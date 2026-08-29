@@ -3,6 +3,7 @@ pub mod auth;
 pub mod config;
 pub mod db;
 pub mod log;
+pub mod memory;
 pub mod plan;
 pub mod runner;
 pub mod tasks;
