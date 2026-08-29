@@ -6,6 +6,7 @@ pub mod db;
 pub mod log;
 pub mod memory;
 pub mod plan;
+pub mod providers;
 pub mod runner;
 pub mod tasks;
 pub mod templates;

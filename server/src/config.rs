@@ -7,6 +7,8 @@ pub struct ServerConfig {
     pub bind_addr: String,
     pub public_base_url: String,
     pub data_dir: PathBuf,
+    #[serde(default)]
+    pub providers: ProvidersConfig,
 }
 
 impl ServerConfig {
@@ -15,6 +17,24 @@ impl ServerConfig {
             .context("reading server.toml")?;
         Ok(toml::from_str(&raw)?)
     }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProviderConfig {
+    pub kind: String,
+    #[serde(default)]
+    pub base_url: String,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub api_key_env: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct ProvidersConfig {
+    pub llm: Option<ProviderConfig>,
+    pub embeddings: Option<ProviderConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -83,5 +103,26 @@ mod tests {
             "display_name = \"Someone\"\ntimezone = \"UTC\"\ntemplate = \"default\"\n");
         let cfg = UserConfig::load(tmp.path(), "nobody").unwrap();
         assert_eq!(cfg.timezone, "UTC");
+    }
+
+    #[test]
+    fn server_config_without_providers_section_still_loads() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), "server.toml",
+            "bind_addr = \"127.0.0.1:0\"\npublic_base_url = \"http://x\"\ndata_dir = \"data\"\n");
+        let cfg = ServerConfig::load(tmp.path()).unwrap();
+        assert!(cfg.providers.llm.is_none());
+    }
+
+    #[test]
+    fn providers_section_parses() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), "server.toml", concat!(
+            "bind_addr = \"127.0.0.1:0\"\npublic_base_url = \"http://x\"\ndata_dir = \"data\"\n",
+            "[providers.llm]\nkind = \"anthropic\"\nmodel = \"claude-sonnet-5\"\napi_key_env = \"ANTHROPIC_API_KEY\"\n",
+            "[providers.embeddings]\nkind = \"openai\"\nbase_url = \"http://localhost:8080/v1\"\nmodel = \"embeddinggemma\"\n"));
+        let cfg = ServerConfig::load(tmp.path()).unwrap();
+        assert_eq!(cfg.providers.llm.unwrap().kind, "anthropic");
+        assert_eq!(cfg.providers.embeddings.unwrap().base_url, "http://localhost:8080/v1");
     }
 }
