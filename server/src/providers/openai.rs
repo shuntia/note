@@ -11,7 +11,7 @@ pub struct OpenAILLM {
 impl OpenAILLM {
     pub fn new(base_url: &str, model: &str, api_key: &str) -> Self {
         Self {
-            agent: ureq::Agent::new(),
+            agent: super::http_agent(),
             base_url: base_url.trim_end_matches('/').to_string(),
             model: model.to_string(),
             api_key: api_key.to_string(),
@@ -29,7 +29,7 @@ pub struct OpenAIEmbeddings {
 impl OpenAIEmbeddings {
     pub fn new(base_url: &str, model: &str, api_key: &str) -> Self {
         Self {
-            agent: ureq::Agent::new(),
+            agent: super::http_agent(),
             base_url: base_url.trim_end_matches('/').to_string(),
             model: model.to_string(),
             api_key: api_key.to_string(),
@@ -74,8 +74,12 @@ pub fn body(model: &str, req: &ChatRequest) -> serde_json::Value {
             }
         }
     }
-    let tools: Vec<serde_json::Value> = req.tools.iter().map(wrap_tool).collect();
-    serde_json::json!({"model": model, "messages": messages, "tools": tools})
+    let mut v = serde_json::json!({"model": model, "messages": messages});
+    if !req.tools.is_empty() {
+        let tools: Vec<serde_json::Value> = req.tools.iter().map(wrap_tool).collect();
+        v["tools"] = serde_json::Value::Array(tools);
+    }
+    v
 }
 
 pub fn parse(v: &serde_json::Value) -> Result<ChatResponse> {
@@ -163,6 +167,13 @@ mod tests {
         assert_eq!(m[3]["role"], "tool");
         assert_eq!(m[4]["content"].as_str().unwrap(), "ERROR: {\"kind\":\"rejected\"}");
         assert_eq!(b["tools"][0]["function"]["parameters"]["type"], "object");
+    }
+
+    #[test]
+    fn body_omits_tools_key_when_empty() {
+        let msgs = vec![Message::User("hi".into())];
+        let b = body("gpt-x", &ChatRequest { system: "sys", messages: &msgs, tools: &[] });
+        assert!(b.get("tools").is_none());
     }
 
     #[test]

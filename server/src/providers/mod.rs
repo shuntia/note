@@ -40,6 +40,17 @@ pub trait EmbeddingsProvider: Send + Sync {
     fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>>;
 }
 
+/// Shared ureq agent config for HTTP-backed providers: bounded connect time,
+/// and a generous read/write timeout since LLM responses (and first-load
+/// embedding models) can be slow, so a stalled provider can't hang forever.
+pub(crate) fn http_agent() -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(10))
+        .timeout_read(std::time::Duration::from_secs(120))
+        .timeout_write(std::time::Duration::from_secs(120))
+        .build()
+}
+
 /// Builds providers from config. Absent or "mock" LLM config yields an
 /// unscripted mock, so the system is fully runnable with no tokens.
 pub fn build(cfg: &crate::config::ProvidersConfig) -> Result<(Arc<dyn LLMProvider>, Option<Arc<dyn EmbeddingsProvider>>)> {
