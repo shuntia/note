@@ -668,6 +668,7 @@ dependencies = [
  "argon2",
  "axum",
  "axum-extra",
+ "http-body-util",
  "jiff",
  "proptest",
  "rusqlite",
