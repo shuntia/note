@@ -1,10 +1,9 @@
-use super::{ToolCtx, ToolError};
+use super::{ToolCtx, ToolError, MAX_TEXT_BYTES};
 use rusqlite::Connection;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
 const MAX_TITLE_BYTES: usize = 500;
-const MAX_TEXT_BYTES: usize = 16 * 1024;
 
 /// Trims and length-checks a title; shared so `create` and `update` cannot drift.
 fn checked_title(title: &str) -> Result<&str, ToolError> {
