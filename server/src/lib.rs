@@ -2,7 +2,9 @@ pub mod api;
 pub mod auth;
 pub mod config;
 pub mod db;
+pub mod plan;
 pub mod tasks;
+pub mod templates;
 
 use rusqlite::Connection;
 use std::sync::{Arc, Mutex};
