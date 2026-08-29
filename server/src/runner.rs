@@ -1,6 +1,7 @@
 use crate::{config::UserConfig, AppState};
 use anyhow::Result;
 use rusqlite::Connection;
+use std::collections::HashMap;
 use std::path::Path;
 
 struct Candidate {
@@ -11,18 +12,45 @@ struct Candidate {
     wall_time: String,
 }
 
-/// Resolves the candidate's stored wall time to an instant in its user's
-/// timezone. `date` and `wall_time` come from user-authored templates and are
-/// stored unvalidated, so both parses can fail. A missing or unknown timezone
-/// falls back to UTC. DST gaps resolve forward to the next valid instant.
-fn due_at(config_dir: &Path, c: &Candidate) -> Result<jiff::Timestamp> {
-    let tz_name = UserConfig::load(config_dir, &c.username)
-        .map(|u| u.timezone)
-        .unwrap_or_else(|_| "UTC".into());
-    let tz = jiff::tz::TimeZone::get(&tz_name).unwrap_or(jiff::tz::TimeZone::UTC);
+/// Resolves the candidate's stored wall time to an instant in `tz`. `date` and
+/// `wall_time` come from user-authored templates and are stored unvalidated, so
+/// both parses can fail. DST gaps resolve forward to the next valid instant.
+fn due_at(tz: &jiff::tz::TimeZone, c: &Candidate) -> Result<jiff::Timestamp> {
     let date: jiff::civil::Date = c.date.parse()?;
     let time: jiff::civil::Time = format!("{}:00", c.wall_time).parse()?;
     Ok(tz.to_ambiguous_zoned(date.to_datetime(time)).compatible()?.timestamp())
+}
+
+/// Resolves a user's configured timezone, memoized so a sweep reads each user's
+/// config — and reports a bad timezone — only once. A missing config or an
+/// unknown timezone name degrades to UTC; the unknown name is recorded as a
+/// `runner_error` rather than silently changing when the user's events fire.
+fn user_tz(
+    conn: &Connection,
+    config_dir: &Path,
+    c: &Candidate,
+    cache: &mut HashMap<String, jiff::tz::TimeZone>,
+) -> Result<jiff::tz::TimeZone> {
+    if let Some(tz) = cache.get(&c.username) {
+        return Ok(tz.clone());
+    }
+    let name = UserConfig::load(config_dir, &c.username)
+        .map(|u| u.timezone)
+        .unwrap_or_else(|_| "UTC".into());
+    let tz = match jiff::tz::TimeZone::get(&name) {
+        Ok(tz) => tz,
+        Err(_) => {
+            crate::log::record(
+                conn,
+                Some(c.user_id),
+                "runner_error",
+                &format!("user {} has unknown timezone {name:?}; using UTC", c.username),
+            )?;
+            jiff::tz::TimeZone::UTC
+        }
+    };
+    cache.insert(c.username.clone(), tz.clone());
+    Ok(tz)
 }
 
 /// Fires every pending event whose wall time, resolved in its user's timezone on
@@ -50,8 +78,10 @@ pub fn fire_due(conn: &Connection, config_dir: &Path, now: jiff::Timestamp) -> R
         .collect::<rusqlite::Result<_>>()?;
 
     let mut fired = Vec::new();
+    let mut tz_cache = HashMap::new();
     for c in candidates {
-        let due = match due_at(config_dir, &c) {
+        let tz = user_tz(conn, config_dir, &c, &mut tz_cache)?;
+        let due = match due_at(&tz, &c) {
             Ok(due) => due,
             Err(e) => {
                 crate::log::record(
@@ -166,6 +196,21 @@ mod tests {
             "SELECT COUNT(*) FROM events WHERE wall_time='noon' AND status='pending'", [], |r| r.get(0),
         ).unwrap();
         assert_eq!(still_pending, 1);
+    }
+
+    #[test]
+    fn unknown_timezone_falls_back_to_utc_and_is_logged() {
+        let (conn, tmp, uid) = setup("Asia/Toyko");
+        let date: jiff::civil::Date = "2026-08-31".parse().unwrap();
+        crate::plan::generate(&conn, uid, &one_event_template("09:00"), date).unwrap();
+
+        let now: jiff::Timestamp = "2026-08-31T09:30:00Z".parse().unwrap();
+        assert_eq!(fire_due(&conn, tmp.path(), now).unwrap().len(), 1);
+
+        let detail: String = conn.query_row(
+            "SELECT detail FROM event_log WHERE kind='runner_error'", [], |r| r.get(0),
+        ).unwrap();
+        assert!(detail.contains("Asia/Toyko"), "unexpected detail: {detail}");
     }
 
     #[test]

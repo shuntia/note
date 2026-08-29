@@ -10,7 +10,28 @@ use rusqlite::{Connection, OptionalExtension};
 
 const SESSION_LIFETIME_HOURS: i64 = 30 * 24;
 
+const MAX_USERNAME_LEN: usize = 64;
+
+/// Usernames become path segments under the config tree, so anything outside
+/// `[A-Za-z0-9_-]` (`..` and separators above all) is rejected at creation.
+fn validate_username(username: &str) -> Result<()> {
+    if username.is_empty() {
+        anyhow::bail!("username must not be empty");
+    }
+    if username.len() > MAX_USERNAME_LEN {
+        anyhow::bail!("username must be at most {MAX_USERNAME_LEN} characters");
+    }
+    if let Some(c) = username
+        .chars()
+        .find(|c| !(c.is_ascii_alphanumeric() || *c == '_' || *c == '-'))
+    {
+        anyhow::bail!("username contains disallowed character {c:?}");
+    }
+    Ok(())
+}
+
 pub fn create_user(conn: &Connection, username: &str, password: &str, admin: bool) -> Result<i64> {
+    validate_username(username)?;
     let salt = SaltString::generate(&mut OsRng);
     let hash = Argon2::default()
         .hash_password(password.as_bytes(), &salt)
@@ -91,5 +112,23 @@ impl FromRequestParts<AppState> for CurrentUser {
             username,
             admin: role == "admin",
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn create_user_rejects_unsafe_usernames() {
+        let conn = crate::db::open_memory().unwrap();
+        for bad in ["../evil", "", &"a".repeat(MAX_USERNAME_LEN + 1), "aki/../root", "a b"] {
+            assert!(
+                create_user(&conn, bad, "pw", false).is_err(),
+                "expected rejection of {bad:?}"
+            );
+        }
+        assert!(create_user(&conn, "aki_2", "pw", false).is_ok());
+        assert!(create_user(&conn, &"a".repeat(MAX_USERNAME_LEN), "pw", false).is_ok());
     }
 }
