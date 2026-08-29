@@ -1,4 +1,4 @@
-use super::{ToolCtx, ToolError, MAX_TEXT_BYTES};
+use super::{check_text, ToolCtx, ToolError};
 use rusqlite::Connection;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -14,15 +14,6 @@ fn checked_title(title: &str) -> Result<&str, ToolError> {
         )));
     }
     Ok(title)
-}
-
-fn check_text(field: &str, value: &str) -> Result<(), ToolError> {
-    if value.len() > MAX_TEXT_BYTES {
-        return Err(ToolError::rejected(format!(
-            "{field} must be at most {MAX_TEXT_BYTES} bytes"
-        )));
-    }
-    Ok(())
 }
 
 #[derive(Deserialize, JsonSchema)]
