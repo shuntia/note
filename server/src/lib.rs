@@ -14,6 +14,7 @@ pub mod tasks;
 pub mod templates;
 pub mod tools;
 
+use crate::providers::{EmbeddingsProvider, LLMProvider};
 use rusqlite::Connection;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -22,10 +23,31 @@ use std::sync::{Arc, Mutex};
 pub struct AppState {
     pub db: Arc<Mutex<Connection>>,
     pub config_dir: PathBuf,
+    pub data_dir: PathBuf,
+    pub llm: Arc<dyn LLMProvider>,
+    pub embeddings: Option<Arc<dyn EmbeddingsProvider>>,
 }
 
 impl AppState {
-    pub fn new(conn: Connection, config_dir: PathBuf) -> Self {
-        Self { db: Arc::new(Mutex::new(conn)), config_dir }
+    /// Providers default to an unscripted mock and no embeddings, so a state
+    /// built without `with_providers` is still fully runnable.
+    pub fn new(conn: Connection, config_dir: PathBuf, data_dir: PathBuf) -> Self {
+        Self {
+            db: Arc::new(Mutex::new(conn)),
+            config_dir,
+            data_dir,
+            llm: Arc::new(crate::providers::mock::MockLLM::empty()),
+            embeddings: None,
+        }
+    }
+
+    pub fn with_providers(
+        mut self,
+        llm: Arc<dyn LLMProvider>,
+        embeddings: Option<Arc<dyn EmbeddingsProvider>>,
+    ) -> Self {
+        self.llm = llm;
+        self.embeddings = embeddings;
+        self
     }
 }

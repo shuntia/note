@@ -14,6 +14,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/me", get(me))
         .route("/api/tasks", get(tasks_list).post(tasks_create))
         .route("/api/tasks/{id}", patch(tasks_update))
+        .route("/api/talk", post(talk))
         .route("/api/plan/today", get(plan_today))
         .route("/api/events/{id}/shift", post(event_shift))
         .route("/api/events/{id}/snooze", post(event_snooze))
@@ -87,6 +88,47 @@ async fn tasks_update(
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(crate::tasks::UpdateError::InvalidState(_)) => StatusCode::BAD_REQUEST.into_response(),
         Err(crate::tasks::UpdateError::Db(_)) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct TalkReq {
+    message: String,
+}
+
+const MAX_TALK_MESSAGE: usize = 16 * 1024;
+
+/// A session makes synchronous provider calls and blocking DB writes, so it
+/// runs off the async executor.
+async fn talk(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Json(req): Json<TalkReq>,
+) -> impl IntoResponse {
+    let message = req.message.trim().to_string();
+    if message.is_empty() || message.len() > MAX_TALK_MESSAGE {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let result = tokio::task::spawn_blocking(move || {
+        let deps = crate::agent::SessionDeps {
+            db: &state.db,
+            config_dir: &state.config_dir,
+            data_dir: &state.data_dir,
+            llm: state.llm.as_ref(),
+            embeddings: state.embeddings.as_deref(),
+        };
+        crate::agent::run_session(
+            &deps,
+            user.id,
+            &user.username,
+            crate::tools::SessionKind::Talk,
+            &message,
+        )
+    })
+    .await;
+    match result {
+        Ok(Ok(out)) => Json(serde_json::json!({ "reply": out.reply })).into_response(),
+        _ => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
 

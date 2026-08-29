@@ -1,5 +1,5 @@
 use anyhow::Context;
-use note_server::{api, auth, config::ServerConfig, db, memory, runner, AppState};
+use note_server::{api, auth, config::ServerConfig, db, memory, providers, runner, AppState};
 use std::path::PathBuf;
 
 #[tokio::main]
@@ -27,7 +27,9 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let state = AppState::new(conn, config_dir);
+    let (llm, embeddings) = providers::build(&cfg.providers)?;
+    let state =
+        AppState::new(conn, config_dir, cfg.data_dir.clone()).with_providers(llm, embeddings);
     runner::spawn(state.clone());
 
     let app = api::router(state);

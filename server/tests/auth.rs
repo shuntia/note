@@ -7,7 +7,7 @@ fn state_with_user() -> (AppState, tempfile::TempDir) {
     let tmp = tempfile::tempdir().unwrap();
     let conn = db::open_memory().unwrap();
     auth::create_user(&conn, "aki", "hunter2", true).unwrap();
-    (AppState::new(conn, tmp.path().to_path_buf()), tmp)
+    (AppState::new(conn, tmp.path().to_path_buf(), tmp.path().to_path_buf()), tmp)
 }
 
 #[tokio::test]

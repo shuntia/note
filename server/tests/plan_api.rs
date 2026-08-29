@@ -213,7 +213,7 @@ async fn other_users_event_is_404() {
     auth::create_user(&conn, "aki", "pw", false).unwrap();
     auth::create_user(&conn, "yuki", "pw2", false).unwrap();
     let cfg = common::config_dir();
-    let app = api::router(AppState::new(conn, cfg.path().to_path_buf()));
+    let app = api::router(AppState::new(conn, cfg.path().to_path_buf(), cfg.path().to_path_buf()));
     let owner = common::login(&app, "aki", "pw").await;
     let other = common::login(&app, "yuki", "pw2").await;
 
