@@ -29,7 +29,7 @@ pub struct OpenAIEmbeddings {
 impl OpenAIEmbeddings {
     pub fn new(base_url: &str, model: &str, api_key: &str) -> Self {
         Self {
-            agent: super::http_agent(),
+            agent: super::embeddings_http_agent(),
             base_url: base_url.trim_end_matches('/').to_string(),
             model: model.to_string(),
             api_key: api_key.to_string(),
