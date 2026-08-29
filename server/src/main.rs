@@ -1,5 +1,5 @@
 use anyhow::Context;
-use note_server::{api, auth, config::ServerConfig, db, AppState};
+use note_server::{api, auth, config::ServerConfig, db, runner, AppState};
 use std::path::PathBuf;
 
 #[tokio::main]
@@ -26,7 +26,10 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let app = api::router(AppState::new(conn, config_dir));
+    let state = AppState::new(conn, config_dir);
+    runner::spawn(state.clone());
+
+    let app = api::router(state);
     let listener = tokio::net::TcpListener::bind(&cfg.bind_addr).await?;
     axum::serve(listener, app).await?;
     Ok(())

@@ -1,0 +1,138 @@
+use crate::{config::UserConfig, AppState};
+use anyhow::Result;
+use rusqlite::Connection;
+use std::path::Path;
+
+struct Candidate {
+    event_id: i64,
+    user_id: i64,
+    username: String,
+    date: String,
+    wall_time: String,
+}
+
+/// Fires every pending event whose wall time, resolved in its user's timezone on
+/// the plan date, has arrived by `now`. A missing or unknown timezone falls back
+/// to UTC rather than stalling that user's events forever.
+pub fn fire_due(conn: &Connection, config_dir: &Path, now: jiff::Timestamp) -> Result<Vec<i64>> {
+    let mut stmt = conn.prepare(
+        "SELECT e.id, p.user_id, u.username, p.date, e.wall_time
+         FROM events e
+         JOIN plans p ON p.id = e.plan_id
+         JOIN users u ON u.id = p.user_id
+         WHERE e.status = 'pending'",
+    )?;
+    let candidates: Vec<Candidate> = stmt
+        .query_map([], |r| {
+            Ok(Candidate {
+                event_id: r.get(0)?,
+                user_id: r.get(1)?,
+                username: r.get(2)?,
+                date: r.get(3)?,
+                wall_time: r.get(4)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+
+    let mut fired = Vec::new();
+    for c in candidates {
+        let tz_name = UserConfig::load(config_dir, &c.username)
+            .map(|u| u.timezone)
+            .unwrap_or_else(|_| "UTC".into());
+        let tz = jiff::tz::TimeZone::get(&tz_name).unwrap_or(jiff::tz::TimeZone::UTC);
+        let date: jiff::civil::Date = c.date.parse()?;
+        let time: jiff::civil::Time = format!("{}:00", c.wall_time).parse()?;
+        // Compatible disambiguation: a time inside a DST gap resolves forward to
+        // the next valid instant instead of erroring.
+        let due = tz.to_ambiguous_zoned(date.to_datetime(time)).compatible()?.timestamp();
+        if due <= now {
+            conn.execute(
+                "UPDATE events SET status='fired', fired_at=?1 WHERE id=?2",
+                (now.to_string(), c.event_id),
+            )?;
+            crate::log::record(
+                conn,
+                Some(c.user_id),
+                "event_fired",
+                &format!("event {} due {}", c.event_id, due),
+            )?;
+            fired.push(c.event_id);
+        }
+    }
+    Ok(fired)
+}
+
+pub fn spawn(state: AppState) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
+        loop {
+            tick.tick().await;
+            // The guard is confined to this iteration: holding it across the
+            // next `tick` would make the task non-Send and stall handlers.
+            let conn = state.db.lock().unwrap();
+            if let Err(e) = fire_due(&conn, &state.config_dir, jiff::Timestamp::now()) {
+                let _ = crate::log::record(&conn, None, "runner_error", &e.to_string());
+            }
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::templates::{Template, TemplateEvent};
+
+    fn setup(tz: &str) -> (rusqlite::Connection, tempfile::TempDir, i64) {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("users/aki");
+        std::fs::create_dir_all(tmp.path().join("defaults")).unwrap();
+        std::fs::create_dir_all(&p).unwrap();
+        std::fs::write(
+            tmp.path().join("defaults/user.toml"),
+            format!("display_name = \"X\"\ntimezone = \"{tz}\"\ntemplate = \"default\"\n"),
+        ).unwrap();
+        let conn = crate::db::open_memory().unwrap();
+        let uid = crate::auth::create_user(&conn, "aki", "p", false).unwrap();
+        (conn, tmp, uid)
+    }
+
+    fn one_event_template(time: &str) -> Template {
+        Template { events: vec![TemplateEvent {
+            kind: "nudge".into(), time: time.into(),
+            days: vec!["mon".into(),"tue".into(),"wed".into(),"thu".into(),"fri".into(),"sat".into(),"sun".into()],
+            flexibility: "slide".into(), slide_window_min: 60, channel: "push".into(),
+        }]}
+    }
+
+    #[test]
+    fn fires_only_when_due_in_user_tz() {
+        let (conn, tmp, uid) = setup("Asia/Tokyo");
+        let date: jiff::civil::Date = "2026-08-31".parse().unwrap();
+        crate::plan::generate(&conn, uid, &one_event_template("09:00"), date).unwrap();
+
+        // 08:59 JST on the plan date = 2026-08-30T23:59Z
+        let early: jiff::Timestamp = "2026-08-30T23:59:00Z".parse().unwrap();
+        assert!(fire_due(&conn, tmp.path(), early).unwrap().is_empty());
+
+        // 09:01 JST
+        let due: jiff::Timestamp = "2026-08-31T00:01:00Z".parse().unwrap();
+        let fired = fire_due(&conn, tmp.path(), due).unwrap();
+        assert_eq!(fired.len(), 1);
+
+        // second run does not double-fire
+        assert!(fire_due(&conn, tmp.path(), due).unwrap().is_empty());
+    }
+
+    #[test]
+    fn fired_events_are_logged() {
+        let (conn, tmp, uid) = setup("UTC");
+        let date: jiff::civil::Date = "2026-08-31".parse().unwrap();
+        crate::plan::generate(&conn, uid, &one_event_template("00:00"), date).unwrap();
+        let now: jiff::Timestamp = "2026-08-31T12:00:00Z".parse().unwrap();
+        fire_due(&conn, tmp.path(), now).unwrap();
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM event_log WHERE kind='event_fired'", [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(n, 1);
+    }
+}
