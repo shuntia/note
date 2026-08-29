@@ -2,6 +2,19 @@ use crate::templates::Template;
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
 use serde::Serialize;
+use thiserror::Error;
+
+/// Distinguishes a slide that violates the event's window (a client/model
+/// mistake) from infrastructure failures.
+#[derive(Debug, Error)]
+pub enum ShiftError {
+    #[error("cumulative slide of {offset} min exceeds the ±{window} min window")]
+    OutOfWindow { offset: i64, window: i64 },
+    #[error(transparent)]
+    Db(#[from] rusqlite::Error),
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
 
 #[derive(Debug, Serialize)]
 pub struct PlanEvent {
@@ -76,35 +89,48 @@ pub fn events_for(conn: &Connection, user_id: i64, date: jiff::civil::Date) -> R
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
-/// Returns `(wall_time, flexibility)` only when the event's plan belongs to
-/// `user_id`, so callers cannot distinguish someone else's event from a
-/// missing one.
-fn owned_event(conn: &Connection, user_id: i64, event_id: i64) -> Result<Option<(String, String)>> {
-    Ok(conn
-        .query_row(
-            "SELECT e.wall_time, e.flexibility FROM events e
-             JOIN plans p ON p.id = e.plan_id
-             WHERE e.id = ?1 AND p.user_id = ?2",
-            (event_id, user_id),
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?)
+/// Returns `(wall_time, flexibility, orig_wall_time, slide_window_min)` only
+/// when the event's plan belongs to `user_id`, so callers cannot distinguish
+/// someone else's event from a missing one.
+fn owned_event(
+    conn: &Connection,
+    user_id: i64,
+    event_id: i64,
+) -> rusqlite::Result<Option<(String, String, String, i64)>> {
+    conn.query_row(
+        "SELECT e.wall_time, e.flexibility, e.orig_wall_time, e.slide_window_min
+         FROM events e JOIN plans p ON p.id = e.plan_id
+         WHERE e.id = ?1 AND p.user_id = ?2",
+        (event_id, user_id),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    )
+    .optional()
 }
 
-/// Moves the event's wall time by `minutes`, clamped inside the day. Only a
-/// `snoozed` event returns to `pending`; a decided one (`done`/`dropped`) or an
-/// already `fired` one keeps its status so a shift cannot resurrect it. `None`
+fn parse_minutes(wall: &str) -> anyhow::Result<i64> {
+    let (h, m) = wall.split_once(':').ok_or_else(|| anyhow::anyhow!("bad wall_time: {wall}"))?;
+    Ok(h.parse::<i64>()? * 60 + m.parse::<i64>()?)
+}
+
+/// Moves the event's wall time by `minutes`, clamped inside the day and — when
+/// the event carries a positive `slide_window_min` — bounded so the cumulative
+/// offset from `orig_wall_time` stays within the window. Only a `snoozed`
+/// event returns to `pending`; a decided or fired one keeps its status. `None`
 /// when the event is not the user's or its flexibility is `fixed`.
-pub fn shift(conn: &Connection, user_id: i64, event_id: i64, minutes: i64) -> Result<Option<()>> {
-    let Some((wall, flex)) = owned_event(conn, user_id, event_id)? else {
+pub fn shift(conn: &Connection, user_id: i64, event_id: i64, minutes: i64) -> Result<Option<()>, ShiftError> {
+    let Some((wall, flex, orig, window)) = owned_event(conn, user_id, event_id)? else {
         return Ok(None);
     };
     if flex == "fixed" {
         return Ok(None);
     }
-    let (h, m) = wall.split_once(':').ok_or_else(|| anyhow::anyhow!("bad wall_time: {wall}"))?;
-    let now = h.parse::<i64>()? * 60 + m.parse::<i64>()?;
-    let total = now.saturating_add(minutes).clamp(0, 23 * 60 + 59);
+    let total = parse_minutes(&wall)?.saturating_add(minutes).clamp(0, 23 * 60 + 59);
+    if window > 0 {
+        let offset = total - parse_minutes(&orig)?;
+        if offset.abs() > window {
+            return Err(ShiftError::OutOfWindow { offset, window });
+        }
+    }
     conn.execute(
         "UPDATE events SET wall_time = ?1,
              status = CASE WHEN status = 'snoozed' THEN 'pending' ELSE status END
@@ -112,6 +138,38 @@ pub fn shift(conn: &Connection, user_id: i64, event_id: i64, minutes: i64) -> Re
         (format!("{:02}:{:02}", total / 60, total % 60), event_id),
     )?;
     Ok(Some(()))
+}
+
+/// Postpones delivery: any owned, undecided event (pending/snoozed/fired) can
+/// be snoozed regardless of flexibility, and the slide window does not apply —
+/// snooze is "not now", not a schedule change.
+pub fn snooze(conn: &Connection, user_id: i64, event_id: i64, minutes: i64) -> Result<Option<()>> {
+    if !(1..=24 * 60).contains(&minutes) {
+        anyhow::bail!("snooze minutes must be in 1..=1440, got {minutes}");
+    }
+    let row: Option<(String, String)> = conn
+        .query_row(
+            "SELECT e.wall_time, e.status FROM events e
+             JOIN plans p ON p.id = e.plan_id
+             WHERE e.id = ?1 AND p.user_id = ?2",
+            (event_id, user_id),
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((wall, status)) = row else { return Ok(None) };
+    if status == "done" || status == "dropped" {
+        return Ok(None);
+    }
+    let total = (parse_minutes(&wall)? + minutes).clamp(0, 23 * 60 + 59);
+    conn.execute(
+        "UPDATE events SET wall_time = ?1, status = 'snoozed' WHERE id = ?2",
+        (format!("{:02}:{:02}", total / 60, total % 60), event_id),
+    )?;
+    Ok(Some(()))
+}
+
+pub fn event_flexibility(conn: &Connection, user_id: i64, event_id: i64) -> Result<Option<String>> {
+    Ok(owned_event(conn, user_id, event_id)?.map(|(_, flex, _, _)| flex))
 }
 
 /// Records a user decision on an event. Only `done` and `dropped` are user
@@ -215,6 +273,7 @@ mod tests {
         let date: jiff::civil::Date = "2026-08-31".parse().unwrap();
         let mut t = tmpl();
         t.events[0].flexibility = "slide".into();
+        t.events[0].slide_window_min = 0;
         generate(&conn, uid, &t, date).unwrap();
         let ev_id = events_for(&conn, uid, date).unwrap()[0].id;
         conn.execute("UPDATE events SET status='snoozed' WHERE id = ?1", [ev_id]).unwrap();
@@ -235,6 +294,7 @@ mod tests {
         let date: jiff::civil::Date = "2026-08-31".parse().unwrap();
         let mut t = tmpl();
         t.events[0].flexibility = "slide".into();
+        t.events[0].slide_window_min = 0;
         generate(&conn, uid, &t, date).unwrap();
         let ev_id = events_for(&conn, uid, date).unwrap()[0].id;
 
@@ -259,6 +319,58 @@ mod tests {
         let ev_id = events_for(&conn, uid, date).unwrap()[0].id;
         assert!(shift(&conn, other, ev_id, 30).unwrap().is_none());
         assert_eq!(events_for(&conn, uid, date).unwrap()[0].wall_time, "09:00");
+    }
+
+    #[test]
+    fn shift_beyond_window_is_rejected_and_writes_nothing() {
+        let conn = crate::db::open_memory().unwrap();
+        let uid = crate::auth::create_user(&conn, "a", "p", false).unwrap();
+        let date: jiff::civil::Date = "2026-08-31".parse().unwrap();
+        generate(&conn, uid, &tmpl(), date).unwrap();
+        let ev_id = events_for(&conn, uid, date).unwrap()[0].id;
+        // window is ±60: +45 then +45 puts cumulative offset at 90
+        assert!(shift(&conn, uid, ev_id, 45).unwrap().is_some());
+        let err = shift(&conn, uid, ev_id, 45).unwrap_err();
+        assert!(matches!(err, ShiftError::OutOfWindow { offset: 90, window: 60 }), "got {err:?}");
+        assert_eq!(events_for(&conn, uid, date).unwrap()[0].wall_time, "09:45");
+        // sliding back inside the window still works
+        assert!(shift(&conn, uid, ev_id, -45).unwrap().is_some());
+        assert_eq!(events_for(&conn, uid, date).unwrap()[0].wall_time, "09:00");
+    }
+
+    #[test]
+    fn snooze_sets_status_and_pushes_time() {
+        let conn = crate::db::open_memory().unwrap();
+        let uid = crate::auth::create_user(&conn, "a", "p", false).unwrap();
+        let date: jiff::civil::Date = "2026-08-31".parse().unwrap();
+        generate(&conn, uid, &tmpl(), date).unwrap();
+        let ev_id = events_for(&conn, uid, date).unwrap()[0].id;
+        // snooze works on a fired event and is not window-bound
+        conn.execute("UPDATE events SET status='fired' WHERE id=?1", [ev_id]).unwrap();
+        assert!(snooze(&conn, uid, ev_id, 90).unwrap().is_some());
+        let ev = &events_for(&conn, uid, date).unwrap()[0];
+        assert_eq!(ev.status, "snoozed");
+        assert_eq!(ev.wall_time, "10:30");
+        // decided events cannot be snoozed
+        conn.execute("UPDATE events SET status='done' WHERE id=?1", [ev_id]).unwrap();
+        assert!(snooze(&conn, uid, ev_id, 10).unwrap().is_none());
+        // range and ownership
+        conn.execute("UPDATE events SET status='pending' WHERE id=?1", [ev_id]).unwrap();
+        assert!(snooze(&conn, uid, ev_id, 0).is_err());
+        let other = crate::auth::create_user(&conn, "b", "p", false).unwrap();
+        assert!(snooze(&conn, other, ev_id, 10).unwrap().is_none());
+    }
+
+    #[test]
+    fn event_flexibility_is_owner_scoped() {
+        let conn = crate::db::open_memory().unwrap();
+        let uid = crate::auth::create_user(&conn, "a", "p", false).unwrap();
+        let date: jiff::civil::Date = "2026-08-31".parse().unwrap();
+        generate(&conn, uid, &tmpl(), date).unwrap();
+        let ev_id = events_for(&conn, uid, date).unwrap()[0].id;
+        assert_eq!(event_flexibility(&conn, uid, ev_id).unwrap().as_deref(), Some("slide"));
+        let other = crate::auth::create_user(&conn, "b", "p", false).unwrap();
+        assert!(event_flexibility(&conn, other, ev_id).unwrap().is_none());
     }
 
     #[test]
