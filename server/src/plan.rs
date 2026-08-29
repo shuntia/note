@@ -91,7 +91,9 @@ fn owned_event(conn: &Connection, user_id: i64, event_id: i64) -> Result<Option<
         .optional()?)
 }
 
-/// Moves the event's wall time by `minutes`, clamped inside the day. `None`
+/// Moves the event's wall time by `minutes`, clamped inside the day. Only a
+/// `snoozed` event returns to `pending`; a decided one (`done`/`dropped`) or an
+/// already `fired` one keeps its status so a shift cannot resurrect it. `None`
 /// when the event is not the user's or its flexibility is `fixed`.
 pub fn shift(conn: &Connection, user_id: i64, event_id: i64, minutes: i64) -> Result<Option<()>> {
     let Some((wall, flex)) = owned_event(conn, user_id, event_id)? else {
@@ -104,7 +106,9 @@ pub fn shift(conn: &Connection, user_id: i64, event_id: i64, minutes: i64) -> Re
     let now = h.parse::<i64>()? * 60 + m.parse::<i64>()?;
     let total = now.saturating_add(minutes).clamp(0, 23 * 60 + 59);
     conn.execute(
-        "UPDATE events SET wall_time = ?1, status = 'pending' WHERE id = ?2",
+        "UPDATE events SET wall_time = ?1,
+             status = CASE WHEN status = 'snoozed' THEN 'pending' ELSE status END
+         WHERE id = ?2",
         (format!("{:02}:{:02}", total / 60, total % 60), event_id),
     )?;
     Ok(Some(()))
@@ -222,6 +226,25 @@ mod tests {
 
         assert!(shift(&conn, uid, ev_id, i64::MIN).unwrap().is_some());
         assert_eq!(events_for(&conn, uid, date).unwrap()[0].wall_time, "00:00");
+    }
+
+    #[test]
+    fn shift_does_not_resurrect_a_decided_event() {
+        let conn = crate::db::open_memory().unwrap();
+        let uid = crate::auth::create_user(&conn, "a", "p", false).unwrap();
+        let date: jiff::civil::Date = "2026-08-31".parse().unwrap();
+        let mut t = tmpl();
+        t.events[0].flexibility = "slide".into();
+        generate(&conn, uid, &t, date).unwrap();
+        let ev_id = events_for(&conn, uid, date).unwrap()[0].id;
+
+        for decided in ["done", "dropped", "fired"] {
+            conn.execute("UPDATE events SET status = ?1 WHERE id = ?2", (decided, ev_id)).unwrap();
+            assert!(shift(&conn, uid, ev_id, 30).unwrap().is_some());
+            let ev = &events_for(&conn, uid, date).unwrap()[0];
+            assert_eq!(ev.status, decided);
+        }
+        assert_eq!(events_for(&conn, uid, date).unwrap()[0].wall_time, "10:30");
     }
 
     #[test]
