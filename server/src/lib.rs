@@ -1,6 +1,7 @@
 pub mod api;
 pub mod auth;
 pub mod config;
+pub mod context;
 pub mod db;
 pub mod log;
 pub mod memory;
