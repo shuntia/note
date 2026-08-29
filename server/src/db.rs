@@ -78,10 +78,24 @@ pub fn open_memory() -> Result<Connection> {
 
 fn init(conn: &Connection) -> Result<()> {
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+    apply_migrations(conn, MIGRATIONS)
+}
+
+/// Each step and its `user_version` bump commit atomically, so a failure
+/// partway through a step leaves the database exactly at the previous version.
+fn apply_migrations(conn: &Connection, migrations: &[&str]) -> Result<()> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    for (i, sql) in MIGRATIONS.iter().enumerate().skip(version as usize) {
-        conn.execute_batch(sql)?;
-        conn.pragma_update(None, "user_version", (i + 1) as i64)?;
+    if version as usize > migrations.len() {
+        anyhow::bail!(
+            "database schema version {version} is newer than this binary supports ({})",
+            migrations.len()
+        );
+    }
+    for (i, sql) in migrations.iter().enumerate().skip(version as usize) {
+        let tx = conn.unchecked_transaction()?;
+        tx.execute_batch(sql)?;
+        tx.pragma_update(None, "user_version", (i + 1) as i64)?;
+        tx.commit()?;
     }
     Ok(())
 }
@@ -101,5 +115,27 @@ mod tests {
             [],
         )
         .unwrap();
+    }
+
+    #[test]
+    fn failed_migration_step_rolls_back_entirely() {
+        let conn = Connection::open_in_memory().unwrap();
+        // second statement fails; the first must not survive
+        let bad: &[&str] = &["CREATE TABLE half (id INTEGER); CREATE TABLE half (id INTEGER);"];
+        assert!(apply_migrations(&conn, bad).is_err());
+        let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, 0);
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sqlite_master WHERE name='half'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn newer_db_version_is_refused() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "user_version", 99).unwrap();
+        let err = apply_migrations(&conn, MIGRATIONS).unwrap_err().to_string();
+        assert!(err.contains("99"), "unexpected error: {err}");
     }
 }
