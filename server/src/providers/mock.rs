@@ -10,7 +10,7 @@ pub struct RecordedChat {
     pub tool_names: Vec<String>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct MockLLM {
     script: Mutex<VecDeque<ChatResponse>>,
     seen: Mutex<Vec<RecordedChat>>,
@@ -50,7 +50,6 @@ impl LLMProvider for MockLLM {
 
 /// Dim-8 letter-count vectors: deterministic, and texts sharing letters get
 /// positive cosine similarity — enough to test ranking without a real model.
-#[derive(Debug)]
 pub struct MockEmbeddings;
 
 impl EmbeddingsProvider for MockEmbeddings {
