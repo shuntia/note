@@ -53,6 +53,20 @@ Two loops:
   nudges). Timing has wiggle room: events carry flexibility attributes and can
   be slid, snoozed, or dropped at runtime by the agent or the user.
 
+## Stack
+
+- **Language:** TypeScript everywhere; pnpm workspaces monorepo.
+- **Server:** Node.js (LTS), Fastify (schema-validated routes), WebSocket via
+  `ws`.
+- **Tool schemas:** Zod — single source of truth per tool: the same schema
+  validates incoming calls and generates the JSON Schema handed to the LLM.
+- **Storage:** SQLite via `better-sqlite3`, plain SQL behind a small DAO
+  layer.
+- **Scheduler:** small custom runner; `croner` for cron expressions.
+- **Channels:** `web-push` (VAPID), Twilio SDK + Media Streams for voice.
+- **Web:** React + Vite PWA.
+- **Testing:** Vitest; `fast-check` for property-based tests and fuzzing.
+
 ## Architecture
 
 Monorepo, TypeScript throughout: `server/` (Node), `web/` (React PWA),
@@ -183,9 +197,25 @@ debrief screen, admin pages (config editing, user management).
 
 ## Testing
 
+The tool layer gets the heaviest investment: it is the sole boundary between
+model output and system state, and a validation gap there is state corruption
+with no second line of defense.
+
+- **Tool fuzzing (first-class):** every tool is fuzzed with `fast-check` —
+  malformed JSON, wrong types, boundary values, oversized payloads, unknown
+  fields, path-like and injection-shaped strings. Required outcome: a typed
+  rejection returned to the model; never a throw, never a partial write.
+- **Invariant properties:** arbitrary interleaved sequences of valid and
+  invalid tool calls, asserting state invariants after every step — memory ids
+  unique and matching filenames, supersede targets exist, archives never
+  edited, plan events reference real tasks, template never mutated by shift
+  ops. Each tool call is transactional: it fully applies or leaves no trace.
+- **Registry enforcement:** per-session-type tool registries tested
+  negatively — a check-in session calling a planner-only tool is rejected.
 - Unit: scheduler and shift logic, memory store semantics (supersede,
   archive, consolidation), context assembly, config overlay resolution.
-- Provider layer: tested against the mock LLM/S2S/embeddings implementations.
+- Provider layer: tested against the mock LLM/S2S/embeddings implementations;
+  the mock LLM doubles as a fuzzer driver, emitting pathological tool calls.
 - Integration: one test driving a full simulated day — nightly run, morning
   delivery, check-ins, shifts, memory pass.
 
