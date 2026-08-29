@@ -78,6 +78,7 @@ async fn tasks_update(
     match crate::tasks::update(&conn, user.id, id, patch) {
         Ok(Some(t)) => Json(t).into_response(),
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
-        Err(_) => StatusCode::BAD_REQUEST.into_response(),
+        Err(crate::tasks::UpdateError::InvalidState(_)) => StatusCode::BAD_REQUEST.into_response(),
+        Err(crate::tasks::UpdateError::Db(_)) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
