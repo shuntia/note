@@ -60,8 +60,9 @@ Two loops:
   `ws`.
 - **Tool schemas:** Zod — single source of truth per tool: the same schema
   validates incoming calls and generates the JSON Schema handed to the LLM.
-- **Storage:** SQLite via `better-sqlite3`, plain SQL behind a small DAO
-  layer.
+- **Storage:** SQLite via the `node:sqlite` builtin (Node ≥ 22), plain SQL
+  behind a small DAO layer. Zero native npm modules — deliberate: the target
+  is NixOS, where node-gyp builds are the main packaging hazard.
 - **Scheduler:** small custom runner; `croner` for cron expressions.
 - **Channels:** `web-push` (VAPID), Twilio SDK + Media Streams for voice.
 - **Web:** React + Vite PWA.
@@ -146,8 +147,21 @@ demand via `memory_query`, not prepended.
 - `EmbeddingsProvider` — OpenAI-compatible, optional.
 
 Each configured with base URL, model, and key env-var name. A mock
-implementation of each ships for development and tests; the system is fully
+implementation of each ships for deterministic tests; the system is fully
 buildable and testable with no live tokens.
+
+The deployment host (`shuntia-nix`) runs a llama.cpp router at
+`http://localhost:8080/v1` exposing OpenAI-compatible chat models (DeepSeek,
+Qwen, GLM, Gemma families) and `embeddinggemma`, loaded on demand. This is
+the default dev/fallback `LLMProvider` and the default `EmbeddingsProvider` —
+agent development and hybrid memory search work from day one, cloud tokens
+merely upgrade quality via config.
+
+## Deployment target
+
+NixOS (`shuntia-nix`), 16 cores, 16 GB RAM, NVMe. Node 24 + pnpm are system
+packages; the server runs as a systemd service. No native npm modules, so no
+build-time Nix gymnastics — `pnpm install` suffices.
 
 ### Channel layer
 `Channel` interface: `deliver(user, message, urgency)`. v1 implementations:
