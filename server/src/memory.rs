@@ -125,7 +125,58 @@ fn one_line(summary: &str) -> String {
     summary.replace(['\n', '\r'], " ").trim().to_string()
 }
 
-pub fn add(conn: &Connection, data_dir: &Path, user: &str, category: &str, summary: &str, body: &str) -> Result<String> {
+/// Writes through a sibling temp file so a crash mid-write can never leave a
+/// half-rendered fact where the index expects a whole one.
+fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
+    let tmp = path.with_extension("md.tmp");
+    std::fs::write(&tmp, contents)?;
+    std::fs::rename(&tmp, path)
+}
+
+fn vec_to_blob(v: &[f32]) -> Vec<u8> {
+    v.iter().flat_map(|x| x.to_le_bytes()).collect()
+}
+
+fn blob_to_vec(b: &[u8]) -> Vec<f32> {
+    b.as_chunks::<4>().0.iter().copied().map(f32::from_le_bytes).collect()
+}
+
+fn cosine(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() {
+        return 0.0;
+    }
+    let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+    let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if na == 0.0 || nb == 0.0 { 0.0 } else { dot / (na * nb) }
+}
+
+/// Embed failure degrades to no vector — the write itself already succeeded.
+fn store_vector(conn: &Connection, user: &str, f: &MemoryFile, emb: Option<&dyn crate::providers::EmbeddingsProvider>) {
+    let Some(emb) = emb else { return };
+    match emb.embed(&[&format!("{}\n{}", f.summary, f.body)]) {
+        Ok(vs) if !vs.is_empty() => {
+            let _ = conn.execute(
+                "INSERT OR REPLACE INTO memory_vectors (user, id, vector) VALUES (?1, ?2, ?3)",
+                (user, &f.id, vec_to_blob(&vs[0])),
+            );
+        }
+        Ok(_) => {}
+        Err(e) => {
+            let _ = crate::log::record(conn, None, "memory_embed_error", &format!("{}: {e}", f.id));
+        }
+    }
+}
+
+pub fn add(
+    conn: &Connection,
+    data_dir: &Path,
+    user: &str,
+    category: &str,
+    summary: &str,
+    body: &str,
+    emb: Option<&dyn crate::providers::EmbeddingsProvider>,
+) -> Result<String> {
     if !CATEGORIES.contains(&category) {
         bail!("invalid category: {category}");
     }
@@ -141,8 +192,9 @@ pub fn add(conn: &Connection, data_dir: &Path, user: &str, category: &str, summa
     let dir = user_root(data_dir, user).join(category);
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(format!("{}.md", f.id));
-    std::fs::write(&path, render(&f))?;
+    write_atomic(&path, &render(&f))?;
     index_insert(conn, user, &f, &path)?;
+    store_vector(conn, user, &f, emb);
     Ok(f.id)
 }
 
@@ -153,7 +205,15 @@ pub fn read(data_dir: &Path, user: &str, id: &str) -> Result<Option<MemoryFile>>
     Ok(Some(parse(&std::fs::read_to_string(path)?, archived)?))
 }
 
-pub fn update(conn: &Connection, data_dir: &Path, user: &str, id: &str, summary: &str, body: &str) -> Result<Option<()>, WriteError> {
+pub fn update(
+    conn: &Connection,
+    data_dir: &Path,
+    user: &str,
+    id: &str,
+    summary: &str,
+    body: &str,
+    emb: Option<&dyn crate::providers::EmbeddingsProvider>,
+) -> Result<Option<()>, WriteError> {
     let Some((path, archived)) = locate(data_dir, user, id) else {
         return Ok(None);
     };
@@ -163,12 +223,21 @@ pub fn update(conn: &Connection, data_dir: &Path, user: &str, id: &str, summary:
     let mut f = parse(&std::fs::read_to_string(&path)?, false)?;
     f.summary = one_line(summary);
     f.body = body.trim().into();
-    std::fs::write(&path, render(&f))?;
+    write_atomic(&path, &render(&f))?;
     index_insert(conn, user, &f, &path)?;
+    store_vector(conn, user, &f, emb);
     Ok(Some(()))
 }
 
-pub fn supersede(conn: &Connection, data_dir: &Path, user: &str, old_id: &str, summary: &str, body: &str) -> Result<Option<String>, WriteError> {
+pub fn supersede(
+    conn: &Connection,
+    data_dir: &Path,
+    user: &str,
+    old_id: &str,
+    summary: &str,
+    body: &str,
+    emb: Option<&dyn crate::providers::EmbeddingsProvider>,
+) -> Result<Option<String>, WriteError> {
     let Some((old_path, archived)) = locate(data_dir, user, old_id) else {
         return Ok(None);
     };
@@ -186,7 +255,7 @@ pub fn supersede(conn: &Connection, data_dir: &Path, user: &str, old_id: &str, s
         archived: false,
     };
     let new_path = user_root(data_dir, user).join(&new.category).join(format!("{}.md", new.id));
-    std::fs::write(&new_path, render(&new))?;
+    write_atomic(&new_path, &render(&new))?;
     let arch_dir = user_root(data_dir, user).join("archive");
     std::fs::create_dir_all(&arch_dir)?;
     let arch_path = arch_dir.join(format!("{}.md", old.id));
@@ -194,13 +263,15 @@ pub fn supersede(conn: &Connection, data_dir: &Path, user: &str, old_id: &str, s
     old.archived = true;
     index_insert(conn, user, &old, &arch_path)?;
     index_insert(conn, user, &new, &new_path)?;
+    conn.execute("DELETE FROM memory_vectors WHERE user = ?1 AND id = ?2", (user, &old.id))?;
+    store_vector(conn, user, &new, emb);
     Ok(Some(new.id))
 }
 
 /// Lexical search over non-archived facts. The raw query is reduced to quoted
 /// alphanumeric tokens, so model- or user-supplied strings can never produce
 /// an FTS5 syntax error.
-pub fn query(conn: &Connection, user: &str, q: &str, limit: i64) -> Result<Vec<QueryHit>> {
+fn lexical_query(conn: &Connection, user: &str, q: &str, limit: i64) -> Result<Vec<QueryHit>> {
     let tokens: Vec<String> = q
         .split(|c: char| !c.is_alphanumeric())
         .filter(|t| !t.is_empty())
@@ -221,6 +292,86 @@ pub fn query(conn: &Connection, user: &str, q: &str, limit: i64) -> Result<Vec<Q
         Ok(QueryHit { id: r.get(0)?, category: r.get(1)?, summary: r.get(2)? })
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// Ids of the user's live facts by cosine similarity, best first. A missing or
+/// failing embedder yields no ids, leaving the caller lexical-only.
+fn vector_query(
+    conn: &Connection,
+    user: &str,
+    q: &str,
+    limit: usize,
+    emb: Option<&dyn crate::providers::EmbeddingsProvider>,
+) -> Result<Vec<String>> {
+    let Some(emb) = emb else { return Ok(vec![]) };
+    let qv = match emb.embed(&[q]) {
+        Ok(vs) => match vs.into_iter().next() {
+            Some(v) => v,
+            None => return Ok(vec![]),
+        },
+        Err(e) => {
+            let _ = crate::log::record(conn, None, "memory_embed_error", &format!("query: {e}"));
+            return Ok(vec![]);
+        }
+    };
+    let mut stmt = conn.prepare(
+        "SELECT v.id, v.vector
+         FROM memory_vectors v
+         JOIN memory_index i ON i.user = v.user AND i.id = v.id
+         WHERE v.user = ?1 AND i.archived = 0",
+    )?;
+    let rows = stmt.query_map([user], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?)))?;
+    let mut scored: Vec<(String, f32)> = rows
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .into_iter()
+        .map(|(id, blob)| {
+            let score = cosine(&qv, &blob_to_vec(&blob));
+            (id, score)
+        })
+        .collect();
+    scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+    scored.truncate(limit);
+    Ok(scored.into_iter().map(|(id, _)| id).collect())
+}
+
+fn hit_for(conn: &Connection, user: &str, id: &str, lexical: &[QueryHit]) -> Result<QueryHit> {
+    if let Some(h) = lexical.iter().find(|h| h.id == id) {
+        return Ok(QueryHit { id: h.id.clone(), category: h.category.clone(), summary: h.summary.clone() });
+    }
+    let (category, summary) = conn.query_row(
+        "SELECT category, summary FROM memory_index WHERE user = ?1 AND id = ?2",
+        (user, id),
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+    )?;
+    Ok(QueryHit { id: id.to_string(), category, summary })
+}
+
+/// Reciprocal rank fusion of the lexical and vector arms; degrades to the
+/// lexical ranking alone whenever the vector arm returns nothing.
+pub fn query(
+    conn: &Connection,
+    user: &str,
+    q: &str,
+    limit: i64,
+    emb: Option<&dyn crate::providers::EmbeddingsProvider>,
+) -> Result<Vec<QueryHit>> {
+    let take = limit as usize;
+    let lexical = lexical_query(conn, user, q, 32)?;
+    let vector = vector_query(conn, user, q, 32, emb)?;
+    if vector.is_empty() {
+        return Ok(lexical.into_iter().take(take).collect());
+    }
+    let mut scores: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+    for (rank, hit) in lexical.iter().enumerate() {
+        *scores.entry(hit.id.clone()).or_default() += 1.0 / (60.0 + rank as f64);
+    }
+    for (rank, id) in vector.iter().enumerate() {
+        *scores.entry(id.clone()).or_default() += 1.0 / (60.0 + rank as f64);
+    }
+    let mut ids: Vec<(String, f64)> = scores.into_iter().collect();
+    ids.sort_by(|a, b| b.1.total_cmp(&a.1));
+    ids.truncate(take);
+    ids.into_iter().map(|(id, _)| hit_for(conn, user, &id, &lexical)).collect()
 }
 
 /// Rebuilds one user's index rows from their files. Unparseable files are
@@ -246,12 +397,26 @@ pub fn reindex_user(conn: &Connection, data_dir: &Path, user: &str) -> Result<()
             }
         }
     }
+    conn.execute(
+        "DELETE FROM memory_vectors WHERE user = ?1
+         AND id NOT IN (SELECT id FROM memory_index WHERE user = ?1 AND archived = 0)",
+        [user],
+    )?;
     Ok(())
 }
 
 pub fn reindex_all(conn: &Connection, data_dir: &Path) -> Result<()> {
     let root = data_dir.join("memory");
-    let Ok(entries) = std::fs::read_dir(&root) else { return Ok(()) };
+    let entries = match std::fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(e) => {
+            if root.exists() {
+                let _ = crate::log::record(conn, None, "memory_index_error",
+                    &format!("{}: {e}", root.display()));
+            }
+            return Ok(());
+        }
+    };
     for entry in entries.flatten() {
         if entry.path().is_dir() {
             reindex_user(conn, data_dir, &entry.file_name().to_string_lossy())?;
@@ -271,7 +436,7 @@ mod tests {
     #[test]
     fn add_read_roundtrip() {
         let (conn, tmp) = env();
-        let id = add(&conn, tmp.path(), "aki", "semantic", "likes tea", "green tea, no sugar").unwrap();
+        let id = add(&conn, tmp.path(), "aki", "semantic", "likes tea", "green tea, no sugar", None).unwrap();
         let f = read(tmp.path(), "aki", &id).unwrap().unwrap();
         assert_eq!(f.summary, "likes tea");
         assert_eq!(f.body, "green tea, no sugar");
@@ -283,13 +448,13 @@ mod tests {
     #[test]
     fn query_finds_by_body_token_and_excludes_archived() {
         let (conn, tmp) = env();
-        let id = add(&conn, tmp.path(), "aki", "semantic", "dentist", "molar hurts on tuesdays").unwrap();
-        let hits = query(&conn, "aki", "molar", 10).unwrap();
+        let id = add(&conn, tmp.path(), "aki", "semantic", "dentist", "molar hurts on tuesdays", None).unwrap();
+        let hits = query(&conn, "aki", "molar", 10, None).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, id);
 
-        let new_id = supersede(&conn, tmp.path(), "aki", &id, "dentist", "molar fixed").unwrap().unwrap();
-        let hits = query(&conn, "aki", "molar", 10).unwrap();
+        let new_id = supersede(&conn, tmp.path(), "aki", &id, "dentist", "molar fixed", None).unwrap().unwrap();
+        let hits = query(&conn, "aki", "molar", 10, None).unwrap();
         assert_eq!(hits.len(), 1, "old fact must leave the index");
         assert_eq!(hits[0].id, new_id);
     }
@@ -297,8 +462,8 @@ mod tests {
     #[test]
     fn supersede_archives_the_old_file_and_links_it() {
         let (conn, tmp) = env();
-        let old = add(&conn, tmp.path(), "aki", "episodic", "s", "b").unwrap();
-        let new = supersede(&conn, tmp.path(), "aki", &old, "s2", "b2").unwrap().unwrap();
+        let old = add(&conn, tmp.path(), "aki", "episodic", "s", "b", None).unwrap();
+        let new = supersede(&conn, tmp.path(), "aki", &old, "s2", "b2", None).unwrap().unwrap();
         assert!(tmp.path().join("memory/aki/archive").join(format!("{old}.md")).exists());
         assert!(!tmp.path().join("memory/aki/episodic").join(format!("{old}.md")).exists());
         let f = read(tmp.path(), "aki", &new).unwrap().unwrap();
@@ -307,11 +472,11 @@ mod tests {
         let archived = read(tmp.path(), "aki", &old).unwrap().unwrap();
         assert!(archived.archived);
         assert!(matches!(
-            update(&conn, tmp.path(), "aki", &old, "x", "y"),
+            update(&conn, tmp.path(), "aki", &old, "x", "y", None),
             Err(WriteError::Archived(_))
         ));
         assert!(matches!(
-            supersede(&conn, tmp.path(), "aki", &old, "x", "y"),
+            supersede(&conn, tmp.path(), "aki", &old, "x", "y", None),
             Err(WriteError::Archived(_))
         ));
     }
@@ -319,22 +484,22 @@ mod tests {
     #[test]
     fn update_rewrites_in_place() {
         let (conn, tmp) = env();
-        let id = add(&conn, tmp.path(), "aki", "procedural", "s", "b").unwrap();
-        update(&conn, tmp.path(), "aki", &id, "s revised", "b revised").unwrap().unwrap();
+        let id = add(&conn, tmp.path(), "aki", "procedural", "s", "b", None).unwrap();
+        update(&conn, tmp.path(), "aki", &id, "s revised", "b revised", None).unwrap().unwrap();
         let f = read(tmp.path(), "aki", &id).unwrap().unwrap();
         assert_eq!(f.summary, "s revised");
-        assert_eq!(query(&conn, "aki", "revised", 10).unwrap().len(), 1);
+        assert_eq!(query(&conn, "aki", "revised", 10, None).unwrap().len(), 1);
     }
 
     #[test]
     fn reindex_rebuilds_from_files_alone() {
         let (conn, tmp) = env();
-        let id = add(&conn, tmp.path(), "aki", "semantic", "findme", "needle haystack").unwrap();
+        let id = add(&conn, tmp.path(), "aki", "semantic", "findme", "needle haystack", None).unwrap();
         conn.execute("DELETE FROM memory_index", []).unwrap();
         conn.execute("DELETE FROM memory_fts WHERE user='aki'", []).unwrap();
-        assert!(query(&conn, "aki", "needle", 10).unwrap().is_empty());
+        assert!(query(&conn, "aki", "needle", 10, None).unwrap().is_empty());
         reindex_user(&conn, tmp.path(), "aki").unwrap();
-        assert_eq!(query(&conn, "aki", "needle", 10).unwrap()[0].id, id);
+        assert_eq!(query(&conn, "aki", "needle", 10, None).unwrap()[0].id, id);
     }
 
     #[test]
@@ -343,16 +508,70 @@ mod tests {
         for bad in ["../../../etc/passwd", "..", "x/y", "", "A-UPPER-ID-000000000000000000000000000"] {
             assert!(!valid_id(bad), "{bad:?} must be invalid");
             assert!(read(tmp.path(), "aki", bad).unwrap().is_none());
-            assert!(update(&conn, tmp.path(), "aki", bad, "s", "b").unwrap().is_none());
+            assert!(update(&conn, tmp.path(), "aki", bad, "s", "b", None).unwrap().is_none());
         }
+    }
+
+    #[test]
+    fn vectors_written_on_add_and_pruned_on_supersede() {
+        let (conn, tmp) = env();
+        let e = crate::providers::mock::MockEmbeddings;
+        let id = add(&conn, tmp.path(), "aki", "semantic", "abc", "abc", Some(&e)).unwrap();
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM memory_vectors WHERE user='aki' AND id=?1", [&id], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(n, 1);
+        let new_id = supersede(&conn, tmp.path(), "aki", &id, "abc", "abc", Some(&e)).unwrap().unwrap();
+        let old_n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM memory_vectors WHERE id=?1", [&id], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(old_n, 0, "superseded vector must be pruned");
+        let new_n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM memory_vectors WHERE id=?1", [&new_id], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(new_n, 1);
+    }
+
+    #[test]
+    fn hybrid_query_ranks_vector_similar_fact_first() {
+        let (conn, tmp) = env();
+        let e = crate::providers::mock::MockEmbeddings;
+        // lexically, neither fact contains the query token "aaab"; only vectors can rank them
+        let close = add(&conn, tmp.path(), "aki", "semantic", "zz", "aaaa", Some(&e)).unwrap();
+        let _far = add(&conn, tmp.path(), "aki", "semantic", "zz", "hhhh", Some(&e)).unwrap();
+        let hits = query(&conn, "aki", "aaab", 2, Some(&e)).unwrap();
+        assert!(!hits.is_empty(), "vector arm must contribute hits with no lexical match");
+        assert_eq!(hits[0].id, close);
+    }
+
+    #[test]
+    fn query_without_provider_stays_lexical() {
+        let (conn, tmp) = env();
+        let id = add(&conn, tmp.path(), "aki", "semantic", "dentist", "molar", None).unwrap();
+        let hits = query(&conn, "aki", "molar", 10, None).unwrap();
+        assert_eq!(hits[0].id, id);
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM memory_vectors", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn atomic_write_leaves_no_tmp_files() {
+        let (conn, tmp) = env();
+        add(&conn, tmp.path(), "aki", "semantic", "s", "b", None).unwrap();
+        let dir = tmp.path().join("memory/aki/semantic");
+        let leftovers: Vec<_> = std::fs::read_dir(&dir).unwrap()
+            .flatten()
+            .filter(|f| f.path().extension().is_some_and(|e| e == "tmp"))
+            .collect();
+        assert!(leftovers.is_empty());
     }
 
     #[test]
     fn hostile_query_strings_never_error() {
         let (conn, tmp) = env();
-        add(&conn, tmp.path(), "aki", "semantic", "s", "b").unwrap();
+        add(&conn, tmp.path(), "aki", "semantic", "s", "b", None).unwrap();
         for q in ["\"unbalanced", "a OR OR", "(((", "*", "co-lu:mn NEAR/x", "", "   "] {
-            query(&conn, "aki", q, 10).unwrap();
+            query(&conn, "aki", q, 10, None).unwrap();
         }
     }
 }

@@ -51,6 +51,7 @@ pub struct ToolCtx<'a> {
     pub data_dir: &'a Path,
     pub user_id: i64,
     pub username: &'a str,
+    pub embeddings: Option<&'a dyn crate::providers::EmbeddingsProvider>,
 }
 
 pub const MAX_ARGS_BYTES: usize = 64 * 1024;
@@ -239,7 +240,7 @@ mod tests {
     }
 
     fn ctx<'a>(tmp: &'a tempfile::TempDir) -> ToolCtx<'a> {
-        ToolCtx { config_dir: tmp.path(), data_dir: tmp.path(), user_id: 1, username: "aki" }
+        ToolCtx { config_dir: tmp.path(), data_dir: tmp.path(), user_id: 1, username: "aki", embeddings: None }
     }
 
     #[test]
