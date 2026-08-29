@@ -61,6 +61,29 @@ config/
 Per-user files are optional; anything not overridden falls back to the
 `defaults/` tree.
 
+## Memory & agent tools
+
+Per-user long-term memory lives under `data/memory/<user>/{semantic,episodic,procedural,archive}/` —
+one markdown fact per file, frontmatter with a one-line summary. Facts are
+never deleted: superseding a fact writes a replacement and moves the old file
+to `archive/`. A SQLite FTS index over these files is derived and rebuilt at
+startup, so the files themselves are the backup-worthy source of truth.
+
+The standing context document each agent session sees is
+`config/users/<user>/standing.md`; agents edit it in place through the
+`context_edit` tool, so its history is whatever your config dir's VCS says.
+
+Model-facing capabilities are typed tool calls dispatched through a
+per-session-type registry (check-in < talk < nightly). Every call is
+validated, size-capped, and transactional; failures return typed rejections
+to the model and never leave partial state.
+
+Event scheduling semantics: `fixed` events cannot move; `slide` events can be
+slid within ±`slide_window_min` minutes of their template time (0 = unbounded);
+`drop` events can additionally be dropped by the agent. Snoozing is separate:
+any undecided event can be snoozed ("not now"), which re-fires it later and is
+not bounded by the slide window.
+
 ## Admin API
 
 Admin-role users (see `create-user --admin`) get two extra routes:
