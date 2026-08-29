@@ -18,6 +18,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/events/{id}/shift", post(event_shift))
         .route("/api/events/{id}/done", post(event_done))
         .route("/api/events/{id}/drop", post(event_drop))
+        .route("/api/admin/log", get(admin_log))
+        .route("/api/admin/users", post(admin_create_user))
         .with_state(state)
 }
 
@@ -167,6 +169,68 @@ fn event_set(state: &AppState, user: &CurrentUser, id: i64, status: &str) -> axu
     match crate::plan::set_status(&conn, user.id, id, status) {
         Ok(Some(())) => StatusCode::OK.into_response(),
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct CreateUserReq {
+    username: String,
+    password: String,
+    admin: bool,
+}
+
+async fn admin_create_user(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Json(req): Json<CreateUserReq>,
+) -> impl IntoResponse {
+    if !user.admin {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let conn = state.db.lock().unwrap();
+    match auth::create_user(&conn, &req.username, &req.password, req.admin) {
+        Ok(_) => StatusCode::OK.into_response(),
+        Err(_) => StatusCode::BAD_REQUEST.into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct LogQuery {
+    #[serde(default = "default_limit")]
+    limit: i64,
+}
+fn default_limit() -> i64 {
+    100
+}
+
+async fn admin_log(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Query(q): Query<LogQuery>,
+) -> impl IntoResponse {
+    if !user.admin {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let conn = state.db.lock().unwrap();
+    let mut stmt = match conn.prepare(
+        "SELECT ts, user_id, kind, detail FROM event_log ORDER BY id DESC LIMIT ?1",
+    ) {
+        Ok(s) => s,
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    let rows: Result<Vec<serde_json::Value>, _> = stmt
+        .query_map([q.limit], |r| {
+            Ok(serde_json::json!({
+                "ts": r.get::<_, String>(0)?,
+                "user_id": r.get::<_, Option<i64>>(1)?,
+                "kind": r.get::<_, String>(2)?,
+                "detail": r.get::<_, String>(3)?,
+            }))
+        })
+        .and_then(|m| m.collect());
+    match rows {
+        Ok(v) => Json(v).into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }

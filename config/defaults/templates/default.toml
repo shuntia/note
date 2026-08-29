@@ -1,0 +1,7 @@
+[[events]]
+kind = "checkin"
+time = "09:00"
+days = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+flexibility = "slide"
+slide_window_min = 60
+channel = "push"
