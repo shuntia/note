@@ -28,7 +28,7 @@ const FLEXIBILITIES: [&str; 3] = ["fixed", "slide", "drop"];
 
 /// Zero-padded 24-hour `HH:MM`; the padding matters because wall times are
 /// compared and sorted as strings once stored.
-fn valid_time(s: &str) -> bool {
+pub(crate) fn valid_time(s: &str) -> bool {
     let Some((h, m)) = s.split_once(':') else {
         return false;
     };
