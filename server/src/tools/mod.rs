@@ -328,6 +328,13 @@ mod tests {
     }
 
     #[test]
+    fn session_surfaces_are_nested_subsets() {
+        let is_subset = |a: &[&str], b: &[&str]| a.iter().all(|t| b.contains(t));
+        assert!(is_subset(registry(SessionKind::Checkin), registry(SessionKind::Talk)));
+        assert!(is_subset(registry(SessionKind::Talk), registry(SessionKind::Nightly)));
+    }
+
+    #[test]
     fn schemas_cover_the_registry_and_are_objects() {
         for kind in [SessionKind::Nightly, SessionKind::Checkin, SessionKind::Talk] {
             let schemas = schemas(kind);
