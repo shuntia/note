@@ -3,6 +3,29 @@ use rusqlite::Connection;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
+const MAX_TITLE_BYTES: usize = 500;
+const MAX_TEXT_BYTES: usize = 16 * 1024;
+
+/// Trims and length-checks a title; shared so `create` and `update` cannot drift.
+fn checked_title(title: &str) -> Result<&str, ToolError> {
+    let title = title.trim();
+    if title.is_empty() || title.len() > MAX_TITLE_BYTES {
+        return Err(ToolError::rejected(format!(
+            "title must be 1..={MAX_TITLE_BYTES} bytes"
+        )));
+    }
+    Ok(title)
+}
+
+fn check_text(field: &str, value: &str) -> Result<(), ToolError> {
+    if value.len() > MAX_TEXT_BYTES {
+        return Err(ToolError::rejected(format!(
+            "{field} must be at most {MAX_TEXT_BYTES} bytes"
+        )));
+    }
+    Ok(())
+}
+
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreateArgs {
@@ -16,10 +39,8 @@ pub fn create(
     ctx: &ToolCtx,
     args: CreateArgs,
 ) -> Result<serde_json::Value, ToolError> {
-    let title = args.title.trim();
-    if title.is_empty() || title.len() > 500 {
-        return Err(ToolError::rejected("title must be 1..=500 characters"));
-    }
+    let title = checked_title(&args.title)?;
+    check_text("description", &args.description)?;
     let task = crate::tasks::create(conn, ctx.user_id, title, "agent")
         .map_err(|e| ToolError::internal(e.to_string()))?;
     if !args.description.is_empty() {
@@ -52,8 +73,18 @@ pub fn update(
     ctx: &ToolCtx,
     args: UpdateArgs,
 ) -> Result<serde_json::Value, ToolError> {
+    let title = match &args.title {
+        Some(t) => Some(checked_title(t)?.to_owned()),
+        None => None,
+    };
+    if let Some(d) = &args.description {
+        check_text("description", d)?;
+    }
+    if let Some(n) = &args.notes {
+        check_text("notes", n)?;
+    }
     let patch = crate::tasks::TaskPatch {
-        title: args.title,
+        title,
         description: args.description,
         state: args.state,
         notes: args.notes,
