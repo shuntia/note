@@ -1,3 +1,5 @@
+pub mod context_ops;
+pub mod memory_ops;
 pub mod task_ops;
 
 use rusqlite::Connection;
@@ -52,9 +54,33 @@ pub struct ToolCtx<'a> {
 
 pub const MAX_ARGS_BYTES: usize = 64 * 1024;
 
-const CHECKIN: &[&str] = &["task_create", "task_update"];
-const TALK: &[&str] = &["task_create", "task_update"];
-const NIGHTLY: &[&str] = &["task_create", "task_update"];
+/// Ceiling for every free-text field a tool accepts, shared so the surfaces
+/// cannot drift apart.
+pub(crate) const MAX_TEXT_BYTES: usize = 16 * 1024;
+
+const CHECKIN: &[&str] = &[
+    "memory_query",
+    "memory_read",
+    "memory_write",
+    "task_create",
+    "task_update",
+];
+const TALK: &[&str] = &[
+    "memory_query",
+    "memory_read",
+    "memory_write",
+    "task_create",
+    "task_update",
+    "context_edit",
+];
+const NIGHTLY: &[&str] = &[
+    "memory_query",
+    "memory_read",
+    "memory_write",
+    "task_create",
+    "task_update",
+    "context_edit",
+];
 
 pub fn registry(kind: SessionKind) -> &'static [&'static str] {
     match kind {
@@ -77,6 +103,22 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
         "task_update" => (
             "Update a task's title, description, state, or notes.",
             schema::<task_ops::UpdateArgs>(),
+        ),
+        "memory_query" => (
+            "Search the user's long-term memory; returns ids and summaries.",
+            schema::<memory_ops::QueryArgs>(),
+        ),
+        "memory_read" => (
+            "Read one memory in full by id.",
+            schema::<memory_ops::ReadArgs>(),
+        ),
+        "memory_write" => (
+            "Add, update, or supersede a memory. Superseding archives the old fact.",
+            schema::<memory_ops::WriteArgs>(),
+        ),
+        "context_edit" => (
+            "Edit the standing context document: replace a unique snippet or append a line.",
+            schema::<context_ops::EditArgs>(),
         ),
         _ => unreachable!("describe covers every registered tool"),
     }
@@ -133,6 +175,10 @@ fn run(
     match name {
         "task_create" => task_ops::create(conn, ctx, parse(raw)?),
         "task_update" => task_ops::update(conn, ctx, parse(raw)?),
+        "memory_query" => memory_ops::query(conn, ctx, parse(raw)?),
+        "memory_read" => memory_ops::read(conn, ctx, parse(raw)?),
+        "memory_write" => memory_ops::write(conn, ctx, parse(raw)?),
+        "context_edit" => context_ops::edit(conn, ctx, parse(raw)?),
         _ => unreachable!("registry guarantees a known name"),
     }
 }
