@@ -62,6 +62,21 @@ const MIGRATIONS: &[&str] = &[
         detail TEXT NOT NULL DEFAULT ''
     );
     ",
+    // v2
+    "
+    ALTER TABLE events ADD COLUMN orig_wall_time TEXT NOT NULL DEFAULT '';
+    UPDATE events SET orig_wall_time = wall_time WHERE orig_wall_time = '';
+    CREATE TABLE memory_index (
+        user TEXT NOT NULL,
+        id TEXT NOT NULL,
+        category TEXT NOT NULL CHECK (category IN ('semantic','episodic','procedural')),
+        summary TEXT NOT NULL,
+        archived INTEGER NOT NULL DEFAULT 0,
+        path TEXT NOT NULL,
+        PRIMARY KEY (user, id)
+    );
+    CREATE VIRTUAL TABLE memory_fts USING fts5(user UNINDEXED, id UNINDEXED, summary, body);
+    ",
 ];
 
 pub fn open(path: &Path) -> Result<Connection> {
@@ -137,5 +152,49 @@ mod tests {
         conn.pragma_update(None, "user_version", 99).unwrap();
         let err = apply_migrations(&conn, MIGRATIONS).unwrap_err().to_string();
         assert!(err.contains("99"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn v2_backfills_orig_wall_time_from_v1_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_migrations(&conn, &MIGRATIONS[..1]).unwrap();
+        conn.execute(
+            "INSERT INTO users (username, pass_hash, role) VALUES ('a','h','member')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO plans (user_id, date, created_at) VALUES (1, '2026-08-31', 'x')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO events (plan_id, kind, wall_time) VALUES (1, 'nudge', '09:15')",
+            [],
+        )
+        .unwrap();
+        apply_migrations(&conn, MIGRATIONS).unwrap();
+        let orig: String = conn
+            .query_row("SELECT orig_wall_time FROM events WHERE id = 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(orig, "09:15");
+    }
+
+    #[test]
+    fn memory_fts_is_available_and_searchable() {
+        let conn = open_memory().unwrap();
+        conn.execute(
+            "INSERT INTO memory_fts (user, id, summary, body) VALUES ('aki', 'x', 'dentist appointment', 'call about the molar')",
+            [],
+        )
+        .unwrap();
+        let id: String = conn
+            .query_row(
+                "SELECT id FROM memory_fts WHERE memory_fts MATCH '\"molar\"' AND user = 'aki'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(id, "x");
     }
 }

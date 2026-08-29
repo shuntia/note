@@ -52,8 +52,8 @@ pub fn generate(conn: &Connection, user_id: i64, template: &Template, date: jiff
     let day = weekday_key(date);
     for ev in template.events.iter().filter(|e| e.days.iter().any(|d| d == day)) {
         tx.execute(
-            "INSERT INTO events (plan_id, kind, wall_time, flexibility, slide_window_min, channel)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO events (plan_id, kind, wall_time, orig_wall_time, flexibility, slide_window_min, channel)
+             VALUES (?1, ?2, ?3, ?3, ?4, ?5, ?6)",
             (plan_id, &ev.kind, &ev.time, &ev.flexibility, ev.slide_window_min, &ev.channel),
         )?;
     }
