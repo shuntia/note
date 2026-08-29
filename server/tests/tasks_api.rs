@@ -24,7 +24,8 @@ async fn login(app: &axum::Router, username: &str, password: &str) -> String {
 async fn create_list_update_task() {
     let conn = db::open_memory().unwrap();
     auth::create_user(&conn, "aki", "pw", false).unwrap();
-    let app = api::router(AppState::new(conn));
+    let tmp = tempfile::tempdir().unwrap();
+    let app = api::router(AppState::new(conn, tmp.path().to_path_buf()));
     let cookie = login(&app, "aki", "pw").await;
 
     let res = app.clone().oneshot(
@@ -56,7 +57,8 @@ async fn create_list_update_task() {
 async fn invalid_state_is_rejected() {
     let conn = db::open_memory().unwrap();
     auth::create_user(&conn, "aki", "pw", false).unwrap();
-    let app = api::router(AppState::new(conn));
+    let tmp = tempfile::tempdir().unwrap();
+    let app = api::router(AppState::new(conn, tmp.path().to_path_buf()));
     let cookie = login(&app, "aki", "pw").await;
     app.clone().oneshot(
         Request::post("/api/tasks")
@@ -78,7 +80,8 @@ async fn patch_by_non_owner_is_404() {
     let conn = db::open_memory().unwrap();
     auth::create_user(&conn, "aki", "pw", false).unwrap();
     auth::create_user(&conn, "yuki", "pw2", false).unwrap();
-    let app = api::router(AppState::new(conn));
+    let tmp = tempfile::tempdir().unwrap();
+    let app = api::router(AppState::new(conn, tmp.path().to_path_buf()));
     let owner_cookie = login(&app, "aki", "pw").await;
     let other_cookie = login(&app, "yuki", "pw2").await;
 
