@@ -69,8 +69,9 @@ Two loops:
 - **Web:** React + Vite TypeScript PWA — the only place npm/pnpm appears,
   build-time only; output is static files served by the server binary.
 - **Testing:** cargo test; proptest for property-based tests and fuzzing.
-- **Dev environment:** `flake.nix` devshell (cargo, rustc, node, pnpm) — the
-  rustup toolchain on this host is FHS-broken; the nixpkgs toolchain works.
+- **Dev environment:** host rustup toolchain (via nix-ld) for day-to-day
+  work; `flake.nix` devshell (cargo, rustc, node, pnpm) as the reproducible
+  build path for fresh checkouts.
 
 ## Architecture
 
