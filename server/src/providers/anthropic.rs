@@ -12,7 +12,7 @@ impl AnthropicLLM {
     pub fn new(base_url: &str, model: &str, api_key: &str) -> Self {
         let base = if base_url.is_empty() { "https://api.anthropic.com" } else { base_url };
         Self {
-            agent: ureq::Agent::new(),
+            agent: super::http_agent(),
             base_url: base.trim_end_matches('/').to_string(),
             model: model.to_string(),
             api_key: api_key.to_string(),
@@ -55,10 +55,14 @@ pub fn body(model: &str, req: &ChatRequest) -> serde_json::Value {
             }
         }
     }
-    serde_json::json!({
+    let mut v = serde_json::json!({
         "model": model, "max_tokens": 4096, "system": req.system,
-        "messages": messages, "tools": req.tools
-    })
+        "messages": messages
+    });
+    if !req.tools.is_empty() {
+        v["tools"] = serde_json::Value::from(req.tools);
+    }
+    v
 }
 
 pub fn parse(v: &serde_json::Value) -> Result<ChatResponse> {
@@ -124,6 +128,13 @@ mod tests {
         assert_eq!(m[1]["content"][1]["input"]["query"], "day");
         assert_eq!(m[2]["role"], "user");
         assert_eq!(m[2]["content"][1]["is_error"], true);
+    }
+
+    #[test]
+    fn body_omits_tools_key_when_empty() {
+        let msgs = vec![Message::User("hi".into())];
+        let b = body("claude-sonnet-5", &ChatRequest { system: "", messages: &msgs, tools: &[] });
+        assert!(b.get("tools").is_none());
     }
 
     #[test]
