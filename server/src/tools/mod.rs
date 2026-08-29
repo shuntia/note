@@ -196,6 +196,51 @@ mod tests {
     }
 
     #[test]
+    fn oversized_text_fields_are_rejected_and_leave_the_row_unchanged() {
+        let (conn, tmp) = env();
+        let out = dispatch(
+            &conn,
+            &ctx(&tmp),
+            SessionKind::Talk,
+            "task_create",
+            r#"{"title":"call dentist"}"#,
+        )
+        .unwrap();
+        let id = out["task_id"].as_i64().unwrap();
+
+        let e = dispatch(
+            &conn,
+            &ctx(&tmp),
+            SessionKind::Talk,
+            "task_update",
+            &format!(r#"{{"task_id":{id},"title":"{}"}}"#, "x".repeat(501)),
+        )
+        .unwrap_err();
+        assert_eq!(e.kind, "rejected");
+
+        let e = dispatch(
+            &conn,
+            &ctx(&tmp),
+            SessionKind::Talk,
+            "task_update",
+            &format!(
+                r#"{{"task_id":{id},"title":"renamed","notes":"{}"}}"#,
+                "x".repeat(16 * 1024 + 1)
+            ),
+        )
+        .unwrap_err();
+        assert_eq!(e.kind, "rejected");
+
+        let (title, notes): (String, String) = conn
+            .query_row("SELECT title, notes FROM tasks WHERE id = ?1", [id], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(title, "call dentist");
+        assert_eq!(notes, "");
+    }
+
+    #[test]
     fn schemas_cover_the_registry_and_are_objects() {
         for kind in [SessionKind::Nightly, SessionKind::Checkin, SessionKind::Talk] {
             let schemas = schemas(kind);
