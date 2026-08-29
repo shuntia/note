@@ -1,5 +1,5 @@
 use anyhow::Context;
-use note_server::{api, auth, config::ServerConfig, db, runner, AppState};
+use note_server::{api, auth, config::ServerConfig, db, memory, runner, AppState};
 use std::path::PathBuf;
 
 #[tokio::main]
@@ -11,6 +11,7 @@ async fn main() -> anyhow::Result<()> {
 
     std::fs::create_dir_all(&cfg.data_dir)?;
     let conn = db::open(&cfg.data_dir.join("note.db"))?;
+    memory::reindex_all(&conn, &cfg.data_dir)?;
 
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(String::as_str) == Some("create-user") {
