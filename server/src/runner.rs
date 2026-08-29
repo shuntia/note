@@ -11,9 +11,24 @@ struct Candidate {
     wall_time: String,
 }
 
+/// Resolves the candidate's stored wall time to an instant in its user's
+/// timezone. `date` and `wall_time` come from user-authored templates and are
+/// stored unvalidated, so both parses can fail. A missing or unknown timezone
+/// falls back to UTC. DST gaps resolve forward to the next valid instant.
+fn due_at(config_dir: &Path, c: &Candidate) -> Result<jiff::Timestamp> {
+    let tz_name = UserConfig::load(config_dir, &c.username)
+        .map(|u| u.timezone)
+        .unwrap_or_else(|_| "UTC".into());
+    let tz = jiff::tz::TimeZone::get(&tz_name).unwrap_or(jiff::tz::TimeZone::UTC);
+    let date: jiff::civil::Date = c.date.parse()?;
+    let time: jiff::civil::Time = format!("{}:00", c.wall_time).parse()?;
+    Ok(tz.to_ambiguous_zoned(date.to_datetime(time)).compatible()?.timestamp())
+}
+
 /// Fires every pending event whose wall time, resolved in its user's timezone on
-/// the plan date, has arrived by `now`. A missing or unknown timezone falls back
-/// to UTC rather than stalling that user's events forever.
+/// the plan date, has arrived by `now`. A candidate that cannot be resolved is
+/// logged as `runner_error` and skipped, so one unusable row cannot stall the
+/// sweep for every other user.
 pub fn fire_due(conn: &Connection, config_dir: &Path, now: jiff::Timestamp) -> Result<Vec<i64>> {
     let mut stmt = conn.prepare(
         "SELECT e.id, p.user_id, u.username, p.date, e.wall_time
@@ -36,15 +51,21 @@ pub fn fire_due(conn: &Connection, config_dir: &Path, now: jiff::Timestamp) -> R
 
     let mut fired = Vec::new();
     for c in candidates {
-        let tz_name = UserConfig::load(config_dir, &c.username)
-            .map(|u| u.timezone)
-            .unwrap_or_else(|_| "UTC".into());
-        let tz = jiff::tz::TimeZone::get(&tz_name).unwrap_or(jiff::tz::TimeZone::UTC);
-        let date: jiff::civil::Date = c.date.parse()?;
-        let time: jiff::civil::Time = format!("{}:00", c.wall_time).parse()?;
-        // Compatible disambiguation: a time inside a DST gap resolves forward to
-        // the next valid instant instead of erroring.
-        let due = tz.to_ambiguous_zoned(date.to_datetime(time)).compatible()?.timestamp();
+        let due = match due_at(config_dir, &c) {
+            Ok(due) => due,
+            Err(e) => {
+                crate::log::record(
+                    conn,
+                    Some(c.user_id),
+                    "runner_error",
+                    &format!(
+                        "event {} unresolvable ({} {}): {e}",
+                        c.event_id, c.date, c.wall_time
+                    ),
+                )?;
+                continue;
+            }
+        };
         if due <= now {
             conn.execute(
                 "UPDATE events SET status='fired', fired_at=?1 WHERE id=?2",
@@ -121,6 +142,30 @@ mod tests {
 
         // second run does not double-fire
         assert!(fire_due(&conn, tmp.path(), due).unwrap().is_empty());
+    }
+
+    #[test]
+    fn unresolvable_event_is_logged_and_skipped() {
+        let (conn, tmp, uid) = setup("UTC");
+        let date: jiff::civil::Date = "2026-08-31".parse().unwrap();
+        let plan_id = crate::plan::generate(&conn, uid, &one_event_template("00:00"), date).unwrap();
+        let good_id = crate::plan::events_for(&conn, uid, date).unwrap()[0].id;
+        conn.execute(
+            "INSERT INTO events (plan_id, kind, wall_time) VALUES (?1, 'nudge', 'noon')",
+            [plan_id],
+        ).unwrap();
+
+        let now: jiff::Timestamp = "2026-08-31T12:00:00Z".parse().unwrap();
+        assert_eq!(fire_due(&conn, tmp.path(), now).unwrap(), vec![good_id]);
+
+        let errors: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM event_log WHERE kind='runner_error'", [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(errors, 1);
+        let still_pending: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM events WHERE wall_time='noon' AND status='pending'", [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(still_pending, 1);
     }
 
     #[test]
