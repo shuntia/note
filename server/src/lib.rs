@@ -9,6 +9,7 @@ pub mod plan;
 pub mod runner;
 pub mod tasks;
 pub mod templates;
+pub mod tools;
 
 use rusqlite::Connection;
 use std::path::PathBuf;
