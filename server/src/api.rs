@@ -145,6 +145,7 @@ async fn event_shift(
     match crate::plan::shift(&conn, user.id, id, req.minutes) {
         Ok(Some(())) => StatusCode::OK.into_response(),
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(crate::plan::ShiftError::OutOfWindow { .. }) => StatusCode::BAD_REQUEST.into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
