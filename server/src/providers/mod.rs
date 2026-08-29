@@ -30,11 +30,11 @@ pub struct ChatResponse {
     pub tool_calls: Vec<ToolCall>,
 }
 
-pub trait LLMProvider: Send + Sync + std::fmt::Debug {
+pub trait LLMProvider: Send + Sync {
     fn chat(&self, req: &ChatRequest) -> Result<ChatResponse>;
 }
 
-pub trait EmbeddingsProvider: Send + Sync + std::fmt::Debug {
+pub trait EmbeddingsProvider: Send + Sync {
     fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>>;
 }
 
@@ -80,7 +80,10 @@ mod tests {
             }),
             embeddings: None,
         };
-        let err = build(&cfg).unwrap_err().to_string();
+        let err = match build(&cfg) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("unknown kind must be rejected"),
+        };
         assert!(err.contains("carrier-pigeon"), "{err}");
     }
 }
