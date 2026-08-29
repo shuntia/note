@@ -1,12 +1,14 @@
 use axum::body::Body;
 use axum::http::{header, Request};
+use note_server::providers::mock::MockLLM;
 use note_server::{api, auth, db, AppState};
+use std::sync::Arc;
 use tempfile::TempDir;
 use tower::ServiceExt;
 
-/// Builds a config dir holding a UTC user default and a `default` template with
-/// one sliding 09:00 event on every weekday. The caller must keep the returned
-/// `TempDir` alive for as long as the state that reads it.
+/// Builds a config dir holding a UTC user default, a `default` template with
+/// one sliding 09:00 event on every weekday, and a persona prompt. The caller
+/// must keep the returned `TempDir` alive for as long as the state that reads it.
 pub fn config_dir() -> TempDir {
     let tmp = tempfile::tempdir().unwrap();
     let write = |rel: &str, c: &str| {
@@ -22,6 +24,7 @@ pub fn config_dir() -> TempDir {
         "defaults/templates/default.toml",
         "[[events]]\nkind='checkin_call'\ntime='09:00'\ndays=['mon','tue','wed','thu','fri','sat','sun']\nflexibility='slide'\nslide_window_min=60\nchannel='voice'\n",
     );
+    write("defaults/prompts/persona.md", "you are note");
     tmp
 }
 
@@ -43,9 +46,22 @@ pub async fn login(app: &axum::Router, username: &str, password: &str) -> String
 
 pub async fn app_with_logged_in_user() -> (axum::Router, String, TempDir) {
     let cfg = config_dir();
+    let dir = cfg.path().to_path_buf();
     let conn = db::open_memory().unwrap();
     auth::create_user(&conn, "aki", "pw", true).unwrap();
-    let app = api::router(AppState::new(conn, cfg.path().to_path_buf()));
+    let app = api::router(AppState::new(conn, dir.clone(), dir));
+    let cookie = login(&app, "aki", "pw").await;
+    (app, cookie, cfg)
+}
+
+#[allow(dead_code)] // every test binary compiles this module; only the talk suite scripts a model
+pub async fn app_with_logged_in_user_and_llm(llm: Arc<MockLLM>) -> (axum::Router, String, TempDir) {
+    let cfg = config_dir();
+    let dir = cfg.path().to_path_buf();
+    let conn = db::open_memory().unwrap();
+    auth::create_user(&conn, "aki", "pw", true).unwrap();
+    let state = AppState::new(conn, dir.clone(), dir).with_providers(llm, None);
+    let app = api::router(state);
     let cookie = login(&app, "aki", "pw").await;
     (app, cookie, cfg)
 }

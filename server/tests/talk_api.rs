@@ -1,0 +1,81 @@
+mod common;
+use axum::body::Body;
+use axum::http::{header, Request, StatusCode};
+use http_body_util::BodyExt;
+use note_server::providers::{mock::MockLLM, ChatResponse, ToolCall};
+use std::sync::Arc;
+use tower::ServiceExt;
+
+#[tokio::test]
+async fn talk_runs_a_session_and_returns_the_reply() {
+    let llm = Arc::new(MockLLM::scripted(vec![
+        ChatResponse {
+            text: String::new(),
+            tool_calls: vec![ToolCall {
+                id: "c1".into(),
+                name: "task_create".into(),
+                args: r#"{"title":"call mom"}"#.into(),
+            }],
+        },
+        ChatResponse { text: "done — added call mom".into(), tool_calls: vec![] },
+    ]));
+    let (app, cookie, _cfg) = common::app_with_logged_in_user_and_llm(llm).await;
+
+    let res = app
+        .clone()
+        .oneshot(
+            Request::post("/api/talk")
+                .header(header::COOKIE, &cookie)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"message":"remind me to call mom"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["reply"], "done — added call mom");
+
+    let res = app
+        .clone()
+        .oneshot(
+            Request::get("/api/tasks")
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v[0]["title"], "call mom");
+}
+
+#[tokio::test]
+async fn empty_message_is_400_and_no_cookie_is_401() {
+    let (app, cookie, _cfg) = common::app_with_logged_in_user().await;
+    let res = app
+        .clone()
+        .oneshot(
+            Request::post("/api/talk")
+                .header(header::COOKIE, &cookie)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"message":"   "}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    let res = app
+        .oneshot(
+            Request::post("/api/talk")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"message":"hi"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
