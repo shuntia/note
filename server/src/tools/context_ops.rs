@@ -1,4 +1,4 @@
-use super::{ToolCtx, ToolError};
+use super::{check_text, ToolCtx, ToolError};
 use rusqlite::Connection;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -19,9 +19,14 @@ pub fn edit(
     let _ = conn;
     let result = match (args.find, args.replace, args.append) {
         (Some(find), Some(replace), None) => {
+            check_text("find", &find)?;
+            check_text("replace", &replace)?;
             crate::context::edit_replace(ctx.config_dir, ctx.username, &find, &replace)
         }
-        (None, None, Some(text)) => crate::context::edit_append(ctx.config_dir, ctx.username, &text),
+        (None, None, Some(text)) => {
+            check_text("append", &text)?;
+            crate::context::edit_append(ctx.config_dir, ctx.username, &text)
+        }
         _ => {
             return Err(ToolError::rejected(
                 "provide either find+replace or append, not a mix",
@@ -63,6 +68,21 @@ mod tests {
         let text = std::fs::read_to_string(
             crate::context::standing_path(tmp.path(), "aki")).unwrap();
         assert!(text.contains("exams done"));
+    }
+
+    #[test]
+    fn oversized_text_is_rejected_before_touching_standing() {
+        let (conn, tmp) = env();
+        let big = "x".repeat(crate::tools::MAX_TEXT_BYTES + 1);
+        for raw in [
+            serde_json::json!({ "append": &big }).to_string(),
+            serde_json::json!({ "find": &big, "replace": "y" }).to_string(),
+            serde_json::json!({ "find": "y", "replace": &big }).to_string(),
+        ] {
+            let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "context_edit", &raw).unwrap_err();
+            assert_eq!(e.kind, "rejected");
+        }
+        assert!(!crate::context::standing_path(tmp.path(), "aki").exists());
     }
 
     #[test]

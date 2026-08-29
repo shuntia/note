@@ -59,6 +59,15 @@ pub const MAX_ARGS_BYTES: usize = 64 * 1024;
 /// cannot drift apart.
 pub(crate) const MAX_TEXT_BYTES: usize = 16 * 1024;
 
+pub(crate) fn check_text(field: &str, value: &str) -> Result<(), ToolError> {
+    if value.len() > MAX_TEXT_BYTES {
+        return Err(ToolError::rejected(format!(
+            "{field} must be at most {MAX_TEXT_BYTES} bytes"
+        )));
+    }
+    Ok(())
+}
+
 const CHECKIN: &[&str] = &[
     "memory_query",
     "memory_read",

@@ -168,8 +168,18 @@ pub fn snooze(conn: &Connection, user_id: i64, event_id: i64, minutes: i64) -> R
     Ok(Some(()))
 }
 
-pub fn event_flexibility(conn: &Connection, user_id: i64, event_id: i64) -> Result<Option<String>> {
-    Ok(owned_event(conn, user_id, event_id)?.map(|(_, flex, _, _)| flex))
+/// Flexibility and current status of an owned event: the two fields the agent
+/// drop gate weighs before touching a user decision.
+pub fn event_gate(conn: &Connection, user_id: i64, event_id: i64) -> Result<Option<(String, String)>> {
+    Ok(conn
+        .query_row(
+            "SELECT e.flexibility, e.status FROM events e
+             JOIN plans p ON p.id = e.plan_id
+             WHERE e.id = ?1 AND p.user_id = ?2",
+            (event_id, user_id),
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?)
 }
 
 /// Records a user decision on an event. Only `done` and `dropped` are user
@@ -362,15 +372,18 @@ mod tests {
     }
 
     #[test]
-    fn event_flexibility_is_owner_scoped() {
+    fn event_gate_is_owner_scoped() {
         let conn = crate::db::open_memory().unwrap();
         let uid = crate::auth::create_user(&conn, "a", "p", false).unwrap();
         let date: jiff::civil::Date = "2026-08-31".parse().unwrap();
         generate(&conn, uid, &tmpl(), date).unwrap();
         let ev_id = events_for(&conn, uid, date).unwrap()[0].id;
-        assert_eq!(event_flexibility(&conn, uid, ev_id).unwrap().as_deref(), Some("slide"));
+        assert_eq!(
+            event_gate(&conn, uid, ev_id).unwrap(),
+            Some(("slide".into(), "pending".into()))
+        );
         let other = crate::auth::create_user(&conn, "b", "p", false).unwrap();
-        assert!(event_flexibility(&conn, other, ev_id).unwrap().is_none());
+        assert!(event_gate(&conn, other, ev_id).unwrap().is_none());
     }
 
     #[test]

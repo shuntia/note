@@ -47,14 +47,22 @@ pub struct DropArgs {
     pub event_id: i64,
 }
 
-/// The agent may only drop events the template marked `flexibility = 'drop'`;
-/// abandoning anything else is the user's call, not the model's.
+/// The agent may only drop events the template marked `flexibility = 'drop'`,
+/// and only while they are still undecided; abandoning anything else — or
+/// rewriting a decision the user already made — is the user's call, not the
+/// model's.
 pub fn drop_event(conn: &Connection, ctx: &ToolCtx, args: DropArgs) -> Result<serde_json::Value, ToolError> {
-    match crate::plan::event_flexibility(conn, ctx.user_id, args.event_id) {
+    match crate::plan::event_gate(conn, ctx.user_id, args.event_id) {
         Ok(None) => return Err(ToolError::not_found(format!("no event {}", args.event_id))),
-        Ok(Some(flex)) if flex != "drop" => {
+        Ok(Some((flex, _))) if flex != "drop" => {
             return Err(ToolError::rejected(format!(
                 "event {} has flexibility '{flex}'; only droppable events can be dropped by the agent",
+                args.event_id
+            )));
+        }
+        Ok(Some((_, status))) if status == "done" || status == "dropped" => {
+            return Err(ToolError::rejected(format!(
+                "event {} is already '{status}'; the user decided it",
                 args.event_id
             )));
         }
@@ -207,6 +215,18 @@ mod tests {
         let status: String = conn
             .query_row("SELECT status FROM events WHERE id=2", [], |r| r.get(0)).unwrap();
         assert_eq!(status, "dropped");
+    }
+
+    #[test]
+    fn drop_leaves_a_user_decision_alone() {
+        let (conn, tmp) = env();
+        conn.execute("UPDATE events SET status='done' WHERE id=2", []).unwrap();
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Checkin, "schedule_drop",
+            r#"{"event_id":2}"#).unwrap_err();
+        assert_eq!(e.kind, "rejected");
+        let status: String = conn
+            .query_row("SELECT status FROM events WHERE id=2", [], |r| r.get(0)).unwrap();
+        assert_eq!(status, "done");
     }
 
     #[test]
