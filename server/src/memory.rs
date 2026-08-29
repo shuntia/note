@@ -356,7 +356,7 @@ pub fn query(
     emb: Option<&dyn crate::providers::EmbeddingsProvider>,
 ) -> Result<Vec<QueryHit>> {
     let take = limit as usize;
-    let lexical = lexical_query(conn, user, q, 32)?;
+    let lexical = lexical_query(conn, user, q, limit.max(32))?;
     let vector = vector_query(conn, user, q, 32, emb)?;
     if vector.is_empty() {
         return Ok(lexical.into_iter().take(take).collect());
@@ -369,7 +369,7 @@ pub fn query(
         *scores.entry(id.clone()).or_default() += 1.0 / (60.0 + rank as f64);
     }
     let mut ids: Vec<(String, f64)> = scores.into_iter().collect();
-    ids.sort_by(|a, b| b.1.total_cmp(&a.1));
+    ids.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     ids.truncate(take);
     ids.into_iter().map(|(id, _)| hit_for(conn, user, &id, &lexical)).collect()
 }
@@ -552,6 +552,16 @@ mod tests {
         assert_eq!(hits[0].id, id);
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM memory_vectors", [], |r| r.get(0)).unwrap();
         assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn limit_above_the_candidate_pool_is_honoured() {
+        let (conn, tmp) = env();
+        for i in 0..40 {
+            add(&conn, tmp.path(), "aki", "semantic", "s", &format!("needle {i}"), None).unwrap();
+        }
+        assert_eq!(query(&conn, "aki", "needle", 40, None).unwrap().len(), 40);
+        assert_eq!(query(&conn, "aki", "needle", 10, None).unwrap().len(), 10);
     }
 
     #[test]
