@@ -42,6 +42,12 @@ pub struct UserConfig {
     pub display_name: String,
     pub timezone: String,
     pub template: String,
+    #[serde(default = "default_nightly_time")]
+    pub nightly_time: String,
+}
+
+fn default_nightly_time() -> String {
+    "03:00".into()
 }
 
 impl UserConfig {
@@ -55,7 +61,13 @@ impl UserConfig {
             Ok(raw) => overlay(defaults, raw.parse()?),
             Err(_) => defaults,
         };
-        Ok(merged.try_into()?)
+        let cfg: UserConfig = merged.try_into()?;
+        anyhow::ensure!(
+            crate::templates::valid_time(&cfg.nightly_time),
+            "invalid nightly_time {:?}",
+            cfg.nightly_time
+        );
+        Ok(cfg)
     }
 }
 
@@ -112,6 +124,16 @@ mod tests {
             "bind_addr = \"127.0.0.1:0\"\npublic_base_url = \"http://x\"\ndata_dir = \"data\"\n");
         let cfg = ServerConfig::load(tmp.path()).unwrap();
         assert!(cfg.providers.llm.is_none());
+    }
+
+    #[test]
+    fn nightly_time_defaults_and_validates() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), "defaults/user.toml",
+            "display_name = \"X\"\ntimezone = \"UTC\"\ntemplate = \"default\"\n");
+        assert_eq!(UserConfig::load(tmp.path(), "a").unwrap().nightly_time, "03:00");
+        write(tmp.path(), "users/aki/user.toml", "nightly_time = \"4:00\"\n");
+        assert!(UserConfig::load(tmp.path(), "aki").is_err());
     }
 
     #[test]
