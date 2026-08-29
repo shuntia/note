@@ -159,6 +159,55 @@ async fn shift_outside_the_slide_window_is_400() {
 }
 
 #[tokio::test]
+async fn snooze_pushes_the_event_and_rejects_out_of_range_minutes() {
+    let (app, cookie, _cfg) = common::app_with_logged_in_user().await;
+    app.clone()
+        .oneshot(
+            Request::get("/api/plan/today?date=2026-08-31")
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let snooze = |minutes: i64| {
+        let app = app.clone();
+        let cookie = cookie.clone();
+        async move {
+            app.oneshot(
+                Request::post("/api/events/1/snooze")
+                    .header(header::COOKIE, cookie)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(format!(r#"{{"minutes":{minutes}}}"#)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+        }
+    };
+
+    assert_eq!(snooze(0).await, StatusCode::BAD_REQUEST);
+    // snooze is not window-bound: 90 exceeds the event's 60 minute slide window
+    assert_eq!(snooze(90).await, StatusCode::OK);
+
+    let res = app
+        .oneshot(
+            Request::get("/api/plan/today?date=2026-08-31")
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v[0]["wall_time"], "10:30");
+    assert_eq!(v[0]["status"], "snoozed");
+}
+
+#[tokio::test]
 async fn other_users_event_is_404() {
     let conn = db::open_memory().unwrap();
     auth::create_user(&conn, "aki", "pw", false).unwrap();
