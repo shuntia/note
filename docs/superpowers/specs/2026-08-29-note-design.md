@@ -199,6 +199,28 @@ One `config/` directory, hot-reloaded where cheap:
     instructions, follow-up policy.
   - `standing.md` — standing context document.
 
+## Network exposure
+
+Two features require a public HTTPS/WSS endpoint: Twilio Media Streams
+(Twilio opens a WebSocket to us) and the PWA (service workers and Web Push
+require a secure context). Ingress is the admin's choice — domain + reverse
+proxy, Cloudflare tunnel, or Tailscale Funnel; the server only needs its
+public base URL in config and binds plain HTTP locally. Auth: argon2 password
+hashes, HTTP-only session cookies.
+
+## Time semantics
+
+Plans and templates store wall-clock times plus an IANA timezone, never UTC
+instants; the runner resolves them at fire time, so DST transitions and
+quiet-hour boundaries behave as a human expects. Skipped/doubled wall-clock
+times during DST resolve to the next valid instant.
+
+## Data lifecycle
+
+SQLite schema migrations run at startup, versioned in the binary. Backup =
+copy the data directory (SQLite file + memory + config); no other state
+exists.
+
 ## Web client (v1)
 
 Installable PWA: today view (plan + task states; tap to shift / snooze /
