@@ -1,4 +1,6 @@
+pub mod anthropic;
 pub mod mock;
+pub mod openai;
 
 use anyhow::Result;
 use std::sync::Arc;
@@ -45,6 +47,15 @@ pub fn build(cfg: &crate::config::ProvidersConfig) -> Result<(Arc<dyn LLMProvide
         None => Arc::new(mock::MockLLM::empty()),
         Some(p) => match p.kind.as_str() {
             "mock" => Arc::new(mock::MockLLM::empty()),
+            "anthropic" => {
+                let key = read_key(&p.api_key_env, true)?;
+                Arc::new(anthropic::AnthropicLLM::new(&p.base_url, &p.model, &key))
+            }
+            "openai" => {
+                anyhow::ensure!(!p.base_url.is_empty(), "openai llm provider requires base_url");
+                let key = read_key(&p.api_key_env, false)?;
+                Arc::new(openai::OpenAILLM::new(&p.base_url, &p.model, &key))
+            }
             other => anyhow::bail!("unknown llm provider kind: {other}"),
         },
     };
@@ -52,10 +63,29 @@ pub fn build(cfg: &crate::config::ProvidersConfig) -> Result<(Arc<dyn LLMProvide
         None => None,
         Some(p) => match p.kind.as_str() {
             "mock" => Some(Arc::new(mock::MockEmbeddings)),
+            "openai" => {
+                anyhow::ensure!(!p.base_url.is_empty(), "openai embeddings provider requires base_url");
+                let key = read_key(&p.api_key_env, false)?;
+                Some(Arc::new(openai::OpenAIEmbeddings::new(&p.base_url, &p.model, &key)))
+            }
             other => anyhow::bail!("unknown embeddings provider kind: {other}"),
         },
     };
     Ok((llm, emb))
+}
+
+/// `required` distinguishes Anthropic (key mandatory) from OpenAI-compatible
+/// local endpoints that accept no key.
+fn read_key(env_name: &str, required: bool) -> Result<String> {
+    if env_name.is_empty() {
+        anyhow::ensure!(!required, "provider requires api_key_env in config");
+        return Ok(String::new());
+    }
+    match std::env::var(env_name) {
+        Ok(v) if !v.is_empty() => Ok(v),
+        _ if required => anyhow::bail!("api key env var {env_name} is not set"),
+        _ => Ok(String::new()),
+    }
 }
 
 #[cfg(test)]
@@ -85,5 +115,21 @@ mod tests {
             Ok(_) => panic!("unknown kind must be rejected"),
         };
         assert!(err.contains("carrier-pigeon"), "{err}");
+    }
+
+    #[test]
+    fn anthropic_without_key_env_errors() {
+        let cfg = crate::config::ProvidersConfig {
+            llm: Some(crate::config::ProviderConfig {
+                kind: "anthropic".into(), base_url: String::new(),
+                model: "m".into(), api_key_env: "NOTE_TEST_MISSING_KEY".into(),
+            }),
+            embeddings: None,
+        };
+        let err = match build(&cfg) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("missing key env must be rejected"),
+        };
+        assert!(err.contains("NOTE_TEST_MISSING_KEY"), "{err}");
     }
 }
