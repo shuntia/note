@@ -40,14 +40,25 @@ pub trait EmbeddingsProvider: Send + Sync {
     fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>>;
 }
 
-/// Shared ureq agent config for HTTP-backed providers: bounded connect time,
-/// and a generous read/write timeout since LLM responses (and first-load
-/// embedding models) can be slow, so a stalled provider can't hang forever.
+/// Agent config for chat providers: bounded connect time, and a generous
+/// read/write timeout since LLM responses can be slow, so a stalled provider
+/// can't hang forever. Chat calls are made with no locks held.
 pub(crate) fn http_agent() -> ureq::Agent {
     ureq::AgentBuilder::new()
         .timeout_connect(std::time::Duration::from_secs(10))
         .timeout_read(std::time::Duration::from_secs(120))
         .timeout_write(std::time::Duration::from_secs(120))
+        .build()
+}
+
+/// Embedding calls happen inside tool dispatch, which holds the DB mutex, so a
+/// stalled endpoint blocks every handler and the runner for the timeout's
+/// duration. These are much tighter than the chat timeouts for that reason.
+pub(crate) fn embeddings_http_agent() -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(5))
+        .timeout_read(std::time::Duration::from_secs(10))
+        .timeout_write(std::time::Duration::from_secs(10))
         .build()
 }
 
