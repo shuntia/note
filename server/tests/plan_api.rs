@@ -124,6 +124,41 @@ async fn shift_moves_the_event_and_drop_marks_it_dropped() {
 }
 
 #[tokio::test]
+async fn shift_outside_the_slide_window_is_400() {
+    let (app, cookie, _cfg) = common::app_with_logged_in_user().await;
+    app.clone()
+        .oneshot(
+            Request::get("/api/plan/today?date=2026-08-31")
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let shift = |minutes: i64| {
+        let app = app.clone();
+        let cookie = cookie.clone();
+        async move {
+            app.oneshot(
+                Request::post("/api/events/1/shift")
+                    .header(header::COOKIE, cookie)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(format!(r#"{{"minutes":{minutes}}}"#)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+        }
+    };
+
+    // the template event's window is 60 minutes
+    assert_eq!(shift(90).await, StatusCode::BAD_REQUEST);
+    assert_eq!(shift(30).await, StatusCode::OK);
+}
+
+#[tokio::test]
 async fn other_users_event_is_404() {
     let conn = db::open_memory().unwrap();
     auth::create_user(&conn, "aki", "pw", false).unwrap();
