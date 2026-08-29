@@ -1,0 +1,105 @@
+use anyhow::Result;
+use rusqlite::Connection;
+use std::path::Path;
+
+const MIGRATIONS: &[&str] = &[
+    // v1
+    "
+    CREATE TABLE users (
+        id INTEGER PRIMARY KEY,
+        username TEXT NOT NULL UNIQUE,
+        pass_hash TEXT NOT NULL,
+        role TEXT NOT NULL CHECK (role IN ('admin','member'))
+    );
+    CREATE TABLE sessions (
+        token TEXT PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id),
+        expires_at TEXT NOT NULL
+    );
+    CREATE TABLE tasks (
+        id INTEGER PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id),
+        title TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        state TEXT NOT NULL DEFAULT 'open'
+            CHECK (state IN ('open','in_progress','done','dropped')),
+        source TEXT NOT NULL DEFAULT 'manual',
+        parent_id INTEGER REFERENCES tasks(id),
+        notes TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    CREATE TABLE plans (
+        id INTEGER PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id),
+        date TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE (user_id, date)
+    );
+    CREATE TABLE events (
+        id INTEGER PRIMARY KEY,
+        plan_id INTEGER NOT NULL REFERENCES plans(id),
+        kind TEXT NOT NULL,
+        wall_time TEXT NOT NULL,
+        flexibility TEXT NOT NULL DEFAULT 'fixed'
+            CHECK (flexibility IN ('fixed','slide','drop')),
+        slide_window_min INTEGER NOT NULL DEFAULT 0,
+        channel TEXT NOT NULL DEFAULT 'push',
+        status TEXT NOT NULL DEFAULT 'pending'
+            CHECK (status IN ('pending','fired','snoozed','dropped','done')),
+        fired_at TEXT
+    );
+    CREATE TABLE event_tasks (
+        event_id INTEGER NOT NULL REFERENCES events(id),
+        task_id INTEGER NOT NULL REFERENCES tasks(id),
+        PRIMARY KEY (event_id, task_id)
+    );
+    CREATE TABLE event_log (
+        id INTEGER PRIMARY KEY,
+        ts TEXT NOT NULL,
+        user_id INTEGER,
+        kind TEXT NOT NULL,
+        detail TEXT NOT NULL DEFAULT ''
+    );
+    ",
+];
+
+pub fn open(path: &Path) -> Result<Connection> {
+    let conn = Connection::open(path)?;
+    init(&conn)?;
+    Ok(conn)
+}
+
+pub fn open_memory() -> Result<Connection> {
+    let conn = Connection::open_in_memory()?;
+    init(&conn)?;
+    Ok(conn)
+}
+
+fn init(conn: &Connection) -> Result<()> {
+    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+    let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    for (i, sql) in MIGRATIONS.iter().enumerate().skip(version as usize) {
+        conn.execute_batch(sql)?;
+        conn.pragma_update(None, "user_version", (i + 1) as i64)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn migrations_apply_and_are_idempotent() {
+        let conn = open_memory().unwrap();
+        let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, MIGRATIONS.len() as i64);
+        init(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO users (username, pass_hash, role) VALUES ('a','h','admin')",
+            [],
+        )
+        .unwrap();
+    }
+}
