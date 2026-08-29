@@ -1,5 +1,6 @@
 pub mod context_ops;
 pub mod memory_ops;
+pub mod schedule_ops;
 pub mod task_ops;
 
 use rusqlite::Connection;
@@ -64,6 +65,9 @@ const CHECKIN: &[&str] = &[
     "memory_write",
     "task_create",
     "task_update",
+    "schedule_slide",
+    "schedule_snooze",
+    "schedule_drop",
 ];
 const TALK: &[&str] = &[
     "memory_query",
@@ -71,6 +75,9 @@ const TALK: &[&str] = &[
     "memory_write",
     "task_create",
     "task_update",
+    "schedule_slide",
+    "schedule_snooze",
+    "schedule_drop",
     "context_edit",
 ];
 const NIGHTLY: &[&str] = &[
@@ -79,7 +86,11 @@ const NIGHTLY: &[&str] = &[
     "memory_write",
     "task_create",
     "task_update",
+    "schedule_slide",
+    "schedule_snooze",
+    "schedule_drop",
     "context_edit",
+    "schedule_insert",
 ];
 
 pub fn registry(kind: SessionKind) -> &'static [&'static str] {
@@ -119,6 +130,22 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
         "context_edit" => (
             "Edit the standing context document: replace a unique snippet or append a line.",
             schema::<context_ops::EditArgs>(),
+        ),
+        "schedule_slide" => (
+            "Slide a plan event by N minutes (negative = earlier), within its slide window.",
+            schema::<schedule_ops::SlideArgs>(),
+        ),
+        "schedule_snooze" => (
+            "Postpone a plan event's delivery by N minutes without changing the schedule intent.",
+            schema::<schedule_ops::SnoozeArgs>(),
+        ),
+        "schedule_drop" => (
+            "Drop a droppable plan event for today.",
+            schema::<schedule_ops::DropArgs>(),
+        ),
+        "schedule_insert" => (
+            "Insert a new event into an existing day plan.",
+            schema::<schedule_ops::InsertArgs>(),
         ),
         _ => unreachable!("describe covers every registered tool"),
     }
@@ -179,6 +206,10 @@ fn run(
         "memory_read" => memory_ops::read(conn, ctx, parse(raw)?),
         "memory_write" => memory_ops::write(conn, ctx, parse(raw)?),
         "context_edit" => context_ops::edit(conn, ctx, parse(raw)?),
+        "schedule_slide" => schedule_ops::slide(conn, ctx, parse(raw)?),
+        "schedule_snooze" => schedule_ops::snooze(conn, ctx, parse(raw)?),
+        "schedule_drop" => schedule_ops::drop_event(conn, ctx, parse(raw)?),
+        "schedule_insert" => schedule_ops::insert(conn, ctx, parse(raw)?),
         _ => unreachable!("registry guarantees a known name"),
     }
 }
