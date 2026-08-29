@@ -25,6 +25,7 @@ argon2 = { version = "0.5", features = ["std"] }
 uuid = { version = "1", features = ["v4"] }
 anyhow = "1"
 thiserror = "1"
+ureq = { version = "2", features = ["json"] }
 
 [dev-dependencies]
 proptest = "1"
