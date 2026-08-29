@@ -77,6 +77,23 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE VIRTUAL TABLE memory_fts USING fts5(user UNINDEXED, id UNINDEXED, summary, body);
     ",
+    // v3
+    "
+    CREATE TABLE memory_vectors (
+        user TEXT NOT NULL,
+        id TEXT NOT NULL,
+        vector BLOB NOT NULL,
+        PRIMARY KEY (user, id)
+    );
+    CREATE TABLE debriefs (
+        id INTEGER PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id),
+        date TEXT NOT NULL,
+        content TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE (user_id, date)
+    );
+    ",
 ];
 
 pub fn open(path: &Path) -> Result<Connection> {
@@ -178,6 +195,24 @@ mod tests {
             .query_row("SELECT orig_wall_time FROM events WHERE id = 1", [], |r| r.get(0))
             .unwrap();
         assert_eq!(orig, "09:15");
+    }
+
+    #[test]
+    fn v3_creates_vector_and_debrief_tables() {
+        let conn = open_memory().unwrap();
+        conn.execute(
+            "INSERT INTO users (username, pass_hash, role) VALUES ('a','h','member')", [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO memory_vectors (user, id, vector) VALUES ('a', 'x', X'00000000')", [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO debriefs (user_id, date, content, created_at) VALUES (1, '2026-08-31', 'ok', 't')", [],
+        ).unwrap();
+        // second debrief for the same (user, date) must be refused
+        assert!(conn.execute(
+            "INSERT INTO debriefs (user_id, date, content, created_at) VALUES (1, '2026-08-31', 'dup', 't')", [],
+        ).is_err());
     }
 
     #[test]
