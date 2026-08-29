@@ -1,4 +1,4 @@
-use super::{ChatRequest, ChatResponse, EmbeddingsProvider, LLMProvider};
+use super::{ChatRequest, ChatResponse, EmbeddingsProvider, LLMProvider, Message};
 use anyhow::Result;
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -7,6 +7,7 @@ use std::sync::Mutex;
 pub struct RecordedChat {
     pub system: String,
     pub n_messages: usize,
+    pub messages: Vec<Message>,
     pub tool_names: Vec<String>,
 }
 
@@ -35,6 +36,7 @@ impl LLMProvider for MockLLM {
         self.seen.lock().unwrap().push(RecordedChat {
             system: req.system.to_string(),
             n_messages: req.messages.len(),
+            messages: req.messages.to_vec(),
             tool_names: req
                 .tools
                 .iter()

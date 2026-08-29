@@ -182,6 +182,14 @@ mod tests {
         assert!(!seen[0].tool_names.contains(&"schedule_insert".to_string()));
         // second turn carried the tool result back
         assert_eq!(seen[1].n_messages, 3);
+        match &seen[1].messages[2] {
+            Message::ToolResult { call_id, content, is_error } => {
+                assert_eq!(call_id, "c1");
+                assert!(!is_error);
+                assert!(content.contains("task_id"), "{content}");
+            }
+            other => panic!("expected a tool result, got {other:?}"),
+        }
     }
 
     #[test]
@@ -201,6 +209,13 @@ mod tests {
         // Talk surface: schedule_insert is forbidden — dispatch returns a typed error
         let out = run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, "hi").unwrap();
         assert_eq!(out.reply, "sorry, couldn't");
+        match &llm.seen()[1].messages[2] {
+            Message::ToolResult { content, is_error, .. } => {
+                assert!(is_error);
+                assert!(content.contains("forbidden"), "{content}");
+            }
+            other => panic!("expected a tool result, got {other:?}"),
+        }
     }
 
     #[test]
