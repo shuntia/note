@@ -161,7 +161,7 @@ proptest! {
         let tmp = tempfile::tempdir().unwrap();
         let ctx = ToolCtx {
             config_dir: tmp.path(), data_dir: tmp.path(),
-            user_id: 1, username: "aki",
+            user_id: 1, username: "aki", embeddings: None,
         };
 
         let mut mem_ids = Vec::new();

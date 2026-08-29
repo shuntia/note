@@ -1,4 +1,4 @@
-use super::{ToolCtx, ToolError, MAX_TEXT_BYTES};
+use super::{ToolCtx, ToolError};
 use rusqlite::Connection;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -25,7 +25,7 @@ pub fn query(
     if !(1..=50).contains(&args.limit) {
         return Err(ToolError::rejected("limit must be in 1..=50"));
     }
-    let hits = crate::memory::query(conn, ctx.username, &args.query, args.limit)
+    let hits = crate::memory::query(conn, ctx.username, &args.query, args.limit, ctx.embeddings)
         .map_err(|e| ToolError::internal(e.to_string()))?;
     Ok(serde_json::json!({ "results": hits }))
 }
@@ -101,11 +101,7 @@ pub fn write(
             "summary must be 1..={MAX_SUMMARY} bytes"
         )));
     }
-    if args.body.len() > MAX_TEXT_BYTES {
-        return Err(ToolError::rejected(format!(
-            "body must be at most {MAX_TEXT_BYTES} bytes"
-        )));
-    }
+    super::check_text("body", &args.body)?;
     let need_id = || -> Result<String, ToolError> {
         let id = args
             .id
@@ -129,6 +125,7 @@ pub fn write(
                 cat.as_str(),
                 &args.summary,
                 &args.body,
+                ctx.embeddings,
             )
             .map(|id| serde_json::json!({ "id": id }))
             .map_err(|e| ToolError::internal(e.to_string()))
@@ -142,6 +139,7 @@ pub fn write(
                 &id,
                 &args.summary,
                 &args.body,
+                ctx.embeddings,
             ) {
                 Ok(Some(())) => Ok(serde_json::json!({ "id": id })),
                 Ok(None) => Err(ToolError::not_found(format!("no memory {id}"))),
@@ -160,6 +158,7 @@ pub fn write(
                 &id,
                 &args.summary,
                 &args.body,
+                ctx.embeddings,
             ) {
                 Ok(Some(new_id)) => Ok(serde_json::json!({ "id": new_id })),
                 Ok(None) => Err(ToolError::not_found(format!("no memory {id}"))),
@@ -187,7 +186,7 @@ mod tests {
     }
 
     fn ctx<'a>(tmp: &'a tempfile::TempDir) -> ToolCtx<'a> {
-        ToolCtx { config_dir: tmp.path(), data_dir: tmp.path(), user_id: 1, username: "aki" }
+        ToolCtx { config_dir: tmp.path(), data_dir: tmp.path(), user_id: 1, username: "aki", embeddings: None }
     }
 
     #[test]

@@ -146,7 +146,7 @@ proptest! {
         std::fs::create_dir(&data).unwrap();
         let ctx = ToolCtx {
             config_dir: &data, data_dir: &data,
-            user_id: 1, username: "aki",
+            user_id: 1, username: "aki", embeddings: None,
         };
         let kind = [SessionKind::Nightly, SessionKind::Checkin, SessionKind::Talk][kind_idx];
         let before_counts = snapshot(&conn);
