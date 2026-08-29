@@ -26,7 +26,7 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let app = api::router(AppState::new(conn));
+    let app = api::router(AppState::new(conn, config_dir));
     let listener = tokio::net::TcpListener::bind(&cfg.bind_addr).await?;
     axum::serve(listener, app).await?;
     Ok(())

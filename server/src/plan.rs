@@ -76,6 +76,53 @@ pub fn events_for(conn: &Connection, user_id: i64, date: jiff::civil::Date) -> R
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
+/// Returns `(wall_time, flexibility)` only when the event's plan belongs to
+/// `user_id`, so callers cannot distinguish someone else's event from a
+/// missing one.
+fn owned_event(conn: &Connection, user_id: i64, event_id: i64) -> Result<Option<(String, String)>> {
+    Ok(conn
+        .query_row(
+            "SELECT e.wall_time, e.flexibility FROM events e
+             JOIN plans p ON p.id = e.plan_id
+             WHERE e.id = ?1 AND p.user_id = ?2",
+            (event_id, user_id),
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?)
+}
+
+/// Moves the event's wall time by `minutes`, clamped inside the day. `None`
+/// when the event is not the user's or its flexibility is `fixed`.
+pub fn shift(conn: &Connection, user_id: i64, event_id: i64, minutes: i64) -> Result<Option<()>> {
+    let Some((wall, flex)) = owned_event(conn, user_id, event_id)? else {
+        return Ok(None);
+    };
+    if flex == "fixed" {
+        return Ok(None);
+    }
+    let (h, m) = wall.split_once(':').ok_or_else(|| anyhow::anyhow!("bad wall_time: {wall}"))?;
+    let now = h.parse::<i64>()? * 60 + m.parse::<i64>()?;
+    let total = now.saturating_add(minutes).clamp(0, 23 * 60 + 59);
+    conn.execute(
+        "UPDATE events SET wall_time = ?1, status = 'pending' WHERE id = ?2",
+        (format!("{:02}:{:02}", total / 60, total % 60), event_id),
+    )?;
+    Ok(Some(()))
+}
+
+/// Records a user decision on an event. Only `done` and `dropped` are user
+/// decisions; the lifecycle statuses belong to the scheduler.
+pub fn set_status(conn: &Connection, user_id: i64, event_id: i64, status: &str) -> Result<Option<()>> {
+    if status != "done" && status != "dropped" {
+        anyhow::bail!("invalid status: {status}");
+    }
+    if owned_event(conn, user_id, event_id)?.is_none() {
+        return Ok(None);
+    }
+    conn.execute("UPDATE events SET status = ?1 WHERE id = ?2", (status, event_id))?;
+    Ok(Some(()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,5 +185,69 @@ mod tests {
         // leftover row from the failed attempt.
         let plan_id = generate(&conn, uid, &tmpl(), date).unwrap();
         assert!(plan_id > 0);
+    }
+
+    #[test]
+    fn shift_moves_wall_time_and_respects_fixed() {
+        let conn = crate::db::open_memory().unwrap();
+        let uid = crate::auth::create_user(&conn, "a", "p", false).unwrap();
+        let date: jiff::civil::Date = "2026-08-31".parse().unwrap();
+        let mut t = tmpl();
+        t.events[0].flexibility = "slide".into();
+        generate(&conn, uid, &t, date).unwrap();
+        let ev = &events_for(&conn, uid, date).unwrap()[0];
+        assert!(shift(&conn, uid, ev.id, 45).unwrap().is_some());
+        let ev = &events_for(&conn, uid, date).unwrap()[0];
+        assert_eq!(ev.wall_time, "09:45");
+
+        conn.execute("UPDATE events SET flexibility='fixed'", []).unwrap();
+        assert!(shift(&conn, uid, ev.id, 15).unwrap().is_none());
+    }
+
+    #[test]
+    fn shift_clamps_to_the_day_and_clears_snoozed() {
+        let conn = crate::db::open_memory().unwrap();
+        let uid = crate::auth::create_user(&conn, "a", "p", false).unwrap();
+        let date: jiff::civil::Date = "2026-08-31".parse().unwrap();
+        let mut t = tmpl();
+        t.events[0].flexibility = "slide".into();
+        generate(&conn, uid, &t, date).unwrap();
+        let ev_id = events_for(&conn, uid, date).unwrap()[0].id;
+        conn.execute("UPDATE events SET status='snoozed' WHERE id = ?1", [ev_id]).unwrap();
+
+        assert!(shift(&conn, uid, ev_id, i64::MAX).unwrap().is_some());
+        let ev = &events_for(&conn, uid, date).unwrap()[0];
+        assert_eq!(ev.wall_time, "23:59");
+        assert_eq!(ev.status, "pending");
+
+        assert!(shift(&conn, uid, ev_id, i64::MIN).unwrap().is_some());
+        assert_eq!(events_for(&conn, uid, date).unwrap()[0].wall_time, "00:00");
+    }
+
+    #[test]
+    fn shift_by_non_owner_is_none() {
+        let conn = crate::db::open_memory().unwrap();
+        let uid = crate::auth::create_user(&conn, "a", "p", false).unwrap();
+        let other = crate::auth::create_user(&conn, "b", "p", false).unwrap();
+        let date: jiff::civil::Date = "2026-08-31".parse().unwrap();
+        let mut t = tmpl();
+        t.events[0].flexibility = "slide".into();
+        generate(&conn, uid, &t, date).unwrap();
+        let ev_id = events_for(&conn, uid, date).unwrap()[0].id;
+        assert!(shift(&conn, other, ev_id, 30).unwrap().is_none());
+        assert_eq!(events_for(&conn, uid, date).unwrap()[0].wall_time, "09:00");
+    }
+
+    #[test]
+    fn set_status_accepts_only_done_and_dropped() {
+        let conn = crate::db::open_memory().unwrap();
+        let uid = crate::auth::create_user(&conn, "a", "p", false).unwrap();
+        let date: jiff::civil::Date = "2026-08-31".parse().unwrap();
+        generate(&conn, uid, &tmpl(), date).unwrap();
+        let ev_id = events_for(&conn, uid, date).unwrap()[0].id;
+        assert!(set_status(&conn, uid, ev_id, "done").unwrap().is_some());
+        assert!(set_status(&conn, uid, ev_id, "fired").is_err());
+        let other = crate::auth::create_user(&conn, "b", "p", false).unwrap();
+        assert!(set_status(&conn, other, ev_id, "done").unwrap().is_none());
     }
 }

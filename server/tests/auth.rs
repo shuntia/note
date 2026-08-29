@@ -3,15 +3,17 @@ use axum::http::{header, Request, StatusCode};
 use note_server::{api, auth, db, AppState};
 use tower::ServiceExt;
 
-fn state_with_user() -> AppState {
+fn state_with_user() -> (AppState, tempfile::TempDir) {
+    let tmp = tempfile::tempdir().unwrap();
     let conn = db::open_memory().unwrap();
     auth::create_user(&conn, "aki", "hunter2", true).unwrap();
-    AppState::new(conn)
+    (AppState::new(conn, tmp.path().to_path_buf()), tmp)
 }
 
 #[tokio::test]
 async fn login_sets_cookie_and_me_works() {
-    let app = api::router(state_with_user());
+    let (state, _tmp) = state_with_user();
+    let app = api::router(state);
     let res = app
         .clone()
         .oneshot(
@@ -42,7 +44,8 @@ async fn login_sets_cookie_and_me_works() {
 
 #[tokio::test]
 async fn wrong_password_is_401_and_me_without_cookie_is_401() {
-    let app = api::router(state_with_user());
+    let (state, _tmp) = state_with_user();
+    let app = api::router(state);
     let res = app
         .clone()
         .oneshot(
