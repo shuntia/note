@@ -55,23 +55,27 @@ Two loops:
 
 ## Stack
 
-- **Language:** TypeScript everywhere; pnpm workspaces monorepo.
-- **Server:** Node.js (LTS), Fastify (schema-validated routes), WebSocket via
-  `ws`.
-- **Tool schemas:** Zod — single source of truth per tool: the same schema
-  validates incoming calls and generates the JSON Schema handed to the LLM.
-- **Storage:** SQLite via the `node:sqlite` builtin (Node ≥ 22), plain SQL
-  behind a small DAO layer. Zero native npm modules — deliberate: the target
-  is NixOS, where node-gyp builds are the main packaging hazard.
-- **Scheduler:** small custom runner; `croner` for cron expressions.
-- **Channels:** `web-push` (VAPID), Twilio SDK + Media Streams for voice.
-- **Web:** React + Vite PWA.
-- **Testing:** Vitest; `fast-check` for property-based tests and fuzzing.
+- **Server:** Rust — axum + tokio, WebSockets via tokio-tungstenite. Ships as
+  one binary serving the API and the built web assets. Minimal footprint,
+  explicit validation, clear errors.
+- **Tool schemas:** serde + schemars — single source of truth per tool: the
+  same Rust type deserializes (and rejects) incoming calls and generates the
+  JSON Schema handed to the LLM.
+- **Storage:** SQLite via rusqlite (bundled), plain SQL behind a small DAO
+  layer.
+- **Scheduler:** small custom runner; a cron crate for expressions only.
+- **Channels:** `web-push` crate (VAPID); Twilio via its REST API + Media
+  Streams WebSocket — no SDK dependency.
+- **Web:** React + Vite TypeScript PWA — the only place npm/pnpm appears,
+  build-time only; output is static files served by the server binary.
+- **Testing:** cargo test; proptest for property-based tests and fuzzing.
+- **Dev environment:** `flake.nix` devshell (cargo, rustc, node, pnpm) — the
+  rustup toolchain on this host is FHS-broken; the nixpkgs toolchain works.
 
 ## Architecture
 
-Monorepo, TypeScript throughout: `server/` (Node), `web/` (React PWA),
-`ios/` (later phase). Single server process, SQLite storage. Units:
+Monorepo: `server/` (Rust), `web/` (TS React PWA), `ios/` (later phase).
+Single server process, SQLite storage. Units:
 
 ### API layer
 REST + WebSocket for clients; serves the PWA. Session login per household
@@ -115,8 +119,9 @@ surface than the nightly planner. Core tools:
 The server validates every call; models supply content, never paths.
 
 ### Memory layer
-Per-user store following the knowit pattern, implemented natively in the
-server (in-process, multi-user), file-compatible with knowit's format:
+Per-user store following the knowit pattern, implemented in-process
+(multi-user), borrowing from the knowit indexer source where it fits, and
+file-compatible with knowit's format:
 `memory/<user>/{semantic,episodic,procedural,archive}/` — one fact per
 markdown file, frontmatter with one-line `summary`, supersede-never-delete
 with archive moves, episodic→semantic consolidation over time. A derived
@@ -151,17 +156,17 @@ implementation of each ships for deterministic tests; the system is fully
 buildable and testable with no live tokens.
 
 The deployment host (`shuntia-nix`) runs a llama.cpp router at
-`http://localhost:8080/v1` exposing OpenAI-compatible chat models (DeepSeek,
-Qwen, GLM, Gemma families) and `embeddinggemma`, loaded on demand. This is
-the default dev/fallback `LLMProvider` and the default `EmbeddingsProvider` —
-agent development and hybrid memory search work from day one, cloud tokens
-merely upgrade quality via config.
+`http://localhost:8080/v1` (OpenAI-compatible, models loaded on demand). Its
+`embeddinggemma` is the default `EmbeddingsProvider` — hybrid memory search
+works from day one. Its chat models are too weak or too slow for production
+agent quality; they serve only as an integration-test backend. Deterministic
+tests use the mocks; real agent quality waits on cloud tokens.
 
 ## Deployment target
 
-NixOS (`shuntia-nix`), 16 cores, 16 GB RAM, NVMe. Node 24 + pnpm are system
-packages; the server runs as a systemd service. No native npm modules, so no
-build-time Nix gymnastics — `pnpm install` suffices.
+NixOS (`shuntia-nix`), 16 cores, 16 GB RAM, NVMe. One Rust binary + static
+web assets + SQLite files, run as a systemd service. Toolchain and web build
+come from the repo's `flake.nix` devshell.
 
 ### Channel layer
 `Channel` interface: `deliver(user, message, urgency)`. v1 implementations:
@@ -215,7 +220,7 @@ The tool layer gets the heaviest investment: it is the sole boundary between
 model output and system state, and a validation gap there is state corruption
 with no second line of defense.
 
-- **Tool fuzzing (first-class):** every tool is fuzzed with `fast-check` —
+- **Tool fuzzing (first-class):** every tool is fuzzed with proptest —
   malformed JSON, wrong types, boundary values, oversized payloads, unknown
   fields, path-like and injection-shaped strings. Required outcome: a typed
   rejection returned to the model; never a throw, never a partial write.
