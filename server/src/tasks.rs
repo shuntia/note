@@ -1,8 +1,19 @@
-use anyhow::{bail, Result};
+use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 const STATES: &[&str] = &["open", "in_progress", "done", "dropped"];
+
+/// Distinguishes a bad request (invalid `state`) from an infrastructure failure,
+/// so callers can map them to different HTTP statuses.
+#[derive(Debug, Error)]
+pub enum UpdateError {
+    #[error("invalid state: {0}")]
+    InvalidState(String),
+    #[error(transparent)]
+    Db(#[from] rusqlite::Error),
+}
 
 #[derive(Debug, Serialize)]
 pub struct Task {
@@ -63,16 +74,17 @@ pub fn list(conn: &Connection, user_id: i64) -> Result<Vec<Task>> {
 }
 
 /// Returns `Ok(None)` when `task_id` doesn't exist or isn't owned by `user_id`;
-/// `Err` when `patch.state` is not one of the allowed values.
+/// `Err(InvalidState)` when `patch.state` is not one of the allowed values;
+/// `Err(Db)` on any other (infrastructure) failure.
 pub fn update(
     conn: &Connection,
     user_id: i64,
     task_id: i64,
     patch: TaskPatch,
-) -> Result<Option<Task>> {
+) -> std::result::Result<Option<Task>, UpdateError> {
     if let Some(s) = &patch.state {
         if !STATES.contains(&s.as_str()) {
-            bail!("invalid state: {s}");
+            return Err(UpdateError::InvalidState(s.clone()));
         }
     }
     let existing: Option<i64> = conn
