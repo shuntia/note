@@ -53,17 +53,17 @@ fn user_tz(
     Ok(tz)
 }
 
-/// Fires every pending event whose wall time, resolved in its user's timezone on
-/// the plan date, has arrived by `now`. A candidate that cannot be resolved is
-/// logged as `runner_error` and skipped, so one unusable row cannot stall the
-/// sweep for every other user.
+/// Fires every pending or snoozed event whose wall time, resolved in its user's
+/// timezone on the plan date, has arrived by `now`. A candidate that cannot be
+/// resolved is logged as `runner_error` and skipped, so one unusable row cannot
+/// stall the sweep for every other user.
 pub fn fire_due(conn: &Connection, config_dir: &Path, now: jiff::Timestamp) -> Result<Vec<i64>> {
     let mut stmt = conn.prepare(
         "SELECT e.id, p.user_id, u.username, p.date, e.wall_time
          FROM events e
          JOIN plans p ON p.id = e.plan_id
          JOIN users u ON u.id = p.user_id
-         WHERE e.status = 'pending'",
+         WHERE e.status IN ('pending','snoozed')",
     )?;
     let candidates: Vec<Candidate> = stmt
         .query_map([], |r| {
@@ -211,6 +211,16 @@ mod tests {
             "SELECT detail FROM event_log WHERE kind='runner_error'", [], |r| r.get(0),
         ).unwrap();
         assert!(detail.contains("Asia/Toyko"), "unexpected detail: {detail}");
+    }
+
+    #[test]
+    fn snoozed_events_fire_when_due() {
+        let (conn, tmp, uid) = setup("UTC");
+        let date: jiff::civil::Date = "2026-08-31".parse().unwrap();
+        crate::plan::generate(&conn, uid, &one_event_template("09:00"), date).unwrap();
+        conn.execute("UPDATE events SET status='snoozed', wall_time='09:30'", []).unwrap();
+        let now: jiff::Timestamp = "2026-08-31T09:31:00Z".parse().unwrap();
+        assert_eq!(fire_due(&conn, tmp.path(), now).unwrap().len(), 1);
     }
 
     #[test]

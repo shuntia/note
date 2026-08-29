@@ -16,6 +16,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/tasks/{id}", patch(tasks_update))
         .route("/api/plan/today", get(plan_today))
         .route("/api/events/{id}/shift", post(event_shift))
+        .route("/api/events/{id}/snooze", post(event_snooze))
         .route("/api/events/{id}/done", post(event_done))
         .route("/api/events/{id}/drop", post(event_drop))
         .route("/api/admin/log", get(admin_log))
@@ -145,6 +146,25 @@ async fn event_shift(
         Ok(Some(())) => StatusCode::OK.into_response(),
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct SnoozeReq {
+    minutes: i64,
+}
+
+async fn event_snooze(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(req): Json<SnoozeReq>,
+) -> impl IntoResponse {
+    let conn = state.db.lock().unwrap();
+    match crate::plan::snooze(&conn, user.id, id, req.minutes) {
+        Ok(Some(())) => StatusCode::OK.into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(_) => StatusCode::BAD_REQUEST.into_response(),
     }
 }
 
