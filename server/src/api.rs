@@ -155,17 +155,22 @@ struct SnoozeReq {
     minutes: i64,
 }
 
+/// The range is checked here so a bad `minutes` is a 400 while a failure inside
+/// `plan::snooze` — which rejects the same range as defense in depth — stays a 500.
 async fn event_snooze(
     user: CurrentUser,
     State(state): State<AppState>,
     Path(id): Path<i64>,
     Json(req): Json<SnoozeReq>,
 ) -> impl IntoResponse {
+    if !(1..=24 * 60).contains(&req.minutes) {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
     let conn = state.db.lock().unwrap();
     match crate::plan::snooze(&conn, user.id, id, req.minutes) {
         Ok(Some(())) => StatusCode::OK.into_response(),
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
-        Err(_) => StatusCode::BAD_REQUEST.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
 
