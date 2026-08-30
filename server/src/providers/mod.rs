@@ -2,7 +2,7 @@ pub mod anthropic;
 pub mod mock;
 pub mod openai;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
@@ -73,12 +73,12 @@ pub fn build(cfg: &crate::config::ProvidersConfig) -> Result<(Arc<dyn LLMProvide
         Some(p) => match p.kind.as_str() {
             "mock" => Arc::new(mock::NullLLM),
             "anthropic" => {
-                let key = read_key(&p.api_key_env, true)?;
+                let key = read_key(p, true)?;
                 Arc::new(anthropic::AnthropicLLM::new(&p.base_url, &p.model, &key))
             }
             "openai" => {
                 anyhow::ensure!(!p.base_url.is_empty(), "openai llm provider requires base_url");
-                let key = read_key(&p.api_key_env, false)?;
+                let key = read_key(p, false)?;
                 Arc::new(openai::OpenAILLM::new(&p.base_url, &p.model, &key))
             }
             other => anyhow::bail!("unknown llm provider kind: {other}"),
@@ -90,7 +90,7 @@ pub fn build(cfg: &crate::config::ProvidersConfig) -> Result<(Arc<dyn LLMProvide
             "mock" => Some(Arc::new(mock::MockEmbeddings)),
             "openai" => {
                 anyhow::ensure!(!p.base_url.is_empty(), "openai embeddings provider requires base_url");
-                let key = read_key(&p.api_key_env, false)?;
+                let key = read_key(p, false)?;
                 Some(Arc::new(openai::OpenAIEmbeddings::new(&p.base_url, &p.model, &key)))
             }
             other => anyhow::bail!("unknown embeddings provider kind: {other}"),
@@ -99,16 +99,26 @@ pub fn build(cfg: &crate::config::ProvidersConfig) -> Result<(Arc<dyn LLMProvide
     Ok((llm, emb))
 }
 
-/// `required` distinguishes Anthropic (key mandatory) from OpenAI-compatible
-/// local endpoints that accept no key.
-fn read_key(env_name: &str, required: bool) -> Result<String> {
-    if env_name.is_empty() {
-        anyhow::ensure!(!required, "provider requires api_key_env in config");
+/// Key resolution: `api_key_file` wins when set (a configured file that is
+/// unreadable or blank is always an error), then `api_key_env`. `required`
+/// distinguishes Anthropic (key mandatory) from OpenAI-compatible local
+/// endpoints that accept no key.
+fn read_key(p: &crate::config::ProviderConfig, required: bool) -> Result<String> {
+    if !p.api_key_file.as_os_str().is_empty() {
+        let key = std::fs::read_to_string(&p.api_key_file)
+            .with_context(|| format!("reading api key file {}", p.api_key_file.display()))?
+            .trim()
+            .to_string();
+        anyhow::ensure!(!key.is_empty(), "api key file {} is empty", p.api_key_file.display());
+        return Ok(key);
+    }
+    if p.api_key_env.is_empty() {
+        anyhow::ensure!(!required, "provider requires api_key_env or api_key_file in config");
         return Ok(String::new());
     }
-    match std::env::var(env_name) {
+    match std::env::var(&p.api_key_env) {
         Ok(v) if !v.is_empty() => Ok(v),
-        _ if required => anyhow::bail!("api key env var {env_name} is not set"),
+        _ if required => anyhow::bail!("api key env var {} is not set", p.api_key_env),
         _ => Ok(String::new()),
     }
 }
@@ -134,6 +144,7 @@ mod tests {
             llm: Some(crate::config::ProviderConfig {
                 kind: "carrier-pigeon".into(),
                 base_url: String::new(), model: String::new(), api_key_env: String::new(),
+                api_key_file: std::path::PathBuf::new(),
             }),
             embeddings: None,
         };
@@ -150,6 +161,7 @@ mod tests {
             llm: Some(crate::config::ProviderConfig {
                 kind: "anthropic".into(), base_url: String::new(),
                 model: "m".into(), api_key_env: "NOTE_TEST_MISSING_KEY".into(),
+                api_key_file: std::path::PathBuf::new(),
             }),
             embeddings: None,
         };
@@ -158,5 +170,38 @@ mod tests {
             Ok(_) => panic!("missing key env must be rejected"),
         };
         assert!(err.contains("NOTE_TEST_MISSING_KEY"), "{err}");
+    }
+
+    fn file_key_config(path: std::path::PathBuf) -> crate::config::ProviderConfig {
+        crate::config::ProviderConfig {
+            kind: "openai".into(), base_url: "http://localhost:1/v1".into(),
+            model: "m".into(), api_key_env: String::new(), api_key_file: path,
+        }
+    }
+
+    #[test]
+    fn key_file_wins_and_is_trimmed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("key");
+        std::fs::write(&path, "  nvapi-secret\n").unwrap();
+        let key = read_key(&file_key_config(path), true).unwrap();
+        assert_eq!(key, "nvapi-secret");
+    }
+
+    #[test]
+    fn missing_key_file_errors_with_path() {
+        let err = read_key(&file_key_config("/nonexistent/note-key".into()), false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("/nonexistent/note-key"), "{err}");
+    }
+
+    #[test]
+    fn blank_key_file_errors_even_when_optional() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("key");
+        std::fs::write(&path, "\n").unwrap();
+        let err = read_key(&file_key_config(path), false).unwrap_err().to_string();
+        assert!(err.contains("empty"), "{err}");
     }
 }
