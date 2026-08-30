@@ -141,7 +141,11 @@ async fn talk(
 ) -> impl IntoResponse {
     let message = req.message.trim().to_string();
     if message.is_empty() || message.len() > MAX_TALK_MESSAGE {
-        return StatusCode::BAD_REQUEST.into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "message must be 1..=16384 bytes" })),
+        )
+            .into_response();
     }
     let permit = match state.talk_gate.try_enter(user.id) {
         Ok(p) => p,
@@ -161,6 +165,8 @@ async fn talk(
                 .into_response()
         }
     };
+    let err_db = state.db.clone();
+    let uid = user.id;
     let result = tokio::task::spawn_blocking(move || {
         // held here, not in the handler future, so a cancelled request still
         // holds the slot until the session it orphaned actually finishes
@@ -191,7 +197,29 @@ async fn talk(
             };
             Json(serde_json::json!({ "reply": reply })).into_response()
         }
-        _ => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        Ok(Err(e)) => {
+            {
+                let conn = err_db.lock().unwrap();
+                let _ = crate::log::record(&conn, Some(uid), "talk_error", &e.to_string());
+            }
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({ "error": "the assistant is unavailable; try again" })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            {
+                let conn = err_db.lock().unwrap();
+                let _ = crate::log::record(
+                    &conn,
+                    Some(uid),
+                    "talk_error",
+                    &format!("talk task failed: {e}"),
+                );
+            }
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
     }
 }
 
@@ -324,6 +352,7 @@ async fn admin_create_user(
     }
     let db = state.db.clone();
     let created = tokio::task::spawn_blocking(move || {
+        auth::validate_username(&req.username)?;
         let hash = auth::hash_password(&req.password)?;
         let conn = db.lock().unwrap();
         auth::insert_user(&conn, &req.username, &hash, req.admin)

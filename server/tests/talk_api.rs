@@ -154,6 +154,63 @@ async fn talk_at_global_capacity_is_service_unavailable() {
     assert_eq!(res.status(), StatusCode::OK);
 }
 
+struct FailingLLM;
+impl note_server::providers::LLMProvider for FailingLLM {
+    fn chat(
+        &self,
+        _: &note_server::providers::ChatRequest,
+    ) -> anyhow::Result<note_server::providers::ChatResponse> {
+        anyhow::bail!("provider down")
+    }
+}
+
+#[tokio::test]
+async fn provider_failure_is_bad_gateway_and_logged() {
+    let (app, cookie, state, _cfg) =
+        common::app_with_logged_in_user_llm_and_state(Arc::new(FailingLLM)).await;
+    let res = app
+        .oneshot(
+            Request::post("/api/talk")
+                .header(header::COOKIE, &cookie)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"message":"hello"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_GATEWAY);
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(v["error"].as_str().unwrap().contains("unavailable"));
+
+    let logged: i64 = {
+        let conn = state.db.lock().unwrap();
+        conn.query_row("SELECT COUNT(*) FROM event_log WHERE kind='talk_error'", [], |r| r.get(0))
+            .unwrap()
+    };
+    assert_eq!(logged, 1);
+}
+
+#[tokio::test]
+async fn oversized_message_is_bad_request_with_body() {
+    let (app, cookie, _cfg) = common::app_with_logged_in_user().await;
+    let big = "a".repeat(16 * 1024 + 1);
+    let res = app
+        .oneshot(
+            Request::post("/api/talk")
+                .header(header::COOKIE, &cookie)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::json!({ "message": big }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(v["error"].as_str().unwrap().contains("16384"));
+}
+
 #[tokio::test]
 async fn blank_reply_is_replaced_with_the_canned_line() {
     let llm =
