@@ -36,6 +36,8 @@ pub struct ProviderConfig {
     pub model: String,
     #[serde(default)]
     pub api_key_env: String,
+    #[serde(default)]
+    pub api_key_file: PathBuf,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -174,10 +176,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         write(tmp.path(), "server.toml", concat!(
             "bind_addr = \"127.0.0.1:0\"\npublic_base_url = \"http://x\"\ndata_dir = \"data\"\n",
-            "[providers.llm]\nkind = \"anthropic\"\nmodel = \"claude-sonnet-5\"\napi_key_env = \"ANTHROPIC_API_KEY\"\n",
+            "[providers.llm]\nkind = \"anthropic\"\nmodel = \"claude-sonnet-5\"\napi_key_env = \"ANTHROPIC_API_KEY\"\napi_key_file = \"/run/secrets/llm\"\n",
             "[providers.embeddings]\nkind = \"openai\"\nbase_url = \"http://localhost:8080/v1\"\nmodel = \"embeddinggemma\"\n"));
         let cfg = ServerConfig::load(tmp.path()).unwrap();
-        assert_eq!(cfg.providers.llm.unwrap().kind, "anthropic");
+        let llm = cfg.providers.llm.unwrap();
+        assert_eq!(llm.kind, "anthropic");
+        assert_eq!(llm.api_key_file, PathBuf::from("/run/secrets/llm"));
         assert_eq!(cfg.providers.embeddings.unwrap().base_url, "http://localhost:8080/v1");
     }
 }

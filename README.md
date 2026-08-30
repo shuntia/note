@@ -90,9 +90,12 @@ With no LLM configured the server runs against a null provider — no API keys,
 fully runnable offline; plans are still generated from templates and nights
 end with the fallback debrief. Configure real providers in `config/server.toml`
 (`[providers.llm]`, `[providers.embeddings]`): Anthropic or any
-OpenAI-compatible endpoint for chat, OpenAI-compatible for embeddings (a
-local llama.cpp router works). Keys are read from the env var named in
-`api_key_env`, never from config files.
+OpenAI-compatible endpoint for chat — NVIDIA NIM
+(`https://integrate.api.nvidia.com/v1`) included — and OpenAI-compatible for
+embeddings (a local llama.cpp router works). The key comes from the file named
+in `api_key_file` (bare key, surrounding whitespace ignored) or the env var
+named in `api_key_env`; the file wins if both are set. The key itself never
+lives in config files.
 
 With an embeddings provider configured, memory search becomes hybrid
 (lexical + vector) and degrades back to lexical automatically when the

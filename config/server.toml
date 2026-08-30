@@ -8,7 +8,15 @@ data_dir = "data"
 # web_dir = "web/dist"
 
 # Providers. Omit this whole section to run with the built-in mock (no tokens).
-#
+# The key comes from api_key_file (a file holding the bare key) or api_key_env;
+# the file wins if both are set.
+
+[providers.llm]
+kind = "openai"                 # NVIDIA NIM is OpenAI-compatible
+base_url = "https://integrate.api.nvidia.com/v1"
+model = "openai/gpt-oss-120b"
+api_key_file = "/tmp/nvidianim"
+
 # [providers.llm]
 # kind = "anthropic"            # or "openai" for any OpenAI-compatible endpoint
 # model = "claude-sonnet-5"
