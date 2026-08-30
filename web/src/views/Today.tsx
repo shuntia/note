@@ -15,9 +15,28 @@ function label(kind: string): string {
   return kind.replaceAll('_', ' ')
 }
 
+const STATUS_WORD: Record<PlanEvent['status'], string> = {
+  pending: '',
+  fired: 'waiting on you',
+  snoozed: 'later',
+  done: 'done',
+  dropped: 'dropped',
+}
+
+function actionMessage(err: unknown): string {
+  if (err instanceof ApiError) {
+    if (err.status === 400) return "That's outside this event's slide window."
+    if (err.status === 409) return 'Already settled — refresh to see its state.'
+    if (err.status === 404) return 'That event is gone.'
+  }
+  return 'Something went wrong. Try again.'
+}
+
 export function Today({ notify }: ViewProps) {
   const [events, setEvents] = useState<PlanEvent[] | null>(null)
   const [failed, setFailed] = useState(false)
+  const [pending, setPending] = useState(false)
+  const [, tick] = useState(0)
 
   const load = useCallback(() => {
     api
@@ -33,13 +52,23 @@ export function Today({ notify }: ViewProps) {
     load()
   }, [load])
 
+  useEffect(() => {
+    const id = window.setInterval(() => tick((n) => n + 1), 60_000)
+    return () => window.clearInterval(id)
+  }, [])
+
+  // Event routes are relative operations, so a second tap before the first lands compounds it.
   const act = async (fn: () => Promise<void>) => {
+    if (pending) return
+    setPending(true)
     try {
       await fn()
       load()
     } catch (err) {
-      notify(err instanceof ApiError ? err.message : 'Something went wrong. Try again.')
+      notify(actionMessage(err))
       if (err instanceof ApiError && err.status === 409) load()
+    } finally {
+      setPending(false)
     }
   }
 
@@ -63,7 +92,9 @@ export function Today({ notify }: ViewProps) {
       rows.push(<NowMarker key="now" now={now} />)
       markerPlaced = true
     }
-    rows.push(<EventRow key={ev.id} ev={ev} past={ev.wall_time <= now} act={act} />)
+    rows.push(
+      <EventRow key={ev.id} ev={ev} past={ev.wall_time <= now} act={act} pending={pending} />,
+    )
   }
   if (!markerPlaced) rows.push(<NowMarker key="now" now={now} />)
 
@@ -83,10 +114,12 @@ function EventRow({
   ev,
   past,
   act,
+  pending,
 }: {
   ev: PlanEvent
   past: boolean
   act: (fn: () => Promise<void>) => Promise<void>
+  pending: boolean
 }) {
   const settled = ev.status === 'done' || ev.status === 'dropped'
   return (
@@ -94,27 +127,46 @@ function EventRow({
       <span className="time">{ev.wall_time}</span>
       <div className="card event-card">
         <div className="event-kind">{label(ev.kind)}</div>
-        {ev.status !== 'pending' && <div className={`event-status ${ev.status}`}>{ev.status}</div>}
+        {ev.status !== 'pending' && (
+          <div className={`event-status ${ev.status}`}>{STATUS_WORD[ev.status]}</div>
+        )}
         {!settled && (
           <div className="event-actions">
-            <button className="quiet" onClick={() => act(() => api.eventAction(ev.id, 'done'))}>
+            <button
+              className="quiet"
+              disabled={pending}
+              onClick={() => act(() => api.eventAction(ev.id, 'done'))}
+            >
               Done
             </button>
-            <button className="quiet" onClick={() => act(() => api.snooze(ev.id, 30))}>
+            <button
+              className="quiet"
+              disabled={pending}
+              onClick={() => act(() => api.snooze(ev.id, 30))}
+            >
               Later
             </button>
             {ev.flexibility !== 'fixed' && (
               <>
-                <button className="quiet" onClick={() => act(() => api.shift(ev.id, 15))}>
+                <button
+                  className="quiet"
+                  disabled={pending}
+                  onClick={() => act(() => api.shift(ev.id, 15))}
+                >
                   +15
                 </button>
-                <button className="quiet" onClick={() => act(() => api.shift(ev.id, -15))}>
+                <button
+                  className="quiet"
+                  disabled={pending}
+                  onClick={() => act(() => api.shift(ev.id, -15))}
+                >
                   −15
                 </button>
               </>
             )}
             <button
               className="quiet danger"
+              disabled={pending}
               onClick={() => act(() => api.eventAction(ev.id, 'drop'))}
             >
               Drop

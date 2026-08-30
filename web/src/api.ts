@@ -9,12 +9,20 @@ export class ApiError extends Error {
   }
 }
 
+let onUnauthorized: (() => void) | null = null
+
+// Lets the shell drop back to the login screen when any request finds the session expired.
+export function setOnUnauthorized(fn: () => void) {
+  onUnauthorized = fn
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
     headers: init?.body ? { 'Content-Type': 'application/json' } : undefined,
     ...init,
   })
   if (!res.ok) {
+    if (res.status === 401 && path !== '/api/login') onUnauthorized?.()
     let message = `Request failed (${res.status})`
     try {
       const body: unknown = await res.json()
