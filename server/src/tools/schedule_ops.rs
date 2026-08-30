@@ -212,6 +212,9 @@ mod tests {
         let e = dispatch(&conn, &ctx(&tmp), SessionKind::Checkin, "schedule_snooze",
             r#"{"event_id":1,"minutes":10}"#).unwrap_err();
         assert_eq!(e.kind, "rejected");
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Checkin, "schedule_snooze",
+            r#"{"event_id":99,"minutes":10}"#).unwrap_err();
+        assert_eq!(e.kind, "not_found");
     }
 
     #[test]
