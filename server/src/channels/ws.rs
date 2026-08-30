@@ -1,0 +1,143 @@
+use super::{Channel, OutboundMessage, Urgency};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+
+#[derive(Default)]
+pub struct ClientHub {
+    next_id: AtomicU64,
+    conns: Mutex<HashMap<i64, Vec<(u64, UnboundedSender<String>)>>>,
+}
+
+impl ClientHub {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn register(&self, user_id: i64) -> (u64, UnboundedReceiver<String>) {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = unbounded_channel();
+        self.conns
+            .lock()
+            .unwrap()
+            .entry(user_id)
+            .or_default()
+            .push((id, tx));
+        (id, rx)
+    }
+
+    pub fn unregister(&self, user_id: i64, conn_id: u64) {
+        let mut conns = self.conns.lock().unwrap();
+        if let Some(v) = conns.get_mut(&user_id) {
+            v.retain(|(id, _)| *id != conn_id);
+            if v.is_empty() {
+                conns.remove(&user_id);
+            }
+        }
+    }
+
+    /// Sends to every live connection of `user_id`, pruning closed ones, and
+    /// returns how many actually received it.
+    pub fn send(&self, user_id: i64, text: &str) -> usize {
+        let mut conns = self.conns.lock().unwrap();
+        let Some(v) = conns.get_mut(&user_id) else {
+            return 0;
+        };
+        v.retain(|(_, tx)| tx.send(text.to_string()).is_ok());
+        let n = v.len();
+        if v.is_empty() {
+            conns.remove(&user_id);
+        }
+        n
+    }
+}
+
+pub struct WsChannel {
+    hub: Arc<ClientHub>,
+}
+
+impl WsChannel {
+    pub fn new(hub: Arc<ClientHub>) -> Self {
+        Self { hub }
+    }
+}
+
+impl Channel for WsChannel {
+    fn name(&self) -> &'static str {
+        "ws"
+    }
+
+    fn deliver(&self, user_id: i64, _username: &str, msg: &OutboundMessage) -> anyhow::Result<()> {
+        let urgency = match msg.urgency {
+            Urgency::Low => "low",
+            Urgency::Normal => "normal",
+            Urgency::High => "high",
+        };
+        let text = serde_json::json!({
+            "type": "event",
+            "title": msg.title,
+            "body": msg.body,
+            "urgency": urgency,
+            "event_id": msg.event_id,
+        })
+        .to_string();
+        if self.hub.send(user_id, &text) == 0 {
+            anyhow::bail!("no connected clients");
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::channels::{Channel, OutboundMessage, Urgency};
+    use std::sync::Arc;
+
+    fn msg() -> OutboundMessage {
+        OutboundMessage {
+            title: "Check-in".into(),
+            body: "at 09:00".into(),
+            urgency: Urgency::Normal,
+            event_id: Some(7),
+        }
+    }
+
+    #[test]
+    fn hub_delivers_to_all_connections_of_the_user_only() {
+        let hub = ClientHub::new();
+        let (_id1, mut rx1) = hub.register(1);
+        let (_id2, mut rx2) = hub.register(1);
+        let (_id3, mut rx3) = hub.register(2);
+        assert_eq!(hub.send(1, "hello"), 2);
+        assert_eq!(rx1.try_recv().unwrap(), "hello");
+        assert_eq!(rx2.try_recv().unwrap(), "hello");
+        assert!(rx3.try_recv().is_err());
+    }
+
+    #[test]
+    fn unregister_and_dropped_receivers_stop_counting() {
+        let hub = ClientHub::new();
+        let (id1, rx1) = hub.register(1);
+        let (_id2, _rx2) = hub.register(1);
+        hub.unregister(1, id1);
+        drop(rx1);
+        drop(_rx2);
+        assert_eq!(hub.send(1, "x"), 0);
+    }
+
+    #[test]
+    fn ws_channel_errors_when_nobody_is_connected() {
+        let hub = Arc::new(ClientHub::new());
+        let ch = WsChannel::new(hub.clone());
+        assert!(ch.deliver(1, "aki", &msg()).is_err());
+        let (_id, mut rx) = hub.register(1);
+        ch.deliver(1, "aki", &msg()).unwrap();
+        let text = rx.try_recv().unwrap();
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["type"], "event");
+        assert_eq!(v["title"], "Check-in");
+        assert_eq!(v["event_id"], 7);
+    }
+}
