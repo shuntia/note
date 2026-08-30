@@ -6,6 +6,7 @@ pub mod context;
 pub mod db;
 pub mod log;
 pub mod memory;
+pub mod nightly;
 pub mod plan;
 pub mod prompts;
 pub mod providers;
