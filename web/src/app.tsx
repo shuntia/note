@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react'
 import { api, ApiError, setOnUnauthorized } from './api'
 import type { Me } from './types'
+import { Talk } from './views/Talk'
 import { Tasks } from './views/Tasks'
 import { Today } from './views/Today'
+import { connectEvents } from './ws'
 
 type Tab = 'today' | 'tasks' | 'talk' | 'more'
 
@@ -45,6 +47,14 @@ export function App() {
       .catch(() => setMe(null))
   }, [])
 
+  useEffect(() => {
+    if (!me) return
+    return connectEvents((ev) => {
+      notify(ev.body ? `${ev.title} — ${ev.body}` : ev.title)
+      onChanged()
+    })
+  }, [me, notify, onChanged])
+
   if (me === undefined) return null
   if (me === null) return <Login onSignedIn={setMe} />
 
@@ -61,7 +71,7 @@ export function App() {
       <main className="view">
         {tab === 'today' && <Today key={refresh} {...views} />}
         {tab === 'tasks' && <Tasks {...views} />}
-        {tab === 'talk' && <Placeholder name="Talk" {...views} />}
+        {tab === 'talk' && <Talk />}
         {tab === 'more' && <Placeholder name="More" {...views} />}
       </main>
       <nav className="tabs">
