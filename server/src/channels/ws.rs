@@ -4,10 +4,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
+type Conns = HashMap<i64, Vec<(u64, UnboundedSender<String>)>>;
+
 #[derive(Default)]
 pub struct ClientHub {
     next_id: AtomicU64,
-    conns: Mutex<HashMap<i64, Vec<(u64, UnboundedSender<String>)>>>,
+    conns: Mutex<Conns>,
 }
 
 impl ClientHub {
@@ -99,7 +101,7 @@ mod tests {
         OutboundMessage {
             title: "Check-in".into(),
             body: "at 09:00".into(),
-            urgency: Urgency::Normal,
+            urgency: Urgency::High,
             event_id: Some(7),
         }
     }
@@ -117,13 +119,23 @@ mod tests {
     }
 
     #[test]
-    fn unregister_and_dropped_receivers_stop_counting() {
+    fn unregister_drops_only_that_connection() {
         let hub = ClientHub::new();
-        let (id1, rx1) = hub.register(1);
-        let (_id2, _rx2) = hub.register(1);
+        let (id1, mut rx1) = hub.register(1);
+        let (_id2, mut rx2) = hub.register(1);
         hub.unregister(1, id1);
+        assert_eq!(hub.send(1, "x"), 1);
+        assert!(rx1.try_recv().is_err());
+        assert_eq!(rx2.try_recv().unwrap(), "x");
+    }
+
+    #[test]
+    fn dropped_receivers_stop_counting() {
+        let hub = ClientHub::new();
+        let (_id1, rx1) = hub.register(1);
+        let (_id2, rx2) = hub.register(1);
         drop(rx1);
-        drop(_rx2);
+        drop(rx2);
         assert_eq!(hub.send(1, "x"), 0);
     }
 
@@ -138,6 +150,7 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(v["type"], "event");
         assert_eq!(v["title"], "Check-in");
+        assert_eq!(v["urgency"], "high");
         assert_eq!(v["event_id"], 7);
     }
 }

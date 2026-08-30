@@ -344,25 +344,46 @@ async fn ws_connect(
     ws.on_upgrade(move |socket| ws_pump(socket, state.hub.clone(), user.id))
 }
 
+const WS_PING_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+const WS_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// Half-open connections (NAT drop, lid close) never produce a FIN, and an
+/// unbounded sender only fails once its receiver is dropped, so a silent socket
+/// would stay registered and keep absorbing deliveries. Pings force the peer to
+/// speak; going `WS_IDLE_TIMEOUT` without any inbound frame tears the bridge
+/// down so the dispatcher's ladder can fall through to another channel.
 async fn ws_pump(
     mut socket: axum::extract::ws::WebSocket,
     hub: std::sync::Arc<crate::channels::ws::ClientHub>,
     user_id: i64,
 ) {
+    use axum::extract::ws::Message;
+
     let (conn_id, mut rx) = hub.register(user_id);
+    let mut ping = tokio::time::interval(WS_PING_EVERY);
+    ping.tick().await;
+    let mut last_inbound = tokio::time::Instant::now();
     loop {
         tokio::select! {
             out = rx.recv() => match out {
                 Some(text) => {
-                    if socket.send(axum::extract::ws::Message::Text(text.into())).await.is_err() {
+                    if socket.send(Message::Text(text.into())).await.is_err() {
                         break;
                     }
                 }
                 None => break,
             },
             inbound = socket.recv() => match inbound {
-                Some(Ok(_)) => {}
+                Some(Ok(Message::Close(_))) => break,
+                Some(Ok(_)) => last_inbound = tokio::time::Instant::now(),
                 _ => break,
+            },
+            _ = ping.tick() => {
+                if last_inbound.elapsed() > WS_IDLE_TIMEOUT
+                    || socket.send(Message::Ping(Vec::new().into())).await.is_err()
+                {
+                    break;
+                }
             },
         }
     }
