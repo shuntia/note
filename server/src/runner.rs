@@ -145,43 +145,48 @@ pub fn fire_due(
 }
 
 /// Expired sessions only ever accumulate; sweeping them here keeps logout and
-/// expiry cheap without a dedicated task. RFC 3339 UTC strings compare
-/// lexicographically, so the string comparison is correct.
+/// expiry cheap without a dedicated task. The comparison is lexicographic on
+/// RFC 3339 UTC strings, whose fractional-second part varies in width, so it is
+/// exact only to the second — a session outlives its expiry by under a second at
+/// worst, and auth re-parses the expiry before trusting it.
 pub fn gc_sessions(conn: &Connection, now: jiff::Timestamp) -> Result<()> {
     conn.execute("DELETE FROM sessions WHERE expires_at < ?1", [now.to_string()])?;
     Ok(())
 }
 
+/// One sweep: session GC and firing under a single lock, then delivery with the
+/// lock released. Blocking throughout, so async callers must wrap it in
+/// `spawn_blocking`.
+pub fn sweep_once(state: &AppState) {
+    let fired = {
+        let conn = state.db.lock().unwrap();
+        let now = jiff::Timestamp::now();
+        if let Err(e) = gc_sessions(&conn, now) {
+            let _ = crate::log::record(&conn, None, "runner_error", &e.to_string());
+        }
+        match fire_due(&conn, &state.config_dir, now) {
+            Ok(f) => f,
+            Err(e) => {
+                let _ = crate::log::record(&conn, None, "runner_error", &e.to_string());
+                Vec::new()
+            }
+        }
+    };
+    for ev in &fired {
+        crate::channels::deliver_event(&state.db, &state.channels, ev);
+    }
+}
+
 pub fn spawn(state: AppState) {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tick.tick().await;
-            // The guard is confined to this block: holding it across the next
-            // `tick` — or across a channel's blocking deliver — would make the
-            // task non-Send and stall handlers.
-            let fired = {
-                let conn = state.db.lock().unwrap();
-                let now = jiff::Timestamp::now();
-                let _ = gc_sessions(&conn, now);
-                match fire_due(&conn, &state.config_dir, now) {
-                    Ok(f) => f,
-                    Err(e) => {
-                        let _ = crate::log::record(&conn, None, "runner_error", &e.to_string());
-                        Vec::new()
-                    }
-                }
-            };
-            if fired.is_empty() {
-                continue;
-            }
+            // The whole sweep runs on the blocking pool: no DB guard is ever
+            // live across the `await`, which would make the task non-Send.
             let st = state.clone();
-            let _ = tokio::task::spawn_blocking(move || {
-                for ev in &fired {
-                    crate::channels::deliver_event(&st.db, &st.channels, ev);
-                }
-            })
-            .await;
+            let _ = tokio::task::spawn_blocking(move || sweep_once(&st)).await;
         }
     });
 }
@@ -297,6 +302,26 @@ mod tests {
         gc_sessions(&conn, "2026-08-31T00:00:00Z".parse().unwrap()).unwrap();
         let left: i64 = conn.query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0)).unwrap();
         assert_eq!(left, 1);
+    }
+
+    #[test]
+    fn sweep_delivers_fired_events_through_the_ladder() {
+        let (conn, tmp, uid) = setup("UTC");
+        let date: jiff::civil::Date = "2020-01-01".parse().unwrap();
+        crate::plan::generate(&conn, uid, &one_event_template("00:00"), date).unwrap();
+        let mock = std::sync::Arc::new(crate::channels::mock::MockChannel::new("mock"));
+        let ladder: Vec<std::sync::Arc<dyn crate::channels::Channel>> = vec![mock.clone()];
+        let state =
+            AppState::new(conn, tmp.path().into(), tmp.path().into()).with_channels(ladder);
+
+        sweep_once(&state);
+
+        assert_eq!(mock.seen().len(), 1);
+        let conn = state.db.lock().unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM event_log WHERE kind='delivery_ok'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1);
     }
 
     #[test]
