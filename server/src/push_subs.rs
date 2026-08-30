@@ -87,6 +87,22 @@ mod tests {
     }
 
     #[test]
+    fn resubscribe_by_another_user_reowns_the_row() {
+        let conn = conn_with_user();
+        conn.execute(
+            "INSERT INTO users (username, pass_hash, role) VALUES ('bo', 'x', 'member')",
+            [],
+        )
+        .unwrap();
+        add(&conn, 1, "https://push.example/a", "pk", "au").unwrap();
+        add(&conn, 2, "https://push.example/a", "pk2", "au2").unwrap();
+        assert!(list(&conn, 1).unwrap().is_empty());
+        let subs = list(&conn, 2).unwrap();
+        assert_eq!(subs.len(), 1);
+        assert_eq!(subs[0].p256dh, "pk2");
+    }
+
+    #[test]
     fn remove_endpoint_prunes_regardless_of_user() {
         let conn = conn_with_user();
         add(&conn, 1, "https://push.example/a", "pk", "au").unwrap();

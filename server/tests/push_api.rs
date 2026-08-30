@@ -32,6 +32,40 @@ async fn subscribe_unsubscribe_roundtrip_and_validation() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 
+    let long = format!("https://push.example/{}", "x".repeat(3000));
+    let res = app
+        .clone()
+        .oneshot(post("/api/push/subscribe", sub_body(&long), &cookie))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    let res = app
+        .clone()
+        .oneshot(post(
+            "/api/push/subscribe",
+            serde_json::json!({
+                "endpoint": "https://push.example/y",
+                "keys": { "p256dh": "", "auth": "au" }
+            })
+            .to_string(),
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    let res = app
+        .clone()
+        .oneshot(post(
+            "/api/push/unsubscribe",
+            serde_json::json!({ "endpoint": long }).to_string(),
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
     let res = app
         .clone()
         .oneshot(
@@ -70,12 +104,33 @@ async fn subscribe_unsubscribe_roundtrip_and_validation() {
 async fn push_routes_require_auth() {
     let (app, _cookie, _cfg) = common::app_with_logged_in_user().await;
     let res = app
+        .clone()
         .oneshot(
             Request::post("/api/push/subscribe")
                 .header("content-type", "application/json")
                 .body(Body::from(sub_body("https://push.example/x")))
                 .unwrap(),
         )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+    let res = app
+        .clone()
+        .oneshot(
+            Request::post("/api/push/unsubscribe")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "endpoint": "https://push.example/x" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+    let res = app
+        .oneshot(Request::get("/api/push/vapid_public_key").body(Body::empty()).unwrap())
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);

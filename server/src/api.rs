@@ -280,6 +280,8 @@ struct SubscribeReq {
 }
 
 const MAX_ENDPOINT_LEN: usize = 2048;
+const MAX_P256DH_LEN: usize = 256;
+const MAX_AUTH_LEN: usize = 64;
 
 async fn push_subscribe(
     user: CurrentUser,
@@ -289,8 +291,8 @@ async fn push_subscribe(
     let scheme_ok = req.endpoint.starts_with("https://") || req.endpoint.starts_with("http://");
     if !scheme_ok
         || req.endpoint.len() > MAX_ENDPOINT_LEN
-        || req.keys.p256dh.len() > 256
-        || req.keys.auth.len() > 64
+        || req.keys.p256dh.len() > MAX_P256DH_LEN
+        || req.keys.auth.len() > MAX_AUTH_LEN
         || req.keys.p256dh.is_empty()
         || req.keys.auth.is_empty()
     {
@@ -313,6 +315,9 @@ async fn push_unsubscribe(
     State(state): State<AppState>,
     Json(req): Json<UnsubscribeReq>,
 ) -> impl IntoResponse {
+    if req.endpoint.len() > MAX_ENDPOINT_LEN {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
     let conn = state.db.lock().unwrap();
     match crate::push_subs::remove(&conn, user.id, &req.endpoint) {
         Ok(true) => StatusCode::OK.into_response(),
@@ -321,7 +326,7 @@ async fn push_unsubscribe(
     }
 }
 
-async fn vapid_public_key(State(state): State<AppState>) -> impl IntoResponse {
+async fn vapid_public_key(_user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
     match &state.vapid_public_key {
         Some(k) => Json(serde_json::json!({ "key": k })).into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
