@@ -86,13 +86,13 @@ pub fn deliver_event(
             Err(e) => errors.push(format!("{}: {e}", ch.name())),
         }
     }
+    let detail = if errors.is_empty() {
+        format!("event {}: no channels configured", ev.event_id)
+    } else {
+        format!("event {}: {}", ev.event_id, errors.join("; "))
+    };
     let conn = db.lock().unwrap();
-    let _ = crate::log::record(
-        &conn,
-        Some(ev.user_id),
-        "delivery_degraded",
-        &format!("event {}: {}", ev.event_id, errors.join("; ")),
-    );
+    let _ = crate::log::record(&conn, Some(ev.user_id), "delivery_degraded", &detail);
 }
 
 #[cfg(test)]
@@ -148,6 +148,20 @@ mod tests {
     }
 
     #[test]
+    fn render_debrief_without_a_row_says_so() {
+        let (db, _uid) = env();
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO debriefs (user_id, date, content, created_at)
+             VALUES (1, '2026-08-30', 'yesterday', 'now')",
+            [],
+        )
+        .unwrap();
+        let m = render(&conn, &ev("debrief", "push", ""));
+        assert_eq!(m.body, "(no debrief yet)");
+    }
+
+    #[test]
     fn dispatcher_falls_through_ladder_and_logs() {
         let (db, _uid) = env();
         let first = Arc::new(MockChannel::new("first"));
@@ -173,10 +187,60 @@ mod tests {
         let ladder: Vec<Arc<dyn Channel>> = vec![only];
         deliver_event(&db, &ladder, &ev("nudge", "push", ""));
         let conn = db.lock().unwrap();
-        let n: i64 = conn
-            .query_row("SELECT COUNT(*) FROM event_log WHERE kind='delivery_degraded'", [], |r| {
+        let detail: String = conn
+            .query_row("SELECT detail FROM event_log WHERE kind='delivery_degraded'", [], |r| {
                 r.get(0)
             })
+            .unwrap();
+        assert!(detail.contains("only"), "unexpected detail: {detail}");
+        assert!(detail.contains("set to fail"), "unexpected detail: {detail}");
+    }
+
+    #[test]
+    fn empty_ladder_logs_a_named_reason() {
+        let (db, _uid) = env();
+        deliver_event(&db, &[], &ev("nudge", "push", ""));
+        let conn = db.lock().unwrap();
+        let detail: String = conn
+            .query_row("SELECT detail FROM event_log WHERE kind='delivery_degraded'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(detail.contains("no channels configured"), "unexpected detail: {detail}");
+    }
+
+    /// Errors unless the dispatcher has released the DB guard before calling it;
+    /// a regression would deadlock the runner, since real channels re-lock the
+    /// same mutex to read their subscriptions.
+    struct LockProbe(Arc<Mutex<rusqlite::Connection>>);
+
+    impl Channel for LockProbe {
+        fn name(&self) -> &'static str {
+            "probe"
+        }
+
+        fn deliver(
+            &self,
+            _user_id: i64,
+            _username: &str,
+            _msg: &OutboundMessage,
+        ) -> anyhow::Result<()> {
+            match self.0.try_lock() {
+                Ok(_) => Ok(()),
+                Err(_) => anyhow::bail!("db guard held across deliver"),
+            }
+        }
+    }
+
+    #[test]
+    fn dispatcher_releases_the_db_guard_before_delivering() {
+        let (db, _uid) = env();
+        let db = Arc::new(db);
+        let ladder: Vec<Arc<dyn Channel>> = vec![Arc::new(LockProbe(db.clone()))];
+        deliver_event(&db, &ladder, &ev("nudge", "push", ""));
+        let conn = db.lock().unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM event_log WHERE kind='delivery_ok'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 1);
     }
