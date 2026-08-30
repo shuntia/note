@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react'
-import { api, ApiError } from './api'
+import { api, ApiError, setOnUnauthorized } from './api'
 import type { Me } from './types'
 import { Tasks } from './views/Tasks'
 import { Today } from './views/Today'
@@ -33,6 +33,10 @@ export function App() {
   }, [])
 
   const onChanged = useCallback(() => setRefresh((n) => n + 1), [])
+
+  useEffect(() => {
+    setOnUnauthorized(() => setMe(null))
+  }, [])
 
   useEffect(() => {
     api

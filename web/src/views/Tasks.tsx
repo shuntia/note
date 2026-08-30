@@ -7,18 +7,22 @@ export function Tasks({ notify }: ViewProps) {
   const [tasks, setTasks] = useState<Task[] | null>(null)
   const [title, setTitle] = useState('')
   const [busy, setBusy] = useState(false)
+  const [failed, setFailed] = useState(false)
 
   const load = () => {
     api
       .tasks()
-      .then(setTasks)
-      .catch(() => notify("Couldn't load tasks. Try again."))
+      .then((ts) => {
+        setTasks(ts)
+        setFailed(false)
+      })
+      .catch(() => setFailed(true))
   }
   useEffect(load, [])
 
   const add = async (e: FormEvent) => {
     e.preventDefault()
-    if (!title.trim()) return
+    if (busy || !title.trim()) return
     setBusy(true)
     try {
       await api.addTask(title.trim())
@@ -40,6 +44,15 @@ export function Tasks({ notify }: ViewProps) {
     }
   }
 
+  if (failed)
+    return (
+      <p className="muted">
+        Couldn't load tasks.{' '}
+        <button className="quiet" onClick={load}>
+          Retry
+        </button>
+      </p>
+    )
   if (tasks === null) return null
 
   return (
