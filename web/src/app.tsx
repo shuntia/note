@@ -4,7 +4,7 @@ import type { Me } from './types'
 
 type Tab = 'today' | 'tasks' | 'talk' | 'more'
 
-// `refresh` is a counter views key or depend on to refetch; `onChanged` bumps it.
+// `refresh` is a counter views key on or depend on to refetch; `onChanged` bumps it.
 export type ViewProps = {
   notify: (msg: string) => void
   refresh: number
