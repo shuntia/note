@@ -48,13 +48,6 @@ pub fn run_session(
     }
 
     let schemas = tools::schemas(kind);
-    let ctx = ToolCtx {
-        config_dir: deps.config_dir,
-        data_dir: deps.data_dir,
-        user_id,
-        username,
-        embeddings: deps.embeddings,
-    };
     let mut messages = vec![Message::User(opening.to_string())];
     let mut turns = 0;
     let mut tool_calls = 0;
@@ -74,8 +67,16 @@ pub fn run_session(
         messages.push(Message::Assistant { text: last_text.clone(), tool_calls: resp.tool_calls });
         for call in calls {
             tool_calls += 1;
+            let vectors = tools::prepare(deps.embeddings, &call.name, &call.args);
             let (content, is_error) = {
                 let conn = deps.db.lock().unwrap();
+                let ctx = ToolCtx {
+                    config_dir: deps.config_dir,
+                    data_dir: deps.data_dir,
+                    user_id,
+                    username,
+                    vectors,
+                };
                 match tools::dispatch(&conn, &ctx, kind, &call.name, &call.args) {
                     Ok(v) => (v.to_string(), false),
                     Err(e) => (

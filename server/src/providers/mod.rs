@@ -53,9 +53,9 @@ pub(crate) fn http_agent() -> ureq::Agent {
         .build()
 }
 
-/// Embedding calls happen inside tool dispatch, which holds the DB mutex, so a
-/// stalled endpoint blocks every handler and the runner for the timeout's
-/// duration. These are much tighter than the chat timeouts for that reason.
+/// Embedding calls run in the agent loop's prepare pass with no lock held, so
+/// a stalled endpoint delays only its own talk turn. The tight caps bound how
+/// long that stall can last.
 pub(crate) fn embeddings_http_agent() -> ureq::Agent {
     ureq::AgentBuilder::new()
         .timeout_connect(std::time::Duration::from_secs(5))

@@ -25,7 +25,10 @@ pub fn query(
     if !(1..=50).contains(&args.limit) {
         return Err(ToolError::rejected("limit must be in 1..=50"));
     }
-    let hits = crate::memory::query(conn, ctx.username, &args.query, args.limit, ctx.embeddings)
+    if let Some(err) = &ctx.vectors.error {
+        let _ = crate::log::record(conn, None, "memory_embed_error", err);
+    }
+    let hits = crate::memory::query(conn, ctx.username, &args.query, args.limit, ctx.vectors.query.as_deref())
         .map_err(|e| ToolError::internal(e.to_string()))?;
     Ok(serde_json::json!({ "results": hits }))
 }
@@ -102,6 +105,9 @@ pub fn write(
         )));
     }
     super::check_text("body", &args.body)?;
+    if let Some(err) = &ctx.vectors.error {
+        let _ = crate::log::record(conn, None, "memory_embed_error", err);
+    }
     let need_id = || -> Result<String, ToolError> {
         let id = args
             .id
@@ -125,7 +131,7 @@ pub fn write(
                 cat.as_str(),
                 &args.summary,
                 &args.body,
-                ctx.embeddings,
+                ctx.vectors.content.as_deref(),
             )
             .map(|id| serde_json::json!({ "id": id }))
             .map_err(|e| ToolError::internal(e.to_string()))
@@ -139,7 +145,7 @@ pub fn write(
                 &id,
                 &args.summary,
                 &args.body,
-                ctx.embeddings,
+                ctx.vectors.content.as_deref(),
             ) {
                 Ok(Some(())) => Ok(serde_json::json!({ "id": id })),
                 Ok(None) => Err(ToolError::not_found(format!("no memory {id}"))),
@@ -158,7 +164,7 @@ pub fn write(
                 &id,
                 &args.summary,
                 &args.body,
-                ctx.embeddings,
+                ctx.vectors.content.as_deref(),
             ) {
                 Ok(Some(new_id)) => Ok(serde_json::json!({ "id": new_id })),
                 Ok(None) => Err(ToolError::not_found(format!("no memory {id}"))),
@@ -173,7 +179,7 @@ pub fn write(
 
 #[cfg(test)]
 mod tests {
-    use crate::tools::{dispatch, SessionKind, ToolCtx};
+    use crate::tools::{dispatch, PreparedVectors, SessionKind, ToolCtx};
 
     fn env() -> (rusqlite::Connection, tempfile::TempDir) {
         let conn = crate::db::open_memory().unwrap();
@@ -186,7 +192,7 @@ mod tests {
     }
 
     fn ctx<'a>(tmp: &'a tempfile::TempDir) -> ToolCtx<'a> {
-        ToolCtx { config_dir: tmp.path(), data_dir: tmp.path(), user_id: 1, username: "aki", embeddings: None }
+        ToolCtx { config_dir: tmp.path(), data_dir: tmp.path(), user_id: 1, username: "aki", vectors: PreparedVectors::default() }
     }
 
     #[test]
