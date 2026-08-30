@@ -84,6 +84,30 @@ slid within ±`slide_window_min` minutes of their template time (0 = unbounded);
 any undecided event can be snoozed ("not now"), which re-fires it later and is
 not bounded by the slide window.
 
+## Providers & the agent
+
+The server runs with deterministic mock providers by default — no API keys,
+fully testable offline. Configure real ones in `config/server.toml`
+(`[providers.llm]`, `[providers.embeddings]`): Anthropic or any
+OpenAI-compatible endpoint for chat, OpenAI-compatible for embeddings (a
+local llama.cpp router works). Keys are read from the env var named in
+`api_key_env`, never from config files.
+
+With an embeddings provider configured, memory search becomes hybrid
+(lexical + vector) and degrades back to lexical automatically when the
+provider is down.
+
+`POST /api/talk {message}` runs a text conversation with the agent. Agent
+behavior lives in editable prompt files (`config/defaults/prompts/`,
+overridable per user under `config/users/<user>/prompts/`) — changing tone
+or policy is a file edit, not a deploy.
+
+Every night at each user's `nightly_time` (default 03:00, their timezone),
+the server generates the day's plan from their template, lets the agent
+adjust it and write a morning debrief, and stores the debrief. If the model
+is unreachable, the plan still exists and a fallback debrief says so — a
+plainer day, never a missing one.
+
 ## Admin API
 
 Admin-role users (see `create-user --admin`) get two extra routes:

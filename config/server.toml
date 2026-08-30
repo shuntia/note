@@ -1,3 +1,15 @@
 bind_addr = "127.0.0.1:3271"
 public_base_url = "http://localhost:3271"
 data_dir = "data"
+
+# Providers. Omit this whole section to run with the built-in mock (no tokens).
+#
+# [providers.llm]
+# kind = "anthropic"            # or "openai" for any OpenAI-compatible endpoint
+# model = "claude-sonnet-5"
+# api_key_env = "ANTHROPIC_API_KEY"
+#
+# [providers.embeddings]        # optional; enables hybrid memory search
+# kind = "openai"
+# base_url = "http://localhost:8080/v1"   # e.g. a local llama.cpp router
+# model = "embeddinggemma"
