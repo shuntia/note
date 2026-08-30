@@ -26,7 +26,7 @@ pub fn query(
         return Err(ToolError::rejected("limit must be in 1..=50"));
     }
     if let Some(err) = &ctx.vectors.error {
-        let _ = crate::log::record(conn, None, "memory_embed_error", err);
+        let _ = crate::log::record(conn, None, "memory_embed_error", &format!("query: {err}"));
     }
     let hits = crate::memory::query(conn, ctx.username, &args.query, args.limit, ctx.vectors.query.as_deref())
         .map_err(|e| ToolError::internal(e.to_string()))?;
@@ -106,7 +106,7 @@ pub fn write(
     }
     super::check_text("body", &args.body)?;
     if let Some(err) = &ctx.vectors.error {
-        let _ = crate::log::record(conn, None, "memory_embed_error", err);
+        let _ = crate::log::record(conn, None, "memory_embed_error", &format!("write: {err}"));
     }
     let need_id = || -> Result<String, ToolError> {
         let id = args
