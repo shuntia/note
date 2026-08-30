@@ -19,8 +19,66 @@ pub mod tools;
 
 use crate::providers::{EmbeddingsProvider, LLMProvider};
 use rusqlite::Connection;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+
+pub const MAX_CONCURRENT_TALKS: usize = 4;
+pub const EMPTY_REPLY_FALLBACK: &str = "(the assistant is not configured on this server)";
+
+#[derive(Debug)]
+pub enum TalkBusy {
+    UserBusy,
+    Full,
+}
+
+/// Caps concurrent talk sessions globally (each pins a blocking thread for up
+/// to MAX_TURNS provider calls) and to one per user (interleaved tool calls
+/// from two sessions of the same user would race).
+pub struct TalkGate {
+    semaphore: Arc<tokio::sync::Semaphore>,
+    active: Mutex<HashSet<i64>>,
+}
+
+pub struct TalkPermit {
+    gate: Arc<TalkGate>,
+    user_id: i64,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl Drop for TalkPermit {
+    fn drop(&mut self) {
+        self.gate.active.lock().unwrap().remove(&self.user_id);
+    }
+}
+
+impl Default for TalkGate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TalkGate {
+    pub fn new() -> Self {
+        Self {
+            semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_TALKS)),
+            active: Mutex::new(HashSet::new()),
+        }
+    }
+
+    pub fn try_enter(self: &Arc<Self>, user_id: i64) -> Result<TalkPermit, TalkBusy> {
+        if !self.active.lock().unwrap().insert(user_id) {
+            return Err(TalkBusy::UserBusy);
+        }
+        match self.semaphore.clone().try_acquire_owned() {
+            Ok(permit) => Ok(TalkPermit { gate: self.clone(), user_id, _permit: permit }),
+            Err(_) => {
+                self.active.lock().unwrap().remove(&user_id);
+                Err(TalkBusy::Full)
+            }
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct AppState {
@@ -34,6 +92,7 @@ pub struct AppState {
     pub channels: Vec<Arc<dyn crate::channels::Channel>>,
     pub secure_cookies: bool,
     pub login_limiter: Arc<crate::auth::LoginLimiter>,
+    pub talk_gate: Arc<TalkGate>,
 }
 
 impl AppState {
@@ -54,6 +113,7 @@ impl AppState {
             channels: vec![ws],
             secure_cookies: false,
             login_limiter: Arc::new(crate::auth::LoginLimiter::new()),
+            talk_gate: Arc::new(TalkGate::new()),
         }
     }
 
@@ -80,5 +140,23 @@ impl AppState {
     pub fn with_channels(mut self, channels: Vec<Arc<dyn crate::channels::Channel>>) -> Self {
         self.channels = channels;
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn talk_gate_blocks_same_user_and_caps_total() {
+        let gate = Arc::new(TalkGate::new());
+        let p1 = gate.try_enter(1).unwrap();
+        assert!(matches!(gate.try_enter(1), Err(TalkBusy::UserBusy)));
+        let _p2 = gate.try_enter(2).unwrap();
+        let _p3 = gate.try_enter(3).unwrap();
+        let _p4 = gate.try_enter(4).unwrap();
+        assert!(matches!(gate.try_enter(5), Err(TalkBusy::Full)));
+        drop(p1);
+        let _p5 = gate.try_enter(1).unwrap();
     }
 }

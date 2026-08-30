@@ -143,6 +143,11 @@ async fn talk(
     if message.is_empty() || message.len() > MAX_TALK_MESSAGE {
         return StatusCode::BAD_REQUEST.into_response();
     }
+    let _permit = match state.talk_gate.clone().try_enter(user.id) {
+        Ok(p) => p,
+        Err(crate::TalkBusy::UserBusy) => return StatusCode::CONFLICT.into_response(),
+        Err(crate::TalkBusy::Full) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    };
     let result = tokio::task::spawn_blocking(move || {
         let deps = crate::agent::SessionDeps {
             db: &state.db,
@@ -162,7 +167,14 @@ async fn talk(
     })
     .await;
     match result {
-        Ok(Ok(out)) => Json(serde_json::json!({ "reply": out.reply })).into_response(),
+        Ok(Ok(out)) => {
+            let reply = if out.reply.trim().is_empty() {
+                crate::EMPTY_REPLY_FALLBACK.to_string()
+            } else {
+                out.reply
+            };
+            Json(serde_json::json!({ "reply": reply })).into_response()
+        }
         _ => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
