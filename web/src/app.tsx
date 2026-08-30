@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react'
 import { api, ApiError, setOnUnauthorized } from './api'
 import type { Me } from './types'
+import { More } from './views/More'
 import { Talk } from './views/Talk'
 import { Tasks } from './views/Tasks'
 import { Today } from './views/Today'
@@ -72,7 +73,7 @@ export function App() {
         {tab === 'today' && <Today key={refresh} {...views} />}
         {tab === 'tasks' && <Tasks {...views} />}
         {tab === 'talk' && <Talk />}
-        {tab === 'more' && <Placeholder name="More" {...views} />}
+        {tab === 'more' && <More me={me} {...views} onSignedOut={() => setMe(null)} />}
       </main>
       <nav className="tabs">
         {TABS.map((t) => (
@@ -84,10 +85,6 @@ export function App() {
       {toast && <div className="toast" role="status">{toast}</div>}
     </div>
   )
-}
-
-function Placeholder({ name }: ViewProps & { name: string }) {
-  return <p className="muted">{name} is on its way.</p>
 }
 
 function Login({ onSignedIn }: { onSignedIn: (me: Me) => void }) {
