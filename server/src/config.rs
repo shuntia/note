@@ -7,10 +7,16 @@ pub struct ServerConfig {
     pub bind_addr: String,
     pub public_base_url: String,
     pub data_dir: PathBuf,
+    #[serde(default = "default_web_dir")]
+    pub web_dir: PathBuf,
     #[serde(default)]
     pub providers: ProvidersConfig,
     #[serde(default)]
     pub channels: ChannelsConfig,
+}
+
+fn default_web_dir() -> PathBuf {
+    PathBuf::from("web/dist")
 }
 
 impl ServerConfig {
