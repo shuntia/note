@@ -46,7 +46,7 @@ The binary is written to `target/release/note-server`.
 
 ```
 config/
-  server.toml                       # bind_addr, public_base_url, data_dir
+  server.toml                       # bind_addr, public_base_url, data_dir, web_dir
   defaults/
     user.toml                       # display_name, timezone, template
     templates/
@@ -195,6 +195,33 @@ Every outcome lands in `event_log`, readable at `GET /api/admin/log`:
   clears the counter.
 - `POST /api/talk` runs one session per user (a second concurrent request gets
   `409`) and four across the server (`503` with `Retry-After: 5` beyond that).
+
+## Web client
+
+The installable PWA lives in `web/` — React + Vite, TypeScript, with React and
+React DOM its only runtime dependencies. Build it once and the server serves it:
+
+```sh
+cd web && pnpm install && pnpm build
+```
+
+The server looks for the build at `web_dir` from `config/server.toml`
+(default `web/dist`, resolved against the working directory like `data_dir`)
+and serves it with an SPA fallback; without a build, the API still runs.
+Unknown `/api/*` paths stay `404` rather than falling back to the app shell.
+
+Sign in with a user from `create-user`. The client shows today's plan on a
+time spine — Done / Later / +15 / −15 / Drop per unsettled event, with the
+±15 slides only on events the template does not pin as `fixed` — plus tasks
+with quick-add, a text conversation with the assistant, and, under More, the
+morning debrief, a Web Push toggle (needs the `[channels.webpush]` config),
+and admin tools for admin users. Delivered events arrive live over the
+WebSocket while the app is open, and as push notifications when it is not;
+`web/public/sw.js` renders those notifications and focuses an open tab when
+one is clicked.
+
+For development, `pnpm dev` proxies `/api` (WebSocket included) to
+`127.0.0.1:3271`.
 
 ## Admin API
 

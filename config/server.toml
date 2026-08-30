@@ -2,6 +2,11 @@ bind_addr = "127.0.0.1:3271"
 public_base_url = "http://localhost:3271"
 data_dir = "data"
 
+# Where the built web client lives; comment out or point elsewhere if you
+# serve the PWA some other way. The server runs API-only if the directory
+# is missing.
+# web_dir = "web/dist"
+
 # Providers. Omit this whole section to run with the built-in mock (no tokens).
 #
 # [providers.llm]
