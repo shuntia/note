@@ -79,3 +79,45 @@ async fn empty_message_is_400_and_no_cookie_is_401() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn concurrent_talk_for_same_user_is_conflict() {
+    let (app, cookie, state, _cfg) = common::app_with_logged_in_user_and_state().await;
+    let user_id: i64 = {
+        let conn = state.db.lock().unwrap();
+        conn.query_row("SELECT id FROM users LIMIT 1", [], |r| r.get(0)).unwrap()
+    };
+    let _permit = state.talk_gate.clone().try_enter(user_id).unwrap();
+    let res = app
+        .oneshot(
+            Request::post("/api/talk")
+                .header(header::COOKIE, &cookie)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"message":"hi"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn blank_reply_is_replaced_with_the_canned_line() {
+    let llm =
+        Arc::new(MockLLM::scripted(vec![ChatResponse { text: "   ".into(), tool_calls: vec![] }]));
+    let (app, cookie, _cfg) = common::app_with_logged_in_user_and_llm(llm).await;
+    let res = app
+        .oneshot(
+            Request::post("/api/talk")
+                .header(header::COOKIE, &cookie)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"message":"hi"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["reply"], note_server::EMPTY_REPLY_FALLBACK);
+}

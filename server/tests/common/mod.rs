@@ -45,23 +45,31 @@ pub async fn login(app: &axum::Router, username: &str, password: &str) -> String
 }
 
 pub async fn app_with_logged_in_user() -> (axum::Router, String, TempDir) {
-    let cfg = config_dir();
-    let dir = cfg.path().to_path_buf();
-    let conn = db::open_memory().unwrap();
-    auth::create_user(&conn, "aki", "pw", true).unwrap();
-    let app = api::router(AppState::new(conn, dir.clone(), dir));
-    let cookie = login(&app, "aki", "pw").await;
+    let (app, cookie, _state, cfg) = app_with_logged_in_user_and_state().await;
     (app, cookie, cfg)
 }
 
 #[allow(dead_code)] // every test binary compiles this module; only the talk suite scripts a model
 pub async fn app_with_logged_in_user_and_llm(llm: Arc<MockLLM>) -> (axum::Router, String, TempDir) {
+    let (app, cookie, _state, cfg) = build(Some(llm)).await;
+    (app, cookie, cfg)
+}
+
+#[allow(dead_code)] // every test binary compiles this module; only the talk suite reaches into the state
+pub async fn app_with_logged_in_user_and_state() -> (axum::Router, String, AppState, TempDir) {
+    build(None).await
+}
+
+async fn build(llm: Option<Arc<MockLLM>>) -> (axum::Router, String, AppState, TempDir) {
     let cfg = config_dir();
     let dir = cfg.path().to_path_buf();
     let conn = db::open_memory().unwrap();
     auth::create_user(&conn, "aki", "pw", true).unwrap();
-    let state = AppState::new(conn, dir.clone(), dir).with_providers(llm, None);
-    let app = api::router(state);
+    let mut state = AppState::new(conn, dir.clone(), dir);
+    if let Some(llm) = llm {
+        state = state.with_providers(llm, None);
+    }
+    let app = api::router(state.clone());
     let cookie = login(&app, "aki", "pw").await;
-    (app, cookie, cfg)
+    (app, cookie, state, cfg)
 }
