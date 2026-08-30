@@ -1,4 +1,4 @@
-import { useRef, useState, type FormEvent } from 'react'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { api, ApiError } from '../api'
 
 type Msg = { from: 'me' | 'note'; text: string }
@@ -8,6 +8,10 @@ export function Talk() {
   const [draft, setDraft] = useState('')
   const [busy, setBusy] = useState(false)
   const bottom = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    bottom.current?.scrollIntoView({ block: 'end' })
+  }, [thread])
 
   const send = async (e: FormEvent) => {
     e.preventDefault()
@@ -25,7 +29,6 @@ export function Talk() {
       setThread((t) => [...t, { from: 'note', text }])
     } finally {
       setBusy(false)
-      bottom.current?.scrollIntoView({ block: 'end' })
     }
   }
 

@@ -1,4 +1,6 @@
-import { api } from './api'
+import { api, ApiError } from './api'
+
+const READY_TIMEOUT_MS = 5000
 
 function applicationServerKey(base64url: string): Uint8Array<ArrayBuffer> {
   const padding = '='.repeat((4 - (base64url.length % 4)) % 4)
@@ -7,16 +9,26 @@ function applicationServerKey(base64url: string): Uint8Array<ArrayBuffer> {
   return Uint8Array.from(raw, (c) => c.charCodeAt(0))
 }
 
+// `serviceWorker.ready` never rejects, so a registration that never activates
+// would hang every caller.
+function serviceWorkerReady(): Promise<ServiceWorkerRegistration> {
+  const timeout = new Promise<never>((_, reject) => {
+    const fail = () => reject(new Error('service worker never became ready'))
+    window.setTimeout(fail, READY_TIMEOUT_MS)
+  })
+  return Promise.race([navigator.serviceWorker.ready, timeout])
+}
+
 export async function pushState(): Promise<'unsupported' | 'off' | 'on'> {
   if (!('serviceWorker' in navigator) || !('PushManager' in window)) return 'unsupported'
-  const reg = await navigator.serviceWorker.ready
+  const reg = await serviceWorkerReady()
   const sub = await reg.pushManager.getSubscription()
   return sub ? 'on' : 'off'
 }
 
 export async function enablePush(): Promise<void> {
   const { key } = await api.vapidKey()
-  const reg = await navigator.serviceWorker.ready
+  const reg = await serviceWorkerReady()
   const sub = await reg.pushManager.subscribe({
     userVisibleOnly: true,
     applicationServerKey: applicationServerKey(key),
@@ -25,10 +37,13 @@ export async function enablePush(): Promise<void> {
 }
 
 export async function disablePush(): Promise<void> {
-  const reg = await navigator.serviceWorker.ready
+  const reg = await serviceWorkerReady()
   const sub = await reg.pushManager.getSubscription()
   if (!sub) return
-  const { endpoint } = sub
+  try {
+    await api.pushUnsubscribe(sub.endpoint)
+  } catch (err) {
+    if (!(err instanceof ApiError) || err.status !== 404) throw err
+  }
   await sub.unsubscribe()
-  await api.pushUnsubscribe(endpoint)
 }
