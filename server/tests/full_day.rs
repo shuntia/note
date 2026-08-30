@@ -124,13 +124,43 @@ fn a_full_simulated_day() {
         assert_eq!(hits.len(), 1);
     }
 
-    // --- 16:05 JST: the runner fires everything due (09:00 checkin + 16:00 nudge).
+    // --- 11:00 JST: only the 09:00 checkin is due; the 16:00 nudge must not fire yet.
+    let midday: jiff::Timestamp = "2026-08-31T02:00:00Z".parse().unwrap(); // 11:00 JST
+    let fired_midday = {
+        let conn = db.lock().unwrap();
+        note_server::runner::fire_due(&conn, tmp.path(), midday).unwrap()
+    };
+    {
+        let conn = db.lock().unwrap();
+        let kinds: Vec<String> = fired_midday
+            .iter()
+            .map(|id| {
+                conn.query_row("SELECT kind FROM events WHERE id=?1", [id], |r| r.get(0)).unwrap()
+            })
+            .collect();
+        assert_eq!(kinds, vec!["checkin_call".to_string()]);
+        let pending: i64 = conn
+            .query_row("SELECT COUNT(*) FROM events WHERE status='pending'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(pending, 1);
+    }
+
+    // --- 16:05 JST: the nudge comes due; the already-fired checkin is not re-fired.
     let fire_at: jiff::Timestamp = "2026-08-31T07:05:00Z".parse().unwrap(); // 16:05 JST
     let fired = {
         let conn = db.lock().unwrap();
         note_server::runner::fire_due(&conn, tmp.path(), fire_at).unwrap()
     };
-    assert_eq!(fired.len(), 2);
+    {
+        let conn = db.lock().unwrap();
+        let kinds: Vec<String> = fired
+            .iter()
+            .map(|id| {
+                conn.query_row("SELECT kind FROM events WHERE id=?1", [id], |r| r.get(0)).unwrap()
+            })
+            .collect();
+        assert_eq!(kinds, vec!["nudge".to_string()]);
+    }
     {
         let conn = db.lock().unwrap();
         let logged: i64 = conn
