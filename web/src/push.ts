@@ -33,7 +33,13 @@ export async function enablePush(): Promise<void> {
     userVisibleOnly: true,
     applicationServerKey: applicationServerKey(key),
   })
-  await api.pushSubscribe(sub.toJSON())
+  try {
+    await api.pushSubscribe(sub.toJSON())
+  } catch (err) {
+    // an orphaned browser subscription would read as "on" next visit
+    await sub.unsubscribe()
+    throw err
+  }
 }
 
 export async function disablePush(): Promise<void> {

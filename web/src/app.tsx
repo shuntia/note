@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { api, ApiError, setOnUnauthorized } from './api'
 import type { Me } from './types'
 import { More } from './views/More'
@@ -30,9 +30,11 @@ export function App() {
   const [toast, setToast] = useState<string | null>(null)
   const [refresh, setRefresh] = useState(0)
 
+  const toastTimer = useRef(0)
   const notify = useCallback((msg: string) => {
     setToast(msg)
-    window.setTimeout(() => setToast(null), 4000)
+    window.clearTimeout(toastTimer.current)
+    toastTimer.current = window.setTimeout(() => setToast(null), 4000)
   }, [])
 
   const onChanged = useCallback(() => setRefresh((n) => n + 1), [])
