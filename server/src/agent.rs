@@ -25,11 +25,14 @@ pub struct SessionOutcome {
 /// Runs one agent session: chat, dispatch tool calls, feed results back, until
 /// the model answers in text or MAX_TURNS is hit. The DB lock is held only for
 /// assembly, individual dispatches, and log writes — never across a provider call.
+/// `now` is the caller's clock so a nightly run assembles context for the same
+/// local date its plan was generated for.
 pub fn run_session(
     deps: &SessionDeps,
     user_id: i64,
     username: &str,
     kind: SessionKind,
+    now: jiff::Timestamp,
     opening: &str,
 ) -> Result<SessionOutcome> {
     let mut system = crate::prompts::load(deps.config_dir, username, "persona")?;
@@ -39,13 +42,7 @@ pub fn run_session(
     }
     {
         let conn = deps.db.lock().unwrap();
-        let context = crate::context::assemble(
-            &conn,
-            deps.config_dir,
-            user_id,
-            username,
-            jiff::Timestamp::now(),
-        )?;
+        let context = crate::context::assemble(&conn, deps.config_dir, user_id, username, now)?;
         system.push_str("\n\n");
         system.push_str(&context);
     }
@@ -149,6 +146,10 @@ mod tests {
         SessionDeps { db, config_dir: tmp.path(), data_dir: tmp.path(), llm, embeddings: None }
     }
 
+    fn now() -> jiff::Timestamp {
+        "2026-08-31T04:00:00Z".parse().unwrap()
+    }
+
     #[test]
     fn tool_call_round_trip_creates_task_and_returns_reply() {
         let (db, tmp) = env();
@@ -164,7 +165,8 @@ mod tests {
             ChatResponse { text: "added buy milk!".into(), tool_calls: vec![] },
         ]);
         let out =
-            run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, "add buy milk").unwrap();
+            run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, now(), "add buy milk")
+                .unwrap();
         assert_eq!(out.reply, "added buy milk!");
         assert_eq!(out.turns, 2);
         assert_eq!(out.tool_calls, 1);
@@ -207,7 +209,7 @@ mod tests {
             ChatResponse { text: "sorry, couldn't".into(), tool_calls: vec![] },
         ]);
         // Talk surface: schedule_insert is forbidden — dispatch returns a typed error
-        let out = run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, "hi").unwrap();
+        let out = run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, now(), "hi").unwrap();
         assert_eq!(out.reply, "sorry, couldn't");
         match &llm.seen()[1].messages[2] {
             Message::ToolResult { content, is_error, .. } => {
@@ -231,7 +233,7 @@ mod tests {
             }],
         };
         let llm = MockLLM::scripted(vec![resp; MAX_TURNS + 4]);
-        let out = run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, "hi").unwrap();
+        let out = run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, now(), "hi").unwrap();
         assert_eq!(out.turns, MAX_TURNS);
         let n: i64 = db
             .lock()
@@ -252,7 +254,7 @@ mod tests {
             text: "debrief".into(),
             tool_calls: vec![],
         }]);
-        run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Nightly, "night").unwrap();
+        run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Nightly, now(), "night").unwrap();
         assert!(llm.seen()[0].system.contains("plan the day"));
     }
 
@@ -276,6 +278,6 @@ mod tests {
             llm: &llm,
             embeddings: None,
         };
-        assert!(run_session(&d, 1, "aki", SessionKind::Talk, "hi").is_err());
+        assert!(run_session(&d, 1, "aki", SessionKind::Talk, now(), "hi").is_err());
     }
 }

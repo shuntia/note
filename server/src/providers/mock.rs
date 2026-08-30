@@ -50,6 +50,17 @@ impl LLMProvider for MockLLM {
     }
 }
 
+/// The default when no LLM is configured: replies blank and records nothing, so
+/// a long-running tokenless server neither grows a transcript in memory nor
+/// stores placeholder text as a user's debriefs and replies.
+pub struct NullLLM;
+
+impl LLMProvider for NullLLM {
+    fn chat(&self, _req: &ChatRequest) -> Result<ChatResponse> {
+        Ok(ChatResponse { text: String::new(), tool_calls: vec![] })
+    }
+}
+
 /// Dim-8 letter-count vectors: deterministic, and texts sharing letters get
 /// positive cosine similarity — enough to test ranking without a real model.
 pub struct MockEmbeddings;
@@ -97,6 +108,18 @@ mod tests {
         assert_eq!(seen.len(), 3);
         assert_eq!(seen[0].system, "sys");
         assert_eq!(seen[0].n_messages, 1);
+    }
+
+    #[test]
+    fn null_llm_replies_blank_and_stays_stateless() {
+        let llm = NullLLM;
+        let req = ChatRequest { system: "sys", messages: &[Message::User("hi".into())], tools: &[] };
+        for _ in 0..3 {
+            let r = llm.chat(&req).unwrap();
+            assert!(r.text.is_empty());
+            assert!(r.tool_calls.is_empty());
+        }
+        assert_eq!(std::mem::size_of::<NullLLM>(), 0);
     }
 
     #[test]

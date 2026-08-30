@@ -42,6 +42,7 @@ pub fn run_for_user(
         user_id,
         username,
         crate::tools::SessionKind::Nightly,
+        now,
         &format!("Nightly run for {date}."),
     ) {
         Ok(out) if !out.reply.trim().is_empty() => out.reply,
@@ -62,7 +63,8 @@ pub fn run_for_user(
 
 /// Users whose local time has reached their configured `nightly_time` and who
 /// have no debrief for that local date yet. A user whose config cannot be read
-/// is skipped rather than failing the whole sweep.
+/// is skipped rather than failing the whole sweep, but the skip is logged: an
+/// unreadable config otherwise ends that user's nightlies silently and forever.
 pub fn due(
     conn: &Connection,
     config_dir: &Path,
@@ -74,10 +76,23 @@ pub fn due(
         .collect::<rusqlite::Result<_>>()?;
     let mut out = Vec::new();
     for (id, username) in users {
-        let Ok(ucfg) = UserConfig::load(config_dir, &username) else { continue };
+        let ucfg = match UserConfig::load(config_dir, &username) {
+            Ok(c) => c,
+            Err(e) => {
+                let _ =
+                    crate::log::record(conn, Some(id), "nightly_config_error", &e.to_string());
+                continue;
+            }
+        };
         let tz = jiff::tz::TimeZone::get(&ucfg.timezone).unwrap_or(jiff::tz::TimeZone::UTC);
         let local = now.to_zoned(tz);
         let Ok(due_time) = format!("{}:00", ucfg.nightly_time).parse::<jiff::civil::Time>() else {
+            let _ = crate::log::record(
+                conn,
+                Some(id),
+                "nightly_config_error",
+                &format!("unparseable nightly_time {:?}", ucfg.nightly_time),
+            );
             continue;
         };
         if local.time() < due_time {
@@ -276,6 +291,21 @@ mod tests {
         assert!(content.contains("template"));
         let logged: i64 = conn
             .query_row("SELECT COUNT(*) FROM event_log WHERE kind='nightly_fallback'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(logged, 1);
+    }
+
+    #[test]
+    fn unreadable_user_config_is_skipped_and_logged() {
+        let (db, tmp) = env("UTC", "03:00");
+        std::fs::write(tmp.path().join("defaults/user.toml"), "nightly_time = \"25:99\"\n").unwrap();
+        let now: jiff::Timestamp = "2026-08-31T04:00:00Z".parse().unwrap();
+        let conn = db.lock().unwrap();
+        assert!(due(&conn, tmp.path(), now).unwrap().is_empty());
+        let logged: i64 = conn
+            .query_row("SELECT COUNT(*) FROM event_log WHERE kind='nightly_config_error'", [], |r| {
                 r.get(0)
             })
             .unwrap();
