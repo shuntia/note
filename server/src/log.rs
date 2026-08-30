@@ -13,8 +13,9 @@ pub fn record(conn: &Connection, user_id: Option<i64>, kind: &str, detail: &str)
 
 /// Writes the row unless an identical (user, kind, detail) row younger than
 /// `window_mins` already exists — recurring failures (a broken user config
-/// hit every sweep) log once per window instead of once per tick. Returns
-/// whether a row was written.
+/// hit every sweep) log once per window instead of once per tick. A stored
+/// timestamp ahead of `now` (a clock step) writes rather than suppressing
+/// until the clock catches up. Returns whether a row was written.
 pub fn record_throttled(
     conn: &Connection,
     user_id: Option<i64>,
@@ -33,8 +34,6 @@ pub fn record_throttled(
         )
         .optional()?;
     if let Some(ts) = last.and_then(|s| s.parse::<jiff::Timestamp>().ok()) {
-        // A negative span (stored ts ahead of `now` after a clock step) must
-        // write, not suppress until the clock catches up.
         if (now - ts)
             .total(jiff::Unit::Second)
             .is_ok_and(|s| (0.0..(window_mins * 60) as f64).contains(&s))

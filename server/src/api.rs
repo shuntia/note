@@ -143,7 +143,7 @@ async fn talk(
     if message.is_empty() || message.len() > MAX_TALK_MESSAGE {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "message must be 1..=16384 bytes" })),
+            Json(serde_json::json!({ "error": "message must be non-blank and at most 16384 bytes" })),
         )
             .into_response();
     }
