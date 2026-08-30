@@ -82,6 +82,9 @@ async fn empty_message_is_400_and_no_cookie_is_401() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(v["error"].as_str().unwrap().contains("16384"));
 
     let res = app
         .oneshot(
