@@ -92,19 +92,27 @@ pub fn due(
         let ucfg = match UserConfig::load(config_dir, &username) {
             Ok(c) => c,
             Err(e) => {
-                let _ =
-                    crate::log::record(conn, Some(id), "nightly_config_error", &e.to_string());
+                let _ = crate::log::record_throttled(
+                    conn,
+                    Some(id),
+                    "nightly_config_error",
+                    &e.to_string(),
+                    now,
+                    crate::log::ERROR_LOG_WINDOW_MINS,
+                );
                 continue;
             }
         };
         let tz = jiff::tz::TimeZone::get(&ucfg.timezone).unwrap_or(jiff::tz::TimeZone::UTC);
         let local = now.to_zoned(tz);
         let Ok(due_time) = format!("{}:00", ucfg.nightly_time).parse::<jiff::civil::Time>() else {
-            let _ = crate::log::record(
+            let _ = crate::log::record_throttled(
                 conn,
                 Some(id),
                 "nightly_config_error",
                 &format!("unparseable nightly_time {:?}", ucfg.nightly_time),
+                now,
+                crate::log::ERROR_LOG_WINDOW_MINS,
             );
             continue;
         };
@@ -138,7 +146,14 @@ pub fn spawn(state: crate::AppState) {
                 Ok(u) => u,
                 Err(e) => {
                     let conn = state.db.lock().unwrap();
-                    let _ = crate::log::record(&conn, None, "nightly_error", &e.to_string());
+                    let _ = crate::log::record_throttled(
+                        &conn,
+                        None,
+                        "nightly_error",
+                        &e.to_string(),
+                        now,
+                        crate::log::ERROR_LOG_WINDOW_MINS,
+                    );
                     continue;
                 }
             };
@@ -163,7 +178,14 @@ pub fn spawn(state: crate::AppState) {
                 };
                 if let Some(detail) = failure {
                     let conn = state.db.lock().unwrap();
-                    let _ = crate::log::record(&conn, Some(user_id), "nightly_error", &detail);
+                    let _ = crate::log::record_throttled(
+                        &conn,
+                        Some(user_id),
+                        "nightly_error",
+                        &detail,
+                        now,
+                        crate::log::ERROR_LOG_WINDOW_MINS,
+                    );
                 }
             }
         }
@@ -318,6 +340,15 @@ mod tests {
         let now: jiff::Timestamp = "2026-08-31T04:00:00Z".parse().unwrap();
         let conn = db.lock().unwrap();
         assert!(due(&conn, tmp.path(), now).unwrap().is_empty());
+        let logged: i64 = conn
+            .query_row("SELECT COUNT(*) FROM event_log WHERE kind='nightly_config_error'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(logged, 1);
+
+        let later: jiff::Timestamp = "2026-08-31T04:01:00Z".parse().unwrap();
+        assert!(due(&conn, tmp.path(), later).unwrap().is_empty());
         let logged: i64 = conn
             .query_row("SELECT COUNT(*) FROM event_log WHERE kind='nightly_config_error'", [], |r| {
                 r.get(0)

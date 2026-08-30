@@ -45,6 +45,7 @@ fn user_tz(
     config_dir: &Path,
     c: &Candidate,
     cache: &mut HashMap<String, jiff::tz::TimeZone>,
+    now: jiff::Timestamp,
 ) -> Result<jiff::tz::TimeZone> {
     if let Some(tz) = cache.get(&c.username) {
         return Ok(tz.clone());
@@ -55,11 +56,13 @@ fn user_tz(
     let tz = match jiff::tz::TimeZone::get(&name) {
         Ok(tz) => tz,
         Err(_) => {
-            crate::log::record(
+            crate::log::record_throttled(
                 conn,
                 Some(c.user_id),
                 "runner_error",
                 &format!("user {} has unknown timezone {name:?}; using UTC", c.username),
+                now,
+                crate::log::ERROR_LOG_WINDOW_MINS,
             )?;
             jiff::tz::TimeZone::UTC
         }
@@ -102,11 +105,11 @@ pub fn fire_due(
     let mut fired = Vec::new();
     let mut tz_cache = HashMap::new();
     for c in candidates {
-        let tz = user_tz(conn, config_dir, &c, &mut tz_cache)?;
+        let tz = user_tz(conn, config_dir, &c, &mut tz_cache, now)?;
         let due = match due_at(&tz, &c) {
             Ok(due) => due,
             Err(e) => {
-                crate::log::record(
+                crate::log::record_throttled(
                     conn,
                     Some(c.user_id),
                     "runner_error",
@@ -114,6 +117,8 @@ pub fn fire_due(
                         "event {} unresolvable ({} {}): {e}",
                         c.event_id, c.date, c.wall_time
                     ),
+                    now,
+                    crate::log::ERROR_LOG_WINDOW_MINS,
                 )?;
                 continue;
             }
@@ -163,12 +168,26 @@ pub fn sweep_once(state: &AppState) {
     let fired = {
         let conn = state.db.lock().unwrap();
         if let Err(e) = gc_sessions(&conn, now) {
-            let _ = crate::log::record(&conn, None, "runner_error", &e.to_string());
+            let _ = crate::log::record_throttled(
+                &conn,
+                None,
+                "runner_error",
+                &e.to_string(),
+                now,
+                crate::log::ERROR_LOG_WINDOW_MINS,
+            );
         }
         match fire_due(&conn, &state.config_dir, now) {
             Ok(f) => f,
             Err(e) => {
-                let _ = crate::log::record(&conn, None, "runner_error", &e.to_string());
+                let _ = crate::log::record_throttled(
+                    &conn,
+                    None,
+                    "runner_error",
+                    &e.to_string(),
+                    now,
+                    crate::log::ERROR_LOG_WINDOW_MINS,
+                );
                 Vec::new()
             }
         }
@@ -258,6 +277,14 @@ mod tests {
             "SELECT COUNT(*) FROM event_log WHERE kind='runner_error'", [], |r| r.get(0),
         ).unwrap();
         assert_eq!(errors, 1);
+
+        let again: jiff::Timestamp = "2026-08-31T12:00:30Z".parse().unwrap();
+        fire_due(&conn, tmp.path(), again).unwrap();
+        let errors: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM event_log WHERE kind='runner_error'", [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(errors, 1);
+
         let still_pending: i64 = conn.query_row(
             "SELECT COUNT(*) FROM events WHERE wall_time='noon' AND status='pending'", [], |r| r.get(0),
         ).unwrap();
