@@ -147,7 +147,6 @@ fn apply_migrations(conn: &Connection, migrations: &[&str]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rusqlite::OptionalExtension;
 
     #[test]
     fn migrations_apply_and_are_idempotent() {
@@ -242,11 +241,19 @@ mod tests {
             [],
         )
         .unwrap();
+        conn.execute(
+            "INSERT INTO plans (user_id, date, created_at) VALUES (1, '2026-08-31', 'x')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO events (plan_id, kind, wall_time) VALUES (1, 'nudge', '09:15')",
+            [],
+        )
+        .unwrap();
         let msg: String = conn
-            .query_row("SELECT message FROM events WHERE 0", [], |r| r.get(0))
-            .optional()
-            .unwrap()
-            .unwrap_or_default();
+            .query_row("SELECT message FROM events WHERE id = 1", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(msg, "");
     }
 
