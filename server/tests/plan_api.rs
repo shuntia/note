@@ -273,6 +273,19 @@ async fn other_users_event_is_404() {
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
 
     let res = app
+        .clone()
+        .oneshot(
+            Request::post("/api/events/1/snooze")
+                .header(header::COOKIE, &other)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"minutes":15}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+    let res = app
         .oneshot(
             Request::post("/api/events/1/done")
                 .header(header::COOKIE, &other)
