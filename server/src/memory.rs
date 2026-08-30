@@ -125,6 +125,12 @@ fn one_line(summary: &str) -> String {
     summary.replace(['\n', '\r'], " ").trim().to_string()
 }
 
+/// The exact text shape the vector index embeds for a fact, shared with the
+/// tool-path prepare pass so prepared vectors match index-time vectors.
+pub(crate) fn embed_text(summary: &str, body: &str) -> String {
+    format!("{}\n{}", one_line(summary), body.trim())
+}
+
 /// Writes through a sibling temp file so a crash mid-write can never leave a
 /// half-rendered fact where the index expects a whole one.
 fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
