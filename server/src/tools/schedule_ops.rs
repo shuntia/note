@@ -16,7 +16,9 @@ pub fn slide(conn: &Connection, ctx: &ToolCtx, args: SlideArgs) -> Result<serde_
         Ok(None) => Err(ToolError::not_found(format!(
             "no slideable event {} for this user", args.event_id
         ))),
-        Err(e @ crate::plan::ShiftError::OutOfWindow { .. }) => Err(ToolError::rejected(e.to_string())),
+        Err(e @ (crate::plan::ShiftError::OutOfWindow { .. } | crate::plan::ShiftError::Decided { .. })) => {
+            Err(ToolError::rejected(e.to_string()))
+        }
         Err(e) => Err(ToolError::internal(e.to_string())),
     }
 }
