@@ -5,6 +5,7 @@ use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
+use rusqlite::OptionalExtension;
 use serde::Deserialize;
 
 pub fn router(state: AppState) -> Router {
@@ -17,6 +18,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/tasks/{id}", patch(tasks_update))
         .route("/api/talk", post(talk))
         .route("/api/plan/today", get(plan_today))
+        .route("/api/debrief", get(debrief))
         .route("/api/events/{id}/shift", post(event_shift))
         .route("/api/events/{id}/snooze", post(event_snooze))
         .route("/api/events/{id}/done", post(event_done))
@@ -259,6 +261,49 @@ async fn plan_today(
     }
     match crate::plan::events_for(&conn, user.id, date) {
         Ok(evs) => Json(evs).into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct DebriefQuery {
+    date: Option<String>,
+}
+
+/// Reads the stored debrief for `date` (default: today in the user's
+/// configured timezone); the nightly job is the only writer.
+async fn debrief(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Query(q): Query<DebriefQuery>,
+) -> impl IntoResponse {
+    let date = match q.date {
+        Some(d) => match d.parse::<jiff::civil::Date>() {
+            Ok(d) => d.to_string(),
+            Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+        },
+        None => {
+            let ucfg = match crate::config::UserConfig::load(&state.config_dir, &user.username) {
+                Ok(c) => c,
+                Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+            };
+            let tz = jiff::tz::TimeZone::get(&ucfg.timezone).unwrap_or(jiff::tz::TimeZone::UTC);
+            jiff::Timestamp::now().to_zoned(tz).date().to_string()
+        }
+    };
+    let conn = state.db.lock().unwrap();
+    let row = conn
+        .query_row(
+            "SELECT date, content FROM debriefs WHERE user_id = ?1 AND date = ?2",
+            (user.id, &date),
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+        )
+        .optional();
+    match row {
+        Ok(Some((date, content))) => {
+            Json(serde_json::json!({ "date": date, "content": content })).into_response()
+        }
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
