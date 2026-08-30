@@ -83,7 +83,7 @@ impl LoginLimiter {
 
 /// Usernames become path segments under the config tree, so anything outside
 /// `[A-Za-z0-9_-]` (`..` and separators above all) is rejected at creation.
-fn validate_username(username: &str) -> Result<()> {
+pub(crate) fn validate_username(username: &str) -> Result<()> {
     if username.is_empty() {
         anyhow::bail!("username must not be empty");
     }

@@ -1,6 +1,6 @@
 use axum::body::Body;
 use axum::http::{header, Request};
-use note_server::providers::mock::MockLLM;
+use note_server::providers::LLMProvider;
 use note_server::{api, auth, db, AppState};
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -50,9 +50,18 @@ pub async fn app_with_logged_in_user() -> (axum::Router, String, TempDir) {
 }
 
 #[allow(dead_code)] // every test binary compiles this module; only the talk suite scripts a model
-pub async fn app_with_logged_in_user_and_llm(llm: Arc<MockLLM>) -> (axum::Router, String, TempDir) {
+pub async fn app_with_logged_in_user_and_llm(
+    llm: Arc<dyn LLMProvider>,
+) -> (axum::Router, String, TempDir) {
     let (app, cookie, _state, cfg) = build(Some(llm)).await;
     (app, cookie, cfg)
+}
+
+#[allow(dead_code)] // every test binary compiles this module; only the talk suite scripts a model
+pub async fn app_with_logged_in_user_llm_and_state(
+    llm: Arc<dyn LLMProvider>,
+) -> (axum::Router, String, AppState, TempDir) {
+    build(Some(llm)).await
 }
 
 #[allow(dead_code)] // every test binary compiles this module; only the talk suite reaches into the state
@@ -60,7 +69,7 @@ pub async fn app_with_logged_in_user_and_state() -> (axum::Router, String, AppSt
     build(None).await
 }
 
-async fn build(llm: Option<Arc<MockLLM>>) -> (axum::Router, String, AppState, TempDir) {
+async fn build(llm: Option<Arc<dyn LLMProvider>>) -> (axum::Router, String, AppState, TempDir) {
     let cfg = config_dir();
     let dir = cfg.path().to_path_buf();
     let conn = db::open_memory().unwrap();
