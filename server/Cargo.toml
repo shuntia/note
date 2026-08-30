@@ -26,6 +26,8 @@ uuid = { version = "1", features = ["v4"] }
 anyhow = "1"
 thiserror = "1"
 ureq = { version = "2", features = ["json"] }
+web-push = { version = "0.10", default-features = false }
+base64 = "0.22"
 
 [dev-dependencies]
 proptest = "1"

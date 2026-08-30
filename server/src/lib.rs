@@ -63,6 +63,16 @@ impl AppState {
         self
     }
 
+    pub fn with_webpush(
+        mut self,
+        ch: crate::channels::webpush::WebPushChannel,
+        public_key: String,
+    ) -> Self {
+        self.channels.push(Arc::new(ch));
+        self.vapid_public_key = Some(public_key);
+        self
+    }
+
     pub fn with_channels(mut self, channels: Vec<Arc<dyn crate::channels::Channel>>) -> Self {
         self.channels = channels;
         self

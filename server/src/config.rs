@@ -9,6 +9,8 @@ pub struct ServerConfig {
     pub data_dir: PathBuf,
     #[serde(default)]
     pub providers: ProvidersConfig,
+    #[serde(default)]
+    pub channels: ChannelsConfig,
 }
 
 impl ServerConfig {
@@ -35,6 +37,18 @@ pub struct ProviderConfig {
 pub struct ProvidersConfig {
     pub llm: Option<ProviderConfig>,
     pub embeddings: Option<ProviderConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct WebPushSettings {
+    pub vapid_pem_file: PathBuf,
+    pub subject: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct ChannelsConfig {
+    pub webpush: Option<WebPushSettings>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -134,6 +148,19 @@ mod tests {
         assert_eq!(UserConfig::load(tmp.path(), "a").unwrap().nightly_time, "03:00");
         write(tmp.path(), "users/aki/user.toml", "nightly_time = \"4:00\"\n");
         assert!(UserConfig::load(tmp.path(), "aki").is_err());
+    }
+
+    #[test]
+    fn channels_section_parses_and_defaults_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), "server.toml", concat!(
+            "bind_addr = \"127.0.0.1:0\"\npublic_base_url = \"http://x\"\ndata_dir = \"data\"\n",
+            "[channels.webpush]\nvapid_pem_file = \"config/vapid.pem\"\nsubject = \"mailto:admin@example.com\"\n"));
+        let cfg = ServerConfig::load(tmp.path()).unwrap();
+        assert_eq!(cfg.channels.webpush.unwrap().subject, "mailto:admin@example.com");
+        write(tmp.path(), "server.toml",
+            "bind_addr = \"127.0.0.1:0\"\npublic_base_url = \"http://x\"\ndata_dir = \"data\"\n");
+        assert!(ServerConfig::load(tmp.path()).unwrap().channels.webpush.is_none());
     }
 
     #[test]
