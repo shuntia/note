@@ -164,10 +164,18 @@ pub fn shift(conn: &Connection, user_id: i64, event_id: i64, minutes: i64) -> Re
 
 /// Postpones delivery: any owned, undecided event (pending/snoozed/fired) can
 /// be snoozed regardless of flexibility, and the slide window does not apply —
-/// snooze is "not now", not a schedule change.
-pub fn snooze(conn: &Connection, user_id: i64, event_id: i64, minutes: i64) -> Result<Option<()>> {
+/// snooze is "not now", not a schedule change. A `done` or `dropped` event is a
+/// settled user decision and is refused, exactly as in `shift`.
+pub fn snooze(
+    conn: &Connection,
+    user_id: i64,
+    event_id: i64,
+    minutes: i64,
+) -> Result<Option<()>, ShiftError> {
     if !(1..=24 * 60).contains(&minutes) {
-        anyhow::bail!("snooze minutes must be in 1..=1440, got {minutes}");
+        return Err(ShiftError::Other(anyhow::anyhow!(
+            "snooze minutes must be in 1..=1440, got {minutes}"
+        )));
     }
     let row: Option<(String, String)> = conn
         .query_row(
@@ -180,7 +188,7 @@ pub fn snooze(conn: &Connection, user_id: i64, event_id: i64, minutes: i64) -> R
         .optional()?;
     let Some((wall, status)) = row else { return Ok(None) };
     if status == "done" || status == "dropped" {
-        return Ok(None);
+        return Err(ShiftError::Decided { status });
     }
     let total = (parse_minutes(&wall)? + minutes).clamp(0, 23 * 60 + 59);
     conn.execute(
@@ -428,7 +436,8 @@ mod tests {
         assert_eq!(ev.wall_time, "10:30");
         // decided events cannot be snoozed
         conn.execute("UPDATE events SET status='done' WHERE id=?1", [ev_id]).unwrap();
-        assert!(snooze(&conn, uid, ev_id, 10).unwrap().is_none());
+        let err = snooze(&conn, uid, ev_id, 10).unwrap_err();
+        assert!(matches!(err, ShiftError::Decided { .. }), "got {err:?}");
         // range and ownership
         conn.execute("UPDATE events SET status='pending' WHERE id=?1", [ev_id]).unwrap();
         assert!(snooze(&conn, uid, ev_id, 0).is_err());

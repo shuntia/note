@@ -39,6 +39,7 @@ pub fn snooze(conn: &Connection, ctx: &ToolCtx, args: SnoozeArgs) -> Result<serd
         Ok(None) => Err(ToolError::not_found(format!(
             "no snoozable event {} for this user", args.event_id
         ))),
+        Err(e @ crate::plan::ShiftError::Decided { .. }) => Err(ToolError::rejected(e.to_string())),
         Err(e) => Err(ToolError::internal(e.to_string())),
     }
 }
@@ -202,6 +203,15 @@ mod tests {
         let e = dispatch(&conn, &ctx(&tmp), SessionKind::Checkin, "schedule_slide",
             r#"{"event_id":99,"minutes":5}"#).unwrap_err();
         assert_eq!(e.kind, "not_found");
+    }
+
+    #[test]
+    fn snooze_on_a_decided_event_is_rejected_not_missing() {
+        let (conn, tmp) = env();
+        conn.execute("UPDATE events SET status='done' WHERE id=1", []).unwrap();
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Checkin, "schedule_snooze",
+            r#"{"event_id":1,"minutes":10}"#).unwrap_err();
+        assert_eq!(e.kind, "rejected");
     }
 
     #[test]

@@ -262,7 +262,8 @@ struct SnoozeReq {
 }
 
 /// The range is checked here so a bad `minutes` is a 400 while a failure inside
-/// `plan::snooze` — which rejects the same range as defense in depth — stays a 500.
+/// `plan::snooze` — which rejects the same range as defense in depth — stays a
+/// 500; a settled `done`/`dropped` event is a 409, as on the shift route.
 async fn event_snooze(
     user: CurrentUser,
     State(state): State<AppState>,
@@ -276,6 +277,7 @@ async fn event_snooze(
     match crate::plan::snooze(&conn, user.id, id, req.minutes) {
         Ok(Some(())) => StatusCode::OK.into_response(),
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(crate::plan::ShiftError::Decided { .. }) => StatusCode::CONFLICT.into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
