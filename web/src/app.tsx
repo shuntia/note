@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react'
 import { api, ApiError } from './api'
 import type { Me } from './types'
+import { Today } from './views/Today'
 
 type Tab = 'today' | 'tasks' | 'talk' | 'more'
 
@@ -53,7 +54,7 @@ export function App() {
         </div>
       </header>
       <main className="view">
-        {tab === 'today' && <Placeholder key={refresh} name="Today" {...views} />}
+        {tab === 'today' && <Today key={refresh} {...views} />}
         {tab === 'tasks' && <Placeholder name="Tasks" {...views} />}
         {tab === 'talk' && <Placeholder name="Talk" {...views} />}
         {tab === 'more' && <Placeholder name="More" {...views} />}
