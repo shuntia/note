@@ -42,6 +42,89 @@ async fn login_sets_cookie_and_me_works() {
     assert_eq!(res.status(), StatusCode::OK);
 }
 
+async fn login_cookie(app: &axum::Router, password: &str) -> String {
+    let res = app
+        .clone()
+        .oneshot(
+            Request::post("/api/login")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(format!(
+                    r#"{{"username":"aki","password":"{password}"}}"#
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    res.headers()[header::SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string()
+}
+
+#[tokio::test]
+async fn logout_invalidates_the_session() {
+    let (state, _tmp) = state_with_user();
+    let app = api::router(state);
+    let cookie = login_cookie(&app, "hunter2").await;
+
+    let res = app
+        .clone()
+        .oneshot(
+            Request::get("/api/me")
+                .header(header::COOKIE, cookie.clone())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let res = app
+        .clone()
+        .oneshot(
+            Request::post("/api/logout")
+                .header(header::COOKIE, cookie.clone())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let res = app
+        .oneshot(
+            Request::get("/api/me")
+                .header(header::COOKIE, cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn repeated_login_failures_are_throttled() {
+    let (state, _tmp) = state_with_user();
+    let app = api::router(state);
+    let attempt = || {
+        Request::post("/api/login")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"username":"aki","password":"wrong"}"#))
+            .unwrap()
+    };
+    for _ in 0..10 {
+        let res = app.clone().oneshot(attempt()).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+    let res = app.oneshot(attempt()).await.unwrap();
+    assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+}
+
 #[tokio::test]
 async fn wrong_password_is_401_and_me_without_cookie_is_401() {
     let (state, _tmp) = state_with_user();

@@ -11,6 +11,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/api/login", post(login))
+        .route("/api/logout", post(logout))
         .route("/api/me", get(me))
         .route("/api/tasks", get(tasks_list).post(tasks_create))
         .route("/api/tasks/{id}", patch(tasks_update))
@@ -36,19 +37,44 @@ struct LoginReq {
 }
 
 async fn login(State(state): State<AppState>, Json(req): Json<LoginReq>) -> impl IntoResponse {
-    let conn = state.db.lock().unwrap();
-    match auth::login(&conn, &req.username, &req.password) {
-        Ok(Some(token)) => (
-            StatusCode::OK,
-            [(
-                header::SET_COOKIE,
-                format!("session={token}; HttpOnly; Path=/; SameSite=Lax"),
-            )],
-        )
-            .into_response(),
-        Ok(None) => StatusCode::UNAUTHORIZED.into_response(),
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    let now = jiff::Timestamp::now();
+    if !state.login_limiter.allow(&req.username, now) {
+        return StatusCode::TOO_MANY_REQUESTS.into_response();
     }
+    let db = state.db.clone();
+    let (username, password) = (req.username.clone(), req.password);
+    let result = tokio::task::spawn_blocking(move || auth::login(&db, &username, &password)).await;
+    match result {
+        Ok(Ok(Some(token))) => {
+            state.login_limiter.clear(&req.username);
+            (
+                StatusCode::OK,
+                [(
+                    header::SET_COOKIE,
+                    auth::session_cookie(&token, state.secure_cookies),
+                )],
+            )
+                .into_response()
+        }
+        Ok(Ok(None)) => {
+            state.login_limiter.record_failure(&req.username, now);
+            StatusCode::UNAUTHORIZED.into_response()
+        }
+        _ => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn logout(State(state): State<AppState>, headers: axum::http::HeaderMap) -> impl IntoResponse {
+    let jar = axum_extra::extract::CookieJar::from_headers(&headers);
+    if let Some(c) = jar.get("session") {
+        let conn = state.db.lock().unwrap();
+        let _ = conn.execute("DELETE FROM sessions WHERE token = ?1", [c.value()]);
+    }
+    (
+        StatusCode::OK,
+        [(header::SET_COOKIE, auth::clear_cookie(state.secure_cookies))],
+    )
+        .into_response()
 }
 
 async fn me(user: CurrentUser) -> Json<serde_json::Value> {
