@@ -1,6 +1,6 @@
 use anyhow::Context;
 use note_server::{
-    api, auth, config::ServerConfig, db, memory, nightly, providers, runner, AppState,
+    api, auth, channels, config::ServerConfig, db, memory, nightly, providers, runner, AppState,
 };
 use std::path::PathBuf;
 
@@ -30,8 +30,15 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let (llm, embeddings) = providers::build(&cfg.providers)?;
-    let state =
+    let mut state =
         AppState::new(conn, config_dir, cfg.data_dir.clone()).with_providers(llm, embeddings);
+    if let Some(wp) = &cfg.channels.webpush {
+        let pem = std::fs::read(&wp.vapid_pem_file)
+            .with_context(|| format!("reading {}", wp.vapid_pem_file.display()))?;
+        let public_key = channels::webpush::public_key_b64(&pem)?;
+        let ch = channels::webpush::WebPushChannel::new(state.db.clone(), pem, wp.subject.clone())?;
+        state = state.with_webpush(ch, public_key);
+    }
     runner::spawn(state.clone());
     nightly::spawn(state.clone());
 

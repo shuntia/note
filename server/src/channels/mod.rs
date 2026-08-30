@@ -1,4 +1,5 @@
 pub mod mock;
+pub mod webpush;
 pub mod ws;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
