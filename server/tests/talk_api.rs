@@ -18,6 +18,7 @@ async fn talk_runs_a_session_and_returns_the_reply() {
             }],
         },
         ChatResponse { text: "done — added call mom".into(), tool_calls: vec![] },
+        ChatResponse { text: "anything else?".into(), tool_calls: vec![] },
     ]));
     let (app, cookie, _cfg) = common::app_with_logged_in_user_and_llm(llm).await;
 
@@ -36,6 +37,20 @@ async fn talk_runs_a_session_and_returns_the_reply() {
     let body = res.into_body().collect().await.unwrap().to_bytes();
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(v["reply"], "done — added call mom");
+
+    // the finished session must have released its gate slot
+    let res = app
+        .clone()
+        .oneshot(
+            Request::post("/api/talk")
+                .header(header::COOKIE, &cookie)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"message":"thanks"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
 
     let res = app
         .clone()
@@ -99,6 +114,44 @@ async fn concurrent_talk_for_same_user_is_conflict() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::CONFLICT);
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["error"], "a reply is already in progress");
+}
+
+#[tokio::test]
+async fn talk_at_global_capacity_is_service_unavailable() {
+    let (app, cookie, state, _cfg) = common::app_with_logged_in_user_and_state().await;
+    let permits: Vec<_> = (0..note_server::MAX_CONCURRENT_TALKS)
+        .map(|i| state.talk_gate.try_enter(-1 - i as i64).unwrap())
+        .collect();
+    let res = app
+        .clone()
+        .oneshot(
+            Request::post("/api/talk")
+                .header(header::COOKIE, &cookie)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"message":"hi"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(res.headers()[header::RETRY_AFTER], "5");
+
+    // the rejected user was rolled back out of the active set
+    drop(permits);
+    let res = app
+        .oneshot(
+            Request::post("/api/talk")
+                .header(header::COOKIE, &cookie)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"message":"hi"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
 }
 
 #[tokio::test]
