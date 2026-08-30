@@ -20,6 +20,8 @@ export function More({
         onClick={async () => {
           try {
             await api.logout()
+          } catch {
+            // dropping to the login screen is the surface either way
           } finally {
             onSignedOut()
           }
