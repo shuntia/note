@@ -7,9 +7,21 @@ use std::path::Path;
 const FALLBACK_DEBRIEF: &str =
     "(Plan generated from your template. The assistant was unavailable overnight.)";
 
-fn local_date(ucfg: &UserConfig, now: jiff::Timestamp) -> jiff::civil::Date {
-    let tz = jiff::tz::TimeZone::get(&ucfg.timezone).unwrap_or(jiff::tz::TimeZone::UTC);
-    now.to_zoned(tz).date()
+/// The date this nightly run plans and debriefs. An early-morning
+/// `nightly_time` runs after midnight, so the current local date is the
+/// sleeper's coming day; from noon onward the run precedes sleep and targets
+/// the next date. Falls back to the current date if `tomorrow` overflows.
+fn plan_date(local: &jiff::Zoned, nightly_time: &str) -> jiff::civil::Date {
+    let evening = nightly_time
+        .split(':')
+        .next()
+        .and_then(|h| h.parse::<u8>().ok())
+        .is_some_and(|h| h >= 12);
+    if evening {
+        local.date().tomorrow().unwrap_or_else(|_| local.date())
+    } else {
+        local.date()
+    }
 }
 
 /// One user's nightly run: the template plan is generated in pure code before
@@ -23,7 +35,8 @@ pub fn run_for_user(
     now: jiff::Timestamp,
 ) -> Result<()> {
     let ucfg = UserConfig::load(deps.config_dir, username)?;
-    let date = local_date(&ucfg, now);
+    let tz = jiff::tz::TimeZone::get(&ucfg.timezone).unwrap_or(jiff::tz::TimeZone::UTC);
+    let date = plan_date(&now.to_zoned(tz), &ucfg.nightly_time);
     {
         let conn = deps.db.lock().unwrap();
         let done: i64 = conn.query_row(
@@ -62,7 +75,7 @@ pub fn run_for_user(
 }
 
 /// Users whose local time has reached their configured `nightly_time` and who
-/// have no debrief for that local date yet. A user whose config cannot be read
+/// have no debrief for that run's target date yet. A user whose config cannot be read
 /// is skipped rather than failing the whole sweep, but the skip is logged: an
 /// unreadable config otherwise ends that user's nightlies silently and forever.
 pub fn due(
@@ -98,9 +111,10 @@ pub fn due(
         if local.time() < due_time {
             continue;
         }
+        let target = plan_date(&local, &ucfg.nightly_time);
         let has: i64 = conn.query_row(
             "SELECT COUNT(*) FROM debriefs WHERE user_id = ?1 AND date = ?2",
-            (id, local.date().to_string()),
+            (id, target.to_string()),
             |r| r.get(0),
         )?;
         if has == 0 {
@@ -328,5 +342,38 @@ mod tests {
             )
             .unwrap();
         assert!(due(&db.lock().unwrap(), tmp.path(), later).unwrap().is_empty());
+    }
+
+    #[test]
+    fn evening_nightly_plans_the_next_local_date() {
+        let (db, tmp) = env("Asia/Tokyo", "22:00");
+        let llm = MockLLM::scripted(vec![
+            ChatResponse { text: "tomorrow looks calm".into(), tool_calls: vec![] },
+        ]);
+        // 2026-08-31T14:00Z = 23:00 JST on 2026-08-31 — past a 22:00 nightly_time
+        let now: jiff::Timestamp = "2026-08-31T14:00:00Z".parse().unwrap();
+        run_for_user(&deps(&db, &tmp, &llm), 1, "aki", now).unwrap();
+        let conn = db.lock().unwrap();
+        let plan_date: String = conn
+            .query_row("SELECT date FROM plans WHERE user_id=1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(plan_date, "2026-09-01");
+        let debrief_date: String = conn
+            .query_row("SELECT date FROM debriefs WHERE user_id=1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(debrief_date, "2026-09-01");
+    }
+
+    #[test]
+    fn due_and_run_agree_on_the_evening_target_date() {
+        let (db, tmp) = env("Asia/Tokyo", "22:00");
+        let now: jiff::Timestamp = "2026-08-31T14:00:00Z".parse().unwrap();
+        let d = due(&db.lock().unwrap(), tmp.path(), now).unwrap();
+        assert_eq!(d, vec![(1, "aki".to_string())]);
+        db.lock().unwrap().execute(
+            "INSERT INTO debriefs (user_id, date, content, created_at) VALUES (1, '2026-09-01', 'x', 't')",
+            [],
+        ).unwrap();
+        assert!(due(&db.lock().unwrap(), tmp.path(), now).unwrap().is_empty());
     }
 }
