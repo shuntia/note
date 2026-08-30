@@ -292,6 +292,29 @@ async fn debrief_route_reads_the_stored_row() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 
+    // another user's debrief is indistinguishable from a missing one
+    {
+        let conn = state.db.lock().unwrap();
+        let other = auth::create_user(&conn, "yuki", "pw2", false).unwrap();
+        conn.execute(
+            "INSERT INTO debriefs (user_id, date, content, created_at)
+             VALUES (?1, '2026-09-01', 'not yours', 't')",
+            [other],
+        )
+        .unwrap();
+    }
+    let res = app
+        .clone()
+        .oneshot(
+            Request::get("/api/debrief?date=2026-09-01")
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
     let res = app
         .oneshot(Request::get("/api/debrief").body(Body::empty()).unwrap())
         .await

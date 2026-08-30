@@ -47,6 +47,13 @@ async fn serves_the_web_build_with_spa_fallback() {
     // API misses stay API-shaped, and real API routes still work
     let (status, _) = get(&app, "/api/definitely-not-a-route").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = get(&app, "/api").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = get(&app, "/api/").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    // 401 rather than 404 proves the real handler beat the catch-all
+    let (status, _) = get(&app, "/api/me").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
     let (status, body) = get(&app, "/healthz").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, "ok");
