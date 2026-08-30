@@ -13,3 +13,17 @@ data_dir = "data"
 # kind = "openai"
 # base_url = "http://localhost:8080/v1"   # e.g. a local llama.cpp router
 # model = "embeddinggemma"
+
+# --- Channels -----------------------------------------------------------
+# Delivery ladder: connected WebSocket clients first, then Web Push.
+# Without a [channels.webpush] section, only in-app WebSocket delivery is
+# active and every push-channel event for a disconnected user is logged as
+# delivery_degraded.
+#
+# Web Push needs a VAPID keypair (any P-256 EC key). Generate one with:
+#   openssl ecparam -genkey -name prime256v1 -noout -out config/vapid.pem
+# The public key is served to clients at GET /api/push/vapid_public_key.
+#
+# [channels.webpush]
+# vapid_pem_file = "config/vapid.pem"
+# subject = "mailto:admin@example.com"
