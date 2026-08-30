@@ -32,20 +32,29 @@ export function More({
 }
 
 function DebriefCard() {
-  const [debrief, setDebrief] = useState<Debrief | null | undefined>(undefined)
+  const [debrief, setDebrief] = useState<Debrief | null | 'error' | undefined>(undefined)
 
-  useEffect(() => {
+  const load = () => {
+    setDebrief(undefined)
     api
       .debrief()
       .then(setDebrief)
-      .catch(() => setDebrief(null))
-  }, [])
+      .catch((err) => setDebrief(err instanceof ApiError && err.status === 404 ? null : 'error'))
+  }
+  useEffect(load, [])
 
   if (debrief === undefined) return null
   return (
     <div className="card">
       {debrief === null ? (
         <p className="muted">No debrief yet — it arrives overnight.</p>
+      ) : debrief === 'error' ? (
+        <p className="muted">
+          Couldn't load the debrief. Try again.{' '}
+          <button className="quiet" onClick={load}>
+            Retry
+          </button>
+        </p>
       ) : (
         <div className="letter">
           <h2>Good morning</h2>
@@ -61,7 +70,9 @@ function PushCard({ notify }: { notify: (msg: string) => void }) {
   const [state, setState] = useState<'unsupported' | 'off' | 'on' | 'busy'>('busy')
 
   useEffect(() => {
-    pushState().then(setState)
+    pushState()
+      .then(setState)
+      .catch(() => setState('unsupported'))
   }, [])
 
   const toggle = async () => {
