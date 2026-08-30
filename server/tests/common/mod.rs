@@ -44,6 +44,7 @@ pub async fn login(app: &axum::Router, username: &str, password: &str) -> String
     res.headers()[header::SET_COOKIE].to_str().unwrap().split(';').next().unwrap().to_string()
 }
 
+#[allow(dead_code)] // every test binary compiles this module; the static-file suite only needs the config dir
 pub async fn app_with_logged_in_user() -> (axum::Router, String, TempDir) {
     let (app, cookie, _state, cfg) = app_with_logged_in_user_and_state().await;
     (app, cookie, cfg)

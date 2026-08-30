@@ -32,6 +32,24 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
+/// Serves the built web client around the API: unknown non-API paths fall back
+/// to `index.html` (SPA routing), unknown API paths stay 404, and a missing
+/// build directory leaves the API-only router untouched so the server runs
+/// without the client ever being built.
+pub fn router_with_web(state: AppState, web_dir: &std::path::Path) -> Router {
+    let api = router(state);
+    if !web_dir.join("index.html").exists() {
+        return api;
+    }
+    let files = tower_http::services::ServeDir::new(web_dir)
+        .fallback(tower_http::services::ServeFile::new(web_dir.join("index.html")));
+    api.route(
+        "/api/{*rest}",
+        axum::routing::any(|| async { StatusCode::NOT_FOUND }),
+    )
+    .fallback_service(files)
+}
+
 #[derive(Deserialize)]
 struct LoginReq {
     username: String,

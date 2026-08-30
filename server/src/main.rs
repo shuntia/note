@@ -43,7 +43,7 @@ async fn main() -> anyhow::Result<()> {
     runner::spawn(state.clone());
     nightly::spawn(state.clone());
 
-    let app = api::router(state);
+    let app = api::router_with_web(state, &cfg.web_dir);
     let listener = tokio::net::TcpListener::bind(&cfg.bind_addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
