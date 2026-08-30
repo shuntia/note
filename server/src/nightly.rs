@@ -1,0 +1,270 @@
+use crate::agent::SessionDeps;
+use crate::config::UserConfig;
+use anyhow::Result;
+use rusqlite::Connection;
+use std::path::Path;
+
+const FALLBACK_DEBRIEF: &str =
+    "(Plan generated from your template. The assistant was unavailable overnight.)";
+
+fn local_date(
+    config_dir: &Path,
+    username: &str,
+    now: jiff::Timestamp,
+) -> Result<jiff::civil::Date> {
+    let ucfg = UserConfig::load(config_dir, username)?;
+    let tz = jiff::tz::TimeZone::get(&ucfg.timezone).unwrap_or(jiff::tz::TimeZone::UTC);
+    Ok(now.to_zoned(tz).date())
+}
+
+/// One user's nightly run: the template plan is generated in pure code before
+/// the agent is involved, so a provider outage still leaves a usable morning
+/// plan. The debrief row doubles as the idempotency marker, which is why a
+/// failed session writes the fallback text instead of retrying every sweep.
+pub fn run_for_user(
+    deps: &SessionDeps,
+    user_id: i64,
+    username: &str,
+    now: jiff::Timestamp,
+) -> Result<()> {
+    let date = local_date(deps.config_dir, username, now)?;
+    {
+        let conn = deps.db.lock().unwrap();
+        let done: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM debriefs WHERE user_id = ?1 AND date = ?2",
+            (user_id, date.to_string()),
+            |r| r.get(0),
+        )?;
+        if done > 0 {
+            return Ok(());
+        }
+        let ucfg = UserConfig::load(deps.config_dir, username)?;
+        let tmpl = crate::templates::Template::load(deps.config_dir, username, &ucfg.template)?;
+        crate::plan::generate(&conn, user_id, &tmpl, date)?;
+    }
+    let content = match crate::agent::run_session(
+        deps,
+        user_id,
+        username,
+        crate::tools::SessionKind::Nightly,
+        &format!("Nightly run for {date}."),
+    ) {
+        Ok(out) if !out.reply.trim().is_empty() => out.reply,
+        Ok(_) => FALLBACK_DEBRIEF.to_string(),
+        Err(e) => {
+            let conn = deps.db.lock().unwrap();
+            let _ = crate::log::record(&conn, Some(user_id), "nightly_fallback", &e.to_string());
+            FALLBACK_DEBRIEF.to_string()
+        }
+    };
+    let conn = deps.db.lock().unwrap();
+    conn.execute(
+        "INSERT OR IGNORE INTO debriefs (user_id, date, content, created_at) VALUES (?1, ?2, ?3, ?4)",
+        (user_id, date.to_string(), content, now.to_string()),
+    )?;
+    Ok(())
+}
+
+/// Users whose local time has reached their configured `nightly_time` and who
+/// have no debrief for that local date yet. A user whose config cannot be read
+/// is skipped rather than failing the whole sweep.
+pub fn due(
+    conn: &Connection,
+    config_dir: &Path,
+    now: jiff::Timestamp,
+) -> Result<Vec<(i64, String)>> {
+    let mut stmt = conn.prepare("SELECT id, username FROM users")?;
+    let users: Vec<(i64, String)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut out = Vec::new();
+    for (id, username) in users {
+        let Ok(ucfg) = UserConfig::load(config_dir, &username) else { continue };
+        let tz = jiff::tz::TimeZone::get(&ucfg.timezone).unwrap_or(jiff::tz::TimeZone::UTC);
+        let local = now.to_zoned(tz);
+        let (h, m) = ucfg.nightly_time.split_once(':').unwrap_or(("03", "00"));
+        let due_time = jiff::civil::time(h.parse().unwrap_or(3), m.parse().unwrap_or(0), 0, 0);
+        if local.time() < due_time {
+            continue;
+        }
+        let has: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM debriefs WHERE user_id = ?1 AND date = ?2",
+            (id, local.date().to_string()),
+            |r| r.get(0),
+        )?;
+        if has == 0 {
+            out.push((id, username));
+        }
+    }
+    Ok(out)
+}
+
+pub fn spawn(state: crate::AppState) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            tick.tick().await;
+            let now = jiff::Timestamp::now();
+            let users = {
+                let conn = state.db.lock().unwrap();
+                due(&conn, &state.config_dir, now)
+            };
+            let users = match users {
+                Ok(u) => u,
+                Err(e) => {
+                    let conn = state.db.lock().unwrap();
+                    let _ = crate::log::record(&conn, None, "nightly_error", &e.to_string());
+                    continue;
+                }
+            };
+            for (user_id, username) in users {
+                let st = state.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    let deps = SessionDeps {
+                        db: &st.db,
+                        config_dir: &st.config_dir,
+                        data_dir: &st.data_dir,
+                        llm: st.llm.as_ref(),
+                        embeddings: st.embeddings.as_deref(),
+                    };
+                    let r = run_for_user(&deps, user_id, &username, now);
+                    (r, username)
+                })
+                .await;
+                if let Ok((Err(e), username)) = result {
+                    let conn = state.db.lock().unwrap();
+                    let _ =
+                        crate::log::record(&conn, None, "nightly_error", &format!("{username}: {e}"));
+                }
+            }
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::providers::{mock::MockLLM, ChatResponse};
+    use std::sync::Mutex;
+
+    fn env(tz: &str, nightly_time: &str) -> (Mutex<rusqlite::Connection>, tempfile::TempDir) {
+        let conn = crate::db::open_memory().unwrap();
+        conn.execute(
+            "INSERT INTO users (username, pass_hash, role) VALUES ('aki', 'x', 'member')",
+            [],
+        )
+        .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let write = |rel: &str, c: &str| {
+            let p = tmp.path().join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, c).unwrap();
+        };
+        write(
+            "defaults/user.toml",
+            &format!(
+                "display_name = \"X\"\ntimezone = \"{tz}\"\ntemplate = \"default\"\nnightly_time = \"{nightly_time}\"\n"
+            ),
+        );
+        write(
+            "defaults/templates/default.toml",
+            "[[events]]\nkind='checkin'\ntime='09:00'\ndays=['mon','tue','wed','thu','fri','sat','sun']\nflexibility='slide'\n",
+        );
+        write("defaults/prompts/persona.md", "persona");
+        write("defaults/prompts/planning.md", "planning");
+        (Mutex::new(conn), tmp)
+    }
+
+    fn deps<'a>(
+        db: &'a Mutex<rusqlite::Connection>,
+        tmp: &'a tempfile::TempDir,
+        llm: &'a dyn crate::providers::LLMProvider,
+    ) -> crate::agent::SessionDeps<'a> {
+        crate::agent::SessionDeps {
+            db,
+            config_dir: tmp.path(),
+            data_dir: tmp.path(),
+            llm,
+            embeddings: None,
+        }
+    }
+
+    #[test]
+    fn nightly_generates_plan_and_stores_debrief_idempotently() {
+        let (db, tmp) = env("UTC", "03:00");
+        let llm = MockLLM::scripted(vec![
+            ChatResponse { text: "good morning! light day ahead".into(), tool_calls: vec![] },
+            ChatResponse { text: "should never be consumed".into(), tool_calls: vec![] },
+        ]);
+        let now: jiff::Timestamp = "2026-08-31T04:00:00Z".parse().unwrap();
+        run_for_user(&deps(&db, &tmp, &llm), 1, "aki", now).unwrap();
+        {
+            let conn = db.lock().unwrap();
+            let n: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM events e JOIN plans p ON p.id = e.plan_id WHERE p.date='2026-08-31'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1);
+            let content: String = conn
+                .query_row(
+                    "SELECT content FROM debriefs WHERE user_id=1 AND date='2026-08-31'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(content.contains("light day"));
+        }
+        run_for_user(&deps(&db, &tmp, &llm), 1, "aki", now).unwrap();
+        assert_eq!(llm.seen().len(), 1);
+    }
+
+    #[test]
+    fn llm_failure_still_leaves_plan_and_fallback_debrief() {
+        struct Failing;
+        impl crate::providers::LLMProvider for Failing {
+            fn chat(
+                &self,
+                _: &crate::providers::ChatRequest,
+            ) -> anyhow::Result<crate::providers::ChatResponse> {
+                anyhow::bail!("down")
+            }
+        }
+        let (db, tmp) = env("UTC", "03:00");
+        let now: jiff::Timestamp = "2026-08-31T04:00:00Z".parse().unwrap();
+        run_for_user(&deps(&db, &tmp, &Failing), 1, "aki", now).unwrap();
+        let conn = db.lock().unwrap();
+        let plans: i64 = conn.query_row("SELECT COUNT(*) FROM plans", [], |r| r.get(0)).unwrap();
+        assert_eq!(plans, 1);
+        let content: String = conn
+            .query_row("SELECT content FROM debriefs WHERE user_id=1", [], |r| r.get(0))
+            .unwrap();
+        assert!(content.contains("template"));
+        let logged: i64 = conn
+            .query_row("SELECT COUNT(*) FROM event_log WHERE kind='nightly_fallback'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(logged, 1);
+    }
+
+    #[test]
+    fn due_respects_local_time_and_existing_debriefs() {
+        let (db, tmp) = env("Asia/Tokyo", "03:00");
+        let early: jiff::Timestamp = "2026-08-30T17:00:00Z".parse().unwrap();
+        assert!(due(&db.lock().unwrap(), tmp.path(), early).unwrap().is_empty());
+        let later: jiff::Timestamp = "2026-08-30T19:00:00Z".parse().unwrap();
+        let d = due(&db.lock().unwrap(), tmp.path(), later).unwrap();
+        assert_eq!(d, vec![(1, "aki".to_string())]);
+        db.lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO debriefs (user_id, date, content, created_at) VALUES (1, '2026-08-31', 'x', 't')",
+                [],
+            )
+            .unwrap();
+        assert!(due(&db.lock().unwrap(), tmp.path(), later).unwrap().is_empty());
+    }
+}
