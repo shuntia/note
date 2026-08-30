@@ -122,6 +122,7 @@ async fn talk(
             user.id,
             &user.username,
             crate::tools::SessionKind::Talk,
+            jiff::Timestamp::now(),
             &message,
         )
     })

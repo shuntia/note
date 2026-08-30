@@ -86,8 +86,9 @@ not bounded by the slide window.
 
 ## Providers & the agent
 
-The server runs with deterministic mock providers by default — no API keys,
-fully testable offline. Configure real ones in `config/server.toml`
+With no LLM configured the server runs against a null provider — no API keys,
+fully runnable offline; plans are still generated from templates and nights
+end with the fallback debrief. Configure real providers in `config/server.toml`
 (`[providers.llm]`, `[providers.embeddings]`): Anthropic or any
 OpenAI-compatible endpoint for chat, OpenAI-compatible for embeddings (a
 local llama.cpp router works). Keys are read from the env var named in

@@ -42,12 +42,14 @@ pub trait EmbeddingsProvider: Send + Sync {
 
 /// Agent config for chat providers: bounded connect time, and a generous
 /// read/write timeout since LLM responses can be slow, so a stalled provider
-/// can't hang forever. Chat calls are made with no locks held.
+/// can't hang forever. The overall `timeout` also caps a drip-feeding endpoint
+/// that keeps resetting the per-operation ones. Chat calls hold no locks.
 pub(crate) fn http_agent() -> ureq::Agent {
     ureq::AgentBuilder::new()
         .timeout_connect(std::time::Duration::from_secs(10))
         .timeout_read(std::time::Duration::from_secs(120))
         .timeout_write(std::time::Duration::from_secs(120))
+        .timeout(std::time::Duration::from_secs(120))
         .build()
 }
 
@@ -59,16 +61,17 @@ pub(crate) fn embeddings_http_agent() -> ureq::Agent {
         .timeout_connect(std::time::Duration::from_secs(5))
         .timeout_read(std::time::Duration::from_secs(10))
         .timeout_write(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(10))
         .build()
 }
 
-/// Builds providers from config. Absent or "mock" LLM config yields an
-/// unscripted mock, so the system is fully runnable with no tokens.
+/// Builds providers from config. Absent or "mock" LLM config yields a
+/// null provider, so the system is fully runnable with no tokens.
 pub fn build(cfg: &crate::config::ProvidersConfig) -> Result<(Arc<dyn LLMProvider>, Option<Arc<dyn EmbeddingsProvider>>)> {
     let llm: Arc<dyn LLMProvider> = match &cfg.llm {
-        None => Arc::new(mock::MockLLM::empty()),
+        None => Arc::new(mock::NullLLM),
         Some(p) => match p.kind.as_str() {
-            "mock" => Arc::new(mock::MockLLM::empty()),
+            "mock" => Arc::new(mock::NullLLM),
             "anthropic" => {
                 let key = read_key(&p.api_key_env, true)?;
                 Arc::new(anthropic::AnthropicLLM::new(&p.base_url, &p.model, &key))
@@ -115,11 +118,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn build_defaults_to_mock_llm_and_no_embeddings() {
+    fn build_defaults_to_null_llm_and_no_embeddings() {
         let cfg = crate::config::ProvidersConfig::default();
         let (llm, emb) = build(&cfg).unwrap();
         let req = ChatRequest { system: "", messages: &[], tools: &[] };
-        assert!(llm.chat(&req).unwrap().text.contains("no scripted response"));
+        let resp = llm.chat(&req).unwrap();
+        assert!(resp.text.is_empty());
+        assert!(resp.tool_calls.is_empty());
         assert!(emb.is_none());
     }
 

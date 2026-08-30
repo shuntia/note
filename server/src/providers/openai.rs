@@ -82,17 +82,39 @@ pub fn body(model: &str, req: &ChatRequest) -> serde_json::Value {
     v
 }
 
+/// `content` is a plain string in the OpenAI spec, but some compatible servers
+/// send the multi-part array shape back; the parts' texts are concatenated.
+fn content_text(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Array(parts) => {
+            parts.iter().filter_map(|p| p["text"].as_str()).collect::<Vec<_>>().join("")
+        }
+        _ => String::new(),
+    }
+}
+
+/// llama.cpp-family servers send tool-call `arguments` as an object rather than
+/// the spec's JSON-encoded string; either way the dispatcher gets JSON text.
+fn tool_args(v: &serde_json::Value) -> String {
+    match v.as_str() {
+        Some(s) => s.to_string(),
+        None if v.is_null() => String::new(),
+        None => v.to_string(),
+    }
+}
+
 pub fn parse(v: &serde_json::Value) -> Result<ChatResponse> {
     let message = &v["choices"][0]["message"];
     anyhow::ensure!(message.is_object(), "openai response missing choices[0].message");
-    let text = message["content"].as_str().unwrap_or("").to_string();
+    let text = content_text(&message["content"]);
     let mut tool_calls = Vec::new();
     if let Some(calls) = message["tool_calls"].as_array() {
         for c in calls {
             tool_calls.push(ToolCall {
                 id: c["id"].as_str().unwrap_or("").to_string(),
                 name: c["function"]["name"].as_str().unwrap_or("").to_string(),
-                args: c["function"]["arguments"].as_str().unwrap_or("").to_string(),
+                args: tool_args(&c["function"]["arguments"]),
             });
         }
     }
@@ -185,6 +207,24 @@ mod tests {
         let r = parse(&v).unwrap();
         assert_eq!(r.text, "");
         assert_eq!(r.tool_calls[0].args, "{\"event_id\":2}");
+    }
+
+    #[test]
+    fn parse_serializes_object_shaped_tool_arguments() {
+        let v = serde_json::json!({"choices":[{"message":{
+            "content": "",
+            "tool_calls":[{"id":"c1","type":"function","function":{"name":"task_create","arguments":{"title":"buy milk"}}}]
+        }}]});
+        let r = parse(&v).unwrap();
+        assert_eq!(r.tool_calls[0].args, "{\"title\":\"buy milk\"}");
+    }
+
+    #[test]
+    fn parse_joins_array_shaped_content() {
+        let v = serde_json::json!({"choices":[{"message":{
+            "content": [{"type":"text","text":"hello "},{"type":"text","text":"there"}]
+        }}]});
+        assert_eq!(parse(&v).unwrap().text, "hello there");
     }
 
     #[test]
