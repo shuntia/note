@@ -20,6 +20,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/events/{id}/snooze", post(event_snooze))
         .route("/api/events/{id}/done", post(event_done))
         .route("/api/events/{id}/drop", post(event_drop))
+        .route("/api/ws", get(ws_connect))
         .route("/api/push/subscribe", post(push_subscribe))
         .route("/api/push/unsubscribe", post(push_unsubscribe))
         .route("/api/push/vapid_public_key", get(vapid_public_key))
@@ -331,6 +332,41 @@ async fn vapid_public_key(_user: CurrentUser, State(state): State<AppState>) -> 
         Some(k) => Json(serde_json::json!({ "key": k })).into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
     }
+}
+
+/// Bridges hub messages to the socket; inbound frames are drained and ignored
+/// (delivery is one-way in v1), and either side closing tears the bridge down.
+async fn ws_connect(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| ws_pump(socket, state.hub.clone(), user.id))
+}
+
+async fn ws_pump(
+    mut socket: axum::extract::ws::WebSocket,
+    hub: std::sync::Arc<crate::channels::ws::ClientHub>,
+    user_id: i64,
+) {
+    let (conn_id, mut rx) = hub.register(user_id);
+    loop {
+        tokio::select! {
+            out = rx.recv() => match out {
+                Some(text) => {
+                    if socket.send(axum::extract::ws::Message::Text(text.into())).await.is_err() {
+                        break;
+                    }
+                }
+                None => break,
+            },
+            inbound = socket.recv() => match inbound {
+                Some(Ok(_)) => {}
+                _ => break,
+            },
+        }
+    }
+    hub.unregister(user_id, conn_id);
 }
 
 #[derive(Deserialize)]
