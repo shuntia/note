@@ -1,4 +1,4 @@
-use super::{Channel, OutboundMessage, Urgency};
+use super::{Channel, OutboundMessage};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -71,16 +71,11 @@ impl Channel for WsChannel {
     }
 
     fn deliver(&self, user_id: i64, _username: &str, msg: &OutboundMessage) -> anyhow::Result<()> {
-        let urgency = match msg.urgency {
-            Urgency::Low => "low",
-            Urgency::Normal => "normal",
-            Urgency::High => "high",
-        };
         let text = serde_json::json!({
             "type": "event",
             "title": msg.title,
             "body": msg.body,
-            "urgency": urgency,
+            "urgency": msg.urgency.as_str(),
             "event_id": msg.event_id,
         })
         .to_string();

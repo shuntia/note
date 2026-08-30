@@ -1,4 +1,4 @@
-use super::{Channel, OutboundMessage, Urgency};
+use super::{Channel, OutboundMessage};
 use crate::push_subs::{self, Subscription};
 use anyhow::{Context, Result};
 use base64::Engine;
@@ -46,12 +46,7 @@ pub fn build_push(
         headers.push(("Content-Encoding".into(), "aes128gcm".into()));
     }
     headers.push(("TTL".into(), m.ttl.to_string()));
-    let urgency = match msg.urgency {
-        Urgency::Low => "low",
-        Urgency::Normal => "normal",
-        Urgency::High => "high",
-    };
-    headers.push(("Urgency".into(), urgency.into()));
+    headers.push(("Urgency".into(), msg.urgency.as_str().into()));
     Ok(BuiltPush {
         endpoint: m.endpoint.to_string(),
         headers,
@@ -210,6 +205,7 @@ v5mC8db8ZSK9ruR2mEgvMEvePYwohpr98g==
         assert!(auth.starts_with("vapid"), "unexpected auth header: {auth}");
         assert_eq!(get("content-encoding").as_deref(), Some("aes128gcm"));
         assert!(get("ttl").is_some());
+        assert_eq!(get("urgency").as_deref(), Some("normal"));
         // encrypted body: non-empty and not the plaintext payload
         assert!(!built.body.is_empty());
         let plain = serde_json::json!({ "title": "Nudge", "body": "stretch break" }).to_string();
