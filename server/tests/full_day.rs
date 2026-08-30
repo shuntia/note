@@ -137,14 +137,9 @@ fn a_full_simulated_day() {
         note_server::runner::fire_due(&conn, tmp.path(), midday).unwrap()
     };
     {
-        let conn = db.lock().unwrap();
-        let kinds: Vec<String> = fired_midday
-            .iter()
-            .map(|id| {
-                conn.query_row("SELECT kind FROM events WHERE id=?1", [id], |r| r.get(0)).unwrap()
-            })
-            .collect();
+        let kinds: Vec<String> = fired_midday.iter().map(|f| f.kind.clone()).collect();
         assert_eq!(kinds, vec!["checkin_call".to_string()]);
+        let conn = db.lock().unwrap();
         let pending: i64 = conn
             .query_row("SELECT COUNT(*) FROM events WHERE status='pending'", [], |r| r.get(0))
             .unwrap();
@@ -158,13 +153,7 @@ fn a_full_simulated_day() {
         note_server::runner::fire_due(&conn, tmp.path(), fire_at).unwrap()
     };
     {
-        let conn = db.lock().unwrap();
-        let kinds: Vec<String> = fired
-            .iter()
-            .map(|id| {
-                conn.query_row("SELECT kind FROM events WHERE id=?1", [id], |r| r.get(0)).unwrap()
-            })
-            .collect();
+        let kinds: Vec<String> = fired.iter().map(|f| f.kind.clone()).collect();
         assert_eq!(kinds, vec!["nudge".to_string()]);
     }
     {

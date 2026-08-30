@@ -10,6 +10,21 @@ struct Candidate {
     username: String,
     date: String,
     wall_time: String,
+    kind: String,
+    channel: String,
+    message: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct FiredEvent {
+    pub event_id: i64,
+    pub user_id: i64,
+    pub username: String,
+    pub kind: String,
+    pub wall_time: String,
+    pub date: String,
+    pub channel: String,
+    pub message: String,
 }
 
 /// Resolves the candidate's stored wall time to an instant in `tz`. `date` and
@@ -57,9 +72,13 @@ fn user_tz(
 /// timezone on the plan date, has arrived by `now`. A candidate that cannot be
 /// resolved is logged as `runner_error` and skipped, so one unusable row cannot
 /// stall the sweep for every other user.
-pub fn fire_due(conn: &Connection, config_dir: &Path, now: jiff::Timestamp) -> Result<Vec<i64>> {
+pub fn fire_due(
+    conn: &Connection,
+    config_dir: &Path,
+    now: jiff::Timestamp,
+) -> Result<Vec<FiredEvent>> {
     let mut stmt = conn.prepare(
-        "SELECT e.id, p.user_id, u.username, p.date, e.wall_time
+        "SELECT e.id, p.user_id, u.username, p.date, e.wall_time, e.kind, e.channel, e.message
          FROM events e
          JOIN plans p ON p.id = e.plan_id
          JOIN users u ON u.id = p.user_id
@@ -73,6 +92,9 @@ pub fn fire_due(conn: &Connection, config_dir: &Path, now: jiff::Timestamp) -> R
                 username: r.get(2)?,
                 date: r.get(3)?,
                 wall_time: r.get(4)?,
+                kind: r.get(5)?,
+                channel: r.get(6)?,
+                message: r.get(7)?,
             })
         })?
         .collect::<rusqlite::Result<_>>()?;
@@ -107,10 +129,27 @@ pub fn fire_due(conn: &Connection, config_dir: &Path, now: jiff::Timestamp) -> R
                 "event_fired",
                 &format!("event {} due {}", c.event_id, due),
             )?;
-            fired.push(c.event_id);
+            fired.push(FiredEvent {
+                event_id: c.event_id,
+                user_id: c.user_id,
+                username: c.username.clone(),
+                kind: c.kind.clone(),
+                wall_time: c.wall_time.clone(),
+                date: c.date.clone(),
+                channel: c.channel.clone(),
+                message: c.message.clone(),
+            });
         }
     }
     Ok(fired)
+}
+
+/// Expired sessions only ever accumulate; sweeping them here keeps logout and
+/// expiry cheap without a dedicated task. RFC 3339 UTC strings compare
+/// lexicographically, so the string comparison is correct.
+pub fn gc_sessions(conn: &Connection, now: jiff::Timestamp) -> Result<()> {
+    conn.execute("DELETE FROM sessions WHERE expires_at < ?1", [now.to_string()])?;
+    Ok(())
 }
 
 pub fn spawn(state: AppState) {
@@ -118,12 +157,31 @@ pub fn spawn(state: AppState) {
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
         loop {
             tick.tick().await;
-            // The guard is confined to this iteration: holding it across the
-            // next `tick` would make the task non-Send and stall handlers.
-            let conn = state.db.lock().unwrap();
-            if let Err(e) = fire_due(&conn, &state.config_dir, jiff::Timestamp::now()) {
-                let _ = crate::log::record(&conn, None, "runner_error", &e.to_string());
+            // The guard is confined to this block: holding it across the next
+            // `tick` — or across a channel's blocking deliver — would make the
+            // task non-Send and stall handlers.
+            let fired = {
+                let conn = state.db.lock().unwrap();
+                let now = jiff::Timestamp::now();
+                let _ = gc_sessions(&conn, now);
+                match fire_due(&conn, &state.config_dir, now) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        let _ = crate::log::record(&conn, None, "runner_error", &e.to_string());
+                        Vec::new()
+                    }
+                }
+            };
+            if fired.is_empty() {
+                continue;
             }
+            let st = state.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                for ev in &fired {
+                    crate::channels::deliver_event(&st.db, &st.channels, ev);
+                }
+            })
+            .await;
         }
     });
 }
@@ -186,7 +244,9 @@ mod tests {
         ).unwrap();
 
         let now: jiff::Timestamp = "2026-08-31T12:00:00Z".parse().unwrap();
-        assert_eq!(fire_due(&conn, tmp.path(), now).unwrap(), vec![good_id]);
+        let fired: Vec<i64> =
+            fire_due(&conn, tmp.path(), now).unwrap().iter().map(|f| f.event_id).collect();
+        assert_eq!(fired, vec![good_id]);
 
         let errors: i64 = conn.query_row(
             "SELECT COUNT(*) FROM event_log WHERE kind='runner_error'", [], |r| r.get(0),
@@ -221,6 +281,37 @@ mod tests {
         conn.execute("UPDATE events SET status='snoozed', wall_time='09:30'", []).unwrap();
         let now: jiff::Timestamp = "2026-08-31T09:31:00Z".parse().unwrap();
         assert_eq!(fire_due(&conn, tmp.path(), now).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn expired_sessions_are_garbage_collected() {
+        let (conn, _tmp, uid) = setup("UTC");
+        conn.execute(
+            "INSERT INTO sessions (token, user_id, expires_at) VALUES ('old', ?1, '2020-01-01T00:00:00Z')",
+            [uid],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO sessions (token, user_id, expires_at) VALUES ('new', ?1, '2099-01-01T00:00:00Z')",
+            [uid],
+        ).unwrap();
+        gc_sessions(&conn, "2026-08-31T00:00:00Z".parse().unwrap()).unwrap();
+        let left: i64 = conn.query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0)).unwrap();
+        assert_eq!(left, 1);
+    }
+
+    #[test]
+    fn fired_events_carry_kind_channel_and_message() {
+        let (conn, tmp, uid) = setup("UTC");
+        let date: jiff::civil::Date = "2026-08-31".parse().unwrap();
+        crate::plan::generate(&conn, uid, &one_event_template("00:00"), date).unwrap();
+        conn.execute("UPDATE events SET message='remember the thing'", []).unwrap();
+        let now: jiff::Timestamp = "2026-08-31T12:00:00Z".parse().unwrap();
+        let fired = fire_due(&conn, tmp.path(), now).unwrap();
+        assert_eq!(fired.len(), 1);
+        assert_eq!(fired[0].kind, "nudge");
+        assert_eq!(fired[0].channel, "push");
+        assert_eq!(fired[0].message, "remember the thing");
+        assert_eq!(fired[0].date, "2026-08-31");
     }
 
     #[test]
