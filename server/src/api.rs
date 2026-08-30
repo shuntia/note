@@ -143,12 +143,28 @@ async fn talk(
     if message.is_empty() || message.len() > MAX_TALK_MESSAGE {
         return StatusCode::BAD_REQUEST.into_response();
     }
-    let _permit = match state.talk_gate.clone().try_enter(user.id) {
+    let permit = match state.talk_gate.try_enter(user.id) {
         Ok(p) => p,
-        Err(crate::TalkBusy::UserBusy) => return StatusCode::CONFLICT.into_response(),
-        Err(crate::TalkBusy::Full) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        Err(crate::TalkBusy::UserBusy) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({ "error": "a reply is already in progress" })),
+            )
+                .into_response()
+        }
+        Err(crate::TalkBusy::Full) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [(header::RETRY_AFTER, "5")],
+                Json(serde_json::json!({ "error": "the server is at capacity" })),
+            )
+                .into_response()
+        }
     };
     let result = tokio::task::spawn_blocking(move || {
+        // held here, not in the handler future, so a cancelled request still
+        // holds the slot until the session it orphaned actually finishes
+        let _permit = permit;
         let deps = crate::agent::SessionDeps {
             db: &state.db,
             config_dir: &state.config_dir,

@@ -98,7 +98,9 @@ With an embeddings provider configured, memory search becomes hybrid
 (lexical + vector) and degrades back to lexical automatically when the
 provider is down.
 
-`POST /api/talk {message}` runs a text conversation with the agent. Agent
+`POST /api/talk {message}` runs a text conversation with the agent. One
+session per user at a time (a second concurrent request gets `409`) and four
+across the server (`503` with `Retry-After` beyond that). Agent
 behavior lives in editable prompt files (`config/defaults/prompts/`,
 overridable per user under `config/users/<user>/prompts/`) — changing tone
 or policy is a file edit, not a deploy.
