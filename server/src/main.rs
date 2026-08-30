@@ -32,6 +32,7 @@ async fn main() -> anyhow::Result<()> {
     let (llm, embeddings) = providers::build(&cfg.providers)?;
     let mut state =
         AppState::new(conn, config_dir, cfg.data_dir.clone()).with_providers(llm, embeddings);
+    state.secure_cookies = cfg.public_base_url.starts_with("https://");
     if let Some(wp) = &cfg.channels.webpush {
         let pem = std::fs::read(&wp.vapid_pem_file)
             .with_context(|| format!("reading {}", wp.vapid_pem_file.display()))?;

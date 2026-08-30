@@ -32,6 +32,8 @@ pub struct AppState {
     pub vapid_public_key: Option<String>,
     pub hub: Arc<crate::channels::ws::ClientHub>,
     pub channels: Vec<Arc<dyn crate::channels::Channel>>,
+    pub secure_cookies: bool,
+    pub login_limiter: Arc<crate::auth::LoginLimiter>,
 }
 
 impl AppState {
@@ -50,6 +52,8 @@ impl AppState {
             vapid_public_key: None,
             hub,
             channels: vec![ws],
+            secure_cookies: false,
+            login_limiter: Arc::new(crate::auth::LoginLimiter::new()),
         }
     }
 
