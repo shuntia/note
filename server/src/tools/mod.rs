@@ -57,6 +57,66 @@ pub struct ToolCtx<'a> {
 
 pub const MAX_ARGS_BYTES: usize = 64 * 1024;
 
+#[derive(Default, Debug)]
+pub struct PreparedVectors {
+    pub content: Option<Vec<f32>>,
+    pub query: Option<Vec<f32>>,
+    pub error: Option<String>,
+}
+
+/// Embeds any text this tool call will need, so `dispatch` itself never does
+/// network I/O. Malformed args embed nothing — dispatch will reject them with
+/// a typed error anyway.
+pub fn prepare(
+    emb: Option<&dyn crate::providers::EmbeddingsProvider>,
+    name: &str,
+    raw_args: &str,
+) -> PreparedVectors {
+    let Some(emb) = emb else { return PreparedVectors::default() };
+    if raw_args.len() > MAX_ARGS_BYTES {
+        return PreparedVectors::default();
+    }
+    let mut out = PreparedVectors::default();
+    match name {
+        "memory_query" => {
+            #[derive(serde::Deserialize, Default)]
+            #[serde(default)]
+            struct Q {
+                query: String,
+            }
+            if let Ok(q) = serde_json::from_str::<Q>(raw_args) {
+                if !q.query.is_empty() {
+                    match emb.embed(&[&q.query]) {
+                        Ok(vs) if !vs.is_empty() => out.query = Some(vs[0].clone()),
+                        Ok(_) => {}
+                        Err(e) => out.error = Some(e.to_string()),
+                    }
+                }
+            }
+        }
+        "memory_write" => {
+            #[derive(serde::Deserialize, Default)]
+            #[serde(default)]
+            struct W {
+                summary: String,
+                body: String,
+            }
+            if let Ok(w) = serde_json::from_str::<W>(raw_args) {
+                if !w.summary.is_empty() || !w.body.is_empty() {
+                    let text = crate::memory::embed_text(&w.summary, &w.body);
+                    match emb.embed(&[&text]) {
+                        Ok(vs) if !vs.is_empty() => out.content = Some(vs[0].clone()),
+                        Ok(_) => {}
+                        Err(e) => out.error = Some(e.to_string()),
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
 /// Ceiling for every free-text field a tool accepts, shared so the surfaces
 /// cannot drift apart.
 pub(crate) const MAX_TEXT_BYTES: usize = 16 * 1024;
@@ -332,6 +392,52 @@ mod tests {
             .unwrap();
         assert_eq!(title, "call dentist");
         assert_eq!(notes, "");
+    }
+
+    #[test]
+    fn prepare_embeds_only_memory_tools_and_reports_failures() {
+        use crate::providers::mock::MockEmbeddings;
+        let emb = MockEmbeddings;
+
+        let v = prepare(Some(&emb), "memory_query", r#"{"query":"abba"}"#);
+        assert!(v.query.is_some());
+        assert!(v.content.is_none() && v.error.is_none());
+
+        let v = prepare(Some(&emb), "memory_write", r#"{"op":"add","category":"semantic","summary":"s","body":"b"}"#);
+        assert!(v.content.is_some());
+        assert!(v.query.is_none());
+
+        // non-memory tools and malformed args cost nothing
+        let v = prepare(Some(&emb), "task_create", r#"{"title":"x"}"#);
+        assert!(v.content.is_none() && v.query.is_none() && v.error.is_none());
+        let v = prepare(Some(&emb), "memory_query", "not json");
+        assert!(v.query.is_none() && v.error.is_none());
+
+        // no provider → all None
+        let v = prepare(None, "memory_query", r#"{"query":"abba"}"#);
+        assert!(v.query.is_none());
+
+        struct FailingEmb;
+        impl crate::providers::EmbeddingsProvider for FailingEmb {
+            fn embed(&self, _: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+                anyhow::bail!("endpoint down")
+            }
+        }
+        let v = prepare(Some(&FailingEmb), "memory_query", r#"{"query":"abba"}"#);
+        assert!(v.query.is_none());
+        assert!(v.error.as_deref().unwrap_or("").contains("endpoint down"));
+    }
+
+    #[test]
+    fn prepared_vector_text_matches_index_text() {
+        use crate::providers::{mock::MockEmbeddings, EmbeddingsProvider};
+        let emb = MockEmbeddings;
+        let v = prepare(Some(&emb), "memory_write",
+            r#"{"op":"add","category":"semantic","summary":"line one\nline two","body":"  padded  "}"#);
+        let direct = emb
+            .embed(&[&crate::memory::embed_text("line one\nline two", "  padded  ")])
+            .unwrap();
+        assert_eq!(v.content.unwrap(), direct[0]);
     }
 
     #[test]
