@@ -12,6 +12,17 @@ pub enum Urgency {
     High,
 }
 
+impl Urgency {
+    /// Wire value shared by the WS frame field and the Web Push `Urgency` header.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Urgency::Low => "low",
+            Urgency::Normal => "normal",
+            Urgency::High => "high",
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct OutboundMessage {
     pub title: String,
