@@ -33,7 +33,12 @@ pub fn record_throttled(
         )
         .optional()?;
     if let Some(ts) = last.and_then(|s| s.parse::<jiff::Timestamp>().ok()) {
-        if (now - ts).total(jiff::Unit::Second).is_ok_and(|s| s < (window_mins * 60) as f64) {
+        // A negative span (stored ts ahead of `now` after a clock step) must
+        // write, not suppress until the clock catches up.
+        if (now - ts)
+            .total(jiff::Unit::Second)
+            .is_ok_and(|s| (0.0..(window_mins * 60) as f64).contains(&s))
+        {
             return Ok(false);
         }
     }
@@ -72,5 +77,15 @@ mod tests {
         assert!(record_throttled(&conn, Some(1), "runner_error", "boom", t0, 60).unwrap());
         assert!(record_throttled(&conn, None, "runner_error", "boom", t2, 60).unwrap());
         assert_eq!(rows(&conn), 4);
+    }
+
+    #[test]
+    fn a_stored_row_ahead_of_now_does_not_suppress() {
+        let conn = crate::db::open_memory().unwrap();
+        let ahead: jiff::Timestamp = "2026-08-31T02:00:00Z".parse().unwrap();
+        let t0: jiff::Timestamp = "2026-08-31T00:00:00Z".parse().unwrap();
+        assert!(record_throttled(&conn, None, "runner_error", "boom", ahead, 60).unwrap());
+        assert!(record_throttled(&conn, None, "runner_error", "boom", t0, 60).unwrap());
+        assert_eq!(rows(&conn), 2);
     }
 }
