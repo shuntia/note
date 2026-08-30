@@ -182,7 +182,8 @@ Every outcome lands in `event_log`, readable at `GET /api/admin/log`:
 - `delivery_ok` — `event <id> via ws` or `via webpush`.
 - `delivery_degraded` — no channel could reach the user; the detail carries
   each channel's reason, or `no channels configured`.
-- `voice_unavailable` — a `voice` event fell back to the push ladder.
+- `voice_unavailable` — a `voice` event fell back to the delivery ladder
+  (WebSocket first, then Web Push).
 
 ### Sessions & limits
 
