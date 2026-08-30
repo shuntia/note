@@ -58,7 +58,9 @@ pub fn generate(conn: &Connection, user_id: i64, template: &Template, date: jiff
     // (e.g. an invalid flexibility value from a hand-edited template) must roll
     // back the plan row too, or the idempotency check above would forever return
     // a truncated plan on retry. A caller already inside a transaction — tool
-    // dispatch — provides that atomicity itself, and SQLite has no nesting.
+    // dispatch — provides that atomicity itself, and SQLite has no nesting; such
+    // a caller must abort its own transaction on error, or the truncated-plan
+    // hazard returns with nothing left here to prevent it.
     let tx = conn.is_autocommit().then(|| conn.unchecked_transaction()).transpose()?;
     conn.execute(
         "INSERT INTO plans (user_id, date, created_at) VALUES (?1, ?2, ?3)",
@@ -277,6 +279,30 @@ mod tests {
         // leftover row from the failed attempt.
         let plan_id = generate(&conn, uid, &tmpl(), date).unwrap();
         assert!(plan_id > 0);
+    }
+
+    /// Tool dispatch calls `generate` inside its own transaction, where SQLite
+    /// forbids a nested one: the plan must still be written, and must still
+    /// vanish when the caller aborts.
+    #[test]
+    fn generate_defers_to_a_caller_transaction() {
+        let conn = crate::db::open_memory().unwrap();
+        let uid = crate::auth::create_user(&conn, "a", "p", false).unwrap();
+        let date: jiff::civil::Date = "2026-08-31".parse().unwrap();
+        let plans = || -> i64 {
+            conn.query_row("SELECT COUNT(*) FROM plans", [], |r| r.get(0)).unwrap()
+        };
+
+        let tx = conn.unchecked_transaction().unwrap();
+        generate(&conn, uid, &tmpl(), date).unwrap();
+        drop(tx);
+        assert_eq!(plans(), 0);
+
+        let tx = conn.unchecked_transaction().unwrap();
+        generate(&conn, uid, &tmpl(), date).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(plans(), 1);
+        assert_eq!(events_for(&conn, uid, date).unwrap().len(), 1);
     }
 
     #[test]
