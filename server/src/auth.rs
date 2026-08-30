@@ -14,10 +14,10 @@ const SESSION_LIFETIME_HOURS: i64 = 30 * 24;
 
 const MAX_USERNAME_LEN: usize = 64;
 
-pub const MAX_FAILURES: u32 = 10;
+pub const MAX_ATTEMPTS: u32 = 10;
 pub const WINDOW_MINS: i64 = 15;
 
-/// Per-username fixed-window failure counter; keys are usernames (attackers
+/// Per-username fixed-window attempt counter; keys are usernames (attackers
 /// rotating usernames still pay the argon2 cost per attempt).
 #[derive(Default)]
 pub struct LoginLimiter {
@@ -28,37 +28,56 @@ fn window_elapsed(now: jiff::Timestamp, start: jiff::Timestamp) -> bool {
     (now.as_second() - start.as_second()) > WINDOW_MINS * 60
 }
 
+/// Request usernames are unbounded, so keys are capped at the length a real
+/// username can reach; longer ones collapse onto their prefix rather than
+/// being rejected, which would leak that the username is invalid via timing.
+fn limiter_key(username: &str) -> &str {
+    if username.len() <= MAX_USERNAME_LEN {
+        return username;
+    }
+    let mut end = MAX_USERNAME_LEN;
+    while !username.is_char_boundary(end) {
+        end -= 1;
+    }
+    &username[..end]
+}
+
 impl LoginLimiter {
     pub fn new() -> Self {
         Self::default()
     }
 
-    pub fn allow(&self, username: &str, now: jiff::Timestamp) -> bool {
+    /// Admits an attempt and counts it in one lock acquisition; a separate
+    /// check and record would let concurrent requests all pass the check.
+    pub fn try_attempt(&self, username: &str, now: jiff::Timestamp) -> bool {
         let mut a = self.attempts.lock().unwrap();
-        match a.get(username) {
-            Some((count, start)) => {
-                if window_elapsed(now, *start) {
-                    a.remove(username);
-                    true
-                } else {
-                    *count < MAX_FAILURES
-                }
-            }
-            None => true,
-        }
-    }
-
-    pub fn record_failure(&self, username: &str, now: jiff::Timestamp) {
-        let mut a = self.attempts.lock().unwrap();
-        let entry = a.entry(username.to_string()).or_insert((0, now));
+        let entry = a.entry(limiter_key(username).to_string()).or_insert((0, now));
         if window_elapsed(now, entry.1) {
             *entry = (0, now);
         }
+        if entry.0 >= MAX_ATTEMPTS {
+            return false;
+        }
         entry.0 += 1;
+        true
     }
 
     pub fn clear(&self, username: &str) {
-        self.attempts.lock().unwrap().remove(username);
+        self.attempts.lock().unwrap().remove(limiter_key(username));
+    }
+
+    /// Drops entries whose window has elapsed; without it the map grows for
+    /// every distinct username ever tried.
+    pub fn sweep(&self, now: jiff::Timestamp) {
+        self.attempts
+            .lock()
+            .unwrap()
+            .retain(|_, (_, start)| !window_elapsed(now, *start));
+    }
+
+    #[cfg(test)]
+    pub fn tracked(&self) -> usize {
+        self.attempts.lock().unwrap().len()
     }
 }
 
@@ -80,13 +99,24 @@ fn validate_username(username: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn create_user(conn: &Connection, username: &str, password: &str, admin: bool) -> Result<i64> {
-    validate_username(username)?;
+pub fn hash_password(password: &str) -> Result<String> {
     let salt = SaltString::generate(&mut OsRng);
-    let hash = Argon2::default()
+    Ok(Argon2::default()
         .hash_password(password.as_bytes(), &salt)
         .map_err(|e| anyhow::anyhow!(e))?
-        .to_string();
+        .to_string())
+}
+
+pub fn create_user(conn: &Connection, username: &str, password: &str, admin: bool) -> Result<i64> {
+    validate_username(username)?;
+    let hash = hash_password(password)?;
+    insert_user(conn, username, &hash, admin)
+}
+
+/// Split out of `create_user` so callers holding a shared connection can run
+/// the argon2 hashing before they take the lock.
+pub fn insert_user(conn: &Connection, username: &str, hash: &str, admin: bool) -> Result<i64> {
+    validate_username(username)?;
     conn.execute(
         "INSERT INTO users (username, pass_hash, role) VALUES (?1, ?2, ?3)",
         (username, hash, if admin { "admin" } else { "member" }),
@@ -240,30 +270,88 @@ mod tests {
     }
 
     #[test]
-    fn limiter_blocks_after_max_failures_and_resets_after_window() {
-        let lim = LoginLimiter::new();
-        let t0: jiff::Timestamp = "2026-08-31T00:00:00Z".parse().unwrap();
-        for _ in 0..MAX_FAILURES {
-            assert!(lim.allow("aki", t0));
-            lim.record_failure("aki", t0);
+    fn login_with_a_corrupt_stored_hash_is_a_mismatch_not_an_error() {
+        let db = std::sync::Mutex::new(crate::db::open_memory().unwrap());
+        {
+            let conn = db.lock().unwrap();
+            create_user(&conn, "aki", "right", false).unwrap();
+            conn.execute("UPDATE users SET pass_hash = 'not-a-phc-string'", [])
+                .unwrap();
         }
-        assert!(!lim.allow("aki", t0));
-        assert!(lim.allow("other", t0));
-        let later = t0 + jiff::Span::new().minutes(WINDOW_MINS + 1);
-        assert!(lim.allow("aki", later));
-        lim.record_failure("aki", later);
+        assert!(login(&db, "aki", "right").unwrap().is_none());
+    }
+
+    fn t0() -> jiff::Timestamp {
+        "2026-08-31T00:00:00Z".parse().unwrap()
+    }
+
+    #[test]
+    fn limiter_blocks_after_max_attempts_and_resets_after_window() {
+        let lim = LoginLimiter::new();
+        for _ in 0..MAX_ATTEMPTS {
+            assert!(lim.try_attempt("aki", t0()));
+        }
+        assert!(!lim.try_attempt("aki", t0()));
+        assert!(lim.try_attempt("other", t0()));
+        let later = t0() + jiff::Span::new().minutes(WINDOW_MINS + 1);
+        assert!(lim.try_attempt("aki", later));
+    }
+
+    #[test]
+    fn clear_releases_a_blocked_username() {
+        let lim = LoginLimiter::new();
+        for _ in 0..MAX_ATTEMPTS {
+            assert!(lim.try_attempt("aki", t0()));
+        }
+        assert!(!lim.try_attempt("aki", t0()));
         lim.clear("aki");
-        assert!(lim.allow("aki", later));
+        assert!(lim.try_attempt("aki", t0()));
+    }
+
+    #[test]
+    fn oversized_usernames_share_one_truncated_key() {
+        let lim = LoginLimiter::new();
+        let long = "a".repeat(MAX_USERNAME_LEN * 100);
+        let longer = format!("{long}{long}");
+        for _ in 0..MAX_ATTEMPTS {
+            assert!(lim.try_attempt(&long, t0()));
+        }
+        assert!(!lim.try_attempt(&longer, t0()));
+        assert_eq!(lim.tracked(), 1);
+        // multi-byte characters must not be split mid-boundary
+        assert!(lim.try_attempt(&"あ".repeat(MAX_USERNAME_LEN), t0()));
+    }
+
+    #[test]
+    fn sweep_drops_only_elapsed_windows() {
+        let lim = LoginLimiter::new();
+        let later = t0() + jiff::Span::new().minutes(WINDOW_MINS + 1);
+        lim.try_attempt("old", t0());
+        lim.try_attempt("fresh", later);
+        lim.sweep(later);
+        assert_eq!(lim.tracked(), 1);
+        lim.sweep(later + jiff::Span::new().minutes(WINDOW_MINS + 1));
+        assert_eq!(lim.tracked(), 0);
     }
 
     #[test]
     fn cookies_carry_hardened_attributes() {
         let c = session_cookie("tok", false);
-        assert!(c.contains("HttpOnly") && c.contains("SameSite=Lax") && c.contains("Max-Age="));
-        assert!(!c.contains("Secure"));
-        let c = session_cookie("tok", true);
-        assert!(c.contains("; Secure"));
-        let c = clear_cookie(false);
-        assert!(c.contains("session=;") && c.contains("Max-Age=0"));
+        assert_eq!(
+            c,
+            "session=tok; HttpOnly; Path=/; SameSite=Lax; Max-Age=2592000"
+        );
+        assert_eq!(
+            session_cookie("tok", true),
+            "session=tok; HttpOnly; Path=/; SameSite=Lax; Max-Age=2592000; Secure"
+        );
+        assert_eq!(
+            clear_cookie(false),
+            "session=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0"
+        );
+        assert_eq!(
+            clear_cookie(true),
+            "session=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0; Secure"
+        );
     }
 }

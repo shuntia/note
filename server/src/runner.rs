@@ -158,9 +158,10 @@ pub fn gc_sessions(conn: &Connection, now: jiff::Timestamp) -> Result<()> {
 /// lock released. Blocking throughout, so async callers must wrap it in
 /// `spawn_blocking`.
 pub fn sweep_once(state: &AppState) {
+    let now = jiff::Timestamp::now();
+    state.login_limiter.sweep(now);
     let fired = {
         let conn = state.db.lock().unwrap();
-        let now = jiff::Timestamp::now();
         if let Err(e) = gc_sessions(&conn, now) {
             let _ = crate::log::record(&conn, None, "runner_error", &e.to_string());
         }
@@ -302,6 +303,20 @@ mod tests {
         gc_sessions(&conn, "2026-08-31T00:00:00Z".parse().unwrap()).unwrap();
         let left: i64 = conn.query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0)).unwrap();
         assert_eq!(left, 1);
+    }
+
+    #[test]
+    fn sweep_evicts_elapsed_login_limiter_entries() {
+        let (conn, tmp, _uid) = setup("UTC");
+        let state = AppState::new(conn, tmp.path().into(), tmp.path().into());
+        state
+            .login_limiter
+            .try_attempt("aki", "2020-01-01T00:00:00Z".parse().unwrap());
+        state.login_limiter.try_attempt("now", jiff::Timestamp::now());
+
+        sweep_once(&state);
+
+        assert_eq!(state.login_limiter.tracked(), 1);
     }
 
     #[test]

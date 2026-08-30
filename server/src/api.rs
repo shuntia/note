@@ -38,7 +38,7 @@ struct LoginReq {
 
 async fn login(State(state): State<AppState>, Json(req): Json<LoginReq>) -> impl IntoResponse {
     let now = jiff::Timestamp::now();
-    if !state.login_limiter.allow(&req.username, now) {
+    if !state.login_limiter.try_attempt(&req.username, now) {
         return StatusCode::TOO_MANY_REQUESTS.into_response();
     }
     let db = state.db.clone();
@@ -56,12 +56,16 @@ async fn login(State(state): State<AppState>, Json(req): Json<LoginReq>) -> impl
             )
                 .into_response()
         }
-        Ok(Ok(None)) => {
-            state.login_limiter.record_failure(&req.username, now);
-            StatusCode::UNAUTHORIZED.into_response()
-        }
-        _ => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        Ok(Ok(None)) => StatusCode::UNAUTHORIZED.into_response(),
+        Ok(Err(e)) => log_login_error(&state, &e.to_string()),
+        Err(e) => log_login_error(&state, &format!("login task failed: {e}")),
     }
+}
+
+fn log_login_error(state: &AppState, detail: &str) -> axum::response::Response {
+    let conn = state.db.lock().unwrap();
+    let _ = crate::log::record(&conn, None, "login_error", detail);
+    StatusCode::INTERNAL_SERVER_ERROR.into_response()
 }
 
 async fn logout(State(state): State<AppState>, headers: axum::http::HeaderMap) -> impl IntoResponse {
@@ -288,10 +292,17 @@ async fn admin_create_user(
     if !user.admin {
         return StatusCode::FORBIDDEN.into_response();
     }
-    let conn = state.db.lock().unwrap();
-    match auth::create_user(&conn, &req.username, &req.password, req.admin) {
-        Ok(_) => StatusCode::OK.into_response(),
-        Err(_) => StatusCode::BAD_REQUEST.into_response(),
+    let db = state.db.clone();
+    let created = tokio::task::spawn_blocking(move || {
+        let hash = auth::hash_password(&req.password)?;
+        let conn = db.lock().unwrap();
+        auth::insert_user(&conn, &req.username, &hash, req.admin)
+    })
+    .await;
+    match created {
+        Ok(Ok(_)) => StatusCode::OK.into_response(),
+        Ok(Err(_)) => StatusCode::BAD_REQUEST.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
 
