@@ -42,7 +42,11 @@ pub trait Channel: Send + Sync {
 /// per-event `message` (set by `notify_send`) overrides the generic body.
 pub fn render(conn: &Connection, ev: &crate::runner::FiredEvent) -> OutboundMessage {
     let (title, mut body, urgency) = if ev.kind.contains("checkin") {
-        ("Check-in".to_string(), format!("{} at {}", ev.kind, ev.wall_time), Urgency::High)
+        (
+            "Check-in".to_string(),
+            format!("Time for your {} check-in — how is the day going?", ev.wall_time),
+            Urgency::High,
+        )
     } else if ev.kind == "debrief" {
         let content: String = conn
             .query_row(
@@ -153,6 +157,8 @@ mod tests {
         let m = render(&conn, &ev("checkin_call", "push", ""));
         assert_eq!(m.title, "Check-in");
         assert_eq!(m.urgency, Urgency::High);
+        assert!(m.body.contains("09:00"), "body: {}", m.body);
+        assert!(!m.body.contains("checkin_call"), "body leaks the kind: {}", m.body);
 
         let m = render(&conn, &ev("nudge", "push", "you wanted a stretch break"));
         assert_eq!(m.body, "you wanted a stretch break");
