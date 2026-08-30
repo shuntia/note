@@ -25,6 +25,7 @@ fn default_channel() -> String { "push".into() }
 
 const DAYS: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 const FLEXIBILITIES: [&str; 3] = ["fixed", "slide", "drop"];
+const CHANNELS: [&str; 2] = ["push", "voice"];
 
 /// Zero-padded 24-hour `HH:MM`; the padding matters because wall times are
 /// compared and sorted as strings once stored.
@@ -70,6 +71,15 @@ impl Template {
             }
             if !FLEXIBILITIES.contains(&ev.flexibility.as_str()) {
                 return Err(bad("flexibility", &ev.flexibility));
+            }
+            if !CHANNELS.contains(&ev.channel.as_str()) {
+                return Err(bad("channel", &ev.channel));
+            }
+            if ev.slide_window_min < 0 {
+                return Err(bad("slide_window_min", &ev.slide_window_min.to_string()));
+            }
+            if ev.kind.trim().is_empty() {
+                return Err(bad("kind", &ev.kind));
             }
         }
         Ok(())
@@ -123,6 +133,24 @@ mod tests {
             "[[events]]\nkind='nudge'\ntime='09:00'\ndays=['mon']\nflexibility='soft'\n");
         let err = Template::load(tmp.path(), "aki", "default").unwrap_err().to_string();
         assert!(err.contains("\"soft\""), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn unknown_channel_negative_window_and_empty_kind_fail_to_load() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), "defaults/templates/default.toml",
+            "[[events]]\nkind='nudge'\ntime='09:00'\ndays=['mon']\nchannel='sms'\n");
+        let err = Template::load(tmp.path(), "aki", "default").unwrap_err().to_string();
+        assert!(err.contains("\"sms\""), "unexpected error: {err}");
+
+        write(tmp.path(), "defaults/templates/default.toml",
+            "[[events]]\nkind='nudge'\ntime='09:00'\ndays=['mon']\nslide_window_min=-5\n");
+        let err = Template::load(tmp.path(), "aki", "default").unwrap_err().to_string();
+        assert!(err.contains("slide_window_min"), "unexpected error: {err}");
+
+        write(tmp.path(), "defaults/templates/default.toml",
+            "[[events]]\nkind=''\ntime='09:00'\ndays=['mon']\n");
+        assert!(Template::load(tmp.path(), "aki", "default").is_err());
     }
 
     #[test]
