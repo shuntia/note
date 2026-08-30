@@ -98,9 +98,7 @@ With an embeddings provider configured, memory search becomes hybrid
 (lexical + vector) and degrades back to lexical automatically when the
 provider is down.
 
-`POST /api/talk {message}` runs a text conversation with the agent. One
-session per user at a time (a second concurrent request gets `409`) and four
-across the server (`503` with `Retry-After` beyond that). Agent
+`POST /api/talk {message}` runs a text conversation with the agent. Agent
 behavior lives in editable prompt files (`config/defaults/prompts/`,
 overridable per user under `config/users/<user>/prompts/`) — changing tone
 or policy is a file edit, not a deploy.
@@ -110,6 +108,92 @@ the server generates the day's plan from their template, lets the agent
 adjust it and write a morning debrief, and stores the debrief. If the model
 is unreachable, the plan still exists and a fallback debrief says so — a
 plainer day, never a missing one.
+
+## Channels & delivery
+
+When an event fires, the server walks a delivery ladder: connected WebSocket
+clients first, then Web Push. The first channel that accepts the message wins;
+if none does, the day is plainer, never an error.
+
+Events carry a `channel` of `push` or `voice`. Voice is not implemented in this
+release — a `voice` event logs `voice_unavailable` and then takes the same
+ladder.
+
+### In-app delivery
+
+`GET /api/ws` upgrades to a WebSocket for the session's user (cookie auth) and
+receives one JSON frame per delivery:
+
+```json
+{ "type": "event", "title": "Check-in", "body": "checkin at 09:00", "urgency": "high", "event_id": 7 }
+```
+
+Delivery is one-way in v1: inbound frames are drained and ignored. The server
+pings every 30s and tears down a connection that has sent nothing for 90s, so a
+half-open socket stops absorbing deliveries and the ladder falls through to
+Web Push.
+
+### Web Push
+
+Web Push needs a VAPID keypair (any P-256 EC key):
+
+```sh
+openssl ecparam -genkey -name prime256v1 -noout -out config/vapid.pem
+```
+
+Then uncomment the stanza in `config/server.toml`:
+
+```toml
+[channels.webpush]
+vapid_pem_file = "config/vapid.pem"
+subject = "mailto:admin@example.com"
+```
+
+`vapid_pem_file` resolves against the server's working directory, like
+`data_dir`; `subject` must be a `mailto:` or `https://` contact URL, and an
+unreadable key or bad subject fails startup rather than the first delivery.
+Without the section, only in-app WebSocket delivery is active and every event
+for a disconnected user is logged as `delivery_degraded`.
+
+Subscription routes — all cookie-authenticated, the public-key route included:
+
+- `GET /api/push/vapid_public_key` → `{"key": "<base64url>"}`, or `404` when
+  Web Push is not configured. Pass the key to
+  `pushManager.subscribe({ userVisibleOnly: true, applicationServerKey })`.
+- `POST /api/push/subscribe` — the browser's `PushSubscription.toJSON()` shape:
+
+  ```json
+  { "endpoint": "https://push.example.net/send/abc", "keys": { "p256dh": "…", "auth": "…" } }
+  ```
+
+  Subscribing again with the same endpoint replaces the stored keys.
+  Non-`http(s)` endpoints, or fields over 2048 (`endpoint`) / 256 (`p256dh`) /
+  64 (`auth`) characters, are rejected with `400`.
+- `POST /api/push/unsubscribe {endpoint}` — `404` if the endpoint is not one of
+  the caller's.
+
+Payloads are encrypted (`aes128gcm`) and VAPID-signed. Endpoints the push
+service reports gone (404/410) are pruned automatically.
+
+### Delivery in the admin log
+
+Every outcome lands in `event_log`, readable at `GET /api/admin/log`:
+
+- `delivery_ok` — `event <id> via ws` or `via webpush`.
+- `delivery_degraded` — no channel could reach the user; the detail carries
+  each channel's reason, or `no channels configured`.
+- `voice_unavailable` — a `voice` event fell back to the push ladder.
+
+### Sessions & limits
+
+- `POST /api/login {username, password}` sets an HttpOnly, SameSite=Lax session
+  cookie valid 30 days (`Secure` whenever `public_base_url` is `https://`).
+  `POST /api/logout` deletes the session row and clears the cookie.
+- Login is capped at 10 attempts per username per 15-minute window; beyond that
+  the route returns `429` without touching the database. A successful login
+  clears the counter.
+- `POST /api/talk` runs one session per user (a second concurrent request gets
+  `409`) and four across the server (`503` with `Retry-After: 5` beyond that).
 
 ## Admin API
 
