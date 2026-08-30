@@ -43,10 +43,14 @@ pub fn router_with_web(state: AppState, web_dir: &std::path::Path) -> Router {
     }
     let files = tower_http::services::ServeDir::new(web_dir)
         .fallback(tower_http::services::ServeFile::new(web_dir.join("index.html")));
+    // `{*rest}` needs at least one character, so the bare prefix forms are
+    // registered separately or they would fall through to the SPA shell.
     api.route(
         "/api/{*rest}",
         axum::routing::any(|| async { StatusCode::NOT_FOUND }),
     )
+    .route("/api", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
+    .route("/api/", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
     .fallback_service(files)
 }
 
@@ -305,7 +309,10 @@ async fn debrief(
                 Ok(c) => c,
                 Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
             };
-            let tz = jiff::tz::TimeZone::get(&ucfg.timezone).unwrap_or(jiff::tz::TimeZone::UTC);
+            let tz = match jiff::tz::TimeZone::get(&ucfg.timezone) {
+                Ok(tz) => tz,
+                Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+            };
             jiff::Timestamp::now().to_zoned(tz).date().to_string()
         }
     };
