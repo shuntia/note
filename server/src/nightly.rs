@@ -7,14 +7,9 @@ use std::path::Path;
 const FALLBACK_DEBRIEF: &str =
     "(Plan generated from your template. The assistant was unavailable overnight.)";
 
-fn local_date(
-    config_dir: &Path,
-    username: &str,
-    now: jiff::Timestamp,
-) -> Result<jiff::civil::Date> {
-    let ucfg = UserConfig::load(config_dir, username)?;
+fn local_date(ucfg: &UserConfig, now: jiff::Timestamp) -> jiff::civil::Date {
     let tz = jiff::tz::TimeZone::get(&ucfg.timezone).unwrap_or(jiff::tz::TimeZone::UTC);
-    Ok(now.to_zoned(tz).date())
+    now.to_zoned(tz).date()
 }
 
 /// One user's nightly run: the template plan is generated in pure code before
@@ -27,7 +22,8 @@ pub fn run_for_user(
     username: &str,
     now: jiff::Timestamp,
 ) -> Result<()> {
-    let date = local_date(deps.config_dir, username, now)?;
+    let ucfg = UserConfig::load(deps.config_dir, username)?;
+    let date = local_date(&ucfg, now);
     {
         let conn = deps.db.lock().unwrap();
         let done: i64 = conn.query_row(
@@ -38,7 +34,6 @@ pub fn run_for_user(
         if done > 0 {
             return Ok(());
         }
-        let ucfg = UserConfig::load(deps.config_dir, username)?;
         let tmpl = crate::templates::Template::load(deps.config_dir, username, &ucfg.template)?;
         crate::plan::generate(&conn, user_id, &tmpl, date)?;
     }
@@ -82,8 +77,9 @@ pub fn due(
         let Ok(ucfg) = UserConfig::load(config_dir, &username) else { continue };
         let tz = jiff::tz::TimeZone::get(&ucfg.timezone).unwrap_or(jiff::tz::TimeZone::UTC);
         let local = now.to_zoned(tz);
-        let (h, m) = ucfg.nightly_time.split_once(':').unwrap_or(("03", "00"));
-        let due_time = jiff::civil::time(h.parse().unwrap_or(3), m.parse().unwrap_or(0), 0, 0);
+        let Ok(due_time) = format!("{}:00", ucfg.nightly_time).parse::<jiff::civil::Time>() else {
+            continue;
+        };
         if local.time() < due_time {
             continue;
         }
@@ -131,10 +127,14 @@ pub fn spawn(state: crate::AppState) {
                     (r, username)
                 })
                 .await;
-                if let Ok((Err(e), username)) = result {
+                let failure = match result {
+                    Ok((Ok(()), _)) => None,
+                    Ok((Err(e), username)) => Some(format!("{username}: {e}")),
+                    Err(join) => Some(format!("nightly task panicked: {join}")),
+                };
+                if let Some(detail) = failure {
                     let conn = state.db.lock().unwrap();
-                    let _ =
-                        crate::log::record(&conn, None, "nightly_error", &format!("{username}: {e}"));
+                    let _ = crate::log::record(&conn, Some(user_id), "nightly_error", &detail);
                 }
             }
         }
@@ -219,6 +219,38 @@ mod tests {
         }
         run_for_user(&deps(&db, &tmp, &llm), 1, "aki", now).unwrap();
         assert_eq!(llm.seen().len(), 1);
+        let conn = db.lock().unwrap();
+        let counts = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+        assert_eq!(counts("SELECT COUNT(*) FROM plans WHERE date='2026-08-31'"), 1);
+        assert_eq!(
+            counts(
+                "SELECT COUNT(*) FROM events e JOIN plans p ON p.id = e.plan_id WHERE p.date='2026-08-31'"
+            ),
+            1
+        );
+        assert_eq!(
+            counts("SELECT COUNT(*) FROM debriefs WHERE user_id=1 AND date='2026-08-31'"),
+            1
+        );
+    }
+
+    #[test]
+    fn blank_reply_stores_fallback_without_logging_a_failure() {
+        let (db, tmp) = env("UTC", "03:00");
+        let llm = MockLLM::scripted(vec![ChatResponse { text: "   \n".into(), tool_calls: vec![] }]);
+        let now: jiff::Timestamp = "2026-08-31T04:00:00Z".parse().unwrap();
+        run_for_user(&deps(&db, &tmp, &llm), 1, "aki", now).unwrap();
+        let conn = db.lock().unwrap();
+        let content: String = conn
+            .query_row("SELECT content FROM debriefs WHERE user_id=1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(content, FALLBACK_DEBRIEF);
+        let logged: i64 = conn
+            .query_row("SELECT COUNT(*) FROM event_log WHERE kind='nightly_fallback'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(logged, 0);
     }
 
     #[test]
