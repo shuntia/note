@@ -240,6 +240,66 @@ async fn snooze_on_a_decided_event_is_conflict() {
 }
 
 #[tokio::test]
+async fn debrief_route_reads_the_stored_row() {
+    let (app, cookie, state, _cfg) = common::app_with_logged_in_user_and_state().await;
+
+    let res = app
+        .clone()
+        .oneshot(
+            Request::get("/api/debrief")
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+    {
+        let conn = state.db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO debriefs (user_id, date, content, created_at)
+             VALUES (1, '2026-08-31', 'a calm day ahead', 't')",
+            [],
+        )
+        .unwrap();
+    }
+    let res = app
+        .clone()
+        .oneshot(
+            Request::get("/api/debrief?date=2026-08-31")
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["date"], "2026-08-31");
+    assert_eq!(v["content"], "a calm day ahead");
+
+    let res = app
+        .clone()
+        .oneshot(
+            Request::get("/api/debrief?date=notadate")
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    let res = app
+        .oneshot(Request::get("/api/debrief").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn other_users_event_is_404() {
     let conn = db::open_memory().unwrap();
     auth::create_user(&conn, "aki", "pw", false).unwrap();
