@@ -94,6 +94,18 @@ const MIGRATIONS: &[&str] = &[
         UNIQUE (user_id, date)
     );
     ",
+    // v4
+    "
+    CREATE TABLE push_subscriptions (
+        id INTEGER PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id),
+        endpoint TEXT NOT NULL UNIQUE,
+        p256dh TEXT NOT NULL,
+        auth TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    );
+    ALTER TABLE events ADD COLUMN message TEXT NOT NULL DEFAULT '';
+    ",
 ];
 
 pub fn open(path: &Path) -> Result<Connection> {
@@ -135,6 +147,7 @@ fn apply_migrations(conn: &Connection, migrations: &[&str]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::OptionalExtension;
 
     #[test]
     fn migrations_apply_and_are_idempotent() {
@@ -213,6 +226,28 @@ mod tests {
         assert!(conn.execute(
             "INSERT INTO debriefs (user_id, date, content, created_at) VALUES (1, '2026-08-31', 'dup', 't')", [],
         ).is_err());
+    }
+
+    #[test]
+    fn v4_adds_push_subscriptions_and_event_message() {
+        let conn = open_memory().unwrap();
+        conn.execute(
+            "INSERT INTO users (username, pass_hash, role) VALUES ('a','h','member')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth, created_at)
+             VALUES (1, 'https://push.example/x', 'k', 'a', 'now')",
+            [],
+        )
+        .unwrap();
+        let msg: String = conn
+            .query_row("SELECT message FROM events WHERE 0", [], |r| r.get(0))
+            .optional()
+            .unwrap()
+            .unwrap_or_default();
+        assert_eq!(msg, "");
     }
 
     #[test]

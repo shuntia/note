@@ -20,6 +20,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/events/{id}/snooze", post(event_snooze))
         .route("/api/events/{id}/done", post(event_done))
         .route("/api/events/{id}/drop", post(event_drop))
+        .route("/api/push/subscribe", post(push_subscribe))
+        .route("/api/push/unsubscribe", post(push_unsubscribe))
+        .route("/api/push/vapid_public_key", get(vapid_public_key))
         .route("/api/admin/log", get(admin_log))
         .route("/api/admin/users", post(admin_create_user))
         .with_state(state)
@@ -261,6 +264,67 @@ async fn admin_create_user(
     match auth::create_user(&conn, &req.username, &req.password, req.admin) {
         Ok(_) => StatusCode::OK.into_response(),
         Err(_) => StatusCode::BAD_REQUEST.into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct SubKeys {
+    p256dh: String,
+    auth: String,
+}
+
+#[derive(Deserialize)]
+struct SubscribeReq {
+    endpoint: String,
+    keys: SubKeys,
+}
+
+const MAX_ENDPOINT_LEN: usize = 2048;
+
+async fn push_subscribe(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Json(req): Json<SubscribeReq>,
+) -> impl IntoResponse {
+    let scheme_ok = req.endpoint.starts_with("https://") || req.endpoint.starts_with("http://");
+    if !scheme_ok
+        || req.endpoint.len() > MAX_ENDPOINT_LEN
+        || req.keys.p256dh.len() > 256
+        || req.keys.auth.len() > 64
+        || req.keys.p256dh.is_empty()
+        || req.keys.auth.is_empty()
+    {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let conn = state.db.lock().unwrap();
+    match crate::push_subs::add(&conn, user.id, &req.endpoint, &req.keys.p256dh, &req.keys.auth) {
+        Ok(()) => StatusCode::OK.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct UnsubscribeReq {
+    endpoint: String,
+}
+
+async fn push_unsubscribe(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Json(req): Json<UnsubscribeReq>,
+) -> impl IntoResponse {
+    let conn = state.db.lock().unwrap();
+    match crate::push_subs::remove(&conn, user.id, &req.endpoint) {
+        Ok(true) => StatusCode::OK.into_response(),
+        Ok(false) => StatusCode::NOT_FOUND.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn vapid_public_key(State(state): State<AppState>) -> impl IntoResponse {
+    match &state.vapid_public_key {
+        Some(k) => Json(serde_json::json!({ "key": k })).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
     }
 }
 

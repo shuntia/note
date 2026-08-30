@@ -10,6 +10,7 @@ pub mod nightly;
 pub mod plan;
 pub mod prompts;
 pub mod providers;
+pub mod push_subs;
 pub mod runner;
 pub mod tasks;
 pub mod templates;
@@ -27,6 +28,7 @@ pub struct AppState {
     pub data_dir: PathBuf,
     pub llm: Arc<dyn LLMProvider>,
     pub embeddings: Option<Arc<dyn EmbeddingsProvider>>,
+    pub vapid_public_key: Option<String>,
 }
 
 impl AppState {
@@ -39,6 +41,7 @@ impl AppState {
             data_dir,
             llm: Arc::new(crate::providers::mock::MockLLM::empty()),
             embeddings: None,
+            vapid_public_key: None,
         }
     }
 
