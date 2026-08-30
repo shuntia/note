@@ -65,6 +65,20 @@ pub fn public_key_b64(vapid_pem: &[u8]) -> Result<String> {
     Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(partial.get_public_key()))
 }
 
+/// VAPID requires a contact the push service can reach if a key misbehaves.
+fn valid_subject(subject: &str) -> bool {
+    subject.starts_with("mailto:") || subject.starts_with("https://")
+}
+
+/// ureq's `Display` embeds the full endpoint URL, which is a per-device bearer
+/// capability, and delivery errors are written to the event log.
+fn describe(err: &ureq::Error) -> String {
+    match err {
+        ureq::Error::Status(code, _) => format!("status {code}"),
+        ureq::Error::Transport(t) => format!("transport error: {}", t.kind()),
+    }
+}
+
 pub struct WebPushChannel {
     db: Arc<Mutex<Connection>>,
     vapid_pem: Vec<u8>,
@@ -74,7 +88,12 @@ pub struct WebPushChannel {
 
 impl WebPushChannel {
     pub fn new(db: Arc<Mutex<Connection>>, vapid_pem: Vec<u8>, subject: String) -> Result<Self> {
-        public_key_b64(&vapid_pem)?; // reject an unusable key at startup, not at first delivery
+        // reject an unusable key or contact at startup, not at first delivery
+        public_key_b64(&vapid_pem)?;
+        anyhow::ensure!(
+            valid_subject(&subject),
+            "vapid subject must be a mailto: or https:// URL, got {subject:?}"
+        );
         let agent = ureq::AgentBuilder::new()
             .timeout_connect(std::time::Duration::from_secs(5))
             .timeout(std::time::Duration::from_secs(15))
@@ -122,20 +141,25 @@ impl Channel for WebPushChannel {
                     Err(ureq::Error::Status(code, _)) if code == 404 || code == 410 => {
                         gone.push(sub.endpoint.clone());
                     }
-                    Err(e) => last_err = e.to_string(),
+                    Err(e) => last_err = describe(&e),
                 },
             }
         }
         if !gone.is_empty() {
             let conn = self.db.lock().unwrap();
             for endpoint in &gone {
-                let _ = push_subs::remove_endpoint(&conn, endpoint);
+                if let Err(e) = push_subs::remove_endpoint(&conn, endpoint) {
+                    last_err = format!("pruning a gone subscription failed: {e}");
+                }
             }
         }
-        if delivered == 0 {
-            anyhow::bail!("no push delivery succeeded: {last_err}");
+        if delivered > 0 {
+            return Ok(());
         }
-        Ok(())
+        if last_err.is_empty() {
+            anyhow::bail!("all push subscriptions gone (pruned {})", gone.len());
+        }
+        anyhow::bail!("no push delivery succeeded: {last_err}");
     }
 }
 
@@ -145,6 +169,7 @@ mod tests {
     use crate::channels::{OutboundMessage, Urgency};
     use crate::push_subs::Subscription;
 
+    // Throwaway P-256 key generated for these tests only — never a deployment key.
     const TEST_PEM: &[u8] = b"-----BEGIN EC PRIVATE KEY-----
 MHcCAQEEIHmZ5O6AfVwy/vYIs4KDabU6mZnBmFw1RV7wfeQ0LB7goAoGCCqGSM49
 AwEHoUQDQgAEA7nqkgOVsRzMWh/T0AnwWx4Nep2dfQAns3Mn1OkO/t/+V/Voqszi
@@ -196,6 +221,20 @@ v5mC8db8ZSK9ruR2mEgvMEvePYwohpr98g==
         let key = public_key_b64(TEST_PEM).unwrap();
         assert!(!key.is_empty());
         assert!(!key.contains('+') && !key.contains('/') && !key.contains('='));
+    }
+
+    #[test]
+    fn new_rejects_a_subject_that_is_not_a_contact_url() {
+        let db = Arc::new(Mutex::new(crate::db::open_memory().unwrap()));
+        let bad = WebPushChannel::new(db.clone(), TEST_PEM.to_vec(), "admin@example.com".into());
+        assert!(bad.is_err());
+        assert!(
+            WebPushChannel::new(db.clone(), TEST_PEM.to_vec(), "mailto:admin@example.com".into())
+                .is_ok()
+        );
+        assert!(
+            WebPushChannel::new(db, TEST_PEM.to_vec(), "https://example.com/contact".into()).is_ok()
+        );
     }
 
     #[test]
