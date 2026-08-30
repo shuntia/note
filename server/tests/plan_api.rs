@@ -208,6 +208,38 @@ async fn snooze_pushes_the_event_and_rejects_out_of_range_minutes() {
 }
 
 #[tokio::test]
+async fn snooze_on_a_decided_event_is_conflict() {
+    let (app, cookie, state, _cfg) = common::app_with_logged_in_user_and_state().await;
+    let res = app
+        .clone()
+        .oneshot(
+            Request::get("/api/plan/today?date=2026-08-31")
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    {
+        let conn = state.db.lock().unwrap();
+        conn.execute("UPDATE events SET status='done' WHERE id=?1", [1]).unwrap();
+    }
+
+    let res = app
+        .oneshot(
+            Request::post("/api/events/1/snooze")
+                .header(header::COOKIE, &cookie)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"minutes":15}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
 async fn other_users_event_is_404() {
     let conn = db::open_memory().unwrap();
     auth::create_user(&conn, "aki", "pw", false).unwrap();
