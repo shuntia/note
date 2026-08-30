@@ -1,5 +1,6 @@
 pub mod context_ops;
 pub mod memory_ops;
+pub mod outreach_ops;
 pub mod schedule_ops;
 pub mod task_ops;
 
@@ -101,6 +102,7 @@ const NIGHTLY: &[&str] = &[
     "schedule_drop",
     "context_edit",
     "schedule_insert",
+    "notify_send",
 ];
 
 pub fn registry(kind: SessionKind) -> &'static [&'static str] {
@@ -156,6 +158,10 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
         "schedule_insert" => (
             "Insert a new event into an existing day plan.",
             schema::<schedule_ops::InsertArgs>(),
+        ),
+        "notify_send" => (
+            "Send the user a push nudge with this text (delivered within a minute).",
+            schema::<outreach_ops::SendArgs>(),
         ),
         _ => unreachable!("describe covers every registered tool"),
     }
@@ -220,6 +226,7 @@ fn run(
         "schedule_snooze" => schedule_ops::snooze(conn, ctx, parse(raw)?),
         "schedule_drop" => schedule_ops::drop_event(conn, ctx, parse(raw)?),
         "schedule_insert" => schedule_ops::insert(conn, ctx, parse(raw)?),
+        "notify_send" => outreach_ops::send(conn, ctx, parse(raw)?),
         _ => unreachable!("registry guarantees a known name"),
     }
 }

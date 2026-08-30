@@ -10,6 +10,8 @@ use thiserror::Error;
 pub enum ShiftError {
     #[error("cumulative slide of {offset} min exceeds the ±{window} min window")]
     OutOfWindow { offset: i64, window: i64 },
+    #[error("event already {status}")]
+    Decided { status: String },
     #[error(transparent)]
     Db(#[from] rusqlite::Error),
     #[error(transparent)]
@@ -55,22 +57,25 @@ pub fn generate(conn: &Connection, user_id: i64, template: &Template, date: jiff
     // Plan creation and its events insert as one unit: a failure partway through
     // (e.g. an invalid flexibility value from a hand-edited template) must roll
     // back the plan row too, or the idempotency check above would forever return
-    // a truncated plan on retry.
-    let tx = conn.unchecked_transaction()?;
-    tx.execute(
+    // a truncated plan on retry. A caller already inside a transaction — tool
+    // dispatch — provides that atomicity itself, and SQLite has no nesting.
+    let tx = conn.is_autocommit().then(|| conn.unchecked_transaction()).transpose()?;
+    conn.execute(
         "INSERT INTO plans (user_id, date, created_at) VALUES (?1, ?2, ?3)",
         (user_id, date.to_string(), jiff::Timestamp::now().to_string()),
     )?;
-    let plan_id = tx.last_insert_rowid();
+    let plan_id = conn.last_insert_rowid();
     let day = weekday_key(date);
     for ev in template.events.iter().filter(|e| e.days.iter().any(|d| d == day)) {
-        tx.execute(
+        conn.execute(
             "INSERT INTO events (plan_id, kind, wall_time, orig_wall_time, flexibility, slide_window_min, channel)
              VALUES (?1, ?2, ?3, ?3, ?4, ?5, ?6)",
             (plan_id, &ev.kind, &ev.time, &ev.flexibility, ev.slide_window_min, &ev.channel),
         )?;
     }
-    tx.commit()?;
+    if let Some(tx) = tx {
+        tx.commit()?;
+    }
     Ok(plan_id)
 }
 
@@ -89,20 +94,31 @@ pub fn events_for(conn: &Connection, user_id: i64, date: jiff::civil::Date) -> R
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
-/// Returns `(wall_time, flexibility, orig_wall_time, slide_window_min)` only
-/// when the event's plan belongs to `user_id`, so callers cannot distinguish
-/// someone else's event from a missing one.
-fn owned_event(
-    conn: &Connection,
-    user_id: i64,
-    event_id: i64,
-) -> rusqlite::Result<Option<(String, String, String, i64)>> {
+struct OwnedEvent {
+    wall_time: String,
+    flexibility: String,
+    orig_wall_time: String,
+    slide_window_min: i64,
+    status: String,
+}
+
+/// Resolves an event only when its plan belongs to `user_id`, so callers cannot
+/// distinguish someone else's event from a missing one.
+fn owned_event(conn: &Connection, user_id: i64, event_id: i64) -> rusqlite::Result<Option<OwnedEvent>> {
     conn.query_row(
-        "SELECT e.wall_time, e.flexibility, e.orig_wall_time, e.slide_window_min
+        "SELECT e.wall_time, e.flexibility, e.orig_wall_time, e.slide_window_min, e.status
          FROM events e JOIN plans p ON p.id = e.plan_id
          WHERE e.id = ?1 AND p.user_id = ?2",
         (event_id, user_id),
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        |r| {
+            Ok(OwnedEvent {
+                wall_time: r.get(0)?,
+                flexibility: r.get(1)?,
+                orig_wall_time: r.get(2)?,
+                slide_window_min: r.get(3)?,
+                status: r.get(4)?,
+            })
+        },
     )
     .optional()
 }
@@ -114,21 +130,25 @@ fn parse_minutes(wall: &str) -> anyhow::Result<i64> {
 
 /// Moves the event's wall time by `minutes`, clamped inside the day and — when
 /// the event carries a positive `slide_window_min` — bounded so the cumulative
-/// offset from `orig_wall_time` stays within the window. Only a `snoozed`
-/// event returns to `pending`; a decided or fired one keeps its status. `None`
-/// when the event is not the user's or its flexibility is `fixed`.
+/// offset from `orig_wall_time` stays within the window. A `done` or `dropped`
+/// event is a settled user decision and is refused. Only a `snoozed` event
+/// returns to `pending`; a `fired` one keeps its status. `None` when the event
+/// is not the user's or its flexibility is `fixed`.
 pub fn shift(conn: &Connection, user_id: i64, event_id: i64, minutes: i64) -> Result<Option<()>, ShiftError> {
-    let Some((wall, flex, orig, window)) = owned_event(conn, user_id, event_id)? else {
+    let Some(ev) = owned_event(conn, user_id, event_id)? else {
         return Ok(None);
     };
-    if flex == "fixed" {
+    if ev.flexibility == "fixed" {
         return Ok(None);
     }
-    let total = parse_minutes(&wall)?.saturating_add(minutes).clamp(0, 23 * 60 + 59);
-    if window > 0 {
-        let offset = total - parse_minutes(&orig)?;
-        if offset.abs() > window {
-            return Err(ShiftError::OutOfWindow { offset, window });
+    if ev.status == "done" || ev.status == "dropped" {
+        return Err(ShiftError::Decided { status: ev.status });
+    }
+    let total = parse_minutes(&ev.wall_time)?.saturating_add(minutes).clamp(0, 23 * 60 + 59);
+    if ev.slide_window_min > 0 {
+        let offset = total - parse_minutes(&ev.orig_wall_time)?;
+        if offset.abs() > ev.slide_window_min {
+            return Err(ShiftError::OutOfWindow { offset, window: ev.slide_window_min });
         }
     }
     conn.execute(
@@ -298,7 +318,25 @@ mod tests {
     }
 
     #[test]
-    fn shift_does_not_resurrect_a_decided_event() {
+    fn shift_keeps_a_fired_event_fired() {
+        let conn = crate::db::open_memory().unwrap();
+        let uid = crate::auth::create_user(&conn, "a", "p", false).unwrap();
+        let date: jiff::civil::Date = "2026-08-31".parse().unwrap();
+        let mut t = tmpl();
+        t.events[0].flexibility = "slide".into();
+        t.events[0].slide_window_min = 0;
+        generate(&conn, uid, &t, date).unwrap();
+        let ev_id = events_for(&conn, uid, date).unwrap()[0].id;
+        conn.execute("UPDATE events SET status = 'fired' WHERE id = ?1", [ev_id]).unwrap();
+
+        assert!(shift(&conn, uid, ev_id, 30).unwrap().is_some());
+        let ev = &events_for(&conn, uid, date).unwrap()[0];
+        assert_eq!(ev.status, "fired");
+        assert_eq!(ev.wall_time, "09:30");
+    }
+
+    #[test]
+    fn shift_rejects_done_and_dropped_events() {
         let conn = crate::db::open_memory().unwrap();
         let uid = crate::auth::create_user(&conn, "a", "p", false).unwrap();
         let date: jiff::civil::Date = "2026-08-31".parse().unwrap();
@@ -308,13 +346,14 @@ mod tests {
         generate(&conn, uid, &t, date).unwrap();
         let ev_id = events_for(&conn, uid, date).unwrap()[0].id;
 
-        for decided in ["done", "dropped", "fired"] {
+        for decided in ["done", "dropped"] {
             conn.execute("UPDATE events SET status = ?1 WHERE id = ?2", (decided, ev_id)).unwrap();
-            assert!(shift(&conn, uid, ev_id, 30).unwrap().is_some());
+            let err = shift(&conn, uid, ev_id, 30).unwrap_err();
+            assert!(matches!(err, ShiftError::Decided { .. }), "got {err:?}");
             let ev = &events_for(&conn, uid, date).unwrap()[0];
             assert_eq!(ev.status, decided);
+            assert_eq!(ev.wall_time, "09:00");
         }
-        assert_eq!(events_for(&conn, uid, date).unwrap()[0].wall_time, "10:30");
     }
 
     #[test]
