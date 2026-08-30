@@ -1,4 +1,4 @@
-use note_server::tools::{dispatch, SessionKind, ToolCtx, MAX_ARGS_BYTES};
+use note_server::tools::{dispatch, PreparedVectors, SessionKind, ToolCtx, MAX_ARGS_BYTES};
 use proptest::prelude::*;
 
 fn setup() -> (rusqlite::Connection, tempfile::TempDir) {
@@ -146,7 +146,7 @@ proptest! {
         std::fs::create_dir(&data).unwrap();
         let ctx = ToolCtx {
             config_dir: &data, data_dir: &data,
-            user_id: 1, username: "aki", embeddings: None,
+            user_id: 1, username: "aki", vectors: PreparedVectors::default(),
         };
         let kind = [SessionKind::Nightly, SessionKind::Checkin, SessionKind::Talk][kind_idx];
         let before_counts = snapshot(&conn);

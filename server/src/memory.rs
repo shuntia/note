@@ -157,21 +157,14 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
     if na == 0.0 || nb == 0.0 { 0.0 } else { dot / (na * nb) }
 }
 
-/// Embed failure degrades to no vector — the write itself already succeeded.
-fn store_vector(conn: &Connection, user: &str, f: &MemoryFile, emb: Option<&dyn crate::providers::EmbeddingsProvider>) {
-    let Some(emb) = emb else { return };
-    match emb.embed(&[&format!("{}\n{}", f.summary, f.body)]) {
-        Ok(vs) if !vs.is_empty() => {
-            let _ = conn.execute(
-                "INSERT OR REPLACE INTO memory_vectors (user, id, vector) VALUES (?1, ?2, ?3)",
-                (user, &f.id, vec_to_blob(&vs[0])),
-            );
-        }
-        Ok(_) => {}
-        Err(e) => {
-            let _ = crate::log::record(conn, None, "memory_embed_error", &format!("{}: {e}", f.id));
-        }
-    }
+/// A missing vector degrades to no index entry — the write itself already
+/// succeeded, and embed-failure logging happens on the dispatch path.
+fn store_vector(conn: &Connection, user: &str, id: &str, vector: Option<&[f32]>) {
+    let Some(v) = vector else { return };
+    let _ = conn.execute(
+        "INSERT OR REPLACE INTO memory_vectors (user, id, vector) VALUES (?1, ?2, ?3)",
+        (user, id, vec_to_blob(v)),
+    );
 }
 
 pub fn add(
@@ -181,7 +174,7 @@ pub fn add(
     category: &str,
     summary: &str,
     body: &str,
-    emb: Option<&dyn crate::providers::EmbeddingsProvider>,
+    vector: Option<&[f32]>,
 ) -> Result<String> {
     if !CATEGORIES.contains(&category) {
         bail!("invalid category: {category}");
@@ -200,7 +193,7 @@ pub fn add(
     let path = dir.join(format!("{}.md", f.id));
     write_atomic(&path, &render(&f))?;
     index_insert(conn, user, &f, &path)?;
-    store_vector(conn, user, &f, emb);
+    store_vector(conn, user, &f.id, vector);
     Ok(f.id)
 }
 
@@ -218,7 +211,7 @@ pub fn update(
     id: &str,
     summary: &str,
     body: &str,
-    emb: Option<&dyn crate::providers::EmbeddingsProvider>,
+    vector: Option<&[f32]>,
 ) -> Result<Option<()>, WriteError> {
     let Some((path, archived)) = locate(data_dir, user, id) else {
         return Ok(None);
@@ -231,7 +224,7 @@ pub fn update(
     f.body = body.trim().into();
     write_atomic(&path, &render(&f))?;
     index_insert(conn, user, &f, &path)?;
-    store_vector(conn, user, &f, emb);
+    store_vector(conn, user, &f.id, vector);
     Ok(Some(()))
 }
 
@@ -242,7 +235,7 @@ pub fn supersede(
     old_id: &str,
     summary: &str,
     body: &str,
-    emb: Option<&dyn crate::providers::EmbeddingsProvider>,
+    vector: Option<&[f32]>,
 ) -> Result<Option<String>, WriteError> {
     let Some((old_path, archived)) = locate(data_dir, user, old_id) else {
         return Ok(None);
@@ -270,7 +263,7 @@ pub fn supersede(
     index_insert(conn, user, &old, &arch_path)?;
     index_insert(conn, user, &new, &new_path)?;
     conn.execute("DELETE FROM memory_vectors WHERE user = ?1 AND id = ?2", (user, &old.id))?;
-    store_vector(conn, user, &new, emb);
+    store_vector(conn, user, &new.id, vector);
     Ok(Some(new.id))
 }
 
@@ -300,26 +293,8 @@ fn lexical_query(conn: &Connection, user: &str, q: &str, limit: i64) -> Result<V
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
-/// Ids of the user's live facts by cosine similarity, best first. A missing or
-/// failing embedder yields no ids, leaving the caller lexical-only.
-fn vector_query(
-    conn: &Connection,
-    user: &str,
-    q: &str,
-    limit: usize,
-    emb: Option<&dyn crate::providers::EmbeddingsProvider>,
-) -> Result<Vec<String>> {
-    let Some(emb) = emb else { return Ok(vec![]) };
-    let qv = match emb.embed(&[q]) {
-        Ok(vs) => match vs.into_iter().next() {
-            Some(v) => v,
-            None => return Ok(vec![]),
-        },
-        Err(e) => {
-            let _ = crate::log::record(conn, None, "memory_embed_error", &format!("query: {e}"));
-            return Ok(vec![]);
-        }
-    };
+/// Ids of the user's live facts by cosine similarity, best first.
+fn vector_query(conn: &Connection, user: &str, qv: &[f32], limit: usize) -> Result<Vec<String>> {
     let mut stmt = conn.prepare(
         "SELECT v.id, v.vector
          FROM memory_vectors v
@@ -331,7 +306,7 @@ fn vector_query(
         .collect::<rusqlite::Result<Vec<_>>>()?
         .into_iter()
         .map(|(id, blob)| {
-            let score = cosine(&qv, &blob_to_vec(&blob));
+            let score = cosine(qv, &blob_to_vec(&blob));
             (id, score)
         })
         .collect();
@@ -359,11 +334,14 @@ pub fn query(
     user: &str,
     q: &str,
     limit: i64,
-    emb: Option<&dyn crate::providers::EmbeddingsProvider>,
+    query_vec: Option<&[f32]>,
 ) -> Result<Vec<QueryHit>> {
     let take = limit as usize;
     let lexical = lexical_query(conn, user, q, limit.max(32))?;
-    let vector = vector_query(conn, user, q, 32, emb)?;
+    let vector = match query_vec {
+        Some(qv) => vector_query(conn, user, qv, 32)?,
+        None => vec![],
+    };
     if vector.is_empty() {
         return Ok(lexical.into_iter().take(take).collect());
     }
@@ -520,14 +498,16 @@ mod tests {
 
     #[test]
     fn vectors_written_on_add_and_pruned_on_supersede() {
+        use crate::providers::EmbeddingsProvider;
         let (conn, tmp) = env();
         let e = crate::providers::mock::MockEmbeddings;
-        let id = add(&conn, tmp.path(), "aki", "semantic", "abc", "abc", Some(&e)).unwrap();
+        let v = e.embed(&[&embed_text("abc", "abc")]).unwrap();
+        let id = add(&conn, tmp.path(), "aki", "semantic", "abc", "abc", Some(&v[0])).unwrap();
         let n: i64 = conn.query_row(
             "SELECT COUNT(*) FROM memory_vectors WHERE user='aki' AND id=?1", [&id], |r| r.get(0),
         ).unwrap();
         assert_eq!(n, 1);
-        let new_id = supersede(&conn, tmp.path(), "aki", &id, "abc", "abc", Some(&e)).unwrap().unwrap();
+        let new_id = supersede(&conn, tmp.path(), "aki", &id, "abc", "abc", Some(&v[0])).unwrap().unwrap();
         let old_n: i64 = conn.query_row(
             "SELECT COUNT(*) FROM memory_vectors WHERE id=?1", [&id], |r| r.get(0),
         ).unwrap();
@@ -540,14 +520,30 @@ mod tests {
 
     #[test]
     fn hybrid_query_ranks_vector_similar_fact_first() {
+        use crate::providers::EmbeddingsProvider;
         let (conn, tmp) = env();
         let e = crate::providers::mock::MockEmbeddings;
         // lexically, neither fact contains the query token "aaab"; only vectors can rank them
-        let close = add(&conn, tmp.path(), "aki", "semantic", "zz", "aaaa", Some(&e)).unwrap();
-        let _far = add(&conn, tmp.path(), "aki", "semantic", "zz", "hhhh", Some(&e)).unwrap();
-        let hits = query(&conn, "aki", "aaab", 2, Some(&e)).unwrap();
+        let cv = e.embed(&[&embed_text("zz", "aaaa")]).unwrap();
+        let close = add(&conn, tmp.path(), "aki", "semantic", "zz", "aaaa", Some(&cv[0])).unwrap();
+        let fv = e.embed(&[&embed_text("zz", "hhhh")]).unwrap();
+        let _far = add(&conn, tmp.path(), "aki", "semantic", "zz", "hhhh", Some(&fv[0])).unwrap();
+        let qv = e.embed(&["aaab"]).unwrap();
+        let hits = query(&conn, "aki", "aaab", 2, Some(&qv[0])).unwrap();
         assert!(!hits.is_empty(), "vector arm must contribute hits with no lexical match");
         assert_eq!(hits[0].id, close);
+    }
+
+    #[test]
+    fn query_without_vector_stays_lexical_even_when_vectors_exist() {
+        use crate::providers::EmbeddingsProvider;
+        let (conn, tmp) = env();
+        let e = crate::providers::mock::MockEmbeddings;
+        let v = e.embed(&[&embed_text("dentist", "molar hurts")]).unwrap();
+        let id = add(&conn, tmp.path(), "aki", "semantic", "dentist", "molar hurts", Some(&v[0])).unwrap();
+        let hits = query(&conn, "aki", "molar", 10, None).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, id);
     }
 
     #[test]

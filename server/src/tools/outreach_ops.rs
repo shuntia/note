@@ -75,7 +75,7 @@ mod tests {
             data_dir: tmp.path(),
             user_id: 1,
             username: "aki",
-            embeddings: None,
+            vectors: crate::tools::PreparedVectors::default(),
         }
     }
 

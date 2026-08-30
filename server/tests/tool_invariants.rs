@@ -1,4 +1,4 @@
-use note_server::tools::{dispatch, SessionKind, ToolCtx};
+use note_server::tools::{dispatch, PreparedVectors, SessionKind, ToolCtx};
 use proptest::prelude::*;
 
 #[derive(Debug, Clone)]
@@ -161,7 +161,7 @@ proptest! {
         let tmp = tempfile::tempdir().unwrap();
         let ctx = ToolCtx {
             config_dir: tmp.path(), data_dir: tmp.path(),
-            user_id: 1, username: "aki", embeddings: None,
+            user_id: 1, username: "aki", vectors: PreparedVectors::default(),
         };
 
         let mut mem_ids = Vec::new();
