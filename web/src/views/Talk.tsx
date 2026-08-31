@@ -412,6 +412,7 @@ export function Talk() {
             )}
             {msgState === 'ready' && items.length === 0 && !busy && (
               <div className="chat-empty">
+                <span className="chat-empty-glyph" aria-hidden="true" />
                 <p>Ask Note anything — about today, your tasks, or what to do next.</p>
               </div>
             )}
@@ -439,12 +440,7 @@ export function Talk() {
               })}
             {busy && (
               <p className="turn pending" aria-live="polite">
-                Note is thinking
-                <span className="dots" aria-hidden="true">
-                  <span />
-                  <span />
-                  <span />
-                </span>
+                Note is thinking…
               </p>
             )}
           </div>
@@ -461,8 +457,20 @@ export function Talk() {
               onChange={(e) => setDraft(e.target.value)}
               onKeyDown={onKeyDown}
             />
-            <button className="primary chat-send" disabled={busy || !draft.trim()}>
-              Send
+            <button
+              className="primary chat-send"
+              aria-label="Send message"
+              disabled={busy || !draft.trim()}
+            >
+              <svg viewBox="0 0 20 20" fill="none" aria-hidden="true">
+                <path
+                  d="M10 16V4M10 4L4.5 9.5M10 4l5.5 5.5"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
             </button>
           </form>
         </div>
