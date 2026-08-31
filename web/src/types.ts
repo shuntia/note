@@ -46,6 +46,11 @@ export type Settings = {
   timezones: string[]
 }
 
+export type PromptName = 'persona' | 'planning'
+
+// `content` is the effective prompt; `custom` marks it as the user's own override.
+export type PromptDoc = { name: PromptName; content: string; custom: boolean }
+
 export type MemoryHit = { id: string; category: string; summary: string }
 
 export type MemoryFact = {
