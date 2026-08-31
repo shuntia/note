@@ -156,16 +156,18 @@ body {
 
 .mobile-head { display: none; }
 
+/* the shell hands over the full width; each view sets its own reading column */
 .view {
   flex: 1;
   width: 100%;
-  max-width: 64rem;
-  margin: 0 auto;
   padding: 1.5rem 1.5rem 2rem;
 }
+.page {
+  width: 100%;
+  max-width: 72rem;
+  margin: 0 auto;
+}
 .view-talk {
-  max-width: none;
-  margin: 0;
   padding: 0;
   min-height: 0;
   display: flex;
@@ -251,6 +253,25 @@ button.quiet {
 }
 button.quiet:hover:not(:disabled) { background: color-mix(in srgb, var(--text) 5%, transparent); }
 button.quiet.danger { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 45%, var(--border-input)); }
+button.ghost {
+  background: none;
+  border: none;
+  border-radius: var(--radius);
+  padding: 0.3rem 0.6rem;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+button.ghost:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--text) 7%, transparent);
+  color: var(--text);
+}
+button.ghost.danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger) 13%, transparent);
+  color: var(--danger);
+}
 button:disabled { opacity: 0.5; cursor: default; }
 button:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 
@@ -319,54 +340,195 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 .login form p[role='alert'] { margin: 0 0 0.75rem; font-size: 0.9rem; color: var(--danger); }
 .login .primary { width: 100%; }
 
+/* today — the plan spine, with the debrief alongside it on wide screens */
+.today { display: grid; gap: 1.75rem; align-items: start; }
+.today-plan { min-width: 0; }
+@media (min-width: 1024px) {
+  .today { grid-template-columns: minmax(0, 2fr) minmax(17rem, 1fr); gap: 2.5rem; }
+  .today-aside {
+    position: sticky;
+    top: 1.5rem;
+    max-height: calc(100dvh - 3rem);
+    overflow-y: auto;
+  }
+}
+.debrief { padding: 0.9rem 1.15rem 1.15rem; border-radius: var(--radius-lg); }
+
 /* the time spine (today view) */
-.spine { list-style: none; margin: 0.5rem 0 0; padding: 0; position: relative; }
+.spine { list-style: none; margin: 0; padding: 0; position: relative; }
 .spine::before {
   content: '';
   position: absolute;
   left: 3.6rem;
-  top: 0;
-  bottom: 0;
+  top: 0.4rem;
+  bottom: 0.4rem;
   width: 1px;
-  background: var(--mist);
+  background: var(--border);
 }
 .spine li {
   display: grid;
   grid-template-columns: 3rem 1fr;
   gap: 1.2rem;
-  padding: 0.5rem 0;
+  padding: 0.35rem 0;
   position: relative;
 }
+/* a diamond on the spine per event: the app's mark, at the hour it lands */
+.spine li::before {
+  content: '';
+  position: absolute;
+  left: calc(3.6rem - 3.5px);
+  top: 1.54rem;
+  width: 7px;
+  height: 7px;
+  transform: rotate(45deg);
+  border: 1.5px solid var(--accent);
+  border-radius: 1px;
+  background: var(--bg);
+}
+.spine li.past::before { border-color: var(--border-input); }
 .spine .time {
   font-family: var(--mono);
   font-variant-numeric: tabular-nums;
   font-size: 0.9rem;
   text-align: right;
-  padding-top: 0.15rem;
+  padding-top: 0.74rem;
 }
 .spine li.past .event-card { opacity: 0.6; }
 .spine li.now-marker {
-  grid-template-columns: 3rem 1fr;
-  padding: 0.15rem 0;
+  align-items: center;
+  padding: 0.35rem 0;
 }
-.spine li.now-marker .time { color: var(--sun); font-weight: 600; }
+.spine li.now-marker::before { display: none; }
+.spine li.now-marker .time { color: var(--sun); font-weight: 600; padding-top: 0; }
 .spine li.now-marker .rule {
-  align-self: center;
   height: 2px;
   background: var(--sun);
   border-radius: 1px;
 }
+
+/* one line where it fits: name and state left, actions right; actions wrap when narrow */
+.event-card {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem 1rem;
+  padding: 0.6rem 0.85rem;
+  border-radius: var(--radius-lg);
+  transition: border-color 120ms ease;
+}
+.event-card:hover { border-color: var(--border-input); }
+.event-head {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex: 1 1 11rem;
+  min-width: 0;
+}
 .event-kind { font-weight: 600; }
-.event-status { font-size: 0.8rem; }
+.event-status {
+  flex: none;
+  font-size: 0.75rem;
+  border-radius: 999px;
+  padding: 0.1rem 0.5rem;
+  background: color-mix(in srgb, currentColor 12%, transparent);
+}
 .event-status.done { color: var(--moss); }
 .event-status.dropped { color: var(--clay); }
 .event-status.snoozed, .event-status.fired { color: var(--sun); }
-.event-actions { display: flex; gap: 0.4rem; margin-top: 0.5rem; flex-wrap: wrap; }
+.event-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.1rem;
+  /* wrapped under the name on phones, so it stays left-aligned there */
+  margin: 0 -0.6rem;
+}
+@media (min-width: 768px) {
+  .event-actions { margin-left: auto; }
+}
 
 /* tasks */
-.task-row { display: flex; align-items: center; gap: 0.75rem; padding: 0.5rem 0; border-bottom: 1px solid var(--mist); }
-.task-row.done .title { text-decoration: line-through; opacity: 0.6; }
-.quick-add { display: flex; gap: 0.5rem; margin-top: 1rem; }
+.quick-add {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 1.5rem;
+  padding: 0.3rem 0.35rem 0.3rem 1rem;
+  box-shadow: 0 1px 2px oklch(0 0 0 / 0.08);
+  transition: box-shadow 150ms ease, border-color 150ms ease;
+}
+.quick-add:focus-within {
+  border-color: var(--ring);
+  box-shadow:
+    0 0 0 1px var(--ring),
+    0 4px 14px oklch(0 0 0 / 0.12);
+}
+.quick-add input {
+  flex: 1;
+  min-width: 0;
+  background: none;
+  border: none;
+  border-radius: 0;
+  padding: 0.5rem 0;
+}
+.quick-add input:focus-visible { outline: none; }
+.quick-add .primary { flex: none; border-radius: 999px; padding: 0.5rem 1.15rem; }
+
+.task-list {
+  list-style: none;
+  margin: 1rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.task-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 0.7rem 0.9rem;
+  transition: border-color 120ms ease;
+}
+.task-row:hover { border-color: var(--border-input); }
+.task-row.done { background: none; }
+.task-row.done .title { text-decoration: line-through; color: var(--text-muted); }
+.task-empty { margin: 1.25rem 0 0; }
+
+.check {
+  appearance: none;
+  flex: none;
+  width: 1.15rem;
+  height: 1.15rem;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  place-content: center;
+  border: 1px solid var(--border-input);
+  border-radius: 5px;
+  background: var(--surface);
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+.check:checked { background: var(--accent); border-color: var(--accent); }
+.check::after {
+  content: '';
+  width: 0.3rem;
+  height: 0.6rem;
+  margin-top: -0.12rem;
+  border: solid var(--accent-fg);
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+  opacity: 0;
+}
+.check:checked::after { opacity: 1; }
+
+@media (prefers-reduced-motion: reduce) {
+  .event-card, .task-row, .check, .quick-add, button.ghost { transition: none; }
+}
 
 /* talk — three voices: Note speaks in serif, you in sans, tools in mono */
 .chat {
@@ -848,8 +1010,8 @@ button.chat-send {
   .tool-glyph { transition: none; }
 }
 
-/* settings panes — the sun diamond marks a section the way it marks a tool call */
-.panes { display: flex; flex-direction: column; gap: 0.85rem; }
+/* panes and section titles — the sun diamond marks a section the way it marks a tool call */
+.panes { display: flex; flex-direction: column; gap: 0.85rem; max-width: 64rem; margin: 0 auto; }
 .pane { padding: 0.9rem 1rem 1rem; }
 .pane > p { margin: 0; }
 
@@ -878,6 +1040,8 @@ button.chat-send {
   color: var(--quiet);
 }
 .pane-note { margin: -0.4rem 0 0.75rem; font-size: 0.9rem; }
+/* a page-wide title is too wide to push its meta to the far edge */
+.page > .pane-title .pane-meta { margin-left: 0; }
 
 fieldset.pane-rows { border: none; margin: 0; padding: 0; min-width: 0; }
 .pane-row { padding: 0.7rem 0; border-top: 1px solid var(--mist); }

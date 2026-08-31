@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import { api, ApiError } from '../api'
 import type { ViewProps } from '../app'
-import type { PlanEvent } from '../types'
+import type { Debrief, PlanEvent } from '../types'
 
 function nowWall(): string {
   const d = new Date()
@@ -72,18 +72,45 @@ export function Today({ notify }: ViewProps) {
     }
   }
 
-  if (failed)
-    return (
-      <p className="muted">
-        Couldn't load today's plan.{' '}
-        <button className="quiet" onClick={load}>
-          Retry
-        </button>
-      </p>
-    )
-  if (events === null) return null
-  if (events.length === 0) return <p className="muted">Nothing planned today.</p>
+  return (
+    <div className="page today">
+      <section className="today-plan">
+        <SectionTitle>Plan</SectionTitle>
+        {failed ? (
+          <p className="muted">
+            Couldn't load today's plan.{' '}
+            <button className="quiet" onClick={load}>
+              Retry
+            </button>
+          </p>
+        ) : events === null ? null : events.length === 0 ? (
+          <p className="muted">Nothing planned today.</p>
+        ) : (
+          <ul className="spine">{spine(events, act, pending)}</ul>
+        )}
+      </section>
+      <aside className="today-aside">
+        <DebriefCard />
+      </aside>
+    </div>
+  )
+}
 
+function SectionTitle({ children, meta }: { children: string; meta?: string }) {
+  return (
+    <h2 className="pane-title">
+      <span className="pane-glyph" aria-hidden="true" />
+      {children}
+      {meta && <span className="pane-meta mono">{meta}</span>}
+    </h2>
+  )
+}
+
+function spine(
+  events: PlanEvent[],
+  act: (fn: () => Promise<void>) => Promise<void>,
+  pending: boolean,
+): ReactNode[] {
   const now = nowWall()
   const rows: ReactNode[] = []
   let markerPlaced = false
@@ -97,8 +124,7 @@ export function Today({ notify }: ViewProps) {
     )
   }
   if (!markerPlaced) rows.push(<NowMarker key="now" now={now} />)
-
-  return <ul className="spine">{rows}</ul>
+  return rows
 }
 
 function NowMarker({ now }: { now: string }) {
@@ -126,21 +152,23 @@ function EventRow({
     <li className={past ? 'past' : ''}>
       <span className="time">{ev.wall_time}</span>
       <div className="card event-card">
-        <div className="event-kind">{label(ev.kind)}</div>
-        {ev.status !== 'pending' && (
-          <div className={`event-status ${ev.status}`}>{STATUS_WORD[ev.status]}</div>
-        )}
+        <div className="event-head">
+          <span className="event-kind">{label(ev.kind)}</span>
+          {ev.status !== 'pending' && (
+            <span className={`event-status ${ev.status}`}>{STATUS_WORD[ev.status]}</span>
+          )}
+        </div>
         {!settled && (
           <div className="event-actions">
             <button
-              className="quiet"
+              className="ghost"
               disabled={pending}
               onClick={() => act(() => api.eventAction(ev.id, 'done'))}
             >
               Done
             </button>
             <button
-              className="quiet"
+              className="ghost"
               disabled={pending}
               onClick={() => act(() => api.snooze(ev.id, 30))}
             >
@@ -149,14 +177,14 @@ function EventRow({
             {ev.flexibility !== 'fixed' && (
               <>
                 <button
-                  className="quiet"
+                  className="ghost"
                   disabled={pending}
                   onClick={() => act(() => api.shift(ev.id, 15))}
                 >
                   +15
                 </button>
                 <button
-                  className="quiet"
+                  className="ghost"
                   disabled={pending}
                   onClick={() => act(() => api.shift(ev.id, -15))}
                 >
@@ -165,7 +193,7 @@ function EventRow({
               </>
             )}
             <button
-              className="quiet danger"
+              className="ghost danger"
               disabled={pending}
               onClick={() => act(() => api.eventAction(ev.id, 'drop'))}
             >
@@ -175,5 +203,39 @@ function EventRow({
         )}
       </div>
     </li>
+  )
+}
+
+function DebriefCard() {
+  const [debrief, setDebrief] = useState<Debrief | null | 'error' | undefined>(undefined)
+
+  const load = () => {
+    setDebrief(undefined)
+    api
+      .debrief()
+      .then(setDebrief)
+      .catch((err) => setDebrief(err instanceof ApiError && err.status === 404 ? null : 'error'))
+  }
+  useEffect(load, [])
+
+  const date = debrief && debrief !== 'error' ? debrief.date : undefined
+  return (
+    <section className="card debrief">
+      <SectionTitle meta={date}>Morning debrief</SectionTitle>
+      {debrief === undefined ? (
+        <p className="muted">Loading…</p>
+      ) : debrief === null ? (
+        <p className="muted">No debrief yet — it arrives overnight.</p>
+      ) : debrief === 'error' ? (
+        <p className="muted">
+          The debrief didn't load.{' '}
+          <button className="quiet" onClick={load}>
+            Retry
+          </button>
+        </p>
+      ) : (
+        <div className="letter">{debrief.content}</div>
+      )}
+    </section>
   )
 }
