@@ -174,6 +174,7 @@ export function Talk() {
   const open = (id: number) => {
     setSideOpen(false)
     setConfirming(null)
+    setSideNotice(null)
     if (id === current) return
     stick.current = true
     era.current++
@@ -185,6 +186,7 @@ export function Talk() {
   const startNew = () => {
     setSideOpen(false)
     setConfirming(null)
+    setSideNotice(null)
     stick.current = true
     era.current++
     wanted.current = null
@@ -196,7 +198,8 @@ export function Talk() {
 
   const send = async () => {
     const text = draft.trim()
-    if (!text || busy) return
+    // a send while history is still loading would be wiped by the load's setItems
+    if (!text || busy || msgState === 'loading') return
     const mine: Item = { kind: 'user', key: nextKey(), text }
     const sentIn = era.current
     stick.current = true
