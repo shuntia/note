@@ -316,6 +316,89 @@ async fn talk_persists_the_exchange_and_surfaces_tool_steps() {
 }
 
 #[tokio::test]
+async fn multiple_tool_calls_keep_call_order_in_steps_and_rows() {
+    let llm = Arc::new(MockLLM::scripted(vec![
+        ChatResponse {
+            text: String::new(),
+            tool_calls: vec![
+                ToolCall {
+                    id: "c1".into(),
+                    name: "task_create".into(),
+                    args: r#"{"title":"call mom"}"#.into(),
+                },
+                ToolCall { id: "c2".into(), name: "schedule_insert".into(), args: "{}".into() },
+            ],
+        },
+        ChatResponse { text: "one worked, one didn't".into(), tool_calls: vec![] },
+    ]));
+    let (app, cookie, state, _cfg) = common::app_with_logged_in_user_llm_and_state(llm).await;
+
+    let res = app
+        .oneshot(
+            Request::post("/api/talk")
+                .header(header::COOKIE, &cookie)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"message":"call mom and book it"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let steps = v["steps"].as_array().unwrap();
+    assert_eq!(steps.len(), 2);
+    assert_eq!(steps[0]["name"], "task_create");
+    assert_eq!(steps[0]["is_error"], false);
+    // schedule_insert is forbidden on the talk surface, so the error reaches the wire
+    assert_eq!(steps[1]["name"], "schedule_insert");
+    assert_eq!(steps[1]["is_error"], true);
+
+    let conn = state.db.lock().unwrap();
+    let mut stmt = conn
+        .prepare("SELECT role, tool_name FROM talk_messages ORDER BY id")
+        .unwrap();
+    let rows: Vec<(String, Option<String>)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let rows: Vec<(&str, Option<&str>)> =
+        rows.iter().map(|(r, t)| (r.as_str(), t.as_deref())).collect();
+    assert_eq!(
+        rows,
+        vec![
+            ("user", None),
+            ("tool", Some("task_create")),
+            ("tool", Some("schedule_insert")),
+            ("assistant", None),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn bad_conversation_at_global_capacity_is_404_not_503() {
+    let (app, cookie, state, _cfg) = common::app_with_logged_in_user_and_state().await;
+    let _permits: Vec<_> = (0..note_server::MAX_CONCURRENT_TALKS)
+        .map(|i| state.talk_gate.try_enter(-1 - i as i64).unwrap())
+        .collect();
+    let res = app
+        .oneshot(
+            Request::post("/api/talk")
+                .header(header::COOKIE, &cookie)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"message":"hi","conversation_id":9999}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["error"], "conversation not found");
+}
+
+#[tokio::test]
 async fn second_post_with_the_conversation_id_replays_history() {
     let llm = Arc::new(MockLLM::scripted(vec![
         ChatResponse { text: "hello aki".into(), tool_calls: vec![] },

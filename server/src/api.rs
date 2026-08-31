@@ -162,6 +162,8 @@ struct TalkReq {
 }
 
 const MAX_TALK_MESSAGE: usize = 16 * 1024;
+// History windows stay user-first/assistant-last: each success appends exactly
+// one user and one assistant row, and errors persist nothing.
 const TALK_HISTORY_LIMIT: usize = 32;
 
 /// A session makes synchronous provider calls and blocking DB writes, so it
