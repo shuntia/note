@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { api, ApiError } from '../api'
 import type { ViewProps } from '../app'
 import { disablePush, enablePush, pushState } from '../push'
@@ -14,7 +14,7 @@ const SECTIONS: { id: SectionId; label: string }[] = [
   { id: 'appearance', label: 'Appearance' },
   { id: 'persona', label: 'Persona' },
   { id: 'notifications', label: 'Notifications' },
-  { id: 'admin', label: 'Admin' },
+  { id: 'admin', label: 'Server log' },
 ]
 
 export function Settings({
@@ -277,14 +277,16 @@ function ProfileAndSchedule({ section }: { section: SectionId }) {
   )
 }
 
-const PROMPTS: { id: PromptName; label: string; hint: string }[] = [
+const PROMPTS: { id: PromptName; title: string; label: string; hint: string }[] = [
   {
     id: 'persona',
+    title: 'Persona',
     label: 'Persona',
     hint: "The assistant's system prompt — its voice and the rules it holds to in every reply.",
   },
   {
     id: 'planning',
+    title: 'Planning',
     label: 'Planning prompt',
     hint: 'The system prompt for the nightly session that reshapes tomorrow.',
   },
@@ -292,39 +294,43 @@ const PROMPTS: { id: PromptName; label: string; hint: string }[] = [
 
 function PersonaSection({ active }: { active: boolean }) {
   const [name, setName] = useState<PromptName>('persona')
-  const [doc, setDoc] = useState<PromptDoc | 'error' | undefined>(undefined)
-  const [text, setText] = useState('')
+  // Fetched body and unsaved text are both kept per prompt, so switching the picker
+  // holds on to a draft instead of discarding it.
+  const [docs, setDocs] = useState<Partial<Record<PromptName, PromptDoc | 'error'>>>({})
+  const [edits, setEdits] = useState<Partial<Record<PromptName, string>>>({})
   const [save, setSave] = useState<SaveState>({ kind: 'idle' })
   const [confirming, setConfirming] = useState(false)
-  const loaded = useRef<PromptName | null>(null)
-  const seq = useRef(0)
+  const [resets, setResets] = useState(0)
+  const asked = useRef(new Set<PromptName>())
+  const editor = useRef<HTMLTextAreaElement>(null)
 
   const load = (which: PromptName) => {
-    const mine = ++seq.current
-    loaded.current = which
-    setDoc(undefined)
+    asked.current.add(which)
+    setDocs((all) => ({ ...all, [which]: undefined }))
     setSave({ kind: 'idle' })
     api
       .promptGet(which)
-      .then((d) => {
-        if (seq.current !== mine) return
-        setDoc(d)
-        setText(d.content)
-      })
+      .then((d) => setDocs((all) => ({ ...all, [which]: d })))
       .catch(() => {
-        if (seq.current !== mine) return
-        loaded.current = null
-        setDoc('error')
+        asked.current.delete(which)
+        setDocs((all) => ({ ...all, [which]: 'error' }))
       })
   }
 
   useEffect(() => {
-    if (active && loaded.current !== name) load(name)
+    if (active && !asked.current.has(name)) load(name)
   }, [active, name])
+
+  // The reset button disables itself once the default lands, so focus goes to the
+  // field the reset rewrote instead of falling to the body.
+  useEffect(() => {
+    if (resets) editor.current?.focus()
+  }, [resets])
 
   if (!active) return null
 
   const prompt = PROMPTS.find((p) => p.id === name) ?? PROMPTS[0]
+  const doc = docs[name]
   const picker = (
     <div className="pane-row">
       <label className="pane-label" htmlFor="set-prompt">
@@ -333,7 +339,10 @@ function PersonaSection({ active }: { active: boolean }) {
       <select
         id="set-prompt"
         value={name}
-        onChange={(e) => setName(e.target.value as PromptName)}
+        onChange={(e) => {
+          setSave({ kind: 'idle' })
+          setName(e.target.value as PromptName)
+        }}
       >
         {PROMPTS.map((p) => (
           <option key={p.id} value={p.id}>
@@ -348,7 +357,7 @@ function PersonaSection({ active }: { active: boolean }) {
   if (doc === undefined || doc === 'error') {
     return (
       <section className="card pane">
-        <SectionTitle>Persona</SectionTitle>
+        <SectionTitle>{prompt.title}</SectionTitle>
         <div className="pane-rows">{picker}</div>
         {doc === undefined ? (
           <p className="muted set-prompt-note">Loading…</p>
@@ -364,16 +373,19 @@ function PersonaSection({ active }: { active: boolean }) {
     )
   }
 
+  const text = edits[name] ?? doc.content
   const blank = text.trim().length === 0
   const dirty = text !== doc.content
   const busy = save.kind === 'busy'
+  const setText = (value: string) => setEdits((all) => ({ ...all, [name]: value }))
 
   const submit = async (e: FormEvent) => {
     e.preventDefault()
     if (!dirty || blank) return
     setSave({ kind: 'busy' })
     try {
-      setDoc(await api.promptPut(name, text))
+      const d = await api.promptPut(name, text)
+      setDocs((all) => ({ ...all, [name]: d }))
       setSave({ kind: 'saved' })
     } catch (err) {
       setSave({
@@ -391,17 +403,19 @@ function PersonaSection({ active }: { active: boolean }) {
     setSave({ kind: 'busy' })
     try {
       const d = await api.promptReset(name)
-      setDoc(d)
-      setText(d.content)
+      setDocs((all) => ({ ...all, [name]: d }))
+      setEdits((all) => ({ ...all, [name]: undefined }))
       setSave({ kind: 'idle' })
     } catch {
       setSave({ kind: 'failed', message: "The prompt didn't reset. Try again." })
+    } finally {
+      setResets((n) => n + 1)
     }
   }
 
   return (
     <section className="card pane">
-      <SectionTitle>Persona</SectionTitle>
+      <SectionTitle>{prompt.title}</SectionTitle>
       <form onSubmit={submit}>
         <fieldset className="pane-rows" disabled={busy}>
           {picker}
@@ -414,6 +428,7 @@ function PersonaSection({ active }: { active: boolean }) {
             </div>
             <textarea
               id="set-prompt-text"
+              ref={editor}
               className="mono set-prompt"
               rows={16}
               value={text}
@@ -440,7 +455,7 @@ function PersonaSection({ active }: { active: boolean }) {
             Reset to default
           </button>
           {blank && dirty && (
-            <span className="pane-status bad" role="status">
+            <span className="pane-status bad" role="alert">
               A prompt can't be empty.
             </span>
           )}
@@ -486,34 +501,45 @@ function Confirm({
   onConfirm: () => void
 }) {
   const ref = useRef<HTMLDialogElement>(null)
+  const id = useId()
   useEffect(() => {
     ref.current?.showModal()
   }, [])
+
+  // Closing before the caller unmounts us is what hands focus back to the button
+  // that opened the dialog.
+  const dismiss = (done: () => void) => () => {
+    ref.current?.close()
+    done()
+  }
 
   return (
     <dialog
       className="dialog"
       ref={ref}
-      aria-labelledby="dialog-title"
+      aria-labelledby={`${id}-title`}
+      aria-describedby={`${id}-text`}
       onCancel={(e) => {
         e.preventDefault()
-        onCancel()
+        dismiss(onCancel)()
       }}
       // The dialog element itself is only the click target outside the padded body.
       onClick={(e) => {
-        if (e.target === ref.current) onCancel()
+        if (e.target === ref.current) dismiss(onCancel)()
       }}
     >
       <div className="dialog-body">
-        <h2 className="dialog-title" id="dialog-title">
+        <h2 className="dialog-title" id={`${id}-title`}>
           {title}
         </h2>
-        <p className="dialog-text">{children}</p>
+        <p className="dialog-text" id={`${id}-text`}>
+          {children}
+        </p>
         <div className="dialog-foot">
-          <button className="quiet" onClick={onCancel}>
+          <button type="button" className="quiet" onClick={dismiss(onCancel)}>
             Cancel
           </button>
-          <button className="quiet danger" onClick={onConfirm}>
+          <button type="button" className="quiet danger" onClick={dismiss(onConfirm)}>
             {confirmLabel}
           </button>
         </div>

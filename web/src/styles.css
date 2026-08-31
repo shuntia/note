@@ -1247,7 +1247,8 @@ button.chat-send {
 
 /* a single-line field stops at a length its value could plausibly need; only the
    prompt editor takes the whole pane */
-.set-pane .pane-row > input { max-width: 26rem; }
+.set-pane .pane-row > input,
+.set-pane .pane-row.inline { max-width: 26rem; }
 
 .set-prompt-head { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.35rem; }
 .set-prompt-head .pane-label { margin-bottom: 0; }
