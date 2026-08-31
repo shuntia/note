@@ -1,4 +1,18 @@
-import type { Debrief, LogRow, Me, PlanEvent, Task } from './types'
+import type {
+  Conversation,
+  Debrief,
+  LogRow,
+  Me,
+  PlanEvent,
+  Settings,
+  TalkMessage,
+  TalkReply,
+  Task,
+} from './types'
+
+const WRITABLE_SETTINGS = ['display_name', 'timezone', 'nightly_time', 'template'] as const
+
+type SettingsPatch = Partial<Pick<Settings, (typeof WRITABLE_SETTINGS)[number]>>
 
 export class ApiError extends Error {
   constructor(
@@ -60,8 +74,32 @@ export const api = {
     request<Task>('/api/tasks', { method: 'POST', body: JSON.stringify({ title }) }),
   patchTask: (id: number, state: Task['state']) =>
     request<Task>(`/api/tasks/${id}`, { method: 'PATCH', body: JSON.stringify({ state }) }),
-  talk: (message: string) =>
-    request<{ reply: string }>('/api/talk', { method: 'POST', body: JSON.stringify({ message }) }),
+  conversations: () => request<Conversation[]>('/api/conversations'),
+  renameConversation: (id: number, title: string) =>
+    request<void>(`/api/conversations/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ title }),
+    }),
+  deleteConversation: (id: number) =>
+    request<void>(`/api/conversations/${id}`, { method: 'DELETE' }),
+  conversationMessages: (id: number) => request<TalkMessage[]>(`/api/conversations/${id}/messages`),
+  talk: (message: string, conversationId?: number) =>
+    request<TalkReply>('/api/talk', {
+      method: 'POST',
+      body: JSON.stringify(
+        conversationId === undefined ? { message } : { message, conversation_id: conversationId },
+      ),
+    }),
+  settings: () => request<Settings>('/api/settings'),
+  // The server rejects unknown fields, so only the writable keys actually set go on the wire.
+  saveSettings: (patch: SettingsPatch) => {
+    const body: SettingsPatch = {}
+    for (const key of WRITABLE_SETTINGS) {
+      const value = patch[key]
+      if (value !== undefined) body[key] = value
+    }
+    return request<void>('/api/settings', { method: 'PUT', body: JSON.stringify(body) })
+  },
   debrief: () => request<Debrief>('/api/debrief'),
   vapidKey: () => request<{ key: string }>('/api/push/vapid_public_key'),
   pushSubscribe: (sub: PushSubscriptionJSON) =>
@@ -69,9 +107,4 @@ export const api = {
   pushUnsubscribe: (endpoint: string) =>
     request<void>('/api/push/unsubscribe', { method: 'POST', body: JSON.stringify({ endpoint }) }),
   adminLog: () => request<LogRow[]>('/api/admin/log?limit=100'),
-  adminCreateUser: (username: string, password: string, admin: boolean) =>
-    request<void>('/api/admin/users', {
-      method: 'POST',
-      body: JSON.stringify({ username, password, admin }),
-    }),
 }

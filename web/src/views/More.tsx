@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useEffect, useState } from 'react'
 import { api, ApiError } from '../api'
 import type { ViewProps } from '../app'
 import { disablePush, enablePush, pushState } from '../push'
@@ -111,8 +111,6 @@ function PushCard({ notify }: { notify: (msg: string) => void }) {
 
 function AdminCard({ notify }: { notify: (msg: string) => void }) {
   const [log, setLog] = useState<LogRow[]>([])
-  const [username, setUsername] = useState('')
-  const [password, setPassword] = useState('')
 
   const loadLog = () => {
     api
@@ -122,41 +120,8 @@ function AdminCard({ notify }: { notify: (msg: string) => void }) {
   }
   useEffect(loadLog, [])
 
-  const create = async (e: FormEvent) => {
-    e.preventDefault()
-    try {
-      await api.adminCreateUser(username, password, false)
-      notify(`Created ${username}.`)
-      setUsername('')
-      setPassword('')
-    } catch {
-      notify("Couldn't create the user. Check the name and try again.")
-    }
-  }
-
   return (
     <>
-      <h2 className="section-title">Add a member</h2>
-      <form onSubmit={create}>
-        <div className="field">
-          <input
-            placeholder="Username"
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
-          />
-        </div>
-        <div className="field">
-          <input
-            type="password"
-            placeholder="Password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-          />
-        </div>
-        <button className="primary" disabled={!username || !password}>
-          Create
-        </button>
-      </form>
       <h2 className="section-title">Server log</h2>
       <table className="log-table">
         <tbody>
