@@ -259,8 +259,9 @@ Every outcome lands in `event_log`, readable at `GET /api/admin/log`:
 
 ## Web client
 
-The installable PWA lives in `web/` — React + Vite, TypeScript, with React and
-React DOM its only runtime dependencies. Build it once and the server serves it:
+The installable PWA lives in `web/` — React + Vite, TypeScript, with React,
+React DOM, marked, and DOMPurify its only runtime dependencies (all bundled;
+the client makes no external requests). Build it once and the server serves it:
 
 ```sh
 cd web && pnpm install && pnpm build
@@ -271,16 +272,21 @@ The server looks for the build at `web_dir` from `config/server.toml`
 and serves it with an SPA fallback; without a build, the API still runs.
 Unknown `/api/*` paths stay `404` rather than falling back to the app shell.
 
-Sign in with a user from `create-user`. The client shows today's plan on a
-time spine — Done / Later / +15 / −15 / Drop per unsettled event, with the
-±15 slides only on events the template does not pin as `fixed` — plus tasks
-with quick-add. Talk is a full chat: a sidebar of persisted conversations
-(new, rename, delete), assistant replies rendered as sanitized markdown with
-copyable code blocks, and every tool call the agent makes shown as an
-expandable block with its arguments and result. More holds the settings card
-(display name, timezone, nightly debrief time, template), a System / Light /
-Dark theme choice, the morning debrief, a Web Push toggle (needs the
-`[channels.webpush]` config), and the server log for admin users. Delivered events arrive live over the
+Sign in with a user from `create-user`. The app is a full-width shell — a left
+sidebar on desktop, bottom tabs on phones — with five views. Today shows the
+day's plan on a time spine (Done / Later / +15 / −15 / Drop per unsettled
+event, the ±15 slides only on events the template does not pin as `fixed`)
+beside the morning debrief. Tasks is the list with quick-add. Chat is a full
+conversation surface: a sidebar of persisted conversations (new, rename,
+delete), assistant replies rendered as sanitized markdown with copyable code
+blocks, and every tool call the agent makes shown as an expandable block with
+its arguments and result. Memory browses everything the agent has saved —
+filter by category or search, and open any fact to read it. Settings gathers
+profile (display name), schedule (timezone, nightly debrief time, template),
+a System / Light / Dark theme choice, the persona editor (the assistant's
+system prompt, per-user override with reset-to-default), a Web Push toggle
+(needs the `[channels.webpush]` config), and the server log for admin users.
+Delivered events arrive live over the
 WebSocket while the app is open, and as push notifications when it is not;
 `web/public/sw.js` renders those notifications and focuses an open tab when
 one is clicked.
