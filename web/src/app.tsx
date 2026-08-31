@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { api, ApiError, setOnUnauthorized } from './api'
 import type { Me } from './types'
+import { Memory } from './views/Memory'
 import { More } from './views/More'
 import { Talk } from './views/Talk'
 import { Tasks } from './views/Tasks'
@@ -101,7 +102,7 @@ export function App() {
           {tab === 'today' && <Today key={refresh} {...views} />}
           {tab === 'tasks' && <Tasks {...views} />}
           {tab === 'chat' && <Talk />}
-          {tab === 'memory' && <section className="pane" />}
+          {tab === 'memory' && <Memory {...views} />}
           {tab === 'settings' && <More me={me} {...views} onSignedOut={() => setMe(null)} />}
         </main>
       </div>
