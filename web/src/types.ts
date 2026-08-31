@@ -46,4 +46,16 @@ export type Settings = {
   timezones: string[]
 }
 
+export type MemoryHit = { id: string; category: string; summary: string }
+
+export type MemoryFact = {
+  id: string
+  category: string
+  summary: string
+  body: string
+  created: string
+  archived: boolean
+  supersedes: string | null
+}
+
 export type LogRow = { ts: string; user_id: number | null; kind: string; detail: string }

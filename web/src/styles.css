@@ -20,6 +20,8 @@
   --radius-xl: 1.25rem;
   --moss: #427a55;
   --clay: #b0533b;
+  /* the sun accent at text weight; --sun itself is tuned for fills */
+  --sun-ink: #9c5c05;
   --serif: Georgia, 'Iowan Old Style', 'Times New Roman', serif;
   --sans: system-ui, -apple-system, 'Segoe UI', sans-serif;
   --mono: ui-monospace, 'SF Mono', Menlo, monospace;
@@ -49,6 +51,7 @@
   --code-bg: oklch(0.245 0 0);
   --moss: #7bbd93;
   --clay: #d98a70;
+  --sun-ink: #edaa4e;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -68,6 +71,7 @@
     --code-bg: oklch(0.245 0 0);
     --moss: #7bbd93;
     --clay: #d98a70;
+    --sun-ink: #edaa4e;
   }
 }
 
@@ -997,6 +1001,167 @@ button.chat-send {
   .chat-side, .chat-side.open { transition: none; }
   .chat-tools, .chat-row, .chat-new { transition: none; }
   .tool-glyph { transition: none; }
+}
+
+/* memory — a list of saved facts beside the one you're reading. Category is the
+   only axis this data has, so it carries one of the app's three tints in both
+   the filter pills and the row chips: one vocabulary, read the same way in
+   either place. */
+.memory { display: grid; gap: 1.25rem; align-items: start; }
+.memory-side { display: flex; flex-direction: column; min-width: 0; gap: 0.6rem; }
+
+.cat-semantic { --cat: var(--sun-ink); }
+.cat-episodic { --cat: var(--clay); }
+.cat-procedural { --cat: var(--moss); }
+
+.memory-search { position: relative; display: flex; align-items: center; }
+.memory-search svg {
+  position: absolute;
+  left: 0.75rem;
+  width: 0.9rem;
+  height: 0.9rem;
+  fill: none;
+  stroke: var(--text-muted);
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  pointer-events: none;
+}
+.memory-search input {
+  border-radius: 999px;
+  padding: 0.45rem 0.9rem 0.45rem 2.15rem;
+  font-size: 0.9rem;
+}
+
+.memory-chips { display: flex; flex-wrap: wrap; gap: 0.3rem; }
+.chip {
+  background: none;
+  border: 1px solid var(--border-input);
+  border-radius: 999px;
+  padding: 0.18rem 0.65rem;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+.chip:hover { color: var(--text); }
+.chip[aria-pressed='true'] {
+  color: var(--cat, var(--text));
+  border-color: color-mix(in srgb, var(--cat, var(--text)) 38%, transparent);
+  background: color-mix(in srgb, var(--cat, var(--text)) 11%, transparent);
+  font-weight: 600;
+}
+
+.memory-cat {
+  flex: none;
+  border-radius: 999px;
+  padding: 0.05rem 0.5rem;
+  font-size: 0.68rem;
+  letter-spacing: 0.04em;
+  color: var(--cat, var(--text-muted));
+  background: color-mix(in srgb, var(--cat, var(--text-muted)) 13%, transparent);
+}
+
+.memory-list {
+  list-style: none;
+  margin: 0;
+  /* the rows' focus ring sits outside them, so the scroll box keeps room for it */
+  padding: 2px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.memory-row {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.3rem;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  border-radius: var(--radius);
+  padding: 0.5rem 0.6rem;
+  color: inherit;
+  font: inherit;
+  font-size: 0.92rem;
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+.memory-row:hover { background: color-mix(in srgb, var(--text) 5%, transparent); }
+.memory-row[aria-current='true'] { background: color-mix(in srgb, var(--accent) 15%, transparent); }
+.memory-summary {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+}
+.memory-empty { margin: 0.4rem 0 0; font-size: 0.9rem; }
+
+.memory-detail { min-width: 0; }
+.memory-back { display: none; align-items: center; gap: 0.35rem; margin: 0 0 0.6rem -0.6rem; }
+.memory-title {
+  margin: 0;
+  font-family: var(--serif);
+  font-weight: 500;
+  font-size: 1.45rem;
+  line-height: 1.25;
+}
+.memory-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+  margin: 0.55rem 0 1.15rem;
+  padding-bottom: 0.9rem;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+.memory-flag {
+  border: 1px solid var(--border-input);
+  border-radius: 999px;
+  padding: 0.05rem 0.5rem;
+  font-size: 0.68rem;
+  letter-spacing: 0.04em;
+}
+.memory-prev {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 0.78rem;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.memory-prev:hover { color: var(--text); }
+.memory-blank {
+  margin: 18vh 0 0;
+  text-align: center;
+  font-family: var(--serif);
+  font-size: 1.05rem;
+  color: var(--text-muted);
+}
+
+/* two panes only once the detail column is wide enough to read a fact in */
+@media (min-width: 1088px) {
+  .memory { grid-template-columns: 22rem minmax(0, 1fr); gap: 2.25rem; }
+  .memory-side { position: sticky; top: 1.5rem; max-height: calc(100dvh - 3rem); }
+  .memory-list { flex: 1; min-height: 0; overflow-y: auto; }
+}
+
+/* below that, one pane at a time: the detail takes over, a back button returns */
+@media (max-width: 1087.98px) {
+  .memory[data-pane='detail'] .memory-side { display: none; }
+  .memory[data-pane='list'] .memory-detail { display: none; }
+  .memory-back { display: inline-flex; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chip, .memory-row { transition: none; }
 }
 
 /* panes and section titles — the sun diamond marks a section the way it marks a tool call */

@@ -3,6 +3,8 @@ import type {
   Debrief,
   LogRow,
   Me,
+  MemoryFact,
+  MemoryHit,
   PlanEvent,
   Settings,
   TalkMessage,
@@ -100,6 +102,15 @@ export const api = {
     }
     return request<void>('/api/settings', { method: 'PUT', body: JSON.stringify(body) })
   },
+  // A search covers every category, so `q` and `category` never travel together.
+  memoryList: (params: { category?: string; q?: string }) => {
+    const search = new URLSearchParams()
+    if (params.q) search.set('q', params.q)
+    else if (params.category) search.set('category', params.category)
+    const query = search.toString()
+    return request<{ items: MemoryHit[] }>(`/api/memory${query ? `?${query}` : ''}`)
+  },
+  memoryRead: (id: string) => request<MemoryFact>(`/api/memory/${id}`),
   debrief: () => request<Debrief>('/api/debrief'),
   vapidKey: () => request<{ key: string }>('/api/push/vapid_public_key'),
   pushSubscribe: (sub: PushSubscriptionJSON) =>
