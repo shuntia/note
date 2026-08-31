@@ -15,11 +15,20 @@ pub struct SessionDeps<'a> {
     pub embeddings: Option<&'a dyn EmbeddingsProvider>,
 }
 
+#[derive(Debug, Clone)]
+pub struct SessionStep {
+    pub name: String,
+    pub args: String,
+    pub result: String,
+    pub is_error: bool,
+}
+
 #[derive(Debug)]
 pub struct SessionOutcome {
     pub reply: String,
     pub turns: usize,
     pub tool_calls: usize,
+    pub steps: Vec<SessionStep>,
 }
 
 /// Runs one agent session: chat, dispatch tool calls, feed results back, until
@@ -33,6 +42,7 @@ pub fn run_session(
     username: &str,
     kind: SessionKind,
     now: jiff::Timestamp,
+    history: &[Message],
     opening: &str,
 ) -> Result<SessionOutcome> {
     let mut system = crate::prompts::load(deps.config_dir, username, "persona")?;
@@ -48,9 +58,11 @@ pub fn run_session(
     }
 
     let schemas = tools::schemas(kind);
-    let mut messages = vec![Message::User(opening.to_string())];
+    let mut messages = history.to_vec();
+    messages.push(Message::User(opening.to_string()));
     let mut turns = 0;
     let mut tool_calls = 0;
+    let mut steps = Vec::new();
     let mut last_text = String::new();
 
     while turns < MAX_TURNS {
@@ -61,7 +73,7 @@ pub fn run_session(
         last_text = resp.text;
         if resp.tool_calls.is_empty() {
             finish(deps, user_id, kind, turns, tool_calls, "agent_session")?;
-            return Ok(SessionOutcome { reply: last_text, turns, tool_calls });
+            return Ok(SessionOutcome { reply: last_text, turns, tool_calls, steps });
         }
         let calls = resp.tool_calls.clone();
         messages.push(Message::Assistant { text: last_text.clone(), tool_calls: resp.tool_calls });
@@ -86,11 +98,17 @@ pub fn run_session(
                     ),
                 }
             };
+            steps.push(SessionStep {
+                name: call.name,
+                args: call.args,
+                result: content.clone(),
+                is_error,
+            });
             messages.push(Message::ToolResult { call_id: call.id, content, is_error });
         }
     }
     finish(deps, user_id, kind, turns, tool_calls, "agent_max_turns")?;
-    Ok(SessionOutcome { reply: last_text, turns, tool_calls })
+    Ok(SessionOutcome { reply: last_text, turns, tool_calls, steps })
 }
 
 fn finish(
@@ -165,12 +183,25 @@ mod tests {
             },
             ChatResponse { text: "added buy milk!".into(), tool_calls: vec![] },
         ]);
-        let out =
-            run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, now(), "add buy milk")
-                .unwrap();
+        let out = run_session(
+            &deps(&db, &tmp, &llm),
+            1,
+            "aki",
+            SessionKind::Talk,
+            now(),
+            &[],
+            "add buy milk",
+        )
+        .unwrap();
         assert_eq!(out.reply, "added buy milk!");
         assert_eq!(out.turns, 2);
         assert_eq!(out.tool_calls, 1);
+        assert_eq!(out.steps.len(), 1);
+        let step = &out.steps[0];
+        assert_eq!(step.name, "task_create");
+        assert_eq!(step.args, r#"{"title":"buy milk"}"#);
+        assert!(step.result.contains("task_id"), "{}", step.result);
+        assert!(!step.is_error);
         let title: String = db
             .lock()
             .unwrap()
@@ -210,8 +241,13 @@ mod tests {
             ChatResponse { text: "sorry, couldn't".into(), tool_calls: vec![] },
         ]);
         // Talk surface: schedule_insert is forbidden — dispatch returns a typed error
-        let out = run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, now(), "hi").unwrap();
+        let out =
+            run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, now(), &[], "hi")
+                .unwrap();
         assert_eq!(out.reply, "sorry, couldn't");
+        assert_eq!(out.steps.len(), 1);
+        assert!(out.steps[0].is_error);
+        assert!(out.steps[0].result.contains("forbidden"), "{}", out.steps[0].result);
         match &llm.seen()[1].messages[2] {
             Message::ToolResult { content, is_error, .. } => {
                 assert!(is_error);
@@ -219,6 +255,25 @@ mod tests {
             }
             other => panic!("expected a tool result, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn history_precedes_the_opening_message() {
+        let (db, tmp) = env();
+        let llm = MockLLM::scripted(vec![ChatResponse { text: "ok".into(), tool_calls: vec![] }]);
+        let history = vec![
+            Message::User("earlier question".into()),
+            Message::Assistant { text: "earlier answer".into(), tool_calls: vec![] },
+        ];
+        run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, now(), &history, "follow up")
+            .unwrap();
+        let seen = llm.seen();
+        assert_eq!(seen[0].n_messages, 3);
+        assert!(matches!(&seen[0].messages[0], Message::User(t) if t == "earlier question"));
+        assert!(
+            matches!(&seen[0].messages[1], Message::Assistant { text, .. } if text == "earlier answer")
+        );
+        assert!(matches!(&seen[0].messages[2], Message::User(t) if t == "follow up"));
     }
 
     #[test]
@@ -234,7 +289,9 @@ mod tests {
             }],
         };
         let llm = MockLLM::scripted(vec![resp; MAX_TURNS + 4]);
-        let out = run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, now(), "hi").unwrap();
+        let out =
+            run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, now(), &[], "hi")
+                .unwrap();
         assert_eq!(out.turns, MAX_TURNS);
         let n: i64 = db
             .lock()
@@ -255,7 +312,8 @@ mod tests {
             text: "debrief".into(),
             tool_calls: vec![],
         }]);
-        run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Nightly, now(), "night").unwrap();
+        run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Nightly, now(), &[], "night")
+            .unwrap();
         assert!(llm.seen()[0].system.contains("plan the day"));
     }
 
@@ -279,6 +337,6 @@ mod tests {
             llm: &llm,
             embeddings: None,
         };
-        assert!(run_session(&d, 1, "aki", SessionKind::Talk, now(), "hi").is_err());
+        assert!(run_session(&d, 1, "aki", SessionKind::Talk, now(), &[], "hi").is_err());
     }
 }

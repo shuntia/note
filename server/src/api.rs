@@ -158,9 +158,11 @@ async fn tasks_update(
 #[derive(Deserialize)]
 struct TalkReq {
     message: String,
+    conversation_id: Option<i64>,
 }
 
 const MAX_TALK_MESSAGE: usize = 16 * 1024;
+const TALK_HISTORY_LIMIT: usize = 32;
 
 /// A session makes synchronous provider calls and blocking DB writes, so it
 /// runs off the async executor.
@@ -176,6 +178,14 @@ async fn talk(
             Json(serde_json::json!({ "error": "message must be non-blank and at most 16384 bytes" })),
         )
             .into_response();
+    }
+    if let Some(id) = req.conversation_id {
+        let conn = state.db.lock().unwrap();
+        match crate::talk::owned(&conn, user.id, id) {
+            Ok(true) => {}
+            Ok(false) => return conversation_not_found(),
+            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        }
     }
     let permit = match state.talk_gate.try_enter(user.id) {
         Ok(p) => p,
@@ -197,6 +207,7 @@ async fn talk(
     };
     let err_db = state.db.clone();
     let uid = user.id;
+    let req_conversation = req.conversation_id;
     let result = tokio::task::spawn_blocking(move || {
         // held here, not in the handler future, so a cancelled request still
         // holds the slot until the session it orphaned actually finishes
@@ -208,24 +219,61 @@ async fn talk(
             llm: state.llm.as_ref(),
             embeddings: state.embeddings.as_deref(),
         };
-        crate::agent::run_session(
+        let now = jiff::Timestamp::now();
+        let history = match req_conversation {
+            Some(id) => {
+                let conn = state.db.lock().unwrap();
+                crate::talk::history(&conn, id, TALK_HISTORY_LIMIT)?
+            }
+            None => Vec::new(),
+        };
+        let out = crate::agent::run_session(
             &deps,
             user.id,
             &user.username,
             crate::tools::SessionKind::Talk,
-            jiff::Timestamp::now(),
+            now,
+            &history,
             &message,
-        )
+        )?;
+        let reply = if out.reply.trim().is_empty() {
+            crate::EMPTY_REPLY_FALLBACK.to_string()
+        } else {
+            out.reply.clone()
+        };
+        let conn = state.db.lock().unwrap();
+        let conv_id = match req_conversation {
+            Some(id) => id,
+            None => crate::talk::create(&conn, user.id, &crate::talk::title_from(&message), now)?,
+        };
+        crate::talk::append_text(&conn, conv_id, "user", &message, now)?;
+        for s in &out.steps {
+            crate::talk::append_tool(&conn, conv_id, &s.name, &s.args, &s.result, s.is_error, now)?;
+        }
+        crate::talk::append_text(&conn, conv_id, "assistant", &reply, now)?;
+        crate::talk::touch(&conn, conv_id, now)?;
+        Ok::<_, anyhow::Error>((conv_id, reply, out.steps))
     })
     .await;
     match result {
-        Ok(Ok(out)) => {
-            let reply = if out.reply.trim().is_empty() {
-                crate::EMPTY_REPLY_FALLBACK.to_string()
-            } else {
-                out.reply
-            };
-            Json(serde_json::json!({ "reply": reply })).into_response()
+        Ok(Ok((conv_id, reply, steps))) => {
+            let steps: Vec<_> = steps
+                .iter()
+                .map(|s| {
+                    serde_json::json!({
+                        "name": s.name,
+                        "args": s.args,
+                        "result": s.result,
+                        "is_error": s.is_error,
+                    })
+                })
+                .collect();
+            Json(serde_json::json!({
+                "conversation_id": conv_id,
+                "reply": reply,
+                "steps": steps,
+            }))
+            .into_response()
         }
         Ok(Err(e)) => {
             {
