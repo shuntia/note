@@ -624,7 +624,11 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 }
 .tool > summary::-webkit-details-marker { display: none; }
 .tool > summary:hover { background: color-mix(in srgb, var(--text) 4%, transparent); }
-.tool > summary:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
+.tool > summary:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+  border-radius: var(--radius-lg);
+}
 .tool[open] > summary { border-bottom: 1px solid var(--border); }
 .tool-glyph {
   width: 7px;
@@ -767,12 +771,14 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
   border: 1px solid var(--border);
   border-radius: 1.5rem;
   padding: 0.35rem 0.35rem 0.35rem 1rem;
-  box-shadow: 0 1px 2px color-mix(in srgb, var(--text) 8%, transparent);
+  box-shadow: 0 1px 2px oklch(0 0 0 / 0.08);
   transition: box-shadow 150ms ease, border-color 150ms ease;
 }
 .chat-composer:focus-within {
-  border-color: var(--border-input);
-  box-shadow: 0 4px 14px color-mix(in srgb, var(--text) 12%, transparent);
+  border-color: var(--ring);
+  box-shadow:
+    0 0 0 1px var(--ring),
+    0 4px 14px oklch(0 0 0 / 0.12);
 }
 .chat-input {
   flex: 1;
@@ -786,7 +792,7 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
   overflow-y: hidden;
 }
 .chat-input:focus-visible { outline: none; }
-.chat-send {
+button.chat-send {
   flex: none;
   display: grid;
   place-items: center;
