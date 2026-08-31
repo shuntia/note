@@ -158,7 +158,11 @@ Conversations are managed over `GET /api/conversations`,
 order). Agent behavior lives in editable prompt files
 (`config/defaults/prompts/`, overridable per user under
 `config/users/<user>/prompts/`) — changing tone or policy is a file edit, not
-a deploy.
+a deploy. The two editable prompts, `persona` and `planning`, are also served
+over `GET /api/prompts/{name}` (`{name, content, custom}`, `content` being the
+effective text), `PUT /api/prompts/{name} {content}` (writes the user's
+override), and `DELETE /api/prompts/{name}` (drops it, back to the default);
+any other name is a 404.
 
 Every night at each user's `nightly_time` (default 03:00, their timezone),
 the server generates the day's plan from their template, lets the agent
