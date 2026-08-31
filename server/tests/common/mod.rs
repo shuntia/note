@@ -7,7 +7,7 @@ use tempfile::TempDir;
 use tower::ServiceExt;
 
 /// Builds a config dir holding a UTC user default, a `default` template with
-/// one sliding 09:00 event on every weekday, and a persona prompt. The caller
+/// one sliding 09:00 event on every weekday, and the editable prompts. The caller
 /// must keep the returned `TempDir` alive for as long as the state that reads it.
 pub fn config_dir() -> TempDir {
     let tmp = tempfile::tempdir().unwrap();
@@ -25,6 +25,7 @@ pub fn config_dir() -> TempDir {
         "[[events]]\nkind='checkin_call'\ntime='09:00'\ndays=['mon','tue','wed','thu','fri','sat','sun']\nflexibility='slide'\nslide_window_min=60\nchannel='voice'\n",
     );
     write("defaults/prompts/persona.md", "you are note");
+    write("defaults/prompts/planning.md", "plan the day");
     tmp
 }
 
