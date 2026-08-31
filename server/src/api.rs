@@ -24,6 +24,8 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/conversations/{id}/messages", get(conversation_messages))
         .route("/api/settings", get(settings_get).put(settings_put))
+        .route("/api/memory", get(memory_list))
+        .route("/api/memory/{id}", get(memory_read))
         .route("/api/plan/today", get(plan_today))
         .route("/api/debrief", get(debrief))
         .route("/api/events/{id}/shift", post(event_shift))
@@ -517,6 +519,74 @@ async fn settings_put(
     }
     match cfg.save(&state.config_dir, &user.username) {
         Ok(()) => Json(settings_body(&cfg)).into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct MemoryQuery {
+    category: Option<String>,
+    q: Option<String>,
+    limit: Option<usize>,
+}
+
+const MEMORY_LIMIT_DEFAULT: usize = 100;
+const MEMORY_LIMIT_MAX: usize = 200;
+
+fn blank_as_none(s: Option<&String>) -> Option<&str> {
+    s.map(|s| s.trim()).filter(|s| !s.is_empty())
+}
+
+/// Browses the user's live facts, newest first; a non-blank `q` switches to
+/// lexical search instead (no embedding is computed for a browse request, so
+/// the vector arm stays out of it) and the category filter no longer applies.
+async fn memory_list(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Query(q): Query<MemoryQuery>,
+) -> impl IntoResponse {
+    let limit = q.limit.unwrap_or(MEMORY_LIMIT_DEFAULT).clamp(1, MEMORY_LIMIT_MAX);
+    let category = blank_as_none(q.category.as_ref());
+    if category.is_some_and(|c| !crate::memory::CATEGORIES.contains(&c)) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "unknown category" })),
+        )
+            .into_response();
+    }
+    let conn = state.db.lock().unwrap();
+    let hits = match blank_as_none(q.q.as_ref()) {
+        Some(search) => crate::memory::query(&conn, &user.username, search, limit as i64, None),
+        None => crate::memory::list(&conn, &user.username, category, limit),
+    };
+    match hits {
+        Ok(items) => Json(serde_json::json!({ "items": items })).into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+/// A fact of another user is indistinguishable from one that does not exist:
+/// the id is only ever looked up under the caller's own memory root.
+async fn memory_read(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    if !crate::memory::valid_id(&id) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    match crate::memory::read(&state.data_dir, &user.username, &id) {
+        Ok(Some(f)) => Json(serde_json::json!({
+            "id": f.id,
+            "category": f.category,
+            "summary": f.summary,
+            "body": f.body,
+            "supersedes": f.supersedes,
+            "created": f.created,
+            "archived": f.archived,
+        }))
+        .into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }

@@ -110,6 +110,19 @@ per-session-type registry (check-in < talk < nightly). Every call is
 validated, size-capped, and transactional; failures return typed rejections
 to the model and never leave partial state.
 
+### Memory API
+
+Read-only, scoped to the session's own user:
+
+- `GET /api/memory?category=&q=&limit=` → `{"items":[{"id","category","summary"}]}`,
+  live facts only. Without `q` this browses newest-first, optionally filtered to
+  one of `semantic`, `episodic`, `procedural` (anything else is a 400). A
+  non-blank `q` runs a lexical search instead and ignores `category`. `limit`
+  defaults to 100 and is clamped to 1–200.
+- `GET /api/memory/{id}` → the whole fact:
+  `{"id","category","summary","body","supersedes","created","archived"}`. An
+  unknown or malformed id, or one belonging to another user, is a 404.
+
 Event scheduling semantics: `fixed` events cannot move; `slide` events can be
 slid within ±`slide_window_min` minutes of their template time (0 = unbounded);
 `drop` events can additionally be dropped by the agent. Snoozing is separate:
