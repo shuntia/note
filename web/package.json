@@ -9,6 +9,8 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "dompurify": "^3.4.14",
+    "marked": "^16.4.2",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"
   },

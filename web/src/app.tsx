@@ -64,14 +64,14 @@ export function App() {
   const views: ViewProps = { notify, refresh, onChanged }
 
   return (
-    <div className="shell">
+    <div className={tab === 'talk' ? 'shell shell-wide' : 'shell'}>
       <header className="masthead">
         <h1>Note</h1>
         <div className="date">
           {me.username} · {new Date().toDateString()}
         </div>
       </header>
-      <main className="view">
+      <main className={tab === 'talk' ? 'view view-talk' : 'view'}>
         {tab === 'today' && <Today key={refresh} {...views} />}
         {tab === 'tasks' && <Tasks {...views} />}
         {tab === 'talk' && <Talk />}
