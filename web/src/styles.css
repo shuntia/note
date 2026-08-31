@@ -472,7 +472,7 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 }
 .event-status.done { color: var(--moss); }
 .event-status.dropped { color: var(--clay); }
-.event-status.snoozed, .event-status.fired { color: var(--sun); }
+.event-status.snoozed, .event-status.fired { color: var(--sun-ink); }
 .event-actions {
   display: flex;
   flex-wrap: wrap;
