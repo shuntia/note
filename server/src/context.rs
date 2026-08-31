@@ -20,9 +20,11 @@ pub fn standing_path(config_dir: &Path, user: &str) -> PathBuf {
 }
 
 /// Writes through a sibling temp file so a crash mid-write can never leave a
-/// half-rendered standing.md.
-fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
-    let tmp = path.with_extension("md.tmp");
+/// half-rendered file behind.
+pub(crate) fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
     std::fs::write(&tmp, contents)?;
     std::fs::rename(&tmp, path)
 }

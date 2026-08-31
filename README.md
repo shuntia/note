@@ -30,6 +30,9 @@ The binary is written to `target/release/note-server`.
    cargo run --release -- create-user <name> <password> --admin
    ```
 
+   Members are created the same way, on the server CLI, without `--admin`.
+   There is no HTTP route for it — the running server never creates accounts.
+
 3. Start the server:
 
    ```sh
@@ -48,7 +51,7 @@ The binary is written to `target/release/note-server`.
 config/
   server.toml                       # bind_addr, public_base_url, data_dir, web_dir
   defaults/
-    user.toml                       # display_name, timezone, template
+    user.toml                       # display_name, timezone, template, nightly_time
     templates/
       default.toml                  # default event template
   users/
@@ -60,6 +63,35 @@ config/
 
 Per-user files are optional; anything not overridden falls back to the
 `defaults/` tree.
+
+### Settings API
+
+`config/users/<username>/user.toml` is also what the settings routes read and
+write, so a hand-edited file and a client-side change are the same thing.
+
+- `GET /api/settings` → the effective values (defaults merged with the user's
+  file) plus the two choice lists the client renders:
+
+  ```json
+  {
+    "display_name": "Aki", "timezone": "Asia/Tokyo",
+    "nightly_time": "03:00", "template": "default",
+    "templates": ["default", "deep-work"],
+    "timezones": ["Africa/Abidjan", "…"]
+  }
+  ```
+
+  `templates` is every `.toml` stem under `defaults/templates/` plus the user's
+  own `templates/`; `timezones` is the bundled IANA database.
+
+- `PUT /api/settings` takes any subset of `display_name`, `timezone`,
+  `nightly_time` and `template`, and returns the merged settings without the
+  two lists. A rejected field is a `400` whose `{"error": …}` names it and
+  leaves the file untouched: `display_name` is trimmed, non-blank and at most
+  64 characters; `timezone` must be an IANA name; `nightly_time` must be a
+  zero-padded 24-hour `HH:MM`; `template` must be one of `templates`. The
+  write replaces the user file with all four keys through a temp file and a
+  rename, so a crash mid-write cannot leave a half-written config.
 
 ## Memory & agent tools
 
@@ -228,12 +260,12 @@ For development, `pnpm dev` proxies `/api` (WebSocket included) to
 
 ## Admin API
 
-Admin-role users (see `create-user --admin`) get two extra routes:
+Admin-role users (see `create-user --admin`) get one extra route:
 
 - `GET /api/admin/log?limit=100` — the last N `event_log` rows.
-- `POST /api/admin/users {username, password, admin}` — create a user.
 
-Both return `403 Forbidden` for non-admin users.
+It returns `403 Forbidden` for non-admin users. Membership is not administered
+over HTTP at all; accounts come from `create-user` on the server CLI.
 
 ## Running as a systemd service
 
