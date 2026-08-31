@@ -1,6 +1,15 @@
 export type ThemeChoice = 'system' | 'light' | 'dark'
 
+// index.html reads this key in its pre-paint script; keep the two in step.
 const KEY = 'note.theme'
+
+// Installed-PWA chrome follows the page, sourced from the token so there is no second
+// copy of the palette.
+function paintChrome() {
+  const meta = document.querySelector('meta[name="theme-color"]')
+  const dawn = getComputedStyle(document.documentElement).getPropertyValue('--dawn').trim()
+  if (meta && dawn) meta.setAttribute('content', dawn)
+}
 
 export function storedTheme(): ThemeChoice {
   try {
@@ -17,6 +26,7 @@ export function applyTheme(choice: ThemeChoice) {
   const root = document.documentElement
   if (choice === 'system') root.removeAttribute('data-theme')
   else root.setAttribute('data-theme', choice)
+  paintChrome()
 }
 
 export function saveTheme(choice: ThemeChoice) {

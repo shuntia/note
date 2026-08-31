@@ -86,6 +86,7 @@ function SettingsCard() {
   useEffect(load, [])
 
   const edit = <K extends keyof Draft>(key: K, value: Draft[K]) => {
+    if (save.kind === 'busy') return
     setSave({ kind: 'idle' })
     setState((s) => (s && s !== 'error' ? { ...s, draft: { ...s.draft, [key]: value } } : s))
   }
@@ -129,7 +130,14 @@ function SettingsCard() {
     setSave({ kind: 'busy' })
     try {
       await api.saveSettings(patch)
-      setState((s) => (s && s !== 'error' ? { ...s, baseline: cleaned, draft: cleaned } : s))
+      // The saved values become the baseline, but any field edited during the flight
+      // keeps what the user typed rather than snapping back to the submitted value.
+      setState((s) => {
+        if (!s || s === 'error') return s
+        const merged = { ...s.draft }
+        for (const key of EDITABLE) if (s.draft[key] === draft[key]) merged[key] = cleaned[key]
+        return { ...s, baseline: cleaned, draft: merged }
+      })
       setSave({ kind: 'saved' })
     } catch (err) {
       setSave({
@@ -145,69 +153,71 @@ function SettingsCard() {
   return (
     <section className="card pane">
       <PaneTitle>Settings</PaneTitle>
-      <form className="pane-rows" onSubmit={submit}>
-        <div className="pane-row">
-          <label className="pane-label" htmlFor="set-name">
-            Display name
-          </label>
-          <input
-            id="set-name"
-            value={draft.display_name}
-            autoComplete="name"
-            onChange={(e) => edit('display_name', e.target.value)}
-          />
-        </div>
+      <form onSubmit={submit}>
+        <fieldset className="pane-rows" disabled={save.kind === 'busy'}>
+          <div className="pane-row">
+            <label className="pane-label" htmlFor="set-name">
+              Display name
+            </label>
+            <input
+              id="set-name"
+              value={draft.display_name}
+              autoComplete="name"
+              onChange={(e) => edit('display_name', e.target.value)}
+            />
+          </div>
 
-        <div className="pane-row">
-          <label className="pane-label" htmlFor="set-tz">
-            Timezone
-          </label>
-          <input
-            id="set-tz"
-            className="mono"
-            list="tz-list"
-            spellCheck={false}
-            autoCapitalize="none"
-            value={draft.timezone}
-            onChange={(e) => edit('timezone', e.target.value)}
-          />
-          <datalist id="tz-list">
-            {choices.timezones.map((tz) => (
-              <option key={tz} value={tz} />
-            ))}
-          </datalist>
-          <p className="pane-hint">Type to search, or enter any IANA zone name.</p>
-        </div>
+          <div className="pane-row">
+            <label className="pane-label" htmlFor="set-tz">
+              Timezone
+            </label>
+            <input
+              id="set-tz"
+              className="mono"
+              list="tz-list"
+              spellCheck={false}
+              autoCapitalize="none"
+              value={draft.timezone}
+              onChange={(e) => edit('timezone', e.target.value)}
+            />
+            <datalist id="tz-list">
+              {choices.timezones.map((tz) => (
+                <option key={tz} value={tz} />
+              ))}
+            </datalist>
+            <p className="pane-hint">Type to search, or enter any IANA zone name.</p>
+          </div>
 
-        <div className="pane-row inline">
-          <label className="pane-label" htmlFor="set-time">
-            Nightly debrief
-          </label>
-          <input
-            id="set-time"
-            className="mono"
-            type="time"
-            value={draft.nightly_time}
-            onChange={(e) => edit('nightly_time', e.target.value)}
-          />
-        </div>
+          <div className="pane-row inline">
+            <label className="pane-label" htmlFor="set-time">
+              Nightly debrief
+            </label>
+            <input
+              id="set-time"
+              className="mono"
+              type="time"
+              value={draft.nightly_time}
+              onChange={(e) => edit('nightly_time', e.target.value)}
+            />
+          </div>
 
-        <div className="pane-row inline">
-          <label className="pane-label" htmlFor="set-template">
-            Template
-          </label>
-          <select
-            id="set-template"
-            value={draft.template}
-            onChange={(e) => edit('template', e.target.value)}
-          >
-            {templates.map((t) => (
-              <option key={t} value={t}>
-                {t}
-              </option>
-            ))}
-          </select>
-        </div>
+          <div className="pane-row inline">
+            <label className="pane-label" htmlFor="set-template">
+              Template
+            </label>
+            <select
+              id="set-template"
+              value={draft.template}
+              onChange={(e) => edit('template', e.target.value)}
+            >
+              {templates.map((t) => (
+                <option key={t} value={t}>
+                  {t}
+                </option>
+              ))}
+            </select>
+          </div>
+        </fieldset>
 
         <div className="pane-foot">
           <button className="primary" disabled={!dirty || save.kind === 'busy'}>

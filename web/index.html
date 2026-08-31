@@ -4,6 +4,21 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#eaf0f4" />
+    <!--
+      Pre-paint theme, ahead of the stylesheet Vite injects below: without this the page
+      paints light before the bundle lands. The key and choices mirror src/theme.ts,
+      which cannot be imported here. theme.ts keeps the theme-color meta above in step.
+    -->
+    <script>
+      try {
+        var choice = localStorage.getItem('note.theme')
+        if (choice === 'dark' || choice === 'light') {
+          document.documentElement.setAttribute('data-theme', choice)
+        }
+      } catch (e) {
+        /* storage blocked; follow the system scheme */
+      }
+    </script>
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" href="/icon.svg" type="image/svg+xml" />
     <title>Note</title>
