@@ -605,10 +605,16 @@ input:focus-visible, textarea:focus-visible { outline: 2px solid var(--sun); out
     z-index: 20;
     width: min(17rem, 82vw);
     transform: translateX(-100%);
-    transition: transform 180ms ease;
+    /* hidden keeps the closed drawer out of the tab order; delayed so the slide still plays */
+    visibility: hidden;
+    transition: transform 180ms ease, visibility 0s linear 180ms;
     box-shadow: 0 0 2rem color-mix(in srgb, var(--ink) 25%, transparent);
   }
-  .chat-side.open { transform: none; }
+  .chat-side.open {
+    transform: none;
+    visibility: visible;
+    transition: transform 180ms ease, visibility 0s;
+  }
   .chat-scrim {
     display: block;
     position: fixed;
@@ -624,7 +630,7 @@ input:focus-visible, textarea:focus-visible { outline: 2px solid var(--sun); out
 
 @media (prefers-reduced-motion: reduce) {
   .dots span { animation: none; opacity: 0.6; }
-  .chat-side { transition: none; }
+  .chat-side, .chat-side.open { transition: none; }
   .chat-tools { transition: none; }
   .tool-glyph { transition: none; }
 }

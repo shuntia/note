@@ -27,31 +27,38 @@ function render(text: string): string {
   return holder.innerHTML
 }
 
-function flash(button: HTMLButtonElement, label: string, timer: { current: number }) {
-  button.textContent = label
-  window.clearTimeout(timer.current)
-  timer.current = window.setTimeout(() => {
-    button.textContent = 'copy'
-  }, 1500)
-}
-
 export function Markdown({ text }: { text: string }) {
   const html = useMemo(() => render(text), [text])
-  const timer = useRef(0)
+  const timers = useRef(new Map<HTMLButtonElement, number>())
 
-  useEffect(() => () => window.clearTimeout(timer.current), [])
+  useEffect(() => {
+    const live = timers.current
+    return () => {
+      for (const id of live.values()) window.clearTimeout(id)
+    }
+  }, [])
+
+  const flash = (button: HTMLButtonElement, label: string) => {
+    button.textContent = label
+    window.clearTimeout(timers.current.get(button))
+    const id = window.setTimeout(() => {
+      button.textContent = 'copy'
+      timers.current.delete(button)
+    }, 1500)
+    timers.current.set(button, id)
+  }
 
   const copy = (e: MouseEvent<HTMLDivElement>) => {
     const button = (e.target as HTMLElement | null)?.closest('button.code-copy')
     if (!(button instanceof HTMLButtonElement)) return
     const code = button.parentElement?.querySelector('pre')?.textContent ?? ''
     if (!navigator.clipboard) {
-      flash(button, "couldn't copy", timer)
+      flash(button, "couldn't copy")
       return
     }
     navigator.clipboard.writeText(code).then(
-      () => flash(button, 'copied', timer),
-      () => flash(button, "couldn't copy", timer),
+      () => flash(button, 'copied'),
+      () => flash(button, "couldn't copy"),
     )
   }
 
