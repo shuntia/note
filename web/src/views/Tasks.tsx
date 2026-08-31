@@ -46,36 +46,49 @@ export function Tasks({ notify }: ViewProps) {
 
   if (failed)
     return (
-      <p className="muted">
-        Couldn't load tasks.{' '}
-        <button className="quiet" onClick={load}>
-          Retry
-        </button>
-      </p>
+      <div className="page">
+        <p className="muted">
+          Couldn't load tasks.{' '}
+          <button className="quiet" onClick={load}>
+            Retry
+          </button>
+        </p>
+      </div>
     )
   if (tasks === null) return null
 
+  const open = tasks.filter((t) => t.state !== 'done').length
   return (
-    <div>
-      {tasks.length === 0 && <p className="muted">No tasks yet. Add one below.</p>}
-      {tasks.map((t) => (
-        <div key={t.id} className={`task-row ${t.state === 'done' ? 'done' : ''}`}>
-          <input
-            type="checkbox"
-            checked={t.state === 'done'}
-            onChange={(e) => setState(t, e.target.checked ? 'done' : 'open')}
-            aria-label={`mark ${t.title} ${t.state === 'done' ? 'open' : 'done'}`}
-            style={{ width: 'auto' }}
-          />
-          <span className="title">{t.title}</span>
-        </div>
-      ))}
+    <div className="page">
+      <h2 className="pane-title">
+        <span className="pane-glyph" aria-hidden="true" />
+        Tasks
+        <span className="pane-meta mono">{open} open</span>
+      </h2>
       <form className="quick-add" onSubmit={add}>
         <input placeholder="Add a task…" value={title} onChange={(e) => setTitle(e.target.value)} />
         <button className="primary" disabled={busy || !title.trim()}>
           Add
         </button>
       </form>
+      {tasks.length === 0 ? (
+        <p className="muted task-empty">No tasks yet. Add one above.</p>
+      ) : (
+        <ul className="task-list">
+          {tasks.map((t) => (
+            <li key={t.id} className={`task-row ${t.state === 'done' ? 'done' : ''}`}>
+              <input
+                type="checkbox"
+                className="check"
+                checked={t.state === 'done'}
+                onChange={(e) => setState(t, e.target.checked ? 'done' : 'open')}
+                aria-label={`mark ${t.title} ${t.state === 'done' ? 'open' : 'done'}`}
+              />
+              <span className="title">{t.title}</span>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   )
 }

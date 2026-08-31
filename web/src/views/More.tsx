@@ -3,7 +3,7 @@ import { api, ApiError } from '../api'
 import type { ViewProps } from '../app'
 import { disablePush, enablePush, pushState } from '../push'
 import { applyTheme, saveTheme, storedTheme, type ThemeChoice } from '../theme'
-import type { Debrief, LogRow, Me, Settings } from '../types'
+import type { LogRow, Me, Settings } from '../types'
 
 export function More({
   me,
@@ -14,7 +14,6 @@ export function More({
     <div className="panes">
       <SettingsCard />
       <AppearanceCard />
-      <DebriefCard />
       <PushCard notify={notify} />
       {me.admin && <AdminCard />}
       <section className="card pane">
@@ -39,12 +38,11 @@ export function More({
   )
 }
 
-function PaneTitle({ children, meta }: { children: string; meta?: string }) {
+function PaneTitle({ children }: { children: string }) {
   return (
     <h2 className="pane-title">
       <span className="pane-glyph" aria-hidden="true" />
       {children}
-      {meta && <span className="pane-meta mono">{meta}</span>}
     </h2>
   )
 }
@@ -276,40 +274,6 @@ function AppearanceCard() {
           </div>
         </div>
       </div>
-    </section>
-  )
-}
-
-function DebriefCard() {
-  const [debrief, setDebrief] = useState<Debrief | null | 'error' | undefined>(undefined)
-
-  const load = () => {
-    setDebrief(undefined)
-    api
-      .debrief()
-      .then(setDebrief)
-      .catch((err) => setDebrief(err instanceof ApiError && err.status === 404 ? null : 'error'))
-  }
-  useEffect(load, [])
-
-  const date = debrief && debrief !== 'error' ? debrief.date : undefined
-  return (
-    <section className="card pane">
-      <PaneTitle meta={date}>Debrief</PaneTitle>
-      {debrief === undefined ? (
-        <p className="muted">Loading…</p>
-      ) : debrief === null ? (
-        <p className="muted">No debrief yet — it arrives overnight.</p>
-      ) : debrief === 'error' ? (
-        <p className="muted">
-          The debrief didn't load.{' '}
-          <button className="quiet" onClick={load}>
-            Retry
-          </button>
-        </p>
-      ) : (
-        <div className="letter">{debrief.content}</div>
-      )}
     </section>
   )
 }
