@@ -62,7 +62,7 @@ function errorText(err: unknown): string {
 }
 
 function shortDate(iso: string): string {
-  const at = new Date(iso.includes('T') ? iso : iso.replace(' ', 'T') + 'Z')
+  const at = new Date(iso)
   if (Number.isNaN(at.getTime())) return ''
   return at.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
 }
@@ -98,7 +98,8 @@ export function Talk() {
   const [items, setItems] = useState<Item[]>([])
   const [msgState, setMsgState] = useState<Load>('ready')
   const [draft, setDraft] = useState('')
-  const [busy, setBusy] = useState(false)
+  // era of the send in flight, so its pending row belongs to the conversation that sent it
+  const [pending, setPending] = useState<number | null>(null)
   const [sideOpen, setSideOpen] = useState(false)
   const [renaming, setRenaming] = useState<{ id: number; value: string } | null>(null)
   const [confirming, setConfirming] = useState<number | null>(null)
@@ -110,12 +111,12 @@ export function Talk() {
   const wanted = useRef<number | null>(null)
   // bumped whenever the open conversation changes, so a late reply never lands in the wrong pane
   const era = useRef(0)
+  const busy = pending === era.current
 
   const loadList = useCallback(async (quiet = false) => {
     if (!quiet) setListState('loading')
     try {
-      const rows = await api.conversations()
-      setConversations([...rows].sort((a, b) => b.updated_at.localeCompare(a.updated_at)))
+      setConversations(await api.conversations())
       setListState('ready')
     } catch {
       if (!quiet) setListState('error')
@@ -176,6 +177,7 @@ export function Talk() {
     if (id === current) return
     stick.current = true
     era.current++
+    setItems([])
     setCurrent(id)
     void loadMessages(id)
   }
@@ -198,7 +200,7 @@ export function Talk() {
     const mine: Item = { kind: 'user', key: nextKey(), text }
     const sentIn = era.current
     stick.current = true
-    setBusy(true)
+    setPending(sentIn)
     setDraft('')
     setItems((prev) => [...prev, mine])
     try {
@@ -228,7 +230,7 @@ export function Talk() {
       setDraft(text)
       input.current?.focus()
     } finally {
-      setBusy(false)
+      setPending((p) => (p === sentIn ? null : p))
     }
   }
 
@@ -410,27 +412,28 @@ export function Talk() {
                 <p>Ask Note anything — about today, your tasks, or what to do next.</p>
               </div>
             )}
-            {items.map((item) => {
-              if (item.kind === 'user')
+            {msgState === 'ready' &&
+              items.map((item) => {
+                if (item.kind === 'user')
+                  return (
+                    <div key={item.key} className="turn user">
+                      {item.text}
+                    </div>
+                  )
+                if (item.kind === 'assistant')
+                  return (
+                    <div key={item.key} className="turn assistant">
+                      <Markdown text={item.text} />
+                    </div>
+                  )
+                if (item.kind === 'tool') return <ToolBlock key={item.key} item={item} />
                 return (
-                  <div key={item.key} className="turn user">
-                    {item.text}
+                  <div key={item.key} className="turn system" role="alert">
+                    <span>{item.text}</span>
+                    {item.hint && <span className="chat-hint">{item.hint}</span>}
                   </div>
                 )
-              if (item.kind === 'assistant')
-                return (
-                  <div key={item.key} className="turn assistant">
-                    <Markdown text={item.text} />
-                  </div>
-                )
-              if (item.kind === 'tool') return <ToolBlock key={item.key} item={item} />
-              return (
-                <div key={item.key} className="turn system" role="alert">
-                  <span>{item.text}</span>
-                  {item.hint && <span className="chat-hint">{item.hint}</span>}
-                </div>
-              )
-            })}
+              })}
             {busy && (
               <p className="turn pending" aria-live="polite">
                 Note is thinking
