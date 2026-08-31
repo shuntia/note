@@ -133,10 +133,19 @@ With an embeddings provider configured, memory search becomes hybrid
 (lexical + vector) and degrades back to lexical automatically when the
 provider is down.
 
-`POST /api/talk {message}` runs a text conversation with the agent. Agent
-behavior lives in editable prompt files (`config/defaults/prompts/`,
-overridable per user under `config/users/<user>/prompts/`) — changing tone
-or policy is a file edit, not a deploy.
+`POST /api/talk {message, conversation_id?}` runs one turn with the agent.
+Turns belong to persisted conversations: omit `conversation_id` and the server
+opens one (titled from the message), pass one and the last 32 text turns are
+replayed to the model first. The response carries the `conversation_id`, the
+reply, and `steps` — every tool call the agent made, with its arguments,
+result, and error flag — which the web client renders as expandable blocks.
+Conversations are managed over `GET /api/conversations`,
+`PATCH/DELETE /api/conversations/{id}`, and
+`GET /api/conversations/{id}/messages` (user, assistant, and tool rows in
+order). Agent behavior lives in editable prompt files
+(`config/defaults/prompts/`, overridable per user under
+`config/users/<user>/prompts/`) — changing tone or policy is a file edit, not
+a deploy.
 
 Every night at each user's `nightly_time` (default 03:00, their timezone),
 the server generates the day's plan from their template, lets the agent
@@ -248,9 +257,13 @@ Unknown `/api/*` paths stay `404` rather than falling back to the app shell.
 Sign in with a user from `create-user`. The client shows today's plan on a
 time spine — Done / Later / +15 / −15 / Drop per unsettled event, with the
 ±15 slides only on events the template does not pin as `fixed` — plus tasks
-with quick-add, a text conversation with the assistant, and, under More, the
-morning debrief, a Web Push toggle (needs the `[channels.webpush]` config),
-and admin tools for admin users. Delivered events arrive live over the
+with quick-add. Talk is a full chat: a sidebar of persisted conversations
+(new, rename, delete), assistant replies rendered as sanitized markdown with
+copyable code blocks, and every tool call the agent makes shown as an
+expandable block with its arguments and result. More holds the settings card
+(display name, timezone, nightly debrief time, template), a System / Light /
+Dark theme choice, the morning debrief, a Web Push toggle (needs the
+`[channels.webpush]` config), and the server log for admin users. Delivered events arrive live over the
 WebSocket while the app is open, and as push notifications when it is not;
 `web/public/sw.js` renders those notifications and focuses an open tab when
 one is clicked.
