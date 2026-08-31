@@ -6,6 +6,8 @@ import type {
   MemoryFact,
   MemoryHit,
   PlanEvent,
+  PromptDoc,
+  PromptName,
   Settings,
   TalkMessage,
   TalkReply,
@@ -102,6 +104,15 @@ export const api = {
     }
     return request<void>('/api/settings', { method: 'PUT', body: JSON.stringify(body) })
   },
+  promptGet: (name: PromptName) => request<PromptDoc>(`/api/prompts/${name}`),
+  promptPut: (name: PromptName, content: string) =>
+    request<PromptDoc>(`/api/prompts/${name}`, {
+      method: 'PUT',
+      body: JSON.stringify({ content }),
+    }),
+  // Dropping the override; the reply carries the shipped default that takes over.
+  promptReset: (name: PromptName) =>
+    request<PromptDoc>(`/api/prompts/${name}`, { method: 'DELETE' }),
   // A search covers every category, so `q` and `category` never travel together.
   memoryList: (params: { category?: string; q?: string }) => {
     const search = new URLSearchParams()

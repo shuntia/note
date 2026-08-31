@@ -1166,8 +1166,130 @@ button.chat-send {
   .chip, .memory-row { transition: none; }
 }
 
+/* settings — one section at a time beside the list of them, the llama-ui settings
+   dialog laid out as a page. Mobile stacks: chip row, pane, sign-out. */
+.settings {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+  max-width: 64rem;
+  margin: 0 auto;
+}
+/* the side column is only a box on desktop; below that its two parts stack with the pane */
+.set-side { display: contents; }
+.set-pane { min-width: 0; }
+
+.set-nav { display: flex; gap: 0.35rem; overflow-x: auto; padding-bottom: 2px; }
+.set-item {
+  flex: none;
+  background: none;
+  border: 1px solid var(--border-input);
+  border-radius: 999px;
+  padding: 0.25rem 0.7rem;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 0.85rem;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+.set-item:hover { color: var(--text); }
+.set-item[aria-current='true'] {
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 38%, transparent);
+  color: color-mix(in srgb, var(--accent) 55%, var(--text));
+  font-weight: 600;
+}
+.set-item:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
+
+.set-foot {
+  order: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+.set-who { margin: 0; font-size: 0.85rem; }
+
+@media (min-width: 768px) {
+  .settings {
+    display: grid;
+    grid-template-columns: 13rem minmax(0, 1fr);
+    gap: 0 2.25rem;
+    align-items: start;
+  }
+  .set-side {
+    display: flex;
+    flex-direction: column;
+    gap: 0.9rem;
+    position: sticky;
+    top: 1.5rem;
+  }
+  .set-nav { flex-direction: column; gap: 2px; overflow: visible; padding: 0; }
+  .set-item {
+    text-align: left;
+    border-color: transparent;
+    border-radius: var(--radius);
+    padding: 0.5rem 0.75rem;
+    font-size: 0.95rem;
+  }
+  .set-item:hover:not([aria-current='true']) {
+    background: color-mix(in srgb, var(--text) 6%, transparent);
+  }
+  .set-foot {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.6rem;
+    border-top: 1px solid var(--border);
+    padding-top: 0.9rem;
+  }
+}
+
+/* a single-line field stops at a length its value could plausibly need; only the
+   prompt editor takes the whole pane */
+.set-pane .pane-row > input { max-width: 26rem; }
+
+.set-prompt-head { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.35rem; }
+.set-prompt-head .pane-label { margin-bottom: 0; }
+.set-badge {
+  flex: none;
+  border-radius: 999px;
+  padding: 0.05rem 0.5rem;
+  font-size: 0.68rem;
+  letter-spacing: 0.04em;
+  color: var(--sun-ink);
+  background: color-mix(in srgb, var(--sun-ink) 13%, transparent);
+}
+.set-prompt { resize: vertical; font-size: 0.85rem; line-height: 1.6; }
+.set-prompt-note { margin: 0.9rem 0 0; }
+
+/* confirm dialog — centered, its own raised surface, scrim and Escape both dismiss */
+.dialog {
+  margin: auto;
+  padding: 0;
+  width: min(25rem, calc(100vw - 2rem));
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 12px 40px oklch(0 0 0 / 28%);
+}
+.dialog::backdrop { background: oklch(0 0 0 / 45%); }
+.dialog-body { padding: 1.1rem 1.25rem 1rem; }
+.dialog-title {
+  margin: 0;
+  font-family: var(--serif);
+  font-weight: 500;
+  font-size: 1.1rem;
+}
+.dialog-text { margin: 0.5rem 0 1.15rem; font-size: 0.9rem; color: var(--text-muted); }
+.dialog-foot { display: flex; justify-content: flex-end; gap: 0.5rem; }
+
+@media (prefers-reduced-motion: reduce) {
+  .set-item { transition: none; }
+}
+
 /* panes and section titles — the sun diamond marks a section the way it marks a tool call */
-.panes { display: flex; flex-direction: column; gap: 0.85rem; max-width: 64rem; margin: 0 auto; }
 .pane { padding: 0.9rem 1rem 1rem; }
 .pane > p { margin: 0; }
 
@@ -1208,6 +1330,7 @@ fieldset.pane-rows { border: none; margin: 0; padding: 0; min-width: 0; }
   justify-content: space-between;
   gap: 1rem;
 }
+.pane-row.inline > button { flex: none; white-space: nowrap; }
 .pane-label { display: block; font-size: 0.9rem; margin-bottom: 0.35rem; }
 .pane-row.inline .pane-label { margin-bottom: 0; }
 .pane-hint { display: block; margin: 0.35rem 0 0; font-size: 0.78rem; color: var(--quiet); }

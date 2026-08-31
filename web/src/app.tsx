@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { api, ApiError, setOnUnauthorized } from './api'
 import type { Me } from './types'
 import { Memory } from './views/Memory'
-import { More } from './views/More'
+import { Settings } from './views/Settings'
 import { Talk } from './views/Talk'
 import { Tasks } from './views/Tasks'
 import { Today } from './views/Today'
@@ -103,7 +103,7 @@ export function App() {
           {tab === 'tasks' && <Tasks {...views} />}
           {tab === 'chat' && <Talk />}
           {tab === 'memory' && <Memory {...views} />}
-          {tab === 'settings' && <More me={me} {...views} onSignedOut={() => setMe(null)} />}
+          {tab === 'settings' && <Settings me={me} {...views} onSignedOut={() => setMe(null)} />}
         </main>
       </div>
       <nav className="tabs" aria-label="Views">
