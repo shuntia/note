@@ -8,7 +8,7 @@
   --border-input: oklch(0.87 0 0);
   --sun: #e8871e;
   --accent: var(--sun);
-  --accent-fg: #ffffff;
+  --accent-fg: oklch(0.205 0 0);
   --danger: oklch(0.577 0.245 27.325);
   --ring: var(--accent);
   --sidebar-bg: oklch(0.97 0 0);
@@ -175,7 +175,7 @@ body {
   display: none;
   justify-content: center;
   gap: 0;
-  background: var(--surface);
+  background: var(--sidebar-bg);
   border-top: 1px solid var(--sidebar-border);
   padding-bottom: env(safe-area-inset-bottom);
 }
@@ -774,6 +774,12 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
   .chat-foot { padding: 0.6rem 0.9rem 0.7rem; }
   .chat-head { padding: 0.5rem 0.9rem; }
   .chat-tools { opacity: 1; }
+}
+
+/* with the app sidebar still visible, the drawer and scrim start after it */
+@media (min-width: 768px) and (max-width: 1023.98px) {
+  .chat-side { left: 15rem; }
+  .chat-scrim { left: 15rem; }
 }
 
 @media (prefers-reduced-motion: reduce) {
