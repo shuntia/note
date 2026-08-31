@@ -523,11 +523,13 @@ async fn settings_put(
     }
 }
 
+/// Every field arrives as a string so that a blank value means "absent" for all
+/// three alike; `limit` is parsed in the handler to keep that symmetry.
 #[derive(Deserialize)]
 struct MemoryQuery {
     category: Option<String>,
     q: Option<String>,
-    limit: Option<usize>,
+    limit: Option<String>,
 }
 
 const MEMORY_LIMIT_DEFAULT: usize = 100;
@@ -535,6 +537,14 @@ const MEMORY_LIMIT_MAX: usize = 200;
 
 fn blank_as_none(s: Option<&String>) -> Option<&str> {
     s.map(|s| s.trim()).filter(|s| !s.is_empty())
+}
+
+fn memory_error(message: &str) -> axum::response::Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({ "error": message })),
+    )
+        .into_response()
 }
 
 /// Browses the user's live facts, newest first; a non-blank `q` switches to
@@ -545,14 +555,17 @@ async fn memory_list(
     State(state): State<AppState>,
     Query(q): Query<MemoryQuery>,
 ) -> impl IntoResponse {
-    let limit = q.limit.unwrap_or(MEMORY_LIMIT_DEFAULT).clamp(1, MEMORY_LIMIT_MAX);
+    let limit = match blank_as_none(q.limit.as_ref()) {
+        Some(raw) => match raw.parse::<usize>() {
+            Ok(n) => n,
+            Err(_) => return memory_error("limit must be a number"),
+        },
+        None => MEMORY_LIMIT_DEFAULT,
+    }
+    .clamp(1, MEMORY_LIMIT_MAX);
     let category = blank_as_none(q.category.as_ref());
     if category.is_some_and(|c| !crate::memory::CATEGORIES.contains(&c)) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "unknown category" })),
-        )
-            .into_response();
+        return memory_error("unknown category");
     }
     let conn = state.db.lock().unwrap();
     let hits = match blank_as_none(q.q.as_ref()) {

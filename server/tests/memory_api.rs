@@ -71,6 +71,25 @@ async fn memory_routes_list_search_and_read() {
     .await;
     assert_eq!(ids(&v), vec![dentist.clone()]);
 
+    // a blank q browses rather than searching for the empty string
+    let v = json(
+        app.clone()
+            .oneshot(get("/api/memory?q=%20", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(ids(&v), vec![dentist.clone(), tea.clone()]);
+
+    // every parameter blank is the same request as no parameters at all
+    let res = app
+        .clone()
+        .oneshot(get("/api/memory?category=&q=&limit=", &cookie))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(ids(&json(res).await), vec![dentist.clone(), tea.clone()]);
+
     let v = json(
         app.clone()
             .oneshot(get("/api/memory?limit=0", &cookie))
@@ -79,6 +98,14 @@ async fn memory_routes_list_search_and_read() {
     )
     .await;
     assert_eq!(ids(&v), vec![dentist.clone()], "limit must clamp up to 1");
+
+    let res = app
+        .clone()
+        .oneshot(get("/api/memory?limit=ten", &cookie))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(json(res).await["error"], "limit must be a number");
 
     let res = app
         .clone()
@@ -127,6 +154,25 @@ async fn memory_routes_list_search_and_read() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn memory_list_caps_at_two_hundred() {
+    let (app, cookie, state, _cfg) = common::app_with_logged_in_user_and_state().await;
+    for i in 0..205 {
+        add(&state, "aki", "semantic", &format!("fact {i}"), "body");
+    }
+    let v = json(
+        app.clone()
+            .oneshot(get("/api/memory?limit=999", &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(ids(&v).len(), 200);
+
+    let v = json(app.oneshot(get("/api/memory", &cookie)).await.unwrap()).await;
+    assert_eq!(ids(&v).len(), 100, "the default limit still applies");
 }
 
 #[tokio::test]
