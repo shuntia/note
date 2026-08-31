@@ -17,6 +17,12 @@ pub fn router(state: AppState) -> Router {
         .route("/api/tasks", get(tasks_list).post(tasks_create))
         .route("/api/tasks/{id}", patch(tasks_update))
         .route("/api/talk", post(talk))
+        .route("/api/conversations", get(conversations_list))
+        .route(
+            "/api/conversations/{id}",
+            patch(conversation_rename).delete(conversation_delete),
+        )
+        .route("/api/conversations/{id}/messages", get(conversation_messages))
         .route("/api/plan/today", get(plan_today))
         .route("/api/debrief", get(debrief))
         .route("/api/events/{id}/shift", post(event_shift))
@@ -244,6 +250,127 @@ async fn talk(
             }
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
+    }
+}
+
+const MAX_CONVERSATION_TITLE: usize = 120;
+
+/// A conversation belonging to someone else is reported as absent, so the API
+/// never confirms that an id exists to a user who cannot see it.
+fn conversation_not_found() -> axum::response::Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(serde_json::json!({ "error": "conversation not found" })),
+    )
+        .into_response()
+}
+
+async fn conversations_list(user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
+    let conn = state.db.lock().unwrap();
+    let mut stmt = match conn.prepare(
+        "SELECT id, title, updated_at FROM conversations
+         WHERE user_id = ?1 ORDER BY updated_at DESC, id DESC",
+    ) {
+        Ok(s) => s,
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    let rows: Result<Vec<serde_json::Value>, _> = stmt
+        .query_map([user.id], |r| {
+            Ok(serde_json::json!({
+                "id": r.get::<_, i64>(0)?,
+                "title": r.get::<_, String>(1)?,
+                "updated_at": r.get::<_, String>(2)?,
+            }))
+        })
+        .and_then(|m| m.collect());
+    match rows {
+        Ok(v) => Json(v).into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct RenameConversationReq {
+    title: String,
+}
+
+async fn conversation_rename(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(req): Json<RenameConversationReq>,
+) -> impl IntoResponse {
+    let title = req.title.trim();
+    if title.is_empty() || title.chars().count() > MAX_CONVERSATION_TITLE {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "title must be non-blank and at most 120 characters"
+            })),
+        )
+            .into_response();
+    }
+    let conn = state.db.lock().unwrap();
+    match conn.execute(
+        "UPDATE conversations SET title = ?1 WHERE id = ?2 AND user_id = ?3",
+        (title, id, user.id),
+    ) {
+        Ok(0) => conversation_not_found(),
+        Ok(_) => StatusCode::OK.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn conversation_delete(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    let conn = state.db.lock().unwrap();
+    match conn.execute(
+        "DELETE FROM conversations WHERE id = ?1 AND user_id = ?2",
+        (id, user.id),
+    ) {
+        Ok(0) => conversation_not_found(),
+        Ok(_) => StatusCode::OK.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn conversation_messages(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    let conn = state.db.lock().unwrap();
+    match crate::talk::owned(&conn, user.id, id) {
+        Ok(true) => {}
+        Ok(false) => return conversation_not_found(),
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+    let mut stmt = match conn.prepare(
+        "SELECT id, role, content, tool_name, tool_args, is_error, created_at
+         FROM talk_messages WHERE conversation_id = ?1 ORDER BY id",
+    ) {
+        Ok(s) => s,
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    let rows: Result<Vec<serde_json::Value>, _> = stmt
+        .query_map([id], |r| {
+            Ok(serde_json::json!({
+                "id": r.get::<_, i64>(0)?,
+                "role": r.get::<_, String>(1)?,
+                "content": r.get::<_, String>(2)?,
+                "tool_name": r.get::<_, Option<String>>(3)?,
+                "tool_args": r.get::<_, Option<String>>(4)?,
+                "is_error": r.get::<_, bool>(5)?,
+                "created_at": r.get::<_, String>(6)?,
+            }))
+        })
+        .and_then(|m| m.collect());
+    match rows {
+        Ok(v) => Json(v).into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
 

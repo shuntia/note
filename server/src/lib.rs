@@ -13,6 +13,7 @@ pub mod prompts;
 pub mod providers;
 pub mod push_subs;
 pub mod runner;
+pub mod talk;
 pub mod tasks;
 pub mod templates;
 pub mod tools;

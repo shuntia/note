@@ -106,6 +106,28 @@ const MIGRATIONS: &[&str] = &[
     );
     ALTER TABLE events ADD COLUMN message TEXT NOT NULL DEFAULT '';
     ",
+    // v5
+    "
+    CREATE TABLE conversations (
+        id INTEGER PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id),
+        title TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    CREATE INDEX idx_conversations_user ON conversations(user_id, updated_at DESC);
+    CREATE TABLE talk_messages (
+        id INTEGER PRIMARY KEY,
+        conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+        role TEXT NOT NULL CHECK (role IN ('user','assistant','tool')),
+        content TEXT NOT NULL,
+        tool_name TEXT,
+        tool_args TEXT,
+        is_error INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL
+    );
+    CREATE INDEX idx_talk_messages_conv ON talk_messages(conversation_id, id);
+    ",
 ];
 
 pub fn open(path: &Path) -> Result<Connection> {
