@@ -427,6 +427,7 @@ async fn conversation_messages(
 const MAX_DISPLAY_NAME: usize = 64;
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SettingsPatch {
     display_name: Option<String>,
     timezone: Option<String>,
@@ -489,7 +490,10 @@ async fn settings_put(
     if let Some(name) = req.display_name {
         let name = name.trim();
         if name.is_empty() || name.chars().count() > MAX_DISPLAY_NAME {
-            return invalid_field("display_name", "must be non-blank and at most 64 characters");
+            return invalid_field(
+                "display_name",
+                &format!("must be non-blank and at most {MAX_DISPLAY_NAME} characters"),
+            );
         }
         cfg.display_name = name.to_string();
     }

@@ -147,6 +147,17 @@ async fn invalid_fields_are_rejected_by_name() {
 }
 
 #[tokio::test]
+async fn unknown_fields_are_rejected_not_ignored() {
+    let (app, cookie, cfg) = common::app_with_logged_in_user().await;
+    let res = app
+        .oneshot(put(&cookie, r#"{"tempalte":"default"}"#))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(!cfg.path().join("users/aki/user.toml").exists());
+}
+
+#[tokio::test]
 async fn a_rejected_put_writes_nothing() {
     let (app, cookie, cfg) = common::app_with_logged_in_user().await;
     let res = app
