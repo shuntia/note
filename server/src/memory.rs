@@ -358,6 +358,25 @@ pub fn query(
     ids.into_iter().map(|(id, _)| hit_for(conn, user, &id, &lexical)).collect()
 }
 
+/// Newest-first browse over a user's live facts, with an optional exact
+/// category filter — the no-search counterpart to `query`.
+pub fn list(
+    conn: &Connection,
+    user: &str,
+    category: Option<&str>,
+    limit: usize,
+) -> Result<Vec<QueryHit>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, category, summary FROM memory_index
+         WHERE user = ?1 AND archived = 0 AND (?2 IS NULL OR category = ?2)
+         ORDER BY rowid DESC LIMIT ?3",
+    )?;
+    let rows = stmt.query_map((user, category, limit as i64), |r| {
+        Ok(QueryHit { id: r.get(0)?, category: r.get(1)?, summary: r.get(2)? })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 /// Rebuilds one user's index rows from their files. Unparseable files are
 /// logged and skipped so one corrupt fact cannot hide the rest.
 pub fn reindex_user(conn: &Connection, data_dir: &Path, user: &str) -> Result<()> {
@@ -576,6 +595,38 @@ mod tests {
             .filter(|f| f.path().extension().is_some_and(|e| e == "tmp"))
             .collect();
         assert!(leftovers.is_empty());
+    }
+
+    #[test]
+    fn list_returns_newest_first_and_filters_category() {
+        let (conn, tmp) = env();
+        let a = add(&conn, tmp.path(), "aki", "semantic", "fact a", "body a", None).unwrap();
+        let b = add(&conn, tmp.path(), "aki", "episodic", "fact b", "body b", None).unwrap();
+        let c = add(&conn, tmp.path(), "aki", "semantic", "fact c", "body c", None).unwrap();
+        add(&conn, tmp.path(), "other", "semantic", "fact d", "body d", None).unwrap();
+
+        let all = list(&conn, "aki", None, 50).unwrap();
+        assert_eq!(
+            all.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(),
+            vec![c.as_str(), b.as_str(), a.as_str()]
+        );
+        assert_eq!(all[0].summary, "fact c");
+
+        let sem = list(&conn, "aki", Some("semantic"), 50).unwrap();
+        assert_eq!(sem.len(), 2);
+        assert!(sem.iter().all(|h| h.category == "semantic"));
+
+        assert_eq!(list(&conn, "aki", None, 1).unwrap().len(), 1);
+        assert!(list(&conn, "nobody", None, 50).unwrap().is_empty());
+    }
+
+    #[test]
+    fn list_excludes_archived() {
+        let (conn, tmp) = env();
+        let old = add(&conn, tmp.path(), "aki", "semantic", "old", "old body", None).unwrap();
+        let new = supersede(&conn, tmp.path(), "aki", &old, "new", "new body", None).unwrap().unwrap();
+        let ids: Vec<String> = list(&conn, "aki", None, 50).unwrap().into_iter().map(|h| h.id).collect();
+        assert_eq!(ids, vec![new]);
     }
 
     #[test]
