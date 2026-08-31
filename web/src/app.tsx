@@ -7,7 +7,7 @@ import { Tasks } from './views/Tasks'
 import { Today } from './views/Today'
 import { connectEvents } from './ws'
 
-type Tab = 'today' | 'tasks' | 'talk' | 'more'
+type Tab = 'today' | 'tasks' | 'chat' | 'memory' | 'settings'
 
 // `refresh` is a counter views key on or depend on to refetch; `onChanged` bumps it.
 export type ViewProps = {
@@ -16,11 +16,12 @@ export type ViewProps = {
   onChanged: () => void
 }
 
-const TABS: { id: Tab; label: string }[] = [
+const NAV: { id: Tab; label: string }[] = [
   { id: 'today', label: 'Today' },
   { id: 'tasks', label: 'Tasks' },
-  { id: 'talk', label: 'Talk' },
-  { id: 'more', label: 'More' },
+  { id: 'chat', label: 'Chat' },
+  { id: 'memory', label: 'Memory' },
+  { id: 'settings', label: 'Settings' },
 ]
 
 export function App() {
@@ -64,21 +65,48 @@ export function App() {
   const views: ViewProps = { notify, refresh, onChanged }
 
   return (
-    <div className={tab === 'talk' ? 'shell shell-wide' : 'shell'}>
-      <header className="masthead">
-        <h1>Note</h1>
-        <div className="date">
-          {me.username} · {new Date().toDateString()}
-        </div>
-      </header>
-      <main className={tab === 'talk' ? 'view view-talk' : 'view'}>
-        {tab === 'today' && <Today key={refresh} {...views} />}
-        {tab === 'tasks' && <Tasks {...views} />}
-        {tab === 'talk' && <Talk />}
-        {tab === 'more' && <More me={me} {...views} onSignedOut={() => setMe(null)} />}
-      </main>
-      <nav className="tabs">
-        {TABS.map((t) => (
+    <div className="shell">
+      <aside className="sidebar">
+        <header className="sidebar-head">
+          <h1 className="brand">
+            <span className="brand-glyph" aria-hidden="true" />
+            Note
+          </h1>
+          <p className="sidebar-sub">
+            {me.username} · {new Date().toDateString()}
+          </p>
+        </header>
+        <nav className="sidebar-nav" aria-label="Views">
+          {NAV.map((t) => (
+            <button
+              key={t.id}
+              className="sidebar-item"
+              aria-current={tab === t.id}
+              onClick={() => setTab(t.id)}
+            >
+              {t.label}
+            </button>
+          ))}
+        </nav>
+      </aside>
+      <div className="content">
+        <header className="mobile-head">
+          <div className="brand">
+            <span className="brand-glyph" aria-hidden="true" />
+            Note
+          </div>
+          <span className="mobile-sub">{me.username}</span>
+        </header>
+        <main className={tab === 'chat' ? 'view view-talk' : 'view'}>
+          {tab === 'today' && <Today key={refresh} {...views} />}
+          {tab === 'tasks' && <Tasks {...views} />}
+          {tab === 'chat' && <Talk />}
+          {tab === 'memory' && <section className="pane" />}
+          {tab === 'settings' && <More me={me} {...views} onSignedOut={() => setMe(null)} />}
+        </main>
+      </div>
+      <nav className="tabs" aria-label="Views">
+        {NAV.map((t) => (
           <button key={t.id} aria-current={tab === t.id} onClick={() => setTab(t.id)}>
             {t.label}
           </button>
