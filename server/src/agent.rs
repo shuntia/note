@@ -293,6 +293,7 @@ mod tests {
             run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, now(), &[], "hi")
                 .unwrap();
         assert_eq!(out.turns, MAX_TURNS);
+        assert_eq!(out.steps.len(), MAX_TURNS);
         let n: i64 = db
             .lock()
             .unwrap()
