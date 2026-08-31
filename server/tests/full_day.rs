@@ -115,6 +115,7 @@ fn a_full_simulated_day() {
             "aki",
             SessionKind::Talk,
             "2026-08-31T01:00:00Z".parse().unwrap(), // 10:00 JST
+            &[],
             "the report is due friday, remind me",
         )
         .unwrap();

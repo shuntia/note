@@ -56,6 +56,7 @@ pub fn run_for_user(
         username,
         crate::tools::SessionKind::Nightly,
         now,
+        &[],
         &format!("Nightly run for {date}."),
     ) {
         Ok(out) if !out.reply.trim().is_empty() => out.reply,
