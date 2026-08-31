@@ -141,6 +141,12 @@ mod tests {
     }
 
     #[test]
+    fn the_role_check_rejects_unknown_roles() {
+        let conn = conn_with_conversation();
+        assert!(append_text(&conn, 1, "system", "x", now()).is_err());
+    }
+
+    #[test]
     fn history_excludes_tool_rows_and_maps_roles_oldest_first() {
         let conn = conn_with_conversation();
         append_text(&conn, 1, "user", "hi", now()).unwrap();
