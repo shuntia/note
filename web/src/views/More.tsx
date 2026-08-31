@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent } from 'react'
 import { api, ApiError } from '../api'
 import type { ViewProps } from '../app'
 import { disablePush, enablePush, pushState } from '../push'
+import { SectionTitle } from '../section'
 import { applyTheme, saveTheme, storedTheme, type ThemeChoice } from '../theme'
 import type { LogRow, Me, Settings } from '../types'
 
@@ -17,7 +18,7 @@ export function More({
       <PushCard notify={notify} />
       {me.admin && <AdminCard />}
       <section className="card pane">
-        <PaneTitle>Session</PaneTitle>
+        <SectionTitle>Session</SectionTitle>
         <p className="pane-note muted">Signed in as {me.username}.</p>
         <button
           className="quiet danger"
@@ -35,15 +36,6 @@ export function More({
         </button>
       </section>
     </div>
-  )
-}
-
-function PaneTitle({ children }: { children: string }) {
-  return (
-    <h2 className="pane-title">
-      <span className="pane-glyph" aria-hidden="true" />
-      {children}
-    </h2>
   )
 }
 
@@ -92,7 +84,7 @@ function SettingsCard() {
   if (state === undefined) {
     return (
       <section className="card pane">
-        <PaneTitle>Settings</PaneTitle>
+        <SectionTitle>Settings</SectionTitle>
         <p className="muted">Loading…</p>
       </section>
     )
@@ -100,7 +92,7 @@ function SettingsCard() {
   if (state === 'error') {
     return (
       <section className="card pane">
-        <PaneTitle>Settings</PaneTitle>
+        <SectionTitle>Settings</SectionTitle>
         <p className="muted">
           Settings didn't load.{' '}
           <button className="quiet" onClick={load}>
@@ -150,7 +142,7 @@ function SettingsCard() {
 
   return (
     <section className="card pane">
-      <PaneTitle>Settings</PaneTitle>
+      <SectionTitle>Settings</SectionTitle>
       <form onSubmit={submit}>
         <fieldset className="pane-rows" disabled={save.kind === 'busy'}>
           <div className="pane-row">
@@ -254,7 +246,7 @@ function AppearanceCard() {
 
   return (
     <section className="card pane">
-      <PaneTitle>Appearance</PaneTitle>
+      <SectionTitle>Appearance</SectionTitle>
       <div className="pane-rows">
         <div className="pane-row inline">
           <span className="pane-label" id="theme-label">
@@ -311,7 +303,7 @@ function PushCard({ notify }: { notify: (msg: string) => void }) {
   if (state === 'unsupported') return null
   return (
     <section className="card pane">
-      <PaneTitle>Notifications</PaneTitle>
+      <SectionTitle>Notifications</SectionTitle>
       <div className="pane-rows">
         <div className="pane-row inline">
           <span className="pane-label">
@@ -341,7 +333,7 @@ function AdminCard() {
 
   return (
     <section className="card pane">
-      <PaneTitle>Server log</PaneTitle>
+      <SectionTitle>Server log</SectionTitle>
       {log === undefined ? (
         <p className="muted">Loading…</p>
       ) : log === 'error' ? (

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import { api, ApiError } from '../api'
 import type { ViewProps } from '../app'
+import { SectionTitle } from '../section'
 import type { Debrief, PlanEvent } from '../types'
 
 function nowWall(): string {
@@ -93,16 +94,6 @@ export function Today({ notify }: ViewProps) {
         <DebriefCard />
       </aside>
     </div>
-  )
-}
-
-function SectionTitle({ children, meta }: { children: string; meta?: string }) {
-  return (
-    <h2 className="pane-title">
-      <span className="pane-glyph" aria-hidden="true" />
-      {children}
-      {meta && <span className="pane-meta mono">{meta}</span>}
-    </h2>
   )
 }
 
@@ -221,7 +212,7 @@ function DebriefCard() {
   const date = debrief && debrief !== 'error' ? debrief.date : undefined
   return (
     <section className="card debrief">
-      <SectionTitle meta={date}>Morning debrief</SectionTitle>
+      <SectionTitle meta={date}>Debrief</SectionTitle>
       {debrief === undefined ? (
         <p className="muted">Loading…</p>
       ) : debrief === null ? (

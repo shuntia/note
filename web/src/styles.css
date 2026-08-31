@@ -300,6 +300,36 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
   outline-offset: 0;
 }
 
+/* the detached composer card, shared by the chat composer and the task quick-add */
+:is(.chat-composer, .quick-add) {
+  display: flex;
+  gap: 0.5rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 1.5rem;
+  padding: 0.35rem 0.35rem 0.35rem 1rem;
+  box-shadow: 0 1px 2px oklch(0 0 0 / 0.08);
+  transition: box-shadow 150ms ease, border-color 150ms ease;
+}
+:is(.chat-composer, .quick-add):focus-within {
+  border-color: var(--ring);
+  box-shadow:
+    0 0 0 1px var(--ring),
+    0 4px 14px oklch(0 0 0 / 0.12);
+}
+/* the card carries the focus affordance, so the field inside is bare */
+:is(.chat-composer, .quick-add) :is(input, textarea) {
+  flex: 1;
+  min-width: 0;
+  background: none;
+  border: none;
+  border-radius: 0;
+}
+:is(.chat-composer, .quick-add) :is(input, textarea):focus-visible { outline: none; }
+@media (prefers-reduced-motion: reduce) {
+  :is(.chat-composer, .quick-add) { transition: none; }
+}
+
 .field { margin-bottom: 0.75rem; }
 .muted { color: var(--text-muted); }
 .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
@@ -343,7 +373,8 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 /* today — the plan spine, with the debrief alongside it on wide screens */
 .today { display: grid; gap: 1.75rem; align-items: start; }
 .today-plan { min-width: 0; }
-@media (min-width: 1024px) {
+/* two columns only once the plan column still fits an event row on one line */
+@media (min-width: 1152px) {
   .today { grid-template-columns: minmax(0, 2fr) minmax(17rem, 1fr); gap: 2.5rem; }
   .today-aside {
     position: sticky;
@@ -372,7 +403,9 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
   padding: 0.35rem 0;
   position: relative;
 }
-/* a diamond on the spine per event: the app's mark, at the hour it lands */
+/* a diamond on the spine per event: the app's mark, at the hour it lands.
+   Offsets centre it on the rule (3.6rem, less half the 7px box) and on the card's
+   first line (row + card padding + half a 1.5rem line box); .time matches that line. */
 .spine li::before {
   content: '';
   position: absolute;
@@ -393,7 +426,8 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
   text-align: right;
   padding-top: 0.74rem;
 }
-.spine li.past .event-card { opacity: 0.6; }
+/* a past row recedes by its name and state only; its buttons keep full contrast */
+.spine li.past .event-head { opacity: 0.6; }
 .spine li.now-marker {
   align-items: center;
   padding: 0.35rem 0;
@@ -447,32 +481,8 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 }
 
 /* tasks */
-.quick-add {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 1.5rem;
-  padding: 0.3rem 0.35rem 0.3rem 1rem;
-  box-shadow: 0 1px 2px oklch(0 0 0 / 0.08);
-  transition: box-shadow 150ms ease, border-color 150ms ease;
-}
-.quick-add:focus-within {
-  border-color: var(--ring);
-  box-shadow:
-    0 0 0 1px var(--ring),
-    0 4px 14px oklch(0 0 0 / 0.12);
-}
-.quick-add input {
-  flex: 1;
-  min-width: 0;
-  background: none;
-  border: none;
-  border-radius: 0;
-  padding: 0.5rem 0;
-}
-.quick-add input:focus-visible { outline: none; }
+.quick-add { align-items: center; padding-block: 0.3rem; }
+.quick-add input { padding: 0.5rem 0; }
 .quick-add .primary { flex: none; border-radius: 999px; padding: 0.5rem 1.15rem; }
 
 .task-list {
@@ -527,7 +537,7 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 .check:checked::after { opacity: 1; }
 
 @media (prefers-reduced-motion: reduce) {
-  .event-card, .task-row, .check, .quick-add, button.ghost { transition: none; }
+  .event-card, .task-row, .check, button.ghost { transition: none; }
 }
 
 /* talk — three voices: Note speaks in serif, you in sans, tools in mono */
@@ -921,39 +931,18 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 }
 .code-block:hover .code-copy, .code-copy:focus-visible { opacity: 1; color: var(--text); }
 
-/* composer — a detached card floating over the stream */
 .chat-foot { flex: none; padding: 0.5rem 1.5rem 1.25rem; }
 .chat-composer {
   max-width: 48rem;
   margin: 0 auto;
-  display: flex;
   align-items: flex-end;
-  gap: 0.5rem;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 1.5rem;
-  padding: 0.35rem 0.35rem 0.35rem 1rem;
-  box-shadow: 0 1px 2px oklch(0 0 0 / 0.08);
-  transition: box-shadow 150ms ease, border-color 150ms ease;
-}
-.chat-composer:focus-within {
-  border-color: var(--ring);
-  box-shadow:
-    0 0 0 1px var(--ring),
-    0 4px 14px oklch(0 0 0 / 0.12);
 }
 .chat-input {
-  flex: 1;
-  min-width: 0;
-  background: none;
-  border: none;
-  border-radius: 0;
   resize: none;
   line-height: 1.5;
   padding: 0.6rem 0 0.55rem;
   overflow-y: hidden;
 }
-.chat-input:focus-visible { outline: none; }
 button.chat-send {
   flex: none;
   display: grid;
@@ -1006,7 +995,7 @@ button.chat-send {
 
 @media (prefers-reduced-motion: reduce) {
   .chat-side, .chat-side.open { transition: none; }
-  .chat-tools, .chat-row, .chat-new, .chat-composer { transition: none; }
+  .chat-tools, .chat-row, .chat-new { transition: none; }
   .tool-glyph { transition: none; }
 }
 
