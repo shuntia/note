@@ -23,6 +23,7 @@ pub fn router(state: AppState) -> Router {
             patch(conversation_rename).delete(conversation_delete),
         )
         .route("/api/conversations/{id}/messages", get(conversation_messages))
+        .route("/api/settings", get(settings_get).put(settings_put))
         .route("/api/plan/today", get(plan_today))
         .route("/api/debrief", get(debrief))
         .route("/api/events/{id}/shift", post(event_shift))
@@ -34,7 +35,6 @@ pub fn router(state: AppState) -> Router {
         .route("/api/push/unsubscribe", post(push_unsubscribe))
         .route("/api/push/vapid_public_key", get(vapid_public_key))
         .route("/api/admin/log", get(admin_log))
-        .route("/api/admin/users", post(admin_create_user))
         .with_state(state)
 }
 
@@ -424,6 +424,99 @@ async fn conversation_messages(
     }
 }
 
+const MAX_DISPLAY_NAME: usize = 64;
+
+#[derive(Deserialize)]
+struct SettingsPatch {
+    display_name: Option<String>,
+    timezone: Option<String>,
+    nightly_time: Option<String>,
+    template: Option<String>,
+}
+
+fn settings_body(cfg: &crate::config::UserConfig) -> serde_json::Value {
+    serde_json::json!({
+        "display_name": cfg.display_name,
+        "timezone": cfg.timezone,
+        "nightly_time": cfg.nightly_time,
+        "template": cfg.template,
+    })
+}
+
+fn invalid_field(field: &str, requirement: &str) -> axum::response::Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({ "error": format!("{field} {requirement}") })),
+    )
+        .into_response()
+}
+
+/// The effective settings plus the two closed choice lists the client needs to
+/// render them.
+async fn settings_get(user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
+    let cfg = match crate::config::UserConfig::load(&state.config_dir, &user.username) {
+        Ok(c) => c,
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    let mut zones: Vec<String> = jiff::tz::db()
+        .available()
+        .map(|n| n.as_str().to_string())
+        .collect();
+    zones.sort_unstable();
+    let templates = crate::templates::available(&state.config_dir, &user.username);
+    let mut body = settings_body(&cfg);
+    body["templates"] = serde_json::json!(templates);
+    body["timezones"] = serde_json::json!(zones);
+    Json(body).into_response()
+}
+
+/// Merges the supplied subset into the effective values and rewrites the user's
+/// file, rejecting the first invalid field without touching disk. The read,
+/// merge and write run under the DB lock: settings writes are rare, and the
+/// guard is the cheapest serializer that stops two concurrent PUTs from each
+/// writing a file built from the values they read before the other landed.
+async fn settings_put(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Json(req): Json<SettingsPatch>,
+) -> impl IntoResponse {
+    let templates = crate::templates::available(&state.config_dir, &user.username);
+    let _serializer = state.db.lock().unwrap();
+    let mut cfg = match crate::config::UserConfig::load(&state.config_dir, &user.username) {
+        Ok(c) => c,
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    if let Some(name) = req.display_name {
+        let name = name.trim();
+        if name.is_empty() || name.chars().count() > MAX_DISPLAY_NAME {
+            return invalid_field("display_name", "must be non-blank and at most 64 characters");
+        }
+        cfg.display_name = name.to_string();
+    }
+    if let Some(tz) = req.timezone {
+        if jiff::tz::TimeZone::get(&tz).is_err() {
+            return invalid_field("timezone", "is not a known IANA timezone");
+        }
+        cfg.timezone = tz;
+    }
+    if let Some(time) = req.nightly_time {
+        if !crate::templates::valid_time(&time) {
+            return invalid_field("nightly_time", "must be a zero-padded 24-hour HH:MM");
+        }
+        cfg.nightly_time = time;
+    }
+    if let Some(template) = req.template {
+        if !templates.contains(&template) {
+            return invalid_field("template", "is not one of the available templates");
+        }
+        cfg.template = template;
+    }
+    match cfg.save(&state.config_dir, &user.username) {
+        Ok(()) => Json(settings_body(&cfg)).into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
 #[derive(Deserialize)]
 struct PlanQuery {
     date: Option<String>,
@@ -578,36 +671,6 @@ fn event_set(state: &AppState, user: &CurrentUser, id: i64, status: &str) -> axu
     match crate::plan::set_status(&conn, user.id, id, status) {
         Ok(Some(())) => StatusCode::OK.into_response(),
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    }
-}
-
-#[derive(Deserialize)]
-struct CreateUserReq {
-    username: String,
-    password: String,
-    admin: bool,
-}
-
-async fn admin_create_user(
-    user: CurrentUser,
-    State(state): State<AppState>,
-    Json(req): Json<CreateUserReq>,
-) -> impl IntoResponse {
-    if !user.admin {
-        return StatusCode::FORBIDDEN.into_response();
-    }
-    let db = state.db.clone();
-    let created = tokio::task::spawn_blocking(move || {
-        auth::validate_username(&req.username)?;
-        let hash = auth::hash_password(&req.password)?;
-        let conn = db.lock().unwrap();
-        auth::insert_user(&conn, &req.username, &hash, req.admin)
-    })
-    .await;
-    match created {
-        Ok(Ok(_)) => StatusCode::OK.into_response(),
-        Ok(Err(_)) => StatusCode::BAD_REQUEST.into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }

@@ -1,5 +1,5 @@
 use anyhow::Context;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Deserialize)]
@@ -59,7 +59,7 @@ pub struct ChannelsConfig {
     pub webpush: Option<WebPushSettings>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct UserConfig {
     pub display_name: String,
     pub timezone: String,
@@ -90,6 +90,15 @@ impl UserConfig {
             cfg.nightly_time
         );
         Ok(cfg)
+    }
+
+    /// Writes all four fields to the user's own file, so a later edit of
+    /// `defaults/user.toml` cannot move settings the user has already chosen.
+    pub fn save(&self, config_dir: &Path, user: &str) -> anyhow::Result<()> {
+        let path = config_dir.join("users").join(user).join("user.toml");
+        std::fs::create_dir_all(path.parent().expect("user.toml always has a parent"))?;
+        crate::context::write_atomic(&path, &toml::to_string(self)?)?;
+        Ok(())
     }
 }
 

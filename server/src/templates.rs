@@ -40,6 +40,27 @@ pub(crate) fn valid_time(s: &str) -> bool {
         && m.parse::<u32>().is_ok_and(|m| m < 60)
 }
 
+/// Every template name `user` can select: the shared defaults plus their own
+/// overrides, deduped (an override shadows the default of the same name) and
+/// sorted. An unreadable directory contributes nothing rather than failing —
+/// a user with no `templates/` of their own is the common case.
+pub fn available(config_dir: &Path, user: &str) -> Vec<String> {
+    let dirs = [
+        config_dir.join("defaults/templates"),
+        config_dir.join("users").join(user).join("templates"),
+    ];
+    let mut names = std::collections::BTreeSet::new();
+    for entry in dirs.iter().filter_map(|d| std::fs::read_dir(d).ok()).flatten().flatten() {
+        let path = entry.path();
+        if path.extension().is_some_and(|e| e == "toml") {
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                names.insert(stem.to_string());
+            }
+        }
+    }
+    names.into_iter().collect()
+}
+
 impl Template {
     /// Loads a named template for `user`, preferring a per-user override
     /// under `config_dir/users/<user>/templates/` and falling back to
