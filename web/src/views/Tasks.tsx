@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { api, ApiError } from '../api'
 import type { ViewProps } from '../app'
+import { SectionTitle } from '../section'
 import type { Task } from '../types'
 
 export function Tasks({ notify }: ViewProps) {
@@ -60,11 +61,7 @@ export function Tasks({ notify }: ViewProps) {
   const open = tasks.filter((t) => t.state !== 'done').length
   return (
     <div className="page">
-      <h2 className="pane-title">
-        <span className="pane-glyph" aria-hidden="true" />
-        Tasks
-        <span className="pane-meta mono">{open} open</span>
-      </h2>
+      <SectionTitle meta={`${open} open`}>Tasks</SectionTitle>
       <form className="quick-add" onSubmit={add}>
         <input placeholder="Add a task…" value={title} onChange={(e) => setTitle(e.target.value)} />
         <button className="primary" disabled={busy || !title.trim()}>
