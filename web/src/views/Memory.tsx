@@ -102,7 +102,7 @@ export function Memory({ notify, refresh }: ViewProps) {
   return (
     <div className="page memory" data-pane={selected === null ? 'list' : 'detail'}>
       <div className="memory-side">
-        <SectionTitle meta={count === 0 ? undefined : `${count} ${scope}`}>Memory</SectionTitle>
+        <SectionTitle meta={count === 0 || listFailed ? undefined : `${count} ${scope}`}>Memory</SectionTitle>
         <div className="memory-search">
           <svg viewBox="0 0 16 16" aria-hidden="true">
             <circle cx="7" cy="7" r="4.5" />

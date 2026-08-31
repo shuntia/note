@@ -1031,6 +1031,8 @@ button.chat-send {
   padding: 0.45rem 0.9rem 0.45rem 2.15rem;
   font-size: 0.9rem;
 }
+/* the native clear glyph is system-colored and breaks the palette */
+.memory-search input::-webkit-search-cancel-button { -webkit-appearance: none; appearance: none; }
 
 .memory-chips { display: flex; flex-wrap: wrap; gap: 0.3rem; }
 .chip {

@@ -110,7 +110,7 @@ export const api = {
     const query = search.toString()
     return request<{ items: MemoryHit[] }>(`/api/memory${query ? `?${query}` : ''}`)
   },
-  memoryRead: (id: string) => request<MemoryFact>(`/api/memory/${id}`),
+  memoryRead: (id: string) => request<MemoryFact>(`/api/memory/${encodeURIComponent(id)}`),
   debrief: () => request<Debrief>('/api/debrief'),
   vapidKey: () => request<{ key: string }>('/api/push/vapid_public_key'),
   pushSubscribe: (sub: PushSubscriptionJSON) =>
