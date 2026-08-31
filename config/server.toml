@@ -15,7 +15,7 @@ data_dir = "data"
 kind = "openai"                 # NVIDIA NIM is OpenAI-compatible
 base_url = "https://integrate.api.nvidia.com/v1"
 model = "openai/gpt-oss-120b"
-api_key_file = "/tmp/nvidianim"
+api_key_file = "config/nvidianim.key"
 
 # [providers.llm]
 # kind = "anthropic"            # or "openai" for any OpenAI-compatible endpoint
