@@ -679,6 +679,7 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 }
 .pane-note { margin: -0.4rem 0 0.75rem; font-size: 0.9rem; }
 
+fieldset.pane-rows { border: none; margin: 0; padding: 0; min-width: 0; }
 .pane-row { padding: 0.7rem 0; border-top: 1px solid var(--mist); }
 .pane-rows > .pane-row:first-child { border-top: none; padding-top: 0; }
 .pane-row.inline {
