@@ -40,6 +40,11 @@ fn delivery_reaches_the_user_through_the_ladder() {
             "[[events]]\nkind = \"checkin_call\"\ntime = \"16:00\"\n",
             "days = [\"mon\",\"tue\",\"wed\",\"thu\",\"fri\",\"sat\",\"sun\"]\n",
             "flexibility = \"fixed\"\nchannel = \"voice\"\n",
+            "[[events]]\nentry = \"block\"\nkind = \"Work time\"\ntime = \"09:30\"\nend_time = \"12:30\"\n",
+            "days = [\"mon\",\"tue\",\"wed\",\"thu\",\"fri\",\"sat\",\"sun\"]\n",
+            "[[events]]\nkind = \"stretch\"\ntime = \"10:30\"\n",
+            "days = [\"mon\",\"tue\",\"wed\",\"thu\",\"fri\",\"sat\",\"sun\"]\n",
+            "flexibility = \"drop\"\nchannel = \"push\"\nalert = false\n",
         ),
     );
 
@@ -90,6 +95,23 @@ fn delivery_reaches_the_user_through_the_ladder() {
     channels::deliver_event(&db, &ladder, &fired[0]);
     assert_eq!(push.seen().len(), 1);
     assert_eq!(push.seen()[0].0, uid);
+
+    // --- 13:00 JST: the block and the silent routine are both past due and
+    // neither reaches a channel.
+    let afternoon: jiff::Timestamp = "2026-08-31T04:00:00Z".parse().unwrap(); // 13:00 JST
+    {
+        let conn = db.lock().unwrap();
+        assert!(note_server::runner::fire_due(&conn, tmp.path(), afternoon).unwrap().is_empty());
+        let quiet: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE kind IN ('Work time','stretch') AND status='pending'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(quiet, 2);
+    }
+    assert_eq!(push.seen().len(), 1);
 
     // --- 16:01 JST: the voice check-in degrades to the push ladder, logged.
     let afternoon: jiff::Timestamp = "2026-08-31T07:01:00Z".parse().unwrap(); // 16:01 JST

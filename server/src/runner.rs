@@ -74,7 +74,9 @@ fn user_tz(
 /// Fires every pending or snoozed event whose wall time, resolved in its user's
 /// timezone on the plan date, has arrived by `now`. A candidate that cannot be
 /// resolved is logged as `runner_error` and skipped, so one unusable row cannot
-/// stall the sweep for every other user.
+/// stall the sweep for every other user. `alert = 0` leaves an event out of the
+/// sweep entirely: the schema forces it on every block, and the user chooses it
+/// per routine.
 pub fn fire_due(
     conn: &Connection,
     config_dir: &Path,
@@ -85,7 +87,7 @@ pub fn fire_due(
          FROM events e
          JOIN plans p ON p.id = e.plan_id
          JOIN users u ON u.id = p.user_id
-         WHERE e.status IN ('pending','snoozed')",
+         WHERE e.status IN ('pending','snoozed') AND e.alert = 1",
     )?;
     let candidates: Vec<Candidate> = stmt
         .query_map([], |r| {
@@ -314,6 +316,40 @@ mod tests {
         conn.execute("UPDATE events SET status='snoozed', wall_time='09:30'", []).unwrap();
         let now: jiff::Timestamp = "2026-08-31T09:31:00Z".parse().unwrap();
         assert_eq!(fire_due(&conn, tmp.path(), now).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_silent_routine_never_fires_but_stays_on_the_plan() {
+        let (conn, tmp, uid) = setup("UTC");
+        let date: jiff::civil::Date = "2026-08-31".parse().unwrap();
+        let mut t = one_event_template("09:00");
+        t.events[0].alert = Some(false);
+        crate::plan::generate(&conn, uid, &t, date).unwrap();
+
+        let now: jiff::Timestamp = "2026-08-31T12:00:00Z".parse().unwrap();
+        assert!(fire_due(&conn, tmp.path(), now).unwrap().is_empty());
+
+        let evs = crate::plan::events_for(&conn, uid, date).unwrap();
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].status, "pending");
+        crate::plan::set_status(&conn, uid, evs[0].id, "done").unwrap();
+        assert_eq!(crate::plan::events_for(&conn, uid, date).unwrap()[0].status, "done");
+    }
+
+    #[test]
+    fn a_block_is_never_a_delivery_candidate() {
+        let (conn, tmp, uid) = setup("UTC");
+        let date: jiff::civil::Date = "2026-08-31".parse().unwrap();
+        let t = Template { events: vec![TemplateEvent {
+            kind: "Work time".into(), time: "09:30".into(),
+            days: vec!["mon".into(),"tue".into(),"wed".into(),"thu".into(),"fri".into(),"sat".into(),"sun".into()],
+            entry: crate::templates::Entry::Block, end_time: Some("12:30".into()),
+            channel: "push".into(), ..Default::default()
+        }]};
+        crate::plan::generate(&conn, uid, &t, date).unwrap();
+        let now: jiff::Timestamp = "2026-08-31T23:00:00Z".parse().unwrap();
+        assert!(fire_due(&conn, tmp.path(), now).unwrap().is_empty());
+        assert_eq!(crate::plan::events_for(&conn, uid, date).unwrap()[0].status, "pending");
     }
 
     #[test]
