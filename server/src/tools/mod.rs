@@ -183,11 +183,14 @@ fn schema<T: schemars::JsonSchema>() -> serde_json::Value {
 fn describe(name: &str) -> (&'static str, serde_json::Value) {
     match name {
         "task_create" => (
-            "Create a new task for the current user.",
+            "Create a new task for the current user. Set is_now to put it straight in Now, \
+             the user's short list of at most 3 — a fourth pushes the newest one back to Later.",
             schema::<task_ops::CreateArgs>(),
         ),
         "task_update" => (
-            "Update a task's title, description, state, notes, or duration (whole 5-minute blocks).",
+            "Update a task's title, description, state, notes, duration (whole 5-minute blocks), \
+             or whether it sits in Now — the short list of at most 3, where a fourth pushes the \
+             newest one back to Later. Steps are never in Now.",
             schema::<task_ops::UpdateArgs>(),
         ),
         "task_split" => (
@@ -350,6 +353,67 @@ mod tests {
         let dur: i64 = conn
             .query_row("SELECT duration_min FROM tasks WHERE id = ?1", [id], |r| r.get(0)).unwrap();
         assert_eq!(dur, 25);
+    }
+
+    #[test]
+    fn agent_moves_tasks_in_and_out_of_now() {
+        let (conn, tmp) = env();
+        let flag = |id: i64| -> i64 {
+            conn.query_row("SELECT is_now FROM tasks WHERE id = ?1", [id], |r| r.get(0)).unwrap()
+        };
+        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_create",
+            r#"{"title":"email landlord","is_now":true}"#).unwrap();
+        let id = out["task_id"].as_i64().unwrap();
+        assert_eq!(flag(id), 1);
+
+        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_update",
+            &format!(r#"{{"task_id":{id},"is_now":false}}"#)).unwrap();
+        assert_eq!(out["is_now"], false);
+        assert_eq!(flag(id), 0);
+
+        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_update",
+            &format!(r#"{{"task_id":{id},"is_now":true}}"#)).unwrap();
+        assert_eq!(out["is_now"], true);
+        assert_eq!(out["demoted_from_now"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn a_fourth_agent_write_pushes_the_newest_task_out_of_now() {
+        let (conn, tmp) = env();
+        let mut ids = Vec::new();
+        for title in ["a", "b", "c", "d"] {
+            let out = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_create",
+                &format!(r#"{{"title":"{title}","is_now":true}}"#)).unwrap();
+            ids.push(out["task_id"].as_i64().unwrap());
+        }
+        let live: Vec<i64> = {
+            let mut stmt = conn.prepare(
+                "SELECT id FROM tasks WHERE is_now = 1 AND state IN ('open','in_progress') ORDER BY id",
+            ).unwrap();
+            let rows = stmt.query_map([], |r| r.get(0)).unwrap();
+            rows.collect::<rusqlite::Result<_>>().unwrap()
+        };
+        assert_eq!(live, vec![ids[0], ids[1], ids[3]], "the newest already in Now stepped aside");
+
+        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_update",
+            &format!(r#"{{"task_id":{},"is_now":true}}"#, ids[2])).unwrap();
+        assert_eq!(out["demoted_from_now"][0], ids[3]);
+    }
+
+    #[test]
+    fn the_agent_cannot_put_a_step_in_now() {
+        let (conn, tmp) = env();
+        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_create",
+            r#"{"title":"email landlord"}"#).unwrap();
+        let id = out["task_id"].as_i64().unwrap();
+        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_split",
+            &format!(r#"{{"task_id":{id},"steps":[
+                {{"title":"find the thread","duration_min":5}},
+                {{"title":"write and send","duration_min":10}}]}}"#)).unwrap();
+        let step = out["step_ids"][0].as_i64().unwrap();
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_update",
+            &format!(r#"{{"task_id":{step},"is_now":true}}"#)).unwrap_err();
+        assert_eq!(e.kind, "rejected");
     }
 
     #[test]

@@ -17,6 +17,7 @@ enum Op {
     Insert(String, String),
     TaskSplit(i64),
     TaskDuration(i64, u32),
+    TaskSetNow(i64, bool),
 }
 
 fn arb_op() -> impl Strategy<Value = Op> {
@@ -39,6 +40,7 @@ fn arb_op() -> impl Strategy<Value = Op> {
         (1..6i64).prop_map(Op::TaskSplit),
         (1..6i64, prop_oneof![Just(5u32), Just(10), Just(23), Just(0)])
             .prop_map(|(id, d)| Op::TaskDuration(id, d)),
+        (1..6i64, any::<bool>()).prop_map(|(id, f)| Op::TaskSetNow(id, f)),
         (prop_oneof![Just("2026-08-31".to_string()), Just("2026-09-01".to_string())], "([01][0-9]|2[0-3]):[0-5][0-9]")
             .prop_map(|(d, t)| Op::Insert(d, t)),
     ]
@@ -67,6 +69,7 @@ fn apply(conn: &rusqlite::Connection, ctx: &ToolCtx, op: &Op, mem_ids: &mut Vec<
         Op::TaskSplit(id) => ("task_split", format!(
             r#"{{"task_id":{id},"steps":[{{"title":"a","duration_min":5}},{{"title":"b","duration_min":10}}]}}"#)),
         Op::TaskDuration(id, d) => ("task_update", format!(r#"{{"task_id":{id},"duration_min":{d}}}"#)),
+        Op::TaskSetNow(id, f) => ("task_update", format!(r#"{{"task_id":{id},"is_now":{f}}}"#)),
         Op::Insert(d, t) => ("schedule_insert",
             format!(r#"{{"date":"{d}","kind":"extra","time":"{t}","flexibility":"slide","slide_window_min":15,"channel":"push"}}"#)),
     };
@@ -131,7 +134,27 @@ fn assert_invariants(conn: &rusqlite::Connection, data_dir: &std::path::Path) {
         assert_eq!(source, "agent", "task {id} duration came from nowhere");
     }
 
-    // 3. Memory: index rows and files agree; ids unique; supersede chains resolve.
+    // 3. Now holds at most three live top-level tasks, and no step is ever in it.
+    let live: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM tasks
+             WHERE user_id = 1 AND is_now = 1 AND parent_id IS NULL
+               AND state IN ('open','in_progress')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(live <= 3, "Now overflowed with {live} tasks");
+    let flagged_steps: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM tasks WHERE is_now = 1 AND parent_id IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(flagged_steps, 0, "a step was flagged into Now");
+
+    // 4. Memory: index rows and files agree; ids unique; supersede chains resolve.
     let mut stmt = conn
         .prepare("SELECT id, archived, path FROM memory_index WHERE user='aki'")
         .unwrap();
