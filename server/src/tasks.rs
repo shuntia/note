@@ -1,18 +1,41 @@
-use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
 const STATES: &[&str] = &["open", "in_progress", "done", "dropped"];
+const DURATION_STEP_MIN: u32 = 5;
+const MAX_DURATION_MIN: u32 = 24 * 60;
 
-/// Distinguishes a bad request (invalid `state`) from an infrastructure failure,
-/// so callers can map them to different HTTP statuses.
+/// Separates the caller's mistakes — each mapped to its own HTTP status — from
+/// an infrastructure failure.
 #[derive(Debug, Error)]
 pub enum UpdateError {
     #[error("invalid state: {0}")]
     InvalidState(String),
+    #[error("{0}")]
+    InvalidDuration(String),
+    #[error("{0}")]
+    InvalidHierarchy(String),
     #[error(transparent)]
     Db(#[from] rusqlite::Error),
+}
+
+/// A duration's provenance is the writer's identity, never the caller's claim:
+/// the HTTP surface is always the user, the agent's tools are always the agent.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub enum DurationActor {
+    #[default]
+    User,
+    Agent,
+}
+
+impl DurationActor {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Agent => "agent",
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -23,8 +46,31 @@ pub struct Task {
     pub state: String,
     pub source: String,
     pub notes: String,
+    pub duration_min: Option<u32>,
+    pub duration_source: String,
+    pub parent_id: Option<i64>,
 }
 
+/// One top-level task with its steps; `children` is always present so the
+/// client never has to distinguish "no steps" from "field missing".
+#[derive(Debug, Serialize)]
+pub struct TaskNode {
+    #[serde(flatten)]
+    pub task: Task,
+    pub children: Vec<Task>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct NewTask {
+    pub title: String,
+    #[serde(default)]
+    pub duration_min: Option<u32>,
+    #[serde(default)]
+    pub parent_id: Option<i64>,
+}
+
+/// `Option<Option<T>>` fields separate "absent, leave alone" (`None`) from
+/// "explicit null, clear it" (`Some(None)`).
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TaskPatch {
@@ -32,6 +78,20 @@ pub struct TaskPatch {
     pub description: Option<String>,
     pub state: Option<String>,
     pub notes: Option<String>,
+    #[serde(default, deserialize_with = "present")]
+    pub duration_min: Option<Option<u32>>,
+    #[serde(default, deserialize_with = "present")]
+    pub parent_id: Option<Option<i64>>,
+    #[serde(skip)]
+    pub duration_actor: DurationActor,
+}
+
+fn present<'de, D, T>(d: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::deserialize(d).map(Some)
 }
 
 fn now() -> String {
@@ -46,70 +106,167 @@ fn row_to_task(r: &rusqlite::Row) -> rusqlite::Result<Task> {
         state: r.get(3)?,
         source: r.get(4)?,
         notes: r.get(5)?,
+        duration_min: r.get(6)?,
+        duration_source: r.get(7)?,
+        parent_id: r.get(8)?,
     })
 }
 
-const COLS: &str = "id, title, description, state, source, notes";
+const COLS: &str =
+    "id, title, description, state, source, notes, duration_min, duration_source, parent_id";
 
-pub fn create(conn: &Connection, user_id: i64, title: &str, source: &str) -> Result<Task> {
+fn checked_duration(min: u32) -> Result<u32, UpdateError> {
+    if min == 0 || min % DURATION_STEP_MIN != 0 || min > MAX_DURATION_MIN {
+        return Err(UpdateError::InvalidDuration(format!(
+            "duration_min must be a multiple of {DURATION_STEP_MIN}, from {DURATION_STEP_MIN} to {MAX_DURATION_MIN}"
+        )));
+    }
+    Ok(min)
+}
+
+fn has_children(conn: &Connection, task_id: i64) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM tasks WHERE parent_id = ?1 AND state != 'dropped')",
+        [task_id],
+        |r| r.get(0),
+    )
+}
+
+/// A parent must be the caller's own, must not itself be a step, and must not
+/// be the task being reparented.
+fn checked_parent(
+    conn: &Connection,
+    user_id: i64,
+    parent_id: i64,
+    child_id: Option<i64>,
+) -> Result<(), UpdateError> {
+    if child_id == Some(parent_id) {
+        return Err(UpdateError::InvalidHierarchy("a task cannot be its own step".into()));
+    }
+    let grandparent: Option<Option<i64>> = conn
+        .query_row(
+            "SELECT parent_id FROM tasks WHERE id = ?1 AND user_id = ?2",
+            (parent_id, user_id),
+            |r| r.get(0),
+        )
+        .optional()?;
+    match grandparent {
+        None => Err(UpdateError::InvalidHierarchy(format!("no task {parent_id}"))),
+        Some(Some(_)) => Err(UpdateError::InvalidHierarchy(
+            "steps are one level deep: a step cannot have steps of its own".into(),
+        )),
+        Some(None) => Ok(()),
+    }
+}
+
+pub fn create(
+    conn: &Connection,
+    user_id: i64,
+    new: NewTask,
+    source: &str,
+    actor: DurationActor,
+) -> Result<Task, UpdateError> {
+    let duration = new.duration_min.map(checked_duration).transpose()?;
+    if let Some(p) = new.parent_id {
+        checked_parent(conn, user_id, p, None)?;
+    }
+    let duration_source = if duration.is_some() { actor.as_str() } else { "none" };
     conn.execute(
-        "INSERT INTO tasks (user_id, title, source, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?4)",
-        (user_id, title, source, now()),
+        "INSERT INTO tasks
+            (user_id, title, source, parent_id, duration_min, duration_source, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+        (user_id, &new.title, source, new.parent_id, duration, duration_source, now()),
     )?;
     let id = conn.last_insert_rowid();
-    Ok(conn.query_row(
-        &format!("SELECT {COLS} FROM tasks WHERE id = ?1"),
-        [id],
-        row_to_task,
-    )?)
+    Ok(conn.query_row(&format!("SELECT {COLS} FROM tasks WHERE id = ?1"), [id], row_to_task)?)
 }
 
-pub fn list(conn: &Connection, user_id: i64) -> Result<Vec<Task>> {
+fn children_of(conn: &Connection, parent_id: i64) -> rusqlite::Result<Vec<Task>> {
     let mut stmt = conn.prepare(&format!(
-        "SELECT {COLS} FROM tasks WHERE user_id = ?1 AND state != 'dropped' ORDER BY id"
+        "SELECT {COLS} FROM tasks WHERE parent_id = ?1 AND state != 'dropped' ORDER BY id"
     ))?;
-    let rows = stmt.query_map([user_id], row_to_task)?;
-    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    let rows = stmt.query_map([parent_id], row_to_task)?;
+    rows.collect()
 }
 
-/// Returns `Ok(None)` when `task_id` doesn't exist or isn't owned by `user_id`;
-/// `Err(InvalidState)` when `patch.state` is not one of the allowed values;
-/// `Err(Db)` on any other (infrastructure) failure.
+pub fn get(conn: &Connection, user_id: i64, task_id: i64) -> rusqlite::Result<Option<Task>> {
+    conn.query_row(
+        &format!("SELECT {COLS} FROM tasks WHERE id = ?1 AND user_id = ?2"),
+        (task_id, user_id),
+        row_to_task,
+    )
+    .optional()
+}
+
+pub fn list(conn: &Connection, user_id: i64) -> rusqlite::Result<Vec<TaskNode>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {COLS} FROM tasks
+         WHERE user_id = ?1 AND state != 'dropped' AND parent_id IS NULL ORDER BY id"
+    ))?;
+    let parents: Vec<Task> =
+        stmt.query_map([user_id], row_to_task)?.collect::<rusqlite::Result<_>>()?;
+    parents
+        .into_iter()
+        .map(|task| {
+            let children = children_of(conn, task.id)?;
+            Ok(TaskNode { task, children })
+        })
+        .collect()
+}
+
+/// Returns `Ok(None)` when `task_id` doesn't exist or isn't owned by `user_id`.
 pub fn update(
     conn: &Connection,
     user_id: i64,
     task_id: i64,
     patch: TaskPatch,
-) -> std::result::Result<Option<Task>, UpdateError> {
+) -> Result<Option<Task>, UpdateError> {
     if let Some(s) = &patch.state {
         if !STATES.contains(&s.as_str()) {
             return Err(UpdateError::InvalidState(s.clone()));
         }
     }
-    let existing: Option<i64> = conn
-        .query_row(
-            "SELECT id FROM tasks WHERE id = ?1 AND user_id = ?2",
-            (task_id, user_id),
-            |r| r.get(0),
-        )
-        .optional()?;
-    if existing.is_none() {
-        return Ok(None);
+    let duration = match patch.duration_min {
+        Some(Some(m)) => Some(Some(checked_duration(m)?)),
+        other => other,
+    };
+    let Some(before) = get(conn, user_id, task_id)? else { return Ok(None) };
+    if let Some(Some(p)) = patch.parent_id {
+        if has_children(conn, task_id)? {
+            return Err(UpdateError::InvalidHierarchy(
+                "steps are one level deep: a task with steps cannot become a step".into(),
+            ));
+        }
+        checked_parent(conn, user_id, p, Some(task_id))?;
     }
+    let (duration_min, duration_source) = match duration {
+        None => (before.duration_min, before.duration_source),
+        Some(None) => (None, "none".to_string()),
+        Some(Some(m)) => (Some(m), patch.duration_actor.as_str().to_string()),
+    };
+    let parent_id = patch.parent_id.unwrap_or(before.parent_id);
     conn.execute(
         "UPDATE tasks SET
             title = COALESCE(?1, title),
             description = COALESCE(?2, description),
             state = COALESCE(?3, state),
             notes = COALESCE(?4, notes),
-            updated_at = ?5
-         WHERE id = ?6",
-        (&patch.title, &patch.description, &patch.state, &patch.notes, now(), task_id),
+            duration_min = ?5,
+            duration_source = ?6,
+            parent_id = ?7,
+            updated_at = ?8
+         WHERE id = ?9",
+        (
+            &patch.title,
+            &patch.description,
+            &patch.state,
+            &patch.notes,
+            duration_min,
+            duration_source,
+            parent_id,
+            now(),
+            task_id,
+        ),
     )?;
-    Ok(Some(conn.query_row(
-        &format!("SELECT {COLS} FROM tasks WHERE id = ?1"),
-        [task_id],
-        row_to_task,
-    )?))
+    Ok(get(conn, user_id, task_id)?)
 }

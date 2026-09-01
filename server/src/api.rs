@@ -121,11 +121,6 @@ async fn me(user: CurrentUser) -> Json<serde_json::Value> {
     Json(serde_json::json!({ "username": user.username, "admin": user.admin }))
 }
 
-#[derive(Deserialize)]
-struct CreateTaskReq {
-    title: String,
-}
-
 async fn tasks_list(user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
     let conn = state.db.lock().unwrap();
     match crate::tasks::list(&conn, user.id) {
@@ -137,12 +132,12 @@ async fn tasks_list(user: CurrentUser, State(state): State<AppState>) -> impl In
 async fn tasks_create(
     user: CurrentUser,
     State(state): State<AppState>,
-    Json(req): Json<CreateTaskReq>,
+    Json(req): Json<crate::tasks::NewTask>,
 ) -> impl IntoResponse {
     let conn = state.db.lock().unwrap();
-    match crate::tasks::create(&conn, user.id, &req.title, "manual") {
+    match crate::tasks::create(&conn, user.id, req, "manual", crate::tasks::DurationActor::User) {
         Ok(t) => Json(t).into_response(),
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        Err(e) => task_error(e),
     }
 }
 
@@ -156,8 +151,20 @@ async fn tasks_update(
     match crate::tasks::update(&conn, user.id, id, patch) {
         Ok(Some(t)) => Json(t).into_response(),
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
-        Err(crate::tasks::UpdateError::InvalidState(_)) => StatusCode::BAD_REQUEST.into_response(),
-        Err(crate::tasks::UpdateError::Db(_)) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        Err(e) => task_error(e),
+    }
+}
+
+fn task_error(e: crate::tasks::UpdateError) -> axum::response::Response {
+    use crate::tasks::UpdateError as E;
+    match e {
+        E::InvalidState(_) => StatusCode::BAD_REQUEST.into_response(),
+        E::InvalidDuration(m) | E::InvalidHierarchy(m) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({ "error": m })),
+        )
+            .into_response(),
+        E::Db(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
 
