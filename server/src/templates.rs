@@ -62,6 +62,32 @@ impl TemplateEvent {
 
 fn default_channel() -> String { "push".into() }
 
+/// One template entry as the settings pane lists it, with every effective value
+/// resolved so the client never has to know the defaults.
+#[derive(Debug, Serialize)]
+pub struct ScheduleRow {
+    pub index: usize,
+    pub kind: String,
+    pub entry: Entry,
+    pub time: String,
+    pub end_time: Option<String>,
+    pub days: Vec<String>,
+    pub flexibility: String,
+    pub slide_window_min: i64,
+    pub channel: String,
+    pub alert: bool,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum AlertError {
+    #[error("no entry at index {0}")]
+    OutOfRange(usize),
+    #[error("entry {0} is a block, and blocks never ping")]
+    Block(usize),
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
 const DAYS: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 const FLEXIBILITIES: [&str; 3] = ["fixed", "slide", "drop"];
 const CHANNELS: [&str; 2] = ["push", "voice"];
@@ -100,14 +126,86 @@ pub fn available(config_dir: &Path, user: &str) -> Vec<String> {
     names.into_iter().collect()
 }
 
+/// The file a load of `name` for `user` actually reads: their own override when
+/// it exists, the shared default otherwise.
+fn effective_path(config_dir: &Path, user: &str, name: &str) -> std::path::PathBuf {
+    let user_path = override_path(config_dir, user, name);
+    if user_path.exists() {
+        user_path
+    } else {
+        config_dir.join("defaults/templates").join(format!("{name}.toml"))
+    }
+}
+
+fn override_path(config_dir: &Path, user: &str, name: &str) -> std::path::PathBuf {
+    config_dir.join("users").join(user).join("templates").join(format!("{name}.toml"))
+}
+
+/// Sets the bell on the named entries and writes the result to `user`'s own copy
+/// of the template, leaving the shared default untouched. Every change is
+/// checked before anything is written, so a rejected request leaves no file
+/// behind. Because the nightly job rebuilds each day from this same file, a bell
+/// set here survives every rebuild.
+pub fn set_alerts(
+    config_dir: &Path,
+    user: &str,
+    name: &str,
+    changes: &[(usize, bool)],
+) -> Result<(), AlertError> {
+    let template = Template::load(config_dir, user, name)?;
+    for (index, _) in changes {
+        let ev = template.events.get(*index).ok_or(AlertError::OutOfRange(*index))?;
+        if ev.is_block() {
+            return Err(AlertError::Block(*index));
+        }
+    }
+    let path = effective_path(config_dir, user, name);
+    let raw = std::fs::read_to_string(&path)
+        .with_context(|| format!("reading template {}", path.display()))?;
+    let mut doc: toml::Value = raw.parse().map_err(anyhow::Error::from)?;
+    let events = doc
+        .get_mut("events")
+        .and_then(toml::Value::as_array_mut)
+        .ok_or_else(|| anyhow::anyhow!("template {} has no events", path.display()))?;
+    for (index, alert) in changes {
+        let entry = events[*index]
+            .as_table_mut()
+            .ok_or_else(|| anyhow::anyhow!("template entry {index} is not a table"))?;
+        entry.insert("alert".into(), toml::Value::Boolean(*alert));
+    }
+    let out = override_path(config_dir, user, name);
+    std::fs::create_dir_all(out.parent().expect("a template file always has a parent"))
+        .map_err(anyhow::Error::from)?;
+    crate::context::write_atomic(&out, &toml::to_string(&doc).map_err(anyhow::Error::from)?)
+        .map_err(anyhow::Error::from)?;
+    Ok(())
+}
+
 impl Template {
+    pub fn rows(&self) -> Vec<ScheduleRow> {
+        self.events
+            .iter()
+            .enumerate()
+            .map(|(index, ev)| ScheduleRow {
+                index,
+                kind: ev.kind.clone(),
+                entry: ev.entry,
+                time: ev.time.clone(),
+                end_time: ev.end_time.clone(),
+                days: ev.days.clone(),
+                flexibility: ev.flexibility().to_string(),
+                slide_window_min: ev.slide_window_min(),
+                channel: ev.channel.clone(),
+                alert: ev.alert(),
+            })
+            .collect()
+    }
+
     /// Loads a named template for `user`, preferring a per-user override
     /// under `config_dir/users/<user>/templates/` and falling back to
     /// `config_dir/defaults/templates/` when no override exists.
     pub fn load(config_dir: &Path, user: &str, name: &str) -> Result<Self> {
-        let user_path = config_dir.join("users").join(user).join("templates").join(format!("{name}.toml"));
-        let default_path = config_dir.join("defaults/templates").join(format!("{name}.toml"));
-        let path = if user_path.exists() { user_path } else { default_path };
+        let path = effective_path(config_dir, user, name);
         let raw = std::fs::read_to_string(&path)
             .with_context(|| format!("reading template {}", path.display()))?;
         let template: Template = toml::from_str(&raw)?;
@@ -285,6 +383,48 @@ mod tests {
             .contains("end_time"));
         assert!(bad("[[events]]\nentry='band'\nkind='Work'\ntime='09:30'\ndays=['mon']\n")
             .contains("entry"));
+    }
+
+    #[test]
+    fn toggling_a_bell_writes_a_user_override_and_leaves_the_default_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), "defaults/templates/default.toml", concat!(
+            "[[events]]\nkind='meds'\ntime='08:00'\ndays=['mon']\n",
+            "[[events]]\nentry='block'\nkind='Work time'\ntime='09:30'\nend_time='12:30'\ndays=['mon']\n"));
+        set_alerts(tmp.path(), "aki", "default", &[(0, false)]).unwrap();
+        let t = Template::load(tmp.path(), "aki", "default").unwrap();
+        assert!(!t.events[0].alert());
+        assert!(t.events[1].is_block());
+        let default =
+            std::fs::read_to_string(tmp.path().join("defaults/templates/default.toml")).unwrap();
+        assert!(!default.contains("alert"), "the shared default was rewritten: {default}");
+
+        set_alerts(tmp.path(), "aki", "default", &[(0, true)]).unwrap();
+        assert!(Template::load(tmp.path(), "aki", "default").unwrap().events[0].alert());
+
+        assert!(matches!(
+            set_alerts(tmp.path(), "aki", "default", &[(1, false)]),
+            Err(AlertError::Block(1))
+        ));
+        assert!(matches!(
+            set_alerts(tmp.path(), "aki", "default", &[(9, false)]),
+            Err(AlertError::OutOfRange(9))
+        ));
+    }
+
+    #[test]
+    fn rows_describe_every_entry_in_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), "defaults/templates/default.toml", concat!(
+            "[[events]]\nkind='meds'\ntime='08:00'\ndays=['mon']\n",
+            "[[events]]\nentry='block'\nkind='Work time'\ntime='09:30'\nend_time='12:30'\ndays=['mon']\n"));
+        let rows = Template::load(tmp.path(), "aki", "default").unwrap().rows();
+        assert_eq!(rows.len(), 2);
+        assert_eq!((rows[0].index, rows[0].entry, rows[0].alert), (0, Entry::Routine, true));
+        assert_eq!(rows[0].flexibility, "fixed");
+        assert_eq!(rows[0].end_time, None);
+        assert_eq!((rows[1].index, rows[1].entry, rows[1].alert), (1, Entry::Block, false));
+        assert_eq!(rows[1].end_time.as_deref(), Some("12:30"));
     }
 
     #[test]

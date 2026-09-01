@@ -480,20 +480,44 @@ const MAX_DISPLAY_NAME: usize = 64;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct AlertPatch {
+    index: usize,
+    alert: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SettingsPatch {
     display_name: Option<String>,
     timezone: Option<String>,
     nightly_time: Option<String>,
     template: Option<String>,
+    alerts: Option<Vec<AlertPatch>>,
 }
 
-fn settings_body(cfg: &crate::config::UserConfig) -> serde_json::Value {
+fn settings_body(
+    cfg: &crate::config::UserConfig,
+    schedule: Vec<crate::templates::ScheduleRow>,
+) -> serde_json::Value {
     serde_json::json!({
         "display_name": cfg.display_name,
         "timezone": cfg.timezone,
         "nightly_time": cfg.nightly_time,
         "template": cfg.template,
+        "schedule": schedule,
     })
+}
+
+/// A template that no longer parses contributes no rows rather than failing the
+/// request: the user needs Settings to reach the picker and choose another one.
+fn schedule_rows(
+    state: &AppState,
+    user: &str,
+    template: &str,
+) -> Vec<crate::templates::ScheduleRow> {
+    crate::templates::Template::load(&state.config_dir, user, template)
+        .map(|t| t.rows())
+        .unwrap_or_default()
 }
 
 fn invalid_field(field: &str, requirement: &str) -> axum::response::Response {
@@ -517,14 +541,17 @@ async fn settings_get(user: CurrentUser, State(state): State<AppState>) -> impl 
         .collect();
     zones.sort_unstable();
     let templates = crate::templates::available(&state.config_dir, &user.username);
-    let mut body = settings_body(&cfg);
+    let schedule = schedule_rows(&state, &user.username, &cfg.template);
+    let mut body = settings_body(&cfg, schedule);
     body["templates"] = serde_json::json!(templates);
     body["timezones"] = serde_json::json!(zones);
     Json(body).into_response()
 }
 
 /// Merges the supplied subset into the effective values and rewrites the user's
-/// file, rejecting the first invalid field without touching disk. The read,
+/// file, rejecting the first invalid field without touching disk. Bell toggles
+/// apply to the template the request leaves selected, and land in the user's own
+/// copy of it. The read,
 /// merge and write run under the DB lock: settings writes are rare, and the
 /// guard is the cheapest serializer that stops two concurrent PUTs from each
 /// writing a file built from the values they read before the other landed.
@@ -567,8 +594,17 @@ async fn settings_put(
         }
         cfg.template = template;
     }
+    if let Some(alerts) = req.alerts {
+        let changes: Vec<(usize, bool)> = alerts.iter().map(|a| (a.index, a.alert)).collect();
+        if let Err(e) =
+            crate::templates::set_alerts(&state.config_dir, &user.username, &cfg.template, &changes)
+        {
+            return invalid_field("alerts", &e.to_string());
+        }
+    }
+    let schedule = schedule_rows(&state, &user.username, &cfg.template);
     match cfg.save(&state.config_dir, &user.username) {
-        Ok(()) => Json(settings_body(&cfg)).into_response(),
+        Ok(()) => Json(settings_body(&cfg, schedule)).into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
