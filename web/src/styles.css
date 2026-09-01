@@ -374,114 +374,280 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 .login form p[role='alert'] { margin: 0 0 0.75rem; font-size: 0.9rem; color: var(--danger); }
 .login .primary { width: 100%; }
 
-/* today — the plan spine, with the debrief alongside it on wide screens */
-.today { display: grid; gap: 1.75rem; align-items: start; }
-.today-plan { min-width: 0; }
-/* two columns only once the plan column still fits an event row on one line */
-@media (min-width: 1152px) {
-  .today { grid-template-columns: minmax(0, 2fr) minmax(17rem, 1fr); gap: 2.5rem; }
-  .today-aside {
-    position: sticky;
-    top: 1.5rem;
-    max-height: calc(100dvh - 3rem);
-    overflow-y: auto;
-  }
-}
-.debrief { padding: 0.9rem 1.15rem 1.15rem; border-radius: var(--radius-lg); }
+/* today — one reading column: the morning letter folded at the top, then the plan
+   spine with the Now line cutting across it and the current event raised into a card.
+   The mockups' third grey fails the 4.5:1 floor, so quiet and faint both resolve to
+   --text-muted and the hierarchy is carried by size and weight. */
+.today { max-width: 45rem; }
 
-/* the time spine (today view) */
-.spine { list-style: none; margin: 0; padding: 0; position: relative; }
-.spine::before {
-  content: '';
-  position: absolute;
-  left: 3.6rem;
-  top: 0.4rem;
-  bottom: 0.4rem;
-  width: 1px;
-  background: var(--border);
-}
-.spine li {
-  display: grid;
-  grid-template-columns: 3rem 1fr;
-  gap: 1.2rem;
-  padding: 0.35rem 0;
-  position: relative;
-}
-/* a diamond on the spine per event: the app's mark, at the hour it lands.
-   Offsets centre it on the rule (3.6rem, less half the 7px box) and on the card's
-   first line (row + card padding + half a 1.5rem line box); .time matches that line. */
-.spine li::before {
-  content: '';
-  position: absolute;
-  left: calc(3.6rem - 3.5px);
-  top: 1.54rem;
-  width: 7px;
-  height: 7px;
-  transform: rotate(45deg);
-  border: 1.5px solid var(--accent);
-  border-radius: 1px;
-  background: var(--bg);
-}
-.spine li.past::before { border-color: var(--border-input); }
-.spine .time {
-  font-family: var(--mono);
-  font-variant-numeric: tabular-nums;
-  font-size: 0.9rem;
-  text-align: right;
-  padding-top: 0.74rem;
-}
-/* a past row recedes by its name and state only; its buttons keep full contrast */
-.spine li.past .event-head { opacity: 0.6; }
-.spine li.now-marker {
-  align-items: center;
-  padding: 0.35rem 0;
-}
-.spine li.now-marker::before { display: none; }
-.spine li.now-marker .time { color: var(--sun); font-weight: 600; padding-top: 0; }
-.spine li.now-marker .rule {
-  height: 2px;
-  background: var(--sun);
-  border-radius: 1px;
-}
-
-/* one line where it fits: name and state left, actions right; actions wrap when narrow */
-.event-card {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.3rem 1rem;
-  padding: 0.6rem 0.85rem;
-  border-radius: var(--radius-lg);
-  transition: border-color 120ms ease;
-}
-.event-card:hover { border-color: var(--border-input); }
-.event-head {
+.debrief-row { margin-bottom: 1.6rem; }
+.debrief-fold {
   display: flex;
   align-items: center;
   gap: 0.6rem;
-  flex: 1 1 11rem;
+  width: 100%;
+  text-align: left;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 0.7rem 1rem;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 0.95rem;
+  cursor: pointer;
+  transition: border-color 120ms ease;
+}
+.debrief-fold:hover { border-color: var(--border-input); }
+.debrief-lead {
   min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.event-kind { font-weight: 600; }
-.event-status {
-  flex: none;
-  font-size: 0.75rem;
-  border-radius: 999px;
-  padding: 0.1rem 0.5rem;
-  background: color-mix(in srgb, currentColor 12%, transparent);
+.debrief-lead b { color: var(--text); font-weight: 700; }
+.debrief-chev { margin-left: auto; }
+.debrief-row .letter { margin-top: 0.9rem; padding: 0 0.25rem; font-size: 1rem; }
+.debrief-note { margin: 0 0 1.6rem; font-size: 0.9rem; }
+
+/* the time spine: hours in the left gutter, a rule down the middle of it */
+.spine {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 0 5.4rem;
+  position: relative;
 }
-.event-status.done { color: var(--moss); }
-.event-status.dropped { color: var(--clay); }
-.event-status.snoozed, .event-status.fired { color: var(--sun-ink); }
-.event-actions {
+.spine::before {
+  content: '';
+  position: absolute;
+  left: 4rem;
+  top: 0.4rem;
+  bottom: 0.4rem;
+  width: 2px;
+  border-radius: 2px;
+  background: var(--border);
+}
+
+.ev { position: relative; margin: 0 0 0.9rem; }
+.ev-time {
+  position: absolute;
+  left: -5.4rem;
+  top: 0.1rem;
+  width: 3.25rem;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+.ev-dot {
+  position: absolute;
+  left: -1.5rem;
+  top: 0.45rem;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--border-input);
+  border: 2px solid var(--bg);
+}
+.ev.done .ev-dot { background: var(--moss); }
+.ev.dropped .ev-dot { background: transparent; border-color: var(--border-input); }
+
+.ev-row {
   display: flex;
+  align-items: center;
   flex-wrap: wrap;
-  gap: 0.1rem;
-  /* wrapped under the name on phones, so it stays left-aligned there */
-  margin: 0 -0.6rem;
+  gap: 0.55rem;
+  color: var(--text-muted);
+  font-size: 0.95rem;
 }
-@media (min-width: 768px) {
-  .event-actions { margin-left: auto; }
+.ev.done .ev-name {
+  text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, var(--moss) 55%, transparent);
+}
+.ev-check { color: var(--moss); font-size: 0.85rem; }
+.ev-tag {
+  font-size: 0.72rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.05rem 0.5rem;
+}
+.ev-tag:empty { display: none; }
+.ev.dropped .ev-tag {
+  color: var(--clay);
+  border-color: color-mix(in srgb, var(--clay) 35%, var(--border));
+}
+
+/* the Now line: dashed across the spine, a sun disc on its axis, the minute on it */
+.now-line {
+  position: relative;
+  height: 0;
+  margin: 1.5rem 0 2rem -5.4rem;
+}
+.now-rule {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  border-top: 1px dashed color-mix(in srgb, var(--sun) 55%, var(--border));
+}
+.now-dot {
+  position: absolute;
+  left: 3.7rem;
+  top: -6px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--sun);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--sun) 22%, var(--bg));
+}
+.now-label {
+  position: absolute;
+  left: 5.15rem;
+  top: -0.62rem;
+  padding: 0 0.5rem;
+  background: var(--bg);
+  color: var(--sun-ink);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  font-variant-numeric: tabular-nums;
+}
+
+.ev.now { margin-bottom: 1.6rem; }
+.ev.now .ev-time { color: var(--sun-ink); font-weight: 700; }
+.nowcard {
+  position: relative;
+  background: var(--surface);
+  border: 1px solid color-mix(in srgb, var(--sun) 38%, var(--border));
+  border-radius: var(--radius-xl);
+  padding: 1.25rem 1.35rem 1.15rem;
+  margin-left: -0.9rem;
+  box-shadow: 0 10px 28px -18px color-mix(in srgb, var(--sun) 45%, transparent);
+}
+.nowcard-eyebrow {
+  color: var(--sun-ink);
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  margin-bottom: 0.35rem;
+}
+.nowcard-title {
+  margin: 0 0 0.2rem;
+  font-family: var(--serif);
+  font-weight: 500;
+  font-size: 1.85rem;
+  line-height: 1.15;
+}
+.nowcard-meta { margin: 0 0 1rem; color: var(--text-muted); font-size: 0.85rem; }
+.nowcard-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 0.6rem; }
+.actions-spacer { flex: 1; }
+
+.btn-primary,
+.btn-outline,
+.btn-chip {
+  border-radius: 999px;
+  font: inherit;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+.btn-primary {
+  background: var(--sun);
+  color: var(--accent-fg);
+  border: 1px solid transparent;
+  font-weight: 700;
+  padding: 0.62rem 1.6rem;
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.25);
+}
+.btn-primary:hover:not(:disabled) { background: color-mix(in srgb, var(--sun) 88%, var(--text)); }
+.btn-outline {
+  background: none;
+  border: 1px solid var(--border-input);
+  color: var(--text-muted);
+  padding: 0.58rem 1.05rem;
+}
+.btn-outline:hover:not(:disabled) { color: var(--text); border-color: var(--text-muted); }
+.btn-chip {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  padding: 0.5rem 0.75rem;
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+}
+.btn-chip:hover:not(:disabled) { color: var(--text); border-color: var(--border-input); }
+
+.ev-more-wrap { position: absolute; top: 0.55rem; right: 0.6rem; }
+.ev-more {
+  display: grid;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  background: none;
+  border: none;
+  border-radius: 50%;
+  color: var(--text-muted);
+  font: inherit;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+.ev-more:hover { background: var(--sunk); color: var(--text); }
+.ev-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 5;
+  min-width: 9rem;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.25rem;
+  box-shadow: 0 10px 28px color-mix(in srgb, var(--text) 18%, transparent);
+}
+.ev-menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  border-radius: calc(var(--radius) - 4px);
+  padding: 0.5rem 0.7rem;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+.ev-menu-item:hover:not(:disabled) { background: var(--sunk); }
+
+.today-clear {
+  margin: 0 0 0.9rem -0.9rem;
+  color: var(--text-muted);
+  font-family: var(--serif);
+  font-size: 1.1rem;
+}
+.today-tomorrow { margin: 1.9rem 0 0; color: var(--text-muted); font-size: 0.85rem; }
+
+/* a finger needs more than the pointer does */
+@media (pointer: coarse), (max-width: 767.98px) {
+  .btn-primary, .btn-outline, .btn-chip, .ev-menu-item, .toast-action { min-height: 2.5rem; }
+  .btn-chip { min-width: 2.5rem; }
+  .ev-more { width: 2.5rem; height: 2.5rem; }
+}
+
+@media (max-width: 767.98px) {
+  .spine { padding-left: 4rem; }
+  .spine::before { left: 2.9rem; }
+  .ev-time { left: -4rem; width: 2.4rem; }
+  .ev-dot { left: -1.2rem; }
+  .now-line { margin-left: -4rem; }
+  .now-dot { left: 2.6rem; }
+  .now-label { left: 3.9rem; }
+  .nowcard { margin-left: -0.9rem; padding: 1.05rem 1.05rem 0.95rem; }
+  .nowcard-title { font-size: 1.55rem; }
+  /* the four controls stay on one row at phone widths */
+  .nowcard-actions { gap: 0.45rem; }
+  .btn-primary { padding-inline: 1.25rem; }
+  .btn-outline { padding-inline: 0.85rem; }
+  .btn-chip { padding-inline: 0.6rem; }
 }
 
 /* tasks */
@@ -541,7 +707,8 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 .check:checked::after { opacity: 1; }
 
 @media (prefers-reduced-motion: reduce) {
-  .event-card, .task-row, .check, button.ghost { transition: none; }
+  .task-row, .check, button.ghost,
+  .debrief-fold, .btn-primary, .btn-outline, .btn-chip, .ev-more { transition: none; }
 }
 
 /* talk — three voices: Note speaks in serif, you in sans, tools in mono */
@@ -1400,14 +1567,32 @@ fieldset.pane-rows { border: none; margin: 0; padding: 0; min-width: 0; }
   bottom: 1.25rem;
   left: 50%;
   transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
   background: var(--text);
   color: var(--bg);
-  padding: 0.6rem 1rem;
+  padding: 0.6rem 0.7rem 0.6rem 1rem;
   border-radius: var(--radius-lg);
-  max-width: 22rem;
+  max-width: 24rem;
   z-index: 30;
   box-shadow: 0 8px 24px color-mix(in srgb, var(--text) 20%, transparent);
 }
+.toast-msg { min-width: 0; }
+.toast-action {
+  flex: none;
+  background: none;
+  border: 1px solid color-mix(in srgb, var(--bg) 45%, transparent);
+  border-radius: 999px;
+  padding: 0.25rem 0.8rem;
+  color: inherit;
+  font: inherit;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.toast-action:hover { background: color-mix(in srgb, var(--bg) 16%, transparent); }
+.toast-action:focus-visible { outline: 2px solid var(--bg); outline-offset: 2px; }
 @media (max-width: 767.98px) {
   .toast { bottom: calc(4.1rem + env(safe-area-inset-bottom)); }
 }
