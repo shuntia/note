@@ -686,7 +686,7 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
   .btn-chip { min-width: 2.5rem; }
   .ev-more { width: 2.5rem; height: 2.5rem; }
   .receipt-chip { min-height: 2.5rem; }
-  .task-tick { width: 2.5rem; height: 2.5rem; }
+  .task-tick, .task-start { width: 2.5rem; height: 2.5rem; }
   .task-add { min-height: 2.5rem; }
 }
 
@@ -795,15 +795,17 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 }
 .task-row:hover .tick { border-color: var(--sun); }
 
-.task-body { min-width: 0; }
+/* the body takes the slack, so every trailing control sits where it is put */
+.task-body { flex: 1; min-width: 0; }
 .task-title { color: var(--text); }
 .task-sub { color: var(--text-muted); font-size: 0.78rem; }
 
-.task-tag {
+.task-tag,
+.task-dur {
   flex: none;
-  margin-left: auto;
   padding: 0.05rem 0.55rem;
   font-size: 0.72rem;
+  white-space: nowrap;
   color: var(--text-muted);
   border: 1px solid var(--border);
   border-radius: 999px;
@@ -813,9 +815,62 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
   border-color: color-mix(in srgb, var(--sun) 35%, var(--border));
   background: color-mix(in srgb, var(--sun) 12%, var(--surface));
 }
+.task-dur.est { border-style: dashed; }
 
-.task-more { position: relative; flex: none; margin-left: auto; }
-.task-tag + .task-more { margin-left: 0; }
+.task-start {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 2.125rem;
+  height: 2.125rem;
+  padding-left: 2px;
+  color: var(--sun-ink);
+  font-size: 0.8rem;
+  background: var(--surface);
+  border: 1px solid color-mix(in srgb, var(--sun) 40%, var(--border));
+  border-radius: 50%;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+.task-start:hover {
+  background: color-mix(in srgb, var(--sun) 10%, var(--surface));
+  border-color: var(--sun);
+}
+
+/* the steps hang off a rail, indented past the parent's circle */
+.task-steps {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0.6rem 0 0.1rem 2.2rem;
+  padding-left: 1.1rem;
+  border-left: 2px solid var(--border);
+}
+.task-step {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  font-size: 0.9rem;
+  color: var(--text-muted);
+}
+.task-step-title { flex: 1; min-width: 0; }
+.ticksm {
+  display: grid;
+  place-items: center;
+  width: 1rem;
+  height: 1rem;
+  border: 2px solid var(--border-input);
+  border-radius: 50%;
+  transition: border-color 120ms ease;
+}
+.task-step:hover .ticksm { border-color: var(--sun); }
+.task-step.done .ticksm { border-color: var(--moss); background: var(--moss); }
+.task-step.done .task-step-title {
+  text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, var(--moss) 45%, transparent);
+}
+.task-step.next .task-step-title { color: var(--text); font-weight: 700; }
+
+.task-more { position: relative; flex: none; }
 
 .task-group.later .task-row { background: none; box-shadow: none; }
 .task-group.later .task-title { color: var(--text-muted); }
@@ -836,7 +891,7 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 
 /* the check reads on both themes because the surface token flips with them:
    a light mark on light-mode moss, a dark one on dark-mode moss */
-.tick::after {
+.tick::after, .ticksm::after {
   content: '';
   width: 0.3rem;
   height: 0.6rem;
@@ -846,10 +901,11 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
   transform: rotate(45deg);
   opacity: 0;
 }
-.task-group.done .tick::after { opacity: 1; }
+.ticksm::after { width: 0.22rem; height: 0.45rem; margin-top: -0.09rem; }
+.task-group.done .tick::after, .task-step.done .ticksm::after { opacity: 1; }
 
 @media (prefers-reduced-motion: reduce) {
-  .task-add, .task-row, .tick, button.ghost,
+  .task-add, .task-row, .tick, .ticksm, .task-start, button.ghost,
   .debrief-fold, .btn-primary, .btn-outline, .btn-chip, .ev-more { transition: none; }
 }
 
