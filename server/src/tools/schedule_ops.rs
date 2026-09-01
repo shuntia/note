@@ -387,6 +387,24 @@ mod tests {
     }
 
     #[test]
+    fn a_block_moves_only_by_reshaping() {
+        let (conn, tmp) = env();
+        for (tool, raw) in [
+            ("schedule_slide", r#"{"event_id":3,"minutes":30}"#),
+            ("schedule_snooze", r#"{"event_id":3,"minutes":30}"#),
+        ] {
+            let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, tool, raw).unwrap_err();
+            assert_eq!(e.kind, "not_found", "{tool} moved a block");
+        }
+        let (start, end): (String, String) = conn
+            .query_row("SELECT wall_time, end_wall_time FROM events WHERE id=3", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!((start.as_str(), end.as_str()), ("09:30", "12:30"));
+    }
+
+    #[test]
     fn a_decided_block_is_left_alone() {
         let (conn, tmp) = env();
         conn.execute("UPDATE events SET status='done' WHERE id=3", []).unwrap();

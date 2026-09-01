@@ -91,7 +91,17 @@ pub fn assemble(conn: &Connection, config_dir: &Path, user_id: i64, username: &s
         out.push_str("(no plan generated for today)\n");
     }
     for e in &events {
-        out.push_str(&format!("- {} {} [{}] via {}\n", e.wall_time, e.kind, e.status, e.channel));
+        match &e.end_wall_time {
+            Some(end) => out.push_str(&format!("- {}-{} {} [block]\n", e.wall_time, end, e.kind)),
+            None => out.push_str(&format!(
+                "- {} {} [{}] via {}{}\n",
+                e.wall_time,
+                e.kind,
+                e.status,
+                e.channel,
+                if e.alert { "" } else { " (silent)" },
+            )),
+        }
     }
 
     out.push_str("\n# Recent activity\n\n");
@@ -171,6 +181,28 @@ mod tests {
         assert!(out.contains("Asia/Tokyo"), "{out}");
         assert!(out.contains("09:00 checkin_call [pending] via voice"), "{out}");
         assert!(out.contains("event_fired"), "{out}");
+    }
+
+    #[test]
+    fn the_plan_section_distinguishes_blocks_and_silent_routines() {
+        let tmp = cfg_dir();
+        let conn = crate::db::open_memory().unwrap();
+        let uid = crate::auth::create_user(&conn, "aki", "p", false).unwrap();
+        let tmpl = crate::templates::Template { events: vec![
+            crate::templates::TemplateEvent {
+                kind: "Work time".into(), time: "09:30".into(), days: vec!["mon".into()],
+                entry: crate::templates::Entry::Block, end_time: Some("12:30".into()),
+                channel: "push".into(), ..Default::default() },
+            crate::templates::TemplateEvent {
+                kind: "meds".into(), time: "08:00".into(), days: vec!["mon".into()],
+                alert: Some(false), channel: "push".into(), ..Default::default() },
+        ]};
+        let date: jiff::civil::Date = "2026-08-31".parse().unwrap();
+        crate::plan::generate(&conn, uid, &tmpl, date).unwrap();
+        let now: jiff::Timestamp = "2026-08-31T12:00:00Z".parse().unwrap();
+        let out = assemble(&conn, tmp.path(), uid, "aki", now).unwrap();
+        assert!(out.contains("- 09:30-12:30 Work time [block]"), "{out}");
+        assert!(out.contains("- 08:00 meds [pending] via push (silent)"), "{out}");
     }
 
     #[test]
