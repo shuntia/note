@@ -16,6 +16,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/me", get(me))
         .route("/api/tasks", get(tasks_list).post(tasks_create))
         .route("/api/tasks/{id}", patch(tasks_update))
+        .route("/api/tasks/{id}/split", post(task_split))
+        .route("/api/tasks/{id}/flatten", post(task_flatten))
         .route("/api/talk", post(talk))
         .route("/api/conversations", get(conversations_list))
         .route(
@@ -150,6 +152,40 @@ async fn tasks_update(
     let conn = state.db.lock().unwrap();
     match crate::tasks::update(&conn, user.id, id, patch) {
         Ok(Some(t)) => Json(t).into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => task_error(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct SplitReq {
+    steps: Vec<crate::tasks::Step>,
+}
+
+async fn task_split(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(req): Json<SplitReq>,
+) -> impl IntoResponse {
+    let conn = state.db.lock().unwrap();
+    match crate::tasks::split(&conn, user.id, id, req.steps, crate::tasks::DurationActor::User) {
+        Ok(Some(n)) => Json(n).into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => task_error(e),
+    }
+}
+
+async fn task_flatten(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    let conn = state.db.lock().unwrap();
+    match crate::tasks::flatten(&conn, user.id, id) {
+        Ok(Some((task, removed))) => {
+            Json(serde_json::json!({ "task": task, "removed": removed })).into_response()
+        }
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(e) => task_error(e),
     }
