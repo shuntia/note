@@ -1225,8 +1225,16 @@ button.chat-send {
 .memory-side { display: flex; flex-direction: column; min-width: 0; gap: 0.6rem; }
 
 .cat-semantic { --cat: var(--sun-ink); }
-.cat-episodic { --cat: var(--clay); }
-.cat-procedural { --cat: var(--moss); }
+.cat-episodic { --cat: var(--moss); }
+.cat-procedural { --cat: var(--clay); }
+
+.memory-lede {
+  margin: -0.2rem 0 0.15rem;
+  max-width: 46ch;
+  font-size: 0.85rem;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
 
 .memory-search { position: relative; display: flex; align-items: center; }
 .memory-search svg {
@@ -1306,6 +1314,13 @@ button.chat-send {
 }
 .memory-row:hover { background: color-mix(in srgb, var(--text) 5%, transparent); }
 .memory-row[aria-current='true'] { background: color-mix(in srgb, var(--accent) 15%, transparent); }
+.memory-rowmeta {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
 .memory-summary {
   display: -webkit-box;
   -webkit-box-orient: vertical;
@@ -1318,7 +1333,7 @@ button.chat-send {
 .memory-detail { min-width: 0; }
 .memory-back { display: none; align-items: center; gap: 0.35rem; margin: 0 0 0.6rem -0.6rem; }
 .memory-title {
-  margin: 0;
+  margin: 0 0 0.75rem;
   font-family: var(--serif);
   font-weight: 500;
   font-size: 1.45rem;
@@ -1329,12 +1344,35 @@ button.chat-send {
   align-items: center;
   flex-wrap: wrap;
   gap: 0.55rem;
-  margin: 0.55rem 0 1.15rem;
-  padding-bottom: 0.9rem;
-  border-bottom: 1px solid var(--border);
+  margin: 0 0 0.5rem;
   font-size: 0.78rem;
   color: var(--text-muted);
 }
+.memory-dmeta {
+  display: grid;
+  gap: 0.3rem;
+  margin-top: 1.15rem;
+  padding-top: 0.9rem;
+  border-top: 1px solid var(--border);
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+.memory-ask {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.5rem;
+  margin-top: 1rem;
+  padding: 0.4rem 0.95rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
+  border-radius: 999px;
+  background: none;
+  color: var(--sun-ink);
+  font: inherit;
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+.memory-ask:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
 .memory-flag {
   border: 1px solid var(--border-input);
   border-radius: 999px;
@@ -1346,7 +1384,7 @@ button.chat-send {
   background: none;
   border: none;
   padding: 0;
-  color: var(--text-muted);
+  color: var(--sun-ink);
   font: inherit;
   font-size: 0.78rem;
   text-decoration: underline;
@@ -1377,7 +1415,7 @@ button.chat-send {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .chip, .memory-row { transition: none; }
+  .chip, .memory-row, .memory-ask { transition: none; }
 }
 
 /* settings — one section at a time beside the list of them, the llama-ui settings

@@ -217,7 +217,7 @@ function ProfileAndSchedule({ section }: { section: SectionId }) {
                     <option key={tz} value={tz} />
                   ))}
                 </datalist>
-                <p className="pane-hint">Type to search, or enter any IANA zone name.</p>
+                <p className="pane-hint">Your days start and end here. Type a city to search.</p>
               </div>
 
               <div className="pane-row">
@@ -231,14 +231,12 @@ function ProfileAndSchedule({ section }: { section: SectionId }) {
                   value={draft.nightly_time}
                   onChange={(e) => edit('nightly_time', e.target.value)}
                 />
-                <p className="pane-hint">
-                  When the assistant writes the day's letter and plans tomorrow.
-                </p>
+                <p className="pane-hint">When Note writes the morning letter and plans tomorrow.</p>
               </div>
 
               <div className="pane-row">
                 <label className="pane-label" htmlFor="set-template">
-                  Template
+                  Shape of the day
                 </label>
                 <select
                   id="set-template"
@@ -251,7 +249,7 @@ function ProfileAndSchedule({ section }: { section: SectionId }) {
                     </option>
                   ))}
                 </select>
-                <p className="pane-hint">The shape of a day — which check-ins get scheduled.</p>
+                <p className="pane-hint">Which routines and blocks make up a day.</p>
               </div>
             </>
           )}

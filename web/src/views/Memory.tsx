@@ -10,13 +10,15 @@ const CATEGORIES = ['semantic', 'episodic', 'procedural'] as const
 // matches the stylesheet's master-detail breakpoint
 const SINGLE_PANE = '(max-width: 1087.98px)'
 
+const DAY_MS = 86_400_000
+
 type Category = (typeof CATEGORIES)[number]
 type Filter = 'all' | Category
 
 const LABEL: Record<Category, string> = {
-  semantic: 'Semantic',
-  episodic: 'Episodic',
-  procedural: 'Procedural',
+  semantic: 'About you',
+  episodic: 'Moments',
+  procedural: 'How you work',
 }
 
 function categoryLabel(category: string): string {
@@ -26,14 +28,70 @@ function categoryLabel(category: string): string {
 function shortDate(iso: string): string {
   const at = new Date(iso)
   if (Number.isNaN(at.getTime())) return ''
-  return at.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
+  const sameYear = at.getFullYear() === new Date().getFullYear()
+  return at.toLocaleDateString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    ...(sameYear ? {} : { year: 'numeric' }),
+  })
+}
+
+// Day-boundary distance, not elapsed hours: 23:00 yesterday reads "yesterday".
+function relativeDay(iso: string): string {
+  const at = new Date(iso)
+  if (Number.isNaN(at.getTime())) return ''
+  const midnight = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
+  const days = Math.round((midnight(new Date()) - midnight(at)) / DAY_MS)
+  if (days <= 0) return 'today'
+  if (days === 1) return 'yesterday'
+  if (days < 7) return `${days} days ago`
+  if (days < 14) return 'last week'
+  return shortDate(iso)
+}
+
+function savedLabel(iso: string): string {
+  const day = relativeDay(iso)
+  return day === 'today' || day === 'yesterday' ? `saved ${day}` : day
+}
+
+function clockTime(iso: string): string {
+  const at = new Date(iso)
+  if (Number.isNaN(at.getTime())) return ''
+  return at.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+}
+
+// Facts never change once written, so reads are cached for the session; the list
+// endpoint carries summaries only, and both a row's date and the note a fact
+// replaces have to be read back one fact at a time.
+const factCache = new Map<string, MemoryFact>()
+const inFlight = new Set<string>()
+
+type Facts = { get: (id: string) => MemoryFact | undefined; want: (id: string) => void }
+
+function useFacts(): Facts {
+  const [, bump] = useState(0)
+  const want = useCallback((id: string) => {
+    if (factCache.has(id) || inFlight.has(id)) return
+    inFlight.add(id)
+    api
+      .memoryRead(id)
+      .then((f) => {
+        factCache.set(f.id, f)
+        bump((n) => n + 1)
+      })
+      .catch(() => {
+        // a date that will not load simply stays off the row
+      })
+      .finally(() => inFlight.delete(id))
+  }, [])
+  return { get: (id) => factCache.get(id), want }
 }
 
 function CategoryChip({ category }: { category: string }) {
   return <span className={`memory-cat cat-${category}`}>{categoryLabel(category)}</span>
 }
 
-export function Memory({ notify, refresh }: ViewProps) {
+export function Memory({ notify, refresh, openTalk }: ViewProps) {
   const [draft, setDraft] = useState('')
   const [query, setQuery] = useState('')
   const [filter, setFilter] = useState<Filter>('all')
@@ -42,6 +100,7 @@ export function Memory({ notify, refresh }: ViewProps) {
   const [selected, setSelected] = useState<string | null>(null)
   const [fact, setFact] = useState<MemoryFact | null>(null)
 
+  const facts = useFacts()
   const detail = useRef<HTMLDivElement>(null)
   // request eras: a slow reply must never overwrite the results of a later one
   const listEra = useRef(0)
@@ -77,6 +136,7 @@ export function Memory({ notify, refresh }: ViewProps) {
       api
         .memoryRead(id)
         .then((f) => {
+          factCache.set(f.id, f)
           if (era === factEra.current) setFact(f)
         })
         .catch(() => {
@@ -97,12 +157,18 @@ export function Memory({ notify, refresh }: ViewProps) {
 
   const searching = query !== ''
   const count = items?.length ?? 0
-  const scope = searching ? 'found' : filter === 'all' ? 'saved' : filter
+  const scope = searching ? 'found' : 'saved'
 
   return (
     <div className="page memory" data-pane={selected === null ? 'list' : 'detail'}>
       <div className="memory-side">
-        <SectionTitle meta={count === 0 || listFailed ? undefined : `${count} ${scope}`}>Memory</SectionTitle>
+        <SectionTitle meta={count === 0 || listFailed ? undefined : `${count} ${scope}`}>
+          Memory
+        </SectionTitle>
+        <p className="memory-lede">
+          What Note has learned as you talk. Nothing here is ever deleted — replaced notes move to
+          the archive.
+        </p>
         <div className="memory-search">
           <svg viewBox="0 0 16 16" aria-hidden="true">
             <circle cx="7" cy="7" r="4.5" />
@@ -149,16 +215,14 @@ export function Memory({ notify, refresh }: ViewProps) {
         ) : (
           <ul className="memory-list">
             {items.map((m) => (
-              <li key={m.id}>
-                <button
-                  className="memory-row"
-                  aria-current={selected === m.id}
-                  onClick={() => openFact(m.id)}
-                >
-                  <span className="memory-summary">{m.summary}</span>
-                  <CategoryChip category={m.category} />
-                </button>
-              </li>
+              <MemoryRow
+                key={m.id}
+                hit={m}
+                saved={facts.get(m.id)?.created}
+                selected={selected === m.id}
+                onOpen={openFact}
+                onSeen={facts.want}
+              />
             ))}
           </ul>
         )}
@@ -174,29 +238,112 @@ export function Memory({ notify, refresh }: ViewProps) {
         ) : fact === null ? (
           <p className="muted">Loading…</p>
         ) : (
-          <FactBody fact={fact} onOpen={openFact} />
+          <FactBody
+            fact={fact}
+            facts={facts}
+            onOpen={openFact}
+            onAsk={(f) => openTalk(`About the memory "${f.summary}" — `)}
+          />
         )}
       </div>
     </div>
   )
 }
 
-function FactBody({ fact, onOpen }: { fact: MemoryFact; onOpen: (id: string) => void }) {
+function MemoryRow({
+  hit,
+  saved,
+  selected,
+  onOpen,
+  onSeen,
+}: {
+  hit: MemoryHit
+  saved: string | undefined
+  selected: boolean
+  onOpen: (id: string) => void
+  onSeen: (id: string) => void
+}) {
+  const row = useRef<HTMLLIElement>(null)
+
+  // Dates cost one read each, so a row only asks for its own once it is on screen.
+  useEffect(() => {
+    if (saved !== undefined) return
+    const el = row.current
+    if (!el || typeof IntersectionObserver !== 'function') {
+      onSeen(hit.id)
+      return
+    }
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (!entries.some((e) => e.isIntersecting)) return
+        io.disconnect()
+        onSeen(hit.id)
+      },
+      { rootMargin: '200px' },
+    )
+    io.observe(el)
+    return () => io.disconnect()
+  }, [hit.id, saved, onSeen])
+
+  return (
+    <li ref={row}>
+      <button className="memory-row" aria-current={selected} onClick={() => onOpen(hit.id)}>
+        <span className="memory-summary">{hit.summary}</span>
+        <span className="memory-rowmeta">
+          <CategoryChip category={hit.category} />
+          {saved && <span>{savedLabel(saved)}</span>}
+        </span>
+      </button>
+    </li>
+  )
+}
+
+function FactBody({
+  fact,
+  facts,
+  onOpen,
+  onAsk,
+}: {
+  fact: MemoryFact
+  facts: Facts
+  onOpen: (id: string) => void
+  onAsk: (fact: MemoryFact) => void
+}) {
   const previous = fact.supersedes
+  const { want } = facts
+  useEffect(() => {
+    if (previous) want(previous)
+  }, [previous, want])
+  // The replaced note is named only once it has been read back, so the link
+  // never offers to open something that cannot be resolved.
+  const older = previous === null ? undefined : facts.get(previous)
+  const time = clockTime(fact.created)
+
   return (
     <article>
-      <h2 className="memory-title">{fact.summary}</h2>
       <p className="memory-meta">
         <CategoryChip category={fact.category} />
-        <span className="mono">{shortDate(fact.created)}</span>
         {fact.archived && <span className="memory-flag">Archived</span>}
-        {previous && (
-          <button className="memory-prev" onClick={() => onOpen(previous)}>
-            Earlier version
-          </button>
-        )}
       </p>
+      <h2 className="memory-title">{fact.summary}</h2>
       <Markdown text={fact.body} />
+      <div className="memory-dmeta">
+        <span>
+          Saved from Talk · {relativeDay(fact.created)}
+          {time && `, ${time}`}
+        </span>
+        {older && (
+          <span>
+            Replaces a note from {shortDate(older.created)} ·{' '}
+            <button className="memory-prev" onClick={() => onOpen(older.id)}>
+              see what changed
+            </button>
+          </span>
+        )}
+      </div>
+      <button className="memory-ask" onClick={() => onAsk(fact)}>
+        Ask Note about this
+      </button>
     </article>
   )
 }
