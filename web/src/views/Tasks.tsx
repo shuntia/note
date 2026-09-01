@@ -4,7 +4,7 @@ import type { ViewProps } from '../app'
 import { SectionTitle } from '../section'
 import type { Task } from '../types'
 
-export function Tasks({ notify }: ViewProps) {
+export function Tasks({ notify, refresh }: ViewProps) {
   const [tasks, setTasks] = useState<Task[] | null>(null)
   const [title, setTitle] = useState('')
   const [busy, setBusy] = useState(false)
@@ -19,7 +19,7 @@ export function Tasks({ notify }: ViewProps) {
       })
       .catch(() => setFailed(true))
   }
-  useEffect(load, [])
+  useEffect(load, [refresh])
 
   const add = async (e: FormEvent) => {
     e.preventDefault()

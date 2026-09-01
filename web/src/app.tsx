@@ -10,6 +10,13 @@ import { connectEvents } from './ws'
 
 type Tab = 'today' | 'tasks' | 'chat' | 'memory' | 'settings'
 
+const DRAFT_KEY = 'note.captureDraft'
+const CAPTURE_PLACEHOLDER = 'Jot anything — a task, a thought, a change of plan'
+const UNDO_MS = 5000
+
+// No API removes a task, so the create waits out the undo window before it is sent.
+let heldCapture: { title: string; timer: number } | null = null
+
 export type ToastAction = { label: string; run: () => void }
 
 // `refresh` is a counter views key on or depend on to refetch; `onChanged` bumps it.
@@ -101,6 +108,7 @@ export function App() {
           </div>
           <span className="mobile-sub">{me.username}</span>
         </header>
+        <Capture notify={notify} onChanged={onChanged} />
         <main className={tab === 'chat' ? 'view view-talk' : 'view'}>
           {tab === 'today' && <Today key={refresh} {...views} />}
           {tab === 'tasks' && <Tasks {...views} />}
@@ -133,6 +141,109 @@ export function App() {
         </div>
       )}
     </div>
+  )
+}
+
+function readDraft(): string {
+  try {
+    return localStorage.getItem(DRAFT_KEY) ?? ''
+  } catch {
+    return ''
+  }
+}
+
+function writeDraft(text: string) {
+  try {
+    if (text) localStorage.setItem(DRAFT_KEY, text)
+    else localStorage.removeItem(DRAFT_KEY)
+  } catch {
+    // storage blocked; the draft still holds for this session
+  }
+}
+
+function Capture({
+  notify,
+  onChanged,
+}: {
+  notify: (msg: string, action?: ToastAction) => void
+  onChanged: () => void
+}) {
+  const [text, setText] = useState(readDraft)
+  const input = useRef<HTMLInputElement>(null)
+  // Where focus was when the shortcut stole it, so Esc can hand it back.
+  const returnTo = useRef<HTMLElement | null>(null)
+
+  const commit = useCallback(() => {
+    if (!heldCapture) return
+    const { title, timer } = heldCapture
+    heldCapture = null
+    window.clearTimeout(timer)
+    api
+      .addTask(title)
+      .then(onChanged)
+      .catch(() => notify("Couldn't save that. Try again."))
+  }, [notify, onChanged])
+
+  useEffect(() => commit, [commit])
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'n' || e.ctrlKey || e.metaKey || e.altKey || e.defaultPrevented) return
+      const el = e.target as HTMLElement | null
+      const tag = el?.tagName
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el?.isContentEditable) return
+      e.preventDefault()
+      returnTo.current = el
+      input.current?.focus()
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [])
+
+  const change = (value: string) => {
+    setText(value)
+    writeDraft(value)
+  }
+
+  const submit = (e: FormEvent) => {
+    e.preventDefault()
+    const title = text.trim()
+    if (!title) return
+    change('')
+    commit()
+    heldCapture = { title, timer: window.setTimeout(commit, UNDO_MS) }
+    notify('Saved to Tasks', {
+      label: 'Undo',
+      run: () => {
+        if (heldCapture?.title !== title) return
+        window.clearTimeout(heldCapture.timer)
+        heldCapture = null
+      },
+    })
+  }
+
+  return (
+    <form className="capture" onSubmit={submit}>
+      <span className="capture-glyph" aria-hidden="true">
+        +
+      </span>
+      <input
+        ref={input}
+        value={text}
+        aria-label={CAPTURE_PLACEHOLDER}
+        placeholder={CAPTURE_PLACEHOLDER}
+        onChange={(e) => change(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key !== 'Escape') return
+          e.currentTarget.blur()
+          returnTo.current?.focus()
+          returnTo.current = null
+        }}
+      />
+      <kbd className="capture-key" aria-hidden="true">
+        N
+      </kbd>
+    </form>
   )
 }
 

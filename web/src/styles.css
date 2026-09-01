@@ -223,6 +223,8 @@ body {
   .mobile-head .brand { font-size: 1.2rem; }
   .mobile-sub { font-size: 0.8rem; color: var(--text-muted); }
   .view { padding: 0.75rem 1rem 1.5rem; }
+  .capture { width: auto; margin: 0 1rem 0.35rem; min-height: 2.5rem; }
+  .capture-key { display: none; }
 }
 
 .card {
@@ -332,6 +334,58 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 :is(.chat-composer, .quick-add) :is(input, textarea):focus-visible { outline: none; }
 @media (prefers-reduced-motion: reduce) {
   :is(.chat-composer, .quick-add) { transition: none; }
+}
+
+/* global capture: the shell's one always-there input */
+.capture {
+  flex: none;
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  width: 100%;
+  max-width: 32.5rem;
+  margin: 1.1rem 1.5rem 0;
+  padding: 0.5rem 1rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  transition: border-color 150ms ease, box-shadow 150ms ease;
+}
+.capture:focus-within {
+  border-color: var(--ring);
+  box-shadow: 0 0 0 1px var(--ring);
+}
+.capture-glyph {
+  flex: none;
+  color: var(--sun-ink);
+  font-size: 1.05rem;
+  line-height: 1;
+}
+.capture input {
+  flex: 1;
+  min-width: 0;
+  padding: 0.15rem 0;
+  background: none;
+  border: none;
+  border-radius: 0;
+  font-size: 0.95rem;
+}
+.capture input:focus-visible { outline: none; }
+.capture-key {
+  flex: none;
+  font: inherit;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  background: var(--sunk);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 0.05rem 0.35rem;
+}
+@media (prefers-reduced-motion: reduce) {
+  .capture { transition: none; }
 }
 
 .field { margin-bottom: 0.75rem; }
@@ -628,7 +682,7 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 
 /* a finger needs more than the pointer does */
 @media (pointer: coarse), (max-width: 767.98px) {
-  .btn-primary, .btn-outline, .btn-chip, .ev-menu-item, .toast-action { min-height: 2.5rem; }
+  .btn-primary, .btn-outline, .btn-chip, .ev-menu-item, .toast-action, .capture { min-height: 2.5rem; }
   .btn-chip { min-width: 2.5rem; }
   .ev-more { width: 2.5rem; height: 2.5rem; }
 }
