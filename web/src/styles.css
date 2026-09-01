@@ -530,6 +530,38 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
   border-color: color-mix(in srgb, var(--clay) 35%, var(--border));
 }
 
+/* a block owns a stretch of the day rather than a moment in it: a dashed band the
+   agent may reshape, faded once its end is behind us */
+.ev-band {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.55rem 0.85rem;
+  background: color-mix(in srgb, var(--sunk) 62%, var(--surface));
+  border: 1px dashed color-mix(in srgb, var(--sun) 24%, var(--border));
+  border-radius: 12px;
+  color: var(--text-muted);
+  font-size: 0.95rem;
+}
+.ev.block .ev-dot { background: transparent; border-color: var(--border-input); }
+.ev.block.past .ev-band { border-color: var(--border); opacity: 0.62; }
+.ev-range { font-size: 0.78rem; font-variant-numeric: tabular-nums; }
+.ev-band .ev-tag { margin-left: auto; white-space: nowrap; }
+.ev-tag.short { display: none; }
+
+/* whether this routine may reach for your attention, drawn the same way wherever
+   it is asked: struck when it stays quiet */
+.bell {
+  width: 13px;
+  height: 13px;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.9;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
 /* the Now line: dashed across the spine, a sun disc on its axis, the minute on it */
 .now-line {
   position: relative;
@@ -682,7 +714,8 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 
 /* a finger needs more than the pointer does */
 @media (pointer: coarse), (max-width: 767.98px) {
-  .btn-primary, .btn-outline, .btn-chip, .ev-menu-item, .toast-action, .capture { min-height: 2.5rem; }
+  .btn-primary, .btn-outline, .btn-chip, .ev-menu-item, .toast-action, .capture,
+  .sched-toggle { min-height: 2.5rem; }
   .btn-chip { min-width: 2.5rem; }
   .ev-more { width: 2.5rem; height: 2.5rem; }
   .receipt-chip { min-height: 2.5rem; }
@@ -698,6 +731,11 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
   .now-line { margin-left: -4rem; }
   .now-dot { left: 2.6rem; }
   .now-label { left: 3.9rem; }
+  /* the phone layout drops the bells and shortens a block's tag */
+  .ev-row .bell { display: none; }
+  .ev-tag.long { display: none; }
+  .ev-tag.short { display: inline; }
+  .ev-band { padding: 0.45rem 0.7rem; font-size: 0.9rem; }
   .nowcard { margin-left: -0.9rem; padding: 1.05rem 1.05rem 0.95rem; }
   .nowcard-title { font-size: 1.55rem; }
   /* the four controls stay on one row at phone widths */
@@ -1658,6 +1696,54 @@ button.chat-send {
 }
 .set-prompt { resize: vertical; font-size: 0.85rem; line-height: 1.6; }
 .set-prompt-note { margin: 0.9rem 0 0; }
+
+/* the day's shape entry by entry: when each one lands, what it is, and whether it
+   may reach for your attention */
+.sched { margin-top: 1.1rem; }
+.sched-head { margin: 0 0 0.5rem; font-size: 0.9rem; font-weight: 700; }
+.sched-list { list-style: none; margin: 0; padding: 0; }
+.sched-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  padding: 0.5rem 0.2rem;
+  border-top: 1px solid var(--border);
+  font-size: 0.92rem;
+}
+.sched-row:last-child { border-bottom: 1px solid var(--border); }
+.sched-time { flex: none; width: 7.5rem; font-size: 0.78rem; color: var(--text-muted); }
+.sched-name { min-width: 0; }
+.sched-flex,
+.sched-na { font-size: 0.72rem; color: var(--text-muted); }
+.sched-flex { border: 1px solid var(--border); border-radius: 999px; padding: 0.05rem 0.5rem; }
+.sched-na { margin-left: auto; }
+.sched-toggle {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  background: none;
+  border: 1px solid var(--border-input);
+  border-radius: 999px;
+  padding: 0.25rem 0.75rem;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+.sched-toggle.on {
+  color: var(--sun-ink);
+  border-color: color-mix(in srgb, var(--sun) 35%, var(--border));
+  background: color-mix(in srgb, var(--sun) 10%, transparent);
+}
+.sched-toggle:hover:not(:disabled) { border-color: var(--sun); }
+.sched-note { margin: 0.55rem 0 0; font-size: 0.78rem; }
+
+@media (prefers-reduced-motion: reduce) {
+  .sched-toggle { transition: none; }
+}
 
 /* confirm dialog — centered, its own raised surface, scrim and Escape both dismiss */
 .dialog {

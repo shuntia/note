@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import { api, ApiError } from '../api'
+import { Bell } from '../bell'
 import type { ViewProps } from '../app'
 import { Overflow } from '../overflow'
 import { eventLabel } from '../receipts'
@@ -44,7 +45,7 @@ function reachText(channel: string): string {
 }
 
 function metaLine(ev: PlanEvent): string {
-  return [slideText(ev), reachText(ev.channel)].filter(Boolean).join(' · ')
+  return [slideText(ev), ev.alert ? reachText(ev.channel) : ''].filter(Boolean).join(' · ')
 }
 
 function flexTag(ev: PlanEvent): string {
@@ -63,11 +64,15 @@ function actionMessage(err: unknown): string {
   return 'Something went wrong. Try again.'
 }
 
-// The fired event owns Now; failing that, the next one still open does.
+// The fired event owns Now; failing that, the next routine still open does. A block
+// spans a stretch of the day rather than arriving at a moment in it, so it never
+// takes the card — and so never offers Done, Later or the slide chips.
 function currentIndex(events: PlanEvent[]): number {
   const fired = events.findIndex((ev) => ev.status === 'fired')
   if (fired !== -1) return fired
-  return events.findIndex((ev) => ev.status === 'pending' || ev.status === 'snoozed')
+  return events.findIndex(
+    (ev) => ev.entry !== 'block' && (ev.status === 'pending' || ev.status === 'snoozed'),
+  )
 }
 
 export function Today({ notify, openNow }: ViewProps) {
@@ -201,7 +206,7 @@ function spine(
       )
       return
     }
-    rows.push(<EventRow key={ev.id} ev={ev} />)
+    rows.push(<EventRow key={ev.id} ev={ev} now={now} />)
   })
   if (current === -1) {
     rows.push(<NowLine key="now" now={now} />)
@@ -224,9 +229,14 @@ function NowLine({ now }: { now: string }) {
   )
 }
 
-function EventRow({ ev }: { ev: PlanEvent }) {
+function droppedTag(ev: PlanEvent): string {
+  return ev.moved_to ? `dropped — moved to ${ev.moved_to.wall_time}` : 'dropped'
+}
+
+function EventRow({ ev, now }: { ev: PlanEvent; now: string }) {
+  if (ev.entry === 'block') return <BlockBand ev={ev} now={now} />
   const state = ev.status === 'done' ? 'done' : ev.status === 'dropped' ? 'dropped' : ''
-  const tag = state === 'dropped' ? 'dropped' : state === 'done' ? '' : flexTag(ev)
+  const tag = state === 'dropped' ? droppedTag(ev) : state === 'done' ? '' : flexTag(ev)
   return (
     <li className={`ev ${state}`}>
       <span className="ev-time">{ev.wall_time}</span>
@@ -238,7 +248,28 @@ function EventRow({ ev }: { ev: PlanEvent }) {
           </span>
         )}
         <span className="ev-name">{eventLabel(ev.kind)}</span>
+        <Bell on={ev.alert} label={ev.alert ? 'pings you' : 'silent'} />
         <span className="ev-tag">{tag}</span>
+      </div>
+    </li>
+  )
+}
+
+// Both tags are rendered; the phone layout is what picks the short one.
+function BlockBand({ ev, now }: { ev: PlanEvent; now: string }) {
+  const end = ev.end_wall_time ?? ev.wall_time
+  const past = minutesOf(end) <= minutesOf(now)
+  return (
+    <li className={`ev block${past ? ' past' : ''}`}>
+      <span className="ev-time">{ev.wall_time}</span>
+      <span className="ev-dot" aria-hidden="true" />
+      <div className="ev-band">
+        <span className="ev-name">{eventLabel(ev.kind)}</span>
+        <span className="ev-range">
+          {ev.wall_time} – {end}
+        </span>
+        <span className="ev-tag long">flexible — Note may reshape it</span>
+        <span className="ev-tag short">flexible</span>
       </div>
     </li>
   )
