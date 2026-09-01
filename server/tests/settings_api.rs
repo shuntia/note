@@ -103,6 +103,76 @@ async fn put_persists_to_disk_and_is_reflected_by_get() {
 }
 
 #[tokio::test]
+async fn get_lists_one_row_per_template_entry() {
+    let (app, cookie, cfg) = common::app_with_logged_in_user().await;
+    write(cfg.path(), "defaults/templates/default.toml", concat!(
+        "[[events]]\nkind='meds'\ntime='08:00'\ndays=['mon']\n",
+        "[[events]]\nentry='block'\nkind='Work time'\ntime='09:30'\nend_time='12:30'\ndays=['mon']\n"));
+    let v = json(app.oneshot(get(&cookie)).await.unwrap()).await;
+    let rows = v["schedule"].as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0]["index"], 0);
+    assert_eq!(rows[0]["kind"], "meds");
+    assert_eq!(rows[0]["entry"], "routine");
+    assert_eq!(rows[0]["alert"], true);
+    assert_eq!(rows[0]["end_time"], serde_json::Value::Null);
+    assert_eq!(rows[1]["entry"], "block");
+    assert_eq!(rows[1]["time"], "09:30");
+    assert_eq!(rows[1]["end_time"], "12:30");
+    assert_eq!(rows[1]["alert"], false);
+}
+
+#[tokio::test]
+async fn a_toggled_bell_persists_and_survives_a_nightly_rebuild() {
+    let (app, cookie, state, cfg) = common::app_with_logged_in_user_and_state().await;
+    let res = app
+        .clone()
+        .oneshot(put(&cookie, r#"{"alerts":[{"index":0,"alert":false}]}"#))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(json(res).await["schedule"][0]["alert"], false);
+    assert!(cfg.path().join("users/aki/templates/default.toml").exists());
+
+    let v = json(app.oneshot(get(&cookie)).await.unwrap()).await;
+    assert_eq!(v["schedule"][0]["alert"], false);
+
+    // the nightly job rebuilds tomorrow from the same template file
+    let ucfg = note_server::config::UserConfig::load(cfg.path(), "aki").unwrap();
+    let tmpl = note_server::templates::Template::load(cfg.path(), "aki", &ucfg.template).unwrap();
+    let conn = state.db.lock().unwrap();
+    let date: jiff::civil::Date = "2026-09-02".parse().unwrap();
+    note_server::plan::generate(&conn, 1, &tmpl, date).unwrap();
+    let evs = note_server::plan::events_for(&conn, 1, date).unwrap();
+    assert_eq!(evs.len(), 1);
+    assert!(!evs[0].alert);
+    assert!(note_server::runner::fire_due(
+        &conn,
+        cfg.path(),
+        "2026-09-02T23:00:00Z".parse().unwrap()
+    )
+    .unwrap()
+    .is_empty());
+}
+
+#[tokio::test]
+async fn a_bell_on_a_block_or_a_missing_row_is_rejected() {
+    let (app, cookie, cfg) = common::app_with_logged_in_user().await;
+    write(cfg.path(), "defaults/templates/default.toml",
+        "[[events]]\nentry='block'\nkind='Work time'\ntime='09:30'\nend_time='12:30'\ndays=['mon']\n");
+    for body in [
+        r#"{"alerts":[{"index":0,"alert":false}]}"#,
+        r#"{"alerts":[{"index":4,"alert":false}]}"#,
+    ] {
+        let res = app.clone().oneshot(put(&cookie, body)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST, "accepted {body}");
+        let v = json(res).await;
+        assert!(v["error"].as_str().unwrap().contains("alerts"), "{v}");
+    }
+    assert!(!cfg.path().join("users/aki/templates/default.toml").exists());
+}
+
+#[tokio::test]
 async fn put_display_name_is_trimmed_and_quotes_survive_a_round_trip() {
     let (app, cookie, cfg) = common::app_with_logged_in_user().await;
     let res = app
