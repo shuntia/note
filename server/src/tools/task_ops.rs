@@ -36,6 +36,9 @@ pub struct CreateArgs {
     /// Rough estimate in whole 5-minute blocks.
     #[serde(default)]
     pub duration_min: Option<u32>,
+    /// Put the task straight in Now, the user's short list of at most 3.
+    #[serde(default)]
+    pub is_now: bool,
 }
 
 pub fn create(
@@ -52,7 +55,7 @@ pub fn create(
             title: title.to_owned(),
             duration_min: args.duration_min,
             parent_id: None,
-            is_now: false,
+            is_now: args.is_now,
         },
         "agent",
         Actor::Agent,
@@ -83,6 +86,8 @@ pub struct UpdateArgs {
     pub notes: Option<String>,
     /// Rough estimate in whole 5-minute blocks.
     pub duration_min: Option<u32>,
+    /// True moves the task into Now, false moves it back to Later.
+    pub is_now: Option<bool>,
 }
 
 pub fn update(
@@ -106,11 +111,17 @@ pub fn update(
         state: args.state,
         notes: args.notes,
         duration_min: args.duration_min.map(Some),
+        is_now: args.is_now,
         actor: Actor::Agent,
         ..Default::default()
     };
     match crate::tasks::update(conn, ctx.user_id, args.task_id, patch) {
-        Ok(Some(t)) => Ok(serde_json::json!({ "task_id": t.task.id, "state": t.task.state })),
+        Ok(Some(t)) => Ok(serde_json::json!({
+            "task_id": t.task.id,
+            "state": t.task.state,
+            "is_now": t.task.is_now,
+            "demoted_from_now": t.demoted_from_now,
+        })),
         Ok(None) => Err(ToolError::not_found(format!("no task {}", args.task_id))),
         Err(e) => Err(task_error(e)),
     }
