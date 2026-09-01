@@ -136,6 +136,12 @@ const MIGRATIONS: &[&str] = &[
         CHECK (duration_source IN ('user','agent','none'));
     CREATE INDEX idx_tasks_parent ON tasks(parent_id);
     ",
+    // v7
+    "
+    ALTER TABLE tasks ADD COLUMN is_now INTEGER NOT NULL DEFAULT 0
+        CHECK (is_now IN (0, 1) AND (is_now = 0 OR parent_id IS NULL));
+    CREATE INDEX idx_tasks_now ON tasks(user_id, is_now);
+    ",
 ];
 
 pub fn open(path: &Path) -> Result<Connection> {
@@ -318,6 +324,35 @@ mod tests {
             [],
         )
         .unwrap();
+    }
+
+    #[test]
+    fn v7_adds_is_now_and_keeps_it_off_steps() {
+        let conn = open_memory().unwrap();
+        conn.execute(
+            "INSERT INTO users (username, pass_hash, role) VALUES ('a','h','member')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tasks (user_id, title, created_at, updated_at)
+             VALUES (1, 'parent', 'now', 'now')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tasks (user_id, title, parent_id, created_at, updated_at)
+             VALUES (1, 'step', 1, 'now', 'now')",
+            [],
+        )
+        .unwrap();
+        let flag: i64 =
+            conn.query_row("SELECT is_now FROM tasks WHERE id = 1", [], |r| r.get(0)).unwrap();
+        assert_eq!(flag, 0);
+        conn.execute("UPDATE tasks SET is_now = 1 WHERE id = 1", []).unwrap();
+        assert!(conn.execute("UPDATE tasks SET is_now = 1 WHERE id = 2", []).is_err());
+        assert!(conn.execute("UPDATE tasks SET is_now = 2 WHERE id = 1", []).is_err());
+        assert!(conn.execute("UPDATE tasks SET parent_id = 2 WHERE id = 1", []).is_err());
     }
 
     #[test]
