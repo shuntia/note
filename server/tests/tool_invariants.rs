@@ -196,18 +196,18 @@ proptest! {
             events: vec![
                 note_server::templates::TemplateEvent {
                     kind: "checkin_call".into(), time: "09:00".into(),
-                    days: vec!["mon".into()], flexibility: "slide".into(),
-                    slide_window_min: 60, channel: "voice".into(),
+                    days: vec!["mon".into()], flexibility: Some("slide".into()),
+                    slide_window_min: Some(60), channel: "voice".into(), ..Default::default()
                 },
                 note_server::templates::TemplateEvent {
                     kind: "nudge".into(), time: "14:00".into(),
-                    days: vec!["mon".into()], flexibility: "drop".into(),
-                    slide_window_min: 0, channel: "push".into(),
+                    days: vec!["mon".into()], flexibility: Some("drop".into()),
+                    slide_window_min: Some(0), channel: "push".into(), ..Default::default()
                 },
                 note_server::templates::TemplateEvent {
                     kind: "meds".into(), time: "20:00".into(),
-                    days: vec!["mon".into()], flexibility: "fixed".into(),
-                    slide_window_min: 0, channel: "push".into(),
+                    days: vec!["mon".into()], flexibility: Some("fixed".into()),
+                    slide_window_min: Some(0), channel: "push".into(), ..Default::default()
                 },
             ],
         };

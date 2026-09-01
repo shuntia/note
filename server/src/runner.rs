@@ -234,7 +234,7 @@ mod tests {
         Template { events: vec![TemplateEvent {
             kind: "nudge".into(), time: time.into(),
             days: vec!["mon".into(),"tue".into(),"wed".into(),"thu".into(),"fri".into(),"sat".into(),"sun".into()],
-            flexibility: "slide".into(), slide_window_min: 60, channel: "push".into(),
+            flexibility: Some("slide".into()), slide_window_min: Some(60), channel: "push".into(), ..Default::default()
         }]}
     }
 
