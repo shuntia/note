@@ -306,8 +306,8 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
   outline-offset: 0;
 }
 
-/* the detached composer card, shared by the chat composer and the task quick-add */
-:is(.chat-composer, .quick-add) {
+/* the detached composer card */
+.chat-composer {
   display: flex;
   gap: 0.5rem;
   background: var(--surface);
@@ -317,23 +317,23 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
   box-shadow: 0 1px 2px oklch(0 0 0 / 0.08);
   transition: box-shadow 150ms ease, border-color 150ms ease;
 }
-:is(.chat-composer, .quick-add):focus-within {
+.chat-composer:focus-within {
   border-color: var(--ring);
   box-shadow:
     0 0 0 1px var(--ring),
     0 4px 14px oklch(0 0 0 / 0.12);
 }
 /* the card carries the focus affordance, so the field inside is bare */
-:is(.chat-composer, .quick-add) :is(input, textarea) {
+.chat-composer :is(input, textarea) {
   flex: 1;
   min-width: 0;
   background: none;
   border: none;
   border-radius: 0;
 }
-:is(.chat-composer, .quick-add) :is(input, textarea):focus-visible { outline: none; }
+.chat-composer :is(input, textarea):focus-visible { outline: none; }
 @media (prefers-reduced-motion: reduce) {
-  :is(.chat-composer, .quick-add) { transition: none; }
+  .chat-composer { transition: none; }
 }
 
 /* global capture: the shell's one always-there input */
@@ -686,6 +686,8 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
   .btn-chip { min-width: 2.5rem; }
   .ev-more { width: 2.5rem; height: 2.5rem; }
   .receipt-chip { min-height: 2.5rem; }
+  .task-tick { width: 2.5rem; height: 2.5rem; }
+  .task-add { min-height: 2.5rem; }
 }
 
 @media (max-width: 767.98px) {
@@ -705,64 +707,149 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
   .btn-chip { padding-inline: 0.6rem; }
 }
 
-/* tasks */
-.quick-add { align-items: center; padding-block: 0.3rem; }
-.quick-add input { padding: 0.5rem 0; }
-.quick-add .primary { flex: none; border-radius: 999px; padding: 0.5rem 1.15rem; }
+/* tasks — three groups down one reading column: Now carries card weight, Later
+   is the same shape gone quiet, Done Today is a receipt. As on Today, the
+   mockups' third grey fails 4.5:1, so quiet and faint both resolve to
+   --text-muted and size and weight carry the hierarchy. */
+.tasks { max-width: 45rem; }
 
-.task-list {
-  list-style: none;
-  margin: 1rem 0 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 0.4rem;
-}
-.task-row {
+.task-add {
   display: flex;
   align-items: center;
-  gap: 0.75rem;
+  gap: 0.65rem;
+  margin: 0 0 1.75rem;
+  padding: 0.7rem 1rem;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
-  padding: 0.7rem 0.9rem;
+  transition: border-color 150ms ease, box-shadow 150ms ease;
+}
+.task-add:focus-within {
+  border-color: var(--ring);
+  box-shadow: 0 0 0 1px var(--ring);
+}
+.task-add-glyph { flex: none; color: var(--sun-ink); line-height: 1; }
+.task-add input {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  background: none;
+  border: none;
+  border-radius: 0;
+}
+.task-add input:focus-visible { outline: none; }
+.task-add-hint { flex: none; font-size: 0.78rem; color: var(--text-muted); }
+
+.task-group { margin-bottom: 1.65rem; }
+.task-group-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.45rem;
+  margin: 0 0 0.6rem;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  color: var(--text-muted);
+}
+.task-group-count { font-weight: 400; letter-spacing: 0; }
+.task-group-why {
+  margin-left: auto;
+  font-weight: 400;
+  letter-spacing: 0;
+  font-size: 0.75rem;
+}
+
+.task-row {
+  margin-bottom: 0.5rem;
+  padding: 0.8rem 1rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
   transition: border-color 120ms ease;
 }
 .task-row:hover { border-color: var(--border-input); }
-.task-row.done { background: none; }
-.task-row.done .title { text-decoration: line-through; color: var(--text-muted); }
-.task-empty { margin: 1.25rem 0 0; }
-
-.check {
-  appearance: none;
-  flex: none;
-  width: 1.15rem;
-  height: 1.15rem;
-  margin: 0;
-  padding: 0;
-  display: grid;
-  place-content: center;
-  border: 1px solid var(--border-input);
-  border-radius: 5px;
-  background: var(--surface);
-  cursor: pointer;
-  transition: background 120ms ease, border-color 120ms ease;
+.task-group.now .task-row {
+  box-shadow: 0 6px 18px -14px color-mix(in srgb, var(--text) 60%, transparent);
 }
-.check:checked { background: var(--accent); border-color: var(--accent); }
-.check::after {
+.task-head { display: flex; align-items: center; gap: 0.8rem; }
+
+.task-tick {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 1.4rem;
+  height: 1.4rem;
+  padding: 0;
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+.tick {
+  display: grid;
+  place-items: center;
+  width: 1.375rem;
+  height: 1.375rem;
+  border: 2px solid var(--border-input);
+  border-radius: 50%;
+  transition: border-color 120ms ease;
+}
+.task-row:hover .tick { border-color: var(--sun); }
+
+.task-body { min-width: 0; }
+.task-title { color: var(--text); }
+.task-sub { color: var(--text-muted); font-size: 0.78rem; }
+
+.task-tag {
+  flex: none;
+  margin-left: auto;
+  padding: 0.05rem 0.55rem;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+.task-tag.progress {
+  color: var(--sun-ink);
+  border-color: color-mix(in srgb, var(--sun) 35%, var(--border));
+  background: color-mix(in srgb, var(--sun) 12%, var(--surface));
+}
+
+.task-more { position: relative; flex: none; margin-left: auto; }
+.task-tag + .task-more { margin-left: 0; }
+
+.task-group.later .task-row { background: none; box-shadow: none; }
+.task-group.later .task-title { color: var(--text-muted); }
+
+.task-group.done .task-row {
+  padding-block: 0.35rem;
+  background: none;
+  border-color: transparent;
+}
+.task-group.done .tick { border-color: var(--moss); background: var(--moss); }
+.task-group.done .task-title {
+  color: var(--text-muted);
+  text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, var(--moss) 45%, transparent);
+}
+
+.task-empty { margin: 0 0 0.5rem; color: var(--text-muted); }
+
+/* the check reads on both themes because the surface token flips with them:
+   a light mark on light-mode moss, a dark one on dark-mode moss */
+.tick::after {
   content: '';
   width: 0.3rem;
   height: 0.6rem;
   margin-top: -0.12rem;
-  border: solid var(--accent-fg);
+  border: solid var(--surface);
   border-width: 0 2px 2px 0;
   transform: rotate(45deg);
   opacity: 0;
 }
-.check:checked::after { opacity: 1; }
+.task-group.done .tick::after { opacity: 1; }
 
 @media (prefers-reduced-motion: reduce) {
-  .task-row, .check, button.ghost,
+  .task-add, .task-row, .tick, button.ghost,
   .debrief-fold, .btn-primary, .btn-outline, .btn-chip, .ev-more { transition: none; }
 }
 
