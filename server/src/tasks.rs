@@ -56,6 +56,7 @@ pub struct Task {
     pub duration_source: String,
     pub parent_id: Option<i64>,
     pub is_now: bool,
+    pub updated_at: String,
 }
 
 /// One top-level task with its steps; `children` is always present so the
@@ -120,11 +121,12 @@ fn row_to_task(r: &rusqlite::Row) -> rusqlite::Result<Task> {
         duration_source: r.get(7)?,
         parent_id: r.get(8)?,
         is_now: r.get(9)?,
+        updated_at: r.get(10)?,
     })
 }
 
 const COLS: &str = "id, title, description, state, source, notes, duration_min, \
-                    duration_source, parent_id, is_now";
+                    duration_source, parent_id, is_now, updated_at";
 
 fn checked_duration(min: u32) -> Result<u32, UpdateError> {
     if min == 0 || !min.is_multiple_of(DURATION_STEP_MIN) || min > MAX_DURATION_MIN {
