@@ -140,6 +140,7 @@ const CHECKIN: &[&str] = &[
     "schedule_slide",
     "schedule_snooze",
     "schedule_drop",
+    "schedule_reshape",
 ];
 const TALK: &[&str] = &[
     "memory_query",
@@ -151,6 +152,7 @@ const TALK: &[&str] = &[
     "schedule_slide",
     "schedule_snooze",
     "schedule_drop",
+    "schedule_reshape",
     "context_edit",
 ];
 const NIGHTLY: &[&str] = &[
@@ -163,6 +165,7 @@ const NIGHTLY: &[&str] = &[
     "schedule_slide",
     "schedule_snooze",
     "schedule_drop",
+    "schedule_reshape",
     "context_edit",
     "schedule_insert",
     "notify_send",
@@ -225,6 +228,11 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
         "schedule_drop" => (
             "Drop a droppable plan event for today.",
             schema::<schedule_ops::DropArgs>(),
+        ),
+        "schedule_reshape" => (
+            "Move or resize a block of time on the day's plan. Blocks are the only entries \
+             with a start and an end, and they never notify the user.",
+            schema::<schedule_ops::ReshapeArgs>(),
         ),
         "schedule_insert" => (
             "Insert a new event into an existing day plan.",
@@ -297,6 +305,7 @@ fn run(
         "schedule_slide" => schedule_ops::slide(conn, ctx, parse(raw)?),
         "schedule_snooze" => schedule_ops::snooze(conn, ctx, parse(raw)?),
         "schedule_drop" => schedule_ops::drop_event(conn, ctx, parse(raw)?),
+        "schedule_reshape" => schedule_ops::reshape(conn, ctx, parse(raw)?),
         "schedule_insert" => schedule_ops::insert(conn, ctx, parse(raw)?),
         "notify_send" => outreach_ops::send(conn, ctx, parse(raw)?),
         _ => unreachable!("registry guarantees a known name"),

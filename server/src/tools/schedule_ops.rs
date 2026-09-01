@@ -46,6 +46,51 @@ pub fn snooze(conn: &Connection, ctx: &ToolCtx, args: SnoozeArgs) -> Result<serd
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct ReshapeArgs {
+    pub event_id: i64,
+    /// New start, zero-padded HH:MM. Omit to keep the current one.
+    #[serde(default)]
+    pub start: Option<String>,
+    /// New end, zero-padded HH:MM. Omit to keep the current one.
+    #[serde(default)]
+    pub end: Option<String>,
+}
+
+pub fn reshape(conn: &Connection, ctx: &ToolCtx, args: ReshapeArgs) -> Result<serde_json::Value, ToolError> {
+    if args.start.is_none() && args.end.is_none() {
+        return Err(ToolError::rejected("give a new start, a new end, or both"));
+    }
+    for (field, value) in [("start", &args.start), ("end", &args.end)] {
+        if let Some(v) = value {
+            if !crate::templates::valid_time(v) {
+                return Err(ToolError::rejected(format!(
+                    "{field} must be zero-padded HH:MM, got {v:?}"
+                )));
+            }
+        }
+    }
+    let shape = crate::plan::block_shape(conn, ctx.user_id, args.event_id)
+        .map_err(|e| ToolError::internal(e.to_string()))?;
+    let Some((cur_start, cur_end, _)) = shape else {
+        return Err(ToolError::not_found(format!(
+            "no block {} for this user; only blocks have a start and an end", args.event_id
+        )));
+    };
+    let start = args.start.unwrap_or(cur_start);
+    let end = args.end.unwrap_or(cur_end);
+    if end <= start {
+        return Err(ToolError::rejected(format!("a block must end after it starts, got {start}-{end}")));
+    }
+    match crate::plan::reshape(conn, ctx.user_id, args.event_id, &start, &end) {
+        Ok(Some(())) => Ok(serde_json::json!({ "start": start, "end": end })),
+        Ok(None) => Err(ToolError::not_found(format!("no block {}", args.event_id))),
+        Err(e @ crate::plan::ShiftError::Decided { .. }) => Err(ToolError::rejected(e.to_string())),
+        Err(e) => Err(ToolError::internal(e.to_string())),
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DropArgs {
     pub event_id: i64,
 }
@@ -176,6 +221,11 @@ mod tests {
                     days: vec!["mon".into()], flexibility: Some("drop".into()),
                     slide_window_min: Some(0), channel: "push".into(), ..Default::default()
                 },
+                crate::templates::TemplateEvent {
+                    kind: "Work time".into(), time: "09:30".into(),
+                    days: vec!["mon".into()], entry: crate::templates::Entry::Block,
+                    end_time: Some("12:30".into()), channel: "push".into(), ..Default::default()
+                },
             ],
         };
         let date: jiff::civil::Date = "2026-08-31".parse().unwrap();
@@ -242,6 +292,69 @@ mod tests {
         let status: String = conn
             .query_row("SELECT status FROM events WHERE id=2", [], |r| r.get(0)).unwrap();
         assert_eq!(status, "done");
+    }
+
+    #[test]
+    fn the_agent_reshapes_a_block_but_not_a_routine() {
+        let (conn, tmp) = env();
+        dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "schedule_reshape",
+            r#"{"event_id":3,"start":"10:00","end":"13:00"}"#).unwrap();
+        let shape = |id: i64| -> (String, String) {
+            conn.query_row("SELECT wall_time, end_wall_time FROM events WHERE id=?1", [id], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap()
+        };
+        assert_eq!(shape(3), ("10:00".to_string(), "13:00".to_string()));
+
+        dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "schedule_reshape",
+            r#"{"event_id":3,"end":"14:00"}"#).unwrap();
+        assert_eq!(shape(3), ("10:00".to_string(), "14:00".to_string()));
+
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "schedule_reshape",
+            r#"{"event_id":1,"start":"10:00","end":"11:00"}"#).unwrap_err();
+        assert_eq!(e.kind, "not_found", "a routine has no shape to change");
+
+        for (raw, why) in [
+            (r#"{"event_id":3}"#, "nothing to change"),
+            (r#"{"event_id":3,"start":"9:00"}"#, "unpadded start"),
+            (r#"{"event_id":3,"start":"15:00","end":"14:00"}"#, "end before start"),
+            (r#"{"event_id":3,"start":"15:00"}"#, "start past the stored end"),
+        ] {
+            let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "schedule_reshape", raw)
+                .unwrap_err();
+            assert_eq!(e.kind, "rejected", "{why}");
+        }
+        assert_eq!(shape(3), ("10:00".to_string(), "14:00".to_string()));
+    }
+
+    #[test]
+    fn a_decided_block_is_left_alone() {
+        let (conn, tmp) = env();
+        conn.execute("UPDATE events SET status='done' WHERE id=3", []).unwrap();
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "schedule_reshape",
+            r#"{"event_id":3,"start":"10:00"}"#).unwrap_err();
+        assert_eq!(e.kind, "rejected");
+    }
+
+    #[test]
+    fn no_schedule_tool_accepts_an_alert_flag() {
+        let (conn, tmp) = env();
+        for (tool, raw) in [
+            ("schedule_reshape", r#"{"event_id":3,"start":"10:00","alert":false}"#),
+            ("schedule_slide", r#"{"event_id":1,"minutes":5,"alert":false}"#),
+            ("schedule_snooze", r#"{"event_id":1,"minutes":5,"alert":false}"#),
+            ("schedule_drop", r#"{"event_id":2,"alert":false}"#),
+            ("schedule_insert", r#"{"date":"2026-08-31","kind":"nudge","time":"16:00","flexibility":"drop","channel":"push","alert":false}"#),
+        ] {
+            let e = dispatch(&conn, &ctx(&tmp), SessionKind::Nightly, tool, raw).unwrap_err();
+            assert_eq!(e.kind, "invalid_args", "{tool} accepted an alert flag");
+        }
+        let bells: Vec<i64> = {
+            let mut stmt = conn.prepare("SELECT alert FROM events ORDER BY id").unwrap();
+            stmt.query_map([], |r| r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap()
+        };
+        assert_eq!(bells, vec![1, 1, 0]);
     }
 
     #[test]
