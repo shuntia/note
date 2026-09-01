@@ -226,7 +226,8 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
             schema::<schedule_ops::SnoozeArgs>(),
         ),
         "schedule_drop" => (
-            "Drop a droppable plan event for today.",
+            "Drop a droppable plan event for today. If it is moving rather than going away, \
+             add the replacement first and name its id, so the user can see where it went.",
             schema::<schedule_ops::DropArgs>(),
         ),
         "schedule_reshape" => (

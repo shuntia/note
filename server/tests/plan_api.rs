@@ -121,6 +121,10 @@ async fn shift_moves_the_event_and_drop_marks_it_dropped() {
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(v[0]["wall_time"], "09:45");
     assert_eq!(v[0]["status"], "dropped");
+    assert!(v[0].get("moved_to").is_none(), "a user's own drop went nowhere in particular");
+    assert_eq!(v[0]["entry"], "routine");
+    assert_eq!(v[0]["end_wall_time"], serde_json::Value::Null);
+    assert_eq!(v[0]["alert"], true);
 }
 
 #[tokio::test]
