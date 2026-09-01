@@ -214,6 +214,86 @@ pub fn list(conn: &Connection, user_id: i64) -> rusqlite::Result<Vec<TaskNode>> 
         .collect()
 }
 
+pub const MIN_STEPS: usize = 2;
+pub const MAX_STEPS: usize = 5;
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Step {
+    pub title: String,
+    pub duration_min: u32,
+}
+
+fn node(conn: &Connection, user_id: i64, task_id: i64) -> Result<Option<TaskNode>, UpdateError> {
+    let Some(task) = get(conn, user_id, task_id)? else { return Ok(None) };
+    let children = children_of(conn, task.id)?;
+    Ok(Some(TaskNode { task, children }))
+}
+
+/// Refuses a task that already has steps, so a re-split can never silently
+/// discard work the user has already ticked off; the parent's duration becomes
+/// the total of its steps.
+pub fn split(
+    conn: &Connection,
+    user_id: i64,
+    task_id: i64,
+    steps: Vec<Step>,
+    actor: DurationActor,
+) -> Result<Option<TaskNode>, UpdateError> {
+    if !(MIN_STEPS..=MAX_STEPS).contains(&steps.len()) {
+        return Err(UpdateError::InvalidHierarchy(format!(
+            "a split needs {MIN_STEPS} to {MAX_STEPS} steps"
+        )));
+    }
+    let Some(parent) = get(conn, user_id, task_id)? else { return Ok(None) };
+    if parent.parent_id.is_some() {
+        return Err(UpdateError::InvalidHierarchy(
+            "steps are one level deep: a step cannot have steps of its own".into(),
+        ));
+    }
+    if has_children(conn, task_id)? {
+        return Err(UpdateError::InvalidHierarchy("this task already has steps".into()));
+    }
+    let mut total: u32 = 0;
+    for s in &steps {
+        total += checked_duration(s.duration_min)?;
+    }
+    for s in steps {
+        create(
+            conn,
+            user_id,
+            NewTask {
+                title: s.title,
+                duration_min: Some(s.duration_min),
+                parent_id: Some(task_id),
+            },
+            &parent.source,
+            actor,
+        )?;
+    }
+    conn.execute(
+        "UPDATE tasks SET duration_min = ?1, duration_source = ?2, updated_at = ?3 WHERE id = ?4",
+        (total, actor.as_str(), now(), task_id),
+    )?;
+    node(conn, user_id, task_id)
+}
+
+/// Returns the parent and the steps that were removed, so the caller can offer
+/// an exact undo.
+pub fn flatten(
+    conn: &Connection,
+    user_id: i64,
+    task_id: i64,
+) -> Result<Option<(TaskNode, Vec<Task>)>, UpdateError> {
+    if get(conn, user_id, task_id)?.is_none() {
+        return Ok(None);
+    }
+    let removed = children_of(conn, task_id)?;
+    conn.execute("DELETE FROM tasks WHERE parent_id = ?1", [task_id])?;
+    let Some(n) = node(conn, user_id, task_id)? else { return Ok(None) };
+    Ok(Some((n, removed)))
+}
+
 /// A patched task, plus its parent when finishing or reopening this step also
 /// moved the parent, so the client needs no second round trip.
 #[derive(Debug, Serialize)]

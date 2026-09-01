@@ -241,6 +241,80 @@ async fn completing_a_parent_completes_its_steps_and_dropping_drops_them() {
     assert_eq!(t["state"], "dropped");
 }
 
+const LANDLORD_STEPS: &str = r#"{"steps":[
+    {"title":"find the last email thread","duration_min":5},
+    {"title":"photos of the ceiling","duration_min":5},
+    {"title":"write and send","duration_min":10}]}"#;
+
+#[tokio::test]
+async fn split_creates_steps_and_totals_the_parent_duration() {
+    let (app, cookie, _tmp) = app_with_user().await;
+    post(&app, &cookie, "/api/tasks", r#"{"title":"email landlord"}"#).await;
+    let (status, node) = post(&app, &cookie, "/api/tasks/1/split", LANDLORD_STEPS).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(node["duration_min"], 20);
+    assert_eq!(node["duration_source"], "user");
+    assert_eq!(node["children"].as_array().unwrap().len(), 3);
+    assert_eq!(node["children"][2]["duration_min"], 10);
+
+    let two = r#"{"steps":[{"title":"a","duration_min":5},{"title":"b","duration_min":5}]}"#;
+    let (status, _) = post(&app, &cookie, "/api/tasks/1/split", two).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "a task with steps cannot be re-split");
+    let (status, _) = post(&app, &cookie, "/api/tasks/2/split", two).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "a step cannot be split");
+
+    post(&app, &cookie, "/api/tasks", r#"{"title":"other"}"#).await;
+    let (status, _) = post(
+        &app,
+        &cookie,
+        "/api/tasks/5/split",
+        r#"{"steps":[{"title":"only","duration_min":5}]}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let (status, _) = post(
+        &app,
+        &cookie,
+        "/api/tasks/5/split",
+        r#"{"steps":[{"title":"a","duration_min":5},{"title":"b","duration_min":7}]}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let (status, _) = post(&app, &cookie, "/api/tasks/999/split", two).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn flatten_removes_every_step_in_one_call_and_hands_them_back() {
+    let (app, cookie, _tmp) = app_with_user().await;
+    post(&app, &cookie, "/api/tasks", r#"{"title":"email landlord"}"#).await;
+    post(&app, &cookie, "/api/tasks/1/split", LANDLORD_STEPS).await;
+
+    let (status, out) = post(&app, &cookie, "/api/tasks/1/flatten", "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(out["task"]["id"], 1);
+    assert_eq!(out["task"]["duration_min"], 20);
+    assert_eq!(out["task"]["children"].as_array().unwrap().len(), 0);
+    assert_eq!(out["removed"].as_array().unwrap().len(), 3);
+    assert_eq!(out["removed"][0]["title"], "find the last email thread");
+    assert_eq!(list(&app, &cookie).await.as_array().unwrap().len(), 1);
+
+    // undo is the inverse call
+    let (status, node) = post(&app, &cookie, "/api/tasks/1/split", LANDLORD_STEPS).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(node["children"].as_array().unwrap().len(), 3);
+
+    // flattening a task with no steps is a no-op, not an error
+    let (_, loose) = post(&app, &cookie, "/api/tasks", r#"{"title":"loose"}"#).await;
+    let path = format!("/api/tasks/{}/flatten", loose["id"].as_i64().unwrap());
+    let (status, out) = post(&app, &cookie, &path, "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(out["removed"].as_array().unwrap().len(), 0);
+
+    let (status, _) = post(&app, &cookie, "/api/tasks/999/flatten", "").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
 #[tokio::test]
 async fn create_list_update_task() {
     let conn = db::open_memory().unwrap();
