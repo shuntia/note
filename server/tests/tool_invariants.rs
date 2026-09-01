@@ -18,6 +18,7 @@ enum Op {
     TaskSplit(i64),
     TaskDuration(i64, u32),
     TaskSetNow(i64, bool),
+    Reshape(i64, String, String),
 }
 
 fn arb_op() -> impl Strategy<Value = Op> {
@@ -32,15 +33,17 @@ fn arb_op() -> impl Strategy<Value = Op> {
         (0..8usize, word).prop_map(|(i, s)| Op::MemUpdate(i, s)),
         (0..8usize, word).prop_map(|(i, s)| Op::MemSupersede(i, s)),
         word.prop_map(Op::MemQuery),
-        (1..4i64, -200..200i64).prop_map(|(e, m)| Op::Slide(e, m)),
-        (1..4i64, -10..100i64).prop_map(|(e, m)| Op::Snooze(e, m)),
-        (1..4i64).prop_map(Op::Drop),
+        (1..5i64, -200..200i64).prop_map(|(e, m)| Op::Slide(e, m)),
+        (1..5i64, -10..100i64).prop_map(|(e, m)| Op::Snooze(e, m)),
+        (1..5i64).prop_map(Op::Drop),
         word.prop_map(Op::CtxAppend),
         (word, word).prop_map(|(f, r)| Op::CtxReplace(f, r)),
         (1..6i64).prop_map(Op::TaskSplit),
         (1..6i64, prop_oneof![Just(5u32), Just(10), Just(23), Just(0)])
             .prop_map(|(id, d)| Op::TaskDuration(id, d)),
         (1..6i64, any::<bool>()).prop_map(|(id, f)| Op::TaskSetNow(id, f)),
+        (1..5i64, "([01][0-9]|2[0-3]):[0-5][0-9]", "([01][0-9]|2[0-3]):[0-5][0-9]")
+            .prop_map(|(e, s, t)| Op::Reshape(e, s, t)),
         (prop_oneof![Just("2026-08-31".to_string()), Just("2026-09-01".to_string())], "([01][0-9]|2[0-3]):[0-5][0-9]")
             .prop_map(|(d, t)| Op::Insert(d, t)),
     ]
@@ -70,6 +73,8 @@ fn apply(conn: &rusqlite::Connection, ctx: &ToolCtx, op: &Op, mem_ids: &mut Vec<
             r#"{{"task_id":{id},"steps":[{{"title":"a","duration_min":5}},{{"title":"b","duration_min":10}}]}}"#)),
         Op::TaskDuration(id, d) => ("task_update", format!(r#"{{"task_id":{id},"duration_min":{d}}}"#)),
         Op::TaskSetNow(id, f) => ("task_update", format!(r#"{{"task_id":{id},"is_now":{f}}}"#)),
+        Op::Reshape(e, s, t) => ("schedule_reshape",
+            format!(r#"{{"event_id":{e},"start":"{s}","end":"{t}"}}"#)),
         Op::Insert(d, t) => ("schedule_insert",
             format!(r#"{{"date":"{d}","kind":"extra","time":"{t}","flexibility":"slide","slide_window_min":15,"channel":"push"}}"#)),
     };
@@ -110,7 +115,25 @@ fn assert_invariants(conn: &rusqlite::Connection, data_dir: &std::path::Path) {
         }
     }
 
-    // 2. Task steps stay exactly one level deep and every duration is a whole
+    // 2. A block keeps a well-ordered range and never regains its bell; a
+    //    routine never grows one.
+    let mut stmt = conn.prepare("SELECT id, wall_time, end_wall_time, alert FROM events").unwrap();
+    let shapes: Vec<(i64, String, Option<String>, i64)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    for (id, start, end, alert) in shapes {
+        match end {
+            Some(end) => {
+                assert!(minutes(&end) > minutes(&start), "block {id} ends at or before {start}");
+                assert_eq!(alert, 0, "block {id} regained its bell");
+            }
+            None => assert_eq!(alert, 1, "routine {id} lost its bell"),
+        }
+    }
+
+    // 3. Task steps stay exactly one level deep and every duration is a whole
     //    number of 5-minute blocks.
     let mut stmt = conn
         .prepare(
@@ -134,7 +157,7 @@ fn assert_invariants(conn: &rusqlite::Connection, data_dir: &std::path::Path) {
         assert_eq!(source, "agent", "task {id} duration came from nowhere");
     }
 
-    // 3. Now holds at most three live top-level tasks, and no step is ever in it.
+    // 4. Now holds at most three live top-level tasks, and no step is ever in it.
     let live: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM tasks
@@ -154,7 +177,7 @@ fn assert_invariants(conn: &rusqlite::Connection, data_dir: &std::path::Path) {
         .unwrap();
     assert_eq!(flagged_steps, 0, "a step was flagged into Now");
 
-    // 4. Memory: index rows and files agree; ids unique; supersede chains resolve.
+    // 5. Memory: index rows and files agree; ids unique; supersede chains resolve.
     let mut stmt = conn
         .prepare("SELECT id, archived, path FROM memory_index WHERE user='aki'")
         .unwrap();
@@ -208,6 +231,11 @@ proptest! {
                     kind: "meds".into(), time: "20:00".into(),
                     days: vec!["mon".into()], flexibility: Some("fixed".into()),
                     slide_window_min: Some(0), channel: "push".into(), ..Default::default()
+                },
+                note_server::templates::TemplateEvent {
+                    kind: "Work time".into(), time: "09:30".into(),
+                    days: vec!["mon".into()], entry: note_server::templates::Entry::Block,
+                    end_time: Some("12:30".into()), channel: "push".into(), ..Default::default()
                 },
             ],
         };

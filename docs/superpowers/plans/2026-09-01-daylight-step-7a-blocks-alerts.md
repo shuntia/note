@@ -684,6 +684,7 @@ git commit -m "feat: settings reads and toggles the per-entry bells"
 - Produces:
   - `plan::reshape(conn, user_id, event_id, start: Option<&str>, end: Option<&str>) -> Result<Option<()>, ShiftError>` — `Ok(None)` when the event is not the user's or is not a block.
   - Tool `schedule_reshape` with args `{ event_id: i64, start?: "HH:MM", end?: "HH:MM" }`, registered in all three session kinds.
+  - `plan::shift` and `plan::snooze` return `Ok(None)` for a block: a block carries an end as well as a start, so moving it through either would leave a range whose end precedes its start.
 - Consumes: Task 2's `end_wall_time`.
 
 - [ ] **Step 1: Write the failing tests**
@@ -1019,6 +1020,10 @@ replacement (render `dropped — moved to <wall_time>`; a plain drop renders
 
 Agent tools: `schedule_reshape { event_id, start?, end? }`;
 `schedule_drop { event_id, moved_to_event_id? }`. No tool accepts `alert`.
+
+`POST /api/events/{id}/shift` and `/snooze` answer 404 for a block — Today must
+render no ±15 chips and no Later on a band. `/done` and `/drop` still work on
+one, and on a silent routine.
 
 ## Self-review
 

@@ -20,6 +20,11 @@ fn setup() -> (rusqlite::Connection, tempfile::TempDir) {
                 days: vec!["mon".into()], flexibility: Some("slide".into()),
                 slide_window_min: Some(30), channel: "voice".into(), ..Default::default()
             },
+            note_server::templates::TemplateEvent {
+                kind: "Work time".into(), time: "13:30".into(),
+                days: vec!["mon".into()], entry: note_server::templates::Entry::Block,
+                end_time: Some("16:30".into()), channel: "push".into(), ..Default::default()
+            },
         ],
     };
     let date: jiff::civil::Date = "2026-08-31".parse().unwrap();
@@ -79,6 +84,7 @@ fn arb_name() -> impl Strategy<Value = String> {
             Just("memory_write".to_string()), Just("context_edit".to_string()),
             Just("schedule_slide".to_string()), Just("schedule_snooze".to_string()),
             Just("schedule_drop".to_string()), Just("schedule_insert".to_string()),
+            Just("schedule_reshape".to_string()),
         ],
         1 => "[a-z_]{1,20}",
         1 => ".*",
@@ -125,6 +131,7 @@ fn arb_call() -> impl Strategy<Value = (String, String)> {
             good("schedule_snooze", r#"{"event_id":1,"minutes":10}"#),
             good("schedule_drop", r#"{"event_id":1}"#),
             good("schedule_slide", r#"{"event_id":2,"minutes":10}"#),
+            good("schedule_reshape", r#"{"event_id":3,"start":"13:00","end":"15:00"}"#),
             good("context_edit", r#"{"append":"a standing note"}"#),
             good("schedule_insert", r#"{"date":"2026-08-31","kind":"extra","time":"11:30","flexibility":"slide","slide_window_min":15,"channel":"push"}"#),
         ],

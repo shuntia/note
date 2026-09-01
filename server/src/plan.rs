@@ -141,13 +141,15 @@ struct OwnedEvent {
     orig_wall_time: String,
     slide_window_min: i64,
     status: String,
+    is_block: bool,
 }
 
 /// Resolves an event only when its plan belongs to `user_id`, so callers cannot
 /// distinguish someone else's event from a missing one.
 fn owned_event(conn: &Connection, user_id: i64, event_id: i64) -> rusqlite::Result<Option<OwnedEvent>> {
     conn.query_row(
-        "SELECT e.wall_time, e.flexibility, e.orig_wall_time, e.slide_window_min, e.status
+        "SELECT e.wall_time, e.flexibility, e.orig_wall_time, e.slide_window_min, e.status,
+                e.end_wall_time IS NOT NULL
          FROM events e JOIN plans p ON p.id = e.plan_id
          WHERE e.id = ?1 AND p.user_id = ?2",
         (event_id, user_id),
@@ -158,6 +160,7 @@ fn owned_event(conn: &Connection, user_id: i64, event_id: i64) -> rusqlite::Resu
                 orig_wall_time: r.get(2)?,
                 slide_window_min: r.get(3)?,
                 status: r.get(4)?,
+                is_block: r.get(5)?,
             })
         },
     )
@@ -174,12 +177,13 @@ fn parse_minutes(wall: &str) -> anyhow::Result<i64> {
 /// offset from `orig_wall_time` stays within the window. A `done` or `dropped`
 /// event is a settled user decision and is refused. Only a `snoozed` event
 /// returns to `pending`; a `fired` one keeps its status. `None` when the event
-/// is not the user's or its flexibility is `fixed`.
+/// is not the user's, its flexibility is `fixed`, or it is a block — a block
+/// carries an end as well as a start, and moves only through `reshape`.
 pub fn shift(conn: &Connection, user_id: i64, event_id: i64, minutes: i64) -> Result<Option<()>, ShiftError> {
     let Some(ev) = owned_event(conn, user_id, event_id)? else {
         return Ok(None);
     };
-    if ev.flexibility == "fixed" {
+    if ev.flexibility == "fixed" || ev.is_block {
         return Ok(None);
     }
     if ev.status == "done" || ev.status == "dropped" {
@@ -204,7 +208,8 @@ pub fn shift(conn: &Connection, user_id: i64, event_id: i64, minutes: i64) -> Re
 /// Postpones delivery: any owned, undecided event (pending/snoozed/fired) can
 /// be snoozed regardless of flexibility, and the slide window does not apply —
 /// snooze is "not now", not a schedule change. A `done` or `dropped` event is a
-/// settled user decision and is refused, exactly as in `shift`.
+/// settled user decision and is refused, exactly as in `shift`. A block has no
+/// delivery to postpone, so it is `None`.
 pub fn snooze(
     conn: &Connection,
     user_id: i64,
@@ -216,16 +221,13 @@ pub fn snooze(
             "snooze minutes must be in 1..=1440, got {minutes}"
         )));
     }
-    let row: Option<(String, String)> = conn
-        .query_row(
-            "SELECT e.wall_time, e.status FROM events e
-             JOIN plans p ON p.id = e.plan_id
-             WHERE e.id = ?1 AND p.user_id = ?2",
-            (event_id, user_id),
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?;
-    let Some((wall, status)) = row else { return Ok(None) };
+    let Some(ev) = owned_event(conn, user_id, event_id)? else {
+        return Ok(None);
+    };
+    if ev.is_block {
+        return Ok(None);
+    }
+    let (wall, status) = (ev.wall_time, ev.status);
     if status == "done" || status == "dropped" {
         return Err(ShiftError::Decided { status });
     }
