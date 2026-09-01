@@ -144,13 +144,17 @@ function turn(item: Exclude<Item, ToolItem>): ReactNode {
   )
 }
 
-export function Talk({ notify }: ViewProps) {
+export function Talk({
+  notify,
+  prefill,
+  onPrefilled,
+}: ViewProps & { prefill?: string | null; onPrefilled?: () => void }) {
   const [conversations, setConversations] = useState<Conversation[]>([])
   const [listState, setListState] = useState<Load>('loading')
   const [current, setCurrent] = useState<number | null>(null)
   const [items, setItems] = useState<Item[]>([])
   const [msgState, setMsgState] = useState<Load>('ready')
-  const [draft, setDraft] = useState('')
+  const [draft, setDraft] = useState(prefill ?? '')
   // era of the send in flight, so its pending row belongs to the conversation that sent it
   const [pending, setPending] = useState<number | null>(null)
   const [sideOpen, setSideOpen] = useState(false)
@@ -214,6 +218,18 @@ export function Talk({ notify }: ViewProps) {
     el.style.height = `${Math.min(el.scrollHeight, max)}px`
     el.style.overflowY = el.scrollHeight > max ? 'auto' : 'hidden'
   }, [draft])
+
+  // Talk mounts fresh on every view switch, so this arrives on a new conversation.
+  useEffect(() => {
+    if (!prefill) return
+    setDraft(prefill)
+    const el = input.current
+    if (el) {
+      el.focus()
+      el.setSelectionRange(el.value.length, el.value.length)
+    }
+    onPrefilled?.()
+  }, [prefill, onPrefilled])
 
   useEffect(() => {
     if (!sideOpen) return
@@ -489,7 +505,7 @@ export function Talk({ notify }: ViewProps) {
               ref={input}
               className="chat-input"
               rows={1}
-              placeholder="Message Note…"
+              placeholder="Talk to Note — it can change the plan, tasks, and memory for you"
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
               onKeyDown={onKeyDown}

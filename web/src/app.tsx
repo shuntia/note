@@ -25,6 +25,8 @@ export type ViewProps = {
   notify: (msg: string, action?: ToastAction) => void
   refresh: number
   onChanged: () => void
+  // Switches to Talk on a new conversation with this text waiting in the composer.
+  openTalk: (draft: string) => void
 }
 
 const NAV: { id: Tab; label: string }[] = [
@@ -41,6 +43,7 @@ export function App() {
   const [tab, setTab] = useState<Tab>('today')
   const [toast, setToast] = useState<{ msg: string; action?: ToastAction } | null>(null)
   const [refresh, setRefresh] = useState(0)
+  const [talkPrefill, setTalkPrefill] = useState<string | null>(null)
 
   const toastTimer = useRef(0)
   const notify = useCallback((msg: string, action?: ToastAction) => {
@@ -53,6 +56,11 @@ export function App() {
   }, [])
 
   const onChanged = useCallback(() => setRefresh((n) => n + 1), [])
+
+  const openTalk = useCallback((draft: string) => {
+    setTalkPrefill(draft)
+    setTab('chat')
+  }, [])
 
   useEffect(() => {
     setOnUnauthorized(() => setMe(null))
@@ -76,7 +84,7 @@ export function App() {
   if (me === undefined) return null
   if (me === null) return <Login onSignedIn={setMe} />
 
-  const views: ViewProps = { notify, refresh, onChanged }
+  const views: ViewProps = { notify, refresh, onChanged, openTalk }
 
   return (
     <div className="shell">
@@ -115,7 +123,9 @@ export function App() {
         <main className={tab === 'chat' ? 'view view-talk' : 'view'}>
           {tab === 'today' && <Today key={refresh} {...views} />}
           {tab === 'tasks' && <Tasks {...views} />}
-          {tab === 'chat' && <Talk {...views} />}
+          {tab === 'chat' && (
+            <Talk {...views} prefill={talkPrefill} onPrefilled={() => setTalkPrefill(null)} />
+          )}
           {tab === 'memory' && <Memory {...views} />}
           {tab === 'settings' && <Settings me={me} {...views} onSignedOut={() => setMe(null)} />}
         </main>
