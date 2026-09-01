@@ -18,15 +18,29 @@ pub enum ShiftError {
     Other(#[from] anyhow::Error),
 }
 
+/// Where a dropped event went, when the agent named its replacement.
+#[derive(Debug, Serialize)]
+pub struct MovedTo {
+    pub event_id: i64,
+    pub date: String,
+    pub wall_time: String,
+    pub kind: String,
+}
+
 #[derive(Debug, Serialize)]
 pub struct PlanEvent {
     pub id: i64,
     pub kind: String,
     pub wall_time: String,
+    pub end_wall_time: Option<String>,
+    pub entry: String,
     pub status: String,
     pub flexibility: String,
     pub slide_window_min: i64,
     pub channel: String,
+    pub alert: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub moved_to: Option<MovedTo>,
 }
 
 fn weekday_key(date: jiff::civil::Date) -> &'static str {
@@ -70,9 +84,13 @@ pub fn generate(conn: &Connection, user_id: i64, template: &Template, date: jiff
     let day = weekday_key(date);
     for ev in template.events.iter().filter(|e| e.days.iter().any(|d| d == day)) {
         conn.execute(
-            "INSERT INTO events (plan_id, kind, wall_time, orig_wall_time, flexibility, slide_window_min, channel)
-             VALUES (?1, ?2, ?3, ?3, ?4, ?5, ?6)",
-            (plan_id, &ev.kind, &ev.time, ev.flexibility(), ev.slide_window_min(), &ev.channel),
+            "INSERT INTO events (plan_id, kind, wall_time, orig_wall_time, end_wall_time,
+                                 flexibility, slide_window_min, channel, alert)
+             VALUES (?1, ?2, ?3, ?3, ?4, ?5, ?6, ?7, ?8)",
+            (
+                plan_id, &ev.kind, &ev.time, &ev.end_time, ev.flexibility(),
+                ev.slide_window_min(), &ev.channel, ev.alert(),
+            ),
         )?;
     }
     if let Some(tx) = tx {
@@ -83,14 +101,35 @@ pub fn generate(conn: &Connection, user_id: i64, template: &Template, date: jiff
 
 pub fn events_for(conn: &Connection, user_id: i64, date: jiff::civil::Date) -> Result<Vec<PlanEvent>> {
     let mut stmt = conn.prepare(
-        "SELECT e.id, e.kind, e.wall_time, e.status, e.flexibility, e.slide_window_min, e.channel
+        "SELECT e.id, e.kind, e.wall_time, e.end_wall_time, e.status, e.flexibility,
+                e.slide_window_min, e.channel, e.alert,
+                m.id, mp.date, m.wall_time, m.kind
          FROM events e JOIN plans p ON p.id = e.plan_id
+         LEFT JOIN events m ON m.id = e.moved_to_event_id
+         LEFT JOIN plans mp ON mp.id = m.plan_id
          WHERE p.user_id = ?1 AND p.date = ?2 ORDER BY e.wall_time",
     )?;
     let rows = stmt.query_map((user_id, date.to_string()), |r| {
+        let end_wall_time: Option<String> = r.get(3)?;
         Ok(PlanEvent {
-            id: r.get(0)?, kind: r.get(1)?, wall_time: r.get(2)?, status: r.get(3)?,
-            flexibility: r.get(4)?, slide_window_min: r.get(5)?, channel: r.get(6)?,
+            id: r.get(0)?,
+            kind: r.get(1)?,
+            wall_time: r.get(2)?,
+            entry: if end_wall_time.is_some() { "block" } else { "routine" }.into(),
+            end_wall_time,
+            status: r.get(4)?,
+            flexibility: r.get(5)?,
+            slide_window_min: r.get(6)?,
+            channel: r.get(7)?,
+            alert: r.get(8)?,
+            moved_to: r.get::<_, Option<i64>>(9)?.map(|event_id| {
+                Ok::<_, rusqlite::Error>(MovedTo {
+                    event_id,
+                    date: r.get(10)?,
+                    wall_time: r.get(11)?,
+                    kind: r.get(12)?,
+                })
+            }).transpose()?,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -258,6 +297,37 @@ mod tests {
         assert_eq!(evs.len(), 1);
         assert_eq!(evs[0].kind, "checkin_call");
         assert_eq!(evs[0].wall_time, "09:00");
+    }
+
+    #[test]
+    fn generate_stores_the_block_range_and_bell_state() {
+        let conn = crate::db::open_memory().unwrap();
+        let uid = crate::auth::create_user(&conn, "a", "p", false).unwrap();
+        let date: jiff::civil::Date = "2026-08-31".parse().unwrap();
+        let t = Template {
+            events: vec![
+                TemplateEvent {
+                    kind: "Work time".into(), time: "09:30".into(), days: vec!["mon".into()],
+                    entry: crate::templates::Entry::Block, end_time: Some("12:30".into()),
+                    channel: "push".into(), ..Default::default()
+                },
+                TemplateEvent {
+                    kind: "meds".into(), time: "08:00".into(), days: vec!["mon".into()],
+                    alert: Some(false), channel: "push".into(), ..Default::default()
+                },
+            ],
+        };
+        generate(&conn, uid, &t, date).unwrap();
+        let evs = events_for(&conn, uid, date).unwrap();
+        assert_eq!(evs[0].kind, "meds");
+        assert_eq!(evs[0].entry, "routine");
+        assert_eq!(evs[0].end_wall_time, None);
+        assert!(!evs[0].alert);
+        assert_eq!(evs[1].kind, "Work time");
+        assert_eq!(evs[1].entry, "block");
+        assert_eq!(evs[1].end_wall_time.as_deref(), Some("12:30"));
+        assert!(!evs[1].alert);
+        assert_eq!(evs[1].flexibility, "slide");
     }
 
     #[test]
