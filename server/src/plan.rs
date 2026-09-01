@@ -72,7 +72,7 @@ pub fn generate(conn: &Connection, user_id: i64, template: &Template, date: jiff
         conn.execute(
             "INSERT INTO events (plan_id, kind, wall_time, orig_wall_time, flexibility, slide_window_min, channel)
              VALUES (?1, ?2, ?3, ?3, ?4, ?5, ?6)",
-            (plan_id, &ev.kind, &ev.time, &ev.flexibility, ev.slide_window_min, &ev.channel),
+            (plan_id, &ev.kind, &ev.time, ev.flexibility(), ev.slide_window_min(), &ev.channel),
         )?;
     }
     if let Some(tx) = tx {
@@ -236,12 +236,12 @@ mod tests {
                 TemplateEvent {
                     kind: "checkin_call".into(), time: "09:00".into(),
                     days: vec!["mon".into(), "tue".into(), "wed".into(), "thu".into(), "fri".into()],
-                    flexibility: "slide".into(), slide_window_min: 60, channel: "voice".into(),
+                    flexibility: Some("slide".into()), slide_window_min: Some(60), channel: "voice".into(), ..Default::default()
                 },
                 TemplateEvent {
                     kind: "nudge".into(), time: "14:00".into(),
                     days: vec!["sat".into()],
-                    flexibility: "drop".into(), slide_window_min: 0, channel: "push".into(),
+                    flexibility: Some("drop".into()), slide_window_min: Some(0), channel: "push".into(), ..Default::default()
                 },
             ],
         }
@@ -277,7 +277,7 @@ mod tests {
         let uid = crate::auth::create_user(&conn, "a", "p", false).unwrap();
         let date: jiff::civil::Date = "2026-08-31".parse().unwrap();
         let mut bad = tmpl();
-        bad.events[0].flexibility = "soft".into(); // not in the events.flexibility CHECK
+        bad.events[0].flexibility = Some("soft".into()); // not in the events.flexibility CHECK
         assert!(generate(&conn, uid, &bad, date).is_err());
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM plans WHERE user_id = ?1", [uid], |r| r.get(0))
@@ -319,7 +319,7 @@ mod tests {
         let uid = crate::auth::create_user(&conn, "a", "p", false).unwrap();
         let date: jiff::civil::Date = "2026-08-31".parse().unwrap();
         let mut t = tmpl();
-        t.events[0].flexibility = "slide".into();
+        t.events[0].flexibility = Some("slide".into());
         generate(&conn, uid, &t, date).unwrap();
         let ev = &events_for(&conn, uid, date).unwrap()[0];
         assert!(shift(&conn, uid, ev.id, 45).unwrap().is_some());
@@ -336,8 +336,8 @@ mod tests {
         let uid = crate::auth::create_user(&conn, "a", "p", false).unwrap();
         let date: jiff::civil::Date = "2026-08-31".parse().unwrap();
         let mut t = tmpl();
-        t.events[0].flexibility = "slide".into();
-        t.events[0].slide_window_min = 0;
+        t.events[0].flexibility = Some("slide".into());
+        t.events[0].slide_window_min = Some(0);
         generate(&conn, uid, &t, date).unwrap();
         let ev_id = events_for(&conn, uid, date).unwrap()[0].id;
         conn.execute("UPDATE events SET status='snoozed' WHERE id = ?1", [ev_id]).unwrap();
@@ -357,8 +357,8 @@ mod tests {
         let uid = crate::auth::create_user(&conn, "a", "p", false).unwrap();
         let date: jiff::civil::Date = "2026-08-31".parse().unwrap();
         let mut t = tmpl();
-        t.events[0].flexibility = "slide".into();
-        t.events[0].slide_window_min = 0;
+        t.events[0].flexibility = Some("slide".into());
+        t.events[0].slide_window_min = Some(0);
         generate(&conn, uid, &t, date).unwrap();
         let ev_id = events_for(&conn, uid, date).unwrap()[0].id;
         conn.execute("UPDATE events SET status = 'fired' WHERE id = ?1", [ev_id]).unwrap();
@@ -375,8 +375,8 @@ mod tests {
         let uid = crate::auth::create_user(&conn, "a", "p", false).unwrap();
         let date: jiff::civil::Date = "2026-08-31".parse().unwrap();
         let mut t = tmpl();
-        t.events[0].flexibility = "slide".into();
-        t.events[0].slide_window_min = 0;
+        t.events[0].flexibility = Some("slide".into());
+        t.events[0].slide_window_min = Some(0);
         generate(&conn, uid, &t, date).unwrap();
         let ev_id = events_for(&conn, uid, date).unwrap()[0].id;
 
@@ -397,7 +397,7 @@ mod tests {
         let other = crate::auth::create_user(&conn, "b", "p", false).unwrap();
         let date: jiff::civil::Date = "2026-08-31".parse().unwrap();
         let mut t = tmpl();
-        t.events[0].flexibility = "slide".into();
+        t.events[0].flexibility = Some("slide".into());
         generate(&conn, uid, &t, date).unwrap();
         let ev_id = events_for(&conn, uid, date).unwrap()[0].id;
         assert!(shift(&conn, other, ev_id, 30).unwrap().is_none());

@@ -156,8 +156,8 @@ mod tests {
         let tmpl = crate::templates::Template {
             events: vec![crate::templates::TemplateEvent {
                 kind: "checkin_call".into(), time: "09:00".into(),
-                days: vec!["mon".into()], flexibility: "slide".into(),
-                slide_window_min: 60, channel: "voice".into(),
+                days: vec!["mon".into()], flexibility: Some("slide".into()),
+                slide_window_min: Some(60), channel: "voice".into(), ..Default::default()
             }],
         };
         // 2026-08-31 is a Monday; noon UTC = 21:00 JST same day

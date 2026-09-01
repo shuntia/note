@@ -12,13 +12,13 @@ fn setup() -> (rusqlite::Connection, tempfile::TempDir) {
         events: vec![
             note_server::templates::TemplateEvent {
                 kind: "nudge".into(), time: "09:00".into(),
-                days: vec!["mon".into()], flexibility: "drop".into(),
-                slide_window_min: 30, channel: "push".into(),
+                days: vec!["mon".into()], flexibility: Some("drop".into()),
+                slide_window_min: Some(30), channel: "push".into(), ..Default::default()
             },
             note_server::templates::TemplateEvent {
                 kind: "checkin_call".into(), time: "10:00".into(),
-                days: vec!["mon".into()], flexibility: "slide".into(),
-                slide_window_min: 30, channel: "voice".into(),
+                days: vec!["mon".into()], flexibility: Some("slide".into()),
+                slide_window_min: Some(30), channel: "voice".into(), ..Default::default()
             },
         ],
     };
