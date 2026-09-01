@@ -31,8 +31,14 @@ pub fn create(
 ) -> Result<serde_json::Value, ToolError> {
     let title = checked_title(&args.title)?;
     check_text("description", &args.description)?;
-    let task = crate::tasks::create(conn, ctx.user_id, title, "agent")
-        .map_err(|e| ToolError::internal(e.to_string()))?;
+    let task = crate::tasks::create(
+        conn,
+        ctx.user_id,
+        crate::tasks::NewTask { title: title.to_owned(), ..Default::default() },
+        "agent",
+        crate::tasks::DurationActor::Agent,
+    )
+    .map_err(|e| ToolError::internal(e.to_string()))?;
     if !args.description.is_empty() {
         crate::tasks::update(
             conn,
@@ -78,6 +84,8 @@ pub fn update(
         description: args.description,
         state: args.state,
         notes: args.notes,
+        duration_actor: crate::tasks::DurationActor::Agent,
+        ..Default::default()
     };
     match crate::tasks::update(conn, ctx.user_id, args.task_id, patch) {
         Ok(Some(t)) => Ok(serde_json::json!({ "task_id": t.id, "state": t.state })),
