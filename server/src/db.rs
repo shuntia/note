@@ -128,6 +128,14 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX idx_talk_messages_conv ON talk_messages(conversation_id, id);
     ",
+    // v6
+    "
+    ALTER TABLE tasks ADD COLUMN duration_min INTEGER
+        CHECK (duration_min IS NULL OR (duration_min > 0 AND duration_min % 5 = 0));
+    ALTER TABLE tasks ADD COLUMN duration_source TEXT NOT NULL DEFAULT 'none'
+        CHECK (duration_source IN ('user','agent','none'));
+    CREATE INDEX idx_tasks_parent ON tasks(parent_id);
+    ",
 ];
 
 pub fn open(path: &Path) -> Result<Connection> {
@@ -277,6 +285,39 @@ mod tests {
             .query_row("SELECT message FROM events WHERE id = 1", [], |r| r.get(0))
             .unwrap();
         assert_eq!(msg, "");
+    }
+
+    #[test]
+    fn v6_adds_duration_columns_with_five_minute_check() {
+        let conn = open_memory().unwrap();
+        conn.execute(
+            "INSERT INTO users (username, pass_hash, role) VALUES ('a','h','member')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tasks (user_id, title, created_at, updated_at)
+             VALUES (1, 't', 'now', 'now')",
+            [],
+        )
+        .unwrap();
+        let (dur, src): (Option<i64>, String) = conn
+            .query_row("SELECT duration_min, duration_source FROM tasks WHERE id = 1", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(dur, None);
+        assert_eq!(src, "none");
+        assert!(conn.execute("UPDATE tasks SET duration_min = 7 WHERE id = 1", []).is_err());
+        assert!(conn.execute("UPDATE tasks SET duration_min = 0 WHERE id = 1", []).is_err());
+        assert!(conn
+            .execute("UPDATE tasks SET duration_source = 'guess' WHERE id = 1", [])
+            .is_err());
+        conn.execute(
+            "UPDATE tasks SET duration_min = 20, duration_source = 'agent' WHERE id = 1",
+            [],
+        )
+        .unwrap();
     }
 
     #[test]
