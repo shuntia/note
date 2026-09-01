@@ -1,27 +1,60 @@
-import { useCallback, useEffect, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { api, ApiError } from '../api'
 import type { ViewProps } from '../app'
-import { SectionTitle } from '../section'
 import type { Debrief, PlanEvent } from '../types'
+
+const UNDO_MS = 5000
+const FOLD_KEY = 'note.debriefFolded'
+
+// Drop has no server-side reversal, so the request waits out the undo window before it
+// is sent. Module scope keeps the hold alive across the remounts a websocket nudge causes.
+let heldDrop: { id: number; timer: number } | null = null
 
 function nowWall(): string {
   const d = new Date()
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }
 
-function label(kind: string): string {
-  if (kind.includes('checkin')) return 'Check-in'
-  if (kind === 'debrief') return 'Morning debrief'
-  if (kind === 'nudge') return 'Nudge'
-  return kind.replaceAll('_', ' ')
+function minutesOf(wall: string): number {
+  const [h, m] = wall.split(':')
+  return Number(h) * 60 + Number(m)
 }
 
-const STATUS_WORD: Record<PlanEvent['status'], string> = {
-  pending: '',
-  fired: 'waiting on you',
-  snoozed: 'later',
-  done: 'done',
-  dropped: 'dropped',
+function label(kind: string): string {
+  if (kind === 'debrief') return 'Morning debrief'
+  const words = kind.replaceAll('_', ' ').replace('checkin', 'check-in').trim()
+  return words.charAt(0).toUpperCase() + words.slice(1)
+}
+
+function eyebrow(ev: PlanEvent, now: string): string {
+  if (ev.status === 'fired') return 'NOW'
+  const mins = minutesOf(ev.wall_time) - minutesOf(now)
+  if (mins <= 0) return 'UP NEXT'
+  if (mins < 90) return `UP NEXT · IN ${mins} MIN`
+  return `UP NEXT · IN ${Math.round(mins / 60)} HR`
+}
+
+function slideText(ev: PlanEvent): string {
+  if (ev.flexibility === 'fixed') return 'Happens at a fixed time'
+  if (ev.flexibility === 'drop') return 'Can be dropped if the day fills up'
+  return ev.slide_window_min > 0 ? `Can slide ±${ev.slide_window_min} min` : 'Can slide freely'
+}
+
+function reachText(channel: string): string {
+  if (channel === 'push') return 'reaches you as a push'
+  if (channel === 'voice') return 'reaches you as a call'
+  return ''
+}
+
+function metaLine(ev: PlanEvent): string {
+  return [slideText(ev), reachText(ev.channel)].filter(Boolean).join(' · ')
+}
+
+function flexTag(ev: PlanEvent): string {
+  if (ev.status === 'snoozed') return 'later'
+  if (ev.flexibility === 'fixed') return 'fixed'
+  if (ev.flexibility === 'drop') return 'droppable'
+  return ev.slide_window_min > 0 ? `±${ev.slide_window_min} min` : 'flexible'
 }
 
 function actionMessage(err: unknown): string {
@@ -31,6 +64,13 @@ function actionMessage(err: unknown): string {
     if (err.status === 404) return 'That event is gone.'
   }
   return 'Something went wrong. Try again.'
+}
+
+// The fired event owns Now; failing that, the next one still open does.
+function currentIndex(events: PlanEvent[]): number {
+  const fired = events.findIndex((ev) => ev.status === 'fired')
+  if (fired !== -1) return fired
+  return events.findIndex((ev) => ev.status === 'pending' || ev.status === 'snoozed')
 }
 
 export function Today({ notify }: ViewProps) {
@@ -53,9 +93,20 @@ export function Today({ notify }: ViewProps) {
     load()
   }, [load])
 
+  // Landing on the minute boundary keeps the Now label and the card's countdown honest.
   useEffect(() => {
-    const id = window.setInterval(() => tick((n) => n + 1), 60_000)
-    return () => window.clearInterval(id)
+    let timer = 0
+    const schedule = () => {
+      timer = window.setTimeout(
+        () => {
+          tick((n) => n + 1)
+          schedule()
+        },
+        60_000 - (Date.now() % 60_000) + 50,
+      )
+    }
+    schedule()
+    return () => window.clearTimeout(timer)
   }, [])
 
   // Event routes are relative operations, so a second tap before the first lands compounds it.
@@ -73,26 +124,56 @@ export function Today({ notify }: ViewProps) {
     }
   }
 
+  const commitDrop = useCallback(() => {
+    if (!heldDrop) return
+    const { id, timer } = heldDrop
+    heldDrop = null
+    window.clearTimeout(timer)
+    api
+      .eventAction(id, 'drop')
+      .then(load)
+      .catch(() => load())
+  }, [load])
+
+  useEffect(() => commitDrop, [commitDrop])
+
+  const drop = (ev: PlanEvent) => {
+    commitDrop()
+    heldDrop = { id: ev.id, timer: window.setTimeout(commitDrop, UNDO_MS) }
+    tick((n) => n + 1)
+    notify(`Dropped "${label(ev.kind)}" — moved off today`, {
+      label: 'Undo',
+      run: () => {
+        if (heldDrop?.id !== ev.id) return
+        window.clearTimeout(heldDrop.timer)
+        heldDrop = null
+        tick((n) => n + 1)
+      },
+    })
+  }
+
+  const visible = events?.filter((ev) => ev.id !== heldDrop?.id) ?? null
+
   return (
     <div className="page today">
-      <section className="today-plan">
-        <SectionTitle>Plan</SectionTitle>
-        {failed ? (
-          <p className="muted">
-            Couldn't load today's plan.{' '}
-            <button className="quiet" onClick={load}>
-              Retry
-            </button>
+      <DebriefFold />
+      {failed ? (
+        <p className="muted">
+          Couldn't load today's plan.{' '}
+          <button className="quiet" onClick={load}>
+            Retry
+          </button>
+        </p>
+      ) : visible === null ? null : visible.length === 0 ? (
+        <p className="muted">Nothing planned today.</p>
+      ) : (
+        <>
+          <ul className="spine">{spine(visible, act, drop, pending)}</ul>
+          <p className="today-tomorrow">
+            Tomorrow's plan arrives overnight — nothing for you to set up.
           </p>
-        ) : events === null ? null : events.length === 0 ? (
-          <p className="muted">Nothing planned today.</p>
-        ) : (
-          <ul className="spine">{spine(events, act, pending)}</ul>
-        )}
-      </section>
-      <aside className="today-aside">
-        <DebriefCard />
-      </aside>
+        </>
+      )}
     </div>
   )
 }
@@ -100,133 +181,257 @@ export function Today({ notify }: ViewProps) {
 function spine(
   events: PlanEvent[],
   act: (fn: () => Promise<void>) => Promise<void>,
+  drop: (ev: PlanEvent) => void,
   pending: boolean,
 ): ReactNode[] {
   const now = nowWall()
+  const current = currentIndex(events)
   const rows: ReactNode[] = []
-  let markerPlaced = false
-  for (const ev of events) {
-    if (!markerPlaced && ev.wall_time > now) {
-      rows.push(<NowMarker key="now" now={now} />)
-      markerPlaced = true
+  events.forEach((ev, i) => {
+    if (i === current) {
+      rows.push(<NowLine key="now" now={now} />)
+      rows.push(<NowCard key={ev.id} ev={ev} now={now} act={act} drop={drop} pending={pending} />)
+      return
     }
+    rows.push(<EventRow key={ev.id} ev={ev} />)
+  })
+  if (current === -1) {
+    rows.push(<NowLine key="now" now={now} />)
     rows.push(
-      <EventRow key={ev.id} ev={ev} past={ev.wall_time <= now} act={act} pending={pending} />,
+      <li key="clear" className="today-clear">
+        That's everything today.
+      </li>,
     )
   }
-  if (!markerPlaced) rows.push(<NowMarker key="now" now={now} />)
   return rows
 }
 
-function NowMarker({ now }: { now: string }) {
+function NowLine({ now }: { now: string }) {
   return (
-    <li className="now-marker" aria-label={`current time ${now}`}>
-      <span className="time">{now}</span>
-      <span className="rule" />
+    <li className="now-line">
+      <span className="now-rule" aria-hidden="true" />
+      <span className="now-dot" aria-hidden="true" />
+      <span className="now-label">NOW · {now}</span>
     </li>
   )
 }
 
-function EventRow({
-  ev,
-  past,
-  act,
-  pending,
-}: {
-  ev: PlanEvent
-  past: boolean
-  act: (fn: () => Promise<void>) => Promise<void>
-  pending: boolean
-}) {
-  const settled = ev.status === 'done' || ev.status === 'dropped'
+function EventRow({ ev }: { ev: PlanEvent }) {
+  const state = ev.status === 'done' ? 'done' : ev.status === 'dropped' ? 'dropped' : ''
+  const tag = state === 'dropped' ? 'dropped' : state === 'done' ? '' : flexTag(ev)
   return (
-    <li className={past ? 'past' : ''}>
-      <span className="time">{ev.wall_time}</span>
-      <div className="card event-card">
-        <div className="event-head">
-          <span className="event-kind">{label(ev.kind)}</span>
-          {ev.status !== 'pending' && (
-            <span className={`event-status ${ev.status}`}>{STATUS_WORD[ev.status]}</span>
-          )}
-        </div>
-        {!settled && (
-          <div className="event-actions">
-            <button
-              className="ghost"
-              disabled={pending}
-              onClick={() => act(() => api.eventAction(ev.id, 'done'))}
-            >
-              Done
-            </button>
-            <button
-              className="ghost"
-              disabled={pending}
-              onClick={() => act(() => api.snooze(ev.id, 30))}
-            >
-              Later
-            </button>
-            {ev.flexibility !== 'fixed' && (
-              <>
-                <button
-                  className="ghost"
-                  disabled={pending}
-                  onClick={() => act(() => api.shift(ev.id, 15))}
-                >
-                  +15
-                </button>
-                <button
-                  className="ghost"
-                  disabled={pending}
-                  onClick={() => act(() => api.shift(ev.id, -15))}
-                >
-                  −15
-                </button>
-              </>
-            )}
-            <button
-              className="ghost danger"
-              disabled={pending}
-              onClick={() => act(() => api.eventAction(ev.id, 'drop'))}
-            >
-              Drop
-            </button>
-          </div>
+    <li className={`ev ${state}`}>
+      <span className="ev-time">{ev.wall_time}</span>
+      <span className="ev-dot" aria-hidden="true" />
+      <div className="ev-row">
+        {state === 'done' && (
+          <span className="ev-check" aria-hidden="true">
+            ✓
+          </span>
         )}
+        <span className="ev-name">{label(ev.kind)}</span>
+        <span className="ev-tag">{tag}</span>
       </div>
     </li>
   )
 }
 
-function DebriefCard() {
+function NowCard({
+  ev,
+  now,
+  act,
+  drop,
+  pending,
+}: {
+  ev: PlanEvent
+  now: string
+  act: (fn: () => Promise<void>) => Promise<void>
+  drop: (ev: PlanEvent) => void
+  pending: boolean
+}) {
+  return (
+    <li className="ev now">
+      <span className="ev-time">{ev.wall_time}</span>
+      <div className="nowcard">
+        <Overflow onDrop={() => drop(ev)} disabled={pending} />
+        <div className="nowcard-eyebrow">{eyebrow(ev, now)}</div>
+        <h2 className="nowcard-title">{label(ev.kind)}</h2>
+        <p className="nowcard-meta">{metaLine(ev)}</p>
+        <div className="nowcard-actions">
+          <button
+            className="btn-primary"
+            disabled={pending}
+            onClick={() => act(() => api.eventAction(ev.id, 'done'))}
+          >
+            Done
+          </button>
+          <button
+            className="btn-outline"
+            disabled={pending}
+            onClick={() => act(() => api.snooze(ev.id, 30))}
+          >
+            Later
+          </button>
+          <span className="actions-spacer" />
+          {ev.flexibility !== 'fixed' && (
+            <>
+              <button
+                className="btn-chip"
+                disabled={pending}
+                onClick={() => act(() => api.shift(ev.id, -15))}
+              >
+                −15
+              </button>
+              <button
+                className="btn-chip"
+                disabled={pending}
+                onClick={() => act(() => api.shift(ev.id, 15))}
+              >
+                +15
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+    </li>
+  )
+}
+
+function Overflow({ onDrop, disabled }: { onDrop: () => void; disabled: boolean }) {
+  const [open, setOpen] = useState(false)
+  const wrap = useRef<HTMLDivElement>(null)
+  const trigger = useRef<HTMLButtonElement>(null)
+  const item = useRef<HTMLButtonElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    item.current?.focus()
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      setOpen(false)
+      trigger.current?.focus()
+    }
+    const onDown = (e: MouseEvent) => {
+      if (!wrap.current?.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('keydown', onKey)
+    document.addEventListener('mousedown', onDown)
+    return () => {
+      document.removeEventListener('keydown', onKey)
+      document.removeEventListener('mousedown', onDown)
+    }
+  }, [open])
+
+  return (
+    <div className="ev-more-wrap" ref={wrap}>
+      <button
+        className="ev-more"
+        ref={trigger}
+        aria-label="More actions"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+      >
+        ⋯
+      </button>
+      {open && (
+        <div className="ev-menu" role="menu">
+          <button
+            className="ev-menu-item"
+            role="menuitem"
+            ref={item}
+            disabled={disabled}
+            onBlur={() => setOpen(false)}
+            onClick={() => {
+              setOpen(false)
+              onDrop()
+            }}
+          >
+            Drop
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function readFold(date: string): boolean {
+  try {
+    const raw = localStorage.getItem(FOLD_KEY)
+    if (!raw) return true
+    const saved = JSON.parse(raw) as { date?: string; folded?: boolean }
+    return saved.date === date ? saved.folded !== false : true
+  } catch {
+    return true
+  }
+}
+
+function writeFold(date: string, folded: boolean) {
+  try {
+    localStorage.setItem(FOLD_KEY, JSON.stringify({ date, folded }))
+  } catch {
+    // storage blocked; the fold still holds for this session
+  }
+}
+
+// The trailing full stop gives way to the ellipsis rather than stacking with it.
+function firstSentence(text: string): string {
+  const trimmed = text.trim()
+  const match = /^[\s\S]*?[.!?](?=\s|$)/.exec(trimmed)
+  const lead = match ? match[0] : trimmed
+  if (lead.length === trimmed.length) return lead
+  return `${lead.replace(/\.$/, '')}…`
+}
+
+function DebriefFold() {
   const [debrief, setDebrief] = useState<Debrief | null | 'error' | undefined>(undefined)
+  const [folded, setFolded] = useState(true)
 
   const load = () => {
     setDebrief(undefined)
     api
       .debrief()
-      .then(setDebrief)
+      .then((d) => {
+        setDebrief(d)
+        setFolded(readFold(d.date))
+      })
       .catch((err) => setDebrief(err instanceof ApiError && err.status === 404 ? null : 'error'))
   }
   useEffect(load, [])
 
-  const date = debrief && debrief !== 'error' ? debrief.date : undefined
+  if (debrief === undefined) return null
+  if (debrief === null) {
+    return <p className="debrief-note muted">No letter yet — it arrives overnight.</p>
+  }
+  if (debrief === 'error') {
+    return (
+      <p className="debrief-note muted">
+        The morning letter didn't load.{' '}
+        <button className="quiet" onClick={load}>
+          Retry
+        </button>
+      </p>
+    )
+  }
+
+  const toggle = () => {
+    const next = !folded
+    setFolded(next)
+    writeFold(debrief.date, next)
+  }
+
   return (
-    <section className="card debrief">
-      <SectionTitle meta={date}>Debrief</SectionTitle>
-      {debrief === undefined ? (
-        <p className="muted">Loading…</p>
-      ) : debrief === null ? (
-        <p className="muted">No debrief yet — it arrives overnight.</p>
-      ) : debrief === 'error' ? (
-        <p className="muted">
-          The debrief didn't load.{' '}
-          <button className="quiet" onClick={load}>
-            Retry
-          </button>
-        </p>
-      ) : (
-        <div className="letter">{debrief.content}</div>
-      )}
+    <section className="debrief-row">
+      <button className="debrief-fold" aria-expanded={!folded} onClick={toggle}>
+        <span aria-hidden="true">☀︎</span>
+        <span className="debrief-lead">
+          <b>This morning:</b> {folded ? firstSentence(debrief.content) : ''}
+        </span>
+        <span className="debrief-chev" aria-hidden="true">
+          {folded ? '▾' : '▴'}
+        </span>
+      </button>
+      {!folded && <div className="letter">{debrief.content}</div>}
     </section>
   )
 }

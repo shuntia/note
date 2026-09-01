@@ -10,9 +10,11 @@ import { connectEvents } from './ws'
 
 type Tab = 'today' | 'tasks' | 'chat' | 'memory' | 'settings'
 
+export type ToastAction = { label: string; run: () => void }
+
 // `refresh` is a counter views key on or depend on to refetch; `onChanged` bumps it.
 export type ViewProps = {
-  notify: (msg: string) => void
+  notify: (msg: string, action?: ToastAction) => void
   refresh: number
   onChanged: () => void
 }
@@ -29,14 +31,15 @@ export function App() {
   // undefined = session check in flight; null = signed out
   const [me, setMe] = useState<Me | null | undefined>(undefined)
   const [tab, setTab] = useState<Tab>('today')
-  const [toast, setToast] = useState<string | null>(null)
+  const [toast, setToast] = useState<{ msg: string; action?: ToastAction } | null>(null)
   const [refresh, setRefresh] = useState(0)
 
   const toastTimer = useRef(0)
-  const notify = useCallback((msg: string) => {
-    setToast(msg)
+  // An undo toast has to outlast the window its action holds itself open for.
+  const notify = useCallback((msg: string, action?: ToastAction) => {
+    setToast({ msg, action })
     window.clearTimeout(toastTimer.current)
-    toastTimer.current = window.setTimeout(() => setToast(null), 4000)
+    toastTimer.current = window.setTimeout(() => setToast(null), action ? 5000 : 4000)
   }, [])
 
   const onChanged = useCallback(() => setRefresh((n) => n + 1), [])
@@ -113,7 +116,22 @@ export function App() {
           </button>
         ))}
       </nav>
-      {toast && <div className="toast" role="status">{toast}</div>}
+      {toast && (
+        <div className="toast" role="status">
+          <span className="toast-msg">{toast.msg}</span>
+          {toast.action && (
+            <button
+              className="toast-action"
+              onClick={() => {
+                toast.action?.run()
+                setToast(null)
+              }}
+            >
+              {toast.action.label}
+            </button>
+          )}
+        </div>
+      )}
     </div>
   )
 }
