@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { api, ApiError, setOnUnauthorized } from './api'
+import { NavIcon } from './navicon'
 import { readSession, writeSession, type FocusSession } from './session'
 import type { Me } from './types'
 import { Memory } from './views/Memory'
@@ -151,6 +152,7 @@ export function App() {
               aria-current={tab === t.id}
               onClick={() => setTab(t.id)}
             >
+              <NavIcon id={t.id} />
               {t.label}
             </button>
           ))}
@@ -178,6 +180,7 @@ export function App() {
       <nav className="tabs" aria-label="Views">
         {NAV.map((t) => (
           <button key={t.id} aria-current={tab === t.id} onClick={() => setTab(t.id)}>
+            <NavIcon id={t.id} />
             {t.label}
           </button>
         ))}
