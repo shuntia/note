@@ -3,6 +3,7 @@ import { api, ApiError } from '../api'
 import type { ViewProps } from '../app'
 import { Overflow } from '../overflow'
 import { eventLabel } from '../receipts'
+import type { FocusSession } from '../session'
 import type { Debrief, PlanEvent } from '../types'
 
 const UNDO_MS = 5000
@@ -69,7 +70,7 @@ function currentIndex(events: PlanEvent[]): number {
   return events.findIndex((ev) => ev.status === 'pending' || ev.status === 'snoozed')
 }
 
-export function Today({ notify }: ViewProps) {
+export function Today({ notify, openNow }: ViewProps) {
   const [events, setEvents] = useState<PlanEvent[] | null>(null)
   const [failed, setFailed] = useState(false)
   const [pending, setPending] = useState(false)
@@ -164,7 +165,7 @@ export function Today({ notify }: ViewProps) {
         <p className="muted">Nothing planned today.</p>
       ) : (
         <>
-          <ul className="spine">{spine(visible, act, drop, pending)}</ul>
+          <ul className="spine">{spine(visible, act, drop, pending, openNow)}</ul>
           <p className="today-tomorrow">
             Tomorrow's plan arrives overnight — nothing for you to set up.
           </p>
@@ -179,6 +180,7 @@ function spine(
   act: (fn: () => Promise<void>) => Promise<void>,
   drop: (ev: PlanEvent) => void,
   pending: boolean,
+  openNow: (session: FocusSession) => void,
 ): ReactNode[] {
   const now = nowWall()
   const current = currentIndex(events)
@@ -186,7 +188,17 @@ function spine(
   events.forEach((ev, i) => {
     if (i === current) {
       rows.push(<NowLine key="now" now={now} />)
-      rows.push(<NowCard key={ev.id} ev={ev} now={now} act={act} drop={drop} pending={pending} />)
+      rows.push(
+        <NowCard
+          key={ev.id}
+          ev={ev}
+          now={now}
+          act={act}
+          drop={drop}
+          pending={pending}
+          openNow={openNow}
+        />,
+      )
       return
     }
     rows.push(<EventRow key={ev.id} ev={ev} />)
@@ -238,12 +250,14 @@ function NowCard({
   act,
   drop,
   pending,
+  openNow,
 }: {
   ev: PlanEvent
   now: string
   act: (fn: () => Promise<void>) => Promise<void>
   drop: (ev: PlanEvent) => void
   pending: boolean
+  openNow: (session: FocusSession) => void
 }) {
   return (
     <li className="ev now">
@@ -254,7 +268,28 @@ function NowCard({
           items={[{ label: 'Drop', run: () => drop(ev), disabled: pending }]}
         />
         <div className="nowcard-eyebrow">{eyebrow(ev, now)}</div>
-        <h2 className="nowcard-title">{eventLabel(ev.kind)}</h2>
+        <h2 className="nowcard-title">
+          <button
+            className="nowcard-open"
+            onClick={() =>
+              openNow({
+                taskId: null,
+                eventId: ev.id,
+                title: eventLabel(ev.kind),
+                notes: '',
+                stepIndex: null,
+                stepCount: null,
+                stepName: null,
+                durationSec: null,
+                startedAt: Date.now(),
+                pausedAt: null,
+                pausedMs: 0,
+              })
+            }
+          >
+            {eventLabel(ev.kind)}
+          </button>
+        </h2>
         <p className="nowcard-meta">{metaLine(ev)}</p>
         <div className="nowcard-actions">
           <button

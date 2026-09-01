@@ -3,6 +3,7 @@ import { api, ApiError } from '../api'
 import type { ViewProps } from '../app'
 import { disablePush, enablePush, pushState } from '../push'
 import { SectionTitle } from '../section'
+import { readCounterMode, writeCounterMode, type CounterMode } from '../session'
 import { applyTheme, saveTheme, storedTheme, type ThemeChoice } from '../theme'
 import type { LogRow, Me, PromptDoc, PromptName, Settings as UserSettings } from '../types'
 
@@ -552,13 +553,24 @@ const THEMES: { id: ThemeChoice; label: string }[] = [
   { id: 'dark', label: 'Dark' },
 ]
 
+const COUNTERS: { id: CounterMode; label: string }[] = [
+  { id: 'elapsed', label: 'Elapsed' },
+  { id: 'remaining', label: 'Remaining' },
+]
+
 function AppearanceSection() {
   const [theme, setTheme] = useState<ThemeChoice>(storedTheme)
+  const [counter, setCounter] = useState<CounterMode>(readCounterMode)
 
   const choose = (choice: ThemeChoice) => {
     setTheme(choice)
     applyTheme(choice)
     saveTheme(choice)
+  }
+
+  const chooseCounter = (choice: CounterMode) => {
+    setCounter(choice)
+    writeCounterMode(choice)
   }
 
   return (
@@ -582,6 +594,24 @@ function AppearanceSection() {
             ))}
           </div>
           <p className="pane-hint">System follows whatever your device is set to right now.</p>
+        </div>
+        <div className="pane-row">
+          <span className="pane-label" id="counter-label">
+            Focus timer shows
+          </span>
+          <div className="seg" role="group" aria-labelledby="counter-label">
+            {COUNTERS.map((c) => (
+              <button
+                key={c.id}
+                type="button"
+                aria-pressed={counter === c.id}
+                onClick={() => chooseCounter(c.id)}
+              >
+                {c.label}
+              </button>
+            ))}
+          </div>
+          <p className="pane-hint">The big number on the Now screen counts up, or counts down.</p>
         </div>
       </div>
     </section>

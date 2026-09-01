@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { api, ApiError, setOnUnauthorized } from './api'
+import { readSession, writeSession, type FocusSession } from './session'
 import type { Me } from './types'
 import { Memory } from './views/Memory'
+import { Now } from './views/Now'
 import { Settings } from './views/Settings'
 import { Talk } from './views/Talk'
 import { Tasks } from './views/Tasks'
@@ -27,6 +29,8 @@ export type ViewProps = {
   onChanged: () => void
   // Switches to Talk on a new conversation with this text waiting in the composer.
   openTalk: (draft: string) => void
+  // Hands the shell over to the Now screen for the length of a focus session.
+  openNow: (session: FocusSession) => void
 }
 
 const NAV: { id: Tab; label: string }[] = [
@@ -44,6 +48,8 @@ export function App() {
   const [toast, setToast] = useState<{ msg: string; action?: ToastAction } | null>(null)
   const [refresh, setRefresh] = useState(0)
   const [talkPrefill, setTalkPrefill] = useState<string | null>(null)
+  // Reading storage at mount is what makes the Now screen the resting face after a reload.
+  const [session, setSession] = useState<FocusSession | null>(readSession)
 
   const toastTimer = useRef(0)
   const notify = useCallback((msg: string, action?: ToastAction) => {
@@ -60,6 +66,11 @@ export function App() {
   const openTalk = useCallback((draft: string) => {
     setTalkPrefill(draft)
     setTab('chat')
+  }, [])
+
+  const changeSession = useCallback((next: FocusSession | null) => {
+    setSession(next)
+    writeSession(next)
   }, [])
 
   useEffect(() => {
@@ -84,7 +95,41 @@ export function App() {
   if (me === undefined) return null
   if (me === null) return <Login onSignedIn={setMe} />
 
-  const views: ViewProps = { notify, refresh, onChanged, openTalk }
+  const views: ViewProps = { notify, refresh, onChanged, openTalk, openNow: changeSession }
+
+  const toastNode = toast && (
+    <div className="toast" role="status">
+      <span className="toast-msg">{toast.msg}</span>
+      {toast.action && (
+        <button
+          className="toast-action"
+          onClick={() => {
+            toast.action?.run()
+            setToast(null)
+          }}
+        >
+          {toast.action.label}
+        </button>
+      )}
+    </div>
+  )
+
+  // The Now screen is a full-bleed focus surface: none of the shell's chrome
+  // mounts around it, so its keys never contend with the capture shortcut.
+  if (session) {
+    return (
+      <>
+        <Now
+          session={session}
+          setSession={changeSession}
+          notify={notify}
+          onChanged={onChanged}
+          onLeave={() => setTab('today')}
+        />
+        {toastNode}
+      </>
+    )
+  }
 
   return (
     <div className="shell">
@@ -137,22 +182,7 @@ export function App() {
           </button>
         ))}
       </nav>
-      {toast && (
-        <div className="toast" role="status">
-          <span className="toast-msg">{toast.msg}</span>
-          {toast.action && (
-            <button
-              className="toast-action"
-              onClick={() => {
-                toast.action?.run()
-                setToast(null)
-              }}
-            >
-              {toast.action.label}
-            </button>
-          )}
-        </div>
-      )}
+      {toastNode}
     </div>
   )
 }
