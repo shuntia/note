@@ -341,6 +341,19 @@ async fn is_now_round_trips_through_create_patch_and_list() {
 }
 
 #[tokio::test]
+async fn tasks_carry_the_time_they_last_changed() {
+    let (app, cookie, _tmp) = app_with_user().await;
+    let (_, t) = post(&app, &cookie, "/api/tasks", r#"{"title":"call dentist"}"#).await;
+    let created = t["updated_at"].as_str().unwrap().to_string();
+    assert!(created.parse::<jiff::Timestamp>().is_ok(), "not a timestamp: {created}");
+
+    let (_, t) = patch_task(&app, &cookie, 1, r#"{"state":"done"}"#).await;
+    let done = t["updated_at"].as_str().unwrap();
+    assert!(done >= created.as_str(), "finishing a task did not move its timestamp");
+    assert_eq!(list(&app, &cookie).await[0]["updated_at"], done);
+}
+
+#[tokio::test]
 async fn a_fourth_task_is_refused_entry_to_now() {
     let (app, cookie, _tmp) = app_with_user().await;
     for title in ["a", "b", "c", "d"] {
