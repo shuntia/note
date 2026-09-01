@@ -316,6 +316,121 @@ async fn flatten_removes_every_step_in_one_call_and_hands_them_back() {
 }
 
 #[tokio::test]
+async fn is_now_round_trips_through_create_patch_and_list() {
+    let (app, cookie, _tmp) = app_with_user().await;
+    let (status, t) = post(&app, &cookie, "/api/tasks", r#"{"title":"call dentist"}"#).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(t["is_now"], false, "a new task lands in Later");
+
+    let (status, t) = patch_task(&app, &cookie, 1, r#"{"is_now":true}"#).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(t["is_now"], true);
+    assert_eq!(list(&app, &cookie).await[0]["is_now"], true, "the flag survives a reload");
+
+    let (_, t) = patch_task(&app, &cookie, 1, r#"{"is_now":false}"#).await;
+    assert_eq!(t["is_now"], false);
+
+    // an unrelated patch leaves the flag alone
+    patch_task(&app, &cookie, 1, r#"{"is_now":true}"#).await;
+    let (_, t) = patch_task(&app, &cookie, 1, r#"{"notes":"ring at 9"}"#).await;
+    assert_eq!(t["is_now"], true);
+
+    let (_, t) =
+        post(&app, &cookie, "/api/tasks", r#"{"title":"refill meds","is_now":true}"#).await;
+    assert_eq!(t["is_now"], true);
+}
+
+#[tokio::test]
+async fn a_fourth_task_is_refused_entry_to_now() {
+    let (app, cookie, _tmp) = app_with_user().await;
+    for title in ["a", "b", "c", "d"] {
+        post(&app, &cookie, "/api/tasks", &format!(r#"{{"title":"{title}"}}"#)).await;
+    }
+    for id in 1..=3 {
+        let (status, _) = patch_task(&app, &cookie, id, r#"{"is_now":true}"#).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    let (status, body) = patch_task(&app, &cookie, 4, r#"{"is_now":true}"#).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(body["error"].as_str().unwrap().contains("Now"));
+    let v = list(&app, &cookie).await;
+    assert_eq!(v[3]["is_now"], false, "the refused task did not move");
+    assert_eq!(v[0]["is_now"], true, "and nothing already in Now was displaced");
+
+    let (status, _) = post(&app, &cookie, "/api/tasks", r#"{"title":"e","is_now":true}"#).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    // re-asserting the flag on a task already in Now is not a fourth
+    let (status, _) = patch_task(&app, &cookie, 1, r#"{"is_now":true}"#).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // finishing one frees its slot without clearing its flag
+    patch_task(&app, &cookie, 1, r#"{"state":"done"}"#).await;
+    let (status, t) = patch_task(&app, &cookie, 4, r#"{"is_now":true}"#).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(t["is_now"], true);
+    let v = list(&app, &cookie).await;
+    assert_eq!(v[0]["is_now"], true, "undo must find the done task still in Now");
+    assert_eq!(v[0]["state"], "done");
+}
+
+#[tokio::test]
+async fn reopening_a_done_now_task_demotes_the_newest_instead_of_failing() {
+    let (app, cookie, _tmp) = app_with_user().await;
+    for title in ["a", "b", "c", "d"] {
+        post(&app, &cookie, "/api/tasks", &format!(r#"{{"title":"{title}","is_now":true}}"#)).await;
+        // the fourth would be refused, so free a slot first
+        if title == "c" {
+            patch_task(&app, &cookie, 1, r#"{"state":"done"}"#).await;
+        }
+    }
+    let (status, t) = patch_task(&app, &cookie, 1, r#"{"state":"open"}"#).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(t["is_now"], true, "undo restores the task to its old group");
+    assert_eq!(t["demoted_from_now"][0], 4, "the newest fell back to Later");
+    let v = list(&app, &cookie).await;
+    let live_now = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|t| t["is_now"] == true && t["state"] != "done")
+        .count();
+    assert_eq!(live_now, 3);
+    assert_eq!(v[3]["is_now"], false);
+}
+
+#[tokio::test]
+async fn a_step_can_never_be_in_now() {
+    let (app, cookie, _tmp) = app_with_user().await;
+    post(&app, &cookie, "/api/tasks", r#"{"title":"email landlord"}"#).await;
+    let (status, step) =
+        post(&app, &cookie, "/api/tasks", r#"{"title":"find the thread","parent_id":1}"#).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(step["is_now"], false);
+
+    let (status, _) = patch_task(&app, &cookie, 2, r#"{"is_now":true}"#).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let (status, _) = post(
+        &app,
+        &cookie,
+        "/api/tasks",
+        r#"{"title":"another step","parent_id":1,"is_now":true}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+    // a task in Now that becomes a step leaves Now with the move
+    post(&app, &cookie, "/api/tasks", r#"{"title":"loose","is_now":true}"#).await;
+    let (status, t) = patch_task(&app, &cookie, 3, r#"{"parent_id":1}"#).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(t["is_now"], false);
+    assert_eq!(t["parent_id"], 1);
+
+    let v = list(&app, &cookie).await;
+    assert_eq!(v[0]["children"][0]["is_now"], false);
+}
+
+#[tokio::test]
 async fn create_list_update_task() {
     let conn = db::open_memory().unwrap();
     auth::create_user(&conn, "aki", "pw", false).unwrap();
