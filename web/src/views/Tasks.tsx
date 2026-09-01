@@ -101,7 +101,7 @@ type RowActions = {
   startFocus: (node: TaskNode) => void
 }
 
-export function Tasks({ notify, refresh }: ViewProps) {
+export function Tasks({ notify, refresh, openNow }: ViewProps) {
   const [nodes, setNodes] = useState<TaskNode[] | null>(null)
   const [failed, setFailed] = useState(false)
   const [title, setTitle] = useState('')
@@ -214,10 +214,22 @@ export function Tasks({ notify, refresh }: ViewProps) {
     })
   }
 
-  // Until the Now screen lands, starting a task does the one thing that screen
-  // would change here.
   const startFocus = (node: TaskNode) => {
-    if (node.state !== 'in_progress') setProgress(node, true)
+    const target = focusTarget(node)
+    const index = node.children.findIndex((c) => c.id === target.id)
+    openNow({
+      taskId: target.id,
+      eventId: null,
+      title: node.title,
+      notes: target.notes,
+      stepIndex: index === -1 ? null : index + 1,
+      stepCount: index === -1 ? null : node.children.length,
+      stepName: index === -1 ? null : target.title,
+      durationSec: target.duration_min === null ? null : round5(target.duration_min) * 60,
+      startedAt: Date.now(),
+      pausedAt: null,
+      pausedMs: 0,
+    })
   }
 
   const add = (e: FormEvent) => {

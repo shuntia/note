@@ -25,7 +25,7 @@ type SettingsPatch = Partial<Pick<Settings, (typeof WRITABLE_SETTINGS)[number]>>
 
 type NewTaskOpts = { duration_min?: number; parent_id?: number; is_now?: boolean }
 
-type TaskPatch = { state?: TaskState; is_now?: boolean }
+type TaskPatch = { state?: TaskState; is_now?: boolean; notes?: string }
 
 export class ApiError extends Error {
   constructor(
