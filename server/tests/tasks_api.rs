@@ -172,6 +172,76 @@ async fn list_nests_children_under_their_parent() {
 }
 
 #[tokio::test]
+async fn completing_the_last_step_completes_the_parent() {
+    let (app, cookie, _tmp) = app_with_user().await;
+    post(&app, &cookie, "/api/tasks", r#"{"title":"email landlord"}"#).await;
+    post(
+        &app,
+        &cookie,
+        "/api/tasks",
+        r#"{"title":"find the thread","parent_id":1,"duration_min":5}"#,
+    )
+    .await;
+    post(
+        &app,
+        &cookie,
+        "/api/tasks",
+        r#"{"title":"write and send","parent_id":1,"duration_min":10}"#,
+    )
+    .await;
+
+    let (_, t) = patch_task(&app, &cookie, 2, r#"{"state":"done"}"#).await;
+    assert_eq!(t["state"], "done");
+    assert!(t.get("parent").is_none(), "parent must not change while a step is open");
+
+    let (_, t) = patch_task(&app, &cookie, 3, r#"{"state":"done"}"#).await;
+    assert_eq!(t["parent"]["id"], 1);
+    assert_eq!(t["parent"]["state"], "done");
+    let v = list(&app, &cookie).await;
+    assert_eq!(v[0]["state"], "done");
+
+    let (_, t) = patch_task(&app, &cookie, 3, r#"{"state":"open"}"#).await;
+    assert_eq!(t["parent"]["state"], "in_progress");
+
+    // the cascade only ever takes `done` back off a parent; a parent already
+    // under way stays under way
+    patch_task(&app, &cookie, 2, r#"{"state":"open"}"#).await;
+    let v = list(&app, &cookie).await;
+    assert_eq!(v[0]["state"], "in_progress");
+}
+
+#[tokio::test]
+async fn completing_a_parent_completes_its_steps_and_dropping_drops_them() {
+    let (app, cookie, _tmp) = app_with_user().await;
+    post(&app, &cookie, "/api/tasks", r#"{"title":"email landlord"}"#).await;
+    post(
+        &app,
+        &cookie,
+        "/api/tasks",
+        r#"{"title":"find the thread","parent_id":1,"duration_min":5}"#,
+    )
+    .await;
+    post(
+        &app,
+        &cookie,
+        "/api/tasks",
+        r#"{"title":"write and send","parent_id":1,"duration_min":10}"#,
+    )
+    .await;
+
+    patch_task(&app, &cookie, 1, r#"{"state":"done"}"#).await;
+    let v = list(&app, &cookie).await;
+    assert_eq!(v[0]["children"][0]["state"], "done");
+    assert_eq!(v[0]["children"][1]["state"], "done");
+
+    patch_task(&app, &cookie, 1, r#"{"state":"dropped"}"#).await;
+    let v = list(&app, &cookie).await;
+    assert_eq!(v.as_array().unwrap().len(), 0);
+    let (_, t) = patch_task(&app, &cookie, 2, r#"{"notes":"x"}"#).await;
+    assert_eq!(t["state"], "dropped");
+}
+
+#[tokio::test]
 async fn create_list_update_task() {
     let conn = db::open_memory().unwrap();
     auth::create_user(&conn, "aki", "pw", false).unwrap();

@@ -88,7 +88,7 @@ pub fn update(
         ..Default::default()
     };
     match crate::tasks::update(conn, ctx.user_id, args.task_id, patch) {
-        Ok(Some(t)) => Ok(serde_json::json!({ "task_id": t.id, "state": t.state })),
+        Ok(Some(t)) => Ok(serde_json::json!({ "task_id": t.task.id, "state": t.task.state })),
         Ok(None) => Err(ToolError::not_found(format!("no task {}", args.task_id))),
         Err(crate::tasks::UpdateError::InvalidState(s)) => {
             Err(ToolError::rejected(format!("invalid state: {s}")))

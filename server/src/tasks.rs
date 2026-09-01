@@ -214,13 +214,73 @@ pub fn list(conn: &Connection, user_id: i64) -> rusqlite::Result<Vec<TaskNode>> 
         .collect()
 }
 
+/// A patched task, plus its parent when finishing or reopening this step also
+/// moved the parent, so the client needs no second round trip.
+#[derive(Debug, Serialize)]
+pub struct Updated {
+    #[serde(flatten)]
+    pub task: Task,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent: Option<Task>,
+}
+
+fn set_state(conn: &Connection, task_id: i64, state: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE tasks SET state = ?1, updated_at = ?2 WHERE id = ?3",
+        (state, now(), task_id),
+    )?;
+    Ok(())
+}
+
+/// Keeps a split consistent in both directions: a parent with steps is `done`
+/// exactly when every live step is, and a parent takes its steps with it when
+/// it is finished or dropped.
+fn cascade(
+    conn: &Connection,
+    user_id: i64,
+    task_id: i64,
+    parent_id: Option<i64>,
+) -> rusqlite::Result<Option<Task>> {
+    let Some(parent_id) = parent_id else {
+        let state: String =
+            conn.query_row("SELECT state FROM tasks WHERE id = ?1", [task_id], |r| r.get(0))?;
+        if state == "done" || state == "dropped" {
+            conn.execute(
+                "UPDATE tasks SET state = ?1, updated_at = ?2
+                 WHERE parent_id = ?3 AND state != 'dropped' AND state != ?1",
+                (&state, now(), task_id),
+            )?;
+        }
+        return Ok(None);
+    };
+    let (total, done): (i64, i64) = conn.query_row(
+        "SELECT COUNT(*), COALESCE(SUM(state = 'done'), 0)
+         FROM tasks WHERE parent_id = ?1 AND state != 'dropped'",
+        [parent_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let Some(parent) = get(conn, user_id, parent_id)? else { return Ok(None) };
+    let wanted = if total > 0 && done == total {
+        "done"
+    } else if parent.state == "done" {
+        if done > 0 { "in_progress" } else { "open" }
+    } else {
+        return Ok(None);
+    };
+    if parent.state == wanted {
+        return Ok(None);
+    }
+    set_state(conn, parent_id, wanted)?;
+    get(conn, user_id, parent_id)
+}
+
 /// Returns `Ok(None)` when `task_id` doesn't exist or isn't owned by `user_id`.
 pub fn update(
     conn: &Connection,
     user_id: i64,
     task_id: i64,
     patch: TaskPatch,
-) -> Result<Option<Task>, UpdateError> {
+) -> Result<Option<Updated>, UpdateError> {
     if let Some(s) = &patch.state {
         if !STATES.contains(&s.as_str()) {
             return Err(UpdateError::InvalidState(s.clone()));
@@ -268,5 +328,10 @@ pub fn update(
             task_id,
         ),
     )?;
-    Ok(get(conn, user_id, task_id)?)
+    let parent = match patch.state {
+        Some(_) => cascade(conn, user_id, task_id, parent_id)?,
+        None => None,
+    };
+    let task = get(conn, user_id, task_id)?.expect("row was just updated");
+    Ok(Some(Updated { task, parent }))
 }
