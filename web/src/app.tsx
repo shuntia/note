@@ -17,7 +17,8 @@ const UNDO_MS = 5000
 // No API removes a task, so the create waits out the undo window before it is sent.
 let heldCapture: { title: string; timer: number } | null = null
 
-export type ToastAction = { label: string; run: () => void }
+// `windowMs` is the undo window the action holds open; the toast must outlast it.
+export type ToastAction = { label: string; run: () => void; windowMs?: number }
 
 // `refresh` is a counter views key on or depend on to refetch; `onChanged` bumps it.
 export type ViewProps = {
@@ -42,11 +43,13 @@ export function App() {
   const [refresh, setRefresh] = useState(0)
 
   const toastTimer = useRef(0)
-  // An undo toast has to outlast the window its action holds itself open for.
   const notify = useCallback((msg: string, action?: ToastAction) => {
     setToast({ msg, action })
     window.clearTimeout(toastTimer.current)
-    toastTimer.current = window.setTimeout(() => setToast(null), action ? 5000 : 4000)
+    toastTimer.current = window.setTimeout(
+      () => setToast(null),
+      action ? (action.windowMs ?? 5000) : 4000,
+    )
   }, [])
 
   const onChanged = useCallback(() => setRefresh((n) => n + 1), [])
@@ -112,7 +115,7 @@ export function App() {
         <main className={tab === 'chat' ? 'view view-talk' : 'view'}>
           {tab === 'today' && <Today key={refresh} {...views} />}
           {tab === 'tasks' && <Tasks {...views} />}
-          {tab === 'chat' && <Talk />}
+          {tab === 'chat' && <Talk {...views} />}
           {tab === 'memory' && <Memory {...views} />}
           {tab === 'settings' && <Settings me={me} {...views} onSignedOut={() => setMe(null)} />}
         </main>

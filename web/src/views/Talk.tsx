@@ -5,9 +5,13 @@ import {
   useState,
   type FormEvent,
   type KeyboardEvent,
+  type ReactNode,
 } from 'react'
 import { api, ApiError } from '../api'
+import type { ViewProps } from '../app'
 import { Markdown } from '../markdown'
+import { Overflow } from '../overflow'
+import { receipt } from '../receipts'
 import type { Conversation, TalkMessage, TalkStep } from '../types'
 
 type Item =
@@ -19,6 +23,12 @@ type Item =
 type ToolItem = Extract<Item, { kind: 'tool' }>
 
 type Load = 'loading' | 'ready' | 'error'
+
+const UNDO_MS = 10_000
+
+// Deleting a conversation has no server-side reversal, so the request waits out the
+// undo window before it is sent. Module scope keeps the hold alive across remounts.
+let heldDelete: { id: number; timer: number } | null = null
 
 let sequence = 0
 const nextKey = () => `local-${++sequence}`
@@ -67,31 +77,74 @@ function shortDate(iso: string): string {
   return at.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
 }
 
-function ToolBlock({ item }: { item: ToolItem }) {
+function Receipt({ item }: { item: ToolItem }) {
+  const [open, setOpen] = useState(false)
   const args = pretty(item.args)
   const result = pretty(item.result)
+  const state = [item.isError ? 'error' : '', open ? 'open' : ''].filter(Boolean).join(' ')
   return (
-    <details className={item.isError ? 'tool error' : 'tool'}>
-      <summary>
-        <span className="tool-glyph" aria-hidden="true" />
-        <span className="tool-name">{item.name}</span>
-        <span className="tool-badge">{item.isError ? 'error' : 'ok'}</span>
-      </summary>
-      <div className="tool-body">
-        {args && (
-          <>
-            <div className="tool-label">args</div>
-            <pre className="tool-block">{args}</pre>
-          </>
-        )}
-        <div className="tool-label">result</div>
-        <pre className="tool-block">{result || '—'}</pre>
-      </div>
-    </details>
+    <div className={`receipt ${state}`.trim()}>
+      <button className="receipt-chip" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
+        <span className="receipt-mark" aria-hidden="true">
+          {item.isError ? '✕' : '✓'}
+        </span>
+        <span className="receipt-text">{receipt(item.name, item.args, item.isError)}</span>
+        <span className="receipt-chev" aria-hidden="true">
+          {open ? '▾' : '▸'}
+        </span>
+      </button>
+      {open && (
+        <div className="receipt-body">
+          <div className="receipt-tool">{item.name}</div>
+          {args && <pre className="receipt-block">{args}</pre>}
+          <pre className="receipt-block">{result || '—'}</pre>
+        </div>
+      )}
+    </div>
   )
 }
 
-export function Talk() {
+// Consecutive calls read as one receipt block, and it sits under the reply that
+// explains it even though the transcript records the calls first.
+function grouped(items: Item[]): { key: string; items: Item[] }[] {
+  const out: { key: string; items: Item[] }[] = []
+  for (const item of items) {
+    const last = out[out.length - 1]
+    if (item.kind === 'tool' && last?.items[0].kind === 'tool') last.items.push(item)
+    else out.push({ key: item.key, items: [item] })
+  }
+  for (let i = 0; i < out.length - 1; i++) {
+    if (out[i].items[0].kind === 'tool' && out[i + 1].items[0].kind === 'assistant') {
+      ;[out[i], out[i + 1]] = [out[i + 1], out[i]]
+      i++
+    }
+  }
+  return out
+}
+
+function turn(item: Exclude<Item, ToolItem>): ReactNode {
+  if (item.kind === 'user')
+    return (
+      <div key={item.key} className="turn user">
+        {item.text}
+      </div>
+    )
+  if (item.kind === 'assistant')
+    return (
+      <div key={item.key} className="turn assistant">
+        <span className="turn-avatar" aria-hidden="true" />
+        <Markdown text={item.text} />
+      </div>
+    )
+  return (
+    <div key={item.key} className="turn system" role="alert">
+      <span>{item.text}</span>
+      {item.hint && <span className="chat-hint">{item.hint}</span>}
+    </div>
+  )
+}
+
+export function Talk({ notify }: ViewProps) {
   const [conversations, setConversations] = useState<Conversation[]>([])
   const [listState, setListState] = useState<Load>('loading')
   const [current, setCurrent] = useState<number | null>(null)
@@ -102,8 +155,8 @@ export function Talk() {
   const [pending, setPending] = useState<number | null>(null)
   const [sideOpen, setSideOpen] = useState(false)
   const [renaming, setRenaming] = useState<{ id: number; value: string } | null>(null)
-  const [confirming, setConfirming] = useState<number | null>(null)
   const [sideNotice, setSideNotice] = useState<string | null>(null)
+  const [, tick] = useState(0)
 
   const pane = useRef<HTMLDivElement>(null)
   const input = useRef<HTMLTextAreaElement>(null)
@@ -173,7 +226,6 @@ export function Talk() {
 
   const open = (id: number) => {
     setSideOpen(false)
-    setConfirming(null)
     setSideNotice(null)
     if (id === current) return
     stick.current = true
@@ -185,7 +237,6 @@ export function Talk() {
 
   const startNew = () => {
     setSideOpen(false)
-    setConfirming(null)
     setSideNotice(null)
     stick.current = true
     era.current++
@@ -266,24 +317,43 @@ export function Talk() {
     }
   }
 
-  const remove = async (id: number) => {
-    setConfirming(null)
-    setSideNotice(null)
-    const before = conversations
-    setConversations((prev) => prev.filter((c) => c.id !== id))
-    if (current === id) {
+  const commitDelete = useCallback(() => {
+    if (!heldDelete) return
+    const { id, timer } = heldDelete
+    heldDelete = null
+    window.clearTimeout(timer)
+    api.deleteConversation(id).then(
+      () => void loadList(true),
+      () => void loadList(true),
+    )
+  }, [loadList])
+
+  useEffect(() => commitDelete, [commitDelete])
+
+  const remove = (c: Conversation) => {
+    commitDelete()
+    heldDelete = { id: c.id, timer: window.setTimeout(commitDelete, UNDO_MS) }
+    const wasOpen = current === c.id
+    if (wasOpen) {
       era.current++
       wanted.current = null
       setCurrent(null)
       setItems([])
       setMsgState('ready')
     }
-    try {
-      await api.deleteConversation(id)
-    } catch (err) {
-      setConversations(before)
-      setSideNotice(errorText(err))
-    }
+    setSideNotice(null)
+    tick((n) => n + 1)
+    notify(`Deleted "${c.title}"`, {
+      label: 'Undo',
+      windowMs: UNDO_MS,
+      run: () => {
+        if (heldDelete?.id !== c.id) return
+        window.clearTimeout(heldDelete.timer)
+        heldDelete = null
+        tick((n) => n + 1)
+        if (wasOpen) open(c.id)
+      },
+    })
   }
 
   const onScroll = () => {
@@ -291,7 +361,8 @@ export function Talk() {
     if (el) stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 64
   }
 
-  const active = conversations.find((c) => c.id === current)
+  const visible = conversations.filter((c) => c.id !== heldDelete?.id)
+  const active = visible.find((c) => c.id === current)
   const title = current === null ? 'New chat' : (active?.title ?? 'Chat')
 
   return (
@@ -312,11 +383,11 @@ export function Talk() {
             </button>
           </p>
         )}
-        {listState === 'ready' && conversations.length === 0 && (
+        {listState === 'ready' && visible.length === 0 && (
           <p className="chat-side-note muted">No chats yet.</p>
         )}
         <ul className="chat-list">
-          {conversations.map((c) => (
+          {visible.map((c) => (
             <li key={c.id} className="chat-row" data-active={c.id === current}>
               {renaming?.id === c.id ? (
                 <input
@@ -344,39 +415,15 @@ export function Talk() {
                 </button>
               )}
               <div className="chat-meta">
-                {confirming === c.id ? (
-                  <>
-                    <span className="chat-when">Delete this chat?</span>
-                    <span className="chat-tools always">
-                      <button className="chat-tool danger" onClick={() => void remove(c.id)}>
-                        delete
-                      </button>
-                      <button className="chat-tool" onClick={() => setConfirming(null)}>
-                        keep
-                      </button>
-                    </span>
-                  </>
-                ) : (
-                  <>
-                    <span className="chat-when">{shortDate(c.updated_at)}</span>
-                    <span className="chat-tools">
-                      <button
-                        className="chat-tool"
-                        aria-label={`Rename ${c.title}`}
-                        onClick={() => setRenaming({ id: c.id, value: c.title })}
-                      >
-                        rename
-                      </button>
-                      <button
-                        className="chat-tool danger"
-                        aria-label={`Delete ${c.title}`}
-                        onClick={() => setConfirming(c.id)}
-                      >
-                        delete
-                      </button>
-                    </span>
-                  </>
-                )}
+                <span className="chat-when">{shortDate(c.updated_at)}</span>
+                <Overflow
+                  className="chat-more-wrap"
+                  label={`More actions for ${c.title}`}
+                  items={[
+                    { label: 'Rename', run: () => setRenaming({ id: c.id, value: c.title }) },
+                    { label: 'Delete', run: () => remove(c) },
+                  ]}
+                />
               </div>
             </li>
           ))}
@@ -417,27 +464,17 @@ export function Talk() {
               </div>
             )}
             {msgState === 'ready' &&
-              items.map((item) => {
-                if (item.kind === 'user')
-                  return (
-                    <div key={item.key} className="turn user">
-                      {item.text}
-                    </div>
-                  )
-                if (item.kind === 'assistant')
-                  return (
-                    <div key={item.key} className="turn assistant">
-                      <Markdown text={item.text} />
-                    </div>
-                  )
-                if (item.kind === 'tool') return <ToolBlock key={item.key} item={item} />
-                return (
-                  <div key={item.key} className="turn system" role="alert">
-                    <span>{item.text}</span>
-                    {item.hint && <span className="chat-hint">{item.hint}</span>}
+              grouped(items).map((group) =>
+                group.items[0].kind === 'tool' ? (
+                  <div key={group.key} className="receipts">
+                    {group.items.map((item) => (
+                      <Receipt key={item.key} item={item as ToolItem} />
+                    ))}
                   </div>
-                )
-              })}
+                ) : (
+                  turn(group.items[0] as Exclude<Item, ToolItem>)
+                ),
+              )}
             {busy && (
               <p className="turn pending" aria-live="polite">
                 Note is thinking…
@@ -473,6 +510,9 @@ export function Talk() {
               </svg>
             </button>
           </form>
+          <p className="chat-standing">
+            Every change Note makes shows up above — nothing happens silently.
+          </p>
         </div>
       </section>
     </div>
