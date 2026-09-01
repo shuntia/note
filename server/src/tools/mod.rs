@@ -136,6 +136,7 @@ const CHECKIN: &[&str] = &[
     "memory_write",
     "task_create",
     "task_update",
+    "task_split",
     "schedule_slide",
     "schedule_snooze",
     "schedule_drop",
@@ -146,6 +147,7 @@ const TALK: &[&str] = &[
     "memory_write",
     "task_create",
     "task_update",
+    "task_split",
     "schedule_slide",
     "schedule_snooze",
     "schedule_drop",
@@ -157,6 +159,7 @@ const NIGHTLY: &[&str] = &[
     "memory_write",
     "task_create",
     "task_update",
+    "task_split",
     "schedule_slide",
     "schedule_snooze",
     "schedule_drop",
@@ -184,8 +187,13 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
             schema::<task_ops::CreateArgs>(),
         ),
         "task_update" => (
-            "Update a task's title, description, state, or notes.",
+            "Update a task's title, description, state, notes, or duration (whole 5-minute blocks).",
             schema::<task_ops::UpdateArgs>(),
+        ),
+        "task_split" => (
+            "Split a task into 2-5 short steps, each with a duration in whole 5-minute blocks. \
+             Only for a task that has no steps yet.",
+            schema::<task_ops::SplitArgs>(),
         ),
         "memory_query" => (
             "Search the user's long-term memory; returns ids and summaries.",
@@ -278,6 +286,7 @@ fn run(
     match name {
         "task_create" => task_ops::create(conn, ctx, parse(raw)?),
         "task_update" => task_ops::update(conn, ctx, parse(raw)?),
+        "task_split" => task_ops::split(conn, ctx, parse(raw)?),
         "memory_query" => memory_ops::query(conn, ctx, parse(raw)?),
         "memory_read" => memory_ops::read(conn, ctx, parse(raw)?),
         "memory_write" => memory_ops::write(conn, ctx, parse(raw)?),
@@ -319,6 +328,56 @@ mod tests {
         let out = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_update",
             &format!(r#"{{"task_id":{id},"state":"done"}}"#)).unwrap();
         assert_eq!(out["state"], "done");
+    }
+
+    #[test]
+    fn agent_sets_durations_in_five_minute_steps() {
+        let (conn, tmp) = env();
+        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_create",
+            r#"{"title":"email landlord","duration_min":20}"#).unwrap();
+        let id = out["task_id"].as_i64().unwrap();
+        let (dur, src): (i64, String) = conn
+            .query_row("SELECT duration_min, duration_source FROM tasks WHERE id = ?1", [id],
+                |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!((dur, src.as_str()), (20, "agent"));
+
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_update",
+            &format!(r#"{{"task_id":{id},"duration_min":23}}"#)).unwrap_err();
+        assert_eq!(e.kind, "rejected");
+
+        dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_update",
+            &format!(r#"{{"task_id":{id},"duration_min":25}}"#)).unwrap();
+        let dur: i64 = conn
+            .query_row("SELECT duration_min FROM tasks WHERE id = ?1", [id], |r| r.get(0)).unwrap();
+        assert_eq!(dur, 25);
+    }
+
+    #[test]
+    fn task_split_makes_one_level_of_steps() {
+        let (conn, tmp) = env();
+        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_create",
+            r#"{"title":"email landlord"}"#).unwrap();
+        let id = out["task_id"].as_i64().unwrap();
+        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_split",
+            &format!(r#"{{"task_id":{id},"steps":[
+                {{"title":"find the last email thread","duration_min":5}},
+                {{"title":"write and send","duration_min":10}}]}}"#)).unwrap();
+        assert_eq!(out["duration_min"], 15);
+        assert_eq!(out["step_ids"].as_array().unwrap().len(), 2);
+        let child = out["step_ids"][0].as_i64().unwrap();
+
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_split",
+            &format!(r#"{{"task_id":{child},"steps":[
+                {{"title":"a","duration_min":5}},{{"title":"b","duration_min":5}}]}}"#)).unwrap_err();
+        assert_eq!(e.kind, "rejected");
+
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_split",
+            &format!(r#"{{"task_id":{id},"steps":[{{"title":"only","duration_min":5}}]}}"#)).unwrap_err();
+        assert_eq!(e.kind, "rejected");
+
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_split",
+            r#"{"task_id":999,"steps":[{"title":"a","duration_min":5},{"title":"b","duration_min":5}]}"#).unwrap_err();
+        assert_eq!(e.kind, "not_found");
     }
 
     #[test]
