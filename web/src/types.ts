@@ -1,13 +1,20 @@
 export type Me = { username: string; admin: boolean }
 
+export type MovedTo = { event_id: number; date: string; wall_time: string; kind: string }
+
 export type PlanEvent = {
   id: number
   kind: string
   wall_time: string
+  end_wall_time: string | null
+  entry: 'routine' | 'block'
   status: 'pending' | 'fired' | 'snoozed' | 'done' | 'dropped'
   flexibility: 'fixed' | 'slide' | 'drop'
   slide_window_min: number
   channel: string
+  alert: boolean
+  // present only when the agent named the event this one moved to
+  moved_to?: MovedTo
 }
 
 export type TaskState = 'open' | 'in_progress' | 'done' | 'dropped'
@@ -55,6 +62,20 @@ export type TalkMessage = {
 
 export type TalkReply = { conversation_id: number; reply: string; steps: TalkStep[] }
 
+// One entry of the day's template, in template order; `index` addresses it in a write.
+export type ScheduleRow = {
+  index: number
+  kind: string
+  entry: 'routine' | 'block'
+  time: string
+  end_time: string | null
+  days: string[]
+  flexibility: 'fixed' | 'slide' | 'drop'
+  slide_window_min: number
+  channel: string
+  alert: boolean
+}
+
 export type Settings = {
   display_name: string
   timezone: string
@@ -62,7 +83,15 @@ export type Settings = {
   template: string
   templates: string[]
   timezones: string[]
+  schedule: ScheduleRow[]
 }
+
+export type AlertPatch = { index: number; alert: boolean }
+
+export type SettingsSaved = Pick<
+  Settings,
+  'display_name' | 'timezone' | 'nightly_time' | 'template'
+> & { schedule: ScheduleRow[] }
 
 export type PromptName = 'persona' | 'planning'
 

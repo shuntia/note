@@ -1,11 +1,19 @@
 import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { api, ApiError } from '../api'
+import { Bell } from '../bell'
 import type { ViewProps } from '../app'
 import { disablePush, enablePush, pushState } from '../push'
 import { SectionTitle } from '../section'
 import { readCounterMode, writeCounterMode, type CounterMode } from '../session'
 import { applyTheme, saveTheme, storedTheme, type ThemeChoice } from '../theme'
-import type { LogRow, Me, PromptDoc, PromptName, Settings as UserSettings } from '../types'
+import type {
+  LogRow,
+  Me,
+  PromptDoc,
+  PromptName,
+  ScheduleRow,
+  Settings as UserSettings,
+} from '../types'
 
 type SectionId = 'profile' | 'schedule' | 'appearance' | 'persona' | 'notifications' | 'admin'
 
@@ -77,7 +85,7 @@ const EDITABLE = ['display_name', 'timezone', 'nightly_time', 'template'] as con
 
 type Draft = Pick<UserSettings, (typeof EDITABLE)[number]>
 type Choices = Pick<UserSettings, 'templates' | 'timezones'>
-type Loaded = { choices: Choices; baseline: Draft; draft: Draft }
+type Loaded = { choices: Choices; baseline: Draft; draft: Draft; rows: ScheduleRow[] }
 type SaveState = { kind: 'idle' | 'busy' | 'saved' } | { kind: 'failed'; message: string }
 
 function draftOf(s: UserSettings): Draft {
@@ -87,6 +95,65 @@ function draftOf(s: UserSettings): Draft {
     nightly_time: s.nightly_time,
     template: s.template,
   }
+}
+
+function flexWord(row: ScheduleRow): string {
+  if (row.flexibility === 'fixed') return 'fixed'
+  if (row.flexibility === 'drop') return 'droppable'
+  return row.slide_window_min > 0 ? `±${row.slide_window_min}m` : 'flexible'
+}
+
+// The day's entries as the template orders them. A template that no longer parses
+// arrives as an empty list, which renders nothing and leaves the picker above to
+// choose another one.
+function ScheduleList({
+  rows,
+  busy,
+  toggle,
+}: {
+  rows: ScheduleRow[]
+  busy: boolean
+  toggle: (row: ScheduleRow) => void
+}) {
+  if (rows.length === 0) return null
+  return (
+    <div className="sched">
+      <h3 className="sched-head">Routines &amp; blocks — choose which ones ping you</h3>
+      <ul className="sched-list">
+        {rows.map((row) => (
+          <li className="sched-row" key={row.index}>
+            <span className="sched-time mono">
+              {row.entry === 'block'
+                ? `${row.time}–${row.end_time ?? ''}`
+                : `${row.time} · ${flexWord(row)}`}
+            </span>
+            <span className="sched-name">{row.kind}</span>
+            {row.entry === 'block' ? (
+              <>
+                <span className="sched-flex">flexible — Note may reshape it</span>
+                <span className="sched-na">blocks never ping</span>
+              </>
+            ) : (
+              <button
+                type="button"
+                className={`sched-toggle ${row.alert ? 'on' : 'off'}`}
+                aria-pressed={row.alert}
+                aria-label={`${row.kind} — ${row.alert ? 'pings you' : 'silent'}`}
+                disabled={busy}
+                onClick={() => toggle(row)}
+              >
+                <Bell on={row.alert} />
+                {row.alert ? 'pings you' : 'silent'}
+              </button>
+            )}
+          </li>
+        ))}
+      </ul>
+      <p className="sched-note muted">
+        Silent routines still appear on Today — they just don't send a push.
+      </p>
+    </div>
+  )
 }
 
 // Profile and Schedule are one form over one `PUT /api/settings`; the section
@@ -105,6 +172,7 @@ function ProfileAndSchedule({ section }: { section: SectionId }) {
           choices: { templates: s.templates, timezones: s.timezones },
           baseline: draftOf(s),
           draft: draftOf(s),
+          rows: s.schedule,
         }),
       )
       .catch(() => setState('error'))
@@ -143,7 +211,7 @@ function ProfileAndSchedule({ section }: { section: SectionId }) {
     )
   }
 
-  const { choices, baseline, draft } = state
+  const { choices, baseline, draft, rows } = state
   const cleaned: Draft = { ...draft, display_name: draft.display_name.trim() }
   const patch: Partial<Draft> = {}
   for (const key of EDITABLE) if (cleaned[key] !== baseline[key]) patch[key] = cleaned[key]
@@ -159,14 +227,15 @@ function ProfileAndSchedule({ section }: { section: SectionId }) {
     if (!dirty) return
     setSave({ kind: 'busy' })
     try {
-      await api.saveSettings(patch)
+      const saved = await api.saveSettings(patch)
       // The saved values become the baseline, but any field edited during the flight
       // keeps what the user typed rather than snapping back to the submitted value.
+      // A template change brings a different set of entries with it.
       setState((s) => {
         if (!s || s === 'error') return s
         const merged = { ...s.draft }
         for (const key of EDITABLE) if (s.draft[key] === draft[key]) merged[key] = cleaned[key]
-        return { ...s, baseline: cleaned, draft: merged }
+        return { ...s, baseline: cleaned, draft: merged, rows: saved.schedule }
       })
       setSave({ kind: 'saved' })
     } catch (err) {
@@ -176,6 +245,34 @@ function ProfileAndSchedule({ section }: { section: SectionId }) {
           err instanceof ApiError && err.status === 400
             ? err.message
             : "Settings didn't save. Try again.",
+      })
+    }
+  }
+
+  // A toggle travels alone, so the index it names always addresses the template
+  // that is saved — the one whose entries are on screen.
+  const toggleAlert = async (row: ScheduleRow) => {
+    const next = !row.alert
+    const setAlert = (value: boolean) =>
+      setState((s) =>
+        s && s !== 'error'
+          ? { ...s, rows: s.rows.map((r) => (r.index === row.index ? { ...r, alert: value } : r)) }
+          : s,
+      )
+    setSave({ kind: 'busy' })
+    setAlert(next)
+    try {
+      const saved = await api.saveSettings({}, [{ index: row.index, alert: next }])
+      setState((s) => (s && s !== 'error' ? { ...s, rows: saved.schedule } : s))
+      setSave({ kind: 'saved' })
+    } catch (err) {
+      setAlert(row.alert)
+      setSave({
+        kind: 'failed',
+        message:
+          err instanceof ApiError && err.status === 400
+            ? err.message
+            : "That didn't save. Try again.",
       })
     }
   }
@@ -256,13 +353,17 @@ function ProfileAndSchedule({ section }: { section: SectionId }) {
           )}
         </fieldset>
 
+        {!profile && (
+          <ScheduleList rows={rows} busy={save.kind === 'busy'} toggle={toggleAlert} />
+        )}
+
         <div className="pane-foot">
-          <button className="primary" disabled={!dirty || save.kind === 'busy'}>
+          <button className="btn-primary" disabled={!dirty || save.kind === 'busy'}>
             {save.kind === 'busy' ? 'Saving…' : 'Save changes'}
           </button>
           {save.kind === 'saved' && (
             <span className="pane-status ok" role="status">
-              Saved.
+              ✓ Saved
             </span>
           )}
           {save.kind === 'failed' && (
@@ -442,7 +543,7 @@ function PersonaSection({ active }: { active: boolean }) {
         </fieldset>
 
         <div className="pane-foot">
-          <button className="primary" disabled={!dirty || blank || busy}>
+          <button className="btn-primary" disabled={!dirty || blank || busy}>
             {busy ? 'Saving…' : 'Save prompt'}
           </button>
           <button
@@ -460,7 +561,7 @@ function PersonaSection({ active }: { active: boolean }) {
           )}
           {save.kind === 'saved' && !dirty && (
             <span className="pane-status ok" role="status">
-              Saved.
+              ✓ Saved
             </span>
           )}
           {save.kind === 'failed' && (

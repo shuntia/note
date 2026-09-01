@@ -1,4 +1,5 @@
 import type {
+  AlertPatch,
   Conversation,
   Debrief,
   FlattenResult,
@@ -11,6 +12,7 @@ import type {
   PromptDoc,
   PromptName,
   Settings,
+  SettingsSaved,
   TalkMessage,
   TalkReply,
   Task,
@@ -113,14 +115,16 @@ export const api = {
       ),
     }),
   settings: () => request<Settings>('/api/settings'),
-  // The server rejects unknown fields, so only the writable keys actually set go on the wire.
-  saveSettings: (patch: SettingsPatch) => {
-    const body: SettingsPatch = {}
+  // The server rejects unknown fields, so only the writable keys actually set go on the
+  // wire. Bell toggles apply to the template the request leaves selected.
+  saveSettings: (patch: SettingsPatch, alerts?: AlertPatch[]) => {
+    const body: SettingsPatch & { alerts?: AlertPatch[] } = {}
     for (const key of WRITABLE_SETTINGS) {
       const value = patch[key]
       if (value !== undefined) body[key] = value
     }
-    return request<void>('/api/settings', { method: 'PUT', body: JSON.stringify(body) })
+    if (alerts?.length) body.alerts = alerts
+    return request<SettingsSaved>('/api/settings', { method: 'PUT', body: JSON.stringify(body) })
   },
   promptGet: (name: PromptName) => request<PromptDoc>(`/api/prompts/${name}`),
   promptPut: (name: PromptName, content: string) =>
