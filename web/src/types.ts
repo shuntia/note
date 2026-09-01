@@ -10,14 +10,32 @@ export type PlanEvent = {
   channel: string
 }
 
+export type TaskState = 'open' | 'in_progress' | 'done' | 'dropped'
+
 export type Task = {
   id: number
   title: string
   description: string
-  state: 'open' | 'in_progress' | 'done' | 'dropped'
+  state: TaskState
   source: string
   notes: string
+  duration_min: number | null
+  duration_source: 'user' | 'agent' | 'none'
+  parent_id: number | null
+  is_now: boolean
+  updated_at: string
 }
+
+// A top-level task with its steps; the list never nests deeper than this.
+export type TaskNode = Task & { children: Task[] }
+
+// `parent` arrives when finishing or reopening cascaded to it; `demoted_from_now`
+// when the write pushed other tasks out of Now, newest first.
+export type TaskUpdate = Task & { parent?: Task; demoted_from_now?: number[] }
+
+export type NewStep = { title: string; duration_min: number }
+
+export type FlattenResult = { task: TaskNode; removed: Task[] }
 
 export type Debrief = { date: string; content: string }
 

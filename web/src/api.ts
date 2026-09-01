@@ -1,10 +1,12 @@
 import type {
   Conversation,
   Debrief,
+  FlattenResult,
   LogRow,
   Me,
   MemoryFact,
   MemoryHit,
+  NewStep,
   PlanEvent,
   PromptDoc,
   PromptName,
@@ -12,11 +14,18 @@ import type {
   TalkMessage,
   TalkReply,
   Task,
+  TaskNode,
+  TaskState,
+  TaskUpdate,
 } from './types'
 
 const WRITABLE_SETTINGS = ['display_name', 'timezone', 'nightly_time', 'template'] as const
 
 type SettingsPatch = Partial<Pick<Settings, (typeof WRITABLE_SETTINGS)[number]>>
+
+type NewTaskOpts = { duration_min?: number; parent_id?: number; is_now?: boolean }
+
+type TaskPatch = { state?: TaskState; is_now?: boolean }
 
 export class ApiError extends Error {
   constructor(
@@ -73,11 +82,20 @@ export const api = {
     request<void>(`/api/events/${id}/shift`, { method: 'POST', body: JSON.stringify({ minutes }) }),
   snooze: (id: number, minutes: number) =>
     request<void>(`/api/events/${id}/snooze`, { method: 'POST', body: JSON.stringify({ minutes }) }),
-  tasks: () => request<Task[]>('/api/tasks'),
-  addTask: (title: string) =>
-    request<Task>('/api/tasks', { method: 'POST', body: JSON.stringify({ title }) }),
-  patchTask: (id: number, state: Task['state']) =>
-    request<Task>(`/api/tasks/${id}`, { method: 'PATCH', body: JSON.stringify({ state }) }),
+  tasks: () => request<TaskNode[]>('/api/tasks'),
+  addTask: (title: string, opts?: NewTaskOpts) =>
+    request<Task>('/api/tasks', { method: 'POST', body: JSON.stringify({ title, ...opts }) }),
+  // The server rejects unknown fields, and undefined keys drop out of the body,
+  // so a patch carries exactly the fields the caller set.
+  patchTask: (id: number, patch: TaskPatch) =>
+    request<TaskUpdate>(`/api/tasks/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
+  splitTask: (id: number, steps: NewStep[]) =>
+    request<TaskNode>(`/api/tasks/${id}/split`, {
+      method: 'POST',
+      body: JSON.stringify({ steps }),
+    }),
+  flattenTask: (id: number) =>
+    request<FlattenResult>(`/api/tasks/${id}/flatten`, { method: 'POST' }),
   conversations: () => request<Conversation[]>('/api/conversations'),
   renameConversation: (id: number, title: string) =>
     request<void>(`/api/conversations/${id}`, {
