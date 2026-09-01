@@ -142,6 +142,13 @@ const MIGRATIONS: &[&str] = &[
         CHECK (is_now IN (0, 1) AND (is_now = 0 OR parent_id IS NULL));
     CREATE INDEX idx_tasks_now ON tasks(user_id, is_now);
     ",
+    // v8
+    "
+    ALTER TABLE events ADD COLUMN end_wall_time TEXT;
+    ALTER TABLE events ADD COLUMN alert INTEGER NOT NULL DEFAULT 1
+        CHECK (alert IN (0, 1) AND (alert = 0 OR end_wall_time IS NULL));
+    ALTER TABLE events ADD COLUMN moved_to_event_id INTEGER REFERENCES events(id);
+    ",
 ];
 
 pub fn open(path: &Path) -> Result<Connection> {
@@ -353,6 +360,31 @@ mod tests {
         assert!(conn.execute("UPDATE tasks SET is_now = 1 WHERE id = 2", []).is_err());
         assert!(conn.execute("UPDATE tasks SET is_now = 2 WHERE id = 1", []).is_err());
         assert!(conn.execute("UPDATE tasks SET parent_id = 2 WHERE id = 1", []).is_err());
+    }
+
+    #[test]
+    fn v8_adds_the_block_range_and_bell_and_keeps_blocks_silent() {
+        let conn = open_memory().unwrap();
+        conn.execute("INSERT INTO users (username, pass_hash, role) VALUES ('a','h','member')", [])
+            .unwrap();
+        conn.execute("INSERT INTO plans (user_id, date, created_at) VALUES (1, '2026-08-31', 'x')", [])
+            .unwrap();
+        conn.execute("INSERT INTO events (plan_id, kind, wall_time) VALUES (1, 'nudge', '09:00')", [])
+            .unwrap();
+        let (end, alert): (Option<String>, i64) = conn
+            .query_row("SELECT end_wall_time, alert FROM events WHERE id = 1", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(end, None);
+        assert_eq!(alert, 1);
+        assert!(conn.execute("UPDATE events SET alert = 2 WHERE id = 1", []).is_err());
+        assert!(
+            conn.execute("UPDATE events SET end_wall_time = '12:30' WHERE id = 1", []).is_err(),
+            "a block must not keep its bell"
+        );
+        conn.execute("UPDATE events SET alert = 0, end_wall_time = '12:30' WHERE id = 1", [])
+            .unwrap();
     }
 
     #[test]
