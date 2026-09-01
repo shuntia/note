@@ -137,7 +137,7 @@ async fn tasks_create(
     Json(req): Json<crate::tasks::NewTask>,
 ) -> impl IntoResponse {
     let conn = state.db.lock().unwrap();
-    match crate::tasks::create(&conn, user.id, req, "manual", crate::tasks::DurationActor::User) {
+    match crate::tasks::create(&conn, user.id, req, "manual", crate::tasks::Actor::User) {
         Ok(t) => Json(t).into_response(),
         Err(e) => task_error(e),
     }
@@ -169,7 +169,7 @@ async fn task_split(
     Json(req): Json<SplitReq>,
 ) -> impl IntoResponse {
     let conn = state.db.lock().unwrap();
-    match crate::tasks::split(&conn, user.id, id, req.steps, crate::tasks::DurationActor::User) {
+    match crate::tasks::split(&conn, user.id, id, req.steps, crate::tasks::Actor::User) {
         Ok(Some(n)) => Json(n).into_response(),
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(e) => task_error(e),
@@ -200,6 +200,9 @@ fn task_error(e: crate::tasks::UpdateError) -> axum::response::Response {
             Json(serde_json::json!({ "error": m })),
         )
             .into_response(),
+        E::NowFull(m) => {
+            (StatusCode::CONFLICT, Json(serde_json::json!({ "error": m }))).into_response()
+        }
         E::Db(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }

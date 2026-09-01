@@ -6,6 +6,9 @@ const STATES: &[&str] = &["open", "in_progress", "done", "dropped"];
 const DURATION_STEP_MIN: u32 = 5;
 const MAX_DURATION_MIN: u32 = 24 * 60;
 
+/// How many tasks Now holds at once — a list short enough to finish.
+pub const NOW_CAP: usize = 3;
+
 /// Separates the caller's mistakes — each mapped to its own HTTP status — from
 /// an infrastructure failure.
 #[derive(Debug, Error)]
@@ -16,20 +19,23 @@ pub enum UpdateError {
     InvalidDuration(String),
     #[error("{0}")]
     InvalidHierarchy(String),
+    #[error("{0}")]
+    NowFull(String),
     #[error(transparent)]
     Db(#[from] rusqlite::Error),
 }
 
-/// A duration's provenance is the writer's identity, never the caller's claim:
-/// the HTTP surface is always the user, the agent's tools are always the agent.
+/// The writer's identity, never the caller's claim: the HTTP surface is always
+/// the user, the agent's tools are always the agent. It fixes a duration's
+/// provenance, and it decides what an over-full Now does.
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
-pub enum DurationActor {
+pub enum Actor {
     #[default]
     User,
     Agent,
 }
 
-impl DurationActor {
+impl Actor {
     fn as_str(self) -> &'static str {
         match self {
             Self::User => "user",
@@ -49,6 +55,7 @@ pub struct Task {
     pub duration_min: Option<u32>,
     pub duration_source: String,
     pub parent_id: Option<i64>,
+    pub is_now: bool,
 }
 
 /// One top-level task with its steps; `children` is always present so the
@@ -67,6 +74,8 @@ pub struct NewTask {
     pub duration_min: Option<u32>,
     #[serde(default)]
     pub parent_id: Option<i64>,
+    #[serde(default)]
+    pub is_now: bool,
 }
 
 /// `Option<Option<T>>` fields separate "absent, leave alone" (`None`) from
@@ -82,8 +91,9 @@ pub struct TaskPatch {
     pub duration_min: Option<Option<u32>>,
     #[serde(default, deserialize_with = "present")]
     pub parent_id: Option<Option<i64>>,
+    pub is_now: Option<bool>,
     #[serde(skip)]
-    pub duration_actor: DurationActor,
+    pub actor: Actor,
 }
 
 fn present<'de, D, T>(d: D) -> Result<Option<Option<T>>, D::Error>
@@ -109,11 +119,12 @@ fn row_to_task(r: &rusqlite::Row) -> rusqlite::Result<Task> {
         duration_min: r.get(6)?,
         duration_source: r.get(7)?,
         parent_id: r.get(8)?,
+        is_now: r.get(9)?,
     })
 }
 
-const COLS: &str =
-    "id, title, description, state, source, notes, duration_min, duration_source, parent_id";
+const COLS: &str = "id, title, description, state, source, notes, duration_min, \
+                    duration_source, parent_id, is_now";
 
 fn checked_duration(min: u32) -> Result<u32, UpdateError> {
     if min == 0 || !min.is_multiple_of(DURATION_STEP_MIN) || min > MAX_DURATION_MIN {
@@ -159,25 +170,92 @@ fn checked_parent(
     }
 }
 
+/// Ids of the tasks that render in Now, oldest first. A done or dropped task
+/// keeps its flag — that is where undo finds its group again — but frees the
+/// slot it was holding.
+fn now_members(conn: &Connection, user_id: i64) -> rusqlite::Result<Vec<i64>> {
+    let mut stmt = conn.prepare(
+        "SELECT id FROM tasks
+         WHERE user_id = ?1 AND is_now = 1 AND parent_id IS NULL
+           AND state IN ('open','in_progress')
+         ORDER BY id",
+    )?;
+    let rows = stmt.query_map([user_id], |r| r.get(0))?;
+    rows.collect()
+}
+
+/// Brings Now back to its cap by dropping the newest members other than `keep`,
+/// so a write always takes effect and the task that falls out is the one at the
+/// bottom of the list. Returns what it demoted, newest first.
+fn trim_now(conn: &Connection, user_id: i64, keep: i64) -> rusqlite::Result<Vec<i64>> {
+    let mut members = now_members(conn, user_id)?;
+    let mut demoted = Vec::new();
+    while members.len() > NOW_CAP {
+        let Some(pos) = members.iter().rposition(|id| *id != keep) else { break };
+        let id = members.remove(pos);
+        conn.execute("UPDATE tasks SET is_now = 0, updated_at = ?1 WHERE id = ?2", (now(), id))?;
+        demoted.push(id);
+    }
+    Ok(demoted)
+}
+
+/// A person choosing a fourth is told Now is full and nothing moves; an agent's
+/// write is trimmed afterwards instead, so it can never fail silently into a
+/// full Now.
+fn check_now_room(
+    conn: &Connection,
+    user_id: i64,
+    actor: Actor,
+    already_in: Option<i64>,
+) -> Result<(), UpdateError> {
+    if actor == Actor::Agent {
+        return Ok(());
+    }
+    let members = now_members(conn, user_id)?;
+    if members.len() < NOW_CAP || already_in.is_some_and(|id| members.contains(&id)) {
+        return Ok(());
+    }
+    Err(UpdateError::NowFull(format!("Now already holds {NOW_CAP} tasks")))
+}
+
 pub fn create(
     conn: &Connection,
     user_id: i64,
     new: NewTask,
     source: &str,
-    actor: DurationActor,
+    actor: Actor,
 ) -> Result<Task, UpdateError> {
     let duration = new.duration_min.map(checked_duration).transpose()?;
     if let Some(p) = new.parent_id {
         checked_parent(conn, user_id, p, None)?;
     }
+    if new.is_now {
+        if new.parent_id.is_some() {
+            return Err(UpdateError::InvalidHierarchy(
+                "only a top-level task can be in Now".into(),
+            ));
+        }
+        check_now_room(conn, user_id, actor, None)?;
+    }
     let duration_source = if duration.is_some() { actor.as_str() } else { "none" };
     conn.execute(
         "INSERT INTO tasks
-            (user_id, title, source, parent_id, duration_min, duration_source, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
-        (user_id, &new.title, source, new.parent_id, duration, duration_source, now()),
+            (user_id, title, source, parent_id, duration_min, duration_source, is_now,
+             created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
+        (
+            user_id,
+            &new.title,
+            source,
+            new.parent_id,
+            duration,
+            duration_source,
+            new.is_now,
+            now(),
+        ),
     )?;
     let id = conn.last_insert_rowid();
+    trim_now(conn, user_id, id)?;
     Ok(conn.query_row(&format!("SELECT {COLS} FROM tasks WHERE id = ?1"), [id], row_to_task)?)
 }
 
@@ -238,7 +316,7 @@ pub fn split(
     user_id: i64,
     task_id: i64,
     steps: Vec<Step>,
-    actor: DurationActor,
+    actor: Actor,
 ) -> Result<Option<TaskNode>, UpdateError> {
     if !(MIN_STEPS..=MAX_STEPS).contains(&steps.len()) {
         return Err(UpdateError::InvalidHierarchy(format!(
@@ -266,6 +344,7 @@ pub fn split(
                 title: s.title,
                 duration_min: Some(s.duration_min),
                 parent_id: Some(task_id),
+                is_now: false,
             },
             &parent.source,
             actor,
@@ -302,6 +381,9 @@ pub struct Updated {
     pub task: Task,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent: Option<Task>,
+    /// Tasks this write pushed out of Now, newest first.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub demoted_from_now: Vec<i64>,
 }
 
 fn set_state(conn: &Connection, task_id: i64, state: &str) -> rusqlite::Result<()> {
@@ -382,9 +464,23 @@ pub fn update(
     let (duration_min, duration_source) = match duration {
         None => (before.duration_min, before.duration_source),
         Some(None) => (None, "none".to_string()),
-        Some(Some(m)) => (Some(m), patch.duration_actor.as_str().to_string()),
+        Some(Some(m)) => (Some(m), patch.actor.as_str().to_string()),
     };
     let parent_id = patch.parent_id.unwrap_or(before.parent_id);
+    let is_now = match patch.is_now {
+        Some(true) => {
+            if parent_id.is_some() {
+                return Err(UpdateError::InvalidHierarchy(
+                    "only a top-level task can be in Now".into(),
+                ));
+            }
+            check_now_room(conn, user_id, patch.actor, Some(task_id))?;
+            true
+        }
+        Some(false) => false,
+        // becoming a step is leaving Now
+        None => before.is_now && parent_id.is_none(),
+    };
     conn.execute(
         "UPDATE tasks SET
             title = COALESCE(?1, title),
@@ -394,8 +490,9 @@ pub fn update(
             duration_min = ?5,
             duration_source = ?6,
             parent_id = ?7,
-            updated_at = ?8
-         WHERE id = ?9",
+            is_now = ?8,
+            updated_at = ?9
+         WHERE id = ?10",
         (
             &patch.title,
             &patch.description,
@@ -404,6 +501,7 @@ pub fn update(
             duration_min,
             duration_source,
             parent_id,
+            is_now,
             now(),
             task_id,
         ),
@@ -412,6 +510,7 @@ pub fn update(
         Some(_) => cascade(conn, user_id, task_id, parent_id)?,
         None => None,
     };
+    let demoted_from_now = trim_now(conn, user_id, task_id)?;
     let task = get(conn, user_id, task_id)?.expect("row was just updated");
-    Ok(Some(Updated { task, parent }))
+    Ok(Some(Updated { task, parent, demoted_from_now }))
 }

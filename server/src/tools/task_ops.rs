@@ -1,5 +1,5 @@
 use super::{check_text, ToolCtx, ToolError};
-use crate::tasks::{DurationActor, NewTask, Step, TaskPatch, UpdateError};
+use crate::tasks::{Actor, NewTask, Step, TaskPatch, UpdateError};
 use rusqlite::Connection;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -20,9 +20,9 @@ fn checked_title(title: &str) -> Result<&str, ToolError> {
 fn task_error(e: UpdateError) -> ToolError {
     match e {
         UpdateError::InvalidState(s) => ToolError::rejected(format!("invalid state: {s}")),
-        UpdateError::InvalidDuration(m) | UpdateError::InvalidHierarchy(m) => {
-            ToolError::rejected(m)
-        }
+        UpdateError::InvalidDuration(m)
+        | UpdateError::InvalidHierarchy(m)
+        | UpdateError::NowFull(m) => ToolError::rejected(m),
         UpdateError::Db(e) => ToolError::internal(e.to_string()),
     }
 }
@@ -52,9 +52,10 @@ pub fn create(
             title: title.to_owned(),
             duration_min: args.duration_min,
             parent_id: None,
+            is_now: false,
         },
         "agent",
-        DurationActor::Agent,
+        Actor::Agent,
     )
     .map_err(task_error)?;
     if !args.description.is_empty() {
@@ -105,7 +106,7 @@ pub fn update(
         state: args.state,
         notes: args.notes,
         duration_min: args.duration_min.map(Some),
-        duration_actor: DurationActor::Agent,
+        actor: Actor::Agent,
         ..Default::default()
     };
     match crate::tasks::update(conn, ctx.user_id, args.task_id, patch) {
@@ -131,7 +132,7 @@ pub fn split(
     for s in &args.steps {
         checked_title(&s.title)?;
     }
-    match crate::tasks::split(conn, ctx.user_id, args.task_id, args.steps, DurationActor::Agent) {
+    match crate::tasks::split(conn, ctx.user_id, args.task_id, args.steps, Actor::Agent) {
         Ok(Some(n)) => Ok(serde_json::json!({
             "task_id": n.task.id,
             "duration_min": n.task.duration_min,
