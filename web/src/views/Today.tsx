@@ -1,6 +1,8 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import { api, ApiError } from '../api'
 import type { ViewProps } from '../app'
+import { Overflow } from '../overflow'
+import { eventLabel } from '../receipts'
 import type { Debrief, PlanEvent } from '../types'
 
 const UNDO_MS = 5000
@@ -18,12 +20,6 @@ function nowWall(): string {
 function minutesOf(wall: string): number {
   const [h, m] = wall.split(':')
   return Number(h) * 60 + Number(m)
-}
-
-function label(kind: string): string {
-  if (kind === 'debrief') return 'Morning debrief'
-  const words = kind.replaceAll('_', ' ').replace('checkin', 'check-in').trim()
-  return words.charAt(0).toUpperCase() + words.slice(1)
 }
 
 function eyebrow(ev: PlanEvent, now: string): string {
@@ -141,7 +137,7 @@ export function Today({ notify }: ViewProps) {
     commitDrop()
     heldDrop = { id: ev.id, timer: window.setTimeout(commitDrop, UNDO_MS) }
     tick((n) => n + 1)
-    notify(`Dropped "${label(ev.kind)}" — moved off today`, {
+    notify(`Dropped "${eventLabel(ev.kind)}" — moved off today`, {
       label: 'Undo',
       run: () => {
         if (heldDrop?.id !== ev.id) return
@@ -229,7 +225,7 @@ function EventRow({ ev }: { ev: PlanEvent }) {
             ✓
           </span>
         )}
-        <span className="ev-name">{label(ev.kind)}</span>
+        <span className="ev-name">{eventLabel(ev.kind)}</span>
         <span className="ev-tag">{tag}</span>
       </div>
     </li>
@@ -253,9 +249,12 @@ function NowCard({
     <li className="ev now">
       <span className="ev-time">{ev.wall_time}</span>
       <div className="nowcard">
-        <Overflow onDrop={() => drop(ev)} disabled={pending} />
+        <Overflow
+          label="More actions"
+          items={[{ label: 'Drop', run: () => drop(ev), disabled: pending }]}
+        />
         <div className="nowcard-eyebrow">{eyebrow(ev, now)}</div>
-        <h2 className="nowcard-title">{label(ev.kind)}</h2>
+        <h2 className="nowcard-title">{eventLabel(ev.kind)}</h2>
         <p className="nowcard-meta">{metaLine(ev)}</p>
         <div className="nowcard-actions">
           <button
@@ -294,64 +293,6 @@ function NowCard({
         </div>
       </div>
     </li>
-  )
-}
-
-function Overflow({ onDrop, disabled }: { onDrop: () => void; disabled: boolean }) {
-  const [open, setOpen] = useState(false)
-  const wrap = useRef<HTMLDivElement>(null)
-  const trigger = useRef<HTMLButtonElement>(null)
-  const item = useRef<HTMLButtonElement>(null)
-
-  useEffect(() => {
-    if (!open) return
-    item.current?.focus()
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape') return
-      setOpen(false)
-      trigger.current?.focus()
-    }
-    const onDown = (e: MouseEvent) => {
-      if (!wrap.current?.contains(e.target as Node)) setOpen(false)
-    }
-    document.addEventListener('keydown', onKey)
-    document.addEventListener('mousedown', onDown)
-    return () => {
-      document.removeEventListener('keydown', onKey)
-      document.removeEventListener('mousedown', onDown)
-    }
-  }, [open])
-
-  return (
-    <div className="ev-more-wrap" ref={wrap}>
-      <button
-        className="ev-more"
-        ref={trigger}
-        aria-label="More actions"
-        aria-haspopup="menu"
-        aria-expanded={open}
-        onClick={() => setOpen((v) => !v)}
-      >
-        ⋯
-      </button>
-      {open && (
-        <div className="ev-menu" role="menu">
-          <button
-            className="ev-menu-item"
-            role="menuitem"
-            ref={item}
-            disabled={disabled}
-            onBlur={() => setOpen(false)}
-            onClick={() => {
-              setOpen(false)
-              onDrop()
-            }}
-          >
-            Drop
-          </button>
-        </div>
-      )}
-    </div>
   )
 }
 
