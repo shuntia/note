@@ -116,7 +116,7 @@ const COLS: &str =
     "id, title, description, state, source, notes, duration_min, duration_source, parent_id";
 
 fn checked_duration(min: u32) -> Result<u32, UpdateError> {
-    if min == 0 || min % DURATION_STEP_MIN != 0 || min > MAX_DURATION_MIN {
+    if min == 0 || !min.is_multiple_of(DURATION_STEP_MIN) || min > MAX_DURATION_MIN {
         return Err(UpdateError::InvalidDuration(format!(
             "duration_min must be a multiple of {DURATION_STEP_MIN}, from {DURATION_STEP_MIN} to {MAX_DURATION_MIN}"
         )));

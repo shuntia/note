@@ -15,6 +15,8 @@ enum Op {
     CtxAppend(String),
     CtxReplace(String, String),
     Insert(String, String),
+    TaskSplit(i64),
+    TaskDuration(i64, u32),
 }
 
 fn arb_op() -> impl Strategy<Value = Op> {
@@ -34,6 +36,9 @@ fn arb_op() -> impl Strategy<Value = Op> {
         (1..4i64).prop_map(Op::Drop),
         word.prop_map(Op::CtxAppend),
         (word, word).prop_map(|(f, r)| Op::CtxReplace(f, r)),
+        (1..6i64).prop_map(Op::TaskSplit),
+        (1..6i64, prop_oneof![Just(5u32), Just(10), Just(23), Just(0)])
+            .prop_map(|(id, d)| Op::TaskDuration(id, d)),
         (prop_oneof![Just("2026-08-31".to_string()), Just("2026-09-01".to_string())], "([01][0-9]|2[0-3]):[0-5][0-9]")
             .prop_map(|(d, t)| Op::Insert(d, t)),
     ]
@@ -59,6 +64,9 @@ fn apply(conn: &rusqlite::Connection, ctx: &ToolCtx, op: &Op, mem_ids: &mut Vec<
         Op::Drop(e) => ("schedule_drop", format!(r#"{{"event_id":{e}}}"#)),
         Op::CtxAppend(t) => ("context_edit", format!(r#"{{"append":"{t}"}}"#)),
         Op::CtxReplace(f, r) => ("context_edit", format!(r#"{{"find":"{f}","replace":"{r}"}}"#)),
+        Op::TaskSplit(id) => ("task_split", format!(
+            r#"{{"task_id":{id},"steps":[{{"title":"a","duration_min":5}},{{"title":"b","duration_min":10}}]}}"#)),
+        Op::TaskDuration(id, d) => ("task_update", format!(r#"{{"task_id":{id},"duration_min":{d}}}"#)),
         Op::Insert(d, t) => ("schedule_insert",
             format!(r#"{{"date":"{d}","kind":"extra","time":"{t}","flexibility":"slide","slide_window_min":15,"channel":"push"}}"#)),
     };
@@ -99,7 +107,31 @@ fn assert_invariants(conn: &rusqlite::Connection, data_dir: &std::path::Path) {
         }
     }
 
-    // 2. Memory: index rows and files agree; ids unique; supersede chains resolve.
+    // 2. Task steps stay exactly one level deep and every duration is a whole
+    //    number of 5-minute blocks.
+    let mut stmt = conn
+        .prepare(
+            "SELECT c.id FROM tasks c JOIN tasks p ON c.parent_id = p.id
+             WHERE p.parent_id IS NOT NULL",
+        )
+        .unwrap();
+    let deep: Vec<i64> =
+        stmt.query_map([], |r| r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+    assert!(deep.is_empty(), "tasks nested more than one level deep: {deep:?}");
+    let mut stmt = conn
+        .prepare("SELECT id, duration_min, duration_source FROM tasks WHERE duration_min IS NOT NULL")
+        .unwrap();
+    let durs: Vec<(i64, i64, String)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    for (id, d, source) in durs {
+        assert!(d > 0 && d % 5 == 0, "task {id} has an unusable duration {d}");
+        assert_eq!(source, "agent", "task {id} duration came from nowhere");
+    }
+
+    // 3. Memory: index rows and files agree; ids unique; supersede chains resolve.
     let mut stmt = conn
         .prepare("SELECT id, archived, path FROM memory_index WHERE user='aki'")
         .unwrap();
