@@ -93,6 +93,10 @@ pub fn reshape(conn: &Connection, ctx: &ToolCtx, args: ReshapeArgs) -> Result<se
 #[serde(deny_unknown_fields)]
 pub struct DropArgs {
     pub event_id: i64,
+    /// The event this one moved to, when the drop is a reschedule rather than an
+    /// abandonment. Add the replacement first, then name its id here.
+    #[serde(default)]
+    pub moved_to_event_id: Option<i64>,
 }
 
 /// The agent may only drop events the template marked `flexibility = 'drop'`,
@@ -100,6 +104,20 @@ pub struct DropArgs {
 /// rewriting a decision the user already made — is the user's call, not the
 /// model's.
 pub fn drop_event(conn: &Connection, ctx: &ToolCtx, args: DropArgs) -> Result<serde_json::Value, ToolError> {
+    if let Some(target) = args.moved_to_event_id {
+        if target == args.event_id {
+            return Err(ToolError::rejected("an event cannot have moved to itself"));
+        }
+        match crate::plan::event_gate(conn, ctx.user_id, target) {
+            Ok(None) => {
+                return Err(ToolError::rejected(format!(
+                    "no event {target} to have moved to; add the replacement first"
+                )))
+            }
+            Ok(Some(_)) => {}
+            Err(e) => return Err(ToolError::internal(e.to_string())),
+        }
+    }
     match crate::plan::event_gate(conn, ctx.user_id, args.event_id) {
         Ok(None) => return Err(ToolError::not_found(format!("no event {}", args.event_id))),
         Ok(Some((flex, _))) if flex != "drop" => {
@@ -118,10 +136,15 @@ pub fn drop_event(conn: &Connection, ctx: &ToolCtx, args: DropArgs) -> Result<se
         Err(e) => return Err(ToolError::internal(e.to_string())),
     }
     match crate::plan::set_status(conn, ctx.user_id, args.event_id, "dropped") {
-        Ok(Some(())) => Ok(serde_json::json!({ "ok": true })),
-        Ok(None) => Err(ToolError::not_found(format!("no event {}", args.event_id))),
-        Err(e) => Err(ToolError::internal(e.to_string())),
+        Ok(Some(())) => {}
+        Ok(None) => return Err(ToolError::not_found(format!("no event {}", args.event_id))),
+        Err(e) => return Err(ToolError::internal(e.to_string())),
     }
+    if let Some(target) = args.moved_to_event_id {
+        crate::plan::set_moved_to(conn, ctx.user_id, args.event_id, target)
+            .map_err(|e| ToolError::internal(e.to_string()))?;
+    }
+    Ok(serde_json::json!({ "ok": true }))
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -292,6 +315,41 @@ mod tests {
         let status: String = conn
             .query_row("SELECT status FROM events WHERE id=2", [], |r| r.get(0)).unwrap();
         assert_eq!(status, "done");
+    }
+
+    #[test]
+    fn a_drop_can_name_the_event_it_moved_to() {
+        let (conn, tmp) = env();
+        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Nightly, "schedule_insert",
+            r#"{"date":"2026-08-31","kind":"nudge","time":"17:00","flexibility":"drop","channel":"push"}"#).unwrap();
+        let moved = out["event_id"].as_i64().unwrap();
+        dispatch(&conn, &ctx(&tmp), SessionKind::Nightly, "schedule_drop",
+            &format!(r#"{{"event_id":2,"moved_to_event_id":{moved}}}"#)).unwrap();
+
+        let date: jiff::civil::Date = "2026-08-31".parse().unwrap();
+        let evs = crate::plan::events_for(&conn, 1, date).unwrap();
+        let dropped = evs.iter().find(|e| e.id == 2).unwrap();
+        assert_eq!(dropped.status, "dropped");
+        let to = dropped.moved_to.as_ref().unwrap();
+        assert_eq!((to.event_id, to.wall_time.as_str(), to.kind.as_str()), (moved, "17:00", "nudge"));
+        assert_eq!(to.date, "2026-08-31");
+        assert!(evs.iter().find(|e| e.id == 1).unwrap().moved_to.is_none());
+    }
+
+    #[test]
+    fn a_drop_cannot_point_at_itself_or_an_event_that_is_not_there() {
+        let (conn, tmp) = env();
+        for raw in [
+            r#"{"event_id":2,"moved_to_event_id":2}"#,
+            r#"{"event_id":2,"moved_to_event_id":9999}"#,
+        ] {
+            let e = dispatch(&conn, &ctx(&tmp), SessionKind::Checkin, "schedule_drop", raw)
+                .unwrap_err();
+            assert_eq!(e.kind, "rejected", "{raw}");
+        }
+        let status: String =
+            conn.query_row("SELECT status FROM events WHERE id=2", [], |r| r.get(0)).unwrap();
+        assert_eq!(status, "pending", "a rejected drop must change nothing");
     }
 
     #[test]
