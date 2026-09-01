@@ -685,6 +685,7 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
   .btn-primary, .btn-outline, .btn-chip, .ev-menu-item, .toast-action, .capture { min-height: 2.5rem; }
   .btn-chip { min-width: 2.5rem; }
   .ev-more { width: 2.5rem; height: 2.5rem; }
+  .receipt-chip { min-height: 2.5rem; }
 }
 
 @media (max-width: 767.98px) {
@@ -857,10 +858,10 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 .chat-rename { font-size: 0.85rem; padding: 0.15rem 0.35rem; }
 .chat-meta {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   gap: 0.5rem;
-  min-height: 1rem;
+  min-height: 1.6rem;
 }
 .chat-when {
   font-family: var(--mono);
@@ -868,22 +869,11 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
   color: var(--text-muted);
   white-space: nowrap;
 }
-.chat-tools { display: flex; gap: 0.5rem; opacity: 0; transition: opacity 120ms ease; }
-.chat-row:hover .chat-tools,
-.chat-row:focus-within .chat-tools,
-.chat-tools.always { opacity: 1; }
-.chat-tool {
-  background: none;
-  border: none;
-  padding: 0;
-  color: var(--text-muted);
-  font-family: var(--mono);
-  font-size: 0.68rem;
-  letter-spacing: 0.04em;
-  cursor: pointer;
+.chat-more-wrap { position: relative; flex: none; }
+.chat-more-wrap .ev-more { width: 1.6rem; height: 1.6rem; font-size: 0.9rem; }
+@media (pointer: coarse), (max-width: 767.98px) {
+  .chat-more-wrap .ev-more { width: 2.5rem; height: 2.5rem; }
 }
-.chat-tool:hover { color: var(--text); }
-.chat-tool.danger:hover { color: var(--danger); }
 
 .chat-scrim { display: none; }
 
@@ -962,7 +952,16 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
   overflow-wrap: anywhere;
   font-size: 0.95rem;
 }
-.turn.assistant { width: 100%; }
+.turn.assistant { width: 100%; display: flex; align-items: flex-start; gap: 0.75rem; }
+.turn-avatar {
+  width: 26px;
+  height: 26px;
+  flex: none;
+  margin-top: 0.3rem;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 35%, color-mix(in srgb, var(--sun) 55%, white), var(--sun));
+}
+.turn.assistant .prose { min-width: 0; max-width: 35rem; }
 .turn.system {
   border-left: 2px solid var(--danger);
   padding: 0.1rem 0 0.1rem 0.75rem;
@@ -1001,81 +1000,70 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
   to { background-position: -80% 0; }
 }
 
-/* tool calls — the diamond echoes the today spine's marker */
-.tool {
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  background: var(--surface);
-  overflow: hidden;
+/* tool calls — a sentence you can read, with the raw call one chevron away.
+   They sit in the assistant's column, so the block is indented past the avatar. */
+.receipts {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-left: 2.375rem;
+  margin-top: -0.6rem;
 }
-.tool.error { border-color: color-mix(in srgb, var(--danger) 40%, var(--border)); }
-.tool > summary {
+.receipt { max-width: 33rem; }
+.receipt-chip {
   display: flex;
   align-items: center;
   gap: 0.55rem;
-  padding: 0.5rem 0.8rem;
-  cursor: pointer;
-  list-style: none;
-  font-family: var(--mono);
-  font-size: 0.8rem;
-}
-.tool > summary::-webkit-details-marker { display: none; }
-.tool > summary:hover { background: color-mix(in srgb, var(--text) 4%, transparent); }
-.tool > summary:focus-visible {
-  outline: 2px solid var(--ring);
-  outline-offset: -2px;
-  border-radius: var(--radius-lg);
-}
-.tool[open] > summary { border-bottom: 1px solid var(--border); }
-.tool-glyph {
-  width: 7px;
-  height: 7px;
-  flex: none;
-  transform: rotate(45deg);
-  border: 1.5px solid var(--accent);
-  border-radius: 1px;
-  transition: background 120ms ease;
-}
-.tool[open] .tool-glyph { background: var(--accent); }
-.tool.error .tool-glyph { border-color: var(--danger); background: var(--danger); }
-.tool-name {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.tool-badge {
-  font-size: 0.65rem;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--text-muted);
+  width: fit-content;
+  max-width: 100%;
+  background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 999px;
-  padding: 0.05rem 0.45rem;
+  padding: 0.3rem 0.85rem 0.3rem 0.7rem;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 0.85rem;
+  text-align: left;
+  cursor: pointer;
+  transition: color 120ms ease, border-color 120ms ease;
 }
-.tool.error .tool-badge {
-  color: var(--danger);
-  border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
+.receipt-chip:hover { color: var(--text); border-color: var(--border-input); }
+.receipt.open .receipt-chip {
+  width: 100%;
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  border-bottom-color: transparent;
 }
-.tool-body { padding: 0.7rem 0.8rem; display: grid; gap: 0.3rem; }
-.tool-label {
+.receipt-mark { flex: none; color: var(--moss); font-size: 0.9rem; line-height: 1; }
+.receipt.error .receipt-mark { color: var(--clay); }
+.receipt-text { min-width: 0; overflow-wrap: anywhere; }
+.receipt-chev { flex: none; margin-left: auto; font-size: 0.7rem; }
+.receipt-body {
+  border: 1px solid var(--border);
+  border-top: none;
+  border-radius: 0 0 var(--radius-lg) var(--radius-lg);
+  background: var(--surface);
+  padding: 0.6rem 0.75rem 0.7rem;
+  display: grid;
+  gap: 0.35rem;
+}
+.receipt.error :is(.receipt-chip, .receipt-body) {
+  border-color: color-mix(in srgb, var(--clay) 40%, var(--border));
+}
+.receipt-tool {
   font-family: var(--mono);
-  font-size: 0.65rem;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  font-size: 0.68rem;
+  letter-spacing: 0.06em;
   color: var(--text-muted);
 }
-.tool-label + .tool-block { margin-bottom: 0.3rem; }
-.tool-block {
+.receipt-block {
   margin: 0;
   background: var(--code-bg);
   border-radius: var(--radius);
-  padding: 0.55rem 0.7rem;
+  padding: 0.5rem 0.65rem;
   font-family: var(--mono);
-  font-size: 0.78rem;
+  font-size: 0.75rem;
   line-height: 1.5;
-  max-height: 16rem;
+  max-height: 14rem;
   overflow: auto;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -1178,6 +1166,13 @@ button.chat-send {
   border-radius: 50%;
 }
 .chat-send svg { width: 1.05rem; height: 1.05rem; }
+.chat-standing {
+  max-width: 48rem;
+  margin: 0.5rem auto 0;
+  padding-left: 0.2rem;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+}
 
 @media (max-width: 1023.98px) {
   .chat-toggle { display: block; }
@@ -1209,7 +1204,6 @@ button.chat-send {
   .chat-pane { padding: 1.1rem 1rem 0.75rem; }
   .chat-foot { padding: 0.5rem 1rem 1rem; }
   .chat-head { padding: 0.7rem 1rem 0.25rem; }
-  .chat-tools { opacity: 1; }
 }
 
 /* with the app sidebar still visible, the drawer and scrim start after it */
@@ -1220,8 +1214,7 @@ button.chat-send {
 
 @media (prefers-reduced-motion: reduce) {
   .chat-side, .chat-side.open { transition: none; }
-  .chat-tools, .chat-row, .chat-new { transition: none; }
-  .tool-glyph { transition: none; }
+  .chat-row, .chat-new, .receipt-chip { transition: none; }
 }
 
 /* memory — a list of saved facts beside the one you're reading. Category is the

@@ -424,18 +424,23 @@ function Receipt({ item }: { item: ToolItem }) {
 
 - [ ] **Step 2: Group consecutive tool items**
 
-The mockup stacks receipts as one tight column under the reply, while the stream's own gap is 1.35 rem. Fold runs of tool items into a single node before rendering. Replace the `items.map(...)` body's tool branch by pre-grouping:
+The mockup stacks receipts as one tight column **under** the reply, while the transcript records the calls before it and the stream's own gap is 1.35 rem. Fold runs of tool items into a single node, then swap each tool group with the assistant group that follows it so the chips sit under the sentence that explains them:
 
 ```tsx
 type Group = { key: string; items: Item[] }
 
-// Consecutive tool calls read as one receipt block under the reply they belong to.
 function grouped(items: Item[]): Group[] {
   const out: Group[] = []
   for (const item of items) {
     const last = out[out.length - 1]
     if (item.kind === 'tool' && last?.items[0]?.kind === 'tool') last.items.push(item)
     else out.push({ key: item.key, items: [item] })
+  }
+  for (let i = 0; i < out.length - 1; i++) {
+    if (out[i].items[0].kind === 'tool' && out[i + 1].items[0].kind === 'assistant') {
+      ;[out[i], out[i + 1]] = [out[i + 1], out[i]]
+      i++
+    }
   }
   return out
 }
@@ -498,7 +503,7 @@ const remove = (c: Conversation) => {
   }
   setSideNotice(null)
   tick((n) => n + 1)
-  notify(`Deleted "${c.title}" — Undo`, {
+  notify(`Deleted "${c.title}"`, {
     label: 'Undo',
     windowMs: UNDO_MS,
     run: () => {
@@ -530,7 +535,7 @@ The row's meta becomes:
 </div>
 ```
 
-Note the toast copy is `Deleted "<title>" — Undo` per the spec, with the word Undo also on the button; the spec writes the button into the sentence, so the message text keeps the em-dash phrase and the button label stays `Undo`.
+The spec writes this toast as `Deleted "<title>" — Undo`, where the trailing word names the button — the same shape as step 3's `Saved to Tasks — Undo`, which shipped as the message `Saved to Tasks` plus an `Undo` button. Follow that precedent so the word appears once.
 
 - [ ] **Step 6: Styles**
 
