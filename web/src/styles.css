@@ -1,77 +1,137 @@
+@font-face {
+  font-family: 'Atkinson Hyperlegible';
+  src: url('./fonts/atkinson-400.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Atkinson Hyperlegible';
+  src: url('./fonts/atkinson-700.woff2') format('woff2');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Atkinson Hyperlegible';
+  src: url('./fonts/atkinson-400-italic.woff2') format('woff2');
+  font-weight: 400;
+  font-style: italic;
+  font-display: swap;
+}
+/* variable: the opsz axis stays live, wght is clipped to the two weights used */
+@font-face {
+  font-family: 'Fraunces';
+  src: url('./fonts/fraunces-subset.woff2') format('woff2');
+  font-weight: 420 560;
+  font-style: normal;
+  font-display: swap;
+}
+
 :root {
-  --bg: oklch(0.985 0 0);
-  --surface: #ffffff;
-  --surface-2: #ffffff;
-  --text: oklch(0.145 0 0);
-  --text-muted: oklch(0.5 0 0);
-  --border: oklch(0.9 0 0);
-  --border-input: oklch(0.87 0 0);
+  color-scheme: light;
+
+  --dawn: oklch(97.5% 0.006 85);
+  --card: oklch(99.2% 0.004 85);
+  --sunk: oklch(95.4% 0.008 80);
+
+  --ink: oklch(24% 0.02 60);
+  --quiet: oklch(48% 0.015 60);
+  /* the design's third grey sits at 62%, which measures 3.4:1 on paper; this is
+     the floor above it, and the smallest shift that clears 4.5:1 on every surface */
+  --faint: oklch(53% 0.012 60);
+
+  --mist: oklch(89% 0.009 75);
+  --mist-strong: oklch(83% 0.011 75);
+
+  /* --sun fills; --sun-ink is the same accent at a weight text can be set in */
   --sun: #e8871e;
-  --accent: var(--sun);
-  --accent-fg: oklch(0.205 0 0);
-  --danger: oklch(0.577 0.245 27.325);
-  --ring: var(--accent);
-  --sidebar-bg: oklch(0.97 0 0);
-  --sidebar-border: oklch(0.922 0 0);
-  --bubble: oklch(0.945 0 0);
-  --code-bg: oklch(0.968 0 0);
+  --sun-ink: #9c5c05;
+  --moss: oklch(52% 0.09 145);
+  --clay: oklch(52% 0.06 40);
+  --accent-fg: oklch(20% 0.03 60);
+
+  /* the shape of a day, drawn once down Today's spine: decoration only */
+  --spine: linear-gradient(
+    to bottom,
+    oklch(80% 0.07 80),
+    oklch(84% 0.02 90) 38%,
+    oklch(78% 0.05 300) 78%,
+    oklch(60% 0.04 285)
+  );
+
   --radius: 0.625rem;
   --radius-lg: 0.875rem;
   --radius-xl: 1.25rem;
-  --moss: #427a55;
-  --clay: #b0533b;
-  /* the sun accent at text weight; --sun itself is tuned for fills */
-  --sun-ink: #9c5c05;
-  --serif: Georgia, 'Iowan Old Style', 'Times New Roman', serif;
-  --sans: system-ui, -apple-system, 'Segoe UI', sans-serif;
+
+  /* Fraunces is display only — the wordmark, view titles, the Now card title,
+     the Now-screen counter, and Memory detail titles. Nothing else. */
+  --display: 'Fraunces', Georgia, 'Iowan Old Style', serif;
+  --sans: 'Atkinson Hyperlegible', system-ui, -apple-system, 'Segoe UI', sans-serif;
   --mono: ui-monospace, 'SF Mono', Menlo, monospace;
-  /* pre-token names; untouched views still resolve these */
-  --dawn: var(--bg);
-  --ink: var(--text);
-  --card: var(--surface);
-  --mist: var(--border);
-  --sunk: color-mix(in srgb, var(--text) 6%, var(--surface));
-  --quiet: var(--text-muted);
-  color-scheme: light;
+
+  /* the names the rest of the sheet resolves through */
+  --bg: var(--dawn);
+  --surface: var(--card);
+  --surface-2: var(--card);
+  --text: var(--ink);
+  --text-muted: var(--quiet);
+  --border: var(--mist);
+  --border-input: var(--mist-strong);
+  --accent: var(--sun);
+  --ring: var(--sun-ink);
+  --sidebar-bg: color-mix(in oklch, var(--dawn) 70%, var(--card));
+  --sidebar-border: var(--mist);
+  --bubble: var(--sunk);
+  --code-bg: var(--sunk);
 }
 
 :root[data-theme='dark'] {
   color-scheme: dark;
-  --bg: oklch(0.16 0 0);
-  --surface: oklch(0.205 0 0);
-  --surface-2: oklch(0.225 0 0);
-  --text: oklch(0.97 0 0);
-  --text-muted: oklch(0.708 0 0);
-  --border: oklch(1 0 0 / 13%);
-  --border-input: oklch(1 0 0 / 22%);
-  --danger: oklch(0.704 0.191 22.216);
-  --sidebar-bg: oklch(0.2 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --bubble: oklch(0.29 0 0);
-  --code-bg: oklch(0.245 0 0);
-  --moss: #7bbd93;
-  --clay: #d98a70;
+  --dawn: oklch(17.5% 0.01 60);
+  --card: oklch(21.5% 0.012 60);
+  --sunk: oklch(25% 0.014 65);
+  --surface-2: var(--sunk);
+  --ink: oklch(93% 0.008 80);
+  --quiet: oklch(72% 0.012 70);
+  /* the design's 56% measures 4.1:1 here; this is the floor above it */
+  --faint: oklch(63% 0.012 70);
+  --mist: oklch(30% 0.012 65);
+  --mist-strong: oklch(38% 0.014 65);
   --sun-ink: #edaa4e;
+  --moss: oklch(72% 0.09 145);
+  --clay: oklch(68% 0.07 40);
+  --spine: linear-gradient(
+    to bottom,
+    oklch(55% 0.07 80),
+    oklch(45% 0.02 90) 38%,
+    oklch(48% 0.06 300) 78%,
+    oklch(40% 0.05 285)
+  );
 }
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme='light']) {
     color-scheme: dark;
-    --bg: oklch(0.16 0 0);
-    --surface: oklch(0.205 0 0);
-    --surface-2: oklch(0.225 0 0);
-    --text: oklch(0.97 0 0);
-    --text-muted: oklch(0.708 0 0);
-    --border: oklch(1 0 0 / 13%);
-    --border-input: oklch(1 0 0 / 22%);
-    --danger: oklch(0.704 0.191 22.216);
-    --sidebar-bg: oklch(0.2 0 0);
-    --sidebar-border: oklch(1 0 0 / 10%);
-    --bubble: oklch(0.29 0 0);
-    --code-bg: oklch(0.245 0 0);
-    --moss: #7bbd93;
-    --clay: #d98a70;
+    --dawn: oklch(17.5% 0.01 60);
+    --card: oklch(21.5% 0.012 60);
+    --sunk: oklch(25% 0.014 65);
+    --surface-2: var(--sunk);
+    --ink: oklch(93% 0.008 80);
+    --quiet: oklch(72% 0.012 70);
+    --faint: oklch(63% 0.012 70);
+    --mist: oklch(30% 0.012 65);
+    --mist-strong: oklch(38% 0.014 65);
     --sun-ink: #edaa4e;
+    --moss: oklch(72% 0.09 145);
+    --clay: oklch(68% 0.07 40);
+    --spine: linear-gradient(
+      to bottom,
+      oklch(55% 0.07 80),
+      oklch(45% 0.02 90) 38%,
+      oklch(48% 0.06 300) 78%,
+      oklch(40% 0.05 285)
+    );
   }
 }
 
@@ -110,18 +170,19 @@ body {
   align-items: center;
   gap: 0.5rem;
   margin: 0;
-  font-family: var(--serif);
-  font-size: 1.35rem;
-  font-weight: 500;
+  font-family: var(--display);
+  font-size: 1.375rem;
+  font-weight: 560;
+  letter-spacing: 0.01em;
   line-height: 1.2;
 }
 .brand-glyph {
-  width: 8px;
-  height: 8px;
+  width: 14px;
+  height: 14px;
   flex: none;
-  transform: rotate(45deg);
-  border-radius: 2px;
-  background: var(--accent);
+  border-radius: 50%;
+  background: var(--sun);
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--sun) 25%, var(--dawn));
 }
 .sidebar-sub {
   margin: 0.3rem 0 0;
@@ -130,24 +191,40 @@ body {
 }
 .sidebar-nav { display: flex; flex-direction: column; gap: 2px; }
 .sidebar-item {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
   text-align: left;
   border: none;
   background: none;
-  color: var(--text-muted);
+  color: var(--quiet);
   font: inherit;
   font-size: 0.95rem;
-  padding: 0.5rem 0.75rem;
+  font-weight: 400;
+  padding: 0.55rem 0.75rem;
   border-radius: var(--radius);
   cursor: pointer;
   transition: background 120ms ease, color 120ms ease;
 }
 .sidebar-item:hover { background: color-mix(in srgb, var(--text) 6%, transparent); color: var(--text); }
 .sidebar-item[aria-current='true'] {
-  background: color-mix(in srgb, var(--accent) 15%, transparent);
-  color: color-mix(in srgb, var(--accent) 55%, var(--text));
-  font-weight: 600;
+  background: var(--sunk);
+  color: var(--ink);
+  font-weight: 700;
 }
+.sidebar-item[aria-current='true'] .nav-icon { stroke: var(--sun-ink); }
 .sidebar-item:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
+
+.nav-icon {
+  width: 17px;
+  height: 17px;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
 
 .content {
   flex: 1;
@@ -194,22 +271,27 @@ body {
 .tabs button {
   flex: 1;
   max-width: 6.5rem;
-  padding: 0.7rem 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: 0.5rem 0 0.45rem;
   border: none;
   background: none;
-  color: var(--text-muted);
+  color: var(--faint);
   font: inherit;
-  font-size: 0.8rem;
+  font-size: 0.66rem;
   cursor: pointer;
 }
+.tabs .nav-icon { width: 20px; height: 20px; }
 .tabs button[aria-current='true'] {
-  color: var(--accent);
-  font-weight: 600;
+  color: var(--sun-ink);
+  font-weight: 700;
 }
 .tabs button:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
 
 @media (max-width: 767.98px) {
-  .shell { padding-bottom: calc(3.1rem + env(safe-area-inset-bottom)); }
+  .shell { padding-bottom: calc(3.6rem + env(safe-area-inset-bottom)); }
   .sidebar { display: none; }
   .tabs { display: flex; }
   .mobile-head {
@@ -258,7 +340,7 @@ button.quiet {
   transition: background 120ms ease;
 }
 button.quiet:hover:not(:disabled) { background: color-mix(in srgb, var(--text) 5%, transparent); }
-button.quiet.danger { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 45%, var(--border-input)); }
+button.quiet.danger { color: var(--clay); border-color: color-mix(in srgb, var(--clay) 45%, var(--border-input)); }
 button.ghost {
   background: none;
   border: none;
@@ -275,8 +357,8 @@ button.ghost:hover:not(:disabled) {
   color: var(--text);
 }
 button.ghost.danger:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--danger) 13%, transparent);
-  color: var(--danger);
+  background: color-mix(in srgb, var(--clay) 13%, transparent);
+  color: var(--clay);
 }
 button:disabled { opacity: 0.5; cursor: default; }
 button:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
@@ -401,7 +483,7 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
   text-align: center;
 }
 .login h1 {
-  font-family: var(--serif);
+  font-family: var(--display);
   font-size: 2.3rem;
   font-weight: 500;
   margin: 0 0 1.25rem;
@@ -409,12 +491,11 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 .login h1::after {
   content: '';
   display: inline-block;
-  width: 9px;
-  height: 9px;
-  margin-left: 0.45rem;
-  transform: rotate(45deg);
-  border-radius: 2px;
-  background: var(--accent);
+  width: 11px;
+  height: 11px;
+  margin-left: 0.5rem;
+  border-radius: 50%;
+  background: var(--sun);
 }
 .login form {
   width: 18rem;
@@ -425,13 +506,11 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
   padding: 1.4rem 1.25rem 1.25rem;
   box-shadow: 0 1px 2px color-mix(in srgb, var(--text) 6%, transparent);
 }
-.login form p[role='alert'] { margin: 0 0 0.75rem; font-size: 0.9rem; color: var(--danger); }
+.login form p[role='alert'] { margin: 0 0 0.75rem; font-size: 0.9rem; color: var(--clay); }
 .login .primary { width: 100%; }
 
 /* today — one reading column: the morning letter folded at the top, then the plan
-   spine with the Now line cutting across it and the current event raised into a card.
-   The mockups' third grey fails the 4.5:1 floor, so quiet and faint both resolve to
-   --text-muted and the hierarchy is carried by size and weight. */
+   spine with the Now line cutting across it and the current event raised into a card. */
 .today { max-width: 45rem; }
 
 .debrief-row { margin-bottom: 1.6rem; }
@@ -463,7 +542,9 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 .debrief-row .letter { margin-top: 0.9rem; padding: 0 0.25rem; font-size: 1rem; }
 .debrief-note { margin: 0 0 1.6rem; font-size: 0.9rem; }
 
-/* the time spine: hours in the left gutter, a rule down the middle of it */
+/* the time spine: hours in the left gutter, a rule down the middle of it. The rule
+   is the day's arc in colour — gold, noon, dusk, night — and nothing more: every
+   row states its own time, state and flexibility in text beside it. */
 .spine {
   list-style: none;
   margin: 0;
@@ -478,7 +559,7 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
   bottom: 0.4rem;
   width: 2px;
   border-radius: 2px;
-  background: var(--border);
+  background: var(--spine);
 }
 
 .ev { position: relative; margin: 0 0 0.9rem; }
@@ -490,7 +571,7 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
   text-align: right;
   font-variant-numeric: tabular-nums;
   font-size: 0.8rem;
-  color: var(--text-muted);
+  color: var(--faint);
 }
 .ev-dot {
   position: absolute;
@@ -520,6 +601,7 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 .ev-check { color: var(--moss); font-size: 0.85rem; }
 .ev-tag {
   font-size: 0.72rem;
+  color: var(--faint);
   border: 1px solid var(--border);
   border-radius: 999px;
   padding: 0.05rem 0.5rem;
@@ -545,7 +627,7 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 }
 .ev.block .ev-dot { background: transparent; border-color: var(--border-input); }
 .ev.block.past .ev-band { border-color: var(--border); opacity: 0.62; }
-.ev-range { font-size: 0.78rem; font-variant-numeric: tabular-nums; }
+.ev-range { font-size: 0.78rem; color: var(--faint); font-variant-numeric: tabular-nums; }
 .ev-band .ev-tag { margin-left: auto; white-space: nowrap; }
 .ev-tag.short { display: none; }
 
@@ -618,8 +700,8 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 }
 .nowcard-title {
   margin: 0 0 0.2rem;
-  font-family: var(--serif);
-  font-weight: 500;
+  font-family: var(--display);
+  font-weight: 420;
   font-size: 1.85rem;
   line-height: 1.15;
 }
@@ -707,10 +789,9 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 .today-clear {
   margin: 0 0 0.9rem -0.9rem;
   color: var(--text-muted);
-  font-family: var(--serif);
   font-size: 1.1rem;
 }
-.today-tomorrow { margin: 1.9rem 0 0; color: var(--text-muted); font-size: 0.85rem; }
+.today-tomorrow { margin: 1.9rem 0 0; color: var(--faint); font-size: 0.85rem; }
 
 /* a finger needs more than the pointer does */
 @media (pointer: coarse), (max-width: 767.98px) {
@@ -746,9 +827,7 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 }
 
 /* tasks — three groups down one reading column: Now carries card weight, Later
-   is the same shape gone quiet, Done Today is a receipt. As on Today, the
-   mockups' third grey fails 4.5:1, so quiet and faint both resolve to
-   --text-muted and size and weight carry the hierarchy. */
+   is the same shape gone quiet, Done Today is a receipt. */
 .tasks { max-width: 45rem; }
 
 .task-add {
@@ -776,7 +855,7 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
   border-radius: 0;
 }
 .task-add input:focus-visible { outline: none; }
-.task-add-hint { flex: none; font-size: 0.78rem; color: var(--text-muted); }
+.task-add-hint { flex: none; font-size: 0.78rem; color: var(--faint); }
 
 .task-group { margin-bottom: 1.65rem; }
 .task-group-head {
@@ -792,6 +871,7 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 .task-group-count { font-weight: 400; letter-spacing: 0; }
 .task-group-why {
   margin-left: auto;
+  color: var(--faint);
   font-weight: 400;
   letter-spacing: 0;
   font-size: 0.75rem;
@@ -984,15 +1064,15 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
   background: color-mix(in srgb, var(--text) 5%, transparent);
   border-color: var(--border-input);
 }
-.chat-new span { color: var(--accent); font-weight: 600; }
+.chat-new span { color: var(--sun-ink); font-weight: 700; }
 
 .chat-side-note { margin: 0 0.85rem 0.5rem; font-size: 0.85rem; }
-.chat-side-note.error { color: var(--danger); }
+.chat-side-note.error { color: var(--clay); }
 .chat-link {
   background: none;
   border: none;
   padding: 0;
-  color: var(--accent);
+  color: var(--sun-ink);
   font: inherit;
   text-decoration: underline;
   text-underline-offset: 2px;
@@ -1016,7 +1096,7 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
   transition: background 120ms ease;
 }
 .chat-row:hover { background: color-mix(in srgb, var(--text) 5%, transparent); }
-.chat-row[data-active='true'] { background: color-mix(in srgb, var(--accent) 15%, transparent); }
+.chat-row[data-active='true'] { background: var(--sunk); }
 .chat-open {
   display: block;
   width: 100%;
@@ -1033,8 +1113,8 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
   white-space: nowrap;
 }
 .chat-row[data-active='true'] .chat-open {
-  color: color-mix(in srgb, var(--accent) 55%, var(--text));
-  font-weight: 600;
+  color: var(--ink);
+  font-weight: 700;
 }
 .chat-rename { font-size: 0.85rem; padding: 0.15rem 0.35rem; }
 .chat-meta {
@@ -1074,8 +1154,7 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 }
 .chat-head h2 {
   margin: 0;
-  font-family: var(--serif);
-  font-weight: 500;
+  font-weight: 700;
   font-size: 1.05rem;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1108,7 +1187,6 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 .chat-empty {
   margin: auto 0;
   text-align: center;
-  font-family: var(--serif);
   font-size: 1.1rem;
   color: var(--text-muted);
 }
@@ -1117,9 +1195,8 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
   display: inline-block;
   width: 10px;
   height: 10px;
-  transform: rotate(45deg);
-  border-radius: 2px;
-  background: var(--accent);
+  border-radius: 50%;
+  background: var(--sun);
 }
 
 .turn.user {
@@ -1144,10 +1221,10 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 }
 .turn.assistant .prose { min-width: 0; max-width: 35rem; }
 .turn.system {
-  border-left: 2px solid var(--danger);
+  border-left: 2px solid var(--clay);
   padding: 0.1rem 0 0.1rem 0.75rem;
   margin: 0;
-  color: var(--danger);
+  color: var(--clay);
   font-size: 0.9rem;
   display: flex;
   flex-direction: column;
@@ -1155,7 +1232,6 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 .turn.system .chat-hint { color: var(--text-muted); }
 .turn.pending {
   margin: 0;
-  font-family: var(--serif);
   font-style: italic;
   color: var(--text-muted);
 }
@@ -1251,13 +1327,12 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 }
 
 /* assistant prose */
-.prose { font-family: var(--serif); font-size: 1.02rem; line-height: 1.65; }
+.prose { font-size: 1.02rem; line-height: 1.65; }
 .prose > :first-child { margin-top: 0; }
 .prose > :last-child { margin-bottom: 0; }
 .prose p { margin: 0.7em 0; }
 .prose h1, .prose h2, .prose h3, .prose h4 {
-  font-family: var(--serif);
-  font-weight: 600;
+  font-weight: 700;
   line-height: 1.3;
   margin: 1.1em 0 0.4em;
 }
@@ -1267,7 +1342,7 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 .prose h4 { font-size: 1rem; }
 .prose ul, .prose ol { margin: 0.6em 0; padding-left: 1.3em; }
 .prose li { margin: 0.2em 0; }
-.prose a { color: var(--accent); text-underline-offset: 2px; }
+.prose a { color: var(--sun-ink); text-underline-offset: 2px; }
 .prose blockquote {
   margin: 0.8em 0;
   padding-left: 0.9rem;
@@ -1451,10 +1526,10 @@ button.chat-send {
 }
 .chip:hover { color: var(--text); }
 .chip[aria-pressed='true'] {
-  color: var(--cat, var(--text));
-  border-color: color-mix(in srgb, var(--cat, var(--text)) 38%, transparent);
-  background: color-mix(in srgb, var(--cat, var(--text)) 11%, transparent);
-  font-weight: 600;
+  background: var(--sunk);
+  color: var(--ink);
+  border-color: color-mix(in oklch, var(--cat, var(--sun)) 34%, var(--mist));
+  font-weight: 700;
 }
 
 .memory-cat {
@@ -1463,8 +1538,8 @@ button.chat-send {
   padding: 0.05rem 0.5rem;
   font-size: 0.68rem;
   letter-spacing: 0.04em;
-  color: var(--cat, var(--text-muted));
-  background: color-mix(in srgb, var(--cat, var(--text-muted)) 13%, transparent);
+  color: var(--cat, var(--quiet));
+  border: 1px solid color-mix(in oklch, var(--cat, var(--mist)) 30%, var(--mist));
 }
 
 .memory-list {
@@ -1494,7 +1569,7 @@ button.chat-send {
   transition: background 120ms ease;
 }
 .memory-row:hover { background: color-mix(in srgb, var(--text) 5%, transparent); }
-.memory-row[aria-current='true'] { background: color-mix(in srgb, var(--accent) 15%, transparent); }
+.memory-row[aria-current='true'] { background: var(--sunk); color: var(--ink); }
 .memory-rowmeta {
   display: flex;
   align-items: center;
@@ -1515,8 +1590,8 @@ button.chat-send {
 .memory-back { display: none; align-items: center; gap: 0.35rem; margin: 0 0 0.6rem -0.6rem; }
 .memory-title {
   margin: 0 0 0.75rem;
-  font-family: var(--serif);
-  font-weight: 500;
+  font-family: var(--display);
+  font-weight: 560;
   font-size: 1.45rem;
   line-height: 1.25;
 }
@@ -1576,7 +1651,6 @@ button.chat-send {
 .memory-blank {
   margin: 18vh 0 0;
   text-align: center;
-  font-family: var(--serif);
   font-size: 1.05rem;
   color: var(--text-muted);
 }
@@ -1628,10 +1702,10 @@ button.chat-send {
 }
 .set-item:hover { color: var(--text); }
 .set-item[aria-current='true'] {
-  background: color-mix(in srgb, var(--accent) 15%, transparent);
-  border-color: color-mix(in srgb, var(--accent) 38%, transparent);
-  color: color-mix(in srgb, var(--accent) 55%, var(--text));
-  font-weight: 600;
+  background: var(--sunk);
+  border-color: color-mix(in oklch, var(--sun) 30%, var(--mist));
+  color: var(--ink);
+  font-weight: 700;
 }
 .set-item:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
 
@@ -1760,8 +1834,7 @@ button.chat-send {
 .dialog-body { padding: 1.1rem 1.25rem 1rem; }
 .dialog-title {
   margin: 0;
-  font-family: var(--serif);
-  font-weight: 500;
+  font-weight: 700;
   font-size: 1.1rem;
 }
 .dialog-text { margin: 0.5rem 0 1.15rem; font-size: 0.9rem; color: var(--text-muted); }
@@ -1771,26 +1844,24 @@ button.chat-send {
   .set-item { transition: none; }
 }
 
-/* panes and section titles — the sun diamond marks a section the way it marks a tool call */
+/* panes and section titles — a heading stands on its type, with no marker beside it */
 .pane { padding: 0.9rem 1rem 1rem; }
 .pane > p { margin: 0; }
 
 .pane-title {
   display: flex;
-  align-items: center;
+  align-items: baseline;
   gap: 0.55rem;
   margin: 0 0 0.75rem;
-  font-family: var(--serif);
-  font-weight: 500;
-  font-size: 1.05rem;
+  font-family: var(--display);
+  font-weight: 420;
+  font-size: 1.625rem;
+  line-height: 1.25;
 }
-.pane-glyph {
-  width: 6px;
-  height: 6px;
-  flex: none;
-  transform: rotate(45deg);
-  border-radius: 1px;
-  background: var(--sun);
+/* inside Settings the same component is a pane heading, one step down */
+.set-pane .pane-title {
+  font-weight: 560;
+  font-size: 1.25rem;
 }
 .pane-meta {
   margin-left: auto;
@@ -1849,8 +1920,8 @@ fieldset.pane-rows { border: none; margin: 0; padding: 0; min-width: 0; }
 }
 .seg button[aria-pressed='true'] {
   background: var(--card);
-  color: var(--sun);
-  font-weight: 600;
+  color: var(--sun-ink);
+  font-weight: 700;
 }
 .seg button:focus-visible { outline: 2px solid var(--sun); outline-offset: 1px; }
 
@@ -1861,7 +1932,6 @@ fieldset.pane-rows { border: none; margin: 0; padding: 0; min-width: 0; }
 
 /* debrief letter */
 .letter {
-  font-family: var(--serif);
   font-size: 1.05rem;
   line-height: 1.7;
   white-space: pre-wrap;
@@ -1908,7 +1978,7 @@ fieldset.pane-rows { border: none; margin: 0; padding: 0; min-width: 0; }
 .toast-action:hover { background: color-mix(in srgb, var(--bg) 16%, transparent); }
 .toast-action:focus-visible { outline: 2px solid var(--bg); outline-offset: 2px; }
 @media (max-width: 767.98px) {
-  .toast { bottom: calc(4.1rem + env(safe-area-inset-bottom)); }
+  .toast { bottom: calc(4.6rem + env(safe-area-inset-bottom)); }
 }
 
 /* admin log */
@@ -1920,7 +1990,7 @@ fieldset.pane-rows { border: none; margin: 0; padding: 0; min-width: 0; }
 
 /* Now-screen counter — 2026-08-31-now-counter-spec.md §4 */
 .now-counter {
-  font-family: var(--serif);
+  font-family: var(--display);
   font-weight: 420;
   font-variant-numeric: tabular-nums;
   line-height: 1;
@@ -1965,8 +2035,6 @@ fieldset.pane-rows { border: none; margin: 0; padding: 0; min-width: 0; }
     radial-gradient(120% 90% at 50% 118%, color-mix(in srgb, var(--sun) 6%, transparent), transparent 60%),
     var(--dawn);
   color: var(--ink);
-  /* one step quieter than --quiet, and no quieter: 4.8:1 is the floor it clears */
-  --now-faint: color-mix(in srgb, var(--quiet) 92%, var(--dawn));
 }
 .now-top {
   width: 100%;
@@ -1974,10 +2042,10 @@ fieldset.pane-rows { border: none; margin: 0; padding: 0; min-width: 0; }
   display: flex;
   align-items: baseline;
   padding: 1.5rem 2.125rem 0;
-  color: var(--now-faint);
+  color: var(--faint);
   font-size: 0.875rem;
 }
-.now-brand { font-family: var(--serif); font-weight: 600; font-size: 0.9375rem; }
+.now-brand { font-family: var(--display); font-weight: 560; font-size: 0.9375rem; }
 .now-clock { margin-left: auto; font-variant-numeric: tabular-nums; }
 
 .now-stage {
@@ -2036,12 +2104,12 @@ fieldset.pane-rows { border: none; margin: 0; padding: 0; min-width: 0; }
   align-items: center;
   gap: 0.5625rem;
   width: 150px;
-  color: var(--now-faint);
+  color: var(--faint);
   font-size: 0.78125rem;
 }
 .now-denom::before, .now-denom::after { content: ""; flex: 1; border-top: 1.5px dashed var(--mist); }
 .now-task { color: var(--quiet); font-size: 0.96875rem; text-wrap: balance; margin-top: 0.375rem; }
-.now-step { color: var(--now-faint); font-size: 0.78125rem; }
+.now-step { color: var(--faint); font-size: 0.78125rem; }
 
 .now-done {
   font-family: var(--sans);
@@ -2056,7 +2124,7 @@ fieldset.pane-rows { border: none; margin: 0; padding: 0; min-width: 0; }
 }
 .now-done:hover { border-color: var(--quiet); color: var(--ink); }
 .now-done:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
-.now-next { color: var(--now-faint); font-size: 0.75rem; margin-top: 0.125rem; }
+.now-next { color: var(--faint); font-size: 0.75rem; margin-top: 0.125rem; }
 
 .now-sheet {
   position: fixed;
@@ -2084,7 +2152,7 @@ fieldset.pane-rows { border: none; margin: 0; padding: 0; min-width: 0; }
 }
 .now-lip:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
 .now-grab { display: block; width: 38px; height: 4px; border-radius: 2px; background: var(--mist); margin: 0 auto 6px; }
-.now-hint { color: var(--now-faint); font-size: 0.75rem; }
+.now-hint { color: var(--faint); font-size: 0.75rem; }
 .now-sheet-body { display: flex; flex-direction: column; padding: 0 0.5rem 0.5rem; }
 .now-sheet-item {
   min-height: 2.5rem;
