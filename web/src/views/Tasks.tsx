@@ -3,7 +3,7 @@ import { api, ApiError } from '../api'
 import type { ViewProps } from '../app'
 import { Overflow, type OverflowItem } from '../overflow'
 import { SectionTitle } from '../section'
-import type { Task, TaskNode, TaskState, TaskUpdate } from '../types'
+import type { NewStep, Task, TaskNode, TaskState, TaskUpdate } from '../types'
 
 const NOW_CAP = 3
 const UNDO_MS = 5000
@@ -17,6 +17,22 @@ type Group = 'now' | 'later' | 'done'
 type Snapshot = { id: number; state: TaskState }[]
 
 const isLive = (t: Task) => t.state === 'open' || t.state === 'in_progress'
+
+// The server only stores multiples of five; rounding here means no display path
+// can ever show a duration the user could not have been offered.
+const round5 = (min: number) => Math.max(5, Math.round(min / 5) * 5)
+
+// Step 6's Now screen opens on this task; a parent hands off to its next
+// unfinished step.
+const focusTarget = (node: TaskNode): Task =>
+  node.children.find((c) => c.state !== 'done') ?? node
+
+function parentSub(node: TaskNode): string {
+  const done = node.children.filter((c) => c.state === 'done').length
+  const parts = node.duration_min === null ? [] : [`≈ ${round5(node.duration_min)} min`]
+  parts.push(`Note split this into ${node.children.length} steps`, `${done} done`)
+  return parts.join(' · ')
+}
 
 function sameDay(iso: string, today: Date): boolean {
   const d = new Date(iso)
@@ -75,11 +91,14 @@ function mergeUpdate(nodes: TaskNode[], u: TaskUpdate): TaskNode[] {
 }
 
 type RowActions = {
-  complete: (node: TaskNode) => void
+  complete: (node: TaskNode, step?: Task) => void
   reopen: (node: TaskNode) => void
+  reopenStep: (step: Task) => void
   moveToNow: (node: TaskNode) => void
   moveToLater: (node: TaskNode) => void
   setProgress: (node: TaskNode, on: boolean) => void
+  keepAsOne: (node: TaskNode) => void
+  startFocus: (node: TaskNode) => void
 }
 
 export function Tasks({ notify, refresh }: ViewProps) {
@@ -123,31 +142,36 @@ export function Tasks({ notify, refresh }: ViewProps) {
     [patch],
   )
 
-  // Finishing a task takes its live steps with it, so undo has to carry them
-  // back or the steps would stay ticked under a reopened task.
-  const complete = (node: TaskNode) => {
-    const steps = node.children.filter((c) => c.state !== 'done')
-    const snap: Snapshot = [
-      ...steps.map((c) => ({ id: c.id, state: c.state })),
-      { id: node.id, state: node.state },
-    ]
-    setNodes((ns) => {
-      if (!ns) return ns
-      return snap.reduce((acc, s) => withState(acc, s.id, 'done'), ns)
-    })
-    void patch(node.id, { state: 'done' })
-    notify(`${node.title} — done`, {
+  // Finishing a task takes its live steps with it, and finishing the last step
+  // finishes the task, so undo has to put the whole cascade back.
+  const complete = (node: TaskNode, step?: Task) => {
+    const lastStep =
+      step !== undefined && node.children.every((c) => c.id === step.id || c.state === 'done')
+    const cascade = step
+      ? lastStep
+        ? [node]
+        : []
+      : node.children.filter((c) => c.state !== 'done')
+    const ordered = step ? [step, ...cascade] : [...cascade, node]
+    const snap: Snapshot = ordered.map((t) => ({ id: t.id, state: t.state }))
+    setNodes((ns) => (ns ? snap.reduce((acc, s) => withState(acc, s.id, 'done'), ns) : ns))
+    void patch(step ? step.id : node.id, { state: 'done' })
+    notify(`${step && !lastStep ? step.title : node.title} — done`, {
       label: 'Undo',
       run: () => void restore(snap),
       windowMs: UNDO_MS,
     })
   }
 
+  // Reopening a finished task brings its steps back too, so the sub-line's count
+  // cannot claim work is done under a task that is open again.
   const reopen = (node: TaskNode) =>
     void restore([
       ...node.children.map((c) => ({ id: c.id, state: 'open' as TaskState })),
       { id: node.id, state: 'open' as TaskState },
     ])
+
+  const reopenStep = (step: Task) => void restore([{ id: step.id, state: 'open' }])
 
   const setNow = (node: TaskNode, is_now: boolean) => {
     setNodes((ns) => (ns ? ns.map((n) => (n.id === node.id ? { ...n, is_now } : n)) : ns))
@@ -158,6 +182,42 @@ export function Tasks({ notify, refresh }: ViewProps) {
     const state: TaskState = on ? 'in_progress' : 'open'
     setNodes((ns) => (ns ? withState(ns, node.id, state) : ns))
     void patch(node.id, { state })
+  }
+
+  // The only reversal a flatten has is replaying the split, so the steps travel
+  // into the undo closure rather than being read back off a stale row.
+  const keepAsOne = (node: TaskNode) => {
+    const steps: NewStep[] = node.children
+      .filter((c) => c.duration_min !== null)
+      .map((c) => ({ title: c.title, duration_min: c.duration_min as number }))
+    const put = (n: TaskNode) =>
+      setNodes((ns) => (ns ? ns.map((x) => (x.id === n.id ? { ...x, ...n } : x)) : ns))
+    setNodes((ns) => (ns ? ns.map((n) => (n.id === node.id ? { ...n, children: [] } : n)) : ns))
+    api
+      .flattenTask(node.id)
+      .then((r) => put(r.task))
+      .catch(() => {
+        notify("Couldn't update the task. Try again.")
+        load()
+      })
+    notify(`${node.title} — kept as one task`, {
+      label: 'Undo',
+      run: () =>
+        void api
+          .splitTask(node.id, steps)
+          .then(put)
+          .catch(() => {
+            notify("Couldn't put the steps back. Try again.")
+            load()
+          }),
+      windowMs: UNDO_MS,
+    })
+  }
+
+  // Until the Now screen lands, starting a task does the one thing that screen
+  // would change here.
+  const startFocus = (node: TaskNode) => {
+    if (node.state !== 'in_progress') setProgress(node, true)
   }
 
   const add = (e: FormEvent) => {
@@ -213,10 +273,12 @@ export function Tasks({ notify, refresh }: ViewProps) {
   const actions: RowActions = {
     complete,
     reopen,
-    moveToNow: (node) =>
-      g.now.length >= NOW_CAP ? notify(NOW_FULL) : setNow(node, true),
+    reopenStep,
+    moveToNow: (node) => (g.now.length >= NOW_CAP ? notify(NOW_FULL) : setNow(node, true)),
     moveToLater: (node) => setNow(node, false),
     setProgress,
+    keepAsOne,
+    startFocus,
   }
 
   return (
@@ -278,16 +340,16 @@ export function Tasks({ notify, refresh }: ViewProps) {
   )
 }
 
-function Row({
-  node,
-  group,
-  actions,
-}: {
-  node: TaskNode
-  group: Group
-  actions: RowActions
-}) {
+function Duration({ task }: { task: Task }) {
+  if (task.duration_min !== null) return <span className="task-dur">≈ {round5(task.duration_min)} min</span>
+  if (task.duration_source !== 'none') return null
+  return <span className="task-dur est">Note will estimate</span>
+}
+
+function Row({ node, group, actions }: { node: TaskNode; group: Group; actions: RowActions }) {
   const done = group === 'done'
+  const steps = done ? [] : node.children
+  const next = steps.find((c) => c.state !== 'done')
   const items: OverflowItem[] = [
     group === 'now'
       ? { label: 'Move to Later', run: () => actions.moveToLater(node) }
@@ -296,6 +358,9 @@ function Row({
       ? { label: 'Clear in progress', run: () => actions.setProgress(node, false) }
       : { label: 'Mark in progress', run: () => actions.setProgress(node, true) },
   ]
+  if (steps.length > 0) {
+    items.push({ label: 'Keep as one task', run: () => actions.keepAsOne(node) })
+  }
 
   return (
     <div className="task-row">
@@ -309,18 +374,51 @@ function Row({
         </button>
         <div className="task-body">
           <div className="task-title">{node.title}</div>
+          {steps.length > 0 && <div className="task-sub">{parentSub(node)}</div>}
         </div>
         {!done && node.state === 'in_progress' && (
           <span className="task-tag progress">in progress</span>
         )}
+        {!done && steps.length === 0 && <Duration task={node} />}
+        {group === 'now' && (
+          <button
+            className="task-start"
+            aria-label={`Start ${focusTarget(node).title}`}
+            onClick={() => actions.startFocus(node)}
+          >
+            <span aria-hidden="true">▶</span>
+          </button>
+        )}
         {!done && (
-          <Overflow
-            className="task-more"
-            label={`More actions for ${node.title}`}
-            items={items}
-          />
+          <Overflow className="task-more" label={`More actions for ${node.title}`} items={items} />
         )}
       </div>
+      {steps.length > 0 && (
+        <div className="task-steps">
+          {steps.map((c) => (
+            <div
+              key={c.id}
+              className={`task-step${c.state === 'done' ? ' done' : ''}${c.id === next?.id ? ' next' : ''}`}
+            >
+              <button
+                className="task-tick"
+                aria-label={
+                  c.state === 'done' ? `Mark ${c.title} not done` : `Mark ${c.title} done`
+                }
+                onClick={() =>
+                  c.state === 'done' ? actions.reopenStep(c) : actions.complete(node, c)
+                }
+              >
+                <span className="ticksm" aria-hidden="true" />
+              </button>
+              <span className="task-step-title">{c.title}</span>
+              {c.duration_min !== null && (
+                <span className="task-dur">{round5(c.duration_min)} min</span>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   )
 }
