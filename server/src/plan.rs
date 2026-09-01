@@ -237,6 +237,65 @@ pub fn snooze(
     Ok(Some(()))
 }
 
+/// Start and end of an owned block, or `None` when the event is not the user's
+/// or is a routine.
+pub fn block_shape(
+    conn: &Connection,
+    user_id: i64,
+    event_id: i64,
+) -> Result<Option<(String, String, String)>> {
+    Ok(conn
+        .query_row(
+            "SELECT e.wall_time, e.end_wall_time, e.status FROM events e
+             JOIN plans p ON p.id = e.plan_id
+             WHERE e.id = ?1 AND p.user_id = ?2 AND e.end_wall_time IS NOT NULL",
+            (event_id, user_id),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?)
+}
+
+/// Moves and resizes a block. A block carries no slide window — its shape is the
+/// agent's to arrange — but a `done` or `dropped` block is a settled user
+/// decision and is refused, exactly as in `shift`. `orig_wall_time` stays where
+/// the template put it. `None` when the event is not the user's or is a routine.
+pub fn reshape(
+    conn: &Connection,
+    user_id: i64,
+    event_id: i64,
+    start: &str,
+    end: &str,
+) -> Result<Option<()>, ShiftError> {
+    let Some((_, _, status)) = block_shape(conn, user_id, event_id)? else {
+        return Ok(None);
+    };
+    if status == "done" || status == "dropped" {
+        return Err(ShiftError::Decided { status });
+    }
+    conn.execute(
+        "UPDATE events SET wall_time = ?1, end_wall_time = ?2 WHERE id = ?3",
+        (start, end, event_id),
+    )?;
+    Ok(Some(()))
+}
+
+/// Records where a dropped event went. The target is resolved under the same
+/// ownership predicate as every other plan write, so it can only ever be one of
+/// the user's own events.
+pub fn set_moved_to(
+    conn: &Connection,
+    user_id: i64,
+    event_id: i64,
+    target_id: i64,
+) -> Result<bool> {
+    let n = conn.execute(
+        "UPDATE events SET moved_to_event_id = ?1
+         WHERE id = ?2 AND plan_id IN (SELECT id FROM plans WHERE user_id = ?3)",
+        (target_id, event_id, user_id),
+    )?;
+    Ok(n > 0)
+}
+
 /// Flexibility and current status of an owned event: the two fields the agent
 /// drop gate weighs before touching a user decision.
 pub fn event_gate(conn: &Connection, user_id: i64, event_id: i64) -> Result<Option<(String, String)>> {
