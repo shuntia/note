@@ -392,9 +392,9 @@ pub fn move_to_tomorrow(
     let plan_id = generate(conn, user_id, template, tomorrow)?;
     conn.execute(
         "INSERT INTO events (plan_id, kind, wall_time, orig_wall_time, end_wall_time,
-                             flexibility, slide_window_min, channel, alert, span_min)
+                             flexibility, slide_window_min, channel, alert, span_min, message)
          SELECT ?1, kind, orig_wall_time, orig_wall_time, end_wall_time,
-                flexibility, slide_window_min, channel, alert, span_min
+                flexibility, slide_window_min, channel, alert, span_min, message
          FROM events WHERE id = ?2",
         (plan_id, event_id),
     )?;
@@ -524,6 +524,21 @@ mod tests {
             move_to_tomorrow(&conn, uid, 1, &t),
             Err(ShiftError::Decided { .. })
         ));
+    }
+
+    #[test]
+    fn a_moved_event_keeps_its_message() {
+        let conn = crate::db::open_memory().unwrap();
+        let uid = crate::auth::create_user(&conn, "a", "p", false).unwrap();
+        let date: jiff::civil::Date = "2026-08-31".parse().unwrap();
+        generate(&conn, uid, &tmpl(), date).unwrap();
+        conn.execute("UPDATE events SET message = ?1 WHERE id = 1", ["water the plants"]).unwrap();
+        let (new_id, tomorrow) = move_to_tomorrow(&conn, uid, 1, &tmpl()).unwrap().unwrap();
+        assert_eq!(tomorrow.to_string(), "2026-09-01");
+        let message: String = conn
+            .query_row("SELECT message FROM events WHERE id = ?1", [new_id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(message, "water the plants");
     }
 
     #[test]
