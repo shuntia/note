@@ -38,11 +38,13 @@
   --ink: oklch(23% 0.03 255);
   --ivory: oklch(98% 0.008 85);
   --quiet: oklch(40% 0.025 250);
-  --faint: oklch(52% 0.02 245);
+  --faint: oklch(45% 0.02 245);
   --line: oklch(30% 0.03 250 / 0.45);
   --track: oklch(30% 0.03 250 / 0.16);
   --sun: oklch(80% 0.15 76);
   --sun-ink: oklch(50% 0.13 55);
+  /* --sun does not follow the theme, so neither does the ink set on it */
+  --accent-fg: oklch(23% 0.03 255);
   --sage: oklch(50% 0.09 150);
   --rose: oklch(55% 0.07 30);
   --sky: linear-gradient(180deg, var(--sky-top) 0%, var(--sky-mid) 45%, var(--earth) 72%);
@@ -63,7 +65,6 @@
   --mist-strong: var(--line);
   --moss: var(--sage);
   --clay: var(--rose);
-  --accent-fg: var(--ink);
   --spine: none;
   --bg: var(--earth);
   --surface: var(--haze-strong);
@@ -90,7 +91,7 @@
   --ink: oklch(93% 0.012 85);
   --ivory: oklch(20% 0.02 60);
   --quiet: oklch(74% 0.015 80);
-  --faint: oklch(62% 0.014 75);
+  --faint: oklch(64.5% 0.014 75);
   --line: oklch(90% 0.01 80 / 0.35);
   --track: oklch(90% 0.01 80 / 0.14);
   --sun-ink: oklch(78% 0.13 78);
@@ -109,7 +110,7 @@
     --ink: oklch(93% 0.012 85);
     --ivory: oklch(20% 0.02 60);
     --quiet: oklch(74% 0.015 80);
-    --faint: oklch(62% 0.014 75);
+    --faint: oklch(64.5% 0.014 75);
     --line: oklch(90% 0.01 80 / 0.35);
     --track: oklch(90% 0.01 80 / 0.14);
     --sun-ink: oklch(78% 0.13 78);
