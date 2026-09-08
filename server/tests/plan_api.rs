@@ -409,6 +409,7 @@ async fn every_event_reports_a_span() {
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(v[0]["entry"], "routine");
     assert_eq!(v[0]["end_wall_time"], "09:15");
+    assert_eq!(v[1]["entry"], "routine");
     assert_eq!(v[1]["end_wall_time"], "18:45");
 }
 
@@ -500,12 +501,13 @@ async fn an_event_moves_to_tomorrow() {
     assert_eq!(today[0]["status"], "dropped");
     assert_eq!(today[0]["moved_to"]["date"], "2026-09-01");
     let tomorrow = fetch("2026-09-01", cookie.clone()).await;
-    let copy = tomorrow
+    let landing: Vec<_> = tomorrow
         .as_array()
         .unwrap()
         .iter()
-        .find(|e| e["id"] == moved["event_id"])
-        .expect("the copy lives in tomorrow's plan");
-    assert_eq!(copy["wall_time"], today[0]["wall_time"]);
-    assert_eq!(copy["status"], "pending");
+        .filter(|e| e["kind"] == today[0]["kind"] && e["wall_time"] == today[0]["wall_time"])
+        .collect();
+    assert_eq!(landing.len(), 1, "the template already recurs tomorrow, so no twin");
+    assert_eq!(landing[0]["id"], moved["event_id"]);
+    assert_eq!(landing[0]["status"], "pending");
 }

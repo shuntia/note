@@ -359,10 +359,13 @@ pub fn set_alert(
     Ok(Some(()))
 }
 
-/// Copies an undecided routine into the plan for the day after its own plan
-/// date, creating that plan from `template` if needed, and marks the original
-/// dropped with a pointer to the copy. A block is never moved. The copy takes
-/// `orig_wall_time`, so a snoozed event lands at its planned time tomorrow.
+/// Sends an undecided routine to the day after its own plan date, creating that
+/// plan from `template` if needed, and marks the original dropped with a pointer
+/// to where it landed. When tomorrow's plan already holds an undecided instance
+/// of the same routine at the same planned time — the template recurs — that
+/// instance is the landing place; otherwise a copy is inserted at
+/// `orig_wall_time`, so a snoozed event lands at its planned time. A block, like
+/// a missing event, answers `None`.
 pub fn move_to_tomorrow(
     conn: &Connection,
     user_id: i64,
@@ -390,15 +393,30 @@ pub fn move_to_tomorrow(
         .map_err(anyhow::Error::from)?;
     let tx = conn.unchecked_transaction()?;
     let plan_id = generate(conn, user_id, template, tomorrow)?;
-    conn.execute(
-        "INSERT INTO events (plan_id, kind, wall_time, orig_wall_time, end_wall_time,
-                             flexibility, slide_window_min, channel, alert, span_min, message)
-         SELECT ?1, kind, orig_wall_time, orig_wall_time, end_wall_time,
-                flexibility, slide_window_min, channel, alert, span_min, message
-         FROM events WHERE id = ?2",
-        (plan_id, event_id),
-    )?;
-    let new_id = conn.last_insert_rowid();
+    let existing: Option<i64> = conn
+        .query_row(
+            "SELECT t.id FROM events t JOIN events s ON s.id = ?2
+             WHERE t.plan_id = ?1 AND t.kind = s.kind AND t.orig_wall_time = s.orig_wall_time
+               AND t.end_wall_time IS NULL AND t.status IN ('pending', 'snoozed', 'fired')
+             ORDER BY t.id LIMIT 1",
+            (plan_id, event_id),
+            |r| r.get(0),
+        )
+        .optional()?;
+    let new_id = match existing {
+        Some(id) => id,
+        None => {
+            conn.execute(
+                "INSERT INTO events (plan_id, kind, wall_time, orig_wall_time, end_wall_time,
+                                     flexibility, slide_window_min, channel, alert, span_min, message)
+                 SELECT ?1, kind, orig_wall_time, orig_wall_time, end_wall_time,
+                        flexibility, slide_window_min, channel, alert, span_min, message
+                 FROM events WHERE id = ?2",
+                (plan_id, event_id),
+            )?;
+            conn.last_insert_rowid()
+        }
+    };
     conn.execute(
         "UPDATE events SET status = 'dropped', moved_to_event_id = ?1 WHERE id = ?2",
         (new_id, event_id),
@@ -531,14 +549,58 @@ mod tests {
         let conn = crate::db::open_memory().unwrap();
         let uid = crate::auth::create_user(&conn, "a", "p", false).unwrap();
         let date: jiff::civil::Date = "2026-08-31".parse().unwrap();
-        generate(&conn, uid, &tmpl(), date).unwrap();
+        let mut t = tmpl();
+        t.events[0].days = vec!["mon".into()];
+        generate(&conn, uid, &t, date).unwrap();
         conn.execute("UPDATE events SET message = ?1 WHERE id = 1", ["water the plants"]).unwrap();
-        let (new_id, tomorrow) = move_to_tomorrow(&conn, uid, 1, &tmpl()).unwrap().unwrap();
+        let (new_id, tomorrow) = move_to_tomorrow(&conn, uid, 1, &t).unwrap().unwrap();
         assert_eq!(tomorrow.to_string(), "2026-09-01");
         let message: String = conn
             .query_row("SELECT message FROM events WHERE id = ?1", [new_id], |r| r.get(0))
             .unwrap();
         assert_eq!(message, "water the plants");
+    }
+
+    #[test]
+    fn a_moved_routine_merges_into_the_instance_tomorrow_already_has() {
+        let conn = crate::db::open_memory().unwrap();
+        let uid = crate::auth::create_user(&conn, "a", "p", false).unwrap();
+        let date: jiff::civil::Date = "2026-08-31".parse().unwrap();
+        let t = Template {
+            events: vec![TemplateEvent {
+                kind: "meds".into(), time: "08:00".into(),
+                days: vec!["mon".into(), "tue".into()],
+                channel: "push".into(), ..Default::default()
+            }],
+        };
+        generate(&conn, uid, &t, date).unwrap();
+        let (new_id, tomorrow) = move_to_tomorrow(&conn, uid, 1, &t).unwrap().unwrap();
+        let evs = events_for(&conn, uid, tomorrow).unwrap();
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].id, new_id);
+        assert_eq!(evs[0].wall_time, "08:00");
+        assert_eq!(evs[0].status, "pending");
+    }
+
+    #[test]
+    fn a_moved_routine_tomorrow_does_not_repeat_is_copied() {
+        let conn = crate::db::open_memory().unwrap();
+        let uid = crate::auth::create_user(&conn, "a", "p", false).unwrap();
+        let date: jiff::civil::Date = "2026-08-31".parse().unwrap();
+        let t = Template {
+            events: vec![TemplateEvent {
+                kind: "meds".into(), time: "08:00".into(), days: vec!["mon".into()],
+                channel: "push".into(), ..Default::default()
+            }],
+        };
+        generate(&conn, uid, &t, date).unwrap();
+        let (new_id, tomorrow) = move_to_tomorrow(&conn, uid, 1, &t).unwrap().unwrap();
+        assert_ne!(new_id, 1);
+        let evs = events_for(&conn, uid, tomorrow).unwrap();
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].id, new_id);
+        assert_eq!(evs[0].kind, "meds");
+        assert_eq!(evs[0].wall_time, "08:00");
     }
 
     #[test]
