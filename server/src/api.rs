@@ -39,6 +39,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/events/{id}/done", post(event_done))
         .route("/api/events/{id}/drop", post(event_drop))
         .route("/api/events/{id}/alert", post(event_alert))
+        .route("/api/events/{id}/move_tomorrow", post(event_move_tomorrow))
         .route("/api/ws", get(ws_connect))
         .route("/api/push/subscribe", post(push_subscribe))
         .route("/api/push/unsubscribe", post(push_unsubscribe))
@@ -944,6 +945,30 @@ async fn event_alert(
         Ok(Some(())) => StatusCode::OK.into_response(),
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(crate::plan::AlertRefused::Block) => StatusCode::CONFLICT.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn event_move_tomorrow(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    let ucfg = match crate::config::UserConfig::load(&state.config_dir, &user.username) {
+        Ok(c) => c,
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    let tmpl = match crate::templates::Template::load(&state.config_dir, &user.username, &ucfg.template) {
+        Ok(t) => t,
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    let conn = state.db.lock().unwrap();
+    match crate::plan::move_to_tomorrow(&conn, user.id, id, &tmpl) {
+        Ok(Some((event_id, date))) => {
+            Json(serde_json::json!({ "event_id": event_id, "date": date.to_string() })).into_response()
+        }
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(crate::plan::ShiftError::Decided { .. }) => StatusCode::CONFLICT.into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }

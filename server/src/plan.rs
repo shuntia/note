@@ -359,6 +359,54 @@ pub fn set_alert(
     Ok(Some(()))
 }
 
+/// Copies an undecided routine into the plan for the day after its own plan
+/// date, creating that plan from `template` if needed, and marks the original
+/// dropped with a pointer to the copy. A block is never moved. The copy takes
+/// `orig_wall_time`, so a snoozed event lands at its planned time tomorrow.
+pub fn move_to_tomorrow(
+    conn: &Connection,
+    user_id: i64,
+    event_id: i64,
+    template: &Template,
+) -> Result<Option<(i64, jiff::civil::Date)>, ShiftError> {
+    let Some(ev) = owned_event(conn, user_id, event_id)? else {
+        return Ok(None);
+    };
+    if ev.is_block {
+        return Ok(None);
+    }
+    if ev.status == "done" || ev.status == "dropped" {
+        return Err(ShiftError::Decided { status: ev.status });
+    }
+    let date: String = conn.query_row(
+        "SELECT p.date FROM events e JOIN plans p ON p.id = e.plan_id WHERE e.id = ?1",
+        [event_id],
+        |r| r.get(0),
+    )?;
+    let tomorrow = date
+        .parse::<jiff::civil::Date>()
+        .map_err(anyhow::Error::from)?
+        .tomorrow()
+        .map_err(anyhow::Error::from)?;
+    let tx = conn.unchecked_transaction()?;
+    let plan_id = generate(conn, user_id, template, tomorrow)?;
+    conn.execute(
+        "INSERT INTO events (plan_id, kind, wall_time, orig_wall_time, end_wall_time,
+                             flexibility, slide_window_min, channel, alert, span_min)
+         SELECT ?1, kind, orig_wall_time, orig_wall_time, end_wall_time,
+                flexibility, slide_window_min, channel, alert, span_min
+         FROM events WHERE id = ?2",
+        (plan_id, event_id),
+    )?;
+    let new_id = conn.last_insert_rowid();
+    conn.execute(
+        "UPDATE events SET status = 'dropped', moved_to_event_id = ?1 WHERE id = ?2",
+        (new_id, event_id),
+    )?;
+    tx.commit()?;
+    Ok(Some((new_id, tomorrow)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -448,6 +496,34 @@ mod tests {
         assert!(matches!(set_alert(&conn, uid, 2, true), Err(AlertRefused::Block)));
         set_alert(&conn, uid, 1, false).unwrap().unwrap();
         assert!(!events_for(&conn, uid, date).unwrap()[0].alert);
+    }
+
+    #[test]
+    fn a_block_or_a_decided_event_never_moves() {
+        let conn = crate::db::open_memory().unwrap();
+        let uid = crate::auth::create_user(&conn, "a", "p", false).unwrap();
+        let date: jiff::civil::Date = "2026-08-31".parse().unwrap();
+        let t = Template {
+            events: vec![
+                TemplateEvent {
+                    kind: "meds".into(), time: "08:00".into(), days: vec!["mon".into()],
+                    channel: "push".into(), ..Default::default()
+                },
+                TemplateEvent {
+                    kind: "Work time".into(), time: "09:30".into(), days: vec!["mon".into()],
+                    entry: crate::templates::Entry::Block, end_time: Some("12:30".into()),
+                    channel: "push".into(), ..Default::default()
+                },
+            ],
+        };
+        generate(&conn, uid, &t, date).unwrap();
+        assert!(move_to_tomorrow(&conn, uid, 2, &t).unwrap().is_none());
+        assert!(move_to_tomorrow(&conn, uid, 99, &t).unwrap().is_none());
+        set_status(&conn, uid, 1, "done").unwrap().unwrap();
+        assert!(matches!(
+            move_to_tomorrow(&conn, uid, 1, &t),
+            Err(ShiftError::Decided { .. })
+        ));
     }
 
     #[test]
