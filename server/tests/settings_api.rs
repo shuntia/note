@@ -91,11 +91,13 @@ async fn put_persists_to_disk_and_is_reflected_by_get() {
     let raw = std::fs::read_to_string(cfg.path().join("users/aki/user.toml")).unwrap();
     let on_disk: toml::Value = raw.parse().unwrap();
     let table = on_disk.as_table().unwrap();
-    assert_eq!(table.len(), 4, "unexpected keys in {raw}");
+    assert_eq!(table.len(), 6, "unexpected keys in {raw}");
     assert_eq!(table["display_name"].as_str(), Some("X"));
     assert_eq!(table["timezone"].as_str(), Some("Asia/Tokyo"));
     assert_eq!(table["nightly_time"].as_str(), Some("22:30"));
     assert_eq!(table["template"].as_str(), Some("default"));
+    assert_eq!(table["show_arc_between_sessions"].as_bool(), Some(true));
+    assert_eq!(table["counter"].as_str(), Some("remaining"));
 
     let v = json(app.oneshot(get(&cookie)).await.unwrap()).await;
     assert_eq!(v["timezone"], "Asia/Tokyo");
@@ -264,4 +266,41 @@ async fn unauthenticated_settings_requests_are_401() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn home_settings_default_and_round_trip() {
+    let (app, cookie, _cfg) = common::app_with_logged_in_user().await;
+    let v = json(app.clone().oneshot(get(&cookie)).await.unwrap()).await;
+    assert_eq!(v["show_arc_between_sessions"], true);
+    assert_eq!(v["counter"], "remaining");
+
+    let res = app
+        .clone()
+        .oneshot(put(
+            &cookie,
+            r#"{"show_arc_between_sessions":false,"counter":"elapsed"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let v = json(res).await;
+    assert_eq!(v["show_arc_between_sessions"], false);
+    assert_eq!(v["counter"], "elapsed");
+
+    let v = json(app.oneshot(get(&cookie)).await.unwrap()).await;
+    assert_eq!(v["show_arc_between_sessions"], false);
+    assert_eq!(v["counter"], "elapsed");
+}
+
+#[tokio::test]
+async fn counter_only_takes_the_two_words() {
+    let (app, cookie, _cfg) = common::app_with_logged_in_user().await;
+    let res = app
+        .oneshot(put(&cookie, r#"{"counter":"sideways"}"#))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let v = json(res).await;
+    assert!(v["error"].as_str().unwrap().starts_with("counter"));
 }

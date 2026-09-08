@@ -485,6 +485,8 @@ struct AlertPatch {
     alert: bool,
 }
 
+const COUNTERS: [&str; 2] = ["remaining", "elapsed"];
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SettingsPatch {
@@ -492,6 +494,8 @@ struct SettingsPatch {
     timezone: Option<String>,
     nightly_time: Option<String>,
     template: Option<String>,
+    show_arc_between_sessions: Option<bool>,
+    counter: Option<String>,
     alerts: Option<Vec<AlertPatch>>,
 }
 
@@ -504,6 +508,8 @@ fn settings_body(
         "timezone": cfg.timezone,
         "nightly_time": cfg.nightly_time,
         "template": cfg.template,
+        "show_arc_between_sessions": cfg.show_arc_between_sessions,
+        "counter": cfg.counter,
         "schedule": schedule,
     })
 }
@@ -593,6 +599,15 @@ async fn settings_put(
             return invalid_field("template", "is not one of the available templates");
         }
         cfg.template = template;
+    }
+    if let Some(show) = req.show_arc_between_sessions {
+        cfg.show_arc_between_sessions = show;
+    }
+    if let Some(counter) = req.counter {
+        if !COUNTERS.contains(&counter.as_str()) {
+            return invalid_field("counter", "must be remaining or elapsed");
+        }
+        cfg.counter = counter;
     }
     if let Some(alerts) = req.alerts {
         let changes: Vec<(usize, bool)> = alerts.iter().map(|a| (a.index, a.alert)).collect();
