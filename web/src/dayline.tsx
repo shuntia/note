@@ -33,8 +33,12 @@ export function DayLine({
       <span className="dl-line" />
       <span className="dl-gone" style={{ width: pct(now) }} />
       <span className="dl-ticks" />
-      {hours.map((h) => (
-        <span key={h} className="dl-hour" style={{ left: pct(h * 60) }}>
+      {hours.map((h, i) => (
+        <span
+          key={h}
+          className={`dl-hour${i === 0 ? ' edge-start' : i === hours.length - 1 ? ' edge-end' : ''}`}
+          style={{ left: pct(h * 60) }}
+        >
           {String(h).padStart(2, '0')}
         </span>
       ))}
