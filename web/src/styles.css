@@ -2175,3 +2175,61 @@ fieldset.pane-rows { border: none; margin: 0; padding: 0; min-width: 0; }
   cursor: pointer;
 }
 .nowcard-open:focus-visible { outline: 2px solid var(--ring); outline-offset: 3px; }
+
+/* ── horizon: shared ─────────────────────────────────────────────── */
+.gauge { position: relative; flex: none; }
+.gauge-ring { width: 100%; height: 100%; overflow: visible; display: block; }
+.gauge-track, .gauge-arc { fill: none; stroke-linecap: round; }
+.gauge-track { stroke: var(--track); }
+.gauge-arc { stroke: var(--sun); transition: stroke-dasharray 900ms linear; }
+.gauge.faded .gauge-ring { opacity: 0.38; }
+.gauge-ring { animation: gauge-breathe 7s ease-in-out infinite; }
+.gauge.faded .gauge-ring, .gauge.still .gauge-ring { animation: none; }
+@keyframes gauge-breathe { 0%, 100% { opacity: 0.55; } 50% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .gauge-ring { animation: none; } }
+.gauge-centre {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  text-align: center; gap: 4px; padding: 0 14%;
+}
+.gauge-num { font-family: var(--display); font-weight: 500; letter-spacing: -0.035em; line-height: 1; color: var(--ink); font-variant-numeric: tabular-nums; }
+.gauge-num.over { color: var(--sun-ink); }
+.gauge-name { margin-top: 6px; font-family: var(--display); font-weight: 500; letter-spacing: -0.015em; line-height: 1.2; color: var(--quiet); text-wrap: balance; }
+.gauge-sub { font-size: 0.75rem; color: var(--faint); font-variant-numeric: tabular-nums; }
+.gauge-eyebrow { font-size: 0.78rem; letter-spacing: 0.12em; font-weight: 700; color: var(--sun-ink); margin-bottom: 6px; }
+
+.dayline { position: relative; height: 0; width: 100%; }
+.dl-line { position: absolute; left: 0; right: 0; top: 0; height: 1px; background: var(--line); }
+.dl-gone { position: absolute; left: 0; top: -1px; height: 3px; border-radius: 2px; background: var(--ink); opacity: 0.7; }
+.dl-ticks { position: absolute; left: 0; right: 0; top: 4px; height: 6px; background: repeating-linear-gradient(to right, var(--line) 0 1px, transparent 1px calc(100% / 18)); }
+.dl-hour { position: absolute; top: 34px; transform: translateX(-50%); font-size: 0.72rem; letter-spacing: 0.06em; color: var(--faint); font-variant-numeric: tabular-nums; }
+.dl-hour:first-of-type { transform: none; }
+.dl-hour:last-of-type { transform: translateX(-100%); }
+.dl-now { position: absolute; top: 0; transform: translate(-50%, -50%); width: 14px; height: 14px; border-radius: 50%; background: var(--ink); }
+.dl-span { position: absolute; top: -6px; height: 12px; min-width: 10px; border-radius: 6px; border: 1.5px solid var(--quiet); box-sizing: border-box; background: var(--earth); }
+.dl-span.next { background: var(--ink); border-color: var(--ink); }
+.dl-label { position: absolute; left: 50%; transform: translateX(-50%); white-space: nowrap; font-size: 0.78rem; color: var(--quiet); font-variant-numeric: tabular-nums; }
+.dl-label.above { bottom: 18px; }
+.dl-label.below { top: 18px; color: var(--ink); font-weight: 700; }
+.dayline.compact .dl-hour { top: 14px; font-size: 0.66rem; }
+.dayline.compact .dl-ticks { height: 5px; }
+.dayline.compact .dl-now { width: 12px; height: 12px; }
+.dayline.compact .dl-span { top: -5px; height: 10px; min-width: 8px; }
+
+.tellnote { display: flex; align-items: center; gap: 10px; padding: 0 6px 0 16px; border-radius: 999px; background: var(--haze-strong); min-height: 48px; }
+.tellnote input { flex: 1; min-width: 0; border: 0; background: none; font: inherit; font-size: 0.92rem; color: var(--ink); outline: none; }
+.tellnote input::placeholder { color: var(--faint); }
+.tellnote button { width: 36px; height: 36px; border: 0; border-radius: 50%; background: none; color: var(--quiet); cursor: pointer; display: grid; place-items: center; }
+.tellnote button:disabled { color: var(--faint); cursor: default; }
+.tellnote button svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.tellnote button:focus-visible, .tellnote input:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+
+.chev { display: flex; align-items: center; justify-content: center; height: 38px; color: var(--faint); background: none; border: 0; width: 100%; cursor: pointer; }
+.chev svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+
+.btn-fill { font: inherit; font-weight: 700; font-size: 1.0625rem; line-height: 1.2; padding: 15px 34px; border: 0; border-radius: 999px; background: var(--ink); color: var(--ivory); cursor: pointer; box-shadow: 0 12px 28px -14px oklch(23% 0.03 255 / 0.7); }
+.btn-haze { font: inherit; font-size: 1.0625rem; line-height: 1.2; padding: 14px 24px; border: 0; border-radius: 999px; background: var(--haze-strong); color: var(--ink); cursor: pointer; }
+.btn-fill:disabled, .btn-haze:disabled { opacity: 0.5; cursor: default; }
+.btn-fill:focus-visible, .btn-haze:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+.btn-round { width: 44px; height: 44px; border: 0; border-radius: 50%; background: var(--haze-strong); color: var(--quiet); display: grid; place-items: center; cursor: pointer; }
+.btn-round svg { width: 18px; height: 18px; fill: currentColor; }
