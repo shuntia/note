@@ -7,6 +7,10 @@ import { mkdtempSync, writeFileSync, cpSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
+// playwright only instruments service-worker traffic behind this flag; without it a
+// service-worker request reaches no listener at all.
+process.env.PW_EXPERIMENTAL_SERVICE_WORKER_NETWORK_EVENTS = '1'
+
 const [tab = 'today', size = '390x844', out = 'shot.png', ...flags] = process.argv.slice(2)
 const [width, height] = size.split('x').map(Number)
 const root = resolve(import.meta.dirname, '../..')
@@ -21,16 +25,29 @@ writeFileSync(
 const bin = join(root, 'target/debug/note-server')
 execFileSync(bin, ['create-user', 'shot', 'shot-pass'], { cwd: dir, stdio: 'ignore' })
 const server = spawn(bin, [], { cwd: dir, stdio: 'ignore' })
+let finished = false
+server.on('exit', (code) => {
+  if (finished) return
+  console.error(`note-server exited early (code ${code}) - is port ${port} already in use?`)
+  process.exit(1)
+})
 process.on('exit', () => server.kill())
+process.on('SIGINT', () => {
+  server.kill()
+  process.exit(130)
+})
 await new Promise((r) => setTimeout(r, 800))
 
 const browser = await chromium.launch({ executablePath: process.env.CHROMIUM ?? '/etc/profiles/per-user/user/bin/chromium' })
 const page = await browser.newPage({ viewport: { width, height }, deviceScaleFactor: 1 })
-const external = []
-page.on('request', (req) => {
-  const url = new URL(req.url())
-  if (url.hostname !== 'localhost' && url.hostname !== '127.0.0.1') external.push(req.url())
-})
+const external = new Set()
+const noteExternal = (req) => {
+  const { hostname } = new URL(req.url())
+  if (hostname !== 'localhost' && hostname !== '127.0.0.1') external.add(req.url())
+}
+page.on('request', noteExternal)
+// Service-worker requests reach the context, never the page.
+page.context().on('request', noteExternal)
 await page.goto('http://localhost:5173/')
 await page.fill('input[placeholder="Username"]', 'shot')
 await page.fill('input[placeholder="Password"]', 'shot-pass')
@@ -59,9 +76,10 @@ if (tab !== 'today') {
 await page.waitForTimeout(800)
 await page.screenshot({ path: out })
 console.log(`wrote ${out}`)
-if (external.length) {
-  console.error(`external requests:\n${external.join('\n')}`)
+if (external.size) {
+  console.error(`external requests:\n${[...external].join('\n')}`)
   process.exitCode = 1
 }
+finished = true
 await browser.close()
 server.kill()
