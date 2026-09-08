@@ -91,16 +91,17 @@ pub fn assemble(conn: &Connection, config_dir: &Path, user_id: i64, username: &s
         out.push_str("(no plan generated for today)\n");
     }
     for e in &events {
-        match &e.end_wall_time {
-            Some(end) => out.push_str(&format!("- {}-{} {} [block]\n", e.wall_time, end, e.kind)),
-            None => out.push_str(&format!(
+        if let ("block", Some(end)) = (e.entry.as_str(), e.end_wall_time.as_deref()) {
+            out.push_str(&format!("- {}-{} {} [block]\n", e.wall_time, end, e.kind));
+        } else {
+            out.push_str(&format!(
                 "- {} {} [{}] via {}{}\n",
                 e.wall_time,
                 e.kind,
                 e.status,
                 e.channel,
                 if e.alert { "" } else { " (silent)" },
-            )),
+            ));
         }
     }
 

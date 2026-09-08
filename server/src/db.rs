@@ -149,6 +149,11 @@ const MIGRATIONS: &[&str] = &[
         CHECK (alert IN (0, 1) AND (alert = 0 OR end_wall_time IS NULL));
     ALTER TABLE events ADD COLUMN moved_to_event_id INTEGER REFERENCES events(id);
     ",
+    // v9
+    "
+    ALTER TABLE events ADD COLUMN span_min INTEGER NOT NULL DEFAULT 15
+        CHECK (span_min > 0);
+    ",
 ];
 
 pub fn open(path: &Path) -> Result<Connection> {
@@ -385,6 +390,22 @@ mod tests {
         );
         conn.execute("UPDATE events SET alert = 0, end_wall_time = '12:30' WHERE id = 1", [])
             .unwrap();
+    }
+
+    #[test]
+    fn v9_gives_every_event_a_span() {
+        let conn = open_memory().unwrap();
+        conn.execute("INSERT INTO users (username, pass_hash, role) VALUES ('a','h','member')", [])
+            .unwrap();
+        conn.execute("INSERT INTO plans (user_id, date, created_at) VALUES (1, '2026-09-01', 'x')", [])
+            .unwrap();
+        conn.execute("INSERT INTO events (plan_id, kind, wall_time) VALUES (1, 'nudge', '09:00')", [])
+            .unwrap();
+        let span: i64 = conn
+            .query_row("SELECT span_min FROM events WHERE id = 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(span, 15);
+        assert!(conn.execute("UPDATE events SET span_min = 0 WHERE id = 1", []).is_err());
     }
 
     #[test]
