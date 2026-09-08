@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { api, ApiError, setOnUnauthorized } from './api'
 import { NavIcon } from './navicon'
+import { prefsFrom, writePrefs } from './prefs'
 import { readSession, writeSession, type FocusSession } from './session'
 import type { Me } from './types'
+import { Home } from './views/Home'
 import { Memory } from './views/Memory'
-import { Now } from './views/Now'
 import { Settings } from './views/Settings'
 import { Talk } from './views/Talk'
 import { Tasks } from './views/Tasks'
@@ -14,7 +15,7 @@ import { connectEvents } from './ws'
 type Tab = 'today' | 'tasks' | 'chat' | 'memory' | 'settings'
 
 const DRAFT_KEY = 'note.captureDraft'
-const CAPTURE_PLACEHOLDER = 'Jot anything — a task, a thought, a change of plan'
+const CAPTURE_PLACEHOLDER = 'Jot anything'
 const UNDO_MS = 5000
 
 // No API removes a task, so the create waits out the undo window before it is sent.
@@ -30,7 +31,7 @@ export type ViewProps = {
   onChanged: () => void
   // Switches to Talk on a new conversation with this text waiting in the composer.
   openTalk: (draft: string) => void
-  // Hands the shell over to the Now screen for the length of a focus session.
+  // Opens a focus session; Home carries it for as long as it runs.
   openNow: (session: FocusSession) => void
 }
 
@@ -49,8 +50,10 @@ export function App() {
   const [toast, setToast] = useState<{ msg: string; action?: ToastAction } | null>(null)
   const [refresh, setRefresh] = useState(0)
   const [talkPrefill, setTalkPrefill] = useState<string | null>(null)
-  // Reading storage at mount is what makes the Now screen the resting face after a reload.
+  // Reading storage at mount is what makes the session face survive a reload.
   const [session, setSession] = useState<FocusSession | null>(readSession)
+  const [chromeHidden, setChromeHidden] = useState(false)
+  const mobile = useMedia('(max-width: 767.98px)')
 
   const toastTimer = useRef(0)
   const notify = useCallback((msg: string, action?: ToastAction) => {
@@ -87,6 +90,14 @@ export function App() {
 
   useEffect(() => {
     if (!me) return
+    api
+      .settings()
+      .then((s) => writePrefs(prefsFrom(s)))
+      .catch(() => {})
+  }, [me])
+
+  useEffect(() => {
+    if (!me) return
     return connectEvents((ev) => {
       notify(ev.body ? `${ev.title} — ${ev.body}` : ev.title)
       onChanged()
@@ -115,79 +126,73 @@ export function App() {
     </div>
   )
 
-  // The Now screen is a full-bleed focus surface: none of the shell's chrome
-  // mounts around it, so its keys never contend with the capture shortcut.
-  if (session) {
-    return (
-      <>
-        <Now
-          session={session}
-          setSession={changeSession}
-          notify={notify}
-          onChanged={onChanged}
-          onLeave={() => setTab('today')}
-        />
-        {toastNode}
-      </>
-    )
-  }
+  const tabsNode = (
+    <nav className={`tabs${chromeHidden ? ' hidden' : ''}`} aria-label="Views">
+      {NAV.map((t) => (
+        <button key={t.id} aria-current={tab === t.id} onClick={() => setTab(t.id)}>
+          <NavIcon id={t.id} />
+          {t.label}
+        </button>
+      ))}
+    </nav>
+  )
+
+  const home = (
+    <Home
+      session={session}
+      setSession={changeSession}
+      notify={notify}
+      onChanged={onChanged}
+      refresh={refresh}
+      openNow={changeSession}
+      mobile={mobile}
+      onChrome={setChromeHidden}
+      tabs={tabsNode}
+    />
+  )
+
+  const showHome = tab === 'today' && (mobile || session !== null)
 
   return (
-    <div className="shell">
-      <aside className="sidebar">
-        <header className="sidebar-head">
-          <h1 className="brand">
-            <span className="brand-glyph" aria-hidden="true" />
-            Note
-          </h1>
-          <p className="sidebar-sub">
-            {me.username} · {new Date().toDateString()}
-          </p>
+    <div className={`shell${chromeHidden ? ' bare' : ''}`}>
+      {!mobile && (
+        <header className="topbar">
+          <span className="brand">Note</span>
+          <nav className="topnav" aria-label="Views">
+            {NAV.map((t) => (
+              <button key={t.id} aria-current={tab === t.id} onClick={() => setTab(t.id)}>
+                {t.label}
+              </button>
+            ))}
+          </nav>
+          <Capture notify={notify} onChanged={onChanged} />
         </header>
-        <nav className="sidebar-nav" aria-label="Views">
-          {NAV.map((t) => (
-            <button
-              key={t.id}
-              className="sidebar-item"
-              aria-current={tab === t.id}
-              onClick={() => setTab(t.id)}
-            >
-              <NavIcon id={t.id} />
-              {t.label}
-            </button>
-          ))}
-        </nav>
-      </aside>
-      <div className="content">
-        <header className="mobile-head">
-          <div className="brand">
-            <span className="brand-glyph" aria-hidden="true" />
-            Note
-          </div>
-          <span className="mobile-sub">{me.username}</span>
-        </header>
-        <Capture notify={notify} onChanged={onChanged} />
-        <main className={tab === 'chat' ? 'view view-talk' : 'view'}>
-          {tab === 'today' && <Today key={refresh} {...views} />}
-          {tab === 'tasks' && <Tasks {...views} />}
-          {tab === 'chat' && (
-            <Talk {...views} prefill={talkPrefill} onPrefilled={() => setTalkPrefill(null)} />
-          )}
-          {tab === 'memory' && <Memory {...views} />}
-          {tab === 'settings' && <Settings me={me} {...views} onSignedOut={() => setMe(null)} />}
-        </main>
-      </div>
-      <nav className="tabs" aria-label="Views">
-        {NAV.map((t) => (
-          <button key={t.id} aria-current={tab === t.id} onClick={() => setTab(t.id)}>
-            <NavIcon id={t.id} />
-            {t.label}
-          </button>
-        ))}
-      </nav>
+      )}
+      <main className={`view${tab === 'chat' ? ' view-talk' : ''}${showHome ? ' view-home' : ''}`}>
+        {showHome && home}
+        {tab === 'today' && !showHome && <Today key={refresh} {...views} />}
+        {tab === 'tasks' && <Tasks {...views} />}
+        {tab === 'chat' && (
+          <Talk {...views} prefill={talkPrefill} onPrefilled={() => setTalkPrefill(null)} />
+        )}
+        {tab === 'memory' && <Memory {...views} />}
+        {tab === 'settings' && <Settings me={me} {...views} onSignedOut={() => setMe(null)} />}
+      </main>
+      {mobile && !showHome && tabsNode}
       {toastNode}
     </div>
   )
+}
+
+function useMedia(query: string): boolean {
+  const [matches, setMatches] = useState(() => window.matchMedia(query).matches)
+  useEffect(() => {
+    const mq = window.matchMedia(query)
+    const on = () => setMatches(mq.matches)
+    mq.addEventListener('change', on)
+    return () => mq.removeEventListener('change', on)
+  }, [query])
+  return matches
 }
 
 function readDraft(): string {

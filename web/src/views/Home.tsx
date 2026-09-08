@@ -320,7 +320,7 @@ export function Home({
     const mins = Math.max(0, minutesOf(ev.wall_time) - now)
     return (
       <>
-        <div className="gauge-eyebrow">NEXT</div>
+        {big && <div className="gauge-eyebrow">NEXT</div>}
         <div className="gauge-num" style={{ fontSize: big ? 50 : 22 }}>{mins} min</div>
         {big && (
           <>
@@ -450,12 +450,14 @@ export function Home({
           <div className="home-text"><div className="home-title">That's everything today.</div></div>
         )}
         {stage === 1 && next && (
-          <div className="home-head">
-            <span className="gauge-eyebrow">NEXT</span>
-            <span className="home-head-name">{eventLabel(next.kind)}</span>
-            <span className="gauge-sub">{next.wall_time} – {next.end_wall_time ?? next.wall_time}</span>
+          <>
+            <div className="home-head">
+              <span className="gauge-eyebrow">NEXT</span>
+              <span className="home-head-name">{eventLabel(next.kind)}</span>
+              <span className="gauge-sub">{next.wall_time} – {next.end_wall_time ?? next.wall_time}</span>
+            </div>
             <button className="btn-fill small" disabled={pending} onClick={() => start(next)}>Start</button>
-          </div>
+          </>
         )}
       </div>
       {stage === 0 && next && nextActions(next)}
