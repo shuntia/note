@@ -1,0 +1,390 @@
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { api, ApiError } from '../api'
+import type { ToastAction } from '../app'
+import { DayLine, minutesOf } from '../dayline'
+import { Gauge } from '../gauge'
+import { NowCounter } from '../nowcounter'
+import { Overflow } from '../overflow'
+import { readPrefs } from '../prefs'
+import { eventLabel } from '../receipts'
+import { effectiveStart, elapsedSec, type FocusSession } from '../session'
+import { useStage } from '../stage'
+import { TellNote } from '../tellnote'
+import type { PlanEvent } from '../types'
+
+const UNDO_MS = 5000
+const LATER_MINUTES = [5, 10, 15, 30, 60]
+
+// Drop has no server-side reversal, so the request waits out the undo window.
+let heldDrop: { id: number; timer: number } | null = null
+
+function nowMinutes(): number {
+  const d = new Date()
+  return d.getHours() * 60 + d.getMinutes()
+}
+
+function fmt(sec: number): string {
+  const s = Math.max(0, sec)
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
+}
+
+function actionMessage(err: unknown): string {
+  if (err instanceof ApiError) {
+    if (err.status === 409) return 'Already settled.'
+    if (err.status === 404) return 'That event is gone.'
+  }
+  return 'Something went wrong. Try again.'
+}
+
+// The fired event owns the face; failing that, the next routine still open does.
+function nextUp(events: PlanEvent[]): PlanEvent | null {
+  return (
+    events.find((ev) => ev.status === 'fired') ??
+    events.find((ev) => ev.entry !== 'block' && (ev.status === 'pending' || ev.status === 'snoozed')) ??
+    null
+  )
+}
+
+// Where the wait started: the end of the last settled routine before now, else 06:00.
+function waitStart(events: PlanEvent[], now: number): number {
+  const ended = events
+    .filter((ev) => ev.status === 'done' || ev.status === 'dropped')
+    .map((ev) => minutesOf(ev.end_wall_time ?? ev.wall_time))
+    .filter((m) => m <= now)
+  return ended.length ? Math.max(...ended) : 6 * 60
+}
+
+// The column is replaced rather than appended to server-side, so the text the
+// session started with has to travel back out with the new line.
+function withElapsedNote(previous: string, elapsed: number): string {
+  const day = new Date().toISOString().slice(0, 10)
+  const line = `${day} · focused ${Math.max(1, Math.round(elapsed / 60))} min`
+  return previous.trim() ? `${previous.trim()}\n${line}` : line
+}
+
+export function Home({
+  session,
+  setSession,
+  notify,
+  onChanged,
+  refresh,
+  openNow,
+  mobile,
+  onChrome,
+  tabs,
+}: {
+  session: FocusSession | null
+  setSession: (s: FocusSession | null) => void
+  notify: (msg: string, action?: ToastAction) => void
+  onChanged: () => void
+  refresh: number
+  openNow: (s: FocusSession) => void
+  mobile: boolean
+  onChrome: (hidden: boolean) => void
+  tabs: ReactNode
+}) {
+  const [events, setEvents] = useState<PlanEvent[]>([])
+  const [, tick] = useState(0)
+  const [pending, setPending] = useState(false)
+  const [later, setLater] = useState(false)
+  const inSession = session !== null
+  const { stage, setStage, bind } = useStage(inSession ? 2 : 1)
+  const prefs = readPrefs()
+
+  const load = useCallback(() => {
+    api
+      .planToday()
+      .then(setEvents)
+      .catch(() => setEvents([]))
+  }, [])
+  useEffect(load, [load, refresh])
+
+  useEffect(() => {
+    const id = setInterval(() => tick((n) => n + 1), 1000)
+    return () => clearInterval(id)
+  }, [])
+
+  // The last stage is Today; before it the face owns the whole screen.
+  const showToday = stage === (inSession ? 2 : 1)
+  useEffect(() => onChrome(mobile && !showToday), [mobile, showToday, onChrome])
+  useEffect(() => setStage(0), [inSession, setStage])
+
+  const act = async (fn: () => Promise<unknown>) => {
+    if (pending) return
+    setPending(true)
+    try {
+      await fn()
+      load()
+      onChanged()
+    } catch (err) {
+      notify(actionMessage(err))
+      if (err instanceof ApiError && err.status === 409) load()
+    } finally {
+      setPending(false)
+    }
+  }
+
+  const commitDrop = useCallback(() => {
+    if (!heldDrop) return
+    const { id, timer } = heldDrop
+    heldDrop = null
+    window.clearTimeout(timer)
+    api
+      .eventAction(id, 'drop')
+      .then(load)
+      .catch(() => load())
+  }, [load])
+  useEffect(() => commitDrop, [commitDrop])
+
+  const drop = (ev: PlanEvent) => {
+    commitDrop()
+    heldDrop = { id: ev.id, timer: window.setTimeout(commitDrop, UNDO_MS) }
+    tick((n) => n + 1)
+    notify(`Dropped ${eventLabel(ev.kind)}`, {
+      label: 'Undo',
+      run: () => {
+        if (heldDrop?.id !== ev.id) return
+        window.clearTimeout(heldDrop.timer)
+        heldDrop = null
+        tick((n) => n + 1)
+      },
+    })
+  }
+
+  const visible = useMemo(() => events.filter((ev) => ev.id !== heldDrop?.id), [events])
+  const now = nowMinutes()
+  const next = nextUp(visible)
+
+  const start = (ev: PlanEvent) =>
+    openNow({
+      taskId: null,
+      eventId: ev.id,
+      title: eventLabel(ev.kind),
+      notes: '',
+      stepIndex: null,
+      stepCount: null,
+      stepName: null,
+      durationSec: Math.max(60, (minutesOf(ev.end_wall_time ?? ev.wall_time) - minutesOf(ev.wall_time)) * 60),
+      startedAt: Date.now(),
+      pausedAt: null,
+      pausedMs: 0,
+    })
+
+  // ── session face ─────────────────────────────────────────────
+  const pause = () => session && setSession({ ...session, pausedAt: Date.now() })
+  const resume = () =>
+    session &&
+    setSession({
+      ...session,
+      pausedAt: null,
+      pausedMs: session.pausedMs + (Date.now() - (session.pausedAt ?? Date.now())),
+    })
+  const finish = () => {
+    if (!session) return
+    const elapsed = elapsedSec(session)
+    const done = () => {
+      setSession(null)
+      onChanged()
+    }
+    if (session.taskId !== null) {
+      api
+        .patchTask(session.taskId, { state: 'done', notes: withElapsedNote(session.notes, elapsed) })
+        .then(done)
+        .catch(() => notify("Couldn't save the session. Try again."))
+    } else if (session.eventId !== null) {
+      api
+        .eventAction(session.eventId, 'done')
+        .then(done)
+        .catch(() => notify("Couldn't mark that done. Try again."))
+    } else {
+      done()
+    }
+  }
+
+  // Past the duration the counter leaves the preference behind and counts the overrun up.
+  const reading = (s: FocusSession) => {
+    const elapsed = elapsedSec(s)
+    const total = s.durationSec
+    const over = total !== null && elapsed > total
+    const shown = over ? elapsed - (total ?? 0) : total === null || prefs.counter === 'elapsed' ? elapsed : total - elapsed
+    return { over, shown, total }
+  }
+
+  const sessionCentre = (session: FocusSession, big: boolean) => {
+    const { over, shown, total } = reading(session)
+    return (
+      <>
+        <div className={`gauge-num${over ? ' over' : ''}`} style={{ fontSize: big ? 58 : 40 }}>
+          {over ? '+' : ''}
+          {big ? (
+            <NowCounter
+              startedAt={effectiveStart(session) + (over ? (total ?? 0) * 1000 : 0)}
+              durationSec={total ?? 0}
+              mode={over || total === null ? 'elapsed' : prefs.counter}
+              pausedAt={session.pausedAt}
+            />
+          ) : (
+            fmt(shown)
+          )}
+        </div>
+        <div className="gauge-name" style={{ fontSize: big ? 18 : 15 }}>{session.stepName ?? session.title}</div>
+        {session.stepIndex !== null && (
+          <div className="gauge-sub">{session.stepIndex} of {session.stepCount}</div>
+        )}
+      </>
+    )
+  }
+
+  const sessionFrac = (session: FocusSession) =>
+    session.durationSec ? elapsedSec(session) / session.durationSec : 0
+
+  // ── wait face ────────────────────────────────────────────────
+  const waitCentre = (ev: PlanEvent, big: boolean) => {
+    const mins = Math.max(0, minutesOf(ev.wall_time) - now)
+    return (
+      <>
+        <div className="gauge-eyebrow">NEXT</div>
+        <div className="gauge-num" style={{ fontSize: big ? 50 : 22 }}>{mins} min</div>
+        {big && (
+          <>
+            <div className="gauge-name" style={{ fontSize: 18 }}>{eventLabel(ev.kind)}</div>
+            <div className="gauge-sub">{ev.wall_time} – {ev.end_wall_time ?? ev.wall_time}</div>
+          </>
+        )}
+      </>
+    )
+  }
+  const waitFrac = (ev: PlanEvent) => {
+    const from = waitStart(visible, now)
+    const to = minutesOf(ev.wall_time)
+    return to <= from ? 1 : (now - from) / (to - from)
+  }
+
+  const nextActions = (ev: PlanEvent) => (
+    <div className="home-actions">
+      <button className="btn-fill" disabled={pending} onClick={() => start(ev)}>Start</button>
+      <button className="btn-haze" aria-expanded={later} disabled={pending} onClick={() => setLater((v) => !v)}>Later</button>
+      <Overflow
+        label="More"
+        items={[
+          { label: 'Drop today', run: () => drop(ev), disabled: pending },
+          { label: 'Move to tomorrow', run: () => act(() => api.moveTomorrow(ev.id)), disabled: pending },
+          { label: ev.alert ? 'Silent' : 'Ping me', run: () => act(() => api.setEventAlert(ev.id, !ev.alert)), disabled: pending },
+        ]}
+      />
+      {later && (
+        <div className="later-pick" role="group" aria-label="Later by">
+          <span className="later-lead">Later by</span>
+          {LATER_MINUTES.map((m) => (
+            <button key={m} className="later-min" disabled={pending} onClick={() => { setLater(false); act(() => api.snooze(ev.id, m)) }}>
+              {m}
+            </button>
+          ))}
+          <span className="later-unit">min</span>
+        </div>
+      )}
+    </div>
+  )
+
+  const chevron = (
+    <button className="chev" aria-label="More" onClick={() => setStage((s) => Math.min(inSession ? 2 : 1, s + 1))}>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 14l6-6 6 6" /></svg>
+    </button>
+  )
+
+  const today = (
+    <div className="home-today">
+      <DayLine events={visible} now={now} compact={mobile} />
+      <ul className="home-list">
+        {visible
+          .filter((ev) => (ev.status === 'pending' || ev.status === 'snoozed' || ev.status === 'fired') && minutesOf(ev.end_wall_time ?? ev.wall_time) >= now)
+          .map((ev) => (
+            <li key={ev.id} className={ev.id === next?.id ? 'next' : ''}>
+              <span className="home-when">{ev.wall_time} – {ev.end_wall_time ?? ev.wall_time}</span>
+              <span className="home-what">{eventLabel(ev.kind)}</span>
+            </li>
+          ))}
+      </ul>
+      {mobile && <TellNote notify={notify} />}
+    </div>
+  )
+
+  // ── layout ───────────────────────────────────────────────────
+  if (session) {
+    const big = stage === 0
+    const head = reading(session)
+    return (
+      <div className={`home in-session stage-${stage}${mobile ? ' mobile' : ''}${session.pausedAt ? ' paused' : ''}`} {...bind}>
+        <div className="home-face">
+          <Gauge size={stage === 2 ? 120 : big ? (mobile ? 320 : 440) : 230} frac={sessionFrac(session)}>
+            {stage === 2 ? (
+              <div className={`gauge-num${head.over ? ' over' : ''}`} style={{ fontSize: 24 }}>
+                {head.over ? '+' : ''}
+                {fmt(head.shown)}
+              </div>
+            ) : (
+              sessionCentre(session, big)
+            )}
+          </Gauge>
+          {stage === 2 && (
+            <div className="home-head">
+              <span className="home-head-name">{session.stepName ?? session.title}</span>
+              {session.stepIndex !== null && <span className="gauge-sub">{session.stepIndex} of {session.stepCount}</span>}
+            </div>
+          )}
+        </div>
+        {stage === 1 && (
+          <div className="home-sheet">
+            <button className="btn-round" aria-label={session.pausedAt ? 'Back to it' : 'Break'} onClick={session.pausedAt ? resume : pause}>
+              {session.pausedAt ? (
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10-6.5z" /></svg>
+              ) : (
+                <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1.2" /><rect x="14" y="5" width="4" height="14" rx="1.2" /></svg>
+              )}
+            </button>
+            <button className="btn-fill wide" onClick={finish}>Done with this step</button>
+            <TellNote notify={notify} />
+          </div>
+        )}
+        {stage === 2 && today}
+        {stage === 2 && mobile && tabs}
+        {stage < 2 && chevron}
+      </div>
+    )
+  }
+
+  return (
+    <div className={`home stage-${stage}${mobile ? ' mobile' : ''}`} {...bind}>
+      <div className="home-face">
+        {next ? (
+          prefs.showArc ? (
+            <Gauge size={stage === 1 ? 120 : mobile ? 320 : 440} frac={waitFrac(next)} faded>
+              {waitCentre(next, stage === 0)}
+            </Gauge>
+          ) : (
+            <div className="home-text">
+              <div className="gauge-eyebrow">NEXT</div>
+              <div className="home-title">{eventLabel(next.kind)}</div>
+              <div className="gauge-num" style={{ fontSize: 30 }}>in {Math.max(0, minutesOf(next.wall_time) - now)} min</div>
+              <div className="gauge-sub">{next.wall_time} – {next.end_wall_time ?? next.wall_time}</div>
+            </div>
+          )
+        ) : (
+          <div className="home-text"><div className="home-title">That's everything today.</div></div>
+        )}
+        {stage === 1 && next && (
+          <div className="home-head">
+            <span className="gauge-eyebrow">NEXT</span>
+            <span className="home-head-name">{eventLabel(next.kind)}</span>
+            <span className="gauge-sub">{next.wall_time} – {next.end_wall_time ?? next.wall_time}</span>
+            <button className="btn-fill small" disabled={pending} onClick={() => start(next)}>Start</button>
+          </div>
+        )}
+      </div>
+      {stage === 0 && next && nextActions(next)}
+      {stage === 1 && today}
+      {stage === 1 && mobile && tabs}
+      {stage === 0 && chevron}
+    </div>
+  )
+}
