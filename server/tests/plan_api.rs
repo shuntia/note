@@ -459,3 +459,53 @@ async fn an_event_can_be_silenced_for_the_day() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn an_event_moves_to_tomorrow() {
+    let (app, cookie, _cfg) = common::app_with_logged_in_user().await;
+    let fetch = |date: &'static str, cookie: String| {
+        let app = app.clone();
+        async move {
+            let res = app
+                .oneshot(
+                    Request::get(format!("/api/plan/today?date={date}"))
+                        .header(header::COOKIE, cookie)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let body = res.into_body().collect().await.unwrap().to_bytes();
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()
+        }
+    };
+    let today = fetch("2026-08-31", cookie.clone()).await;
+    let id = today[0]["id"].as_i64().unwrap();
+    let res = app
+        .clone()
+        .oneshot(
+            Request::post(format!("/api/events/{id}/move_tomorrow"))
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    let moved: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(moved["date"], "2026-09-01");
+
+    let today = fetch("2026-08-31", cookie.clone()).await;
+    assert_eq!(today[0]["status"], "dropped");
+    assert_eq!(today[0]["moved_to"]["date"], "2026-09-01");
+    let tomorrow = fetch("2026-09-01", cookie.clone()).await;
+    let copy = tomorrow
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["id"] == moved["event_id"])
+        .expect("the copy lives in tomorrow's plan");
+    assert_eq!(copy["wall_time"], today[0]["wall_time"]);
+    assert_eq!(copy["status"], "pending");
+}
