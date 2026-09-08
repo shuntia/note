@@ -2203,8 +2203,8 @@ fieldset.pane-rows { border: none; margin: 0; padding: 0; min-width: 0; }
 .dl-gone { position: absolute; left: 0; top: -1px; height: 3px; border-radius: 2px; background: var(--ink); opacity: 0.7; }
 .dl-ticks { position: absolute; left: 0; right: 0; top: 4px; height: 6px; background: repeating-linear-gradient(to right, var(--line) 0 1px, transparent 1px calc(100% / 18)); }
 .dl-hour { position: absolute; top: 34px; transform: translateX(-50%); font-size: 0.72rem; letter-spacing: 0.06em; color: var(--faint); font-variant-numeric: tabular-nums; }
-.dl-hour:first-of-type { transform: none; }
-.dl-hour:last-of-type { transform: translateX(-100%); }
+.dl-hour.edge-start { transform: none; }
+.dl-hour.edge-end { transform: translateX(-100%); }
 .dl-now { position: absolute; top: 0; transform: translate(-50%, -50%); width: 14px; height: 14px; border-radius: 50%; background: var(--ink); }
 .dl-span { position: absolute; top: -6px; height: 12px; min-width: 10px; border-radius: 6px; border: 1.5px solid var(--quiet); box-sizing: border-box; background: var(--earth); }
 .dl-span.next { background: var(--ink); border-color: var(--ink); }
