@@ -51,7 +51,8 @@ The binary is written to `target/release/note-server`.
 config/
   server.toml                       # bind_addr, public_base_url, data_dir, web_dir
   defaults/
-    user.toml                       # display_name, timezone, template, nightly_time
+    user.toml                       # display_name, timezone, template, nightly_time,
+                                    # show_arc_between_sessions, counter
     templates/
       default.toml                  # default event template
   users/
@@ -76,6 +77,7 @@ write, so a hand-edited file and a client-side change are the same thing.
   {
     "display_name": "Aki", "timezone": "Asia/Tokyo",
     "nightly_time": "03:00", "template": "default",
+    "show_arc_between_sessions": true, "counter": "remaining",
     "templates": ["default", "deep-work"],
     "timezones": ["Africa/Abidjan", "…"]
   }
@@ -85,13 +87,15 @@ write, so a hand-edited file and a client-side change are the same thing.
   own `templates/`; `timezones` is the bundled IANA database.
 
 - `PUT /api/settings` takes any subset of `display_name`, `timezone`,
-  `nightly_time` and `template`, and returns the merged settings without the
-  two lists. A rejected field is a `400` whose `{"error": …}` names it and
-  leaves the file untouched: `display_name` is trimmed, non-blank and at most
-  64 characters; `timezone` must be an IANA name; `nightly_time` must be a
-  zero-padded 24-hour `HH:MM`; `template` must be one of `templates`. The
-  write replaces the user file with all four keys through a temp file and a
-  rename, so a crash mid-write cannot leave a half-written config.
+  `nightly_time`, `template`, `show_arc_between_sessions` and `counter`, and
+  returns the merged settings without the two lists. A rejected field is a
+  `400` whose `{"error": …}` names it and leaves the file untouched:
+  `display_name` is trimmed, non-blank and at most 64 characters; `timezone`
+  must be an IANA name; `nightly_time` must be a zero-padded 24-hour `HH:MM`;
+  `template` must be one of `templates`; `show_arc_between_sessions` is a bool;
+  `counter` must be `remaining` or `elapsed`. The write replaces the user file
+  with all six keys through a temp file and a rename, so a crash mid-write
+  cannot leave a half-written config.
 
 ## Memory & agent tools
 

@@ -479,6 +479,7 @@ async fn conversation_messages(
 }
 
 const MAX_DISPLAY_NAME: usize = 64;
+const COUNTERS: [&str; 2] = ["remaining", "elapsed"];
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -486,8 +487,6 @@ struct AlertPatch {
     index: usize,
     alert: bool,
 }
-
-const COUNTERS: [&str; 2] = ["remaining", "elapsed"];
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -930,6 +929,7 @@ async fn event_drop(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AlertReq {
     alert: bool,
 }
