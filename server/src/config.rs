@@ -66,10 +66,22 @@ pub struct UserConfig {
     pub template: String,
     #[serde(default = "default_nightly_time")]
     pub nightly_time: String,
+    #[serde(default = "default_true")]
+    pub show_arc_between_sessions: bool,
+    #[serde(default = "default_counter")]
+    pub counter: String,
 }
 
 fn default_nightly_time() -> String {
     "03:00".into()
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_counter() -> String {
+    "remaining".into()
 }
 
 impl UserConfig {
@@ -92,7 +104,7 @@ impl UserConfig {
         Ok(cfg)
     }
 
-    /// Writes all four fields to the user's own file, so a later edit of
+    /// Writes every field to the user's own file, so a later edit of
     /// `defaults/user.toml` cannot move settings the user has already chosen.
     pub fn save(&self, config_dir: &Path, user: &str) -> anyhow::Result<()> {
         let path = config_dir.join("users").join(user).join("user.toml");
