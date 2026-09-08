@@ -7,8 +7,8 @@ const KEY = 'note.theme'
 // copy of the palette.
 function paintChrome() {
   const meta = document.querySelector('meta[name="theme-color"]')
-  const dawn = getComputedStyle(document.documentElement).getPropertyValue('--dawn').trim()
-  if (meta && dawn) meta.setAttribute('content', dawn)
+  const earth = getComputedStyle(document.documentElement).getPropertyValue('--earth').trim()
+  if (meta && earth) meta.setAttribute('content', earth)
 }
 
 export function storedTheme(): ThemeChoice {
