@@ -271,12 +271,14 @@ impl Template {
             if ev.kind.trim().is_empty() {
                 return Err(bad("kind", &ev.kind));
             }
-            if ev.is_block() {
-                let Some(end) = ev.end_time.as_deref() else {
-                    return Err(bad("end_time", "(a block needs a start and an end)"));
-                };
+            if let Some(end) = ev.end_time.as_deref() {
                 if !valid_time(end) || end <= ev.time.as_str() {
                     return Err(bad("end_time", end));
+                }
+            }
+            if ev.is_block() {
+                if ev.end_time.is_none() {
+                    return Err(bad("end_time", "(a block needs a start and an end)"));
                 }
                 if ev.flexibility.is_some() {
                     return Err(bad("flexibility", "(a block is always reshapable)"));
@@ -286,10 +288,6 @@ impl Template {
                 }
                 if ev.alert.is_some() {
                     return Err(bad("alert", "(a block never pings)"));
-                }
-            } else if let Some(end) = ev.end_time.as_deref() {
-                if !valid_time(end) || end <= ev.time.as_str() {
-                    return Err(bad("end_time", end));
                 }
             }
         }
