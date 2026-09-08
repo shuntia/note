@@ -330,6 +330,35 @@ pub fn set_status(conn: &Connection, user_id: i64, event_id: i64, status: &str) 
     Ok(Some(()))
 }
 
+/// A block never pings, so silencing one is a client mistake rather than a
+/// no-op the caller should ignore.
+#[derive(Debug, Error)]
+pub enum AlertRefused {
+    #[error("a block never pings")]
+    Block,
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
+/// Turns the bell on or off for this day's instance only; the template keeps
+/// its own setting for every other day.
+pub fn set_alert(
+    conn: &Connection,
+    user_id: i64,
+    event_id: i64,
+    alert: bool,
+) -> Result<Option<()>, AlertRefused> {
+    let Some(ev) = owned_event(conn, user_id, event_id).map_err(anyhow::Error::from)? else {
+        return Ok(None);
+    };
+    if ev.is_block {
+        return Err(AlertRefused::Block);
+    }
+    conn.execute("UPDATE events SET alert = ?1 WHERE id = ?2", (alert, event_id))
+        .map_err(anyhow::Error::from)?;
+    Ok(Some(()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -394,6 +423,31 @@ mod tests {
         assert_eq!(evs[1].end_wall_time.as_deref(), Some("12:30"));
         assert!(!evs[1].alert);
         assert_eq!(evs[1].flexibility, "slide");
+    }
+
+    #[test]
+    fn a_block_cannot_take_a_bell() {
+        let conn = crate::db::open_memory().unwrap();
+        let uid = crate::auth::create_user(&conn, "a", "p", false).unwrap();
+        let date: jiff::civil::Date = "2026-08-31".parse().unwrap();
+        let t = Template {
+            events: vec![
+                TemplateEvent {
+                    kind: "meds".into(), time: "08:00".into(), days: vec!["mon".into()],
+                    channel: "push".into(), ..Default::default()
+                },
+                TemplateEvent {
+                    kind: "Work time".into(), time: "09:30".into(), days: vec!["mon".into()],
+                    entry: crate::templates::Entry::Block, end_time: Some("12:30".into()),
+                    channel: "push".into(), ..Default::default()
+                },
+            ],
+        };
+        generate(&conn, uid, &t, date).unwrap();
+        assert!(events_for(&conn, uid, date).unwrap()[0].alert);
+        assert!(matches!(set_alert(&conn, uid, 2, true), Err(AlertRefused::Block)));
+        set_alert(&conn, uid, 1, false).unwrap().unwrap();
+        assert!(!events_for(&conn, uid, date).unwrap()[0].alert);
     }
 
     #[test]
