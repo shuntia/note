@@ -19,11 +19,10 @@
   font-style: italic;
   font-display: swap;
 }
-/* variable: the opsz axis stays live, wght is clipped to the two weights used */
 @font-face {
-  font-family: 'Fraunces';
-  src: url('./fonts/fraunces-subset.woff2') format('woff2');
-  font-weight: 420 560;
+  font-family: 'Bricolage Grotesque';
+  src: url('./fonts/bricolage-grotesque.woff2') format('woff2');
+  font-weight: 300 700;
   font-style: normal;
   font-display: swap;
 }
@@ -31,107 +30,91 @@
 :root {
   color-scheme: light;
 
-  --dawn: oklch(97.5% 0.006 85);
-  --card: oklch(99.2% 0.004 85);
-  --sunk: oklch(95.4% 0.008 80);
+  --sky-top: oklch(84% 0.035 230);
+  --sky-mid: oklch(91% 0.025 200);
+  --earth: oklch(93.5% 0.016 78);
+  --haze: oklch(99% 0.004 80 / 0.55);
+  --haze-strong: oklch(99% 0.004 80 / 0.86);
+  --ink: oklch(23% 0.03 255);
+  --ivory: oklch(98% 0.008 85);
+  --quiet: oklch(40% 0.025 250);
+  --faint: oklch(52% 0.02 245);
+  --line: oklch(30% 0.03 250 / 0.45);
+  --track: oklch(30% 0.03 250 / 0.16);
+  --sun: oklch(80% 0.15 76);
+  --sun-ink: oklch(50% 0.13 55);
+  --sage: oklch(50% 0.09 150);
+  --rose: oklch(55% 0.07 30);
+  --sky: linear-gradient(180deg, var(--sky-top) 0%, var(--sky-mid) 45%, var(--earth) 72%);
 
-  --ink: oklch(24% 0.02 60);
-  --quiet: oklch(48% 0.015 60);
-  /* the design's third grey sits at 62%, which measures 3.4:1 on paper; this is
-     the floor above it, and the smallest shift that clears 4.5:1 on every surface */
-  --faint: oklch(53% 0.012 60);
+  --radius: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 18px;
 
-  --mist: oklch(89% 0.009 75);
-  --mist-strong: oklch(83% 0.011 75);
-
-  /* --sun fills; --sun-ink is the same accent at a weight text can be set in */
-  --sun: #e8871e;
-  --sun-ink: #9c5c05;
-  --moss: oklch(52% 0.09 145);
-  --clay: oklch(52% 0.06 40);
-  --accent-fg: oklch(20% 0.03 60);
-
-  /* the shape of a day, drawn once down Today's spine: decoration only */
-  --spine: linear-gradient(
-    to bottom,
-    oklch(80% 0.07 80),
-    oklch(84% 0.02 90) 38%,
-    oklch(78% 0.05 300) 78%,
-    oklch(60% 0.04 285)
-  );
-
-  --radius: 0.625rem;
-  --radius-lg: 0.875rem;
-  --radius-xl: 1.25rem;
-
-  /* Fraunces is display only — the wordmark, view titles, the Now card title,
-     the Now-screen counter, and Memory detail titles. Nothing else. */
-  --display: 'Fraunces', Georgia, 'Iowan Old Style', serif;
+  --display: 'Bricolage Grotesque', 'Avenir Next', 'Helvetica Neue', Arial, sans-serif;
   --sans: 'Atkinson Hyperlegible', system-ui, -apple-system, 'Segoe UI', sans-serif;
   --mono: ui-monospace, 'SF Mono', Menlo, monospace;
 
-  /* the names the rest of the sheet resolves through */
-  --bg: var(--dawn);
-  --surface: var(--card);
-  --surface-2: var(--card);
+  /* aliases the older rules resolve through */
+  --dawn: var(--earth);
+  --card: var(--haze-strong);
+  --sunk: var(--earth);
+  --mist: var(--line);
+  --mist-strong: var(--line);
+  --moss: var(--sage);
+  --clay: var(--rose);
+  --accent-fg: var(--ink);
+  --spine: none;
+  --bg: var(--earth);
+  --surface: var(--haze-strong);
+  --surface-2: var(--earth);
   --text: var(--ink);
   --text-muted: var(--quiet);
-  --border: var(--mist);
-  --border-input: var(--mist-strong);
+  --border: var(--line);
+  --border-input: var(--line);
   --accent: var(--sun);
   --ring: var(--sun-ink);
-  --sidebar-bg: color-mix(in oklch, var(--dawn) 70%, var(--card));
-  --sidebar-border: var(--mist);
-  --bubble: var(--sunk);
-  --code-bg: var(--sunk);
+  --sidebar-bg: transparent;
+  --sidebar-border: transparent;
+  --bubble: var(--haze-strong);
+  --code-bg: var(--earth);
 }
 
 :root[data-theme='dark'] {
   color-scheme: dark;
-  --dawn: oklch(17.5% 0.01 60);
-  --card: oklch(21.5% 0.012 60);
-  --sunk: oklch(25% 0.014 65);
-  --surface-2: var(--sunk);
-  --ink: oklch(93% 0.008 80);
-  --quiet: oklch(72% 0.012 70);
-  /* the design's 56% measures 4.1:1 here; this is the floor above it */
-  --faint: oklch(63% 0.012 70);
-  --mist: oklch(30% 0.012 65);
-  --mist-strong: oklch(38% 0.014 65);
-  --sun-ink: #edaa4e;
-  --moss: oklch(72% 0.09 145);
-  --clay: oklch(68% 0.07 40);
-  --spine: linear-gradient(
-    to bottom,
-    oklch(55% 0.07 80),
-    oklch(45% 0.02 90) 38%,
-    oklch(48% 0.06 300) 78%,
-    oklch(40% 0.05 285)
-  );
+  --sky-top: oklch(24% 0.03 250);
+  --sky-mid: oklch(22% 0.025 240);
+  --earth: oklch(20% 0.018 60);
+  --haze: oklch(30% 0.02 60 / 0.6);
+  --haze-strong: oklch(28% 0.02 60 / 0.92);
+  --ink: oklch(93% 0.012 85);
+  --ivory: oklch(20% 0.02 60);
+  --quiet: oklch(74% 0.015 80);
+  --faint: oklch(62% 0.014 75);
+  --line: oklch(90% 0.01 80 / 0.35);
+  --track: oklch(90% 0.01 80 / 0.14);
+  --sun-ink: oklch(78% 0.13 78);
+  --sage: oklch(72% 0.08 150);
+  --rose: oklch(70% 0.06 30);
 }
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme='light']) {
     color-scheme: dark;
-    --dawn: oklch(17.5% 0.01 60);
-    --card: oklch(21.5% 0.012 60);
-    --sunk: oklch(25% 0.014 65);
-    --surface-2: var(--sunk);
-    --ink: oklch(93% 0.008 80);
-    --quiet: oklch(72% 0.012 70);
-    --faint: oklch(63% 0.012 70);
-    --mist: oklch(30% 0.012 65);
-    --mist-strong: oklch(38% 0.014 65);
-    --sun-ink: #edaa4e;
-    --moss: oklch(72% 0.09 145);
-    --clay: oklch(68% 0.07 40);
-    --spine: linear-gradient(
-      to bottom,
-      oklch(55% 0.07 80),
-      oklch(45% 0.02 90) 38%,
-      oklch(48% 0.06 300) 78%,
-      oklch(40% 0.05 285)
-    );
+    --sky-top: oklch(24% 0.03 250);
+    --sky-mid: oklch(22% 0.025 240);
+    --earth: oklch(20% 0.018 60);
+    --haze: oklch(30% 0.02 60 / 0.6);
+    --haze-strong: oklch(28% 0.02 60 / 0.92);
+    --ink: oklch(93% 0.012 85);
+    --ivory: oklch(20% 0.02 60);
+    --quiet: oklch(74% 0.015 80);
+    --faint: oklch(62% 0.014 75);
+    --line: oklch(90% 0.01 80 / 0.35);
+    --track: oklch(90% 0.01 80 / 0.14);
+    --sun-ink: oklch(78% 0.13 78);
+    --sage: oklch(72% 0.08 150);
+    --rose: oklch(70% 0.06 30);
   }
 }
 
@@ -139,7 +122,8 @@
 
 body {
   margin: 0;
-  background: var(--dawn);
+  background: var(--sky);
+  background-attachment: fixed;
   color: var(--ink);
   font-family: var(--sans);
   font-size: 16px;
@@ -172,7 +156,7 @@ body {
   margin: 0;
   font-family: var(--display);
   font-size: 1.375rem;
-  font-weight: 560;
+  font-weight: 500;
   letter-spacing: 0.01em;
   line-height: 1.2;
 }
@@ -701,7 +685,7 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 .nowcard-title {
   margin: 0 0 0.2rem;
   font-family: var(--display);
-  font-weight: 420;
+  font-weight: 500;
   font-size: 1.85rem;
   line-height: 1.15;
 }
@@ -1591,7 +1575,7 @@ button.chat-send {
 .memory-title {
   margin: 0 0 0.75rem;
   font-family: var(--display);
-  font-weight: 560;
+  font-weight: 500;
   font-size: 1.45rem;
   line-height: 1.25;
 }
@@ -1854,13 +1838,13 @@ button.chat-send {
   gap: 0.55rem;
   margin: 0 0 0.75rem;
   font-family: var(--display);
-  font-weight: 420;
+  font-weight: 500;
   font-size: 1.625rem;
   line-height: 1.25;
 }
 /* inside Settings the same component is a pane heading, one step down */
 .set-pane .pane-title {
-  font-weight: 560;
+  font-weight: 500;
   font-size: 1.25rem;
 }
 .pane-meta {
@@ -1991,7 +1975,7 @@ fieldset.pane-rows { border: none; margin: 0; padding: 0; min-width: 0; }
 /* Now-screen counter — 2026-08-31-now-counter-spec.md §4 */
 .now-counter {
   font-family: var(--display);
-  font-weight: 420;
+  font-weight: 500;
   font-variant-numeric: tabular-nums;
   line-height: 1;
 }
@@ -2045,7 +2029,7 @@ fieldset.pane-rows { border: none; margin: 0; padding: 0; min-width: 0; }
   color: var(--faint);
   font-size: 0.875rem;
 }
-.now-brand { font-family: var(--display); font-weight: 560; font-size: 0.9375rem; }
+.now-brand { font-family: var(--display); font-weight: 500; font-size: 0.9375rem; }
 .now-clock { margin-left: auto; font-variant-numeric: tabular-nums; }
 
 .now-stage {
