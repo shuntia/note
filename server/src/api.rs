@@ -38,6 +38,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/events/{id}/snooze", post(event_snooze))
         .route("/api/events/{id}/done", post(event_done))
         .route("/api/events/{id}/drop", post(event_drop))
+        .route("/api/events/{id}/alert", post(event_alert))
         .route("/api/ws", get(ws_connect))
         .route("/api/push/subscribe", post(push_subscribe))
         .route("/api/push/unsubscribe", post(push_unsubscribe))
@@ -925,6 +926,26 @@ async fn event_drop(
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
     event_set(&state, &user, id, "dropped")
+}
+
+#[derive(Deserialize)]
+struct AlertReq {
+    alert: bool,
+}
+
+async fn event_alert(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(req): Json<AlertReq>,
+) -> impl IntoResponse {
+    let conn = state.db.lock().unwrap();
+    match crate::plan::set_alert(&conn, user.id, id, req.alert) {
+        Ok(Some(())) => StatusCode::OK.into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(crate::plan::AlertRefused::Block) => StatusCode::CONFLICT.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
 }
 
 fn event_set(state: &AppState, user: &CurrentUser, id: i64, status: &str) -> axum::response::Response {

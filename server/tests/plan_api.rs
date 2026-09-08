@@ -411,3 +411,51 @@ async fn every_event_reports_a_span() {
     assert_eq!(v[0]["end_wall_time"], "09:15");
     assert_eq!(v[1]["end_wall_time"], "18:45");
 }
+
+#[tokio::test]
+async fn an_event_can_be_silenced_for_the_day() {
+    async fn today(app: &axum::Router, cookie: &str) -> serde_json::Value {
+        let res = app
+            .clone()
+            .oneshot(
+                Request::get("/api/plan/today?date=2026-08-31")
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        serde_json::from_slice(&body).unwrap()
+    }
+    let (app, cookie, _cfg) = common::app_with_logged_in_user().await;
+    let v = today(&app, &cookie).await;
+    assert_eq!(v[0]["alert"], true);
+
+    let res = app
+        .clone()
+        .oneshot(
+            Request::post("/api/events/1/alert")
+                .header(header::COOKIE, &cookie)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"alert":false}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let v = today(&app, &cookie).await;
+    assert_eq!(v[0]["alert"], false);
+
+    let res = app
+        .oneshot(
+            Request::post("/api/events/999/alert")
+                .header(header::COOKIE, &cookie)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"alert":true}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}
