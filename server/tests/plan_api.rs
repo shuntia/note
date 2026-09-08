@@ -123,7 +123,7 @@ async fn shift_moves_the_event_and_drop_marks_it_dropped() {
     assert_eq!(v[0]["status"], "dropped");
     assert!(v[0].get("moved_to").is_none(), "a user's own drop went nowhere in particular");
     assert_eq!(v[0]["entry"], "routine");
-    assert_eq!(v[0]["end_wall_time"], serde_json::Value::Null);
+    assert_eq!(v[0]["end_wall_time"], "10:00");
     assert_eq!(v[0]["alert"], true);
 }
 
@@ -382,4 +382,32 @@ async fn other_users_event_is_404() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn every_event_reports_a_span() {
+    let (app, cookie, cfg) = common::app_with_logged_in_user().await;
+    let p = cfg.path().join("users/aki/templates/default.toml");
+    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+    std::fs::write(
+        &p,
+        "[[events]]\nkind='checkin'\ntime='09:00'\ndays=['mon','tue','wed','thu','fri','sat','sun']\n\
+         [[events]]\nkind='walk'\ntime='18:00'\nend_time='18:45'\ndays=['mon','tue','wed','thu','fri','sat','sun']\n",
+    )
+    .unwrap();
+    let res = app
+        .oneshot(
+            Request::get("/api/plan/today?date=2026-09-01")
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v[0]["entry"], "routine");
+    assert_eq!(v[0]["end_wall_time"], "09:15");
+    assert_eq!(v[1]["end_wall_time"], "18:45");
 }

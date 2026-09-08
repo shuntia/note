@@ -58,6 +58,27 @@ impl TemplateEvent {
     pub fn alert(&self) -> bool {
         !self.is_block() && self.alert.unwrap_or(true)
     }
+
+    /// How long a routine occupies, from its `end_time` or the fifteen-minute
+    /// default; a block's range is stored on the event instead.
+    pub fn span_min(&self) -> i64 {
+        if self.is_block() {
+            return 0;
+        }
+        match self.end_time.as_deref() {
+            Some(end) => wall_minutes(end) - wall_minutes(&self.time),
+            None => 15,
+        }
+    }
+
+    /// The effective end of the entry, for both shapes.
+    pub fn end(&self) -> String {
+        match (self.is_block(), self.end_time.as_deref()) {
+            (true, Some(end)) => end.to_string(),
+            (true, None) => self.time.clone(),
+            (false, _) => wall_add(&self.time, self.span_min()),
+        }
+    }
 }
 
 fn default_channel() -> String { "push".into() }
@@ -103,6 +124,17 @@ pub(crate) fn valid_time(s: &str) -> bool {
         && padded(m)
         && h.parse::<u32>().is_ok_and(|h| h < 24)
         && m.parse::<u32>().is_ok_and(|m| m < 60)
+}
+
+/// Adds `minutes` to a zero-padded wall time, never crossing midnight.
+pub(crate) fn wall_add(wall: &str, minutes: i64) -> String {
+    let total = (wall_minutes(wall) + minutes).clamp(0, 23 * 60 + 59);
+    format!("{:02}:{:02}", total / 60, total % 60)
+}
+
+fn wall_minutes(wall: &str) -> i64 {
+    let (h, m) = wall.split_once(':').unwrap_or(("0", "0"));
+    h.parse::<i64>().unwrap_or(0) * 60 + m.parse::<i64>().unwrap_or(0)
 }
 
 /// Every template name `user` can select: the shared defaults plus their own
@@ -191,7 +223,7 @@ impl Template {
                 kind: ev.kind.clone(),
                 entry: ev.entry,
                 time: ev.time.clone(),
-                end_time: ev.end_time.clone(),
+                end_time: Some(ev.end()),
                 days: ev.days.clone(),
                 flexibility: ev.flexibility().to_string(),
                 slide_window_min: ev.slide_window_min(),
@@ -255,8 +287,10 @@ impl Template {
                 if ev.alert.is_some() {
                     return Err(bad("alert", "(a block never pings)"));
                 }
-            } else if let Some(end) = &ev.end_time {
-                return Err(bad("end_time", end));
+            } else if let Some(end) = ev.end_time.as_deref() {
+                if !valid_time(end) || end <= ev.time.as_str() {
+                    return Err(bad("end_time", end));
+                }
             }
         }
         Ok(())
@@ -379,8 +413,6 @@ mod tests {
             .contains("alert"));
         assert!(bad("[[events]]\nentry='block'\nkind='Work'\ntime='09:30'\nend_time='12:30'\ndays=['mon']\nflexibility='fixed'\n")
             .contains("flexibility"));
-        assert!(bad("[[events]]\nkind='nudge'\ntime='09:00'\nend_time='10:00'\ndays=['mon']\n")
-            .contains("end_time"));
         assert!(bad("[[events]]\nentry='band'\nkind='Work'\ntime='09:30'\ndays=['mon']\n")
             .contains("entry"));
     }
@@ -422,9 +454,44 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!((rows[0].index, rows[0].entry, rows[0].alert), (0, Entry::Routine, true));
         assert_eq!(rows[0].flexibility, "fixed");
-        assert_eq!(rows[0].end_time, None);
+        assert_eq!(rows[0].end_time.as_deref(), Some("08:15"));
         assert_eq!((rows[1].index, rows[1].entry, rows[1].alert), (1, Entry::Block, false));
         assert_eq!(rows[1].end_time.as_deref(), Some("12:30"));
+    }
+
+    #[test]
+    fn a_routine_may_carry_an_end_time_and_defaults_to_fifteen_minutes() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), "defaults/templates/default.toml",
+            "[[events]]\nkind='meds'\ntime='08:00'\ndays=['mon']\n\
+             [[events]]\nkind='walk'\ntime='18:00'\nend_time='18:45'\ndays=['mon']\n");
+        let t = Template::load(tmp.path(), "aki", "default").unwrap();
+        assert_eq!(t.events[0].span_min(), 15);
+        assert_eq!(t.events[1].span_min(), 45);
+        let rows = t.rows();
+        assert_eq!(rows[0].end_time.as_deref(), Some("08:15"));
+        assert_eq!(rows[1].end_time.as_deref(), Some("18:45"));
+        assert_eq!(rows[0].entry, Entry::Routine);
+    }
+
+    #[test]
+    fn a_routine_end_before_its_start_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bad = |toml: &str| -> String {
+            write(tmp.path(), "defaults/templates/default.toml", toml);
+            Template::load(tmp.path(), "aki", "default").unwrap_err().to_string()
+        };
+        assert!(bad("[[events]]\nkind='nudge'\ntime='09:00'\nend_time='08:30'\ndays=['mon']\n")
+            .contains("end_time"));
+        assert!(bad("[[events]]\nkind='nudge'\ntime='09:00'\nend_time='9:30'\ndays=['mon']\n")
+            .contains("end_time"));
+    }
+
+    #[test]
+    fn wall_add_pads_and_clamps() {
+        assert_eq!(wall_add("09:00", 15), "09:15");
+        assert_eq!(wall_add("23:50", 30), "23:59");
+        assert_eq!(wall_add("08:05", 55), "09:00");
     }
 
     #[test]

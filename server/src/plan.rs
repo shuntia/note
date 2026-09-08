@@ -85,11 +85,11 @@ pub fn generate(conn: &Connection, user_id: i64, template: &Template, date: jiff
     for ev in template.events.iter().filter(|e| e.days.iter().any(|d| d == day)) {
         conn.execute(
             "INSERT INTO events (plan_id, kind, wall_time, orig_wall_time, end_wall_time,
-                                 flexibility, slide_window_min, channel, alert)
-             VALUES (?1, ?2, ?3, ?3, ?4, ?5, ?6, ?7, ?8)",
+                                 flexibility, slide_window_min, channel, alert, span_min)
+             VALUES (?1, ?2, ?3, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             (
-                plan_id, &ev.kind, &ev.time, &ev.end_time, ev.flexibility(),
-                ev.slide_window_min(), &ev.channel, ev.alert(),
+                plan_id, &ev.kind, &ev.time, ev.is_block().then(|| ev.end()), ev.flexibility(),
+                ev.slide_window_min(), &ev.channel, ev.alert(), ev.span_min().max(1),
             ),
         )?;
     }
@@ -103,7 +103,7 @@ pub fn events_for(conn: &Connection, user_id: i64, date: jiff::civil::Date) -> R
     let mut stmt = conn.prepare(
         "SELECT e.id, e.kind, e.wall_time, e.end_wall_time, e.status, e.flexibility,
                 e.slide_window_min, e.channel, e.alert,
-                m.id, mp.date, m.wall_time, m.kind
+                m.id, mp.date, m.wall_time, m.kind, e.span_min
          FROM events e JOIN plans p ON p.id = e.plan_id
          LEFT JOIN events m ON m.id = e.moved_to_event_id
          LEFT JOIN plans mp ON mp.id = m.plan_id
@@ -111,12 +111,17 @@ pub fn events_for(conn: &Connection, user_id: i64, date: jiff::civil::Date) -> R
     )?;
     let rows = stmt.query_map((user_id, date.to_string()), |r| {
         let end_wall_time: Option<String> = r.get(3)?;
+        let wall_time: String = r.get(2)?;
+        let span_min: i64 = r.get(13)?;
+        let entry = if end_wall_time.is_some() { "block" } else { "routine" };
         Ok(PlanEvent {
             id: r.get(0)?,
             kind: r.get(1)?,
-            wall_time: r.get(2)?,
-            entry: if end_wall_time.is_some() { "block" } else { "routine" }.into(),
-            end_wall_time,
+            end_wall_time: Some(
+                end_wall_time.unwrap_or_else(|| crate::templates::wall_add(&wall_time, span_min)),
+            ),
+            wall_time,
+            entry: entry.into(),
             status: r.get(4)?,
             flexibility: r.get(5)?,
             slide_window_min: r.get(6)?,
@@ -382,7 +387,7 @@ mod tests {
         let evs = events_for(&conn, uid, date).unwrap();
         assert_eq!(evs[0].kind, "meds");
         assert_eq!(evs[0].entry, "routine");
-        assert_eq!(evs[0].end_wall_time, None);
+        assert_eq!(evs[0].end_wall_time.as_deref(), Some("08:15"));
         assert!(!evs[0].alert);
         assert_eq!(evs[1].kind, "Work time");
         assert_eq!(evs[1].entry, "block");
@@ -550,6 +555,19 @@ mod tests {
         // sliding back inside the window still works
         assert!(shift(&conn, uid, ev_id, -45).unwrap().is_some());
         assert_eq!(events_for(&conn, uid, date).unwrap()[0].wall_time, "09:00");
+    }
+
+    #[test]
+    fn a_routine_end_follows_its_start_when_snoozed() {
+        let conn = crate::db::open_memory().unwrap();
+        conn.execute("INSERT INTO users (username, pass_hash, role) VALUES ('a','h','member')", [])
+            .unwrap();
+        let date: jiff::civil::Date = "2026-08-31".parse().unwrap();
+        generate(&conn, 1, &tmpl(), date).unwrap();
+        snooze(&conn, 1, 1, 20).unwrap().unwrap();
+        let evs = events_for(&conn, 1, date).unwrap();
+        assert_eq!(evs[0].wall_time, "09:20");
+        assert_eq!(evs[0].end_wall_time.as_deref(), Some("09:35"));
     }
 
     #[test]

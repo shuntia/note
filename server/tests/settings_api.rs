@@ -115,7 +115,7 @@ async fn get_lists_one_row_per_template_entry() {
     assert_eq!(rows[0]["kind"], "meds");
     assert_eq!(rows[0]["entry"], "routine");
     assert_eq!(rows[0]["alert"], true);
-    assert_eq!(rows[0]["end_time"], serde_json::Value::Null);
+    assert_eq!(rows[0]["end_time"], "08:15");
     assert_eq!(rows[1]["entry"], "block");
     assert_eq!(rows[1]["time"], "09:30");
     assert_eq!(rows[1]["end_time"], "12:30");
