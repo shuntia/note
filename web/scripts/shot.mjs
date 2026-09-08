@@ -1,4 +1,5 @@
-// Usage: node scripts/shot.mjs <today|tasks|chat|memory|settings> <WxH> <out.png> [--session]
+// Usage: node scripts/shot.mjs <today|tasks|chat|memory|settings> <WxH> <out.png> [--session] [--stage N]
+// --stage N advances the Home surface N steps (ArrowDown) before the shot.
 // Expects `pnpm dev` on http://localhost:5173 with NOTE_API pointing at the server this
 // script starts (default http://127.0.0.1:3299).
 import { chromium } from 'playwright-core'
@@ -12,6 +13,7 @@ import { join, resolve } from 'node:path'
 process.env.PW_EXPERIMENTAL_SERVICE_WORKER_NETWORK_EVENTS = '1'
 
 const [tab = 'today', size = '390x844', out = 'shot.png', ...flags] = process.argv.slice(2)
+const stages = Number(flags[flags.indexOf('--stage') + 1]) || 0
 const [width, height] = size.split('x').map(Number)
 const root = resolve(import.meta.dirname, '../..')
 const port = Number(process.env.NOTE_PORT ?? 3299)
@@ -52,9 +54,19 @@ await page.goto('http://localhost:5173/')
 await page.fill('input[placeholder="Username"]', 'shot')
 await page.fill('input[placeholder="Password"]', 'shot-pass')
 await page.click('button:has-text("Sign in")')
-// Both the sidebar and the tab bar carry the label; CSS shows one per width.
+// Both the sidebar and the tab bar carry the label; CSS shows one per width, and
+// mobile Home hides the tab bar until its last stage - so wait on the app root.
 const nav = 'nav[aria-label="Views"]:visible'
-await page.waitForSelector(nav, { timeout: 10000 })
+await page.waitForSelector('.shell', { timeout: 10000 })
+
+// The stage hook ignores steps within 500 ms of the last one.
+const step = async (times) => {
+  for (let i = 0; i < times; i++) {
+    await page.focus('.home')
+    await page.keyboard.press('ArrowDown')
+    await page.waitForTimeout(600)
+  }
+}
 if (flags.includes('--session')) {
   await page.evaluate(() => {
     localStorage.setItem(
@@ -69,7 +81,12 @@ if (flags.includes('--session')) {
   await page.reload()
   await page.waitForTimeout(500)
 }
+if (stages) {
+  await step(stages)
+  await page.waitForTimeout(500)
+}
 if (tab !== 'today') {
+  for (let i = 0; i < 3 && !(await page.locator(nav).count()); i++) await step(1)
   await page.click(`${nav} button:has-text("${tab[0].toUpperCase()}${tab.slice(1)}")`)
   await page.waitForTimeout(500)
 }
