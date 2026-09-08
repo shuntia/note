@@ -84,13 +84,20 @@ export type Settings = {
   templates: string[]
   timezones: string[]
   schedule: ScheduleRow[]
+  show_arc_between_sessions: boolean
+  counter: 'remaining' | 'elapsed'
 }
 
 export type AlertPatch = { index: number; alert: boolean }
 
 export type SettingsSaved = Pick<
   Settings,
-  'display_name' | 'timezone' | 'nightly_time' | 'template'
+  | 'display_name'
+  | 'timezone'
+  | 'nightly_time'
+  | 'template'
+  | 'show_arc_between_sessions'
+  | 'counter'
 > & { schedule: ScheduleRow[] }
 
 export type PromptName = 'persona' | 'planning'

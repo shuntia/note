@@ -21,7 +21,14 @@ import type {
   TaskUpdate,
 } from './types'
 
-const WRITABLE_SETTINGS = ['display_name', 'timezone', 'nightly_time', 'template'] as const
+const WRITABLE_SETTINGS = [
+  'display_name',
+  'timezone',
+  'nightly_time',
+  'template',
+  'show_arc_between_sessions',
+  'counter',
+] as const
 
 type SettingsPatch = Partial<Pick<Settings, (typeof WRITABLE_SETTINGS)[number]>>
 
@@ -84,6 +91,12 @@ export const api = {
     request<void>(`/api/events/${id}/shift`, { method: 'POST', body: JSON.stringify({ minutes }) }),
   snooze: (id: number, minutes: number) =>
     request<void>(`/api/events/${id}/snooze`, { method: 'POST', body: JSON.stringify({ minutes }) }),
+  setEventAlert: (id: number, alert: boolean) =>
+    request<void>(`/api/events/${id}/alert`, { method: 'POST', body: JSON.stringify({ alert }) }),
+  moveTomorrow: (id: number) =>
+    request<{ event_id: number; date: string }>(`/api/events/${id}/move_tomorrow`, {
+      method: 'POST',
+    }),
   tasks: () => request<TaskNode[]>('/api/tasks'),
   addTask: (title: string, opts?: NewTaskOpts) =>
     request<Task>('/api/tasks', { method: 'POST', body: JSON.stringify({ title, ...opts }) }),
@@ -121,7 +134,7 @@ export const api = {
     const body: SettingsPatch & { alerts?: AlertPatch[] } = {}
     for (const key of WRITABLE_SETTINGS) {
       const value = patch[key]
-      if (value !== undefined) body[key] = value
+      if (value !== undefined) Object.assign(body, { [key]: value })
     }
     if (alerts?.length) body.alerts = alerts
     return request<SettingsSaved>('/api/settings', { method: 'PUT', body: JSON.stringify(body) })
