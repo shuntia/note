@@ -2,9 +2,10 @@ import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } fr
 import { api, ApiError } from '../api'
 import { Bell } from '../bell'
 import type { ViewProps } from '../app'
+import { readPrefs, writePrefs } from '../prefs'
 import { disablePush, enablePush, pushState } from '../push'
 import { SectionTitle } from '../section'
-import { readCounterMode, writeCounterMode, type CounterMode } from '../session'
+import type { CounterMode } from '../session'
 import { applyTheme, saveTheme, storedTheme, type ThemeChoice } from '../theme'
 import type {
   LogRow,
@@ -661,7 +662,7 @@ const COUNTERS: { id: CounterMode; label: string }[] = [
 
 function AppearanceSection() {
   const [theme, setTheme] = useState<ThemeChoice>(storedTheme)
-  const [counter, setCounter] = useState<CounterMode>(readCounterMode)
+  const [counter, setCounter] = useState<CounterMode>(() => readPrefs().counter)
 
   const choose = (choice: ThemeChoice) => {
     setTheme(choice)
@@ -671,7 +672,7 @@ function AppearanceSection() {
 
   const chooseCounter = (choice: CounterMode) => {
     setCounter(choice)
-    writeCounterMode(choice)
+    writePrefs({ ...readPrefs(), counter: choice })
   }
 
   return (

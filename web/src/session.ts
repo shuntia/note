@@ -1,5 +1,4 @@
 const SESSION_KEY = 'note.nowSession'
-const MODE_KEY = 'note.nowCounter'
 
 // One focus session. `taskId` names the task being worked — a step, when the
 // task was split — while `title` stays the top-level name the user recognises.
@@ -57,20 +56,4 @@ export function effectiveStart(s: FocusSession): number {
 export function elapsedSec(s: FocusSession): number {
   const at = s.pausedAt ?? Date.now()
   return Math.max(0, Math.floor((at - effectiveStart(s)) / 1000))
-}
-
-export function readCounterMode(): CounterMode {
-  try {
-    return localStorage.getItem(MODE_KEY) === 'remaining' ? 'remaining' : 'elapsed'
-  } catch {
-    return 'elapsed'
-  }
-}
-
-export function writeCounterMode(m: CounterMode) {
-  try {
-    localStorage.setItem(MODE_KEY, m)
-  } catch {
-    // the choice still holds for this session
-  }
 }

@@ -2,15 +2,9 @@ import { useCallback, useEffect, useRef, useState, type CSSProperties, type Touc
 import { api } from '../api'
 import type { ToastAction } from '../app'
 import { NowCounter } from '../nowcounter'
+import { readPrefs, writePrefs } from '../prefs'
 import { eventLabel } from '../receipts'
-import {
-  effectiveStart,
-  elapsedSec,
-  readCounterMode,
-  writeCounterMode,
-  type CounterMode,
-  type FocusSession,
-} from '../session'
+import { effectiveStart, elapsedSec, type CounterMode, type FocusSession } from '../session'
 import type { PlanEvent } from '../types'
 
 // The 240° sweep, out of the r=150 circle's 942.48 circumference.
@@ -70,7 +64,7 @@ export function Now({
   onChanged: () => void
   onLeave: () => void
 }) {
-  const [mode, setMode] = useState<CounterMode>(readCounterMode)
+  const [mode, setMode] = useState<CounterMode>(() => readPrefs().counter)
   const [events, setEvents] = useState<PlanEvent[]>([])
   const [minute, setMinute] = useState(() => new Date())
   const [ambient, setAmbient] = useState(false)
@@ -163,7 +157,7 @@ export function Now({
   const flip = () => {
     const next: CounterMode = mode === 'elapsed' ? 'remaining' : 'elapsed'
     setMode(next)
-    writeCounterMode(next)
+    writePrefs({ ...readPrefs(), counter: next })
   }
 
   const close = useCallback(() => {
