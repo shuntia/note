@@ -14,9 +14,14 @@ import type { PlanEvent } from '../types'
 
 const UNDO_MS = 5000
 const LATER_MINUTES = [5, 10, 15, 30, 60]
+const ROUTINE_MIN = 15
 
 // Drop has no server-side reversal, so the request waits out the undo window.
 let heldDrop: { id: number; timer: number } | null = null
+// Nor does finishing, so the last step's write waits the same way.
+let heldDone: { timer: number; send: () => void } | null = null
+
+const round5 = (min: number) => Math.max(5, Math.round(min / 5) * 5)
 
 function nowMinutes(): number {
   const d = new Date()
@@ -84,7 +89,7 @@ export function Home({
   tabs: ReactNode
 }) {
   const [events, setEvents] = useState<PlanEvent[]>([])
-  const [, tick] = useState(0)
+  const [beat, tick] = useState(0)
   const [pending, setPending] = useState(false)
   const [later, setLater] = useState(false)
   const inSession = session !== null
@@ -106,7 +111,10 @@ export function Home({
 
   // The last stage is Today; before it the face owns the whole screen.
   const showToday = stage === (inSession ? 2 : 1)
-  useEffect(() => onChrome(mobile && !showToday), [mobile, showToday, onChrome])
+  useEffect(() => {
+    onChrome(mobile && !showToday)
+    return () => onChrome(false)
+  }, [mobile, showToday, onChrome])
   useEffect(() => setStage(0), [inSession, setStage])
 
   const act = async (fn: () => Promise<unknown>) => {
@@ -151,11 +159,16 @@ export function Home({
     })
   }
 
-  const visible = useMemo(() => events.filter((ev) => ev.id !== heldDrop?.id), [events])
+  // the beat is a dependency because the held drop lives outside React state
+  const visible = useMemo(() => events.filter((ev) => ev.id !== heldDrop?.id), [events, beat])
   const now = nowMinutes()
   const next = nextUp(visible)
 
-  const start = (ev: PlanEvent) =>
+  // A routine is timed to its span; without an end the routine default stands in.
+  const start = (ev: PlanEvent) => {
+    const span = ev.end_wall_time
+      ? Math.max(1, minutesOf(ev.end_wall_time) - minutesOf(ev.wall_time))
+      : ROUTINE_MIN
     openNow({
       taskId: null,
       eventId: ev.id,
@@ -164,11 +177,12 @@ export function Home({
       stepIndex: null,
       stepCount: null,
       stepName: null,
-      durationSec: Math.max(60, (minutesOf(ev.end_wall_time ?? ev.wall_time) - minutesOf(ev.wall_time)) * 60),
+      durationSec: span * 60,
       startedAt: Date.now(),
       pausedAt: null,
       pausedMs: 0,
     })
+  }
 
   // ── session face ─────────────────────────────────────────────
   const pause = () => session && setSession({ ...session, pausedAt: Date.now() })
@@ -179,26 +193,89 @@ export function Home({
       pausedAt: null,
       pausedMs: session.pausedMs + (Date.now() - (session.pausedAt ?? Date.now())),
     })
+  const commitDone = useCallback(() => {
+    if (!heldDone) return
+    const { timer, send } = heldDone
+    heldDone = null
+    window.clearTimeout(timer)
+    send()
+  }, [])
+  useEffect(() => commitDone, [commitDone])
+
+  // Ending the last step closes the session at once and holds the write, so Undo
+  // is a toast rather than a question asked before the fact.
+  const complete = (s: FocusSession) => {
+    const elapsed = elapsedSec(s)
+    const send = () => {
+      if (s.taskId !== null) {
+        api
+          .patchTask(s.taskId, { state: 'done', notes: withElapsedNote(s.notes, elapsed) })
+          .then(onChanged)
+          .catch(() => notify("Couldn't save the session. Try again."))
+      } else if (s.eventId !== null) {
+        api
+          .eventAction(s.eventId, 'done')
+          .then(onChanged)
+          .catch(() => notify("Couldn't mark that done. Try again."))
+      }
+    }
+    commitDone()
+    const hold = { timer: window.setTimeout(commitDone, UNDO_MS), send }
+    heldDone = hold
+    setSession(null)
+    onChanged()
+    notify('Done', {
+      label: 'Undo',
+      run: () => {
+        if (heldDone !== hold) return
+        window.clearTimeout(hold.timer)
+        heldDone = null
+        setSession(s)
+      },
+    })
+  }
+
+  // A step before the last hands the session straight to the next one still open.
+  const advance = async (s: FocusSession, step: number) => {
+    if (pending) return
+    setPending(true)
+    try {
+      await api.patchTask(step, { state: 'done', notes: withElapsedNote(s.notes, elapsedSec(s)) })
+      const nodes = await api.tasks()
+      const parent = nodes.find((n) => n.children.some((c) => c.id === step))
+      const at = parent?.children.findIndex((c) => c.id === step) ?? -1
+      const open = parent?.children.slice(at + 1).find((c) => c.state === 'open' || c.state === 'in_progress')
+      onChanged()
+      if (!parent || !open) {
+        setSession(null)
+        notify('Done')
+        return
+      }
+      setSession({
+        taskId: open.id,
+        eventId: null,
+        title: parent.title,
+        notes: open.notes,
+        stepIndex: parent.children.indexOf(open) + 1,
+        stepCount: parent.children.length,
+        stepName: open.title,
+        durationSec: open.duration_min === null ? null : round5(open.duration_min) * 60,
+        startedAt: Date.now(),
+        pausedAt: null,
+        pausedMs: 0,
+      })
+    } catch {
+      notify("Couldn't save the session. Try again.")
+    } finally {
+      setPending(false)
+    }
+  }
+
   const finish = () => {
     if (!session) return
-    const elapsed = elapsedSec(session)
-    const done = () => {
-      setSession(null)
-      onChanged()
-    }
-    if (session.taskId !== null) {
-      api
-        .patchTask(session.taskId, { state: 'done', notes: withElapsedNote(session.notes, elapsed) })
-        .then(done)
-        .catch(() => notify("Couldn't save the session. Try again."))
-    } else if (session.eventId !== null) {
-      api
-        .eventAction(session.eventId, 'done')
-        .then(done)
-        .catch(() => notify("Couldn't mark that done. Try again."))
-    } else {
-      done()
-    }
+    const more = session.stepIndex !== null && session.stepCount !== null && session.stepIndex < session.stepCount
+    if (session.taskId !== null && more) advance(session, session.taskId)
+    else complete(session)
   }
 
   // Past the duration the counter leaves the preference behind and counts the overrun up.
@@ -342,7 +419,7 @@ export function Home({
                 <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1.2" /><rect x="14" y="5" width="4" height="14" rx="1.2" /></svg>
               )}
             </button>
-            <button className="btn-fill wide" onClick={finish}>Done with this step</button>
+            <button className="btn-fill wide" disabled={pending} onClick={finish}>Done with this step</button>
             <TellNote notify={notify} />
           </div>
         )}
