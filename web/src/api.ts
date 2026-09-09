@@ -52,9 +52,15 @@ export function setOnUnauthorized(fn: () => void) {
   onUnauthorized = fn
 }
 
+// Keepalive keeps a request started during `pagehide` alive past the unload; it
+// carries a body cap, so a rare oversized payload goes out the ordinary way.
+const KEEPALIVE_MAX_BODY = 60_000
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const body = init?.body
   const res = await fetch(path, {
-    headers: init?.body ? { 'Content-Type': 'application/json' } : undefined,
+    headers: body ? { 'Content-Type': 'application/json' } : undefined,
+    keepalive: typeof body === 'string' ? body.length <= KEEPALIVE_MAX_BODY : true,
     ...init,
   })
   if (!res.ok) {

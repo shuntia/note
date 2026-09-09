@@ -147,6 +147,7 @@ function turn(item: Exclude<Item, ToolItem>): ReactNode {
 
 export function Talk({
   notify,
+  onChanged,
   prefill,
   onPrefilled,
 }: ViewProps & { prefill?: string | null; onPrefilled?: () => void }) {
@@ -337,11 +338,14 @@ export function Talk({
   }
 
   const remove = (c: Conversation) => {
+    // The hold outlives this component, so the commit also pokes the app-level
+    // refresh that a remounted view is listening to.
+    const settled = () => {
+      void loadList(true)
+      onChanged()
+    }
     deleteHold.start(c.id, () => {
-      api.deleteConversation(c.id).then(
-        () => void loadList(true),
-        () => void loadList(true),
-      )
+      api.deleteConversation(c.id).then(settled, settled)
     })
     const wasOpen = current === c.id
     const wasRemembered = lastConversation() === c.id
