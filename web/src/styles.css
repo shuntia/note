@@ -273,15 +273,6 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
   font-weight: 500;
   margin: 0 0 1.25rem;
 }
-.login h1::after {
-  content: '';
-  display: inline-block;
-  width: 11px;
-  height: 11px;
-  margin-left: 0.5rem;
-  border-radius: 50%;
-  background: var(--sun);
-}
 .login form {
   width: 18rem;
   text-align: left;
@@ -966,7 +957,7 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 .log-table tr:first-child td { border-top: none; }
 .log-table td:first-child { white-space: nowrap; }
 
-/* Now-screen counter — 2026-08-31-now-counter-spec.md §4 */
+/* session counter */
 .now-counter {
   font-family: var(--display);
   font-weight: 500;
@@ -1071,7 +1062,7 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 .home.stage-2 .home-face, .home:not(.in-session).stage-1 .home-face { flex-direction: row; align-items: center; gap: 16px; padding: 54px 24px 0; box-sizing: border-box; }
 .home.paused .gauge-ring { opacity: 0.5; animation: none; }
 .gauge-num { display: flex; align-items: baseline; justify-content: center; }
-/* the shared counter carries its own Now-screen size; on a face the centre sets it */
+/* the counter carries its own size; on a face the centre sets it */
 .gauge-num .now-counter { font-size: inherit; letter-spacing: inherit; }
 .home-head { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
 .home-head .gauge-eyebrow { margin-bottom: 0; }

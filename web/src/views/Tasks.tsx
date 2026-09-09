@@ -20,8 +20,7 @@ const isLive = (t: Task) => t.state === 'open' || t.state === 'in_progress'
 // can ever show a duration the user could not have been offered.
 const round5 = (min: number) => Math.max(5, Math.round(min / 5) * 5)
 
-// Step 6's Now screen opens on this task; a parent hands off to its next
-// unfinished step.
+// A parent hands its focus session off to its next unfinished step.
 const focusTarget = (node: TaskNode): Task =>
   node.children.find((c) => c.state !== 'done') ?? node
 
