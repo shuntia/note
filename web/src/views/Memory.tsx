@@ -26,6 +26,20 @@ function factDate(iso: string): string {
   return midnight(at) === midnight(new Date()) ? 'today' : shortDate(iso)
 }
 
+// The list endpoint has no dates, so the order settles as the rows read theirs back;
+// a row still waiting keeps the server's place until then.
+function newestFirst(items: MemoryHit[], saved: (id: string) => MemoryFact | undefined): MemoryHit[] {
+  return items
+    .map((m, i) => ({ m, i, created: saved(m.id)?.created }))
+    .sort((a, b) => {
+      if (a.created && b.created) return b.created.localeCompare(a.created) || a.i - b.i
+      if (a.created) return -1
+      if (b.created) return 1
+      return a.i - b.i
+    })
+    .map((row) => row.m)
+}
+
 // Facts never change once written, so reads are cached for the session; the list
 // endpoint carries summaries only, so a row's date has to be read back one fact
 // at a time.
@@ -139,7 +153,7 @@ export function Memory({ notify, refresh, openTalk }: ViewProps) {
           <p className="memory-empty">{query ? 'Nothing matches.' : 'Nothing yet.'}</p>
         ) : (
           <ul className="memory-list">
-            {items.map((m) => (
+            {newestFirst(items, facts.get).map((m) => (
               <MemoryRow
                 key={m.id}
                 hit={m}

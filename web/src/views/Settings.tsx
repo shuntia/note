@@ -3,6 +3,7 @@ import { api, ApiError } from '../api'
 import type { ToastAction, ViewProps } from '../app'
 import { prefsFrom, writePrefs } from '../prefs'
 import { disablePush, enablePush, pushState } from '../push'
+import { eventLabel } from '../receipts'
 import type { CounterMode } from '../session'
 import { applyTheme, saveTheme, storedTheme, type ThemeChoice } from '../theme'
 import type {
@@ -50,13 +51,19 @@ function draftOf(s: UserSettings): Draft {
   }
 }
 
+const templateChoices = (loaded: { choices: Choices; draft: Draft }) =>
+  loaded.choices.templates.includes(loaded.draft.template)
+    ? loaded.choices.templates
+    : [loaded.draft.template, ...loaded.choices.templates]
+
 // A zone reads as the city it names; the region is the same for every choice nearby.
 const zoneCity = (tz: string) => tz.split('/').pop()?.replace(/_/g, ' ') ?? tz
 
-function flexWord(row: ScheduleRow): string {
-  if (row.flexibility === 'fixed') return 'fixed'
-  if (row.flexibility === 'drop') return 'droppable'
-  return row.slide_window_min > 0 ? `±${row.slide_window_min}m` : 'flexible'
+// Only a real slide window is worth a line; everything else the day already shows.
+function slideWord(row: ScheduleRow): string | null {
+  if (row.entry === 'block' || row.flexibility === 'fixed' || row.slide_window_min <= 0) return null
+  const min = row.slide_window_min
+  return min % 60 === 0 ? `± ${min / 60} h` : `± ${min} min`
 }
 
 function Group({ head, children }: { head: string; children: ReactNode }) {
@@ -318,23 +325,22 @@ export function Settings({
           >
             {open === 'schedule' && (
               <div className="set-fold-body">
-                <select
-                  aria-label="Shape of the day"
-                  value={loaded.draft.template}
-                  onChange={(e) => {
-                    edit('template', e.target.value)
-                    void commit('schedule', { template: e.target.value })
-                  }}
-                >
-                  {(loaded.choices.templates.includes(loaded.draft.template)
-                    ? loaded.choices.templates
-                    : [loaded.draft.template, ...loaded.choices.templates]
-                  ).map((t) => (
-                    <option key={t} value={t}>
-                      {t}
-                    </option>
-                  ))}
-                </select>
+{templateChoices(loaded).length > 1 && (
+                  <select
+                    aria-label="Shape of the day"
+                    value={loaded.draft.template}
+                    onChange={(e) => {
+                      edit('template', e.target.value)
+                      void commit('schedule', { template: e.target.value })
+                    }}
+                  >
+                    {templateChoices(loaded).map((t) => (
+                      <option key={t} value={t}>
+                        {t}
+                      </option>
+                    ))}
+                  </select>
+                )}
                 <ScheduleList rows={loaded.rows} busy={busy} toggle={toggleAlert} />
                 <Status save={save} row="schedule" />
               </div>
@@ -490,25 +496,28 @@ function ScheduleList({
   if (rows.length === 0) return null
   return (
     <ul className="sched-list">
-      {rows.map((row) => (
+      {rows.map((row) => {
+        const slide = slideWord(row)
+        return (
         <li className="sched-row" key={row.index}>
           <span className="sched-time">
             {row.entry === 'block' ? `${row.time}–${row.end_time ?? ''}` : row.time}
           </span>
           <span className="set-row-body">
-            <span className="set-label">{row.kind}</span>
-            <span className="set-sub">{row.entry === 'block' ? 'block' : flexWord(row)}</span>
+            <span className="set-label">{eventLabel(row.kind)}</span>
+            {slide && <span className="set-sub">{slide}</span>}
           </span>
           {row.entry === 'routine' && (
             <Switch
-              label={`${row.kind} pings you`}
+              label={`${eventLabel(row.kind)} pings you`}
               on={row.alert}
               disabled={busy}
               onToggle={() => toggle(row)}
             />
           )}
         </li>
-      ))}
+        )
+      })}
     </ul>
   )
 }
