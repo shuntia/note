@@ -7,6 +7,7 @@ import { Gauge } from '../gauge'
 import { makeHold } from '../held'
 import { NowCounter } from '../nowcounter'
 import { Overflow } from '../overflow'
+import { Presence } from '../presence'
 import { readPrefs } from '../prefs'
 import { eventLabel } from '../receipts'
 import { effectiveStart, elapsedSec, type FocusSession } from '../session'
@@ -27,11 +28,6 @@ const round5 = (min: number) => Math.max(5, Math.round(min / 5) * 5)
 function nowMinutes(): number {
   const d = new Date()
   return d.getHours() * 60 + d.getMinutes()
-}
-
-function fmt(sec: number): string {
-  const s = Math.max(0, sec)
-  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
 }
 
 function actionMessage(err: unknown): string {
@@ -86,7 +82,15 @@ export function Home({
   const [later, setLater] = useState(false)
   const inSession = session !== null
   const { stage, setStage, bind } = useStage(inSession ? 2 : 1)
+  const [wasInSession, setWasInSession] = useState(inSession)
   const prefs = readPrefs()
+
+  // Starting or finishing puts the face back at stage 0 in the same render, so no
+  // frame shows the new face at the old stage.
+  if (wasInSession !== inSession) {
+    setWasInSession(inSession)
+    setStage(0)
+  }
 
   const load = useCallback(() => {
     api
@@ -107,7 +111,6 @@ export function Home({
     onChrome(!showToday)
     return () => onChrome(false)
   }, [showToday, onChrome])
-  useEffect(() => setStage(0), [inSession, setStage])
 
   const act = async (fn: () => Promise<unknown>) => {
     if (pending) return
@@ -255,36 +258,20 @@ export function Home({
   }
 
   // Past the duration the counter leaves the preference behind and counts the overrun up.
-  const reading = (s: FocusSession) => {
-    const elapsed = elapsedSec(s)
+  const overrun = (s: FocusSession) => {
     const total = s.durationSec
-    const over = total !== null && elapsed > total
-    const shown = over ? elapsed - (total ?? 0) : total === null || prefs.counter === 'elapsed' ? elapsed : total - elapsed
-    return { over, shown, total }
+    return { total, over: total !== null && elapsedSec(s) > total }
   }
 
-  const sessionCentre = (session: FocusSession, big: boolean) => {
-    const { over, shown, total } = reading(session)
+  const counter = (s: FocusSession) => {
+    const { total, over } = overrun(s)
     return (
-      <>
-        <div className={`gauge-num${over ? ' over' : ''}`} style={{ fontSize: big ? 58 : 40 }}>
-          {over ? '+' : ''}
-          {big ? (
-            <NowCounter
-              startedAt={effectiveStart(session) + (over ? (total ?? 0) * 1000 : 0)}
-              durationSec={total ?? 0}
-              mode={over || total === null ? 'elapsed' : prefs.counter}
-              pausedAt={session.pausedAt}
-            />
-          ) : (
-            fmt(shown)
-          )}
-        </div>
-        <div className="gauge-name" style={{ fontSize: big ? 18 : 15 }}>{session.stepName ?? session.title}</div>
-        {session.stepIndex !== null && (
-          <div className="gauge-sub">{session.stepIndex} of {session.stepCount}</div>
-        )}
-      </>
+      <NowCounter
+        startedAt={effectiveStart(s) + (over ? (total ?? 0) * 1000 : 0)}
+        durationSec={total ?? 0}
+        mode={over || total === null ? 'elapsed' : prefs.counter}
+        pausedAt={s.pausedAt}
+      />
     )
   }
 
@@ -317,7 +304,7 @@ export function Home({
   }
 
   const nextActions = (ev: PlanEvent) => (
-    <div className="home-actions">
+    <>
       <button className="btn-fill" disabled={pending} onClick={() => start(ev)}>Start</button>
       <button className="btn-haze" aria-expanded={later} disabled={pending} onClick={() => setLater((v) => !v)}>Later</button>
       <Overflow
@@ -339,7 +326,7 @@ export function Home({
           <span className="later-unit">min</span>
         </div>
       )}
-    </div>
+    </>
   )
 
   const chevron = (
@@ -349,7 +336,7 @@ export function Home({
   )
 
   const today = (
-    <div className="home-today">
+    <>
       <DayLine events={visible} now={now} compact={mobile} nextId={next?.id} />
       <ul className="home-list">
         {visible
@@ -362,47 +349,47 @@ export function Home({
           ))}
       </ul>
       {mobile && <TellNote notify={notify} />}
-    </div>
+    </>
   )
 
   // ── layout ───────────────────────────────────────────────────
   if (session) {
     const big = stage === 0
-    const head = reading(session)
+    const { over } = overrun(session)
     return (
       <div className={`home in-session stage-${stage}${mobile ? ' mobile' : ''}${session.pausedAt ? ' paused' : ''}`} {...bind}>
         <div className="home-face">
           <Gauge size={stage === 2 ? 120 : big ? (mobile ? 320 : 440) : 230} frac={sessionFrac(session)}>
-            {stage === 2 ? (
-              <div className={`gauge-num${head.over ? ' over' : ''}`} style={{ fontSize: 24 }}>
-                {head.over ? '+' : ''}
-                {fmt(head.shown)}
-              </div>
-            ) : (
-              sessionCentre(session, big)
+            <div className={`gauge-num${over ? ' over' : ''}`} style={{ fontSize: stage === 2 ? 24 : big ? 58 : 40 }}>
+              {over ? '+' : ''}
+              {counter(session)}
+            </div>
+            {stage !== 2 && (
+              <>
+                <div className="gauge-name" style={{ fontSize: big ? 18 : 15 }}>{session.stepName ?? session.title}</div>
+                {session.stepIndex !== null && (
+                  <div className="gauge-sub">{session.stepIndex} of {session.stepCount}</div>
+                )}
+              </>
             )}
           </Gauge>
-          {stage === 2 && (
-            <div className="home-head">
-              <span className="home-head-name">{session.stepName ?? session.title}</span>
-              {session.stepIndex !== null && <span className="gauge-sub">{session.stepIndex} of {session.stepCount}</span>}
-            </div>
-          )}
+          <Presence key="head" show={stage === 2} className="home-head">
+            <span className="home-head-name">{session.stepName ?? session.title}</span>
+            {session.stepIndex !== null && <span className="gauge-sub">{session.stepIndex} of {session.stepCount}</span>}
+          </Presence>
         </div>
-        {stage === 1 && (
-          <div className="home-sheet">
-            <button className="btn-round" aria-label={session.pausedAt ? 'Back to it' : 'Break'} onClick={session.pausedAt ? resume : pause}>
+        <Presence key="sheet" show={stage === 1} className="home-sheet">
+          <button className="btn-round" aria-label={session.pausedAt ? 'Back to it' : 'Break'} onClick={session.pausedAt ? resume : pause}>
               {session.pausedAt ? (
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10-6.5z" /></svg>
               ) : (
                 <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1.2" /><rect x="14" y="5" width="4" height="14" rx="1.2" /></svg>
               )}
             </button>
-            <button className="btn-fill wide" disabled={pending} onClick={finish}>Done with this step</button>
-            <TellNote notify={notify} />
-          </div>
-        )}
-        {stage === 2 && today}
+          <button className="btn-fill wide" disabled={pending} onClick={finish}>Done with this step</button>
+          <TellNote notify={notify} />
+        </Presence>
+        <Presence key="today" show={stage === 2} className="home-today">{today}</Presence>
         {stage === 2 && mobile && tabs}
         {stage < 2 && chevron}
       </div>
@@ -432,19 +419,19 @@ export function Home({
         ) : (
           <div className="home-text"><div className="home-title">That's everything today.</div></div>
         )}
-        {stage === 1 && next && facts && (
-          <>
-            <div className="home-head">
-              <span className="gauge-eyebrow">{facts.eyebrow}</span>
-              <span className="home-head-name">{eventLabel(next.kind)}</span>
-              <span className="gauge-sub">{facts.span}</span>
-            </div>
-            <button className="btn-fill small" disabled={pending} onClick={() => start(next)}>Start</button>
-          </>
+        <Presence key="head" show={stage === 1 && next !== null && facts !== null} className="home-head">
+          <span className="gauge-eyebrow">{facts?.eyebrow}</span>
+          <span className="home-head-name">{next && eventLabel(next.kind)}</span>
+          <span className="gauge-sub">{facts?.span}</span>
+        </Presence>
+        {stage === 1 && next && (
+          <button className="btn-fill small stage-in" disabled={pending} onClick={() => start(next)}>Start</button>
         )}
       </div>
-      {stage === 0 && next && nextActions(next)}
-      {stage === 1 && today}
+      <Presence key="actions" show={stage === 0 && next !== null} className="home-actions">
+        {next && nextActions(next)}
+      </Presence>
+      <Presence key="today" show={stage === 1} className="home-today">{today}</Presence>
       {stage === 1 && mobile && tabs}
       {stage === 0 && chevron}
     </div>
