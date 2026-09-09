@@ -415,7 +415,7 @@ export function Home({
   }
 
   return (
-    <div className={`home stage-${stage}${mobile ? ' mobile' : ''}`} {...bind}>
+    <div className={`home stage-${stage}${mobile ? ' mobile' : ''}${prefs.showArc ? '' : ' no-arc'}`} {...bind}>
       <div className="home-face">
         {next ? (
           prefs.showArc ? (

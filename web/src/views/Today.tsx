@@ -239,11 +239,11 @@ function DebriefFold() {
   }
 
   return (
-    <section className="debrief-row">
+    <section className={`debrief-row${folded ? '' : ' open'}`}>
       <button className="debrief-fold" aria-expanded={!folded} onClick={toggle}>
         <span className="debrief-mark" aria-hidden="true" />
         <span className="debrief-lead">
-          <b>This morning:</b> {folded ? firstSentence(debrief.content) : ''}
+          <b>This morning:</b> {firstSentence(debrief.content)}
         </span>
         <span className="debrief-chev" aria-hidden="true">
           <svg viewBox="0 0 24 24">

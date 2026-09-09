@@ -385,7 +385,7 @@ function Row({ node, group, actions }: { node: TaskNode; group: Group; actions: 
   const sub =
     steps.length > 0
       ? parentSub(node)
-      : !done && node.duration_min === null && node.duration_source === 'none'
+      : group === 'now' && node.duration_min === null && node.duration_source === 'none'
         ? 'Note will estimate'
         : null
 
