@@ -164,7 +164,12 @@ body {
 .tabs button[aria-current='true'] { color: var(--ink); }
 .tabs .nav-icon { width: 22px; height: 22px; }
 .tabs button:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
-@media (max-width: 767.98px) { .topbar { display: none; } .view { padding: 12px 16px 24px; } }
+@media (max-width: 767.98px) {
+  .topbar { display: none; }
+  .view { padding: 12px 16px 84px; }
+  /* the bar is translucent, so the blur keeps content readable as it scrolls under */
+  .shell > .tabs { position: fixed; left: 0; right: 0; bottom: 0; z-index: 10; backdrop-filter: blur(14px); }
+}
 @media (min-width: 768px) { .tabs { display: none; } }
 
 
@@ -698,6 +703,7 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 
 .chat-foot { flex: none; padding: 12px 20px 24px; }
 .chat-foot .tellnote { max-width: 680px; margin: 0 auto; }
+@media (max-width: 767.98px) { .chat-foot { padding-bottom: 84px; } }
 @media (min-width: 768px) { .chat-foot { padding: 12px 20px 40px; } }
 
 @media (prefers-reduced-motion: reduce) {

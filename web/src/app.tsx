@@ -156,8 +156,8 @@ export function App() {
   const showHome = tab === 'today' && (mobile || session !== null)
 
   return (
-    <div className={`shell${chromeHidden ? ' bare' : ''}`}>
-      {!mobile && !(showHome && session) && (
+    <div className="shell">
+      {!mobile && !(showHome && chromeHidden) && (
         <header className="topbar">
           <span className="brand">Note</span>
           <nav className="topnav" aria-label="Views">
