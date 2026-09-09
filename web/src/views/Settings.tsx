@@ -176,10 +176,15 @@ export function Settings({
     err instanceof ApiError && err.status === 400 ? err.message : "That didn't save. Try again."
 
   // Only the fields that moved travel, so an edit left open in another row is never
-  // written by someone else's save.
-  const commit = async (row: string) => {
+  // written by someone else's save. `override` carries a value whose state update
+  // has not landed yet, for controls that save on change.
+  const commit = async (row: string, override?: Partial<Draft>) => {
     if (!loaded) return
-    const cleaned: Draft = { ...loaded.draft, display_name: loaded.draft.display_name.trim() }
+    const cleaned: Draft = {
+      ...loaded.draft,
+      ...override,
+      display_name: loaded.draft.display_name.trim(),
+    }
     const patch: Partial<Draft> = {}
     for (const key of EDITABLE) if (cleaned[key] !== loaded.baseline[key]) patch[key] = cleaned[key]
     if (Object.keys(patch).length === 0) return
@@ -318,9 +323,8 @@ export function Settings({
                   value={loaded.draft.template}
                   onChange={(e) => {
                     edit('template', e.target.value)
-                    setOpen('schedule')
+                    void commit('schedule', { template: e.target.value })
                   }}
-                  onBlur={() => void commit('schedule')}
                 >
                   {(loaded.choices.templates.includes(loaded.draft.template)
                     ? loaded.choices.templates

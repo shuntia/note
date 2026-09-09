@@ -276,24 +276,36 @@ The server looks for the build at `web_dir` from `config/server.toml`
 and serves it with an SPA fallback; without a build, the API still runs.
 Unknown `/api/*` paths stay `404` rather than falling back to the app shell.
 
-Sign in with a user from `create-user`. The app is a full-width shell — a left
-sidebar on desktop, bottom tabs on phones — with five views. Today shows the
-day's plan on a time spine (Done / Later / +15 / −15 / Drop per unsettled
-event, the ±15 slides only on events the template does not pin as `fixed`)
-beside the morning debrief. Tasks is the list with quick-add. Chat is a full
-conversation surface: a sidebar of persisted conversations (new, rename,
-delete), assistant replies rendered as sanitized markdown with copyable code
-blocks, and every tool call the agent makes shown as an expandable block with
-its arguments and result. Memory browses everything the agent has saved —
-filter by category or search, and open any fact to read it. Settings gathers
-profile (display name), schedule (timezone, nightly debrief time, template),
-a System / Light / Dark theme choice, the persona editor (the assistant's
-system prompt, per-user override with reset-to-default), a Web Push toggle
-(needs the `[channels.webpush]` config), and the server log for admin users.
-Delivered events arrive live over the
-WebSocket while the app is open, and as push notifications when it is not;
-`web/public/sw.js` renders those notifications and focuses an open tab when
-one is clicked.
+Sign in with a user from `create-user`. The home screen is one face on the
+gradient with the day a gesture away: swipe up, scroll, or press ArrowDown to
+raise Today under it, and the other way to send it back. In a focus session
+that face is a gauge around the time left on the step, with pause and "Done
+with this step" under it; between sessions it is the next routine, named and
+counted down, over an arc that fills as the wait runs out. A phone opens there;
+a desktop keeps the home screen for sessions and opens on Today.
+
+Today is the same plan with room to read it: the next event as the hero with
+its actions (Start, Later, drop it, move it to tomorrow, silence it), the day
+drawn as a line from 06 to 24 with every event still ahead on it, and the
+morning debrief folded at the foot. The shell around all of it is a top bar on
+desktop — the five views and a quick-capture field `N` focuses — and a fixed
+tab bar on phones; a running session takes the whole screen and both step aside
+until Today is raised. Tasks is the list with quick-add, steps, durations, and
+a start that opens a session. Chat is a full conversation surface: a sidebar
+of persisted conversations (new, rename, delete), assistant replies rendered
+as sanitized markdown with copyable code blocks, and every tool call the agent
+makes shown as an expandable block with its arguments and result. Memory
+browses everything the agent has saved — filter by category or search, and
+open any fact to read it. Settings gathers
+the home screen (`show_arc_between_sessions`, whether the wait draws its arc,
+and `counter`, whether a session reads remaining or elapsed), the day
+(template, which routines ping, nightly debrief time, timezone), your name, a
+System / Light / Dark theme choice, the persona editor (the assistant's system
+prompt, per-user override with reset-to-default), a Web Push toggle (needs the
+`[channels.webpush]` config), and the server log for admin users. Delivered
+events arrive live over the WebSocket while the app is open, and as push
+notifications when it is not; `web/public/sw.js` renders those notifications
+and focuses an open tab when one is clicked.
 
 For development, `pnpm dev` proxies `/api` (WebSocket included) to
 `127.0.0.1:3271`.

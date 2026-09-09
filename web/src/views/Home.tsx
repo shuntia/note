@@ -448,12 +448,14 @@ export function Home({
               {waitCentre(next, stage === 0)}
             </Gauge>
           ) : (
-            <div className="home-text">
-              <div className="gauge-eyebrow">NEXT</div>
-              <div className="home-title">{eventLabel(next.kind)}</div>
-              <div className="gauge-num" style={{ fontSize: 30 }}>in {Math.max(0, minutesOf(next.wall_time) - now)} min</div>
-              <div className="gauge-sub">{next.wall_time} – {next.end_wall_time ?? next.wall_time}</div>
-            </div>
+            stage === 0 && (
+              <div className="home-text">
+                <div className="gauge-eyebrow">NEXT</div>
+                <div className="home-title">{eventLabel(next.kind)}</div>
+                <div className="gauge-num" style={{ fontSize: 30 }}>in {Math.max(0, minutesOf(next.wall_time) - now)} min</div>
+                <div className="gauge-sub">{next.wall_time} – {next.end_wall_time ?? next.wall_time}</div>
+              </div>
+            )
           )
         ) : (
           <div className="home-text"><div className="home-title">That's everything today.</div></div>

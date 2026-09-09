@@ -129,7 +129,7 @@ export function App() {
   )
 
   const tabsNode = (
-    <nav className={`tabs${chromeHidden ? ' hidden' : ''}`} aria-label="Views">
+    <nav className="tabs" aria-label="Views">
       {NAV.map((t) => (
         <button key={t.id} aria-current={tab === t.id} onClick={() => setTab(t.id)}>
           <NavIcon id={t.id} />
