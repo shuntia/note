@@ -1566,8 +1566,10 @@ fieldset.pane-rows { border: none; margin: 0; padding: 0; min-width: 0; }
 .today-actions { position: relative; display: flex; align-items: center; gap: 12px; margin-top: 18px; }
 .today-actions .ev-more-wrap { position: relative; top: auto; right: auto; margin-left: 6px; }
 .today-actions .ev-more { width: 44px; height: 44px; font-size: 1.3rem; color: var(--quiet); }
-/* the dots open to the right, over the Later panel rather than under it */
 .today-actions .ev-menu { left: 0; right: auto; z-index: 6; min-width: 12rem; }
+/* with Later open the menu steps clear of its panel, the two side by side */
+.today-actions .beside-later { position: static; }
+.today-actions .beside-later .ev-menu { left: calc(min(400px, 92vw) + 20px); top: calc(100% + 14px); }
 .today-line { position: absolute; left: 120px; width: 1200px; max-width: calc(100% - 240px); top: 496px; }
 .today-ground { position: absolute; left: 0; right: 0; top: 560px; bottom: 0; background: var(--earth); padding: 100px 0 0 120px; }
 .today-ground .debrief-row { width: 820px; max-width: calc(100% - 240px); }
