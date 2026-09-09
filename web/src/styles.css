@@ -462,209 +462,10 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
   .sched-toggle { min-height: 2.5rem; }
   .ev-more { width: 2.5rem; height: 2.5rem; }
   .receipt-chip { min-height: 2.5rem; }
-  .task-tick, .task-start { width: 2.5rem; height: 2.5rem; }
-  .task-add { min-height: 2.5rem; }
 }
-
-/* tasks — three groups down one reading column: Now carries card weight, Later
-   is the same shape gone quiet, Done Today is a receipt. */
-.tasks { max-width: 45rem; }
-
-.task-add {
-  display: flex;
-  align-items: center;
-  gap: 0.65rem;
-  margin: 0 0 1.75rem;
-  padding: 0.7rem 1rem;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  transition: border-color 150ms ease, box-shadow 150ms ease;
-}
-.task-add:focus-within {
-  border-color: var(--ring);
-  box-shadow: 0 0 0 1px var(--ring);
-}
-.task-add-glyph { flex: none; color: var(--sun-ink); line-height: 1; }
-.task-add input {
-  flex: 1;
-  min-width: 0;
-  padding: 0;
-  background: none;
-  border: none;
-  border-radius: 0;
-}
-.task-add input:focus-visible { outline: none; }
-.task-add-hint { flex: none; font-size: 0.78rem; color: var(--faint); }
-
-.task-group { margin-bottom: 1.65rem; }
-.task-group-head {
-  display: flex;
-  align-items: baseline;
-  gap: 0.45rem;
-  margin: 0 0 0.6rem;
-  font-size: 0.78rem;
-  font-weight: 700;
-  letter-spacing: 0.09em;
-  color: var(--text-muted);
-}
-.task-group-count { font-weight: 400; letter-spacing: 0; }
-.task-group-why {
-  margin-left: auto;
-  color: var(--faint);
-  font-weight: 400;
-  letter-spacing: 0;
-  font-size: 0.75rem;
-}
-
-.task-row {
-  margin-bottom: 0.5rem;
-  padding: 0.8rem 1rem;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  transition: border-color 120ms ease;
-}
-.task-row:hover { border-color: var(--border-input); }
-.task-group.now .task-row {
-  box-shadow: 0 6px 18px -14px color-mix(in srgb, var(--text) 60%, transparent);
-}
-.task-head { display: flex; align-items: center; gap: 0.8rem; }
-
-.task-tick {
-  flex: none;
-  display: grid;
-  place-items: center;
-  width: 1.4rem;
-  height: 1.4rem;
-  padding: 0;
-  background: none;
-  border: none;
-  cursor: pointer;
-}
-.tick {
-  display: grid;
-  place-items: center;
-  width: 1.375rem;
-  height: 1.375rem;
-  border: 2px solid var(--border-input);
-  border-radius: 50%;
-  transition: border-color 120ms ease;
-}
-.task-row:hover .tick { border-color: var(--sun); }
-
-/* the body takes the slack, so every trailing control sits where it is put */
-.task-body { flex: 1; min-width: 0; }
-.task-title { color: var(--text); }
-.task-sub { color: var(--text-muted); font-size: 0.78rem; }
-
-.task-tag,
-.task-dur {
-  flex: none;
-  padding: 0.05rem 0.55rem;
-  font-size: 0.72rem;
-  white-space: nowrap;
-  color: var(--text-muted);
-  border: 1px solid var(--border);
-  border-radius: 999px;
-}
-.task-tag.progress {
-  color: var(--sun-ink);
-  border-color: color-mix(in srgb, var(--sun) 35%, var(--border));
-  background: color-mix(in srgb, var(--sun) 12%, var(--surface));
-}
-.task-dur.est { border-style: dashed; }
-
-.task-start {
-  flex: none;
-  display: grid;
-  place-items: center;
-  width: 2.125rem;
-  height: 2.125rem;
-  padding-left: 2px;
-  color: var(--sun-ink);
-  font-size: 0.8rem;
-  background: var(--surface);
-  border: 1px solid color-mix(in srgb, var(--sun) 40%, var(--border));
-  border-radius: 50%;
-  cursor: pointer;
-  transition: background 120ms ease, border-color 120ms ease;
-}
-.task-start:hover {
-  background: color-mix(in srgb, var(--sun) 10%, var(--surface));
-  border-color: var(--sun);
-}
-
-/* the steps hang off a rail, indented past the parent's circle */
-.task-steps {
-  display: grid;
-  gap: 0.35rem;
-  margin: 0.6rem 0 0.1rem 2.2rem;
-  padding-left: 1.1rem;
-  border-left: 2px solid var(--border);
-}
-.task-step {
-  display: flex;
-  align-items: center;
-  gap: 0.6rem;
-  font-size: 0.9rem;
-  color: var(--text-muted);
-}
-.task-step-title { flex: 1; min-width: 0; }
-.ticksm {
-  display: grid;
-  place-items: center;
-  width: 1rem;
-  height: 1rem;
-  border: 2px solid var(--border-input);
-  border-radius: 50%;
-  transition: border-color 120ms ease;
-}
-.task-step:hover .ticksm { border-color: var(--sun); }
-.task-step.done .ticksm { border-color: var(--moss); background: var(--moss); }
-.task-step.done .task-step-title {
-  text-decoration: line-through;
-  text-decoration-color: color-mix(in srgb, var(--moss) 45%, transparent);
-}
-.task-step.next .task-step-title { color: var(--text); font-weight: 700; }
-
-.task-more { position: relative; flex: none; }
-
-.task-group.later .task-row { background: none; box-shadow: none; }
-.task-group.later .task-title { color: var(--text-muted); }
-
-.task-group.done .task-row {
-  padding-block: 0.35rem;
-  background: none;
-  border-color: transparent;
-}
-.task-group.done .tick { border-color: var(--moss); background: var(--moss); }
-.task-group.done .task-title {
-  color: var(--text-muted);
-  text-decoration: line-through;
-  text-decoration-color: color-mix(in srgb, var(--moss) 45%, transparent);
-}
-
-.task-empty { margin: 0 0 0.5rem; color: var(--text-muted); }
-
-/* the check reads on both themes because the surface token flips with them:
-   a light mark on light-mode moss, a dark one on dark-mode moss */
-.tick::after, .ticksm::after {
-  content: '';
-  width: 0.3rem;
-  height: 0.6rem;
-  margin-top: -0.12rem;
-  border: solid var(--surface);
-  border-width: 0 2px 2px 0;
-  transform: rotate(45deg);
-  opacity: 0;
-}
-.ticksm::after { width: 0.22rem; height: 0.45rem; margin-top: -0.09rem; }
-.task-group.done .tick::after, .task-step.done .ticksm::after { opacity: 1; }
 
 @media (prefers-reduced-motion: reduce) {
-  .task-add, .task-row, .tick, .ticksm, .task-start, button.ghost,
-  .debrief-fold, .btn-primary, .ev-more { transition: none; }
+  button.ghost, .debrief-fold, .btn-primary, .ev-more { transition: none; }
 }
 
 /* talk — three voices: Note speaks in serif, you in sans, tools in mono */
@@ -1774,3 +1575,44 @@ fieldset.pane-rows { border: none; margin: 0; padding: 0; min-width: 0; }
 .debrief-mark { width: 18px; height: 18px; border-radius: 50%; border: 1.7px solid var(--sun-ink); box-sizing: border-box; flex: none; }
 .debrief-chev svg { width: 16px; height: 16px; fill: none; stroke: var(--faint); stroke-width: 1.8; transition: transform 200ms; }
 .debrief-fold[aria-expanded='true'] .debrief-chev svg { transform: rotate(180deg); }
+
+/* ── horizon: tasks ─────────────────────────────────────────────── */
+.view:has(> .tasks) { padding: 0; }
+.tasks { width: 100%; padding: 56px 24px 100px; max-width: 720px; margin: 0 auto; }
+@media (min-width: 768px) {
+  .tasks { margin: 0; max-width: 840px; padding: 46px 0 0 120px; }
+  .task-add { max-width: 520px; }
+}
+.task-add { margin-bottom: 26px; }
+.task-group { display: flex; flex-direction: column; gap: 6px; margin-top: 28px; }
+.task-group:first-of-type { margin-top: 0; }
+.task-group.done { margin-top: 0; }
+.task-group-head { margin: 0; font-size: 0.72rem; letter-spacing: 0.12em; font-weight: 700; color: var(--faint); }
+.task-row { display: flex; align-items: center; gap: 12px; min-height: 52px; }
+.task-group.later .task-row { color: var(--quiet); }
+.task-group.done .task-row { color: var(--faint); }
+.task-group.done .task-title { text-decoration: line-through; text-decoration-color: var(--line); }
+.tick { width: 24px; height: 24px; border-radius: 50%; border: 2px solid var(--quiet); box-sizing: border-box; background: none; flex: none; cursor: pointer; display: grid; place-items: center; }
+.task-group.later .tick { border-color: var(--line); }
+.tick[aria-checked='true'] { background: var(--sage); border-color: var(--sage); }
+.tick[aria-checked='true']::after { content: ''; width: 5px; height: 9px; margin-top: -2px; border: solid var(--ivory); border-width: 0 2px 2px 0; transform: rotate(45deg); }
+.tick:focus-visible, .task-start:focus-visible, .task-done-fold:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+.task-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.task-title { font-size: 1rem; }
+.task-sub { font-size: 0.78rem; color: var(--faint); }
+.task-dur { font-size: 0.75rem; padding: 2px 9px; border-radius: 999px; border: 1px solid var(--line); color: var(--faint); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.task-start { width: 36px; height: 36px; border: 0; border-radius: 50%; background: var(--sun); display: grid; place-items: center; cursor: pointer; flex: none; }
+.task-start svg { width: 16px; height: 16px; fill: var(--ink); }
+.task-more { position: relative; flex: none; }
+.task-more .ev-more { width: 24px; height: 24px; color: var(--faint); }
+.task-steps { list-style: none; margin: 0; padding: 0 0 0 36px; }
+.task-step { display: flex; align-items: center; gap: 12px; min-height: 40px; color: var(--quiet); font-size: 0.92rem; }
+.task-step .tick { width: 20px; height: 20px; border-color: var(--line); }
+.task-step-title { min-width: 0; }
+.task-step.done { color: var(--faint); }
+.task-step.done .task-step-title { text-decoration: line-through; text-decoration-color: var(--line); }
+.task-step-min { margin-left: auto; font-size: 0.75rem; color: var(--faint); font-variant-numeric: tabular-nums; }
+.task-done-fold { margin-top: 20px; display: flex; align-items: center; gap: 8px; font: inherit; font-size: 0.875rem; color: var(--faint); background: none; border: 0; padding: 0; cursor: pointer; }
+.task-done-fold svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; transition: transform 200ms; }
+.task-done-fold[aria-expanded='true'] svg { transform: rotate(90deg); }
+@media (prefers-reduced-motion: reduce) { .task-done-fold svg { transition: none; } }

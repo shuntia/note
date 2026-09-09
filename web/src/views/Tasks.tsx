@@ -2,13 +2,11 @@ import { useCallback, useEffect, useState, type FormEvent } from 'react'
 import { api, ApiError } from '../api'
 import type { ViewProps } from '../app'
 import { Overflow, type OverflowItem } from '../overflow'
-import { SectionTitle } from '../section'
 import type { NewStep, Task, TaskNode, TaskState, TaskUpdate } from '../types'
 
 const NOW_CAP = 3
 const UNDO_MS = 5000
 const NOW_FULL = 'Now is full — finish or move something first'
-const NOW_EMPTY = "Nothing queued — pull something up from Later, or just add what's on your mind."
 
 type Group = 'now' | 'later' | 'done'
 
@@ -29,9 +27,7 @@ const focusTarget = (node: TaskNode): Task =>
 
 function parentSub(node: TaskNode): string {
   const done = node.children.filter((c) => c.state === 'done').length
-  const parts = node.duration_min === null ? [] : [`≈ ${round5(node.duration_min)} min`]
-  parts.push(`Note split this into ${node.children.length} steps`, `${done} done`)
-  return parts.join(' · ')
+  return `${node.children.length} steps · ${done} done`
 }
 
 function sameDay(iso: string, today: Date): boolean {
@@ -96,6 +92,7 @@ type RowActions = {
   reopenStep: (step: Task) => void
   moveToNow: (node: TaskNode) => void
   moveToLater: (node: TaskNode) => void
+  drop: (node: TaskNode) => void
   setProgress: (node: TaskNode, on: boolean) => void
   keepAsOne: (node: TaskNode) => void
   startFocus: (node: TaskNode) => void
@@ -105,6 +102,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
   const [nodes, setNodes] = useState<TaskNode[] | null>(null)
   const [failed, setFailed] = useState(false)
   const [title, setTitle] = useState('')
+  const [showDone, setShowDone] = useState(false)
 
   const load = useCallback(() => {
     api
@@ -172,6 +170,17 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
     ])
 
   const reopenStep = (step: Task) => void restore([{ id: step.id, state: 'open' }])
+
+  const drop = (node: TaskNode) => {
+    const snap: Snapshot = [{ id: node.id, state: node.state }]
+    setNodes((ns) => (ns ? withState(ns, node.id, 'dropped') : ns))
+    void patch(node.id, { state: 'dropped' })
+    notify(`${node.title} — dropped`, {
+      label: 'Undo',
+      run: () => void restore(snap),
+      windowMs: UNDO_MS,
+    })
+  }
 
   const setNow = (node: TaskNode, is_now: boolean) => {
     setNodes((ns) => (ns ? ns.map((n) => (n.id === node.id ? { ...n, is_now } : n)) : ns))
@@ -269,7 +278,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
 
   if (failed)
     return (
-      <div className="page tasks">
+      <div className="tasks">
         <p className="muted">
           Couldn't load tasks.{' '}
           <button className="quiet" onClick={load}>
@@ -281,156 +290,142 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
   if (nodes === null) return null
 
   const g = groups(nodes)
-  const empty = g.now.length === 0 && g.later.length === 0 && g.doneToday.length === 0
   const actions: RowActions = {
     complete,
     reopen,
     reopenStep,
     moveToNow: (node) => (g.now.length >= NOW_CAP ? notify(NOW_FULL) : setNow(node, true)),
     moveToLater: (node) => setNow(node, false),
+    drop,
     setProgress,
     keepAsOne,
     startFocus,
   }
 
   return (
-    <div className="page tasks">
-      <SectionTitle>Tasks</SectionTitle>
-      <form className="task-add" onSubmit={add}>
-        <span className="task-add-glyph" aria-hidden="true">
-          ＋
-        </span>
+    <div className="tasks">
+      <form className="task-add tellnote" onSubmit={add}>
         <input
           value={title}
-          placeholder="Add a task — just a title is enough"
-          aria-label="Add a task — just a title is enough"
+          placeholder="Add a task"
+          aria-label="Add a task"
           onChange={(e) => setTitle(e.target.value)}
         />
-        <span className="task-add-hint">press Enter to save</span>
+        <button type="submit" aria-label="Add" disabled={!title.trim()}>
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M5 12h14" />
+            <path d="M13 6l6 6-6 6" />
+          </svg>
+        </button>
       </form>
-      {empty ? (
-        <p className="task-empty">{NOW_EMPTY}</p>
-      ) : (
-        <>
-          <section className="task-group now">
-            <h3 className="task-group-head">
-              NOW{' '}
-              <span className="task-group-count">
-                · {g.now.length} of {NOW_CAP}
-              </span>
-              <span className="task-group-why">a short list you can actually finish</span>
-            </h3>
-            {g.now.length === 0 ? (
-              <p className="task-empty">{NOW_EMPTY}</p>
-            ) : (
-              g.now.map((n) => <Row key={n.id} node={n} group="now" actions={actions} />)
-            )}
-          </section>
-          {g.later.length > 0 && (
-            <section className="task-group later">
-              <h3 className="task-group-head">
-                LATER <span className="task-group-count">· {g.later.length}</span>
-              </h3>
-              {g.later.map((n) => (
-                <Row key={n.id} node={n} group="later" actions={actions} />
-              ))}
-            </section>
-          )}
-          {g.doneToday.length > 0 && (
-            <section className="task-group done">
-              <h3 className="task-group-head">
-                DONE TODAY <span className="task-group-count">· {g.doneToday.length}</span>
-              </h3>
-              {g.doneToday.map((n) => (
-                <Row key={n.id} node={n} group="done" actions={actions} />
-              ))}
-            </section>
-          )}
-        </>
+      {g.now.length > 0 && (
+        <section className="task-group now">
+          <h3 className="task-group-head">NOW</h3>
+          {g.now.map((n) => (
+            <Row key={n.id} node={n} group="now" actions={actions} />
+          ))}
+        </section>
+      )}
+      {g.later.length > 0 && (
+        <section className="task-group later">
+          <h3 className="task-group-head">LATER · {g.later.length}</h3>
+          {g.later.map((n) => (
+            <Row key={n.id} node={n} group="later" actions={actions} />
+          ))}
+        </section>
+      )}
+      {g.doneToday.length > 0 && (
+        <section className="task-group done">
+          <button
+            className="task-done-fold"
+            aria-expanded={showDone}
+            onClick={() => setShowDone((v) => !v)}
+          >
+            Done today · {g.doneToday.length}
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M9 6l6 6-6 6" />
+            </svg>
+          </button>
+          {showDone &&
+            g.doneToday.map((n) => <Row key={n.id} node={n} group="done" actions={actions} />)}
+        </section>
       )}
     </div>
   )
 }
 
 function Duration({ task }: { task: Task }) {
-  if (task.duration_min !== null) return <span className="task-dur">≈ {round5(task.duration_min)} min</span>
-  if (task.duration_source !== 'none') return null
-  return <span className="task-dur est">Note will estimate</span>
+  if (task.duration_min === null) return null
+  return <span className="task-dur">≈ {round5(task.duration_min)} min</span>
 }
 
 function Row({ node, group, actions }: { node: TaskNode; group: Group; actions: RowActions }) {
   const done = group === 'done'
   const steps = done ? [] : node.children
-  const next = steps.find((c) => c.state !== 'done')
   const items: OverflowItem[] = [
-    group === 'now'
-      ? { label: 'Move to Later', run: () => actions.moveToLater(node) }
-      : { label: 'Move to Now', run: () => actions.moveToNow(node) },
-    node.state === 'in_progress'
-      ? { label: 'Clear in progress', run: () => actions.setProgress(node, false) }
-      : { label: 'Mark in progress', run: () => actions.setProgress(node, true) },
+    { label: 'Move to Now', run: () => actions.moveToNow(node) },
+    { label: 'Drop', run: () => actions.drop(node) },
   ]
-  if (steps.length > 0) {
-    items.push({ label: 'Keep as one task', run: () => actions.keepAsOne(node) })
-  }
+  const sub =
+    steps.length > 0
+      ? parentSub(node)
+      : !done && node.duration_min === null && node.duration_source === 'none'
+        ? 'Note will estimate'
+        : null
 
   return (
-    <div className="task-row">
-      <div className="task-head">
+    <>
+      <div className="task-row">
         <button
-          className="task-tick"
+          className="tick"
+          role="checkbox"
+          aria-checked={done}
           aria-label={done ? `Mark ${node.title} not done` : `Mark ${node.title} done`}
           onClick={() => (done ? actions.reopen(node) : actions.complete(node))}
-        >
-          <span className="tick" aria-hidden="true" />
-        </button>
+        />
         <div className="task-body">
-          <div className="task-title">{node.title}</div>
-          {steps.length > 0 && <div className="task-sub">{parentSub(node)}</div>}
+          <span className="task-title">{node.title}</span>
+          {sub && <span className="task-sub">{sub}</span>}
         </div>
-        {!done && node.state === 'in_progress' && (
-          <span className="task-tag progress">in progress</span>
-        )}
-        {!done && steps.length === 0 && <Duration task={node} />}
+        {!done && <Duration task={node} />}
         {group === 'now' && (
           <button
             className="task-start"
             aria-label={`Start ${focusTarget(node).title}`}
             onClick={() => actions.startFocus(node)}
           >
-            <span aria-hidden="true">▶</span>
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M9 7.5v9l7-4.5z" />
+            </svg>
           </button>
         )}
-        {!done && (
+        {group === 'later' && (
           <Overflow className="task-more" label={`More actions for ${node.title}`} items={items} />
         )}
       </div>
       {steps.length > 0 && (
-        <div className="task-steps">
+        <ul className="task-steps">
           {steps.map((c) => (
-            <div
-              key={c.id}
-              className={`task-step${c.state === 'done' ? ' done' : ''}${c.id === next?.id ? ' next' : ''}`}
-            >
+            <li key={c.id} className={`task-step${c.state === 'done' ? ' done' : ''}`}>
               <button
-                className="task-tick"
+                className="tick"
+                role="checkbox"
+                aria-checked={c.state === 'done'}
                 aria-label={
                   c.state === 'done' ? `Mark ${c.title} not done` : `Mark ${c.title} done`
                 }
                 onClick={() =>
                   c.state === 'done' ? actions.reopenStep(c) : actions.complete(node, c)
                 }
-              >
-                <span className="ticksm" aria-hidden="true" />
-              </button>
+              />
               <span className="task-step-title">{c.title}</span>
               {c.duration_min !== null && (
-                <span className="task-dur">{round5(c.duration_min)} min</span>
+                <span className="task-step-min">{round5(c.duration_min)}</span>
               )}
-            </div>
+            </li>
           ))}
-        </div>
+        </ul>
       )}
-    </div>
+    </>
   )
 }
