@@ -41,11 +41,16 @@ function actionMessage(err: unknown): string {
   return 'Something went wrong. Try again.'
 }
 
-// The fired event owns the face; failing that, the next routine still open does.
-function nextUp(events: PlanEvent[]): PlanEvent | null {
+// The fired event owns the face; failing that, the next routine still ahead does.
+function nextUp(events: PlanEvent[], now: number): PlanEvent | null {
   return (
     events.find((ev) => ev.status === 'fired') ??
-    events.find((ev) => ev.entry !== 'block' && (ev.status === 'pending' || ev.status === 'snoozed')) ??
+    events.find(
+      (ev) =>
+        ev.entry !== 'block' &&
+        (ev.status === 'pending' || ev.status === 'snoozed') &&
+        minutesOf(ev.end_wall_time ?? ev.wall_time) >= now,
+    ) ??
     null
   )
 }
@@ -162,7 +167,7 @@ export function Home({
   // the beat is a dependency because the held drop lives outside React state
   const visible = useMemo(() => events.filter((ev) => ev.id !== heldDrop?.id), [events, beat])
   const now = nowMinutes()
-  const next = nextUp(visible)
+  const next = nextUp(visible, now)
 
   // A routine is timed to its span; without an end the routine default stands in.
   const start = (ev: PlanEvent) => {

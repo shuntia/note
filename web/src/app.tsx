@@ -72,9 +72,11 @@ export function App() {
     setTab('chat')
   }, [])
 
+  // A session takes the screen from wherever it was started, so Today comes with it.
   const changeSession = useCallback((next: FocusSession | null) => {
     setSession(next)
     writeSession(next)
+    if (next) setTab('today')
   }, [])
 
   useEffect(() => {
@@ -155,7 +157,7 @@ export function App() {
 
   return (
     <div className={`shell${chromeHidden ? ' bare' : ''}`}>
-      {!mobile && (
+      {!mobile && !(showHome && session) && (
         <header className="topbar">
           <span className="brand">Note</span>
           <nav className="topnav" aria-label="Views">
