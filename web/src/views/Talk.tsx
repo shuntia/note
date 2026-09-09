@@ -12,6 +12,7 @@ import type { ViewProps } from '../app'
 import { Markdown } from '../markdown'
 import { Overflow } from '../overflow'
 import { receipt } from '../receipts'
+import { rememberConversation } from '../tellnote'
 import type { Conversation, TalkMessage, TalkStep } from '../types'
 
 type Item =
@@ -85,13 +86,13 @@ function Receipt({ item }: { item: ToolItem }) {
   return (
     <div className={`receipt ${state}`.trim()}>
       <button className="receipt-chip" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
-        <span className="receipt-mark" aria-hidden="true">
-          {item.isError ? '✕' : '✓'}
-        </span>
+        <svg className="receipt-mark" viewBox="0 0 24 24" aria-hidden="true">
+          {item.isError ? <path d="M6 6l12 12M18 6L6 18" /> : <path d="M5 12.5l4.5 4.5L19 7.5" />}
+        </svg>
         <span className="receipt-text">{receipt(item.name, item.args, item.isError)}</span>
-        <span className="receipt-chev" aria-hidden="true">
-          {open ? '▾' : '▸'}
-        </span>
+        <svg className="receipt-chev" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M9 6l6 6-6 6" />
+        </svg>
       </button>
       {open && (
         <div className="receipt-body">
@@ -132,7 +133,6 @@ function turn(item: Exclude<Item, ToolItem>): ReactNode {
   if (item.kind === 'assistant')
     return (
       <div key={item.key} className="turn assistant">
-        <span className="turn-avatar" aria-hidden="true" />
         <Markdown text={item.text} />
       </div>
     )
@@ -248,6 +248,7 @@ export function Talk({
     era.current++
     setItems([])
     setCurrent(id)
+    rememberConversation(id)
     void loadMessages(id)
   }
 
@@ -282,6 +283,7 @@ export function Talk({
         ...reply.steps.map(fromStep),
         { kind: 'assistant', key: nextKey(), text: reply.reply },
       ])
+      rememberConversation(reply.conversation_id)
       if (current === null) {
         setCurrent(reply.conversation_id)
         wanted.current = reply.conversation_id
@@ -378,8 +380,6 @@ export function Talk({
   }
 
   const visible = conversations.filter((c) => c.id !== heldDelete?.id)
-  const active = visible.find((c) => c.id === current)
-  const title = current === null ? 'New chat' : (active?.title ?? 'Chat')
 
   return (
     <div className="chat">
@@ -451,12 +451,12 @@ export function Talk({
         <header className="chat-head">
           <button
             className="chat-toggle"
+            aria-label="Chats"
             aria-expanded={sideOpen}
             onClick={() => setSideOpen((v) => !v)}
           >
-            Chats
+            ⋯
           </button>
-          <h2>{title}</h2>
         </header>
 
         <div className="chat-pane" ref={pane} onScroll={onScroll}>
@@ -472,12 +472,6 @@ export function Talk({
                   Try again
                 </button>
               </p>
-            )}
-            {msgState === 'ready' && items.length === 0 && !busy && (
-              <div className="chat-empty">
-                <span className="chat-empty-glyph" aria-hidden="true" />
-                <p>Ask Note anything — about today, your tasks, or what to do next.</p>
-              </div>
             )}
             {msgState === 'ready' &&
               grouped(items).map((group) =>
@@ -500,35 +494,23 @@ export function Talk({
         </div>
 
         <div className="chat-foot">
-          <form className="chat-composer" onSubmit={onSubmit}>
+          <form className="tellnote" onSubmit={onSubmit}>
             <textarea
               ref={input}
-              className="chat-input"
               rows={1}
-              placeholder="Talk to Note — it can change the plan, tasks, and memory for you"
+              placeholder="Tell Note"
+              aria-label="Tell Note"
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
               onKeyDown={onKeyDown}
             />
-            <button
-              className="primary chat-send"
-              aria-label="Send message"
-              disabled={busy || !draft.trim()}
-            >
-              <svg viewBox="0 0 20 20" fill="none" aria-hidden="true">
-                <path
-                  d="M10 16V4M10 4L4.5 9.5M10 4l5.5 5.5"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
+            <button type="submit" aria-label="Send" disabled={busy || !draft.trim()}>
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M5 12h14" />
+                <path d="M13 6l6 6-6 6" />
               </svg>
             </button>
           </form>
-          <p className="chat-standing">
-            Every change Note makes shows up above — nothing happens silently.
-          </p>
         </div>
       </section>
     </div>
