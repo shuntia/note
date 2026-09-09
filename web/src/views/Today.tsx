@@ -1,123 +1,69 @@
-import { useCallback, useEffect, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { api, ApiError } from '../api'
-import { Bell } from '../bell'
 import type { ViewProps } from '../app'
+import { DayLine, minutesOf } from '../dayline'
 import { Overflow } from '../overflow'
 import { eventLabel } from '../receipts'
-import type { FocusSession } from '../session'
 import type { Debrief, PlanEvent } from '../types'
 
 const UNDO_MS = 5000
+const LATER_MINUTES = [5, 10, 15, 30, 60]
 const FOLD_KEY = 'note.debriefFolded'
 
 // Drop has no server-side reversal, so the request waits out the undo window before it
 // is sent. Module scope keeps the hold alive across the remounts a websocket nudge causes.
 let heldDrop: { id: number; timer: number } | null = null
 
-function nowWall(): string {
+function nowMinutes(): number {
   const d = new Date()
-  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
-}
-
-function minutesOf(wall: string): number {
-  const [h, m] = wall.split(':')
-  return Number(h) * 60 + Number(m)
-}
-
-function eyebrow(ev: PlanEvent, now: string): string {
-  if (ev.status === 'fired') return 'NOW'
-  const mins = minutesOf(ev.wall_time) - minutesOf(now)
-  if (mins <= 0) return 'UP NEXT'
-  if (mins < 90) return `UP NEXT · IN ${mins} MIN`
-  return `UP NEXT · IN ${Math.round(mins / 60)} HR`
-}
-
-function slideText(ev: PlanEvent): string {
-  if (ev.flexibility === 'fixed') return 'Happens at a fixed time'
-  if (ev.flexibility === 'drop') return 'Can be dropped if the day fills up'
-  return ev.slide_window_min > 0 ? `Can slide ±${ev.slide_window_min} min` : 'Can slide freely'
-}
-
-function reachText(channel: string): string {
-  if (channel === 'push') return 'reaches you as a push'
-  if (channel === 'voice') return 'reaches you as a call'
-  return ''
-}
-
-function metaLine(ev: PlanEvent): string {
-  return [slideText(ev), ev.alert ? reachText(ev.channel) : ''].filter(Boolean).join(' · ')
-}
-
-function flexTag(ev: PlanEvent): string {
-  if (ev.status === 'snoozed') return 'later'
-  if (ev.flexibility === 'fixed') return 'fixed'
-  if (ev.flexibility === 'drop') return 'droppable'
-  return ev.slide_window_min > 0 ? `±${ev.slide_window_min} min` : 'flexible'
+  return d.getHours() * 60 + d.getMinutes()
 }
 
 function actionMessage(err: unknown): string {
   if (err instanceof ApiError) {
-    if (err.status === 400) return "That's outside this event's slide window."
-    if (err.status === 409) return 'Already settled — refresh to see its state.'
+    if (err.status === 409) return 'Already settled.'
     if (err.status === 404) return 'That event is gone.'
   }
   return 'Something went wrong. Try again.'
 }
 
-// The fired event owns Now; failing that, the next routine still open does. A block
-// spans a stretch of the day rather than arriving at a moment in it, so it never
-// takes the card — and so never offers Done, Later or the slide chips.
-function currentIndex(events: PlanEvent[]): number {
-  const fired = events.findIndex((ev) => ev.status === 'fired')
-  if (fired !== -1) return fired
-  return events.findIndex(
-    (ev) => ev.entry !== 'block' && (ev.status === 'pending' || ev.status === 'snoozed'),
+// The fired event owns the hero; failing that, the next routine still ahead does.
+function nextUp(events: PlanEvent[], now: number): PlanEvent | null {
+  return (
+    events.find((ev) => ev.status === 'fired') ??
+    events.find(
+      (ev) =>
+        ev.entry !== 'block' &&
+        (ev.status === 'pending' || ev.status === 'snoozed') &&
+        minutesOf(ev.end_wall_time ?? ev.wall_time) >= now,
+    ) ??
+    null
   )
 }
 
-export function Today({ notify, openNow }: ViewProps) {
+export function Today({ notify, openNow, onChanged }: ViewProps) {
   const [events, setEvents] = useState<PlanEvent[] | null>(null)
-  const [failed, setFailed] = useState(false)
   const [pending, setPending] = useState(false)
+  const [later, setLater] = useState(false)
   const [, tick] = useState(0)
 
   const load = useCallback(() => {
-    api
-      .planToday()
-      .then((evs) => {
-        setEvents(evs)
-        setFailed(false)
-      })
-      .catch(() => setFailed(true))
+    api.planToday().then(setEvents).catch(() => setEvents([]))
   }, [])
+  useEffect(load, [load])
 
   useEffect(() => {
-    load()
-  }, [load])
-
-  // Landing on the minute boundary keeps the Now label and the card's countdown honest.
-  useEffect(() => {
-    let timer = 0
-    const schedule = () => {
-      timer = window.setTimeout(
-        () => {
-          tick((n) => n + 1)
-          schedule()
-        },
-        60_000 - (Date.now() % 60_000) + 50,
-      )
-    }
-    schedule()
-    return () => window.clearTimeout(timer)
+    const id = setInterval(() => tick((n) => n + 1), 30_000)
+    return () => clearInterval(id)
   }, [])
 
-  // Event routes are relative operations, so a second tap before the first lands compounds it.
-  const act = async (fn: () => Promise<void>) => {
+  const act = async (fn: () => Promise<unknown>) => {
     if (pending) return
     setPending(true)
     try {
       await fn()
       load()
+      onChanged()
     } catch (err) {
       notify(actionMessage(err))
       if (err instanceof ApiError && err.status === 409) load()
@@ -131,19 +77,15 @@ export function Today({ notify, openNow }: ViewProps) {
     const { id, timer } = heldDrop
     heldDrop = null
     window.clearTimeout(timer)
-    api
-      .eventAction(id, 'drop')
-      .then(load)
-      .catch(() => load())
+    api.eventAction(id, 'drop').then(load).catch(() => load())
   }, [load])
-
   useEffect(() => commitDrop, [commitDrop])
 
   const drop = (ev: PlanEvent) => {
     commitDrop()
     heldDrop = { id: ev.id, timer: window.setTimeout(commitDrop, UNDO_MS) }
     tick((n) => n + 1)
-    notify(`Dropped "${eventLabel(ev.kind)}" — moved off today`, {
+    notify(`Dropped ${eventLabel(ev.kind)}`, {
       label: 'Undo',
       run: () => {
         if (heldDrop?.id !== ev.id) return
@@ -154,211 +96,74 @@ export function Today({ notify, openNow }: ViewProps) {
     })
   }
 
-  const visible = events?.filter((ev) => ev.id !== heldDrop?.id) ?? null
+  const visible = events?.filter((ev) => ev.id !== heldDrop?.id) ?? []
+  const now = nowMinutes()
+  const next = nextUp(visible, now)
+  const nowLabel = `${String(Math.floor(now / 60)).padStart(2, '0')}:${String(now % 60).padStart(2, '0')}`
 
   return (
-    <div className="page today">
-      <DebriefFold />
-      {failed ? (
-        <p className="muted">
-          Couldn't load today's plan.{' '}
-          <button className="quiet" onClick={load}>
-            Retry
-          </button>
-        </p>
-      ) : visible === null ? null : visible.length === 0 ? (
-        <p className="muted">Nothing planned today.</p>
-      ) : (
-        <>
-          <ul className="spine">{spine(visible, act, drop, pending, openNow)}</ul>
-          <p className="today-tomorrow">
-            Tomorrow's plan arrives overnight — nothing for you to set up.
-          </p>
-        </>
-      )}
-    </div>
-  )
-}
-
-function spine(
-  events: PlanEvent[],
-  act: (fn: () => Promise<void>) => Promise<void>,
-  drop: (ev: PlanEvent) => void,
-  pending: boolean,
-  openNow: (session: FocusSession) => void,
-): ReactNode[] {
-  const now = nowWall()
-  const current = currentIndex(events)
-  const rows: ReactNode[] = []
-  events.forEach((ev, i) => {
-    if (i === current) {
-      rows.push(<NowLine key="now" now={now} />)
-      rows.push(
-        <NowCard
-          key={ev.id}
-          ev={ev}
-          now={now}
-          act={act}
-          drop={drop}
-          pending={pending}
-          openNow={openNow}
-        />,
-      )
-      return
-    }
-    rows.push(<EventRow key={ev.id} ev={ev} now={now} />)
-  })
-  if (current === -1) {
-    rows.push(<NowLine key="now" now={now} />)
-    rows.push(
-      <li key="clear" className="today-clear">
-        That's everything today.
-      </li>,
-    )
-  }
-  return rows
-}
-
-function NowLine({ now }: { now: string }) {
-  return (
-    <li className="now-line">
-      <span className="now-rule" aria-hidden="true" />
-      <span className="now-dot" aria-hidden="true" />
-      <span className="now-label">NOW · {now}</span>
-    </li>
-  )
-}
-
-function droppedTag(ev: PlanEvent): string {
-  return ev.moved_to ? `dropped — moved to ${ev.moved_to.wall_time}` : 'dropped'
-}
-
-function EventRow({ ev, now }: { ev: PlanEvent; now: string }) {
-  if (ev.entry === 'block') return <BlockBand ev={ev} now={now} />
-  const state = ev.status === 'done' ? 'done' : ev.status === 'dropped' ? 'dropped' : ''
-  const tag = state === 'dropped' ? droppedTag(ev) : state === 'done' ? '' : flexTag(ev)
-  return (
-    <li className={`ev ${state}`}>
-      <span className="ev-time">{ev.wall_time}</span>
-      <span className="ev-dot" aria-hidden="true" />
-      <div className="ev-row">
-        {state === 'done' && (
-          <span className="ev-check" aria-hidden="true">
-            ✓
-          </span>
+    <div className="today">
+      <section className="today-hero">
+        {next ? (
+          <>
+            <div className="today-eyebrow">
+              NOW {nowLabel} <span className="today-dot" aria-hidden="true" /> {next.status === 'fired' ? 'NOW' : 'UP NEXT'}
+            </div>
+            <h1 className="today-title">{eventLabel(next.kind)}</h1>
+            <div className="today-when">
+              <span className="today-in">in {Math.max(0, minutesOf(next.wall_time) - now)} min</span>
+              <span className="today-span">{next.wall_time} – {next.end_wall_time ?? next.wall_time}</span>
+            </div>
+            <div className="today-actions">
+              <button
+                className="btn-fill"
+                disabled={pending}
+                onClick={() =>
+                  openNow({
+                    taskId: null, eventId: next.id, title: eventLabel(next.kind), notes: '',
+                    stepIndex: null, stepCount: null, stepName: null,
+                    durationSec: Math.max(60, (minutesOf(next.end_wall_time ?? next.wall_time) - minutesOf(next.wall_time)) * 60),
+                    startedAt: Date.now(), pausedAt: null, pausedMs: 0,
+                  })
+                }
+              >
+                Start
+              </button>
+              <button className="btn-haze" aria-expanded={later} disabled={pending} onClick={() => setLater((v) => !v)}>
+                Later
+              </button>
+              <Overflow
+                label="More"
+                items={[
+                  { label: 'Drop today', run: () => drop(next), disabled: pending },
+                  { label: 'Move to tomorrow', run: () => act(() => api.moveTomorrow(next.id)), disabled: pending },
+                  { label: next.alert ? 'Silent' : 'Ping me', run: () => act(() => api.setEventAlert(next.id, !next.alert)), disabled: pending },
+                ]}
+              />
+              {later && (
+                <div className="later-pick" role="group" aria-label="Later by">
+                  <span className="later-lead">Later by</span>
+                  {LATER_MINUTES.map((m) => (
+                    <button key={m} className="later-min" disabled={pending} onClick={() => { setLater(false); act(() => api.snooze(next.id, m)) }}>
+                      {m}
+                    </button>
+                  ))}
+                  <span className="later-unit">min</span>
+                </div>
+              )}
+            </div>
+          </>
+        ) : (
+          events && <h1 className="today-title">That's everything today.</h1>
         )}
-        <span className="ev-name">{eventLabel(ev.kind)}</span>
-        <Bell on={ev.alert} label={ev.alert ? 'pings you' : 'silent'} />
-        <span className="ev-tag">{tag}</span>
-      </div>
-    </li>
-  )
-}
-
-// Both tags are rendered; the phone layout is what picks the short one.
-function BlockBand({ ev, now }: { ev: PlanEvent; now: string }) {
-  const end = ev.end_wall_time ?? ev.wall_time
-  const past = minutesOf(end) <= minutesOf(now)
-  return (
-    <li className={`ev block${past ? ' past' : ''}`}>
-      <span className="ev-time">{ev.wall_time}</span>
-      <span className="ev-dot" aria-hidden="true" />
-      <div className="ev-band">
-        <span className="ev-name">{eventLabel(ev.kind)}</span>
-        <span className="ev-range">
-          {ev.wall_time} – {end}
-        </span>
-        <span className="ev-tag long">flexible — Note may reshape it</span>
-        <span className="ev-tag short">flexible</span>
-      </div>
-    </li>
-  )
-}
-
-function NowCard({
-  ev,
-  now,
-  act,
-  drop,
-  pending,
-  openNow,
-}: {
-  ev: PlanEvent
-  now: string
-  act: (fn: () => Promise<void>) => Promise<void>
-  drop: (ev: PlanEvent) => void
-  pending: boolean
-  openNow: (session: FocusSession) => void
-}) {
-  return (
-    <li className="ev now">
-      <span className="ev-time">{ev.wall_time}</span>
-      <div className="nowcard">
-        <Overflow
-          label="More actions"
-          items={[{ label: 'Drop', run: () => drop(ev), disabled: pending }]}
-        />
-        <div className="nowcard-eyebrow">{eyebrow(ev, now)}</div>
-        <h2 className="nowcard-title">
-          <button
-            className="nowcard-open"
-            onClick={() =>
-              openNow({
-                taskId: null,
-                eventId: ev.id,
-                title: eventLabel(ev.kind),
-                notes: '',
-                stepIndex: null,
-                stepCount: null,
-                stepName: null,
-                durationSec: null,
-                startedAt: Date.now(),
-                pausedAt: null,
-                pausedMs: 0,
-              })
-            }
-          >
-            {eventLabel(ev.kind)}
-          </button>
-        </h2>
-        <p className="nowcard-meta">{metaLine(ev)}</p>
-        <div className="nowcard-actions">
-          <button
-            className="btn-primary"
-            disabled={pending}
-            onClick={() => act(() => api.eventAction(ev.id, 'done'))}
-          >
-            Done
-          </button>
-          <button
-            className="btn-outline"
-            disabled={pending}
-            onClick={() => act(() => api.snooze(ev.id, 30))}
-          >
-            Later
-          </button>
-          <span className="actions-spacer" />
-          {ev.flexibility !== 'fixed' && (
-            <>
-              <button
-                className="btn-chip"
-                disabled={pending}
-                onClick={() => act(() => api.shift(ev.id, -15))}
-              >
-                −15
-              </button>
-              <button
-                className="btn-chip"
-                disabled={pending}
-                onClick={() => act(() => api.shift(ev.id, 15))}
-              >
-                +15
-              </button>
-            </>
-          )}
-        </div>
-      </div>
-    </li>
+      </section>
+      <section className="today-line">
+        <DayLine events={visible} now={now} />
+      </section>
+      <section className="today-ground">
+        <DebriefFold />
+      </section>
+    </div>
   )
 }
 
@@ -430,12 +235,14 @@ function DebriefFold() {
   return (
     <section className="debrief-row">
       <button className="debrief-fold" aria-expanded={!folded} onClick={toggle}>
-        <span aria-hidden="true">☀︎</span>
+        <span className="debrief-mark" aria-hidden="true" />
         <span className="debrief-lead">
           <b>This morning:</b> {folded ? firstSentence(debrief.content) : ''}
         </span>
         <span className="debrief-chev" aria-hidden="true">
-          {folded ? '▾' : '▴'}
+          <svg viewBox="0 0 24 24">
+            <path d="M6 9l6 6 6-6" />
+          </svg>
         </span>
       </button>
       {!folded && <div className="letter">{debrief.content}</div>}
