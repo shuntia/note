@@ -1618,3 +1618,16 @@ fieldset.pane-rows { border: none; margin: 0; padding: 0; min-width: 0; }
 .task-done-fold svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; transition: transform 200ms; }
 .task-done-fold[aria-expanded='true'] svg { transform: rotate(90deg); }
 @media (prefers-reduced-motion: reduce) { .task-done-fold svg { transition: none; } }
+/* the board's circles are smaller than a fingertip, so each one carries a hit box */
+@media (pointer: coarse), (max-width: 767.98px) {
+  .tick, .task-start, .task-more .ev-more { position: relative; }
+  .tick::before, .task-start::before, .task-more .ev-more::before {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 40px;
+    height: 40px;
+    transform: translate(-50%, -50%);
+  }
+}
