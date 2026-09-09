@@ -12,7 +12,7 @@ import type { ViewProps } from '../app'
 import { Markdown } from '../markdown'
 import { Overflow } from '../overflow'
 import { receipt } from '../receipts'
-import { rememberConversation } from '../tellnote'
+import { forgetConversation, lastConversation, rememberConversation } from '../tellnote'
 import type { Conversation, TalkMessage, TalkStep } from '../types'
 
 type Item =
@@ -352,6 +352,8 @@ export function Talk({
     commitDelete()
     heldDelete = { id: c.id, timer: window.setTimeout(commitDelete, UNDO_MS) }
     const wasOpen = current === c.id
+    const wasRemembered = lastConversation() === c.id
+    if (wasRemembered) forgetConversation()
     if (wasOpen) {
       era.current++
       wanted.current = null
@@ -370,6 +372,7 @@ export function Talk({
         heldDelete = null
         tick((n) => n + 1)
         if (wasOpen) open(c.id)
+        else if (wasRemembered) rememberConversation(c.id)
       },
     })
   }

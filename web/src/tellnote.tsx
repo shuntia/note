@@ -21,6 +21,14 @@ export function rememberConversation(id: number) {
   }
 }
 
+export function forgetConversation() {
+  try {
+    localStorage.removeItem(KEY)
+  } catch {
+    // storage blocked; nothing was remembered to clear
+  }
+}
+
 export function TellNote({
   placeholder = 'Tell Note',
   notify,

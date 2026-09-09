@@ -58,11 +58,8 @@
   --mono: ui-monospace, 'SF Mono', Menlo, monospace;
 
   /* aliases the older rules resolve through */
-  --dawn: var(--earth);
-  --card: var(--haze-strong);
   --sunk: var(--earth);
   --mist: var(--line);
-  --mist-strong: var(--line);
   --moss: var(--sage);
   --clay: var(--rose);
   --bg: var(--earth);
@@ -74,9 +71,6 @@
   --border-input: var(--line);
   --accent: var(--sun);
   --ring: var(--sun-ink);
-  --sidebar-bg: transparent;
-  --sidebar-border: transparent;
-  --bubble: var(--haze-strong);
   --code-bg: var(--earth);
 }
 
@@ -159,7 +153,6 @@ body {
 .view.view-talk { flex-direction: row; padding: 0; min-height: 0; overflow: hidden; }
 
 .tabs { display: flex; height: 84px; padding: 12px 18px 22px; box-sizing: border-box; background: var(--haze-strong); }
-.tabs.hidden { display: none; }
 .tabs button { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 4px; font: inherit; font-size: 0.66rem; border: 0; background: none; color: var(--faint); cursor: pointer; }
 .tabs button[aria-current='true'] { color: var(--ink); }
 .tabs .nav-icon { width: 22px; height: 22px; }
@@ -330,21 +323,6 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 .debrief-row .letter { margin-top: 0.9rem; padding: 0 0.25rem; font-size: 1rem; }
 .debrief-note { margin: 0 0 1.6rem; font-size: 0.9rem; }
 
-
-.btn-primary {
-  border-radius: 999px;
-  font: inherit;
-  cursor: pointer;
-  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
-  background: var(--sun);
-  color: var(--accent-fg);
-  border: 1px solid transparent;
-  font-weight: 700;
-  padding: 0.62rem 1.6rem;
-  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.25);
-}
-.btn-primary:hover:not(:disabled) { background: color-mix(in srgb, var(--sun) 88%, var(--text)); }
-
 .ev-more-wrap { position: absolute; top: 0.55rem; right: 0.6rem; }
 .ev-more {
   display: grid;
@@ -390,12 +368,12 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 
 /* a finger needs more than the pointer does */
 @media (pointer: coarse), (max-width: 767.98px) {
-  .btn-primary, .ev-menu-item, .toast-action, .capture { min-height: 2.5rem; }
+  .ev-menu-item, .toast-action, .capture { min-height: 2.5rem; }
   .ev-more { width: 2.5rem; height: 2.5rem; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .debrief-fold, .btn-primary, .ev-more { transition: none; }
+  .debrief-fold, .ev-more { transition: none; }
 }
 
 /* ── horizon: chat ──────────────────────────────────────────────── */
@@ -1054,6 +1032,8 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 .dl-span.next { background: var(--ink); border-color: var(--ink); }
 .dl-label { position: absolute; left: 50%; transform: translateX(-50%); white-space: nowrap; font-size: 0.78rem; color: var(--quiet); font-variant-numeric: tabular-nums; }
 .dl-label.above { bottom: 18px; }
+/* neighbouring spans sit close enough at narrow widths that one row of labels overlaps */
+.dl-label.above.row2 { bottom: 36px; }
 .dl-label.below { top: 18px; color: var(--ink); font-weight: 700; }
 .dayline.compact .dl-hour { top: 14px; font-size: 0.66rem; }
 .dayline.compact .dl-ticks { height: 5px; }
@@ -1064,11 +1044,12 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 .tellnote :is(input, textarea) { flex: 1; min-width: 0; border: 0; background: none; font: inherit; font-size: 0.92rem; color: var(--ink); outline: none; }
 .tellnote textarea { resize: none; line-height: 1.45; overflow-y: hidden; }
 .tellnote :is(input, textarea)::placeholder { color: var(--faint); }
+.tellnote input[type='search']::-webkit-search-cancel-button { appearance: none; -webkit-appearance: none; }
 .tellnote button { width: 36px; height: 36px; border: 0; border-radius: 50%; background: none; color: var(--quiet); cursor: pointer; display: grid; place-items: center; }
 .tellnote button:disabled { color: var(--faint); cursor: default; }
 .tellnote button svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 /* the pill carries the focus ring; the field inside it is bare */
-.tellnote:focus-within { outline: 2px solid var(--ring); outline-offset: 2px; }
+.tellnote:has(:is(input, textarea):focus-visible) { outline: 2px solid var(--ring); outline-offset: 2px; }
 .tellnote :is(input, textarea):focus-visible { outline: none; }
 .tellnote button:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
 

@@ -42,14 +42,14 @@ export function DayLine({
           {String(h).padStart(2, '0')}
         </span>
       ))}
-      {ahead.map((ev) => {
+      {ahead.map((ev, i) => {
         const a = minutesOf(ev.wall_time)
         const b = minutesOf(ev.end_wall_time ?? ev.wall_time)
         const w = Math.max(1, ((b - a) / (END - START)) * 100)
         return (
           <span key={ev.id} className={`dl-span${ev.id === nextId ? ' next' : ''}`} style={{ left: pct(a), width: `${w}%` }}>
             {!compact && (
-              <span className={`dl-label${ev.id === nextId ? ' below' : ' above'}`}>
+              <span className={`dl-label${ev.id === nextId ? ' below' : i % 2 ? ' above' : ' above row2'}`}>
                 {ev.wall_time} – {ev.end_wall_time ?? ev.wall_time} {eventLabel(ev.kind)}
               </span>
             )}
