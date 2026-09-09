@@ -994,7 +994,9 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 .gauge-ring { width: 100%; height: 100%; overflow: visible; display: block; }
 .gauge-track, .gauge-arc { fill: none; stroke-linecap: round; }
 .gauge-track { stroke: var(--track); }
-.gauge-arc { stroke: var(--sun); transition: stroke-dasharray 900ms linear; }
+.gauge-arc { stroke: var(--sun); }
+/* the tween belongs to one tick reaching the next; the first paint is the reading as it is */
+.gauge-arc.live { transition: stroke-dasharray 900ms linear; }
 .gauge.faded .gauge-ring { opacity: 0.38; }
 .gauge-ring { animation: gauge-breathe 7s ease-in-out infinite; }
 .gauge.faded .gauge-ring, .gauge.still .gauge-ring { animation: none; }
@@ -1005,7 +1007,7 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
   display: flex; flex-direction: column; align-items: center; justify-content: center;
   text-align: center; gap: 4px; padding: 0 14%;
 }
-.gauge-num { font-family: var(--display); font-weight: 500; letter-spacing: -0.035em; line-height: 1; color: var(--ink); font-variant-numeric: tabular-nums; }
+.gauge-num { font-family: var(--display); font-weight: 500; letter-spacing: -0.035em; line-height: 1; color: var(--ink); font-variant-numeric: tabular-nums; font-variation-settings: 'opsz' 32; }
 .gauge-num.over { color: var(--sun-ink); }
 .gauge-name { margin-top: 6px; font-family: var(--display); font-weight: 500; letter-spacing: -0.015em; line-height: 1.2; color: var(--quiet); text-wrap: balance; }
 .gauge-sub { font-size: 0.75rem; color: var(--faint); font-variant-numeric: tabular-nums; }
@@ -1056,7 +1058,7 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 
 /* ── horizon: home ───────────────────────────────────────────────── */
 .home { position: relative; flex: 1; display: flex; flex-direction: column; align-items: center; outline: none; background: var(--sky); background-attachment: fixed; }
-.home-face { display: flex; flex-direction: column; align-items: center; width: 100%; padding-top: 200px; transition: padding-top 400ms ease; }
+.home-face { display: flex; flex-direction: column; align-items: center; width: 100%; padding-top: 200px; }
 .home:not(.in-session).stage-0 .home-face { padding-top: 170px; }
 .home.stage-1 .home-face, .home.stage-2 .home-face { padding-top: 96px; }
 .home.stage-2 .home-face, .home:not(.in-session).stage-1 .home-face { flex-direction: row; align-items: center; gap: 16px; padding: 54px 24px 0; box-sizing: border-box; }
@@ -1064,6 +1066,20 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 .gauge-num { display: flex; align-items: baseline; justify-content: center; }
 /* the counter carries its own size; on a face the centre sets it */
 .gauge-num .now-counter { font-size: inherit; letter-spacing: inherit; }
+/* A stage arrives as its own fade and rise; the ring travels to its slot on its own (gauge.tsx). */
+.home-sheet, .home-today, .home-head, .home-actions, .stage-in {
+  animation: stage-in 400ms cubic-bezier(.2,.7,.3,1) both;
+}
+.home-sheet.leaving, .home-today.leaving, .home-head.leaving, .home-actions.leaving {
+  animation-name: stage-out;
+  pointer-events: none;
+}
+@keyframes stage-in { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: none; } }
+@keyframes stage-out { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateY(12px); } }
+@media (prefers-reduced-motion: reduce) {
+  .home-face, .gauge-arc, .gauge-arc.live { transition: none; }
+  .home-sheet, .home-today, .home-head, .home-actions, .stage-in { animation: none; }
+}
 .home-head { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
 .home-head .gauge-eyebrow { margin-bottom: 0; }
 .home-head-name { font-family: var(--display); font-weight: 500; font-size: 1.0625rem; letter-spacing: -0.015em; color: var(--ink); }
