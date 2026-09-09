@@ -127,6 +127,14 @@ Read-only, scoped to the session's own user:
   `{"id","category","summary","body","supersedes","created","archived"}`. An
   unknown or malformed id, or one belonging to another user, is a 404.
 
+Two more routes settle a single event from the client:
+
+- `POST /api/events/{id}/alert {alert}` — whether that one event pings when it
+  fires; a block refuses with a `409`.
+- `POST /api/events/{id}/move_tomorrow` — drops the event from today and plans
+  it into tomorrow, returning `{"event_id", "date"}`; an already decided event
+  is a `409`.
+
 Event scheduling semantics: `fixed` events cannot move; `slide` events can be
 slid within ±`slide_window_min` minutes of their template time (0 = unbounded);
 `drop` events can additionally be dropped by the agent. Snoozing is separate:
@@ -309,6 +317,13 @@ and focuses an open tab when one is clicked.
 
 For development, `pnpm dev` proxies `/api` (WebSocket included) to
 `127.0.0.1:3271`.
+
+Screens can also be captured. Build the binary once (`cargo build`), leave
+`NOTE_API=http://127.0.0.1:3299 pnpm dev` running, and
+`pnpm shot <today|tasks|chat|memory|settings> <WxH> <out.png>` starts a throwaway
+server on that port, signs a scratch user in, and writes the PNG; `--session`
+shoots with a focus session running and `--stage N` raises the home screen N
+steps first.
 
 ## Admin API
 
