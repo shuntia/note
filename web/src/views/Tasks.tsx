@@ -93,7 +93,6 @@ type RowActions = {
   moveToNow: (node: TaskNode) => void
   moveToLater: (node: TaskNode) => void
   drop: (node: TaskNode) => void
-  setProgress: (node: TaskNode, on: boolean) => void
   keepAsOne: (node: TaskNode) => void
   startFocus: (node: TaskNode) => void
 }
@@ -171,9 +170,12 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
 
   const reopenStep = (step: Task) => void restore([{ id: step.id, state: 'open' }])
 
+  // Dropping a task drops every step it still has, finished ones included, and a
+  // dropped step never comes back on its own, so undo has to name each of them.
   const drop = (node: TaskNode) => {
-    const snap: Snapshot = [{ id: node.id, state: node.state }]
-    setNodes((ns) => (ns ? withState(ns, node.id, 'dropped') : ns))
+    const steps = node.children.filter((c) => c.state !== 'dropped')
+    const snap: Snapshot = [...steps, node].map((t) => ({ id: t.id, state: t.state }))
+    setNodes((ns) => (ns ? snap.reduce((acc, s) => withState(acc, s.id, 'dropped'), ns) : ns))
     void patch(node.id, { state: 'dropped' })
     notify(`${node.title} — dropped`, {
       label: 'Undo',
@@ -185,12 +187,6 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
   const setNow = (node: TaskNode, is_now: boolean) => {
     setNodes((ns) => (ns ? ns.map((n) => (n.id === node.id ? { ...n, is_now } : n)) : ns))
     void patch(node.id, { is_now })
-  }
-
-  const setProgress = (node: TaskNode, on: boolean) => {
-    const state: TaskState = on ? 'in_progress' : 'open'
-    setNodes((ns) => (ns ? withState(ns, node.id, state) : ns))
-    void patch(node.id, { state })
   }
 
   // The only reversal a flatten has is replaying the split, so the steps travel
@@ -263,17 +259,36 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
       children: [],
     }
     setNodes((ns) => (ns ? [...ns, optimistic] : ns))
+    // The row is live before the server answers, so undo may land either side of
+    // that: the id it has to drop is the real one once there is one.
+    let created: Task | null = null
+    let undone = false
+    const forget = (id: number) => setNodes((ns) => (ns ? ns.filter((n) => n.id !== id) : ns))
     api
       .addTask(text, is_now ? { is_now: true } : undefined)
-      .then((t) =>
+      .then((t) => {
+        created = t
+        if (undone) {
+          void patch(t.id, { state: 'dropped' })
+          return
+        }
         setNodes((ns) =>
           ns ? ns.map((n) => (n.id === optimistic.id ? { ...n, ...t, children: [] } : n)) : ns,
-        ),
-      )
+        )
+      })
       .catch(() => {
-        setNodes((ns) => (ns ? ns.filter((n) => n.id !== optimistic.id) : ns))
+        forget(optimistic.id)
         notify("Couldn't add the task. Try again.")
       })
+    notify(`${text} — added`, {
+      label: 'Undo',
+      run: () => {
+        undone = true
+        forget(created ? created.id : optimistic.id)
+        if (created) void patch(created.id, { state: 'dropped' })
+      },
+      windowMs: UNDO_MS,
+    })
   }
 
   if (failed)
@@ -297,7 +312,6 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
     moveToNow: (node) => (g.now.length >= NOW_CAP ? notify(NOW_FULL) : setNow(node, true)),
     moveToLater: (node) => setNow(node, false),
     drop,
-    setProgress,
     keepAsOne,
     startFocus,
   }
@@ -363,9 +377,12 @@ function Row({ node, group, actions }: { node: TaskNode; group: Group; actions: 
   const done = group === 'done'
   const steps = done ? [] : node.children
   const items: OverflowItem[] = [
-    { label: 'Move to Now', run: () => actions.moveToNow(node) },
-    { label: 'Drop', run: () => actions.drop(node) },
+    group === 'now'
+      ? { label: 'Move to Later', run: () => actions.moveToLater(node) }
+      : { label: 'Move to Now', run: () => actions.moveToNow(node) },
   ]
+  if (steps.length > 0) items.push({ label: 'Keep as one task', run: () => actions.keepAsOne(node) })
+  items.push({ label: 'Drop', run: () => actions.drop(node) })
   const sub =
     steps.length > 0
       ? parentSub(node)
@@ -388,6 +405,9 @@ function Row({ node, group, actions }: { node: TaskNode; group: Group; actions: 
           {sub && <span className="task-sub">{sub}</span>}
         </div>
         {!done && <Duration task={node} />}
+        {!done && (
+          <Overflow className="task-more" label={`More actions for ${node.title}`} items={items} />
+        )}
         {group === 'now' && (
           <button
             className="task-start"
@@ -398,9 +418,6 @@ function Row({ node, group, actions }: { node: TaskNode; group: Group; actions: 
               <path d="M9 7.5v9l7-4.5z" />
             </svg>
           </button>
-        )}
-        {group === 'later' && (
-          <Overflow className="task-more" label={`More actions for ${node.title}`} items={items} />
         )}
       </div>
       {steps.length > 0 && (
