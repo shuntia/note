@@ -172,7 +172,7 @@ export function App() {
       )}
       <main className={`view${tab === 'chat' ? ' view-talk' : ''}${showHome ? ' view-home' : ''}`}>
         {showHome && home}
-        {tab === 'today' && !showHome && <Today key={refresh} {...views} />}
+        {tab === 'today' && !showHome && <Today {...views} />}
         {tab === 'tasks' && <Tasks {...views} />}
         {tab === 'chat' && (
           <Talk {...views} prefill={talkPrefill} onPrefilled={() => setTalkPrefill(null)} />
