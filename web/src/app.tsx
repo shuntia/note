@@ -112,7 +112,7 @@ export function App() {
   const views: ViewProps = { notify, refresh, onChanged, openTalk, openNow: changeSession }
 
   const toastNode = toast && (
-    <div className="toast" role="status">
+    <div className={`toast${mobile && !chromeHidden ? ' above-tabs' : ''}`} role="status">
       <span className="toast-msg">{toast.msg}</span>
       {toast.action && (
         <button

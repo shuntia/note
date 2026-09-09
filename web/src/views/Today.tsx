@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { api, ApiError } from '../api'
 import type { ViewProps } from '../app'
 import { DayLine, minutesOf } from '../dayline'
+import { useEscape } from '../escape'
 import { eventFacts, nextUp } from '../events'
 import { makeHold } from '../held'
 import { Overflow } from '../overflow'
@@ -32,6 +33,7 @@ export function Today({ notify, openNow, onChanged, refresh }: ViewProps) {
   const [events, setEvents] = useState<PlanEvent[] | null>(null)
   const [pending, setPending] = useState(false)
   const [later, setLater] = useState(false)
+  useEscape(later, () => setLater(false))
   const [, tick] = useState(0)
 
   const load = useCallback(() => {

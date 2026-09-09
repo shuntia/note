@@ -371,6 +371,19 @@ export function Talk({
     })
   }
 
+  // A fresh browser still opens on something: the remembered thread if it is still
+  // there, otherwise the one touched last.
+  const opened = useRef(false)
+  useEffect(() => {
+    if (opened.current || listState !== 'ready' || current !== null) return
+    opened.current = true
+    if (prefill) return
+    const pool = conversations.filter((c) => c.id !== deleteHold.held())
+    const remembered = pool.find((c) => c.id === lastConversation())
+    const recent = remembered ?? [...pool].sort((a, b) => b.updated_at.localeCompare(a.updated_at))[0]
+    if (recent) open(recent.id)
+  })
+
   const onScroll = () => {
     const el = pane.current
     if (el) stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 64
@@ -445,17 +458,6 @@ export function Talk({
       </aside>
 
       <section className="chat-main">
-        <header className="chat-head">
-          <button
-            className="chat-toggle"
-            aria-label="Chats"
-            aria-expanded={sideOpen}
-            onClick={() => setSideOpen((v) => !v)}
-          >
-            ⋯
-          </button>
-        </header>
-
         <div className="chat-pane" ref={pane} onScroll={onScroll}>
           <div className="chat-stream">
             {msgState === 'loading' && <p className="muted">Loading this chat…</p>}
@@ -491,23 +493,33 @@ export function Talk({
         </div>
 
         <div className="chat-foot">
-          <form className="tellnote" onSubmit={onSubmit}>
-            <textarea
-              ref={input}
-              rows={1}
-              placeholder="Tell Note"
-              aria-label="Tell Note"
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              onKeyDown={onKeyDown}
-            />
-            <button type="submit" aria-label="Send" disabled={busy || !draft.trim()}>
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M5 12h14" />
-                <path d="M13 6l6 6-6 6" />
-              </svg>
+          <div className="chat-compose">
+            <button
+              className="chat-toggle"
+              aria-label="Chats"
+              aria-expanded={sideOpen}
+              onClick={() => setSideOpen((v) => !v)}
+            >
+              ⋯
             </button>
-          </form>
+            <form className="tellnote" onSubmit={onSubmit}>
+              <textarea
+                ref={input}
+                rows={1}
+                placeholder="Tell Note"
+                aria-label="Tell Note"
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                onKeyDown={onKeyDown}
+              />
+              <button type="submit" aria-label="Send" disabled={busy || !draft.trim()}>
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M5 12h14" />
+                  <path d="M13 6l6 6-6 6" />
+                </svg>
+              </button>
+            </form>
+          </div>
         </div>
       </section>
     </div>
