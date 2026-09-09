@@ -12,6 +12,7 @@ import type { ViewProps } from '../app'
 import { Markdown } from '../markdown'
 import { Overflow } from '../overflow'
 import { receipt } from '../receipts'
+import { makeHold } from '../held'
 import { forgetConversation, lastConversation, rememberConversation } from '../tellnote'
 import type { Conversation, TalkMessage, TalkStep } from '../types'
 
@@ -28,8 +29,8 @@ type Load = 'loading' | 'ready' | 'error'
 const UNDO_MS = 10_000
 
 // Deleting a conversation has no server-side reversal, so the request waits out the
-// undo window before it is sent. Module scope keeps the hold alive across remounts.
-let heldDelete: { id: number; timer: number } | null = null
+// undo window before it is sent.
+const deleteHold = makeHold<number>(UNDO_MS)
 
 let sequence = 0
 const nextKey = () => `local-${++sequence}`
@@ -335,22 +336,13 @@ export function Talk({
     }
   }
 
-  const commitDelete = useCallback(() => {
-    if (!heldDelete) return
-    const { id, timer } = heldDelete
-    heldDelete = null
-    window.clearTimeout(timer)
-    api.deleteConversation(id).then(
-      () => void loadList(true),
-      () => void loadList(true),
-    )
-  }, [loadList])
-
-  useEffect(() => commitDelete, [commitDelete])
-
   const remove = (c: Conversation) => {
-    commitDelete()
-    heldDelete = { id: c.id, timer: window.setTimeout(commitDelete, UNDO_MS) }
+    deleteHold.start(c.id, () => {
+      api.deleteConversation(c.id).then(
+        () => void loadList(true),
+        () => void loadList(true),
+      )
+    })
     const wasOpen = current === c.id
     const wasRemembered = lastConversation() === c.id
     if (wasRemembered) forgetConversation()
@@ -367,9 +359,7 @@ export function Talk({
       label: 'Undo',
       windowMs: UNDO_MS,
       run: () => {
-        if (heldDelete?.id !== c.id) return
-        window.clearTimeout(heldDelete.timer)
-        heldDelete = null
+        if (!deleteHold.cancel(c.id)) return
         tick((n) => n + 1)
         if (wasOpen) open(c.id)
         else if (wasRemembered) rememberConversation(c.id)
@@ -382,7 +372,7 @@ export function Talk({
     if (el) stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 64
   }
 
-  const visible = conversations.filter((c) => c.id !== heldDelete?.id)
+  const visible = conversations.filter((c) => c.id !== deleteHold.held())
 
   return (
     <div className="chat">

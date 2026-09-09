@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { api, ApiError, setOnUnauthorized } from './api'
 import { NavIcon } from './navicon'
 import { prefsFrom, writePrefs } from './prefs'
+import { makeHold } from './held'
 import { readSession, writeSession, type FocusSession } from './session'
 import type { Me } from './types'
 import { Home } from './views/Home'
@@ -16,10 +17,9 @@ type Tab = 'today' | 'tasks' | 'chat' | 'memory' | 'settings'
 
 const DRAFT_KEY = 'note.captureDraft'
 const CAPTURE_PLACEHOLDER = 'Jot anything'
-const UNDO_MS = 5000
 
 // No API removes a task, so the create waits out the undo window before it is sent.
-let heldCapture: { title: string; timer: number } | null = null
+const captureHold = makeHold<string>()
 
 // `windowMs` is the undo window the action holds open; the toast must outlast it.
 export type ToastAction = { label: string; run: () => void; windowMs?: number }
@@ -226,19 +226,6 @@ function Capture({
   // Where focus was when the shortcut stole it, so Esc can hand it back.
   const returnTo = useRef<HTMLElement | null>(null)
 
-  const commit = useCallback(() => {
-    if (!heldCapture) return
-    const { title, timer } = heldCapture
-    heldCapture = null
-    window.clearTimeout(timer)
-    api
-      .addTask(title)
-      .then(onChanged)
-      .catch(() => notify("Couldn't save that. Try again."))
-  }, [notify, onChanged])
-
-  useEffect(() => commit, [commit])
-
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'n' || e.ctrlKey || e.metaKey || e.altKey || e.defaultPrevented) return
@@ -263,15 +250,15 @@ function Capture({
     const title = text.trim()
     if (!title) return
     change('')
-    commit()
-    heldCapture = { title, timer: window.setTimeout(commit, UNDO_MS) }
+    captureHold.start(title, () => {
+      api
+        .addTask(title)
+        .then(onChanged)
+        .catch(() => notify("Couldn't save that. Try again."))
+    })
     notify('Saved to Tasks', {
       label: 'Undo',
-      run: () => {
-        if (heldCapture?.title !== title) return
-        window.clearTimeout(heldCapture.timer)
-        heldCapture = null
-      },
+      run: () => captureHold.cancel(title),
     })
   }
 

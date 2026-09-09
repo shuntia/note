@@ -2,18 +2,18 @@ import { useCallback, useEffect, useState } from 'react'
 import { api, ApiError } from '../api'
 import type { ViewProps } from '../app'
 import { DayLine, minutesOf } from '../dayline'
+import { eventFacts, nextUp } from '../events'
+import { makeHold } from '../held'
 import { Overflow } from '../overflow'
 import { eventLabel } from '../receipts'
 import type { Debrief, PlanEvent } from '../types'
 
-const UNDO_MS = 5000
 const LATER_MINUTES = [5, 10, 15, 30, 60]
 const ROUTINE_MIN = 15
 const FOLD_KEY = 'note.debriefFolded'
 
-// Drop has no server-side reversal, so the request waits out the undo window before it
-// is sent. Module scope keeps the hold alive across the remounts a websocket nudge causes.
-let heldDrop: { id: number; timer: number } | null = null
+// Drop has no server-side reversal, so the request waits out the undo window.
+const dropHold = makeHold<number>()
 
 function nowMinutes(): number {
   const d = new Date()
@@ -26,20 +26,6 @@ function actionMessage(err: unknown): string {
     if (err.status === 404) return 'That event is gone.'
   }
   return 'Something went wrong. Try again.'
-}
-
-// The fired event owns the hero; failing that, the next routine still ahead does.
-function nextUp(events: PlanEvent[], now: number): PlanEvent | null {
-  return (
-    events.find((ev) => ev.status === 'fired') ??
-    events.find(
-      (ev) =>
-        ev.entry !== 'block' &&
-        (ev.status === 'pending' || ev.status === 'snoozed') &&
-        minutesOf(ev.end_wall_time ?? ev.wall_time) >= now,
-    ) ??
-    null
-  )
 }
 
 export function Today({ notify, openNow, onChanged, refresh }: ViewProps) {
@@ -76,26 +62,15 @@ export function Today({ notify, openNow, onChanged, refresh }: ViewProps) {
     }
   }
 
-  const commitDrop = useCallback(() => {
-    if (!heldDrop) return
-    const { id, timer } = heldDrop
-    heldDrop = null
-    window.clearTimeout(timer)
-    api.eventAction(id, 'drop').then(load).catch(() => load())
-  }, [load])
-  useEffect(() => commitDrop, [commitDrop])
-
   const drop = (ev: PlanEvent) => {
-    commitDrop()
-    heldDrop = { id: ev.id, timer: window.setTimeout(commitDrop, UNDO_MS) }
+    dropHold.start(ev.id, () => {
+      api.eventAction(ev.id, 'drop').then(load).catch(() => load())
+    })
     tick((n) => n + 1)
     notify(`Dropped ${eventLabel(ev.kind)}`, {
       label: 'Undo',
       run: () => {
-        if (heldDrop?.id !== ev.id) return
-        window.clearTimeout(heldDrop.timer)
-        heldDrop = null
-        tick((n) => n + 1)
+        if (dropHold.cancel(ev.id)) tick((n) => n + 1)
       },
     })
   }
@@ -120,23 +95,30 @@ export function Today({ notify, openNow, onChanged, refresh }: ViewProps) {
     })
   }
 
-  const visible = events?.filter((ev) => ev.id !== heldDrop?.id) ?? []
+  const visible = events?.filter((ev) => ev.id !== dropHold.held()) ?? []
   const now = nowMinutes()
   const next = nextUp(visible, now)
+  const facts = next ? eventFacts(next, now) : null
   const nowLabel = `${String(Math.floor(now / 60)).padStart(2, '0')}:${String(now % 60).padStart(2, '0')}`
 
   return (
     <div className="today">
       <section className="today-hero">
-        {next ? (
+        {next && facts ? (
           <>
             <div className="today-eyebrow">
-              NOW {nowLabel} <span className="today-dot" aria-hidden="true" /> {next.status === 'fired' ? 'NOW' : 'UP NEXT'}
+              NOW {nowLabel}
+              {facts.eyebrow === 'NEXT' && (
+                <>
+                  {' '}
+                  <span className="today-dot" aria-hidden="true" /> UP NEXT
+                </>
+              )}
             </div>
             <h1 className="today-title">{eventLabel(next.kind)}</h1>
             <div className="today-when">
-              <span className="today-in">in {Math.max(0, minutesOf(next.wall_time) - now)} min</span>
-              <span className="today-span">{next.wall_time} – {next.end_wall_time ?? next.wall_time}</span>
+              {facts.minutes !== null && <span className="today-in">in {facts.minutes} min</span>}
+              <span className="today-span">{facts.span}</span>
             </div>
             <div className="today-actions">
               <button className="btn-fill" disabled={pending} onClick={() => start(next)}>
@@ -173,7 +155,7 @@ export function Today({ notify, openNow, onChanged, refresh }: ViewProps) {
       </section>
       {events && (
         <section className="today-line">
-          <DayLine events={visible} now={now} />
+          <DayLine events={visible} now={now} nextId={next?.id} />
         </section>
       )}
       <section className="today-ground">

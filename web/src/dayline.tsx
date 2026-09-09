@@ -15,10 +15,13 @@ const pct = (mins: number) => `${((Math.min(END, Math.max(START, mins)) - START)
 export function DayLine({
   events,
   now,
+  nextId,
   compact = false,
 }: {
   events: PlanEvent[]
   now: number
+  // Which event the caller's face is on; without one the first still ahead is filled.
+  nextId?: number
   compact?: boolean
 }) {
   const ahead = events.filter(
@@ -26,7 +29,7 @@ export function DayLine({
       (ev.status === 'pending' || ev.status === 'snoozed' || ev.status === 'fired') &&
       minutesOf(ev.end_wall_time ?? ev.wall_time) >= now,
   )
-  const nextId = ahead[0]?.id
+  const filled = nextId ?? ahead[0]?.id
   const hours = compact ? [6, 15, 24] : [6, 9, 12, 15, 18, 21, 24]
   return (
     <div className={`dayline${compact ? ' compact' : ''}`} role="img" aria-label="Today, drawn as a line">
@@ -47,9 +50,9 @@ export function DayLine({
         const b = minutesOf(ev.end_wall_time ?? ev.wall_time)
         const w = Math.max(1, ((b - a) / (END - START)) * 100)
         return (
-          <span key={ev.id} className={`dl-span${ev.id === nextId ? ' next' : ''}`} style={{ left: pct(a), width: `${w}%` }}>
+          <span key={ev.id} className={`dl-span${ev.id === filled ? ' next' : ''}`} style={{ left: pct(a), width: `${w}%` }}>
             {!compact && (
-              <span className={`dl-label${ev.id === nextId ? ' below' : i % 2 ? ' above' : ' above row2'}`}>
+              <span className={`dl-label${ev.id === filled ? ' below' : i % 2 ? ' above' : ' above row2'}`}>
                 {ev.wall_time} – {ev.end_wall_time ?? ev.wall_time} {eventLabel(ev.kind)}
               </span>
             )}
