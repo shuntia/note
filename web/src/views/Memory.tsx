@@ -2,28 +2,10 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 import type { ViewProps } from '../app'
 import { Markdown } from '../markdown'
-import { SectionTitle } from '../section'
 import type { MemoryFact, MemoryHit } from '../types'
-
-const CATEGORIES = ['semantic', 'episodic', 'procedural'] as const
 
 // matches the stylesheet's master-detail breakpoint
 const SINGLE_PANE = '(max-width: 1087.98px)'
-
-const DAY_MS = 86_400_000
-
-type Category = (typeof CATEGORIES)[number]
-type Filter = 'all' | Category
-
-const LABEL: Record<Category, string> = {
-  semantic: 'About you',
-  episodic: 'Moments',
-  procedural: 'How you work',
-}
-
-function categoryLabel(category: string): string {
-  return category in LABEL ? LABEL[category as Category] : category
-}
 
 function shortDate(iso: string): string {
   const at = new Date(iso)
@@ -36,39 +18,21 @@ function shortDate(iso: string): string {
   })
 }
 
-// Day-boundary distance, not elapsed hours: 23:00 yesterday reads "yesterday".
-function relativeDay(iso: string): string {
+// Day boundaries, not elapsed hours: something saved at 00:30 still reads "today".
+function factDate(iso: string): string {
   const at = new Date(iso)
   if (Number.isNaN(at.getTime())) return ''
   const midnight = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
-  const days = Math.round((midnight(new Date()) - midnight(at)) / DAY_MS)
-  if (days <= 0) return 'today'
-  if (days === 1) return 'yesterday'
-  if (days < 7) return `${days} days ago`
-  if (days < 14) return 'last week'
-  return shortDate(iso)
-}
-
-function savedLabel(iso: string): string {
-  const day = relativeDay(iso)
-  return day === 'today' || day === 'yesterday' ? `saved ${day}` : day
-}
-
-function clockTime(iso: string): string {
-  const at = new Date(iso)
-  if (Number.isNaN(at.getTime())) return ''
-  return at.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+  return midnight(at) === midnight(new Date()) ? 'today' : shortDate(iso)
 }
 
 // Facts never change once written, so reads are cached for the session; the list
-// endpoint carries summaries only, and both a row's date and the note a fact
-// replaces have to be read back one fact at a time.
+// endpoint carries summaries only, so a row's date has to be read back one fact
+// at a time.
 const factCache = new Map<string, MemoryFact>()
 const inFlight = new Set<string>()
 
-type Facts = { get: (id: string) => MemoryFact | undefined; want: (id: string) => void }
-
-function useFacts(): Facts {
+function useFacts() {
   const [, bump] = useState(0)
   const want = useCallback((id: string) => {
     if (factCache.has(id) || inFlight.has(id)) return
@@ -84,17 +48,12 @@ function useFacts(): Facts {
       })
       .finally(() => inFlight.delete(id))
   }, [])
-  return { get: (id) => factCache.get(id), want }
-}
-
-function CategoryChip({ category }: { category: string }) {
-  return <span className={`memory-cat cat-${category}`}>{categoryLabel(category)}</span>
+  return { get: (id: string) => factCache.get(id), want }
 }
 
 export function Memory({ notify, refresh, openTalk }: ViewProps) {
   const [draft, setDraft] = useState('')
   const [query, setQuery] = useState('')
-  const [filter, setFilter] = useState<Filter>('all')
   const [items, setItems] = useState<MemoryHit[] | null>(null)
   const [listFailed, setListFailed] = useState(false)
   const [selected, setSelected] = useState<string | null>(null)
@@ -115,7 +74,7 @@ export function Memory({ notify, refresh, openTalk }: ViewProps) {
     const era = ++listEra.current
     setListFailed(false)
     api
-      .memoryList(query ? { q: query } : filter === 'all' ? {} : { category: filter })
+      .memoryList(query ? { q: query } : {})
       .then((res) => {
         if (era === listEra.current) setItems(res.items)
       })
@@ -124,7 +83,7 @@ export function Memory({ notify, refresh, openTalk }: ViewProps) {
         setListFailed(true)
         notify("Couldn't load memories. Try again.")
       })
-  }, [query, filter, notify])
+  }, [query, notify])
 
   useEffect(load, [load, refresh])
 
@@ -155,63 +114,29 @@ export function Memory({ notify, refresh, openTalk }: ViewProps) {
     detail.current?.scrollIntoView()
   }, [selected])
 
-  const searching = query !== ''
   const count = items?.length ?? 0
-  const scope = searching ? 'found' : 'saved'
 
   return (
-    <div className="page memory" data-pane={selected === null ? 'list' : 'detail'}>
+    <div className="memory" data-pane={selected === null ? 'list' : 'detail'}>
       <div className="memory-side">
-        <SectionTitle meta={count === 0 || listFailed ? undefined : `${count} ${scope}`}>
-          Memory
-        </SectionTitle>
-        <p className="memory-lede">
-          What Note has learned as you talk. Nothing here is ever deleted — replaced notes move to
-          the archive.
-        </p>
-        <div className="memory-search">
-          <svg viewBox="0 0 16 16" aria-hidden="true">
-            <circle cx="7" cy="7" r="4.5" />
-            <line x1="10.5" y1="10.5" x2="14" y2="14" />
-          </svg>
+        <div className="tellnote memory-search">
           <input
             type="search"
             value={draft}
-            placeholder="Search memories…"
-            aria-label="Search memories"
+            placeholder="Search what Note knows"
+            aria-label="Search what Note knows"
             onChange={(e) => setDraft(e.target.value)}
           />
         </div>
-        {!searching && (
-          <div className="memory-chips" role="group" aria-label="Filter by category">
-            <button className="chip" aria-pressed={filter === 'all'} onClick={() => setFilter('all')}>
-              All
-            </button>
-            {CATEGORIES.map((c) => (
-              <button
-                key={c}
-                className={`chip cat-${c}`}
-                aria-pressed={filter === c}
-                onClick={() => setFilter(c)}
-              >
-                {LABEL[c]}
-              </button>
-            ))}
-          </div>
-        )}
         {listFailed ? (
-          <p className="muted memory-empty">
+          <p className="memory-empty">
             Couldn't load memories.{' '}
-            <button className="quiet" onClick={load}>
+            <button className="memory-link" onClick={load}>
               Retry
             </button>
           </p>
         ) : items === null ? null : count === 0 ? (
-          <p className="muted memory-empty">
-            {searching || filter !== 'all'
-              ? 'Nothing matches.'
-              : 'No memories yet — the assistant saves what it learns as you talk.'}
-          </p>
+          <p className="memory-empty">{query ? 'Nothing matches.' : 'Nothing yet.'}</p>
         ) : (
           <ul className="memory-list">
             {items.map((m) => (
@@ -229,22 +154,14 @@ export function Memory({ notify, refresh, openTalk }: ViewProps) {
       </div>
       <div className="memory-detail" ref={detail}>
         {selected !== null && (
-          <button className="ghost memory-back" onClick={() => setSelected(null)}>
-            <span aria-hidden="true">←</span> Memories
+          <button className="memory-back" onClick={() => setSelected(null)}>
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M15 6l-6 6 6 6" />
+            </svg>
+            Memory
           </button>
         )}
-        {selected === null ? (
-          count > 0 && <p className="memory-blank">Pick a memory to read it.</p>
-        ) : fact === null ? (
-          <p className="muted">Loading…</p>
-        ) : (
-          <FactBody
-            fact={fact}
-            facts={facts}
-            onOpen={openFact}
-            onAsk={(f) => openTalk(`About the memory "${f.summary}" — `)}
-          />
-        )}
+        {selected !== null && fact !== null && <FactBody fact={fact} openTalk={openTalk} />}
       </div>
     </div>
   )
@@ -289,61 +206,32 @@ function MemoryRow({
     <li ref={row}>
       <button className="memory-row" aria-current={selected} onClick={() => onOpen(hit.id)}>
         <span className="memory-summary">{hit.summary}</span>
-        <span className="memory-rowmeta">
-          <CategoryChip category={hit.category} />
-          {saved && <span>{savedLabel(saved)}</span>}
-        </span>
+        {saved && <span className="memory-when">{factDate(saved)}</span>}
       </button>
     </li>
   )
 }
 
-function FactBody({
-  fact,
-  facts,
-  onOpen,
-  onAsk,
-}: {
-  fact: MemoryFact
-  facts: Facts
-  onOpen: (id: string) => void
-  onAsk: (fact: MemoryFact) => void
-}) {
-  const previous = fact.supersedes
-  const { want } = facts
-  useEffect(() => {
-    if (previous) want(previous)
-  }, [previous, want])
-  // The replaced note is named only once it has been read back, so the link
-  // never offers to open something that cannot be resolved.
-  const older = previous === null ? undefined : facts.get(previous)
-  const time = clockTime(fact.created)
-
+function FactBody({ fact, openTalk }: { fact: MemoryFact; openTalk: (draft: string) => void }) {
   return (
-    <article>
-      <p className="memory-meta">
-        <CategoryChip category={fact.category} />
-        {fact.archived && <span className="memory-flag">Archived</span>}
-      </p>
+    <article className="memory-card">
       <h2 className="memory-title">{fact.summary}</h2>
-      <Markdown text={fact.body} />
-      <div className="memory-dmeta">
-        <span>
-          Saved from Talk · {relativeDay(fact.created)}
-          {time && `, ${time}`}
-        </span>
-        {older && (
-          <span>
-            Replaces a note from {shortDate(older.created)} ·{' '}
-            <button className="memory-prev" onClick={() => onOpen(older.id)}>
-              see what changed
-            </button>
-          </span>
-        )}
+      <p className="memory-meta">
+        From a chat on {shortDate(fact.created)}
+        {fact.archived && <span className="memory-flag">archived</span>}
+      </p>
+      {fact.body.trim() !== fact.summary.trim() && <Markdown text={fact.body} />}
+      <div className="memory-acts">
+        <button
+          className="btn-haze"
+          onClick={() => openTalk(`This is wrong: "${fact.summary}". `)}
+        >
+          That's wrong
+        </button>
+        <button className="memory-more" onClick={() => openTalk(`About "${fact.summary}": `)}>
+          Tell Note more
+        </button>
       </div>
-      <button className="memory-ask" onClick={() => onAsk(fact)}>
-        Ask Note about this
-      </button>
     </article>
   )
 }
