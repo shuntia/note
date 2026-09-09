@@ -2,7 +2,9 @@ import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react
 import { api, ApiError } from '../api'
 import type { ToastAction } from '../app'
 import { DayLine, minutesOf } from '../dayline'
+import { eventFacts, nextUp } from '../events'
 import { Gauge } from '../gauge'
+import { makeHold } from '../held'
 import { NowCounter } from '../nowcounter'
 import { Overflow } from '../overflow'
 import { readPrefs } from '../prefs'
@@ -12,14 +14,13 @@ import { useStage } from '../stage'
 import { TellNote } from '../tellnote'
 import type { PlanEvent } from '../types'
 
-const UNDO_MS = 5000
 const LATER_MINUTES = [5, 10, 15, 30, 60]
 const ROUTINE_MIN = 15
 
 // Drop has no server-side reversal, so the request waits out the undo window.
-let heldDrop: { id: number; timer: number } | null = null
+const dropHold = makeHold<number>()
 // Nor does finishing, so the last step's write waits the same way.
-let heldDone: { eventId: number | null; timer: number; send: () => void } | null = null
+const doneHold = makeHold<FocusSession>()
 
 const round5 = (min: number) => Math.max(5, Math.round(min / 5) * 5)
 
@@ -39,20 +40,6 @@ function actionMessage(err: unknown): string {
     if (err.status === 404) return 'That event is gone.'
   }
   return 'Something went wrong. Try again.'
-}
-
-// The fired event owns the face; failing that, the next routine still ahead does.
-function nextUp(events: PlanEvent[], now: number): PlanEvent | null {
-  return (
-    events.find((ev) => ev.status === 'fired') ??
-    events.find(
-      (ev) =>
-        ev.entry !== 'block' &&
-        (ev.status === 'pending' || ev.status === 'snoozed') &&
-        minutesOf(ev.end_wall_time ?? ev.wall_time) >= now,
-    ) ??
-    null
-  )
 }
 
 // Where the wait started: the end of the last settled routine before now, else 06:00.
@@ -137,40 +124,30 @@ export function Home({
     }
   }
 
-  const commitDrop = useCallback(() => {
-    if (!heldDrop) return
-    const { id, timer } = heldDrop
-    heldDrop = null
-    window.clearTimeout(timer)
-    api
-      .eventAction(id, 'drop')
-      .then(load)
-      .catch(() => load())
-  }, [load])
-  useEffect(() => commitDrop, [commitDrop])
-
   const drop = (ev: PlanEvent) => {
-    commitDrop()
-    heldDrop = { id: ev.id, timer: window.setTimeout(commitDrop, UNDO_MS) }
+    dropHold.start(ev.id, () => {
+      api
+        .eventAction(ev.id, 'drop')
+        .then(load)
+        .catch(() => load())
+    })
     tick((n) => n + 1)
     notify(`Dropped ${eventLabel(ev.kind)}`, {
       label: 'Undo',
       run: () => {
-        if (heldDrop?.id !== ev.id) return
-        window.clearTimeout(heldDrop.timer)
-        heldDrop = null
-        tick((n) => n + 1)
+        if (dropHold.cancel(ev.id)) tick((n) => n + 1)
       },
     })
   }
 
   // the beat is a dependency because the holds live outside React state
   const visible = useMemo(
-    () => events.filter((ev) => ev.id !== heldDrop?.id && ev.id !== heldDone?.eventId),
+    () => events.filter((ev) => ev.id !== dropHold.held() && ev.id !== doneHold.held()?.eventId),
     [events, beat],
   )
   const now = nowMinutes()
   const next = nextUp(visible, now)
+  const facts = next ? eventFacts(next, now) : null
 
   // A routine is timed to its span; without an end the routine default stands in.
   const start = (ev: PlanEvent) => {
@@ -201,15 +178,6 @@ export function Home({
       pausedAt: null,
       pausedMs: session.pausedMs + (Date.now() - (session.pausedAt ?? Date.now())),
     })
-  const commitDone = useCallback(() => {
-    if (!heldDone) return
-    const { timer, send } = heldDone
-    heldDone = null
-    window.clearTimeout(timer)
-    send()
-  }, [])
-  useEffect(() => commitDone, [commitDone])
-
   // Ending the last step closes the session at once and holds the write, so Undo
   // is a toast rather than a question asked before the fact.
   const complete = (s: FocusSession) => {
@@ -227,17 +195,13 @@ export function Home({
           .catch(() => notify("Couldn't mark that done. Try again."))
       }
     }
-    commitDone()
-    const hold = { eventId: s.eventId, timer: window.setTimeout(commitDone, UNDO_MS), send }
-    heldDone = hold
+    doneHold.start(s, send)
     setSession(null)
     onChanged()
     notify('Done', {
       label: 'Undo',
       run: () => {
-        if (heldDone !== hold) return
-        window.clearTimeout(hold.timer)
-        heldDone = null
+        if (!doneHold.cancel(s)) return
         tick((n) => n + 1)
         setSession(s)
       },
@@ -326,21 +290,24 @@ export function Home({
 
   // ── wait face ────────────────────────────────────────────────
   const waitCentre = (ev: PlanEvent, big: boolean) => {
-    const mins = Math.max(0, minutesOf(ev.wall_time) - now)
+    const { eyebrow, minutes, span } = eventFacts(ev, now)
     return (
       <>
-        {big && <div className="gauge-eyebrow">NEXT</div>}
-        <div className="gauge-num" style={{ fontSize: big ? 50 : 22 }}>{mins} min</div>
+        {big && <div className="gauge-eyebrow">{eyebrow}</div>}
+        {minutes !== null && (
+          <div className="gauge-num" style={{ fontSize: big ? 50 : 22 }}>{minutes} min</div>
+        )}
         {big && (
           <>
             <div className="gauge-name" style={{ fontSize: 18 }}>{eventLabel(ev.kind)}</div>
-            <div className="gauge-sub">{ev.wall_time} – {ev.end_wall_time ?? ev.wall_time}</div>
+            <div className="gauge-sub">{span}</div>
           </>
         )}
       </>
     )
   }
   const waitFrac = (ev: PlanEvent) => {
+    if (eventFacts(ev, now).minutes === null) return 1
     const from = waitStart(visible, now)
     const to = minutesOf(ev.wall_time)
     return to <= from ? 1 : (now - from) / (to - from)
@@ -373,14 +340,14 @@ export function Home({
   )
 
   const chevron = (
-    <button className="chev" aria-label="More" onClick={() => setStage((s) => Math.min(inSession ? 2 : 1, s + 1))}>
+    <button className="chev" aria-label="Today" onClick={() => setStage((s) => Math.min(inSession ? 2 : 1, s + 1))}>
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 14l6-6 6 6" /></svg>
     </button>
   )
 
   const today = (
     <div className="home-today">
-      <DayLine events={visible} now={now} compact={mobile} />
+      <DayLine events={visible} now={now} compact={mobile} nextId={next?.id} />
       <ul className="home-list">
         {visible
           .filter((ev) => (ev.status === 'pending' || ev.status === 'snoozed' || ev.status === 'fired') && minutesOf(ev.end_wall_time ?? ev.wall_time) >= now)
@@ -448,24 +415,26 @@ export function Home({
               {waitCentre(next, stage === 0)}
             </Gauge>
           ) : (
-            stage === 0 && (
+            stage === 0 && facts && (
               <div className="home-text">
-                <div className="gauge-eyebrow">NEXT</div>
+                <div className="gauge-eyebrow">{facts.eyebrow}</div>
                 <div className="home-title">{eventLabel(next.kind)}</div>
-                <div className="gauge-num" style={{ fontSize: 30 }}>in {Math.max(0, minutesOf(next.wall_time) - now)} min</div>
-                <div className="gauge-sub">{next.wall_time} – {next.end_wall_time ?? next.wall_time}</div>
+                {facts.minutes !== null && (
+                  <div className="gauge-num" style={{ fontSize: 30 }}>in {facts.minutes} min</div>
+                )}
+                <div className="gauge-sub">{facts.span}</div>
               </div>
             )
           )
         ) : (
           <div className="home-text"><div className="home-title">That's everything today.</div></div>
         )}
-        {stage === 1 && next && (
+        {stage === 1 && next && facts && (
           <>
             <div className="home-head">
-              <span className="gauge-eyebrow">NEXT</span>
+              <span className="gauge-eyebrow">{facts.eyebrow}</span>
               <span className="home-head-name">{eventLabel(next.kind)}</span>
-              <span className="gauge-sub">{next.wall_time} – {next.end_wall_time ?? next.wall_time}</span>
+              <span className="gauge-sub">{facts.span}</span>
             </div>
             <button className="btn-fill small" disabled={pending} onClick={() => start(next)}>Start</button>
           </>
