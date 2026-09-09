@@ -19,7 +19,7 @@ const ROUTINE_MIN = 15
 // Drop has no server-side reversal, so the request waits out the undo window.
 let heldDrop: { id: number; timer: number } | null = null
 // Nor does finishing, so the last step's write waits the same way.
-let heldDone: { timer: number; send: () => void } | null = null
+let heldDone: { eventId: number | null; timer: number; send: () => void } | null = null
 
 const round5 = (min: number) => Math.max(5, Math.round(min / 5) * 5)
 
@@ -117,9 +117,9 @@ export function Home({
   // The last stage is Today; before it the face owns the whole screen.
   const showToday = stage === (inSession ? 2 : 1)
   useEffect(() => {
-    onChrome(mobile && !showToday)
+    onChrome(!showToday)
     return () => onChrome(false)
-  }, [mobile, showToday, onChrome])
+  }, [showToday, onChrome])
   useEffect(() => setStage(0), [inSession, setStage])
 
   const act = async (fn: () => Promise<unknown>) => {
@@ -164,8 +164,11 @@ export function Home({
     })
   }
 
-  // the beat is a dependency because the held drop lives outside React state
-  const visible = useMemo(() => events.filter((ev) => ev.id !== heldDrop?.id), [events, beat])
+  // the beat is a dependency because the holds live outside React state
+  const visible = useMemo(
+    () => events.filter((ev) => ev.id !== heldDrop?.id && ev.id !== heldDone?.eventId),
+    [events, beat],
+  )
   const now = nowMinutes()
   const next = nextUp(visible, now)
 
@@ -225,7 +228,7 @@ export function Home({
       }
     }
     commitDone()
-    const hold = { timer: window.setTimeout(commitDone, UNDO_MS), send }
+    const hold = { eventId: s.eventId, timer: window.setTimeout(commitDone, UNDO_MS), send }
     heldDone = hold
     setSession(null)
     onChanged()
@@ -235,6 +238,7 @@ export function Home({
         if (heldDone !== hold) return
         window.clearTimeout(hold.timer)
         heldDone = null
+        tick((n) => n + 1)
         setSession(s)
       },
     })
