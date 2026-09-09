@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react
 import { api, ApiError } from '../api'
 import type { ToastAction } from '../app'
 import { DayLine, minutesOf } from '../dayline'
+import { useEscape } from '../escape'
 import { eventFacts, nextUp } from '../events'
 import { Gauge } from '../gauge'
 import { makeHold } from '../held'
@@ -91,6 +92,8 @@ export function Home({
     setWasInSession(inSession)
     setStage(0)
   }
+
+  useEscape(later, () => setLater(false))
 
   const load = useCallback(() => {
     api
@@ -215,33 +218,47 @@ export function Home({
   }
 
   // A step before the last hands the session straight to the next one still open.
+  // The step's write waits out the undo window, so every Done is reversible.
   const advance = async (s: FocusSession, step: number) => {
     if (pending) return
     setPending(true)
     try {
-      await api.patchTask(step, { state: 'done', notes: withElapsedNote(s.notes, elapsedSec(s)) })
       const nodes = await api.tasks()
       const parent = nodes.find((n) => n.children.some((c) => c.id === step))
       const at = parent?.children.findIndex((c) => c.id === step) ?? -1
       const open = parent?.children.slice(at + 1).find((c) => c.state === 'open' || c.state === 'in_progress')
+      const notes = withElapsedNote(s.notes, elapsedSec(s))
+      doneHold.start(s, () => {
+        api
+          .patchTask(step, { state: 'done', notes })
+          .then(onChanged)
+          .catch(() => notify("Couldn't save the session. Try again."))
+      })
+      setSession(
+        parent && open
+          ? {
+              taskId: open.id,
+              eventId: null,
+              title: parent.title,
+              notes: open.notes,
+              stepIndex: parent.children.indexOf(open) + 1,
+              stepCount: parent.children.length,
+              stepName: open.title,
+              durationSec: open.duration_min === null ? null : round5(open.duration_min) * 60,
+              startedAt: Date.now(),
+              pausedAt: null,
+              pausedMs: 0,
+            }
+          : null,
+      )
       onChanged()
-      if (!parent || !open) {
-        setSession(null)
-        notify('Done')
-        return
-      }
-      setSession({
-        taskId: open.id,
-        eventId: null,
-        title: parent.title,
-        notes: open.notes,
-        stepIndex: parent.children.indexOf(open) + 1,
-        stepCount: parent.children.length,
-        stepName: open.title,
-        durationSec: open.duration_min === null ? null : round5(open.duration_min) * 60,
-        startedAt: Date.now(),
-        pausedAt: null,
-        pausedMs: 0,
+      notify('Done', {
+        label: 'Undo',
+        run: () => {
+          if (!doneHold.cancel(s)) return
+          tick((n) => n + 1)
+          setSession(s)
+        },
       })
     } catch {
       notify("Couldn't save the session. Try again.")
@@ -309,6 +326,7 @@ export function Home({
       <button className="btn-haze" aria-expanded={later} disabled={pending} onClick={() => setLater((v) => !v)}>Later</button>
       <Overflow
         label="More"
+        className={`ev-more-wrap${later ? ' beside-later' : ''}`}
         items={[
           { label: 'Drop today', run: () => drop(ev), disabled: pending },
           { label: 'Move to tomorrow', run: () => act(() => api.moveTomorrow(ev.id)), disabled: pending },

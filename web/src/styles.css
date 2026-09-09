@@ -332,27 +332,31 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 .ev-more:hover { background: var(--sunk); color: var(--text); }
 .ev-menu {
   position: absolute;
-  top: calc(100% + 4px);
+  top: calc(100% + 6px);
   right: 0;
   z-index: 5;
-  min-width: 9rem;
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 0.25rem;
-  box-shadow: 0 10px 28px color-mix(in srgb, var(--text) 18%, transparent);
+  min-width: 12rem;
+  background: var(--haze-strong);
+  border: 0;
+  border-radius: 16px;
+  padding: 0.35rem;
+  backdrop-filter: blur(14px);
+  box-shadow: 0 24px 50px -30px oklch(23% 0.03 255 / 0.5);
 }
+/* with the Later panel open below, the menu opens upward so the two never overlap */
+.beside-later .ev-menu { top: auto; bottom: calc(100% + 10px); }
 .ev-menu-item {
   display: block;
   width: 100%;
   text-align: left;
   background: none;
   border: none;
-  border-radius: calc(var(--radius) - 4px);
-  padding: 0.5rem 0.7rem;
+  border-radius: 12px;
+  padding: 0.5rem 0.75rem;
   color: var(--text);
   font: inherit;
   font-size: 0.9rem;
+  white-space: nowrap;
   cursor: pointer;
 }
 .ev-menu-item:hover:not(:disabled) { background: var(--sunk); }
@@ -461,19 +465,22 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 }
 
 .chat-main { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 0; }
-.chat-head { flex: none; display: flex; padding: 12px 20px 0; }
+.chat-compose { display: flex; align-items: center; gap: 8px; max-width: 680px; margin: 0 auto; }
+.chat-compose .tellnote-wrap { flex: 1; min-width: 0; }
 .chat-toggle {
-  width: 32px;
-  height: 32px;
+  flex: none;
+  width: 44px;
+  height: 44px;
   border: 0;
   border-radius: 50%;
   background: none;
-  color: var(--faint);
+  color: var(--quiet);
   font: inherit;
-  font-size: 1.2rem;
+  font-size: 1.3rem;
   line-height: 1;
   cursor: pointer;
 }
+.chat-toggle:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
 .chat-pane { flex: 1; min-height: 0; overflow-y: auto; padding: 8px 20px 0; }
 .chat-stream {
   width: 100%;
@@ -671,7 +678,7 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 .code-block:hover .code-copy, .code-copy:focus-visible { opacity: 1; color: var(--text); }
 
 .chat-foot { flex: none; padding: 12px 20px 24px; }
-.chat-foot .tellnote { max-width: 680px; margin: 0 auto; }
+.chat-foot .tellnote { width: 100%; }
 @media (max-width: 767.98px) { .chat-foot { padding-bottom: 84px; } }
 @media (min-width: 768px) { .chat-foot { padding: 12px 20px 40px; } }
 
@@ -947,7 +954,8 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 .toast-action:hover { background: color-mix(in srgb, var(--bg) 16%, transparent); }
 .toast-action:focus-visible { outline: 2px solid var(--bg); outline-offset: 2px; }
 @media (max-width: 767.98px) {
-  .toast { bottom: calc(4.6rem + env(safe-area-inset-bottom)); }
+  .toast { bottom: calc(1.25rem + env(safe-area-inset-bottom)); }
+  .toast.above-tabs { bottom: calc(96px + env(safe-area-inset-bottom)); }
 }
 
 /* admin log */
@@ -1033,6 +1041,20 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 .dayline.compact .dl-now { width: 12px; height: 12px; }
 .dayline.compact .dl-span { top: -5px; height: 10px; min-width: 8px; }
 
+.tellnote-wrap { display: flex; flex-direction: column; gap: 10px; width: 100%; }
+.tellnote-reply {
+  padding: 12px 16px;
+  border-radius: 16px;
+  background: var(--haze-strong);
+  color: var(--quiet);
+  font-size: 0.9rem;
+  line-height: 1.5;
+  animation: bubble-in 240ms cubic-bezier(.2,.7,.3,1) both;
+}
+.tellnote-reply.leaving { animation: bubble-out 300ms ease-in both; }
+@keyframes bubble-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+@keyframes bubble-out { from { opacity: 1; } to { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .tellnote-reply, .tellnote-reply.leaving { animation: none; } }
 .tellnote { display: flex; align-items: center; gap: 10px; padding: 0 6px 0 16px; border-radius: 999px; background: var(--haze-strong); min-height: 48px; }
 .tellnote :is(input, textarea) { flex: 1; min-width: 0; border: 0; background: none; font: inherit; font-size: 0.92rem; color: var(--ink); outline: none; }
 .tellnote textarea { resize: none; line-height: 1.45; overflow-y: hidden; }
@@ -1046,7 +1068,9 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 .tellnote :is(input, textarea):focus-visible { outline: none; }
 .tellnote button:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
 
-.chev { display: flex; align-items: center; justify-content: center; height: 38px; color: var(--faint); background: none; border: 0; width: 100%; cursor: pointer; }
+.chev { position: relative; display: flex; align-items: center; justify-content: center; width: 44px; height: 44px; margin: 0 auto; color: var(--faint); background: none; border: 0; border-radius: 50%; cursor: pointer; }
+/* the ring stays on the glyph; the thumb still gets the whole width of the screen */
+.chev::before { content: ''; position: absolute; top: 0; bottom: 0; left: -50vw; right: -50vw; }
 .chev svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 
 .btn-fill { font: inherit; font-weight: 700; font-size: 1.0625rem; line-height: 1.2; padding: 15px 34px; border: 0; border-radius: 999px; background: var(--ink); color: var(--ivory); cursor: pointer; box-shadow: 0 12px 28px -14px oklch(23% 0.03 255 / 0.7); }
@@ -1086,13 +1110,13 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 .home-actions { position: relative; display: flex; align-items: center; gap: 10px; margin-top: 50px; }
 .home-actions .ev-more-wrap { position: relative; top: auto; right: auto; margin-left: 6px; }
 .home-actions .ev-more { width: 44px; height: 44px; font-size: 1.3rem; color: var(--quiet); }
-.later-pick { position: absolute; left: 0; top: calc(100% + 14px); width: min(400px, 92vw); padding: 14px 16px; border-radius: 18px; background: var(--haze-strong); box-shadow: 0 24px 50px -30px oklch(23% 0.03 255 / 0.5); display: flex; flex-wrap: wrap; align-items: center; gap: 8px; z-index: 5; }
+.later-pick { position: absolute; left: 50%; transform: translateX(-50%); top: calc(100% + 14px); width: min(400px, 88vw); padding: 14px 16px; border-radius: 18px; background: var(--haze-strong); box-shadow: 0 24px 50px -30px oklch(23% 0.03 255 / 0.5); display: flex; flex-wrap: wrap; align-items: center; gap: 8px; z-index: 5; }
 .later-lead { width: 100%; font-size: 0.8125rem; color: var(--quiet); }
 .later-min { flex: 1; font: inherit; font-variant-numeric: tabular-nums; padding: 9px 0; border: 0; border-radius: 999px; background: var(--earth); color: var(--ink); cursor: pointer; }
 .later-min:hover, .later-min:focus-visible { background: var(--ink); color: var(--ivory); outline: none; }
 .later-unit { flex: 1; text-align: center; font-size: 0.8125rem; color: var(--quiet); }
 .home-sheet { display: flex; flex-direction: column; align-items: center; gap: 22px; width: min(342px, 88vw); margin-top: 40px; }
-.home-sheet .tellnote { width: 100%; box-sizing: border-box; }
+.home-sheet .tellnote-wrap, .home-today .tellnote-wrap { width: 100%; box-sizing: border-box; }
 .btn-fill.wide { width: 100%; }
 .btn-fill.small { padding: 10px 18px; font-size: 0.9375rem; box-shadow: none; }
 .home-today { width: min(342px, 88vw); margin-top: 60px; display: flex; flex-direction: column; gap: 40px; }
@@ -1107,7 +1131,7 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 .home-what { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .home-text { display: flex; flex-direction: column; gap: 10px; padding: 0 28px; width: 100%; box-sizing: border-box; }
 .home-title { font-family: var(--display); font-weight: 500; font-size: 2.75rem; letter-spacing: -0.03em; line-height: 1.02; color: var(--ink); text-wrap: balance; }
-.home .chev { position: absolute; left: 0; right: 0; bottom: 0; }
+.home .chev { position: absolute; left: 50%; transform: translateX(-50%); bottom: 0; }
 .home.mobile .tabs { margin-top: auto; position: sticky; bottom: 0; width: 100%; }
 
 /* ── horizon: today (desktop) ───────────────────────────────────── */
@@ -1124,9 +1148,6 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 .today-actions .ev-more-wrap { position: relative; top: auto; right: auto; margin-left: 6px; }
 .today-actions .ev-more { width: 44px; height: 44px; font-size: 1.3rem; color: var(--quiet); }
 .today-actions .ev-menu { left: 0; right: auto; z-index: 6; min-width: 12rem; }
-/* with Later open the menu steps clear of its panel, the two side by side */
-.today-actions .beside-later { position: static; }
-.today-actions .beside-later .ev-menu { left: calc(min(400px, 92vw) + 20px); top: calc(100% + 14px); }
 .today-line { position: absolute; left: 120px; width: 1200px; max-width: calc(100% - 240px); top: 496px; }
 .today-ground { position: absolute; left: 0; right: 0; top: 560px; bottom: 0; background: var(--earth); padding: 100px 0 0 120px; }
 .today-ground .debrief-row { width: 820px; max-width: calc(100% - 240px); }
