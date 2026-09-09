@@ -63,8 +63,14 @@ export function Today({ notify, openNow, onChanged, refresh }: ViewProps) {
   }
 
   const drop = (ev: PlanEvent) => {
+    // The hold outlives this component, so the commit also pokes the app-level
+    // refresh that a remounted view is listening to.
+    const settled = () => {
+      load()
+      onChanged()
+    }
     dropHold.start(ev.id, () => {
-      api.eventAction(ev.id, 'drop').then(load).catch(() => load())
+      api.eventAction(ev.id, 'drop').then(settled, settled)
     })
     tick((n) => n + 1)
     notify(`Dropped ${eventLabel(ev.kind)}`, {
