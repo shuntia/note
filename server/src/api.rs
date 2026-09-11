@@ -44,7 +44,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/push/subscribe", post(push_subscribe))
         .route("/api/push/unsubscribe", post(push_unsubscribe))
         .route("/api/push/vapid_public_key", get(vapid_public_key))
-        .route("/api/admin/log", get(admin_log))
+        .nest("/api/admin", crate::admin::routes())
         .with_state(state)
 }
 
@@ -452,27 +452,7 @@ async fn conversation_messages(
         Ok(false) => return conversation_not_found(),
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
-    let mut stmt = match conn.prepare(
-        "SELECT id, role, content, tool_name, tool_args, is_error, created_at
-         FROM talk_messages WHERE conversation_id = ?1 ORDER BY id",
-    ) {
-        Ok(s) => s,
-        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    };
-    let rows: Result<Vec<serde_json::Value>, _> = stmt
-        .query_map([id], |r| {
-            Ok(serde_json::json!({
-                "id": r.get::<_, i64>(0)?,
-                "role": r.get::<_, String>(1)?,
-                "content": r.get::<_, String>(2)?,
-                "tool_name": r.get::<_, Option<String>>(3)?,
-                "tool_args": r.get::<_, Option<String>>(4)?,
-                "is_error": r.get::<_, bool>(5)?,
-                "created_at": r.get::<_, String>(6)?,
-            }))
-        })
-        .and_then(|m| m.collect());
-    match rows {
+    match crate::talk::messages_json(&conn, id) {
         Ok(v) => Json(v).into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
@@ -1104,42 +1084,3 @@ async fn ws_pump(
     hub.unregister(user_id, conn_id);
 }
 
-#[derive(Deserialize)]
-struct LogQuery {
-    #[serde(default = "default_limit")]
-    limit: i64,
-}
-fn default_limit() -> i64 {
-    100
-}
-
-async fn admin_log(
-    user: CurrentUser,
-    State(state): State<AppState>,
-    Query(q): Query<LogQuery>,
-) -> impl IntoResponse {
-    if !user.admin {
-        return StatusCode::FORBIDDEN.into_response();
-    }
-    let conn = state.db.lock().unwrap();
-    let mut stmt = match conn.prepare(
-        "SELECT ts, user_id, kind, detail FROM event_log ORDER BY id DESC LIMIT ?1",
-    ) {
-        Ok(s) => s,
-        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    };
-    let rows: Result<Vec<serde_json::Value>, _> = stmt
-        .query_map([q.limit], |r| {
-            Ok(serde_json::json!({
-                "ts": r.get::<_, String>(0)?,
-                "user_id": r.get::<_, Option<i64>>(1)?,
-                "kind": r.get::<_, String>(2)?,
-                "detail": r.get::<_, String>(3)?,
-            }))
-        })
-        .and_then(|m| m.collect());
-    match rows {
-        Ok(v) => Json(v).into_response(),
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    }
-}

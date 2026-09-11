@@ -204,6 +204,26 @@ pub fn read(data_dir: &Path, user: &str, id: &str) -> Result<Option<MemoryFile>>
     Ok(Some(parse(&std::fs::read_to_string(path)?, archived)?))
 }
 
+pub fn read_raw(data_dir: &Path, user: &str, id: &str) -> Result<Option<String>> {
+    let Some((path, _)) = locate(data_dir, user, id) else {
+        return Ok(None);
+    };
+    Ok(Some(std::fs::read_to_string(path)?))
+}
+
+/// Replaces the file verbatim and re-indexes it; the content must still parse
+/// as a memory file, and the archive flag follows the directory it lives in.
+pub fn write_raw(conn: &Connection, data_dir: &Path, user: &str, id: &str, raw: &str) -> Result<Option<()>> {
+    let Some((path, archived)) = locate(data_dir, user, id) else {
+        return Ok(None);
+    };
+    let f = parse(raw, archived)?;
+    anyhow::ensure!(f.id == id, "frontmatter id {} does not match {id}", f.id);
+    write_atomic(&path, raw)?;
+    index_insert(conn, user, &f, &path)?;
+    Ok(Some(()))
+}
+
 pub fn update(
     conn: &Connection,
     data_dir: &Path,

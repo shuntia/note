@@ -1,9 +1,13 @@
 import type {
+  AdminGate,
+  AdminLog,
+  AdminStatus,
+  AdminUser,
   AlertPatch,
   Conversation,
   Debrief,
   FlattenResult,
-  LogRow,
+  InspectUser,
   Me,
   MemoryFact,
   MemoryHit,
@@ -13,6 +17,7 @@ import type {
   PromptName,
   Settings,
   SettingsSaved,
+  SqlResult,
   TalkMessage,
   TalkReply,
   Task,
@@ -56,15 +61,20 @@ export function setOnUnauthorized(fn: () => void) {
 // carries a body cap, so a rare oversized payload goes out the ordinary way.
 const KEEPALIVE_MAX_BODY = 60_000
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const body = init?.body
+// `quiet401` is for admin elevation, where a 401 means the grant is gone rather
+// than the session.
+type Options = RequestInit & { quiet401?: boolean }
+
+async function request<T>(path: string, init?: Options): Promise<T> {
+  const { quiet401, ...rest } = init ?? {}
+  const body = rest.body
   const res = await fetch(path, {
     headers: body ? { 'Content-Type': 'application/json' } : undefined,
     keepalive: typeof body === 'string' ? body.length <= KEEPALIVE_MAX_BODY : true,
-    ...init,
+    ...rest,
   })
   if (!res.ok) {
-    if (res.status === 401 && path !== '/api/login') onUnauthorized?.()
+    if (res.status === 401 && path !== '/api/login' && !quiet401) onUnauthorized?.()
     let message = `Request failed (${res.status})`
     try {
       const body: unknown = await res.json()
@@ -169,5 +179,60 @@ export const api = {
     request<void>('/api/push/subscribe', { method: 'POST', body: JSON.stringify(sub) }),
   pushUnsubscribe: (endpoint: string) =>
     request<void>('/api/push/unsubscribe', { method: 'POST', body: JSON.stringify({ endpoint }) }),
-  adminLog: () => request<LogRow[]>('/api/admin/log?limit=100'),
+}
+
+const ADMIN = '/api/admin'
+
+// Every grant-protected route answers 401 when elevation has expired; the panel
+// handles that itself rather than dropping the whole session.
+const guarded = <T,>(path: string, init?: RequestInit) =>
+  request<T>(`${ADMIN}${path}`, { ...init, quiet401: true })
+
+export const admin = {
+  gate: () => request<AdminGate>(`${ADMIN}/gate`),
+  elevate: (password: string, code?: string) =>
+    request<void>(`${ADMIN}/elevate`, {
+      method: 'POST',
+      body: JSON.stringify(code ? { password, code } : { password }),
+      quiet401: true,
+    }),
+  drop: () => request<void>(`${ADMIN}/drop`, { method: 'POST' }),
+  status: () => guarded<AdminStatus>('/status'),
+  users: () => guarded<AdminUser[]>('/users'),
+  createUser: (username: string, password: string, admin: boolean) =>
+    guarded<{ id: number }>('/users', {
+      method: 'POST',
+      body: JSON.stringify({ username, password, admin }),
+    }),
+  patchUser: (
+    id: number,
+    patch: { role?: 'admin' | 'member'; disabled?: boolean; password?: string },
+  ) => guarded<void>(`/users/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
+  revokeSessions: (id: number) =>
+    guarded<{ revoked: number }>(`/users/${id}/revoke_sessions`, { method: 'POST' }),
+  log: (params: { limit?: number; kind?: string; before_id?: number }) => {
+    const search = new URLSearchParams()
+    if (params.limit !== undefined) search.set('limit', String(params.limit))
+    if (params.kind) search.set('kind', params.kind)
+    if (params.before_id !== undefined) search.set('before_id', String(params.before_id))
+    const query = search.toString()
+    return guarded<AdminLog>(`/log${query ? `?${query}` : ''}`)
+  },
+  inspectUser: (id: number) => guarded<InspectUser>(`/inspect/users/${id}`),
+  putConfig: (id: number, toml: string) =>
+    guarded<void>(`/inspect/users/${id}/config`, {
+      method: 'PUT',
+      body: JSON.stringify({ toml }),
+    }),
+  conversationMessages: (id: number, cid: number) =>
+    guarded<TalkMessage[]>(`/inspect/users/${id}/conversations/${cid}`),
+  memoryGet: (id: number, mid: string) =>
+    guarded<{ content: string }>(`/inspect/users/${id}/memory/${encodeURIComponent(mid)}`),
+  memoryPut: (id: number, mid: string, content: string) =>
+    guarded<void>(`/inspect/users/${id}/memory/${encodeURIComponent(mid)}`, {
+      method: 'PUT',
+      body: JSON.stringify({ content }),
+    }),
+  sql: (sql: string) =>
+    guarded<SqlResult>('/inspect/sql', { method: 'POST', body: JSON.stringify({ sql }) }),
 }

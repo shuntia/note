@@ -9,6 +9,8 @@ pub struct ServerConfig {
     pub data_dir: PathBuf,
     #[serde(default = "default_web_dir")]
     pub web_dir: PathBuf,
+    #[serde(default = "default_secrets_dir")]
+    pub secrets_dir: PathBuf,
     #[serde(default)]
     pub providers: ProvidersConfig,
     #[serde(default)]
@@ -19,6 +21,10 @@ pub struct ServerConfig {
 /// (the Nix package points it at its own `share/note/web`).
 fn default_web_dir() -> PathBuf {
     PathBuf::from(option_env!("NOTE_DEFAULT_WEB_DIR").unwrap_or("web/dist"))
+}
+
+fn default_secrets_dir() -> PathBuf {
+    PathBuf::from("persist/secrets")
 }
 
 impl ServerConfig {
@@ -88,14 +94,19 @@ fn default_counter() -> String {
 
 impl UserConfig {
     pub fn load(config_dir: &Path, user: &str) -> anyhow::Result<Self> {
+        let raw = std::fs::read_to_string(config_dir.join("users").join(user).join("user.toml")).ok();
+        Self::from_overlay(config_dir, raw.as_deref())
+    }
+
+    /// The effective config for a user file with this content (`None` for no
+    /// file), validated the same way `load` validates the file on disk.
+    pub fn from_overlay(config_dir: &Path, raw: Option<&str>) -> anyhow::Result<Self> {
         let defaults: toml::Value = std::fs::read_to_string(config_dir.join("defaults/user.toml"))
             .context("reading defaults/user.toml")?
             .parse()?;
-        let merged = match std::fs::read_to_string(
-            config_dir.join("users").join(user).join("user.toml"),
-        ) {
-            Ok(raw) => overlay(defaults, raw.parse()?),
-            Err(_) => defaults,
+        let merged = match raw {
+            Some(raw) => overlay(defaults, raw.parse()?),
+            None => defaults,
         };
         let cfg: UserConfig = merged.try_into()?;
         anyhow::ensure!(
@@ -169,6 +180,7 @@ mod tests {
             "bind_addr = \"127.0.0.1:0\"\npublic_base_url = \"http://x\"\ndata_dir = \"data\"\n");
         let cfg = ServerConfig::load(tmp.path()).unwrap();
         assert!(cfg.providers.llm.is_none());
+        assert_eq!(cfg.secrets_dir, PathBuf::from("persist/secrets"));
     }
 
     #[test]

@@ -154,6 +154,22 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE events ADD COLUMN span_min INTEGER NOT NULL DEFAULT 15
         CHECK (span_min > 0);
     ",
+    // v10
+    "
+    ALTER TABLE users ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0
+        CHECK (disabled IN (0, 1));
+    CREATE TABLE admin_grants (
+        token TEXT PRIMARY KEY,
+        session_token TEXT NOT NULL REFERENCES sessions(token) ON DELETE CASCADE,
+        user_id INTEGER NOT NULL REFERENCES users(id),
+        expires_at INTEGER NOT NULL
+    );
+    CREATE INDEX idx_admin_grants_session ON admin_grants(session_token);
+    CREATE TABLE totp_replay (
+        user_id INTEGER PRIMARY KEY REFERENCES users(id),
+        last_step INTEGER NOT NULL
+    );
+    ",
 ];
 
 pub fn open(path: &Path) -> Result<Connection> {

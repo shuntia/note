@@ -7,7 +7,6 @@ import { eventLabel } from '../receipts'
 import type { CounterMode } from '../session'
 import { applyTheme, saveTheme, storedTheme, type ThemeChoice } from '../theme'
 import type {
-  LogRow,
   Me,
   PromptDoc,
   PromptName,
@@ -147,7 +146,8 @@ export function Settings({
   me,
   notify,
   onSignedOut,
-}: ViewProps & { me: Me; onSignedOut: () => void }) {
+  openAdmin,
+}: ViewProps & { me: Me; onSignedOut: () => void; openAdmin: () => void }) {
   const [state, setState] = useState<Loaded | 'error' | undefined>(undefined)
   const [save, setSave] = useState<Save>(null)
   const [open, setOpen] = useState<string | null>(null)
@@ -455,16 +455,20 @@ export function Settings({
             </div>
           )}
         </FoldRow>
-        {me.admin && (
-          <FoldRow label="Server log" open={open === 'log'} onToggle={fold('log')}>
-            {open === 'log' && (
-              <div className="set-fold-body">
-                <AdminSection />
-              </div>
-            )}
-          </FoldRow>
-        )}
       </Group>
+
+      {me.admin && (
+        <Group head="ADMIN">
+          <button className="set-row set-open" onClick={openAdmin}>
+            <span className="set-row-body">
+              <span className="set-label">Admin panel</span>
+            </span>
+            <svg className="set-chev" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M9 6l6 6-6 6" />
+            </svg>
+          </button>
+        </Group>
+      )}
 
       <button
         className="set-signout"
@@ -729,46 +733,6 @@ function PushRow({ notify }: { notify: Notify }) {
         disabled={state === 'busy' || state === 'unsupported'}
         onToggle={() => void toggle()}
       />
-    </div>
-  )
-}
-
-function AdminSection() {
-  const [log, setLog] = useState<LogRow[] | 'error' | undefined>(undefined)
-
-  const load = () => {
-    setLog(undefined)
-    api
-      .adminLog()
-      .then(setLog)
-      .catch(() => setLog('error'))
-  }
-  useEffect(load, [])
-
-  if (log === undefined) return null
-  if (log === 'error')
-    return (
-      <p className="set-sub">
-        The log didn't load.{' '}
-        <button className="set-link" onClick={load}>
-          Retry
-        </button>
-      </p>
-    )
-  if (log.length === 0) return <p className="set-sub">Nothing logged yet.</p>
-  return (
-    <div className="log-scroll">
-      <table className="log-table">
-        <tbody>
-          {log.map((row, i) => (
-            <tr key={i}>
-              <td className="mono">{row.ts.slice(11, 19)}</td>
-              <td>{row.kind}</td>
-              <td className="set-sub">{row.detail}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
     </div>
   )
 }

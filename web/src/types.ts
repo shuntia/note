@@ -117,4 +117,59 @@ export type MemoryFact = {
   supersedes: string | null
 }
 
-export type LogRow = { ts: string; user_id: number | null; kind: string; detail: string }
+export type LogRow = {
+  id: number
+  ts: string
+  user_id: number | null
+  kind: string
+  detail: string
+}
+
+export type AdminGate = {
+  elevated: boolean
+  expires_at?: string
+  totp: 'required' | 'password_only' | 'missing'
+  inspect: boolean
+}
+
+export type AdminStatus = {
+  version: string
+  build: 'release' | 'dev-inspect'
+  started_at: string
+  uptime_s: number
+  db_bytes: number
+  users: number
+  sessions: number
+  push_subscriptions: number
+  providers: {
+    llm: { kind: string; model: string } | null
+    embeddings: { kind: string; model: string } | null
+  }
+  webpush: boolean
+  secrets: { admin_totp: boolean }
+}
+
+export type AdminUser = {
+  id: number
+  username: string
+  role: 'admin' | 'member'
+  disabled: boolean
+  sessions: number
+}
+
+export type AdminLog = { rows: LogRow[]; kinds: string[] }
+
+export type InspectMemory = { id: string; category: string; summary: string; archived: boolean }
+
+export type InspectUser = {
+  config_path: string
+  config_toml: string
+  tasks: TaskNode[]
+  conversations: Conversation[]
+  memory: InspectMemory[]
+  events_today: PlanEvent[]
+}
+
+export type SqlResult =
+  | { columns: string[]; rows: unknown[][]; truncated: boolean }
+  | { changes: number }
