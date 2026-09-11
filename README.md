@@ -42,8 +42,8 @@ client under `web/dist` (see "Web client" below).
    cargo run --release -- create-user <name> <password> --admin
    ```
 
-   Members are created the same way, on the server CLI, without `--admin`.
-   There is no HTTP route for it — the running server never creates accounts.
+   Further accounts come from the same command, or from the admin panel once
+   its secret is installed (see "Admin panel").
 
 3. Start the server:
 
@@ -337,14 +337,74 @@ server on that port, signs a scratch user in, and writes the PNG; `--session`
 shoots with a focus session running and `--stage N` raises the home screen N
 steps first.
 
-## Admin API
+## Admin panel
 
-Admin-role users (see `create-user --admin`) get one extra route:
+Settings shows admin-role users an "Admin panel" row. The panel manages
+accounts (create, password reset, admin role, disable, sign out everywhere),
+shows server status, and browses the server log. Everything it does is
+written to `event_log` as `admin_*` rows naming the acting admin.
 
-- `GET /api/admin/log?limit=100` — the last N `event_log` rows.
+### Lockdown
 
-It returns `403 Forbidden` for non-admin users. Membership is not administered
-over HTTP at all; accounts come from `create-user` on the server CLI.
+Every `/api/admin/*` route needs, in order:
+
+1. an admin-role session (`403` otherwise);
+2. an *admin grant*: the panel asks for the password again plus a 6-digit TOTP
+   code, and the server answers with a second cookie
+   (`admin=…; Path=/api/admin; HttpOnly; SameSite=Strict`, `Secure` on HTTPS)
+   valid 15 minutes, bound to that session, and deleted with it. Every route
+   except `gate`, `elevate` and `drop` answers `401` without a live grant;
+3. same-origin provenance: a request whose `Sec-Fetch-Site` says a foreign site
+   started it is refused (`403`).
+
+Elevation attempts are limited like logins (10 per username per 15 minutes),
+TOTP codes are single-use, and admin responses are `Cache-Control: no-store`.
+
+### Secrets
+
+`secrets_dir` in `server.toml` (default `persist/secrets`, gitignored) holds
+`admin_totp`: the base32 TOTP seed (SHA-1, 6 digits, 30 s). Generate and
+enrol one with:
+
+```sh
+note-server totp-generate            # prints a seed and its otpauth:// URI
+note-server totp-uri                 # the URI for the seed already installed
+```
+
+Until the file exists, a release server keeps the panel locked: the gate
+reports `totp: "missing"` and elevation answers `503`. Startup writes an
+`admin_locked` row so the state is visible in the log.
+
+### Dev builds
+
+```sh
+cargo run --features dev-inspect
+```
+
+`dev-inspect` is a Cargo feature, off by default and off in the Nix package.
+It compiles in the inspection routes (`/api/admin/inspect/...`: a user's
+config, tasks, today's events, conversations and memory files, all editable,
+plus a SQL console on the live database), lets elevation pass on the password
+alone when no seed is installed, and makes the panel show a red banner. The
+web client is a single build; it renders the inspection section only when the
+server's gate reports `inspect: true`.
+
+### Routes
+
+| Route | Needs | Effect |
+|---|---|---|
+| `GET /api/admin/gate` | role | `{elevated, expires_at?, totp, inspect}` |
+| `POST /api/admin/elevate` `{password, code?}` | role | sets the grant cookie |
+| `POST /api/admin/drop` | role | ends the grant |
+| `GET /api/admin/status` | grant | version, build, uptime, DB size, counts, providers |
+| `GET /api/admin/users` | grant | `[{id, username, role, disabled, sessions}]` |
+| `POST /api/admin/users` `{username, password, admin}` | grant | `201 {id}`; `409` taken; `422` invalid |
+| `PATCH /api/admin/users/{id}` `{role?, disabled?, password?}` | grant | `409` if it would leave no enabled admin or change the actor's own role |
+| `POST /api/admin/users/{id}/revoke_sessions` | grant | `{revoked}` |
+| `GET /api/admin/log?limit&kind&before_id` | grant | `{rows, kinds}` |
+
+A password reset ends the account's other sessions; disabling an account ends
+all of them and blocks sign-in.
 
 ## Running as a systemd service
 

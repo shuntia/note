@@ -1,3 +1,4 @@
+pub mod admin;
 pub mod agent;
 pub mod api;
 pub mod auth;
@@ -17,6 +18,7 @@ pub mod talk;
 pub mod tasks;
 pub mod templates;
 pub mod tools;
+pub mod totp;
 
 use crate::providers::{EmbeddingsProvider, LLMProvider};
 use rusqlite::Connection;
@@ -94,6 +96,10 @@ pub struct AppState {
     pub secure_cookies: bool,
     pub login_limiter: Arc<crate::auth::LoginLimiter>,
     pub talk_gate: Arc<TalkGate>,
+    pub admin_limiter: Arc<crate::auth::LoginLimiter>,
+    pub admin_secrets: Arc<crate::admin::AdminSecrets>,
+    pub providers_info: crate::admin::ProvidersInfo,
+    pub started_at: jiff::Timestamp,
 }
 
 impl AppState {
@@ -115,7 +121,21 @@ impl AppState {
             secure_cookies: false,
             login_limiter: Arc::new(crate::auth::LoginLimiter::new()),
             talk_gate: Arc::new(TalkGate::new()),
+            admin_limiter: Arc::new(crate::auth::LoginLimiter::new()),
+            admin_secrets: Arc::new(crate::admin::AdminSecrets::default()),
+            providers_info: crate::admin::ProvidersInfo::default(),
+            started_at: jiff::Timestamp::now(),
         }
+    }
+
+    pub fn with_admin_secrets(mut self, secrets: crate::admin::AdminSecrets) -> Self {
+        self.admin_secrets = Arc::new(secrets);
+        self
+    }
+
+    pub fn with_providers_info(mut self, info: crate::admin::ProvidersInfo) -> Self {
+        self.providers_info = info;
+        self
     }
 
     pub fn with_providers(

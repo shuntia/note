@@ -66,6 +66,26 @@ pub fn append_tool(
     Ok(())
 }
 
+/// Every row of a conversation as the API presents it, oldest-first.
+pub fn messages_json(conn: &Connection, conversation_id: i64) -> Result<Vec<serde_json::Value>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, role, content, tool_name, tool_args, is_error, created_at
+         FROM talk_messages WHERE conversation_id = ?1 ORDER BY id",
+    )?;
+    let rows = stmt.query_map([conversation_id], |r| {
+        Ok(serde_json::json!({
+            "id": r.get::<_, i64>(0)?,
+            "role": r.get::<_, String>(1)?,
+            "content": r.get::<_, String>(2)?,
+            "tool_name": r.get::<_, Option<String>>(3)?,
+            "tool_args": r.get::<_, Option<String>>(4)?,
+            "is_error": r.get::<_, bool>(5)?,
+            "created_at": r.get::<_, String>(6)?,
+        }))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 /// The last `limit` text turns, oldest-first. Tool rows are dropped because a
 /// replayed transcript has no live call ids to pair its results against.
 pub fn history(conn: &Connection, conversation_id: i64, limit: usize) -> Result<Vec<Message>> {

@@ -29,6 +29,13 @@ thiserror = "1"
 ureq = { version = "2", features = ["json"] }
 web-push = { version = "0.10", default-features = false }
 base64 = "0.22"
+hmac = "0.12"
+sha1 = "0.10"
+data-encoding = "2"
+
+[features]
+# Compiles in the admin inspection routes and password-only elevation; never for deploys.
+dev-inspect = []
 
 [dev-dependencies]
 proptest = "1"

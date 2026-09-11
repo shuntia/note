@@ -14,7 +14,8 @@ Three layers stack on every `/api/admin/*` route:
    (`admin=<token>; Path=/api/admin; HttpOnly; SameSite=Strict; Secure` when
    the site is HTTPS), 15 minutes absolute (no sliding), bound to the session
    (deleted with it), stored in `admin_grants`. Every admin route except
-   `gate` and `elevate` requires a live grant; reads included.
+   `gate`, `elevate` and `drop` requires a live grant; reads included. A
+   missing or expired grant answers 401 so the client can re-gate.
 3. **Request provenance.** A request carrying `Sec-Fetch-Site` other than
    `same-origin`/`none` is refused (403). Mutations require a JSON body.
    Admin responses carry `Cache-Control: no-store`.
@@ -65,7 +66,7 @@ CREATE TABLE admin_grants (
     token TEXT PRIMARY KEY,
     session_token TEXT NOT NULL REFERENCES sessions(token) ON DELETE CASCADE,
     user_id INTEGER NOT NULL REFERENCES users(id),
-    expires_at TEXT NOT NULL
+    expires_at INTEGER NOT NULL
 );
 CREATE TABLE totp_replay (
     user_id INTEGER PRIMARY KEY REFERENCES users(id),
@@ -127,7 +128,7 @@ Elevation expiry drops the view back to the gate on the next 401.
 ## Testing
 
 Unit: TOTP vectors (RFC 6238), replay rejection, seed parsing, last-admin
-guard. Integration: member 403 on every route; admin without grant 403;
+guard. Integration: member 403 on every route; admin without grant 401;
 grant lifecycle (elevate, use, expire, logout cascade); wrong code 401 and
 limiter 429; disabled user login and session behaviour; cross-site header
 403; inspect routes absent (404) without the feature and present with it;

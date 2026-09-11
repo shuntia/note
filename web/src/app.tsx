@@ -5,6 +5,7 @@ import { prefsFrom, writePrefs } from './prefs'
 import { makeHold } from './held'
 import { readSession, writeSession, type FocusSession } from './session'
 import type { Me } from './types'
+import { Admin } from './views/Admin'
 import { Home } from './views/Home'
 import { Memory } from './views/Memory'
 import { Settings } from './views/Settings'
@@ -13,7 +14,8 @@ import { Tasks } from './views/Tasks'
 import { Today } from './views/Today'
 import { connectEvents } from './ws'
 
-type Tab = 'today' | 'tasks' | 'chat' | 'memory' | 'settings'
+// `admin` is reached from Settings only, so it never joins NAV.
+type Tab = 'today' | 'tasks' | 'chat' | 'memory' | 'settings' | 'admin'
 
 const DRAFT_KEY = 'note.captureDraft'
 const CAPTURE_PLACEHOLDER = 'Jot anything'
@@ -35,7 +37,9 @@ export type ViewProps = {
   openNow: (session: FocusSession) => void
 }
 
-const NAV: { id: Tab; label: string }[] = [
+type NavTab = Exclude<Tab, 'admin'>
+
+const NAV: { id: NavTab; label: string }[] = [
   { id: 'today', label: 'Today' },
   { id: 'tasks', label: 'Tasks' },
   { id: 'chat', label: 'Chat' },
@@ -128,10 +132,12 @@ export function App() {
     </div>
   )
 
+  const current: NavTab = tab === 'admin' ? 'settings' : tab
+
   const tabsNode = (
     <nav className="tabs" aria-label="Views">
       {NAV.map((t) => (
-        <button key={t.id} aria-current={tab === t.id} onClick={() => setTab(t.id)}>
+        <button key={t.id} aria-current={current === t.id} onClick={() => setTab(t.id)}>
           <NavIcon id={t.id} />
           {t.label}
         </button>
@@ -162,7 +168,7 @@ export function App() {
           <span className="brand">Note</span>
           <nav className="topnav" aria-label="Views">
             {NAV.map((t) => (
-              <button key={t.id} aria-current={tab === t.id} onClick={() => setTab(t.id)}>
+              <button key={t.id} aria-current={current === t.id} onClick={() => setTab(t.id)}>
                 {t.label}
               </button>
             ))}
@@ -178,7 +184,17 @@ export function App() {
           <Talk {...views} prefill={talkPrefill} onPrefilled={() => setTalkPrefill(null)} />
         )}
         {tab === 'memory' && <Memory {...views} />}
-        {tab === 'settings' && <Settings me={me} {...views} onSignedOut={() => setMe(null)} />}
+        {tab === 'settings' && (
+          <Settings
+            me={me}
+            {...views}
+            onSignedOut={() => setMe(null)}
+            openAdmin={() => setTab('admin')}
+          />
+        )}
+        {tab === 'admin' && (
+          <Admin me={me} notify={notify} onBack={() => setTab('settings')} />
+        )}
       </main>
       {mobile && !showHome && tabsNode}
       {toastNode}

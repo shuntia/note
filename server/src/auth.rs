@@ -128,6 +128,30 @@ fn dummy_hash() -> &'static str {
     })
 }
 
+pub fn stored_hash(conn: &Connection, user_id: i64) -> Result<Option<String>> {
+    Ok(conn
+        .query_row("SELECT pass_hash FROM users WHERE id = ?1", [user_id], |r| r.get(0))
+        .optional()?)
+}
+
+/// Verifies against the stored hash, or against a dummy hash when there is
+/// none, so every path pays the same argon2 cost. Runs with no lock held.
+pub fn verify_against(password: &str, hash: Option<&str>) -> bool {
+    match hash {
+        Some(h) => verify(password, h),
+        None => {
+            let _ = verify(password, dummy_hash());
+            false
+        }
+    }
+}
+
+pub fn set_password(conn: &Connection, user_id: i64, password: &str) -> Result<()> {
+    let hash = hash_password(password)?;
+    conn.execute("UPDATE users SET pass_hash = ?1 WHERE id = ?2", (hash, user_id))?;
+    Ok(())
+}
+
 fn verify(password: &str, hash: &str) -> bool {
     PasswordHash::new(hash)
         .map(|parsed| {
@@ -138,22 +162,23 @@ fn verify(password: &str, hash: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Returns a fresh session token, or `None` when the credentials do not match.
-/// Row lookup and session insert each take a short lock; the argon2 work runs
-/// with no lock held. Unknown usernames verify against a dummy hash so the
-/// response time does not reveal which usernames exist.
+/// Returns a fresh session token, or `None` when the credentials do not match
+/// or the account is disabled. Row lookup and session insert each take a short
+/// lock; the argon2 work runs with no lock held. Unknown usernames verify
+/// against a dummy hash and disabled accounts still verify, so the response
+/// time reveals neither which usernames exist nor which are disabled.
 pub fn login(db: &Mutex<Connection>, username: &str, password: &str) -> Result<Option<String>> {
-    let row: Option<(i64, String)> = {
+    let row: Option<(i64, String, bool)> = {
         let conn = db.lock().unwrap();
         conn.query_row(
-            "SELECT id, pass_hash FROM users WHERE username = ?1",
+            "SELECT id, pass_hash, disabled FROM users WHERE username = ?1",
             [username],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()?
     };
     let ok = match &row {
-        Some((_, hash)) => verify(password, hash),
+        Some((_, hash, disabled)) => verify(password, hash) && !disabled,
         None => {
             let _ = verify(password, dummy_hash());
             false
@@ -162,7 +187,7 @@ pub fn login(db: &Mutex<Connection>, username: &str, password: &str) -> Result<O
     if !ok {
         return Ok(None);
     }
-    let (id, _) = row.expect("checked above");
+    let (id, _, _) = row.expect("checked above");
     let token = uuid::Uuid::new_v4().to_string();
     let expires = jiff::Timestamp::now() + jiff::Span::new().hours(SESSION_LIFETIME_HOURS);
     let conn = db.lock().unwrap();
@@ -195,6 +220,7 @@ pub struct CurrentUser {
     pub id: i64,
     pub username: String,
     pub admin: bool,
+    pub session_token: String,
 }
 
 impl FromRequestParts<AppState> for CurrentUser {
@@ -208,27 +234,28 @@ impl FromRequestParts<AppState> for CurrentUser {
             .value()
             .to_string();
         let conn = state.db.lock().unwrap();
-        let row: Option<(i64, String, String, String)> = conn
+        let row: Option<(i64, String, String, String, bool)> = conn
             .query_row(
-                "SELECT u.id, u.username, u.role, s.expires_at
+                "SELECT u.id, u.username, u.role, s.expires_at, u.disabled
                  FROM sessions s JOIN users u ON u.id = s.user_id
                  WHERE s.token = ?1",
                 [&token],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )
             .optional()
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        let Some((id, username, role, expires_at)) = row else {
+        let Some((id, username, role, expires_at, disabled)) = row else {
             return Err(StatusCode::UNAUTHORIZED);
         };
         let expires: jiff::Timestamp = expires_at.parse().map_err(|_| StatusCode::UNAUTHORIZED)?;
-        if expires < jiff::Timestamp::now() {
+        if disabled || expires < jiff::Timestamp::now() {
             return Err(StatusCode::UNAUTHORIZED);
         }
         Ok(CurrentUser {
             id,
             username,
             admin: role == "admin",
+            session_token: token,
         })
     }
 }
@@ -272,6 +299,32 @@ mod tests {
                 .unwrap();
         }
         assert!(login(&db, "aki", "right").unwrap().is_none());
+    }
+
+    #[test]
+    fn disabled_users_cannot_log_in() {
+        let db = std::sync::Mutex::new(crate::db::open_memory().unwrap());
+        {
+            let conn = db.lock().unwrap();
+            create_user(&conn, "aki", "right", false).unwrap();
+            conn.execute("UPDATE users SET disabled = 1", []).unwrap();
+        }
+        assert!(login(&db, "aki", "right").unwrap().is_none());
+    }
+
+    #[test]
+    fn verify_against_stored_hash_and_set_password() {
+        let conn = crate::db::open_memory().unwrap();
+        let id = create_user(&conn, "aki", "one", false).unwrap();
+        let hash = stored_hash(&conn, id).unwrap();
+        assert!(verify_against("one", hash.as_deref()));
+        assert!(!verify_against("two", hash.as_deref()));
+        assert!(stored_hash(&conn, id + 99).unwrap().is_none());
+        assert!(!verify_against("one", None));
+        set_password(&conn, id, "two").unwrap();
+        let hash = stored_hash(&conn, id).unwrap();
+        assert!(verify_against("two", hash.as_deref()));
+        assert!(!verify_against("one", hash.as_deref()));
     }
 
     fn t0() -> jiff::Timestamp {
