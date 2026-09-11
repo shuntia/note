@@ -15,8 +15,10 @@ pub struct ServerConfig {
     pub channels: ChannelsConfig,
 }
 
+/// `NOTE_DEFAULT_WEB_DIR` at build time bakes in an install-specific location
+/// (the Nix package points it at its own `share/note/web`).
 fn default_web_dir() -> PathBuf {
-    PathBuf::from("web/dist")
+    PathBuf::from(option_env!("NOTE_DEFAULT_WEB_DIR").unwrap_or("web/dist"))
 }
 
 impl ServerConfig {

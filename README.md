@@ -14,11 +14,23 @@ Either:
 
 ## Build
 
+With Nix, the flake builds the server and the web client together:
+
+```sh
+nix build            # ./result/bin/note-server, web client under share/note/web
+```
+
+The packaged binary defaults `web_dir` to its own bundled client, so a
+`server.toml` that leaves `web_dir` unset serves the PWA from the store path.
+
+Without Nix:
+
 ```sh
 cargo build --release
 ```
 
-The binary is written to `target/release/note-server`.
+The binary is written to `target/release/note-server` and looks for the web
+client under `web/dist` (see "Web client" below).
 
 ## First run
 
@@ -335,6 +347,39 @@ It returns `403 Forbidden` for non-admin users. Membership is not administered
 over HTTP at all; accounts come from `create-user` on the server CLI.
 
 ## Running as a systemd service
+
+From the flake, install the package into your profile and run it as a user
+service (no root needed; enable lingering so it survives logout):
+
+```sh
+nix profile add .#note-server        # later: nix profile upgrade note-server
+```
+
+```ini
+# ~/.config/systemd/user/note.service
+[Unit]
+Description=Note server
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+WorkingDirectory=/home/shuntia/Projects/note
+ExecStart=%h/.nix-profile/bin/note-server
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
+```
+
+```sh
+systemctl --user daemon-reload
+systemctl --user enable --now note
+```
+
+`WorkingDirectory` is where `config/` and `data/` live. The same unit works
+system-wide with a host-built binary:
 
 ```ini
 [Unit]
