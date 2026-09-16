@@ -1,4 +1,5 @@
 pub mod mock;
+pub mod ntfy;
 pub mod webpush;
 pub mod ws;
 
@@ -194,6 +195,35 @@ mod tests {
             .query_row("SELECT detail FROM event_log WHERE kind='delivery_ok'", [], |r| r.get(0))
             .unwrap();
         assert!(detail.contains("second"), "unexpected detail: {detail}");
+    }
+
+    #[test]
+    fn the_walk_names_the_channel_that_delivered() {
+        let (db, _uid) = env();
+        let ws = Arc::new(MockChannel::new("ws"));
+        let webpush = Arc::new(MockChannel::new("webpush"));
+        let ntfy = Arc::new(MockChannel::new("ntfy"));
+        ws.set_fail(true);
+        webpush.set_fail(true);
+        let ladder: Vec<Arc<dyn Channel>> = vec![ws, webpush, ntfy.clone()];
+        let msg = OutboundMessage {
+            title: "Note".into(),
+            body: "Test notification".into(),
+            urgency: Urgency::Normal,
+            event_id: None,
+        };
+        assert_eq!(deliver_via(&db, &ladder, 1, "aki", &msg), Some("ntfy"));
+        assert_eq!(ntfy.seen().len(), 1);
+
+        ntfy.set_fail(true);
+        assert_eq!(deliver_via(&db, &ladder, 1, "aki", &msg), None);
+        let conn = db.lock().unwrap();
+        let detail: String = conn
+            .query_row("SELECT detail FROM event_log WHERE kind='delivery_degraded'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(detail.contains("ntfy"), "unexpected detail: {detail}");
     }
 
     #[test]

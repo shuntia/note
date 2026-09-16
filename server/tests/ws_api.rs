@@ -3,7 +3,9 @@ mod common;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use note_server::channels::mock::MockChannel;
+use note_server::channels::ntfy::NtfyChannel;
 use note_server::channels::webpush::{public_key_b64, WebPushChannel};
+use note_server::config::NtfySettings;
 use note_server::channels::Channel;
 use note_server::{db, AppState};
 use std::sync::Arc;
@@ -59,4 +61,30 @@ fn with_webpush_appends_below_ws_and_sets_the_vapid_key() {
     assert_eq!(state.channels[0].name(), "ws");
     assert_eq!(state.channels[1].name(), "webpush");
     assert_eq!(state.vapid_public_key.as_deref(), Some(key.as_str()));
+}
+
+#[test]
+fn with_ntfy_appends_below_web_push() {
+    let cfg = common::config_dir();
+    let dir = cfg.path().to_path_buf();
+    let state = AppState::new(db::open_memory().unwrap(), dir.clone(), dir.clone());
+    let wp = WebPushChannel::new(
+        state.db.clone(),
+        TEST_PEM.to_vec(),
+        "mailto:admin@example.com".into(),
+    )
+    .unwrap();
+    let settings = NtfySettings {
+        base_url: "http://127.0.0.1:2586".into(),
+        token_file: std::path::PathBuf::new(),
+        topic_prefix: "note-".into(),
+    };
+    let ntfy = NtfyChannel::new(dir, &settings, "http://localhost:3271").unwrap();
+
+    let state = state
+        .with_webpush(wp, public_key_b64(TEST_PEM).unwrap())
+        .with_ntfy(ntfy, settings.topic_prefix.clone());
+    let names: Vec<&str> = state.channels.iter().map(|c| c.name()).collect();
+    assert_eq!(names, ["ws", "webpush", "ntfy"]);
+    assert_eq!(state.ntfy_topic_prefix.as_deref(), Some("note-"));
 }
