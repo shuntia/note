@@ -171,6 +171,7 @@ pub fn spawn(state: crate::AppState) {
                         data_dir: &st.data_dir,
                         llm: st.llm.as_ref(),
                         embeddings: st.embeddings.as_deref(),
+                        task_scope: None,
                     };
                     let r = run_for_user(&deps, user_id, &username, now);
                     (r, username)
@@ -242,6 +243,7 @@ mod tests {
             data_dir: tmp.path(),
             llm,
             embeddings: None,
+            task_scope: None,
         }
     }
 
