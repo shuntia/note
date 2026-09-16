@@ -98,8 +98,9 @@ pub fn create(conn: &Connection, user_id: i64, name: &str) -> Result<Created, Cr
 }
 
 pub fn list(conn: &Connection, user_id: i64) -> rusqlite::Result<Vec<TokenInfo>> {
-    let mut stmt =
-        conn.prepare(&format!("SELECT {COLS} FROM api_tokens WHERE user_id = ?1 ORDER BY id"))?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {COLS} FROM api_tokens WHERE user_id = ?1 ORDER BY id"
+    ))?;
     let rows = stmt.query_map([user_id], row_to_info)?;
     rows.collect()
 }
@@ -153,7 +154,11 @@ pub fn resolve(
             (now.to_string(), token_id),
         )?;
     }
-    Ok(Some(Resolved { token_id, user_id, username }))
+    Ok(Some(Resolved {
+        token_id,
+        user_id,
+        username,
+    }))
 }
 
 #[cfg(test)]
@@ -186,7 +191,11 @@ mod tests {
         assert_eq!(made.info.name, "cli");
         assert!(made.token.starts_with(PREFIX));
         let stored: String = conn
-            .query_row("SELECT token_hash FROM api_tokens WHERE id = ?1", [made.info.id], |r| r.get(0))
+            .query_row(
+                "SELECT token_hash FROM api_tokens WHERE id = ?1",
+                [made.info.id],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(stored, hash_secret(&made.token));
         assert_ne!(stored, made.token);
@@ -201,7 +210,10 @@ mod tests {
     #[test]
     fn name_is_validated_and_count_is_capped() {
         let (conn, uid) = db_with_user();
-        assert!(matches!(create(&conn, uid, "   "), Err(CreateError::InvalidName)));
+        assert!(matches!(
+            create(&conn, uid, "   "),
+            Err(CreateError::InvalidName)
+        ));
         assert!(matches!(
             create(&conn, uid, &"a".repeat(MAX_NAME_LEN + 1)),
             Err(CreateError::InvalidName)
@@ -210,7 +222,10 @@ mod tests {
         for i in 1..MAX_PER_USER {
             create(&conn, uid, &format!("t{i}")).unwrap();
         }
-        assert!(matches!(create(&conn, uid, "one more"), Err(CreateError::TooMany)));
+        assert!(matches!(
+            create(&conn, uid, "one more"),
+            Err(CreateError::TooMany)
+        ));
     }
 
     #[test]
@@ -220,7 +235,11 @@ mod tests {
         let mine = create(&conn, uid, "mine").unwrap();
         let theirs = create(&conn, other, "theirs").unwrap();
 
-        let names: Vec<String> = list(&conn, uid).unwrap().into_iter().map(|t| t.name).collect();
+        let names: Vec<String> = list(&conn, uid)
+            .unwrap()
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
         assert_eq!(names, vec!["mine"]);
 
         assert!(revoke(&conn, uid, theirs.info.id).unwrap().is_none());
@@ -236,7 +255,8 @@ mod tests {
     fn disabled_users_tokens_do_not_resolve() {
         let (conn, uid) = db_with_user();
         let made = create(&conn, uid, "cli").unwrap();
-        conn.execute("UPDATE users SET disabled = 1 WHERE id = ?1", [uid]).unwrap();
+        conn.execute("UPDATE users SET disabled = 1 WHERE id = ?1", [uid])
+            .unwrap();
         assert!(resolve(&conn, &made.token, t0()).unwrap().is_none());
     }
 
@@ -245,8 +265,12 @@ mod tests {
         let (conn, uid) = db_with_user();
         let made = create(&conn, uid, "cli").unwrap();
         let last = |conn: &Connection| -> Option<String> {
-            conn.query_row("SELECT last_used_at FROM api_tokens WHERE id = ?1", [made.info.id], |r| r.get(0))
-                .unwrap()
+            conn.query_row(
+                "SELECT last_used_at FROM api_tokens WHERE id = ?1",
+                [made.info.id],
+                |r| r.get(0),
+            )
+            .unwrap()
         };
         assert!(last(&conn).is_none());
         resolve(&conn, &made.token, t0()).unwrap();
