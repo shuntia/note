@@ -96,6 +96,9 @@ export type Settings = {
   schedule: ScheduleRow[]
   show_arc_between_sessions: boolean
   counter: 'remaining' | 'elapsed'
+  category: 'member' | 'test'
+  nightly_enabled: boolean
+  checkins_enabled: boolean
 }
 
 export type AlertPatch = { index: number; alert: boolean }
@@ -108,6 +111,8 @@ export type SettingsSaved = Pick<
   | 'template'
   | 'show_arc_between_sessions'
   | 'counter'
+  | 'nightly_enabled'
+  | 'checkins_enabled'
 > & { schedule: ScheduleRow[] }
 
 export type PromptName = 'persona' | 'planning'

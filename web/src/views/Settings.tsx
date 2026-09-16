@@ -29,6 +29,8 @@ type Loaded = {
   rows: ScheduleRow[]
   arc: boolean
   counter: CounterMode
+  nightly: boolean
+  checkins: boolean
 }
 type Save = { row: string; kind: 'busy' | 'saved' | 'failed'; message?: string } | null
 
@@ -168,6 +170,8 @@ export function Settings({
           rows: s.schedule,
           arc: s.show_arc_between_sessions,
           counter: s.counter,
+          nightly: s.nightly_enabled,
+          checkins: s.checkins_enabled,
         }),
       )
       .catch(() => setState('error'))
@@ -223,6 +227,24 @@ export function Settings({
           : s,
       )
       writePrefs(prefsFrom(saved))
+      setSave({ row, kind: 'saved' })
+    } catch (err) {
+      setSave({ row, kind: 'failed', message: failure(err) })
+    }
+  }
+
+  const commitFeature = async (
+    row: string,
+    patch: { nightly_enabled?: boolean; checkins_enabled?: boolean },
+  ) => {
+    setSave({ row, kind: 'busy' })
+    try {
+      const saved = await api.saveSettings(patch)
+      setState((s) =>
+        s && s !== 'error'
+          ? { ...s, nightly: saved.nightly_enabled, checkins: saved.checkins_enabled }
+          : s,
+      )
       setSave({ row, kind: 'saved' })
     } catch (err) {
       setSave({ row, kind: 'failed', message: failure(err) })
@@ -348,6 +370,21 @@ export function Settings({
               </div>
             )}
           </FoldRow>
+          <div className="set-row">
+            <span className="set-row-body">
+              <span className="set-label">Nightly plan</span>
+              <span className="set-sub">Plans the day and writes the letter</span>
+            </span>
+            <Status save={save} row="nightly_enabled" />
+            <Switch
+              label="Nightly plan"
+              on={loaded.nightly}
+              disabled={busy}
+              onToggle={() =>
+                void commitFeature('nightly_enabled', { nightly_enabled: !loaded.nightly })
+              }
+            />
+          </div>
           <FoldRow
             label="Nightly letter"
             value={loaded.draft.nightly_time}
@@ -398,6 +435,23 @@ export function Settings({
 
       <Group head="REACH">
         <PushRow notify={notify} />
+        {loaded && (
+          <div className="set-row">
+            <span className="set-row-body">
+              <span className="set-label">Check-ins</span>
+              <span className="set-sub">Routines on the day reach you when they fire</span>
+            </span>
+            <Status save={save} row="checkins_enabled" />
+            <Switch
+              label="Check-ins"
+              on={loaded.checkins}
+              disabled={busy}
+              onToggle={() =>
+                void commitFeature('checkins_enabled', { checkins_enabled: !loaded.checkins })
+              }
+            />
+          </div>
+        )}
         <div className="set-row">
           <span className="set-row-body">
             <span className="set-label">Calls</span>

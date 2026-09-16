@@ -35,6 +35,8 @@ const WRITABLE_SETTINGS = [
   'template',
   'show_arc_between_sessions',
   'counter',
+  'nightly_enabled',
+  'checkins_enabled',
 ] as const
 
 type SettingsPatch = Partial<Pick<Settings, (typeof WRITABLE_SETTINGS)[number]>>
