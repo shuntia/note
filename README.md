@@ -43,7 +43,14 @@ client under `web/dist` (see "Web client" below).
    ```
 
    Further accounts come from the same command, or from the admin panel once
-   its secret is installed (see "Admin panel").
+   its secret is installed (see "Admin panel"). An account that only exercises
+   the API is created with `--test`, which starts it with every background
+   feature off (see "Categories & background features"):
+
+   ```sh
+   cargo run --release -- create-user aitest <password> --test
+   note-server set-category aitest test   # or move an existing account
+   ```
 
 3. Start the server:
 
@@ -64,7 +71,8 @@ config/
   server.toml                       # bind_addr, public_base_url, data_dir, web_dir
   defaults/
     user.toml                       # display_name, timezone, template, nightly_time,
-                                    # show_arc_between_sessions, counter
+                                    # show_arc_between_sessions, counter,
+                                    # nightly_enabled, checkins_enabled
     templates/
       default.toml                  # default event template
   users/
@@ -90,6 +98,7 @@ write, so a hand-edited file and a client-side change are the same thing.
     "display_name": "Aki", "timezone": "Asia/Tokyo",
     "nightly_time": "03:00", "template": "default",
     "show_arc_between_sessions": true, "counter": "remaining",
+    "category": "member", "nightly_enabled": true, "checkins_enabled": true,
     "templates": ["default", "deep-work"],
     "timezones": ["Africa/Abidjan", "…"]
   }
@@ -99,15 +108,33 @@ write, so a hand-edited file and a client-side change are the same thing.
   own `templates/`; `timezones` is the bundled IANA database.
 
 - `PUT /api/settings` takes any subset of `display_name`, `timezone`,
-  `nightly_time`, `template`, `show_arc_between_sessions` and `counter`, and
-  returns the merged settings without the two lists. A rejected field is a
+  `nightly_time`, `template`, `show_arc_between_sessions`, `counter`,
+  `nightly_enabled` and `checkins_enabled`, and returns the merged settings
+  without the two lists. `category` is read-only here — it belongs to the
+  account, not the settings file. A rejected field is a
   `400` whose `{"error": …}` names it and leaves the file untouched:
   `display_name` is trimmed, non-blank and at most 64 characters; `timezone`
   must be an IANA name; `nightly_time` must be a zero-padded 24-hour `HH:MM`;
   `template` must be one of `templates`; `show_arc_between_sessions` is a bool;
-  `counter` must be `remaining` or `elapsed`. The write replaces the user file
-  with all six keys through a temp file and a rename, so a crash mid-write
-  cannot leave a half-written config.
+  `counter` must be `remaining` or `elapsed`; the two feature toggles are
+  bools. The write replaces the user file through a temp file and a rename, so
+  a crash mid-write cannot leave a half-written config. A toggle the user has
+  never set stays out of the file and keeps following its category default.
+
+### Categories & background features
+
+Every account has a `category` beside its role: `member`, or `test` for one
+that exists to exercise the API. The category decides where the two background
+features start — the nightly run (the day's plan and its debrief letter) and
+check-ins (the scheduled events that reach the user). Both spend model tokens
+or attention with nobody asking for them, so a `test` account starts with both
+off and a `member` with both on.
+
+`nightly_enabled` and `checkins_enabled` in `user.toml` override that default
+either way, and the settings API writes them live: a disabled user is skipped
+by the nightly sweep and the delivery sweep without a model call or a log row,
+and switching one back on takes effect on the next sweep. Talk is never gated
+— an account the user is typing to answers whatever its category.
 
 ## Memory & agent tools
 
@@ -125,6 +152,14 @@ Model-facing capabilities are typed tool calls dispatched through a
 per-session-type registry (check-in < talk < nightly). Every call is
 validated, size-capped, and transactional; failures return typed rejections
 to the model and never leave partial state.
+
+Tasks: `task_create`, `task_update` (title, description, state, notes,
+duration, Now), `task_split` into steps, and `task_delete`, which removes a
+task or a single step with its steps and event links exactly as
+`DELETE /api/tasks/{id}` does. Memory: `memory_query`, `memory_read`,
+`memory_write`. The day: `schedule_slide`, `schedule_snooze`, `schedule_drop`,
+`schedule_reshape`, and — nightly only — `schedule_insert` and `notify_send`.
+`context_edit` maintains the standing document.
 
 ### Memory API
 
@@ -339,7 +374,8 @@ browses everything the agent has saved — filter by category or search, and
 open any fact to read it. Settings gathers
 the home screen (`show_arc_between_sessions`, whether the wait draws its arc,
 and `counter`, whether a session reads remaining or elapsed), the day
-(template, which routines ping, nightly debrief time, timezone), your name, a
+(template, which routines ping, whether the nightly run happens at all and
+when, timezone), whether check-ins reach you, your name, a
 System / Light / Dark theme choice, the persona editor (the assistant's system
 prompt, per-user override with reset-to-default), a Web Push toggle (needs the
 `[channels.webpush]` config), and the server log for admin users. Delivered
