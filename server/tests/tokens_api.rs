@@ -350,3 +350,71 @@ async fn bearer_token_can_delete_a_task() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn another_users_token_cannot_touch_my_tasks() {
+    let (app, cookie_a, state, _cfg) = common::app_with_logged_in_user_and_state().await;
+    {
+        let conn = state.db.lock().unwrap();
+        auth::create_user(&conn, "bo", "pw", false).unwrap();
+    }
+    let cookie_b = common::login(&app, "bo", "pw").await;
+    let (_, token_b) = minted(&app, &cookie_b, "bos").await;
+
+    let (status, t) = with_cookie(
+        &app,
+        &cookie_a,
+        Method::POST,
+        "/api/tasks",
+        Some(r#"{"title":"mine"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{t}");
+    let id = t["id"].as_i64().unwrap();
+
+    let (status, _) = with_bearer(
+        &app,
+        &token_b,
+        Method::PATCH,
+        &format!("/api/tasks/{id}"),
+        Some(r#"{"title":"stolen"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = with_bearer(
+        &app,
+        &token_b,
+        Method::POST,
+        &format!("/api/tasks/{id}/split"),
+        Some(r#"{"steps":[{"title":"a","duration_min":5},{"title":"b","duration_min":5}]}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = with_bearer(
+        &app,
+        &token_b,
+        Method::POST,
+        &format!("/api/tasks/{id}/flatten"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = with_bearer(
+        &app,
+        &token_b,
+        Method::DELETE,
+        &format!("/api/tasks/{id}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (status, list) = with_bearer(&app, &token_b, Method::GET, "/api/tasks", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(list.as_array().unwrap().is_empty(), "{list}");
+
+    let (status, list) = with_cookie(&app, &cookie_a, Method::GET, "/api/tasks", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(list.as_array().unwrap().len(), 1, "{list}");
+    assert_eq!(list[0]["title"], "mine");
+}
