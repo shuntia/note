@@ -149,9 +149,10 @@ The standing context document each agent session sees is
 `context_edit` tool, so its history is whatever your config dir's VCS says.
 
 Model-facing capabilities are typed tool calls dispatched through a
-per-session-type registry (check-in < talk < nightly). Every call is
-validated, size-capped, and transactional; failures return typed rejections
-to the model and never leave partial state.
+per-session-type registry (check-in < talk < nightly, with a two-tool import
+surface inside talk's). Every call is validated, size-capped, and
+transactional; failures return typed rejections to the model and never leave
+partial state.
 
 Tasks: `task_create`, `task_update` (title, description, state, notes,
 duration, Now), `task_split` into steps, and `task_delete`, which removes a
@@ -217,11 +218,12 @@ Conversations are managed over `GET /api/conversations`,
 order). Agent behavior lives in editable prompt files
 (`config/defaults/prompts/`, overridable per user under
 `config/users/<user>/prompts/`) — changing tone or policy is a file edit, not
-a deploy. The two editable prompts, `persona` and `planning`, are also served
+a deploy. The editable prompts are also served
 over `GET /api/prompts/{name}` (`{name, content, custom}`, `content` being the
 effective text), `PUT /api/prompts/{name} {content}` (writes the user's
 override), and `DELETE /api/prompts/{name}` (drops it, back to the default);
-any other name is a 404.
+any other name is a 404. A third, `import`, drives the task-briefing route
+(see "Briefing an imported task").
 
 Every night at each user's `nightly_time` (default 03:00, their timezone),
 the server generates the day's plan from their template, lets the agent
@@ -335,6 +337,58 @@ reach the task routes only; every other route still needs the session cookie.
 - `DELETE /api/tasks/{id}` removes the task, its steps, and their event links
   (`204`, or `404` when the task is not the caller's).
 - Minting and revoking log `token_created` / `token_revoked` to `event_log`.
+
+### Briefing an imported task
+
+An importer that mirrors outside work into Note — school assignments, say —
+can hand a task to Note's own agent instead of running a model of its own:
+
+```sh
+curl -X POST http://localhost:3271/api/tasks/42/agent \
+  -H 'Authorization: Bearer note_…' -H 'Content-Type: application/json' \
+  -d '{"context":"Due Friday. Worksheet handed out in class."}'
+```
+
+`context` is optional (`{}` and an empty body mean "no context") and is
+capped at 32 KiB. The reply is the session and its result:
+
+```json
+{
+  "task_id": 42,
+  "outcome": "briefed",
+  "steps": [{ "name": "task_update", "args": "…", "result": "…", "is_error": false }],
+  "task": { "id": 42, "description": "…", "children": [] }
+}
+```
+
+`outcome` is `dropped` when the task ends the session dropped, `unchanged`
+when no tool call of the session succeeded, and `briefed` otherwise. `task` is
+the same shape as one entry of `GET /api/tasks`, steps included. The failures
+are `404` (unknown task, or not the caller's), `409` (the id is a step — only
+top-level tasks are briefed), `422` (context over 32 KiB), `502` (the model is
+unreachable) and `500`; every one of them carries a `{"error": …}` body, and
+`502`/`500` also write a `task_agent_error` row to `event_log`.
+
+The session is scoped: it is a fresh run with no conversation history, nothing
+is kept in the talk conversations, and its only tools are `task_update` and
+`task_split` aimed at that one task and its steps. It cannot move anything into
+Now, and it can drop only a task that is still open — one already `in_progress`
+or `done` is briefed, never dropped. A tool call that breaks those rules comes
+back in `steps` as a rejection and the rest of the session carries on; only a
+failed session rolls back, and then the task, its steps and their event links
+are restored exactly as they were, so the same id can simply be retried.
+
+Field ownership splits cleanly: the agent owns the `description`, the
+`duration_min` (written with `duration_source: "agent"`), the steps and the
+`dropped` state; the caller owns the `title` and the `notes`, which the agent
+is told never to touch. Re-briefing a changed task is safe — existing steps are
+left alone, since the user may already have ticked some off, and the agent
+updates the description and duration only. It says so in the description when
+the new text really invalidates those steps. Call
+`POST /api/tasks/{id}/flatten` first only when you do want the steps regenerated.
+
+What the agent is told lives in `config/defaults/prompts/import.md`, editable
+per user like the other prompts over `GET/PUT/DELETE /api/prompts/import`.
 
 ## Web client
 
