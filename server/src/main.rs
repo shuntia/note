@@ -56,6 +56,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let (secrets, warnings) = admin::AdminSecrets::load(&cfg.secrets_dir);
+    let secrets = secrets.require_totp(cfg.admin.require_totp);
     for w in &warnings {
         eprintln!("warning: {w}");
         let _ = note_server::log::record(&conn, None, "admin_secret_error", w);
@@ -70,8 +71,11 @@ async fn main() -> anyhow::Result<()> {
             eprintln!("{msg}");
             let _ = note_server::log::record(&conn, None, "admin_locked", &msg);
         }
-        admin::TotpMode::PasswordOnly => {
+        admin::TotpMode::PasswordOnly if admin::INSPECT => {
             eprintln!("DEV-INSPECT BUILD: admin elevation is password-only and user data is open; never deploy this binary");
+        }
+        admin::TotpMode::PasswordOnly => {
+            eprintln!("admin elevation is password-only: [admin] require_totp = false in server.toml");
         }
     }
 
