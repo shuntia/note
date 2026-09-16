@@ -9,7 +9,10 @@ use tower::ServiceExt;
 async fn read(res: axum::response::Response) -> (StatusCode, serde_json::Value) {
     let status = res.status();
     let bytes = res.into_body().collect().await.unwrap().to_bytes();
-    (status, serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null))
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+    )
 }
 
 async fn with_cookie(
@@ -19,13 +22,19 @@ async fn with_cookie(
     path: &str,
     body: Option<&str>,
 ) -> (StatusCode, serde_json::Value) {
-    let mut req = Request::builder().method(method).uri(path).header(header::COOKIE, cookie);
+    let mut req = Request::builder()
+        .method(method)
+        .uri(path)
+        .header(header::COOKIE, cookie);
     if body.is_some() {
         req = req.header(header::CONTENT_TYPE, "application/json");
     }
     let res = app
         .clone()
-        .oneshot(req.body(Body::from(body.unwrap_or("").to_string())).unwrap())
+        .oneshot(
+            req.body(Body::from(body.unwrap_or("").to_string()))
+                .unwrap(),
+        )
         .await
         .unwrap();
     read(res).await
@@ -47,21 +56,33 @@ async fn with_bearer(
     }
     let res = app
         .clone()
-        .oneshot(req.body(Body::from(body.unwrap_or("").to_string())).unwrap())
+        .oneshot(
+            req.body(Body::from(body.unwrap_or("").to_string()))
+                .unwrap(),
+        )
         .await
         .unwrap();
     read(res).await
 }
 
 async fn mint(app: &axum::Router, cookie: &str, name: &str) -> (StatusCode, serde_json::Value) {
-    with_cookie(app, cookie, Method::POST, "/api/tokens", Some(&format!(r#"{{"name":"{name}"}}"#)))
-        .await
+    with_cookie(
+        app,
+        cookie,
+        Method::POST,
+        "/api/tokens",
+        Some(&format!(r#"{{"name":"{name}"}}"#)),
+    )
+    .await
 }
 
 async fn minted(app: &axum::Router, cookie: &str, name: &str) -> (i64, String) {
     let (status, v) = mint(app, cookie, name).await;
     assert_eq!(status, StatusCode::OK, "{v}");
-    (v["id"].as_i64().unwrap(), v["token"].as_str().unwrap().to_string())
+    (
+        v["id"].as_i64().unwrap(),
+        v["token"].as_str().unwrap().to_string(),
+    )
 }
 
 #[tokio::test]
@@ -80,19 +101,36 @@ async fn mint_list_revoke_round_trip() {
     assert_eq!(list[0]["id"], id);
     assert!(list[0].get("token").is_none());
 
-    let (status, _) =
-        with_cookie(&app, &cookie, Method::DELETE, &format!("/api/tokens/{id}"), None).await;
+    let (status, _) = with_cookie(
+        &app,
+        &cookie,
+        Method::DELETE,
+        &format!("/api/tokens/{id}"),
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
-    let (status, _) =
-        with_cookie(&app, &cookie, Method::DELETE, &format!("/api/tokens/{id}"), None).await;
+    let (status, _) = with_cookie(
+        &app,
+        &cookie,
+        Method::DELETE,
+        &format!("/api/tokens/{id}"),
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     let (_, list) = with_cookie(&app, &cookie, Method::GET, "/api/tokens", None).await;
     assert!(list.as_array().unwrap().is_empty());
 
     let kinds: Vec<String> = {
         let conn = state.db.lock().unwrap();
-        let mut stmt = conn.prepare("SELECT kind FROM event_log ORDER BY id").unwrap();
-        stmt.query_map([], |r| r.get(0)).unwrap().collect::<Result<_, _>>().unwrap()
+        let mut stmt = conn
+            .prepare("SELECT kind FROM event_log ORDER BY id")
+            .unwrap();
+        stmt.query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
     };
     assert!(kinds.contains(&"token_created".to_string()), "{kinds:?}");
     assert!(kinds.contains(&"token_revoked".to_string()), "{kinds:?}");
@@ -124,8 +162,14 @@ async fn another_users_token_id_is_404() {
     }
     let bo = common::login(&app, "bo", "pw").await;
     let (id, _) = minted(&app, &bo, "bos").await;
-    let (status, _) =
-        with_cookie(&app, &cookie, Method::DELETE, &format!("/api/tokens/{id}"), None).await;
+    let (status, _) = with_cookie(
+        &app,
+        &cookie,
+        Method::DELETE,
+        &format!("/api/tokens/{id}"),
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     let (_, list) = with_cookie(&app, &bo, Method::GET, "/api/tokens", None).await;
     assert_eq!(list.as_array().unwrap().len(), 1);
@@ -144,8 +188,14 @@ async fn bearer_token_reaches_every_task_route() {
     let (app, cookie, _cfg) = common::app_with_logged_in_user().await;
     let (_, token) = minted(&app, &cookie, "cli").await;
 
-    let (status, t) =
-        with_bearer(&app, &token, Method::POST, "/api/tasks", Some(r#"{"title":"via token"}"#)).await;
+    let (status, t) = with_bearer(
+        &app,
+        &token,
+        Method::POST,
+        "/api/tasks",
+        Some(r#"{"title":"via token"}"#),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{t}");
     let id = t["id"].as_i64().unwrap();
 
@@ -173,8 +223,14 @@ async fn bearer_token_reaches_every_task_route() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let (status, _) =
-        with_bearer(&app, &token, Method::POST, &format!("/api/tasks/{id}/flatten"), None).await;
+    let (status, _) = with_bearer(
+        &app,
+        &token,
+        Method::POST,
+        &format!("/api/tasks/{id}/flatten"),
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
 
     let (status, _) = with_cookie(&app, &cookie, Method::GET, "/api/tasks", None).await;
@@ -185,7 +241,12 @@ async fn bearer_token_reaches_every_task_route() {
 async fn bearer_token_is_refused_outside_tasks() {
     let (app, cookie, _cfg) = common::app_with_logged_in_user().await;
     let (_, token) = minted(&app, &cookie, "cli").await;
-    for path in ["/api/me", "/api/settings", "/api/plan/today", "/api/conversations"] {
+    for path in [
+        "/api/me",
+        "/api/settings",
+        "/api/plan/today",
+        "/api/conversations",
+    ] {
         let (status, _) = with_bearer(&app, &token, Method::GET, path, None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "{path}");
     }
@@ -230,7 +291,14 @@ async fn revoked_token_is_401_on_next_use() {
     let (id, token) = minted(&app, &cookie, "cli").await;
     let (status, _) = with_bearer(&app, &token, Method::GET, "/api/tasks", None).await;
     assert_eq!(status, StatusCode::OK);
-    with_cookie(&app, &cookie, Method::DELETE, &format!("/api/tokens/{id}"), None).await;
+    with_cookie(
+        &app,
+        &cookie,
+        Method::DELETE,
+        &format!("/api/tokens/{id}"),
+        None,
+    )
+    .await;
     let (status, _) = with_bearer(&app, &token, Method::GET, "/api/tasks", None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
@@ -254,13 +322,31 @@ async fn token_writes_are_user_actor() {
 async fn bearer_token_can_delete_a_task() {
     let (app, cookie, _cfg) = common::app_with_logged_in_user().await;
     let (_, token) = minted(&app, &cookie, "cli").await;
-    let (_, t) =
-        with_bearer(&app, &token, Method::POST, "/api/tasks", Some(r#"{"title":"gone"}"#)).await;
+    let (_, t) = with_bearer(
+        &app,
+        &token,
+        Method::POST,
+        "/api/tasks",
+        Some(r#"{"title":"gone"}"#),
+    )
+    .await;
     let id = t["id"].as_i64().unwrap();
-    let (status, _) =
-        with_bearer(&app, &token, Method::DELETE, &format!("/api/tasks/{id}"), None).await;
+    let (status, _) = with_bearer(
+        &app,
+        &token,
+        Method::DELETE,
+        &format!("/api/tasks/{id}"),
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
-    let (status, _) =
-        with_bearer(&app, &token, Method::DELETE, &format!("/api/tasks/{id}"), None).await;
+    let (status, _) = with_bearer(
+        &app,
+        &token,
+        Method::DELETE,
+        &format!("/api/tasks/{id}"),
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
