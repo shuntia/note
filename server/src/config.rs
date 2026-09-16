@@ -63,10 +63,27 @@ pub struct WebPushSettings {
     pub subject: String,
 }
 
+pub const DEFAULT_NTFY_TOPIC_PREFIX: &str = "note-";
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct NtfySettings {
+    pub base_url: String,
+    /// Bearer token for an authenticated ntfy server; empty means none.
+    #[serde(default)]
+    pub token_file: PathBuf,
+    #[serde(default = "default_topic_prefix")]
+    pub topic_prefix: String,
+}
+
+fn default_topic_prefix() -> String {
+    DEFAULT_NTFY_TOPIC_PREFIX.into()
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct ChannelsConfig {
     pub webpush: Option<WebPushSettings>,
+    pub ntfy: Option<NtfySettings>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -116,6 +133,8 @@ pub struct UserConfig {
     pub nightly_enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkins_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ntfy_topic: Option<String>,
 }
 
 fn default_nightly_time() -> String {
@@ -138,6 +157,15 @@ impl UserConfig {
         Features {
             nightly: self.nightly_enabled.unwrap_or(default.nightly),
             checkins: self.checkins_enabled.unwrap_or(default.checkins),
+        }
+    }
+
+    /// The user's own topic where they set a non-blank one, else the server's
+    /// prefix and their username.
+    pub fn ntfy_topic_for(&self, prefix: &str, username: &str) -> String {
+        match self.ntfy_topic.as_deref().map(str::trim) {
+            Some(topic) if !topic.is_empty() => topic.to_string(),
+            _ => format!("{prefix}{username}"),
         }
     }
 
