@@ -300,6 +300,56 @@ mod tests {
     }
 
     #[test]
+    fn ntfy_section_parses_with_defaults_and_is_absent_by_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = "bind_addr = \"127.0.0.1:0\"\npublic_base_url = \"http://x\"\ndata_dir = \"data\"\n";
+        write(tmp.path(), "server.toml", base);
+        assert!(ServerConfig::load(tmp.path()).unwrap().channels.ntfy.is_none());
+
+        write(tmp.path(), "server.toml",
+            &format!("{base}[channels.ntfy]\nbase_url = \"http://10.0.0.1:2586\"\n"));
+        let ntfy = ServerConfig::load(tmp.path()).unwrap().channels.ntfy.unwrap();
+        assert_eq!(ntfy.base_url, "http://10.0.0.1:2586");
+        assert_eq!(ntfy.topic_prefix, DEFAULT_NTFY_TOPIC_PREFIX);
+        assert!(ntfy.token_file.as_os_str().is_empty());
+
+        write(tmp.path(), "server.toml", &format!(
+            "{base}[channels.ntfy]\nbase_url = \"http://x:2586\"\ntoken_file = \"/run/secrets/ntfy\"\ntopic_prefix = \"plan-\"\n"));
+        let ntfy = ServerConfig::load(tmp.path()).unwrap().channels.ntfy.unwrap();
+        assert_eq!(ntfy.topic_prefix, "plan-");
+        assert_eq!(ntfy.token_file, PathBuf::from("/run/secrets/ntfy"));
+    }
+
+    #[test]
+    fn ntfy_topic_falls_back_to_the_prefixed_username() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), "defaults/user.toml",
+            "display_name = \"X\"\ntimezone = \"UTC\"\ntemplate = \"default\"\n");
+        let cfg = UserConfig::load(tmp.path(), "aki").unwrap();
+        assert!(cfg.ntfy_topic.is_none());
+        assert_eq!(cfg.ntfy_topic_for("note-", "aki"), "note-aki");
+
+        write(tmp.path(), "users/aki/user.toml", "ntfy_topic = \"my-desk\"\n");
+        let cfg = UserConfig::load(tmp.path(), "aki").unwrap();
+        assert_eq!(cfg.ntfy_topic_for("note-", "aki"), "my-desk");
+
+        write(tmp.path(), "users/aki/user.toml", "ntfy_topic = \"\"\n");
+        let cfg = UserConfig::load(tmp.path(), "aki").unwrap();
+        assert_eq!(cfg.ntfy_topic_for("note-", "aki"), "note-aki");
+    }
+
+    #[test]
+    fn an_unset_ntfy_topic_stays_out_of_the_saved_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), "defaults/user.toml",
+            "display_name = \"X\"\ntimezone = \"UTC\"\ntemplate = \"default\"\n");
+        let cfg = UserConfig::load(tmp.path(), "aki").unwrap();
+        cfg.save(tmp.path(), "aki").unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join("users/aki/user.toml")).unwrap();
+        assert!(!raw.contains("ntfy_topic"), "unexpected file: {raw}");
+    }
+
+    #[test]
     fn providers_section_parses() {
         let tmp = tempfile::tempdir().unwrap();
         write(tmp.path(), "server.toml", concat!(
