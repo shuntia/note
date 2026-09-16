@@ -231,8 +231,8 @@ fn log_brief_error(state: &AppState, user_id: i64, detail: &str) {
 fn brief_message(node: &crate::tasks::TaskNode, context: &str) -> String {
     let t = &node.task;
     let mut m = format!(
-        "Title: {}\nState: {}\nDescription: {}\nNotes: {}\n",
-        t.title, t.state, t.description, t.notes
+        "Task id: {}\nTitle: {}\nState: {}\nDescription: {}\nNotes: {}\n",
+        t.id, t.title, t.state, t.description, t.notes
     );
     if !node.children.is_empty() {
         m.push_str("Steps:\n");
