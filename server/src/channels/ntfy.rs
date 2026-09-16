@@ -1,3 +1,104 @@
+use super::{Channel, OutboundMessage, Urgency};
+use crate::config::{NtfySettings, UserConfig};
+use anyhow::{Context, Result};
+use std::path::PathBuf;
+
+const MAX_TOPIC: usize = 64;
+
+/// ntfy addresses a topic by URL path, so the name is restricted to what stays
+/// unambiguous there.
+pub fn valid_topic(topic: &str) -> bool {
+    !topic.is_empty()
+        && topic.len() <= MAX_TOPIC
+        && topic.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// ntfy's 1-5 priority scale, where 4 and 5 are the ones that break through a
+/// quiet phone.
+fn priority(urgency: Urgency) -> &'static str {
+    match urgency {
+        Urgency::Low => "2",
+        Urgency::Normal => "3",
+        Urgency::High => "5",
+    }
+}
+
+pub struct NtfyChannel {
+    config_dir: PathBuf,
+    base_url: String,
+    topic_prefix: String,
+    token: Option<String>,
+    click_url: String,
+    agent: ureq::Agent,
+}
+
+impl NtfyChannel {
+    /// A configured `token_file` that is unreadable or blank fails here rather
+    /// than at the first delivery.
+    pub fn new(config_dir: PathBuf, cfg: &NtfySettings, public_base_url: &str) -> Result<Self> {
+        anyhow::ensure!(!cfg.base_url.is_empty(), "ntfy channel requires base_url");
+        let token = if cfg.token_file.as_os_str().is_empty() {
+            None
+        } else {
+            let token = std::fs::read_to_string(&cfg.token_file)
+                .with_context(|| format!("reading ntfy token file {}", cfg.token_file.display()))?
+                .trim()
+                .to_string();
+            anyhow::ensure!(
+                !token.is_empty(),
+                "ntfy token file {} is empty",
+                cfg.token_file.display()
+            );
+            Some(token)
+        };
+        let agent = ureq::AgentBuilder::new()
+            .timeout_connect(std::time::Duration::from_secs(5))
+            .timeout(std::time::Duration::from_secs(10))
+            .build();
+        Ok(Self {
+            config_dir,
+            base_url: cfg.base_url.trim_end_matches('/').to_string(),
+            topic_prefix: cfg.topic_prefix.clone(),
+            token,
+            click_url: public_base_url.to_string(),
+            agent,
+        })
+    }
+
+    /// A user config that will not load leaves the default topic, so a broken
+    /// file costs the topic override and not the delivery.
+    fn topic(&self, username: &str) -> String {
+        UserConfig::load(&self.config_dir, username)
+            .map(|cfg| cfg.ntfy_topic_for(&self.topic_prefix, username))
+            .unwrap_or_else(|_| format!("{}{username}", self.topic_prefix))
+    }
+}
+
+impl Channel for NtfyChannel {
+    fn name(&self) -> &'static str {
+        "ntfy"
+    }
+
+    fn deliver(&self, _user_id: i64, username: &str, msg: &OutboundMessage) -> Result<()> {
+        let url = format!("{}/{}", self.base_url, self.topic(username));
+        let mut req = self
+            .agent
+            .post(&url)
+            .set("Title", &msg.title)
+            .set("Priority", priority(msg.urgency))
+            .set("Tags", "bell")
+            .set("Click", &self.click_url);
+        if let Some(token) = &self.token {
+            req = req.set("Authorization", &format!("Bearer {token}"));
+        }
+        match req.send_string(&msg.body) {
+            Ok(_) => Ok(()),
+            Err(ureq::Error::Status(code, _)) => anyhow::bail!("status {code}"),
+            Err(ureq::Error::Transport(t)) => anyhow::bail!("transport error: {}", t.kind()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
