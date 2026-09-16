@@ -40,3 +40,12 @@ api_key_file = "config/nvidianim.key"
 # [channels.webpush]
 # vapid_pem_file = "config/vapid.pem"
 # subject = "mailto:admin@example.com"
+
+# ntfy reaches desktop and phone clients over plain HTTP, so it works where a
+# browser refuses to register a service worker for Web Push. Each user's topic
+# is ntfy_topic in their user.toml, or topic_prefix + their username.
+#
+# [channels.ntfy]
+# base_url = "http://127.0.0.1:2586"
+# token_file = "config/ntfy.token"   # only for an ntfy server that needs auth
+# topic_prefix = "note-"
