@@ -12,6 +12,8 @@ import type {
   PromptName,
   ScheduleRow,
   Settings as UserSettings,
+  Token,
+  TokenCreated,
 } from '../types'
 
 type Notify = (msg: string, action?: ToastAction) => void
@@ -457,6 +459,12 @@ export function Settings({
         </FoldRow>
       </Group>
 
+      <Group head="API TOKENS">
+        <FoldRow label="Tokens" open={open === 'tokens'} onToggle={fold('tokens')}>
+          {open === 'tokens' && <TokensSection notify={notify} />}
+        </FoldRow>
+      </Group>
+
       {me.admin && (
         <Group head="ADMIN">
           <button className="set-row set-open" onClick={openAdmin}>
@@ -688,6 +696,116 @@ function PersonaSection({ active, notify }: { active: boolean; notify: Notify })
         {!dirty && <Status save={save} row="prompt" />}
       </div>
     </form>
+  )
+}
+
+function dayOf(iso: string): string {
+  return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+}
+
+function TokensSection({ notify }: { notify: Notify }) {
+  const [tokens, setTokens] = useState<Token[] | 'error' | undefined>(undefined)
+  const [name, setName] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [fresh, setFresh] = useState<TokenCreated | null>(null)
+  // Revoke is two taps: the first arms the row, the second removes it.
+  const [arming, setArming] = useState<number | null>(null)
+
+  useEffect(() => {
+    api
+      .tokens()
+      .then(setTokens)
+      .catch(() => setTokens('error'))
+  }, [])
+
+  const create = async (e: FormEvent) => {
+    e.preventDefault()
+    const trimmed = name.trim()
+    if (!trimmed || busy) return
+    setBusy(true)
+    try {
+      const made = await api.createToken(trimmed)
+      const info: Token = {
+        id: made.id,
+        name: made.name,
+        created_at: made.created_at,
+        last_used_at: made.last_used_at,
+      }
+      setFresh(made)
+      setName('')
+      setTokens((all) => (Array.isArray(all) ? [...all, info] : all))
+    } catch (err) {
+      notify(
+        err instanceof ApiError && (err.status === 409 || err.status === 422)
+          ? err.message
+          : "That token wasn't created. Try again.",
+      )
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const revoke = async (t: Token) => {
+    if (arming !== t.id) {
+      setArming(t.id)
+      return
+    }
+    setArming(null)
+    try {
+      await api.revokeToken(t.id)
+      setTokens((all) => (Array.isArray(all) ? all.filter((x) => x.id !== t.id) : all))
+      if (fresh?.id === t.id) setFresh(null)
+    } catch {
+      notify("That token wasn't revoked. Try again.")
+    }
+  }
+
+  return (
+    <div className="set-fold-body">
+      <form className="set-token-form" onSubmit={(e) => void create(e)}>
+        <input
+          aria-label="Token name"
+          placeholder="Name this token"
+          maxLength={64}
+          spellCheck={false}
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+        />
+        <button type="submit" className="btn-haze small" disabled={busy || !name.trim()}>
+          Create
+        </button>
+      </form>
+      {fresh && (
+        <div className="set-token-fresh">
+          <code className="set-token-secret">{fresh.token}</code>
+          <span className="set-sub">Copy it now. It won't be shown again.</span>
+        </div>
+      )}
+      {tokens === 'error' && <span className="set-sub">Tokens didn't load.</span>}
+      {Array.isArray(tokens) && tokens.length === 0 && (
+        <span className="set-sub">No tokens yet.</span>
+      )}
+      {Array.isArray(tokens) &&
+        tokens.map((t) => (
+          <div className="set-row set-token-row" key={t.id}>
+            <span className="set-row-body">
+              <span className="set-label">{t.name}</span>
+              <span className="set-sub">
+                Created {dayOf(t.created_at)} ·{' '}
+                {t.last_used_at ? `used ${dayOf(t.last_used_at)}` : 'never used'}
+              </span>
+            </span>
+            <button
+              type="button"
+              className="btn-haze small"
+              onClick={() => void revoke(t)}
+              onBlur={() => setArming((a) => (a === t.id ? null : a))}
+            >
+              {arming === t.id ? 'Really revoke?' : 'Revoke'}
+            </button>
+          </div>
+        ))}
+    </div>
   )
 }
 

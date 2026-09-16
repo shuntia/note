@@ -24,6 +24,8 @@ import type {
   TaskNode,
   TaskState,
   TaskUpdate,
+  Token,
+  TokenCreated,
 } from './types'
 
 const WRITABLE_SETTINGS = [
@@ -127,6 +129,10 @@ export const api = {
     }),
   flattenTask: (id: number) =>
     request<FlattenResult>(`/api/tasks/${id}/flatten`, { method: 'POST' }),
+  tokens: () => request<Token[]>('/api/tokens'),
+  createToken: (name: string) =>
+    request<TokenCreated>('/api/tokens', { method: 'POST', body: JSON.stringify({ name }) }),
+  revokeToken: (id: number) => request<void>(`/api/tokens/${id}`, { method: 'DELETE' }),
   conversations: () => request<Conversation[]>('/api/conversations'),
   renameConversation: (id: number, title: string) =>
     request<void>(`/api/conversations/${id}`, {
