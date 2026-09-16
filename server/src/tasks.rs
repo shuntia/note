@@ -375,6 +375,24 @@ pub fn flatten(
     Ok(Some((n, removed)))
 }
 
+/// Removes the task, its steps, and every event link to them. `false` when the
+/// task is not this user's.
+pub fn delete(conn: &Connection, user_id: i64, task_id: i64) -> rusqlite::Result<bool> {
+    let tx = conn.unchecked_transaction()?;
+    if get(&tx, user_id, task_id)?.is_none() {
+        return Ok(false);
+    }
+    tx.execute(
+        "DELETE FROM event_tasks
+         WHERE task_id = ?1 OR task_id IN (SELECT id FROM tasks WHERE parent_id = ?1)",
+        [task_id],
+    )?;
+    tx.execute("DELETE FROM tasks WHERE parent_id = ?1", [task_id])?;
+    tx.execute("DELETE FROM tasks WHERE id = ?1", [task_id])?;
+    tx.commit()?;
+    Ok(true)
+}
+
 /// A patched task, plus its parent when finishing or reopening this step also
 /// moved the parent, so the client needs no second round trip.
 #[derive(Debug, Serialize)]
@@ -515,4 +533,75 @@ pub fn update(
     let demoted_from_now = trim_now(conn, user_id, task_id)?;
     let task = get(conn, user_id, task_id)?.expect("row was just updated");
     Ok(Some(Updated { task, parent, demoted_from_now }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn db_with_user() -> (Connection, i64) {
+        let conn = crate::db::open_memory().unwrap();
+        let id = crate::auth::create_user(&conn, "aki", "pw", false).unwrap();
+        (conn, id)
+    }
+
+    fn task(conn: &Connection, uid: i64, title: &str, parent: Option<i64>) -> i64 {
+        create(
+            conn,
+            uid,
+            NewTask { title: title.into(), parent_id: parent, ..NewTask::default() },
+            "manual",
+            Actor::User,
+        )
+        .unwrap()
+        .id
+    }
+
+    fn count(conn: &Connection, sql: &str) -> i64 {
+        conn.query_row(sql, [], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn delete_removes_a_leaf() {
+        let (conn, uid) = db_with_user();
+        let id = task(&conn, uid, "solo", None);
+        assert!(delete(&conn, uid, id).unwrap());
+        assert!(get(&conn, uid, id).unwrap().is_none());
+        assert!(!delete(&conn, uid, id).unwrap());
+    }
+
+    #[test]
+    fn delete_removes_a_parent_with_its_steps_and_event_links() {
+        let (conn, uid) = db_with_user();
+        let parent = task(&conn, uid, "parent", None);
+        let step = task(&conn, uid, "step", Some(parent));
+        let other = task(&conn, uid, "other", None);
+        conn.execute(
+            "INSERT INTO plans (user_id, date, created_at) VALUES (?1, '2026-09-15', 'x')",
+            [uid],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO events (plan_id, kind, wall_time) VALUES (1, 'checkin', '09:00')",
+            [],
+        )
+        .unwrap();
+        for t in [parent, step, other] {
+            conn.execute("INSERT INTO event_tasks (event_id, task_id) VALUES (1, ?1)", [t])
+                .unwrap();
+        }
+        assert!(delete(&conn, uid, parent).unwrap());
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM tasks"), 1);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM event_tasks"), 1);
+        assert!(get(&conn, uid, other).unwrap().is_some());
+    }
+
+    #[test]
+    fn delete_ignores_another_users_task() {
+        let (conn, uid) = db_with_user();
+        let bo = crate::auth::create_user(&conn, "bo", "pw", false).unwrap();
+        let theirs = task(&conn, bo, "theirs", None);
+        assert!(!delete(&conn, uid, theirs).unwrap());
+        assert!(get(&conn, bo, theirs).unwrap().is_some());
+    }
 }
