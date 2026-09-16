@@ -36,6 +36,16 @@ export type Task = {
 // A top-level task with its steps; the list never nests deeper than this.
 export type TaskNode = Task & { children: Task[] }
 
+export type Token = {
+  id: number
+  name: string
+  created_at: string
+  last_used_at: string | null
+}
+
+// The secret is present only in the create response.
+export type TokenCreated = Token & { token: string }
+
 // `parent` arrives when finishing or reopening cascaded to it; `demoted_from_now`
 // when the write pushed other tasks out of Now, newest first.
 export type TaskUpdate = Task & { parent?: Task; demoted_from_now?: number[] }

@@ -897,6 +897,11 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 .set-prompt { resize: vertical; font-size: 0.8rem; line-height: 1.6; }
 .set-acts { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
 .btn-haze.small { padding: 9px 18px; font-size: 0.9375rem; }
+.set-token-form { display: flex; align-items: center; gap: 10px; width: 100%; }
+.set-token-form input { flex: 1; min-width: 0; }
+.set-token-fresh { display: flex; flex-direction: column; gap: 4px; width: 100%; }
+.set-token-secret { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85rem; word-break: break-all; user-select: all; color: var(--ink); }
+.set-token-row { width: 100%; min-height: 48px; }
 
 /* the day's shape entry by entry: when each one lands, what it is, and whether it
    may reach for your attention */
