@@ -15,7 +15,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/logout", post(logout))
         .route("/api/me", get(me))
         .route("/api/tasks", get(tasks_list).post(tasks_create))
-        .route("/api/tasks/{id}", patch(tasks_update))
+        .route("/api/tasks/{id}", patch(tasks_update).delete(tasks_delete))
         .route("/api/tasks/{id}/split", post(task_split))
         .route("/api/tasks/{id}/flatten", post(task_flatten))
         .route("/api/tokens", get(tokens_list).post(tokens_create))
@@ -192,6 +192,19 @@ async fn task_flatten(
         }
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(e) => task_error(e),
+    }
+}
+
+async fn tasks_delete(
+    user: TaskPrincipal,
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    let conn = state.db.lock().unwrap();
+    match crate::tasks::delete(&conn, user.id, id) {
+        Ok(true) => StatusCode::NO_CONTENT,
+        Ok(false) => StatusCode::NOT_FOUND,
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
 

@@ -535,3 +535,40 @@ async fn patch_by_non_owner_is_404() {
 
     assert_eq!(owned_body, missing_body);
 }
+
+#[tokio::test]
+async fn delete_removes_task_and_steps_and_404s_after() {
+    let (app, cookie, _tmp) = app_with_user().await;
+    let (_, parent) = post(&app, &cookie, "/api/tasks", r#"{"title":"parent"}"#).await;
+    let pid = parent["id"].as_i64().unwrap();
+    post(&app, &cookie, "/api/tasks", &format!(r#"{{"title":"step","parent_id":{pid}}}"#)).await;
+    post(&app, &cookie, "/api/tasks", r#"{"title":"other"}"#).await;
+
+    let res = app
+        .clone()
+        .oneshot(
+            Request::delete(format!("/api/tasks/{pid}"))
+                .header(header::COOKIE, cookie.as_str())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    let all = list(&app, &cookie).await;
+    assert_eq!(all.as_array().unwrap().len(), 1);
+    assert_eq!(all[0]["title"], "other");
+
+    let res = app
+        .clone()
+        .oneshot(
+            Request::delete(format!("/api/tasks/{pid}"))
+                .header(header::COOKIE, cookie.as_str())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}

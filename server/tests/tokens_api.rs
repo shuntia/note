@@ -249,3 +249,18 @@ async fn token_writes_are_user_actor() {
     .await;
     assert_eq!(t["duration_source"], "user");
 }
+
+#[tokio::test]
+async fn bearer_token_can_delete_a_task() {
+    let (app, cookie, _cfg) = common::app_with_logged_in_user().await;
+    let (_, token) = minted(&app, &cookie, "cli").await;
+    let (_, t) =
+        with_bearer(&app, &token, Method::POST, "/api/tasks", Some(r#"{"title":"gone"}"#)).await;
+    let id = t["id"].as_i64().unwrap();
+    let (status, _) =
+        with_bearer(&app, &token, Method::DELETE, &format!("/api/tasks/{id}"), None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) =
+        with_bearer(&app, &token, Method::DELETE, &format!("/api/tasks/{id}"), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
