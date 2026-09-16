@@ -66,9 +66,46 @@ pub fn render(conn: &Connection, ev: &crate::runner::FiredEvent) -> OutboundMess
     OutboundMessage { title, body, urgency, event_id: Some(ev.event_id) }
 }
 
-/// Walks the ladder until one channel delivers; every outcome is logged and
-/// none propagates — a failed delivery is a plainer day, never an error. The
-/// DB guard is never held across a channel's `deliver`.
+/// Walks the ladder until one channel delivers, returning its name; every
+/// outcome is logged and none propagates — a failed delivery is a plainer day,
+/// never an error. The DB guard is never held across a channel's `deliver`.
+pub fn deliver_via(
+    db: &Mutex<Connection>,
+    ladder: &[Arc<dyn Channel>],
+    user_id: i64,
+    username: &str,
+    msg: &OutboundMessage,
+) -> Option<&'static str> {
+    let subject = match msg.event_id {
+        Some(id) => format!("event {id}"),
+        None => "test".to_string(),
+    };
+    let mut errors: Vec<String> = Vec::new();
+    for ch in ladder {
+        match ch.deliver(user_id, username, msg) {
+            Ok(()) => {
+                let conn = db.lock().unwrap();
+                let _ = crate::log::record(
+                    &conn,
+                    Some(user_id),
+                    "delivery_ok",
+                    &format!("{subject} via {}", ch.name()),
+                );
+                return Some(ch.name());
+            }
+            Err(e) => errors.push(format!("{}: {e}", ch.name())),
+        }
+    }
+    let detail = if errors.is_empty() {
+        format!("{subject}: no channels configured")
+    } else {
+        format!("{subject}: {}", errors.join("; "))
+    };
+    let conn = db.lock().unwrap();
+    let _ = crate::log::record(&conn, Some(user_id), "delivery_degraded", &detail);
+    None
+}
+
 pub fn deliver_event(
     db: &Mutex<Connection>,
     ladder: &[Arc<dyn Channel>],
@@ -86,29 +123,7 @@ pub fn deliver_event(
         }
         render(&conn, ev)
     };
-    let mut errors: Vec<String> = Vec::new();
-    for ch in ladder {
-        match ch.deliver(ev.user_id, &ev.username, &msg) {
-            Ok(()) => {
-                let conn = db.lock().unwrap();
-                let _ = crate::log::record(
-                    &conn,
-                    Some(ev.user_id),
-                    "delivery_ok",
-                    &format!("event {} via {}", ev.event_id, ch.name()),
-                );
-                return;
-            }
-            Err(e) => errors.push(format!("{}: {e}", ch.name())),
-        }
-    }
-    let detail = if errors.is_empty() {
-        format!("event {}: no channels configured", ev.event_id)
-    } else {
-        format!("event {}: {}", ev.event_id, errors.join("; "))
-    };
-    let conn = db.lock().unwrap();
-    let _ = crate::log::record(&conn, Some(ev.user_id), "delivery_degraded", &detail);
+    deliver_via(db, ladder, ev.user_id, &ev.username, &msg);
 }
 
 #[cfg(test)]
