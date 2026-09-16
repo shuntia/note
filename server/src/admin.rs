@@ -17,14 +17,27 @@ const COOKIE: &str = "admin";
 const LOG_LIMIT_DEFAULT: i64 = 100;
 const LOG_LIMIT_MAX: i64 = 500;
 
-#[derive(Default)]
 pub struct AdminSecrets {
     pub totp_seed: Option<Vec<u8>>,
+    require_totp: bool,
+}
+
+impl Default for AdminSecrets {
+    fn default() -> Self {
+        Self { totp_seed: None, require_totp: true }
+    }
 }
 
 impl AdminSecrets {
     pub fn with_seed(seed: Vec<u8>) -> Self {
-        Self { totp_seed: Some(seed) }
+        Self { totp_seed: Some(seed), ..Self::default() }
+    }
+
+    /// `false` is the operator's opt-out: elevation re-asks for the account
+    /// password alone and the seed is never consulted.
+    pub fn require_totp(mut self, require: bool) -> Self {
+        self.require_totp = require;
+        self
     }
 
     /// A missing file is the normal "not installed yet" state; anything else
@@ -46,14 +59,15 @@ impl AdminSecrets {
                 None
             }
         };
-        (Self { totp_seed }, warnings)
+        (Self { totp_seed, ..Self::default() }, warnings)
     }
 
     pub fn totp_mode(&self) -> TotpMode {
-        match (&self.totp_seed, INSPECT) {
-            (Some(_), _) => TotpMode::Required,
-            (None, true) => TotpMode::PasswordOnly,
-            (None, false) => TotpMode::Missing,
+        match (self.require_totp, &self.totp_seed, INSPECT) {
+            (false, _, _) => TotpMode::PasswordOnly,
+            (true, Some(_), _) => TotpMode::Required,
+            (true, None, true) => TotpMode::PasswordOnly,
+            (true, None, false) => TotpMode::Missing,
         }
     }
 }

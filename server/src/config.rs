@@ -15,6 +15,8 @@ pub struct ServerConfig {
     pub providers: ProvidersConfig,
     #[serde(default)]
     pub channels: ChannelsConfig,
+    #[serde(default)]
+    pub admin: AdminConfig,
 }
 
 /// `NOTE_DEFAULT_WEB_DIR` at build time bakes in an install-specific location
@@ -65,6 +67,18 @@ pub struct WebPushSettings {
 #[serde(default)]
 pub struct ChannelsConfig {
     pub webpush: Option<WebPushSettings>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct AdminConfig {
+    pub require_totp: bool,
+}
+
+impl Default for AdminConfig {
+    fn default() -> Self {
+        Self { require_totp: true }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
