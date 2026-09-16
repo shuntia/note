@@ -721,7 +721,7 @@ function TokensSection({ notify }: { notify: Notify }) {
   const create = async (e: FormEvent) => {
     e.preventDefault()
     const trimmed = name.trim()
-    if (!trimmed || busy) return
+    if (!trimmed || busy || !Array.isArray(tokens)) return
     setBusy(true)
     try {
       const made = await api.createToken(trimmed)
@@ -771,7 +771,11 @@ function TokensSection({ notify }: { notify: Notify }) {
           value={name}
           onChange={(e) => setName(e.target.value)}
         />
-        <button type="submit" className="btn-haze small" disabled={busy || !name.trim()}>
+        <button
+          type="submit"
+          className="btn-haze small"
+          disabled={busy || !name.trim() || !Array.isArray(tokens)}
+        >
           Create
         </button>
       </form>
