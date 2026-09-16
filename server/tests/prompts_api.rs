@@ -44,6 +44,22 @@ async fn prompts_routes_get_put_delete() {
     let v = json(app.clone().oneshot(get("/api/prompts/planning", &cookie)).await.unwrap()).await;
     assert_eq!(v["content"], "plan the day");
 
+    let v = json(app.clone().oneshot(get("/api/prompts/import", &cookie)).await.unwrap()).await;
+    assert_eq!(v["name"], "import");
+    assert_eq!(v["content"], "brief the assignment");
+    assert_eq!(v["custom"], false);
+
+    let res = app
+        .clone()
+        .oneshot(put("/api/prompts/import", &cookie, r#"{"content":"brief it in French"}"#.to_string()))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(json(res).await["custom"], true);
+    let res = app.clone().oneshot(delete("/api/prompts/import", &cookie)).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(json(res).await["content"], "brief the assignment");
+
     let res = app
         .clone()
         .oneshot(put(
