@@ -370,7 +370,8 @@ Every `/api/admin/*` route needs, in order:
 
 1. an admin-role session (`403` otherwise);
 2. an *admin grant*: the panel asks for the password again plus a 6-digit TOTP
-   code, and the server answers with a second cookie
+   code (the password alone under `require_totp = false`), and the server
+   answers with a second cookie
    (`admin=…; Path=/api/admin; HttpOnly; SameSite=Strict`, `Secure` on HTTPS)
    valid 15 minutes, bound to that session, and deleted with it. Every route
    except `gate`, `elevate` and `drop` answers `401` without a live grant;
@@ -395,6 +396,21 @@ Until the file exists, a release server keeps the panel locked: the gate
 reports `totp: "missing"` and elevation answers `503`. Startup writes an
 `admin_locked` row so the state is visible in the log.
 
+### Password-only elevation
+
+An operator who does not want a second factor opts out in `server.toml`:
+
+```toml
+[admin]
+require_totp = false
+```
+
+Elevation then re-asks for the account password alone — same grant cookie,
+same 15 minutes, same limiter and audit rows — and the seed is ignored, installed
+or not. The gate reports `totp: "password_only"` and the panel drops the code
+field. The default is `true`: without the section, a missing seed keeps the panel
+locked as above.
+
 ### Dev builds
 
 ```sh
@@ -413,7 +429,7 @@ server's gate reports `inspect: true`.
 
 | Route | Needs | Effect |
 |---|---|---|
-| `GET /api/admin/gate` | role | `{elevated, expires_at?, totp, inspect}` |
+| `GET /api/admin/gate` | role | `{elevated, expires_at?, totp, inspect}`; `totp` is `required`, `password_only` or `missing` |
 | `POST /api/admin/elevate` `{password, code?}` | role | sets the grant cookie |
 | `POST /api/admin/drop` | role | ends the grant |
 | `GET /api/admin/status` | grant | version, build, uptime, DB size, counts, providers |
