@@ -13,6 +13,8 @@ pub struct SessionDeps<'a> {
     pub data_dir: &'a Path,
     pub llm: &'a dyn LLMProvider,
     pub embeddings: Option<&'a dyn EmbeddingsProvider>,
+    /// Confines the session's task tools to one task and its steps.
+    pub task_scope: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -45,12 +47,18 @@ pub fn run_session(
     history: &[Message],
     opening: &str,
 ) -> Result<SessionOutcome> {
-    let mut system = crate::prompts::load(deps.config_dir, username, "persona")?;
+    // An import session briefs one task on an importer's behalf: it gets its own
+    // instructions and none of the user's standing context.
+    let mut system = if kind == SessionKind::Import {
+        crate::prompts::load(deps.config_dir, username, "import")?
+    } else {
+        crate::prompts::load(deps.config_dir, username, "persona")?
+    };
     if kind == SessionKind::Nightly {
         system.push_str("\n\n");
         system.push_str(&crate::prompts::load(deps.config_dir, username, "planning")?);
     }
-    {
+    if kind != SessionKind::Import {
         let conn = deps.db.lock().unwrap();
         let context = crate::context::assemble(&conn, deps.config_dir, user_id, username, now)?;
         system.push_str("\n\n");
@@ -88,6 +96,7 @@ pub fn run_session(
                     user_id,
                     username,
                     vectors,
+                    task_scope: deps.task_scope,
                 };
                 match tools::dispatch(&conn, &ctx, kind, &call.name, &call.args) {
                     Ok(v) => (v.to_string(), false),
@@ -163,7 +172,7 @@ mod tests {
         tmp: &'a tempfile::TempDir,
         llm: &'a MockLLM,
     ) -> SessionDeps<'a> {
-        SessionDeps { db, config_dir: tmp.path(), data_dir: tmp.path(), llm, embeddings: None }
+        SessionDeps { db, config_dir: tmp.path(), data_dir: tmp.path(), llm, embeddings: None, task_scope: None }
     }
 
     fn now() -> jiff::Timestamp {
@@ -338,6 +347,7 @@ mod tests {
             data_dir: tmp.path(),
             llm: &llm,
             embeddings: None,
+            task_scope: None,
         };
         assert!(run_session(&d, 1, "aki", SessionKind::Talk, now(), &[], "hi").is_err());
     }

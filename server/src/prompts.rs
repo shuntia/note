@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 /// The prompts a user may override through the API; callers must check a
 /// caller-supplied name against this list before it reaches the filesystem.
-pub const EDITABLE: [&str; 2] = ["persona", "planning"];
+pub const EDITABLE: [&str; 3] = ["persona", "planning", "import"];
 
 fn override_path(config_dir: &Path, user: &str, name: &str) -> PathBuf {
     config_dir.join("users").join(user).join("prompts").join(format!("{name}.md"))

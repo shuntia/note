@@ -17,6 +17,33 @@ fn checked_title(title: &str) -> Result<&str, ToolError> {
     Ok(title)
 }
 
+/// In a scoped session the model may only reach the scoped task itself, and —
+/// when `steps_too` — its steps. Unscoped sessions reach everything.
+fn in_scope(
+    conn: &Connection,
+    ctx: &ToolCtx,
+    task_id: i64,
+    steps_too: bool,
+) -> Result<(), ToolError> {
+    let Some(scope) = ctx.task_scope else { return Ok(()) };
+    if task_id == scope {
+        return Ok(());
+    }
+    let parent = steps_too
+        .then(|| crate::tasks::get(conn, ctx.user_id, task_id))
+        .transpose()
+        .map_err(|e| ToolError::internal(e.to_string()))?
+        .flatten()
+        .and_then(|t| t.parent_id);
+    if parent == Some(scope) {
+        return Ok(());
+    }
+    Err(ToolError::rejected(format!(
+        "this session may only change task {scope}{}",
+        if steps_too { " and its steps" } else { "" }
+    )))
+}
+
 fn task_error(e: UpdateError) -> ToolError {
     match e {
         UpdateError::InvalidState(s) => ToolError::rejected(format!("invalid state: {s}")),
@@ -96,6 +123,23 @@ pub fn update(
     ctx: &ToolCtx,
     args: UpdateArgs,
 ) -> Result<serde_json::Value, ToolError> {
+    in_scope(conn, ctx, args.task_id, true)?;
+    if let Some(scope) = ctx.task_scope {
+        if args.is_now.is_some() {
+            return Err(ToolError::rejected("this session cannot move a task in or out of Now"));
+        }
+        if args.state.as_deref() == Some("dropped") {
+            let state = crate::tasks::get(conn, ctx.user_id, scope)
+                .map_err(|e| ToolError::internal(e.to_string()))?
+                .map(|t| t.state)
+                .unwrap_or_default();
+            if state == "in_progress" || state == "done" {
+                return Err(ToolError::rejected(format!(
+                    "task {scope} is already {state}; only an open task can be dropped"
+                )));
+            }
+        }
+    }
     let title = match &args.title {
         Some(t) => Some(checked_title(t)?.to_owned()),
         None => None,
@@ -159,6 +203,7 @@ pub fn split(
     ctx: &ToolCtx,
     args: SplitArgs,
 ) -> Result<serde_json::Value, ToolError> {
+    in_scope(conn, ctx, args.task_id, false)?;
     for s in &args.steps {
         checked_title(&s.title)?;
     }

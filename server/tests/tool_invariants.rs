@@ -245,6 +245,7 @@ proptest! {
         let ctx = ToolCtx {
             config_dir: tmp.path(), data_dir: tmp.path(),
             user_id: 1, username: "aki", vectors: PreparedVectors::default(),
+            task_scope: None,
         };
 
         let mut mem_ids = Vec::new();

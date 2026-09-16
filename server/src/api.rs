@@ -18,6 +18,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/tasks/{id}", patch(tasks_update).delete(tasks_delete))
         .route("/api/tasks/{id}/split", post(task_split))
         .route("/api/tasks/{id}/flatten", post(task_flatten))
+        .route("/api/tasks/{id}/agent", post(task_agent))
         .route("/api/tokens", get(tokens_list).post(tokens_create))
         .route("/api/tokens/{id}", axum::routing::delete(tokens_revoke))
         .route("/api/talk", post(talk))
@@ -208,6 +209,178 @@ async fn tasks_delete(
     }
 }
 
+const MAX_BRIEF_CONTEXT: usize = 32 * 1024;
+
+#[derive(Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+struct BriefReq {
+    context: String,
+}
+
+fn brief_error(status: StatusCode, message: &str) -> axum::response::Response {
+    (status, Json(serde_json::json!({ "error": message }))).into_response()
+}
+
+fn log_brief_error(state: &AppState, user_id: i64, detail: &str) {
+    let conn = state.db.lock().unwrap();
+    let _ = crate::log::record(&conn, Some(user_id), "task_agent_error", detail);
+}
+
+/// The task as DATA for the model: everything the importer wrote, plus the
+/// steps that already exist so a re-brief knows not to try splitting again.
+fn brief_message(node: &crate::tasks::TaskNode, context: &str) -> String {
+    let t = &node.task;
+    let mut m = format!(
+        "Title: {}\nState: {}\nDescription: {}\nNotes: {}\n",
+        t.title, t.state, t.description, t.notes
+    );
+    if !node.children.is_empty() {
+        m.push_str("Steps:\n");
+        for c in &node.children {
+            m.push_str(&format!("- {}\n", c.title));
+        }
+    }
+    if !context.trim().is_empty() {
+        m.push_str("\nContext:\n");
+        m.push_str(context);
+        m.push('\n');
+    }
+    m
+}
+
+/// Briefs one imported task in a fresh agent session scoped to that task, with
+/// no history and nothing kept as a conversation. Any failure restores the task
+/// and its steps exactly as they were, so a caller can retry on the same id.
+async fn task_agent(
+    user: TaskPrincipal,
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    let req: BriefReq = if body.iter().all(|b| b.is_ascii_whitespace()) {
+        BriefReq::default()
+    } else {
+        match serde_json::from_slice(&body) {
+            Ok(r) => r,
+            Err(e) => return brief_error(StatusCode::BAD_REQUEST, &e.to_string()),
+        }
+    };
+    if req.context.len() > MAX_BRIEF_CONTEXT {
+        return brief_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            &format!("context must be at most {MAX_BRIEF_CONTEXT} bytes"),
+        );
+    }
+    let (opening, snap) = {
+        let conn = state.db.lock().unwrap();
+        let failed = |detail: String| {
+            let _ = crate::log::record(&conn, Some(user.id), "task_agent_error", &detail);
+            brief_error(StatusCode::INTERNAL_SERVER_ERROR, "the task could not be briefed")
+        };
+        let node = match crate::tasks::node(&conn, user.id, id) {
+            Ok(Some(n)) => n,
+            Ok(None) => return brief_error(StatusCode::NOT_FOUND, "task not found"),
+            Err(e) => return failed(e.to_string()),
+        };
+        if node.task.parent_id.is_some() {
+            return brief_error(
+                StatusCode::CONFLICT,
+                "only a top-level task can be briefed, not one of its steps",
+            );
+        }
+        match crate::tasks::snapshot(&conn, user.id, id) {
+            Ok(snap) => (brief_message(&node, &req.context), snap),
+            Err(e) => return failed(e.to_string()),
+        }
+    };
+
+    let rollback = snap.clone();
+    let err_state = state.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let deps = crate::agent::SessionDeps {
+            db: &state.db,
+            config_dir: &state.config_dir,
+            data_dir: &state.data_dir,
+            llm: state.llm.as_ref(),
+            embeddings: state.embeddings.as_deref(),
+            task_scope: Some(id),
+        };
+        let session = crate::agent::run_session(
+            &deps,
+            user.id,
+            &user.username,
+            crate::tools::SessionKind::Import,
+            jiff::Timestamp::now(),
+            &[],
+            &opening,
+        );
+        let conn = state.db.lock().unwrap();
+        // `None` is a rolled-back session: the caller answers 502.
+        match session {
+            Ok(out) => match crate::tasks::node(&conn, user.id, id)? {
+                Some(node) => Ok(Some((out.steps, node))),
+                None => {
+                    crate::tasks::restore(&conn, &snap)?;
+                    anyhow::bail!("task {id} disappeared during the session")
+                }
+            },
+            Err(e) => {
+                crate::tasks::restore(&conn, &snap)?;
+                let _ =
+                    crate::log::record(&conn, Some(user.id), "task_agent_error", &e.to_string());
+                Ok(None)
+            }
+        }
+    })
+    .await;
+
+    match result {
+        Ok(Ok(Some((steps, node)))) => {
+            let outcome = if node.task.state == "dropped" {
+                "dropped"
+            } else if steps.iter().any(|s| !s.is_error) {
+                "briefed"
+            } else {
+                "unchanged"
+            };
+            let steps: Vec<_> = steps
+                .iter()
+                .map(|s| {
+                    serde_json::json!({
+                        "name": s.name,
+                        "args": s.args,
+                        "result": s.result,
+                        "is_error": s.is_error,
+                    })
+                })
+                .collect();
+            Json(serde_json::json!({
+                "task_id": id,
+                "outcome": outcome,
+                "steps": steps,
+                "task": node,
+            }))
+            .into_response()
+        }
+        Ok(Ok(None)) => {
+            brief_error(StatusCode::BAD_GATEWAY, "the assistant is unavailable; try again")
+        }
+        Ok(Err(e)) => {
+            log_brief_error(&err_state, user.id, &e.to_string());
+            brief_error(StatusCode::INTERNAL_SERVER_ERROR, "the task could not be briefed")
+        }
+        Err(e) => {
+            let detail = format!("brief task failed: {e}");
+            {
+                let conn = err_state.db.lock().unwrap();
+                let _ = crate::tasks::restore(&conn, &rollback);
+            }
+            log_brief_error(&err_state, user.id, &detail);
+            brief_error(StatusCode::INTERNAL_SERVER_ERROR, "the task could not be briefed")
+        }
+    }
+}
+
 fn task_error(e: crate::tasks::UpdateError) -> axum::response::Response {
     use crate::tasks::UpdateError as E;
     match e {
@@ -353,6 +526,7 @@ async fn talk(
             data_dir: &state.data_dir,
             llm: state.llm.as_ref(),
             embeddings: state.embeddings.as_deref(),
+            task_scope: None,
         };
         let now = jiff::Timestamp::now();
         let history = match req_conversation {

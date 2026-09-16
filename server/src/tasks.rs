@@ -304,7 +304,66 @@ pub struct Step {
     pub duration_min: u32,
 }
 
-fn node(conn: &Connection, user_id: i64, task_id: i64) -> Result<Option<TaskNode>, UpdateError> {
+/// Every column of a task row and of its steps, plus their event links, taken
+/// verbatim so a session that fails partway can be undone byte for byte.
+#[derive(Debug, Clone)]
+pub struct Snapshot {
+    task_id: i64,
+    columns: Vec<String>,
+    rows: Vec<Vec<rusqlite::types::Value>>,
+    links: Vec<(i64, i64)>,
+}
+
+pub fn snapshot(conn: &Connection, user_id: i64, task_id: i64) -> rusqlite::Result<Snapshot> {
+    let mut stmt = conn.prepare(
+        "SELECT * FROM tasks WHERE user_id = ?1 AND (id = ?2 OR parent_id = ?2)
+         ORDER BY parent_id IS NOT NULL, id",
+    )?;
+    let columns: Vec<String> = stmt.column_names().iter().map(|s| (*s).to_owned()).collect();
+    let width = columns.len();
+    let rows = stmt
+        .query_map((user_id, task_id), |r| {
+            (0..width).map(|i| r.get(i)).collect::<rusqlite::Result<Vec<_>>>()
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut stmt = conn.prepare(
+        "SELECT event_id, task_id FROM event_tasks
+         WHERE task_id = ?1 OR task_id IN (SELECT id FROM tasks WHERE parent_id = ?1)",
+    )?;
+    let links = stmt
+        .query_map([task_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(Snapshot { task_id, columns, rows, links })
+}
+
+/// Puts the snapshot back in one transaction: steps the session added are gone,
+/// steps it removed are back, and every restored row keeps its original id.
+pub fn restore(conn: &Connection, snap: &Snapshot) -> rusqlite::Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "DELETE FROM event_tasks
+         WHERE task_id = ?1 OR task_id IN (SELECT id FROM tasks WHERE parent_id = ?1)",
+        [snap.task_id],
+    )?;
+    tx.execute("DELETE FROM tasks WHERE parent_id = ?1", [snap.task_id])?;
+    tx.execute("DELETE FROM tasks WHERE id = ?1", [snap.task_id])?;
+    let holes =
+        (1..=snap.columns.len()).map(|i| format!("?{i}")).collect::<Vec<_>>().join(", ");
+    let insert =
+        format!("INSERT INTO tasks ({}) VALUES ({holes})", snap.columns.join(", "));
+    for row in &snap.rows {
+        tx.execute(&insert, rusqlite::params_from_iter(row.iter()))?;
+    }
+    for (event_id, task_id) in &snap.links {
+        tx.execute(
+            "INSERT INTO event_tasks (event_id, task_id) VALUES (?1, ?2)",
+            (event_id, task_id),
+        )?;
+    }
+    tx.commit()
+}
+
+pub fn node(conn: &Connection, user_id: i64, task_id: i64) -> Result<Option<TaskNode>, UpdateError> {
     let Some(task) = get(conn, user_id, task_id)? else { return Ok(None) };
     let children = children_of(conn, task.id)?;
     Ok(Some(TaskNode { task, children }))

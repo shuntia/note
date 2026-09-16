@@ -13,6 +13,8 @@ pub enum SessionKind {
     Nightly,
     Checkin,
     Talk,
+    /// One imported task, briefed by the agent on its importer's behalf.
+    Import,
 }
 
 /// A tool failure returned to the model as a value; `kind` is machine-matchable,
@@ -53,6 +55,8 @@ pub struct ToolCtx<'a> {
     pub user_id: i64,
     pub username: &'a str,
     pub vectors: PreparedVectors,
+    /// When set, the task tools reach only this task and its steps.
+    pub task_scope: Option<i64>,
 }
 
 pub const MAX_ARGS_BYTES: usize = 64 * 1024;
@@ -157,6 +161,7 @@ const TALK: &[&str] = &[
     "schedule_reshape",
     "context_edit",
 ];
+const IMPORT: &[&str] = &["task_update", "task_split"];
 const NIGHTLY: &[&str] = &[
     "memory_query",
     "memory_read",
@@ -179,6 +184,7 @@ pub fn registry(kind: SessionKind) -> &'static [&'static str] {
         SessionKind::Nightly => NIGHTLY,
         SessionKind::Checkin => CHECKIN,
         SessionKind::Talk => TALK,
+        SessionKind::Import => IMPORT,
     }
 }
 
@@ -340,7 +346,7 @@ mod tests {
     }
 
     fn ctx<'a>(tmp: &'a tempfile::TempDir) -> ToolCtx<'a> {
-        ToolCtx { config_dir: tmp.path(), data_dir: tmp.path(), user_id: 1, username: "aki", vectors: PreparedVectors::default() }
+        ToolCtx { config_dir: tmp.path(), data_dir: tmp.path(), user_id: 1, username: "aki", vectors: PreparedVectors::default(), task_scope: None }
     }
 
     #[test]
