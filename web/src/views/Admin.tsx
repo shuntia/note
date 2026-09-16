@@ -279,7 +279,7 @@ function Gate({
               />
             </div>
           )}
-          {gate.totp === 'password_only' && (
+          {gate.totp === 'password_only' && gate.inspect && (
             <p className="admin-gate-dev">Dev build: password only</p>
           )}
           {error && <p role="alert">{error}</p>}
