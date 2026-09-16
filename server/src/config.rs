@@ -207,6 +207,16 @@ mod tests {
     }
 
     #[test]
+    fn admin_section_defaults_to_requiring_totp() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = "bind_addr = \"127.0.0.1:0\"\npublic_base_url = \"http://x\"\ndata_dir = \"data\"\n";
+        write(tmp.path(), "server.toml", base);
+        assert!(ServerConfig::load(tmp.path()).unwrap().admin.require_totp);
+        write(tmp.path(), "server.toml", &format!("{base}[admin]\nrequire_totp = false\n"));
+        assert!(!ServerConfig::load(tmp.path()).unwrap().admin.require_totp);
+    }
+
+    #[test]
     fn providers_section_parses() {
         let tmp = tempfile::tempdir().unwrap();
         write(tmp.path(), "server.toml", concat!(

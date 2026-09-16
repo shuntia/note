@@ -1,6 +1,7 @@
 use axum::body::Body;
 use axum::http::{header, Request};
 use note_server::providers::LLMProvider;
+use note_server::admin::AdminSecrets;
 use note_server::{api, auth, db, AppState};
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -73,7 +74,12 @@ pub async fn app_with_logged_in_user_and_state() -> (axum::Router, String, AppSt
 
 #[allow(dead_code)] // only the admin suite installs a TOTP seed
 pub async fn app_with_admin_seed(seed: Vec<u8>) -> (axum::Router, String, AppState, TempDir) {
-    build_with(None, Some(seed)).await
+    build_with(None, Some(AdminSecrets::with_seed(seed))).await
+}
+
+#[allow(dead_code)] // only the admin suite elevates on the password alone
+pub async fn app_with_password_only_admin() -> (axum::Router, String, AppState, TempDir) {
+    build_with(None, Some(AdminSecrets::default().require_totp(false))).await
 }
 
 async fn build(llm: Option<Arc<dyn LLMProvider>>) -> (axum::Router, String, AppState, TempDir) {
@@ -82,7 +88,7 @@ async fn build(llm: Option<Arc<dyn LLMProvider>>) -> (axum::Router, String, AppS
 
 async fn build_with(
     llm: Option<Arc<dyn LLMProvider>>,
-    seed: Option<Vec<u8>>,
+    secrets: Option<AdminSecrets>,
 ) -> (axum::Router, String, AppState, TempDir) {
     let cfg = config_dir();
     let dir = cfg.path().to_path_buf();
@@ -92,8 +98,8 @@ async fn build_with(
     if let Some(llm) = llm {
         state = state.with_providers(llm, None);
     }
-    if let Some(seed) = seed {
-        state = state.with_admin_secrets(note_server::admin::AdminSecrets::with_seed(seed));
+    if let Some(secrets) = secrets {
+        state = state.with_admin_secrets(secrets);
     }
     let app = api::router(state.clone());
     let cookie = login(&app, "aki", "pw").await;
