@@ -37,6 +37,7 @@ const WRITABLE_SETTINGS = [
   'counter',
   'nightly_enabled',
   'checkins_enabled',
+  'ntfy_topic',
 ] as const
 
 type SettingsPatch = Partial<Pick<Settings, (typeof WRITABLE_SETTINGS)[number]>>
@@ -187,6 +188,7 @@ export const api = {
     request<void>('/api/push/subscribe', { method: 'POST', body: JSON.stringify(sub) }),
   pushUnsubscribe: (endpoint: string) =>
     request<void>('/api/push/unsubscribe', { method: 'POST', body: JSON.stringify({ endpoint }) }),
+  notifyTest: () => request<{ via: string }>('/api/notify/test', { method: 'POST' }),
 }
 
 const ADMIN = '/api/admin'
