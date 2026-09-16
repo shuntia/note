@@ -341,3 +341,34 @@ async fn a_test_account_starts_with_its_background_features_off() {
     assert_eq!(v["nightly_enabled"], false);
     assert_eq!(v["checkins_enabled"], false);
 }
+
+#[tokio::test]
+async fn ntfy_is_reported_off_with_the_default_topic_until_it_is_configured() {
+    let (app, cookie, _cfg) = common::app_with_logged_in_user().await;
+    let v = json(app.oneshot(get(&cookie)).await.unwrap()).await;
+    assert_eq!(v["ntfy_enabled"], false);
+    assert_eq!(v["ntfy_topic"], "note-aki");
+}
+
+#[tokio::test]
+async fn ntfy_topic_is_written_validated_and_cleared() {
+    let (app, cookie, cfg) = common::app_with_logged_in_user().await;
+    let path = cfg.path().join("users/aki/user.toml");
+
+    let v = json(app.clone().oneshot(put(&cookie, r#"{"ntfy_topic":"my-desk"}"#)).await.unwrap()).await;
+    assert_eq!(v["ntfy_topic"], "my-desk");
+    assert_eq!(json(app.clone().oneshot(get(&cookie)).await.unwrap()).await["ntfy_topic"], "my-desk");
+
+    for bad in [r#"{"ntfy_topic":"has space"}"#, r#"{"ntfy_topic":"has/slash"}"#, r#"{"ntfy_topic":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#] {
+        let res = app.clone().oneshot(put(&cookie, bad)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY, "accepted {bad}");
+        assert!(json(res).await["error"].is_string());
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("my-desk"), "a rejected topic touched the file: {raw}");
+    }
+
+    let v = json(app.clone().oneshot(put(&cookie, r#"{"ntfy_topic":""}"#)).await.unwrap()).await;
+    assert_eq!(v["ntfy_topic"], "note-aki");
+    let raw = std::fs::read_to_string(&path).unwrap();
+    assert!(!raw.contains("ntfy_topic"), "the cleared override stayed in the file: {raw}");
+}
