@@ -379,17 +379,27 @@ pub fn flatten(
 /// task is not this user's.
 pub fn delete(conn: &Connection, user_id: i64, task_id: i64) -> rusqlite::Result<bool> {
     let tx = conn.unchecked_transaction()?;
-    if get(&tx, user_id, task_id)?.is_none() {
+    let gone = delete_within(&tx, user_id, task_id)?;
+    tx.commit()?;
+    Ok(gone)
+}
+
+/// The deletion itself, for callers that already hold a transaction.
+pub(crate) fn delete_within(
+    conn: &Connection,
+    user_id: i64,
+    task_id: i64,
+) -> rusqlite::Result<bool> {
+    if get(conn, user_id, task_id)?.is_none() {
         return Ok(false);
     }
-    tx.execute(
+    conn.execute(
         "DELETE FROM event_tasks
          WHERE task_id = ?1 OR task_id IN (SELECT id FROM tasks WHERE parent_id = ?1)",
         [task_id],
     )?;
-    tx.execute("DELETE FROM tasks WHERE parent_id = ?1", [task_id])?;
-    tx.execute("DELETE FROM tasks WHERE id = ?1", [task_id])?;
-    tx.commit()?;
+    conn.execute("DELETE FROM tasks WHERE parent_id = ?1", [task_id])?;
+    conn.execute("DELETE FROM tasks WHERE id = ?1", [task_id])?;
     Ok(true)
 }
 

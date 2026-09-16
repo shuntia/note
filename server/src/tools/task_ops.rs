@@ -82,6 +82,7 @@ pub struct UpdateArgs {
     pub task_id: i64,
     pub title: Option<String>,
     pub description: Option<String>,
+    /// One of open, in_progress, done, dropped.
     pub state: Option<String>,
     pub notes: Option<String>,
     /// Rough estimate in whole 5-minute blocks.
@@ -124,6 +125,24 @@ pub fn update(
         })),
         Ok(None) => Err(ToolError::not_found(format!("no task {}", args.task_id))),
         Err(e) => Err(task_error(e)),
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DeleteArgs {
+    pub task_id: i64,
+}
+
+pub fn delete(
+    conn: &Connection,
+    ctx: &ToolCtx,
+    args: DeleteArgs,
+) -> Result<serde_json::Value, ToolError> {
+    match crate::tasks::delete_within(conn, ctx.user_id, args.task_id) {
+        Ok(true) => Ok(serde_json::json!({ "task_id": args.task_id, "deleted": true })),
+        Ok(false) => Err(ToolError::not_found(format!("no task {}", args.task_id))),
+        Err(e) => Err(ToolError::internal(e.to_string())),
     }
 }
 

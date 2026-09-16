@@ -137,6 +137,7 @@ const CHECKIN: &[&str] = &[
     "task_create",
     "task_update",
     "task_split",
+    "task_delete",
     "schedule_slide",
     "schedule_snooze",
     "schedule_drop",
@@ -149,6 +150,7 @@ const TALK: &[&str] = &[
     "task_create",
     "task_update",
     "task_split",
+    "task_delete",
     "schedule_slide",
     "schedule_snooze",
     "schedule_drop",
@@ -162,6 +164,7 @@ const NIGHTLY: &[&str] = &[
     "task_create",
     "task_update",
     "task_split",
+    "task_delete",
     "schedule_slide",
     "schedule_snooze",
     "schedule_drop",
@@ -197,9 +200,16 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
             schema::<task_ops::UpdateArgs>(),
         ),
         "task_split" => (
-            "Split a task into 2-5 short steps, each with a duration in whole 5-minute blocks. \
-             Only for a task that has no steps yet.",
+            "Break the existing task with this id into 2-5 short steps, each with a duration in \
+             whole 5-minute blocks. The steps land under that task; this is not the way to create \
+             new tasks. Only for a task that has no steps yet.",
             schema::<task_ops::SplitArgs>(),
+        ),
+        "task_delete" => (
+            "Delete a task, or one step, for good — with its steps and its place on the day's \
+             plan. For a task the user no longer wants at all; to record one they finished or \
+             abandoned, set its state with task_update instead.",
+            schema::<task_ops::DeleteArgs>(),
         ),
         "memory_query" => (
             "Search the user's long-term memory; returns ids and summaries.",
@@ -299,6 +309,7 @@ fn run(
         "task_create" => task_ops::create(conn, ctx, parse(raw)?),
         "task_update" => task_ops::update(conn, ctx, parse(raw)?),
         "task_split" => task_ops::split(conn, ctx, parse(raw)?),
+        "task_delete" => task_ops::delete(conn, ctx, parse(raw)?),
         "memory_query" => memory_ops::query(conn, ctx, parse(raw)?),
         "memory_read" => memory_ops::read(conn, ctx, parse(raw)?),
         "memory_write" => memory_ops::write(conn, ctx, parse(raw)?),
@@ -424,6 +435,83 @@ mod tests {
         let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_update",
             &format!(r#"{{"task_id":{step},"is_now":true}}"#)).unwrap_err();
         assert_eq!(e.kind, "rejected");
+    }
+
+    #[test]
+    fn task_delete_removes_the_task_and_its_steps() {
+        let (conn, tmp) = env();
+        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_create",
+            r#"{"title":"junk from a test run"}"#).unwrap();
+        let id = out["task_id"].as_i64().unwrap();
+        dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_split",
+            &format!(r#"{{"task_id":{id},"steps":[
+                {{"title":"a","duration_min":5}},{{"title":"b","duration_min":5}}]}}"#)).unwrap();
+
+        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_delete",
+            &format!(r#"{{"task_id":{id}}}"#)).unwrap();
+        assert_eq!(out["deleted"], true);
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 0);
+
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_delete",
+            &format!(r#"{{"task_id":{id}}}"#)).unwrap_err();
+        assert_eq!(e.kind, "not_found");
+    }
+
+    #[test]
+    fn task_delete_leaves_another_users_task_alone() {
+        let (conn, tmp) = env();
+        conn.execute(
+            "INSERT INTO users (username, pass_hash, role) VALUES ('rin', 'x', 'member')",
+            [],
+        )
+        .unwrap();
+        let mut theirs = ctx(&tmp);
+        theirs.user_id = 2;
+        theirs.username = "rin";
+        let out =
+            dispatch(&conn, &theirs, SessionKind::Talk, "task_create", r#"{"title":"theirs"}"#)
+                .unwrap();
+        let id = out["task_id"].as_i64().unwrap();
+
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_delete",
+            &format!(r#"{{"task_id":{id}}}"#)).unwrap_err();
+        assert_eq!(e.kind, "not_found");
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn task_delete_drops_a_step_like_the_http_route() {
+        let (conn, tmp) = env();
+        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_create",
+            r#"{"title":"email landlord"}"#).unwrap();
+        let id = out["task_id"].as_i64().unwrap();
+        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_split",
+            &format!(r#"{{"task_id":{id},"steps":[
+                {{"title":"a","duration_min":5}},{{"title":"b","duration_min":5}}]}}"#)).unwrap();
+        let step = out["step_ids"][0].as_i64().unwrap();
+
+        dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_delete",
+            &format!(r#"{{"task_id":{step}}}"#)).unwrap();
+        let left: Vec<i64> = {
+            let mut stmt = conn.prepare("SELECT id FROM tasks ORDER BY id").unwrap();
+            let rows = stmt.query_map([], |r| r.get(0)).unwrap();
+            rows.collect::<rusqlite::Result<_>>().unwrap()
+        };
+        assert_eq!(left, vec![id, out["step_ids"][1].as_i64().unwrap()]);
+    }
+
+    #[test]
+    fn task_update_schema_lists_the_valid_states() {
+        let schema = schemas(SessionKind::Talk)
+            .into_iter()
+            .find(|s| s["name"] == "task_update")
+            .unwrap();
+        let text = schema["input_schema"]["properties"]["state"].to_string();
+        for state in ["open", "in_progress", "done", "dropped"] {
+            assert!(text.contains(state), "state schema does not mention {state}: {text}");
+        }
     }
 
     #[test]
