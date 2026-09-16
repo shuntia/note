@@ -1,5 +1,5 @@
 use crate::agent::SessionDeps;
-use crate::config::UserConfig;
+use crate::config::{Features, UserConfig};
 use anyhow::Result;
 use rusqlite::Connection;
 use std::path::Path;
@@ -84,14 +84,15 @@ pub fn due(
     config_dir: &Path,
     now: jiff::Timestamp,
 ) -> Result<Vec<(i64, String)>> {
-    let mut stmt = conn.prepare("SELECT id, username FROM users")?;
-    let users: Vec<(i64, String)> = stmt
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+    let mut stmt = conn.prepare("SELECT id, username, category FROM users")?;
+    let users: Vec<(i64, String, String)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
         .collect::<rusqlite::Result<_>>()?;
     let mut out = Vec::new();
-    for (id, username) in users {
+    for (id, username, category) in users {
         let ucfg = match UserConfig::load(config_dir, &username) {
             Ok(c) => c,
+            Err(_) if !Features::for_category(&category).nightly => continue,
             Err(e) => {
                 let _ = crate::log::record_throttled(
                     conn,
@@ -104,6 +105,9 @@ pub fn due(
                 continue;
             }
         };
+        if !ucfg.features(&category).nightly {
+            continue;
+        }
         let tz = jiff::tz::TimeZone::get(&ucfg.timezone).unwrap_or(jiff::tz::TimeZone::UTC);
         let local = now.to_zoned(tz);
         let Ok(due_time) = format!("{}:00", ucfg.nightly_time).parse::<jiff::civil::Time>() else {
@@ -356,6 +360,30 @@ mod tests {
             })
             .unwrap();
         assert_eq!(logged, 1);
+    }
+
+    #[test]
+    fn a_test_account_has_no_nightly_until_it_is_switched_on() {
+        let (db, tmp) = env("Asia/Tokyo", "03:00");
+        let now: jiff::Timestamp = "2026-08-30T19:00:00Z".parse().unwrap();
+        {
+            let conn = db.lock().unwrap();
+            crate::auth::set_category(&conn, "aki", "test").unwrap();
+            assert!(due(&conn, tmp.path(), now).unwrap().is_empty());
+            let logged: i64 = conn
+                .query_row("SELECT COUNT(*) FROM event_log", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(logged, 0, "a skipped account costs nothing, not even a log row");
+        }
+
+        std::fs::create_dir_all(tmp.path().join("users/aki")).unwrap();
+        std::fs::write(
+            tmp.path().join("users/aki/user.toml"),
+            "nightly_enabled = true\n",
+        )
+        .unwrap();
+        let conn = db.lock().unwrap();
+        assert_eq!(due(&conn, tmp.path(), now).unwrap(), vec![(1, "aki".to_string())]);
     }
 
     #[test]

@@ -556,13 +556,17 @@ struct SettingsPatch {
     template: Option<String>,
     show_arc_between_sessions: Option<bool>,
     counter: Option<String>,
+    nightly_enabled: Option<bool>,
+    checkins_enabled: Option<bool>,
     alerts: Option<Vec<AlertPatch>>,
 }
 
 fn settings_body(
     cfg: &crate::config::UserConfig,
+    category: &str,
     schedule: Vec<crate::templates::ScheduleRow>,
 ) -> serde_json::Value {
+    let features = cfg.features(category);
     serde_json::json!({
         "display_name": cfg.display_name,
         "timezone": cfg.timezone,
@@ -570,6 +574,9 @@ fn settings_body(
         "template": cfg.template,
         "show_arc_between_sessions": cfg.show_arc_between_sessions,
         "counter": cfg.counter,
+        "category": category,
+        "nightly_enabled": features.nightly,
+        "checkins_enabled": features.checkins,
         "schedule": schedule,
     })
 }
@@ -608,7 +615,7 @@ async fn settings_get(user: CurrentUser, State(state): State<AppState>) -> impl 
     zones.sort_unstable();
     let templates = crate::templates::available(&state.config_dir, &user.username);
     let schedule = schedule_rows(&state, &user.username, &cfg.template);
-    let mut body = settings_body(&cfg, schedule);
+    let mut body = settings_body(&cfg, &user.category, schedule);
     body["templates"] = serde_json::json!(templates);
     body["timezones"] = serde_json::json!(zones);
     Json(body).into_response()
@@ -669,6 +676,12 @@ async fn settings_put(
         }
         cfg.counter = counter;
     }
+    if let Some(on) = req.nightly_enabled {
+        cfg.nightly_enabled = Some(on);
+    }
+    if let Some(on) = req.checkins_enabled {
+        cfg.checkins_enabled = Some(on);
+    }
     if let Some(alerts) = req.alerts {
         let changes: Vec<(usize, bool)> = alerts.iter().map(|a| (a.index, a.alert)).collect();
         if let Err(e) =
@@ -679,7 +692,7 @@ async fn settings_put(
     }
     let schedule = schedule_rows(&state, &user.username, &cfg.template);
     match cfg.save(&state.config_dir, &user.username) {
-        Ok(()) => Json(settings_body(&cfg, schedule)).into_response(),
+        Ok(()) => Json(settings_body(&cfg, &user.category, schedule)).into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }

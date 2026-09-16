@@ -1,4 +1,7 @@
-use crate::{config::UserConfig, AppState};
+use crate::{
+    config::{Features, UserConfig},
+    AppState,
+};
 use anyhow::Result;
 use rusqlite::Connection;
 use std::collections::HashMap;
@@ -8,6 +11,7 @@ struct Candidate {
     event_id: i64,
     user_id: i64,
     username: String,
+    category: String,
     date: String,
     wall_time: String,
     kind: String,
@@ -36,25 +40,34 @@ fn due_at(tz: &jiff::tz::TimeZone, c: &Candidate) -> Result<jiff::Timestamp> {
     Ok(tz.to_ambiguous_zoned(date.to_datetime(time)).compatible()?.timestamp())
 }
 
-/// Resolves a user's configured timezone, memoized so a sweep reads each user's
-/// config — and reports a bad timezone — only once. A missing config or an
+#[derive(Clone)]
+struct UserRuntime {
+    tz: jiff::tz::TimeZone,
+    features: Features,
+}
+
+/// Resolves what the sweep needs from a user's config, memoized so it reads
+/// that config — and reports a bad timezone — only once. A missing config or an
 /// unknown timezone name degrades to UTC; the unknown name is recorded as a
 /// `runner_error` rather than silently changing when the user's events fire.
-fn user_tz(
+fn user_runtime(
     conn: &Connection,
     config_dir: &Path,
     c: &Candidate,
-    cache: &mut HashMap<String, jiff::tz::TimeZone>,
+    cache: &mut HashMap<String, UserRuntime>,
     now: jiff::Timestamp,
-) -> Result<jiff::tz::TimeZone> {
-    if let Some(tz) = cache.get(&c.username) {
-        return Ok(tz.clone());
+) -> Result<UserRuntime> {
+    if let Some(rt) = cache.get(&c.username) {
+        return Ok(rt.clone());
     }
-    let name = UserConfig::load(config_dir, &c.username)
-        .map(|u| u.timezone)
-        .unwrap_or_else(|_| "UTC".into());
+    let cfg = UserConfig::load(config_dir, &c.username).ok();
+    let features = cfg
+        .as_ref()
+        .map_or_else(|| Features::for_category(&c.category), |u| u.features(&c.category));
+    let name = cfg.map_or_else(|| "UTC".into(), |u| u.timezone);
     let tz = match jiff::tz::TimeZone::get(&name) {
         Ok(tz) => tz,
+        Err(_) if !features.checkins => jiff::tz::TimeZone::UTC,
         Err(_) => {
             crate::log::record_throttled(
                 conn,
@@ -67,8 +80,9 @@ fn user_tz(
             jiff::tz::TimeZone::UTC
         }
     };
-    cache.insert(c.username.clone(), tz.clone());
-    Ok(tz)
+    let rt = UserRuntime { tz, features };
+    cache.insert(c.username.clone(), rt.clone());
+    Ok(rt)
 }
 
 /// Fires every pending or snoozed event whose wall time, resolved in its user's
@@ -83,7 +97,8 @@ pub fn fire_due(
     now: jiff::Timestamp,
 ) -> Result<Vec<FiredEvent>> {
     let mut stmt = conn.prepare(
-        "SELECT e.id, p.user_id, u.username, p.date, e.wall_time, e.kind, e.channel, e.message
+        "SELECT e.id, p.user_id, u.username, u.category, p.date, e.wall_time, e.kind,
+                e.channel, e.message
          FROM events e
          JOIN plans p ON p.id = e.plan_id
          JOIN users u ON u.id = p.user_id
@@ -95,11 +110,12 @@ pub fn fire_due(
                 event_id: r.get(0)?,
                 user_id: r.get(1)?,
                 username: r.get(2)?,
-                date: r.get(3)?,
-                wall_time: r.get(4)?,
-                kind: r.get(5)?,
-                channel: r.get(6)?,
-                message: r.get(7)?,
+                category: r.get(3)?,
+                date: r.get(4)?,
+                wall_time: r.get(5)?,
+                kind: r.get(6)?,
+                channel: r.get(7)?,
+                message: r.get(8)?,
             })
         })?
         .collect::<rusqlite::Result<_>>()?;
@@ -107,8 +123,11 @@ pub fn fire_due(
     let mut fired = Vec::new();
     let mut tz_cache = HashMap::new();
     for c in candidates {
-        let tz = user_tz(conn, config_dir, &c, &mut tz_cache, now)?;
-        let due = match due_at(&tz, &c) {
+        let rt = user_runtime(conn, config_dir, &c, &mut tz_cache, now)?;
+        if !rt.features.checkins {
+            continue;
+        }
+        let due = match due_at(&rt.tz, &c) {
             Ok(due) => due,
             Err(e) => {
                 crate::log::record_throttled(
@@ -257,6 +276,28 @@ mod tests {
 
         // second run does not double-fire
         assert!(fire_due(&conn, tmp.path(), due).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_test_accounts_events_never_fire_until_checkins_are_switched_on() {
+        let (conn, tmp, uid) = setup("UTC");
+        crate::auth::set_category(&conn, "aki", "test").unwrap();
+        let date: jiff::civil::Date = "2026-08-31".parse().unwrap();
+        crate::plan::generate(&conn, uid, &one_event_template("09:00"), date).unwrap();
+
+        let now: jiff::Timestamp = "2026-08-31T09:30:00Z".parse().unwrap();
+        assert!(fire_due(&conn, tmp.path(), now).unwrap().is_empty());
+        let logged: i64 =
+            conn.query_row("SELECT COUNT(*) FROM event_log", [], |r| r.get(0)).unwrap();
+        assert_eq!(logged, 0);
+        let status: String = conn
+            .query_row("SELECT status FROM events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(status, "pending");
+
+        std::fs::write(tmp.path().join("users/aki/user.toml"), "checkins_enabled = true\n")
+            .unwrap();
+        assert_eq!(fire_due(&conn, tmp.path(), now).unwrap().len(), 1);
     }
 
     #[test]

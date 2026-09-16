@@ -182,6 +182,11 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX idx_api_tokens_user ON api_tokens(user_id, id);
     ",
+    // v12
+    "
+    ALTER TABLE users ADD COLUMN category TEXT NOT NULL DEFAULT 'member'
+        CHECK (category IN ('member','test'));
+    ",
 ];
 
 pub fn open(path: &Path) -> Result<Connection> {

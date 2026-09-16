@@ -304,3 +304,40 @@ async fn counter_only_takes_the_two_words() {
     let v = json(res).await;
     assert!(v["error"].as_str().unwrap().starts_with("counter"));
 }
+
+#[tokio::test]
+async fn background_features_are_visible_and_flippable() {
+    let (app, cookie, cfg) = common::app_with_logged_in_user().await;
+    let v = json(app.clone().oneshot(get(&cookie)).await.unwrap()).await;
+    assert_eq!(v["category"], "member");
+    assert_eq!(v["nightly_enabled"], true);
+    assert_eq!(v["checkins_enabled"], true);
+
+    let res = app
+        .clone()
+        .oneshot(put(&cookie, r#"{"nightly_enabled":false}"#))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let v = json(res).await;
+    assert_eq!(v["nightly_enabled"], false);
+    assert_eq!(v["checkins_enabled"], true);
+
+    let raw = std::fs::read_to_string(cfg.path().join("users/aki/user.toml")).unwrap();
+    assert!(raw.contains("nightly_enabled = false"), "unexpected file: {raw}");
+    let v = json(app.oneshot(get(&cookie)).await.unwrap()).await;
+    assert_eq!(v["nightly_enabled"], false);
+}
+
+#[tokio::test]
+async fn a_test_account_starts_with_its_background_features_off() {
+    let (app, cookie, state, _cfg) = common::app_with_logged_in_user_and_state().await;
+    {
+        let conn = state.db.lock().unwrap();
+        note_server::auth::set_category(&conn, "aki", "test").unwrap();
+    }
+    let v = json(app.oneshot(get(&cookie)).await.unwrap()).await;
+    assert_eq!(v["category"], "test");
+    assert_eq!(v["nightly_enabled"], false);
+    assert_eq!(v["checkins_enabled"], false);
+}
