@@ -18,6 +18,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/tasks/{id}", patch(tasks_update))
         .route("/api/tasks/{id}/split", post(task_split))
         .route("/api/tasks/{id}/flatten", post(task_flatten))
+        .route("/api/tokens", get(tokens_list).post(tokens_create))
+        .route("/api/tokens/{id}", axum::routing::delete(tokens_revoke))
         .route("/api/talk", post(talk))
         .route("/api/conversations", get(conversations_list))
         .route(
@@ -206,6 +208,70 @@ fn task_error(e: crate::tasks::UpdateError) -> axum::response::Response {
             (StatusCode::CONFLICT, Json(serde_json::json!({ "error": m }))).into_response()
         }
         E::Db(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct NewTokenReq {
+    name: String,
+}
+
+async fn tokens_list(user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
+    let conn = state.db.lock().unwrap();
+    match crate::tokens::list(&conn, user.id) {
+        Ok(ts) => Json(ts).into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn tokens_create(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Json(req): Json<NewTokenReq>,
+) -> impl IntoResponse {
+    use crate::tokens::CreateError as E;
+    let conn = state.db.lock().unwrap();
+    match crate::tokens::create(&conn, user.id, &req.name) {
+        Ok(made) => {
+            let _ = crate::log::record(
+                &conn,
+                Some(user.id),
+                "token_created",
+                &format!("token {} {:?}", made.info.id, made.info.name),
+            );
+            Json(made).into_response()
+        }
+        Err(e @ E::InvalidName) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+        Err(e @ E::TooMany) => {
+            (StatusCode::CONFLICT, Json(serde_json::json!({ "error": e.to_string() })))
+                .into_response()
+        }
+        Err(E::Db(_)) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn tokens_revoke(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    let conn = state.db.lock().unwrap();
+    match crate::tokens::revoke(&conn, user.id, id) {
+        Ok(Some(t)) => {
+            let _ = crate::log::record(
+                &conn,
+                Some(user.id),
+                "token_revoked",
+                &format!("token {} {:?}", t.id, t.name),
+            );
+            StatusCode::NO_CONTENT
+        }
+        Ok(None) => StatusCode::NOT_FOUND,
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
 
