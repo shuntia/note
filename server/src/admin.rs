@@ -1009,6 +1009,18 @@ mod tests {
     }
 
     #[test]
+    fn opting_out_of_totp_ignores_the_seed() {
+        assert_eq!(
+            AdminSecrets::with_seed(vec![1; 20]).require_totp(false).totp_mode(),
+            TotpMode::PasswordOnly
+        );
+        assert_eq!(
+            AdminSecrets::default().require_totp(false).totp_mode(),
+            TotpMode::PasswordOnly
+        );
+    }
+
+    #[test]
     fn grant_cookies_are_scoped_and_strict() {
         assert_eq!(
             grant_cookie("t", false),

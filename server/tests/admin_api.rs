@@ -340,3 +340,43 @@ async fn inspection_reads_and_edits_user_data() {
     let res = app.oneshot(req(Method::GET, "/api/admin/log?kind=admin_inspect_sql", &cookies, None)).await.unwrap();
     assert_eq!(json(res).await["rows"].as_array().unwrap().len(), 2);
 }
+
+#[tokio::test]
+async fn password_only_elevation_skips_the_code_and_still_checks_the_password() {
+    let (app, session, state, _cfg) = common::app_with_password_only_admin().await;
+    let res = app.clone().oneshot(req(Method::GET, "/api/admin/gate", &session, None)).await.unwrap();
+    assert_eq!(json(res).await["totp"], "password_only");
+
+    let res = app.clone().oneshot(req(Method::POST, "/api/admin/elevate", &session, Some(r#"{"password":"nope"}"#))).await.unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    let denied: i64 = state.db.lock().unwrap()
+        .query_row("SELECT COUNT(*) FROM event_log WHERE kind = 'admin_elevate_denied'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(denied, 1);
+
+    let cookies = elevate(&app, &session, "").await.expect("password alone elevates");
+    let res = app.clone().oneshot(req(Method::GET, "/api/admin/status", &cookies, None)).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = app.oneshot(req(Method::GET, "/api/admin/gate", &cookies, None)).await.unwrap();
+    assert_eq!(json(res).await["elevated"], true);
+}
+
+#[tokio::test]
+async fn password_only_elevation_is_rate_limited() {
+    let (app, session, _state, _cfg) = common::app_with_password_only_admin().await;
+    for _ in 0..auth::MAX_ATTEMPTS {
+        let res = app.clone().oneshot(req(Method::POST, "/api/admin/elevate", &session, Some(r#"{"password":"nope"}"#))).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+    let res = app.oneshot(req(Method::POST, "/api/admin/elevate", &session, Some(r#"{"password":"pw"}"#))).await.unwrap();
+    assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
+async fn requiring_totp_still_rejects_a_password_without_a_code() {
+    let (app, session, _state, _cfg) = common::app_with_admin_seed(SEED.to_vec()).await;
+    let res = app.clone().oneshot(req(Method::GET, "/api/admin/gate", &session, None)).await.unwrap();
+    assert_eq!(json(res).await["totp"], "required");
+    let res = app.oneshot(req(Method::POST, "/api/admin/elevate", &session, Some(r#"{"password":"pw"}"#))).await.unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
