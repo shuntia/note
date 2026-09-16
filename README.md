@@ -281,6 +281,26 @@ Every outcome lands in `event_log`, readable at `GET /api/admin/log`:
 - `POST /api/talk` runs one session per user (a second concurrent request gets
   `409`) and four across the server (`503` with `Retry-After: 5` beyond that).
 
+### API tokens
+
+A user can mint long-lived bearer tokens for scripts and other agents. Tokens
+reach the task routes only; every other route still needs the session cookie.
+
+- Mint one in Settings → API tokens, or over the session:
+  `POST /api/tokens {name}` → `{id, name, created_at, last_used_at, token}`.
+  The `token` (`note_…`) is shown once; only its SHA-256 digest is stored.
+  `GET /api/tokens` lists `{id, name, created_at, last_used_at}`;
+  `DELETE /api/tokens/{id}` revokes. Names are 1 to 64 characters (`422`),
+  and a user holds at most 20 tokens (`409`).
+- Send it as `Authorization: Bearer note_…` on `GET/POST /api/tasks`,
+  `PATCH/DELETE /api/tasks/{id}`, `POST /api/tasks/{id}/split`, and
+  `POST /api/tasks/{id}/flatten`. A bearer header that does not resolve is
+  `401` even when a session cookie is also present. Disabling the user stops
+  their tokens.
+- `DELETE /api/tasks/{id}` removes the task, its steps, and their event links
+  (`204`, or `404` when the task is not the caller's).
+- Minting and revoking log `token_created` / `token_revoked` to `event_log`.
+
 ## Web client
 
 The installable PWA lives in `web/` — React + Vite, TypeScript, with React,
