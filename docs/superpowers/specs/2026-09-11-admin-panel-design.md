@@ -36,7 +36,13 @@ admin's `user_id` and a detail naming the target.
 - `admin_totp` — the shared admin TOTP seed, base32 (RFC 4648, unpadded,
   whitespace ignored), SHA-1, 6 digits, 30-second step, ±1 step tolerated.
 
-Absent or unreadable seed:
+`[admin] require_totp` in `server.toml` (default `true`) selects the factors.
+Set to `false`, elevation verifies the account password alone against the stored
+argon2 hash and the seed is never read; everything else about the grant — the
+cookie and its 15 minutes, the limiter, `admin_elevate` / `admin_elevate_denied`
+— is unchanged, and the gate reports `totp: "password_only"`.
+
+Absent or unreadable seed, with `require_totp = true`:
 
 - **Release build:** elevation is refused with 503 and the panel says the
   server has no admin secret installed. The panel fails closed until the user
@@ -114,7 +120,8 @@ switches) at a wider measure:
 
 - **Gate**: a card like the login screen asking for password and, when
   required, the 6-digit code. A missing seed on a release server shows a
-  single explanatory line instead of the form.
+  single explanatory line instead of the form; `password_only` drops the code
+  field, and keeps the dev-build note for dev-inspect builds only.
 - **Status**: label/value rows.
 - **Users**: one fold per user (role badge, session count) with password
   reset, role switch, disabled switch, revoke sessions; an "Add user" fold.
@@ -128,8 +135,9 @@ Elevation expiry drops the view back to the gate on the next 401.
 ## Testing
 
 Unit: TOTP vectors (RFC 6238), replay rejection, seed parsing, last-admin
-guard. Integration: member 403 on every route; admin without grant 401;
-grant lifecycle (elevate, use, expire, logout cascade); wrong code 401 and
-limiter 429; disabled user login and session behaviour; cross-site header
+guard, `require_totp = false` overriding seed and build. Integration: member
+403 on every route; admin without grant 401; grant lifecycle (elevate, use,
+expire, logout cascade); wrong code 401 and limiter 429; disabled user login and session behaviour; cross-site header
 403; inspect routes absent (404) without the feature and present with it;
-release build refuses elevation without a seed.
+release build refuses elevation without a seed; password-only elevation
+(no code accepted, wrong password 401 and logged, limiter 429).
