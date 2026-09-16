@@ -138,3 +138,114 @@ async fn token_routes_need_the_cookie_not_a_bearer() {
     let (status, _) = with_bearer(&app, &token, Method::GET, "/api/tokens", None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn bearer_token_reaches_every_task_route() {
+    let (app, cookie, _cfg) = common::app_with_logged_in_user().await;
+    let (_, token) = minted(&app, &cookie, "cli").await;
+
+    let (status, t) =
+        with_bearer(&app, &token, Method::POST, "/api/tasks", Some(r#"{"title":"via token"}"#)).await;
+    assert_eq!(status, StatusCode::OK, "{t}");
+    let id = t["id"].as_i64().unwrap();
+
+    let (status, list) = with_bearer(&app, &token, Method::GET, "/api/tasks", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(list[0]["title"], "via token");
+
+    let (status, t) = with_bearer(
+        &app,
+        &token,
+        Method::PATCH,
+        &format!("/api/tasks/{id}"),
+        Some(r#"{"duration_min":20}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{t}");
+    assert_eq!(t["duration_source"], "user");
+
+    let (status, _) = with_bearer(
+        &app,
+        &token,
+        Method::POST,
+        &format!("/api/tasks/{id}/split"),
+        Some(r#"{"steps":[{"title":"a","duration_min":5},{"title":"b","duration_min":5}]}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) =
+        with_bearer(&app, &token, Method::POST, &format!("/api/tasks/{id}/flatten"), None).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _) = with_cookie(&app, &cookie, Method::GET, "/api/tasks", None).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn bearer_token_is_refused_outside_tasks() {
+    let (app, cookie, _cfg) = common::app_with_logged_in_user().await;
+    let (_, token) = minted(&app, &cookie, "cli").await;
+    for path in ["/api/me", "/api/settings", "/api/plan/today", "/api/conversations"] {
+        let (status, _) = with_bearer(&app, &token, Method::GET, path, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{path}");
+    }
+}
+
+#[tokio::test]
+async fn bad_bearer_is_401_even_with_a_valid_cookie() {
+    let (app, cookie, _cfg) = common::app_with_logged_in_user().await;
+    for auth_value in ["Bearer note_not_a_real_token", "Basic abc", "Bearer "] {
+        let res = app
+            .clone()
+            .oneshot(
+                Request::get("/api/tasks")
+                    .header(header::COOKIE, cookie.as_str())
+                    .header(header::AUTHORIZATION, auth_value)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED, "{auth_value:?}");
+    }
+}
+
+#[tokio::test]
+async fn disabled_user_token_stops_resolving() {
+    let (app, cookie, state, _cfg) = common::app_with_logged_in_user_and_state().await;
+    let (_, token) = minted(&app, &cookie, "cli").await;
+    state
+        .db
+        .lock()
+        .unwrap()
+        .execute("UPDATE users SET disabled = 1 WHERE username = 'aki'", [])
+        .unwrap();
+    let (status, _) = with_bearer(&app, &token, Method::GET, "/api/tasks", None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn revoked_token_is_401_on_next_use() {
+    let (app, cookie, _cfg) = common::app_with_logged_in_user().await;
+    let (id, token) = minted(&app, &cookie, "cli").await;
+    let (status, _) = with_bearer(&app, &token, Method::GET, "/api/tasks", None).await;
+    assert_eq!(status, StatusCode::OK);
+    with_cookie(&app, &cookie, Method::DELETE, &format!("/api/tokens/{id}"), None).await;
+    let (status, _) = with_bearer(&app, &token, Method::GET, "/api/tasks", None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn token_writes_are_user_actor() {
+    let (app, cookie, _cfg) = common::app_with_logged_in_user().await;
+    let (_, token) = minted(&app, &cookie, "cli").await;
+    let (_, t) = with_bearer(
+        &app,
+        &token,
+        Method::POST,
+        "/api/tasks",
+        Some(r#"{"title":"timed","duration_min":15}"#),
+    )
+    .await;
+    assert_eq!(t["duration_source"], "user");
+}

@@ -1,4 +1,4 @@
-use crate::auth::{self, CurrentUser};
+use crate::auth::{self, CurrentUser, TaskPrincipal};
 use crate::AppState;
 use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
@@ -127,7 +127,7 @@ async fn me(user: CurrentUser) -> Json<serde_json::Value> {
     Json(serde_json::json!({ "username": user.username, "admin": user.admin }))
 }
 
-async fn tasks_list(user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
+async fn tasks_list(user: TaskPrincipal, State(state): State<AppState>) -> impl IntoResponse {
     let conn = state.db.lock().unwrap();
     match crate::tasks::list(&conn, user.id) {
         Ok(ts) => Json(ts).into_response(),
@@ -136,7 +136,7 @@ async fn tasks_list(user: CurrentUser, State(state): State<AppState>) -> impl In
 }
 
 async fn tasks_create(
-    user: CurrentUser,
+    user: TaskPrincipal,
     State(state): State<AppState>,
     Json(req): Json<crate::tasks::NewTask>,
 ) -> impl IntoResponse {
@@ -148,7 +148,7 @@ async fn tasks_create(
 }
 
 async fn tasks_update(
-    user: CurrentUser,
+    user: TaskPrincipal,
     State(state): State<AppState>,
     Path(id): Path<i64>,
     Json(patch): Json<crate::tasks::TaskPatch>,
@@ -167,7 +167,7 @@ struct SplitReq {
 }
 
 async fn task_split(
-    user: CurrentUser,
+    user: TaskPrincipal,
     State(state): State<AppState>,
     Path(id): Path<i64>,
     Json(req): Json<SplitReq>,
@@ -181,7 +181,7 @@ async fn task_split(
 }
 
 async fn task_flatten(
-    user: CurrentUser,
+    user: TaskPrincipal,
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> impl IntoResponse {

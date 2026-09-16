@@ -260,6 +260,55 @@ impl FromRequestParts<AppState> for CurrentUser {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum Credential {
+    Session,
+    Token(i64),
+}
+
+/// The caller on a task route: a session cookie or a per-user API token.
+/// This is the only extractor that reads `Authorization`, so a token cannot
+/// reach a route that still takes `CurrentUser`. A bearer header that does
+/// not resolve is a 401 even when a valid cookie rides along.
+#[derive(Debug, Clone)]
+pub struct TaskPrincipal {
+    pub id: i64,
+    pub username: String,
+    pub via: Credential,
+}
+
+impl FromRequestParts<AppState> for TaskPrincipal {
+    type Rejection = StatusCode;
+
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, StatusCode> {
+        let header = parts
+            .headers
+            .get(axum::http::header::AUTHORIZATION)
+            .map(|v| v.to_str().map_err(|_| StatusCode::UNAUTHORIZED))
+            .transpose()?;
+        if let Some(value) = header {
+            let secret = value
+                .strip_prefix("Bearer ")
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or(StatusCode::UNAUTHORIZED)?;
+            let conn = state.db.lock().unwrap();
+            let resolved = crate::tokens::resolve(&conn, secret, jiff::Timestamp::now())
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            let Some(r) = resolved else {
+                return Err(StatusCode::UNAUTHORIZED);
+            };
+            return Ok(TaskPrincipal {
+                id: r.user_id,
+                username: r.username,
+                via: Credential::Token(r.token_id),
+            });
+        }
+        let user = CurrentUser::from_request_parts(parts, state).await?;
+        Ok(TaskPrincipal { id: user.id, username: user.username, via: Credential::Session })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
