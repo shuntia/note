@@ -170,6 +170,18 @@ const MIGRATIONS: &[&str] = &[
         last_step INTEGER NOT NULL
     );
     ",
+    // v11
+    "
+    CREATE TABLE api_tokens (
+        id INTEGER PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id),
+        name TEXT NOT NULL,
+        token_hash TEXT NOT NULL UNIQUE,
+        created_at TEXT NOT NULL,
+        last_used_at TEXT
+    );
+    CREATE INDEX idx_api_tokens_user ON api_tokens(user_id, id);
+    ",
 ];
 
 pub fn open(path: &Path) -> Result<Connection> {
@@ -440,5 +452,32 @@ mod tests {
             )
             .unwrap();
         assert_eq!(id, "x");
+    }
+
+    #[test]
+    fn v11_creates_api_tokens_with_a_unique_hash() {
+        let conn = open_memory().unwrap();
+        conn.execute(
+            "INSERT INTO users (username, pass_hash, role) VALUES ('a','h','member')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO api_tokens (user_id, name, token_hash, created_at)
+             VALUES (1, 'cli', 'abc', 'now')",
+            [],
+        )
+        .unwrap();
+        assert!(conn
+            .execute(
+                "INSERT INTO api_tokens (user_id, name, token_hash, created_at)
+                 VALUES (1, 'other', 'abc', 'now')",
+                [],
+            )
+            .is_err());
+        let last: Option<String> = conn
+            .query_row("SELECT last_used_at FROM api_tokens WHERE id = 1", [], |r| r.get(0))
+            .unwrap();
+        assert!(last.is_none());
     }
 }
