@@ -317,11 +317,15 @@ async fn task_agent(
         let conn = state.db.lock().unwrap();
         // `None` is a rolled-back session: the caller answers 502.
         match session {
-            Ok(out) => match crate::tasks::node(&conn, user.id, id)? {
-                Some(node) => Ok(Some((out.steps, node))),
-                None => {
+            Ok(out) => match crate::tasks::node(&conn, user.id, id) {
+                Ok(Some(node)) => Ok(Some((out.steps, node))),
+                Ok(None) => {
                     crate::tasks::restore(&conn, &snap)?;
                     anyhow::bail!("task {id} disappeared during the session")
+                }
+                Err(e) => {
+                    crate::tasks::restore(&conn, &snap)?;
+                    Err(e.into())
                 }
             },
             Err(e) => {
