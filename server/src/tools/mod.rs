@@ -664,13 +664,104 @@ mod tests {
     #[test]
     fn session_surfaces_are_nested_subsets() {
         let is_subset = |a: &[&str], b: &[&str]| a.iter().all(|t| b.contains(t));
+        assert!(is_subset(registry(SessionKind::Import), registry(SessionKind::Talk)));
         assert!(is_subset(registry(SessionKind::Checkin), registry(SessionKind::Talk)));
         assert!(is_subset(registry(SessionKind::Talk), registry(SessionKind::Nightly)));
     }
 
     #[test]
+    fn the_import_surface_is_only_the_two_task_tools() {
+        assert_eq!(registry(SessionKind::Import), &["task_update", "task_split"]);
+    }
+
+    fn scoped<'a>(tmp: &'a tempfile::TempDir, task_id: i64) -> ToolCtx<'a> {
+        ToolCtx { task_scope: Some(task_id), ..ctx(tmp) }
+    }
+
+    /// Creates a scoped task with two steps, plus an unrelated task, and
+    /// returns (scoped id, first step id, foreign id).
+    fn scope_fixture(conn: &Connection, tmp: &tempfile::TempDir) -> (i64, i64, i64) {
+        let mine = dispatch(conn, &ctx(tmp), SessionKind::Talk, "task_create",
+            r#"{"title":"biology ch.4"}"#).unwrap()["task_id"].as_i64().unwrap();
+        let split = dispatch(conn, &ctx(tmp), SessionKind::Talk, "task_split",
+            &format!(r#"{{"task_id":{mine},"steps":[
+                {{"title":"read","duration_min":25}},
+                {{"title":"answer","duration_min":20}}]}}"#)).unwrap();
+        let step = split["step_ids"][0].as_i64().unwrap();
+        let other = dispatch(conn, &ctx(tmp), SessionKind::Talk, "task_create",
+            r#"{"title":"someone else's"}"#).unwrap()["task_id"].as_i64().unwrap();
+        (mine, step, other)
+    }
+
+    #[test]
+    fn a_scoped_session_reaches_only_its_own_task_and_steps() {
+        let (conn, tmp) = env();
+        let (mine, step, other) = scope_fixture(&conn, &tmp);
+
+        dispatch(&conn, &scoped(&tmp, mine), SessionKind::Import, "task_update",
+            &format!(r#"{{"task_id":{mine},"description":"a brief"}}"#)).unwrap();
+        dispatch(&conn, &scoped(&tmp, mine), SessionKind::Import, "task_update",
+            &format!(r#"{{"task_id":{step},"title":"read carefully"}}"#)).unwrap();
+
+        let e = dispatch(&conn, &scoped(&tmp, mine), SessionKind::Import, "task_update",
+            &format!(r#"{{"task_id":{other},"description":"not yours"}}"#)).unwrap_err();
+        assert_eq!(e.kind, "rejected");
+        let e = dispatch(&conn, &scoped(&tmp, mine), SessionKind::Import, "task_update",
+            r#"{"task_id":9999,"description":"nowhere"}"#).unwrap_err();
+        assert_eq!(e.kind, "rejected");
+    }
+
+    #[test]
+    fn a_scoped_split_refuses_a_step_and_a_foreign_task() {
+        let (conn, tmp) = env();
+        let (mine, step, other) = scope_fixture(&conn, &tmp);
+        let two_steps = r#""steps":[{"title":"a","duration_min":5},{"title":"b","duration_min":5}]"#;
+        for target in [step, other] {
+            let e = dispatch(&conn, &scoped(&tmp, mine), SessionKind::Import, "task_split",
+                &format!(r#"{{"task_id":{target},{two_steps}}}"#)).unwrap_err();
+            assert_eq!(e.kind, "rejected", "task_split reached {target}");
+        }
+    }
+
+    #[test]
+    fn a_scoped_session_cannot_touch_now() {
+        let (conn, tmp) = env();
+        let (mine, _, _) = scope_fixture(&conn, &tmp);
+        for value in ["true", "false"] {
+            let e = dispatch(&conn, &scoped(&tmp, mine), SessionKind::Import, "task_update",
+                &format!(r#"{{"task_id":{mine},"is_now":{value}}}"#)).unwrap_err();
+            assert_eq!(e.kind, "rejected");
+        }
+        let is_now: i64 = conn
+            .query_row("SELECT is_now FROM tasks WHERE id = ?1", [mine], |r| r.get(0))
+            .unwrap();
+        assert_eq!(is_now, 0);
+    }
+
+    #[test]
+    fn a_scoped_session_drops_only_an_open_task() {
+        let (conn, tmp) = env();
+        let (mine, _, _) = scope_fixture(&conn, &tmp);
+        let drop = format!(r#"{{"task_id":{mine},"state":"dropped"}}"#);
+        for state in ["in_progress", "done"] {
+            dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_update",
+                &format!(r#"{{"task_id":{mine},"state":"{state}"}}"#)).unwrap();
+            let e = dispatch(&conn, &scoped(&tmp, mine), SessionKind::Import, "task_update", &drop)
+                .unwrap_err();
+            assert_eq!(e.kind, "rejected", "dropped a task that was {state}");
+        }
+        dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_update",
+            &format!(r#"{{"task_id":{mine},"state":"open"}}"#)).unwrap();
+        let out =
+            dispatch(&conn, &scoped(&tmp, mine), SessionKind::Import, "task_update", &drop).unwrap();
+        assert_eq!(out["state"], "dropped");
+    }
+
+    #[test]
     fn schemas_cover_the_registry_and_are_objects() {
-        for kind in [SessionKind::Nightly, SessionKind::Checkin, SessionKind::Talk] {
+        for kind in
+            [SessionKind::Nightly, SessionKind::Checkin, SessionKind::Talk, SessionKind::Import]
+        {
             let schemas = schemas(kind);
             assert_eq!(schemas.len(), registry(kind).len());
             for s in schemas {

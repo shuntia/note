@@ -60,6 +60,19 @@ mod tests {
         assert!(err.contains("missing"), "{err}");
     }
 
+    /// The shipped defaults are what an un-overridden server loads, so every
+    /// editable name must resolve to a file in the repo's config tree.
+    #[test]
+    fn every_editable_prompt_ships_a_default() {
+        let config = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("config");
+        assert!(EDITABLE.contains(&"import"));
+        for name in EDITABLE {
+            let text = load(&config, "nobody", name).unwrap();
+            assert!(!text.trim().is_empty(), "{name} ships an empty prompt");
+        }
+        assert!(load(&config, "nobody", "import").unwrap().contains("task_split"));
+    }
+
     #[test]
     fn save_overrides_and_reset_restores_the_default() {
         let tmp = tempfile::tempdir().unwrap();
