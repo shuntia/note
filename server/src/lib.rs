@@ -16,6 +16,7 @@ pub mod push_subs;
 pub mod runner;
 pub mod talk;
 pub mod tasks;
+pub mod tokens;
 pub mod templates;
 pub mod tools;
 pub mod totp;
