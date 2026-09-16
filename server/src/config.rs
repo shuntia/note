@@ -81,6 +81,26 @@ impl Default for AdminConfig {
     }
 }
 
+pub const CATEGORY_MEMBER: &str = "member";
+pub const CATEGORY_TEST: &str = "test";
+pub const CATEGORIES: [&str; 2] = [CATEGORY_MEMBER, CATEGORY_TEST];
+
+/// The background work that spends model tokens without the user asking for it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Features {
+    pub nightly: bool,
+    pub checkins: bool,
+}
+
+impl Features {
+    /// A test account exercises the API and should cost nothing while idle, so
+    /// it starts with every background feature off and a member with them on.
+    pub fn for_category(category: &str) -> Self {
+        let on = category != CATEGORY_TEST;
+        Self { nightly: on, checkins: on }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct UserConfig {
     pub display_name: String,
@@ -92,6 +112,10 @@ pub struct UserConfig {
     pub show_arc_between_sessions: bool,
     #[serde(default = "default_counter")]
     pub counter: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nightly_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkins_enabled: Option<bool>,
 }
 
 fn default_nightly_time() -> String {
@@ -107,6 +131,16 @@ fn default_counter() -> String {
 }
 
 impl UserConfig {
+    /// The user's own toggles where they set one, the category's default where
+    /// they did not.
+    pub fn features(&self, category: &str) -> Features {
+        let default = Features::for_category(category);
+        Features {
+            nightly: self.nightly_enabled.unwrap_or(default.nightly),
+            checkins: self.checkins_enabled.unwrap_or(default.checkins),
+        }
+    }
+
     pub fn load(config_dir: &Path, user: &str) -> anyhow::Result<Self> {
         let raw = std::fs::read_to_string(config_dir.join("users").join(user).join("user.toml")).ok();
         Self::from_overlay(config_dir, raw.as_deref())
@@ -205,6 +239,41 @@ mod tests {
         assert_eq!(UserConfig::load(tmp.path(), "a").unwrap().nightly_time, "03:00");
         write(tmp.path(), "users/aki/user.toml", "nightly_time = \"4:00\"\n");
         assert!(UserConfig::load(tmp.path(), "aki").is_err());
+    }
+
+    #[test]
+    fn background_features_default_off_for_test_accounts() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), "defaults/user.toml",
+            "display_name = \"X\"\ntimezone = \"UTC\"\ntemplate = \"default\"\n");
+
+        let cfg = UserConfig::load(tmp.path(), "aki").unwrap();
+        let on = cfg.features(CATEGORY_MEMBER);
+        assert!(on.nightly && on.checkins);
+        let off = cfg.features(CATEGORY_TEST);
+        assert!(!off.nightly && !off.checkins);
+
+        write(tmp.path(), "users/aki/user.toml", "nightly_enabled = true\n");
+        let cfg = UserConfig::load(tmp.path(), "aki").unwrap();
+        let f = cfg.features(CATEGORY_TEST);
+        assert!(f.nightly, "an explicit toggle beats the category default");
+        assert!(!f.checkins);
+
+        write(tmp.path(), "users/aki/user.toml", "checkins_enabled = false\n");
+        assert!(!UserConfig::load(tmp.path(), "aki").unwrap().features(CATEGORY_MEMBER).checkins);
+    }
+
+    #[test]
+    fn saving_keeps_untouched_toggles_on_their_category_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), "defaults/user.toml",
+            "display_name = \"X\"\ntimezone = \"UTC\"\ntemplate = \"default\"\n");
+        let mut cfg = UserConfig::load(tmp.path(), "aki").unwrap();
+        cfg.timezone = "Asia/Tokyo".into();
+        cfg.save(tmp.path(), "aki").unwrap();
+        let back = UserConfig::load(tmp.path(), "aki").unwrap();
+        assert!(!back.features(CATEGORY_TEST).nightly);
+        assert!(back.features(CATEGORY_MEMBER).nightly);
     }
 
     #[test]

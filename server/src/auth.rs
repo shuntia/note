@@ -117,6 +117,25 @@ pub fn create_user(conn: &Connection, username: &str, password: &str, admin: boo
     Ok(conn.last_insert_rowid())
 }
 
+pub fn category(conn: &Connection, username: &str) -> Result<Option<String>> {
+    Ok(conn
+        .query_row("SELECT category FROM users WHERE username = ?1", [username], |r| r.get(0))
+        .optional()?)
+}
+
+/// Moves an account between categories; `false` means there is no such user.
+pub fn set_category(conn: &Connection, username: &str, category: &str) -> Result<bool> {
+    anyhow::ensure!(
+        crate::config::CATEGORIES.contains(&category),
+        "unknown category {category:?}"
+    );
+    let n = conn.execute(
+        "UPDATE users SET category = ?1 WHERE username = ?2",
+        (category, username),
+    )?;
+    Ok(n > 0)
+}
+
 fn dummy_hash() -> &'static str {
     static DUMMY: OnceLock<String> = OnceLock::new();
     DUMMY.get_or_init(|| {
@@ -220,6 +239,7 @@ pub struct CurrentUser {
     pub id: i64,
     pub username: String,
     pub admin: bool,
+    pub category: String,
     pub session_token: String,
 }
 
@@ -234,17 +254,17 @@ impl FromRequestParts<AppState> for CurrentUser {
             .value()
             .to_string();
         let conn = state.db.lock().unwrap();
-        let row: Option<(i64, String, String, String, bool)> = conn
+        let row: Option<(i64, String, String, String, bool, String)> = conn
             .query_row(
-                "SELECT u.id, u.username, u.role, s.expires_at, u.disabled
+                "SELECT u.id, u.username, u.role, s.expires_at, u.disabled, u.category
                  FROM sessions s JOIN users u ON u.id = s.user_id
                  WHERE s.token = ?1",
                 [&token],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
             )
             .optional()
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        let Some((id, username, role, expires_at, disabled)) = row else {
+        let Some((id, username, role, expires_at, disabled, category)) = row else {
             return Err(StatusCode::UNAUTHORIZED);
         };
         let expires: jiff::Timestamp = expires_at.parse().map_err(|_| StatusCode::UNAUTHORIZED)?;
@@ -255,6 +275,7 @@ impl FromRequestParts<AppState> for CurrentUser {
             id,
             username,
             admin: role == "admin",
+            category,
             session_token: token,
         })
     }
@@ -324,6 +345,20 @@ mod tests {
         }
         assert!(create_user(&conn, "aki_2", "pw", false).is_ok());
         assert!(create_user(&conn, &"a".repeat(MAX_USERNAME_LEN), "pw", false).is_ok());
+    }
+
+    #[test]
+    fn users_are_members_until_put_in_another_category() {
+        let conn = crate::db::open_memory().unwrap();
+        create_user(&conn, "aki", "pw", false).unwrap();
+        assert_eq!(category(&conn, "aki").unwrap().as_deref(), Some("member"));
+
+        assert!(set_category(&conn, "aki", "test").unwrap());
+        assert_eq!(category(&conn, "aki").unwrap().as_deref(), Some("test"));
+
+        assert!(!set_category(&conn, "nobody", "test").unwrap());
+        assert!(set_category(&conn, "aki", "vip").is_err());
+        assert_eq!(category(&conn, "aki").unwrap().as_deref(), Some("test"));
     }
 
     #[test]

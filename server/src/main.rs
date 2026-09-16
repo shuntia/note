@@ -5,7 +5,7 @@ use note_server::{
 };
 use std::path::PathBuf;
 
-const USAGE: &str = "usage: note-server [create-user <name> <password> [--admin] | totp-generate | totp-uri]";
+const USAGE: &str = "usage: note-server [create-user <name> <password> [--admin] [--test] | set-category <name> <member|test> | totp-generate | totp-uri]";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -46,9 +46,26 @@ async fn main() -> anyhow::Result<()> {
         Some("create-user") => {
             let name = args.get(2).context(USAGE)?;
             let pass = args.get(3).context(USAGE)?;
-            let admin = args.get(4).map(String::as_str) == Some("--admin");
+            let flags = &args[4.min(args.len())..];
+            let admin = flags.iter().any(|f| f == "--admin");
+            let category = if flags.iter().any(|f| f == "--test") {
+                note_server::config::CATEGORY_TEST
+            } else {
+                note_server::config::CATEGORY_MEMBER
+            };
+            if let Some(unknown) = flags.iter().find(|f| *f != "--admin" && *f != "--test") {
+                anyhow::bail!("unknown flag {unknown:?}\n{USAGE}");
+            }
             auth::create_user(&conn, name, pass, admin)?;
-            println!("created {name}");
+            auth::set_category(&conn, name, category)?;
+            println!("created {name} ({category})");
+            return Ok(());
+        }
+        Some("set-category") => {
+            let name = args.get(2).context(USAGE)?;
+            let category = args.get(3).context(USAGE)?;
+            anyhow::ensure!(auth::set_category(&conn, name, category)?, "no user {name}");
+            println!("{name} is now {category}");
             return Ok(());
         }
         Some(other) => anyhow::bail!("unknown command {other:?}\n{USAGE}"),
