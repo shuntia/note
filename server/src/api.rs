@@ -29,6 +29,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/conversations/{id}/messages", get(conversation_messages))
         .route("/api/settings", get(settings_get).put(settings_put))
+        .route("/api/notify/test", post(notify_test))
         .route(
             "/api/prompts/{name}",
             get(prompt_get).put(prompt_put).delete(prompt_delete),
@@ -736,14 +737,26 @@ struct SettingsPatch {
     counter: Option<String>,
     nightly_enabled: Option<bool>,
     checkins_enabled: Option<bool>,
+    ntfy_topic: Option<String>,
     alerts: Option<Vec<AlertPatch>>,
 }
 
+/// The prefix the user's default topic is built from, whether or not the
+/// channel is configured, so Settings can always name the topic to subscribe to.
+fn ntfy_topic_prefix(state: &AppState) -> &str {
+    state
+        .ntfy_topic_prefix
+        .as_deref()
+        .unwrap_or(crate::config::DEFAULT_NTFY_TOPIC_PREFIX)
+}
+
 fn settings_body(
+    state: &AppState,
     cfg: &crate::config::UserConfig,
-    category: &str,
+    user: &CurrentUser,
     schedule: Vec<crate::templates::ScheduleRow>,
 ) -> serde_json::Value {
+    let category = user.category.as_str();
     let features = cfg.features(category);
     serde_json::json!({
         "display_name": cfg.display_name,
@@ -755,6 +768,8 @@ fn settings_body(
         "category": category,
         "nightly_enabled": features.nightly,
         "checkins_enabled": features.checkins,
+        "ntfy_enabled": state.ntfy_topic_prefix.is_some(),
+        "ntfy_topic": cfg.ntfy_topic_for(ntfy_topic_prefix(state), &user.username),
         "schedule": schedule,
     })
 }
@@ -779,6 +794,14 @@ fn invalid_field(field: &str, requirement: &str) -> axum::response::Response {
         .into_response()
 }
 
+fn unprocessable_field(field: &str, requirement: &str) -> axum::response::Response {
+    (
+        StatusCode::UNPROCESSABLE_ENTITY,
+        Json(serde_json::json!({ "error": format!("{field} {requirement}") })),
+    )
+        .into_response()
+}
+
 /// The effective settings plus the two closed choice lists the client needs to
 /// render them.
 async fn settings_get(user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
@@ -793,7 +816,7 @@ async fn settings_get(user: CurrentUser, State(state): State<AppState>) -> impl 
     zones.sort_unstable();
     let templates = crate::templates::available(&state.config_dir, &user.username);
     let schedule = schedule_rows(&state, &user.username, &cfg.template);
-    let mut body = settings_body(&cfg, &user.category, schedule);
+    let mut body = settings_body(&state, &cfg, &user, schedule);
     body["templates"] = serde_json::json!(templates);
     body["timezones"] = serde_json::json!(zones);
     Json(body).into_response()
@@ -860,6 +883,19 @@ async fn settings_put(
     if let Some(on) = req.checkins_enabled {
         cfg.checkins_enabled = Some(on);
     }
+    if let Some(topic) = req.ntfy_topic {
+        let topic = topic.trim();
+        if topic.is_empty() {
+            cfg.ntfy_topic = None;
+        } else if !crate::channels::ntfy::valid_topic(topic) {
+            return unprocessable_field(
+                "ntfy_topic",
+                "must be 1 to 64 characters of letters, digits, _ or -",
+            );
+        } else {
+            cfg.ntfy_topic = Some(topic.to_string());
+        }
+    }
     if let Some(alerts) = req.alerts {
         let changes: Vec<(usize, bool)> = alerts.iter().map(|a| (a.index, a.alert)).collect();
         if let Err(e) =
@@ -870,7 +906,33 @@ async fn settings_put(
     }
     let schedule = schedule_rows(&state, &user.username, &cfg.template);
     match cfg.save(&state.config_dir, &user.username) {
-        Ok(()) => Json(settings_body(&cfg, &user.category, schedule)).into_response(),
+        Ok(()) => Json(settings_body(&state, &cfg, &user, schedule)).into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+/// Runs the delivery ladder the way a fired event does, so the reply names the
+/// channel that would actually reach the user right now.
+async fn notify_test(user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
+    let msg = crate::channels::OutboundMessage {
+        title: "Note".into(),
+        body: "Test notification".into(),
+        urgency: crate::channels::Urgency::Normal,
+        event_id: None,
+    };
+    let db = state.db.clone();
+    let ladder = state.channels.clone();
+    let via = tokio::task::spawn_blocking(move || {
+        crate::channels::deliver_via(&db, &ladder, user.id, &user.username, &msg)
+    })
+    .await;
+    match via {
+        Ok(Some(name)) => Json(serde_json::json!({ "via": name })).into_response(),
+        Ok(None) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({ "error": "no channel could reach you" })),
+        )
+            .into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
