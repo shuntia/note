@@ -25,29 +25,35 @@ Homework: `{"task_id": <id>, "homework": true, ...}` with the fields below.
 line between them:
 
 - 1-2 sentences on what the task is about and what must be done;
-- a "Hand in:" line saying what gets submitted and how;
-- a "Requirements:" line listing only hard constraints stated in the text
-  (length, format, citation style, rubric criteria and points, group size).
+- a "Hand in:" line only when the text states what gets submitted and how, or
+  names another platform where the work is done ("Hand in: completed on
+  Positive Physics, nothing to upload");
+- a "Requirements:" line only when the text states hard constraints (length,
+  format, citation style, rubric criteria and points, group size).
 
-Leave the "Hand in:" and the "Requirements:" line out entirely when there is
-nothing to say. Never write "Hand in: none", "No submission", "Requirements:
-None stated" or anything like them, and never guess the platform. Never put a
-due date in Requirements or anywhere else in the description — the due date
-lives in the notes.
+Leave the "Hand in:" and the "Requirements:" line out entirely otherwise. Never
+write "Hand in: none", "No submission", "be ready for a quiz", "Requirements:
+None stated", a restatement of the task, or anything else the text does not
+say, and never guess the platform. Never put a due date in Requirements or
+anywhere else in the description — the due date lives in the notes.
 
 `duration_min` — focused minutes for a high-school student, rounded to 5. Leave
 it out when the work is impossible to judge.
 
 `steps` — 2 to 5 concrete ordered actions, each title under 100 characters,
 each duration in whole 5-minute blocks, together summing to roughly the
-estimate. Leave the field out for a pure reading with nothing to do. The user
-message lists the steps the task already has: when it has any, they are kept
+estimate. Leave the field out for a pure reading or a single read-through of
+slides or a study guide — one continuous activity is not split. A step's title
+is the work itself: never a step whose only action is opening, logging in,
+finding or navigating to something. The user message lists the steps the task
+already has: when it has any, they are kept
 and yours are ignored, so send none — and if the new text really invalidates
 them, say so in one line of the description.
 
 A title-only task — no description, and no attachment text in the context —
-gets one sentence saying what the title implies. Do not invent steps for it,
-and leave `duration_min` out unless the title makes the work obvious. A file
+gets a description of exactly one sentence saying what the title implies — no
+"Hand in:" line, no "Requirements:" line. Do not invent steps for it, and leave
+`duration_min` out unless the title makes the work obvious. A file
 name is not content: when all you have is a template's or an attachment's file
 name, treat the task as title-only rather than guessing the work from the name.
 
