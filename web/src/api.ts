@@ -51,9 +51,21 @@ const WRITABLE_SETTINGS = [
 
 type SettingsPatch = Partial<Pick<Settings, (typeof WRITABLE_SETTINGS)[number]>>
 
-type NewTaskOpts = { duration_min?: number; parent_id?: number; is_now?: boolean }
+type NewTaskOpts = {
+  duration_min?: number
+  parent_id?: number
+  is_now?: boolean
+  due_at?: string | null
+  url?: string
+}
 
-type TaskPatch = { state?: TaskState; is_now?: boolean; notes?: string }
+type TaskPatch = {
+  state?: TaskState
+  is_now?: boolean
+  notes?: string
+  due_at?: string | null
+  url?: string
+}
 
 export class ApiError extends Error {
   constructor(

@@ -1346,6 +1346,8 @@ textarea.mono { font-family: var(--mono); }
 .task-title { font-size: 1rem; }
 .task-sub { font-size: 0.78rem; color: var(--faint); }
 .task-dur { font-size: 0.75rem; padding: 2px 9px; border-radius: 999px; border: 1px solid var(--line); color: var(--faint); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.task-due { border-color: transparent; padding-inline: 0; }
+.task-due.overdue { color: var(--ink); }
 .task-start { width: 36px; height: 36px; border: 0; border-radius: 50%; background: var(--sun); display: grid; place-items: center; cursor: pointer; flex: none; }
 .task-start svg { width: 16px; height: 16px; fill: var(--ink); }
 .task-more { position: relative; flex: none; }
