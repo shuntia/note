@@ -202,6 +202,16 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX idx_passkeys_user ON passkeys(user_id, id);
     ",
+    // v14
+    "
+    CREATE TABLE memory_sources (
+        user_id INTEGER NOT NULL REFERENCES users(id),
+        source_id TEXT NOT NULL,
+        memory_id TEXT NOT NULL,
+        PRIMARY KEY (user_id, source_id, memory_id)
+    );
+    ALTER TABLE memory_index ADD COLUMN until TEXT;
+    ",
 ];
 
 pub fn open(path: &Path) -> Result<Connection> {
