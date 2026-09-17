@@ -220,7 +220,10 @@ they overlap what is already there. Memory: `memory_query`, `memory_read`,
 `memory_write`. The day: `schedule_slide`, `schedule_snooze`, `schedule_drop`,
 `schedule_reshape`, and — nightly only — `schedule_insert` and `notify_send`.
 `context_edit` maintains the standing document, and `nightly_notes_write`
-(nightly only) replaces the brief tomorrow's sessions read.
+(nightly only) replaces the brief tomorrow's sessions read. The calendar:
+`calendar_list` everywhere, and `calendar_add`, `calendar_update`,
+`calendar_remove` and `calendar_skip` in talk and nightly sessions (see
+"Calendar and quiet windows").
 
 ### Memory API
 
@@ -248,6 +251,88 @@ slid within ±`slide_window_min` minutes of their template time (0 = unbounded);
 `drop` events can additionally be dropped by the agent. Snoozing is separate:
 any undecided event can be snoozed ("not now"), which re-fires it later and is
 not bounded by the slide window.
+
+## Calendar and quiet windows
+
+Beside the generated plan, each user keeps a calendar of the commitments the
+day is built around — school, work, a class, a commute. An entry is a title, a
+kind, a local `HH:MM` range, and either a weekday set or a single date:
+
+- `fixed` — a hard commitment. The day is planned around it, and nothing may be
+  scheduled inside it.
+- `busy` — softer: a commute, a meal. It shows on the day and may be quiet, but
+  it never blocks scheduling.
+- `note` — informational (bin day, a birthday), and never quiet.
+
+`quiet` defaults on and is forced off for a `note`. A recurring entry carries
+`days` as a bitmask (Mon = 1 … Sun = 64) and optional `from_date`/`until_date`
+bounds; a one-off entry carries `on_date` and no days. Any single occurrence can
+be skipped by date — a day off school — without touching the entry. Times are
+read in the user's configured timezone, occurrences are computed per local date,
+and a calendar holds at most 100 entries.
+
+### What a quiet window does
+
+While the local time is inside a quiet occurrence, deliveries wait. When an
+event comes due there, the runner moves its wall time to the end of the window
+instead of firing it, writes one `delivery_deferred` row
+(`event <id> held until HH:MM by calendar <title>`), and the event then fires at
+that time by the normal path. Overlapping and adjacent quiet occurrences merge
+into one window, so a day of back-to-back commitments defers once, to the end of
+the last of them. Silent routines (`alert = 0`) and blocks never deliver at all,
+so nothing about them changes.
+
+Two more places read the calendar:
+
+- The nightly plan is generated around it. A routine that would start inside a
+  `fixed` occurrence moves to the end of that occurrence if it can slide, is
+  left out of the day if it can be dropped, and stands where the template put it
+  if it is `fixed`. Either adjustment writes a `plan_adjusted` row. A moved
+  routine's `orig_wall_time` is where the day put it, not the template time, so
+  its slide window still measures from where it actually sits.
+- `schedule_slide`, `schedule_reshape` and `schedule_insert` refuse a target
+  inside a `fixed` occurrence, naming it: `10:00 is inside school 08:15-15:30`.
+
+The agent's session context also carries it: `# Now` gains a
+`Quiet until HH:MM (<title>)` line while a quiet window is running, and
+`# Today's plan` lists the day's occurrences under a `Calendar:` sub-line above
+the plan events (at most 12 lines).
+
+### Calendar API
+
+All cookie-authenticated, scoped to the caller, and `{"error": …}` on every
+failure — `422` for a rejected field or an unknown one, `409` at the 100-entry
+cap, `404` for an entry that is not the caller's, `400` for malformed JSON.
+
+| Route | Body | Effect |
+|---|---|---|
+| `GET /api/calendar` | — | `{"entries": [ … ]}`, each row with its `exceptions` |
+| `POST /api/calendar` | `{title, kind, quiet?, start_time, end_time, days?, on_date?, from_date?, until_date?}` | `201` with the row |
+| `PATCH /api/calendar/{id}` | any subset of the same | the updated row |
+| `DELETE /api/calendar/{id}` | — | `204` |
+| `POST /api/calendar/{id}/skip` | `{date}` | `204`; that occurrence stops happening |
+| `DELETE /api/calendar/{id}/skip/{date}` | — | `204`; it happens again |
+| `GET /api/calendar/day/{date}` | — | `{date, occurrences: [{entry_id, title, kind, quiet, start, end}], quiet_now}` |
+
+A row is `{id, title, kind, quiet, start_time, end_time, days, day_names,
+on_date, from_date, until_date, created_at, updated_at, exceptions}`. On a
+`PATCH`, `days` above zero makes an entry recurring and clears its `on_date`, a
+non-blank `on_date` makes it one-off and clears its days, and an empty string
+clears `from_date` or `until_date`. `quiet_now` is the `HH:MM` the current quiet
+window ends, and is `null` for any date but today.
+
+`GET /api/plan/today` answers its array of events as before; add `?calendar=1`
+and it answers `{"events": [ … ], "calendar": [ … occurrences … ]}` instead, so a
+client can draw the day and its commitments from one call.
+
+### Calendar tools
+
+`calendar_list {date?, days?}` reads 1 to 14 days from `date` (default today) as
+`{days: [{date, occurrences: [ … ]}]}`. `calendar_add`, `calendar_update`,
+`calendar_remove` and `calendar_skip` write, and take weekdays as names
+(`["mon", "tue"]`) in both directions — the bitmask stays in the database. Every
+session type reads; only talk and nightly sessions write, and a scoped session
+(an imported task, an inbox item) reaches none of them.
 
 ## Providers & the agent
 
