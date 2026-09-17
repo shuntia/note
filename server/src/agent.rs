@@ -45,6 +45,20 @@ pub struct SessionOutcome {
     pub turns: usize,
     pub tool_calls: usize,
     pub steps: Vec<SessionStep>,
+    /// Every round's reasoning text, blank-line separated, for providers that
+    /// return any. Not persisted with the transcript.
+    pub reasoning: String,
+}
+
+/// One step of a session as it happens, for a caller that shows progress while
+/// the session runs. `index` addresses the matching entry of `steps`.
+#[derive(Debug, Clone, Copy)]
+pub enum AgentEvent<'a> {
+    Thinking { text: &'a str },
+    ToolCall { index: usize, name: &'a str, args: &'a str },
+    ToolResult { index: usize, name: &'a str, result: &'a str, is_error: bool },
+    Reply { text: &'a str },
+    Error { message: &'a str },
 }
 
 /// Runs one agent session: chat, dispatch tool calls, feed results back, until
@@ -61,6 +75,22 @@ pub fn run_session(
     now: jiff::Timestamp,
     history: &[Message],
     opening: &str,
+) -> Result<SessionOutcome> {
+    run_session_watched(deps, user_id, username, kind, now, history, opening, &|_| {})
+}
+
+/// `run_session` with a progress sink: every event is handed over as it
+/// happens, on the session's own thread, before the session moves on.
+#[allow(clippy::too_many_arguments)]
+pub fn run_session_watched(
+    deps: &SessionDeps,
+    user_id: i64,
+    username: &str,
+    kind: SessionKind,
+    now: jiff::Timestamp,
+    history: &[Message],
+    opening: &str,
+    on_event: &dyn Fn(AgentEvent),
 ) -> Result<SessionOutcome> {
     // An import session briefs one task and an inbox session judges one item,
     // both on a caller's behalf: each gets its own instructions and none of the
@@ -88,22 +118,38 @@ pub fn run_session(
     let mut tool_calls = 0;
     let mut steps = Vec::new();
     let mut last_text = String::new();
+    let mut reasoning = String::new();
     let max_turns = if single_call(kind) { IMPORT_MAX_TURNS } else { MAX_TURNS };
 
     while turns < max_turns {
-        let resp = deps
-            .llm
-            .chat(&ChatRequest { system: &system, messages: &messages, tools: &schemas })?;
+        let req = ChatRequest { system: &system, messages: &messages, tools: &schemas };
+        let (resp, thinking) = match deps.llm.chat_with_reasoning(&req) {
+            Ok(v) => v,
+            Err(e) => {
+                on_event(AgentEvent::Error { message: &e.to_string() });
+                return Err(e);
+            }
+        };
         turns += 1;
+        if !thinking.trim().is_empty() {
+            on_event(AgentEvent::Thinking { text: &thinking });
+            if !reasoning.is_empty() {
+                reasoning.push_str("\n\n");
+            }
+            reasoning.push_str(thinking.trim());
+        }
         last_text = resp.text;
         if resp.tool_calls.is_empty() {
+            on_event(AgentEvent::Reply { text: &last_text });
             finish(deps, user_id, kind, turns, tool_calls, "agent_session")?;
-            return Ok(SessionOutcome { reply: last_text, turns, tool_calls, steps });
+            return Ok(SessionOutcome { reply: last_text, turns, tool_calls, steps, reasoning });
         }
         let calls = resp.tool_calls.clone();
         messages.push(Message::Assistant { text: last_text.clone(), tool_calls: resp.tool_calls });
         for call in calls {
             tool_calls += 1;
+            let index = steps.len();
+            on_event(AgentEvent::ToolCall { index, name: &call.name, args: &call.args });
             let vectors = tools::prepare(deps.embeddings, &call.name, &call.args);
             let (content, is_error) = {
                 let conn = crate::db_guard(deps.db);
@@ -126,6 +172,7 @@ pub fn run_session(
                 }
             };
             let terminal = !is_error && tools::is_terminal(kind, &call.name);
+            on_event(AgentEvent::ToolResult { index, name: &call.name, result: &content, is_error });
             steps.push(SessionStep {
                 name: call.name,
                 args: call.args,
@@ -133,14 +180,16 @@ pub fn run_session(
                 is_error,
             });
             if terminal {
+                on_event(AgentEvent::Reply { text: &content });
                 finish(deps, user_id, kind, turns, tool_calls, "agent_session")?;
-                return Ok(SessionOutcome { reply: content, turns, tool_calls, steps });
+                return Ok(SessionOutcome { reply: content, turns, tool_calls, steps, reasoning });
             }
             messages.push(Message::ToolResult { call_id: call.id, content, is_error });
         }
     }
+    on_event(AgentEvent::Reply { text: &last_text });
     finish(deps, user_id, kind, turns, tool_calls, "agent_max_turns")?;
-    Ok(SessionOutcome { reply: last_text, turns, tool_calls, steps })
+    Ok(SessionOutcome { reply: last_text, turns, tool_calls, steps, reasoning })
 }
 
 fn finish(
@@ -200,6 +249,98 @@ mod tests {
 
     fn now() -> jiff::Timestamp {
         "2026-08-31T04:00:00Z".parse().unwrap()
+    }
+
+    /// Every event as `kind:detail`, in the order the session emitted it.
+    fn trace(ev: AgentEvent) -> String {
+        match ev {
+            AgentEvent::Thinking { text } => format!("thinking:{text}"),
+            AgentEvent::ToolCall { index, name, .. } => format!("call:{index}:{name}"),
+            AgentEvent::ToolResult { index, name, is_error, .. } => {
+                format!("result:{index}:{name}:{is_error}")
+            }
+            AgentEvent::Reply { text } => format!("reply:{text}"),
+            AgentEvent::Error { message } => format!("error:{message}"),
+        }
+    }
+
+    #[test]
+    fn a_watched_session_reports_thinking_calls_results_then_the_reply() {
+        let (db, tmp) = env();
+        let llm = MockLLM::scripted(vec![
+            ChatResponse {
+                text: String::new(),
+                tool_calls: vec![
+                    ToolCall {
+                        id: "c1".into(),
+                        name: "task_create".into(),
+                        args: r#"{"title":"buy milk"}"#.into(),
+                    },
+                    ToolCall { id: "c2".into(), name: "memory_query".into(), args: "{}".into() },
+                ],
+            },
+            ChatResponse { text: "done".into(), tool_calls: vec![] },
+        ])
+        .thinking(vec!["a task, then a lookup"]);
+        let seen = std::cell::RefCell::new(Vec::new());
+        let out = run_session_watched(
+            &deps(&db, &tmp, &llm),
+            1,
+            "aki",
+            SessionKind::Talk,
+            now(),
+            &[],
+            "add buy milk",
+            &|ev| seen.borrow_mut().push(trace(ev)),
+        )
+        .unwrap();
+        assert_eq!(
+            seen.into_inner(),
+            vec![
+                "thinking:a task, then a lookup",
+                "call:0:task_create",
+                "result:0:task_create:false",
+                "call:1:memory_query",
+                "result:1:memory_query:true",
+                "reply:done",
+            ]
+        );
+        assert_eq!(out.reasoning, "a task, then a lookup");
+        assert_eq!(out.steps.len(), 2);
+    }
+
+    #[test]
+    fn a_failing_provider_reports_an_error_event() {
+        let (db, tmp) = env();
+        struct Broken;
+        impl crate::providers::LLMProvider for Broken {
+            fn chat(&self, _req: &ChatRequest) -> Result<ChatResponse> {
+                anyhow::bail!("provider is down")
+            }
+        }
+        let seen = std::cell::RefCell::new(Vec::new());
+        let deps = SessionDeps {
+            db: &db,
+            config_dir: tmp.path(),
+            data_dir: tmp.path(),
+            llm: &Broken,
+            embeddings: None,
+            task_scope: None,
+            token_id: None,
+        };
+        let err = run_session_watched(
+            &deps,
+            1,
+            "aki",
+            SessionKind::Talk,
+            now(),
+            &[],
+            "hi",
+            &|ev| seen.borrow_mut().push(trace(ev)),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("provider is down"));
+        assert_eq!(seen.into_inner(), vec!["error:provider is down"]);
     }
 
     #[test]
