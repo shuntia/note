@@ -16,6 +16,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/me", get(me))
         .route("/api/tasks", get(tasks_list).post(tasks_create))
         .route("/api/tasks/{id}", patch(tasks_update).delete(tasks_delete))
+        .route(
+            "/api/tasks/by-external/{external_id}",
+            axum::routing::put(task_upsert).delete(task_delete_by_external),
+        )
         .route("/api/tasks/{id}/split", post(task_split))
         .route("/api/tasks/{id}/flatten", post(task_flatten))
         .route("/api/tasks/{id}/agent", post(task_agent))
@@ -233,6 +237,52 @@ async fn task_flatten(
         }
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(e) => task_error(e),
+    }
+}
+
+/// Mirrors one task from another system. The body is a task without its
+/// `external_id`, which the path carries; a task the user deleted is declined
+/// rather than made again.
+async fn task_upsert(
+    user: TaskPrincipal,
+    State(state): State<AppState>,
+    Path(external_id): Path<String>,
+    Json(req): Json<crate::tasks::NewTask>,
+) -> impl IntoResponse {
+    if req.external_id.as_deref().is_some_and(|id| id != external_id) {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({ "error": "external_id belongs to the path, not the body" })),
+        )
+            .into_response();
+    }
+    let conn = state.db();
+    match crate::tasks::upsert(&conn, user.id, &external_id, req) {
+        Ok(crate::tasks::Upsert::Created(n)) => (StatusCode::CREATED, Json(n)).into_response(),
+        Ok(crate::tasks::Upsert::Updated(n)) => Json(n).into_response(),
+        Ok(crate::tasks::Upsert::Declined { deleted_at }) => (
+            StatusCode::GONE,
+            Json(serde_json::json!({
+                "error": "the user deleted this task; it is not recreated",
+                "external_id": external_id,
+                "deleted_at": deleted_at,
+            })),
+        )
+            .into_response(),
+        Err(e) => task_error(e),
+    }
+}
+
+async fn task_delete_by_external(
+    user: TaskPrincipal,
+    State(state): State<AppState>,
+    Path(external_id): Path<String>,
+) -> impl IntoResponse {
+    let conn = state.db();
+    match crate::tasks::delete_by_external(&conn, user.id, &external_id) {
+        Ok(true) => StatusCode::NO_CONTENT,
+        Ok(false) => StatusCode::NOT_FOUND,
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
 

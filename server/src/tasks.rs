@@ -99,7 +99,9 @@ pub struct NewTask {
     #[serde(default)]
     pub is_now: bool,
     #[serde(default)]
-    pub due_at: Option<String>,
+    pub state: Option<String>,
+    #[serde(default, deserialize_with = "present")]
+    pub due_at: Option<Option<String>>,
     #[serde(default)]
     pub url: Option<String>,
     #[serde(default)]
@@ -353,8 +355,12 @@ pub fn create(
     let notes = new.notes.unwrap_or_default();
     checked_text("description", &description)?;
     checked_text("notes", &notes)?;
-    let due_at = new.due_at.as_deref().map(checked_due).transpose()?;
+    let due_at = new.due_at.flatten().as_deref().map(checked_due).transpose()?;
     checked_due_placement(new.parent_id, due_at.as_deref())?;
+    let state = match new.state.as_deref() {
+        Some(s) if !STATES.contains(&s) => return Err(UpdateError::InvalidState(s.to_owned())),
+        other => other.unwrap_or("open").to_owned(),
+    };
     let url = checked_url(new.url.as_deref().unwrap_or_default())?;
     let external_id = new.external_id.as_deref().map(checked_external_id).transpose()?;
     let source = checked_source(new.source.as_deref().unwrap_or(source))?;
@@ -379,15 +385,16 @@ pub fn create(
     let duration_source = if duration.is_some() { actor.as_str() } else { "none" };
     conn.execute(
         "INSERT INTO tasks
-            (user_id, title, description, notes, source, parent_id, duration_min,
+            (user_id, title, description, notes, source, state, parent_id, duration_min,
              duration_source, is_now, due_at, url, external_id, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14)",
         rusqlite::params![
             user_id,
             &title,
             &description,
             &notes,
             &source,
+            &state,
             new.parent_id,
             duration,
             duration_source,
@@ -592,6 +599,110 @@ pub fn flatten(
     Ok(Some((n, removed)))
 }
 
+/// What an upsert did, so the route can say created, updated, or declined.
+pub enum Upsert {
+    Created(TaskNode),
+    Updated(TaskNode),
+    /// The user deleted this external task; it is not recreated.
+    Declined { deleted_at: String },
+}
+
+/// When this external id was buried.
+pub fn tombstone(
+    conn: &Connection,
+    user_id: i64,
+    external_id: &str,
+) -> rusqlite::Result<Option<String>> {
+    conn.query_row(
+        "SELECT deleted_at FROM task_tombstones WHERE user_id = ?1 AND external_id = ?2",
+        (user_id, external_id),
+        |r| r.get(0),
+    )
+    .optional()
+}
+
+fn bury(conn: &Connection, user_id: i64, external_id: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO task_tombstones (user_id, external_id, deleted_at)
+         VALUES (?1, ?2, ?3)",
+        (user_id, external_id, now()),
+    )?;
+    Ok(())
+}
+
+pub fn by_external(
+    conn: &Connection,
+    user_id: i64,
+    external_id: &str,
+) -> rusqlite::Result<Option<i64>> {
+    conn.query_row(
+        "SELECT id FROM tasks WHERE user_id = ?1 AND external_id = ?2",
+        (user_id, external_id),
+        |r| r.get(0),
+    )
+    .optional()
+}
+
+/// Mirrors one task from another system, keyed on `external_id`. The importer
+/// owns the title, the notes, the due date and the link; the description, the
+/// duration and the steps belong to whoever briefed the task, and the state
+/// belongs to the user: a dropped task stays dropped and a done one never
+/// reopens from the outside.
+pub fn upsert(
+    conn: &Connection,
+    user_id: i64,
+    external_id: &str,
+    new: NewTask,
+) -> Result<Upsert, UpdateError> {
+    let external_id = checked_external_id(external_id)?;
+    if let Some(deleted_at) = tombstone(conn, user_id, &external_id)? {
+        return Ok(Upsert::Declined { deleted_at });
+    }
+    let Some(id) = by_external(conn, user_id, &external_id)? else {
+        let made = create(
+            conn,
+            user_id,
+            NewTask { external_id: Some(external_id), ..new },
+            "import",
+            Actor::User,
+        )?;
+        let node = node(conn, user_id, made.id)?.expect("row was just created");
+        return Ok(Upsert::Created(node));
+    };
+    let before = get(conn, user_id, id)?.expect("row was just found");
+    if let Some(s) = new.state.as_deref() {
+        if !STATES.contains(&s) {
+            return Err(UpdateError::InvalidState(s.to_owned()));
+        }
+    }
+    let state = (before.state != "dropped" && before.state != "done"
+        && new.state.as_deref() == Some("done"))
+        .then(|| "done".to_owned());
+    let patch = TaskPatch {
+        title: Some(new.title),
+        notes: new.notes,
+        due_at: new.due_at,
+        url: new.url,
+        state,
+        ..Default::default()
+    };
+    update(conn, user_id, id, patch)?;
+    let node = node(conn, user_id, id)?.expect("row was just updated");
+    Ok(Upsert::Updated(node))
+}
+
+/// Removes the task the importer knows by this id, burying the id with it.
+pub fn delete_by_external(
+    conn: &Connection,
+    user_id: i64,
+    external_id: &str,
+) -> rusqlite::Result<bool> {
+    match by_external(conn, user_id, external_id)? {
+        Some(id) => delete(conn, user_id, id),
+        None => Ok(false),
+    }
+}
+
 /// Removes the task, its steps, and every event link to them. `false` when the
 /// task is not this user's.
 pub fn delete(conn: &Connection, user_id: i64, task_id: i64) -> rusqlite::Result<bool> {
@@ -602,13 +713,16 @@ pub fn delete(conn: &Connection, user_id: i64, task_id: i64) -> rusqlite::Result
 }
 
 /// The deletion itself, for callers that already hold a transaction.
+/// An imported task leaves a tombstone behind, so the next run of whatever
+/// created it sees a decision rather than a task to make again.
 pub(crate) fn delete_within(
     conn: &Connection,
     user_id: i64,
     task_id: i64,
 ) -> rusqlite::Result<bool> {
-    if get(conn, user_id, task_id)?.is_none() {
-        return Ok(false);
+    let Some(task) = get(conn, user_id, task_id)? else { return Ok(false) };
+    if let Some(external_id) = &task.external_id {
+        bury(conn, user_id, external_id)?;
     }
     conn.execute(
         "DELETE FROM event_tasks
