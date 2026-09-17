@@ -242,6 +242,45 @@ fn brief_error(status: StatusCode, message: &str) -> axum::response::Response {
     (status, Json(serde_json::json!({ "error": message }))).into_response()
 }
 
+/// The per-user daily spend ceiling both agent routes sit behind. Sessions are
+/// counted from the `agent_session` rows they already write, so the ceiling
+/// needs no state of its own.
+fn daily_cap_reached(state: &AppState, user_id: i64) -> bool {
+    let cap = state.agent_sessions_per_day;
+    if cap == 0 {
+        return false;
+    }
+    let since = jiff::Timestamp::now() - jiff::Span::new().hours(24);
+    let conn = state.db.lock().unwrap();
+    crate::log::agent_sessions_since(&conn, user_id, since).unwrap_or(0) >= cap
+}
+
+fn daily_cap_response() -> axum::response::Response {
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        Json(serde_json::json!({ "error": "daily session limit reached" })),
+    )
+        .into_response()
+}
+
+/// Turns a busy gate into the response both agent routes give: one session per
+/// user, `MAX_CONCURRENT_TALKS` across the server.
+fn session_busy_response(busy: crate::TalkBusy) -> axum::response::Response {
+    match busy {
+        crate::TalkBusy::UserBusy => (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({ "error": "a session is already in progress" })),
+        )
+            .into_response(),
+        crate::TalkBusy::Full => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(header::RETRY_AFTER, "5")],
+            Json(serde_json::json!({ "error": "the server is at capacity" })),
+        )
+            .into_response(),
+    }
+}
+
 fn log_brief_error(state: &AppState, user_id: i64, detail: &str) {
     let conn = state.db.lock().unwrap();
     let _ = crate::log::record(&conn, Some(user_id), "task_agent_error", detail);
@@ -292,6 +331,17 @@ async fn task_agent(
             &format!("context must be at most {MAX_BRIEF_CONTEXT} bytes"),
         );
     }
+    if daily_cap_reached(&state, user.id) {
+        return daily_cap_response();
+    }
+    let permit = match state.talk_gate.try_enter(user.id) {
+        Ok(p) => p,
+        Err(busy) => return session_busy_response(busy),
+    };
+    let token_id = match user.via {
+        auth::Credential::Token(id) => Some(id),
+        auth::Credential::Session => None,
+    };
     let (opening, snap) = {
         let conn = state.db.lock().unwrap();
         let failed = |detail: String| {
@@ -318,6 +368,9 @@ async fn task_agent(
     let rollback = snap.clone();
     let err_state = state.clone();
     let result = tokio::task::spawn_blocking(move || {
+        // held here, not in the handler future, so a cancelled request still
+        // holds the slot until the session it orphaned actually finishes
+        let _permit = permit;
         let deps = crate::agent::SessionDeps {
             db: &state.db,
             config_dir: &state.config_dir,
@@ -325,6 +378,7 @@ async fn task_agent(
             llm: state.llm.as_ref(),
             embeddings: state.embeddings.as_deref(),
             task_scope: Some(id),
+            token_id,
         };
         let session = crate::agent::run_session(
             &deps,
@@ -520,6 +574,9 @@ async fn talk(
             Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         }
     }
+    if daily_cap_reached(&state, user.id) {
+        return daily_cap_response();
+    }
     let permit = match state.talk_gate.try_enter(user.id) {
         Ok(p) => p,
         Err(crate::TalkBusy::UserBusy) => {
@@ -529,14 +586,7 @@ async fn talk(
             )
                 .into_response()
         }
-        Err(crate::TalkBusy::Full) => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                [(header::RETRY_AFTER, "5")],
-                Json(serde_json::json!({ "error": "the server is at capacity" })),
-            )
-                .into_response()
-        }
+        Err(busy) => return session_busy_response(busy),
     };
     let err_db = state.db.clone();
     let uid = user.id;
@@ -552,6 +602,7 @@ async fn talk(
             llm: state.llm.as_ref(),
             embeddings: state.embeddings.as_deref(),
             task_scope: None,
+            token_id: None,
         };
         let now = jiff::Timestamp::now();
         let history = match req_conversation {

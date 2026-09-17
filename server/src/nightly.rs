@@ -172,6 +172,7 @@ pub fn spawn(state: crate::AppState) {
                         llm: st.llm.as_ref(),
                         embeddings: st.embeddings.as_deref(),
                         task_scope: None,
+                        token_id: None,
                     };
                     let r = run_for_user(&deps, user_id, &username, now);
                     (r, username)
@@ -244,6 +245,7 @@ mod tests {
             llm,
             embeddings: None,
             task_scope: None,
+            token_id: None,
         }
     }
 

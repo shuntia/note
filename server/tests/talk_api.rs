@@ -524,3 +524,58 @@ async fn failed_session_persists_nothing() {
         .unwrap();
     assert_eq!(messages, 0);
 }
+
+#[tokio::test]
+async fn the_daily_session_cap_refuses_a_talk_turn() {
+    let (app, cookie, state, _cfg) = common::app_with_logged_in_user_and_state().await;
+    {
+        let conn = state.db.lock().unwrap();
+        for _ in 0..state.agent_sessions_per_day {
+            note_server::log::record(&conn, Some(1), "agent_session", "kind=Talk").unwrap();
+        }
+    }
+    let res = app
+        .oneshot(
+            Request::post("/api/talk")
+                .header(header::COOKIE, &cookie)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"message":"hi"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["error"], "daily session limit reached");
+}
+
+async fn talk_status(app: &axum::Router, cookie: &str) -> StatusCode {
+    app.clone()
+        .oneshot(
+            Request::post("/api/talk")
+                .header(header::COOKIE, cookie)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"message":"hi"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .status()
+}
+
+#[tokio::test]
+async fn a_zero_cap_lifts_the_daily_limit() {
+    let (_app, cookie, mut state, _cfg) = common::app_with_logged_in_user_and_state().await;
+    {
+        let conn = state.db.lock().unwrap();
+        note_server::log::record(&conn, Some(1), "agent_session", "kind=Talk").unwrap();
+    }
+    state.agent_sessions_per_day = 1;
+    assert_eq!(
+        talk_status(&note_server::api::router(state.clone()), &cookie).await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    state.agent_sessions_per_day = 0;
+    assert_eq!(talk_status(&note_server::api::router(state), &cookie).await, StatusCode::OK);
+}

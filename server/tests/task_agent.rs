@@ -407,3 +407,56 @@ async fn a_re_brief_keeps_the_existing_steps() {
     };
     assert!(opening.contains("draft"), "{opening}");
 }
+
+#[tokio::test]
+async fn a_second_brief_for_the_same_user_is_refused() {
+    let llm = Arc::new(MockLLM::scripted(vec![text("briefed")]));
+    let (app, cookie, state, _cfg) = common::app_with_logged_in_user_llm_and_state(llm).await;
+    make_task(&app, &cookie, "Essay").await;
+    let _permit = state.talk_gate.clone().try_enter(1).unwrap();
+
+    let (status, v) =
+        send(&app, cookie_auth(&cookie), Method::POST, "/api/tasks/1/agent", Some("{}")).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{v}");
+    assert_eq!(v["error"], "a session is already in progress");
+}
+
+#[tokio::test]
+async fn the_daily_session_cap_refuses_a_brief() {
+    let llm = Arc::new(MockLLM::scripted(vec![text("briefed")]));
+    let (app, cookie, state, _cfg) = common::app_with_logged_in_user_llm_and_state(llm).await;
+    make_task(&app, &cookie, "Essay").await;
+    {
+        let conn = state.db.lock().unwrap();
+        for _ in 0..state.agent_sessions_per_day {
+            note_server::log::record(&conn, Some(1), "agent_session", "kind=Import").unwrap();
+        }
+    }
+
+    let (status, v) =
+        send(&app, cookie_auth(&cookie), Method::POST, "/api/tasks/1/agent", Some("{}")).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{v}");
+    assert_eq!(v["error"], "daily session limit reached");
+}
+
+#[tokio::test]
+async fn a_bearer_session_is_attributed_to_its_token() {
+    let llm = Arc::new(MockLLM::scripted(vec![text("briefed")]));
+    let (app, cookie, state, _cfg) = common::app_with_logged_in_user_llm_and_state(llm).await;
+    make_task(&app, &cookie, "Essay").await;
+    let token = token_for(&state, 1);
+
+    let (status, v) = send(&app, bearer(&token), Method::POST, "/api/tasks/1/agent", Some("{}")).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+
+    let detail: String = {
+        let conn = state.db.lock().unwrap();
+        conn.query_row(
+            "SELECT detail FROM event_log WHERE kind = 'agent_session'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert!(detail.ends_with(" token=1"), "{detail}");
+}

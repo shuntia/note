@@ -109,6 +109,8 @@ pub struct AppState {
     pub admin_secrets: Arc<crate::admin::AdminSecrets>,
     pub passkeys: Arc<crate::security::PasskeyService>,
     pub providers_info: crate::admin::ProvidersInfo,
+    /// Per-user agent sessions allowed in any 24 h; 0 lifts the ceiling.
+    pub agent_sessions_per_day: u32,
     pub started_at: jiff::Timestamp,
 }
 
@@ -140,6 +142,7 @@ impl AppState {
             admin_secrets: Arc::new(crate::admin::AdminSecrets::default()),
             passkeys: Arc::new(crate::security::PasskeyService::default()),
             providers_info: crate::admin::ProvidersInfo::default(),
+            agent_sessions_per_day: crate::config::LimitsConfig::default().agent_sessions_per_day,
             started_at: jiff::Timestamp::now(),
         }
     }
@@ -151,6 +154,11 @@ impl AppState {
 
     pub fn with_passkeys(mut self, passkeys: crate::security::PasskeyService) -> Self {
         self.passkeys = Arc::new(passkeys);
+        self
+    }
+
+    pub fn with_limits(mut self, limits: &crate::config::LimitsConfig) -> Self {
+        self.agent_sessions_per_day = limits.agent_sessions_per_day;
         self
     }
 
