@@ -906,6 +906,43 @@ mod tests {
         assert!(!out.contains("description"), "{out}");
     }
 
+    fn dated(conn: &rusqlite::Connection, uid: i64, title: &str, is_now: bool, due: &str) -> i64 {
+        let id = task(conn, uid, title, "open", None, is_now, None, NOW);
+        conn.execute("UPDATE tasks SET due_at = ?1 WHERE id = ?2", (due, id)).unwrap();
+        id
+    }
+
+    #[test]
+    fn the_task_lists_carry_their_deadlines_soonest_first() {
+        let tmp = cfg_dir();
+        let (conn, uid) = user();
+        dated(&conn, uid, "essay", true, "2026-08-31T14:00:00Z");
+        dated(&conn, uid, "reading", false, "2026-09-05T10:00:00Z");
+        dated(&conn, uid, "quiz", false, "2026-08-30T14:00:00Z");
+        dated(&conn, uid, "lab", false, "2026-09-01T10:00:00Z");
+        task(&conn, uid, "loose", "open", None, false, None, NOW);
+
+        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        assert!(out.contains("Now:\n- essay [open] due today\n"), "{out}");
+        assert!(
+            out.contains(
+                "Later (4 open):\n- quiz overdue\n- lab due tomorrow\n                 - reading due 2026-09-05\n- loose\n"
+            ),
+            "{out}"
+        );
+        assert!(out.contains("Due soon: 2 in the next 3 days, 1 overdue"), "{out}");
+    }
+
+    #[test]
+    fn a_list_with_no_deadlines_says_nothing_about_them() {
+        let tmp = cfg_dir();
+        let (conn, uid) = user();
+        task(&conn, uid, "loose", "open", Some(15), false, None, NOW);
+        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        assert!(out.contains("- loose 15m\n"), "{out}");
+        assert!(!out.contains("Due soon"), "{out}");
+    }
+
     #[test]
     fn the_later_list_stops_at_ten_titles() {
         let tmp = cfg_dir();
