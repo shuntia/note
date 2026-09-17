@@ -29,6 +29,54 @@ async fn ws_route_requires_a_session() {
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 }
 
+/// The headers a browser sends to open a socket; without them the upgrade
+/// extractor answers before any of our own checks run.
+fn upgrade(uri: &str) -> axum::http::request::Builder {
+    Request::get(uri)
+        .header("connection", "upgrade")
+        .header("upgrade", "websocket")
+        .header("sec-websocket-version", "13")
+        .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+}
+
+#[tokio::test]
+async fn a_cross_site_upgrade_is_refused() {
+    let (app, cookie, _cfg) = common::app_with_logged_in_user().await;
+    for site in ["cross-site", "same-site"] {
+        let res = app
+            .clone()
+            .oneshot(
+                upgrade("/api/ws")
+                    .header("cookie", cookie.clone())
+                    .header("sec-fetch-site", site)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN, "{site}");
+    }
+}
+
+#[tokio::test]
+async fn a_user_at_the_socket_cap_is_refused_before_the_upgrade() {
+    let (app, cookie, state, _cfg) = common::app_with_logged_in_user_and_state().await;
+    let _held: Vec<_> = (0..note_server::channels::ws::MAX_PER_USER)
+        .map(|_| state.hub.register(1).unwrap())
+        .collect();
+    let res = app
+        .oneshot(
+            upgrade("/api/ws")
+                .header("cookie", cookie)
+                .header("sec-fetch-site", "same-origin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+}
+
 #[test]
 fn default_ladder_is_ws_only_and_with_channels_replaces_it() {
     let cfg = common::config_dir();

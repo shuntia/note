@@ -71,7 +71,7 @@ fn delivery_reaches_the_user_through_the_ladder() {
     note_server::nightly::run_for_user(&deps, uid, "aki", nightly_now).unwrap();
 
     // --- 07:31 JST: debrief event fires and reaches the connected client.
-    let (conn_id, mut rx) = hub.register(uid);
+    let (conn_id, mut rx) = hub.register(uid).unwrap();
     let morning: jiff::Timestamp = "2026-08-30T22:31:00Z".parse().unwrap(); // 07:31 JST 08-31
     let fired = {
         let conn = db.lock().unwrap();
