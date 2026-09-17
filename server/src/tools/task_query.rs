@@ -138,12 +138,11 @@ pub fn list(conn: &Connection, ctx: &ToolCtx, args: ListArgs) -> Result<serde_js
         .map_err(internal)?;
     let mut stmt = conn
         .prepare(&format!(
-            "SELECT t.id, t.title, t.state, t.is_now, t.duration_min, t.created_at, t.updated_at,
-                    (SELECT COUNT(*) FROM tasks s WHERE s.parent_id = t.id AND s.state != 'dropped'),
-                    (SELECT COUNT(*) FROM tasks s WHERE s.parent_id = t.id AND s.state = 'done')
-             FROM tasks t WHERE {}
-             ORDER BY t.created_at DESC, t.id DESC LIMIT {limit}",
-            wheres.replace("user_id", "t.user_id")
+            "SELECT id, title, state, is_now, duration_min, created_at, updated_at,
+                    (SELECT COUNT(*) FROM tasks s WHERE s.parent_id = tasks.id AND s.state != 'dropped'),
+                    (SELECT COUNT(*) FROM tasks s WHERE s.parent_id = tasks.id AND s.state = 'done')
+             FROM tasks WHERE {wheres}
+             ORDER BY created_at DESC, id DESC LIMIT {limit}"
         ))
         .map_err(internal)?;
     let tasks = stmt
@@ -193,8 +192,9 @@ pub fn search(conn: &Connection, ctx: &ToolCtx, args: SearchArgs) -> Result<serd
             .join(" AND ")
     };
     let text = "lower(title) || ' ' || lower(description) || ' ' || lower(notes)";
-    let title_match = clause("lower(title)", &mut params);
+    // the parameters are pushed in the order the statement below binds them
     let text_match = clause(text, &mut params);
+    let title_match = clause("lower(title)", &mut params);
 
     let mut stmt = conn
         .prepare(&format!(
@@ -207,13 +207,8 @@ pub fn search(conn: &Connection, ctx: &ToolCtx, args: SearchArgs) -> Result<serd
              LIMIT {SEARCH_HITS}"
         ))
         .map_err(internal)?;
-    // the ORDER BY repeats the title clause, so its parameters come last
-    let ordered: Vec<&SqlValue> = std::iter::once(&params[0])
-        .chain(params[1 + words.len()..].iter())
-        .chain(params[1..1 + words.len()].iter())
-        .collect();
     let tasks = stmt
-        .query_map(rusqlite::params_from_iter(ordered), |r| {
+        .query_map(rusqlite::params_from_iter(params.iter()), |r| {
             Ok(serde_json::json!({
                 "id": r.get::<_, i64>(0)?,
                 "title": r.get::<_, String>(1)?,
