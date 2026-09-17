@@ -8,6 +8,32 @@ export type EventFrame = {
   event_id: number | null
 }
 
+export type AgentEvent =
+  | { kind: 'thinking'; text: string }
+  | { kind: 'tool_call'; index: number; name: string; args: string }
+  | { kind: 'tool_result'; index: number; name: string; result: string; is_error: boolean }
+  | { kind: 'reply'; text: string }
+  | { kind: 'error'; message: string }
+
+// `seq` counts from zero within one session; `conversation_id` is null until a
+// brand-new conversation's reply hands the client its id.
+export type AgentFrame = {
+  type: 'agent'
+  conversation_id: number | null
+  seq: number
+  event: AgentEvent
+}
+
+const agentListeners = new Set<(frame: AgentFrame) => void>()
+
+// Subscribes to the live agent frames of the one socket the shell already holds.
+export function onAgentFrame(fn: (frame: AgentFrame) => void): () => void {
+  agentListeners.add(fn)
+  return () => {
+    agentListeners.delete(fn)
+  }
+}
+
 // Handshakes that close without ever opening, this many in a row, read as a
 // dead session rather than a flaky network.
 const DEAD_HANDSHAKE_STREAK = 3
@@ -35,13 +61,10 @@ export function connectEvents(onEvent: (ev: EventFrame) => void): () => void {
     socket.onmessage = (m) => {
       try {
         const frame: unknown = JSON.parse(String(m.data))
-        if (
-          typeof frame === 'object' &&
-          frame !== null &&
-          (frame as { type?: unknown }).type === 'event'
-        ) {
-          onEvent(frame as EventFrame)
-        }
+        if (typeof frame !== 'object' || frame === null) return
+        const kind = (frame as { type?: unknown }).type
+        if (kind === 'event') onEvent(frame as EventFrame)
+        if (kind === 'agent') for (const fn of agentListeners) fn(frame as AgentFrame)
       } catch {
         // non-JSON frame; ignore
       }

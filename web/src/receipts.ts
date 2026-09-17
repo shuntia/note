@@ -104,6 +104,24 @@ const done: Record<string, (a: Args) => string> = {
   },
 }
 
+// What a call reads as while it is still running.
+const running: Record<string, (a: Args) => string> = {
+  task_create: () => 'Adding a task',
+  task_update: () => 'Updating a task',
+  memory_query: (a) => {
+    const q = str(a, 'query')
+    return q ? `Searching memory for ${quoted(q)}` : 'Searching memory'
+  },
+  memory_read: () => 'Opening a saved note',
+  memory_write: () => 'Saving that to memory',
+  context_edit: () => 'Updating your background notes',
+  schedule_slide: () => 'Moving an event',
+  schedule_snooze: () => 'Putting an event off',
+  schedule_drop: () => 'Dropping an event',
+  schedule_insert: () => 'Adding that to the plan',
+  notify_send: () => 'Sending you a nudge',
+}
+
 const failed: Record<string, string> = {
   task_create: "Couldn't add that task",
   task_update: "Couldn't update that task",
@@ -125,6 +143,12 @@ function parse(raw: string): Args {
   } catch {
     return {}
   }
+}
+
+// The sentence for a call still in flight.
+export function doing(name: string, args: string): string {
+  const template = running[name]
+  return template ? template(parse(args)) : `Using ${name}`
 }
 
 // The sentence for one tool call; an unrecognised tool still gets a sentence, never a raw block.
