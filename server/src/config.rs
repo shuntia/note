@@ -89,12 +89,18 @@ pub struct ChannelsConfig {
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct AdminConfig {
-    pub require_totp: bool,
+    /// `require_totp` is the key's former name and still reads.
+    #[serde(alias = "require_totp")]
+    pub require_second_factor: bool,
+    /// Relying party overrides for a deployment whose public origin is not the
+    /// one browsers see; both default to `public_base_url`.
+    pub rp_id: Option<String>,
+    pub rp_origin: Option<String>,
 }
 
 impl Default for AdminConfig {
     fn default() -> Self {
-        Self { require_totp: true }
+        Self { require_second_factor: true, rp_id: None, rp_origin: None }
     }
 }
 
@@ -318,13 +324,31 @@ mod tests {
     }
 
     #[test]
-    fn admin_section_defaults_to_requiring_totp() {
+    fn admin_section_defaults_to_requiring_a_second_factor() {
         let tmp = tempfile::tempdir().unwrap();
         let base = "bind_addr = \"127.0.0.1:0\"\npublic_base_url = \"http://x\"\ndata_dir = \"data\"\n";
         write(tmp.path(), "server.toml", base);
-        assert!(ServerConfig::load(tmp.path()).unwrap().admin.require_totp);
+        let admin = ServerConfig::load(tmp.path()).unwrap().admin;
+        assert!(admin.require_second_factor);
+        assert!(admin.rp_id.is_none() && admin.rp_origin.is_none());
+
+        write(tmp.path(), "server.toml", &format!("{base}[admin]\nrequire_second_factor = false\n"));
+        assert!(!ServerConfig::load(tmp.path()).unwrap().admin.require_second_factor);
+
         write(tmp.path(), "server.toml", &format!("{base}[admin]\nrequire_totp = false\n"));
-        assert!(!ServerConfig::load(tmp.path()).unwrap().admin.require_totp);
+        assert!(
+            !ServerConfig::load(tmp.path()).unwrap().admin.require_second_factor,
+            "the former key name still reads"
+        );
+
+        write(
+            tmp.path(),
+            "server.toml",
+            &format!("{base}[admin]\nrp_id = \"note.example.net\"\nrp_origin = \"https://note.example.net\"\n"),
+        );
+        let admin = ServerConfig::load(tmp.path()).unwrap().admin;
+        assert_eq!(admin.rp_id.unwrap(), "note.example.net");
+        assert_eq!(admin.rp_origin.unwrap(), "https://note.example.net");
     }
 
     #[test]

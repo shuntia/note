@@ -1,7 +1,7 @@
 use anyhow::Context;
 use note_server::{
     admin, api, auth, channels, config::ServerConfig, db, memory, nightly, providers, runner,
-    totp, AppState,
+    security, totp, AppState,
 };
 use std::path::PathBuf;
 
@@ -73,7 +73,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let (secrets, warnings) = admin::AdminSecrets::load(&cfg.secrets_dir);
-    let secrets = secrets.require_totp(cfg.admin.require_totp);
+    let secrets = secrets.require_second_factor(cfg.admin.require_second_factor);
     for w in &warnings {
         eprintln!("warning: {w}");
         let _ = note_server::log::record(&conn, None, "admin_secret_error", w);
@@ -82,7 +82,7 @@ async fn main() -> anyhow::Result<()> {
         admin::TotpMode::Required => {}
         admin::TotpMode::Missing => {
             let msg = format!(
-                "admin panel locked: no admin_totp seed in {}",
+                "admin panel locked for accounts with no passkey or authenticator app: no admin_totp seed in {}",
                 cfg.secrets_dir.display()
             );
             eprintln!("{msg}");
@@ -92,15 +92,28 @@ async fn main() -> anyhow::Result<()> {
             eprintln!("DEV-INSPECT BUILD: admin elevation is password-only and user data is open; never deploy this binary");
         }
         admin::TotpMode::PasswordOnly => {
-            eprintln!("admin elevation is password-only: [admin] require_totp = false in server.toml");
+            eprintln!("admin elevation is password-only: [admin] require_second_factor = false in server.toml");
         }
+    }
+
+    let (passkeys, passkey_warning) = security::PasskeyService::build(
+        &cfg.public_base_url,
+        cfg.admin.rp_id.as_deref(),
+        cfg.admin.rp_origin.as_deref(),
+    );
+    if let Some(w) = &passkey_warning {
+        eprintln!("warning: {w}");
+        let _ = note_server::log::record(&conn, None, "passkeys_unavailable", w);
+    } else if !passkeys.available() {
+        eprintln!("passkeys are registered but browsers will refuse them: {} is not https", cfg.public_base_url);
     }
 
     let (llm, embeddings) = providers::build(&cfg.providers)?;
     let mut state = AppState::new(conn, config_dir, cfg.data_dir.clone())
         .with_providers(llm, embeddings)
         .with_providers_info(admin::ProvidersInfo::from(&cfg.providers))
-        .with_admin_secrets(secrets);
+        .with_admin_secrets(secrets)
+        .with_passkeys(passkeys);
     state.secure_cookies = cfg.public_base_url.starts_with("https://");
     if let Some(wp) = &cfg.channels.webpush {
         let pem = std::fs::read(&wp.vapid_pem_file)
