@@ -119,10 +119,12 @@
 .sheet-top .ev-more-wrap { position: relative; top: auto; right: auto; }
 .sheet-top .ev-more { width: 44px; height: 44px; font-size: 1.3rem; color: var(--quiet); }
 .sheet .ev-menu { min-width: 13rem; top: auto; bottom: calc(100% + 6px); }
+.sheet .ev-menu-item { display: flex; align-items: center; gap: 10px; }
 .sheet .ev-menu-item .check { width: 14px; height: 14px; margin-left: auto; color: var(--sage); }
+.ev-menu-sep { height: 1px; margin: 4px 8px; background: var(--track); }
 .sheet-time { display: flex; align-items: center; gap: 10px; font-size: 1.0625rem; color: var(--quiet); }
+.sheet-time .pill-in { width: calc(5ch + 36px); text-align: center; }
 .pill-in { min-height: 44px; border: 0; border-radius: 999px; background: var(--earth); padding: 9px 18px; color: var(--ink); font-family: var(--display); font-weight: 500; font-size: 1.125rem; letter-spacing: -0.01em; font-variant-numeric: tabular-nums; cursor: pointer; }
-.pill-in::-webkit-calendar-picker-indicator { display: none; }
 .pill-in:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 .days { display: flex; justify-content: space-between; gap: 6px; }
 .day-dot { width: 40px; height: 40px; border-radius: 50%; border: 0; background: var(--track); color: var(--quiet); font: inherit; font-size: 0.8125rem; font-weight: 700; cursor: pointer; padding: 0; display: grid; place-items: center; transition: background-color 0.2s ease, color 0.2s ease; }
@@ -133,8 +135,10 @@
 .sheet-date { padding: 8px 14px; border-radius: 999px; background: var(--earth); color: var(--ink); font-size: 0.9375rem; font-variant-numeric: tabular-nums; }
 .sheet-save { margin-top: 4px; }
 
-/* Mounted under Today until the calendar takes its place in Today's own scroll. */
-.today > .cal { position: absolute; top: 680px; left: 50%; transform: translateX(-50%); }
+/* Mounted under Today until the calendar takes its place in Today's own scroll: below
+   the morning letter, with the page held tall enough to keep the ground under it. */
+.today:has(> .cal) { min-height: 1560px; }
+.today > .cal { position: absolute; top: 720px; left: 50%; transform: translateX(-50%); }
 
 @media (min-width: 768px) {
   .cal.desktop { width: min(1200px, calc(100vw - 240px)); gap: 20px; }
