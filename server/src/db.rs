@@ -212,6 +212,32 @@ const MIGRATIONS: &[&str] = &[
     );
     ALTER TABLE memory_index ADD COLUMN until TEXT;
     ",
+    // v15
+    "
+    CREATE TABLE calendar_entries (
+        id INTEGER PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id),
+        title TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('fixed','busy','note')),
+        quiet INTEGER NOT NULL DEFAULT 1 CHECK (quiet IN (0, 1)),
+        start_time TEXT NOT NULL,
+        end_time TEXT NOT NULL,
+        days INTEGER NOT NULL DEFAULT 0 CHECK (days BETWEEN 0 AND 127),
+        on_date TEXT,
+        from_date TEXT,
+        until_date TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        CHECK (end_time > start_time),
+        CHECK ((days = 0) = (on_date IS NOT NULL))
+    );
+    CREATE INDEX idx_calendar_entries_user ON calendar_entries(user_id, start_time);
+    CREATE TABLE calendar_exceptions (
+        entry_id INTEGER NOT NULL REFERENCES calendar_entries(id) ON DELETE CASCADE,
+        date TEXT NOT NULL,
+        PRIMARY KEY (entry_id, date)
+    );
+    ",
 ];
 
 pub fn open(path: &Path) -> Result<Connection> {
@@ -554,6 +580,65 @@ mod tests {
             .is_err(),
             "one memory cannot be recorded twice under the same source"
         );
+    }
+
+    #[test]
+    fn v15_creates_calendar_entries_and_their_exceptions() {
+        let conn = open_memory().unwrap();
+        let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, MIGRATIONS.len() as i64);
+        conn.execute(
+            "INSERT INTO users (username, pass_hash, role) VALUES ('a','h','member')",
+            [],
+        )
+        .unwrap();
+        let insert = |sql: &str| {
+            conn.execute(
+                &format!(
+                    "INSERT INTO calendar_entries
+                     (user_id, title, kind, quiet, start_time, end_time, days, on_date,
+                      created_at, updated_at) VALUES {sql}"
+                ),
+                [],
+            )
+        };
+        insert("(1,'school','fixed',1,'08:15','15:30',31,NULL,'t','t')").unwrap();
+        assert!(
+            insert("(1,'x','busy',1,'09:00','08:00',31,NULL,'t','t')").is_err(),
+            "an entry may not end before it starts"
+        );
+        assert!(
+            insert("(1,'x','party',1,'09:00','10:00',31,NULL,'t','t')").is_err(),
+            "kind is closed"
+        );
+        assert!(
+            insert("(1,'x','busy',1,'09:00','10:00',0,NULL,'t','t')").is_err(),
+            "a one-off entry carries its date"
+        );
+        assert!(
+            insert("(1,'x','busy',1,'09:00','10:00',31,'2026-09-16','t','t')").is_err(),
+            "a recurring entry carries no date"
+        );
+        assert!(
+            insert("(1,'x','busy',1,'09:00','10:00',128,NULL,'t','t')").is_err(),
+            "days is a seven-bit mask"
+        );
+
+        conn.execute("INSERT INTO calendar_exceptions (entry_id, date) VALUES (1, '2026-09-16')", [])
+            .unwrap();
+        assert!(
+            conn.execute(
+                "INSERT INTO calendar_exceptions (entry_id, date) VALUES (1, '2026-09-16')",
+                [],
+            )
+            .is_err(),
+            "a date is skipped once"
+        );
+        conn.execute("DELETE FROM calendar_entries WHERE id = 1", []).unwrap();
+        let left: i64 = conn
+            .query_row("SELECT COUNT(*) FROM calendar_exceptions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 0, "exceptions follow their entry");
     }
 
     #[test]
