@@ -1,9 +1,15 @@
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
-/// The prompts a user may override through the API; callers must check a
-/// caller-supplied name against this list before it reaches the filesystem.
+/// The prompts a user may override through the API. Every function here checks
+/// a name against this list, so a caller-supplied name can never become a path
+/// of its own choosing.
 pub const EDITABLE: [&str; 3] = ["persona", "planning", "import"];
+
+fn checked(name: &str) -> Result<()> {
+    anyhow::ensure!(EDITABLE.contains(&name), "unknown prompt {name:?}");
+    Ok(())
+}
 
 fn override_path(config_dir: &Path, user: &str, name: &str) -> PathBuf {
     config_dir.join("users").join(user).join("prompts").join(format!("{name}.md"))
@@ -12,6 +18,7 @@ fn override_path(config_dir: &Path, user: &str, name: &str) -> PathBuf {
 /// Per-user prompt override with shipped-default fallback, mirroring
 /// Template::load's resolution order.
 pub fn load(config_dir: &Path, user: &str, name: &str) -> Result<String> {
+    checked(name)?;
     let user_path = override_path(config_dir, user, name);
     let default_path = config_dir.join("defaults/prompts").join(format!("{name}.md"));
     let path = if user_path.exists() { user_path } else { default_path };
@@ -19,10 +26,11 @@ pub fn load(config_dir: &Path, user: &str, name: &str) -> Result<String> {
 }
 
 pub fn custom(config_dir: &Path, user: &str, name: &str) -> bool {
-    override_path(config_dir, user, name).exists()
+    checked(name).is_ok() && override_path(config_dir, user, name).exists()
 }
 
 pub fn save(config_dir: &Path, user: &str, name: &str, content: &str) -> Result<()> {
+    checked(name)?;
     let path = override_path(config_dir, user, name);
     std::fs::create_dir_all(path.parent().expect("a prompt file always has a parent"))?;
     crate::context::write_atomic(&path, content)?;
@@ -32,6 +40,7 @@ pub fn save(config_dir: &Path, user: &str, name: &str, content: &str) -> Result<
 /// Drops the user's override so `load` falls back to the shipped default;
 /// having no override to drop is success, not an error.
 pub fn reset(config_dir: &Path, user: &str, name: &str) -> Result<()> {
+    checked(name)?;
     match std::fs::remove_file(override_path(config_dir, user, name)) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -56,8 +65,24 @@ mod tests {
         write(tmp.path(), "users/aki/prompts/persona.md", "aki persona");
         assert_eq!(load(tmp.path(), "aki", "persona").unwrap(), "aki persona");
         assert_eq!(load(tmp.path(), "bob", "persona").unwrap(), "default persona");
-        let err = load(tmp.path(), "aki", "missing").unwrap_err().to_string();
-        assert!(err.contains("missing"), "{err}");
+        let err = load(tmp.path(), "aki", "planning").unwrap_err().to_string();
+        assert!(err.contains("planning"), "{err}");
+    }
+
+    /// The allow-list lives here rather than in each caller, so forgetting it
+    /// upstream cannot turn a name into a path.
+    #[test]
+    fn a_name_outside_the_allow_list_never_reaches_the_filesystem() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), "defaults/prompts/persona.md", "default persona");
+        for bad in ["../x", "../../etc/passwd", "persona.md", "", "secrets"] {
+            assert!(save(tmp.path(), "aki", bad, "owned").is_err(), "saved {bad:?}");
+            assert!(load(tmp.path(), "aki", bad).is_err(), "loaded {bad:?}");
+            assert!(reset(tmp.path(), "aki", bad).is_err(), "reset {bad:?}");
+            assert!(!custom(tmp.path(), "aki", bad));
+        }
+        assert!(!tmp.path().join("users/aki/prompts").exists());
+        assert!(!tmp.path().join("users/aki/x.md").exists());
     }
 
     /// The shipped defaults are what an un-overridden server loads, so every
