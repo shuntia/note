@@ -19,14 +19,23 @@ import type { Conversation, TalkMessage, TalkStep } from '../types'
 
 type Item =
   | { kind: 'user'; key: string; text: string }
-  | { kind: 'assistant'; key: string; text: string }
+  | {
+      kind: 'assistant'
+      key: string
+      text: string
+      reasoning: string
+      thoughtMs: number | null
+      steps: ToolItem[]
+    }
   | { kind: 'tool'; key: string; name: string; args: string; result: string; isError: boolean }
-  | { kind: 'activity'; key: string; reasoning: string; steps: ToolItem[] }
+  | { kind: 'steps'; key: string; steps: ToolItem[] }
   | { kind: 'system'; key: string; text: string; hint: string | null }
 
 type ToolItem = Extract<Item, { kind: 'tool' }> & { running?: boolean }
-type ActivityItem = Extract<Item, { kind: 'activity' }>
-type TurnItem = Extract<Item, { kind: 'user' | 'assistant' | 'system' }>
+type AssistantItem = Extract<Item, { kind: 'assistant' }>
+type StepsItem = Extract<Item, { kind: 'steps' }>
+type TurnItem = Extract<Item, { kind: 'user' | 'system' }>
+type Shown = AssistantItem | StepsItem | TurnItem
 
 // One session's progress as the live frames describe it; `seq` is the last one applied.
 type Live = { seq: number; reasoning: string; steps: ToolItem[] }
@@ -69,7 +78,15 @@ const nextKey = () => `local-${++sequence}`
 function fromMessage(m: TalkMessage): Item {
   const key = `msg-${m.id}`
   if (m.role === 'user') return { kind: 'user', key, text: m.content }
-  if (m.role === 'assistant') return { kind: 'assistant', key, text: m.content }
+  if (m.role === 'assistant')
+    return {
+      kind: 'assistant',
+      key,
+      text: m.content,
+      reasoning: m.reasoning ?? '',
+      thoughtMs: m.thought_ms,
+      steps: [],
+    }
   return {
     kind: 'tool',
     key,
@@ -145,23 +162,33 @@ function Receipt({ item }: { item: ToolItem }) {
   )
 }
 
-// What the header says a block is doing, or what it did once it is over.
-function status(steps: ToolItem[], reasoning: string, live: boolean): string {
-  const busy = steps.find((s) => s.running)
-  if (live) return busy ? `${doing(busy.name, busy.args)}…` : 'Thinking…'
-  if (steps.length === 0) return 'Thought'
-  const count = `${steps.length} step${steps.length === 1 ? '' : 's'}`
-  return reasoning ? `Thought · ${count}` : count
+const STEPS_LABEL = "Note's steps"
+
+// The header over a finished reply; null when it would open onto nothing.
+function thoughtLabel(item: AssistantItem): string | null {
+  if (!item.reasoning && item.steps.length === 0) return null
+  if (item.thoughtMs === null) return STEPS_LABEL
+  if (item.thoughtMs < 1000) return 'Note thought for a moment'
+  const seconds = Math.round(item.thoughtMs / 1000)
+  return `Note thought for ${seconds} second${seconds === 1 ? '' : 's'}`
 }
 
-// One line while it runs and after: the reasoning and the calls stay a chevron away.
-function ActivityBlock({
-  steps,
+// The single line a session in flight shows, naming the call being processed.
+function liveLabel(steps: ToolItem[]): string {
+  const busy = steps.find((s) => s.running)
+  return busy ? `Note is thinking… · ${doing(busy.name, busy.args)}` : 'Note is thinking…'
+}
+
+// One quiet line; the reasoning and the calls stay a chevron away.
+function Trace({
+  label,
   reasoning,
+  steps,
   live = false,
 }: {
-  steps: ToolItem[]
+  label: string
   reasoning: string
+  steps: ToolItem[]
   live?: boolean
 }) {
   const [open, setOpen] = useState(false)
@@ -169,8 +196,8 @@ function ActivityBlock({
   return (
     <div className={`activity ${state}`.trim()}>
       <button className="activity-head" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
-        <span className="activity-status" aria-live="polite">
-          {status(steps, reasoning, live)}
+        <span className="activity-status" aria-live={live ? 'polite' : undefined}>
+          {label}
         </span>
         <svg className="receipt-chev" viewBox="0 0 24 24" aria-hidden="true">
           <path d="M9 6l6 6-6 6" />
@@ -179,34 +206,56 @@ function ActivityBlock({
       {open && (
         <div className="activity-body">
           {reasoning && <pre className="activity-think">{reasoning}</pre>}
-          <div className="receipts">
-            {steps.map((step) => (
-              <Receipt key={step.key} item={step} />
-            ))}
-          </div>
+          {steps.length > 0 && (
+            <div className="receipts">
+              {steps.map((step) => (
+                <Receipt key={step.key} item={step} />
+              ))}
+            </div>
+          )}
         </div>
       )}
     </div>
   )
 }
 
-// Consecutive calls read as one activity block, and it sits under the reply that
-// explains it even though the transcript records the calls first.
-function grouped(items: Item[]): (ActivityItem | TurnItem)[] {
-  const out: (ActivityItem | TurnItem)[] = []
+// The transcript records a turn's calls before the reply that explains them; the
+// panel hangs them off that reply instead. Calls nothing answered stand alone.
+function grouped(items: Item[]): Shown[] {
+  const out: Shown[] = []
+  let pending: ToolItem[] = []
+  const flush = () => {
+    if (!pending.length) return
+    out.push({ kind: 'steps', key: pending[0].key, steps: pending })
+    pending = []
+  }
   for (const item of items) {
-    const last = out[out.length - 1]
-    if (item.kind !== 'tool') out.push(item)
-    else if (last?.kind === 'activity') out[out.length - 1] = { ...last, steps: [...last.steps, item] }
-    else out.push({ kind: 'activity', key: item.key, reasoning: '', steps: [item] })
-  }
-  for (let i = 0; i < out.length - 1; i++) {
-    if (out[i].kind === 'activity' && out[i + 1].kind === 'assistant') {
-      ;[out[i], out[i + 1]] = [out[i + 1], out[i]]
-      i++
+    if (item.kind === 'tool') {
+      pending.push(item)
+      continue
     }
+    if (item.kind === 'assistant') {
+      out.push({ ...item, steps: [...pending, ...item.steps] })
+      pending = []
+      continue
+    }
+    flush()
+    out.push(item)
   }
+  flush()
   return out
+}
+
+function assistantTurn(item: AssistantItem): ReactNode {
+  const label = thoughtLabel(item)
+  return (
+    <div key={item.key} className="reply">
+      {label && <Trace label={label} reasoning={item.reasoning} steps={item.steps} />}
+      <div className="turn assistant">
+        <Markdown text={item.text} />
+      </div>
+    </div>
+  )
 }
 
 function turn(item: TurnItem): ReactNode {
@@ -214,12 +263,6 @@ function turn(item: TurnItem): ReactNode {
     return (
       <div key={item.key} className="turn user">
         {item.text}
-      </div>
-    )
-  if (item.kind === 'assistant')
-    return (
-      <div key={item.key} className="turn assistant">
-        <Markdown text={item.text} />
       </div>
     )
   return (
@@ -382,21 +425,16 @@ export function Talk({
       const reply = await api.talk(text, current ?? undefined)
       void loadList(true)
       if (era.current !== sentIn) return
-      const activity: Item[] =
-        reply.steps.length || reply.reasoning
-          ? [
-              {
-                kind: 'activity',
-                key: nextKey(),
-                reasoning: reply.reasoning,
-                steps: reply.steps.map(fromStep),
-              },
-            ]
-          : []
       setItems((prev) => [
         ...prev,
-        ...activity,
-        { kind: 'assistant', key: nextKey(), text: reply.reply },
+        {
+          kind: 'assistant',
+          key: nextKey(),
+          text: reply.reply,
+          reasoning: reply.reasoning,
+          thoughtMs: reply.thought_ms,
+          steps: reply.steps.map(fromStep),
+        },
       ])
       rememberConversation(reply.conversation_id)
       if (current === null) {
@@ -587,14 +625,22 @@ export function Talk({
               </p>
             )}
             {msgState === 'ready' &&
-              grouped(items).map((item) =>
-                item.kind === 'activity' ? (
-                  <ActivityBlock key={item.key} steps={item.steps} reasoning={item.reasoning} />
-                ) : (
-                  turn(item)
-                ),
-              )}
-            {busy && <ActivityBlock live steps={live.steps} reasoning={live.reasoning} />}
+              grouped(items).map((item) => {
+                if (item.kind === 'assistant') return assistantTurn(item)
+                if (item.kind === 'steps')
+                  return (
+                    <Trace key={item.key} label={STEPS_LABEL} reasoning="" steps={item.steps} />
+                  )
+                return turn(item)
+              })}
+            {busy && (
+              <Trace
+                live
+                label={liveLabel(live.steps)}
+                reasoning={live.reasoning}
+                steps={live.steps}
+              />
+            )}
           </div>
         </div>
 

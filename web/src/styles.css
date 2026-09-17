@@ -562,22 +562,39 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
   to { background-position: -80% 0; }
 }
 
+/* a reply and the header over it read as one block, the header never a bubble */
+.reply {
+  align-self: flex-start;
+  min-width: 0;
+  max-width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+
 /* what Note is doing, one line; its reasoning and calls stay a chevron away */
 .activity { align-self: flex-start; max-width: 100%; }
 .activity-head {
   display: flex;
   align-items: center;
   gap: 6px;
-  width: 100%;
+  max-width: 100%;
   padding: 4px 6px;
   border: 0;
   background: none;
   color: var(--faint);
   font: inherit;
-  font-size: 0.8rem;
+  font-size: 0.9375rem;
   text-align: left;
   cursor: pointer;
 }
+.activity-head:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+  border-radius: 8px;
+}
+.activity-status { min-width: 0; overflow-wrap: anywhere; }
 .activity.open .receipt-chev { transform: rotate(90deg); }
 .activity-think {
   margin: 4px 6px 6px;
