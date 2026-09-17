@@ -13,8 +13,10 @@ import type {
   MemoryHit,
   NewStep,
   PlanEvent,
+  Passkey,
   PromptDoc,
   PromptName,
+  SecurityState,
   Settings,
   SettingsSaved,
   SqlResult,
@@ -26,7 +28,14 @@ import type {
   TaskUpdate,
   Token,
   TokenCreated,
+  TotpEnrolment,
 } from './types'
+import type {
+  AssertionJSON,
+  CreationChallenge,
+  RegistrationJSON,
+  RequestChallenge,
+} from './webauthn'
 
 const WRITABLE_SETTINGS = [
   'display_name',
@@ -191,6 +200,43 @@ export const api = {
   notifyTest: () => request<{ via: string }>('/api/notify/test', { method: 'POST' }),
 }
 
+const SECURITY = '/api/security'
+
+// Every mutating call carries the account password: adding or dropping a second
+// factor asks for it again, whatever the session already proved.
+export const security = {
+  state: () => request<SecurityState>(SECURITY),
+  passkeyChallenge: (password: string) =>
+    request<CreationChallenge>(`${SECURITY}/passkeys/challenge`, {
+      method: 'POST',
+      body: JSON.stringify({ password }),
+    }),
+  addPasskey: (name: string, credential: RegistrationJSON) =>
+    request<Passkey>(`${SECURITY}/passkeys`, {
+      method: 'POST',
+      body: JSON.stringify({ name, credential }),
+    }),
+  renamePasskey: (id: number, name: string) =>
+    request<Passkey>(`${SECURITY}/passkeys/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ name }),
+    }),
+  removePasskey: (id: number, password: string) =>
+    request<void>(`${SECURITY}/passkeys/${id}`, {
+      method: 'DELETE',
+      body: JSON.stringify({ password }),
+    }),
+  totpStart: (password: string) =>
+    request<TotpEnrolment>(`${SECURITY}/totp/start`, {
+      method: 'POST',
+      body: JSON.stringify({ password }),
+    }),
+  totpConfirm: (code: string) =>
+    request<void>(`${SECURITY}/totp/confirm`, { method: 'POST', body: JSON.stringify({ code }) }),
+  totpRemove: (password: string) =>
+    request<void>(`${SECURITY}/totp`, { method: 'DELETE', body: JSON.stringify({ password }) }),
+}
+
 const ADMIN = '/api/admin'
 
 // Every grant-protected route answers 401 when elevation has expired; the panel
@@ -204,6 +250,14 @@ export const admin = {
     request<void>(`${ADMIN}/elevate`, {
       method: 'POST',
       body: JSON.stringify(code ? { password, code } : { password }),
+      quiet401: true,
+    }),
+  elevateChallenge: () =>
+    request<RequestChallenge>(`${ADMIN}/elevate/challenge`, { method: 'POST', quiet401: true }),
+  elevateWithPasskey: (password: string, assertion: AssertionJSON) =>
+    request<void>(`${ADMIN}/elevate`, {
+      method: 'POST',
+      body: JSON.stringify({ password, assertion }),
       quiet401: true,
     }),
   drop: () => request<void>(`${ADMIN}/drop`, { method: 'POST' }),

@@ -1,5 +1,6 @@
+import QRCode from 'qrcode'
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
-import { api, ApiError } from '../api'
+import { api, ApiError, security } from '../api'
 import type { ToastAction, ViewProps } from '../app'
 import { prefsFrom, writePrefs } from '../prefs'
 import { disablePush, enablePush, pushState } from '../push'
@@ -8,13 +9,17 @@ import type { CounterMode } from '../session'
 import { applyTheme, saveTheme, storedTheme, type ThemeChoice } from '../theme'
 import type {
   Me,
+  Passkey,
   PromptDoc,
   PromptName,
   ScheduleRow,
+  SecurityState,
   Settings as UserSettings,
   Token,
   TokenCreated,
+  TotpEnrolment,
 } from '../types'
+import { createCredential, webauthnSupported, type RegistrationJSON } from '../webauthn'
 
 type Notify = (msg: string, action?: ToastAction) => void
 
@@ -583,6 +588,12 @@ export function Settings({
         </FoldRow>
       </Group>
 
+      <Group head="SECURITY">
+        <FoldRow label="Passkeys and codes" open={open === 'security'} onToggle={fold('security')}>
+          {open === 'security' && <SecuritySection notify={notify} />}
+        </FoldRow>
+      </Group>
+
       <Group head="API TOKENS">
         <FoldRow label="Tokens" open={open === 'tokens'} onToggle={fold('tokens')}>
           {open === 'tokens' && <TokensSection notify={notify} />}
@@ -825,6 +836,327 @@ function PersonaSection({ active, notify }: { active: boolean; notify: Notify })
 
 function dayOf(iso: string): string {
   return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+}
+
+
+const PASSKEY_HINT = 'Passkeys need an https address'
+
+const passkeyLine = (k: Passkey) =>
+  `Added ${dayOf(k.created_at)} · ${k.last_used_at ? `used ${dayOf(k.last_used_at)}` : 'never used'}`
+
+// What the password prompt is standing in front of.
+type Ask =
+  | { kind: 'add-passkey' }
+  | { kind: 'drop-passkey'; id: number }
+  | { kind: 'start-totp' }
+  | { kind: 'drop-totp' }
+
+const ASK_LABEL: Record<Ask['kind'], string> = {
+  'add-passkey': 'Add a passkey',
+  'drop-passkey': 'Remove this passkey',
+  'start-totp': 'Set up authenticator',
+  'drop-totp': 'Remove the authenticator app',
+}
+
+function QrCode({ uri }: { uri: string }) {
+  const canvas = useRef<HTMLCanvasElement>(null)
+  const [drawn, setDrawn] = useState(true)
+
+  useEffect(() => {
+    const el = canvas.current
+    if (!el) return
+    // a plain white ground, so a scanner reads it in either theme
+    QRCode.toCanvas(el, uri, { width: 168, margin: 1, color: { dark: '#000000', light: '#ffffff' } })
+      .then(() => setDrawn(true))
+      .catch(() => setDrawn(false))
+  }, [uri])
+
+  if (!drawn) return <span className="set-sub">Use the manual key below.</span>
+  return <canvas className="set-qr" ref={canvas} aria-label="Authenticator QR code" />
+}
+
+function TotpEnrol({
+  enrol,
+  busy,
+  onConfirm,
+  onCancel,
+}: {
+  enrol: TotpEnrolment
+  busy: boolean
+  onConfirm: (code: string) => void
+  onCancel: () => void
+}) {
+  const [code, setCode] = useState('')
+  return (
+    <form
+      className="set-enrol"
+      onSubmit={(e) => {
+        e.preventDefault()
+        onConfirm(code)
+      }}
+    >
+      <QrCode uri={enrol.otpauth_uri} />
+      <a className="set-link" href={enrol.otpauth_uri}>
+        Open in your password manager
+      </a>
+      <span className="set-sub">Manual key</span>
+      <code className="set-token-secret">{enrol.secret_base32}</code>
+      <span className="set-sub">Enter a code from the app to finish</span>
+      <div className="set-token-form">
+        <input
+          aria-label="Code from the app"
+          inputMode="numeric"
+          autoComplete="one-time-code"
+          pattern="\d{6}"
+          maxLength={6}
+          value={code}
+          onChange={(e) => setCode(e.target.value)}
+        />
+        <button type="submit" className="btn-haze small" disabled={busy || code.length !== 6}>
+          Finish
+        </button>
+        <button type="button" className="set-link" onClick={onCancel}>
+          Cancel
+        </button>
+      </div>
+    </form>
+  )
+}
+
+function SecuritySection({ notify }: { notify: Notify }) {
+  const [state, setState] = useState<SecurityState | 'error' | undefined>(undefined)
+  const [ask, setAsk] = useState<Ask | null>(null)
+  const [password, setPassword] = useState('')
+  const [naming, setNaming] = useState<{ credential: RegistrationJSON; name: string } | null>(null)
+  const [enrol, setEnrol] = useState<TotpEnrolment | null>(null)
+  const [rename, setRename] = useState<{ id: number; name: string } | null>(null)
+  // Remove is two taps, like revoking a token; the second opens the password prompt.
+  const [arming, setArming] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  const load = () => {
+    security
+      .state()
+      .then(setState)
+      .catch(() => setState('error'))
+  }
+  useEffect(load, [])
+
+  const loaded = state !== undefined && state !== 'error' ? state : null
+  const canPasskey = !!loaded?.webauthn_available && webauthnSupported()
+
+  const fail = (err: unknown, fallback: string) =>
+    notify(err instanceof ApiError && err.status < 500 && err.message ? err.message : fallback)
+
+  const open = (kind: Ask) => {
+    setAsk(kind)
+    setPassword('')
+    setArming(null)
+  }
+
+  const answer = async (e: FormEvent) => {
+    e.preventDefault()
+    if (!ask || busy) return
+    setBusy(true)
+    try {
+      if (ask.kind === 'add-passkey') {
+        const challenge = await security.passkeyChallenge(password)
+        setAsk(null)
+        setNaming({ credential: await createCredential(challenge), name: '' })
+      } else if (ask.kind === 'drop-passkey') {
+        await security.removePasskey(ask.id, password)
+        setAsk(null)
+        load()
+      } else if (ask.kind === 'start-totp') {
+        setEnrol(await security.totpStart(password))
+        setAsk(null)
+      } else {
+        await security.totpRemove(password)
+        setAsk(null)
+        load()
+      }
+      setPassword('')
+    } catch (err) {
+      fail(err, "That didn't go through. Try again.")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const keepPasskey = async (e: FormEvent) => {
+    e.preventDefault()
+    if (!naming || busy) return
+    setBusy(true)
+    try {
+      await security.addPasskey(naming.name.trim(), naming.credential)
+      setNaming(null)
+      load()
+    } catch (err) {
+      fail(err, "That passkey wasn't saved. Try again.")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const commitRename = async () => {
+    if (!rename) return
+    const { id, name } = rename
+    setRename(null)
+    const was = loaded?.passkeys.find((k) => k.id === id)?.name
+    if (!name.trim() || name.trim() === was) return
+    try {
+      await security.renamePasskey(id, name.trim())
+      load()
+    } catch (err) {
+      fail(err, "That name didn't save. Try again.")
+    }
+  }
+
+  const confirmTotp = async (code: string) => {
+    setBusy(true)
+    try {
+      await security.totpConfirm(code)
+      setEnrol(null)
+      load()
+    } catch (err) {
+      fail(err, "That code didn't match. Try the next one.")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const removeButton = (key: string, onArmed: () => void, label: string) => (
+    <button
+      type="button"
+      className="btn-haze small"
+      onClick={() => (arming === key ? onArmed() : setArming(key))}
+      onBlur={() => setArming((a) => (a === key ? null : a))}
+    >
+      {arming === key ? 'Really remove?' : label}
+    </button>
+  )
+
+  return (
+    <div className="set-fold-body">
+      <span className="set-sub">Used when the admin panel asks you to confirm it's you.</span>
+
+      {state === 'error' && (
+        <span className="set-sub">
+          Security didn't load.{' '}
+          <button className="set-link" onClick={load}>
+            Retry
+          </button>
+        </span>
+      )}
+
+      {loaded?.passkeys.map((k) => (
+        <div className="set-row set-token-row" key={k.id}>
+          <span className="set-row-body">
+            {rename?.id === k.id ? (
+              <input
+                aria-label="Passkey name"
+                maxLength={64}
+                autoFocus
+                value={rename.name}
+                onChange={(e) => setRename({ id: k.id, name: e.target.value })}
+                onBlur={() => void commitRename()}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') e.currentTarget.blur()
+                  if (e.key === 'Escape') setRename(null)
+                }}
+              />
+            ) : (
+              <button className="set-link set-name" onClick={() => setRename({ id: k.id, name: k.name })}>
+                {k.name}
+              </button>
+            )}
+            <span className="set-sub">{passkeyLine(k)}</span>
+          </span>
+          {removeButton(`passkey:${k.id}`, () => open({ kind: 'drop-passkey', id: k.id }), 'Remove')}
+        </div>
+      ))}
+
+      {loaded && (
+        <div className="set-row set-token-row">
+          <span className="set-row-body">
+            <span className="set-label">Authenticator app</span>
+            <span className="set-sub">{loaded.totp.enabled ? 'on' : 'Any TOTP app or password manager'}</span>
+          </span>
+          {loaded.totp.enabled
+            ? removeButton('totp', () => open({ kind: 'drop-totp' }), 'Remove')
+            : !enrol && (
+                <button
+                  type="button"
+                  className="btn-haze small"
+                  disabled={busy}
+                  onClick={() => open({ kind: 'start-totp' })}
+                >
+                  Set up authenticator
+                </button>
+              )}
+        </div>
+      )}
+
+      {enrol && (
+        <TotpEnrol
+          enrol={enrol}
+          busy={busy}
+          onConfirm={(code) => void confirmTotp(code)}
+          onCancel={() => setEnrol(null)}
+        />
+      )}
+
+      {loaded && !naming && (
+        <div className="set-acts">
+          <button
+            type="button"
+            className="btn-haze small"
+            disabled={!canPasskey || busy}
+            onClick={() => open({ kind: 'add-passkey' })}
+          >
+            Add a passkey
+          </button>
+          {!canPasskey && <span className="set-sub">{PASSKEY_HINT}</span>}
+        </div>
+      )}
+
+      {ask && (
+        <form className="set-token-form" onSubmit={(e) => void answer(e)}>
+          <input
+            type="password"
+            aria-label={`Password to ${ASK_LABEL[ask.kind].toLowerCase()}`}
+            placeholder="Your password"
+            autoComplete="current-password"
+            autoFocus
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+          />
+          <button type="submit" className="btn-haze small" disabled={busy || !password}>
+            {ASK_LABEL[ask.kind]}
+          </button>
+          <button type="button" className="set-link" onClick={() => setAsk(null)}>
+            Cancel
+          </button>
+        </form>
+      )}
+
+      {naming && (
+        <form className="set-token-form" onSubmit={(e) => void keepPasskey(e)}>
+          <input
+            aria-label="Name this passkey"
+            placeholder="Name this passkey"
+            maxLength={64}
+            autoFocus
+            value={naming.name}
+            onChange={(e) => setNaming({ ...naming, name: e.target.value })}
+          />
+          <button type="submit" className="btn-haze small" disabled={busy || !naming.name.trim()}>
+            Save
+          </button>
+        </form>
+      )}
+    </div>
+  )
 }
 
 function TokensSection({ notify }: { notify: Notify }) {

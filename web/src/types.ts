@@ -124,6 +124,28 @@ export type PromptName = 'persona' | 'planning'
 // `content` is the effective prompt; `custom` marks it as the user's own override.
 export type PromptDoc = { name: PromptName; content: string; custom: boolean }
 
+export type Passkey = {
+  id: number
+  name: string
+  created_at: string
+  last_used_at: string | null
+}
+
+// `webauthn_available` is false wherever browsers would refuse WebAuthn.
+export type SecurityState = {
+  passkeys: Passkey[]
+  totp: { enabled: boolean; pending: boolean }
+  webauthn_available: boolean
+}
+
+// The only response that carries the new secret.
+export type TotpEnrolment = {
+  secret_base32: string
+  otpauth_uri: string
+  issuer: string
+  account: string
+}
+
 export type MemoryHit = { id: string; category: string; summary: string }
 
 export type MemoryFact = {
@@ -144,9 +166,13 @@ export type LogRow = {
   detail: string
 }
 
+// `totp` is the former shape of this report, kept for one release.
 export type AdminGate = {
   elevated: boolean
   expires_at?: string
+  second_factor: 'passkey' | 'totp' | 'none'
+  methods: { passkey: boolean; totp: boolean }
+  require_second_factor: boolean
   totp: 'required' | 'password_only' | 'missing'
   inspect: boolean
 }
