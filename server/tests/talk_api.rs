@@ -579,3 +579,61 @@ async fn a_zero_cap_lifts_the_daily_limit() {
     state.agent_sessions_per_day = 0;
     assert_eq!(talk_status(&note_server::api::router(state), &cookie).await, StatusCode::OK);
 }
+
+#[tokio::test]
+async fn talk_returns_timing_and_the_transcript_keeps_the_trace() {
+    let llm = Arc::new(
+        MockLLM::scripted(vec![
+            ChatResponse {
+                text: String::new(),
+                tool_calls: vec![ToolCall {
+                    id: "c1".into(),
+                    name: "task_create".into(),
+                    args: r#"{"title":"call mom"}"#.into(),
+                }],
+            },
+            ChatResponse { text: "done".into(), tool_calls: vec![] },
+        ])
+        .thinking(vec!["a task first", "now the reply"]),
+    );
+    let (app, cookie, _cfg) = common::app_with_logged_in_user_and_llm(llm).await;
+
+    let res = app
+        .clone()
+        .oneshot(
+            Request::post("/api/talk")
+                .header(header::COOKIE, &cookie)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"message":"remind me to call mom"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let conv_id = v["conversation_id"].as_i64().unwrap();
+    assert!(v["thought_ms"].as_i64().unwrap() >= 0, "{}", v["thought_ms"]);
+    assert_eq!(v["reasoning"], "a task first\n\nnow the reply");
+
+    let res = app
+        .oneshot(
+            Request::get(format!("/api/conversations/{conv_id}/messages"))
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    let rows: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let rows = rows.as_array().unwrap();
+    assert_eq!(rows.len(), 3);
+    // a tool row stays ahead of the assistant row it belongs to
+    assert_eq!(rows[0]["role"], "user");
+    assert_eq!(rows[1]["role"], "tool");
+    assert_eq!(rows[2]["role"], "assistant");
+    assert!(rows[0]["reasoning"].is_null() && rows[1]["reasoning"].is_null());
+    assert_eq!(rows[2]["reasoning"], "a task first\n\nnow the reply");
+    assert_eq!(rows[2]["thought_ms"], v["thought_ms"]);
+}

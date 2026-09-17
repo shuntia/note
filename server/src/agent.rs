@@ -46,8 +46,10 @@ pub struct SessionOutcome {
     pub tool_calls: usize,
     pub steps: Vec<SessionStep>,
     /// Every round's reasoning text, blank-line separated, for providers that
-    /// return any. Not persisted with the transcript.
+    /// return any.
     pub reasoning: String,
+    /// Wall clock from the first provider call to the reply, in milliseconds.
+    pub thought_ms: u64,
 }
 
 /// One step of a session as it happens, for a caller that shows progress while
@@ -120,6 +122,7 @@ pub fn run_session_watched(
     let mut last_text = String::new();
     let mut reasoning = String::new();
     let max_turns = if single_call(kind) { IMPORT_MAX_TURNS } else { MAX_TURNS };
+    let started = std::time::Instant::now();
 
     while turns < max_turns {
         let req = ChatRequest { system: &system, messages: &messages, tools: &schemas };
@@ -142,7 +145,15 @@ pub fn run_session_watched(
         if resp.tool_calls.is_empty() {
             on_event(AgentEvent::Reply { text: &last_text });
             finish(deps, user_id, kind, turns, tool_calls, "agent_session")?;
-            return Ok(SessionOutcome { reply: last_text, turns, tool_calls, steps, reasoning });
+            let thought_ms = started.elapsed().as_millis() as u64;
+            return Ok(SessionOutcome {
+                reply: last_text,
+                turns,
+                tool_calls,
+                steps,
+                reasoning,
+                thought_ms,
+            });
         }
         let calls = resp.tool_calls.clone();
         messages.push(Message::Assistant { text: last_text.clone(), tool_calls: resp.tool_calls });
@@ -182,14 +193,23 @@ pub fn run_session_watched(
             if terminal {
                 on_event(AgentEvent::Reply { text: &content });
                 finish(deps, user_id, kind, turns, tool_calls, "agent_session")?;
-                return Ok(SessionOutcome { reply: content, turns, tool_calls, steps, reasoning });
+                let thought_ms = started.elapsed().as_millis() as u64;
+                return Ok(SessionOutcome {
+                    reply: content,
+                    turns,
+                    tool_calls,
+                    steps,
+                    reasoning,
+                    thought_ms,
+                });
             }
             messages.push(Message::ToolResult { call_id: call.id, content, is_error });
         }
     }
     on_event(AgentEvent::Reply { text: &last_text });
     finish(deps, user_id, kind, turns, tool_calls, "agent_max_turns")?;
-    Ok(SessionOutcome { reply: last_text, turns, tool_calls, steps, reasoning })
+    let thought_ms = started.elapsed().as_millis() as u64;
+    Ok(SessionOutcome { reply: last_text, turns, tool_calls, steps, reasoning, thought_ms })
 }
 
 fn finish(

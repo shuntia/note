@@ -3,6 +3,7 @@ use anyhow::Result;
 use rusqlite::Connection;
 
 const MAX_TITLE_CHARS: usize = 60;
+const MAX_REASONING_BYTES: usize = 32 * 1024;
 
 pub fn create(conn: &Connection, user_id: i64, title: &str, now: jiff::Timestamp) -> Result<i64> {
     conn.execute(
@@ -46,6 +47,42 @@ pub fn append_text(
     Ok(())
 }
 
+/// The assistant row, carrying the session's thinking text and how long the
+/// session took. Blank reasoning is stored as NULL, so a provider that returns
+/// none reads the same as a row written before the columns existed.
+pub fn append_assistant(
+    conn: &Connection,
+    conversation_id: i64,
+    content: &str,
+    reasoning: &str,
+    thought_ms: u64,
+    now: jiff::Timestamp,
+) -> Result<()> {
+    let reasoning = match reasoning.trim() {
+        "" => None,
+        text => Some(clip(text, MAX_REASONING_BYTES)),
+    };
+    conn.execute(
+        "INSERT INTO talk_messages
+            (conversation_id, role, content, reasoning, thought_ms, created_at)
+         VALUES (?1, 'assistant', ?2, ?3, ?4, ?5)",
+        (conversation_id, content, reasoning, thought_ms as i64, now.to_string()),
+    )?;
+    Ok(())
+}
+
+/// At most `limit` bytes, cut on a char boundary and marked with an ellipsis.
+fn clip(text: &str, limit: usize) -> String {
+    if text.len() <= limit {
+        return text.to_string();
+    }
+    let mut end = limit - '…'.len_utf8();
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &text[..end])
+}
+
 /// `result` is the tool output as it went back to the model, and lands in
 /// `content` so every row carries its displayable text in the same column.
 pub fn append_tool(
@@ -69,7 +106,8 @@ pub fn append_tool(
 /// Every row of a conversation as the API presents it, oldest-first.
 pub fn messages_json(conn: &Connection, conversation_id: i64) -> Result<Vec<serde_json::Value>> {
     let mut stmt = conn.prepare(
-        "SELECT id, role, content, tool_name, tool_args, is_error, created_at
+        "SELECT id, role, content, tool_name, tool_args, is_error, created_at,
+                reasoning, thought_ms
          FROM talk_messages WHERE conversation_id = ?1 ORDER BY id",
     )?;
     let rows = stmt.query_map([conversation_id], |r| {
@@ -81,6 +119,8 @@ pub fn messages_json(conn: &Connection, conversation_id: i64) -> Result<Vec<serd
             "tool_args": r.get::<_, Option<String>>(4)?,
             "is_error": r.get::<_, bool>(5)?,
             "created_at": r.get::<_, String>(6)?,
+            "reasoning": r.get::<_, Option<String>>(7)?,
+            "thought_ms": r.get::<_, Option<i64>>(8)?,
         }))
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -268,6 +308,50 @@ mod tests {
         assert_eq!(name, "task_create");
         assert_eq!(args, r#"{"title":"x"}"#);
         assert!(is_error);
+    }
+
+    #[test]
+    fn append_assistant_stores_the_trace_and_messages_json_returns_it() {
+        let conn = conn_with_conversation();
+        append_text(&conn, 1, "user", "hi", now()).unwrap();
+        append_tool(&conn, 1, "task_create", "{}", "{}", false, now()).unwrap();
+        append_assistant(&conn, 1, "done", "  first\n\nsecond  ", 2400, now()).unwrap();
+
+        let rows = messages_json(&conn, 1).unwrap();
+        assert_eq!(rows.len(), 3);
+        assert!(rows[0]["reasoning"].is_null() && rows[0]["thought_ms"].is_null());
+        assert!(rows[1]["reasoning"].is_null() && rows[1]["thought_ms"].is_null());
+        assert_eq!(rows[2]["role"], "assistant");
+        assert_eq!(rows[2]["reasoning"], "first\n\nsecond");
+        assert_eq!(rows[2]["thought_ms"], 2400);
+    }
+
+    #[test]
+    fn blank_reasoning_is_null_and_the_timing_is_kept() {
+        let conn = conn_with_conversation();
+        append_assistant(&conn, 1, "done", "   \n ", 0, now()).unwrap();
+        let rows = messages_json(&conn, 1).unwrap();
+        assert!(rows[0]["reasoning"].is_null());
+        assert_eq!(rows[0]["thought_ms"], 0);
+    }
+
+    #[test]
+    fn a_row_written_before_the_columns_existed_reads_as_null() {
+        let conn = conn_with_conversation();
+        append_text(&conn, 1, "assistant", "old", now()).unwrap();
+        let rows = messages_json(&conn, 1).unwrap();
+        assert!(rows[0]["reasoning"].is_null());
+        assert!(rows[0]["thought_ms"].is_null());
+    }
+
+    #[test]
+    fn over_long_reasoning_is_clipped_on_a_char_boundary() {
+        let conn = conn_with_conversation();
+        append_assistant(&conn, 1, "done", &"日".repeat(MAX_REASONING_BYTES), 10, now()).unwrap();
+        let stored = messages_json(&conn, 1).unwrap()[0]["reasoning"].as_str().unwrap().to_string();
+        assert!(stored.len() <= MAX_REASONING_BYTES);
+        assert!(stored.ends_with('…'));
+        assert!(stored.trim_end_matches('…').chars().all(|c| c == '日'));
     }
 
     #[test]

@@ -238,6 +238,11 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (entry_id, date)
     );
     ",
+    // v16
+    "
+    ALTER TABLE talk_messages ADD COLUMN reasoning TEXT;
+    ALTER TABLE talk_messages ADD COLUMN thought_ms INTEGER;
+    ",
 ];
 
 pub fn open(path: &Path) -> Result<Connection> {
@@ -639,6 +644,44 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM calendar_exceptions", [], |r| r.get(0))
             .unwrap();
         assert_eq!(left, 0, "exceptions follow their entry");
+    }
+
+    #[test]
+    fn v16_adds_the_trace_columns_to_talk_messages() {
+        let conn = open_memory().unwrap();
+        let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, MIGRATIONS.len() as i64);
+        conn.execute(
+            "INSERT INTO users (username, pass_hash, role) VALUES ('a','h','member')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO conversations (user_id, title, created_at, updated_at)
+             VALUES (1, 'chat', 'now', 'now')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO talk_messages (conversation_id, role, content, created_at)
+             VALUES (1, 'assistant', 'hi', 'now')",
+            [],
+        )
+        .unwrap();
+        let trace = || -> (Option<String>, Option<i64>) {
+            conn.query_row("SELECT reasoning, thought_ms FROM talk_messages WHERE id = 1", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap()
+        };
+        assert_eq!(trace(), (None, None));
+
+        conn.execute(
+            "UPDATE talk_messages SET reasoning = 'weighed it up', thought_ms = 1400 WHERE id = 1",
+            [],
+        )
+        .unwrap();
+        assert_eq!(trace(), (Some("weighed it up".to_string()), Some(1400)));
     }
 
     #[test]

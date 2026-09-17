@@ -785,13 +785,13 @@ async fn talk(
         for s in &out.steps {
             crate::talk::append_tool(&conn, conv_id, &s.name, &s.args, &s.result, s.is_error, now)?;
         }
-        crate::talk::append_text(&conn, conv_id, "assistant", &reply, now)?;
+        crate::talk::append_assistant(&conn, conv_id, &reply, &out.reasoning, out.thought_ms, now)?;
         crate::talk::touch(&conn, conv_id, now)?;
-        Ok::<_, anyhow::Error>((conv_id, reply, out.steps, out.reasoning))
+        Ok::<_, anyhow::Error>((conv_id, reply, out.steps, out.reasoning, out.thought_ms))
     })
     .await;
     match result {
-        Ok(Ok((conv_id, reply, steps, reasoning))) => {
+        Ok(Ok((conv_id, reply, steps, reasoning, thought_ms))) => {
             let steps: Vec<_> = steps
                 .iter()
                 .map(|s| {
@@ -808,6 +808,7 @@ async fn talk(
                 "reply": reply,
                 "steps": steps,
                 "reasoning": reasoning,
+                "thought_ms": thought_ms,
             }))
             .into_response()
         }
