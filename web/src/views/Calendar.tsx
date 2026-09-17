@@ -89,6 +89,16 @@ function occurrencesOn(entries: CalendarEntry[], date: string): Occurrence[] {
     .sort((a, b) => a.start - b.start || a.end - b.end)
 }
 
+const TIME = /^([01]\d|2[0-3]):[0-5]\d$/
+
+// What the field holds becomes the zero-padded HH:MM the server takes, when it can.
+function asTime(raw: string): string {
+  const m = /^(\d{1,2})[:.]?(\d{2})$/.exec(raw.trim())
+  if (!m) return raw.trim()
+  const [h, min] = [Number(m[1]), Number(m[2])]
+  return h < 24 && min < 60 ? `${pad(h)}:${pad(min)}` : raw.trim()
+}
+
 const spanOf = (o: Occurrence) =>
   o.entry.kind === 'note' ? o.entry.start_time : `${o.entry.start_time} – ${o.entry.end_time}`
 
@@ -617,7 +627,11 @@ function EntrySheet({
 
   const set = (patch: Partial<Draft>) => setDraft((d) => ({ ...d, ...patch }))
   const toggleDay = (i: number) => set({ days: draft.days ^ (1 << i) })
-  const ready = draft.title.trim().length > 0 && draft.end > draft.start
+  const ready =
+    draft.title.trim().length > 0 &&
+    TIME.test(draft.start) &&
+    TIME.test(draft.end) &&
+    draft.end > draft.start
 
   return createPortal(
     <>
@@ -673,19 +687,23 @@ function EntrySheet({
         </div>
         <div className="sheet-time">
           <input
-            type="time"
             className="pill-in tnum"
+            inputMode="numeric"
+            maxLength={5}
             aria-label="Start"
             value={draft.start}
             onChange={(e) => set({ start: e.target.value })}
+            onBlur={(e) => set({ start: asTime(e.target.value) })}
           />
           <span>–</span>
           <input
-            type="time"
             className="pill-in tnum"
+            inputMode="numeric"
+            maxLength={5}
             aria-label="End"
             value={draft.end}
             onChange={(e) => set({ end: e.target.value })}
+            onBlur={(e) => set({ end: asTime(e.target.value) })}
           />
         </div>
         <div className="days" role="group" aria-label="Days">
