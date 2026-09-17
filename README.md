@@ -500,32 +500,83 @@ written to `event_log` as `admin_*` rows naming the acting admin.
 Every `/api/admin/*` route needs, in order:
 
 1. an admin-role session (`403` otherwise);
-2. an *admin grant*: the panel asks for the password again plus a 6-digit TOTP
-   code (the password alone under `require_totp = false`), and the server
-   answers with a second cookie
-   (`admin=…; Path=/api/admin; HttpOnly; SameSite=Strict`, `Secure` on HTTPS)
-   valid 15 minutes, bound to that session, and deleted with it. Every route
-   except `gate`, `elevate` and `drop` answers `401` without a live grant;
+2. an *admin grant*: the panel asks for the password again plus a second factor
+   — a passkey, or a 6-digit code (the password alone under
+   `require_second_factor = false`) — and the server answers with a second
+   cookie (`admin=…; Path=/api/admin; HttpOnly; SameSite=Strict`, `Secure` on
+   HTTPS) valid 15 minutes, bound to that session, and deleted with it. Every
+   route except `gate`, `elevate` and `drop` answers `401` without a live grant;
 3. same-origin provenance: a request whose `Sec-Fetch-Site` says a foreign site
    started it is refused (`403`).
 
 Elevation attempts are limited like logins (10 per username per 15 minutes),
-TOTP codes are single-use, and admin responses are `Cache-Control: no-store`.
+TOTP codes and passkey assertions are single-use, and admin responses are
+`Cache-Control: no-store`.
 
-### Secrets
+### Second factors
 
-`secrets_dir` in `server.toml` (default `persist/secrets`, gitignored) holds
-`admin_totp`: the base32 TOTP seed (SHA-1, 6 digits, 30 s). Generate and
-enrol one with:
+Every account enrols its own in Settings → SECURITY, admin or not:
+
+- **Passkeys.** "Add a passkey" re-asks for the password, then hands the
+  browser a WebAuthn challenge; the credential is named and stored. An account
+  holds at most 10. Rename and remove are on the row (removal re-asks for the
+  password). Browsers only speak WebAuthn to a secure origin, so this needs
+  `public_base_url` on `https://` (or `http://localhost` for development);
+  anywhere else the section says so and the button stays off.
+- **Authenticator app.** "Set up authenticator" shows a QR code (rendered in
+  the page — no image service ever sees the secret), the `otpauth://` URI as a
+  link a password manager can take, and the base32 key for the manual field.
+  A code from the app finishes enrolment; until then the secret sits in
+  `users.totp_pending` and a later setup replaces it.
+
+Secrets are stored as base32 text in `users.totp_secret`, not encrypted: the
+database file is the trust boundary, and anything reading it already holds the
+session table and the argon2 hashes. Back it up accordingly.
+
+Enrolment routes, all on the session cookie. Asking for a challenge and
+dropping a factor re-check the account password; finishing a registration rides
+on the challenge that password bought:
+
+| Route | Body | Effect |
+|---|---|---|
+| `GET /api/security` | — | `{passkeys: [{id, name, created_at, last_used_at}], totp: {enabled, pending}, webauthn_available}` |
+| `POST /api/security/passkeys/challenge` | `{password}` | WebAuthn creation options; `503` where passkeys can't run, `409` at the cap |
+| `POST /api/security/passkeys` | `{name, credential}` | `{id, name, created_at, last_used_at}`; `422` bad name or challenge, `409` cap or a credential already registered |
+| `PATCH /api/security/passkeys/{id}` | `{name}` | the renamed row; `422` invalid, `404` not yours |
+| `DELETE /api/security/passkeys/{id}` | `{password}` | `204`; `404` not yours |
+| `POST /api/security/totp/start` | `{password}` | `{secret_base32, otpauth_uri, issuer, account}` — the only response carrying the secret |
+| `POST /api/security/totp/confirm` | `{code}` | `204`; `401` when it doesn't match |
+| `DELETE /api/security/totp` | `{password}` | `204`, clearing the secret and any pending one |
+
+A wrong password is `401` and changes nothing; ten wrong ones in 15 minutes are
+`429`. Adding and dropping factors write `passkey_added`, `passkey_removed`,
+`totp_enrolled` and `totp_removed` to `event_log`.
+
+The relying party is the host of `public_base_url`, named "Note". A deployment
+whose browsers see a different origin overrides both:
+
+```toml
+[admin]
+rp_id = "note.example.net"
+rp_origin = "https://note.example.net"
+```
+
+### Legacy: the shared admin seed
+
+`secrets_dir` in `server.toml` (default `persist/secrets`, gitignored) may hold
+`admin_totp`: one base32 TOTP seed (SHA-1, 6 digits, 30 s) shared by every
+admin. It answers for an admin who has enrolled nothing of their own, and stops
+being consulted for one who has.
 
 ```sh
 note-server totp-generate            # prints a seed and its otpauth:// URI
 note-server totp-uri                 # the URI for the seed already installed
 ```
 
-Until the file exists, a release server keeps the panel locked: the gate
-reports `totp: "missing"` and elevation answers `503`. Startup writes an
-`admin_locked` row so the state is visible in the log.
+With no seed installed and nothing enrolled, a release server keeps that
+account out: the gate reports `totp: "missing"` and elevation answers `503`
+(enrolment itself needs no elevation, so Settings is the way in). Startup
+writes an `admin_locked` row so the state is visible in the log.
 
 ### Password-only elevation
 
@@ -533,14 +584,13 @@ An operator who does not want a second factor opts out in `server.toml`:
 
 ```toml
 [admin]
-require_totp = false
+require_second_factor = false        # require_totp still reads as its old name
 ```
 
 Elevation then re-asks for the account password alone — same grant cookie,
-same 15 minutes, same limiter and audit rows — and the seed is ignored, installed
-or not. The gate reports `totp: "password_only"` and the panel drops the code
-field. The default is `true`: without the section, a missing seed keeps the panel
-locked as above.
+same 15 minutes, same limiter and audit rows — and no factor is consulted,
+enrolled or not. The gate reports `require_second_factor: false` and the panel
+drops the second field. The default is `true`.
 
 ### Dev builds
 
@@ -552,7 +602,8 @@ cargo run --features dev-inspect
 It compiles in the inspection routes (`/api/admin/inspect/...`: a user's
 config, tasks, today's events, conversations and memory files, all editable,
 plus a SQL console on the live database), lets elevation pass on the password
-alone when no seed is installed, and makes the panel show a red banner. The
+alone for an account with no factor and no seed, and makes the panel show a red
+banner. The
 web client is a single build; it renders the inspection section only when the
 server's gate reports `inspect: true`.
 
@@ -560,8 +611,9 @@ server's gate reports `inspect: true`.
 
 | Route | Needs | Effect |
 |---|---|---|
-| `GET /api/admin/gate` | role | `{elevated, expires_at?, totp, inspect}`; `totp` is `required`, `password_only` or `missing` |
-| `POST /api/admin/elevate` `{password, code?}` | role | sets the grant cookie |
+| `GET /api/admin/gate` | role | `{elevated, expires_at?, second_factor, methods: {passkey, totp}, require_second_factor, totp, inspect}`; `second_factor` is what to ask this admin for (`passkey`, `totp`, `none`), `methods` what they hold, and `totp` the former report (`required`, `password_only`, `missing`) kept for one release |
+| `POST /api/admin/elevate/challenge` | role | WebAuthn request options for this admin's passkeys; `409` when they have none, `503` where passkeys can't run |
+| `POST /api/admin/elevate` `{password, code?, assertion?}` | role | sets the grant cookie; the password plus a passkey assertion, a code from the account's app, or the shared seed's code |
 | `POST /api/admin/drop` | role | ends the grant |
 | `GET /api/admin/status` | grant | version, build, uptime, DB size, counts, providers |
 | `GET /api/admin/users` | grant | `[{id, username, role, disabled, sessions}]` |
