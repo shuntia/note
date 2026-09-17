@@ -857,6 +857,27 @@ fn schedule_rows(
         .unwrap_or_default()
 }
 
+/// A topic the server would deliver another account's messages to. Their
+/// default topic is derived from their username, so claiming it would subscribe
+/// this user to their notifications.
+fn is_another_users_topic(
+    conn: &rusqlite::Connection,
+    prefix: &str,
+    username: &str,
+    topic: &str,
+) -> bool {
+    let Some(other) = topic.strip_prefix(prefix) else {
+        return false;
+    };
+    if other == username {
+        return false;
+    }
+    conn.query_row("SELECT 1 FROM users WHERE username = ?1", [other], |_| Ok(()))
+        .optional()
+        .unwrap_or(None)
+        .is_some()
+}
+
 fn invalid_field(field: &str, requirement: &str) -> axum::response::Response {
     (
         StatusCode::BAD_REQUEST,
@@ -906,7 +927,7 @@ async fn settings_put(
     Json(req): Json<SettingsPatch>,
 ) -> impl IntoResponse {
     let templates = crate::templates::available(&state.config_dir, &user.username);
-    let _serializer = state.db();
+    let conn = state.db();
     let mut cfg = match crate::config::UserConfig::load(&state.config_dir, &user.username) {
         Ok(c) => c,
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
@@ -963,6 +984,8 @@ async fn settings_put(
                 "ntfy_topic",
                 "must be 1 to 64 characters of letters, digits, _ or -",
             );
+        } else if is_another_users_topic(&conn, ntfy_topic_prefix(&state), &user.username, topic) {
+            return unprocessable_field("ntfy_topic", "is another account's topic");
         } else {
             cfg.ntfy_topic = Some(topic.to_string());
         }
