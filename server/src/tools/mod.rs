@@ -1,3 +1,4 @@
+pub mod calendar_ops;
 pub mod context_ops;
 pub mod inbox_ops;
 pub mod memory_ops;
@@ -192,6 +193,7 @@ const CHECKIN: &[&str] = &[
     "task_list",
     "task_search",
     "task_read",
+    "calendar_list",
 ];
 const TALK: &[&str] = &[
     "memory_query",
@@ -211,6 +213,11 @@ const TALK: &[&str] = &[
     "task_read",
     "task_bulk_update",
     "plan_tasks",
+    "calendar_list",
+    "calendar_add",
+    "calendar_update",
+    "calendar_remove",
+    "calendar_skip",
 ];
 const IMPORT: &[&str] = &["task_brief"];
 const INBOX: &[&str] = &["memory_query", "memory_read", "inbox_decide"];
@@ -235,6 +242,11 @@ const NIGHTLY: &[&str] = &[
     "task_read",
     "task_bulk_update",
     "plan_tasks",
+    "calendar_list",
+    "calendar_add",
+    "calendar_update",
+    "calendar_remove",
+    "calendar_skip",
 ];
 
 /// A tool whose success is the session's whole job: `run_session` returns on
@@ -386,6 +398,35 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
              would overlap something already planned, or when they do not fit before end.",
             schema::<plan_ops::PlanTasksArgs>(),
         ),
+        "calendar_list" => (
+            "Read the user's calendar of fixed commitments: what each day already \
+             belongs to, with the quiet windows marked.",
+            schema::<calendar_ops::ListArgs>(),
+        ),
+        "calendar_add" => (
+            "Add a standing commitment to the calendar. \"fixed\" is a hard one the day is \
+             built around — school, work, a class — and is quiet by default: while it runs, \
+             deliveries are held and arrive when it ends. \"busy\" is softer (a commute, a \
+             meal) and \"note\" is informational and never quiet. Use this when the user says \
+             they cannot be disturbed at certain times, or names something that happens every \
+             week: \"school weekdays 08:15-15:30\" is fixed and quiet.",
+            schema::<calendar_ops::AddArgs>(),
+        ),
+        "calendar_update" => (
+            "Change a calendar entry: its title, kind, quiet flag, times, weekdays, one-off \
+             date or validity range. Only the fields given change.",
+            schema::<calendar_ops::UpdateArgs>(),
+        ),
+        "calendar_remove" => (
+            "Delete a calendar entry for good. For a commitment that has ended; to drop a \
+             single day of one that continues, use calendar_skip.",
+            schema::<calendar_ops::RemoveArgs>(),
+        ),
+        "calendar_skip" => (
+            "Skip one date of a repeating calendar entry — a day off school, a cancelled \
+             class. The entry itself stays.",
+            schema::<calendar_ops::SkipArgs>(),
+        ),
         _ => unreachable!("describe covers every registered tool"),
     }
 }
@@ -461,6 +502,11 @@ fn run(
         "task_read" => task_query::read(conn, ctx, parse(raw)?),
         "task_bulk_update" => task_query::bulk_update(conn, ctx, parse(raw)?),
         "plan_tasks" => plan_ops::plan_tasks(conn, ctx, parse(raw)?),
+        "calendar_list" => calendar_ops::list(conn, ctx, parse(raw)?),
+        "calendar_add" => calendar_ops::add(conn, ctx, parse(raw)?),
+        "calendar_update" => calendar_ops::update(conn, ctx, parse(raw)?),
+        "calendar_remove" => calendar_ops::remove(conn, ctx, parse(raw)?),
+        "calendar_skip" => calendar_ops::skip(conn, ctx, parse(raw)?),
         _ => unreachable!("registry guarantees a known name"),
     }
 }
