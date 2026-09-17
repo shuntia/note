@@ -326,6 +326,7 @@ mod tests {
             llm: &Broken,
             embeddings: None,
             task_scope: None,
+            inbox_source: None,
             token_id: None,
         };
         let err = run_session_watched(
