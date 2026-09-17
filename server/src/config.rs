@@ -50,6 +50,16 @@ pub struct ProviderConfig {
     pub api_key_env: String,
     #[serde(default)]
     pub api_key_file: PathBuf,
+    /// Read/write/overall cap on one chat call. The default sits under the 100 s
+    /// a Cloudflare tunnel allows a response to take.
+    #[serde(default = "default_provider_timeout")]
+    pub timeout_secs: u64,
+}
+
+pub const DEFAULT_PROVIDER_TIMEOUT_SECS: u64 = 45;
+
+fn default_provider_timeout() -> u64 {
+    DEFAULT_PROVIDER_TIMEOUT_SECS
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -414,6 +424,22 @@ mod tests {
         cfg.save(tmp.path(), "aki").unwrap();
         let raw = std::fs::read_to_string(tmp.path().join("users/aki/user.toml")).unwrap();
         assert!(!raw.contains("ntfy_topic"), "unexpected file: {raw}");
+    }
+
+    #[test]
+    fn a_providers_timeout_defaults_and_can_be_overridden() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = "bind_addr = \"127.0.0.1:0\"\npublic_base_url = \"http://x\"\ndata_dir = \"data\"\n";
+        write(tmp.path(), "server.toml",
+            &format!("{base}[providers.llm]\nkind = \"anthropic\"\nmodel = \"m\"\napi_key_env = \"K\"\n"));
+        let llm = ServerConfig::load(tmp.path()).unwrap().providers.llm.unwrap();
+        assert_eq!(llm.timeout_secs, DEFAULT_PROVIDER_TIMEOUT_SECS);
+        assert_eq!(llm.timeout_secs, 45);
+
+        write(tmp.path(), "server.toml", &format!(
+            "{base}[providers.llm]\nkind = \"anthropic\"\nmodel = \"m\"\napi_key_env = \"K\"\ntimeout_secs = 90\n"));
+        let llm = ServerConfig::load(tmp.path()).unwrap().providers.llm.unwrap();
+        assert_eq!(llm.timeout_secs, 90);
     }
 
     #[test]

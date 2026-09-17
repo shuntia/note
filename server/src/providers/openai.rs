@@ -9,9 +9,9 @@ pub struct OpenAILLM {
 }
 
 impl OpenAILLM {
-    pub fn new(base_url: &str, model: &str, api_key: &str) -> Self {
+    pub fn new(base_url: &str, model: &str, api_key: &str, timeout_secs: u64) -> Self {
         Self {
-            agent: super::http_agent(),
+            agent: super::http_agent(timeout_secs),
             base_url: base_url.trim_end_matches('/').to_string(),
             model: model.to_string(),
             api_key: api_key.to_string(),

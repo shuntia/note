@@ -460,3 +460,21 @@ async fn a_bearer_session_is_attributed_to_its_token() {
     };
     assert!(detail.ends_with(" token=1"), "{detail}");
 }
+
+#[tokio::test]
+async fn a_malformed_body_says_so_and_nothing_more() {
+    let llm = Arc::new(MockLLM::scripted(vec![text("briefed")]));
+    let (app, cookie, _state, _cfg) = common::app_with_logged_in_user_llm_and_state(llm).await;
+    make_task(&app, &cookie, "Essay").await;
+
+    let (status, v) = send(
+        &app,
+        cookie_auth(&cookie),
+        Method::POST,
+        "/api/tasks/1/agent",
+        Some(r#"{"context": unquoted}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(v["error"], "malformed JSON body");
+}
