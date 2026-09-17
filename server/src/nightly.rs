@@ -196,6 +196,7 @@ pub fn spawn(state: crate::AppState) {
                         task_scope: None,
                         inbox_source: None,
                         token_id: None,
+                        thread_note: None,
                     };
                     let r = run_for_user(&deps, user_id, &username, now);
                     (r, username)
@@ -270,6 +271,7 @@ mod tests {
             task_scope: None,
             inbox_source: None,
             token_id: None,
+            thread_note: None,
         }
     }
 

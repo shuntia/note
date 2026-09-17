@@ -459,6 +459,7 @@ async fn task_agent(
             task_scope: Some(id),
             inbox_source: None,
             token_id,
+            thread_note: None,
         };
         let session = crate::agent::run_session(
             &deps,
@@ -617,6 +618,7 @@ async fn agent_inbox(
             task_scope: None,
             inbox_source: Some(req.source_id.clone()),
             token_id,
+            thread_note: None,
         };
         crate::agent::run_session(
             &deps,
@@ -765,6 +767,17 @@ struct TalkReq {
 }
 
 const MAX_TALK_MESSAGE: usize = 16 * 1024;
+
+/// The marker a reply in a check-in thread carries into its session, so the
+/// model reads the thread's opening assistant turns as its own scheduled
+/// check-ins rather than as answers it once gave.
+fn checkin_thread_note(date: &str) -> String {
+    format!(
+        "# This conversation\n\nOpened by your scheduled check-in on {date}: every assistant \
+         message the user has not answered yet is a check-in question you sent, and the user \
+         is replying to it now."
+    )
+}
 // History windows stay user-first/assistant-last: each success appends exactly
 // one user and one assistant row, and errors persist nothing.
 const TALK_HISTORY_LIMIT: usize = 32;
@@ -784,6 +797,7 @@ async fn talk(
         )
             .into_response();
     }
+    let mut thread_note = None;
     if let Some(id) = req.conversation_id {
         let conn = state.db();
         match crate::talk::owned(&conn, user.id, id) {
@@ -791,6 +805,10 @@ async fn talk(
             Ok(false) => return conversation_not_found(),
             Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         }
+        thread_note = match crate::talk::checkin_date(&conn, id) {
+            Ok(date) => date.map(|d| checkin_thread_note(&d)),
+            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        };
     }
     if daily_cap_reached(&state, user.id) {
         return daily_cap_response();
@@ -822,6 +840,7 @@ async fn talk(
             task_scope: None,
             inbox_source: None,
             token_id: None,
+            thread_note,
         };
         let now = jiff::Timestamp::now();
         let history = match req_conversation {

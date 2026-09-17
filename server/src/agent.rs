@@ -29,6 +29,9 @@ pub struct SessionDeps<'a> {
     /// The API token the caller presented, so the session's log row says which
     /// credential spent it.
     pub token_id: Option<i64>,
+    /// What the model should know about the thread it is replying in, appended
+    /// after the context block.
+    pub thread_note: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -111,6 +114,10 @@ pub fn run_session_watched(
         let context = crate::context::assemble(&conn, deps.config_dir, user_id, username, now)?;
         system.push_str("\n\n");
         system.push_str(&context);
+        if let Some(note) = &deps.thread_note {
+            system.push_str("\n\n");
+            system.push_str(note);
+        }
     }
 
     let schemas = tools::schemas(kind);
@@ -264,7 +271,7 @@ mod tests {
         tmp: &'a tempfile::TempDir,
         llm: &'a MockLLM,
     ) -> SessionDeps<'a> {
-        SessionDeps { db, config_dir: tmp.path(), data_dir: tmp.path(), llm, embeddings: None, task_scope: None, inbox_source: None, token_id: None }
+        SessionDeps { db, config_dir: tmp.path(), data_dir: tmp.path(), llm, embeddings: None, task_scope: None, inbox_source: None, token_id: None, thread_note: None }
     }
 
     fn now() -> jiff::Timestamp {
@@ -348,6 +355,7 @@ mod tests {
             task_scope: None,
             inbox_source: None,
             token_id: None,
+            thread_note: None,
         };
         let err = run_session_watched(
             &deps,
@@ -627,6 +635,7 @@ mod tests {
             task_scope: None,
             inbox_source: None,
             token_id: None,
+            thread_note: None,
         };
         assert!(run_session(&d, 1, "aki", SessionKind::Talk, now(), &[], "hi").is_err());
     }
