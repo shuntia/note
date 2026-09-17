@@ -694,6 +694,23 @@ mod tests {
     }
 
     #[test]
+    fn nightly_notes_write_is_reachable_only_from_the_nightly_run() {
+        assert!(registry(SessionKind::Nightly).contains(&"nightly_notes_write"));
+        for kind in [SessionKind::Talk, SessionKind::Checkin, SessionKind::Import] {
+            assert!(
+                !registry(kind).contains(&"nightly_notes_write"),
+                "{kind:?} can write the nightly notes"
+            );
+        }
+        let (conn, tmp) = env();
+        for kind in [SessionKind::Talk, SessionKind::Checkin] {
+            let e = dispatch(&conn, &ctx(&tmp), kind, "nightly_notes_write", r#"{"text":"x"}"#)
+                .unwrap_err();
+            assert_eq!(e.kind, "forbidden");
+        }
+    }
+
+    #[test]
     fn the_import_surface_is_one_tool() {
         assert_eq!(registry(SessionKind::Import), &["task_brief"]);
         let (conn, tmp) = env();
