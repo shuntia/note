@@ -15,11 +15,11 @@ pub fn valid_topic(topic: &str) -> bool {
 
 /// ntfy's 1-5 priority scale, where 4 and 5 are the ones that break through a
 /// quiet phone.
-fn priority(urgency: Urgency) -> &'static str {
+fn priority(urgency: Urgency) -> u8 {
     match urgency {
-        Urgency::Low => "2",
-        Urgency::Normal => "3",
-        Urgency::High => "5",
+        Urgency::Low => 2,
+        Urgency::Normal => 3,
+        Urgency::High => 5,
     }
 }
 
@@ -79,19 +79,22 @@ impl Channel for NtfyChannel {
         "ntfy"
     }
 
+    /// The JSON publish form rather than the header form: a title is often the
+    /// event's own words, and HTTP header values cannot carry non-ASCII bytes.
     fn deliver(&self, _user_id: i64, username: &str, msg: &OutboundMessage) -> Result<()> {
-        let url = format!("{}/{}", self.base_url, self.topic(username));
-        let mut req = self
-            .agent
-            .post(&url)
-            .set("Title", &msg.title)
-            .set("Priority", priority(msg.urgency))
-            .set("Tags", "bell")
-            .set("Click", &self.click_url);
+        let body = serde_json::json!({
+            "topic": self.topic(username),
+            "title": msg.title,
+            "message": msg.body,
+            "priority": priority(msg.urgency),
+            "tags": ["bell"],
+            "click": self.click_url,
+        });
+        let mut req = self.agent.post(&self.base_url);
         if let Some(token) = &self.token {
             req = req.set("Authorization", &format!("Bearer {token}"));
         }
-        match req.send_string(&msg.body) {
+        match req.send_json(body) {
             Ok(_) => Ok(()),
             Err(ureq::Error::Status(code, _)) => anyhow::bail!("status {code}"),
             Err(ureq::Error::Transport(t)) => anyhow::bail!("transport error: {}", t.kind()),
@@ -172,6 +175,11 @@ mod tests {
         (base, rx)
     }
 
+    fn body_json(raw: &str) -> serde_json::Value {
+        let (_, body) = raw.split_once("\r\n\r\n").expect("a request with a body");
+        serde_json::from_str(body).unwrap_or_else(|e| panic!("body {body:?}: {e}"))
+    }
+
     fn msg(urgency: Urgency) -> OutboundMessage {
         OutboundMessage {
             title: "Check-in".into(),
@@ -207,25 +215,27 @@ mod tests {
         ch.deliver(1, "aki", &msg(Urgency::High)).unwrap();
 
         let raw = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
-        assert!(raw.starts_with("POST /my-desk "), "request line: {raw}");
-        assert!(raw.contains("Title: Check-in\r\n"), "{raw}");
-        assert!(raw.contains("Priority: 5\r\n"), "{raw}");
-        assert!(raw.contains("Tags: bell\r\n"), "{raw}");
-        assert!(raw.contains("Click: https://note.example\r\n"), "{raw}");
+        assert!(raw.starts_with("POST / "), "request line: {raw}");
         assert!(!raw.contains("Authorization"), "{raw}");
-        assert!(raw.ends_with("how is the day going?"), "{raw}");
+        let v = body_json(&raw);
+        assert_eq!(v["topic"], "my-desk");
+        assert_eq!(v["title"], "Check-in");
+        assert_eq!(v["message"], "how is the day going?");
+        assert_eq!(v["priority"], 5);
+        assert_eq!(v["tags"], serde_json::json!(["bell"]));
+        assert_eq!(v["click"], "https://note.example");
     }
 
     #[test]
     fn urgency_maps_onto_ntfys_scale() {
-        for (urgency, priority) in [(Urgency::Low, "2"), (Urgency::Normal, "3"), (Urgency::High, "5")] {
+        for (urgency, priority) in [(Urgency::Low, 2), (Urgency::Normal, 3), (Urgency::High, 5)] {
             let (base, rx) = one_shot("200 OK");
             let cfg = config_dir();
             let ch =
                 NtfyChannel::new(cfg.path().to_path_buf(), &settings(&base), "http://x").unwrap();
             ch.deliver(1, "aki", &msg(urgency)).unwrap();
             let raw = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
-            assert!(raw.contains(&format!("Priority: {priority}\r\n")), "{raw}");
+            assert_eq!(body_json(&raw)["priority"], priority);
         }
     }
 
@@ -237,7 +247,26 @@ mod tests {
         let ch = NtfyChannel::new(cfg.path().to_path_buf(), &settings(&base), "http://x").unwrap();
         ch.deliver(1, "aki", &msg(Urgency::Normal)).unwrap();
         let raw = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
-        assert!(raw.starts_with("POST /note-aki "), "request line: {raw}");
+        assert_eq!(body_json(&raw)["topic"], "note-aki");
+    }
+
+    /// A title is the event's own words, which a header value cannot carry.
+    #[test]
+    fn a_non_ascii_title_is_delivered_intact() {
+        let (base, rx) = one_shot("200 OK");
+        let cfg = config_dir();
+        let ch = NtfyChannel::new(cfg.path().to_path_buf(), &settings(&base), "http://x").unwrap();
+        let msg = OutboundMessage {
+            title: "朝のチェックイン".into(),
+            body: "今日はどう？".into(),
+            urgency: Urgency::High,
+            event_id: Some(7),
+        };
+        ch.deliver(1, "aki", &msg).unwrap();
+        let raw = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        let v = body_json(&raw);
+        assert_eq!(v["title"], "朝のチェックイン");
+        assert_eq!(v["message"], "今日はどう？");
     }
 
     #[test]
@@ -302,6 +331,7 @@ mod tests {
         .unwrap();
         ch.deliver(1, "aki", &msg(Urgency::Normal)).unwrap();
         let raw = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
-        assert!(raw.starts_with("POST /note-aki "), "request line: {raw}");
+        assert!(raw.starts_with("POST / "), "request line: {raw}");
+        assert_eq!(body_json(&raw)["topic"], "note-aki");
     }
 }
