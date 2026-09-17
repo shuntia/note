@@ -1459,11 +1459,44 @@ async fn vapid_public_key(_user: CurrentUser, State(state): State<AppState>) -> 
 /// Bridges hub messages to the socket; inbound frames are drained and ignored
 /// (delivery is one-way in v1), and either side closing tears the bridge down.
 async fn ws_connect(
-    user: CurrentUser,
+    WsAdmission(user): WsAdmission,
     State(state): State<AppState>,
     ws: axum::extract::ws::WebSocketUpgrade,
 ) -> impl IntoResponse {
     ws.on_upgrade(move |socket| ws_pump(socket, state.hub.clone(), user.id))
+}
+
+/// A session allowed to open a socket: not started by a foreign page, and not
+/// already holding the cap. It sits ahead of the upgrade extractor in the
+/// handler's arguments so both refusals answer as plain HTTP.
+struct WsAdmission(CurrentUser);
+
+impl axum::extract::FromRequestParts<AppState> for WsAdmission {
+    type Rejection = axum::response::Response;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        if !crate::net::fetch_site_ok(&parts.headers) {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({ "error": "cross-site request refused" })),
+            )
+                .into_response());
+        }
+        let user = CurrentUser::from_request_parts(parts, state)
+            .await
+            .map_err(|s| s.into_response())?;
+        if state.hub.at_capacity(user.id) {
+            return Err((
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(serde_json::json!({ "error": "too many open connections" })),
+            )
+                .into_response());
+        }
+        Ok(WsAdmission(user))
+    }
 }
 
 const WS_PING_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
@@ -1481,7 +1514,9 @@ async fn ws_pump(
 ) {
     use axum::extract::ws::Message;
 
-    let (conn_id, mut rx) = hub.register(user_id);
+    let Some((conn_id, mut rx)) = hub.register(user_id) else {
+        return;
+    };
     let mut ping = tokio::time::interval(WS_PING_EVERY);
     ping.tick().await;
     let mut last_inbound = tokio::time::Instant::now();
