@@ -1,6 +1,7 @@
 target/
 node_modules/
 data/
+config/users/
 web/node_modules/
 web/dist/
 config/nvidianim.key

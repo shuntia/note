@@ -40,16 +40,17 @@ pub trait EmbeddingsProvider: Send + Sync {
     fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>>;
 }
 
-/// Agent config for chat providers: bounded connect time, and a generous
-/// read/write timeout since LLM responses can be slow, so a stalled provider
-/// can't hang forever. The overall `timeout` also caps a drip-feeding endpoint
-/// that keeps resetting the per-operation ones. Chat calls hold no locks.
-pub(crate) fn http_agent() -> ureq::Agent {
+/// Agent config for chat providers: bounded connect time, and a caller-set
+/// read/write cap so a stalled provider can't hang a session. The overall
+/// `timeout` also caps a drip-feeding endpoint that keeps resetting the
+/// per-operation ones. Chat calls hold no locks.
+pub(crate) fn http_agent(timeout_secs: u64) -> ureq::Agent {
+    let cap = std::time::Duration::from_secs(timeout_secs);
     ureq::AgentBuilder::new()
         .timeout_connect(std::time::Duration::from_secs(10))
-        .timeout_read(std::time::Duration::from_secs(120))
-        .timeout_write(std::time::Duration::from_secs(120))
-        .timeout(std::time::Duration::from_secs(120))
+        .timeout_read(cap)
+        .timeout_write(cap)
+        .timeout(cap)
         .build()
 }
 
@@ -74,12 +75,12 @@ pub fn build(cfg: &crate::config::ProvidersConfig) -> Result<(Arc<dyn LLMProvide
             "mock" => Arc::new(mock::NullLLM),
             "anthropic" => {
                 let key = read_key(p, true)?;
-                Arc::new(anthropic::AnthropicLLM::new(&p.base_url, &p.model, &key))
+                Arc::new(anthropic::AnthropicLLM::new(&p.base_url, &p.model, &key, p.timeout_secs))
             }
             "openai" => {
                 anyhow::ensure!(!p.base_url.is_empty(), "openai llm provider requires base_url");
                 let key = read_key(p, false)?;
-                Arc::new(openai::OpenAILLM::new(&p.base_url, &p.model, &key))
+                Arc::new(openai::OpenAILLM::new(&p.base_url, &p.model, &key, p.timeout_secs))
             }
             other => anyhow::bail!("unknown llm provider kind: {other}"),
         },
@@ -144,7 +145,7 @@ mod tests {
             llm: Some(crate::config::ProviderConfig {
                 kind: "carrier-pigeon".into(),
                 base_url: String::new(), model: String::new(), api_key_env: String::new(),
-                api_key_file: std::path::PathBuf::new(),
+                api_key_file: std::path::PathBuf::new(), timeout_secs: 45,
             }),
             embeddings: None,
         };
@@ -161,7 +162,7 @@ mod tests {
             llm: Some(crate::config::ProviderConfig {
                 kind: "anthropic".into(), base_url: String::new(),
                 model: "m".into(), api_key_env: "NOTE_TEST_MISSING_KEY".into(),
-                api_key_file: std::path::PathBuf::new(),
+                api_key_file: std::path::PathBuf::new(), timeout_secs: 45,
             }),
             embeddings: None,
         };
@@ -176,6 +177,7 @@ mod tests {
         crate::config::ProviderConfig {
             kind: "openai".into(), base_url: "http://localhost:1/v1".into(),
             model: "m".into(), api_key_env: String::new(), api_key_file: path,
+            timeout_secs: 45,
         }
     }
 

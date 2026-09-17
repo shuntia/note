@@ -9,10 +9,10 @@ pub struct AnthropicLLM {
 }
 
 impl AnthropicLLM {
-    pub fn new(base_url: &str, model: &str, api_key: &str) -> Self {
+    pub fn new(base_url: &str, model: &str, api_key: &str, timeout_secs: u64) -> Self {
         let base = if base_url.is_empty() { "https://api.anthropic.com" } else { base_url };
         Self {
-            agent: super::http_agent(),
+            agent: super::http_agent(timeout_secs),
             base_url: base.trim_end_matches('/').to_string(),
             model: model.to_string(),
             api_key: api_key.to_string(),

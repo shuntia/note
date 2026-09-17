@@ -322,7 +322,7 @@ async fn task_agent(
     } else {
         match serde_json::from_slice(&body) {
             Ok(r) => r,
-            Err(e) => return brief_error(StatusCode::BAD_REQUEST, &e.to_string()),
+            Err(_) => return brief_error(StatusCode::BAD_REQUEST, "malformed JSON body"),
         }
     };
     if req.context.len() > MAX_BRIEF_CONTEXT {
