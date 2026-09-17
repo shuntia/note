@@ -1,88 +1,121 @@
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
-import { reducedMotion, STAGE_MS } from './motion'
+import { gsap } from 'gsap'
+import { useLayoutEffect, useRef, type ReactNode } from 'react'
+import { reducedMotion } from './motion'
 
 // One drawing at every size: the ring lives in a fixed 320-unit box and the
-// wrapper is what grows and shrinks, so the dash lengths never change with the stage.
-const VB = 320
-const SWEEP = 240 / 360
-const STROKE = 9
+// wrapper is what grows and shrinks, so the stroke scales with the ring.
+export const VB = 320
+export const STROKE = 9
 const R = VB / 2 - STROKE * 1.4
-const C = 2 * Math.PI * R
-const FULL = C * SWEEP
 const MID = VB / 2
+const SEGMENTS = 96
+const BREATHE_MS = 7000
 
+// [x0, x1, y] in the ring's own units: the straight line the arc unrolls onto.
+export type ArcLine = [number, number, number]
+
+// The 240° arc, open at the bottom, as a path so it can unroll: at t=0 the arc, at
+// t=1 the line. pathLength=1 on the element keeps the filled share meaningful.
+export function arcPath(t = 0, line?: ArcLine): string {
+  let d = ''
+  for (let i = 0; i <= SEGMENTS; i++) {
+    const u = i / SEGMENTS
+    const th = ((150 + 240 * u) * Math.PI) / 180
+    let x = MID + R * Math.cos(th)
+    let y = MID + R * Math.sin(th)
+    if (line) {
+      x += (line[0] + u * (line[1] - line[0]) - x) * t
+      y += (line[2] - y) * t
+    }
+    d += `${i ? 'L' : 'M'}${x.toFixed(1)} ${y.toFixed(1)}`
+  }
+  return d
+}
+
+const clamp = (v: number) => Math.min(1, Math.max(0, v))
+
+/**
+ * `fracAt` makes the arc live: it is read every frame, and the stroke follows it
+ * with no per-second steps. `breathe` is the session arc's slow pulse (both copies of
+ * a face read the same clock, so they pulse together); `paused` dims it to half with
+ * a tween rather than a cut.
+ */
 export function Gauge({
   size,
-  frac,
+  frac = 0,
+  fracAt,
   faded = false,
+  breathe = false,
+  paused = false,
   children,
 }: {
   size: number
-  frac: number
+  frac?: number
+  fracAt?: () => number
   faded?: boolean
+  breathe?: boolean
+  paused?: boolean
   children?: ReactNode
 }) {
-  const prog = FULL * Math.min(1, Math.max(0, frac))
-  const box = useRef<HTMLDivElement>(null)
-  const last = useRef<{ x: number; y: number; w: number } | null>(null)
-  const moving = useRef(0)
-  const [live, setLive] = useState(false)
+  const track = useRef<SVGPathElement>(null)
+  const arc = useRef<SVGPathElement>(null)
+  const at = useRef(fracAt)
+  at.current = fracAt
+  const dim = useRef({ v: 0 })
 
-  // The dash tween is for one tick to the next; the first paint shows the reading as is.
-  useEffect(() => {
-    const id = requestAnimationFrame(() => setLive(true))
+  useLayoutEffect(() => {
+    if (reducedMotion()) {
+      dim.current.v = paused ? 1 : 0
+      return
+    }
+    const tw = gsap.to(dim.current, { v: paused ? 1 : 0, duration: 0.5, ease: 'power2.out', overwrite: true })
+    return () => {
+      tw.kill()
+    }
+  }, [paused])
+
+  useLayoutEffect(() => {
+    const path = arc.current
+    const rail = track.current
+    if (!path || !rail) return
+    const still = reducedMotion()
+    // The pulse is painted on the strokes, not the svg, so the svg's opacity stays
+    // free for the morph to fade it.
+    const paint = () => {
+      const read = at.current
+      if (read) path.setAttribute('stroke-dasharray', `${clamp(read())} 1`)
+      if (!breathe) return
+      const pulse = still ? 1 : 0.775 + 0.225 * Math.sin((performance.now() / BREATHE_MS) * 2 * Math.PI)
+      const opacity = String(pulse + (0.5 - pulse) * dim.current.v)
+      path.style.opacity = opacity
+      rail.style.opacity = opacity
+    }
+    paint()
+    if (!fracAt && !breathe) return
+    let id = requestAnimationFrame(function step() {
+      paint()
+      id = requestAnimationFrame(step)
+    })
     return () => {
       cancelAnimationFrame(id)
-      window.clearTimeout(moving.current)
+      path.style.opacity = ''
+      rail.style.opacity = ''
     }
-  }, [])
+  }, [breathe, !!fracAt])
 
-  // Whenever layout has put the ring somewhere else it travels there from where it
-  // was (FLIP), so a stage change reads as one shape moving rather than two drawings.
-  useLayoutEffect(() => {
-    const el = box.current
-    if (!el || moving.current) return
-    const r = el.getBoundingClientRect()
-    const now = { x: r.left + window.scrollX, y: r.top + window.scrollY, w: r.width }
-    const prev = last.current
-    last.current = now
-    if (!prev || reducedMotion() || !now.w || !prev.w) return
-    const dx = prev.x - now.x
-    const dy = prev.y - now.y
-    const s = prev.w / now.w
-    if (dx === 0 && dy === 0 && s === 1) return
-    el.style.transformOrigin = '0 0'
-    el.style.transition = 'none'
-    el.style.transform = `translate(${dx}px, ${dy}px) scale(${s})`
-    void el.offsetWidth
-    el.style.transition = `transform ${STAGE_MS}ms cubic-bezier(.2,.7,.3,1)`
-    el.style.transform = ''
-    moving.current = window.setTimeout(() => {
-      moving.current = 0
-      el.style.transition = ''
-      el.style.transform = ''
-      el.style.transformOrigin = ''
-      const b = el.getBoundingClientRect()
-      last.current = { x: b.left + window.scrollX, y: b.top + window.scrollY, w: b.width }
-    }, STAGE_MS)
-  })
-
+  const d = arcPath(0)
   return (
-    <div ref={box} className={`gauge${faded ? ' faded' : ''}`} style={{ width: size, height: size }}>
+    <div className={`gauge${faded ? ' faded' : ''}`} style={{ width: size, height: size }}>
       <svg className="gauge-ring" viewBox={`0 0 ${VB} ${VB}`} aria-hidden="true">
-        <g transform={`rotate(150 ${MID} ${MID})`}>
-          <circle className="gauge-track" cx={MID} cy={MID} r={R} strokeWidth={STROKE} strokeDasharray={`${FULL} ${C}`} />
-          {prog > 0 && (
-            <circle
-              className={`gauge-arc${live ? ' live' : ''}`}
-              cx={MID}
-              cy={MID}
-              r={R}
-              strokeWidth={STROKE}
-              strokeDasharray={`${prog} ${C}`}
-            />
-          )}
-        </g>
+        <path ref={track} className="gauge-track" d={d} pathLength={1} strokeWidth={STROKE} />
+        <path
+          ref={arc}
+          className="gauge-arc"
+          d={d}
+          pathLength={1}
+          strokeWidth={STROKE}
+          strokeDasharray={fracAt ? undefined : `${clamp(frac)} 1`}
+        />
       </svg>
       <div className="gauge-centre">{children}</div>
     </div>
