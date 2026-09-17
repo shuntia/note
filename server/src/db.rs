@@ -258,6 +258,10 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (user_id, external_id)
     );
     ",
+    // v18
+    "
+    ALTER TABLE conversations ADD COLUMN checkin_date TEXT;
+    ",
 ];
 
 pub fn open(path: &Path) -> Result<Connection> {
@@ -773,6 +777,32 @@ mod tests {
             .is_err(),
             "one external id is buried once"
         );
+    }
+
+    #[test]
+    fn v18_adds_the_checkin_date_to_conversations() {
+        let conn = open_memory().unwrap();
+        let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, MIGRATIONS.len() as i64);
+        conn.execute(
+            "INSERT INTO users (username, pass_hash, role) VALUES ('a','h','member')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO conversations (user_id, title, created_at, updated_at)
+             VALUES (1, 'chat', 'now', 'now')",
+            [],
+        )
+        .unwrap();
+        let date = || -> Option<String> {
+            conn.query_row("SELECT checkin_date FROM conversations WHERE id = 1", [], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(date(), None, "a talk thread carries no check-in date");
+        conn.execute("UPDATE conversations SET checkin_date = '2026-09-17' WHERE id = 1", [])
+            .unwrap();
+        assert_eq!(date(), Some("2026-09-17".to_string()));
     }
 
     #[test]
