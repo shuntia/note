@@ -95,7 +95,14 @@ mod tests {
             let text = load(&config, "nobody", name).unwrap();
             assert!(!text.trim().is_empty(), "{name} ships an empty prompt");
         }
-        assert!(load(&config, "nobody", "import").unwrap().contains("task_split"));
+        // the import prompt names the tools that session actually has
+        let import = load(&config, "nobody", "import").unwrap();
+        for name in crate::tools::registry(crate::tools::SessionKind::Import) {
+            assert!(import.contains(name), "the import prompt never mentions {name}");
+        }
+        for gone in ["task_update", "task_split"] {
+            assert!(!import.contains(gone), "the import prompt still calls for {gone}");
+        }
     }
 
     #[test]
