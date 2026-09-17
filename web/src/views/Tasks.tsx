@@ -553,23 +553,29 @@ function Row({
           <span className="task-title">{node.title}</span>
           {sub && <span className="task-sub">{sub}</span>}
         </div>
-        {!done && <Duration task={node} />}
-        {!done && <Due task={node} />}
         {!done && (
-          <Overflow className="task-more" label={`More actions for ${node.title}`} items={items} />
+          <span className="task-chips">
+            <Duration task={node} />
+            <Due task={node} />
+          </span>
         )}
-        {group === 'now' && (
-          <button
-            className="task-start"
-            data-tip="Start"
-            aria-label={`Start ${focusTarget(node).title}`}
-            onClick={() => actions.startFocus(node)}
-          >
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M9 7.5v9l7-4.5z" />
-            </svg>
-          </button>
-        )}
+        <span className="task-acts">
+          {!done && (
+            <Overflow className="task-more" label={`More actions for ${node.title}`} items={items} />
+          )}
+          {group === 'now' && (
+            <button
+              className="task-start"
+              data-tip="Start"
+              aria-label={`Start ${focusTarget(node).title}`}
+              onClick={() => actions.startFocus(node)}
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M9 7.5v9l7-4.5z" />
+              </svg>
+            </button>
+          )}
+        </span>
       </div>
       {steps.length > 0 && (
         <ul className="task-steps">
