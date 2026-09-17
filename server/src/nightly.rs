@@ -202,7 +202,7 @@ pub fn spawn(state: crate::AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::providers::{mock::MockLLM, ChatResponse};
+    use crate::providers::{mock::MockLLM, ChatResponse, ToolCall};
     use std::sync::Mutex;
 
     fn env(tz: &str, nightly_time: &str) -> (Mutex<rusqlite::Connection>, tempfile::TempDir) {
@@ -439,5 +439,60 @@ mod tests {
             [],
         ).unwrap();
         assert!(due(&db.lock().unwrap(), tmp.path(), now).unwrap().is_empty());
+    }
+
+    fn missing_rows(conn: &rusqlite::Connection) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM event_log WHERE kind='nightly_notes_missing'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn the_nightly_run_leaves_notes_for_tomorrow() {
+        let (db, tmp) = env("UTC", "03:00");
+        let llm = MockLLM::scripted(vec![
+            ChatResponse {
+                text: String::new(),
+                tool_calls: vec![ToolCall {
+                    id: "1".into(),
+                    name: "nightly_notes_write".into(),
+                    args: r#"{"text":"the essay is the one that matters"}"#.into(),
+                }],
+            },
+            ChatResponse { text: "good morning! light day ahead".into(), tool_calls: vec![] },
+        ]);
+        let now: jiff::Timestamp = "2026-08-31T04:00:00Z".parse().unwrap();
+        run_for_user(&deps(&db, &tmp, &llm), 1, "aki", now).unwrap();
+
+        let notes =
+            std::fs::read_to_string(crate::context::nightly_notes_path(tmp.path(), "aki")).unwrap();
+        assert!(notes.contains("the essay is the one that matters"), "{notes}");
+        assert_eq!(missing_rows(&db.lock().unwrap()), 0);
+    }
+
+    #[test]
+    fn a_night_that_writes_no_notes_is_logged_and_keeps_the_old_ones() {
+        let (db, tmp) = env("UTC", "03:00");
+        crate::context::write_nightly_notes(
+            tmp.path(),
+            "aki",
+            "still the essay",
+            "2026-08-30".parse().unwrap(),
+        )
+        .unwrap();
+        let llm = MockLLM::scripted(vec![
+            ChatResponse { text: "good morning! light day ahead".into(), tool_calls: vec![] },
+        ]);
+        let now: jiff::Timestamp = "2026-08-31T04:00:00Z".parse().unwrap();
+        run_for_user(&deps(&db, &tmp, &llm), 1, "aki", now).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(crate::context::nightly_notes_path(tmp.path(), "aki")).unwrap(),
+            "<!-- written 2026-08-30 -->\nstill the essay\n",
+        );
+        assert_eq!(missing_rows(&db.lock().unwrap()), 1);
     }
 }

@@ -502,7 +502,12 @@ mod tests {
 
     /// The part rebuilt on every call, which is what the size ceiling covers.
     fn dynamic(out: &str) -> &str {
-        &out[out.find("# Now").expect("a Now section")..]
+        let start = ["# Notes from last night", "# (stale) Notes from last night", "# Now"]
+            .iter()
+            .filter_map(|h| out.find(h))
+            .min()
+            .expect("a dynamic block");
+        &out[start..]
     }
 
     fn routine(kind: &str, time: &str) -> crate::templates::TemplateEvent {
@@ -892,5 +897,90 @@ mod tests {
         }
         let block = dynamic(&assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap()).to_string();
         assert!(block.len() <= 1600, "a typical day is {} bytes:\n{block}", block.len());
+    }
+
+    fn notes(tmp: &tempfile::TempDir, date: &str, body: &str) {
+        write_nightly_notes(tmp.path(), "aki", body, date.parse().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn last_nights_notes_sit_between_the_standing_document_and_the_day() {
+        let tmp = cfg_dir();
+        let (conn, uid) = user();
+        edit_append(tmp.path(), "aki", "- prefers evening calls").unwrap();
+        notes(&tmp, "2026-08-30", "the essay is the one that matters\nlow energy after 21:00");
+        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        let standing = out.find("# Standing context").expect("a standing section");
+        let header = out
+            .find("# Notes from last night (written 2026-08-30, yesterday)")
+            .unwrap_or_else(|| panic!("{out}"));
+        let now = out.find("# Now").expect("a Now section");
+        assert!(standing < header && header < now, "{out}");
+        assert!(out.contains("low energy after 21:00"), "{out}");
+    }
+
+    #[test]
+    fn no_notes_file_means_no_notes_section() {
+        let tmp = cfg_dir();
+        let (conn, uid) = user();
+        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        assert!(!out.contains("Notes from last night"), "{out}");
+    }
+
+    #[test]
+    fn notes_older_than_three_days_are_labeled_stale() {
+        let tmp = cfg_dir();
+        let (conn, uid) = user();
+        notes(&tmp, "2026-08-28", "the essay is the one that matters");
+        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        assert!(
+            out.contains("# Notes from last night (written 2026-08-28, 3 days ago)"),
+            "{out}"
+        );
+
+        notes(&tmp, "2026-08-27", "the essay is the one that matters");
+        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        assert!(
+            out.contains("# (stale) Notes from last night (written 2026-08-27, 4 days ago)"),
+            "{out}"
+        );
+        assert!(out.contains("the essay is the one that matters"), "{out}");
+    }
+
+    #[test]
+    fn last_nights_notes_outlive_the_later_list_and_the_debrief() {
+        let tmp = cfg_dir();
+        let (conn, uid) = user();
+        notes(&tmp, "2026-08-30", "the essay is the one that matters\nlow energy after 21:00");
+        plan_today(&conn, uid, vec![routine("meds", "08:00")]);
+        for i in 0..120 {
+            task(&conn, uid, &format!("later-{i:03} {}", "t".repeat(60)), "open", Some(15), false, None, NOW);
+        }
+        conn.execute(
+            "INSERT INTO debriefs (user_id, date, content, created_at)
+             VALUES (?1, '2026-08-30', ?2, 't')",
+            (uid, "d".repeat(4000)),
+        )
+        .unwrap();
+        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        let block = dynamic(&out);
+        assert!(block.len() <= MAX_DYNAMIC_BYTES, "{} bytes", block.len());
+        assert!(block.contains("Later: 120 open (titles trimmed for size)"), "{block}");
+        assert!(block.contains("(trimmed for size)"), "{block}");
+        assert!(block.contains("low energy after 21:00"), "{block}");
+    }
+
+    #[test]
+    fn the_settings_section_counts_the_searchable_memory() {
+        let tmp = cfg_dir();
+        let (conn, uid) = user();
+        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        assert!(out.contains("Memory: 0 facts"), "{out}");
+
+        for summary in ["sister is called Rin", "hates phone calls"] {
+            crate::memory::add(&conn, tmp.path(), "aki", "semantic", summary, "body", None).unwrap();
+        }
+        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        assert!(out.contains("Memory: 2 facts"), "{out}");
     }
 }

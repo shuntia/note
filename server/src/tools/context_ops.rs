@@ -51,7 +51,14 @@ mod tests {
             [],
         )
         .unwrap();
-        (conn, tempfile::tempdir().unwrap())
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("defaults")).unwrap();
+        std::fs::write(
+            tmp.path().join("defaults/user.toml"),
+            "display_name = \"X\"\ntimezone = \"UTC\"\ntemplate = \"default\"\n",
+        )
+        .unwrap();
+        (conn, tmp)
     }
 
     fn ctx<'a>(tmp: &'a tempfile::TempDir) -> ToolCtx<'a> {
@@ -103,5 +110,69 @@ mod tests {
         let e = dispatch(&conn, &ctx(&tmp), SessionKind::Checkin, "context_edit",
             r#"{"append":"x"}"#).unwrap_err();
         assert_eq!(e.kind, "forbidden");
+    }
+
+    const NOTES: &str = "the essay is the one that matters\nlow energy after 21:00";
+
+    fn today_utc() -> String {
+        jiff::Timestamp::now().to_zoned(jiff::tz::TimeZone::UTC).date().to_string()
+    }
+
+    #[test]
+    fn nightly_notes_write_replaces_the_file_under_a_dated_marker() {
+        let (conn, tmp) = env();
+        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Nightly, "nightly_notes_write",
+            &serde_json::json!({ "text": NOTES }).to_string()).unwrap();
+        assert_eq!(out["ok"], true);
+        assert_eq!(out["bytes"].as_u64().unwrap() as usize, NOTES.len());
+
+        let path = crate::context::nightly_notes_path(tmp.path(), "aki");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            format!("<!-- written {} -->\n{NOTES}\n", today_utc()),
+        );
+
+        dispatch(&conn, &ctx(&tmp), SessionKind::Nightly, "nightly_notes_write",
+            r#"{"text":"  start with the dishes  "}"#).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            format!("<!-- written {} -->\nstart with the dishes\n", today_utc()),
+        );
+        let mut tmp_name = path.as_os_str().to_owned();
+        tmp_name.push(".tmp");
+        assert!(!std::path::PathBuf::from(tmp_name).exists(), "a temp file was left behind");
+    }
+
+    #[test]
+    fn nightly_notes_write_rejects_empty_oversized_and_headed_text() {
+        let (conn, tmp) = env();
+        let big = "x".repeat(crate::context::MAX_NIGHTLY_NOTES_BYTES + 1);
+        for raw in [
+            r#"{"text":""}"#.to_string(),
+            r#"{"text":"   \n  "}"#.to_string(),
+            serde_json::json!({ "text": big }).to_string(),
+            serde_json::json!({ "text": "# Tomorrow\nthe essay first" }).to_string(),
+            serde_json::json!({ "text": "the essay first\n  ## energy" }).to_string(),
+        ] {
+            let e = dispatch(&conn, &ctx(&tmp), SessionKind::Nightly, "nightly_notes_write", &raw)
+                .unwrap_err();
+            assert_eq!(e.kind, "rejected", "raw={raw}");
+        }
+        assert!(!crate::context::nightly_notes_path(tmp.path(), "aki").exists());
+    }
+
+    #[test]
+    fn a_rejected_note_leaves_last_nights_file_alone() {
+        let (conn, tmp) = env();
+        dispatch(&conn, &ctx(&tmp), SessionKind::Nightly, "nightly_notes_write",
+            &serde_json::json!({ "text": NOTES }).to_string()).unwrap();
+        let before =
+            std::fs::read_to_string(crate::context::nightly_notes_path(tmp.path(), "aki")).unwrap();
+        dispatch(&conn, &ctx(&tmp), SessionKind::Nightly, "nightly_notes_write",
+            r##"{"text":"# headed"}"##).unwrap_err();
+        assert_eq!(
+            std::fs::read_to_string(crate::context::nightly_notes_path(tmp.path(), "aki")).unwrap(),
+            before,
+        );
     }
 }
