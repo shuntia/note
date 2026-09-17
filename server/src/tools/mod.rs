@@ -4,6 +4,7 @@ pub mod memory_ops;
 pub mod outreach_ops;
 pub mod schedule_ops;
 pub mod task_ops;
+pub mod task_query;
 
 use rusqlite::Connection;
 use serde::Serialize;
