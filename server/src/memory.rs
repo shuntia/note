@@ -660,6 +660,82 @@ mod tests {
     }
 
     #[test]
+    fn an_until_date_survives_a_reindex() {
+        let (conn, tmp) = env();
+        let id = add_until(&conn, tmp.path(), "aki", "semantic", "quiz", "chapter 4 quiz",
+            Some("2026-09-25"), None).unwrap();
+        let plain = add(&conn, tmp.path(), "aki", "semantic", "rule", "bring a pencil", None).unwrap();
+        let until = |id: &str| -> Option<String> {
+            conn.query_row("SELECT until FROM memory_index WHERE user='aki' AND id=?1", [id],
+                |r| r.get(0)).unwrap()
+        };
+        assert_eq!(until(&id).as_deref(), Some("2026-09-25"));
+        assert_eq!(until(&plain), None);
+
+        reindex_user(&conn, tmp.path(), "aki").unwrap();
+        assert_eq!(until(&id).as_deref(), Some("2026-09-25"), "until must live in the file");
+        assert_eq!(until(&plain), None);
+        assert_eq!(read(tmp.path(), "aki", &id).unwrap().unwrap().until.as_deref(), Some("2026-09-25"));
+    }
+
+    #[test]
+    fn archive_moves_a_live_fact_out_of_the_index_and_prunes_its_vector() {
+        use crate::providers::EmbeddingsProvider;
+        let (conn, tmp) = env();
+        let e = crate::providers::mock::MockEmbeddings;
+        let v = e.embed(&[&embed_text("s", "b")]).unwrap();
+        let id = add(&conn, tmp.path(), "aki", "semantic", "s", "b", Some(&v[0])).unwrap();
+        assert!(archive(&conn, tmp.path(), "aki", &id).unwrap());
+        assert!(tmp.path().join("memory/aki/archive").join(format!("{id}.md")).exists());
+        assert!(list(&conn, "aki", None, 50).unwrap().is_empty());
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM memory_vectors WHERE id=?1", [&id],
+            |r| r.get(0)).unwrap();
+        assert_eq!(n, 0);
+        // archiving twice, or an id that never existed, is a no-op
+        assert!(!archive(&conn, tmp.path(), "aki", &id).unwrap());
+        assert!(!archive(&conn, tmp.path(), "aki", "00000000-0000-4000-8000-000000000000").unwrap());
+    }
+
+    #[test]
+    fn archive_expired_keeps_yesterday_and_archives_the_day_before() {
+        let (conn, tmp) = env();
+        let today: jiff::civil::Date = "2026-09-16".parse().unwrap();
+        let live = |d: &str| add_until(&conn, tmp.path(), "aki", "semantic", d, d, Some(d), None).unwrap();
+        let today_id = live("2026-09-16");
+        let yesterday = live("2026-09-15");
+        let two_days = live("2026-09-14");
+        let standing = add(&conn, tmp.path(), "aki", "semantic", "rule", "bring a pencil", None).unwrap();
+
+        assert_eq!(archive_expired(&conn, tmp.path(), "aki", today).unwrap(), 1);
+        let live_ids: Vec<String> =
+            list(&conn, "aki", None, 50).unwrap().into_iter().map(|h| h.id).collect();
+        assert!(live_ids.contains(&today_id));
+        assert!(live_ids.contains(&yesterday), "a fact one day past is still kept");
+        assert!(live_ids.contains(&standing), "a standing fact never expires");
+        assert!(!live_ids.contains(&two_days));
+        assert!(read(tmp.path(), "aki", &two_days).unwrap().unwrap().archived);
+
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM event_log WHERE kind = 'memory_expired'", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 1);
+        // a sweep that archives nothing logs nothing
+        assert_eq!(archive_expired(&conn, tmp.path(), "aki", today).unwrap(), 0);
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM event_log WHERE kind = 'memory_expired'", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn archive_expired_leaves_other_users_alone() {
+        let (conn, tmp) = env();
+        let today: jiff::civil::Date = "2026-09-16".parse().unwrap();
+        let bo = add_until(&conn, tmp.path(), "bo", "semantic", "s", "b", Some("2026-01-01"), None).unwrap();
+        add_until(&conn, tmp.path(), "aki", "semantic", "s", "b", Some("2026-01-01"), None).unwrap();
+        assert_eq!(archive_expired(&conn, tmp.path(), "aki", today).unwrap(), 1);
+        assert!(!read(tmp.path(), "bo", &bo).unwrap().unwrap().archived);
+    }
+
+    #[test]
     fn hostile_query_strings_never_error() {
         let (conn, tmp) = env();
         add(&conn, tmp.path(), "aki", "semantic", "s", "b", None).unwrap();

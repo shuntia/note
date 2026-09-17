@@ -29,6 +29,10 @@ pub fn config_dir() -> TempDir {
     write("defaults/prompts/persona.md", "you are note");
     write("defaults/prompts/planning.md", "plan the day");
     write("defaults/prompts/import.md", "brief the assignment");
+    write(
+        "defaults/prompts/inbox.md",
+        "You read one item from a school system and decide what to remember.",
+    );
     tmp
 }
 

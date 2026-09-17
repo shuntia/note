@@ -176,6 +176,7 @@ mod tests {
         write("defaults/prompts/persona.md", "you are note, be kind");
         write("defaults/prompts/planning.md", "plan the day");
         write("defaults/prompts/import.md", "brief the assignment");
+        write("defaults/prompts/inbox.md", "read the item");
         (Mutex::new(conn), tmp)
     }
 
