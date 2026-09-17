@@ -161,7 +161,7 @@ const TALK: &[&str] = &[
     "schedule_reshape",
     "context_edit",
 ];
-const IMPORT: &[&str] = &["task_update", "task_split"];
+const IMPORT: &[&str] = &["task_brief"];
 const NIGHTLY: &[&str] = &[
     "memory_query",
     "memory_read",
@@ -178,6 +178,12 @@ const NIGHTLY: &[&str] = &[
     "schedule_insert",
     "notify_send",
 ];
+
+/// A tool whose success is the session's whole job: `run_session` returns on
+/// it instead of spending another model round on a closing sentence.
+pub fn is_terminal(kind: SessionKind, name: &str) -> bool {
+    kind == SessionKind::Import && name == "task_brief"
+}
 
 pub fn registry(kind: SessionKind) -> &'static [&'static str] {
     match kind {
@@ -210,6 +216,13 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
              whole 5-minute blocks. The steps land under that task; this is not the way to create \
              new tasks. Only for a task that has no steps yet.",
             schema::<task_ops::SplitArgs>(),
+        ),
+        "task_brief" => (
+            "Brief this one imported assignment, in a single call that ends the session. \
+             With homework false the task is dropped as not homework and reason says why; \
+             with homework true, description, duration_min (whole 5-minute blocks) and steps \
+             are written — steps only when the task has none yet, otherwise they are kept.",
+            schema::<task_ops::BriefArgs>(),
         ),
         "task_delete" => (
             "Delete a task, or one step, for good — with its steps and its place on the day's \
@@ -315,6 +328,7 @@ fn run(
         "task_create" => task_ops::create(conn, ctx, parse(raw)?),
         "task_update" => task_ops::update(conn, ctx, parse(raw)?),
         "task_split" => task_ops::split(conn, ctx, parse(raw)?),
+        "task_brief" => task_ops::brief(conn, ctx, parse(raw)?),
         "task_delete" => task_ops::delete(conn, ctx, parse(raw)?),
         "memory_query" => memory_ops::query(conn, ctx, parse(raw)?),
         "memory_read" => memory_ops::read(conn, ctx, parse(raw)?),
@@ -667,17 +681,33 @@ mod tests {
         assert_eq!(v.content.unwrap(), direct[0]);
     }
 
+    /// Checkin ⊆ Talk ⊆ Nightly; Import is its own surface, sharing nothing
+    /// with them.
     #[test]
-    fn session_surfaces_are_nested_subsets() {
+    fn session_surfaces_nest_and_import_stands_apart() {
         let is_subset = |a: &[&str], b: &[&str]| a.iter().all(|t| b.contains(t));
-        assert!(is_subset(registry(SessionKind::Import), registry(SessionKind::Talk)));
         assert!(is_subset(registry(SessionKind::Checkin), registry(SessionKind::Talk)));
         assert!(is_subset(registry(SessionKind::Talk), registry(SessionKind::Nightly)));
+        assert!(registry(SessionKind::Import)
+            .iter()
+            .all(|t| !registry(SessionKind::Nightly).contains(t)));
     }
 
     #[test]
-    fn the_import_surface_is_only_the_two_task_tools() {
-        assert_eq!(registry(SessionKind::Import), &["task_update", "task_split"]);
+    fn the_import_surface_is_one_tool() {
+        assert_eq!(registry(SessionKind::Import), &["task_brief"]);
+        let (conn, tmp) = env();
+        for name in ["task_update", "task_split"] {
+            let e = dispatch(&conn, &ctx(&tmp), SessionKind::Import, name, r#"{"task_id":1}"#)
+                .unwrap_err();
+            assert_eq!(e.kind, "forbidden", "{name} is still reachable from an import session");
+        }
+    }
+
+    #[test]
+    fn task_brief_is_the_terminal_tool_of_an_import_session() {
+        assert!(is_terminal(SessionKind::Import, "task_brief"));
+        assert!(!is_terminal(SessionKind::Talk, "task_update"));
     }
 
     fn scoped<'a>(tmp: &'a tempfile::TempDir, task_id: i64) -> ToolCtx<'a> {
@@ -704,15 +734,15 @@ mod tests {
         let (conn, tmp) = env();
         let (mine, step, other) = scope_fixture(&conn, &tmp);
 
-        dispatch(&conn, &scoped(&tmp, mine), SessionKind::Import, "task_update",
+        dispatch(&conn, &scoped(&tmp, mine), SessionKind::Talk, "task_update",
             &format!(r#"{{"task_id":{mine},"description":"a brief"}}"#)).unwrap();
-        dispatch(&conn, &scoped(&tmp, mine), SessionKind::Import, "task_update",
+        dispatch(&conn, &scoped(&tmp, mine), SessionKind::Talk, "task_update",
             &format!(r#"{{"task_id":{step},"title":"read carefully"}}"#)).unwrap();
 
-        let e = dispatch(&conn, &scoped(&tmp, mine), SessionKind::Import, "task_update",
+        let e = dispatch(&conn, &scoped(&tmp, mine), SessionKind::Talk, "task_update",
             &format!(r#"{{"task_id":{other},"description":"not yours"}}"#)).unwrap_err();
         assert_eq!(e.kind, "rejected");
-        let e = dispatch(&conn, &scoped(&tmp, mine), SessionKind::Import, "task_update",
+        let e = dispatch(&conn, &scoped(&tmp, mine), SessionKind::Talk, "task_update",
             r#"{"task_id":9999,"description":"nowhere"}"#).unwrap_err();
         assert_eq!(e.kind, "rejected");
     }
@@ -723,7 +753,7 @@ mod tests {
         let (mine, step, other) = scope_fixture(&conn, &tmp);
         let two_steps = r#""steps":[{"title":"a","duration_min":5},{"title":"b","duration_min":5}]"#;
         for target in [step, other] {
-            let e = dispatch(&conn, &scoped(&tmp, mine), SessionKind::Import, "task_split",
+            let e = dispatch(&conn, &scoped(&tmp, mine), SessionKind::Talk, "task_split",
                 &format!(r#"{{"task_id":{target},{two_steps}}}"#)).unwrap_err();
             assert_eq!(e.kind, "rejected", "task_split reached {target}");
         }
@@ -734,7 +764,7 @@ mod tests {
         let (conn, tmp) = env();
         let (mine, _, _) = scope_fixture(&conn, &tmp);
         for value in ["true", "false"] {
-            let e = dispatch(&conn, &scoped(&tmp, mine), SessionKind::Import, "task_update",
+            let e = dispatch(&conn, &scoped(&tmp, mine), SessionKind::Talk, "task_update",
                 &format!(r#"{{"task_id":{mine},"is_now":{value}}}"#)).unwrap_err();
             assert_eq!(e.kind, "rejected");
         }
@@ -752,14 +782,14 @@ mod tests {
         for state in ["in_progress", "done"] {
             dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_update",
                 &format!(r#"{{"task_id":{mine},"state":"{state}"}}"#)).unwrap();
-            let e = dispatch(&conn, &scoped(&tmp, mine), SessionKind::Import, "task_update", &drop)
+            let e = dispatch(&conn, &scoped(&tmp, mine), SessionKind::Talk, "task_update", &drop)
                 .unwrap_err();
             assert_eq!(e.kind, "rejected", "dropped a task that was {state}");
         }
         dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_update",
             &format!(r#"{{"task_id":{mine},"state":"open"}}"#)).unwrap();
         let out =
-            dispatch(&conn, &scoped(&tmp, mine), SessionKind::Import, "task_update", &drop).unwrap();
+            dispatch(&conn, &scoped(&tmp, mine), SessionKind::Talk, "task_update", &drop).unwrap();
         assert_eq!(out["state"], "dropped");
     }
 
