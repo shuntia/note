@@ -17,6 +17,7 @@ import { eventLabel } from '../receipts'
 import { effectiveStart, elapsedSec, type FocusSession } from '../session'
 import { TellNote } from '../tellnote'
 import type { PlanEvent } from '../types'
+import { CalendarSection } from './Calendar'
 import { DebriefFold } from './Today'
 import '../styles/home-motion.css'
 
@@ -704,25 +705,45 @@ export function Home({
     [],
   )
 
-  // What sits under the stage fades in as it scrolls up, and away again at the top.
+  // What sits under the stage fades in as it scrolls up, and away again at the top:
+  // the letter, then the calendar, whose silhouettes, windows and rows draw
+  // themselves in turn. Rebuilt whenever what is under there changes.
   useLayoutEffect(() => {
     if (!motion) return
     const el = ground.current
     if (!el) return
     let undo: (() => void) | null = null
+    let raf = 0
     const arm = () => {
       undo?.()
+      const qa = (sel: string) => [...el.querySelectorAll<HTMLElement>(sel)]
+      const from = (t: Timeline, targets: HTMLElement[], vars: gsap.TweenVars, at: number) => {
+        if (targets.length) t.from(targets, vars, at)
+      }
       undo = scrollReveal(
-        (t) => t.from([...el.children], { autoAlpha: 0, y: 36, duration: 1, ease: 'power2.out', stagger: 0.35 }),
+        (t) => {
+          from(t, qa('.debrief-row, .debrief-note'), { autoAlpha: 0, y: 28, duration: 0.8, ease: 'power2.out' }, 0)
+          from(t, qa('#calendar-slot'), { autoAlpha: 0, y: 40, duration: 1, ease: 'power2.out' }, mobile ? 0 : 0.25)
+          from(t, qa('.ws-seg'), { scaleY: 0, transformOrigin: 'top', duration: 0.6, ease: 'power2.out', stagger: 0.04 }, 0.35)
+          from(t, qa('.cal-line .cal-band'), { scaleX: 0, transformOrigin: 'left center', duration: 0.6, ease: 'power2.out', stagger: 0.1 }, 0.6)
+          from(t, qa('.cal-line .dl-label, .cal-line .dl-now'), { autoAlpha: 0, duration: 0.4 }, 1.0)
+          from(t, qa('.cal-list li'), { autoAlpha: 0, y: 10, duration: 0.5, ease: 'power2.out', stagger: 0.08 }, 0.85)
+          from(t, qa('.week'), { autoAlpha: 0, y: 36, duration: 1, ease: 'power2.out' }, 0.45)
+          from(t, qa('.week .band'), { autoAlpha: 0, y: 10, duration: 0.6, ease: 'power2.out', stagger: 0.05 }, 0.9)
+        },
         { trigger: el, start: mobile ? 'clamp(top 92%)' : 'clamp(top 88%)', end: mobile ? 'clamp(top 45%)' : 'clamp(top 30%)' },
       )
       ScrollTrigger.refresh()
     }
     arm()
-    const mo = new MutationObserver(arm)
-    mo.observe(el, { childList: true })
+    const mo = new MutationObserver(() => {
+      cancelAnimationFrame(raf)
+      raf = requestAnimationFrame(arm)
+    })
+    mo.observe(el, { childList: true, subtree: true })
     return () => {
       mo.disconnect()
+      cancelAnimationFrame(raf)
       undo?.()
     }
   }, [motion, mobile])
@@ -771,7 +792,9 @@ export function Home({
       </section>
       <section ref={ground} className="today-ground">
         {!mobile && <DebriefFold />}
-        <section id="calendar-slot" />
+        <section id="calendar-slot">
+          <CalendarSection notify={notify} refresh={refresh} onChanged={onChanged} />
+        </section>
       </section>
       {mobile && tabs}
     </div>

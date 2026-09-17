@@ -8,7 +8,6 @@ import { makeHold } from '../held'
 import { Overflow } from '../overflow'
 import { eventLabel } from '../receipts'
 import type { Debrief, PlanEvent } from '../types'
-import { CalendarSection } from './Calendar'
 
 const LATER_MINUTES = [5, 10, 15, 30, 60]
 const ROUTINE_MIN = 15
@@ -30,8 +29,7 @@ function actionMessage(err: unknown): string {
   return 'Something went wrong. Try again.'
 }
 
-export function Today(props: ViewProps) {
-  const { notify, openNow, onChanged, refresh } = props
+export function Today({ notify, openNow, onChanged, refresh }: ViewProps) {
   const [events, setEvents] = useState<PlanEvent[] | null>(null)
   const [pending, setPending] = useState(false)
   const [later, setLater] = useState(false)
@@ -171,7 +169,6 @@ export function Today(props: ViewProps) {
       <section className="today-ground">
         <DebriefFold />
       </section>
-      <CalendarSection {...props} />
     </div>
   )
 }

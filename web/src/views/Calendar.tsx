@@ -116,7 +116,7 @@ function useMedia(query: string): boolean {
   return matches
 }
 
-export function CalendarSection({ notify, refresh, onChanged }: ViewProps) {
+export function CalendarSection({ notify, refresh, onChanged }: Pick<ViewProps, 'notify' | 'refresh' | 'onChanged'>) {
   const [entries, setEntries] = useState<CalendarEntry[] | null>(null)
   const [quietUntil, setQuietUntil] = useState<string | null>(null)
   const [today, setToday] = useState(() => isoOf(new Date()))

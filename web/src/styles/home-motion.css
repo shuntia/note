@@ -43,7 +43,8 @@
 .home .today-ground { position: static; display: flex; flex-direction: column; align-items: center; gap: 64px; width: 100%; box-sizing: border-box; padding: 72px 0 120px; background: none; }
 .home.desktop .today-ground { align-items: flex-start; padding: 100px 120px 140px; background: var(--earth); }
 .home.desktop .today-ground .debrief-row { width: 820px; max-width: 100%; }
-#calendar-slot { width: 100%; }
+#calendar-slot { display: flex; justify-content: center; width: 100%; }
+.home.desktop #calendar-slot { justify-content: flex-start; }
 #calendar-slot:empty { display: none; }
 
 .home .tabs { position: fixed; left: 0; right: 0; bottom: 0; z-index: 10; margin: 0; backdrop-filter: blur(14px); }
