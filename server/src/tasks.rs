@@ -294,6 +294,22 @@ pub fn list(conn: &Connection, user_id: i64) -> rusqlite::Result<Vec<TaskNode>> 
         .collect()
 }
 
+/// How many of the user's tasks and steps last moved to done inside the
+/// half-open span; `updated_at` is RFC3339 UTC, which orders lexically.
+pub fn done_between(
+    conn: &Connection,
+    user_id: i64,
+    from: jiff::Timestamp,
+    to: jiff::Timestamp,
+) -> rusqlite::Result<i64> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM tasks
+         WHERE user_id = ?1 AND state = 'done' AND updated_at >= ?2 AND updated_at < ?3",
+        (user_id, from.to_string(), to.to_string()),
+        |r| r.get(0),
+    )
+}
+
 pub const MIN_STEPS: usize = 2;
 pub const MAX_STEPS: usize = 5;
 

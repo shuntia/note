@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -83,6 +83,46 @@ pub fn edit_append(config_dir: &Path, user: &str, text: &str) -> Result<(), Edit
     Ok(())
 }
 
+/// Rows that say how the server ran rather than what the user did.
+const OPERATIONAL_LOG_KINDS: &[&str] = &[
+    "agent_max_turns",
+    "agent_session",
+    "delivery_degraded",
+    "delivery_ok",
+    "login_error",
+    "memory_embed_error",
+    "memory_index_error",
+    "passkey_added",
+    "passkey_removed",
+    "passkeys_unavailable",
+    "runner_error",
+    "token_created",
+    "token_revoked",
+    "totp_enrolled",
+    "totp_removed",
+    "voice_unavailable",
+];
+
+/// How much of the material that can be shortened survives.
+#[derive(Clone, Copy)]
+struct Caps {
+    later: usize,
+    debrief: usize,
+    activity: usize,
+}
+
+/// Walked in order until the block fits: the Later list gives way first, then
+/// the debrief, then the activity tail. The real-time line, the Now list and
+/// the plan are never among them.
+const CAPS: [Caps; 6] = [
+    Caps { later: 10, debrief: 600, activity: 10 },
+    Caps { later: 4, debrief: 600, activity: 10 },
+    Caps { later: 0, debrief: 600, activity: 10 },
+    Caps { later: 0, debrief: 200, activity: 10 },
+    Caps { later: 0, debrief: 0, activity: 10 },
+    Caps { later: 0, debrief: 0, activity: 3 },
+];
+
 /// Renders the full injection context: the standing document verbatim, then a
 /// dynamic block from the DB. Ordered standing-first for prompt-cache
 /// stability — the standing doc changes rarely, the dynamic block every call.
@@ -92,28 +132,152 @@ pub fn assemble(conn: &Connection, config_dir: &Path, user_id: i64, username: &s
         Ok(tz) => (tz, ucfg.timezone.clone()),
         Err(_) => (jiff::tz::TimeZone::UTC, "UTC (configured timezone invalid)".into()),
     };
-    let local = now.to_zoned(tz);
+    let local = now.to_zoned(tz.clone());
+    let today = local.date();
+    let tomorrow = today.tomorrow()?;
+    let now_min = i64::from(local.hour()) * 60 + i64::from(local.minute());
     let standing = std::fs::read_to_string(standing_path(config_dir, username))
         .unwrap_or_else(|_| "(no standing context yet)".into());
 
-    let mut out = String::new();
-    out.push_str("# Standing context\n\n");
-    out.push_str(standing.trim());
-    out.push_str("\n\n# Now\n\n");
-    out.push_str(&format!("{} ({})\n\n", local.strftime("%Y-%m-%d %H:%M"), tz_label));
+    let events = crate::plan::events_for(conn, user_id, today)?;
+    let tasks = crate::tasks::list(conn, user_id)?;
+    let (now_tasks, later): (Vec<_>, Vec<_>) = tasks.iter().partition(|t| t.task.is_now);
+    let later: Vec<_> = later
+        .into_iter()
+        .filter(|t| t.task.state == "open" || t.task.state == "in_progress")
+        .collect();
+    let done_today = crate::tasks::done_between(
+        conn,
+        user_id,
+        today.to_zoned(tz.clone())?.timestamp(),
+        tomorrow.to_zoned(tz)?.timestamp(),
+    )?;
+    let category = crate::auth::category(conn, username)?
+        .unwrap_or_else(|| crate::config::CATEGORY_MEMBER.into());
+    let debrief = latest_debrief(conn, user_id, today)?;
+    let activity = recent_activity(conn, user_id)?;
 
-    out.push_str("# Today's plan\n\n");
-    let events = crate::plan::events_for(conn, user_id, local.date())?;
-    if events.is_empty() {
-        out.push_str("(no plan generated for today)\n");
+    let now_s = now_section(&local, &tz_label, now, &events, now_min, &ucfg.nightly_time);
+    let plan_s = plan_section(&events, now_min, tomorrow, crate::plan::exists(conn, user_id, tomorrow)?);
+    let settings_s = settings_section(&ucfg, &tz_label, ucfg.features(&category));
+    let render = |caps: &Caps| {
+        let mut s = String::with_capacity(2048);
+        s.push_str(&now_s);
+        s.push_str(&plan_s);
+        s.push_str(&tasks_section(&now_tasks, &later, done_today, caps.later));
+        s.push_str(&debrief_section(debrief.as_ref(), today, caps.debrief));
+        s.push_str(&settings_s);
+        s.push_str(&activity_section(&activity, caps.activity));
+        s
+    };
+
+    let mut block = render(&CAPS[0]);
+    for caps in &CAPS[1..] {
+        if block.len() <= MAX_DYNAMIC_BYTES {
+            break;
+        }
+        block = render(caps);
     }
-    for e in &events {
-        if let ("block", Some(end)) = (e.entry.as_str(), e.end_wall_time.as_deref()) {
-            out.push_str(&format!("- {}-{} {} [block]\n", e.wall_time, end, e.kind));
+    if block.len() > MAX_DYNAMIC_BYTES {
+        let mut cut = MAX_DYNAMIC_BYTES;
+        while !block.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        block.truncate(cut);
+    }
+    Ok(format!("# Standing context\n\n{}\n\n{block}", standing.trim()))
+}
+
+fn part_of_day(hour: i8) -> &'static str {
+    match hour {
+        5..=7 => "early morning",
+        8..=10 => "morning",
+        11..=13 => "midday",
+        14..=17 => "afternoon",
+        18..=21 => "evening",
+        _ => "night",
+    }
+}
+
+fn in_words(mins: i64) -> String {
+    if mins < 60 {
+        format!("{mins} min")
+    } else {
+        format!("{}h{:02}m", mins / 60, mins % 60)
+    }
+}
+
+fn end_of(e: &crate::plan::PlanEvent) -> &str {
+    e.end_wall_time.as_deref().unwrap_or(&e.wall_time)
+}
+
+fn now_section(
+    local: &jiff::Zoned,
+    tz_label: &str,
+    now: jiff::Timestamp,
+    events: &[crate::plan::PlanEvent],
+    now_min: i64,
+    nightly_time: &str,
+) -> String {
+    let mut s = String::from("# Now\n\n");
+    s.push_str(&format!(
+        "{} {tz_label} {} | {} | {}\n",
+        local.strftime("%A %Y-%m-%d %H:%M"),
+        local.strftime("UTC%:z"),
+        now.strftime("%Y-%m-%dT%H:%MZ"),
+        part_of_day(local.hour()),
+    ));
+    match events.first() {
+        None => s.push_str("Day's plan: none generated for today\n"),
+        Some(first) => {
+            let last = events.iter().map(end_of).max().unwrap_or(&first.wall_time);
+            let left = events
+                .iter()
+                .filter(|e| crate::templates::wall_minutes(&e.wall_time) > now_min)
+                .count();
+            s.push_str(&format!(
+                "Day's plan: {}-{last}; now {}, {left} event{} left\n",
+                first.wall_time,
+                local.strftime("%H:%M"),
+                if left == 1 { "" } else { "s" },
+            ));
+        }
+    }
+    let until = (crate::templates::wall_minutes(nightly_time) - now_min).rem_euclid(24 * 60);
+    s.push_str(&format!("Nightly run {nightly_time}, in {}\n\n", in_words(until)));
+    s
+}
+
+fn plan_section(
+    events: &[crate::plan::PlanEvent],
+    now_min: i64,
+    tomorrow: jiff::civil::Date,
+    tomorrow_planned: bool,
+) -> String {
+    let mut s = String::from("# Today's plan\n\n");
+    if events.is_empty() {
+        s.push_str("(no plan generated for today)\n");
+    }
+    let start_of = |e: &crate::plan::PlanEvent| crate::templates::wall_minutes(&e.wall_time);
+    let current = events
+        .iter()
+        .position(|e| start_of(e) <= now_min && now_min < crate::templates::wall_minutes(end_of(e)));
+    let next = events.iter().position(|e| start_of(e) > now_min);
+    for (i, e) in events.iter().enumerate() {
+        let mark = if Some(i) == current {
+            " <- now".into()
+        } else if Some(i) == next {
+            format!(" <- next, in {}", in_words(start_of(e) - now_min))
         } else {
-            out.push_str(&format!(
-                "- {} {} [{}] via {}{}\n",
+            String::new()
+        };
+        if e.entry == "block" {
+            s.push_str(&format!("- {}-{} {} [{}] block{mark}\n", e.wall_time, end_of(e), e.kind, e.status));
+        } else {
+            s.push_str(&format!(
+                "- {}-{} {} [{}] routine via {}{}{mark}\n",
                 e.wall_time,
+                end_of(e),
                 e.kind,
                 e.status,
                 e.channel,
@@ -121,21 +285,178 @@ pub fn assemble(conn: &Connection, config_dir: &Path, user_id: i64, username: &s
             ));
         }
     }
+    if !events.is_empty() {
+        let n = |status: &str| events.iter().filter(|e| e.status == status).count();
+        s.push_str(&format!(
+            "{} pending, {} fired, {} done, {} dropped, {} snoozed\n",
+            n("pending"), n("fired"), n("done"), n("dropped"), n("snoozed"),
+        ));
+    }
+    s.push_str(&format!(
+        "Tomorrow's plan ({tomorrow}): {}\n\n",
+        if tomorrow_planned { "generated" } else { "not generated yet" },
+    ));
+    s
+}
 
-    out.push_str("\n# Recent activity\n\n");
-    let mut stmt = conn.prepare(
-        "SELECT ts, kind, detail FROM event_log WHERE user_id = ?1 ORDER BY id DESC LIMIT 10",
-    )?;
+fn duration(min: Option<u32>) -> String {
+    min.map(|d| format!(" {d}m")).unwrap_or_default()
+}
+
+fn tasks_section(
+    now: &[&crate::tasks::TaskNode],
+    later: &[&crate::tasks::TaskNode],
+    done_today: i64,
+    cap: usize,
+) -> String {
+    let mut s = String::from("# Tasks\n\n");
+    if now.is_empty() && later.is_empty() && done_today == 0 {
+        s.push_str("(no tasks)\n\n");
+        return s;
+    }
+    if now.is_empty() {
+        s.push_str("Now: (none)\n");
+    } else {
+        s.push_str("Now:\n");
+        for n in now {
+            s.push_str(&format!(
+                "- {} [{}]{}\n",
+                n.task.title,
+                n.task.state,
+                duration(n.task.duration_min),
+            ));
+            for c in &n.children {
+                let mark = match c.state.as_str() {
+                    "done" => 'x',
+                    "in_progress" => '~',
+                    _ => ' ',
+                };
+                s.push_str(&format!("  - [{mark}] {}{}\n", c.title, duration(c.duration_min)));
+            }
+        }
+    }
+    if later.is_empty() {
+        s.push_str("Later: (none)\n");
+    } else if cap == 0 {
+        s.push_str(&format!("Later: {} open (titles trimmed for size)\n", later.len()));
+    } else {
+        s.push_str(&format!("Later ({} open):\n", later.len()));
+        for t in later.iter().take(cap) {
+            s.push_str(&format!("- {}{}\n", t.task.title, duration(t.task.duration_min)));
+        }
+        if let Some(rest) = later.len().checked_sub(cap).filter(|r| *r > 0) {
+            s.push_str(&format!("- ... and {rest} more\n"));
+        }
+    }
+    s.push_str(&format!("Done today: {done_today}\n\n"));
+    s
+}
+
+fn excerpt(text: &str, max: usize) -> String {
+    let flat: String =
+        text.trim().chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+    if flat.chars().count() <= max {
+        return flat;
+    }
+    let mut out: String = flat.chars().take(max).collect();
+    out.push('…');
+    out
+}
+
+fn days_ago(date: &str, today: jiff::civil::Date) -> String {
+    let Some(days) = date
+        .parse::<jiff::civil::Date>()
+        .ok()
+        .and_then(|d| d.until((jiff::Unit::Day, today)).ok())
+        .map(|span| span.get_days())
+    else {
+        return "date unreadable".into();
+    };
+    match days {
+        0 => "today".into(),
+        1 => "yesterday".into(),
+        n => format!("{n} days ago"),
+    }
+}
+
+fn debrief_section(row: Option<&(String, String)>, today: jiff::civil::Date, cap: usize) -> String {
+    let mut s = String::from("# Latest debrief\n\n");
+    match row {
+        None => s.push_str("(no debrief yet)\n\n"),
+        Some((date, content)) if cap == 0 => {
+            s.push_str(&format!("{date} ({}): (trimmed for size)\n\n", days_ago(date, today)));
+        }
+        Some((date, content)) => {
+            s.push_str(&format!(
+                "{date} ({}): {}\n\n",
+                days_ago(date, today),
+                excerpt(content, cap),
+            ));
+        }
+    }
+    s
+}
+
+fn settings_section(
+    cfg: &crate::config::UserConfig,
+    tz_label: &str,
+    features: crate::config::Features,
+) -> String {
+    let on = |b: bool| if b { "on" } else { "off" };
+    format!(
+        "# Settings\n\n{} | {tz_label} | nightly_time {} | template {} | counter {} | nightly {} | checkins {}\n\n",
+        cfg.display_name,
+        cfg.nightly_time,
+        cfg.template,
+        cfg.counter,
+        on(features.nightly),
+        on(features.checkins),
+    )
+}
+
+fn activity_section(rows: &[(String, String, String)], cap: usize) -> String {
+    let mut s = String::from("# Recent activity\n\n");
+    if cap == 0 {
+        s.push_str("(trimmed for size)\n");
+        return s;
+    }
+    if rows.is_empty() {
+        s.push_str("(none)\n");
+    }
+    for (ts, kind, detail) in rows.iter().take(cap) {
+        s.push_str(&format!("- {ts} {kind}: {detail}\n"));
+    }
+    s
+}
+
+fn latest_debrief(
+    conn: &Connection,
+    user_id: i64,
+    today: jiff::civil::Date,
+) -> Result<Option<(String, String)>> {
+    Ok(conn
+        .query_row(
+            "SELECT date, content FROM debriefs
+             WHERE user_id = ?1 AND date <= ?2 ORDER BY date DESC LIMIT 1",
+            (user_id, today.to_string()),
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?)
+}
+
+fn recent_activity(conn: &Connection, user_id: i64) -> Result<Vec<(String, String, String)>> {
+    let denied =
+        OPERATIONAL_LOG_KINDS.iter().map(|k| format!("'{k}'")).collect::<Vec<_>>().join(", ");
+    let mut stmt = conn.prepare(&format!(
+        "SELECT ts, kind, detail FROM event_log
+         WHERE user_id = ?1 AND kind NOT IN ({denied})
+               AND kind NOT LIKE 'admin\\_%' ESCAPE '\\'
+         ORDER BY id DESC LIMIT 10"
+    ))?;
     let rows: Vec<(String, String, String)> = stmt
         .query_map([user_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
         .collect::<rusqlite::Result<_>>()?;
-    if rows.is_empty() {
-        out.push_str("(none)\n");
-    }
-    for (ts, kind, detail) in rows {
-        out.push_str(&format!("- {ts} {kind}: {detail}\n"));
-    }
-    Ok(out)
+    Ok(rows)
 }
 
 #[cfg(test)]
@@ -192,6 +513,7 @@ mod tests {
         crate::plan::generate(conn, uid, &tmpl, date).unwrap();
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn task(
         conn: &rusqlite::Connection,
         uid: i64,

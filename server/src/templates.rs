@@ -132,7 +132,7 @@ pub(crate) fn wall_add(wall: &str, minutes: i64) -> String {
     format!("{:02}:{:02}", total / 60, total % 60)
 }
 
-fn wall_minutes(wall: &str) -> i64 {
+pub(crate) fn wall_minutes(wall: &str) -> i64 {
     let (h, m) = wall.split_once(':').unwrap_or(("0", "0"));
     h.parse::<i64>().unwrap_or(0) * 60 + m.parse::<i64>().unwrap_or(0)
 }
