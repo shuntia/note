@@ -158,15 +158,16 @@ whole file is prepended to every system prompt, so it is capped at 64 KiB: an
 edit that would cross that is rejected and the file is left alone.
 
 Model-facing capabilities are typed tool calls dispatched through a
-per-session-type registry (check-in < talk < nightly, with a two-tool import
-surface inside talk's). Every call is validated, size-capped, and
+per-session-type registry (check-in < talk < nightly, with a one-tool import
+surface of its own beside them). Every call is validated, size-capped, and
 transactional; failures return typed rejections to the model and never leave
 partial state.
 
 Tasks: `task_create`, `task_update` (title, description, state, notes,
 duration, Now), `task_split` into steps, and `task_delete`, which removes a
 task or a single step with its steps and event links exactly as
-`DELETE /api/tasks/{id}` does. Memory: `memory_query`, `memory_read`,
+`DELETE /api/tasks/{id}` does. `task_brief` is the import session's only tool
+(see "Briefing an imported task"). Memory: `memory_query`, `memory_read`,
 `memory_write`. The day: `schedule_slide`, `schedule_snooze`, `schedule_drop`,
 `schedule_reshape`, and — nightly only — `schedule_insert` and `notify_send`.
 `context_edit` maintains the standing document.
@@ -425,7 +426,7 @@ capped at 32 KiB. The reply is the session and its result:
 {
   "task_id": 42,
   "outcome": "briefed",
-  "steps": [{ "name": "task_update", "args": "…", "result": "…", "is_error": false }],
+  "steps": [{ "name": "task_brief", "args": "…", "result": "…", "is_error": false }],
   "task": { "id": 42, "description": "…", "children": [] }
 }
 ```
@@ -440,21 +441,41 @@ is unreachable) and `500`; every one of them carries a `{"error": …}` body, an
 `502`/`500` also write a `task_agent_error` row to `event_log`.
 
 The session is scoped: it is a fresh run with no conversation history, nothing
-is kept in the talk conversations, and its only tools are `task_update` and
-`task_split` aimed at that one task and its steps. It cannot move anything into
-Now, and it can drop only a task that is still open — one already `in_progress`
-or `done` is briefed, never dropped. A tool call that breaks those rules comes
-back in `steps` as a rejection and the rest of the session carries on; only a
-failed session rolls back, and then the task, its steps and their event links
-are restored exactly as they were, so the same id can simply be retried.
+is kept in the talk conversations, and its only tool is `task_brief`, aimed at
+that one task:
+
+```json
+{ "task_id": 42, "homework": true,
+  "description": "Read chapter 4 and answer the questions.\nHand in: worksheet in class.",
+  "duration_min": 45,
+  "steps": [{ "title": "read chapter 4", "duration_min": 25 },
+            { "title": "answer the questions", "duration_min": 20 }] }
+```
+
+It answers `{"task_id", "outcome": "briefed"|"dropped", "steps_applied"}`,
+where `steps_applied` is the number of steps written, `0`, or `"kept"` for a
+task that already had steps. `homework: false` is the other call: it drops the
+task and writes `"Not homework: <reason>"` as the description, the reason being
+required and at most 100 characters; everything else in the call is ignored.
+The whole brief is one transaction — a rejected field leaves nothing behind.
+
+One brief is one model round: a successful `task_brief` ends the session on the
+spot, and a rejected one is fed back for a single retry, so a session costs at
+most two calls to the provider. It cannot move anything into Now, it can drop
+only a task that is still open — one already `in_progress` or `done` is
+briefed, never dropped — and it cannot change a state to anything but
+`dropped`. A call that breaks those rules comes back in `steps` as a rejection;
+only a failed session rolls back, and then the task, its steps and their event
+links are restored exactly as they were, so the same id can simply be retried.
 
 Field ownership splits cleanly: the agent owns the `description`, the
 `duration_min` (written with `duration_source: "agent"`), the steps and the
 `dropped` state; the caller owns the `title` and the `notes`, which the agent
 is told never to touch. Re-briefing a changed task is safe — existing steps are
 left alone, since the user may already have ticked some off, and the agent
-updates the description and duration only. It says so in the description when
-the new text really invalidates those steps. Call
+updates the description and duration only (the call answers
+`"steps_applied": "kept"`). It says so in the description when the new text
+really invalidates those steps. Call
 `POST /api/tasks/{id}/flatten` first only when you do want the steps regenerated.
 
 What the agent is told lives in `config/defaults/prompts/import.md`, editable
