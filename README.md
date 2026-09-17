@@ -208,6 +208,15 @@ task or a single step with its steps and event links exactly as
 `DELETE /api/tasks/{id}` does. `task_brief` is the import session's only tool
 (see "Briefing an imported task"), and `inbox_decide` the inbox session's
 (see "Reading an inbox item"). Memory: `memory_query`, `memory_read`,
+(see "Briefing an imported task"). Surveying the list: `task_list` (filtered by
+state, keyword, age or Now, newest first, with step counts), `task_search`
+(every word of a query against the titles, then the rest of the text),
+`task_read` (one task in full, as `GET /api/tasks` renders it, plus when it was
+added) and — talk and nightly only — `task_bulk_update`, which sets a state,
+moves Now or deletes across a batch of up to 50 tasks, all or nothing.
+`plan_tasks` lays up to 10 tasks out as consecutive silent blocks on a day's
+plan, each as long as its own duration, refusing rather than reshuffling when
+they overlap what is already there. Memory: `memory_query`, `memory_read`,
 `memory_write`. The day: `schedule_slide`, `schedule_snooze`, `schedule_drop`,
 `schedule_reshape`, and — nightly only — `schedule_insert` and `notify_send`.
 `context_edit` maintains the standing document, and `nightly_notes_write`
