@@ -228,6 +228,14 @@ pub fn plan_tasks(
         cursor = end + gap;
     }
 
+    for (task, s, e) in &laid {
+        if let Some(why) = crate::calendar::conflict(conn, ctx.user_id, date, &wall(*s), &wall(*e))
+            .map_err(internal)?
+        {
+            return Err(ToolError::rejected(format!("{:?} would fall {why}", task.title)));
+        }
+    }
+
     let plan_id = plan_row(conn, ctx, date)?;
     let mut clashes: Vec<String> = occupied(conn, ctx, date)?
         .into_iter()
@@ -459,6 +467,39 @@ mod tests {
         let plans: i64 =
             conn.query_row("SELECT COUNT(*) FROM plans", [], |r| r.get(0)).unwrap();
         assert_eq!(plans, 0, "a rejected call leaves no plan row behind");
+    }
+
+    #[test]
+    fn plan_tasks_refuses_a_block_inside_a_fixed_commitment() {
+        let (conn, tmp) = env();
+        let date = tomorrow();
+        crate::calendar::create(&conn, 1, crate::calendar::Fields {
+            title: "school".into(), kind: "fixed".into(),
+            start_time: "08:15".into(), end_time: "15:30".into(),
+            on_date: Some(date.to_string()),
+            ..Default::default()
+        }).unwrap();
+        let id = task(&conn, &tmp, r#"{"title":"call dentist"}"#);
+
+        let e = call(
+            &conn,
+            &tmp,
+            "plan_tasks",
+            &format!(r#"{{"date":"{date}","task_ids":[{id}],"start":"10:00"}}"#),
+        )
+        .unwrap_err();
+        assert_eq!(e.kind, "rejected");
+        assert!(e.message.contains("inside school 08:15-15:30"), "{}", e.message);
+        assert!(events_on(&conn, date).is_empty());
+
+        let ok = call(
+            &conn,
+            &tmp,
+            "plan_tasks",
+            &format!(r#"{{"date":"{date}","task_ids":[{id}],"start":"16:00"}}"#),
+        )
+        .unwrap();
+        assert_eq!(ok["events"].as_array().unwrap().len(), 1);
     }
 
     #[test]
