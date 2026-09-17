@@ -1,7 +1,17 @@
-import { useCallback, useEffect, useState, type FormEvent } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type FormEvent,
+  type RefObject,
+} from 'react'
 import { api, ApiError } from '../api'
 import type { ViewProps } from '../app'
+import { collapse, flip, settle } from '../motion-gsap'
 import { Overflow, type OverflowItem } from '../overflow'
+import '../styles/tasks.css'
 import type { NewStep, Task, TaskNode, TaskState, TaskUpdate } from '../types'
 
 const NOW_CAP = 3
@@ -85,6 +95,55 @@ function mergeUpdate(nodes: TaskNode[], u: TaskUpdate): TaskNode[] {
   return next
 }
 
+// A finished or dropped task keeps its place in the list until it has folded away.
+type Leaving = { id: number; group: Exclude<Group, 'done'>; index: number; state: TaskState }
+
+type Placed = { node: TaskNode; leaving: TaskState | null }
+
+function placed(list: TaskNode[], nodes: TaskNode[], leaving: Leaving[], group: Group): Placed[] {
+  const out: Placed[] = list.map((node) => ({ node, leaving: null }))
+  for (const l of leaving) {
+    if (l.group !== group) continue
+    const node = nodes.find((n) => n.id === l.id)
+    if (node) out.splice(Math.min(l.index, out.length), 0, { node, leaving: l.state })
+  }
+  return out
+}
+
+// Rows that were already there slide from where they were; rows that are new
+// settle in. A row folding away drives the layout itself, so both stand down
+// for it — and for the frame in which it leaves the list.
+function useRowMotion(root: RefObject<HTMLDivElement | null>, busy: boolean) {
+  const tops = useRef<Map<string, number> | null>(null)
+  const idle = useRef(true)
+
+  useLayoutEffect(() => {
+    const now = new Map<string, number>()
+    const els = new Map<string, HTMLElement>()
+    root.current?.querySelectorAll<HTMLElement>('[data-row]').forEach((el) => {
+      const key = el.dataset.row as string
+      now.set(key, el.getBoundingClientRect().top)
+      els.set(key, el)
+    })
+    const was = tops.current
+    tops.current = now
+    if (busy || !idle.current) {
+      idle.current = !busy
+      return
+    }
+    if (was === null) return settle([...els.values()])
+    const moves: { el: Element; dy: number }[] = []
+    const fresh: Element[] = []
+    for (const [key, el] of els) {
+      const before = was.get(key)
+      if (before === undefined) fresh.push(el)
+      else moves.push({ el, dy: before - (now.get(key) as number) })
+    }
+    flip(moves)
+    settle(fresh)
+  })
+}
+
 type RowActions = {
   complete: (node: TaskNode, step?: Task) => void
   reopen: (node: TaskNode) => void
@@ -101,6 +160,9 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
   const [failed, setFailed] = useState(false)
   const [title, setTitle] = useState('')
   const [showDone, setShowDone] = useState(false)
+  const [leaving, setLeaving] = useState<Leaving[]>([])
+  const root = useRef<HTMLDivElement>(null)
+  useRowMotion(root, leaving.length > 0)
 
   const load = useCallback(() => {
     api
@@ -138,6 +200,16 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
     [patch],
   )
 
+  const markLeaving = (node: TaskNode, state: TaskState) => {
+    if (!nodes) return
+    const g = groups(nodes)
+    const now = g.now.findIndex((n) => n.id === node.id)
+    const index = now === -1 ? g.later.findIndex((n) => n.id === node.id) : now
+    if (index === -1) return
+    setLeaving((ls) => [...ls, { id: node.id, group: now === -1 ? 'later' : 'now', index, state }])
+  }
+  const gone = useCallback((id: number) => setLeaving((ls) => ls.filter((l) => l.id !== id)), [])
+
   // Finishing a task takes its live steps with it, and finishing the last step
   // finishes the task, so undo has to put the whole cascade back.
   const complete = (node: TaskNode, step?: Task) => {
@@ -150,6 +222,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
       : node.children.filter((c) => c.state !== 'done')
     const ordered = step ? [step, ...cascade] : [...cascade, node]
     const snap: Snapshot = ordered.map((t) => ({ id: t.id, state: t.state }))
+    if (!step || lastStep) markLeaving(node, 'done')
     setNodes((ns) => (ns ? snap.reduce((acc, s) => withState(acc, s.id, 'done'), ns) : ns))
     void patch(step ? step.id : node.id, { state: 'done' })
     notify(`${step && !lastStep ? step.title : node.title} — done`, {
@@ -174,6 +247,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
   const drop = (node: TaskNode) => {
     const steps = node.children.filter((c) => c.state !== 'dropped')
     const snap: Snapshot = [...steps, node].map((t) => ({ id: t.id, state: t.state }))
+    markLeaving(node, 'dropped')
     setNodes((ns) => (ns ? snap.reduce((acc, s) => withState(acc, s.id, 'dropped'), ns) : ns))
     void patch(node.id, { state: 'dropped' })
     notify(`${node.title} — dropped`, {
@@ -318,8 +392,11 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
     startFocus,
   }
 
+  const now = placed(g.now, nodes, leaving, 'now')
+  const later = placed(g.later, nodes, leaving, 'later')
+
   return (
-    <div className="tasks">
+    <div className="tasks" ref={root}>
       <form className="task-add tellnote" onSubmit={add}>
         <input
           value={title}
@@ -334,19 +411,19 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
           </svg>
         </button>
       </form>
-      {g.now.length > 0 && (
+      {now.length > 0 && (
         <section className="task-group now">
           <h3 className="task-group-head">NOW</h3>
-          {g.now.map((n) => (
-            <Row key={n.id} node={n} group="now" actions={actions} />
+          {now.map((p) => (
+            <Row key={p.node.id} node={p.node} group="now" actions={actions} leaving={p.leaving} onGone={gone} />
           ))}
         </section>
       )}
-      {g.later.length > 0 && (
+      {later.length > 0 && (
         <section className="task-group later">
           <h3 className="task-group-head">LATER · {g.later.length}</h3>
-          {g.later.map((n) => (
-            <Row key={n.id} node={n} group="later" actions={actions} />
+          {later.map((p) => (
+            <Row key={p.node.id} node={p.node} group="later" actions={actions} leaving={p.leaving} onGone={gone} />
           ))}
         </section>
       )}
@@ -363,7 +440,9 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
             </svg>
           </button>
           {showDone &&
-            g.doneToday.map((n) => <Row key={n.id} node={n} group="done" actions={actions} />)}
+            g.doneToday.map((n) => (
+              <Row key={n.id} node={n} group="done" actions={actions} leaving={null} onGone={gone} />
+            ))}
         </section>
       )}
     </div>
@@ -403,9 +482,46 @@ function Due({ task }: { task: Task }) {
   return <span className={`task-dur task-due${label === 'overdue' ? ' overdue' : ''}`}>{label}</span>
 }
 
-function Row({ node, group, actions }: { node: TaskNode; group: Group; actions: RowActions }) {
+function Tick({
+  checked,
+  label,
+  onClick,
+}: {
+  checked: boolean
+  label: string
+  onClick: () => void
+}) {
+  return (
+    <button className="tick" role="checkbox" aria-checked={checked} aria-label={label} onClick={onClick}>
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M7 12.4l3.2 3.1 6.4-6.6" />
+      </svg>
+    </button>
+  )
+}
+
+function Row({
+  node,
+  group,
+  actions,
+  leaving,
+  onGone,
+}: {
+  node: TaskNode
+  group: Group
+  actions: RowActions
+  leaving: TaskState | null
+  onGone: (id: number) => void
+}) {
+  const item = useRef<HTMLDivElement>(null)
   const done = group === 'done'
   const steps = done ? [] : node.children
+
+  useLayoutEffect(() => {
+    if (leaving === null) return
+    collapse(item.current, () => onGone(node.id))
+  }, [leaving, node.id, onGone])
+
   const items: OverflowItem[] = [
     group === 'now'
       ? { label: 'Move to Later', run: () => actions.moveToLater(node) }
@@ -421,13 +537,16 @@ function Row({ node, group, actions }: { node: TaskNode; group: Group; actions: 
         : null
 
   return (
-    <>
+    <div
+      className="task-item"
+      ref={item}
+      data-row={`${leaving ? 'x' : 't'}${node.id}`}
+      data-leaving={leaving ?? undefined}
+    >
       <div className="task-row">
-        <button
-          className="tick"
-          role="checkbox"
-          aria-checked={done}
-          aria-label={done ? `Mark ${node.title} not done` : `Mark ${node.title} done`}
+        <Tick
+          checked={done || leaving === 'done'}
+          label={done ? `Mark ${node.title} not done` : `Mark ${node.title} done`}
           onClick={() => (done ? actions.reopen(node) : actions.complete(node))}
         />
         <div className="task-body">
@@ -442,6 +561,7 @@ function Row({ node, group, actions }: { node: TaskNode; group: Group; actions: 
         {group === 'now' && (
           <button
             className="task-start"
+            data-tip="Start"
             aria-label={`Start ${focusTarget(node).title}`}
             onClick={() => actions.startFocus(node)}
           >
@@ -455,13 +575,9 @@ function Row({ node, group, actions }: { node: TaskNode; group: Group; actions: 
         <ul className="task-steps">
           {steps.map((c) => (
             <li key={c.id} className={`task-step${c.state === 'done' ? ' done' : ''}`}>
-              <button
-                className="tick"
-                role="checkbox"
-                aria-checked={c.state === 'done'}
-                aria-label={
-                  c.state === 'done' ? `Mark ${c.title} not done` : `Mark ${c.title} done`
-                }
+              <Tick
+                checked={c.state === 'done'}
+                label={c.state === 'done' ? `Mark ${c.title} not done` : `Mark ${c.title} done`}
                 onClick={() =>
                   c.state === 'done' ? actions.reopenStep(c) : actions.complete(node, c)
                 }
@@ -474,6 +590,6 @@ function Row({ node, group, actions }: { node: TaskNode; group: Group; actions: 
           ))}
         </ul>
       )}
-    </>
+    </div>
   )
 }

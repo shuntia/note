@@ -1321,61 +1321,6 @@ textarea.mono { font-family: var(--mono); }
 .debrief-chev svg { width: 16px; height: 16px; fill: none; stroke: var(--faint); stroke-width: 1.8; transition: transform 200ms; }
 .debrief-fold[aria-expanded='true'] .debrief-chev svg { transform: rotate(180deg); }
 
-/* ── horizon: tasks ─────────────────────────────────────────────── */
-.view:has(> .tasks) { padding: 0; }
-.tasks { width: 100%; padding: 56px 24px 100px; max-width: 720px; margin: 0 auto; }
-@media (min-width: 768px) {
-  .tasks { margin: 0; max-width: min(840px, calc(100% - 144px)); padding: 46px 0 0 120px; }
-  .task-add { max-width: 520px; }
-}
-.task-add { margin-bottom: 26px; }
-.task-group { display: flex; flex-direction: column; gap: 6px; margin-top: 28px; }
-.task-group:first-of-type { margin-top: 0; }
-.task-group.done { margin-top: 0; }
-.task-group-head { margin: 0; font-size: 0.72rem; letter-spacing: 0.12em; font-weight: 700; color: var(--faint); }
-.task-row { display: flex; align-items: center; gap: 12px; min-height: 52px; }
-.task-group.later .task-row { color: var(--quiet); }
-.task-group.done .task-row { color: var(--faint); }
-.task-group.done .task-title { text-decoration: line-through; text-decoration-color: var(--line); }
-.tick { width: 24px; height: 24px; border-radius: 50%; border: 2px solid var(--quiet); box-sizing: border-box; background: none; flex: none; cursor: pointer; display: grid; place-items: center; }
-.task-group.later .tick { border-color: var(--line); }
-.tick[aria-checked='true'] { background: var(--sage); border-color: var(--sage); }
-.tick[aria-checked='true']::after { content: ''; width: 5px; height: 9px; margin-top: -2px; border: solid var(--ivory); border-width: 0 2px 2px 0; transform: rotate(45deg); }
-.tick:focus-visible, .task-start:focus-visible, .task-done-fold:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
-.task-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
-.task-title { font-size: 1rem; }
-.task-sub { font-size: 0.78rem; color: var(--faint); }
-.task-dur { font-size: 0.75rem; padding: 2px 9px; border-radius: 999px; border: 1px solid var(--line); color: var(--faint); font-variant-numeric: tabular-nums; white-space: nowrap; }
-.task-due { border-color: transparent; padding-inline: 0; }
-.task-due.overdue { color: var(--ink); }
-.task-start { width: 36px; height: 36px; border: 0; border-radius: 50%; background: var(--sun); display: grid; place-items: center; cursor: pointer; flex: none; }
-.task-start svg { width: 16px; height: 16px; fill: var(--ink); }
-.task-more { position: relative; flex: none; }
-.task-more .ev-more { width: 24px; height: 24px; color: var(--faint); }
-.task-steps { list-style: none; margin: 0; padding: 0 0 0 36px; }
-.task-step { display: flex; align-items: center; gap: 12px; min-height: 40px; color: var(--quiet); font-size: 0.92rem; }
-.task-step .tick { width: 20px; height: 20px; border-color: var(--line); }
-.task-step-title { min-width: 0; }
-.task-step.done { color: var(--faint); }
-.task-step.done .task-step-title { text-decoration: line-through; text-decoration-color: var(--line); }
-.task-step-min { margin-left: auto; font-size: 0.75rem; color: var(--faint); font-variant-numeric: tabular-nums; }
-.task-done-fold { margin-top: 20px; display: flex; align-items: center; gap: 8px; font: inherit; font-size: 0.875rem; color: var(--faint); background: none; border: 0; padding: 0; cursor: pointer; }
-.task-done-fold svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; transition: transform 200ms; }
-.task-done-fold[aria-expanded='true'] svg { transform: rotate(90deg); }
-@media (prefers-reduced-motion: reduce) { .task-done-fold svg { transition: none; } }
-/* the board's circles are smaller than a fingertip, so each one carries a hit box */
-@media (pointer: coarse), (max-width: 767.98px) {
-  .tick, .task-start, .task-more .ev-more { position: relative; }
-  .tick::before, .task-start::before, .task-more .ev-more::before {
-    content: '';
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    width: 40px;
-    height: 40px;
-    transform: translate(-50%, -50%);
-  }
-}
 /* small marks that answer to a whole fingertip whatever the pointer */
 .tellnote button, .receipt-chip, .set-signout { position: relative; }
 .tellnote button::before {
