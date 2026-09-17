@@ -44,6 +44,37 @@ fn in_scope(
     )))
 }
 
+/// The timezone the user's days are measured in; a bare day means the end of
+/// one of those.
+fn user_tz(ctx: &ToolCtx) -> jiff::tz::TimeZone {
+    crate::config::UserConfig::load(ctx.config_dir, ctx.username)
+        .ok()
+        .and_then(|c| jiff::tz::TimeZone::get(&c.timezone).ok())
+        .unwrap_or(jiff::tz::TimeZone::UTC)
+}
+
+/// An instant stays one; a bare `YYYY-MM-DD` becomes the end of that day where
+/// the user lives; an empty string clears the date.
+fn checked_due(ctx: &ToolCtx, raw: &str) -> Result<Option<String>, ToolError> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    if let Ok(ts) = raw.parse::<jiff::Timestamp>() {
+        return Ok(Some(ts.to_string()));
+    }
+    let day: jiff::civil::Date = raw
+        .parse()
+        .map_err(|_| ToolError::rejected(format!(
+            "due_at must be an RFC 3339 instant or a YYYY-MM-DD day, got {raw:?}"
+        )))?;
+    let end = day
+        .at(23, 59, 0, 0)
+        .to_zoned(user_tz(ctx))
+        .map_err(|e| ToolError::internal(e.to_string()))?;
+    Ok(Some(end.timestamp().to_string()))
+}
+
 fn task_error(e: UpdateError) -> ToolError {
     match e {
         UpdateError::InvalidState(s) => ToolError::rejected(format!("invalid state: {s}")),
@@ -68,6 +99,10 @@ pub struct CreateArgs {
     /// Put the task straight in Now, the user's short list of at most 3.
     #[serde(default)]
     pub is_now: bool,
+    /// When it is due: an RFC 3339 instant, or a bare YYYY-MM-DD day, which
+    /// means the end of that day where the user lives.
+    #[serde(default)]
+    pub due_at: Option<String>,
 }
 
 pub fn create(
@@ -77,6 +112,7 @@ pub fn create(
 ) -> Result<serde_json::Value, ToolError> {
     let title = checked_title(&args.title)?;
     check_text("description", &args.description)?;
+    let due_at = args.due_at.as_deref().map(|raw| checked_due(ctx, raw)).transpose()?.flatten();
     let task = crate::tasks::create(
         conn,
         ctx.user_id,
@@ -84,6 +120,7 @@ pub fn create(
             title: title.to_owned(),
             duration_min: args.duration_min,
             is_now: args.is_now,
+            due_at: due_at.map(Some),
             ..NewTask::default()
         },
         "agent",
@@ -118,6 +155,9 @@ pub struct UpdateArgs {
     pub duration_min: Option<u32>,
     /// True moves the task into Now, false moves it back to Later.
     pub is_now: Option<bool>,
+    /// When it is due: an RFC 3339 instant, or a bare YYYY-MM-DD day, which
+    /// means the end of that day where the user lives. An empty string clears it.
+    pub due_at: Option<String>,
 }
 
 pub fn update(
@@ -157,6 +197,10 @@ pub fn update(
     if let Some(n) = &args.notes {
         check_text("notes", n)?;
     }
+    let due_at = match &args.due_at {
+        Some(raw) => Some(checked_due(ctx, raw)?),
+        None => None,
+    };
     let patch = TaskPatch {
         title,
         description: args.description,
@@ -164,6 +208,7 @@ pub fn update(
         notes: args.notes,
         duration_min: args.duration_min.map(Some),
         is_now: args.is_now,
+        due_at,
         actor: Actor::Agent,
         ..Default::default()
     };

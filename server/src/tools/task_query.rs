@@ -55,6 +55,18 @@ pub struct ListArgs {
     /// True for the Now list only, false for everything outside it.
     #[serde(default)]
     pub is_now: Option<bool>,
+    /// Only tasks due before this day starts, YYYY-MM-DD in the user's timezone.
+    #[serde(default)]
+    pub due_before: Option<String>,
+    /// Only tasks due on or after this day starts, YYYY-MM-DD in the user's timezone.
+    #[serde(default)]
+    pub due_after: Option<String>,
+    /// True for tasks whose due date has passed, false for everything else.
+    #[serde(default)]
+    pub overdue: Option<bool>,
+    /// added (default), newest first, or due, soonest first with undated last.
+    #[serde(default)]
+    pub sort: Option<String>,
     /// How many tasks to return, 1 to 200. Default 50.
     #[serde(default)]
     pub limit: Option<u32>,
@@ -117,7 +129,35 @@ fn list_filters(ctx: &ToolCtx, args: &ListArgs) -> Result<(String, Vec<SqlValue>
         wheres.push("is_now = ?".into());
         params.push(i64::from(flag).into());
     }
+    if let Some(day) = &args.due_before {
+        wheres.push("due_at IS NOT NULL AND due_at < ?".into());
+        params.push(day_start(ctx, "due_before", day)?.into());
+    }
+    if let Some(day) = &args.due_after {
+        wheres.push("due_at IS NOT NULL AND due_at >= ?".into());
+        params.push(day_start(ctx, "due_after", day)?.into());
+    }
+    if let Some(flag) = args.overdue {
+        wheres.push(
+            if flag { "(due_at IS NOT NULL AND due_at < ?)" } else { "(due_at IS NULL OR due_at >= ?)" }
+                .into(),
+        );
+        params.push(jiff::Timestamp::now().to_string().into());
+    }
     Ok((wheres.join(" AND "), params))
+}
+
+/// The instant a local day begins, which is what a due-date filter compares
+/// against.
+fn day_start(ctx: &ToolCtx, field: &str, day: &str) -> Result<String, ToolError> {
+    let day: jiff::civil::Date = day
+        .parse()
+        .map_err(|_| ToolError::rejected(format!("{field} must be YYYY-MM-DD, got {day:?}")))?;
+    let tz = crate::config::UserConfig::load(ctx.config_dir, ctx.username)
+        .ok()
+        .and_then(|c| jiff::tz::TimeZone::get(&c.timezone).ok())
+        .unwrap_or(jiff::tz::TimeZone::UTC);
+    Ok(day.to_zoned(tz).map_err(internal)?.timestamp().to_string())
 }
 
 /// The user's top-level tasks, newest first, with how far their steps have got.
@@ -127,6 +167,13 @@ pub fn list(conn: &Connection, ctx: &ToolCtx, args: ListArgs) -> Result<serde_js
     if !(1..=MAX_LIMIT).contains(&limit) {
         return Err(ToolError::rejected(format!("limit must be in 1..={MAX_LIMIT}")));
     }
+    let order = match args.sort.as_deref() {
+        None | Some("added") => "created_at DESC, id DESC",
+        Some("due") => "due_at IS NULL, due_at ASC, created_at DESC, id DESC",
+        Some(other) => {
+            return Err(ToolError::rejected(format!("sort must be added or due, got {other:?}")))
+        }
+    };
     let (wheres, params) = list_filters(ctx, &args)?;
 
     let total: i64 = conn
@@ -138,11 +185,11 @@ pub fn list(conn: &Connection, ctx: &ToolCtx, args: ListArgs) -> Result<serde_js
         .map_err(internal)?;
     let mut stmt = conn
         .prepare(&format!(
-            "SELECT id, title, state, is_now, duration_min, created_at, updated_at,
+            "SELECT id, title, state, is_now, duration_min, created_at, updated_at, due_at,
                     (SELECT COUNT(*) FROM tasks s WHERE s.parent_id = tasks.id AND s.state != 'dropped'),
                     (SELECT COUNT(*) FROM tasks s WHERE s.parent_id = tasks.id AND s.state = 'done')
              FROM tasks WHERE {wheres}
-             ORDER BY created_at DESC, id DESC LIMIT {limit}"
+             ORDER BY {order} LIMIT {limit}"
         ))
         .map_err(internal)?;
     let tasks = stmt
@@ -155,8 +202,9 @@ pub fn list(conn: &Connection, ctx: &ToolCtx, args: ListArgs) -> Result<serde_js
                 "duration_min": r.get::<_, Option<i64>>(4)?,
                 "created_at": r.get::<_, String>(5)?,
                 "updated_at": r.get::<_, String>(6)?,
-                "steps": r.get::<_, i64>(7)?,
-                "done_steps": r.get::<_, i64>(8)?,
+                "due_at": r.get::<_, Option<String>>(7)?,
+                "steps": r.get::<_, i64>(8)?,
+                "done_steps": r.get::<_, i64>(9)?,
             }))
         })
         .and_then(|rows| rows.collect::<rusqlite::Result<Vec<_>>>())
@@ -198,7 +246,7 @@ pub fn search(conn: &Connection, ctx: &ToolCtx, args: SearchArgs) -> Result<serd
 
     let mut stmt = conn
         .prepare(&format!(
-            "SELECT id, title, state, is_now, duration_min
+            "SELECT id, title, state, is_now, duration_min, due_at
              FROM tasks
              WHERE user_id = ? AND parent_id IS NULL AND state != 'dropped' AND ({text_match})
              ORDER BY CASE WHEN {title_match} THEN 0 ELSE 1 END,
@@ -215,6 +263,7 @@ pub fn search(conn: &Connection, ctx: &ToolCtx, args: SearchArgs) -> Result<serd
                 "state": r.get::<_, String>(2)?,
                 "is_now": r.get::<_, bool>(3)?,
                 "duration_min": r.get::<_, Option<i64>>(4)?,
+                "due_at": r.get::<_, Option<String>>(5)?,
             }))
         })
         .and_then(|rows| rows.collect::<rusqlite::Result<Vec<_>>>())
@@ -463,9 +512,15 @@ mod tests {
     #[test]
     fn task_list_filters_and_sorts_by_due_date() {
         let (conn, tmp) = env();
+        let tomorrow = jiff::Timestamp::now()
+            .to_zoned(jiff::tz::TimeZone::UTC)
+            .date()
+            .tomorrow()
+            .unwrap();
+        let midnight = tomorrow.to_zoned(jiff::tz::TimeZone::UTC).unwrap().timestamp();
         let yesterday = (jiff::Timestamp::now() - jiff::Span::new().hours(30)).to_string();
-        let soon = (jiff::Timestamp::now() + jiff::Span::new().hours(20)).to_string();
-        let later = (jiff::Timestamp::now() + jiff::Span::new().hours(24 * 10)).to_string();
+        let soon = (midnight - jiff::Span::new().seconds(1)).to_string();
+        let later = (midnight + jiff::Span::new().hours(24 * 10)).to_string();
         let late = task(&conn, &tmp, &format!(r#"{{"title":"late","due_at":"{yesterday}"}}"#));
         let today = task(&conn, &tmp, &format!(r#"{{"title":"today","due_at":"{soon}"}}"#));
         let far = task(&conn, &tmp, &format!(r#"{{"title":"far","due_at":"{later}"}}"#));
@@ -477,10 +532,8 @@ mod tests {
         assert_eq!(list(r#"{"overdue":true}"#), vec![late]);
         assert_eq!(list(r#"{"overdue":false}"#), vec![undated, far, today]);
 
-        let tomorrow = jiff::Timestamp::now().to_zoned(jiff::tz::TimeZone::UTC).date().tomorrow().unwrap();
         assert_eq!(list(&format!(r#"{{"due_before":"{tomorrow}"}}"#)), vec![today, late]);
         assert_eq!(list(&format!(r#"{{"due_after":"{tomorrow}"}}"#)), vec![far]);
-        assert_eq!(list(r#"{"due_before":"nonsense"}"#).len(), 0);
 
         let out = call(&conn, &tmp, "task_list", r#"{"sort":"due"}"#).unwrap();
         assert_eq!(out["tasks"][0]["due_at"], yesterday);

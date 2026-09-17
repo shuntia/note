@@ -277,13 +277,15 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
     match name {
         "task_create" => (
             "Create a new task for the current user. Set is_now to put it straight in Now, \
-             the user's short list of at most 3 — a fourth pushes the newest one back to Later.",
+             the user's short list of at most 3 — a fourth pushes the newest one back to Later. \
+             due_at is when the work is due, not when to do it.",
             schema::<task_ops::CreateArgs>(),
         ),
         "task_update" => (
             "Update a task's title, description, state, notes, duration (whole 5-minute blocks), \
-             or whether it sits in Now — the short list of at most 3, where a fourth pushes the \
-             newest one back to Later. Steps are never in Now.",
+             due date, or whether it sits in Now — the short list of at most 3, where a fourth \
+             pushes the newest one back to Later. Steps are never in Now, and a step never \
+             carries a due date of its own.",
             schema::<task_ops::UpdateArgs>(),
         ),
         "task_split" => (
@@ -361,10 +363,12 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
             schema::<context_ops::NightlyNotesArgs>(),
         ),
         "task_list" => (
-            "Survey the user's top-level tasks, newest first, each with its step count and how \
-             many of those are done. Filter by state, by a case-insensitive keyword over title, \
-             description and notes, by when the task was added, or to the Now list; total says \
-             how many matched, which can be more than one page holds.",
+            "Survey the user's top-level tasks, newest first, each with its due date, its step \
+             count and how many of those are done. Filter by state, by a case-insensitive keyword \
+             over title, description and notes, by when the task was added, by when it is due or \
+             whether it is overdue, or to the Now list; sort due to put the soonest deadline \
+             first and the undated tasks last; total says how many matched, which can be more \
+             than one page holds.",
             schema::<task_query::ListArgs>(),
         ),
         "task_search" => (
@@ -375,9 +379,9 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
             schema::<task_query::SearchArgs>(),
         ),
         "task_read" => (
-            "Read one task in full: description, notes, state, source, duration, whether it is in \
-             Now, when it was added and last touched, and its steps with their own states and \
-             durations. The list tools carry titles only; this is how to see the rest.",
+            "Read one task in full: description, notes, state, source, duration, due date, the \
+             link and id it was imported under, whether it is in Now, when it was added and last \
+             touched, and its steps with their own states and durations. The list tools carry titles only; this is how to see the rest.",
             schema::<task_query::ReadArgs>(),
         ),
         "task_bulk_update" => (
