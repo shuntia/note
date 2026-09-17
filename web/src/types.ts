@@ -60,6 +60,8 @@ export type Conversation = { id: number; title: string; updated_at: string }
 
 export type TalkStep = { name: string; args: string; result: string; is_error: boolean }
 
+// `reasoning` and `thought_ms` are set on the assistant row only, and are null
+// on rows written before the transcript kept them.
 export type TalkMessage = {
   id: number
   role: 'user' | 'assistant' | 'tool'
@@ -68,15 +70,16 @@ export type TalkMessage = {
   tool_args: string | null
   is_error: boolean
   created_at: string
+  reasoning: string | null
+  thought_ms: number | null
 }
 
-// `reasoning` is the session's thinking text, live only: the transcript does
-// not store it, so a reloaded conversation has none.
 export type TalkReply = {
   conversation_id: number
   reply: string
   steps: TalkStep[]
   reasoning: string
+  thought_ms: number
 }
 
 // One entry of the day's template, in template order; `index` addresses it in a write.
