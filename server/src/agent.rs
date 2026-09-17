@@ -15,6 +15,9 @@ pub struct SessionDeps<'a> {
     pub embeddings: Option<&'a dyn EmbeddingsProvider>,
     /// Confines the session's task tools to one task and its steps.
     pub task_scope: Option<i64>,
+    /// The API token the caller presented, so the session's log row says which
+    /// credential spent it.
+    pub token_id: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -128,13 +131,12 @@ fn finish(
     calls: usize,
     log_kind: &str,
 ) -> Result<()> {
+    let mut detail = format!("kind={kind:?} turns={turns} tools={calls}");
+    if let Some(id) = deps.token_id {
+        detail.push_str(&format!(" token={id}"));
+    }
     let conn = deps.db.lock().unwrap();
-    crate::log::record(
-        &conn,
-        Some(user_id),
-        log_kind,
-        &format!("kind={kind:?} turns={turns} tools={calls}"),
-    )
+    crate::log::record(&conn, Some(user_id), log_kind, &detail)
 }
 
 #[cfg(test)]
@@ -172,7 +174,7 @@ mod tests {
         tmp: &'a tempfile::TempDir,
         llm: &'a MockLLM,
     ) -> SessionDeps<'a> {
-        SessionDeps { db, config_dir: tmp.path(), data_dir: tmp.path(), llm, embeddings: None, task_scope: None }
+        SessionDeps { db, config_dir: tmp.path(), data_dir: tmp.path(), llm, embeddings: None, task_scope: None, token_id: None }
     }
 
     fn now() -> jiff::Timestamp {
@@ -348,6 +350,7 @@ mod tests {
             llm: &llm,
             embeddings: None,
             task_scope: None,
+            token_id: None,
         };
         assert!(run_session(&d, 1, "aki", SessionKind::Talk, now(), &[], "hi").is_err());
     }

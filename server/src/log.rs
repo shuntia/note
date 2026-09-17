@@ -11,6 +11,16 @@ pub fn record(conn: &Connection, user_id: Option<i64>, kind: &str, detail: &str)
     Ok(())
 }
 
+/// How many agent sessions this user has started since `since`; the spend
+/// ceiling both agent routes sit behind.
+pub fn agent_sessions_since(conn: &Connection, user_id: i64, since: jiff::Timestamp) -> Result<u32> {
+    Ok(conn.query_row(
+        "SELECT COUNT(*) FROM event_log WHERE user_id = ?1 AND kind = 'agent_session' AND ts > ?2",
+        (user_id, since.to_string()),
+        |r| r.get(0),
+    )?)
+}
+
 /// Writes the row unless an identical (user, kind, detail) row younger than
 /// `window_mins` already exists — recurring failures (a broken user config
 /// hit every sweep) log once per window instead of once per tick. A stored
@@ -54,6 +64,22 @@ mod tests {
 
     fn rows(conn: &Connection) -> i64 {
         conn.query_row("SELECT COUNT(*) FROM event_log", [], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn agent_sessions_are_counted_per_user_inside_the_window() {
+        let conn = crate::db::open_memory().unwrap();
+        let t0: jiff::Timestamp = "2026-08-31T00:00:00Z".parse().unwrap();
+        let day_before = t0 - jiff::Span::new().hours(25);
+        record_throttled(&conn, Some(1), "agent_session", "old", day_before, 0).unwrap();
+        record_throttled(&conn, Some(1), "agent_session", "a", t0, 0).unwrap();
+        record_throttled(&conn, Some(1), "agent_session", "b", t0, 0).unwrap();
+        record_throttled(&conn, Some(2), "agent_session", "c", t0, 0).unwrap();
+        record_throttled(&conn, Some(1), "talk_error", "d", t0, 0).unwrap();
+        let since = t0 - jiff::Span::new().hours(24);
+        assert_eq!(agent_sessions_since(&conn, 1, since).unwrap(), 2);
+        assert_eq!(agent_sessions_since(&conn, 2, since).unwrap(), 1);
+        assert_eq!(agent_sessions_since(&conn, 3, since).unwrap(), 0);
     }
 
     #[test]

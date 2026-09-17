@@ -113,7 +113,8 @@ async fn main() -> anyhow::Result<()> {
         .with_providers(llm, embeddings)
         .with_providers_info(admin::ProvidersInfo::from(&cfg.providers))
         .with_admin_secrets(secrets)
-        .with_passkeys(passkeys);
+        .with_passkeys(passkeys)
+        .with_limits(&cfg.limits);
     state.secure_cookies = cfg.public_base_url.starts_with("https://");
     if let Some(wp) = &cfg.channels.webpush {
         let pem = std::fs::read(&wp.vapid_pem_file)

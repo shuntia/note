@@ -17,6 +17,8 @@ pub struct ServerConfig {
     pub channels: ChannelsConfig,
     #[serde(default)]
     pub admin: AdminConfig,
+    #[serde(default)]
+    pub limits: LimitsConfig,
 }
 
 /// `NOTE_DEFAULT_WEB_DIR` at build time bakes in an install-specific location
@@ -101,6 +103,19 @@ pub struct AdminConfig {
 impl Default for AdminConfig {
     fn default() -> Self {
         Self { require_second_factor: true, rp_id: None, rp_origin: None }
+    }
+}
+
+/// Spend ceilings an operator can raise or lift; 0 means unlimited.
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct LimitsConfig {
+    pub agent_sessions_per_day: u32,
+}
+
+impl Default for LimitsConfig {
+    fn default() -> Self {
+        Self { agent_sessions_per_day: 200 }
     }
 }
 
@@ -399,6 +414,16 @@ mod tests {
         cfg.save(tmp.path(), "aki").unwrap();
         let raw = std::fs::read_to_string(tmp.path().join("users/aki/user.toml")).unwrap();
         assert!(!raw.contains("ntfy_topic"), "unexpected file: {raw}");
+    }
+
+    #[test]
+    fn limits_section_is_optional_and_overridable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = "bind_addr = \"127.0.0.1:0\"\npublic_base_url = \"http://x\"\ndata_dir = \"data\"\n";
+        write(tmp.path(), "server.toml", base);
+        assert_eq!(ServerConfig::load(tmp.path()).unwrap().limits.agent_sessions_per_day, 200);
+        write(tmp.path(), "server.toml", &format!("{base}[limits]\nagent_sessions_per_day = 0\n"));
+        assert_eq!(ServerConfig::load(tmp.path()).unwrap().limits.agent_sessions_per_day, 0);
     }
 
     #[test]
