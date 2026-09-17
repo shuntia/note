@@ -39,7 +39,8 @@ pub fn run_for_user(
 ) -> Result<()> {
     let ucfg = UserConfig::load(deps.config_dir, username)?;
     let tz = jiff::tz::TimeZone::get(&ucfg.timezone).unwrap_or(jiff::tz::TimeZone::UTC);
-    let date = plan_date(&now.to_zoned(tz), &ucfg.nightly_time);
+    let local = now.to_zoned(tz);
+    let date = plan_date(&local, &ucfg.nightly_time);
     {
         let conn = crate::db_guard(deps.db);
         let done: i64 = conn.query_row(
@@ -49,6 +50,9 @@ pub fn run_for_user(
         )?;
         if done > 0 {
             return Ok(());
+        }
+        if let Err(e) = crate::memory::archive_expired(&conn, deps.data_dir, username, local.date()) {
+            let _ = crate::log::record(&conn, Some(user_id), "memory_expire_error", &e.to_string());
         }
         let tmpl = crate::templates::Template::load(deps.config_dir, username, &ucfg.template)?;
         crate::plan::generate(&conn, user_id, &tmpl, date)?;
@@ -190,6 +194,7 @@ pub fn spawn(state: crate::AppState) {
                         llm: st.llm.as_ref(),
                         embeddings: st.embeddings.as_deref(),
                         task_scope: None,
+                        inbox_source: None,
                         token_id: None,
                     };
                     let r = run_for_user(&deps, user_id, &username, now);
@@ -263,6 +268,7 @@ mod tests {
             llm,
             embeddings: None,
             task_scope: None,
+            inbox_source: None,
             token_id: None,
         }
     }

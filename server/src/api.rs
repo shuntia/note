@@ -19,6 +19,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/tasks/{id}/split", post(task_split))
         .route("/api/tasks/{id}/flatten", post(task_flatten))
         .route("/api/tasks/{id}/agent", post(task_agent))
+        .route("/api/agent/inbox", post(agent_inbox))
         .route("/api/tokens", get(tokens_list).post(tokens_create))
         .route("/api/tokens/{id}", axum::routing::delete(tokens_revoke))
         .route("/api/talk", post(talk))
@@ -378,6 +379,7 @@ async fn task_agent(
             llm: state.llm.as_ref(),
             embeddings: state.embeddings.as_deref(),
             task_scope: Some(id),
+            inbox_source: None,
             token_id,
         };
         let session = crate::agent::run_session(
@@ -458,6 +460,144 @@ async fn task_agent(
             brief_error(StatusCode::INTERNAL_SERVER_ERROR, "the task could not be briefed")
         }
     }
+}
+
+const MAX_SOURCE_ID: usize = 200;
+const INBOX_KINDS: [&str; 2] = ["announcement", "material"];
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InboxReq {
+    source_id: String,
+    kind: String,
+    #[serde(default)]
+    context: String,
+}
+
+/// Source ids appear in the session's scope check and in the source map, so
+/// they are held to a shape a caller cannot smuggle anything through.
+fn valid_source_id(id: &str) -> bool {
+    (1..=MAX_SOURCE_ID).contains(&id.len())
+        && id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b':' | b'.' | b'_' | b'-'))
+}
+
+/// Judges one learning-management item in a fresh agent session scoped to its
+/// source id, with no history and nothing kept as a conversation. Memory is
+/// written only by the terminal decision, so any failure before it leaves the
+/// source's previous facts exactly as they were.
+async fn agent_inbox(
+    user: TaskPrincipal,
+    State(state): State<AppState>,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    let req: InboxReq = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(_) => return brief_error(StatusCode::BAD_REQUEST, "malformed JSON body"),
+    };
+    if !valid_source_id(&req.source_id) {
+        return brief_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            &format!("source_id must be 1 to {MAX_SOURCE_ID} characters of A-Za-z0-9:._-"),
+        );
+    }
+    if !INBOX_KINDS.contains(&req.kind.as_str()) {
+        return brief_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "kind must be \"announcement\" or \"material\"",
+        );
+    }
+    if req.context.len() > MAX_BRIEF_CONTEXT {
+        return brief_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            &format!("context must be at most {MAX_BRIEF_CONTEXT} bytes"),
+        );
+    }
+    if daily_cap_reached(&state, user.id) {
+        return daily_cap_response();
+    }
+    let permit = match state.talk_gate.try_enter(user.id) {
+        Ok(p) => p,
+        Err(busy) => return session_busy_response(busy),
+    };
+    let token_id = match user.via {
+        auth::Credential::Token(id) => Some(id),
+        auth::Credential::Session => None,
+    };
+    let source_id = req.source_id.clone();
+    let opening = format!("Source: {}\nKind: {}\n\n{}", req.source_id, req.kind, req.context);
+    let err_state = state.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        // held here, not in the handler future, so a cancelled request still
+        // holds the slot until the session it orphaned actually finishes
+        let _permit = permit;
+        let deps = crate::agent::SessionDeps {
+            db: &state.db,
+            config_dir: &state.config_dir,
+            data_dir: &state.data_dir,
+            llm: state.llm.as_ref(),
+            embeddings: state.embeddings.as_deref(),
+            task_scope: None,
+            inbox_source: Some(req.source_id.clone()),
+            token_id,
+        };
+        crate::agent::run_session(
+            &deps,
+            user.id,
+            &user.username,
+            crate::tools::SessionKind::Inbox,
+            jiff::Timestamp::now(),
+            &[],
+            &opening,
+        )
+    })
+    .await;
+
+    let session = match result {
+        Ok(Ok(out)) => out,
+        Ok(Err(e)) => {
+            log_inbox_error(&err_state, user.id, &e.to_string());
+            return brief_error(StatusCode::BAD_GATEWAY, "the assistant is unavailable; try again");
+        }
+        Err(e) => {
+            log_inbox_error(&err_state, user.id, &format!("inbox session failed: {e}"));
+            return brief_error(StatusCode::INTERNAL_SERVER_ERROR, "the item could not be read");
+        }
+    };
+    let Some(decision) = session
+        .steps
+        .iter()
+        .rev()
+        .find(|s| s.name == "inbox_decide" && !s.is_error)
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s.result).ok())
+    else {
+        log_inbox_error(&err_state, user.id, &format!("{source_id}: the session never decided"));
+        return brief_error(StatusCode::BAD_GATEWAY, "the assistant reached no decision; try again");
+    };
+    let steps: Vec<_> = session
+        .steps
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "name": s.name,
+                "args": s.args,
+                "result": s.result,
+                "is_error": s.is_error,
+            })
+        })
+        .collect();
+    Json(serde_json::json!({
+        "source_id": source_id,
+        "outcome": decision["outcome"],
+        "reason": decision["reason"],
+        "memory_ids": decision["memory_ids"],
+        "steps": steps,
+    }))
+    .into_response()
+}
+
+fn log_inbox_error(state: &AppState, user_id: i64, detail: &str) {
+    let conn = state.db();
+    let _ = crate::log::record(&conn, Some(user_id), "agent_inbox_error", detail);
 }
 
 fn task_error(e: crate::tasks::UpdateError) -> axum::response::Response {
@@ -602,6 +742,7 @@ async fn talk(
             llm: state.llm.as_ref(),
             embeddings: state.embeddings.as_deref(),
             task_scope: None,
+            inbox_source: None,
             token_id: None,
         };
         let now = jiff::Timestamp::now();

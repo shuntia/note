@@ -65,6 +65,7 @@ fn delivery_reaches_the_user_through_the_ladder() {
         llm: &llm,
         embeddings: None,
         task_scope: None,
+        inbox_source: None,
         token_id: None,
     };
     let nightly_now: jiff::Timestamp = "2026-08-30T18:30:00Z".parse().unwrap();

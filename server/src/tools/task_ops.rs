@@ -405,6 +405,7 @@ mod tests {
             username: "aki",
             vectors: crate::tools::PreparedVectors::default(),
             task_scope: scope,
+            inbox_source: None,
         }
     }
 

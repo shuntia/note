@@ -487,8 +487,6 @@ mod tests {
     #[test]
     fn v13_adds_passkeys_and_the_per_user_totp_columns() {
         let conn = open_memory().unwrap();
-        let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(v, 13);
         conn.execute(
             "INSERT INTO users (username, pass_hash, role) VALUES ('a','h','member')",
             [],
@@ -519,6 +517,42 @@ mod tests {
             )
             .is_err(),
             "one credential id cannot be registered twice"
+        );
+    }
+
+    #[test]
+    fn v14_adds_the_memory_source_map_and_the_until_column() {
+        let conn = open_memory().unwrap();
+        let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, MIGRATIONS.len() as i64);
+        conn.execute(
+            "INSERT INTO users (username, pass_hash, role) VALUES ('a','h','member')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO memory_index (user, id, category, summary, path)
+             VALUES ('a', 'x', 'semantic', 's', 'p')",
+            [],
+        )
+        .unwrap();
+        let until: Option<String> = conn
+            .query_row("SELECT until FROM memory_index WHERE id = 'x'", [], |r| r.get(0))
+            .unwrap();
+        assert!(until.is_none());
+
+        conn.execute(
+            "INSERT INTO memory_sources (user_id, source_id, memory_id) VALUES (1, 's1', 'x')",
+            [],
+        )
+        .unwrap();
+        assert!(
+            conn.execute(
+                "INSERT INTO memory_sources (user_id, source_id, memory_id) VALUES (1, 's1', 'x')",
+                [],
+            )
+            .is_err(),
+            "one memory cannot be recorded twice under the same source"
         );
     }
 
