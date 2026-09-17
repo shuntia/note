@@ -102,19 +102,15 @@ fn token_for(state: &note_server::AppState, user_id: i64) -> String {
 
 #[tokio::test]
 async fn a_bearer_token_briefs_a_task() {
-    let llm = Arc::new(MockLLM::scripted(vec![
-        call(
-            "c1",
-            "task_update",
-            r#"{"task_id":1,"description":"Read chapter 4 and answer the questions.\nHand in: worksheet in class.","duration_min":45}"#,
-        ),
-        call(
-            "c2",
-            "task_split",
-            r#"{"task_id":1,"steps":[{"title":"read chapter 4","duration_min":25},{"title":"answer the questions","duration_min":20}]}"#,
-        ),
-        text("briefed"),
-    ]));
+    let llm = Arc::new(MockLLM::scripted(vec![call(
+        "c1",
+        "task_brief",
+        r#"{"task_id":1,"homework":true,
+            "description":"Read chapter 4 and answer the questions.\nHand in: worksheet in class.",
+            "duration_min":45,
+            "steps":[{"title":"read chapter 4","duration_min":25},
+                     {"title":"answer the questions","duration_min":20}]}"#,
+    )]));
     let (app, cookie, state, _cfg) =
         common::app_with_logged_in_user_llm_and_state(llm.clone()).await;
     let id = make_task(&app, &cookie, "Biology ch.4").await;
@@ -134,13 +130,11 @@ async fn a_bearer_token_briefs_a_task() {
     assert_eq!(v["outcome"], "briefed");
 
     let steps = v["steps"].as_array().unwrap();
-    assert_eq!(steps.len(), 2);
-    assert_eq!(steps[0]["name"], "task_update");
+    assert_eq!(steps.len(), 1);
+    assert_eq!(steps[0]["name"], "task_brief");
     assert_eq!(steps[0]["is_error"], false);
     assert!(steps[0]["args"].as_str().unwrap().contains("Hand in"));
-    assert!(!steps[0]["result"].as_str().unwrap().is_empty());
-    assert_eq!(steps[1]["name"], "task_split");
-    assert_eq!(steps[1]["is_error"], false);
+    assert!(steps[0]["result"].as_str().unwrap().contains(r#""steps_applied":2"#));
 
     let task = &v["task"];
     assert!(task["description"].as_str().unwrap().starts_with("Read chapter 4"));
@@ -150,10 +144,10 @@ async fn a_bearer_token_briefs_a_task() {
     assert_eq!(task["children"].as_array().unwrap().len(), 2);
     assert_eq!(task["children"][0]["title"], "read chapter 4");
 
-    // the session saw the import prompt and only the two scoped tools
+    // the session saw the import prompt and the one scoped tool
     let seen = llm.seen();
     assert!(seen[0].system.contains("brief the assignment"), "{}", seen[0].system);
-    assert_eq!(seen[0].tool_names, vec!["task_update", "task_split"]);
+    assert_eq!(seen[0].tool_names, vec!["task_brief"]);
     let opening = match &seen[0].messages[0] {
         note_server::providers::Message::User(t) => t.clone(),
         other => panic!("expected the task as the opening message, got {other:?}"),
@@ -173,8 +167,8 @@ async fn a_scripted_drop_reports_dropped() {
     let llm = Arc::new(MockLLM::scripted(vec![
         call(
             "c1",
-            "task_update",
-            r#"{"task_id":1,"state":"dropped","description":"Not homework: announcement about the field trip."}"#,
+            "task_brief",
+            r#"{"task_id":1,"homework":false,"reason":"announcement about the field trip"}"#,
         ),
         text("dropped"),
     ]));
@@ -221,10 +215,10 @@ async fn a_session_that_changes_nothing_reports_unchanged() {
 
 #[tokio::test]
 async fn a_rejected_tool_call_is_reported_and_leaves_the_task_unchanged() {
-    // the scoped session refuses a foreign id, Now, and a re-split
+    // the scoped session refuses a foreign id, and a drop with no reason
     let llm = Arc::new(MockLLM::scripted(vec![
-        call("c1", "task_update", r#"{"task_id":2,"description":"not mine to touch"}"#),
-        call("c2", "task_update", r#"{"task_id":1,"is_now":true}"#),
+        call("c1", "task_brief", r#"{"task_id":2,"homework":true,"description":"not mine"}"#),
+        call("c2", "task_brief", r#"{"task_id":1,"homework":false}"#),
         text("could not"),
     ]));
     let (app, cookie, _state, _cfg) = common::app_with_logged_in_user_llm_and_state(llm).await;
@@ -241,7 +235,7 @@ async fn a_rejected_tool_call_is_reported_and_leaves_the_task_unchanged() {
         assert_eq!(s["is_error"], true, "{s}");
         assert!(s["result"].as_str().unwrap().contains("rejected"), "{s}");
     }
-    assert_eq!(v["task"]["is_now"], false);
+    assert_eq!(v["task"]["state"], "open");
     assert_eq!(v["task"]["description"], "");
 }
 
@@ -309,18 +303,11 @@ async fn an_oversized_context_is_422() {
 
 #[tokio::test]
 async fn a_provider_failure_is_502_and_restores_the_task_and_its_steps() {
-    let llm = Arc::new(ScriptThenFail::new(vec![
-        call(
-            "c1",
-            "task_update",
-            r#"{"task_id":1,"description":"half-written brief","duration_min":30}"#,
-        ),
-        call(
-            "c2",
-            "task_split",
-            r#"{"task_id":1,"steps":[{"title":"one","duration_min":5},{"title":"two","duration_min":5}]}"#,
-        ),
-    ]));
+    let llm = Arc::new(ScriptThenFail::new(vec![call(
+        "c1",
+        "task_brief",
+        r#"{"task_id":1,"homework":true,"description":"half-written brief","duration_min":31}"#,
+    )]));
     let (app, cookie, _state, _cfg) = common::app_with_logged_in_user_llm_and_state(llm).await;
     make_task(&app, &cookie, "Essay").await;
     // give it a description, a duration and steps of its own first
@@ -353,7 +340,7 @@ async fn a_provider_failure_is_502_and_restores_the_task_and_its_steps() {
 #[tokio::test]
 async fn a_cookie_session_briefs_too() {
     let llm = Arc::new(MockLLM::scripted(vec![
-        call("c1", "task_update", r#"{"task_id":1,"description":"one line of brief"}"#),
+        call("c1", "task_brief", r#"{"task_id":1,"homework":true,"description":"one line of brief"}"#),
         text("briefed"),
     ]));
     let (app, cookie, _state, _cfg) = common::app_with_logged_in_user_llm_and_state(llm).await;
@@ -375,7 +362,13 @@ async fn a_cookie_session_briefs_too() {
 #[tokio::test]
 async fn a_re_brief_keeps_the_existing_steps() {
     let llm = Arc::new(MockLLM::scripted(vec![
-        call("c1", "task_update", r#"{"task_id":1,"description":"a fresher brief"}"#),
+        call(
+            "c1",
+            "task_brief",
+            r#"{"task_id":1,"homework":true,"description":"a fresher brief",
+                "steps":[{"title":"start over","duration_min":10},
+                         {"title":"and again","duration_min":10}]}"#,
+        ),
         text("briefed"),
     ]));
     let (app, cookie, _state, _cfg) = common::app_with_logged_in_user_llm_and_state(llm.clone()).await;
@@ -395,6 +388,7 @@ async fn a_re_brief_keeps_the_existing_steps() {
         send(&app, cookie_auth(&cookie), Method::POST, "/api/tasks/1/agent", Some("{}")).await;
     assert_eq!(status, StatusCode::OK, "{v}");
     assert_eq!(v["outcome"], "briefed");
+    assert!(v["steps"][0]["result"].as_str().unwrap().contains(r#""steps_applied":"kept""#));
     let children = v["task"]["children"].as_array().unwrap();
     assert_eq!(children.len(), 2);
     assert_eq!(children[0]["title"], "draft");
