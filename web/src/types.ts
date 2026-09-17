@@ -232,3 +232,40 @@ export type InspectUser = {
 export type SqlResult =
   | { columns: string[]; rows: unknown[][]; truncated: boolean }
   | { changes: number }
+
+export type CalendarKind = 'fixed' | 'busy' | 'note'
+
+// `days` is a weekday bitmask, Mon = 1 … Sun = 64; 0 means the entry happens once, on
+// `on_date`. `exceptions` are the dates its occurrence is skipped.
+export type CalendarEntry = {
+  id: number
+  title: string
+  kind: CalendarKind
+  quiet: boolean
+  start_time: string
+  end_time: string
+  days: number
+  day_names: string[]
+  on_date: string | null
+  from_date: string | null
+  until_date: string | null
+  created_at: string
+  updated_at: string
+  exceptions: string[]
+}
+
+export type CalendarOccurrence = {
+  entry_id: number
+  title: string
+  kind: CalendarKind
+  quiet: boolean
+  start: string
+  end: string
+}
+
+// `quiet_now` is the HH:MM a running quiet window ends, and is only ever set for today.
+export type CalendarDay = {
+  date: string
+  occurrences: CalendarOccurrence[]
+  quiet_now: string | null
+}

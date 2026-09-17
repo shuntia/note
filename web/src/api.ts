@@ -4,6 +4,9 @@ import type {
   AdminStatus,
   AdminUser,
   AlertPatch,
+  CalendarDay,
+  CalendarEntry,
+  CalendarKind,
   Conversation,
   Debrief,
   FlattenResult,
@@ -57,6 +60,17 @@ type NewTaskOpts = {
   is_now?: boolean
   due_at?: string | null
   url?: string
+}
+
+// A calendar entry recurs on `days` or happens once on `on_date`, never both.
+type CalendarFields = {
+  title: string
+  kind: CalendarKind
+  quiet: boolean
+  start_time: string
+  end_time: string
+  days: number
+  on_date: string | null
 }
 
 type TaskPatch = {
@@ -210,6 +224,23 @@ export const api = {
   pushUnsubscribe: (endpoint: string) =>
     request<void>('/api/push/unsubscribe', { method: 'POST', body: JSON.stringify({ endpoint }) }),
   notifyTest: () => request<{ via: string }>('/api/notify/test', { method: 'POST' }),
+  calendar: () => request<{ entries: CalendarEntry[] }>('/api/calendar'),
+  calendarDay: (date: string) => request<CalendarDay>(`/api/calendar/day/${date}`),
+  addCalendarEntry: (fields: CalendarFields) =>
+    request<CalendarEntry>('/api/calendar', { method: 'POST', body: JSON.stringify(fields) }),
+  // The server rejects unknown fields and keeps whatever the patch leaves out; an empty
+  // string is how a date is cleared.
+  patchCalendarEntry: (id: number, patch: Partial<CalendarFields>) =>
+    request<CalendarEntry>(`/api/calendar/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    }),
+  deleteCalendarEntry: (id: number) =>
+    request<void>(`/api/calendar/${id}`, { method: 'DELETE' }),
+  skipCalendarDate: (id: number, date: string) =>
+    request<void>(`/api/calendar/${id}/skip`, { method: 'POST', body: JSON.stringify({ date }) }),
+  unskipCalendarDate: (id: number, date: string) =>
+    request<void>(`/api/calendar/${id}/skip/${date}`, { method: 'DELETE' }),
 }
 
 const SECURITY = '/api/security'
