@@ -54,6 +54,7 @@ fn a_full_simulated_day() {
             llm: &nightly_llm,
             embeddings: None,
             task_scope: None,
+            inbox_source: None,
             token_id: None,
         };
         assert_eq!(note_server::nightly::due(&db.lock().unwrap(), tmp.path(), now).unwrap().len(), 1);
@@ -111,6 +112,7 @@ fn a_full_simulated_day() {
             llm: &talk_llm,
             embeddings: None,
             task_scope: None,
+            inbox_source: None,
             token_id: None,
         };
         let out = note_server::agent::run_session(

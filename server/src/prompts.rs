@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 /// The prompts a user may override through the API. Every function here checks
 /// a name against this list, so a caller-supplied name can never become a path
 /// of its own choosing.
-pub const EDITABLE: [&str; 3] = ["persona", "planning", "import"];
+pub const EDITABLE: [&str; 4] = ["persona", "planning", "import", "inbox"];
 
 fn checked(name: &str) -> Result<()> {
     anyhow::ensure!(EDITABLE.contains(&name), "unknown prompt {name:?}");
@@ -102,6 +102,11 @@ mod tests {
         }
         for gone in ["task_update", "task_split"] {
             assert!(!import.contains(gone), "the import prompt still calls for {gone}");
+        }
+        // the inbox prompt names the tools that session actually has
+        let inbox = load(&config, "nobody", "inbox").unwrap();
+        for name in crate::tools::registry(crate::tools::SessionKind::Inbox) {
+            assert!(inbox.contains(name), "the inbox prompt never mentions {name}");
         }
     }
 

@@ -1,4 +1,5 @@
 pub mod context_ops;
+pub mod inbox_ops;
 pub mod memory_ops;
 pub mod outreach_ops;
 pub mod schedule_ops;
@@ -15,6 +16,9 @@ pub enum SessionKind {
     Talk,
     /// One imported task, briefed by the agent on its importer's behalf.
     Import,
+    /// One item from a learning-management system, judged for what it is worth
+    /// remembering.
+    Inbox,
 }
 
 /// A tool failure returned to the model as a value; `kind` is machine-matchable,
@@ -57,6 +61,8 @@ pub struct ToolCtx<'a> {
     pub vectors: PreparedVectors,
     /// When set, the task tools reach only this task and its steps.
     pub task_scope: Option<i64>,
+    /// When set, `inbox_decide` accepts only this source id.
+    pub inbox_source: Option<String>,
 }
 
 pub const MAX_ARGS_BYTES: usize = 64 * 1024;
@@ -65,6 +71,8 @@ pub const MAX_ARGS_BYTES: usize = 64 * 1024;
 pub struct PreparedVectors {
     pub content: Option<Vec<f32>>,
     pub query: Option<Vec<f32>>,
+    /// One vector per fact of an `inbox_decide` call, in argument order.
+    pub facts: Vec<Option<Vec<f32>>>,
     pub error: Option<String>,
 }
 
@@ -116,6 +124,39 @@ pub fn prepare(
                 }
             }
         }
+        "inbox_decide" => {
+            #[derive(serde::Deserialize, Default)]
+            #[serde(default)]
+            struct F {
+                summary: String,
+                body: String,
+            }
+            #[derive(serde::Deserialize, Default)]
+            #[serde(default)]
+            struct D {
+                facts: Vec<F>,
+            }
+            if let Ok(d) = serde_json::from_str::<D>(raw_args) {
+                let texts: Vec<String> = d
+                    .facts
+                    .iter()
+                    .map(|f| crate::memory::embed_text(&f.summary, &f.body))
+                    .collect();
+                if !texts.is_empty() {
+                    let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+                    match emb.embed(&refs) {
+                        Ok(vs) => {
+                            out.facts = texts
+                                .iter()
+                                .enumerate()
+                                .map(|(i, _)| vs.get(i).cloned())
+                                .collect()
+                        }
+                        Err(e) => out.error = Some(e.to_string()),
+                    }
+                }
+            }
+        }
         _ => {}
     }
     out
@@ -162,6 +203,7 @@ const TALK: &[&str] = &[
     "context_edit",
 ];
 const IMPORT: &[&str] = &["task_brief"];
+const INBOX: &[&str] = &["memory_query", "memory_read", "inbox_decide"];
 const NIGHTLY: &[&str] = &[
     "memory_query",
     "memory_read",
@@ -183,7 +225,11 @@ const NIGHTLY: &[&str] = &[
 /// A tool whose success is the session's whole job: `run_session` returns on
 /// it instead of spending another model round on a closing sentence.
 pub fn is_terminal(kind: SessionKind, name: &str) -> bool {
-    kind == SessionKind::Import && name == "task_brief"
+    match kind {
+        SessionKind::Import => name == "task_brief",
+        SessionKind::Inbox => name == "inbox_decide",
+        _ => false,
+    }
 }
 
 pub fn registry(kind: SessionKind) -> &'static [&'static str] {
@@ -192,6 +238,7 @@ pub fn registry(kind: SessionKind) -> &'static [&'static str] {
         SessionKind::Checkin => CHECKIN,
         SessionKind::Talk => TALK,
         SessionKind::Import => IMPORT,
+        SessionKind::Inbox => INBOX,
     }
 }
 
@@ -230,6 +277,13 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
              plan. For a task the user no longer wants at all; to record one they finished or \
              abandoned, set its state with task_update instead.",
             schema::<task_ops::DeleteArgs>(),
+        ),
+        "inbox_decide" => (
+            "Decide what this one learning-management item is worth, in a single call that ends \
+             the session. Outcome \"remembered\" writes 1 to 10 durable facts; \"task\" leaves the \
+             item to the importer to turn into a task; \"nothing\" records that it held nothing \
+             durable. Facts already written for this source are archived and replaced.",
+            schema::<inbox_ops::DecideArgs>(),
         ),
         "memory_query" => (
             "Search the user's long-term memory; returns ids and summaries.",
@@ -337,6 +391,7 @@ fn run(
         "task_split" => task_ops::split(conn, ctx, parse(raw)?),
         "task_brief" => task_ops::brief(conn, ctx, parse(raw)?),
         "task_delete" => task_ops::delete(conn, ctx, parse(raw)?),
+        "inbox_decide" => inbox_ops::decide(conn, ctx, parse(raw)?),
         "memory_query" => memory_ops::query(conn, ctx, parse(raw)?),
         "memory_read" => memory_ops::read(conn, ctx, parse(raw)?),
         "memory_write" => memory_ops::write(conn, ctx, parse(raw)?),
@@ -368,7 +423,7 @@ mod tests {
     }
 
     fn ctx<'a>(tmp: &'a tempfile::TempDir) -> ToolCtx<'a> {
-        ToolCtx { config_dir: tmp.path(), data_dir: tmp.path(), user_id: 1, username: "aki", vectors: PreparedVectors::default(), task_scope: None }
+        ToolCtx { config_dir: tmp.path(), data_dir: tmp.path(), user_id: 1, username: "aki", vectors: PreparedVectors::default(), task_scope: None, inbox_source: None }
     }
 
     #[test]

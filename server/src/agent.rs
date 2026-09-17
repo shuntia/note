@@ -6,9 +6,15 @@ use std::path::Path;
 use std::sync::Mutex;
 
 pub const MAX_TURNS: usize = 16;
-/// An import session is one brief: the call, plus a single retry when the
-/// first one is rejected.
+/// An import session is one brief, and an inbox session one decision: the
+/// call, plus a single retry when the first one is rejected.
 pub const IMPORT_MAX_TURNS: usize = 2;
+
+/// The sessions that run on their own instructions alone, with none of the
+/// user's standing context and a single call to make.
+fn single_call(kind: SessionKind) -> bool {
+    matches!(kind, SessionKind::Import | SessionKind::Inbox)
+}
 
 pub struct SessionDeps<'a> {
     pub db: &'a Mutex<Connection>,
@@ -18,6 +24,8 @@ pub struct SessionDeps<'a> {
     pub embeddings: Option<&'a dyn EmbeddingsProvider>,
     /// Confines the session's task tools to one task and its steps.
     pub task_scope: Option<i64>,
+    /// Confines the session's inbox decision to one source id.
+    pub inbox_source: Option<String>,
     /// The API token the caller presented, so the session's log row says which
     /// credential spent it.
     pub token_id: Option<i64>,
@@ -54,18 +62,19 @@ pub fn run_session(
     history: &[Message],
     opening: &str,
 ) -> Result<SessionOutcome> {
-    // An import session briefs one task on an importer's behalf: it gets its own
-    // instructions and none of the user's standing context.
-    let mut system = if kind == SessionKind::Import {
-        crate::prompts::load(deps.config_dir, username, "import")?
-    } else {
-        crate::prompts::load(deps.config_dir, username, "persona")?
+    // An import session briefs one task and an inbox session judges one item,
+    // both on a caller's behalf: each gets its own instructions and none of the
+    // user's standing context.
+    let mut system = match kind {
+        SessionKind::Import => crate::prompts::load(deps.config_dir, username, "import")?,
+        SessionKind::Inbox => crate::prompts::load(deps.config_dir, username, "inbox")?,
+        _ => crate::prompts::load(deps.config_dir, username, "persona")?,
     };
     if kind == SessionKind::Nightly {
         system.push_str("\n\n");
         system.push_str(&crate::prompts::load(deps.config_dir, username, "planning")?);
     }
-    if kind != SessionKind::Import {
+    if !single_call(kind) {
         let conn = crate::db_guard(deps.db);
         let context = crate::context::assemble(&conn, deps.config_dir, user_id, username, now)?;
         system.push_str("\n\n");
@@ -79,7 +88,7 @@ pub fn run_session(
     let mut tool_calls = 0;
     let mut steps = Vec::new();
     let mut last_text = String::new();
-    let max_turns = if kind == SessionKind::Import { IMPORT_MAX_TURNS } else { MAX_TURNS };
+    let max_turns = if single_call(kind) { IMPORT_MAX_TURNS } else { MAX_TURNS };
 
     while turns < max_turns {
         let resp = deps
@@ -105,6 +114,7 @@ pub fn run_session(
                     username,
                     vectors,
                     task_scope: deps.task_scope,
+                    inbox_source: deps.inbox_source.clone(),
                 };
                 match tools::dispatch(&conn, &ctx, kind, &call.name, &call.args) {
                     Ok(v) => (v.to_string(), false),
@@ -185,7 +195,7 @@ mod tests {
         tmp: &'a tempfile::TempDir,
         llm: &'a MockLLM,
     ) -> SessionDeps<'a> {
-        SessionDeps { db, config_dir: tmp.path(), data_dir: tmp.path(), llm, embeddings: None, task_scope: None, token_id: None }
+        SessionDeps { db, config_dir: tmp.path(), data_dir: tmp.path(), llm, embeddings: None, task_scope: None, inbox_source: None, token_id: None }
     }
 
     fn now() -> jiff::Timestamp {
@@ -455,6 +465,7 @@ mod tests {
             llm: &llm,
             embeddings: None,
             task_scope: None,
+            inbox_source: None,
             token_id: None,
         };
         assert!(run_session(&d, 1, "aki", SessionKind::Talk, now(), &[], "hi").is_err());

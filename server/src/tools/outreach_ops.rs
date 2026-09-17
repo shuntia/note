@@ -77,6 +77,7 @@ mod tests {
             username: "aki",
             vectors: crate::tools::PreparedVectors::default(),
             task_scope: None,
+            inbox_source: None,
         }
     }
 

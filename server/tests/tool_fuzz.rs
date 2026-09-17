@@ -155,6 +155,7 @@ proptest! {
             config_dir: &data, data_dir: &data,
             user_id: 1, username: "aki", vectors: PreparedVectors::default(),
             task_scope: None,
+            inbox_source: None,
         };
         let kind = [SessionKind::Nightly, SessionKind::Checkin, SessionKind::Talk][kind_idx];
         let before_counts = snapshot(&conn);
