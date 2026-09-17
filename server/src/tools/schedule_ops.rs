@@ -10,7 +10,45 @@ pub struct SlideArgs {
     pub minutes: i64,
 }
 
+/// The plan date and current wall time of an owned event; the pair every
+/// calendar check needs before it can say where a move would land.
+fn event_day(conn: &Connection, user_id: i64, event_id: i64) -> Option<(jiff::civil::Date, String)> {
+    let row: Option<(String, String)> = conn
+        .query_row(
+            "SELECT p.date, e.wall_time FROM events e JOIN plans p ON p.id = e.plan_id
+             WHERE e.id = ?1 AND p.user_id = ?2",
+            (event_id, user_id),
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .ok()
+        .flatten();
+    row.and_then(|(date, wall)| Some((date.parse().ok()?, wall)))
+}
+
+/// Refuses a target range that runs into a hard commitment on the user's
+/// calendar, naming the one it hits.
+fn check_calendar(
+    conn: &Connection,
+    user_id: i64,
+    date: jiff::civil::Date,
+    start: &str,
+    end: &str,
+) -> Result<(), ToolError> {
+    let clash = crate::calendar::conflict(conn, user_id, date, start, end)
+        .map_err(|e| ToolError::internal(e.to_string()))?;
+    match clash {
+        Some(why) if start == end => Err(ToolError::rejected(format!("{start} is {why}"))),
+        Some(why) => Err(ToolError::rejected(format!("{start}-{end} is {why}"))),
+        None => Ok(()),
+    }
+}
+
 pub fn slide(conn: &Connection, ctx: &ToolCtx, args: SlideArgs) -> Result<serde_json::Value, ToolError> {
+    if let Some((date, wall)) = event_day(conn, ctx.user_id, args.event_id) {
+        let target = crate::templates::wall_add(&wall, args.minutes);
+        check_calendar(conn, ctx.user_id, date, &target, &target)?;
+    }
     match crate::plan::shift(conn, ctx.user_id, args.event_id, args.minutes) {
         Ok(Some(())) => Ok(serde_json::json!({ "ok": true })),
         Ok(None) => Err(ToolError::not_found(format!(
@@ -80,6 +118,9 @@ pub fn reshape(conn: &Connection, ctx: &ToolCtx, args: ReshapeArgs) -> Result<se
     let end = args.end.unwrap_or(cur_end);
     if end <= start {
         return Err(ToolError::rejected(format!("a block must end after it starts, got {start}-{end}")));
+    }
+    if let Some((date, _)) = event_day(conn, ctx.user_id, args.event_id) {
+        check_calendar(conn, ctx.user_id, date, &start, &end)?;
     }
     match crate::plan::reshape(conn, ctx.user_id, args.event_id, &start, &end) {
         Ok(Some(())) => Ok(serde_json::json!({ "start": start, "end": end })),
@@ -212,6 +253,7 @@ pub fn insert(conn: &Connection, ctx: &ToolCtx, args: InsertArgs) -> Result<serd
     let Some(plan_id) = plan_id else {
         return Err(ToolError::rejected(format!("no plan exists for {date}; generate it first")));
     };
+    check_calendar(conn, ctx.user_id, date, &args.time, &args.time)?;
     conn.execute(
         "INSERT INTO events (plan_id, kind, wall_time, orig_wall_time, flexibility, slide_window_min, channel)
          VALUES (?1, ?2, ?3, ?3, ?4, ?5, ?6)",
@@ -260,6 +302,65 @@ mod tests {
         ToolCtx { config_dir: tmp.path(), data_dir: tmp.path(), user_id: 1, username: "aki", vectors: crate::tools::PreparedVectors::default(), task_scope: None, inbox_source: None }
     }
 
+
+    /// School covers the middle of the Monday the fixture plans.
+    fn school(conn: &rusqlite::Connection) {
+        crate::calendar::create(conn, 1, crate::calendar::Fields {
+            title: "school".into(), kind: "fixed".into(),
+            start_time: "09:30".into(), end_time: "15:30".into(),
+            days: Some(crate::calendar::day_mask(&["mon", "tue", "wed", "thu", "fri"]).unwrap()),
+            ..Default::default()
+        }).unwrap();
+    }
+
+    #[test]
+    fn a_slide_into_a_fixed_commitment_is_refused_by_name() {
+        let (conn, tmp) = env();
+        school(&conn);
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "schedule_slide",
+            r#"{"event_id":1,"minutes":30}"#).unwrap_err();
+        assert_eq!(e.kind, "rejected");
+        assert_eq!(e.message, "09:30 is inside school 09:30-15:30");
+        let wall: String = conn
+            .query_row("SELECT wall_time FROM events WHERE id = 1", [], |r| r.get(0)).unwrap();
+        assert_eq!(wall, "09:00", "a refused slide leaves the event alone");
+
+        dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "schedule_slide",
+            r#"{"event_id":1,"minutes":-30}"#).unwrap();
+    }
+
+    #[test]
+    fn an_insert_inside_a_fixed_commitment_is_refused() {
+        let (conn, tmp) = env();
+        school(&conn);
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Nightly, "schedule_insert",
+            r#"{"date":"2026-08-31","kind":"nudge","time":"10:00","flexibility":"slide","channel":"push"}"#,
+        ).unwrap_err();
+        assert_eq!(e.kind, "rejected");
+        assert!(e.message.contains("inside school 09:30-15:30"), "{}", e.message);
+
+        dispatch(&conn, &ctx(&tmp), SessionKind::Nightly, "schedule_insert",
+            r#"{"date":"2026-08-31","kind":"nudge","time":"16:00","flexibility":"slide","channel":"push"}"#,
+        ).unwrap();
+    }
+
+    #[test]
+    fn a_reshape_into_a_fixed_commitment_is_refused() {
+        let (conn, tmp) = env();
+        school(&conn);
+        let block: i64 = conn
+            .query_row("SELECT id FROM events WHERE end_wall_time IS NOT NULL", [], |r| r.get(0))
+            .unwrap();
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "schedule_reshape",
+            &format!(r#"{{"event_id":{block},"start":"13:00","end":"14:00"}}"#)).unwrap_err();
+        assert_eq!(e.kind, "rejected");
+        assert!(e.message.contains("inside school 09:30-15:30"), "{}", e.message);
+
+        dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "schedule_reshape",
+            &format!(r#"{{"event_id":{block},"start":"07:00","end":"09:30"}}"#)).unwrap();
+    }
+
+    
     #[test]
     fn slide_snooze_and_window_rejection() {
         let (conn, tmp) = env();
