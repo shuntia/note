@@ -62,7 +62,7 @@ pub fn run_session(
         system.push_str(&crate::prompts::load(deps.config_dir, username, "planning")?);
     }
     if kind != SessionKind::Import {
-        let conn = deps.db.lock().unwrap();
+        let conn = crate::db_guard(deps.db);
         let context = crate::context::assemble(&conn, deps.config_dir, user_id, username, now)?;
         system.push_str("\n\n");
         system.push_str(&context);
@@ -92,7 +92,7 @@ pub fn run_session(
             tool_calls += 1;
             let vectors = tools::prepare(deps.embeddings, &call.name, &call.args);
             let (content, is_error) = {
-                let conn = deps.db.lock().unwrap();
+                let conn = crate::db_guard(deps.db);
                 let ctx = ToolCtx {
                     config_dir: deps.config_dir,
                     data_dir: deps.data_dir,
@@ -135,7 +135,7 @@ fn finish(
     if let Some(id) = deps.token_id {
         detail.push_str(&format!(" token={id}"));
     }
-    let conn = deps.db.lock().unwrap();
+    let conn = crate::db_guard(deps.db);
     crate::log::record(&conn, Some(user_id), log_kind, &detail)
 }
 

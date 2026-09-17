@@ -43,7 +43,7 @@ impl ClientHub {
     }
 
     pub fn unregister(&self, user_id: i64, conn_id: u64) {
-        let mut conns = self.conns.lock().unwrap();
+        let mut conns = self.conns.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(v) = conns.get_mut(&user_id) {
             v.retain(|(id, _)| *id != conn_id);
             if v.is_empty() {
@@ -55,7 +55,7 @@ impl ClientHub {
     /// Sends to every live connection of `user_id`, pruning closed ones, and
     /// returns how many actually received it.
     pub fn send(&self, user_id: i64, text: &str) -> usize {
-        let mut conns = self.conns.lock().unwrap();
+        let mut conns = self.conns.lock().unwrap_or_else(|e| e.into_inner());
         let Some(v) = conns.get_mut(&user_id) else {
             return 0;
         };

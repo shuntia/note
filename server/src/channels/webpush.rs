@@ -119,7 +119,7 @@ impl Channel for WebPushChannel {
     /// prunes endpoints the push service reports gone (404/410).
     fn deliver(&self, user_id: i64, _username: &str, msg: &OutboundMessage) -> Result<()> {
         let subs = {
-            let conn = self.db.lock().unwrap();
+            let conn = crate::db_guard(&self.db);
             push_subs::list(&conn, user_id)?
         };
         if subs.is_empty() {
@@ -141,7 +141,7 @@ impl Channel for WebPushChannel {
             }
         }
         if !gone.is_empty() {
-            let conn = self.db.lock().unwrap();
+            let conn = crate::db_guard(&self.db);
             for endpoint in &gone {
                 if let Err(e) = push_subs::remove_endpoint(&conn, endpoint) {
                     last_err = format!("pruning a gone subscription failed: {e}");

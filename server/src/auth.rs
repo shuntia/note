@@ -193,7 +193,7 @@ fn verify(password: &str, hash: &str) -> bool {
 /// time reveals neither which usernames exist nor which are disabled.
 pub fn login(db: &Mutex<Connection>, username: &str, password: &str) -> Result<Option<String>> {
     let row: Option<(i64, String, bool)> = {
-        let conn = db.lock().unwrap();
+        let conn = crate::db_guard(db);
         conn.query_row(
             "SELECT id, pass_hash, disabled FROM users WHERE username = ?1",
             [username],
@@ -214,7 +214,7 @@ pub fn login(db: &Mutex<Connection>, username: &str, password: &str) -> Result<O
     let (id, _, _) = row.expect("checked above");
     let token = uuid::Uuid::new_v4().to_string();
     let expires = jiff::Timestamp::now() + jiff::Span::new().hours(SESSION_LIFETIME_HOURS);
-    let conn = db.lock().unwrap();
+    let conn = crate::db_guard(db);
     conn.execute(
         "INSERT INTO sessions (token, user_id, expires_at) VALUES (?1, ?2, ?3)",
         (&token, id, expires.to_string()),
@@ -258,7 +258,7 @@ impl FromRequestParts<AppState> for CurrentUser {
             .ok_or(StatusCode::UNAUTHORIZED)?
             .value()
             .to_string();
-        let conn = state.db.lock().unwrap();
+        let conn = state.db();
         let row: Option<(i64, String, String, String, bool, String)> = conn
             .query_row(
                 "SELECT u.id, u.username, u.role, s.expires_at, u.disabled, u.category
@@ -318,7 +318,7 @@ impl FromRequestParts<AppState> for TaskPrincipal {
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .ok_or(StatusCode::UNAUTHORIZED)?;
-            let conn = state.db.lock().unwrap();
+            let conn = state.db();
             let resolved = crate::tokens::resolve(&conn, secret, jiff::Timestamp::now())
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
             let Some(r) = resolved else {
