@@ -347,6 +347,7 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
              lines, no markdown headers, nothing that will read as stale. It is injected \
              into every session tomorrow, so write it for yourself, not for the user.",
             schema::<context_ops::NightlyNotesArgs>(),
+        ),
         "task_list" => (
             "Survey the user's top-level tasks, newest first, each with its step count and how \
              many of those are done. Filter by state, by a case-insensitive keyword over title, \
