@@ -177,6 +177,7 @@ const NIGHTLY: &[&str] = &[
     "context_edit",
     "schedule_insert",
     "notify_send",
+    "nightly_notes_write",
 ];
 
 /// A tool whose success is the session's whole job: `run_session` returns on
@@ -272,6 +273,12 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
             "Send the user a push nudge with this text (delivered within a minute).",
             schema::<outreach_ops::SendArgs>(),
         ),
+        "nightly_notes_write" => (
+            "Leave tomorrow's sessions a short brief, replacing last night's: 5-12 plain \
+             lines, no markdown headers, nothing that will read as stale. It is injected \
+             into every session tomorrow, so write it for yourself, not for the user.",
+            schema::<context_ops::NightlyNotesArgs>(),
+        ),
         _ => unreachable!("describe covers every registered tool"),
     }
 }
@@ -340,6 +347,7 @@ fn run(
         "schedule_reshape" => schedule_ops::reshape(conn, ctx, parse(raw)?),
         "schedule_insert" => schedule_ops::insert(conn, ctx, parse(raw)?),
         "notify_send" => outreach_ops::send(conn, ctx, parse(raw)?),
+        "nightly_notes_write" => context_ops::nightly_notes_write(conn, ctx, parse(raw)?),
         _ => unreachable!("registry guarantees a known name"),
     }
 }

@@ -4,6 +4,9 @@ use anyhow::Result;
 use rusqlite::Connection;
 use std::path::Path;
 
+/// The run's last step: yesterday's notes stay in place when it never happens.
+const NOTES_TOOL: &str = "nightly_notes_write";
+
 const FALLBACK_DEBRIEF: &str =
     "(Plan generated from your template. The assistant was unavailable overnight.)";
 
@@ -59,8 +62,23 @@ pub fn run_for_user(
         &[],
         &format!("Nightly run for {date}."),
     ) {
-        Ok(out) if !out.reply.trim().is_empty() => out.reply,
-        Ok(_) => FALLBACK_DEBRIEF.to_string(),
+        Ok(out) => {
+            if !out.steps.iter().any(|s| s.name == NOTES_TOOL && !s.is_error) {
+                let conn = crate::db_guard(deps.db);
+                let _ = crate::log::record_throttled(
+                    &conn,
+                    Some(user_id),
+                    "nightly_notes_missing",
+                    &format!("no notes written for {date}"),
+                    now,
+                    crate::log::ERROR_LOG_WINDOW_MINS,
+                );
+            }
+            match out.reply.trim().is_empty() {
+                true => FALLBACK_DEBRIEF.to_string(),
+                false => out.reply,
+            }
+        }
         Err(e) => {
             let conn = crate::db_guard(deps.db);
             let _ = crate::log::record(&conn, Some(user_id), "nightly_fallback", &e.to_string());

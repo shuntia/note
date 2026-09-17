@@ -378,6 +378,16 @@ pub fn query(
     ids.into_iter().map(|(id, _)| hit_for(conn, user, &id, &lexical)).collect()
 }
 
+/// How many live facts a user holds. The situational block says so, so a
+/// session knows before searching whether there is anything to find.
+pub fn live_count(conn: &Connection, user: &str) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT COUNT(*) FROM memory_index WHERE user = ?1 AND archived = 0",
+        [user],
+        |r| r.get(0),
+    )?)
+}
+
 /// Newest-first browse over a user's live facts, with an optional exact
 /// category filter — the no-search counterpart to `query`.
 pub fn list(

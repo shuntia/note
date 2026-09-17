@@ -40,6 +40,45 @@ pub fn edit(
     }
 }
 
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NightlyNotesArgs {
+    /// The whole brief: plain lines, no markdown headers.
+    pub text: String,
+}
+
+/// Replaces the brief the next day's sessions read. Rejections are `rejected`
+/// so the model reformats and calls again rather than giving up.
+pub fn nightly_notes_write(
+    conn: &Connection,
+    ctx: &ToolCtx,
+    args: NightlyNotesArgs,
+) -> Result<serde_json::Value, ToolError> {
+    let _ = conn;
+    let text = args.text.trim();
+    if text.is_empty() {
+        return Err(ToolError::rejected("text must not be empty"));
+    }
+    if text.len() > crate::context::MAX_NIGHTLY_NOTES_BYTES {
+        return Err(ToolError::rejected(format!(
+            "text must be at most {} bytes",
+            crate::context::MAX_NIGHTLY_NOTES_BYTES
+        )));
+    }
+    if text.lines().any(|l| l.trim_start().starts_with('#')) {
+        return Err(ToolError::rejected(
+            "no markdown headers; the notes are injected under a header of their own",
+        ));
+    }
+    let ucfg = crate::config::UserConfig::load(ctx.config_dir, ctx.username)
+        .map_err(|e| ToolError::internal(e.to_string()))?;
+    let tz = jiff::tz::TimeZone::get(&ucfg.timezone).unwrap_or(jiff::tz::TimeZone::UTC);
+    let date = jiff::Timestamp::now().to_zoned(tz).date();
+    crate::context::write_nightly_notes(ctx.config_dir, ctx.username, text, date)
+        .map_err(|e| ToolError::internal(e.to_string()))?;
+    Ok(serde_json::json!({ "ok": true, "bytes": text.len() }))
+}
+
 #[cfg(test)]
 mod tests {
     use crate::tools::{dispatch, SessionKind, ToolCtx};
