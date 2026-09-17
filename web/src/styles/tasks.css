@@ -1,0 +1,194 @@
+/* ── horizon: tasks ─────────────────────────────────────────────── */
+.view:has(> .tasks) { padding: 0; }
+.tasks { width: 100%; padding: 56px 24px 100px; max-width: 720px; margin: 0 auto; }
+@media (min-width: 768px) {
+  .tasks { margin: 0; max-width: min(840px, calc(100% - 144px)); padding: 46px 0 0 120px; }
+  .task-add { max-width: 520px; }
+}
+
+.task-add { margin-bottom: 26px; }
+/* the one filled control on this screen, and only with something to save */
+.tasks .task-add button:not(:disabled) { background: var(--ink); color: var(--ivory); }
+
+.task-group { display: flex; flex-direction: column; gap: 6px; margin-top: 28px; }
+.task-group:first-of-type { margin-top: 0; }
+.task-group.done { margin-top: 0; }
+.task-group-head { margin: 0; font-size: 0.72rem; letter-spacing: 0.12em; font-weight: 700; color: var(--faint); }
+
+.task-item { position: relative; }
+.task-item[data-leaving] { overflow: hidden; pointer-events: none; }
+.task-item[data-leaving='dropped'] .task-title { color: var(--rose); }
+
+.task-row { display: flex; align-items: center; gap: 12px; min-height: 52px; }
+.task-group.later .task-row { color: var(--quiet); }
+.task-group.done .task-row { color: var(--faint); }
+
+.task-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.task-title { position: relative; font-size: 1rem; }
+.task-sub { font-size: 0.78rem; color: var(--faint); }
+
+/* a finished title is struck by a line that draws itself, so nothing snaps */
+.task-title::after, .task-step-title::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 58%;
+  width: 0;
+  height: 1px;
+  background: currentColor;
+  opacity: 0.7;
+  transition: width 260ms ease;
+}
+.task-group.done .task-title::after,
+.task-item[data-leaving] .task-title::after,
+.task-step.done .task-step-title::after { width: 100%; }
+
+.tick {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border-radius: 50%;
+  border: 2px solid var(--quiet);
+  box-sizing: border-box;
+  background: none;
+  flex: none;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  transition: background 220ms ease, border-color 220ms ease;
+}
+.task-group.later .tick { border-color: var(--line); }
+.tick svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: var(--ivory);
+  stroke-width: 2.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: 0;
+  transform: scale(0.5);
+  transition: opacity 180ms ease, transform 220ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.tick[aria-checked='true'] { background: var(--sage); border-color: var(--sage); }
+.tick[aria-checked='true'] svg { opacity: 1; transform: scale(1); }
+.tick:focus-visible, .task-start:focus-visible, .task-done-fold:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+.task-dur {
+  font-size: 0.75rem;
+  padding: 2px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.task-due { border-color: transparent; padding-inline: 0; }
+.task-due.overdue { color: var(--rose); }
+
+.task-start {
+  width: 36px;
+  height: 36px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--sun);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  flex: none;
+  transition: transform 200ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.task-start:hover { transform: scale(1.08); }
+.task-start svg { width: 16px; height: 16px; fill: var(--accent-fg); }
+
+/* the row keeps one status and its title; its other actions wait under the dots */
+.task-more { position: relative; flex: none; }
+.task-more .ev-more { width: 24px; height: 24px; color: var(--faint); }
+.task-item .task-more { opacity: 0; transition: opacity 160ms ease; }
+.task-item:hover .task-more,
+.task-item:focus-within .task-more,
+.task-more[data-open='true'] { opacity: 1; }
+
+.task-steps { list-style: none; margin: 0; padding: 0 0 0 36px; }
+.task-step { display: flex; align-items: center; gap: 12px; min-height: 40px; color: var(--quiet); font-size: 0.92rem; }
+.task-step .tick { width: 20px; height: 20px; border-color: var(--line); }
+.task-step .tick svg { width: 12px; height: 12px; }
+.task-step-title { position: relative; min-width: 0; transition: color 220ms ease; }
+.task-step.done { color: var(--faint); }
+.task-step-min { margin-left: auto; font-size: 0.75rem; color: var(--faint); font-variant-numeric: tabular-nums; }
+
+.task-done-fold {
+  margin-top: 20px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font: inherit;
+  font-size: 0.875rem;
+  color: var(--faint);
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+.task-done-fold svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: transform 200ms;
+}
+.task-done-fold[aria-expanded='true'] svg { transform: rotate(90deg); }
+
+/* an icon says what it does only when the pointer asks */
+.tasks [data-tip] { position: relative; }
+.tasks [data-tip]::after {
+  content: attr(data-tip);
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: var(--ink);
+  color: var(--ivory);
+  font-size: 0.7rem;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  opacity: 0;
+  transform: translate(-50%, 4px);
+  transition: opacity 160ms ease, transform 160ms ease;
+  pointer-events: none;
+}
+.tasks [data-tip]:hover::after, .tasks [data-tip]:focus-visible::after {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+/* the board's circles are smaller than a fingertip, so each one carries a hit box */
+@media (pointer: coarse), (max-width: 767.98px) {
+  .tick, .task-start, .task-more .ev-more { position: relative; }
+  .tick::before, .task-start::before, .task-more .ev-more::before {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 40px;
+    height: 40px;
+    transform: translate(-50%, -50%);
+  }
+  .task-item .task-more { opacity: 1; }
+  .tasks [data-tip]::after { content: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .task-done-fold svg,
+  .tick, .tick svg,
+  .task-start,
+  .task-title::after, .task-step-title::after,
+  .task-item .task-more { transition: none; }
+}
