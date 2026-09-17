@@ -541,7 +541,8 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 .turn.pending { align-self: flex-start; margin: 0; padding: 0 6px; font-size: 0.85rem; color: var(--faint); }
 /* the thinking line reads as muted text; the sweep only runs when motion is welcome */
 @media (prefers-reduced-motion: no-preference) {
-  .turn.pending {
+  .turn.pending,
+  .activity.live .activity-status {
     background-image: linear-gradient(
       100deg,
       var(--faint) 35%,
@@ -560,6 +561,43 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
   from { background-position: 180% 0; }
   to { background-position: -80% 0; }
 }
+
+/* what Note is doing, one line; its reasoning and calls stay a chevron away */
+.activity { align-self: flex-start; max-width: 100%; }
+.activity-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 4px 6px;
+  border: 0;
+  background: none;
+  color: var(--faint);
+  font: inherit;
+  font-size: 0.8rem;
+  text-align: left;
+  cursor: pointer;
+}
+.activity.open .receipt-chev { transform: rotate(90deg); }
+.activity-think {
+  margin: 4px 6px 6px;
+  padding: 10px 12px;
+  max-height: 220px;
+  overflow-y: auto;
+  border-radius: 12px;
+  background: var(--haze-strong);
+  color: var(--faint);
+  font: inherit;
+  font-size: 0.8rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.receipt-mark.running { stroke: var(--faint); }
+@media (prefers-reduced-motion: no-preference) {
+  .receipt-mark.running { transform-origin: 50% 50%; animation: spin 1s linear infinite; }
+}
+@keyframes spin { to { transform: rotate(1turn); } }
 
 /* every change Note made, one sentence each, with the raw call one chevron away */
 .receipts { align-self: flex-start; max-width: 100%; display: flex; flex-direction: column; gap: 4px; }

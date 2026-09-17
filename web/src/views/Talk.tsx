@@ -11,18 +11,51 @@ import { api, ApiError } from '../api'
 import type { ViewProps } from '../app'
 import { Markdown } from '../markdown'
 import { Overflow } from '../overflow'
-import { receipt } from '../receipts'
+import { doing, receipt } from '../receipts'
 import { makeHold } from '../held'
 import { forgetConversation, lastConversation, rememberConversation } from '../tellnote'
+import { onAgentFrame, type AgentFrame } from '../ws'
 import type { Conversation, TalkMessage, TalkStep } from '../types'
 
 type Item =
   | { kind: 'user'; key: string; text: string }
   | { kind: 'assistant'; key: string; text: string }
   | { kind: 'tool'; key: string; name: string; args: string; result: string; isError: boolean }
+  | { kind: 'activity'; key: string; reasoning: string; steps: ToolItem[] }
   | { kind: 'system'; key: string; text: string; hint: string | null }
 
-type ToolItem = Extract<Item, { kind: 'tool' }>
+type ToolItem = Extract<Item, { kind: 'tool' }> & { running?: boolean }
+type ActivityItem = Extract<Item, { kind: 'activity' }>
+type TurnItem = Extract<Item, { kind: 'user' | 'assistant' | 'system' }>
+
+// One session's progress as the live frames describe it; `seq` is the last one applied.
+type Live = { seq: number; reasoning: string; steps: ToolItem[] }
+
+const EMPTY_LIVE: Live = { seq: -1, reasoning: '', steps: [] }
+
+function applyFrame(prev: Live, frame: AgentFrame): Live {
+  if (frame.seq <= prev.seq) return prev
+  const at = { ...prev, seq: frame.seq }
+  const ev = frame.event
+  if (ev.kind === 'thinking')
+    return { ...at, reasoning: [at.reasoning, ev.text].filter(Boolean).join('\n\n') }
+  if (ev.kind !== 'tool_call' && ev.kind !== 'tool_result') return at
+  const steps = at.steps.slice()
+  const before = steps[ev.index]
+  steps[ev.index] =
+    ev.kind === 'tool_call'
+      ? { kind: 'tool', key: `live-${ev.index}`, name: ev.name, args: ev.args, result: '', isError: false, running: true }
+      : {
+          kind: 'tool',
+          key: `live-${ev.index}`,
+          name: ev.name,
+          args: before?.args ?? '',
+          result: ev.result,
+          isError: ev.is_error,
+          running: false,
+        }
+  return { ...at, steps }
+}
 
 type Load = 'loading' | 'ready' | 'error'
 
@@ -49,7 +82,7 @@ function fromMessage(m: TalkMessage): Item {
   }
 }
 
-const fromStep = (s: TalkStep): Item => ({
+const fromStep = (s: TalkStep): ToolItem => ({
   kind: 'tool',
   key: nextKey(),
   name: s.name,
@@ -87,10 +120,18 @@ function Receipt({ item }: { item: ToolItem }) {
   return (
     <div className={`receipt ${state}`.trim()}>
       <button className="receipt-chip" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
-        <svg className="receipt-mark" viewBox="0 0 24 24" aria-hidden="true">
-          {item.isError ? <path d="M6 6l12 12M18 6L6 18" /> : <path d="M5 12.5l4.5 4.5L19 7.5" />}
+        <svg
+          className={item.running ? 'receipt-mark running' : 'receipt-mark'}
+          viewBox="0 0 24 24"
+          aria-hidden="true"
+        >
+          {item.running && <path d="M12 3a9 9 0 0 1 9 9" />}
+          {!item.running &&
+            (item.isError ? <path d="M6 6l12 12M18 6L6 18" /> : <path d="M5 12.5l4.5 4.5L19 7.5" />)}
         </svg>
-        <span className="receipt-text">{receipt(item.name, item.args, item.isError)}</span>
+        <span className="receipt-text">
+          {item.running ? doing(item.name, item.args) : receipt(item.name, item.args, item.isError)}
+        </span>
         <svg className="receipt-chev" viewBox="0 0 24 24" aria-hidden="true">
           <path d="M9 6l6 6-6 6" />
         </svg>
@@ -99,24 +140,71 @@ function Receipt({ item }: { item: ToolItem }) {
         <div className="receipt-body">
           <div className="receipt-tool">{item.name}</div>
           {args && <pre className="receipt-block">{args}</pre>}
-          <pre className="receipt-block">{result || '—'}</pre>
+          <pre className="receipt-block">{result || (item.running ? '…' : '—')}</pre>
         </div>
       )}
     </div>
   )
 }
 
-// Consecutive calls read as one receipt block, and it sits under the reply that
+// What the header says a block is doing, or what it did once it is over.
+function status(steps: ToolItem[], reasoning: string, live: boolean): string {
+  const busy = steps.find((s) => s.running)
+  if (live) return busy ? `${doing(busy.name, busy.args)}…` : 'Thinking…'
+  const thought = reasoning ? 'Thought' : ''
+  if (steps.length === 0) return thought || 'No steps'
+  const count = `${steps.length} step${steps.length === 1 ? '' : 's'}`
+  return thought ? `${thought} · ${count}` : count
+}
+
+// One line while it runs and after: the reasoning and the calls stay a chevron away.
+function ActivityBlock({
+  steps,
+  reasoning,
+  live = false,
+}: {
+  steps: ToolItem[]
+  reasoning: string
+  live?: boolean
+}) {
+  const [open, setOpen] = useState(false)
+  const state = [live ? 'live' : '', open ? 'open' : ''].filter(Boolean).join(' ')
+  return (
+    <div className={`activity ${state}`.trim()}>
+      <button className="activity-head" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
+        <span className="activity-status" aria-live="polite">
+          {status(steps, reasoning, live)}
+        </span>
+        <svg className="receipt-chev" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M9 6l6 6-6 6" />
+        </svg>
+      </button>
+      {open && (
+        <div className="activity-body">
+          {reasoning && <pre className="activity-think">{reasoning}</pre>}
+          <div className="receipts">
+            {steps.map((step) => (
+              <Receipt key={step.key} item={step} />
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// Consecutive calls read as one activity block, and it sits under the reply that
 // explains it even though the transcript records the calls first.
-function grouped(items: Item[]): { key: string; items: Item[] }[] {
-  const out: { key: string; items: Item[] }[] = []
+function grouped(items: Item[]): (ActivityItem | TurnItem)[] {
+  const out: (ActivityItem | TurnItem)[] = []
   for (const item of items) {
     const last = out[out.length - 1]
-    if (item.kind === 'tool' && last?.items[0].kind === 'tool') last.items.push(item)
-    else out.push({ key: item.key, items: [item] })
+    if (item.kind !== 'tool') out.push(item)
+    else if (last?.kind === 'activity') last.steps.push(item)
+    else out.push({ kind: 'activity', key: item.key, reasoning: '', steps: [item] })
   }
   for (let i = 0; i < out.length - 1; i++) {
-    if (out[i].items[0].kind === 'tool' && out[i + 1].items[0].kind === 'assistant') {
+    if (out[i].kind === 'activity' && out[i + 1].kind === 'assistant') {
       ;[out[i], out[i + 1]] = [out[i + 1], out[i]]
       i++
     }
@@ -124,7 +212,7 @@ function grouped(items: Item[]): { key: string; items: Item[] }[] {
   return out
 }
 
-function turn(item: Exclude<Item, ToolItem>): ReactNode {
+function turn(item: TurnItem): ReactNode {
   if (item.kind === 'user')
     return (
       <div key={item.key} className="turn user">
@@ -159,6 +247,7 @@ export function Talk({
   const [draft, setDraft] = useState(prefill ?? '')
   // era of the send in flight, so its pending row belongs to the conversation that sent it
   const [pending, setPending] = useState<number | null>(null)
+  const [live, setLive] = useState<Live>(EMPTY_LIVE)
   const [sideOpen, setSideOpen] = useState(false)
   const [renaming, setRenaming] = useState<{ id: number; value: string } | null>(null)
   const [sideNotice, setSideNotice] = useState<string | null>(null)
@@ -171,6 +260,8 @@ export function Talk({
   // bumped whenever the open conversation changes, so a late reply never lands in the wrong pane
   const era = useRef(0)
   const busy = pending === era.current
+  // the send in flight, for the frames arriving on the shell's socket
+  const inFlight = useRef<{ conversation: number | null } | null>(null)
 
   const loadList = useCallback(async (quiet = false) => {
     if (!quiet) setListState('loading')
@@ -200,10 +291,22 @@ export function Talk({
     void loadList()
   }, [loadList])
 
+  // A brand-new conversation's frames carry no id, so they belong to whatever send is open.
+  useEffect(
+    () =>
+      onAgentFrame((frame) => {
+        const sent = inFlight.current
+        if (!sent) return
+        if (frame.conversation_id !== null && frame.conversation_id !== sent.conversation) return
+        setLive((prev) => applyFrame(prev, frame))
+      }),
+    [],
+  )
+
   useEffect(() => {
     const el = pane.current
     if (el && stick.current) el.scrollTop = el.scrollHeight
-  }, [items, busy, msgState])
+  }, [items, busy, live, msgState])
 
   useEffect(() => {
     const el = input.current
@@ -273,6 +376,8 @@ export function Talk({
     const mine: Item = { kind: 'user', key: nextKey(), text }
     const sentIn = era.current
     stick.current = true
+    inFlight.current = { conversation: current }
+    setLive(EMPTY_LIVE)
     setPending(sentIn)
     setDraft('')
     setItems((prev) => [...prev, mine])
@@ -280,9 +385,20 @@ export function Talk({
       const reply = await api.talk(text, current ?? undefined)
       void loadList(true)
       if (era.current !== sentIn) return
+      const activity: Item[] =
+        reply.steps.length || reply.reasoning
+          ? [
+              {
+                kind: 'activity',
+                key: nextKey(),
+                reasoning: reply.reasoning,
+                steps: reply.steps.map(fromStep),
+              },
+            ]
+          : []
       setItems((prev) => [
         ...prev,
-        ...reply.steps.map(fromStep),
+        ...activity,
         { kind: 'assistant', key: nextKey(), text: reply.reply },
       ])
       rememberConversation(reply.conversation_id)
@@ -304,6 +420,7 @@ export function Talk({
       setDraft(text)
       input.current?.focus()
     } finally {
+      inFlight.current = null
       setPending((p) => (p === sentIn ? null : p))
     }
   }
@@ -473,22 +590,14 @@ export function Talk({
               </p>
             )}
             {msgState === 'ready' &&
-              grouped(items).map((group) =>
-                group.items[0].kind === 'tool' ? (
-                  <div key={group.key} className="receipts">
-                    {group.items.map((item) => (
-                      <Receipt key={item.key} item={item as ToolItem} />
-                    ))}
-                  </div>
+              grouped(items).map((item) =>
+                item.kind === 'activity' ? (
+                  <ActivityBlock key={item.key} steps={item.steps} reasoning={item.reasoning} />
                 ) : (
-                  turn(group.items[0] as Exclude<Item, ToolItem>)
+                  turn(item)
                 ),
               )}
-            {busy && (
-              <p className="turn pending" aria-live="polite">
-                Note is thinking…
-              </p>
-            )}
+            {busy && <ActivityBlock live steps={live.steps} reasoning={live.reasoning} />}
           </div>
         </div>
 

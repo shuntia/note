@@ -70,7 +70,14 @@ export type TalkMessage = {
   created_at: string
 }
 
-export type TalkReply = { conversation_id: number; reply: string; steps: TalkStep[] }
+// `reasoning` is the session's thinking text, live only: the transcript does
+// not store it, so a reloaded conversation has none.
+export type TalkReply = {
+  conversation_id: number
+  reply: string
+  steps: TalkStep[]
+  reasoning: string
+}
 
 // One entry of the day's template, in template order; `index` addresses it in a write.
 export type ScheduleRow = {
