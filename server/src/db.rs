@@ -187,6 +187,21 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE users ADD COLUMN category TEXT NOT NULL DEFAULT 'member'
         CHECK (category IN ('member','test'));
     ",
+    // v13
+    "
+    ALTER TABLE users ADD COLUMN totp_secret TEXT;
+    ALTER TABLE users ADD COLUMN totp_pending TEXT;
+    CREATE TABLE passkeys (
+        id INTEGER PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id),
+        name TEXT NOT NULL,
+        credential TEXT NOT NULL,
+        cred_id BLOB NOT NULL UNIQUE,
+        created_at TEXT NOT NULL,
+        last_used_at TEXT
+    );
+    CREATE INDEX idx_passkeys_user ON passkeys(user_id, id);
+    ",
 ];
 
 pub fn open(path: &Path) -> Result<Connection> {
@@ -457,6 +472,44 @@ mod tests {
             )
             .unwrap();
         assert_eq!(id, "x");
+    }
+
+    #[test]
+    fn v13_adds_passkeys_and_the_per_user_totp_columns() {
+        let conn = open_memory().unwrap();
+        let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, 13);
+        conn.execute(
+            "INSERT INTO users (username, pass_hash, role) VALUES ('a','h','member')",
+            [],
+        )
+        .unwrap();
+        let (secret, pending): (Option<String>, Option<String>) = conn
+            .query_row("SELECT totp_secret, totp_pending FROM users WHERE id = 1", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert!(secret.is_none() && pending.is_none());
+
+        conn.execute(
+            "INSERT INTO passkeys (user_id, name, credential, cred_id, created_at)
+             VALUES (1, 'phone', '{}', X'0102', 'now')",
+            [],
+        )
+        .unwrap();
+        let last: Option<String> = conn
+            .query_row("SELECT last_used_at FROM passkeys WHERE id = 1", [], |r| r.get(0))
+            .unwrap();
+        assert!(last.is_none());
+        assert!(
+            conn.execute(
+                "INSERT INTO passkeys (user_id, name, credential, cred_id, created_at)
+                 VALUES (1, 'again', '{}', X'0102', 'now')",
+                [],
+            )
+            .is_err(),
+            "one credential id cannot be registered twice"
+        );
     }
 
     #[test]
