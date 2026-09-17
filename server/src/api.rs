@@ -1766,12 +1766,10 @@ fn calendar_failed(e: crate::calendar::CalendarError) -> axum::response::Respons
 /// as validation failures rather than as broken syntax.
 fn calendar_body<T: serde::de::DeserializeOwned>(
     body: &axum::body::Bytes,
-) -> Result<T, axum::response::Response> {
+) -> Result<T, (StatusCode, String)> {
     serde_json::from_slice(body).map_err(|e| match e.classify() {
-        serde_json::error::Category::Data => {
-            calendar_error(StatusCode::UNPROCESSABLE_ENTITY, &e.to_string())
-        }
-        _ => calendar_error(StatusCode::BAD_REQUEST, "malformed JSON body"),
+        serde_json::error::Category::Data => (StatusCode::UNPROCESSABLE_ENTITY, e.to_string()),
+        _ => (StatusCode::BAD_REQUEST, "malformed JSON body".into()),
     })
 }
 
@@ -1790,7 +1788,7 @@ async fn calendar_create(
 ) -> impl IntoResponse {
     let fields = match calendar_body::<crate::calendar::Fields>(&body) {
         Ok(f) => f,
-        Err(res) => return res,
+        Err((status, why)) => return calendar_error(status, &why),
     };
     let conn = state.db();
     match crate::calendar::create(&conn, user.id, fields) {
@@ -1807,7 +1805,7 @@ async fn calendar_update(
 ) -> impl IntoResponse {
     let patch = match calendar_body::<crate::calendar::Patch>(&body) {
         Ok(p) => p,
-        Err(res) => return res,
+        Err((status, why)) => return calendar_error(status, &why),
     };
     let conn = state.db();
     match crate::calendar::update(&conn, user.id, id, patch) {
@@ -1843,7 +1841,7 @@ async fn calendar_skip(
 ) -> impl IntoResponse {
     let req = match calendar_body::<SkipReq>(&body) {
         Ok(r) => r,
-        Err(res) => return res,
+        Err((status, why)) => return calendar_error(status, &why),
     };
     let conn = state.db();
     match crate::calendar::skip(&conn, user.id, id, &req.date) {
