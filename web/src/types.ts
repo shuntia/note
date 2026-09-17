@@ -31,6 +31,10 @@ export type Task = {
   parent_id: number | null
   is_now: boolean
   updated_at: string
+  // RFC 3339 UTC, like updated_at; steps never carry one.
+  due_at: string | null
+  external_id: string | null
+  url: string
 }
 
 // A top-level task with its steps; the list never nests deeper than this.

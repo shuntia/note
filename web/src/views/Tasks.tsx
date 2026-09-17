@@ -255,6 +255,9 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
       parent_id: null,
       is_now,
       updated_at: new Date().toISOString(),
+      due_at: null,
+      external_id: null,
+      url: '',
       children: [],
     }
     setNodes((ns) => (ns ? [...ns, optimistic] : ns))
@@ -372,6 +375,34 @@ function Duration({ task }: { task: Task }) {
   return <span className="task-dur">≈ {round5(task.duration_min)} min</span>
 }
 
+const DAY_MS = 24 * 60 * 60 * 1000
+
+// Days between two dates by the calendar, not by the hours between them.
+const daysUntil = (due: Date, now: Date) =>
+  Math.round(
+    (new Date(due.getFullYear(), due.getMonth(), due.getDate()).getTime() -
+      new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()) /
+      DAY_MS,
+  )
+
+function dueLabel(due_at: string, now: Date): string | null {
+  const due = new Date(due_at)
+  if (Number.isNaN(due.getTime())) return null
+  if (due.getTime() < now.getTime()) return 'overdue'
+  const days = daysUntil(due, now)
+  if (days === 0) return 'due today'
+  if (days === 1) return 'due tomorrow'
+  if (days < 7) return `due ${due.toLocaleDateString(undefined, { weekday: 'short' })}`
+  return `due ${due.toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}`
+}
+
+function Due({ task }: { task: Task }) {
+  if (task.due_at === null) return null
+  const label = dueLabel(task.due_at, new Date())
+  if (label === null) return null
+  return <span className={`task-dur task-due${label === 'overdue' ? ' overdue' : ''}`}>{label}</span>
+}
+
 function Row({ node, group, actions }: { node: TaskNode; group: Group; actions: RowActions }) {
   const done = group === 'done'
   const steps = done ? [] : node.children
@@ -404,6 +435,7 @@ function Row({ node, group, actions }: { node: TaskNode; group: Group; actions: 
           {sub && <span className="task-sub">{sub}</span>}
         </div>
         {!done && <Duration task={node} />}
+        {!done && <Due task={node} />}
         {!done && (
           <Overflow className="task-more" label={`More actions for ${node.title}`} items={items} />
         )}
