@@ -211,3 +211,25 @@ async fn unauthenticated_requests_are_rejected() {
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
     }
 }
+
+#[tokio::test]
+async fn an_assistant_row_carries_its_trace_and_an_older_one_is_null() {
+    let (app, cookie, state, _cfg) = common::app_with_logged_in_user_and_state().await;
+    // seed's assistant row goes in the way a pre-migration one did
+    let id = seed(&state, 1, "chat", "2026-08-30T09:00:00Z");
+    {
+        let conn = state.db.lock().unwrap();
+        let at: jiff::Timestamp = "2026-08-30T09:01:00Z".parse().unwrap();
+        talk::append_assistant(&conn, id, "here you go", "weighed two options", 2600, at).unwrap();
+    }
+
+    let v = json(get(&app, &format!("/api/conversations/{id}/messages"), &cookie).await).await;
+    let rows = v.as_array().unwrap();
+    assert_eq!(rows.len(), 3);
+    assert!(rows[0]["reasoning"].is_null() && rows[0]["thought_ms"].is_null());
+    assert_eq!(rows[1]["role"], "assistant");
+    assert!(rows[1]["reasoning"].is_null() && rows[1]["thought_ms"].is_null());
+    assert_eq!(rows[2]["role"], "assistant");
+    assert_eq!(rows[2]["reasoning"], "weighed two options");
+    assert_eq!(rows[2]["thought_ms"], 2600);
+}
