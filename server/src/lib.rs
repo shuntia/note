@@ -8,6 +8,7 @@ pub mod context;
 pub mod db;
 pub mod log;
 pub mod memory;
+pub mod net;
 pub mod nightly;
 pub mod plan;
 pub mod prompts;
