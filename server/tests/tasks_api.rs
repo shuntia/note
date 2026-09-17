@@ -572,3 +572,87 @@ async fn delete_removes_task_and_steps_and_404s_after() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn a_task_carries_its_due_date_and_its_origin() {
+    let (app, cookie, _tmp) = app_with_user().await;
+    let (status, t) = post(&app, &cookie, "/api/tasks", r#"{"title":"call dentist"}"#).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(t["due_at"].is_null());
+    assert!(t["external_id"].is_null());
+    assert_eq!(t["url"], "");
+    assert_eq!(t["source"], "manual");
+
+    let (status, t) = post(
+        &app,
+        &cookie,
+        "/api/tasks",
+        r#"{"title":"essay","due_at":"2026-09-19T23:59:00+09:00",
+            "url":"https://canvas.example/a/12","description":"two pages","notes":"from the LMS"}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{t}");
+    assert_eq!(t["due_at"], "2026-09-19T14:59:00Z", "stored as RFC 3339 UTC");
+    assert_eq!(t["url"], "https://canvas.example/a/12");
+    assert_eq!(t["description"], "two pages");
+    assert_eq!(t["notes"], "from the LMS");
+
+    let v = list(&app, &cookie).await;
+    assert_eq!(v[1]["due_at"], "2026-09-19T14:59:00Z");
+    assert_eq!(v[1]["url"], "https://canvas.example/a/12");
+}
+
+#[tokio::test]
+async fn due_at_is_set_cleared_and_validated() {
+    let (app, cookie, _tmp) = app_with_user().await;
+    post(&app, &cookie, "/api/tasks", r#"{"title":"essay"}"#).await;
+
+    let (status, t) = patch_task(&app, &cookie, 1, r#"{"due_at":"2026-09-19T23:59:00Z"}"#).await;
+    assert_eq!(status, StatusCode::OK, "{t}");
+    assert_eq!(t["due_at"], "2026-09-19T23:59:00Z");
+
+    let (status, t) = patch_task(&app, &cookie, 1, r#"{"notes":"x"}"#).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(t["due_at"], "2026-09-19T23:59:00Z", "an unrelated patch leaves it alone");
+
+    let (status, t) = patch_task(&app, &cookie, 1, r#"{"due_at":null}"#).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(t["due_at"].is_null());
+
+    for bad in ["\"friday\"", "\"2026-09-19\"", "\"2026-13-01T00:00:00Z\"", "5"] {
+        let (status, _) = patch_task(&app, &cookie, 1, &format!(r#"{{"due_at":{bad}}}"#)).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "accepted {bad}");
+        let (status, _) =
+            post(&app, &cookie, "/api/tasks", &format!(r#"{{"title":"x","due_at":{bad}}}"#)).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "accepted {bad} on create");
+    }
+}
+
+#[tokio::test]
+async fn a_step_never_carries_a_due_date_of_its_own() {
+    let (app, cookie, _tmp) = app_with_user().await;
+    post(&app, &cookie, "/api/tasks", r#"{"title":"essay"}"#).await;
+    let (status, _) = post(
+        &app,
+        &cookie,
+        "/api/tasks",
+        r#"{"title":"draft","parent_id":1,"due_at":"2026-09-19T23:59:00Z"}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+    post(&app, &cookie, "/api/tasks", r#"{"title":"draft","parent_id":1}"#).await;
+    let (status, _) = patch_task(&app, &cookie, 2, r#"{"due_at":"2026-09-19T23:59:00Z"}"#).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+    post(&app, &cookie, "/api/tasks", r#"{"title":"loose","due_at":"2026-09-19T23:59:00Z"}"#).await;
+    let (status, _) = patch_task(&app, &cookie, 3, r#"{"parent_id":1}"#).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "a task with a due date cannot become a step");
+}
+
+#[tokio::test]
+async fn an_unknown_field_on_create_is_refused() {
+    let (app, cookie, _tmp) = app_with_user().await;
+    let (status, _) = post(&app, &cookie, "/api/tasks", r#"{"title":"x","due":"friday"}"#).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+}
