@@ -372,3 +372,24 @@ async fn ntfy_topic_is_written_validated_and_cleared() {
     let raw = std::fs::read_to_string(&path).unwrap();
     assert!(!raw.contains("ntfy_topic"), "the cleared override stayed in the file: {raw}");
 }
+
+/// A topic is a shared namespace on the ntfy server: taking the name another
+/// account's deliveries go to would subscribe this user to them.
+#[tokio::test]
+async fn another_users_default_topic_cannot_be_claimed() {
+    let (app, cookie, state, _cfg) = common::app_with_logged_in_user_and_state().await;
+    {
+        let conn = state.db.lock().unwrap();
+        note_server::auth::create_user(&conn, "bo", "pw", false).unwrap();
+    }
+
+    let res = app.clone().oneshot(put(&cookie, r#"{"ntfy_topic":"note-bo"}"#)).await.unwrap();
+    assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(json(res).await["error"].is_string());
+
+    // the user's own default, and a name no account answers to, are fine
+    let v = json(app.clone().oneshot(put(&cookie, r#"{"ntfy_topic":"note-aki"}"#)).await.unwrap()).await;
+    assert_eq!(v["ntfy_topic"], "note-aki");
+    let v = json(app.oneshot(put(&cookie, r#"{"ntfy_topic":"note-nobody"}"#)).await.unwrap()).await;
+    assert_eq!(v["ntfy_topic"], "note-nobody");
+}
