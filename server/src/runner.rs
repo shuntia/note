@@ -85,6 +85,31 @@ fn user_runtime(
     Ok(rt)
 }
 
+/// Holds a due delivery that lands inside a quiet calendar window: the event's
+/// wall time moves to the window's end, where it fires by the normal path. A
+/// candidate always carries a bare start — the schema forbids an end on
+/// anything that alerts — so its wall time is the whole of its shape.
+fn defer_while_quiet(
+    conn: &Connection,
+    c: &Candidate,
+    tz: &jiff::tz::TimeZone,
+    now: jiff::Timestamp,
+) -> Result<bool> {
+    let Some(window) = crate::calendar::quiet_window(conn, c.user_id, tz, now)? else {
+        return Ok(false);
+    };
+    conn.execute("UPDATE events SET wall_time = ?1 WHERE id = ?2", (&window.end, c.event_id))?;
+    crate::log::record_throttled(
+        conn,
+        Some(c.user_id),
+        "delivery_deferred",
+        &format!("event {} held until {} by calendar {}", c.event_id, window.end, window.title),
+        now,
+        crate::log::ERROR_LOG_WINDOW_MINS,
+    )?;
+    Ok(true)
+}
+
 /// Fires every pending or snoozed event whose wall time, resolved in its user's
 /// timezone on the plan date, has arrived by `now`. A candidate that cannot be
 /// resolved is logged as `runner_error` and skipped, so one unusable row cannot
@@ -145,6 +170,9 @@ pub fn fire_due(
             }
         };
         if due <= now {
+            if defer_while_quiet(conn, &c, &rt.tz, now)? {
+                continue;
+            }
             conn.execute(
                 "UPDATE events SET status='fired', fired_at=?1 WHERE id=?2",
                 (now.to_string(), c.event_id),
@@ -391,6 +419,106 @@ mod tests {
         let now: jiff::Timestamp = "2026-08-31T23:00:00Z".parse().unwrap();
         assert!(fire_due(&conn, tmp.path(), now).unwrap().is_empty());
         assert_eq!(crate::plan::events_for(&conn, uid, date).unwrap()[0].status, "pending");
+    }
+
+    fn calendar_entry(
+        conn: &rusqlite::Connection, uid: i64, title: &str, kind: &str, quiet: bool, days: &[&str],
+    ) -> i64 {
+        crate::calendar::create(conn, uid, crate::calendar::Fields {
+            title: title.into(), kind: kind.into(), quiet: Some(quiet),
+            start_time: "08:15".into(), end_time: "15:30".into(),
+            days: Some(crate::calendar::day_mask(days).unwrap()), ..Default::default()
+        }).unwrap().id
+    }
+
+    fn school(conn: &rusqlite::Connection, uid: i64) -> i64 {
+        calendar_entry(conn, uid, "school", "fixed", true, &["mon", "tue", "wed", "thu", "fri"])
+    }
+
+    /// 2026-09-15 is a Tuesday, and a 10:00 delivery falls inside school.
+    fn day_with_a_ten_oclock_event(tz: &str) -> (rusqlite::Connection, tempfile::TempDir, i64) {
+        let (conn, tmp, uid) = setup(tz);
+        let date: jiff::civil::Date = "2026-09-15".parse().unwrap();
+        crate::plan::generate(&conn, uid, &one_event_template("10:00"), date).unwrap();
+        (conn, tmp, uid)
+    }
+
+    fn wall_time(conn: &rusqlite::Connection) -> String {
+        conn.query_row("SELECT wall_time FROM events", [], |r| r.get(0)).unwrap()
+    }
+
+    fn deferrals(conn: &rusqlite::Connection) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM event_log WHERE kind='delivery_deferred'", [], |r| r.get(0),
+        ).unwrap()
+    }
+
+    #[test]
+    fn a_delivery_inside_a_quiet_window_waits_for_its_end() {
+        let (conn, tmp, uid) = day_with_a_ten_oclock_event("UTC");
+        school(&conn, uid);
+
+        let inside: jiff::Timestamp = "2026-09-15T10:00:00Z".parse().unwrap();
+        assert!(fire_due(&conn, tmp.path(), inside).unwrap().is_empty());
+        assert_eq!(wall_time(&conn), "15:30");
+
+        let detail: String = conn.query_row(
+            "SELECT detail FROM event_log WHERE kind='delivery_deferred'", [], |r| r.get(0),
+        ).unwrap();
+        assert!(detail.ends_with("held until 15:30 by calendar school"), "{detail}");
+
+        let still_inside: jiff::Timestamp = "2026-09-15T15:29:00Z".parse().unwrap();
+        assert!(fire_due(&conn, tmp.path(), still_inside).unwrap().is_empty());
+        assert_eq!(deferrals(&conn), 1, "a sweep a minute does not log a row a minute");
+
+        let ended: jiff::Timestamp = "2026-09-15T15:30:00Z".parse().unwrap();
+        assert_eq!(fire_due(&conn, tmp.path(), ended).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_window_that_is_not_quiet_holds_nothing_back() {
+        let (conn, tmp, uid) = day_with_a_ten_oclock_event("UTC");
+        calendar_entry(&conn, uid, "commute", "busy", false, &["tue"]);
+        calendar_entry(&conn, uid, "bin day", "note", true, &["tue"]);
+
+        let inside: jiff::Timestamp = "2026-09-15T10:00:00Z".parse().unwrap();
+        assert_eq!(fire_due(&conn, tmp.path(), inside).unwrap().len(), 1);
+        assert_eq!(deferrals(&conn), 0);
+    }
+
+    #[test]
+    fn a_skipped_occurrence_leaves_the_day_loud() {
+        let (conn, tmp, uid) = day_with_a_ten_oclock_event("UTC");
+        let id = school(&conn, uid);
+        crate::calendar::skip(&conn, uid, id, "2026-09-15").unwrap();
+
+        let inside: jiff::Timestamp = "2026-09-15T10:00:00Z".parse().unwrap();
+        assert_eq!(fire_due(&conn, tmp.path(), inside).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_one_off_entry_quiets_its_own_day() {
+        let (conn, tmp, uid) = day_with_a_ten_oclock_event("UTC");
+        crate::calendar::create(&conn, uid, crate::calendar::Fields {
+            title: "exam".into(), kind: "fixed".into(),
+            start_time: "09:00".into(), end_time: "11:30".into(),
+            on_date: Some("2026-09-15".into()), ..Default::default()
+        }).unwrap();
+
+        let inside: jiff::Timestamp = "2026-09-15T10:00:00Z".parse().unwrap();
+        assert!(fire_due(&conn, tmp.path(), inside).unwrap().is_empty());
+        assert_eq!(wall_time(&conn), "11:30");
+    }
+
+    #[test]
+    fn a_quiet_window_is_another_users_business_alone() {
+        let (conn, tmp, uid) = day_with_a_ten_oclock_event("UTC");
+        let other = crate::auth::create_user(&conn, "rin", "p", false).unwrap();
+        school(&conn, other);
+        assert_ne!(uid, other);
+
+        let inside: jiff::Timestamp = "2026-09-15T10:00:00Z".parse().unwrap();
+        assert_eq!(fire_due(&conn, tmp.path(), inside).unwrap().len(), 1);
     }
 
     #[test]
