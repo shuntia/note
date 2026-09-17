@@ -8,6 +8,7 @@ import {
   type KeyboardEvent,
   type ReactNode,
 } from 'react'
+import { flushSync } from 'react-dom'
 import gsap from 'gsap'
 import { api, ApiError } from '../api'
 import type { ViewProps } from '../app'
@@ -74,6 +75,9 @@ type Load = 'loading' | 'ready' | 'error'
 
 const UNDO_MS = 10_000
 
+// The send flight, the scroll that reveals it and the composer's settling
+// share one easing.
+const FLIGHT_S = 0.45
 const SETTLE_S = 0.3
 const SETTLE_EASE = 'expo.out'
 
@@ -188,20 +192,25 @@ function liveLabel(steps: ToolItem[]): string {
   return busy ? `Note is thinking… · ${doing(busy.name, busy.args)}` : 'Note is thinking…'
 }
 
-// One quiet line; the reasoning and the calls stay a chevron away.
+// One quiet line; the reasoning and the calls stay a chevron away. `held` keeps a
+// live line in the layout but out of sight until the sent bubble has landed.
 function Trace({
   label,
   reasoning,
   steps,
   live = false,
+  held = false,
 }: {
   label: string
   reasoning: string
   steps: ToolItem[]
   live?: boolean
+  held?: boolean
 }) {
   const [open, setOpen] = useState(false)
-  const state = [live ? 'live' : '', open ? 'open' : ''].filter(Boolean).join(' ')
+  const state = [live ? 'live' : '', held ? 'held' : '', open ? 'open' : '']
+    .filter(Boolean)
+    .join(' ')
   return (
     <div className={`activity ${state}`.trim()}>
       <button className="activity-head" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
@@ -285,6 +294,48 @@ function turn(item: TurnItem): ReactNode {
   )
 }
 
+// The composer text becomes the sent bubble: a copy lifts off the composer, takes
+// the bubble's colour and shape on the way, and lands where the real one waits.
+function flyToBubble(
+  text: string,
+  from: DOMRect,
+  fromStyle: CSSStyleDeclaration,
+  bubble: HTMLElement,
+  to: { left: number; top: number; width: number },
+  onLand: () => void,
+) {
+  const toStyle = getComputedStyle(bubble)
+  const ghost = document.createElement('div')
+  ghost.className = 'send-ghost'
+  ghost.textContent = text
+  Object.assign(ghost.style, {
+    left: `${from.left}px`,
+    top: `${from.top}px`,
+    width: `${from.width}px`,
+    padding: fromStyle.padding,
+    fontSize: fromStyle.fontSize,
+    lineHeight: fromStyle.lineHeight,
+  })
+  document.body.append(ghost)
+  bubble.style.visibility = 'hidden'
+  requestAnimationFrame(() => ghost.classList.add('bubble'))
+  gsap.to(ghost, {
+    left: to.left,
+    top: to.top,
+    width: to.width,
+    padding: toStyle.padding,
+    fontSize: toStyle.fontSize,
+    lineHeight: toStyle.lineHeight,
+    duration: FLIGHT_S,
+    ease: SETTLE_EASE,
+    onComplete: () => {
+      bubble.style.visibility = ''
+      ghost.remove()
+      onLand()
+    },
+  })
+}
+
 export function Talk({
   notify,
   onChanged,
@@ -313,6 +364,7 @@ export function Talk({
   // era of the send in flight, so its pending row belongs to the conversation that sent it
   const [pending, setPending] = useState<number | null>(null)
   const [live, setLive] = useState<Live>(EMPTY_LIVE)
+  const [flying, setFlying] = useState(false)
   const [sideOpen, setSideOpen] = useState(false)
   const [renaming, setRenaming] = useState<{ id: number; value: string } | null>(null)
   const [sideNotice, setSideNotice] = useState<string | null>(null)
@@ -329,6 +381,8 @@ export function Talk({
   const busy = pending === era.current
   // the send in flight, for the frames arriving on the shell's socket
   const inFlight = useRef<{ conversation: number | null } | null>(null)
+  // set while a sent bubble is on its way, so nothing else moves the pane
+  const flight = useRef(false)
 
   const loadList = useCallback(async (quiet = false) => {
     if (!quiet) setListState('loading')
@@ -384,7 +438,7 @@ export function Talk({
   }, [])
 
   useEffect(() => {
-    if (!stick.current) return
+    if (flight.current || !stick.current) return
     const instant = jump.current
     jump.current = false
     scrollToEnd(instant)
@@ -392,7 +446,7 @@ export function Talk({
 
   const fitComposer = useCallback(() => {
     const el = input.current
-    if (!el) return
+    if (!el) return 0
     el.style.height = 'auto'
     const style = window.getComputedStyle(el)
     const line = parseFloat(style.lineHeight) || 22
@@ -402,8 +456,10 @@ export function Talk({
       parseFloat(style.borderTopWidth) +
       parseFloat(style.borderBottomWidth)
     const max = line * 8 + frame
-    el.style.height = `${Math.min(el.scrollHeight, max)}px`
+    const height = Math.min(el.scrollHeight, max)
+    el.style.height = `${height}px`
     el.style.overflowY = el.scrollHeight > max ? 'auto' : 'hidden'
+    return height
   }, [])
 
   useLayoutEffect(() => {
@@ -480,10 +536,56 @@ export function Talk({
     stick.current = true
     inFlight.current = { conversation: current }
 
-    setLive(EMPTY_LIVE)
-    setPending(sentIn)
-    setDraft('')
-    setItems((prev) => [...prev, mine])
+    const el = input.current
+    const paneEl = pane.current
+    const motion = !!el && !!paneEl && !reducedMotion()
+    if (motion) {
+      const from = el.getBoundingClientRect()
+      const fromStyle = getComputedStyle(el)
+      const oldHeight = el.offsetHeight
+      flight.current = true
+      // committed at once so the bubble's slot can be measured before any paint
+      flushSync(() => {
+        setLive(EMPTY_LIVE)
+        setPending(sentIn)
+        setDraft('')
+        setFlying(true)
+        setItems((prev) => [...prev, mine])
+      })
+      const bubble = paneEl.querySelector<HTMLElement>(`[data-key="${mine.key}"]`)
+      const land = () => {
+        flight.current = false
+        setFlying(false)
+        if (stick.current) scrollToEnd(false)
+      }
+      if (bubble) {
+        // where the bubble will sit once the pane has scrolled to its end
+        const end = paneEl.scrollHeight - paneEl.clientHeight
+        const rect = bubble.getBoundingClientRect()
+        const to = { left: rect.left, top: rect.top - (end - paneEl.scrollTop), width: rect.width }
+        gsap.to(paneEl, { scrollTop: end, duration: FLIGHT_S, ease: SETTLE_EASE, overwrite: true })
+        flyToBubble(text, from, fromStyle, bubble, to, land)
+      } else {
+        land()
+      }
+      const settled = fitComposer()
+      el.classList.add('flying')
+      gsap.fromTo(
+        el,
+        { height: oldHeight },
+        {
+          height: settled,
+          duration: SETTLE_S,
+          ease: SETTLE_EASE,
+          onComplete: () => el.classList.remove('flying'),
+        },
+      )
+    } else {
+      setLive(EMPTY_LIVE)
+      setPending(sentIn)
+      setDraft('')
+      setItems((prev) => [...prev, mine])
+    }
 
     try {
       const reply = await api.talk(text, current ?? undefined)
@@ -602,7 +704,7 @@ export function Talk({
 
   const onScroll = () => {
     const el = pane.current
-    if (el) stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 64
+    if (el && !flight.current) stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 64
   }
 
   const visible = conversations.filter((c) => c.id !== deleteHold.held())
@@ -705,6 +807,7 @@ export function Talk({
             {busy && (
               <Trace
                 live
+                held={flying}
                 label={liveLabel(live.steps)}
                 reasoning={live.reasoning}
                 steps={live.steps}
