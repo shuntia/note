@@ -210,6 +210,7 @@ const TALK: &[&str] = &[
     "task_search",
     "task_read",
     "task_bulk_update",
+    "plan_tasks",
 ];
 const IMPORT: &[&str] = &["task_brief"];
 const INBOX: &[&str] = &["memory_query", "memory_read", "inbox_decide"];
@@ -233,6 +234,7 @@ const NIGHTLY: &[&str] = &[
     "task_search",
     "task_read",
     "task_bulk_update",
+    "plan_tasks",
 ];
 
 /// A tool whose success is the session's whole job: `run_session` returns on
@@ -373,6 +375,16 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
              demoted_from_now; steps are never in Now.",
             schema::<task_query::BulkUpdateArgs>(),
         ),
+        "plan_tasks" => (
+            "Lay tasks out as consecutive blocks of time on one day's plan — this is how \
+             \"schedule these tasks for tomorrow morning\" is done. Each block runs as long as \
+             its task's duration (25 minutes for a task with none), in the order given, from \
+             start, with gap_min minutes between them and none ending after end. Blocks are \
+             silent: they never ping the user. Not for routines or reminders. The call is \
+             refused, changing nothing, when a task is already on that day, when the blocks \
+             would overlap something already planned, or when they do not fit before end.",
+            schema::<plan_ops::PlanTasksArgs>(),
+        ),
         _ => unreachable!("describe covers every registered tool"),
     }
 }
@@ -447,6 +459,7 @@ fn run(
         "task_search" => task_query::search(conn, ctx, parse(raw)?),
         "task_read" => task_query::read(conn, ctx, parse(raw)?),
         "task_bulk_update" => task_query::bulk_update(conn, ctx, parse(raw)?),
+        "plan_tasks" => plan_ops::plan_tasks(conn, ctx, parse(raw)?),
         _ => unreachable!("registry guarantees a known name"),
     }
 }
