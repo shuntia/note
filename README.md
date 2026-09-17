@@ -151,6 +151,13 @@ never deleted: superseding a fact writes a replacement and moves the old file
 to `archive/`. A SQLite FTS index over these files is derived and rebuilt at
 startup, so the files themselves are the backup-worthy source of truth.
 
+A fact may carry an `until: YYYY-MM-DD` line in its frontmatter — the date
+after which it stops mattering, such as the quiz it announces. It lives in the
+file, so it survives a reindex, and every nightly run archives the user's live
+facts whose `until` is more than one day past, logging one `memory_expired`
+row with the count when it moves anything. A fact with no `until` never
+expires.
+
 The standing context document each agent session sees is
 `config/users/<user>/standing.md`; agents edit it in place through the
 `context_edit` tool, so its history is whatever your config dir's VCS says. The
@@ -199,7 +206,8 @@ Tasks: `task_create`, `task_update` (title, description, state, notes,
 duration, Now), `task_split` into steps, and `task_delete`, which removes a
 task or a single step with its steps and event links exactly as
 `DELETE /api/tasks/{id}` does. `task_brief` is the import session's only tool
-(see "Briefing an imported task"). Memory: `memory_query`, `memory_read`,
+(see "Briefing an imported task"), and `inbox_decide` the inbox session's
+(see "Reading an inbox item"). Memory: `memory_query`, `memory_read`,
 `memory_write`. The day: `schedule_slide`, `schedule_snooze`, `schedule_drop`,
 `schedule_reshape`, and — nightly only — `schedule_insert` and `notify_send`.
 `context_edit` maintains the standing document, and `nightly_notes_write`
@@ -267,8 +275,9 @@ a deploy. The editable prompts are also served
 over `GET /api/prompts/{name}` (`{name, content, custom}`, `content` being the
 effective text), `PUT /api/prompts/{name} {content}` (writes the user's
 override), and `DELETE /api/prompts/{name}` (drops it, back to the default);
-any other name is a 404. A third, `import`, drives the task-briefing route
-(see "Briefing an imported task").
+any other name is a 404. Two more stand on their own: `import` drives the
+task-briefing route (see "Briefing an imported task") and `inbox` the
+item-reading one (see "Reading an inbox item").
 
 Every night at each user's `nightly_time` (default 03:00, their timezone),
 the server generates the day's plan from their template, lets the agent
@@ -415,11 +424,11 @@ Every outcome lands in `event_log`, readable at `GET /api/admin/log`:
   wrong guesses cannot lock an account's owner out. A successful login clears it.
 - `POST /api/talk` runs one session per user (a second concurrent request gets
   `409`) and four across the server (`503` with `Retry-After: 5` beyond that).
-  `POST /api/tasks/{id}/agent` takes the same gate: a second session for the
-  same user is a `429`, the server-wide cap a `503`.
+  `POST /api/tasks/{id}/agent` and `POST /api/agent/inbox` take the same gate:
+  a second session for the same user is a `429`, the server-wide cap a `503`.
 - One account may start `[limits] agent_sessions_per_day` agent sessions in any
-  24 hours — default 200, `0` lifts the ceiling — and beyond that both routes
-  answer `429` `{"error": "daily session limit reached"}`. The count comes from
+  24 hours — default 200, `0` lifts the ceiling — and beyond that every agent
+  route answers `429` `{"error": "daily session limit reached"}`. The count comes from
   the `agent_session` rows already in `event_log`, and a session an API token
   started names it (`token=<id>`) so the spend is attributable.
 
@@ -515,6 +524,78 @@ really invalidates those steps. Call
 
 What the agent is told lives in `config/defaults/prompts/import.md`, editable
 per user like the other prompts over `GET/PUT/DELETE /api/prompts/import`.
+
+### Reading an inbox item
+
+The same importer can hand Note an item that is not a task at all — an
+announcement or a piece of course material — and let the agent decide what, if
+anything, is worth remembering from it:
+
+```sh
+curl -X POST http://localhost:3271/api/agent/inbox \
+  -H 'Authorization: Bearer note_…' -H 'Content-Type: application/json' \
+  -d '{"source_id":"lms:post:77","kind":"announcement",
+       "context":"Posted 2026-09-18. Quiz on chapter 4 next Friday."}'
+```
+
+`source_id` is the caller's own stable id for the item, 1–200 characters of
+`A-Za-z0-9:._-`; `kind` is `announcement` or `material`; `context` is the item
+text, capped at 32 KiB and allowed to be empty. The reply is the decision and
+the session that reached it:
+
+```json
+{
+  "source_id": "lms:post:77",
+  "outcome": "remembered",
+  "reason": "the quiz date and the late-work rule",
+  "memory_ids": ["8f2…", "b41…"],
+  "steps": [{ "name": "inbox_decide", "args": "…", "result": "…", "is_error": false }]
+}
+```
+
+`outcome` is `remembered` (facts were written, their ids in `memory_ids`),
+`task` (the item asks the student to do something — the importer creates the
+task) or `nothing`. The failures are `400` (`{"error":"malformed JSON body"}`),
+`422` (bad `source_id` or `kind`, or context over 32 KiB), `429` (a session for
+that user is already running, or the daily ceiling is reached), `502` (the
+model is unreachable, or the session reached no decision) and `500`; every one
+carries a `{"error": …}` body, and `502`/`500` write an `agent_inbox_error`
+row to `event_log`. Nothing is written on any non-2xx reply: memory is touched
+only by the decision itself, which is the last thing the session does.
+
+The session is fresh, has no conversation history, is capped at two model
+rounds, and sees `config/defaults/prompts/inbox.md` as its whole system prompt
+— no persona, no standing context. Its tools are `memory_query`, `memory_read`
+and `inbox_decide`:
+
+```json
+{ "source_id": "lms:post:77", "outcome": "remembered",
+  "reason": "the quiz date and the late-work rule",
+  "facts": [
+    { "summary": "Biology quiz on chapter 4",
+      "body": "Biology: the chapter 4 quiz is on 2026-09-25, per \"Quiz Friday\".",
+      "until": "2026-09-25" },
+    { "summary": "Biology late work policy",
+      "body": "Biology: late work loses 10% a day, per \"Quiz Friday\"." }]}
+```
+
+It answers `{"outcome", "reason", "memory_ids", "superseded"}`. The
+`source_id` must be the one the session was opened for; `remembered` takes 1
+to 10 facts and the other two outcomes take none; `reason` is 1–200
+characters, a fact's `summary` 1–120 and its `body` up to 2 KiB; `until` must
+be a `YYYY-MM-DD` date. Facts are written as `semantic`, embedded and indexed
+exactly as `memory_write` writes one.
+
+Every item the agent decides is recorded in a `memory_sources` row per fact
+(`user_id`, `source_id`, `memory_id`), which makes a re-send safe: before
+writing anything, the decision archives every fact that source produced before
+and reports how many in `superseded`. Editing an item upstream and sending it
+again therefore replaces what Note remembers from it rather than duplicating
+it, and a re-send that decides `nothing` or `task` clears it. The map is
+per-user, so two users importing the same item never see each other's facts.
+
+What the agent is told lives in `config/defaults/prompts/inbox.md`, editable
+per user over `GET/PUT/DELETE /api/prompts/inbox`.
 
 ## Web client
 
