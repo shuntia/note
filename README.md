@@ -143,6 +143,84 @@ by the nightly sweep and the delivery sweep without a model call or a log row,
 and switching one back on takes effect on the next sweep. Talk is never gated
 — an account the user is typing to answers whatever its category.
 
+## Tasks, deadlines and imported work
+
+A task is a title, a description, notes, a state (`open`, `in_progress`,
+`done`, `dropped`), an optional duration in whole 5-minute blocks, an optional
+place in Now, and up to one level of steps. Beside those, every task carries
+where it came from and when it is due:
+
+- `due_at` — when the work is due, RFC 3339 and stored in UTC like
+  `updated_at`, or `null`. It is a deadline, not a time to work: the day's plan
+  is where work is scheduled. A step never carries one of its own — the task it
+  belongs to holds it — and an attempt is a `422`.
+- `external_id` — the id whatever created the task knows it by
+  (`canvas:assignment:12345`), opaque to the server, at most 200 bytes, and
+  unique per user.
+- `url` — a link back to the origin, `""` when there is none.
+- `source` — `manual` (the user typed it), `agent` (a session made it), or
+  `import` (a script mirrored it). A cookie writes `manual` unless the body
+  names another; a bearer token writes `import` and can never write `manual`.
+
+`POST /api/tasks` takes `title` and any of `description`, `notes`,
+`duration_min`, `parent_id`, `is_now`, `state`, `due_at`, `url`, `external_id`
+and `source`; an unknown field is a `422` rather than a silent drop. `PATCH`
+takes the same fields, with explicit `null` clearing `due_at`, `duration_min`,
+`parent_id` and `external_id`. A `due_at` that is not an RFC 3339 instant is a
+`422`; an `external_id` another task already holds is a `409`. Both routes, and
+every listing, return `due_at`, `external_id`, `url` and `source` on the task
+and on each of its steps.
+
+### Importing from another system
+
+An importer that re-runs on a timer needs to find the task it made last time
+rather than making it again, so identity lives in the path:
+
+```sh
+curl -X PUT http://localhost:3271/api/tasks/by-external/canvas:assignment:12345 \
+  -H 'Authorization: Bearer note_…' -H 'Content-Type: application/json' \
+  -d '{"title":"Biology ch.4","due_at":"2026-09-19T23:59:00+09:00",
+       "url":"https://canvas.example/a/12","notes":"worksheet attached"}'
+```
+
+The body is a task without its `external_id`, which the path carries (a body
+that names a different one is a `422`). The reply is the task with its steps:
+
+- `201` when there was no such task and this call made it, with `source`
+  `import`.
+- `200` when it already existed. The importer owns the title, the notes, the
+  due date and the link, and those refresh; the description, the duration and
+  the steps belong to whoever briefed the task and are left alone. The state
+  belongs to the user: a `dropped` task stays dropped so the run cannot undo
+  the user's decision, a `done` one never reopens from outside, and `open` or
+  `in_progress` moves to `done` when the body says the work was handed in.
+- `410` when the user deleted the task. The body is
+  `{"error", "external_id", "deleted_at"}`; the task is not made again.
+
+`DELETE /api/tasks/by-external/{external_id}` deletes the same task (`204`, or
+`404` when there is none). Deleting a task that carries an `external_id` — by
+either route, or through the agent's `task_delete` — buries that id in
+`task_tombstones`, which is what the `410` above reports. A task with no
+`external_id` deletes exactly as before and leaves nothing behind.
+
+### Deadlines in a session
+
+`task_create` and `task_update` take `due_at` as an RFC 3339 instant or as a
+bare `YYYY-MM-DD`, which means the end of that day where the user lives; an
+empty string clears it. `task_list` filters on `due_before` and `due_after`
+(`YYYY-MM-DD`, read as the start of that local day) and on `overdue`, and
+`sort: "due"` puts the nearest deadline first with the undated tasks last —
+`sort: "added"`, newest first, stays the default. `task_list`, `task_search`
+and `task_read` all carry `due_at`, and `task_read` also shows `url`,
+`external_id` and `source`.
+
+In the injected context, each Now and Later line ends with `due today`, `due
+tomorrow`, `overdue`, or `due <local date>`; the Later list leads with the
+nearest deadline and falls back to newest-first for what carries none; and a
+`Due soon: n in the next 3 days, m overdue` line sits under the list whenever
+there is anything to count. A briefing session is handed the deadline as a
+`Due: <local date and time>` line of the task it is given.
+
 ## Memory & agent tools
 
 Per-user long-term memory lives under `data/memory/<user>/{semantic,episodic,procedural,archive}/` —
@@ -184,7 +262,9 @@ the database on each call: the real-time line (weekday, local time, timezone and
 UTC offset, the UTC instant, the part of day), where the day stands against its
 first and last planned event and the nightly run, today's plan with the current
 and next event marked and its statuses counted, the Now tasks with their steps
-and the Later list capped at ten titles, how much was finished today, the
+and the Later list capped at ten titles — every line carrying its deadline, the
+list led by the nearest one — how much is due inside three days, how much was
+finished today, the
 latest debrief in excerpt, whether tomorrow is planned already, the settings
 that shape advice with a count of the user's live memory facts, and the last
 ten user-meaningful `event_log` rows — operational ones (deliveries, agent
@@ -209,10 +289,10 @@ task or a single step with its steps and event links exactly as
 (see "Briefing an imported task"), and `inbox_decide` the inbox session's
 (see "Reading an inbox item"). Memory: `memory_query`, `memory_read`,
 (see "Briefing an imported task"). Surveying the list: `task_list` (filtered by
-state, keyword, age or Now, newest first, with step counts), `task_search`
-(every word of a query against the titles, then the rest of the text),
-`task_read` (one task in full, as `GET /api/tasks` renders it, plus when it was
-added) and — talk and nightly only — `task_bulk_update`, which sets a state,
+state, keyword, age, deadline or Now, newest first or by due date, with step
+counts), `task_search` (every word of a query against the titles, then the rest
+of the text), `task_read` (one task in full, as `GET /api/tasks` renders it,
+plus when it was added) and — talk and nightly only — `task_bulk_update`, which sets a state,
 moves Now or deletes across a batch of up to 50 tasks, all or nothing.
 `plan_tasks` lays up to 10 tasks out as consecutive silent blocks on a day's
 plan, each as long as its own duration, refusing rather than reshuffling when
@@ -566,12 +646,14 @@ reach the task routes only; every other route still needs the session cookie.
   `DELETE /api/tokens/{id}` revokes. Names are 1 to 64 characters (`422`),
   and a user holds at most 20 tokens (`409`).
 - Send it as `Authorization: Bearer note_…` on `GET/POST /api/tasks`,
-  `PATCH/DELETE /api/tasks/{id}`, `POST /api/tasks/{id}/split`, and
-  `POST /api/tasks/{id}/flatten`. A bearer header that does not resolve is
+  `PATCH/DELETE /api/tasks/{id}`, `PUT/DELETE /api/tasks/by-external/{external_id}`,
+  `POST /api/tasks/{id}/split`, and `POST /api/tasks/{id}/flatten`. A bearer header that does not resolve is
   `401` even when a session cookie is also present. Disabling the user stops
   their tokens.
 - `DELETE /api/tasks/{id}` removes the task, its steps, and their event links
-  (`204`, or `404` when the task is not the caller's).
+  (`204`, or `404` when the task is not the caller's); a task with an
+  `external_id` leaves a tombstone behind (see "Importing from another
+  system").
 - Minting and revoking log `token_created` / `token_revoked` to `event_log`.
 
 ### Briefing an imported task
