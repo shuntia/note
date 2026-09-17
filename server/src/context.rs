@@ -150,7 +150,7 @@ pub fn assemble(conn: &Connection, config_dir: &Path, user_id: i64, username: &s
         conn,
         user_id,
         today.to_zoned(tz.clone())?.timestamp(),
-        tomorrow.to_zoned(tz)?.timestamp(),
+        tomorrow.to_zoned(tz.clone())?.timestamp(),
     )?;
     let category = crate::auth::category(conn, username)?
         .unwrap_or_else(|| crate::config::CATEGORY_MEMBER.into());
@@ -167,7 +167,7 @@ pub fn assemble(conn: &Connection, config_dir: &Path, user_id: i64, username: &s
         s.push_str(&tasks_section(&now_tasks, &later, done_today, caps.later));
         s.push_str(&debrief_section(debrief.as_ref(), today, caps.debrief));
         s.push_str(&settings_s);
-        s.push_str(&activity_section(&activity, caps.activity));
+        s.push_str(&activity_section(&activity, &tz, caps.activity));
         s
     };
 
@@ -414,7 +414,11 @@ fn settings_section(
     )
 }
 
-fn activity_section(rows: &[(String, String, String)], cap: usize) -> String {
+fn activity_section(
+    rows: &[(String, String, String)],
+    tz: &jiff::tz::TimeZone,
+    cap: usize,
+) -> String {
     let mut s = String::from("# Recent activity\n\n");
     if cap == 0 {
         s.push_str("(trimmed for size)\n");
@@ -424,7 +428,11 @@ fn activity_section(rows: &[(String, String, String)], cap: usize) -> String {
         s.push_str("(none)\n");
     }
     for (ts, kind, detail) in rows.iter().take(cap) {
-        s.push_str(&format!("- {ts} {kind}: {detail}\n"));
+        let when = ts
+            .parse::<jiff::Timestamp>()
+            .map(|t| t.to_zoned(tz.clone()).strftime("%Y-%m-%d %H:%M").to_string())
+            .unwrap_or_else(|_| ts.clone());
+        s.push_str(&format!("- {when} {kind}: {detail}\n"));
     }
     s
 }
@@ -797,6 +805,12 @@ mod tests {
         for kind in ["event_fired", "talk_error", "nightly_fallback"] {
             crate::log::record(&conn, Some(uid), kind, "x").unwrap();
         }
+        conn.execute(
+            "INSERT INTO event_log (ts, user_id, kind, detail)
+             VALUES ('2026-08-31T11:30:00Z', ?1, 'event_fired', 'event 3')",
+            [uid],
+        )
+        .unwrap();
         let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
         let tail = &out[out.find("# Recent activity").unwrap()..];
         for kind in
@@ -807,6 +821,7 @@ mod tests {
         for kind in ["event_fired", "talk_error", "nightly_fallback"] {
             assert!(tail.contains(kind), "{kind} should be kept\n{tail}");
         }
+        assert!(tail.contains("- 2026-08-31 20:30 event_fired: event 3"), "{tail}");
     }
 
     #[test]
