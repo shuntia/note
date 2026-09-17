@@ -20,6 +20,13 @@ type Tab = 'today' | 'tasks' | 'chat' | 'memory' | 'settings' | 'admin'
 const DRAFT_KEY = 'note.captureDraft'
 const CAPTURE_PLACEHOLDER = 'Jot anything'
 
+// The deep link a push notification or an ntfy click carries; the id of the thread it names.
+function conversationOf(url: string): number | null {
+  const hash = url.startsWith('#') ? url : new URL(url, location.href).hash
+  const match = /^#\/chat\/(\d+)$/.exec(hash)
+  return match ? Number(match[1]) : null
+}
+
 // No API removes a task, so the create waits out the undo window before it is sent.
 const captureHold = makeHold<string>()
 
@@ -54,6 +61,8 @@ export function App() {
   const [toast, setToast] = useState<{ msg: string; action?: ToastAction } | null>(null)
   const [refresh, setRefresh] = useState(0)
   const [talkPrefill, setTalkPrefill] = useState<string | null>(null)
+  // A thread to land on, with a nonce so the same thread can be asked for twice.
+  const [talkOpen, setTalkOpen] = useState<{ id: number; at: number } | null>(null)
   // Reading storage at mount is what makes the session face survive a reload.
   const [session, setSession] = useState<FocusSession | null>(readSession)
   const [chromeHidden, setChromeHidden] = useState(false)
@@ -75,6 +84,38 @@ export function App() {
     setTalkPrefill(draft)
     setTab('chat')
   }, [])
+
+  const openConversation = useCallback((id: number) => {
+    setTalkOpen({ id, at: Date.now() })
+    setTab('chat')
+  }, [])
+
+  // `#/chat/<id>` in the address bar, at load or from a notification, and the
+  // same route handed over by the service worker when a tab is already open.
+  useEffect(() => {
+    if (!me) return
+    const fromHash = () => {
+      const id = conversationOf(location.hash)
+      if (id === null) return
+      history.replaceState(null, '', location.pathname + location.search)
+      openConversation(id)
+    }
+    const fromWorker = (e: MessageEvent) => {
+      const data: unknown = e.data
+      if (typeof data !== 'object' || data === null) return
+      const { type, url } = data as { type?: unknown; url?: unknown }
+      if (type !== 'open' || typeof url !== 'string') return
+      const id = conversationOf(url)
+      if (id !== null) openConversation(id)
+    }
+    fromHash()
+    window.addEventListener('hashchange', fromHash)
+    navigator.serviceWorker?.addEventListener('message', fromWorker)
+    return () => {
+      window.removeEventListener('hashchange', fromHash)
+      navigator.serviceWorker?.removeEventListener('message', fromWorker)
+    }
+  }, [me, openConversation])
 
   // A session takes the screen from wherever it was started, so Today comes with it.
   const changeSession = useCallback((next: FocusSession | null) => {
@@ -105,10 +146,12 @@ export function App() {
   useEffect(() => {
     if (!me) return
     return connectEvents((ev) => {
-      notify(ev.body ? `${ev.title} — ${ev.body}` : ev.title)
+      // A check-in's question is waiting in its thread, so the thread is the notice.
+      if (ev.conversation_id !== null) openConversation(ev.conversation_id)
+      else notify(ev.body ? `${ev.title} — ${ev.body}` : ev.title)
       onChanged()
     })
-  }, [me, notify, onChanged])
+  }, [me, notify, onChanged, openConversation])
 
   if (me === undefined) return null
   if (me === null) return <Login onSignedIn={setMe} />
@@ -181,7 +224,14 @@ export function App() {
         {tab === 'today' && !showHome && <Today {...views} />}
         {tab === 'tasks' && <Tasks {...views} />}
         {tab === 'chat' && (
-          <Talk {...views} prefill={talkPrefill} onPrefilled={() => setTalkPrefill(null)} />
+          <Talk
+            {...views}
+            prefill={talkPrefill}
+            onPrefilled={() => setTalkPrefill(null)}
+            open={talkOpen}
+            session={session}
+            goHome={() => setTab('today')}
+          />
         )}
         {tab === 'memory' && <Memory {...views} />}
         {tab === 'settings' && (

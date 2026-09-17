@@ -1,21 +1,27 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type FormEvent,
   type KeyboardEvent,
   type ReactNode,
 } from 'react'
+import gsap from 'gsap'
 import { api, ApiError } from '../api'
 import type { ViewProps } from '../app'
 import { Markdown } from '../markdown'
+import { reducedMotion } from '../motion'
 import { Overflow } from '../overflow'
+import { Pulse } from '../pulse'
 import { doing, receipt } from '../receipts'
 import { makeHold } from '../held'
+import type { FocusSession } from '../session'
 import { forgetConversation, lastConversation, rememberConversation } from '../tellnote'
 import { onAgentFrame, type AgentFrame } from '../ws'
 import type { Conversation, TalkMessage, TalkStep } from '../types'
+import '../styles/talk.css'
 
 type Item =
   | { kind: 'user'; key: string; text: string }
@@ -67,6 +73,9 @@ function applyFrame(prev: Live, frame: AgentFrame): Live {
 type Load = 'loading' | 'ready' | 'error'
 
 const UNDO_MS = 10_000
+
+const SETTLE_S = 0.3
+const SETTLE_EASE = 'expo.out'
 
 // Deleting a conversation has no server-side reversal, so the request waits out the
 // undo window before it is sent.
@@ -246,10 +255,13 @@ function grouped(items: Item[]): Shown[] {
   return out
 }
 
+// A reply that arrived in this sitting eases in; a loaded transcript is already there.
+const fresh = (key: string) => key.startsWith('local-')
+
 function assistantTurn(item: AssistantItem): ReactNode {
   const label = thoughtLabel(item)
   return (
-    <div key={item.key} className="reply">
+    <div key={item.key} className={`reply${fresh(item.key) ? ' fresh' : ''}`}>
       {label && <Trace label={label} reasoning={item.reasoning} steps={item.steps} />}
       <div className="turn assistant">
         <Markdown text={item.text} />
@@ -261,7 +273,7 @@ function assistantTurn(item: AssistantItem): ReactNode {
 function turn(item: TurnItem): ReactNode {
   if (item.kind === 'user')
     return (
-      <div key={item.key} className="turn user">
+      <div key={item.key} className="turn user" data-key={item.key}>
         {item.text}
       </div>
     )
@@ -276,9 +288,22 @@ function turn(item: TurnItem): ReactNode {
 export function Talk({
   notify,
   onChanged,
+  refresh,
   prefill,
   onPrefilled,
-}: ViewProps & { prefill?: string | null; onPrefilled?: () => void }) {
+  open,
+  onOpened,
+  session = null,
+  goHome,
+}: ViewProps & {
+  prefill?: string | null
+  onPrefilled?: () => void
+  // A thread to land on, from a check-in or a deep link; `at` tells one ask from the next.
+  open?: { id: number; at: number } | null
+  onOpened?: () => void
+  session?: FocusSession | null
+  goHome?: () => void
+}) {
   const [conversations, setConversations] = useState<Conversation[]>([])
   const [listState, setListState] = useState<Load>('loading')
   const [current, setCurrent] = useState<number | null>(null)
@@ -296,6 +321,8 @@ export function Talk({
   const pane = useRef<HTMLDivElement>(null)
   const input = useRef<HTMLTextAreaElement>(null)
   const stick = useRef(true)
+  // a freshly loaded transcript opens at its end at once; everything after eases there
+  const jump = useRef(false)
   const wanted = useRef<number | null>(null)
   // bumped whenever the open conversation changes, so a late reply never lands in the wrong pane
   const era = useRef(0)
@@ -319,6 +346,7 @@ export function Talk({
     try {
       const rows = await api.conversationMessages(id)
       if (wanted.current !== id) return
+      jump.current = true
       setItems(rows.map(fromMessage))
       setMsgState('ready')
     } catch {
@@ -343,12 +371,26 @@ export function Talk({
     [],
   )
 
-  useEffect(() => {
+  const scrollToEnd = useCallback((instant: boolean) => {
     const el = pane.current
-    if (el && stick.current) el.scrollTop = el.scrollHeight
-  }, [items, busy, live, msgState])
+    if (!el) return
+    const end = el.scrollHeight - el.clientHeight
+    if (instant || reducedMotion()) {
+      gsap.killTweensOf(el)
+      el.scrollTop = end
+      return
+    }
+    gsap.to(el, { scrollTop: end, duration: SETTLE_S, ease: SETTLE_EASE, overwrite: true })
+  }, [])
 
   useEffect(() => {
+    if (!stick.current) return
+    const instant = jump.current
+    jump.current = false
+    scrollToEnd(instant)
+  }, [items, busy, live, msgState, scrollToEnd])
+
+  const fitComposer = useCallback(() => {
     const el = input.current
     if (!el) return
     el.style.height = 'auto'
@@ -362,17 +404,24 @@ export function Talk({
     const max = line * 8 + frame
     el.style.height = `${Math.min(el.scrollHeight, max)}px`
     el.style.overflowY = el.scrollHeight > max ? 'auto' : 'hidden'
-  }, [draft])
+  }, [])
+
+  useLayoutEffect(() => {
+    fitComposer()
+  }, [draft, fitComposer])
+
+  const focusInput = () => {
+    const el = input.current
+    if (!el) return
+    el.focus()
+    el.setSelectionRange(el.value.length, el.value.length)
+  }
 
   // Talk mounts fresh on every view switch, so this arrives on a new conversation.
   useEffect(() => {
     if (!prefill) return
     setDraft(prefill)
-    const el = input.current
-    if (el) {
-      el.focus()
-      el.setSelectionRange(el.value.length, el.value.length)
-    }
+    focusInput()
     onPrefilled?.()
   }, [prefill, onPrefilled])
 
@@ -385,7 +434,7 @@ export function Talk({
     return () => window.removeEventListener('keydown', onKey)
   }, [sideOpen])
 
-  const open = (id: number) => {
+  const show = (id: number) => {
     setSideOpen(false)
     setSideNotice(null)
     if (id === current) return
@@ -396,6 +445,19 @@ export function Talk({
     rememberConversation(id)
     void loadMessages(id)
   }
+
+  // A thread asked for from outside lands with its newest message in view and
+  // the composer ready; asked for again while open, it reloads.
+  useEffect(() => {
+    if (!open) return
+    stick.current = true
+    if (open.id === current) void loadMessages(open.id)
+    else show(open.id)
+    void loadList(true)
+    focusInput()
+    onOpened?.()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open?.at])
 
   const startNew = () => {
     setSideOpen(false)
@@ -417,10 +479,12 @@ export function Talk({
     const sentIn = era.current
     stick.current = true
     inFlight.current = { conversation: current }
+
     setLive(EMPTY_LIVE)
     setPending(sentIn)
     setDraft('')
     setItems((prev) => [...prev, mine])
+
     try {
       const reply = await api.talk(text, current ?? undefined)
       void loadList(true)
@@ -517,7 +581,7 @@ export function Talk({
       run: () => {
         if (!deleteHold.cancel(c.id)) return
         tick((n) => n + 1)
-        if (wasOpen) open(c.id)
+        if (wasOpen) show(c.id)
         else if (wasRemembered) rememberConversation(c.id)
       },
     })
@@ -529,11 +593,11 @@ export function Talk({
   useEffect(() => {
     if (opened.current || listState !== 'ready' || current !== null) return
     opened.current = true
-    if (prefill) return
+    if (prefill || open) return
     const pool = conversations.filter((c) => c.id !== deleteHold.held())
     const remembered = pool.find((c) => c.id === lastConversation())
     const recent = remembered ?? [...pool].sort((a, b) => b.updated_at.localeCompare(a.updated_at))[0]
-    if (recent) open(recent.id)
+    if (recent) show(recent.id)
   })
 
   const onScroll = () => {
@@ -587,7 +651,7 @@ export function Talk({
                 <button
                   className="chat-open"
                   aria-current={c.id === current}
-                  onClick={() => open(c.id)}
+                  onClick={() => show(c.id)}
                 >
                   {c.title}
                 </button>
@@ -610,6 +674,11 @@ export function Talk({
       </aside>
 
       <section className="chat-main">
+        {goHome && (
+          <div className="chat-head">
+            <Pulse session={session} refresh={refresh} onOpen={goHome} />
+          </div>
+        )}
         <div className="chat-pane" ref={pane} onScroll={onScroll}>
           <div className="chat-stream">
             {msgState === 'loading' && <p className="muted">Loading this chat…</p>}
@@ -654,7 +723,7 @@ export function Talk({
             >
               ⋯
             </button>
-            <form className="tellnote" onSubmit={onSubmit}>
+            <form className={`tellnote${draft.trim() ? ' armed' : ''}`} onSubmit={onSubmit}>
               <textarea
                 ref={input}
                 rows={1}
