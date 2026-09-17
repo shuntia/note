@@ -35,7 +35,8 @@ Leave the "Hand in:" and the "Requirements:" line out entirely otherwise. Never
 write "Hand in: none", "No submission", "be ready for a quiz", "Requirements:
 None stated", a restatement of the task, or anything else the text does not
 say, and never guess the platform. Never put a due date in Requirements or
-anywhere else in the description — the due date lives in the notes.
+anywhere else in the description — the due date is a field of the task, given
+to you as the `Due:` line of the user message.
 
 `duration_min` — focused minutes for a high-school student, rounded to 5. Leave
 it out when the work is impossible to judge.
