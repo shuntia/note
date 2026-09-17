@@ -2,7 +2,7 @@
 .view:has(> .tasks) { padding: 0; }
 .tasks { width: 100%; padding: 56px 24px 100px; max-width: 720px; margin: 0 auto; }
 @media (min-width: 768px) {
-  .tasks { margin: 0; max-width: min(840px, calc(100% - 144px)); padding: 46px 0 0 120px; }
+  .tasks { margin: 0; max-width: min(760px, calc(100% - 144px)); padding: 46px 0 0 120px; }
   .task-add { max-width: 520px; }
 }
 
@@ -19,7 +19,37 @@
 .task-item[data-leaving] { overflow: hidden; pointer-events: none; }
 .task-item[data-leaving='dropped'] .task-title { color: var(--rose); }
 
-.task-row { display: flex; align-items: center; gap: 12px; min-height: 52px; }
+/* the trailing controls hold one width per group, so every chip in it lands on
+   the same edge and the steps below count to that edge too */
+.task-group { --acts: 24px; }
+.task-group.now { --acts: 68px; }
+.task-group.done { --acts: 0px; }
+
+/* the title has the whole width it needs: the status sits under it until there
+   is room beside it */
+.task-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-areas: 'tick body acts' 'tick chips acts';
+  align-items: center;
+  column-gap: 12px;
+  row-gap: 2px;
+  min-height: 52px;
+}
+.task-row > .tick { grid-area: tick; }
+.task-body { grid-area: body; }
+.task-chips { grid-area: chips; justify-self: start; }
+.task-acts { grid-area: acts; }
+@media (min-width: 768px) {
+  .task-row {
+    grid-template-columns: auto minmax(0, 1fr) auto auto;
+    grid-template-areas: 'tick body chips acts';
+  }
+  .task-chips { justify-self: end; }
+}
+.task-chips { display: flex; align-items: center; gap: 10px; }
+.task-chips:empty { display: none; }
+.task-acts { display: flex; align-items: center; justify-content: flex-end; gap: 8px; width: var(--acts); }
 .task-group.later .task-row { color: var(--quiet); }
 .task-group.done .task-row { color: var(--faint); }
 
@@ -112,7 +142,7 @@
 .task-item:focus-within .task-more,
 .task-more[data-open='true'] { opacity: 1; }
 
-.task-steps { list-style: none; margin: 0; padding: 0 0 0 36px; }
+.task-steps { list-style: none; margin: 0; padding: 0 calc(var(--acts) + 12px) 0 36px; }
 .task-step { display: flex; align-items: center; gap: 12px; min-height: 40px; color: var(--quiet); font-size: 0.92rem; }
 .task-step .tick { width: 20px; height: 20px; border-color: var(--line); }
 .task-step .tick svg { width: 12px; height: 12px; }

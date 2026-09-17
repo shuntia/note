@@ -358,7 +358,9 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
   right: 0;
   z-index: 5;
   min-width: 12rem;
-  background: var(--haze-strong);
+  /* the haze over solid ground: a menu never shows the row it covers */
+  background-color: var(--earth);
+  background-image: linear-gradient(var(--haze-strong), var(--haze-strong));
   border: 0;
   border-radius: 16px;
   padding: 0.35rem;
