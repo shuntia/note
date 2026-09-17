@@ -3,6 +3,10 @@ use rusqlite::Connection;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
+/// The whole standing document is prepended to every system prompt, so its
+/// size is a per-call cost on every session, not just a disk figure.
+pub const MAX_STANDING_BYTES: usize = 64 * 1024;
+
 #[derive(Debug, Error)]
 pub enum EditError {
     #[error("standing.md does not exist yet; use append")]
@@ -11,6 +15,8 @@ pub enum EditError {
     NoMatch,
     #[error("find text matches {0} places in standing.md; it must match exactly one")]
     Ambiguous(usize),
+    #[error("standing.md may hold at most {MAX_STANDING_BYTES} bytes; replace or trim what is there instead of adding to it")]
+    TooLarge,
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
@@ -42,7 +48,11 @@ pub fn edit_replace(config_dir: &Path, user: &str, find: &str, replace: &str) ->
     match text.matches(find).count() {
         0 => Err(EditError::NoMatch),
         1 => {
-            write_atomic(&path, &text.replacen(find, replace, 1))?;
+            let next = text.replacen(find, replace, 1);
+            if next.len() > MAX_STANDING_BYTES {
+                return Err(EditError::TooLarge);
+            }
+            write_atomic(&path, &next)?;
             Ok(())
         }
         n => Err(EditError::Ambiguous(n)),
@@ -62,6 +72,9 @@ pub fn edit_append(config_dir: &Path, user: &str, text: &str) -> Result<(), Edit
     }
     cur.push_str(text);
     cur.push('\n');
+    if cur.len() > MAX_STANDING_BYTES {
+        return Err(EditError::TooLarge);
+    }
     write_atomic(&path, &cur)?;
     Ok(())
 }
@@ -135,6 +148,30 @@ mod tests {
         write("defaults/user.toml",
             "display_name = \"X\"\ntimezone = \"Asia/Tokyo\"\ntemplate = \"default\"\n");
         tmp
+    }
+
+    #[test]
+    fn the_standing_document_has_a_ceiling() {
+        let tmp = cfg_dir();
+        let path = standing_path(tmp.path(), "aki");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let filled = "x".repeat(MAX_STANDING_BYTES - 16);
+        std::fs::write(&path, &filled).unwrap();
+
+        assert!(matches!(
+            edit_append(tmp.path(), "aki", &"y".repeat(32)),
+            Err(EditError::TooLarge)
+        ));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), filled);
+
+        assert!(matches!(
+            edit_replace(tmp.path(), "aki", &filled, &"y".repeat(MAX_STANDING_BYTES + 1)),
+            Err(EditError::TooLarge)
+        ));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), filled);
+
+        edit_append(tmp.path(), "aki", "short").unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().ends_with("short\n"));
     }
 
     #[test]
