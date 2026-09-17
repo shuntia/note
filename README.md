@@ -490,8 +490,14 @@ ladder.
 receives one JSON frame per delivery:
 
 ```json
-{ "type": "event", "title": "Check-in", "body": "checkin at 09:00", "urgency": "high", "event_id": 7 }
+{ "type": "event", "title": "Check-in", "body": "checkin at 09:00", "urgency": "high", "event_id": 7,
+  "conversation_id": 12 }
 ```
+
+`conversation_id` is the thread a check-in opened (see below) and null on
+every other event. The web client switches to that conversation when the frame
+arrives; a push notification or an ntfy click carries the same thread as the
+deep link `/#/chat/<id>`.
 
 A talk session in flight pushes its progress to the same sockets, so the client
 can show what the agent is doing while it works:
@@ -516,6 +522,19 @@ channels below it.
 An upgrade whose `Sec-Fetch-Site` says a foreign site started it is refused
 (`403`), and an account holds at most 8 sockets at once — a ninth is a `429`
 before the upgrade.
+
+### Check-ins are conversations
+
+A check-in's question (the event's own `message`, or the rendered "Time for
+your 09:00 check-in" line) is written to a conversation before any channel
+carries it, as an assistant message. One thread per plan date: the first
+check-in of a day creates it, titled from the question (`checkin_date` on the
+row marks it), and every later check-in of the same date appends to it; the
+next day starts a fresh one. The thread exists even when no channel could
+deliver. Replying goes through `POST /api/talk` with that `conversation_id`;
+the session runs on the normal talk surface with the thread's history and a
+`# This conversation` note in its system prompt saying the opening assistant
+turns were scheduled check-ins.
 
 ### Web Push
 
@@ -562,8 +581,10 @@ Subscription routes — all cookie-authenticated, the public-key route included:
 - `POST /api/push/unsubscribe {endpoint}` — `404` if the endpoint is not one of
   the caller's.
 
-Payloads are encrypted (`aes128gcm`) and VAPID-signed. Endpoints the push
-service reports gone (404/410) are pruned automatically.
+Payloads are encrypted (`aes128gcm`) and VAPID-signed; the plaintext is
+`{"title", "body"}` plus `conversation_id` and `url` (`/#/chat/<id>`) when the
+event opened a thread, which the service worker opens on click. Endpoints the
+push service reports gone (404/410) are pruned automatically.
 
 ### ntfy
 
@@ -591,7 +612,8 @@ Subscribing to the topic in an ntfy client is all a device needs.
 
 A delivery is a `POST {base_url}` carrying ntfy's JSON publish form: `topic`,
 `title`, `message`, `tags: ["bell"]`, `click` (the instance's
-`public_base_url`) and `priority` — 2 for a low-urgency message, 3 for normal,
+`public_base_url`, with `/#/chat/<id>` appended for a check-in) and
+`priority` — 2 for a low-urgency message, 3 for normal,
 5 for a check-in — plus `Authorization: Bearer` when a token is configured. The
 JSON form rather than the header form because a title carries the event's own
 words and an HTTP header value cannot hold them. Anything but a 2xx, and any
