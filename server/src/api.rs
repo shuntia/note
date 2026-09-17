@@ -753,7 +753,14 @@ async fn talk(
             }
             None => Vec::new(),
         };
-        let out = crate::agent::run_session(
+        // A brand-new conversation has no id yet, so its frames carry null
+        // until the reply hands the client one.
+        let seq = std::cell::Cell::new(0u64);
+        let on_event = |ev: crate::agent::AgentEvent| {
+            let n = seq.replace(seq.get() + 1);
+            state.hub.send(uid, &crate::channels::ws::agent_frame(req_conversation, n, &ev));
+        };
+        let out = crate::agent::run_session_watched(
             &deps,
             user.id,
             &user.username,
@@ -761,6 +768,7 @@ async fn talk(
             now,
             &history,
             &message,
+            &on_event,
         )?;
         let reply = if out.reply.trim().is_empty() {
             crate::EMPTY_REPLY_FALLBACK.to_string()
@@ -778,11 +786,11 @@ async fn talk(
         }
         crate::talk::append_text(&conn, conv_id, "assistant", &reply, now)?;
         crate::talk::touch(&conn, conv_id, now)?;
-        Ok::<_, anyhow::Error>((conv_id, reply, out.steps))
+        Ok::<_, anyhow::Error>((conv_id, reply, out.steps, out.reasoning))
     })
     .await;
     match result {
-        Ok(Ok((conv_id, reply, steps))) => {
+        Ok(Ok((conv_id, reply, steps, reasoning))) => {
             let steps: Vec<_> = steps
                 .iter()
                 .map(|s| {
@@ -798,6 +806,7 @@ async fn talk(
                 "conversation_id": conv_id,
                 "reply": reply,
                 "steps": steps,
+                "reasoning": reasoning,
             }))
             .into_response()
         }

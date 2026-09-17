@@ -1,4 +1,5 @@
 use super::{Channel, OutboundMessage};
+use crate::agent::AgentEvent;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -66,6 +67,49 @@ impl ClientHub {
         }
         n
     }
+}
+
+/// Cap on one agent frame's variable text, so a large tool payload cannot
+/// flood a socket; what is left ends in an ellipsis.
+pub const MAX_FRAME_TEXT: usize = 4 * 1024;
+
+fn clip(text: &str) -> String {
+    if text.len() <= MAX_FRAME_TEXT {
+        return text.to_string();
+    }
+    let mut end = MAX_FRAME_TEXT;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &text[..end])
+}
+
+/// One session event as the client reads it. `seq` counts from zero within a
+/// session, so a client can order and dedupe frames from parallel sessions.
+pub fn agent_frame(conversation_id: Option<i64>, seq: u64, event: &AgentEvent) -> String {
+    let event = match *event {
+        AgentEvent::Thinking { text } => {
+            serde_json::json!({"kind": "thinking", "text": clip(text)})
+        }
+        AgentEvent::ToolCall { index, name, args } => {
+            serde_json::json!({"kind": "tool_call", "index": index, "name": name, "args": clip(args)})
+        }
+        AgentEvent::ToolResult { index, name, result, is_error } => serde_json::json!({
+            "kind": "tool_result", "index": index, "name": name,
+            "result": clip(result), "is_error": is_error,
+        }),
+        AgentEvent::Reply { text } => serde_json::json!({"kind": "reply", "text": clip(text)}),
+        AgentEvent::Error { message } => {
+            serde_json::json!({"kind": "error", "message": clip(message)})
+        }
+    };
+    serde_json::json!({
+        "type": "agent",
+        "conversation_id": conversation_id,
+        "seq": seq,
+        "event": event,
+    })
+    .to_string()
 }
 
 pub struct WsChannel {
@@ -160,6 +204,50 @@ mod tests {
         drop(rx1);
         drop(rx2);
         assert_eq!(hub.send(1, "x"), 0);
+    }
+
+    #[test]
+    fn agent_frames_reach_the_users_socket_in_sequence() {
+        let hub = ClientHub::new();
+        let (_id, mut rx) = hub.register(1).unwrap();
+        let (_other, mut theirs) = hub.register(2).unwrap();
+        let events = [
+            AgentEvent::Thinking { text: "a task, then" },
+            AgentEvent::ToolCall { index: 0, name: "task_create", args: "{\"title\":\"milk\"}" },
+            AgentEvent::ToolResult { index: 0, name: "task_create", result: "{}", is_error: false },
+            AgentEvent::Reply { text: "added it" },
+        ];
+        for (seq, ev) in events.iter().enumerate() {
+            hub.send(1, &agent_frame(Some(7), seq as u64, ev));
+        }
+        let frames: Vec<serde_json::Value> = (0..4)
+            .map(|_| serde_json::from_str(&rx.try_recv().unwrap()).unwrap())
+            .collect();
+        assert!(frames.iter().all(|f| f["type"] == "agent" && f["conversation_id"] == 7));
+        assert_eq!(
+            frames.iter().map(|f| f["seq"].as_u64().unwrap()).collect::<Vec<_>>(),
+            vec![0, 1, 2, 3]
+        );
+        assert_eq!(frames[0]["event"]["kind"], "thinking");
+        assert_eq!(frames[1]["event"]["args"], "{\"title\":\"milk\"}");
+        assert_eq!(frames[2]["event"]["is_error"], false);
+        assert_eq!(frames[3]["event"]["text"], "added it");
+        assert!(theirs.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_new_conversation_frame_carries_a_null_id_and_clips_long_text() {
+        let long = "x".repeat(MAX_FRAME_TEXT * 2);
+        let frame: serde_json::Value = serde_json::from_str(&agent_frame(
+            None,
+            0,
+            &AgentEvent::ToolResult { index: 1, name: "memory_query", result: &long, is_error: true },
+        ))
+        .unwrap();
+        assert!(frame["conversation_id"].is_null());
+        let result = frame["event"]["result"].as_str().unwrap();
+        assert_eq!(result.len(), MAX_FRAME_TEXT + "…".len());
+        assert!(result.ends_with('…'));
     }
 
     #[test]
