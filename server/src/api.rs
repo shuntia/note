@@ -49,6 +49,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/push/subscribe", post(push_subscribe))
         .route("/api/push/unsubscribe", post(push_unsubscribe))
         .route("/api/push/vapid_public_key", get(vapid_public_key))
+        .merge(calendar_router())
         .nest("/api/security", crate::security::routes())
         .nest("/api/admin", crate::admin::routes())
         .with_state(state)
@@ -1338,6 +1339,9 @@ async fn memory_read(
 #[derive(Deserialize)]
 struct PlanQuery {
     date: Option<String>,
+    /// Adds the day's calendar occurrences beside the events, so a client can
+    /// draw both from one call.
+    calendar: Option<String>,
 }
 
 /// Generates the plan for `date` (default: today in the user's configured
@@ -1369,10 +1373,24 @@ async fn plan_today(
     if crate::plan::generate(&conn, user.id, &tmpl, date).is_err() {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
-    match crate::plan::events_for(&conn, user.id, date) {
-        Ok(evs) => Json(evs).into_response(),
+    let Ok(evs) = crate::plan::events_for(&conn, user.id, date) else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    if !truthy(q.calendar.as_deref()) {
+        return Json(evs).into_response();
+    }
+    match crate::calendar::occurrences(&conn, user.id, date) {
+        Ok(occurrences) => {
+            Json(serde_json::json!({ "events": evs, "calendar": occurrences })).into_response()
+        }
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
+}
+
+/// A query flag a client sets by presence: `?calendar`, `?calendar=1` and
+/// `?calendar=true` all mean yes, an explicit `0` or `false` means no.
+fn truthy(value: Option<&str>) -> bool {
+    matches!(value, Some("" | "1" | "true" | "yes"))
 }
 
 #[derive(Deserialize)]
@@ -1720,3 +1738,163 @@ async fn ws_pump(
     hub.unregister(user_id, conn_id);
 }
 
+
+fn calendar_router() -> Router<AppState> {
+    Router::new()
+        .route("/api/calendar", get(calendar_list).post(calendar_create))
+        .route("/api/calendar/{id}", patch(calendar_update).delete(calendar_delete))
+        .route("/api/calendar/{id}/skip", post(calendar_skip))
+        .route("/api/calendar/{id}/skip/{date}", axum::routing::delete(calendar_unskip))
+        .route("/api/calendar/day/{date}", get(calendar_day))
+}
+
+fn calendar_error(status: StatusCode, message: &str) -> axum::response::Response {
+    (status, Json(serde_json::json!({ "error": message }))).into_response()
+}
+
+fn calendar_failed(e: crate::calendar::CalendarError) -> axum::response::Response {
+    use crate::calendar::CalendarError as E;
+    match e {
+        E::Invalid(m) => calendar_error(StatusCode::UNPROCESSABLE_ENTITY, &m),
+        e @ E::TooMany => calendar_error(StatusCode::CONFLICT, &e.to_string()),
+        e @ E::NotFound(_) => calendar_error(StatusCode::NOT_FOUND, &e.to_string()),
+        E::Db(_) => calendar_error(StatusCode::INTERNAL_SERVER_ERROR, "database error"),
+    }
+}
+
+/// Unknown fields and wrong types are the caller's mistake to fix, so they read
+/// as validation failures rather than as broken syntax.
+fn calendar_body<T: serde::de::DeserializeOwned>(
+    body: &axum::body::Bytes,
+) -> Result<T, axum::response::Response> {
+    serde_json::from_slice(body).map_err(|e| match e.classify() {
+        serde_json::error::Category::Data => {
+            calendar_error(StatusCode::UNPROCESSABLE_ENTITY, &e.to_string())
+        }
+        _ => calendar_error(StatusCode::BAD_REQUEST, "malformed JSON body"),
+    })
+}
+
+async fn calendar_list(user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
+    let conn = state.db();
+    match crate::calendar::list(&conn, user.id) {
+        Ok(entries) => Json(serde_json::json!({ "entries": entries })).into_response(),
+        Err(_) => calendar_error(StatusCode::INTERNAL_SERVER_ERROR, "database error"),
+    }
+}
+
+async fn calendar_create(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    let fields = match calendar_body::<crate::calendar::Fields>(&body) {
+        Ok(f) => f,
+        Err(res) => return res,
+    };
+    let conn = state.db();
+    match crate::calendar::create(&conn, user.id, fields) {
+        Ok(entry) => (StatusCode::CREATED, Json(entry)).into_response(),
+        Err(e) => calendar_failed(e),
+    }
+}
+
+async fn calendar_update(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    let patch = match calendar_body::<crate::calendar::Patch>(&body) {
+        Ok(p) => p,
+        Err(res) => return res,
+    };
+    let conn = state.db();
+    match crate::calendar::update(&conn, user.id, id, patch) {
+        Ok(entry) => Json(entry).into_response(),
+        Err(e) => calendar_failed(e),
+    }
+}
+
+async fn calendar_delete(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    let conn = state.db();
+    match crate::calendar::delete(&conn, user.id, id) {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => calendar_error(StatusCode::NOT_FOUND, "no such calendar entry"),
+        Err(_) => calendar_error(StatusCode::INTERNAL_SERVER_ERROR, "database error"),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SkipReq {
+    date: String,
+}
+
+async fn calendar_skip(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    let req = match calendar_body::<SkipReq>(&body) {
+        Ok(r) => r,
+        Err(res) => return res,
+    };
+    let conn = state.db();
+    match crate::calendar::skip(&conn, user.id, id, &req.date) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => calendar_failed(e),
+    }
+}
+
+async fn calendar_unskip(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Path((id, date)): Path<(i64, String)>,
+) -> impl IntoResponse {
+    let conn = state.db();
+    match crate::calendar::unskip(&conn, user.id, id, &date) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => calendar_failed(e),
+    }
+}
+
+/// One local day of the calendar. `quiet_now` answers only for today, where
+/// "now" means anything at all.
+async fn calendar_day(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Path(date): Path<String>,
+) -> impl IntoResponse {
+    let Ok(date) = date.parse::<jiff::civil::Date>() else {
+        return calendar_error(StatusCode::BAD_REQUEST, "date must be YYYY-MM-DD");
+    };
+    let Ok(ucfg) = crate::config::UserConfig::load(&state.config_dir, &user.username) else {
+        return calendar_error(StatusCode::INTERNAL_SERVER_ERROR, "unreadable user config");
+    };
+    let tz = jiff::tz::TimeZone::get(&ucfg.timezone).unwrap_or(jiff::tz::TimeZone::UTC);
+    let now = jiff::Timestamp::now();
+    let conn = state.db();
+    let Ok(occurrences) = crate::calendar::occurrences(&conn, user.id, date) else {
+        return calendar_error(StatusCode::INTERNAL_SERVER_ERROR, "database error");
+    };
+    let quiet_now = if now.to_zoned(tz.clone()).date() == date {
+        match crate::calendar::quiet_window(&conn, user.id, &tz, now) {
+            Ok(w) => w.map(|w| w.end),
+            Err(_) => return calendar_error(StatusCode::INTERNAL_SERVER_ERROR, "database error"),
+        }
+    } else {
+        None
+    };
+    Json(serde_json::json!({
+        "date": date.to_string(),
+        "occurrences": occurrences,
+        "quiet_now": quiet_now,
+    }))
+    .into_response()
+}
