@@ -7,6 +7,10 @@ use thiserror::Error;
 /// size is a per-call cost on every session, not just a disk figure.
 pub const MAX_STANDING_BYTES: usize = 64 * 1024;
 
+/// Everything after the standing document is rebuilt on every call, so it is a
+/// per-turn token cost rather than a per-edit one.
+pub const MAX_DYNAMIC_BYTES: usize = 6 * 1024;
+
 #[derive(Debug, Error)]
 pub enum EditError {
     #[error("standing.md does not exist yet; use append")]
@@ -138,16 +142,83 @@ pub fn assemble(conn: &Connection, config_dir: &Path, user_id: i64, username: &s
 mod tests {
     use super::*;
 
-    fn cfg_dir() -> tempfile::TempDir {
+    /// Monday; 21:00 in Asia/Tokyo, 08:00 in America/New_York.
+    const NOW: &str = "2026-08-31T12:00:00Z";
+
+    fn now_ts() -> jiff::Timestamp {
+        NOW.parse().unwrap()
+    }
+
+    fn cfg_dir_tz(tz: &str) -> tempfile::TempDir {
         let tmp = tempfile::tempdir().unwrap();
-        let write = |rel: &str, c: &str| {
-            let p = tmp.path().join(rel);
-            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-            std::fs::write(p, c).unwrap();
-        };
-        write("defaults/user.toml",
-            "display_name = \"X\"\ntimezone = \"Asia/Tokyo\"\ntemplate = \"default\"\n");
+        let p = tmp.path().join("defaults/user.toml");
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(
+            p,
+            format!("display_name = \"X\"\ntimezone = \"{tz}\"\ntemplate = \"default\"\n"),
+        )
+        .unwrap();
         tmp
+    }
+
+    fn cfg_dir() -> tempfile::TempDir {
+        cfg_dir_tz("Asia/Tokyo")
+    }
+
+    fn user() -> (rusqlite::Connection, i64) {
+        let conn = crate::db::open_memory().unwrap();
+        let uid = crate::auth::create_user(&conn, "aki", "p", false).unwrap();
+        (conn, uid)
+    }
+
+    /// The part rebuilt on every call, which is what the size ceiling covers.
+    fn dynamic(out: &str) -> &str {
+        &out[out.find("# Now").expect("a Now section")..]
+    }
+
+    fn routine(kind: &str, time: &str) -> crate::templates::TemplateEvent {
+        crate::templates::TemplateEvent {
+            kind: kind.into(),
+            time: time.into(),
+            days: vec!["mon".into()],
+            channel: "push".into(),
+            ..Default::default()
+        }
+    }
+
+    fn plan_today(conn: &rusqlite::Connection, uid: i64, events: Vec<crate::templates::TemplateEvent>) {
+        let tmpl = crate::templates::Template { events };
+        let date: jiff::civil::Date = "2026-08-31".parse().unwrap();
+        crate::plan::generate(conn, uid, &tmpl, date).unwrap();
+    }
+
+    fn task(
+        conn: &rusqlite::Connection,
+        uid: i64,
+        title: &str,
+        state: &str,
+        duration: Option<u32>,
+        is_now: bool,
+        parent: Option<i64>,
+        updated: &str,
+    ) -> i64 {
+        conn.execute(
+            "INSERT INTO tasks (user_id, title, state, source, parent_id, duration_min,
+                                duration_source, is_now, created_at, updated_at)
+             VALUES (?1, ?2, ?3, 'manual', ?4, ?5, ?6, ?7, ?8, ?8)",
+            rusqlite::params![
+                uid,
+                title,
+                state,
+                parent,
+                duration,
+                if duration.is_some() { "user" } else { "none" },
+                is_now,
+                updated,
+            ],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
     }
 
     #[test]
@@ -198,8 +269,7 @@ mod tests {
     #[test]
     fn assemble_renders_all_sections_in_user_tz() {
         let tmp = cfg_dir();
-        let conn = crate::db::open_memory().unwrap();
-        let uid = crate::auth::create_user(&conn, "aki", "p", false).unwrap();
+        let (conn, uid) = user();
         edit_append(tmp.path(), "aki", "remember: hates mornings").unwrap();
         let tmpl = crate::templates::Template {
             events: vec![crate::templates::TemplateEvent {
@@ -208,25 +278,22 @@ mod tests {
                 slide_window_min: Some(60), channel: "voice".into(), ..Default::default()
             }],
         };
-        // 2026-08-31 is a Monday; noon UTC = 21:00 JST same day
         let date: jiff::civil::Date = "2026-08-31".parse().unwrap();
         crate::plan::generate(&conn, uid, &tmpl, date).unwrap();
         crate::log::record(&conn, Some(uid), "event_fired", "event 1").unwrap();
-        let now: jiff::Timestamp = "2026-08-31T12:00:00Z".parse().unwrap();
-        let out = assemble(&conn, tmp.path(), uid, "aki", now).unwrap();
+        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
         assert!(out.contains("hates mornings"), "{out}");
         assert!(out.contains("2026-08-31 21:00"), "{out}");
         assert!(out.contains("Asia/Tokyo"), "{out}");
-        assert!(out.contains("09:00 checkin_call [pending] via voice"), "{out}");
+        assert!(out.contains("- 09:00-09:15 checkin_call [pending] routine via voice"), "{out}");
         assert!(out.contains("event_fired"), "{out}");
     }
 
     #[test]
     fn the_plan_section_distinguishes_blocks_and_silent_routines() {
         let tmp = cfg_dir();
-        let conn = crate::db::open_memory().unwrap();
-        let uid = crate::auth::create_user(&conn, "aki", "p", false).unwrap();
-        let tmpl = crate::templates::Template { events: vec![
+        let (conn, uid) = user();
+        plan_today(&conn, uid, vec![
             crate::templates::TemplateEvent {
                 kind: "Work time".into(), time: "09:30".into(), days: vec!["mon".into()],
                 entry: crate::templates::Entry::Block, end_time: Some("12:30".into()),
@@ -234,29 +301,17 @@ mod tests {
             crate::templates::TemplateEvent {
                 kind: "meds".into(), time: "08:00".into(), days: vec!["mon".into()],
                 alert: Some(false), channel: "push".into(), ..Default::default() },
-        ]};
-        let date: jiff::civil::Date = "2026-08-31".parse().unwrap();
-        crate::plan::generate(&conn, uid, &tmpl, date).unwrap();
-        let now: jiff::Timestamp = "2026-08-31T12:00:00Z".parse().unwrap();
-        let out = assemble(&conn, tmp.path(), uid, "aki", now).unwrap();
-        assert!(out.contains("- 09:30-12:30 Work time [block]"), "{out}");
-        assert!(out.contains("- 08:00 meds [pending] via push (silent)"), "{out}");
+        ]);
+        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        assert!(out.contains("- 09:30-12:30 Work time [pending] block"), "{out}");
+        assert!(out.contains("- 08:00-08:15 meds [pending] routine via push (silent)"), "{out}");
     }
 
     #[test]
     fn invalid_tz_is_labeled_as_utc_fallback() {
-        let tmp = tempfile::tempdir().unwrap();
-        let write = |rel: &str, c: &str| {
-            let p = tmp.path().join(rel);
-            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-            std::fs::write(p, c).unwrap();
-        };
-        write("defaults/user.toml",
-            "display_name = \"X\"\ntimezone = \"Not/AZone\"\ntemplate = \"default\"\n");
-        let conn = crate::db::open_memory().unwrap();
-        let uid = crate::auth::create_user(&conn, "aki", "p", false).unwrap();
-        let now: jiff::Timestamp = "2026-08-31T12:00:00Z".parse().unwrap();
-        let out = assemble(&conn, tmp.path(), uid, "aki", now).unwrap();
+        let tmp = cfg_dir_tz("Not/AZone");
+        let (conn, uid) = user();
+        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
         assert!(out.contains("UTC (configured timezone invalid)"), "{out}");
         assert!(!out.contains("Not/AZone"), "{out}");
     }
@@ -264,11 +319,241 @@ mod tests {
     #[test]
     fn assemble_without_standing_or_plan_still_works() {
         let tmp = cfg_dir();
-        let conn = crate::db::open_memory().unwrap();
-        let uid = crate::auth::create_user(&conn, "aki", "p", false).unwrap();
-        let now: jiff::Timestamp = "2026-08-31T12:00:00Z".parse().unwrap();
-        let out = assemble(&conn, tmp.path(), uid, "aki", now).unwrap();
+        let (conn, uid) = user();
+        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
         assert!(out.contains("(no standing context yet)"), "{out}");
         assert!(out.contains("(no plan generated for today)"), "{out}");
+        assert!(out.contains("(no tasks)"), "{out}");
+        assert!(out.contains("(no debrief yet)"), "{out}");
+        assert!(out.contains("Day's plan: none generated for today"), "{out}");
+    }
+
+    #[test]
+    fn the_now_line_names_weekday_offset_and_part_of_day() {
+        let (conn, uid) = user();
+        let tokyo = cfg_dir();
+        let out = assemble(&conn, tokyo.path(), uid, "aki", now_ts()).unwrap();
+        assert!(out.contains("Monday 2026-08-31 21:00 Asia/Tokyo UTC+09:00"), "{out}");
+        assert!(out.contains("2026-08-31T12:00Z"), "{out}");
+        assert!(out.contains("evening"), "{out}");
+
+        let ny = cfg_dir_tz("America/New_York");
+        let out = assemble(&conn, ny.path(), uid, "aki", now_ts()).unwrap();
+        assert!(out.contains("Monday 2026-08-31 08:00 America/New_York UTC-04:00"), "{out}");
+        assert!(out.contains("2026-08-31T12:00Z"), "{out}");
+        assert!(out.contains("morning"), "{out}");
+    }
+
+    #[test]
+    fn the_now_section_places_the_day_between_its_edges_and_the_nightly_run() {
+        let tmp = cfg_dir();
+        let (conn, uid) = user();
+        plan_today(&conn, uid, vec![routine("meds", "08:00"), routine("wind down", "21:30")]);
+        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        assert!(out.contains("Day's plan: 08:00-21:45; now 21:00, 1 event left"), "{out}");
+        assert!(out.contains("Nightly run 03:00, in 6h00m"), "{out}");
+    }
+
+    #[test]
+    fn the_plan_marks_the_current_event_and_the_next_one() {
+        let tmp = cfg_dir();
+        let (conn, uid) = user();
+        plan_today(&conn, uid, vec![
+            crate::templates::TemplateEvent {
+                kind: "Work time".into(), time: "20:30".into(), days: vec!["mon".into()],
+                entry: crate::templates::Entry::Block, end_time: Some("22:00".into()),
+                channel: "push".into(), ..Default::default() },
+            routine("wind down", "21:30"),
+        ]);
+        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        assert!(out.contains("- 20:30-22:00 Work time [pending] block <- now"), "{out}");
+        assert!(
+            out.contains("- 21:30-21:45 wind down [pending] routine via push <- next, in 30 min"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn the_plan_counts_every_status() {
+        let tmp = cfg_dir();
+        let (conn, uid) = user();
+        plan_today(&conn, uid, vec![
+            routine("a", "07:00"), routine("b", "08:00"), routine("c", "09:00"),
+            routine("d", "10:00"), routine("e", "11:00"),
+        ]);
+        for (kind, status) in [("a", "done"), ("b", "dropped"), ("c", "snoozed"), ("d", "fired")] {
+            conn.execute("UPDATE events SET status = ?1 WHERE kind = ?2", (status, kind)).unwrap();
+        }
+        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        assert!(out.contains("1 pending, 1 fired, 1 done, 1 dropped, 1 snoozed"), "{out}");
+        assert!(out.contains("- 07:00-07:15 a [done] routine via push"), "{out}");
+        assert!(out.contains("- 08:00-08:15 b [dropped] routine via push"), "{out}");
+    }
+
+    #[test]
+    fn the_now_list_carries_durations_and_step_marks() {
+        let tmp = cfg_dir();
+        let (conn, uid) = user();
+        let t = task(&conn, uid, "Write the essay", "in_progress", Some(90), true, None, NOW);
+        task(&conn, uid, "outline", "done", Some(30), false, Some(t), NOW);
+        task(&conn, uid, "draft", "open", Some(60), false, Some(t), NOW);
+        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        assert!(out.contains("Now:\n- Write the essay [in_progress] 90m\n"), "{out}");
+        assert!(out.contains("  - [x] outline 30m\n"), "{out}");
+        assert!(out.contains("  - [ ] draft 60m\n"), "{out}");
+        assert!(!out.contains("description"), "{out}");
+    }
+
+    #[test]
+    fn the_later_list_stops_at_ten_titles() {
+        let tmp = cfg_dir();
+        let (conn, uid) = user();
+        for i in 1..=12 {
+            task(&conn, uid, &format!("later-{i:02}"), "open", Some(15), false, None, NOW);
+        }
+        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        assert!(out.contains("Later (12 open):"), "{out}");
+        assert!(out.contains("- later-10 15m"), "{out}");
+        assert!(!out.contains("later-11"), "{out}");
+        assert!(out.contains("and 2 more"), "{out}");
+        assert!(out.contains("Now: (none)"), "{out}");
+    }
+
+    #[test]
+    fn done_today_counts_only_todays_completions() {
+        let tmp = cfg_dir();
+        let (conn, uid) = user();
+        // The local day runs 2026-08-30T15:00Z .. 2026-08-31T15:00Z in Tokyo.
+        task(&conn, uid, "a", "done", None, false, None, "2026-08-30T16:00:00Z");
+        task(&conn, uid, "b", "done", None, false, None, "2026-08-31T02:00:00Z");
+        task(&conn, uid, "c", "done", None, false, None, "2026-08-30T02:00:00Z");
+        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        assert!(out.contains("Done today: 2"), "{out}");
+    }
+
+    #[test]
+    fn the_debrief_excerpt_is_dated_and_capped() {
+        let tmp = cfg_dir();
+        let (conn, uid) = user();
+        let content = format!("{}NEEDLE", "d".repeat(650));
+        conn.execute(
+            "INSERT INTO debriefs (user_id, date, content, created_at)
+             VALUES (?1, '2026-08-30', ?2, 't')",
+            (uid, &content),
+        )
+        .unwrap();
+        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        assert!(out.contains("2026-08-30 (yesterday):"), "{out}");
+        assert!(out.contains(&"d".repeat(600)), "{out}");
+        assert!(!out.contains(&"d".repeat(601)), "{out}");
+        assert!(!out.contains("NEEDLE"), "{out}");
+    }
+
+    #[test]
+    fn tomorrows_plan_is_flagged_once_it_exists() {
+        let tmp = cfg_dir();
+        let (conn, uid) = user();
+        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        assert!(out.contains("Tomorrow's plan (2026-09-01): not generated yet"), "{out}");
+
+        let tmpl = crate::templates::Template { events: vec![routine("meds", "08:00")] };
+        let date: jiff::civil::Date = "2026-09-01".parse().unwrap();
+        crate::plan::generate(&conn, uid, &tmpl, date).unwrap();
+        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        assert!(out.contains("Tomorrow's plan (2026-09-01): generated"), "{out}");
+    }
+
+    #[test]
+    fn recent_activity_leaves_out_operational_rows() {
+        let tmp = cfg_dir();
+        let (conn, uid) = user();
+        for kind in
+            ["delivery_ok", "agent_session", "token_created", "admin_user_create", "delivery_degraded"]
+        {
+            crate::log::record(&conn, Some(uid), kind, "x").unwrap();
+        }
+        for kind in ["event_fired", "talk_error", "nightly_fallback"] {
+            crate::log::record(&conn, Some(uid), kind, "x").unwrap();
+        }
+        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        let tail = &out[out.find("# Recent activity").unwrap()..];
+        for kind in
+            ["delivery_ok", "agent_session", "token_created", "admin_user_create", "delivery_degraded"]
+        {
+            assert!(!tail.contains(kind), "{kind} should be filtered out\n{tail}");
+        }
+        for kind in ["event_fired", "talk_error", "nightly_fallback"] {
+            assert!(tail.contains(kind), "{kind} should be kept\n{tail}");
+        }
+    }
+
+    #[test]
+    fn the_settings_line_names_what_shapes_advice() {
+        let tmp = cfg_dir();
+        let (conn, uid) = user();
+        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        assert!(
+            out.contains(
+                "X | Asia/Tokyo | nightly_time 03:00 | template default | counter remaining \
+                 | nightly on | checkins on"
+            ),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn the_dynamic_block_stays_under_its_ceiling() {
+        let tmp = cfg_dir();
+        let (conn, uid) = user();
+        edit_append(tmp.path(), "aki", &"s".repeat(4096)).unwrap();
+        plan_today(&conn, uid, vec![routine("meds", "08:00")]);
+        task(&conn, uid, "Write the essay", "in_progress", Some(90), true, None, NOW);
+        for i in 0..120 {
+            task(&conn, uid, &format!("later-{i:03} {}", "t".repeat(60)), "open", Some(15), false, None, NOW);
+        }
+        conn.execute(
+            "INSERT INTO debriefs (user_id, date, content, created_at)
+             VALUES (?1, '2026-08-30', ?2, 't')",
+            (uid, "d".repeat(4000)),
+        )
+        .unwrap();
+        for _ in 0..20 {
+            crate::log::record(&conn, Some(uid), "event_fired", &"e".repeat(300)).unwrap();
+        }
+        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        let block = dynamic(&out);
+        assert!(block.len() <= MAX_DYNAMIC_BYTES, "{} bytes", block.len());
+        assert!(block.contains("Monday 2026-08-31 21:00"), "{block}");
+        assert!(block.contains("- 08:00-08:15 meds [pending] routine via push"), "{block}");
+        assert!(block.contains("- Write the essay [in_progress] 90m"), "{block}");
+        assert!(out.contains(&"s".repeat(4096)), "the standing document is never trimmed");
+    }
+
+    #[test]
+    fn a_typical_day_stays_terse() {
+        let tmp = cfg_dir();
+        let (conn, uid) = user();
+        edit_append(tmp.path(), "aki", "- prefers evening calls").unwrap();
+        plan_today(&conn, uid, vec![
+            routine("meds", "08:00"), routine("checkin", "12:00"), routine("wind down", "21:30"),
+        ]);
+        let t = task(&conn, uid, "Write the essay", "in_progress", Some(90), true, None, NOW);
+        task(&conn, uid, "outline", "done", Some(30), false, Some(t), NOW);
+        task(&conn, uid, "draft", "open", Some(60), false, Some(t), NOW);
+        for i in 1..=5 {
+            task(&conn, uid, &format!("later task {i}"), "open", Some(30), false, None, NOW);
+        }
+        conn.execute(
+            "INSERT INTO debriefs (user_id, date, content, created_at)
+             VALUES (?1, '2026-08-30', ?2, 't')",
+            (uid, "Yesterday went well. Two steps left on the essay."),
+        )
+        .unwrap();
+        for _ in 0..4 {
+            crate::log::record(&conn, Some(uid), "event_fired", "event 3 due 2026-08-31T03:00:00Z")
+                .unwrap();
+        }
+        let block = dynamic(&assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap()).to_string();
+        assert!(block.len() <= 1600, "a typical day is {} bytes:\n{block}", block.len());
     }
 }
