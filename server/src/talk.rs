@@ -1,6 +1,6 @@
 use crate::providers::Message;
 use anyhow::Result;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 const MAX_TITLE_CHARS: usize = 60;
 const MAX_REASONING_BYTES: usize = 32 * 1024;
@@ -29,6 +29,49 @@ pub fn touch(conn: &Connection, id: i64, now: jiff::Timestamp) -> Result<()> {
         (now.to_string(), id),
     )?;
     Ok(())
+}
+
+/// The thread a check-in's question lands in: one per user per plan date, so
+/// every check-in of a day appends to the same conversation and the next day
+/// starts a fresh one. The question is stored as an assistant row.
+pub fn checkin_thread(
+    conn: &Connection,
+    user_id: i64,
+    date: &str,
+    question: &str,
+    now: jiff::Timestamp,
+) -> Result<i64> {
+    let existing: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM conversations WHERE user_id = ?1 AND checkin_date = ?2
+             ORDER BY id DESC LIMIT 1",
+            (user_id, date),
+            |r| r.get(0),
+        )
+        .optional()?;
+    let id = match existing {
+        Some(id) => id,
+        None => {
+            conn.execute(
+                "INSERT INTO conversations (user_id, title, created_at, updated_at, checkin_date)
+                 VALUES (?1, ?2, ?3, ?3, ?4)",
+                (user_id, title_from(question), now.to_string(), date),
+            )?;
+            conn.last_insert_rowid()
+        }
+    };
+    append_text(conn, id, "assistant", question, now)?;
+    touch(conn, id, now)?;
+    Ok(id)
+}
+
+/// The plan date whose check-in opened the conversation; None for a thread the
+/// user started.
+pub fn checkin_date(conn: &Connection, id: i64) -> Result<Option<String>> {
+    Ok(conn
+        .query_row("SELECT checkin_date FROM conversations WHERE id = ?1", [id], |r| r.get(0))
+        .optional()?
+        .flatten())
 }
 
 /// `role` is `"user"` or `"assistant"`; the table's CHECK rejects anything else.
@@ -177,6 +220,53 @@ mod tests {
 
     fn now() -> jiff::Timestamp {
         jiff::Timestamp::now()
+    }
+
+    #[test]
+    fn a_days_checkins_share_one_thread_and_the_next_day_opens_another() {
+        let conn = conn_with_conversation();
+        let morning: jiff::Timestamp = "2026-09-17T00:00:00Z".parse().unwrap();
+        let noon: jiff::Timestamp = "2026-09-17T03:00:00Z".parse().unwrap();
+        let first =
+            checkin_thread(&conn, 1, "2026-09-17", "Morning — how did you sleep?", morning).unwrap();
+        let again =
+            checkin_thread(&conn, 1, "2026-09-17", "Midday. How is it going?", noon).unwrap();
+        assert_eq!(first, again);
+        assert_ne!(first, 1, "the user's own thread is never reused");
+
+        let rows = messages_json(&conn, first).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| r["role"] == "assistant"));
+        assert_eq!(rows[1]["content"], "Midday. How is it going?");
+
+        let (title, updated): (String, String) = conn
+            .query_row("SELECT title, updated_at FROM conversations WHERE id = ?1", [first], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(title, "Morning — how did you sleep?");
+        assert_eq!(updated, noon.to_string());
+        assert_eq!(checkin_date(&conn, first).unwrap().as_deref(), Some("2026-09-17"));
+        assert_eq!(checkin_date(&conn, 1).unwrap(), None);
+        assert_eq!(checkin_date(&conn, 99).unwrap(), None);
+
+        let next = checkin_thread(&conn, 1, "2026-09-18", "Morning again", noon).unwrap();
+        assert_ne!(next, first);
+    }
+
+    #[test]
+    fn a_checkin_thread_belongs_to_its_user_alone() {
+        let conn = conn_with_conversation();
+        conn.execute(
+            "INSERT INTO users (username, pass_hash, role) VALUES ('bo', 'x', 'member')",
+            [],
+        )
+        .unwrap();
+        let mine = checkin_thread(&conn, 1, "2026-09-17", "hi", now()).unwrap();
+        let theirs = checkin_thread(&conn, 2, "2026-09-17", "hi", now()).unwrap();
+        assert_ne!(mine, theirs);
+        assert!(owned(&conn, 2, theirs).unwrap());
+        assert!(!owned(&conn, 2, mine).unwrap());
     }
 
     #[test]
