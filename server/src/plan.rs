@@ -82,13 +82,15 @@ pub fn generate(conn: &Connection, user_id: i64, template: &Template, date: jiff
     )?;
     let plan_id = conn.last_insert_rowid();
     let day = weekday_key(date);
-    for ev in template.events.iter().filter(|e| e.days.iter().any(|d| d == day)) {
+    let today: Vec<&crate::templates::TemplateEvent> =
+        template.events.iter().filter(|e| e.days.iter().any(|d| d == day)).collect();
+    for (ev, time) in around_calendar(conn, user_id, date, &today)? {
         conn.execute(
             "INSERT INTO events (plan_id, kind, wall_time, orig_wall_time, end_wall_time,
                                  flexibility, slide_window_min, channel, alert, span_min)
              VALUES (?1, ?2, ?3, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             (
-                plan_id, &ev.kind, &ev.time, ev.is_block().then(|| ev.end()), ev.flexibility(),
+                plan_id, &ev.kind, &time, ev.is_block().then(|| ev.end()), ev.flexibility(),
                 ev.slide_window_min(), &ev.channel, ev.alert(), ev.span_min().max(1),
             ),
         )?;
@@ -97,6 +99,45 @@ pub fn generate(conn: &Connection, user_id: i64, template: &Template, date: jiff
         tx.commit()?;
     }
     Ok(plan_id)
+}
+
+/// Where today's template entries start once the user's fixed commitments are
+/// accounted for: a routine that would begin inside one moves to its end if it
+/// can slide, is left out of the day if it can be dropped, and otherwise
+/// stands where the template put it. A block keeps its own shape.
+fn around_calendar<'a>(
+    conn: &Connection,
+    user_id: i64,
+    date: jiff::civil::Date,
+    events: &[&'a crate::templates::TemplateEvent],
+) -> Result<Vec<(&'a crate::templates::TemplateEvent, String)>> {
+    let busy = crate::calendar::occurrences(conn, user_id, date)?;
+    let mut out = Vec::with_capacity(events.len());
+    for ev in events {
+        let inside = busy.iter().find(|o| {
+            o.kind == "fixed" && !ev.is_block() && o.start <= ev.time && ev.time < o.end
+        });
+        let Some(o) = inside else {
+            out.push((*ev, ev.time.clone()));
+            continue;
+        };
+        let window = format!("inside {} {}-{}", o.title, o.start, o.end);
+        match ev.flexibility() {
+            "slide" => {
+                crate::log::record(conn, Some(user_id), "plan_adjusted", &format!(
+                    "{date} {} moved {} -> {} ({window})", ev.kind, ev.time, o.end,
+                ))?;
+                out.push((*ev, o.end.clone()));
+            }
+            "drop" => {
+                crate::log::record(conn, Some(user_id), "plan_adjusted", &format!(
+                    "{date} {} at {} skipped ({window})", ev.kind, ev.time,
+                ))?;
+            }
+            _ => out.push((*ev, ev.time.clone())),
+        }
+    }
+    Ok(out)
 }
 
 /// Whether that day has a plan at all, without reading its events.
@@ -457,6 +498,100 @@ mod tests {
                 },
             ],
         }
+    }
+
+    /// School covers 08:15-15:30 every weekday, and `kind` is a routine at
+    /// 10:00 on the Monday the tests plan.
+    fn day_against_school(kind: &str, flexibility: &str) -> (Connection, i64, jiff::civil::Date) {
+        let conn = crate::db::open_memory().unwrap();
+        let uid = crate::auth::create_user(&conn, "a", "p", false).unwrap();
+        crate::calendar::create(&conn, uid, crate::calendar::Fields {
+            title: "school".into(), kind: "fixed".into(),
+            start_time: "08:15".into(), end_time: "15:30".into(),
+            days: Some(crate::calendar::day_mask(&["mon", "tue", "wed", "thu", "fri"]).unwrap()),
+            ..Default::default()
+        }).unwrap();
+        let t = Template { events: vec![TemplateEvent {
+            kind: kind.into(), time: "10:00".into(), days: vec!["mon".into()],
+            flexibility: Some(flexibility.into()), slide_window_min: Some(30),
+            channel: "push".into(), ..Default::default()
+        }]};
+        let date: jiff::civil::Date = "2026-08-31".parse().unwrap();
+        generate(&conn, uid, &t, date).unwrap();
+        (conn, uid, date)
+    }
+
+    fn adjustments(conn: &Connection) -> Vec<String> {
+        let mut stmt = conn
+            .prepare("SELECT detail FROM event_log WHERE kind='plan_adjusted' ORDER BY id")
+            .unwrap();
+        let rows = stmt.query_map([], |r| r.get(0)).unwrap();
+        rows.collect::<rusqlite::Result<_>>().unwrap()
+    }
+
+    #[test]
+    fn a_slideable_routine_inside_a_commitment_starts_when_it_ends() {
+        let (conn, uid, date) = day_against_school("nudge", "slide");
+        let evs = events_for(&conn, uid, date).unwrap();
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].wall_time, "15:30");
+        assert_eq!(evs[0].end_wall_time.as_deref(), Some("15:45"), "the span follows the start");
+        let orig: String =
+            conn.query_row("SELECT orig_wall_time FROM events", [], |r| r.get(0)).unwrap();
+        assert_eq!(orig, "15:30", "the day's plan, not a slide off the template time");
+        assert_eq!(adjustments(&conn).len(), 1);
+        assert!(adjustments(&conn)[0].contains("moved 10:00 -> 15:30 (inside school 08:15-15:30)"));
+    }
+
+    #[test]
+    fn a_droppable_routine_inside_a_commitment_is_left_out_of_the_day() {
+        let (conn, uid, date) = day_against_school("nudge", "drop");
+        assert!(events_for(&conn, uid, date).unwrap().is_empty());
+        assert!(adjustments(&conn)[0].contains("at 10:00 skipped (inside school 08:15-15:30)"));
+    }
+
+    #[test]
+    fn a_fixed_routine_inside_a_commitment_stands() {
+        let (conn, uid, date) = day_against_school("nudge", "fixed");
+        assert_eq!(events_for(&conn, uid, date).unwrap()[0].wall_time, "10:00");
+        assert!(adjustments(&conn).is_empty());
+    }
+
+    #[test]
+    fn a_routine_outside_every_commitment_is_left_alone() {
+        let conn = crate::db::open_memory().unwrap();
+        let uid = crate::auth::create_user(&conn, "a", "p", false).unwrap();
+        crate::calendar::create(&conn, uid, crate::calendar::Fields {
+            title: "school".into(), kind: "fixed".into(),
+            start_time: "10:00".into(), end_time: "15:30".into(),
+            days: Some(crate::calendar::day_mask(&["mon"]).unwrap()), ..Default::default()
+        }).unwrap();
+        let date: jiff::civil::Date = "2026-08-31".parse().unwrap();
+        generate(&conn, uid, &tmpl(), date).unwrap();
+        assert_eq!(events_for(&conn, uid, date).unwrap()[0].wall_time, "09:00");
+        assert!(adjustments(&conn).is_empty());
+    }
+
+    #[test]
+    fn a_block_keeps_its_shape_whatever_the_calendar_says() {
+        let conn = crate::db::open_memory().unwrap();
+        let uid = crate::auth::create_user(&conn, "a", "p", false).unwrap();
+        crate::calendar::create(&conn, uid, crate::calendar::Fields {
+            title: "school".into(), kind: "fixed".into(),
+            start_time: "08:15".into(), end_time: "15:30".into(),
+            days: Some(crate::calendar::day_mask(&["mon"]).unwrap()), ..Default::default()
+        }).unwrap();
+        let t = Template { events: vec![TemplateEvent {
+            kind: "Work time".into(), time: "09:30".into(), days: vec!["mon".into()],
+            entry: crate::templates::Entry::Block, end_time: Some("12:30".into()),
+            channel: "push".into(), ..Default::default()
+        }]};
+        let date: jiff::civil::Date = "2026-08-31".parse().unwrap();
+        generate(&conn, uid, &t, date).unwrap();
+        let evs = events_for(&conn, uid, date).unwrap();
+        assert_eq!((evs[0].wall_time.as_str(), evs[0].end_wall_time.as_deref()),
+                   ("09:30", Some("12:30")));
+        assert!(adjustments(&conn).is_empty());
     }
 
     #[test]
