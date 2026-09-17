@@ -666,6 +666,59 @@ mod tests {
     }
 
     #[test]
+    fn restore_undoes_a_briefing_session_row_for_row() {
+        let (conn, uid) = db_with_user();
+        let id = task(&conn, uid, "essay", None);
+        update(
+            &conn,
+            uid,
+            id,
+            TaskPatch {
+                description: Some("the caller's own text".into()),
+                duration_min: Some(Some(15)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        split(
+            &conn,
+            uid,
+            id,
+            vec![
+                Step { title: "draft".into(), duration_min: 20 },
+                Step { title: "edit".into(), duration_min: 10 },
+            ],
+            Actor::User,
+        )
+        .unwrap();
+        let before = node(&conn, uid, id).unwrap().unwrap();
+        let snap = snapshot(&conn, uid, id).unwrap();
+
+        let step = before.children[0].id;
+        delete(&conn, uid, step).unwrap();
+        update(
+            &conn,
+            uid,
+            id,
+            TaskPatch {
+                description: Some("the agent's brief".into()),
+                state: Some("dropped".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        restore(&conn, &snap).unwrap();
+
+        let after = node(&conn, uid, id).unwrap().unwrap();
+        assert_eq!(after.task.description, before.task.description);
+        assert_eq!(after.task.state, before.task.state);
+        assert_eq!(after.task.duration_min, before.task.duration_min);
+        assert_eq!(after.task.updated_at, before.task.updated_at);
+        let ids = |n: &TaskNode| n.children.iter().map(|c| c.id).collect::<Vec<_>>();
+        assert_eq!(ids(&after), ids(&before));
+    }
+
+    #[test]
     fn delete_ignores_another_users_task() {
         let (conn, uid) = db_with_user();
         let bo = crate::auth::create_user(&conn, "bo", "pw", false).unwrap();

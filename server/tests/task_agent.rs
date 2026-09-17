@@ -144,8 +144,9 @@ async fn a_bearer_token_briefs_a_task() {
     assert_eq!(task["children"].as_array().unwrap().len(), 2);
     assert_eq!(task["children"][0]["title"], "read chapter 4");
 
-    // the session saw the import prompt and the one scoped tool
+    // one model round: the brief ends the session, no closing turn
     let seen = llm.seen();
+    assert_eq!(seen.len(), 1);
     assert!(seen[0].system.contains("brief the assignment"), "{}", seen[0].system);
     assert_eq!(seen[0].tool_names, vec!["task_brief"]);
     let opening = match &seen[0].messages[0] {
