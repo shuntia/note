@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { admin, ApiError } from '../api'
 import type { ToastAction } from '../app'
+import { signChallenge } from '../webauthn'
 import type {
   AdminGate,
   AdminStatus,
@@ -221,19 +222,20 @@ function Gate({
 }) {
   const [password, setPassword] = useState('')
   const [code, setCode] = useState('')
+  const [useCode, setUseCode] = useState(!gate.methods.passkey)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
-  const needsCode = gate.totp === 'required'
-  const missing =
-    'This server has no admin secret installed. Put the TOTP seed in the secrets directory and restart.'
+  const { passkey, totp } = gate.methods
+  const nothingEnrolled = gate.require_second_factor && !passkey && !totp
+  const needsCode = gate.require_second_factor && useCode && totp
+  const unenrolled = 'Add a passkey or an authenticator app in Settings first.'
 
-  const submit = async (e: FormEvent) => {
-    e.preventDefault()
+  const attempt = async (run: () => Promise<void>) => {
     setBusy(true)
     setError(null)
     try {
-      await admin.elevate(password, needsCode ? code : undefined)
+      await run()
       setPassword('')
       setCode('')
       onElevated()
@@ -241,19 +243,32 @@ function Gate({
       const status = err instanceof ApiError ? err.status : 0
       if (status === 401) setError('Wrong password or code.')
       else if (status === 429) setError('Too many attempts. Wait a few minutes.')
-      else if (status === 503) setError(missing)
+      else if (status === 503) setError(unenrolled)
+      else if (err instanceof DOMException) setError('That passkey was not confirmed.')
       else setError("Couldn't unlock. Try again.")
     } finally {
       setBusy(false)
     }
   }
 
+  const submit = (e: FormEvent) => {
+    e.preventDefault()
+    if (gate.require_second_factor && passkey && !useCode) {
+      void attempt(async () => {
+        const challenge = await admin.elevateChallenge()
+        await admin.elevateWithPasskey(password, await signChallenge(challenge))
+      })
+      return
+    }
+    void attempt(() => admin.elevate(password, needsCode ? code : undefined))
+  }
+
   return (
     <div className="login admin-gate">
       <h1>Admin</h1>
-      {gate.totp === 'missing' ? (
+      {nothingEnrolled ? (
         <p className="admin-gate-note" role="alert">
-          {missing}
+          {unenrolled}
         </p>
       ) : (
         <form onSubmit={submit}>
@@ -279,13 +294,28 @@ function Gate({
               />
             </div>
           )}
-          {gate.totp === 'password_only' && gate.inspect && (
+          {!gate.require_second_factor && gate.inspect && (
             <p className="admin-gate-dev">Dev build: password only</p>
           )}
           {error && <p role="alert">{error}</p>}
-          <button className="primary" disabled={busy || !password || (needsCode && !code)}>
-            Unlock
+          <button
+            className="primary"
+            disabled={busy || !password || (needsCode && code.length !== 6)}
+          >
+            {gate.require_second_factor && passkey && !useCode ? 'Use passkey' : 'Unlock'}
           </button>
+          {gate.require_second_factor && passkey && totp && (
+            <button
+              type="button"
+              className="set-link admin-gate-alt"
+              onClick={() => {
+                setError(null)
+                setUseCode((c) => !c)
+              }}
+            >
+              {useCode ? 'Use a passkey instead' : 'Use a code instead'}
+            </button>
+          )}
         </form>
       )}
       <button className="set-link admin-gate-back" onClick={onBack}>
