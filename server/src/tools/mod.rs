@@ -2,6 +2,7 @@ pub mod context_ops;
 pub mod inbox_ops;
 pub mod memory_ops;
 pub mod outreach_ops;
+pub mod plan_ops;
 pub mod schedule_ops;
 pub mod task_ops;
 pub mod task_query;
