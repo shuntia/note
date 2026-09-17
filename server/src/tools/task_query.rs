@@ -369,6 +369,7 @@ mod tests {
             username: "aki",
             vectors: PreparedVectors::default(),
             task_scope: scope,
+            inbox_source: None,
         }
     }
 
