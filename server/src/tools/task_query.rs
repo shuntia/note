@@ -1,3 +1,355 @@
+use super::{ToolCtx, ToolError};
+use rusqlite::types::Value as SqlValue;
+use rusqlite::Connection;
+use schemars::JsonSchema;
+use serde::Deserialize;
+
+const DEFAULT_LIMIT: u32 = 50;
+const MAX_LIMIT: u32 = 200;
+const MAX_KEYWORD_CHARS: usize = 200;
+const MAX_QUERY_CHARS: usize = 200;
+const SEARCH_HITS: usize = 20;
+const MAX_BATCH: usize = 50;
+const MAX_AGE_DAYS: u32 = 3650;
+
+/// These tools survey or move the whole list, so a session pinned to one task
+/// has no business in any of them.
+pub(super) fn unscoped(ctx: &ToolCtx) -> Result<(), ToolError> {
+    match ctx.task_scope {
+        None => Ok(()),
+        Some(scope) => Err(ToolError::rejected(format!(
+            "this session works on task {scope} alone and cannot survey the whole list"
+        ))),
+    }
+}
+
+fn internal(e: impl std::fmt::Display) -> ToolError {
+    ToolError::internal(e.to_string())
+}
+
+fn checked_date(field: &str, value: &str) -> Result<String, ToolError> {
+    value
+        .parse::<jiff::civil::Date>()
+        .map(|d| d.to_string())
+        .map_err(|_| ToolError::rejected(format!("{field} must be YYYY-MM-DD, got {value:?}")))
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ListArgs {
+    /// open, in_progress, done, dropped, or any. Omitted: the live ones, open and in_progress.
+    #[serde(default)]
+    pub state: Option<String>,
+    /// Case-insensitive substring of the title, the description or the notes.
+    #[serde(default)]
+    pub keyword: Option<String>,
+    /// Only tasks added on or after this day, YYYY-MM-DD.
+    #[serde(default)]
+    pub added_after: Option<String>,
+    /// Only tasks added before this day, YYYY-MM-DD.
+    #[serde(default)]
+    pub added_before: Option<String>,
+    /// Only tasks added more than this many days ago.
+    #[serde(default)]
+    pub older_than_days: Option<u32>,
+    /// True for the Now list only, false for everything outside it.
+    #[serde(default)]
+    pub is_now: Option<bool>,
+    /// How many tasks to return, 1 to 200. Default 50.
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+/// The filters, as SQL and its parameters, shared by the page and its count.
+fn list_filters(ctx: &ToolCtx, args: &ListArgs) -> Result<(String, Vec<SqlValue>), ToolError> {
+    let mut wheres = vec!["user_id = ?".to_string(), "parent_id IS NULL".to_string()];
+    let mut params: Vec<SqlValue> = vec![ctx.user_id.into()];
+
+    match args.state.as_deref() {
+        None => wheres.push("state IN ('open','in_progress')".into()),
+        Some("any") => {}
+        Some(s) if crate::tasks::STATES.contains(&s) => {
+            wheres.push("state = ?".into());
+            params.push(s.to_string().into());
+        }
+        Some(s) => {
+            return Err(ToolError::rejected(format!(
+                "state must be one of {}, any, got {s:?}",
+                crate::tasks::STATES.join(", ")
+            )))
+        }
+    }
+    if let Some(keyword) = &args.keyword {
+        let needle = keyword.trim().to_lowercase();
+        if needle.is_empty() || needle.chars().count() > MAX_KEYWORD_CHARS {
+            return Err(ToolError::rejected(format!(
+                "keyword must be 1 to {MAX_KEYWORD_CHARS} characters"
+            )));
+        }
+        wheres.push(
+            "(instr(lower(title), ?) > 0 OR instr(lower(description), ?) > 0 \
+              OR instr(lower(notes), ?) > 0)"
+                .into(),
+        );
+        params.extend([needle.clone().into(), needle.clone().into(), needle.into()]);
+    }
+    if let Some(day) = &args.added_after {
+        wheres.push("created_at >= ?".into());
+        params.push(checked_date("added_after", day)?.into());
+    }
+    if let Some(day) = &args.added_before {
+        wheres.push("created_at < ?".into());
+        params.push(checked_date("added_before", day)?.into());
+    }
+    if let Some(days) = args.older_than_days {
+        if days > MAX_AGE_DAYS {
+            return Err(ToolError::rejected(format!(
+                "older_than_days must be at most {MAX_AGE_DAYS}"
+            )));
+        }
+        let cutoff = jiff::Timestamp::now()
+            .checked_sub(jiff::Span::new().hours(24 * i64::from(days)))
+            .map_err(internal)?;
+        wheres.push("created_at < ?".into());
+        params.push(cutoff.to_string().into());
+    }
+    if let Some(flag) = args.is_now {
+        wheres.push("is_now = ?".into());
+        params.push(i64::from(flag).into());
+    }
+    Ok((wheres.join(" AND "), params))
+}
+
+/// The user's top-level tasks, newest first, with how far their steps have got.
+pub fn list(conn: &Connection, ctx: &ToolCtx, args: ListArgs) -> Result<serde_json::Value, ToolError> {
+    unscoped(ctx)?;
+    let limit = args.limit.unwrap_or(DEFAULT_LIMIT);
+    if !(1..=MAX_LIMIT).contains(&limit) {
+        return Err(ToolError::rejected(format!("limit must be in 1..={MAX_LIMIT}")));
+    }
+    let (wheres, params) = list_filters(ctx, &args)?;
+
+    let total: i64 = conn
+        .query_row(
+            &format!("SELECT COUNT(*) FROM tasks WHERE {wheres}"),
+            rusqlite::params_from_iter(params.iter()),
+            |r| r.get(0),
+        )
+        .map_err(internal)?;
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT t.id, t.title, t.state, t.is_now, t.duration_min, t.created_at, t.updated_at,
+                    (SELECT COUNT(*) FROM tasks s WHERE s.parent_id = t.id AND s.state != 'dropped'),
+                    (SELECT COUNT(*) FROM tasks s WHERE s.parent_id = t.id AND s.state = 'done')
+             FROM tasks t WHERE {}
+             ORDER BY t.created_at DESC, t.id DESC LIMIT {limit}",
+            wheres.replace("user_id", "t.user_id")
+        ))
+        .map_err(internal)?;
+    let tasks = stmt
+        .query_map(rusqlite::params_from_iter(params.iter()), |r| {
+            Ok(serde_json::json!({
+                "id": r.get::<_, i64>(0)?,
+                "title": r.get::<_, String>(1)?,
+                "state": r.get::<_, String>(2)?,
+                "is_now": r.get::<_, bool>(3)?,
+                "duration_min": r.get::<_, Option<i64>>(4)?,
+                "created_at": r.get::<_, String>(5)?,
+                "updated_at": r.get::<_, String>(6)?,
+                "steps": r.get::<_, i64>(7)?,
+                "done_steps": r.get::<_, i64>(8)?,
+            }))
+        })
+        .and_then(|rows| rows.collect::<rusqlite::Result<Vec<_>>>())
+        .map_err(internal)?;
+    Ok(serde_json::json!({ "tasks": tasks, "total": total }))
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SearchArgs {
+    /// The words to look for, 1 to 200 characters. Every word must match.
+    pub query: String,
+}
+
+/// Every word of the query against the title first, then against the task's
+/// whole text; live tasks before finished ones.
+pub fn search(conn: &Connection, ctx: &ToolCtx, args: SearchArgs) -> Result<serde_json::Value, ToolError> {
+    unscoped(ctx)?;
+    let query = args.query.trim();
+    if query.is_empty() || query.chars().count() > MAX_QUERY_CHARS {
+        return Err(ToolError::rejected(format!(
+            "query must be 1 to {MAX_QUERY_CHARS} characters"
+        )));
+    }
+    let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+    let mut params: Vec<SqlValue> = vec![ctx.user_id.into()];
+    let clause = |column: &str, params: &mut Vec<SqlValue>| {
+        params.extend(words.iter().map(|w| SqlValue::from(w.clone())));
+        words
+            .iter()
+            .map(|_| format!("instr({column}, ?) > 0"))
+            .collect::<Vec<_>>()
+            .join(" AND ")
+    };
+    let text = "lower(title) || ' ' || lower(description) || ' ' || lower(notes)";
+    let title_match = clause("lower(title)", &mut params);
+    let text_match = clause(text, &mut params);
+
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT id, title, state, is_now, duration_min
+             FROM tasks
+             WHERE user_id = ? AND parent_id IS NULL AND state != 'dropped' AND ({text_match})
+             ORDER BY CASE WHEN {title_match} THEN 0 ELSE 1 END,
+                      CASE WHEN state = 'done' THEN 1 ELSE 0 END,
+                      created_at DESC, id DESC
+             LIMIT {SEARCH_HITS}"
+        ))
+        .map_err(internal)?;
+    // the ORDER BY repeats the title clause, so its parameters come last
+    let ordered: Vec<&SqlValue> = std::iter::once(&params[0])
+        .chain(params[1 + words.len()..].iter())
+        .chain(params[1..1 + words.len()].iter())
+        .collect();
+    let tasks = stmt
+        .query_map(rusqlite::params_from_iter(ordered), |r| {
+            Ok(serde_json::json!({
+                "id": r.get::<_, i64>(0)?,
+                "title": r.get::<_, String>(1)?,
+                "state": r.get::<_, String>(2)?,
+                "is_now": r.get::<_, bool>(3)?,
+                "duration_min": r.get::<_, Option<i64>>(4)?,
+            }))
+        })
+        .and_then(|rows| rows.collect::<rusqlite::Result<Vec<_>>>())
+        .map_err(internal)?;
+    Ok(serde_json::json!({ "tasks": tasks }))
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReadArgs {
+    pub task_id: i64,
+}
+
+/// One task in full, exactly as `GET /api/tasks` renders it, plus when it was
+/// added.
+pub fn read(conn: &Connection, ctx: &ToolCtx, args: ReadArgs) -> Result<serde_json::Value, ToolError> {
+    unscoped(ctx)?;
+    let Some(node) = crate::tasks::node(conn, ctx.user_id, args.task_id).map_err(internal)? else {
+        return Err(ToolError::not_found(format!("no task {}", args.task_id)));
+    };
+    let mut out = serde_json::to_value(&node).map_err(internal)?;
+    let mut stmt = conn
+        .prepare("SELECT id, created_at FROM tasks WHERE id = ?1 OR parent_id = ?1")
+        .map_err(internal)?;
+    let added: std::collections::HashMap<i64, String> = stmt
+        .query_map([args.task_id], |r| Ok((r.get(0)?, r.get(1)?)))
+        .and_then(|rows| rows.collect::<rusqlite::Result<_>>())
+        .map_err(internal)?;
+    stamp(&mut out, &added);
+    if let Some(children) = out["children"].as_array_mut() {
+        for child in children {
+            stamp(child, &added);
+        }
+    }
+    Ok(out)
+}
+
+fn stamp(task: &mut serde_json::Value, added: &std::collections::HashMap<i64, String>) {
+    let Some(created) = task["id"].as_i64().and_then(|id| added.get(&id)) else { return };
+    task["created_at"] = serde_json::json!(created);
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BulkUpdateArgs {
+    /// 1 to 50 task ids. Every one must be the user's own, or nothing happens.
+    pub task_ids: Vec<i64>,
+    /// One of open, in_progress, done, dropped, for all of them.
+    #[serde(default)]
+    pub state: Option<String>,
+    /// True moves them all into Now, false moves them all back to Later.
+    #[serde(default)]
+    pub is_now: Option<bool>,
+    /// True deletes them all, with their steps and their place on the day's plan.
+    #[serde(default)]
+    pub delete: Option<bool>,
+}
+
+/// One change across a batch of tasks: either every id takes it, or the call is
+/// rejected and nothing moves.
+pub fn bulk_update(
+    conn: &Connection,
+    ctx: &ToolCtx,
+    args: BulkUpdateArgs,
+) -> Result<serde_json::Value, ToolError> {
+    unscoped(ctx)?;
+    if args.task_ids.is_empty() || args.task_ids.len() > MAX_BATCH {
+        return Err(ToolError::rejected(format!("task_ids must hold 1 to {MAX_BATCH} ids")));
+    }
+    let mut seen = std::collections::HashSet::new();
+    if let Some(dup) = args.task_ids.iter().find(|id| !seen.insert(**id)) {
+        return Err(ToolError::rejected(format!("task_ids names {dup} twice")));
+    }
+    let changes =
+        [args.state.is_some(), args.is_now.is_some(), args.delete.is_some()].iter().filter(|c| **c).count();
+    if changes != 1 {
+        return Err(ToolError::rejected("set exactly one of state, is_now or delete"));
+    }
+    if args.delete == Some(false) {
+        return Err(ToolError::rejected("delete only takes true; there is no undelete"));
+    }
+    for id in &args.task_ids {
+        if crate::tasks::get(conn, ctx.user_id, *id).map_err(internal)?.is_none() {
+            return Err(ToolError::not_found(format!("no task {id}; nothing was changed")));
+        }
+    }
+
+    if args.delete == Some(true) {
+        for id in &args.task_ids {
+            // a step deleted with its parent earlier in the batch is already gone
+            crate::tasks::delete_within(conn, ctx.user_id, *id).map_err(internal)?;
+        }
+        return Ok(serde_json::json!({ "deleted": args.task_ids }));
+    }
+
+    let mut demoted = Vec::new();
+    for id in &args.task_ids {
+        let patch = crate::tasks::TaskPatch {
+            state: args.state.clone(),
+            is_now: args.is_now,
+            actor: crate::tasks::Actor::Agent,
+            ..Default::default()
+        };
+        match crate::tasks::update(conn, ctx.user_id, *id, patch) {
+            Ok(Some(t)) => demoted.extend(t.demoted_from_now),
+            Ok(None) => return Err(ToolError::not_found(format!("no task {id}"))),
+            Err(e) => return Err(task_error(e)),
+        }
+    }
+    demoted.sort_unstable();
+    demoted.dedup();
+    let mut out = Vec::new();
+    for id in demoted {
+        let still_now: bool = conn
+            .query_row("SELECT is_now FROM tasks WHERE id = ?1", [id], |r| r.get(0))
+            .map_err(internal)?;
+        if !still_now {
+            out.push(id);
+        }
+    }
+    Ok(serde_json::json!({ "updated": args.task_ids, "demoted_from_now": out }))
+}
+
+fn task_error(e: crate::tasks::UpdateError) -> ToolError {
+    match e {
+        crate::tasks::UpdateError::Db(e) => ToolError::internal(e.to_string()),
+        other => ToolError::rejected(other.to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::tools::{dispatch, registry, PreparedVectors, SessionKind, ToolCtx, ToolError};
