@@ -409,6 +409,67 @@ mod tests {
         }
     }
 
+    /// A config dir whose user lives in `tz`, which is what a bare day means.
+    fn tz_dir(tz: &str) -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("defaults")).unwrap();
+        std::fs::write(
+            tmp.path().join("defaults/user.toml"),
+            format!("display_name = \"X\"\ntimezone = \"{tz}\"\ntemplate = \"default\"\n"),
+        )
+        .unwrap();
+        tmp
+    }
+
+    fn due_of(conn: &rusqlite::Connection, id: i64) -> Option<String> {
+        crate::tasks::get(conn, 1, id).unwrap().unwrap().due_at
+    }
+
+    #[test]
+    fn a_due_date_is_an_instant_or_the_end_of_a_day_where_the_user_lives() {
+        let (conn, _tmp) = env();
+        let tmp = tz_dir("Asia/Tokyo");
+        let call = |args: &str| {
+            dispatch(&conn, &ctx(&tmp, None), SessionKind::Talk, "task_create", args)
+        };
+        let id = call(r#"{"title":"essay","due_at":"2026-09-19T23:59:00+09:00"}"#).unwrap()
+            ["task_id"]
+            .as_i64()
+            .unwrap();
+        assert_eq!(due_of(&conn, id).as_deref(), Some("2026-09-19T14:59:00Z"));
+
+        let bare = call(r#"{"title":"worksheet","due_at":"2026-09-19"}"#).unwrap()["task_id"]
+            .as_i64()
+            .unwrap();
+        assert_eq!(
+            due_of(&conn, bare).as_deref(),
+            Some("2026-09-19T14:59:00Z"),
+            "a bare day is the end of that day in Tokyo"
+        );
+
+        dispatch(
+            &conn,
+            &ctx(&tmp, None),
+            SessionKind::Talk,
+            "task_update",
+            &format!(r#"{{"task_id":{bare},"due_at":"2026-09-20"}}"#),
+        )
+        .unwrap();
+        assert_eq!(due_of(&conn, bare).as_deref(), Some("2026-09-20T14:59:00Z"));
+
+        dispatch(
+            &conn,
+            &ctx(&tmp, None),
+            SessionKind::Talk,
+            "task_update",
+            &format!(r#"{{"task_id":{bare},"due_at":""}}"#),
+        )
+        .unwrap();
+        assert_eq!(due_of(&conn, bare), None, "an empty string clears it");
+
+        assert_eq!(call(r#"{"title":"x","due_at":"friday"}"#).unwrap_err().kind, "rejected");
+    }
+
     #[test]
     fn a_scoped_session_cannot_delete_a_task_outside_its_scope() {
         let (conn, tmp) = env();

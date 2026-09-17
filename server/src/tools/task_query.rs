@@ -461,6 +461,63 @@ mod tests {
     }
 
     #[test]
+    fn task_list_filters_and_sorts_by_due_date() {
+        let (conn, tmp) = env();
+        let yesterday = (jiff::Timestamp::now() - jiff::Span::new().hours(30)).to_string();
+        let soon = (jiff::Timestamp::now() + jiff::Span::new().hours(20)).to_string();
+        let later = (jiff::Timestamp::now() + jiff::Span::new().hours(24 * 10)).to_string();
+        let late = task(&conn, &tmp, &format!(r#"{{"title":"late","due_at":"{yesterday}"}}"#));
+        let today = task(&conn, &tmp, &format!(r#"{{"title":"today","due_at":"{soon}"}}"#));
+        let far = task(&conn, &tmp, &format!(r#"{{"title":"far","due_at":"{later}"}}"#));
+        let undated = task(&conn, &tmp, r#"{"title":"undated"}"#);
+
+        let list = |args: &str| ids(&call(&conn, &tmp, "task_list", args).unwrap(), "tasks");
+        assert_eq!(list("{}"), vec![undated, far, today, late], "added order is untouched");
+        assert_eq!(list(r#"{"sort":"due"}"#), vec![late, today, far, undated], "nulls last");
+        assert_eq!(list(r#"{"overdue":true}"#), vec![late]);
+        assert_eq!(list(r#"{"overdue":false}"#), vec![undated, far, today]);
+
+        let tomorrow = jiff::Timestamp::now().to_zoned(jiff::tz::TimeZone::UTC).date().tomorrow().unwrap();
+        assert_eq!(list(&format!(r#"{{"due_before":"{tomorrow}"}}"#)), vec![today, late]);
+        assert_eq!(list(&format!(r#"{{"due_after":"{tomorrow}"}}"#)), vec![far]);
+        assert_eq!(list(r#"{"due_before":"nonsense"}"#).len(), 0);
+
+        let out = call(&conn, &tmp, "task_list", r#"{"sort":"due"}"#).unwrap();
+        assert_eq!(out["tasks"][0]["due_at"], yesterday);
+        assert!(out["tasks"][3]["due_at"].is_null());
+    }
+
+    #[test]
+    fn a_bad_sort_or_filter_is_rejected_rather_than_ignored() {
+        let (conn, tmp) = env();
+        task(&conn, &tmp, r#"{"title":"x"}"#);
+        for args in [r#"{"sort":"soonest"}"#, r#"{"due_before":"friday"}"#, r#"{"due_after":"2026-13-01"}"#] {
+            assert_eq!(call(&conn, &tmp, "task_list", args).unwrap_err().kind, "rejected", "{args}");
+        }
+    }
+
+    #[test]
+    fn a_task_read_and_a_search_carry_where_the_task_came_from() {
+        let (conn, tmp) = env();
+        let id = task(&conn, &tmp, r#"{"title":"Biology ch.4","due_at":"2026-09-19T14:59:00Z"}"#);
+        conn.execute(
+            "UPDATE tasks SET external_id = 'canvas:12', url = 'https://canvas.example/a/12',
+                              source = 'import' WHERE id = ?1",
+            [id],
+        )
+        .unwrap();
+
+        let out = call(&conn, &tmp, "task_read", &format!(r#"{{"task_id":{id}}}"#)).unwrap();
+        assert_eq!(out["due_at"], "2026-09-19T14:59:00Z");
+        assert_eq!(out["external_id"], "canvas:12");
+        assert_eq!(out["url"], "https://canvas.example/a/12");
+        assert_eq!(out["source"], "import");
+
+        let hits = call(&conn, &tmp, "task_search", r#"{"query":"biology"}"#).unwrap();
+        assert_eq!(hits["tasks"][0]["due_at"], "2026-09-19T14:59:00Z");
+    }
+
+    #[test]
     fn task_list_bounds_its_page_and_reports_the_whole_count() {
         let (conn, tmp) = env();
         for title in ["a", "b", "c", "d"] {
