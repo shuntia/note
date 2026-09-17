@@ -355,8 +355,8 @@ server allows a response to take.
 with the request and reads the text back from `message.reasoning`, or
 `message.reasoning_content` on servers that name it that way. Reasoning is
 shown live and returned with the reply; it is never fed back into the next
-round's messages, and the transcript does not store it — reopening a
-conversation shows its tool calls but no reasoning.
+round's messages. The transcript keeps it on the assistant row, capped at
+32 KiB, so a reopened conversation shows the same traces it showed live.
 
 With an embeddings provider configured, memory search becomes hybrid
 (lexical + vector) and degrades back to lexical automatically when the
@@ -368,13 +368,14 @@ opens one (titled from the message), pass one and the last 32 text turns are
 replayed to the model first. The response carries the `conversation_id`, the
 reply, and `steps` — every tool call the agent made, with its arguments,
 result, and error flag — plus `reasoning`, the session's thinking text (blank
-unless reasoning is configured and the model returned any). The web client
-folds all of it into one collapsed line under the reply that opens onto the
-reasoning and every call.
+unless reasoning is configured and the model returned any), and `thought_ms`,
+the wall clock from the first provider call to the reply.
 Conversations are managed over `GET /api/conversations`,
 `PATCH/DELETE /api/conversations/{id}`, and
 `GET /api/conversations/{id}/messages` (user, assistant, and tool rows in
-order). Agent behavior lives in editable prompt files
+order; every row carries `reasoning` and `thought_ms`, set on the assistant
+row and null everywhere else, a row written before the columns existed
+included). Agent behavior lives in editable prompt files
 (`config/defaults/prompts/`, overridable per user under
 `config/users/<user>/prompts/`) — changing tone or policy is a file edit, not
 a deploy. The editable prompts are also served
@@ -750,13 +751,18 @@ tab bar on phones; a running session takes the whole screen and both step aside
 until Today is raised. Tasks is the list with quick-add, steps, durations, and
 a start that opens a session. Chat is a full conversation surface: a sidebar
 of persisted conversations (new, rename, delete), assistant replies rendered
-as sanitized markdown with copyable code blocks, and one line under each reply
-for what the agent did. That line is live while the reply is still coming —
-"Thinking…", then the sentence for the tool in flight — and settles into
-"Thought · 2 steps" once it lands; it opens onto the model's reasoning and
-every call with its arguments, result, and a spinner or a tick. It is
-collapsed until clicked, and it says "Thinking…" throughout if the socket is
-down. Memory
+as sanitized markdown with copyable code blocks, and one quiet line for what
+the agent did. While the reply is still coming that line reads "Note is
+thinking…", with " · " and the sentence for the tool in flight appended as
+each call is processed; once the reply lands it becomes a header over the
+bubble reading "Note thought for 4 seconds" (or "for a moment" under a
+second, or "Note's steps" for a turn the server timed before it kept
+timings). Clicking the header opens the model's reasoning and every call with
+its arguments, result, and a spinner or a tick; it is collapsed until then,
+and nothing about the tools shows in the reply itself. A turn with neither
+reasoning nor tool calls has no header. Reopening a conversation renders the
+same header from the stored trace, and a dead socket leaves the live line at
+"Note is thinking…" throughout. Memory
 browses everything the agent has saved — filter by category or search, and
 open any fact to read it. Settings gathers
 the home screen (`show_arc_between_sessions`, whether the wait draws its arc,
