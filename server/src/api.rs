@@ -1381,14 +1381,14 @@ const MAX_ENDPOINT_LEN: usize = 2048;
 const MAX_P256DH_LEN: usize = 256;
 const MAX_AUTH_LEN: usize = 64;
 
+/// The server posts to a stored endpoint on every delivery, so the host is
+/// vetted here — once, before it is stored — rather than at delivery time.
 async fn push_subscribe(
     user: CurrentUser,
     State(state): State<AppState>,
     Json(req): Json<SubscribeReq>,
 ) -> impl IntoResponse {
-    let scheme_ok = req.endpoint.starts_with("https://") || req.endpoint.starts_with("http://");
-    if !scheme_ok
-        || req.endpoint.len() > MAX_ENDPOINT_LEN
+    if req.endpoint.len() > MAX_ENDPOINT_LEN
         || req.keys.p256dh.len() > MAX_P256DH_LEN
         || req.keys.auth.len() > MAX_AUTH_LEN
         || req.keys.p256dh.is_empty()
@@ -1396,9 +1396,34 @@ async fn push_subscribe(
     {
         return StatusCode::BAD_REQUEST.into_response();
     }
+    let endpoint = req.endpoint.clone();
+    let vetted = tokio::task::spawn_blocking(move || crate::net::push_endpoint_ok(&endpoint)).await;
+    match vetted {
+        Ok(Ok(())) => {}
+        Ok(Err(reason)) => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({ "error": reason })),
+            )
+                .into_response()
+        }
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
     let conn = state.db.lock().unwrap();
     match crate::push_subs::add(&conn, user.id, &req.endpoint, &req.keys.p256dh, &req.keys.auth) {
-        Ok(()) => StatusCode::OK.into_response(),
+        Ok(crate::push_subs::Added::Stored) => StatusCode::OK.into_response(),
+        Ok(crate::push_subs::Added::Taken) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": "that endpoint belongs to another account" })),
+        )
+            .into_response(),
+        Ok(crate::push_subs::Added::TooMany) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": format!("at most {} devices per account", crate::push_subs::MAX_PER_USER)
+            })),
+        )
+            .into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
