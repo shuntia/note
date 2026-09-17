@@ -130,6 +130,8 @@ const OPERATIONAL_LOG_KINDS: &[&str] = &[
     "delivery_ok",
     "login_error",
     "memory_embed_error",
+    "memory_expired",
+    "nightly_notes_missing",
     "memory_index_error",
     "passkey_added",
     "passkey_removed",
