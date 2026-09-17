@@ -1,11 +1,13 @@
 import { api } from './api'
 
+// `conversation_id` is the thread a check-in opened; null on every other event.
 export type EventFrame = {
   type: 'event'
   title: string
   body: string
   urgency: string
   event_id: number | null
+  conversation_id: number | null
 }
 
 export type AgentEvent =

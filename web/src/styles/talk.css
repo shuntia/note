@@ -1,0 +1,103 @@
+/* ── horizon: chat, the thread's own sheet ───────────────────────── */
+/* Selectors carry the `.chat` ancestor: this sheet is evaluated before the
+   shared one in the module graph, so a bare class here would lose to it. */
+
+/* the shell is a viewport tall while the thread is up, so the thread scrolls
+   inside its pane and the composer never leaves the screen */
+.shell:has(> .view-talk) { height: 100dvh; }
+
+/* the head floats over the top of the thread, on the column's own right edge,
+   and holds the pulse alone */
+.chat .chat-main { position: relative; }
+.chat .chat-head {
+  position: absolute;
+  top: 10px;
+  left: 20px;
+  right: 20px;
+  z-index: 5;
+  display: flex;
+  justify-content: flex-end;
+  max-width: 680px;
+  margin: 0 auto;
+  pointer-events: none;
+}
+.chat .chat-head > * { pointer-events: auto; }
+@media (min-width: 768px) { .chat .chat-head { top: 4px; } }
+
+/* what scrolls under the head fades out beneath it rather than meeting it */
+.chat .chat-pane {
+  mask-image: linear-gradient(to bottom, transparent 6px, #000 54px);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 6px, #000 54px);
+}
+@media (min-width: 768px) {
+  .chat .chat-pane {
+    mask-image: linear-gradient(to bottom, transparent 2px, #000 46px);
+    -webkit-mask-image: linear-gradient(to bottom, transparent 2px, #000 46px);
+  }
+}
+.chat .chat-stream { padding-bottom: 6px; gap: 14px; }
+
+/* the session or the wait, small: a ring on a phone, a bar on a desktop */
+.pulse {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: 36px;
+  padding: 0 13px 0 5px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--haze-strong);
+  color: var(--ink);
+  font: inherit;
+  cursor: pointer;
+  backdrop-filter: blur(10px);
+}
+.pulse:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+.pulse-ring { width: 26px; height: 26px; flex: none; overflow: visible; }
+.pulse-track, .pulse-arc { fill: none; stroke-width: 2.75; stroke-linecap: round; }
+.pulse-track { stroke: var(--track); }
+.pulse-arc { stroke: var(--sun); transition: stroke-dasharray 900ms linear; }
+.pulse.faded .pulse-arc { opacity: 0.7; }
+.pulse-text {
+  font-family: var(--display);
+  font-weight: 500;
+  font-size: 0.9375rem;
+  letter-spacing: -0.02em;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+.pulse.over .pulse-text { color: var(--sun-ink); }
+.pulse-bar { display: none; }
+@media (min-width: 768px) {
+  .pulse { gap: 10px; height: 32px; padding: 0 12px 0 14px; }
+  .pulse-ring { display: none; }
+  .pulse-bar { display: block; width: 88px; height: 3px; border-radius: 2px; background: var(--track); overflow: hidden; }
+  .pulse-fill { display: block; height: 100%; border-radius: 2px; background: var(--sun); transition: width 900ms linear; }
+  .pulse.faded .pulse-fill { opacity: 0.7; }
+}
+
+/* one side's run of bubbles sits closer than the turn between sides */
+.chat .turn.user + .turn.user, .chat .reply + .reply { margin-top: -6px; }
+
+/* what Note did reads as a caption, never as a message */
+.chat .activity-head { font-size: 0.875rem; padding: 2px 6px; }
+@media (prefers-reduced-motion: no-preference) {
+  .chat .reply.fresh { animation: bubble-in 240ms cubic-bezier(0.2, 0.7, 0.3, 1) both; }
+}
+
+/* the composer: its arrow fills once there is something to send */
+.chat .tellnote button { transition: background-color 180ms ease, color 180ms ease; }
+.chat .tellnote.armed button:not(:disabled) { background: var(--ink); color: var(--ivory); }
+
+/* the drawer: a row's actions show themselves only when the row is in hand */
+@media (pointer: fine) and (min-width: 768px) {
+  .chat .chat-row .chat-more-wrap { opacity: 0; transition: opacity 150ms ease; }
+  .chat .chat-row:hover .chat-more-wrap,
+  .chat .chat-row:focus-within .chat-more-wrap,
+  .chat .chat-row[data-active='true'] .chat-more-wrap { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pulse-arc, .pulse-fill, .chat .tellnote button, .chat .chat-row .chat-more-wrap { transition: none; }
+  .chat .reply.fresh { animation: none; }
+}
