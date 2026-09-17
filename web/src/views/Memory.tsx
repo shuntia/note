@@ -1,7 +1,16 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type RefObject,
+} from 'react'
 import { api } from '../api'
 import type { ViewProps } from '../app'
 import { Markdown } from '../markdown'
+import { flip, popOut, rise, settle } from '../motion-gsap'
+import '../styles/memory.css'
 import type { MemoryFact, MemoryHit } from '../types'
 
 // matches the stylesheet's master-detail breakpoint
@@ -65,6 +74,30 @@ function useFacts() {
   return { get: (id: string) => factCache.get(id), want }
 }
 
+// Results arrive as a staggered rise; a row that only changed places slides there.
+function useListMotion(list: RefObject<HTMLUListElement | null>, sig: string) {
+  const tops = useRef(new Map<string, number>())
+  const settled = useRef(false)
+
+  useLayoutEffect(() => {
+    settled.current = true
+    settle([...(list.current?.children ?? [])])
+  }, [sig, list])
+
+  useLayoutEffect(() => {
+    const moves: { el: Element; dy: number }[] = []
+    list.current?.querySelectorAll<HTMLElement>('[data-mem]').forEach((el) => {
+      const id = el.dataset.mem as string
+      const top = el.getBoundingClientRect().top
+      const was = tops.current.get(id)
+      if (was !== undefined) moves.push({ el, dy: was - top })
+      tops.current.set(id, top)
+    })
+    if (settled.current) settled.current = false
+    else flip(moves)
+  })
+}
+
 export function Memory({ notify, refresh, openTalk }: ViewProps) {
   const [draft, setDraft] = useState('')
   const [query, setQuery] = useState('')
@@ -75,6 +108,9 @@ export function Memory({ notify, refresh, openTalk }: ViewProps) {
 
   const facts = useFacts()
   const detail = useRef<HTMLDivElement>(null)
+  const list = useRef<HTMLUListElement>(null)
+  const card = useRef<HTMLElement>(null)
+  useListMotion(list, items?.map((m) => m.id).join() ?? '')
   // request eras: a slow reply must never overwrite the results of a later one
   const listEra = useRef(0)
   const factEra = useRef(0)
@@ -128,6 +164,14 @@ export function Memory({ notify, refresh, openTalk }: ViewProps) {
     detail.current?.scrollIntoView()
   }, [selected])
 
+  // Where the fact replaces the list it rises like a sheet; beside it, it settles.
+  useLayoutEffect(() => {
+    if (fact === null) return
+    rise(card.current, window.matchMedia(SINGLE_PANE).matches ? 28 : 14)
+  }, [fact])
+
+  const closeFact = () => popOut(card.current, () => setSelected(null), true)
+
   const count = items?.length ?? 0
 
   return (
@@ -152,7 +196,7 @@ export function Memory({ notify, refresh, openTalk }: ViewProps) {
         ) : items === null ? null : count === 0 ? (
           <p className="memory-empty">{query ? 'Nothing matches.' : 'Nothing yet.'}</p>
         ) : (
-          <ul className="memory-list">
+          <ul className="memory-list" ref={list}>
             {newestFirst(items, facts.get).map((m) => (
               <MemoryRow
                 key={m.id}
@@ -168,14 +212,16 @@ export function Memory({ notify, refresh, openTalk }: ViewProps) {
       </div>
       <div className="memory-detail" ref={detail}>
         {selected !== null && (
-          <button className="memory-back" onClick={() => setSelected(null)}>
+          <button className="memory-back" onClick={closeFact}>
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <path d="M15 6l-6 6 6 6" />
             </svg>
             Memory
           </button>
         )}
-        {selected !== null && fact !== null && <FactBody fact={fact} openTalk={openTalk} />}
+        {selected !== null && fact !== null && (
+          <FactBody fact={fact} openTalk={openTalk} cardRef={card} />
+        )}
       </div>
     </div>
   )
@@ -217,7 +263,7 @@ function MemoryRow({
   }, [hit.id, saved, onSeen])
 
   return (
-    <li ref={row}>
+    <li ref={row} data-mem={hit.id}>
       <button className="memory-row" aria-current={selected} onClick={() => onOpen(hit.id)}>
         <span className="memory-summary">{hit.summary}</span>
         {saved && <span className="memory-when">{factDate(saved)}</span>}
@@ -226,9 +272,17 @@ function MemoryRow({
   )
 }
 
-function FactBody({ fact, openTalk }: { fact: MemoryFact; openTalk: (draft: string) => void }) {
+function FactBody({
+  fact,
+  openTalk,
+  cardRef,
+}: {
+  fact: MemoryFact
+  openTalk: (draft: string) => void
+  cardRef: RefObject<HTMLElement | null>
+}) {
   return (
-    <article className="memory-card">
+    <article className="memory-card" ref={cardRef}>
       <h2 className="memory-title">{fact.summary}</h2>
       <p className="memory-meta">
         From a chat on {shortDate(fact.created)}
