@@ -202,8 +202,14 @@ pub fn assemble(conn: &Connection, config_dir: &Path, user_id: i64, username: &s
     let activity = recent_activity(conn, user_id)?;
     let notes = read_nightly_notes(config_dir, username);
 
-    let now_s = now_section(&local, &tz_label, now, &events, now_min, &ucfg.nightly_time);
-    let plan_s = plan_section(&events, now_min, tomorrow, crate::plan::exists(conn, user_id, tomorrow)?);
+    let quiet = crate::calendar::quiet_window(conn, user_id, &tz, now)?;
+    let calendar = crate::calendar::occurrences(conn, user_id, today)?;
+
+    let now_s =
+        now_section(&local, &tz_label, now, &events, now_min, &ucfg.nightly_time, quiet.as_ref());
+    let plan_s = plan_section(
+        &events, &calendar, now_min, tomorrow, crate::plan::exists(conn, user_id, tomorrow)?,
+    );
     let settings_s = settings_section(
         &ucfg,
         &tz_label,
@@ -269,6 +275,7 @@ fn now_section(
     events: &[crate::plan::PlanEvent],
     now_min: i64,
     nightly_time: &str,
+    quiet: Option<&crate::calendar::QuietWindow>,
 ) -> String {
     let mut s = String::from("# Now\n\n");
     s.push_str(&format!(
@@ -295,17 +302,43 @@ fn now_section(
         }
     }
     let until = (crate::templates::wall_minutes(nightly_time) - now_min).rem_euclid(24 * 60);
-    s.push_str(&format!("Nightly run {nightly_time}, in {}\n\n", in_words(until)));
+    s.push_str(&format!("Nightly run {nightly_time}, in {}\n", in_words(until)));
+    if let Some(q) = quiet {
+        s.push_str(&format!("Quiet until {} ({})\n", q.end, q.title));
+    }
+    s.push('\n');
+    s
+}
+
+/// The standing commitments a day is built around, above the plan itself. They
+/// are never trimmed, so the list itself is bounded.
+const MAX_CALENDAR_LINES: usize = 12;
+
+fn calendar_lines(calendar: &[crate::calendar::Occurrence]) -> String {
+    if calendar.is_empty() {
+        return String::new();
+    }
+    let mut s = String::from("Calendar:\n");
+    for o in calendar.iter().take(MAX_CALENDAR_LINES) {
+        let marks = if o.quiet { format!("{}, quiet", o.kind) } else { o.kind.clone() };
+        s.push_str(&format!("- {}-{} {} [{marks}]\n", o.start, o.end, o.title));
+    }
+    if let Some(rest) = calendar.len().checked_sub(MAX_CALENDAR_LINES).filter(|n| *n > 0) {
+        s.push_str(&format!("- (+{rest} more)\n"));
+    }
+    s.push('\n');
     s
 }
 
 fn plan_section(
     events: &[crate::plan::PlanEvent],
+    calendar: &[crate::calendar::Occurrence],
     now_min: i64,
     tomorrow: jiff::civil::Date,
     tomorrow_planned: bool,
 ) -> String {
     let mut s = String::from("# Today's plan\n\n");
+    s.push_str(&calendar_lines(calendar));
     if events.is_empty() {
         s.push_str("(no plan generated for today)\n");
     }
@@ -694,6 +727,68 @@ mod tests {
         assert!(out.contains("Asia/Tokyo"), "{out}");
         assert!(out.contains("- 09:00-09:15 checkin_call [pending] routine via voice"), "{out}");
         assert!(out.contains("event_fired"), "{out}");
+    }
+
+    fn commitment(conn: &rusqlite::Connection, uid: i64, title: &str, start: &str, end: &str,
+                  kind: &str, quiet: bool) {
+        crate::calendar::create(conn, uid, crate::calendar::Fields {
+            title: title.into(), kind: kind.into(), quiet: Some(quiet),
+            start_time: start.into(), end_time: end.into(),
+            days: Some(crate::calendar::day_mask(&["mon"]).unwrap()), ..Default::default()
+        }).unwrap();
+    }
+
+    #[test]
+    fn the_now_line_says_how_long_the_quiet_lasts() {
+        let tmp = cfg_dir();
+        let (conn, uid) = user();
+        plan_today(&conn, uid, vec![routine("checkin_call", "09:00")]);
+        commitment(&conn, uid, "swim practice", "20:00", "22:00", "fixed", true);
+
+        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        assert!(out.contains("Quiet until 22:00 (swim practice)"), "{out}");
+    }
+
+    #[test]
+    fn a_day_with_nothing_quiet_running_says_nothing_about_it() {
+        let tmp = cfg_dir();
+        let (conn, uid) = user();
+        plan_today(&conn, uid, vec![routine("checkin_call", "09:00")]);
+        commitment(&conn, uid, "commute", "20:00", "22:00", "busy", false);
+
+        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        assert!(!out.contains("Quiet until"), "{out}");
+    }
+
+    #[test]
+    fn the_plan_lists_the_days_commitments_before_its_events() {
+        let tmp = cfg_dir();
+        let (conn, uid) = user();
+        plan_today(&conn, uid, vec![routine("checkin_call", "09:00")]);
+        commitment(&conn, uid, "school", "08:15", "15:30", "fixed", true);
+        commitment(&conn, uid, "bin day", "07:00", "07:30", "note", false);
+
+        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        let plan = out.find("# Today's plan").expect("a plan section");
+        let calendar = out[plan..].find("Calendar:").expect("a calendar sub-line") + plan;
+        let school = out[plan..].find("- 08:15-15:30 school [fixed, quiet]").expect("school") + plan;
+        let event = out[plan..].find("- 09:00-09:15 checkin_call").expect("the event") + plan;
+        assert!(out.contains("- 07:00-07:30 bin day [note]"), "{out}");
+        assert!(calendar < school && school < event, "{out}");
+    }
+
+    #[test]
+    fn a_crowded_calendar_is_capped_and_counted() {
+        let tmp = cfg_dir();
+        let (conn, uid) = user();
+        plan_today(&conn, uid, vec![routine("checkin_call", "09:00")]);
+        for i in 0..MAX_CALENDAR_LINES + 3 {
+            commitment(&conn, uid, &format!("class {i}"), &format!("{:02}:00", i),
+                       &format!("{:02}:30", i), "fixed", true);
+        }
+        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        assert_eq!(out.matches("class ").count(), MAX_CALENDAR_LINES);
+        assert!(out.contains("- (+3 more)"), "{out}");
     }
 
     #[test]
