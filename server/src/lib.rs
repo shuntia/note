@@ -100,6 +100,8 @@ pub struct AppState {
     pub channels: Vec<Arc<dyn crate::channels::Channel>>,
     pub secure_cookies: bool,
     pub login_limiter: Arc<crate::auth::LoginLimiter>,
+    /// Bounds concurrent password hashes; see `auth::MAX_CONCURRENT_LOGINS`.
+    pub login_slots: Arc<tokio::sync::Semaphore>,
     pub talk_gate: Arc<TalkGate>,
     pub admin_limiter: Arc<crate::auth::LoginLimiter>,
     /// Caps password re-checks on the enrolment routes.
@@ -129,6 +131,9 @@ impl AppState {
             channels: vec![ws],
             secure_cookies: false,
             login_limiter: Arc::new(crate::auth::LoginLimiter::new()),
+            login_slots: Arc::new(tokio::sync::Semaphore::new(
+                crate::auth::MAX_CONCURRENT_LOGINS,
+            )),
             talk_gate: Arc::new(TalkGate::new()),
             admin_limiter: Arc::new(crate::auth::LoginLimiter::new()),
             security_limiter: Arc::new(crate::auth::LoginLimiter::new()),

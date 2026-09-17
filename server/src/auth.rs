@@ -17,8 +17,13 @@ const MAX_USERNAME_LEN: usize = 64;
 pub const MAX_ATTEMPTS: u32 = 10;
 pub const WINDOW_MINS: i64 = 15;
 
-/// Per-username fixed-window attempt counter; keys are usernames (attackers
-/// rotating usernames still pay the argon2 cost per attempt).
+/// How many argon2 verifications may be in flight server-wide. The login route
+/// is reachable unauthenticated and every call costs ~19 MiB and a blocking
+/// thread, so admission is bounded before the hash rather than by username.
+pub const MAX_CONCURRENT_LOGINS: usize = 4;
+
+/// Per-username fixed-window counter of *failed* attempts, consulted only after
+/// a verification has already failed, so a correct password is never refused.
 #[derive(Default)]
 pub struct LoginLimiter {
     attempts: Mutex<HashMap<String, (u32, jiff::Timestamp)>>,
