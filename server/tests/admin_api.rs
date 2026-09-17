@@ -380,3 +380,19 @@ async fn requiring_totp_still_rejects_a_password_without_a_code() {
     let res = app.oneshot(req(Method::POST, "/api/admin/elevate", &session, Some(r#"{"password":"pw"}"#))).await.unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn an_admin_cannot_reset_another_admins_password() {
+    let (app, _session, cookies, _state, _cfg) = elevated_app().await;
+    let res = app.clone().oneshot(req(Method::POST, "/api/admin/users", &cookies, Some(r#"{"username":"peer","password":"pw"}"#))).await.unwrap();
+    assert_eq!(res.status(), StatusCode::CREATED);
+    let peer_id = json(res).await["id"].as_i64().unwrap();
+    let res = app.clone().oneshot(req(Method::PATCH, &format!("/api/admin/users/{peer_id}"), &cookies, Some(r#"{"role":"admin"}"#))).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = app.clone().oneshot(req(Method::PATCH, &format!("/api/admin/users/{peer_id}"), &cookies, Some(r#"{"password":"taken"}"#))).await.unwrap();
+    assert_eq!(res.status(), StatusCode::CONFLICT, "a peer admin's password is not yours to reset");
+    let res = app.clone().oneshot(req(Method::PATCH, "/api/admin/users/1", &cookies, Some(r#"{"password":"mine"}"#))).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK, "your own password stays resettable");
+    let peer = common::login(&app, "peer", "pw").await;
+    assert!(!peer.is_empty(), "the peer admin still signs in with the untouched password");
+}

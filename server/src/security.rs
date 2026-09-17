@@ -504,11 +504,22 @@ async fn password_refused(
     if !state.security_limiter.try_attempt(&user.username, now) {
         return Some(error(StatusCode::TOO_MANY_REQUESTS, "too many attempts"));
     }
+    let Ok(slot) = state.login_slots.clone().try_acquire_owned() else {
+        return Some(
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [(axum::http::header::RETRY_AFTER, "2")],
+                Json(serde_json::json!({ "error": "too many sign-ins in flight; try again" })),
+            )
+                .into_response(),
+        );
+    };
     let st = state.clone();
     let id = user.id;
     let verified = tokio::task::spawn_blocking(move || {
+        let _slot = slot;
         let hash = {
-            let conn = st.db.lock().unwrap();
+            let conn = st.db();
             auth::stored_hash(&conn, id)
         };
         hash.map(|h| auth::verify_against(&password, h.as_deref()))
@@ -525,7 +536,7 @@ async fn password_refused(
 }
 
 async fn overview(user: CurrentUser, State(state): State<AppState>) -> Response {
-    let conn = state.db.lock().unwrap();
+    let conn = state.db();
     let result =
         (|| -> rusqlite::Result<_> { Ok((list(&conn, user.id)?, totp_state(&conn, user.id)?)) })();
     let Ok((passkeys, (enabled, pending))) = result else {
@@ -554,7 +565,7 @@ async fn passkey_challenge(
         return refused;
     }
     let existing = {
-        let conn = state.db.lock().unwrap();
+        let conn = state.db();
         match (count(&conn, user.id), credentials(&conn, user.id)) {
             (Ok(held), _) if held as usize >= MAX_PASSKEYS => {
                 return error(StatusCode::CONFLICT, &SaveError::TooMany.to_string())
@@ -596,7 +607,7 @@ async fn passkey_finish(
         Ok(key) => key,
         Err(e) => return error(StatusCode::UNPROCESSABLE_ENTITY, &e.to_string()),
     };
-    let conn = state.db.lock().unwrap();
+    let conn = state.db();
     match add(&conn, user.id, &req.name, &key) {
         Ok(info) => {
             let _ = crate::log::record(
@@ -626,7 +637,7 @@ async fn passkey_rename(
     Path(id): Path<i64>,
     Json(req): Json<RenameReq>,
 ) -> Response {
-    let conn = state.db.lock().unwrap();
+    let conn = state.db();
     match rename(&conn, user.id, id, &req.name) {
         Ok(Some(info)) => Json(info).into_response(),
         Ok(None) => error(StatusCode::NOT_FOUND, "no such passkey"),
@@ -644,7 +655,7 @@ async fn passkey_delete(
     if let Some(refused) = password_refused(&state, &user, req.password).await {
         return refused;
     }
-    let conn = state.db.lock().unwrap();
+    let conn = state.db();
     match remove(&conn, user.id, id) {
         Ok(Some(info)) => {
             let _ = crate::log::record(
@@ -668,7 +679,7 @@ async fn totp_start_route(
     if let Some(refused) = password_refused(&state, &user, req.password).await {
         return refused;
     }
-    let conn = state.db.lock().unwrap();
+    let conn = state.db();
     match totp_start(&conn, user.id) {
         Ok(secret) => Json(serde_json::json!({
             "secret_base32": secret,
@@ -691,7 +702,7 @@ async fn totp_confirm_route(
     State(state): State<AppState>,
     Json(req): Json<CodeReq>,
 ) -> Response {
-    let conn = state.db.lock().unwrap();
+    let conn = state.db();
     match totp_confirm(&conn, user.id, &req.code, jiff::Timestamp::now()) {
         Ok(true) => {
             let _ = crate::log::record(&conn, Some(user.id), "totp_enrolled", &user.username);
@@ -710,7 +721,7 @@ async fn totp_delete(
     if let Some(refused) = password_refused(&state, &user, req.password).await {
         return refused;
     }
-    let conn = state.db.lock().unwrap();
+    let conn = state.db();
     match totp_remove(&conn, user.id) {
         Ok(()) => {
             let _ = crate::log::record(&conn, Some(user.id), "totp_removed", &user.username);

@@ -204,7 +204,7 @@ impl FromRequestParts<AppState> for Elevated {
         let AdminUser(user) = AdminUser::from_request_parts(parts, state).await?;
         let token = grant_token(&parts.headers).ok_or_else(elevation_required)?;
         let now = jiff::Timestamp::now().as_second();
-        let conn = state.db.lock().unwrap();
+        let conn = state.db();
         match live_grant(&conn, &user, &token, now) {
             Ok(Some(_)) => Ok(Elevated { user, grant: token }),
             Ok(None) => Err(elevation_required()),
@@ -237,7 +237,7 @@ async fn no_store(req: axum::extract::Request, next: axum::middleware::Next) -> 
 }
 
 fn record(state: &AppState, actor: i64, kind: &str, detail: &str) {
-    let conn = state.db.lock().unwrap();
+    let conn = state.db();
     let _ = crate::log::record(&conn, Some(actor), kind, detail);
 }
 
@@ -265,7 +265,7 @@ impl Methods {
 }
 
 fn methods_for(state: &AppState, user_id: i64) -> rusqlite::Result<Methods> {
-    let conn = state.db.lock().unwrap();
+    let conn = state.db();
     let (passkey, own_totp) = crate::security::user_factors(&conn, user_id)?;
     Ok(Methods {
         passkey: passkey && state.passkeys.available(),
@@ -277,7 +277,7 @@ async fn gate(AdminUser(user): AdminUser, State(state): State<AppState>, headers
     let now = jiff::Timestamp::now().as_second();
     let expires = match grant_token(&headers) {
         Some(token) => {
-            let conn = state.db.lock().unwrap();
+            let conn = state.db();
             match live_grant(&conn, &user, &token, now) {
                 Ok(e) => e,
                 Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
@@ -349,7 +349,7 @@ pub fn elevate_blocking(
     now: jiff::Timestamp,
 ) -> Result<ElevateOutcome> {
     let (hash, user_seed, methods) = {
-        let conn = state.db.lock().unwrap();
+        let conn = state.db();
         let (passkey, own_totp) = crate::security::user_factors(&conn, user.id)?;
         (
             auth::stored_hash(&conn, user.id)?,
@@ -387,7 +387,7 @@ pub fn elevate_blocking(
     if !password_ok {
         return Ok(ElevateOutcome::Denied);
     }
-    let conn = state.db.lock().unwrap();
+    let conn = state.db();
     match proof {
         Proof::Passkey(result) => {
             if !crate::security::record_use(&conn, user.id, &result, now)? {
@@ -420,7 +420,7 @@ async fn elevate_challenge(AdminUser(user): AdminUser, State(state): State<AppSt
         );
     }
     let credentials = {
-        let conn = state.db.lock().unwrap();
+        let conn = state.db();
         match crate::security::credentials(&conn, user.id) {
             Ok(keys) => keys,
             Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
@@ -470,9 +470,18 @@ async fn elevate(
             None => SecondFactor::None,
         },
     };
+    let Ok(slot) = state.login_slots.clone().try_acquire_owned() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(header::RETRY_AFTER, "2")],
+            Json(serde_json::json!({ "error": "too many sign-ins in flight; try again" })),
+        )
+            .into_response();
+    };
     let st = state.clone();
     let u = user.clone();
     let result = tokio::task::spawn_blocking(move || {
+        let _slot = slot;
         elevate_blocking(&st, &u, &req.password, factor, now)
     })
     .await;
@@ -504,7 +513,7 @@ async fn elevate(
 
 async fn drop_grant(AdminUser(user): AdminUser, State(state): State<AppState>, headers: HeaderMap) -> Response {
     if let Some(token) = grant_token(&headers) {
-        let conn = state.db.lock().unwrap();
+        let conn = state.db();
         let _ = conn.execute(
             "DELETE FROM admin_grants WHERE token = ?1 AND user_id = ?2",
             (token, user.id),
@@ -528,7 +537,7 @@ fn file_len(path: &FsPath) -> u64 {
 async fn status(_e: Elevated, State(state): State<AppState>) -> Response {
     let now = jiff::Timestamp::now();
     let (users, sessions, push) = {
-        let conn = state.db.lock().unwrap();
+        let conn = state.db();
         let r = (|| -> rusqlite::Result<_> {
             Ok((
                 count(&conn, "SELECT COUNT(*) FROM users")?,
@@ -601,7 +610,7 @@ pub fn list_users(conn: &Connection, now: jiff::Timestamp) -> rusqlite::Result<V
 }
 
 async fn users_list(_e: Elevated, State(state): State<AppState>) -> Response {
-    let conn = state.db.lock().unwrap();
+    let conn = state.db();
     match list_users(&conn, jiff::Timestamp::now()) {
         Ok(v) => Json(v).into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
@@ -636,7 +645,7 @@ async fn users_create(
     let st = state.clone();
     let (username, password, admin) = (req.username, req.password, req.admin);
     let result = tokio::task::spawn_blocking(move || {
-        let conn = st.db.lock().unwrap();
+        let conn = st.db();
         auth::create_user(&conn, &username, &password, admin).map(|id| (id, username, admin))
     })
     .await;
@@ -743,7 +752,7 @@ async fn users_patch(
         return error(StatusCode::UNPROCESSABLE_ENTITY, "password must not be empty");
     }
     let mut changed = {
-        let conn = state.db.lock().unwrap();
+        let conn = state.db();
         match apply_user_patch(&conn, actor.id, id, req.role.as_deref(), req.disabled) {
             Ok(c) => c,
             Err(PatchError::NotFound) => return error(StatusCode::NOT_FOUND, "user not found"),
@@ -752,10 +761,19 @@ async fn users_patch(
         }
     };
     if let Some(password) = req.password {
+        let target_is_admin = {
+            let conn = state.db();
+            conn.query_row("SELECT role FROM users WHERE id = ?1", [id], |r| r.get::<_, String>(0))
+                .map(|r| r == "admin")
+                .unwrap_or(false)
+        };
+        if id != actor.id && target_is_admin {
+            return error(StatusCode::CONFLICT, "you can't reset another admin's password");
+        }
         let st = state.clone();
         let keep = actor.session_token.clone();
         let result = tokio::task::spawn_blocking(move || {
-            let conn = st.db.lock().unwrap();
+            let conn = st.db();
             auth::set_password(&conn, id, &password)?;
             // every other session of the account ends with the old password
             conn.execute(
@@ -782,7 +800,7 @@ async fn users_revoke(
     Path(id): Path<i64>,
 ) -> Response {
     let revoked = {
-        let conn = state.db.lock().unwrap();
+        let conn = state.db();
         conn.execute(
             "DELETE FROM sessions WHERE user_id = ?1 AND token != ?2",
             (id, &actor.session_token),
@@ -810,7 +828,7 @@ struct LogQuery {
 async fn log_list(_e: Elevated, State(state): State<AppState>, Query(q): Query<LogQuery>) -> Response {
     let limit = q.limit.unwrap_or(LOG_LIMIT_DEFAULT).clamp(1, LOG_LIMIT_MAX);
     let kind = q.kind.filter(|k| !k.is_empty());
-    let conn = state.db.lock().unwrap();
+    let conn = state.db();
     let result = (|| -> rusqlite::Result<serde_json::Value> {
         let mut stmt = conn.prepare(
             "SELECT id, ts, user_id, kind, detail FROM event_log
@@ -873,7 +891,7 @@ mod inspect {
     }
 
     async fn user_overview(_e: Elevated, State(state): State<AppState>, Path(id): Path<i64>) -> Response {
-        let conn = state.db.lock().unwrap();
+        let conn = state.db();
         let username = match user_or_404(&conn, id) {
             Ok(u) => u,
             Err(r) => return *r,
@@ -943,7 +961,7 @@ mod inspect {
         Json(req): Json<ConfigReq>,
     ) -> Response {
         let username = {
-            let conn = state.db.lock().unwrap();
+            let conn = state.db();
             match user_or_404(&conn, id) {
                 Ok(u) => u,
                 Err(r) => return *r,
@@ -967,7 +985,7 @@ mod inspect {
         State(state): State<AppState>,
         Path((id, cid)): Path<(i64, i64)>,
     ) -> Response {
-        let conn = state.db.lock().unwrap();
+        let conn = state.db();
         match crate::talk::owned(&conn, id, cid) {
             Ok(true) => {}
             Ok(false) => return error(StatusCode::NOT_FOUND, "conversation not found"),
@@ -985,7 +1003,7 @@ mod inspect {
         Path((id, mid)): Path<(i64, String)>,
     ) -> Response {
         let username = {
-            let conn = state.db.lock().unwrap();
+            let conn = state.db();
             match user_or_404(&conn, id) {
                 Ok(u) => u,
                 Err(r) => return *r,
@@ -1009,7 +1027,7 @@ mod inspect {
         Path((id, mid)): Path<(i64, String)>,
         Json(req): Json<MemoryReq>,
     ) -> Response {
-        let conn = state.db.lock().unwrap();
+        let conn = state.db();
         let username = match user_or_404(&conn, id) {
             Ok(u) => u,
             Err(r) => return *r,
@@ -1074,7 +1092,7 @@ mod inspect {
         State(state): State<AppState>,
         Json(req): Json<SqlReq>,
     ) -> Response {
-        let conn = state.db.lock().unwrap();
+        let conn = state.db();
         let _ = crate::log::record(&conn, Some(actor.id), "admin_inspect_sql", req.sql.trim());
         match run_sql(&conn, &req.sql) {
             Ok(v) => Json(v).into_response(),
