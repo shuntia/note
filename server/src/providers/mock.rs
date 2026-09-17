@@ -14,6 +14,7 @@ pub struct RecordedChat {
 #[derive(Default)]
 pub struct MockLLM {
     script: Mutex<VecDeque<ChatResponse>>,
+    thinking: Mutex<VecDeque<String>>,
     seen: Mutex<Vec<RecordedChat>>,
 }
 
@@ -23,7 +24,13 @@ impl MockLLM {
     }
 
     pub fn scripted(responses: Vec<ChatResponse>) -> Self {
-        Self { script: Mutex::new(responses.into()), seen: Mutex::new(Vec::new()) }
+        Self { script: Mutex::new(responses.into()), ..Self::default() }
+    }
+
+    /// One reasoning text per scripted round, in order.
+    pub fn thinking(self, texts: Vec<&str>) -> Self {
+        *self.thinking.lock().unwrap() = texts.into_iter().map(String::from).collect();
+        self
     }
 
     pub fn seen(&self) -> Vec<RecordedChat> {
@@ -47,6 +54,11 @@ impl LLMProvider for MockLLM {
             text: "(mock: no scripted response)".into(),
             tool_calls: vec![],
         }))
+    }
+
+    fn chat_with_reasoning(&self, req: &ChatRequest) -> Result<(ChatResponse, String)> {
+        let resp = self.chat(req)?;
+        Ok((resp, self.thinking.lock().unwrap().pop_front().unwrap_or_default()))
     }
 }
 

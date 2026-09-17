@@ -54,6 +54,10 @@ pub struct ProviderConfig {
     /// a Cloudflare tunnel allows a response to take.
     #[serde(default = "default_provider_timeout")]
     pub timeout_secs: u64,
+    /// Reasoning effort asked of an OpenAI-compatible endpoint: "none" (the
+    /// default), "low", "medium" or "high".
+    #[serde(default)]
+    pub reasoning: String,
 }
 
 pub const DEFAULT_PROVIDER_TIMEOUT_SECS: u64 = 45;

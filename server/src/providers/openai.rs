@@ -6,16 +6,35 @@ pub struct OpenAILLM {
     base_url: String,
     model: String,
     api_key: String,
+    reasoning: Option<String>,
 }
 
 impl OpenAILLM {
-    pub fn new(base_url: &str, model: &str, api_key: &str, timeout_secs: u64) -> Self {
+    pub fn new(
+        base_url: &str,
+        model: &str,
+        api_key: &str,
+        timeout_secs: u64,
+        reasoning: Option<&str>,
+    ) -> Self {
         Self {
             agent: super::http_agent(timeout_secs),
             base_url: base_url.trim_end_matches('/').to_string(),
             model: model.to_string(),
             api_key: api_key.to_string(),
+            reasoning: reasoning.map(String::from),
         }
+    }
+
+    fn post(&self, req: &ChatRequest) -> Result<serde_json::Value> {
+        let mut request = self.agent.post(&format!("{}/chat/completions", self.base_url));
+        if !self.api_key.is_empty() {
+            request = request.set("Authorization", &format!("Bearer {}", self.api_key));
+        }
+        Ok(request
+            .send_json(body(&self.model, req, self.reasoning.as_deref()))
+            .context("openai request failed")?
+            .into_json()?)
     }
 }
 
@@ -48,7 +67,9 @@ fn wrap_tool(t: &serde_json::Value) -> serde_json::Value {
     })
 }
 
-pub fn body(model: &str, req: &ChatRequest) -> serde_json::Value {
+/// `reasoning` asks an endpoint that supports it (OpenRouter) for the model's
+/// reasoning text; the field is absent when no effort is configured.
+pub fn body(model: &str, req: &ChatRequest, reasoning: Option<&str>) -> serde_json::Value {
     let mut messages: Vec<serde_json::Value> = vec![serde_json::json!({"role": "system", "content": req.system})];
     for m in req.messages {
         match m {
@@ -75,6 +96,9 @@ pub fn body(model: &str, req: &ChatRequest) -> serde_json::Value {
         }
     }
     let mut v = serde_json::json!({"model": model, "messages": messages});
+    if let Some(effort) = reasoning {
+        v["reasoning"] = serde_json::json!({ "effort": effort });
+    }
     if !req.tools.is_empty() {
         let tools: Vec<serde_json::Value> = req.tools.iter().map(wrap_tool).collect();
         v["tools"] = serde_json::Value::Array(tools);
@@ -102,6 +126,19 @@ fn tool_args(v: &serde_json::Value) -> String {
         None if v.is_null() => String::new(),
         None => v.to_string(),
     }
+}
+
+/// OpenRouter returns the model's reasoning in `message.reasoning`; some
+/// OpenAI-compatible servers name it `reasoning_content`.
+pub fn reasoning_text(v: &serde_json::Value) -> String {
+    let message = &v["choices"][0]["message"];
+    for key in ["reasoning", "reasoning_content"] {
+        let text = content_text(&message[key]);
+        if !text.trim().is_empty() {
+            return text;
+        }
+    }
+    String::new()
 }
 
 pub fn parse(v: &serde_json::Value) -> Result<ChatResponse> {
@@ -142,15 +179,13 @@ pub fn parse_embeddings(v: &serde_json::Value) -> Result<Vec<Vec<f32>>> {
 
 impl LLMProvider for OpenAILLM {
     fn chat(&self, req: &ChatRequest) -> Result<ChatResponse> {
-        let mut request = self.agent.post(&format!("{}/chat/completions", self.base_url));
-        if !self.api_key.is_empty() {
-            request = request.set("Authorization", &format!("Bearer {}", self.api_key));
-        }
-        let resp: serde_json::Value = request
-            .send_json(body(&self.model, req))
-            .context("openai request failed")?
-            .into_json()?;
-        parse(&resp)
+        parse(&self.post(req)?)
+    }
+
+    fn chat_with_reasoning(&self, req: &ChatRequest) -> Result<(ChatResponse, String)> {
+        let resp = self.post(req)?;
+        let reasoning = if self.reasoning.is_some() { reasoning_text(&resp) } else { String::new() };
+        Ok((parse(&resp)?, reasoning))
     }
 }
 
@@ -182,7 +217,7 @@ mod tests {
             Message::ToolResult { call_id: "c1".into(), content: "{\"task_id\":1}".into(), is_error: false },
             Message::ToolResult { call_id: "c2".into(), content: "{\"kind\":\"rejected\"}".into(), is_error: true },
         ];
-        let b = body("gpt-x", &ChatRequest { system: "sys", messages: &msgs, tools: &tools });
+        let b = body("gpt-x", &ChatRequest { system: "sys", messages: &msgs, tools: &tools }, None);
         let m = b["messages"].as_array().unwrap();
         assert_eq!(m[0]["role"], "system");
         assert_eq!(m[2]["tool_calls"][0]["function"]["name"], "task_create");
@@ -194,8 +229,32 @@ mod tests {
     #[test]
     fn body_omits_tools_key_when_empty() {
         let msgs = vec![Message::User("hi".into())];
-        let b = body("gpt-x", &ChatRequest { system: "sys", messages: &msgs, tools: &[] });
+        let b = body("gpt-x", &ChatRequest { system: "sys", messages: &msgs, tools: &[] }, None);
         assert!(b.get("tools").is_none());
+        assert!(b.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn body_carries_the_reasoning_effort_only_when_configured() {
+        let msgs = vec![Message::User("hi".into())];
+        let req = ChatRequest { system: "sys", messages: &msgs, tools: &[] };
+        assert!(body("gpt-x", &req, None).get("reasoning").is_none());
+        assert_eq!(body("gpt-x", &req, Some("high"))["reasoning"]["effort"], "high");
+    }
+
+    #[test]
+    fn reasoning_is_read_from_either_field_name() {
+        let with_reasoning = serde_json::json!({"choices":[{"message":{
+            "content": "sure", "reasoning": "the user wants a task, so I will make one"
+        }}]});
+        assert_eq!(reasoning_text(&with_reasoning), "the user wants a task, so I will make one");
+        let compat = serde_json::json!({"choices":[{"message":{
+            "content": "sure", "reasoning_content": "thinking"
+        }}]});
+        assert_eq!(reasoning_text(&compat), "thinking");
+        let plain = serde_json::json!({"choices":[{"message":{"content":"sure"}}]});
+        assert_eq!(reasoning_text(&plain), "");
+        assert_eq!(parse(&with_reasoning).unwrap().text, "sure");
     }
 
     #[test]

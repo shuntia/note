@@ -34,6 +34,12 @@ pub struct ChatResponse {
 
 pub trait LLMProvider: Send + Sync {
     fn chat(&self, req: &ChatRequest) -> Result<ChatResponse>;
+
+    /// The reply plus the model's reasoning text for this round, blank when the
+    /// provider returns none or reasoning is off.
+    fn chat_with_reasoning(&self, req: &ChatRequest) -> Result<(ChatResponse, String)> {
+        Ok((self.chat(req)?, String::new()))
+    }
 }
 
 pub trait EmbeddingsProvider: Send + Sync {
@@ -80,7 +86,13 @@ pub fn build(cfg: &crate::config::ProvidersConfig) -> Result<(Arc<dyn LLMProvide
             "openai" => {
                 anyhow::ensure!(!p.base_url.is_empty(), "openai llm provider requires base_url");
                 let key = read_key(p, false)?;
-                Arc::new(openai::OpenAILLM::new(&p.base_url, &p.model, &key, p.timeout_secs))
+                Arc::new(openai::OpenAILLM::new(
+                    &p.base_url,
+                    &p.model,
+                    &key,
+                    p.timeout_secs,
+                    reasoning_effort(p)?,
+                ))
             }
             other => anyhow::bail!("unknown llm provider kind: {other}"),
         },
@@ -98,6 +110,15 @@ pub fn build(cfg: &crate::config::ProvidersConfig) -> Result<(Arc<dyn LLMProvide
         },
     };
     Ok((llm, emb))
+}
+
+/// The configured reasoning effort, or `None` for the default "none".
+fn reasoning_effort(p: &crate::config::ProviderConfig) -> Result<Option<&str>> {
+    match p.reasoning.as_str() {
+        "" | "none" => Ok(None),
+        e @ ("low" | "medium" | "high") => Ok(Some(e)),
+        other => anyhow::bail!("unknown reasoning effort: {other}"),
+    }
 }
 
 /// Key resolution: `api_key_file` wins when set (a configured file that is
@@ -135,6 +156,7 @@ mod tests {
         let req = ChatRequest { system: "", messages: &[], tools: &[] };
         let resp = llm.chat(&req).unwrap();
         assert!(resp.text.is_empty());
+        assert_eq!(llm.chat_with_reasoning(&req).unwrap().1, "");
         assert!(resp.tool_calls.is_empty());
         assert!(emb.is_none());
     }
@@ -146,6 +168,7 @@ mod tests {
                 kind: "carrier-pigeon".into(),
                 base_url: String::new(), model: String::new(), api_key_env: String::new(),
                 api_key_file: std::path::PathBuf::new(), timeout_secs: 45,
+                reasoning: String::new(),
             }),
             embeddings: None,
         };
@@ -163,6 +186,7 @@ mod tests {
                 kind: "anthropic".into(), base_url: String::new(),
                 model: "m".into(), api_key_env: "NOTE_TEST_MISSING_KEY".into(),
                 api_key_file: std::path::PathBuf::new(), timeout_secs: 45,
+                reasoning: String::new(),
             }),
             embeddings: None,
         };
@@ -177,8 +201,20 @@ mod tests {
         crate::config::ProviderConfig {
             kind: "openai".into(), base_url: "http://localhost:1/v1".into(),
             model: "m".into(), api_key_env: String::new(), api_key_file: path,
-            timeout_secs: 45,
+            timeout_secs: 45, reasoning: String::new(),
         }
+    }
+
+    #[test]
+    fn reasoning_effort_defaults_to_none_and_rejects_junk() {
+        let mut cfg = file_key_config(std::path::PathBuf::new());
+        assert_eq!(reasoning_effort(&cfg).unwrap(), None);
+        cfg.reasoning = "none".into();
+        assert_eq!(reasoning_effort(&cfg).unwrap(), None);
+        cfg.reasoning = "high".into();
+        assert_eq!(reasoning_effort(&cfg).unwrap(), Some("high"));
+        cfg.reasoning = "extreme".into();
+        assert!(reasoning_effort(&cfg).is_err());
     }
 
     #[test]
