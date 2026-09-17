@@ -243,6 +243,21 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE talk_messages ADD COLUMN reasoning TEXT;
     ALTER TABLE talk_messages ADD COLUMN thought_ms INTEGER;
     ",
+    // v17
+    "
+    ALTER TABLE tasks ADD COLUMN due_at TEXT
+        CHECK (due_at IS NULL OR parent_id IS NULL);
+    ALTER TABLE tasks ADD COLUMN external_id TEXT;
+    ALTER TABLE tasks ADD COLUMN url TEXT NOT NULL DEFAULT '';
+    CREATE UNIQUE INDEX idx_tasks_external
+        ON tasks(user_id, external_id) WHERE external_id IS NOT NULL;
+    CREATE TABLE task_tombstones (
+        user_id INTEGER NOT NULL REFERENCES users(id),
+        external_id TEXT NOT NULL,
+        deleted_at TEXT NOT NULL,
+        PRIMARY KEY (user_id, external_id)
+    );
+    ",
 ];
 
 pub fn open(path: &Path) -> Result<Connection> {
@@ -682,6 +697,82 @@ mod tests {
         )
         .unwrap();
         assert_eq!(trace(), (Some("weighed it up".to_string()), Some(1400)));
+    }
+
+    #[test]
+    fn v17_adds_the_due_date_the_external_identity_and_the_tombstones() {
+        let conn = open_memory().unwrap();
+        let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, MIGRATIONS.len() as i64);
+        conn.execute(
+            "INSERT INTO users (username, pass_hash, role) VALUES ('a','h','member')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tasks (user_id, title, created_at, updated_at)
+             VALUES (1, 'essay', 'now', 'now')",
+            [],
+        )
+        .unwrap();
+        let (due, ext, url): (Option<String>, Option<String>, String) = conn
+            .query_row("SELECT due_at, external_id, url FROM tasks WHERE id = 1", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .unwrap();
+        assert!(due.is_none() && ext.is_none());
+        assert_eq!(url, "");
+
+        conn.execute(
+            "UPDATE tasks SET due_at = '2026-09-19T14:59:00Z', external_id = 'canvas:1' WHERE id = 1",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tasks (user_id, title, parent_id, created_at, updated_at)
+             VALUES (1, 'step', 1, 'now', 'now')",
+            [],
+        )
+        .unwrap();
+        assert!(
+            conn.execute("UPDATE tasks SET due_at = '2026-09-19T14:59:00Z' WHERE id = 2", [])
+                .is_err(),
+            "a step carries no due date of its own"
+        );
+
+        conn.execute(
+            "INSERT INTO tasks (user_id, title, external_id, created_at, updated_at)
+             VALUES (1, 'other', NULL, 'now', 'now')",
+            [],
+        )
+        .unwrap();
+        assert!(
+            conn.execute("UPDATE tasks SET external_id = 'canvas:1' WHERE id = 3", []).is_err(),
+            "one external id belongs to one task per user"
+        );
+        crate::auth::create_user(&conn, "bo", "pw", false).unwrap();
+        conn.execute(
+            "INSERT INTO tasks (user_id, title, external_id, created_at, updated_at)
+             VALUES (2, 'theirs', 'canvas:1', 'now', 'now')",
+            [],
+        )
+        .expect("the same external id in another account is a different task");
+
+        conn.execute(
+            "INSERT INTO task_tombstones (user_id, external_id, deleted_at)
+             VALUES (1, 'canvas:1', 'now')",
+            [],
+        )
+        .unwrap();
+        assert!(
+            conn.execute(
+                "INSERT INTO task_tombstones (user_id, external_id, deleted_at)
+                 VALUES (1, 'canvas:1', 'later')",
+                [],
+            )
+            .is_err(),
+            "one external id is buried once"
+        );
     }
 
     #[test]
