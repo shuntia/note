@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 4857414d95d88e8faa27b28720b3014ada5f985d890d044b808e95ed13748013 # shrinks to (name, raw) = ("schedule_slide", "{\"event_id\": 1, \"minutes\": 9223372036854775807}"), kind_idx = 0

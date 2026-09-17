@@ -49,7 +49,9 @@ fn task_error(e: UpdateError) -> ToolError {
         UpdateError::InvalidState(s) => ToolError::rejected(format!("invalid state: {s}")),
         UpdateError::InvalidDuration(m)
         | UpdateError::InvalidHierarchy(m)
-        | UpdateError::NowFull(m) => ToolError::rejected(m),
+        | UpdateError::NowFull(m)
+        | UpdateError::Invalid(m)
+        | UpdateError::ExternalIdTaken(m) => ToolError::rejected(m),
         UpdateError::Db(e) => ToolError::internal(e.to_string()),
     }
 }
@@ -81,8 +83,8 @@ pub fn create(
         NewTask {
             title: title.to_owned(),
             duration_min: args.duration_min,
-            parent_id: None,
             is_now: args.is_now,
+            ..NewTask::default()
         },
         "agent",
         Actor::Agent,
@@ -385,9 +387,7 @@ mod tests {
                 1,
                 crate::tasks::NewTask {
                     title: title.into(),
-                    duration_min: None,
-                    parent_id: None,
-                    is_now: false,
+                    ..crate::tasks::NewTask::default()
                 },
                 "manual",
                 crate::tasks::Actor::User,

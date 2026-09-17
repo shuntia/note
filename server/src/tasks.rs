@@ -3,8 +3,15 @@ use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
 pub const STATES: &[&str] = &["open", "in_progress", "done", "dropped"];
+/// Where a task came from: typed by the user, written by the agent, or
+/// mirrored from another system by an importer.
+pub const SOURCES: &[&str] = &["manual", "agent", "import"];
 const DURATION_STEP_MIN: u32 = 5;
 const MAX_DURATION_MIN: u32 = 24 * 60;
+pub const MAX_TITLE_BYTES: usize = 500;
+const MAX_TEXT_BYTES: usize = 16 * 1024;
+const MAX_EXTERNAL_ID_BYTES: usize = 200;
+const MAX_URL_BYTES: usize = 2 * 1024;
 
 /// How many tasks Now holds at once — a list short enough to finish.
 pub const NOW_CAP: usize = 3;
@@ -21,6 +28,10 @@ pub enum UpdateError {
     InvalidHierarchy(String),
     #[error("{0}")]
     NowFull(String),
+    #[error("{0}")]
+    Invalid(String),
+    #[error("{0}")]
+    ExternalIdTaken(String),
     #[error(transparent)]
     Db(#[from] rusqlite::Error),
 }
@@ -57,6 +68,11 @@ pub struct Task {
     pub parent_id: Option<i64>,
     pub is_now: bool,
     pub updated_at: String,
+    /// RFC 3339 UTC, like `updated_at`; only a top-level task carries one.
+    pub due_at: Option<String>,
+    /// The importer's own id for this task, opaque here and unique per user.
+    pub external_id: Option<String>,
+    pub url: String,
 }
 
 /// One top-level task with its steps; `children` is always present so the
@@ -69,14 +85,29 @@ pub struct TaskNode {
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NewTask {
     pub title: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub notes: Option<String>,
     #[serde(default)]
     pub duration_min: Option<u32>,
     #[serde(default)]
     pub parent_id: Option<i64>,
     #[serde(default)]
     pub is_now: bool,
+    #[serde(default)]
+    pub due_at: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub external_id: Option<String>,
+    /// Overrides the caller's default source; the routes decide what a
+    /// principal may write.
+    #[serde(default)]
+    pub source: Option<String>,
 }
 
 /// `Option<Option<T>>` fields separate "absent, leave alone" (`None`) from
@@ -93,6 +124,11 @@ pub struct TaskPatch {
     #[serde(default, deserialize_with = "present")]
     pub parent_id: Option<Option<i64>>,
     pub is_now: Option<bool>,
+    #[serde(default, deserialize_with = "present")]
+    pub due_at: Option<Option<String>>,
+    pub url: Option<String>,
+    #[serde(default, deserialize_with = "present")]
+    pub external_id: Option<Option<String>>,
     #[serde(skip)]
     pub actor: Actor,
 }
@@ -122,11 +158,15 @@ fn row_to_task(r: &rusqlite::Row) -> rusqlite::Result<Task> {
         parent_id: r.get(8)?,
         is_now: r.get(9)?,
         updated_at: r.get(10)?,
+        due_at: r.get(11)?,
+        external_id: r.get(12)?,
+        url: r.get(13)?,
     })
 }
 
 const COLS: &str = "id, title, description, state, source, notes, duration_min, \
-                    duration_source, parent_id, is_now, updated_at";
+                    duration_source, parent_id, is_now, updated_at, due_at, \
+                    external_id, url";
 
 fn checked_duration(min: u32) -> Result<u32, UpdateError> {
     if min == 0 || !min.is_multiple_of(DURATION_STEP_MIN) || min > MAX_DURATION_MIN {
@@ -135,6 +175,84 @@ fn checked_duration(min: u32) -> Result<u32, UpdateError> {
         )));
     }
     Ok(min)
+}
+
+/// A due date is stored the way `updated_at` is, so parsing and ordering are
+/// the same everywhere: RFC 3339, normalised to UTC.
+fn checked_due(raw: &str) -> Result<String, UpdateError> {
+    raw.parse::<jiff::Timestamp>()
+        .map(|t| t.to_string())
+        .map_err(|_| UpdateError::Invalid(format!("due_at must be an RFC 3339 instant, got {raw:?}")))
+}
+
+fn checked_title(raw: &str) -> Result<String, UpdateError> {
+    let title = raw.trim();
+    if title.is_empty() || title.len() > MAX_TITLE_BYTES {
+        return Err(UpdateError::Invalid(format!("title must be 1..={MAX_TITLE_BYTES} bytes")));
+    }
+    Ok(title.to_owned())
+}
+
+fn checked_text(field: &str, value: &str) -> Result<(), UpdateError> {
+    if value.len() > MAX_TEXT_BYTES {
+        return Err(UpdateError::Invalid(format!(
+            "{field} must be at most {MAX_TEXT_BYTES} bytes"
+        )));
+    }
+    Ok(())
+}
+
+fn checked_url(raw: &str) -> Result<String, UpdateError> {
+    if raw.len() > MAX_URL_BYTES {
+        return Err(UpdateError::Invalid(format!("url must be at most {MAX_URL_BYTES} bytes")));
+    }
+    Ok(raw.to_owned())
+}
+
+pub fn checked_external_id(raw: &str) -> Result<String, UpdateError> {
+    let id = raw.trim();
+    if id.is_empty() || id.len() > MAX_EXTERNAL_ID_BYTES {
+        return Err(UpdateError::Invalid(format!(
+            "external_id must be 1..={MAX_EXTERNAL_ID_BYTES} bytes"
+        )));
+    }
+    Ok(id.to_owned())
+}
+
+fn checked_source(raw: &str) -> Result<String, UpdateError> {
+    if !SOURCES.contains(&raw) {
+        return Err(UpdateError::Invalid(format!(
+            "source must be one of {}, got {raw:?}",
+            SOURCES.join(", ")
+        )));
+    }
+    Ok(raw.to_owned())
+}
+
+/// Steps hang under a deadline rather than carrying one of their own, which is
+/// also what the schema enforces.
+fn checked_due_placement(parent_id: Option<i64>, due_at: Option<&str>) -> Result<(), UpdateError> {
+    if parent_id.is_some() && due_at.is_some() {
+        return Err(UpdateError::Invalid(
+            "a step carries no due date of its own; the task it belongs to holds it".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// The id of the task holding this external id, when some other task does.
+fn external_id_holder(
+    conn: &Connection,
+    user_id: i64,
+    external_id: &str,
+    except: Option<i64>,
+) -> rusqlite::Result<Option<i64>> {
+    conn.query_row(
+        "SELECT id FROM tasks WHERE user_id = ?1 AND external_id = ?2 AND id IS NOT ?3",
+        (user_id, external_id, except),
+        |r| r.get(0),
+    )
+    .optional()
 }
 
 fn has_children(conn: &Connection, task_id: i64) -> rusqlite::Result<bool> {
@@ -220,6 +338,8 @@ fn check_now_room(
     Err(UpdateError::NowFull(format!("Now already holds {NOW_CAP} tasks")))
 }
 
+/// `source` is the caller's default; a body that names one of `SOURCES` wins,
+/// which is how an importer marks what it mirrored.
 pub fn create(
     conn: &Connection,
     user_id: i64,
@@ -227,9 +347,26 @@ pub fn create(
     source: &str,
     actor: Actor,
 ) -> Result<Task, UpdateError> {
+    let title = checked_title(&new.title)?;
     let duration = new.duration_min.map(checked_duration).transpose()?;
+    let description = new.description.unwrap_or_default();
+    let notes = new.notes.unwrap_or_default();
+    checked_text("description", &description)?;
+    checked_text("notes", &notes)?;
+    let due_at = new.due_at.as_deref().map(checked_due).transpose()?;
+    checked_due_placement(new.parent_id, due_at.as_deref())?;
+    let url = checked_url(new.url.as_deref().unwrap_or_default())?;
+    let external_id = new.external_id.as_deref().map(checked_external_id).transpose()?;
+    let source = checked_source(new.source.as_deref().unwrap_or(source))?;
     if let Some(p) = new.parent_id {
         checked_parent(conn, user_id, p, None)?;
+    }
+    if let Some(id) = &external_id {
+        if let Some(held) = external_id_holder(conn, user_id, id, None)? {
+            return Err(UpdateError::ExternalIdTaken(format!(
+                "external_id {id} already belongs to task {held}"
+            )));
+        }
     }
     if new.is_now {
         if new.parent_id.is_some() {
@@ -242,19 +379,24 @@ pub fn create(
     let duration_source = if duration.is_some() { actor.as_str() } else { "none" };
     conn.execute(
         "INSERT INTO tasks
-            (user_id, title, source, parent_id, duration_min, duration_source, is_now,
-             created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
-        (
+            (user_id, title, description, notes, source, parent_id, duration_min,
+             duration_source, is_now, due_at, url, external_id, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13)",
+        rusqlite::params![
             user_id,
-            &new.title,
-            source,
+            &title,
+            &description,
+            &notes,
+            &source,
             new.parent_id,
             duration,
             duration_source,
             new.is_now,
+            due_at,
+            url,
+            external_id,
             now(),
-        ),
+        ],
     )?;
     let id = conn.last_insert_rowid();
     trim_now(conn, user_id, id)?;
@@ -421,7 +563,7 @@ pub fn split(
                 title: s.title,
                 duration_min: Some(s.duration_min),
                 parent_id: Some(task_id),
-                is_now: false,
+                ..NewTask::default()
             },
             &parent.source,
             actor,
@@ -557,6 +699,28 @@ pub fn update(
         Some(Some(m)) => Some(Some(checked_duration(m)?)),
         other => other,
     };
+    let title = match &patch.title {
+        Some(t) => Some(checked_title(t)?),
+        None => None,
+    };
+    if let Some(d) = &patch.description {
+        checked_text("description", d)?;
+    }
+    if let Some(n) = &patch.notes {
+        checked_text("notes", n)?;
+    }
+    let due_at = match &patch.due_at {
+        Some(Some(raw)) => Some(Some(checked_due(raw)?)),
+        other => other.as_ref().map(|_| None),
+    };
+    let url = match &patch.url {
+        Some(u) => Some(checked_url(u)?),
+        None => None,
+    };
+    let external_id = match &patch.external_id {
+        Some(Some(raw)) => Some(Some(checked_external_id(raw)?)),
+        other => other.as_ref().map(|_| None),
+    };
     let Some(before) = get(conn, user_id, task_id)? else { return Ok(None) };
     if let Some(Some(p)) = patch.parent_id {
         if has_children(conn, task_id)? {
@@ -572,6 +736,16 @@ pub fn update(
         Some(Some(m)) => (Some(m), patch.actor.as_str().to_string()),
     };
     let parent_id = patch.parent_id.unwrap_or(before.parent_id);
+    let due_at = due_at.unwrap_or(before.due_at);
+    checked_due_placement(parent_id, due_at.as_deref())?;
+    let external_id = external_id.unwrap_or(before.external_id);
+    if let Some(id) = &external_id {
+        if let Some(held) = external_id_holder(conn, user_id, id, Some(task_id))? {
+            return Err(UpdateError::ExternalIdTaken(format!(
+                "external_id {id} already belongs to task {held}"
+            )));
+        }
+    }
     let is_now = match patch.is_now {
         Some(true) => {
             if parent_id.is_some() {
@@ -596,10 +770,13 @@ pub fn update(
             duration_source = ?6,
             parent_id = ?7,
             is_now = ?8,
-            updated_at = ?9
-         WHERE id = ?10",
-        (
-            &patch.title,
+            due_at = ?9,
+            url = COALESCE(?10, url),
+            external_id = ?11,
+            updated_at = ?12
+         WHERE id = ?13",
+        rusqlite::params![
+            &title,
             &patch.description,
             &patch.state,
             &patch.notes,
@@ -607,9 +784,12 @@ pub fn update(
             duration_source,
             parent_id,
             is_now,
+            due_at,
+            url,
+            external_id,
             now(),
             task_id,
-        ),
+        ],
     )?;
     let parent = match patch.state {
         Some(_) => cascade(conn, user_id, task_id, parent_id)?,
