@@ -12,6 +12,17 @@ pub struct BuiltPush {
     pub body: Vec<u8>,
 }
 
+/// What the service worker decrypts: the notification's text, plus the app
+/// route to open when it is clicked.
+pub fn payload_json(msg: &OutboundMessage) -> String {
+    let mut payload = serde_json::json!({ "title": msg.title, "body": msg.body });
+    if let Some(id) = msg.conversation_id {
+        payload["conversation_id"] = serde_json::json!(id);
+        payload["url"] = serde_json::json!(super::conversation_path(id));
+    }
+    payload.to_string()
+}
+
 /// Builds the encrypted, VAPID-signed request for one subscription — pure so
 /// tests can pin the wire shape without any network.
 pub fn build_push(
@@ -26,7 +37,7 @@ pub fn build_push(
     sig.add_claim("sub", subject);
     let signature = sig.build().map_err(|e| anyhow::anyhow!("vapid sign: {e}"))?;
 
-    let payload = serde_json::json!({ "title": msg.title, "body": msg.body }).to_string();
+    let payload = payload_json(msg);
     let mut b = WebPushMessageBuilder::new(&info);
     b.set_payload(web_push::ContentEncoding::Aes128Gcm, payload.as_bytes());
     b.set_vapid_signature(signature);
@@ -187,7 +198,20 @@ v5mC8db8ZSK9ruR2mEgvMEvePYwohpr98g==
             body: "stretch break".into(),
             urgency: Urgency::Normal,
             event_id: Some(3),
+            conversation_id: None,
         }
+    }
+
+    #[test]
+    fn the_payload_carries_the_thread_route_only_when_there_is_one() {
+        let plain: serde_json::Value = serde_json::from_str(&payload_json(&msg())).unwrap();
+        assert_eq!(plain, serde_json::json!({ "title": "Nudge", "body": "stretch break" }));
+
+        let mut checkin = msg();
+        checkin.conversation_id = Some(42);
+        let v: serde_json::Value = serde_json::from_str(&payload_json(&checkin)).unwrap();
+        assert_eq!(v["conversation_id"], 42);
+        assert_eq!(v["url"], "/#/chat/42");
     }
 
     #[test]

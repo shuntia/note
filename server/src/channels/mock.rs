@@ -55,6 +55,7 @@ mod tests {
             body: "b".into(),
             urgency: Urgency::Low,
             event_id: None,
+            conversation_id: None,
         };
         ch.deliver(1, "aki", &m).unwrap();
         ch.set_fail(true);

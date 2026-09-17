@@ -60,7 +60,7 @@ impl NtfyChannel {
             base_url: cfg.base_url.trim_end_matches('/').to_string(),
             topic_prefix: cfg.topic_prefix.clone(),
             token,
-            click_url: public_base_url.to_string(),
+            click_url: public_base_url.trim_end_matches('/').to_string(),
             agent,
         })
     }
@@ -82,13 +82,17 @@ impl Channel for NtfyChannel {
     /// The JSON publish form rather than the header form: a title is often the
     /// event's own words, and HTTP header values cannot carry non-ASCII bytes.
     fn deliver(&self, _user_id: i64, username: &str, msg: &OutboundMessage) -> Result<()> {
+        let click = match msg.conversation_id {
+            Some(id) => format!("{}{}", self.click_url, super::conversation_path(id)),
+            None => self.click_url.clone(),
+        };
         let body = serde_json::json!({
             "topic": self.topic(username),
             "title": msg.title,
             "message": msg.body,
             "priority": priority(msg.urgency),
             "tags": ["bell"],
-            "click": self.click_url,
+            "click": click,
         });
         let mut req = self.agent.post(&self.base_url);
         if let Some(token) = &self.token {
@@ -186,7 +190,25 @@ mod tests {
             body: "how is the day going?".into(),
             urgency,
             event_id: Some(7),
+            conversation_id: None,
         }
+    }
+
+    #[test]
+    fn a_checkin_clicks_through_to_its_thread() {
+        let (base, rx) = one_shot("200 OK");
+        let cfg = config_dir();
+        let ch = NtfyChannel::new(
+            cfg.path().to_path_buf(),
+            &settings(&base),
+            "https://note.example/",
+        )
+        .unwrap();
+        let mut checkin = msg(Urgency::High);
+        checkin.conversation_id = Some(5);
+        ch.deliver(1, "aki", &checkin).unwrap();
+        let raw = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert_eq!(body_json(&raw)["click"], "https://note.example/#/chat/5");
     }
 
     #[test]
@@ -261,6 +283,7 @@ mod tests {
             body: "今日はどう？".into(),
             urgency: Urgency::High,
             event_id: Some(7),
+            conversation_id: None,
         };
         ch.deliver(1, "aki", &msg).unwrap();
         let raw = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();

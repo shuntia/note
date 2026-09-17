@@ -134,6 +134,7 @@ impl Channel for WsChannel {
             "body": msg.body,
             "urgency": msg.urgency.as_str(),
             "event_id": msg.event_id,
+            "conversation_id": msg.conversation_id,
         })
         .to_string();
         if self.hub.send(user_id, &text) == 0 {
@@ -155,6 +156,7 @@ mod tests {
             body: "at 09:00".into(),
             urgency: Urgency::High,
             event_id: Some(7),
+            conversation_id: Some(3),
         }
     }
 
@@ -263,5 +265,12 @@ mod tests {
         assert_eq!(v["title"], "Check-in");
         assert_eq!(v["urgency"], "high");
         assert_eq!(v["event_id"], 7);
+        assert_eq!(v["conversation_id"], 3);
+
+        let mut plain = msg();
+        plain.conversation_id = None;
+        ch.deliver(1, "aki", &plain).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
+        assert!(v["conversation_id"].is_null());
     }
 }

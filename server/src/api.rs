@@ -1242,6 +1242,7 @@ async fn notify_test(user: CurrentUser, State(state): State<AppState>) -> impl I
         body: "Test notification".into(),
         urgency: crate::channels::Urgency::Normal,
         event_id: None,
+        conversation_id: None,
     };
     let db = state.db.clone();
     let ladder = state.channels.clone();
