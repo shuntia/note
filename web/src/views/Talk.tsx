@@ -42,18 +42,16 @@ function applyFrame(prev: Live, frame: AgentFrame): Live {
   if (ev.kind !== 'tool_call' && ev.kind !== 'tool_result') return at
   const steps = at.steps.slice()
   const before = steps[ev.index]
-  steps[ev.index] =
-    ev.kind === 'tool_call'
-      ? { kind: 'tool', key: `live-${ev.index}`, name: ev.name, args: ev.args, result: '', isError: false, running: true }
-      : {
-          kind: 'tool',
-          key: `live-${ev.index}`,
-          name: ev.name,
-          args: before?.args ?? '',
-          result: ev.result,
-          isError: ev.is_error,
-          running: false,
-        }
+  const call = ev.kind === 'tool_call'
+  steps[ev.index] = {
+    kind: 'tool',
+    key: `live-${ev.index}`,
+    name: ev.name,
+    args: call ? ev.args : (before?.args ?? ''),
+    result: call ? '' : ev.result,
+    isError: call ? false : ev.is_error,
+    running: call,
+  }
   return { ...at, steps }
 }
 
@@ -151,10 +149,9 @@ function Receipt({ item }: { item: ToolItem }) {
 function status(steps: ToolItem[], reasoning: string, live: boolean): string {
   const busy = steps.find((s) => s.running)
   if (live) return busy ? `${doing(busy.name, busy.args)}…` : 'Thinking…'
-  const thought = reasoning ? 'Thought' : ''
-  if (steps.length === 0) return thought || 'No steps'
+  if (steps.length === 0) return 'Thought'
   const count = `${steps.length} step${steps.length === 1 ? '' : 's'}`
-  return thought ? `${thought} · ${count}` : count
+  return reasoning ? `Thought · ${count}` : count
 }
 
 // One line while it runs and after: the reasoning and the calls stay a chevron away.
@@ -200,7 +197,7 @@ function grouped(items: Item[]): (ActivityItem | TurnItem)[] {
   for (const item of items) {
     const last = out[out.length - 1]
     if (item.kind !== 'tool') out.push(item)
-    else if (last?.kind === 'activity') last.steps.push(item)
+    else if (last?.kind === 'activity') out[out.length - 1] = { ...last, steps: [...last.steps, item] }
     else out.push({ kind: 'activity', key: item.key, reasoning: '', steps: [item] })
   }
   for (let i = 0; i < out.length - 1; i++) {
