@@ -183,6 +183,7 @@ pub fn delete(
     ctx: &ToolCtx,
     args: DeleteArgs,
 ) -> Result<serde_json::Value, ToolError> {
+    in_scope(conn, ctx, args.task_id, true)?;
     match crate::tasks::delete_within(conn, ctx.user_id, args.task_id) {
         Ok(true) => Ok(serde_json::json!({ "task_id": args.task_id, "deleted": true })),
         Ok(false) => Err(ToolError::not_found(format!("no task {}", args.task_id))),
@@ -215,5 +216,73 @@ pub fn split(
         })),
         Ok(None) => Err(ToolError::not_found(format!("no task {}", args.task_id))),
         Err(e) => Err(task_error(e)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::tools::{dispatch, SessionKind, ToolCtx};
+
+    fn env() -> (rusqlite::Connection, tempfile::TempDir) {
+        let conn = crate::db::open_memory().unwrap();
+        conn.execute(
+            "INSERT INTO users (username, pass_hash, role) VALUES ('aki', 'x', 'member')",
+            [],
+        )
+        .unwrap();
+        for title in ["scoped", "someone elses"] {
+            crate::tasks::create(
+                &conn,
+                1,
+                crate::tasks::NewTask {
+                    title: title.into(),
+                    duration_min: None,
+                    parent_id: None,
+                    is_now: false,
+                },
+                "manual",
+                crate::tasks::Actor::User,
+            )
+            .unwrap();
+        }
+        (conn, tempfile::tempdir().unwrap())
+    }
+
+    fn ctx<'a>(tmp: &'a tempfile::TempDir, scope: Option<i64>) -> ToolCtx<'a> {
+        ToolCtx {
+            config_dir: tmp.path(),
+            data_dir: tmp.path(),
+            user_id: 1,
+            username: "aki",
+            vectors: crate::tools::PreparedVectors::default(),
+            task_scope: scope,
+        }
+    }
+
+    #[test]
+    fn a_scoped_session_cannot_delete_a_task_outside_its_scope() {
+        let (conn, tmp) = env();
+        let e = dispatch(
+            &conn,
+            &ctx(&tmp, Some(1)),
+            SessionKind::Talk,
+            "task_delete",
+            r#"{"task_id":2}"#,
+        )
+        .unwrap_err();
+        assert_eq!(e.kind, "rejected");
+        assert!(crate::tasks::get(&conn, 1, 2).unwrap().is_some());
+
+        dispatch(&conn, &ctx(&tmp, Some(1)), SessionKind::Talk, "task_delete", r#"{"task_id":1}"#)
+            .unwrap();
+        assert!(crate::tasks::get(&conn, 1, 1).unwrap().is_none());
+    }
+
+    #[test]
+    fn an_unscoped_session_deletes_any_of_the_users_tasks() {
+        let (conn, tmp) = env();
+        dispatch(&conn, &ctx(&tmp, None), SessionKind::Talk, "task_delete", r#"{"task_id":2}"#)
+            .unwrap();
+        assert!(crate::tasks::get(&conn, 1, 2).unwrap().is_none());
     }
 }
