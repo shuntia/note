@@ -188,6 +188,9 @@ const CHECKIN: &[&str] = &[
     "schedule_snooze",
     "schedule_drop",
     "schedule_reshape",
+    "task_list",
+    "task_search",
+    "task_read",
 ];
 const TALK: &[&str] = &[
     "memory_query",
@@ -202,6 +205,10 @@ const TALK: &[&str] = &[
     "schedule_drop",
     "schedule_reshape",
     "context_edit",
+    "task_list",
+    "task_search",
+    "task_read",
+    "task_bulk_update",
 ];
 const IMPORT: &[&str] = &["task_brief"];
 const INBOX: &[&str] = &["memory_query", "memory_read", "inbox_decide"];
@@ -221,6 +228,10 @@ const NIGHTLY: &[&str] = &[
     "schedule_insert",
     "notify_send",
     "nightly_notes_write",
+    "task_list",
+    "task_search",
+    "task_read",
+    "task_bulk_update",
 ];
 
 /// A tool whose success is the session's whole job: `run_session` returns on
@@ -333,6 +344,33 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
              lines, no markdown headers, nothing that will read as stale. It is injected \
              into every session tomorrow, so write it for yourself, not for the user.",
             schema::<context_ops::NightlyNotesArgs>(),
+        "task_list" => (
+            "Survey the user's top-level tasks, newest first, each with its step count and how \
+             many of those are done. Filter by state, by a case-insensitive keyword over title, \
+             description and notes, by when the task was added, or to the Now list; total says \
+             how many matched, which can be more than one page holds.",
+            schema::<task_query::ListArgs>(),
+        ),
+        "task_search" => (
+            "Find the user's tasks by the words in them — the way to turn a task the user names \
+             in passing into an id. Every word must match: title matches come first, then tasks \
+             whose description or notes carry the words, live ones before finished ones. \
+             Top-level tasks only, at most 20, dropped ones left out.",
+            schema::<task_query::SearchArgs>(),
+        ),
+        "task_read" => (
+            "Read one task in full: description, notes, state, source, duration, whether it is in \
+             Now, when it was added and last touched, and its steps with their own states and \
+             durations. The list tools carry titles only; this is how to see the rest.",
+            schema::<task_query::ReadArgs>(),
+        ),
+        "task_bulk_update" => (
+            "Apply one change to a batch of up to 50 tasks: set them all to a state, move them \
+             all in or out of Now, or delete them all. Set exactly one of state, is_now or \
+             delete. All or nothing — an id that is not the user's rejects the whole call and \
+             nothing changes. Now holds at most 3, and the tasks it pushes out come back in \
+             demoted_from_now; steps are never in Now.",
+            schema::<task_query::BulkUpdateArgs>(),
         ),
         _ => unreachable!("describe covers every registered tool"),
     }
@@ -404,6 +442,10 @@ fn run(
         "schedule_insert" => schedule_ops::insert(conn, ctx, parse(raw)?),
         "notify_send" => outreach_ops::send(conn, ctx, parse(raw)?),
         "nightly_notes_write" => context_ops::nightly_notes_write(conn, ctx, parse(raw)?),
+        "task_list" => task_query::list(conn, ctx, parse(raw)?),
+        "task_search" => task_query::search(conn, ctx, parse(raw)?),
+        "task_read" => task_query::read(conn, ctx, parse(raw)?),
+        "task_bulk_update" => task_query::bulk_update(conn, ctx, parse(raw)?),
         _ => unreachable!("registry guarantees a known name"),
     }
 }

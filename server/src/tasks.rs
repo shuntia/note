@@ -2,7 +2,7 @@ use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
-const STATES: &[&str] = &["open", "in_progress", "done", "dropped"];
+pub const STATES: &[&str] = &["open", "in_progress", "done", "dropped"];
 const DURATION_STEP_MIN: u32 = 5;
 const MAX_DURATION_MIN: u32 = 24 * 60;
 
