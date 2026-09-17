@@ -135,11 +135,6 @@
 .sheet-date { padding: 8px 14px; border-radius: 999px; background: var(--earth); color: var(--ink); font-size: 0.9375rem; font-variant-numeric: tabular-nums; }
 .sheet-save { margin-top: 4px; }
 
-/* Mounted under Today until the calendar takes its place in Today's own scroll: below
-   the morning letter, with the page held tall enough to keep the ground under it. */
-.today:has(> .cal) { min-height: 1560px; }
-.today > .cal { position: absolute; top: 720px; left: 50%; transform: translateX(-50%); }
-
 @media (min-width: 768px) {
   .cal.desktop { width: min(1200px, calc(100vw - 240px)); gap: 20px; }
   .cal.desktop .cal-month { font-size: 1.75rem; cursor: default; }
@@ -150,7 +145,6 @@
   .week .band.note .t { font-size: 0.8rem; }
   .week-hour { font-size: 0.72rem; }
   .sheet { left: auto; right: 24px; bottom: 24px; width: 420px; border-radius: var(--radius-xl); padding-bottom: 28px; }
-  .today > .cal { left: 120px; transform: none; }
 }
 
 @media (max-width: 767.98px) {
