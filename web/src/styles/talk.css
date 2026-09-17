@@ -81,13 +81,37 @@
 
 /* what Note did reads as a caption, never as a message */
 .chat .activity-head { font-size: 0.875rem; padding: 2px 6px; }
+.chat .activity.live { transition: opacity 350ms ease; }
+.chat .activity.live.held { opacity: 0; }
 @media (prefers-reduced-motion: no-preference) {
   .chat .reply.fresh { animation: bubble-in 240ms cubic-bezier(0.2, 0.7, 0.3, 1) both; }
 }
 
+/* the text on its way from the composer to the thread */
+.send-ghost {
+  position: fixed;
+  z-index: 30;
+  box-sizing: border-box;
+  margin: 0;
+  pointer-events: none;
+  font-family: var(--sans);
+  color: var(--ink);
+  background: transparent;
+  border-radius: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  transition:
+    background-color 450ms cubic-bezier(0.16, 1, 0.3, 1),
+    color 450ms cubic-bezier(0.16, 1, 0.3, 1),
+    border-radius 450ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.send-ghost.bubble { background: var(--ink); color: var(--ivory); border-radius: 18px; }
+
 /* the composer: its arrow fills once there is something to send */
 .chat .tellnote button { transition: background-color 180ms ease, color 180ms ease; }
 .chat .tellnote.armed button:not(:disabled) { background: var(--ink); color: var(--ivory); }
+.chat .tellnote textarea::placeholder { transition: opacity 300ms ease; }
+.chat .tellnote textarea.flying::placeholder { opacity: 0; }
 
 /* the drawer: a row's actions show themselves only when the row is in hand */
 @media (pointer: fine) and (min-width: 768px) {
@@ -98,6 +122,9 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .pulse-arc, .pulse-fill, .chat .tellnote button, .chat .chat-row .chat-more-wrap { transition: none; }
+  .pulse-arc, .pulse-fill, .send-ghost, .chat .activity.live,
+  .chat .tellnote button, .chat .tellnote textarea::placeholder,
+  .chat .chat-row .chat-more-wrap { transition: none; }
+  .chat .activity.live.held { opacity: 1; }
   .chat .reply.fresh { animation: none; }
 }
