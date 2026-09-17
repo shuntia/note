@@ -12,6 +12,9 @@ pub struct MemoryFile {
     pub summary: String,
     pub body: String,
     pub supersedes: Option<String>,
+    /// The date after which the fact stops mattering; the nightly sweep
+    /// archives it once it is more than a day past.
+    pub until: Option<String>,
     pub created: String,
     pub archived: bool,
 }
@@ -55,6 +58,9 @@ fn render(f: &MemoryFile) -> String {
     if let Some(s) = &f.supersedes {
         fm.push_str(&format!("supersedes: {s}\n"));
     }
+    if let Some(u) = &f.until {
+        fm.push_str(&format!("until: {u}\n"));
+    }
     format!("{fm}---\n\n{}\n", f.body)
 }
 
@@ -67,6 +73,7 @@ fn parse(raw: &str, archived: bool) -> Result<MemoryFile> {
         summary: String::new(),
         body: body.trim().to_string(),
         supersedes: None,
+        until: None,
         created: String::new(),
         archived,
     };
@@ -78,6 +85,7 @@ fn parse(raw: &str, archived: bool) -> Result<MemoryFile> {
             "summary" => f.summary = v.into(),
             "created" => f.created = v.into(),
             "supersedes" => f.supersedes = Some(v.into()),
+            "until" => f.until = Some(v.into()),
             _ => {}
         }
     }
@@ -107,9 +115,9 @@ fn locate(data_dir: &Path, user: &str, id: &str) -> Option<(PathBuf, bool)> {
 
 fn index_insert(conn: &Connection, user: &str, f: &MemoryFile, path: &Path) -> rusqlite::Result<()> {
     conn.execute(
-        "INSERT OR REPLACE INTO memory_index (user, id, category, summary, archived, path)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        (user, &f.id, &f.category, &f.summary, f.archived as i64, path.to_string_lossy()),
+        "INSERT OR REPLACE INTO memory_index (user, id, category, summary, archived, path, until)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        (user, &f.id, &f.category, &f.summary, f.archived as i64, path.to_string_lossy(), &f.until),
     )?;
     conn.execute("DELETE FROM memory_fts WHERE user = ?1 AND id = ?2", (user, &f.id))?;
     if !f.archived {
@@ -176,6 +184,21 @@ pub fn add(
     body: &str,
     vector: Option<&[f32]>,
 ) -> Result<String> {
+    add_until(conn, data_dir, user, category, summary, body, None, vector)
+}
+
+/// `add` with an expiry date (`YYYY-MM-DD`) written into the file, so a fact
+/// that stops mattering can be swept without the writer tracking it.
+pub fn add_until(
+    conn: &Connection,
+    data_dir: &Path,
+    user: &str,
+    category: &str,
+    summary: &str,
+    body: &str,
+    until: Option<&str>,
+    vector: Option<&[f32]>,
+) -> Result<String> {
     if !CATEGORIES.contains(&category) {
         bail!("invalid category: {category}");
     }
@@ -185,6 +208,7 @@ pub fn add(
         summary: one_line(summary),
         body: body.trim().into(),
         supersedes: None,
+        until: until.map(str::to_owned),
         created: jiff::Timestamp::now().to_string(),
         archived: false,
     };
@@ -270,6 +294,7 @@ pub fn supersede(
         summary: one_line(summary),
         body: body.trim().into(),
         supersedes: Some(old.id.clone()),
+        until: None,
         created: jiff::Timestamp::now().to_string(),
         archived: false,
     };
@@ -285,6 +310,56 @@ pub fn supersede(
     conn.execute("DELETE FROM memory_vectors WHERE user = ?1 AND id = ?2", (user, &old.id))?;
     store_vector(conn, user, &new.id, vector);
     Ok(Some(new.id))
+}
+
+/// Moves one live fact into the user's archive, where it stays readable and
+/// immutable. Returns whether anything moved: an unknown or already-archived
+/// id is a no-op, so a re-run is harmless.
+pub fn archive(conn: &Connection, data_dir: &Path, user: &str, id: &str) -> Result<bool> {
+    let Some((path, archived)) = locate(data_dir, user, id) else {
+        return Ok(false);
+    };
+    if archived {
+        return Ok(false);
+    }
+    let mut f = parse(&std::fs::read_to_string(&path)?, false)?;
+    let arch_dir = user_root(data_dir, user).join("archive");
+    std::fs::create_dir_all(&arch_dir)?;
+    let arch_path = arch_dir.join(format!("{id}.md"));
+    std::fs::rename(&path, &arch_path)?;
+    f.archived = true;
+    index_insert(conn, user, &f, &arch_path)?;
+    conn.execute("DELETE FROM memory_vectors WHERE user = ?1 AND id = ?2", (user, id))?;
+    Ok(true)
+}
+
+/// Archives the user's live facts whose `until` is more than one day past, so
+/// a quiz date still shows up on the day after it. Returns how many moved.
+pub fn archive_expired(
+    conn: &Connection,
+    data_dir: &Path,
+    user: &str,
+    today: jiff::civil::Date,
+) -> Result<usize> {
+    let cutoff = today.yesterday().unwrap_or(today).to_string();
+    let mut stmt = conn.prepare(
+        "SELECT id FROM memory_index
+         WHERE user = ?1 AND archived = 0 AND until IS NOT NULL AND until < ?2",
+    )?;
+    let ids: Vec<String> = stmt
+        .query_map((user, &cutoff), |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    drop(stmt);
+    let mut n = 0;
+    for id in ids {
+        if archive(conn, data_dir, user, &id)? {
+            n += 1;
+        }
+    }
+    if n > 0 {
+        let _ = crate::log::record(conn, None, "memory_expired", &format!("{user}: {n} archived"));
+    }
+    Ok(n)
 }
 
 /// Lexical search over non-archived facts. The raw query is reduced to quoted
