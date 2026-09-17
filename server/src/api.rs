@@ -81,14 +81,28 @@ struct LoginReq {
     password: String,
 }
 
+/// Admission first, then the hash, then the limiter: the semaphore bounds what
+/// an unauthenticated flood can spend, and counting an attempt only once a
+/// verification has failed means guessing traffic against a username can never
+/// lock its owner out.
 async fn login(State(state): State<AppState>, Json(req): Json<LoginReq>) -> impl IntoResponse {
-    let now = jiff::Timestamp::now();
-    if !state.login_limiter.try_attempt(&req.username, now) {
-        return StatusCode::TOO_MANY_REQUESTS.into_response();
-    }
+    let Ok(slot) = state.login_slots.clone().try_acquire_owned() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(header::RETRY_AFTER, "2")],
+            Json(serde_json::json!({ "error": "too many sign-ins in flight; try again" })),
+        )
+            .into_response();
+    };
     let db = state.db.clone();
     let (username, password) = (req.username.clone(), req.password);
-    let result = tokio::task::spawn_blocking(move || auth::login(&db, &username, &password)).await;
+    let result = tokio::task::spawn_blocking(move || {
+        // held inside the closure so a cancelled request still occupies the slot
+        // until the hash it started actually finishes
+        let _slot = slot;
+        auth::login(&db, &username, &password)
+    })
+    .await;
     match result {
         Ok(Ok(Some(token))) => {
             state.login_limiter.clear(&req.username);
@@ -101,7 +115,12 @@ async fn login(State(state): State<AppState>, Json(req): Json<LoginReq>) -> impl
             )
                 .into_response()
         }
-        Ok(Ok(None)) => StatusCode::UNAUTHORIZED.into_response(),
+        Ok(Ok(None)) => {
+            if !state.login_limiter.try_attempt(&req.username, jiff::Timestamp::now()) {
+                return StatusCode::TOO_MANY_REQUESTS.into_response();
+            }
+            StatusCode::UNAUTHORIZED.into_response()
+        }
         Ok(Err(e)) => log_login_error(&state, &e.to_string()),
         Err(e) => log_login_error(&state, &format!("login task failed: {e}")),
     }

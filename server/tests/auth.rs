@@ -147,3 +147,50 @@ async fn wrong_password_is_401_and_me_without_cookie_is_401() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn correct_password_succeeds_while_the_username_is_rate_limited() {
+    let (state, _tmp) = state_with_user();
+    let app = api::router(state);
+    let wrong = || {
+        Request::post("/api/login")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"username":"aki","password":"wrong"}"#))
+            .unwrap()
+    };
+    for _ in 0..11 {
+        app.clone().oneshot(wrong()).await.unwrap();
+    }
+    let res = app
+        .oneshot(
+            Request::post("/api/login")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"username":"aki","password":"hunter2"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert!(res.headers().contains_key(header::SET_COOKIE));
+}
+
+#[tokio::test]
+async fn login_beyond_the_hash_admission_limit_is_service_unavailable() {
+    let (state, _tmp) = state_with_user();
+    let held: Vec<_> = (0..note_server::auth::MAX_CONCURRENT_LOGINS)
+        .map(|_| state.login_slots.clone().try_acquire_owned().unwrap())
+        .collect();
+    let app = api::router(state);
+    let res = app
+        .oneshot(
+            Request::post("/api/login")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"username":"aki","password":"hunter2"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(res.headers()[header::RETRY_AFTER], "2");
+    drop(held);
+}
