@@ -1049,13 +1049,7 @@ textarea.mono { font-family: var(--mono); }
 .gauge-track, .gauge-arc { fill: none; stroke-linecap: round; }
 .gauge-track { stroke: var(--track); }
 .gauge-arc { stroke: var(--sun); }
-/* the tween belongs to one tick reaching the next; the first paint is the reading as it is */
-.gauge-arc.live { transition: stroke-dasharray 900ms linear; }
 .gauge.faded .gauge-ring { opacity: 0.38; }
-.gauge-ring { animation: gauge-breathe 7s ease-in-out infinite; }
-.gauge.faded .gauge-ring, .gauge.still .gauge-ring { animation: none; }
-@keyframes gauge-breathe { 0%, 100% { opacity: 0.55; } 50% { opacity: 1; } }
-@media (prefers-reduced-motion: reduce) { .gauge-ring { animation: none; } }
 .gauge-centre {
   position: absolute; inset: 0;
   display: flex; flex-direction: column; align-items: center; justify-content: center;
@@ -1132,30 +1126,9 @@ textarea.mono { font-family: var(--mono); }
 /* ── horizon: home ───────────────────────────────────────────────── */
 .home { position: relative; flex: 1; display: flex; flex-direction: column; align-items: center; outline: none; background: var(--sky); background-attachment: fixed; }
 .home-face { display: flex; flex-direction: column; align-items: center; width: 100%; padding-top: 200px; }
-.home:not(.in-session).stage-0 .home-face { padding-top: 170px; }
-.home.stage-1 .home-face, .home.stage-2 .home-face { padding-top: 96px; }
-.home.stage-2 .home-face, .home:not(.in-session).stage-1 .home-face { flex-direction: row; align-items: center; gap: 16px; padding: 54px 24px 0; box-sizing: border-box; }
-.home:not(.mobile).stage-2 .home-face, .home:not(.mobile):not(.in-session).stage-1 .home-face { width: min(1200px, 84vw); padding-left: 0; padding-right: 0; }
-.home.paused .gauge-ring { opacity: 0.5; animation: none; }
 .gauge-num { display: flex; align-items: baseline; justify-content: center; }
 /* the counter carries its own size; on a face the centre sets it */
 .gauge-num .now-counter { font-size: inherit; letter-spacing: inherit; }
-/* A stage arrives as its own fade and rise, once the stage it replaces is out of
-   sight; the ring travels to its slot on its own (gauge.tsx). */
-.home-sheet, .home-today, .home-head, .home-actions, .stage-in {
-  animation: stage-in 300ms cubic-bezier(.2,.7,.3,1) 140ms both;
-}
-.home-sheet.leaving, .home-today.leaving, .home-head.leaving, .home-actions.leaving {
-  animation: stage-out 120ms ease-in both;
-  pointer-events: none;
-}
-@keyframes stage-in { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: none; } }
-@keyframes stage-out { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateY(12px); } }
-@media (prefers-reduced-motion: reduce) {
-  .home-face, .gauge-arc, .gauge-arc.live { transition: none; }
-  .home-sheet, .home-today, .home-head, .home-actions, .stage-in,
-  .home-sheet.leaving, .home-today.leaving, .home-head.leaving, .home-actions.leaving { animation: none; }
-}
 .home-head { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
 .home-head .gauge-eyebrow { margin-bottom: 0; }
 .home-head-name { font-family: var(--display); font-weight: 500; font-size: 1.0625rem; letter-spacing: -0.015em; color: var(--ink); }
@@ -1182,11 +1155,7 @@ textarea.mono { font-family: var(--mono); }
 .home-when { font-size: 0.8125rem; color: var(--faint); font-variant-numeric: tabular-nums; font-weight: 400; }
 .home-what { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .home-text { display: flex; flex-direction: column; gap: 10px; padding: 0 28px; width: 100%; box-sizing: border-box; }
-.home.no-arc.stage-0 .home-text .gauge-num { justify-content: flex-start; }
-.home.no-arc.stage-0 .home-actions { align-self: flex-start; margin-left: 28px; }
 .home-title { font-family: var(--display); font-weight: 500; font-size: 2.75rem; letter-spacing: -0.03em; line-height: 1.02; color: var(--ink); text-wrap: balance; }
-.home .chev { position: absolute; left: 50%; transform: translateX(-50%); bottom: 0; }
-.home.mobile .tabs { margin-top: auto; position: sticky; bottom: 0; width: 100%; }
 
 /* ── horizon: today (desktop) ───────────────────────────────────── */
 .view:has(> .today) { padding: 0; }

@@ -204,7 +204,7 @@ function firstSentence(text: string): string {
   return `${lead.replace(/\.$/, '')}…`
 }
 
-function DebriefFold() {
+export function DebriefFold() {
   const [debrief, setDebrief] = useState<Debrief | null | 'error' | undefined>(undefined)
   const [folded, setFolded] = useState(true)
 
