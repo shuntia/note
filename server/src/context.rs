@@ -39,6 +39,45 @@ pub(crate) fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
+/// The nightly brief rides in the dynamic block, so it is capped far below the
+/// standing document.
+pub const MAX_NIGHTLY_NOTES_BYTES: usize = 3 * 1024;
+
+/// Past this age the notes are still shown, but labelled stale.
+const NIGHTLY_NOTES_FRESH_DAYS: i32 = 3;
+
+pub fn nightly_notes_path(config_dir: &Path, user: &str) -> PathBuf {
+    config_dir.join("users").join(user).join("nightly_notes.md")
+}
+
+/// Replaces the notes wholesale, under a marker line dating them so a session
+/// can discount what it has outlived.
+pub fn write_nightly_notes(
+    config_dir: &Path,
+    user: &str,
+    text: &str,
+    date: jiff::civil::Date,
+) -> std::io::Result<()> {
+    let path = nightly_notes_path(config_dir, user);
+    std::fs::create_dir_all(path.parent().expect("nightly_notes.md always has a parent"))?;
+    write_atomic(&path, &format!("<!-- written {date} -->\n{}\n", text.trim()))
+}
+
+/// The notes as (written date, body); a file without a readable marker keeps
+/// its whole text and an empty date, which renders as an unknown age.
+fn read_nightly_notes(config_dir: &Path, user: &str) -> Option<(String, String)> {
+    let raw = std::fs::read_to_string(nightly_notes_path(config_dir, user)).ok()?;
+    let (head, rest) = raw.split_once('\n').unwrap_or((raw.as_str(), ""));
+    let dated = head
+        .trim()
+        .strip_prefix("<!-- written")
+        .and_then(|s| s.strip_suffix("-->"))
+        .map(|d| (d.trim().to_string(), rest));
+    let (date, body) = dated.unwrap_or_else(|| (String::new(), raw.as_str()));
+    let body = body.trim();
+    (!body.is_empty()).then(|| (date, body.to_string()))
+}
+
 pub fn edit_replace(config_dir: &Path, user: &str, find: &str, replace: &str) -> Result<(), EditError> {
     let path = standing_path(config_dir, user);
     let text = match std::fs::read_to_string(&path) {
@@ -109,18 +148,21 @@ struct Caps {
     later: usize,
     debrief: usize,
     activity: usize,
+    notes: bool,
 }
 
 /// Walked in order until the block fits: the Later list gives way first, then
-/// the debrief, then the activity tail. The real-time line, the Now list and
-/// the plan are never among them.
-const CAPS: [Caps; 6] = [
-    Caps { later: 10, debrief: 600, activity: 10 },
-    Caps { later: 4, debrief: 600, activity: 10 },
-    Caps { later: 0, debrief: 600, activity: 10 },
-    Caps { later: 0, debrief: 200, activity: 10 },
-    Caps { later: 0, debrief: 0, activity: 10 },
-    Caps { later: 0, debrief: 0, activity: 3 },
+/// the debrief, then the activity tail, and last night's notes only once all
+/// of those are gone. The real-time line, the Now list and the plan are never
+/// among them.
+const CAPS: [Caps; 7] = [
+    Caps { later: 10, debrief: 600, activity: 10, notes: true },
+    Caps { later: 4, debrief: 600, activity: 10, notes: true },
+    Caps { later: 0, debrief: 600, activity: 10, notes: true },
+    Caps { later: 0, debrief: 200, activity: 10, notes: true },
+    Caps { later: 0, debrief: 0, activity: 10, notes: true },
+    Caps { later: 0, debrief: 0, activity: 3, notes: true },
+    Caps { later: 0, debrief: 0, activity: 3, notes: false },
 ];
 
 /// Renders the full injection context: the standing document verbatim, then a
@@ -156,12 +198,19 @@ pub fn assemble(conn: &Connection, config_dir: &Path, user_id: i64, username: &s
         .unwrap_or_else(|| crate::config::CATEGORY_MEMBER.into());
     let debrief = latest_debrief(conn, user_id, today)?;
     let activity = recent_activity(conn, user_id)?;
+    let notes = read_nightly_notes(config_dir, username);
 
     let now_s = now_section(&local, &tz_label, now, &events, now_min, &ucfg.nightly_time);
     let plan_s = plan_section(&events, now_min, tomorrow, crate::plan::exists(conn, user_id, tomorrow)?);
-    let settings_s = settings_section(&ucfg, &tz_label, ucfg.features(&category));
+    let settings_s = settings_section(
+        &ucfg,
+        &tz_label,
+        ucfg.features(&category),
+        crate::memory::live_count(conn, username).unwrap_or(0),
+    );
     let render = |caps: &Caps| {
         let mut s = String::with_capacity(2048);
+        s.push_str(&notes_section(notes.as_ref(), today, caps.notes));
         s.push_str(&now_s);
         s.push_str(&plan_s);
         s.push_str(&tasks_section(&now_tasks, &later, done_today, caps.later));
@@ -363,20 +412,38 @@ fn excerpt(text: &str, max: usize) -> String {
     out
 }
 
-fn days_ago(date: &str, today: jiff::civil::Date) -> String {
-    let Some(days) = date
-        .parse::<jiff::civil::Date>()
+fn days_since(date: &str, today: jiff::civil::Date) -> Option<i32> {
+    date.parse::<jiff::civil::Date>()
         .ok()
         .and_then(|d| d.until((jiff::Unit::Day, today)).ok())
         .map(|span| span.get_days())
-    else {
-        return "date unreadable".into();
-    };
-    match days {
-        0 => "today".into(),
-        1 => "yesterday".into(),
-        n => format!("{n} days ago"),
+}
+
+fn days_ago(date: &str, today: jiff::civil::Date) -> String {
+    match days_since(date, today) {
+        None => "date unreadable".into(),
+        Some(0) => "today".into(),
+        Some(1) => "yesterday".into(),
+        Some(n) => format!("{n} days ago"),
     }
+}
+
+/// What last night's run left for today's sessions, dated so the model can
+/// weigh it, and marked stale once it has outlived its day.
+fn notes_section(
+    notes: Option<&(String, String)>,
+    today: jiff::civil::Date,
+    keep: bool,
+) -> String {
+    let Some((date, body)) = notes.filter(|_| keep) else {
+        return String::new();
+    };
+    let stale = days_since(date, today).is_some_and(|d| d > NIGHTLY_NOTES_FRESH_DAYS);
+    format!(
+        "# {}Notes from last night (written {date}, {})\n\n{body}\n\n",
+        if stale { "(stale) " } else { "" },
+        days_ago(date, today),
+    )
 }
 
 fn debrief_section(row: Option<&(String, String)>, today: jiff::civil::Date, cap: usize) -> String {
@@ -401,16 +468,19 @@ fn settings_section(
     cfg: &crate::config::UserConfig,
     tz_label: &str,
     features: crate::config::Features,
+    memory_facts: i64,
 ) -> String {
     let on = |b: bool| if b { "on" } else { "off" };
     format!(
-        "# Settings\n\n{} | {tz_label} | nightly_time {} | template {} | counter {} | nightly {} | checkins {}\n\n",
+        "# Settings\n\n{} | {tz_label} | nightly_time {} | template {} | counter {} | nightly {} | checkins {}\n\
+         Memory: {memory_facts} fact{}\n\n",
         cfg.display_name,
         cfg.nightly_time,
         cfg.template,
         cfg.counter,
         on(features.nightly),
         on(features.checkins),
+        if memory_facts == 1 { "" } else { "s" },
     )
 }
 
@@ -962,6 +1032,9 @@ mod tests {
             (uid, "d".repeat(4000)),
         )
         .unwrap();
+        for _ in 0..20 {
+            crate::log::record(&conn, Some(uid), "event_fired", &"e".repeat(700)).unwrap();
+        }
         let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
         let block = dynamic(&out);
         assert!(block.len() <= MAX_DYNAMIC_BYTES, "{} bytes", block.len());
