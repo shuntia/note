@@ -23,7 +23,7 @@ schemars = "1"
 toml = "0.8"
 jiff = { version = "0.2", features = ["tzdb-bundle-always"] }
 argon2 = { version = "0.5", features = ["std"] }
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "v5"] }
 anyhow = "1"
 thiserror = "1"
 ureq = { version = "2", features = ["json"] }
@@ -33,6 +33,7 @@ hmac = "0.12"
 sha1 = "0.10"
 sha2 = "0.10"
 data-encoding = "2"
+webauthn-rs = "0.5"
 
 [features]
 # Compiles in the admin inspection routes and password-only elevation; never for deploys.
@@ -43,3 +44,4 @@ proptest = "1"
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+webauthn-authenticator-rs = { version = "0.5", default-features = false, features = ["softpasskey"] }
