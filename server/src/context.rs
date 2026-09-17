@@ -186,10 +186,17 @@ pub fn assemble(conn: &Connection, config_dir: &Path, user_id: i64, username: &s
     let events = crate::plan::events_for(conn, user_id, today)?;
     let tasks = crate::tasks::list(conn, user_id)?;
     let (now_tasks, later): (Vec<_>, Vec<_>) = tasks.iter().partition(|t| t.task.is_now);
-    let later: Vec<_> = later
+    let mut later: Vec<_> = later
         .into_iter()
         .filter(|t| t.task.state == "open" || t.task.state == "in_progress")
         .collect();
+    // the nearest deadline first, then the newest of what carries none
+    later.sort_by(|a, b| match (&a.task.due_at, &b.task.due_at) {
+        (Some(x), Some(y)) => x.cmp(y),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => b.task.id.cmp(&a.task.id),
+    });
     let done_today = crate::tasks::done_between(
         conn,
         user_id,
@@ -221,7 +228,7 @@ pub fn assemble(conn: &Connection, config_dir: &Path, user_id: i64, username: &s
         s.push_str(&notes_section(notes.as_ref(), today, caps.notes));
         s.push_str(&now_s);
         s.push_str(&plan_s);
-        s.push_str(&tasks_section(&now_tasks, &later, done_today, caps.later));
+        s.push_str(&tasks_section(&now_tasks, &later, done_today, caps.later, &tz, today, now));
         s.push_str(&debrief_section(debrief.as_ref(), today, caps.debrief));
         s.push_str(&settings_s);
         s.push_str(&activity_section(&activity, &tz, caps.activity));
@@ -387,27 +394,75 @@ fn duration(min: Option<u32>) -> String {
     min.map(|d| format!(" {d}m")).unwrap_or_default()
 }
 
+/// How a deadline reads next to a title: the near ones in words, the rest as
+/// the local day they fall on.
+fn due(
+    task: &crate::tasks::Task,
+    tz: &jiff::tz::TimeZone,
+    today: jiff::civil::Date,
+    now: jiff::Timestamp,
+) -> String {
+    let Some(at) = task.due_at.as_deref().and_then(|d| d.parse::<jiff::Timestamp>().ok()) else {
+        return String::new();
+    };
+    if at < now {
+        return " overdue".into();
+    }
+    let day = at.to_zoned(tz.clone()).date();
+    match day.since(today).ok().map(|s| s.get_days()) {
+        Some(0) => " due today".into(),
+        Some(1) => " due tomorrow".into(),
+        _ => format!(" due {day}"),
+    }
+}
+
+/// Tasks with a deadline inside the next three days, and tasks already past
+/// theirs.
+fn due_soon(tasks: &[&crate::tasks::TaskNode], now: jiff::Timestamp) -> (usize, usize) {
+    let horizon = now + jiff::Span::new().hours(24 * DUE_SOON_DAYS);
+    let dates = tasks
+        .iter()
+        .filter_map(|t| t.task.due_at.as_deref())
+        .filter_map(|d| d.parse::<jiff::Timestamp>().ok());
+    let mut soon = 0;
+    let mut overdue = 0;
+    for at in dates {
+        if at < now {
+            overdue += 1;
+        } else if at < horizon {
+            soon += 1;
+        }
+    }
+    (soon, overdue)
+}
+
+const DUE_SOON_DAYS: i64 = 3;
+
 fn tasks_section(
-    now: &[&crate::tasks::TaskNode],
+    now_tasks: &[&crate::tasks::TaskNode],
     later: &[&crate::tasks::TaskNode],
     done_today: i64,
     cap: usize,
+    tz: &jiff::tz::TimeZone,
+    today: jiff::civil::Date,
+    now: jiff::Timestamp,
 ) -> String {
     let mut s = String::from("# Tasks\n\n");
-    if now.is_empty() && later.is_empty() && done_today == 0 {
+    if now_tasks.is_empty() && later.is_empty() && done_today == 0 {
         s.push_str("(no tasks)\n\n");
         return s;
     }
-    if now.is_empty() {
+    if now_tasks.is_empty() {
         s.push_str("Now: (none)\n");
     } else {
         s.push_str("Now:\n");
-        for n in now {
+        for n in now_tasks {
             s.push_str(&format!(
-                "- {} [{}]{}\n",
+                "- {} [{}]{}{}\n",
                 n.task.title,
                 n.task.state,
                 duration(n.task.duration_min),
+                due(&n.task, tz, today, now),
             ));
             for c in &n.children {
                 let mark = match c.state.as_str() {
@@ -426,11 +481,23 @@ fn tasks_section(
     } else {
         s.push_str(&format!("Later ({} open):\n", later.len()));
         for t in later.iter().take(cap) {
-            s.push_str(&format!("- {}{}\n", t.task.title, duration(t.task.duration_min)));
+            s.push_str(&format!(
+                "- {}{}{}\n",
+                t.task.title,
+                duration(t.task.duration_min),
+                due(&t.task, tz, today, now),
+            ));
         }
         if let Some(rest) = later.len().checked_sub(cap).filter(|r| *r > 0) {
             s.push_str(&format!("- ... and {rest} more\n"));
         }
+    }
+    let dated: Vec<_> = now_tasks.iter().chain(later.iter()).copied().collect();
+    let (soon, overdue) = due_soon(&dated, now);
+    if soon > 0 || overdue > 0 {
+        s.push_str(&format!(
+            "Due soon: {soon} in the next {DUE_SOON_DAYS} days, {overdue} overdue\n"
+        ));
     }
     s.push_str(&format!("Done today: {done_today}\n\n"));
     s
@@ -926,7 +993,8 @@ mod tests {
         assert!(out.contains("Now:\n- essay [open] due today\n"), "{out}");
         assert!(
             out.contains(
-                "Later (4 open):\n- quiz overdue\n- lab due tomorrow\n                 - reading due 2026-09-05\n- loose\n"
+                "Later (4 open):\n- quiz overdue\n- lab due tomorrow\n\
+                 - reading due 2026-09-05\n- loose\n"
             ),
             "{out}"
         );
@@ -952,8 +1020,9 @@ mod tests {
         }
         let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
         assert!(out.contains("Later (12 open):"), "{out}");
-        assert!(out.contains("- later-10 15m"), "{out}");
-        assert!(!out.contains("later-11"), "{out}");
+        assert!(out.contains("- later-12 15m"), "{out}");
+        assert!(out.contains("- later-03 15m"), "{out}");
+        assert!(!out.contains("later-02"), "{out}");
         assert!(out.contains("and 2 more"), "{out}");
         assert!(out.contains("Now: (none)"), "{out}");
     }

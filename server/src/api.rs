@@ -357,12 +357,18 @@ fn log_brief_error(state: &AppState, user_id: i64, detail: &str) {
 
 /// The task as DATA for the model: everything the importer wrote, plus the
 /// steps that already exist so a re-brief knows not to try splitting again.
-fn brief_message(node: &crate::tasks::TaskNode, context: &str) -> String {
+fn brief_message(node: &crate::tasks::TaskNode, context: &str, tz: &jiff::tz::TimeZone) -> String {
     let t = &node.task;
     let mut m = format!(
         "Task id: {}\nTitle: {}\nState: {}\nDescription: {}\nNotes: {}\n",
         t.id, t.title, t.state, t.description, t.notes
     );
+    if let Some(at) = t.due_at.as_deref().and_then(|d| d.parse::<jiff::Timestamp>().ok()) {
+        m.push_str(&format!(
+            "Due: {}\n",
+            at.to_zoned(tz.clone()).strftime("%Y-%m-%d %H:%M")
+        ));
+    }
     if !node.children.is_empty() {
         m.push_str("Steps:\n");
         for c in &node.children {
@@ -428,8 +434,12 @@ async fn task_agent(
                 "only a top-level task can be briefed, not one of its steps",
             );
         }
+        let tz = crate::config::UserConfig::load(&state.config_dir, &user.username)
+            .ok()
+            .and_then(|c| jiff::tz::TimeZone::get(&c.timezone).ok())
+            .unwrap_or(jiff::tz::TimeZone::UTC);
         match crate::tasks::snapshot(&conn, user.id, id) {
-            Ok(snap) => (brief_message(&node, &req.context), snap),
+            Ok(snap) => (brief_message(&node, &req.context, &tz), snap),
             Err(e) => return failed(e.to_string()),
         }
     };
