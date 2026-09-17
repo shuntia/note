@@ -128,7 +128,7 @@ pub(crate) fn valid_time(s: &str) -> bool {
 
 /// Adds `minutes` to a zero-padded wall time, never crossing midnight.
 pub(crate) fn wall_add(wall: &str, minutes: i64) -> String {
-    let total = (wall_minutes(wall) + minutes).clamp(0, 23 * 60 + 59);
+    let total = wall_minutes(wall).saturating_add(minutes).clamp(0, 23 * 60 + 59);
     format!("{:02}:{:02}", total / 60, total % 60)
 }
 
