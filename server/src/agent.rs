@@ -522,9 +522,7 @@ mod tests {
             1,
             crate::tasks::NewTask {
                 title: "Biology ch.4".into(),
-                duration_min: None,
-                parent_id: None,
-                is_now: false,
+                ..crate::tasks::NewTask::default()
             },
             "import",
             crate::tasks::Actor::User,

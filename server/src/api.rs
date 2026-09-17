@@ -159,13 +159,30 @@ async fn tasks_list(user: TaskPrincipal, State(state): State<AppState>) -> impl 
     }
 }
 
+/// A cookie is the user typing; a token is a script mirroring another system,
+/// so what it writes is an import and never passes for something the user did.
+fn default_source(via: &auth::Credential) -> &'static str {
+    match via {
+        auth::Credential::Session => "manual",
+        auth::Credential::Token(_) => "import",
+    }
+}
+
 async fn tasks_create(
     user: TaskPrincipal,
     State(state): State<AppState>,
     Json(req): Json<crate::tasks::NewTask>,
 ) -> impl IntoResponse {
+    if matches!(user.via, auth::Credential::Token(_)) && req.source.as_deref() == Some("manual") {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({ "error": "a token cannot write source manual" })),
+        )
+            .into_response();
+    }
     let conn = state.db();
-    match crate::tasks::create(&conn, user.id, req, "manual", crate::tasks::Actor::User) {
+    let source = default_source(&user.via);
+    match crate::tasks::create(&conn, user.id, req, source, crate::tasks::Actor::User) {
         Ok(t) => Json(t).into_response(),
         Err(e) => task_error(e),
     }
@@ -605,12 +622,12 @@ fn task_error(e: crate::tasks::UpdateError) -> axum::response::Response {
     use crate::tasks::UpdateError as E;
     match e {
         E::InvalidState(_) => StatusCode::BAD_REQUEST.into_response(),
-        E::InvalidDuration(m) | E::InvalidHierarchy(m) => (
+        E::InvalidDuration(m) | E::InvalidHierarchy(m) | E::Invalid(m) => (
             StatusCode::UNPROCESSABLE_ENTITY,
             Json(serde_json::json!({ "error": m })),
         )
             .into_response(),
-        E::NowFull(m) => {
+        E::NowFull(m) | E::ExternalIdTaken(m) => {
             (StatusCode::CONFLICT, Json(serde_json::json!({ "error": m }))).into_response()
         }
         E::Db(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
