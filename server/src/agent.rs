@@ -6,6 +6,9 @@ use std::path::Path;
 use std::sync::Mutex;
 
 pub const MAX_TURNS: usize = 16;
+/// An import session is one brief: the call, plus a single retry when the
+/// first one is rejected.
+pub const IMPORT_MAX_TURNS: usize = 2;
 
 pub struct SessionDeps<'a> {
     pub db: &'a Mutex<Connection>,
@@ -37,8 +40,9 @@ pub struct SessionOutcome {
 }
 
 /// Runs one agent session: chat, dispatch tool calls, feed results back, until
-/// the model answers in text or MAX_TURNS is hit. The DB lock is held only for
-/// assembly, individual dispatches, and log writes — never across a provider call.
+/// the model answers in text, a terminal tool succeeds, or the turn cap is hit.
+/// The DB lock is held only for assembly, individual dispatches, and log writes
+/// — never across a provider call.
 /// `now` is the caller's clock so a nightly run assembles context for the same
 /// local date its plan was generated for.
 pub fn run_session(
@@ -75,8 +79,9 @@ pub fn run_session(
     let mut tool_calls = 0;
     let mut steps = Vec::new();
     let mut last_text = String::new();
+    let max_turns = if kind == SessionKind::Import { IMPORT_MAX_TURNS } else { MAX_TURNS };
 
-    while turns < MAX_TURNS {
+    while turns < max_turns {
         let resp = deps
             .llm
             .chat(&ChatRequest { system: &system, messages: &messages, tools: &schemas })?;
@@ -110,12 +115,17 @@ pub fn run_session(
                     ),
                 }
             };
+            let terminal = !is_error && tools::is_terminal(kind, &call.name);
             steps.push(SessionStep {
                 name: call.name,
                 args: call.args,
                 result: content.clone(),
                 is_error,
             });
+            if terminal {
+                finish(deps, user_id, kind, turns, tool_calls, "agent_session")?;
+                return Ok(SessionOutcome { reply: content, turns, tool_calls, steps });
+            }
             messages.push(Message::ToolResult { call_id: call.id, content, is_error });
         }
     }
@@ -328,6 +338,100 @@ mod tests {
         run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Nightly, now(), &[], "night")
             .unwrap();
         assert!(llm.seen()[0].system.contains("plan the day"));
+    }
+
+    fn import_env(
+        db: &Mutex<rusqlite::Connection>,
+    ) -> i64 {
+        let conn = db.lock().unwrap();
+        crate::tasks::create(
+            &conn,
+            1,
+            crate::tasks::NewTask {
+                title: "Biology ch.4".into(),
+                duration_min: None,
+                parent_id: None,
+                is_now: false,
+            },
+            "import",
+            crate::tasks::Actor::User,
+        )
+        .unwrap()
+        .id
+    }
+
+    fn brief_call(id: &str, args: String) -> ChatResponse {
+        ChatResponse {
+            text: String::new(),
+            tool_calls: vec![ToolCall { id: id.into(), name: "task_brief".into(), args }],
+        }
+    }
+
+    fn log_rows(db: &Mutex<rusqlite::Connection>, kind: &str) -> i64 {
+        db.lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM event_log WHERE kind = ?1", [kind], |r| r.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn a_successful_brief_ends_the_import_session_in_one_round() {
+        let (db, tmp) = env();
+        let id = import_env(&db);
+        let llm = MockLLM::scripted(vec![brief_call(
+            "c1",
+            format!(r#"{{"task_id":{id},"homework":true,"description":"one line of brief"}}"#),
+        )]);
+        let mut d = deps(&db, &tmp, &llm);
+        d.task_scope = Some(id);
+        let out = run_session(&d, 1, "aki", SessionKind::Import, now(), &[], "brief it").unwrap();
+
+        assert_eq!(llm.seen().len(), 1, "the model was asked again after a successful brief");
+        assert_eq!(out.turns, 1);
+        assert_eq!(out.tool_calls, 1);
+        assert_eq!(out.steps.len(), 1);
+        assert!(!out.steps[0].is_error);
+        assert!(out.reply.contains("briefed"), "{}", out.reply);
+        assert_eq!(log_rows(&db, "agent_session"), 1);
+        assert_eq!(log_rows(&db, "agent_max_turns"), 0);
+    }
+
+    #[test]
+    fn a_rejected_brief_buys_exactly_one_retry() {
+        let (db, tmp) = env();
+        let id = import_env(&db);
+        let llm = MockLLM::scripted(vec![
+            brief_call("c1", format!(r#"{{"task_id":{id},"homework":false}}"#)),
+            brief_call(
+                "c2",
+                format!(r#"{{"task_id":{id},"homework":true,"description":"second try"}}"#),
+            ),
+            brief_call("c3", format!(r#"{{"task_id":{id},"homework":true}}"#)),
+        ]);
+        let mut d = deps(&db, &tmp, &llm);
+        d.task_scope = Some(id);
+        let out = run_session(&d, 1, "aki", SessionKind::Import, now(), &[], "brief it").unwrap();
+
+        assert_eq!(llm.seen().len(), 2);
+        assert_eq!(out.steps.len(), 2);
+        assert!(out.steps[0].is_error);
+        assert!(!out.steps[1].is_error);
+    }
+
+    #[test]
+    fn two_rejected_briefs_end_the_import_session() {
+        let (db, tmp) = env();
+        let id = import_env(&db);
+        let bad = brief_call("c", format!(r#"{{"task_id":{id},"homework":false}}"#));
+        let llm = MockLLM::scripted(vec![bad.clone(), bad.clone(), bad]);
+        let mut d = deps(&db, &tmp, &llm);
+        d.task_scope = Some(id);
+        let out = run_session(&d, 1, "aki", SessionKind::Import, now(), &[], "brief it").unwrap();
+
+        assert_eq!(llm.seen().len(), IMPORT_MAX_TURNS);
+        assert_eq!(out.turns, IMPORT_MAX_TURNS);
+        assert!(out.steps.iter().all(|s| s.is_error));
+        assert_eq!(log_rows(&db, "agent_max_turns"), 1);
     }
 
     #[test]
