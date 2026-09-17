@@ -84,7 +84,8 @@ config/
 ```
 
 Per-user files are optional; anything not overridden falls back to the
-`defaults/` tree.
+`defaults/` tree. `server.toml` also takes an optional `[limits]` section
+(`agent_sessions_per_day`, see "Sessions & limits").
 
 ### Settings API
 
@@ -152,7 +153,9 @@ startup, so the files themselves are the backup-worthy source of truth.
 
 The standing context document each agent session sees is
 `config/users/<user>/standing.md`; agents edit it in place through the
-`context_edit` tool, so its history is whatever your config dir's VCS says.
+`context_edit` tool, so its history is whatever your config dir's VCS says. The
+whole file is prepended to every system prompt, so it is capped at 64 KiB: an
+edit that would cross that is rejected and the file is left alone.
 
 Model-facing capabilities are typed tool calls dispatched through a
 per-session-type registry (check-in < talk < nightly, with a two-tool import
@@ -206,7 +209,9 @@ OpenAI-compatible endpoint for chat — NVIDIA NIM
 embeddings (a local llama.cpp router works). The key comes from the file named
 in `api_key_file` (bare key, surrounding whitespace ignored) or the env var
 named in `api_key_env`; the file wins if both are set. The key itself never
-lives in config files.
+lives in config files. One chat call is capped at `timeout_secs` (default 45),
+which keeps a session's calls inside the 100 seconds a tunnel in front of the
+server allows a response to take.
 
 With an embeddings provider configured, memory search becomes hybrid
 (lexical + vector) and degrades back to lexical automatically when the
@@ -261,6 +266,10 @@ pings every 30s and tears down a connection that has sent nothing for 90s, so a
 half-open socket stops absorbing deliveries and the ladder falls through to the
 channels below it.
 
+An upgrade whose `Sec-Fetch-Site` says a foreign site started it is refused
+(`403`), and an account holds at most 8 sockets at once — a ninth is a `429`
+before the upgrade.
+
 ### Web Push
 
 Web Push needs a VAPID keypair (any P-256 EC key):
@@ -295,9 +304,14 @@ Subscription routes — all cookie-authenticated, the public-key route included:
   { "endpoint": "https://push.example.net/send/abc", "keys": { "p256dh": "…", "auth": "…" } }
   ```
 
-  Subscribing again with the same endpoint replaces the stored keys.
-  Non-`http(s)` endpoints, or fields over 2048 (`endpoint`) / 256 (`p256dh`) /
-  64 (`auth`) characters, are rejected with `400`.
+  Subscribing again with the same endpoint replaces the stored keys. Fields
+  over 2048 (`endpoint`) / 256 (`p256dh`) / 64 (`auth`) characters are a `400`.
+  The server is the one that posts to an endpoint, so the endpoint must be
+  `https://` and its host must not be — or resolve to — a loopback, RFC1918,
+  link-local, CGNAT, unique-local or unspecified address, `localhost` included;
+  a host that does not resolve is refused as well. Each of those is a `422`
+  `{"error": …}`. An account holds at most 10 subscriptions (`409`), and an
+  endpoint another account registered is a `409` rather than a change of owner.
 - `POST /api/push/unsubscribe {endpoint}` — `404` if the endpoint is not one of
   the caller's.
 
@@ -324,13 +338,16 @@ first delivery, like a provider's `api_key_file`.
 
 Each user has a topic: `ntfy_topic` in their `user.toml`, or
 `<topic_prefix><username>` when they have not set one. A topic is 1 to 64
-characters of letters, digits, `_` or `-`. Subscribing to it in an ntfy client
-is all a device needs.
+characters of letters, digits, `_` or `-`, and may not be another account's
+default topic (`<topic_prefix><their username>`) — Settings answers `422`.
+Subscribing to the topic in an ntfy client is all a device needs.
 
-A delivery is a plain `POST {base_url}/{topic}` carrying the message as the
-body, with `Title`, `Tags: bell`, `Click` (the instance's `public_base_url`) and
-`Priority` — 2 for a low-urgency message, 3 for normal, 5 for a check-in — plus
-`Authorization: Bearer` when a token is configured. Anything but a 2xx, and any
+A delivery is a `POST {base_url}` carrying ntfy's JSON publish form: `topic`,
+`title`, `message`, `tags: ["bell"]`, `click` (the instance's
+`public_base_url`) and `priority` — 2 for a low-urgency message, 3 for normal,
+5 for a check-in — plus `Authorization: Bearer` when a token is configured. The
+JSON form rather than the header form because a title carries the event's own
+words and an HTTP header value cannot hold them. Anything but a 2xx, and any
 transport error, falls through the ladder as `delivery_degraded`.
 
 `POST /api/notify/test` (session cookie) walks the same ladder with a stand-in
@@ -353,11 +370,22 @@ Every outcome lands in `event_log`, readable at `GET /api/admin/log`:
 - `POST /api/login {username, password}` sets an HttpOnly, SameSite=Lax session
   cookie valid 30 days (`Secure` whenever `public_base_url` is `https://`).
   `POST /api/logout` deletes the session row and clears the cookie.
-- Login is capped at 10 attempts per username per 15-minute window; beyond that
-  the route returns `429` without touching the database. A successful login
-  clears the counter.
+- Four password verifications run at once server-wide; a login that arrives
+  while all four are busy is a `503` with `Retry-After: 2`. Hashing is what the
+  route costs, so that is what bounds a flood of fresh usernames.
+- A failed sign-in counts against 10 attempts per username per 15-minute window,
+  and the eleventh failure is a `429`. The counter is consulted only after a
+  verification has already failed, so the right password always signs in and
+  wrong guesses cannot lock an account's owner out. A successful login clears it.
 - `POST /api/talk` runs one session per user (a second concurrent request gets
   `409`) and four across the server (`503` with `Retry-After: 5` beyond that).
+  `POST /api/tasks/{id}/agent` takes the same gate: a second session for the
+  same user is a `429`, the server-wide cap a `503`.
+- One account may start `[limits] agent_sessions_per_day` agent sessions in any
+  24 hours — default 200, `0` lifts the ceiling — and beyond that both routes
+  answer `429` `{"error": "daily session limit reached"}`. The count comes from
+  the `agent_session` rows already in `event_log`, and a session an API token
+  started names it (`token=<id>`) so the spend is attributable.
 
 ### API tokens
 
@@ -406,8 +434,9 @@ capped at 32 KiB. The reply is the session and its result:
 when no tool call of the session succeeded, and `briefed` otherwise. `task` is
 the same shape as one entry of `GET /api/tasks`, steps included. The failures
 are `404` (unknown task, or not the caller's), `409` (the id is a step — only
-top-level tasks are briefed), `422` (context over 32 KiB), `502` (the model is
-unreachable) and `500`; every one of them carries a `{"error": …}` body, and
+top-level tasks are briefed), `422` (context over 32 KiB), `429` (a session for
+that user is already running, or the daily ceiling is reached), `502` (the model
+is unreachable) and `500`; every one of them carries a `{"error": …}` body, and
 `502`/`500` also write a `task_agent_error` row to `event_log`.
 
 The session is scoped: it is a fresh run with no conversation history, nothing
