@@ -473,3 +473,33 @@ async fn a_malformed_body_says_so_and_nothing_more() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(v["error"], "malformed JSON body");
 }
+
+#[tokio::test]
+async fn the_briefing_message_names_the_due_date() {
+    let llm = Arc::new(MockLLM::scripted(vec![call(
+        "c1",
+        "task_brief",
+        r#"{"task_id":1,"homework":true,"description":"Read chapter 4."}"#,
+    )]));
+    let (app, cookie, state, _cfg) =
+        common::app_with_logged_in_user_llm_and_state(llm.clone()).await;
+    let (status, t) = send(
+        &app,
+        cookie_auth(&cookie),
+        Method::POST,
+        "/api/tasks",
+        Some(r#"{"title":"Biology ch.4","due_at":"2026-09-19T23:59:00Z"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{t}");
+    let token = token_for(&state, 1);
+
+    let (status, v) =
+        send(&app, bearer(&token), Method::POST, "/api/tasks/1/agent", Some("{}")).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let opening = match &llm.seen()[0].messages[0] {
+        note_server::providers::Message::User(t) => t.clone(),
+        other => panic!("expected the task as the opening message, got {other:?}"),
+    };
+    assert!(opening.contains("Due: 2026-09-19 23:59"), "{opening}");
+}
