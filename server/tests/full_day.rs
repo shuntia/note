@@ -80,9 +80,9 @@ fn a_full_simulated_day() {
     }
     // the agent planned against the simulated day, not the wall clock
     let nightly_system = &nightly_llm.seen()[0].system;
-    assert!(nightly_system.contains("2026-08-31 03:30 (Asia/Tokyo)"), "{nightly_system}");
+    assert!(nightly_system.contains("Monday 2026-08-31 03:30 Asia/Tokyo UTC+09:00"), "{nightly_system}");
     let plan_section = nightly_system.split("# Today's plan").nth(1).unwrap();
-    assert!(plan_section.contains("09:00 checkin_call [pending] via voice"), "{plan_section}");
+    assert!(plan_section.contains("09:00-09:15 checkin_call [pending] routine via voice"), "{plan_section}");
 
     // --- 10:00 JST: the user talks; the agent captures a task and remembers a fact.
     let talk_llm = MockLLM::scripted(vec![

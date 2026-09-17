@@ -99,6 +99,18 @@ pub fn generate(conn: &Connection, user_id: i64, template: &Template, date: jiff
     Ok(plan_id)
 }
 
+/// Whether that day has a plan at all, without reading its events.
+pub fn exists(conn: &Connection, user_id: i64, date: jiff::civil::Date) -> rusqlite::Result<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM plans WHERE user_id = ?1 AND date = ?2",
+            (user_id, date.to_string()),
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
+
 pub fn events_for(conn: &Connection, user_id: i64, date: jiff::civil::Date) -> Result<Vec<PlanEvent>> {
     let mut stmt = conn.prepare(
         "SELECT e.id, e.kind, e.wall_time, e.end_wall_time, e.status, e.flexibility,
