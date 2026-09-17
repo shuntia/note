@@ -264,6 +264,15 @@ lives in config files. One chat call is capped at `timeout_secs` (default 45),
 which keeps a session's calls inside the 100 seconds a tunnel in front of the
 server allows a response to take.
 
+`[providers.llm] reasoning` asks an OpenAI-compatible endpoint that supports it
+(OpenRouter) for the model's reasoning: `"none"` (the default), `"low"`,
+`"medium"` or `"high"`. Anything but `"none"` sends `reasoning: {"effort": …}`
+with the request and reads the text back from `message.reasoning`, or
+`message.reasoning_content` on servers that name it that way. Reasoning is
+shown live and returned with the reply; it is never fed back into the next
+round's messages, and the transcript does not store it — reopening a
+conversation shows its tool calls but no reasoning.
+
 With an embeddings provider configured, memory search becomes hybrid
 (lexical + vector) and degrades back to lexical automatically when the
 provider is down.
@@ -273,7 +282,10 @@ Turns belong to persisted conversations: omit `conversation_id` and the server
 opens one (titled from the message), pass one and the last 32 text turns are
 replayed to the model first. The response carries the `conversation_id`, the
 reply, and `steps` — every tool call the agent made, with its arguments,
-result, and error flag — which the web client renders as expandable blocks.
+result, and error flag — plus `reasoning`, the session's thinking text (blank
+unless reasoning is configured and the model returned any). The web client
+folds all of it into one collapsed line under the reply that opens onto the
+reasoning and every call.
 Conversations are managed over `GET /api/conversations`,
 `PATCH/DELETE /api/conversations/{id}`, and
 `GET /api/conversations/{id}/messages` (user, assistant, and tool rows in
@@ -314,6 +326,21 @@ receives one JSON frame per delivery:
 ```json
 { "type": "event", "title": "Check-in", "body": "checkin at 09:00", "urgency": "high", "event_id": 7 }
 ```
+
+A talk session in flight pushes its progress to the same sockets, so the client
+can show what the agent is doing while it works:
+
+```json
+{ "type": "agent", "conversation_id": 12, "seq": 3,
+  "event": { "kind": "tool_call", "index": 1, "name": "memory_query", "args": "{\"query\":\"groceries\"}" } }
+```
+
+`seq` counts from zero within one session. `conversation_id` is null until a
+brand-new conversation's reply hands the client its id. `event.kind` is
+`thinking` (`text`), `tool_call` (`index`, `name`, `args`), `tool_result`
+(`index`, `name`, `result`, `is_error`), `reply` (`text`) or `error`
+(`message`), and every variable field is clipped to 4 KiB. Only `POST /api/talk`
+emits these; the nightly, check-in and import sessions run unwatched.
 
 Delivery is one-way in v1: inbound frames are drained and ignored. The server
 pings every 30s and tears down a connection that has sent nothing for 90s, so a
@@ -638,8 +665,13 @@ tab bar on phones; a running session takes the whole screen and both step aside
 until Today is raised. Tasks is the list with quick-add, steps, durations, and
 a start that opens a session. Chat is a full conversation surface: a sidebar
 of persisted conversations (new, rename, delete), assistant replies rendered
-as sanitized markdown with copyable code blocks, and every tool call the agent
-makes shown as an expandable block with its arguments and result. Memory
+as sanitized markdown with copyable code blocks, and one line under each reply
+for what the agent did. That line is live while the reply is still coming —
+"Thinking…", then the sentence for the tool in flight — and settles into
+"Thought · 2 steps" once it lands; it opens onto the model's reasoning and
+every call with its arguments, result, and a spinner or a tick. It is
+collapsed until clicked, and it says "Thinking…" throughout if the socket is
+down. Memory
 browses everything the agent has saved — filter by category or search, and
 open any fact to read it. Settings gathers
 the home screen (`show_arc_between_sessions`, whether the wait draws its arc,
