@@ -127,7 +127,7 @@ async fn login(State(state): State<AppState>, Json(req): Json<LoginReq>) -> impl
 }
 
 fn log_login_error(state: &AppState, detail: &str) -> axum::response::Response {
-    let conn = state.db.lock().unwrap();
+    let conn = state.db();
     let _ = crate::log::record(&conn, None, "login_error", detail);
     StatusCode::INTERNAL_SERVER_ERROR.into_response()
 }
@@ -135,7 +135,7 @@ fn log_login_error(state: &AppState, detail: &str) -> axum::response::Response {
 async fn logout(State(state): State<AppState>, headers: axum::http::HeaderMap) -> impl IntoResponse {
     let jar = axum_extra::extract::CookieJar::from_headers(&headers);
     if let Some(c) = jar.get("session") {
-        let conn = state.db.lock().unwrap();
+        let conn = state.db();
         let _ = conn.execute("DELETE FROM sessions WHERE token = ?1", [c.value()]);
     }
     (
@@ -150,7 +150,7 @@ async fn me(user: CurrentUser) -> Json<serde_json::Value> {
 }
 
 async fn tasks_list(user: TaskPrincipal, State(state): State<AppState>) -> impl IntoResponse {
-    let conn = state.db.lock().unwrap();
+    let conn = state.db();
     match crate::tasks::list(&conn, user.id) {
         Ok(ts) => Json(ts).into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
@@ -162,7 +162,7 @@ async fn tasks_create(
     State(state): State<AppState>,
     Json(req): Json<crate::tasks::NewTask>,
 ) -> impl IntoResponse {
-    let conn = state.db.lock().unwrap();
+    let conn = state.db();
     match crate::tasks::create(&conn, user.id, req, "manual", crate::tasks::Actor::User) {
         Ok(t) => Json(t).into_response(),
         Err(e) => task_error(e),
@@ -175,7 +175,7 @@ async fn tasks_update(
     Path(id): Path<i64>,
     Json(patch): Json<crate::tasks::TaskPatch>,
 ) -> impl IntoResponse {
-    let conn = state.db.lock().unwrap();
+    let conn = state.db();
     match crate::tasks::update(&conn, user.id, id, patch) {
         Ok(Some(t)) => Json(t).into_response(),
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
@@ -194,7 +194,7 @@ async fn task_split(
     Path(id): Path<i64>,
     Json(req): Json<SplitReq>,
 ) -> impl IntoResponse {
-    let conn = state.db.lock().unwrap();
+    let conn = state.db();
     match crate::tasks::split(&conn, user.id, id, req.steps, crate::tasks::Actor::User) {
         Ok(Some(n)) => Json(n).into_response(),
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
@@ -207,7 +207,7 @@ async fn task_flatten(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
-    let conn = state.db.lock().unwrap();
+    let conn = state.db();
     match crate::tasks::flatten(&conn, user.id, id) {
         Ok(Some((task, removed))) => {
             Json(serde_json::json!({ "task": task, "removed": removed })).into_response()
@@ -222,7 +222,7 @@ async fn tasks_delete(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
-    let conn = state.db.lock().unwrap();
+    let conn = state.db();
     match crate::tasks::delete(&conn, user.id, id) {
         Ok(true) => StatusCode::NO_CONTENT,
         Ok(false) => StatusCode::NOT_FOUND,
@@ -251,7 +251,7 @@ fn daily_cap_reached(state: &AppState, user_id: i64) -> bool {
         return false;
     }
     let since = jiff::Timestamp::now() - jiff::Span::new().hours(24);
-    let conn = state.db.lock().unwrap();
+    let conn = state.db();
     crate::log::agent_sessions_since(&conn, user_id, since).unwrap_or(0) >= cap
 }
 
@@ -282,7 +282,7 @@ fn session_busy_response(busy: crate::TalkBusy) -> axum::response::Response {
 }
 
 fn log_brief_error(state: &AppState, user_id: i64, detail: &str) {
-    let conn = state.db.lock().unwrap();
+    let conn = state.db();
     let _ = crate::log::record(&conn, Some(user_id), "task_agent_error", detail);
 }
 
@@ -343,7 +343,7 @@ async fn task_agent(
         auth::Credential::Session => None,
     };
     let (opening, snap) = {
-        let conn = state.db.lock().unwrap();
+        let conn = state.db();
         let failed = |detail: String| {
             let _ = crate::log::record(&conn, Some(user.id), "task_agent_error", &detail);
             brief_error(StatusCode::INTERNAL_SERVER_ERROR, "the task could not be briefed")
@@ -389,7 +389,7 @@ async fn task_agent(
             &[],
             &opening,
         );
-        let conn = state.db.lock().unwrap();
+        let conn = state.db();
         // `None` is a rolled-back session: the caller answers 502.
         match session {
             Ok(out) => match crate::tasks::node(&conn, user.id, id) {
@@ -451,7 +451,7 @@ async fn task_agent(
         Err(e) => {
             let detail = format!("brief task failed: {e}");
             {
-                let conn = err_state.db.lock().unwrap();
+                let conn = err_state.db();
                 let _ = crate::tasks::restore(&conn, &rollback);
             }
             log_brief_error(&err_state, user.id, &detail);
@@ -482,7 +482,7 @@ struct NewTokenReq {
 }
 
 async fn tokens_list(user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
-    let conn = state.db.lock().unwrap();
+    let conn = state.db();
     match crate::tokens::list(&conn, user.id) {
         Ok(ts) => Json(ts).into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
@@ -495,7 +495,7 @@ async fn tokens_create(
     Json(req): Json<NewTokenReq>,
 ) -> impl IntoResponse {
     use crate::tokens::CreateError as E;
-    let conn = state.db.lock().unwrap();
+    let conn = state.db();
     match crate::tokens::create(&conn, user.id, &req.name) {
         Ok(made) => {
             let _ = crate::log::record(
@@ -524,7 +524,7 @@ async fn tokens_revoke(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
-    let conn = state.db.lock().unwrap();
+    let conn = state.db();
     match crate::tokens::revoke(&conn, user.id, id) {
         Ok(Some(t)) => {
             let _ = crate::log::record(
@@ -567,7 +567,7 @@ async fn talk(
             .into_response();
     }
     if let Some(id) = req.conversation_id {
-        let conn = state.db.lock().unwrap();
+        let conn = state.db();
         match crate::talk::owned(&conn, user.id, id) {
             Ok(true) => {}
             Ok(false) => return conversation_not_found(),
@@ -607,7 +607,7 @@ async fn talk(
         let now = jiff::Timestamp::now();
         let history = match req_conversation {
             Some(id) => {
-                let conn = state.db.lock().unwrap();
+                let conn = state.db();
                 crate::talk::history(&conn, id, TALK_HISTORY_LIMIT)?
             }
             None => Vec::new(),
@@ -626,7 +626,7 @@ async fn talk(
         } else {
             out.reply.clone()
         };
-        let conn = state.db.lock().unwrap();
+        let conn = state.db();
         let conv_id = match req_conversation {
             Some(id) => id,
             None => crate::talk::create(&conn, user.id, &crate::talk::title_from(&message), now)?,
@@ -662,7 +662,7 @@ async fn talk(
         }
         Ok(Err(e)) => {
             {
-                let conn = err_db.lock().unwrap();
+                let conn = crate::db_guard(&err_db);
                 let _ = crate::log::record(&conn, Some(uid), "talk_error", &e.to_string());
             }
             (
@@ -673,7 +673,7 @@ async fn talk(
         }
         Err(e) => {
             {
-                let conn = err_db.lock().unwrap();
+                let conn = crate::db_guard(&err_db);
                 let _ = crate::log::record(
                     &conn,
                     Some(uid),
@@ -699,7 +699,7 @@ fn conversation_not_found() -> axum::response::Response {
 }
 
 async fn conversations_list(user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
-    let conn = state.db.lock().unwrap();
+    let conn = state.db();
     let mut stmt = match conn.prepare(
         "SELECT id, title, updated_at FROM conversations
          WHERE user_id = ?1 ORDER BY updated_at DESC, id DESC",
@@ -743,7 +743,7 @@ async fn conversation_rename(
         )
             .into_response();
     }
-    let conn = state.db.lock().unwrap();
+    let conn = state.db();
     match conn.execute(
         "UPDATE conversations SET title = ?1 WHERE id = ?2 AND user_id = ?3",
         (title, id, user.id),
@@ -759,7 +759,7 @@ async fn conversation_delete(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
-    let conn = state.db.lock().unwrap();
+    let conn = state.db();
     match conn.execute(
         "DELETE FROM conversations WHERE id = ?1 AND user_id = ?2",
         (id, user.id),
@@ -775,7 +775,7 @@ async fn conversation_messages(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
-    let conn = state.db.lock().unwrap();
+    let conn = state.db();
     match crate::talk::owned(&conn, user.id, id) {
         Ok(true) => {}
         Ok(false) => return conversation_not_found(),
@@ -906,7 +906,7 @@ async fn settings_put(
     Json(req): Json<SettingsPatch>,
 ) -> impl IntoResponse {
     let templates = crate::templates::available(&state.config_dir, &user.username);
-    let _serializer = state.db.lock().unwrap();
+    let _serializer = state.db();
     let mut cfg = match crate::config::UserConfig::load(&state.config_dir, &user.username) {
         Ok(c) => c,
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
@@ -1125,7 +1125,7 @@ async fn memory_list(
     if category.is_some_and(|c| !crate::memory::CATEGORIES.contains(&c)) {
         return memory_error("unknown category");
     }
-    let conn = state.db.lock().unwrap();
+    let conn = state.db();
     let hits = match blank_as_none(q.q.as_ref()) {
         Some(search) => crate::memory::query(&conn, &user.username, search, limit as i64, None),
         None => crate::memory::list(&conn, &user.username, category, limit),
@@ -1192,7 +1192,7 @@ async fn plan_today(
         Ok(t) => t,
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
-    let conn = state.db.lock().unwrap();
+    let conn = state.db();
     if crate::plan::generate(&conn, user.id, &tmpl, date).is_err() {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
@@ -1231,7 +1231,7 @@ async fn debrief(
             jiff::Timestamp::now().to_zoned(tz).date().to_string()
         }
     };
-    let conn = state.db.lock().unwrap();
+    let conn = state.db();
     let row = conn
         .query_row(
             "SELECT date, content FROM debriefs WHERE user_id = ?1 AND date = ?2",
@@ -1259,7 +1259,7 @@ async fn event_shift(
     Path(id): Path<i64>,
     Json(req): Json<ShiftReq>,
 ) -> impl IntoResponse {
-    let conn = state.db.lock().unwrap();
+    let conn = state.db();
     match crate::plan::shift(&conn, user.id, id, req.minutes) {
         Ok(Some(())) => StatusCode::OK.into_response(),
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
@@ -1286,7 +1286,7 @@ async fn event_snooze(
     if !(1..=24 * 60).contains(&req.minutes) {
         return StatusCode::BAD_REQUEST.into_response();
     }
-    let conn = state.db.lock().unwrap();
+    let conn = state.db();
     match crate::plan::snooze(&conn, user.id, id, req.minutes) {
         Ok(Some(())) => StatusCode::OK.into_response(),
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
@@ -1323,7 +1323,7 @@ async fn event_alert(
     Path(id): Path<i64>,
     Json(req): Json<AlertReq>,
 ) -> impl IntoResponse {
-    let conn = state.db.lock().unwrap();
+    let conn = state.db();
     match crate::plan::set_alert(&conn, user.id, id, req.alert) {
         Ok(Some(())) => StatusCode::OK.into_response(),
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
@@ -1345,7 +1345,7 @@ async fn event_move_tomorrow(
         Ok(t) => t,
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
-    let conn = state.db.lock().unwrap();
+    let conn = state.db();
     match crate::plan::move_to_tomorrow(&conn, user.id, id, &tmpl) {
         Ok(Some((event_id, date))) => {
             Json(serde_json::json!({ "event_id": event_id, "date": date.to_string() })).into_response()
@@ -1357,7 +1357,7 @@ async fn event_move_tomorrow(
 }
 
 fn event_set(state: &AppState, user: &CurrentUser, id: i64, status: &str) -> axum::response::Response {
-    let conn = state.db.lock().unwrap();
+    let conn = state.db();
     match crate::plan::set_status(&conn, user.id, id, status) {
         Ok(Some(())) => StatusCode::OK.into_response(),
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
@@ -1409,7 +1409,7 @@ async fn push_subscribe(
         }
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
-    let conn = state.db.lock().unwrap();
+    let conn = state.db();
     match crate::push_subs::add(&conn, user.id, &req.endpoint, &req.keys.p256dh, &req.keys.auth) {
         Ok(crate::push_subs::Added::Stored) => StatusCode::OK.into_response(),
         Ok(crate::push_subs::Added::Taken) => (
@@ -1441,7 +1441,7 @@ async fn push_unsubscribe(
     if req.endpoint.len() > MAX_ENDPOINT_LEN {
         return StatusCode::BAD_REQUEST.into_response();
     }
-    let conn = state.db.lock().unwrap();
+    let conn = state.db();
     match crate::push_subs::remove(&conn, user.id, &req.endpoint) {
         Ok(true) => StatusCode::OK.into_response(),
         Ok(false) => StatusCode::NOT_FOUND.into_response(),

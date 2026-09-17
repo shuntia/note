@@ -27,7 +27,7 @@ use crate::providers::{EmbeddingsProvider, LLMProvider};
 use rusqlite::Connection;
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 pub const MAX_CONCURRENT_TALKS: usize = 4;
 pub const EMPTY_REPLY_FALLBACK: &str = "(the assistant is not configured on this server)";
@@ -84,6 +84,13 @@ impl TalkGate {
             }
         }
     }
+}
+
+/// A lock poisoned by a panic elsewhere is not a reason to fail every later
+/// request: the panicking scope already reported itself, the connection behind
+/// the lock is intact, and refusing it would turn one bug into a dead server.
+pub fn db_guard(db: &Mutex<Connection>) -> MutexGuard<'_, Connection> {
+    db.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 #[derive(Clone)]
@@ -148,6 +155,10 @@ impl AppState {
         }
     }
 
+    pub fn db(&self) -> MutexGuard<'_, Connection> {
+        db_guard(&self.db)
+    }
+
     pub fn with_admin_secrets(mut self, secrets: crate::admin::AdminSecrets) -> Self {
         self.admin_secrets = Arc::new(secrets);
         self
@@ -207,6 +218,29 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One panicked request must not take the database down with it for the
+    /// life of the process.
+    #[test]
+    fn a_poisoned_lock_still_hands_out_the_connection() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState::new(
+            crate::db::open_memory().unwrap(),
+            tmp.path().to_path_buf(),
+            tmp.path().to_path_buf(),
+        );
+        let db = state.db.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = db.lock().unwrap();
+            panic!("a handler died holding the lock");
+        })
+        .join();
+        assert!(state.db.lock().is_err(), "the lock must really be poisoned");
+        assert_eq!(
+            state.db().query_row("SELECT 1", [], |r| r.get::<_, i64>(0)).unwrap(),
+            1
+        );
+    }
 
     #[test]
     fn talk_gate_blocks_same_user_and_caps_total() {

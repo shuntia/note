@@ -84,7 +84,7 @@ pub fn deliver_via(
     for ch in ladder {
         match ch.deliver(user_id, username, msg) {
             Ok(()) => {
-                let conn = db.lock().unwrap();
+                let conn = crate::db_guard(db);
                 let _ = crate::log::record(
                     &conn,
                     Some(user_id),
@@ -101,7 +101,7 @@ pub fn deliver_via(
     } else {
         format!("{subject}: {}", errors.join("; "))
     };
-    let conn = db.lock().unwrap();
+    let conn = crate::db_guard(db);
     let _ = crate::log::record(&conn, Some(user_id), "delivery_degraded", &detail);
     None
 }
@@ -112,7 +112,7 @@ pub fn deliver_event(
     ev: &crate::runner::FiredEvent,
 ) {
     let msg = {
-        let conn = db.lock().unwrap();
+        let conn = crate::db_guard(db);
         if ev.channel == "voice" {
             let _ = crate::log::record(
                 &conn,

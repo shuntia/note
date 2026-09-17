@@ -187,7 +187,7 @@ pub fn sweep_once(state: &AppState) {
     let now = jiff::Timestamp::now();
     state.login_limiter.sweep(now);
     let fired = {
-        let conn = state.db.lock().unwrap();
+        let conn = state.db();
         if let Err(e) = gc_sessions(&conn, now) {
             let _ = crate::log::record_throttled(
                 &conn,

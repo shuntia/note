@@ -38,7 +38,7 @@ pub fn run_for_user(
     let tz = jiff::tz::TimeZone::get(&ucfg.timezone).unwrap_or(jiff::tz::TimeZone::UTC);
     let date = plan_date(&now.to_zoned(tz), &ucfg.nightly_time);
     {
-        let conn = deps.db.lock().unwrap();
+        let conn = crate::db_guard(deps.db);
         let done: i64 = conn.query_row(
             "SELECT COUNT(*) FROM debriefs WHERE user_id = ?1 AND date = ?2",
             (user_id, date.to_string()),
@@ -62,12 +62,12 @@ pub fn run_for_user(
         Ok(out) if !out.reply.trim().is_empty() => out.reply,
         Ok(_) => FALLBACK_DEBRIEF.to_string(),
         Err(e) => {
-            let conn = deps.db.lock().unwrap();
+            let conn = crate::db_guard(deps.db);
             let _ = crate::log::record(&conn, Some(user_id), "nightly_fallback", &e.to_string());
             FALLBACK_DEBRIEF.to_string()
         }
     };
-    let conn = deps.db.lock().unwrap();
+    let conn = crate::db_guard(deps.db);
     conn.execute(
         "INSERT OR IGNORE INTO debriefs (user_id, date, content, created_at) VALUES (?1, ?2, ?3, ?4)",
         (user_id, date.to_string(), content, now.to_string()),
@@ -144,13 +144,13 @@ pub fn spawn(state: crate::AppState) {
             tick.tick().await;
             let now = jiff::Timestamp::now();
             let users = {
-                let conn = state.db.lock().unwrap();
+                let conn = state.db();
                 due(&conn, &state.config_dir, now)
             };
             let users = match users {
                 Ok(u) => u,
                 Err(e) => {
-                    let conn = state.db.lock().unwrap();
+                    let conn = state.db();
                     let _ = crate::log::record_throttled(
                         &conn,
                         None,
@@ -184,7 +184,7 @@ pub fn spawn(state: crate::AppState) {
                     Err(join) => Some(format!("nightly task panicked: {join}")),
                 };
                 if let Some(detail) = failure {
-                    let conn = state.db.lock().unwrap();
+                    let conn = state.db();
                     let _ = crate::log::record_throttled(
                         &conn,
                         Some(user_id),
