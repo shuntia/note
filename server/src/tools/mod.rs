@@ -775,6 +775,25 @@ mod tests {
     }
 
     #[test]
+    fn a_scoped_session_may_only_drop_never_restate() {
+        let (conn, tmp) = env();
+        let (mine, step, _) = scope_fixture(&conn, &tmp);
+        dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_update",
+            &format!(r#"{{"task_id":{mine},"state":"in_progress"}}"#)).unwrap();
+        for target in [mine, step] {
+            for state in ["done", "in_progress", "open"] {
+                let e = dispatch(&conn, &scoped(&tmp, mine), SessionKind::Talk, "task_update",
+                    &format!(r#"{{"task_id":{target},"state":"{state}"}}"#)).unwrap_err();
+                assert_eq!(e.kind, "rejected", "task {target} was set {state}");
+            }
+        }
+        let state: String = conn
+            .query_row("SELECT state FROM tasks WHERE id = ?1", [mine], |r| r.get(0))
+            .unwrap();
+        assert_eq!(state, "in_progress");
+    }
+
+    #[test]
     fn a_scoped_session_drops_only_an_open_task() {
         let (conn, tmp) = env();
         let (mine, _, _) = scope_fixture(&conn, &tmp);

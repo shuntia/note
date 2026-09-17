@@ -128,7 +128,12 @@ pub fn update(
         if args.is_now.is_some() {
             return Err(ToolError::rejected("this session cannot move a task in or out of Now"));
         }
-        if args.state.as_deref() == Some("dropped") {
+        if let Some(wanted) = args.state.as_deref() {
+            if wanted != "dropped" {
+                return Err(ToolError::rejected(format!(
+                    "this session may only drop a task, not set its state to {wanted}"
+                )));
+            }
             let state = crate::tasks::get(conn, ctx.user_id, scope)
                 .map_err(|e| ToolError::internal(e.to_string()))?
                 .map(|t| t.state)
