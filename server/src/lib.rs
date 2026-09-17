@@ -14,6 +14,7 @@ pub mod prompts;
 pub mod providers;
 pub mod push_subs;
 pub mod runner;
+pub mod security;
 pub mod talk;
 pub mod tasks;
 pub mod tokens;
@@ -101,7 +102,10 @@ pub struct AppState {
     pub login_limiter: Arc<crate::auth::LoginLimiter>,
     pub talk_gate: Arc<TalkGate>,
     pub admin_limiter: Arc<crate::auth::LoginLimiter>,
+    /// Caps password re-checks on the enrolment routes.
+    pub security_limiter: Arc<crate::auth::LoginLimiter>,
     pub admin_secrets: Arc<crate::admin::AdminSecrets>,
+    pub passkeys: Arc<crate::security::PasskeyService>,
     pub providers_info: crate::admin::ProvidersInfo,
     pub started_at: jiff::Timestamp,
 }
@@ -127,7 +131,9 @@ impl AppState {
             login_limiter: Arc::new(crate::auth::LoginLimiter::new()),
             talk_gate: Arc::new(TalkGate::new()),
             admin_limiter: Arc::new(crate::auth::LoginLimiter::new()),
+            security_limiter: Arc::new(crate::auth::LoginLimiter::new()),
             admin_secrets: Arc::new(crate::admin::AdminSecrets::default()),
+            passkeys: Arc::new(crate::security::PasskeyService::default()),
             providers_info: crate::admin::ProvidersInfo::default(),
             started_at: jiff::Timestamp::now(),
         }
@@ -135,6 +141,11 @@ impl AppState {
 
     pub fn with_admin_secrets(mut self, secrets: crate::admin::AdminSecrets) -> Self {
         self.admin_secrets = Arc::new(secrets);
+        self
+    }
+
+    pub fn with_passkeys(mut self, passkeys: crate::security::PasskeyService) -> Self {
+        self.passkeys = Arc::new(passkeys);
         self
     }
 

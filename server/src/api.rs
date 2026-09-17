@@ -48,6 +48,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/push/subscribe", post(push_subscribe))
         .route("/api/push/unsubscribe", post(push_unsubscribe))
         .route("/api/push/vapid_public_key", get(vapid_public_key))
+        .nest("/api/security", crate::security::routes())
         .nest("/api/admin", crate::admin::routes())
         .with_state(state)
 }
