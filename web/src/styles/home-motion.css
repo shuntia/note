@@ -1,0 +1,71 @@
+/* ── home: one scroll from the face to Today ──────────────────────
+   The stage is the Today screen; the big face sits over it and is carried into the
+   compact header (or the desktop hero) while the stage stays pinned. Without motion
+   (.still) the face and Today are plain sections, one under the other. */
+.home.motion { display: block; }
+.home .stage { position: relative; width: 100%; min-height: 100dvh; display: flex; flex-direction: column; align-items: center; }
+.home.desktop .stage { min-height: calc(100dvh - 64px); }
+.home.desktop.motion:not(.in-session) .stage { display: block; }
+
+.face-big { position: absolute; top: 0; left: 0; right: 0; height: 100dvh; z-index: 5; display: flex; flex-direction: column; align-items: center; pointer-events: none; }
+.home.desktop .face-big { height: calc(100dvh - 64px); }
+.face-big button, .face-big .later-pick, .face-big .ev-menu { pointer-events: auto; }
+.face-big .rest { display: flex; flex-direction: column; align-items: center; }
+.face-big .home-face, .face-still .home-face { flex-direction: column; padding-top: 170px; }
+.home.desktop .face-big .home-face, .home.desktop .face-still .home-face { padding-top: clamp(40px, 9vh, 110px); }
+.face-big .chev { position: absolute; left: 50%; transform: translateX(-50%); bottom: 28px; }
+.home.desktop .face-big .chev { bottom: 40px; }
+.home.no-arc .face-big .home-text .gauge-num, .home.no-arc .face-still .home-text .gauge-num { justify-content: flex-start; }
+.home.no-arc .face-big .home-actions, .home.no-arc .face-still .home-actions { align-self: flex-start; margin-left: 28px; }
+
+/* the words the morph carries take the target's optical size and tracking on the way */
+.atom { display: inline-block; font-variation-settings: 'opsz' var(--opsz); letter-spacing: var(--ls); }
+
+/* the landing spots are hidden until the timeline owns them (it measures them first) */
+.home.motion:not(.morph-ready) :is(.home-face.compact, .home-sheet, .home-today, .today-hero, .today-line, .today-bar, .tabs) { visibility: hidden; }
+
+/* ── the compact header ── */
+.home-face.compact { flex-direction: row; align-items: center; gap: 16px; width: 100%; padding: 54px 24px 0; box-sizing: border-box; }
+.home.desktop .home-face.compact { width: min(1200px, 84vw); padding-left: 0; padding-right: 0; }
+.home-face.compact .btn-round { flex: none; }
+.home.desktop .home-face.compact .btn-fill { margin-left: 8px; }
+.home.motion .home-sheet { margin-top: 24px; }
+
+/* ── the desktop hero ── */
+.today-wait { display: inline-flex; flex-direction: column; align-self: flex-start; }
+.today-in > span { display: inline-block; }
+.in-word { margin-right: 0.28em; }
+/* the arc, flattened: what is left of the wait, under the words that say it */
+.today-bar { height: 3px; border-radius: 2px; background: var(--track); overflow: hidden; margin-top: 8px; opacity: 0.38; }
+.today-bar-fill { display: block; height: 100%; border-radius: 2px; background: var(--sun); }
+
+/* ── under the stage ── */
+.home .today-ground { position: static; display: flex; flex-direction: column; align-items: center; gap: 64px; width: 100%; box-sizing: border-box; padding: 72px 0 120px; background: none; }
+.home.desktop .today-ground { align-items: flex-start; padding: 100px 120px 140px; background: var(--earth); }
+.home.desktop .today-ground .debrief-row { width: 820px; max-width: 100%; }
+#calendar-slot { width: 100%; }
+#calendar-slot:empty { display: none; }
+
+.home .tabs { position: fixed; left: 0; right: 0; bottom: 0; z-index: 10; margin: 0; backdrop-filter: blur(14px); }
+
+/* ── without motion: plain sections, the face a screen of its own ── */
+.home.still { display: block; }
+.home.still .face-still { display: flex; flex-direction: column; align-items: center; width: 100%; min-height: 100dvh; box-sizing: border-box; }
+.home.still.desktop .face-still { min-height: calc(100dvh - 64px); }
+.home.still .face-still .home-sheet { margin-top: 32px; }
+.home.still .today-line { position: static; width: min(1200px, calc(100% - 240px)); margin: 24px auto 0; }
+
+/* the pinned stage paints after the top bar; the bar keeps its place above the sky */
+.topbar { z-index: 20; }
+
+/* ── desktop: the buttons and the top bar rest after two idle seconds ──
+   Nothing the morph tweens carries a transition (a mid-transition opacity would be
+   read as a tween's end value), so the rest belongs to a wrapper. */
+@media (min-width: 768px) {
+  .rest, .topbar > * { transition: opacity 0.25s ease; }
+  html.idle .rest:not(:hover):not(:focus-within):not(:has(.ev-menu, .later-pick)),
+  html.idle .topbar:not(:hover):not(:focus-within) > * { opacity: 0; pointer-events: none; transition-duration: 0.6s; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .rest, .topbar > * { transition: none; }
+}

@@ -1,23 +1,31 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { gsap } from 'gsap'
+import { ScrollTrigger } from 'gsap/ScrollTrigger'
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { api, ApiError } from '../api'
 import type { ToastAction } from '../app'
 import { DayLine, minutesOf } from '../dayline'
 import { useEscape } from '../escape'
 import { eventFacts, nextUp } from '../events'
-import { Gauge } from '../gauge'
+import { arcPath, Gauge, STROKE, VB, type ArcLine } from '../gauge'
 import { makeHold } from '../held'
+import { clearTimeline, scrollReveal, scrollToY, scrub, snapNearest, travel, type Timeline, type Trigger } from '../homeMotion'
+import { reducedMotion } from '../motion'
 import { NowCounter } from '../nowcounter'
 import { Overflow } from '../overflow'
-import { Presence } from '../presence'
 import { readPrefs } from '../prefs'
 import { eventLabel } from '../receipts'
 import { effectiveStart, elapsedSec, type FocusSession } from '../session'
-import { useStage } from '../stage'
 import { TellNote } from '../tellnote'
 import type { PlanEvent } from '../types'
+import { DebriefFold } from './Today'
+import '../styles/home-motion.css'
 
 const LATER_MINUTES = [5, 10, 15, 30, 60]
 const ROUTINE_MIN = 15
+const PIN_MOBILE = 520
+const PIN_DESKTOP = 600
+const IDLE_MS = 2000
+const WAKE_EVENTS = ['mousemove', 'wheel', 'keydown', 'touchstart', 'pointerdown', 'scroll', 'focusin'] as const
 
 // Drop has no server-side reversal, so the request waits out the undo window.
 const dropHold = makeHold<number>()
@@ -25,10 +33,15 @@ const dropHold = makeHold<number>()
 const doneHold = makeHold<FocusSession>()
 
 const round5 = (min: number) => Math.max(5, Math.round(min / 5) * 5)
+const clamp = (v: number) => Math.min(1, Math.max(0, v))
 
 function nowMinutes(): number {
   const d = new Date()
   return d.getHours() * 60 + d.getMinutes()
+}
+
+function minutesOfDayNow(): number {
+  return (Date.now() - new Date().setHours(0, 0, 0, 0)) / 60_000
 }
 
 function actionMessage(err: unknown): string {
@@ -56,6 +69,62 @@ function withElapsedNote(previous: string, elapsed: number): string {
   return previous.trim() ? `${previous.trim()}\n${line}` : line
 }
 
+// Text the morph can carry word by word.
+function Atoms({ text }: { text: string }) {
+  return (
+    <span className="atoms">
+      {text
+        .split(/\s+/)
+        .filter(Boolean)
+        .map((w, i) => (
+          <Fragment key={i}>
+            {i > 0 && ' '}
+            <span className="atom">{w}</span>
+          </Fragment>
+        ))}
+    </span>
+  )
+}
+
+function useMotion(): boolean {
+  const [on, setOn] = useState(() => !reducedMotion())
+  useEffect(() => {
+    const mq = window.matchMedia('(prefers-reduced-motion: reduce)')
+    const sync = () => setOn(!mq.matches)
+    mq.addEventListener('change', sync)
+    return () => mq.removeEventListener('change', sync)
+  }, [])
+  return on
+}
+
+// Desktop rests its buttons and the top bar after two idle seconds; any sign of a
+// hand brings them back (the CSS reads `html.idle`).
+function useIdle(on: boolean) {
+  useEffect(() => {
+    if (!on) return
+    const root = document.documentElement
+    let timer = 0
+    const wake = () => {
+      root.classList.remove('idle')
+      window.clearTimeout(timer)
+      timer = window.setTimeout(() => root.classList.add('idle'), IDLE_MS)
+    }
+    for (const ev of WAKE_EVENTS) addEventListener(ev, wake, { passive: true })
+    wake()
+    return () => {
+      window.clearTimeout(timer)
+      root.classList.remove('idle')
+      for (const ev of WAKE_EVENTS) removeEventListener(ev, wake)
+    }
+  }, [on])
+}
+
+const isTyping = (target: EventTarget | null) => {
+  const el = target as HTMLElement | null
+  const tag = el?.tagName
+  return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || !!el?.isContentEditable
+}
+
 export function Home({
   session,
   setSession,
@@ -64,7 +133,6 @@ export function Home({
   refresh,
   openNow,
   mobile,
-  onChrome,
   tabs,
 }: {
   session: FocusSession | null
@@ -74,24 +142,16 @@ export function Home({
   refresh: number
   openNow: (s: FocusSession) => void
   mobile: boolean
-  onChrome: (hidden: boolean) => void
   tabs: ReactNode
 }) {
-  const [events, setEvents] = useState<PlanEvent[]>([])
+  const [events, setEvents] = useState<PlanEvent[] | null>(null)
   const [beat, tick] = useState(0)
   const [pending, setPending] = useState(false)
   const [later, setLater] = useState(false)
   const inSession = session !== null
-  const { stage, setStage, bind } = useStage(inSession ? 2 : 1)
-  const [wasInSession, setWasInSession] = useState(inSession)
   const prefs = readPrefs()
-
-  // Starting or finishing puts the face back at stage 0 in the same render, so no
-  // frame shows the new face at the old stage.
-  if (wasInSession !== inSession) {
-    setWasInSession(inSession)
-    setStage(0)
-  }
+  const motion = useMotion()
+  useIdle(!mobile)
 
   useEscape(later, () => setLater(false))
 
@@ -107,13 +167,6 @@ export function Home({
     const id = setInterval(() => tick((n) => n + 1), 1000)
     return () => clearInterval(id)
   }, [])
-
-  // The last stage is Today; before it the face owns the whole screen.
-  const showToday = stage === (inSession ? 2 : 1)
-  useEffect(() => {
-    onChrome(!showToday)
-    return () => onChrome(false)
-  }, [showToday, onChrome])
 
   const act = async (fn: () => Promise<unknown>) => {
     if (pending) return
@@ -151,12 +204,13 @@ export function Home({
 
   // the beat is a dependency because the holds live outside React state
   const visible = useMemo(
-    () => events.filter((ev) => ev.id !== dropHold.held() && ev.id !== doneHold.held()?.eventId),
+    () => (events ?? []).filter((ev) => ev.id !== dropHold.held() && ev.id !== doneHold.held()?.eventId),
     [events, beat],
   )
   const now = nowMinutes()
   const next = nextUp(visible, now)
   const facts = next ? eventFacts(next, now) : null
+  const label = next ? eventLabel(next.kind) : ''
 
   // A routine is timed to its span; without an end the routine default stands in.
   const start = (ev: PlanEvent) => {
@@ -178,7 +232,7 @@ export function Home({
     })
   }
 
-  // ── session face ─────────────────────────────────────────────
+  // ── session ──────────────────────────────────────────────────
   const pause = () => session && setSession({ ...session, pausedAt: Date.now() })
   const resume = () =>
     session &&
@@ -275,13 +329,10 @@ export function Home({
   }
 
   // Past the duration the counter leaves the preference behind and counts the overrun up.
-  const overrun = (s: FocusSession) => {
-    const total = s.durationSec
-    return { total, over: total !== null && elapsedSec(s) > total }
-  }
+  const over = session !== null && session.durationSec !== null && elapsedSec(session) > session.durationSec
 
   const counter = (s: FocusSession) => {
-    const { total, over } = overrun(s)
+    const total = s.durationSec
     return (
       <NowCounter
         startedAt={effectiveStart(s) + (over ? (total ?? 0) * 1000 : 0)}
@@ -292,32 +343,36 @@ export function Home({
     )
   }
 
-  const sessionFrac = (session: FocusSession) =>
-    session.durationSec ? elapsedSec(session) / session.durationSec : 0
+  const sessionFracAt = (s: FocusSession) => () =>
+    s.durationSec ? ((s.pausedAt ?? Date.now()) - effectiveStart(s)) / (s.durationSec * 1000) : 0
 
-  // ── wait face ────────────────────────────────────────────────
-  const waitCentre = (ev: PlanEvent, big: boolean) => {
-    const { eyebrow, minutes, span } = eventFacts(ev, now)
-    return (
-      <>
-        {big && <div className="gauge-eyebrow">{eyebrow}</div>}
-        {minutes !== null && (
-          <div className="gauge-num" style={{ fontSize: big ? 50 : 22 }}>{minutes} min</div>
-        )}
-        {big && (
-          <>
-            <div className="gauge-name" style={{ fontSize: 18 }}>{eventLabel(ev.kind)}</div>
-            <div className="gauge-sub">{span}</div>
-          </>
-        )}
-      </>
-    )
-  }
-  const waitFrac = (ev: PlanEvent) => {
+  const sessionNum = (s: FocusSession, size: number) => (
+    <div className={`gauge-num${over ? ' over' : ''}`} style={{ fontSize: size }}>
+      {over ? '+' : ''}
+      {counter(s)}
+    </div>
+  )
+
+  const pauseButton = (s: FocusSession) => (
+    <button className="btn-round" aria-label={s.pausedAt ? 'Back to it' : 'Break'} onClick={s.pausedAt ? resume : pause}>
+      {s.pausedAt ? (
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10-6.5z" /></svg>
+      ) : (
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1.2" /><rect x="14" y="5" width="4" height="14" rx="1.2" /></svg>
+      )}
+    </button>
+  )
+
+  const doneButton = (
+    <button className={`btn-fill${mobile ? ' wide' : ''}`} disabled={pending} onClick={finish}>Done with this step</button>
+  )
+
+  // ── the wait ─────────────────────────────────────────────────
+  const from = waitStart(visible, now)
+  const waitFracAt = (ev: PlanEvent) => () => {
     if (eventFacts(ev, now).minutes === null) return 1
-    const from = waitStart(visible, now)
     const to = minutesOf(ev.wall_time)
-    return to <= from ? 1 : (now - from) / (to - from)
+    return to <= from ? 1 : clamp((minutesOfDayNow() - from) / (to - from))
   }
 
   const nextActions = (ev: PlanEvent) => (
@@ -347,111 +402,378 @@ export function Home({
     </>
   )
 
+  // ── the two faces ────────────────────────────────────────────
+  const bigFace = session ? (
+    <div className="home-face">
+      <Gauge size={mobile ? 320 : 440} fracAt={sessionFracAt(session)} breathe paused={session.pausedAt !== null}>
+        {sessionNum(session, 58)}
+        <div className="gauge-name" style={{ fontSize: 18 }}><Atoms text={session.stepName ?? session.title} /></div>
+        {session.stepIndex !== null && (
+          <div className="gauge-sub"><Atoms text={`${session.stepIndex} of ${session.stepCount}`} /></div>
+        )}
+      </Gauge>
+    </div>
+  ) : (
+    <div className="home-face">
+      {events === null ? (
+        <Gauge size={mobile ? 320 : 440} faded />
+      ) : next && facts ? (
+        prefs.showArc ? (
+          <Gauge size={mobile ? 320 : 440} fracAt={waitFracAt(next)} faded>
+            <div className="gauge-eyebrow"><Atoms text={facts.eyebrow} /></div>
+            {facts.minutes !== null && (
+              <div className="gauge-num" style={{ fontSize: mobile ? 50 : 58 }}><Atoms text={`${facts.minutes} min`} /></div>
+            )}
+            <div className="gauge-name" style={{ fontSize: mobile ? 18 : 22 }}><Atoms text={label} /></div>
+            <div className="gauge-sub" style={{ fontSize: mobile ? undefined : '0.875rem' }}><Atoms text={facts.span} /></div>
+          </Gauge>
+        ) : (
+          <div className="home-text">
+            <div className="gauge-eyebrow"><Atoms text={facts.eyebrow} /></div>
+            <div className="home-title"><Atoms text={label} /></div>
+            {facts.minutes !== null && (
+              <div className="gauge-num" style={{ fontSize: 30 }}><Atoms text={`in ${facts.minutes} min`} /></div>
+            )}
+            <div className="gauge-sub"><Atoms text={facts.span} /></div>
+          </div>
+        )
+      ) : (
+        <div className="home-text"><div className="home-title"><Atoms text="That's everything today." /></div></div>
+      )}
+    </div>
+  )
+
+  // The wrapper is what rests when the desktop goes idle; the group inside is what the morph moves.
+  const bigActions = session ? null : next && <div className="rest"><div className="home-actions">{nextActions(next)}</div></div>
+
+  // Mobile, and any session, land on the compact header; the desktop wait lands on
+  // the hero.
+  const compactHeader = session ? (
+    <div className="home-face compact">
+      <Gauge size={120} fracAt={sessionFracAt(session)} breathe paused={session.pausedAt !== null}>
+        {sessionNum(session, 24)}
+      </Gauge>
+      <div className="home-head">
+        <span className="home-head-name">{session.stepName ?? session.title}</span>
+        {session.stepIndex !== null && <span className="gauge-sub">{session.stepIndex} of {session.stepCount}</span>}
+      </div>
+      {!mobile && doneButton}
+      {pauseButton(session)}
+    </div>
+  ) : next && facts ? (
+    <div className="home-face compact">
+      {prefs.showArc ? (
+        <Gauge size={120} fracAt={waitFracAt(next)} faded>
+          {facts.minutes !== null && <span className="gauge-num" style={{ fontSize: 22 }}>{facts.minutes} min</span>}
+        </Gauge>
+      ) : (
+        facts.minutes !== null && <span className="gauge-num" style={{ fontSize: 22 }}>{facts.minutes} min</span>
+      )}
+      <div className="home-head">
+        <span className="gauge-eyebrow">{facts.eyebrow}</span>
+        <span className="home-head-name">{label}</span>
+        <span className="gauge-sub">{facts.span}</span>
+      </div>
+      <button className="btn-fill small" disabled={pending} onClick={() => start(next)}>Start</button>
+    </div>
+  ) : null
+
+  const nowLabel = `${String(Math.floor(now / 60)).padStart(2, '0')}:${String(now % 60).padStart(2, '0')}`
+  const hero = (
+    <section className="today-hero">
+      {next && facts ? (
+        <>
+          <div className="today-eyebrow">
+            NOW {nowLabel}
+            {facts.eyebrow === 'NEXT' && (
+              <>
+                {' '}
+                <span className="today-dot" aria-hidden="true" /> UP NEXT
+              </>
+            )}
+          </div>
+          <h1 className="today-title">{label}</h1>
+          <div className="today-wait">
+            <div className="today-when">
+              {facts.minutes !== null && (
+                <span className="today-in"><span className="in-word">in</span><span className="in-num">{facts.minutes} min</span></span>
+              )}
+              <span className="today-span">{facts.span}</span>
+            </div>
+            <div className="today-bar" aria-hidden="true"><span className="today-bar-fill" style={{ width: `${waitFracAt(next)() * 100}%` }} /></div>
+          </div>
+          <div className="rest"><div className="today-actions">{nextActions(next)}</div></div>
+        </>
+      ) : (
+        events && <h1 className="today-title">That's everything today.</h1>
+      )}
+    </section>
+  )
+
+  const list = (
+    <ul className="home-list">
+      {visible
+        .filter((ev) => (ev.status === 'pending' || ev.status === 'snoozed' || ev.status === 'fired') && minutesOf(ev.end_wall_time ?? ev.wall_time) >= now)
+        .map((ev) => (
+          <li key={ev.id} className={ev.id === next?.id ? 'next' : ''}>
+            <span className="home-when">{ev.wall_time} – {ev.end_wall_time ?? ev.wall_time}</span>
+            <span className="home-what">{eventLabel(ev.kind)}</span>
+          </li>
+        ))}
+    </ul>
+  )
+
+  const compactLanding = mobile || inSession
+  const today = events && (
+    <div className="home-today">
+      <DayLine events={visible} now={now} compact={mobile} nextId={next?.id} />
+      {list}
+      {mobile && <TellNote notify={notify} />}
+    </div>
+  )
+
+  // ── the choreography ─────────────────────────────────────────
+  const home = useRef<HTMLDivElement>(null)
+  const stage = useRef<HTMLElement>(null)
+  const ground = useRef<HTMLElement>(null)
+  const tl = useRef<Timeline | null>(null)
+  const st = useRef<Trigger | null>(null)
+  const [ready, setReady] = useState(false)
+  const choreo = motion && !!events
+
+  const distance = mobile ? PIN_MOBILE : PIN_DESKTOP
+  useLayoutEffect(() => {
+    if (!motion) return
+    const el = stage.current
+    const root = home.current
+    if (!el || !root) return
+    const topbar = mobile ? null : document.querySelector<HTMLElement>('.shell > .topbar')
+    const trigger = scrub(
+      () => tl.current,
+      { trigger: el, start: topbar ? 'top 64px' : 'top top', end: `+=${distance}`, pin: true, pinSpacing: true, anticipatePin: 1 },
+      { down: 0.7, up: 1.2 },
+    )
+    st.current = trigger
+    const barPin = topbar
+      ? ScrollTrigger.create({ trigger: topbar, start: 'top top', end: `+=${distance}`, pin: true, pinSpacing: false })
+      : null
+    // `?nosnap` holds a mid frame for screenshots.
+    const unsnap = new URLSearchParams(location.search).has('nosnap') ? () => {} : snapNearest(trigger)
+    const onKey = (e: KeyboardEvent) => {
+      if (isTyping(e.target) || e.defaultPrevented) return
+      if (e.key === 'ArrowDown' && window.scrollY < trigger.end) {
+        e.preventDefault()
+        scrollToY(trigger.end)
+      } else if (e.key === 'ArrowUp' && window.scrollY <= trigger.end + 1) {
+        e.preventDefault()
+        scrollToY(trigger.start)
+      }
+    }
+    addEventListener('keydown', onKey)
+    // Content that arrives later (the plan, the letter, the calendar) changes the page's height.
+    let raf = 0
+    const ro = new ResizeObserver(() => {
+      cancelAnimationFrame(raf)
+      raf = requestAnimationFrame(() => ScrollTrigger.refresh())
+    })
+    ro.observe(root)
+    return () => {
+      ro.disconnect()
+      cancelAnimationFrame(raf)
+      removeEventListener('keydown', onKey)
+      unsnap()
+      barPin?.kill()
+      trigger.kill()
+      st.current = null
+    }
+  }, [motion, mobile, distance])
+
+  // Every landing spot is measured from rendered text, so the timeline is rebuilt
+  // whenever what is on the face or where it lands could have moved.
+  const shape = [
+    choreo,
+    compactLanding,
+    prefs.showArc,
+    next?.id,
+    label,
+    facts?.eyebrow,
+    facts?.minutes,
+    facts?.span,
+    session?.startedAt,
+    session?.stepIndex,
+    session?.stepName,
+    over,
+    visible.map((ev) => ev.id).join(','),
+  ].join('|')
+  const [layout, relayout] = useState(0)
+  useEffect(() => {
+    if (!motion) return
+    const bump = () => relayout((n) => n + 1)
+    ScrollTrigger.addEventListener('refresh', bump)
+    return () => ScrollTrigger.removeEventListener('refresh', bump)
+  }, [motion])
+
+  useLayoutEffect(() => {
+    if (!choreo) {
+      setReady(false)
+      return
+    }
+    let stale = false
+    const build = () => {
+      if (stale) return
+      const el = stage.current
+      if (!el) return
+      if (tl.current) clearTimeline(tl.current)
+      const timeline = gsap.timeline({ paused: true })
+      const q = (sel: string) => el.querySelector<HTMLElement>(sel)
+      const qa = (sel: string) => [...el.querySelectorAll<HTMLElement>(sel)]
+      const to = (targets: HTMLElement[], vars: gsap.TweenVars, at: number) => {
+        if (targets.length) timeline.to(targets, vars, at)
+      }
+      const from = (targets: HTMLElement[], vars: gsap.TweenVars, at: number) => {
+        if (targets.length) timeline.from(targets, vars, at)
+      }
+      const tabsEl = home.current?.querySelectorAll<HTMLElement>('.tabs') ?? []
+      if (compactLanding) {
+        travel(timeline, q('.face-big .gauge-ring'), q('.home-face.compact .gauge-ring'), { mode: 'box' })
+        travel(timeline, q('.face-big .gauge-num'), q('.home-face.compact .gauge-num'), { mode: inSession ? 'box' : 'text' })
+        travel(timeline, q('.face-big .gauge-eyebrow'), q('.home-face.compact .gauge-eyebrow'))
+        travel(timeline, q('.face-big .gauge-name, .face-big .home-title'), q('.home-face.compact .home-head-name'))
+        travel(timeline, q('.face-big .gauge-sub'), q('.home-face.compact .home-head .gauge-sub'))
+        if (inSession) {
+          // The controls settle in once the ring has cleared the header row.
+          from(qa('.home-face.compact .btn-round, .home-face.compact .btn-fill'), { autoAlpha: 0, scale: 0.85, duration: 0.3, ease: 'power2.out' }, 0.65)
+          from(qa('.home-sheet'), { autoAlpha: 0, y: 24, duration: 0.3, ease: 'power2.out' }, 0.62)
+        } else {
+          travel(timeline, q('.face-big .home-actions .btn-fill'), q('.home-face.compact .btn-fill'), { mode: 'box', fit: 'both' })
+          to(qa('.face-big .btn-haze, .face-big .ev-more-wrap'), { autoAlpha: 0, x: -24, y: -10, duration: 0.45, ease: 'power2.in' }, 0.2)
+        }
+        if (!q('.home-face.compact')) to(qa('.face-big .home-text'), { autoAlpha: 0, y: -20, duration: 0.4, ease: 'power2.in' }, 0.2)
+        from(qa('.home-today .dayline'), { autoAlpha: 0, y: 28, duration: 0.4, ease: 'power2.out' }, 0.35)
+        from(qa('.home-list li'), { autoAlpha: 0, y: 24, duration: 0.35, ease: 'power2.out', stagger: 0.04 }, 0.42)
+        from(qa('.home-today .tellnote-wrap'), { autoAlpha: 0, y: 24, duration: 0.35, ease: 'power2.out' }, 0.5)
+      } else {
+        const ring = q('.face-big .gauge-ring') as SVGSVGElement | null
+        const bar = q('.today-bar')
+        if (ring && bar) {
+          const paths = [...ring.querySelectorAll('path')]
+          const flat = (t: number, line?: ArcLine, width = STROKE) => {
+            const d = arcPath(t, line)
+            for (const p of paths) {
+              p.setAttribute('d', d)
+              p.setAttribute('stroke-width', width.toFixed(2))
+            }
+          }
+          flat(0)
+          const sr = ring.getBoundingClientRect()
+          const br = bar.getBoundingClientRect()
+          const k = sr.width / VB
+          const line: ArcLine = [(br.left - sr.left) / k, (br.right - sr.left) / k, (br.top + br.height / 2 - sr.top) / k]
+          const thin = br.height / k
+          const fl = { t: 0 }
+          timeline
+            .to(fl, { t: 1, duration: 1, ease: 'power2.inOut', onUpdate: () => flat(fl.t, line, STROKE + (thin - STROKE) * fl.t) }, 0)
+            .to(ring, { autoAlpha: 0, duration: 0.015, ease: 'none' }, 0.985)
+            .from(bar, { autoAlpha: 0, duration: 0.015, ease: 'none' }, 0.985)
+          from(qa('.in-word'), { autoAlpha: 0, duration: 0.4, ease: 'none' }, 0.6)
+        }
+        travel(timeline, q('.face-big .gauge-num'), q('.in-num'))
+        travel(timeline, q('.face-big .gauge-name, .face-big .home-title'), q('.today-title'))
+        travel(timeline, q('.face-big .gauge-sub'), q('.today-span'))
+        travel(timeline, q('.face-big .gauge-eyebrow'), q('.today-eyebrow'))
+        travel(timeline, q('.face-big .home-actions'), q('.today-actions'), { mode: 'children', fit: 'both' })
+        from(qa('.today-line'), { autoAlpha: 0, y: 28, duration: 0.45, ease: 'power2.out' }, 0.35)
+      }
+      to(qa('.face-big .chev'), { autoAlpha: 0, duration: 0.35 }, 0)
+      from([...tabsEl], { autoAlpha: 0, duration: 0.45, ease: 'none' }, 0.4)
+      tl.current = timeline
+      timeline.progress(st.current?.progress ?? 0)
+      setReady(true)
+    }
+    void document.fonts.ready.then(build)
+    return () => {
+      stale = true
+    }
+  }, [shape, layout])
+
+  useEffect(
+    () => () => {
+      if (tl.current) clearTimeline(tl.current)
+      tl.current = null
+    },
+    [],
+  )
+
+  // What sits under the stage fades in as it scrolls up, and away again at the top.
+  useLayoutEffect(() => {
+    if (!motion) return
+    const el = ground.current
+    if (!el) return
+    let undo: (() => void) | null = null
+    const arm = () => {
+      undo?.()
+      undo = scrollReveal(
+        (t) => t.from([...el.children], { autoAlpha: 0, y: 36, duration: 1, ease: 'power2.out', stagger: 0.35 }),
+        { trigger: el, start: mobile ? 'clamp(top 92%)' : 'clamp(top 88%)', end: mobile ? 'clamp(top 45%)' : 'clamp(top 30%)' },
+      )
+      ScrollTrigger.refresh()
+    }
+    arm()
+    const mo = new MutationObserver(arm)
+    mo.observe(el, { childList: true })
+    return () => {
+      mo.disconnect()
+      undo?.()
+    }
+  }, [motion, mobile])
+
+  // A session starting or ending changes the face, so the page goes back to it.
+  useEffect(() => {
+    if (window.scrollY > 0) scrollToY(0)
+  }, [inSession])
+
   const chevron = (
-    <button className="chev" aria-label="Today" onClick={() => setStage((s) => Math.min(inSession ? 2 : 1, s + 1))}>
+    <button className="chev" aria-label="Today" onClick={() => st.current && scrollToY(st.current.end)}>
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 14l6-6 6 6" /></svg>
     </button>
   )
 
-  const today = (
-    <>
-      <DayLine events={visible} now={now} compact={mobile} nextId={next?.id} />
-      <ul className="home-list">
-        {visible
-          .filter((ev) => (ev.status === 'pending' || ev.status === 'snoozed' || ev.status === 'fired') && minutesOf(ev.end_wall_time ?? ev.wall_time) >= now)
-          .map((ev) => (
-            <li key={ev.id} className={ev.id === next?.id ? 'next' : ''}>
-              <span className="home-when">{ev.wall_time} – {ev.end_wall_time ?? ev.wall_time}</span>
-              <span className="home-what">{eventLabel(ev.kind)}</span>
-            </li>
-          ))}
-      </ul>
-      {mobile && <TellNote notify={notify} />}
-    </>
-  )
-
-  // ── layout ───────────────────────────────────────────────────
-  if (session) {
-    const big = stage === 0
-    const { over } = overrun(session)
-    return (
-      <div className={`home in-session stage-${stage}${mobile ? ' mobile' : ''}${session.pausedAt ? ' paused' : ''}`} {...bind}>
-        <div className="home-face">
-          <Gauge size={stage === 2 ? 120 : big ? (mobile ? 320 : 440) : 230} frac={sessionFrac(session)}>
-            <div className={`gauge-num${over ? ' over' : ''}`} style={{ fontSize: stage === 2 ? 24 : big ? 58 : 40 }}>
-              {over ? '+' : ''}
-              {counter(session)}
-            </div>
-            {stage !== 2 && (
-              <>
-                <div className="gauge-name" style={{ fontSize: big ? 18 : 15 }}>{session.stepName ?? session.title}</div>
-                {session.stepIndex !== null && (
-                  <div className="gauge-sub">{session.stepIndex} of {session.stepCount}</div>
-                )}
-              </>
-            )}
-          </Gauge>
-          <Presence key="head" show={stage === 2} className="home-head">
-            <span className="home-head-name">{session.stepName ?? session.title}</span>
-            {session.stepIndex !== null && <span className="gauge-sub">{session.stepIndex} of {session.stepCount}</span>}
-          </Presence>
-        </div>
-        <Presence key="sheet" show={stage === 1} className="home-sheet">
-          <button className="btn-round" aria-label={session.pausedAt ? 'Back to it' : 'Break'} onClick={session.pausedAt ? resume : pause}>
-              {session.pausedAt ? (
-                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10-6.5z" /></svg>
-              ) : (
-                <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1.2" /><rect x="14" y="5" width="4" height="14" rx="1.2" /></svg>
-              )}
-            </button>
-          <button className="btn-fill wide" disabled={pending} onClick={finish}>Done with this step</button>
-          <TellNote notify={notify} />
-        </Presence>
-        <Presence key="today" show={stage === 2} className="home-today">{today}</Presence>
-        {stage === 2 && mobile && tabs}
-        {stage < 2 && chevron}
-      </div>
-    )
-  }
+  const cls = [
+    'home',
+    mobile ? 'mobile' : 'desktop',
+    inSession ? 'in-session' : '',
+    motion ? 'motion' : 'still',
+    ready ? 'morph-ready' : '',
+    prefs.showArc ? '' : 'no-arc',
+  ]
+    .filter(Boolean)
+    .join(' ')
 
   return (
-    <div className={`home stage-${stage}${mobile ? ' mobile' : ''}${prefs.showArc ? '' : ' no-arc'}`} {...bind}>
-      <div className="home-face">
-        {next ? (
-          prefs.showArc ? (
-            <Gauge size={stage === 1 ? 120 : mobile ? 320 : 440} frac={waitFrac(next)} faded>
-              {waitCentre(next, stage === 0)}
-            </Gauge>
-          ) : (
-            stage === 0 && facts && (
-              <div className="home-text">
-                <div className="gauge-eyebrow">{facts.eyebrow}</div>
-                <div className="home-title">{eventLabel(next.kind)}</div>
-                {facts.minutes !== null && (
-                  <div className="gauge-num" style={{ fontSize: 30 }}>in {facts.minutes} min</div>
-                )}
-                <div className="gauge-sub">{facts.span}</div>
-              </div>
-            )
-          )
+    <div ref={home} className={cls}>
+      <section ref={stage} className="stage" aria-label="Today">
+        {motion ? (
+          <div className="face-big">
+            {bigFace}
+            {bigActions}
+            {chevron}
+          </div>
         ) : (
-          <div className="home-text"><div className="home-title">That's everything today.</div></div>
+          <div className="face-still">
+            {bigFace}
+            {bigActions}
+            {session && <div className="home-sheet">{pauseButton(session)}{doneButton}</div>}
+          </div>
         )}
-        <Presence key="head" show={stage === 1 && next !== null && facts !== null} className="home-head">
-          <span className="gauge-eyebrow">{facts?.eyebrow}</span>
-          <span className="home-head-name">{next && eventLabel(next.kind)}</span>
-          <span className="gauge-sub">{facts?.span}</span>
-        </Presence>
-        {stage === 1 && next && (
-          <button className="btn-fill small stage-in" disabled={pending} onClick={() => start(next)}>Start</button>
-        )}
-      </div>
-      <Presence key="actions" show={stage === 0 && next !== null} className="home-actions">
-        {next && nextActions(next)}
-      </Presence>
-      <Presence key="today" show={stage === 1} className="home-today">{today}</Presence>
-      {stage === 1 && mobile && tabs}
-      {stage === 0 && chevron}
+        {motion && (compactLanding ? compactHeader : hero)}
+        {motion && session && mobile && <div className="home-sheet">{doneButton}</div>}
+        {compactLanding ? today : events && <section className="today-line"><DayLine events={visible} now={now} nextId={next?.id} /></section>}
+      </section>
+      <section ref={ground} className="today-ground">
+        {!mobile && <DebriefFold />}
+        <section id="calendar-slot" />
+      </section>
+      {mobile && tabs}
     </div>
   )
 }

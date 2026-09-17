@@ -11,7 +11,6 @@ import { Memory } from './views/Memory'
 import { Settings } from './views/Settings'
 import { Talk } from './views/Talk'
 import { Tasks } from './views/Tasks'
-import { Today } from './views/Today'
 import { connectEvents } from './ws'
 
 // `admin` is reached from Settings only, so it never joins NAV.
@@ -65,7 +64,6 @@ export function App() {
   const [talkOpen, setTalkOpen] = useState<{ id: number; at: number } | null>(null)
   // Reading storage at mount is what makes the session face survive a reload.
   const [session, setSession] = useState<FocusSession | null>(readSession)
-  const [chromeHidden, setChromeHidden] = useState(false)
   const mobile = useMedia('(max-width: 767.98px)')
 
   const toastTimer = useRef(0)
@@ -159,7 +157,7 @@ export function App() {
   const views: ViewProps = { notify, refresh, onChanged, openTalk, openNow: changeSession }
 
   const toastNode = toast && (
-    <div className={`toast${mobile && !chromeHidden ? ' above-tabs' : ''}`} role="status">
+    <div className={`toast${mobile ? ' above-tabs' : ''}`} role="status">
       <span className="toast-msg">{toast.msg}</span>
       {toast.action && (
         <button
@@ -197,16 +195,15 @@ export function App() {
       refresh={refresh}
       openNow={changeSession}
       mobile={mobile}
-      onChrome={setChromeHidden}
       tabs={tabsNode}
     />
   )
 
-  const showHome = tab === 'today' && (mobile || session !== null)
+  const showHome = tab === 'today'
 
   return (
     <div className="shell">
-      {!mobile && !(showHome && chromeHidden) && (
+      {!mobile && (
         <header className="topbar">
           <span className="brand">Note</span>
           <nav className="topnav" aria-label="Views">
@@ -221,7 +218,6 @@ export function App() {
       )}
       <main className={`view${tab === 'chat' ? ' view-talk' : ''}${showHome ? ' view-home' : ''}`}>
         {showHome && home}
-        {tab === 'today' && !showHome && <Today {...views} />}
         {tab === 'tasks' && <Tasks {...views} />}
         {tab === 'chat' && (
           <Talk
