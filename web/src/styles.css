@@ -902,6 +902,10 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 .set-token-fresh { display: flex; flex-direction: column; gap: 4px; width: 100%; }
 .set-token-secret { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85rem; word-break: break-all; user-select: all; color: var(--ink); }
 .set-token-row { width: 100%; min-height: 48px; }
+.set-name { align-self: flex-start; font-size: 0.9375rem; color: var(--ink); text-decoration-color: var(--faint); }
+.set-enrol { display: flex; flex-direction: column; align-items: flex-start; gap: 10px; width: 100%; }
+/* scanners need a white ground whatever the theme is doing around it */
+.set-qr { align-self: flex-start; background: #fff; padding: 8px; border-radius: 8px; }
 
 /* the day's shape entry by entry: when each one lands, what it is, and whether it
    may reach for your attention */
@@ -1024,6 +1028,7 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 .admin-dev-banner b { letter-spacing: 0.1em; font-size: 0.72rem; color: var(--rose); }
 .admin-gate .admin-gate-note { width: 19rem; margin: 0 auto; color: var(--quiet); font-size: 0.9rem; }
 .admin-gate .admin-gate-dev { margin: 0 0 0.6rem; color: var(--rose); font-size: 0.8rem; }
+.admin-gate-alt { display: block; margin: 0.9rem auto 0; }
 .admin-gate-back { margin-top: 1.25rem; }
 .admin-form { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; width: 100%; }
 .admin-switch { width: 100%; min-height: 44px; }
