@@ -157,20 +157,37 @@ The standing context document each agent session sees is
 whole file is prepended to every system prompt, so it is capped at 64 KiB: an
 edit that would cross that is rejected and the file is left alone.
 
-Under it every talk, check-in and nightly session gets a block rebuilt from the
-database on each call: the real-time line (weekday, local time, timezone and
+Beside it, `config/users/<user>/nightly_notes.md` is the brief last night's run
+left for today's sessions — written by the agent for itself, not for the user,
+and injected right under the standing document as
+`# Notes from last night (written <date>, <age>)`. Its first line is a
+`<!-- written YYYY-MM-DD -->` marker in the user's own timezone, so the block
+can date it; past three days the header gains a `(stale)` prefix and the notes
+stay. The nightly agent replaces the file through `nightly_notes_write`
+(nightly sessions only): 1 byte to 3 KiB of plain lines, no markdown headers,
+written atomically. A night that never calls the tool logs
+`nightly_notes_missing` and leaves yesterday's notes in place, so the section
+is absent only until the first run writes one. What belongs in it — today's
+priorities and open loops, what the user says matters lately, energy and mood,
+what to watch for, how to pitch the day — is the closing step of
+`config/defaults/prompts/planning.md`.
+
+Under both, every talk, check-in and nightly session gets a block rebuilt from
+the database on each call: the real-time line (weekday, local time, timezone and
 UTC offset, the UTC instant, the part of day), where the day stands against its
 first and last planned event and the nightly run, today's plan with the current
 and next event marked and its statuses counted, the Now tasks with their steps
 and the Later list capped at ten titles, how much was finished today, the
 latest debrief in excerpt, whether tomorrow is planned already, the settings
-that shape advice, and the last ten user-meaningful `event_log` rows —
-operational ones (deliveries, agent sessions, tokens, admin and security rows)
-are left out. Titles, states, durations and step titles only: descriptions and
-notes never reach the prompt. A typical day is about 1.2 KiB, and the block is
-held under 6 KiB by shortening the Later list first, then the debrief, then the
-activity tail; the real-time line, the Now tasks and the plan are never
-trimmed. A task-briefing session gets neither the document nor the block.
+that shape advice with a count of the user's live memory facts, and the last
+ten user-meaningful `event_log` rows — operational ones (deliveries, agent
+sessions, tokens, admin and security rows) are left out. Titles, states,
+durations and step titles only: descriptions and notes never reach the prompt.
+A typical day is about 1.2 KiB, and the block is held under 6 KiB by shortening
+the Later list first, then the debrief, then the activity tail, and last
+night's notes only once all of those are gone; the real-time line, the Now
+tasks and the plan are never trimmed. A task-briefing session gets neither the
+document nor the block.
 
 Model-facing capabilities are typed tool calls dispatched through a
 per-session-type registry (check-in < talk < nightly, with a one-tool import
@@ -185,7 +202,8 @@ task or a single step with its steps and event links exactly as
 (see "Briefing an imported task"). Memory: `memory_query`, `memory_read`,
 `memory_write`. The day: `schedule_slide`, `schedule_snooze`, `schedule_drop`,
 `schedule_reshape`, and — nightly only — `schedule_insert` and `notify_send`.
-`context_edit` maintains the standing document.
+`context_edit` maintains the standing document, and `nightly_notes_write`
+(nightly only) replaces the brief tomorrow's sessions read.
 
 ### Memory API
 
@@ -254,7 +272,9 @@ any other name is a 404. A third, `import`, drives the task-briefing route
 
 Every night at each user's `nightly_time` (default 03:00, their timezone),
 the server generates the day's plan from their template, lets the agent
-adjust it and write a morning debrief, and stores the debrief. If the model
+adjust it and write a morning debrief, and stores the debrief. The run's last
+step is the brief it leaves itself for tomorrow (see "Memory & agent tools").
+If the model
 is unreachable, the plan still exists and a fallback debrief says so — a
 plainer day, never a missing one.
 
