@@ -157,6 +157,21 @@ The standing context document each agent session sees is
 whole file is prepended to every system prompt, so it is capped at 64 KiB: an
 edit that would cross that is rejected and the file is left alone.
 
+Under it every talk, check-in and nightly session gets a block rebuilt from the
+database on each call: the real-time line (weekday, local time, timezone and
+UTC offset, the UTC instant, the part of day), where the day stands against its
+first and last planned event and the nightly run, today's plan with the current
+and next event marked and its statuses counted, the Now tasks with their steps
+and the Later list capped at ten titles, how much was finished today, the
+latest debrief in excerpt, whether tomorrow is planned already, the settings
+that shape advice, and the last ten user-meaningful `event_log` rows —
+operational ones (deliveries, agent sessions, tokens, admin and security rows)
+are left out. Titles, states, durations and step titles only: descriptions and
+notes never reach the prompt. A typical day is about 1.2 KiB, and the block is
+held under 6 KiB by shortening the Later list first, then the debrief, then the
+activity tail; the real-time line, the Now tasks and the plan are never
+trimmed. A task-briefing session gets neither the document nor the block.
+
 Model-facing capabilities are typed tool calls dispatched through a
 per-session-type registry (check-in < talk < nightly, with a one-tool import
 surface of its own beside them). Every call is validated, size-capped, and
