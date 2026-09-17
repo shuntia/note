@@ -1,7 +1,8 @@
 use axum::body::Body;
 use axum::http::{header, Request};
-use note_server::providers::LLMProvider;
 use note_server::admin::AdminSecrets;
+use note_server::providers::LLMProvider;
+use note_server::security::PasskeyService;
 use note_server::{api, auth, db, AppState};
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -44,7 +45,13 @@ pub async fn login(app: &axum::Router, username: &str, password: &str) -> String
         )
         .await
         .unwrap();
-    res.headers()[header::SET_COOKIE].to_str().unwrap().split(';').next().unwrap().to_string()
+    res.headers()[header::SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string()
 }
 
 #[allow(dead_code)] // every test binary compiles this module; the static-file suite only needs the config dir
@@ -75,21 +82,55 @@ pub async fn app_with_logged_in_user_and_state() -> (axum::Router, String, AppSt
 
 #[allow(dead_code)] // only the admin suite installs a TOTP seed
 pub async fn app_with_admin_seed(seed: Vec<u8>) -> (axum::Router, String, AppState, TempDir) {
-    build_with(None, Some(AdminSecrets::with_seed(seed))).await
+    build_with(None, Some(AdminSecrets::with_seed(seed)), None).await
 }
 
 #[allow(dead_code)] // only the admin suite elevates on the password alone
 pub async fn app_with_password_only_admin() -> (axum::Router, String, AppState, TempDir) {
-    build_with(None, Some(AdminSecrets::default().require_totp(false))).await
+    build_with(
+        None,
+        Some(AdminSecrets::default().require_second_factor(false)),
+        None,
+    )
+    .await
+}
+
+/// The origin the passkey-capable states are built for; tests hand it to the
+/// software authenticator as the page's origin.
+#[allow(dead_code)] // only the security suite drives a software authenticator
+pub const ORIGIN: &str = "https://note.example.net";
+
+/// No shared seed: the only second factors are the ones a user enrols.
+#[allow(dead_code)] // only the security suite drives a software authenticator
+pub async fn app_with_passkeys() -> (axum::Router, String, AppState, TempDir) {
+    build_with(
+        None,
+        None,
+        Some(PasskeyService::build(ORIGIN, None, None).0),
+    )
+    .await
+}
+
+#[allow(dead_code)] // only the security suite drives a software authenticator
+pub async fn app_with_seed_and_passkeys(
+    seed: Vec<u8>,
+) -> (axum::Router, String, AppState, TempDir) {
+    build_with(
+        None,
+        Some(AdminSecrets::with_seed(seed)),
+        Some(PasskeyService::build(ORIGIN, None, None).0),
+    )
+    .await
 }
 
 async fn build(llm: Option<Arc<dyn LLMProvider>>) -> (axum::Router, String, AppState, TempDir) {
-    build_with(llm, None).await
+    build_with(llm, None, None).await
 }
 
 async fn build_with(
     llm: Option<Arc<dyn LLMProvider>>,
     secrets: Option<AdminSecrets>,
+    passkeys: Option<PasskeyService>,
 ) -> (axum::Router, String, AppState, TempDir) {
     let cfg = config_dir();
     let dir = cfg.path().to_path_buf();
@@ -101,6 +142,9 @@ async fn build_with(
     }
     if let Some(secrets) = secrets {
         state = state.with_admin_secrets(secrets);
+    }
+    if let Some(passkeys) = passkeys {
+        state = state.with_passkeys(passkeys);
     }
     let app = api::router(state.clone());
     let cookie = login(&app, "aki", "pw").await;

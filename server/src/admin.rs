@@ -19,12 +19,12 @@ const LOG_LIMIT_MAX: i64 = 500;
 
 pub struct AdminSecrets {
     pub totp_seed: Option<Vec<u8>>,
-    require_totp: bool,
+    require_second_factor: bool,
 }
 
 impl Default for AdminSecrets {
     fn default() -> Self {
-        Self { totp_seed: None, require_totp: true }
+        Self { totp_seed: None, require_second_factor: true }
     }
 }
 
@@ -34,9 +34,9 @@ impl AdminSecrets {
     }
 
     /// `false` is the operator's opt-out: elevation re-asks for the account
-    /// password alone and the seed is never consulted.
-    pub fn require_totp(mut self, require: bool) -> Self {
-        self.require_totp = require;
+    /// password alone and no second factor is consulted.
+    pub fn require_second_factor(mut self, require: bool) -> Self {
+        self.require_second_factor = require;
         self
     }
 
@@ -62,12 +62,20 @@ impl AdminSecrets {
         (Self { totp_seed, ..Self::default() }, warnings)
     }
 
+    /// The legacy report, for a server whose users have enrolled nothing.
     pub fn totp_mode(&self) -> TotpMode {
-        match (self.require_totp, &self.totp_seed, INSPECT) {
+        self.mode_with_factor(false)
+    }
+
+    /// `Required` as soon as any factor exists — the user's own or the shared
+    /// seed. `Missing` is the release-build lockout: a second factor is asked
+    /// for and there is none to ask for.
+    pub fn mode_with_factor(&self, user_has_factor: bool) -> TotpMode {
+        match (self.require_second_factor, self.totp_seed.is_some() || user_has_factor, INSPECT) {
             (false, _, _) => TotpMode::PasswordOnly,
-            (true, Some(_), _) => TotpMode::Required,
-            (true, None, true) => TotpMode::PasswordOnly,
-            (true, None, false) => TotpMode::Missing,
+            (true, true, _) => TotpMode::Required,
+            (true, false, true) => TotpMode::PasswordOnly,
+            (true, false, false) => TotpMode::Missing,
         }
     }
 }
@@ -209,6 +217,7 @@ pub fn routes() -> Router<AppState> {
     let r = Router::new()
         .route("/gate", get(gate))
         .route("/elevate", post(elevate))
+        .route("/elevate/challenge", post(elevate_challenge))
         .route("/drop", post(drop_grant))
         .route("/status", get(status))
         .route("/users", get(users_list).post(users_create))
@@ -232,6 +241,38 @@ fn record(state: &AppState, actor: i64, kind: &str, detail: &str) {
     let _ = crate::log::record(&conn, Some(actor), kind, detail);
 }
 
+/// What this admin can present as a second factor. A passkey counts only where
+/// browsers will speak WebAuthn; the shared seed answers as this user's TOTP
+/// until they enrol a secret of their own.
+#[derive(Debug, Clone, Copy)]
+pub struct Methods {
+    pub passkey: bool,
+    pub totp: bool,
+}
+
+impl Methods {
+    fn any(&self) -> bool {
+        self.passkey || self.totp
+    }
+
+    fn preferred(&self) -> &'static str {
+        match (self.passkey, self.totp) {
+            (true, _) => "passkey",
+            (false, true) => "totp",
+            (false, false) => "none",
+        }
+    }
+}
+
+fn methods_for(state: &AppState, user_id: i64) -> rusqlite::Result<Methods> {
+    let conn = state.db.lock().unwrap();
+    let (passkey, own_totp) = crate::security::user_factors(&conn, user_id)?;
+    Ok(Methods {
+        passkey: passkey && state.passkeys.available(),
+        totp: own_totp || state.admin_secrets.totp_seed.is_some(),
+    })
+}
+
 async fn gate(AdminUser(user): AdminUser, State(state): State<AppState>, headers: HeaderMap) -> Response {
     let now = jiff::Timestamp::now().as_second();
     let expires = match grant_token(&headers) {
@@ -244,10 +285,17 @@ async fn gate(AdminUser(user): AdminUser, State(state): State<AppState>, headers
         }
         None => None,
     };
+    let Ok(methods) = methods_for(&state, user.id) else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    let mode = state.admin_secrets.mode_with_factor(methods.any());
     Json(serde_json::json!({
         "elevated": expires.is_some(),
         "expires_at": expires.map(unix_to_rfc3339),
-        "totp": state.admin_secrets.totp_mode(),
+        "second_factor": methods.preferred(),
+        "methods": { "passkey": methods.passkey, "totp": methods.totp },
+        "require_second_factor": mode != TotpMode::PasswordOnly,
+        "totp": mode,
         "inspect": INSPECT,
     }))
     .into_response()
@@ -264,6 +312,9 @@ struct ElevateReq {
     password: String,
     #[serde(default)]
     code: Option<String>,
+    /// A `navigator.credentials.get()` result answering `elevate/challenge`.
+    #[serde(default)]
+    assertion: Option<serde_json::Value>,
 }
 
 pub enum ElevateOutcome {
@@ -271,48 +322,84 @@ pub enum ElevateOutcome {
     Denied,
 }
 
-/// Password and (when a seed is installed) code are both checked on every
-/// attempt, and an accepted code's time step is recorded so it cannot be
-/// replayed. The argon2 work runs with no lock held.
+/// What the request offered alongside the password.
+pub enum SecondFactor {
+    Assertion(Box<webauthn_rs::prelude::PublicKeyCredential>),
+    Code(String),
+    None,
+}
+
+/// Proof that survived verification and is waiting to be spent once the
+/// password is known to be right.
+enum Proof {
+    Passkey(Box<webauthn_rs::prelude::AuthenticationResult>),
+    Step(i64),
+    PasswordOnly,
+}
+
+/// The password is verified on every attempt (with no lock held) whatever the
+/// second factor does, so a wrong one costs the same argon2 work. An accepted
+/// code's time step is recorded, and an accepted assertion's sign counter is
+/// written back, only once the password is also known to be right.
 pub fn elevate_blocking(
     state: &AppState,
     user: &CurrentUser,
     password: &str,
-    code: Option<&str>,
+    factor: SecondFactor,
     now: jiff::Timestamp,
 ) -> Result<ElevateOutcome> {
-    let hash = {
+    let (hash, user_seed, methods) = {
         let conn = state.db.lock().unwrap();
-        auth::stored_hash(&conn, user.id)?
+        let (passkey, own_totp) = crate::security::user_factors(&conn, user.id)?;
+        (
+            auth::stored_hash(&conn, user.id)?,
+            crate::security::totp_seed(&conn, user.id)?,
+            Methods {
+                passkey: passkey && state.passkeys.available(),
+                totp: own_totp || state.admin_secrets.totp_seed.is_some(),
+            },
+        )
     };
     let password_ok = auth::verify_against(password, hash.as_deref());
-    let step = match state.admin_secrets.totp_mode() {
-        TotpMode::Missing => anyhow::bail!("no admin TOTP seed installed"),
-        TotpMode::PasswordOnly => None,
-        TotpMode::Required => {
-            let seed = state.admin_secrets.totp_seed.as_deref().expect("mode implies seed");
-            match crate::totp::verify(seed, code.unwrap_or(""), now) {
-                Some(step) => Some(step),
-                None => return Ok(ElevateOutcome::Denied),
+    let proof = match state.admin_secrets.mode_with_factor(methods.any()) {
+        TotpMode::Missing => anyhow::bail!("no second factor installed"),
+        TotpMode::PasswordOnly => Proof::PasswordOnly,
+        TotpMode::Required => match factor {
+            SecondFactor::Assertion(cred) => {
+                match state
+                    .passkeys
+                    .finish_authentication(&user.session_token, &cred, now.as_second())
+                {
+                    Ok(result) => Proof::Passkey(Box::new(result)),
+                    Err(_) => return Ok(ElevateOutcome::Denied),
+                }
             }
-        }
+            SecondFactor::Code(code) => {
+                let seed = user_seed.or_else(|| state.admin_secrets.totp_seed.clone());
+                match seed.as_deref().and_then(|s| crate::totp::verify(s, &code, now)) {
+                    Some(step) => Proof::Step(step),
+                    None => return Ok(ElevateOutcome::Denied),
+                }
+            }
+            SecondFactor::None => return Ok(ElevateOutcome::Denied),
+        },
     };
     if !password_ok {
         return Ok(ElevateOutcome::Denied);
     }
     let conn = state.db.lock().unwrap();
-    if let Some(step) = step {
-        let last: Option<i64> = conn
-            .query_row("SELECT last_step FROM totp_replay WHERE user_id = ?1", [user.id], |r| r.get(0))
-            .optional()?;
-        if last.is_some_and(|l| step <= l) {
-            return Ok(ElevateOutcome::Denied);
+    match proof {
+        Proof::Passkey(result) => {
+            if !crate::security::record_use(&conn, user.id, &result, now)? {
+                return Ok(ElevateOutcome::Denied);
+            }
         }
-        conn.execute(
-            "INSERT INTO totp_replay (user_id, last_step) VALUES (?1, ?2)
-             ON CONFLICT(user_id) DO UPDATE SET last_step = excluded.last_step",
-            (user.id, step),
-        )?;
+        Proof::Step(step) => {
+            if !crate::security::claim_step(&conn, user.id, step)? {
+                return Ok(ElevateOutcome::Denied);
+            }
+        }
+        Proof::PasswordOnly => {}
     }
     let token = uuid::Uuid::new_v4().to_string();
     let expires_at = now.as_second() + GRANT_LIFETIME_MINS * 60;
@@ -324,22 +411,69 @@ pub fn elevate_blocking(
     Ok(ElevateOutcome::Granted { token, expires_at })
 }
 
+/// The passkeys this admin can assert with, for `navigator.credentials.get()`.
+async fn elevate_challenge(AdminUser(user): AdminUser, State(state): State<AppState>) -> Response {
+    if !state.passkeys.available() {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &crate::security::PasskeyError::Unavailable.to_string(),
+        );
+    }
+    let credentials = {
+        let conn = state.db.lock().unwrap();
+        match crate::security::credentials(&conn, user.id) {
+            Ok(keys) => keys,
+            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        }
+    };
+    if credentials.is_empty() {
+        return error(StatusCode::CONFLICT, "no passkeys on this account");
+    }
+    let now = jiff::Timestamp::now().as_second();
+    match state
+        .passkeys
+        .start_authentication(&user.session_token, &credentials, now)
+    {
+        Ok(challenge) => Json(challenge).into_response(),
+        Err(e) => error(StatusCode::UNPROCESSABLE_ENTITY, &e.to_string()),
+    }
+}
+
 async fn elevate(
     AdminUser(user): AdminUser,
     State(state): State<AppState>,
     Json(req): Json<ElevateReq>,
 ) -> Response {
-    if state.admin_secrets.totp_mode() == TotpMode::Missing {
-        return error(StatusCode::SERVICE_UNAVAILABLE, "no admin secret installed on this server");
+    let Ok(methods) = methods_for(&state, user.id) else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    if state.admin_secrets.mode_with_factor(methods.any()) == TotpMode::Missing {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no second factor on this account and no admin secret on this server",
+        );
     }
     let now = jiff::Timestamp::now();
     if !state.admin_limiter.try_attempt(&user.username, now) {
         return error(StatusCode::TOO_MANY_REQUESTS, "too many attempts");
     }
+    let factor = match req.assertion {
+        Some(raw) => match serde_json::from_value(raw) {
+            Ok(cred) => SecondFactor::Assertion(Box::new(cred)),
+            Err(_) => {
+                record(&state, user.id, "admin_elevate_denied", &user.username);
+                return error(StatusCode::UNAUTHORIZED, "that passkey could not be verified");
+            }
+        },
+        None => match req.code.filter(|c| !c.trim().is_empty()) {
+            Some(code) => SecondFactor::Code(code),
+            None => SecondFactor::None,
+        },
+    };
     let st = state.clone();
     let u = user.clone();
     let result = tokio::task::spawn_blocking(move || {
-        elevate_blocking(&st, &u, &req.password, req.code.as_deref(), now)
+        elevate_blocking(&st, &u, &req.password, factor, now)
     })
     .await;
     match result {
@@ -1023,15 +1157,30 @@ mod tests {
     }
 
     #[test]
-    fn opting_out_of_totp_ignores_the_seed() {
+    fn opting_out_of_a_second_factor_ignores_every_factor() {
+        let opted_out = AdminSecrets::with_seed(vec![1; 20]).require_second_factor(false);
+        assert_eq!(opted_out.totp_mode(), TotpMode::PasswordOnly);
+        assert_eq!(opted_out.mode_with_factor(true), TotpMode::PasswordOnly);
         assert_eq!(
-            AdminSecrets::with_seed(vec![1; 20]).require_totp(false).totp_mode(),
+            AdminSecrets::default().require_second_factor(false).totp_mode(),
             TotpMode::PasswordOnly
         );
-        assert_eq!(
-            AdminSecrets::default().require_totp(false).totp_mode(),
-            TotpMode::PasswordOnly
-        );
+    }
+
+    #[test]
+    fn a_users_own_factor_requires_a_second_factor_without_a_seed() {
+        let bare = AdminSecrets::default();
+        assert_eq!(bare.mode_with_factor(true), TotpMode::Required);
+        let expected = if INSPECT { TotpMode::PasswordOnly } else { TotpMode::Missing };
+        assert_eq!(bare.mode_with_factor(false), expected);
+    }
+
+    #[test]
+    fn preferred_method_puts_passkeys_first() {
+        assert_eq!(Methods { passkey: true, totp: true }.preferred(), "passkey");
+        assert_eq!(Methods { passkey: false, totp: true }.preferred(), "totp");
+        assert_eq!(Methods { passkey: false, totp: false }.preferred(), "none");
+        assert!(!Methods { passkey: false, totp: false }.any());
     }
 
     #[test]
