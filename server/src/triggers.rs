@@ -8,6 +8,9 @@ pub const KIND: &str = "trigger";
 pub const MIN_LEAD_MIN: i64 = 10;
 /// How far past a work session's planned end its own checks may still reach.
 pub const OVERRUN_MIN: i64 = 15;
+/// The furthest ahead a `+Nmin` offset may reach: a trigger point is about the
+/// day it is laid in, not next week.
+pub const MAX_OFFSET_MIN: i64 = 24 * 60;
 pub const MAX_PROMPT_BYTES: usize = 1000;
 pub const MAX_SAY_BYTES: usize = 1200;
 /// How much of the thread a firing trigger reads.
@@ -158,6 +161,7 @@ pub fn add_extra(
 
 /// Writes the trigger row itself, with no budget or timing opinion: the caller
 /// has already decided this one is allowed.
+#[allow(clippy::too_many_arguments)]
 pub fn insert(
     conn: &Connection,
     plan_id: i64,
@@ -210,6 +214,11 @@ fn resolve(at: &str, lay: &Lay, local: &jiff::Zoned) -> Result<(jiff::civil::Dat
     let loose = || Refusal::Rejected(format!("at must be zero-padded HH:MM or +Nmin, got {at:?}"));
     if let Some(rest) = at.strip_prefix('+') {
         let n: i64 = rest.trim_end_matches("min").parse().map_err(|_| loose())?;
+        if !(0..=MAX_OFFSET_MIN).contains(&n) {
+            return Err(Refusal::Rejected(format!(
+                "an offset must be 0 to {MAX_OFFSET_MIN} minutes, got {at:?}"
+            )));
+        }
         let there = (lay.now + jiff::Span::new().minutes(n))
             .to_zoned(local.time_zone().clone());
         return Ok((there.date(), i64::from(there.hour()) * 60 + i64::from(there.minute())));
@@ -496,6 +505,166 @@ fn last_user_message(conn: &Connection, user_id: i64) -> rusqlite::Result<Option
     .map(Option::flatten)
 }
 
+/// The thread a firing trigger reads before it decides, and the note that says
+/// what the window no longer reaches.
+fn thread_context(
+    conn: &Connection,
+    conversation_id: Option<i64>,
+) -> (Vec<crate::providers::Message>, Option<String>) {
+    let Some(id) = conversation_id else {
+        return (Vec::new(), None);
+    };
+    let history = crate::talk::history(conn, id, HISTORY_TURNS).unwrap_or_default();
+    let note = crate::talk::summary(conn, id)
+        .ok()
+        .flatten()
+        .map(|(summary, _)| crate::api::summary_thread_note(&summary));
+    (history, note)
+}
+
+/// Where a trigger's words land: the thread it was laid against, else the day's
+/// check-in thread. The text is written there whether or not a channel takes it.
+fn record_said(
+    conn: &Connection,
+    user_id: i64,
+    date: &str,
+    conversation_id: Option<i64>,
+    text: &str,
+    now: jiff::Timestamp,
+) -> Result<i64> {
+    match conversation_id {
+        Some(id) => {
+            crate::talk::append_text(conn, id, "assistant", text, now)?;
+            crate::talk::touch(conn, id, now)?;
+            Ok(id)
+        }
+        None => crate::talk::checkin_thread(conn, user_id, date, text, now),
+    }
+}
+
+fn settle(conn: &Connection, event_id: i64, now: jiff::Timestamp) -> rusqlite::Result<usize> {
+    conn.execute(
+        "UPDATE events SET status = 'done', decided_at = ?1 WHERE id = ?2",
+        (now.to_string(), event_id),
+    )
+}
+
+/// A fired trigger, off the runner's lock: a short session reads the situation
+/// and either says something or stays quiet. A session that never gets that far
+/// leaves the event alone and sends nothing — silence is the safe failure.
+pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
+    let Ok(permit) = state.talk_gate.try_enter(fired.user_id) else {
+        let conn = state.db();
+        let _ = conn.execute(
+            "UPDATE events SET status = 'pending', fired_at = NULL
+             WHERE id = ?1 AND status = 'fired'",
+            [fired.event_id],
+        );
+        return;
+    };
+    let _permit = permit;
+    let now = jiff::Timestamp::now();
+    let tz = timezone(&state.config_dir, &fired.username);
+    let (ev, opening, history, thread_note) = {
+        let conn = state.db();
+        let Ok(Some(ev)) = read(&conn, fired.event_id) else {
+            return;
+        };
+        let opening = situation(&conn, fired.user_id, &ev, &tz);
+        let (history, note) = thread_context(&conn, ev.conversation_id);
+        (ev, opening, history, note)
+    };
+    let deps = crate::agent::SessionDeps {
+        db: &state.db,
+        config_dir: &state.config_dir,
+        data_dir: &state.data_dir,
+        llm: state.llm.as_ref(),
+        embeddings: state.embeddings.as_deref(),
+        task_scope: None,
+        inbox_source: None,
+        memory_source: None,
+        token_id: None,
+        thread_note,
+    };
+    let outcome = crate::agent::run_session(
+        &deps,
+        fired.user_id,
+        &fired.username,
+        crate::tools::SessionKind::Trigger,
+        now,
+        &history,
+        &opening,
+    );
+    let failed = |detail: String| {
+        let conn = state.db();
+        let _ = crate::log::record_throttled(
+            &conn,
+            Some(fired.user_id),
+            "trigger_error",
+            &detail,
+            now,
+            crate::log::ERROR_LOG_WINDOW_MINS,
+        );
+    };
+    let out = match outcome {
+        Ok(out) => out,
+        Err(e) => return failed(format!("event {}: {e}", ev.event_id)),
+    };
+    let Some(step) = out.steps.iter().rev().find(|s| {
+        !s.is_error && crate::tools::is_terminal(crate::tools::SessionKind::Trigger, &s.name)
+    }) else {
+        return failed(format!("event {}: the session never decided", ev.event_id));
+    };
+    let result: serde_json::Value = serde_json::from_str(&step.result).unwrap_or_default();
+    if step.name == "stay_quiet" {
+        let conn = state.db();
+        let _ = settle(&conn, ev.event_id, now);
+        let _ = crate::log::record(
+            &conn,
+            Some(fired.user_id),
+            "trigger_quiet",
+            &format!(
+                "event {}: {}",
+                ev.event_id,
+                result["reason"].as_str().unwrap_or("no reason given")
+            ),
+        );
+        drop(conn);
+        state.hub.broadcast_changed(fired.user_id);
+        return;
+    }
+    let Some(text) = result["said"].as_str().map(str::to_string) else {
+        return failed(format!("event {}: the session said nothing readable", ev.event_id));
+    };
+    let conversation_id = {
+        let conn = state.db();
+        let landed =
+            record_said(&conn, fired.user_id, &fired.date, ev.conversation_id, &text, now);
+        let _ = settle(&conn, ev.event_id, now);
+        let _ = crate::log::record(
+            &conn,
+            Some(fired.user_id),
+            "trigger_said",
+            &format!("event {}: {text}", ev.event_id),
+        );
+        landed.ok()
+    };
+    state.hub.broadcast_changed(fired.user_id);
+    crate::channels::deliver_via(
+        &state.db,
+        &state.channels,
+        fired.user_id,
+        &fired.username,
+        &crate::channels::OutboundMessage {
+            title: "Note".into(),
+            body: text,
+            urgency: crate::channels::Urgency::Normal,
+            event_id: Some(ev.event_id),
+            conversation_id,
+        },
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -559,10 +728,28 @@ mod tests {
     }
 
     #[test]
-    fn a_relative_time_resolves_from_now() {
+    fn a_relative_time_resolves_from_now_and_reaches_no_further_than_a_day() {
         let (conn, tmp, uid) = env();
         let laid = lay(&conn, &lay_at(&tmp, uid, "+45min")).unwrap();
         assert_eq!(laid.at, "09:45");
+        // an offset over midnight belongs to the day it lands on
+        let laid = lay(&conn, &lay_at(&tmp, uid, "+1000min")).unwrap();
+        assert_eq!(laid.at, "01:40");
+        let date: String = conn
+            .query_row(
+                "SELECT p.date FROM plans p JOIN events e ON e.plan_id = p.id WHERE e.id = ?1",
+                [laid.event_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(date, "2026-09-18");
+
+        for silly in ["+9223372036854775807min", "+-30min", "+2000min", "+min"] {
+            assert!(
+                matches!(lay(&conn, &lay_at(&tmp, uid, silly)).unwrap_err(), Refusal::Rejected(_)),
+                "{silly} was accepted"
+            );
+        }
     }
 
     #[test]

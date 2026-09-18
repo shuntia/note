@@ -222,6 +222,11 @@ pub fn assemble(conn: &Connection, config_dir: &Path, user_id: i64, username: &s
         &tz_label,
         ucfg.features(&category),
         crate::memory::live_count(conn, username).unwrap_or(0),
+        (
+            crate::triggers::spent(conn, user_id, today).unwrap_or(0),
+            crate::triggers::allowance(conn, config_dir, username, user_id, today)
+                .unwrap_or_else(|_| ucfg.triggers_per_day()),
+        ),
     );
     let render = |caps: &Caps| {
         let mut s = String::with_capacity(2048);
@@ -586,11 +591,14 @@ fn settings_section(
     tz_label: &str,
     features: crate::config::Features,
     memory_facts: i64,
+    triggers: (u32, u32),
 ) -> String {
     let on = |b: bool| if b { "on" } else { "off" };
+    let (spent, allowance) = triggers;
     format!(
         "# Settings\n\n{} | {tz_label} | nightly_time {} | template {} | counter {} | nightly {} | checkins {}\n\
-         Memory: {memory_facts} fact{}\n\n",
+         Memory: {memory_facts} fact{}\n\
+         Trigger points you may lay today: {spent} of {allowance} used\n\n",
         cfg.display_name,
         cfg.nightly_time,
         cfg.template,

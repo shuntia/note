@@ -121,6 +121,7 @@ fn first_check_minutes(planned_min: Option<i64>) -> i64 {
         .max(1)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn lay_first_check(
     conn: &Connection,
     config_dir: &Path,
