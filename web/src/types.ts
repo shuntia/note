@@ -6,7 +6,14 @@ export type MovedTo = { event_id: number; date: string; wall_time: string; kind:
 export type EventOrigin = 'template' | 'agent' | 'auto' | 'user'
 
 // The task a block holds, carried so the block can offer the task's own actions.
-export type TaskRef = { id: number; title: string; state: TaskState; notify?: TaskNotify }
+// `title` is always the top-level task; `step` names the one this block holds.
+export type TaskRef = {
+  id: number
+  title: string
+  state: TaskState
+  step: string | null
+  notify?: TaskNotify
+}
 
 export type PlanEvent = {
   id: number
