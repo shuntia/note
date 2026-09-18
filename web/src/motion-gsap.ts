@@ -165,3 +165,31 @@ export function glide(el: Target, to: { x: number; width: number }, animate: boo
   if (animate && !still()) gsap.to(el, { ...to, duration: 0.34, ease: 'power3.out', overwrite: true })
   else gsap.set(el, to)
 }
+
+/** An element about to unmount, leaving on a copy of itself pinned where it stood. */
+export function ghostOut(el: Element | null | undefined): void {
+  if (still() || !el) return
+  const rect = el.getBoundingClientRect()
+  if (rect.width === 0 || getComputedStyle(el).visibility === 'hidden') return
+  const ghost = el.cloneNode(true) as HTMLElement
+  Object.assign(ghost.style, {
+    position: 'fixed',
+    top: `${rect.top}px`,
+    left: `${rect.left}px`,
+    width: `${rect.width}px`,
+    height: `${rect.height}px`,
+    margin: '0',
+    pointerEvents: 'none',
+    zIndex: '20',
+  })
+  ghost.setAttribute('aria-hidden', 'true')
+  document.body.appendChild(ghost)
+  gsap.to(ghost, {
+    autoAlpha: 0,
+    y: -10,
+    scale: 0.96,
+    duration: 0.24,
+    ease: 'power2.in',
+    onComplete: () => ghost.remove(),
+  })
+}

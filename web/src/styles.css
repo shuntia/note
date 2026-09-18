@@ -47,7 +47,7 @@
   --accent-fg: oklch(23% 0.03 255);
   --sage: oklch(50% 0.09 150);
   --rose: oklch(55% 0.07 30);
-  --sky: linear-gradient(180deg, var(--sky-top) 0px, var(--sky-mid) 405px, var(--earth) 624px);
+  --sky: linear-gradient(180deg, var(--sky-top) 0px, var(--sky-mid) max(405px, 43vh), var(--earth) max(624px, 66vh));
 
   --radius: 12px;
   --radius-lg: 16px;

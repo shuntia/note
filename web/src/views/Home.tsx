@@ -11,6 +11,7 @@ import { makeHold } from '../held'
 import { Jot } from '../jot'
 import { clearTimeline, scrollReveal, scrollToY, scrub, snapNearest, travel, type Timeline, type Trigger } from '../homeMotion'
 import { reducedMotion } from '../motion'
+import { ghostOut, rise } from '../motion-gsap'
 import { NowCounter } from '../nowcounter'
 import { Overflow } from '../overflow'
 import { readPrefs } from '../prefs'
@@ -246,6 +247,9 @@ export function Home({
   // A routine is timed to its span; without an end the routine default stands in.
   // A block laid for a task runs as that task, so finishing it settles both.
   const start = (ev: PlanEvent) => {
+    home.current
+      ?.querySelectorAll('.home-actions, .today-actions, .home-face.compact .btn-fill')
+      .forEach(ghostOut)
     const span = ev.end_wall_time
       ? Math.max(1, minutesOf(ev.end_wall_time) - minutesOf(ev.wall_time))
       : ROUTINE_MIN
@@ -831,9 +835,11 @@ export function Home({
     }
   }, [motion, mobile])
 
-  // A session starting or ending changes the face, so the page goes back to it.
+  // A session starting or ending changes the face, so the page goes back to it,
+  // and what the face now says arrives rather than appears.
   useEffect(() => {
     if (window.scrollY > 0) scrollToY(0)
+    if (inSession) rise(home.current?.querySelector('.gauge-centre'), 14)
   }, [inSession])
 
   const chevron = (
