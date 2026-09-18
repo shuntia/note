@@ -148,10 +148,10 @@ async fn skipping_a_date_takes_it_off_the_day_and_unskipping_puts_it_back() {
     let (app, cookie, _cfg) = common::app_with_logged_in_user().await;
     let id = school(&app, &cookie).await;
 
-    // 2026-09-18 is a Friday
-    let (status, day) = call(&app, &cookie, Method::GET, "/api/calendar/day/2026-09-18", None).await;
+    // 2026-09-25 is a Friday
+    let (status, day) = call(&app, &cookie, Method::GET, "/api/calendar/day/2026-09-25", None).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(day["date"], "2026-09-18");
+    assert_eq!(day["date"], "2026-09-25");
     assert_eq!(day["occurrences"][0]["entry_id"], id);
     assert_eq!(day["occurrences"][0]["title"], "school");
     assert_eq!(day["occurrences"][0]["start"], "08:15");
@@ -164,25 +164,25 @@ async fn skipping_a_date_takes_it_off_the_day_and_unskipping_puts_it_back() {
         &cookie,
         Method::POST,
         &format!("/api/calendar/{id}/skip"),
-        Some(r#"{"date":"2026-09-18"}"#),
+        Some(r#"{"date":"2026-09-25"}"#),
     )
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
-    let (_, day) = call(&app, &cookie, Method::GET, "/api/calendar/day/2026-09-18", None).await;
+    let (_, day) = call(&app, &cookie, Method::GET, "/api/calendar/day/2026-09-25", None).await;
     assert!(day["occurrences"].as_array().unwrap().is_empty());
     let (_, body) = call(&app, &cookie, Method::GET, "/api/calendar", None).await;
-    assert_eq!(body["entries"][0]["exceptions"], serde_json::json!(["2026-09-18"]));
+    assert_eq!(body["entries"][0]["exceptions"], serde_json::json!(["2026-09-25"]));
 
     let (status, _) = call(
         &app,
         &cookie,
         Method::DELETE,
-        &format!("/api/calendar/{id}/skip/2026-09-18"),
+        &format!("/api/calendar/{id}/skip/2026-09-25"),
         None,
     )
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
-    let (_, day) = call(&app, &cookie, Method::GET, "/api/calendar/day/2026-09-18", None).await;
+    let (_, day) = call(&app, &cookie, Method::GET, "/api/calendar/day/2026-09-25", None).await;
     assert_eq!(day["occurrences"].as_array().unwrap().len(), 1);
 }
 

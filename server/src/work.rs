@@ -578,62 +578,79 @@ pub fn tick(conn: &Connection, config_dir: &Path, now: jiff::Timestamp) -> Resul
         };
         flips.push(Flip { user_id, username, message });
     }
-    flips.extend(overrun(conn, now)?);
+    flips.extend(overrun(conn, config_dir, now)?);
     Ok(flips)
 }
 
-/// How far past its planned length a session may run before Note asks after it.
-pub const OVERRUN_FACTOR_PCT: i64 = 150;
+/// How far past its planned length a session may run before Note asks after it,
+/// and how far before Note ends it.
+pub const OVERRUN_ASK_PCT: i64 = 150;
+pub const OVERRUN_END_PCT: i64 = 300;
 
-/// Asks once, in plain words, after every open session that has run past
-/// `OVERRUN_FACTOR_PCT` of its planned length: the line lands in the session's
-/// thread and goes out through the ladder. A paused session is not running.
-pub fn overrun(conn: &Connection, now: jiff::Timestamp) -> Result<Vec<Flip>> {
+/// Looks after every open session that has run past its plan: at
+/// `OVERRUN_ASK_PCT` it asks once, in plain words; at `OVERRUN_END_PCT` it ends
+/// the session and says so. Each line lands in the session's thread and goes out
+/// through the ladder. A paused session is not running.
+pub fn overrun(conn: &Connection, config_dir: &Path, now: jiff::Timestamp) -> Result<Vec<Flip>> {
     let mut stmt = conn.prepare(&format!(
-        "SELECT {COLS_W}, w.user_id, u.username FROM work_sessions w
+        "SELECT {COLS_W}, w.user_id, u.username, w.overrun_asked_at FROM work_sessions w
          JOIN users u ON u.id = w.user_id
-         WHERE w.ended_at IS NULL AND w.paused_at IS NULL
-           AND w.planned_min IS NOT NULL AND w.overrun_asked_at IS NULL"
+         WHERE w.ended_at IS NULL AND w.paused_at IS NULL AND w.planned_min IS NOT NULL"
     ))?;
-    let due: Vec<(Session, i64, String)> = stmt
-        .query_map([], |r| Ok((row_to_session(r)?, r.get(20)?, r.get(21)?)))?
-        .collect::<rusqlite::Result<Vec<_>>>()?
-        .into_iter()
-        .filter(|(s, _, _)| {
-            s.planned_min
-                .is_some_and(|p| s.elapsed_ms(now) >= p * 60_000 * OVERRUN_FACTOR_PCT / 100)
-        })
-        .collect();
+    let open: Vec<(Session, i64, String, Option<String>)> = stmt
+        .query_map([], |r| Ok((row_to_session(r)?, r.get(20)?, r.get(21)?, r.get(22)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     drop(stmt);
 
     let mut asks = Vec::new();
-    for (session, user_id, username) in due {
+    for (session, user_id, username, asked) in open {
         let planned = session.planned_min.unwrap_or_default();
-        let elapsed = session.elapsed_ms(now) / 60_000;
-        let extra = ((planned / 2).max(5) + 4) / 5 * 5;
-        let body = format!(
-            "{} has run {elapsed} min against {planned} planned. How is it going? \
-             Take a break, or give it {extra} more minutes.",
-            session.title
-        );
-        conn.execute(
-            "UPDATE work_sessions SET overrun_asked_at = ?1 WHERE id = ?2",
-            (now.to_string(), session.id),
-        )?;
+        let elapsed_ms = session.elapsed_ms(now);
+        let past = |pct: i64| elapsed_ms >= planned * 60_000 * pct / 100;
+        let elapsed = elapsed_ms / 60_000;
+        let (title, body, kind) = if past(OVERRUN_END_PCT) {
+            end(conn, config_dir, user_id, &username, Some(session.id), "stopped", now)?;
+            (
+                "Force-terminating",
+                format!(
+                    "{} ran {elapsed} min against {planned} planned, so it ends here. \
+                     Start it again when you are ready.",
+                    session.title
+                ),
+                "session_force_ended",
+            )
+        } else if asked.is_none() && past(OVERRUN_ASK_PCT) {
+            let extra = ((planned / 2).max(5) + 4) / 5 * 5;
+            conn.execute(
+                "UPDATE work_sessions SET overrun_asked_at = ?1 WHERE id = ?2",
+                (now.to_string(), session.id),
+            )?;
+            (
+                "Are you OK?",
+                format!(
+                    "{} has run {elapsed} min against {planned} planned. How is it going? \
+                     Take a break, or give it {extra} more minutes.",
+                    session.title
+                ),
+                "session_overrun",
+            )
+        } else {
+            continue;
+        };
         if let Some(thread) = session.conversation_id {
-            crate::talk::append_assistant(conn, thread, &format!("Are you OK? {body}"), "", 0, now)?;
+            crate::talk::append_assistant(conn, thread, &format!("{title}: {body}"), "", 0, now)?;
         }
         crate::log::record(
             conn,
             Some(user_id),
-            "session_overrun",
+            kind,
             &format!("session {} at {elapsed} of {planned} min", session.id),
         )?;
         asks.push(Flip {
             user_id,
             username,
             message: Some(crate::channels::OutboundMessage {
-                title: "Are you OK?".into(),
+                title: title.into(),
                 body,
                 urgency: crate::channels::Urgency::High,
                 event_id: None,
@@ -1036,8 +1053,8 @@ mod tests {
     fn a_session_far_past_its_plan_is_asked_after_once() {
         let (conn, tmp, uid) = env();
         let session = start_one(&conn, &tmp, uid, Some(20));
-        assert!(overrun(&conn, at("2026-09-17T09:29:00Z")).unwrap().is_empty(), "under 1.5x");
-        let asks = overrun(&conn, at("2026-09-17T09:31:00Z")).unwrap();
+        assert!(overrun(&conn, tmp.path(), at("2026-09-17T09:29:00Z")).unwrap().is_empty(), "under 1.5x");
+        let asks = overrun(&conn, tmp.path(), at("2026-09-17T09:31:00Z")).unwrap();
         assert_eq!(asks.len(), 1);
         let msg = asks[0].message.as_ref().unwrap();
         assert_eq!(msg.title, "Are you OK?");
@@ -1052,17 +1069,29 @@ mod tests {
             )
             .unwrap();
         assert!(thread.starts_with("Are you OK?"));
-        assert!(overrun(&conn, at("2026-09-17T10:00:00Z")).unwrap().is_empty(), "asked once");
+        assert!(overrun(&conn, tmp.path(), at("2026-09-17T09:45:00Z")).unwrap().is_empty(), "asked once");
+
+        let ended = overrun(&conn, tmp.path(), at("2026-09-17T10:00:00Z")).unwrap();
+        assert_eq!(ended.len(), 1, "3x the plan ends it");
+        let msg = ended[0].message.as_ref().unwrap();
+        assert_eq!(msg.title, "Force-terminating");
+        assert!(msg.body.contains("60 min against 20 planned"), "{}", msg.body);
+        assert!(open(&conn, uid).unwrap().is_none(), "the session is over");
+        assert!(
+            checks(&conn).iter().any(|(_, _, status, prompt)| status == "pending" && prompt.contains("just ended")),
+            "the farewell is laid"
+        );
+        assert!(overrun(&conn, tmp.path(), at("2026-09-17T11:00:00Z")).unwrap().is_empty());
     }
 
     #[test]
     fn a_paused_or_unplanned_session_is_never_asked_after() {
         let (conn, tmp, uid) = env();
         start_one(&conn, &tmp, uid, None);
-        assert!(overrun(&conn, at("2026-09-17T12:00:00Z")).unwrap().is_empty());
+        assert!(overrun(&conn, tmp.path(), at("2026-09-17T12:00:00Z")).unwrap().is_empty());
         end_one(&conn, &tmp, uid, None, "stopped", "2026-09-17T12:00:00Z");
         let s = start_one(&conn, &tmp, uid, Some(10));
         pause(&conn, uid, s.id, at("2026-09-17T09:05:00Z")).unwrap();
-        assert!(overrun(&conn, at("2026-09-17T09:30:00Z")).unwrap().is_empty());
+        assert!(overrun(&conn, tmp.path(), at("2026-09-17T09:30:00Z")).unwrap().is_empty());
     }
 }
