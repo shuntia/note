@@ -126,28 +126,11 @@ fn default_topic_prefix() -> String {
     DEFAULT_NTFY_TOPIC_PREFIX.into()
 }
 
-pub const DEFAULT_TWILIO_BASE_URL: &str = "https://api.twilio.com";
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct VoiceSettings {
-    pub account_sid: String,
-    pub auth_token_file: PathBuf,
-    /// The caller id calls are placed from, in E.164.
-    pub from_number: String,
-    #[serde(default = "default_twilio_base_url")]
-    pub base_url: String,
-}
-
-fn default_twilio_base_url() -> String {
-    DEFAULT_TWILIO_BASE_URL.into()
-}
-
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct ChannelsConfig {
     pub webpush: Option<WebPushSettings>,
     pub ntfy: Option<NtfySettings>,
-    pub voice: Option<VoiceSettings>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -190,7 +173,6 @@ pub const CATEGORIES: [&str; 2] = [CATEGORY_MEMBER, CATEGORY_TEST];
 pub struct Features {
     pub nightly: bool,
     pub checkins: bool,
-    pub calls: bool,
 }
 
 impl Features {
@@ -198,7 +180,7 @@ impl Features {
     /// it starts with every background feature off and a member with them on.
     pub fn for_category(category: &str) -> Self {
         let on = category != CATEGORY_TEST;
-        Self { nightly: on, checkins: on, calls: on }
+        Self { nightly: on, checkins: on }
     }
 }
 
@@ -219,11 +201,6 @@ pub struct UserConfig {
     pub checkins_enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ntfy_topic: Option<String>,
-    /// E.164; the number accountability calls ring.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub phone_number: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub calls_enabled: Option<bool>,
 }
 
 fn default_nightly_time() -> String {
@@ -246,13 +223,7 @@ impl UserConfig {
         Features {
             nightly: self.nightly_enabled.unwrap_or(default.nightly),
             checkins: self.checkins_enabled.unwrap_or(default.checkins),
-            calls: self.calls_enabled.unwrap_or(default.calls),
         }
-    }
-
-    /// The number to ring, or `None` when the user has not given one.
-    pub fn phone(&self) -> Option<&str> {
-        self.phone_number.as_deref().map(str::trim).filter(|p| !p.is_empty())
     }
 
     /// The user's own topic where they set a non-blank one, else the server's
@@ -488,49 +459,6 @@ mod tests {
         let ntfy = ServerConfig::load(tmp.path()).unwrap().channels.ntfy.unwrap();
         assert_eq!(ntfy.topic_prefix, "plan-");
         assert_eq!(ntfy.token_file, PathBuf::from("/run/secrets/ntfy"));
-    }
-
-    #[test]
-    fn voice_section_parses_with_a_default_api_base_and_is_absent_by_default() {
-        let tmp = tempfile::tempdir().unwrap();
-        let base = "bind_addr = \"127.0.0.1:0\"\npublic_base_url = \"http://x\"\ndata_dir = \"data\"\n";
-        write(tmp.path(), "server.toml", base);
-        assert!(ServerConfig::load(tmp.path()).unwrap().channels.voice.is_none());
-
-        write(tmp.path(), "server.toml", &format!(
-            "{base}[channels.voice]\naccount_sid = \"AC1\"\nauth_token_file = \"config/twilio.token\"\nfrom_number = \"+15005550006\"\n"));
-        let voice = ServerConfig::load(tmp.path()).unwrap().channels.voice.unwrap();
-        assert_eq!(voice.account_sid, "AC1");
-        assert_eq!(voice.from_number, "+15005550006");
-        assert_eq!(voice.auth_token_file, PathBuf::from("config/twilio.token"));
-        assert_eq!(voice.base_url, DEFAULT_TWILIO_BASE_URL);
-
-        write(tmp.path(), "server.toml", &format!(
-            "{base}[channels.voice]\naccount_sid = \"AC1\"\nauth_token_file = \"t\"\nfrom_number = \"+1\"\nbase_url = \"http://127.0.0.1:9\"\n"));
-        assert_eq!(
-            ServerConfig::load(tmp.path()).unwrap().channels.voice.unwrap().base_url,
-            "http://127.0.0.1:9"
-        );
-    }
-
-    #[test]
-    fn calls_follow_the_category_until_the_user_chooses() {
-        let tmp = tempfile::tempdir().unwrap();
-        write(tmp.path(), "defaults/user.toml",
-            "display_name = \"X\"\ntimezone = \"UTC\"\ntemplate = \"default\"\n");
-        let cfg = UserConfig::load(tmp.path(), "aki").unwrap();
-        assert!(cfg.phone().is_none());
-        assert!(cfg.features(CATEGORY_MEMBER).calls);
-        assert!(!cfg.features(CATEGORY_TEST).calls);
-
-        write(tmp.path(), "users/aki/user.toml",
-            "calls_enabled = false\nphone_number = \" +819012345678 \"\n");
-        let cfg = UserConfig::load(tmp.path(), "aki").unwrap();
-        assert!(!cfg.features(CATEGORY_MEMBER).calls);
-        assert_eq!(cfg.phone(), Some("+819012345678"));
-
-        write(tmp.path(), "users/aki/user.toml", "phone_number = \"\"\n");
-        assert!(UserConfig::load(tmp.path(), "aki").unwrap().phone().is_none());
     }
 
     #[test]

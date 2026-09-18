@@ -242,7 +242,7 @@ pub fn sweep_once(state: &AppState) {
         }
     };
     for ev in &fired {
-        crate::channels::deliver_event(&state.db, &state.channels, state.voice.as_deref(), ev);
+        crate::channels::deliver_event(&state.db, &state.channels, ev);
     }
 }
 

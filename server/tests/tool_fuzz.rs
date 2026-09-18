@@ -18,7 +18,7 @@ fn setup() -> (rusqlite::Connection, tempfile::TempDir) {
             note_server::templates::TemplateEvent {
                 kind: "checkin_call".into(), time: "10:00".into(),
                 days: vec!["mon".into()], flexibility: Some("slide".into()),
-                slide_window_min: Some(30), channel: "voice".into(), ..Default::default()
+                slide_window_min: Some(30), channel: "push".into(), ..Default::default()
             },
             note_server::templates::TemplateEvent {
                 kind: "Work time".into(), time: "13:30".into(),

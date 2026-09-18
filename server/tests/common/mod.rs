@@ -24,7 +24,7 @@ pub fn config_dir() -> TempDir {
     );
     write(
         "defaults/templates/default.toml",
-        "[[events]]\nkind='checkin_call'\ntime='09:00'\ndays=['mon','tue','wed','thu','fri','sat','sun']\nflexibility='slide'\nslide_window_min=60\nchannel='voice'\n",
+        "[[events]]\nkind='checkin_call'\ntime='09:00'\ndays=['mon','tue','wed','thu','fri','sat','sun']\nflexibility='slide'\nslide_window_min=60\nchannel='push'\n",
     );
     write("defaults/prompts/persona.md", "you are note");
     write("defaults/prompts/planning.md", "plan the day");
@@ -36,74 +36,6 @@ pub fn config_dir() -> TempDir {
     write("defaults/prompts/summarize.md", "summarise the conversation");
     write("defaults/prompts/harvest.md", "keep what will still matter");
     tmp
-}
-
-#[allow(dead_code)] // only the voice suites stand up a fake Twilio
-pub const TWILIO_TOKEN: &str = "tok_secret";
-
-#[allow(dead_code)] // only the voice suites stand up a fake Twilio
-pub const VOICE_PUBLIC_BASE: &str = "https://note.example";
-
-/// Twilio settings whose auth token file is written under `dir`, pointed at a
-/// `one_shot` stand-in rather than the real API.
-#[allow(dead_code)] // only the voice suites stand up a fake Twilio
-pub fn voice_settings(dir: &std::path::Path, base_url: &str) -> note_server::config::VoiceSettings {
-    let token_file = dir.join("twilio.token");
-    std::fs::write(&token_file, TWILIO_TOKEN).unwrap();
-    note_server::config::VoiceSettings {
-        account_sid: "AC00000000000000000000000000000001".into(),
-        auth_token_file: token_file,
-        from_number: "+15005550006".into(),
-        base_url: base_url.into(),
-    }
-}
-
-/// A stand-in for an HTTP API: answers the first request with `status` and
-/// `body`, then hands the raw request back down the channel.
-#[allow(dead_code)] // only the voice suites stand up a fake Twilio
-pub fn one_shot(
-    status: &'static str,
-    body: &'static str,
-) -> (String, std::sync::mpsc::Receiver<String>) {
-    use std::io::{Read, Write};
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let base = format!("http://{}", listener.local_addr().unwrap());
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let (mut sock, _) = listener.accept().unwrap();
-        let mut raw = Vec::new();
-        let mut buf = [0u8; 1024];
-        loop {
-            let n = sock.read(&mut buf).unwrap();
-            raw.extend_from_slice(&buf[..n]);
-            let text = String::from_utf8_lossy(&raw).to_string();
-            let Some(head_end) = text.find("\r\n\r\n") else {
-                if n == 0 {
-                    break;
-                }
-                continue;
-            };
-            let want: usize = text[..head_end]
-                .lines()
-                .find_map(|l| {
-                    l.strip_prefix("content-length: ").or(l.strip_prefix("Content-Length: "))
-                })
-                .and_then(|v| v.trim().parse().ok())
-                .unwrap_or(0);
-            if raw.len() >= head_end + 4 + want || n == 0 {
-                break;
-            }
-        }
-        let _ = sock.write_all(
-            format!(
-                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            )
-            .as_bytes(),
-        );
-        let _ = tx.send(String::from_utf8_lossy(&raw).to_string());
-    });
-    (base, rx)
 }
 
 pub async fn login(app: &axum::Router, username: &str, password: &str) -> String {
