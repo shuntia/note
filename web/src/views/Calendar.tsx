@@ -14,7 +14,7 @@ import { minutesOf } from '../dayline'
 import { useEscape } from '../escape'
 import { makeHold } from '../held'
 import { reducedMotion } from '../motion'
-import type { CalendarEntry, CalendarKind } from '../types'
+import type { CalendarEntry, CalendarKind, DayView, PlanEvent } from '../types'
 import '../styles/calendar.css'
 
 const START = 6 * 60
@@ -36,7 +36,13 @@ const MONTHS = [
   'November',
   'December',
 ]
-const KINDS: CalendarKind[] = ['fixed', 'busy', 'note']
+const KINDS: CalendarKind[] = ['fixed', 'busy', 'note', 'free']
+const KIND_LABEL: Record<CalendarKind, string> = {
+  fixed: 'Fixed',
+  busy: 'Busy',
+  note: 'Note',
+  free: 'Free time',
+}
 
 // Removal has no server-side reversal, so the request waits out the undo window.
 const deleteHold = makeHold<number>()
@@ -116,28 +122,36 @@ function useMedia(query: string): boolean {
   return matches
 }
 
-export function CalendarSection({ notify, refresh, onChanged }: Pick<ViewProps, 'notify' | 'refresh' | 'onChanged'>) {
+export function CalendarSection({
+  notify,
+  refresh,
+  onChanged,
+  day,
+  onStartBlock,
+}: Pick<ViewProps, 'notify' | 'refresh' | 'onChanged'> & {
+  // Today, as Home read it: the quiet window and the free time both come from there.
+  day: DayView | null
+  onStartBlock: (event: PlanEvent) => void
+}) {
   const [entries, setEntries] = useState<CalendarEntry[] | null>(null)
-  const [quietUntil, setQuietUntil] = useState<string | null>(null)
   const [today, setToday] = useState(() => isoOf(new Date()))
   const [selected, setSelected] = useState(today)
   const [grid, setGrid] = useState(false)
   const [sheet, setSheet] = useState<{ entry: CalendarEntry | null; date: string } | null>(null)
+  const [blocks, setBlocks] = useState<Record<string, PlanEvent[]>>({})
+  const [block, setBlock] = useState<PlanEvent | null>(null)
+  const [filling, setFilling] = useState(false)
   const [, tick] = useState(0)
   const wide = useMedia('(min-width: 768px)')
   const tips = useTips()
+  const quietUntil = day?.date === today ? day.quiet_now : null
 
   const load = useCallback(() => {
-    const date = isoOf(new Date())
-    setToday(date)
+    setToday(isoOf(new Date()))
     api
       .calendar()
       .then((r) => setEntries(r.entries))
       .catch(() => notify("Couldn't load the calendar. Try again."))
-    api
-      .calendarDay(date)
-      .then((d) => setQuietUntil(d.quiet_now))
-      .catch(() => setQuietUntil(null))
   }, [notify])
   useEffect(load, [load, refresh])
 
@@ -150,6 +164,47 @@ export function CalendarSection({ notify, refresh, onChanged }: Pick<ViewProps, 
   const monday = mondayOf(selected)
   const week = Array.from({ length: 7 }, (_, i) => shift(monday, i))
   const now = new Date().getHours() * 60 + new Date().getMinutes()
+
+  // The task blocks the week already holds; a day with no plan simply has none.
+  useEffect(() => {
+    let stale = false
+    api
+      .planRange(week[0], week[6])
+      .then((r) => {
+        if (stale) return
+        const kept: Record<string, PlanEvent[]> = {}
+        for (const [date, events] of Object.entries(r.days)) {
+          const held = events.filter((e) => e.task && e.status !== 'dropped')
+          if (held.length) kept[date] = held
+        }
+        setBlocks(kept)
+      })
+      .catch(() => {
+        if (!stale) setBlocks({})
+      })
+    return () => {
+      stale = true
+    }
+  }, [week[0], week[6], refresh])
+
+  const freeToday = (day?.free.length ?? 0) > 0 && selected === today
+  const fill = () => {
+    if (filling) return
+    setFilling(true)
+    api
+      .allocate(selected)
+      .then((out) => {
+        notify(out.placed.length ? `${out.placed.length} laid into your free time` : 'Nothing to lay in')
+        onChanged()
+      })
+      .catch(() => notify("Couldn't fill that day. Try again."))
+      .finally(() => setFilling(false))
+  }
+
+  const settle = (run: Promise<unknown>, failure: string) => {
+    setBlock(null)
+    run.then(onChanged).catch(() => notify(failure))
+  }
 
   const replace = (entry: CalendarEntry) =>
     setEntries((list) => (list ?? []).map((e) => (e.id === entry.id ? entry : e)))
@@ -271,6 +326,11 @@ export function CalendarSection({ notify, refresh, onChanged }: Pick<ViewProps, 
             <ChevronRight />
           </button>
         )}
+        {freeToday && (
+          <button className="quiet cal-fill" disabled={filling} onClick={fill}>
+            Fill my free time
+          </button>
+        )}
         <button
           className="btn-round"
           aria-label="Add an entry"
@@ -285,8 +345,10 @@ export function CalendarSection({ notify, refresh, onChanged }: Pick<ViewProps, 
           today={today}
           now={now}
           entries={visible}
+          blocks={blocks}
           quietUntil={quietUntil}
           onPick={(entry, date) => setSheet({ entry, date })}
+          onBlock={setBlock}
         />
       ) : (
         <>
@@ -303,7 +365,9 @@ export function CalendarSection({ notify, refresh, onChanged }: Pick<ViewProps, 
               today={today}
               now={now}
               entries={visible}
+              blocks={blocks[selected] ?? []}
               quietUntil={quietUntil}
+              onBlock={setBlock}
             />
           </div>
           <DayList
@@ -314,6 +378,27 @@ export function CalendarSection({ notify, refresh, onChanged }: Pick<ViewProps, 
         </>
       )}
       {tips.node}
+      {block && (
+        <BlockMenu
+          event={block}
+          onStart={() => {
+            const event = block
+            setBlock(null)
+            onStartBlock(event)
+          }}
+          onDone={() =>
+            settle(
+              api.eventAction(block.id, 'done').then(() =>
+                block.task ? api.patchTask(block.task.id, { state: 'done' }) : undefined,
+              ),
+              "Couldn't mark that done. Try again.",
+            )
+          }
+          onDrop={() => settle(api.eventAction(block.id, 'drop'), "Couldn't drop that. Try again.")}
+          onMove={() => settle(api.moveTomorrow(block.id), "Couldn't move that. Try again.")}
+          onClose={() => setBlock(null)}
+        />
+      )}
       {sheet && (
         <EntrySheet
           key={sheet.entry?.id ?? 'new'}
@@ -375,19 +460,24 @@ function WeekStrip({
   )
 }
 
-// The day as ground: every window of it named on demand, the disc where now stands.
+// The day as ground: every window of it named on demand, the disc where now stands,
+// and the task blocks the plan laid over its free time.
 function DayBands({
   date,
   today,
   now,
   entries,
+  blocks,
   quietUntil,
+  onBlock,
 }: {
   date: string
   today: string
   now: number
   entries: CalendarEntry[]
+  blocks: PlanEvent[]
   quietUntil: string | null
+  onBlock: (event: PlanEvent) => void
 }) {
   const isToday = date === today
   return (
@@ -417,6 +507,20 @@ function DayBands({
           />
         ),
       )}
+      {blocks.map((ev) => {
+        const start = minutesOf(ev.wall_time)
+        const end = minutesOf(ev.end_wall_time ?? ev.wall_time)
+        return (
+          <button
+            key={ev.id}
+            className={`dl-span task cal-band${ev.status === 'done' || ev.status === 'dropped' ? ' settled' : ''}`}
+            data-tip={`${ev.wall_time} – ${ev.end_wall_time ?? ev.wall_time} ${ev.task?.title ?? ev.kind}${ev.origin === 'auto' ? ' · auto' : ''}`}
+            aria-label={`${ev.task?.title ?? ev.kind} ${ev.wall_time}`}
+            style={{ left: pct(start), width: `${Math.max(0.6, ((end - start) / (END - START)) * 100)}%` }}
+            onClick={() => onBlock(ev)}
+          />
+        )
+      })}
       {HOURS.map((h, i) => (
         <span
           key={h}
@@ -469,15 +573,19 @@ function WeekGrid({
   today,
   now,
   entries,
+  blocks,
   quietUntil,
   onPick,
+  onBlock,
 }: {
   week: string[]
   today: string
   now: number
   entries: CalendarEntry[]
+  blocks: Record<string, PlanEvent[]>
   quietUntil: string | null
   onPick: (entry: CalendarEntry, date: string) => void
+  onBlock: (event: PlanEvent) => void
 }) {
   const hours = Array.from({ length: 19 }, (_, i) => i + 6)
   const thisWeek = week.includes(today)
@@ -537,6 +645,32 @@ function WeekGrid({
                   }}
                 >
                   <span className="t">{o.entry.title}</span>
+                </div>
+              )
+            })}
+            {(blocks[date] ?? []).map((ev) => {
+              const start = minutesOf(ev.wall_time)
+              const height = Math.max(0.5, (minutesOf(ev.end_wall_time ?? ev.wall_time) - start) / 60)
+              return (
+                <div
+                  key={`b${ev.id}`}
+                  className={`band task${ev.status === 'done' || ev.status === 'dropped' ? ' settled' : ''}`}
+                  role="button"
+                  tabIndex={0}
+                  data-tip={`${ev.wall_time} – ${ev.end_wall_time ?? ev.wall_time}${ev.origin === 'auto' ? ' · auto' : ''}`}
+                  aria-label={`${ev.task?.title ?? ev.kind} ${ev.wall_time}`}
+                  style={{
+                    top: `calc(var(--hour) * ${(start - START) / 60})`,
+                    height: `calc(var(--hour) * ${height})`,
+                  }}
+                  onClick={() => onBlock(ev)}
+                  onKeyDown={(e) => {
+                    if (e.key !== 'Enter' && e.key !== ' ') return
+                    e.preventDefault()
+                    onBlock(ev)
+                  }}
+                >
+                  <span className="t">{ev.task?.title ?? ev.kind}</span>
                 </div>
               )
             })}
@@ -669,7 +803,7 @@ function EntrySheet({
                   kind={draft.kind}
                   onKind={(kind) => {
                     setMenu(false)
-                    set({ kind, quiet: kind === 'note' ? false : draft.quiet })
+                    set({ kind, quiet: kind === 'note' || kind === 'free' ? false : draft.quiet })
                   }}
                   onSkip={() => {
                     onSkip()
@@ -722,6 +856,8 @@ function EntrySheet({
         <div className="sheet-row">
           {draft.kind === 'note' ? (
             <span className="label">A mark on the day, not a window</span>
+          ) : draft.kind === 'free' ? (
+            <span className="label">Time set aside for tasks</span>
           ) : (
             <span className="label">
               <BellOff />
@@ -731,7 +867,7 @@ function EntrySheet({
           {draft.days === 0 && (
             <span className="sheet-date">{`${DAYS[weekdayOf(draft.date)]} ${dateOf(draft.date).getDate()} ${MONTHS[dateOf(draft.date).getMonth()].slice(0, 3)}`}</span>
           )}
-          {draft.kind !== 'note' && (
+          {draft.kind !== 'note' && draft.kind !== 'free' && (
             <button
               className="sw"
               role="switch"
@@ -751,6 +887,52 @@ function EntrySheet({
         >
           Save
         </button>
+      </div>
+    </>,
+    document.body,
+  )
+}
+
+// A task block is the plan's, not the calendar's: clicking one offers the row's
+// own actions rather than the entry sheet.
+function BlockMenu({
+  event,
+  onStart,
+  onDone,
+  onDrop,
+  onMove,
+  onClose,
+}: {
+  event: PlanEvent
+  onStart: () => void
+  onDone: () => void
+  onDrop: () => void
+  onMove: () => void
+  onClose: () => void
+}) {
+  useEscape(true, onClose)
+  const settled = event.status === 'done' || event.status === 'dropped'
+  return createPortal(
+    <>
+      <div className="scrim" onClick={onClose} />
+      <div className="block-menu" role="dialog" aria-modal="true" aria-label={event.task?.title ?? event.kind}>
+        <span className="block-menu-head">
+          <span className="block-menu-title">{event.task?.title ?? event.kind}</span>
+          <span className="block-menu-when tnum">
+            {event.wall_time} – {event.end_wall_time ?? event.wall_time}
+            {event.origin === 'auto' && <span className="block-menu-auto">auto</span>}
+          </span>
+        </span>
+        {!settled && (
+          <>
+            <button className="ev-menu-item" onClick={onStart}>Start</button>
+            <button className="ev-menu-item" onClick={onDone}>Done</button>
+            <div className="ev-menu-sep" />
+            <button className="ev-menu-item" onClick={onDrop}>Drop today</button>
+            <button className="ev-menu-item" onClick={onMove}>Move to tomorrow</button>
+          </>
+        )}
+        {settled && <p className="block-menu-settled">Already {event.status}.</p>}
       </div>
     </>,
     document.body,
@@ -804,7 +986,7 @@ function SheetMenu({
           ref={i === 0 ? first : undefined}
           onClick={() => onKind(k)}
         >
-          {k[0].toUpperCase() + k.slice(1)}
+          {KIND_LABEL[k]}
           {k === kind && <Check />}
         </button>
       ))}
