@@ -110,6 +110,9 @@ pub struct AppState {
     /// Set when the ntfy channel is configured; also the prefix its default
     /// topics are built from.
     pub ntfy_topic_prefix: Option<String>,
+    /// Set when the telegram channel is configured; it also names the bot a
+    /// link invites the user to, and carries a mirrored reply back.
+    pub telegram: Option<Arc<crate::channels::telegram::TelegramChannel>>,
     /// Set when the voice channel is configured; it both places calls and
     /// verifies the signature on Twilio's callbacks.
     pub voice: Option<Arc<crate::channels::voice::VoiceChannel>>,
@@ -149,6 +152,7 @@ impl AppState {
             embeddings: None,
             vapid_public_key: None,
             ntfy_topic_prefix: None,
+            telegram: None,
             voice: None,
             hub,
             channels: vec![ws],
@@ -225,6 +229,14 @@ impl AppState {
     ) -> Self {
         self.channels.push(Arc::new(ch));
         self.ntfy_topic_prefix = Some(topic_prefix);
+        self
+    }
+
+    /// First in the ladder: a linked chat is where the user already is.
+    pub fn with_telegram(mut self, ch: crate::channels::telegram::TelegramChannel) -> Self {
+        let ch = Arc::new(ch);
+        self.channels.insert(0, ch.clone());
+        self.telegram = Some(ch);
         self
     }
 

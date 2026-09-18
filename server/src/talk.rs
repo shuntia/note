@@ -31,6 +31,61 @@ pub fn touch(conn: &Connection, id: i64, now: jiff::Timestamp) -> Result<()> {
     Ok(())
 }
 
+/// Where the user last spoke to a thread from, and so where Note answers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Via {
+    Web,
+    Telegram,
+}
+
+impl Via {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Via::Web => "web",
+            Via::Telegram => "telegram",
+        }
+    }
+}
+
+pub fn via_of(conn: &Connection, id: i64) -> Result<Via> {
+    let via: Option<String> = conn
+        .query_row("SELECT via FROM conversations WHERE id = ?1", [id], |r| r.get(0))
+        .optional()?;
+    Ok(match via.as_deref() {
+        Some("telegram") => Via::Telegram,
+        _ => Via::Web,
+    })
+}
+
+/// A turn from Telegram also stamps the thread, so the next reply from that
+/// chat lands back in it.
+pub fn mark_via(conn: &Connection, id: i64, via: Via, now: jiff::Timestamp) -> Result<()> {
+    match via {
+        Via::Telegram => {
+            conn.execute(
+                "UPDATE conversations SET via = ?1, telegram_at = ?2 WHERE id = ?3",
+                (via.as_str(), now.to_string(), id),
+            )?;
+        }
+        Via::Web => {
+            conn.execute(
+                "UPDATE conversations SET via = ?1 WHERE id = ?2",
+                (via.as_str(), id),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// When this thread last crossed Telegram, whichever way the message went.
+pub fn stamp_telegram(conn: &Connection, id: i64, now: jiff::Timestamp) -> Result<()> {
+    conn.execute(
+        "UPDATE conversations SET telegram_at = ?1 WHERE id = ?2",
+        (now.to_string(), id),
+    )?;
+    Ok(())
+}
+
 /// The thread a check-in's question lands in: one per user per plan date, so
 /// every check-in of a day appends to the same conversation and the next day
 /// starts a fresh one. The question is stored as an assistant row.

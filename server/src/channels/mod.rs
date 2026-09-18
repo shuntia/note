@@ -1,5 +1,6 @@
 pub mod mock;
 pub mod ntfy;
+pub mod telegram;
 pub mod voice;
 pub mod webpush;
 pub mod ws;

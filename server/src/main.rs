@@ -132,6 +132,10 @@ async fn main() -> anyhow::Result<()> {
         )?;
         state = state.with_ntfy(ch, n.topic_prefix.clone());
     }
+    if let Some(t) = &cfg.channels.telegram {
+        let ch = channels::telegram::TelegramChannel::new(state.db.clone(), t)?;
+        state = state.with_telegram(ch);
+    }
     if let Some(v) = &cfg.channels.voice {
         let ch = channels::voice::VoiceChannel::new(
             state.config_dir.clone(),
