@@ -5,7 +5,6 @@ import type {
   AdminUser,
   AlertPatch,
   Allocation,
-  CalendarDay,
   CalendarEntry,
   CalendarKind,
   Conversation,
@@ -142,7 +141,6 @@ export const api = {
   login: (username: string, password: string) =>
     request<void>('/api/login', { method: 'POST', body: JSON.stringify({ username, password }) }),
   logout: () => request<void>('/api/logout', { method: 'POST' }),
-  planToday: () => request<PlanEvent[]>('/api/plan/today'),
   day: (date: string) => request<DayView>(`/api/day/${date}`),
   planRange: (from: string, to: string) =>
     request<{ days: Record<string, PlanEvent[]> }>(
@@ -233,7 +231,6 @@ export const api = {
     request<void>('/api/push/unsubscribe', { method: 'POST', body: JSON.stringify({ endpoint }) }),
   notifyTest: () => request<{ via: string }>('/api/notify/test', { method: 'POST' }),
   calendar: () => request<{ entries: CalendarEntry[] }>('/api/calendar'),
-  calendarDay: (date: string) => request<CalendarDay>(`/api/calendar/day/${date}`),
   addCalendarEntry: (fields: CalendarFields) =>
     request<CalendarEntry>('/api/calendar', { method: 'POST', body: JSON.stringify(fields) }),
   // The server rejects unknown fields and keeps whatever the patch leaves out; an empty
