@@ -21,6 +21,9 @@ pub struct ServerConfig {
     pub limits: LimitsConfig,
     #[serde(default)]
     pub agent: AgentConfig,
+    /// Absent turns the `web_search` tool off: no session is offered it.
+    #[serde(default)]
+    pub search: Option<SearchConfig>,
 }
 
 /// `NOTE_DEFAULT_WEB_DIR` at build time bakes in an install-specific location
@@ -65,6 +68,27 @@ impl Default for AgentConfig {
     fn default() -> Self {
         Self { idle_summary_min: 60 }
     }
+}
+
+/// The SearXNG instance the `web_search` tool queries.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SearchConfig {
+    pub searxng_url: String,
+    #[serde(default = "default_search_max_results")]
+    pub max_results: usize,
+    #[serde(default = "default_search_timeout")]
+    pub timeout_secs: u64,
+}
+
+pub const DEFAULT_SEARCH_MAX_RESULTS: usize = 8;
+pub const DEFAULT_SEARCH_TIMEOUT_SECS: u64 = 15;
+
+fn default_search_max_results() -> usize {
+    DEFAULT_SEARCH_MAX_RESULTS
+}
+
+fn default_search_timeout() -> u64 {
+    DEFAULT_SEARCH_TIMEOUT_SECS
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -558,6 +582,25 @@ mod tests {
         assert_eq!(ServerConfig::load(tmp.path()).unwrap().limits.agent_sessions_per_day, 200);
         write(tmp.path(), "server.toml", &format!("{base}[limits]\nagent_sessions_per_day = 0\n"));
         assert_eq!(ServerConfig::load(tmp.path()).unwrap().limits.agent_sessions_per_day, 0);
+    }
+
+    #[test]
+    fn search_section_is_absent_by_default_and_defaults_its_bounds() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = "bind_addr = \"127.0.0.1:0\"\npublic_base_url = \"http://x\"\ndata_dir = \"data\"\n";
+        write(tmp.path(), "server.toml", base);
+        assert!(ServerConfig::load(tmp.path()).unwrap().search.is_none());
+
+        write(tmp.path(), "server.toml", &format!("{base}[search]\nsearxng_url = \"http://127.0.0.1:8888\"\n"));
+        let search = ServerConfig::load(tmp.path()).unwrap().search.unwrap();
+        assert_eq!(search.searxng_url, "http://127.0.0.1:8888");
+        assert_eq!(search.max_results, DEFAULT_SEARCH_MAX_RESULTS);
+        assert_eq!(search.timeout_secs, DEFAULT_SEARCH_TIMEOUT_SECS);
+
+        write(tmp.path(), "server.toml", &format!(
+            "{base}[search]\nsearxng_url = \"http://s:8888\"\nmax_results = 3\ntimeout_secs = 4\n"));
+        let search = ServerConfig::load(tmp.path()).unwrap().search.unwrap();
+        assert_eq!((search.max_results, search.timeout_secs), (3, 4));
     }
 
     #[test]

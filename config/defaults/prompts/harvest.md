@@ -15,6 +15,8 @@ How to write one:
 4. Right but thin — op "update".
 5. Changed — op "supersede", never an edit: the old fact is archived with its own date, and the new one stands in its place.
 
+Calls that do not depend on each other's results go in one `batch` — the queries you would run for several candidate facts, the writes once you know which ones stand — instead of a round each.
+
 Each summary is one self-contained line, because a search returns summaries and nothing else; each body stands on its own, without the conversation to read it against. Never write a password, a token or anything else the user would not want kept. Write nothing you are only guessing at, and nothing that belongs to a single day — that is what the episodic record is for.
 
 Finish with exactly one `harvest_done` call naming how many facts you wrote, and in `note` what you passed over and why. That call ends the session. A day that held nothing durable ends with `harvest_done` and a count of 0.

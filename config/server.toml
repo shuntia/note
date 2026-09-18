@@ -38,6 +38,18 @@ kind = "openai"
 base_url = "http://localhost:8080/v1"
 model = "embeddinggemma"
 
+# --- Web search ---------------------------------------------------------
+# A SearXNG instance the agent may ask when a reply turns on something current
+# or outside what it holds. Its hits never reach the session raw: one extra
+# model call answers the question from them first, so a search costs a query
+# and a short completion. Without this section the web_search tool is not
+# offered to any session at all.
+#
+[search]
+searxng_url = "http://127.0.0.1:8888"
+# max_results = 8        # hits handed to the summarizer
+# timeout_secs = 15      # cap on the search itself
+
 # --- Background agent passes ---------------------------------------------
 # A conversation quiet for this many minutes is summarised while its context
 # is still cheap; 0 turns the pass off. The prompt cache above shortens it.

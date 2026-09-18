@@ -21,6 +21,7 @@ pub mod providers;
 pub mod push_subs;
 pub mod review;
 pub mod runner;
+pub mod search;
 pub mod security;
 pub mod summaries;
 pub mod talk;
@@ -36,6 +37,7 @@ pub mod triggers;
 pub mod work;
 
 use crate::providers::{EmbeddingsProvider, LLMProvider};
+use crate::search::SearchProvider;
 use rusqlite::Connection;
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -112,6 +114,9 @@ pub struct AppState {
     pub data_dir: PathBuf,
     pub llm: Arc<dyn LLMProvider>,
     pub embeddings: Option<Arc<dyn EmbeddingsProvider>>,
+    /// Set when a search instance is configured; without one no session is
+    /// offered the `web_search` tool.
+    pub search: Option<Arc<dyn SearchProvider>>,
     pub vapid_public_key: Option<String>,
     /// Set when the telegram channel is configured; it also names the bot a
     /// link invites the user to, and carries a mirrored reply back.
@@ -150,6 +155,7 @@ impl AppState {
             data_dir,
             llm: Arc::new(crate::providers::mock::MockLLM::empty()),
             embeddings: None,
+            search: None,
             vapid_public_key: None,
             telegram: None,
             hub,
@@ -207,6 +213,11 @@ impl AppState {
     ) -> Self {
         self.llm = llm;
         self.embeddings = embeddings;
+        self
+    }
+
+    pub fn with_search(mut self, search: Arc<dyn SearchProvider>) -> Self {
+        self.search = Some(search);
         self
     }
 

@@ -1,7 +1,7 @@
 use anyhow::Context;
 use note_server::{
     admin, api, auth, channels, config::ServerConfig, db, memory, nightly, providers, runner,
-    security, summaries, totp, AppState,
+    search, security, summaries, totp, AppState,
 };
 use std::path::PathBuf;
 
@@ -123,6 +123,9 @@ async fn main() -> anyhow::Result<()> {
         let public_key = channels::webpush::public_key_b64(&pem)?;
         let ch = channels::webpush::WebPushChannel::new(state.db.clone(), pem, wp.subject.clone())?;
         state = state.with_webpush(ch, public_key);
+    }
+    if let Some(s) = &cfg.search {
+        state = state.with_search(std::sync::Arc::new(search::SearxngSearch::new(s)));
     }
     if let Some(t) = &cfg.channels.telegram {
         let ch = channels::telegram::TelegramChannel::new(state.db.clone(), t)?;

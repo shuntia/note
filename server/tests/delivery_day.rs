@@ -108,6 +108,7 @@ fn delivery_reaches_the_user_through_the_ladder() {
         data_dir: tmp.path(),
         llm: &llm,
         embeddings: None,
+            search: None,
         task_scope: None,
         inbox_source: None,
         memory_source: None,
