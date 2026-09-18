@@ -237,6 +237,7 @@ export function CalendarSection({
     }
     const pending: CalendarEntry = {
       id: -Date.now(),
+      external_id: null,
       ...fields,
       on_date: draft.days ? null : draft.date,
       day_names: [],

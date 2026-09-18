@@ -63,6 +63,7 @@ fn failed(e: CalendarError) -> ToolError {
         CalendarError::Invalid(m) => ToolError::rejected(m),
         e @ CalendarError::TooMany => ToolError::rejected(e.to_string()),
         e @ CalendarError::NotFound(_) => ToolError::not_found(e.to_string()),
+        e @ CalendarError::Duplicate { .. } => ToolError::rejected(e.to_string()),
         CalendarError::Db(e) => ToolError::internal(e.to_string()),
     }
 }
@@ -182,6 +183,7 @@ pub fn add(conn: &Connection, ctx: &ToolCtx, args: AddArgs) -> Result<serde_json
         on_date: args.on_date,
         from_date: args.from_date,
         until_date: args.until_date,
+        external_id: None,
     };
     calendar::create(conn, ctx.user_id, fields).map(|e| row(&e)).map_err(failed)
 }
@@ -232,6 +234,7 @@ pub fn update(
         on_date: args.on_date,
         from_date: args.from_date,
         until_date: args.until_date,
+        external_id: None,
     };
     calendar::update(conn, ctx.user_id, args.entry_id, patch).map(|e| row(&e)).map_err(failed)
 }
