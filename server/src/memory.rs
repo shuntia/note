@@ -147,7 +147,7 @@ pub(crate) fn embed_text(summary: &str, body: &str) -> String {
 
 /// What the embedding model is given of a body; the endpoint refuses inputs
 /// past its batch size, and the summary plus this much carries the meaning.
-pub const MAX_EMBED_BODY_CHARS: usize = 2800;
+pub const MAX_EMBED_BODY_CHARS: usize = 2200;
 
 /// Writes through a sibling temp file so a crash mid-write can never leave a
 /// half-rendered fact where the index expects a whole one.
