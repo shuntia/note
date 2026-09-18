@@ -189,6 +189,10 @@ pub struct UserConfig {
     pub template: String,
     #[serde(default = "default_nightly_time")]
     pub nightly_time: String,
+    /// When the close-the-day trigger fires, zero-padded HH:MM; blank turns the
+    /// ritual off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub close_day_time: Option<String>,
     #[serde(default = "default_true")]
     pub show_arc_between_sessions: bool,
     #[serde(default = "default_counter")]
@@ -212,6 +216,7 @@ pub struct UserConfig {
 }
 
 pub const DEFAULT_TRIGGERS_PER_DAY: u32 = 4;
+pub const DEFAULT_CLOSE_DAY_TIME: &str = "21:30";
 pub const DEFAULT_POMODORO_WORK_MIN: u32 = 25;
 pub const DEFAULT_POMODORO_BREAK_MIN: u32 = 5;
 
@@ -236,6 +241,11 @@ impl UserConfig {
             nightly: self.nightly_enabled.unwrap_or(default.nightly),
             checkins: self.checkins_enabled.unwrap_or(default.checkins),
         }
+    }
+
+    /// Blank where the user has turned the close of the day off.
+    pub fn close_day_time(&self) -> &str {
+        self.close_day_time.as_deref().unwrap_or(DEFAULT_CLOSE_DAY_TIME)
     }
 
     pub fn triggers_per_day(&self) -> u32 {
@@ -277,6 +287,11 @@ impl UserConfig {
             crate::templates::valid_time(&cfg.nightly_time),
             "invalid nightly_time {:?}",
             cfg.nightly_time
+        );
+        anyhow::ensure!(
+            cfg.close_day_time().is_empty() || crate::templates::valid_time(cfg.close_day_time()),
+            "invalid close_day_time {:?}",
+            cfg.close_day_time()
         );
         Ok(cfg)
     }

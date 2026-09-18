@@ -48,6 +48,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/plan/today", get(plan_today))
         .route("/api/plan/range", get(plan_range))
         .route("/api/plan/{date}/allocate", post(plan_allocate))
+        .route("/api/plan/{date}/carry", post(plan_carry))
         .route("/api/day/{date}", get(day_view))
         .route("/api/debrief", get(debrief))
         .route("/api/events/{id}/shift", post(event_shift))
@@ -963,6 +964,7 @@ struct SettingsPatch {
     display_name: Option<String>,
     timezone: Option<String>,
     nightly_time: Option<String>,
+    close_day_time: Option<String>,
     template: Option<String>,
     show_arc_between_sessions: Option<bool>,
     counter: Option<String>,
@@ -996,6 +998,7 @@ fn settings_body(
         "display_name": cfg.display_name,
         "timezone": cfg.timezone,
         "nightly_time": cfg.nightly_time,
+        "close_day_time": cfg.close_day_time(),
         "template": cfg.template,
         "show_arc_between_sessions": cfg.show_arc_between_sessions,
         "counter": cfg.counter,
@@ -1104,6 +1107,16 @@ async fn settings_put(
             return invalid_field("nightly_time", "must be a zero-padded 24-hour HH:MM");
         }
         cfg.nightly_time = time;
+    }
+    if let Some(time) = req.close_day_time {
+        let time = time.trim();
+        if !time.is_empty() && !crate::templates::valid_time(time) {
+            return invalid_field(
+                "close_day_time",
+                "must be a zero-padded 24-hour HH:MM, or blank for no close of day",
+            );
+        }
+        cfg.close_day_time = Some(time.to_string());
     }
     if let Some(template) = req.template {
         if !templates.contains(&template) {
@@ -1608,6 +1621,35 @@ async fn plan_allocate(
             "cleared": out.cleared,
         }))
         .into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+/// Moves what is left of a day to tomorrow: the close-the-day ritual's own
+/// button, and the route the `plan_carry` tool answers to.
+async fn plan_carry(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Path(date): Path<String>,
+) -> impl IntoResponse {
+    let Ok(date) = date.parse::<jiff::civil::Date>() else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let (tz, _) = match day_context(&state, &user.username) {
+        Ok(c) => c,
+        Err(status) => return status.into_response(),
+    };
+    let now = jiff::Timestamp::now();
+    if date < now.to_zoned(tz).date() {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({ "error": "a day that is over cannot be carried" })),
+        )
+            .into_response();
+    }
+    let conn = state.db();
+    match crate::plan::carry(&conn, &state.config_dir, &user.username, user.id, date, now) {
+        Ok(moved) => Json(serde_json::json!({ "moved": moved })).into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }

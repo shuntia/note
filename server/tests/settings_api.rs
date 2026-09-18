@@ -207,6 +207,8 @@ async fn invalid_fields_are_rejected_by_name() {
         (r#"{"timezone":"Not/AZone"}"#, "timezone"),
         (r#"{"nightly_time":"3:00"}"#, "nightly_time"),
         (r#"{"nightly_time":"24:00"}"#, "nightly_time"),
+        (r#"{"close_day_time":"9:30"}"#, "close_day_time"),
+        (r#"{"close_day_time":"21:60"}"#, "close_day_time"),
         (r#"{"template":"nope"}"#, "template"),
     ];
     for (body, field) in cases {
@@ -216,6 +218,24 @@ async fn invalid_fields_are_rejected_by_name() {
         let msg = v["error"].as_str().unwrap_or_default();
         assert!(msg.contains(field), "error {msg:?} does not name {field}");
     }
+}
+
+#[tokio::test]
+async fn the_close_of_the_day_defaults_to_an_evening_and_blank_turns_it_off() {
+    let (app, cookie, _cfg) = common::app_with_logged_in_user().await;
+    let v = json(app.clone().oneshot(get(&cookie)).await.unwrap()).await;
+    assert_eq!(v["close_day_time"], "21:30");
+
+    let v = json(
+        app.clone().oneshot(put(&cookie, r#"{"close_day_time":"22:15"}"#)).await.unwrap(),
+    )
+    .await;
+    assert_eq!(v["close_day_time"], "22:15");
+
+    let v = json(app.clone().oneshot(put(&cookie, r#"{"close_day_time":""}"#)).await.unwrap()).await;
+    assert_eq!(v["close_day_time"], "");
+    let v = json(app.oneshot(get(&cookie)).await.unwrap()).await;
+    assert_eq!(v["close_day_time"], "");
 }
 
 #[tokio::test]

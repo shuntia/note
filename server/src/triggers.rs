@@ -160,13 +160,15 @@ pub fn add_extra(
 }
 
 /// Writes the trigger row itself, with no budget or timing opinion: the caller
-/// has already decided this one is allowed.
+/// has already decided this one is allowed. `origin` separates a check the agent
+/// chose to lay from one the server lays for the ritual it runs.
 #[allow(clippy::too_many_arguments)]
 pub fn insert(
     conn: &Connection,
     plan_id: i64,
     wall: &str,
     prompt: &str,
+    origin: &str,
     cancel: Option<Cancel>,
     conversation_id: Option<i64>,
     work_session_id: Option<i64>,
@@ -176,11 +178,12 @@ pub fn insert(
         "INSERT INTO events (plan_id, kind, wall_time, orig_wall_time, flexibility,
                              slide_window_min, channel, origin, prompt, cancel_if, cancel_ref,
                              conversation_id, work_session_id, created_at)
-         VALUES (?1, ?2, ?3, ?3, 'drop', 0, 'push', 'agent', ?4, ?5, ?6, ?7, ?8, ?9)",
+         VALUES (?1, ?2, ?3, ?3, 'drop', 0, 'push', ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         (
             plan_id,
             KIND,
             wall,
+            origin,
             prompt,
             cancel.map(|c| c.as_str()),
             cancel.and_then(|c| c.reference()),
@@ -208,6 +211,10 @@ pub struct Lay<'a> {
     /// that is already closed. It carries the session's exemptions: no lead
     /// time, and no call on the day's budget.
     pub work_session_id: Option<i64>,
+    /// A check the server lays for a ritual of its own rather than one the
+    /// agent chose: it is the day's furniture, so it is exempt from the budget
+    /// and from the lead time, and never belongs to an open session.
+    pub system: bool,
     pub now: jiff::Timestamp,
 }
 
@@ -253,11 +260,12 @@ pub fn lay(conn: &Connection, lay: &Lay) -> Result<Laid, Refusal> {
     if lead < 0 {
         return Err(Refusal::Past { at: wall });
     }
-    if lay.work_session_id.is_none() && lead < MIN_LEAD_MIN {
+    if lay.work_session_id.is_none() && !lay.system && lead < MIN_LEAD_MIN {
         return Err(Refusal::TooSoon { minutes: lead });
     }
     match (&lay.work_session_id, &session) {
         (Some(_), _) => {}
+        _ if lay.system => {}
         (None, Some(s)) => {
             if let Some(limit) = overrun_lead(s, lay.now) {
                 if lead > limit {
@@ -301,9 +309,13 @@ pub fn lay(conn: &Connection, lay: &Lay) -> Result<Laid, Refusal> {
         plan_id,
         &wall,
         prompt,
+        if lay.system { "template" } else { "agent" },
         lay.cancel,
         lay.conversation_id,
-        lay.work_session_id.or_else(|| session.as_ref().map(|s| s.id)),
+        match lay.system {
+            true => None,
+            false => lay.work_session_id.or_else(|| session.as_ref().map(|s| s.id)),
+        },
         lay.now,
     )
     .map_err(internal)?;
@@ -315,6 +327,55 @@ pub fn lay(conn: &Connection, lay: &Lay) -> Result<Laid, Refusal> {
     )
     .map_err(internal)?;
     Ok(Laid { event_id, at: wall, cancel_if: lay.cancel.map(|c| c.as_str()) })
+}
+
+/// What the close-the-day check asks for; the tool it names is how the day's
+/// leftovers actually move.
+pub const CLOSE_DAY_PROMPT: &str = "It is the close of the day. In one or two lines say what is \
+     still pending and what got done, then ask whether to carry the rest to tomorrow. If they say \
+     yes, call plan_carry.";
+
+/// Puts the day's close-the-day check on `date`, replacing the one an earlier
+/// run left there so a date never holds two. Returns the event, or nothing when
+/// the user has turned the ritual off or the time has already gone by.
+pub fn lay_close_day(
+    conn: &Connection,
+    config_dir: &Path,
+    username: &str,
+    user_id: i64,
+    date: jiff::civil::Date,
+    now: jiff::Timestamp,
+) -> Result<Option<i64>> {
+    let at = crate::config::UserConfig::load(config_dir, username)?.close_day_time().to_string();
+    conn.execute(
+        "DELETE FROM events WHERE kind = ?1 AND origin = 'template'
+           AND plan_id IN (SELECT id FROM plans WHERE user_id = ?2 AND date = ?3)",
+        (KIND, user_id, date.to_string()),
+    )?;
+    if at.is_empty() {
+        return Ok(None);
+    }
+    let laid = lay(
+        conn,
+        &Lay {
+            config_dir,
+            user_id,
+            username,
+            at: &at,
+            prompt: CLOSE_DAY_PROMPT,
+            date,
+            cancel: None,
+            conversation_id: None,
+            work_session_id: None,
+            system: true,
+            now,
+        },
+    );
+    match laid {
+        Ok(l) => Ok(Some(l.event_id)),
+        Err(Refusal::Past { .. }) => Ok(None),
+        Err(e) => Err(anyhow::anyhow!("{e:?}")),
+    }
 }
 
 /// How many minutes from now the target wall time on `date` is; negative once
@@ -708,8 +769,69 @@ mod tests {
             cancel: None,
             conversation_id: None,
             work_session_id: None,
+            system: false,
             now: at("2026-09-17T09:00:00Z"),
         }
+    }
+
+    #[test]
+    fn a_system_trigger_stands_outside_the_budget_and_the_lead_time() {
+        let (conn, tmp, uid) = env();
+        for hour in 10..14 {
+            lay(&conn, &lay_at(&tmp, uid, &format!("{hour}:00"))).unwrap();
+        }
+        assert_eq!(spent(&conn, uid, date()).unwrap(), 4);
+        assert!(matches!(
+            lay(&conn, &lay_at(&tmp, uid, "15:00")),
+            Err(Refusal::CapReached { .. })
+        ));
+        assert!(matches!(
+            lay(&conn, &lay_at(&tmp, uid, "09:05")),
+            Err(Refusal::TooSoon { .. })
+        ));
+
+        let system = Lay { system: true, ..lay_at(&tmp, uid, "09:05") };
+        let laid = lay(&conn, &system).unwrap();
+        let origin: String = conn
+            .query_row("SELECT origin FROM events WHERE id = ?1", [laid.event_id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(origin, "template");
+        assert_eq!(spent(&conn, uid, date()).unwrap(), 4, "it costs the day nothing");
+    }
+
+    #[test]
+    fn a_system_trigger_outlives_the_session_that_happens_to_be_open() {
+        let (conn, tmp, uid) = env();
+        conn.execute(
+            "INSERT INTO work_sessions (user_id, title, planned_min, started_at)
+             VALUES (?1, 'essay', 60, '2026-09-17T09:00:00Z')",
+            [uid],
+        )
+        .unwrap();
+        let laid = lay(&conn, &Lay { system: true, ..lay_at(&tmp, uid, "21:30") }).unwrap();
+        let session: Option<i64> = conn
+            .query_row("SELECT work_session_id FROM events WHERE id = ?1", [laid.event_id], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(session.is_none());
+    }
+
+    #[test]
+    fn the_close_of_the_day_replaces_the_one_already_there() {
+        let (conn, tmp, uid) = env();
+        let now = at("2026-09-17T09:00:00Z");
+        lay_close_day(&conn, tmp.path(), "aki", uid, date(), now).unwrap().unwrap();
+        let event_id = lay_close_day(&conn, tmp.path(), "aki", uid, date(), now).unwrap().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT id, wall_time FROM events WHERE kind = ?1 AND origin = 'template'")
+            .unwrap();
+        let rows: Vec<(i64, String)> = stmt
+            .query_map([KIND], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(rows, vec![(event_id, crate::config::DEFAULT_CLOSE_DAY_TIME.to_string())]);
     }
 
     #[test]

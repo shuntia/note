@@ -306,7 +306,7 @@ fn lay_session_check(
     let plan_id = crate::plan::ensure(conn, config_dir, username, user_id, at.date())?;
     let wall = format!("{:02}:{:02}", at.hour(), at.minute());
     let event_id =
-        crate::triggers::insert(conn, plan_id, &wall, prompt, None, None, Some(session_id), now)?;
+        crate::triggers::insert(conn, plan_id, &wall, prompt, "agent", None, None, Some(session_id), now)?;
     crate::log::record(
         conn,
         Some(user_id),
@@ -398,6 +398,7 @@ fn lay_farewell(
             cancel: None,
             conversation_id: session.conversation_id,
             work_session_id: Some(session.id),
+            system: false,
             now,
         },
     );
@@ -855,6 +856,7 @@ mod tests {
                 cancel: None,
                 conversation_id: None,
                 work_session_id: None,
+                system: false,
                 now: at("2026-09-17T09:00:00Z"),
             },
         )
