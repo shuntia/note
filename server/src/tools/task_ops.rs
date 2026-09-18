@@ -103,6 +103,10 @@ pub struct CreateArgs {
     /// means the end of that day where the user lives.
     #[serde(default)]
     pub due_at: Option<String>,
+    /// How the block holding this task announces itself when it starts: none,
+    /// chat, or notify.
+    #[serde(default)]
+    pub notify: Option<String>,
 }
 
 pub fn create(
@@ -121,6 +125,7 @@ pub fn create(
             duration_min: args.duration_min,
             is_now: args.is_now,
             due_at: due_at.map(Some),
+            notify: args.notify,
             ..NewTask::default()
         },
         "agent",
@@ -158,6 +163,9 @@ pub struct UpdateArgs {
     /// When it is due: an RFC 3339 instant, or a bare YYYY-MM-DD day, which
     /// means the end of that day where the user lives. An empty string clears it.
     pub due_at: Option<String>,
+    /// How the block holding this task announces itself when it starts: none,
+    /// chat, or notify.
+    pub notify: Option<String>,
 }
 
 pub fn update(
@@ -209,6 +217,7 @@ pub fn update(
         duration_min: args.duration_min.map(Some),
         is_now: args.is_now,
         due_at,
+        notify: args.notify,
         actor: Actor::Agent,
         ..Default::default()
     };
