@@ -439,7 +439,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn telegram_section_parses_with_a_default_api_base_and_is_absent_by_default() {
         let tmp = tempfile::tempdir().unwrap();
         let base = "bind_addr = \"127.0.0.1:0\"\npublic_base_url = \"http://x\"\ndata_dir = \"data\"\n";
@@ -460,7 +459,8 @@ mod tests {
         );
     }
 
-    #[test    fn a_providers_timeout_defaults_and_can_be_overridden() {
+    #[test]
+    fn a_providers_timeout_defaults_and_can_be_overridden() {
         let tmp = tempfile::tempdir().unwrap();
         let base = "bind_addr = \"127.0.0.1:0\"\npublic_base_url = \"http://x\"\ndata_dir = \"data\"\n";
         write(tmp.path(), "server.toml",
