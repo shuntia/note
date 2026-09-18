@@ -966,7 +966,7 @@ export function Home({
         {motion && session && mobile && (
           <div className="home-sheet">
             {doneButton}
-            <Jot flow openTalk={openTalk} openConversation={openConversation} />
+            <Jot flow placeholder="Tell Note" openTalk={openTalk} openConversation={openConversation} />
           </div>
         )}
         {compactLanding ? today : events && <section className="today-line"><DayLine events={visible} now={now} nextId={next?.id} /></section>}
