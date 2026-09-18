@@ -28,6 +28,7 @@ const EDITABLE = [
   'display_name',
   'timezone',
   'nightly_time',
+  'close_day_time',
   'template',
   'triggers_per_day',
   'pomodoro_work_min',
@@ -72,6 +73,7 @@ function draftOf(s: UserSettings): Draft {
     display_name: s.display_name,
     timezone: s.timezone,
     nightly_time: s.nightly_time,
+    close_day_time: s.close_day_time,
     template: s.template,
     triggers_per_day: s.triggers_per_day,
     pomodoro_work_min: s.pomodoro_work_min,
@@ -457,6 +459,29 @@ export function Settings({
                   {...commitOn('pomodoro')}
                 />
                 <Status save={save} row="pomodoro" />
+              </div>
+            )}
+          </FoldRow>
+          <FoldRow
+            label="Close the day"
+            value={loaded.draft.close_day_time || 'Off'}
+            open={open === 'close_day'}
+            onToggle={fold('close_day')}
+          >
+            {open === 'close_day' && (
+              <div className="set-fold-body">
+                <span className="set-sub">
+                  At this hour Note asks what is still open and offers to carry it to
+                  tomorrow. Clear the time to leave the day to end on its own.
+                </span>
+                <input
+                  type="time"
+                  aria-label="Close the day"
+                  value={loaded.draft.close_day_time}
+                  onChange={(e) => edit('close_day_time', e.target.value)}
+                  {...commitOn('close_day')}
+                />
+                <Status save={save} row="close_day" />
               </div>
             )}
           </FoldRow>

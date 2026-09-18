@@ -536,7 +536,6 @@ async fn a_button_for_someone_elses_day_is_refused_and_disarmed() {
     for (update_id, data) in [
         (21, format!("ev:done:{foreign}")),
         (22, "ev:done:9999".to_string()),
-        (23, "carry:2026-01-05".to_string()),
         (24, "nonsense".to_string()),
     ] {
         fake.answer(&presses(&[(update_id, 42, "q1", &data)]));

@@ -132,13 +132,15 @@ fn delivery_reaches_the_user_through_the_ladder() {
                 cancel: None,
                 conversation_id: None,
                 work_session_id: None,
+                system: false,
                 now: nightly_now,
             },
         )
         .unwrap();
         let (wall, flex, origin): (String, String, String) = conn
             .query_row(
-                "SELECT wall_time, flexibility, origin FROM events WHERE kind = 'trigger'",
+                "SELECT wall_time, flexibility, origin FROM events
+                 WHERE kind = 'trigger' AND wall_time = '18:00'",
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
@@ -332,7 +334,11 @@ fn delivery_reaches_the_user_through_the_ladder() {
     {
         let conn = db.lock().unwrap();
         let status: String = conn
-            .query_row("SELECT status FROM events WHERE kind = 'trigger'", [], |r| r.get(0))
+            .query_row(
+                "SELECT status FROM events WHERE kind = 'trigger' AND wall_time = '18:00'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(status, "done");
         let said: String = conn

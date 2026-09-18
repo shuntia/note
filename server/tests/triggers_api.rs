@@ -208,6 +208,7 @@ async fn a_trigger_whose_reason_settled_itself_is_cancelled_before_any_session_r
                 cancel: Some(note_server::triggers::Cancel::TaskDone(task_id)),
                 conversation_id: None,
                 work_session_id: None,
+                system: false,
                 now: jiff::Timestamp::now(),
             },
         )

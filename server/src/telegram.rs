@@ -292,7 +292,12 @@ fn apply(
                 .map(|()| format!("Snoozed {minutes} min"))
         }
         ["block", "start", id] => start_block(conn, config_dir, link, id.parse().ok()?, now),
-        ["carry", _date] => None,
+        ["carry", date] => {
+            let date: jiff::civil::Date = date.parse().ok()?;
+            crate::plan::carry(conn, config_dir, &link.username, link.user_id, date, now)
+                .ok()
+                .map(|_| "Carried".to_string())
+        }
         _ => None,
     }
 }

@@ -215,6 +215,7 @@ const CHECKIN: &[&str] = &[
     "task_list",
     "task_search",
     "task_read",
+    "plan_carry",
     "plan_list",
     "calendar_list",
     "trigger_set",
@@ -241,6 +242,7 @@ const TALK: &[&str] = &[
     "task_bulk_update",
     "plan_tasks",
     "plan_auto",
+    "plan_carry",
     "plan_list",
     "calendar_list",
     "calendar_add",
@@ -295,6 +297,7 @@ const TRIGGER: &[&str] = &[
     "task_list",
     "task_read",
     "task_search",
+    "plan_carry",
     "plan_list",
     "trigger_set",
     "wait_until",
@@ -484,6 +487,13 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
              use plan_tasks instead.",
             schema::<plan_ops::PlanAutoArgs>(),
         ),
+        "plan_carry" => (
+            "Carry what is left of a day over to the next: every block still waiting on the \
+             user moves to tomorrow's plan with its task, and the day's remaining check-ins \
+             are dropped. Defaults to today. This is what the user agreeing to carry the rest \
+             to tomorrow at the close of the day means; nothing already done or dropped moves.",
+            schema::<plan_ops::PlanCarryArgs>(),
+        ),
         "plan_list" => (
             "Read one day's plan: every event with its event_id — the id the schedule tools \
              take — its times, status and flexibility, and for a block laid by plan_tasks the \
@@ -634,6 +644,7 @@ fn run(
         "task_bulk_update" => task_query::bulk_update(conn, ctx, parse(raw)?),
         "plan_tasks" => plan_ops::plan_tasks(conn, ctx, parse(raw)?),
         "plan_auto" => plan_ops::plan_auto(conn, ctx, parse(raw)?),
+        "plan_carry" => plan_ops::plan_carry(conn, ctx, parse(raw)?),
         "plan_list" => plan_ops::plan_list(conn, ctx, parse(raw)?),
         "calendar_list" => calendar_ops::list(conn, ctx, parse(raw)?),
         "calendar_add" => calendar_ops::add(conn, ctx, parse(raw)?),
@@ -987,25 +998,26 @@ mod tests {
         assert_eq!(v.content.unwrap(), direct[0]);
     }
 
-    /// Checkin ⊆ Talk ⊆ Nightly but for `trigger_budget`, which lives where the
-    /// user is there to agree to it; a harvest reads memory with the nightly's
-    /// own tools plus the one that ends it; Import, Inbox, Summarize and
-    /// Harvest share nothing with an import session.
+    /// Checkin ⊆ Talk ⊆ Nightly but for `trigger_budget` and `plan_carry`,
+    /// which live where the user is there to agree to them; a harvest reads
+    /// memory with the nightly's own tools plus the one that ends it; Import,
+    /// Inbox, Summarize and Harvest share nothing with an import session.
     #[test]
     fn session_surfaces_nest_and_import_stands_apart() {
         let is_subset = |a: &[&str], b: &[&str]| a.iter().all(|t| b.contains(t));
         assert!(is_subset(registry(SessionKind::Checkin), registry(SessionKind::Talk)));
+        let asks_the_user = |t: &str| t == "trigger_budget" || t == "plan_carry";
         assert!(registry(SessionKind::Talk)
             .iter()
-            .filter(|t| **t != "trigger_budget")
+            .filter(|t| !asks_the_user(t))
             .all(|t| registry(SessionKind::Nightly).contains(t)));
         assert!(
-            !registry(SessionKind::Nightly).contains(&"trigger_budget"),
+            !registry(SessionKind::Nightly).iter().any(|t| asks_the_user(t)),
             "the nightly run has nobody to ask"
         );
         assert!(registry(SessionKind::Trigger)
             .iter()
-            .filter(|t| !is_terminal(SessionKind::Trigger, t))
+            .filter(|t| !is_terminal(SessionKind::Trigger, t) && !asks_the_user(t))
             .all(|t| registry(SessionKind::Nightly).contains(t)));
         assert!(registry(SessionKind::Harvest)
             .iter()
