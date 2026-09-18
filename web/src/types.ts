@@ -60,7 +60,12 @@ export type FlattenResult = { task: TaskNode; removed: Task[] }
 
 export type Debrief = { date: string; content: string }
 
-export type Conversation = { id: number; title: string; updated_at: string }
+export type Conversation = {
+  id: number
+  title: string
+  updated_at: string
+  summary: string | null
+}
 
 export type TalkStep = { name: string; args: string; result: string; is_error: boolean }
 
