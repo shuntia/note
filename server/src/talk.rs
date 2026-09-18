@@ -1,9 +1,15 @@
+use crate::agent::{AgentEvent, SessionDeps, SessionStep};
 use crate::providers::Message;
+use crate::AppState;
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
 
 const MAX_TITLE_CHARS: usize = 60;
 const MAX_REASONING_BYTES: usize = 32 * 1024;
+pub const MAX_MESSAGE: usize = 16 * 1024;
+// History windows stay user-first/assistant-last: each success appends exactly
+// one user and one assistant row, and errors persist nothing.
+pub const HISTORY_LIMIT: usize = 32;
 
 pub fn create(conn: &Connection, user_id: i64, title: &str, now: jiff::Timestamp) -> Result<i64> {
     conn.execute(
@@ -273,7 +279,7 @@ pub fn history_after(
     Ok(msgs)
 }
 
-/// How many turns `history` has to choose from: past `TALK_HISTORY_LIMIT` the
+/// How many turns `history` has to choose from: past `HISTORY_LIMIT` the
 /// window drops the oldest ones, and only the summary still carries them.
 pub fn text_turns(conn: &Connection, conversation_id: i64) -> Result<usize> {
     let n: i64 = conn.query_row(
@@ -324,6 +330,204 @@ pub fn title_from(message: &str) -> String {
     let mut title: String = collapsed.chars().take(MAX_TITLE_CHARS - 1).collect();
     title.push('…');
     title
+}
+
+/// The marker a reply in a check-in thread carries into its session, so the
+/// model reads the thread's opening assistant turns as its own scheduled
+/// check-ins rather than as answers it once gave.
+fn checkin_thread_note(date: &str) -> String {
+    format!(
+        "# This conversation\n\nOpened by your scheduled check-in on {date}: every assistant \
+         message the user has not answered yet is a check-in question you sent, and the user \
+         is replying to it now."
+    )
+}
+
+/// What the history window no longer reaches. A thread longer than the window
+/// loses its oldest turns, and only the summary still carries them.
+fn summary_thread_note(summary: &str) -> String {
+    format!("# This conversation\n\nEarlier in this conversation: {summary}")
+}
+
+pub struct Turn {
+    pub conversation_id: i64,
+    pub reply: String,
+    pub steps: Vec<SessionStep>,
+    pub reasoning: String,
+    pub thought_ms: u64,
+}
+
+#[derive(Debug)]
+pub enum TurnError {
+    Blank,
+    NotFound,
+    DailyCap,
+    Busy(crate::TalkBusy),
+    /// The session did not finish; nothing was persisted.
+    Unavailable,
+    Internal,
+}
+
+/// One turn of a conversation, wherever the user spoke from: the same session,
+/// the same thread notes, the same rows in the same order. `conversation` is
+/// `None` to open a thread, titled from the message. A session that fails
+/// persists nothing, as on the web.
+pub async fn run_turn(
+    state: &AppState,
+    user_id: i64,
+    username: &str,
+    conversation: Option<i64>,
+    message: &str,
+    via: Via,
+) -> Result<Turn, TurnError> {
+    let message = message.trim().to_string();
+    if message.is_empty() || message.len() > MAX_MESSAGE {
+        return Err(TurnError::Blank);
+    }
+    let mut notes: Vec<String> = Vec::new();
+    let mut spoke_from = Via::Web;
+    if let Some(id) = conversation {
+        let conn = state.db();
+        match owned(&conn, user_id, id) {
+            Ok(true) => {}
+            Ok(false) => return Err(TurnError::NotFound),
+            Err(_) => return Err(TurnError::Internal),
+        }
+        spoke_from = via_of(&conn, id).map_err(|_| TurnError::Internal)?;
+        match checkin_date(&conn, id) {
+            Ok(Some(date)) => notes.push(checkin_thread_note(&date)),
+            Ok(None) => {}
+            Err(_) => return Err(TurnError::Internal),
+        }
+        if text_turns(&conn, id).unwrap_or(0) > HISTORY_LIMIT {
+            if let Ok(Some((summary, _))) = summary(&conn, id) {
+                notes.push(summary_thread_note(&summary));
+            }
+        }
+    }
+    let thread_note = (!notes.is_empty()).then(|| notes.join("\n\n"));
+    if crate::api::daily_cap_reached(state, user_id) {
+        return Err(TurnError::DailyCap);
+    }
+    let permit = state.talk_gate.try_enter(user_id).map_err(TurnError::Busy)?;
+
+    let st = state.clone();
+    let username = username.to_string();
+    let said = message.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        // held here, not in the caller's future, so a cancelled request still
+        // holds the slot until the session it orphaned actually finishes
+        let _permit = permit;
+        let deps = SessionDeps {
+            db: &st.db,
+            config_dir: &st.config_dir,
+            data_dir: &st.data_dir,
+            llm: st.llm.as_ref(),
+            embeddings: st.embeddings.as_deref(),
+            task_scope: None,
+            inbox_source: None,
+            memory_source: None,
+            token_id: None,
+            thread_note,
+        };
+        let now = jiff::Timestamp::now();
+        let past = match conversation {
+            Some(id) => {
+                let conn = st.db();
+                history(&conn, id, HISTORY_LIMIT)?
+            }
+            None => Vec::new(),
+        };
+        // A brand-new conversation has no id yet, so its frames carry null
+        // until the reply hands the client one.
+        let seq = std::cell::Cell::new(0u64);
+        let on_event = |ev: AgentEvent| {
+            let n = seq.replace(seq.get() + 1);
+            st.hub.send(user_id, &crate::channels::ws::agent_frame(conversation, n, &ev));
+        };
+        let out = crate::agent::run_session_watched(
+            &deps,
+            user_id,
+            &username,
+            crate::tools::SessionKind::Talk,
+            now,
+            &past,
+            &said,
+            &on_event,
+        )?;
+        let reply = if out.reply.trim().is_empty() {
+            crate::EMPTY_REPLY_FALLBACK.to_string()
+        } else {
+            out.reply.clone()
+        };
+        let conn = st.db();
+        let conv_id = match conversation {
+            Some(id) => id,
+            None => create(&conn, user_id, &title_from(&said), now)?,
+        };
+        append_text(&conn, conv_id, "user", &said, now)?;
+        for s in &out.steps {
+            append_tool(&conn, conv_id, &s.name, &s.args, &s.result, s.is_error, now)?;
+        }
+        append_assistant(&conn, conv_id, &reply, &out.reasoning, out.thought_ms, now)?;
+        touch(&conn, conv_id, now)?;
+        mark_via(&conn, conv_id, via, now)?;
+        Ok::<_, anyhow::Error>(Turn {
+            conversation_id: conv_id,
+            reply,
+            steps: out.steps,
+            reasoning: out.reasoning,
+            thought_ms: out.thought_ms,
+        })
+    })
+    .await;
+    match result {
+        Ok(Ok(turn)) => {
+            if via == Via::Web && spoke_from == Via::Telegram {
+                mirror_to_telegram(state, user_id, turn.conversation_id, turn.reply.clone()).await;
+            }
+            Ok(turn)
+        }
+        Ok(Err(e)) => {
+            let conn = state.db();
+            let _ = crate::log::record(&conn, Some(user_id), "talk_error", &e.to_string());
+            Err(TurnError::Unavailable)
+        }
+        Err(e) => {
+            let conn = state.db();
+            let _ =
+                crate::log::record(&conn, Some(user_id), "talk_error", &format!("talk task failed: {e}"));
+            Err(TurnError::Internal)
+        }
+    }
+}
+
+/// A thread the user was last speaking to from Telegram is answered there as
+/// well as on the web, so the handover back to the app leaves nothing behind.
+async fn mirror_to_telegram(state: &AppState, user_id: i64, conversation_id: i64, reply: String) {
+    let Some(ch) = state.telegram.clone() else { return };
+    let db = state.db.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        let now = jiff::Timestamp::now();
+        match ch.send_to_user(user_id, &reply) {
+            Ok(()) => {
+                let conn = crate::db_guard(&db);
+                let _ = stamp_telegram(&conn, conversation_id, now);
+            }
+            Err(e) => {
+                let conn = crate::db_guard(&db);
+                let _ = crate::log::record_throttled(
+                    &conn,
+                    Some(user_id),
+                    "telegram_error",
+                    &e.to_string(),
+                    now,
+                    crate::log::ERROR_LOG_WINDOW_MINS,
+                );
+            }
+        }
+    })
+    .await;
 }
 
 #[cfg(test)]
