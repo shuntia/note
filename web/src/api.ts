@@ -2,6 +2,7 @@ import type {
   AdminGate,
   AdminLog,
   AdminStatus,
+  AdminTraces,
   AdminUser,
   AlertPatch,
   Allocation,
@@ -38,6 +39,7 @@ import type {
   Token,
   TokenCreated,
   TotpEnrolment,
+  TraceDetail,
   WorkSession,
 } from './types'
 import type {
@@ -367,6 +369,16 @@ export const admin = {
     const query = search.toString()
     return guarded<AdminLog>(`/log${query ? `?${query}` : ''}`)
   },
+  traces: (params: { limit?: number; kind?: string; outcome?: string; before_id?: number }) => {
+    const search = new URLSearchParams()
+    if (params.limit !== undefined) search.set('limit', String(params.limit))
+    if (params.kind) search.set('kind', params.kind)
+    if (params.outcome) search.set('outcome', params.outcome)
+    if (params.before_id !== undefined) search.set('before_id', String(params.before_id))
+    const query = search.toString()
+    return guarded<AdminTraces>(`/traces${query ? `?${query}` : ''}`)
+  },
+  trace: (id: number) => guarded<TraceDetail>(`/traces/${id}`),
   inspectUser: (id: number) => guarded<InspectUser>(`/inspect/users/${id}`),
   putConfig: (id: number, toml: string) =>
     guarded<void>(`/inspect/users/${id}/config`, {

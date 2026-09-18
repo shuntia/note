@@ -12,6 +12,9 @@ import type {
   Me,
   SqlResult,
   TalkMessage,
+  TraceCall,
+  TraceDetail,
+  TraceRow,
 } from '../types'
 
 type Notify = (msg: string, action?: ToastAction) => void
@@ -24,10 +27,29 @@ type Save = { kind: 'busy' | 'saved' | 'failed'; message?: string } | null
 
 const LOG_PAGE = 50
 
+const OUTCOMES = ['ok', 'max_turns', 'error'] as const
+
 const clock = (iso: string) =>
   new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 
 const stamp = (iso: string) => new Date(iso).toLocaleString()
+
+function duration(ms: number): string {
+  if (ms < 1000) return `${ms}ms`
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`
+  const seconds = Math.round(ms / 1000)
+  return `${Math.floor(seconds / 60)}m ${seconds % 60}s`
+}
+
+function pretty(raw: string): string {
+  const text = raw.trim()
+  if (!text) return ''
+  try {
+    return JSON.stringify(JSON.parse(text), null, 2)
+  } catch {
+    return raw
+  }
+}
 
 function uptime(seconds: number): string {
   const h = Math.floor(seconds / 3600)
@@ -206,6 +228,7 @@ export function Admin({ me, notify, onBack }: { me: Me; notify: Notify; onBack: 
       <StatusGroup expire={expire} />
       <UsersGroup me={me} notify={notify} expire={expire} />
       <LogGroup expire={expire} />
+      <TracesGroup expire={expire} />
       {gate.inspect && <InspectGroup expire={expire} />}
     </div>
   )
@@ -684,6 +707,251 @@ function LogGroup({ expire }: { expire: Expire }) {
         </div>
       </div>
     </Group>
+  )
+}
+
+const outcomeClass = (outcome: string) =>
+  outcome === 'error' ? 'trace-bad' : outcome === 'max_turns' ? 'trace-warn' : 'set-sub'
+
+function TracesGroup({ expire }: { expire: Expire }) {
+  const [rows, setRows] = useState<TraceRow[]>([])
+  const [kinds, setKinds] = useState<string[]>([])
+  const [kind, setKind] = useState('')
+  const [outcome, setOutcome] = useState('')
+  const [state, setState] = useState<'loading' | 'ready' | 'error'>('loading')
+  const [open, setOpen] = useState<number | null>(null)
+
+  const fetchPage = (before?: number) => {
+    setState('loading')
+    if (before === undefined) setOpen(null)
+    admin
+      .traces({
+        limit: LOG_PAGE,
+        kind: kind || undefined,
+        outcome: outcome || undefined,
+        before_id: before,
+      })
+      .then((page) => {
+        setRows((r) => (before === undefined ? page.rows : [...r, ...page.rows]))
+        setKinds(page.kinds)
+        setState('ready')
+      })
+      .catch((err) => {
+        if (expire(err)) return
+        // A server without the route has simply never recorded one.
+        if (err instanceof ApiError && err.status === 404) {
+          setRows([])
+          setState('ready')
+          return
+        }
+        setState('error')
+      })
+  }
+
+  useEffect(() => {
+    fetchPage()
+  }, [kind, outcome])
+
+  const last = rows[rows.length - 1]
+
+  return (
+    <Group head="SESSIONS">
+      <div className="set-fold-body">
+        <div className="trace-filters">
+          <select aria-label="Kind" value={kind} onChange={(e) => setKind(e.target.value)}>
+            <option value="">All kinds</option>
+            {kinds.map((k) => (
+              <option key={k} value={k}>
+                {k}
+              </option>
+            ))}
+          </select>
+          <select
+            aria-label="Outcome"
+            value={outcome}
+            onChange={(e) => setOutcome(e.target.value)}
+          >
+            <option value="">All outcomes</option>
+            {OUTCOMES.map((o) => (
+              <option key={o} value={o}>
+                {o}
+              </option>
+            ))}
+          </select>
+        </div>
+        {state === 'error' && (
+          <p className="set-sub">
+            The sessions didn't load.{' '}
+            <button className="set-link" onClick={() => fetchPage()}>
+              Retry
+            </button>
+          </p>
+        )}
+        {rows.length > 0 && (
+          <div className="log-scroll">
+            <table className="log-table admin-table trace-table">
+              <thead>
+                <tr>
+                  <th>time</th>
+                  <th>user</th>
+                  <th>kind</th>
+                  <th>outcome</th>
+                  <th>turns</th>
+                  <th>tools</th>
+                  <th>took</th>
+                  <th>error</th>
+                </tr>
+              </thead>
+              <tbody>
+                {/* the time button is the row's keyboard handle; its click bubbles to the row */}
+                {rows.map((row) => (
+                  <tr
+                    key={row.id}
+                    className={open === row.id ? 'trace-row on' : 'trace-row'}
+                    onClick={() => setOpen((o) => (o === row.id ? null : row.id))}
+                  >
+                    <td className="mono">
+                      <button
+                        className="trace-open"
+                        aria-expanded={open === row.id}
+                        title={stamp(row.ts)}
+                      >
+                        {row.ts.slice(11, 19)}
+                      </button>
+                    </td>
+                    <td>{row.username}</td>
+                    <td>{row.kind}</td>
+                    <td className={outcomeClass(row.outcome)}>{row.outcome}</td>
+                    <td className="mono">{row.turns}</td>
+                    <td className="mono">{row.tool_calls}</td>
+                    <td className="mono">{duration(row.duration_ms)}</td>
+                    <td className="set-sub trace-err" title={row.error ?? undefined}>
+                      {row.error}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        {state === 'ready' && rows.length === 0 && (
+          <p className="set-sub">No sessions recorded yet.</p>
+        )}
+        {open !== null && <TraceFold id={open} expire={expire} />}
+        <div className="set-acts">
+          <button
+            className="set-link"
+            disabled={state === 'loading' || !last}
+            onClick={() => last && fetchPage(last.id)}
+          >
+            Older
+          </button>
+          <button className="set-link" disabled={state === 'loading'} onClick={() => fetchPage()}>
+            Refresh
+          </button>
+        </div>
+      </div>
+    </Group>
+  )
+}
+
+function TraceFold({ id, expire }: { id: number; expire: Expire }) {
+  const [trace, setTrace] = useState<TraceDetail | 'error' | undefined>(undefined)
+
+  useEffect(() => {
+    setTrace(undefined)
+    admin
+      .trace(id)
+      .then(setTrace)
+      .catch((err) => {
+        if (!expire(err)) setTrace('error')
+      })
+  }, [id])
+
+  if (trace === undefined) return <p className="set-sub">Loading…</p>
+  if (trace === 'error') return <p className="set-sub">That session didn't load.</p>
+
+  const opening = trace.opening?.trim()
+  const reply = trace.reply?.trim()
+
+  return (
+    <div className="trace-detail">
+      <div className="trace-detail-head">
+        <span className="set-label">
+          {trace.kind} · {trace.username}
+        </span>
+        <span className="set-sub">{stamp(trace.ts)}</span>
+        <span className={outcomeClass(trace.outcome)}>{trace.outcome}</span>
+      </div>
+      {trace.error && (
+        <p className="pane-status bad" role="alert">
+          {trace.error}
+        </p>
+      )}
+      {opening && (
+        <div className="trace-text">
+          <span className="receipt-tool">opening</span>
+          <pre className="receipt-block">{opening}</pre>
+        </div>
+      )}
+      {trace.rounds.length === 0 && <p className="set-sub">No rounds recorded.</p>}
+      {trace.rounds.map((round, i) => (
+        <div className="trace-round" key={i}>
+          <div className="trace-round-head">
+            <span className="trace-round-n">Round {i + 1}</span>
+            <span className="set-sub">{duration(round.ms)}</span>
+          </div>
+          {round.error && <p className="pane-status bad">{round.error}</p>}
+          {round.calls?.map((call, j) => <Call key={j} call={call} />)}
+        </div>
+      ))}
+      {reply && (
+        <div className="trace-text">
+          <span className="receipt-tool">reply</span>
+          <pre className="receipt-block">{reply}</pre>
+        </div>
+      )}
+      {!trace.full && (
+        <p className="set-sub">Release build: arguments, results and text aren't recorded.</p>
+      )}
+    </div>
+  )
+}
+
+function Call({ call }: { call: TraceCall }) {
+  const [open, setOpen] = useState(false)
+  const args = pretty(call.args ?? '')
+  const result = pretty(call.result ?? '')
+  const body = Boolean(args || result)
+  const state = [call.is_error ? 'error' : '', open ? 'open' : ''].filter(Boolean).join(' ')
+
+  return (
+    <div className={`receipt ${state}`.trim()}>
+      <button
+        className="receipt-chip"
+        aria-expanded={body ? open : undefined}
+        disabled={!body}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <svg className="receipt-mark" viewBox="0 0 24 24" aria-hidden="true">
+          {call.is_error ? <path d="M6 6l12 12M18 6L6 18" /> : <path d="M5 12.5l4.5 4.5L19 7.5" />}
+        </svg>
+        <span className="receipt-text">{call.name}</span>
+        {call.error_kind && <span className="trace-kind">{call.error_kind}</span>}
+        <span className="trace-ms mono">{duration(call.ms)}</span>
+        {body && (
+          <svg className="receipt-chev" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M9 6l6 6-6 6" />
+          </svg>
+        )}
+      </button>
+      {open && body && (
+        <div className="receipt-body">
+          {args && <pre className="receipt-block">{args}</pre>}
+          {result && <pre className="receipt-block">{result}</pre>}
+        </div>
+      )}
+    </div>
   )
 }
 

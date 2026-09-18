@@ -268,6 +268,45 @@ export type AdminUser = {
 
 export type AdminLog = { rows: LogRow[]; kinds: string[] }
 
+export type TraceOutcome = 'ok' | 'max_turns' | 'error'
+
+// `error` carries the failure only when `outcome` is 'error'.
+export type TraceRow = {
+  id: number
+  ts: string
+  user_id: number
+  username: string
+  kind: string
+  outcome: TraceOutcome
+  turns: number
+  tool_calls: number
+  duration_ms: number
+  error: string | null
+}
+
+export type AdminTraces = { rows: TraceRow[]; kinds: string[] }
+
+// A release build drops `args` and `result`; the rest is always recorded.
+export type TraceCall = {
+  name: string
+  ms: number
+  is_error: boolean
+  error_kind: string | null
+  args?: string | null
+  result?: string | null
+}
+
+// A round whose provider call failed carries `error` and no calls.
+export type TraceRound = { ms: number; error: string | null; calls?: TraceCall[] }
+
+// `full` is false on a release build, where `opening` and `reply` are absent too.
+export type TraceDetail = TraceRow & {
+  rounds: TraceRound[]
+  opening?: string | null
+  reply?: string | null
+  full: boolean
+}
+
 export type InspectMemory = { id: string; category: string; summary: string; archived: boolean }
 
 export type InspectUser = {

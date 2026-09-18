@@ -1095,6 +1095,26 @@ textarea.mono { font-family: var(--mono); }
 .log-table tr:first-child td { border-top: none; }
 .log-table td:first-child { white-space: nowrap; }
 
+/* admin sessions: one agent run per row, its rounds and calls below */
+.trace-filters { display: flex; align-items: center; gap: 0.625rem; flex-wrap: wrap; }
+.trace-table { min-width: 34rem; }
+.trace-row { cursor: pointer; }
+.trace-row.on td { background: color-mix(in srgb, var(--sun) 14%, transparent); }
+.trace-open { padding: 0; border: 0; background: none; color: inherit; font: inherit; cursor: pointer; }
+.trace-bad { color: var(--clay); }
+.trace-warn { color: var(--sun-ink); }
+.trace-err { max-width: 18rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.trace-detail { width: 100%; display: flex; flex-direction: column; gap: 0.75rem; }
+.trace-detail-head { display: flex; align-items: baseline; gap: 0.625rem; flex-wrap: wrap; font-size: 0.85rem; }
+.trace-text { width: 100%; display: grid; gap: 4px; }
+.trace-round { width: 100%; display: flex; flex-direction: column; gap: 0.25rem; border-left: 2px solid var(--mist); padding-left: 0.75rem; }
+.trace-round-head { display: flex; align-items: baseline; gap: 0.5rem; }
+.trace-round-n { font-size: 0.78rem; letter-spacing: 0.06em; color: var(--quiet); }
+.trace-round .receipt { width: 100%; }
+.trace-kind { flex: none; font-size: 0.68rem; color: var(--rose); }
+.trace-ms { flex: none; margin-left: auto; font-size: 0.72rem; }
+.receipt-chip:disabled { cursor: default; }
+
 /* session counter */
 .now-counter {
   font-family: var(--display);
