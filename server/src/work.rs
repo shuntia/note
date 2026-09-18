@@ -342,6 +342,9 @@ pub fn end(
         "UPDATE work_sessions SET ended_at = ?1, outcome = ?2 WHERE id = ?3",
         (now.to_string(), outcome, session.id),
     )?;
+    if let Some(task_id) = session.task_id {
+        book_minutes(conn, task_id, session.elapsed_ms(now) / 60_000)?;
+    }
     let dropped = conn.execute(
         "UPDATE events SET status = 'dropped', decided_at = ?1
          WHERE work_session_id = ?2 AND status IN ('pending','snoozed')",
@@ -367,6 +370,20 @@ pub fn end(
         tx.commit()?;
     }
     Ok(Some(session.id))
+}
+
+/// Books the minutes worked against the task, and against its parent as well
+/// when the session ran a step.
+fn book_minutes(conn: &Connection, task_id: i64, minutes: i64) -> rusqlite::Result<()> {
+    if minutes <= 0 {
+        return Ok(());
+    }
+    conn.execute(
+        "UPDATE tasks SET actual_min = COALESCE(actual_min, 0) + ?2
+         WHERE id = ?1 OR id = (SELECT parent_id FROM tasks WHERE id = ?1)",
+        (task_id, minutes),
+    )?;
+    Ok(())
 }
 
 /// The one check that outlives the session, laid into its own thread. A refusal
@@ -735,6 +752,69 @@ mod tests {
 
     fn reload(conn: &Connection, uid: i64) -> Session {
         open(conn, uid).unwrap().unwrap()
+    }
+
+    fn actual(conn: &Connection, task_id: i64) -> Option<i64> {
+        conn.query_row("SELECT actual_min FROM tasks WHERE id = ?1", [task_id], |r| r.get(0))
+            .unwrap()
+    }
+
+    fn new_task(conn: &Connection, uid: i64, title: &str, parent: Option<i64>) -> i64 {
+        crate::tasks::create(
+            conn,
+            uid,
+            crate::tasks::NewTask { title: title.into(), parent_id: parent, ..Default::default() },
+            "manual",
+            crate::tasks::Actor::User,
+        )
+        .unwrap()
+        .id
+    }
+
+    fn work_on(conn: &Connection, tmp: &tempfile::TempDir, uid: i64, task_id: i64, until: &str) {
+        start(
+            conn,
+            tmp.path(),
+            uid,
+            "aki",
+            NewSession {
+                title: "read the chapter".into(),
+                task_id: Some(task_id),
+                planned_min: Some(30),
+                ..Default::default()
+            },
+            at("2026-09-17T09:00:00Z"),
+        )
+        .unwrap();
+        end_one(conn, tmp, uid, None, "done", until);
+    }
+
+    #[test]
+    fn the_minutes_worked_are_booked_against_the_task() {
+        let (conn, tmp, uid) = env();
+        let task = new_task(&conn, uid, "the chapter", None);
+        assert!(actual(&conn, task).is_none());
+        work_on(&conn, &tmp, uid, task, "2026-09-17T09:40:00Z");
+        assert_eq!(actual(&conn, task), Some(40));
+        work_on(&conn, &tmp, uid, task, "2026-09-17T09:15:00Z");
+        assert_eq!(actual(&conn, task), Some(55), "a second sitting adds to the first");
+    }
+
+    #[test]
+    fn a_step_books_its_minutes_to_the_task_over_it_as_well() {
+        let (conn, tmp, uid) = env();
+        let essay = new_task(&conn, uid, "the essay", None);
+        let outline = new_task(&conn, uid, "outline", Some(essay));
+        work_on(&conn, &tmp, uid, outline, "2026-09-17T09:20:00Z");
+        assert_eq!((actual(&conn, outline), actual(&conn, essay)), (Some(20), Some(20)));
+    }
+
+    #[test]
+    fn a_session_shorter_than_a_minute_books_nothing() {
+        let (conn, tmp, uid) = env();
+        let task = new_task(&conn, uid, "the chapter", None);
+        work_on(&conn, &tmp, uid, task, "2026-09-17T09:00:30Z");
+        assert!(actual(&conn, task).is_none());
     }
 
     #[test]

@@ -427,6 +427,18 @@ const MIGRATIONS: &[&str] = &[
     CREATE UNIQUE INDEX idx_calendar_external
         ON calendar_entries(user_id, external_id) WHERE external_id IS NOT NULL;
     ",
+    // v31
+    "
+    ALTER TABLE tasks ADD COLUMN actual_min INTEGER;
+    CREATE TABLE learning (
+        user_id INTEGER NOT NULL REFERENCES users(id),
+        key TEXT NOT NULL,
+        value REAL NOT NULL,
+        sample INTEGER NOT NULL,
+        computed_at TEXT NOT NULL,
+        PRIMARY KEY (user_id, key)
+    );
+    ",
 ];
 
 pub fn open(path: &Path) -> Result<Connection> {
@@ -1240,6 +1252,42 @@ mod tests {
         crate::auth::create_user(&conn, "bo", "pw", false).unwrap();
         entry(2, "theirs", "gcal:c_8f3a:t:busy")
             .expect("the same external id in another account is a different entry");
+    }
+
+    #[test]
+    fn v31_counts_real_minutes_and_holds_what_was_learned() {
+        let conn = open_memory().unwrap();
+        let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, MIGRATIONS.len() as i64);
+        conn.execute(
+            "INSERT INTO users (username, pass_hash, role) VALUES ('a','h','member')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tasks (user_id, title, created_at, updated_at) VALUES (1, 't', 'x', 'x')",
+            [],
+        )
+        .unwrap();
+        let actual: Option<i64> =
+            conn.query_row("SELECT actual_min FROM tasks WHERE id = 1", [], |r| r.get(0)).unwrap();
+        assert!(actual.is_none(), "a task nobody has worked on counts nothing yet");
+
+        conn.execute(
+            "INSERT INTO learning (user_id, key, value, sample, computed_at)
+             VALUES (1, 'plan_factor', 1.4, 9, '2026-09-18T03:00:00Z')",
+            [],
+        )
+        .unwrap();
+        assert!(
+            conn.execute(
+                "INSERT INTO learning (user_id, key, value, sample, computed_at)
+                 VALUES (1, 'plan_factor', 1.1, 4, '2026-09-19T03:00:00Z')",
+                [],
+            )
+            .is_err(),
+            "one user holds one value per key"
+        );
     }
 
     #[test]

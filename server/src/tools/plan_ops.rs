@@ -77,7 +77,9 @@ fn plan_row(conn: &Connection, ctx: &ToolCtx, date: jiff::civil::Date) -> Result
     crate::plan::generate(conn, ctx.user_id, &template, date).map_err(internal)
 }
 
+/// Each task as long as the nightly learned it really runs.
 fn resolve_tasks(conn: &Connection, ctx: &ToolCtx, ids: &[i64]) -> Result<Vec<Planned>, ToolError> {
+    let factor = crate::learn::plan_factor(conn, ctx.user_id).map_err(internal)?;
     ids.iter()
         .map(|id| {
             let Some(task) = crate::tasks::get(conn, ctx.user_id, *id).map_err(internal)? else {
@@ -86,7 +88,10 @@ fn resolve_tasks(conn: &Connection, ctx: &ToolCtx, ids: &[i64]) -> Result<Vec<Pl
             Ok(Planned {
                 id: task.id,
                 title: task.title,
-                minutes: task.duration_min.map_or(DEFAULT_BLOCK_MIN, i64::from),
+                minutes: crate::learn::stretch(
+                    task.duration_min.map_or(DEFAULT_BLOCK_MIN, i64::from),
+                    factor,
+                ),
             })
         })
         .collect()

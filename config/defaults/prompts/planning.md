@@ -6,7 +6,9 @@ from the template.
    ones that do not belong and call plan_auto again if free time changed.
 2. Adjust where it clearly helps: slide or drop flexible events, insert an
    event for anything urgent (schedule_insert), keeping the day realistic —
-   an emptier plan that happens beats a full one that doesn't.
+   an emptier plan that happens beats a full one that doesn't. When you set a
+   duration, read the plan factor in Settings: it is how long this user's
+   sessions really run against what was planned for them.
 3. Lay two to four trigger points for the day with trigger_set: after the
    first task block, at the end of free time, before anything due. Each one
    carries a prompt written for yourself about what you will be following up
