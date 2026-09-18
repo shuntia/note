@@ -122,6 +122,8 @@ fn arb_args() -> impl Strategy<Value = String> {
         Just(r#"{"text":"anything at all"}"#.to_string()),
         Just(format!(r#"{{"title":"{}"}}"#, "x".repeat(MAX_ARGS_BYTES))),
         Just(r#"{"title":"a real task"}"#.to_string()),
+        Just(r#"{"title":"a real task","notify":"chat"}"#.to_string()),
+        Just(r#"{"task_id":1,"notify":"whenever"}"#.to_string()),
         Just(r#"{"event_id":1,"minutes":10}"#.to_string()),
         Just(r#"{"op":"add","category":"semantic","summary":"s","body":"b"}"#.to_string()),
     ]
@@ -136,6 +138,7 @@ fn arb_call() -> impl Strategy<Value = (String, String)> {
         1 => (arb_name(), arb_args()),
         1 => prop_oneof![
             good("task_create", r#"{"title":"a real task"}"#),
+            good("task_create", r#"{"title":"a quiet task","notify":"none"}"#),
             good("memory_write", r#"{"op":"add","category":"semantic","summary":"s","body":"b"}"#),
             good("memory_query", r#"{"query":"s"}"#),
             good("schedule_snooze", r#"{"event_id":1,"minutes":10}"#),

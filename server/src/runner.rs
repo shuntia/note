@@ -219,6 +219,93 @@ pub fn fire_due(
     Ok(fired)
 }
 
+/// A block whose task asks to be announced, at the moment the block starts.
+#[derive(Clone, Debug)]
+pub struct BlockStart {
+    pub event_id: i64,
+    pub user_id: i64,
+    pub username: String,
+    pub date: String,
+    /// The task the block holds, and when the block gives it back.
+    pub task: String,
+    pub end_wall_time: String,
+    pub notify: String,
+}
+
+/// Fires every block that has arrived and holds a task with something to say.
+/// A quiet window holds a block start exactly as it holds a routine: the start
+/// moves to the window's end and lands there.
+pub fn block_starts(
+    conn: &Connection,
+    config_dir: &Path,
+    now: jiff::Timestamp,
+) -> Result<Vec<BlockStart>> {
+    let mut stmt = conn.prepare(
+        "SELECT e.id, p.user_id, u.username, u.category, p.date, e.wall_time,
+                e.end_wall_time, t.title, t.notify
+         FROM events e
+         JOIN plans p ON p.id = e.plan_id
+         JOIN users u ON u.id = p.user_id
+         JOIN event_tasks et ON et.event_id = e.id
+         JOIN tasks t ON t.id = et.task_id
+         WHERE e.status = 'pending' AND e.end_wall_time IS NOT NULL AND t.notify != 'none'",
+    )?;
+    let waiting: Vec<(Candidate, String, String, String)> = stmt
+        .query_map([], |r| {
+            Ok((
+                Candidate {
+                    event_id: r.get(0)?,
+                    user_id: r.get(1)?,
+                    username: r.get(2)?,
+                    category: r.get(3)?,
+                    date: r.get(4)?,
+                    wall_time: r.get(5)?,
+                    kind: String::new(),
+                    channel: String::new(),
+                    message: String::new(),
+                },
+                r.get(6)?,
+                r.get(7)?,
+                r.get(8)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    drop(stmt);
+
+    let mut started = Vec::new();
+    let mut tz_cache = HashMap::new();
+    for (c, end_wall_time, task, notify) in waiting {
+        let rt = user_runtime(conn, config_dir, &c, &mut tz_cache, now)?;
+        if !rt.features.checkins {
+            continue;
+        }
+        let Ok(due) = due_at(&rt.tz, &c) else { continue };
+        if due > now || defer_while_quiet(conn, &c, &rt.tz, now)? {
+            continue;
+        }
+        conn.execute(
+            "UPDATE events SET status='fired', fired_at=?1 WHERE id=?2",
+            (now.to_string(), c.event_id),
+        )?;
+        crate::log::record(
+            conn,
+            Some(c.user_id),
+            "block_started",
+            &format!("event {} holds {task:?} until {end_wall_time} ({notify})", c.event_id),
+        )?;
+        started.push(BlockStart {
+            event_id: c.event_id,
+            user_id: c.user_id,
+            username: c.username,
+            date: c.date,
+            task,
+            end_wall_time,
+            notify,
+        });
+    }
+    Ok(started)
+}
+
 /// Expired sessions only ever accumulate; sweeping them here keeps logout and
 /// expiry cheap without a dedicated task. The comparison is lexicographic on
 /// RFC 3339 UTC strings, whose fractional-second part varies in width, so it is
@@ -235,7 +322,7 @@ pub fn gc_sessions(conn: &Connection, now: jiff::Timestamp) -> Result<()> {
 pub fn sweep_once(state: &AppState) {
     let now = jiff::Timestamp::now();
     state.login_limiter.sweep(now);
-    let fired = {
+    let (fired, started, flips) = {
         let conn = state.db();
         if let Err(e) = gc_sessions(&conn, now) {
             let _ = crate::log::record_throttled(
@@ -247,21 +334,45 @@ pub fn sweep_once(state: &AppState) {
                 crate::log::ERROR_LOG_WINDOW_MINS,
             );
         }
-        match fire_due(&conn, &state.config_dir, now) {
-            Ok(f) => f,
-            Err(e) => {
-                let _ = crate::log::record_throttled(
-                    &conn,
-                    None,
-                    "runner_error",
-                    &e.to_string(),
-                    now,
-                    crate::log::ERROR_LOG_WINDOW_MINS,
-                );
-                Vec::new()
-            }
-        }
+        let note = |e: anyhow::Error| {
+            let _ = crate::log::record_throttled(
+                &conn,
+                None,
+                "runner_error",
+                &e.to_string(),
+                now,
+                crate::log::ERROR_LOG_WINDOW_MINS,
+            );
+        };
+        let fired = fire_due(&conn, &state.config_dir, now).unwrap_or_else(|e| {
+            note(e);
+            Vec::new()
+        });
+        let started = block_starts(&conn, &state.config_dir, now).unwrap_or_else(|e| {
+            note(e);
+            Vec::new()
+        });
+        let flips = crate::work::tick(&conn, &state.config_dir, now).unwrap_or_else(|e| {
+            note(e);
+            Vec::new()
+        });
+        (fired, started, flips)
     };
+    for start in &started {
+        crate::channels::deliver_block_start(&state.db, &state.channels, &state.hub, start);
+    }
+    for flip in &flips {
+        if let Some(msg) = &flip.message {
+            crate::channels::deliver_via(
+                &state.db,
+                &state.channels,
+                flip.user_id,
+                &flip.username,
+                msg,
+            );
+        }
+        state.hub.broadcast_changed(flip.user_id);
+    }
     for ev in &fired {
         // A trigger has nothing canned to deliver: it runs a session first, and
         // that session decides whether anything is sent at all.

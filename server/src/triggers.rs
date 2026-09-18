@@ -204,6 +204,10 @@ pub struct Lay<'a> {
     pub date: jiff::civil::Date,
     pub cancel: Option<Cancel>,
     pub conversation_id: Option<i64>,
+    /// The session this check belongs to, named by the server for a session
+    /// that is already closed. It carries the session's exemptions: no lead
+    /// time, and no call on the day's budget.
+    pub work_session_id: Option<i64>,
     pub now: jiff::Timestamp,
 }
 
@@ -249,11 +253,12 @@ pub fn lay(conn: &Connection, lay: &Lay) -> Result<Laid, Refusal> {
     if lead < 0 {
         return Err(Refusal::Past { at: wall });
     }
-    if lead < MIN_LEAD_MIN {
+    if lay.work_session_id.is_none() && lead < MIN_LEAD_MIN {
         return Err(Refusal::TooSoon { minutes: lead });
     }
-    match &session {
-        Some(s) => {
+    match (&lay.work_session_id, &session) {
+        (Some(_), _) => {}
+        (None, Some(s)) => {
             if let Some(limit) = overrun_lead(s, lay.now) {
                 if lead > limit {
                     return Err(Refusal::Rejected(format!(
@@ -264,7 +269,7 @@ pub fn lay(conn: &Connection, lay: &Lay) -> Result<Laid, Refusal> {
                 }
             }
         }
-        None => {
+        (None, None) => {
             let allowance = allowance(conn, lay.config_dir, lay.username, lay.user_id, date)
                 .map_err(internal)?;
             let spent = spent(conn, lay.user_id, date).map_err(internal)?;
@@ -298,7 +303,7 @@ pub fn lay(conn: &Connection, lay: &Lay) -> Result<Laid, Refusal> {
         prompt,
         lay.cancel,
         lay.conversation_id,
-        session.as_ref().map(|s| s.id),
+        lay.work_session_id.or_else(|| session.as_ref().map(|s| s.id)),
         lay.now,
     )
     .map_err(internal)?;
@@ -441,19 +446,23 @@ pub fn situation(
         None => s.push_str(&format!("Meant for {}.\n", ev.wall_time)),
     }
     if let Some(id) = ev.work_session_id {
-        let row: Option<(String, Option<i64>, String)> = conn
+        let row: Option<(String, Option<i64>, String, String, String, i64)> = conn
             .query_row(
-                "SELECT title, planned_min, started_at FROM work_sessions WHERE id = ?1",
+                "SELECT title, planned_min, started_at, mode, phase, round
+                 FROM work_sessions WHERE id = ?1",
                 [id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
             )
             .optional()
             .ok()
             .flatten();
-        if let Some((title, planned, started)) = row {
+        if let Some((title, planned, started, mode, phase, round)) = row {
             s.push_str(&format!("Work session: {title:?}, started {}", clock(&started)));
             if let Some(min) = planned {
                 s.push_str(&format!(", planned {min} min"));
+            }
+            if mode == "pomodoro" {
+                s.push_str(&format!(", in the {phase} of round {round}"));
             }
             let done = steps_done_since(conn, user_id, id, &started).unwrap_or(0);
             s.push_str(&format!(", {done} step{} done since the last check.\n",
@@ -698,6 +707,7 @@ mod tests {
             date: date(),
             cancel: None,
             conversation_id: None,
+            work_session_id: None,
             now: at("2026-09-17T09:00:00Z"),
         }
     }

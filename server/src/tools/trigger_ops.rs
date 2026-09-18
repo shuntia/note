@@ -120,6 +120,7 @@ fn lay(
             date: target_date(ctx, kind, now),
             cancel,
             conversation_id: thread,
+            work_session_id: None,
             now,
         },
     )

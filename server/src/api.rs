@@ -59,6 +59,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/sessions", post(work_session_start))
         .route("/api/sessions/open", get(work_session_open))
         .route("/api/sessions/{id}/end", post(work_session_end))
+        .route("/api/sessions/{id}/pause", post(work_session_pause))
+        .route("/api/sessions/{id}/resume", post(work_session_resume))
+        .route("/api/sessions/{id}/step", post(work_session_step))
+        .route("/api/sessions/{id}/skip_break", post(work_session_skip_break))
         .route("/api/ws", get(ws_connect))
         .route("/api/push/subscribe", post(push_subscribe))
         .route("/api/push/unsubscribe", post(push_unsubscribe))
@@ -1772,12 +1776,27 @@ struct NewWorkSession {
     title: String,
     #[serde(default)]
     planned_min: Option<i64>,
+    #[serde(default)]
+    step_index: Option<i64>,
+    #[serde(default)]
+    step_count: Option<i64>,
+    #[serde(default)]
+    step_name: Option<String>,
+    #[serde(default)]
+    notes: Option<String>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EndWorkSession {
     outcome: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SessionStep {
+    step_index: i64,
+    step_name: String,
 }
 
 /// Opens a work session, stopping whatever was still running. The server lays
@@ -1799,6 +1818,10 @@ async fn work_session_start(
             event_id: req.event_id,
             title: req.title,
             planned_min: req.planned_min,
+            step_index: req.step_index,
+            step_count: req.step_count,
+            step_name: req.step_name,
+            notes: req.notes,
         },
         jiff::Timestamp::now(),
     );
@@ -1824,10 +1847,83 @@ async fn work_session_end(
         return unprocessable_field("outcome", "must be done or stopped");
     }
     let conn = state.db();
-    match crate::work::end(&conn, user.id, Some(id), &req.outcome, jiff::Timestamp::now()) {
+    let ended = crate::work::end(
+        &conn,
+        &state.config_dir,
+        user.id,
+        &user.username,
+        Some(id),
+        &req.outcome,
+        jiff::Timestamp::now(),
+    );
+    match ended {
         Ok(ended) => Json(serde_json::json!({ "ended": ended })).into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
+}
+
+/// The four ways a client moves the session the server holds. Each answers with
+/// the whole session, so the face repaints from one reply, and a stale id is a
+/// 404 rather than a silent write to whatever is running now.
+fn session_reply(
+    moved: rusqlite::Result<Option<crate::work::Session>>,
+) -> axum::response::Response {
+    match moved {
+        Ok(Some(session)) => Json(session).into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn work_session_pause(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    let conn = state.db();
+    session_reply(crate::work::pause(&conn, user.id, id, jiff::Timestamp::now()))
+}
+
+async fn work_session_resume(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    let conn = state.db();
+    session_reply(crate::work::resume(&conn, user.id, id, jiff::Timestamp::now()))
+}
+
+async fn work_session_step(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(req): Json<SessionStep>,
+) -> impl IntoResponse {
+    if req.step_index < 0 {
+        return unprocessable_field("step_index", "must not be negative");
+    }
+    if req.step_name.len() > crate::work::MAX_TITLE_BYTES {
+        return unprocessable_field(
+            "step_name",
+            &format!("must be at most {} bytes", crate::work::MAX_TITLE_BYTES),
+        );
+    }
+    let conn = state.db();
+    session_reply(crate::work::set_step(&conn, user.id, id, req.step_index, &req.step_name))
+}
+
+async fn work_session_skip_break(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    let conn = state.db();
+    let skipped = crate::work::skip_break(&conn, user.id, id, jiff::Timestamp::now());
+    drop(conn);
+    if matches!(skipped, Ok(Some(_))) {
+        state.hub.broadcast_changed(user.id);
+    }
+    session_reply(skipped)
 }
 
 async fn work_session_open(user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {

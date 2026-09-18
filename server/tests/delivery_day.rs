@@ -131,6 +131,7 @@ fn delivery_reaches_the_user_through_the_ladder() {
                 date: "2026-08-31".parse().unwrap(),
                 cancel: None,
                 conversation_id: None,
+                work_session_id: None,
                 now: nightly_now,
             },
         )
@@ -251,9 +252,71 @@ fn delivery_reaches_the_user_through_the_ladder() {
         assert_eq!(n, 1);
     }
 
+    // --- 17:01 JST: the evening block starts, and the task it holds says so.
+    push.set_fail(false);
+    let evening_block: jiff::Timestamp = "2026-08-31T08:01:00Z".parse().unwrap(); // 17:01 JST
+    let started = {
+        let conn = db.lock().unwrap();
+        note_server::runner::block_starts(&conn, tmp.path(), evening_block).unwrap()
+    };
+    assert_eq!(started.len(), 1);
+    assert_eq!(started[0].notify, "notify");
+    for start in &started {
+        note_server::channels::deliver_block_start(&db, &ladder, &hub, start);
+    }
+    let seen = push.seen();
+    let last = seen.last().unwrap();
+    assert_eq!(last.1.title, "Starting now");
+    assert_eq!(last.1.body, "read the chapter · until 17:45");
+    {
+        let conn = db.lock().unwrap();
+        let logged: i64 = conn
+            .query_row("SELECT COUNT(*) FROM event_log WHERE kind='block_started'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(logged, 1);
+    }
+    let again = {
+        let conn = db.lock().unwrap();
+        note_server::runner::block_starts(&conn, tmp.path(), evening_block).unwrap()
+    };
+    assert!(again.is_empty(), "a block starts once");
+
+    // --- 17:10 JST: the user works it in rounds, and the first break is told.
+    write(
+        "users/aki/user.toml",
+        "pomodoro_enabled = true\npomodoro_work_min = 25\npomodoro_break_min = 5\n",
+    );
+    let sat_down: jiff::Timestamp = "2026-08-31T08:10:00Z".parse().unwrap(); // 17:10 JST
+    let session = {
+        let conn = db.lock().unwrap();
+        note_server::work::start(
+            &conn,
+            tmp.path(),
+            uid,
+            "aki",
+            note_server::work::NewSession {
+                title: "read the chapter".into(),
+                ..Default::default()
+            },
+            sat_down,
+        )
+        .unwrap()
+    };
+    assert_eq!(session.mode, "pomodoro");
+    let round_over: jiff::Timestamp = "2026-08-31T08:36:00Z".parse().unwrap(); // 17:36 JST
+    let flips = {
+        let conn = db.lock().unwrap();
+        note_server::work::tick(&conn, tmp.path(), round_over).unwrap()
+    };
+    assert_eq!(flips.len(), 1);
+    let msg = flips[0].message.as_ref().unwrap();
+    assert_eq!(msg.title, "Break");
+    assert_eq!(msg.body, "5 min. Round 1 of read the chapter done.");
+    channels::deliver_via(&db, &ladder, flips[0].user_id, &flips[0].username, msg);
+    assert_eq!(push.seen().last().unwrap().1.body, "5 min. Round 1 of read the chapter done.");
+
     // --- 18:01 JST: the trigger point fires a session of its own, and what it
     // decides to say is what reaches the user.
-    push.set_fail(false);
     let evening: jiff::Timestamp = "2026-08-31T09:01:00Z".parse().unwrap(); // 18:01 JST
     let fired = {
         let conn = db.lock().unwrap();
