@@ -1,6 +1,6 @@
 import { gsap } from 'gsap'
 import { ScrollTrigger } from 'gsap/ScrollTrigger'
-import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { api, ApiError } from '../api'
 import type { ToastAction } from '../app'
 import { DayLine, minutesOf } from '../dayline'
@@ -134,7 +134,7 @@ export function Home({
   refresh,
   openNow,
   mobile,
-  tabs,
+  armed,
 }: {
   session: FocusSession | null
   setSession: (s: FocusSession | null) => void
@@ -143,7 +143,9 @@ export function Home({
   refresh: number
   openNow: (s: FocusSession) => void
   mobile: boolean
-  tabs: ReactNode
+  // The shell holds the pin off while a view transition is under way: the layer is
+  // transformed then, which no fixed position inside it would survive.
+  armed: boolean
 }) {
   const [events, setEvents] = useState<PlanEvent[] | null>(null)
   const [beat, tick] = useState(0)
@@ -544,11 +546,11 @@ export function Home({
 
   const distance = mobile ? PIN_MOBILE : PIN_DESKTOP
   useLayoutEffect(() => {
-    if (!motion) return
+    if (!motion || !armed) return
     const el = stage.current
     const root = home.current
     if (!el || !root) return
-    const topbar = mobile ? null : document.querySelector<HTMLElement>('.shell > .topbar')
+    const topbar = mobile ? null : document.querySelector<HTMLElement>('.shell .topbar')
     const trigger = scrub(
       () => tl.current,
       { trigger: el, start: topbar ? 'top 64px' : 'top top', end: `+=${distance}`, pin: true, pinSpacing: true, anticipatePin: 1 },
@@ -587,7 +589,7 @@ export function Home({
       trigger.kill()
       st.current = null
     }
-  }, [motion, mobile, distance])
+  }, [motion, mobile, distance, armed])
 
   // Every landing spot is measured from rendered text, so the timeline is rebuilt
   // whenever what is on the face or where it lands could have moved.
@@ -634,7 +636,7 @@ export function Home({
       const from = (targets: HTMLElement[], vars: gsap.TweenVars, at: number) => {
         if (targets.length) timeline.from(targets, vars, at)
       }
-      const tabsEl = home.current?.querySelectorAll<HTMLElement>('.tabs') ?? []
+      const tabsEl = document.querySelectorAll<HTMLElement>('.shell > .tabs')
       if (compactLanding) {
         travel(timeline, q('.face-big .gauge-ring'), q('.home-face.compact .gauge-ring'), { mode: 'box' })
         travel(timeline, q('.face-big .gauge-num'), q('.home-face.compact .gauge-num'), { mode: inSession ? 'box' : 'text' })
@@ -796,7 +798,6 @@ export function Home({
           <CalendarSection notify={notify} refresh={refresh} onChanged={onChanged} />
         </section>
       </section>
-      {mobile && tabs}
     </div>
   )
 }

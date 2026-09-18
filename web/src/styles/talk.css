@@ -4,7 +4,7 @@
 
 /* the shell is a viewport tall while the thread is up, so the thread scrolls
    inside its pane and the composer never leaves the screen */
-.shell:has(> .view-talk) { height: 100dvh; }
+.shell:has(> .view-talk:not(.leaving)) { height: 100dvh; }
 
 /* the head floats over the top of the thread, on the column's own right edge,
    and holds the pulse alone */

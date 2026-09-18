@@ -1,0 +1,18 @@
+/* ── the shell's turn: one view handing the screen to the next ────
+   Both views are in the tree while the turn lasts. The one leaving is held at the
+   pixels it had, out of the flow and out of reach, so the one arriving takes the
+   layout under it and the sky behind them never blinks. */
+.view.leaving { z-index: 4; pointer-events: none; }
+
+/* the tab bar belongs to the shell at every view, so the mark can cross between
+   them; on Home it waits for the morph to say where it sits */
+.shell:has(.home.motion:not(.morph-ready)) > .tabs { visibility: hidden; }
+
+/* ── the mark behind the current view's name ──────────────────────
+   One element per bar, moved by the shell rather than restyled per button, so the
+   change of view reads as the mark travelling to it. */
+.topnav, .tabs { position: relative; }
+.topnav button, .tabs button { position: relative; z-index: 1; }
+.nav-glide { position: absolute; left: 0; z-index: 0; pointer-events: none; }
+.topnav .nav-glide { top: 0; bottom: 0; border-radius: 999px; background: var(--haze-strong); }
+.tabs .nav-glide { top: 8px; bottom: 18px; border-radius: 16px; background: var(--track); }
