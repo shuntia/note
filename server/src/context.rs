@@ -220,7 +220,7 @@ pub fn assemble(conn: &Connection, config_dir: &Path, user_id: i64, username: &s
         &ucfg,
         &tz_label,
         ucfg.features(&category),
-        crate::memory::live_count(conn, username).unwrap_or(0),
+        crate::memory::live_count_by_category(conn, username).unwrap_or_default(),
         (
             crate::triggers::spent(conn, user_id, today).unwrap_or(0),
             crate::triggers::allowance(conn, config_dir, username, user_id, today)
@@ -589,14 +589,21 @@ fn settings_section(
     cfg: &crate::config::UserConfig,
     tz_label: &str,
     features: crate::config::Features,
-    memory_facts: i64,
+    by_category: [i64; crate::memory::CATEGORIES.len()],
     triggers: (u32, u32),
 ) -> String {
     let on = |b: bool| if b { "on" } else { "off" };
     let (spent, allowance) = triggers;
+    let memory_facts: i64 = by_category.iter().sum();
+    let split = crate::memory::CATEGORIES
+        .iter()
+        .zip(by_category)
+        .map(|(c, n)| format!("{n} {c}"))
+        .collect::<Vec<_>>()
+        .join(", ");
     format!(
         "# Settings\n\n{} | {tz_label} | nightly_time {} | template {} | counter {} | nightly {} | checkins {}\n\
-         Memory: {memory_facts} fact{}\n\
+         Memory: {memory_facts} fact{} ({split})\n\
          Trigger points you may lay today: {spent} of {allowance} used\n\n",
         cfg.display_name,
         cfg.nightly_time,
