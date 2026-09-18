@@ -23,6 +23,7 @@ pub mod security;
 pub mod summaries;
 pub mod talk;
 pub mod tasks;
+pub mod telegram;
 pub mod tokens;
 pub mod templates;
 pub mod tools;
