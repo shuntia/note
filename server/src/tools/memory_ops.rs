@@ -92,6 +92,9 @@ pub struct WriteArgs {
     pub category: Option<Category>,
     pub summary: String,
     pub body: String,
+    /// `YYYY-MM-DD`, after which the nightly sweep archives the fact.
+    #[serde(default)]
+    pub until: Option<String>,
 }
 
 pub fn write(
@@ -105,6 +108,11 @@ pub fn write(
         )));
     }
     super::check_text("body", &args.body)?;
+    if let Some(u) = &args.until {
+        if u.parse::<jiff::civil::Date>().is_err() {
+            return Err(ToolError::rejected(format!("until {u:?} is not a YYYY-MM-DD date")));
+        }
+    }
     if let Some(err) = &ctx.vectors.error {
         let _ = crate::log::record(conn, None, "memory_embed_error", &format!("write: {err}"));
     }
@@ -124,13 +132,14 @@ pub fn write(
                 .category
                 .as_ref()
                 .ok_or_else(|| ToolError::rejected("add requires a category"))?;
-            let id = crate::memory::add(
+            let id = crate::memory::add_until(
                 conn,
                 ctx.data_dir,
                 ctx.username,
                 cat.as_str(),
                 &args.summary,
                 &args.body,
+                args.until.as_deref(),
                 ctx.vectors.content.as_deref(),
             )
             .map_err(|e| ToolError::internal(e.to_string()))?;
@@ -270,6 +279,34 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM memory_sources", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 2, "a session with no source records nothing");
+    }
+
+    #[test]
+    fn an_added_fact_can_carry_the_date_it_stops_mattering() {
+        let (conn, tmp) = env();
+        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Harvest, "memory_write",
+            r#"{"op":"add","category":"episodic","summary":"Day 2026-09-17: the essay went in","body":"an hour of drafting","until":"2026-12-16"}"#).unwrap();
+        let id = out["id"].as_str().unwrap();
+        let f = crate::memory::read(tmp.path(), "aki", id).unwrap().unwrap();
+        assert_eq!(f.until.as_deref(), Some("2026-12-16"));
+        assert_eq!(f.category, "episodic");
+
+        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Harvest, "memory_write",
+            r#"{"op":"add","category":"semantic","summary":"mira lives next door","body":"since september"}"#).unwrap();
+        assert!(crate::memory::read(tmp.path(), "aki", out["id"].as_str().unwrap())
+            .unwrap()
+            .unwrap()
+            .until
+            .is_none());
+
+        for bad in ["friday", "2026-13-01"] {
+            let args = format!(
+                r#"{{"op":"add","category":"episodic","summary":"s","body":"b","until":"{bad}"}}"#
+            );
+            let e = dispatch(&conn, &ctx(&tmp), SessionKind::Harvest, "memory_write", &args)
+                .unwrap_err();
+            assert_eq!(e.kind, "rejected", "{bad}");
+        }
     }
 
     #[test]

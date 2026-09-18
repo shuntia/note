@@ -84,6 +84,8 @@ export type FlattenResult = { task: TaskNode; removed: Task[] }
 
 export type Debrief = { date: string; content: string }
 
+export type Review = { week_start: string; content: string }
+
 // Where the user last spoke to the thread from; Note answers there.
 export type ConversationVia = 'web' | 'telegram'
 

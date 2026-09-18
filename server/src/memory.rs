@@ -505,6 +505,23 @@ pub fn live_count(conn: &Connection, user: &str) -> Result<i64> {
     )?)
 }
 
+/// The same count split by category, in `CATEGORIES` order, for a surface that
+/// says what kind of memory a user is carrying.
+pub fn live_count_by_category(conn: &Connection, user: &str) -> Result<[i64; CATEGORIES.len()]> {
+    let mut stmt = conn.prepare(
+        "SELECT category, COUNT(*) FROM memory_index
+         WHERE user = ?1 AND archived = 0 GROUP BY category",
+    )?;
+    let mut out = [0i64; CATEGORIES.len()];
+    for row in stmt.query_map([user], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))? {
+        let (category, n) = row?;
+        if let Some(i) = CATEGORIES.iter().position(|c| *c == category) {
+            out[i] = n;
+        }
+    }
+    Ok(out)
+}
+
 /// Newest-first browse over a user's live facts, with an optional exact
 /// category filter — the no-search counterpart to `query`.
 pub fn list(

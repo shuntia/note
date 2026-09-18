@@ -69,6 +69,20 @@ pub fn run_for_user(
             crate::log::ERROR_LOG_WINDOW_MINS,
         );
     }
+    // Monday's run looks back before it looks forward, so the planning session
+    // already has the week's letter in memory.
+    if let Err(e) = crate::review::run_for_user(deps, user_id, username, local.time_zone(), date, now)
+    {
+        let conn = crate::db_guard(deps.db);
+        let _ = crate::log::record_throttled(
+            &conn,
+            Some(user_id),
+            "review_error",
+            &e.to_string(),
+            now,
+            crate::log::ERROR_LOG_WINDOW_MINS,
+        );
+    }
     {
         let conn = crate::db_guard(deps.db);
         if let Err(e) = crate::learn::run_for_user(&conn, user_id, now) {
@@ -86,6 +100,16 @@ pub fn run_for_user(
         let conn = crate::db_guard(deps.db);
         let tmpl = crate::templates::Template::load(deps.config_dir, username, &ucfg.template)?;
         crate::plan::generate(&conn, user_id, &tmpl, date)?;
+        if let Err(e) = crate::review::lay_event(&conn, user_id, date) {
+            let _ = crate::log::record_throttled(
+                &conn,
+                Some(user_id),
+                "review_error",
+                &e.to_string(),
+                now,
+                crate::log::ERROR_LOG_WINDOW_MINS,
+            );
+        }
         if let Err(e) = crate::allocate::run(&conn, user_id, local.time_zone(), date, now) {
             let _ = crate::log::record_throttled(
                 &conn,
@@ -308,6 +332,7 @@ mod tests {
         write("defaults/prompts/persona.md", "persona");
         write("defaults/prompts/planning.md", "planning");
         write("defaults/prompts/harvest.md", "harvest");
+        write("defaults/prompts/review.md", "read the week");
         (Mutex::new(conn), tmp)
     }
 
@@ -418,6 +443,57 @@ mod tests {
         run_for_user(&deps(&db, &tmp, &llm), 1, "aki", now).unwrap();
         let conn = db.lock().unwrap();
         assert!(close_day_rows(&conn).is_empty());
+    }
+
+    #[test]
+    fn a_monday_run_writes_the_week_and_lays_it_beside_the_debrief() {
+        let (db, tmp) = env("UTC", "03:00");
+        std::fs::write(
+            tmp.path().join("defaults/templates/default.toml"),
+            "[[events]]\nkind='debrief'\ntime='07:30'\ndays=['mon']\n",
+        )
+        .unwrap();
+        std::fs::write(tmp.path().join("defaults/prompts/review.md"), "read the week").unwrap();
+        db.lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO tasks (user_id, title, state, created_at, updated_at, completed_at)
+                 VALUES (1, 'the essay', 'done', 'x', '2026-09-16T04:00:00Z', '2026-09-16T04:00:00Z')",
+                [],
+            )
+            .unwrap();
+        let llm = MockLLM::scripted(vec![
+            ChatResponse {
+                text: String::new(),
+                tool_calls: vec![ToolCall {
+                    id: "1".into(),
+                    name: "review_write".into(),
+                    args: r#"{"text":"You finished the essay."}"#.into(),
+                }],
+            },
+            ChatResponse { text: "good morning".into(), tool_calls: vec![] },
+        ]);
+        let now: jiff::Timestamp = "2026-09-21T04:00:00Z".parse().unwrap();
+        run_for_user(&deps(&db, &tmp, &llm), 1, "aki", now).unwrap();
+
+        let conn = db.lock().unwrap();
+        let content: String = conn
+            .query_row(
+                "SELECT content FROM reviews WHERE user_id = 1 AND week_start = '2026-09-14'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(content, "You finished the essay.");
+        let (kind, wall): (String, String) = conn
+            .query_row(
+                "SELECT e.kind, e.wall_time FROM events e JOIN plans p ON p.id = e.plan_id
+                 WHERE p.date = '2026-09-21' AND e.kind = 'review'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((kind.as_str(), wall.as_str()), ("review", "07:31"));
     }
 
     #[test]
