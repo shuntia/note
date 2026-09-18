@@ -156,6 +156,52 @@ pub fn deliver_event(
     deliver_via(db, ladder, ev.user_id, &ev.username, &msg);
 }
 
+/// What a starting block says, and where: a notification through the ladder, or
+/// a line in the day's thread that never leaves the app. Either way the day has
+/// changed, so the open clients are told to look again.
+pub fn deliver_block_start(
+    db: &Mutex<Connection>,
+    ladder: &[Arc<dyn Channel>],
+    hub: &ws::ClientHub,
+    start: &crate::runner::BlockStart,
+) {
+    if start.notify == "chat" {
+        let conn = crate::db_guard(db);
+        let line = format!("Starting now: {}, until {}.", start.task, start.end_wall_time);
+        if let Err(e) = crate::talk::checkin_thread(
+            &conn,
+            start.user_id,
+            &start.date,
+            &line,
+            jiff::Timestamp::now(),
+        ) {
+            let _ = crate::log::record(
+                &conn,
+                Some(start.user_id),
+                "checkin_thread_error",
+                &format!("event {}: {e}", start.event_id),
+            );
+        }
+        drop(conn);
+        hub.broadcast_changed(start.user_id);
+        return;
+    }
+    deliver_via(
+        db,
+        ladder,
+        start.user_id,
+        &start.username,
+        &OutboundMessage {
+            title: "Starting now".into(),
+            body: format!("{} · until {}", start.task, start.end_wall_time),
+            urgency: Urgency::Normal,
+            event_id: Some(start.event_id),
+            conversation_id: None,
+        },
+    );
+    hub.broadcast_changed(start.user_id);
+}
+
 #[cfg(test)]
 mod tests {
     use super::mock::MockChannel;

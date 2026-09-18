@@ -90,13 +90,10 @@ fn statuses(w: &World) -> Vec<String> {
     rows(w, "SELECT status FROM events WHERE kind = 'trigger' ORDER BY id")
 }
 
-async fn start_session(w: &World, planned_min: i64) -> i64 {
-    let (status, body) = post(
-        w,
-        "/api/sessions",
-        &format!(r#"{{"title":"read the chapter","planned_min":{planned_min}}}"#),
-    )
-    .await;
+/// A session with no planned length, so the only trigger waiting is the
+/// midpoint check these tests are about.
+async fn start_session(w: &World) -> i64 {
+    let (status, body) = post(w, "/api/sessions", r#"{"title":"read the chapter"}"#).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     body["id"].as_i64().unwrap()
 }
@@ -104,7 +101,7 @@ async fn start_session(w: &World, planned_min: i64) -> i64 {
 #[tokio::test]
 async fn a_trigger_that_speaks_lands_in_the_thread_and_on_a_channel() {
     let w = world(vec![call("c1", "say", r#"{"text":"how is the chapter going?"}"#)]).await;
-    start_session(&w, 60).await;
+    start_session(&w).await;
     make_due(&w);
 
     note_server::runner::sweep_once(&w.state);
@@ -140,7 +137,7 @@ async fn a_trigger_that_speaks_lands_in_the_thread_and_on_a_channel() {
 #[tokio::test]
 async fn a_trigger_that_stays_quiet_sends_nothing_and_settles() {
     let w = world(vec![call("c1", "stay_quiet", r#"{"reason":"they answered a minute ago"}"#)]).await;
-    start_session(&w, 60).await;
+    start_session(&w).await;
     make_due(&w);
 
     note_server::runner::sweep_once(&w.state);
@@ -150,8 +147,8 @@ async fn a_trigger_that_stays_quiet_sends_nothing_and_settles() {
     let quiet = logged(&w, "trigger_quiet");
     assert_eq!(quiet.len(), 1);
     assert!(quiet[0].contains("they answered a minute ago"), "{}", quiet[0]);
-    let threads: Vec<i64> = rows(&w, "SELECT COUNT(*) FROM conversations");
-    assert_eq!(threads, vec![0]);
+    let said: Vec<i64> = rows(&w, "SELECT COUNT(*) FROM talk_messages");
+    assert_eq!(said, vec![0], "the session's own thread stays empty");
 }
 
 #[tokio::test]
@@ -161,7 +158,7 @@ async fn a_firing_trigger_may_leave_one_follow_up_behind_inside_its_work_session
         call("c2", "say", r#"{"text":"half an hour in — how far did you get?"}"#),
     ])
     .await;
-    let session = start_session(&w, 120).await;
+    let session = start_session(&w).await;
     make_due(&w);
 
     note_server::runner::sweep_once(&w.state);
@@ -198,6 +195,7 @@ async fn a_trigger_whose_reason_settled_itself_is_cancelled_before_any_session_r
                 date: jiff::Timestamp::now().to_zoned(jiff::tz::TimeZone::UTC).date(),
                 cancel: Some(note_server::triggers::Cancel::TaskDone(task_id)),
                 conversation_id: None,
+                work_session_id: None,
                 now: jiff::Timestamp::now(),
             },
         )
@@ -219,35 +217,6 @@ async fn a_trigger_whose_reason_settled_itself_is_cancelled_before_any_session_r
     assert!(w.push.seen().is_empty());
     assert_eq!(logged(&w, "trigger_cancelled").len(), 1);
     assert!(logged(&w, "event_fired").is_empty());
-}
-
-#[tokio::test]
-async fn a_work_session_lays_its_first_check_and_takes_it_along_when_it_ends() {
-    let w = world(Vec::new()).await;
-    let id = start_session(&w, 30).await;
-
-    let (status, open) = get(&w, "/api/sessions/open").await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(open["id"], id);
-    assert_eq!(open["title"], "read the chapter");
-    let prompts: Vec<String> = rows(&w, "SELECT prompt FROM events WHERE kind = 'trigger'");
-    assert_eq!(prompts, vec!["Progress check on read the chapter."]);
-
-    let (status, ended) = post(&w, &format!("/api/sessions/{id}/end"), r#"{"outcome":"done"}"#).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(ended["ended"], id);
-    assert_eq!(statuses(&w), vec!["dropped"]);
-    assert_eq!(get(&w, "/api/sessions/open").await.1, serde_json::Value::Null);
-
-    let (status, again) =
-        post(&w, &format!("/api/sessions/{id}/end"), r#"{"outcome":"done"}"#).await;
-    assert_eq!(status, StatusCode::OK, "saying stop twice is not an error");
-    assert_eq!(again["ended"], serde_json::Value::Null);
-
-    let (status, _) = post(&w, &format!("/api/sessions/{id}/end"), r#"{"outcome":"quit"}"#).await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    let (status, _) = post(&w, "/api/sessions", r#"{"title":"  "}"#).await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
 }
 
 #[tokio::test]
@@ -293,7 +262,7 @@ async fn the_allowance_is_a_setting_the_user_owns() {
 #[tokio::test]
 async fn a_trigger_a_session_could_not_decide_sends_nothing_and_stays_where_it_is() {
     let w = world(vec![ChatResponse { text: "thinking out loud".into(), tool_calls: vec![] }]).await;
-    start_session(&w, 60).await;
+    start_session(&w).await;
     make_due(&w);
 
     note_server::runner::sweep_once(&w.state);
