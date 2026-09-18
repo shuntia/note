@@ -69,6 +69,14 @@ impl ClientHub {
     }
 }
 
+impl ClientHub {
+    /// Tells every socket of `user_id` that something it is showing changed;
+    /// the client reloads rather than patching, so the frame carries no detail.
+    pub fn broadcast_changed(&self, user_id: i64) {
+        self.send(user_id, "{\"type\":\"changed\"}");
+    }
+}
+
 /// Cap on one agent frame's variable text, so a large tool payload cannot
 /// flood a socket; what is left ends in an ellipsis.
 pub const MAX_FRAME_TEXT: usize = 4 * 1024;
@@ -250,6 +258,17 @@ mod tests {
         let result = frame["event"]["result"].as_str().unwrap();
         assert_eq!(result.len(), MAX_FRAME_TEXT + "…".len());
         assert!(result.ends_with('…'));
+    }
+
+    #[test]
+    fn a_changed_frame_reaches_only_that_users_sockets() {
+        let hub = ClientHub::new();
+        let (_id, mut rx) = hub.register(1).unwrap();
+        let (_other, mut theirs) = hub.register(2).unwrap();
+        hub.broadcast_changed(1);
+        let v: serde_json::Value = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
+        assert_eq!(v["type"], "changed");
+        assert!(theirs.try_recv().is_err());
     }
 
     #[test]

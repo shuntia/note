@@ -113,6 +113,10 @@ const DAYS: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 const FLEXIBILITIES: [&str; 3] = ["fixed", "slide", "drop"];
 const CHANNELS: [&str; 2] = ["push", "voice"];
 
+pub fn valid_channel(channel: &str) -> bool {
+    CHANNELS.contains(&channel)
+}
+
 /// Zero-padded 24-hour `HH:MM`; the padding matters because wall times are
 /// compared and sorted as strings once stored.
 pub(crate) fn valid_time(s: &str) -> bool {

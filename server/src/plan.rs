@@ -383,6 +383,27 @@ pub fn set_status(conn: &Connection, user_id: i64, event_id: i64, status: &str) 
     Ok(Some(()))
 }
 
+/// Chooses how this day's instance reaches the user. A `done` or `dropped`
+/// event is a settled decision and is refused, as in `shift`.
+pub fn set_channel(
+    conn: &Connection,
+    user_id: i64,
+    event_id: i64,
+    channel: &str,
+) -> Result<Option<()>, ShiftError> {
+    if !crate::templates::valid_channel(channel) {
+        return Err(ShiftError::Other(anyhow::anyhow!("invalid channel: {channel}")));
+    }
+    let Some(ev) = owned_event(conn, user_id, event_id)? else {
+        return Ok(None);
+    };
+    if ev.status == "done" || ev.status == "dropped" {
+        return Err(ShiftError::Decided { status: ev.status });
+    }
+    conn.execute("UPDATE events SET channel = ?1 WHERE id = ?2", (channel, event_id))?;
+    Ok(Some(()))
+}
+
 /// A block never pings, so silencing one is a client mistake rather than a
 /// no-op the caller should ignore.
 #[derive(Debug, Error)]
