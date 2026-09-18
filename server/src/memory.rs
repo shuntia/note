@@ -175,6 +175,48 @@ fn store_vector(conn: &Connection, user: &str, id: &str, vector: Option<&[f32]>)
     );
 }
 
+/// Live facts the index knows but the vector table does not: everything written
+/// before embeddings existed, or while the endpoint was down. Embeds them in
+/// batches and stores each vector; returns how many were filled.
+pub fn backfill_vectors(
+    db: &std::sync::Mutex<Connection>,
+    data_dir: &Path,
+    embeddings: &dyn crate::providers::EmbeddingsProvider,
+) -> Result<usize> {
+    let missing: Vec<(String, String)> = {
+        let conn = crate::db_guard(db);
+        let mut stmt = conn.prepare(
+            "SELECT i.user, i.id FROM memory_index i
+             LEFT JOIN memory_vectors v ON v.user = i.user AND v.id = i.id
+             WHERE i.archived = 0 AND v.id IS NULL ORDER BY i.rowid",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+    let mut filled = 0;
+    for batch in missing.chunks(16) {
+        let mut texts = Vec::new();
+        let mut keys = Vec::new();
+        for (user, id) in batch {
+            if let Some(f) = read(data_dir, user, id)? {
+                texts.push(embed_text(&f.summary, &f.body));
+                keys.push((user.clone(), id.clone()));
+            }
+        }
+        if texts.is_empty() {
+            continue;
+        }
+        let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+        let vectors = embeddings.embed(&refs)?;
+        let conn = crate::db_guard(db);
+        for ((user, id), v) in keys.iter().zip(vectors.iter()) {
+            store_vector(&conn, user, id, Some(v));
+            filled += 1;
+        }
+    }
+    Ok(filled)
+}
+
 pub fn add(
     conn: &Connection,
     data_dir: &Path,

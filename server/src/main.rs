@@ -128,6 +128,17 @@ async fn main() -> anyhow::Result<()> {
         let ch = channels::telegram::TelegramChannel::new(state.db.clone(), t)?;
         state = state.with_telegram(ch);
     }
+    if let Some(embeddings) = state.embeddings.clone() {
+        let db = state.db.clone();
+        let data_dir = state.data_dir.clone();
+        tokio::task::spawn_blocking(move || {
+            match memory::backfill_vectors(&db, &data_dir, embeddings.as_ref()) {
+                Ok(0) => {}
+                Ok(n) => eprintln!("memory: embedded {n} fact(s) that had no vector"),
+                Err(e) => eprintln!("memory: vector backfill failed: {e:#}"),
+            }
+        });
+    }
     runner::spawn(state.clone());
     note_server::telegram::spawn(state.clone());
     nightly::spawn(state.clone());
