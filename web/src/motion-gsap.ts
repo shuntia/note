@@ -74,6 +74,34 @@ export function collapse(el: Element | null | undefined, done: () => void): void
   })
 }
 
+/** A panel growing out of the box above it, from nothing to the height it asks for. */
+export function unfold(el: Target): void {
+  if (still() || !el) return
+  gsap.from(el, {
+    height: 0,
+    paddingTop: 0,
+    paddingBottom: 0,
+    autoAlpha: 0,
+    duration: 0.28,
+    ease: 'expo.out',
+    clearProps: 'height,padding,opacity,visibility',
+  })
+}
+
+/** The reverse of `unfold`; `done` runs once the panel is free to unmount. */
+export function fold(el: Target, done: () => void): void {
+  if (still() || !el) return done()
+  gsap.to(el, {
+    height: 0,
+    paddingTop: 0,
+    paddingBottom: 0,
+    autoAlpha: 0,
+    duration: 0.2,
+    ease: 'power2.in',
+    onComplete: done,
+  })
+}
+
 /** Rows that changed places: each starts from where it was and slides home. */
 export function flip(moves: readonly { el: Element; dy: number }[]): void {
   if (still()) return

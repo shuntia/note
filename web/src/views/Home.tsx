@@ -8,6 +8,7 @@ import { useEscape } from '../escape'
 import { eventFacts, nextUp } from '../events'
 import { arcPath, Gauge, STROKE, VB, type ArcLine } from '../gauge'
 import { makeHold } from '../held'
+import { Jot } from '../jot'
 import { clearTimeline, scrollReveal, scrollToY, scrub, snapNearest, travel, type Timeline, type Trigger } from '../homeMotion'
 import { reducedMotion } from '../motion'
 import { NowCounter } from '../nowcounter'
@@ -15,7 +16,6 @@ import { Overflow } from '../overflow'
 import { readPrefs } from '../prefs'
 import { eventLabel } from '../receipts'
 import { effectiveStart, elapsedSec, type FocusSession } from '../session'
-import { TellNote } from '../tellnote'
 import type { PlanEvent } from '../types'
 import { CalendarSection } from './Calendar'
 import { DebriefFold } from './Today'
@@ -133,6 +133,8 @@ export function Home({
   onChanged,
   refresh,
   openNow,
+  openTalk,
+  openConversation,
   mobile,
   armed,
 }: {
@@ -142,6 +144,8 @@ export function Home({
   onChanged: () => void
   refresh: number
   openNow: (s: FocusSession) => void
+  openTalk: (draft: string) => void
+  openConversation: (id: number) => void
   mobile: boolean
   // The shell holds the pin off while a view transition is under way: the layer is
   // transformed then, which no fixed position inside it would survive.
@@ -539,7 +543,7 @@ export function Home({
     <div className="home-today">
       <DayLine events={visible} now={now} compact={mobile} nextId={next?.id} />
       {list}
-      {mobile && <TellNote notify={notify} />}
+      {mobile && <Jot flow openTalk={openTalk} openConversation={openConversation} />}
     </div>
   )
 
@@ -662,7 +666,7 @@ export function Home({
         if (!q('.home-face.compact')) to(qa('.face-big .home-text'), { autoAlpha: 0, y: -20, duration: 0.4, ease: 'power2.in' }, 0.2)
         from(qa('.home-today .dayline'), { autoAlpha: 0, y: 28, duration: 0.4, ease: 'power2.out' }, 0.35)
         from(qa('.home-list li'), { autoAlpha: 0, y: 24, duration: 0.35, ease: 'power2.out', stagger: 0.04 }, 0.42)
-        from(qa('.home-today .tellnote-wrap'), { autoAlpha: 0, y: 24, duration: 0.35, ease: 'power2.out' }, 0.5)
+        from(qa('.home-today .jot-wrap'), { autoAlpha: 0, y: 24, duration: 0.35, ease: 'power2.out' }, 0.5)
       } else {
         const ring = q('.face-big .gauge-ring') as SVGSVGElement | null
         const bar = q('.today-bar')
