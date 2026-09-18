@@ -219,7 +219,7 @@ export function App() {
       if (ev.conversation_id !== null) openConversation(ev.conversation_id)
       else notify(ev.body ? `${ev.title} — ${ev.body}` : ev.title)
       onChanged()
-    })
+    }, onChanged)
   }, [me, notify, onChanged, openConversation])
 
   if (me === undefined) return null
