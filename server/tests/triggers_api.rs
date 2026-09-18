@@ -24,6 +24,9 @@ struct World {
 async fn world(script: Vec<ChatResponse>) -> World {
     let cfg = common::config_dir();
     let dir = cfg.path().to_path_buf();
+    // The day's own routines stay out of these counts: the template lays nothing.
+    std::fs::create_dir_all(dir.join("users/aki/templates")).unwrap();
+    std::fs::write(dir.join("users/aki/templates/default.toml"), "events = []\n").unwrap();
     let conn = db::open_memory().unwrap();
     auth::create_user(&conn, "aki", "pw", true).unwrap();
     let push = Arc::new(MockChannel::new("mockpush"));
