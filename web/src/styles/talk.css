@@ -11,39 +11,39 @@
 .chat .chat-main { position: relative; }
 .chat .chat-head {
   position: absolute;
-  top: 10px;
-  left: 20px;
-  right: 20px;
+  top: 0.625rem;
+  left: 1.25rem;
+  right: 1.25rem;
   z-index: 5;
   display: flex;
   justify-content: flex-end;
-  max-width: 680px;
+  max-width: max(42.5rem, 34vw);
   margin: 0 auto;
   pointer-events: none;
 }
 .chat .chat-head > * { pointer-events: auto; }
-@media (min-width: 768px) { .chat .chat-head { top: 4px; } }
+@media (min-width: 768px) { .chat .chat-head { top: 0.25rem; } }
 
 /* what scrolls under the head fades out beneath it rather than meeting it */
 .chat .chat-pane {
-  mask-image: linear-gradient(to bottom, transparent 6px, #000 54px);
-  -webkit-mask-image: linear-gradient(to bottom, transparent 6px, #000 54px);
+  mask-image: linear-gradient(to bottom, transparent 0.375rem, #000 3.375rem);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0.375rem, #000 3.375rem);
 }
 @media (min-width: 768px) {
   .chat .chat-pane {
-    mask-image: linear-gradient(to bottom, transparent 2px, #000 46px);
-    -webkit-mask-image: linear-gradient(to bottom, transparent 2px, #000 46px);
+    mask-image: linear-gradient(to bottom, transparent 0.125rem, #000 2.875rem);
+    -webkit-mask-image: linear-gradient(to bottom, transparent 0.125rem, #000 2.875rem);
   }
 }
-.chat .chat-stream { padding-bottom: 6px; gap: 14px; }
+.chat .chat-stream { padding-bottom: 0.375rem; gap: 0.875rem; }
 
 /* the session or the wait, small: a ring on a phone, a bar on a desktop */
 .pulse {
   display: flex;
   align-items: center;
-  gap: 7px;
-  height: 36px;
-  padding: 0 13px 0 5px;
+  gap: 0.4375rem;
+  height: 2.25rem;
+  padding: 0 0.8125rem 0 0.3125rem;
   border: 0;
   border-radius: 999px;
   background: var(--haze-strong);
@@ -53,7 +53,7 @@
   backdrop-filter: blur(10px);
 }
 .pulse:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
-.pulse-ring { width: 26px; height: 26px; flex: none; overflow: visible; }
+.pulse-ring { width: 1.625rem; height: 1.625rem; flex: none; overflow: visible; }
 .pulse-track, .pulse-arc { fill: none; stroke-width: 2.75; stroke-linecap: round; }
 .pulse-track { stroke: var(--track); }
 .pulse-arc { stroke: var(--sun); transition: stroke-dasharray 900ms linear; }
@@ -69,18 +69,18 @@
 .pulse.over .pulse-text { color: var(--sun-ink); }
 .pulse-bar { display: none; }
 @media (min-width: 768px) {
-  .pulse { gap: 10px; height: 32px; padding: 0 12px 0 14px; }
+  .pulse { gap: 0.625rem; height: 2rem; padding: 0 0.75rem 0 0.875rem; }
   .pulse-ring { display: none; }
-  .pulse-bar { display: block; width: 88px; height: 3px; border-radius: 2px; background: var(--track); overflow: hidden; }
+  .pulse-bar { display: block; width: 5.5rem; height: 0.1875rem; border-radius: 2px; background: var(--track); overflow: hidden; }
   .pulse-fill { display: block; height: 100%; border-radius: 2px; background: var(--sun); transition: width 900ms linear; }
   .pulse.faded .pulse-fill { opacity: 0.7; }
 }
 
 /* one side's run of bubbles sits closer than the turn between sides */
-.chat .turn.user + .turn.user, .chat .reply + .reply { margin-top: -6px; }
+.chat .turn.user + .turn.user, .chat .reply + .reply { margin-top: -0.375rem; }
 
 /* what Note did reads as a caption, never as a message */
-.chat .activity-head { font-size: 0.875rem; padding: 2px 6px; }
+.chat .activity-head { font-size: 0.875rem; padding: 0.125rem 0.375rem; }
 .chat .activity.live { transition: opacity 350ms ease; }
 .chat .activity.live.held { opacity: 0; }
 @media (prefers-reduced-motion: no-preference) {
@@ -105,7 +105,7 @@
     color 450ms cubic-bezier(0.16, 1, 0.3, 1),
     border-radius 450ms cubic-bezier(0.16, 1, 0.3, 1);
 }
-.send-ghost.bubble { background: var(--ink); color: var(--ivory); border-radius: 18px; }
+.send-ghost.bubble { background: var(--ink); color: var(--ivory); border-radius: 1.125rem; }
 
 /* the composer: its arrow fills once there is something to send */
 .chat .tellnote button { transition: background-color 180ms ease, color 180ms ease; }
