@@ -156,10 +156,13 @@ pub fn run_session_watched(
         SessionKind::Trigger => TRIGGER_MAX_TURNS,
         _ => MAX_TURNS,
     };
+    // Talk, import and inbox sessions answer a caller who is waiting on them.
+    let background =
+        !matches!(kind, SessionKind::Talk | SessionKind::Import | SessionKind::Inbox);
     let started = std::time::Instant::now();
 
     while turns < max_turns {
-        let req = ChatRequest { system: &system, messages: &messages, tools: &schemas };
+        let req = ChatRequest { system: &system, messages: &messages, tools: &schemas, background };
         let (resp, thinking) = match deps.llm.chat_with_reasoning(&req) {
             Ok(v) => v,
             Err(e) => {

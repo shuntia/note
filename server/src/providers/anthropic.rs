@@ -2,17 +2,17 @@ use super::{ChatRequest, ChatResponse, LLMProvider, ToolCall};
 use anyhow::{Context, Result};
 
 pub struct AnthropicLLM {
-    agent: ureq::Agent,
+    agents: super::ChatAgents,
     base_url: String,
     model: String,
     api_key: String,
 }
 
 impl AnthropicLLM {
-    pub fn new(base_url: &str, model: &str, api_key: &str, timeout_secs: u64) -> Self {
+    pub fn new(base_url: &str, model: &str, api_key: &str, agents: super::ChatAgents) -> Self {
         let base = if base_url.is_empty() { "https://api.anthropic.com" } else { base_url };
         Self {
-            agent: super::http_agent(timeout_secs),
+            agents,
             base_url: base.trim_end_matches('/').to_string(),
             model: model.to_string(),
             api_key: api_key.to_string(),
@@ -84,15 +84,14 @@ pub fn parse(v: &serde_json::Value) -> Result<ChatResponse> {
 
 impl LLMProvider for AnthropicLLM {
     fn chat(&self, req: &ChatRequest) -> Result<ChatResponse> {
-        let resp: serde_json::Value = self
-            .agent
-            .post(&format!("{}/v1/messages", self.base_url))
-            .set("x-api-key", &self.api_key)
-            .set("anthropic-version", "2023-06-01")
-            .set("content-type", "application/json")
-            .send_json(body(&self.model, req))
-            .context("anthropic request failed")?
-            .into_json()?;
+        let url = format!("{}/v1/messages", self.base_url);
+        let resp = self.agents.post_json(req.background, "anthropic", &body(&self.model, req), |agent| {
+            agent
+                .post(&url)
+                .set("x-api-key", &self.api_key)
+                .set("anthropic-version", "2023-06-01")
+                .set("content-type", "application/json")
+        })?;
         parse(&resp)
     }
 }
@@ -118,7 +117,7 @@ mod tests {
     fn body_maps_roles_tools_and_merges_tool_results() {
         let tools = vec![serde_json::json!({"name":"memory_query","description":"d","input_schema":{"type":"object"}})];
         let msgs = req_fixture();
-        let b = body("claude-sonnet-5", &ChatRequest { system: "be kind", messages: &msgs, tools: &tools });
+        let b = body("claude-sonnet-5", &ChatRequest { system: "be kind", messages: &msgs, tools: &tools, background: false });
         assert_eq!(b["system"], "be kind");
         assert_eq!(b["max_tokens"], 4096);
         assert_eq!(b["tools"][0]["name"], "memory_query");
@@ -133,7 +132,7 @@ mod tests {
     #[test]
     fn body_omits_tools_key_when_empty() {
         let msgs = vec![Message::User("hi".into())];
-        let b = body("claude-sonnet-5", &ChatRequest { system: "", messages: &msgs, tools: &[] });
+        let b = body("claude-sonnet-5", &ChatRequest { system: "", messages: &msgs, tools: &[], background: false });
         assert!(b.get("tools").is_none());
     }
 

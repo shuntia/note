@@ -28,6 +28,8 @@ pub mod tasks;
 pub mod telegram;
 pub mod tokens;
 pub mod templates;
+#[cfg(test)]
+pub(crate) mod testhttp;
 pub mod tools;
 pub mod totp;
 pub mod triggers;

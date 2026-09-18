@@ -2,7 +2,7 @@ use super::{ChatRequest, ChatResponse, EmbeddingsProvider, LLMProvider, ToolCall
 use anyhow::{Context, Result};
 
 pub struct OpenAILLM {
-    agent: ureq::Agent,
+    agents: super::ChatAgents,
     base_url: String,
     model: String,
     api_key: String,
@@ -14,11 +14,11 @@ impl OpenAILLM {
         base_url: &str,
         model: &str,
         api_key: &str,
-        timeout_secs: u64,
+        agents: super::ChatAgents,
         reasoning: Option<&str>,
     ) -> Self {
         Self {
-            agent: super::http_agent(timeout_secs),
+            agents,
             base_url: base_url.trim_end_matches('/').to_string(),
             model: model.to_string(),
             api_key: api_key.to_string(),
@@ -27,14 +27,15 @@ impl OpenAILLM {
     }
 
     fn post(&self, req: &ChatRequest) -> Result<serde_json::Value> {
-        let mut request = self.agent.post(&format!("{}/chat/completions", self.base_url));
-        if !self.api_key.is_empty() {
-            request = request.set("Authorization", &format!("Bearer {}", self.api_key));
-        }
-        Ok(request
-            .send_json(body(&self.model, req, self.reasoning.as_deref()))
-            .context("openai request failed")?
-            .into_json()?)
+        let url = format!("{}/chat/completions", self.base_url);
+        let body = body(&self.model, req, self.reasoning.as_deref());
+        self.agents.post_json(req.background, "openai", &body, |agent| {
+            let request = agent.post(&url);
+            match self.api_key.is_empty() {
+                true => request,
+                false => request.set("Authorization", &format!("Bearer {}", self.api_key)),
+            }
+        })
     }
 }
 
@@ -217,7 +218,7 @@ mod tests {
             Message::ToolResult { call_id: "c1".into(), content: "{\"task_id\":1}".into(), is_error: false },
             Message::ToolResult { call_id: "c2".into(), content: "{\"kind\":\"rejected\"}".into(), is_error: true },
         ];
-        let b = body("gpt-x", &ChatRequest { system: "sys", messages: &msgs, tools: &tools }, None);
+        let b = body("gpt-x", &ChatRequest { system: "sys", messages: &msgs, tools: &tools, background: false }, None);
         let m = b["messages"].as_array().unwrap();
         assert_eq!(m[0]["role"], "system");
         assert_eq!(m[2]["tool_calls"][0]["function"]["name"], "task_create");
@@ -229,7 +230,7 @@ mod tests {
     #[test]
     fn body_omits_tools_key_when_empty() {
         let msgs = vec![Message::User("hi".into())];
-        let b = body("gpt-x", &ChatRequest { system: "sys", messages: &msgs, tools: &[] }, None);
+        let b = body("gpt-x", &ChatRequest { system: "sys", messages: &msgs, tools: &[], background: false }, None);
         assert!(b.get("tools").is_none());
         assert!(b.get("reasoning").is_none());
     }
@@ -237,7 +238,7 @@ mod tests {
     #[test]
     fn body_carries_the_reasoning_effort_only_when_configured() {
         let msgs = vec![Message::User("hi".into())];
-        let req = ChatRequest { system: "sys", messages: &msgs, tools: &[] };
+        let req = ChatRequest { system: "sys", messages: &msgs, tools: &[], background: false };
         assert!(body("gpt-x", &req, None).get("reasoning").is_none());
         assert_eq!(body("gpt-x", &req, Some("high"))["reasoning"]["effort"], "high");
     }
