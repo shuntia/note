@@ -105,6 +105,9 @@ pub struct AppState {
     /// Set when the ntfy channel is configured; also the prefix its default
     /// topics are built from.
     pub ntfy_topic_prefix: Option<String>,
+    /// Set when the voice channel is configured; it both places calls and
+    /// verifies the signature on Twilio's callbacks.
+    pub voice: Option<Arc<crate::channels::voice::VoiceChannel>>,
     pub hub: Arc<crate::channels::ws::ClientHub>,
     pub channels: Vec<Arc<dyn crate::channels::Channel>>,
     pub secure_cookies: bool,
@@ -138,6 +141,7 @@ impl AppState {
             embeddings: None,
             vapid_public_key: None,
             ntfy_topic_prefix: None,
+            voice: None,
             hub,
             channels: vec![ws],
             secure_cookies: false,
@@ -207,6 +211,11 @@ impl AppState {
     ) -> Self {
         self.channels.push(Arc::new(ch));
         self.ntfy_topic_prefix = Some(topic_prefix);
+        self
+    }
+
+    pub fn with_voice(mut self, ch: crate::channels::voice::VoiceChannel) -> Self {
+        self.voice = Some(Arc::new(ch));
         self
     }
 

@@ -64,7 +64,7 @@ fn fire_checkins(state: &AppState, mock: &Arc<MockChannel>) -> Vec<runner::Fired
     };
     let ladder: Vec<Arc<dyn Channel>> = vec![mock.clone()];
     for ev in &fired {
-        channels::deliver_event(&state.db, &ladder, ev);
+        channels::deliver_event(&state.db, &ladder, state.voice.as_deref(), ev);
     }
     fired
 }

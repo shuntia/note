@@ -8,3 +8,4 @@ config/nvidianim.key
 config/vapid.pem
 persist/
 config/openrouter.key
+config/twilio.token
