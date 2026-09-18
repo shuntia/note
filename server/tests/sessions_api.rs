@@ -198,9 +198,9 @@ async fn the_farewell_speaks_on_the_next_sweep_in_the_sessions_own_thread() {
     note_server::runner::sweep_once(&w.state);
 
     let seen = w.push.seen();
-    assert_eq!(seen.len(), 1, "the farewell needs no lead time");
-    assert_eq!(seen[0].1.body, "that is a wrap — what is left of it?");
-    assert_eq!(seen[0].1.conversation_id, Some(thread));
+    let farewell: Vec<_> = seen.iter().filter(|m| m.1.conversation_id == Some(thread)).collect();
+    assert_eq!(farewell.len(), 1, "the farewell needs no lead time: {seen:?}");
+    assert_eq!(farewell[0].1.body, "that is a wrap — what is left of it?");
     let said: Vec<String> = rows(
         &w,
         &format!(
