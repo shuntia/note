@@ -527,6 +527,14 @@ export function Talk({
     input.current?.focus()
   }
 
+  // Chat opens on an empty conversation — the drawer's own control — unless a thread
+  // was named on the way in. Nothing is written until the first message is sent, so
+  // leaving an untouched one behind costs nothing.
+  useEffect(() => {
+    if (!open) startNew()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   const send = async () => {
     const text = draft.trim()
     // a send while history is still loading would be wiped by the load's setItems
@@ -688,19 +696,6 @@ export function Talk({
       },
     })
   }
-
-  // A fresh browser still opens on something: the remembered thread if it is still
-  // there, otherwise the one touched last.
-  const opened = useRef(false)
-  useEffect(() => {
-    if (opened.current || listState !== 'ready' || current !== null) return
-    opened.current = true
-    if (prefill || open) return
-    const pool = conversations.filter((c) => c.id !== deleteHold.held())
-    const remembered = pool.find((c) => c.id === lastConversation())
-    const recent = remembered ?? [...pool].sort((a, b) => b.updated_at.localeCompare(a.updated_at))[0]
-    if (recent) show(recent.id)
-  })
 
   const onScroll = () => {
     const el = pane.current
