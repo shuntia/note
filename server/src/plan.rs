@@ -27,6 +27,15 @@ pub struct MovedTo {
     pub kind: String,
 }
 
+/// The task a block holds, for a client that draws the block and offers the
+/// task's own actions on it.
+#[derive(Debug, Serialize)]
+pub struct TaskRef {
+    pub id: i64,
+    pub title: String,
+    pub state: String,
+}
+
 #[derive(Debug, Serialize)]
 pub struct PlanEvent {
     pub id: i64,
@@ -39,8 +48,13 @@ pub struct PlanEvent {
     pub slide_window_min: i64,
     pub channel: String,
     pub alert: bool,
+    pub origin: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decided_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub moved_to: Option<MovedTo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task: Option<TaskRef>,
 }
 
 fn weekday_key(date: jiff::civil::Date) -> &'static str {
@@ -156,10 +170,13 @@ pub fn events_for(conn: &Connection, user_id: i64, date: jiff::civil::Date) -> R
     let mut stmt = conn.prepare(
         "SELECT e.id, e.kind, e.wall_time, e.end_wall_time, e.status, e.flexibility,
                 e.slide_window_min, e.channel, e.alert,
-                m.id, mp.date, m.wall_time, m.kind, e.span_min
+                m.id, mp.date, m.wall_time, m.kind, e.span_min,
+                e.origin, e.decided_at, t.id, t.title, t.state
          FROM events e JOIN plans p ON p.id = e.plan_id
          LEFT JOIN events m ON m.id = e.moved_to_event_id
          LEFT JOIN plans mp ON mp.id = m.plan_id
+         LEFT JOIN event_tasks et ON et.event_id = e.id
+         LEFT JOIN tasks t ON t.id = et.task_id
          WHERE p.user_id = ?1 AND p.date = ?2 ORDER BY e.wall_time",
     )?;
     let rows = stmt.query_map((user_id, date.to_string()), |r| {
@@ -180,6 +197,8 @@ pub fn events_for(conn: &Connection, user_id: i64, date: jiff::civil::Date) -> R
             slide_window_min: r.get(6)?,
             channel: r.get(7)?,
             alert: r.get(8)?,
+            origin: r.get(14)?,
+            decided_at: r.get(15)?,
             moved_to: r.get::<_, Option<i64>>(9)?.map(|event_id| {
                 Ok::<_, rusqlite::Error>(MovedTo {
                     event_id,
@@ -187,6 +206,9 @@ pub fn events_for(conn: &Connection, user_id: i64, date: jiff::civil::Date) -> R
                     wall_time: r.get(11)?,
                     kind: r.get(12)?,
                 })
+            }).transpose()?,
+            task: r.get::<_, Option<i64>>(16)?.map(|id| {
+                Ok::<_, rusqlite::Error>(TaskRef { id, title: r.get(17)?, state: r.get(18)? })
             }).transpose()?,
         })
     })?;
@@ -291,8 +313,8 @@ pub fn snooze(
     }
     let total = (parse_minutes(&wall)? + minutes).clamp(0, 23 * 60 + 59);
     conn.execute(
-        "UPDATE events SET wall_time = ?1, status = 'snoozed' WHERE id = ?2",
-        (format!("{:02}:{:02}", total / 60, total % 60), event_id),
+        "UPDATE events SET wall_time = ?1, status = 'snoozed', decided_at = ?3 WHERE id = ?2",
+        (format!("{:02}:{:02}", total / 60, total % 60), event_id, jiff::Timestamp::now().to_string()),
     )?;
     Ok(Some(()))
 }
@@ -379,7 +401,10 @@ pub fn set_status(conn: &Connection, user_id: i64, event_id: i64, status: &str) 
     if owned_event(conn, user_id, event_id)?.is_none() {
         return Ok(None);
     }
-    conn.execute("UPDATE events SET status = ?1 WHERE id = ?2", (status, event_id))?;
+    conn.execute(
+        "UPDATE events SET status = ?1, decided_at = ?3 WHERE id = ?2",
+        (status, event_id, jiff::Timestamp::now().to_string()),
+    )?;
     Ok(Some(()))
 }
 
@@ -461,9 +486,10 @@ pub fn move_to_tomorrow(
         None => {
             conn.execute(
                 "INSERT INTO events (plan_id, kind, wall_time, orig_wall_time, end_wall_time,
-                                     flexibility, slide_window_min, channel, alert, span_min, message)
+                                     flexibility, slide_window_min, channel, alert, span_min,
+                                     message, origin)
                  SELECT ?1, kind, orig_wall_time, orig_wall_time, end_wall_time,
-                        flexibility, slide_window_min, channel, alert, span_min, message
+                        flexibility, slide_window_min, channel, alert, span_min, message, origin
                  FROM events WHERE id = ?2",
                 (plan_id, event_id),
             )?;
@@ -471,8 +497,9 @@ pub fn move_to_tomorrow(
         }
     };
     conn.execute(
-        "UPDATE events SET status = 'dropped', moved_to_event_id = ?1 WHERE id = ?2",
-        (new_id, event_id),
+        "UPDATE events SET status = 'dropped', moved_to_event_id = ?1, decided_at = ?3
+         WHERE id = ?2",
+        (new_id, event_id, jiff::Timestamp::now().to_string()),
     )?;
     tx.commit()?;
     Ok(Some((new_id, tomorrow)))

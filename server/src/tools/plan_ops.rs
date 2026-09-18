@@ -256,8 +256,8 @@ pub fn plan_tasks(
         let kind: String = task.title.chars().take(MAX_KIND_CHARS).collect();
         conn.execute(
             "INSERT INTO events (plan_id, kind, wall_time, orig_wall_time, end_wall_time,
-                                 flexibility, slide_window_min, channel, alert, span_min)
-             VALUES (?1, ?2, ?3, ?3, ?4, 'drop', 0, 'push', 0, ?5)",
+                                 flexibility, slide_window_min, channel, alert, span_min, origin)
+             VALUES (?1, ?2, ?3, ?3, ?4, 'drop', 0, 'push', 0, ?5, 'agent')",
             (plan_id, &kind, wall(start), wall(end), task.minutes),
         )
         .map_err(internal)?;
