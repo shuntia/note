@@ -19,7 +19,6 @@ import { Pulse } from '../pulse'
 import { doing, receipt } from '../receipts'
 import { makeHold } from '../held'
 import type { FocusSession } from '../session'
-import { forgetConversation, lastConversation, rememberConversation } from '../tellnote'
 import { onAgentFrame, type AgentFrame } from '../ws'
 import type { Conversation, TalkMessage, TalkStep } from '../types'
 import '../styles/talk.css'
@@ -498,7 +497,6 @@ export function Talk({
     era.current++
     setItems([])
     setCurrent(id)
-    rememberConversation(id)
     void loadMessages(id)
   }
 
@@ -610,7 +608,6 @@ export function Talk({
           steps: reply.steps.map(fromStep),
         },
       ])
-      rememberConversation(reply.conversation_id)
       if (current === null) {
         setCurrent(reply.conversation_id)
         wanted.current = reply.conversation_id
@@ -674,8 +671,6 @@ export function Talk({
       api.deleteConversation(c.id).then(settled, settled)
     })
     const wasOpen = current === c.id
-    const wasRemembered = lastConversation() === c.id
-    if (wasRemembered) forgetConversation()
     if (wasOpen) {
       era.current++
       wanted.current = null
@@ -692,7 +687,6 @@ export function Talk({
         if (!deleteHold.cancel(c.id)) return
         tick((n) => n + 1)
         if (wasOpen) show(c.id)
-        else if (wasRemembered) rememberConversation(c.id)
       },
     })
   }

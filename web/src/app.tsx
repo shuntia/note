@@ -9,11 +9,11 @@ import {
 } from 'react'
 import { flushSync } from 'react-dom'
 import { api, ApiError, setOnUnauthorized } from './api'
+import { Jot } from './jot'
 import { glide, lift, viewIn, viewOut } from './motion-gsap'
 import { reducedMotion } from './motion'
 import { NavIcon } from './navicon'
 import { prefsFrom, writePrefs } from './prefs'
-import { makeHold } from './held'
 import { readSession, writeSession, type FocusSession } from './session'
 import type { Me } from './types'
 import { Admin } from './views/Admin'
@@ -28,18 +28,12 @@ import './styles/shell.css'
 // `admin` is reached from Settings only, so it never joins NAV.
 type Tab = 'today' | 'tasks' | 'chat' | 'memory' | 'settings' | 'admin'
 
-const DRAFT_KEY = 'note.captureDraft'
-const CAPTURE_PLACEHOLDER = 'Jot anything'
-
 // The deep link a push notification or an ntfy click carries; the id of the thread it names.
 function conversationOf(url: string): number | null {
   const hash = url.startsWith('#') ? url : new URL(url, location.href).hash
   const match = /^#\/chat\/(\d+)$/.exec(hash)
   return match ? Number(match[1]) : null
 }
-
-// No API removes a task, so the create waits out the undo window before it is sent.
-const captureHold = makeHold<string>()
 
 // `windowMs` is the undo window the action holds open; the toast must outlast it.
 export type ToastAction = { label: string; run: () => void; windowMs?: number }
@@ -51,6 +45,8 @@ export type ViewProps = {
   onChanged: () => void
   // Switches to Talk on a new conversation with this text waiting in the composer.
   openTalk: (draft: string) => void
+  // Switches to Talk landing on a thread that already exists.
+  openConversation: (id: number) => void
   // Opens a focus session; Home carries it for as long as it runs.
   openNow: (session: FocusSession) => void
 }
@@ -225,7 +221,14 @@ export function App() {
   if (me === undefined) return null
   if (me === null) return <Login onSignedIn={setMe} />
 
-  const views: ViewProps = { notify, refresh, onChanged, openTalk, openNow: changeSession }
+  const views: ViewProps = {
+    notify,
+    refresh,
+    onChanged,
+    openTalk,
+    openConversation,
+    openNow: changeSession,
+  }
 
   const toastNode = toast && (
     <div className={`toast${mobile ? ' above-tabs' : ''}`} role="status">
@@ -256,6 +259,8 @@ export function App() {
           onChanged={onChanged}
           refresh={refresh}
           openNow={changeSession}
+          openTalk={openTalk}
+          openConversation={openConversation}
           mobile={mobile}
           armed={!turning}
         />
@@ -294,7 +299,7 @@ export function App() {
         <header className="topbar">
           <span className="brand">Note</span>
           <Rail kind="topnav" current={current} go={go} />
-          <Capture notify={notify} onChanged={onChanged} />
+          <Jot openTalk={openTalk} openConversation={openConversation} tab={tab} />
         </header>
       )}
       {layers.map((l) => (
@@ -376,96 +381,6 @@ function useMedia(query: string): boolean {
     return () => mq.removeEventListener('change', on)
   }, [query])
   return matches
-}
-
-function readDraft(): string {
-  try {
-    return localStorage.getItem(DRAFT_KEY) ?? ''
-  } catch {
-    return ''
-  }
-}
-
-function writeDraft(text: string) {
-  try {
-    if (text) localStorage.setItem(DRAFT_KEY, text)
-    else localStorage.removeItem(DRAFT_KEY)
-  } catch {
-    // storage blocked; the draft still holds for this session
-  }
-}
-
-function Capture({
-  notify,
-  onChanged,
-}: {
-  notify: (msg: string, action?: ToastAction) => void
-  onChanged: () => void
-}) {
-  const [text, setText] = useState(readDraft)
-  const input = useRef<HTMLInputElement>(null)
-  // Where focus was when the shortcut stole it, so Esc can hand it back.
-  const returnTo = useRef<HTMLElement | null>(null)
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== 'n' || e.ctrlKey || e.metaKey || e.altKey || e.defaultPrevented) return
-      const el = e.target as HTMLElement | null
-      const tag = el?.tagName
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el?.isContentEditable) return
-      e.preventDefault()
-      returnTo.current = el
-      input.current?.focus()
-    }
-    document.addEventListener('keydown', onKey)
-    return () => document.removeEventListener('keydown', onKey)
-  }, [])
-
-  const change = (value: string) => {
-    setText(value)
-    writeDraft(value)
-  }
-
-  const submit = (e: FormEvent) => {
-    e.preventDefault()
-    const title = text.trim()
-    if (!title) return
-    change('')
-    captureHold.start(title, () => {
-      api
-        .addTask(title)
-        .then(onChanged)
-        .catch(() => notify("Couldn't save that. Try again."))
-    })
-    notify('Saved to Tasks', {
-      label: 'Undo',
-      run: () => captureHold.cancel(title),
-    })
-  }
-
-  return (
-    <form className="capture" onSubmit={submit}>
-      <span className="capture-glyph" aria-hidden="true">
-        +
-      </span>
-      <input
-        ref={input}
-        value={text}
-        aria-label={CAPTURE_PLACEHOLDER}
-        placeholder={CAPTURE_PLACEHOLDER}
-        onChange={(e) => change(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key !== 'Escape') return
-          e.currentTarget.blur()
-          returnTo.current?.focus()
-          returnTo.current = null
-        }}
-      />
-      <kbd className="capture-key" aria-hidden="true">
-        N
-      </kbd>
-    </form>
-  )
 }
 
 function Login({ onSignedIn }: { onSignedIn: (me: Me) => void }) {
