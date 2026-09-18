@@ -20,6 +20,7 @@ import type {
   Passkey,
   PromptDoc,
   PromptName,
+  Review,
   SecurityState,
   SessionStart,
   Settings,
@@ -233,6 +234,7 @@ export const api = {
   },
   memoryRead: (id: string) => request<MemoryFact>(`/api/memory/${encodeURIComponent(id)}`),
   debrief: () => request<Debrief>('/api/debrief'),
+  review: () => request<Review>('/api/review'),
   vapidKey: () => request<{ key: string }>('/api/push/vapid_public_key'),
   pushSubscribe: (sub: PushSubscriptionJSON) =>
     request<void>('/api/push/subscribe', { method: 'POST', body: JSON.stringify(sub) }),
