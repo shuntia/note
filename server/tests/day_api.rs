@@ -252,6 +252,59 @@ async fn allocate_fills_the_free_time_and_a_second_run_keeps_what_is_settled() {
 }
 
 #[tokio::test]
+async fn carrying_a_day_moves_its_blocks_and_leaves_the_routines() {
+    let (app, cookie, _cfg) = common::app_with_logged_in_user().await;
+    let date = today();
+    free_afternoon(&app, &cookie, date).await;
+    let (status, _) = call(
+        &app,
+        &cookie,
+        Method::POST,
+        "/api/tasks",
+        Some(r#"{"title":"read the chapter"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    call(&app, &cookie, Method::POST, &format!("/api/plan/{date}/allocate"), None).await;
+
+    let (status, out) =
+        call(&app, &cookie, Method::POST, &format!("/api/plan/{date}/carry"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(out["moved"], 1);
+
+    let (_, day) = call(&app, &cookie, Method::GET, &format!("/api/day/{date}"), None).await;
+    let events = day["events"].as_array().unwrap();
+    let block = events.iter().find(|e| e["entry"] == "block").expect("the block is still listed");
+    assert_eq!(block["status"], "dropped");
+    assert_eq!(block["moved_to"]["date"], ahead(1).to_string());
+    let routine = events.iter().find(|e| e["kind"] == "checkin_call").unwrap();
+    assert_eq!(routine["status"], "pending", "a routine is not the day's leftovers");
+
+    let (_, tomorrow) = call(&app, &cookie, Method::GET, &format!("/api/day/{}", ahead(1)), None).await;
+    let landed = tomorrow["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["entry"] == "block")
+        .expect("the block landed tomorrow");
+    assert_eq!(landed["task"]["title"], "read the chapter");
+
+    let (_, again) =
+        call(&app, &cookie, Method::POST, &format!("/api/plan/{date}/carry"), None).await;
+    assert_eq!(again["moved"], 0);
+}
+
+#[tokio::test]
+async fn a_day_that_is_over_cannot_be_carried() {
+    let (app, cookie, _cfg) = common::app_with_logged_in_user().await;
+    let (status, _) =
+        call(&app, &cookie, Method::POST, &format!("/api/plan/{}/carry", ahead(-1)), None).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let (status, _) = call(&app, &cookie, Method::POST, "/api/plan/not-a-date/carry", None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn a_day_that_is_over_cannot_be_filled() {
     let (app, cookie, _cfg) = common::app_with_logged_in_user().await;
     let (status, _) =

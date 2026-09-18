@@ -498,7 +498,7 @@ pub fn move_to_tomorrow(
         .map_err(anyhow::Error::from)?
         .tomorrow()
         .map_err(anyhow::Error::from)?;
-    let tx = conn.unchecked_transaction()?;
+    let tx = conn.is_autocommit().then(|| conn.unchecked_transaction()).transpose()?;
     let plan_id = generate(conn, user_id, template, tomorrow)?;
     let existing: Option<i64> = conn
         .query_row(
@@ -540,8 +540,65 @@ pub fn move_to_tomorrow(
          WHERE id = ?2",
         (new_id, event_id, jiff::Timestamp::now().to_string()),
     )?;
-    tx.commit()?;
+    if let Some(tx) = tx {
+        tx.commit()?;
+    }
     Ok(Some((new_id, tomorrow)))
+}
+
+/// The close of the day, applied: every block of the day still waiting on the
+/// user goes to tomorrow, and what is left of the day's checks is dropped
+/// rather than fired into an evening that is over. Returns how many blocks
+/// moved.
+pub fn carry(
+    conn: &Connection,
+    config_dir: &std::path::Path,
+    username: &str,
+    user_id: i64,
+    date: jiff::civil::Date,
+    now: jiff::Timestamp,
+) -> Result<usize> {
+    let template = crate::config::UserConfig::load(config_dir, username)
+        .ok()
+        .and_then(|c| Template::load(config_dir, username, &c.template).ok())
+        .unwrap_or(Template { events: Vec::new() });
+    let tx = conn.is_autocommit().then(|| conn.unchecked_transaction()).transpose()?;
+    let blocks: Vec<i64> = {
+        let mut stmt = conn.prepare(
+            "SELECT e.id FROM events e
+             JOIN plans p ON p.id = e.plan_id
+             JOIN event_tasks et ON et.event_id = e.id
+             WHERE p.user_id = ?1 AND p.date = ?2 AND e.end_wall_time IS NOT NULL
+               AND e.status IN ('pending', 'snoozed', 'fired')
+             ORDER BY e.wall_time",
+        )?;
+        let rows = stmt.query_map((user_id, date.to_string()), |r| r.get(0))?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+    let mut moved = 0;
+    for id in blocks {
+        match move_to_tomorrow(conn, user_id, id, &template) {
+            Ok(Some(_)) => moved += 1,
+            Ok(None) | Err(ShiftError::Decided { .. }) => {}
+            Err(e) => return Err(anyhow::Error::from(e)),
+        }
+    }
+    let dropped = conn.execute(
+        "UPDATE events SET status = 'dropped', decided_at = ?1
+         WHERE kind = ?2 AND status IN ('pending', 'snoozed')
+           AND plan_id IN (SELECT id FROM plans WHERE user_id = ?3 AND date = ?4)",
+        (now.to_string(), crate::triggers::KIND, user_id, date.to_string()),
+    )?;
+    crate::log::record(
+        conn,
+        Some(user_id),
+        "plan_carried",
+        &format!("{date}: {moved} block(s) to tomorrow, {dropped} check(s) dropped"),
+    )?;
+    if let Some(tx) = tx {
+        tx.commit()?;
+    }
+    Ok(moved)
 }
 
 #[cfg(test)]
@@ -763,6 +820,79 @@ mod tests {
             move_to_tomorrow(&conn, uid, 1, &t),
             Err(ShiftError::Decided { .. })
         ));
+    }
+
+    /// A Monday holding a routine at 09:00 and a block from 09:30, with the
+    /// config the carry reads its template from.
+    fn day_with_a_block() -> (Connection, i64, tempfile::TempDir, jiff::civil::Date) {
+        let conn = crate::db::open_memory().unwrap();
+        let uid = crate::auth::create_user(&conn, "aki", "p", false).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let write = |rel: &str, c: &str| {
+            let path = tmp.path().join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, c).unwrap();
+        };
+        write("defaults/user.toml", "display_name = \"X\"\ntimezone = \"UTC\"\ntemplate = \"default\"\n");
+        write(
+            "defaults/templates/default.toml",
+            "[[events]]\nkind='meds'\ntime='09:00'\ndays=['mon']\nchannel='push'\n\
+             [[events]]\nkind='Work time'\ntime='09:30'\nend_time='12:30'\nentry='block'\ndays=['mon']\nchannel='push'\n",
+        );
+        let date: jiff::civil::Date = "2026-08-31".parse().unwrap();
+        let template = crate::templates::Template::load(tmp.path(), "aki", "default").unwrap();
+        generate(&conn, uid, &template, date).unwrap();
+        let task = crate::tasks::create(
+            &conn,
+            uid,
+            crate::tasks::NewTask { title: "essay".into(), ..Default::default() },
+            "manual",
+            crate::tasks::Actor::User,
+        )
+        .unwrap();
+        conn.execute("INSERT INTO event_tasks (event_id, task_id) VALUES (2, ?1)", [task.id]).unwrap();
+        (conn, uid, tmp, date)
+    }
+
+    #[test]
+    fn the_close_of_the_day_carries_blocks_and_drops_what_is_left_of_the_checks() {
+        let (conn, uid, tmp, date) = day_with_a_block();
+        let now: jiff::Timestamp = "2026-08-31T21:30:00Z".parse().unwrap();
+        crate::triggers::lay(
+            &conn,
+            &crate::triggers::Lay {
+                config_dir: tmp.path(), user_id: uid, username: "aki", at: "22:00",
+                prompt: "how did the essay go?", date, cancel: None, conversation_id: None,
+                work_session_id: None, system: false, now,
+            },
+        )
+        .unwrap();
+        assert_eq!(carry(&conn, tmp.path(), "aki", uid, date, now).unwrap(), 1);
+
+        let today = events_for(&conn, uid, date).unwrap();
+        let block = today.iter().find(|e| e.id == 2).unwrap();
+        assert_eq!(block.status, "dropped");
+        assert_eq!(block.moved_to.as_ref().unwrap().date, "2026-09-01");
+        let trigger = today.iter().find(|e| e.kind == "trigger").unwrap();
+        assert_eq!(trigger.status, "dropped");
+        assert!(trigger.decided_at.is_some());
+        assert_eq!(today.iter().find(|e| e.id == 1).unwrap().status, "pending", "a routine stays");
+
+        let tomorrow = events_for(&conn, uid, "2026-09-01".parse().unwrap()).unwrap();
+        let landed = tomorrow.iter().find(|e| e.entry == "block").unwrap();
+        assert_eq!((landed.wall_time.as_str(), landed.end_wall_time.as_deref()), ("09:30", Some("12:30")));
+        assert_eq!(landed.task.as_ref().unwrap().title, "essay");
+
+        assert_eq!(carry(&conn, tmp.path(), "aki", uid, date, now).unwrap(), 0, "nothing left to move");
+    }
+
+    #[test]
+    fn a_finished_block_stays_where_it_was() {
+        let (conn, uid, tmp, date) = day_with_a_block();
+        set_status(&conn, uid, 2, "done").unwrap().unwrap();
+        let now: jiff::Timestamp = "2026-08-31T21:30:00Z".parse().unwrap();
+        assert_eq!(carry(&conn, tmp.path(), "aki", uid, date, now).unwrap(), 0);
+        assert!(!exists(&conn, uid, "2026-09-01".parse().unwrap()).unwrap());
     }
 
     #[test]
