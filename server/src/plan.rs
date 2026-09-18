@@ -32,8 +32,10 @@ pub struct MovedTo {
 #[derive(Debug, Serialize)]
 pub struct TaskRef {
     pub id: i64,
+    /// The top-level task's title, even when the block holds one of its steps.
     pub title: String,
     pub state: String,
+    pub step: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -202,12 +204,13 @@ pub fn events_for(conn: &Connection, user_id: i64, date: jiff::civil::Date) -> R
         "SELECT e.id, e.kind, e.wall_time, e.end_wall_time, e.status, e.flexibility,
                 e.slide_window_min, e.channel, e.alert,
                 m.id, mp.date, m.wall_time, m.kind, e.span_min,
-                e.origin, e.decided_at, t.id, t.title, t.state, e.prompt
+                e.origin, e.decided_at, t.id, t.title, t.state, e.prompt, pt.title
          FROM events e JOIN plans p ON p.id = e.plan_id
          LEFT JOIN events m ON m.id = e.moved_to_event_id
          LEFT JOIN plans mp ON mp.id = m.plan_id
          LEFT JOIN event_tasks et ON et.event_id = e.id
          LEFT JOIN tasks t ON t.id = et.task_id
+         LEFT JOIN tasks pt ON pt.id = t.parent_id
          WHERE p.user_id = ?1 AND p.date = ?2 ORDER BY e.wall_time",
     )?;
     let rows = stmt.query_map((user_id, date.to_string()), |r| {
@@ -240,7 +243,12 @@ pub fn events_for(conn: &Connection, user_id: i64, date: jiff::civil::Date) -> R
                 })
             }).transpose()?,
             task: r.get::<_, Option<i64>>(16)?.map(|id| {
-                Ok::<_, rusqlite::Error>(TaskRef { id, title: r.get(17)?, state: r.get(18)? })
+                let title: String = r.get(17)?;
+                let state: String = r.get(18)?;
+                Ok::<_, rusqlite::Error>(match r.get::<_, Option<String>>(20)? {
+                    Some(parent) => TaskRef { id, title: parent, state, step: Some(title) },
+                    None => TaskRef { id, title, state, step: None },
+                })
             }).transpose()?,
         })
     })?;
