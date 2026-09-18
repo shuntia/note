@@ -1,7 +1,13 @@
 import { useCallback, useEffect, useRef, useState, type FocusEvent } from 'react'
 import { popIn, popOut } from './motion-gsap'
 
-export type OverflowItem = { label: string; run: () => void; disabled?: boolean }
+// `checked` makes the item one of a choice: the menu shows which one holds.
+export type OverflowItem = {
+  label: string
+  run: () => void
+  disabled?: boolean
+  checked?: boolean
+}
 
 // A menu sitting above its trigger leaves and returns downward.
 const opensUp = (menu: HTMLElement | null, trigger: HTMLElement | null) =>
@@ -89,7 +95,8 @@ export function Overflow({
             <button
               key={item.label}
               className="ev-menu-item"
-              role="menuitem"
+              role={item.checked === undefined ? 'menuitem' : 'menuitemradio'}
+              aria-checked={item.checked}
               ref={i === 0 ? first : undefined}
               disabled={item.disabled}
               onClick={() => {

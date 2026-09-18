@@ -428,6 +428,9 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
   cursor: pointer;
 }
 .ev-menu-item:hover:not(:disabled) { background: var(--sunk); }
+.ev-menu-item[aria-checked] { display: flex; align-items: center; gap: 0.5rem; }
+.ev-menu-item[aria-checked]::before { content: '✓'; width: 1em; color: var(--sun-ink); opacity: 0; }
+.ev-menu-item[aria-checked='true']::before { opacity: 1; }
 
 /* a finger needs more than the pointer does */
 @media (pointer: coarse), (max-width: 767.98px) {
