@@ -437,13 +437,13 @@ pub fn set_alert(
     Ok(Some(()))
 }
 
-/// Sends an undecided routine to the day after its own plan date, creating that
+/// Sends an undecided entry to the day after its own plan date, creating that
 /// plan from `template` if needed, and marks the original dropped with a pointer
 /// to where it landed. When tomorrow's plan already holds an undecided instance
-/// of the same routine at the same planned time — the template recurs — that
-/// instance is the landing place; otherwise a copy is inserted at
-/// `orig_wall_time`, so a snoozed event lands at its planned time. A block, like
-/// a missing event, answers `None`.
+/// of the same shape at the same planned time — the template recurs — that
+/// instance is the landing place; otherwise a copy is inserted. A routine lands
+/// at `orig_wall_time`, so a snoozed one arrives at its planned time; a block
+/// keeps the shape it has now, and takes its task with it.
 pub fn move_to_tomorrow(
     conn: &Connection,
     user_id: i64,
@@ -453,9 +453,6 @@ pub fn move_to_tomorrow(
     let Some(ev) = owned_event(conn, user_id, event_id)? else {
         return Ok(None);
     };
-    if ev.is_block {
-        return Ok(None);
-    }
     if ev.status == "done" || ev.status == "dropped" {
         return Err(ShiftError::Decided { status: ev.status });
     }
@@ -475,7 +472,8 @@ pub fn move_to_tomorrow(
         .query_row(
             "SELECT t.id FROM events t JOIN events s ON s.id = ?2
              WHERE t.plan_id = ?1 AND t.kind = s.kind AND t.orig_wall_time = s.orig_wall_time
-               AND t.end_wall_time IS NULL AND t.status IN ('pending', 'snoozed', 'fired')
+               AND (t.end_wall_time IS NULL) = (s.end_wall_time IS NULL)
+               AND t.status IN ('pending', 'snoozed', 'fired')
              ORDER BY t.id LIMIT 1",
             (plan_id, event_id),
             |r| r.get(0),
@@ -488,12 +486,21 @@ pub fn move_to_tomorrow(
                 "INSERT INTO events (plan_id, kind, wall_time, orig_wall_time, end_wall_time,
                                      flexibility, slide_window_min, channel, alert, span_min,
                                      message, origin)
-                 SELECT ?1, kind, orig_wall_time, orig_wall_time, end_wall_time,
+                 SELECT ?1,
+                        kind,
+                        CASE WHEN end_wall_time IS NULL THEN orig_wall_time ELSE wall_time END,
+                        orig_wall_time, end_wall_time,
                         flexibility, slide_window_min, channel, alert, span_min, message, origin
                  FROM events WHERE id = ?2",
                 (plan_id, event_id),
             )?;
-            conn.last_insert_rowid()
+            let id = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO event_tasks (event_id, task_id)
+                 SELECT ?1, task_id FROM event_tasks WHERE event_id = ?2",
+                (id, event_id),
+            )?;
+            id
         }
     };
     conn.execute(
@@ -691,7 +698,7 @@ mod tests {
     }
 
     #[test]
-    fn a_block_or_a_decided_event_never_moves() {
+    fn a_decided_event_never_moves_and_a_block_takes_its_shape_along() {
         let conn = crate::db::open_memory().unwrap();
         let uid = crate::auth::create_user(&conn, "a", "p", false).unwrap();
         let date: jiff::civil::Date = "2026-08-31".parse().unwrap();
@@ -709,8 +716,16 @@ mod tests {
             ],
         };
         generate(&conn, uid, &t, date).unwrap();
-        assert!(move_to_tomorrow(&conn, uid, 2, &t).unwrap().is_none());
         assert!(move_to_tomorrow(&conn, uid, 99, &t).unwrap().is_none());
+        reshape(&conn, uid, 2, "10:00", "13:00").unwrap().unwrap();
+        let (block_id, tomorrow) = move_to_tomorrow(&conn, uid, 2, &t).unwrap().unwrap();
+        let moved: (String, Option<String>) = conn
+            .query_row("SELECT wall_time, end_wall_time FROM events WHERE id = ?1", [block_id], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(moved, ("10:00".into(), Some("13:00".into())));
+        assert_eq!(tomorrow.to_string(), "2026-09-01");
         set_status(&conn, uid, 1, "done").unwrap().unwrap();
         assert!(matches!(
             move_to_tomorrow(&conn, uid, 1, &t),
