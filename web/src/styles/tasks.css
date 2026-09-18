@@ -1,16 +1,16 @@
 /* ── horizon: tasks ─────────────────────────────────────────────── */
 .view:has(> .tasks) { padding: 0; }
-.tasks { width: 100%; padding: 56px 24px 100px; max-width: 720px; margin: 0 auto; }
+.tasks { width: 100%; padding: 3.5rem 1.5rem 6.25rem; max-width: 45rem; margin: 0 auto; }
 @media (min-width: 768px) {
-  .tasks { margin: 0; max-width: min(760px, calc(100% - 144px)); padding: 46px 0 0 120px; }
-  .task-add { max-width: 520px; }
+  .tasks { margin: 0; max-width: min(max(47.5rem, 40vw), calc(100% - 2 * var(--rail))); padding: 2.875rem 0 0 var(--rail); }
+  .task-add { max-width: max(32.5rem, 27vw); }
 }
 
-.task-add { margin-bottom: 26px; }
+.task-add { margin-bottom: 1.625rem; }
 /* the one filled control on this screen, and only with something to save */
 .tasks .task-add button:not(:disabled) { background: var(--ink); color: var(--ivory); }
 
-.task-group { display: flex; flex-direction: column; gap: 6px; margin-top: 28px; }
+.task-group { display: flex; flex-direction: column; gap: 0.375rem; margin-top: 1.75rem; }
 .task-group:first-of-type { margin-top: 0; }
 .task-group.done { margin-top: 0; }
 .task-group-head { margin: 0; font-size: 0.72rem; letter-spacing: 0.12em; font-weight: 700; color: var(--faint); }
@@ -21,8 +21,8 @@
 
 /* the trailing controls hold one width per group, so every chip in it lands on
    the same edge and the steps below count to that edge too */
-.task-group { --acts: 24px; }
-.task-group.now { --acts: 68px; }
+.task-group { --acts: 1.5rem; }
+.task-group.now { --acts: 4.25rem; }
 .task-group.done { --acts: 0px; }
 
 /* the title has the whole width it needs: the status sits under it until there
@@ -32,9 +32,9 @@
   grid-template-columns: auto minmax(0, 1fr) auto;
   grid-template-areas: 'tick body acts' 'tick chips acts';
   align-items: center;
-  column-gap: 12px;
-  row-gap: 2px;
-  min-height: 52px;
+  column-gap: 0.75rem;
+  row-gap: 0.125rem;
+  min-height: 3.25rem;
 }
 .task-row > .tick { grid-area: tick; }
 .task-body { grid-area: body; }
@@ -47,14 +47,14 @@
   }
   .task-chips { justify-self: end; }
 }
-.task-chips { display: flex; align-items: center; gap: 10px; }
+.task-chips { display: flex; align-items: center; gap: 0.625rem; }
 .task-chips:empty { display: none; }
-.task-acts { display: flex; align-items: center; justify-content: flex-end; gap: 8px; width: var(--acts); }
+.task-acts { display: flex; align-items: center; justify-content: flex-end; gap: 0.5rem; width: var(--acts); }
 .task-group.later .task-row { color: var(--quiet); }
 .task-group.done .task-row { color: var(--faint); }
 
 /* the strike is drawn across the title, so the title is as wide as its words */
-.task-body { min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 1px; }
+.task-body { min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 0.0625rem; }
 .task-title { max-width: 100%; }
 .task-title { position: relative; font-size: 1rem; }
 .task-sub { font-size: 0.78rem; color: var(--faint); }
@@ -76,8 +76,8 @@
 .task-step.done .task-step-title::after { width: 100%; }
 
 .tick {
-  width: 24px;
-  height: 24px;
+  width: 1.5rem;
+  height: 1.5rem;
   padding: 0;
   border-radius: 50%;
   border: 2px solid var(--quiet);
@@ -91,8 +91,8 @@
 }
 .task-group.later .tick { border-color: var(--line); }
 .tick svg {
-  width: 14px;
-  height: 14px;
+  width: 0.875rem;
+  height: 0.875rem;
   fill: none;
   stroke: var(--ivory);
   stroke-width: 2.6;
@@ -111,7 +111,7 @@
 
 .task-dur {
   font-size: 0.75rem;
-  padding: 2px 9px;
+  padding: 0.125rem 0.5625rem;
   border-radius: 999px;
   border: 1px solid var(--line);
   color: var(--faint);
@@ -122,8 +122,8 @@
 .task-due.overdue { color: var(--rose); }
 
 .task-start {
-  width: 36px;
-  height: 36px;
+  width: 2.25rem;
+  height: 2.25rem;
   border: 0;
   border-radius: 50%;
   background: var(--sun);
@@ -134,29 +134,29 @@
   transition: transform 200ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 .task-start:hover { transform: scale(1.08); }
-.task-start svg { width: 16px; height: 16px; fill: var(--accent-fg); }
+.task-start svg { width: 1rem; height: 1rem; fill: var(--accent-fg); }
 
 /* the row keeps one status and its title; its other actions wait under the dots */
 .task-more { position: relative; flex: none; }
-.task-more .ev-more { width: 24px; height: 24px; color: var(--faint); }
+.task-more .ev-more { width: 1.5rem; height: 1.5rem; color: var(--faint); }
 .task-item .task-more { opacity: 0; transition: opacity 160ms ease; }
 .task-item:hover .task-more,
 .task-item:focus-within .task-more,
 .task-more[data-open='true'] { opacity: 1; }
 
-.task-steps { list-style: none; margin: 0; padding: 0 calc(var(--acts) + 12px) 0 36px; }
-.task-step { display: flex; align-items: center; gap: 12px; min-height: 40px; color: var(--quiet); font-size: 0.92rem; }
-.task-step .tick { width: 20px; height: 20px; border-color: var(--line); }
-.task-step .tick svg { width: 12px; height: 12px; }
+.task-steps { list-style: none; margin: 0; padding: 0 calc(var(--acts) + 0.75rem) 0 2.25rem; }
+.task-step { display: flex; align-items: center; gap: 0.75rem; min-height: 2.5rem; color: var(--quiet); font-size: 0.92rem; }
+.task-step .tick { width: 1.25rem; height: 1.25rem; border-color: var(--line); }
+.task-step .tick svg { width: 0.75rem; height: 0.75rem; }
 .task-step-title { position: relative; min-width: 0; transition: color 220ms ease; }
 .task-step.done { color: var(--faint); }
 .task-step-min { margin-left: auto; font-size: 0.75rem; color: var(--faint); font-variant-numeric: tabular-nums; }
 
 .task-done-fold {
-  margin-top: 20px;
+  margin-top: 1.25rem;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 0.5rem;
   font: inherit;
   font-size: 0.875rem;
   color: var(--faint);
@@ -166,8 +166,8 @@
   cursor: pointer;
 }
 .task-done-fold svg {
-  width: 16px;
-  height: 16px;
+  width: 1rem;
+  height: 1rem;
   fill: none;
   stroke: currentColor;
   stroke-width: 1.8;
@@ -182,9 +182,9 @@
 .tasks [data-tip]::after {
   content: attr(data-tip);
   position: absolute;
-  bottom: calc(100% + 6px);
+  bottom: calc(100% + 0.375rem);
   left: 50%;
-  padding: 3px 9px;
+  padding: 0.1875rem 0.5625rem;
   border-radius: 999px;
   background: var(--ink);
   color: var(--ivory);
