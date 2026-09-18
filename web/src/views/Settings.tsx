@@ -36,11 +36,6 @@ type Loaded = {
   counter: CounterMode
   nightly: boolean
   checkins: boolean
-  ntfyEnabled: boolean
-  ntfyTopic: string
-  voiceEnabled: boolean
-  phone: string
-  calls: boolean
 }
 type Save = { row: string; kind: 'busy' | 'saved' | 'failed'; message?: string } | null
 
@@ -166,8 +161,6 @@ export function Settings({
   const [save, setSave] = useState<Save>(null)
   const [open, setOpen] = useState<string | null>(null)
   const [theme, setTheme] = useState<ThemeChoice>(storedTheme)
-  const [ntfyDraft, setNtfyDraft] = useState('')
-  const [phoneDraft, setPhoneDraft] = useState('')
 
   const load = () => {
     setState(undefined)
@@ -175,8 +168,6 @@ export function Settings({
     api
       .settings()
       .then((s) => {
-        setNtfyDraft(s.ntfy_topic)
-        setPhoneDraft(s.phone_number)
         setState({
           choices: { templates: s.templates, timezones: s.timezones },
           baseline: draftOf(s),
@@ -186,11 +177,6 @@ export function Settings({
           counter: s.counter,
           nightly: s.nightly_enabled,
           checkins: s.checkins_enabled,
-          ntfyEnabled: s.ntfy_enabled,
-          ntfyTopic: s.ntfy_topic,
-          voiceEnabled: s.voice_enabled,
-          phone: s.phone_number,
-          calls: s.calls_enabled,
         })
       })
       .catch(() => setState('error'))
@@ -272,72 +258,13 @@ export function Settings({
     }
   }
 
-  // A cleared field drops the override, so the reply carries the default topic
-  // the input and its placeholder fall back to.
-  const commitNtfy = async () => {
-    if (!loaded || ntfyDraft === loaded.ntfyTopic) return
-    setSave({ row: 'ntfy', kind: 'busy' })
-    try {
-      const saved = await api.saveSettings({ ntfy_topic: ntfyDraft })
-      setState((s) => (s && s !== 'error' ? { ...s, ntfyTopic: saved.ntfy_topic } : s))
-      setNtfyDraft(saved.ntfy_topic)
-      setSave({ row: 'ntfy', kind: 'saved' })
-    } catch (err) {
-      setSave({ row: 'ntfy', kind: 'failed', message: failure(err) })
-    }
-  }
-
-  // A cleared field drops the number, so the reply carries the empty value the
-  // input falls back to.
-  const commitPhone = async () => {
-    if (!loaded || phoneDraft === loaded.phone) return
-    setSave({ row: 'calls', kind: 'busy' })
-    try {
-      const saved = await api.saveSettings({ phone_number: phoneDraft })
-      setState((s) => (s && s !== 'error' ? { ...s, phone: saved.phone_number } : s))
-      setPhoneDraft(saved.phone_number)
-      setSave({ row: 'calls', kind: 'saved' })
-    } catch (err) {
-      setPhoneDraft(loaded.phone)
-      setSave({ row: 'calls', kind: 'failed', message: failure(err) })
-    }
-  }
-
-  const commitCalls = async (on: boolean) => {
-    setSave({ row: 'calls', kind: 'busy' })
-    try {
-      const saved = await api.saveSettings({ calls_enabled: on })
-      setState((s) => (s && s !== 'error' ? { ...s, calls: saved.calls_enabled } : s))
-      setSave({ row: 'calls', kind: 'saved' })
-    } catch (err) {
-      setSave({ row: 'calls', kind: 'failed', message: failure(err) })
-    }
-  }
-
-  const callNow = async () => {
-    setSave({ row: 'calls', kind: 'busy' })
-    try {
-      await api.notifyCall()
-      setSave({ row: 'calls', kind: 'saved', message: '✓ Calling you now' })
-    } catch (err) {
-      setSave({
-        row: 'calls',
-        kind: 'failed',
-        message:
-          err instanceof ApiError && err.status === 409
-            ? 'Add a phone number first.'
-            : "That call didn't go through. Try again.",
-      })
-    }
-  }
-
   const sendTest = async () => {
-    setSave({ row: 'ntfy', kind: 'busy' })
+    setSave({ row: 'test', kind: 'busy' })
     try {
       const { via } = await api.notifyTest()
-      setSave({ row: 'ntfy', kind: 'saved', message: `✓ Sent via ${via}` })
+      setSave({ row: 'test', kind: 'saved', message: `✓ Sent via ${via}` })
     } catch {
-      setSave({ row: 'ntfy', kind: 'failed', message: "That didn't reach you. Try again." })
+      setSave({ row: 'test', kind: 'failed', message: "That didn't reach you. Try again." })
     }
   }
 
@@ -525,92 +452,21 @@ export function Settings({
 
       <Group head="REACH">
         <PushRow notify={notify} />
-        {loaded?.ntfyEnabled && (
-          <FoldRow
-            label="ntfy"
-            value={loaded.ntfyTopic}
-            open={open === 'ntfy'}
-            onToggle={fold('ntfy')}
+        <div className="set-row">
+          <span className="set-row-body">
+            <span className="set-label">Test notification</span>
+            <span className="set-sub">Goes out the way a fired event would</span>
+          </span>
+          <Status save={save} row="test" />
+          <button
+            type="button"
+            className="btn-haze small"
+            disabled={busy}
+            onClick={() => void sendTest()}
           >
-            {open === 'ntfy' && (
-              <div className="set-fold-body">
-                <div className="set-token-form">
-                  <input
-                    aria-label="ntfy topic"
-                    placeholder={loaded.ntfyTopic}
-                    maxLength={64}
-                    spellCheck={false}
-                    value={ntfyDraft}
-                    onChange={(e) => setNtfyDraft(e.target.value)}
-                    onBlur={() => void commitNtfy()}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') e.currentTarget.blur()
-                    }}
-                  />
-                  <button
-                    type="button"
-                    className="btn-haze small"
-                    disabled={busy}
-                    onClick={() => void sendTest()}
-                  >
-                    Send test
-                  </button>
-                </div>
-                <span className="set-sub">Subscribe to this topic in the ntfy app</span>
-                <Status save={save} row="ntfy" />
-              </div>
-            )}
-          </FoldRow>
-        )}
-        {loaded?.voiceEnabled && (
-          <FoldRow
-            label="Calls"
-            value={loaded.phone || 'No number'}
-            open={open === 'calls'}
-            onToggle={fold('calls')}
-          >
-            {open === 'calls' && (
-              <div className="set-fold-body">
-                <div className="set-token-form">
-                  <input
-                    type="tel"
-                    aria-label="Phone number"
-                    placeholder="+15551234567"
-                    maxLength={16}
-                    spellCheck={false}
-                    value={phoneDraft}
-                    onChange={(e) => setPhoneDraft(e.target.value)}
-                    onBlur={() => void commitPhone()}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') e.currentTarget.blur()
-                    }}
-                  />
-                  <button
-                    type="button"
-                    className="btn-haze small"
-                    disabled={busy || !loaded.phone}
-                    onClick={() => void callNow()}
-                  >
-                    Call me now
-                  </button>
-                </div>
-                <div className="set-row">
-                  <span className="set-row-body">
-                    <span className="set-label">Call me for check-ins</span>
-                    <span className="set-sub">Note reads it out; the keypad answers</span>
-                  </span>
-                  <Switch
-                    label="Call me for check-ins"
-                    on={loaded.calls}
-                    disabled={busy}
-                    onToggle={() => void commitCalls(!loaded.calls)}
-                  />
-                </div>
-                <Status save={save} row="calls" />
-              </div>
-            )}
-          </FoldRow>
-        )}
+            Send test
+          </button>
+        </div>
         {loaded && (
           <div className="set-row">
             <span className="set-row-body">
@@ -628,13 +484,6 @@ export function Settings({
             />
           </div>
         )}
-        <div className="set-row">
-          <span className="set-row-body">
-            <span className="set-label">Calls</span>
-            <span className="set-sub">Needs a number</span>
-          </span>
-          <Switch label="Calls" on={false} disabled />
-        </div>
       </Group>
 
       <Group head="NOTE">

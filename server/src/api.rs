@@ -35,7 +35,6 @@ pub fn router(state: AppState) -> Router {
         .route("/api/conversations/{id}/messages", get(conversation_messages))
         .route("/api/settings", get(settings_get).put(settings_put))
         .route("/api/notify/test", post(notify_test))
-        .route("/api/notify/call", post(notify_call))
         .route(
             "/api/prompts/{name}",
             get(prompt_get).put(prompt_put).delete(prompt_delete),
@@ -53,13 +52,11 @@ pub fn router(state: AppState) -> Router {
         .route("/api/events/{id}/drop", post(event_drop))
         .route("/api/events/{id}/alert", post(event_alert))
         .route("/api/events/{id}/move_tomorrow", post(event_move_tomorrow))
-        .route("/api/events/{id}/channel", post(event_channel))
         .route("/api/ws", get(ws_connect))
         .route("/api/push/subscribe", post(push_subscribe))
         .route("/api/push/unsubscribe", post(push_unsubscribe))
         .route("/api/push/vapid_public_key", get(vapid_public_key))
         .merge(calendar_router())
-        .merge(voice_router())
         .nest("/api/security", crate::security::routes())
         .nest("/api/admin", crate::admin::routes())
         .with_state(state)
@@ -1080,23 +1077,10 @@ struct SettingsPatch {
     counter: Option<String>,
     nightly_enabled: Option<bool>,
     checkins_enabled: Option<bool>,
-    ntfy_topic: Option<String>,
-    phone_number: Option<String>,
-    calls_enabled: Option<bool>,
     alerts: Option<Vec<AlertPatch>>,
 }
 
-/// The prefix the user's default topic is built from, whether or not the
-/// channel is configured, so Settings can always name the topic to subscribe to.
-fn ntfy_topic_prefix(state: &AppState) -> &str {
-    state
-        .ntfy_topic_prefix
-        .as_deref()
-        .unwrap_or(crate::config::DEFAULT_NTFY_TOPIC_PREFIX)
-}
-
 fn settings_body(
-    state: &AppState,
     cfg: &crate::config::UserConfig,
     user: &CurrentUser,
     schedule: Vec<crate::templates::ScheduleRow>,
@@ -1113,11 +1097,6 @@ fn settings_body(
         "category": category,
         "nightly_enabled": features.nightly,
         "checkins_enabled": features.checkins,
-        "ntfy_enabled": state.ntfy_topic_prefix.is_some(),
-        "ntfy_topic": cfg.ntfy_topic_for(ntfy_topic_prefix(state), &user.username),
-        "voice_enabled": state.voice.is_some(),
-        "phone_number": cfg.phone().unwrap_or_default(),
-        "calls_enabled": features.calls,
         "schedule": schedule,
     })
 }
@@ -1134,38 +1113,9 @@ fn schedule_rows(
         .unwrap_or_default()
 }
 
-/// A topic the server would deliver another account's messages to. Their
-/// default topic is derived from their username, so claiming it would subscribe
-/// this user to their notifications.
-fn is_another_users_topic(
-    conn: &rusqlite::Connection,
-    prefix: &str,
-    username: &str,
-    topic: &str,
-) -> bool {
-    let Some(other) = topic.strip_prefix(prefix) else {
-        return false;
-    };
-    if other == username {
-        return false;
-    }
-    conn.query_row("SELECT 1 FROM users WHERE username = ?1", [other], |_| Ok(()))
-        .optional()
-        .unwrap_or(None)
-        .is_some()
-}
-
 fn invalid_field(field: &str, requirement: &str) -> axum::response::Response {
     (
         StatusCode::BAD_REQUEST,
-        Json(serde_json::json!({ "error": format!("{field} {requirement}") })),
-    )
-        .into_response()
-}
-
-fn unprocessable_field(field: &str, requirement: &str) -> axum::response::Response {
-    (
-        StatusCode::UNPROCESSABLE_ENTITY,
         Json(serde_json::json!({ "error": format!("{field} {requirement}") })),
     )
         .into_response()
@@ -1185,7 +1135,7 @@ async fn settings_get(user: CurrentUser, State(state): State<AppState>) -> impl 
     zones.sort_unstable();
     let templates = crate::templates::available(&state.config_dir, &user.username);
     let schedule = schedule_rows(&state, &user.username, &cfg.template);
-    let mut body = settings_body(&state, &cfg, &user, schedule);
+    let mut body = settings_body(&cfg, &user, schedule);
     body["templates"] = serde_json::json!(templates);
     body["timezones"] = serde_json::json!(zones);
     Json(body).into_response()
@@ -1194,17 +1144,17 @@ async fn settings_get(user: CurrentUser, State(state): State<AppState>) -> impl 
 /// Merges the supplied subset into the effective values and rewrites the user's
 /// file, rejecting the first invalid field without touching disk. Bell toggles
 /// apply to the template the request leaves selected, and land in the user's own
-/// copy of it. The read,
-/// merge and write run under the DB lock: settings writes are rare, and the
-/// guard is the cheapest serializer that stops two concurrent PUTs from each
-/// writing a file built from the values they read before the other landed.
+/// copy of it. The read, merge and write run under the DB lock: settings writes
+/// are rare, and the guard is the cheapest serializer that stops two concurrent
+/// PUTs from each writing a file built from the values they read before the
+/// other landed.
 async fn settings_put(
     user: CurrentUser,
     State(state): State<AppState>,
     Json(req): Json<SettingsPatch>,
 ) -> impl IntoResponse {
     let templates = crate::templates::available(&state.config_dir, &user.username);
-    let conn = state.db();
+    let _guard = state.db();
     let mut cfg = match crate::config::UserConfig::load(&state.config_dir, &user.username) {
         Ok(c) => c,
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
@@ -1252,37 +1202,6 @@ async fn settings_put(
     if let Some(on) = req.checkins_enabled {
         cfg.checkins_enabled = Some(on);
     }
-    if let Some(topic) = req.ntfy_topic {
-        let topic = topic.trim();
-        if topic.is_empty() {
-            cfg.ntfy_topic = None;
-        } else if !crate::channels::ntfy::valid_topic(topic) {
-            return unprocessable_field(
-                "ntfy_topic",
-                "must be 1 to 64 characters of letters, digits, _ or -",
-            );
-        } else if is_another_users_topic(&conn, ntfy_topic_prefix(&state), &user.username, topic) {
-            return unprocessable_field("ntfy_topic", "is another account's topic");
-        } else {
-            cfg.ntfy_topic = Some(topic.to_string());
-        }
-    }
-    if let Some(on) = req.calls_enabled {
-        cfg.calls_enabled = Some(on);
-    }
-    if let Some(phone) = req.phone_number {
-        let phone = phone.trim();
-        if phone.is_empty() {
-            cfg.phone_number = None;
-        } else if !crate::channels::voice::valid_phone(phone) {
-            return unprocessable_field(
-                "phone_number",
-                "must be an E.164 number, like +15551234567",
-            );
-        } else {
-            cfg.phone_number = Some(phone.to_string());
-        }
-    }
     if let Some(alerts) = req.alerts {
         let changes: Vec<(usize, bool)> = alerts.iter().map(|a| (a.index, a.alert)).collect();
         if let Err(e) =
@@ -1293,7 +1212,7 @@ async fn settings_put(
     }
     let schedule = schedule_rows(&state, &user.username, &cfg.template);
     match cfg.save(&state.config_dir, &user.username) {
-        Ok(()) => Json(settings_body(&state, &cfg, &user, schedule)).into_response(),
+        Ok(()) => Json(settings_body(&cfg, &user, schedule)).into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
@@ -1319,37 +1238,6 @@ async fn notify_test(user: CurrentUser, State(state): State<AppState>) -> impl I
         Ok(None) => (
             StatusCode::BAD_GATEWAY,
             Json(serde_json::json!({ "error": "no channel could reach you" })),
-        )
-            .into_response(),
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    }
-}
-
-/// Rings the user once so they can hear that the number works. Explicit, so it
-/// ignores the check-in toggle and needs only a number to ring.
-async fn notify_call(user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
-    let Some(voice) = state.voice.clone() else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-    let msg = crate::channels::OutboundMessage {
-        title: "Note".into(),
-        body: "This is Note. Your phone is set up.".into(),
-        urgency: crate::channels::Urgency::Normal,
-        event_id: None,
-        conversation_id: None,
-    };
-    let placed =
-        tokio::task::spawn_blocking(move || voice.call_now(user.id, &user.username, &msg)).await;
-    match placed {
-        Ok(Ok(call_id)) => Json(serde_json::json!({ "call_id": call_id })).into_response(),
-        Ok(Err(crate::channels::voice::CallRefused::NoPhone)) => (
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({ "error": "add a phone number first" })),
-        )
-            .into_response(),
-        Ok(Err(e)) => (
-            StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({ "error": format!("the call was not placed ({e})") })),
         )
             .into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
@@ -1888,32 +1776,6 @@ async fn event_move_tomorrow(
     }
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ChannelReq {
-    channel: String,
-}
-
-async fn event_channel(
-    user: CurrentUser,
-    State(state): State<AppState>,
-    Path(id): Path<i64>,
-    Json(req): Json<ChannelReq>,
-) -> impl IntoResponse {
-    if !crate::templates::valid_channel(&req.channel) {
-        return unprocessable_field("channel", "must be push or voice");
-    }
-    let conn = state.db();
-    match crate::plan::set_channel(&conn, user.id, id, &req.channel) {
-        Ok(Some(())) => StatusCode::OK.into_response(),
-        Ok(None) => StatusCode::NOT_FOUND.into_response(),
-        Err(crate::plan::ShiftError::Decided { .. }) => {
-            unprocessable_field("channel", "cannot change on a decided event")
-        }
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    }
-}
-
 fn event_set(state: &AppState, user: &CurrentUser, id: i64, status: &str) -> axum::response::Response {
     let conn = state.db();
     match crate::plan::set_status(&conn, user.id, id, status) {
@@ -2103,205 +1965,6 @@ async fn ws_pump(
         }
     }
     hub.unregister(user_id, conn_id);
-}
-
-
-const TWILIO_SIGNATURE: &str = "x-twilio-signature";
-
-/// Twilio's callbacks carry no session: the request signature is the whole
-/// credential, and a token answers only for its own call.
-fn voice_router() -> Router<AppState> {
-    Router::new()
-        .route("/api/voice/twiml/{token}", post(voice_twiml))
-        .route("/api/voice/gather/{token}", post(voice_gather))
-        .route("/api/voice/status/{token}", post(voice_status))
-}
-
-fn twiml(body: String) -> axum::response::Response {
-    ([(header::CONTENT_TYPE, "application/xml")], body).into_response()
-}
-
-fn form_value<'a>(params: &'a [(String, String)], name: &str) -> &'a str {
-    params.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str()).unwrap_or_default()
-}
-
-/// The call this request is allowed to act on: the signature must be Twilio's
-/// over our own public URL, and the token must still name a live call.
-fn signed_call(
-    state: &AppState,
-    uri: &axum::http::Uri,
-    headers: &axum::http::HeaderMap,
-    body: &str,
-    token: &str,
-) -> Result<(Vec<(String, String)>, crate::channels::voice::VoiceCall), StatusCode> {
-    let Some(voice) = &state.voice else {
-        return Err(StatusCode::NOT_FOUND);
-    };
-    let params = crate::channels::voice::parse_form(body);
-    let signature =
-        headers.get(TWILIO_SIGNATURE).and_then(|v| v.to_str().ok()).unwrap_or_default();
-    let path = uri.path_and_query().map_or(uri.path(), |p| p.as_str());
-    if !voice.signed(path, &params, signature) {
-        return Err(StatusCode::FORBIDDEN);
-    }
-    let conn = state.db();
-    crate::channels::voice::call_by_token(&conn, token, jiff::Timestamp::now())
-        .map(|call| (params, call))
-        .ok_or(StatusCode::NOT_FOUND)
-}
-
-fn display_name(state: &AppState, username: &str) -> String {
-    crate::config::UserConfig::load(&state.config_dir, username)
-        .map(|c| c.display_name)
-        .unwrap_or_else(|_| "there".into())
-}
-
-async fn voice_twiml(
-    State(state): State<AppState>,
-    Path(token): Path<String>,
-    uri: axum::http::Uri,
-    headers: axum::http::HeaderMap,
-    body: String,
-) -> impl IntoResponse {
-    let call = match signed_call(&state, &uri, &headers, &body, &token) {
-        Ok((_, call)) => call,
-        Err(status) => return status.into_response(),
-    };
-    let name = display_name(&state, &call.username);
-    twiml(match call.event_id {
-        Some(_) => crate::channels::voice::twiml_gather(&token, &name, &call.message),
-        None => crate::channels::voice::twiml_say(&name, &call.message),
-    })
-}
-
-/// A keypad decision is a user decision: it lands on the event exactly as the
-/// same choice made in the app would, and the client is told to reload.
-async fn voice_gather(
-    State(state): State<AppState>,
-    Path(token): Path<String>,
-    uri: axum::http::Uri,
-    headers: axum::http::HeaderMap,
-    body: String,
-) -> impl IntoResponse {
-    let (params, call) = match signed_call(&state, &uri, &headers, &body, &token) {
-        Ok(v) => v,
-        Err(status) => return status.into_response(),
-    };
-    let digit = form_value(&params, "Digits").to_string();
-    let Some(event_id) = call.event_id else {
-        let conn = state.db();
-        let _ = crate::channels::voice::set_call_status(&conn, call.id, "answered");
-        return twiml(crate::channels::voice::twiml_done());
-    };
-    let decision = match digit.as_str() {
-        "1" => "done",
-        "2" => "snoozed",
-        "3" => "dropped",
-        _ => {
-            if call.digit.is_some() {
-                return twiml(crate::channels::voice::twiml_giving_up());
-            }
-            let conn = state.db();
-            let _ = crate::channels::voice::record_digit(&conn, call.id, &digit);
-            drop(conn);
-            let name = display_name(&state, &call.username);
-            return twiml(crate::channels::voice::twiml_gather(&token, &name, &call.message));
-        }
-    };
-    {
-        let conn = state.db();
-        let applied = if decision == "snoozed" {
-            crate::plan::snooze(
-                &conn,
-                call.user_id,
-                event_id,
-                crate::channels::voice::KEYPAD_SNOOZE_MINUTES,
-            )
-            .ok()
-            .flatten()
-        } else {
-            crate::plan::set_status(&conn, call.user_id, event_id, decision).ok().flatten()
-        };
-        let _ = crate::channels::voice::record_digit(&conn, call.id, &digit);
-        let _ = crate::channels::voice::set_call_status(&conn, call.id, "answered");
-        if applied.is_some() {
-            let _ = crate::log::record(
-                &conn,
-                Some(call.user_id),
-                "voice_decision",
-                &format!("event {event_id}: {decision} by phone"),
-            );
-        }
-    }
-    state.hub.broadcast_changed(call.user_id);
-    twiml(crate::channels::voice::twiml_done())
-}
-
-/// The message a call carried, rebuilt for the push ladder when the phone never
-/// picked up.
-fn unanswered_message(
-    conn: &rusqlite::Connection,
-    call: &crate::channels::voice::VoiceCall,
-) -> crate::channels::OutboundMessage {
-    let kind: Option<String> = call.event_id.and_then(|id| {
-        conn.query_row("SELECT kind FROM events WHERE id = ?1", [id], |r| r.get(0))
-            .optional()
-            .ok()
-            .flatten()
-    });
-    let checkin = kind.as_deref().is_some_and(crate::channels::is_checkin);
-    crate::channels::OutboundMessage {
-        title: if checkin { "Check-in".into() } else { kind.unwrap_or_else(|| "Note".into()) },
-        body: call.message.clone(),
-        urgency: if checkin {
-            crate::channels::Urgency::High
-        } else {
-            crate::channels::Urgency::Normal
-        },
-        event_id: call.event_id,
-        conversation_id: None,
-    }
-}
-
-async fn voice_status(
-    State(state): State<AppState>,
-    Path(token): Path<String>,
-    uri: axum::http::Uri,
-    headers: axum::http::HeaderMap,
-    body: String,
-) -> impl IntoResponse {
-    let (params, call) = match signed_call(&state, &uri, &headers, &body, &token) {
-        Ok(v) => v,
-        Err(status) => return status.into_response(),
-    };
-    let reported = form_value(&params, "CallStatus");
-    let Some(status) = crate::channels::voice::call_status_from(reported) else {
-        return StatusCode::NO_CONTENT.into_response();
-    };
-    let fallback = {
-        let conn = state.db();
-        let _ = crate::channels::voice::set_call_status(&conn, call.id, status);
-        if !matches!(status, "no_answer" | "busy" | "failed") {
-            return StatusCode::NO_CONTENT.into_response();
-        }
-        let _ = crate::log::record(
-            &conn,
-            Some(call.user_id),
-            "voice_unanswered",
-            &format!("call {}: {reported}", call.id),
-        );
-        call.event_id.is_some().then(|| unanswered_message(&conn, &call))
-    };
-    if let Some(msg) = fallback {
-        let db = state.db.clone();
-        let ladder = state.channels.clone();
-        let (user_id, username) = (call.user_id, call.username.clone());
-        let _ = tokio::task::spawn_blocking(move || {
-            crate::channels::deliver_via(&db, &ladder, user_id, &username, &msg)
-        })
-        .await;
-    }
-    StatusCode::NO_CONTENT.into_response()
 }
 
 fn calendar_router() -> Router<AppState> {

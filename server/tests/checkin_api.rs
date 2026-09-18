@@ -47,7 +47,7 @@ fn fire_checkins(state: &AppState, mock: &Arc<MockChannel>) -> Vec<runner::Fired
             },
             templates::TemplateEvent {
                 kind: "checkin_call".into(), time: "15:30".into(), days: all(),
-                flexibility: Some("fixed".into()), channel: "voice".into(), ..Default::default()
+                flexibility: Some("fixed".into()), channel: "push".into(), ..Default::default()
             },
         ],
     };
@@ -64,7 +64,7 @@ fn fire_checkins(state: &AppState, mock: &Arc<MockChannel>) -> Vec<runner::Fired
     };
     let ladder: Vec<Arc<dyn Channel>> = vec![mock.clone()];
     for ev in &fired {
-        channels::deliver_event(&state.db, &ladder, state.voice.as_deref(), ev);
+        channels::deliver_event(&state.db, &ladder, ev);
     }
     fired
 }

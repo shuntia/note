@@ -20,7 +20,7 @@ fn a_full_simulated_day() {
     write(
         tmp.path(),
         "defaults/templates/default.toml",
-        "[[events]]\nkind='checkin_call'\ntime='09:00'\ndays=['mon','tue','wed','thu','fri','sat','sun']\nflexibility='slide'\nslide_window_min=60\nchannel='voice'\n",
+        "[[events]]\nkind='checkin_call'\ntime='09:00'\ndays=['mon','tue','wed','thu','fri','sat','sun']\nflexibility='slide'\nslide_window_min=60\nchannel='push'\n",
     );
     write(tmp.path(), "defaults/prompts/persona.md", "you are note");
     write(tmp.path(), "defaults/prompts/planning.md", "plan the day, then debrief");
@@ -85,7 +85,7 @@ fn a_full_simulated_day() {
     let nightly_system = &nightly_llm.seen()[0].system;
     assert!(nightly_system.contains("Monday 2026-08-31 03:30 Asia/Tokyo UTC+09:00"), "{nightly_system}");
     let plan_section = nightly_system.split("# Today's plan").nth(1).unwrap();
-    assert!(plan_section.contains("09:00-09:15 checkin_call [pending] routine via voice"), "{plan_section}");
+    assert!(plan_section.contains("09:00-09:15 checkin_call [pending] routine via push"), "{plan_section}");
 
     // --- 10:00 JST: the user talks; the agent captures a task and remembers a fact.
     let talk_llm = MockLLM::scripted(vec![

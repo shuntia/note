@@ -384,9 +384,7 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
             schema::<schedule_ops::InsertArgs>(),
         ),
         "notify_send" => (
-            "Send the user a nudge with this text (delivered within a minute). channel \"voice\" \
-             rings their phone and reads it out instead of pushing it — only when the user has \
-             asked for calls.",
+            "Send the user a nudge with this text (delivered within a minute).",
             schema::<outreach_ops::SendArgs>(),
         ),
         "nightly_notes_write" => (
