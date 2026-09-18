@@ -54,6 +54,23 @@ pub fn run_for_user(
         if let Err(e) = crate::memory::archive_expired(&conn, deps.data_dir, username, local.date()) {
             let _ = crate::log::record(&conn, Some(user_id), "memory_expire_error", &e.to_string());
         }
+    }
+    // The day's conversations become memory before the plan is built, so the
+    // planning session already counts what they left behind.
+    if let Err(e) = crate::harvest::run_for_user(deps, user_id, username, local.time_zone(), date, now)
+    {
+        let conn = crate::db_guard(deps.db);
+        let _ = crate::log::record_throttled(
+            &conn,
+            Some(user_id),
+            "harvest_error",
+            &e.to_string(),
+            now,
+            crate::log::ERROR_LOG_WINDOW_MINS,
+        );
+    }
+    {
+        let conn = crate::db_guard(deps.db);
         let tmpl = crate::templates::Template::load(deps.config_dir, username, &ucfg.template)?;
         crate::plan::generate(&conn, user_id, &tmpl, date)?;
     }
@@ -255,6 +272,7 @@ mod tests {
         );
         write("defaults/prompts/persona.md", "persona");
         write("defaults/prompts/planning.md", "planning");
+        write("defaults/prompts/harvest.md", "harvest");
         (Mutex::new(conn), tmp)
     }
 

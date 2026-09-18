@@ -7,6 +7,7 @@ pub mod channels;
 pub mod config;
 pub mod context;
 pub mod db;
+pub mod harvest;
 pub mod log;
 pub mod memory;
 pub mod net;
