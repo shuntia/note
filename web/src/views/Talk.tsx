@@ -751,6 +751,7 @@ export function Talk({
                   onClick={() => show(c.id)}
                 >
                   {c.title}
+                  {c.summary && <span className="chat-gist">{c.summary}</span>}
                 </button>
               )}
               <div className="chat-meta">
