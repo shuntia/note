@@ -142,12 +142,27 @@ fn default_twilio_base_url() -> String {
     DEFAULT_TWILIO_BASE_URL.into()
 }
 
+pub const DEFAULT_TELEGRAM_BASE_URL: &str = "https://api.telegram.org";
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TelegramSettings {
+    /// The bot token, alone on a line; the file is the only place it lives.
+    pub token_file: PathBuf,
+    #[serde(default = "default_telegram_base_url")]
+    pub base_url: String,
+}
+
+fn default_telegram_base_url() -> String {
+    DEFAULT_TELEGRAM_BASE_URL.into()
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct ChannelsConfig {
     pub webpush: Option<WebPushSettings>,
     pub ntfy: Option<NtfySettings>,
     pub voice: Option<VoiceSettings>,
+    pub telegram: Option<TelegramSettings>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -488,6 +503,27 @@ mod tests {
         let ntfy = ServerConfig::load(tmp.path()).unwrap().channels.ntfy.unwrap();
         assert_eq!(ntfy.topic_prefix, "plan-");
         assert_eq!(ntfy.token_file, PathBuf::from("/run/secrets/ntfy"));
+    }
+
+    #[test]
+    fn telegram_section_parses_with_a_default_api_base_and_is_absent_by_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = "bind_addr = \"127.0.0.1:0\"\npublic_base_url = \"http://x\"\ndata_dir = \"data\"\n";
+        write(tmp.path(), "server.toml", base);
+        assert!(ServerConfig::load(tmp.path()).unwrap().channels.telegram.is_none());
+
+        write(tmp.path(), "server.toml", &format!(
+            "{base}[channels.telegram]\ntoken_file = \"config/telegram.token\"\n"));
+        let tg = ServerConfig::load(tmp.path()).unwrap().channels.telegram.unwrap();
+        assert_eq!(tg.token_file, PathBuf::from("config/telegram.token"));
+        assert_eq!(tg.base_url, DEFAULT_TELEGRAM_BASE_URL);
+
+        write(tmp.path(), "server.toml", &format!(
+            "{base}[channels.telegram]\ntoken_file = \"t\"\nbase_url = \"http://127.0.0.1:9\"\n"));
+        assert_eq!(
+            ServerConfig::load(tmp.path()).unwrap().channels.telegram.unwrap().base_url,
+            "http://127.0.0.1:9"
+        );
     }
 
     #[test]
