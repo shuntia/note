@@ -394,6 +394,29 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE events ADD COLUMN work_session_id INTEGER REFERENCES work_sessions(id);
     ALTER TABLE events ADD COLUMN created_at TEXT;
     ",
+    // v28
+    "
+    ALTER TABLE tasks ADD COLUMN notify TEXT NOT NULL DEFAULT 'notify'
+        CHECK (notify IN ('none','chat','notify'));
+
+    ALTER TABLE work_sessions ADD COLUMN mode TEXT NOT NULL DEFAULT 'single'
+        CHECK (mode IN ('single','pomodoro'));
+    ALTER TABLE work_sessions ADD COLUMN work_min INTEGER;
+    ALTER TABLE work_sessions ADD COLUMN break_min INTEGER;
+    ALTER TABLE work_sessions ADD COLUMN phase TEXT NOT NULL DEFAULT 'work'
+        CHECK (phase IN ('work','break'));
+    ALTER TABLE work_sessions ADD COLUMN phase_started_at TEXT;
+    ALTER TABLE work_sessions ADD COLUMN phase_paused_ms INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE work_sessions ADD COLUMN round INTEGER NOT NULL DEFAULT 1;
+    ALTER TABLE work_sessions ADD COLUMN paused_at TEXT;
+    ALTER TABLE work_sessions ADD COLUMN paused_ms INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE work_sessions ADD COLUMN step_index INTEGER;
+    ALTER TABLE work_sessions ADD COLUMN step_count INTEGER;
+    ALTER TABLE work_sessions ADD COLUMN step_name TEXT;
+    ALTER TABLE work_sessions ADD COLUMN notes TEXT NOT NULL DEFAULT '';
+    ALTER TABLE work_sessions ADD COLUMN conversation_id INTEGER REFERENCES conversations(id);
+    UPDATE work_sessions SET phase_started_at = started_at WHERE phase_started_at IS NULL;
+    ",
 ];
 
 pub fn open(path: &Path) -> Result<Connection> {
@@ -1123,6 +1146,53 @@ mod tests {
             )
             .is_err(),
             "one day carries one extra"
+        );
+    }
+
+    #[test]
+    fn v28_gives_a_task_its_notice_and_a_session_its_clock() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_migrations(&conn, &MIGRATIONS[..27]).unwrap();
+        conn.execute(
+            "INSERT INTO users (username, pass_hash, role) VALUES ('a','h','member')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO work_sessions (user_id, title, started_at)
+             VALUES (1, 'the chapter', '2026-09-18T09:00:00Z')",
+            [],
+        )
+        .unwrap();
+        apply_migrations(&conn, MIGRATIONS).unwrap();
+
+        let (mode, phase, started, round, paused): (String, String, String, i64, i64) = conn
+            .query_row(
+                "SELECT mode, phase, phase_started_at, round, paused_ms FROM work_sessions
+                 WHERE id = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!((mode.as_str(), phase.as_str()), ("single", "work"));
+        assert_eq!(started, "2026-09-18T09:00:00Z", "a session already running keeps its clock");
+        assert_eq!((round, paused), (1, 0));
+        assert!(
+            conn.execute("UPDATE work_sessions SET mode = 'tomato' WHERE id = 1", []).is_err(),
+            "the mode is a closed set"
+        );
+
+        conn.execute(
+            "INSERT INTO tasks (user_id, title, created_at, updated_at) VALUES (1, 't', 'x', 'x')",
+            [],
+        )
+        .unwrap();
+        let notify: String =
+            conn.query_row("SELECT notify FROM tasks WHERE id = 1", [], |r| r.get(0)).unwrap();
+        assert_eq!(notify, "notify");
+        assert!(
+            conn.execute("UPDATE tasks SET notify = 'shout' WHERE id = 1", []).is_err(),
+            "notify is a closed set"
         );
     }
 
