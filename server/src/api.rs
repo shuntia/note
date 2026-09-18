@@ -967,6 +967,7 @@ struct SettingsPatch {
 /// `telegram_linked` is read by the caller, which already holds the DB guard on
 /// the write path.
 fn settings_body(
+    state: &AppState,
     cfg: &crate::config::UserConfig,
     user: &CurrentUser,
     schedule: Vec<crate::templates::ScheduleRow>,
@@ -1048,7 +1049,7 @@ async fn settings_put(
     Json(req): Json<SettingsPatch>,
 ) -> impl IntoResponse {
     let templates = crate::templates::available(&state.config_dir, &user.username);
-    let _guard = state.db();
+    let conn = state.db();
     let mut cfg = match crate::config::UserConfig::load(&state.config_dir, &user.username) {
         Ok(c) => c,
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
