@@ -6,6 +6,9 @@ pub const STATES: &[&str] = &["open", "in_progress", "done", "dropped"];
 /// Where a task came from: typed by the user, written by the agent, or
 /// mirrored from another system by an importer.
 pub const SOURCES: &[&str] = &["manual", "agent", "import"];
+/// How the block holding a task announces itself when it starts: silently, in
+/// the day's thread, or as a notification.
+pub const NOTIFY: &[&str] = &["none", "chat", "notify"];
 const DURATION_STEP_MIN: u32 = 5;
 const MAX_DURATION_MIN: u32 = 24 * 60;
 pub const MAX_TITLE_BYTES: usize = 500;
@@ -73,6 +76,7 @@ pub struct Task {
     /// The importer's own id for this task, opaque here and unique per user.
     pub external_id: Option<String>,
     pub url: String,
+    pub notify: String,
 }
 
 /// One top-level task with its steps; `children` is always present so the
@@ -110,6 +114,8 @@ pub struct NewTask {
     /// principal may write.
     #[serde(default)]
     pub source: Option<String>,
+    #[serde(default)]
+    pub notify: Option<String>,
 }
 
 /// `Option<Option<T>>` fields separate "absent, leave alone" (`None`) from
@@ -131,6 +137,7 @@ pub struct TaskPatch {
     pub url: Option<String>,
     #[serde(default, deserialize_with = "present")]
     pub external_id: Option<Option<String>>,
+    pub notify: Option<String>,
     #[serde(skip)]
     pub actor: Actor,
 }
@@ -163,12 +170,13 @@ fn row_to_task(r: &rusqlite::Row) -> rusqlite::Result<Task> {
         due_at: r.get(11)?,
         external_id: r.get(12)?,
         url: r.get(13)?,
+        notify: r.get(14)?,
     })
 }
 
 const COLS: &str = "id, title, description, state, source, notes, duration_min, \
                     duration_source, parent_id, is_now, updated_at, due_at, \
-                    external_id, url";
+                    external_id, url, notify";
 
 fn checked_duration(min: u32) -> Result<u32, UpdateError> {
     if min == 0 || !min.is_multiple_of(DURATION_STEP_MIN) || min > MAX_DURATION_MIN {
@@ -185,6 +193,13 @@ fn checked_due(raw: &str) -> Result<String, UpdateError> {
     raw.parse::<jiff::Timestamp>()
         .map(|t| t.to_string())
         .map_err(|_| UpdateError::Invalid(format!("due_at must be an RFC 3339 instant, got {raw:?}")))
+}
+
+fn checked_notify(raw: &str) -> Result<String, UpdateError> {
+    if !NOTIFY.contains(&raw) {
+        return Err(UpdateError::Invalid(format!("notify must be one of {}", NOTIFY.join(", "))));
+    }
+    Ok(raw.to_owned())
 }
 
 fn checked_title(raw: &str) -> Result<String, UpdateError> {
@@ -364,6 +379,7 @@ pub fn create(
     let url = checked_url(new.url.as_deref().unwrap_or_default())?;
     let external_id = new.external_id.as_deref().map(checked_external_id).transpose()?;
     let source = checked_source(new.source.as_deref().unwrap_or(source))?;
+    let notify = new.notify.as_deref().map(checked_notify).transpose()?;
     if let Some(p) = new.parent_id {
         checked_parent(conn, user_id, p, None)?;
     }
@@ -386,9 +402,10 @@ pub fn create(
     conn.execute(
         "INSERT INTO tasks
             (user_id, title, description, notes, source, state, parent_id, duration_min,
-             duration_source, is_now, due_at, url, external_id, created_at, updated_at,
+             duration_source, is_now, due_at, url, external_id, notify, created_at, updated_at,
              completed_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14,
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+                 COALESCE(?15, 'notify'), ?14, ?14,
                  CASE WHEN ?6 = 'done' THEN ?14 END)",
         rusqlite::params![
             user_id,
@@ -405,6 +422,7 @@ pub fn create(
             url,
             external_id,
             now(),
+            notify,
         ],
     )?;
     let id = conn.last_insert_rowid();
@@ -840,6 +858,7 @@ pub fn update(
         Some(Some(raw)) => Some(Some(checked_external_id(raw)?)),
         other => other.as_ref().map(|_| None),
     };
+    let notify = patch.notify.as_deref().map(checked_notify).transpose()?;
     let Some(before) = get(conn, user_id, task_id)? else { return Ok(None) };
     if let Some(Some(p)) = patch.parent_id {
         if has_children(conn, task_id)? {
@@ -892,6 +911,7 @@ pub fn update(
             due_at = ?9,
             url = COALESCE(?10, url),
             external_id = ?11,
+            notify = COALESCE(?14, notify),
             updated_at = ?12,
             completed_at = CASE WHEN COALESCE(?3, state) = 'done'
                 THEN COALESCE(completed_at, ?12) END
@@ -910,6 +930,7 @@ pub fn update(
             external_id,
             now(),
             task_id,
+            notify,
         ],
     )?;
     let parent = match patch.state {

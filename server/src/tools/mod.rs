@@ -338,14 +338,17 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
         "task_create" => (
             "Create a new task for the current user. Set is_now to put it straight in Now, \
              the user's short list of at most 3 — a fourth pushes the newest one back to Later. \
-             due_at is when the work is due, not when to do it.",
+             due_at is when the work is due, not when to do it. notify says how the block \
+             holding this task announces itself when it starts: none is silent, chat writes a \
+             line in the day's thread, notify sends a notification (the default).",
             schema::<task_ops::CreateArgs>(),
         ),
         "task_update" => (
             "Update a task's title, description, state, notes, duration (whole 5-minute blocks), \
-             due date, or whether it sits in Now — the short list of at most 3, where a fourth \
-             pushes the newest one back to Later. Steps are never in Now, and a step never \
-             carries a due date of its own.",
+             due date, how its block announces itself (notify: none, chat or notify), or \
+             whether it sits in Now — the short list of at most 3, where a fourth pushes the \
+             newest one back to Later. Steps are never in Now, and a step never carries a due \
+             date of its own.",
             schema::<task_ops::UpdateArgs>(),
         ),
         "task_split" => (

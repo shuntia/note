@@ -656,3 +656,24 @@ async fn an_unknown_field_on_create_is_refused() {
     let (status, _) = post(&app, &cookie, "/api/tasks", r#"{"title":"x","due":"friday"}"#).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
 }
+
+#[tokio::test]
+async fn a_task_says_how_its_block_announces_itself() {
+    let (app, cookie, _tmp) = app_with_user().await;
+    let (status, made) = post(&app, &cookie, "/api/tasks", r#"{"title":"the chapter"}"#).await;
+    assert_eq!(status, StatusCode::OK, "{made}");
+    assert_eq!(made["notify"], "notify", "a block speaks up unless it is told not to");
+    let id = made["id"].as_i64().unwrap();
+
+    let (status, quiet) = patch_task(&app, &cookie, id, r#"{"notify":"none"}"#).await;
+    assert_eq!(status, StatusCode::OK, "{quiet}");
+    assert_eq!(quiet["notify"], "none");
+    assert_eq!(list(&app, &cookie).await[0]["notify"], "none");
+
+    let (status, _) = patch_task(&app, &cookie, id, r#"{"notify":"shout"}"#).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let (status, made) =
+        post(&app, &cookie, "/api/tasks", r#"{"title":"quiet one","notify":"chat"}"#).await;
+    assert_eq!(status, StatusCode::OK, "{made}");
+    assert_eq!(made["notify"], "chat");
+}
