@@ -363,16 +363,24 @@ fn plan_section(
             String::new()
         };
         if e.entry == "block" {
-            s.push_str(&format!("- {}-{} {} [{}] block{mark}\n", e.wall_time, end_of(e), e.kind, e.status));
+            s.push_str(&format!(
+                "- {}-{} {} [{}] block (event_id {}){mark}\n",
+                e.wall_time,
+                end_of(e),
+                e.kind,
+                e.status,
+                e.id,
+            ));
         } else {
             s.push_str(&format!(
-                "- {}-{} {} [{}] routine via {}{}{mark}\n",
+                "- {}-{} {} [{}] routine via {}{} (event_id {}){mark}\n",
                 e.wall_time,
                 end_of(e),
                 e.kind,
                 e.status,
                 e.channel,
                 if e.alert { "" } else { " (silent)" },
+                e.id,
             ));
         }
     }
@@ -872,7 +880,13 @@ mod tests {
                 alert: Some(false), channel: "push".into(), ..Default::default() },
         ]);
         let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
-        assert!(out.contains("- 09:30-12:30 Work time [pending] block"), "{out}");
+        let block: i64 = conn
+            .query_row("SELECT id FROM events WHERE kind = 'Work time'", [], |r| r.get(0))
+            .unwrap();
+        assert!(
+            out.contains(&format!("- 09:30-12:30 Work time [pending] block (event_id {block})")),
+            "{out}"
+        );
         assert!(out.contains("- 08:00-08:15 meds [pending] routine via push (silent)"), "{out}");
     }
 
@@ -935,9 +949,21 @@ mod tests {
             routine("wind down", "21:30"),
         ]);
         let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
-        assert!(out.contains("- 20:30-22:00 Work time [pending] block <- now"), "{out}");
+        let id = |kind: &str| -> i64 {
+            conn.query_row("SELECT id FROM events WHERE kind = ?1", [kind], |r| r.get(0)).unwrap()
+        };
         assert!(
-            out.contains("- 21:30-21:45 wind down [pending] routine via push <- next, in 30 min"),
+            out.contains(&format!(
+                "- 20:30-22:00 Work time [pending] block (event_id {}) <- now",
+                id("Work time")
+            )),
+            "{out}"
+        );
+        assert!(
+            out.contains(&format!(
+                "- 21:30-21:45 wind down [pending] routine via push (event_id {}) <- next, in 30 min",
+                id("wind down")
+            )),
             "{out}"
         );
     }
