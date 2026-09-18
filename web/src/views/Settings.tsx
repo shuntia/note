@@ -36,8 +36,6 @@ type Loaded = {
   counter: CounterMode
   nightly: boolean
   checkins: boolean
-  ntfyEnabled: boolean
-  ntfyTopic: string
 }
 type Save = { row: string; kind: 'busy' | 'saved' | 'failed'; message?: string } | null
 
@@ -163,7 +161,6 @@ export function Settings({
   const [save, setSave] = useState<Save>(null)
   const [open, setOpen] = useState<string | null>(null)
   const [theme, setTheme] = useState<ThemeChoice>(storedTheme)
-  const [ntfyDraft, setNtfyDraft] = useState('')
 
   const load = () => {
     setState(undefined)
@@ -171,7 +168,6 @@ export function Settings({
     api
       .settings()
       .then((s) => {
-        setNtfyDraft(s.ntfy_topic)
         setState({
           choices: { templates: s.templates, timezones: s.timezones },
           baseline: draftOf(s),
@@ -181,8 +177,6 @@ export function Settings({
           counter: s.counter,
           nightly: s.nightly_enabled,
           checkins: s.checkins_enabled,
-          ntfyEnabled: s.ntfy_enabled,
-          ntfyTopic: s.ntfy_topic,
         })
       })
       .catch(() => setState('error'))
@@ -264,28 +258,13 @@ export function Settings({
     }
   }
 
-  // A cleared field drops the override, so the reply carries the default topic
-  // the input and its placeholder fall back to.
-  const commitNtfy = async () => {
-    if (!loaded || ntfyDraft === loaded.ntfyTopic) return
-    setSave({ row: 'ntfy', kind: 'busy' })
-    try {
-      const saved = await api.saveSettings({ ntfy_topic: ntfyDraft })
-      setState((s) => (s && s !== 'error' ? { ...s, ntfyTopic: saved.ntfy_topic } : s))
-      setNtfyDraft(saved.ntfy_topic)
-      setSave({ row: 'ntfy', kind: 'saved' })
-    } catch (err) {
-      setSave({ row: 'ntfy', kind: 'failed', message: failure(err) })
-    }
-  }
-
   const sendTest = async () => {
-    setSave({ row: 'ntfy', kind: 'busy' })
+    setSave({ row: 'test', kind: 'busy' })
     try {
       const { via } = await api.notifyTest()
-      setSave({ row: 'ntfy', kind: 'saved', message: `✓ Sent via ${via}` })
+      setSave({ row: 'test', kind: 'saved', message: `✓ Sent via ${via}` })
     } catch {
-      setSave({ row: 'ntfy', kind: 'failed', message: "That didn't reach you. Try again." })
+      setSave({ row: 'test', kind: 'failed', message: "That didn't reach you. Try again." })
     }
   }
 
@@ -473,43 +452,21 @@ export function Settings({
 
       <Group head="REACH">
         <PushRow notify={notify} />
-        {loaded?.ntfyEnabled && (
-          <FoldRow
-            label="ntfy"
-            value={loaded.ntfyTopic}
-            open={open === 'ntfy'}
-            onToggle={fold('ntfy')}
+        <div className="set-row">
+          <span className="set-row-body">
+            <span className="set-label">Test notification</span>
+            <span className="set-sub">Goes out the way a fired event would</span>
+          </span>
+          <Status save={save} row="test" />
+          <button
+            type="button"
+            className="btn-haze small"
+            disabled={busy}
+            onClick={() => void sendTest()}
           >
-            {open === 'ntfy' && (
-              <div className="set-fold-body">
-                <div className="set-token-form">
-                  <input
-                    aria-label="ntfy topic"
-                    placeholder={loaded.ntfyTopic}
-                    maxLength={64}
-                    spellCheck={false}
-                    value={ntfyDraft}
-                    onChange={(e) => setNtfyDraft(e.target.value)}
-                    onBlur={() => void commitNtfy()}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') e.currentTarget.blur()
-                    }}
-                  />
-                  <button
-                    type="button"
-                    className="btn-haze small"
-                    disabled={busy}
-                    onClick={() => void sendTest()}
-                  >
-                    Send test
-                  </button>
-                </div>
-                <span className="set-sub">Subscribe to this topic in the ntfy app</span>
-                <Status save={save} row="ntfy" />
-              </div>
-            )}
-          </FoldRow>
-        )}
+            Send test
+          </button>
+        </div>
         {loaded && (
           <div className="set-row">
             <span className="set-row-body">

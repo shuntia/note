@@ -50,7 +50,6 @@ const WRITABLE_SETTINGS = [
   'counter',
   'nightly_enabled',
   'checkins_enabled',
-  'ntfy_topic',
 ] as const
 
 type SettingsPatch = Partial<Pick<Settings, (typeof WRITABLE_SETTINGS)[number]>>
