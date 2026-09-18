@@ -344,7 +344,7 @@ pub fn plan_list(conn: &Connection, ctx: &ToolCtx, args: PlanListArgs) -> Result
             .query_row("SELECT task_id FROM event_tasks WHERE event_id = ?1", [e.id], |r| r.get(0))
             .optional()
             .map_err(internal)?;
-        events.push(serde_json::json!({
+        let mut row = serde_json::json!({
             "event_id": e.id,
             "kind": e.kind,
             "entry": e.entry,
@@ -353,7 +353,17 @@ pub fn plan_list(conn: &Connection, ctx: &ToolCtx, args: PlanListArgs) -> Result
             "status": e.status,
             "flexibility": e.flexibility,
             "task_id": task_id,
-        }));
+        });
+        if e.kind == crate::triggers::KIND {
+            let cancel_if: Option<String> = conn
+                .query_row("SELECT cancel_if FROM events WHERE id = ?1", [e.id], |r| r.get(0))
+                .optional()
+                .map_err(internal)?
+                .flatten();
+            row["prompt"] = serde_json::json!(e.prompt);
+            row["cancel_if"] = serde_json::json!(cancel_if);
+        }
+        events.push(row);
     }
     Ok(serde_json::json!({ "date": date.to_string(), "events": events }))
 }

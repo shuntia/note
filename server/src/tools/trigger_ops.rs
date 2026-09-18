@@ -414,6 +414,24 @@ mod tests {
         assert_eq!(date, tomorrow.to_string());
     }
 
+    /// The plan is how the model finds a trigger again: the row has to carry
+    /// what it was for, and what would call it off.
+    #[test]
+    fn plan_list_shows_a_trigger_with_its_prompt_and_its_cancel_rule() {
+        let (conn, tmp) = env();
+        dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "trigger_set",
+            &format!(r#"{{"at":"{}","prompt":"ask about the essay"}}"#, soon())).unwrap();
+        dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "wait_until",
+            &format!(r#"{{"at":"{}","prompt":"did they answer?"}}"#, soon())).unwrap();
+        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Trigger, "plan_list", "{}").unwrap();
+        let rows = out["events"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["prompt"], "ask about the essay");
+        assert!(rows[0]["cancel_if"].is_null());
+        assert_eq!(rows[1]["cancel_if"], "replied");
+        assert_eq!(rows[0]["flexibility"], "drop", "the user can drop one from the day");
+    }
+
     #[test]
     fn the_budget_tool_is_out_of_reach_where_the_user_is_not() {
         let (conn, tmp) = env();
