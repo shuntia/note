@@ -241,7 +241,7 @@ export function Home({
   const now = nowMinutes()
   const next = nextUp(visible, now)
   const facts = next ? eventFacts(next, now) : null
-  const label = next ? eventLabel(next.kind) : ''
+  const label = next ? rowLabel(next) : ''
 
   // A routine is timed to its span; without an end the routine default stands in.
   // A block laid for a task runs as that task, so finishing it settles both.
@@ -408,7 +408,20 @@ export function Home({
     return to <= from ? 1 : clamp((minutesOfDayNow() - from) / (to - from))
   }
 
-  const nextActions = (ev: PlanEvent) => (
+  const nextActions = (ev: PlanEvent) => ev.task ? (
+    <>
+      <button className="btn-fill" disabled={pending} onClick={() => start(ev)}>Start</button>
+      <button className="btn-haze" disabled={pending} onClick={() => finishBlock(ev)}>Done</button>
+      <Overflow
+        label="More"
+        className="ev-more-wrap"
+        items={[
+          { label: 'Drop today', run: () => drop(ev), disabled: pending },
+          { label: 'Move to tomorrow', run: () => act(() => api.moveTomorrow(ev.id)), disabled: pending },
+        ]}
+      />
+    </>
+  ) : (
     <>
       <button className="btn-fill" disabled={pending} onClick={() => start(ev)}>Start</button>
       <button className="btn-haze" aria-expanded={later} disabled={pending} onClick={() => setLater((v) => !v)}>Later</button>

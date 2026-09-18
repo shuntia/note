@@ -7,13 +7,13 @@ export type EventFacts = {
   span: string
 }
 
-// The fired event owns the face; failing that, the next routine still ahead does.
+// The fired event owns the face; failing that, the next routine or task block still ahead does.
 export function nextUp(events: PlanEvent[], now: number): PlanEvent | null {
   return (
     events.find((ev) => ev.status === 'fired') ??
     events.find(
       (ev) =>
-        ev.entry !== 'block' &&
+        (ev.entry !== 'block' || ev.task) &&
         (ev.status === 'pending' || ev.status === 'snoozed') &&
         minutesOf(ev.end_wall_time ?? ev.wall_time) >= now,
     ) ??
