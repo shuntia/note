@@ -82,6 +82,10 @@ pub struct ProviderConfig {
     /// a Cloudflare tunnel allows a response to take.
     #[serde(default = "default_provider_timeout")]
     pub timeout_secs: u64,
+    /// The same cap for a session nobody is waiting on: a nightly letter written
+    /// over a full context takes longer than a chat turn may.
+    #[serde(default = "default_background_timeout")]
+    pub background_timeout_secs: u64,
     /// Reasoning effort asked of an OpenAI-compatible endpoint: "none" (the
     /// default), "low", "medium" or "high".
     #[serde(default)]
@@ -95,6 +99,12 @@ pub const DEFAULT_PROVIDER_TIMEOUT_SECS: u64 = 45;
 
 fn default_provider_timeout() -> u64 {
     DEFAULT_PROVIDER_TIMEOUT_SECS
+}
+
+pub const DEFAULT_BACKGROUND_TIMEOUT_SECS: u64 = 180;
+
+fn default_background_timeout() -> u64 {
+    DEFAULT_BACKGROUND_TIMEOUT_SECS
 }
 
 #[derive(Debug, Default, Deserialize)]

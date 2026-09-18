@@ -112,7 +112,7 @@ mod tests {
                 tool_calls: vec![ToolCall { id: "c1".into(), name: "task_create".into(), args: "{}".into() }],
             },
         ]);
-        let req = ChatRequest { system: "sys", messages: &[Message::User("hi".into())], tools: &[] };
+        let req = ChatRequest { system: "sys", messages: &[Message::User("hi".into())], tools: &[], background: false };
         assert_eq!(llm.chat(&req).unwrap().text, "one");
         assert_eq!(llm.chat(&req).unwrap().tool_calls[0].name, "task_create");
         assert!(llm.chat(&req).unwrap().text.contains("no scripted response"));
@@ -125,7 +125,7 @@ mod tests {
     #[test]
     fn null_llm_replies_blank_and_stays_stateless() {
         let llm = NullLLM;
-        let req = ChatRequest { system: "sys", messages: &[Message::User("hi".into())], tools: &[] };
+        let req = ChatRequest { system: "sys", messages: &[Message::User("hi".into())], tools: &[], background: false };
         for _ in 0..3 {
             let r = llm.chat(&req).unwrap();
             assert!(r.text.is_empty());

@@ -24,6 +24,9 @@ pub struct ChatRequest<'a> {
     pub system: &'a str,
     pub messages: &'a [Message],
     pub tools: &'a [serde_json::Value],
+    /// Nobody is waiting on the reply, so the call may take the provider's
+    /// longer `background_timeout_secs`.
+    pub background: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -60,6 +63,64 @@ pub(crate) fn http_agent(timeout_secs: u64) -> ureq::Agent {
         .build()
 }
 
+/// Waits before the second and third attempt of a chat call.
+const RETRY_DELAYS_MS: [u64; 2] = [1_500, 4_000];
+
+/// The interactive and the background agent of one chat provider.
+pub(crate) struct ChatAgents {
+    interactive: ureq::Agent,
+    background: ureq::Agent,
+    retry_delays_ms: &'static [u64],
+}
+
+impl ChatAgents {
+    pub(crate) fn new(timeout_secs: u64, background_timeout_secs: u64) -> Self {
+        Self {
+            interactive: http_agent(timeout_secs),
+            background: http_agent(background_timeout_secs.max(timeout_secs)),
+            retry_delays_ms: &RETRY_DELAYS_MS,
+        }
+    }
+
+    /// Posts `body` and reads the JSON reply. A transport failure, a reply that
+    /// stalls mid-read, 429 and 5xx are tried again; any other status fails at
+    /// once. The error carries the status and the head of the body, since the
+    /// log line it ends up in is all anyone sees of it.
+    pub(crate) fn post_json(
+        &self,
+        background: bool,
+        what: &str,
+        body: &serde_json::Value,
+        request: impl Fn(&ureq::Agent) -> ureq::Request,
+    ) -> Result<serde_json::Value> {
+        let agent = if background { &self.background } else { &self.interactive };
+        let mut attempt = 0;
+        loop {
+            let failure = match request(agent).send_json(body) {
+                Ok(resp) => match resp.into_json::<serde_json::Value>() {
+                    Ok(v) => return Ok(v),
+                    Err(e) => format!("reading the response: {e}"),
+                },
+                Err(ureq::Error::Status(code, resp)) => {
+                    let head: String =
+                        resp.into_string().unwrap_or_default().chars().take(300).collect();
+                    let failure = format!("status {code}: {head}");
+                    if code != 429 && code < 500 {
+                        anyhow::bail!("{what} request failed: {failure}");
+                    }
+                    failure
+                }
+                Err(e) => e.to_string(),
+            };
+            let Some(delay) = self.retry_delays_ms.get(attempt) else {
+                anyhow::bail!("{what} request failed after {} attempts: {failure}", attempt + 1);
+            };
+            std::thread::sleep(std::time::Duration::from_millis(*delay));
+            attempt += 1;
+        }
+    }
+}
+
 /// Embedding calls run in the agent loop's prepare pass with no lock held, so
 /// a stalled endpoint delays only its own talk turn. The tight caps bound how
 /// long that stall can last.
@@ -81,7 +142,12 @@ pub fn build(cfg: &crate::config::ProvidersConfig) -> Result<(Arc<dyn LLMProvide
             "mock" => Arc::new(mock::NullLLM),
             "anthropic" => {
                 let key = read_key(p, true)?;
-                Arc::new(anthropic::AnthropicLLM::new(&p.base_url, &p.model, &key, p.timeout_secs))
+                Arc::new(anthropic::AnthropicLLM::new(
+                    &p.base_url,
+                    &p.model,
+                    &key,
+                    ChatAgents::new(p.timeout_secs, p.background_timeout_secs),
+                ))
             }
             "openai" => {
                 anyhow::ensure!(!p.base_url.is_empty(), "openai llm provider requires base_url");
@@ -90,7 +156,7 @@ pub fn build(cfg: &crate::config::ProvidersConfig) -> Result<(Arc<dyn LLMProvide
                     &p.base_url,
                     &p.model,
                     &key,
-                    p.timeout_secs,
+                    ChatAgents::new(p.timeout_secs, p.background_timeout_secs),
                     reasoning_effort(p)?,
                 ))
             }
@@ -149,11 +215,49 @@ fn read_key(p: &crate::config::ProviderConfig, required: bool) -> Result<String>
 mod tests {
     use super::*;
 
+    fn agents() -> ChatAgents {
+        ChatAgents { retry_delays_ms: &[0, 0], ..ChatAgents::new(5, 5) }
+    }
+
+    fn post(base: &str) -> Result<serde_json::Value> {
+        let url = format!("{base}/chat");
+        agents().post_json(false, "openai", &serde_json::json!({}), |a| a.post(&url))
+    }
+
+    #[test]
+    fn a_chat_call_outlives_a_failing_attempt() {
+        let (base, rx) = crate::testhttp::serve(vec![
+            ("502 Bad Gateway", "{}"),
+            ("429 Too Many Requests", "{}"),
+            ("200 OK", r#"{"ok":true}"#),
+        ]);
+        assert_eq!(post(&base).unwrap()["ok"], true);
+        assert_eq!(rx.try_iter().count(), 3);
+    }
+
+    #[test]
+    fn a_refused_chat_call_fails_at_once_and_says_why() {
+        let (base, rx) = crate::testhttp::serve(vec![
+            ("400 Bad Request", r#"{"error":"context too long"}"#),
+            ("200 OK", "{}"),
+        ]);
+        let err = post(&base).unwrap_err().to_string();
+        assert!(err.contains("status 400") && err.contains("context too long"), "{err}");
+        assert_eq!(rx.try_iter().count(), 1);
+    }
+
+    #[test]
+    fn a_chat_call_gives_up_after_its_retries() {
+        let (base, _rx) = crate::testhttp::serve(vec![("500 Oops", "{}"); 3]);
+        let err = post(&base).unwrap_err().to_string();
+        assert!(err.contains("after 3 attempts") && err.contains("status 500"), "{err}");
+    }
+
     #[test]
     fn build_defaults_to_null_llm_and_no_embeddings() {
         let cfg = crate::config::ProvidersConfig::default();
         let (llm, emb) = build(&cfg).unwrap();
-        let req = ChatRequest { system: "", messages: &[], tools: &[] };
+        let req = ChatRequest { system: "", messages: &[], tools: &[], background: false };
         let resp = llm.chat(&req).unwrap();
         assert!(resp.text.is_empty());
         assert_eq!(llm.chat_with_reasoning(&req).unwrap().1, "");
@@ -167,7 +271,7 @@ mod tests {
             llm: Some(crate::config::ProviderConfig {
                 kind: "carrier-pigeon".into(),
                 base_url: String::new(), model: String::new(), api_key_env: String::new(),
-                api_key_file: std::path::PathBuf::new(), timeout_secs: 45,
+                api_key_file: std::path::PathBuf::new(), timeout_secs: 45, background_timeout_secs: 180,
                 reasoning: String::new(), cache_ttl_min: None,
             }),
             embeddings: None,
@@ -185,7 +289,7 @@ mod tests {
             llm: Some(crate::config::ProviderConfig {
                 kind: "anthropic".into(), base_url: String::new(),
                 model: "m".into(), api_key_env: "NOTE_TEST_MISSING_KEY".into(),
-                api_key_file: std::path::PathBuf::new(), timeout_secs: 45,
+                api_key_file: std::path::PathBuf::new(), timeout_secs: 45, background_timeout_secs: 180,
                 reasoning: String::new(), cache_ttl_min: None,
             }),
             embeddings: None,
@@ -201,7 +305,7 @@ mod tests {
         crate::config::ProviderConfig {
             kind: "openai".into(), base_url: "http://localhost:1/v1".into(),
             model: "m".into(), api_key_env: String::new(), api_key_file: path,
-            timeout_secs: 45, reasoning: String::new(), cache_ttl_min: None,
+            timeout_secs: 45, background_timeout_secs: 180, reasoning: String::new(), cache_ttl_min: None,
         }
     }
 
