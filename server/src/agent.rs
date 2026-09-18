@@ -9,6 +9,8 @@ pub const MAX_TURNS: usize = 16;
 /// An import session is one brief, and an inbox session one decision: the
 /// call, plus a single retry when the first one is rejected.
 pub const IMPORT_MAX_TURNS: usize = 2;
+pub const MAX_TURNS_REPLY: &str =
+    "(I ran out of steps before finishing — ask again and I'll pick it up from here)";
 
 /// The sessions that run on their own instructions alone, with none of the
 /// user's standing context and a single call to make.
@@ -212,6 +214,9 @@ pub fn run_session_watched(
             }
             messages.push(Message::ToolResult { call_id: call.id, content, is_error });
         }
+    }
+    if last_text.trim().is_empty() {
+        last_text = MAX_TURNS_REPLY.to_string();
     }
     on_event(AgentEvent::Reply { text: &last_text });
     finish(deps, user_id, kind, turns, tool_calls, "agent_max_turns")?;
@@ -507,6 +512,24 @@ mod tests {
             )
             .unwrap();
         assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn a_turn_cap_with_no_text_says_it_ran_out_of_steps() {
+        let (db, tmp) = env();
+        let resp = ChatResponse {
+            text: String::new(),
+            tool_calls: vec![ToolCall {
+                id: "c".into(),
+                name: "memory_query".into(),
+                args: r#"{"query":"x"}"#.into(),
+            }],
+        };
+        let llm = MockLLM::scripted(vec![resp; MAX_TURNS]);
+        let out =
+            run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, now(), &[], "hi")
+                .unwrap();
+        assert_eq!(out.reply, MAX_TURNS_REPLY);
     }
 
     #[test]
