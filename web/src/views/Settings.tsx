@@ -23,7 +23,15 @@ import { createCredential, webauthnSupported, type RegistrationJSON } from '../w
 
 type Notify = (msg: string, action?: ToastAction) => void
 
-const EDITABLE = ['display_name', 'timezone', 'nightly_time', 'template'] as const
+const EDITABLE = [
+  'display_name',
+  'timezone',
+  'nightly_time',
+  'template',
+  'triggers_per_day',
+] as const
+
+const MAX_TRIGGERS_PER_DAY = 20
 
 type Draft = Pick<UserSettings, (typeof EDITABLE)[number]>
 type Choices = Pick<UserSettings, 'templates' | 'timezones'>
@@ -61,6 +69,7 @@ function draftOf(s: UserSettings): Draft {
     timezone: s.timezone,
     nightly_time: s.nightly_time,
     template: s.template,
+    triggers_per_day: s.triggers_per_day,
   }
 }
 
@@ -220,7 +229,10 @@ export function Settings({
       display_name: loaded.draft.display_name.trim(),
     }
     const patch: Partial<Draft> = {}
-    for (const key of EDITABLE) if (cleaned[key] !== loaded.baseline[key]) patch[key] = cleaned[key]
+    // Draft mixes text and numbers, so each field travels as its own key.
+    for (const key of EDITABLE) {
+      if (cleaned[key] !== loaded.baseline[key]) Object.assign(patch, { [key]: cleaned[key] })
+    }
     if (Object.keys(patch).length === 0) return
     setSave({ row, kind: 'busy' })
     try {
@@ -627,6 +639,38 @@ export function Settings({
               }
             />
           </div>
+        )}
+        {loaded && (
+          <FoldRow
+            label="Check-ins from Note"
+            value={`up to ${loaded.draft.triggers_per_day} a day`}
+            open={open === 'triggers'}
+            onToggle={fold('triggers')}
+          >
+            {open === 'triggers' && (
+              <div className="set-fold-body">
+                <span className="set-sub">
+                  Moments Note sets aside to look at the day and reach out on its own. It asks
+                  before it goes past this.
+                </span>
+                <input
+                  aria-label="Check-ins from Note a day"
+                  type="number"
+                  min={0}
+                  max={MAX_TRIGGERS_PER_DAY}
+                  value={loaded.draft.triggers_per_day}
+                  onChange={(e) =>
+                    edit(
+                      'triggers_per_day',
+                      Math.min(MAX_TRIGGERS_PER_DAY, Math.max(0, Math.round(Number(e.target.value) || 0))),
+                    )
+                  }
+                  {...commitOn('triggers')}
+                />
+                <Status save={save} row="triggers" />
+              </div>
+            )}
+          </FoldRow>
         )}
         <div className="set-row">
           <span className="set-row-body">

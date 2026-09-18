@@ -8,10 +8,13 @@ export type EventFacts = {
 }
 
 // The fired event owns the face; failing that, the next routine still ahead does.
+// A trigger is Note's own moment to look again, not something the user starts,
+// so it stays off the face and lives on the line and in the list.
 export function nextUp(events: PlanEvent[], now: number): PlanEvent | null {
+  const theirs = events.filter((ev) => ev.kind !== 'trigger')
   return (
-    events.find((ev) => ev.status === 'fired') ??
-    events.find(
+    theirs.find((ev) => ev.status === 'fired') ??
+    theirs.find(
       (ev) =>
         ev.entry !== 'block' &&
         (ev.status === 'pending' || ev.status === 'snoozed') &&

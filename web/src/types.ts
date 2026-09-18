@@ -20,6 +20,8 @@ export type PlanEvent = {
   channel: string
   alert: boolean
   origin: EventOrigin
+  // What a trigger is meant to follow up on; absent on every other event.
+  prompt?: string
   // RFC 3339 UTC; set once the event was finished, dropped, moved or snoozed
   decided_at?: string
   // present only when the agent named the event this one moved to
@@ -136,6 +138,8 @@ export type Settings = {
   phone_number: string
   calls_enabled: boolean
   voice_enabled: boolean
+  // How many check-ins Note may start on its own in a day.
+  triggers_per_day: number
 }
 
 export type AlertPatch = { index: number; alert: boolean }
@@ -153,6 +157,7 @@ export type SettingsSaved = Pick<
   | 'ntfy_topic'
   | 'phone_number'
   | 'calls_enabled'
+  | 'triggers_per_day'
 > & { schedule: ScheduleRow[] }
 
 export type PromptName = 'persona' | 'planning'
@@ -317,6 +322,17 @@ export type DayView = {
   free: FreeWindow[]
   quiet_now: string | null
   history: HistoryRow[]
+}
+
+// The session the user is in, as the server holds it.
+export type WorkSession = {
+  id: number
+  task_id: number | null
+  event_id: number | null
+  title: string
+  planned_min: number | null
+  // RFC 3339 UTC
+  started_at: string
 }
 
 // What the allocator laid down, and how many waiting blocks it replaced.

@@ -296,6 +296,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
     const target = focusTarget(node)
     const index = node.children.findIndex((c) => c.id === target.id)
     openNow({
+      serverId: null,
       taskId: target.id,
       eventId: null,
       title: node.title,
