@@ -34,6 +34,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/conversations/{id}/messages", get(conversation_messages))
         .route("/api/settings", get(settings_get).put(settings_put))
+        .route(
+            "/api/telegram/link",
+            post(telegram_link).delete(telegram_unlink),
+        )
         .route("/api/notify/test", post(notify_test))
         .route("/api/notify/call", post(notify_call))
         .route(
@@ -851,7 +855,7 @@ fn conversation_not_found() -> axum::response::Response {
 async fn conversations_list(user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
     let conn = state.db();
     let mut stmt = match conn.prepare(
-        "SELECT id, title, updated_at, summary FROM conversations
+        "SELECT id, title, updated_at, summary, via FROM conversations
          WHERE user_id = ?1 ORDER BY updated_at DESC, id DESC",
     ) {
         Ok(s) => s,
@@ -864,6 +868,7 @@ async fn conversations_list(user: CurrentUser, State(state): State<AppState>) ->
                 "title": r.get::<_, String>(1)?,
                 "updated_at": r.get::<_, String>(2)?,
                 "summary": r.get::<_, Option<String>>(3)?,
+                "via": r.get::<_, String>(4)?,
             }))
         })
         .and_then(|m| m.collect());
@@ -974,11 +979,14 @@ fn ntfy_topic_prefix(state: &AppState) -> &str {
         .unwrap_or(crate::config::DEFAULT_NTFY_TOPIC_PREFIX)
 }
 
+/// `telegram_linked` is read by the caller, which already holds the DB guard on
+/// the write path.
 fn settings_body(
     state: &AppState,
     cfg: &crate::config::UserConfig,
     user: &CurrentUser,
     schedule: Vec<crate::templates::ScheduleRow>,
+    telegram_linked: bool,
 ) -> serde_json::Value {
     let category = user.category.as_str();
     let features = cfg.features(category);
@@ -994,6 +1002,9 @@ fn settings_body(
         "checkins_enabled": features.checkins,
         "ntfy_enabled": state.ntfy_topic_prefix.is_some(),
         "ntfy_topic": cfg.ntfy_topic_for(ntfy_topic_prefix(state), &user.username),
+        "telegram_enabled": state.telegram.is_some(),
+        "telegram_linked": telegram_linked,
+        "telegram_bot": state.telegram.as_ref().map(|ch| ch.bot()).unwrap_or_default(),
         "voice_enabled": state.voice.is_some(),
         "phone_number": cfg.phone().unwrap_or_default(),
         "calls_enabled": features.calls,
@@ -1064,7 +1075,11 @@ async fn settings_get(user: CurrentUser, State(state): State<AppState>) -> impl 
     zones.sort_unstable();
     let templates = crate::templates::available(&state.config_dir, &user.username);
     let schedule = schedule_rows(&state, &user.username, &cfg.template);
-    let mut body = settings_body(&state, &cfg, &user, schedule);
+    let linked = {
+        let conn = state.db();
+        crate::telegram::chat_for_user(&conn, user.id).unwrap_or(None).is_some()
+    };
+    let mut body = settings_body(&state, &cfg, &user, schedule, linked);
     body["templates"] = serde_json::json!(templates);
     body["timezones"] = serde_json::json!(zones);
     Json(body).into_response()
@@ -1172,7 +1187,43 @@ async fn settings_put(
     }
     let schedule = schedule_rows(&state, &user.username, &cfg.template);
     match cfg.save(&state.config_dir, &user.username) {
-        Ok(()) => Json(settings_body(&state, &cfg, &user, schedule)).into_response(),
+        Ok(()) => {
+            let linked = crate::telegram::chat_for_user(&conn, user.id).unwrap_or(None).is_some();
+            Json(settings_body(&state, &cfg, &user, schedule, linked)).into_response()
+        }
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+/// A fresh code and the deep link that carries it to the bot; issuing one
+/// replaces whatever code the user was last given.
+async fn telegram_link(user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
+    let Some(ch) = state.telegram.clone() else {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": "telegram is not configured" })),
+        )
+            .into_response();
+    };
+    let conn = state.db();
+    match crate::telegram::issue_code(&conn, user.id, jiff::Timestamp::now()) {
+        Ok(code) => {
+            let bot = ch.bot();
+            Json(serde_json::json!({
+                "code": code,
+                "bot": bot,
+                "url": format!("https://t.me/{bot}?start={code}"),
+            }))
+            .into_response()
+        }
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn telegram_unlink(user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
+    let conn = state.db();
+    match crate::telegram::unlink(&conn, user.id) {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
