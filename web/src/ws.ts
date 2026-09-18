@@ -41,8 +41,12 @@ export function onAgentFrame(fn: (frame: AgentFrame) => void): () => void {
 const DEAD_HANDSHAKE_STREAK = 3
 
 // Reconnects with capped backoff; the server pings every 30s, so a healthy
-// socket stays quiet from our side.
-export function connectEvents(onEvent: (ev: EventFrame) => void): () => void {
+// socket stays quiet from our side. A `changed` frame carries no detail: it
+// says only that something the client is showing was decided elsewhere.
+export function connectEvents(
+  onEvent: (ev: EventFrame) => void,
+  onChanged: () => void,
+): () => void {
   let socket: WebSocket | null = null
   let closed = false
   let retry = 1000
@@ -66,6 +70,7 @@ export function connectEvents(onEvent: (ev: EventFrame) => void): () => void {
         if (typeof frame !== 'object' || frame === null) return
         const kind = (frame as { type?: unknown }).type
         if (kind === 'event') onEvent(frame as EventFrame)
+        if (kind === 'changed') onChanged()
         if (kind === 'agent') for (const fn of agentListeners) fn(frame as AgentFrame)
       } catch {
         // non-JSON frame; ignore

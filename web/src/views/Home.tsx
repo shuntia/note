@@ -389,6 +389,7 @@ export function Home({
           { label: 'Drop today', run: () => drop(ev), disabled: pending },
           { label: 'Move to tomorrow', run: () => act(() => api.moveTomorrow(ev.id)), disabled: pending },
           { label: ev.alert ? 'Silent' : 'Ping me', run: () => act(() => api.setEventAlert(ev.id, !ev.alert)), disabled: pending },
+          { label: ev.channel === 'voice' ? 'Notify me' : 'Call me', run: () => act(() => api.setEventChannel(ev.id, ev.channel === 'voice' ? 'push' : 'voice')), disabled: pending },
         ]}
       />
       {later && (
@@ -520,7 +521,14 @@ export function Home({
         .map((ev) => (
           <li key={ev.id} className={ev.id === next?.id ? 'next' : ''}>
             <span className="home-when">{ev.wall_time} – {ev.end_wall_time ?? ev.wall_time}</span>
-            <span className="home-what">{eventLabel(ev.kind)}</span>
+            <span className="home-what">
+              {eventLabel(ev.kind)}
+              {ev.channel === 'voice' && (
+                <svg className="home-phone" viewBox="0 0 24 24" role="img" aria-label="Note calls you">
+                  <path d="M6.6 10.8a15.1 15.1 0 006.6 6.6l2.2-2.2a1 1 0 011-.25 11.4 11.4 0 003.6.57 1 1 0 011 1V20a1 1 0 01-1 1A17 17 0 013 4a1 1 0 011-1h3.5a1 1 0 011 1 11.4 11.4 0 00.57 3.6 1 1 0 01-.25 1z" />
+                </svg>
+              )}
+            </span>
           </li>
         ))}
     </ul>
