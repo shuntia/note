@@ -15,6 +15,7 @@ import type {
   ScheduleRow,
   SecurityState,
   Settings as UserSettings,
+  TelegramLink,
   Token,
   TokenCreated,
   TotpEnrolment,
@@ -36,6 +37,9 @@ type Loaded = {
   counter: CounterMode
   nightly: boolean
   checkins: boolean
+  telegramEnabled: boolean
+  telegramLinked: boolean
+  telegramBot: string
 }
 type Save = { row: string; kind: 'busy' | 'saved' | 'failed'; message?: string } | null
 
@@ -161,6 +165,7 @@ export function Settings({
   const [save, setSave] = useState<Save>(null)
   const [open, setOpen] = useState<string | null>(null)
   const [theme, setTheme] = useState<ThemeChoice>(storedTheme)
+  const [invite, setInvite] = useState<TelegramLink | null>(null)
 
   const load = () => {
     setState(undefined)
@@ -177,6 +182,9 @@ export function Settings({
           counter: s.counter,
           nightly: s.nightly_enabled,
           checkins: s.checkins_enabled,
+          telegramEnabled: s.telegram_enabled,
+          telegramLinked: s.telegram_linked,
+          telegramBot: s.telegram_bot,
         })
       })
       .catch(() => setState('error'))
@@ -257,6 +265,47 @@ export function Settings({
       setSave({ row, kind: 'failed', message: failure(err) })
     }
   }
+
+  const startLink = async () => {
+    setSave({ row: 'telegram', kind: 'busy' })
+    try {
+      setInvite(await api.telegramLink())
+      setSave(null)
+    } catch (err) {
+      setSave({ row: 'telegram', kind: 'failed', message: failure(err) })
+    }
+  }
+
+  const unlinkTelegram = async () => {
+    setSave({ row: 'telegram', kind: 'busy' })
+    try {
+      await api.telegramUnlink()
+      setInvite(null)
+      setState((s) => (s && s !== 'error' ? { ...s, telegramLinked: false } : s))
+      setSave({ row: 'telegram', kind: 'saved' })
+    } catch (err) {
+      setSave({ row: 'telegram', kind: 'failed', message: failure(err) })
+    }
+  }
+
+  // The link is finished over in Telegram, so the card watches for it rather
+  // than asking for a reload.
+  useEffect(() => {
+    if (!invite) return
+    const id = window.setInterval(() => {
+      void api
+        .settings()
+        .then((s) => {
+          if (!s.telegram_linked) return
+          setInvite(null)
+          setState((prev) =>
+            prev && prev !== 'error' ? { ...prev, telegramLinked: true } : prev,
+          )
+        })
+        .catch(() => undefined)
+    }, 3000)
+    return () => window.clearInterval(id)
+  }, [invite])
 
   const sendTest = async () => {
     setSave({ row: 'test', kind: 'busy' })
@@ -467,6 +516,67 @@ export function Settings({
             Send test
           </button>
         </div>
+        {loaded?.telegramEnabled && (
+          <FoldRow
+            label="Telegram"
+            value={loaded.telegramLinked ? `@${loaded.telegramBot}` : 'Not linked'}
+            open={open === 'telegram'}
+            onToggle={fold('telegram')}
+          >
+            {open === 'telegram' && (
+              <div className="set-fold-body">
+                {loaded.telegramLinked ? (
+                  <>
+                    <span className="set-sub">
+                      Note answers you where you last wrote; the app keeps the whole record.
+                    </span>
+                    <button
+                      type="button"
+                      className="btn-haze small"
+                      disabled={busy}
+                      onClick={() => void unlinkTelegram()}
+                    >
+                      Unlink
+                    </button>
+                  </>
+                ) : invite ? (
+                  <div className="set-enrol">
+                    <QrCode uri={invite.url} label="Telegram link QR code" />
+                    <a
+                      className="set-link"
+                      href={invite.url}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      Open @{invite.bot}
+                    </a>
+                    <span className="set-sub">Or send the bot this code</span>
+                    <code className="set-token-secret">/start {invite.code}</code>
+                    <span className="set-sub">It lasts ten minutes</span>
+                    <button
+                      type="button"
+                      className="btn-haze small"
+                      disabled={busy}
+                      onClick={() => void startLink()}
+                    >
+                      New code
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    className="btn-haze small"
+                    disabled={busy}
+                    onClick={() => void startLink()}
+                  >
+                    Link a chat
+                  </button>
+                )}
+                <Status save={save} row="telegram" />
+              </div>
+            )}
+          </FoldRow>
+        )}
         {loaded && (
           <div className="set-row">
             <span className="set-row-body">
@@ -808,7 +918,7 @@ const ASK_LABEL: Record<Ask['kind'], string> = {
   'drop-totp': 'Remove the authenticator app',
 }
 
-function QrCode({ uri }: { uri: string }) {
+function QrCode({ uri, label = 'Authenticator QR code' }: { uri: string; label?: string }) {
   const canvas = useRef<HTMLCanvasElement>(null)
   const [drawn, setDrawn] = useState(true)
 
@@ -822,7 +932,7 @@ function QrCode({ uri }: { uri: string }) {
   }, [uri])
 
   if (!drawn) return <span className="set-sub">Use the manual key below.</span>
-  return <canvas className="set-qr" ref={canvas} aria-label="Authenticator QR code" />
+  return <canvas className="set-qr" ref={canvas} aria-label={label} />
 }
 
 function TotpEnrol({

@@ -51,3 +51,12 @@ api_key_file = "config/nvidianim.key"
 # [channels.webpush]
 # vapid_pem_file = "config/vapid.pem"
 # subject = "mailto:admin@example.com"
+
+# Telegram makes a bot chat one more window onto the same conversations: a
+# check-in arrives there, the reply runs the same Talk session the web does,
+# and the thread is the one the app shows. A linked chat is tried first in the
+# ladder. Talk to @BotFather for a token, then link a chat from Settings.
+#
+# [channels.telegram]
+# token_file = "config/telegram.token"   # mode 600, gitignored
+# base_url = "https://api.telegram.org"  # the default

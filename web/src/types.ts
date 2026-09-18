@@ -71,11 +71,15 @@ export type FlattenResult = { task: TaskNode; removed: Task[] }
 
 export type Debrief = { date: string; content: string }
 
+// Where the user last spoke to the thread from; Note answers there.
+export type ConversationVia = 'web' | 'telegram'
+
 export type Conversation = {
   id: number
   title: string
   updated_at: string
   summary: string | null
+  via: ConversationVia
 }
 
 export type TalkStep = { name: string; args: string; result: string; is_error: boolean }
@@ -129,7 +133,14 @@ export type Settings = {
   category: 'member' | 'test'
   nightly_enabled: boolean
   checkins_enabled: boolean
+  telegram_enabled: boolean
+  telegram_linked: boolean
+  // The bot a link invites the user to; '' where no bot is configured.
+  telegram_bot: string
 }
+
+// A live code and the deep link that carries it to the bot.
+export type TelegramLink = { code: string; bot: string; url: string }
 
 export type AlertPatch = { index: number; alert: boolean }
 

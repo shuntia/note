@@ -536,7 +536,16 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 }
 .chat-rename { font-size: 0.85rem; padding: 2px 6px; }
 .chat-meta { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 26px; }
-.chat-when { font-size: 0.7rem; color: var(--faint); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.chat-when {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.7rem;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.chat-via { width: 13px; height: 13px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .chat-more-wrap { position: relative; flex: none; }
 .chat-more-wrap .ev-more { width: 26px; height: 26px; font-size: 0.9rem; color: var(--faint); }
 @media (pointer: coarse), (max-width: 767.98px) {

@@ -344,6 +344,28 @@ const MIGRATIONS: &[&str] = &[
     "
     DROP TABLE IF EXISTS voice_calls;
     ",
+    // v26
+    "
+    CREATE TABLE telegram_links (
+        user_id INTEGER PRIMARY KEY REFERENCES users(id),
+        chat_id INTEGER NOT NULL UNIQUE,
+        handle TEXT NOT NULL DEFAULT '',
+        linked_at TEXT NOT NULL
+    );
+    CREATE TABLE telegram_link_codes (
+        code TEXT PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id),
+        expires_at TEXT NOT NULL
+    );
+    CREATE TABLE telegram_cursor (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        last_update_id INTEGER NOT NULL
+    );
+    ALTER TABLE conversations ADD COLUMN via TEXT NOT NULL DEFAULT 'web'
+        CHECK (via IN ('web','telegram'));
+    ALTER TABLE conversations ADD COLUMN telegram_at TEXT;
+    CREATE INDEX idx_conversations_telegram ON conversations(user_id, telegram_at DESC);
+    ",
 ];
 
 pub fn open(path: &Path) -> Result<Connection> {
@@ -1019,6 +1041,58 @@ mod tests {
             })
             .unwrap();
         assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn v25_opens_the_telegram_tables_and_stamps_conversations() {
+        let conn = open_memory().unwrap();
+        let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, MIGRATIONS.len() as i64);
+        conn.execute(
+            "INSERT INTO users (username, pass_hash, role)
+             VALUES ('a','h','member'), ('b','h','member')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO telegram_links (user_id, chat_id, handle, linked_at)
+             VALUES (1, 42, 'aki', 'now')",
+            [],
+        )
+        .unwrap();
+        assert!(
+            conn.execute(
+                "INSERT INTO telegram_links (user_id, chat_id, handle, linked_at)
+                 VALUES (2, 42, 'bo', 'now')",
+                [],
+            )
+            .is_err(),
+            "one chat belongs to one account"
+        );
+        conn.execute("INSERT INTO telegram_cursor (id, last_update_id) VALUES (1, 7)", [])
+            .unwrap();
+        assert!(
+            conn.execute("INSERT INTO telegram_cursor (id, last_update_id) VALUES (2, 9)", [])
+                .is_err(),
+            "the cursor is a single row"
+        );
+        conn.execute(
+            "INSERT INTO conversations (user_id, title, created_at, updated_at)
+             VALUES (1, 'chat', 'now', 'now')",
+            [],
+        )
+        .unwrap();
+        let (via, at): (String, Option<String>) = conn
+            .query_row("SELECT via, telegram_at FROM conversations WHERE id = 1", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(via, "web");
+        assert!(at.is_none());
+        assert!(
+            conn.execute("UPDATE conversations SET via = 'sms' WHERE id = 1", []).is_err(),
+            "via is a closed set"
+        );
     }
 
     #[test]
