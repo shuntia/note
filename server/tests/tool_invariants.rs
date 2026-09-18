@@ -247,6 +247,7 @@ proptest! {
             user_id: 1, username: "aki", vectors: PreparedVectors::default(),
             task_scope: None,
             inbox_source: None,
+            memory_source: None,
         };
 
         let mut mem_ids = Vec::new();

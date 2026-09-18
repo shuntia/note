@@ -17,6 +17,10 @@ base_url = "https://integrate.api.nvidia.com/v1"
 model = "openai/gpt-oss-120b"
 api_key_file = "config/nvidianim.key"
 
+# How long the endpoint keeps a prompt cached; it caps how long a
+# conversation may idle before the summary pass replays it.
+# cache_ttl_min = 60
+
 # [providers.llm]
 # kind = "anthropic"            # or "openai" for any OpenAI-compatible endpoint
 # model = "claude-sonnet-5"
@@ -26,6 +30,13 @@ api_key_file = "config/nvidianim.key"
 # kind = "openai"
 # base_url = "http://localhost:8080/v1"   # e.g. a local llama.cpp router
 # model = "embeddinggemma"
+
+# --- Background agent passes ---------------------------------------------
+# A conversation quiet for this many minutes is summarised while its context
+# is still cheap; 0 turns the pass off. The prompt cache above shortens it.
+#
+# [agent]
+# idle_summary_min = 60
 
 # --- Channels -----------------------------------------------------------
 # Delivery ladder: connected WebSocket clients first, then Web Push.

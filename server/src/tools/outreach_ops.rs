@@ -89,6 +89,7 @@ mod tests {
             vectors: crate::tools::PreparedVectors::default(),
             task_scope: None,
             inbox_source: None,
+            memory_source: None,
         }
     }
 

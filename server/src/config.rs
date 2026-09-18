@@ -19,6 +19,8 @@ pub struct ServerConfig {
     pub admin: AdminConfig,
     #[serde(default)]
     pub limits: LimitsConfig,
+    #[serde(default)]
+    pub agent: AgentConfig,
 }
 
 /// `NOTE_DEFAULT_WEB_DIR` at build time bakes in an install-specific location
@@ -36,6 +38,32 @@ impl ServerConfig {
         let raw = std::fs::read_to_string(config_dir.join("server.toml"))
             .context("reading server.toml")?;
         Ok(toml::from_str(&raw)?)
+    }
+
+    /// How long a conversation must have been quiet before it is summarised.
+    /// A summary replays the thread, so it is worth nothing once the
+    /// provider's prompt cache has expired: whichever is shorter wins.
+    pub fn idle_summary_min(&self) -> u32 {
+        let idle = self.agent.idle_summary_min;
+        match self.providers.llm.as_ref().and_then(|l| l.cache_ttl_min) {
+            Some(ttl) => idle.min(ttl),
+            None => idle,
+        }
+    }
+}
+
+/// The background passes that spend model tokens on their own schedule.
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct AgentConfig {
+    /// Minutes of quiet after which a conversation is summarised; 0 turns the
+    /// pass off.
+    pub idle_summary_min: u32,
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self { idle_summary_min: 60 }
     }
 }
 
@@ -58,6 +86,9 @@ pub struct ProviderConfig {
     /// default), "low", "medium" or "high".
     #[serde(default)]
     pub reasoning: String,
+    /// How long the endpoint keeps a prompt cached, when it caches at all.
+    #[serde(default)]
+    pub cache_ttl_min: Option<u32>,
 }
 
 pub const DEFAULT_PROVIDER_TIMEOUT_SECS: u64 = 45;
@@ -379,6 +410,35 @@ mod tests {
         write(tmp.path(), "server.toml",
             "bind_addr = \"127.0.0.1:0\"\npublic_base_url = \"http://x\"\ndata_dir = \"data\"\n");
         assert!(ServerConfig::load(tmp.path()).unwrap().channels.webpush.is_none());
+    }
+
+    #[test]
+    fn the_idle_summary_threshold_never_outlives_the_prompt_cache() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = "bind_addr = \"127.0.0.1:0\"\npublic_base_url = \"http://x\"\ndata_dir = \"data\"\n";
+        write(tmp.path(), "server.toml", base);
+        let cfg = ServerConfig::load(tmp.path()).unwrap();
+        assert_eq!(cfg.agent.idle_summary_min, 60);
+        assert_eq!(cfg.idle_summary_min(), 60);
+
+        write(tmp.path(), "server.toml", &format!("{base}[agent]\nidle_summary_min = 120\n"));
+        assert_eq!(ServerConfig::load(tmp.path()).unwrap().idle_summary_min(), 120);
+
+        write(
+            tmp.path(),
+            "server.toml",
+            &format!("{base}[agent]\nidle_summary_min = 120\n[providers.llm]\nkind = \"mock\"\ncache_ttl_min = 15\n"),
+        );
+        let cfg = ServerConfig::load(tmp.path()).unwrap();
+        assert_eq!(cfg.providers.llm.as_ref().unwrap().cache_ttl_min, Some(15));
+        assert_eq!(cfg.idle_summary_min(), 15);
+
+        write(
+            tmp.path(),
+            "server.toml",
+            &format!("{base}[agent]\nidle_summary_min = 0\n[providers.llm]\nkind = \"mock\"\ncache_ttl_min = 15\n"),
+        );
+        assert_eq!(ServerConfig::load(tmp.path()).unwrap().idle_summary_min(), 0);
     }
 
     #[test]

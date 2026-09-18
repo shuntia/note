@@ -1,10 +1,12 @@
 pub mod calendar_ops;
 pub mod context_ops;
+pub mod harvest_ops;
 pub mod inbox_ops;
 pub mod memory_ops;
 pub mod outreach_ops;
 pub mod plan_ops;
 pub mod schedule_ops;
+pub mod summary_ops;
 pub mod task_ops;
 pub mod task_query;
 
@@ -22,6 +24,10 @@ pub enum SessionKind {
     /// One item from a learning-management system, judged for what it is worth
     /// remembering.
     Inbox,
+    /// One idle conversation, condensed into the summary it carries from then on.
+    Summarize,
+    /// The day's conversations, read once for the facts worth keeping.
+    Harvest,
 }
 
 /// A tool failure returned to the model as a value; `kind` is machine-matchable,
@@ -66,6 +72,9 @@ pub struct ToolCtx<'a> {
     pub task_scope: Option<i64>,
     /// When set, `inbox_decide` accepts only this source id.
     pub inbox_source: Option<String>,
+    /// When set, every fact `memory_write` lands is recorded against this
+    /// source id.
+    pub memory_source: Option<String>,
 }
 
 pub const MAX_ARGS_BYTES: usize = 64 * 1024;
@@ -222,6 +231,9 @@ const TALK: &[&str] = &[
     "calendar_skip",
 ];
 const IMPORT: &[&str] = &["task_brief"];
+const SUMMARIZE: &[&str] = &["summary_write"];
+const HARVEST: &[&str] =
+    &["memory_query", "memory_read", "memory_write", "harvest_done"];
 const INBOX: &[&str] = &["memory_query", "memory_read", "inbox_decide"];
 const NIGHTLY: &[&str] = &[
     "memory_query",
@@ -258,6 +270,8 @@ pub fn is_terminal(kind: SessionKind, name: &str) -> bool {
     match kind {
         SessionKind::Import => name == "task_brief",
         SessionKind::Inbox => name == "inbox_decide",
+        SessionKind::Summarize => name == "summary_write",
+        SessionKind::Harvest => name == "harvest_done",
         _ => false,
     }
 }
@@ -269,6 +283,8 @@ pub fn registry(kind: SessionKind) -> &'static [&'static str] {
         SessionKind::Talk => TALK,
         SessionKind::Import => IMPORT,
         SessionKind::Inbox => INBOX,
+        SessionKind::Summarize => SUMMARIZE,
+        SessionKind::Harvest => HARVEST,
     }
 }
 
@@ -328,6 +344,16 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
         "memory_write" => (
             "Add, update, or supersede a memory. Superseding archives the old fact.",
             schema::<memory_ops::WriteArgs>(),
+        ),
+        "summary_write" => (
+            "Write this conversation's summary, in a single call that ends the session. \
+             1 to 1200 bytes of plain text — no markdown headers.",
+            schema::<summary_ops::WriteArgs>(),
+        ),
+        "harvest_done" => (
+            "End the harvest, naming how many facts you wrote and, in note, what you \
+             left out and why. Call it once, last.",
+            schema::<harvest_ops::DoneArgs>(),
         ),
         "context_edit" => (
             "Edit the standing context document: replace a unique snippet or append a line.",
@@ -504,6 +530,8 @@ fn run(
         "memory_query" => memory_ops::query(conn, ctx, parse(raw)?),
         "memory_read" => memory_ops::read(conn, ctx, parse(raw)?),
         "memory_write" => memory_ops::write(conn, ctx, parse(raw)?),
+        "summary_write" => summary_ops::write(conn, ctx, parse(raw)?),
+        "harvest_done" => harvest_ops::done(conn, ctx, parse(raw)?),
         "context_edit" => context_ops::edit(conn, ctx, parse(raw)?),
         "schedule_slide" => schedule_ops::slide(conn, ctx, parse(raw)?),
         "schedule_snooze" => schedule_ops::snooze(conn, ctx, parse(raw)?),
@@ -543,7 +571,7 @@ mod tests {
     }
 
     fn ctx<'a>(tmp: &'a tempfile::TempDir) -> ToolCtx<'a> {
-        ToolCtx { config_dir: tmp.path(), data_dir: tmp.path(), user_id: 1, username: "aki", vectors: PreparedVectors::default(), task_scope: None, inbox_source: None }
+        ToolCtx { config_dir: tmp.path(), data_dir: tmp.path(), user_id: 1, username: "aki", vectors: PreparedVectors::default(), task_scope: None, inbox_source: None, memory_source: None }
     }
 
     #[test]
@@ -864,22 +892,62 @@ mod tests {
         assert_eq!(v.content.unwrap(), direct[0]);
     }
 
-    /// Checkin ⊆ Talk ⊆ Nightly; Import is its own surface, sharing nothing
-    /// with them.
+    /// Checkin ⊆ Talk ⊆ Nightly, and a harvest reads memory with the nightly's
+    /// own tools plus the one that ends it; Import, Inbox, Summarize and
+    /// Harvest share nothing with an import session.
     #[test]
     fn session_surfaces_nest_and_import_stands_apart() {
         let is_subset = |a: &[&str], b: &[&str]| a.iter().all(|t| b.contains(t));
         assert!(is_subset(registry(SessionKind::Checkin), registry(SessionKind::Talk)));
         assert!(is_subset(registry(SessionKind::Talk), registry(SessionKind::Nightly)));
+        assert!(registry(SessionKind::Harvest)
+            .iter()
+            .filter(|t| !is_terminal(SessionKind::Harvest, t))
+            .all(|t| registry(SessionKind::Nightly).contains(t)));
         assert!(registry(SessionKind::Import)
             .iter()
             .all(|t| !registry(SessionKind::Nightly).contains(t)));
+        for kind in [SessionKind::Summarize, SessionKind::Harvest] {
+            assert!(
+                registry(kind).iter().all(|t| !registry(SessionKind::Import).contains(t)),
+                "{kind:?} shares a tool with an import session"
+            );
+        }
+    }
+
+    #[test]
+    fn a_summary_writes_nothing_but_its_own_line() {
+        assert_eq!(registry(SessionKind::Summarize), &["summary_write"]);
+        assert!(is_terminal(SessionKind::Summarize, "summary_write"));
+        assert!(is_terminal(SessionKind::Harvest, "harvest_done"));
+        let (conn, tmp) = env();
+        for kind in [SessionKind::Talk, SessionKind::Nightly, SessionKind::Harvest] {
+            let e = dispatch(&conn, &ctx(&tmp), kind, "summary_write", r#"{"summary":"x"}"#)
+                .unwrap_err();
+            assert_eq!(e.kind, "unknown_tool", "{kind:?}");
+        }
+        let e = dispatch(
+            &conn,
+            &ctx(&tmp),
+            SessionKind::Summarize,
+            "memory_write",
+            r#"{"op":"add","category":"semantic","summary":"s","body":"b"}"#,
+        )
+        .unwrap_err();
+        assert_eq!(e.kind, "forbidden");
     }
 
     #[test]
     fn nightly_notes_write_is_reachable_only_from_the_nightly_run() {
         assert!(registry(SessionKind::Nightly).contains(&"nightly_notes_write"));
-        for kind in [SessionKind::Talk, SessionKind::Checkin, SessionKind::Import] {
+        for kind in [
+            SessionKind::Talk,
+            SessionKind::Checkin,
+            SessionKind::Import,
+            SessionKind::Inbox,
+            SessionKind::Summarize,
+            SessionKind::Harvest,
+        ] {
             assert!(
                 !registry(kind).contains(&"nightly_notes_write"),
                 "{kind:?} can write the nightly notes"
@@ -1014,9 +1082,15 @@ mod tests {
 
     #[test]
     fn schemas_cover_the_registry_and_are_objects() {
-        for kind in
-            [SessionKind::Nightly, SessionKind::Checkin, SessionKind::Talk, SessionKind::Import]
-        {
+        for kind in [
+            SessionKind::Nightly,
+            SessionKind::Checkin,
+            SessionKind::Talk,
+            SessionKind::Import,
+            SessionKind::Inbox,
+            SessionKind::Summarize,
+            SessionKind::Harvest,
+        ] {
             let schemas = schemas(kind);
             assert_eq!(schemas.len(), registry(kind).len());
             for s in schemas {
