@@ -121,6 +121,7 @@ fn lay(
             cancel,
             conversation_id: thread,
             work_session_id: None,
+            system: false,
             now,
         },
     )

@@ -330,6 +330,38 @@ pub fn plan_auto(
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct PlanCarryArgs {
+    /// The day whose leftovers move, YYYY-MM-DD. Omit for today.
+    #[serde(default)]
+    pub date: Option<String>,
+}
+
+pub fn plan_carry(
+    conn: &Connection,
+    ctx: &ToolCtx,
+    args: PlanCarryArgs,
+) -> Result<serde_json::Value, ToolError> {
+    unscoped(ctx)?;
+    let date = match args.date {
+        Some(d) => d
+            .parse::<jiff::civil::Date>()
+            .map_err(|_| ToolError::rejected(format!("date must be YYYY-MM-DD, got {d:?}")))?,
+        None => today(ctx),
+    };
+    let moved = crate::plan::carry(
+        conn,
+        ctx.config_dir,
+        ctx.username,
+        ctx.user_id,
+        date,
+        jiff::Timestamp::now(),
+    )
+    .map_err(internal)?;
+    Ok(serde_json::json!({ "moved": moved }))
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct PlanListArgs {
     /// The day to read, YYYY-MM-DD. Omit for today.
     #[serde(default)]
@@ -466,6 +498,41 @@ mod tests {
             .unwrap()
             .collect::<rusqlite::Result<_>>()
             .unwrap()
+    }
+
+    #[test]
+    fn plan_carry_moves_the_day_leftovers_through_the_dispatcher() {
+        let (conn, tmp) = env();
+        let id = task(&conn, &tmp, r#"{"title":"essay"}"#);
+        let date = today();
+        call(&conn, &tmp, "plan_tasks", &format!(r#"{{"date":"{date}","task_ids":[{id}],"start":"09:00"}}"#))
+            .unwrap();
+        call(&conn, &tmp, "trigger_set", r#"{"at":"+120min","prompt":"how is the essay?"}"#).unwrap();
+
+        let out = call(&conn, &tmp, "plan_carry", "{}").unwrap();
+        assert_eq!(out["moved"], 1);
+        assert_eq!(events_on(&conn, tomorrow()).len(), 1);
+        let left: Vec<(String, String)> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT e.kind, e.status FROM events e JOIN plans p ON p.id = e.plan_id
+                     WHERE p.date = ?1 ORDER BY e.id",
+                )
+                .unwrap();
+            stmt.query_map([date.to_string()], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+        assert!(left.iter().all(|(_, status)| status == "dropped"));
+        assert_eq!(call(&conn, &tmp, "plan_carry", "{}").unwrap()["moved"], 0);
+    }
+
+    #[test]
+    fn plan_carry_rejects_a_date_it_cannot_read() {
+        let (conn, tmp) = env();
+        let e = call(&conn, &tmp, "plan_carry", r#"{"date":"the 31st"}"#).unwrap_err();
+        assert_eq!(e.kind, "rejected");
     }
 
     #[test]

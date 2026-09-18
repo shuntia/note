@@ -7,6 +7,7 @@ import type {
   Allocation,
   CalendarEntry,
   CalendarKind,
+  Carried,
   Conversation,
   DayView,
   Debrief,
@@ -49,6 +50,7 @@ const WRITABLE_SETTINGS = [
   'display_name',
   'timezone',
   'nightly_time',
+  'close_day_time',
   'template',
   'show_arc_between_sessions',
   'counter',
@@ -156,6 +158,7 @@ export const api = {
       `/api/plan/range?${new URLSearchParams({ from, to }).toString()}`,
     ),
   allocate: (date: string) => request<Allocation>(`/api/plan/${date}/allocate`, { method: 'POST' }),
+  carry: (date: string) => request<Carried>(`/api/plan/${date}/carry`, { method: 'POST' }),
   eventAction: (id: number, action: 'done' | 'drop') =>
     request<void>(`/api/events/${id}/${action}`, { method: 'POST' }),
   shift: (id: number, minutes: number) =>

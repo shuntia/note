@@ -96,6 +96,18 @@ pub fn run_for_user(
                 crate::log::ERROR_LOG_WINDOW_MINS,
             );
         }
+        let close_day =
+            crate::triggers::lay_close_day(&conn, deps.config_dir, username, user_id, date, now);
+        if let Err(e) = close_day {
+            let _ = crate::log::record_throttled(
+                &conn,
+                Some(user_id),
+                "close_day_error",
+                &e.to_string(),
+                now,
+                crate::log::ERROR_LOG_WINDOW_MINS,
+            );
+        }
     }
     let content = match crate::agent::run_session(
         deps,
@@ -336,7 +348,7 @@ mod tests {
                     |r| r.get(0),
                 )
                 .unwrap();
-            assert_eq!(n, 1);
+            assert_eq!(n, 2, "the template event and the close of the day");
             let content: String = conn
                 .query_row(
                     "SELECT content FROM debriefs WHERE user_id=1 AND date='2026-08-31'",
@@ -355,12 +367,57 @@ mod tests {
             counts(
                 "SELECT COUNT(*) FROM events e JOIN plans p ON p.id = e.plan_id WHERE p.date='2026-08-31'"
             ),
-            1
+            2
         );
         assert_eq!(
             counts("SELECT COUNT(*) FROM debriefs WHERE user_id=1 AND date='2026-08-31'"),
             1
         );
+    }
+
+    fn close_day_rows(conn: &rusqlite::Connection) -> Vec<(String, String)> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT e.wall_time, e.prompt FROM events e JOIN plans p ON p.id = e.plan_id
+                 WHERE p.date = '2026-08-31' AND e.kind = 'trigger' AND e.origin = 'template'",
+            )
+            .unwrap();
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        rows.collect::<rusqlite::Result<_>>().unwrap()
+    }
+
+    #[test]
+    fn the_close_of_the_day_is_laid_once_per_date() {
+        let (db, tmp) = env("UTC", "03:00");
+        let llm = MockLLM::scripted(vec![ChatResponse { text: "ok".into(), tool_calls: vec![] }]);
+        let now: jiff::Timestamp = "2026-08-31T04:00:00Z".parse().unwrap();
+        run_for_user(&deps(&db, &tmp, &llm), 1, "aki", now).unwrap();
+        {
+            let conn = db.lock().unwrap();
+            let rows = close_day_rows(&conn);
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].0, crate::config::DEFAULT_CLOSE_DAY_TIME);
+            assert!(rows[0].1.contains("plan_carry"));
+            conn.execute("DELETE FROM debriefs", []).unwrap();
+        }
+        run_for_user(&deps(&db, &tmp, &llm), 1, "aki", now).unwrap();
+        let conn = db.lock().unwrap();
+        assert_eq!(close_day_rows(&conn).len(), 1);
+        let spent = crate::triggers::spent(&conn, 1, "2026-08-31".parse().unwrap()).unwrap();
+        assert_eq!(spent, 0, "a system check never costs the day's budget");
+    }
+
+    #[test]
+    fn a_blank_close_day_time_lays_nothing() {
+        let (db, tmp) = env("UTC", "03:00");
+        let path = tmp.path().join("defaults/user.toml");
+        let raw = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, format!("{raw}close_day_time = \"\"\n")).unwrap();
+        let llm = MockLLM::scripted(vec![ChatResponse { text: "ok".into(), tool_calls: vec![] }]);
+        let now: jiff::Timestamp = "2026-08-31T04:00:00Z".parse().unwrap();
+        run_for_user(&deps(&db, &tmp, &llm), 1, "aki", now).unwrap();
+        let conn = db.lock().unwrap();
+        assert!(close_day_rows(&conn).is_empty());
     }
 
     #[test]

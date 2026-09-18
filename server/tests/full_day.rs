@@ -73,7 +73,11 @@ fn a_full_simulated_day() {
             .unwrap()
             .collect::<rusqlite::Result<_>>()
             .unwrap();
-        assert_eq!(kinds, vec!["checkin_call".to_string(), "nudge".to_string()]);
+        assert_eq!(
+            kinds,
+            vec!["checkin_call".to_string(), "nudge".to_string(), "trigger".to_string()],
+            "the template's own entries, then the close of the day"
+        );
         let debrief: String = conn
             .query_row("SELECT content FROM debriefs WHERE user_id=1 AND date='2026-08-31'", [], |r| {
                 r.get(0)
@@ -154,7 +158,7 @@ fn a_full_simulated_day() {
         let pending: i64 = conn
             .query_row("SELECT COUNT(*) FROM events WHERE status='pending'", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(pending, 1);
+        assert_eq!(pending, 2, "the 16:00 nudge and the close of the day");
     }
 
     // --- 16:05 JST: the nudge comes due; the already-fired checkin is not re-fired.
