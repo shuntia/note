@@ -77,6 +77,8 @@ pub struct Task {
     pub external_id: Option<String>,
     pub url: String,
     pub notify: String,
+    /// Minutes actually worked on it, summed from the sessions that ended.
+    pub actual_min: Option<u32>,
 }
 
 /// One top-level task with its steps; `children` is always present so the
@@ -171,12 +173,13 @@ fn row_to_task(r: &rusqlite::Row) -> rusqlite::Result<Task> {
         external_id: r.get(12)?,
         url: r.get(13)?,
         notify: r.get(14)?,
+        actual_min: r.get(15)?,
     })
 }
 
 const COLS: &str = "id, title, description, state, source, notes, duration_min, \
                     duration_source, parent_id, is_now, updated_at, due_at, \
-                    external_id, url, notify";
+                    external_id, url, notify, actual_min";
 
 fn checked_duration(min: u32) -> Result<u32, UpdateError> {
     if min == 0 || !min.is_multiple_of(DURATION_STEP_MIN) || min > MAX_DURATION_MIN {
