@@ -67,9 +67,11 @@ function todayIso(): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
 }
 
-// What the row is called: a block laid for a task carries the task's own name.
+// What the row is called: a block laid for a task carries the task's own name,
+// and a block laid for one of its steps names the step after it.
 function rowLabel(ev: PlanEvent): string {
-  return ev.task ? ev.task.title : eventLabel(ev.kind)
+  if (!ev.task) return eventLabel(ev.kind)
+  return ev.task.step ? `${ev.task.title} · ${ev.task.step}` : ev.task.title
 }
 
 function minutesOfDayNow(): number {
