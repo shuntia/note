@@ -30,9 +30,13 @@ const EDITABLE = [
   'nightly_time',
   'template',
   'triggers_per_day',
+  'pomodoro_work_min',
+  'pomodoro_break_min',
 ] as const
 
 const MAX_TRIGGERS_PER_DAY = 20
+const WORK_MIN = { min: 5, max: 120 }
+const BREAK_MIN = { min: 1, max: 60 }
 
 type Draft = Pick<UserSettings, (typeof EDITABLE)[number]>
 type Choices = Pick<UserSettings, 'templates' | 'timezones'>
@@ -45,6 +49,7 @@ type Loaded = {
   counter: CounterMode
   nightly: boolean
   checkins: boolean
+  pomodoro: boolean
   telegramEnabled: boolean
   telegramLinked: boolean
   telegramBot: string
@@ -69,6 +74,8 @@ function draftOf(s: UserSettings): Draft {
     nightly_time: s.nightly_time,
     template: s.template,
     triggers_per_day: s.triggers_per_day,
+    pomodoro_work_min: s.pomodoro_work_min,
+    pomodoro_break_min: s.pomodoro_break_min,
   }
 }
 
@@ -191,6 +198,7 @@ export function Settings({
           counter: s.counter,
           nightly: s.nightly_enabled,
           checkins: s.checkins_enabled,
+          pomodoro: s.pomodoro_enabled,
           telegramEnabled: s.telegram_enabled,
           telegramLinked: s.telegram_linked,
           telegramBot: s.telegram_bot,
@@ -262,14 +270,19 @@ export function Settings({
 
   const commitFeature = async (
     row: string,
-    patch: { nightly_enabled?: boolean; checkins_enabled?: boolean },
+    patch: { nightly_enabled?: boolean; checkins_enabled?: boolean; pomodoro_enabled?: boolean },
   ) => {
     setSave({ row, kind: 'busy' })
     try {
       const saved = await api.saveSettings(patch)
       setState((s) =>
         s && s !== 'error'
-          ? { ...s, nightly: saved.nightly_enabled, checkins: saved.checkins_enabled }
+          ? {
+              ...s,
+              nightly: saved.nightly_enabled,
+              checkins: saved.checkins_enabled,
+              pomodoro: saved.pomodoro_enabled,
+            }
           : s,
       )
       setSave({ row, kind: 'saved' })
@@ -390,6 +403,63 @@ export function Settings({
               onToggle={() => void commitHome('arc', { show_arc_between_sessions: !loaded.arc })}
             />
           </div>
+          <FoldRow
+            label="Pomodoro"
+            value={
+              loaded.pomodoro
+                ? `${loaded.draft.pomodoro_work_min} / ${loaded.draft.pomodoro_break_min} min`
+                : 'Off'
+            }
+            open={open === 'pomodoro'}
+            onToggle={fold('pomodoro')}
+          >
+            {open === 'pomodoro' && (
+              <div className="set-fold-body">
+                <span className="set-sub">
+                  A session runs in rounds: work, then a break, and Note says when each
+                  one is up.
+                </span>
+                <div className="set-row">
+                  <span className="set-row-body">
+                    <span className="set-label">Rounds</span>
+                  </span>
+                  <Switch
+                    label="Pomodoro"
+                    on={loaded.pomodoro}
+                    disabled={busy}
+                    onToggle={() =>
+                      void commitFeature('pomodoro', { pomodoro_enabled: !loaded.pomodoro })
+                    }
+                  />
+                </div>
+                <label className="set-sub" htmlFor="pomodoro-work">
+                  Work, in minutes
+                </label>
+                <input
+                  id="pomodoro-work"
+                  type="number"
+                  min={WORK_MIN.min}
+                  max={WORK_MIN.max}
+                  value={loaded.draft.pomodoro_work_min}
+                  onChange={(e) => edit('pomodoro_work_min', Math.round(Number(e.target.value) || 0))}
+                  {...commitOn('pomodoro')}
+                />
+                <label className="set-sub" htmlFor="pomodoro-break">
+                  Break, in minutes
+                </label>
+                <input
+                  id="pomodoro-break"
+                  type="number"
+                  min={BREAK_MIN.min}
+                  max={BREAK_MIN.max}
+                  value={loaded.draft.pomodoro_break_min}
+                  onChange={(e) => edit('pomodoro_break_min', Math.round(Number(e.target.value) || 0))}
+                  {...commitOn('pomodoro')}
+                />
+                <Status save={save} row="pomodoro" />
+              </div>
+            )}
+          </FoldRow>
           <FoldRow
             label="Counter"
             value={loaded.counter}
