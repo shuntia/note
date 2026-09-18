@@ -168,7 +168,7 @@ mod tests {
                 kind: "carrier-pigeon".into(),
                 base_url: String::new(), model: String::new(), api_key_env: String::new(),
                 api_key_file: std::path::PathBuf::new(), timeout_secs: 45,
-                reasoning: String::new(),
+                reasoning: String::new(), cache_ttl_min: None,
             }),
             embeddings: None,
         };
@@ -186,7 +186,7 @@ mod tests {
                 kind: "anthropic".into(), base_url: String::new(),
                 model: "m".into(), api_key_env: "NOTE_TEST_MISSING_KEY".into(),
                 api_key_file: std::path::PathBuf::new(), timeout_secs: 45,
-                reasoning: String::new(),
+                reasoning: String::new(), cache_ttl_min: None,
             }),
             embeddings: None,
         };
@@ -201,7 +201,7 @@ mod tests {
         crate::config::ProviderConfig {
             kind: "openai".into(), base_url: "http://localhost:1/v1".into(),
             model: "m".into(), api_key_env: String::new(), api_key_file: path,
-            timeout_secs: 45, reasoning: String::new(),
+            timeout_secs: 45, reasoning: String::new(), cache_ttl_min: None,
         }
     }
 

@@ -17,6 +17,7 @@ pub mod providers;
 pub mod push_subs;
 pub mod runner;
 pub mod security;
+pub mod summaries;
 pub mod talk;
 pub mod tasks;
 pub mod tokens;
@@ -120,6 +121,9 @@ pub struct AppState {
     pub providers_info: crate::admin::ProvidersInfo,
     /// Per-user agent sessions allowed in any 24 h; 0 lifts the ceiling.
     pub agent_sessions_per_day: u32,
+    /// Minutes of quiet after which a conversation is summarised; 0 turns the
+    /// pass off.
+    pub idle_summary_min: u32,
     pub started_at: jiff::Timestamp,
 }
 
@@ -152,6 +156,7 @@ impl AppState {
             passkeys: Arc::new(crate::security::PasskeyService::default()),
             providers_info: crate::admin::ProvidersInfo::default(),
             agent_sessions_per_day: crate::config::LimitsConfig::default().agent_sessions_per_day,
+            idle_summary_min: crate::config::AgentConfig::default().idle_summary_min,
             started_at: jiff::Timestamp::now(),
         }
     }
@@ -172,6 +177,11 @@ impl AppState {
 
     pub fn with_limits(mut self, limits: &crate::config::LimitsConfig) -> Self {
         self.agent_sessions_per_day = limits.agent_sessions_per_day;
+        self
+    }
+
+    pub fn with_idle_summary_min(mut self, minutes: u32) -> Self {
+        self.idle_summary_min = minutes;
         self
     }
 
