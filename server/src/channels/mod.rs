@@ -33,6 +33,28 @@ pub struct OutboundMessage {
     /// The conversation the message opened or joined; a check-in carries one,
     /// so the client can land on the thread where its question waits.
     pub conversation_id: Option<i64>,
+    /// One answer the user can give without typing. Only the channels that
+    /// carry buttons look at these; the rest deliver the text alone.
+    pub actions: Vec<Action>,
+}
+
+/// A button on a message. `data` travels back verbatim when it is pressed, and
+/// Telegram caps it at 64 bytes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Action {
+    pub label: String,
+    pub data: String,
+}
+
+pub const MAX_ACTION_DATA: usize = 64;
+
+/// What can be said about an event that has just asked for something.
+pub fn event_actions(event_id: i64) -> Vec<Action> {
+    vec![
+        Action { label: "Done".into(), data: format!("ev:done:{event_id}") },
+        Action { label: "Snooze 15".into(), data: format!("ev:snooze:{event_id}:15") },
+        Action { label: "Drop".into(), data: format!("ev:drop:{event_id}") },
+    ]
 }
 
 /// The web client's route for a conversation, relative to the app's origin.
@@ -75,7 +97,16 @@ pub fn render(conn: &Connection, ev: &crate::runner::FiredEvent) -> OutboundMess
     if !ev.message.is_empty() {
         body = ev.message.clone();
     }
-    OutboundMessage { title, body, urgency, event_id: Some(ev.event_id), conversation_id: None }
+    let actions =
+        if is_checkin(&ev.kind) { event_actions(ev.event_id) } else { Vec::new() };
+    OutboundMessage {
+        title,
+        body,
+        urgency,
+        event_id: Some(ev.event_id),
+        conversation_id: None,
+        actions,
+    }
 }
 
 /// A check-in's question becomes the newest message of the day's check-in
@@ -197,6 +228,10 @@ pub fn deliver_block_start(
             urgency: Urgency::Normal,
             event_id: Some(start.event_id),
             conversation_id: None,
+            actions: vec![Action {
+                label: "Start session".into(),
+                data: format!("block:start:{}", start.event_id),
+            }],
         },
     );
     hub.broadcast_changed(start.user_id);
@@ -257,6 +292,24 @@ mod tests {
     }
 
     #[test]
+    fn only_a_checkin_is_rendered_with_something_to_press() {
+        let (db, _uid) = env();
+        let conn = db.lock().unwrap();
+        let m = render(&conn, &ev("checkin_call", "push", ""));
+        assert_eq!(
+            m.actions,
+            vec![
+                Action { label: "Done".into(), data: "ev:done:11".into() },
+                Action { label: "Snooze 15".into(), data: "ev:snooze:11:15".into() },
+                Action { label: "Drop".into(), data: "ev:drop:11".into() },
+            ]
+        );
+        assert!(m.actions.iter().all(|a| a.data.len() <= MAX_ACTION_DATA));
+        assert!(render(&conn, &ev("nudge", "push", "stretch")).actions.is_empty());
+        assert!(render(&conn, &ev("debrief", "push", "")).actions.is_empty());
+    }
+
+    #[test]
     fn render_debrief_without_a_row_says_so() {
         let (db, _uid) = env();
         let conn = db.lock().unwrap();
@@ -301,6 +354,7 @@ mod tests {
             urgency: Urgency::Normal,
             event_id: None,
             conversation_id: None,
+            actions: Vec::new(),
         };
         assert_eq!(deliver_via(&db, &ladder, 1, "aki", &msg), Some("webpush"));
         assert_eq!(webpush.seen().len(), 1);

@@ -165,6 +165,7 @@ mod tests {
             urgency: Urgency::High,
             event_id: Some(7),
             conversation_id: Some(3),
+            actions: Vec::new(),
         }
     }
 

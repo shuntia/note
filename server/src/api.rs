@@ -1216,6 +1216,7 @@ async fn notify_test(user: CurrentUser, State(state): State<AppState>) -> impl I
         urgency: crate::channels::Urgency::Normal,
         event_id: None,
         conversation_id: None,
+        actions: Vec::new(),
     };
     let db = state.db.clone();
     let ladder = state.channels.clone();

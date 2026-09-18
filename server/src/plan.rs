@@ -279,7 +279,7 @@ fn owned_event(conn: &Connection, user_id: i64, event_id: i64) -> rusqlite::Resu
     .optional()
 }
 
-fn parse_minutes(wall: &str) -> anyhow::Result<i64> {
+pub(crate) fn parse_minutes(wall: &str) -> anyhow::Result<i64> {
     let (h, m) = wall.split_once(':').ok_or_else(|| anyhow::anyhow!("bad wall_time: {wall}"))?;
     Ok(h.parse::<i64>()? * 60 + m.parse::<i64>()?)
 }

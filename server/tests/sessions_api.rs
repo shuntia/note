@@ -368,6 +368,10 @@ async fn a_block_announces_itself_the_way_its_task_asks() {
     assert_eq!(seen[0].1.title, "Starting now");
     assert_eq!(seen[0].1.body, "read the chapter · until 23:59");
     assert_eq!(seen[0].1.event_id, Some(loud));
+    assert_eq!(
+        seen[0].1.actions.iter().map(|a| (a.label.as_str(), a.data.as_str())).collect::<Vec<_>>(),
+        vec![("Start session", format!("block:start:{loud}").as_str())]
+    );
 
     let lines: Vec<String> = rows(
         &w,
