@@ -136,8 +136,18 @@ fn one_line(summary: &str) -> String {
 /// The exact text shape the vector index embeds for a fact, shared with the
 /// tool-path prepare pass so prepared vectors match index-time vectors.
 pub(crate) fn embed_text(summary: &str, body: &str) -> String {
-    format!("{}\n{}", one_line(summary), body.trim())
+    let body = body.trim();
+    let cut = body
+        .char_indices()
+        .map(|(i, _)| i)
+        .find(|&i| i >= MAX_EMBED_BODY_CHARS)
+        .unwrap_or(body.len());
+    format!("{}\n{}", one_line(summary), &body[..cut])
 }
+
+/// What the embedding model is given of a body; the endpoint refuses inputs
+/// past its batch size, and the summary plus this much carries the meaning.
+pub const MAX_EMBED_BODY_CHARS: usize = 2800;
 
 /// Writes through a sibling temp file so a crash mid-write can never leave a
 /// half-rendered fact where the index expects a whole one.
@@ -207,11 +217,19 @@ pub fn backfill_vectors(
             continue;
         }
         let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
-        let vectors = embeddings.embed(&refs)?;
+        let vectors = match embeddings.embed(&refs) {
+            Ok(v) => v.into_iter().map(Some).collect::<Vec<_>>(),
+            Err(_) => refs
+                .iter()
+                .map(|t| embeddings.embed(&[t]).ok().and_then(|mut v| v.pop()))
+                .collect(),
+        };
         let conn = crate::db_guard(db);
         for ((user, id), v) in keys.iter().zip(vectors.iter()) {
-            store_vector(&conn, user, id, Some(v));
-            filled += 1;
+            if v.is_some() {
+                store_vector(&conn, user, id, v.as_deref());
+                filled += 1;
+            }
         }
     }
     Ok(filled)
