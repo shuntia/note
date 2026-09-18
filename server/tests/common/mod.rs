@@ -35,6 +35,7 @@ pub fn config_dir() -> TempDir {
     );
     write("defaults/prompts/summarize.md", "summarise the conversation");
     write("defaults/prompts/harvest.md", "keep what will still matter");
+    write("defaults/prompts/trigger.md", "say one thing or stay_quiet");
     tmp
 }
 

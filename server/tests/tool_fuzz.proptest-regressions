@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 4857414d95d88e8faa27b28720b3014ada5f985d890d044b808e95ed13748013 # shrinks to (name, raw) = ("schedule_slide", "{\"event_id\": 1, \"minutes\": 9223372036854775807}"), kind_idx = 0
+cc 2252e066f410c496ee2dae725fc419d88f6361e99a281c92e3a7f0c849c84b28 # shrinks to (name, raw) = ("trigger_set", "{\"at\":\"+9223372036854775807min\",\"prompt\":\"look again\"}"), kind_idx = 0

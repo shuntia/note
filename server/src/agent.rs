@@ -13,6 +13,9 @@ pub const IMPORT_MAX_TURNS: usize = 2;
 /// A harvest reads one digest: enough rounds to search memory before each
 /// write and still finish.
 pub const HARVEST_MAX_TURNS: usize = 8;
+/// A trigger session looks around and then speaks or does not: room to read the
+/// situation, never room to hold a conversation with itself.
+pub const TRIGGER_MAX_TURNS: usize = 6;
 pub const MAX_TURNS_REPLY: &str =
     "(I ran out of steps before finishing — ask again and I'll pick it up from here)";
 
@@ -119,6 +122,10 @@ pub fn run_session_watched(
         system.push_str("\n\n");
         system.push_str(&crate::prompts::load(deps.config_dir, username, "planning")?);
     }
+    if kind == SessionKind::Trigger {
+        system.push_str("\n\n");
+        system.push_str(&crate::prompts::load(deps.config_dir, username, "trigger")?);
+    }
     if !single_call(kind) {
         let conn = crate::db_guard(deps.db);
         let context = crate::context::assemble(&conn, deps.config_dir, user_id, username, now)?;
@@ -141,6 +148,7 @@ pub fn run_session_watched(
     let max_turns = match kind {
         _ if single_call(kind) => IMPORT_MAX_TURNS,
         SessionKind::Harvest => HARVEST_MAX_TURNS,
+        SessionKind::Trigger => TRIGGER_MAX_TURNS,
         _ => MAX_TURNS,
     };
     let started = std::time::Instant::now();
@@ -281,6 +289,7 @@ mod tests {
         write("defaults/prompts/planning.md", "plan the day");
         write("defaults/prompts/import.md", "brief the assignment");
         write("defaults/prompts/inbox.md", "read the item");
+        write("defaults/prompts/trigger.md", "you are following up on your own plan");
         (Mutex::new(conn), tmp)
     }
 
@@ -550,6 +559,30 @@ mod tests {
             run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Nightly, now(), &[], "hi")
                 .unwrap();
         assert_eq!(out.reply, "", "the nightly run keeps its own fallback");
+    }
+
+    #[test]
+    fn a_trigger_session_reads_its_own_instructions_and_stops_early() {
+        let (db, tmp) = env();
+        let resp = ChatResponse {
+            text: String::new(),
+            tool_calls: vec![ToolCall {
+                id: "c".into(),
+                name: "memory_query".into(),
+                args: r#"{"query":"x"}"#.into(),
+            }],
+        };
+        let llm = MockLLM::scripted(vec![resp; TRIGGER_MAX_TURNS + 2]);
+        let out =
+            run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Trigger, now(), &[], "check")
+                .unwrap();
+        assert_eq!(out.turns, TRIGGER_MAX_TURNS);
+        let seen = llm.seen();
+        assert!(seen[0].system.contains("you are note"));
+        assert!(seen[0].system.contains("following up on your own plan"));
+        assert!(seen[0].system.contains("# Today's plan"));
+        assert!(seen[0].tool_names.contains(&"stay_quiet".to_string()));
+        assert!(!seen[0].tool_names.contains(&"task_create".to_string()));
     }
 
     #[test]
