@@ -417,6 +417,10 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE work_sessions ADD COLUMN conversation_id INTEGER REFERENCES conversations(id);
     UPDATE work_sessions SET phase_started_at = started_at WHERE phase_started_at IS NULL;
     ",
+    // v29
+    "
+    ALTER TABLE work_sessions ADD COLUMN overrun_asked_at TEXT;
+    ",
 ];
 
 pub fn open(path: &Path) -> Result<Connection> {
