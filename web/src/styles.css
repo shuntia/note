@@ -1144,18 +1144,16 @@ textarea.mono { font-family: var(--mono); }
 /* a moment Note set aside to look again: a hollow ring on the spine */
 .dl-span.trigger { top: -4px; width: 8px; min-width: 8px; height: 8px; margin-left: -4px; border-radius: 50%; background: none; border: 1.5px solid var(--quiet); }
 .dl-span.trigger.next { background: none; border-color: var(--ink); }
+.dl-span { transition: transform 140ms ease, box-shadow 140ms ease; }
+.dl-span.hover { transform: scaleY(1.5); box-shadow: 0 0 0 2px var(--sun); z-index: 1; }
+.dl-span.trigger.hover { transform: scale(1.4); }
+.home-list li { transition: background-color 140ms ease; border-radius: 8px; }
+.home-list li.hover { background: var(--haze-strong); color: var(--ink); }
 /* what the day already settled, as a tick on the gone bar */
 .dl-past { position: absolute; top: -3px; width: 2px; height: 6px; margin-left: -1px; border-radius: 1px; }
 .dl-past.done { background: var(--sage); }
 .dl-past.dropped { background: none; box-shadow: inset 0 0 0 1px var(--line); }
 .dl-label { position: absolute; left: 50%; transform: translateX(-50%); white-space: nowrap; font-size: 0.78rem; color: var(--quiet); font-variant-numeric: tabular-nums; }
-.dl-label.above { bottom: 18px; }
-/* neighbouring spans sit close enough at narrow widths that one row of labels overlaps */
-.dl-label.above.row2 { bottom: 36px; }
-.dl-label.above.row3 { bottom: 54px; }
-.dl-label.short .dl-name { display: none; }
-.dl-label.hide { display: none; }
-.dl-label.below { top: 18px; color: var(--ink); font-weight: 700; }
 .dayline.compact .dl-hour { top: 14px; font-size: 0.66rem; }
 .dayline.compact .dl-ticks { height: 5px; }
 .dayline.compact .dl-now { width: 12px; height: 12px; }
@@ -1271,6 +1269,8 @@ textarea.mono { font-family: var(--mono); }
   }
 }
 .today-line { position: absolute; left: 120px; width: 1200px; max-width: calc(100% - 240px); top: 496px; }
+.today-line .home-list { margin-top: 52px; }
+.today-line .home-list li { min-height: 38px; }
 .today-ground { position: absolute; left: 0; right: 0; top: 560px; bottom: 0; background: var(--earth); padding: 100px 0 0 120px; }
 .today-ground .debrief-row { width: 820px; max-width: calc(100% - 240px); }
 .today-ground .sofar { width: 820px; max-width: calc(100% - 240px); margin: 0 auto 1.6rem; }
