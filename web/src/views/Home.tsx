@@ -13,7 +13,7 @@ import { clearTimeline, scrollReveal, scrollToY, scrub, snapNearest, travel, typ
 import { reducedMotion } from '../motion'
 import { ghostOut, rise } from '../motion-gsap'
 import { NowCounter } from '../nowcounter'
-import { Overflow } from '../overflow'
+import { Overflow, type OverflowItem } from '../overflow'
 import { readPrefs } from '../prefs'
 import { eventLabel } from '../receipts'
 import {
@@ -28,7 +28,7 @@ import {
   type FocusSession,
 } from '../session'
 import { SoFar } from '../sofar'
-import type { DayView, PlanEvent, SessionStart, Task } from '../types'
+import type { DayView, PlanEvent, SessionStart, Task, TaskNotify, TaskRef } from '../types'
 import { CalendarSection } from './Calendar'
 import { DebriefFold } from '../debrief'
 import '../styles/home-motion.css'
@@ -48,6 +48,13 @@ const doneHold = makeHold<FocusSession>()
 const clamp = (v: number) => Math.min(1, Math.max(0, v))
 
 const isLive = (t: Task) => t.state === 'open' || t.state === 'in_progress'
+
+// What a block laid for the task does when it starts.
+const ANNOUNCE: { id: TaskNotify; label: string }[] = [
+  { id: 'none', label: 'None' },
+  { id: 'chat', label: 'Chat' },
+  { id: 'notify', label: 'Notify' },
+]
 
 function nowMinutes(): number {
   const d = new Date()
@@ -633,6 +640,14 @@ export function Home({
       (minutesOf(ev.end_wall_time ?? ev.wall_time) >= now || ev.status === 'fired'),
   )
 
+  const announce = (task: TaskRef): OverflowItem[] =>
+    ANNOUNCE.map((choice) => ({
+      label: `Announce: ${choice.label}`,
+      run: () => act(() => api.patchTask(task.id, { notify: choice.id })),
+      disabled: pending,
+      checked: task.notify === undefined ? undefined : task.notify === choice.id,
+    }))
+
   const blockActions = (ev: PlanEvent) => (
     <span className="home-row-actions">
       <button className="btn-haze small" disabled={pending} onClick={() => start(ev)}>Start</button>
@@ -642,6 +657,7 @@ export function Home({
         items={[
           { label: 'Drop today', run: () => drop(ev), disabled: pending },
           { label: 'Move to tomorrow', run: () => act(() => api.moveTomorrow(ev.id)), disabled: pending },
+          ...(ev.task ? announce(ev.task) : []),
         ]}
       />
     </span>

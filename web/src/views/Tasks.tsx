@@ -12,11 +12,18 @@ import type { ViewProps } from '../app'
 import { collapse, flip, settle } from '../motion-gsap'
 import { Overflow, type OverflowItem } from '../overflow'
 import '../styles/tasks.css'
-import type { NewStep, Task, TaskNode, TaskState, TaskUpdate } from '../types'
+import type { NewStep, Task, TaskNode, TaskNotify, TaskState, TaskUpdate } from '../types'
 
 const NOW_CAP = 3
 const UNDO_MS = 5000
 const NOW_FULL = 'Now is full — finish or move something first'
+
+// What a block laid for the task does when it starts.
+const ANNOUNCE: { id: TaskNotify; label: string }[] = [
+  { id: 'none', label: 'None' },
+  { id: 'chat', label: 'Chat' },
+  { id: 'notify', label: 'Notify' },
+]
 
 type Group = 'now' | 'later' | 'done'
 
@@ -153,6 +160,7 @@ type RowActions = {
   drop: (node: TaskNode) => void
   keepAsOne: (node: TaskNode) => void
   startFocus: (node: TaskNode) => void
+  announce: (node: TaskNode, notify: TaskNotify) => void
 }
 
 export function Tasks({ notify, refresh, openNow }: ViewProps) {
@@ -176,7 +184,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
   useEffect(load, [load, refresh])
 
   const patch = useCallback(
-    async (id: number, body: { state?: TaskState; is_now?: boolean }) => {
+    async (id: number, body: { state?: TaskState; is_now?: boolean; notify?: TaskNotify }) => {
       try {
         const updated = await api.patchTask(id, body)
         setNodes((ns) => (ns ? mergeUpdate(ns, updated) : ns))
@@ -255,6 +263,11 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
       run: () => void restore(snap),
       windowMs: UNDO_MS,
     })
+  }
+
+  const announce = (node: TaskNode, notify: TaskNotify) => {
+    setNodes((ns) => (ns ? ns.map((n) => (n.id === node.id ? { ...n, notify } : n)) : ns))
+    void patch(node.id, { notify })
   }
 
   const setNow = (node: TaskNode, is_now: boolean) => {
@@ -389,6 +402,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
     drop,
     keepAsOne,
     startFocus,
+    announce,
   }
 
   const now = placed(g.now, nodes, leaving, 'now')
@@ -527,6 +541,13 @@ function Row({
       : { label: 'Move to Now', run: () => actions.moveToNow(node) },
   ]
   if (steps.length > 0) items.push({ label: 'Keep as one task', run: () => actions.keepAsOne(node) })
+  for (const choice of ANNOUNCE) {
+    items.push({
+      label: `Announce: ${choice.label}`,
+      run: () => actions.announce(node, choice.id),
+      checked: node.notify === choice.id,
+    })
+  }
   items.push({ label: 'Drop', run: () => actions.drop(node) })
   const sub =
     steps.length > 0
