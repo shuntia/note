@@ -28,7 +28,7 @@ import './styles/shell.css'
 // `admin` is reached from Settings only, so it never joins NAV.
 type Tab = 'today' | 'tasks' | 'chat' | 'memory' | 'settings' | 'admin'
 
-// The deep link a push notification or an ntfy click carries; the id of the thread it names.
+// The deep link a push notification carries; the id of the thread it names.
 function conversationOf(url: string): number | null {
   const hash = url.startsWith('#') ? url : new URL(url, location.href).hash
   const match = /^#\/chat\/(\d+)$/.exec(hash)

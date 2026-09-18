@@ -129,9 +129,6 @@ export type Settings = {
   category: 'member' | 'test'
   nightly_enabled: boolean
   checkins_enabled: boolean
-  // The topic in use: the user's own where they set one, else the server default.
-  ntfy_topic: string
-  ntfy_enabled: boolean
 }
 
 export type AlertPatch = { index: number; alert: boolean }
@@ -146,7 +143,6 @@ export type SettingsSaved = Pick<
   | 'counter'
   | 'nightly_enabled'
   | 'checkins_enabled'
-  | 'ntfy_topic'
 > & { schedule: ScheduleRow[] }
 
 export type PromptName = 'persona' | 'planning'
