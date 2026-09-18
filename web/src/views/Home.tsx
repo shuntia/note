@@ -47,6 +47,9 @@ const doneHold = makeHold<FocusSession>()
 
 const clamp = (v: number) => Math.min(1, Math.max(0, v))
 
+// A size in pixels at 1440x900, read through the viewport's own scale.
+const u = (px: number) => `calc(${px} * var(--u))`
+
 const isLive = (t: Task) => t.state === 'open' || t.state === 'in_progress'
 
 // What a block laid for the task does when it starts.
@@ -422,7 +425,7 @@ export function Home({
   }
 
   const sessionNum = (s: FocusSession, size: number) => (
-    <div className={`gauge-num${over ? ' over' : ''}`} style={{ fontSize: size }}>
+    <div className={`gauge-num${over ? ' over' : ''}`} style={{ fontSize: u(size) }}>
       {over ? '+' : ''}
       {counter(s)}
     </div>
@@ -519,7 +522,7 @@ export function Home({
       <Gauge size={mobile ? 320 : 440} fracAt={sessionFracAt(session)} breathe paused={isPaused(session)}>
         {eyebrow(session) && <div className="gauge-eyebrow"><Atoms text={eyebrow(session) ?? ''} /></div>}
         {sessionNum(session, mobile ? 64 : 76)}
-        <div className="gauge-name" style={{ fontSize: mobile ? 20 : 22 }}><Atoms text={faceName(session)} /></div>
+        <div className="gauge-name" style={{ fontSize: u(mobile ? 20 : 22) }}><Atoms text={faceName(session)} /></div>
         {stepOf(session) && <div className="gauge-sub"><Atoms text={stepOf(session) ?? ''} /></div>}
       </Gauge>
       {breakSheet}
@@ -533,17 +536,17 @@ export function Home({
           <Gauge size={mobile ? 320 : 440} fracAt={waitFracAt(next)} faded>
             <div className="gauge-eyebrow"><Atoms text={facts.eyebrow} /></div>
             {facts.minutes !== null && (
-              <div className="gauge-num" style={{ fontSize: mobile ? 50 : 58 }}><Atoms text={`${facts.minutes} min`} /></div>
+              <div className="gauge-num" style={{ fontSize: u(mobile ? 50 : 58) }}><Atoms text={`${facts.minutes} min`} /></div>
             )}
-            <div className="gauge-name" style={{ fontSize: mobile ? 18 : 22 }}><Atoms text={label} /></div>
-            <div className="gauge-sub" style={{ fontSize: mobile ? undefined : '0.875rem' }}><Atoms text={facts.span} /></div>
+            <div className="gauge-name" style={{ fontSize: u(mobile ? 18 : 22) }}><Atoms text={label} /></div>
+            <div className="gauge-sub" style={{ fontSize: mobile ? undefined : u(14) }}><Atoms text={facts.span} /></div>
           </Gauge>
         ) : (
           <div className="home-text">
             <div className="gauge-eyebrow"><Atoms text={facts.eyebrow} /></div>
             <div className="home-title"><Atoms text={label} /></div>
             {facts.minutes !== null && (
-              <div className="gauge-num" style={{ fontSize: 30 }}><Atoms text={`in ${facts.minutes} min`} /></div>
+              <div className="gauge-num" style={{ fontSize: u(30) }}><Atoms text={`in ${facts.minutes} min`} /></div>
             )}
             <div className="gauge-sub"><Atoms text={facts.span} /></div>
           </div>
@@ -566,7 +569,7 @@ export function Home({
           <Gauge size={230} fracAt={sessionFracAt(session)} breathe paused={isPaused(session)}>
             {eyebrow(session) && <span className="gauge-eyebrow">{eyebrow(session)}</span>}
             {sessionNum(session, 40)}
-            <div className="gauge-name" style={{ fontSize: 15 }}>{faceName(session)}</div>
+            <div className="gauge-name" style={{ fontSize: u(15) }}>{faceName(session)}</div>
             {stepOf(session) && <span className="gauge-sub">{stepOf(session)}</span>}
           </Gauge>
           {pauseButton(session)}
@@ -590,10 +593,10 @@ export function Home({
     <div className="home-face compact">
       {prefs.showArc ? (
         <Gauge size={120} fracAt={waitFracAt(next)} faded>
-          {facts.minutes !== null && <span className="gauge-num" style={{ fontSize: 22 }}>{facts.minutes} min</span>}
+          {facts.minutes !== null && <span className="gauge-num" style={{ fontSize: u(22) }}>{facts.minutes} min</span>}
         </Gauge>
       ) : (
-        facts.minutes !== null && <span className="gauge-num" style={{ fontSize: 22 }}>{facts.minutes} min</span>
+        facts.minutes !== null && <span className="gauge-num" style={{ fontSize: u(22) }}>{facts.minutes} min</span>
       )}
       <div className="home-head">
         <span className="gauge-eyebrow">{facts.eyebrow}</span>
@@ -728,7 +731,7 @@ export function Home({
     const topbar = mobile ? null : document.querySelector<HTMLElement>('.shell .topbar')
     const trigger = scrub(
       () => tl.current,
-      { trigger: el, start: topbar ? 'top 64px' : 'top top', end: `+=${distance}`, pin: true, pinSpacing: true, anticipatePin: 1 },
+      { trigger: el, start: topbar ? `top ${topbar.offsetHeight}px` : 'top top', end: `+=${distance}`, pin: true, pinSpacing: true, anticipatePin: 1 },
       { down: 0.7, up: 1.2 },
     )
     st.current = trigger
