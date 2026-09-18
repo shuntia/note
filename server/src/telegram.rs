@@ -1,10 +1,11 @@
-use crate::channels::telegram::Update;
+use crate::channels::telegram::{Callback, Update};
 use crate::talk::{TurnError, Via};
 use crate::AppState;
 use anyhow::Result;
 use argon2::password_hash::rand_core::{OsRng, RngCore};
 use rusqlite::{Connection, OptionalExtension};
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 /// Unambiguous when read off a screen and typed into a phone: no O/0, no I/1.
 const CODE_ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -130,6 +131,7 @@ const FRESH: &str = "Fresh start.";
 const CAPPED: &str = "You've used today's sessions.";
 const BUSY: &str = "Still on your last message.";
 const UNREACHABLE: &str = "Couldn't reach Note right now.";
+const GONE: &str = "That one is gone.";
 
 /// What the loop remembers between updates: nothing a restart needs back.
 #[derive(Default)]
@@ -189,6 +191,9 @@ pub async fn poll_once(state: &AppState, chats: &mut Chats) -> Result<()> {
     for update in &batch.messages {
         receive(state, chats, update).await;
     }
+    for callback in &batch.callbacks {
+        receive_callback(state, callback).await;
+    }
     if let Some(last) = batch.last_update_id {
         let conn = state.db();
         set_cursor(&conn, last)?;
@@ -236,6 +241,134 @@ pub async fn receive(state: &AppState, chats: &mut Chats, update: &Update) {
     }
 }
 
+/// One pressed button, applied against the account the chat speaks for. Data
+/// that names nothing of theirs is answered all the same, so a message from
+/// before a restart or from another account's plan cannot be pressed twice.
+pub async fn receive_callback(state: &AppState, cb: &Callback) {
+    let now = jiff::Timestamp::now();
+    let applied = {
+        let conn = state.db();
+        link_for_chat(&conn, cb.chat_id).unwrap_or(None).and_then(|link| {
+            let did = apply(&conn, &state.config_dir, &link, &cb.data, now)?;
+            let _ = crate::log::record(
+                &conn,
+                Some(link.user_id),
+                "telegram_action",
+                &format!("{}: {did}", cb.data),
+            );
+            Some((link.user_id, did))
+        })
+    };
+    let Some((user_id, did)) = applied else {
+        return settle_button(state, cb, GONE, None).await;
+    };
+    state.hub.broadcast_changed(user_id);
+    let line = format!("✓ {did}");
+    settle_button(state, cb, &did, Some(line)).await;
+}
+
+/// The outcome the button's data named, or `None` when it named nothing the
+/// account still holds.
+fn apply(
+    conn: &Connection,
+    config_dir: &Path,
+    link: &Link,
+    data: &str,
+    now: jiff::Timestamp,
+) -> Option<String> {
+    match data.split(':').collect::<Vec<_>>().as_slice() {
+        ["ev", "done", id] => crate::plan::set_status(conn, link.user_id, id.parse().ok()?, "done")
+            .ok()?
+            .map(|()| "Done".to_string()),
+        ["ev", "drop", id] => {
+            crate::plan::set_status(conn, link.user_id, id.parse().ok()?, "dropped")
+                .ok()?
+                .map(|()| "Dropped".to_string())
+        }
+        ["ev", "snooze", id, minutes] => {
+            let minutes: i64 = minutes.parse().ok()?;
+            crate::plan::snooze(conn, link.user_id, id.parse().ok()?, minutes)
+                .ok()?
+                .map(|()| format!("Snoozed {minutes} min"))
+        }
+        ["block", "start", id] => start_block(conn, config_dir, link, id.parse().ok()?, now),
+        ["carry", _date] => None,
+        _ => None,
+    }
+}
+
+/// Opens the session a block was laid for: its task, for as long as it runs.
+fn start_block(
+    conn: &Connection,
+    config_dir: &Path,
+    link: &Link,
+    event_id: i64,
+    now: jiff::Timestamp,
+) -> Option<String> {
+    let (task_id, title, start, end): (i64, String, String, String) = conn
+        .query_row(
+            "SELECT t.id, t.title, e.wall_time, e.end_wall_time FROM events e
+             JOIN plans p ON p.id = e.plan_id
+             JOIN event_tasks et ON et.event_id = e.id
+             JOIN tasks t ON t.id = et.task_id
+             WHERE e.id = ?1 AND p.user_id = ?2 AND e.end_wall_time IS NOT NULL",
+            (event_id, link.user_id),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()
+        .ok()??;
+    let span = crate::plan::parse_minutes(&end).ok()? - crate::plan::parse_minutes(&start).ok()?;
+    crate::work::start(
+        conn,
+        config_dir,
+        link.user_id,
+        &link.username,
+        crate::work::NewSession {
+            task_id: Some(task_id),
+            event_id: Some(event_id),
+            title,
+            planned_min: (span > 0).then_some(span),
+            step_index: None,
+            step_count: None,
+            step_name: None,
+            notes: None,
+        },
+        now,
+    )
+    .ok()?;
+    Some("Session started".into())
+}
+
+/// Answers the press with a toast, takes the buttons off the message, and —
+/// where something was applied — writes the outcome under what it said.
+async fn settle_button(state: &AppState, cb: &Callback, toast: &str, line: Option<String>) {
+    let Some(ch) = state.telegram.clone() else { return };
+    let (toast, text) = (toast.to_string(), line.map(|l| format!("{}\n{l}", cb.text)));
+    let (callback_id, chat_id, message_id) = (cb.callback_id.clone(), cb.chat_id, cb.message_id);
+    let db = state.db.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        let outcome = ch
+            .answer_callback(&callback_id, &toast)
+            .and_then(|()| ch.clear_keyboard(chat_id, message_id))
+            .and_then(|()| match text {
+                Some(text) => ch.edit_text(chat_id, message_id, &text),
+                None => Ok(()),
+            });
+        if let Err(e) = outcome {
+            let conn = crate::db_guard(&db);
+            let _ = crate::log::record_throttled(
+                &conn,
+                None,
+                "telegram_error",
+                &e.to_string(),
+                jiff::Timestamp::now(),
+                crate::log::ERROR_LOG_WINDOW_MINS,
+            );
+        }
+    })
+    .await;
+}
+
 /// A chat Note does not know: either it carries a live code, or it is told
 /// where to get one — once an hour, so a stranger cannot be answered in a loop.
 async fn offer_linking(
@@ -278,7 +411,7 @@ async fn say(state: &AppState, chat_id: i64, text: &str) {
     let text = text.to_string();
     let db = state.db.clone();
     let _ = tokio::task::spawn_blocking(move || {
-        if let Err(e) = ch.send_message(chat_id, &text) {
+        if let Err(e) = ch.send_message(chat_id, &text, &[]) {
             let conn = crate::db_guard(&db);
             let _ = crate::log::record_throttled(
                 &conn,
