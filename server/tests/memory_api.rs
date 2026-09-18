@@ -157,6 +157,33 @@ async fn memory_routes_list_search_and_read() {
 }
 
 #[tokio::test]
+async fn a_fact_names_what_wrote_it_on_the_users_behalf() {
+    let (app, cookie, state, _cfg) = common::app_with_logged_in_user_and_state().await;
+    let harvested = add(&state, "aki", "semantic", "mira lives next door", "since september");
+    let own = add(&state, "aki", "semantic", "likes green tea", "no sugar");
+    {
+        let conn = state.db();
+        conn.execute(
+            "INSERT INTO memory_sources (user_id, source_id, memory_id) VALUES (1, ?1, ?2)",
+            ("harvest:2026-09-18", &harvested),
+        )
+        .unwrap();
+    }
+
+    let v = json(
+        app.clone()
+            .oneshot(get(&format!("/api/memory/{harvested}"), &cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(v["sources"], serde_json::json!(["harvest:2026-09-18"]));
+
+    let v = json(app.oneshot(get(&format!("/api/memory/{own}"), &cookie)).await.unwrap()).await;
+    assert_eq!(v["sources"], serde_json::json!([]));
+}
+
+#[tokio::test]
 async fn memory_list_caps_at_two_hundred() {
     let (app, cookie, state, _cfg) = common::app_with_logged_in_user_and_state().await;
     for i in 0..205 {

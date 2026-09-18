@@ -451,6 +451,82 @@ async fn second_post_with_the_conversation_id_replays_history() {
 }
 
 #[tokio::test]
+async fn a_thread_longer_than_the_window_carries_its_summary_into_the_prompt() {
+    use note_server::talk;
+    let llm = Arc::new(MockLLM::scripted(vec![ChatResponse {
+        text: "still here".into(),
+        tool_calls: vec![],
+    }]));
+    let (app, cookie, state, _cfg) =
+        common::app_with_logged_in_user_llm_and_state(llm.clone()).await;
+    let at: jiff::Timestamp = "2026-09-17T09:00:00Z".parse().unwrap();
+    let id = {
+        let conn = state.db();
+        let id = talk::create(&conn, 1, "the essay", at).unwrap();
+        for i in 0..40 {
+            talk::append_text(&conn, id, "user", &format!("turn {i}"), at).unwrap();
+        }
+        talk::store_summary(&conn, id, "Aki worked through the essay outline.", 10, at).unwrap();
+        id
+    };
+
+    let res = app
+        .oneshot(
+            Request::post("/api/talk")
+                .header(header::COOKIE, &cookie)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "message": "you there?", "conversation_id": id })
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let system = &llm.seen()[0].system;
+    assert!(
+        system.contains("Earlier in this conversation: Aki worked through the essay outline."),
+        "{system}"
+    );
+}
+
+#[tokio::test]
+async fn a_short_thread_needs_no_summary_in_the_prompt() {
+    use note_server::talk;
+    let llm = Arc::new(MockLLM::scripted(vec![ChatResponse {
+        text: "still here".into(),
+        tool_calls: vec![],
+    }]));
+    let (app, cookie, state, _cfg) =
+        common::app_with_logged_in_user_llm_and_state(llm.clone()).await;
+    let at: jiff::Timestamp = "2026-09-17T09:00:00Z".parse().unwrap();
+    let id = {
+        let conn = state.db();
+        let id = talk::create(&conn, 1, "the essay", at).unwrap();
+        talk::append_text(&conn, id, "user", "the essay is due friday", at).unwrap();
+        talk::store_summary(&conn, id, "Aki brought the Friday essay.", 1, at).unwrap();
+        id
+    };
+
+    let res = app
+        .oneshot(
+            Request::post("/api/talk")
+                .header(header::COOKIE, &cookie)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "message": "you there?", "conversation_id": id })
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert!(!llm.seen()[0].system.contains("Earlier in this conversation"));
+}
+
+#[tokio::test]
 async fn absent_or_unowned_conversation_is_404_and_nothing_persisted() {
     let llm = Arc::new(MockLLM::scripted(vec![ChatResponse {
         text: "should never run".into(),

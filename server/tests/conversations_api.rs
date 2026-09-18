@@ -79,6 +79,30 @@ async fn list_is_newest_updated_first() {
 }
 
 #[tokio::test]
+async fn a_row_carries_the_summary_the_idle_pass_wrote() {
+    let (app, cookie, state, _cfg) = common::app_with_logged_in_user_and_state().await;
+    let plain = seed(&state, 1, "plain", "2026-08-29T09:00:00Z");
+    let summarised = seed(&state, 1, "the essay", "2026-08-30T09:00:00Z");
+    {
+        let conn = state.db();
+        talk::store_summary(
+            &conn,
+            summarised,
+            "Aki brought the Friday essay and it went into Now.",
+            2,
+            "2026-08-30T10:00:00Z".parse().unwrap(),
+        )
+        .unwrap();
+    }
+
+    let v = json(get(&app, "/api/conversations", &cookie).await).await;
+    assert_eq!(v[0]["id"], summarised);
+    assert_eq!(v[0]["summary"], "Aki brought the Friday essay and it went into Now.");
+    assert_eq!(v[1]["id"], plain);
+    assert!(v[1]["summary"].is_null());
+}
+
+#[tokio::test]
 async fn rename_round_trips_into_the_list() {
     let (app, cookie, state, _cfg) = common::app_with_logged_in_user_and_state().await;
     let id = seed(&state, 1, "untitled", "2026-08-30T09:00:00Z");
