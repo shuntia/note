@@ -124,7 +124,12 @@ async fn main() -> anyhow::Result<()> {
         let ch = channels::webpush::WebPushChannel::new(state.db.clone(), pem, wp.subject.clone())?;
         state = state.with_webpush(ch, public_key);
     }
+    if let Some(t) = &cfg.channels.telegram {
+        let ch = channels::telegram::TelegramChannel::new(state.db.clone(), t)?;
+        state = state.with_telegram(ch);
+    }
     runner::spawn(state.clone());
+    note_server::telegram::spawn(state.clone());
     nightly::spawn(state.clone());
     summaries::spawn(state.clone());
 

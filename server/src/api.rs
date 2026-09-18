@@ -34,6 +34,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/conversations/{id}/messages", get(conversation_messages))
         .route("/api/settings", get(settings_get).put(settings_put))
+        .route(
+            "/api/telegram/link",
+            post(telegram_link).delete(telegram_unlink),
+        )
         .route("/api/notify/test", post(notify_test))
         .route(
             "/api/prompts/{name}",
@@ -317,7 +321,7 @@ fn brief_error(status: StatusCode, message: &str) -> axum::response::Response {
 /// The per-user daily spend ceiling both agent routes sit behind. Sessions are
 /// counted from the `agent_session` rows they already write, so the ceiling
 /// needs no state of its own.
-fn daily_cap_reached(state: &AppState, user_id: i64) -> bool {
+pub(crate) fn daily_cap_reached(state: &AppState, user_id: i64) -> bool {
     let cap = state.agent_sessions_per_day;
     if cap == 0 {
         return false;
@@ -771,28 +775,6 @@ struct TalkReq {
     conversation_id: Option<i64>,
 }
 
-const MAX_TALK_MESSAGE: usize = 16 * 1024;
-
-/// The marker a reply in a check-in thread carries into its session, so the
-/// model reads the thread's opening assistant turns as its own scheduled
-/// check-ins rather than as answers it once gave.
-fn checkin_thread_note(date: &str) -> String {
-    format!(
-        "# This conversation\n\nOpened by your scheduled check-in on {date}: every assistant \
-         message the user has not answered yet is a check-in question you sent, and the user \
-         is replying to it now."
-    )
-}
-
-/// What the history window no longer reaches. A thread longer than the window
-/// loses its oldest turns, and only the summary still carries them.
-fn summary_thread_note(summary: &str) -> String {
-    format!("# This conversation\n\nEarlier in this conversation: {summary}")
-}
-// History windows stay user-first/assistant-last: each success appends exactly
-// one user and one assistant row, and errors persist nothing.
-const TALK_HISTORY_LIMIT: usize = 32;
-
 /// A session makes synchronous provider calls and blocking DB writes, so it
 /// runs off the async executor.
 async fn talk(
@@ -800,115 +782,20 @@ async fn talk(
     State(state): State<AppState>,
     Json(req): Json<TalkReq>,
 ) -> impl IntoResponse {
-    let message = req.message.trim().to_string();
-    if message.is_empty() || message.len() > MAX_TALK_MESSAGE {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "message must be non-blank and at most 16384 bytes" })),
-        )
-            .into_response();
-    }
-    let mut notes: Vec<String> = Vec::new();
-    if let Some(id) = req.conversation_id {
-        let conn = state.db();
-        match crate::talk::owned(&conn, user.id, id) {
-            Ok(true) => {}
-            Ok(false) => return conversation_not_found(),
-            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-        }
-        match crate::talk::checkin_date(&conn, id) {
-            Ok(Some(date)) => notes.push(checkin_thread_note(&date)),
-            Ok(None) => {}
-            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-        }
-        let long = crate::talk::text_turns(&conn, id).unwrap_or(0) > TALK_HISTORY_LIMIT;
-        if long {
-            if let Ok(Some((summary, _))) = crate::talk::summary(&conn, id) {
-                notes.push(summary_thread_note(&summary));
-            }
-        }
-    }
-    let thread_note = (!notes.is_empty()).then(|| notes.join("\n\n"));
-    if daily_cap_reached(&state, user.id) {
-        return daily_cap_response();
-    }
-    let permit = match state.talk_gate.try_enter(user.id) {
-        Ok(p) => p,
-        Err(crate::TalkBusy::UserBusy) => {
-            return (
-                StatusCode::CONFLICT,
-                Json(serde_json::json!({ "error": "a reply is already in progress" })),
-            )
-                .into_response()
-        }
-        Err(busy) => return session_busy_response(busy),
-    };
-    let err_db = state.db.clone();
-    let uid = user.id;
-    let req_conversation = req.conversation_id;
-    let result = tokio::task::spawn_blocking(move || {
-        // held here, not in the handler future, so a cancelled request still
-        // holds the slot until the session it orphaned actually finishes
-        let _permit = permit;
-        let deps = crate::agent::SessionDeps {
-            db: &state.db,
-            config_dir: &state.config_dir,
-            data_dir: &state.data_dir,
-            llm: state.llm.as_ref(),
-            embeddings: state.embeddings.as_deref(),
-            task_scope: None,
-            inbox_source: None,
-            memory_source: None,
-            token_id: None,
-            thread_note,
-        };
-        let now = jiff::Timestamp::now();
-        let history = match req_conversation {
-            Some(id) => {
-                let conn = state.db();
-                crate::talk::history(&conn, id, TALK_HISTORY_LIMIT)?
-            }
-            None => Vec::new(),
-        };
-        // A brand-new conversation has no id yet, so its frames carry null
-        // until the reply hands the client one.
-        let seq = std::cell::Cell::new(0u64);
-        let on_event = |ev: crate::agent::AgentEvent| {
-            let n = seq.replace(seq.get() + 1);
-            state.hub.send(uid, &crate::channels::ws::agent_frame(req_conversation, n, &ev));
-        };
-        let out = crate::agent::run_session_watched(
-            &deps,
-            user.id,
-            &user.username,
-            crate::tools::SessionKind::Talk,
-            now,
-            &history,
-            &message,
-            &on_event,
-        )?;
-        let reply = if out.reply.trim().is_empty() {
-            crate::EMPTY_REPLY_FALLBACK.to_string()
-        } else {
-            out.reply.clone()
-        };
-        let conn = state.db();
-        let conv_id = match req_conversation {
-            Some(id) => id,
-            None => crate::talk::create(&conn, user.id, &crate::talk::title_from(&message), now)?,
-        };
-        crate::talk::append_text(&conn, conv_id, "user", &message, now)?;
-        for s in &out.steps {
-            crate::talk::append_tool(&conn, conv_id, &s.name, &s.args, &s.result, s.is_error, now)?;
-        }
-        crate::talk::append_assistant(&conn, conv_id, &reply, &out.reasoning, out.thought_ms, now)?;
-        crate::talk::touch(&conn, conv_id, now)?;
-        Ok::<_, anyhow::Error>((conv_id, reply, out.steps, out.reasoning, out.thought_ms))
-    })
+    use crate::talk::TurnError as E;
+    let turn = crate::talk::run_turn(
+        &state,
+        user.id,
+        &user.username,
+        req.conversation_id,
+        &req.message,
+        crate::talk::Via::Web,
+    )
     .await;
-    match result {
-        Ok(Ok((conv_id, reply, steps, reasoning, thought_ms))) => {
-            let steps: Vec<_> = steps
+    match turn {
+        Ok(turn) => {
+            let steps: Vec<_> = turn
+                .steps
                 .iter()
                 .map(|s| {
                     serde_json::json!({
@@ -920,37 +807,33 @@ async fn talk(
                 })
                 .collect();
             Json(serde_json::json!({
-                "conversation_id": conv_id,
-                "reply": reply,
+                "conversation_id": turn.conversation_id,
+                "reply": turn.reply,
                 "steps": steps,
-                "reasoning": reasoning,
-                "thought_ms": thought_ms,
+                "reasoning": turn.reasoning,
+                "thought_ms": turn.thought_ms,
             }))
             .into_response()
         }
-        Ok(Err(e)) => {
-            {
-                let conn = crate::db_guard(&err_db);
-                let _ = crate::log::record(&conn, Some(uid), "talk_error", &e.to_string());
-            }
-            (
-                StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({ "error": "the assistant is unavailable; try again" })),
-            )
-                .into_response()
-        }
-        Err(e) => {
-            {
-                let conn = crate::db_guard(&err_db);
-                let _ = crate::log::record(
-                    &conn,
-                    Some(uid),
-                    "talk_error",
-                    &format!("talk task failed: {e}"),
-                );
-            }
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
+        Err(E::Blank) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "message must be non-blank and at most 16384 bytes" })),
+        )
+            .into_response(),
+        Err(E::NotFound) => conversation_not_found(),
+        Err(E::DailyCap) => daily_cap_response(),
+        Err(E::Busy(crate::TalkBusy::UserBusy)) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": "a reply is already in progress" })),
+        )
+            .into_response(),
+        Err(E::Busy(busy)) => session_busy_response(busy),
+        Err(E::Unavailable) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({ "error": "the assistant is unavailable; try again" })),
+        )
+            .into_response(),
+        Err(E::Internal) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
 
@@ -969,7 +852,7 @@ fn conversation_not_found() -> axum::response::Response {
 async fn conversations_list(user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
     let conn = state.db();
     let mut stmt = match conn.prepare(
-        "SELECT id, title, updated_at, summary FROM conversations
+        "SELECT id, title, updated_at, summary, via FROM conversations
          WHERE user_id = ?1 ORDER BY updated_at DESC, id DESC",
     ) {
         Ok(s) => s,
@@ -982,6 +865,7 @@ async fn conversations_list(user: CurrentUser, State(state): State<AppState>) ->
                 "title": r.get::<_, String>(1)?,
                 "updated_at": r.get::<_, String>(2)?,
                 "summary": r.get::<_, Option<String>>(3)?,
+                "via": r.get::<_, String>(4)?,
             }))
         })
         .and_then(|m| m.collect());
@@ -1080,10 +964,13 @@ struct SettingsPatch {
     alerts: Option<Vec<AlertPatch>>,
 }
 
+/// `telegram_linked` is read by the caller, which already holds the DB guard on
+/// the write path.
 fn settings_body(
     cfg: &crate::config::UserConfig,
     user: &CurrentUser,
     schedule: Vec<crate::templates::ScheduleRow>,
+    telegram_linked: bool,
 ) -> serde_json::Value {
     let category = user.category.as_str();
     let features = cfg.features(category);
@@ -1097,6 +984,9 @@ fn settings_body(
         "category": category,
         "nightly_enabled": features.nightly,
         "checkins_enabled": features.checkins,
+        "telegram_enabled": state.telegram.is_some(),
+        "telegram_linked": telegram_linked,
+        "telegram_bot": state.telegram.as_ref().map(|ch| ch.bot()).unwrap_or_default(),
         "schedule": schedule,
     })
 }
@@ -1135,7 +1025,11 @@ async fn settings_get(user: CurrentUser, State(state): State<AppState>) -> impl 
     zones.sort_unstable();
     let templates = crate::templates::available(&state.config_dir, &user.username);
     let schedule = schedule_rows(&state, &user.username, &cfg.template);
-    let mut body = settings_body(&cfg, &user, schedule);
+    let linked = {
+        let conn = state.db();
+        crate::telegram::chat_for_user(&conn, user.id).unwrap_or(None).is_some()
+    };
+    let mut body = settings_body(&state, &cfg, &user, schedule, linked);
     body["templates"] = serde_json::json!(templates);
     body["timezones"] = serde_json::json!(zones);
     Json(body).into_response()
@@ -1212,7 +1106,43 @@ async fn settings_put(
     }
     let schedule = schedule_rows(&state, &user.username, &cfg.template);
     match cfg.save(&state.config_dir, &user.username) {
-        Ok(()) => Json(settings_body(&cfg, &user, schedule)).into_response(),
+        Ok(()) => {
+            let linked = crate::telegram::chat_for_user(&conn, user.id).unwrap_or(None).is_some();
+            Json(settings_body(&state, &cfg, &user, schedule, linked)).into_response()
+        }
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+/// A fresh code and the deep link that carries it to the bot; issuing one
+/// replaces whatever code the user was last given.
+async fn telegram_link(user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
+    let Some(ch) = state.telegram.clone() else {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": "telegram is not configured" })),
+        )
+            .into_response();
+    };
+    let conn = state.db();
+    match crate::telegram::issue_code(&conn, user.id, jiff::Timestamp::now()) {
+        Ok(code) => {
+            let bot = ch.bot();
+            Json(serde_json::json!({
+                "code": code,
+                "bot": bot,
+                "url": format!("https://t.me/{bot}?start={code}"),
+            }))
+            .into_response()
+        }
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn telegram_unlink(user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
+    let conn = state.db();
+    match crate::telegram::unlink(&conn, user.id) {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }

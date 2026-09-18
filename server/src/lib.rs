@@ -23,6 +23,7 @@ pub mod security;
 pub mod summaries;
 pub mod talk;
 pub mod tasks;
+pub mod telegram;
 pub mod tokens;
 pub mod templates;
 pub mod tools;
@@ -106,6 +107,9 @@ pub struct AppState {
     pub llm: Arc<dyn LLMProvider>,
     pub embeddings: Option<Arc<dyn EmbeddingsProvider>>,
     pub vapid_public_key: Option<String>,
+    /// Set when the telegram channel is configured; it also names the bot a
+    /// link invites the user to, and carries a mirrored reply back.
+    pub telegram: Option<Arc<crate::channels::telegram::TelegramChannel>>,
     pub hub: Arc<crate::channels::ws::ClientHub>,
     pub channels: Vec<Arc<dyn crate::channels::Channel>>,
     pub secure_cookies: bool,
@@ -141,6 +145,7 @@ impl AppState {
             llm: Arc::new(crate::providers::mock::MockLLM::empty()),
             embeddings: None,
             vapid_public_key: None,
+            telegram: None,
             hub,
             channels: vec![ws],
             secure_cookies: false,
@@ -206,6 +211,14 @@ impl AppState {
     ) -> Self {
         self.channels.push(Arc::new(ch));
         self.vapid_public_key = Some(public_key);
+        self
+    }
+
+    /// First in the ladder: a linked chat is where the user already is.
+    pub fn with_telegram(mut self, ch: crate::channels::telegram::TelegramChannel) -> Self {
+        let ch = Arc::new(ch);
+        self.channels.insert(0, ch.clone());
+        self.telegram = Some(ch);
         self
     }
 

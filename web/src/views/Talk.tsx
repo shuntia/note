@@ -749,7 +749,16 @@ export function Talk({
                 </button>
               )}
               <div className="chat-meta">
-                <span className="chat-when">{shortDate(c.updated_at)}</span>
+                <span className="chat-when">
+                  {c.via === 'telegram' && (
+                    <svg className="chat-via" viewBox="0 0 24 24" role="img">
+                      <title>Last answered on Telegram</title>
+                      <path d="M21 3L2 11l8 3 3 8z" />
+                      <path d="M21 3l-11 11" />
+                    </svg>
+                  )}
+                  {shortDate(c.updated_at)}
+                </span>
                 <Overflow
                   className="chat-more-wrap"
                   label={`More actions for ${c.title}`}
