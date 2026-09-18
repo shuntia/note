@@ -427,6 +427,16 @@ const MIGRATIONS: &[&str] = &[
     CREATE UNIQUE INDEX idx_calendar_external
         ON calendar_entries(user_id, external_id) WHERE external_id IS NOT NULL;
     ",
+    // v31
+    "
+    CREATE TABLE reviews (
+        user_id INTEGER NOT NULL REFERENCES users(id),
+        week_start TEXT NOT NULL,
+        content TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (user_id, week_start)
+    );
+    ",
 ];
 
 pub fn open(path: &Path) -> Result<Connection> {
