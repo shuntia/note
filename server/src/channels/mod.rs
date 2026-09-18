@@ -1,5 +1,6 @@
 pub mod mock;
 pub mod ntfy;
+pub mod voice;
 pub mod webpush;
 pub mod ws;
 
@@ -140,25 +141,46 @@ pub fn deliver_via(
     None
 }
 
+/// A `voice` event rings the phone before anything else; the push ladder is
+/// what it falls back to, logged as `voice_fallback`, so a refused call is still
+/// a nudge that lands.
 pub fn deliver_event(
     db: &Mutex<Connection>,
     ladder: &[Arc<dyn Channel>],
+    voice: Option<&voice::VoiceChannel>,
     ev: &crate::runner::FiredEvent,
 ) {
     let msg = {
         let conn = crate::db_guard(db);
-        if ev.channel == "voice" {
-            let _ = crate::log::record(
-                &conn,
-                Some(ev.user_id),
-                "voice_unavailable",
-                &format!("event {}: voice not implemented, using push ladder", ev.event_id),
-            );
-        }
         let mut msg = render(&conn, ev);
         open_checkin_thread(&conn, ev, &mut msg);
         msg
     };
+    if ev.channel == "voice" {
+        let refusal = match voice {
+            Some(ch) => match ch.deliver(ev.user_id, &ev.username, &msg) {
+                Ok(()) => {
+                    let conn = crate::db_guard(db);
+                    let _ = crate::log::record(
+                        &conn,
+                        Some(ev.user_id),
+                        "delivery_ok",
+                        &format!("event {} via voice", ev.event_id),
+                    );
+                    return;
+                }
+                Err(e) => e.to_string(),
+            },
+            None => "no voice channel configured".to_string(),
+        };
+        let conn = crate::db_guard(db);
+        let _ = crate::log::record(
+            &conn,
+            Some(ev.user_id),
+            "voice_fallback",
+            &format!("event {}: {refusal}", ev.event_id),
+        );
+    }
     deliver_via(db, ladder, ev.user_id, &ev.username, &msg);
 }
 
@@ -238,7 +260,7 @@ mod tests {
         first.set_fail(true);
         let ladder: Vec<Arc<dyn Channel>> = vec![first.clone(), second.clone()];
 
-        deliver_event(&db, &ladder, &ev("nudge", "push", ""));
+        deliver_event(&db, &ladder, None, &ev("nudge", "push", ""));
         assert!(first.seen().is_empty());
         assert_eq!(second.seen().len(), 1);
         let conn = db.lock().unwrap();
@@ -284,7 +306,7 @@ mod tests {
         let only = Arc::new(MockChannel::new("only"));
         only.set_fail(true);
         let ladder: Vec<Arc<dyn Channel>> = vec![only];
-        deliver_event(&db, &ladder, &ev("nudge", "push", ""));
+        deliver_event(&db, &ladder, None, &ev("nudge", "push", ""));
         let conn = db.lock().unwrap();
         let detail: String = conn
             .query_row("SELECT detail FROM event_log WHERE kind='delivery_degraded'", [], |r| {
@@ -298,7 +320,7 @@ mod tests {
     #[test]
     fn empty_ladder_logs_a_named_reason() {
         let (db, _uid) = env();
-        deliver_event(&db, &[], &ev("nudge", "push", ""));
+        deliver_event(&db, &[], None, &ev("nudge", "push", ""));
         let conn = db.lock().unwrap();
         let detail: String = conn
             .query_row("SELECT detail FROM event_log WHERE kind='delivery_degraded'", [], |r| {
@@ -336,7 +358,7 @@ mod tests {
         let (db, _uid) = env();
         let db = Arc::new(db);
         let ladder: Vec<Arc<dyn Channel>> = vec![Arc::new(LockProbe(db.clone()))];
-        deliver_event(&db, &ladder, &ev("nudge", "push", ""));
+        deliver_event(&db, &ladder, None, &ev("nudge", "push", ""));
         let conn = db.lock().unwrap();
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM event_log WHERE kind='delivery_ok'", [], |r| r.get(0))
@@ -363,11 +385,11 @@ mod tests {
         let push = Arc::new(MockChannel::new("push"));
         let ladder: Vec<Arc<dyn Channel>> = vec![push.clone()];
 
-        deliver_event(&db, &ladder, &ev("checkin", "push", ""));
+        deliver_event(&db, &ladder, None, &ev("checkin", "push", ""));
         let mut later = ev("checkin_call", "push", "Afternoon. Where did the morning go?");
         later.event_id = 12;
         later.wall_time = "15:30".into();
-        deliver_event(&db, &ladder, &later);
+        deliver_event(&db, &ladder, None, &later);
 
         let seen = push.seen();
         assert_eq!(seen.len(), 2);
@@ -388,7 +410,7 @@ mod tests {
     #[test]
     fn the_thread_exists_even_when_no_channel_takes_the_checkin() {
         let (db, _uid) = env();
-        deliver_event(&db, &[], &ev("checkin", "push", ""));
+        deliver_event(&db, &[], None, &ev("checkin", "push", ""));
         let conn = db.lock().unwrap();
         assert_eq!(thread_rows(&conn).len(), 1);
     }
@@ -398,25 +420,23 @@ mod tests {
         let (db, _uid) = env();
         let push = Arc::new(MockChannel::new("push"));
         let ladder: Vec<Arc<dyn Channel>> = vec![push.clone()];
-        deliver_event(&db, &ladder, &ev("nudge", "push", "stretch"));
+        deliver_event(&db, &ladder, None, &ev("nudge", "push", "stretch"));
         assert_eq!(push.seen()[0].1.conversation_id, None);
         let conn = db.lock().unwrap();
         assert!(thread_rows(&conn).is_empty());
     }
 
     #[test]
-    fn voice_channel_logs_unavailable_then_falls_back() {
+    fn a_voice_event_with_no_channel_falls_back_to_the_push_ladder() {
         let (db, _uid) = env();
         let push = Arc::new(MockChannel::new("push"));
         let ladder: Vec<Arc<dyn Channel>> = vec![push.clone()];
-        deliver_event(&db, &ladder, &ev("checkin_call", "voice", ""));
+        deliver_event(&db, &ladder, None, &ev("checkin_call", "voice", ""));
         assert_eq!(push.seen().len(), 1);
         let conn = db.lock().unwrap();
-        let n: i64 = conn
-            .query_row("SELECT COUNT(*) FROM event_log WHERE kind='voice_unavailable'", [], |r| {
-                r.get(0)
-            })
+        let detail: String = conn
+            .query_row("SELECT detail FROM event_log WHERE kind='voice_fallback'", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(n, 1);
+        assert!(detail.contains("no voice channel configured"), "unexpected detail: {detail}");
     }
 }

@@ -267,6 +267,23 @@ const MIGRATIONS: &[&str] = &[
     UPDATE events SET flexibility = 'drop'
     WHERE flexibility = 'slide' AND id IN (SELECT event_id FROM event_tasks);
     ",
+    // v20
+    "
+    CREATE TABLE voice_calls (
+        id INTEGER PRIMARY KEY,
+        token TEXT NOT NULL UNIQUE,
+        user_id INTEGER NOT NULL REFERENCES users(id),
+        event_id INTEGER REFERENCES events(id),
+        message TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'placed'
+            CHECK (status IN ('placed','ringing','answered','completed','no_answer','busy','failed')),
+        digit TEXT,
+        call_sid TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    CREATE INDEX idx_voice_calls_user ON voice_calls(user_id, created_at DESC);
+    ",
 ];
 
 pub fn open(path: &Path) -> Result<Connection> {
@@ -808,6 +825,44 @@ mod tests {
         conn.execute("UPDATE conversations SET checkin_date = '2026-09-17' WHERE id = 1", [])
             .unwrap();
         assert_eq!(date(), Some("2026-09-17".to_string()));
+    }
+
+    #[test]
+    fn v20_creates_voice_calls_keyed_by_token() {
+        let conn = open_memory().unwrap();
+        let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, MIGRATIONS.len() as i64);
+        conn.execute(
+            "INSERT INTO users (username, pass_hash, role) VALUES ('a','h','member')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO voice_calls (token, user_id, message, created_at, updated_at)
+             VALUES ('tok', 1, 'time for your check-in', 'now', 'now')",
+            [],
+        )
+        .unwrap();
+        let (status, digit, sid): (String, Option<String>, Option<String>) = conn
+            .query_row("SELECT status, digit, call_sid FROM voice_calls WHERE id = 1", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .unwrap();
+        assert_eq!(status, "placed");
+        assert!(digit.is_none() && sid.is_none());
+        assert!(
+            conn.execute("UPDATE voice_calls SET status = 'ringing_in' WHERE id = 1", []).is_err(),
+            "the status column is a closed set"
+        );
+        assert!(
+            conn.execute(
+                "INSERT INTO voice_calls (token, user_id, message, created_at, updated_at)
+                 VALUES ('tok', 1, 'again', 'now', 'now')",
+                [],
+            )
+            .is_err(),
+            "one token names one call"
+        );
     }
 
     #[test]

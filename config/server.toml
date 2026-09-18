@@ -49,3 +49,14 @@ api_key_file = "config/nvidianim.key"
 # base_url = "http://127.0.0.1:2586"
 # token_file = "config/ntfy.token"   # only for an ntfy server that needs auth
 # topic_prefix = "note-"
+
+# Voice rings the user's phone through Twilio for events whose channel is
+# "voice": Note reads the check-in out and they answer on the keypad. Needs an
+# https public_base_url, since Twilio fetches the TwiML from it. Each user's
+# number is phone_number in their user.toml.
+#
+# [channels.voice]
+# account_sid = "AC..."
+# auth_token_file = "config/twilio.token"   # mode 600, gitignored
+# from_number = "+15551234567"              # E.164
+# base_url = "https://api.twilio.com"       # the default
