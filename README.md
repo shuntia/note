@@ -197,6 +197,26 @@ either route, or through the agent's `task_delete` — buries that id in
 `task_tombstones`, which is what the `410` above reports. A task with no
 `external_id` deletes exactly as before and leaves nothing behind.
 
+Meetings arrive the same way. `PUT /api/calendar/by-external/{external_id}`
+takes the body `POST /api/calendar` takes and answers `201` with the entry when
+it made one, `200` when it refreshed the entry that id already names — the
+title, the kind, the quiet flag, the times, the days or date and the validity
+bounds are all rewritten from the body, while the entry keeps its id and the
+dates the user skipped. `DELETE /api/calendar/by-external/{external_id}` is
+`204`, or `404` when no entry carries that id; nothing is buried, so the next
+run makes the meeting again. Both take a bearer token or the session cookie, a
+malformed body is a `400` and invalid fields a `422`, and every error body
+carries `{"error"}`. `GET /api/calendar` returns `external_id` on each entry,
+`null` for one the user made here, and `POST /api/calendar` accepts it too
+(`409` when that id already belongs to another entry of theirs).
+
+```sh
+curl -X PUT 'http://localhost:3271/api/calendar/by-external/gcal:c_52db:t:busy' \
+  -H 'Authorization: Bearer note_…' -H 'Content-Type: application/json' \
+  -d '{"external_id":"gcal:c_52db:t:busy","title":"Crimson Meeting","kind":"busy",
+       "start_time":"11:00","end_time":"12:00","on_date":"2026-09-19"}'
+```
+
 ### Deadlines in a session
 
 `task_create` and `task_update` take `due_at` as an RFC 3339 instant or as a
@@ -613,7 +633,8 @@ Every outcome lands in `event_log`, readable at `GET /api/admin/log`:
 ### API tokens
 
 A user can mint long-lived bearer tokens for scripts and other agents. Tokens
-reach the task routes only; every other route still needs the session cookie.
+reach the task routes and the calendar's by-external routes only; every other
+route still needs the session cookie.
 
 - Mint one in Settings → API tokens, or over the session:
   `POST /api/tokens {name}` → `{id, name, created_at, last_used_at, token}`.
@@ -623,6 +644,7 @@ reach the task routes only; every other route still needs the session cookie.
   and a user holds at most 20 tokens (`409`).
 - Send it as `Authorization: Bearer note_…` on `GET/POST /api/tasks`,
   `PATCH/DELETE /api/tasks/{id}`, `PUT/DELETE /api/tasks/by-external/{external_id}`,
+  `PUT/DELETE /api/calendar/by-external/{external_id}`,
   `POST /api/tasks/{id}/split`, and `POST /api/tasks/{id}/flatten`. A bearer header that does not resolve is
   `401` even when a session cookie is also present. Disabling the user stops
   their tokens.

@@ -277,6 +277,7 @@ export type CalendarKind = 'fixed' | 'busy' | 'note' | 'free'
 // `on_date`. `exceptions` are the dates its occurrence is skipped.
 export type CalendarEntry = {
   id: number
+  external_id: string | null
   title: string
   kind: CalendarKind
   quiet: boolean

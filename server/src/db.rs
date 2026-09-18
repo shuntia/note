@@ -421,6 +421,12 @@ const MIGRATIONS: &[&str] = &[
     "
     ALTER TABLE work_sessions ADD COLUMN overrun_asked_at TEXT;
     ",
+    // v30
+    "
+    ALTER TABLE calendar_entries ADD COLUMN external_id TEXT;
+    CREATE UNIQUE INDEX idx_calendar_external
+        ON calendar_entries(user_id, external_id) WHERE external_id IS NOT NULL;
+    ",
 ];
 
 pub fn open(path: &Path) -> Result<Connection> {
@@ -1198,6 +1204,42 @@ mod tests {
             conn.execute("UPDATE tasks SET notify = 'shout' WHERE id = 1", []).is_err(),
             "notify is a closed set"
         );
+    }
+
+    #[test]
+    fn v30_gives_a_calendar_entry_a_name_from_outside() {
+        let conn = open_memory().unwrap();
+        let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, MIGRATIONS.len() as i64);
+        conn.execute(
+            "INSERT INTO users (username, pass_hash, role) VALUES ('a','h','member')",
+            [],
+        )
+        .unwrap();
+        let entry = |user: i64, title: &str, external: &str| {
+            conn.execute(
+                "INSERT INTO calendar_entries
+                 (user_id, title, kind, quiet, start_time, end_time, days, on_date, external_id,
+                  created_at, updated_at)
+                 VALUES (?1, ?2, 'busy', 1, '11:00', '12:00', 0, '2026-09-19', ?3, 't', 't')",
+                rusqlite::params![user, title, (!external.is_empty()).then_some(external)],
+            )
+        };
+        entry(1, "standup", "").unwrap();
+        let external: Option<String> = conn
+            .query_row("SELECT external_id FROM calendar_entries WHERE id = 1", [], |r| r.get(0))
+            .unwrap();
+        assert!(external.is_none(), "an entry the user made carries no outside name");
+
+        entry(1, "crimson meeting", "gcal:c_52db:t:busy").unwrap();
+        assert!(
+            entry(1, "again", "gcal:c_52db:t:busy").is_err(),
+            "one external id belongs to one entry per user"
+        );
+        entry(1, "another", "").expect("entries without an external id do not collide");
+        crate::auth::create_user(&conn, "bo", "pw", false).unwrap();
+        entry(2, "theirs", "gcal:c_52db:t:busy")
+            .expect("the same external id in another account is a different entry");
     }
 
     #[test]
