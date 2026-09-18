@@ -47,6 +47,17 @@ const doneHold = makeHold<FocusSession>()
 
 const clamp = (v: number) => Math.min(1, Math.max(0, v))
 
+// "Leave them" is the user's answer for the rest of that day, and only on this device.
+const LEFT_KEY = 'note.close-day-left'
+
+function leftToday(): boolean {
+  try {
+    return localStorage.getItem(LEFT_KEY) === todayIso()
+  } catch {
+    return false
+  }
+}
+
 const isLive = (t: Task) => t.state === 'open' || t.state === 'in_progress'
 
 // What a block laid for the task does when it starts.
@@ -186,6 +197,7 @@ export function Home({
   const [beat, tick] = useState(0)
   const [pending, setPending] = useState(false)
   const [later, setLater] = useState(false)
+  const [left, setLeft] = useState(leftToday)
   const inSession = session !== null
   const prefs = readPrefs()
   const motion = useMotion()
@@ -670,6 +682,42 @@ export function Home({
     </span>
   )
 
+  const openBlocks = useMemo(
+    () => visible.filter((ev) => ev.task && ev.status !== 'done' && ev.status !== 'dropped'),
+    [visible],
+  )
+
+  const leaveThem = () => {
+    setLeft(true)
+    try {
+      localStorage.setItem(LEFT_KEY, todayIso())
+    } catch {
+      // storage blocked; the card stays gone for this session
+    }
+  }
+
+  const pastCloseDay = prefs.closeDay !== '' && now >= minutesOf(prefs.closeDay)
+  const closeDay = pastCloseDay && !left && openBlocks.length > 0 && (
+    <section className="close-day">
+      <p className="close-day-head">Close the day</p>
+      <p className="close-day-line">
+        {openBlocks.length} block{openBlocks.length === 1 ? '' : 's'} still open.
+      </p>
+      <div className="close-day-actions">
+        <button
+          className="btn-fill small"
+          disabled={pending}
+          onClick={() => act(() => api.carry(todayIso()))}
+        >
+          Carry to tomorrow
+        </button>
+        <button className="btn-haze small" disabled={pending} onClick={leaveThem}>
+          Leave them
+        </button>
+      </div>
+    </section>
+  )
+
   const list = (
     <ul className="home-list" onMouseLeave={() => setHoverId(null)}>
       {upcoming.map((ev) => (
@@ -702,6 +750,7 @@ export function Home({
   const today = day && !(mobile && inSession) && (
     <div className="home-today">
       <DayLine events={visible} now={now} compact={mobile} nextId={next?.id} hoverId={hoverId} onHover={setHoverId} />
+      {closeDay}
       {list}
       {mobile && <SoFar rows={day.history} />}
       {mobile && <Jot flow openTalk={openTalk} openConversation={openConversation} />}
@@ -972,7 +1021,7 @@ export function Home({
             <Jot flow placeholder="Tell Note" openTalk={openTalk} openConversation={openConversation} />
           </div>
         )}
-        {compactLanding ? today : events && <section className="today-line"><DayLine events={visible} now={now} nextId={next?.id} hoverId={hoverId} onHover={setHoverId} />{list}</section>}
+        {compactLanding ? today : events && <section className="today-line"><DayLine events={visible} now={now} nextId={next?.id} hoverId={hoverId} onHover={setHoverId} />{closeDay}{list}</section>}
       </section>
       <section ref={ground} className="today-ground">
         {!mobile && <DebriefFold />}

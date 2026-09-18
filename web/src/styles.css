@@ -1221,6 +1221,12 @@ textarea.mono { font-family: var(--mono); }
 .home-row-actions .btn-haze { padding: 6px 14px; font-size: 0.875rem; }
 .home-row-actions .ev-more-wrap { position: relative; top: auto; right: auto; }
 
+/* ── the close of the day ───────────────────────────────────────── */
+.close-day { background: var(--haze-strong); border-radius: 16px; padding: 16px 18px; display: flex; flex-direction: column; gap: 6px; }
+.close-day-head { margin: 0; color: var(--faint); font-size: 0.8125rem; letter-spacing: 0.06em; text-transform: uppercase; }
+.close-day-line { margin: 0; color: var(--ink); }
+.close-day-actions { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 10px; }
+
 /* ── so far today ───────────────────────────────────────────────── */
 .sofar { margin-top: 8px; }
 .sofar-fold { display: flex; align-items: center; gap: 10px; width: 100%; background: none; border: 0; padding: 10px 0; color: var(--faint); font: inherit; font-size: 0.8125rem; letter-spacing: 0.06em; text-transform: uppercase; cursor: pointer; }
