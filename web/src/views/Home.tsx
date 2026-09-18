@@ -259,6 +259,7 @@ export function Home({
   )
   const now = nowMinutes()
   const next = nextUp(visible, now)
+  const [hoverId, setHoverId] = useState<number | null>(null)
   const facts = next ? eventFacts(next, now) : null
   const label = next ? rowLabel(next) : ''
 
@@ -670,13 +671,15 @@ export function Home({
   )
 
   const list = (
-    <ul className="home-list">
+    <ul className="home-list" onMouseLeave={() => setHoverId(null)}>
       {upcoming.map((ev) => (
         <li
           key={ev.id}
           title={ev.prompt}
+          onMouseEnter={() => setHoverId(ev.id)}
           className={[
             ev.id === next?.id ? 'next' : '',
+            ev.id === hoverId ? 'hover' : '',
             ev.task ? 'task' : '',
             minutesOf(ev.end_wall_time ?? ev.wall_time) < now ? 'overdue' : '',
           ]
@@ -698,7 +701,7 @@ export function Home({
   // On the phone a session is the whole screen: the day waits until it is over.
   const today = day && !(mobile && inSession) && (
     <div className="home-today">
-      <DayLine events={visible} now={now} compact={mobile} nextId={next?.id} />
+      <DayLine events={visible} now={now} compact={mobile} nextId={next?.id} hoverId={hoverId} onHover={setHoverId} />
       {list}
       {mobile && <SoFar rows={day.history} />}
       {mobile && <Jot flow openTalk={openTalk} openConversation={openConversation} />}
@@ -969,7 +972,7 @@ export function Home({
             <Jot flow placeholder="Tell Note" openTalk={openTalk} openConversation={openConversation} />
           </div>
         )}
-        {compactLanding ? today : events && <section className="today-line"><DayLine events={visible} now={now} nextId={next?.id} /></section>}
+        {compactLanding ? today : events && <section className="today-line"><DayLine events={visible} now={now} nextId={next?.id} hoverId={hoverId} onHover={setHoverId} />{list}</section>}
       </section>
       <section ref={ground} className="today-ground">
         {!mobile && <DebriefFold />}
