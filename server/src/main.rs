@@ -132,15 +132,6 @@ async fn main() -> anyhow::Result<()> {
         )?;
         state = state.with_ntfy(ch, n.topic_prefix.clone());
     }
-    if let Some(v) = &cfg.channels.voice {
-        let ch = channels::voice::VoiceChannel::new(
-            state.config_dir.clone(),
-            state.db.clone(),
-            v,
-            &cfg.public_base_url,
-        )?;
-        state = state.with_voice(ch);
-    }
     runner::spawn(state.clone());
     nightly::spawn(state.clone());
     summaries::spawn(state.clone());

@@ -111,7 +111,7 @@ pub enum AlertError {
 
 const DAYS: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 const FLEXIBILITIES: [&str; 3] = ["fixed", "slide", "drop"];
-const CHANNELS: [&str; 2] = ["push", "voice"];
+const CHANNELS: [&str; 1] = ["push"];
 
 pub fn valid_channel(channel: &str) -> bool {
     CHANNELS.contains(&channel)
