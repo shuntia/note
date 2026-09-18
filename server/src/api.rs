@@ -2164,7 +2164,7 @@ fn calendar_body<T: serde::de::DeserializeOwned>(
     })
 }
 
-async fn calendar_list(user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
+async fn calendar_list(user: TaskPrincipal, State(state): State<AppState>) -> impl IntoResponse {
     let conn = state.db();
     match crate::calendar::list(&conn, user.id) {
         Ok(entries) => Json(serde_json::json!({ "entries": entries })).into_response(),
