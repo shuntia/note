@@ -345,7 +345,7 @@ fn checkin_thread_note(date: &str) -> String {
 
 /// What the history window no longer reaches. A thread longer than the window
 /// loses its oldest turns, and only the summary still carries them.
-fn summary_thread_note(summary: &str) -> String {
+pub(crate) fn summary_thread_note(summary: &str) -> String {
     format!("# This conversation\n\nEarlier in this conversation: {summary}")
 }
 

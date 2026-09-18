@@ -49,6 +49,9 @@ pub struct PlanEvent {
     pub channel: String,
     pub alert: bool,
     pub origin: String,
+    /// What a trigger is meant to follow up on; empty on every other event.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub prompt: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub decided_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -154,6 +157,34 @@ fn around_calendar<'a>(
     Ok(out)
 }
 
+/// The day's plan id, generating it from the user's template when the day has
+/// none. A template that cannot be read contributes no events rather than
+/// failing: the caller has something to place now, and the nightly run fills
+/// the rest of the day in later.
+pub fn ensure(
+    conn: &Connection,
+    config_dir: &std::path::Path,
+    username: &str,
+    user_id: i64,
+    date: jiff::civil::Date,
+) -> Result<i64> {
+    let existing: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM plans WHERE user_id = ?1 AND date = ?2",
+            (user_id, date.to_string()),
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(id) = existing {
+        return Ok(id);
+    }
+    let template = crate::config::UserConfig::load(config_dir, username)
+        .ok()
+        .and_then(|c| Template::load(config_dir, username, &c.template).ok())
+        .unwrap_or(Template { events: Vec::new() });
+    generate(conn, user_id, &template, date)
+}
+
 /// Whether that day has a plan at all, without reading its events.
 pub fn exists(conn: &Connection, user_id: i64, date: jiff::civil::Date) -> rusqlite::Result<bool> {
     Ok(conn
@@ -171,7 +202,7 @@ pub fn events_for(conn: &Connection, user_id: i64, date: jiff::civil::Date) -> R
         "SELECT e.id, e.kind, e.wall_time, e.end_wall_time, e.status, e.flexibility,
                 e.slide_window_min, e.channel, e.alert,
                 m.id, mp.date, m.wall_time, m.kind, e.span_min,
-                e.origin, e.decided_at, t.id, t.title, t.state
+                e.origin, e.decided_at, t.id, t.title, t.state, e.prompt
          FROM events e JOIN plans p ON p.id = e.plan_id
          LEFT JOIN events m ON m.id = e.moved_to_event_id
          LEFT JOIN plans mp ON mp.id = m.plan_id
@@ -198,6 +229,7 @@ pub fn events_for(conn: &Connection, user_id: i64, date: jiff::civil::Date) -> R
             channel: r.get(7)?,
             alert: r.get(8)?,
             origin: r.get(14)?,
+            prompt: r.get(19)?,
             decided_at: r.get(15)?,
             moved_to: r.get::<_, Option<i64>>(9)?.map(|event_id| {
                 Ok::<_, rusqlite::Error>(MovedTo {

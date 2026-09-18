@@ -366,6 +366,34 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE conversations ADD COLUMN telegram_at TEXT;
     CREATE INDEX idx_conversations_telegram ON conversations(user_id, telegram_at DESC);
     ",
+    // v27
+    "
+    CREATE TABLE work_sessions (
+        id INTEGER PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id),
+        task_id INTEGER REFERENCES tasks(id),
+        event_id INTEGER REFERENCES events(id),
+        title TEXT NOT NULL,
+        planned_min INTEGER,
+        started_at TEXT NOT NULL,
+        ended_at TEXT,
+        outcome TEXT CHECK (outcome IS NULL OR outcome IN ('done','stopped'))
+    );
+    CREATE INDEX idx_work_sessions_open ON work_sessions(user_id) WHERE ended_at IS NULL;
+    CREATE TABLE trigger_budgets (
+        user_id INTEGER NOT NULL REFERENCES users(id),
+        date TEXT NOT NULL,
+        extra INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (user_id, date)
+    );
+    ALTER TABLE events ADD COLUMN prompt TEXT NOT NULL DEFAULT '';
+    ALTER TABLE events ADD COLUMN cancel_if TEXT
+        CHECK (cancel_if IS NULL OR cancel_if IN ('replied','task_done','event_decided'));
+    ALTER TABLE events ADD COLUMN cancel_ref INTEGER;
+    ALTER TABLE events ADD COLUMN conversation_id INTEGER REFERENCES conversations(id);
+    ALTER TABLE events ADD COLUMN work_session_id INTEGER REFERENCES work_sessions(id);
+    ALTER TABLE events ADD COLUMN created_at TEXT;
+    ",
 ];
 
 pub fn open(path: &Path) -> Result<Connection> {
@@ -1044,7 +1072,62 @@ mod tests {
     }
 
     #[test]
-    fn v25_opens_the_telegram_tables_and_stamps_conversations() {
+    fn v27_adds_the_trigger_columns_the_work_sessions_and_the_budgets() {
+        let conn = open_memory().unwrap();
+        conn.execute(
+            "INSERT INTO users (username, pass_hash, role) VALUES ('a','h','member')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO plans (user_id, date, created_at) VALUES (1, '2026-09-17', 'x')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO events (plan_id, kind, wall_time) VALUES (1, 'trigger', '10:00')",
+            [],
+        )
+        .unwrap();
+        let (prompt, rule, created): (String, Option<String>, Option<String>) = conn
+            .query_row("SELECT prompt, cancel_if, created_at FROM events WHERE id = 1", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .unwrap();
+        assert_eq!(prompt, "");
+        assert!(rule.is_none() && created.is_none());
+        assert!(
+            conn.execute("UPDATE events SET cancel_if = 'whenever' WHERE id = 1", []).is_err(),
+            "the cancel rule is a closed set"
+        );
+
+        conn.execute(
+            "INSERT INTO work_sessions (user_id, title, planned_min, started_at)
+             VALUES (1, 'read the chapter', 50, 'now')",
+            [],
+        )
+        .unwrap();
+        assert!(
+            conn.execute("UPDATE work_sessions SET outcome = 'abandoned' WHERE id = 1", [])
+                .is_err(),
+            "the outcome is a closed set"
+        );
+        conn.execute("UPDATE events SET work_session_id = 1 WHERE id = 1", []).unwrap();
+
+        conn.execute("INSERT INTO trigger_budgets (user_id, date, extra) VALUES (1, '2026-09-17', 2)", [])
+            .unwrap();
+        assert!(
+            conn.execute(
+                "INSERT INTO trigger_budgets (user_id, date, extra) VALUES (1, '2026-09-17', 3)",
+                [],
+            )
+            .is_err(),
+            "one day carries one extra"
+        );
+    }
+
+    #[test]
+    fn v26_opens_the_telegram_tables_and_stamps_conversations() {
         let conn = open_memory().unwrap();
         let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
         assert_eq!(v, MIGRATIONS.len() as i64);

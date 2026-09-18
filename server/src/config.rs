@@ -197,7 +197,13 @@ pub struct UserConfig {
     pub nightly_enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkins_enabled: Option<bool>,
+    /// How many trigger points Note may lay for itself in a day before it has
+    /// to ask.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub triggers_per_day: Option<u32>,
 }
+
+pub const DEFAULT_TRIGGERS_PER_DAY: u32 = 4;
 
 fn default_nightly_time() -> String {
     "03:00".into()
@@ -219,6 +225,13 @@ impl UserConfig {
         Features {
             nightly: self.nightly_enabled.unwrap_or(default.nightly),
             checkins: self.checkins_enabled.unwrap_or(default.checkins),
+        }
+    }
+
+    pub fn triggers_per_day(&self) -> u32 {
+        match self.triggers_per_day {
+            Some(n) => n,
+            None => DEFAULT_TRIGGERS_PER_DAY,
         }
     }
 
@@ -457,6 +470,21 @@ mod tests {
             ServerConfig::load(tmp.path()).unwrap().channels.telegram.unwrap().base_url,
             "http://127.0.0.1:9"
         );
+    }
+
+    #[test]
+    fn the_trigger_allowance_defaults_and_stays_out_of_an_untouched_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), "defaults/user.toml",
+            "display_name = \"X\"\ntimezone = \"UTC\"\ntemplate = \"default\"\n");
+        let cfg = UserConfig::load(tmp.path(), "aki").unwrap();
+        assert_eq!(cfg.triggers_per_day(), DEFAULT_TRIGGERS_PER_DAY);
+        cfg.save(tmp.path(), "aki").unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join("users/aki/user.toml")).unwrap();
+        assert!(!raw.contains("triggers_per_day"), "unexpected file: {raw}");
+
+        write(tmp.path(), "users/aki/user.toml", "triggers_per_day = 7\n");
+        assert_eq!(UserConfig::load(tmp.path(), "aki").unwrap().triggers_per_day(), 7);
     }
 
     #[test]

@@ -9,6 +9,7 @@ pub mod schedule_ops;
 pub mod summary_ops;
 pub mod task_ops;
 pub mod task_query;
+pub mod trigger_ops;
 
 use rusqlite::Connection;
 use serde::Serialize;
@@ -28,6 +29,8 @@ pub enum SessionKind {
     Summarize,
     /// The day's conversations, read once for the facts worth keeping.
     Harvest,
+    /// One trigger point, fired: read the situation, then speak or stay quiet.
+    Trigger,
 }
 
 /// A tool failure returned to the model as a value; `kind` is machine-matchable,
@@ -56,6 +59,16 @@ impl ToolError {
     }
     pub fn unknown_tool(m: impl Into<String>) -> Self {
         Self::of("unknown_tool")(m.into())
+    }
+    /// The day's own trigger budget is used up; the message names the way out.
+    pub fn cap_reached(m: impl Into<String>) -> Self {
+        Self::of("cap_reached")(m.into())
+    }
+    pub fn too_soon(m: impl Into<String>) -> Self {
+        Self::of("too_soon")(m.into())
+    }
+    pub fn past(m: impl Into<String>) -> Self {
+        Self::of("past")(m.into())
     }
     pub fn internal(m: impl Into<String>) -> Self {
         Self::of("internal")(m.into())
@@ -204,6 +217,10 @@ const CHECKIN: &[&str] = &[
     "task_read",
     "plan_list",
     "calendar_list",
+    "trigger_set",
+    "wait_until",
+    "wait_for",
+    "trigger_budget",
 ];
 const TALK: &[&str] = &[
     "memory_query",
@@ -230,6 +247,10 @@ const TALK: &[&str] = &[
     "calendar_update",
     "calendar_remove",
     "calendar_skip",
+    "trigger_set",
+    "wait_until",
+    "wait_for",
+    "trigger_budget",
 ];
 const IMPORT: &[&str] = &["task_brief"];
 const SUMMARIZE: &[&str] = &["summary_write"];
@@ -264,6 +285,22 @@ const NIGHTLY: &[&str] = &[
     "calendar_update",
     "calendar_remove",
     "calendar_skip",
+    "trigger_set",
+    "wait_until",
+    "wait_for",
+];
+const TRIGGER: &[&str] = &[
+    "memory_query",
+    "memory_read",
+    "task_list",
+    "task_read",
+    "task_search",
+    "plan_list",
+    "trigger_set",
+    "wait_until",
+    "wait_for",
+    "say",
+    "stay_quiet",
 ];
 
 /// A tool whose success is the session's whole job: `run_session` returns on
@@ -274,6 +311,7 @@ pub fn is_terminal(kind: SessionKind, name: &str) -> bool {
         SessionKind::Inbox => name == "inbox_decide",
         SessionKind::Summarize => name == "summary_write",
         SessionKind::Harvest => name == "harvest_done",
+        SessionKind::Trigger => name == "say" || name == "stay_quiet",
         _ => false,
     }
 }
@@ -287,6 +325,7 @@ pub fn registry(kind: SessionKind) -> &'static [&'static str] {
         SessionKind::Inbox => INBOX,
         SessionKind::Summarize => SUMMARIZE,
         SessionKind::Harvest => HARVEST,
+        SessionKind::Trigger => TRIGGER,
     }
 }
 
@@ -480,6 +519,39 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
              class. The entry itself stays.",
             schema::<calendar_ops::SkipArgs>(),
         ),
+        "trigger_set" => (
+            "Lay a trigger point: a moment later today when you will look at the situation \
+             again and either say something or stay quiet. prompt is the note to yourself \
+             about what you are following up on. This is how you reach out on your own \
+             terms rather than waiting to be asked. at least 10 minutes ahead.",
+            schema::<trigger_ops::SetArgs>(),
+        ),
+        "wait_until" => (
+            "Lay a trigger point that calls itself off if the user writes back in the \
+             thread before it fires — the way to leave a question open without nagging.",
+            schema::<trigger_ops::WaitUntilArgs>(),
+        ),
+        "wait_for" => (
+            "Lay a trigger point that calls itself off if the task is finished or dropped, \
+             or the plan event is settled, before it fires. Name exactly one of them.",
+            schema::<trigger_ops::WaitForArgs>(),
+        ),
+        "trigger_budget" => (
+            "Raise today's check-in budget, after the user has agreed to it — never \
+             before. reason is what they agreed to.",
+            schema::<trigger_ops::BudgetArgs>(),
+        ),
+        "say" => (
+            "Say this to the user and end the trigger session. One or two warm sentences, \
+             no greeting ritual — it lands in the thread and as a notification.",
+            schema::<trigger_ops::SayArgs>(),
+        ),
+        "stay_quiet" => (
+            "Say nothing and end the trigger session: the right move when the user is \
+             already on it, when what you would say is on their screen, or when the \
+             prompt no longer applies.",
+            schema::<trigger_ops::QuietArgs>(),
+        ),
         _ => unreachable!("describe covers every registered tool"),
     }
 }
@@ -521,7 +593,7 @@ pub fn dispatch(
         });
     }
     let tx = conn.unchecked_transaction().map_err(|e| ToolError::internal(e.to_string()))?;
-    let out = run(&tx, ctx, name, raw_args)?;
+    let out = run(&tx, ctx, kind, name, raw_args)?;
     tx.commit().map_err(|e| ToolError::internal(e.to_string()))?;
     Ok(out)
 }
@@ -529,6 +601,7 @@ pub fn dispatch(
 fn run(
     conn: &Connection,
     ctx: &ToolCtx,
+    kind: SessionKind,
     name: &str,
     raw: &str,
 ) -> Result<serde_json::Value, ToolError> {
@@ -564,6 +637,12 @@ fn run(
         "calendar_update" => calendar_ops::update(conn, ctx, parse(raw)?),
         "calendar_remove" => calendar_ops::remove(conn, ctx, parse(raw)?),
         "calendar_skip" => calendar_ops::skip(conn, ctx, parse(raw)?),
+        "trigger_set" => trigger_ops::set(conn, ctx, kind, parse(raw)?),
+        "wait_until" => trigger_ops::wait_until(conn, ctx, kind, parse(raw)?),
+        "wait_for" => trigger_ops::wait_for(conn, ctx, kind, parse(raw)?),
+        "trigger_budget" => trigger_ops::budget(conn, ctx, parse(raw)?),
+        "say" => trigger_ops::say(conn, ctx, parse(raw)?),
+        "stay_quiet" => trigger_ops::stay_quiet(conn, ctx, parse(raw)?),
         _ => unreachable!("registry guarantees a known name"),
     }
 }
@@ -905,14 +984,26 @@ mod tests {
         assert_eq!(v.content.unwrap(), direct[0]);
     }
 
-    /// Checkin ⊆ Talk ⊆ Nightly, and a harvest reads memory with the nightly's
+    /// Checkin ⊆ Talk ⊆ Nightly but for `trigger_budget`, which lives where the
+    /// user is there to agree to it; a harvest reads memory with the nightly's
     /// own tools plus the one that ends it; Import, Inbox, Summarize and
     /// Harvest share nothing with an import session.
     #[test]
     fn session_surfaces_nest_and_import_stands_apart() {
         let is_subset = |a: &[&str], b: &[&str]| a.iter().all(|t| b.contains(t));
         assert!(is_subset(registry(SessionKind::Checkin), registry(SessionKind::Talk)));
-        assert!(is_subset(registry(SessionKind::Talk), registry(SessionKind::Nightly)));
+        assert!(registry(SessionKind::Talk)
+            .iter()
+            .filter(|t| **t != "trigger_budget")
+            .all(|t| registry(SessionKind::Nightly).contains(t)));
+        assert!(
+            !registry(SessionKind::Nightly).contains(&"trigger_budget"),
+            "the nightly run has nobody to ask"
+        );
+        assert!(registry(SessionKind::Trigger)
+            .iter()
+            .filter(|t| !is_terminal(SessionKind::Trigger, t))
+            .all(|t| registry(SessionKind::Nightly).contains(t)));
         assert!(registry(SessionKind::Harvest)
             .iter()
             .filter(|t| !is_terminal(SessionKind::Harvest, t))
@@ -960,6 +1051,7 @@ mod tests {
             SessionKind::Inbox,
             SessionKind::Summarize,
             SessionKind::Harvest,
+            SessionKind::Trigger,
         ] {
             assert!(
                 !registry(kind).contains(&"nightly_notes_write"),
@@ -1103,6 +1195,7 @@ mod tests {
             SessionKind::Inbox,
             SessionKind::Summarize,
             SessionKind::Harvest,
+            SessionKind::Trigger,
         ] {
             let schemas = schemas(kind);
             assert_eq!(schemas.len(), registry(kind).len());

@@ -127,16 +127,19 @@ export function DayLine({
         const w = Math.max(1, ((b - a) / (END - START)) * 100)
         const spot = place[ev.id]
         const above = ['above', `row${(spot?.row ?? 0) + 1}`, spot?.short ? 'short' : '', spot?.hidden ? 'hide' : '']
+        // A trigger is a moment, not a stretch: the ring keeps its own size.
+        const trigger = ev.kind === 'trigger'
         return (
           <span
             key={ev.id}
-            className={`dl-span${ev.id === filled ? ' next' : ''}${ev.task ? ' task' : ''}`}
-            style={{ left: pct(a), width: `${w}%` }}
+            className={`dl-span${ev.id === filled ? ' next' : ''}${ev.task ? ' task' : ''}${trigger ? ' trigger' : ''}`}
+            style={trigger ? { left: pct(a) } : { left: pct(a), width: `${w}%` }}
           >
             {!compact && (
               <span
                 className={`dl-label ${ev.id === filled ? 'below' : above.filter(Boolean).join(' ')}`}
                 data-ev={ev.id}
+                title={ev.prompt}
                 style={spot?.shift ? { transform: `translateX(calc(-50% + ${Math.round(spot.shift)}px))` } : undefined}
               >
                 <span className="dl-when">

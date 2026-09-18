@@ -1,8 +1,8 @@
 mod common;
 
 use note_server::channels::{self, mock::MockChannel, ws::ClientHub, ws::WsChannel, Channel};
-use note_server::providers::{mock::MockLLM, ChatResponse};
-use std::sync::{Arc, Mutex};
+use note_server::providers::{mock::MockLLM, ChatResponse, ToolCall};
+use std::sync::Arc;
 
 /// One simulated evening-to-day for a JST user: nightly debrief at 03:30,
 /// morning debrief delivery over WS, a daytime nudge falling back to the mock
@@ -31,6 +31,7 @@ fn delivery_reaches_the_user_through_the_ladder() {
     );
     write("defaults/prompts/persona.md", "you are note");
     write("defaults/prompts/planning.md", "plan the day");
+    write("defaults/prompts/trigger.md", "say one thing or stay_quiet");
     write(
         "defaults/templates/default.toml",
         concat!(
@@ -77,10 +78,24 @@ fn delivery_reaches_the_user_through_the_ladder() {
     )
     .unwrap();
 
-    let db = Arc::new(Mutex::new(conn));
     let hub = Arc::new(ClientHub::new());
     let push = Arc::new(MockChannel::new("mockpush"));
     let ladder: Vec<Arc<dyn Channel>> = vec![Arc::new(WsChannel::new(hub.clone())), push.clone()];
+    // The trigger point the nightly lays runs its own session at fire time, so
+    // the day needs a state to fire it through; everything else reads the same
+    // connection through it.
+    let trigger_llm = Arc::new(MockLLM::scripted(vec![ChatResponse {
+        text: String::new(),
+        tool_calls: vec![ToolCall {
+            id: "t1".into(),
+            name: "say".into(),
+            args: r#"{"text":"the evening block is coming up — still up for it?"}"#.into(),
+        }],
+    }]));
+    let state = note_server::AppState::new(conn, tmp.path().into(), tmp.path().into())
+        .with_channels(ladder.clone())
+        .with_providers(trigger_llm.clone(), None);
+    let db = state.db.clone();
 
     // --- 03:30 JST 2026-08-31 (= 18:30Z 08-30): nightly writes plan + debrief.
     let llm = MockLLM::scripted(vec![ChatResponse {
@@ -101,6 +116,34 @@ fn delivery_reaches_the_user_through_the_ladder() {
     };
     let nightly_now: jiff::Timestamp = "2026-08-30T18:30:00Z".parse().unwrap();
     note_server::nightly::run_for_user(&deps, uid, "aki", nightly_now).unwrap();
+
+    // --- the night lays a trigger point of its own on the day it planned.
+    {
+        let conn = db.lock().unwrap();
+        note_server::triggers::lay(
+            &conn,
+            &note_server::triggers::Lay {
+                config_dir: tmp.path(),
+                user_id: uid,
+                username: "aki",
+                at: "18:00",
+                prompt: "the evening block is about to start",
+                date: "2026-08-31".parse().unwrap(),
+                cancel: None,
+                conversation_id: None,
+                now: nightly_now,
+            },
+        )
+        .unwrap();
+        let (wall, flex, origin): (String, String, String) = conn
+            .query_row(
+                "SELECT wall_time, flexibility, origin FROM events WHERE kind = 'trigger'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((wall.as_str(), flex.as_str(), origin.as_str()), ("18:00", "drop", "agent"));
+    }
 
     // --- the evening the user set aside now holds the open task.
     {
@@ -206,5 +249,34 @@ fn delivery_reaches_the_user_through_the_ladder() {
             })
             .unwrap();
         assert_eq!(n, 1);
+    }
+
+    // --- 18:01 JST: the trigger point fires a session of its own, and what it
+    // decides to say is what reaches the user.
+    push.set_fail(false);
+    let evening: jiff::Timestamp = "2026-08-31T09:01:00Z".parse().unwrap(); // 18:01 JST
+    let fired = {
+        let conn = db.lock().unwrap();
+        note_server::runner::fire_due(&conn, tmp.path(), evening).unwrap()
+    };
+    assert_eq!(fired.len(), 1);
+    assert_eq!(fired[0].kind, "trigger");
+    note_server::triggers::fire(&state, &fired[0]);
+    let seen = push.seen();
+    let last = seen.last().unwrap();
+    assert_eq!(last.1.body, "the evening block is coming up — still up for it?");
+    assert!(last.1.conversation_id.is_some(), "the words land in a thread of their own");
+    {
+        let conn = db.lock().unwrap();
+        let status: String = conn
+            .query_row("SELECT status FROM events WHERE kind = 'trigger'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(status, "done");
+        let said: String = conn
+            .query_row(
+                "SELECT detail FROM event_log WHERE kind = 'trigger_said'", [], |r| r.get(0),
+            )
+            .unwrap();
+        assert!(said.contains("still up for it?"), "unexpected detail: {said}");
     }
 }

@@ -34,6 +34,7 @@ import type {
   Token,
   TokenCreated,
   TotpEnrolment,
+  WorkSession,
 } from './types'
 import type {
   AssertionJSON,
@@ -51,6 +52,7 @@ const WRITABLE_SETTINGS = [
   'counter',
   'nightly_enabled',
   'checkins_enabled',
+  'triggers_per_day',
 ] as const
 
 type SettingsPatch = Partial<Pick<Settings, (typeof WRITABLE_SETTINGS)[number]>>
@@ -233,6 +235,18 @@ export const api = {
   telegramLink: () => request<TelegramLink>('/api/telegram/link', { method: 'POST' }),
   telegramUnlink: () => request<void>('/api/telegram/link', { method: 'DELETE' }),
   notifyTest: () => request<{ via: string }>('/api/notify/test', { method: 'POST' }),
+  openWorkSession: () => request<WorkSession | null>('/api/sessions/open'),
+  startWorkSession: (fields: {
+    title: string
+    task_id?: number
+    event_id?: number
+    planned_min?: number
+  }) => request<WorkSession>('/api/sessions', { method: 'POST', body: JSON.stringify(fields) }),
+  endWorkSession: (id: number, outcome: 'done' | 'stopped') =>
+    request<{ ended: number | null }>(`/api/sessions/${id}/end`, {
+      method: 'POST',
+      body: JSON.stringify({ outcome }),
+    }),
   calendar: () => request<{ entries: CalendarEntry[] }>('/api/calendar'),
   addCalendarEntry: (fields: CalendarFields) =>
     request<CalendarEntry>('/api/calendar', { method: 'POST', body: JSON.stringify(fields) }),
