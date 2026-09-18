@@ -866,6 +866,7 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 }
 .set-open[aria-expanded='true'] .set-chev { transform: rotate(90deg); }
 .set-fold-body { display: flex; flex-direction: column; align-items: flex-start; gap: 12px; padding: 0 0 18px; width: 100%; }
+.set-fold-body .set-row { align-self: stretch; min-height: 44px; }
 .set-fold-body :is(input, select, textarea) {
   max-width: 100%;
   min-height: 44px;
