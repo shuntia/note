@@ -6,7 +6,7 @@ export type MovedTo = { event_id: number; date: string; wall_time: string; kind:
 export type EventOrigin = 'template' | 'agent' | 'auto' | 'user'
 
 // The task a block holds, carried so the block can offer the task's own actions.
-export type TaskRef = { id: number; title: string; state: TaskState }
+export type TaskRef = { id: number; title: string; state: TaskState; notify?: TaskNotify }
 
 export type PlanEvent = {
   id: number
@@ -32,6 +32,9 @@ export type PlanEvent = {
 
 export type TaskState = 'open' | 'in_progress' | 'done' | 'dropped'
 
+// How the block laid for a task announces itself when it starts.
+export type TaskNotify = 'none' | 'chat' | 'notify'
+
 export type Task = {
   id: number
   title: string
@@ -48,6 +51,7 @@ export type Task = {
   due_at: string | null
   external_id: string | null
   url: string
+  notify: TaskNotify
 }
 
 // A top-level task with its steps; the list never nests deeper than this.
@@ -141,6 +145,9 @@ export type Settings = {
   telegram_bot: string
   // How many check-ins Note may start on its own in a day.
   triggers_per_day: number
+  pomodoro_enabled: boolean
+  pomodoro_work_min: number
+  pomodoro_break_min: number
 }
 
 // A live code and the deep link that carries it to the bot.
@@ -159,6 +166,9 @@ export type SettingsSaved = Pick<
   | 'nightly_enabled'
   | 'checkins_enabled'
   | 'triggers_per_day'
+  | 'pomodoro_enabled'
+  | 'pomodoro_work_min'
+  | 'pomodoro_break_min'
 > & { schedule: ScheduleRow[] }
 
 export type PromptName = 'persona' | 'planning'
@@ -325,15 +335,47 @@ export type DayView = {
   history: HistoryRow[]
 }
 
-// The session the user is in, as the server holds it.
+export type SessionMode = 'single' | 'pomodoro'
+
+export type SessionPhase = 'work' | 'break'
+
+// The session the user is in, as the server holds it: the clock, the pause, the
+// step and the phase are all its own. Every time is RFC 3339 UTC.
 export type WorkSession = {
   id: number
   task_id: number | null
   event_id: number | null
   title: string
   planned_min: number | null
-  // RFC 3339 UTC
   started_at: string
+  paused_at: string | null
+  paused_ms: number
+  mode: SessionMode
+  work_min: number | null
+  break_min: number | null
+  phase: SessionPhase
+  phase_started_at: string | null
+  phase_paused_ms: number
+  round: number
+  step_index: number | null
+  step_count: number | null
+  step_name: string | null
+  notes: string
+  // The session thread; break reports and Note's own check-ins are in it.
+  conversation_id: number | null
+}
+
+// What a session is opened with; the mode and the pomodoro lengths are the
+// server's to decide from the user's settings.
+export type SessionStart = {
+  title: string
+  task_id?: number
+  event_id?: number
+  planned_min?: number
+  step_index?: number
+  step_count?: number
+  step_name?: string
+  notes?: string
 }
 
 // What the allocator laid down, and how many waiting blocks it replaced.

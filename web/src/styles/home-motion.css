@@ -69,3 +69,25 @@
 @media (prefers-reduced-motion: reduce) {
   .rest, .topbar > * { transition: none; }
 }
+
+/* ── in a session ──
+   The face is the whole window: the top bar and its jot rest for as long as the
+   session runs, and the phone's face carries nothing but the arc and the chevron. */
+.face-big .jot-wrap, .face-big .break-sheet { pointer-events: auto; }
+.home.mobile.in-session .face-big .home-face { padding-top: 200px; }
+.home.desktop.in-session .face-big { top: -64px; height: 100dvh; }
+.home.desktop.in-session .face-big .home-face { padding-top: clamp(40px, calc((100dvh - 500px) / 2), 200px); }
+.home.desktop.in-session .face-big .chev { bottom: 4px; }
+.break-sheet { display: flex; flex-direction: column; align-items: center; gap: 18px; width: min(342px, 88vw); margin-top: 36px; }
+.break-sheet .jot-wrap { width: 100%; }
+
+/* the phone's pulled face: the arc with the counter, the pause in its open bottom */
+.home-face.compact.session { flex-direction: column; gap: 0; padding: 96px 24px 0; }
+.session-arc { position: relative; }
+.session-arc .btn-round { position: absolute; left: 50%; bottom: -9px; transform: translateX(-50%); width: 36px; height: 36px; }
+.session-arc .btn-round svg { width: 15px; height: 15px; }
+.home.mobile.in-session .home-sheet { margin-top: 84px; }
+
+@media (min-width: 768px) {
+  html.in-session .topbar:not(:hover):not(:focus-within) > * { opacity: 0; pointer-events: none; transition-duration: 0.6s; }
+}
