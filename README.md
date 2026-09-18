@@ -151,6 +151,8 @@ where it came from and when it is due:
 - `external_id` — the id whatever created the task knows it by
   (`canvas:assignment:12345`), opaque to the server, at most 200 bytes, and
   unique per user.
+- `actual_min` — minutes really worked on it, summed as sessions end, or
+  `null` while none has. A step's minutes count for the task above it too.
 - `url` — a link back to the origin, `""` when there is none.
 - `source` — `manual` (the user typed it), `agent` (a session made it), or
   `import` (a script mirrored it). A cookie writes `manual` unless the body

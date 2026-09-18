@@ -10,6 +10,7 @@ pub mod context;
 pub mod day;
 pub mod db;
 pub mod harvest;
+pub mod learn;
 pub mod log;
 pub mod memory;
 pub mod net;

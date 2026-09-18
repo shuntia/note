@@ -226,6 +226,7 @@ pub fn assemble(conn: &Connection, config_dir: &Path, user_id: i64, username: &s
             crate::triggers::allowance(conn, config_dir, username, user_id, today)
                 .unwrap_or_else(|_| ucfg.triggers_per_day()),
         ),
+        crate::learn::plan_factor(conn, user_id).unwrap_or(None),
     );
     let render = |caps: &Caps| {
         let mut s = String::with_capacity(2048);
@@ -591,12 +592,25 @@ fn settings_section(
     features: crate::config::Features,
     memory_facts: i64,
     triggers: (u32, u32),
+    plan_factor: Option<crate::learn::Learned>,
 ) -> String {
     let on = |b: bool| if b { "on" } else { "off" };
     let (spent, allowance) = triggers;
+    let factor = plan_factor.map_or_else(
+        || "no plan factor yet".to_string(),
+        |f| {
+            format!(
+                "Plan factor: {:.1}× from {} session{}",
+                f.value,
+                f.sample,
+                if f.sample == 1 { "" } else { "s" }
+            )
+        },
+    );
     format!(
         "# Settings\n\n{} | {tz_label} | nightly_time {} | template {} | counter {} | nightly {} | checkins {}\n\
          Memory: {memory_facts} fact{}\n\
+         {factor}\n\
          Trigger points you may lay today: {spent} of {allowance} used\n\n",
         cfg.display_name,
         cfg.nightly_time,
@@ -1323,5 +1337,22 @@ mod tests {
         }
         let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
         assert!(out.contains("Memory: 2 facts"), "{out}");
+    }
+
+    #[test]
+    fn the_settings_section_says_how_long_the_work_really_runs() {
+        let tmp = cfg_dir();
+        let (conn, uid) = user();
+        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        assert!(out.contains("no plan factor yet"), "{out}");
+
+        conn.execute(
+            "INSERT INTO learning (user_id, key, value, sample, computed_at)
+             VALUES (?1, 'plan_factor', 1.44, 9, '2026-08-31T03:00:00Z')",
+            [uid],
+        )
+        .unwrap();
+        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        assert!(out.contains("Plan factor: 1.4× from 9 sessions"), "{out}");
     }
 }
