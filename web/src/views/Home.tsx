@@ -250,6 +250,7 @@ export function Home({
       ? Math.max(1, minutesOf(ev.end_wall_time) - minutesOf(ev.wall_time))
       : ROUTINE_MIN
     openNow({
+      serverId: null,
       taskId: ev.task?.id ?? null,
       eventId: ev.id,
       title: rowLabel(ev),
@@ -324,6 +325,7 @@ export function Home({
       setSession(
         parent && open
           ? {
+              serverId: null,
               taskId: open.id,
               eventId: null,
               title: parent.title,
@@ -565,11 +567,18 @@ export function Home({
     </span>
   )
 
+  const triggerActions = (ev: PlanEvent) => (
+    <span className="home-row-actions">
+      <Overflow label="More" items={[{ label: 'Drop today', run: () => drop(ev), disabled: pending }]} />
+    </span>
+  )
+
   const list = (
     <ul className="home-list">
       {upcoming.map((ev) => (
         <li
           key={ev.id}
+          title={ev.prompt}
           className={[
             ev.id === next?.id ? 'next' : '',
             ev.task ? 'task' : '',
@@ -588,6 +597,7 @@ export function Home({
               )}
           </span>
           {ev.task && blockActions(ev)}
+          {ev.kind === 'trigger' && triggerActions(ev)}
         </li>
       ))}
     </ul>

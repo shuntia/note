@@ -3,6 +3,8 @@ const SESSION_KEY = 'note.nowSession'
 // One focus session. `taskId` names the task being worked — a step, when the
 // task was split — while `title` stays the top-level name the user recognises.
 export type FocusSession = {
+  // The work session the server holds for this one, once it has answered.
+  serverId: number | null
   taskId: number | null
   eventId: number | null
   title: string
@@ -33,7 +35,8 @@ export function readSession(): FocusSession | null {
     const raw = localStorage.getItem(SESSION_KEY)
     if (!raw) return null
     const parsed: unknown = JSON.parse(raw)
-    return isSession(parsed) ? parsed : null
+    // A session stored before the server held one carries no id of its own.
+    return isSession(parsed) ? { ...parsed, serverId: parsed.serverId ?? null } : null
   } catch {
     return null
   }

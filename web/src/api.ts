@@ -33,6 +33,7 @@ import type {
   Token,
   TokenCreated,
   TotpEnrolment,
+  WorkSession,
 } from './types'
 import type {
   AssertionJSON,
@@ -53,6 +54,7 @@ const WRITABLE_SETTINGS = [
   'ntfy_topic',
   'phone_number',
   'calls_enabled',
+  'triggers_per_day',
 ] as const
 
 type SettingsPatch = Partial<Pick<Settings, (typeof WRITABLE_SETTINGS)[number]>>
@@ -238,6 +240,18 @@ export const api = {
     request<void>('/api/push/unsubscribe', { method: 'POST', body: JSON.stringify({ endpoint }) }),
   notifyTest: () => request<{ via: string }>('/api/notify/test', { method: 'POST' }),
   notifyCall: () => request<{ call_id: number }>('/api/notify/call', { method: 'POST' }),
+  openWorkSession: () => request<WorkSession | null>('/api/sessions/open'),
+  startWorkSession: (fields: {
+    title: string
+    task_id?: number
+    event_id?: number
+    planned_min?: number
+  }) => request<WorkSession>('/api/sessions', { method: 'POST', body: JSON.stringify(fields) }),
+  endWorkSession: (id: number, outcome: 'done' | 'stopped') =>
+    request<{ ended: number | null }>(`/api/sessions/${id}/end`, {
+      method: 'POST',
+      body: JSON.stringify({ outcome }),
+    }),
   calendar: () => request<{ entries: CalendarEntry[] }>('/api/calendar'),
   addCalendarEntry: (fields: CalendarFields) =>
     request<CalendarEntry>('/api/calendar', { method: 'POST', body: JSON.stringify(fields) }),
