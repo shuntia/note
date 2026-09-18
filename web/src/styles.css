@@ -428,6 +428,9 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
   cursor: pointer;
 }
 .ev-menu-item:hover:not(:disabled) { background: var(--sunk); }
+.ev-menu-item[aria-checked] { display: flex; align-items: center; gap: 0.5rem; }
+.ev-menu-item[aria-checked]::before { content: '✓'; width: 1em; color: var(--sun-ink); opacity: 0; }
+.ev-menu-item[aria-checked='true']::before { opacity: 1; }
 
 /* a finger needs more than the pointer does */
 @media (pointer: coarse), (max-width: 767.98px) {
@@ -863,6 +866,7 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 }
 .set-open[aria-expanded='true'] .set-chev { transform: rotate(90deg); }
 .set-fold-body { display: flex; flex-direction: column; align-items: flex-start; gap: 12px; padding: 0 0 18px; width: 100%; }
+.set-fold-body .set-row { align-self: stretch; min-height: 44px; }
 .set-fold-body :is(input, select, textarea) {
   max-width: 100%;
   min-height: 44px;

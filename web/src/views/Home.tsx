@@ -13,12 +13,22 @@ import { clearTimeline, scrollReveal, scrollToY, scrub, snapNearest, travel, typ
 import { reducedMotion } from '../motion'
 import { ghostOut, rise } from '../motion-gsap'
 import { NowCounter } from '../nowcounter'
-import { Overflow } from '../overflow'
+import { Overflow, type OverflowItem } from '../overflow'
 import { readPrefs } from '../prefs'
 import { eventLabel } from '../receipts'
-import { effectiveStart, elapsedSec, type FocusSession } from '../session'
+import {
+  effectiveStart,
+  elapsedSec,
+  isPaused,
+  markEnding,
+  pausedAt,
+  phaseLengthSec,
+  phaseStart,
+  plannedSec,
+  type FocusSession,
+} from '../session'
 import { SoFar } from '../sofar'
-import type { DayView, PlanEvent } from '../types'
+import type { DayView, PlanEvent, SessionStart, Task, TaskNotify, TaskRef } from '../types'
 import { CalendarSection } from './Calendar'
 import { DebriefFold } from '../debrief'
 import '../styles/home-motion.css'
@@ -35,8 +45,16 @@ const dropHold = makeHold<number>()
 // Nor does finishing, so the last step's write waits the same way.
 const doneHold = makeHold<FocusSession>()
 
-const round5 = (min: number) => Math.max(5, Math.round(min / 5) * 5)
 const clamp = (v: number) => Math.min(1, Math.max(0, v))
+
+const isLive = (t: Task) => t.state === 'open' || t.state === 'in_progress'
+
+// What a block laid for the task does when it starts.
+const ANNOUNCE: { id: TaskNotify; label: string }[] = [
+  { id: 'none', label: 'None' },
+  { id: 'chat', label: 'Chat' },
+  { id: 'notify', label: 'Notify' },
+]
 
 function nowMinutes(): number {
   const d = new Date()
@@ -156,7 +174,7 @@ export function Home({
   notify: (msg: string, action?: ToastAction) => void
   onChanged: () => void
   refresh: number
-  openNow: (s: FocusSession) => void
+  openNow: (fields: SessionStart) => void
   openTalk: (draft: string) => void
   openConversation: (id: number) => void
   mobile: boolean
@@ -236,7 +254,7 @@ export function Home({
 
   // the beat is a dependency because the holds live outside React state
   const visible = useMemo(
-    () => (events ?? []).filter((ev) => ev.id !== dropHold.held() && ev.id !== doneHold.held()?.eventId),
+    () => (events ?? []).filter((ev) => ev.id !== dropHold.held() && ev.id !== doneHold.held()?.event_id),
     [events, beat],
   )
   const now = nowMinutes()
@@ -254,44 +272,51 @@ export function Home({
       ? Math.max(1, minutesOf(ev.end_wall_time) - minutesOf(ev.wall_time))
       : ROUTINE_MIN
     openNow({
-      serverId: null,
-      taskId: ev.task?.id ?? null,
-      eventId: ev.id,
       title: rowLabel(ev),
-      notes: '',
-      stepIndex: null,
-      stepCount: null,
-      stepName: null,
-      durationSec: span * 60,
-      startedAt: Date.now(),
-      pausedAt: null,
-      pausedMs: 0,
+      ...(ev.task && { task_id: ev.task.id }),
+      event_id: ev.id,
+      planned_min: span,
     })
   }
 
   // ── session ──────────────────────────────────────────────────
-  const pause = () => session && setSession({ ...session, pausedAt: Date.now() })
-  const resume = () =>
-    session &&
-    setSession({
-      ...session,
-      pausedAt: null,
-      pausedMs: session.pausedMs + (Date.now() - (session.pausedAt ?? Date.now())),
-    })
-  // Ending the last step closes the session at once and holds the write, so Undo
-  // is a toast rather than a question asked before the fact.
-  const complete = (s: FocusSession) => {
+  // Every session route answers with the session itself; the reply is the face.
+  const route = async (fn: () => Promise<FocusSession>) => {
+    if (pending) return
+    setPending(true)
+    try {
+      setSession(await fn())
+    } catch {
+      notify("Couldn't reach Note. Try again.")
+    } finally {
+      setPending(false)
+    }
+  }
+
+  const pause = () => session && void route(() => api.pauseWorkSession(session.id))
+  const resume = () => session && void route(() => api.resumeWorkSession(session.id))
+  const backToIt = () => session && void route(() => api.skipBreak(session.id))
+
+  // Ending closes the session at once and holds the writes, so Undo is a toast
+  // rather than a question asked before the fact.
+  const complete = (s: FocusSession, task: Task | null) => {
     const elapsed = elapsedSec(s)
+    markEnding(s.id)
     const send = () => {
-      if (s.taskId !== null) {
+      const settled = () => {
+        markEnding(null)
+        onChanged()
+      }
+      api.endWorkSession(s.id, 'done').then(settled, settled)
+      if (task) {
         api
-          .patchTask(s.taskId, { state: 'done', notes: withElapsedNote(s.notes, elapsed) })
+          .patchTask(task.id, { state: 'done', notes: withElapsedNote(task.notes, elapsed) })
           .then(onChanged)
           .catch(() => notify("Couldn't save the session. Try again."))
       }
-      if (s.eventId !== null) {
+      if (s.event_id !== null) {
         api
-          .eventAction(s.eventId, 'done')
+          .eventAction(s.event_id, 'done')
           .then(onChanged)
           .catch(() => notify("Couldn't mark that done. Try again."))
       }
@@ -303,56 +328,62 @@ export function Home({
       label: 'Undo',
       run: () => {
         if (!doneHold.cancel(s)) return
+        markEnding(null)
         tick((n) => n + 1)
         setSession(s)
       },
     })
   }
 
-  // A step before the last hands the session straight to the next one still open.
-  // The step's write waits out the undo window, so every Done is reversible.
-  const advance = async (s: FocusSession, step: number) => {
-    if (pending) return
+  // The step's own write waits out the undo window, and undoing it hands the
+  // session back to the step it was on.
+  const advance = (s: FocusSession, step: Task) => {
+    const notes = withElapsedNote(step.notes, elapsedSec(s))
+    doneHold.start(s, () => {
+      api
+        .patchTask(step.id, { state: 'done', notes })
+        .then(onChanged)
+        .catch(() => notify("Couldn't save the session. Try again."))
+    })
+    onChanged()
+    notify('Done', {
+      label: 'Undo',
+      run: () => {
+        if (!doneHold.cancel(s)) return
+        void route(() =>
+          api.stepWorkSession(s.id, {
+            step_index: s.step_index ?? 1,
+            step_name: s.step_name ?? s.title,
+          }),
+        )
+      },
+    })
+  }
+
+  // The step the session is on, and whatever is still open after it.
+  const finish = async () => {
+    const s = session
+    if (!s || pending) return
     setPending(true)
     try {
-      const nodes = await api.tasks()
-      const parent = nodes.find((n) => n.children.some((c) => c.id === step))
-      const at = parent?.children.findIndex((c) => c.id === step) ?? -1
-      const open = parent?.children.slice(at + 1).find((c) => c.state === 'open' || c.state === 'in_progress')
-      const notes = withElapsedNote(s.notes, elapsedSec(s))
-      doneHold.start(s, () => {
-        api
-          .patchTask(step, { state: 'done', notes })
-          .then(onChanged)
-          .catch(() => notify("Couldn't save the session. Try again."))
-      })
-      setSession(
-        parent && open
-          ? {
-              serverId: null,
-              taskId: open.id,
-              eventId: null,
-              title: parent.title,
-              notes: open.notes,
-              stepIndex: parent.children.indexOf(open) + 1,
-              stepCount: parent.children.length,
-              stepName: open.title,
-              durationSec: open.duration_min === null ? null : round5(open.duration_min) * 60,
-              startedAt: Date.now(),
-              pausedAt: null,
-              pausedMs: 0,
-            }
-          : null,
-      )
-      onChanged()
-      notify('Done', {
-        label: 'Undo',
-        run: () => {
-          if (!doneHold.cancel(s)) return
-          tick((n) => n + 1)
-          setSession(s)
-        },
-      })
+      const nodes = s.task_id === null ? [] : await api.tasks()
+      const parent = nodes.find((n) => n.id === s.task_id) ?? null
+      const own = nodes.flatMap((n) => [n as Task, ...n.children]).find((t) => t.id === s.task_id) ?? null
+      const steps = parent?.children ?? []
+      const at = s.step_index
+      const current = at !== null && steps.length ? (steps[at - 1] ?? own) : own
+      const next = at !== null ? (steps.slice(at).find(isLive) ?? null) : null
+      if (next && current) {
+        setSession(
+          await api.stepWorkSession(s.id, {
+            step_index: steps.indexOf(next) + 1,
+            step_name: next.title,
+          }),
+        )
+        advance(s, current)
+      } else {
+        complete(s, current)
+      }
     } catch {
       notify("Couldn't save the session. Try again.")
     } finally {
@@ -360,30 +391,32 @@ export function Home({
     }
   }
 
-  const finish = () => {
-    if (!session) return
-    const more = session.stepIndex !== null && session.stepCount !== null && session.stepIndex < session.stepCount
-    if (session.taskId !== null && more) advance(session, session.taskId)
-    else complete(session)
-  }
-
-  // Past the duration the counter leaves the preference behind and counts the overrun up.
-  const over = session !== null && session.durationSec !== null && elapsedSec(session) > session.durationSec
+  const pomodoro = session?.mode === 'pomodoro'
+  const onBreak = pomodoro && session?.phase === 'break'
+  const phaseSec = session && pomodoro ? phaseLengthSec(session) : null
+  const planned = session ? plannedSec(session) : null
+  // Past the planned end the counter leaves the preference behind and counts the
+  // overrun up; a pomodoro round is the server's to end, so it never runs over.
+  const over = session !== null && !pomodoro && planned !== null && elapsedSec(session) > planned
 
   const counter = (s: FocusSession) => {
-    const total = s.durationSec
+    const total = pomodoro ? phaseSec : planned
     return (
       <NowCounter
-        startedAt={effectiveStart(s) + (over ? (total ?? 0) * 1000 : 0)}
+        startedAt={pomodoro ? phaseStart(s) : effectiveStart(s) + (over ? (total ?? 0) * 1000 : 0)}
         durationSec={total ?? 0}
-        mode={over || total === null ? 'elapsed' : prefs.counter}
-        pausedAt={s.pausedAt}
+        mode={pomodoro ? 'remaining' : over || total === null ? 'elapsed' : prefs.counter}
+        pausedAt={pausedAt(s)}
       />
     )
   }
 
-  const sessionFracAt = (s: FocusSession) => () =>
-    s.durationSec ? ((s.pausedAt ?? Date.now()) - effectiveStart(s)) / (s.durationSec * 1000) : 0
+  const sessionFracAt = (s: FocusSession) => () => {
+    const total = pomodoro ? phaseSec : planned
+    if (!total) return 0
+    const from = pomodoro ? phaseStart(s) : effectiveStart(s)
+    return ((pausedAt(s) ?? Date.now()) - from) / (total * 1000)
+  }
 
   const sessionNum = (s: FocusSession, size: number) => (
     <div className={`gauge-num${over ? ' over' : ''}`} style={{ fontSize: size }}>
@@ -392,9 +425,18 @@ export function Home({
     </div>
   )
 
+  const eyebrow = (s: FocusSession) =>
+    s.mode !== 'pomodoro' ? null : s.phase === 'break' ? 'BREAK' : `ROUND ${s.round}`
+
+  const faceName = (s: FocusSession) =>
+    onBreak ? `Round ${s.round} done` : (s.step_name ?? s.title)
+
+  const stepOf = (s: FocusSession) =>
+    s.step_index === null || onBreak ? null : `${s.step_index} of ${s.step_count}`
+
   const pauseButton = (s: FocusSession) => (
-    <button className="btn-round" aria-label={s.pausedAt ? 'Back to it' : 'Break'} onClick={s.pausedAt ? resume : pause}>
-      {s.pausedAt ? (
+    <button className="btn-round" aria-label={isPaused(s) ? 'Back to it' : 'Break'} onClick={isPaused(s) ? resume : pause}>
+      {isPaused(s) ? (
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10-6.5z" /></svg>
       ) : (
         <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1.2" /><rect x="14" y="5" width="4" height="14" rx="1.2" /></svg>
@@ -403,7 +445,21 @@ export function Home({
   )
 
   const doneButton = (
-    <button className={`btn-fill${mobile ? ' wide' : ''}`} disabled={pending} onClick={finish}>Done with this step</button>
+    <button className={`btn-fill${mobile ? ' wide' : ''}`} disabled={pending} onClick={() => void finish()}>Done with this step</button>
+  )
+
+  // The break asks for a word about the round, in the session's own thread.
+  const breakSheet = session && onBreak && (
+    <div className="break-sheet">
+      <button className="btn-haze" disabled={pending} onClick={backToIt}>Back to it</button>
+      <Jot
+        flow
+        conversationId={session.conversation_id}
+        placeholder="How did that round go?"
+        openTalk={openTalk}
+        openConversation={openConversation}
+      />
+    </div>
   )
 
   // ── the wait ─────────────────────────────────────────────────
@@ -457,13 +513,13 @@ export function Home({
   // ── the two faces ────────────────────────────────────────────
   const bigFace = session ? (
     <div className="home-face">
-      <Gauge size={mobile ? 320 : 440} fracAt={sessionFracAt(session)} breathe paused={session.pausedAt !== null}>
-        {sessionNum(session, 58)}
-        <div className="gauge-name" style={{ fontSize: 18 }}><Atoms text={session.stepName ?? session.title} /></div>
-        {session.stepIndex !== null && (
-          <div className="gauge-sub"><Atoms text={`${session.stepIndex} of ${session.stepCount}`} /></div>
-        )}
+      <Gauge size={mobile ? 320 : 440} fracAt={sessionFracAt(session)} breathe paused={isPaused(session)}>
+        {eyebrow(session) && <div className="gauge-eyebrow"><Atoms text={eyebrow(session) ?? ''} /></div>}
+        {sessionNum(session, mobile ? 64 : 76)}
+        <div className="gauge-name" style={{ fontSize: mobile ? 20 : 22 }}><Atoms text={faceName(session)} /></div>
+        {stepOf(session) && <div className="gauge-sub"><Atoms text={stepOf(session) ?? ''} /></div>}
       </Gauge>
+      {breakSheet}
     </div>
   ) : (
     <div className="home-face">
@@ -501,17 +557,32 @@ export function Home({
   // Mobile, and any session, land on the compact header; the desktop wait lands on
   // the hero.
   const compactHeader = session ? (
-    <div className="home-face compact">
-      <Gauge size={120} fracAt={sessionFracAt(session)} breathe paused={session.pausedAt !== null}>
-        {sessionNum(session, 24)}
-      </Gauge>
-      <div className="home-head">
-        <span className="home-head-name">{session.stepName ?? session.title}</span>
-        {session.stepIndex !== null && <span className="gauge-sub">{session.stepIndex} of {session.stepCount}</span>}
+    mobile ? (
+      <div className="home-face compact session">
+        <div className="session-arc">
+          <Gauge size={230} fracAt={sessionFracAt(session)} breathe paused={isPaused(session)}>
+            {eyebrow(session) && <span className="gauge-eyebrow">{eyebrow(session)}</span>}
+            {sessionNum(session, 40)}
+            <div className="gauge-name" style={{ fontSize: 15 }}>{faceName(session)}</div>
+            {stepOf(session) && <span className="gauge-sub">{stepOf(session)}</span>}
+          </Gauge>
+          {pauseButton(session)}
+        </div>
       </div>
-      {!mobile && doneButton}
-      {pauseButton(session)}
-    </div>
+    ) : (
+      <div className="home-face compact">
+        <Gauge size={120} fracAt={sessionFracAt(session)} breathe paused={isPaused(session)}>
+          {sessionNum(session, 24)}
+        </Gauge>
+        <div className="home-head">
+          {eyebrow(session) && <span className="gauge-eyebrow">{eyebrow(session)}</span>}
+          <span className="home-head-name">{faceName(session)}</span>
+          {stepOf(session) && <span className="gauge-sub">{stepOf(session)}</span>}
+        </div>
+        {doneButton}
+        {pauseButton(session)}
+      </div>
+    )
   ) : next && facts ? (
     <div className="home-face compact">
       {prefs.showArc ? (
@@ -569,6 +640,14 @@ export function Home({
       (minutesOf(ev.end_wall_time ?? ev.wall_time) >= now || ev.status === 'fired'),
   )
 
+  const announce = (task: TaskRef): OverflowItem[] =>
+    ANNOUNCE.map((choice) => ({
+      label: `Announce: ${choice.label}`,
+      run: () => act(() => api.patchTask(task.id, { notify: choice.id })),
+      disabled: pending,
+      checked: task.notify === undefined ? undefined : task.notify === choice.id,
+    }))
+
   const blockActions = (ev: PlanEvent) => (
     <span className="home-row-actions">
       <button className="btn-haze small" disabled={pending} onClick={() => start(ev)}>Start</button>
@@ -578,6 +657,7 @@ export function Home({
         items={[
           { label: 'Drop today', run: () => drop(ev), disabled: pending },
           { label: 'Move to tomorrow', run: () => act(() => api.moveTomorrow(ev.id)), disabled: pending },
+          ...(ev.task ? announce(ev.task) : []),
         ]}
       />
     </span>
@@ -615,7 +695,8 @@ export function Home({
   )
 
   const compactLanding = mobile || inSession
-  const today = day && (
+  // On the phone a session is the whole screen: the day waits until it is over.
+  const today = day && !(mobile && inSession) && (
     <div className="home-today">
       <DayLine events={visible} now={now} compact={mobile} nextId={next?.id} />
       {list}
@@ -691,9 +772,11 @@ export function Home({
     facts?.eyebrow,
     facts?.minutes,
     facts?.span,
-    session?.startedAt,
-    session?.stepIndex,
-    session?.stepName,
+    session?.started_at,
+    session?.step_index,
+    session?.step_name,
+    session?.phase,
+    session?.round,
     over,
     visible.map((ev) => ev.id).join(','),
   ].join('|')
@@ -730,8 +813,8 @@ export function Home({
         travel(timeline, q('.face-big .gauge-ring'), q('.home-face.compact .gauge-ring'), { mode: 'box' })
         travel(timeline, q('.face-big .gauge-num'), q('.home-face.compact .gauge-num'), { mode: inSession ? 'box' : 'text' })
         travel(timeline, q('.face-big .gauge-eyebrow'), q('.home-face.compact .gauge-eyebrow'))
-        travel(timeline, q('.face-big .gauge-name, .face-big .home-title'), q('.home-face.compact .home-head-name'))
-        travel(timeline, q('.face-big .gauge-sub'), q('.home-face.compact .home-head .gauge-sub'))
+        travel(timeline, q('.face-big .gauge-name, .face-big .home-title'), q('.home-face.compact .home-head-name, .home-face.compact .gauge-name'))
+        travel(timeline, q('.face-big .gauge-sub'), q('.home-face.compact .home-head .gauge-sub, .home-face.compact .gauge-sub'))
         if (inSession) {
           // The controls settle in once the ring has cleared the header row.
           from(qa('.home-face.compact .btn-round, .home-face.compact .btn-fill'), { autoAlpha: 0, scale: 0.85, duration: 0.3, ease: 'power2.out' }, 0.65)
@@ -880,7 +963,12 @@ export function Home({
           </div>
         )}
         {motion && (compactLanding ? compactHeader : hero)}
-        {motion && session && mobile && <div className="home-sheet">{doneButton}</div>}
+        {motion && session && mobile && (
+          <div className="home-sheet">
+            {doneButton}
+            <Jot flow placeholder="Tell Note" openTalk={openTalk} openConversation={openConversation} />
+          </div>
+        )}
         {compactLanding ? today : events && <section className="today-line"><DayLine events={visible} now={now} nextId={next?.id} /></section>}
       </section>
       <section ref={ground} className="today-ground">

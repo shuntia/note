@@ -12,11 +12,18 @@ import type { ViewProps } from '../app'
 import { collapse, flip, settle } from '../motion-gsap'
 import { Overflow, type OverflowItem } from '../overflow'
 import '../styles/tasks.css'
-import type { NewStep, Task, TaskNode, TaskState, TaskUpdate } from '../types'
+import type { NewStep, Task, TaskNode, TaskNotify, TaskState, TaskUpdate } from '../types'
 
 const NOW_CAP = 3
 const UNDO_MS = 5000
 const NOW_FULL = 'Now is full — finish or move something first'
+
+// What a block laid for the task does when it starts.
+const ANNOUNCE: { id: TaskNotify; label: string }[] = [
+  { id: 'none', label: 'None' },
+  { id: 'chat', label: 'Chat' },
+  { id: 'notify', label: 'Notify' },
+]
 
 type Group = 'now' | 'later' | 'done'
 
@@ -153,6 +160,7 @@ type RowActions = {
   drop: (node: TaskNode) => void
   keepAsOne: (node: TaskNode) => void
   startFocus: (node: TaskNode) => void
+  announce: (node: TaskNode, notify: TaskNotify) => void
 }
 
 export function Tasks({ notify, refresh, openNow }: ViewProps) {
@@ -176,7 +184,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
   useEffect(load, [load, refresh])
 
   const patch = useCallback(
-    async (id: number, body: { state?: TaskState; is_now?: boolean }) => {
+    async (id: number, body: { state?: TaskState; is_now?: boolean; notify?: TaskNotify }) => {
       try {
         const updated = await api.patchTask(id, body)
         setNodes((ns) => (ns ? mergeUpdate(ns, updated) : ns))
@@ -257,6 +265,11 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
     })
   }
 
+  const announce = (node: TaskNode, notify: TaskNotify) => {
+    setNodes((ns) => (ns ? ns.map((n) => (n.id === node.id ? { ...n, notify } : n)) : ns))
+    void patch(node.id, { notify })
+  }
+
   const setNow = (node: TaskNode, is_now: boolean) => {
     setNodes((ns) => (ns ? ns.map((n) => (n.id === node.id ? { ...n, is_now } : n)) : ns))
     void patch(node.id, { is_now })
@@ -296,18 +309,15 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
     const target = focusTarget(node)
     const index = node.children.findIndex((c) => c.id === target.id)
     openNow({
-      serverId: null,
-      taskId: target.id,
-      eventId: null,
       title: node.title,
+      task_id: node.id,
       notes: target.notes,
-      stepIndex: index === -1 ? null : index + 1,
-      stepCount: index === -1 ? null : node.children.length,
-      stepName: index === -1 ? null : target.title,
-      durationSec: target.duration_min === null ? null : round5(target.duration_min) * 60,
-      startedAt: Date.now(),
-      pausedAt: null,
-      pausedMs: 0,
+      ...(index !== -1 && {
+        step_index: index + 1,
+        step_count: node.children.length,
+        step_name: target.title,
+      }),
+      ...(target.duration_min !== null && { planned_min: round5(target.duration_min) }),
     })
   }
 
@@ -333,6 +343,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
       due_at: null,
       external_id: null,
       url: '',
+      notify: 'notify',
       children: [],
     }
     setNodes((ns) => (ns ? [...ns, optimistic] : ns))
@@ -391,6 +402,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
     drop,
     keepAsOne,
     startFocus,
+    announce,
   }
 
   const now = placed(g.now, nodes, leaving, 'now')
@@ -529,6 +541,13 @@ function Row({
       : { label: 'Move to Now', run: () => actions.moveToNow(node) },
   ]
   if (steps.length > 0) items.push({ label: 'Keep as one task', run: () => actions.keepAsOne(node) })
+  for (const choice of ANNOUNCE) {
+    items.push({
+      label: `Announce: ${choice.label}`,
+      run: () => actions.announce(node, choice.id),
+      checked: node.notify === choice.id,
+    })
+  }
   items.push({ label: 'Drop', run: () => actions.drop(node) })
   const sub =
     steps.length > 0

@@ -58,19 +58,25 @@ function writeDraft(text: string) {
 // The shell's one always-there input: what it is given goes to Note as a message, and
 // Note's answer unfolds under the box until something sends the panel away.
 // `flow` puts the panel in the page rather than hanging it under the box; `tab` is the
-// view around it, so a change of view closes the panel with it.
+// view around it, so a change of view closes the panel with it. A box bound to a
+// `conversationId` writes into that thread and keeps its text to itself.
 export function Jot({
   openTalk,
   openConversation,
   flow = false,
   tab,
+  conversationId = null,
+  placeholder = PLACEHOLDER,
 }: {
   openTalk: (draft: string) => void
   openConversation: (id: number) => void
   flow?: boolean
   tab?: string
+  conversationId?: number | null
+  placeholder?: string
 }) {
-  const [text, setText] = useState(readDraft)
+  const bound = conversationId !== null
+  const [text, setText] = useState(bound ? '' : readDraft)
   const [lines, setLines] = useState<Line[]>([])
   const [conversation, setConversation] = useState<number | null>(null)
   const [busy, setBusy] = useState(false)
@@ -165,7 +171,7 @@ export function Jot({
 
   const change = (value: string) => {
     setText(value)
-    writeDraft(value)
+    if (!bound) writeDraft(value)
   }
 
   const submit = async (e: FormEvent) => {
@@ -173,7 +179,7 @@ export function Jot({
     const message = text.trim()
     if (!message || busy) return
     const sentIn = era.current
-    const thread = conversation
+    const thread = conversation ?? conversationId
     change('')
     setLive(QUIET)
     setBusy(true)
@@ -199,7 +205,7 @@ export function Jot({
   // The panel is a foretaste of the thread; opening it hands the conversation to Chat.
   const openThread = () => {
     const said = lines.find((l) => l.kind === 'said')
-    const id = conversation
+    const id = conversation ?? conversationId
     clear()
     if (id !== null) openConversation(id)
     else openTalk(said?.text ?? '')
@@ -227,8 +233,8 @@ export function Jot({
         <input
           ref={input}
           value={text}
-          aria-label={PLACEHOLDER}
-          placeholder={PLACEHOLDER}
+          aria-label={placeholder}
+          placeholder={placeholder}
           onChange={(e) => change(e.target.value)}
           onKeyDown={(e) => {
             if (e.key !== 'Escape') return

@@ -14,9 +14,8 @@ import { glide, lift, viewIn, viewOut } from './motion-gsap'
 import { reducedMotion } from './motion'
 import { NavIcon } from './navicon'
 import { prefsFrom, writePrefs } from './prefs'
-import { readSession, writeSession, type FocusSession } from './session'
-import type { WorkSession } from './types'
-import type { Me } from './types'
+import { readSession, stillEnding, writeSession, type FocusSession } from './session'
+import type { Me, SessionStart } from './types'
 import { Admin } from './views/Admin'
 import { Home } from './views/Home'
 import { Memory } from './views/Memory'
@@ -48,8 +47,8 @@ export type ViewProps = {
   openTalk: (draft: string) => void
   // Switches to Talk landing on a thread that already exists.
   openConversation: (id: number) => void
-  // Opens a focus session; Home carries it for as long as it runs.
-  openNow: (session: FocusSession) => void
+  // Opens a focus session on the server and lands on Home, which paints it.
+  openNow: (fields: SessionStart) => void
 }
 
 type NavTab = Exclude<Tab, 'admin'>
@@ -66,25 +65,6 @@ const NAV: { id: NavTab; label: string }[] = [
 // it has faded, so nothing in it is torn down mid-transition.
 type Layer = { id: number; tab: Tab }
 
-// The face for a session the server is still holding, after a reload.
-function sessionFrom(open: WorkSession): FocusSession {
-  const started = Date.parse(open.started_at)
-  return {
-    serverId: open.id,
-    taskId: open.task_id,
-    eventId: open.event_id,
-    title: open.title,
-    notes: '',
-    stepIndex: null,
-    stepCount: null,
-    stepName: null,
-    durationSec: open.planned_min === null ? null : open.planned_min * 60,
-    startedAt: Number.isNaN(started) ? Date.now() : started,
-    pausedAt: null,
-    pausedMs: 0,
-  }
-}
-
 export function App() {
   // undefined = session check in flight; null = signed out
   const [me, setMe] = useState<Me | null | undefined>(undefined)
@@ -97,12 +77,8 @@ export function App() {
   const [talkPrefill, setTalkPrefill] = useState<string | null>(null)
   // A thread to land on, with a nonce so the same thread can be asked for twice.
   const [talkOpen, setTalkOpen] = useState<{ id: number; at: number } | null>(null)
-  // Reading storage at mount is what makes the session face survive a reload.
+  // The cache is what the first paint draws; the server answers a moment later.
   const [session, setSession] = useState<FocusSession | null>(readSession)
-  // The sync below runs outside React's render, so it reads the session here
-  // rather than through a stale closure.
-  const held = useRef(session)
-  held.current = session
   const mobile = useMedia('(max-width: 767.98px)')
 
   const tab = layer.tab
@@ -203,70 +179,51 @@ export function App() {
     }
   }, [me, openConversation])
 
-  // The server holds the session too: it lays the progress checks that fire
-  // while the user works, and drops them the moment the session is over.
-  const syncSession = useCallback(
-    async (previous: FocusSession | null, next: FocusSession | null) => {
-      if (!next) {
-        if (previous?.serverId !== null && previous !== null) {
-          await api.endWorkSession(previous.serverId, 'done')
-        }
-        return
-      }
-      if (next.serverId !== null) return
-      const started = await api.startWorkSession({
-        title: next.title,
-        ...(next.taskId !== null && { task_id: next.taskId }),
-        ...(next.eventId !== null && { event_id: next.eventId }),
-        ...(next.durationSec !== null && {
-          planned_min: Math.max(1, Math.round(next.durationSec / 60)),
-        }),
-      })
-      // Only if the same session is still the one on screen: a slow answer
-      // must never revive one the user has already finished.
-      const current = held.current
-      if (!current || current.startedAt !== next.startedAt) return
-      const adopted = { ...current, serverId: started.id }
-      setSession(adopted)
-      writeSession(adopted)
-    },
-    [],
-  )
+  const putSession = useCallback((s: FocusSession | null) => {
+    setSession(s)
+    writeSession(s)
+  }, [])
 
-  // A session takes the screen from wherever it was started, so Today comes with it.
-  const changeSession = useCallback(
-    (next: FocusSession | null) => {
-      const previous = held.current
-      held.current = next
-      setSession(next)
-      writeSession(next)
-      if (next) go('today')
-      void syncSession(previous, next).catch(() => {})
-    },
-    [go, syncSession],
-  )
-
-  // A reload asks the server what it is still holding: the face comes back
-  // whether or not this browser remembered it.
-  useEffect(() => {
-    if (!me) return
-    let gone = false
+  // `/api/sessions/open` is the truth: on load, on everything the server says it
+  // decided, and whenever the tab is looked at again.
+  const syncSession = useCallback(() => {
     api
       .openWorkSession()
       .then((open) => {
-        if (gone || !open) return
-        const current = held.current
-        if (current?.serverId != null) return
-        const restored = current ? { ...current, serverId: open.id } : sessionFrom(open)
-        held.current = restored
-        setSession(restored)
-        writeSession(restored)
+        if (open && stillEnding(open.id)) return
+        putSession(open)
       })
       .catch(() => {})
-    return () => {
-      gone = true
-    }
-  }, [me])
+  }, [putSession])
+
+  useEffect(() => {
+    if (!me) return
+    syncSession()
+  }, [me, refresh, syncSession])
+
+  useEffect(() => {
+    if (!me) return
+    window.addEventListener('focus', syncSession)
+    return () => window.removeEventListener('focus', syncSession)
+  }, [me, syncSession])
+
+  // A session takes the screen from wherever it was started, so Today comes with it.
+  const startSession = useCallback(
+    async (fields: SessionStart) => {
+      go('today')
+      try {
+        putSession(await api.startWorkSession(fields))
+      } catch {
+        notify("Couldn't start that session. Try again.")
+      }
+    },
+    [go, notify, putSession],
+  )
+
+  // Desktop rests the top bar and its jot for as long as a session runs.
+  useEffect(() => {
+    document.documentElement.classList.toggle('in-session', session !== null)
+  }, [session])
 
   useEffect(() => {
     setOnUnauthorized(() => setMe(null))
@@ -306,7 +263,7 @@ export function App() {
     onChanged,
     openTalk,
     openConversation,
-    openNow: changeSession,
+    openNow: (fields: SessionStart) => void startSession(fields),
   }
 
   const toastNode = toast && (
@@ -333,11 +290,11 @@ export function App() {
       return (
         <Home
           session={session}
-          setSession={changeSession}
+          setSession={putSession}
           notify={notify}
           onChanged={onChanged}
           refresh={refresh}
-          openNow={changeSession}
+          openNow={views.openNow}
           openTalk={openTalk}
           openConversation={openConversation}
           mobile={mobile}

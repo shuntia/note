@@ -3,7 +3,13 @@ import { api } from './api'
 import { minutesOf } from './dayline'
 import { eventFacts, nextUp } from './events'
 import { readPrefs } from './prefs'
-import { elapsedSec, type FocusSession } from './session'
+import {
+  elapsedSec,
+  phaseElapsedSec,
+  phaseLengthSec,
+  plannedSec,
+  type FocusSession,
+} from './session'
 import type { DayView, PlanEvent } from './types'
 
 const VB = 32
@@ -26,13 +32,14 @@ type Reading = { frac: number; text: string; over: boolean; faded: boolean }
 
 function read(session: FocusSession | null, events: PlanEvent[]): Reading | null {
   if (session) {
-    const total = session.durationSec
-    const elapsed = elapsedSec(session)
-    const over = total !== null && elapsed > total
-    const shown =
-      over && total !== null
-        ? `+${fmt(elapsed - total)}`
-        : fmt(total !== null && readPrefs().counter === 'remaining' ? total - elapsed : elapsed)
+    const round = session.mode === 'pomodoro'
+    const total = round ? phaseLengthSec(session) : plannedSec(session)
+    const elapsed = round ? phaseElapsedSec(session) : elapsedSec(session)
+    const over = !round && total !== null && elapsed > total
+    const left = total === null ? elapsed : Math.max(0, total - elapsed)
+    const shown = over
+      ? `+${fmt(elapsed - (total ?? 0))}`
+      : fmt(round || readPrefs().counter === 'remaining' ? left : elapsed)
     return { frac: total ? Math.min(1, elapsed / total) : 0, text: shown, over, faded: false }
   }
   const d = new Date()
