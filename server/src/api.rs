@@ -461,6 +461,7 @@ async fn task_agent(
             embeddings: state.embeddings.as_deref(),
             task_scope: Some(id),
             inbox_source: None,
+            memory_source: None,
             token_id,
             thread_note: None,
         };
@@ -620,6 +621,7 @@ async fn agent_inbox(
             embeddings: state.embeddings.as_deref(),
             task_scope: None,
             inbox_source: Some(req.source_id.clone()),
+            memory_source: None,
             token_id,
             thread_note: None,
         };
@@ -781,6 +783,12 @@ fn checkin_thread_note(date: &str) -> String {
          is replying to it now."
     )
 }
+
+/// What the history window no longer reaches. A thread longer than the window
+/// loses its oldest turns, and only the summary still carries them.
+fn summary_thread_note(summary: &str) -> String {
+    format!("# This conversation\n\nEarlier in this conversation: {summary}")
+}
 // History windows stay user-first/assistant-last: each success appends exactly
 // one user and one assistant row, and errors persist nothing.
 const TALK_HISTORY_LIMIT: usize = 32;
@@ -800,7 +808,7 @@ async fn talk(
         )
             .into_response();
     }
-    let mut thread_note = None;
+    let mut notes: Vec<String> = Vec::new();
     if let Some(id) = req.conversation_id {
         let conn = state.db();
         match crate::talk::owned(&conn, user.id, id) {
@@ -808,11 +816,19 @@ async fn talk(
             Ok(false) => return conversation_not_found(),
             Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         }
-        thread_note = match crate::talk::checkin_date(&conn, id) {
-            Ok(date) => date.map(|d| checkin_thread_note(&d)),
+        match crate::talk::checkin_date(&conn, id) {
+            Ok(Some(date)) => notes.push(checkin_thread_note(&date)),
+            Ok(None) => {}
             Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-        };
+        }
+        let long = crate::talk::text_turns(&conn, id).unwrap_or(0) > TALK_HISTORY_LIMIT;
+        if long {
+            if let Ok(Some((summary, _))) = crate::talk::summary(&conn, id) {
+                notes.push(summary_thread_note(&summary));
+            }
+        }
     }
+    let thread_note = (!notes.is_empty()).then(|| notes.join("\n\n"));
     if daily_cap_reached(&state, user.id) {
         return daily_cap_response();
     }
@@ -842,6 +858,7 @@ async fn talk(
             embeddings: state.embeddings.as_deref(),
             task_scope: None,
             inbox_source: None,
+            memory_source: None,
             token_id: None,
             thread_note,
         };
@@ -952,7 +969,7 @@ fn conversation_not_found() -> axum::response::Response {
 async fn conversations_list(user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
     let conn = state.db();
     let mut stmt = match conn.prepare(
-        "SELECT id, title, updated_at FROM conversations
+        "SELECT id, title, updated_at, summary FROM conversations
          WHERE user_id = ?1 ORDER BY updated_at DESC, id DESC",
     ) {
         Ok(s) => s,
@@ -964,6 +981,7 @@ async fn conversations_list(user: CurrentUser, State(state): State<AppState>) ->
                 "id": r.get::<_, i64>(0)?,
                 "title": r.get::<_, String>(1)?,
                 "updated_at": r.get::<_, String>(2)?,
+                "summary": r.get::<_, Option<String>>(3)?,
             }))
         })
         .and_then(|m| m.collect());
@@ -1465,6 +1483,21 @@ async fn memory_list(
 
 /// A fact of another user is indistinguishable from one that does not exist:
 /// the id is only ever looked up under the caller's own memory root.
+/// What wrote this fact on the user's behalf — an inbox item, a harvest —
+/// empty for one the user's own sessions wrote.
+fn memory_sources(state: &AppState, user_id: i64, memory_id: &str) -> Vec<String> {
+    let conn = state.db();
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT source_id FROM memory_sources WHERE user_id = ?1 AND memory_id = ?2
+         ORDER BY source_id",
+    ) else {
+        return Vec::new();
+    };
+    stmt.query_map((user_id, memory_id), |r| r.get(0))
+        .and_then(|rows| rows.collect::<rusqlite::Result<Vec<String>>>())
+        .unwrap_or_default()
+}
+
 async fn memory_read(
     user: CurrentUser,
     State(state): State<AppState>,
@@ -1482,6 +1515,7 @@ async fn memory_read(
             "supersedes": f.supersedes,
             "created": f.created,
             "archived": f.archived,
+            "sources": memory_sources(&state, user.id, &id),
         }))
         .into_response(),
         Ok(None) => StatusCode::NOT_FOUND.into_response(),

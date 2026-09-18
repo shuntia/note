@@ -337,6 +337,7 @@ mod tests {
             vectors: PreparedVectors::default(),
             task_scope: scope,
             inbox_source: None,
+            memory_source: None,
         }
     }
 

@@ -6,16 +6,20 @@ use std::path::Path;
 use std::sync::Mutex;
 
 pub const MAX_TURNS: usize = 16;
-/// An import session is one brief, and an inbox session one decision: the
-/// call, plus a single retry when the first one is rejected.
+/// An import session is one brief, an inbox session one decision, and a
+/// summary one line: the call, plus a single retry when the first one is
+/// rejected.
 pub const IMPORT_MAX_TURNS: usize = 2;
+/// A harvest reads one digest: enough rounds to search memory before each
+/// write and still finish.
+pub const HARVEST_MAX_TURNS: usize = 8;
 pub const MAX_TURNS_REPLY: &str =
     "(I ran out of steps before finishing — ask again and I'll pick it up from here)";
 
 /// The sessions that run on their own instructions alone, with none of the
 /// user's standing context and a single call to make.
 fn single_call(kind: SessionKind) -> bool {
-    matches!(kind, SessionKind::Import | SessionKind::Inbox)
+    matches!(kind, SessionKind::Import | SessionKind::Inbox | SessionKind::Summarize)
 }
 
 pub struct SessionDeps<'a> {
@@ -28,6 +32,8 @@ pub struct SessionDeps<'a> {
     pub task_scope: Option<i64>,
     /// Confines the session's inbox decision to one source id.
     pub inbox_source: Option<String>,
+    /// Records every fact the session writes against this source id.
+    pub memory_source: Option<String>,
     /// The API token the caller presented, so the session's log row says which
     /// credential spent it.
     pub token_id: Option<i64>,
@@ -105,6 +111,8 @@ pub fn run_session_watched(
     let mut system = match kind {
         SessionKind::Import => crate::prompts::load(deps.config_dir, username, "import")?,
         SessionKind::Inbox => crate::prompts::load(deps.config_dir, username, "inbox")?,
+        SessionKind::Summarize => crate::prompts::load(deps.config_dir, username, "summarize")?,
+        SessionKind::Harvest => crate::prompts::load(deps.config_dir, username, "harvest")?,
         _ => crate::prompts::load(deps.config_dir, username, "persona")?,
     };
     if kind == SessionKind::Nightly {
@@ -130,7 +138,11 @@ pub fn run_session_watched(
     let mut steps = Vec::new();
     let mut last_text = String::new();
     let mut reasoning = String::new();
-    let max_turns = if single_call(kind) { IMPORT_MAX_TURNS } else { MAX_TURNS };
+    let max_turns = match kind {
+        _ if single_call(kind) => IMPORT_MAX_TURNS,
+        SessionKind::Harvest => HARVEST_MAX_TURNS,
+        _ => MAX_TURNS,
+    };
     let started = std::time::Instant::now();
 
     while turns < max_turns {
@@ -181,6 +193,7 @@ pub fn run_session_watched(
                     vectors,
                     task_scope: deps.task_scope,
                     inbox_source: deps.inbox_source.clone(),
+                    memory_source: deps.memory_source.clone(),
                 };
                 match tools::dispatch(&conn, &ctx, kind, &call.name, &call.args) {
                     Ok(v) => (v.to_string(), false),
@@ -276,7 +289,7 @@ mod tests {
         tmp: &'a tempfile::TempDir,
         llm: &'a MockLLM,
     ) -> SessionDeps<'a> {
-        SessionDeps { db, config_dir: tmp.path(), data_dir: tmp.path(), llm, embeddings: None, task_scope: None, inbox_source: None, token_id: None, thread_note: None }
+        SessionDeps { db, config_dir: tmp.path(), data_dir: tmp.path(), llm, embeddings: None, task_scope: None, inbox_source: None, memory_source: None, token_id: None, thread_note: None }
     }
 
     fn now() -> jiff::Timestamp {
@@ -359,6 +372,7 @@ mod tests {
             embeddings: None,
             task_scope: None,
             inbox_source: None,
+            memory_source: None,
             token_id: None,
             thread_note: None,
         };
@@ -663,6 +677,7 @@ mod tests {
             embeddings: None,
             task_scope: None,
             inbox_source: None,
+            memory_source: None,
             token_id: None,
             thread_note: None,
         };

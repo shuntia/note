@@ -190,6 +190,7 @@ mod tests {
             vectors: PreparedVectors::default(),
             task_scope: None,
             inbox_source: Some(source.to_string()),
+            memory_source: None,
         }
     }
 
