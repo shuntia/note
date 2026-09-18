@@ -341,3 +341,34 @@ async fn a_test_account_starts_with_its_background_features_off() {
     assert_eq!(v["nightly_enabled"], false);
     assert_eq!(v["checkins_enabled"], false);
 }
+
+#[tokio::test]
+async fn the_pomodoro_settings_round_trip_and_hold_their_range() {
+    let (app, cookie, _cfg) = common::app_with_logged_in_user().await;
+    let v = json(app.clone().oneshot(get(&cookie)).await.unwrap()).await;
+    assert_eq!(v["pomodoro_enabled"], false);
+    assert_eq!(v["pomodoro_work_min"], 25);
+    assert_eq!(v["pomodoro_break_min"], 5);
+
+    let saved = json(
+        app.clone()
+            .oneshot(put(
+                &cookie,
+                r#"{"pomodoro_enabled":true,"pomodoro_work_min":50,"pomodoro_break_min":10}"#,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(saved["pomodoro_enabled"], true);
+    assert_eq!(saved["pomodoro_work_min"], 50);
+    assert_eq!(saved["pomodoro_break_min"], 10);
+
+    for bad in [r#"{"pomodoro_work_min":4}"#, r#"{"pomodoro_work_min":121}"#,
+                r#"{"pomodoro_break_min":0}"#, r#"{"pomodoro_break_min":61}"#] {
+        let res = app.clone().oneshot(put(&cookie, bad)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{bad}");
+    }
+    let v = json(app.oneshot(get(&cookie)).await.unwrap()).await;
+    assert_eq!(v["pomodoro_work_min"], 50, "a refused write changes nothing");
+}

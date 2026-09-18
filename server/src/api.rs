@@ -965,12 +965,17 @@ struct SettingsPatch {
     nightly_enabled: Option<bool>,
     checkins_enabled: Option<bool>,
     triggers_per_day: Option<u32>,
+    pomodoro_enabled: Option<bool>,
+    pomodoro_work_min: Option<u32>,
+    pomodoro_break_min: Option<u32>,
     alerts: Option<Vec<AlertPatch>>,
 }
 
 /// A day's worth of check-ins Note may start on its own; more than this and it
 /// is not a companion any more.
 const MAX_TRIGGERS_PER_DAY: u32 = 20;
+const POMODORO_WORK_MIN: std::ops::RangeInclusive<u32> = 5..=120;
+const POMODORO_BREAK_MIN: std::ops::RangeInclusive<u32> = 1..=60;
 
 /// `telegram_linked` is read by the caller, which already holds the DB guard on
 /// the write path.
@@ -997,6 +1002,9 @@ fn settings_body(
         "telegram_linked": telegram_linked,
         "telegram_bot": state.telegram.as_ref().map(|ch| ch.bot()).unwrap_or_default(),
         "triggers_per_day": cfg.triggers_per_day(),
+        "pomodoro_enabled": cfg.pomodoro_enabled(),
+        "pomodoro_work_min": cfg.pomodoro_work_min(),
+        "pomodoro_break_min": cfg.pomodoro_break_min(),
         "schedule": schedule,
     })
 }
@@ -1122,6 +1130,27 @@ async fn settings_put(
             );
         }
         cfg.triggers_per_day = Some(n);
+    }
+    if let Some(on) = req.pomodoro_enabled {
+        cfg.pomodoro_enabled = Some(on);
+    }
+    if let Some(n) = req.pomodoro_work_min {
+        if !POMODORO_WORK_MIN.contains(&n) {
+            return invalid_field(
+                "pomodoro_work_min",
+                &format!("must be {} to {}", POMODORO_WORK_MIN.start(), POMODORO_WORK_MIN.end()),
+            );
+        }
+        cfg.pomodoro_work_min = Some(n);
+    }
+    if let Some(n) = req.pomodoro_break_min {
+        if !POMODORO_BREAK_MIN.contains(&n) {
+            return invalid_field(
+                "pomodoro_break_min",
+                &format!("must be {} to {}", POMODORO_BREAK_MIN.start(), POMODORO_BREAK_MIN.end()),
+            );
+        }
+        cfg.pomodoro_break_min = Some(n);
     }
     if let Some(alerts) = req.alerts {
         let changes: Vec<(usize, bool)> = alerts.iter().map(|a| (a.index, a.alert)).collect();

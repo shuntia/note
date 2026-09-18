@@ -201,9 +201,19 @@ pub struct UserConfig {
     /// to ask.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub triggers_per_day: Option<u32>,
+    /// Whether a session runs in rounds of work and break rather than straight
+    /// through.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pomodoro_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pomodoro_work_min: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pomodoro_break_min: Option<u32>,
 }
 
 pub const DEFAULT_TRIGGERS_PER_DAY: u32 = 4;
+pub const DEFAULT_POMODORO_WORK_MIN: u32 = 25;
+pub const DEFAULT_POMODORO_BREAK_MIN: u32 = 5;
 
 fn default_nightly_time() -> String {
     "03:00".into()
@@ -233,6 +243,18 @@ impl UserConfig {
             Some(n) => n,
             None => DEFAULT_TRIGGERS_PER_DAY,
         }
+    }
+
+    pub fn pomodoro_enabled(&self) -> bool {
+        self.pomodoro_enabled.unwrap_or(false)
+    }
+
+    pub fn pomodoro_work_min(&self) -> u32 {
+        self.pomodoro_work_min.unwrap_or(DEFAULT_POMODORO_WORK_MIN)
+    }
+
+    pub fn pomodoro_break_min(&self) -> u32 {
+        self.pomodoro_break_min.unwrap_or(DEFAULT_POMODORO_BREAK_MIN)
     }
 
     pub fn load(config_dir: &Path, user: &str) -> anyhow::Result<Self> {
