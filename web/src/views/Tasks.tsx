@@ -296,18 +296,15 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
     const target = focusTarget(node)
     const index = node.children.findIndex((c) => c.id === target.id)
     openNow({
-      serverId: null,
-      taskId: target.id,
-      eventId: null,
       title: node.title,
+      task_id: node.id,
       notes: target.notes,
-      stepIndex: index === -1 ? null : index + 1,
-      stepCount: index === -1 ? null : node.children.length,
-      stepName: index === -1 ? null : target.title,
-      durationSec: target.duration_min === null ? null : round5(target.duration_min) * 60,
-      startedAt: Date.now(),
-      pausedAt: null,
-      pausedMs: 0,
+      ...(index !== -1 && {
+        step_index: index + 1,
+        step_count: node.children.length,
+        step_name: target.title,
+      }),
+      ...(target.duration_min !== null && { planned_min: round5(target.duration_min) }),
     })
   }
 
@@ -333,6 +330,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
       due_at: null,
       external_id: null,
       url: '',
+      notify: 'notify',
       children: [],
     }
     setNodes((ns) => (ns ? [...ns, optimistic] : ns))

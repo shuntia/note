@@ -21,6 +21,7 @@ import type {
   PromptDoc,
   PromptName,
   SecurityState,
+  SessionStart,
   Settings,
   SettingsSaved,
   SqlResult,
@@ -29,6 +30,7 @@ import type {
   TelegramLink,
   Task,
   TaskNode,
+  TaskNotify,
   TaskState,
   TaskUpdate,
   Token,
@@ -53,6 +55,9 @@ const WRITABLE_SETTINGS = [
   'nightly_enabled',
   'checkins_enabled',
   'triggers_per_day',
+  'pomodoro_enabled',
+  'pomodoro_work_min',
+  'pomodoro_break_min',
 ] as const
 
 type SettingsPatch = Partial<Pick<Settings, (typeof WRITABLE_SETTINGS)[number]>>
@@ -63,6 +68,7 @@ type NewTaskOpts = {
   is_now?: boolean
   due_at?: string | null
   url?: string
+  notify?: TaskNotify
 }
 
 // A calendar entry recurs on `days` or happens once on `on_date`, never both.
@@ -82,6 +88,7 @@ type TaskPatch = {
   notes?: string
   due_at?: string | null
   url?: string
+  notify?: TaskNotify
 }
 
 export class ApiError extends Error {
@@ -236,12 +243,20 @@ export const api = {
   telegramUnlink: () => request<void>('/api/telegram/link', { method: 'DELETE' }),
   notifyTest: () => request<{ via: string }>('/api/notify/test', { method: 'POST' }),
   openWorkSession: () => request<WorkSession | null>('/api/sessions/open'),
-  startWorkSession: (fields: {
-    title: string
-    task_id?: number
-    event_id?: number
-    planned_min?: number
-  }) => request<WorkSession>('/api/sessions', { method: 'POST', body: JSON.stringify(fields) }),
+  // Opening one ends whatever was still running, farewell and all.
+  startWorkSession: (fields: SessionStart) =>
+    request<WorkSession>('/api/sessions', { method: 'POST', body: JSON.stringify(fields) }),
+  pauseWorkSession: (id: number) =>
+    request<WorkSession>(`/api/sessions/${id}/pause`, { method: 'POST' }),
+  resumeWorkSession: (id: number) =>
+    request<WorkSession>(`/api/sessions/${id}/resume`, { method: 'POST' }),
+  stepWorkSession: (id: number, step: { step_index: number; step_name: string }) =>
+    request<WorkSession>(`/api/sessions/${id}/step`, {
+      method: 'POST',
+      body: JSON.stringify(step),
+    }),
+  skipBreak: (id: number) =>
+    request<WorkSession>(`/api/sessions/${id}/skip_break`, { method: 'POST' }),
   endWorkSession: (id: number, outcome: 'done' | 'stopped') =>
     request<{ ended: number | null }>(`/api/sessions/${id}/end`, {
       method: 'POST',
