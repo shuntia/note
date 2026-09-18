@@ -1,7 +1,7 @@
 use anyhow::Context;
 use note_server::{
     admin, api, auth, channels, config::ServerConfig, db, memory, nightly, providers, runner,
-    security, totp, AppState,
+    security, summaries, totp, AppState,
 };
 use std::path::PathBuf;
 
@@ -114,7 +114,8 @@ async fn main() -> anyhow::Result<()> {
         .with_providers_info(admin::ProvidersInfo::from(&cfg.providers))
         .with_admin_secrets(secrets)
         .with_passkeys(passkeys)
-        .with_limits(&cfg.limits);
+        .with_limits(&cfg.limits)
+        .with_idle_summary_min(cfg.idle_summary_min());
     state.secure_cookies = cfg.public_base_url.starts_with("https://");
     if let Some(wp) = &cfg.channels.webpush {
         let pem = std::fs::read(&wp.vapid_pem_file)
@@ -133,6 +134,7 @@ async fn main() -> anyhow::Result<()> {
     }
     runner::spawn(state.clone());
     nightly::spawn(state.clone());
+    summaries::spawn(state.clone());
 
     let app = api::router_with_web(state, &cfg.web_dir);
     let listener = tokio::net::TcpListener::bind(&cfg.bind_addr).await?;
