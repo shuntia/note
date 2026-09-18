@@ -2128,6 +2128,10 @@ async fn ws_pump(
 fn calendar_router() -> Router<AppState> {
     Router::new()
         .route("/api/calendar", get(calendar_list).post(calendar_create))
+        .route(
+            "/api/calendar/by-external/{external_id}",
+            axum::routing::put(calendar_upsert).delete(calendar_delete_by_external),
+        )
         .route("/api/calendar/{id}", patch(calendar_update).delete(calendar_delete))
         .route("/api/calendar/{id}/skip", post(calendar_skip))
         .route("/api/calendar/{id}/skip/{date}", axum::routing::delete(calendar_unskip))
@@ -2144,6 +2148,7 @@ fn calendar_failed(e: crate::calendar::CalendarError) -> axum::response::Respons
         E::Invalid(m) => calendar_error(StatusCode::UNPROCESSABLE_ENTITY, &m),
         e @ E::TooMany => calendar_error(StatusCode::CONFLICT, &e.to_string()),
         e @ E::NotFound(_) => calendar_error(StatusCode::NOT_FOUND, &e.to_string()),
+        e @ E::Duplicate { .. } => calendar_error(StatusCode::CONFLICT, &e.to_string()),
         E::Db(_) => calendar_error(StatusCode::INTERNAL_SERVER_ERROR, "database error"),
     }
 }
@@ -2180,6 +2185,46 @@ async fn calendar_create(
     match crate::calendar::create(&conn, user.id, fields) {
         Ok(entry) => (StatusCode::CREATED, Json(entry)).into_response(),
         Err(e) => calendar_failed(e),
+    }
+}
+
+/// Mirrors one entry from another system. The body is an entry without its
+/// `external_id`, which the path carries; the reply is the entry, `201` when
+/// this call made it and `200` when it refreshed one.
+async fn calendar_upsert(
+    user: TaskPrincipal,
+    State(state): State<AppState>,
+    Path(external_id): Path<String>,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    let fields = match calendar_body::<crate::calendar::Fields>(&body) {
+        Ok(f) => f,
+        Err((status, why)) => return calendar_error(status, &why),
+    };
+    if fields.external_id.as_deref().is_some_and(|id| id.trim() != external_id.trim()) {
+        return calendar_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "external_id belongs to the path, not the body",
+        );
+    }
+    let conn = state.db();
+    match crate::calendar::upsert_by_external(&conn, user.id, &external_id, fields) {
+        Ok((entry, true)) => (StatusCode::CREATED, Json(entry)).into_response(),
+        Ok((entry, false)) => Json(entry).into_response(),
+        Err(e) => calendar_failed(e),
+    }
+}
+
+async fn calendar_delete_by_external(
+    user: TaskPrincipal,
+    State(state): State<AppState>,
+    Path(external_id): Path<String>,
+) -> impl IntoResponse {
+    let conn = state.db();
+    match crate::calendar::delete_by_external(&conn, user.id, &external_id) {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => calendar_error(StatusCode::NOT_FOUND, "no such calendar entry"),
+        Err(_) => calendar_error(StatusCode::INTERNAL_SERVER_ERROR, "database error"),
     }
 }
 
