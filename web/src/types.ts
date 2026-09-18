@@ -2,6 +2,12 @@ export type Me = { username: string; admin: boolean }
 
 export type MovedTo = { event_id: number; date: string; wall_time: string; kind: string }
 
+// Where the event came from: the template, the agent, the allocator, or a user edit.
+export type EventOrigin = 'template' | 'agent' | 'auto' | 'user'
+
+// The task a block holds, carried so the block can offer the task's own actions.
+export type TaskRef = { id: number; title: string; state: TaskState }
+
 export type PlanEvent = {
   id: number
   kind: string
@@ -13,8 +19,13 @@ export type PlanEvent = {
   slide_window_min: number
   channel: string
   alert: boolean
+  origin: EventOrigin
+  // RFC 3339 UTC; set once the event was finished, dropped, moved or snoozed
+  decided_at?: string
   // present only when the agent named the event this one moved to
   moved_to?: MovedTo
+  // present only on a block laid for a task
+  task?: TaskRef
 }
 
 export type TaskState = 'open' | 'in_progress' | 'done' | 'dropped'
@@ -233,7 +244,7 @@ export type SqlResult =
   | { columns: string[]; rows: unknown[][]; truncated: boolean }
   | { changes: number }
 
-export type CalendarKind = 'fixed' | 'busy' | 'note'
+export type CalendarKind = 'fixed' | 'busy' | 'note' | 'free'
 
 // `days` is a weekday bitmask, Mon = 1 … Sun = 64; 0 means the entry happens once, on
 // `on_date`. `exceptions` are the dates its occurrence is skipped.
@@ -268,4 +279,44 @@ export type CalendarDay = {
   date: string
   occurrences: CalendarOccurrence[]
   quiet_now: string | null
+}
+
+export type HistoryKind =
+  | 'event_done'
+  | 'event_dropped'
+  | 'event_moved'
+  | 'event_snoozed'
+  | 'event_fired'
+  | 'task_done'
+  | 'checkin'
+
+// `at` is RFC 3339 UTC; `time` is the same instant as HH:MM where the user lives.
+export type HistoryRow = {
+  at: string
+  time: string
+  kind: HistoryKind
+  label: string
+  event_id?: number
+  task_id?: number
+  conversation_id?: number
+}
+
+export type FreeWindow = { start: string; end: string }
+
+// One local day, whole. `history` is empty for a day that has not started, and
+// `quiet_now` is only ever set for today.
+export type DayView = {
+  date: string
+  events: PlanEvent[]
+  calendar: CalendarOccurrence[]
+  free: FreeWindow[]
+  quiet_now: string | null
+  history: HistoryRow[]
+}
+
+// What the allocator laid down, and how many waiting blocks it replaced.
+export type Allocation = {
+  plan_date: string
+  placed: { event_id: number; task_id: number; start: string; end: string }[]
+  cleared: number
 }

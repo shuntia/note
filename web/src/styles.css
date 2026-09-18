@@ -1071,6 +1071,13 @@ textarea.mono { font-family: var(--mono); }
 .dl-now { position: absolute; top: 0; transform: translate(-50%, -50%); width: 14px; height: 14px; border-radius: 50%; background: var(--ink); }
 .dl-span { position: absolute; top: -6px; height: 12px; min-width: 10px; border-radius: 6px; border: 1.5px solid var(--quiet); box-sizing: border-box; background: var(--earth); }
 .dl-span.next { background: var(--ink); border-color: var(--ink); }
+/* a block laid for a task: soft ground with the day's own attention down its edge */
+.dl-span.task { background: var(--haze-strong); border: 0; border-left: 2px solid var(--sun-ink); border-radius: 3px 6px 6px 3px; }
+.dl-span.task.next { background: var(--sun); }
+/* what the day already settled, as a tick on the gone bar */
+.dl-past { position: absolute; top: -3px; width: 2px; height: 6px; margin-left: -1px; border-radius: 1px; }
+.dl-past.done { background: var(--sage); }
+.dl-past.dropped { background: none; box-shadow: inset 0 0 0 1px var(--line); }
 .dl-label { position: absolute; left: 50%; transform: translateX(-50%); white-space: nowrap; font-size: 0.78rem; color: var(--quiet); font-variant-numeric: tabular-nums; }
 .dl-label.above { bottom: 18px; }
 /* neighbouring spans sit close enough at narrow widths that one row of labels overlaps */
@@ -1150,8 +1157,32 @@ textarea.mono { font-family: var(--mono); }
 .home-today .dayline { margin: 34px 0 18px; }
 .home-today .dayline.compact { margin: 6px 0 0; }
 .home-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
-.home-list li { display: grid; grid-template-columns: 96px minmax(0, 1fr); align-items: center; gap: 12px; min-height: 44px; color: var(--quiet); }
+.home-list li { display: grid; grid-template-columns: 96px minmax(0, 1fr) auto; align-items: center; gap: 12px; min-height: 44px; color: var(--quiet); }
 .home-list li.next { color: var(--ink); font-weight: 700; }
+.home-list li.task .home-what { border-left: 2px solid var(--sun-ink); padding-left: 10px; }
+.home-list li.overdue .home-when { color: var(--rose); }
+.home-row-actions { position: relative; display: flex; align-items: center; gap: 8px; }
+.home-row-actions .btn-haze { padding: 6px 14px; font-size: 0.875rem; }
+.home-row-actions .ev-more-wrap { position: relative; top: auto; right: auto; }
+
+/* ── so far today ───────────────────────────────────────────────── */
+.sofar { margin-top: 8px; }
+.sofar-fold { display: flex; align-items: center; gap: 10px; width: 100%; background: none; border: 0; padding: 10px 0; color: var(--faint); font: inherit; font-size: 0.8125rem; letter-spacing: 0.06em; text-transform: uppercase; cursor: pointer; }
+.sofar-count { margin-left: -4px; color: var(--quiet); }
+.sofar-chev { margin-left: auto; display: flex; }
+.sofar-chev svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; transition: transform 0.2s ease; }
+.sofar.open .sofar-chev svg { transform: rotate(180deg); }
+.sofar-list { list-style: none; margin: 0; padding: 0 0 8px; display: flex; flex-direction: column; }
+.sofar-list li { display: grid; grid-template-columns: 56px 20px minmax(0, 1fr); align-items: center; gap: 10px; min-height: 32px; color: var(--quiet); font-size: 0.9375rem; }
+.sofar-when { font-size: 0.8125rem; color: var(--faint); }
+.sofar-mark { display: flex; align-items: center; justify-content: center; color: var(--sage); }
+.sofar-mark .glyph { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.sofar-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--line); }
+.sofar-what { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sofar-list li.event-dropped { color: var(--faint); }
+.sofar-list li.event-dropped .sofar-what { text-decoration: line-through; text-decoration-color: var(--line); }
+.sofar-list li.event-moved .sofar-mark { color: var(--quiet); }
+.sofar-empty { margin: 0 0 10px; color: var(--faint); font-size: 0.9375rem; }
 .home-when { font-size: 0.8125rem; color: var(--faint); font-variant-numeric: tabular-nums; font-weight: 400; }
 .home-what { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .home-text { display: flex; flex-direction: column; gap: 10px; padding: 0 28px; width: 100%; box-sizing: border-box; }
@@ -1184,6 +1215,7 @@ textarea.mono { font-family: var(--mono); }
 .today-line { position: absolute; left: 120px; width: 1200px; max-width: calc(100% - 240px); top: 496px; }
 .today-ground { position: absolute; left: 0; right: 0; top: 560px; bottom: 0; background: var(--earth); padding: 100px 0 0 120px; }
 .today-ground .debrief-row { width: 820px; max-width: calc(100% - 240px); }
+.today-ground .sofar { width: 820px; max-width: calc(100% - 240px); margin: 0 auto 1.6rem; }
 .debrief-fold { background: var(--haze-strong); border: 0; border-radius: 16px; }
 .debrief-row.open { background: var(--haze-strong); border-radius: 16px; }
 .debrief-row.open .debrief-fold { background: none; }
