@@ -1,6 +1,12 @@
-bind_addr = "127.0.0.1:3271"
-public_base_url = "http://localhost:3271"
+bind_addr = "127.0.0.1:3271"   # only cloudflared (same host) reaches the listener
+public_base_url = "https://note.shuntia.net"   # Cloudflare tunnel; https turns on Secure cookies
 data_dir = "data"
+secrets_dir = "/persist/secrets/note"
+
+# Admin panel elevation = password + a second factor enrolled in Settings
+# (passkey or authenticator app); the legacy seed file still counts.
+[admin]
+require_second_factor = true
 
 # Where the built web client lives; comment out or point elsewhere if you
 # serve the PWA some other way. The server runs API-only if the directory
@@ -12,10 +18,11 @@ data_dir = "data"
 # the file wins if both are set.
 
 [providers.llm]
-kind = "openai"                 # NVIDIA NIM is OpenAI-compatible
-base_url = "https://integrate.api.nvidia.com/v1"
-model = "openai/gpt-oss-120b"
-api_key_file = "config/nvidianim.key"
+kind = "openai"                 # OpenRouter is OpenAI-compatible
+base_url = "https://openrouter.ai/api/v1"
+model = "deepseek/deepseek-v4-flash"
+api_key_file = "config/openrouter.key"
+reasoning = "low"               # model reasoning shown in the Talk activity panel; costs tokens
 
 # How long the endpoint keeps a prompt cached; it caps how long a
 # conversation may idle before the summary pass replays it.
@@ -26,10 +33,10 @@ api_key_file = "config/nvidianim.key"
 # model = "claude-sonnet-5"
 # api_key_env = "ANTHROPIC_API_KEY"
 #
-# [providers.embeddings]        # optional; enables hybrid memory search
-# kind = "openai"
-# base_url = "http://localhost:8080/v1"   # e.g. a local llama.cpp router
-# model = "embeddinggemma"
+[providers.embeddings]          # local llama.cpp router; enables hybrid memory search
+kind = "openai"
+base_url = "http://localhost:8080/v1"
+model = "embeddinggemma"
 
 # --- Background agent passes ---------------------------------------------
 # A conversation quiet for this many minutes is summarised while its context
@@ -48,9 +55,9 @@ api_key_file = "config/nvidianim.key"
 #   openssl ecparam -genkey -name prime256v1 -noout -out config/vapid.pem
 # The public key is served to clients at GET /api/push/vapid_public_key.
 #
-# [channels.webpush]
-# vapid_pem_file = "config/vapid.pem"
-# subject = "mailto:admin@example.com"
+[channels.webpush]
+vapid_pem_file = "config/vapid.pem"
+subject = "https://note.shuntia.net"
 
 # Telegram makes a bot chat one more window onto the same conversations: a
 # check-in arrives there, the reply runs the same Talk session the web does,
