@@ -51,8 +51,6 @@ const WRITABLE_SETTINGS = [
   'nightly_enabled',
   'checkins_enabled',
   'ntfy_topic',
-  'phone_number',
-  'calls_enabled',
 ] as const
 
 type SettingsPatch = Partial<Pick<Settings, (typeof WRITABLE_SETTINGS)[number]>>
@@ -155,11 +153,6 @@ export const api = {
     request<void>(`/api/events/${id}/shift`, { method: 'POST', body: JSON.stringify({ minutes }) }),
   snooze: (id: number, minutes: number) =>
     request<void>(`/api/events/${id}/snooze`, { method: 'POST', body: JSON.stringify({ minutes }) }),
-  setEventChannel: (id: number, channel: 'push' | 'voice') =>
-    request<void>(`/api/events/${id}/channel`, {
-      method: 'POST',
-      body: JSON.stringify({ channel }),
-    }),
   setEventAlert: (id: number, alert: boolean) =>
     request<void>(`/api/events/${id}/alert`, { method: 'POST', body: JSON.stringify({ alert }) }),
   moveTomorrow: (id: number) =>
@@ -237,7 +230,6 @@ export const api = {
   pushUnsubscribe: (endpoint: string) =>
     request<void>('/api/push/unsubscribe', { method: 'POST', body: JSON.stringify({ endpoint }) }),
   notifyTest: () => request<{ via: string }>('/api/notify/test', { method: 'POST' }),
-  notifyCall: () => request<{ call_id: number }>('/api/notify/call', { method: 'POST' }),
   calendar: () => request<{ entries: CalendarEntry[] }>('/api/calendar'),
   addCalendarEntry: (fields: CalendarFields) =>
     request<CalendarEntry>('/api/calendar', { method: 'POST', body: JSON.stringify(fields) }),
