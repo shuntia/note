@@ -130,6 +130,8 @@ export type Settings = {
   display_name: string
   timezone: string
   nightly_time: string
+  // When the close-the-day card appears; '' where the user turned it off.
+  close_day_time: string
   template: string
   templates: string[]
   timezones: string[]
@@ -160,6 +162,7 @@ export type SettingsSaved = Pick<
   | 'display_name'
   | 'timezone'
   | 'nightly_time'
+  | 'close_day_time'
   | 'template'
   | 'show_arc_between_sessions'
   | 'counter'
@@ -378,6 +381,9 @@ export type SessionStart = {
   step_name?: string
   notes?: string
 }
+
+// How many blocks the close of the day sent to tomorrow.
+export type Carried = { moved: number }
 
 // What the allocator laid down, and how many waiting blocks it replaced.
 export type Allocation = {
