@@ -27,6 +27,8 @@ pub mod tokens;
 pub mod templates;
 pub mod tools;
 pub mod totp;
+pub mod triggers;
+pub mod work;
 
 use crate::providers::{EmbeddingsProvider, LLMProvider};
 use rusqlite::Connection;
