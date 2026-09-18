@@ -27,6 +27,15 @@ pub struct MovedTo {
     pub kind: String,
 }
 
+/// The task a block holds, for a client that draws the block and offers the
+/// task's own actions on it.
+#[derive(Debug, Serialize)]
+pub struct TaskRef {
+    pub id: i64,
+    pub title: String,
+    pub state: String,
+}
+
 #[derive(Debug, Serialize)]
 pub struct PlanEvent {
     pub id: i64,
@@ -39,8 +48,13 @@ pub struct PlanEvent {
     pub slide_window_min: i64,
     pub channel: String,
     pub alert: bool,
+    pub origin: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decided_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub moved_to: Option<MovedTo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task: Option<TaskRef>,
 }
 
 fn weekday_key(date: jiff::civil::Date) -> &'static str {
@@ -156,10 +170,13 @@ pub fn events_for(conn: &Connection, user_id: i64, date: jiff::civil::Date) -> R
     let mut stmt = conn.prepare(
         "SELECT e.id, e.kind, e.wall_time, e.end_wall_time, e.status, e.flexibility,
                 e.slide_window_min, e.channel, e.alert,
-                m.id, mp.date, m.wall_time, m.kind, e.span_min
+                m.id, mp.date, m.wall_time, m.kind, e.span_min,
+                e.origin, e.decided_at, t.id, t.title, t.state
          FROM events e JOIN plans p ON p.id = e.plan_id
          LEFT JOIN events m ON m.id = e.moved_to_event_id
          LEFT JOIN plans mp ON mp.id = m.plan_id
+         LEFT JOIN event_tasks et ON et.event_id = e.id
+         LEFT JOIN tasks t ON t.id = et.task_id
          WHERE p.user_id = ?1 AND p.date = ?2 ORDER BY e.wall_time",
     )?;
     let rows = stmt.query_map((user_id, date.to_string()), |r| {
@@ -180,6 +197,8 @@ pub fn events_for(conn: &Connection, user_id: i64, date: jiff::civil::Date) -> R
             slide_window_min: r.get(6)?,
             channel: r.get(7)?,
             alert: r.get(8)?,
+            origin: r.get(14)?,
+            decided_at: r.get(15)?,
             moved_to: r.get::<_, Option<i64>>(9)?.map(|event_id| {
                 Ok::<_, rusqlite::Error>(MovedTo {
                     event_id,
@@ -187,6 +206,9 @@ pub fn events_for(conn: &Connection, user_id: i64, date: jiff::civil::Date) -> R
                     wall_time: r.get(11)?,
                     kind: r.get(12)?,
                 })
+            }).transpose()?,
+            task: r.get::<_, Option<i64>>(16)?.map(|id| {
+                Ok::<_, rusqlite::Error>(TaskRef { id, title: r.get(17)?, state: r.get(18)? })
             }).transpose()?,
         })
     })?;
@@ -291,8 +313,8 @@ pub fn snooze(
     }
     let total = (parse_minutes(&wall)? + minutes).clamp(0, 23 * 60 + 59);
     conn.execute(
-        "UPDATE events SET wall_time = ?1, status = 'snoozed' WHERE id = ?2",
-        (format!("{:02}:{:02}", total / 60, total % 60), event_id),
+        "UPDATE events SET wall_time = ?1, status = 'snoozed', decided_at = ?3 WHERE id = ?2",
+        (format!("{:02}:{:02}", total / 60, total % 60), event_id, jiff::Timestamp::now().to_string()),
     )?;
     Ok(Some(()))
 }
@@ -379,7 +401,10 @@ pub fn set_status(conn: &Connection, user_id: i64, event_id: i64, status: &str) 
     if owned_event(conn, user_id, event_id)?.is_none() {
         return Ok(None);
     }
-    conn.execute("UPDATE events SET status = ?1 WHERE id = ?2", (status, event_id))?;
+    conn.execute(
+        "UPDATE events SET status = ?1, decided_at = ?3 WHERE id = ?2",
+        (status, event_id, jiff::Timestamp::now().to_string()),
+    )?;
     Ok(Some(()))
 }
 
@@ -433,13 +458,13 @@ pub fn set_alert(
     Ok(Some(()))
 }
 
-/// Sends an undecided routine to the day after its own plan date, creating that
+/// Sends an undecided entry to the day after its own plan date, creating that
 /// plan from `template` if needed, and marks the original dropped with a pointer
 /// to where it landed. When tomorrow's plan already holds an undecided instance
-/// of the same routine at the same planned time — the template recurs — that
-/// instance is the landing place; otherwise a copy is inserted at
-/// `orig_wall_time`, so a snoozed event lands at its planned time. A block, like
-/// a missing event, answers `None`.
+/// of the same shape at the same planned time — the template recurs — that
+/// instance is the landing place; otherwise a copy is inserted. A routine lands
+/// at `orig_wall_time`, so a snoozed one arrives at its planned time; a block
+/// keeps the shape it has now, and takes its task with it.
 pub fn move_to_tomorrow(
     conn: &Connection,
     user_id: i64,
@@ -449,9 +474,6 @@ pub fn move_to_tomorrow(
     let Some(ev) = owned_event(conn, user_id, event_id)? else {
         return Ok(None);
     };
-    if ev.is_block {
-        return Ok(None);
-    }
     if ev.status == "done" || ev.status == "dropped" {
         return Err(ShiftError::Decided { status: ev.status });
     }
@@ -471,7 +493,8 @@ pub fn move_to_tomorrow(
         .query_row(
             "SELECT t.id FROM events t JOIN events s ON s.id = ?2
              WHERE t.plan_id = ?1 AND t.kind = s.kind AND t.orig_wall_time = s.orig_wall_time
-               AND t.end_wall_time IS NULL AND t.status IN ('pending', 'snoozed', 'fired')
+               AND (t.end_wall_time IS NULL) = (s.end_wall_time IS NULL)
+               AND t.status IN ('pending', 'snoozed', 'fired')
              ORDER BY t.id LIMIT 1",
             (plan_id, event_id),
             |r| r.get(0),
@@ -482,18 +505,29 @@ pub fn move_to_tomorrow(
         None => {
             conn.execute(
                 "INSERT INTO events (plan_id, kind, wall_time, orig_wall_time, end_wall_time,
-                                     flexibility, slide_window_min, channel, alert, span_min, message)
-                 SELECT ?1, kind, orig_wall_time, orig_wall_time, end_wall_time,
-                        flexibility, slide_window_min, channel, alert, span_min, message
+                                     flexibility, slide_window_min, channel, alert, span_min,
+                                     message, origin)
+                 SELECT ?1,
+                        kind,
+                        CASE WHEN end_wall_time IS NULL THEN orig_wall_time ELSE wall_time END,
+                        orig_wall_time, end_wall_time,
+                        flexibility, slide_window_min, channel, alert, span_min, message, origin
                  FROM events WHERE id = ?2",
                 (plan_id, event_id),
             )?;
-            conn.last_insert_rowid()
+            let id = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO event_tasks (event_id, task_id)
+                 SELECT ?1, task_id FROM event_tasks WHERE event_id = ?2",
+                (id, event_id),
+            )?;
+            id
         }
     };
     conn.execute(
-        "UPDATE events SET status = 'dropped', moved_to_event_id = ?1 WHERE id = ?2",
-        (new_id, event_id),
+        "UPDATE events SET status = 'dropped', moved_to_event_id = ?1, decided_at = ?3
+         WHERE id = ?2",
+        (new_id, event_id, jiff::Timestamp::now().to_string()),
     )?;
     tx.commit()?;
     Ok(Some((new_id, tomorrow)))
@@ -685,7 +719,7 @@ mod tests {
     }
 
     #[test]
-    fn a_block_or_a_decided_event_never_moves() {
+    fn a_decided_event_never_moves_and_a_block_takes_its_shape_along() {
         let conn = crate::db::open_memory().unwrap();
         let uid = crate::auth::create_user(&conn, "a", "p", false).unwrap();
         let date: jiff::civil::Date = "2026-08-31".parse().unwrap();
@@ -703,8 +737,16 @@ mod tests {
             ],
         };
         generate(&conn, uid, &t, date).unwrap();
-        assert!(move_to_tomorrow(&conn, uid, 2, &t).unwrap().is_none());
         assert!(move_to_tomorrow(&conn, uid, 99, &t).unwrap().is_none());
+        reshape(&conn, uid, 2, "10:00", "13:00").unwrap().unwrap();
+        let (block_id, tomorrow) = move_to_tomorrow(&conn, uid, 2, &t).unwrap().unwrap();
+        let moved: (String, Option<String>) = conn
+            .query_row("SELECT wall_time, end_wall_time FROM events WHERE id = ?1", [block_id], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(moved, ("10:00".into(), Some("13:00".into())));
+        assert_eq!(tomorrow.to_string(), "2026-09-01");
         set_status(&conn, uid, 1, "done").unwrap().unwrap();
         assert!(matches!(
             move_to_tomorrow(&conn, uid, 1, &t),

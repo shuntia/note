@@ -1,11 +1,13 @@
 pub mod admin;
 pub mod agent;
+pub mod allocate;
 pub mod api;
 pub mod auth;
 pub mod calendar;
 pub mod channels;
 pub mod config;
 pub mod context;
+pub mod day;
 pub mod db;
 pub mod harvest;
 pub mod log;

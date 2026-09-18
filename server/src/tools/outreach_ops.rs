@@ -39,8 +39,8 @@ pub fn send(conn: &Connection, ctx: &ToolCtx, args: SendArgs) -> Result<serde_js
     let plan_id = crate::plan::generate(conn, ctx.user_id, &tmpl, local.date())
         .map_err(|e| ToolError::internal(e.to_string()))?;
     conn.execute(
-        "INSERT INTO events (plan_id, kind, wall_time, orig_wall_time, flexibility, slide_window_min, channel, message)
-         VALUES (?1, 'nudge', ?2, ?2, 'drop', 0, ?3, ?4)",
+        "INSERT INTO events (plan_id, kind, wall_time, orig_wall_time, flexibility, slide_window_min, channel, message, origin)
+         VALUES (?1, 'nudge', ?2, ?2, 'drop', 0, ?3, ?4, 'agent')",
         (plan_id, &wall, channel, text),
     )
     .map_err(|e| ToolError::internal(e.to_string()))?;

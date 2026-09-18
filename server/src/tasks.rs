@@ -386,8 +386,10 @@ pub fn create(
     conn.execute(
         "INSERT INTO tasks
             (user_id, title, description, notes, source, state, parent_id, duration_min,
-             duration_source, is_now, due_at, url, external_id, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14)",
+             duration_source, is_now, due_at, url, external_id, created_at, updated_at,
+             completed_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14,
+                 CASE WHEN ?6 = 'done' THEN ?14 END)",
         rusqlite::params![
             user_id,
             &title,
@@ -443,8 +445,8 @@ pub fn list(conn: &Connection, user_id: i64) -> rusqlite::Result<Vec<TaskNode>> 
         .collect()
 }
 
-/// How many of the user's tasks and steps last moved to done inside the
-/// half-open span; `updated_at` is RFC3339 UTC, which orders lexically.
+/// How many of the user's tasks and steps were finished inside the half-open
+/// span; `completed_at` is RFC3339 UTC, which orders lexically.
 pub fn done_between(
     conn: &Connection,
     user_id: i64,
@@ -453,7 +455,7 @@ pub fn done_between(
 ) -> rusqlite::Result<i64> {
     conn.query_row(
         "SELECT COUNT(*) FROM tasks
-         WHERE user_id = ?1 AND state = 'done' AND updated_at >= ?2 AND updated_at < ?3",
+         WHERE user_id = ?1 AND state = 'done' AND completed_at >= ?2 AND completed_at < ?3",
         (user_id, from.to_string(), to.to_string()),
         |r| r.get(0),
     )
@@ -749,7 +751,9 @@ pub struct Updated {
 
 fn set_state(conn: &Connection, task_id: i64, state: &str) -> rusqlite::Result<()> {
     conn.execute(
-        "UPDATE tasks SET state = ?1, updated_at = ?2 WHERE id = ?3",
+        "UPDATE tasks SET state = ?1, updated_at = ?2,
+             completed_at = CASE WHEN ?1 = 'done' THEN COALESCE(completed_at, ?2) END
+         WHERE id = ?3",
         (state, now(), task_id),
     )?;
     Ok(())
@@ -769,7 +773,8 @@ fn cascade(
             conn.query_row("SELECT state FROM tasks WHERE id = ?1", [task_id], |r| r.get(0))?;
         if state == "done" || state == "dropped" {
             conn.execute(
-                "UPDATE tasks SET state = ?1, updated_at = ?2
+                "UPDATE tasks SET state = ?1, updated_at = ?2,
+                     completed_at = CASE WHEN ?1 = 'done' THEN COALESCE(completed_at, ?2) END
                  WHERE parent_id = ?3 AND state != 'dropped' AND state != ?1",
                 (&state, now(), task_id),
             )?;
@@ -887,7 +892,9 @@ pub fn update(
             due_at = ?9,
             url = COALESCE(?10, url),
             external_id = ?11,
-            updated_at = ?12
+            updated_at = ?12,
+            completed_at = CASE WHEN COALESCE(?3, state) = 'done'
+                THEN COALESCE(completed_at, ?12) END
          WHERE id = ?13",
         rusqlite::params![
             &title,
@@ -1026,6 +1033,41 @@ mod tests {
         assert_eq!(after.task.updated_at, before.task.updated_at);
         let ids = |n: &TaskNode| n.children.iter().map(|c| c.id).collect::<Vec<_>>();
         assert_eq!(ids(&after), ids(&before));
+    }
+
+    #[test]
+    fn completion_time_follows_the_state_in_both_directions() {
+        let (conn, uid) = db_with_user();
+        let id = task(&conn, uid, "write it up", None);
+        let completed = |id: i64| -> Option<String> {
+            conn.query_row("SELECT completed_at FROM tasks WHERE id = ?1", [id], |r| r.get(0))
+                .unwrap()
+        };
+        assert!(completed(id).is_none());
+        update(&conn, uid, id, TaskPatch { state: Some("done".into()), ..Default::default() })
+            .unwrap();
+        let first = completed(id).expect("done carries a completion time");
+        update(&conn, uid, id, TaskPatch { notes: Some("later".into()), ..Default::default() })
+            .unwrap();
+        assert_eq!(completed(id).as_deref(), Some(first.as_str()), "an unrelated write keeps it");
+        update(&conn, uid, id, TaskPatch { state: Some("open".into()), ..Default::default() })
+            .unwrap();
+        assert!(completed(id).is_none(), "reopening clears it");
+    }
+
+    #[test]
+    fn done_between_counts_by_completion_time() {
+        let (conn, uid) = db_with_user();
+        let id = task(&conn, uid, "write it up", None);
+        update(&conn, uid, id, TaskPatch { state: Some("done".into()), ..Default::default() })
+            .unwrap();
+        let now = jiff::Timestamp::now();
+        let hour = jiff::Span::new().hours(1);
+        assert_eq!(done_between(&conn, uid, now.checked_sub(hour).unwrap(), now.checked_add(hour).unwrap()).unwrap(), 1);
+        assert_eq!(
+            done_between(&conn, uid, now.checked_add(hour).unwrap(), now.checked_add(hour).unwrap().checked_add(hour).unwrap()).unwrap(),
+            0
+        );
     }
 
     #[test]
