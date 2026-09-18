@@ -56,6 +56,16 @@ pub fn run_for_user(
         }
         let tmpl = crate::templates::Template::load(deps.config_dir, username, &ucfg.template)?;
         crate::plan::generate(&conn, user_id, &tmpl, date)?;
+        if let Err(e) = crate::allocate::run(&conn, user_id, local.time_zone(), date, now) {
+            let _ = crate::log::record_throttled(
+                &conn,
+                Some(user_id),
+                "allocate_error",
+                &e.to_string(),
+                now,
+                crate::log::ERROR_LOG_WINDOW_MINS,
+            );
+        }
     }
     let content = match crate::agent::run_session(
         deps,

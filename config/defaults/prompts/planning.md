@@ -2,6 +2,8 @@ Nightly planning session. The day plan for today has already been generated
 from the template.
 
 1. Look at today's plan and the open tasks in the standing context.
+   Automatic task blocks are already laid into the day's free time; drop the
+   ones that do not belong and call plan_auto again if free time changed.
 2. Adjust where it clearly helps: slide or drop flexible events, insert an
    event for anything urgent (schedule_insert), keeping the day realistic —
    an emptier plan that happens beats a full one that doesn't.
