@@ -78,7 +78,6 @@ config/
   users/
     <username>/
       user.toml                     # per-user overrides, merged over defaults
-                                    # (incl. ntfy_topic, set from Settings)
       templates/
         <name>.toml                 # per-user template overrides
 ```
@@ -101,7 +100,6 @@ write, so a hand-edited file and a client-side change are the same thing.
     "nightly_time": "03:00", "template": "default",
     "show_arc_between_sessions": true, "counter": "remaining",
     "category": "member", "nightly_enabled": true, "checkins_enabled": true,
-    "ntfy_topic": "note-aki", "ntfy_enabled": true,
     "templates": ["default", "deep-work"],
     "timezones": ["Africa/Abidjan", "…"]
   }
@@ -110,12 +108,9 @@ write, so a hand-edited file and a client-side change are the same thing.
   `templates` is every `.toml` stem under `defaults/templates/` plus the user's
   own `templates/`; `timezones` is the bundled IANA database.
 
-  `ntfy_topic` is the topic the ntfy channel delivers to (see "ntfy") and
-  `ntfy_enabled` says whether that channel is configured at all.
-
 - `PUT /api/settings` takes any subset of `display_name`, `timezone`,
   `nightly_time`, `template`, `show_arc_between_sessions`, `counter`,
-  `nightly_enabled`, `checkins_enabled` and `ntfy_topic`, and returns the
+  `nightly_enabled` and `checkins_enabled`, and returns the
   merged settings without the two lists. `category` is read-only here — it belongs to the
   account, not the settings file. A rejected field is a
   `400` whose `{"error": …}` names it and leaves the file untouched:
@@ -123,8 +118,7 @@ write, so a hand-edited file and a client-side change are the same thing.
   must be an IANA name; `nightly_time` must be a zero-padded 24-hour `HH:MM`;
   `template` must be one of `templates`; `show_arc_between_sessions` is a bool;
   `counter` must be `remaining` or `elapsed`; the two feature toggles are
-  bools. `ntfy_topic` is the exception to the `400`: an invalid topic is a
-  `422`, and an empty string clears the override rather than setting one. The write replaces the user file through a temp file and a rename, so
+  bools. The write replaces the user file through a temp file and a rename, so
   a crash mid-write cannot leave a half-written config. A toggle the user has
   never set stays out of the file and keeps following its category default.
 
@@ -477,8 +471,8 @@ plainer day, never a missing one.
 ## Channels & delivery
 
 When an event fires, the server walks a delivery ladder: connected WebSocket
-clients first, then Web Push, then ntfy. The first channel that accepts the
-message wins; if none does, the day is plainer, never an error.
+clients first, then Web Push. The first channel that accepts the message wins;
+if none does, the day is plainer, never an error.
 
 ### In-app delivery
 
@@ -492,8 +486,8 @@ receives one JSON frame per delivery:
 
 `conversation_id` is the thread a check-in opened (see below) and null on
 every other event. The web client switches to that conversation when the frame
-arrives; a push notification or an ntfy click carries the same thread as the
-deep link `/#/chat/<id>`.
+arrives; a push notification carries the same thread as the deep link
+`/#/chat/<id>`.
 
 A talk session in flight pushes its progress to the same sockets, so the client
 can show what the agent is doing while it works:
@@ -551,9 +545,8 @@ subject = "mailto:admin@example.com"
 `vapid_pem_file` resolves against the server's working directory, like
 `data_dir`; `subject` must be a `mailto:` or `https://` contact URL, and an
 unreadable key or bad subject fails startup rather than the first delivery.
-Without this section and without `[channels.ntfy]`, only in-app WebSocket
-delivery is active and every event for a disconnected user is logged as
-`delivery_degraded`.
+Without this section, only in-app WebSocket delivery is active and every event
+for a disconnected user is logged as `delivery_degraded`.
 
 Subscription routes — all cookie-authenticated, the public-key route included:
 
@@ -582,40 +575,7 @@ Payloads are encrypted (`aes128gcm`) and VAPID-signed; the plaintext is
 event opened a thread, which the service worker opens on click. Endpoints the
 push service reports gone (404/410) are pruned automatically.
 
-### ntfy
-
-An [ntfy](https://ntfy.sh) server delivers to its own desktop and phone clients
-over plain HTTP — the way to reach a device from an instance served over
-`http://`, where browsers refuse the service worker Web Push needs. Point the
-channel at one:
-
-```toml
-[channels.ntfy]
-base_url = "http://10.0.0.1:2586"
-# token_file = "config/ntfy.token"   # bearer token, for a server that needs one
-# topic_prefix = "note-"             # the default
-```
-
-`base_url` is required; without the section the channel is not built. A
-configured `token_file` that is missing or blank fails startup rather than the
-first delivery, like a provider's `api_key_file`.
-
-Each user has a topic: `ntfy_topic` in their `user.toml`, or
-`<topic_prefix><username>` when they have not set one. A topic is 1 to 64
-characters of letters, digits, `_` or `-`, and may not be another account's
-default topic (`<topic_prefix><their username>`) — Settings answers `422`.
-Subscribing to the topic in an ntfy client is all a device needs.
-
-A delivery is a `POST {base_url}` carrying ntfy's JSON publish form: `topic`,
-`title`, `message`, `tags: ["bell"]`, `click` (the instance's
-`public_base_url`, with `/#/chat/<id>` appended for a check-in) and
-`priority` — 2 for a low-urgency message, 3 for normal,
-5 for a check-in — plus `Authorization: Bearer` when a token is configured. The
-JSON form rather than the header form because a title carries the event's own
-words and an HTTP header value cannot hold them. Anything but a 2xx, and any
-transport error, falls through the ladder as `delivery_degraded`.
-
-`POST /api/notify/test` (session cookie) walks the same ladder with a stand-in
+`POST /api/notify/test` (session cookie) walks the ladder with a stand-in
 message and answers `{"via": "<channel>"}`, or `502` `{"error": …}` when no
 channel could take it. Settings offers it as "Send test".
 
@@ -623,7 +583,7 @@ channel could take it. Settings offers it as "Send test".
 
 Every outcome lands in `event_log`, readable at `GET /api/admin/log`:
 
-- `delivery_ok` — `event <id> via ws`, `via webpush` or `via ntfy`; a
+- `delivery_ok` — `event <id> via ws` or `via webpush`; a
   `POST /api/notify/test` logs the same row as `test via <channel>`.
 - `delivery_degraded` — no channel could reach the user; the detail carries
   each channel's reason, or `no channels configured`.

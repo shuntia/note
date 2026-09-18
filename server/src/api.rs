@@ -1077,21 +1077,10 @@ struct SettingsPatch {
     counter: Option<String>,
     nightly_enabled: Option<bool>,
     checkins_enabled: Option<bool>,
-    ntfy_topic: Option<String>,
     alerts: Option<Vec<AlertPatch>>,
 }
 
-/// The prefix the user's default topic is built from, whether or not the
-/// channel is configured, so Settings can always name the topic to subscribe to.
-fn ntfy_topic_prefix(state: &AppState) -> &str {
-    state
-        .ntfy_topic_prefix
-        .as_deref()
-        .unwrap_or(crate::config::DEFAULT_NTFY_TOPIC_PREFIX)
-}
-
 fn settings_body(
-    state: &AppState,
     cfg: &crate::config::UserConfig,
     user: &CurrentUser,
     schedule: Vec<crate::templates::ScheduleRow>,
@@ -1108,8 +1097,6 @@ fn settings_body(
         "category": category,
         "nightly_enabled": features.nightly,
         "checkins_enabled": features.checkins,
-        "ntfy_enabled": state.ntfy_topic_prefix.is_some(),
-        "ntfy_topic": cfg.ntfy_topic_for(ntfy_topic_prefix(state), &user.username),
         "schedule": schedule,
     })
 }
@@ -1126,38 +1113,9 @@ fn schedule_rows(
         .unwrap_or_default()
 }
 
-/// A topic the server would deliver another account's messages to. Their
-/// default topic is derived from their username, so claiming it would subscribe
-/// this user to their notifications.
-fn is_another_users_topic(
-    conn: &rusqlite::Connection,
-    prefix: &str,
-    username: &str,
-    topic: &str,
-) -> bool {
-    let Some(other) = topic.strip_prefix(prefix) else {
-        return false;
-    };
-    if other == username {
-        return false;
-    }
-    conn.query_row("SELECT 1 FROM users WHERE username = ?1", [other], |_| Ok(()))
-        .optional()
-        .unwrap_or(None)
-        .is_some()
-}
-
 fn invalid_field(field: &str, requirement: &str) -> axum::response::Response {
     (
         StatusCode::BAD_REQUEST,
-        Json(serde_json::json!({ "error": format!("{field} {requirement}") })),
-    )
-        .into_response()
-}
-
-fn unprocessable_field(field: &str, requirement: &str) -> axum::response::Response {
-    (
-        StatusCode::UNPROCESSABLE_ENTITY,
         Json(serde_json::json!({ "error": format!("{field} {requirement}") })),
     )
         .into_response()
@@ -1177,7 +1135,7 @@ async fn settings_get(user: CurrentUser, State(state): State<AppState>) -> impl 
     zones.sort_unstable();
     let templates = crate::templates::available(&state.config_dir, &user.username);
     let schedule = schedule_rows(&state, &user.username, &cfg.template);
-    let mut body = settings_body(&state, &cfg, &user, schedule);
+    let mut body = settings_body(&cfg, &user, schedule);
     body["templates"] = serde_json::json!(templates);
     body["timezones"] = serde_json::json!(zones);
     Json(body).into_response()
@@ -1186,17 +1144,17 @@ async fn settings_get(user: CurrentUser, State(state): State<AppState>) -> impl 
 /// Merges the supplied subset into the effective values and rewrites the user's
 /// file, rejecting the first invalid field without touching disk. Bell toggles
 /// apply to the template the request leaves selected, and land in the user's own
-/// copy of it. The read,
-/// merge and write run under the DB lock: settings writes are rare, and the
-/// guard is the cheapest serializer that stops two concurrent PUTs from each
-/// writing a file built from the values they read before the other landed.
+/// copy of it. The read, merge and write run under the DB lock: settings writes
+/// are rare, and the guard is the cheapest serializer that stops two concurrent
+/// PUTs from each writing a file built from the values they read before the
+/// other landed.
 async fn settings_put(
     user: CurrentUser,
     State(state): State<AppState>,
     Json(req): Json<SettingsPatch>,
 ) -> impl IntoResponse {
     let templates = crate::templates::available(&state.config_dir, &user.username);
-    let conn = state.db();
+    let _guard = state.db();
     let mut cfg = match crate::config::UserConfig::load(&state.config_dir, &user.username) {
         Ok(c) => c,
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
@@ -1244,21 +1202,6 @@ async fn settings_put(
     if let Some(on) = req.checkins_enabled {
         cfg.checkins_enabled = Some(on);
     }
-    if let Some(topic) = req.ntfy_topic {
-        let topic = topic.trim();
-        if topic.is_empty() {
-            cfg.ntfy_topic = None;
-        } else if !crate::channels::ntfy::valid_topic(topic) {
-            return unprocessable_field(
-                "ntfy_topic",
-                "must be 1 to 64 characters of letters, digits, _ or -",
-            );
-        } else if is_another_users_topic(&conn, ntfy_topic_prefix(&state), &user.username, topic) {
-            return unprocessable_field("ntfy_topic", "is another account's topic");
-        } else {
-            cfg.ntfy_topic = Some(topic.to_string());
-        }
-    }
     if let Some(alerts) = req.alerts {
         let changes: Vec<(usize, bool)> = alerts.iter().map(|a| (a.index, a.alert)).collect();
         if let Err(e) =
@@ -1269,7 +1212,7 @@ async fn settings_put(
     }
     let schedule = schedule_rows(&state, &user.username, &cfg.template);
     match cfg.save(&state.config_dir, &user.username) {
-        Ok(()) => Json(settings_body(&state, &cfg, &user, schedule)).into_response(),
+        Ok(()) => Json(settings_body(&cfg, &user, schedule)).into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }

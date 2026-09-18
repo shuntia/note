@@ -1,5 +1,4 @@
 pub mod mock;
-pub mod ntfy;
 pub mod webpush;
 pub mod ws;
 
@@ -247,10 +246,8 @@ mod tests {
         let (db, _uid) = env();
         let ws = Arc::new(MockChannel::new("ws"));
         let webpush = Arc::new(MockChannel::new("webpush"));
-        let ntfy = Arc::new(MockChannel::new("ntfy"));
         ws.set_fail(true);
-        webpush.set_fail(true);
-        let ladder: Vec<Arc<dyn Channel>> = vec![ws, webpush, ntfy.clone()];
+        let ladder: Vec<Arc<dyn Channel>> = vec![ws, webpush.clone()];
         let msg = OutboundMessage {
             title: "Note".into(),
             body: "Test notification".into(),
@@ -258,10 +255,10 @@ mod tests {
             event_id: None,
             conversation_id: None,
         };
-        assert_eq!(deliver_via(&db, &ladder, 1, "aki", &msg), Some("ntfy"));
-        assert_eq!(ntfy.seen().len(), 1);
+        assert_eq!(deliver_via(&db, &ladder, 1, "aki", &msg), Some("webpush"));
+        assert_eq!(webpush.seen().len(), 1);
 
-        ntfy.set_fail(true);
+        webpush.set_fail(true);
         assert_eq!(deliver_via(&db, &ladder, 1, "aki", &msg), None);
         let conn = db.lock().unwrap();
         let detail: String = conn
@@ -269,7 +266,7 @@ mod tests {
                 r.get(0)
             })
             .unwrap();
-        assert!(detail.contains("ntfy"), "unexpected detail: {detail}");
+        assert!(detail.contains("webpush"), "unexpected detail: {detail}");
     }
 
     #[test]

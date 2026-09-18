@@ -110,27 +110,10 @@ pub struct WebPushSettings {
     pub subject: String,
 }
 
-pub const DEFAULT_NTFY_TOPIC_PREFIX: &str = "note-";
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct NtfySettings {
-    pub base_url: String,
-    /// Bearer token for an authenticated ntfy server; empty means none.
-    #[serde(default)]
-    pub token_file: PathBuf,
-    #[serde(default = "default_topic_prefix")]
-    pub topic_prefix: String,
-}
-
-fn default_topic_prefix() -> String {
-    DEFAULT_NTFY_TOPIC_PREFIX.into()
-}
-
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct ChannelsConfig {
     pub webpush: Option<WebPushSettings>,
-    pub ntfy: Option<NtfySettings>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -199,8 +182,6 @@ pub struct UserConfig {
     pub nightly_enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkins_enabled: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ntfy_topic: Option<String>,
 }
 
 fn default_nightly_time() -> String {
@@ -223,15 +204,6 @@ impl UserConfig {
         Features {
             nightly: self.nightly_enabled.unwrap_or(default.nightly),
             checkins: self.checkins_enabled.unwrap_or(default.checkins),
-        }
-    }
-
-    /// The user's own topic where they set a non-blank one, else the server's
-    /// prefix and their username.
-    pub fn ntfy_topic_for(&self, prefix: &str, username: &str) -> String {
-        match self.ntfy_topic.as_deref().map(str::trim) {
-            Some(topic) if !topic.is_empty() => topic.to_string(),
-            _ => format!("{prefix}{username}"),
         }
     }
 
@@ -383,6 +355,17 @@ mod tests {
         assert!(ServerConfig::load(tmp.path()).unwrap().channels.webpush.is_none());
     }
 
+    /// An operator's file outlives the server that read it, so a section this
+    /// build knows nothing about is ignored rather than fatal.
+    #[test]
+    fn an_unknown_section_does_not_fail_the_load() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), "server.toml", concat!(
+            "bind_addr = \"127.0.0.1:0\"\npublic_base_url = \"http://x\"\ndata_dir = \"data\"\n",
+            "[channels.smoke]\nbase_url = \"http://10.0.0.1:2586\"\n"));
+        assert!(ServerConfig::load(tmp.path()).unwrap().channels.webpush.is_none());
+    }
+
     #[test]
     fn the_idle_summary_threshold_never_outlives_the_prompt_cache() {
         let tmp = tempfile::tempdir().unwrap();
@@ -438,56 +421,6 @@ mod tests {
         let admin = ServerConfig::load(tmp.path()).unwrap().admin;
         assert_eq!(admin.rp_id.unwrap(), "note.example.net");
         assert_eq!(admin.rp_origin.unwrap(), "https://note.example.net");
-    }
-
-    #[test]
-    fn ntfy_section_parses_with_defaults_and_is_absent_by_default() {
-        let tmp = tempfile::tempdir().unwrap();
-        let base = "bind_addr = \"127.0.0.1:0\"\npublic_base_url = \"http://x\"\ndata_dir = \"data\"\n";
-        write(tmp.path(), "server.toml", base);
-        assert!(ServerConfig::load(tmp.path()).unwrap().channels.ntfy.is_none());
-
-        write(tmp.path(), "server.toml",
-            &format!("{base}[channels.ntfy]\nbase_url = \"http://10.0.0.1:2586\"\n"));
-        let ntfy = ServerConfig::load(tmp.path()).unwrap().channels.ntfy.unwrap();
-        assert_eq!(ntfy.base_url, "http://10.0.0.1:2586");
-        assert_eq!(ntfy.topic_prefix, DEFAULT_NTFY_TOPIC_PREFIX);
-        assert!(ntfy.token_file.as_os_str().is_empty());
-
-        write(tmp.path(), "server.toml", &format!(
-            "{base}[channels.ntfy]\nbase_url = \"http://x:2586\"\ntoken_file = \"/run/secrets/ntfy\"\ntopic_prefix = \"plan-\"\n"));
-        let ntfy = ServerConfig::load(tmp.path()).unwrap().channels.ntfy.unwrap();
-        assert_eq!(ntfy.topic_prefix, "plan-");
-        assert_eq!(ntfy.token_file, PathBuf::from("/run/secrets/ntfy"));
-    }
-
-    #[test]
-    fn ntfy_topic_falls_back_to_the_prefixed_username() {
-        let tmp = tempfile::tempdir().unwrap();
-        write(tmp.path(), "defaults/user.toml",
-            "display_name = \"X\"\ntimezone = \"UTC\"\ntemplate = \"default\"\n");
-        let cfg = UserConfig::load(tmp.path(), "aki").unwrap();
-        assert!(cfg.ntfy_topic.is_none());
-        assert_eq!(cfg.ntfy_topic_for("note-", "aki"), "note-aki");
-
-        write(tmp.path(), "users/aki/user.toml", "ntfy_topic = \"my-desk\"\n");
-        let cfg = UserConfig::load(tmp.path(), "aki").unwrap();
-        assert_eq!(cfg.ntfy_topic_for("note-", "aki"), "my-desk");
-
-        write(tmp.path(), "users/aki/user.toml", "ntfy_topic = \"\"\n");
-        let cfg = UserConfig::load(tmp.path(), "aki").unwrap();
-        assert_eq!(cfg.ntfy_topic_for("note-", "aki"), "note-aki");
-    }
-
-    #[test]
-    fn an_unset_ntfy_topic_stays_out_of_the_saved_file() {
-        let tmp = tempfile::tempdir().unwrap();
-        write(tmp.path(), "defaults/user.toml",
-            "display_name = \"X\"\ntimezone = \"UTC\"\ntemplate = \"default\"\n");
-        let cfg = UserConfig::load(tmp.path(), "aki").unwrap();
-        cfg.save(tmp.path(), "aki").unwrap();
-        let raw = std::fs::read_to_string(tmp.path().join("users/aki/user.toml")).unwrap();
-        assert!(!raw.contains("ntfy_topic"), "unexpected file: {raw}");
     }
 
     #[test]

@@ -106,9 +106,6 @@ pub struct AppState {
     pub llm: Arc<dyn LLMProvider>,
     pub embeddings: Option<Arc<dyn EmbeddingsProvider>>,
     pub vapid_public_key: Option<String>,
-    /// Set when the ntfy channel is configured; also the prefix its default
-    /// topics are built from.
-    pub ntfy_topic_prefix: Option<String>,
     pub hub: Arc<crate::channels::ws::ClientHub>,
     pub channels: Vec<Arc<dyn crate::channels::Channel>>,
     pub secure_cookies: bool,
@@ -144,7 +141,6 @@ impl AppState {
             llm: Arc::new(crate::providers::mock::MockLLM::empty()),
             embeddings: None,
             vapid_public_key: None,
-            ntfy_topic_prefix: None,
             hub,
             channels: vec![ws],
             secure_cookies: false,
@@ -210,16 +206,6 @@ impl AppState {
     ) -> Self {
         self.channels.push(Arc::new(ch));
         self.vapid_public_key = Some(public_key);
-        self
-    }
-
-    pub fn with_ntfy(
-        mut self,
-        ch: crate::channels::ntfy::NtfyChannel,
-        topic_prefix: String,
-    ) -> Self {
-        self.channels.push(Arc::new(ch));
-        self.ntfy_topic_prefix = Some(topic_prefix);
         self
     }
 
