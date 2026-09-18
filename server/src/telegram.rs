@@ -1,6 +1,10 @@
+use crate::channels::telegram::Update;
+use crate::talk::{TurnError, Via};
+use crate::AppState;
 use anyhow::Result;
 use argon2::password_hash::rand_core::{OsRng, RngCore};
 use rusqlite::{Connection, OptionalExtension};
+use std::collections::{HashMap, HashSet};
 
 /// Unambiguous when read off a screen and typed into a phone: no O/0, no I/1.
 const CODE_ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -113,6 +117,180 @@ pub fn thread_for(conn: &Connection, user_id: i64, cutoff: jiff::Timestamp) -> R
             |r| r.get(0),
         )
         .optional()?)
+}
+
+/// How long the loop waits after a failed poll, and the ceiling it doubles to.
+const MIN_BACKOFF_SECS: u64 = 5;
+const MAX_BACKOFF_SECS: u64 = 60;
+/// How often one unlinked chat is told the bot is not for it.
+const NOTICE_MINS: i64 = 60;
+
+const PRIVATE: &str = "This bot is private. Link it from Note's settings.";
+const FRESH: &str = "Fresh start.";
+const CAPPED: &str = "You've used today's sessions.";
+const BUSY: &str = "Still on your last message.";
+const UNREACHABLE: &str = "Couldn't reach Note right now.";
+
+/// What the loop remembers between updates: nothing a restart needs back.
+#[derive(Default)]
+pub struct Chats {
+    told: HashMap<i64, jiff::Timestamp>,
+    fresh: HashSet<i64>,
+    busy: HashSet<i64>,
+}
+
+/// Long-polls Telegram for as long as the server runs. A failed poll backs off
+/// rather than spinning, and the cursor is persisted after every batch, so a
+/// restart resumes where the last one stopped.
+pub fn spawn(state: AppState) {
+    if state.telegram.is_none() {
+        return;
+    }
+    tokio::spawn(async move {
+        let mut chats = Chats::default();
+        let mut backoff = MIN_BACKOFF_SECS;
+        loop {
+            match poll_once(&state, &mut chats).await {
+                Ok(()) => backoff = MIN_BACKOFF_SECS,
+                Err(e) => {
+                    let now = jiff::Timestamp::now();
+                    {
+                        let conn = state.db();
+                        let _ = crate::log::record_throttled(
+                            &conn,
+                            None,
+                            "telegram_error",
+                            &e.to_string(),
+                            now,
+                            crate::log::ERROR_LOG_WINDOW_MINS,
+                        );
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
+                    backoff = (backoff * 2).min(MAX_BACKOFF_SECS);
+                }
+            }
+        }
+    });
+}
+
+/// One batch: every text message answered, then the cursor moved past all of
+/// them. An update the loop dies on is replayed, never silently dropped.
+pub async fn poll_once(state: &AppState, chats: &mut Chats) -> Result<()> {
+    let Some(ch) = state.telegram.clone() else { return Ok(()) };
+    let offset = {
+        let conn = state.db();
+        match cursor(&conn)? {
+            0 => 0,
+            last => last + 1,
+        }
+    };
+    let polling = ch.clone();
+    let batch = tokio::task::spawn_blocking(move || polling.get_updates(offset)).await??;
+    for update in &batch.messages {
+        receive(state, chats, update).await;
+    }
+    if let Some(last) = batch.last_update_id {
+        let conn = state.db();
+        set_cursor(&conn, last)?;
+    }
+    Ok(())
+}
+
+/// One message from one chat, answered in the chat it came from.
+pub async fn receive(state: &AppState, chats: &mut Chats, update: &Update) {
+    let now = jiff::Timestamp::now();
+    let link = {
+        let conn = state.db();
+        link_for_chat(&conn, update.chat_id).unwrap_or(None)
+    };
+    let Some(link) = link else {
+        return offer_linking(state, chats, update, now).await;
+    };
+    let text = update.text.trim();
+    if text == "/new" {
+        chats.fresh.insert(update.chat_id);
+        return say(state, update.chat_id, FRESH).await;
+    }
+    let conversation = if chats.fresh.remove(&update.chat_id) {
+        None
+    } else {
+        let conn = state.db();
+        let cutoff = now - jiff::Span::new().minutes(state.idle_summary_min as i64);
+        thread_for(&conn, link.user_id, cutoff).unwrap_or(None)
+    };
+    match crate::talk::run_turn(state, link.user_id, &link.username, conversation, text, Via::Telegram)
+        .await
+    {
+        Ok(turn) => {
+            chats.busy.remove(&update.chat_id);
+            say(state, update.chat_id, &turn.reply).await;
+        }
+        Err(TurnError::DailyCap) => say(state, update.chat_id, CAPPED).await,
+        Err(TurnError::Busy(_)) => {
+            if chats.busy.insert(update.chat_id) {
+                say(state, update.chat_id, BUSY).await;
+            }
+        }
+        Err(TurnError::Blank) => {}
+        Err(_) => say(state, update.chat_id, UNREACHABLE).await,
+    }
+}
+
+/// A chat Note does not know: either it carries a live code, or it is told
+/// where to get one — once an hour, so a stranger cannot be answered in a loop.
+async fn offer_linking(
+    state: &AppState,
+    chats: &mut Chats,
+    update: &Update,
+    now: jiff::Timestamp,
+) {
+    if let Some(code) = update.text.trim().strip_prefix("/start ") {
+        let linked = {
+            let conn = state.db();
+            let code = code.trim().to_uppercase();
+            redeem(&conn, &code, update.chat_id, &update.handle, now)
+                .unwrap_or(None)
+                .and_then(|_| link_for_chat(&conn, update.chat_id).unwrap_or(None))
+        };
+        if let Some(link) = linked {
+            chats.told.remove(&update.chat_id);
+            let name = crate::config::UserConfig::load(&state.config_dir, &link.username)
+                .map(|cfg| cfg.display_name)
+                .unwrap_or_else(|_| link.username.clone());
+            return say(state, update.chat_id, &format!("Linked to Note as {name}")).await;
+        }
+    }
+    let quiet = chats
+        .told
+        .get(&update.chat_id)
+        .is_some_and(|told| *told + jiff::Span::new().minutes(NOTICE_MINS) > now);
+    if quiet {
+        return;
+    }
+    chats.told.insert(update.chat_id, now);
+    say(state, update.chat_id, PRIVATE).await;
+}
+
+/// A line Note says on its own account, rather than a reply a session produced.
+/// A chat that will not take it is logged, never retried.
+async fn say(state: &AppState, chat_id: i64, text: &str) {
+    let Some(ch) = state.telegram.clone() else { return };
+    let text = text.to_string();
+    let db = state.db.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        if let Err(e) = ch.send_message(chat_id, &text) {
+            let conn = crate::db_guard(&db);
+            let _ = crate::log::record_throttled(
+                &conn,
+                None,
+                "telegram_error",
+                &e.to_string(),
+                jiff::Timestamp::now(),
+                crate::log::ERROR_LOG_WINDOW_MINS,
+            );
+        }
+    })
+    .await;
 }
 
 #[cfg(test)]

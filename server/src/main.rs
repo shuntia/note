@@ -146,6 +146,7 @@ async fn main() -> anyhow::Result<()> {
         state = state.with_voice(ch);
     }
     runner::spawn(state.clone());
+    note_server::telegram::spawn(state.clone());
     nightly::spawn(state.clone());
     summaries::spawn(state.clone());
 

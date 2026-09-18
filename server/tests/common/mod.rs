@@ -106,6 +106,120 @@ pub fn one_shot(
     (base, rx)
 }
 
+#[allow(dead_code)] // only the telegram suite stands up a fake Bot API
+pub const GET_ME: &str = r#"{"ok":true,"result":{"id":7,"username":"note_bot"}}"#;
+
+#[allow(dead_code)] // only the telegram suite stands up a fake Bot API
+pub const SENT: &str = r#"{"ok":true,"result":{"message_id":1}}"#;
+
+/// A stand-in Bot API: every request waits for the body the test has queued and
+/// is handed back for inspection, so a suite drives the wire in both directions.
+#[allow(dead_code)] // only the telegram suite stands up a fake Bot API
+pub struct Fake {
+    pub base: String,
+    replies: std::sync::mpsc::Sender<String>,
+    requests: std::sync::mpsc::Receiver<String>,
+}
+
+#[allow(dead_code)] // only the telegram suite stands up a fake Bot API
+impl Fake {
+    /// Queued before the call that consumes it; the fake holds the connection
+    /// open until one is there.
+    pub fn answer(&self, body: &str) {
+        self.replies.send(body.to_string()).unwrap();
+    }
+
+    pub fn took(&self) -> String {
+        self.requests.recv_timeout(std::time::Duration::from_secs(5)).expect("a request")
+    }
+
+    /// The method and JSON body of the next request.
+    pub fn call(&self) -> (String, serde_json::Value) {
+        let raw = self.took();
+        let path = raw.split_whitespace().nth(1).unwrap_or_default().to_string();
+        let method = path.rsplit('/').next().unwrap_or_default().to_string();
+        let (_, body) = raw.split_once("\r\n\r\n").expect("a request with a body");
+        (method, serde_json::from_str(body).unwrap_or_else(|e| panic!("body {body:?}: {e}")))
+    }
+
+    pub fn silent(&self) -> bool {
+        self.requests.recv_timeout(std::time::Duration::from_millis(250)).is_err()
+    }
+}
+
+#[allow(dead_code)] // only the telegram suite stands up a fake Bot API
+pub fn fake_telegram() -> Fake {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let (replies, next) = std::sync::mpsc::channel::<String>();
+    let (seen, requests) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || loop {
+        let Ok((mut sock, _)) = listener.accept() else { return };
+        let mut raw = Vec::new();
+        let mut buf = [0u8; 1024];
+        loop {
+            let Ok(n) = sock.read(&mut buf) else { return };
+            raw.extend_from_slice(&buf[..n]);
+            let text = String::from_utf8_lossy(&raw).to_string();
+            let Some(head_end) = text.find("\r\n\r\n") else {
+                if n == 0 {
+                    break;
+                }
+                continue;
+            };
+            let want: usize = text[..head_end]
+                .lines()
+                .find_map(|l| {
+                    l.strip_prefix("content-length: ").or(l.strip_prefix("Content-Length: "))
+                })
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(0);
+            if raw.len() >= head_end + 4 + want || n == 0 {
+                break;
+            }
+        }
+        let Ok(body) = next.recv() else { return };
+        let _ = sock.write_all(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .as_bytes(),
+        );
+        let _ = seen.send(String::from_utf8_lossy(&raw).to_string());
+    });
+    Fake { base, replies, requests }
+}
+
+/// The fake must already hold an answer for `getMe`, which boot spends.
+#[allow(dead_code)] // only the telegram suite stands up a fake Bot API
+pub async fn app_with_telegram(
+    llm: Arc<dyn LLMProvider>,
+    base_url: &str,
+) -> (axum::Router, String, AppState, TempDir) {
+    let cfg = config_dir();
+    let dir = cfg.path().to_path_buf();
+    let conn = db::open_memory().unwrap();
+    auth::create_user(&conn, "aki", "pw", true).unwrap();
+    let token_file = dir.join("telegram.token");
+    std::fs::write(&token_file, "bot:secret").unwrap();
+    let mut state = AppState::new(conn, dir.clone(), dir).with_providers(llm, None);
+    let settings = note_server::config::TelegramSettings {
+        token_file,
+        base_url: base_url.into(),
+    };
+    let ch = match note_server::channels::telegram::TelegramChannel::new(state.db.clone(), &settings)
+    {
+        Ok(ch) => ch,
+        Err(e) => panic!("the telegram channel refused to boot: {e}"),
+    };
+    state = state.with_telegram(ch);
+    let app = api::router(state.clone());
+    let cookie = login(&app, "aki", "pw").await;
+    (app, cookie, state, cfg)
+}
+
 pub async fn login(app: &axum::Router, username: &str, password: &str) -> String {
     let res = app
         .clone()
