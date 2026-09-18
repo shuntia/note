@@ -195,6 +195,7 @@ pub fn spawn(state: crate::AppState) {
                         embeddings: st.embeddings.as_deref(),
                         task_scope: None,
                         inbox_source: None,
+                        memory_source: None,
                         token_id: None,
                         thread_note: None,
                     };
@@ -270,6 +271,7 @@ mod tests {
             embeddings: None,
             task_scope: None,
             inbox_source: None,
+            memory_source: None,
             token_id: None,
             thread_note: None,
         }

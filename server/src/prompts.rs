@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 /// The prompts a user may override through the API. Every function here checks
 /// a name against this list, so a caller-supplied name can never become a path
 /// of its own choosing.
-pub const EDITABLE: [&str; 4] = ["persona", "planning", "import", "inbox"];
+pub const EDITABLE: [&str; 6] =
+    ["persona", "planning", "import", "inbox", "summarize", "harvest"];
 
 fn checked(name: &str) -> Result<()> {
     anyhow::ensure!(EDITABLE.contains(&name), "unknown prompt {name:?}");
@@ -107,6 +108,14 @@ mod tests {
         let inbox = load(&config, "nobody", "inbox").unwrap();
         for name in crate::tools::registry(crate::tools::SessionKind::Inbox) {
             assert!(inbox.contains(name), "the inbox prompt never mentions {name}");
+        }
+        let summarize = load(&config, "nobody", "summarize").unwrap();
+        for name in crate::tools::registry(crate::tools::SessionKind::Summarize) {
+            assert!(summarize.contains(name), "the summarize prompt never mentions {name}");
+        }
+        let harvest = load(&config, "nobody", "harvest").unwrap();
+        for name in crate::tools::registry(crate::tools::SessionKind::Harvest) {
+            assert!(harvest.contains(name), "the harvest prompt never mentions {name}");
         }
     }
 

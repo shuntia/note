@@ -33,6 +33,8 @@ pub fn config_dir() -> TempDir {
         "defaults/prompts/inbox.md",
         "You read one item from a school system and decide what to remember.",
     );
+    write("defaults/prompts/summarize.md", "summarise the conversation");
+    write("defaults/prompts/harvest.md", "keep what will still matter");
     tmp
 }
 
