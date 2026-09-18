@@ -480,9 +480,9 @@ When an event fires, the server walks a delivery ladder: connected WebSocket
 clients first, then Web Push, then ntfy. The first channel that accepts the
 message wins; if none does, the day is plainer, never an error.
 
-Events carry a `channel` of `push` or `voice`. Voice is not implemented in this
-release — a `voice` event logs `voice_unavailable` and then takes the same
-ladder.
+Events carry a `channel` of `push` or `voice`. A `voice` event rings the phone
+first (see "Calls"); a call that cannot be placed logs `voice_fallback` and
+then takes the same ladder.
 
 ### In-app delivery
 
@@ -623,6 +623,63 @@ transport error, falls through the ladder as `delivery_degraded`.
 message and answers `{"via": "<channel>"}`, or `502` `{"error": …}` when no
 channel could take it. Settings offers it as "Send test".
 
+### Calls
+
+An event whose channel is `voice` rings the user's phone through Twilio: Note
+reads the check-in out and the user answers on the keypad. Point the channel at
+an account:
+
+```toml
+[channels.voice]
+account_sid = "AC…"
+auth_token_file = "config/twilio.token"   # mode 600, gitignored
+from_number = "+15551234567"              # E.164
+# base_url = "https://api.twilio.com"     # the default
+```
+
+All three are required; without the section the channel is not built and
+`voice` events fall straight down the push ladder. A missing or blank token
+file, a `from_number` that is not E.164, and a `public_base_url` that is not
+`https://` all fail startup — Twilio will not fetch TwiML over plain HTTP.
+
+Each user has `phone_number` in their `user.toml` (E.164, `^\+[1-9]\d{6,14}$`;
+Settings answers `422` for anything else and a blank value clears it) and
+`calls_enabled`, which defaults to on for members and off for test accounts.
+Without a number, or with calls switched off, a `voice` event falls through to
+the push ladder. Quiet calendar windows defer a call exactly as they defer a
+push: the runner holds the event until the window ends, so nothing rings
+inside one.
+
+Placing a call `POST`s Twilio's `Calls.json` with `To`, `From`, a `Url` and a
+`StatusCallback` pointing back at this server, and `Timeout = 25`. The row it
+writes to `voice_calls` carries a 32-byte base64url token, which is the only
+handle Twilio ever sees and the only way back in; it stops answering two hours
+after the call was placed.
+
+Twilio calls back on three routes, all `POST`, none of which takes a session
+cookie. Each validates `X-Twilio-Signature` (HMAC-SHA1 over `public_base_url` +
+the request path with every form parameter sorted by name, base64) and answers
+`403` on a mismatch, `404` for an unknown or expired token:
+
+- `/api/voice/twiml/{token}` — the TwiML the call speaks: a `<Gather>` of one
+  digit around the message, or a single `<Say>` for a call with no event.
+- `/api/voice/gather/{token}` — `1` finishes the event, `2` snoozes it fifteen
+  minutes, `3` drops it; each logs `voice_decision` and pushes a
+  `{"type": "changed"}` frame to the user's open clients. Any other digit
+  replays the question once, then the call lets go.
+- `/api/voice/status/{token}` — moves the call's row; `no-answer`, `busy` and
+  `failed` log `voice_unanswered` and send the same message down the push
+  ladder, so the nudge still lands.
+
+`POST /api/notify/call` (session cookie) places a test call saying "This is
+Note. Your phone is set up." and answers `{"call_id": …}`, `409` when the user
+has no number, or `502` `{"error": …}` when Twilio refused it. Settings offers
+it as "Call me now", beside the number and the "Call me for check-ins" switch;
+the card is hidden when the server has no voice channel. On the day's plan,
+an event's overflow menu carries "Call me" / "Notify me", which is
+`POST /api/events/{id}/channel {"channel": "push" | "voice"}` — `422` for an
+unknown channel or an event already done or dropped.
+
 ### Delivery in the admin log
 
 Every outcome lands in `event_log`, readable at `GET /api/admin/log`:
@@ -631,8 +688,13 @@ Every outcome lands in `event_log`, readable at `GET /api/admin/log`:
   `POST /api/notify/test` logs the same row as `test via <channel>`.
 - `delivery_degraded` — no channel could reach the user; the detail carries
   each channel's reason, or `no channels configured`.
-- `voice_unavailable` — a `voice` event fell back to the delivery ladder
-  (WebSocket first, then Web Push, then ntfy).
+- `voice_fallback` — a `voice` event could not be placed as a call (no number,
+  calls off, no channel configured, or Twilio refused it) and fell back to the
+  delivery ladder; a placed call logs `delivery_ok` as `event <id> via voice`.
+- `voice_decision` — `event <id>: done|snoozed|dropped by phone`.
+- `voice_unanswered` — the call rang out, was busy or failed; the message went
+  down the push ladder behind it.
+- `voice_failed` — Twilio refused the request that would have placed the call.
 
 ### Sessions & limits
 

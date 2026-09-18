@@ -8,6 +8,9 @@ use serde::Deserialize;
 pub struct SendArgs {
     /// The nudge text shown to the user.
     pub text: String,
+    /// "push" (default) or "voice".
+    #[serde(default)]
+    pub channel: Option<String>,
 }
 
 /// Inserts an immediate droppable nudge into today's plan; the runner delivers
@@ -22,6 +25,10 @@ pub fn send(conn: &Connection, ctx: &ToolCtx, args: SendArgs) -> Result<serde_js
     if text.is_empty() {
         return Err(ToolError::rejected("text must not be empty"));
     }
+    let channel = args.channel.as_deref().unwrap_or("push");
+    if !crate::templates::valid_channel(channel) {
+        return Err(ToolError::rejected("channel must be push or voice"));
+    }
     let ucfg = crate::config::UserConfig::load(ctx.config_dir, ctx.username)
         .map_err(|e| ToolError::internal(e.to_string()))?;
     let tz = jiff::tz::TimeZone::get(&ucfg.timezone).unwrap_or(jiff::tz::TimeZone::UTC);
@@ -33,11 +40,15 @@ pub fn send(conn: &Connection, ctx: &ToolCtx, args: SendArgs) -> Result<serde_js
         .map_err(|e| ToolError::internal(e.to_string()))?;
     conn.execute(
         "INSERT INTO events (plan_id, kind, wall_time, orig_wall_time, flexibility, slide_window_min, channel, message)
-         VALUES (?1, 'nudge', ?2, ?2, 'drop', 0, 'push', ?3)",
-        (plan_id, &wall, text),
+         VALUES (?1, 'nudge', ?2, ?2, 'drop', 0, ?3, ?4)",
+        (plan_id, &wall, channel, text),
     )
     .map_err(|e| ToolError::internal(e.to_string()))?;
-    Ok(serde_json::json!({ "event_id": conn.last_insert_rowid(), "wall_time": wall }))
+    Ok(serde_json::json!({
+        "event_id": conn.last_insert_rowid(),
+        "wall_time": wall,
+        "channel": channel,
+    }))
 }
 
 #[cfg(test)]
@@ -98,6 +109,23 @@ mod tests {
         assert_eq!(flex, "drop");
         assert_eq!(message, "stretch break, you asked for it");
         assert_eq!(status, "pending");
+        assert_eq!(out["channel"], "push");
+    }
+
+    #[test]
+    fn notify_send_can_escalate_a_nudge_to_a_call() {
+        let (conn, tmp) = env();
+        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Nightly, "notify_send",
+            r#"{"text":"the essay is due in an hour","channel":"voice"}"#).unwrap();
+        assert_eq!(out["channel"], "voice");
+        let channel: String = conn
+            .query_row("SELECT channel FROM events WHERE id = ?1", [out["event_id"].as_i64().unwrap()], |r| r.get(0))
+            .unwrap();
+        assert_eq!(channel, "voice");
+
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Nightly, "notify_send",
+            r#"{"text":"x","channel":"telegram"}"#).unwrap_err();
+        assert_eq!(e.kind, "rejected");
     }
 
     #[test]
