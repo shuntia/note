@@ -670,6 +670,7 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
             urgency: crate::channels::Urgency::Normal,
             event_id: Some(ev.event_id),
             conversation_id,
+            actions: crate::channels::event_actions(ev.event_id),
         },
     );
 }

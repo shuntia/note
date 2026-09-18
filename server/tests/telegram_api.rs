@@ -36,6 +36,82 @@ fn updates(items: &[(i64, i64, &str)]) -> String {
     serde_json::json!({ "ok": true, "result": list }).to_string()
 }
 
+fn presses(items: &[(i64, i64, &str, &str)]) -> String {
+    let list: Vec<serde_json::Value> = items
+        .iter()
+        .map(|(id, chat, callback_id, data)| {
+            serde_json::json!({
+                "update_id": id,
+                "callback_query": {
+                    "id": callback_id,
+                    "from": { "username": "aki_t" },
+                    "message": { "message_id": 90, "chat": { "id": chat }, "text": "Check-in" },
+                    "data": data,
+                },
+            })
+        })
+        .collect();
+    serde_json::json!({ "ok": true, "result": list }).to_string()
+}
+
+const ANSWERED: &str = r#"{"ok":true,"result":true}"#;
+
+/// A plan of that date for `user_id`, holding one 09:00 routine.
+fn routine(state: &AppState, user_id: i64, date: &str) -> i64 {
+    let conn = state.db();
+    conn.execute("INSERT INTO plans (user_id, date, created_at) VALUES (?1, ?2, 'c')", (user_id, date))
+        .unwrap();
+    let plan_id = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO events (plan_id, kind, wall_time, orig_wall_time, flexibility, slide_window_min)
+         VALUES (?1, 'checkin_call', '09:00', '09:00', 'slide', 60)",
+        [plan_id],
+    )
+    .unwrap();
+    conn.last_insert_rowid()
+}
+
+/// A 50-minute block holding a task of its own.
+fn block(state: &AppState, user_id: i64, date: &str) -> i64 {
+    let conn = state.db();
+    conn.execute(
+        "INSERT INTO tasks (user_id, title, created_at, updated_at)
+         VALUES (?1, 'read the chapter', 'c', 'c')",
+        [user_id],
+    )
+    .unwrap();
+    let task_id = conn.last_insert_rowid();
+    conn.execute("INSERT INTO plans (user_id, date, created_at) VALUES (?1, ?2, 'c')", (user_id, date))
+        .unwrap();
+    let plan_id = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO events (plan_id, kind, wall_time, orig_wall_time, end_wall_time, span_min, alert)
+         VALUES (?1, 'read the chapter', '14:00', '14:00', '14:50', 50, 0)",
+        [plan_id],
+    )
+    .unwrap();
+    let event_id = conn.last_insert_rowid();
+    conn.execute("INSERT INTO event_tasks (event_id, task_id) VALUES (?1, ?2)", (event_id, task_id))
+        .unwrap();
+    event_id
+}
+
+fn status(state: &AppState, event_id: i64) -> (String, String) {
+    let conn = state.db();
+    conn.query_row("SELECT status, wall_time FROM events WHERE id = ?1", [event_id], |r| {
+        Ok((r.get(0)?, r.get(1)?))
+    })
+    .unwrap()
+}
+
+fn actions_logged(state: &AppState) -> Vec<String> {
+    let conn = state.db();
+    let mut stmt = conn
+        .prepare("SELECT detail FROM event_log WHERE kind = 'telegram_action' ORDER BY id")
+        .unwrap();
+    stmt.query_map([], |r| r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap()
+}
+
 fn link(state: &AppState, chat_id: i64) {
     let conn = state.db();
     conn.execute(
@@ -338,4 +414,202 @@ async fn a_server_with_no_bot_says_so_and_issues_no_code() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn each_button_settles_what_it_names_and_writes_it_back_onto_the_message() {
+    let fake = common::fake_telegram();
+    fake.answer(common::GET_ME);
+    let (_app, _cookie, state, _cfg) = common::app_with_telegram(says(&[]), &fake.base).await;
+    fake.call();
+    link(&state, 42);
+    let (_conn_id, mut frames) = state.hub.register(1).unwrap();
+    let mut chats = note_server::telegram::Chats::default();
+
+    let done = routine(&state, 1, "2026-01-05");
+    let snoozed = routine(&state, 1, "2026-01-06");
+    let dropped = routine(&state, 1, "2026-01-07");
+
+    for (update_id, event_id, data, toast) in [
+        (21, done, format!("ev:done:{done}"), "Done"),
+        (22, snoozed, format!("ev:snooze:{snoozed}:15"), "Snoozed 15 min"),
+        (23, dropped, format!("ev:drop:{dropped}"), "Dropped"),
+    ] {
+        fake.answer(&presses(&[(update_id, 42, "q1", &data)]));
+        for _ in 0..3 {
+            fake.answer(ANSWERED);
+        }
+        note_server::telegram::poll_once(&state, &mut chats).await.unwrap();
+        assert_eq!(fake.call().0, "getUpdates");
+
+        let (method, answered) = fake.call();
+        assert_eq!(method, "answerCallbackQuery");
+        assert_eq!(answered["callback_query_id"], "q1");
+        assert_eq!(answered["text"], toast);
+
+        let (method, cleared) = fake.call();
+        assert_eq!(method, "editMessageReplyMarkup");
+        assert_eq!(cleared["chat_id"], 42);
+        assert_eq!(cleared["message_id"], 90);
+        assert!(cleared.get("reply_markup").is_none());
+
+        let (method, edited) = fake.call();
+        assert_eq!(method, "editMessageText");
+        assert_eq!(edited["text"], format!("Check-in\n✓ {toast}"));
+
+        let frame: serde_json::Value =
+            serde_json::from_str(&frames.recv().await.expect("a changed frame")).unwrap();
+        assert_eq!(frame["type"], "changed");
+        assert!(status(&state, event_id).0 != "pending", "the event was not settled");
+    }
+
+    assert_eq!(status(&state, done).0, "done");
+    assert_eq!(status(&state, snoozed), ("snoozed".to_string(), "09:15".to_string()));
+    assert_eq!(status(&state, dropped).0, "dropped");
+    assert_eq!(
+        actions_logged(&state),
+        vec![
+            format!("ev:done:{done}: Done"),
+            format!("ev:snooze:{snoozed}:15: Snoozed 15 min"),
+            format!("ev:drop:{dropped}: Dropped"),
+        ]
+    );
+    {
+        let conn = state.db();
+        assert_eq!(note_server::telegram::cursor(&conn).unwrap(), 23);
+    }
+}
+
+#[tokio::test]
+async fn start_session_opens_the_block_it_was_sent_with() {
+    let fake = common::fake_telegram();
+    fake.answer(common::GET_ME);
+    let (_app, _cookie, state, _cfg) = common::app_with_telegram(says(&[]), &fake.base).await;
+    fake.call();
+    link(&state, 42);
+    let event_id = block(&state, 1, "2026-01-05");
+
+    fake.answer(&presses(&[(21, 42, "q1", &format!("block:start:{event_id}"))]));
+    for _ in 0..3 {
+        fake.answer(ANSWERED);
+    }
+    let mut chats = note_server::telegram::Chats::default();
+    note_server::telegram::poll_once(&state, &mut chats).await.unwrap();
+    fake.call();
+    assert_eq!(fake.call().1["text"], "Session started");
+    fake.call();
+    assert_eq!(fake.call().1["text"], "Check-in\n✓ Session started");
+
+    let conn = state.db();
+    let (title, planned, event): (String, Option<i64>, Option<i64>) = conn
+        .query_row(
+            "SELECT title, planned_min, event_id FROM work_sessions
+             WHERE user_id = 1 AND ended_at IS NULL",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(title, "read the chapter");
+    assert_eq!(planned, Some(50), "the session runs as long as the block");
+    assert_eq!(event, Some(event_id));
+}
+
+#[tokio::test]
+async fn a_button_for_someone_elses_day_is_refused_and_disarmed() {
+    let fake = common::fake_telegram();
+    fake.answer(common::GET_ME);
+    let (_app, _cookie, state, _cfg) = common::app_with_telegram(says(&[]), &fake.base).await;
+    fake.call();
+    link(&state, 42);
+    let theirs = {
+        let conn = state.db();
+        conn.execute(
+            "INSERT INTO users (username, pass_hash, role) VALUES ('bo', 'x', 'member')",
+            [],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    };
+    let foreign = routine(&state, theirs, "2026-01-05");
+
+    let mut chats = note_server::telegram::Chats::default();
+    for (update_id, data) in [
+        (21, format!("ev:done:{foreign}")),
+        (22, "ev:done:9999".to_string()),
+        (23, "carry:2026-01-05".to_string()),
+        (24, "nonsense".to_string()),
+    ] {
+        fake.answer(&presses(&[(update_id, 42, "q1", &data)]));
+        fake.answer(ANSWERED);
+        fake.answer(ANSWERED);
+        note_server::telegram::poll_once(&state, &mut chats).await.unwrap();
+        fake.call();
+        let (method, answered) = fake.call();
+        assert_eq!(method, "answerCallbackQuery");
+        assert_eq!(answered["text"], "That one is gone.", "data: {data}");
+        assert_eq!(fake.call().0, "editMessageReplyMarkup");
+        assert!(fake.silent(), "a refusal writes nothing onto the message");
+    }
+
+    assert_eq!(status(&state, foreign).0, "pending");
+    assert!(actions_logged(&state).is_empty());
+}
+
+#[tokio::test]
+async fn a_press_from_a_chat_note_does_not_know_is_turned_away() {
+    let fake = common::fake_telegram();
+    fake.answer(common::GET_ME);
+    let (_app, _cookie, state, _cfg) = common::app_with_telegram(says(&[]), &fake.base).await;
+    fake.call();
+    let event_id = routine(&state, 1, "2026-01-05");
+
+    fake.answer(&presses(&[(21, 99, "q1", &format!("ev:done:{event_id}"))]));
+    fake.answer(ANSWERED);
+    fake.answer(ANSWERED);
+    let mut chats = note_server::telegram::Chats::default();
+    note_server::telegram::poll_once(&state, &mut chats).await.unwrap();
+    fake.call();
+    assert_eq!(fake.call().1["text"], "That one is gone.");
+    assert_eq!(fake.call().0, "editMessageReplyMarkup");
+    assert_eq!(status(&state, event_id).0, "pending");
+}
+
+#[tokio::test]
+async fn a_checkin_carries_its_three_buttons_into_the_chat() {
+    let fake = common::fake_telegram();
+    fake.answer(common::GET_ME);
+    let (_app, _cookie, state, _cfg) = common::app_with_telegram(says(&[]), &fake.base).await;
+    fake.call();
+    link(&state, 42);
+
+    fake.answer(common::SENT);
+    let event_id = routine(&state, 1, "2026-01-05");
+    let ev = note_server::runner::FiredEvent {
+        event_id,
+        user_id: 1,
+        username: "aki".into(),
+        kind: "checkin_call".into(),
+        wall_time: "09:00".into(),
+        date: "2026-01-05".into(),
+        channel: "push".into(),
+        message: String::new(),
+    };
+    let db = state.db.clone();
+    let ladder = state.channels.clone();
+    tokio::task::spawn_blocking(move || {
+        note_server::channels::deliver_event(&db, &ladder, &ev);
+    })
+    .await
+    .unwrap();
+
+    let (method, sent) = fake.call();
+    assert_eq!(method, "sendMessage");
+    assert_eq!(
+        sent["reply_markup"],
+        serde_json::json!({ "inline_keyboard": [[
+            { "text": "Done", "callback_data": format!("ev:done:{event_id}") },
+            { "text": "Snooze 15", "callback_data": format!("ev:snooze:{event_id}:15") },
+            { "text": "Drop", "callback_data": format!("ev:drop:{event_id}") },
+        ]] })
+    );
 }
