@@ -73,6 +73,8 @@ async fn members_get_403_on_every_admin_route() {
         (Method::PATCH, "/api/admin/users/1", Some(r#"{"disabled":true}"#)),
         (Method::POST, "/api/admin/users/1/revoke_sessions", None),
         (Method::GET, "/api/admin/log", None),
+        (Method::GET, "/api/admin/traces", None),
+        (Method::GET, "/api/admin/traces/1", None),
     ] {
         let res = app.clone().oneshot(req(m.clone(), p, &kid, body)).await.unwrap();
         assert_eq!(res.status(), StatusCode::FORBIDDEN, "{m} {p}");
@@ -91,7 +93,7 @@ async fn admin_without_a_grant_sees_the_gate_and_nothing_else() {
     assert_eq!(v["elevated"], false);
     assert_eq!(v["totp"], "required");
     assert_eq!(v["inspect"], cfg!(feature = "dev-inspect"));
-    for p in ["/api/admin/status", "/api/admin/users", "/api/admin/log"] {
+    for p in ["/api/admin/status", "/api/admin/users", "/api/admin/log", "/api/admin/traces"] {
         let res = app.clone().oneshot(req(Method::GET, p, &session, None)).await.unwrap();
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED, "{p}");
     }
@@ -276,6 +278,110 @@ async fn user_management_round_trip() {
 
     let n: i64 = state.db.lock().unwrap().query_row("SELECT COUNT(*) FROM event_log WHERE kind LIKE 'admin_%'", [], |r| r.get(0)).unwrap();
     assert!(n >= 6, "every admin action is audited, got {n}");
+}
+
+/// Seeds one trace and returns nothing: the ids are 1, 2, 3 in the order laid.
+fn seed_traces(state: &AppState) {
+    use note_server::tools::SessionKind;
+    let conn = state.db.lock().unwrap();
+    auth::create_user(&conn, "kid", "pw", false).unwrap();
+
+    let mut talk = note_server::trace::Builder::new(SessionKind::Talk, "add buy milk");
+    talk.round(120);
+    talk.call("task_create", r#"{"title":"buy milk"}"#, r#"{"task_id":1}"#, false, 4);
+    talk.call("task_update", "{}", r#"{"kind":"not_found","message":"no task"}"#, true, 2);
+    talk.round(60);
+    talk.ok("added buy milk!");
+    talk.insert(&conn, 1).unwrap();
+
+    let mut night = note_server::trace::Builder::new(SessionKind::Nightly, "Nightly run.");
+    night.round(200);
+    night.round_failed(88_000, "timed out reading response");
+    night.failed("nightly session: timed out reading response");
+    night.insert(&conn, 1).unwrap();
+
+    let mut kid = note_server::trace::Builder::new(SessionKind::Talk, "hello");
+    kid.round(10);
+    kid.ok("hi");
+    kid.insert(&conn, 2).unwrap();
+}
+
+#[tokio::test]
+async fn traces_list_filters_and_pages_newest_first() {
+    let (app, _session, cookies, state, _cfg) = elevated_app().await;
+    seed_traces(&state);
+
+    let get = |query: &str| {
+        let app = app.clone();
+        let cookies = cookies.clone();
+        let path = format!("/api/admin/traces{query}");
+        async move { json(app.oneshot(req(Method::GET, &path, &cookies, None)).await.unwrap()).await }
+    };
+
+    let v = get("").await;
+    let rows = v["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0]["id"], 3, "newest first");
+    assert_eq!(rows[0]["username"], "kid");
+    assert_eq!(rows[2]["kind"], "Talk");
+    assert_eq!(rows[2]["turns"], 2);
+    assert_eq!(rows[2]["tool_calls"], 2);
+    assert!(rows[2]["error"].is_null(), "only a failed session carries an error");
+    assert_eq!(v["kinds"], serde_json::json!(["Nightly", "Talk"]));
+
+    let v = get("?outcome=error").await;
+    let rows = v["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["outcome"], "error");
+    assert_eq!(rows[0]["error"], "nightly session: timed out reading response");
+
+    assert_eq!(get("?kind=Nightly").await["rows"].as_array().unwrap().len(), 1);
+    assert_eq!(get("?user_id=2").await["rows"].as_array().unwrap().len(), 1);
+    let v = get("?before_id=3&limit=1").await;
+    assert_eq!(v["rows"].as_array().unwrap().len(), 1);
+    assert_eq!(v["rows"][0]["id"], 2);
+}
+
+#[tokio::test]
+async fn a_trace_detail_holds_the_rounds_and_only_a_dev_build_sees_the_words() {
+    let (app, _session, cookies, state, _cfg) = elevated_app().await;
+    seed_traces(&state);
+    let full = cfg!(feature = "dev-inspect");
+
+    let res = app.clone().oneshot(req(Method::GET, "/api/admin/traces/1", &cookies, None)).await.unwrap();
+    let v = json(res).await;
+    assert_eq!(v["full"], full);
+    assert_eq!(v["outcome"], "ok");
+    let rounds = v["rounds"].as_array().unwrap();
+    assert_eq!(rounds.len(), 2);
+    assert_eq!(rounds[0]["ms"], 120);
+    assert!(rounds[0]["error"].is_null());
+    let calls = rounds[0]["calls"].as_array().unwrap();
+    assert_eq!(calls[0]["name"], "task_create");
+    assert_eq!(calls[0]["ms"], 4);
+    assert_eq!(calls[1]["is_error"], true);
+    assert_eq!(calls[1]["error_kind"], "not_found");
+    if full {
+        assert_eq!(v["opening"], "add buy milk");
+        assert_eq!(v["reply"], "added buy milk!");
+        assert_eq!(calls[0]["args"], r#"{"title":"buy milk"}"#);
+        assert_eq!(calls[0]["result"], r#"{"task_id":1}"#);
+    } else {
+        assert!(v["opening"].is_null() && v["reply"].is_null());
+        for call in calls {
+            assert!(call["args"].is_null() && call["result"].is_null(), "{call}");
+        }
+    }
+
+    let res = app.clone().oneshot(req(Method::GET, "/api/admin/traces/2", &cookies, None)).await.unwrap();
+    let v = json(res).await;
+    let rounds = v["rounds"].as_array().unwrap();
+    assert_eq!(rounds[1]["ms"], 88_000);
+    assert_eq!(rounds[1]["error"], "timed out reading response", "a provider failure is not user data");
+    assert!(rounds[1]["calls"].as_array().unwrap().is_empty());
+
+    let res = app.oneshot(req(Method::GET, "/api/admin/traces/99", &cookies, None)).await.unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
 }
 
 #[cfg(not(feature = "dev-inspect"))]

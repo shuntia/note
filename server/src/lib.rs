@@ -33,6 +33,7 @@ pub mod templates;
 pub(crate) mod testhttp;
 pub mod tools;
 pub mod totp;
+pub mod trace;
 pub mod triggers;
 pub mod work;
 

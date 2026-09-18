@@ -504,8 +504,12 @@ async fn task_agent(
             },
             Err(e) => {
                 crate::tasks::restore(&conn, &snap)?;
-                let _ =
-                    crate::log::record(&conn, Some(user.id), "task_agent_error", &e.to_string());
+                let _ = crate::log::record(
+                    &conn,
+                    Some(user.id),
+                    "task_agent_error",
+                    &format!("{e:#}"),
+                );
                 Ok(None)
             }
         }

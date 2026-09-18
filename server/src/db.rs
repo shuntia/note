@@ -449,6 +449,22 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (user_id, week_start)
     );
     ",
+    // v33
+    "
+    CREATE TABLE agent_traces (
+        id INTEGER PRIMARY KEY,
+        ts TEXT NOT NULL,
+        user_id INTEGER NOT NULL REFERENCES users(id),
+        kind TEXT NOT NULL,
+        outcome TEXT NOT NULL,
+        turns INTEGER NOT NULL,
+        tool_calls INTEGER NOT NULL,
+        duration_ms INTEGER NOT NULL,
+        error TEXT,
+        detail TEXT NOT NULL
+    );
+    CREATE INDEX idx_agent_traces_user ON agent_traces(user_id, id);
+    ",
 ];
 
 pub fn open(path: &Path) -> Result<Connection> {

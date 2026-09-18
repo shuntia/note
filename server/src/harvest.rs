@@ -313,7 +313,7 @@ pub fn run_for_user(
                 &conn,
                 Some(user_id),
                 "harvest_error",
-                &e.to_string(),
+                &format!("{e:#}"),
                 now,
                 crate::log::ERROR_LOG_WINDOW_MINS,
             );
@@ -366,7 +366,7 @@ pub fn run_for_user(
                     &conn,
                     Some(user_id),
                     "harvest_error",
-                    &e.to_string(),
+                    &format!("{e:#}"),
                     now,
                     crate::log::ERROR_LOG_WINDOW_MINS,
                 );

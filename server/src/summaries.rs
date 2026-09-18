@@ -203,7 +203,7 @@ pub fn spawn(state: crate::AppState) {
                 .await;
                 let (id, failure) = match result {
                     Ok((Ok(()), c)) => (c.conversation_id, None),
-                    Ok((Err(e), c)) => (c.conversation_id, Some(format!("{}: {e}", c.username))),
+                    Ok((Err(e), c)) => (c.conversation_id, Some(format!("{}: {e:#}", c.username))),
                     Err(join) => {
                         let conn = state.db();
                         let _ = crate::log::record_throttled(

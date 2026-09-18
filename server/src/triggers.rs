@@ -679,7 +679,7 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
     };
     let out = match outcome {
         Ok(out) => out,
-        Err(e) => return failed(format!("event {}: {e}", ev.event_id)),
+        Err(e) => return failed(format!("event {}: {e:#}", ev.event_id)),
     };
     let Some(step) = out.steps.iter().rev().find(|s| {
         !s.is_error && crate::tools::is_terminal(crate::tools::SessionKind::Trigger, &s.name)

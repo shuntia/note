@@ -223,7 +223,9 @@ pub fn routes() -> Router<AppState> {
         .route("/users", get(users_list).post(users_create))
         .route("/users/{id}", patch(users_patch))
         .route("/users/{id}/revoke_sessions", post(users_revoke))
-        .route("/log", get(log_list));
+        .route("/log", get(log_list))
+        .route("/traces", get(traces_list))
+        .route("/traces/{id}", get(traces_detail));
     #[cfg(feature = "dev-inspect")]
     let r = r.merge(inspect::routes());
     r.layer(axum::middleware::from_fn(no_store))
@@ -854,6 +856,48 @@ async fn log_list(_e: Elevated, State(state): State<AppState>, Query(q): Query<L
     })();
     match result {
         Ok(v) => Json(v).into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct TraceQuery {
+    #[serde(default)]
+    limit: Option<i64>,
+    #[serde(default)]
+    user_id: Option<i64>,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    outcome: Option<String>,
+    #[serde(default)]
+    before_id: Option<i64>,
+}
+
+async fn traces_list(
+    _e: Elevated,
+    State(state): State<AppState>,
+    Query(q): Query<TraceQuery>,
+) -> Response {
+    let filter = crate::trace::Filter {
+        limit: q.limit.unwrap_or(LOG_LIMIT_DEFAULT).clamp(1, LOG_LIMIT_MAX),
+        user_id: q.user_id,
+        kind: q.kind.filter(|k| !k.is_empty()),
+        outcome: q.outcome.filter(|o| !o.is_empty()),
+        before_id: q.before_id,
+    };
+    let conn = state.db();
+    match crate::trace::list(&conn, &filter) {
+        Ok(v) => Json(v).into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn traces_detail(_e: Elevated, State(state): State<AppState>, Path(id): Path<i64>) -> Response {
+    let conn = state.db();
+    match crate::trace::detail(&conn, id, INSPECT) {
+        Ok(Some(v)) => Json(v).into_response(),
+        Ok(None) => error(StatusCode::NOT_FOUND, "trace not found"),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }

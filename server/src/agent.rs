@@ -104,6 +104,8 @@ pub fn run_session(
 
 /// `run_session` with a progress sink: every event is handed over as it
 /// happens, on the session's own thread, before the session moves on.
+/// However it ends, the session leaves one `agent_traces` row behind; failing
+/// to write that row changes nothing about the session's own result.
 #[allow(clippy::too_many_arguments)]
 pub fn run_session_watched(
     deps: &SessionDeps,
@@ -114,6 +116,28 @@ pub fn run_session_watched(
     history: &[Message],
     opening: &str,
     on_event: &dyn Fn(AgentEvent),
+) -> Result<SessionOutcome> {
+    let mut trace = crate::trace::Builder::new(kind, opening);
+    let result =
+        run_traced(deps, user_id, username, kind, now, history, opening, on_event, &mut trace);
+    if let Err(e) = &result {
+        trace.failed(&format!("{e:#}"));
+    }
+    let _ = trace.insert(&crate::db_guard(deps.db), user_id);
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_traced(
+    deps: &SessionDeps,
+    user_id: i64,
+    username: &str,
+    kind: SessionKind,
+    now: jiff::Timestamp,
+    history: &[Message],
+    opening: &str,
+    on_event: &dyn Fn(AgentEvent),
+    trace: &mut crate::trace::Builder,
 ) -> Result<SessionOutcome> {
     // An import session briefs one task and an inbox session judges one item,
     // both on a caller's behalf: each gets its own instructions and none of the
@@ -171,9 +195,14 @@ pub fn run_session_watched(
 
     while turns < max_turns {
         let req = ChatRequest { system: &system, messages: &messages, tools: &schemas, background };
+        let round = std::time::Instant::now();
         let (resp, thinking) = match deps.llm.chat_with_reasoning(&req) {
-            Ok(v) => v,
+            Ok(v) => {
+                trace.round(round.elapsed().as_millis() as u64);
+                v
+            }
             Err(e) => {
+                trace.round_failed(round.elapsed().as_millis() as u64, &format!("{e:#}"));
                 on_event(AgentEvent::Error { message: &e.to_string() });
                 return Err(e);
             }
@@ -189,6 +218,7 @@ pub fn run_session_watched(
         last_text = resp.text;
         if resp.tool_calls.is_empty() {
             on_event(AgentEvent::Reply { text: &last_text });
+            trace.ok(&last_text);
             finish(deps, user_id, kind, turns, tool_calls, "agent_session")?;
             let thought_ms = started.elapsed().as_millis() as u64;
             return Ok(SessionOutcome {
@@ -205,14 +235,15 @@ pub fn run_session_watched(
         for call in calls {
             if call.name == "batch" {
                 let (content, is_error) =
-                    run_batch(&env, &call.args, &mut steps, &mut tool_calls, on_event);
+                    run_batch(&env, &call.args, &mut steps, &mut tool_calls, trace, on_event);
                 messages.push(Message::ToolResult { call_id: call.id, content, is_error });
                 continue;
             }
             tool_calls += 1;
-            let (content, is_error) = env.step(&call.name, &call.args, &mut steps, on_event);
+            let (content, is_error) = env.step(&call.name, &call.args, &mut steps, trace, on_event);
             if !is_error && tools::is_terminal(kind, &call.name) {
                 on_event(AgentEvent::Reply { text: &content });
+                trace.ok(&content);
                 finish(deps, user_id, kind, turns, tool_calls, "agent_session")?;
                 let thought_ms = started.elapsed().as_millis() as u64;
                 return Ok(SessionOutcome {
@@ -231,6 +262,7 @@ pub fn run_session_watched(
         last_text = MAX_TURNS_REPLY.to_string();
     }
     on_event(AgentEvent::Reply { text: &last_text });
+    trace.max_turns(&last_text);
     finish(deps, user_id, kind, turns, tool_calls, "agent_max_turns")?;
     let thought_ms = started.elapsed().as_millis() as u64;
     Ok(SessionOutcome { reply: last_text, turns, tool_calls, steps, reasoning, thought_ms })
@@ -283,18 +315,21 @@ impl CallEnv<'_> {
         }
     }
 
-    /// `run` as a session step: its own index, its own pair of events, and its
-    /// own entry in `steps`.
+    /// `run` as a session step: its own index, its own pair of events, its own
+    /// entry in `steps`, and its own timed call on the round's trace.
     fn step(
         &self,
         name: &str,
         args: &str,
         steps: &mut Vec<SessionStep>,
+        trace: &mut crate::trace::Builder,
         on_event: &dyn Fn(AgentEvent),
     ) -> (String, bool) {
         let index = steps.len();
         on_event(AgentEvent::ToolCall { index, name, args });
+        let started = std::time::Instant::now();
         let (content, is_error) = self.run(name, args);
+        trace.call(name, args, &content, is_error, started.elapsed().as_millis() as u64);
         on_event(AgentEvent::ToolResult { index, name, result: &content, is_error });
         steps.push(SessionStep {
             name: name.to_string(),
@@ -319,6 +354,7 @@ fn run_batch(
     raw_args: &str,
     steps: &mut Vec<SessionStep>,
     tool_calls: &mut usize,
+    trace: &mut crate::trace::Builder,
     on_event: &dyn Fn(AgentEvent),
 ) -> (String, bool) {
     if !tools::registry(env.kind).contains(&"batch") {
@@ -362,7 +398,7 @@ fn run_batch(
             serde_json::Value::Null => "{}".to_string(),
             v => v.to_string(),
         };
-        let (content, is_error) = env.step(&sub.tool, &sub_args, steps, on_event);
+        let (content, is_error) = env.step(&sub.tool, &sub_args, steps, trace, on_event);
         let value: serde_json::Value =
             serde_json::from_str(&content).unwrap_or(serde_json::Value::String(content));
         results.push(if is_error {
@@ -1198,6 +1234,219 @@ mod tests {
             !llm.seen()[0].tool_names.contains(&"web_search".to_string()),
             "a trigger session searches the user's own world, not the web"
         );
+    }
+
+    /// The one trace the session left, as (outcome, turns, tool_calls, error, detail).
+    fn trace_row(
+        db: &Mutex<rusqlite::Connection>,
+    ) -> (String, i64, i64, Option<String>, serde_json::Value) {
+        let conn = db.lock().unwrap();
+        let n: i64 =
+            conn.query_row("SELECT COUNT(*) FROM agent_traces", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 1, "one session leaves one trace");
+        conn.query_row(
+            "SELECT outcome, turns, tool_calls, error, detail FROM agent_traces",
+            [],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    serde_json::from_str(&r.get::<_, String>(4)?).unwrap(),
+                ))
+            },
+        )
+        .unwrap()
+    }
+
+    fn rounds(detail: &serde_json::Value) -> &Vec<serde_json::Value> {
+        detail["rounds"].as_array().unwrap()
+    }
+
+    #[test]
+    fn a_finished_session_leaves_one_trace_of_its_rounds_and_calls() {
+        let (db, tmp) = env();
+        let llm = MockLLM::scripted(vec![
+            ChatResponse {
+                text: String::new(),
+                tool_calls: vec![ToolCall {
+                    id: "c1".into(),
+                    name: "task_create".into(),
+                    args: r#"{"title":"buy milk"}"#.into(),
+                }],
+            },
+            ChatResponse { text: "added buy milk!".into(), tool_calls: vec![] },
+        ]);
+        let out =
+            run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, now(), &[], "add milk")
+                .unwrap();
+
+        let (outcome, turns, tool_calls, error, detail) = trace_row(&db);
+        assert_eq!(outcome, "ok");
+        assert_eq!(turns, out.turns as i64);
+        assert_eq!(tool_calls, out.tool_calls as i64);
+        assert!(error.is_none());
+        assert_eq!(detail["opening"], "add milk");
+        assert_eq!(detail["reply"], "added buy milk!");
+        assert_eq!(rounds(&detail).len(), turns as usize, "every answered round is a turn");
+        let calls: Vec<&serde_json::Value> =
+            rounds(&detail).iter().flat_map(|r| r["calls"].as_array().unwrap()).collect();
+        assert_eq!(calls.len(), out.steps.len());
+        assert_eq!(calls[0]["name"], out.steps[0].name);
+        assert_eq!(calls[0]["args"], out.steps[0].args);
+        assert_eq!(calls[0]["result"], out.steps[0].result);
+        assert_eq!(calls[0]["is_error"], false);
+        assert!(calls[0]["error_kind"].is_null());
+        assert!(rounds(&detail)[1]["calls"].as_array().unwrap().is_empty());
+        let kind: String =
+            db.lock().unwrap().query_row("SELECT kind FROM agent_traces", [], |r| r.get(0)).unwrap();
+        assert_eq!(kind, "Talk");
+    }
+
+    #[test]
+    fn a_session_that_runs_out_of_turns_says_so_in_its_trace() {
+        let (db, tmp) = env();
+        let resp = ChatResponse {
+            text: "looping".into(),
+            tool_calls: vec![ToolCall {
+                id: "c".into(),
+                name: "memory_query".into(),
+                args: r#"{"query":"x"}"#.into(),
+            }],
+        };
+        let llm = MockLLM::scripted(vec![resp; MAX_TURNS + 2]);
+        run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, now(), &[], "hi").unwrap();
+
+        let (outcome, turns, tool_calls, _, detail) = trace_row(&db);
+        assert_eq!(outcome, "max_turns");
+        assert_eq!(turns, MAX_TURNS as i64);
+        assert_eq!(tool_calls, MAX_TURNS as i64);
+        assert_eq!(rounds(&detail).len(), MAX_TURNS);
+        assert_eq!(detail["reply"], "looping");
+    }
+
+    /// Answers `rounds` calls from the script, then fails the way a provider
+    /// that has gone away does.
+    struct FailsAfter {
+        inner: MockLLM,
+        rounds: usize,
+        seen: std::sync::atomic::AtomicUsize,
+    }
+
+    impl LLMProvider for FailsAfter {
+        fn chat(&self, req: &ChatRequest) -> Result<ChatResponse> {
+            if self.seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= self.rounds {
+                anyhow::bail!("timed out reading response");
+            }
+            self.inner.chat(req)
+        }
+    }
+
+    #[test]
+    fn a_provider_that_dies_mid_session_leaves_the_rounds_it_finished() {
+        let (db, tmp) = env();
+        let llm = FailsAfter {
+            inner: MockLLM::scripted(vec![ChatResponse {
+                text: String::new(),
+                tool_calls: vec![ToolCall {
+                    id: "c1".into(),
+                    name: "task_create".into(),
+                    args: r#"{"title":"buy milk"}"#.into(),
+                }],
+            }]),
+            rounds: 1,
+            seen: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let err =
+            run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Nightly, now(), &[], "night")
+                .unwrap_err();
+        assert!(err.to_string().contains("timed out"));
+
+        let (outcome, turns, tool_calls, error, detail) = trace_row(&db);
+        assert_eq!(outcome, "error");
+        assert_eq!(turns, 1, "only the answered round counts");
+        assert_eq!(tool_calls, 1);
+        assert!(error.unwrap().contains("timed out reading response"));
+        assert_eq!(rounds(&detail).len(), 2);
+        assert!(rounds(&detail)[0]["error"].is_null());
+        assert_eq!(rounds(&detail)[0]["calls"][0]["name"], "task_create");
+        assert!(rounds(&detail)[1]["error"].as_str().unwrap().contains("timed out"));
+        assert!(rounds(&detail)[1]["calls"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_session_that_never_reaches_the_provider_is_traced_all_the_same() {
+        let (db, tmp) = env();
+        std::fs::remove_file(tmp.path().join("defaults/prompts/persona.md")).unwrap();
+        let llm = MockLLM::scripted(vec![ChatResponse { text: "hi".into(), tool_calls: vec![] }]);
+        assert!(run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, now(), &[], "hi")
+            .is_err());
+
+        let (outcome, turns, tool_calls, error, detail) = trace_row(&db);
+        assert_eq!((outcome.as_str(), turns, tool_calls), ("error", 0, 0));
+        assert!(error.is_some());
+        assert!(rounds(&detail).is_empty());
+    }
+
+    #[test]
+    fn a_batch_lands_as_the_calls_of_the_round_that_ran_it() {
+        let (db, tmp) = env();
+        let llm = MockLLM::scripted(vec![
+            batch_call(
+                "b1",
+                serde_json::json!([
+                    { "tool": "task_create", "args": { "title": "buy milk" } },
+                    { "tool": "task_update", "args": { "task_id": 999, "state": "done" } },
+                ]),
+            ),
+            ChatResponse { text: "one added".into(), tool_calls: vec![] },
+        ]);
+        run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, now(), &[], "two things")
+            .unwrap();
+
+        let (_, turns, tool_calls, _, detail) = trace_row(&db);
+        assert_eq!((turns, tool_calls), (2, 2));
+        let calls = rounds(&detail)[0]["calls"].as_array().unwrap();
+        assert_eq!(calls.len(), 2, "the batch envelope itself is not a call");
+        assert_eq!(calls[0]["name"], "task_create");
+        assert_eq!(calls[1]["name"], "task_update");
+        assert_eq!(calls[1]["is_error"], true);
+        assert_eq!(calls[1]["error_kind"], "not_found");
+    }
+
+    #[test]
+    fn a_runaway_argument_is_clipped_before_it_is_stored() {
+        let (db, tmp) = env();
+        let title = "x".repeat(crate::trace::MAX_FIELD_BYTES * 2);
+        let llm = MockLLM::scripted(vec![
+            ChatResponse {
+                text: String::new(),
+                tool_calls: vec![ToolCall {
+                    id: "c1".into(),
+                    name: "task_create".into(),
+                    args: serde_json::json!({ "title": title }).to_string(),
+                }],
+            },
+            ChatResponse { text: "done".into(), tool_calls: vec![] },
+        ]);
+        run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, now(), &[], "big").unwrap();
+
+        let (_, _, _, _, detail) = trace_row(&db);
+        let args = rounds(&detail)[0]["calls"][0]["args"].as_str().unwrap();
+        assert!(args.ends_with('…'));
+        assert!(args.len() <= crate::trace::MAX_FIELD_BYTES + '…'.len_utf8());
+    }
+
+    #[test]
+    fn a_trace_that_cannot_be_written_leaves_the_session_alone() {
+        let (db, tmp) = env();
+        db.lock().unwrap().execute("DROP TABLE agent_traces", []).unwrap();
+        let llm = MockLLM::scripted(vec![ChatResponse { text: "hi".into(), tool_calls: vec![] }]);
+        let out =
+            run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, now(), &[], "hello")
+                .unwrap();
+        assert_eq!(out.reply, "hi");
     }
 
     #[test]
