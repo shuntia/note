@@ -9,3 +9,4 @@ config/vapid.pem
 persist/
 config/openrouter.key
 config/twilio.token
+config/telegram.token

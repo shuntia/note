@@ -71,3 +71,12 @@ api_key_file = "config/nvidianim.key"
 # auth_token_file = "config/twilio.token"   # mode 600, gitignored
 # from_number = "+15551234567"              # E.164
 # base_url = "https://api.twilio.com"       # the default
+
+# Telegram makes a bot chat one more window onto the same conversations: a
+# check-in arrives there, the reply runs the same Talk session the web does,
+# and the thread is the one the app shows. A linked chat is tried first in the
+# ladder. Talk to @BotFather for a token, then link a chat from Settings.
+#
+# [channels.telegram]
+# token_file = "config/telegram.token"   # mode 600, gitignored
+# base_url = "https://api.telegram.org"  # the default
