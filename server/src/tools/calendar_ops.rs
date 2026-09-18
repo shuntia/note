@@ -38,6 +38,7 @@ pub enum Kind {
     Fixed,
     Busy,
     Note,
+    Free,
 }
 
 impl Kind {
@@ -46,6 +47,7 @@ impl Kind {
             Kind::Fixed => "fixed",
             Kind::Busy => "busy",
             Kind::Note => "note",
+            Kind::Free => "free",
         }
     }
 }
@@ -147,7 +149,7 @@ pub struct AddArgs {
     pub title: String,
     pub kind: Kind,
     /// Whether deliveries wait for the window to end. Defaults to true, and is
-    /// always false for a note.
+    /// always false for a note or free time.
     #[serde(default)]
     pub quiet: Option<bool>,
     /// Zero-padded HH:MM in the user's timezone.
@@ -443,7 +445,7 @@ mod tests {
             .find(|s| s["name"] == "calendar_add")
             .unwrap();
         let text = schema["input_schema"].to_string();
-        for word in ["mon", "sun", "fixed", "busy", "note"] {
+        for word in ["mon", "sun", "fixed", "busy", "note", "free"] {
             assert!(text.contains(word), "the schema never mentions {word}");
         }
         let description = schema["description"].as_str().unwrap();

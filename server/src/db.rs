@@ -297,6 +297,49 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (user_id, date)
     );
     ",
+    // v22
+    "
+    CREATE TABLE calendar_entries_v2 (
+        id INTEGER PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id),
+        title TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('fixed','busy','note','free')),
+        quiet INTEGER NOT NULL DEFAULT 1 CHECK (quiet IN (0, 1)),
+        start_time TEXT NOT NULL,
+        end_time TEXT NOT NULL,
+        days INTEGER NOT NULL DEFAULT 0 CHECK (days BETWEEN 0 AND 127),
+        on_date TEXT,
+        from_date TEXT,
+        until_date TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        CHECK (end_time > start_time),
+        CHECK ((days = 0) = (on_date IS NOT NULL))
+    );
+    INSERT INTO calendar_entries_v2 SELECT * FROM calendar_entries;
+    CREATE TABLE calendar_exceptions_v2 (
+        entry_id INTEGER NOT NULL REFERENCES calendar_entries_v2(id) ON DELETE CASCADE,
+        date TEXT NOT NULL,
+        PRIMARY KEY (entry_id, date)
+    );
+    INSERT INTO calendar_exceptions_v2 SELECT * FROM calendar_exceptions;
+    DROP TABLE calendar_exceptions;
+    DROP TABLE calendar_entries;
+    ALTER TABLE calendar_entries_v2 RENAME TO calendar_entries;
+    ALTER TABLE calendar_exceptions_v2 RENAME TO calendar_exceptions;
+    CREATE INDEX idx_calendar_entries_user ON calendar_entries(user_id, start_time);
+    ",
+    // v23
+    "
+    ALTER TABLE events ADD COLUMN origin TEXT NOT NULL DEFAULT 'template'
+        CHECK (origin IN ('template','agent','auto','user'));
+    ALTER TABLE events ADD COLUMN decided_at TEXT;
+    ",
+    // v24
+    "
+    ALTER TABLE tasks ADD COLUMN completed_at TEXT;
+    UPDATE tasks SET completed_at = updated_at WHERE state = 'done';
+    ",
 ];
 
 pub fn open(path: &Path) -> Result<Connection> {
@@ -840,6 +883,128 @@ mod tests {
         assert_eq!(date(), Some("2026-09-17".to_string()));
     }
 
+    #[test]
+    fn v22_rebuilds_the_calendar_tables_and_keeps_every_row() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        apply_migrations(&conn, &MIGRATIONS[..21]).unwrap();
+        conn.execute(
+            "INSERT INTO users (username, pass_hash, role) VALUES ('a','h','member')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO calendar_entries
+             (id, user_id, title, kind, quiet, start_time, end_time, days, on_date,
+              created_at, updated_at)
+             VALUES (7, 1, 'school', 'fixed', 1, '08:15', '15:30', 31, NULL, 't1', 't2')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO calendar_exceptions (entry_id, date) VALUES (7, '2026-09-16')",
+            [],
+        )
+        .unwrap();
+        apply_migrations(&conn, MIGRATIONS).unwrap();
+
+        let (id, title, kind, start, created): (i64, String, String, String, String) = conn
+            .query_row("SELECT id, title, kind, start_time, created_at FROM calendar_entries", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })
+            .unwrap();
+        assert_eq!((id, title.as_str(), kind.as_str(), start.as_str(), created.as_str()),
+                   (7, "school", "fixed", "08:15", "t1"));
+        let skipped: (i64, String) = conn
+            .query_row("SELECT entry_id, date FROM calendar_exceptions", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(skipped, (7, "2026-09-16".to_string()));
+
+        conn.execute(
+            "INSERT INTO calendar_entries
+             (user_id, title, kind, quiet, start_time, end_time, days, on_date, created_at, updated_at)
+             VALUES (1, 'open afternoon', 'free', 0, '16:00', '18:30', 0, '2026-09-18', 't', 't')",
+            [],
+        )
+        .unwrap();
+        assert!(
+            conn.execute(
+                "INSERT INTO calendar_entries
+                 (user_id, title, kind, quiet, start_time, end_time, days, on_date, created_at, updated_at)
+                 VALUES (1, 'x', 'party', 1, '09:00', '10:00', 0, '2026-09-18', 't', 't')",
+                [],
+            )
+            .is_err(),
+            "kind is still closed"
+        );
+        conn.execute("DELETE FROM calendar_entries WHERE id = 7", []).unwrap();
+        let left: i64 = conn
+            .query_row("SELECT COUNT(*) FROM calendar_exceptions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 0, "exceptions still follow their entry");
+    }
+
+    #[test]
+    fn v23_adds_event_origin_and_decision_time() {
+        let conn = open_memory().unwrap();
+        conn.execute(
+            "INSERT INTO users (username, pass_hash, role) VALUES ('a','h','member')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO plans (user_id, date, created_at) VALUES (1, '2026-09-17', 'x')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO events (plan_id, kind, wall_time) VALUES (1, 'nudge', '09:15')",
+            [],
+        )
+        .unwrap();
+        let (origin, decided): (String, Option<String>) = conn
+            .query_row("SELECT origin, decided_at FROM events WHERE id = 1", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(origin, "template");
+        assert!(decided.is_none());
+        assert!(
+            conn.execute("UPDATE events SET origin = 'somewhere' WHERE id = 1", []).is_err(),
+            "origin is closed"
+        );
+    }
+
+    #[test]
+    fn v24_backfills_completion_time_for_finished_tasks() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_migrations(&conn, &MIGRATIONS[..23]).unwrap();
+        conn.execute(
+            "INSERT INTO users (username, pass_hash, role) VALUES ('a','h','member')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tasks (user_id, title, state, created_at, updated_at)
+             VALUES (1, 'shipped', 'done', 'c', '2026-09-16T12:00:00Z'),
+                    (1, 'open one', 'open', 'c', '2026-09-16T12:00:00Z')",
+            [],
+        )
+        .unwrap();
+        apply_migrations(&conn, MIGRATIONS).unwrap();
+        let done: Option<String> = conn
+            .query_row("SELECT completed_at FROM tasks WHERE id = 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(done.as_deref(), Some("2026-09-16T12:00:00Z"));
+        let open: Option<String> = conn
+            .query_row("SELECT completed_at FROM tasks WHERE id = 2", [], |r| r.get(0))
+            .unwrap();
+        assert!(open.is_none());
+    }
+
+    #[test]
     #[test]
     fn v20_creates_voice_calls_keyed_by_token() {
         let conn = open_memory().unwrap();

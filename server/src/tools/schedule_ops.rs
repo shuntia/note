@@ -269,8 +269,8 @@ pub fn insert(conn: &Connection, ctx: &ToolCtx, args: InsertArgs) -> Result<serd
     };
     check_calendar(conn, ctx.user_id, date, &args.time, &args.time)?;
     conn.execute(
-        "INSERT INTO events (plan_id, kind, wall_time, orig_wall_time, flexibility, slide_window_min, channel)
-         VALUES (?1, ?2, ?3, ?3, ?4, ?5, ?6)",
+        "INSERT INTO events (plan_id, kind, wall_time, orig_wall_time, flexibility, slide_window_min, channel, origin)
+         VALUES (?1, ?2, ?3, ?3, ?4, ?5, ?6, 'agent')",
         (plan_id, kind, &args.time, args.flexibility.as_str(), args.slide_window_min, args.channel.as_str()),
     )
     .map_err(|e| ToolError::internal(e.to_string()))?;

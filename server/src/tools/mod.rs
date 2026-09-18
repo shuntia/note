@@ -223,6 +223,7 @@ const TALK: &[&str] = &[
     "task_read",
     "task_bulk_update",
     "plan_tasks",
+    "plan_auto",
     "plan_list",
     "calendar_list",
     "calendar_add",
@@ -256,6 +257,7 @@ const NIGHTLY: &[&str] = &[
     "task_read",
     "task_bulk_update",
     "plan_tasks",
+    "plan_auto",
     "plan_list",
     "calendar_list",
     "calendar_add",
@@ -433,6 +435,15 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
              would overlap something already planned, or when they do not fit before end.",
             schema::<plan_ops::PlanTasksArgs>(),
         ),
+        "plan_auto" => (
+            "Lay the user's open tasks into a day's free time by itself — the free windows \
+             the user has set aside on the calendar, minus what the day already holds. \
+             Automatic blocks from an earlier run that have not started are replaced, and \
+             blocks the user has already finished or dropped are left alone. Use it after \
+             the day's free time changes; to place particular tasks at particular times, \
+             use plan_tasks instead.",
+            schema::<plan_ops::PlanAutoArgs>(),
+        ),
         "plan_list" => (
             "Read one day's plan: every event with its event_id — the id the schedule tools \
              take — its times, status and flexibility, and for a block laid by plan_tasks the \
@@ -441,16 +452,19 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
         ),
         "calendar_list" => (
             "Read the user's calendar of fixed commitments: what each day already \
-             belongs to, with the quiet windows marked.",
+             belongs to, with the quiet windows marked and the free time the user has set \
+             aside for tasks.",
             schema::<calendar_ops::ListArgs>(),
         ),
         "calendar_add" => (
             "Add a standing commitment to the calendar. \"fixed\" is a hard one the day is \
              built around — school, work, a class — and is quiet by default: while it runs, \
              deliveries are held and arrive when it ends. \"busy\" is softer (a commute, a \
-             meal) and \"note\" is informational and never quiet. Use this when the user says \
-             they cannot be disturbed at certain times, or names something that happens every \
-             week: \"school weekdays 08:15-15:30\" is fixed and quiet.",
+             meal), \"note\" is informational and never quiet, and \"free\" is time the user \
+             has set aside for tasks — never quiet, and the only time open tasks are laid \
+             into. Use this when the user says they cannot be disturbed at certain times, or \
+             names something that happens every week: \"school weekdays 08:15-15:30\" is \
+             fixed and quiet.",
             schema::<calendar_ops::AddArgs>(),
         ),
         "calendar_update" => (
@@ -545,6 +559,7 @@ fn run(
         "task_read" => task_query::read(conn, ctx, parse(raw)?),
         "task_bulk_update" => task_query::bulk_update(conn, ctx, parse(raw)?),
         "plan_tasks" => plan_ops::plan_tasks(conn, ctx, parse(raw)?),
+        "plan_auto" => plan_ops::plan_auto(conn, ctx, parse(raw)?),
         "plan_list" => plan_ops::plan_list(conn, ctx, parse(raw)?),
         "calendar_list" => calendar_ops::list(conn, ctx, parse(raw)?),
         "calendar_add" => calendar_ops::add(conn, ctx, parse(raw)?),

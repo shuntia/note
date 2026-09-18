@@ -16,7 +16,8 @@ const pct = (mins: number) => `${((Math.min(END, Math.max(START, mins)) - START)
 
 type Placement = { row: number; short: boolean; hidden: boolean; shift: number }
 
-// Only what is ahead is drawn; the solid line behind the disc is all the past needs.
+// What is ahead is drawn in full; what is behind is a tick on the gone bar for
+// each event the day already settled.
 export function DayLine({
   events,
   now,
@@ -33,6 +34,11 @@ export function DayLine({
     (ev) =>
       (ev.status === 'pending' || ev.status === 'snoozed' || ev.status === 'fired') &&
       minutesOf(ev.end_wall_time ?? ev.wall_time) >= now,
+  )
+  const settled = events.filter(
+    (ev) =>
+      (ev.status === 'done' || ev.status === 'dropped') &&
+      minutesOf(ev.end_wall_time ?? ev.wall_time) <= now,
   )
   const filled = nextId ?? ahead[0]?.id
   const hours = compact ? [6, 15, 24] : [6, 9, 12, 15, 18, 21, 24]
@@ -108,6 +114,13 @@ export function DayLine({
           {String(h).padStart(2, '0')}
         </span>
       ))}
+      {settled.map((ev) => (
+        <span
+          key={`past-${ev.id}`}
+          className={`dl-past ${ev.status}`}
+          style={{ left: pct(minutesOf(ev.end_wall_time ?? ev.wall_time)) }}
+        />
+      ))}
       {ahead.map((ev) => {
         const a = minutesOf(ev.wall_time)
         const b = minutesOf(ev.end_wall_time ?? ev.wall_time)
@@ -115,7 +128,11 @@ export function DayLine({
         const spot = place[ev.id]
         const above = ['above', `row${(spot?.row ?? 0) + 1}`, spot?.short ? 'short' : '', spot?.hidden ? 'hide' : '']
         return (
-          <span key={ev.id} className={`dl-span${ev.id === filled ? ' next' : ''}`} style={{ left: pct(a), width: `${w}%` }}>
+          <span
+            key={ev.id}
+            className={`dl-span${ev.id === filled ? ' next' : ''}${ev.task ? ' task' : ''}`}
+            style={{ left: pct(a), width: `${w}%` }}
+          >
             {!compact && (
               <span
                 className={`dl-label ${ev.id === filled ? 'below' : above.filter(Boolean).join(' ')}`}
@@ -125,7 +142,7 @@ export function DayLine({
                 <span className="dl-when">
                   {ev.wall_time} – {ev.end_wall_time ?? ev.wall_time}
                 </span>
-                <span className="dl-name">{' '}{eventLabel(ev.kind)}</span>
+                <span className="dl-name">{' '}{ev.task ? ev.task.title : eventLabel(ev.kind)}</span>
               </span>
             )}
           </span>

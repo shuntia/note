@@ -4,7 +4,7 @@ import { minutesOf } from './dayline'
 import { eventFacts, nextUp } from './events'
 import { readPrefs } from './prefs'
 import { elapsedSec, type FocusSession } from './session'
-import type { PlanEvent } from './types'
+import type { DayView, PlanEvent } from './types'
 
 const VB = 32
 const R = 13
@@ -58,14 +58,16 @@ export function Pulse({
   refresh: number
   onOpen: () => void
 }) {
-  const [events, setEvents] = useState<PlanEvent[]>([])
+  const [day, setDay] = useState<DayView | null>(null)
   const [, tick] = useState(0)
 
   useEffect(() => {
     const load = () => {
+      const d = new Date()
+      const pad = (n: number) => String(n).padStart(2, '0')
       api
-        .planToday()
-        .then(setEvents)
+        .day(`${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`)
+        .then(setDay)
         .catch(() => {})
     }
     load()
@@ -78,7 +80,7 @@ export function Pulse({
     return () => clearInterval(id)
   }, [session])
 
-  const reading = read(session, events)
+  const reading = read(session, day?.events ?? [])
   if (!reading) return null
   const { frac, text, over, faded } = reading
   const prog = FULL * Math.max(0, Math.min(1, frac))

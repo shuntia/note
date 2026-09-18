@@ -5,7 +5,7 @@ use thiserror::Error;
 
 pub const MAX_ENTRIES: i64 = 100;
 pub const MAX_TITLE_CHARS: usize = 80;
-pub const KINDS: [&str; 3] = ["fixed", "busy", "note"];
+pub const KINDS: [&str; 4] = ["fixed", "busy", "note", "free"];
 pub const DAY_NAMES: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 
 #[derive(Debug, Error)]
@@ -206,8 +206,9 @@ fn validate(f: Fields) -> Result<Fields, CalendarError> {
             )));
         }
     }
-    // An informational entry is never a reason to hold a delivery.
-    let quiet = f.kind != "note" && f.quiet.unwrap_or(true);
+    // Neither an informational entry nor time set aside for tasks is ever a
+    // reason to hold a delivery.
+    let quiet = !matches!(f.kind.as_str(), "note" | "free") && f.quiet.unwrap_or(true);
     Ok(Fields {
         title,
         quiet: Some(quiet),
@@ -814,6 +815,25 @@ mod tests {
         )
         .unwrap();
         assert!(!b.quiet);
+        let f = create(
+            &conn,
+            1,
+            Fields {
+                quiet: Some(true),
+                ..fields("open afternoon", "free", "16:00", "18:30", &["mon"])
+            },
+        )
+        .unwrap();
+        assert!(!f.quiet);
+    }
+
+    #[test]
+    fn free_time_never_blocks_the_day() {
+        let conn = env();
+        create(&conn, 1, fields("open afternoon", "free", "16:00", "18:30", &["mon"])).unwrap();
+        let date: jiff::civil::Date = "2026-09-14".parse().unwrap();
+        assert!(overlaps(&conn, 1, date, "16:30", "17:00").unwrap().is_empty());
+        assert!(conflict(&conn, 1, date, "16:30", "17:00").unwrap().is_none());
     }
 
     #[test]

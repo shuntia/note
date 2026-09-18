@@ -726,8 +726,9 @@ mod tests {
     ) -> i64 {
         conn.execute(
             "INSERT INTO tasks (user_id, title, state, source, parent_id, duration_min,
-                                duration_source, is_now, created_at, updated_at)
-             VALUES (?1, ?2, ?3, 'manual', ?4, ?5, ?6, ?7, ?8, ?8)",
+                                duration_source, is_now, created_at, updated_at, completed_at)
+             VALUES (?1, ?2, ?3, 'manual', ?4, ?5, ?6, ?7, ?8, ?8,
+                     CASE WHEN ?3 = 'done' THEN ?8 END)",
             rusqlite::params![
                 uid,
                 title,

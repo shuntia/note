@@ -4,10 +4,11 @@ import type {
   AdminStatus,
   AdminUser,
   AlertPatch,
-  CalendarDay,
+  Allocation,
   CalendarEntry,
   CalendarKind,
   Conversation,
+  DayView,
   Debrief,
   FlattenResult,
   InspectUser,
@@ -142,7 +143,12 @@ export const api = {
   login: (username: string, password: string) =>
     request<void>('/api/login', { method: 'POST', body: JSON.stringify({ username, password }) }),
   logout: () => request<void>('/api/logout', { method: 'POST' }),
-  planToday: () => request<PlanEvent[]>('/api/plan/today'),
+  day: (date: string) => request<DayView>(`/api/day/${date}`),
+  planRange: (from: string, to: string) =>
+    request<{ days: Record<string, PlanEvent[]> }>(
+      `/api/plan/range?${new URLSearchParams({ from, to }).toString()}`,
+    ),
+  allocate: (date: string) => request<Allocation>(`/api/plan/${date}/allocate`, { method: 'POST' }),
   eventAction: (id: number, action: 'done' | 'drop') =>
     request<void>(`/api/events/${id}/${action}`, { method: 'POST' }),
   shift: (id: number, minutes: number) =>
@@ -233,7 +239,6 @@ export const api = {
   notifyTest: () => request<{ via: string }>('/api/notify/test', { method: 'POST' }),
   notifyCall: () => request<{ call_id: number }>('/api/notify/call', { method: 'POST' }),
   calendar: () => request<{ entries: CalendarEntry[] }>('/api/calendar'),
-  calendarDay: (date: string) => request<CalendarDay>(`/api/calendar/day/${date}`),
   addCalendarEntry: (fields: CalendarFields) =>
     request<CalendarEntry>('/api/calendar', { method: 'POST', body: JSON.stringify(fields) }),
   // The server rejects unknown fields and keeps whatever the patch leaves out; an empty

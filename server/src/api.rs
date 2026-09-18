@@ -43,6 +43,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/memory", get(memory_list))
         .route("/api/memory/{id}", get(memory_read))
         .route("/api/plan/today", get(plan_today))
+        .route("/api/plan/range", get(plan_range))
+        .route("/api/plan/{date}/allocate", post(plan_allocate))
+        .route("/api/day/{date}", get(day_view))
         .route("/api/debrief", get(debrief))
         .route("/api/events/{id}/shift", post(event_shift))
         .route("/api/events/{id}/snooze", post(event_snooze))
@@ -1578,6 +1581,157 @@ async fn plan_today(
 /// `?calendar=true` all mean yes, an explicit `0` or `false` means no.
 fn truthy(value: Option<&str>) -> bool {
     matches!(value, Some("" | "1" | "true" | "yes"))
+}
+
+const MAX_RANGE_DAYS: i32 = 14;
+
+/// The user's timezone and template, the two things every day-shaped read needs.
+fn day_context(
+    state: &AppState,
+    username: &str,
+) -> Result<(jiff::tz::TimeZone, crate::templates::Template), StatusCode> {
+    let ucfg = crate::config::UserConfig::load(&state.config_dir, username)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let tz = jiff::tz::TimeZone::get(&ucfg.timezone).unwrap_or(jiff::tz::TimeZone::UTC);
+    let tmpl = crate::templates::Template::load(&state.config_dir, username, &ucfg.template)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok((tz, tmpl))
+}
+
+/// One local day, whole: its plan, its calendar, the free time left in it, and
+/// — for today and the days behind it — what has already happened.
+async fn day_view(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Path(date): Path<String>,
+) -> impl IntoResponse {
+    let Ok(date) = date.parse::<jiff::civil::Date>() else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let (tz, tmpl) = match day_context(&state, &user.username) {
+        Ok(c) => c,
+        Err(status) => return status.into_response(),
+    };
+    let now = jiff::Timestamp::now();
+    let today = now.to_zoned(tz.clone()).date();
+    let conn = state.db();
+    if crate::plan::generate(&conn, user.id, &tmpl, date).is_err() {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+    let (Ok(events), Ok(occurrences)) = (
+        crate::plan::events_for(&conn, user.id, date),
+        crate::calendar::occurrences(&conn, user.id, date),
+    ) else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    let free: Vec<serde_json::Value> = crate::allocate::free_windows(&occurrences)
+        .iter()
+        .map(|w| serde_json::json!({ "start": w.start_wall(), "end": w.end_wall() }))
+        .collect();
+    let quiet_now = if today == date {
+        match crate::calendar::quiet_window(&conn, user.id, &tz, now) {
+            Ok(w) => w.map(|w| w.end),
+            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        }
+    } else {
+        None
+    };
+    let history = if date > today {
+        Vec::new()
+    } else {
+        match crate::day::history(&conn, user.id, &tz, date, now) {
+            Ok(h) => h,
+            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        }
+    };
+    Json(serde_json::json!({
+        "date": date.to_string(),
+        "events": events,
+        "calendar": occurrences,
+        "free": free,
+        "quiet_now": quiet_now,
+        "history": history,
+    }))
+    .into_response()
+}
+
+#[derive(Deserialize)]
+struct RangeQuery {
+    from: String,
+    to: String,
+}
+
+/// The plans that already exist across a span of days; a day with no plan is
+/// left out rather than generated, so reading a week never invents one.
+async fn plan_range(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Query(q): Query<RangeQuery>,
+) -> impl IntoResponse {
+    let (Ok(from), Ok(to)) =
+        (q.from.parse::<jiff::civil::Date>(), q.to.parse::<jiff::civil::Date>())
+    else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let span = (to - from).get_days();
+    if span < 0 || span >= MAX_RANGE_DAYS {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let conn = state.db();
+    let mut days = serde_json::Map::new();
+    let mut date = from;
+    while date <= to {
+        match crate::plan::exists(&conn, user.id, date) {
+            Ok(true) => match crate::plan::events_for(&conn, user.id, date) {
+                Ok(evs) => {
+                    days.insert(date.to_string(), serde_json::to_value(evs).unwrap_or_default());
+                }
+                Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+            },
+            Ok(false) => {}
+            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        }
+        let Ok(next) = date.tomorrow() else { break };
+        date = next;
+    }
+    Json(serde_json::json!({ "days": days })).into_response()
+}
+
+/// Lays the user's open tasks into that day's free time, replacing the
+/// automatic blocks an earlier run left that have not started.
+async fn plan_allocate(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Path(date): Path<String>,
+) -> impl IntoResponse {
+    let Ok(date) = date.parse::<jiff::civil::Date>() else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let (tz, tmpl) = match day_context(&state, &user.username) {
+        Ok(c) => c,
+        Err(status) => return status.into_response(),
+    };
+    let now = jiff::Timestamp::now();
+    if date < now.to_zoned(tz.clone()).date() {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({ "error": "a day that is over cannot be filled" })),
+        )
+            .into_response();
+    }
+    let conn = state.db();
+    if crate::plan::generate(&conn, user.id, &tmpl, date).is_err() {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+    match crate::allocate::run(&conn, user.id, &tz, date, now) {
+        Ok(out) => Json(serde_json::json!({
+            "plan_date": date.to_string(),
+            "placed": out.placed,
+            "cleared": out.cleared,
+        }))
+        .into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
 }
 
 #[derive(Deserialize)]

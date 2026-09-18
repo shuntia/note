@@ -16,9 +16,10 @@ import { Overflow } from '../overflow'
 import { readPrefs } from '../prefs'
 import { eventLabel } from '../receipts'
 import { effectiveStart, elapsedSec, type FocusSession } from '../session'
-import type { PlanEvent } from '../types'
+import { SoFar } from '../sofar'
+import type { DayView, PlanEvent } from '../types'
 import { CalendarSection } from './Calendar'
-import { DebriefFold } from './Today'
+import { DebriefFold } from '../debrief'
 import '../styles/home-motion.css'
 
 const LATER_MINUTES = [5, 10, 15, 30, 60]
@@ -39,6 +40,17 @@ const clamp = (v: number) => Math.min(1, Math.max(0, v))
 function nowMinutes(): number {
   const d = new Date()
   return d.getHours() * 60 + d.getMinutes()
+}
+
+function todayIso(): string {
+  const d = new Date()
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+}
+
+// What the row is called: a block laid for a task carries the task's own name.
+function rowLabel(ev: PlanEvent): string {
+  return ev.task ? ev.task.title : eventLabel(ev.kind)
 }
 
 function minutesOfDayNow(): number {
@@ -151,7 +163,7 @@ export function Home({
   // transformed then, which no fixed position inside it would survive.
   armed: boolean
 }) {
-  const [events, setEvents] = useState<PlanEvent[] | null>(null)
+  const [day, setDay] = useState<DayView | null>(null)
   const [beat, tick] = useState(0)
   const [pending, setPending] = useState(false)
   const [later, setLater] = useState(false)
@@ -163,12 +175,16 @@ export function Home({
   useEscape(later, () => setLater(false))
 
   const load = useCallback(() => {
+    const date = todayIso()
     api
-      .planToday()
-      .then(setEvents)
-      .catch(() => setEvents([]))
+      .day(date)
+      .then(setDay)
+      .catch(() =>
+        setDay({ date, events: [], calendar: [], free: [], quiet_now: null, history: [] }),
+      )
   }, [])
   useEffect(load, [load, refresh])
+  const events = day?.events ?? null
 
   useEffect(() => {
     const id = setInterval(() => tick((n) => n + 1), 1000)
@@ -209,6 +225,14 @@ export function Home({
     })
   }
 
+  // A block laid for a task is finished on both counts at once: the plan settles,
+  // and so does the task it holds.
+  const finishBlock = (ev: PlanEvent) =>
+    act(async () => {
+      await api.eventAction(ev.id, 'done')
+      if (ev.task) await api.patchTask(ev.task.id, { state: 'done' })
+    })
+
   // the beat is a dependency because the holds live outside React state
   const visible = useMemo(
     () => (events ?? []).filter((ev) => ev.id !== dropHold.held() && ev.id !== doneHold.held()?.eventId),
@@ -220,14 +244,15 @@ export function Home({
   const label = next ? eventLabel(next.kind) : ''
 
   // A routine is timed to its span; without an end the routine default stands in.
+  // A block laid for a task runs as that task, so finishing it settles both.
   const start = (ev: PlanEvent) => {
     const span = ev.end_wall_time
       ? Math.max(1, minutesOf(ev.end_wall_time) - minutesOf(ev.wall_time))
       : ROUTINE_MIN
     openNow({
-      taskId: null,
+      taskId: ev.task?.id ?? null,
       eventId: ev.id,
-      title: eventLabel(ev.kind),
+      title: rowLabel(ev),
       notes: '',
       stepIndex: null,
       stepCount: null,
@@ -258,7 +283,8 @@ export function Home({
           .patchTask(s.taskId, { state: 'done', notes: withElapsedNote(s.notes, elapsed) })
           .then(onChanged)
           .catch(() => notify("Couldn't save the session. Try again."))
-      } else if (s.eventId !== null) {
+      }
+      if (s.eventId !== null) {
         api
           .eventAction(s.eventId, 'done')
           .then(onChanged)
@@ -518,31 +544,61 @@ export function Home({
     </section>
   )
 
+  // Everything still ahead, plus anything that pinged and was never answered.
+  const upcoming = visible.filter(
+    (ev) =>
+      (ev.status === 'pending' || ev.status === 'snoozed' || ev.status === 'fired') &&
+      (minutesOf(ev.end_wall_time ?? ev.wall_time) >= now || ev.status === 'fired'),
+  )
+
+  const blockActions = (ev: PlanEvent) => (
+    <span className="home-row-actions">
+      <button className="btn-haze small" disabled={pending} onClick={() => start(ev)}>Start</button>
+      <button className="btn-haze small" disabled={pending} onClick={() => finishBlock(ev)}>Done</button>
+      <Overflow
+        label="More"
+        items={[
+          { label: 'Drop today', run: () => drop(ev), disabled: pending },
+          { label: 'Move to tomorrow', run: () => act(() => api.moveTomorrow(ev.id)), disabled: pending },
+        ]}
+      />
+    </span>
+  )
+
   const list = (
     <ul className="home-list">
-      {visible
-        .filter((ev) => (ev.status === 'pending' || ev.status === 'snoozed' || ev.status === 'fired') && minutesOf(ev.end_wall_time ?? ev.wall_time) >= now)
-        .map((ev) => (
-          <li key={ev.id} className={ev.id === next?.id ? 'next' : ''}>
-            <span className="home-when">{ev.wall_time} – {ev.end_wall_time ?? ev.wall_time}</span>
-            <span className="home-what">
-              {eventLabel(ev.kind)}
+      {upcoming.map((ev) => (
+        <li
+          key={ev.id}
+          className={[
+            ev.id === next?.id ? 'next' : '',
+            ev.task ? 'task' : '',
+            minutesOf(ev.end_wall_time ?? ev.wall_time) < now ? 'overdue' : '',
+          ]
+            .filter(Boolean)
+            .join(' ')}
+        >
+          <span className="home-when">{ev.wall_time} – {ev.end_wall_time ?? ev.wall_time}</span>
+          <span className="home-what">
+            {rowLabel(ev)}
               {ev.channel === 'voice' && (
                 <svg className="home-phone" viewBox="0 0 24 24" role="img" aria-label="Note calls you">
                   <path d="M6.6 10.8a15.1 15.1 0 006.6 6.6l2.2-2.2a1 1 0 011-.25 11.4 11.4 0 003.6.57 1 1 0 011 1V20a1 1 0 01-1 1A17 17 0 013 4a1 1 0 011-1h3.5a1 1 0 011 1 11.4 11.4 0 00.57 3.6 1 1 0 01-.25 1z" />
                 </svg>
               )}
-            </span>
-          </li>
-        ))}
+          </span>
+          {ev.task && blockActions(ev)}
+        </li>
+      ))}
     </ul>
   )
 
   const compactLanding = mobile || inSession
-  const today = events && (
+  const today = day && (
     <div className="home-today">
       <DayLine events={visible} now={now} compact={mobile} nextId={next?.id} />
       {list}
+      {mobile && <SoFar rows={day.history} />}
       {mobile && <Jot flow openTalk={openTalk} openConversation={openConversation} />}
     </div>
   )
@@ -736,7 +792,7 @@ export function Home({
       }
       undo = scrollReveal(
         (t) => {
-          from(t, qa('.debrief-row, .debrief-note'), { autoAlpha: 0, y: 28, duration: 0.8, ease: 'power2.out' }, 0)
+          from(t, qa('.debrief-row, .debrief-note, .sofar'), { autoAlpha: 0, y: 28, duration: 0.8, ease: 'power2.out' }, 0)
           from(t, qa('#calendar-slot'), { autoAlpha: 0, y: 40, duration: 1, ease: 'power2.out' }, mobile ? 0 : 0.25)
           from(t, qa('.ws-seg'), { scaleY: 0, transformOrigin: 'top', duration: 0.6, ease: 'power2.out', stagger: 0.04 }, 0.35)
           from(t, qa('.cal-line .cal-band'), { scaleX: 0, transformOrigin: 'left center', duration: 0.6, ease: 'power2.out', stagger: 0.1 }, 0.6)
@@ -806,8 +862,15 @@ export function Home({
       </section>
       <section ref={ground} className="today-ground">
         {!mobile && <DebriefFold />}
+        {!mobile && day && <SoFar rows={day.history} />}
         <section id="calendar-slot">
-          <CalendarSection notify={notify} refresh={refresh} onChanged={onChanged} />
+          <CalendarSection
+            notify={notify}
+            refresh={refresh}
+            onChanged={onChanged}
+            day={day}
+            onStartBlock={start}
+          />
         </section>
       </section>
     </div>

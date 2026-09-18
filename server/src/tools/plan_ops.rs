@@ -43,14 +43,17 @@ fn wall(minutes: i64) -> String {
     format!("{:02}:{:02}", minutes / 60, minutes % 60)
 }
 
+fn timezone(ctx: &ToolCtx) -> jiff::tz::TimeZone {
+    crate::config::UserConfig::load(ctx.config_dir, ctx.username)
+        .ok()
+        .and_then(|c| jiff::tz::TimeZone::get(&c.timezone).ok())
+        .unwrap_or(jiff::tz::TimeZone::UTC)
+}
+
 /// The day the user is living in, which is what "today or later" is measured
 /// against.
 fn today(ctx: &ToolCtx) -> jiff::civil::Date {
-    let tz = crate::config::UserConfig::load(ctx.config_dir, ctx.username)
-        .ok()
-        .and_then(|c| jiff::tz::TimeZone::get(&c.timezone).ok())
-        .unwrap_or(jiff::tz::TimeZone::UTC);
-    jiff::Timestamp::now().to_zoned(tz).date()
+    jiff::Timestamp::now().to_zoned(timezone(ctx)).date()
 }
 
 /// The day's plan, generated from the user's template when the day has none —
@@ -89,6 +92,23 @@ fn resolve_tasks(conn: &Connection, ctx: &ToolCtx, ids: &[i64]) -> Result<Vec<Pl
         .collect()
 }
 
+/// Every task that already holds a non-dropped slot on that day, mapped to the
+/// event holding it.
+pub(crate) fn planned_on(
+    conn: &Connection,
+    user_id: i64,
+    date: jiff::civil::Date,
+) -> rusqlite::Result<std::collections::HashMap<i64, i64>> {
+    let mut stmt = conn.prepare(
+        "SELECT et.task_id, e.id FROM event_tasks et
+         JOIN events e ON e.id = et.event_id
+         JOIN plans p ON p.id = e.plan_id
+         WHERE p.user_id = ?1 AND p.date = ?2 AND e.status != 'dropped'",
+    )?;
+    let rows = stmt.query_map((user_id, date.to_string()), |r| Ok((r.get(0)?, r.get(1)?)))?;
+    rows.collect()
+}
+
 /// Tasks that already hold a slot on that day; planning one twice is a mistake
 /// the model should see rather than a second block.
 fn already_planned(
@@ -97,41 +117,27 @@ fn already_planned(
     date: jiff::civil::Date,
     tasks: &[Planned],
 ) -> Result<Vec<String>, ToolError> {
-    let mut found = Vec::new();
-    for t in tasks {
-        let event: Option<i64> = conn
-            .query_row(
-                "SELECT e.id FROM event_tasks et
-                 JOIN events e ON e.id = et.event_id
-                 JOIN plans p ON p.id = e.plan_id
-                 WHERE p.user_id = ?1 AND p.date = ?2 AND et.task_id = ?3
-                   AND e.status != 'dropped'",
-                (ctx.user_id, date.to_string(), t.id),
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(internal)?;
-        if let Some(event) = event {
-            found.push(format!("task {} ({}) as event_id {event}", t.id, t.title));
-        }
-    }
-    Ok(found)
+    let held = planned_on(conn, ctx.user_id, date).map_err(internal)?;
+    Ok(tasks
+        .iter()
+        .filter_map(|t| {
+            held.get(&t.id).map(|e| format!("task {} ({}) as event_id {e}", t.id, t.title))
+        })
+        .collect())
 }
 
 /// Everything already occupying time on that day, as half-open minute ranges.
-fn occupied(
+pub(crate) fn occupied(
     conn: &Connection,
-    ctx: &ToolCtx,
+    user_id: i64,
     date: jiff::civil::Date,
-) -> Result<Vec<(String, i64, i64)>, ToolError> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT e.kind, e.wall_time, e.end_wall_time, e.span_min FROM events e
-             JOIN plans p ON p.id = e.plan_id
-             WHERE p.user_id = ?1 AND p.date = ?2 AND e.status != 'dropped'",
-        )
-        .map_err(internal)?;
-    stmt.query_map((ctx.user_id, date.to_string()), |r| {
+) -> rusqlite::Result<Vec<(String, i64, i64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT e.kind, e.wall_time, e.end_wall_time, e.span_min FROM events e
+         JOIN plans p ON p.id = e.plan_id
+         WHERE p.user_id = ?1 AND p.date = ?2 AND e.status != 'dropped'",
+    )?;
+    stmt.query_map((user_id, date.to_string()), |r| {
         let kind: String = r.get(0)?;
         let start: String = r.get(1)?;
         let end: Option<String> = r.get(2)?;
@@ -141,7 +147,6 @@ fn occupied(
         Ok((format!("{kind} at {start}-{}", wall(to)), from, to))
     })
     .and_then(|rows| rows.collect::<rusqlite::Result<Vec<_>>>())
-    .map_err(internal)
 }
 
 /// Lays the tasks out as consecutive blocks on one day's plan: each as long as
@@ -237,7 +242,8 @@ pub fn plan_tasks(
     }
 
     let plan_id = plan_row(conn, ctx, date)?;
-    let mut clashes: Vec<String> = occupied(conn, ctx, date)?
+    let mut clashes: Vec<String> = occupied(conn, ctx.user_id, date)
+        .map_err(internal)?
         .into_iter()
         .filter(|(_, from, to)| laid.iter().any(|(_, s, e)| s < to && from < e))
         .map(|(label, _, _)| label)
@@ -256,8 +262,8 @@ pub fn plan_tasks(
         let kind: String = task.title.chars().take(MAX_KIND_CHARS).collect();
         conn.execute(
             "INSERT INTO events (plan_id, kind, wall_time, orig_wall_time, end_wall_time,
-                                 flexibility, slide_window_min, channel, alert, span_min)
-             VALUES (?1, ?2, ?3, ?3, ?4, 'drop', 0, 'push', 0, ?5)",
+                                 flexibility, slide_window_min, channel, alert, span_min, origin)
+             VALUES (?1, ?2, ?3, ?3, ?4, 'drop', 0, 'push', 0, ?5, 'agent')",
             (plan_id, &kind, wall(start), wall(end), task.minutes),
         )
         .map_err(internal)?;
@@ -275,6 +281,46 @@ pub fn plan_tasks(
         }));
     }
     Ok(serde_json::json!({ "plan_date": date.to_string(), "events": events }))
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PlanAutoArgs {
+    /// The day to fill, YYYY-MM-DD: today or one of the next 14 days. Omit for
+    /// today.
+    #[serde(default)]
+    pub date: Option<String>,
+}
+
+pub fn plan_auto(
+    conn: &Connection,
+    ctx: &ToolCtx,
+    args: PlanAutoArgs,
+) -> Result<serde_json::Value, ToolError> {
+    unscoped(ctx)?;
+    let today = today(ctx);
+    let date = match args.date {
+        Some(d) => d
+            .parse::<jiff::civil::Date>()
+            .map_err(|_| ToolError::rejected(format!("date must be YYYY-MM-DD, got {d:?}")))?,
+        None => today,
+    };
+    let horizon = today
+        .checked_add(jiff::Span::new().days(MAX_DAYS_AHEAD))
+        .map_err(internal)?;
+    if date < today || date > horizon {
+        return Err(ToolError::rejected(format!(
+            "date must be from {today} to {horizon}, got {date}"
+        )));
+    }
+    plan_row(conn, ctx, date)?;
+    let out = crate::allocate::run(conn, ctx.user_id, &timezone(ctx), date, jiff::Timestamp::now())
+        .map_err(internal)?;
+    Ok(serde_json::json!({
+        "plan_date": date.to_string(),
+        "placed": out.placed,
+        "cleared": out.cleared,
+    }))
 }
 
 #[derive(Deserialize, JsonSchema)]
