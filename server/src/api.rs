@@ -458,6 +458,7 @@ async fn task_agent(
             embeddings: state.embeddings.as_deref(),
             task_scope: Some(id),
             inbox_source: None,
+            memory_source: None,
             token_id,
             thread_note: None,
         };
@@ -617,6 +618,7 @@ async fn agent_inbox(
             embeddings: state.embeddings.as_deref(),
             task_scope: None,
             inbox_source: Some(req.source_id.clone()),
+            memory_source: None,
             token_id,
             thread_note: None,
         };
@@ -853,6 +855,7 @@ async fn talk(
             embeddings: state.embeddings.as_deref(),
             task_scope: None,
             inbox_source: None,
+            memory_source: None,
             token_id: None,
             thread_note,
         };

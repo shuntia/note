@@ -66,6 +66,7 @@ fn delivery_reaches_the_user_through_the_ladder() {
         embeddings: None,
         task_scope: None,
         inbox_source: None,
+        memory_source: None,
         token_id: None,
         thread_note: None,
     };

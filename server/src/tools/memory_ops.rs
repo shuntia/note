@@ -124,7 +124,7 @@ pub fn write(
                 .category
                 .as_ref()
                 .ok_or_else(|| ToolError::rejected("add requires a category"))?;
-            crate::memory::add(
+            let id = crate::memory::add(
                 conn,
                 ctx.data_dir,
                 ctx.username,
@@ -133,8 +133,9 @@ pub fn write(
                 &args.body,
                 ctx.vectors.content.as_deref(),
             )
-            .map(|id| serde_json::json!({ "id": id }))
-            .map_err(|e| ToolError::internal(e.to_string()))
+            .map_err(|e| ToolError::internal(e.to_string()))?;
+            record_source(conn, ctx, &id)?;
+            Ok(serde_json::json!({ "id": id }))
         }
         WriteOp::Update => {
             let id = need_id()?;
@@ -147,7 +148,10 @@ pub fn write(
                 &args.body,
                 ctx.vectors.content.as_deref(),
             ) {
-                Ok(Some(())) => Ok(serde_json::json!({ "id": id })),
+                Ok(Some(())) => {
+                    record_source(conn, ctx, &id)?;
+                    Ok(serde_json::json!({ "id": id }))
+                }
                 Ok(None) => Err(ToolError::not_found(format!("no memory {id}"))),
                 Err(crate::memory::WriteError::Archived(id)) => Err(ToolError::rejected(format!(
                     "memory {id} is archived and immutable"
@@ -166,7 +170,10 @@ pub fn write(
                 &args.body,
                 ctx.vectors.content.as_deref(),
             ) {
-                Ok(Some(new_id)) => Ok(serde_json::json!({ "id": new_id })),
+                Ok(Some(new_id)) => {
+                    record_source(conn, ctx, &new_id)?;
+                    Ok(serde_json::json!({ "id": new_id }))
+                }
                 Ok(None) => Err(ToolError::not_found(format!("no memory {id}"))),
                 Err(crate::memory::WriteError::Archived(id)) => Err(ToolError::rejected(format!(
                     "memory {id} is archived and immutable"
@@ -175,6 +182,18 @@ pub fn write(
             }
         }
     }
+}
+
+/// Provenance for a session that writes on something else's behalf; a session
+/// with no source of its own leaves the table alone.
+fn record_source(conn: &Connection, ctx: &ToolCtx, memory_id: &str) -> Result<(), ToolError> {
+    let Some(source) = &ctx.memory_source else { return Ok(()) };
+    conn.execute(
+        "INSERT OR IGNORE INTO memory_sources (user_id, source_id, memory_id) VALUES (?1, ?2, ?3)",
+        (ctx.user_id, source, memory_id),
+    )
+    .map_err(|e| ToolError::internal(e.to_string()))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -192,7 +211,7 @@ mod tests {
     }
 
     fn ctx<'a>(tmp: &'a tempfile::TempDir) -> ToolCtx<'a> {
-        ToolCtx { config_dir: tmp.path(), data_dir: tmp.path(), user_id: 1, username: "aki", vectors: PreparedVectors::default(), task_scope: None, inbox_source: None }
+        ToolCtx { config_dir: tmp.path(), data_dir: tmp.path(), user_id: 1, username: "aki", vectors: PreparedVectors::default(), task_scope: None, inbox_source: None, memory_source: None }
     }
 
     #[test]
@@ -219,6 +238,38 @@ mod tests {
         let e = dispatch(&conn, &ctx(&tmp), SessionKind::Checkin, "memory_write",
             &format!(r#"{{"op":"supersede","id":"{id}","summary":"x","body":"y"}}"#)).unwrap_err();
         assert_eq!(e.kind, "rejected");
+    }
+
+    #[test]
+    fn a_sourced_session_records_where_each_fact_came_from() {
+        let (conn, tmp) = env();
+        let sourced = ToolCtx { memory_source: Some("harvest:2026-09-17".into()), ..ctx(&tmp) };
+        let out = dispatch(&conn, &sourced, SessionKind::Harvest, "memory_write",
+            r#"{"op":"add","category":"semantic","summary":"runs on tuesdays","body":"with mira"}"#).unwrap();
+        let id = out["id"].as_str().unwrap().to_string();
+        let out = dispatch(&conn, &sourced, SessionKind::Harvest, "memory_write",
+            &format!(r#"{{"op":"supersede","id":"{id}","summary":"runs on thursdays","body":"alone"}}"#)).unwrap();
+        let new_id = out["id"].as_str().unwrap().to_string();
+
+        let mut stmt = conn
+            .prepare("SELECT memory_id FROM memory_sources WHERE source_id = 'harvest:2026-09-17' ORDER BY memory_id")
+            .unwrap();
+        let mut ids: Vec<String> = stmt
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        ids.sort();
+        let mut want = vec![id, new_id];
+        want.sort();
+        assert_eq!(ids, want);
+
+        dispatch(&conn, &ctx(&tmp), SessionKind::Checkin, "memory_write",
+            r#"{"op":"add","category":"semantic","summary":"likes tea","body":"green"}"#).unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM memory_sources", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 2, "a session with no source records nothing");
     }
 
     #[test]
