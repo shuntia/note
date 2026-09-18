@@ -51,6 +51,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/plan/{date}/carry", post(plan_carry))
         .route("/api/day/{date}", get(day_view))
         .route("/api/debrief", get(debrief))
+        .route("/api/review", get(review))
         .route("/api/events/{id}/shift", post(event_shift))
         .route("/api/events/{id}/snooze", post(event_snooze))
         .route("/api/events/{id}/done", post(event_done))
@@ -1695,6 +1696,49 @@ async fn debrief(
     match row {
         Ok(Some((date, content))) => {
             Json(serde_json::json!({ "date": date, "content": content })).into_response()
+        }
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct ReviewQuery {
+    week: Option<String>,
+}
+
+/// Reads the stored weekly letter for the week `week` falls in (default: the
+/// latest one written); the Monday nightly is the only writer.
+async fn review(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Query(q): Query<ReviewQuery>,
+) -> impl IntoResponse {
+    let week = match q.week {
+        Some(w) => match w.parse::<jiff::civil::Date>() {
+            Ok(d) => Some(crate::review::monday_of(d).to_string()),
+            Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+        },
+        None => None,
+    };
+    let conn = state.db();
+    let row = match &week {
+        Some(w) => conn.query_row(
+            "SELECT week_start, content FROM reviews WHERE user_id = ?1 AND week_start = ?2",
+            (user.id, w),
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+        ),
+        None => conn.query_row(
+            "SELECT week_start, content FROM reviews WHERE user_id = ?1
+             ORDER BY week_start DESC LIMIT 1",
+            [user.id],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+        ),
+    }
+    .optional();
+    match row {
+        Ok(Some((week_start, content))) => {
+            Json(serde_json::json!({ "week_start": week_start, "content": content })).into_response()
         }
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),

@@ -13,6 +13,9 @@ pub const IMPORT_MAX_TURNS: usize = 2;
 /// A harvest reads one digest: enough rounds to search memory before each
 /// write and still finish.
 pub const HARVEST_MAX_TURNS: usize = 8;
+/// A review reads one week: enough rounds to search memory before each write
+/// and still finish.
+pub const REVIEW_MAX_TURNS: usize = 8;
 /// A trigger session looks around and then speaks or does not: room to read the
 /// situation, never room to hold a conversation with itself.
 pub const TRIGGER_MAX_TURNS: usize = 6;
@@ -116,6 +119,7 @@ pub fn run_session_watched(
         SessionKind::Inbox => crate::prompts::load(deps.config_dir, username, "inbox")?,
         SessionKind::Summarize => crate::prompts::load(deps.config_dir, username, "summarize")?,
         SessionKind::Harvest => crate::prompts::load(deps.config_dir, username, "harvest")?,
+        SessionKind::Review => crate::prompts::load(deps.config_dir, username, "review")?,
         _ => crate::prompts::load(deps.config_dir, username, "persona")?,
     };
     if kind == SessionKind::Nightly {
@@ -148,6 +152,7 @@ pub fn run_session_watched(
     let max_turns = match kind {
         _ if single_call(kind) => IMPORT_MAX_TURNS,
         SessionKind::Harvest => HARVEST_MAX_TURNS,
+        SessionKind::Review => REVIEW_MAX_TURNS,
         SessionKind::Trigger => TRIGGER_MAX_TURNS,
         _ => MAX_TURNS,
     };

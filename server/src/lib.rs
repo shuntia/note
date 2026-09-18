@@ -19,6 +19,7 @@ pub mod plan;
 pub mod prompts;
 pub mod providers;
 pub mod push_subs;
+pub mod review;
 pub mod runner;
 pub mod security;
 pub mod summaries;

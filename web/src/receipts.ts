@@ -23,6 +23,7 @@ function span(minutes: number): string {
 
 export function eventLabel(kind: string): string {
   if (kind === 'debrief') return 'Morning debrief'
+  if (kind === 'review') return 'Your week'
   if (kind === 'trigger') return 'Note checks in'
   const words = kind.replaceAll('_', ' ').replace('checkin', 'check-in').trim()
   return words.charAt(0).toUpperCase() + words.slice(1)

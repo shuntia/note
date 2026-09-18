@@ -31,6 +31,7 @@ import { SoFar } from '../sofar'
 import type { DayView, PlanEvent, SessionStart, Task, TaskNotify, TaskRef } from '../types'
 import { CalendarSection } from './Calendar'
 import { DebriefFold } from '../debrief'
+import { ReviewFold } from '../review'
 import '../styles/home-motion.css'
 
 const LATER_MINUTES = [5, 10, 15, 30, 60]
@@ -1030,6 +1031,7 @@ export function Home({
       </section>
       <section ref={ground} className="today-ground">
         {!mobile && <DebriefFold />}
+        {!mobile && <ReviewFold />}
         {!mobile && day && <SoFar rows={day.history} />}
         <section id="calendar-slot">
           <CalendarSection

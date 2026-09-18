@@ -439,6 +439,16 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (user_id, key)
     );
     ",
+    // v32
+    "
+    CREATE TABLE reviews (
+        user_id INTEGER NOT NULL REFERENCES users(id),
+        week_start TEXT NOT NULL,
+        content TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (user_id, week_start)
+    );
+    ",
 ];
 
 pub fn open(path: &Path) -> Result<Connection> {

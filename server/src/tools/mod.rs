@@ -5,6 +5,7 @@ pub mod inbox_ops;
 pub mod memory_ops;
 pub mod outreach_ops;
 pub mod plan_ops;
+pub mod review_ops;
 pub mod schedule_ops;
 pub mod summary_ops;
 pub mod task_ops;
@@ -31,6 +32,9 @@ pub enum SessionKind {
     Harvest,
     /// One trigger point, fired: read the situation, then speak or stay quiet.
     Trigger,
+    /// The week just ended, read once for the letter that stands beside Monday's
+    /// debrief.
+    Review,
 }
 
 /// A tool failure returned to the model as a value; `kind` is machine-matchable,
@@ -259,6 +263,8 @@ const SUMMARIZE: &[&str] = &["summary_write"];
 const HARVEST: &[&str] =
     &["memory_query", "memory_read", "memory_write", "harvest_done"];
 const INBOX: &[&str] = &["memory_query", "memory_read", "inbox_decide"];
+const REVIEW: &[&str] =
+    &["memory_query", "memory_read", "memory_write", "review_write"];
 const NIGHTLY: &[&str] = &[
     "memory_query",
     "memory_read",
@@ -314,6 +320,7 @@ pub fn is_terminal(kind: SessionKind, name: &str) -> bool {
         SessionKind::Inbox => name == "inbox_decide",
         SessionKind::Summarize => name == "summary_write",
         SessionKind::Harvest => name == "harvest_done",
+        SessionKind::Review => name == "review_write",
         SessionKind::Trigger => name == "say" || name == "stay_quiet",
         _ => false,
     }
@@ -328,6 +335,7 @@ pub fn registry(kind: SessionKind) -> &'static [&'static str] {
         SessionKind::Inbox => INBOX,
         SessionKind::Summarize => SUMMARIZE,
         SessionKind::Harvest => HARVEST,
+        SessionKind::Review => REVIEW,
         SessionKind::Trigger => TRIGGER,
     }
 }
@@ -389,7 +397,10 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
             schema::<memory_ops::ReadArgs>(),
         ),
         "memory_write" => (
-            "Add, update, or supersede a memory. Superseding archives the old fact.",
+            "Add, update, or supersede a memory. Superseding archives the old fact. \
+             On an add, until (YYYY-MM-DD) is the date the fact stops mattering, after \
+             which it is archived on its own — set it on anything tied to a stretch of \
+             time, and leave it off what stays true.",
             schema::<memory_ops::WriteArgs>(),
         ),
         "summary_write" => (
@@ -401,6 +412,11 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
             "End the harvest, naming how many facts you wrote and, in note, what you \
              left out and why. Call it once, last.",
             schema::<harvest_ops::DoneArgs>(),
+        ),
+        "review_write" => (
+            "Write the week's letter, in a single call that ends the session. 1 to 4000 bytes \
+             of plain text, addressed to the user.",
+            schema::<review_ops::WriteArgs>(),
         ),
         "context_edit" => (
             "Edit the standing context document: replace a unique snippet or append a line.",
@@ -630,6 +646,7 @@ fn run(
         "memory_write" => memory_ops::write(conn, ctx, parse(raw)?),
         "summary_write" => summary_ops::write(conn, ctx, parse(raw)?),
         "harvest_done" => harvest_ops::done(conn, ctx, parse(raw)?),
+        "review_write" => review_ops::write(conn, ctx, parse(raw)?),
         "context_edit" => context_ops::edit(conn, ctx, parse(raw)?),
         "schedule_slide" => schedule_ops::slide(conn, ctx, parse(raw)?),
         "schedule_snooze" => schedule_ops::snooze(conn, ctx, parse(raw)?),
@@ -1023,10 +1040,14 @@ mod tests {
             .iter()
             .filter(|t| !is_terminal(SessionKind::Harvest, t))
             .all(|t| registry(SessionKind::Nightly).contains(t)));
+        assert!(registry(SessionKind::Review)
+            .iter()
+            .filter(|t| !is_terminal(SessionKind::Review, t))
+            .all(|t| registry(SessionKind::Nightly).contains(t)));
         assert!(registry(SessionKind::Import)
             .iter()
             .all(|t| !registry(SessionKind::Nightly).contains(t)));
-        for kind in [SessionKind::Summarize, SessionKind::Harvest] {
+        for kind in [SessionKind::Summarize, SessionKind::Harvest, SessionKind::Review] {
             assert!(
                 registry(kind).iter().all(|t| !registry(SessionKind::Import).contains(t)),
                 "{kind:?} shares a tool with an import session"
@@ -1039,6 +1060,7 @@ mod tests {
         assert_eq!(registry(SessionKind::Summarize), &["summary_write"]);
         assert!(is_terminal(SessionKind::Summarize, "summary_write"));
         assert!(is_terminal(SessionKind::Harvest, "harvest_done"));
+        assert!(is_terminal(SessionKind::Review, "review_write"));
         let (conn, tmp) = env();
         for kind in [SessionKind::Talk, SessionKind::Nightly, SessionKind::Harvest] {
             let e = dispatch(&conn, &ctx(&tmp), kind, "summary_write", r#"{"summary":"x"}"#)
@@ -1066,6 +1088,7 @@ mod tests {
             SessionKind::Inbox,
             SessionKind::Summarize,
             SessionKind::Harvest,
+            SessionKind::Review,
             SessionKind::Trigger,
         ] {
             assert!(
@@ -1210,6 +1233,7 @@ mod tests {
             SessionKind::Inbox,
             SessionKind::Summarize,
             SessionKind::Harvest,
+            SessionKind::Review,
             SessionKind::Trigger,
         ] {
             let schemas = schemas(kind);
