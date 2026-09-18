@@ -491,7 +491,7 @@ pub async fn run_turn(
         }
         Ok(Err(e)) => {
             let conn = state.db();
-            let _ = crate::log::record(&conn, Some(user_id), "talk_error", &e.to_string());
+            let _ = crate::log::record(&conn, Some(user_id), "talk_error", &format!("{e:#}"));
             Err(TurnError::Unavailable)
         }
         Err(e) => {

@@ -52,88 +52,85 @@ pub fn run_for_user(
             return Ok(());
         }
         if let Err(e) = crate::memory::archive_expired(&conn, deps.data_dir, username, local.date()) {
-            let _ = crate::log::record(&conn, Some(user_id), "memory_expire_error", &e.to_string());
+            let _ = crate::log::record(&conn, Some(user_id), "memory_expire_error", &format!("{e:#}"));
         }
     }
+    let mut report = Report::new(date);
+    let result = run_stages(deps, user_id, username, &ucfg, date, now, &mut report);
+    {
+        let conn = crate::db_guard(deps.db);
+        let _ = crate::log::record(&conn, Some(user_id), "nightly_run", &report.line());
+    }
+    result
+}
+
+/// Every stage of one run, in order. Its caller writes the report whether this
+/// returns or fails partway, so a run that dies still says where it died.
+fn run_stages(
+    deps: &SessionDeps,
+    user_id: i64,
+    username: &str,
+    ucfg: &UserConfig,
+    date: jiff::civil::Date,
+    now: jiff::Timestamp,
+    report: &mut Report,
+) -> Result<()> {
+    let tz = jiff::tz::TimeZone::get(&ucfg.timezone).unwrap_or(jiff::tz::TimeZone::UTC);
+    let note = |kind: &str, e: &anyhow::Error| {
+        let conn = crate::db_guard(deps.db);
+        let _ = crate::log::record_throttled(
+            &conn,
+            Some(user_id),
+            kind,
+            &format!("{e:#}"),
+            now,
+            crate::log::ERROR_LOG_WINDOW_MINS,
+        );
+    };
     // The day's conversations become memory before the plan is built, so the
     // planning session already counts what they left behind.
-    if let Err(e) = crate::harvest::run_for_user(deps, user_id, username, local.time_zone(), date, now)
-    {
-        let conn = crate::db_guard(deps.db);
-        let _ = crate::log::record_throttled(
-            &conn,
-            Some(user_id),
-            "harvest_error",
-            &e.to_string(),
-            now,
-            crate::log::ERROR_LOG_WINDOW_MINS,
-        );
-    }
+    let at = report.start();
+    let harvested = crate::harvest::run_for_user(deps, user_id, username, &tz, date, now);
+    report.stage("harvest", at, harvested.as_ref().err().inspect(|e| note("harvest_error", e)));
     // Monday's run looks back before it looks forward, so the planning session
     // already has the week's letter in memory.
-    if let Err(e) = crate::review::run_for_user(deps, user_id, username, local.time_zone(), date, now)
-    {
+    let at = report.start();
+    let reviewed = crate::review::run_for_user(deps, user_id, username, &tz, date, now);
+    report.stage("review", at, reviewed.as_ref().err().inspect(|e| note("review_error", e)));
+    let at = report.start();
+    let learned = {
         let conn = crate::db_guard(deps.db);
-        let _ = crate::log::record_throttled(
-            &conn,
-            Some(user_id),
-            "review_error",
-            &e.to_string(),
-            now,
-            crate::log::ERROR_LOG_WINDOW_MINS,
-        );
-    }
-    {
-        let conn = crate::db_guard(deps.db);
-        if let Err(e) = crate::learn::run_for_user(&conn, user_id, now) {
-            let _ = crate::log::record_throttled(
-                &conn,
-                Some(user_id),
-                "learn_error",
-                &e.to_string(),
-                now,
-                crate::log::ERROR_LOG_WINDOW_MINS,
-            );
-        }
-    }
-    {
+        crate::learn::run_for_user(&conn, user_id, now)
+    };
+    report.stage("learn", at, learned.as_ref().err().inspect(|e| note("learn_error", e)));
+
+    let at = report.start();
+    let generated = (|| -> Result<()> {
         let conn = crate::db_guard(deps.db);
         let tmpl = crate::templates::Template::load(deps.config_dir, username, &ucfg.template)?;
         crate::plan::generate(&conn, user_id, &tmpl, date)?;
+        Ok(())
+    })();
+    report.stage("plan", at, generated.as_ref().err());
+    generated?;
+    let at = report.start();
+    let allocated = {
+        let conn = crate::db_guard(deps.db);
         if let Err(e) = crate::review::lay_event(&conn, user_id, date) {
-            let _ = crate::log::record_throttled(
-                &conn,
-                Some(user_id),
-                "review_error",
-                &e.to_string(),
-                now,
-                crate::log::ERROR_LOG_WINDOW_MINS,
-            );
+            note("review_error", &e);
         }
-        if let Err(e) = crate::allocate::run(&conn, user_id, local.time_zone(), date, now) {
-            let _ = crate::log::record_throttled(
-                &conn,
-                Some(user_id),
-                "allocate_error",
-                &e.to_string(),
-                now,
-                crate::log::ERROR_LOG_WINDOW_MINS,
-            );
-        }
-        let close_day =
-            crate::triggers::lay_close_day(&conn, deps.config_dir, username, user_id, date, now);
-        if let Err(e) = close_day {
-            let _ = crate::log::record_throttled(
-                &conn,
-                Some(user_id),
-                "close_day_error",
-                &e.to_string(),
-                now,
-                crate::log::ERROR_LOG_WINDOW_MINS,
-            );
-        }
-    }
-    let content = match crate::agent::run_session(
+        crate::allocate::run(&conn, user_id, &tz, date, now)
+    };
+    report.stage("allocate", at, allocated.as_ref().err().inspect(|e| note("allocate_error", e)));
+    let at = report.start();
+    let closed = {
+        let conn = crate::db_guard(deps.db);
+        crate::triggers::lay_close_day(&conn, deps.config_dir, username, user_id, date, now)
+    };
+    report.stage("close_day", at, closed.as_ref().err().inspect(|e| note("close_day_error", e)));
+
+    let at = report.start();
+    let outcome = crate::agent::run_session(
         deps,
         user_id,
         username,
@@ -141,7 +138,9 @@ pub fn run_for_user(
         now,
         &[],
         &format!("Nightly run for {date}."),
-    ) {
+    );
+    report.stage("session", at, outcome.as_ref().err());
+    let content = match outcome {
         Ok(out) => {
             if !out.steps.iter().any(|s| s.name == NOTES_TOOL && !s.is_error) {
                 let conn = crate::db_guard(deps.db);
@@ -161,16 +160,56 @@ pub fn run_for_user(
         }
         Err(e) => {
             let conn = crate::db_guard(deps.db);
-            let _ = crate::log::record(&conn, Some(user_id), "nightly_fallback", &e.to_string());
+            let _ = crate::log::record(&conn, Some(user_id), "nightly_fallback", &format!("{e:#}"));
             FALLBACK_DEBRIEF.to_string()
         }
     };
+    report.debrief(content != FALLBACK_DEBRIEF);
     let conn = crate::db_guard(deps.db);
     conn.execute(
         "INSERT OR IGNORE INTO debriefs (user_id, date, content, created_at) VALUES (?1, ?2, ?3, ?4)",
         (user_id, date.to_string(), content, now.to_string()),
     )?;
     Ok(())
+}
+
+/// What the run did, stage by stage, for the one `nightly_run` row it leaves.
+/// Stage names and timings only: the errors themselves have their own rows and
+/// this one is readable on a release build.
+struct Report {
+    date: jiff::civil::Date,
+    stages: Vec<String>,
+    debrief: Option<&'static str>,
+}
+
+impl Report {
+    fn new(date: jiff::civil::Date) -> Self {
+        Self { date, stages: Vec::new(), debrief: None }
+    }
+
+    fn start(&self) -> std::time::Instant {
+        std::time::Instant::now()
+    }
+
+    fn stage(&mut self, name: &str, at: std::time::Instant, failure: Option<&anyhow::Error>) {
+        let status = match failure {
+            Some(_) => "error",
+            None => "ok",
+        };
+        self.stages.push(format!("{name}={status} {:.1}s", at.elapsed().as_secs_f64()));
+    }
+
+    fn debrief(&mut self, written: bool) {
+        self.debrief = Some(if written { "written" } else { "fallback" });
+    }
+
+    fn line(&self) -> String {
+        let mut parts = self.stages.clone();
+        if let Some(d) = self.debrief {
+            parts.push(format!("debrief={d}"));
+        }
+        format!("{}: {}", self.date, parts.join(", "))
+    }
 }
 
 /// Users whose local time has reached their configured `nightly_time` and who
@@ -282,7 +321,7 @@ pub fn spawn(state: crate::AppState) {
                 .await;
                 let failure = match result {
                     Ok((Ok(()), _)) => None,
-                    Ok((Err(e), username)) => Some(format!("{username}: {e}")),
+                    Ok((Err(e), username)) => Some(format!("{username}: {e:#}")),
                     Err(join) => Some(format!("nightly task panicked: {join}")),
                 };
                 if let Some(detail) = failure {
@@ -517,6 +556,40 @@ mod tests {
         assert_eq!(logged, 0);
     }
 
+    fn nightly_run_row(conn: &rusqlite::Connection) -> String {
+        conn.query_row("SELECT detail FROM event_log WHERE kind = 'nightly_run'", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    /// The report line with each stage's seconds dropped, so it can be compared.
+    fn without_timings(line: &str) -> String {
+        line.split(", ")
+            .map(|part| match part.rsplit_once(' ') {
+                Some((head, secs)) if secs.ends_with('s') => head,
+                _ => part,
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    #[test]
+    fn a_finished_run_reports_every_stage_it_went_through() {
+        let (db, tmp) = env("UTC", "03:00");
+        let llm = MockLLM::scripted(vec![ChatResponse {
+            text: "good morning".into(),
+            tool_calls: vec![],
+        }]);
+        let now: jiff::Timestamp = "2026-08-31T04:00:00Z".parse().unwrap();
+        run_for_user(&deps(&db, &tmp, &llm), 1, "aki", now).unwrap();
+        let line = nightly_run_row(&db.lock().unwrap());
+        assert_eq!(
+            without_timings(&line),
+            "2026-08-31: harvest=ok, review=ok, learn=ok, plan=ok, allocate=ok, close_day=ok, \
+             session=ok, debrief=written"
+        );
+        assert_ne!(line, without_timings(&line), "every stage carries its own seconds");
+    }
+
     #[test]
     fn llm_failure_still_leaves_plan_and_fallback_debrief() {
         struct Failing;
@@ -544,6 +617,10 @@ mod tests {
             })
             .unwrap();
         assert_eq!(logged, 1);
+        let line = nightly_run_row(&conn);
+        assert!(line.contains("session=error"), "{line}");
+        assert!(line.ends_with("debrief=fallback"), "{line}");
+        assert!(!line.contains("down"), "the cause has its own row, not this one");
     }
 
     #[test]
