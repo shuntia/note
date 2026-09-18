@@ -3,7 +3,8 @@ import { useLayoutEffect, useRef, type ReactNode } from 'react'
 import { reducedMotion } from './motion'
 
 // One drawing at every size: the ring lives in a fixed 320-unit box and the
-// wrapper is what grows and shrinks, so the stroke scales with the ring.
+// wrapper is what grows and shrinks, so the stroke scales with the ring. `size` is
+// the width at 1440x900, taken through --u so the arc follows the viewport.
 export const VB = 320
 export const STROKE = 9
 const R = VB / 2 - STROKE * 1.4
@@ -105,7 +106,7 @@ export function Gauge({
 
   const d = arcPath(0)
   return (
-    <div className={`gauge${faded ? ' faded' : ''}`} style={{ width: size, height: size }}>
+    <div className={`gauge${faded ? ' faded' : ''}`} style={{ width: `calc(${size} * var(--u))`, height: `calc(${size} * var(--u))` }}>
       <svg className="gauge-ring" viewBox={`0 0 ${VB} ${VB}`} aria-hidden="true">
         <path ref={track} className="gauge-track" d={d} pathLength={1} strokeWidth={STROKE} />
         <path

@@ -15,8 +15,8 @@
 .cal .glyph,
 .sheet .glyph,
 .tip .glyph {
-  width: 18px;
-  height: 18px;
+  width: 1.125rem;
+  height: 1.125rem;
   fill: none;
   stroke: currentColor;
   stroke-width: 1.8;
@@ -27,38 +27,38 @@
 }
 .cal .tnum, .sheet .tnum { font-variant-numeric: tabular-nums; }
 
-.cal { width: min(342px, 88vw); display: flex; flex-direction: column; gap: 28px; }
-.cal-head { display: flex; align-items: center; justify-content: space-between; min-height: 44px; }
-.cal-month { display: inline-flex; align-items: center; gap: 6px; padding: 0; border: 0; background: none; font-family: var(--display); font-weight: 500; font-size: 1.375rem; letter-spacing: -0.02em; color: var(--ink); cursor: pointer; }
+.cal { width: min(21.375rem, 88vw); display: flex; flex-direction: column; gap: 1.75rem; }
+.cal-head { display: flex; align-items: center; justify-content: space-between; min-height: 2.75rem; }
+.cal-month { display: inline-flex; align-items: center; gap: 0.375rem; padding: 0; border: 0; background: none; font-family: var(--display); font-weight: 500; font-size: 1.375rem; letter-spacing: -0.02em; color: var(--ink); cursor: pointer; }
 .cal-range { font-family: var(--sans); font-size: 0.9375rem; font-weight: 400; color: var(--faint); }
-.cal-chev { width: 16px; height: 16px; color: var(--faint); transition: transform 0.2s ease; }
+.cal-chev { width: 1rem; height: 1rem; color: var(--faint); transition: transform 0.2s ease; }
 .cal-month.open .cal-chev { transform: rotate(90deg); }
 .cal-month:focus-visible, .cal-list li button:focus-visible { outline: 2px solid var(--ring); outline-offset: 3px; border-radius: 4px; }
 .cal .btn-round:focus-visible, .ws-day:focus-visible, .band:focus-visible, .day-dot:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 
 /* the week at a glance: each day carries a silhouette of its windows, 06–24 */
 .week-strip { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); }
-.ws-day { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 0; border: 0; background: none; cursor: pointer; border-radius: 12px; font: inherit; color: inherit; }
+.ws-day { display: flex; flex-direction: column; align-items: center; gap: 0.375rem; padding: 0; border: 0; background: none; cursor: pointer; border-radius: 0.75rem; font: inherit; color: inherit; }
 .ws-name { font-size: 0.66rem; letter-spacing: 0.1em; font-weight: 700; color: var(--faint); }
-.ws-num { width: 32px; height: 32px; display: grid; place-items: center; border-radius: 50%; font-family: var(--display); font-weight: 500; font-size: 1.0625rem; letter-spacing: -0.02em; color: var(--quiet); font-variant-numeric: tabular-nums; transition: box-shadow 0.2s ease, color 0.2s ease; }
+.ws-num { width: 2rem; height: 2rem; display: grid; place-items: center; border-radius: 50%; font-family: var(--display); font-weight: 500; font-size: 1.0625rem; letter-spacing: -0.02em; color: var(--quiet); font-variant-numeric: tabular-nums; transition: box-shadow 0.2s ease, color 0.2s ease; }
 .ws-day.is-today .ws-num { background: var(--ink); color: var(--ivory); }
 .ws-day[aria-pressed='true']:not(.is-today) .ws-num { box-shadow: inset 0 0 0 1.5px var(--ink); color: var(--ink); }
 .ws-day.past .ws-num { color: var(--faint); }
-.ws-col { position: relative; width: 6px; height: 30px; border-radius: 3px; background: var(--track); }
-.ws-seg { position: absolute; left: 0; right: 0; border-radius: 3px; }
+.ws-col { position: relative; width: 0.375rem; height: 1.875rem; border-radius: 0.1875rem; background: var(--track); }
+.ws-seg { position: absolute; left: 0; right: 0; border-radius: 0.1875rem; }
 /* a finger or a pointer needs more than six pixels */
-.ws-seg::before { content: ''; position: absolute; inset: -2px -10px; }
+.ws-seg::before { content: ''; position: absolute; inset: -0.125rem -0.625rem; }
 .ws-seg.fixed { background: var(--ink); }
 .ws-seg.busy { background: color-mix(in srgb, var(--quiet) 60%, transparent); }
-.ws-seg.note { background: var(--quiet); height: 2px !important; }
+.ws-seg.note { background: var(--quiet); height: 0.125rem !important; }
 .ws-seg.free { background: none; box-shadow: inset 0 0 0 1.5px var(--sun-ink); }
 
-.cal-line { padding: 16px 0 64px; }
-.cal-line .dl-hour { top: 40px; }
+.cal-line { padding: 1rem 0 4rem; }
+.cal-line .dl-hour { top: 2.5rem; }
 .cal-line .dl-now { z-index: 2; }
 
 /* a calendar window is ground under the line, never a pill on it */
-.dl-band { position: absolute; top: -8px; height: 16px; border-radius: 8px; box-sizing: border-box; z-index: 0; }
+.dl-band { position: absolute; top: -0.5rem; height: 1rem; border-radius: 0.5rem; box-sizing: border-box; z-index: 0; }
 .dl-band.fixed { background: color-mix(in srgb, var(--ink) 16%, transparent); }
 .dl-band.busy { background: var(--haze-strong); }
 .dl-band.once { background: none; border: 1.5px solid var(--line); }
@@ -67,30 +67,30 @@
 .dl-band.free { background: color-mix(in srgb, var(--sun) 16%, transparent); }
 .dl-band.once.free { border-color: var(--sun-ink); }
 /* a task block sits on the free band it was laid into, not beside it */
-.cal-line .dl-span.task { position: absolute; top: -6px; height: 12px; min-width: 10px; padding: 0; border: 0; border-left: 2px solid var(--sun-ink); border-radius: 3px 6px 6px 3px; background: var(--haze-strong); box-sizing: border-box; cursor: pointer; z-index: 1; }
+.cal-line .dl-span.task { position: absolute; top: -0.375rem; height: 0.75rem; min-width: 0.625rem; padding: 0; border: 0; border-left: 2px solid var(--sun-ink); border-radius: 0.1875rem 0.375rem 0.375rem 0.1875rem; background: var(--haze-strong); box-sizing: border-box; cursor: pointer; z-index: 1; }
 .cal-line .dl-span.task.settled { background: none; border-left-color: var(--line); box-shadow: inset 0 0 0 1px var(--line); }
-.dl-note { position: absolute; top: -9px; width: 2px; height: 18px; margin-left: -1px; background: var(--quiet); border-radius: 1px; }
-.dl-label.quiet { top: 18px; color: var(--faint); font-weight: 400; display: flex; align-items: center; gap: 5px; }
-.dl-label.quiet .glyph { width: 14px; height: 14px; stroke-width: 2; }
+.dl-note { position: absolute; top: -0.5625rem; width: 0.125rem; height: 1.125rem; margin-left: -0.0625rem; background: var(--quiet); border-radius: 1px; }
+.dl-label.quiet { top: 1.125rem; color: var(--faint); font-weight: 400; display: flex; align-items: center; gap: 0.3125rem; }
+.dl-label.quiet .glyph { width: 0.875rem; height: 0.875rem; stroke-width: 2; }
 
 .cal-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
-.cal-list li { display: grid; grid-template-columns: 96px minmax(0, 1fr) auto; align-items: center; gap: 12px; min-height: 44px; color: var(--ink); }
+.cal-list li { display: grid; grid-template-columns: 6rem minmax(0, 1fr) auto; align-items: center; gap: 0.75rem; min-height: 2.75rem; color: var(--ink); }
 .cal-list li button { text-align: left; background: none; border: 0; padding: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; color: inherit; font: inherit; }
 .cal-list li.skipped { color: var(--faint); }
 .cal-list li.skipped button { text-decoration: line-through; text-decoration-color: var(--line); }
-.cal-list .glyph { width: 16px; height: 16px; color: var(--faint); }
+.cal-list .glyph { width: 1rem; height: 1rem; color: var(--faint); }
 .cal-empty { margin: 0; color: var(--faint); font-size: 0.9375rem; }
 
 /* the words of one band, above it, only while asked for */
-.tip { position: absolute; z-index: 35; padding: 3px 9px; border-radius: 8px; background: var(--haze-strong); color: var(--quiet); font-size: 0.78rem; line-height: 1.4; white-space: nowrap; font-variant-numeric: tabular-nums; pointer-events: none; backdrop-filter: blur(10px); box-shadow: 0 10px 24px -16px var(--cal-shadow); opacity: 0; transform: translateY(4px); transition: opacity 0.18s ease, transform 0.18s ease; }
+.tip { position: absolute; z-index: 35; padding: 0.1875rem 0.5625rem; border-radius: 0.5rem; background: var(--haze-strong); color: var(--quiet); font-size: 0.78rem; line-height: 1.4; white-space: nowrap; font-variant-numeric: tabular-nums; pointer-events: none; backdrop-filter: blur(10px); box-shadow: 0 10px 24px -16px var(--cal-shadow); opacity: 0; transform: translateY(4px); transition: opacity 0.18s ease, transform 0.18s ease; }
 .tip.on { opacity: 1; transform: none; }
 .tip s { text-decoration-color: var(--line); }
 
 /* ── the week: 7 columns × hours ─────────────────────────────── */
-.week { --hour: 24px; --gutter: 26px; width: 100%; }
-.week-head { display: grid; grid-template-columns: var(--gutter) repeat(7, minmax(0, 1fr)); margin-bottom: 8px; }
-.week-head .ws-day { gap: 2px; cursor: default; }
-.week-head .ws-num { width: 28px; height: 28px; font-size: 0.9375rem; }
+.week { --hour: 1.5rem; --gutter: 1.625rem; width: 100%; }
+.week-head { display: grid; grid-template-columns: var(--gutter) repeat(7, minmax(0, 1fr)); margin-bottom: 0.5rem; }
+.week-head .ws-day { gap: 0.125rem; cursor: default; }
+.week-head .ws-num { width: 1.75rem; height: 1.75rem; font-size: 0.9375rem; }
 .week-body { position: relative; display: grid; grid-template-columns: var(--gutter) repeat(7, minmax(0, 1fr)); height: calc(var(--hour) * 18); }
 .week-hour { position: relative; font-size: 0.66rem; letter-spacing: 0.06em; color: var(--faint); font-variant-numeric: tabular-nums; }
 .week-hour span { position: absolute; left: 0; transform: translateY(-50%); }
@@ -100,10 +100,10 @@
 .week-rule { position: absolute; left: var(--gutter); right: 0; height: 1px; background: var(--track); pointer-events: none; }
 .week-rule.major { background: var(--line); opacity: 0.5; }
 .week-now { position: absolute; left: var(--gutter); right: 0; height: 1px; background: var(--ink); opacity: 0.7; z-index: 3; pointer-events: none; }
-.week-now::before { content: ''; position: absolute; left: -1px; top: -5px; width: 11px; height: 11px; border-radius: 50%; background: var(--ink); }
-.week-now .cal-quiet { position: absolute; right: 0; bottom: 6px; display: flex; align-items: center; gap: 5px; color: var(--faint); font-size: 0.78rem; font-variant-numeric: tabular-nums; }
-.week-now .cal-quiet .glyph { width: 14px; height: 14px; stroke-width: 2; color: var(--quiet); }
-.band { position: absolute; left: 2px; right: 2px; border-radius: 7px; padding: 3px; font-family: var(--display); font-weight: 500; font-size: 0.68rem; line-height: 1.15; letter-spacing: -0.02em; overflow: hidden; text-align: left; cursor: pointer; border: 0; box-sizing: border-box; z-index: 2; }
+.week-now::before { content: ''; position: absolute; left: -0.0625rem; top: -0.3125rem; width: 0.6875rem; height: 0.6875rem; border-radius: 50%; background: var(--ink); }
+.week-now .cal-quiet { position: absolute; right: 0; bottom: 0.375rem; display: flex; align-items: center; gap: 0.3125rem; color: var(--faint); font-size: 0.78rem; font-variant-numeric: tabular-nums; }
+.week-now .cal-quiet .glyph { width: 0.875rem; height: 0.875rem; stroke-width: 2; color: var(--quiet); }
+.band { position: absolute; left: 0.125rem; right: 0.125rem; border-radius: 0.4375rem; padding: 0.1875rem; font-family: var(--display); font-weight: 500; font-size: 0.68rem; line-height: 1.15; letter-spacing: -0.02em; overflow: hidden; text-align: left; cursor: pointer; border: 0; box-sizing: border-box; z-index: 2; }
 .band .t { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .band.tall .t { display: inline; white-space: nowrap; }
 .band.fixed { background: var(--ink); color: var(--ivory); }
@@ -114,53 +114,53 @@
 .band.skipped .t { text-decoration: line-through; text-decoration-color: var(--line); }
 .band.free { background: none; box-shadow: none; border: 1.5px dashed var(--sun-ink); color: var(--sun-ink); z-index: 1; }
 /* the day's own attention, laid over the free time it was given */
-.band.task { background: var(--haze-strong); color: var(--ink); border-left: 2px solid var(--sun-ink); border-radius: 3px 7px 7px 3px; }
+.band.task { background: var(--haze-strong); color: var(--ink); border-left: 2px solid var(--sun-ink); border-radius: 0.1875rem 0.4375rem 0.4375rem 0.1875rem; }
 .band.task.settled { background: none; border-left-color: var(--line); color: var(--faint); }
 .band.task.settled .t { text-decoration: line-through; text-decoration-color: var(--line); }
-.band.note { background: none; border-top: 2px solid var(--quiet); border-radius: 0; padding: 3px 0 0; color: var(--ink); height: auto !important; overflow: visible; z-index: 3; }
-.band.note .t { display: inline-block; max-width: none; overflow: visible; padding: 1px 6px; border-radius: 5px; background: var(--haze-strong); font-size: 0.68rem; }
+.band.note { background: none; border-top: 2px solid var(--quiet); border-radius: 0; padding: 0.1875rem 0 0; color: var(--ink); height: auto !important; overflow: visible; z-index: 3; }
+.band.note .t { display: inline-block; max-width: none; overflow: visible; padding: 0.0625rem 0.375rem; border-radius: 0.3125rem; background: var(--haze-strong); font-size: 0.68rem; }
 
 /* ── the entry sheet ─────────────────────────────────────────── */
 .scrim { position: fixed; inset: 0; z-index: 40; background: color-mix(in srgb, var(--cal-shadow) 55%, transparent); }
-.sheet { position: fixed; left: 0; right: 0; bottom: 0; z-index: 50; background: var(--haze-strong); backdrop-filter: blur(18px); border-radius: var(--radius-xl) var(--radius-xl) 0 0; padding: 10px 24px calc(34px + env(safe-area-inset-bottom)); display: flex; flex-direction: column; gap: 18px; box-shadow: 0 -24px 60px -40px var(--cal-shadow); }
-.sheet-handle { width: 36px; height: 4px; border-radius: 2px; background: var(--line); margin: 0 auto 6px; }
-.sheet-top { display: flex; align-items: center; gap: 8px; }
-.sheet-title { flex: 1; min-width: 0; border: 0; background: none; padding: 6px 0; font-family: var(--display); font-weight: 500; font-size: 1.5rem; letter-spacing: -0.02em; color: var(--ink); outline: none; }
+.sheet { position: fixed; left: 0; right: 0; bottom: 0; z-index: 50; background: var(--haze-strong); backdrop-filter: blur(18px); border-radius: var(--radius-xl) var(--radius-xl) 0 0; padding: 0.625rem 1.5rem calc(2.125rem + env(safe-area-inset-bottom)); display: flex; flex-direction: column; gap: 1.125rem; box-shadow: 0 -1.5rem 3.75rem -2.5rem var(--cal-shadow); }
+.sheet-handle { width: 2.25rem; height: 0.25rem; border-radius: 0.125rem; background: var(--line); margin: 0 auto 0.375rem; }
+.sheet-top { display: flex; align-items: center; gap: 0.5rem; }
+.sheet-title { flex: 1; min-width: 0; border: 0; background: none; padding: 0.375rem 0; font-family: var(--display); font-weight: 500; font-size: 1.5rem; letter-spacing: -0.02em; color: var(--ink); outline: none; }
 .sheet-title::placeholder { color: var(--faint); }
 .sheet-top .ev-more-wrap { position: relative; top: auto; right: auto; }
-.sheet-top .ev-more { width: 44px; height: 44px; font-size: 1.3rem; color: var(--quiet); }
-.sheet .ev-menu { min-width: 13rem; top: auto; bottom: calc(100% + 6px); }
-.sheet .ev-menu-item { display: flex; align-items: center; gap: 10px; }
-.sheet .ev-menu-item .check { width: 14px; height: 14px; margin-left: auto; color: var(--sage); }
-.ev-menu-sep { height: 1px; margin: 4px 8px; background: var(--track); }
-.sheet-time { display: flex; align-items: center; gap: 10px; font-size: 1.0625rem; color: var(--quiet); }
-.sheet-time .pill-in { width: calc(5ch + 36px); text-align: center; }
-.pill-in { min-height: 44px; border: 0; border-radius: 999px; background: var(--earth); padding: 9px 18px; color: var(--ink); font-family: var(--display); font-weight: 500; font-size: 1.125rem; letter-spacing: -0.01em; font-variant-numeric: tabular-nums; cursor: pointer; }
+.sheet-top .ev-more { width: 2.75rem; height: 2.75rem; font-size: 1.3rem; color: var(--quiet); }
+.sheet .ev-menu { min-width: 13rem; top: auto; bottom: calc(100% + 0.375rem); }
+.sheet .ev-menu-item { display: flex; align-items: center; gap: 0.625rem; }
+.sheet .ev-menu-item .check { width: 0.875rem; height: 0.875rem; margin-left: auto; color: var(--sage); }
+.ev-menu-sep { height: 1px; margin: 0.25rem 0.5rem; background: var(--track); }
+.sheet-time { display: flex; align-items: center; gap: 0.625rem; font-size: 1.0625rem; color: var(--quiet); }
+.sheet-time .pill-in { width: calc(5ch + 2.25rem); text-align: center; }
+.pill-in { min-height: 2.75rem; border: 0; border-radius: 999px; background: var(--earth); padding: 0.5625rem 1.125rem; color: var(--ink); font-family: var(--display); font-weight: 500; font-size: 1.125rem; letter-spacing: -0.01em; font-variant-numeric: tabular-nums; cursor: pointer; }
 .pill-in:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
-.days { display: flex; justify-content: space-between; gap: 6px; }
-.day-dot { width: 40px; height: 40px; border-radius: 50%; border: 0; background: var(--track); color: var(--quiet); font: inherit; font-size: 0.8125rem; font-weight: 700; cursor: pointer; padding: 0; display: grid; place-items: center; transition: background-color 0.2s ease, color 0.2s ease; }
+.days { display: flex; justify-content: space-between; gap: 0.375rem; }
+.day-dot { width: 2.5rem; height: 2.5rem; border-radius: 50%; border: 0; background: var(--track); color: var(--quiet); font: inherit; font-size: 0.8125rem; font-weight: 700; cursor: pointer; padding: 0; display: grid; place-items: center; transition: background-color 0.2s ease, color 0.2s ease; }
 .day-dot[aria-pressed='true'] { background: var(--ink); color: var(--ivory); }
-.sheet-row { display: flex; align-items: center; gap: 12px; min-height: 44px; }
-.sheet-row .label { flex: 1; display: flex; align-items: center; gap: 10px; font-size: 1rem; color: var(--ink); }
+.sheet-row { display: flex; align-items: center; gap: 0.75rem; min-height: 2.75rem; }
+.sheet-row .label { flex: 1; display: flex; align-items: center; gap: 0.625rem; font-size: 1rem; color: var(--ink); }
 .sheet-row .label .glyph { color: var(--quiet); }
-.sheet-date { padding: 8px 14px; border-radius: 999px; background: var(--earth); color: var(--ink); font-size: 0.9375rem; font-variant-numeric: tabular-nums; }
-.sheet-save { margin-top: 4px; }
+.sheet-date { padding: 0.5rem 0.875rem; border-radius: 999px; background: var(--earth); color: var(--ink); font-size: 0.9375rem; font-variant-numeric: tabular-nums; }
+.sheet-save { margin-top: 0.25rem; }
 
 @media (min-width: 768px) {
-  .cal.desktop { width: min(1200px, calc(100vw - 240px)); gap: 20px; }
+  .cal.desktop { width: min(var(--column), 100%); gap: 1.25rem; }
   .cal.desktop .cal-month { font-size: 1.75rem; cursor: default; }
-  .week { --hour: 28px; --gutter: 44px; }
-  .week-head .ws-num { width: 32px; height: 32px; font-size: 1.0625rem; }
-  .week .band { left: 4px; right: 6px; padding: 6px 9px; font-size: 0.875rem; border-radius: 8px; }
-  .week .band.note { padding: 3px 0 0; }
+  .week { --hour: 1.75rem; --gutter: 2.75rem; }
+  .week-head .ws-num { width: 2rem; height: 2rem; font-size: 1.0625rem; }
+  .week .band { left: 0.25rem; right: 0.375rem; padding: 0.375rem 0.5625rem; font-size: 0.875rem; border-radius: 0.5rem; }
+  .week .band.note { padding: 0.1875rem 0 0; }
   .week .band.note .t { font-size: 0.8rem; }
   .week-hour { font-size: 0.72rem; }
-  .sheet { left: auto; right: 24px; bottom: 24px; width: 420px; border-radius: var(--radius-xl); padding-bottom: 28px; }
+  .sheet { left: auto; right: 1.5rem; bottom: 1.5rem; width: 26.25rem; border-radius: var(--radius-xl); padding-bottom: 1.75rem; }
 }
 
 @media (max-width: 767.98px) {
   /* a window taller than its title is wide reads down its column */
-  .band.tall { writing-mode: vertical-rl; display: flex; align-items: center; padding: 9px 0; }
+  .band.tall { writing-mode: vertical-rl; display: flex; align-items: center; padding: 0.5625rem 0; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -171,11 +171,11 @@
 
 /* ── filling free time, and the block that lands in it ───────────── */
 .cal-fill { margin-left: auto; font-size: 0.875rem; color: var(--sun-ink); }
-.cal-head .btn-round { margin-left: 8px; }
+.cal-head .btn-round { margin-left: 0.5rem; }
 
-.block-menu { position: fixed; left: 50%; bottom: 20%; z-index: 50; transform: translateX(-50%); min-width: 15rem; max-width: calc(100vw - 48px); background-color: var(--earth); background-image: linear-gradient(var(--haze-strong), var(--haze-strong)); border-radius: 16px; padding: 0.35rem; backdrop-filter: blur(14px); box-shadow: 0 24px 50px -30px var(--cal-shadow); }
+.block-menu { position: fixed; left: 50%; bottom: 20%; z-index: 50; transform: translateX(-50%); min-width: 15rem; max-width: calc(100vw - 3rem); background-color: var(--earth); background-image: linear-gradient(var(--haze-strong), var(--haze-strong)); border-radius: 1rem; padding: 0.35rem; backdrop-filter: blur(14px); box-shadow: 0 1.5rem 3.125rem -1.875rem var(--cal-shadow); }
 .block-menu-head { display: flex; flex-direction: column; gap: 2px; padding: 0.6rem 0.75rem 0.5rem; }
 .block-menu-title { font-family: var(--display); font-weight: 500; font-size: 1.0625rem; letter-spacing: -0.02em; color: var(--ink); }
-.block-menu-when { display: flex; align-items: center; gap: 8px; font-size: 0.8125rem; color: var(--faint); }
+.block-menu-when { display: flex; align-items: center; gap: 0.5rem; font-size: 0.8125rem; color: var(--faint); }
 .block-menu-auto { padding: 1px 7px; border-radius: 999px; background: color-mix(in srgb, var(--sun) 22%, transparent); color: var(--sun-ink); font-size: 0.68rem; letter-spacing: 0.08em; text-transform: uppercase; }
 .block-menu-settled { margin: 0; padding: 0.5rem 0.75rem 0.75rem; color: var(--faint); font-size: 0.9rem; }
