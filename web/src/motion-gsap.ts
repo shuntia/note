@@ -82,3 +82,58 @@ export function flip(moves: readonly { el: Element; dy: number }[]): void {
     gsap.from(el, { y: dy, duration: 0.38, ease: 'power2.out', clearProps: 'transform' })
   }
 }
+
+/** The view giving way; `done` runs once it is free to unmount. */
+export function viewOut(el: Target, done: () => void): void {
+  if (still() || !el) return done()
+  gsap.to(el, {
+    autoAlpha: 0,
+    y: -8,
+    duration: 0.18,
+    ease: 'power2.in',
+    overwrite: true,
+    onComplete: done,
+  })
+}
+
+/** The view taking the screen, rising into the place the last one held. */
+export function viewIn(el: Target, done: () => void): void {
+  if (still() || !el) return done()
+  gsap.fromTo(
+    el,
+    { opacity: 0, y: 8 },
+    {
+      opacity: 1,
+      y: 0,
+      duration: 0.28,
+      delay: 0.06,
+      ease: 'power2.out',
+      overwrite: true,
+      onComplete: () => {
+        // A pin inside the arriving view needs its layer free of transforms.
+        gsap.set(el, { clearProps: 'transform,opacity' })
+        done()
+      },
+    },
+  )
+}
+
+/** Holds a view at the pixels it occupies so the next one can take the layout under it. */
+export function lift(el: HTMLElement): void {
+  const y = Number(gsap.getProperty(el, 'y')) || 0
+  const r = el.getBoundingClientRect()
+  Object.assign(el.style, {
+    position: 'fixed',
+    left: `${r.left}px`,
+    top: `${r.top - y}px`,
+    width: `${r.width}px`,
+    height: `${r.height}px`,
+  })
+}
+
+/** The mark behind the current view's name, sliding to the one just chosen. */
+export function glide(el: Target, to: { x: number; width: number }, animate: boolean): void {
+  if (!el) return
+  if (animate && !still()) gsap.to(el, { ...to, duration: 0.34, ease: 'power3.out', overwrite: true })
+  else gsap.set(el, to)
+}

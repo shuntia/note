@@ -21,8 +21,9 @@
 /* the words the morph carries take the target's optical size and tracking on the way */
 .atom { display: inline-block; font-variation-settings: 'opsz' var(--opsz); letter-spacing: var(--ls); }
 
-/* the landing spots are hidden until the timeline owns them (it measures them first) */
-.home.motion:not(.morph-ready) :is(.home-face.compact, .home-sheet, .home-today, .today-hero, .today-line, .today-bar, .tabs) { visibility: hidden; }
+/* the landing spots are hidden until the timeline owns them (it measures them first);
+   the tab bar is the shell's, so shell.css hides that one on the same condition */
+.home.motion:not(.morph-ready) :is(.home-face.compact, .home-sheet, .home-today, .today-hero, .today-line, .today-bar) { visibility: hidden; }
 
 /* ── the compact header ── */
 .home-face.compact { flex-direction: row; align-items: center; gap: 16px; width: 100%; padding: 54px 24px 0; box-sizing: border-box; }
@@ -46,8 +47,6 @@
 #calendar-slot { display: flex; justify-content: center; width: 100%; }
 .home.desktop #calendar-slot { justify-content: flex-start; }
 #calendar-slot:empty { display: none; }
-
-.home .tabs { position: fixed; left: 0; right: 0; bottom: 0; z-index: 10; margin: 0; backdrop-filter: blur(14px); }
 
 /* ── without motion: plain sections, the face a screen of its own ── */
 .home.still { display: block; }

@@ -1,5 +1,16 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type FormEvent,
+  type ReactNode,
+} from 'react'
+import { flushSync } from 'react-dom'
 import { api, ApiError, setOnUnauthorized } from './api'
+import { glide, lift, viewIn, viewOut } from './motion-gsap'
+import { reducedMotion } from './motion'
 import { NavIcon } from './navicon'
 import { prefsFrom, writePrefs } from './prefs'
 import { makeHold } from './held'
@@ -12,6 +23,7 @@ import { Settings } from './views/Settings'
 import { Talk } from './views/Talk'
 import { Tasks } from './views/Tasks'
 import { connectEvents } from './ws'
+import './styles/shell.css'
 
 // `admin` is reached from Settings only, so it never joins NAV.
 type Tab = 'today' | 'tasks' | 'chat' | 'memory' | 'settings' | 'admin'
@@ -53,10 +65,17 @@ const NAV: { id: NavTab; label: string }[] = [
   { id: 'settings', label: 'Settings' },
 ]
 
+// A view on screen. A turn keeps the one being replaced alive under its own id until
+// it has faded, so nothing in it is torn down mid-transition.
+type Layer = { id: number; tab: Tab }
+
 export function App() {
   // undefined = session check in flight; null = signed out
   const [me, setMe] = useState<Me | null | undefined>(undefined)
-  const [tab, setTab] = useState<Tab>('today')
+  const [layer, setLayer] = useState<Layer>({ id: 0, tab: 'today' })
+  const [leaving, setLeaving] = useState<Layer | null>(null)
+  // true from the moment a turn starts until the arriving layer has settled
+  const [turning, setTurning] = useState(false)
   const [toast, setToast] = useState<{ msg: string; action?: ToastAction } | null>(null)
   const [refresh, setRefresh] = useState(0)
   const [talkPrefill, setTalkPrefill] = useState<string | null>(null)
@@ -65,6 +84,49 @@ export function App() {
   // Reading storage at mount is what makes the session face survive a reload.
   const [session, setSession] = useState<FocusSession | null>(readSession)
   const mobile = useMedia('(max-width: 767.98px)')
+
+  const tab = layer.tab
+  const here = useRef(layer)
+  here.current = layer
+  const layerEls = useRef(new Map<number, HTMLElement>())
+  const turn = useRef(0)
+
+  // Every way into a view goes through here: the outgoing one is held where it is
+  // while the arriving one takes the layout, and the page starts at the top again.
+  const go = useCallback((next: Tab) => {
+    const from = here.current
+    if (next === from.tab) return
+    const id = turn.current + 1
+    turn.current = id
+    const el = layerEls.current.get(from.id)
+    if (!el || reducedMotion()) {
+      setLeaving(null)
+      setTurning(false)
+      setLayer({ id, tab: next })
+      window.scrollTo(0, 0)
+      return
+    }
+    // Home pins the page as it scrolls, and lets go before its layer is lifted. The
+    // spacer that pin held leaves the page with it, so the scroll follows it down and
+    // what is on screen stays where it was; the reset is then the arriving view's.
+    const tall = document.documentElement.scrollHeight
+    const y = window.scrollY
+    flushSync(() => setTurning(true))
+    const shed = tall - document.documentElement.scrollHeight
+    if (shed > 0) window.scrollTo(0, Math.max(0, y - shed))
+    lift(el)
+    window.scrollTo(0, 0)
+    setLeaving(from)
+    setLayer({ id, tab: next })
+  }, [])
+
+  useLayoutEffect(() => {
+    if (!leaving) return
+    const id = turn.current
+    const mine = () => turn.current === id
+    viewOut(layerEls.current.get(leaving.id), () => mine() && setLeaving(null))
+    viewIn(layerEls.current.get(layer.id), () => mine() && setTurning(false))
+  }, [leaving, layer])
 
   const toastTimer = useRef(0)
   const notify = useCallback((msg: string, action?: ToastAction) => {
@@ -78,15 +140,21 @@ export function App() {
 
   const onChanged = useCallback(() => setRefresh((n) => n + 1), [])
 
-  const openTalk = useCallback((draft: string) => {
-    setTalkPrefill(draft)
-    setTab('chat')
-  }, [])
+  const openTalk = useCallback(
+    (draft: string) => {
+      setTalkPrefill(draft)
+      go('chat')
+    },
+    [go],
+  )
 
-  const openConversation = useCallback((id: number) => {
-    setTalkOpen({ id, at: Date.now() })
-    setTab('chat')
-  }, [])
+  const openConversation = useCallback(
+    (id: number) => {
+      setTalkOpen({ id, at: Date.now() })
+      go('chat')
+    },
+    [go],
+  )
 
   // `#/chat/<id>` in the address bar, at load or from a notification, and the
   // same route handed over by the service worker when a tab is already open.
@@ -116,11 +184,14 @@ export function App() {
   }, [me, openConversation])
 
   // A session takes the screen from wherever it was started, so Today comes with it.
-  const changeSession = useCallback((next: FocusSession | null) => {
-    setSession(next)
-    writeSession(next)
-    if (next) setTab('today')
-  }, [])
+  const changeSession = useCallback(
+    (next: FocusSession | null) => {
+      setSession(next)
+      writeSession(next)
+      if (next) go('today')
+    },
+    [go],
+  )
 
   useEffect(() => {
     setOnUnauthorized(() => setMe(null))
@@ -175,76 +246,124 @@ export function App() {
 
   const current: NavTab = tab === 'admin' ? 'settings' : tab
 
-  const tabsNode = (
-    <nav className="tabs" aria-label="Views">
-      {NAV.map((t) => (
-        <button key={t.id} aria-current={current === t.id} onClick={() => setTab(t.id)}>
-          <NavIcon id={t.id} />
-          {t.label}
-        </button>
-      ))}
-    </nav>
-  )
+  const viewOf = (of: Tab): ReactNode => {
+    if (of === 'today')
+      return (
+        <Home
+          session={session}
+          setSession={changeSession}
+          notify={notify}
+          onChanged={onChanged}
+          refresh={refresh}
+          openNow={changeSession}
+          mobile={mobile}
+          armed={!turning}
+        />
+      )
+    if (of === 'tasks') return <Tasks {...views} />
+    if (of === 'chat')
+      return (
+        <Talk
+          {...views}
+          prefill={talkPrefill}
+          onPrefilled={() => setTalkPrefill(null)}
+          open={talkOpen}
+          onOpened={() => setTalkOpen(null)}
+          session={session}
+          goHome={() => go('today')}
+        />
+      )
+    if (of === 'memory') return <Memory {...views} />
+    if (of === 'settings')
+      return (
+        <Settings
+          me={me}
+          {...views}
+          onSignedOut={() => setMe(null)}
+          openAdmin={() => go('admin')}
+        />
+      )
+    return <Admin me={me} notify={notify} onBack={() => go('settings')} />
+  }
 
-  const home = (
-    <Home
-      session={session}
-      setSession={changeSession}
-      notify={notify}
-      onChanged={onChanged}
-      refresh={refresh}
-      openNow={changeSession}
-      mobile={mobile}
-      tabs={tabsNode}
-    />
-  )
-
-  const showHome = tab === 'today'
+  const layers = leaving ? [leaving, layer] : [layer]
 
   return (
     <div className="shell">
       {!mobile && (
         <header className="topbar">
           <span className="brand">Note</span>
-          <nav className="topnav" aria-label="Views">
-            {NAV.map((t) => (
-              <button key={t.id} aria-current={current === t.id} onClick={() => setTab(t.id)}>
-                {t.label}
-              </button>
-            ))}
-          </nav>
+          <Rail kind="topnav" current={current} go={go} />
           <Capture notify={notify} onChanged={onChanged} />
         </header>
       )}
-      <main className={`view${tab === 'chat' ? ' view-talk' : ''}${showHome ? ' view-home' : ''}`}>
-        {showHome && home}
-        {tab === 'tasks' && <Tasks {...views} />}
-        {tab === 'chat' && (
-          <Talk
-            {...views}
-            prefill={talkPrefill}
-            onPrefilled={() => setTalkPrefill(null)}
-            open={talkOpen}
-            session={session}
-            goHome={() => setTab('today')}
-          />
-        )}
-        {tab === 'memory' && <Memory {...views} />}
-        {tab === 'settings' && (
-          <Settings
-            me={me}
-            {...views}
-            onSignedOut={() => setMe(null)}
-            openAdmin={() => setTab('admin')}
-          />
-        )}
-        {tab === 'admin' && (
-          <Admin me={me} notify={notify} onBack={() => setTab('settings')} />
-        )}
-      </main>
-      {mobile && !showHome && tabsNode}
+      {layers.map((l) => (
+        <main
+          key={l.id}
+          ref={(el) => {
+            if (el) layerEls.current.set(l.id, el)
+            else layerEls.current.delete(l.id)
+          }}
+          className={[
+            'view',
+            l.tab === 'chat' ? 'view-talk' : '',
+            l.tab === 'today' ? 'view-home' : '',
+            l === leaving ? 'leaving' : '',
+          ]
+            .filter(Boolean)
+            .join(' ')}
+          aria-hidden={l === leaving || undefined}
+        >
+          {viewOf(l.tab)}
+        </main>
+      ))}
+      {mobile && <Rail kind="tabs" current={current} go={go} />}
       {toastNode}
     </div>
+  )
+}
+
+// The bar of views, with the mark behind the current one travelling to whichever is
+// chosen next; `tabs` carries icons and sits at the foot of a phone.
+function Rail({
+  kind,
+  current,
+  go,
+}: {
+  kind: 'topnav' | 'tabs'
+  current: NavTab
+  go: (t: NavTab) => void
+}) {
+  const nav = useRef<HTMLElement>(null)
+  const mark = useRef<HTMLSpanElement>(null)
+  const placed = useRef(false)
+
+  useLayoutEffect(() => {
+    const root = nav.current
+    if (!root) return
+    const inset = kind === 'tabs' ? 10 : 0
+    const put = (animate: boolean) => {
+      const on = root.querySelector<HTMLElement>('button[aria-current="true"]')
+      if (!on) return
+      glide(mark.current, { x: on.offsetLeft + inset, width: on.offsetWidth - inset * 2 }, animate)
+    }
+    put(placed.current)
+    placed.current = true
+    const ro = new ResizeObserver(() => put(false))
+    ro.observe(root)
+    return () => ro.disconnect()
+  }, [kind, current])
+
+  return (
+    <nav ref={nav} className={kind} aria-label="Views">
+      <span className="nav-glide" aria-hidden="true" ref={mark} />
+      {NAV.map((t) => (
+        <button key={t.id} aria-current={current === t.id} onClick={() => go(t.id)}>
+          {kind === 'tabs' && <NavIcon id={t.id} />}
+          {t.label}
+        </button>
+      ))}
+    </nav>
   )
 }
 
