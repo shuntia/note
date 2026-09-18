@@ -78,7 +78,6 @@ config/
   users/
     <username>/
       user.toml                     # per-user overrides, merged over defaults
-                                    # (incl. ntfy_topic, set from Settings)
       templates/
         <name>.toml                 # per-user template overrides
 ```
@@ -101,7 +100,6 @@ write, so a hand-edited file and a client-side change are the same thing.
     "nightly_time": "03:00", "template": "default",
     "show_arc_between_sessions": true, "counter": "remaining",
     "category": "member", "nightly_enabled": true, "checkins_enabled": true,
-    "ntfy_topic": "note-aki", "ntfy_enabled": true,
     "templates": ["default", "deep-work"],
     "timezones": ["Africa/Abidjan", "…"]
   }
@@ -110,12 +108,9 @@ write, so a hand-edited file and a client-side change are the same thing.
   `templates` is every `.toml` stem under `defaults/templates/` plus the user's
   own `templates/`; `timezones` is the bundled IANA database.
 
-  `ntfy_topic` is the topic the ntfy channel delivers to (see "ntfy") and
-  `ntfy_enabled` says whether that channel is configured at all.
-
 - `PUT /api/settings` takes any subset of `display_name`, `timezone`,
   `nightly_time`, `template`, `show_arc_between_sessions`, `counter`,
-  `nightly_enabled`, `checkins_enabled` and `ntfy_topic`, and returns the
+  `nightly_enabled` and `checkins_enabled`, and returns the
   merged settings without the two lists. `category` is read-only here — it belongs to the
   account, not the settings file. A rejected field is a
   `400` whose `{"error": …}` names it and leaves the file untouched:
@@ -123,8 +118,7 @@ write, so a hand-edited file and a client-side change are the same thing.
   must be an IANA name; `nightly_time` must be a zero-padded 24-hour `HH:MM`;
   `template` must be one of `templates`; `show_arc_between_sessions` is a bool;
   `counter` must be `remaining` or `elapsed`; the two feature toggles are
-  bools. `ntfy_topic` is the exception to the `400`: an invalid topic is a
-  `422`, and an empty string clears the override rather than setting one. The write replaces the user file through a temp file and a rename, so
+  bools. The write replaces the user file through a temp file and a rename, so
   a crash mid-write cannot leave a half-written config. A toggle the user has
   never set stays out of the file and keeps following its category default.
 
@@ -477,12 +471,8 @@ plainer day, never a missing one.
 ## Channels & delivery
 
 When an event fires, the server walks a delivery ladder: connected WebSocket
-clients first, then Web Push, then ntfy. The first channel that accepts the
-message wins; if none does, the day is plainer, never an error.
-
-Events carry a `channel` of `push` or `voice`. A `voice` event rings the phone
-first (see "Calls"); a call that cannot be placed logs `voice_fallback` and
-then takes the same ladder.
+clients first, then Web Push. The first channel that accepts the message wins;
+if none does, the day is plainer, never an error.
 
 ### In-app delivery
 
@@ -496,8 +486,8 @@ receives one JSON frame per delivery:
 
 `conversation_id` is the thread a check-in opened (see below) and null on
 every other event. The web client switches to that conversation when the frame
-arrives; a push notification or an ntfy click carries the same thread as the
-deep link `/#/chat/<id>`.
+arrives; a push notification carries the same thread as the deep link
+`/#/chat/<id>`.
 
 A talk session in flight pushes its progress to the same sockets, so the client
 can show what the agent is doing while it works:
@@ -555,9 +545,8 @@ subject = "mailto:admin@example.com"
 `vapid_pem_file` resolves against the server's working directory, like
 `data_dir`; `subject` must be a `mailto:` or `https://` contact URL, and an
 unreadable key or bad subject fails startup rather than the first delivery.
-Without this section and without `[channels.ntfy]`, only in-app WebSocket
-delivery is active and every event for a disconnected user is logged as
-`delivery_degraded`.
+Without this section, only in-app WebSocket delivery is active and every event
+for a disconnected user is logged as `delivery_degraded`.
 
 Subscription routes — all cookie-authenticated, the public-key route included:
 
@@ -586,115 +575,18 @@ Payloads are encrypted (`aes128gcm`) and VAPID-signed; the plaintext is
 event opened a thread, which the service worker opens on click. Endpoints the
 push service reports gone (404/410) are pruned automatically.
 
-### ntfy
-
-An [ntfy](https://ntfy.sh) server delivers to its own desktop and phone clients
-over plain HTTP — the way to reach a device from an instance served over
-`http://`, where browsers refuse the service worker Web Push needs. Point the
-channel at one:
-
-```toml
-[channels.ntfy]
-base_url = "http://10.0.0.1:2586"
-# token_file = "config/ntfy.token"   # bearer token, for a server that needs one
-# topic_prefix = "note-"             # the default
-```
-
-`base_url` is required; without the section the channel is not built. A
-configured `token_file` that is missing or blank fails startup rather than the
-first delivery, like a provider's `api_key_file`.
-
-Each user has a topic: `ntfy_topic` in their `user.toml`, or
-`<topic_prefix><username>` when they have not set one. A topic is 1 to 64
-characters of letters, digits, `_` or `-`, and may not be another account's
-default topic (`<topic_prefix><their username>`) — Settings answers `422`.
-Subscribing to the topic in an ntfy client is all a device needs.
-
-A delivery is a `POST {base_url}` carrying ntfy's JSON publish form: `topic`,
-`title`, `message`, `tags: ["bell"]`, `click` (the instance's
-`public_base_url`, with `/#/chat/<id>` appended for a check-in) and
-`priority` — 2 for a low-urgency message, 3 for normal,
-5 for a check-in — plus `Authorization: Bearer` when a token is configured. The
-JSON form rather than the header form because a title carries the event's own
-words and an HTTP header value cannot hold them. Anything but a 2xx, and any
-transport error, falls through the ladder as `delivery_degraded`.
-
-`POST /api/notify/test` (session cookie) walks the same ladder with a stand-in
+`POST /api/notify/test` (session cookie) walks the ladder with a stand-in
 message and answers `{"via": "<channel>"}`, or `502` `{"error": …}` when no
 channel could take it. Settings offers it as "Send test".
-
-### Calls
-
-An event whose channel is `voice` rings the user's phone through Twilio: Note
-reads the check-in out and the user answers on the keypad. Point the channel at
-an account:
-
-```toml
-[channels.voice]
-account_sid = "AC…"
-auth_token_file = "config/twilio.token"   # mode 600, gitignored
-from_number = "+15551234567"              # E.164
-# base_url = "https://api.twilio.com"     # the default
-```
-
-All three are required; without the section the channel is not built and
-`voice` events fall straight down the push ladder. A missing or blank token
-file, a `from_number` that is not E.164, and a `public_base_url` that is not
-`https://` all fail startup — Twilio will not fetch TwiML over plain HTTP.
-
-Each user has `phone_number` in their `user.toml` (E.164, `^\+[1-9]\d{6,14}$`;
-Settings answers `422` for anything else and a blank value clears it) and
-`calls_enabled`, which defaults to on for members and off for test accounts.
-Without a number, or with calls switched off, a `voice` event falls through to
-the push ladder. Quiet calendar windows defer a call exactly as they defer a
-push: the runner holds the event until the window ends, so nothing rings
-inside one.
-
-Placing a call `POST`s Twilio's `Calls.json` with `To`, `From`, a `Url` and a
-`StatusCallback` pointing back at this server, and `Timeout = 25`. The row it
-writes to `voice_calls` carries a 32-byte base64url token, which is the only
-handle Twilio ever sees and the only way back in; it stops answering two hours
-after the call was placed.
-
-Twilio calls back on three routes, all `POST`, none of which takes a session
-cookie. Each validates `X-Twilio-Signature` (HMAC-SHA1 over `public_base_url` +
-the request path with every form parameter sorted by name, base64) and answers
-`403` on a mismatch, `404` for an unknown or expired token:
-
-- `/api/voice/twiml/{token}` — the TwiML the call speaks: a `<Gather>` of one
-  digit around the message, or a single `<Say>` for a call with no event.
-- `/api/voice/gather/{token}` — `1` finishes the event, `2` snoozes it fifteen
-  minutes, `3` drops it; each logs `voice_decision` and pushes a
-  `{"type": "changed"}` frame to the user's open clients. Any other digit
-  replays the question once, then the call lets go.
-- `/api/voice/status/{token}` — moves the call's row; `no-answer`, `busy` and
-  `failed` log `voice_unanswered` and send the same message down the push
-  ladder, so the nudge still lands.
-
-`POST /api/notify/call` (session cookie) places a test call saying "This is
-Note. Your phone is set up." and answers `{"call_id": …}`, `409` when the user
-has no number, or `502` `{"error": …}` when Twilio refused it. Settings offers
-it as "Call me now", beside the number and the "Call me for check-ins" switch;
-the card is hidden when the server has no voice channel. On the day's plan,
-an event's overflow menu carries "Call me" / "Notify me", which is
-`POST /api/events/{id}/channel {"channel": "push" | "voice"}` — `422` for an
-unknown channel or an event already done or dropped.
 
 ### Delivery in the admin log
 
 Every outcome lands in `event_log`, readable at `GET /api/admin/log`:
 
-- `delivery_ok` — `event <id> via ws`, `via webpush` or `via ntfy`; a
+- `delivery_ok` — `event <id> via ws` or `via webpush`; a
   `POST /api/notify/test` logs the same row as `test via <channel>`.
 - `delivery_degraded` — no channel could reach the user; the detail carries
   each channel's reason, or `no channels configured`.
-- `voice_fallback` — a `voice` event could not be placed as a call (no number,
-  calls off, no channel configured, or Twilio refused it) and fell back to the
-  delivery ladder; a placed call logs `delivery_ok` as `event <id> via voice`.
-- `voice_decision` — `event <id>: done|snoozed|dropped by phone`.
-- `voice_unanswered` — the call rang out, was busy or failed; the message went
-  down the push ladder behind it.
-- `voice_failed` — Twilio refused the request that would have placed the call.
 
 ### Sessions & limits
 

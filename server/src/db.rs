@@ -340,6 +340,10 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE tasks ADD COLUMN completed_at TEXT;
     UPDATE tasks SET completed_at = updated_at WHERE state = 'done';
     ",
+    // v25
+    "
+    DROP TABLE IF EXISTS voice_calls;
+    ",
 ];
 
 pub fn open(path: &Path) -> Result<Connection> {
@@ -1005,42 +1009,16 @@ mod tests {
     }
 
     #[test]
-    #[test]
-    fn v20_creates_voice_calls_keyed_by_token() {
+    fn v25_leaves_no_voice_calls_table() {
         let conn = open_memory().unwrap();
         let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
         assert_eq!(v, MIGRATIONS.len() as i64);
-        conn.execute(
-            "INSERT INTO users (username, pass_hash, role) VALUES ('a','h','member')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO voice_calls (token, user_id, message, created_at, updated_at)
-             VALUES ('tok', 1, 'time for your check-in', 'now', 'now')",
-            [],
-        )
-        .unwrap();
-        let (status, digit, sid): (String, Option<String>, Option<String>) = conn
-            .query_row("SELECT status, digit, call_sid FROM voice_calls WHERE id = 1", [], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sqlite_master WHERE name = 'voice_calls'", [], |r| {
+                r.get(0)
             })
             .unwrap();
-        assert_eq!(status, "placed");
-        assert!(digit.is_none() && sid.is_none());
-        assert!(
-            conn.execute("UPDATE voice_calls SET status = 'ringing_in' WHERE id = 1", []).is_err(),
-            "the status column is a closed set"
-        );
-        assert!(
-            conn.execute(
-                "INSERT INTO voice_calls (token, user_id, message, created_at, updated_at)
-                 VALUES ('tok', 1, 'again', 'now', 'now')",
-                [],
-            )
-            .is_err(),
-            "one token names one call"
-        );
+        assert_eq!(n, 0);
     }
 
     #[test]

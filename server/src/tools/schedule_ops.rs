@@ -218,13 +218,12 @@ impl Flexibility {
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub enum Channel { Push, Voice }
+pub enum Channel { Push }
 
 impl Channel {
     fn as_str(&self) -> &'static str {
         match self {
             Channel::Push => "push",
-            Channel::Voice => "voice",
         }
     }
 }
@@ -293,7 +292,7 @@ mod tests {
                 crate::templates::TemplateEvent {
                     kind: "checkin_call".into(), time: "09:00".into(),
                     days: vec!["mon".into()], flexibility: Some("slide".into()),
-                    slide_window_min: Some(60), channel: "voice".into(), ..Default::default()
+                    slide_window_min: Some(60), channel: "push".into(), ..Default::default()
                 },
                 crate::templates::TemplateEvent {
                     kind: "nudge".into(), time: "14:00".into(),

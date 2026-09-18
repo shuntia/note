@@ -141,7 +141,6 @@ const OPERATIONAL_LOG_KINDS: &[&str] = &[
     "token_revoked",
     "totp_enrolled",
     "totp_removed",
-    "voice_unavailable",
 ];
 
 /// How much of the material that can be shortened survives.
@@ -798,7 +797,7 @@ mod tests {
             events: vec![crate::templates::TemplateEvent {
                 kind: "checkin_call".into(), time: "09:00".into(),
                 days: vec!["mon".into()], flexibility: Some("slide".into()),
-                slide_window_min: Some(60), channel: "voice".into(), ..Default::default()
+                slide_window_min: Some(60), channel: "push".into(), ..Default::default()
             }],
         };
         let date: jiff::civil::Date = "2026-08-31".parse().unwrap();
@@ -808,7 +807,7 @@ mod tests {
         assert!(out.contains("hates mornings"), "{out}");
         assert!(out.contains("2026-08-31 21:00"), "{out}");
         assert!(out.contains("Asia/Tokyo"), "{out}");
-        assert!(out.contains("- 09:00-09:15 checkin_call [pending] routine via voice"), "{out}");
+        assert!(out.contains("- 09:00-09:15 checkin_call [pending] routine via push"), "{out}");
         assert!(out.contains("event_fired"), "{out}");
     }
 
