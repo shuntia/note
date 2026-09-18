@@ -283,3 +283,17 @@ async fn a_created_entry_may_name_itself_once() {
     assert_eq!(status, StatusCode::OK, "the upsert finds the entry the user named");
     assert_eq!(again["id"], made["id"]);
 }
+
+#[tokio::test]
+async fn the_list_answers_a_token_so_an_importer_can_reconcile() {
+    let (app, _cookie, token, theirs, _cfg) = importer().await;
+    with_bearer(&app, &token, Method::PUT, GCAL, Some(MEETING)).await;
+    let (status, list) = with_bearer(&app, &token, Method::GET, "/api/calendar", None).await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    let ids: Vec<&str> =
+        list["entries"].as_array().unwrap().iter().filter_map(|e| e["external_id"].as_str()).collect();
+    assert_eq!(ids, ["gcal:c_8f3a:t:busy"]);
+    let (status, other) = with_bearer(&app, &theirs, Method::GET, "/api/calendar", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(other["entries"].as_array().unwrap().is_empty(), "another account sees nothing");
+}
