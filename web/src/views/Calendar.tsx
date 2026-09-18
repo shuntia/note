@@ -187,7 +187,9 @@ export function CalendarSection({
     }
   }, [week[0], week[6], refresh])
 
-  const freeToday = (day?.free.length ?? 0) > 0 && selected === today
+  const hasFree =
+    selected >= today &&
+    occurrencesOn(visible, selected).some((o) => o.entry.kind === 'free' && !o.skipped)
   const fill = () => {
     if (filling) return
     setFilling(true)
@@ -326,7 +328,7 @@ export function CalendarSection({
             <ChevronRight />
           </button>
         )}
-        {freeToday && (
+        {hasFree && (
           <button className="quiet cal-fill" disabled={filling} onClick={fill}>
             Fill my free time
           </button>

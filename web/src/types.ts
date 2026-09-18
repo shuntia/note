@@ -274,12 +274,6 @@ export type CalendarOccurrence = {
   end: string
 }
 
-// `quiet_now` is the HH:MM a running quiet window ends, and is only ever set for today.
-export type CalendarDay = {
-  date: string
-  occurrences: CalendarOccurrence[]
-  quiet_now: string | null
-}
 
 export type HistoryKind =
   | 'event_done'
