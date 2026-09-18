@@ -321,6 +321,15 @@ they overlap what is already there. Memory: `memory_query`, `memory_read`,
 `calendar_remove` and `calendar_skip` in talk and nightly sessions (see
 "Calendar and quiet windows").
 
+`batch` runs 1 to 10 of those calls in a single model round — every session but
+the one-call ones (import, inbox, summarize) is offered it, and the prompts ask
+for it whenever two or more calls do not depend on each other's results. The
+session expands it itself: each sub-call takes the same path and the same
+transaction it would have taken alone, and appears as its own step, so one
+failing call neither aborts the rest nor the round. A sub-call naming `batch`
+or a tool that would end the session is refused on its own. The model gets one
+result back: `{results: [{tool, ok, result | error}, …]}`.
+
 ### Memory API
 
 Read-only, scoped to the session's own user:
@@ -457,6 +466,19 @@ round's messages. The transcript keeps it on the assistant row, capped at
 With an embeddings provider configured, memory search becomes hybrid
 (lexical + vector) and degrades back to lexical automatically when the
 provider is down.
+
+### Web search
+
+`[search]` names a SearXNG instance — `searxng_url`, plus `max_results`
+(default 8) and `timeout_secs` (default 15) — and turns on the `web_search`
+tool for talk, check-in and nightly sessions. Without the section no session is
+offered it at all. A call runs the search and then one extra model call with no
+tools, on the `search` prompt (editable per user like the others), which
+answers the caller's `question` from the hits alone and cites them by number;
+the session sees `{summary, sources}`, or the top five hits raw when the
+summarizer cannot answer. Each search writes one `web_search` row to the event
+log with the hit count and which of the two it was — never the query, which is
+the user's own words.
 
 `POST /api/talk {message, conversation_id?}` runs one turn with the agent.
 Turns belong to persisted conversations: omit `conversation_id` and the server

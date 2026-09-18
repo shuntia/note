@@ -29,5 +29,9 @@ from the template.
    names one reads as stale by tomorrow. Nothing that belongs in long-term
    memory either: a durable fact goes to memory_write instead.
 
+Throughout, group the calls that do not depend on each other's results into
+one `batch` — the task and schedule edits you have already decided on, the
+day's trigger points — rather than spending a round on each.
+
 Then reply with the debrief text. It closes the session and becomes the
 debrief delivered this morning, so nothing comes after it.

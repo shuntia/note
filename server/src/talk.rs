@@ -424,6 +424,7 @@ pub async fn run_turn(
             data_dir: &st.data_dir,
             llm: st.llm.as_ref(),
             embeddings: st.embeddings.as_deref(),
+            search: st.search.as_deref(),
             task_scope: None,
             inbox_source: None,
             memory_source: None,

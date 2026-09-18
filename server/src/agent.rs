@@ -1,5 +1,6 @@
 use crate::providers::{ChatRequest, EmbeddingsProvider, LLMProvider, Message};
-use crate::tools::{self, SessionKind, ToolCtx};
+use crate::search::SearchProvider;
+use crate::tools::{self, SessionKind, ToolCtx, ToolError};
 use anyhow::Result;
 use rusqlite::Connection;
 use std::path::Path;
@@ -34,6 +35,9 @@ pub struct SessionDeps<'a> {
     pub data_dir: &'a Path,
     pub llm: &'a dyn LLMProvider,
     pub embeddings: Option<&'a dyn EmbeddingsProvider>,
+    /// Absent where the server has no search configured; the session then never
+    /// offers the `web_search` tool.
+    pub search: Option<&'a dyn SearchProvider>,
     /// Confines the session's task tools to one task and its steps.
     pub task_scope: Option<i64>,
     /// Confines the session's inbox decision to one source id.
@@ -141,7 +145,10 @@ pub fn run_session_watched(
         }
     }
 
-    let schemas = tools::schemas(kind);
+    let mut schemas = tools::schemas(kind);
+    if deps.search.is_none() {
+        schemas.retain(|s| s["name"] != "web_search");
+    }
     let mut messages = history.to_vec();
     messages.push(Message::User(opening.to_string()));
     let mut turns = 0;
@@ -159,6 +166,7 @@ pub fn run_session_watched(
     // Talk, import and inbox sessions answer a caller who is waiting on them.
     let background =
         !matches!(kind, SessionKind::Talk | SessionKind::Import | SessionKind::Inbox);
+    let env = CallEnv { deps, user_id, username, kind, background };
     let started = std::time::Instant::now();
 
     while turns < max_turns {
@@ -195,40 +203,15 @@ pub fn run_session_watched(
         let calls = resp.tool_calls.clone();
         messages.push(Message::Assistant { text: last_text.clone(), tool_calls: resp.tool_calls });
         for call in calls {
+            if call.name == "batch" {
+                let (content, is_error) =
+                    run_batch(&env, &call.args, &mut steps, &mut tool_calls, on_event);
+                messages.push(Message::ToolResult { call_id: call.id, content, is_error });
+                continue;
+            }
             tool_calls += 1;
-            let index = steps.len();
-            on_event(AgentEvent::ToolCall { index, name: &call.name, args: &call.args });
-            let vectors = tools::prepare(deps.embeddings, &call.name, &call.args);
-            let (content, is_error) = {
-                let conn = crate::db_guard(deps.db);
-                let ctx = ToolCtx {
-                    config_dir: deps.config_dir,
-                    data_dir: deps.data_dir,
-                    user_id,
-                    username,
-                    vectors,
-                    task_scope: deps.task_scope,
-                    inbox_source: deps.inbox_source.clone(),
-                    memory_source: deps.memory_source.clone(),
-                };
-                match tools::dispatch(&conn, &ctx, kind, &call.name, &call.args) {
-                    Ok(v) => (v.to_string(), false),
-                    Err(e) => (
-                        serde_json::to_string(&e)
-                            .unwrap_or_else(|_| r#"{"kind":"internal"}"#.into()),
-                        true,
-                    ),
-                }
-            };
-            let terminal = !is_error && tools::is_terminal(kind, &call.name);
-            on_event(AgentEvent::ToolResult { index, name: &call.name, result: &content, is_error });
-            steps.push(SessionStep {
-                name: call.name,
-                args: call.args,
-                result: content.clone(),
-                is_error,
-            });
-            if terminal {
+            let (content, is_error) = env.step(&call.name, &call.args, &mut steps, on_event);
+            if !is_error && tools::is_terminal(kind, &call.name) {
                 on_event(AgentEvent::Reply { text: &content });
                 finish(deps, user_id, kind, turns, tool_calls, "agent_session")?;
                 let thought_ms = started.elapsed().as_millis() as u64;
@@ -251,6 +234,144 @@ pub fn run_session_watched(
     finish(deps, user_id, kind, turns, tool_calls, "agent_max_turns")?;
     let thought_ms = started.elapsed().as_millis() as u64;
     Ok(SessionOutcome { reply: last_text, turns, tool_calls, steps, reasoning, thought_ms })
+}
+
+/// What every tool call of one session shares, so a call the model made and a
+/// call inside a `batch` take exactly the same path.
+struct CallEnv<'a> {
+    deps: &'a SessionDeps<'a>,
+    user_id: i64,
+    username: &'a str,
+    kind: SessionKind,
+    background: bool,
+}
+
+impl CallEnv<'_> {
+    /// Embeddings first, outside the DB lock, then one dispatch inside it.
+    /// `web_search` reaches the network instead and never takes the lock.
+    fn run(&self, name: &str, args: &str) -> (String, bool) {
+        let result = match name {
+            "web_search" if !tools::registry(self.kind).contains(&name) => Err(
+                ToolError::forbidden(format!("tool {name} is not available in this session type")),
+            ),
+            "web_search" => crate::search::run_tool(
+                self.deps,
+                self.user_id,
+                self.username,
+                self.background,
+                args,
+            ),
+            _ => {
+                let vectors = tools::prepare(self.deps.embeddings, name, args);
+                let conn = crate::db_guard(self.deps.db);
+                let ctx = ToolCtx {
+                    config_dir: self.deps.config_dir,
+                    data_dir: self.deps.data_dir,
+                    user_id: self.user_id,
+                    username: self.username,
+                    vectors,
+                    task_scope: self.deps.task_scope,
+                    inbox_source: self.deps.inbox_source.clone(),
+                    memory_source: self.deps.memory_source.clone(),
+                };
+                tools::dispatch(&conn, &ctx, self.kind, name, args)
+            }
+        };
+        match result {
+            Ok(v) => (v.to_string(), false),
+            Err(e) => (error_json(&e), true),
+        }
+    }
+
+    /// `run` as a session step: its own index, its own pair of events, and its
+    /// own entry in `steps`.
+    fn step(
+        &self,
+        name: &str,
+        args: &str,
+        steps: &mut Vec<SessionStep>,
+        on_event: &dyn Fn(AgentEvent),
+    ) -> (String, bool) {
+        let index = steps.len();
+        on_event(AgentEvent::ToolCall { index, name, args });
+        let (content, is_error) = self.run(name, args);
+        on_event(AgentEvent::ToolResult { index, name, result: &content, is_error });
+        steps.push(SessionStep {
+            name: name.to_string(),
+            args: args.to_string(),
+            result: content.clone(),
+            is_error,
+        });
+        (content, is_error)
+    }
+}
+
+fn error_json(e: &ToolError) -> String {
+    serde_json::to_string(e).unwrap_or_else(|_| r#"{"kind":"internal"}"#.into())
+}
+
+/// Runs a `batch` call's sub-calls in order, each its own step, and returns the
+/// single tool result the model gets back. `is_error` is set only when the
+/// batch arguments themselves are unusable: a sub-call that fails or is refused
+/// is an entry in `results` and leaves the rest of the batch running.
+fn run_batch(
+    env: &CallEnv,
+    raw_args: &str,
+    steps: &mut Vec<SessionStep>,
+    tool_calls: &mut usize,
+    on_event: &dyn Fn(AgentEvent),
+) -> (String, bool) {
+    if !tools::registry(env.kind).contains(&"batch") {
+        let e = ToolError::forbidden("tool batch is not available in this session type");
+        return (error_json(&e), true);
+    }
+    if raw_args.len() > tools::MAX_ARGS_BYTES {
+        let e = ToolError::rejected(format!("arguments exceed {} bytes", tools::MAX_ARGS_BYTES));
+        return (error_json(&e), true);
+    }
+    let args: tools::BatchArgs = match serde_json::from_str(raw_args) {
+        Ok(a) => a,
+        Err(e) => return (error_json(&ToolError::invalid_args(e.to_string())), true),
+    };
+    if args.calls.is_empty() || args.calls.len() > tools::MAX_BATCH_CALLS {
+        let e = ToolError::rejected(format!(
+            "batch takes 1 to {} calls, not {}",
+            tools::MAX_BATCH_CALLS,
+            args.calls.len()
+        ));
+        return (error_json(&e), true);
+    }
+    let mut results = Vec::new();
+    for sub in args.calls {
+        let refused = if sub.tool == "batch" {
+            Some(ToolError::rejected("a batch cannot hold another batch"))
+        } else if tools::is_terminal(env.kind, &sub.tool) {
+            Some(ToolError::rejected(format!(
+                "{} ends the session and must be called on its own",
+                sub.tool
+            )))
+        } else {
+            None
+        };
+        if let Some(e) = refused {
+            results.push(serde_json::json!({ "tool": sub.tool, "ok": false, "error": e }));
+            continue;
+        }
+        *tool_calls += 1;
+        let sub_args = match &sub.args {
+            serde_json::Value::Null => "{}".to_string(),
+            v => v.to_string(),
+        };
+        let (content, is_error) = env.step(&sub.tool, &sub_args, steps, on_event);
+        let value: serde_json::Value =
+            serde_json::from_str(&content).unwrap_or(serde_json::Value::String(content));
+        results.push(if is_error {
+            serde_json::json!({ "tool": sub.tool, "ok": false, "error": value })
+        } else {
+            serde_json::json!({ "tool": sub.tool, "ok": true, "result": value })
+        });
+    }
+    (serde_json::json!({ "results": results }).to_string(), false)
 }
 
 fn finish(
@@ -298,15 +419,17 @@ mod tests {
         write("defaults/prompts/import.md", "brief the assignment");
         write("defaults/prompts/inbox.md", "read the item");
         write("defaults/prompts/trigger.md", "you are following up on your own plan");
+        write("defaults/prompts/search.md", "answer from the hits alone");
         (Mutex::new(conn), tmp)
     }
 
     fn deps<'a>(
         db: &'a Mutex<rusqlite::Connection>,
         tmp: &'a tempfile::TempDir,
-        llm: &'a MockLLM,
+        llm: &'a dyn LLMProvider,
     ) -> SessionDeps<'a> {
-        SessionDeps { db, config_dir: tmp.path(), data_dir: tmp.path(), llm, embeddings: None, task_scope: None, inbox_source: None, memory_source: None, token_id: None, thread_note: None }
+        SessionDeps { db, config_dir: tmp.path(), data_dir: tmp.path(), llm, embeddings: None,
+            search: None, task_scope: None, inbox_source: None, memory_source: None, token_id: None, thread_note: None }
     }
 
     fn now() -> jiff::Timestamp {
@@ -387,6 +510,7 @@ mod tests {
             data_dir: tmp.path(),
             llm: &Broken,
             embeddings: None,
+            search: None,
             task_scope: None,
             inbox_source: None,
             memory_source: None,
@@ -697,6 +821,385 @@ mod tests {
         assert_eq!(log_rows(&db, "agent_max_turns"), 1);
     }
 
+    fn batch_call(id: &str, calls: serde_json::Value) -> ChatResponse {
+        ChatResponse {
+            text: String::new(),
+            tool_calls: vec![ToolCall {
+                id: id.into(),
+                name: "batch".into(),
+                args: serde_json::json!({ "calls": calls }).to_string(),
+            }],
+        }
+    }
+
+    /// The one tool result a batch hands back, parsed.
+    fn batch_result(llm: &MockLLM, round: usize) -> (serde_json::Value, bool) {
+        let seen = llm.seen();
+        let last = seen[round].messages.last().expect("a message");
+        match last {
+            Message::ToolResult { content, is_error, .. } => {
+                (serde_json::from_str(content).expect("a JSON tool result"), *is_error)
+            }
+            other => panic!("expected a tool result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_batch_runs_every_call_in_one_round_and_a_failure_leaves_the_rest_standing() {
+        let (db, tmp) = env();
+        let llm = MockLLM::scripted(vec![
+            batch_call(
+                "b1",
+                serde_json::json!([
+                    { "tool": "task_create", "args": { "title": "buy milk" } },
+                    { "tool": "task_update", "args": { "task_id": 999, "state": "done" } },
+                    { "tool": "task_create", "args": { "title": "call the dentist" } },
+                ]),
+            ),
+            ChatResponse { text: "both added".into(), tool_calls: vec![] },
+        ]);
+        let seen = std::cell::RefCell::new(Vec::new());
+        let out = run_session_watched(
+            &deps(&db, &tmp, &llm),
+            1,
+            "aki",
+            SessionKind::Talk,
+            now(),
+            &[],
+            "two things",
+            &|ev| seen.borrow_mut().push(trace(ev)),
+        )
+        .unwrap();
+
+        assert_eq!(out.turns, 2, "three calls cost one round");
+        assert_eq!(out.tool_calls, 3);
+        assert_eq!(out.steps.len(), 3, "the batch itself is not a step");
+        assert_eq!(
+            seen.into_inner(),
+            vec![
+                "call:0:task_create",
+                "result:0:task_create:false",
+                "call:1:task_update",
+                "result:1:task_update:true",
+                "call:2:task_create",
+                "result:2:task_create:false",
+                "reply:both added",
+            ]
+        );
+
+        let (result, is_error) = batch_result(&llm, 1);
+        assert!(!is_error, "a failing call inside a batch is not a failed batch");
+        let results = result["results"].as_array().unwrap();
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0]["tool"], "task_create");
+        assert_eq!(results[0]["ok"], true);
+        assert!(results[0]["result"]["task_id"].is_i64());
+        assert_eq!(results[1]["ok"], false);
+        assert_eq!(results[1]["error"]["kind"], "not_found");
+        assert_eq!(results[2]["ok"], true);
+
+        let titles: Vec<String> = {
+            let conn = db.lock().unwrap();
+            let mut stmt = conn.prepare("SELECT title FROM tasks ORDER BY id").unwrap();
+            let rows = stmt.query_map([], |r| r.get(0)).unwrap();
+            rows.collect::<rusqlite::Result<_>>().unwrap()
+        };
+        assert_eq!(titles, vec!["buy milk", "call the dentist"]);
+    }
+
+    #[test]
+    fn a_batch_refuses_a_nested_batch_and_a_tool_that_would_end_the_session() {
+        let (db, tmp) = env();
+        let llm = MockLLM::scripted(vec![
+            batch_call(
+                "b1",
+                serde_json::json!([
+                    { "tool": "batch", "args": { "calls": [] } },
+                    { "tool": "say", "args": { "text": "hello" } },
+                    { "tool": "memory_query", "args": { "query": "school" } },
+                ]),
+            ),
+            ChatResponse {
+                text: String::new(),
+                tool_calls: vec![ToolCall {
+                    id: "c2".into(),
+                    name: "stay_quiet".into(),
+                    args: r#"{"reason":"nothing to add"}"#.into(),
+                }],
+            },
+        ]);
+        let out =
+            run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Trigger, now(), &[], "check")
+                .unwrap();
+
+        let (result, is_error) = batch_result(&llm, 1);
+        assert!(!is_error);
+        let results = result["results"].as_array().unwrap();
+        assert_eq!(results[0]["ok"], false);
+        assert!(
+            results[0]["error"]["message"].as_str().unwrap().contains("batch"),
+            "{}",
+            results[0]["error"]
+        );
+        assert_eq!(results[1]["ok"], false);
+        assert!(
+            results[1]["error"]["message"].as_str().unwrap().contains("ends the session"),
+            "{}",
+            results[1]["error"]
+        );
+        assert_eq!(results[2]["ok"], true, "{}", results[2]);
+
+        assert_eq!(out.tool_calls, 2, "a refused call never runs");
+        let names: Vec<&str> = out.steps.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["memory_query", "stay_quiet"]);
+        assert!(out.reply.contains("quiet"), "a batch ended the session: {}", out.reply);
+    }
+
+    #[test]
+    fn a_batch_over_the_cap_or_empty_runs_nothing() {
+        let (db, tmp) = env();
+        let one = serde_json::json!({ "tool": "task_create", "args": { "title": "x" } });
+        for calls in [
+            serde_json::Value::Array(vec![one; tools::MAX_BATCH_CALLS + 1]),
+            serde_json::json!([]),
+        ] {
+            let llm = MockLLM::scripted(vec![
+                batch_call("b1", calls),
+                ChatResponse { text: "fine".into(), tool_calls: vec![] },
+            ]);
+            let out =
+                run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, now(), &[], "hi")
+                    .unwrap();
+            let (result, is_error) = batch_result(&llm, 1);
+            assert!(is_error, "malformed batch arguments are the batch call's own error");
+            assert_eq!(result["kind"], "rejected");
+            assert_eq!(out.tool_calls, 0);
+            assert!(out.steps.is_empty());
+        }
+        let n: i64 =
+            db.lock().unwrap().query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn the_sessions_that_answer_one_call_are_never_offered_a_batch() {
+        for kind in [SessionKind::Import, SessionKind::Inbox, SessionKind::Summarize] {
+            assert!(!tools::registry(kind).contains(&"batch"), "{kind:?} is offered a batch");
+        }
+        for kind in [
+            SessionKind::Talk,
+            SessionKind::Checkin,
+            SessionKind::Nightly,
+            SessionKind::Harvest,
+            SessionKind::Review,
+            SessionKind::Trigger,
+        ] {
+            assert!(tools::registry(kind).contains(&"batch"), "{kind:?} has no batch");
+        }
+    }
+
+    struct FakeSearch(Vec<crate::search::SearchHit>);
+
+    impl crate::search::SearchProvider for FakeSearch {
+        fn search(&self, _query: &str) -> Result<Vec<crate::search::SearchHit>> {
+            Ok(self.0.clone())
+        }
+    }
+
+    fn hits(n: usize) -> FakeSearch {
+        FakeSearch(
+            (1..=n)
+                .map(|i| crate::search::SearchHit {
+                    title: format!("result {i}"),
+                    url: format!("http://example.test/{i}"),
+                    snippet: format!("what page {i} says"),
+                })
+                .collect(),
+        )
+    }
+
+    fn searching<'a>(
+        db: &'a Mutex<rusqlite::Connection>,
+        tmp: &'a tempfile::TempDir,
+        llm: &'a dyn LLMProvider,
+        search: &'a dyn crate::search::SearchProvider,
+    ) -> SessionDeps<'a> {
+        SessionDeps { search: Some(search), ..deps(db, tmp, llm) }
+    }
+
+    fn search_call(args: &str) -> ChatResponse {
+        ChatResponse {
+            text: String::new(),
+            tool_calls: vec![ToolCall {
+                id: "s1".into(),
+                name: "web_search".into(),
+                args: args.into(),
+            }],
+        }
+    }
+
+    fn search_log(db: &Mutex<rusqlite::Connection>) -> String {
+        db.lock()
+            .unwrap()
+            .query_row("SELECT detail FROM event_log WHERE kind = 'web_search'", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn a_web_search_hands_back_a_summary_written_from_the_hits() {
+        let (db, tmp) = env();
+        let llm = MockLLM::scripted(vec![
+            search_call(r#"{"query":"kyoto rain","question":"is it raining in kyoto?"}"#),
+            ChatResponse { text: "Rain until Thursday (1,2).".into(), tool_calls: vec![] },
+            ChatResponse { text: "take an umbrella".into(), tool_calls: vec![] },
+        ]);
+        let search = hits(2);
+        let out = run_session(
+            &searching(&db, &tmp, &llm, &search),
+            1,
+            "aki",
+            SessionKind::Talk,
+            now(),
+            &[],
+            "is it raining in kyoto?",
+        )
+        .unwrap();
+
+        assert_eq!(out.reply, "take an umbrella");
+        assert_eq!(out.steps.len(), 1);
+        assert_eq!(out.steps[0].name, "web_search");
+        assert!(!out.steps[0].is_error);
+        let result: serde_json::Value = serde_json::from_str(&out.steps[0].result).unwrap();
+        assert_eq!(result["summary"], "Rain until Thursday (1,2).");
+        assert_eq!(result["sources"].as_array().unwrap().len(), 2);
+        assert_eq!(result["sources"][0]["n"], 1);
+        assert_eq!(result["sources"][1]["url"], "http://example.test/2");
+        assert!(result["sources"][0]["snippet"].is_null(), "a summary carries no page text");
+
+        // the summarizer is one tool-less call of its own, between the rounds
+        let seen = llm.seen();
+        assert_eq!(seen.len(), 3);
+        assert!(seen[1].tool_names.is_empty(), "the summarizer was handed tools");
+        assert!(seen[1].system.contains("answer from the hits alone"));
+        assert_eq!(seen[1].n_messages, 1);
+        match &seen[1].messages[0] {
+            Message::User(text) => {
+                assert!(text.contains("kyoto rain"), "{text}");
+                assert!(text.contains("is it raining in kyoto?"), "{text}");
+                assert!(text.contains("1. result 1") && text.contains("what page 2 says"), "{text}");
+            }
+            other => panic!("expected the hits as a user message, got {other:?}"),
+        }
+        assert_eq!(search_log(&db), "hits=2 summary=ok");
+    }
+
+    #[test]
+    fn a_summarizer_that_cannot_answer_falls_back_to_the_hits_themselves() {
+        /// Answers the session from the script and fails the tool-less
+        /// summarizer call.
+        struct NoSummary(MockLLM);
+        impl LLMProvider for NoSummary {
+            fn chat(&self, req: &ChatRequest) -> Result<ChatResponse> {
+                anyhow::ensure!(!req.tools.is_empty(), "the summarizer is down");
+                self.0.chat(req)
+            }
+        }
+        let (db, tmp) = env();
+        let llm = NoSummary(MockLLM::scripted(vec![
+            search_call(r#"{"query":"kyoto rain"}"#),
+            ChatResponse { text: "here is what I found".into(), tool_calls: vec![] },
+        ]));
+        let search = hits(7);
+        let out = run_session(
+            &searching(&db, &tmp, &llm, &search),
+            1,
+            "aki",
+            SessionKind::Talk,
+            now(),
+            &[],
+            "kyoto rain",
+        )
+        .unwrap();
+
+        assert!(!out.steps[0].is_error, "a silent summarizer is not a failed search");
+        let result: serde_json::Value = serde_json::from_str(&out.steps[0].result).unwrap();
+        assert!(result["summary"].is_null());
+        let raw = result["hits"].as_array().unwrap();
+        assert_eq!(raw.len(), 5, "the fallback is the top five, text and all");
+        assert_eq!(raw[0]["snippet"], "what page 1 says");
+        assert_eq!(search_log(&db), "hits=7 summary=fallback");
+    }
+
+    #[test]
+    fn a_search_with_no_hits_costs_nothing_more() {
+        let (db, tmp) = env();
+        let llm = MockLLM::scripted(vec![
+            search_call(r#"{"query":"kyoto rain"}"#),
+            ChatResponse { text: "nothing came back".into(), tool_calls: vec![] },
+        ]);
+        let search = hits(0);
+        let out = run_session(
+            &searching(&db, &tmp, &llm, &search),
+            1,
+            "aki",
+            SessionKind::Talk,
+            now(),
+            &[],
+            "kyoto rain",
+        )
+        .unwrap();
+
+        assert_eq!(out.reply, "nothing came back");
+        let result: serde_json::Value = serde_json::from_str(&out.steps[0].result).unwrap();
+        assert_eq!(result["summary"], "no results");
+        assert_eq!(result["sources"].as_array().unwrap().len(), 0);
+        assert_eq!(llm.seen().len(), 2, "the summarizer was called with nothing to read");
+        assert_eq!(search_log(&db), "hits=0 summary=none");
+    }
+
+    #[test]
+    fn the_search_tool_is_offered_and_answered_only_where_search_is_configured() {
+        let (db, tmp) = env();
+        let llm = MockLLM::scripted(vec![
+            search_call(r#"{"query":"kyoto rain"}"#),
+            ChatResponse { text: "I can't look that up".into(), tool_calls: vec![] },
+        ]);
+        let out =
+            run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, now(), &[], "hi")
+                .unwrap();
+        assert!(!llm.seen()[0].tool_names.contains(&"web_search".to_string()));
+        assert!(out.steps[0].is_error);
+        assert!(out.steps[0].result.contains("not configured"), "{}", out.steps[0].result);
+        let n: i64 = db
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM event_log WHERE kind = 'web_search'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0);
+
+        let llm = MockLLM::scripted(vec![ChatResponse { text: "hi".into(), tool_calls: vec![] }]);
+        let search = hits(1);
+        run_session(&searching(&db, &tmp, &llm, &search), 1, "aki", SessionKind::Talk, now(), &[], "hi")
+            .unwrap();
+        assert!(llm.seen()[0].tool_names.contains(&"web_search".to_string()));
+
+        let llm = MockLLM::scripted(vec![ChatResponse { text: "hi".into(), tool_calls: vec![] }]);
+        run_session(
+            &searching(&db, &tmp, &llm, &search),
+            1,
+            "aki",
+            SessionKind::Trigger,
+            now(),
+            &[],
+            "check",
+        )
+        .unwrap();
+        assert!(
+            !llm.seen()[0].tool_names.contains(&"web_search".to_string()),
+            "a trigger session searches the user's own world, not the web"
+        );
+    }
+
     #[test]
     fn llm_failure_propagates() {
         struct Failing;
@@ -716,6 +1219,7 @@ mod tests {
             data_dir: tmp.path(),
             llm: &llm,
             embeddings: None,
+            search: None,
             task_scope: None,
             inbox_source: None,
             memory_source: None,

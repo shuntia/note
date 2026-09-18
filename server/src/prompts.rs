@@ -4,8 +4,10 @@ use std::path::{Path, PathBuf};
 /// The prompts a user may override through the API. Every function here checks
 /// a name against this list, so a caller-supplied name can never become a path
 /// of its own choosing.
-pub const EDITABLE: [&str; 8] =
-    ["persona", "planning", "import", "inbox", "summarize", "harvest", "review", "trigger"];
+pub const EDITABLE: [&str; 9] = [
+    "persona", "planning", "import", "inbox", "summarize", "harvest", "review", "trigger",
+    "search",
+];
 
 fn checked(name: &str) -> Result<()> {
     anyhow::ensure!(EDITABLE.contains(&name), "unknown prompt {name:?}");

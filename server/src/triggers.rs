@@ -650,6 +650,7 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
         data_dir: &state.data_dir,
         llm: state.llm.as_ref(),
         embeddings: state.embeddings.as_deref(),
+        search: state.search.as_deref(),
         task_scope: None,
         inbox_source: None,
         memory_source: None,

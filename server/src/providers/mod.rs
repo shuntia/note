@@ -67,14 +67,14 @@ pub(crate) fn http_agent(timeout_secs: u64) -> ureq::Agent {
 const RETRY_DELAYS_MS: [u64; 2] = [1_500, 4_000];
 
 /// The interactive and the background agent of one chat provider.
-pub(crate) struct ChatAgents {
+pub struct ChatAgents {
     interactive: ureq::Agent,
     background: ureq::Agent,
     retry_delays_ms: &'static [u64],
 }
 
 impl ChatAgents {
-    pub(crate) fn new(timeout_secs: u64, background_timeout_secs: u64) -> Self {
+    pub fn new(timeout_secs: u64, background_timeout_secs: u64) -> Self {
         Self {
             interactive: http_agent(timeout_secs),
             background: http_agent(background_timeout_secs.max(timeout_secs)),
