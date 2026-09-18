@@ -117,6 +117,11 @@ mod tests {
         for name in crate::tools::registry(crate::tools::SessionKind::Harvest) {
             assert!(harvest.contains(name), "the harvest prompt never mentions {name}");
         }
+        // the night's two halves: the episodic record is mechanical, the rest distilled
+        for kind in ["semantic", "procedural", "episodic"] {
+            assert!(harvest.contains(kind), "the harvest prompt never names {kind} memory");
+        }
+        assert!(harvest.contains("supersede"), "the harvest prompt never says how a fact changes");
         // the trigger prompt names the two ways that session can end
         let trigger = load(&config, "nobody", "trigger").unwrap();
         for name in ["say", "stay_quiet", "wait_until", "wait_for"] {
