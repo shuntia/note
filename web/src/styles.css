@@ -1137,6 +1137,9 @@ textarea.mono { font-family: var(--mono); }
 /* a block laid for a task: soft ground with the day's own attention down its edge */
 .dl-span.task { background: var(--haze-strong); border: 0; border-left: 2px solid var(--sun-ink); border-radius: 3px 6px 6px 3px; }
 .dl-span.task.next { background: var(--sun); }
+/* a moment Note set aside to look again: a hollow ring on the spine */
+.dl-span.trigger { top: -4px; width: 8px; min-width: 8px; height: 8px; margin-left: -4px; border-radius: 50%; background: none; border: 1.5px solid var(--quiet); }
+.dl-span.trigger.next { background: none; border-color: var(--ink); }
 /* what the day already settled, as a tick on the gone bar */
 .dl-past { position: absolute; top: -3px; width: 2px; height: 6px; margin-left: -1px; border-radius: 1px; }
 .dl-past.done { background: var(--sage); }
@@ -1153,6 +1156,7 @@ textarea.mono { font-family: var(--mono); }
 .dayline.compact .dl-ticks { height: 5px; }
 .dayline.compact .dl-now { width: 12px; height: 12px; }
 .dayline.compact .dl-span { top: -5px; height: 10px; min-width: 8px; }
+.dayline.compact .dl-span.trigger { top: -4px; height: 8px; }
 
 @keyframes bubble-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 .tellnote { display: flex; align-items: center; gap: 10px; padding: 0 6px 0 16px; border-radius: 999px; background: var(--haze-strong); min-height: 48px; }

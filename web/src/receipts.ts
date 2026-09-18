@@ -23,6 +23,7 @@ function span(minutes: number): string {
 
 export function eventLabel(kind: string): string {
   if (kind === 'debrief') return 'Morning debrief'
+  if (kind === 'trigger') return 'Note checks in'
   const words = kind.replaceAll('_', ' ').replace('checkin', 'check-in').trim()
   return words.charAt(0).toUpperCase() + words.slice(1)
 }
@@ -102,6 +103,23 @@ const done: Record<string, (a: Args) => string> = {
     const text = str(a, 'text')
     return text ? `Sent you a nudge: ${clip(text)}` : 'Sent you a nudge'
   },
+  trigger_set: (a) => laid(a, 'at'),
+  wait_until: (a) => laid(a, 'at'),
+  wait_for: (a) => laid(a, 'until'),
+  trigger_budget: (a) => {
+    const extra = num(a, 'extra')
+    return extra === null
+      ? "Raised today's check-in budget"
+      : `Raised today's check-in budget by ${extra}`
+  },
+}
+
+// When Note will look at the day again, in the words the user set the time in.
+function laid(a: Args, key: string): string {
+  const at = str(a, key)
+  const offset = at.startsWith('+') ? `in ${span(Number(at.replace(/\D/g, '')) || 0)}` : ''
+  const when = offset || (at ? `at ${at}` : '')
+  return when ? `Set a check-in ${when}` : 'Set a check-in'
 }
 
 // What a call reads as while it is still running.
@@ -120,6 +138,10 @@ const running: Record<string, (a: Args) => string> = {
   schedule_drop: () => 'Dropping an event',
   schedule_insert: () => 'Adding that to the plan',
   notify_send: () => 'Sending you a nudge',
+  trigger_set: () => 'Setting a check-in',
+  wait_until: () => 'Setting a check-in',
+  wait_for: () => 'Setting a check-in',
+  trigger_budget: () => "Raising today's check-in budget",
 }
 
 const failed: Record<string, string> = {
@@ -134,6 +156,10 @@ const failed: Record<string, string> = {
   schedule_drop: "Couldn't drop that event",
   schedule_insert: "Couldn't add that to the plan",
   notify_send: "Couldn't send that nudge",
+  trigger_set: "Couldn't set that check-in",
+  wait_until: "Couldn't set that check-in",
+  wait_for: "Couldn't set that check-in",
+  trigger_budget: "Couldn't raise today's check-in budget",
 }
 
 function parse(raw: string): Args {

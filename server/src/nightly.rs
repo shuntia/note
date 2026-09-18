@@ -14,7 +14,7 @@ const FALLBACK_DEBRIEF: &str =
 /// `nightly_time` runs after midnight, so the current local date is the
 /// sleeper's coming day; from noon onward the run precedes sleep and targets
 /// the next date. Falls back to the current date if `tomorrow` overflows.
-fn plan_date(local: &jiff::Zoned, nightly_time: &str) -> jiff::civil::Date {
+pub(crate) fn plan_date(local: &jiff::Zoned, nightly_time: &str) -> jiff::civil::Date {
     let evening = nightly_time
         .split(':')
         .next()

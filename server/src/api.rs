@@ -56,6 +56,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/events/{id}/drop", post(event_drop))
         .route("/api/events/{id}/alert", post(event_alert))
         .route("/api/events/{id}/move_tomorrow", post(event_move_tomorrow))
+        .route("/api/sessions", post(work_session_start))
+        .route("/api/sessions/open", get(work_session_open))
+        .route("/api/sessions/{id}/end", post(work_session_end))
         .route("/api/ws", get(ws_connect))
         .route("/api/push/subscribe", post(push_subscribe))
         .route("/api/push/unsubscribe", post(push_unsubscribe))
@@ -961,8 +964,13 @@ struct SettingsPatch {
     counter: Option<String>,
     nightly_enabled: Option<bool>,
     checkins_enabled: Option<bool>,
+    triggers_per_day: Option<u32>,
     alerts: Option<Vec<AlertPatch>>,
 }
+
+/// A day's worth of check-ins Note may start on its own; more than this and it
+/// is not a companion any more.
+const MAX_TRIGGERS_PER_DAY: u32 = 20;
 
 /// `telegram_linked` is read by the caller, which already holds the DB guard on
 /// the write path.
@@ -988,6 +996,7 @@ fn settings_body(
         "telegram_enabled": state.telegram.is_some(),
         "telegram_linked": telegram_linked,
         "telegram_bot": state.telegram.as_ref().map(|ch| ch.bot()).unwrap_or_default(),
+        "triggers_per_day": cfg.triggers_per_day(),
         "schedule": schedule,
     })
 }
@@ -1007,6 +1016,14 @@ fn schedule_rows(
 fn invalid_field(field: &str, requirement: &str) -> axum::response::Response {
     (
         StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({ "error": format!("{field} {requirement}") })),
+    )
+        .into_response()
+}
+
+fn unprocessable_field(field: &str, requirement: &str) -> axum::response::Response {
+    (
+        StatusCode::UNPROCESSABLE_ENTITY,
         Json(serde_json::json!({ "error": format!("{field} {requirement}") })),
     )
         .into_response()
@@ -1096,6 +1113,15 @@ async fn settings_put(
     }
     if let Some(on) = req.checkins_enabled {
         cfg.checkins_enabled = Some(on);
+    }
+    if let Some(n) = req.triggers_per_day {
+        if n > MAX_TRIGGERS_PER_DAY {
+            return invalid_field(
+                "triggers_per_day",
+                &format!("must be 0 to {MAX_TRIGGERS_PER_DAY}"),
+            );
+        }
+        cfg.triggers_per_day = Some(n);
     }
     if let Some(alerts) = req.alerts {
         let changes: Vec<(usize, bool)> = alerts.iter().map(|a| (a.index, a.alert)).collect();
@@ -1703,6 +1729,82 @@ async fn event_move_tomorrow(
         }
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(crate::plan::ShiftError::Decided { .. }) => StatusCode::CONFLICT.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NewWorkSession {
+    #[serde(default)]
+    task_id: Option<i64>,
+    #[serde(default)]
+    event_id: Option<i64>,
+    title: String,
+    #[serde(default)]
+    planned_min: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EndWorkSession {
+    outcome: String,
+}
+
+/// Opens a work session, stopping whatever was still running. The server lays
+/// the first progress check itself, so accountability starts with the session
+/// rather than with the agent's next turn.
+async fn work_session_start(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Json(req): Json<NewWorkSession>,
+) -> impl IntoResponse {
+    let conn = state.db();
+    let started = crate::work::start(
+        &conn,
+        &state.config_dir,
+        user.id,
+        &user.username,
+        crate::work::NewSession {
+            task_id: req.task_id,
+            event_id: req.event_id,
+            title: req.title,
+            planned_min: req.planned_min,
+        },
+        jiff::Timestamp::now(),
+    );
+    match started {
+        Ok(session) => Json(session).into_response(),
+        Err(crate::work::StartError::Invalid(m)) => {
+            (StatusCode::UNPROCESSABLE_ENTITY, Json(serde_json::json!({ "error": m })))
+                .into_response()
+        }
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+/// Closes the session and takes its waiting checks with it. Ending one that is
+/// already over is success: the client says stop once, whatever it lost track of.
+async fn work_session_end(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(req): Json<EndWorkSession>,
+) -> impl IntoResponse {
+    if req.outcome != "done" && req.outcome != "stopped" {
+        return unprocessable_field("outcome", "must be done or stopped");
+    }
+    let conn = state.db();
+    match crate::work::end(&conn, user.id, Some(id), &req.outcome, jiff::Timestamp::now()) {
+        Ok(ended) => Json(serde_json::json!({ "ended": ended })).into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn work_session_open(user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
+    let conn = state.db();
+    match crate::work::open(&conn, user.id) {
+        Ok(session) => Json(session).into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }

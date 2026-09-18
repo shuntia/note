@@ -110,6 +110,24 @@ fn defer_while_quiet(
     Ok(true)
 }
 
+/// Settles a due trigger whose reason has already taken care of itself, before
+/// it is ever marked fired: the user replied, finished the task, or decided the
+/// event it was waiting on.
+fn cancel_settled_trigger(
+    conn: &Connection,
+    c: &Candidate,
+    now: jiff::Timestamp,
+) -> Result<bool> {
+    let Some(ev) = crate::triggers::read(conn, c.event_id)? else {
+        return Ok(false);
+    };
+    if !crate::triggers::cancelled(conn, c.user_id, &ev)? {
+        return Ok(false);
+    }
+    crate::triggers::cancel(conn, c.user_id, &ev, now)?;
+    Ok(true)
+}
+
 /// Fires every pending or snoozed event whose wall time, resolved in its user's
 /// timezone on the plan date, has arrived by `now`. A candidate that cannot be
 /// resolved is logged as `runner_error` and skipped, so one unusable row cannot
@@ -171,6 +189,9 @@ pub fn fire_due(
         };
         if due <= now {
             if defer_while_quiet(conn, &c, &rt.tz, now)? {
+                continue;
+            }
+            if c.kind == crate::triggers::KIND && cancel_settled_trigger(conn, &c, now)? {
                 continue;
             }
             conn.execute(
@@ -242,7 +263,13 @@ pub fn sweep_once(state: &AppState) {
         }
     };
     for ev in &fired {
-        crate::channels::deliver_event(&state.db, &state.channels, ev);
+        // A trigger has nothing canned to deliver: it runs a session first, and
+        // that session decides whether anything is sent at all.
+        if ev.kind == crate::triggers::KIND {
+            crate::triggers::fire(state, ev);
+        } else {
+            crate::channels::deliver_event(&state.db, &state.channels, ev);
+        }
     }
 }
 

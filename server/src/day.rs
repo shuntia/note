@@ -102,6 +102,11 @@ pub fn history(
     let local_now = now.to_zoned(tz.clone());
     let now_min = i64::from(local_now.hour()) * 60 + i64::from(local_now.minute());
     for e in events {
+        // A trigger point is Note's own moment, not a thing the user did: what
+        // it said is in the thread, and one it called off left no mark at all.
+        if e.kind == crate::triggers::KIND {
+            continue;
+        }
         match &e.decided_at {
             Some(at) if on_date(at, tz, date) => {
                 let (kind, label) = match (e.status.as_str(), &e.moved) {
@@ -242,6 +247,27 @@ mod tests {
             rows(&conn, uid, date, "2026-09-21T11:00:00Z").is_empty(),
             "an undecided event past its end is still owed, not history"
         );
+    }
+
+    #[test]
+    fn a_trigger_point_leaves_no_mark_on_the_day_whichever_way_it_ended() {
+        let (conn, uid, date) = env();
+        for (status, at) in [("done", "09:10"), ("dropped", "10:10")] {
+            conn.execute(
+                "INSERT INTO events (plan_id, kind, wall_time, orig_wall_time, span_min,
+                                     status, decided_at, prompt)
+                 VALUES (1, 'trigger', ?1, ?1, 15, ?2, ?3, 'ask about the essay')",
+                (at, status, format!("2026-09-21T{at}:00Z")),
+            )
+            .unwrap();
+        }
+        let id = event(&conn, "11:00", None);
+        crate::plan::set_status(&conn, uid, id, "done").unwrap();
+        decided_at(&conn, id, "2026-09-21T11:10:00Z");
+
+        let out = rows(&conn, uid, date, "2026-09-21T20:00:00Z");
+        assert_eq!(out.len(), 1, "only the user's own day is history");
+        assert_eq!(out[0].label, "stretch");
     }
 
     #[test]
