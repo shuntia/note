@@ -413,16 +413,19 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
         ),
         "calendar_list" => (
             "Read the user's calendar of fixed commitments: what each day already \
-             belongs to, with the quiet windows marked.",
+             belongs to, with the quiet windows marked and the free time the user has set \
+             aside for tasks.",
             schema::<calendar_ops::ListArgs>(),
         ),
         "calendar_add" => (
             "Add a standing commitment to the calendar. \"fixed\" is a hard one the day is \
              built around — school, work, a class — and is quiet by default: while it runs, \
              deliveries are held and arrive when it ends. \"busy\" is softer (a commute, a \
-             meal) and \"note\" is informational and never quiet. Use this when the user says \
-             they cannot be disturbed at certain times, or names something that happens every \
-             week: \"school weekdays 08:15-15:30\" is fixed and quiet.",
+             meal), \"note\" is informational and never quiet, and \"free\" is time the user \
+             has set aside for tasks — never quiet, and the only time open tasks are laid \
+             into. Use this when the user says they cannot be disturbed at certain times, or \
+             names something that happens every week: \"school weekdays 08:15-15:30\" is \
+             fixed and quiet.",
             schema::<calendar_ops::AddArgs>(),
         ),
         "calendar_update" => (
