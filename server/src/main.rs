@@ -124,14 +124,6 @@ async fn main() -> anyhow::Result<()> {
         let ch = channels::webpush::WebPushChannel::new(state.db.clone(), pem, wp.subject.clone())?;
         state = state.with_webpush(ch, public_key);
     }
-    if let Some(n) = &cfg.channels.ntfy {
-        let ch = channels::ntfy::NtfyChannel::new(
-            state.config_dir.clone(),
-            n,
-            &cfg.public_base_url,
-        )?;
-        state = state.with_ntfy(ch, n.topic_prefix.clone());
-    }
     runner::spawn(state.clone());
     nightly::spawn(state.clone());
     summaries::spawn(state.clone());

@@ -4,9 +4,7 @@ use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
 use http_body_util::BodyExt;
 use note_server::channels::mock::MockChannel;
-use note_server::channels::ntfy::NtfyChannel;
 use note_server::channels::Channel;
-use note_server::config::NtfySettings;
 use note_server::{api, auth, db, AppState};
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -50,21 +48,21 @@ async fn the_test_notification_names_the_channel_that_took_it() {
     let cfg = common::config_dir();
     let ws = Arc::new(MockChannel::new("ws"));
     ws.set_fail(true);
-    let ntfy = Arc::new(MockChannel::new("ntfy"));
-    let ladder: Vec<Arc<dyn Channel>> = vec![ws, ntfy.clone()];
+    let webpush = Arc::new(MockChannel::new("webpush"));
+    let ladder: Vec<Arc<dyn Channel>> = vec![ws, webpush.clone()];
     let (app, cookie, state) = app_with(&cfg, |s| s.with_channels(ladder)).await;
 
     let res = app.oneshot(test_request(Some(&cookie))).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
-    assert_eq!(json(res).await["via"], "ntfy");
+    assert_eq!(json(res).await["via"], "webpush");
 
-    let seen = ntfy.seen();
+    let seen = webpush.seen();
     assert_eq!(seen.len(), 1);
     assert_eq!(seen[0].1.title, "Note");
     assert_eq!(seen[0].1.body, "Test notification");
     assert_eq!(seen[0].1.event_id, None);
     let detail = logged(&state, "delivery_ok").unwrap();
-    assert!(detail.contains("via ntfy"), "unexpected detail: {detail}");
+    assert!(detail.contains("via webpush"), "unexpected detail: {detail}");
 }
 
 #[tokio::test]
@@ -83,33 +81,4 @@ async fn the_test_route_needs_a_session() {
     let (app, _cookie, _state) = app_with(&cfg, |s| s).await;
     let res = app.oneshot(test_request(None)).await.unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
-}
-
-#[tokio::test]
-async fn settings_report_the_configured_prefix_as_the_default_topic() {
-    let cfg = common::config_dir();
-    let settings = NtfySettings {
-        base_url: "http://127.0.0.1:1".into(),
-        token_file: std::path::PathBuf::new(),
-        topic_prefix: "plan-".into(),
-    };
-    let dir = cfg.path().to_path_buf();
-    let (app, cookie, _state) = app_with(&cfg, move |s| {
-        let ch = NtfyChannel::new(dir, &settings, "http://localhost:3271").unwrap();
-        s.with_ntfy(ch, settings.topic_prefix.clone())
-    })
-    .await;
-
-    let res = app
-        .oneshot(
-            Request::get("/api/settings")
-                .header(header::COOKIE, &cookie)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    let v = json(res).await;
-    assert_eq!(v["ntfy_enabled"], true);
-    assert_eq!(v["ntfy_topic"], "plan-aki");
 }
