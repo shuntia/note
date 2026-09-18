@@ -215,7 +215,7 @@ pub fn run_session_watched(
             messages.push(Message::ToolResult { call_id: call.id, content, is_error });
         }
     }
-    if last_text.trim().is_empty() {
+    if last_text.trim().is_empty() && matches!(kind, SessionKind::Talk | SessionKind::Checkin) {
         last_text = MAX_TURNS_REPLY.to_string();
     }
     on_event(AgentEvent::Reply { text: &last_text });
@@ -525,11 +525,17 @@ mod tests {
                 args: r#"{"query":"x"}"#.into(),
             }],
         };
-        let llm = MockLLM::scripted(vec![resp; MAX_TURNS]);
+        let llm = MockLLM::scripted(vec![resp.clone(); MAX_TURNS]);
         let out =
             run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, now(), &[], "hi")
                 .unwrap();
         assert_eq!(out.reply, MAX_TURNS_REPLY);
+
+        let llm = MockLLM::scripted(vec![resp; MAX_TURNS]);
+        let out =
+            run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Nightly, now(), &[], "hi")
+                .unwrap();
+        assert_eq!(out.reply, "", "the nightly run keeps its own fallback");
     }
 
     #[test]
