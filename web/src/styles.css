@@ -1279,6 +1279,7 @@ textarea.mono { font-family: var(--mono); }
 .debrief-row.open .debrief-fold { background: none; }
 .debrief-row.open .debrief-lead { white-space: normal; overflow: visible; }
 .debrief-mark { width: 18px; height: 18px; border-radius: 50%; border: 1.7px solid var(--sun-ink); box-sizing: border-box; flex: none; }
+.review-row .debrief-mark { background: var(--sun-ink); }
 .debrief-chev svg { width: 16px; height: 16px; fill: none; stroke: var(--faint); stroke-width: 1.8; transition: transform 200ms; }
 .debrief-fold[aria-expanded='true'] .debrief-chev svg { transform: rotate(180deg); }
 
