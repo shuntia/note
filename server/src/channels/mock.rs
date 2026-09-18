@@ -56,6 +56,7 @@ mod tests {
             urgency: Urgency::Low,
             event_id: None,
             conversation_id: None,
+            actions: Vec::new(),
         };
         ch.deliver(1, "aki", &m).unwrap();
         ch.set_fail(true);

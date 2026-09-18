@@ -574,6 +574,7 @@ pub fn tick(conn: &Connection, config_dir: &Path, now: jiff::Timestamp) -> Resul
                     urgency: crate::channels::Urgency::Normal,
                     event_id: None,
                     conversation_id: session.conversation_id,
+                    actions: Vec::new(),
                 })
             }
         } else {
@@ -591,6 +592,7 @@ pub fn tick(conn: &Connection, config_dir: &Path, now: jiff::Timestamp) -> Resul
                 urgency: crate::channels::Urgency::Normal,
                 event_id: None,
                 conversation_id: session.conversation_id,
+                actions: Vec::new(),
             })
         };
         flips.push(Flip { user_id, username, message });
@@ -672,6 +674,7 @@ pub fn overrun(conn: &Connection, config_dir: &Path, now: jiff::Timestamp) -> Re
                 urgency: crate::channels::Urgency::High,
                 event_id: None,
                 conversation_id: session.conversation_id,
+                actions: Vec::new(),
             }),
         });
     }

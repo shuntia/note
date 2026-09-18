@@ -1,4 +1,4 @@
-use super::{Channel, OutboundMessage};
+use super::{Action, Channel, OutboundMessage};
 use crate::config::TelegramSettings;
 use anyhow::{Context, Result};
 use rusqlite::Connection;
@@ -20,12 +20,25 @@ pub struct Update {
     pub text: String,
 }
 
+/// A button pressed on a message Note sent, carrying what it needs to apply the
+/// answer and to write the outcome back onto the message it came from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Callback {
+    pub update_id: i64,
+    pub callback_id: String,
+    pub chat_id: i64,
+    pub message_id: i64,
+    pub text: String,
+    pub data: String,
+}
+
 /// `last_update_id` counts every update in the batch, including the ones that
 /// carried nothing to answer, so the cursor never stalls on them.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Batch {
     pub last_update_id: Option<i64>,
     pub messages: Vec<Update>,
+    pub callbacks: Vec<Callback>,
 }
 
 pub struct TelegramChannel {
@@ -99,14 +112,46 @@ impl TelegramChannel {
         Ok(result["username"].as_str().context("getMe named no username")?.to_string())
     }
 
-    pub fn send_message(&self, chat_id: i64, text: &str) -> Result<()> {
-        for part in split(text) {
-            self.call(
-                &self.agent,
-                "sendMessage",
-                serde_json::json!({ "chat_id": chat_id, "text": part }),
-            )?;
+    /// The buttons ride on the last part, so a reply that travels as several
+    /// messages still ends with one keyboard.
+    pub fn send_message(&self, chat_id: i64, text: &str, actions: &[Action]) -> Result<()> {
+        let parts = split(text);
+        let last = parts.len() - 1;
+        for (i, part) in parts.into_iter().enumerate() {
+            let mut body = serde_json::json!({ "chat_id": chat_id, "text": part });
+            if i == last && !actions.is_empty() {
+                body["reply_markup"] = keyboard(actions);
+            }
+            self.call(&self.agent, "sendMessage", body)?;
         }
+        Ok(())
+    }
+
+    pub fn answer_callback(&self, callback_id: &str, text: &str) -> Result<()> {
+        self.call(
+            &self.agent,
+            "answerCallbackQuery",
+            serde_json::json!({ "callback_query_id": callback_id, "text": text }),
+        )?;
+        Ok(())
+    }
+
+    /// Takes the buttons off a message that has been answered.
+    pub fn clear_keyboard(&self, chat_id: i64, message_id: i64) -> Result<()> {
+        self.call(
+            &self.agent,
+            "editMessageReplyMarkup",
+            serde_json::json!({ "chat_id": chat_id, "message_id": message_id }),
+        )?;
+        Ok(())
+    }
+
+    pub fn edit_text(&self, chat_id: i64, message_id: i64, text: &str) -> Result<()> {
+        self.call(
+            &self.agent,
+            "editMessageText",
+            serde_json::json!({ "chat_id": chat_id, "message_id": message_id, "text": text }),
+        )?;
         Ok(())
     }
 
@@ -114,7 +159,7 @@ impl TelegramChannel {
     /// account has no chat.
     pub fn send_to_user(&self, user_id: i64, text: &str) -> Result<()> {
         let chat_id = self.chat_for(user_id)?;
-        self.send_message(chat_id, text)
+        self.send_message(chat_id, text, &[])
     }
 
     pub fn get_updates(&self, offset: i64) -> Result<Batch> {
@@ -124,7 +169,7 @@ impl TelegramChannel {
             serde_json::json!({
                 "offset": offset,
                 "timeout": POLL_SECS,
-                "allowed_updates": ["message"],
+                "allowed_updates": ["message", "callback_query"],
             }),
         )?;
         let updates = result.as_array().context("getUpdates returned no list")?;
@@ -135,6 +180,9 @@ impl TelegramChannel {
             }
             if let Some(update) = parse_update(raw) {
                 batch.messages.push(update);
+            }
+            if let Some(callback) = parse_callback(raw) {
+                batch.callbacks.push(callback);
             }
         }
         Ok(batch)
@@ -147,6 +195,30 @@ impl TelegramChannel {
         };
         chat_id.context("not linked")
     }
+}
+
+/// One row of buttons; Telegram's `data` is capped at 64 bytes, and a label
+/// whose data will not fit is dropped rather than refused by the API.
+fn keyboard(actions: &[Action]) -> serde_json::Value {
+    let row: Vec<serde_json::Value> = actions
+        .iter()
+        .filter(|a| a.data.len() <= super::MAX_ACTION_DATA)
+        .map(|a| serde_json::json!({ "text": a.label, "callback_data": a.data }))
+        .collect();
+    serde_json::json!({ "inline_keyboard": [row] })
+}
+
+fn parse_callback(raw: &serde_json::Value) -> Option<Callback> {
+    let query = raw.get("callback_query")?;
+    let message = query.get("message")?;
+    Some(Callback {
+        update_id: raw["update_id"].as_i64()?,
+        callback_id: query["id"].as_str()?.to_string(),
+        chat_id: message["chat"]["id"].as_i64()?,
+        message_id: message["message_id"].as_i64()?,
+        text: message["text"].as_str().unwrap_or_default().to_string(),
+        data: query["data"].as_str()?.to_string(),
+    })
 }
 
 fn parse_update(raw: &serde_json::Value) -> Option<Update> {
@@ -190,7 +262,7 @@ impl Channel for TelegramChannel {
         } else {
             format!("{}\n{}", msg.title, msg.body)
         };
-        self.send_message(chat_id, &text)?;
+        self.send_message(chat_id, &text, &msg.actions)?;
         if let Some(id) = msg.conversation_id {
             let conn = crate::db_guard(&self.db);
             let _ = crate::talk::stamp_telegram(&conn, id, jiff::Timestamp::now());
@@ -313,6 +385,7 @@ mod tests {
             urgency: Urgency::High,
             event_id: Some(7),
             conversation_id: None,
+            actions: Vec::new(),
         }
     }
 
@@ -466,13 +539,120 @@ mod tests {
         let v = body_json(&raw);
         assert_eq!(v["offset"], 11);
         assert_eq!(v["timeout"], 30);
-        assert_eq!(v["allowed_updates"], serde_json::json!(["message"]));
+        assert_eq!(v["allowed_updates"], serde_json::json!(["message", "callback_query"]));
 
         assert_eq!(batch.last_update_id, Some(13));
         assert_eq!(
             batch.messages,
             vec![Update { update_id: 11, chat_id: 42, handle: "aki_t".into(), text: "hi".into() }]
         );
+        assert!(batch.callbacks.is_empty());
+    }
+
+    #[test]
+    fn a_batch_carries_the_buttons_that_were_pressed() {
+        let updates = r#"{"ok":true,"result":[
+            {"update_id":21,"callback_query":{"id":"q1","data":"ev:done:7",
+                "from":{"username":"aki_t"},
+                "message":{"message_id":90,"chat":{"id":42},"text":"Check-in\nhow is it going?"}}},
+            {"update_id":22,"callback_query":{"id":"q2","data":"ev:drop:7"}}
+        ]}"#;
+        let (base, rx) = serve(vec![("200 OK", GET_ME), ("200 OK", updates)]);
+        let (ch, _tmp) = channel(db(), &base);
+        took(&rx);
+        let batch = ch.get_updates(0).unwrap();
+        took(&rx);
+
+        assert_eq!(batch.last_update_id, Some(22));
+        assert!(batch.messages.is_empty());
+        assert_eq!(
+            batch.callbacks,
+            vec![Callback {
+                update_id: 21,
+                callback_id: "q1".into(),
+                chat_id: 42,
+                message_id: 90,
+                text: "Check-in\nhow is it going?".into(),
+                data: "ev:done:7".into(),
+            }],
+            "a press with no message to write back onto is counted, not kept"
+        );
+    }
+
+    #[test]
+    fn a_message_with_actions_carries_one_row_of_buttons() {
+        let db = db();
+        link(&db, 1, 4242);
+        let (base, rx) = serve(vec![("200 OK", GET_ME), ("200 OK", SENT)]);
+        let (ch, _tmp) = channel(db, &base);
+        took(&rx);
+        let mut m = msg();
+        m.actions = crate::channels::event_actions(7);
+        ch.deliver(1, "aki", &m).unwrap();
+
+        let v = body_json(&took(&rx));
+        assert_eq!(
+            v["reply_markup"],
+            serde_json::json!({ "inline_keyboard": [[
+                { "text": "Done", "callback_data": "ev:done:7" },
+                { "text": "Snooze 15", "callback_data": "ev:snooze:7:15" },
+                { "text": "Drop", "callback_data": "ev:drop:7" },
+            ]] })
+        );
+    }
+
+    #[test]
+    fn only_the_last_of_a_split_message_holds_the_buttons() {
+        let db = db();
+        link(&db, 1, 4242);
+        let (base, rx) = serve(vec![("200 OK", GET_ME), ("200 OK", SENT), ("200 OK", SENT)]);
+        let (ch, _tmp) = channel(db, &base);
+        took(&rx);
+        let long = format!("{}\n", "x".repeat(99)).repeat(60);
+        ch.send_message(4242, &long, &crate::channels::event_actions(7)).unwrap();
+
+        assert!(body_json(&took(&rx)).get("reply_markup").is_none());
+        assert!(body_json(&took(&rx))["reply_markup"]["inline_keyboard"][0].is_array());
+    }
+
+    #[test]
+    fn a_label_whose_data_will_not_fit_is_left_off() {
+        let long = Action { label: "Carry".into(), data: "carry:".to_string() + &"x".repeat(64) };
+        let row = keyboard(&[long, Action { label: "Done".into(), data: "ev:done:7".into() }]);
+        assert_eq!(
+            row,
+            serde_json::json!({ "inline_keyboard": [[
+                { "text": "Done", "callback_data": "ev:done:7" },
+            ]] })
+        );
+    }
+
+    #[test]
+    fn an_answered_press_is_toasted_disarmed_and_written_back() {
+        let ok = r#"{"ok":true,"result":true}"#;
+        let (base, rx) = serve(vec![("200 OK", GET_ME), ("200 OK", ok), ("200 OK", ok), ("200 OK", ok)]);
+        let (ch, _tmp) = channel(db(), &base);
+        took(&rx);
+        ch.answer_callback("q1", "Done").unwrap();
+        ch.clear_keyboard(42, 90).unwrap();
+        ch.edit_text(42, 90, "Check-in\n✓ Done").unwrap();
+
+        let raw = took(&rx);
+        assert!(raw.starts_with("POST /botbot:secret/answerCallbackQuery "), "{raw}");
+        let v = body_json(&raw);
+        assert_eq!(v["callback_query_id"], "q1");
+        assert_eq!(v["text"], "Done");
+
+        let raw = took(&rx);
+        assert!(raw.starts_with("POST /botbot:secret/editMessageReplyMarkup "), "{raw}");
+        let v = body_json(&raw);
+        assert_eq!(v["chat_id"], 42);
+        assert_eq!(v["message_id"], 90);
+        assert!(v.get("reply_markup").is_none(), "the keyboard is removed, not replaced");
+
+        let raw = took(&rx);
+        assert!(raw.starts_with("POST /botbot:secret/editMessageText "), "{raw}");
+        assert_eq!(body_json(&raw)["text"], "Check-in\n✓ Done");
     }
 
     #[test]

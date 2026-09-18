@@ -110,6 +110,15 @@ async fn a_trigger_that_speaks_lands_in_the_thread_and_on_a_channel() {
     assert_eq!(seen.len(), 1);
     assert_eq!(seen[0].1.title, "Note");
     assert_eq!(seen[0].1.body, "how is the chapter going?");
+    let event_id = seen[0].1.event_id.expect("the words name the trigger they came from");
+    assert_eq!(
+        seen[0].1.actions.iter().map(|a| a.data.as_str()).collect::<Vec<_>>(),
+        vec![
+            format!("ev:done:{event_id}"),
+            format!("ev:snooze:{event_id}:15"),
+            format!("ev:drop:{event_id}"),
+        ]
+    );
     let thread = seen[0].1.conversation_id.expect("the words land in a thread");
 
     let said: Vec<String> = rows(
