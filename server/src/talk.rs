@@ -191,6 +191,74 @@ pub fn history(conn: &Connection, conversation_id: i64, limit: usize) -> Result<
     Ok(msgs)
 }
 
+/// `history` restricted to the rows a summary has not covered yet, so a
+/// re-summary replays only what is new.
+pub fn history_after(
+    conn: &Connection,
+    conversation_id: i64,
+    after_id: i64,
+    limit: usize,
+) -> Result<Vec<Message>> {
+    let mut stmt = conn.prepare(
+        "SELECT role, content FROM talk_messages
+         WHERE conversation_id = ?1 AND role IN ('user','assistant') AND id > ?2
+         ORDER BY id DESC LIMIT ?3",
+    )?;
+    let mut msgs = stmt
+        .query_map((conversation_id, after_id, limit as i64), |r| {
+            let role: String = r.get(0)?;
+            let content: String = r.get(1)?;
+            Ok(match role.as_str() {
+                "user" => Message::User(content),
+                _ => Message::Assistant { text: content, tool_calls: vec![] },
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    msgs.reverse();
+    Ok(msgs)
+}
+
+/// How many turns `history` has to choose from: past `TALK_HISTORY_LIMIT` the
+/// window drops the oldest ones, and only the summary still carries them.
+pub fn text_turns(conn: &Connection, conversation_id: i64) -> Result<usize> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM talk_messages
+         WHERE conversation_id = ?1 AND role IN ('user','assistant')",
+        [conversation_id],
+        |r| r.get(0),
+    )?;
+    Ok(n as usize)
+}
+
+/// The summary a conversation carries, with the row it covers up to.
+pub fn summary(conn: &Connection, conversation_id: i64) -> Result<Option<(String, i64)>> {
+    Ok(conn
+        .query_row(
+            "SELECT summary, COALESCE(summary_through, 0) FROM conversations WHERE id = ?1",
+            [conversation_id],
+            |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, i64>(1)?)),
+        )
+        .optional()?
+        .and_then(|(s, through)| s.map(|s| (s, through))))
+}
+
+/// Stores a summary and the last row it covers; `summarized_at` says when the
+/// pass last ran.
+pub fn store_summary(
+    conn: &Connection,
+    conversation_id: i64,
+    summary: &str,
+    through: i64,
+    now: jiff::Timestamp,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE conversations SET summary = ?1, summarized_at = ?2, summary_through = ?3
+         WHERE id = ?4",
+        (summary, now.to_string(), through, conversation_id),
+    )?;
+    Ok(())
+}
+
 /// A conversation title derived from its opening message: whitespace collapsed
 /// to single spaces and at most `MAX_TITLE_CHARS` chars, ellipsis included.
 pub fn title_from(message: &str) -> String {
@@ -267,6 +335,43 @@ mod tests {
         assert_ne!(mine, theirs);
         assert!(owned(&conn, 2, theirs).unwrap());
         assert!(!owned(&conn, 2, mine).unwrap());
+    }
+
+    #[test]
+    fn history_after_replays_only_the_rows_a_summary_missed() {
+        let conn = conn_with_conversation();
+        for i in 0..4 {
+            append_text(&conn, 1, "user", &format!("m{i}"), now()).unwrap();
+            append_tool(&conn, 1, "task_create", "{}", "{}", false, now()).unwrap();
+        }
+        let after: i64 = conn
+            .query_row("SELECT id FROM talk_messages WHERE content = 'm1'", [], |r| r.get(0))
+            .unwrap();
+        let msgs = history_after(&conn, 1, after, 10).unwrap();
+        assert_eq!(msgs.len(), 2);
+        assert!(matches!(&msgs[0], Message::User(t) if t == "m2"));
+        assert!(matches!(&msgs[1], Message::User(t) if t == "m3"));
+
+        let msgs = history_after(&conn, 1, after, 1).unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert!(matches!(&msgs[0], Message::User(t) if t == "m3"));
+        assert_eq!(history_after(&conn, 1, 0, 10).unwrap().len(), 4);
+        assert_eq!(text_turns(&conn, 1).unwrap(), 4);
+    }
+
+    #[test]
+    fn a_stored_summary_reads_back_with_the_row_it_covers() {
+        let conn = conn_with_conversation();
+        assert_eq!(summary(&conn, 1).unwrap(), None);
+        append_text(&conn, 1, "user", "hi", now()).unwrap();
+        let at: jiff::Timestamp = "2026-09-17T09:00:00Z".parse().unwrap();
+        store_summary(&conn, 1, "Aki said hello.", 1, at).unwrap();
+        assert_eq!(summary(&conn, 1).unwrap(), Some(("Aki said hello.".to_string(), 1)));
+        let when: String = conn
+            .query_row("SELECT summarized_at FROM conversations WHERE id = 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(when, at.to_string());
+        assert_eq!(summary(&conn, 99).unwrap(), None);
     }
 
     #[test]

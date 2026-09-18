@@ -267,6 +267,19 @@ const MIGRATIONS: &[&str] = &[
     UPDATE events SET flexibility = 'drop'
     WHERE flexibility = 'slide' AND id IN (SELECT event_id FROM event_tasks);
     ",
+    // v20
+    "
+    ALTER TABLE conversations ADD COLUMN summary TEXT;
+    ALTER TABLE conversations ADD COLUMN summarized_at TEXT;
+    ALTER TABLE conversations ADD COLUMN summary_through INTEGER;
+    CREATE TABLE harvests (
+        user_id INTEGER NOT NULL REFERENCES users(id),
+        date TEXT NOT NULL,
+        facts_written INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (user_id, date)
+    );
+    ",
 ];
 
 pub fn open(path: &Path) -> Result<Connection> {
