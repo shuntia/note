@@ -262,6 +262,11 @@ const MIGRATIONS: &[&str] = &[
     "
     ALTER TABLE conversations ADD COLUMN checkin_date TEXT;
     ",
+    // v19
+    "
+    UPDATE events SET flexibility = 'drop'
+    WHERE flexibility = 'slide' AND id IN (SELECT event_id FROM event_tasks);
+    ",
 ];
 
 pub fn open(path: &Path) -> Result<Connection> {

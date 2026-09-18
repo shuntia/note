@@ -99,20 +99,20 @@ fn already_planned(
 ) -> Result<Vec<String>, ToolError> {
     let mut found = Vec::new();
     for t in tasks {
-        let linked: bool = conn
+        let event: Option<i64> = conn
             .query_row(
-                "SELECT EXISTS (
-                    SELECT 1 FROM event_tasks et
-                    JOIN events e ON e.id = et.event_id
-                    JOIN plans p ON p.id = e.plan_id
-                    WHERE p.user_id = ?1 AND p.date = ?2 AND et.task_id = ?3
-                      AND e.status != 'dropped')",
+                "SELECT e.id FROM event_tasks et
+                 JOIN events e ON e.id = et.event_id
+                 JOIN plans p ON p.id = e.plan_id
+                 WHERE p.user_id = ?1 AND p.date = ?2 AND et.task_id = ?3
+                   AND e.status != 'dropped'",
                 (ctx.user_id, date.to_string(), t.id),
                 |r| r.get(0),
             )
+            .optional()
             .map_err(internal)?;
-        if linked {
-            found.push(format!("{} ({})", t.id, t.title));
+        if let Some(event) = event {
+            found.push(format!("task {} ({}) as event_id {event}", t.id, t.title));
         }
     }
     Ok(found)
@@ -206,7 +206,7 @@ pub fn plan_tasks(
     let clashing = already_planned(conn, ctx, date, &tasks)?;
     if !clashing.is_empty() {
         return Err(ToolError::rejected(format!(
-            "already on the plan for {date}: {}",
+            "already on the plan for {date}: {}; move it with schedule_reshape, or drop it first",
             clashing.join(", ")
         )));
     }
@@ -257,7 +257,7 @@ pub fn plan_tasks(
         conn.execute(
             "INSERT INTO events (plan_id, kind, wall_time, orig_wall_time, end_wall_time,
                                  flexibility, slide_window_min, channel, alert, span_min)
-             VALUES (?1, ?2, ?3, ?3, ?4, 'slide', 0, 'push', 0, ?5)",
+             VALUES (?1, ?2, ?3, ?3, ?4, 'drop', 0, 'push', 0, ?5)",
             (plan_id, &kind, wall(start), wall(end), task.minutes),
         )
         .map_err(internal)?;
@@ -275,6 +275,41 @@ pub fn plan_tasks(
         }));
     }
     Ok(serde_json::json!({ "plan_date": date.to_string(), "events": events }))
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PlanListArgs {
+    /// The day to read, YYYY-MM-DD. Omit for today.
+    #[serde(default)]
+    pub date: Option<String>,
+}
+
+pub fn plan_list(conn: &Connection, ctx: &ToolCtx, args: PlanListArgs) -> Result<serde_json::Value, ToolError> {
+    let date = match args.date {
+        Some(d) => d
+            .parse::<jiff::civil::Date>()
+            .map_err(|_| ToolError::rejected(format!("date must be YYYY-MM-DD, got {d:?}")))?,
+        None => today(ctx),
+    };
+    let mut events = Vec::new();
+    for e in crate::plan::events_for(conn, ctx.user_id, date).map_err(internal)? {
+        let task_id: Option<i64> = conn
+            .query_row("SELECT task_id FROM event_tasks WHERE event_id = ?1", [e.id], |r| r.get(0))
+            .optional()
+            .map_err(internal)?;
+        events.push(serde_json::json!({
+            "event_id": e.id,
+            "kind": e.kind,
+            "entry": e.entry,
+            "start": e.wall_time,
+            "end": e.end_wall_time,
+            "status": e.status,
+            "flexibility": e.flexibility,
+            "task_id": task_id,
+        }));
+    }
+    Ok(serde_json::json!({ "date": date.to_string(), "events": events }))
 }
 
 #[cfg(test)]
@@ -416,7 +451,7 @@ mod tests {
                 .unwrap();
             assert_eq!(alert, 0, "a block never pings");
             assert_eq!(span, if i == 0 { 25 } else { 45 });
-            assert_eq!((flex.as_str(), channel.as_str()), ("slide", "push"));
+            assert_eq!((flex.as_str(), channel.as_str()), ("drop", "push"));
             let linked: i64 = conn
                 .query_row("SELECT task_id FROM event_tasks WHERE event_id = ?1", [id], |r| r.get(0))
                 .unwrap();
@@ -537,13 +572,14 @@ mod tests {
         let (conn, tmp) = env();
         let date = tomorrow();
         let id = task(&conn, &tmp, r#"{"title":"call dentist"}"#);
-        call(
+        let laid = call(
             &conn,
             &tmp,
             "plan_tasks",
             &format!(r#"{{"date":"{date}","task_ids":[{id}],"start":"09:00"}}"#),
         )
         .unwrap();
+        let event = laid["events"][0]["event_id"].as_i64().unwrap();
 
         let e = call(
             &conn,
@@ -554,6 +590,7 @@ mod tests {
         .unwrap_err();
         assert_eq!(e.kind, "rejected");
         assert!(e.message.contains(&id.to_string()), "names the task: {}", e.message);
+        assert!(e.message.contains(&format!("event_id {event}")), "names the block: {}", e.message);
         assert_eq!(events_on(&conn, date).len(), 1);
 
         let other = tomorrow().tomorrow().unwrap();
@@ -654,5 +691,53 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(e.kind, "forbidden");
+    }
+
+    #[test]
+    fn a_planned_block_can_be_dropped_and_laid_again() {
+        let (conn, tmp) = env();
+        let date = tomorrow();
+        let id = task(&conn, &tmp, r#"{"title":"call dentist"}"#);
+        let args = format!(r#"{{"date":"{date}","task_ids":[{id}],"start":"09:00"}}"#);
+        let laid = call(&conn, &tmp, "plan_tasks", &args).unwrap();
+        let event = laid["events"][0]["event_id"].as_i64().unwrap();
+
+        call(&conn, &tmp, "schedule_drop", &format!(r#"{{"event_id":{event}}}"#)).unwrap();
+        call(&conn, &tmp, "plan_tasks", &args).unwrap();
+    }
+
+    #[test]
+    fn plan_list_shows_any_days_events_with_their_ids_and_tasks() {
+        let (conn, tmp) = env();
+        let date = tomorrow();
+        seed_plan(&conn, date);
+        let id = task(&conn, &tmp, r#"{"title":"call dentist"}"#);
+        let laid = call(
+            &conn,
+            &tmp,
+            "plan_tasks",
+            &format!(r#"{{"date":"{date}","task_ids":[{id}],"start":"10:00"}}"#),
+        )
+        .unwrap();
+        let event = laid["events"][0]["event_id"].as_i64().unwrap();
+
+        let out = call(&conn, &tmp, "plan_list", &format!(r#"{{"date":"{date}"}}"#)).unwrap();
+        assert_eq!(out["date"], date.to_string());
+        let events = out["events"].as_array().unwrap();
+        assert_eq!(events.len(), 3, "{out}");
+        let block = events.iter().find(|e| e["event_id"] == event).expect("the laid block");
+        assert_eq!(block["task_id"], id);
+        assert_eq!(block["start"], "10:00");
+        assert_eq!(block["entry"], "block");
+        let routine = events.iter().find(|e| e["kind"] == "morning checkin").unwrap();
+        assert!(routine["task_id"].is_null(), "{routine}");
+
+        let empty = call(&conn, &tmp, "plan_list", "{}").unwrap();
+        assert_eq!(empty["date"], today().to_string());
+        assert!(empty["events"].as_array().unwrap().is_empty());
+
+        for kind in [SessionKind::Talk, SessionKind::Checkin, SessionKind::Nightly] {
+            assert!(registry(kind).contains(&"plan_list"), "{kind:?}");
+        }
     }
 }

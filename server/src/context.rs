@@ -466,11 +466,12 @@ fn tasks_section(
         s.push_str("Now:\n");
         for n in now_tasks {
             s.push_str(&format!(
-                "- {} [{}]{}{}\n",
+                "- {} [{}]{}{} (task_id {})\n",
                 n.task.title,
                 n.task.state,
                 duration(n.task.duration_min),
                 due(&n.task, tz, today, now),
+                n.task.id,
             ));
             for c in &n.children {
                 let mark = match c.state.as_str() {
@@ -478,7 +479,12 @@ fn tasks_section(
                     "in_progress" => '~',
                     _ => ' ',
                 };
-                s.push_str(&format!("  - [{mark}] {}{}\n", c.title, duration(c.duration_min)));
+                s.push_str(&format!(
+                    "  - [{mark}] {}{} (task_id {})\n",
+                    c.title,
+                    duration(c.duration_min),
+                    c.id,
+                ));
             }
         }
     }
@@ -490,10 +496,11 @@ fn tasks_section(
         s.push_str(&format!("Later ({} open):\n", later.len()));
         for t in later.iter().take(cap) {
             s.push_str(&format!(
-                "- {}{}{}\n",
+                "- {}{}{} (task_id {})\n",
                 t.task.title,
                 duration(t.task.duration_min),
                 due(&t.task, tz, today, now),
+                t.task.id,
             ));
         }
         if let Some(rest) = later.len().checked_sub(cap).filter(|r| *r > 0) {
@@ -992,11 +999,24 @@ mod tests {
         let t = task(&conn, uid, "Write the essay", "in_progress", Some(90), true, None, NOW);
         task(&conn, uid, "outline", "done", Some(30), false, Some(t), NOW);
         task(&conn, uid, "draft", "open", Some(60), false, Some(t), NOW);
-        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        let out = without_task_ids(&assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap());
         assert!(out.contains("Now:\n- Write the essay [in_progress] 90m\n"), "{out}");
         assert!(out.contains("  - [x] outline 30m\n"), "{out}");
         assert!(out.contains("  - [ ] draft 60m\n"), "{out}");
         assert!(!out.contains("description"), "{out}");
+    }
+
+    /// The context with its task ids taken out, for tests about the rest of a line.
+    fn without_task_ids(out: &str) -> String {
+        let mut rest = out;
+        let mut plain = String::new();
+        while let Some(i) = rest.find(" (task_id ") {
+            plain.push_str(&rest[..i]);
+            rest = &rest[i..];
+            rest = &rest[rest.find(')').unwrap() + 1..];
+        }
+        plain.push_str(rest);
+        plain
     }
 
     fn dated(conn: &rusqlite::Connection, uid: i64, title: &str, is_now: bool, due: &str) -> i64 {
@@ -1015,7 +1035,7 @@ mod tests {
         dated(&conn, uid, "lab", false, "2026-09-01T10:00:00Z");
         task(&conn, uid, "loose", "open", None, false, None, NOW);
 
-        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        let out = without_task_ids(&assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap());
         assert!(out.contains("Now:\n- essay [open] due today\n"), "{out}");
         assert!(
             out.contains(
@@ -1028,11 +1048,22 @@ mod tests {
     }
 
     #[test]
+    fn every_task_line_carries_its_id() {
+        let tmp = cfg_dir();
+        let (conn, uid) = user();
+        let now = task(&conn, uid, "essay", "open", None, true, None, NOW);
+        let later = task(&conn, uid, "loose", "open", None, false, None, NOW);
+        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        assert!(out.contains(&format!("- essay [open] (task_id {now})\n")), "{out}");
+        assert!(out.contains(&format!("- loose (task_id {later})\n")), "{out}");
+    }
+
+    #[test]
     fn a_list_with_no_deadlines_says_nothing_about_them() {
         let tmp = cfg_dir();
         let (conn, uid) = user();
         task(&conn, uid, "loose", "open", Some(15), false, None, NOW);
-        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        let out = without_task_ids(&assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap());
         assert!(out.contains("- loose 15m\n"), "{out}");
         assert!(!out.contains("Due soon"), "{out}");
     }

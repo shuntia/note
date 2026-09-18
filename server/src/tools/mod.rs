@@ -193,6 +193,7 @@ const CHECKIN: &[&str] = &[
     "task_list",
     "task_search",
     "task_read",
+    "plan_list",
     "calendar_list",
 ];
 const TALK: &[&str] = &[
@@ -213,6 +214,7 @@ const TALK: &[&str] = &[
     "task_read",
     "task_bulk_update",
     "plan_tasks",
+    "plan_list",
     "calendar_list",
     "calendar_add",
     "calendar_update",
@@ -242,6 +244,7 @@ const NIGHTLY: &[&str] = &[
     "task_read",
     "task_bulk_update",
     "plan_tasks",
+    "plan_list",
     "calendar_list",
     "calendar_add",
     "calendar_update",
@@ -402,6 +405,12 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
              would overlap something already planned, or when they do not fit before end.",
             schema::<plan_ops::PlanTasksArgs>(),
         ),
+        "plan_list" => (
+            "Read one day's plan: every event with its event_id — the id the schedule tools \
+             take — its times, status and flexibility, and for a block laid by plan_tasks the \
+             task_id it holds. Defaults to today; the context lists only today's.",
+            schema::<plan_ops::PlanListArgs>(),
+        ),
         "calendar_list" => (
             "Read the user's calendar of fixed commitments: what each day already \
              belongs to, with the quiet windows marked.",
@@ -506,6 +515,7 @@ fn run(
         "task_read" => task_query::read(conn, ctx, parse(raw)?),
         "task_bulk_update" => task_query::bulk_update(conn, ctx, parse(raw)?),
         "plan_tasks" => plan_ops::plan_tasks(conn, ctx, parse(raw)?),
+        "plan_list" => plan_ops::plan_list(conn, ctx, parse(raw)?),
         "calendar_list" => calendar_ops::list(conn, ctx, parse(raw)?),
         "calendar_add" => calendar_ops::add(conn, ctx, parse(raw)?),
         "calendar_update" => calendar_ops::update(conn, ctx, parse(raw)?),

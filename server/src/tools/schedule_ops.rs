@@ -44,6 +44,24 @@ fn check_calendar(
     }
 }
 
+/// Why an owned event refused a slide or snooze, so the model is pointed at
+/// the tool that can do it rather than told the event does not exist.
+fn refusal(conn: &Connection, user_id: i64, event_id: i64, verb: &str) -> ToolError {
+    match crate::plan::event_gate(conn, user_id, event_id) {
+        Ok(Some((flex, _))) => {
+            if crate::plan::block_shape(conn, user_id, event_id).ok().flatten().is_some() {
+                ToolError::rejected(format!(
+                    "event {event_id} is a block, which cannot {verb}; move or resize it with schedule_reshape"
+                ))
+            } else {
+                ToolError::rejected(format!("event {event_id} has flexibility '{flex}' and cannot {verb}"))
+            }
+        }
+        Ok(None) => ToolError::not_found(format!("no event {event_id} for this user; plan_list shows a day's ids")),
+        Err(e) => ToolError::internal(e.to_string()),
+    }
+}
+
 pub fn slide(conn: &Connection, ctx: &ToolCtx, args: SlideArgs) -> Result<serde_json::Value, ToolError> {
     if let Some((date, wall)) = event_day(conn, ctx.user_id, args.event_id) {
         let target = crate::templates::wall_add(&wall, args.minutes);
@@ -51,9 +69,7 @@ pub fn slide(conn: &Connection, ctx: &ToolCtx, args: SlideArgs) -> Result<serde_
     }
     match crate::plan::shift(conn, ctx.user_id, args.event_id, args.minutes) {
         Ok(Some(())) => Ok(serde_json::json!({ "ok": true })),
-        Ok(None) => Err(ToolError::not_found(format!(
-            "no slideable event {} for this user", args.event_id
-        ))),
+        Ok(None) => Err(refusal(conn, ctx.user_id, args.event_id, "slide")),
         Err(e @ (crate::plan::ShiftError::OutOfWindow { .. } | crate::plan::ShiftError::Decided { .. })) => {
             Err(ToolError::rejected(e.to_string()))
         }
@@ -74,9 +90,7 @@ pub fn snooze(conn: &Connection, ctx: &ToolCtx, args: SnoozeArgs) -> Result<serd
     }
     match crate::plan::snooze(conn, ctx.user_id, args.event_id, args.minutes) {
         Ok(Some(())) => Ok(serde_json::json!({ "ok": true })),
-        Ok(None) => Err(ToolError::not_found(format!(
-            "no snoozable event {} for this user", args.event_id
-        ))),
+        Ok(None) => Err(refusal(conn, ctx.user_id, args.event_id, "be snoozed")),
         Err(e @ crate::plan::ShiftError::Decided { .. }) => Err(ToolError::rejected(e.to_string())),
         Err(e) => Err(ToolError::internal(e.to_string())),
     }
@@ -111,7 +125,7 @@ pub fn reshape(conn: &Connection, ctx: &ToolCtx, args: ReshapeArgs) -> Result<se
         .map_err(|e| ToolError::internal(e.to_string()))?;
     let Some((cur_start, cur_end, _)) = shape else {
         return Err(ToolError::not_found(format!(
-            "no block {} for this user; only blocks have a start and an end", args.event_id
+            "no block {} for this user; only blocks have a start and an end, and plan_list shows which events are blocks", args.event_id
         )));
     };
     let start = args.start.unwrap_or(cur_start);
@@ -495,8 +509,12 @@ mod tests {
             ("schedule_snooze", r#"{"event_id":3,"minutes":30}"#),
         ] {
             let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, tool, raw).unwrap_err();
-            assert_eq!(e.kind, "not_found", "{tool} moved a block");
+            assert_eq!(e.kind, "rejected", "{tool} moved a block");
+            assert!(e.message.contains("schedule_reshape"), "{tool}: {}", e.message);
         }
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "schedule_slide",
+            r#"{"event_id":999,"minutes":5}"#).unwrap_err();
+        assert_eq!(e.kind, "not_found");
         let (start, end): (String, String) = conn
             .query_row("SELECT wall_time, end_wall_time FROM events WHERE id=3", [], |r| {
                 Ok((r.get(0)?, r.get(1)?))
