@@ -5,6 +5,7 @@ use thiserror::Error;
 
 pub const MAX_ENTRIES: i64 = 100;
 pub const MAX_TITLE_CHARS: usize = 80;
+pub const MAX_EXTERNAL_ID_CHARS: usize = 200;
 pub const KINDS: [&str; 4] = ["fixed", "busy", "note", "free"];
 pub const DAY_NAMES: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 
@@ -16,6 +17,8 @@ pub enum CalendarError {
     TooMany,
     #[error("no calendar entry {0}")]
     NotFound(i64),
+    #[error("external_id {id} already belongs to calendar entry {entry_id}")]
+    Duplicate { id: String, entry_id: i64 },
     #[error(transparent)]
     Db(#[from] rusqlite::Error),
 }
@@ -27,6 +30,9 @@ fn invalid(message: impl Into<String>) -> CalendarError {
 #[derive(Debug, Clone, Serialize)]
 pub struct Entry {
     pub id: i64,
+    /// The name an outside importer knows this entry by; `None` for one the
+    /// user made here.
+    pub external_id: Option<String>,
     pub title: String,
     pub kind: String,
     pub quiet: bool,
@@ -82,6 +88,8 @@ pub struct Fields {
     pub from_date: Option<String>,
     #[serde(default)]
     pub until_date: Option<String>,
+    #[serde(default)]
+    pub external_id: Option<String>,
 }
 
 /// Any subset of an entry's fields. `days` above zero makes an entry recurring
@@ -108,6 +116,8 @@ pub struct Patch {
     pub from_date: Option<String>,
     #[serde(default)]
     pub until_date: Option<String>,
+    #[serde(default)]
+    pub external_id: Option<String>,
 }
 
 pub fn day_names(mask: i64) -> Vec<&'static str> {
@@ -138,6 +148,16 @@ fn weekday_bit(date: jiff::civil::Date) -> i64 {
 
 fn blank_to_none(s: Option<String>) -> Option<String> {
     s.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
+fn checked_external_id(raw: &str) -> Result<String, CalendarError> {
+    let id = raw.trim();
+    if id.is_empty() || id.chars().count() > MAX_EXTERNAL_ID_CHARS {
+        return Err(invalid(format!(
+            "external_id must be 1 to {MAX_EXTERNAL_ID_CHARS} characters"
+        )));
+    }
+    Ok(id.to_owned())
 }
 
 fn check_date(field: &str, value: &Option<String>) -> Result<(), CalendarError> {
@@ -209,6 +229,9 @@ fn validate(f: Fields) -> Result<Fields, CalendarError> {
     // Neither an informational entry nor time set aside for tasks is ever a
     // reason to hold a delivery.
     let quiet = !matches!(f.kind.as_str(), "note" | "free") && f.quiet.unwrap_or(true);
+    let external_id = blank_to_none(f.external_id)
+        .map(|id| checked_external_id(&id))
+        .transpose()?;
     Ok(Fields {
         title,
         quiet: Some(quiet),
@@ -216,12 +239,42 @@ fn validate(f: Fields) -> Result<Fields, CalendarError> {
         on_date,
         from_date,
         until_date,
+        external_id,
         ..f
     })
 }
 
+/// The entry holding this external id, when one other than `except` does.
+fn holder(
+    conn: &Connection,
+    user_id: i64,
+    external_id: &str,
+    except: Option<i64>,
+) -> rusqlite::Result<Option<i64>> {
+    conn.query_row(
+        "SELECT id FROM calendar_entries
+         WHERE user_id = ?1 AND external_id = ?2 AND id IS NOT ?3",
+        (user_id, external_id, except),
+        |r| r.get(0),
+    )
+    .optional()
+}
+
+fn check_free(
+    conn: &Connection,
+    user_id: i64,
+    external_id: &Option<String>,
+    except: Option<i64>,
+) -> Result<(), CalendarError> {
+    let Some(id) = external_id else { return Ok(()) };
+    match holder(conn, user_id, id, except)? {
+        Some(entry_id) => Err(CalendarError::Duplicate { id: id.clone(), entry_id }),
+        None => Ok(()),
+    }
+}
+
 const COLUMNS: &str = "id, title, kind, quiet, start_time, end_time, days, on_date, from_date,
-                       until_date, created_at, updated_at";
+                       until_date, created_at, updated_at, external_id";
 
 fn row_to_entry(r: &rusqlite::Row) -> rusqlite::Result<Entry> {
     let days: i64 = r.get(6)?;
@@ -239,6 +292,7 @@ fn row_to_entry(r: &rusqlite::Row) -> rusqlite::Result<Entry> {
         until_date: r.get(9)?,
         created_at: r.get(10)?,
         updated_at: r.get(11)?,
+        external_id: r.get(12)?,
         exceptions: Vec::new(),
     })
 }
@@ -280,6 +334,7 @@ pub fn list(conn: &Connection, user_id: i64) -> rusqlite::Result<Vec<Entry>> {
 
 pub fn create(conn: &Connection, user_id: i64, fields: Fields) -> Result<Entry, CalendarError> {
     let f = validate(fields)?;
+    check_free(conn, user_id, &f.external_id, None)?;
     let held: i64 = conn.query_row(
         "SELECT COUNT(*) FROM calendar_entries WHERE user_id = ?1",
         [user_id],
@@ -292,8 +347,8 @@ pub fn create(conn: &Connection, user_id: i64, fields: Fields) -> Result<Entry, 
     conn.execute(
         "INSERT INTO calendar_entries
             (user_id, title, kind, quiet, start_time, end_time, days, on_date, from_date,
-             until_date, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11)",
+             until_date, external_id, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)",
         rusqlite::params![
             user_id,
             f.title,
@@ -305,6 +360,7 @@ pub fn create(conn: &Connection, user_id: i64, fields: Fields) -> Result<Entry, 
             f.on_date,
             f.from_date,
             f.until_date,
+            f.external_id,
             now,
         ],
     )?;
@@ -347,8 +403,49 @@ pub fn update(
         },
         from_date: patch.from_date.or(cur.from_date),
         until_date: patch.until_date.or(cur.until_date),
+        external_id: patch.external_id.or(cur.external_id),
     };
     let f = validate(f)?;
+    check_free(conn, user_id, &f.external_id, Some(id))?;
+    conn.execute(
+        "UPDATE calendar_entries SET title = ?1, kind = ?2, quiet = ?3, start_time = ?4,
+             end_time = ?5, days = ?6, on_date = ?7, from_date = ?8, until_date = ?9,
+             external_id = ?10, updated_at = ?11
+         WHERE id = ?12 AND user_id = ?13",
+        rusqlite::params![
+            f.title,
+            f.kind,
+            f.quiet,
+            f.start_time,
+            f.end_time,
+            f.days,
+            f.on_date,
+            f.from_date,
+            f.until_date,
+            f.external_id,
+            jiff::Timestamp::now().to_string(),
+            id,
+            user_id,
+        ],
+    )?;
+    Ok(get(conn, user_id, id)?.expect("the row just written is the caller's"))
+}
+
+/// Mirrors one entry from another system, keyed on `external_id`: the body is
+/// the whole entry, so every field the importer sends is written, while the id
+/// and the dates the user skipped stay with the row. The flag says whether
+/// this call made the entry.
+pub fn upsert_by_external(
+    conn: &Connection,
+    user_id: i64,
+    external_id: &str,
+    fields: Fields,
+) -> Result<(Entry, bool), CalendarError> {
+    let external_id = checked_external_id(external_id)?;
+    let f = validate(Fields { external_id: Some(external_id.clone()), ..fields })?;
+    let Some(id) = holder(conn, user_id, &external_id, None)? else {
+        return Ok((create(conn, user_id, f)?, true));
+    };
     conn.execute(
         "UPDATE calendar_entries SET title = ?1, kind = ?2, quiet = ?3, start_time = ?4,
              end_time = ?5, days = ?6, on_date = ?7, from_date = ?8, until_date = ?9,
@@ -369,7 +466,18 @@ pub fn update(
             user_id,
         ],
     )?;
-    Ok(get(conn, user_id, id)?.expect("the row just written is the caller's"))
+    Ok((get(conn, user_id, id)?.expect("the row just written is the caller's"), false))
+}
+
+pub fn delete_by_external(
+    conn: &Connection,
+    user_id: i64,
+    external_id: &str,
+) -> rusqlite::Result<bool> {
+    match holder(conn, user_id, external_id, None)? {
+        Some(id) => delete(conn, user_id, id),
+        None => Ok(false),
+    }
 }
 
 pub fn delete(conn: &Connection, user_id: i64, id: i64) -> rusqlite::Result<bool> {
