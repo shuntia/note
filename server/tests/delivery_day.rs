@@ -48,6 +48,32 @@ fn delivery_reaches_the_user_through_the_ladder() {
         ),
     );
 
+    note_server::calendar::create(
+        &conn,
+        uid,
+        note_server::calendar::Fields {
+            title: "open evening".into(),
+            kind: "free".into(),
+            start_time: "17:00".into(),
+            end_time: "19:00".into(),
+            days: Some(127),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    note_server::tasks::create(
+        &conn,
+        uid,
+        note_server::tasks::NewTask {
+            title: "read the chapter".into(),
+            duration_min: Some(45),
+            ..Default::default()
+        },
+        "manual",
+        note_server::tasks::Actor::User,
+    )
+    .unwrap();
+
     let db = Mutex::new(conn);
     let hub = Arc::new(ClientHub::new());
     let push = Arc::new(MockChannel::new("mockpush"));
@@ -71,6 +97,21 @@ fn delivery_reaches_the_user_through_the_ladder() {
     };
     let nightly_now: jiff::Timestamp = "2026-08-30T18:30:00Z".parse().unwrap();
     note_server::nightly::run_for_user(&deps, uid, "aki", nightly_now).unwrap();
+
+    // --- the evening the user set aside now holds the open task.
+    {
+        let conn = db.lock().unwrap();
+        let block: (String, String, String) = conn
+            .query_row(
+                "SELECT e.kind, e.wall_time, e.end_wall_time FROM events e
+                 JOIN event_tasks et ON et.event_id = e.id
+                 WHERE e.origin = 'auto'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(block, ("read the chapter".into(), "17:00".into(), "17:45".into()));
+    }
 
     // --- 07:31 JST: debrief event fires and reaches the connected client.
     let (conn_id, mut rx) = hub.register(uid).unwrap();
