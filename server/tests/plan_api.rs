@@ -327,6 +327,60 @@ async fn debrief_route_reads_the_stored_row() {
 }
 
 #[tokio::test]
+async fn review_route_answers_the_latest_week_or_the_one_asked_for() {
+    let (app, cookie, state, _cfg) = common::app_with_logged_in_user_and_state().await;
+    let get = |url: &str| {
+        Request::get(url).header(header::COOKIE, &cookie).body(Body::empty()).unwrap()
+    };
+
+    let res = app.clone().oneshot(get("/api/review")).await.unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+    {
+        let conn = state.db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO reviews (user_id, week_start, content, created_at)
+             VALUES (1, '2026-09-07', 'the week before', 't'),
+                    (1, '2026-09-14', 'the essay landed', 't')",
+            [],
+        )
+        .unwrap();
+        let other = auth::create_user(&conn, "yuki", "pw2", false).unwrap();
+        conn.execute(
+            "INSERT INTO reviews (user_id, week_start, content, created_at)
+             VALUES (?1, '2026-09-21', 'not yours', 't')",
+            [other],
+        )
+        .unwrap();
+    }
+
+    let res = app.clone().oneshot(get("/api/review")).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["week_start"], "2026-09-14");
+    assert_eq!(v["content"], "the essay landed");
+
+    // any day of a week finds that week's letter
+    let res = app.clone().oneshot(get("/api/review?week=2026-09-11")).await.unwrap();
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["week_start"], "2026-09-07");
+
+    let res = app.clone().oneshot(get("/api/review?week=2026-09-21")).await.unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+    let res = app.clone().oneshot(get("/api/review?week=notadate")).await.unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    let res = app
+        .oneshot(Request::get("/api/review").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn other_users_event_is_404() {
     let conn = db::open_memory().unwrap();
     auth::create_user(&conn, "aki", "pw", false).unwrap();

@@ -69,6 +69,22 @@ pub fn render(conn: &Connection, ev: &crate::runner::FiredEvent) -> OutboundMess
             )
             .unwrap_or_else(|_| "(no debrief yet)".into());
         ("Good morning".to_string(), content, Urgency::Normal)
+    } else if ev.kind == crate::review::EVENT_KIND {
+        let week = ev
+            .date
+            .parse::<jiff::civil::Date>()
+            .ok()
+            .and_then(crate::review::reviewed_week)
+            .map(|d| d.to_string())
+            .unwrap_or_default();
+        let content: String = conn
+            .query_row(
+                "SELECT content FROM reviews WHERE user_id = ?1 AND week_start = ?2",
+                (ev.user_id, &week),
+                |r| r.get(0),
+            )
+            .unwrap_or_else(|_| "(no week yet)".into());
+        ("Your week".to_string(), content, Urgency::Low)
     } else {
         (ev.kind.clone(), format!("scheduled for {}", ev.wall_time), Urgency::Normal)
     };
@@ -268,6 +284,28 @@ mod tests {
         .unwrap();
         let m = render(&conn, &ev("debrief", "push", ""));
         assert_eq!(m.body, "(no debrief yet)");
+    }
+
+    #[test]
+    fn render_reads_the_week_the_monday_looks_back_on() {
+        let (db, _uid) = env();
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO reviews (user_id, week_start, content, created_at)
+             VALUES (1, '2026-09-14', 'You finished the essay.', 'now')",
+            [],
+        )
+        .unwrap();
+        let mut monday = ev("review", "push", "");
+        monday.date = "2026-09-21".into();
+        let m = render(&conn, &monday);
+        assert_eq!(m.title, "Your week");
+        assert_eq!(m.body, "You finished the essay.");
+        assert_eq!(m.urgency, Urgency::Low);
+
+        let mut other = ev("review", "push", "");
+        other.date = "2026-09-28".into();
+        assert_eq!(render(&conn, &other).body, "(no week yet)");
     }
 
     #[test]
