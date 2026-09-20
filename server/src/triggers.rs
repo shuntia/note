@@ -101,6 +101,16 @@ pub fn timezone(config_dir: &Path, username: &str) -> jiff::tz::TimeZone {
         .unwrap_or(jiff::tz::TimeZone::UTC)
 }
 
+/// A fixed-offset zone whose wall clock reads midday however the suite is
+/// timed. A test writes it as the user's own zone when its `+Nmin` lays must
+/// stay on the day that laid them, budget and plan alike.
+#[cfg(test)]
+pub(crate) fn midday_zone() -> jiff::tz::TimeZone {
+    let hour = i32::from(jiff::Timestamp::now().to_zoned(jiff::tz::TimeZone::UTC).hour());
+    // Etc/GMT+N runs N hours behind UTC, so the sign reads backwards.
+    jiff::tz::TimeZone::get(&format!("Etc/GMT{:+}", hour - 12)).unwrap()
+}
+
 fn allowance_of(config_dir: &Path, username: &str) -> u32 {
     crate::config::UserConfig::load(config_dir, username)
         .map_or(crate::config::DEFAULT_TRIGGERS_PER_DAY, |c| c.triggers_per_day())

@@ -254,7 +254,7 @@ async fn allocate_fills_the_free_time_and_a_second_run_keeps_what_is_settled() {
 #[tokio::test]
 async fn carrying_a_day_moves_its_blocks_and_leaves_the_routines() {
     let (app, cookie, _cfg) = common::app_with_logged_in_user().await;
-    let date = today();
+    let date = ahead(2);
     free_afternoon(&app, &cookie, date).await;
     let (status, _) = call(
         &app,
@@ -276,11 +276,11 @@ async fn carrying_a_day_moves_its_blocks_and_leaves_the_routines() {
     let events = day["events"].as_array().unwrap();
     let block = events.iter().find(|e| e["entry"] == "block").expect("the block is still listed");
     assert_eq!(block["status"], "dropped");
-    assert_eq!(block["moved_to"]["date"], ahead(1).to_string());
+    assert_eq!(block["moved_to"]["date"], ahead(3).to_string());
     let routine = events.iter().find(|e| e["kind"] == "checkin_call").unwrap();
     assert_eq!(routine["status"], "pending", "a routine is not the day's leftovers");
 
-    let (_, tomorrow) = call(&app, &cookie, Method::GET, &format!("/api/day/{}", ahead(1)), None).await;
+    let (_, tomorrow) = call(&app, &cookie, Method::GET, &format!("/api/day/{}", ahead(3)), None).await;
     let landed = tomorrow["events"]
         .as_array()
         .unwrap()

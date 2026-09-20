@@ -453,6 +453,22 @@ mod tests {
         jiff::Timestamp::now().to_zoned(jiff::tz::TimeZone::UTC).date()
     }
 
+    /// Pins the user to a zone whose clock reads midday, so a `+Nmin` trigger
+    /// lands on today's plan rather than tomorrow's. That zone's date is the
+    /// UTC one, so `today` still answers for it.
+    fn pin_to_midday(tmp: &tempfile::TempDir) {
+        let p = tmp.path().join("defaults/user.toml");
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(
+            p,
+            format!(
+                "display_name = \"X\"\ntimezone = \"{}\"\ntemplate = \"default\"\n",
+                crate::triggers::midday_zone().iana_name().unwrap()
+            ),
+        )
+        .unwrap();
+    }
+
     fn tomorrow() -> jiff::civil::Date {
         today().tomorrow().unwrap()
     }
@@ -503,6 +519,7 @@ mod tests {
     #[test]
     fn plan_carry_moves_the_day_leftovers_through_the_dispatcher() {
         let (conn, tmp) = env();
+        pin_to_midday(&tmp);
         let id = task(&conn, &tmp, r#"{"title":"essay"}"#);
         let date = today();
         call(&conn, &tmp, "plan_tasks", &format!(r#"{{"date":"{date}","task_ids":[{id}],"start":"09:00"}}"#))
