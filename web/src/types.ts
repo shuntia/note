@@ -97,10 +97,19 @@ export type Conversation = {
   via: ConversationVia
 }
 
-export type TalkStep = { name: string; args: string; result: string; is_error: boolean }
+export type TalkStep = {
+  name: string
+  args: string
+  result: string
+  is_error: boolean
+  // the reasoning of the round that made this call, on the round's first step only
+  thinking: string | null
+}
 
-// `reasoning` and `thought_ms` are set on the assistant row only, and are null
-// on rows written before the transcript kept them.
+// `reasoning` holds the thinking of the round the row ended: on a tool row the
+// round that made the call, on an assistant row the round that answered.
+// `thought_ms` is set on the assistant row only. Both are null on rows written
+// before the transcript kept them.
 export type TalkMessage = {
   id: number
   role: 'user' | 'assistant' | 'tool'

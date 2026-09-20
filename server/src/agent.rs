@@ -58,6 +58,10 @@ pub struct SessionStep {
     pub args: String,
     pub result: String,
     pub is_error: bool,
+    /// The reasoning of the round that made this call, on the round's first
+    /// step and `None` on the rest, so a transcript can show the thinking where
+    /// it happened.
+    pub thinking: Option<String>,
 }
 
 #[derive(Debug)]
@@ -66,8 +70,9 @@ pub struct SessionOutcome {
     pub turns: usize,
     pub tool_calls: usize,
     pub steps: Vec<SessionStep>,
-    /// Every round's reasoning text, blank-line separated, for providers that
-    /// return any.
+    /// The reasoning of the final round, the one that answered in text; every
+    /// earlier round's reasoning rides on its first step instead. Empty when a
+    /// terminal tool or the turn cap ended the session.
     pub reasoning: String,
     /// Wall clock from the first provider call to the reply, in milliseconds.
     pub thought_ms: u64,
@@ -179,7 +184,6 @@ fn run_traced(
     let mut tool_calls = 0;
     let mut steps = Vec::new();
     let mut last_text = String::new();
-    let mut reasoning = String::new();
     let max_turns = match kind {
         _ if single_call(kind) => IMPORT_MAX_TURNS,
         SessionKind::Harvest => HARVEST_MAX_TURNS,
@@ -208,13 +212,13 @@ fn run_traced(
             }
         };
         turns += 1;
-        if !thinking.trim().is_empty() {
-            on_event(AgentEvent::Thinking { text: &thinking });
-            if !reasoning.is_empty() {
-                reasoning.push_str("\n\n");
+        let mut thinking = match thinking.trim() {
+            "" => None,
+            text => {
+                on_event(AgentEvent::Thinking { text });
+                Some(text.to_string())
             }
-            reasoning.push_str(thinking.trim());
-        }
+        };
         last_text = resp.text;
         if resp.tool_calls.is_empty() {
             on_event(AgentEvent::Reply { text: &last_text });
@@ -226,7 +230,7 @@ fn run_traced(
                 turns,
                 tool_calls,
                 steps,
-                reasoning,
+                reasoning: thinking.unwrap_or_default(),
                 thought_ms,
             });
         }
@@ -234,13 +238,21 @@ fn run_traced(
         messages.push(Message::Assistant { text: last_text.clone(), tool_calls: resp.tool_calls });
         for call in calls {
             if call.name == "batch" {
-                let (content, is_error) =
-                    run_batch(&env, &call.args, &mut steps, &mut tool_calls, trace, on_event);
+                let (content, is_error) = run_batch(
+                    &env,
+                    &call.args,
+                    &mut steps,
+                    &mut tool_calls,
+                    &mut thinking,
+                    trace,
+                    on_event,
+                );
                 messages.push(Message::ToolResult { call_id: call.id, content, is_error });
                 continue;
             }
             tool_calls += 1;
-            let (content, is_error) = env.step(&call.name, &call.args, &mut steps, trace, on_event);
+            let (content, is_error) =
+                env.step(&call.name, &call.args, &mut steps, &mut thinking, trace, on_event);
             if !is_error && tools::is_terminal(kind, &call.name) {
                 on_event(AgentEvent::Reply { text: &content });
                 trace.ok(&content);
@@ -251,7 +263,7 @@ fn run_traced(
                     turns,
                     tool_calls,
                     steps,
-                    reasoning,
+                    reasoning: String::new(),
                     thought_ms,
                 });
             }
@@ -265,7 +277,14 @@ fn run_traced(
     trace.max_turns(&last_text);
     finish(deps, user_id, kind, turns, tool_calls, "agent_max_turns")?;
     let thought_ms = started.elapsed().as_millis() as u64;
-    Ok(SessionOutcome { reply: last_text, turns, tool_calls, steps, reasoning, thought_ms })
+    Ok(SessionOutcome {
+        reply: last_text,
+        turns,
+        tool_calls,
+        steps,
+        reasoning: String::new(),
+        thought_ms,
+    })
 }
 
 /// What every tool call of one session shares, so a call the model made and a
@@ -316,12 +335,14 @@ impl CallEnv<'_> {
     }
 
     /// `run` as a session step: its own index, its own pair of events, its own
-    /// entry in `steps`, and its own timed call on the round's trace.
+    /// entry in `steps`, and its own timed call on the round's trace. The first
+    /// step of a round takes `thinking` and leaves the rest of the round none.
     fn step(
         &self,
         name: &str,
         args: &str,
         steps: &mut Vec<SessionStep>,
+        thinking: &mut Option<String>,
         trace: &mut crate::trace::Builder,
         on_event: &dyn Fn(AgentEvent),
     ) -> (String, bool) {
@@ -336,6 +357,7 @@ impl CallEnv<'_> {
             args: args.to_string(),
             result: content.clone(),
             is_error,
+            thinking: thinking.take(),
         });
         (content, is_error)
     }
@@ -354,6 +376,7 @@ fn run_batch(
     raw_args: &str,
     steps: &mut Vec<SessionStep>,
     tool_calls: &mut usize,
+    thinking: &mut Option<String>,
     trace: &mut crate::trace::Builder,
     on_event: &dyn Fn(AgentEvent),
 ) -> (String, bool) {
@@ -398,7 +421,7 @@ fn run_batch(
             serde_json::Value::Null => "{}".to_string(),
             v => v.to_string(),
         };
-        let (content, is_error) = env.step(&sub.tool, &sub_args, steps, trace, on_event);
+        let (content, is_error) = env.step(&sub.tool, &sub_args, steps, thinking, trace, on_event);
         let value: serde_json::Value =
             serde_json::from_str(&content).unwrap_or(serde_json::Value::String(content));
         results.push(if is_error {
@@ -526,8 +549,79 @@ mod tests {
                 "reply:done",
             ]
         );
-        assert_eq!(out.reasoning, "a task, then a lookup");
         assert_eq!(out.steps.len(), 2);
+        assert_eq!(out.steps[0].thinking.as_deref(), Some("a task, then a lookup"));
+        assert_eq!(out.steps[1].thinking, None, "one round's thinking rides on its first call");
+        assert_eq!(out.reasoning, "", "no round answered in text with thinking of its own");
+    }
+
+    #[test]
+    fn each_rounds_thinking_rides_on_its_first_call_and_the_last_rounds_stays_in_the_outcome() {
+        let (db, tmp) = env();
+        let llm = MockLLM::scripted(vec![
+            ChatResponse {
+                text: String::new(),
+                tool_calls: vec![ToolCall {
+                    id: "c1".into(),
+                    name: "task_create".into(),
+                    args: r#"{"title":"buy milk"}"#.into(),
+                }],
+            },
+            ChatResponse { text: "added it".into(), tool_calls: vec![] },
+        ])
+        .thinking(vec!["first, a task", "that covers it"]);
+        let out =
+            run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, now(), &[], "milk")
+                .unwrap();
+
+        assert_eq!(out.steps.len(), 1);
+        assert_eq!(out.steps[0].thinking.as_deref(), Some("first, a task"));
+        assert_eq!(out.reasoning, "that covers it");
+    }
+
+    #[test]
+    fn a_batchs_thinking_rides_on_its_first_sub_call() {
+        let (db, tmp) = env();
+        let llm = MockLLM::scripted(vec![
+            batch_call(
+                "b1",
+                serde_json::json!([
+                    { "tool": "task_create", "args": { "title": "buy milk" } },
+                    { "tool": "task_create", "args": { "title": "call the dentist" } },
+                ]),
+            ),
+            ChatResponse { text: "both added".into(), tool_calls: vec![] },
+        ])
+        .thinking(vec!["two at once"]);
+        let out =
+            run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, now(), &[], "two")
+                .unwrap();
+
+        assert_eq!(out.steps.len(), 2);
+        assert_eq!(out.steps[0].thinking.as_deref(), Some("two at once"));
+        assert_eq!(out.steps[1].thinking, None);
+        assert_eq!(out.reasoning, "");
+    }
+
+    #[test]
+    fn a_session_a_terminal_tool_ended_keeps_its_thinking_on_the_step() {
+        let (db, tmp) = env();
+        let llm = MockLLM::scripted(vec![ChatResponse {
+            text: String::new(),
+            tool_calls: vec![ToolCall {
+                id: "c1".into(),
+                name: "stay_quiet".into(),
+                args: r#"{"reason":"nothing to add"}"#.into(),
+            }],
+        }])
+        .thinking(vec!["nothing worth saying"]);
+        let out =
+            run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Trigger, now(), &[], "check")
+                .unwrap();
+
+        assert_eq!(out.steps.len(), 1);
+        assert_eq!(out.steps[0].thinking.as_deref(), Some("nothing worth saying"));
+        assert_eq!(out.reasoning, "");
     }
 
     #[test]

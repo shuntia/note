@@ -485,16 +485,19 @@ Turns belong to persisted conversations: omit `conversation_id` and the server
 opens one (titled from the message), pass one and the last 32 text turns are
 replayed to the model first. The response carries the `conversation_id`, the
 reply, and `steps` — every tool call the agent made, with its arguments,
-result, and error flag — plus `reasoning`, the session's thinking text (blank
-unless reasoning is configured and the model returned any), and `thought_ms`,
-the wall clock from the first provider call to the reply.
+result, error flag, and `thinking`, the reasoning of the round that made it
+(on the round's first call and null on the rest) — plus `reasoning`, the
+thinking of the round that answered in text (blank unless reasoning is
+configured and the model returned any), and `thought_ms`, the wall clock from
+the first provider call to the reply.
 Conversations are managed over `GET /api/conversations`,
 `PATCH/DELETE /api/conversations/{id}`, and
 `GET /api/conversations/{id}/messages` (user, assistant, and tool rows in
-order; every row carries `reasoning` and `thought_ms`, set on the assistant
-row and null everywhere else, a row written before the columns existed
-included). Agent behavior lives in editable prompt files
-(`config/defaults/prompts/`, overridable per user under
+order; every row carries `reasoning` — the thinking of the round that made the
+call on a tool row, of the round that answered on the assistant row — and
+`thought_ms`, set on the assistant row alone; both are null where there is
+none, a row written before the columns existed included). Agent behavior lives
+in editable prompt files (`config/defaults/prompts/`, overridable per user under
 `config/users/<user>/prompts/`) — changing tone or policy is a file edit, not
 a deploy. The editable prompts are also served
 over `GET /api/prompts/{name}` (`{name, content, custom}`, `content` being the

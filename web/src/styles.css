@@ -682,7 +682,7 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 .activity-status { min-width: 0; overflow-wrap: anywhere; }
 .activity.open .receipt-chev { transform: rotate(90deg); }
 .activity-think {
-  margin: 0.25rem 0.375rem 0.375rem;
+  margin: 0.25rem 0.375rem;
   padding: 0.625rem 0.75rem;
   max-height: 13.75rem;
   overflow-y: auto;
