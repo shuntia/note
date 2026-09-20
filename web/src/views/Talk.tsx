@@ -37,7 +37,7 @@ type Item =
   | { kind: 'steps'; key: string; steps: ToolItem[] }
   | { kind: 'system'; key: string; text: string; hint: string | null }
 
-type ToolItem = Extract<Item, { kind: 'tool' }> & { running?: boolean }
+type ToolItem = Extract<Item, { kind: 'tool' }> & { running?: boolean; finishedAt?: number }
 type AssistantItem = Extract<Item, { kind: 'assistant' }>
 type StepsItem = Extract<Item, { kind: 'steps' }>
 type TurnItem = Extract<Item, { kind: 'user' | 'system' }>
@@ -66,6 +66,7 @@ function applyFrame(prev: Live, frame: AgentFrame): Live {
     result: call ? '' : ev.result,
     isError: call ? false : ev.is_error,
     running: call,
+    finishedAt: call ? undefined : Date.now(),
   }
   return { ...at, steps }
 }
@@ -73,6 +74,9 @@ function applyFrame(prev: Live, frame: AgentFrame): Live {
 type Load = 'loading' | 'ready' | 'error'
 
 const UNDO_MS = 10_000
+
+// How long a finished call's receipt holds the live status line before it falls back.
+const RECEIPT_MS = 2_500
 
 // The send flight, the scroll that reveals it and the composer's settling
 // share one easing.
@@ -185,10 +189,27 @@ function thoughtLabel(item: AssistantItem): string | null {
   return `Note thought for ${seconds} second${seconds === 1 ? '' : 's'}`
 }
 
-// The single line a session in flight shows, naming the call being processed.
-function liveLabel(steps: ToolItem[]): string {
-  const busy = steps.find((s) => s.running)
-  return busy ? `Note is thinking… · ${doing(busy.name, busy.args)}` : 'Note is thinking…'
+const lastRunning = (steps: ToolItem[]): ToolItem | undefined =>
+  steps.reduce<ToolItem | undefined>((last, s) => (s.running ? s : last), undefined)
+
+const lastFinished = (steps: ToolItem[]): ToolItem | undefined =>
+  steps.reduce<ToolItem | undefined>(
+    (best, s) =>
+      s.finishedAt && !s.running && (!best?.finishedAt || s.finishedAt >= best.finishedAt)
+        ? s
+        : best,
+    undefined,
+  )
+
+// The single line a session in flight shows: the call being processed, or the one that
+// just finished until RECEIPT_MS has run out.
+function liveLabel(steps: ToolItem[], now: number): string {
+  const running = lastRunning(steps)
+  if (running) return `Note is thinking… · ${doing(running.name, running.args)}`
+  const just = lastFinished(steps)
+  if (just?.finishedAt && now - just.finishedAt < RECEIPT_MS)
+    return `Note is thinking… · ${receipt(just.name, just.args, just.isError)}`
+  return 'Note is thinking…'
 }
 
 // One quiet line; the reasoning and the calls stay a chevron away. `held` keeps a
@@ -423,6 +444,17 @@ export function Talk({
       }),
     [],
   )
+
+  // A receipt on the status line expires on the clock alone, with no frame to redraw it.
+  useEffect(() => {
+    if (!busy || lastRunning(live.steps)) return
+    const at = lastFinished(live.steps)?.finishedAt
+    if (!at) return
+    const left = at + RECEIPT_MS - Date.now()
+    if (left <= 0) return
+    const timer = window.setTimeout(() => tick((n) => n + 1), left)
+    return () => window.clearTimeout(timer)
+  }, [busy, live.steps])
 
   const scrollToEnd = useCallback((instant: boolean) => {
     const el = pane.current
@@ -807,7 +839,7 @@ export function Talk({
               <Trace
                 live
                 held={flying}
-                label={liveLabel(live.steps)}
+                label={liveLabel(live.steps, Date.now())}
                 reasoning={live.reasoning}
                 steps={live.steps}
               />
