@@ -270,9 +270,13 @@ export function Home({
       if (ev.task) await api.patchTask(ev.task.id, { state: 'done' })
     })
 
-  // the beat is a dependency because the holds live outside React state
+  // A trigger is Note's own moment to look again, never the user's, so it stays off
+  // the day entirely. The beat is a dependency because the holds live outside React state.
   const visible = useMemo(
-    () => (events ?? []).filter((ev) => ev.id !== dropHold.held() && ev.id !== doneHold.held()?.event_id),
+    () =>
+      (events ?? []).filter(
+        (ev) => ev.kind !== 'trigger' && ev.id !== dropHold.held() && ev.id !== doneHold.held()?.event_id,
+      ),
     [events, beat],
   )
   const now = nowMinutes()
@@ -652,12 +656,23 @@ export function Home({
     </section>
   )
 
-  // Everything still ahead, plus anything that pinged and was never answered.
-  const upcoming = visible.filter(
-    (ev) =>
-      (ev.status === 'pending' || ev.status === 'snoozed' || ev.status === 'fired') &&
-      (minutesOf(ev.end_wall_time ?? ev.wall_time) >= now || ev.status === 'fired'),
-  )
+  // The whole day in time order: what the plan holds and every window the calendar
+  // has, the ones already over among them.
+  const rows = useMemo(() => {
+    const plan = visible
+      .filter((ev) => ev.status !== 'dropped')
+      .map((ev) => ({
+        at: minutesOf(ev.wall_time),
+        to: minutesOf(ev.end_wall_time ?? ev.wall_time),
+        ev,
+      }))
+    const cal = (day?.calendar ?? []).map((occ) => ({
+      at: minutesOf(occ.start),
+      to: minutesOf(occ.end),
+      occ,
+    }))
+    return [...plan, ...cal].sort((a, b) => a.at - b.at || a.to - b.to)
+  }, [visible, day])
 
   const announce = (task: TaskRef): OverflowItem[] =>
     ANNOUNCE.map((choice) => ({
@@ -679,12 +694,6 @@ export function Home({
           ...(ev.task ? announce(ev.task) : []),
         ]}
       />
-    </span>
-  )
-
-  const triggerActions = (ev: PlanEvent) => (
-    <span className="home-row-actions">
-      <Overflow label="More" items={[{ label: 'Drop today', run: () => drop(ev), disabled: pending }]} />
     </span>
   )
 
@@ -726,28 +735,36 @@ export function Home({
 
   const list = (
     <ul className="home-list" onMouseLeave={() => setHoverId(null)}>
-      {upcoming.map((ev) => (
-        <li
-          key={ev.id}
-          title={ev.prompt}
-          onMouseEnter={() => setHoverId(ev.id)}
-          className={[
-            ev.id === next?.id ? 'next' : '',
-            ev.id === hoverId ? 'hover' : '',
-            ev.task ? 'task' : '',
-            minutesOf(ev.end_wall_time ?? ev.wall_time) < now ? 'overdue' : '',
-          ]
-            .filter(Boolean)
-            .join(' ')}
-        >
-          <span className="home-when">{ev.wall_time} – {ev.end_wall_time ?? ev.wall_time}</span>
-          <span className="home-what">
-            {rowLabel(ev)}
-          </span>
-          {ev.task && blockActions(ev)}
-          {ev.kind === 'trigger' && triggerActions(ev)}
-        </li>
-      ))}
+      {rows.map((row) =>
+        'ev' in row ? (
+          <li
+            key={`e${row.ev.id}`}
+            title={row.ev.prompt}
+            onMouseEnter={() => setHoverId(row.ev.id)}
+            className={[
+              row.ev.id === next?.id ? 'next' : '',
+              row.ev.id === hoverId ? 'hover' : '',
+              row.ev.task ? 'task' : '',
+              row.to <= now ? 'past' : '',
+              row.to < now && row.ev.status !== 'done' ? 'overdue' : '',
+            ]
+              .filter(Boolean)
+              .join(' ')}
+          >
+            <span className="home-when">{row.ev.wall_time} – {row.ev.end_wall_time ?? row.ev.wall_time}</span>
+            <span className="home-what">{rowLabel(row.ev)}</span>
+            {row.ev.task && blockActions(row.ev)}
+          </li>
+        ) : (
+          <li
+            key={`c${row.occ.entry_id}-${row.occ.start}`}
+            className={`cal ${row.occ.kind}${row.to <= now ? ' past' : row.at <= now ? ' on' : ''}`}
+          >
+            <span className="home-when">{row.occ.start} – {row.occ.end}</span>
+            <span className="home-what">{row.occ.title}</span>
+          </li>
+        ),
+      )}
     </ul>
   )
 
@@ -755,7 +772,7 @@ export function Home({
   // On the phone a session is the whole screen: the day waits until it is over.
   const today = day && !(mobile && inSession) && (
     <div className="home-today">
-      <DayLine events={visible} now={now} compact={mobile} nextId={next?.id} hoverId={hoverId} onHover={setHoverId} />
+      <DayLine events={visible} calendar={day.calendar} now={now} compact={mobile} nextId={next?.id} hoverId={hoverId} onHover={setHoverId} />
       {closeDay}
       {list}
       {mobile && <SoFar rows={day.history} />}
@@ -1027,7 +1044,7 @@ export function Home({
             <Jot flow placeholder="Tell Note" openTalk={openTalk} openConversation={openConversation} />
           </div>
         )}
-        {compactLanding ? today : events && <section className="today-line"><DayLine events={visible} now={now} nextId={next?.id} hoverId={hoverId} onHover={setHoverId} />{closeDay}{list}</section>}
+        {compactLanding ? today : events && <section className="today-line"><DayLine events={visible} calendar={day?.calendar} now={now} nextId={next?.id} hoverId={hoverId} onHover={setHoverId} />{closeDay}{list}</section>}
       </section>
       <section ref={ground} className="today-ground">
         {!mobile && <DebriefFold />}
