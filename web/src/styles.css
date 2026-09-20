@@ -48,6 +48,10 @@
   --sage: oklch(50% 0.09 150);
   --rose: oklch(55% 0.07 30);
   --sky: linear-gradient(180deg, var(--sky-top) 0px, var(--sky-mid) max(405px, 43vh), var(--earth) max(624px, 66vh));
+  /* a list that hangs from a line begins under it rather than at it, and where it
+     has only so much room, it leaves the same way at the bottom */
+  --under-line: linear-gradient(to bottom, transparent 0.125rem, #000 2.625rem);
+  --under-line-both: linear-gradient(to bottom, transparent 0.125rem, #000 2.625rem, #000 calc(100% - 2.25rem), transparent 100%);
 
   /* the whole composition grows from here. 1px at 1440x900 and under; above it,
      half of what the viewport itself gained, so the design opens rather than zooms. */
@@ -1178,12 +1182,8 @@ textarea.mono { font-family: var(--mono); }
 /* a block laid for a task: soft ground with the day's own attention down its edge */
 .dl-span.task { background: var(--haze-strong); border: 0; border-left: 2px solid var(--sun-ink); border-radius: 0.1875rem 0.375rem 0.375rem 0.1875rem; }
 .dl-span.task.next { background: var(--sun); }
-/* a moment Note set aside to look again: a hollow ring on the spine */
-.dl-span.trigger { top: -0.25rem; width: 0.5rem; min-width: 0.5rem; height: 0.5rem; margin-left: -0.25rem; border-radius: 50%; background: none; border: 1.5px solid var(--quiet); }
-.dl-span.trigger.next { background: none; border-color: var(--ink); }
 .dl-span { transition: transform 140ms ease, box-shadow 140ms ease; }
 .dl-span.hover { transform: scaleY(1.5); box-shadow: 0 0 0 2px var(--sun); z-index: 1; }
-.dl-span.trigger.hover { transform: scale(1.4); }
 .home-list li { transition: background-color 140ms ease; border-radius: 8px; }
 .home-list li.hover { background: var(--haze-strong); color: var(--ink); }
 /* what the day already settled, as a tick on the gone bar */
@@ -1195,7 +1195,6 @@ textarea.mono { font-family: var(--mono); }
 .dayline.compact .dl-ticks { height: 5px; }
 .dayline.compact .dl-now { width: 12px; height: 12px; }
 .dayline.compact .dl-span { top: -5px; height: 10px; min-width: 8px; }
-.dayline.compact .dl-span.trigger { top: -4px; height: 8px; }
 
 @keyframes bubble-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 .tellnote { display: flex; align-items: center; gap: 0.625rem; padding: 0 0.375rem 0 1rem; border-radius: 999px; background: var(--haze-strong); min-height: 3rem; }
@@ -1249,11 +1248,14 @@ textarea.mono { font-family: var(--mono); }
 /* the line itself has no height: the room is for the labels it hangs outside its box */
 .home-today .dayline { margin: 2.125rem 0 1.125rem; }
 .home-today .dayline.compact { margin: 6px 0 0; }
-.home-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.home-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; mask-image: var(--under-line); -webkit-mask-image: var(--under-line); }
 .home-list li { display: grid; grid-template-columns: 6rem minmax(0, 1fr) auto; align-items: center; gap: 0.75rem; min-height: 2.75rem; color: var(--quiet); }
 .home-list li.next { color: var(--ink); font-weight: 700; }
 .home-list li.task .home-what { border-left: 2px solid var(--sun-ink); padding-left: 0.625rem; }
 .home-list li.overdue .home-when { color: var(--rose); }
+/* the day's own windows: the one standing now is the only one in full ink */
+.home-list li.cal.on { color: var(--ink); }
+.home-list li.past { color: var(--faint); opacity: 0.7; }
 .home-row-actions { position: relative; display: flex; align-items: center; gap: 0.5rem; }
 .home-row-actions .btn-haze { padding: 0.375rem 0.875rem; font-size: 0.875rem; }
 .home-row-actions .ev-more-wrap { position: relative; top: auto; right: auto; }
@@ -1312,7 +1314,16 @@ textarea.mono { font-family: var(--mono); }
   }
 }
 .today-line { position: absolute; left: var(--rail); right: var(--rail); top: calc(var(--hero-top) + 25.625rem); }
-.today-line .home-list { margin-top: 3.25rem; }
+/* the desktop list has the ground beneath it for a floor, so the day scrolls
+   through the room between the line and it */
+.today-line .home-list {
+  margin-top: 3.25rem;
+  max-height: max(9rem, calc(100dvh - var(--hero-top) - var(--bar) - 29.875rem));
+  overflow-y: auto;
+  scrollbar-width: none;
+  mask-image: var(--under-line-both);
+  -webkit-mask-image: var(--under-line-both);
+}
 .today-line .home-list li { min-height: 2.375rem; }
 .today-ground { position: absolute; left: 0; right: 0; top: calc(var(--hero-top) + 29.625rem); bottom: 0; background: var(--earth); padding: 6.25rem 0 0 var(--rail); }
 .today-ground .debrief-row { width: 51.25rem; max-width: calc(100% - 2 * var(--rail)); }

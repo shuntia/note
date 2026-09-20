@@ -108,6 +108,16 @@ function asTime(raw: string): string {
 const spanOf = (o: Occurrence) =>
   o.entry.kind === 'note' ? o.entry.start_time : `${o.entry.start_time} – ${o.entry.end_time}`
 
+// A one-off entry is for time still to come: a day gone by, or an end already
+// behind today's clock, is not the calendar's to keep.
+const hasGoneBy = (draft: Draft): boolean => {
+  if (draft.days !== 0) return false
+  const today = isoOf(new Date())
+  if (draft.date < today) return true
+  const now = new Date()
+  return draft.date === today && draft.end <= `${pad(now.getHours())}:${pad(now.getMinutes())}`
+}
+
 const bandClass = (o: Occurrence, base: string) =>
   [base, o.entry.kind, o.once ? 'once' : '', o.skipped ? 'skipped' : ''].filter(Boolean).join(' ')
 
@@ -343,16 +353,30 @@ export function CalendarSection({
         </button>
       </div>
       {showGrid ? (
-        <WeekGrid
-          week={week}
-          today={today}
-          now={now}
-          entries={visible}
-          blocks={blocks}
-          quietUntil={quietUntil}
-          onPick={(entry, date) => setSheet({ entry, date })}
-          onBlock={setBlock}
-        />
+        <>
+          <WeekGrid
+            week={week}
+            today={today}
+            now={now}
+            selected={selected}
+            entries={visible}
+            blocks={blocks}
+            quietUntil={quietUntil}
+            onSelect={setSelected}
+            onPick={(entry, date) => setSheet({ entry, date })}
+            onBlock={setBlock}
+          />
+          <p className="cal-day">
+            {DAYS[weekdayOf(selected)]} {dateOf(selected).getDate()}
+          </p>
+          <DayList
+            date={selected}
+            today={today}
+            now={now}
+            entries={visible}
+            onPick={(entry) => setSheet({ entry, date: selected })}
+          />
+        </>
       ) : (
         <>
           <WeekStrip
@@ -375,6 +399,8 @@ export function CalendarSection({
           </div>
           <DayList
             date={selected}
+            today={today}
+            now={now}
             entries={visible}
             onPick={(entry) => setSheet({ entry, date: selected })}
           />
@@ -547,21 +573,30 @@ function DayBands({
   )
 }
 
+// Where the names of the day's windows live, the line above holding only their shape.
 function DayList({
   date,
+  today,
+  now,
   entries,
   onPick,
 }: {
   date: string
+  today: string
+  now: number
   entries: CalendarEntry[]
   onPick: (entry: CalendarEntry) => void
 }) {
   const occ = occurrencesOn(entries, date)
   if (!occ.length) return <p className="cal-empty">Nothing on this day.</p>
+  const gone = (o: Occurrence) => date < today || (date === today && o.end <= now)
   return (
     <ul className="cal-list">
       {occ.map((o) => (
-        <li key={o.entry.id} className={o.skipped ? 'skipped' : undefined}>
+        <li
+          key={o.entry.id}
+          className={[o.skipped ? 'skipped' : '', gone(o) ? 'past' : ''].filter(Boolean).join(' ')}
+        >
           <span className="home-when">{spanOf(o)}</span>
           <button onClick={() => onPick(o.entry)}>{o.entry.title}</button>
           {o.entry.quiet && !o.skipped ? <BellOff /> : <span />}
@@ -571,22 +606,27 @@ function DayList({
   )
 }
 
+// The week as ground: bare bands, whose names the list under it carries.
 function WeekGrid({
   week,
   today,
   now,
+  selected,
   entries,
   blocks,
   quietUntil,
+  onSelect,
   onPick,
   onBlock,
 }: {
   week: string[]
   today: string
   now: number
+  selected: string
   entries: CalendarEntry[]
   blocks: Record<string, PlanEvent[]>
   quietUntil: string | null
+  onSelect: (date: string) => void
   onPick: (entry: CalendarEntry, date: string) => void
   onBlock: (event: PlanEvent) => void
 }) {
@@ -597,13 +637,16 @@ function WeekGrid({
       <div className="week-head">
         <span />
         {week.map((date, i) => (
-          <span
+          <button
             key={date}
             className={`ws-day${date === today ? ' is-today' : date < today ? ' past' : ''}`}
+            aria-pressed={date === selected}
+            aria-label={`${DAYS[i]} ${dateOf(date).getDate()}`}
+            onClick={() => onSelect(date)}
           >
             <span className="ws-name">{LETTERS[i]}</span>
             <span className="ws-num">{dateOf(date).getDate()}</span>
-          </span>
+          </button>
         ))}
       </div>
       <div className="week-body">
@@ -625,11 +668,10 @@ function WeekGrid({
           <div key={date} className={`week-col${date === today ? ' is-today' : ''}`}>
             {occurrencesOn(entries, date).map((o) => {
               const height = Math.max(0.5, (o.end - o.start) / 60)
-              const tall = o.entry.kind !== 'note' && height >= 3
               return (
                 <div
                   key={o.entry.id}
-                  className={`${bandClass(o, 'band')}${tall ? ' tall' : ''}`}
+                  className={bandClass(o, 'band')}
                   role="button"
                   tabIndex={0}
                   data-entry={o.entry.id}
@@ -646,9 +688,7 @@ function WeekGrid({
                     e.preventDefault()
                     onPick(o.entry, date)
                   }}
-                >
-                  <span className="t">{o.entry.title}</span>
-                </div>
+                />
               )
             })}
             {(blocks[date] ?? []).map((ev) => {
@@ -672,9 +712,7 @@ function WeekGrid({
                     e.preventDefault()
                     onBlock(ev)
                   }}
-                >
-                  <span className="t">{ev.task?.title ?? ev.kind}</span>
-                </div>
+                />
               )
             })}
           </div>
@@ -729,6 +767,7 @@ function EntrySheet({
     date: entry?.on_date ?? date,
   }))
   const [menu, setMenu] = useState(false)
+  const [refused, setRefused] = useState('')
   const scrim = useRef<HTMLDivElement>(null)
   const panel = useRef<HTMLDivElement>(null)
   const title = useRef<HTMLInputElement>(null)
@@ -762,7 +801,10 @@ function EntrySheet({
   }, [onClose])
   useEscape(true, close)
 
-  const set = (patch: Partial<Draft>) => setDraft((d) => ({ ...d, ...patch }))
+  const set = (patch: Partial<Draft>) => {
+    setRefused('')
+    setDraft((d) => ({ ...d, ...patch }))
+  }
   const toggleDay = (i: number) => set({ days: draft.days ^ (1 << i) })
   const ready =
     draft.title.trim().length > 0 &&
@@ -880,10 +922,12 @@ function EntrySheet({
             />
           )}
         </div>
+        {refused && <p className="sheet-refused">{refused}</p>}
         <button
           className="btn-fill wide sheet-save"
           disabled={!ready}
           onClick={() => {
+            if (hasGoneBy(draft)) return setRefused('That time has gone by.')
             onSave(draft)
             close()
           }}
