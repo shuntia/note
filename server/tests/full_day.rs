@@ -9,8 +9,24 @@ fn write(dir: &std::path::Path, rel: &str, content: &str) {
     std::fs::write(p, content).unwrap();
 }
 
+/// The simulated day is tomorrow in Tokyo, so everything the agent lays is
+/// ahead of the wall clock whatever time the suite runs at.
+fn day() -> (jiff::tz::TimeZone, jiff::civil::Date) {
+    let tz = jiff::tz::TimeZone::get("Asia/Tokyo").unwrap();
+    let date = jiff::Timestamp::now().to_zoned(tz.clone()).date().tomorrow().unwrap();
+    (tz, date)
+}
+
 #[test]
 fn a_full_simulated_day() {
+    let (tokyo, day) = day();
+    let at = |wall: &str| -> jiff::Timestamp {
+        let (h, m) = wall.split_once(':').unwrap();
+        day.at(h.parse().unwrap(), m.parse().unwrap(), 0, 0)
+            .to_zoned(tokyo.clone())
+            .unwrap()
+            .timestamp()
+    };
     let tmp = tempfile::tempdir().unwrap();
     write(
         tmp.path(),
@@ -29,7 +45,7 @@ fn a_full_simulated_day() {
         .unwrap();
     let db = Mutex::new(conn);
 
-    // --- 03:30 JST, 2026-08-31 (Monday): nightly run.
+    // --- 03:30 JST on the simulated day: nightly run.
     // The agent inserts an afternoon nudge, then debriefs.
     let nightly_llm = MockLLM::scripted(vec![
         ChatResponse {
@@ -37,7 +53,9 @@ fn a_full_simulated_day() {
             tool_calls: vec![ToolCall {
                 id: "n1".into(),
                 name: "schedule_insert".into(),
-                args: r#"{"date":"2026-08-31","kind":"nudge","time":"16:00","flexibility":"drop","channel":"push"}"#.into(),
+                args: format!(
+                    r#"{{"date":"{day}","kind":"nudge","time":"16:00","flexibility":"drop","channel":"push"}}"#
+                ),
             }],
         },
         ChatResponse {
@@ -45,7 +63,7 @@ fn a_full_simulated_day() {
             tool_calls: vec![],
         },
     ]);
-    let now: jiff::Timestamp = "2026-08-30T18:30:00Z".parse().unwrap(); // 03:30 JST on the 31st
+    let now = at("03:30");
     {
         let deps = SessionDeps {
             db: &db,
@@ -67,10 +85,11 @@ fn a_full_simulated_day() {
         let conn = db.lock().unwrap();
         let kinds: Vec<String> = conn
             .prepare(
-                "SELECT e.kind FROM events e JOIN plans p ON p.id = e.plan_id WHERE p.date='2026-08-31' ORDER BY e.wall_time",
+                "SELECT e.kind FROM events e JOIN plans p ON p.id = e.plan_id
+                 WHERE p.date = ?1 ORDER BY e.wall_time",
             )
             .unwrap()
-            .query_map([], |r| r.get(0))
+            .query_map([day.to_string()], |r| r.get(0))
             .unwrap()
             .collect::<rusqlite::Result<_>>()
             .unwrap();
@@ -80,15 +99,18 @@ fn a_full_simulated_day() {
             "the template's own entries, then the close of the day"
         );
         let debrief: String = conn
-            .query_row("SELECT content FROM debriefs WHERE user_id=1 AND date='2026-08-31'", [], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT content FROM debriefs WHERE user_id=1 AND date = ?1",
+                [day.to_string()],
+                |r| r.get(0),
+            )
             .unwrap();
         assert!(debrief.contains("checkin at nine"));
     }
     // the agent planned against the simulated day, not the wall clock
     let nightly_system = &nightly_llm.seen()[0].system;
-    assert!(nightly_system.contains("Monday 2026-08-31 03:30 Asia/Tokyo UTC+09:00"), "{nightly_system}");
+    let header = now.to_zoned(tokyo.clone()).strftime("%A %Y-%m-%d %H:%M Asia/Tokyo UTC+09:00").to_string();
+    assert!(nightly_system.contains(&header), "{nightly_system}");
     let plan_section = nightly_system.split("# Today's plan").nth(1).unwrap();
     assert!(plan_section.contains("09:00-09:15 checkin_call [pending] routine via push"), "{plan_section}");
 
@@ -130,7 +152,7 @@ fn a_full_simulated_day() {
             1,
             "aki",
             SessionKind::Talk,
-            "2026-08-31T01:00:00Z".parse().unwrap(), // 10:00 JST
+            at("10:00"),
             &[],
             "the report is due friday, remind me",
         )
@@ -148,7 +170,7 @@ fn a_full_simulated_day() {
     }
 
     // --- 11:00 JST: only the 09:00 checkin is due; the 16:00 nudge must not fire yet.
-    let midday: jiff::Timestamp = "2026-08-31T02:00:00Z".parse().unwrap(); // 11:00 JST
+    let midday = at("11:00");
     let fired_midday = {
         let conn = db.lock().unwrap();
         note_server::runner::fire_due(&conn, tmp.path(), midday).unwrap()
@@ -164,7 +186,7 @@ fn a_full_simulated_day() {
     }
 
     // --- 16:05 JST: the nudge comes due; the already-fired checkin is not re-fired.
-    let fire_at: jiff::Timestamp = "2026-08-31T07:05:00Z".parse().unwrap(); // 16:05 JST
+    let fire_at = at("16:05");
     let fired = {
         let conn = db.lock().unwrap();
         note_server::runner::fire_due(&conn, tmp.path(), fire_at).unwrap()
