@@ -221,6 +221,13 @@ pub(crate) fn check_text(field: &str, value: &str) -> Result<(), ToolError> {
     Ok(())
 }
 
+/// Whether a wall time on `date` is already behind the user's own clock.
+pub(crate) fn has_gone_by(ctx: &ToolCtx, date: jiff::civil::Date, wall: &str) -> bool {
+    let tz = crate::triggers::timezone(ctx.config_dir, ctx.username);
+    let local = jiff::Timestamp::now().to_zoned(tz);
+    crate::triggers::lead_minutes(date, crate::templates::wall_minutes(wall), &local) < 0
+}
+
 const CHECKIN: &[&str] = &[
     "memory_query",
     "memory_read",
@@ -465,7 +472,7 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
             schema::<schedule_ops::ReshapeArgs>(),
         ),
         "schedule_insert" => (
-            "Insert a new event into an existing day plan.",
+            "Insert a new event into an existing day plan. A time that has gone by is refused.",
             schema::<schedule_ops::InsertArgs>(),
         ),
         "notify_send" => (
@@ -554,7 +561,7 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
              has set aside for tasks — never quiet, and the only time open tasks are laid \
              into. Use this when the user says they cannot be disturbed at certain times, or \
              names something that happens every week: \"school weekdays 08:15-15:30\" is \
-             fixed and quiet.",
+             fixed and quiet. A one-off entry that has already ended is refused.",
             schema::<calendar_ops::AddArgs>(),
         ),
         "calendar_update" => (

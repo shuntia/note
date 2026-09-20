@@ -390,7 +390,7 @@ pub fn lay_close_day(
 
 /// How many minutes from now the target wall time on `date` is; negative once
 /// it has gone by.
-fn lead_minutes(date: jiff::civil::Date, target: i64, local: &jiff::Zoned) -> i64 {
+pub(crate) fn lead_minutes(date: jiff::civil::Date, target: i64, local: &jiff::Zoned) -> i64 {
     let days = i64::from((date - local.date()).get_days());
     let now_min = i64::from(local.hour()) * 60 + i64::from(local.minute());
     days * 24 * 60 + target - now_min

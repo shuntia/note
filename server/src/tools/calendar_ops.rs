@@ -170,16 +170,35 @@ pub struct AddArgs {
     pub until_date: Option<String>,
 }
 
+/// A one-off entry whose end is behind the user's clock is a lay in the past.
+/// A recurring one is not, and neither is `until_date`, which bounds an entry
+/// rather than placing it.
+fn check_past(ctx: &ToolCtx, args: &AddArgs, days: i64) -> Result<(), ToolError> {
+    let Some(raw) = args.on_date.as_deref().filter(|_| days == 0) else { return Ok(()) };
+    let (Ok(date), true) = (raw.parse(), crate::templates::valid_time(&args.end_time)) else {
+        return Ok(());
+    };
+    if super::has_gone_by(ctx, date, &args.end_time) {
+        return Err(ToolError::past(format!(
+            "{raw} {} has gone by; put a one-off entry on a day still ahead",
+            args.end_time
+        )));
+    }
+    Ok(())
+}
+
 pub fn add(conn: &Connection, ctx: &ToolCtx, args: AddArgs) -> Result<serde_json::Value, ToolError> {
     unscoped(ctx)?;
     super::check_text("title", &args.title)?;
+    let days = args.days.as_deref().map_or(0, mask);
+    check_past(ctx, &args, days)?;
     let fields = calendar::Fields {
         title: args.title,
         kind: args.kind.as_str().into(),
         quiet: args.quiet,
         start_time: args.start_time,
         end_time: args.end_time,
-        days: Some(args.days.as_deref().map_or(0, mask)),
+        days: Some(days),
         on_date: args.on_date,
         from_date: args.from_date,
         until_date: args.until_date,
@@ -309,6 +328,21 @@ mod tests {
     const SCHOOL: &str = r#"{"title":"school","kind":"fixed","start_time":"08:15",
         "end_time":"15:30","days":["mon","tue","wed","thu","fri"]}"#;
 
+    /// Pins the user to a zone whose clock reads midday, so an hour either side
+    /// of now stays on today's date.
+    fn pin_to_midday(tmp: &tempfile::TempDir) -> jiff::civil::Date {
+        let zone = crate::triggers::midday_zone();
+        std::fs::write(
+            tmp.path().join("defaults/user.toml"),
+            format!(
+                "display_name = \"X\"\ntimezone = \"{}\"\ntemplate = \"default\"\n",
+                zone.iana_name().unwrap()
+            ),
+        )
+        .unwrap();
+        jiff::Timestamp::now().to_zoned(zone).date()
+    }
+
     #[test]
     fn a_commitment_goes_in_by_day_name_and_comes_back_by_day_name() {
         let (conn, tmp) = env();
@@ -404,6 +438,33 @@ mod tests {
         let n: i64 =
             conn.query_row("SELECT COUNT(*) FROM calendar_entries", [], |r| r.get(0)).unwrap();
         assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn a_one_off_entry_that_has_already_ended_is_refused() {
+        let (conn, tmp) = env();
+        let today = pin_to_midday(&tmp);
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "calendar_add",
+            &format!(r#"{{"title":"dentist","kind":"busy","start_time":"10:00",
+                "end_time":"11:00","on_date":"{today}"}}"#)).unwrap_err();
+        assert_eq!(e.kind, "past");
+        assert!(e.message.contains("has gone by"), "{}", e.message);
+
+        dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "calendar_add",
+            &format!(r#"{{"title":"dentist","kind":"busy","start_time":"13:00",
+                "end_time":"14:00","on_date":"{today}"}}"#)).unwrap();
+    }
+
+    #[test]
+    fn a_recurring_entry_is_added_however_its_bounds_read() {
+        let (conn, tmp) = env();
+        let today = pin_to_midday(&tmp);
+        dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "calendar_add",
+            &format!(r#"{{"title":"swim","kind":"busy","start_time":"09:00","end_time":"10:00",
+                "days":["mon","wed"],"until_date":"{}"}}"#, today.yesterday().unwrap())).unwrap();
+        let n: i64 =
+            conn.query_row("SELECT COUNT(*) FROM calendar_entries", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 1, "an until_date bounds an entry, it does not lay one");
     }
 
     #[test]

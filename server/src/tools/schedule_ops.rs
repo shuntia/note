@@ -255,6 +255,12 @@ pub fn insert(conn: &Connection, ctx: &ToolCtx, args: InsertArgs) -> Result<serd
     }
     let date: jiff::civil::Date = args.date.parse()
         .map_err(|_| ToolError::rejected(format!("date must be YYYY-MM-DD, got {:?}", args.date)))?;
+    if super::has_gone_by(ctx, date, &args.time) {
+        return Err(ToolError::past(format!(
+            "{date} {} has gone by; insert it later in the day",
+            args.time
+        )));
+    }
     let plan_id: Option<i64> = conn
         .query_row(
             "SELECT id FROM plans WHERE user_id = ?1 AND date = ?2",
@@ -280,6 +286,20 @@ pub fn insert(conn: &Connection, ctx: &ToolCtx, args: InsertArgs) -> Result<serd
 mod tests {
     use crate::tools::{dispatch, SessionKind, ToolCtx};
 
+    /// The user's zone, pinned so its clock reads midday: the fixture plans the
+    /// day that zone is in, and the times below sit either side of now.
+    fn zone() -> jiff::tz::TimeZone {
+        crate::triggers::midday_zone()
+    }
+
+    fn today() -> jiff::civil::Date {
+        jiff::Timestamp::now().to_zoned(zone()).date()
+    }
+
+    fn every_day() -> Vec<String> {
+        ["mon", "tue", "wed", "thu", "fri", "sat", "sun"].iter().map(|d| (*d).into()).collect()
+    }
+
     fn env() -> (rusqlite::Connection, tempfile::TempDir) {
         let conn = crate::db::open_memory().unwrap();
         conn.execute(
@@ -291,24 +311,34 @@ mod tests {
             events: vec![
                 crate::templates::TemplateEvent {
                     kind: "checkin_call".into(), time: "09:00".into(),
-                    days: vec!["mon".into()], flexibility: Some("slide".into()),
+                    days: every_day(), flexibility: Some("slide".into()),
                     slide_window_min: Some(60), channel: "push".into(), ..Default::default()
                 },
                 crate::templates::TemplateEvent {
                     kind: "nudge".into(), time: "14:00".into(),
-                    days: vec!["mon".into()], flexibility: Some("drop".into()),
+                    days: every_day(), flexibility: Some("drop".into()),
                     slide_window_min: Some(0), channel: "push".into(), ..Default::default()
                 },
                 crate::templates::TemplateEvent {
                     kind: "Work time".into(), time: "09:30".into(),
-                    days: vec!["mon".into()], entry: crate::templates::Entry::Block,
+                    days: every_day(), entry: crate::templates::Entry::Block,
                     end_time: Some("12:30".into()), channel: "push".into(), ..Default::default()
                 },
             ],
         };
-        let date: jiff::civil::Date = "2026-08-31".parse().unwrap();
-        crate::plan::generate(&conn, 1, &tmpl, date).unwrap();
-        (conn, tempfile::tempdir().unwrap())
+        crate::plan::generate(&conn, 1, &tmpl, today()).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("defaults/user.toml");
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(
+            p,
+            format!(
+                "display_name = \"X\"\ntimezone = \"{}\"\ntemplate = \"default\"\n",
+                zone().iana_name().unwrap()
+            ),
+        )
+        .unwrap();
+        (conn, tmp)
     }
 
     fn ctx<'a>(tmp: &'a tempfile::TempDir) -> ToolCtx<'a> {
@@ -316,12 +346,15 @@ mod tests {
     }
 
 
-    /// School covers the middle of the Monday the fixture plans.
+    /// School covers the middle of the day the fixture plans.
     fn school(conn: &rusqlite::Connection) {
         crate::calendar::create(conn, 1, crate::calendar::Fields {
             title: "school".into(), kind: "fixed".into(),
             start_time: "09:30".into(), end_time: "15:30".into(),
-            days: Some(crate::calendar::day_mask(&["mon", "tue", "wed", "thu", "fri"]).unwrap()),
+            days: Some(crate::calendar::day_mask(&[
+                "mon", "tue", "wed", "thu", "fri", "sat", "sun",
+            ])
+            .unwrap()),
             ..Default::default()
         }).unwrap();
     }
@@ -347,13 +380,13 @@ mod tests {
         let (conn, tmp) = env();
         school(&conn);
         let e = dispatch(&conn, &ctx(&tmp), SessionKind::Nightly, "schedule_insert",
-            r#"{"date":"2026-08-31","kind":"nudge","time":"10:00","flexibility":"slide","channel":"push"}"#,
+            &format!(r#"{{"date":"{}","kind":"nudge","time":"13:00","flexibility":"slide","channel":"push"}}"#, today()),
         ).unwrap_err();
         assert_eq!(e.kind, "rejected");
         assert!(e.message.contains("inside school 09:30-15:30"), "{}", e.message);
 
         dispatch(&conn, &ctx(&tmp), SessionKind::Nightly, "schedule_insert",
-            r#"{"date":"2026-08-31","kind":"nudge","time":"16:00","flexibility":"slide","channel":"push"}"#,
+            &format!(r#"{{"date":"{}","kind":"nudge","time":"16:00","flexibility":"slide","channel":"push"}}"#, today()),
         ).unwrap();
     }
 
@@ -435,18 +468,17 @@ mod tests {
     fn a_drop_can_name_the_event_it_moved_to() {
         let (conn, tmp) = env();
         let out = dispatch(&conn, &ctx(&tmp), SessionKind::Nightly, "schedule_insert",
-            r#"{"date":"2026-08-31","kind":"nudge","time":"17:00","flexibility":"drop","channel":"push"}"#).unwrap();
+            &format!(r#"{{"date":"{}","kind":"nudge","time":"17:00","flexibility":"drop","channel":"push"}}"#, today())).unwrap();
         let moved = out["event_id"].as_i64().unwrap();
         dispatch(&conn, &ctx(&tmp), SessionKind::Nightly, "schedule_drop",
             &format!(r#"{{"event_id":2,"moved_to_event_id":{moved}}}"#)).unwrap();
 
-        let date: jiff::civil::Date = "2026-08-31".parse().unwrap();
-        let evs = crate::plan::events_for(&conn, 1, date).unwrap();
+        let evs = crate::plan::events_for(&conn, 1, today()).unwrap();
         let dropped = evs.iter().find(|e| e.id == 2).unwrap();
         assert_eq!(dropped.status, "dropped");
         let to = dropped.moved_to.as_ref().unwrap();
         assert_eq!((to.event_id, to.wall_time.as_str(), to.kind.as_str()), (moved, "17:00", "nudge"));
-        assert_eq!(to.date, "2026-08-31");
+        assert_eq!(to.date, today().to_string());
         assert!(evs.iter().find(|e| e.id == 1).unwrap().moved_to.is_none());
     }
 
@@ -535,13 +567,13 @@ mod tests {
     fn no_schedule_tool_accepts_an_alert_flag() {
         let (conn, tmp) = env();
         for (tool, raw) in [
-            ("schedule_reshape", r#"{"event_id":3,"start":"10:00","alert":false}"#),
-            ("schedule_slide", r#"{"event_id":1,"minutes":5,"alert":false}"#),
-            ("schedule_snooze", r#"{"event_id":1,"minutes":5,"alert":false}"#),
-            ("schedule_drop", r#"{"event_id":2,"alert":false}"#),
-            ("schedule_insert", r#"{"date":"2026-08-31","kind":"nudge","time":"16:00","flexibility":"drop","channel":"push","alert":false}"#),
+            ("schedule_reshape", r#"{"event_id":3,"start":"10:00","alert":false}"#.to_string()),
+            ("schedule_slide", r#"{"event_id":1,"minutes":5,"alert":false}"#.to_string()),
+            ("schedule_snooze", r#"{"event_id":1,"minutes":5,"alert":false}"#.to_string()),
+            ("schedule_drop", r#"{"event_id":2,"alert":false}"#.to_string()),
+            ("schedule_insert", format!(r#"{{"date":"{}","kind":"nudge","time":"16:00","flexibility":"drop","channel":"push","alert":false}}"#, today())),
         ] {
-            let e = dispatch(&conn, &ctx(&tmp), SessionKind::Nightly, tool, raw).unwrap_err();
+            let e = dispatch(&conn, &ctx(&tmp), SessionKind::Nightly, tool, &raw).unwrap_err();
             assert_eq!(e.kind, "invalid_args", "{tool} accepted an alert flag");
         }
         let bells: Vec<i64> = {
@@ -554,26 +586,47 @@ mod tests {
     #[test]
     fn insert_is_nightly_only_and_validated() {
         let (conn, tmp) = env();
-        let ok = r#"{"date":"2026-08-31","kind":"nudge","time":"16:30","flexibility":"drop","channel":"push"}"#;
+        let today = today();
+        let ok = format!(r#"{{"date":"{today}","kind":"nudge","time":"16:30","flexibility":"drop","channel":"push"}}"#);
         for kind in [SessionKind::Checkin, SessionKind::Talk] {
-            let e = dispatch(&conn, &ctx(&tmp), kind, "schedule_insert", ok).unwrap_err();
+            let e = dispatch(&conn, &ctx(&tmp), kind, "schedule_insert", &ok).unwrap_err();
             assert_eq!(e.kind, "forbidden");
         }
-        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Nightly, "schedule_insert", ok).unwrap();
+        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Nightly, "schedule_insert", &ok).unwrap();
         assert!(out["event_id"].as_i64().unwrap() > 0);
 
+        let tomorrow = today.tomorrow().unwrap();
         for (raw, why) in [
-            (r#"{"date":"2026-08-31","kind":"nudge","time":"9:00","flexibility":"drop","channel":"push"}"#, "unpadded time"),
-            (r#"{"date":"not-a-date","kind":"nudge","time":"09:00","flexibility":"drop","channel":"push"}"#, "bad date"),
-            (r#"{"date":"2026-09-01","kind":"nudge","time":"09:00","flexibility":"drop","channel":"push"}"#, "no plan for date"),
-            (r#"{"date":"2026-08-31","kind":"","time":"09:00","flexibility":"drop","channel":"push"}"#, "empty kind"),
-            (r#"{"date":"2026-08-31","kind":"nudge","time":"09:00","flexibility":"drop","slide_window_min":-5,"channel":"push"}"#, "negative window"),
+            (format!(r#"{{"date":"{today}","kind":"nudge","time":"9:00","flexibility":"drop","channel":"push"}}"#), "unpadded time"),
+            (r#"{"date":"not-a-date","kind":"nudge","time":"16:00","flexibility":"drop","channel":"push"}"#.to_string(), "bad date"),
+            (format!(r#"{{"date":"{tomorrow}","kind":"nudge","time":"16:00","flexibility":"drop","channel":"push"}}"#), "no plan for date"),
+            (format!(r#"{{"date":"{today}","kind":"","time":"16:00","flexibility":"drop","channel":"push"}}"#), "empty kind"),
+            (format!(r#"{{"date":"{today}","kind":"nudge","time":"16:00","flexibility":"drop","slide_window_min":-5,"channel":"push"}}"#), "negative window"),
         ] {
-            let e = dispatch(&conn, &ctx(&tmp), SessionKind::Nightly, "schedule_insert", raw).unwrap_err();
+            let e = dispatch(&conn, &ctx(&tmp), SessionKind::Nightly, "schedule_insert", &raw).unwrap_err();
             assert_eq!(e.kind, "rejected", "{why}");
         }
         let e = dispatch(&conn, &ctx(&tmp), SessionKind::Nightly, "schedule_insert",
-            r#"{"date":"2026-08-31","kind":"nudge","time":"09:00","flexibility":"soft","channel":"push"}"#).unwrap_err();
+            &format!(r#"{{"date":"{today}","kind":"nudge","time":"16:00","flexibility":"soft","channel":"push"}}"#)).unwrap_err();
         assert_eq!(e.kind, "invalid_args");
+    }
+
+    #[test]
+    fn an_insert_at_a_moment_that_has_gone_by_is_refused() {
+        let (conn, tmp) = env();
+        let today = today();
+        for (date, time, why) in [
+            (today, "11:00", "earlier today"),
+            (today.yesterday().unwrap(), "23:00", "a whole day earlier"),
+        ] {
+            let e = dispatch(&conn, &ctx(&tmp), SessionKind::Nightly, "schedule_insert",
+                &format!(r#"{{"date":"{date}","kind":"nudge","time":"{time}","flexibility":"drop","channel":"push"}}"#),
+            ).unwrap_err();
+            assert_eq!(e.kind, "past", "{why}");
+            assert!(e.message.contains("has gone by"), "{}", e.message);
+        }
+        dispatch(&conn, &ctx(&tmp), SessionKind::Nightly, "schedule_insert",
+            &format!(r#"{{"date":"{today}","kind":"nudge","time":"13:00","flexibility":"drop","channel":"push"}}"#),
+        ).unwrap();
     }
 }
