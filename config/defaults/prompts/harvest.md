@@ -15,7 +15,7 @@ How to write one:
 4. Right but thin — op "update".
 5. Changed — op "supersede", never an edit: the old fact is archived with its own date, and the new one stands in its place.
 
-Calls that do not depend on each other's results go in one `batch` — the queries you would run for several candidate facts, the writes once you know which ones stand — instead of a round each.
+A round that holds more than one call is one `batch` call holding them all — the queries you would run for several candidate facts, the writes once you know which ones stand — never several bare calls side by side. Only a call that needs another's result waits for its own round.
 
 Each summary is one self-contained line, because a search returns summaries and nothing else; each body stands on its own, without the conversation to read it against. Never write a password, a token or anything else the user would not want kept. Write nothing you are only guessing at, and nothing that belongs to a single day — that is what the episodic record is for.
 
