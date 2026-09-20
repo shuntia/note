@@ -1,4 +1,5 @@
 import {
+  Fragment,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -33,7 +34,15 @@ type Item =
       thoughtMs: number | null
       steps: ToolItem[]
     }
-  | { kind: 'tool'; key: string; name: string; args: string; result: string; isError: boolean }
+  | {
+      kind: 'tool'
+      key: string
+      name: string
+      args: string
+      result: string
+      isError: boolean
+      thinking?: string
+    }
   | { kind: 'steps'; key: string; steps: ToolItem[] }
   | { kind: 'system'; key: string; text: string; hint: string | null }
 
@@ -43,7 +52,8 @@ type StepsItem = Extract<Item, { kind: 'steps' }>
 type TurnItem = Extract<Item, { kind: 'user' | 'system' }>
 type Shown = AssistantItem | StepsItem | TurnItem
 
-// One session's progress as the live frames describe it; `seq` is the last one applied.
+// One session's progress as the live frames describe it; `seq` is the last one
+// applied and `reasoning` the thinking no call has followed yet.
 type Live = { seq: number; reasoning: string; steps: ToolItem[] }
 
 const EMPTY_LIVE: Live = { seq: -1, reasoning: '', steps: [] }
@@ -58,6 +68,7 @@ function applyFrame(prev: Live, frame: AgentFrame): Live {
   const steps = at.steps.slice()
   const before = steps[ev.index]
   const call = ev.kind === 'tool_call'
+  const opening = call && !before
   steps[ev.index] = {
     kind: 'tool',
     key: `live-${ev.index}`,
@@ -65,10 +76,11 @@ function applyFrame(prev: Live, frame: AgentFrame): Live {
     args: call ? ev.args : (before?.args ?? ''),
     result: call ? '' : ev.result,
     isError: call ? false : ev.is_error,
+    thinking: opening ? at.reasoning || undefined : before?.thinking,
     running: call,
     finishedAt: call ? undefined : Date.now(),
   }
-  return { ...at, steps }
+  return { ...at, reasoning: opening ? '' : at.reasoning, steps }
 }
 
 type Load = 'loading' | 'ready' | 'error'
@@ -110,6 +122,7 @@ function fromMessage(m: TalkMessage): Item {
     args: m.tool_args ?? '',
     result: m.content,
     isError: m.is_error,
+    thinking: m.reasoning ?? undefined,
   }
 }
 
@@ -120,6 +133,7 @@ const fromStep = (s: TalkStep): ToolItem => ({
   args: s.args,
   result: s.result,
   isError: s.is_error,
+  thinking: s.thinking ?? undefined,
 })
 
 function pretty(raw: string): string {
@@ -212,8 +226,10 @@ function liveLabel(steps: ToolItem[], now: number): string {
   return 'Note is thinking…'
 }
 
-// One quiet line; the reasoning and the calls stay a chevron away. `held` keeps a
-// live line in the layout but out of sight until the sent bubble has landed.
+// One quiet line; the reasoning and the calls stay a chevron away, each round's
+// thinking above the calls it led to and `reasoning` — the round that answered —
+// last. `held` keeps a live line in the layout but out of sight until the sent
+// bubble has landed.
 function Trace({
   label,
   reasoning,
@@ -243,14 +259,15 @@ function Trace({
       </button>
       {open && (
         <div className="activity-body">
-          {reasoning && <pre className="activity-think">{reasoning}</pre>}
-          {steps.length > 0 && (
-            <div className="receipts">
-              {steps.map((step) => (
-                <Receipt key={step.key} item={step} />
-              ))}
-            </div>
-          )}
+          <div className="receipts">
+            {steps.map((step) => (
+              <Fragment key={step.key}>
+                {step.thinking && <pre className="activity-think">{step.thinking}</pre>}
+                <Receipt item={step} />
+              </Fragment>
+            ))}
+            {reasoning && <pre className="activity-think">{reasoning}</pre>}
+          </div>
         </div>
       )}
     </div>

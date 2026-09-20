@@ -690,7 +690,8 @@ async fn talk_returns_timing_and_the_transcript_keeps_the_trace() {
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let conv_id = v["conversation_id"].as_i64().unwrap();
     assert!(v["thought_ms"].as_i64().unwrap() >= 0, "{}", v["thought_ms"]);
-    assert_eq!(v["reasoning"], "a task first\n\nnow the reply");
+    assert_eq!(v["steps"][0]["thinking"], "a task first");
+    assert_eq!(v["reasoning"], "now the reply", "the outcome keeps the round that answered");
 
     let res = app
         .oneshot(
@@ -709,7 +710,8 @@ async fn talk_returns_timing_and_the_transcript_keeps_the_trace() {
     assert_eq!(rows[0]["role"], "user");
     assert_eq!(rows[1]["role"], "tool");
     assert_eq!(rows[2]["role"], "assistant");
-    assert!(rows[0]["reasoning"].is_null() && rows[1]["reasoning"].is_null());
-    assert_eq!(rows[2]["reasoning"], "a task first\n\nnow the reply");
+    assert!(rows[0]["reasoning"].is_null());
+    assert_eq!(rows[1]["reasoning"], "a task first", "the call carries the round that made it");
+    assert_eq!(rows[2]["reasoning"], "now the reply");
     assert_eq!(rows[2]["thought_ms"], v["thought_ms"]);
 }

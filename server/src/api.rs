@@ -818,6 +818,7 @@ async fn talk(
                         "args": s.args,
                         "result": s.result,
                         "is_error": s.is_error,
+                        "thinking": s.thinking,
                     })
                 })
                 .collect();

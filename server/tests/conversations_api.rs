@@ -142,8 +142,17 @@ async fn messages_are_ordered_and_expose_tool_rows() {
     {
         let conn = state.db.lock().unwrap();
         let at: jiff::Timestamp = "2026-08-30T09:01:00Z".parse().unwrap();
-        talk::append_tool(&conn, id, "task_create", r#"{"title":"x"}"#, r#"{"id":1}"#, true, at)
-            .unwrap();
+        talk::append_tool(
+            &conn,
+            id,
+            "task_create",
+            r#"{"title":"x"}"#,
+            r#"{"id":1}"#,
+            true,
+            None,
+            at,
+        )
+        .unwrap();
     }
 
     let v = json(get(&app, &format!("/api/conversations/{id}/messages"), &cookie).await).await;

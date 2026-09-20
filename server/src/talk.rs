@@ -151,7 +151,7 @@ pub fn append_text(
     Ok(())
 }
 
-/// The assistant row, carrying the session's thinking text and how long the
+/// The assistant row, carrying the final round's thinking text and how long the
 /// session took. Blank reasoning is stored as NULL, so a provider that returns
 /// none reads the same as a row written before the columns existed.
 pub fn append_assistant(
@@ -189,6 +189,9 @@ fn clip(text: &str, limit: usize) -> String {
 
 /// `result` is the tool output as it went back to the model, and lands in
 /// `content` so every row carries its displayable text in the same column.
+/// `thinking` is the reasoning of the round that made this call, held by the
+/// round's first call only.
+#[allow(clippy::too_many_arguments)]
 pub fn append_tool(
     conn: &Connection,
     conversation_id: i64,
@@ -196,13 +199,18 @@ pub fn append_tool(
     tool_args: &str,
     result: &str,
     is_error: bool,
+    thinking: Option<&str>,
     now: jiff::Timestamp,
 ) -> Result<()> {
+    let reasoning = match thinking.unwrap_or("").trim() {
+        "" => None,
+        text => Some(clip(text, MAX_REASONING_BYTES)),
+    };
     conn.execute(
         "INSERT INTO talk_messages
-            (conversation_id, role, content, tool_name, tool_args, is_error, created_at)
-         VALUES (?1, 'tool', ?2, ?3, ?4, ?5, ?6)",
-        (conversation_id, result, tool_name, tool_args, is_error, now.to_string()),
+            (conversation_id, role, content, tool_name, tool_args, is_error, reasoning, created_at)
+         VALUES (?1, 'tool', ?2, ?3, ?4, ?5, ?6, ?7)",
+        (conversation_id, result, tool_name, tool_args, is_error, reasoning, now.to_string()),
     )?;
     Ok(())
 }
@@ -468,7 +476,16 @@ pub async fn run_turn(
         };
         append_text(&conn, conv_id, "user", &said, now)?;
         for s in &out.steps {
-            append_tool(&conn, conv_id, &s.name, &s.args, &s.result, s.is_error, now)?;
+            append_tool(
+                &conn,
+                conv_id,
+                &s.name,
+                &s.args,
+                &s.result,
+                s.is_error,
+                s.thinking.as_deref(),
+                now,
+            )?;
         }
         append_assistant(&conn, conv_id, &reply, &out.reasoning, out.thought_ms, now)?;
         touch(&conn, conv_id, now)?;
@@ -602,7 +619,7 @@ mod tests {
         let conn = conn_with_conversation();
         for i in 0..4 {
             append_text(&conn, 1, "user", &format!("m{i}"), now()).unwrap();
-            append_tool(&conn, 1, "task_create", "{}", "{}", false, now()).unwrap();
+            append_tool(&conn, 1, "task_create", "{}", "{}", false, None, now()).unwrap();
         }
         let after: i64 = conn
             .query_row("SELECT id FROM talk_messages WHERE content = 'm1'", [], |r| r.get(0))
@@ -665,7 +682,7 @@ mod tests {
     fn history_excludes_tool_rows_and_maps_roles_oldest_first() {
         let conn = conn_with_conversation();
         append_text(&conn, 1, "user", "hi", now()).unwrap();
-        append_tool(&conn, 1, "task_create", r#"{"title":"x"}"#, "{}", false, now()).unwrap();
+        append_tool(&conn, 1, "task_create", r#"{"title":"x"}"#, "{}", false, None, now()).unwrap();
         append_text(&conn, 1, "assistant", "done", now()).unwrap();
 
         let msgs = history(&conn, 1, 10).unwrap();
@@ -737,7 +754,7 @@ mod tests {
     fn deleting_a_conversation_cascades_to_its_messages() {
         let conn = conn_with_conversation();
         append_text(&conn, 1, "user", "hi", now()).unwrap();
-        append_tool(&conn, 1, "task_create", "{}", "{}", true, now()).unwrap();
+        append_tool(&conn, 1, "task_create", "{}", "{}", true, None, now()).unwrap();
         conn.execute("DELETE FROM conversations WHERE id = 1", []).unwrap();
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM talk_messages WHERE conversation_id = 1", [], |r| {
@@ -750,7 +767,8 @@ mod tests {
     #[test]
     fn append_tool_stores_the_call_beside_its_result() {
         let conn = conn_with_conversation();
-        append_tool(&conn, 1, "task_create", r#"{"title":"x"}"#, r#"{"id":1}"#, true, now()).unwrap();
+        append_tool(&conn, 1, "task_create", r#"{"title":"x"}"#, r#"{"id":1}"#, true, None, now())
+            .unwrap();
         let (role, content, name, args, is_error): (String, String, String, String, bool) = conn
             .query_row(
                 "SELECT role, content, tool_name, tool_args, is_error FROM talk_messages WHERE id = 1",
@@ -769,16 +787,37 @@ mod tests {
     fn append_assistant_stores_the_trace_and_messages_json_returns_it() {
         let conn = conn_with_conversation();
         append_text(&conn, 1, "user", "hi", now()).unwrap();
-        append_tool(&conn, 1, "task_create", "{}", "{}", false, now()).unwrap();
+        append_tool(&conn, 1, "task_create", "{}", "{}", false, Some("  a task  "), now()).unwrap();
         append_assistant(&conn, 1, "done", "  first\n\nsecond  ", 2400, now()).unwrap();
 
         let rows = messages_json(&conn, 1).unwrap();
         assert_eq!(rows.len(), 3);
         assert!(rows[0]["reasoning"].is_null() && rows[0]["thought_ms"].is_null());
-        assert!(rows[1]["reasoning"].is_null() && rows[1]["thought_ms"].is_null());
+        assert_eq!(rows[1]["reasoning"], "a task");
+        assert!(rows[1]["thought_ms"].is_null());
         assert_eq!(rows[2]["role"], "assistant");
         assert_eq!(rows[2]["reasoning"], "first\n\nsecond");
         assert_eq!(rows[2]["thought_ms"], 2400);
+    }
+
+    #[test]
+    fn a_call_no_thinking_led_to_stores_none() {
+        let conn = conn_with_conversation();
+        append_tool(&conn, 1, "task_create", "{}", "{}", false, Some("   "), now()).unwrap();
+        append_tool(&conn, 1, "memory_query", "{}", "{}", false, None, now()).unwrap();
+        let rows = messages_json(&conn, 1).unwrap();
+        assert!(rows[0]["reasoning"].is_null());
+        assert!(rows[1]["reasoning"].is_null());
+    }
+
+    #[test]
+    fn over_long_thinking_on_a_call_is_clipped_too() {
+        let conn = conn_with_conversation();
+        let long = "日".repeat(MAX_REASONING_BYTES);
+        append_tool(&conn, 1, "task_create", "{}", "{}", false, Some(&long), now()).unwrap();
+        let stored = messages_json(&conn, 1).unwrap()[0]["reasoning"].as_str().unwrap().to_string();
+        assert!(stored.len() <= MAX_REASONING_BYTES);
+        assert!(stored.ends_with('…'));
     }
 
     #[test]
