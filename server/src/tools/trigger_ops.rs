@@ -245,10 +245,20 @@ mod tests {
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::fs::write(
             p,
-            "display_name = \"X\"\ntimezone = \"UTC\"\ntemplate = \"default\"\nnightly_time = \"22:00\"\n",
+            format!(
+                "display_name = \"X\"\ntimezone = \"{}\"\ntemplate = \"default\"\n\
+                 nightly_time = \"22:00\"\n",
+                zone().iana_name().unwrap()
+            ),
         )
         .unwrap();
         (conn, tmp)
+    }
+
+    /// The test user's zone, pinned to midday so the offsets below stay on the
+    /// day that laid them.
+    fn zone() -> jiff::tz::TimeZone {
+        crate::triggers::midday_zone()
     }
 
     fn ctx(tmp: &tempfile::TempDir) -> ToolCtx<'_> {
@@ -408,11 +418,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        let tomorrow = jiff::Timestamp::now()
-            .to_zoned(jiff::tz::TimeZone::UTC)
-            .date()
-            .tomorrow()
-            .unwrap();
+        let tomorrow = jiff::Timestamp::now().to_zoned(zone()).date().tomorrow().unwrap();
         assert_eq!(date, tomorrow.to_string());
     }
 
