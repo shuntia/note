@@ -606,7 +606,6 @@ function DayList({
   )
 }
 
-// The week as ground: bare bands, whose names the list under it carries.
 function WeekGrid({
   week,
   today,
@@ -644,7 +643,7 @@ function WeekGrid({
             aria-label={`${DAYS[i]} ${dateOf(date).getDate()}`}
             onClick={() => onSelect(date)}
           >
-            <span className="ws-name">{LETTERS[i]}</span>
+            <span className="ws-name">{DAYS[i]}</span>
             <span className="ws-num">{dateOf(date).getDate()}</span>
           </button>
         ))}
@@ -671,7 +670,7 @@ function WeekGrid({
               return (
                 <div
                   key={o.entry.id}
-                  className={bandClass(o, 'band')}
+                  className={`${bandClass(o, 'band')}${height < 0.75 ? ' short' : ''}`}
                   role="button"
                   tabIndex={0}
                   data-entry={o.entry.id}
@@ -688,7 +687,9 @@ function WeekGrid({
                     e.preventDefault()
                     onPick(o.entry, date)
                   }}
-                />
+                >
+                  <span className="band-label">{o.entry.title}</span>
+                </div>
               )
             })}
             {(blocks[date] ?? []).map((ev) => {
@@ -697,7 +698,7 @@ function WeekGrid({
               return (
                 <div
                   key={`b${ev.id}`}
-                  className={`band task${ev.status === 'done' || ev.status === 'dropped' ? ' settled' : ''}`}
+                  className={`band task${ev.status === 'done' || ev.status === 'dropped' ? ' settled' : ''}${height < 0.75 ? ' short' : ''}`}
                   role="button"
                   tabIndex={0}
                   data-tip={`${ev.wall_time} – ${ev.end_wall_time ?? ev.wall_time}${ev.origin === 'auto' ? ' · auto' : ''}`}
@@ -712,7 +713,9 @@ function WeekGrid({
                     e.preventDefault()
                     onBlock(ev)
                   }}
-                />
+                >
+                  <span className="band-label">{ev.task?.title ?? ev.kind}</span>
+                </div>
               )
             })}
           </div>

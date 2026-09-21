@@ -90,9 +90,10 @@
 .tip s { text-decoration-color: var(--line); }
 
 /* ── the week: 7 columns × hours ─────────────────────────────── */
-.week { --hour: 1.5rem; --gutter: 1.625rem; width: 100%; }
+.week { --hour: 1.5rem; --gutter: 1.625rem; width: 100%; padding-bottom: 0.5rem; }
 .week-head { display: grid; grid-template-columns: var(--gutter) repeat(7, minmax(0, 1fr)); margin-bottom: 0.5rem; }
 .week-head .ws-day { gap: 0.125rem; }
+.week-head .ws-name { text-transform: uppercase; letter-spacing: 0.06em; }
 .week-head .ws-num { width: 1.75rem; height: 1.75rem; font-size: 0.9375rem; }
 .week-body { position: relative; display: grid; grid-template-columns: var(--gutter) repeat(7, minmax(0, 1fr)); height: calc(var(--hour) * 18); }
 .week-hour { position: relative; font-size: 0.66rem; letter-spacing: 0.06em; color: var(--faint); font-variant-numeric: tabular-nums; }
@@ -117,6 +118,12 @@
 .band.task { background: var(--haze-strong); color: var(--ink); border-left: 2px solid var(--sun-ink); border-radius: 0.1875rem 0.4375rem 0.4375rem 0.1875rem; }
 .band.task.settled { background: none; border-left-color: var(--line); }
 .band.note { background: none; border-top: 2px solid var(--quiet); border-radius: 0; height: 0 !important; z-index: 3; }
+.band { overflow: hidden; text-align: left; }
+.band-label { display: block; padding: 0.125rem 0.25rem; font-size: 0.625rem; line-height: 1.2; font-weight: 500; overflow-wrap: anywhere; pointer-events: none; }
+.band.note { overflow: visible; }
+.band.short { display: flex; align-items: center; }
+.band.short .band-label { padding-block: 0; line-height: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.band.note .band-label { padding-top: 0.0625rem; color: var(--quiet); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* ── the entry sheet ─────────────────────────────────────────── */
 .scrim { position: fixed; inset: 0; z-index: 40; background: color-mix(in srgb, var(--cal-shadow) 55%, transparent); }
@@ -152,6 +159,7 @@
   .week-head .ws-num { width: 2rem; height: 2rem; font-size: 1.0625rem; }
   .week .band { left: 0.25rem; right: 0.375rem; border-radius: 0.5rem; }
   .week-hour { font-size: 0.72rem; }
+  .band-label { padding: 0.1875rem 0.375rem; font-size: 0.72rem; }
   .sheet { left: auto; right: 1.5rem; bottom: 1.5rem; width: 26.25rem; border-radius: var(--radius-xl); padding-bottom: 1.75rem; }
 }
 
