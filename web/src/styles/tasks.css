@@ -21,16 +21,19 @@
 
 /* the trailing controls hold one width per group, so every chip in it lands on
    the same edge and the steps below count to that edge too */
-.task-group { --acts: 1.5rem; }
+.task-group { --acts: 1.5rem; --bar: 4rem; }
 .task-group.now { --acts: 4.25rem; }
 .task-group.done { --acts: 0px; }
+@media (min-width: 768px) {
+  .task-group { --bar: 6rem; }
+}
 
 /* the title has the whole width it needs: the status sits under it until there
    is room beside it */
 .task-row {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  grid-template-areas: 'tick body acts' 'tick chips acts';
+  grid-template-columns: auto minmax(0, 1fr) var(--bar) auto;
+  grid-template-areas: 'tick body prog acts' 'tick chips prog acts';
   align-items: center;
   column-gap: 0.75rem;
   row-gap: 0.125rem;
@@ -39,11 +42,12 @@
 .task-row > .tick { grid-area: tick; }
 .task-body { grid-area: body; }
 .task-chips { grid-area: chips; justify-self: start; }
+.task-row > .task-prog { grid-area: prog; }
 .task-acts { grid-area: acts; }
 @media (min-width: 768px) {
   .task-row {
-    grid-template-columns: auto minmax(0, 1fr) auto auto;
-    grid-template-areas: 'tick body chips acts';
+    grid-template-columns: auto minmax(0, 1fr) auto var(--bar) auto;
+    grid-template-areas: 'tick body chips prog acts';
   }
   .task-chips { justify-self: end; }
 }
@@ -121,6 +125,75 @@
 .task-due { border-color: transparent; padding-inline: 0; }
 .task-due.overdue { color: var(--rose); }
 
+/* one fixed column holds every bar, so a row's label never moves it */
+.task-prog { width: var(--bar); flex: none; display: flex; flex-direction: column; gap: 0.1875rem; }
+.task-bar-wrap { display: grid; align-items: center; height: 1rem; }
+.task-bar {
+  grid-area: 1 / 1;
+  height: 0.1875rem;
+  border-radius: 2px;
+  background: var(--track);
+  overflow: hidden;
+}
+.task-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--sage);
+  transition: width 260ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.task-left {
+  font-size: 0.7rem;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* the bar is the control: the thumb comes out when the row is reached for */
+.task-slider {
+  grid-area: 1 / 1;
+  width: 100%;
+  height: 1rem;
+  margin: 0;
+  padding: 0;
+  appearance: none;
+  -webkit-appearance: none;
+  background: none;
+  border: 0;
+  border-radius: 0;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 160ms ease;
+}
+.task-slider::-webkit-slider-runnable-track {
+  -webkit-appearance: none;
+  height: 1rem;
+  border: 0;
+  background: none;
+}
+.task-slider::-moz-range-track { height: 1rem; border: 0; background: none; }
+.task-slider::-moz-range-progress { background: none; }
+.task-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 0.75rem;
+  height: 0.75rem;
+  margin-top: 0.125rem;
+  border: 0;
+  border-radius: 50%;
+  background: var(--sage);
+}
+.task-slider::-moz-range-thumb {
+  width: 0.75rem;
+  height: 0.75rem;
+  border: 0;
+  border-radius: 50%;
+  background: var(--sage);
+}
+.task-item:hover .task-slider,
+.task-item:focus-within .task-slider { opacity: 1; pointer-events: auto; }
+.task-slider:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+
 .task-start {
   width: 2.25rem;
   height: 2.25rem;
@@ -151,6 +224,9 @@
 .task-step-title { position: relative; min-width: 0; transition: color 220ms ease; }
 .task-step.done { color: var(--faint); }
 .task-step-min { margin-left: auto; font-size: 0.75rem; color: var(--faint); font-variant-numeric: tabular-nums; }
+/* the step's bar counts to the same edge the parent's does */
+.task-step .task-prog { margin-left: auto; }
+.task-step-min + .task-prog { margin-left: 0; }
 
 .task-done-fold {
   margin-top: 1.25rem;
@@ -214,6 +290,7 @@
     transform: translate(-50%, -50%);
   }
   .task-item .task-more { opacity: 1; }
+  .task-slider { opacity: 1; pointer-events: auto; }
   .tasks [data-tip]::after { content: none; }
 }
 
@@ -222,5 +299,6 @@
   .tick, .tick svg,
   .task-start,
   .task-title::after, .task-step-title::after,
+  .task-bar-fill, .task-slider,
   .task-item .task-more { transition: none; }
 }

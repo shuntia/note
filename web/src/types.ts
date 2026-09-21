@@ -59,6 +59,12 @@ export type Task = {
   external_id: string | null
   url: string
   notify: TaskNotify
+  // How far along it is, 0 to 100.
+  progress: number
+  // Where the minutes already worked say the task lands, and what is left of
+  // that; both absent until there is progress and time behind it.
+  expected_min: number | null
+  remaining_min: number | null
 }
 
 // A top-level task with its steps; the list never nests deeper than this.

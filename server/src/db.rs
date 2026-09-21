@@ -465,6 +465,11 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX idx_agent_traces_user ON agent_traces(user_id, id);
     ",
+    // v34
+    "
+    ALTER TABLE tasks ADD COLUMN progress INTEGER NOT NULL DEFAULT 0
+        CHECK (progress BETWEEN 0 AND 100);
+    ",
 ];
 
 pub fn open(path: &Path) -> Result<Connection> {
@@ -1314,6 +1319,34 @@ mod tests {
             .is_err(),
             "one user holds one value per key"
         );
+    }
+
+    #[test]
+    fn v34_starts_a_task_at_no_progress_and_holds_it_in_range() {
+        let conn = open_memory().unwrap();
+        let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, MIGRATIONS.len() as i64);
+        conn.execute(
+            "INSERT INTO users (username, pass_hash, role) VALUES ('a','h','member')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tasks (user_id, title, created_at, updated_at) VALUES (1, 't', 'x', 'x')",
+            [],
+        )
+        .unwrap();
+        let progress: i64 =
+            conn.query_row("SELECT progress FROM tasks WHERE id = 1", [], |r| r.get(0)).unwrap();
+        assert_eq!(progress, 0, "a task nobody has touched is nowhere yet");
+
+        conn.execute("UPDATE tasks SET progress = 100 WHERE id = 1", []).unwrap();
+        for out in [-1, 101] {
+            assert!(
+                conn.execute("UPDATE tasks SET progress = ?1 WHERE id = 1", [out]).is_err(),
+                "progress {out} is outside 0..=100"
+            );
+        }
     }
 
     #[test]

@@ -74,6 +74,7 @@ type NewTaskOpts = {
   due_at?: string | null
   url?: string
   notify?: TaskNotify
+  progress?: number
 }
 
 // A calendar entry recurs on `days` or happens once on `on_date`, never both.
@@ -94,6 +95,7 @@ type TaskPatch = {
   due_at?: string | null
   url?: string
   notify?: TaskNotify
+  progress?: number
 }
 
 export class ApiError extends Error {

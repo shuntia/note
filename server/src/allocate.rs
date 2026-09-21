@@ -163,15 +163,58 @@ fn split(minutes: u16, longest: u16) -> Vec<u16> {
     (0..n).map(|i| (units / n + u16::from(i < units % n)) * GRAIN).collect()
 }
 
-fn open_steps(conn: &Connection, parent_id: i64) -> rusqlite::Result<Vec<(i64, Option<i64>)>> {
+/// What a task row says about its length: the estimate it was given, and the
+/// progress a projection can be read off.
+struct Length {
+    duration_min: Option<i64>,
+    progress: i64,
+    actual_min: Option<i64>,
+}
+
+impl Length {
+    /// `first` is the first of the three columns in the row.
+    fn read(r: &rusqlite::Row, first: usize) -> rusqlite::Result<Self> {
+        Ok(Self {
+            duration_min: r.get(first)?,
+            progress: r.get(first + 1)?,
+            actual_min: r.get(first + 2)?,
+        })
+    }
+
+    /// What is still to come: the projection when the task has one — measured
+    /// time, which the learned stretch has no place on — and otherwise the
+    /// estimate, or `fallback`, as the nightly says it will really run.
+    fn minutes(&self, fallback: Option<i64>, stretch: impl Fn(i64) -> u16) -> u16 {
+        let (_, left) = crate::tasks::projection(
+            u32::try_from(self.progress).unwrap_or(0),
+            self.actual_min.and_then(|m| u32::try_from(m).ok()),
+        );
+        match left.filter(|m| *m > 0) {
+            Some(m) => m.clamp(1, u32::from(u16::MAX)) as u16,
+            None => {
+                stretch(self.duration_min.or(fallback).unwrap_or(i64::from(DEFAULT_BLOCK_MIN)))
+            }
+        }
+    }
+}
+
+fn open_steps(conn: &Connection, parent_id: i64) -> rusqlite::Result<Vec<(i64, Length)>> {
     let mut stmt = conn.prepare(
-        "SELECT id, duration_min FROM tasks
+        "SELECT id, duration_min, progress, actual_min FROM tasks
          WHERE parent_id = ?1 AND state IN ('open','in_progress') ORDER BY id",
     )?;
-    let steps: Vec<(i64, Option<i64>)> = stmt
-        .query_map([parent_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+    let steps = stmt
+        .query_map([parent_id], |r| Ok((r.get(0)?, Length::read(r, 1)?)))?
         .collect::<rusqlite::Result<_>>()?;
     Ok(steps)
+}
+
+struct TaskRow {
+    id: i64,
+    len: Length,
+    is_now: bool,
+    due_at: Option<String>,
+    created: String,
 }
 
 /// What the day may still be filled with, already cut the way it will be laid:
@@ -190,27 +233,33 @@ fn candidates(
         crate::learn::stretch(minutes, factor).clamp(1, i64::from(u16::MAX)) as u16
     };
     let mut stmt = conn.prepare(
-        "SELECT id, duration_min, is_now, due_at, created_at FROM tasks
+        "SELECT id, is_now, due_at, created_at, duration_min, progress, actual_min FROM tasks
          WHERE user_id = ?1 AND parent_id IS NULL AND state IN ('open','in_progress')
          ORDER BY id",
     )?;
-    let rows: Vec<(i64, Option<i64>, bool, Option<String>, String)> = stmt
+    let rows: Vec<TaskRow> = stmt
         .query_map([user_id], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            Ok(TaskRow {
+                id: r.get(0)?,
+                is_now: r.get(1)?,
+                due_at: r.get(2)?,
+                created: r.get(3)?,
+                len: Length::read(r, 4)?,
+            })
         })?
         .collect::<rusqlite::Result<_>>()?;
     drop(stmt);
 
     let mut out = Vec::new();
-    for (id, minutes, is_now, due_at, created) in rows {
+    for row in rows {
+        let TaskRow { id, len, is_now, due_at, created } = row;
         if held.contains_key(&id) {
             continue;
         }
         let due = due_at.and_then(|d| d.parse().ok());
         let steps = open_steps(conn, id)?;
         if steps.is_empty() {
-            let whole = stretched(minutes.unwrap_or(i64::from(DEFAULT_BLOCK_MIN)));
-            let pieces = split(whole, longest);
+            let pieces = split(len.minutes(None, stretched), longest);
             let n = pieces.len() as u16;
             for (i, piece) in pieces.into_iter().enumerate() {
                 out.push(Candidate {
@@ -224,16 +273,14 @@ fn candidates(
             }
             continue;
         }
-        let share = minutes.map(|m| (m / steps.len() as i64).max(1));
-        for (step_id, step_min) in steps {
+        let share = len.duration_min.map(|m| (m / steps.len() as i64).max(1));
+        for (step_id, step_len) in steps {
             if held.contains_key(&step_id) {
                 continue;
             }
             out.push(Candidate {
                 id: step_id,
-                minutes: stretched(
-                    step_min.or(share).unwrap_or(i64::from(DEFAULT_BLOCK_MIN)),
-                ),
+                minutes: step_len.minutes(share, stretched),
                 is_now,
                 due,
                 created: created.clone(),
@@ -554,6 +601,34 @@ mod tests {
             .unwrap();
         assert!(!alert);
         assert_eq!(flexibility, "drop");
+    }
+
+    #[test]
+    fn a_task_part_way_through_is_planned_for_what_is_left_of_it() {
+        let (conn, uid, _tmp) = env();
+        let date = day(&conn, uid);
+        let id = new_task(&conn, uid, "read the chapter", Some(120));
+        conn.execute(
+            "UPDATE tasks SET progress = 75, actual_min = 90 WHERE id = ?1",
+            [id],
+        )
+        .unwrap();
+        let out = run(&conn, uid, &jiff::tz::TimeZone::UTC, date, at("2026-09-20T09:00:00Z")).unwrap();
+        let shape: Vec<(String, String)> =
+            out.placed.iter().map(|p| (p.start.clone(), p.end.clone())).collect();
+        assert_eq!(shape, vec![("16:00".into(), "16:30".into())], "30 minutes left, not 120");
+    }
+
+    #[test]
+    fn a_task_nobody_has_started_keeps_its_estimate() {
+        let (conn, uid, _tmp) = env();
+        let date = day(&conn, uid);
+        let id = new_task(&conn, uid, "read the chapter", Some(60));
+        conn.execute("UPDATE tasks SET actual_min = 90 WHERE id = ?1", [id]).unwrap();
+        let out = run(&conn, uid, &jiff::tz::TimeZone::UTC, date, at("2026-09-20T09:00:00Z")).unwrap();
+        let shape: Vec<(String, String)> =
+            out.placed.iter().map(|p| (p.start.clone(), p.end.clone())).collect();
+        assert_eq!(shape, vec![("16:00".into(), "17:00".into())]);
     }
 
     #[test]

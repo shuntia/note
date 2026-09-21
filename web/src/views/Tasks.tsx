@@ -151,7 +151,11 @@ function useRowMotion(root: RefObject<HTMLDivElement | null>, busy: boolean) {
   })
 }
 
+// Dragging the bar fires all the way along; the write waits for the hand to settle.
+const PROGRESS_SETTLE_MS = 400
+
 type RowActions = {
+  setProgress: (task: Task, progress: number) => void
   complete: (node: TaskNode, step?: Task) => void
   reopen: (node: TaskNode) => void
   reopenStep: (step: Task) => void
@@ -184,7 +188,10 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
   useEffect(load, [load, refresh])
 
   const patch = useCallback(
-    async (id: number, body: { state?: TaskState; is_now?: boolean; notify?: TaskNotify }) => {
+    async (
+      id: number,
+      body: { state?: TaskState; is_now?: boolean; notify?: TaskNotify; progress?: number },
+    ) => {
       try {
         const updated = await api.patchTask(id, body)
         setNodes((ns) => (ns ? mergeUpdate(ns, updated) : ns))
@@ -263,6 +270,11 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
       run: () => void restore(snap),
       windowMs: UNDO_MS,
     })
+  }
+
+  const setProgress = (task: Task, progress: number) => {
+    setNodes((ns) => (ns ? withTask(ns, { ...task, progress }) : ns))
+    void patch(task.id, { progress })
   }
 
   const announce = (node: TaskNode, notify: TaskNotify) => {
@@ -344,6 +356,9 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
       external_id: null,
       url: '',
       notify: 'notify',
+      progress: 0,
+      expected_min: null,
+      remaining_min: null,
       children: [],
     }
     setNodes((ns) => (ns ? [...ns, optimistic] : ns))
@@ -394,6 +409,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
 
   const g = groups(nodes)
   const actions: RowActions = {
+    setProgress,
     complete,
     reopen,
     reopenStep,
@@ -495,6 +511,53 @@ function Due({ task }: { task: Task }) {
   return <span className={`task-dur task-due${label === 'overdue' ? ' overdue' : ''}`}>{label}</span>
 }
 
+// The bar reads the task's progress and the slider over it sets the same value,
+// so the fill under the thumb is what the drag is already showing.
+function Progress({ task, onSet }: { task: Task; onSet: (progress: number) => void }) {
+  const [value, setValue] = useState(task.progress)
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(() => setValue(task.progress), [task.progress])
+  useEffect(() => () => void (timer.current && clearTimeout(timer.current)), [])
+
+  const slide = (next: number) => {
+    setValue(next)
+    if (timer.current) clearTimeout(timer.current)
+    timer.current = setTimeout(() => onSet(next), PROGRESS_SETTLE_MS)
+  }
+
+  return (
+    <span className="task-prog">
+      <span className="task-bar-wrap">
+        <span
+          className="task-bar"
+          role="progressbar"
+          aria-valuenow={value}
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuetext={`${value}% done`}
+          aria-label={`${task.title} progress`}
+        >
+          <span className="task-bar-fill" style={{ width: `${value}%` }} />
+        </span>
+        <input
+          className="task-slider"
+          type="range"
+          min={0}
+          max={100}
+          step={5}
+          value={value}
+          aria-label={`Set progress for ${task.title}`}
+          onChange={(e) => slide(Number(e.currentTarget.value))}
+        />
+      </span>
+      {task.remaining_min !== null && (
+        <span className="task-left">{task.remaining_min} min left</span>
+      )}
+    </span>
+  )
+}
+
 function Tick({
   checked,
   label,
@@ -579,6 +642,7 @@ function Row({
             <Due task={node} />
           </span>
         )}
+        <Progress task={node} onSet={(p) => actions.setProgress(node, p)} />
         <span className="task-acts">
           {!done && (
             <Overflow className="task-more" label={`More actions for ${node.title}`} items={items} />
@@ -612,6 +676,7 @@ function Row({
               {c.duration_min !== null && (
                 <span className="task-step-min">{round5(c.duration_min)}</span>
               )}
+              <Progress task={c} onSet={(p) => actions.setProgress(c, p)} />
             </li>
           ))}
         </ul>

@@ -407,6 +407,18 @@ fn duration(min: Option<u32>) -> String {
     min.map(|d| format!(" {d}m")).unwrap_or_default()
 }
 
+/// How far along a task is, and where the minutes behind that say it lands; a
+/// task nobody has started says nothing.
+fn progress(task: &crate::tasks::Task) -> String {
+    if task.progress == 0 {
+        return String::new();
+    }
+    match task.remaining_min {
+        Some(left) => format!(" {}% ~{left}m left", task.progress),
+        None => format!(" {}%", task.progress),
+    }
+}
+
 /// How a deadline reads next to a title: the near ones in words, the rest as
 /// the local day they fall on.
 fn due(
@@ -471,10 +483,11 @@ fn tasks_section(
         s.push_str("Now:\n");
         for n in now_tasks {
             s.push_str(&format!(
-                "- {} [{}]{}{} (task_id {})\n",
+                "- {} [{}]{}{}{} (task_id {})\n",
                 n.task.title,
                 n.task.state,
                 duration(n.task.duration_min),
+                progress(&n.task),
                 due(&n.task, tz, today, now),
                 n.task.id,
             ));
@@ -485,9 +498,10 @@ fn tasks_section(
                     _ => ' ',
                 };
                 s.push_str(&format!(
-                    "  - [{mark}] {}{} (task_id {})\n",
+                    "  - [{mark}] {}{}{} (task_id {})\n",
                     c.title,
                     duration(c.duration_min),
+                    progress(c),
                     c.id,
                 ));
             }
@@ -501,9 +515,10 @@ fn tasks_section(
         s.push_str(&format!("Later ({} open):\n", later.len()));
         for t in later.iter().take(cap) {
             s.push_str(&format!(
-                "- {}{}{} (task_id {})\n",
+                "- {}{}{}{} (task_id {})\n",
                 t.task.title,
                 duration(t.task.duration_min),
+                progress(&t.task),
                 due(&t.task, tz, today, now),
                 t.task.id,
             ));
@@ -1085,6 +1100,22 @@ mod tests {
         let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
         assert!(out.contains(&format!("- essay [open] (task_id {now})\n")), "{out}");
         assert!(out.contains(&format!("- loose (task_id {later})\n")), "{out}");
+    }
+
+    #[test]
+    fn a_task_part_way_through_says_how_far_and_how_much_is_left() {
+        let tmp = cfg_dir();
+        let (conn, uid) = user();
+        let started = task(&conn, uid, "chapter", "open", Some(60), false, None, NOW);
+        task(&conn, uid, "untouched", "open", Some(15), false, None, NOW);
+        conn.execute(
+            "UPDATE tasks SET progress = 40, actual_min = 36 WHERE id = ?1",
+            [started],
+        )
+        .unwrap();
+        let out = without_task_ids(&assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap());
+        assert!(out.contains("- chapter 60m 40% ~60m left\n"), "{out}");
+        assert!(out.contains("- untouched 15m\n"), "{out}");
     }
 
     #[test]

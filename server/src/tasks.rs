@@ -11,6 +11,9 @@ pub const SOURCES: &[&str] = &["manual", "agent", "import"];
 pub const NOTIFY: &[&str] = &["none", "chat", "notify"];
 const DURATION_STEP_MIN: u32 = 5;
 const MAX_DURATION_MIN: u32 = 24 * 60;
+const MAX_PROGRESS: u32 = 100;
+/// The grain every projected figure lands on.
+const PROJECTION_STEP_MIN: u32 = 15;
 pub const MAX_TITLE_BYTES: usize = 500;
 const MAX_TEXT_BYTES: usize = 16 * 1024;
 const MAX_EXTERNAL_ID_BYTES: usize = 200;
@@ -79,6 +82,35 @@ pub struct Task {
     pub notify: String,
     /// Minutes actually worked on it, summed from the sessions that ended.
     pub actual_min: Option<u32>,
+    /// How far along the task is, 0 to 100.
+    pub progress: u32,
+    /// Where the minutes already worked say the task will land, and what is left
+    /// of that. Derived from `progress` and `actual_min`, never stored.
+    pub expected_min: Option<u32>,
+    pub remaining_min: Option<u32>,
+}
+
+/// Rounds to the nearest quarter hour; anything above zero lands on at least one.
+fn quantize(minutes: u64) -> u32 {
+    if minutes == 0 {
+        return 0;
+    }
+    let step = u64::from(PROJECTION_STEP_MIN);
+    let rounded = (minutes + step / 2) / step * step;
+    rounded.max(step) as u32
+}
+
+/// The total the task is heading for and what is left of it, read off how far it
+/// says it has got and how long that took. Progress of nothing, or time of
+/// nothing, extrapolates to nothing: both figures are absent.
+pub fn projection(progress: u32, actual_min: Option<u32>) -> (Option<u32>, Option<u32>) {
+    let spent = u64::from(actual_min.unwrap_or(0));
+    let progress = u64::from(progress.min(MAX_PROGRESS));
+    if progress == 0 || spent == 0 {
+        return (None, None);
+    }
+    let total = spent * 100 / progress;
+    (Some(quantize(total)), Some(quantize(total.saturating_sub(spent))))
 }
 
 /// One top-level task with its steps; `children` is always present so the
@@ -118,6 +150,8 @@ pub struct NewTask {
     pub source: Option<String>,
     #[serde(default)]
     pub notify: Option<String>,
+    #[serde(default)]
+    pub progress: Option<u32>,
 }
 
 /// `Option<Option<T>>` fields separate "absent, leave alone" (`None`) from
@@ -140,6 +174,7 @@ pub struct TaskPatch {
     #[serde(default, deserialize_with = "present")]
     pub external_id: Option<Option<String>>,
     pub notify: Option<String>,
+    pub progress: Option<u32>,
     #[serde(skip)]
     pub actor: Actor,
 }
@@ -157,6 +192,9 @@ fn now() -> String {
 }
 
 fn row_to_task(r: &rusqlite::Row) -> rusqlite::Result<Task> {
+    let actual_min: Option<u32> = r.get(15)?;
+    let progress: u32 = r.get(16)?;
+    let (expected_min, remaining_min) = projection(progress, actual_min);
     Ok(Task {
         id: r.get(0)?,
         title: r.get(1)?,
@@ -173,13 +211,16 @@ fn row_to_task(r: &rusqlite::Row) -> rusqlite::Result<Task> {
         external_id: r.get(12)?,
         url: r.get(13)?,
         notify: r.get(14)?,
-        actual_min: r.get(15)?,
+        actual_min,
+        progress,
+        expected_min,
+        remaining_min,
     })
 }
 
 const COLS: &str = "id, title, description, state, source, notes, duration_min, \
                     duration_source, parent_id, is_now, updated_at, due_at, \
-                    external_id, url, notify, actual_min";
+                    external_id, url, notify, actual_min, progress";
 
 fn checked_duration(min: u32) -> Result<u32, UpdateError> {
     if min == 0 || !min.is_multiple_of(DURATION_STEP_MIN) || min > MAX_DURATION_MIN {
@@ -188,6 +229,13 @@ fn checked_duration(min: u32) -> Result<u32, UpdateError> {
         )));
     }
     Ok(min)
+}
+
+fn checked_progress(value: u32) -> Result<u32, UpdateError> {
+    if value > MAX_PROGRESS {
+        return Err(UpdateError::Invalid(format!("progress must be 0 to {MAX_PROGRESS}")));
+    }
+    Ok(value)
 }
 
 /// A due date is stored the way `updated_at` is, so parsing and ordering are
@@ -383,6 +431,7 @@ pub fn create(
     let external_id = new.external_id.as_deref().map(checked_external_id).transpose()?;
     let source = checked_source(new.source.as_deref().unwrap_or(source))?;
     let notify = new.notify.as_deref().map(checked_notify).transpose()?;
+    let progress = new.progress.map(checked_progress).transpose()?.unwrap_or(0);
     if let Some(p) = new.parent_id {
         checked_parent(conn, user_id, p, None)?;
     }
@@ -406,10 +455,11 @@ pub fn create(
         "INSERT INTO tasks
             (user_id, title, description, notes, source, state, parent_id, duration_min,
              duration_source, is_now, due_at, url, external_id, notify, created_at, updated_at,
-             completed_at)
+             completed_at, progress)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
                  COALESCE(?15, 'notify'), ?14, ?14,
-                 CASE WHEN ?6 = 'done' THEN ?14 END)",
+                 CASE WHEN ?6 = 'done' THEN ?14 END,
+                 CASE WHEN ?6 = 'done' THEN 100 ELSE ?16 END)",
         rusqlite::params![
             user_id,
             &title,
@@ -426,6 +476,7 @@ pub fn create(
             external_id,
             now(),
             notify,
+            progress,
         ],
     )?;
     let id = conn.last_insert_rowid();
@@ -773,7 +824,8 @@ pub struct Updated {
 fn set_state(conn: &Connection, task_id: i64, state: &str) -> rusqlite::Result<()> {
     conn.execute(
         "UPDATE tasks SET state = ?1, updated_at = ?2,
-             completed_at = CASE WHEN ?1 = 'done' THEN COALESCE(completed_at, ?2) END
+             completed_at = CASE WHEN ?1 = 'done' THEN COALESCE(completed_at, ?2) END,
+             progress = CASE WHEN ?1 = 'done' THEN 100 ELSE progress END
          WHERE id = ?3",
         (state, now(), task_id),
     )?;
@@ -795,7 +847,8 @@ fn cascade(
         if state == "done" || state == "dropped" {
             conn.execute(
                 "UPDATE tasks SET state = ?1, updated_at = ?2,
-                     completed_at = CASE WHEN ?1 = 'done' THEN COALESCE(completed_at, ?2) END
+                     completed_at = CASE WHEN ?1 = 'done' THEN COALESCE(completed_at, ?2) END,
+                     progress = CASE WHEN ?1 = 'done' THEN 100 ELSE progress END
                  WHERE parent_id = ?3 AND state != 'dropped' AND state != ?1",
                 (&state, now(), task_id),
             )?;
@@ -862,6 +915,7 @@ pub fn update(
         other => other.as_ref().map(|_| None),
     };
     let notify = patch.notify.as_deref().map(checked_notify).transpose()?;
+    let progress = patch.progress.map(checked_progress).transpose()?;
     let Some(before) = get(conn, user_id, task_id)? else { return Ok(None) };
     if let Some(Some(p)) = patch.parent_id {
         if has_children(conn, task_id)? {
@@ -915,6 +969,8 @@ pub fn update(
             url = COALESCE(?10, url),
             external_id = ?11,
             notify = COALESCE(?14, notify),
+            progress = CASE WHEN COALESCE(?3, state) = 'done' THEN 100
+                ELSE COALESCE(?15, progress) END,
             updated_at = ?12,
             completed_at = CASE WHEN COALESCE(?3, state) = 'done'
                 THEN COALESCE(completed_at, ?12) END
@@ -934,6 +990,7 @@ pub fn update(
             now(),
             task_id,
             notify,
+            progress,
         ],
     )?;
     let parent = match patch.state {
@@ -1092,6 +1149,84 @@ mod tests {
             done_between(&conn, uid, now.checked_add(hour).unwrap(), now.checked_add(hour).unwrap().checked_add(hour).unwrap()).unwrap(),
             0
         );
+    }
+
+    #[test]
+    fn a_projection_needs_both_progress_and_time_behind_it() {
+        assert_eq!(projection(0, Some(60)), (None, None));
+        assert_eq!(projection(50, None), (None, None));
+        assert_eq!(projection(50, Some(0)), (None, None));
+        assert_eq!(projection(0, None), (None, None));
+    }
+
+    #[test]
+    fn a_projection_lands_on_the_quarter_hour() {
+        assert_eq!(projection(50, Some(30)), (Some(60), Some(30)));
+        assert_eq!(projection(25, Some(20)), (Some(75), Some(60)), "80 and 60 round to the grain");
+        assert_eq!(projection(10, Some(1)), (Some(15), Some(15)), "a sliver still reads as a step");
+        assert_eq!(projection(100, Some(90)), (Some(90), Some(0)), "finished means nothing left");
+        assert_eq!(projection(100, Some(3)), (Some(15), Some(0)));
+    }
+
+    #[test]
+    fn progress_is_written_read_back_and_held_in_range() {
+        let (conn, uid) = db_with_user();
+        let id = task(&conn, uid, "the chapter", None);
+        assert_eq!(get(&conn, uid, id).unwrap().unwrap().progress, 0);
+
+        update(&conn, uid, id, TaskPatch { progress: Some(40), ..Default::default() }).unwrap();
+        let t = get(&conn, uid, id).unwrap().unwrap();
+        assert_eq!(t.progress, 40);
+        assert_eq!((t.expected_min, t.remaining_min), (None, None), "no minutes to read from yet");
+
+        conn.execute("UPDATE tasks SET actual_min = 40 WHERE id = ?1", [id]).unwrap();
+        let t = get(&conn, uid, id).unwrap().unwrap();
+        assert_eq!((t.expected_min, t.remaining_min), (Some(105), Some(60)));
+
+        let e = update(&conn, uid, id, TaskPatch { progress: Some(101), ..Default::default() });
+        assert!(matches!(e, Err(UpdateError::Invalid(_))), "{e:?}");
+        assert_eq!(get(&conn, uid, id).unwrap().unwrap().progress, 40);
+    }
+
+    #[test]
+    fn finishing_fills_progress_and_reopening_leaves_it_full() {
+        let (conn, uid) = db_with_user();
+        let parent = task(&conn, uid, "essay", None);
+        let step = task(&conn, uid, "draft", Some(parent));
+        update(&conn, uid, step, TaskPatch { state: Some("done".into()), ..Default::default() })
+            .unwrap();
+        assert_eq!(get(&conn, uid, step).unwrap().unwrap().progress, 100);
+        assert_eq!(
+            get(&conn, uid, parent).unwrap().unwrap().progress,
+            100,
+            "the parent the last step finished is finished too"
+        );
+
+        update(&conn, uid, parent, TaskPatch { state: Some("open".into()), ..Default::default() })
+            .unwrap();
+        assert_eq!(get(&conn, uid, parent).unwrap().unwrap().progress, 100);
+    }
+
+    #[test]
+    fn a_task_can_be_created_part_way_through() {
+        let (conn, uid) = db_with_user();
+        let made = create(
+            &conn,
+            uid,
+            NewTask { title: "half read".into(), progress: Some(50), ..NewTask::default() },
+            "manual",
+            Actor::User,
+        )
+        .unwrap();
+        assert_eq!(made.progress, 50);
+        let refused = create(
+            &conn,
+            uid,
+            NewTask { title: "too far".into(), progress: Some(120), ..NewTask::default() },
+            "manual",
+            Actor::User,
+        );
+        assert!(matches!(refused, Err(UpdateError::Invalid(_))), "{refused:?}");
     }
 
     #[test]

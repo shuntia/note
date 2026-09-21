@@ -107,6 +107,9 @@ pub struct CreateArgs {
     /// chat, or notify.
     #[serde(default)]
     pub notify: Option<String>,
+    /// How far along it already is, 0 to 100. Leave it out for work not started.
+    #[serde(default)]
+    pub progress: Option<u32>,
 }
 
 pub fn create(
@@ -126,6 +129,7 @@ pub fn create(
             is_now: args.is_now,
             due_at: due_at.map(Some),
             notify: args.notify,
+            progress: args.progress,
             ..NewTask::default()
         },
         "agent",
@@ -166,6 +170,8 @@ pub struct UpdateArgs {
     /// How the block holding this task announces itself when it starts: none,
     /// chat, or notify.
     pub notify: Option<String>,
+    /// How far along it is, 0 to 100. Finishing a task fills it on its own.
+    pub progress: Option<u32>,
 }
 
 pub fn update(
@@ -218,6 +224,7 @@ pub fn update(
         is_now: args.is_now,
         due_at,
         notify: args.notify,
+        progress: args.progress,
         actor: Actor::Agent,
         ..Default::default()
     };
@@ -226,6 +233,8 @@ pub fn update(
             "task_id": t.task.id,
             "state": t.task.state,
             "is_now": t.task.is_now,
+            "progress": t.task.progress,
+            "remaining_min": t.task.remaining_min,
             "demoted_from_now": t.demoted_from_now,
         })),
         Ok(None) => Err(ToolError::not_found(format!("no task {}", args.task_id))),
