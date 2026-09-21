@@ -192,7 +192,8 @@ async fn completing_the_last_step_completes_the_parent() {
 
     let (_, t) = patch_task(&app, &cookie, 2, r#"{"state":"done"}"#).await;
     assert_eq!(t["state"], "done");
-    assert!(t.get("parent").is_none(), "parent must not change while a step is open");
+    assert_ne!(t["parent"]["state"], "done", "a parent stays open while a step is open");
+    assert_eq!(t["parent"]["progress"], 33, "5 of 15 minutes done");
 
     let (_, t) = patch_task(&app, &cookie, 3, r#"{"state":"done"}"#).await;
     assert_eq!(t["parent"]["id"], 1);
