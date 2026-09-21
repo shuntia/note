@@ -23,7 +23,7 @@ fn override_path(config_dir: &Path, user: &str, name: &str) -> PathBuf {
 pub fn load(config_dir: &Path, user: &str, name: &str) -> Result<String> {
     checked(name)?;
     let user_path = override_path(config_dir, user, name);
-    let default_path = config_dir.join("defaults/prompts").join(format!("{name}.md"));
+    let default_path = crate::config::defaults_dir(config_dir).join("prompts").join(format!("{name}.md"));
     let path = if user_path.exists() { user_path } else { default_path };
     std::fs::read_to_string(&path).with_context(|| format!("reading prompt {name} ({})", path.display()))
 }

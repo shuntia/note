@@ -143,7 +143,7 @@ pub(crate) fn wall_minutes(wall: &str) -> i64 {
 /// a user with no `templates/` of their own is the common case.
 pub fn available(config_dir: &Path, user: &str) -> Vec<String> {
     let dirs = [
-        config_dir.join("defaults/templates"),
+        crate::config::defaults_dir(config_dir).join("templates"),
         config_dir.join("users").join(user).join("templates"),
     ];
     let mut names = std::collections::BTreeSet::new();
@@ -165,7 +165,7 @@ fn effective_path(config_dir: &Path, user: &str, name: &str) -> std::path::PathB
     if user_path.exists() {
         user_path
     } else {
-        config_dir.join("defaults/templates").join(format!("{name}.toml"))
+        crate::config::defaults_dir(config_dir).join("templates").join(format!("{name}.toml"))
     }
 }
 
