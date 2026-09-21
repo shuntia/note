@@ -187,13 +187,17 @@ pub fn list(conn: &Connection, ctx: &ToolCtx, args: ListArgs) -> Result<serde_js
         .prepare(&format!(
             "SELECT id, title, state, is_now, duration_min, created_at, updated_at, due_at,
                     (SELECT COUNT(*) FROM tasks s WHERE s.parent_id = tasks.id AND s.state != 'dropped'),
-                    (SELECT COUNT(*) FROM tasks s WHERE s.parent_id = tasks.id AND s.state = 'done')
+                    (SELECT COUNT(*) FROM tasks s WHERE s.parent_id = tasks.id AND s.state = 'done'),
+                    progress, actual_min
              FROM tasks WHERE {wheres}
              ORDER BY {order} LIMIT {limit}"
         ))
         .map_err(internal)?;
     let tasks = stmt
         .query_map(rusqlite::params_from_iter(params.iter()), |r| {
+            let progress: u32 = r.get(10)?;
+            let (expected_min, remaining_min) =
+                crate::tasks::projection(progress, r.get(11)?);
             Ok(serde_json::json!({
                 "id": r.get::<_, i64>(0)?,
                 "title": r.get::<_, String>(1)?,
@@ -205,6 +209,9 @@ pub fn list(conn: &Connection, ctx: &ToolCtx, args: ListArgs) -> Result<serde_js
                 "due_at": r.get::<_, Option<String>>(7)?,
                 "steps": r.get::<_, i64>(8)?,
                 "done_steps": r.get::<_, i64>(9)?,
+                "progress": progress,
+                "expected_min": expected_min,
+                "remaining_min": remaining_min,
             }))
         })
         .and_then(|rows| rows.collect::<rusqlite::Result<Vec<_>>>())
