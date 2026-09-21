@@ -1,8 +1,6 @@
 use crate::AppState;
 use anyhow::Result;
-use argon2::password_hash::{
-    rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString,
-};
+use argon2::password_hash::{PasswordHasher, PasswordVerifier};
 use argon2::Argon2;
 use axum::extract::FromRequestParts;
 use axum::http::{request::Parts, StatusCode};
@@ -105,9 +103,8 @@ fn validate_username(username: &str) -> Result<()> {
 }
 
 fn hash_password(password: &str) -> Result<String> {
-    let salt = SaltString::generate(&mut OsRng);
     Ok(Argon2::default()
-        .hash_password(password.as_bytes(), &salt)
+        .hash_password(password.as_bytes())
         .map_err(|e| anyhow::anyhow!(e))?
         .to_string())
 }
@@ -144,9 +141,8 @@ pub fn set_category(conn: &Connection, username: &str, category: &str) -> Result
 fn dummy_hash() -> &'static str {
     static DUMMY: OnceLock<String> = OnceLock::new();
     DUMMY.get_or_init(|| {
-        let salt = SaltString::generate(&mut OsRng);
         Argon2::default()
-            .hash_password(b"timing-equalizer", &salt)
+            .hash_password(b"timing-equalizer")
             .expect("static hash")
             .to_string()
     })
@@ -177,13 +173,7 @@ pub fn set_password(conn: &Connection, user_id: i64, password: &str) -> Result<(
 }
 
 fn verify(password: &str, hash: &str) -> bool {
-    PasswordHash::new(hash)
-        .map(|parsed| {
-            Argon2::default()
-                .verify_password(password.as_bytes(), &parsed)
-                .is_ok()
-        })
-        .unwrap_or(false)
+    Argon2::default().verify_password(password.as_bytes(), hash).is_ok()
 }
 
 /// Returns a fresh session token, or `None` when the credentials do not match

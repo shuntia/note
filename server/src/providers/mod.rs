@@ -54,13 +54,17 @@ pub trait EmbeddingsProvider: Send + Sync {
 /// `timeout` also caps a drip-feeding endpoint that keeps resetting the
 /// per-operation ones. Chat calls hold no locks.
 pub(crate) fn http_agent(timeout_secs: u64) -> ureq::Agent {
-    let cap = std::time::Duration::from_secs(timeout_secs);
-    ureq::AgentBuilder::new()
-        .timeout_connect(std::time::Duration::from_secs(10))
-        .timeout_read(cap)
-        .timeout_write(cap)
-        .timeout(cap)
+    let cap = Some(std::time::Duration::from_secs(timeout_secs));
+    ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_connect(Some(std::time::Duration::from_secs(10)))
+        .timeout_send_request(cap)
+        .timeout_send_body(cap)
+        .timeout_recv_response(cap)
+        .timeout_recv_body(cap)
+        .timeout_global(cap)
         .build()
+        .into()
 }
 
 /// Waits before the second and third attempt of a chat call.
@@ -91,19 +95,22 @@ impl ChatAgents {
         background: bool,
         what: &str,
         body: &serde_json::Value,
-        request: impl Fn(&ureq::Agent) -> ureq::Request,
+        request: impl Fn(&ureq::Agent) -> ureq::RequestBuilder<ureq::typestate::WithBody>,
     ) -> Result<serde_json::Value> {
         let agent = if background { &self.background } else { &self.interactive };
         let mut attempt = 0;
         loop {
             let failure = match request(agent).send_json(body) {
-                Ok(resp) => match resp.into_json::<serde_json::Value>() {
-                    Ok(v) => return Ok(v),
-                    Err(e) => format!("reading the response: {e}"),
-                },
-                Err(ureq::Error::Status(code, resp)) => {
+                Ok(mut resp) if resp.status().is_success() => {
+                    match resp.body_mut().read_json::<serde_json::Value>() {
+                        Ok(v) => return Ok(v),
+                        Err(e) => format!("reading the response: {e}"),
+                    }
+                }
+                Ok(mut resp) => {
+                    let code = resp.status().as_u16();
                     let head: String =
-                        resp.into_string().unwrap_or_default().chars().take(300).collect();
+                        resp.body_mut().read_to_string().unwrap_or_default().chars().take(300).collect();
                     let failure = format!("status {code}: {head}");
                     if code != 429 && code < 500 {
                         anyhow::bail!("{what} request failed: {failure}");
@@ -125,12 +132,16 @@ impl ChatAgents {
 /// a stalled endpoint delays only its own talk turn. The tight caps bound how
 /// long that stall can last.
 pub(crate) fn embeddings_http_agent() -> ureq::Agent {
-    ureq::AgentBuilder::new()
-        .timeout_connect(std::time::Duration::from_secs(5))
-        .timeout_read(std::time::Duration::from_secs(10))
-        .timeout_write(std::time::Duration::from_secs(10))
-        .timeout(std::time::Duration::from_secs(10))
+    let cap = Some(std::time::Duration::from_secs(10));
+    ureq::Agent::config_builder()
+        .timeout_connect(Some(std::time::Duration::from_secs(5)))
+        .timeout_send_request(cap)
+        .timeout_send_body(cap)
+        .timeout_recv_response(cap)
+        .timeout_recv_body(cap)
+        .timeout_global(cap)
         .build()
+        .into()
 }
 
 /// Builds providers from config. Absent or "mock" LLM config yields a

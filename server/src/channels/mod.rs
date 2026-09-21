@@ -6,6 +6,20 @@ pub mod ws;
 use rusqlite::Connection;
 use std::sync::{Arc, Mutex};
 
+/// An error line without the request URL, which for Web Push is a per-device
+/// bearer capability and for Telegram carries the bot token; delivery errors
+/// are written to the event log.
+pub(crate) fn describe_http_error(err: &ureq::Error) -> String {
+    match err {
+        ureq::Error::StatusCode(code) => format!("status {code}"),
+        ureq::Error::Io(e) => format!("transport error: {}", e.kind()),
+        ureq::Error::BadUri(_) | ureq::Error::RequireHttpsOnly(_) | ureq::Error::Http(_) => {
+            "transport error: invalid url".to_string()
+        }
+        e => format!("transport error: {e}"),
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Urgency {
     Low,

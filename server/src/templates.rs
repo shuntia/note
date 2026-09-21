@@ -194,7 +194,7 @@ pub fn set_alerts(
     let path = effective_path(config_dir, user, name);
     let raw = std::fs::read_to_string(&path)
         .with_context(|| format!("reading template {}", path.display()))?;
-    let mut doc: toml::Value = raw.parse().map_err(anyhow::Error::from)?;
+    let mut doc: toml::Value = toml::from_str(&raw).map_err(anyhow::Error::from)?;
     let events = doc
         .get_mut("events")
         .and_then(toml::Value::as_array_mut)

@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
-use argon2::password_hash::rand_core::{OsRng, RngCore};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha1::Sha1;
 
 pub const STEP_SECS: i64 = 30;
@@ -23,7 +22,7 @@ pub fn parse_seed(text: &str) -> Result<Vec<u8>> {
 
 pub fn generate_seed() -> String {
     let mut bytes = [0u8; SEED_BYTES];
-    OsRng.fill_bytes(&mut bytes);
+    getrandom::fill(&mut bytes).expect("os rng");
     data_encoding::BASE32_NOPAD.encode(&bytes)
 }
 
