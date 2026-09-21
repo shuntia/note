@@ -470,6 +470,20 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE tasks ADD COLUMN progress INTEGER NOT NULL DEFAULT 0
         CHECK (progress BETWEEN 0 AND 100);
     ",
+    // v35
+    "
+    UPDATE tasks SET progress = COALESCE((
+        SELECT CAST(ROUND(SUM(w * p) * 1.0 / SUM(w)) AS INTEGER) FROM (
+            SELECT COALESCE(s.duration_min, (
+                    SELECT AVG(a.duration_min) FROM tasks a
+                    WHERE a.parent_id = s.parent_id AND a.state != 'dropped'
+                ), 1) AS w,
+                CASE WHEN s.state = 'done' THEN 100 ELSE s.progress END AS p
+            FROM tasks s WHERE s.parent_id = tasks.id AND s.state != 'dropped'
+        )
+    ), progress)
+    WHERE state != 'done' AND parent_id IS NULL;
+    ",
 ];
 
 pub fn open(path: &Path) -> Result<Connection> {
@@ -1347,6 +1361,33 @@ mod tests {
                 "progress {out} is outside 0..=100"
             );
         }
+    }
+
+    #[test]
+    fn v35_derives_a_parents_progress_from_its_steps() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_migrations(&conn, &MIGRATIONS[..34]).unwrap();
+        conn.execute(
+            "INSERT INTO users (username, pass_hash, role) VALUES ('a','h','member')",
+            [],
+        )
+        .unwrap();
+        conn.execute_batch(
+            "INSERT INTO tasks (id, user_id, title, created_at, updated_at)
+                 VALUES (1, 1, 'parent', 'x', 'x');
+             INSERT INTO tasks (id, user_id, title, created_at, updated_at, parent_id, state)
+                 VALUES (2, 1, 'a', 'x', 'x', 1, 'done'), (3, 1, 'b', 'x', 'x', 1, 'open'),
+                        (4, 1, 'c', 'x', 'x', 1, 'open'), (5, 1, 'd', 'x', 'x', 1, 'dropped');
+             INSERT INTO tasks (id, user_id, title, created_at, updated_at, progress)
+                 VALUES (6, 1, 'alone', 'x', 'x', 30);",
+        )
+        .unwrap();
+        apply_migrations(&conn, MIGRATIONS).unwrap();
+        let progress = |id: i64| -> i64 {
+            conn.query_row("SELECT progress FROM tasks WHERE id = ?1", [id], |r| r.get(0)).unwrap()
+        };
+        assert_eq!(progress(1), 33, "one of three live steps done");
+        assert_eq!(progress(6), 30, "a task without steps keeps its own");
     }
 
     #[test]

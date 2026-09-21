@@ -1,8 +1,8 @@
 /* ── horizon: tasks ─────────────────────────────────────────────── */
 .view:has(> .tasks) { padding: 0; }
-.tasks { width: 100%; padding: 3.5rem 1.5rem 6.25rem; max-width: 45rem; margin: 0 auto; }
+.tasks { width: 100%; padding: 3.5rem 1rem 6.25rem; max-width: 45rem; margin: 0 auto; }
 @media (min-width: 768px) {
-  .tasks { margin: 0; max-width: min(max(47.5rem, 40vw), calc(100% - 2 * var(--rail))); padding: 2.875rem 0 0 var(--rail); }
+  .tasks { margin: 0; max-width: none; padding: 2.875rem var(--rail) 3rem; }
   .task-add { max-width: max(32.5rem, 27vw); }
 }
 
@@ -10,52 +10,61 @@
 /* the one filled control on this screen, and only with something to save */
 .tasks .task-add button:not(:disabled) { background: var(--ink); color: var(--ivory); }
 
-.task-group { display: flex; flex-direction: column; gap: 0.375rem; margin-top: 1.75rem; }
+.task-group { display: flex; flex-direction: column; gap: 0.25rem; margin-top: 1.75rem; }
 .task-group:first-of-type { margin-top: 0; }
 .task-group.done { margin-top: 0; }
 .task-group-head { margin: 0; font-size: 0.72rem; letter-spacing: 0.12em; font-weight: 700; color: var(--faint); }
+
+/* a wide screen reads Later in columns, each row whole in one of them; Now
+   stays one list, as wide as a column once there are two */
+.tasks { container-type: inline-size; }
+@media (min-width: 1088px) {
+  .task-group:not(.now) .task-list { columns: 38rem; column-gap: 4rem; }
+  .task-item { break-inside: avoid; }
+}
+@container (min-width: 80rem) {
+  .task-group.now .task-list { max-width: calc((100% - 4rem) / 2); }
+}
 
 .task-item { position: relative; }
 .task-item[data-leaving] { overflow: hidden; pointer-events: none; }
 .task-item[data-leaving='dropped'] .task-title { color: var(--rose); }
 
-/* the trailing controls hold one width per group, so every chip in it lands on
+/* the trailing controls hold one width per group, so every bar in it ends on
    the same edge and the steps below count to that edge too */
-.task-group { --acts: 1.5rem; --bar: 4rem; }
+.task-group { --acts: 1.5rem; --bar: 12rem; }
 .task-group.now { --acts: 4.25rem; }
 .task-group.done { --acts: 0px; }
-@media (min-width: 768px) {
-  .task-group { --bar: 6rem; }
-}
 
-/* the title has the whole width it needs: the status sits under it until there
-   is room beside it */
+/* narrow: the title has the row, and its chips and bar take the line under it */
 .task-row {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) var(--bar) auto;
-  grid-template-areas: 'tick body prog acts' 'tick chips prog acts';
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-areas: 'tick body acts' '. foot foot';
   align-items: center;
   column-gap: 0.75rem;
-  row-gap: 0.125rem;
-  min-height: 3.25rem;
+  row-gap: 0.25rem;
+  padding: 0.625rem 0;
 }
 .task-row > .tick { grid-area: tick; }
 .task-body { grid-area: body; }
-.task-chips { grid-area: chips; justify-self: start; }
-.task-row > .task-prog { grid-area: prog; }
+.task-foot { grid-area: foot; min-width: 0; display: flex; align-items: center; gap: 0.75rem; }
+.task-foot > .task-prog { flex: 1; }
 .task-acts { grid-area: acts; }
-@media (min-width: 768px) {
+@media (min-width: 1088px) {
   .task-row {
-    grid-template-columns: auto minmax(0, 1fr) auto var(--bar) auto;
+    grid-template-columns: auto minmax(0, 1fr) auto var(--bar) var(--acts);
     grid-template-areas: 'tick body chips prog acts';
+    padding: 0.4375rem 0;
   }
-  .task-chips { justify-self: end; }
+  .task-foot { display: contents; }
+  .task-chips { grid-area: chips; justify-self: end; }
+  .task-foot > .task-prog { grid-area: prog; flex-direction: column; align-items: stretch; gap: 0; }
 }
 .task-chips { display: flex; align-items: center; gap: 0.625rem; }
 .task-chips:empty { display: none; }
 .task-acts { display: flex; align-items: center; justify-content: flex-end; gap: 0.5rem; width: var(--acts); }
 .task-group.later .task-row { color: var(--quiet); }
-.task-group.done .task-row { color: var(--faint); }
 
 /* the strike is drawn across the title, so the title is as wide as its words */
 .task-body { min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 0.0625rem; }
@@ -75,7 +84,7 @@
   opacity: 0.7;
   transition: width 260ms ease;
 }
-.task-group.done .task-title::after,
+.task-item[data-finished] .task-title::after,
 .task-item[data-leaving] .task-title::after,
 .task-step.done .task-step-title::after { width: 100%; }
 
@@ -125,22 +134,37 @@
 .task-due { border-color: transparent; padding-inline: 0; }
 .task-due.overdue { color: var(--rose); }
 
-/* one fixed column holds every bar, so a row's label never moves it */
-.task-prog { width: var(--bar); flex: none; display: flex; flex-direction: column; gap: 0.1875rem; }
-.task-bar-wrap { display: grid; align-items: center; height: 1rem; }
+.task-prog {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  transition: opacity 260ms ease;
+}
+.task-bar-wrap {
+  position: relative;
+  flex: 1;
+  align-self: stretch;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  height: 1.5rem;
+  border-radius: 999px;
+}
 .task-bar {
-  grid-area: 1 / 1;
-  height: 0.1875rem;
-  border-radius: 2px;
+  flex: 1;
+  height: 0.3125rem;
+  border-radius: 999px;
   background: var(--track);
   overflow: hidden;
+  transition: height 160ms ease;
 }
 .task-bar-fill {
   display: block;
   height: 100%;
-  border-radius: 2px;
+  border-radius: inherit;
   background: var(--sage);
-  transition: width 260ms cubic-bezier(0.22, 1, 0.36, 1);
+  transition: width 420ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 .task-left {
   font-size: 0.7rem;
@@ -149,50 +173,52 @@
   white-space: nowrap;
 }
 
-/* the bar is the control: the thumb comes out when the row is reached for */
-.task-slider {
-  grid-area: 1 / 1;
-  width: 100%;
+/* the bar is the slider: it thickens and shows its thumb when reached for */
+.task-bar-wrap[role='slider'] { cursor: pointer; touch-action: pan-y; user-select: none; -webkit-user-select: none; }
+.task-bar-wrap[role='slider']:hover .task-bar,
+.task-bar-wrap[role='slider']:focus-visible .task-bar,
+.task-bar-wrap[data-dragging] .task-bar { height: 0.5rem; }
+.task-bar-wrap[data-dragging] { cursor: grabbing; }
+.task-bar-wrap:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+.task-thumb {
+  position: absolute;
+  top: 50%;
+  width: 1rem;
   height: 1rem;
-  margin: 0;
-  padding: 0;
-  appearance: none;
-  -webkit-appearance: none;
-  background: none;
-  border: 0;
-  border-radius: 0;
-  cursor: pointer;
-  opacity: 0;
+  border-radius: 50%;
+  background: var(--sage);
+  box-shadow: 0 0 0 3px var(--haze-strong), 0 1px 4px oklch(20% 0.02 250 / 0.25);
+  transform: translate(-50%, -50%) scale(0);
+  transition: transform 180ms cubic-bezier(0.22, 1, 0.36, 1), left 420ms cubic-bezier(0.22, 1, 0.36, 1);
   pointer-events: none;
-  transition: opacity 160ms ease;
 }
-.task-slider::-webkit-slider-runnable-track {
-  -webkit-appearance: none;
-  height: 1rem;
-  border: 0;
-  background: none;
+.task-bar-wrap:hover .task-thumb,
+.task-bar-wrap:focus-visible .task-thumb { transform: translate(-50%, -50%) scale(1); }
+.task-bar-wrap[data-dragging] .task-thumb { transform: translate(-50%, -50%) scale(1.15); }
+.task-bar-wrap[data-dragging] .task-bar-fill,
+.task-bar-wrap[data-dragging] .task-thumb { transition-property: transform; }
+
+/* finishing: the bar fills, the whole task greys, then the bar fades; each
+   step undoes in reverse when it is reopened */
+.task-row, .task-steps, .task-step { transition: color 320ms ease, opacity 320ms ease; }
+.task-item[data-finished] .task-row,
+.task-item[data-finished] .task-steps,
+.task-item:not([data-finished]) .task-step.done {
+  color: var(--faint);
+  opacity: 0.5;
+  transition-delay: 260ms;
 }
-.task-slider::-moz-range-track { height: 1rem; border: 0; background: none; }
-.task-slider::-moz-range-progress { background: none; }
-.task-slider::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  width: 0.75rem;
-  height: 0.75rem;
-  margin-top: 0.125rem;
-  border: 0;
-  border-radius: 50%;
-  background: var(--sage);
+.task-item[data-finished] .task-prog,
+.task-step.done .task-prog { opacity: 0; transition: opacity 360ms ease 560ms; }
+/* narrow, where the bar has a line of its own, the line closes behind the fade */
+@media (max-width: 1087.98px) {
+  .task-foot > .task-prog, .task-step > .task-prog { height: 1.5rem; transition: opacity 260ms ease, height 240ms ease; }
+  .task-item[data-finished] .task-foot:not(:has(.task-dur)) > .task-prog,
+  .task-step.done > .task-prog {
+    height: 0;
+    transition: opacity 360ms ease 560ms, height 240ms ease 920ms;
+  }
 }
-.task-slider::-moz-range-thumb {
-  width: 0.75rem;
-  height: 0.75rem;
-  border: 0;
-  border-radius: 50%;
-  background: var(--sage);
-}
-.task-item:hover .task-slider,
-.task-item:focus-within .task-slider { opacity: 1; pointer-events: auto; }
-.task-slider:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 
 .task-start {
   width: 2.25rem;
@@ -217,16 +243,35 @@
 .task-item:focus-within .task-more,
 .task-more[data-open='true'] { opacity: 1; }
 
-.task-steps { list-style: none; margin: 0; padding: 0 calc(var(--acts) + 0.75rem) 0 2.25rem; }
-.task-step { display: flex; align-items: center; gap: 0.75rem; min-height: 2.5rem; color: var(--quiet); font-size: 0.92rem; }
+.task-steps { list-style: none; margin: 0 0 0.25rem; padding: 0 0 0 2.25rem; }
+.task-step {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-areas: 'tick title min' '. prog prog';
+  align-items: center;
+  column-gap: 0.75rem;
+  row-gap: 0.125rem;
+  padding: 0.375rem 0;
+  color: var(--quiet);
+  font-size: 0.92rem;
+}
+.task-step > .tick { grid-area: tick; }
+.task-step-title { grid-area: title; }
+.task-step-min { grid-area: min; }
+.task-step > .task-prog { grid-area: prog; }
+@media (min-width: 1088px) {
+  .task-steps { padding-right: calc(var(--acts) + 0.75rem); }
+  .task-step {
+    grid-template-columns: auto minmax(0, 1fr) auto var(--bar);
+    grid-template-areas: 'tick title min prog';
+    padding: 0.25rem 0;
+  }
+}
 .task-step .tick { width: 1.25rem; height: 1.25rem; border-color: var(--line); }
 .task-step .tick svg { width: 0.75rem; height: 0.75rem; }
-.task-step-title { position: relative; min-width: 0; transition: color 220ms ease; }
+.task-step-title { position: relative; justify-self: start; min-width: 0; }
 .task-step.done { color: var(--faint); }
-.task-step-min { margin-left: auto; font-size: 0.75rem; color: var(--faint); font-variant-numeric: tabular-nums; }
-/* the step's bar counts to the same edge the parent's does */
-.task-step .task-prog { margin-left: auto; }
-.task-step-min + .task-prog { margin-left: 0; }
+.task-step-min { font-size: 0.75rem; color: var(--faint); font-variant-numeric: tabular-nums; }
 
 .task-done-fold {
   margin-top: 1.25rem;
@@ -290,7 +335,7 @@
     transform: translate(-50%, -50%);
   }
   .task-item .task-more { opacity: 1; }
-  .task-slider { opacity: 1; pointer-events: auto; }
+  .task-thumb { transform: translate(-50%, -50%) scale(0.8); }
   .tasks [data-tip]::after { content: none; }
 }
 
@@ -299,6 +344,6 @@
   .tick, .tick svg,
   .task-start,
   .task-title::after, .task-step-title::after,
-  .task-bar-fill, .task-slider,
-  .task-item .task-more { transition: none; }
+  .task-bar-fill, .task-bar, .task-thumb, .task-prog,
+  .task-row, .task-steps, .task-step, .task-item .task-more { transition: none !important; }
 }
