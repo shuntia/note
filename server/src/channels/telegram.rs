@@ -64,14 +64,16 @@ impl TelegramChannel {
             "telegram token file {} is empty",
             cfg.token_file.display()
         );
-        let agent = ureq::AgentBuilder::new()
-            .timeout_connect(std::time::Duration::from_secs(5))
-            .timeout(std::time::Duration::from_secs(10))
-            .build();
-        let poll_agent = ureq::AgentBuilder::new()
-            .timeout_connect(std::time::Duration::from_secs(5))
-            .timeout(std::time::Duration::from_secs(POLL_TIMEOUT_SECS))
-            .build();
+        let agent = ureq::Agent::config_builder()
+            .timeout_connect(Some(std::time::Duration::from_secs(5)))
+            .timeout_global(Some(std::time::Duration::from_secs(10)))
+            .build()
+            .into();
+        let poll_agent = ureq::Agent::config_builder()
+            .timeout_connect(Some(std::time::Duration::from_secs(5)))
+            .timeout_global(Some(std::time::Duration::from_secs(POLL_TIMEOUT_SECS)))
+            .build()
+            .into();
         let mut ch = Self {
             db,
             base_url: cfg.base_url.trim_end_matches('/').to_string(),
@@ -93,13 +95,12 @@ impl TelegramChannel {
 
     fn call(&self, agent: &ureq::Agent, method: &str, body: serde_json::Value) -> Result<serde_json::Value> {
         let url = format!("{}/bot{}/{method}", self.base_url, self.token);
-        let res = match agent.post(&url).send_json(body) {
-            Ok(res) => res,
-            Err(ureq::Error::Status(code, _)) => anyhow::bail!("status {code}"),
-            Err(ureq::Error::Transport(t)) => anyhow::bail!("transport error: {}", t.kind()),
-        };
+        let mut res = agent
+            .post(&url)
+            .send_json(body)
+            .map_err(|e| anyhow::anyhow!(super::describe_http_error(&e)))?;
         let body: serde_json::Value =
-            res.into_json().map_err(|e| anyhow::anyhow!("unreadable reply: {e}"))?;
+            res.body_mut().read_json().map_err(|e| anyhow::anyhow!("unreadable reply: {e}"))?;
         if body["ok"] != serde_json::Value::Bool(true) {
             let why = body["description"].as_str().unwrap_or("refused").to_string();
             anyhow::bail!("{method}: {why}");

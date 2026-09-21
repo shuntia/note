@@ -89,7 +89,7 @@ async fn put_persists_to_disk_and_is_reflected_by_get() {
     assert!(v.get("timezones").is_none());
 
     let raw = std::fs::read_to_string(cfg.path().join("users/aki/user.toml")).unwrap();
-    let on_disk: toml::Value = raw.parse().unwrap();
+    let on_disk: toml::Value = toml::from_str(&raw).unwrap();
     let table = on_disk.as_table().unwrap();
     assert_eq!(table.len(), 6, "unexpected keys in {raw}");
     assert_eq!(table["display_name"].as_str(), Some("X"));
@@ -185,7 +185,7 @@ async fn put_display_name_is_trimmed_and_quotes_survive_a_round_trip() {
     assert_eq!(res.status(), StatusCode::OK);
     assert_eq!(json(res).await["display_name"], r#"a "b" \ c"#);
     let raw = std::fs::read_to_string(cfg.path().join("users/aki/user.toml")).unwrap();
-    let on_disk: toml::Value = raw.parse().unwrap();
+    let on_disk: toml::Value = toml::from_str(&raw).unwrap();
     assert_eq!(
         on_disk["display_name"].as_str(),
         Some(r#"a "b" \ c"#),

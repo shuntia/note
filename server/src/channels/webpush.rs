@@ -76,15 +76,6 @@ fn valid_subject(subject: &str) -> bool {
     subject.starts_with("mailto:") || subject.starts_with("https://")
 }
 
-/// ureq's `Display` embeds the full endpoint URL, which is a per-device bearer
-/// capability, and delivery errors are written to the event log.
-fn describe(err: &ureq::Error) -> String {
-    match err {
-        ureq::Error::Status(code, _) => format!("status {code}"),
-        ureq::Error::Transport(t) => format!("transport error: {}", t.kind()),
-    }
-}
-
 pub struct WebPushChannel {
     db: Arc<Mutex<Connection>>,
     vapid_pem: Vec<u8>,
@@ -100,10 +91,11 @@ impl WebPushChannel {
             valid_subject(&subject),
             "vapid subject must be a mailto: or https:// URL, got {subject:?}"
         );
-        let agent = ureq::AgentBuilder::new()
-            .timeout_connect(std::time::Duration::from_secs(5))
-            .timeout(std::time::Duration::from_secs(15))
-            .build();
+        let agent = ureq::Agent::config_builder()
+            .timeout_connect(Some(std::time::Duration::from_secs(5)))
+            .timeout_global(Some(std::time::Duration::from_secs(15)))
+            .build()
+            .into();
         Ok(Self {
             db,
             vapid_pem,
@@ -115,9 +107,9 @@ impl WebPushChannel {
     fn send(&self, built: &BuiltPush) -> std::result::Result<(), ureq::Error> {
         let mut req = self.agent.post(&built.endpoint);
         for (k, v) in &built.headers {
-            req = req.set(k, v);
+            req = req.header(k, v);
         }
-        req.send_bytes(&built.body).map(|_| ())
+        req.send(&built.body[..]).map(|_| ())
     }
 }
 
@@ -144,10 +136,10 @@ impl Channel for WebPushChannel {
                 Err(e) => last_err = e.to_string(),
                 Ok(built) => match self.send(&built) {
                     Ok(()) => delivered += 1,
-                    Err(ureq::Error::Status(code, _)) if code == 404 || code == 410 => {
+                    Err(ureq::Error::StatusCode(404 | 410)) => {
                         gone.push(sub.endpoint.clone());
                     }
-                    Err(e) => last_err = describe(&e),
+                    Err(e) => last_err = super::describe_http_error(&e),
                 },
             }
         }

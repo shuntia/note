@@ -2,7 +2,6 @@ use crate::channels::telegram::{Callback, Update};
 use crate::talk::{TurnError, Via};
 use crate::AppState;
 use anyhow::Result;
-use argon2::password_hash::rand_core::{OsRng, RngCore};
 use rusqlite::{Connection, OptionalExtension};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -22,7 +21,7 @@ pub struct Link {
 
 pub fn new_code() -> String {
     let mut bytes = [0u8; CODE_LEN];
-    OsRng.fill_bytes(&mut bytes);
+    getrandom::fill(&mut bytes).expect("os rng");
     bytes.iter().map(|b| CODE_ALPHABET[*b as usize % CODE_ALPHABET.len()] as char).collect()
 }
 

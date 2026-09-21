@@ -88,9 +88,9 @@ impl LLMProvider for AnthropicLLM {
         let resp = self.agents.post_json(req.background, "anthropic", &body(&self.model, req), |agent| {
             agent
                 .post(&url)
-                .set("x-api-key", &self.api_key)
-                .set("anthropic-version", "2023-06-01")
-                .set("content-type", "application/json")
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", "2023-06-01")
+                .header("content-type", "application/json")
         })?;
         parse(&resp)
     }

@@ -42,12 +42,14 @@ impl SearchProvider for SearxngSearch {
     fn search(&self, query: &str) -> Result<Vec<SearchHit>> {
         let call = self.agent.get(&self.url).query("q", query).query("format", "json").call();
         let body: serde_json::Value = match call {
-            Ok(resp) => resp
-                .into_json()
+            Ok(mut resp) if resp.status().is_success() => resp
+                .body_mut()
+                .read_json()
                 .map_err(|e| anyhow::anyhow!("searxng: reading the response: {e}"))?,
-            Err(ureq::Error::Status(code, resp)) => {
+            Ok(mut resp) => {
+                let code = resp.status().as_u16();
                 let head: String =
-                    resp.into_string().unwrap_or_default().chars().take(200).collect();
+                    resp.body_mut().read_to_string().unwrap_or_default().chars().take(200).collect();
                 anyhow::bail!("searxng: status {code}: {head}")
             }
             Err(e) => anyhow::bail!("searxng: {e}"),

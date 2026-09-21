@@ -33,7 +33,7 @@ impl OpenAILLM {
             let request = agent.post(&url);
             match self.api_key.is_empty() {
                 true => request,
-                false => request.set("Authorization", &format!("Bearer {}", self.api_key)),
+                false => request.header("Authorization", format!("Bearer {}", self.api_key)),
             }
         })
     }
@@ -194,12 +194,13 @@ impl EmbeddingsProvider for OpenAIEmbeddings {
     fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
         let mut request = self.agent.post(&format!("{}/embeddings", self.base_url));
         if !self.api_key.is_empty() {
-            request = request.set("Authorization", &format!("Bearer {}", self.api_key));
+            request = request.header("Authorization", format!("Bearer {}", self.api_key));
         }
         let resp: serde_json::Value = request
             .send_json(serde_json::json!({"model": self.model, "input": texts}))
             .context("openai embeddings request failed")?
-            .into_json()?;
+            .body_mut()
+            .read_json()?;
         parse_embeddings(&resp)
     }
 }

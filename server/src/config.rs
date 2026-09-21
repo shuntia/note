@@ -309,11 +309,12 @@ impl UserConfig {
     /// The effective config for a user file with this content (`None` for no
     /// file), validated the same way `load` validates the file on disk.
     pub fn from_overlay(config_dir: &Path, raw: Option<&str>) -> anyhow::Result<Self> {
-        let defaults: toml::Value = std::fs::read_to_string(config_dir.join("defaults/user.toml"))
-            .context("reading defaults/user.toml")?
-            .parse()?;
+        let defaults: toml::Value = toml::from_str(
+            &std::fs::read_to_string(config_dir.join("defaults/user.toml"))
+                .context("reading defaults/user.toml")?,
+        )?;
         let merged = match raw {
-            Some(raw) => overlay(defaults, raw.parse()?),
+            Some(raw) => overlay(defaults, toml::from_str(raw)?),
             None => defaults,
         };
         let cfg: UserConfig = merged.try_into()?;

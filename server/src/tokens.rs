@@ -1,4 +1,3 @@
-use argon2::password_hash::rand_core::{OsRng, RngCore};
 use base64::Engine;
 use rusqlite::{Connection, OptionalExtension};
 use serde::Serialize;
@@ -45,7 +44,7 @@ pub struct Resolved {
 
 pub fn generate_secret() -> String {
     let mut bytes = [0u8; 32];
-    OsRng.fill_bytes(&mut bytes);
+    getrandom::fill(&mut bytes).expect("os rng");
     format!(
         "{PREFIX}{}",
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
@@ -54,7 +53,7 @@ pub fn generate_secret() -> String {
 
 /// Secrets are 256 random bits, so an unsalted digest is a safe lookup key.
 pub fn hash_secret(secret: &str) -> String {
-    format!("{:x}", Sha256::digest(secret.as_bytes()))
+    data_encoding::HEXLOWER.encode(&Sha256::digest(secret.as_bytes()))
 }
 
 const COLS: &str = "id, name, created_at, last_used_at";
