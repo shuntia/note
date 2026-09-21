@@ -97,13 +97,22 @@
 .memory-more:hover { color: var(--ink); }
 
 @media (min-width: 768px) {
-  .memory { padding: 2.875rem 0 0 var(--rail); }
+  .memory { padding: 2.875rem var(--rail) 3rem; }
   .memory-search { margin: 0; }
   .memory-detail { padding: 0; }
 }
+/* the list and the fact it opened share the width; the fact stays in view while
+   the list scrolls past it */
 @media (min-width: 1088px) {
-  .memory { grid-template-columns: max(32.5rem, 26vw) minmax(0, max(32.5rem, 26vw)); gap: 3.75rem; }
-  .memory-detail { padding-top: 1.25rem; }
+  .memory { grid-template-columns: minmax(24rem, 5fr) minmax(0, 7fr); gap: 4rem; }
+  .memory-detail {
+    position: sticky;
+    top: 1.5rem;
+    max-height: calc(100dvh - 3rem);
+    overflow-y: auto;
+    padding-top: 4.625rem;
+  }
+  .memory-card { max-width: 46rem; }
   /* the list never left, so there is nothing to go back to */
   .memory-back { display: none; }
 }

@@ -60,18 +60,28 @@ export function rise(el: Target, y = 20): void {
   })
 }
 
-/** A row folding away under what follows it; `done` runs at zero height. */
-export function collapse(el: Element | null | undefined, done: () => void): void {
-  if (still() || !el) return done()
-  gsap.to(el, {
+/** A row folding away under what follows it, after `delay` seconds; `done` runs
+ *  at zero height. The returned kill stops the fold and puts the row back. */
+export function collapse(el: Element | null | undefined, done: () => void, delay = 0): () => void {
+  if (still() || !el) {
+    done()
+    return () => {}
+  }
+  const tween = gsap.to(el, {
     height: 0,
     autoAlpha: 0,
     marginTop: 0,
     marginBottom: 0,
     duration: 0.34,
+    delay,
     ease: 'power2.inOut',
     onComplete: done,
   })
+  return () => {
+    if (tween.progress() === 1) return
+    tween.kill()
+    gsap.set(el, { clearProps: 'height,opacity,visibility,marginTop,marginBottom' })
+  }
 }
 
 /** A panel growing out of the box above it, from nothing to the height it asks for. */
@@ -103,11 +113,11 @@ export function fold(el: Target, done: () => void): void {
 }
 
 /** Rows that changed places: each starts from where it was and slides home. */
-export function flip(moves: readonly { el: Element; dy: number }[]): void {
+export function flip(moves: readonly { el: Element; dx?: number; dy: number }[]): void {
   if (still()) return
-  for (const { el, dy } of moves) {
-    if (Math.abs(dy) < 1) continue
-    gsap.from(el, { y: dy, duration: 0.38, ease: 'power2.out', clearProps: 'transform' })
+  for (const { el, dx = 0, dy } of moves) {
+    if (Math.abs(dx) < 1 && Math.abs(dy) < 1) continue
+    gsap.from(el, { x: dx, y: dy, duration: 0.38, ease: 'power2.out', clearProps: 'transform' })
   }
 }
 

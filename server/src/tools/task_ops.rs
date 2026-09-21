@@ -170,7 +170,8 @@ pub struct UpdateArgs {
     /// How the block holding this task announces itself when it starts: none,
     /// chat, or notify.
     pub notify: Option<String>,
-    /// How far along it is, 0 to 100. Finishing a task fills it on its own.
+    /// How far along it is, 0 to 100. Finishing a task fills it on its own, and a
+    /// task with steps holds theirs, so this is ignored on one.
     pub progress: Option<u32>,
 }
 

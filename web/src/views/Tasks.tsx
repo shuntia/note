@@ -10,6 +10,7 @@ import {
 import { api, ApiError } from '../api'
 import type { ViewProps } from '../app'
 import { collapse, flip, settle } from '../motion-gsap'
+import { reducedMotion } from '../motion'
 import { Overflow, type OverflowItem } from '../overflow'
 import '../styles/tasks.css'
 import type { NewStep, Task, TaskNode, TaskNotify, TaskState, TaskUpdate } from '../types'
@@ -29,7 +30,7 @@ type Group = 'now' | 'later' | 'done'
 
 // The prior states a completion has to put back, steps first: reopening a step
 // cascades the parent, so the parent's own state must land last to win.
-type Snapshot = { id: number; state: TaskState }[]
+type Snapshot = { id: number; state: TaskState; progress: number }[]
 
 const isLive = (t: Task) => t.state === 'open' || t.state === 'in_progress'
 
@@ -40,6 +41,28 @@ const round5 = (min: number) => Math.max(5, Math.round(min / 5) * 5)
 // A parent hands its focus session off to its next unfinished step.
 const focusTarget = (node: TaskNode): Task =>
   node.children.find((c) => c.state !== 'done') ?? node
+
+const shown = (t: Task) => (t.state === 'done' ? 100 : t.progress)
+
+// The weighting the server holds a parent to: each live step by its length, one
+// without a length by its siblings' mean, a finished one counted full.
+function stepsProgress(steps: Task[]): number | null {
+  const live = steps.filter((s) => s.state !== 'dropped')
+  if (live.length === 0) return null
+  const sized = live.flatMap((s) => (s.duration_min === null ? [] : [s.duration_min]))
+  const mean = sized.length > 0 ? sized.reduce((a, b) => a + b, 0) / sized.length : 1
+  let sum = 0
+  let weight = 0
+  for (const s of live) {
+    const w = s.duration_min ?? mean
+    sum += w * shown(s)
+    weight += w
+  }
+  return Math.round(sum / weight)
+}
+
+const nodeProgress = (node: TaskNode) =>
+  node.state === 'done' ? 100 : (stepsProgress(node.children) ?? node.progress)
 
 function parentSub(node: TaskNode): string {
   const done = node.children.filter((c) => c.state === 'done').length
@@ -78,15 +101,23 @@ function withTask(nodes: TaskNode[], t: Task): TaskNode[] {
   })
 }
 
-function withState(nodes: TaskNode[], id: number, state: TaskState): TaskNode[] {
+function withState(
+  nodes: TaskNode[],
+  id: number,
+  state: TaskState,
+  progress?: number,
+): TaskNode[] {
   const stamp = new Date().toISOString()
+  const put = <T extends Task>(t: T): T => ({
+    ...t,
+    state,
+    updated_at: stamp,
+    progress: state === 'done' ? 100 : (progress ?? t.progress),
+  })
   return nodes.map((n) => {
-    if (n.id === id) return { ...n, state, updated_at: stamp }
+    if (n.id === id) return put(n)
     if (!n.children.some((c) => c.id === id)) return n
-    return {
-      ...n,
-      children: n.children.map((c) => (c.id === id ? { ...c, state, updated_at: stamp } : c)),
-    }
+    return { ...n, children: n.children.map((c) => (c.id === id ? put(c) : c)) }
   })
 }
 
@@ -121,15 +152,15 @@ function placed(list: TaskNode[], nodes: TaskNode[], leaving: Leaving[], group: 
 // settle in. A row folding away drives the layout itself, so both stand down
 // for it — and for the frame in which it leaves the list.
 function useRowMotion(root: RefObject<HTMLDivElement | null>, busy: boolean) {
-  const tops = useRef<Map<string, number> | null>(null)
+  const tops = useRef<Map<string, DOMRect> | null>(null)
   const idle = useRef(true)
 
   useLayoutEffect(() => {
-    const now = new Map<string, number>()
+    const now = new Map<string, DOMRect>()
     const els = new Map<string, HTMLElement>()
     root.current?.querySelectorAll<HTMLElement>('[data-row]').forEach((el) => {
       const key = el.dataset.row as string
-      now.set(key, el.getBoundingClientRect().top)
+      now.set(key, el.getBoundingClientRect())
       els.set(key, el)
     })
     const was = tops.current
@@ -139,12 +170,13 @@ function useRowMotion(root: RefObject<HTMLDivElement | null>, busy: boolean) {
       return
     }
     if (was === null) return settle([...els.values()])
-    const moves: { el: Element; dy: number }[] = []
+    const moves: { el: Element; dx: number; dy: number }[] = []
     const fresh: Element[] = []
     for (const [key, el] of els) {
       const before = was.get(key)
+      const at = now.get(key) as DOMRect
       if (before === undefined) fresh.push(el)
-      else moves.push({ el, dy: before - (now.get(key) as number) })
+      else moves.push({ el, dx: before.left - at.left, dy: before.top - at.top })
     }
     flip(moves)
     settle(fresh)
@@ -173,6 +205,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
   const [title, setTitle] = useState('')
   const [showDone, setShowDone] = useState(false)
   const [leaving, setLeaving] = useState<Leaving[]>([])
+  const unfinished = useRef(new Map<number, number>())
   const root = useRef<HTMLDivElement>(null)
   useRowMotion(root, leaving.length > 0)
 
@@ -207,10 +240,14 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
     [load, notify],
   )
 
+  // A restored row still folding away stays where it is and unfolds its finish.
   const restore = useCallback(
     async (snap: Snapshot) => {
-      setNodes((ns) => (ns ? snap.reduce((acc, s) => withState(acc, s.id, s.state), ns) : ns))
-      for (const s of snap) await patch(s.id, { state: s.state })
+      setLeaving((ls) => ls.filter((l) => !snap.some((s) => s.id === l.id)))
+      setNodes((ns) =>
+        ns ? snap.reduce((acc, s) => withState(acc, s.id, s.state, s.progress), ns) : ns,
+      )
+      for (const s of snap) await patch(s.id, { state: s.state, progress: s.progress })
     },
     [patch],
   )
@@ -236,7 +273,8 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
         : []
       : node.children.filter((c) => c.state !== 'done')
     const ordered = step ? [step, ...cascade] : [...cascade, node]
-    const snap: Snapshot = ordered.map((t) => ({ id: t.id, state: t.state }))
+    const snap: Snapshot = ordered.map((t) => ({ id: t.id, state: t.state, progress: t.progress }))
+    for (const s of snap) unfinished.current.set(s.id, s.progress)
     if (!step || lastStep) markLeaving(node, 'done')
     setNodes((ns) => (ns ? snap.reduce((acc, s) => withState(acc, s.id, 'done'), ns) : ns))
     void patch(step ? step.id : node.id, { state: 'done' })
@@ -248,20 +286,26 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
   }
 
   // Reopening a finished task brings its steps back too, so the sub-line's count
-  // cannot claim work is done under a task that is open again.
-  const reopen = (node: TaskNode) =>
-    void restore([
-      ...node.children.map((c) => ({ id: c.id, state: 'open' as TaskState })),
-      { id: node.id, state: 'open' as TaskState },
-    ])
+  // cannot claim work is done under a task that is open again. Each goes back to
+  // the progress it had before it was finished here, when that is known.
+  const reopened = (t: Task) => ({
+    id: t.id,
+    state: 'open' as TaskState,
+    progress: unfinished.current.get(t.id) ?? t.progress,
+  })
+  const reopen = (node: TaskNode) => void restore([...node.children.map(reopened), reopened(node)])
 
-  const reopenStep = (step: Task) => void restore([{ id: step.id, state: 'open' }])
+  const reopenStep = (step: Task) => void restore([reopened(step)])
 
   // Dropping a task drops every step it still has, finished ones included, and a
   // dropped step never comes back on its own, so undo has to name each of them.
   const drop = (node: TaskNode) => {
     const steps = node.children.filter((c) => c.state !== 'dropped')
-    const snap: Snapshot = [...steps, node].map((t) => ({ id: t.id, state: t.state }))
+    const snap: Snapshot = [...steps, node].map((t) => ({
+      id: t.id,
+      state: t.state,
+      progress: t.progress,
+    }))
     markLeaving(node, 'dropped')
     setNodes((ns) => (ns ? snap.reduce((acc, s) => withState(acc, s.id, 'dropped'), ns) : ns))
     void patch(node.id, { state: 'dropped' })
@@ -443,17 +487,21 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
       {now.length > 0 && (
         <section className="task-group now">
           <h3 className="task-group-head">NOW</h3>
-          {now.map((p) => (
-            <Row key={p.node.id} node={p.node} group="now" actions={actions} leaving={p.leaving} onGone={gone} />
-          ))}
+          <div className="task-list">
+            {now.map((p) => (
+              <Row key={p.node.id} node={p.node} group="now" actions={actions} leaving={p.leaving} onGone={gone} />
+            ))}
+          </div>
         </section>
       )}
       {later.length > 0 && (
         <section className="task-group later">
           <h3 className="task-group-head">LATER · {g.later.length}</h3>
-          {later.map((p) => (
-            <Row key={p.node.id} node={p.node} group="later" actions={actions} leaving={p.leaving} onGone={gone} />
-          ))}
+          <div className="task-list">
+            {later.map((p) => (
+              <Row key={p.node.id} node={p.node} group="later" actions={actions} leaving={p.leaving} onGone={gone} />
+            ))}
+          </div>
         </section>
       )}
       {g.doneToday.length > 0 && (
@@ -468,10 +516,13 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
               <path d="M9 6l6 6-6 6" />
             </svg>
           </button>
-          {showDone &&
-            g.doneToday.map((n) => (
-              <Row key={n.id} node={n} group="done" actions={actions} leaving={null} onGone={gone} />
-            ))}
+          {showDone && (
+            <div className="task-list">
+              {g.doneToday.map((n) => (
+                <Row key={n.id} node={n} group="done" actions={actions} leaving={null} onGone={gone} />
+              ))}
+            </div>
+          )}
         </section>
       )}
     </div>
@@ -511,26 +562,73 @@ function Due({ task }: { task: Task }) {
   return <span className={`task-dur task-due${label === 'overdue' ? ' overdue' : ''}`}>{label}</span>
 }
 
-// The bar reads the task's progress and the slider over it sets the same value,
-// so the fill under the thumb is what the drag is already showing.
-function Progress({ task, onSet }: { task: Task; onSet: (progress: number) => void }) {
-  const [value, setValue] = useState(task.progress)
+const PROGRESS_STEP = 5
+
+const snapProgress = (v: number) =>
+  Math.min(100, Math.max(0, Math.round(v / PROGRESS_STEP) * PROGRESS_STEP))
+
+const PROGRESS_KEYS: Record<string, (v: number) => number> = {
+  ArrowRight: (v) => v + PROGRESS_STEP,
+  ArrowUp: (v) => v + PROGRESS_STEP,
+  ArrowLeft: (v) => v - PROGRESS_STEP,
+  ArrowDown: (v) => v - PROGRESS_STEP,
+  PageUp: (v) => v + 25,
+  PageDown: (v) => v - 25,
+  Home: () => 0,
+  End: () => 100,
+}
+
+// The bar is the slider: a press lands the fill under the pointer and a drag
+// carries it along. Without `onSet` it only reads.
+function Progress({
+  task,
+  value: held,
+  onSet,
+}: {
+  task: Task
+  value: number
+  onSet?: (progress: number) => void
+}) {
+  const [value, setValue] = useState(held)
+  const [dragging, setDragging] = useState(false)
+  const track = useRef<HTMLSpanElement>(null)
+  const latest = useRef(held)
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  useEffect(() => setValue(task.progress), [task.progress])
+  useEffect(() => {
+    if (dragging) return
+    latest.current = held
+    setValue(held)
+  }, [held, dragging])
   useEffect(() => () => void (timer.current && clearTimeout(timer.current)), [])
 
-  const slide = (next: number) => {
+  const show = (next: number) => {
+    latest.current = next
     setValue(next)
+  }
+  const commit = (next: number) => {
     if (timer.current) clearTimeout(timer.current)
-    timer.current = setTimeout(() => onSet(next), PROGRESS_SETTLE_MS)
+    if (next !== held) onSet?.(next)
+  }
+  const at = (clientX: number) => {
+    const r = (track.current as HTMLSpanElement).getBoundingClientRect()
+    return snapProgress(((clientX - r.left) / r.width) * 100)
   }
 
-  return (
-    <span className="task-prog">
-      <span className="task-bar-wrap">
+  const bar = (
+    <span className="task-bar">
+      <span className="task-bar-fill" style={{ width: `${value}%` }} />
+    </span>
+  )
+  const left = task.remaining_min !== null && (
+    <span className="task-left">{task.remaining_min} min left</span>
+  )
+
+  if (!onSet)
+    return (
+      <span className="task-prog">
         <span
-          className="task-bar"
+          className="task-bar-wrap"
           role="progressbar"
           aria-valuenow={value}
           aria-valuemin={0}
@@ -538,22 +636,55 @@ function Progress({ task, onSet }: { task: Task; onSet: (progress: number) => vo
           aria-valuetext={`${value}% done`}
           aria-label={`${task.title} progress`}
         >
-          <span className="task-bar-fill" style={{ width: `${value}%` }} />
+          {bar}
         </span>
-        <input
-          className="task-slider"
-          type="range"
-          min={0}
-          max={100}
-          step={5}
-          value={value}
-          aria-label={`Set progress for ${task.title}`}
-          onChange={(e) => slide(Number(e.currentTarget.value))}
-        />
+        {left}
       </span>
-      {task.remaining_min !== null && (
-        <span className="task-left">{task.remaining_min} min left</span>
-      )}
+    )
+
+  return (
+    <span className="task-prog">
+      <span
+        ref={track}
+        className="task-bar-wrap"
+        role="slider"
+        tabIndex={0}
+        data-dragging={dragging || undefined}
+        aria-valuenow={value}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuetext={`${value}% done`}
+        aria-label={`${task.title} progress`}
+        onPointerDown={(e) => {
+          if (e.button !== 0) return
+          e.currentTarget.setPointerCapture(e.pointerId)
+          setDragging(true)
+          show(at(e.clientX))
+        }}
+        onPointerMove={(e) => dragging && show(at(e.clientX))}
+        onPointerUp={() => {
+          if (!dragging) return
+          setDragging(false)
+          commit(latest.current)
+        }}
+        onPointerCancel={() => {
+          setDragging(false)
+          show(held)
+        }}
+        onKeyDown={(e) => {
+          const step = PROGRESS_KEYS[e.key]
+          if (!step) return
+          e.preventDefault()
+          const next = snapProgress(step(latest.current))
+          show(next)
+          if (timer.current) clearTimeout(timer.current)
+          timer.current = setTimeout(() => commit(next), PROGRESS_SETTLE_MS)
+        }}
+      >
+        {bar}
+        <span className="task-thumb" style={{ left: `${value}%` }} />
+      </span>
+      {left}
     </span>
   )
 }
@@ -576,6 +707,11 @@ function Tick({
   )
 }
 
+// Finishing a row plays out in the stylesheet — the bar fills, the row greys,
+// the bar fades — and the row folds away once that has been seen.
+const FINISH_HOLD_S = 1.15
+const REVIVE_MS = 420
+
 function Row({
   node,
   group,
@@ -590,13 +726,26 @@ function Row({
   onGone: (id: number) => void
 }) {
   const item = useRef<HTMLDivElement>(null)
+  const [reviving, setReviving] = useState(false)
   const done = group === 'done'
+  const finished = (done && !reviving) || leaving === 'done'
   const steps = done ? [] : node.children
 
   useLayoutEffect(() => {
     if (leaving === null) return
-    collapse(item.current, () => onGone(node.id))
+    return collapse(item.current, () => onGone(node.id), leaving === 'done' ? FINISH_HOLD_S : 0)
   }, [leaving, node.id, onGone])
+
+  const revive = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => () => void (revive.current && clearTimeout(revive.current)), [])
+
+  // A finished row is brought back the way it went: it colours in and its bar
+  // returns before it moves back to its list.
+  const reopen = () => {
+    if (reviving) return
+    setReviving(true)
+    revive.current = setTimeout(() => actions.reopen(node), reducedMotion() ? 0 : REVIVE_MS)
+  }
 
   const items: OverflowItem[] = [
     group === 'now'
@@ -618,6 +767,7 @@ function Row({
       : group === 'now' && node.duration_min === null && node.duration_source === 'none'
         ? 'Note will estimate'
         : null
+  const live = !done && leaving === null
 
   return (
     <div
@@ -625,24 +775,31 @@ function Row({
       ref={item}
       data-row={`${leaving ? 'x' : 't'}${node.id}`}
       data-leaving={leaving ?? undefined}
+      data-finished={finished || undefined}
     >
       <div className="task-row">
         <Tick
-          checked={done || leaving === 'done'}
+          checked={finished}
           label={done ? `Mark ${node.title} not done` : `Mark ${node.title} done`}
-          onClick={() => (done ? actions.reopen(node) : actions.complete(node))}
+          onClick={() => (done ? reopen() : actions.complete(node))}
         />
         <div className="task-body">
           <span className="task-title">{node.title}</span>
           {sub && <span className="task-sub">{sub}</span>}
         </div>
-        {!done && (
-          <span className="task-chips">
-            <Duration task={node} />
-            <Due task={node} />
-          </span>
-        )}
-        <Progress task={node} onSet={(p) => actions.setProgress(node, p)} />
+        <div className="task-foot">
+          {!done && (
+            <span className="task-chips">
+              <Duration task={node} />
+              <Due task={node} />
+            </span>
+          )}
+          <Progress
+            task={node}
+            value={finished ? 100 : nodeProgress(node)}
+            onSet={live && steps.length === 0 ? (p) => actions.setProgress(node, p) : undefined}
+          />
+        </div>
         <span className="task-acts">
           {!done && (
             <Overflow className="task-more" label={`More actions for ${node.title}`} items={items} />
@@ -676,7 +833,11 @@ function Row({
               {c.duration_min !== null && (
                 <span className="task-step-min">{round5(c.duration_min)}</span>
               )}
-              <Progress task={c} onSet={(p) => actions.setProgress(c, p)} />
+              <Progress
+                task={c}
+                value={shown(c)}
+                onSet={live && c.state !== 'done' ? (p) => actions.setProgress(c, p) : undefined}
+              />
             </li>
           ))}
         </ul>

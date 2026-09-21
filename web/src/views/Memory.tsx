@@ -15,6 +15,7 @@ import type { MemoryFact, MemoryHit } from '../types'
 
 // matches the stylesheet's master-detail breakpoint
 const SINGLE_PANE = '(max-width: 1087.98px)'
+const AUTO_OPEN_AFTER = 8
 
 function shortDate(iso: string): string {
   const at = new Date(iso)
@@ -156,6 +157,15 @@ export function Memory({ notify, refresh, openTalk }: ViewProps) {
     },
     [notify],
   )
+
+  // Side by side, the reading pane is never left empty: it opens the newest fact
+  // once the rows on screen have read back their dates.
+  const head = items?.slice(0, AUTO_OPEN_AFTER) ?? []
+  const dated = head.length > 0 && head.every((m) => facts.get(m.id) !== undefined)
+  useEffect(() => {
+    if (selected !== null || !items || !dated || window.matchMedia(SINGLE_PANE).matches) return
+    openFact(newestFirst(items, (id) => factCache.get(id))[0].id)
+  }, [items, dated, selected, openFact])
 
   // On the single-pane layout the detail replaces the list, so bring it into view.
   useEffect(() => {

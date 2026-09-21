@@ -231,6 +231,27 @@ fn checked_duration(min: u32) -> Result<u32, UpdateError> {
     Ok(min)
 }
 
+/// A parent with live steps holds their progress, each weighted by its duration
+/// (a step without one weighs what its siblings average) and a finished step
+/// counted full. A finished parent keeps its 100.
+const DERIVE_PROGRESS: &str = "
+    UPDATE tasks SET progress = COALESCE((
+        SELECT CAST(ROUND(SUM(w * p) * 1.0 / SUM(w)) AS INTEGER) FROM (
+            SELECT COALESCE(s.duration_min, (
+                    SELECT AVG(a.duration_min) FROM tasks a
+                    WHERE a.parent_id = s.parent_id AND a.state != 'dropped'
+                ), 1) AS w,
+                CASE WHEN s.state = 'done' THEN 100 ELSE s.progress END AS p
+            FROM tasks s WHERE s.parent_id = tasks.id AND s.state != 'dropped'
+        )
+    ), progress)
+    WHERE id = ?1 AND state != 'done'";
+
+fn derive_progress(conn: &Connection, parent_id: i64) -> rusqlite::Result<()> {
+    conn.execute(DERIVE_PROGRESS, [parent_id])?;
+    Ok(())
+}
+
 fn checked_progress(value: u32) -> Result<u32, UpdateError> {
     if value > MAX_PROGRESS {
         return Err(UpdateError::Invalid(format!("progress must be 0 to {MAX_PROGRESS}")));
@@ -480,6 +501,9 @@ pub fn create(
         ],
     )?;
     let id = conn.last_insert_rowid();
+    if let Some(p) = new.parent_id {
+        derive_progress(conn, p)?;
+    }
     trim_now(conn, user_id, id)?;
     Ok(conn.query_row(&format!("SELECT {COLS} FROM tasks WHERE id = ?1"), [id], row_to_task)?)
 }
@@ -805,11 +829,14 @@ pub(crate) fn delete_within(
     )?;
     conn.execute("DELETE FROM tasks WHERE parent_id = ?1", [task_id])?;
     conn.execute("DELETE FROM tasks WHERE id = ?1", [task_id])?;
+    if let Some(p) = task.parent_id {
+        derive_progress(conn, p)?;
+    }
     Ok(true)
 }
 
-/// A patched task, plus its parent when finishing or reopening this step also
-/// moved the parent, so the client needs no second round trip.
+/// A patched task, plus its parent whenever it is a step, since a step's state
+/// and progress move the parent's, so the client needs no second round trip.
 #[derive(Debug, Serialize)]
 pub struct Updated {
     #[serde(flatten)]
@@ -840,7 +867,7 @@ fn cascade(
     user_id: i64,
     task_id: i64,
     parent_id: Option<i64>,
-) -> rusqlite::Result<Option<Task>> {
+) -> rusqlite::Result<()> {
     let Some(parent_id) = parent_id else {
         let state: String =
             conn.query_row("SELECT state FROM tasks WHERE id = ?1", [task_id], |r| r.get(0))?;
@@ -853,7 +880,7 @@ fn cascade(
                 (&state, now(), task_id),
             )?;
         }
-        return Ok(None);
+        return Ok(());
     };
     let (total, done): (i64, i64) = conn.query_row(
         "SELECT COUNT(*), COALESCE(SUM(state = 'done'), 0)
@@ -861,19 +888,18 @@ fn cascade(
         [parent_id],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
-    let Some(parent) = get(conn, user_id, parent_id)? else { return Ok(None) };
+    let Some(parent) = get(conn, user_id, parent_id)? else { return Ok(()) };
     let wanted = if total > 0 && done == total {
         "done"
     } else if parent.state == "done" {
         if done > 0 { "in_progress" } else { "open" }
     } else {
-        return Ok(None);
+        return Ok(());
     };
     if parent.state == wanted {
-        return Ok(None);
+        return Ok(());
     }
-    set_state(conn, parent_id, wanted)?;
-    get(conn, user_id, parent_id)
+    set_state(conn, parent_id, wanted)
 }
 
 /// Returns `Ok(None)` when `task_id` doesn't exist or isn't owned by `user_id`.
@@ -993,8 +1019,15 @@ pub fn update(
             progress,
         ],
     )?;
-    let parent = match patch.state {
-        Some(_) => cascade(conn, user_id, task_id, parent_id)?,
+    if patch.state.is_some() {
+        cascade(conn, user_id, task_id, parent_id)?;
+    }
+    derive_progress(conn, task_id)?;
+    for p in [before.parent_id, parent_id].into_iter().flatten() {
+        derive_progress(conn, p)?;
+    }
+    let parent = match parent_id {
+        Some(p) => get(conn, user_id, p)?,
         None => None,
     };
     let demoted_from_now = trim_now(conn, user_id, task_id)?;
@@ -1205,6 +1238,52 @@ mod tests {
         update(&conn, uid, parent, TaskPatch { state: Some("open".into()), ..Default::default() })
             .unwrap();
         assert_eq!(get(&conn, uid, parent).unwrap().unwrap().progress, 100);
+    }
+
+    #[test]
+    fn a_parent_holds_the_progress_of_its_steps_weighted_by_length() {
+        let (conn, uid) = db_with_user();
+        let parent = task(&conn, uid, "film analysis", None);
+        let step = |title: &str, minutes: Option<u32>| {
+            create(
+                &conn,
+                uid,
+                NewTask {
+                    title: title.into(),
+                    parent_id: Some(parent),
+                    duration_min: minutes,
+                    ..NewTask::default()
+                },
+                "manual",
+                Actor::User,
+            )
+            .unwrap()
+            .id
+        };
+        let watch = step("watch", Some(60));
+        let notes = step("notes", Some(30));
+        let write = step("write", None);
+        let progress = |id| get(&conn, uid, id).unwrap().unwrap().progress;
+        assert_eq!(progress(parent), 0);
+
+        let u = update(&conn, uid, watch, TaskPatch { state: Some("done".into()), ..Default::default() })
+            .unwrap()
+            .unwrap();
+        assert_eq!(progress(parent), 44, "60 of 60 + 30 + an unsized step weighing their mean, 45");
+        assert_eq!(u.parent.map(|p| p.progress), Some(44), "the write hands the parent back");
+
+        update(&conn, uid, notes, TaskPatch { progress: Some(50), ..Default::default() }).unwrap();
+        assert_eq!(progress(parent), 56);
+
+        update(&conn, uid, parent, TaskPatch { progress: Some(5), ..Default::default() }).unwrap();
+        assert_eq!(progress(parent), 56, "a parent with steps is not set by hand");
+
+        update(&conn, uid, write, TaskPatch { state: Some("dropped".into()), ..Default::default() })
+            .unwrap();
+        assert_eq!(progress(parent), 83, "a dropped step weighs nothing");
+
+        delete(&conn, uid, notes).unwrap();
+        assert_eq!(progress(parent), 100);
     }
 
     #[test]
