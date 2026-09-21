@@ -12,7 +12,10 @@ async fn main() -> anyhow::Result<()> {
     let config_dir = std::env::var("NOTE_CONFIG_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("./config"));
-    let cfg = ServerConfig::load(&config_dir)?;
+    let cfg = match std::env::var_os("NOTE_SERVER_CONFIG") {
+        Some(path) => ServerConfig::load_file(std::path::Path::new(&path))?,
+        None => ServerConfig::load(&config_dir)?,
+    };
 
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {

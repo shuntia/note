@@ -1,7 +1,7 @@
-bind_addr = "127.0.0.1:3271"   # only cloudflared (same host) reaches the listener
-public_base_url = "https://note.example.com"   # Cloudflare tunnel; https turns on Secure cookies
+bind_addr = "127.0.0.1:3271"
+public_base_url = "http://127.0.0.1:3271"   # https turns on Secure cookies and passkeys
 data_dir = "data"
-secrets_dir = "/persist/secrets/note"
+# secrets_dir = "persist/secrets"          # holds the legacy admin_totp seed
 
 # Admin panel elevation = password + a second factor enrolled in Settings
 # (passkey or authenticator app); the legacy seed file still counts.
@@ -17,12 +17,12 @@ require_second_factor = true
 # The key comes from api_key_file (a file holding the bare key) or api_key_env;
 # the file wins if both are set.
 
-[providers.llm]
-kind = "openai"                 # OpenRouter is OpenAI-compatible
-base_url = "https://openrouter.ai/api/v1"
-model = "deepseek/deepseek-v4-flash"
-api_key_file = "config/openrouter.key"
-reasoning = "low"               # model reasoning shown in the Talk activity panel; costs tokens
+# [providers.llm]
+# kind = "openai"               # OpenRouter is OpenAI-compatible
+# base_url = "https://openrouter.ai/api/v1"
+# model = "deepseek/deepseek-v4-flash"
+# api_key_file = "config/openrouter.key"
+# reasoning = "low"             # model reasoning shown in the Talk activity panel; costs tokens
 
 # How long the endpoint keeps a prompt cached; it caps how long a
 # conversation may idle before the summary pass replays it.
@@ -33,10 +33,10 @@ reasoning = "low"               # model reasoning shown in the Talk activity pan
 # model = "claude-sonnet-5"
 # api_key_env = "ANTHROPIC_API_KEY"
 #
-[providers.embeddings]          # local llama.cpp router; enables hybrid memory search
-kind = "openai"
-base_url = "http://localhost:8080/v1"
-model = "embeddinggemma"
+# [providers.embeddings]        # e.g. a local llama.cpp router; enables hybrid memory search
+# kind = "openai"
+# base_url = "http://localhost:8080/v1"
+# model = "embeddinggemma"
 
 # --- Web search ---------------------------------------------------------
 # A SearXNG instance the agent may ask when a reply turns on something current
@@ -45,8 +45,8 @@ model = "embeddinggemma"
 # and a short completion. Without this section the web_search tool is not
 # offered to any session at all.
 #
-[search]
-searxng_url = "http://127.0.0.1:8888"
+# [search]
+# searxng_url = "http://127.0.0.1:8888"
 # max_results = 8        # hits handed to the summarizer
 # timeout_secs = 15      # cap on the search itself
 
@@ -67,9 +67,9 @@ searxng_url = "http://127.0.0.1:8888"
 #   openssl ecparam -genkey -name prime256v1 -noout -out config/vapid.pem
 # The public key is served to clients at GET /api/push/vapid_public_key.
 #
-[channels.webpush]
-vapid_pem_file = "config/vapid.pem"
-subject = "https://note.example.com"
+# [channels.webpush]
+# vapid_pem_file = "config/vapid.pem"
+# subject = "mailto:admin@example.com"
 
 # Telegram makes a bot chat one more window onto the same conversations: a
 # check-in arrives there, the reply runs the same Talk session the web does,

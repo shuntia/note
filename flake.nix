@@ -57,10 +57,12 @@
         postInstall = ''
           mkdir -p $out/share/note
           ln -s ${web} $out/share/note/web
+          cp -r --no-preserve=mode ${./config/defaults} $out/share/note/defaults
         '';
         passthru.web = web;
       });
     in {
+      nixosModules.default = import ./nix/module.nix self;
       packages.${system} = {
         default = server;
         note-server = server;

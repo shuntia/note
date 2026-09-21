@@ -32,14 +32,26 @@ fn default_web_dir() -> PathBuf {
     PathBuf::from(option_env!("NOTE_DEFAULT_WEB_DIR").unwrap_or("web/dist"))
 }
 
+/// Shipped defaults (`user.toml`, `prompts/`, `templates/`): `NOTE_DEFAULTS_DIR`
+/// when set, so a packaged install keeps them apart from per-user state.
+pub fn defaults_dir(config_dir: &Path) -> PathBuf {
+    std::env::var_os("NOTE_DEFAULTS_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| config_dir.join("defaults"))
+}
+
 fn default_secrets_dir() -> PathBuf {
     PathBuf::from("persist/secrets")
 }
 
 impl ServerConfig {
     pub fn load(config_dir: &Path) -> anyhow::Result<Self> {
-        let raw = std::fs::read_to_string(config_dir.join("server.toml"))
-            .context("reading server.toml")?;
+        Self::load_file(&config_dir.join("server.toml"))
+    }
+
+    pub fn load_file(path: &Path) -> anyhow::Result<Self> {
+        let raw = std::fs::read_to_string(path)
+            .with_context(|| format!("reading {}", path.display()))?;
         Ok(toml::from_str(&raw)?)
     }
 
@@ -310,7 +322,7 @@ impl UserConfig {
     /// file), validated the same way `load` validates the file on disk.
     pub fn from_overlay(config_dir: &Path, raw: Option<&str>) -> anyhow::Result<Self> {
         let defaults: toml::Value = toml::from_str(
-            &std::fs::read_to_string(config_dir.join("defaults/user.toml"))
+            &std::fs::read_to_string(defaults_dir(config_dir).join("user.toml"))
                 .context("reading defaults/user.toml")?,
         )?;
         let merged = match raw {

@@ -63,6 +63,10 @@ client under `web/dist` (see "Web client" below).
    (default `./data`, already gitignored).
 
 `NOTE_CONFIG_DIR` overrides the config directory (default `./config`).
+`NOTE_SERVER_CONFIG` names the `server.toml` to read instead of the one in it,
+and `NOTE_DEFAULTS_DIR` the shipped `defaults/` tree (the Nix package carries
+one under `share/note/defaults`); `users/` stays under the config directory,
+since the server writes it.
 
 ## Config layout
 
@@ -1032,8 +1036,64 @@ all of them and blocks sign-in.
 
 ## Running as a systemd service
 
+### NixOS
+
+The flake exports a module that runs the server as its own `note` user, with
+every secret handed over through systemd `LoadCredential` so it never reaches
+the Nix store:
+
+```nix
+# flake inputs
+inputs.note.url = "github:<you>/note";
+
+# in the system configuration
+imports = [ inputs.note.nixosModules.default ];
+
+services.note = {
+  enable = true;
+  credentials = {
+    "openrouter.key" = "/run/secrets/note/openrouter.key";
+    "vapid.pem"      = "/run/secrets/note/vapid.pem";
+    admin_totp       = "/run/secrets/note/admin_totp";   # optional legacy seed
+  };
+  settings = {
+    public_base_url = "https://note.example.com";
+    providers.llm = {
+      kind = "openai";
+      base_url = "https://openrouter.ai/api/v1";
+      model = "deepseek/deepseek-v4-flash";
+      api_key_file = "/run/credentials/note.service/openrouter.key";
+    };
+    channels.webpush = {
+      vapid_pem_file = "/run/credentials/note.service/vapid.pem";
+      subject = "mailto:admin@example.com";
+    };
+  };
+};
+```
+
+`settings` is `server.toml` as Nix; `data_dir` and `secrets_dir` default to
+`/var/lib/note/data` and the credentials directory. Everything the server
+writes — the database, memory files, per-user settings and prompt overrides —
+lives under `stateDir` (`/var/lib/note`), which is the one directory to back
+up or, on an impermanent root, to persist:
+
+```nix
+environment.persistence."/persist".directories = [
+  { directory = "/var/lib/note"; user = "note"; group = "note"; mode = "0700"; }
+];
+```
+
+`note-ctl` runs the CLI subcommands against the service's state as its user:
+
+```sh
+sudo note-ctl create-user <name> <password> --admin
+```
+
+### Other hosts
+
 From the flake, install the package into your profile and run it as a user
-service (no root needed; enable lingering so it survives logout):
+service (enable lingering so it survives logout):
 
 ```sh
 nix profile add .#note-server        # later: nix profile upgrade note-server
@@ -1048,7 +1108,7 @@ Wants=network-online.target
 StartLimitIntervalSec=0
 
 [Service]
-WorkingDirectory=~/Projects/note
+WorkingDirectory=%h/note
 ExecStart=%h/.nix-profile/bin/note-server
 Restart=on-failure
 RestartSec=3
@@ -1062,26 +1122,5 @@ systemctl --user daemon-reload
 systemctl --user enable --now note
 ```
 
-`WorkingDirectory` is where `config/` and `data/` live. The same unit works
-system-wide with a host-built binary:
-
-```ini
-[Unit]
-Description=Note server
-After=network.target
-
-[Service]
-ExecStart=~/Projects/note/target/release/note-server
-WorkingDirectory=~/Projects/note
-Restart=on-failure
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Install to `/etc/systemd/system/note.service`, then:
-
-```sh
-sudo systemctl daemon-reload
-sudo systemctl enable --now note
-```
+`WorkingDirectory` holds `config/` and `data/`; relative paths in
+`server.toml` resolve against it.
