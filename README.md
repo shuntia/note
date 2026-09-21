@@ -1043,12 +1043,23 @@ every secret handed over through systemd `LoadCredential` so it never reaches
 the Nix store:
 
 ```nix
-# flake inputs
-inputs.note.url = "github:<you>/note";
+# flake.nix
+{
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  inputs.note.url = "github:<owner>/note";
+  inputs.note.inputs.nixpkgs.follows = "nixpkgs";
 
-# in the system configuration
-imports = [ inputs.note.nixosModules.default ];
+  outputs = { nixpkgs, note, ... }: {
+    nixosConfigurations.<host> = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux";          # or aarch64-linux
+      modules = [ note.nixosModules.default ./configuration.nix ];
+    };
+  };
+}
+```
 
+```nix
+# configuration.nix
 services.note = {
   enable = true;
   credentials = {
@@ -1072,23 +1083,37 @@ services.note = {
 };
 ```
 
-`settings` is `server.toml` as Nix; `data_dir` and `secrets_dir` default to
-`/var/lib/note/data` and the credentials directory. Everything the server
-writes — the database, memory files, per-user settings and prompt overrides —
-lives under `stateDir` (`/var/lib/note`), which is the one directory to back
-up or, on an impermanent root, to persist:
+Only `enable` and `settings.public_base_url` are required; without
+`providers` the server runs on the built-in mock.
 
-```nix
-environment.persistence."/persist".directories = [
-  { directory = "/var/lib/note"; user = "note"; group = "note"; mode = "0700"; }
-];
-```
+`settings` is `server.toml` as Nix; `bind_addr` defaults to `127.0.0.1:3271`,
+`data_dir` and `secrets_dir` to `/var/lib/note/data` and the credentials
+directory. Each `credentials` entry is readable by the service at
+`/run/credentials/note.service/<name>` (also `config.services.note.credentialPath
+"<name>"`), and an `admin_totp` entry installs the legacy admin seed.
+`environmentFile` supplies variables such as `ANTHROPIC_API_KEY` for a
+provider's `api_key_env`; `openFirewall` opens the `bind_addr` port. The
+module's default `package` is this flake's `note-server`; `overlays.default`
+adds it to `pkgs` for other uses.
+
+Everything the server writes — the database, memory files, per-user settings
+and prompt overrides — lives under `stateDir` (`/var/lib/note`), the one
+directory to back up or, on an impermanent root, to persist.
 
 `note-ctl` runs the CLI subcommands against the service's state as its user:
 
 ```sh
 sudo note-ctl create-user <name> <password> --admin
 ```
+
+To upgrade, back up `/var/lib/note/data/note.db`, then:
+
+```sh
+nix flake update note
+sudo nixos-rebuild switch --flake .#<host>
+```
+
+Database migrations run when the service restarts.
 
 ### Other hosts
 
@@ -1124,3 +1149,7 @@ systemctl --user enable --now note
 
 `WorkingDirectory` holds `config/` and `data/`; relative paths in
 `server.toml` resolve against it.
+
+## License
+
+Released into the public domain under the [Unlicense](UNLICENSE).

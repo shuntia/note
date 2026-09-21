@@ -4,7 +4,7 @@
 # overrides) lives under `stateDir`; the shipped defaults and web client come
 # from the package. Secrets never enter the Nix store: each entry of
 # `credentials` is handed over with systemd LoadCredential, so the source files
-# can stay root-only (e.g. under /persist/secrets/note) and the service reads
+# can stay root-only (e.g. under /run/secrets/note) and the service reads
 # them from /run/credentials/note.service/<name>.
 self:
 { config, lib, pkgs, ... }:
@@ -23,8 +23,9 @@ let
   # service's own config and state, as the service user.
   ctl = pkgs.writeShellScriptBin "note-ctl" ''
     exec ${pkgs.util-linux}/bin/runuser -u ${cfg.user} -- \
+      ${pkgs.coreutils}/bin/env --chdir=${cfg.stateDir} \
       ${lib.concatStringsSep " " (lib.mapAttrsToList (k: v: "${k}=${lib.escapeShellArg v}") env)} \
-      ${pkgs.coreutils}/bin/env --chdir=${cfg.stateDir} ${lib.getExe cfg.package} "$@"
+      ${lib.getExe cfg.package} "$@"
   '';
 in
 {
@@ -50,9 +51,9 @@ in
       type = lib.types.attrsOf lib.types.path;
       default = { };
       example = {
-        "openrouter.key" = "/persist/secrets/note/openrouter.key";
-        "vapid.pem" = "/persist/secrets/note/vapid.pem";
-        admin_totp = "/persist/secrets/note/admin_totp";
+        "openrouter.key" = "/run/secrets/note/openrouter.key";
+        "vapid.pem" = "/run/secrets/note/vapid.pem";
+        admin_totp = "/run/secrets/note/admin_totp";
       };
       description = ''
         Secret files loaded with LoadCredential and readable by the service at
