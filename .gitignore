@@ -9,3 +9,5 @@ config/vapid.pem
 persist/
 config/openrouter.key
 config/telegram.token
+config/*.key
+config/*.pem
