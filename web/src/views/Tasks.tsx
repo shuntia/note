@@ -94,6 +94,15 @@ function matches(node: TaskNode, words: string[]): boolean {
   return words.every((w) => hay.includes(w))
 }
 
+// The category rides after the title as `.meta`, so a title that opens with it
+// says it twice. Display only: the stored title, and the search, keep the prefix.
+function shownTitle(node: TaskNode): string {
+  const prefix = `${node.category} — `
+  return node.category !== '' && node.title.startsWith(prefix)
+    ? node.title.slice(prefix.length)
+    : node.title
+}
+
 // The user's categories, the ones they use most first.
 function categoriesOf(nodes: TaskNode[]): string[] {
   const counts = new Map<string, number>()
@@ -1363,7 +1372,7 @@ function Row({
           onClick={() => (done ? reopen() : actions.complete(node))}
         />
         <div className="task-body">
-          <span className="task-title">{node.title}</span>
+          <span className="task-title">{shownTitle(node)}</span>
           {steps.length > 0 ? (
             <button
               className="task-fold"

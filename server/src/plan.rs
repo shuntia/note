@@ -36,6 +36,7 @@ pub struct TaskRef {
     pub title: String,
     pub state: String,
     pub step: Option<String>,
+    pub category: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -204,7 +205,8 @@ pub fn events_for(conn: &Connection, user_id: i64, date: jiff::civil::Date) -> R
         "SELECT e.id, e.kind, e.wall_time, e.end_wall_time, e.status, e.flexibility,
                 e.slide_window_min, e.channel, e.alert,
                 m.id, mp.date, m.wall_time, m.kind, e.span_min,
-                e.origin, e.decided_at, t.id, t.title, t.state, e.prompt, pt.title
+                e.origin, e.decided_at, t.id, t.title, t.state, e.prompt, pt.title,
+                COALESCE(pt.category, t.category)
          FROM events e JOIN plans p ON p.id = e.plan_id
          LEFT JOIN events m ON m.id = e.moved_to_event_id
          LEFT JOIN plans mp ON mp.id = m.plan_id
@@ -245,9 +247,10 @@ pub fn events_for(conn: &Connection, user_id: i64, date: jiff::civil::Date) -> R
             task: r.get::<_, Option<i64>>(16)?.map(|id| {
                 let title: String = r.get(17)?;
                 let state: String = r.get(18)?;
+                let category: String = r.get::<_, Option<String>>(21)?.unwrap_or_default();
                 Ok::<_, rusqlite::Error>(match r.get::<_, Option<String>>(20)? {
-                    Some(parent) => TaskRef { id, title: parent, state, step: Some(title) },
-                    None => TaskRef { id, title, state, step: None },
+                    Some(parent) => TaskRef { id, title: parent, state, step: Some(title), category },
+                    None => TaskRef { id, title, state, step: None, category },
                 })
             }).transpose()?,
         })

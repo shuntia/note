@@ -5,6 +5,7 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  type CSSProperties,
   type MouseEvent as ReactMouseEvent,
 } from 'react'
 import { createPortal } from 'react-dom'
@@ -49,6 +50,8 @@ const KIND_LABEL: Record<CalendarKind, string> = {
 const deleteHold = makeHold<number>()
 
 const pad = (n: number) => String(n).padStart(2, '0')
+// Whole lines of a name a band that many hours tall has room for.
+const bandLines = (hours: number) => Math.max(1, Math.floor(1.73 * hours - 0.43))
 const pct = (m: number) => `${((Math.min(END, Math.max(START, m)) - START) / (END - START)) * 100}%`
 
 const isoOf = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
@@ -675,7 +678,8 @@ function WeekGrid({
                   style={{
                     top: `calc(var(--hour) * ${(o.start - START) / 60})`,
                     height: `calc(var(--hour) * ${height})`,
-                  }}
+                    '--band-lines': bandLines(height),
+                  } as CSSProperties}
                   onClick={() => onPick(o.entry, date)}
                   onKeyDown={(e) => {
                     if (e.key !== 'Enter' && e.key !== ' ') return
@@ -699,7 +703,8 @@ function WeekGrid({
                   style={{
                     top: `calc(var(--hour) * ${(start - START) / 60})`,
                     height: `calc(var(--hour) * ${height})`,
-                  }}
+                    '--band-lines': bandLines(height),
+                  } as CSSProperties}
                 >
                   <span className="band-label">{blockTitle(ev)}</span>
                   <BlockMenu event={ev} items={blockItems(ev)} />
@@ -708,7 +713,7 @@ function WeekGrid({
             })}
           </div>
         ))}
-        {thisWeek && (
+        {thisWeek && now >= START && now <= END && (
           <span className="week-now" style={{ top: `calc(var(--hour) * ${(now - START) / 60})` }}>
             {quietUntil && (
               <span className="cal-quiet">

@@ -85,10 +85,19 @@ function todayIso(): string {
 
 // What the row is called: a block laid for a task carries the task's own name, and
 // a block laid for one of its steps is named after the step, the task behind it.
+// A title that opens with the task's own category says the course twice over.
+function withoutCategory(title: string, category: string): string {
+  const prefix = `${category} — `
+  if (!category || !title.startsWith(prefix)) return title
+  const rest = title.slice(prefix.length).trim()
+  return rest === '' ? title : rest
+}
+
 function rowParts(ev: PlanEvent): { name: string; of: string | null } {
   if (!ev.task) return { name: eventLabel(ev.kind), of: null }
-  if (ev.task.step) return { name: ev.task.step, of: ev.task.title }
-  return { name: ev.task.title, of: null }
+  const title = withoutCategory(ev.task.title, ev.task.category)
+  if (ev.task.step) return { name: ev.task.step, of: title }
+  return { name: title, of: null }
 }
 
 function minutesOfDayNow(): number {

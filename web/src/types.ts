@@ -12,6 +12,7 @@ export type TaskRef = {
   title: string
   state: TaskState
   step: string | null
+  category: string
   notify?: TaskNotify
 }
 

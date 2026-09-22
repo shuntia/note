@@ -128,6 +128,7 @@
     flex: none;
     transform: none;
     visibility: visible;
+    background: none;
     box-shadow: none;
     border-right: 1px solid var(--line);
     transition: none;

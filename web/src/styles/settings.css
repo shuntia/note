@@ -1,7 +1,22 @@
 /* ── horizon: settings ──────────────────────────────────────────── */
 .view:has(> .settings) { padding: 0; }
-.settings { padding: 3.5rem 1.5rem 6.25rem; max-width: 35rem; display: flex; flex-direction: column; gap: 1.625rem; }
+.settings { padding: 3.5rem 1rem 6.25rem; max-width: 35rem; display: flex; flex-direction: column; gap: 1.625rem; }
 @media (min-width: 768px) { .settings { padding: 2.875rem 0 0 var(--rail); max-width: 40rem; } }
+/* one tall column would leave two thirds of a wide screen empty: the groups pair up */
+@media (min-width: 1200px) {
+  .settings {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 30rem));
+    align-content: start;
+    gap: 1.625rem 4rem;
+    max-width: none;
+    padding-right: var(--rail);
+  }
+  .settings > :not(.set-group) { grid-column: 1 / -1; }
+  /* a switch's hit box reaches a viewport to its left to cover its own row: paired
+     columns have to keep it out of the column beside them */
+  .set-group { overflow-x: clip; }
+}
 .set-group { display: flex; flex-direction: column; gap: 0.125rem; }
 .set-group-head {
   margin: 0 0 0.25rem;

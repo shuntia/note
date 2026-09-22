@@ -91,7 +91,9 @@
 .week-hour span { position: absolute; left: 0; transform: translateY(-50%); }
 .week-gutter { position: relative; }
 .week-col { position: relative; border-left: 1px solid var(--track); }
-.week-col.is-today { background: color-mix(in srgb, var(--haze-strong) 55%, transparent); }
+/* an ink tint, not a wash: the day's own blocks are the pale ones and have to
+   read against the column they sit on */
+.week-col.is-today { background: color-mix(in oklch, var(--ink) 5%, transparent); }
 .week-rule { position: absolute; left: var(--gutter); right: 0; height: 1px; background: var(--track); pointer-events: none; }
 .week-rule.major { background: var(--line); opacity: 0.5; }
 .week-now { position: absolute; left: var(--gutter); right: 0; height: 1px; background: var(--ink); opacity: 0.7; z-index: 3; pointer-events: none; }
@@ -110,7 +112,10 @@
 .band.task.settled { background: none; border-left-color: var(--line); }
 .band.note { background: none; border-top: 2px solid var(--quiet); border-radius: 0; height: 0 !important; z-index: 3; }
 .band { overflow: hidden; text-align: left; }
-.band-label { display: block; padding: 0.125rem 0.25rem; font-size: 0.625rem; line-height: 1.2; font-weight: 500; overflow-wrap: anywhere; pointer-events: none; }
+/* the name keeps to the whole lines its band has room for (--band-lines comes from
+   the band's height), and carries no padding under the last one: overflow clips at
+   the padding edge, so the ascenders of the line after it would show through */
+.band-label { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: var(--band-lines, 99); padding: 0.125rem 0.25rem 0; font-size: 0.625rem; line-height: 1.2; font-weight: 500; overflow: hidden; overflow-wrap: anywhere; pointer-events: none; }
 .band.note { overflow: visible; }
 /* under half an hour there is no room for a name: the tip carries it */
 .band.short .band-label { display: none; }
@@ -122,7 +127,7 @@
 /* the grid and the line carry a transform of their own, so the part of the calendar
    holding an open menu has to rise over the rest of it */
 .cal:has(.band-menu[data-open='true']) :is(.week, .cal-line) { position: relative; z-index: 10; }
-.band.note .band-label { padding-top: 0.0625rem; color: var(--quiet); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.band.note .band-label { display: block; padding-top: 0.0625rem; color: var(--quiet); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* ── the entry sheet ─────────────────────────────────────────── */
 .sheet-top { display: flex; align-items: center; gap: 0.5rem; }
@@ -161,7 +166,7 @@
   .week-head .ws-num { width: 2rem; height: 2rem; font-size: 1.0625rem; }
   .week .band { left: 0.25rem; right: 0.375rem; border-radius: 0.5rem; }
   .week-hour { font-size: 0.72rem; }
-  .band-label { padding: 0.1875rem 0.375rem; font-size: 0.72rem; }
+  .band-label { padding: 0.1875rem 0.375rem 0; font-size: 0.72rem; }
 }
 
 @media (prefers-reduced-motion: reduce) {
