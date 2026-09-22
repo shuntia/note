@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { admin, ApiError } from '../api'
 import type { ToastAction } from '../app'
+import '../styles/settings.css'
 import { signChallenge } from '../webauthn'
 import type {
   AdminGate,

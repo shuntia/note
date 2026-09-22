@@ -6,6 +6,7 @@ import { prefsFrom, writePrefs } from '../prefs'
 import { disablePush, enablePush, pushState } from '../push'
 import { eventLabel } from '../receipts'
 import type { CounterMode } from '../session'
+import '../styles/settings.css'
 import { applyTheme, saveTheme, storedTheme, type ThemeChoice } from '../theme'
 import type {
   Me,
@@ -379,6 +380,7 @@ export function Settings({
 
   const busy = save?.kind === 'busy'
   const themeLabel = THEMES.find((t) => t.id === theme)?.label ?? 'System'
+  const counterLabel = COUNTERS.find((c) => c.id === loaded?.counter)?.label ?? 'Remaining'
 
   return (
     <div className="settings">
@@ -392,19 +394,7 @@ export function Settings({
       )}
 
       {loaded && (
-        <Group head="HOME">
-          <div className="set-row">
-            <span className="set-row-body">
-              <span className="set-label">Arc between sessions</span>
-            </span>
-            <Status save={save} row="arc" />
-            <Switch
-              label="Arc between sessions"
-              on={loaded.arc}
-              disabled={busy}
-              onToggle={() => void commitHome('arc', { show_arc_between_sessions: !loaded.arc })}
-            />
-          </div>
+        <Group head="Sessions">
           <FoldRow
             label="Pomodoro"
             value={
@@ -463,31 +453,8 @@ export function Settings({
             )}
           </FoldRow>
           <FoldRow
-            label="Close the day"
-            value={loaded.draft.close_day_time || 'Off'}
-            open={open === 'close_day'}
-            onToggle={fold('close_day')}
-          >
-            {open === 'close_day' && (
-              <div className="set-fold-body">
-                <span className="set-sub">
-                  At this hour Note asks what is still open and offers to carry it to
-                  tomorrow. Clear the time to leave the day to end on its own.
-                </span>
-                <input
-                  type="time"
-                  aria-label="Close the day"
-                  value={loaded.draft.close_day_time}
-                  onChange={(e) => edit('close_day_time', e.target.value)}
-                  {...commitOn('close_day')}
-                />
-                <Status save={save} row="close_day" />
-              </div>
-            )}
-          </FoldRow>
-          <FoldRow
             label="Counter"
-            value={loaded.counter}
+            value={counterLabel}
             open={open === 'counter'}
             onToggle={fold('counter')}
           >
@@ -509,20 +476,32 @@ export function Settings({
               </div>
             )}
           </FoldRow>
+          <div className="set-row">
+            <span className="set-row-body">
+              <span className="set-label">Show the wait as an arc</span>
+            </span>
+            <Status save={save} row="arc" />
+            <Switch
+              label="Show the wait as an arc"
+              on={loaded.arc}
+              disabled={busy}
+              onToggle={() => void commitHome('arc', { show_arc_between_sessions: !loaded.arc })}
+            />
+          </div>
         </Group>
       )}
 
       {loaded && (
-        <Group head="DAY">
+        <Group head="Day">
           <FoldRow
             label="Routines and blocks"
-            value={String(loaded.rows.length)}
+            value={loaded.draft.template}
             open={open === 'schedule'}
             onToggle={fold('schedule')}
           >
             {open === 'schedule' && (
               <div className="set-fold-body">
-{templateChoices(loaded).length > 1 && (
+                {templateChoices(loaded).length > 1 && (
                   <select
                     aria-label="Shape of the day"
                     value={loaded.draft.template}
@@ -543,37 +522,62 @@ export function Settings({
               </div>
             )}
           </FoldRow>
-          <div className="set-row">
-            <span className="set-row-body">
-              <span className="set-label">Nightly plan</span>
-              <span className="set-sub">Plans the day and writes the letter</span>
-            </span>
-            <Status save={save} row="nightly_enabled" />
-            <Switch
-              label="Nightly plan"
-              on={loaded.nightly}
-              disabled={busy}
-              onToggle={() =>
-                void commitFeature('nightly_enabled', { nightly_enabled: !loaded.nightly })
-              }
-            />
-          </div>
           <FoldRow
-            label="Nightly letter"
-            value={loaded.draft.nightly_time}
+            label="Nightly plan"
+            value={loaded.nightly ? `On, ${loaded.draft.nightly_time}` : 'Off'}
             open={open === 'nightly'}
             onToggle={fold('nightly')}
           >
             {open === 'nightly' && (
               <div className="set-fold-body">
+                <div className="set-row">
+                  <span className="set-row-body">
+                    <span className="set-label">Plans the day and writes the letter</span>
+                  </span>
+                  <Status save={save} row="nightly_enabled" />
+                  <Switch
+                    label="Nightly plan"
+                    on={loaded.nightly}
+                    disabled={busy}
+                    onToggle={() =>
+                      void commitFeature('nightly_enabled', { nightly_enabled: !loaded.nightly })
+                    }
+                  />
+                </div>
+                <label className="set-sub" htmlFor="nightly-time">
+                  Lands at
+                </label>
                 <input
+                  id="nightly-time"
                   type="time"
-                  aria-label="Nightly letter"
                   value={loaded.draft.nightly_time}
                   onChange={(e) => edit('nightly_time', e.target.value)}
                   {...commitOn('nightly')}
                 />
                 <Status save={save} row="nightly" />
+              </div>
+            )}
+          </FoldRow>
+          <FoldRow
+            label="Close the day"
+            value={loaded.draft.close_day_time || 'Off'}
+            open={open === 'close_day'}
+            onToggle={fold('close_day')}
+          >
+            {open === 'close_day' && (
+              <div className="set-fold-body">
+                <span className="set-sub">
+                  At this hour Note asks what is still open and offers to carry it to
+                  tomorrow. Clear the time to leave the day to end on its own.
+                </span>
+                <input
+                  type="time"
+                  aria-label="Close the day"
+                  value={loaded.draft.close_day_time}
+                  onChange={(e) => edit('close_day_time', e.target.value)}
+                  {...commitOn('close_day')}
+                />
+                <Status save={save} row="close_day" />
               </div>
             )}
           </FoldRow>
@@ -606,23 +610,8 @@ export function Settings({
         </Group>
       )}
 
-      <Group head="REACH">
+      <Group head="Notifications">
         <PushRow notify={notify} />
-        <div className="set-row">
-          <span className="set-row-body">
-            <span className="set-label">Test notification</span>
-            <span className="set-sub">Goes out the way a fired event would</span>
-          </span>
-          <Status save={save} row="test" />
-          <button
-            type="button"
-            className="btn-haze small"
-            disabled={busy}
-            onClick={() => void sendTest()}
-          >
-            Send test
-          </button>
-        </div>
         {loaded?.telegramEnabled && (
           <FoldRow
             label="Telegram"
@@ -704,7 +693,7 @@ export function Settings({
         {loaded && (
           <FoldRow
             label="Check-ins from Note"
-            value={`up to ${loaded.draft.triggers_per_day} a day`}
+            value={`Up to ${loaded.draft.triggers_per_day} a day`}
             open={open === 'triggers'}
             onToggle={fold('triggers')}
           >
@@ -729,13 +718,24 @@ export function Settings({
                   {...commitOn('triggers')}
                 />
                 <Status save={save} row="triggers" />
+                <div className="set-acts">
+                  <button
+                    type="button"
+                    className="set-link"
+                    disabled={busy}
+                    onClick={() => void sendTest()}
+                  >
+                    Send a test notification
+                  </button>
+                  <Status save={save} row="test" />
+                </div>
               </div>
             )}
           </FoldRow>
         )}
       </Group>
 
-      <Group head="NOTE">
+      <Group head="You">
         {loaded && (
           <FoldRow
             label="Your name"
@@ -757,11 +757,6 @@ export function Settings({
             )}
           </FoldRow>
         )}
-        {/* The prompt editor stays mounted and renders nothing while closed, so an
-            unsaved draft survives a detour through another row. */}
-        <FoldRow label="How Note talks" open={open === 'persona'} onToggle={fold('persona')}>
-          <PersonaSection active={open === 'persona'} notify={notify} />
-        </FoldRow>
         <FoldRow
           label="Theme"
           value={themeLabel}
@@ -787,20 +782,22 @@ export function Settings({
         </FoldRow>
       </Group>
 
-      <Group head="SECURITY">
+      <Group head="Advanced">
+        {/* The prompt editor stays mounted and renders nothing while closed, so an
+            unsaved draft survives a detour through another row. */}
+        <FoldRow label="How Note talks" open={open === 'persona'} onToggle={fold('persona')}>
+          <PersonaSection active={open === 'persona'} notify={notify} />
+        </FoldRow>
         <FoldRow label="Passkeys and codes" open={open === 'security'} onToggle={fold('security')}>
           {open === 'security' && <SecuritySection notify={notify} />}
         </FoldRow>
-      </Group>
-
-      <Group head="API TOKENS">
-        <FoldRow label="Tokens" open={open === 'tokens'} onToggle={fold('tokens')}>
+        <FoldRow label="API tokens" open={open === 'tokens'} onToggle={fold('tokens')}>
           {open === 'tokens' && <TokensSection notify={notify} />}
         </FoldRow>
       </Group>
 
       {me.admin && (
-        <Group head="ADMIN">
+        <Group head="Admin">
           <button className="set-row set-open" onClick={openAdmin}>
             <span className="set-row-body">
               <span className="set-label">Admin panel</span>
@@ -813,7 +810,7 @@ export function Settings({
       )}
 
       <button
-        className="set-signout"
+        className="btn-haze small set-signout"
         onClick={async () => {
           try {
             await api.logout()
