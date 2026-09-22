@@ -3,18 +3,139 @@
 .tasks { width: 100%; padding: 3.5rem 1rem 6.25rem; max-width: 45rem; margin: 0 auto; }
 @media (min-width: 768px) {
   .tasks { margin: 0; max-width: none; padding: 2.875rem var(--rail) 3rem; }
-  .task-add { max-width: max(32.5rem, 27vw); }
+  .task-box { max-width: max(32.5rem, 27vw); }
 }
 
-.task-add { margin-bottom: 1.625rem; }
+.task-box { display: flex; align-items: center; gap: 0.25rem; margin-bottom: 0.875rem; }
+.task-add { flex: 1; min-width: 0; }
 /* the one filled control on this screen, and only with something to save */
 .tasks .task-add button:not(:disabled) { background: var(--ink); color: var(--ivory); }
+.task-add-more { position: relative; flex: none; }
+.task-add-more .ev-more { width: 2.25rem; height: 2.25rem; color: var(--faint); }
+
+/* a goal is named and dated in the box a task would have been typed into */
+.task-box:has(.task-goal-add) { max-width: none; }
+.task-goal-add { gap: 0.5rem; padding-right: 0.5rem; max-width: 40rem; }
+.task-goal-add > * { flex: none; }
+.task-goal-add input:not([type='date']) { flex: 1; min-width: 4rem; }
+.task-goal-add input[type='date'] {
+  width: auto;
+  font-size: 0.85rem;
+  color: var(--quiet);
+  font-variant-numeric: tabular-nums;
+}
+.task-goal-add button {
+  width: auto;
+  height: 2.25rem;
+  border-radius: 999px;
+  padding: 0 0.875rem;
+  font-size: 0.875rem;
+}
+.tasks .task-goal-add button[type='button'] { background: none; color: var(--quiet); }
+
+/* the user's own categories, the ones they use most first */
+.tasks .task-cats {
+  flex-wrap: wrap;
+  max-width: 100%;
+  background: none;
+  padding: 0;
+  gap: 0.375rem;
+  margin-bottom: 1.25rem;
+}
+.tasks .task-cats button {
+  padding: 0.375rem 0.8125rem;
+  font-size: 0.8125rem;
+  background: var(--track);
+}
+.tasks .task-cats button[aria-pressed='true'] { background: var(--haze-strong); }
+.task-hint { margin: 0 0 1.25rem; }
+
+.task-sort { align-self: center; }
+.tasks .task-sort button { padding: 0.3125rem 0.6875rem; font-size: 0.8125rem; }
+/* wide enough to sit at the far end of the heading's line; narrow, it takes
+   the next line and starts where the heading did */
+@media (min-width: 768px) {
+  .task-sort { margin-left: auto; }
+}
+
+.task-sub-head {
+  margin: 1rem 0 0.125rem;
+  font-family: var(--display);
+  font-weight: 500;
+  font-size: 1rem;
+  letter-spacing: -0.015em;
+  color: var(--ink);
+}
+.task-cat:first-of-type .task-sub-head { margin-top: 0.25rem; }
+
+/* what a menu row asked to be typed: named here, on the row it belongs to */
+.task-inline { display: flex; align-items: center; gap: 0.5rem; padding: 0 0 0.625rem 2.25rem; }
+.task-inline input {
+  min-width: 0;
+  flex: 1;
+  max-width: 16rem;
+  min-height: 2.25rem;
+  border: 0;
+  border-radius: 999px;
+  background: var(--haze-strong);
+  padding: 0.375rem 0.875rem;
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.875rem;
+}
+.task-inline input[type='date'] { flex: none; font-variant-numeric: tabular-nums; }
+.task-inline button {
+  border: 0;
+  border-radius: 999px;
+  background: none;
+  color: var(--quiet);
+  font: inherit;
+  font-size: 0.875rem;
+  padding: 0.375rem 0.75rem;
+  cursor: pointer;
+}
+.task-inline button[type='submit'] { background: var(--ink); color: var(--ivory); }
+.task-inline :is(input, button):focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+
+/* a goal reads like a task whose tick is the fold to the tasks under it */
+.goal-chev {
+  grid-area: tick;
+  width: 1.5rem;
+  height: 1.5rem;
+  display: grid;
+  place-items: center;
+  border: 0;
+  background: none;
+  color: var(--faint);
+  padding: 0;
+  cursor: pointer;
+  flex: none;
+}
+.goal-chev svg {
+  width: 1rem;
+  height: 1rem;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: transform 200ms;
+}
+.goal-chev[aria-expanded='true'] svg { transform: rotate(90deg); }
+.goal-chev:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+.goal-row .task-bar { height: 0.25rem; }
+.goal-tasks { padding-left: 2.25rem; }
+.goal-tasks .task-row { padding-block: 0.375rem; }
 
 .task-group { display: flex; flex-direction: column; gap: 0.25rem; margin-top: 1.75rem; }
 .task-group:first-of-type { margin-top: 0; }
 .task-group.done { margin-top: 0; }
 .task-group-head {
   margin: 0;
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.5rem;
   font-family: var(--display);
   font-weight: 500;
   font-size: 1.375rem;
@@ -36,7 +157,7 @@
    stays one list, as wide as a column once there are two */
 .tasks { container-type: inline-size; }
 @media (min-width: 1088px) {
-  .task-group:not(.now) .task-list { columns: 38rem; column-gap: 4rem; }
+  .task-group:not(.now, .goals) .task-list { columns: 38rem; column-gap: 4rem; }
   .task-item { break-inside: avoid; }
 }
 @container (min-width: 80rem) {
@@ -359,7 +480,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .task-done-fold svg, .task-fold svg,
+  .task-done-fold svg, .task-fold svg, .goal-chev svg,
   .tick, .tick svg,
   .task-start,
   .task-title::after, .task-step-title::after,

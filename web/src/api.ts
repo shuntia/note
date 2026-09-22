@@ -13,6 +13,8 @@ import type {
   DayView,
   Debrief,
   FlattenResult,
+  Goal,
+  GoalState,
   InspectUser,
   Me,
   MemoryFact,
@@ -75,6 +77,17 @@ type NewTaskOpts = {
   url?: string
   notify?: TaskNotify
   progress?: number
+  category?: string
+  goal_id?: number
+}
+
+type NewGoal = { title: string; description?: string; due_at?: string | null }
+
+type GoalPatch = {
+  title?: string
+  description?: string
+  state?: GoalState
+  due_at?: string | null
 }
 
 // A calendar entry recurs on `days` or happens once on `on_date`, never both.
@@ -96,6 +109,9 @@ type TaskPatch = {
   url?: string
   notify?: TaskNotify
   progress?: number
+  category?: string
+  // null detaches the task from whatever goal it was on.
+  goal_id?: number | null
 }
 
 export class ApiError extends Error {
@@ -190,6 +206,20 @@ export const api = {
     }),
   flattenTask: (id: number) =>
     request<FlattenResult>(`/api/tasks/${id}/flatten`, { method: 'POST' }),
+  // Every state, so a caller that only wants the open ones says so itself.
+  goals: () => request<Goal[]>('/api/goals'),
+  addGoal: (fields: NewGoal) =>
+    request<Goal>('/api/goals', { method: 'POST', body: JSON.stringify(fields) }),
+  patchGoal: (id: number, patch: GoalPatch) =>
+    request<Goal>(`/api/goals/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
+  deleteGoal: (id: number) => request<void>(`/api/goals/${id}`, { method: 'DELETE' }),
+  // 401 when `current` is wrong, 422 when the new one is too short.
+  changePassword: (current: string, next: string) =>
+    request<void>('/api/password', {
+      method: 'POST',
+      body: JSON.stringify({ current, new: next }),
+      quiet401: true,
+    }),
   tokens: () => request<Token[]>('/api/tokens'),
   createToken: (name: string) =>
     request<TokenCreated>('/api/tokens', { method: 'POST', body: JSON.stringify({ name }) }),

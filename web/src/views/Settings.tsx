@@ -757,6 +757,9 @@ export function Settings({
             )}
           </FoldRow>
         )}
+        <FoldRow label="Password" open={open === 'password'} onToggle={fold('password')}>
+          {open === 'password' && <PasswordSection />}
+        </FoldRow>
         <FoldRow
           label="Theme"
           value={themeLabel}
@@ -824,6 +827,74 @@ export function Settings({
         Sign out
       </button>
     </div>
+  )
+}
+
+const MIN_PASSWORD = 8
+const WRONG_PASSWORD = "That isn't your current password."
+
+function PasswordSection() {
+  const [current, setCurrent] = useState('')
+  const [next, setNext] = useState('')
+  const [confirm, setConfirm] = useState('')
+  const [save, setSave] = useState<Save>(null)
+
+  const ready = current !== '' && next.length >= MIN_PASSWORD && next === confirm
+
+  const submit = async (e: FormEvent) => {
+    e.preventDefault()
+    if (!ready) return
+    setSave({ row: 'password', kind: 'busy' })
+    try {
+      await api.changePassword(current, next)
+      setCurrent('')
+      setNext('')
+      setConfirm('')
+      setSave({ row: 'password', kind: 'saved', message: 'Changed' })
+    } catch (err) {
+      const message =
+        err instanceof ApiError
+          ? err.status === 401
+            ? WRONG_PASSWORD
+            : err.message
+          : "Couldn't change the password. Try again."
+      setSave({ row: 'password', kind: 'failed', message })
+    }
+  }
+
+  return (
+    <form className="set-fold-body" onSubmit={(e) => void submit(e)}>
+      <input
+        type="password"
+        aria-label="Current password"
+        placeholder="Current password"
+        autoComplete="current-password"
+        value={current}
+        onChange={(e) => setCurrent(e.target.value)}
+      />
+      <input
+        type="password"
+        aria-label="New password"
+        placeholder="New password"
+        autoComplete="new-password"
+        value={next}
+        onChange={(e) => setNext(e.target.value)}
+      />
+      <input
+        type="password"
+        aria-label="Confirm the new password"
+        placeholder="Confirm the new password"
+        autoComplete="new-password"
+        value={confirm}
+        onChange={(e) => setConfirm(e.target.value)}
+      />
+      <div className="set-acts">
+        <button type="submit" className="btn-haze small" disabled={!ready || save?.kind === 'busy'}>
+          Change password
+        </button>
+        <Status save={save} row="password" />
+      </div>
+    </form>
   )
 }
 
