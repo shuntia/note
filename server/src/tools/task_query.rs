@@ -43,6 +43,9 @@ pub struct ListArgs {
     /// Case-insensitive substring of the title, the description or the notes.
     #[serde(default)]
     pub keyword: Option<String>,
+    /// Only tasks in this category, matched exactly.
+    #[serde(default)]
+    pub category: Option<String>,
     /// Only tasks added on or after this day, YYYY-MM-DD.
     #[serde(default)]
     pub added_after: Option<String>,
@@ -104,6 +107,10 @@ fn list_filters(ctx: &ToolCtx, args: &ListArgs) -> Result<(String, Vec<SqlValue>
                 .into(),
         );
         params.extend([needle.clone().into(), needle.clone().into(), needle.into()]);
+    }
+    if let Some(category) = &args.category {
+        wheres.push("category = ?".into());
+        params.push(category.trim().to_string().into());
     }
     if let Some(day) = &args.added_after {
         wheres.push("created_at >= ?".into());
@@ -188,7 +195,7 @@ pub fn list(conn: &Connection, ctx: &ToolCtx, args: ListArgs) -> Result<serde_js
             "SELECT id, title, state, is_now, duration_min, created_at, updated_at, due_at,
                     (SELECT COUNT(*) FROM tasks s WHERE s.parent_id = tasks.id AND s.state != 'dropped'),
                     (SELECT COUNT(*) FROM tasks s WHERE s.parent_id = tasks.id AND s.state = 'done'),
-                    progress, actual_min
+                    progress, actual_min, category, goal_id
              FROM tasks WHERE {wheres}
              ORDER BY {order} LIMIT {limit}"
         ))
@@ -212,6 +219,8 @@ pub fn list(conn: &Connection, ctx: &ToolCtx, args: ListArgs) -> Result<serde_js
                 "progress": progress,
                 "expected_min": expected_min,
                 "remaining_min": remaining_min,
+                "category": r.get::<_, String>(12)?,
+                "goal_id": r.get::<_, Option<i64>>(13)?,
             }))
         })
         .and_then(|rows| rows.collect::<rusqlite::Result<Vec<_>>>())
@@ -288,9 +297,13 @@ pub struct ReadArgs {
 /// added.
 pub fn read(conn: &Connection, ctx: &ToolCtx, args: ReadArgs) -> Result<serde_json::Value, ToolError> {
     unscoped(ctx)?;
-    let Some(node) = crate::tasks::node(conn, ctx.user_id, args.task_id).map_err(internal)? else {
+    let Some(mut node) = crate::tasks::node(conn, ctx.user_id, args.task_id).map_err(internal)?
+    else {
         return Err(ToolError::not_found(format!("no task {}", args.task_id)));
     };
+    let tz = crate::triggers::timezone(ctx.config_dir, ctx.username);
+    crate::tasks::stamp_schedule(conn, ctx.user_id, &tz, std::iter::once(&mut node.task))
+        .map_err(internal)?;
     let mut out = serde_json::to_value(&node).map_err(internal)?;
     let mut stmt = conn
         .prepare("SELECT id, created_at FROM tasks WHERE id = ?1 OR parent_id = ?1")
@@ -324,6 +337,12 @@ pub struct BulkUpdateArgs {
     /// True moves them all into Now, false moves them all back to Later.
     #[serde(default)]
     pub is_now: Option<bool>,
+    /// Puts them all in this category; an empty string clears it.
+    #[serde(default)]
+    pub category: Option<String>,
+    /// Hangs them all from this goal; null detaches them.
+    #[serde(default, deserialize_with = "crate::tasks::present")]
+    pub goal_id: Option<Option<i64>>,
     /// True deletes them all, with their steps and their place on the day's plan.
     #[serde(default)]
     pub delete: Option<bool>,
@@ -344,10 +363,20 @@ pub fn bulk_update(
     if let Some(dup) = args.task_ids.iter().find(|id| !seen.insert(**id)) {
         return Err(ToolError::rejected(format!("task_ids names {dup} twice")));
     }
-    let changes =
-        [args.state.is_some(), args.is_now.is_some(), args.delete.is_some()].iter().filter(|c| **c).count();
+    let changes = [
+        args.state.is_some(),
+        args.is_now.is_some(),
+        args.category.is_some(),
+        args.goal_id.is_some(),
+        args.delete.is_some(),
+    ]
+    .iter()
+    .filter(|c| **c)
+    .count();
     if changes != 1 {
-        return Err(ToolError::rejected("set exactly one of state, is_now or delete"));
+        return Err(ToolError::rejected(
+            "set exactly one of state, is_now, category, goal_id or delete",
+        ));
     }
     if args.delete == Some(false) {
         return Err(ToolError::rejected("delete only takes true; there is no undelete"));
@@ -371,6 +400,8 @@ pub fn bulk_update(
         let patch = crate::tasks::TaskPatch {
             state: args.state.clone(),
             is_now: args.is_now,
+            category: args.category.clone(),
+            goal_id: args.goal_id,
             actor: crate::tasks::Actor::Agent,
             ..Default::default()
         };

@@ -46,7 +46,7 @@ fn in_scope(
 
 /// The timezone the user's days are measured in; a bare day means the end of
 /// one of those.
-fn user_tz(ctx: &ToolCtx) -> jiff::tz::TimeZone {
+pub(super) fn user_tz(ctx: &ToolCtx) -> jiff::tz::TimeZone {
     crate::config::UserConfig::load(ctx.config_dir, ctx.username)
         .ok()
         .and_then(|c| jiff::tz::TimeZone::get(&c.timezone).ok())
@@ -55,7 +55,7 @@ fn user_tz(ctx: &ToolCtx) -> jiff::tz::TimeZone {
 
 /// An instant stays one; a bare `YYYY-MM-DD` becomes the end of that day where
 /// the user lives; an empty string clears the date.
-fn checked_due(ctx: &ToolCtx, raw: &str) -> Result<Option<String>, ToolError> {
+pub(super) fn checked_due(ctx: &ToolCtx, raw: &str) -> Result<Option<String>, ToolError> {
     let raw = raw.trim();
     if raw.is_empty() {
         return Ok(None);
@@ -75,7 +75,7 @@ fn checked_due(ctx: &ToolCtx, raw: &str) -> Result<Option<String>, ToolError> {
     Ok(Some(end.timestamp().to_string()))
 }
 
-fn task_error(e: UpdateError) -> ToolError {
+pub(super) fn task_error(e: UpdateError) -> ToolError {
     match e {
         UpdateError::InvalidState(s) => ToolError::rejected(format!("invalid state: {s}")),
         UpdateError::InvalidDuration(m)
@@ -110,6 +110,13 @@ pub struct CreateArgs {
     /// How far along it already is, 0 to 100. Leave it out for work not started.
     #[serde(default)]
     pub progress: Option<u32>,
+    /// What the task belongs to — a course, a project, a part of life. Free
+    /// text; reuse one the user already has rather than coining a near-copy.
+    #[serde(default)]
+    pub category: Option<String>,
+    /// The goal this task is part of, from goal_list.
+    #[serde(default)]
+    pub goal_id: Option<i64>,
 }
 
 pub fn create(
@@ -130,6 +137,8 @@ pub fn create(
             due_at: due_at.map(Some),
             notify: args.notify,
             progress: args.progress,
+            category: args.category,
+            goal_id: args.goal_id,
             ..NewTask::default()
         },
         "agent",
@@ -173,6 +182,13 @@ pub struct UpdateArgs {
     /// How far along it is, 0 to 100. Finishing a task fills it on its own, and a
     /// task with steps holds theirs, so this is ignored on one.
     pub progress: Option<u32>,
+    /// What the task belongs to — a course, a project, a part of life. An empty
+    /// string clears it. A step carries none: it reads its parent's.
+    pub category: Option<String>,
+    /// The goal this task is part of, from goal_list; null detaches it. A step
+    /// belongs to no goal of its own.
+    #[serde(default, deserialize_with = "crate::tasks::present")]
+    pub goal_id: Option<Option<i64>>,
 }
 
 pub fn update(
@@ -226,6 +242,8 @@ pub fn update(
         due_at,
         notify: args.notify,
         progress: args.progress,
+        category: args.category,
+        goal_id: args.goal_id,
         actor: Actor::Agent,
         ..Default::default()
     };
@@ -309,6 +327,9 @@ pub struct BriefArgs {
     /// Focused minutes, in whole 5-minute blocks.
     #[serde(default)]
     pub duration_min: Option<u32>,
+    /// The course or source this assignment came from, as the item names it.
+    #[serde(default)]
+    pub category: Option<String>,
     /// 2 to 5 steps, each under 100 characters. Ignored when the task already has steps.
     #[serde(default)]
     pub steps: Option<Vec<Step>>,
@@ -345,7 +366,7 @@ pub fn brief(
         }
         None => None,
     };
-    if description.is_some() || args.duration_min.is_some() {
+    if description.is_some() || args.duration_min.is_some() || args.category.is_some() {
         patch(
             conn,
             ctx,
@@ -353,6 +374,7 @@ pub fn brief(
             TaskPatch {
                 description,
                 duration_min: args.duration_min.map(Some),
+                category: args.category,
                 actor: Actor::Agent,
                 ..Default::default()
             },
@@ -533,6 +555,84 @@ mod tests {
         assert_eq!(due_of(&conn, bare), None, "an empty string clears it");
 
         assert_eq!(call(r#"{"title":"x","due_at":"friday"}"#).unwrap_err().kind, "rejected");
+    }
+
+    #[test]
+    fn a_category_is_written_cleared_and_never_put_on_a_step() {
+        let (conn, tmp) = env();
+        let call = |name: &str, args: &str| {
+            dispatch(&conn, &ctx(&tmp, None), SessionKind::Talk, name, args)
+        };
+        let id = call("task_create", r#"{"title":"chapter 4","category":"  Biology  "}"#).unwrap()
+            ["task_id"]
+            .as_i64()
+            .unwrap();
+        let category = |id: i64| crate::tasks::get(&conn, 1, id).unwrap().unwrap().category;
+        assert_eq!(category(id), "Biology");
+
+        call("task_update", &format!(r#"{{"task_id":{id},"category":"Chemistry"}}"#)).unwrap();
+        assert_eq!(category(id), "Chemistry");
+        call("task_update", &format!(r#"{{"task_id":{id},"category":""}}"#)).unwrap();
+        assert_eq!(category(id), "");
+
+        call("task_update", &format!(r#"{{"task_id":{id},"category":"Biology"}}"#)).unwrap();
+        let steps = r#""steps":[{"title":"read","duration_min":5},{"title":"answer","duration_min":5}]"#;
+        let split = call("task_split", &format!(r#"{{"task_id":{id},{steps}}}"#)).unwrap();
+        let step = split["step_ids"][0].as_i64().unwrap();
+        assert_eq!(category(step), "Biology", "a step reads the task's own");
+        let e = call("task_update", &format!(r#"{{"task_id":{step},"category":"History"}}"#))
+            .unwrap_err();
+        assert_eq!(e.kind, "rejected");
+
+        let long = format!(r#"{{"title":"x","category":"{}"}}"#, "c".repeat(101));
+        assert_eq!(call("task_create", &long).unwrap_err().kind, "rejected");
+    }
+
+    #[test]
+    fn a_goal_is_hung_on_a_task_detached_and_refused_on_a_step() {
+        let (conn, tmp) = env();
+        let call = |name: &str, args: &str| {
+            dispatch(&conn, &ctx(&tmp, None), SessionKind::Talk, name, args)
+        };
+        let goal = call("goal_create", r#"{"title":"get into the programme"}"#).unwrap()["goal_id"]
+            .as_i64()
+            .unwrap();
+        let id = call("task_create", &format!(r#"{{"title":"essay","goal_id":{goal}}}"#)).unwrap()
+            ["task_id"]
+            .as_i64()
+            .unwrap();
+        let goal_of = |id: i64| crate::tasks::get(&conn, 1, id).unwrap().unwrap().goal_id;
+        assert_eq!(goal_of(id), Some(goal));
+
+        call("task_update", &format!(r#"{{"task_id":{id},"goal_id":null}}"#)).unwrap();
+        assert_eq!(goal_of(id), None);
+        call("task_update", &format!(r#"{{"task_id":{id},"goal_id":{goal}}}"#)).unwrap();
+        assert_eq!(goal_of(id), Some(goal));
+
+        assert_eq!(
+            call("task_create", r#"{"title":"x","goal_id":9999}"#).unwrap_err().kind,
+            "rejected"
+        );
+
+        let steps = r#""steps":[{"title":"draft","duration_min":5},{"title":"edit","duration_min":5}]"#;
+        let split = call("task_split", &format!(r#"{{"task_id":{id},{steps}}}"#)).unwrap();
+        let step = split["step_ids"][0].as_i64().unwrap();
+        let e = call("task_update", &format!(r#"{{"task_id":{step},"goal_id":{goal}}}"#))
+            .unwrap_err();
+        assert_eq!(e.kind, "rejected");
+        assert_eq!(goal_of(step), None);
+    }
+
+    #[test]
+    fn a_brief_files_the_task_under_the_course_it_came_from() {
+        let (conn, tmp) = env();
+        brief(
+            &conn,
+            &tmp,
+            r#"{"task_id":1,"homework":true,"description":"Read chapter 4.","category":"Biology"}"#,
+        )
+        .unwrap();
+        assert_eq!(crate::tasks::get(&conn, 1, 1).unwrap().unwrap().category, "Biology");
     }
 
     #[test]
