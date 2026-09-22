@@ -1,17 +1,5 @@
 /* The calendar: the week as ground, the day as a line, the entry sheet over both. */
 
-:root {
-  --cal-shadow: oklch(23% 0.03 255 / 0.5);
-}
-:root[data-theme='dark'] {
-  --cal-shadow: oklch(10% 0.02 60 / 0.6);
-}
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme='light']) {
-    --cal-shadow: oklch(10% 0.02 60 / 0.6);
-  }
-}
-
 .cal .glyph,
 .sheet .glyph,
 .tip .glyph {
@@ -126,9 +114,6 @@
 .band.note .band-label { padding-top: 0.0625rem; color: var(--quiet); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* ── the entry sheet ─────────────────────────────────────────── */
-.scrim { position: fixed; inset: 0; z-index: 40; background: color-mix(in srgb, var(--cal-shadow) 55%, transparent); }
-.sheet { position: fixed; left: 0; right: 0; bottom: 0; z-index: 50; background: var(--haze-strong); backdrop-filter: blur(18px); border-radius: var(--radius-xl) var(--radius-xl) 0 0; padding: 0.625rem 1.5rem calc(2.125rem + env(safe-area-inset-bottom)); display: flex; flex-direction: column; gap: 1.125rem; box-shadow: 0 -1.5rem 3.75rem -2.5rem var(--cal-shadow); }
-.sheet-handle { width: 2.25rem; height: 0.25rem; border-radius: 0.125rem; background: var(--line); margin: 0 auto 0.375rem; }
 .sheet-top { display: flex; align-items: center; gap: 0.5rem; }
 .sheet-title { flex: 1; min-width: 0; border: 0; background: none; padding: 0.375rem 0; font-family: var(--display); font-weight: 500; font-size: 1.5rem; letter-spacing: -0.02em; color: var(--ink); outline: none; }
 .sheet-title::placeholder { color: var(--faint); }
@@ -137,7 +122,6 @@
 .sheet .ev-menu { min-width: 13rem; top: auto; bottom: calc(100% + 0.375rem); }
 .sheet .ev-menu-item { display: flex; align-items: center; gap: 0.625rem; }
 .sheet .ev-menu-item .check { width: 0.875rem; height: 0.875rem; margin-left: auto; color: var(--sage); }
-.ev-menu-sep { height: 1px; margin: 0.25rem 0.5rem; background: var(--track); }
 .sheet-time { display: flex; align-items: center; gap: 0.625rem; font-size: 1.0625rem; color: var(--quiet); }
 .sheet-time .pill-in { width: calc(5ch + 2.25rem); text-align: center; }
 .pill-in { min-height: 2.75rem; border: 0; border-radius: 999px; background: var(--earth); padding: 0.5625rem 1.125rem; color: var(--ink); font-family: var(--display); font-weight: 500; font-size: 1.125rem; letter-spacing: -0.01em; font-variant-numeric: tabular-nums; cursor: pointer; }
@@ -160,7 +144,6 @@
   .week .band { left: 0.25rem; right: 0.375rem; border-radius: 0.5rem; }
   .week-hour { font-size: 0.72rem; }
   .band-label { padding: 0.1875rem 0.375rem; font-size: 0.72rem; }
-  .sheet { left: auto; right: 1.5rem; bottom: 1.5rem; width: 26.25rem; border-radius: var(--radius-xl); padding-bottom: 1.75rem; }
 }
 
 @media (prefers-reduced-motion: reduce) {
