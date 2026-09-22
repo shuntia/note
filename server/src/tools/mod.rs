@@ -228,120 +228,151 @@ pub(crate) fn has_gone_by(ctx: &ToolCtx, date: jiff::civil::Date, wall: &str) ->
     crate::triggers::lead_minutes(date, crate::templates::wall_minutes(wall), &local) < 0
 }
 
-const CHECKIN: &[&str] = &[
-    "memory_query",
-    "memory_read",
-    "memory_write",
-    "task_create",
-    "task_update",
-    "task_split",
-    "task_delete",
-    "schedule_slide",
-    "schedule_snooze",
-    "schedule_drop",
-    "schedule_reshape",
-    "task_list",
-    "task_search",
-    "task_read",
-    "plan_carry",
-    "plan_list",
-    "calendar_list",
-    "trigger_set",
-    "wait_until",
-    "wait_for",
-    "trigger_budget",
-    "web_search",
-    "batch",
+const MEMORY_READ: &[&str] = &["memory_query", "memory_read"];
+const MEMORY_WRITE: &[&str] = &["memory_write"];
+const CONTEXT: &[&str] = &["context_edit"];
+const TASK_READ: &[&str] = &["task_list", "task_search", "task_read"];
+const TASK_WRITE: &[&str] = &["task_create", "task_update", "task_split", "task_delete"];
+const TASK_BULK: &[&str] = &["task_bulk_update"];
+const PLAN_READ: &[&str] = &["plan_list"];
+const PLAN_LAY: &[&str] = &["plan_tasks", "plan_auto"];
+/// Moving the rest of a day to the next is the user's call, so it lives only
+/// where they are there to make it.
+const PLAN_CARRY: &[&str] = &["plan_carry"];
+const SCHEDULE: &[&str] =
+    &["schedule_slide", "schedule_snooze", "schedule_drop", "schedule_reshape"];
+const SCHEDULE_INSERT: &[&str] = &["schedule_insert"];
+const CALENDAR_READ: &[&str] = &["calendar_list"];
+const CALENDAR_WRITE: &[&str] =
+    &["calendar_add", "calendar_update", "calendar_remove", "calendar_skip"];
+const TRIGGERS: &[&str] = &["trigger_set", "wait_until", "wait_for"];
+/// Raising the day's budget needs the user's agreement first.
+const TRIGGER_BUDGET: &[&str] = &["trigger_budget"];
+const OUTREACH: &[&str] = &["notify_send"];
+const NIGHTLY_NOTES: &[&str] = &["nightly_notes_write"];
+const SEARCH: &[&str] = &["web_search"];
+const BATCH: &[&str] = &["batch"];
+const BRIEF: &[&str] = &["task_brief"];
+const DECIDE: &[&str] = &["inbox_decide"];
+const SUMMARY: &[&str] = &["summary_write"];
+const HARVEST_DONE: &[&str] = &["harvest_done"];
+const REVIEW_WRITE: &[&str] = &["review_write"];
+const SPEAK: &[&str] = &["say", "stay_quiet"];
+
+/// Every domain, in the one order each session's tools are offered in; the
+/// tests hold the registries below to it.
+#[cfg(test)]
+const DOMAINS: &[&[&str]] = &[
+    MEMORY_READ,
+    MEMORY_WRITE,
+    CONTEXT,
+    TASK_READ,
+    TASK_WRITE,
+    TASK_BULK,
+    PLAN_READ,
+    PLAN_LAY,
+    PLAN_CARRY,
+    SCHEDULE,
+    SCHEDULE_INSERT,
+    CALENDAR_READ,
+    CALENDAR_WRITE,
+    TRIGGERS,
+    TRIGGER_BUDGET,
+    OUTREACH,
+    NIGHTLY_NOTES,
+    SEARCH,
+    BATCH,
+    BRIEF,
+    DECIDE,
+    SUMMARY,
+    HARVEST_DONE,
+    REVIEW_WRITE,
+    SPEAK,
 ];
-const TALK: &[&str] = &[
-    "memory_query",
-    "memory_read",
-    "memory_write",
-    "task_create",
-    "task_update",
-    "task_split",
-    "task_delete",
-    "schedule_slide",
-    "schedule_snooze",
-    "schedule_drop",
-    "schedule_reshape",
-    "context_edit",
-    "task_list",
-    "task_search",
-    "task_read",
-    "task_bulk_update",
-    "plan_tasks",
-    "plan_auto",
-    "plan_carry",
-    "plan_list",
-    "calendar_list",
-    "calendar_add",
-    "calendar_update",
-    "calendar_remove",
-    "calendar_skip",
-    "trigger_set",
-    "wait_until",
-    "wait_for",
-    "trigger_budget",
-    "web_search",
-    "batch",
+
+const fn joined<const N: usize>(domains: &[&[&'static str]]) -> [&'static str; N] {
+    let mut out = [""; N];
+    let (mut at, mut d) = (0, 0);
+    while d < domains.len() {
+        let domain = domains[d];
+        let mut i = 0;
+        while i < domain.len() {
+            out[at] = domain[i];
+            at += 1;
+            i += 1;
+        }
+        d += 1;
+    }
+    assert!(at == N, "the length does not match the domains given");
+    out
+}
+
+/// Composes one session's tools from whole domains, keeping them in `DOMAINS`
+/// order so two kinds that share a domain offer it identically.
+macro_rules! registry_of {
+    ($($domain:expr),+ $(,)?) => {
+        &joined::<{ 0 $(+ $domain.len())+ }>(&[$($domain),+])
+    };
+}
+
+const CHECKIN: &[&str] = registry_of![
+    MEMORY_READ,
+    MEMORY_WRITE,
+    TASK_READ,
+    TASK_WRITE,
+    PLAN_READ,
+    PLAN_CARRY,
+    SCHEDULE,
+    CALENDAR_READ,
+    TRIGGERS,
+    TRIGGER_BUDGET,
+    SEARCH,
+    BATCH,
 ];
-const IMPORT: &[&str] = &["task_brief"];
-const SUMMARIZE: &[&str] = &["summary_write"];
-const HARVEST: &[&str] =
-    &["memory_query", "memory_read", "memory_write", "batch", "harvest_done"];
-const INBOX: &[&str] = &["memory_query", "memory_read", "inbox_decide"];
-const REVIEW: &[&str] =
-    &["memory_query", "memory_read", "memory_write", "batch", "review_write"];
-const NIGHTLY: &[&str] = &[
-    "memory_query",
-    "memory_read",
-    "memory_write",
-    "task_create",
-    "task_update",
-    "task_split",
-    "task_delete",
-    "schedule_slide",
-    "schedule_snooze",
-    "schedule_drop",
-    "schedule_reshape",
-    "context_edit",
-    "schedule_insert",
-    "notify_send",
-    "nightly_notes_write",
-    "task_list",
-    "task_search",
-    "task_read",
-    "task_bulk_update",
-    "plan_tasks",
-    "plan_auto",
-    "plan_list",
-    "calendar_list",
-    "calendar_add",
-    "calendar_update",
-    "calendar_remove",
-    "calendar_skip",
-    "trigger_set",
-    "wait_until",
-    "wait_for",
-    "web_search",
-    "batch",
+const TALK: &[&str] = registry_of![
+    MEMORY_READ,
+    MEMORY_WRITE,
+    CONTEXT,
+    TASK_READ,
+    TASK_WRITE,
+    TASK_BULK,
+    PLAN_READ,
+    PLAN_LAY,
+    PLAN_CARRY,
+    SCHEDULE,
+    CALENDAR_READ,
+    CALENDAR_WRITE,
+    TRIGGERS,
+    TRIGGER_BUDGET,
+    SEARCH,
+    BATCH,
 ];
-const TRIGGER: &[&str] = &[
-    "memory_query",
-    "memory_read",
-    "task_list",
-    "task_read",
-    "task_search",
-    "plan_carry",
-    "plan_list",
-    "trigger_set",
-    "wait_until",
-    "wait_for",
-    "batch",
-    "say",
-    "stay_quiet",
+const NIGHTLY: &[&str] = registry_of![
+    MEMORY_READ,
+    MEMORY_WRITE,
+    CONTEXT,
+    TASK_READ,
+    TASK_WRITE,
+    TASK_BULK,
+    PLAN_READ,
+    PLAN_LAY,
+    SCHEDULE,
+    SCHEDULE_INSERT,
+    CALENDAR_READ,
+    CALENDAR_WRITE,
+    TRIGGERS,
+    OUTREACH,
+    NIGHTLY_NOTES,
+    SEARCH,
+    BATCH,
 ];
+const TRIGGER: &[&str] =
+    registry_of![MEMORY_READ, TASK_READ, PLAN_READ, PLAN_CARRY, TRIGGERS, BATCH, SPEAK];
+const IMPORT: &[&str] = registry_of![BRIEF];
+const INBOX: &[&str] = registry_of![MEMORY_READ, DECIDE];
+const SUMMARIZE: &[&str] = registry_of![SUMMARY];
+const HARVEST: &[&str] = registry_of![MEMORY_READ, MEMORY_WRITE, BATCH, HARVEST_DONE];
+const REVIEW: &[&str] = registry_of![MEMORY_READ, MEMORY_WRITE, BATCH, REVIEW_WRITE];
 
 /// A tool whose success is the session's whole job: `run_session` returns on
 /// it instead of spending another model round on a closing sentence.
@@ -1108,6 +1139,81 @@ mod tests {
                 registry(kind).iter().all(|t| !registry(SessionKind::Import).contains(t)),
                 "{kind:?} shares a tool with an import session"
             );
+        }
+    }
+
+    const KINDS: [SessionKind; 9] = [
+        SessionKind::Nightly,
+        SessionKind::Checkin,
+        SessionKind::Talk,
+        SessionKind::Import,
+        SessionKind::Inbox,
+        SessionKind::Summarize,
+        SessionKind::Harvest,
+        SessionKind::Review,
+        SessionKind::Trigger,
+    ];
+
+    /// The membership a kind offers is a union of whole domains, and the order
+    /// it offers them in is the one domain order — so two kinds that share a
+    /// domain cannot drift apart.
+    #[test]
+    fn registries_are_the_same_sets_as_before() {
+        for domain in DOMAINS {
+            for other in DOMAINS {
+                assert!(
+                    std::ptr::eq(*domain, *other) || !domain.iter().any(|t| other.contains(t)),
+                    "{domain:?} and {other:?} share a tool"
+                );
+            }
+        }
+        for kind in KINDS {
+            let tools = registry(kind);
+            for (i, name) in tools.iter().enumerate() {
+                assert!(!tools[..i].contains(name), "{kind:?} offers {name} twice");
+                assert!(
+                    DOMAINS.iter().any(|d| d.contains(name)),
+                    "{name} belongs to no domain"
+                );
+            }
+            let held: Vec<&str> = DOMAINS
+                .iter()
+                .filter(|d| d.iter().any(|t| tools.contains(t)))
+                .flat_map(|d| {
+                    assert!(
+                        d.iter().all(|t| tools.contains(t)),
+                        "{kind:?} takes part of {d:?}"
+                    );
+                    d.iter().copied()
+                })
+                .collect();
+            assert_eq!(tools, held, "{kind:?} is out of domain order");
+        }
+    }
+
+    /// A tool that ends a session is reachable from that session and from no
+    /// other.
+    #[test]
+    fn every_terminal_tool_is_offered_by_its_own_kind_alone() {
+        let terminals: [(SessionKind, &[&str]); 6] = [
+            (SessionKind::Import, BRIEF),
+            (SessionKind::Inbox, DECIDE),
+            (SessionKind::Summarize, SUMMARY),
+            (SessionKind::Harvest, HARVEST_DONE),
+            (SessionKind::Review, REVIEW_WRITE),
+            (SessionKind::Trigger, SPEAK),
+        ];
+        for (kind, names) in terminals {
+            for name in names {
+                assert!(is_terminal(kind, name), "{name} does not end a {kind:?} session");
+                assert!(registry(kind).contains(name), "{kind:?} cannot reach {name}");
+                for other in KINDS.into_iter().filter(|k| *k != kind) {
+                    assert!(
+                        !registry(other).contains(name) && !is_terminal(other, name),
+                        "{other:?} reaches {name}"
+                    );
+                }
+            }
         }
     }
 

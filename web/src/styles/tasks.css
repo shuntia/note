@@ -88,36 +88,8 @@
 .task-item[data-leaving] .task-title::after,
 .task-step.done .task-step-title::after { width: 100%; }
 
-.tick {
-  width: 1.5rem;
-  height: 1.5rem;
-  padding: 0;
-  border-radius: 50%;
-  border: 2px solid var(--quiet);
-  box-sizing: border-box;
-  background: none;
-  flex: none;
-  cursor: pointer;
-  display: grid;
-  place-items: center;
-  transition: background 220ms ease, border-color 220ms ease;
-}
 .task-group.later .tick { border-color: var(--line); }
-.tick svg {
-  width: 0.875rem;
-  height: 0.875rem;
-  fill: none;
-  stroke: var(--ivory);
-  stroke-width: 2.6;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-  opacity: 0;
-  transform: scale(0.5);
-  transition: opacity 180ms ease, transform 220ms cubic-bezier(0.22, 1, 0.36, 1);
-}
-.tick[aria-checked='true'] { background: var(--sage); border-color: var(--sage); }
-.tick[aria-checked='true'] svg { opacity: 1; transform: scale(1); }
-.tick:focus-visible, .task-start:focus-visible, .task-done-fold:focus-visible {
+.task-start:focus-visible, .task-done-fold:focus-visible {
   outline: 2px solid var(--ring);
   outline-offset: 2px;
 }
