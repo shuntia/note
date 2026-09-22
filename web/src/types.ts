@@ -98,6 +98,8 @@ export type ConversationVia = 'web' | 'telegram'
 export type Conversation = {
   id: number
   title: string
+  // 'draft' until the server has written a title of its own; 'user' once renamed by hand
+  title_kind: 'draft' | 'generated' | 'user'
   updated_at: string
   summary: string | null
   via: ConversationVia

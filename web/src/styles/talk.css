@@ -6,36 +6,138 @@
    inside its pane and the composer never leaves the screen */
 .shell:has(> .view-talk:not(.leaving)) { height: 100dvh; }
 
-/* the head floats over the top of the thread, on the column's own right edge,
-   and holds the pulse alone */
+/* the head sits above the thread, in the flow: the way to the chats, the thread's
+   own name, a new chat and the pulse */
 .chat .chat-main { position: relative; }
 .chat .chat-head {
-  position: absolute;
-  top: 0.625rem;
-  left: 1.25rem;
-  right: 1.25rem;
+  position: static;
   z-index: 5;
   display: flex;
-  justify-content: flex-end;
-  max-width: max(42.5rem, 34vw);
-  margin: 0 auto;
-  pointer-events: none;
-}
-.chat .chat-head > * { pointer-events: auto; }
-@media (min-width: 768px) { .chat .chat-head { top: 0.25rem; } }
-
-/* what scrolls under the head fades out beneath it rather than meeting it */
-.chat .chat-pane {
-  mask-image: linear-gradient(to bottom, transparent 0.375rem, #000 3.375rem);
-  -webkit-mask-image: linear-gradient(to bottom, transparent 0.375rem, #000 3.375rem);
+  align-items: center;
+  gap: 0.375rem;
+  max-width: none;
+  margin: 0;
+  padding: 0.5rem 0.75rem 0.375rem;
 }
 @media (min-width: 768px) {
-  .chat .chat-pane {
-    mask-image: linear-gradient(to bottom, transparent 0.125rem, #000 2.875rem);
-    -webkit-mask-image: linear-gradient(to bottom, transparent 0.125rem, #000 2.875rem);
-  }
+  .chat .chat-head { gap: 0.5rem; padding: 0.25rem 1.25rem 0.375rem; }
+}
+
+.chat .chat-chats {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4375rem;
+  height: 2.25rem;
+  padding: 0 0.5rem;
+  border: 0;
+  border-radius: 999px;
+  background: none;
+  color: var(--quiet);
+  font: inherit;
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+.chat .chat-chats:hover { background: var(--haze-strong); color: var(--ink); }
+.chat .chat-chats-glyph {
+  width: 1.25rem;
+  height: 1.25rem;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+}
+.chat .chat-chats-label { display: none; }
+@media (min-width: 768px) {
+  .chat .chat-chats { padding: 0 0.75rem 0 0.625rem; }
+  .chat .chat-chats-label { display: inline; }
+}
+
+.chat .chat-title {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  font-family: var(--display);
+  font-weight: 500;
+  font-size: 1.125rem;
+  letter-spacing: -0.01em;
+  line-height: 1.3;
+}
+.chat .chat-retitle {
+  display: block;
+  max-width: 100%;
+  margin: 0;
+  padding: 0.125rem 0.375rem;
+  border: 0;
+  border-radius: 0.5rem;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat .chat-retitle.plain { color: var(--quiet); cursor: default; }
+.chat .chat-retitle:not(.plain):hover { background: var(--haze-strong); }
+.chat .chat-title .chat-rename {
+  width: 100%;
+  font: inherit;
+  font-size: 1.0625rem;
+  padding: 0.0625rem 0.3125rem;
+}
+
+.chat .chat-add { flex: none; width: 2.25rem; height: 2.25rem; color: var(--ink); }
+.chat .chat-add svg {
+  width: 1.125rem;
+  height: 1.125rem;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+/* the pane begins under the head, so nothing scrolls behind it */
+.chat .chat-pane {
+  padding-top: 0;
+  mask-image: none;
+  -webkit-mask-image: none;
 }
 .chat .chat-stream { padding-bottom: 0.375rem; gap: 0.875rem; }
+
+/* the one line an untouched thread says */
+.chat .chat-stream:has(> .chat-empty) { min-height: 100%; justify-content: center; }
+.chat .chat-empty {
+  align-self: center;
+  max-width: 24rem;
+  margin: 0;
+  padding: 0 1rem 3rem;
+  text-align: center;
+  color: var(--faint);
+  text-wrap: balance;
+}
+
+/* ≥1088px the thread list is a column of the page, kept open across visits */
+@media (min-width: 1088px) {
+  .chat.with-column .chat-side {
+    position: static;
+    width: 17rem;
+    flex: none;
+    transform: none;
+    visibility: visible;
+    box-shadow: none;
+    border-right: 1px solid var(--line);
+    transition: none;
+  }
+  .chat.with-column .chat-list { padding-top: 0.875rem; }
+}
+
+/* a thread the server has not named yet reads as provisional */
+.chat .chat-name.draft { color: var(--quiet); }
+.chat .chat-gist { white-space: nowrap; }
 
 /* the session or the wait, small: a ring on a phone, a bar on a desktop */
 .pulse {
@@ -78,6 +180,31 @@
 
 /* one side's run of bubbles sits closer than the turn between sides */
 .chat .turn.user + .turn.user, .chat .reply + .reply { margin-top: -0.375rem; }
+
+/* Note answers in prose on the page; only what the user said is a bubble */
+.chat .turn.assistant {
+  max-width: 100%;
+  background: none;
+  padding: 0.25rem 0.375rem;
+}
+.chat .turn.user { max-width: min(28rem, 72%); }
+
+/* a batch says what it did, one line per call, before its raw body */
+.chat .receipt-inner {
+  display: flex;
+  flex-direction: column;
+  gap: 0.0625rem;
+  margin-left: 1.25rem;
+}
+.chat .receipt-sub {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.125rem 0.375rem;
+  color: var(--faint);
+  font-size: 0.78rem;
+}
+.chat .receipt-sub.error .receipt-mark { stroke: var(--rose); }
 
 /* what Note did reads as a caption, never as a message */
 .chat .activity-head { font-size: 0.875rem; padding: 0.125rem 0.375rem; }
