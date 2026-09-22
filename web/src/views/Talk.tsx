@@ -883,6 +883,7 @@ export function Talk({
                   </span>
                   <Overflow
                     className="chat-more-wrap"
+                    row=".chat-row"
                     label={`More actions for ${c.title}`}
                     items={[
                       {

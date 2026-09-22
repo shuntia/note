@@ -8,7 +8,7 @@ import { eventFacts, nextUp } from '../events'
 import { arcPath, Gauge, STROKE, VB, type ArcLine } from '../gauge'
 import { makeHold } from '../held'
 import { Jot } from '../jot'
-import { clearTimeline, scrollReveal, scrollToY, scrub, snapNearest, travel, type Timeline, type Trigger } from '../homeMotion'
+import { clampStops, clearTimeline, scrollReveal, scrollToY, scrub, travel, type Timeline, type Trigger } from '../homeMotion'
 import { reducedMotion } from '../motion'
 import { ghostOut, rise } from '../motion-gsap'
 import { NowCounter } from '../nowcounter'
@@ -762,7 +762,7 @@ export function Home({
             <path d="M9 7.5v9l7-4.5z" />
           </svg>
         </button>
-        <Overflow label={`More: ${name}`} items={blockMenuItems(ev)} />
+        <Overflow label={`More: ${name}`} row=".home-list li" items={blockMenuItems(ev)} />
       </>
     )
   }
@@ -838,7 +838,7 @@ export function Home({
       ? ScrollTrigger.create({ trigger: topbar, start: 'top top', end: `+=${distance}`, pin: true, pinSpacing: false })
       : null
     // `?nosnap` holds a mid frame for screenshots.
-    const unsnap = new URLSearchParams(location.search).has('nosnap') ? () => {} : snapNearest(trigger)
+    const unsnap = new URLSearchParams(location.search).has('nosnap') ? () => {} : clampStops(() => trigger)
     const onKey = (e: KeyboardEvent) => {
       if (isTyping(e.target) || e.defaultPrevented) return
       if (e.key === 'ArrowDown' && window.scrollY < trigger.end) {
@@ -867,6 +867,15 @@ export function Home({
       st.current = null
     }
   }, [motion, mobile, distance, armed])
+
+  // Without the morph there is no pin, but the face and the day are still the two
+  // stops a gesture moves between.
+  useLayoutEffect(() => {
+    if (motion || !armed) return
+    const face = home.current?.querySelector<HTMLElement>('.face-still')
+    if (!face) return
+    return clampStops(() => ({ start: 0, end: face.offsetHeight }))
+  }, [motion, armed])
 
   // Every landing spot is measured from rendered text, so the timeline is rebuilt
   // whenever what is on the face or where it lands could have moved.

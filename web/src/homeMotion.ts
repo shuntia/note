@@ -33,51 +33,143 @@ export function scrub(
   })
 }
 
-// Let go partway and the scroll itself settles on the nearer state, 80 ms after the
-// last wheel, touch or scroll; any new input kills a settle already under way.
-export function snapNearest(st: Trigger): () => void {
-  let timer = 0
+const SETTLE_MS = 500
+const GESTURE_MS = 400
+const TOUCH_THRESHOLD = 24
+const AT_STOP = 2
+const OVERLAY = '.sheet, .ev-menu, [role="dialog"]'
+
+// Something under the pointer that can take the scroll itself keeps it.
+function scrollableUnder(target: EventTarget | null, down: boolean): boolean {
+  let el = target instanceof Element ? target : null
+  while (el && el !== document.body && el !== document.documentElement) {
+    if (el.matches(OVERLAY)) return true
+    const overflow = getComputedStyle(el).overflowY
+    if (
+      (overflow === 'auto' || overflow === 'scroll') &&
+      el.scrollHeight > el.clientHeight + 1 &&
+      (down ? el.scrollTop + el.clientHeight < el.scrollHeight - 1 : el.scrollTop > 1)
+    )
+      return true
+    el = el.parentElement
+  }
+  return false
+}
+
+// One gesture, one stop. While the page is at or inside the stage the wheel and the
+// finger do not scroll it: they choose the next stop — the face, the stage, and past
+// the stage the page again — and everything further is ignored until that scroll has
+// settled and half a second of quiet has passed, so a trackpad's inertia or a flick
+// counts once. Without motion the stops still hold; the page simply jumps to them.
+export function clampStops(stops: () => { start: number; end: number }): () => void {
   let tween: gsap.core.Tween | null = null
-  const go = () => {
-    const p = st.progress
-    if (!st.isActive || p <= 0 || p >= 1) return
-    const target = p < 0.5 ? st.start : st.end
-    const pos = { y: window.scrollY }
-    tween = gsap.to(pos, {
-      y: target,
-      duration: 0.25 + 0.25 * (Math.abs(target - pos.y) / (st.end - st.start)),
-      ease: 'power2.inOut',
-      onUpdate: () => window.scrollTo(0, pos.y),
-      onComplete: () => {
-        tween = null
-      },
+  let quiet = 0
+  let from: number | null = null
+  let handled = 0
+  let last = window.scrollY
+  let aim: number | null = null
+
+  const busy = () => tween !== null || performance.now() < quiet
+  const hold = () => {
+    quiet = performance.now() + SETTLE_MS
+  }
+  const go = (y: number) => {
+    tween?.kill()
+    aim = y
+    if (Math.abs(y - window.scrollY) < 1) return hold()
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      window.scrollTo(0, y)
+      return hold()
+    }
+    tween = scrollToY(y)
+    tween.eventCallback('onComplete', () => {
+      tween = null
+      hold()
     })
   }
-  const arm = () => {
-    window.clearTimeout(timer)
-    timer = window.setTimeout(go, 80)
+
+  const inside = () => window.scrollY <= stops().end + AT_STOP
+
+  // Down from anywhere above the stage's end lands on it; resting on the stage, up
+  // goes to the face, and up from below lands on the stage first.
+  const stop = (down: boolean): number | null => {
+    const { start, end } = stops()
+    const y = window.scrollY
+    if (down) return y < end - AT_STOP ? end : null
+    if (y >= end - AT_STOP) return start
+    if (y > start + AT_STOP) return end
+    return null
   }
-  const input = () => {
-    if (tween) {
-      tween.kill()
-      tween = null
+
+  const onWheel = (e: WheelEvent) => {
+    if (e.deltaY === 0) return
+    handled = performance.now()
+    const down = e.deltaY > 0
+    if (!inside() || scrollableUnder(e.target, down)) return
+    if (busy()) {
+      e.preventDefault()
+      hold()
+      return
     }
-    arm()
+    const to = stop(down)
+    if (to === null) return
+    e.preventDefault()
+    go(to)
   }
+  const onStart = (e: TouchEvent) => {
+    from = e.touches.length === 1 ? e.touches[0].clientY : null
+  }
+  const onMove = (e: TouchEvent) => {
+    if (from === null) return
+    handled = performance.now()
+    const moved = from - e.touches[0].clientY
+    const down = moved > 0
+    if (!inside() || scrollableUnder(e.target, down)) return
+    if (busy()) {
+      e.preventDefault()
+      hold()
+      return
+    }
+    if (Math.abs(moved) < TOUCH_THRESHOLD) return
+    const to = stop(down)
+    if (to === null) return
+    e.preventDefault()
+    from = e.touches[0].clientY
+    go(to)
+  }
+  const onEnd = () => {
+    from = null
+  }
+  // A single coarse wheel event can clear the whole stage; crossing its end on the way
+  // up is the gesture that brings the page back to it.
   const onScroll = () => {
-    if (!tween) arm()
+    const was = last
+    last = window.scrollY
+    // A fling the page had already taken when the gesture was caught would otherwise
+    // drift off the stop while everything else is being ignored.
+    if (busy()) {
+      if (tween === null && aim !== null && Math.abs(last - aim) > 1) window.scrollTo(0, aim)
+      return
+    }
+    if (performance.now() - handled > GESTURE_MS) return
+    const { end } = stops()
+    if (was > end + AT_STOP && last <= end + AT_STOP) go(end)
   }
-  addEventListener('wheel', input, { passive: true })
-  addEventListener('touchstart', input, { passive: true })
-  addEventListener('touchend', arm, { passive: true })
+
+  addEventListener('wheel', onWheel, { passive: false })
   addEventListener('scroll', onScroll, { passive: true })
+  addEventListener('touchstart', onStart, { passive: true })
+  addEventListener('touchmove', onMove, { passive: false })
+  addEventListener('touchend', onEnd, { passive: true })
+  addEventListener('touchcancel', onEnd, { passive: true })
   return () => {
-    window.clearTimeout(timer)
     tween?.kill()
-    removeEventListener('wheel', input)
-    removeEventListener('touchstart', input)
-    removeEventListener('touchend', arm)
+    removeEventListener('wheel', onWheel)
     removeEventListener('scroll', onScroll)
+    removeEventListener('touchstart', onStart)
+    removeEventListener('touchmove', onMove)
+    removeEventListener('touchend', onEnd)
+    removeEventListener('touchcancel', onEnd)
   }
 }
 

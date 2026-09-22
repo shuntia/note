@@ -129,6 +129,7 @@ function BlockMenu({ event, items }: { event: PlanEvent; items: OverflowItem[] }
   return (
     <Overflow
       className="band-menu"
+      row=".dl-span, .band"
       label={blockTitle(event)}
       title={blockTitle(event)}
       subtitle={blockWhen(event)}
