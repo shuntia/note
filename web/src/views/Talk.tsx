@@ -17,7 +17,7 @@ import { Markdown } from '../markdown'
 import { reducedMotion } from '../motion'
 import { Overflow } from '../overflow'
 import { Pulse } from '../pulse'
-import { doing, receipt } from '../receipts'
+import { batchReceipts, doing, receipt } from '../receipts'
 import { makeHold } from '../held'
 import type { FocusSession } from '../session'
 import { onAgentFrame, type AgentFrame } from '../ws'
@@ -157,23 +157,27 @@ function shortDate(iso: string): string {
   return at.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
 }
 
+const Mark = ({ isError, running }: { isError: boolean; running?: boolean }) => (
+  <svg
+    className={running ? 'receipt-mark running' : 'receipt-mark'}
+    viewBox="0 0 24 24"
+    aria-hidden="true"
+  >
+    {running && <path d="M12 3a9 9 0 0 1 9 9" />}
+    {!running && (isError ? <path d="M6 6l12 12M18 6L6 18" /> : <path d="M5 12.5l4.5 4.5L19 7.5" />)}
+  </svg>
+)
+
 function Receipt({ item }: { item: ToolItem }) {
   const [open, setOpen] = useState(false)
   const args = pretty(item.args)
   const result = pretty(item.result)
+  const inner = item.name === 'batch' ? batchReceipts(item.args, item.result) : []
   const state = [item.isError ? 'error' : '', open ? 'open' : ''].filter(Boolean).join(' ')
   return (
     <div className={`receipt ${state}`.trim()}>
       <button className="receipt-chip" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
-        <svg
-          className={item.running ? 'receipt-mark running' : 'receipt-mark'}
-          viewBox="0 0 24 24"
-          aria-hidden="true"
-        >
-          {item.running && <path d="M12 3a9 9 0 0 1 9 9" />}
-          {!item.running &&
-            (item.isError ? <path d="M6 6l12 12M18 6L6 18" /> : <path d="M5 12.5l4.5 4.5L19 7.5" />)}
-        </svg>
+        <Mark isError={item.isError} running={item.running} />
         <span className="receipt-text">
           {item.running ? doing(item.name, item.args) : receipt(item.name, item.args, item.isError)}
         </span>
@@ -181,6 +185,16 @@ function Receipt({ item }: { item: ToolItem }) {
           <path d="M9 6l6 6-6 6" />
         </svg>
       </button>
+      {inner.length > 0 && (
+        <div className="receipt-inner">
+          {inner.map((one, i) => (
+            <div key={i} className={one.isError ? 'receipt-sub error' : 'receipt-sub'}>
+              <Mark isError={one.isError} />
+              <span className="receipt-text">{receipt(one.name, one.args, one.isError)}</span>
+            </div>
+          ))}
+        </div>
+      )}
       {open && (
         <div className="receipt-body">
           <div className="receipt-tool">{item.name}</div>
@@ -301,6 +315,41 @@ function grouped(items: Item[]): Shown[] {
   return out
 }
 
+// A title being edited, and which of the two places is editing it.
+type Rename = { id: number; value: string; at: 'list' | 'head' }
+
+const COLUMN = '(min-width: 1088px)'
+const LIST_KEY = 'note.chatListOpen'
+
+function readListOpen(): boolean {
+  try {
+    return window.localStorage.getItem(LIST_KEY) !== 'closed'
+  } catch {
+    return true
+  }
+}
+
+function writeListOpen(open: boolean) {
+  try {
+    window.localStorage.setItem(LIST_KEY, open ? 'open' : 'closed')
+  } catch {
+    return
+  }
+}
+
+/** True where the thread list is a column in the flow rather than a drawer. */
+function useColumn(): boolean {
+  const [column, setColumn] = useState(() => window.matchMedia(COLUMN).matches)
+  useEffect(() => {
+    const mq = window.matchMedia(COLUMN)
+    const read = () => setColumn(mq.matches)
+    read()
+    mq.addEventListener('change', read)
+    return () => mq.removeEventListener('change', read)
+  }, [])
+  return column
+}
+
 // A reply that arrived in this sitting eases in; a loaded transcript is already there.
 const fresh = (key: string) => key.startsWith('local-')
 
@@ -403,7 +452,9 @@ export function Talk({
   const [live, setLive] = useState<Live>(EMPTY_LIVE)
   const [flying, setFlying] = useState(false)
   const [sideOpen, setSideOpen] = useState(false)
-  const [renaming, setRenaming] = useState<{ id: number; value: string } | null>(null)
+  const column = useColumn()
+  const [listOpen, setListOpen] = useState(readListOpen)
+  const [renaming, setRenaming] = useState<Rename | null>(null)
   const [sideNotice, setSideNotice] = useState<string | null>(null)
   const [, tick] = useState(0)
 
@@ -415,6 +466,7 @@ export function Talk({
   const wanted = useRef<number | null>(null)
   // bumped whenever the open conversation changes, so a late reply never lands in the wrong pane
   const era = useRef(0)
+  const listed = useRef(false)
   const busy = pending === era.current
   // the send in flight, for the frames arriving on the shell's socket
   const inFlight = useRef<{ conversation: number | null } | null>(null)
@@ -447,8 +499,9 @@ export function Talk({
   }, [])
 
   useEffect(() => {
-    void loadList()
-  }, [loadList])
+    void loadList(listed.current)
+    listed.current = true
+  }, [refresh, loadList])
 
   // A brand-new conversation's frames carry no id, so they belong to whatever send is open.
   useEffect(
@@ -740,98 +793,157 @@ export function Talk({
     })
   }
 
+  const toggleList = () => {
+    if (!column) {
+      setSideOpen((v) => !v)
+      return
+    }
+    const next = !listOpen
+    setListOpen(next)
+    writeListOpen(next)
+  }
+
   const onScroll = () => {
     const el = pane.current
     if (el && !flight.current) stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 64
   }
 
   const visible = conversations.filter((c) => c.id !== deleteHold.held())
+  const here = current === null ? null : (conversations.find((c) => c.id === current) ?? null)
+  const shown = column ? listOpen : sideOpen
+  const renameInput = (at: 'list' | 'head', id: number) => (
+    <input
+      className="chat-rename"
+      autoFocus
+      value={renaming?.value ?? ''}
+      aria-label="Chat title"
+      onChange={(e) => setRenaming({ id, value: e.target.value, at })}
+      onBlur={() => void commitRename()}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault()
+          void commitRename()
+        }
+        if (e.key === 'Escape') setRenaming(null)
+      }}
+    />
+  )
 
   return (
-    <div className="chat">
-      {sideOpen && <div className="chat-scrim" onClick={() => setSideOpen(false)} />}
-      <aside className={sideOpen ? 'chat-side open' : 'chat-side'}>
-        <div className="chat-side-head">
-          <button className="chat-new" onClick={startNew}>
-            <span aria-hidden="true">+</span> New chat
-          </button>
-        </div>
-        {listState === 'loading' && <p className="chat-side-note muted">Loading chats…</p>}
-        {listState === 'error' && (
-          <p className="chat-side-note">
-            Couldn&rsquo;t load your chats.{' '}
-            <button className="chat-link" onClick={() => void loadList()}>
-              Try again
-            </button>
-          </p>
-        )}
-        {listState === 'ready' && visible.length === 0 && (
-          <p className="chat-side-note muted">No chats yet.</p>
-        )}
-        <ul className="chat-list">
-          {visible.map((c) => (
-            <li key={c.id} className="chat-row" data-active={c.id === current}>
-              {renaming?.id === c.id ? (
-                <input
-                  className="chat-rename"
-                  autoFocus
-                  value={renaming.value}
-                  aria-label="Chat title"
-                  onChange={(e) => setRenaming({ id: c.id, value: e.target.value })}
-                  onBlur={() => void commitRename()}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') {
-                      e.preventDefault()
-                      void commitRename()
-                    }
-                    if (e.key === 'Escape') setRenaming(null)
-                  }}
-                />
-              ) : (
-                <button
-                  className="chat-open"
-                  aria-current={c.id === current}
-                  onClick={() => show(c.id)}
-                >
-                  {c.title}
-                  {c.summary && <span className="chat-gist">{c.summary}</span>}
-                </button>
-              )}
-              <div className="chat-meta">
-                <span className="chat-when">
-                  {c.via === 'telegram' && (
-                    <svg className="chat-via" viewBox="0 0 24 24" role="img">
-                      <title>Last answered on Telegram</title>
-                      <path d="M21 3L2 11l8 3 3 8z" />
-                      <path d="M21 3l-11 11" />
-                    </svg>
-                  )}
-                  {shortDate(c.updated_at)}
-                </span>
-                <Overflow
-                  className="chat-more-wrap"
-                  label={`More actions for ${c.title}`}
-                  items={[
-                    { label: 'Rename', run: () => setRenaming({ id: c.id, value: c.title }) },
-                    { label: 'Delete', run: () => remove(c) },
-                  ]}
-                />
-              </div>
-            </li>
-          ))}
-        </ul>
-        {sideNotice && <p className="chat-side-note error">{sideNotice}</p>}
-      </aside>
+    <div className={`chat${column && listOpen ? ' with-column' : ''}`}>
+      {!column && sideOpen && <div className="chat-scrim" onClick={() => setSideOpen(false)} />}
+      {(!column || listOpen) && (
+        <aside className={`chat-side${sideOpen ? ' open' : ''}`} aria-label="Chats">
+          {!column && (
+            <div className="chat-side-head">
+              <button className="chat-new" onClick={startNew}>
+                <span aria-hidden="true">+</span> New chat
+              </button>
+            </div>
+          )}
+          {listState === 'loading' && <p className="chat-side-note muted">Loading chats…</p>}
+          {listState === 'error' && (
+            <p className="chat-side-note">
+              Couldn&rsquo;t load your chats.{' '}
+              <button className="chat-link" onClick={() => void loadList()}>
+                Try again
+              </button>
+            </p>
+          )}
+          {listState === 'ready' && visible.length === 0 && (
+            <p className="chat-side-note muted">No chats yet.</p>
+          )}
+          <ul className="chat-list">
+            {visible.map((c) => (
+              <li key={c.id} className="chat-row" data-active={c.id === current}>
+                {renaming?.id === c.id && renaming.at === 'list' ? (
+                  renameInput('list', c.id)
+                ) : (
+                  <button
+                    className="chat-open"
+                    aria-current={c.id === current}
+                    onClick={() => show(c.id)}
+                  >
+                    <span className={c.title_kind === 'draft' ? 'chat-name draft' : 'chat-name'}>
+                      {c.title}
+                    </span>
+                    {c.summary && <span className="chat-gist">{c.summary}</span>}
+                  </button>
+                )}
+                <div className="chat-meta">
+                  <span className="chat-when">
+                    {c.via === 'telegram' && (
+                      <svg className="chat-via" viewBox="0 0 24 24" role="img">
+                        <title>Last answered on Telegram</title>
+                        <path d="M21 3L2 11l8 3 3 8z" />
+                        <path d="M21 3l-11 11" />
+                      </svg>
+                    )}
+                    {shortDate(c.updated_at)}
+                  </span>
+                  <Overflow
+                    className="chat-more-wrap"
+                    label={`More actions for ${c.title}`}
+                    items={[
+                      {
+                        label: 'Rename',
+                        run: () => setRenaming({ id: c.id, value: c.title, at: 'list' }),
+                      },
+                      { label: 'Delete', kind: 'danger', run: () => remove(c) },
+                    ]}
+                  />
+                </div>
+              </li>
+            ))}
+          </ul>
+          {sideNotice && <p className="chat-side-note error">{sideNotice}</p>}
+        </aside>
+      )}
 
       <section className="chat-main">
-        {goHome && (
-          <div className="chat-head">
-            <Pulse session={session} refresh={refresh} onOpen={goHome} />
-          </div>
-        )}
+        <div className="chat-head">
+          <button
+            className="chat-chats"
+            aria-label="Chats"
+            aria-expanded={shown}
+            onClick={toggleList}
+          >
+            <svg className="chat-chats-glyph" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M4 7h16" />
+              <path d="M4 12h16" />
+              <path d="M4 17h16" />
+            </svg>
+            <span className="chat-chats-label">Chats</span>
+          </button>
+          <h1 className="chat-title">
+            {here && renaming?.id === here.id && renaming.at === 'head' ? (
+              renameInput('head', here.id)
+            ) : here ? (
+              <button
+                className="chat-retitle"
+                title="Rename this chat"
+                onClick={() => setRenaming({ id: here.id, value: here.title, at: 'head' })}
+              >
+                {here.title}
+              </button>
+            ) : (
+              <span className="chat-retitle plain">New chat</span>
+            )}
+          </h1>
+          <button className="btn-round chat-add" aria-label="New chat" onClick={startNew}>
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 5v14" />
+              <path d="M5 12h14" />
+            </svg>
+          </button>
+          {goHome && <Pulse session={session} refresh={refresh} onOpen={goHome} />}
+        </div>
         <div className="chat-pane" ref={pane} onScroll={onScroll}>
           <div className="chat-stream">
             {msgState === 'loading' && <p className="muted">Loading this chat…</p>}
+            {msgState === 'ready' && current === null && items.length === 0 && (
+              <p className="chat-empty">Tell Note anything — a task, a plan, a question.</p>
+            )}
             {msgState === 'error' && (
               <p className="turn system">
                 Couldn&rsquo;t load these messages.{' '}
@@ -866,14 +978,6 @@ export function Talk({
 
         <div className="chat-foot">
           <div className="chat-compose">
-            <button
-              className="chat-toggle"
-              aria-label="Chats"
-              aria-expanded={sideOpen}
-              onClick={() => setSideOpen((v) => !v)}
-            >
-              ⋯
-            </button>
             <form className={`tellnote${draft.trim() ? ' armed' : ''}`} onSubmit={onSubmit}>
               <textarea
                 ref={input}
