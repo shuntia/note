@@ -1,4 +1,14 @@
-import { useCallback, useEffect, useRef, useState, type FocusEvent, type ReactNode } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type FocusEvent,
+  type ReactNode,
+  type Ref,
+} from 'react'
 import { createPortal } from 'react-dom'
 import gsap from 'gsap'
 import { popIn, popOut } from './motion-gsap'
@@ -15,7 +25,15 @@ export type OverflowItem = {
   children?: OverflowItem[]
 }
 
+export type OverflowHandle = {
+  /** Opens the menu at a point in the viewport, clamped inside it. */
+  openAt: (x: number, y: number) => void
+}
+
 const POINTER = '(min-width: 768px) and (pointer: fine)'
+const LONG_PRESS_MS = 500
+const LONG_PRESS_SLOP = 10
+const EDGE = 8
 
 /** True where the menu belongs at the bottom of the screen rather than under its trigger. */
 export function useMenuSheet(): boolean {
@@ -42,23 +60,112 @@ export function Overflow({
   className = 'ev-more-wrap',
   title,
   subtitle,
+  row,
+  trigger: showTrigger = true,
+  ref: handle,
 }: {
   label: string
   items: OverflowItem[]
   className?: string
   title?: string
   subtitle?: string
+  // A selector for the row this menu belongs to: a right-click anywhere on it, or a
+  // still press held half a second, opens the menu where the pointer is.
+  row?: string
+  trigger?: boolean
+  ref?: Ref<OverflowHandle>
 }) {
   const sheet = useMenuSheet()
   const [open, setOpen] = useState(false)
   const [closing, setClosing] = useState(false)
   const [group, setGroup] = useState<string | null>(null)
+  const [point, setPoint] = useState<{ x: number; y: number } | null>(null)
   const wrap = useRef<HTMLDivElement>(null)
   const trigger = useRef<HTMLButtonElement>(null)
   const menu = useRef<HTMLDivElement>(null)
   const scrim = useRef<HTMLDivElement>(null)
 
   const close = useCallback(() => setClosing(true), [])
+  const inside = (n: Node | null) =>
+    !!n && (!!wrap.current?.contains(n) || !!menu.current?.contains(n))
+
+  const openAt = useCallback(
+    (x: number, y: number) => {
+      setPoint(sheet ? null : { x, y })
+      setClosing(false)
+      setOpen(true)
+    },
+    [sheet],
+  )
+  useImperativeHandle(handle, () => ({ openAt }), [openAt])
+
+  useEffect(() => {
+    if (!row) return
+    const el = wrap.current?.closest<HTMLElement>(row)
+    if (!el) return
+    let timer = 0
+    let held = 0
+    let from: { x: number; y: number } | null = null
+    // The press that opened the menu must not also press what is under it.
+    const swallow = (e: Event) => {
+      e.preventDefault()
+      e.stopPropagation()
+    }
+    const forget = () => {
+      window.clearTimeout(held)
+      removeEventListener('click', swallow, true)
+    }
+    const stop = () => {
+      window.clearTimeout(timer)
+      from = null
+    }
+    const onMenu = (e: MouseEvent) => {
+      stop()
+      e.preventDefault()
+      openAt(e.clientX, e.clientY)
+    }
+    const onDown = (e: PointerEvent) => {
+      if (e.pointerType !== 'touch') return
+      from = { x: e.clientX, y: e.clientY }
+      timer = window.setTimeout(() => {
+        from = null
+        forget()
+        addEventListener('click', swallow, { capture: true, once: true })
+        held = window.setTimeout(() => removeEventListener('click', swallow, true), 600)
+        openAt(e.clientX, e.clientY)
+      }, LONG_PRESS_MS)
+    }
+    const onMove = (e: PointerEvent) => {
+      if (!from) return
+      if (
+        Math.abs(e.clientX - from.x) > LONG_PRESS_SLOP ||
+        Math.abs(e.clientY - from.y) > LONG_PRESS_SLOP
+      )
+        stop()
+    }
+    el.addEventListener('contextmenu', onMenu)
+    el.addEventListener('pointerdown', onDown)
+    el.addEventListener('pointermove', onMove)
+    el.addEventListener('pointerup', stop)
+    el.addEventListener('pointercancel', stop)
+    return () => {
+      stop()
+      forget()
+      el.removeEventListener('contextmenu', onMenu)
+      el.removeEventListener('pointerdown', onDown)
+      el.removeEventListener('pointermove', onMove)
+      el.removeEventListener('pointerup', stop)
+      el.removeEventListener('pointercancel', stop)
+    }
+  }, [row, openAt])
+
+  useLayoutEffect(() => {
+    const el = menu.current
+    if (!open || sheet || !point || !el) return
+    const r = el.getBoundingClientRect()
+    el.style.left = `${Math.max(EDGE, Math.min(point.x, innerWidth - r.width - EDGE))}px`
+    el.style.top = `${Math.max(EDGE, Math.min(point.y, innerHeight - r.height - EDGE))}px`
+  }, [open, sheet, point, group])
 
   const step = useCallback((by: number) => {
     const rows = Array.from(
@@ -97,7 +204,7 @@ export function Overflow({
       step(e.key === 'ArrowDown' ? 1 : -1)
     }
     const onDown = (e: MouseEvent) => {
-      if (!wrap.current?.contains(e.target as Node)) close()
+      if (!inside(e.target as Node)) close()
     }
     document.addEventListener('keydown', onKey)
     if (!sheet) document.addEventListener('mousedown', onDown)
@@ -113,6 +220,7 @@ export function Overflow({
       setClosing(false)
       setOpen(false)
       setGroup(null)
+      setPoint(null)
     }
     if (!sheet) {
       popOut(menu.current, settled, opensUp(menu.current, trigger.current))
@@ -147,12 +255,15 @@ export function Overflow({
         })
       }
     } else if (open) close()
-    else setOpen(true)
+    else {
+      setPoint(null)
+      setOpen(true)
+    }
   }
 
   // Focus moving between the menu's own items must not close it.
   const onBlur = (e: FocusEvent<HTMLDivElement>) => {
-    if (!wrap.current?.contains(e.relatedTarget as Node | null)) close()
+    if (!inside(e.relatedTarget as Node | null)) close()
   }
 
   const pick = (item: OverflowItem) => {
@@ -213,23 +324,33 @@ export function Overflow({
     </>
   )
 
+  const popover = open && !sheet && (
+    <div
+      className="ev-menu"
+      role="menu"
+      ref={menu}
+      onBlur={onBlur}
+      style={point ? { position: 'fixed', left: point.x, top: point.y, right: 'auto', zIndex: 60 } : undefined}
+    >
+      {body}
+    </div>
+  )
+
   return (
     <div className={className} ref={wrap} data-open={open && !closing}>
-      <button
-        className="ev-more"
-        ref={trigger}
-        aria-label={label}
-        aria-haspopup="menu"
-        aria-expanded={open && !closing}
-        onClick={toggle}
-      >
-        ⋯
-      </button>
-      {open && !sheet && (
-        <div className="ev-menu" role="menu" ref={menu} onBlur={onBlur}>
-          {body}
-        </div>
+      {showTrigger && (
+        <button
+          className="ev-more"
+          ref={trigger}
+          aria-label={label}
+          aria-haspopup="menu"
+          aria-expanded={open && !closing}
+          onClick={toggle}
+        >
+          ⋯
+        </button>
       )}
+      {popover && (point ? createPortal(popover, document.body) : popover)}
       {open &&
         sheet &&
         createPortal(

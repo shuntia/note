@@ -10,6 +10,7 @@ import { api } from '../api'
 import type { ViewProps } from '../app'
 import { Markdown } from '../markdown'
 import { flip, popOut, rise, settle } from '../motion-gsap'
+import { Overflow } from '../overflow'
 import '../styles/memory.css'
 import type { MemoryFact, MemoryHit } from '../types'
 
@@ -279,6 +280,7 @@ export function Memory({ notify, refresh, openTalk }: ViewProps) {
                 selected={selected === m.id}
                 onOpen={openFact}
                 onSeen={facts.want}
+                openTalk={openTalk}
               />
             ))}
           </ul>
@@ -307,12 +309,14 @@ function MemoryRow({
   selected,
   onOpen,
   onSeen,
+  openTalk,
 }: {
   hit: MemoryHit
   saved: string | undefined
   selected: boolean
   onOpen: (id: string) => void
   onSeen: (id: string) => void
+  openTalk: (draft: string) => void
 }) {
   const row = useRef<HTMLLIElement>(null)
 
@@ -343,6 +347,17 @@ function MemoryRow({
         <span className="memory-summary">{displaySummary(hit)}</span>
         {saved && <span className="memory-when">{factDate(saved)}</span>}
       </button>
+      <Overflow
+        className="memory-more-wrap"
+        row="li[data-mem]"
+        trigger={false}
+        label={`More actions for ${displaySummary(hit)}`}
+        items={[
+          { label: 'Open', run: () => onOpen(hit.id) },
+          { label: 'Tell Note more', run: () => openTalk(`About "${hit.summary}": `) },
+          { label: "That's wrong", run: () => openTalk(`This is wrong: "${hit.summary}". `) },
+        ]}
+      />
     </li>
   )
 }

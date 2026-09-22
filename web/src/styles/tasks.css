@@ -44,7 +44,9 @@
 }
 
 .task-item { position: relative; }
-.task-item[data-leaving] { overflow: hidden; pointer-events: none; }
+/* a row folding away drives the list's layout and nothing else: its own contents
+   cannot re-flow anything around it on the way down */
+.task-item[data-leaving] { overflow: hidden; pointer-events: none; contain: layout; }
 .task-item[data-leaving='dropped'] .task-title { color: var(--rose); }
 
 /* the trailing controls hold one width per group, so every bar in it ends on

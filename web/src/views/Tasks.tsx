@@ -149,35 +149,48 @@ function placed(list: TaskNode[], nodes: TaskNode[], leaving: Leaving[], group: 
   return out
 }
 
-// Rows that were already there slide from where they were; rows that are new
-// settle in. A row folding away drives the layout itself, so both stand down
-// for it — and for the frame in which it leaves the list.
+// Rows that were already there slide from where they were; rows that are new settle
+// in. A row folding away drives the layout itself, so the FLIP stands down for it and
+// re-reads the rows each frame instead: whatever moves as the row finally leaves the
+// list travels from where it stood one frame before, not from before the fold.
 function useRowMotion(root: RefObject<HTMLDivElement | null>, busy: boolean) {
   const tops = useRef<Map<string, DOMRect> | null>(null)
-  const idle = useRef(true)
 
-  useLayoutEffect(() => {
-    const now = new Map<string, DOMRect>()
+  const read = useCallback(() => {
+    const at = new Map<string, DOMRect>()
     const els = new Map<string, HTMLElement>()
     root.current?.querySelectorAll<HTMLElement>('[data-row]').forEach((el) => {
       const key = el.dataset.row as string
-      now.set(key, el.getBoundingClientRect())
+      at.set(key, el.getBoundingClientRect())
       els.set(key, el)
     })
-    const was = tops.current
-    tops.current = now
-    if (busy || !idle.current) {
-      idle.current = !busy
-      return
+    return { at, els }
+  }, [root])
+
+  useEffect(() => {
+    if (!busy) return
+    let raf = 0
+    const sample = () => {
+      tops.current = read().at
+      raf = requestAnimationFrame(sample)
     }
+    raf = requestAnimationFrame(sample)
+    return () => cancelAnimationFrame(raf)
+  }, [busy, read])
+
+  useLayoutEffect(() => {
+    const { at, els } = read()
+    const was = tops.current
+    tops.current = at
+    if (busy) return
     if (was === null) return settle([...els.values()])
     const moves: { el: Element; dx: number; dy: number }[] = []
     const fresh: Element[] = []
     for (const [key, el] of els) {
       const before = was.get(key)
-      const at = now.get(key) as DOMRect
+      const now = at.get(key) as DOMRect
       if (before === undefined) fresh.push(el)
-      else moves.push({ el, dx: before.left - at.left, dy: before.top - at.top })
+      else moves.push({ el, dx: before.left - now.left, dy: before.top - now.top })
     }
     flip(moves)
     settle(fresh)
@@ -489,6 +502,9 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
 
   const now = placed(g.now, nodes, leaving, 'now')
   const later = placed(g.later, nodes, leaving, 'later')
+  // A task settles into Done today only once it has folded away: until then it is
+  // still in the list it is leaving, and a row is never in two lists at once.
+  const doneToday = g.doneToday.filter((n) => !leaving.some((l) => l.id === n.id))
 
   return (
     <div className="tasks" ref={root}>
@@ -529,7 +545,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
       {later.length > 0 && (
         <section className="task-group later">
           <h3 className="task-group-head">
-            Later <span className="task-count">{g.later.length}</span>
+            Later <span className="task-count">{later.length}</span>
           </h3>
           <div className="task-list">
             {later.map((p) => (
@@ -546,21 +562,21 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
           </div>
         </section>
       )}
-      {g.doneToday.length > 0 && (
+      {doneToday.length > 0 && (
         <section className="task-group done">
           <button
             className="task-done-fold"
             aria-expanded={showDone}
             onClick={() => setShowDone((v) => !v)}
           >
-            Done today <span className="task-count">{g.doneToday.length}</span>
+            Done today <span className="task-count">{doneToday.length}</span>
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <path d="M9 6l6 6-6 6" />
             </svg>
           </button>
           {showDone && (
             <div className="task-list">
-              {g.doneToday.map((n) => (
+              {doneToday.map((n) => (
                 <Row
                   key={n.id}
                   node={n}
@@ -877,7 +893,12 @@ function Row({
         </div>
         <span className="task-acts">
           {!done && (
-            <Overflow className="task-more" label={`More actions for ${node.title}`} items={items} />
+            <Overflow
+              className="task-more"
+              row=".task-row"
+              label={`More actions for ${node.title}`}
+              items={items}
+            />
           )}
           {group === 'now' && !sheet && (
             <button
