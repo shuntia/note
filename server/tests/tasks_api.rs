@@ -21,12 +21,18 @@ async fn login(app: &axum::Router, username: &str, password: &str) -> String {
 }
 
 async fn app_with_user() -> (axum::Router, String, tempfile::TempDir) {
+    let (app, cookie, _state, tmp) = app_with_user_and_state().await;
+    (app, cookie, tmp)
+}
+
+async fn app_with_user_and_state() -> (axum::Router, String, AppState, tempfile::TempDir) {
     let conn = db::open_memory().unwrap();
     auth::create_user(&conn, "aki", "pw", false).unwrap();
     let tmp = tempfile::tempdir().unwrap();
-    let app = api::router(AppState::new(conn, tmp.path().to_path_buf(), tmp.path().to_path_buf()));
+    let state = AppState::new(conn, tmp.path().to_path_buf(), tmp.path().to_path_buf());
+    let app = api::router(state.clone());
     let cookie = login(&app, "aki", "pw").await;
-    (app, cookie, tmp)
+    (app, cookie, state, tmp)
 }
 
 async fn read(res: axum::response::Response) -> (StatusCode, serde_json::Value) {
@@ -677,4 +683,97 @@ async fn a_task_says_how_its_block_announces_itself() {
         post(&app, &cookie, "/api/tasks", r#"{"title":"quiet one","notify":"chat"}"#).await;
     assert_eq!(status, StatusCode::OK, "{made}");
     assert_eq!(made["notify"], "chat");
+}
+
+#[tokio::test]
+async fn a_task_carries_its_category_and_a_step_reads_the_one_above_it() {
+    let (app, cookie, _tmp) = app_with_user().await;
+    let (status, made) =
+        post(&app, &cookie, "/api/tasks", r#"{"title":"chapter 4","category":"Biology"}"#).await;
+    assert_eq!(status, StatusCode::OK, "{made}");
+    assert_eq!(made["category"], "Biology");
+    let id = made["id"].as_i64().unwrap();
+
+    let (status, step) = post(
+        &app,
+        &cookie,
+        "/api/tasks",
+        &format!(r#"{{"title":"read it","parent_id":{id}}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{step}");
+    assert_eq!(step["category"], "Biology");
+
+    let (status, refused) =
+        patch_task(&app, &cookie, step["id"].as_i64().unwrap(), r#"{"category":"History"}"#).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refused}");
+
+    let (_, cleared) = patch_task(&app, &cookie, id, r#"{"category":""}"#).await;
+    assert_eq!(cleared["category"], "");
+    assert_eq!(list(&app, &cookie).await[0]["children"][0]["category"], "");
+}
+
+#[tokio::test]
+async fn a_task_names_the_goal_it_belongs_to() {
+    let (app, cookie, _tmp) = app_with_user().await;
+    let (status, goal) =
+        post(&app, &cookie, "/api/goals", r#"{"title":"get into the programme"}"#).await;
+    assert_eq!(status, StatusCode::CREATED, "{goal}");
+    let goal_id = goal["id"].as_i64().unwrap();
+
+    let (status, made) = post(
+        &app,
+        &cookie,
+        "/api/tasks",
+        &format!(r#"{{"title":"the essay","goal_id":{goal_id}}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{made}");
+    assert_eq!(made["goal_id"], goal_id);
+    assert_eq!(made["goal_title"], "get into the programme");
+
+    let row = list(&app, &cookie).await;
+    assert_eq!(row[0]["goal_title"], "get into the programme");
+
+    let (status, refused) = patch_task(
+        &app,
+        &cookie,
+        made["id"].as_i64().unwrap(),
+        r#"{"goal_id":9999}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refused}");
+}
+
+#[tokio::test]
+async fn a_task_row_says_when_its_next_block_starts() {
+    let (app, cookie, state, _tmp) = app_with_user_and_state().await;
+    let (_, made) = post(&app, &cookie, "/api/tasks", r#"{"title":"the essay"}"#).await;
+    let id = made["id"].as_i64().unwrap();
+    assert!(list(&app, &cookie).await[0]["scheduled_at"].is_null());
+
+    let today = jiff::Timestamp::now().to_zoned(jiff::tz::TimeZone::UTC).date();
+    {
+        let conn = state.db();
+        conn.execute(
+            "INSERT INTO plans (user_id, date, created_at) VALUES (1, ?1, 'x')",
+            [today.to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO events (plan_id, kind, wall_time, alert, end_wall_time)
+             VALUES (1, 'the essay', '18:15', 0, '19:00')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO event_tasks (event_id, task_id) VALUES (?1, ?2)",
+            (conn.last_insert_rowid(), id),
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        list(&app, &cookie).await[0]["scheduled_at"],
+        serde_json::json!(format!("{today}T18:15:00+00:00"))
+    );
 }

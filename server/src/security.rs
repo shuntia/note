@@ -495,7 +495,7 @@ struct PasswordReq {
 /// The sudo check every mutating call pays: a stolen session cannot add or drop
 /// a factor without the account password. Attempts are limited like a login.
 /// A `Some` is the response the route must answer with.
-async fn password_refused(
+pub(crate) async fn password_refused(
     state: &AppState,
     user: &CurrentUser,
     password: String,

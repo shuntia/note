@@ -13,7 +13,10 @@ pub fn router(state: AppState) -> Router {
         .route("/healthz", get(|| async { "ok" }))
         .route("/api/login", post(login))
         .route("/api/logout", post(logout))
+        .route("/api/password", post(password_change))
         .route("/api/me", get(me))
+        .route("/api/goals", get(goals_list).post(goals_create))
+        .route("/api/goals/{id}", patch(goals_update).delete(goals_delete))
         .route("/api/tasks", get(tasks_list).post(tasks_create))
         .route("/api/tasks/{id}", patch(tasks_update).delete(tasks_delete))
         .route(
@@ -171,9 +174,110 @@ async fn me(user: CurrentUser) -> Json<serde_json::Value> {
     Json(serde_json::json!({ "username": user.username, "admin": user.admin }))
 }
 
+/// Short enough to type on a phone, long enough not to be guessed.
+const MIN_PASSWORD_LEN: usize = 8;
+
+#[derive(Deserialize)]
+struct PasswordChangeReq {
+    current: String,
+    new: String,
+}
+
+/// Changing the password ends every other session the account holds — a
+/// password is changed because the old one may be known — while the one making
+/// the change stays signed in.
+async fn password_change(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Json(req): Json<PasswordChangeReq>,
+) -> impl IntoResponse {
+    if req.new.chars().count() < MIN_PASSWORD_LEN {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({
+                "error": format!("the new password must be at least {MIN_PASSWORD_LEN} characters")
+            })),
+        )
+            .into_response();
+    }
+    if let Some(refused) = crate::security::password_refused(&state, &user, req.current).await {
+        return refused;
+    }
+    let written = tokio::task::spawn_blocking(move || {
+        let conn = state.db();
+        auth::set_password(&conn, user.id, &req.new)?;
+        conn.execute(
+            "DELETE FROM sessions WHERE user_id = ?1 AND token != ?2",
+            (user.id, &user.session_token),
+        )?;
+        anyhow::Ok(())
+    })
+    .await;
+    match written {
+        Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
+        _ => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn goals_list(user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
+    let conn = state.db();
+    match crate::goals::list(&conn, user.id, Some("any")) {
+        Ok(gs) => Json(gs).into_response(),
+        Err(e) => task_error(e),
+    }
+}
+
+async fn goals_create(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Json(req): Json<crate::goals::NewGoal>,
+) -> impl IntoResponse {
+    let conn = state.db();
+    match crate::goals::create(&conn, user.id, req) {
+        Ok(g) => (StatusCode::CREATED, Json(g)).into_response(),
+        Err(e) => task_error(e),
+    }
+}
+
+async fn goals_update(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(patch): Json<crate::goals::GoalPatch>,
+) -> impl IntoResponse {
+    let conn = state.db();
+    match crate::goals::update(&conn, user.id, id, patch) {
+        Ok(Some(g)) => Json(g).into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => task_error(e),
+    }
+}
+
+async fn goals_delete(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    let conn = state.db();
+    match crate::goals::delete(&conn, user.id, id) {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => StatusCode::NOT_FOUND.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+fn user_zone(state: &AppState, username: &str) -> jiff::tz::TimeZone {
+    crate::triggers::timezone(&state.config_dir, username)
+}
+
 async fn tasks_list(user: TaskPrincipal, State(state): State<AppState>) -> impl IntoResponse {
     let conn = state.db();
-    match crate::tasks::list(&conn, user.id) {
+    let tz = user_zone(&state, &user.username);
+    let listed = crate::tasks::list(&conn, user.id).and_then(|mut ts| {
+        crate::tasks::stamp_schedule(&conn, user.id, &tz, ts.iter_mut().map(|n| &mut n.task))?;
+        Ok(ts)
+    });
+    match listed {
         Ok(ts) => Json(ts).into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
@@ -202,8 +306,12 @@ async fn tasks_create(
     }
     let conn = state.db();
     let source = default_source(&user.via);
+    let tz = user_zone(&state, &user.username);
     match crate::tasks::create(&conn, user.id, req, source, crate::tasks::Actor::User) {
-        Ok(t) => Json(t).into_response(),
+        Ok(mut t) => {
+            let _ = crate::tasks::stamp_schedule(&conn, user.id, &tz, std::iter::once(&mut t));
+            Json(t).into_response()
+        }
         Err(e) => task_error(e),
     }
 }
@@ -215,8 +323,17 @@ async fn tasks_update(
     Json(patch): Json<crate::tasks::TaskPatch>,
 ) -> impl IntoResponse {
     let conn = state.db();
+    let tz = user_zone(&state, &user.username);
     match crate::tasks::update(&conn, user.id, id, patch) {
-        Ok(Some(t)) => Json(t).into_response(),
+        Ok(Some(mut t)) => {
+            let _ = crate::tasks::stamp_schedule(
+                &conn,
+                user.id,
+                &tz,
+                std::iter::once(&mut t.task).chain(t.parent.as_mut()),
+            );
+            Json(t).into_response()
+        }
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(e) => task_error(e),
     }

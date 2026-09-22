@@ -15,6 +15,7 @@ const MAX_PROGRESS: u32 = 100;
 /// The grain every projected figure lands on.
 const PROJECTION_STEP_MIN: u32 = 15;
 pub const MAX_TITLE_BYTES: usize = 500;
+pub const MAX_CATEGORY_BYTES: usize = 100;
 const MAX_TEXT_BYTES: usize = 16 * 1024;
 const MAX_EXTERNAL_ID_BYTES: usize = 200;
 const MAX_URL_BYTES: usize = 2 * 1024;
@@ -80,6 +81,16 @@ pub struct Task {
     pub external_id: Option<String>,
     pub url: String,
     pub notify: String,
+    /// Free text, one per task; a step reports the one its parent carries.
+    pub category: String,
+    /// The goal this task belongs to, and its title; only a top-level task
+    /// carries one.
+    pub goal_id: Option<i64>,
+    pub goal_title: Option<String>,
+    /// When this task's next block still to come starts, as a date-time in the
+    /// user's own zone. Filled by `stamp_schedule`, which is where the zone is
+    /// known; `None` everywhere else.
+    pub scheduled_at: Option<String>,
     /// Minutes actually worked on it, summed from the sessions that ended.
     pub actual_min: Option<u32>,
     /// How far along the task is, 0 to 100.
@@ -152,6 +163,10 @@ pub struct NewTask {
     pub notify: Option<String>,
     #[serde(default)]
     pub progress: Option<u32>,
+    #[serde(default)]
+    pub category: Option<String>,
+    #[serde(default)]
+    pub goal_id: Option<i64>,
 }
 
 /// `Option<Option<T>>` fields separate "absent, leave alone" (`None`) from
@@ -175,11 +190,14 @@ pub struct TaskPatch {
     pub external_id: Option<Option<String>>,
     pub notify: Option<String>,
     pub progress: Option<u32>,
+    pub category: Option<String>,
+    #[serde(default, deserialize_with = "present")]
+    pub goal_id: Option<Option<i64>>,
     #[serde(skip)]
     pub actor: Actor,
 }
 
-fn present<'de, D, T>(d: D) -> Result<Option<Option<T>>, D::Error>
+pub(crate) fn present<'de, D, T>(d: D) -> Result<Option<Option<T>>, D::Error>
 where
     D: Deserializer<'de>,
     T: Deserialize<'de>,
@@ -211,6 +229,10 @@ fn row_to_task(r: &rusqlite::Row) -> rusqlite::Result<Task> {
         external_id: r.get(12)?,
         url: r.get(13)?,
         notify: r.get(14)?,
+        category: r.get(17)?,
+        goal_id: r.get(18)?,
+        goal_title: r.get(19)?,
+        scheduled_at: None,
         actual_min,
         progress,
         expected_min,
@@ -218,9 +240,16 @@ fn row_to_task(r: &rusqlite::Row) -> rusqlite::Result<Task> {
     })
 }
 
-const COLS: &str = "id, title, description, state, source, notes, duration_min, \
-                    duration_source, parent_id, is_now, updated_at, due_at, \
-                    external_id, url, notify, actual_min, progress";
+const COLS: &str = "t.id, t.title, t.description, t.state, t.source, t.notes, t.duration_min, \
+                    t.duration_source, t.parent_id, t.is_now, t.updated_at, t.due_at, \
+                    t.external_id, t.url, t.notify, t.actual_min, t.progress, \
+                    COALESCE(p.category, t.category), t.goal_id, g.title";
+
+/// A step reports the category of the task it belongs to, and a task its goal's
+/// title, so one read carries what a row needs to draw itself.
+const FROM: &str = "tasks t
+    LEFT JOIN tasks p ON p.id = t.parent_id
+    LEFT JOIN goals g ON g.id = t.goal_id";
 
 fn checked_duration(min: u32) -> Result<u32, UpdateError> {
     if min == 0 || !min.is_multiple_of(DURATION_STEP_MIN) || min > MAX_DURATION_MIN {
@@ -327,6 +356,53 @@ fn checked_due_placement(parent_id: Option<i64>, due_at: Option<&str>) -> Result
         ));
     }
     Ok(())
+}
+
+fn checked_category(raw: &str) -> Result<String, UpdateError> {
+    let category = raw.trim();
+    if category.len() > MAX_CATEGORY_BYTES {
+        return Err(UpdateError::Invalid(format!(
+            "category must be at most {MAX_CATEGORY_BYTES} bytes"
+        )));
+    }
+    Ok(category.to_owned())
+}
+
+/// A category and a goal both belong to the whole task, so a step carries
+/// neither: it reads its parent's.
+fn checked_step_placement(
+    parent_id: Option<i64>,
+    category: Option<&str>,
+    goal_id: Option<i64>,
+) -> Result<(), UpdateError> {
+    if parent_id.is_none() {
+        return Ok(());
+    }
+    if category.is_some_and(|c| !c.is_empty()) {
+        return Err(UpdateError::Invalid(
+            "a step carries no category of its own; it reads the one on the task it belongs to"
+                .into(),
+        ));
+    }
+    if goal_id.is_some() {
+        return Err(UpdateError::Invalid(
+            "a step belongs to no goal of its own; the task it belongs to holds one".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// A goal a task names must be the caller's own.
+fn checked_goal(conn: &Connection, user_id: i64, goal_id: i64) -> Result<(), UpdateError> {
+    let mine: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM goals WHERE id = ?1 AND user_id = ?2)",
+        (goal_id, user_id),
+        |r| r.get(0),
+    )?;
+    if mine {
+        return Ok(());
+    }
+    Err(UpdateError::Invalid(format!("no goal {goal_id}")))
 }
 
 /// The id of the task holding this external id, when some other task does.
@@ -444,6 +520,11 @@ pub fn create(
     checked_text("notes", &notes)?;
     let due_at = new.due_at.flatten().as_deref().map(checked_due).transpose()?;
     checked_due_placement(new.parent_id, due_at.as_deref())?;
+    let category = new.category.as_deref().map(checked_category).transpose()?;
+    checked_step_placement(new.parent_id, category.as_deref(), new.goal_id)?;
+    if let Some(goal_id) = new.goal_id {
+        checked_goal(conn, user_id, goal_id)?;
+    }
     let state = match new.state.as_deref() {
         Some(s) if !STATES.contains(&s) => return Err(UpdateError::InvalidState(s.to_owned())),
         other => other.unwrap_or("open").to_owned(),
@@ -476,11 +557,12 @@ pub fn create(
         "INSERT INTO tasks
             (user_id, title, description, notes, source, state, parent_id, duration_min,
              duration_source, is_now, due_at, url, external_id, notify, created_at, updated_at,
-             completed_at, progress)
+             completed_at, progress, category, goal_id)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
                  COALESCE(?15, 'notify'), ?14, ?14,
                  CASE WHEN ?6 = 'done' THEN ?14 END,
-                 CASE WHEN ?6 = 'done' THEN 100 ELSE ?16 END)",
+                 CASE WHEN ?6 = 'done' THEN 100 ELSE ?16 END,
+                 COALESCE(?17, ''), ?18)",
         rusqlite::params![
             user_id,
             &title,
@@ -498,6 +580,8 @@ pub fn create(
             now(),
             notify,
             progress,
+            category,
+            new.goal_id,
         ],
     )?;
     let id = conn.last_insert_rowid();
@@ -505,12 +589,12 @@ pub fn create(
         derive_progress(conn, p)?;
     }
     trim_now(conn, user_id, id)?;
-    Ok(conn.query_row(&format!("SELECT {COLS} FROM tasks WHERE id = ?1"), [id], row_to_task)?)
+    Ok(conn.query_row(&format!("SELECT {COLS} FROM {FROM} WHERE t.id = ?1"), [id], row_to_task)?)
 }
 
 fn children_of(conn: &Connection, parent_id: i64) -> rusqlite::Result<Vec<Task>> {
     let mut stmt = conn.prepare(&format!(
-        "SELECT {COLS} FROM tasks WHERE parent_id = ?1 AND state != 'dropped' ORDER BY id"
+        "SELECT {COLS} FROM {FROM} WHERE t.parent_id = ?1 AND t.state != 'dropped' ORDER BY t.id"
     ))?;
     let rows = stmt.query_map([parent_id], row_to_task)?;
     rows.collect()
@@ -518,7 +602,7 @@ fn children_of(conn: &Connection, parent_id: i64) -> rusqlite::Result<Vec<Task>>
 
 pub fn get(conn: &Connection, user_id: i64, task_id: i64) -> rusqlite::Result<Option<Task>> {
     conn.query_row(
-        &format!("SELECT {COLS} FROM tasks WHERE id = ?1 AND user_id = ?2"),
+        &format!("SELECT {COLS} FROM {FROM} WHERE t.id = ?1 AND t.user_id = ?2"),
         (task_id, user_id),
         row_to_task,
     )
@@ -527,8 +611,8 @@ pub fn get(conn: &Connection, user_id: i64, task_id: i64) -> rusqlite::Result<Op
 
 pub fn list(conn: &Connection, user_id: i64) -> rusqlite::Result<Vec<TaskNode>> {
     let mut stmt = conn.prepare(&format!(
-        "SELECT {COLS} FROM tasks
-         WHERE user_id = ?1 AND state != 'dropped' AND parent_id IS NULL ORDER BY id"
+        "SELECT {COLS} FROM {FROM}
+         WHERE t.user_id = ?1 AND t.state != 'dropped' AND t.parent_id IS NULL ORDER BY t.id"
     ))?;
     let parents: Vec<Task> =
         stmt.query_map([user_id], row_to_task)?.collect::<rusqlite::Result<_>>()?;
@@ -539,6 +623,64 @@ pub fn list(conn: &Connection, user_id: i64) -> rusqlite::Result<Vec<TaskNode>> 
             Ok(TaskNode { task, children })
         })
         .collect()
+}
+
+/// The next block each of the user's top-level tasks still has waiting — its
+/// own or one of its steps' — keyed by that task's id. Blocks are stored as a
+/// local date and wall time, so the answer is stamped with the offset the
+/// user's clock had then.
+fn schedule(
+    conn: &Connection,
+    user_id: i64,
+    tz: &jiff::tz::TimeZone,
+    today: jiff::civil::Date,
+) -> rusqlite::Result<std::collections::HashMap<i64, String>> {
+    let mut stmt = conn.prepare(
+        "SELECT COALESCE(t.parent_id, t.id), p.date, e.wall_time
+         FROM events e
+         JOIN plans p ON p.id = e.plan_id
+         JOIN event_tasks et ON et.event_id = e.id
+         JOIN tasks t ON t.id = et.task_id
+         WHERE p.user_id = ?1 AND e.status IN ('pending','snoozed') AND p.date >= ?2
+         ORDER BY p.date, e.wall_time",
+    )?;
+    let rows = stmt.query_map((user_id, today.to_string()), |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+    })?;
+    let mut out = std::collections::HashMap::new();
+    for row in rows {
+        let (task_id, date, wall) = row?;
+        if out.contains_key(&task_id) {
+            continue;
+        }
+        if let Some(at) = local_start(tz, &date, &wall) {
+            out.insert(task_id, at);
+        }
+    }
+    Ok(out)
+}
+
+fn local_start(tz: &jiff::tz::TimeZone, date: &str, wall: &str) -> Option<String> {
+    let date: jiff::civil::Date = date.parse().ok()?;
+    let (h, m) = wall.split_once(':')?;
+    let time = jiff::civil::Time::new(h.parse().ok()?, m.parse().ok()?, 0, 0).ok()?;
+    let zoned = tz.to_ambiguous_zoned(date.to_datetime(time)).compatible().ok()?;
+    Some(zoned.strftime("%Y-%m-%dT%H:%M:%S%:z").to_string())
+}
+
+/// Fills `scheduled_at` on each of the top-level tasks given.
+pub fn stamp_schedule<'a>(
+    conn: &Connection,
+    user_id: i64,
+    tz: &jiff::tz::TimeZone,
+    tasks: impl IntoIterator<Item = &'a mut Task>,
+) -> rusqlite::Result<()> {
+    let today = jiff::Timestamp::now().to_zoned(tz.clone()).date();
+    let found = schedule(conn, user_id, tz, today)?;
+    for task in tasks {
+        task.scheduled_at = found.get(&task.id).cloned();
+    }
+    Ok(())
 }
 
 /// How many of the user's tasks and steps were finished inside the half-open
@@ -942,6 +1084,7 @@ pub fn update(
     };
     let notify = patch.notify.as_deref().map(checked_notify).transpose()?;
     let progress = patch.progress.map(checked_progress).transpose()?;
+    let category = patch.category.as_deref().map(checked_category).transpose()?;
     let Some(before) = get(conn, user_id, task_id)? else { return Ok(None) };
     if let Some(Some(p)) = patch.parent_id {
         if has_children(conn, task_id)? {
@@ -959,6 +1102,15 @@ pub fn update(
     let parent_id = patch.parent_id.unwrap_or(before.parent_id);
     let due_at = due_at.unwrap_or(before.due_at);
     checked_due_placement(parent_id, due_at.as_deref())?;
+    checked_step_placement(parent_id, category.as_deref(), patch.goal_id.flatten())?;
+    // becoming a step is giving up a category and a goal, as it is leaving Now
+    let (category, goal_id) = match parent_id {
+        Some(_) => (Some(String::new()), None),
+        None => (category, patch.goal_id.unwrap_or(before.goal_id)),
+    };
+    if let Some(id) = goal_id {
+        checked_goal(conn, user_id, id)?;
+    }
     let external_id = external_id.unwrap_or(before.external_id);
     if let Some(id) = &external_id {
         if let Some(held) = external_id_holder(conn, user_id, id, Some(task_id))? {
@@ -997,6 +1149,8 @@ pub fn update(
             notify = COALESCE(?14, notify),
             progress = CASE WHEN COALESCE(?3, state) = 'done' THEN 100
                 ELSE COALESCE(?15, progress) END,
+            category = COALESCE(?16, category),
+            goal_id = ?17,
             updated_at = ?12,
             completed_at = CASE WHEN COALESCE(?3, state) = 'done'
                 THEN COALESCE(completed_at, ?12) END
@@ -1017,6 +1171,8 @@ pub fn update(
             task_id,
             notify,
             progress,
+            category,
+            goal_id,
         ],
     )?;
     if patch.state.is_some() {
@@ -1306,6 +1462,154 @@ mod tests {
             Actor::User,
         );
         assert!(matches!(refused, Err(UpdateError::Invalid(_))), "{refused:?}");
+    }
+
+    #[test]
+    fn a_step_reads_its_parents_category_and_carries_none_of_its_own() {
+        let (conn, uid) = db_with_user();
+        let parent = create(
+            &conn,
+            uid,
+            NewTask { title: "essay".into(), category: Some("  Biology  ".into()), ..Default::default() },
+            "manual",
+            Actor::User,
+        )
+        .unwrap();
+        assert_eq!(parent.category, "Biology");
+        let step = task(&conn, uid, "draft", Some(parent.id));
+        assert_eq!(get(&conn, uid, step).unwrap().unwrap().category, "Biology");
+
+        let refused = update(
+            &conn,
+            uid,
+            step,
+            TaskPatch { category: Some("History".into()), ..Default::default() },
+        );
+        assert!(matches!(refused, Err(UpdateError::Invalid(_))), "{refused:?}");
+
+        update(&conn, uid, parent.id, TaskPatch { category: Some("Chemistry".into()), ..Default::default() })
+            .unwrap();
+        assert_eq!(get(&conn, uid, step).unwrap().unwrap().category, "Chemistry");
+    }
+
+    #[test]
+    fn a_goal_is_the_users_own_and_never_a_steps() {
+        let (conn, uid) = db_with_user();
+        let goal = crate::goals::create(
+            &conn,
+            uid,
+            crate::goals::NewGoal { title: "apply".into(), ..Default::default() },
+        )
+        .unwrap();
+        let id = create(
+            &conn,
+            uid,
+            NewTask { title: "essay".into(), goal_id: Some(goal.id), ..Default::default() },
+            "manual",
+            Actor::User,
+        )
+        .unwrap()
+        .id;
+        let t = get(&conn, uid, id).unwrap().unwrap();
+        assert_eq!(t.goal_id, Some(goal.id));
+        assert_eq!(t.goal_title.as_deref(), Some("apply"));
+
+        let step = task(&conn, uid, "draft", Some(id));
+        let refused =
+            update(&conn, uid, step, TaskPatch { goal_id: Some(Some(goal.id)), ..Default::default() });
+        assert!(matches!(refused, Err(UpdateError::Invalid(_))), "{refused:?}");
+
+        let bo = crate::auth::create_user(&conn, "bo", "pw", false).unwrap();
+        let theirs = crate::goals::create(
+            &conn,
+            bo,
+            crate::goals::NewGoal { title: "theirs".into(), ..Default::default() },
+        )
+        .unwrap();
+        let refused =
+            update(&conn, uid, id, TaskPatch { goal_id: Some(Some(theirs.id)), ..Default::default() });
+        assert!(matches!(refused, Err(UpdateError::Invalid(_))), "{refused:?}");
+
+        update(&conn, uid, id, TaskPatch { goal_id: Some(None), ..Default::default() }).unwrap();
+        assert!(get(&conn, uid, id).unwrap().unwrap().goal_id.is_none());
+    }
+
+    #[test]
+    fn scheduled_at_reads_the_next_block_still_waiting() {
+        let (conn, uid) = db_with_user();
+        let id = task(&conn, uid, "essay", None);
+        let tz = jiff::tz::TimeZone::UTC;
+        let today = jiff::Timestamp::now().to_zoned(tz.clone()).date();
+        let stamped = |id: i64| -> Option<String> {
+            let mut t = get(&conn, uid, id).unwrap().unwrap();
+            stamp_schedule(&conn, uid, &tz, std::iter::once(&mut t)).unwrap();
+            t.scheduled_at
+        };
+        assert!(stamped(id).is_none(), "a task nobody has planned has no hour yet");
+
+        let block = |date: jiff::civil::Date, wall: &str, status: &str| {
+            conn.execute(
+                "INSERT OR IGNORE INTO plans (user_id, date, created_at) VALUES (?1, ?2, 'x')",
+                (uid, date.to_string()),
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO events (plan_id, kind, wall_time, alert, end_wall_time, status)
+                 SELECT id, 'essay', ?2, 0, '10:00', ?3 FROM plans
+                 WHERE user_id = ?1 AND date = ?4",
+                rusqlite::params![uid, wall, status, date.to_string()],
+            )
+            .unwrap();
+            let event = conn.last_insert_rowid();
+            conn.execute("INSERT INTO event_tasks (event_id, task_id) VALUES (?1, ?2)", (event, id))
+                .unwrap();
+        };
+        let tomorrow = today.tomorrow().unwrap();
+        block(today.yesterday().unwrap(), "08:00", "pending");
+        block(tomorrow, "09:15", "pending");
+        assert_eq!(
+            stamped(id).as_deref(),
+            Some(format!("{tomorrow}T09:15:00+00:00").as_str()),
+            "yesterday's block is behind us"
+        );
+
+        block(today, "18:15", "dropped");
+        assert_eq!(
+            stamped(id).as_deref(),
+            Some(format!("{tomorrow}T09:15:00+00:00").as_str()),
+            "a block the user dropped is not waiting"
+        );
+        block(today, "18:45", "snoozed");
+        assert_eq!(stamped(id).as_deref(), Some(format!("{today}T18:45:00+00:00").as_str()));
+    }
+
+    #[test]
+    fn a_steps_block_is_the_tasks_own_hour() {
+        let (conn, uid) = db_with_user();
+        let parent = task(&conn, uid, "essay", None);
+        let step = task(&conn, uid, "draft", Some(parent));
+        let tz = jiff::tz::TimeZone::UTC;
+        let today = jiff::Timestamp::now().to_zoned(tz.clone()).date();
+        conn.execute(
+            "INSERT INTO plans (user_id, date, created_at) VALUES (?1, ?2, 'x')",
+            (uid, today.to_string()),
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO events (plan_id, kind, wall_time, alert, end_wall_time)
+             VALUES (1, 'draft', '14:00', 0, '15:00')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO event_tasks (event_id, task_id) VALUES (?1, ?2)",
+            (conn.last_insert_rowid(), step),
+        )
+        .unwrap();
+
+        let mut t = get(&conn, uid, parent).unwrap().unwrap();
+        stamp_schedule(&conn, uid, &tz, std::iter::once(&mut t)).unwrap();
+        assert_eq!(t.scheduled_at.as_deref(), Some(format!("{today}T14:00:00+00:00").as_str()));
     }
 
     #[test]

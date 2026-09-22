@@ -1,5 +1,6 @@
 pub mod calendar_ops;
 pub mod context_ops;
+pub mod goal_ops;
 pub mod harvest_ops;
 pub mod inbox_ops;
 pub mod memory_ops;
@@ -234,6 +235,7 @@ const CONTEXT: &[&str] = &["context_edit"];
 const TASK_READ: &[&str] = &["task_list", "task_search", "task_read"];
 const TASK_WRITE: &[&str] = &["task_create", "task_update", "task_split", "task_delete"];
 const TASK_BULK: &[&str] = &["task_bulk_update"];
+const GOALS: &[&str] = &["goal_create", "goal_update", "goal_list"];
 const PLAN_READ: &[&str] = &["plan_list"];
 const PLAN_LAY: &[&str] = &["plan_tasks", "plan_auto"];
 /// Moving the rest of a day to the next is the user's call, so it lives only
@@ -269,6 +271,7 @@ const DOMAINS: &[&[&str]] = &[
     TASK_READ,
     TASK_WRITE,
     TASK_BULK,
+    GOALS,
     PLAN_READ,
     PLAN_LAY,
     PLAN_CARRY,
@@ -320,6 +323,7 @@ const CHECKIN: &[&str] = registry_of![
     MEMORY_WRITE,
     TASK_READ,
     TASK_WRITE,
+    GOALS,
     PLAN_READ,
     PLAN_CARRY,
     SCHEDULE,
@@ -336,6 +340,7 @@ const TALK: &[&str] = registry_of![
     TASK_READ,
     TASK_WRITE,
     TASK_BULK,
+    GOALS,
     PLAN_READ,
     PLAN_LAY,
     PLAN_CARRY,
@@ -354,6 +359,7 @@ const NIGHTLY: &[&str] = registry_of![
     TASK_READ,
     TASK_WRITE,
     TASK_BULK,
+    GOALS,
     PLAN_READ,
     PLAN_LAY,
     SCHEDULE,
@@ -411,17 +417,20 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
         "task_create" => (
             "Create a new task for the current user. Set is_now to put it straight in Now, \
              the user's short list of at most 3 — a fourth pushes the newest one back to Later. \
-             due_at is when the work is due, not when to do it. notify says how the block \
-             holding this task announces itself when it starts: none is silent, chat writes a \
-             line in the day's thread, notify sends a notification (the default).",
+             due_at is when the work is due, not when to do it. category is free text naming \
+             what the task belongs to — a course, a project, a part of life — and is how the \
+             user groups their list; reuse a category they already have rather than coining a \
+             near-copy. goal_id hangs the task from one of their goals. notify says how the \
+             block holding this task announces itself when it starts: none is silent, chat \
+             writes a line in the day's thread, notify sends a notification (the default).",
             schema::<task_ops::CreateArgs>(),
         ),
         "task_update" => (
             "Update a task's title, description, state, notes, duration (whole 5-minute blocks), \
-             due date, how its block announces itself (notify: none, chat or notify), or \
-             whether it sits in Now — the short list of at most 3, where a fourth pushes the \
-             newest one back to Later. Steps are never in Now, and a step never carries a due \
-             date of its own.",
+             due date, category, goal, how its block announces itself (notify: none, chat or \
+             notify), or whether it sits in Now — the short list of at most 3, where a fourth \
+             pushes the newest one back to Later. Steps are never in Now, and a step carries \
+             neither a due date, a category nor a goal of its own.",
             schema::<task_ops::UpdateArgs>(),
         ),
         "task_split" => (
@@ -433,8 +442,9 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
         "task_brief" => (
             "Brief this one imported assignment, in a single call that ends the session. \
              With homework false the task is dropped as not homework and reason says why; \
-             with homework true, description, duration_min (whole 5-minute blocks) and steps \
-             are written — steps only when the task has none yet, otherwise they are kept.",
+             with homework true, description, duration_min (whole 5-minute blocks), category — \
+             the course or source it came from — and steps are written; steps only when the \
+             task has none yet, otherwise they are kept.",
             schema::<task_ops::BriefArgs>(),
         ),
         "task_delete" => (
@@ -517,10 +527,10 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
             schema::<context_ops::NightlyNotesArgs>(),
         ),
         "task_list" => (
-            "Survey the user's top-level tasks, newest first, each with its due date, its step \
-             count and how many of those are done. Filter by state, by a case-insensitive keyword \
-             over title, description and notes, by when the task was added, by when it is due or \
-             whether it is overdue, or to the Now list; sort due to put the soonest deadline \
+            "Survey the user's top-level tasks, newest first, each with its due date, its \
+             category, its step count and how many of those are done. Filter by state, by a \
+             case-insensitive keyword over title, description and notes, by category, by when \
+             the task was added, by when it is due or whether it is overdue, or to the Now list; sort due to put the soonest deadline \
              first and the undated tasks last; total says how many matched, which can be more \
              than one page holds.",
             schema::<task_query::ListArgs>(),
@@ -533,18 +543,38 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
             schema::<task_query::SearchArgs>(),
         ),
         "task_read" => (
-            "Read one task in full: description, notes, state, source, duration, due date, the \
-             link and id it was imported under, whether it is in Now, when it was added and last \
-             touched, and its steps with their own states and durations. The list tools carry titles only; this is how to see the rest.",
+            "Read one task in full: description, notes, state, source, duration, due date, \
+             category, goal, when its next block on the plan starts (scheduled_at), the link and \
+             id it was imported under, whether it is in Now, when it was added and last touched, \
+             and its steps with their own states and durations. The list tools carry titles only; this is how to see the rest.",
             schema::<task_query::ReadArgs>(),
         ),
         "task_bulk_update" => (
             "Apply one change to a batch of up to 50 tasks: set them all to a state, move them \
-             all in or out of Now, or delete them all. Set exactly one of state, is_now or \
+             all in or out of Now, put them all in one category, hang them all from one goal, \
+             or delete them all. Set exactly one of state, is_now, category, goal_id or \
              delete. All or nothing — an id that is not the user's rejects the whole call and \
              nothing changes. Now holds at most 3, and the tasks it pushes out come back in \
              demoted_from_now; steps are never in Now.",
             schema::<task_query::BulkUpdateArgs>(),
+        ),
+        "goal_create" => (
+            "Open a goal: something that takes weeks rather than an afternoon — an \
+             application, an exam, a project. Make one when the user names such a thing, then \
+             break it into tasks with task_create, each carrying goal_id and a due date spread \
+             back from the goal's own.",
+            schema::<goal_ops::CreateArgs>(),
+        ),
+        "goal_update" => (
+            "Change a goal's title, description, due date or state: done when the user has \
+             reached it, dropped when they have let it go.",
+            schema::<goal_ops::UpdateArgs>(),
+        ),
+        "goal_list" => (
+            "Read the user's goals, soonest deadline first, each with how many tasks hang from \
+             it, how many of those are done, and the unfinished one that falls due next. This is \
+             how to check a goal's remaining tasks against its date.",
+            schema::<goal_ops::ListArgs>(),
         ),
         "plan_tasks" => (
             "Lay tasks out as consecutive blocks of time on one day's plan — this is how \
@@ -741,6 +771,9 @@ fn run(
         "task_search" => task_query::search(conn, ctx, parse(raw)?),
         "task_read" => task_query::read(conn, ctx, parse(raw)?),
         "task_bulk_update" => task_query::bulk_update(conn, ctx, parse(raw)?),
+        "goal_create" => goal_ops::create(conn, ctx, parse(raw)?),
+        "goal_update" => goal_ops::update(conn, ctx, parse(raw)?),
+        "goal_list" => goal_ops::list(conn, ctx, parse(raw)?),
         "plan_tasks" => plan_ops::plan_tasks(conn, ctx, parse(raw)?),
         "plan_auto" => plan_ops::plan_auto(conn, ctx, parse(raw)?),
         "plan_carry" => plan_ops::plan_carry(conn, ctx, parse(raw)?),

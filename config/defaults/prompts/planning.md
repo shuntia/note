@@ -14,9 +14,15 @@ from the template.
    carries a prompt written for yourself about what you will be following up
    on. That is the whole budget you lay alone; a check-in is where to ask the
    user for more.
-4. Work out the morning debrief: two or three warm sentences — yesterday in
+4. Read the open goals (goal_list) against their dates. A goal whose remaining
+   tasks no longer fit before its due date needs the near ones laid onto the
+   coming days; a goal short of tasks needs them written now — 3 to 12 per
+   goal, each with goal_id, a due date spread back from the goal's, and a size
+   in whole 5-minute blocks. Anything the user has named that runs for weeks
+   and has no goal yet gets one (goal_create).
+5. Work out the morning debrief: two or three warm sentences — yesterday in
    one line (no guilt), today's shape in one or two.
-5. Last, once the plan and the debrief are settled, call nightly_notes_write
+6. Last, once the plan and the debrief are settled, call nightly_notes_write
    exactly once. It is the brief every session reads tomorrow, written for
    you and not for the user: 5-12 short plain lines covering
    - today's priorities and the loops still open,

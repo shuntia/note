@@ -489,6 +489,31 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE conversations ADD COLUMN title_kind TEXT NOT NULL DEFAULT 'draft'
         CHECK (title_kind IN ('draft','generated','user'));
     ",
+    // v37
+    "
+    ALTER TABLE tasks ADD COLUMN category TEXT NOT NULL DEFAULT ''
+        CHECK (category = '' OR parent_id IS NULL);
+    UPDATE tasks SET category = substr(title, 1, instr(title, ' — ') - 1)
+    WHERE parent_id IS NULL AND category = '' AND instr(title, ' — ') > 1;
+    ",
+    // v38
+    "
+    CREATE TABLE goals (
+        id INTEGER PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id),
+        title TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        due_at TEXT,
+        state TEXT NOT NULL DEFAULT 'open'
+            CHECK (state IN ('open','done','dropped')),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    CREATE INDEX idx_goals_user ON goals(user_id, id);
+    ALTER TABLE tasks ADD COLUMN goal_id INTEGER REFERENCES goals(id)
+        CHECK (goal_id IS NULL OR parent_id IS NULL);
+    CREATE INDEX idx_tasks_goal ON tasks(goal_id);
+    ",
 ];
 
 pub fn open(path: &Path) -> Result<Connection> {
@@ -1425,6 +1450,84 @@ mod tests {
         for good in ["generated", "user", "draft"] {
             conn.execute("UPDATE conversations SET title_kind = ?1 WHERE id = 1", [good]).unwrap();
         }
+    }
+
+    #[test]
+    fn v37_takes_a_category_from_the_title_and_keeps_it_off_steps() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_migrations(&conn, &MIGRATIONS[..36]).unwrap();
+        conn.execute(
+            "INSERT INTO users (username, pass_hash, role) VALUES ('a','h','member')",
+            [],
+        )
+        .unwrap();
+        conn.execute_batch(
+            "INSERT INTO tasks (id, user_id, title, created_at, updated_at)
+                 VALUES (1, 1, 'Biology — chapter 4', 'x', 'x'),
+                        (2, 1, 'call the dentist', 'x', 'x'),
+                        (3, 1, ' — nothing before it', 'x', 'x');
+             INSERT INTO tasks (id, user_id, title, parent_id, created_at, updated_at)
+                 VALUES (4, 1, 'History — read it', 1, 'x', 'x');",
+        )
+        .unwrap();
+        apply_migrations(&conn, MIGRATIONS).unwrap();
+        let category = |id: i64| -> String {
+            conn.query_row("SELECT category FROM tasks WHERE id = ?1", [id], |r| r.get(0)).unwrap()
+        };
+        assert_eq!(category(1), "Biology");
+        assert_eq!(category(2), "", "a title without the separator carries none");
+        assert_eq!(category(3), "", "nothing stands before the separator");
+        assert_eq!(category(4), "", "a step takes its parent's on read");
+        assert!(
+            conn.execute("UPDATE tasks SET category = 'History' WHERE id = 4", []).is_err(),
+            "a step carries no category of its own"
+        );
+    }
+
+    #[test]
+    fn v38_opens_the_goals_table_and_hangs_top_level_tasks_from_it() {
+        let conn = open_memory().unwrap();
+        let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, MIGRATIONS.len() as i64);
+        conn.execute(
+            "INSERT INTO users (username, pass_hash, role) VALUES ('a','h','member')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO goals (user_id, title, created_at, updated_at)
+             VALUES (1, 'get into the programme', 't', 't')",
+            [],
+        )
+        .unwrap();
+        let (state, due): (String, Option<String>) = conn
+            .query_row("SELECT state, due_at FROM goals WHERE id = 1", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(state, "open");
+        assert!(due.is_none());
+        assert!(
+            conn.execute("UPDATE goals SET state = 'someday' WHERE id = 1", []).is_err(),
+            "the state is a closed set"
+        );
+
+        conn.execute_batch(
+            "INSERT INTO tasks (id, user_id, title, created_at, updated_at)
+                 VALUES (1, 1, 'write the essay', 'x', 'x');
+             INSERT INTO tasks (id, user_id, title, parent_id, created_at, updated_at)
+                 VALUES (2, 1, 'draft it', 1, 'x', 'x');",
+        )
+        .unwrap();
+        conn.execute("UPDATE tasks SET goal_id = 1 WHERE id = 1", []).unwrap();
+        assert!(
+            conn.execute("UPDATE tasks SET goal_id = 1 WHERE id = 2", []).is_err(),
+            "a step hangs from its task, not from a goal"
+        );
+        assert!(
+            conn.execute("UPDATE tasks SET goal_id = 99 WHERE id = 1", []).is_err(),
+            "a task cannot name a goal that is not there"
+        );
     }
 
     #[test]

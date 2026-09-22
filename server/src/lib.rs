@@ -9,6 +9,7 @@ pub mod config;
 pub mod context;
 pub mod day;
 pub mod db;
+pub mod goals;
 pub mod harvest;
 pub mod learn;
 pub mod log;
