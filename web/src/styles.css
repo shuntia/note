@@ -1274,8 +1274,8 @@ textarea.mono { font-family: var(--mono); }
 .home-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .home-of { flex: 0 6 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--faint); font-weight: 400; font-size: 0.875rem; }
 /* the phone has room for the start alone; the span is the menu header's */
-.home.mobile .home-when { width: 3rem; }
-.home.mobile .home-when-end { display: none; }
+.home.mobile .home-list .home-when { width: 3rem; }
+.home.mobile .home-list .home-when-end { display: none; }
 .home-text { display: flex; flex-direction: column; gap: calc(10 * var(--u)); padding: 0 calc(28 * var(--u)); width: 100%; box-sizing: border-box; }
 .home-title { font-family: var(--display); font-weight: 500; font-size: calc(44 * var(--u)); letter-spacing: -0.03em; line-height: 1.02; color: var(--ink); text-wrap: balance; }
 
