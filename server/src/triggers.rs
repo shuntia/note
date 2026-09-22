@@ -608,6 +608,7 @@ fn record_said(
     conn: &Connection,
     user_id: i64,
     date: &str,
+    at: &str,
     conversation_id: Option<i64>,
     text: &str,
     now: jiff::Timestamp,
@@ -618,7 +619,7 @@ fn record_said(
             crate::talk::touch(conn, id, now)?;
             Ok(id)
         }
-        None => crate::talk::checkin_thread(conn, user_id, date, text, now),
+        None => crate::talk::checkin_thread(conn, user_id, date, at, text, now),
     }
 }
 
@@ -719,8 +720,15 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
     };
     let conversation_id = {
         let conn = state.db();
-        let landed =
-            record_said(&conn, fired.user_id, &fired.date, ev.conversation_id, &text, now);
+        let landed = record_said(
+            &conn,
+            fired.user_id,
+            &fired.date,
+            &fired.wall_time,
+            ev.conversation_id,
+            &text,
+            now,
+        );
         let _ = settle(&conn, ev.event_id, now);
         let _ = crate::log::record(
             &conn,

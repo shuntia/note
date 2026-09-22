@@ -312,6 +312,7 @@ mod tests {
             &conn,
             uid,
             &date.to_string(),
+            "09:00",
             "How is it going?",
             "2026-09-21T09:00:00Z".parse().unwrap(),
         )

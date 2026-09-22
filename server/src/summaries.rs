@@ -104,16 +104,21 @@ pub fn run_for_conversation(
         &history,
         &opening,
     )?;
-    let summary = out
+    let written = out
         .steps
         .iter()
         .rev()
         .find(|s| s.name == "summary_write" && !s.is_error)
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s.result).ok())
-        .and_then(|v| v["summary"].as_str().map(str::to_string))
+        .ok_or_else(|| anyhow::anyhow!("the session wrote no summary"))?;
+    let summary = written["summary"]
+        .as_str()
         .ok_or_else(|| anyhow::anyhow!("the session wrote no summary"))?;
     let conn = crate::db_guard(deps.db);
-    crate::talk::store_summary(&conn, candidate.conversation_id, &summary, candidate.through, now)?;
+    crate::talk::store_summary(&conn, candidate.conversation_id, summary, candidate.through, now)?;
+    if let Some(title) = written["title"].as_str() {
+        crate::talk::set_title_unless_renamed(&conn, candidate.conversation_id, title)?;
+    }
     Ok(())
 }
 
@@ -296,12 +301,20 @@ mod tests {
     }
 
     fn wrote(summary: &str) -> MockLLM {
+        named(summary, None)
+    }
+
+    fn named(summary: &str, title: Option<&str>) -> MockLLM {
+        let mut args = serde_json::json!({ "summary": summary });
+        if let Some(title) = title {
+            args["title"] = title.into();
+        }
         MockLLM::scripted(vec![ChatResponse {
             text: String::new(),
             tool_calls: vec![ToolCall {
                 id: "1".into(),
                 name: "summary_write".into(),
-                args: serde_json::json!({ "summary": summary }).to_string(),
+                args: args.to_string(),
             }],
         }])
     }
@@ -379,6 +392,50 @@ mod tests {
         let seen = llm.seen();
         assert_eq!(seen.len(), 1);
         assert_eq!(seen[0].system, "summarise it", "a summary carries no standing context");
+    }
+
+    #[test]
+    fn a_summarys_title_names_the_thread_unless_the_user_named_it() {
+        let (db, tmp) = env();
+        let id = {
+            let conn = db.lock().unwrap();
+            let id = crate::talk::create(&conn, 1, "the essay is due", at("2026-09-17T08:00:00Z"))
+                .unwrap();
+            talk(&conn, id, "user", "the essay is due friday", "2026-09-17T08:00:00Z");
+            id
+        };
+        let candidate = {
+            let conn = db.lock().unwrap();
+            due(&conn, tmp.path(), cutoff_ts()).unwrap().remove(0)
+        };
+        let llm = named("Aki brought the Friday essay.", Some("Essay due on Friday"));
+        run_for_conversation(&deps(&db, &tmp, &llm), &candidate, cutoff_ts()).unwrap();
+        let titled = |conn: &Connection| -> (String, String) {
+            conn.query_row("SELECT title, title_kind FROM conversations WHERE id = ?1", [id], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap()
+        };
+        {
+            let conn = db.lock().unwrap();
+            assert_eq!(titled(&conn), ("Essay due on Friday".into(), "generated".into()));
+            conn.execute("UPDATE conversations SET title_kind = 'user' WHERE id = ?1", [id])
+                .unwrap();
+            talk(&conn, id, "user", "moved to monday", "2026-09-17T08:30:00Z");
+        }
+        let candidate = {
+            let conn = db.lock().unwrap();
+            due(&conn, tmp.path(), cutoff_ts()).unwrap().remove(0)
+        };
+        let llm = named("Aki moved the essay to Monday.", Some("Essay due on Monday"));
+        run_for_conversation(&deps(&db, &tmp, &llm), &candidate, cutoff_ts()).unwrap();
+        let conn = db.lock().unwrap();
+        assert_eq!(titled(&conn), ("Essay due on Friday".into(), "user".into()));
+        assert_eq!(
+            crate::talk::summary(&conn, id).unwrap().unwrap().0,
+            "Aki moved the essay to Monday.",
+            "the summary lands whatever the thread is called"
+        );
     }
 
     #[test]

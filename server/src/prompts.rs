@@ -4,9 +4,9 @@ use std::path::{Path, PathBuf};
 /// The prompts a user may override through the API. Every function here checks
 /// a name against this list, so a caller-supplied name can never become a path
 /// of its own choosing.
-pub const EDITABLE: [&str; 9] = [
+pub const EDITABLE: [&str; 10] = [
     "persona", "planning", "import", "inbox", "summarize", "harvest", "review", "trigger",
-    "search",
+    "search", "title",
 ];
 
 fn checked(name: &str) -> Result<()> {

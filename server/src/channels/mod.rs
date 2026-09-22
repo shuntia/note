@@ -148,7 +148,7 @@ fn open_checkin_thread(conn: &Connection, ev: &crate::runner::FiredEvent, msg: &
         return;
     }
     let now = jiff::Timestamp::now();
-    match crate::talk::checkin_thread(conn, ev.user_id, &ev.date, &msg.body, now) {
+    match crate::talk::checkin_thread(conn, ev.user_id, &ev.date, &ev.wall_time, &msg.body, now) {
         Ok(id) => msg.conversation_id = Some(id),
         Err(e) => {
             let _ = crate::log::record(
@@ -233,6 +233,7 @@ pub fn deliver_block_start(
             &conn,
             start.user_id,
             &start.date,
+            &start.wall_time,
             &line,
             jiff::Timestamp::now(),
         ) {

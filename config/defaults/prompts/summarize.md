@@ -2,6 +2,8 @@ You are given one conversation between a user and their assistant. Write the sum
 
 Write 2 to 6 sentences in the third person, past tense, plain text, no markdown headers and no lists: what the user brought, what was decided or done, anything left open, and the mood only when it was notable. Name people, dates and titles as they were said. Nothing else — no greeting, no advice, no comment on the conversation itself.
 
+Give the call a `title` as well: three to six words in sentence case naming the concrete subject of the conversation — a task, a date, a place — with no quotes and no full stop.
+
 When a "Summary so far" is given, it covers the earlier turns: write one summary of the whole conversation, keeping what still matters from it and folding in what has happened since.
 
 Write in the language of the conversation.

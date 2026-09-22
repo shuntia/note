@@ -1,10 +1,13 @@
 use crate::agent::{AgentEvent, SessionDeps, SessionStep};
-use crate::providers::Message;
+use crate::providers::{ChatRequest, LLMProvider, Message};
 use crate::AppState;
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
 
 const MAX_TITLE_CHARS: usize = 60;
+const MAX_TITLE_WORDS: usize = 8;
+/// How much of each opening turn the titler reads.
+const TITLE_EXCHANGE_CHARS: usize = 1500;
 const MAX_REASONING_BYTES: usize = 32 * 1024;
 pub const MAX_MESSAGE: usize = 16 * 1024;
 // History windows stay user-first/assistant-last: each success appends exactly
@@ -92,6 +95,15 @@ pub fn stamp_telegram(conn: &Connection, id: i64, now: jiff::Timestamp) -> Resul
     Ok(())
 }
 
+/// How a check-in thread is named before its first reply: `at` is the wall
+/// time it opened at, in the user's own day.
+fn checkin_title(date: &str, at: &str) -> String {
+    match date.parse::<jiff::civil::Date>() {
+        Ok(day) => format!("{}'s {at} check-in", day.strftime("%A")),
+        Err(_) => format!("The {at} check-in"),
+    }
+}
+
 /// The thread a check-in's question lands in: one per user per plan date, so
 /// every check-in of a day appends to the same conversation and the next day
 /// starts a fresh one. The question is stored as an assistant row.
@@ -99,6 +111,7 @@ pub fn checkin_thread(
     conn: &Connection,
     user_id: i64,
     date: &str,
+    at: &str,
     question: &str,
     now: jiff::Timestamp,
 ) -> Result<i64> {
@@ -116,7 +129,7 @@ pub fn checkin_thread(
             conn.execute(
                 "INSERT INTO conversations (user_id, title, created_at, updated_at, checkin_date)
                  VALUES (?1, ?2, ?3, ?3, ?4)",
-                (user_id, title_from(question), now.to_string(), date),
+                (user_id, checkin_title(date, at), now.to_string(), date),
             )?;
             conn.last_insert_rowid()
         }
@@ -340,6 +353,140 @@ pub fn title_from(message: &str) -> String {
     title
 }
 
+/// A model's answer as a title, or `None` when what came back is prose rather
+/// than a name: empty, long-winded, spread over lines, or parenthetical.
+pub fn normalize_title(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.contains('\n') || raw.contains('(') {
+        return None;
+    }
+    let mut stripped = raw;
+    loop {
+        let next = stripped
+            .trim_end_matches('.')
+            .trim_matches(|c| matches!(c, '"' | '\'' | '\u{201c}' | '\u{201d}'))
+            .trim();
+        if next == stripped {
+            break;
+        }
+        stripped = next;
+    }
+    let title = stripped.split_whitespace().collect::<Vec<_>>().join(" ");
+    let fits = !title.is_empty()
+        && title.chars().count() <= MAX_TITLE_CHARS
+        && title.split_whitespace().count() <= MAX_TITLE_WORDS;
+    fits.then_some(title)
+}
+
+fn clip_chars(text: &str, chars: usize) -> String {
+    text.chars().take(chars).collect()
+}
+
+pub fn title_is_draft(conn: &Connection, conversation_id: i64) -> Result<bool> {
+    let kind: Option<String> = conn
+        .query_row("SELECT title_kind FROM conversations WHERE id = ?1", [conversation_id], |r| {
+            r.get(0)
+        })
+        .optional()?;
+    Ok(kind.as_deref() == Some("draft"))
+}
+
+/// The opening of a thread as the titler reads it: what the user first said and
+/// the first answer it drew. `None` where the user has not spoken yet.
+fn opening_exchange(conn: &Connection, conversation_id: i64) -> Result<Option<String>> {
+    let first = |role: &str| -> rusqlite::Result<Option<String>> {
+        conn.query_row(
+            "SELECT content FROM talk_messages WHERE conversation_id = ?1 AND role = ?2
+             ORDER BY id LIMIT 1",
+            (conversation_id, role),
+            |r| r.get(0),
+        )
+        .optional()
+    };
+    let Some(user) = first("user")? else { return Ok(None) };
+    let mut exchange = format!("User: {}", clip_chars(&user, TITLE_EXCHANGE_CHARS));
+    if let Some(assistant) = first("assistant")? {
+        exchange.push_str(&format!("\nAssistant: {}", clip_chars(&assistant, TITLE_EXCHANGE_CHARS)));
+    }
+    Ok(Some(exchange))
+}
+
+/// One tool-less call that names the thread.
+fn ask_for_title(llm: &dyn LLMProvider, system: &str, exchange: &str) -> Result<String> {
+    let messages = [Message::User(exchange.to_string())];
+    let req = ChatRequest { system, messages: &messages, tools: &[], background: true };
+    let reply = llm.chat(&req)?.text;
+    normalize_title(&reply)
+        .ok_or_else(|| anyhow::anyhow!("not a title: {:?}", clip_chars(&reply, 80)))
+}
+
+/// Stores a generated title; false where the user renamed the thread or another
+/// pass named it first.
+pub fn set_title_if_draft(conn: &Connection, conversation_id: i64, title: &str) -> Result<bool> {
+    let rows = conn.execute(
+        "UPDATE conversations SET title = ?1, title_kind = 'generated'
+         WHERE id = ?2 AND title_kind = 'draft'",
+        (title, conversation_id),
+    )?;
+    Ok(rows > 0)
+}
+
+/// The summary pass's title: it may better an earlier generated one, but never
+/// replaces a name the user typed.
+pub fn set_title_unless_renamed(
+    conn: &Connection,
+    conversation_id: i64,
+    title: &str,
+) -> Result<bool> {
+    let rows = conn.execute(
+        "UPDATE conversations SET title = ?1, title_kind = 'generated'
+         WHERE id = ?2 AND title_kind != 'user'",
+        (title, conversation_id),
+    )?;
+    Ok(rows > 0)
+}
+
+/// Names a thread from its opening exchange. Blocking, and meant to run off the
+/// turn that triggered it: the DB lock is taken for the reads and the write, and
+/// never held across the provider call. Without a real LLM there is nothing to
+/// ask, so the draft title stands.
+pub fn generate_title(state: &AppState, user_id: i64, username: &str, conversation_id: i64) {
+    if state.providers_info.llm.is_none() {
+        return;
+    }
+    let exchange = {
+        let conn = state.db();
+        match title_is_draft(&conn, conversation_id) {
+            Ok(true) => opening_exchange(&conn, conversation_id),
+            Ok(false) => return,
+            Err(e) => Err(e),
+        }
+    };
+    let named = match exchange {
+        Ok(None) => return,
+        Ok(Some(exchange)) => crate::prompts::load(&state.config_dir, username, "title")
+            .and_then(|system| ask_for_title(state.llm.as_ref(), &system, &exchange))
+            .and_then(|title| {
+                let conn = state.db();
+                set_title_if_draft(&conn, conversation_id, &title)
+            }),
+        Err(e) => Err(e),
+    };
+    match named {
+        Ok(true) => state.hub.broadcast_changed(user_id),
+        Ok(false) => {}
+        Err(e) => {
+            let conn = state.db();
+            let _ = crate::log::record(
+                &conn,
+                Some(user_id),
+                "title_error",
+                &format!("conversation {conversation_id}: {e:#}"),
+            );
+        }
+    }
+}
+
 /// The marker a reply in a check-in thread carries into its session, so the
 /// model reads the thread's opening assistant turns as its own scheduled
 /// check-ins rather than as answers it once gave.
@@ -420,7 +567,7 @@ pub async fn run_turn(
     let permit = state.talk_gate.try_enter(user_id).map_err(TurnError::Busy)?;
 
     let st = state.clone();
-    let username = username.to_string();
+    let session_user = username.to_string();
     let said = message.clone();
     let result = tokio::task::spawn_blocking(move || {
         // held here, not in the caller's future, so a cancelled request still
@@ -457,7 +604,7 @@ pub async fn run_turn(
         let out = crate::agent::run_session_watched(
             &deps,
             user_id,
-            &username,
+            &session_user,
             crate::tools::SessionKind::Talk,
             now,
             &past,
@@ -501,6 +648,12 @@ pub async fn run_turn(
     .await;
     match result {
         Ok(Ok(turn)) => {
+            let st = state.clone();
+            let titled_user = username.to_string();
+            let conv_id = turn.conversation_id;
+            tokio::task::spawn_blocking(move || {
+                generate_title(&st, user_id, &titled_user, conv_id)
+            });
             if via == Via::Web && spoke_from == Via::Telegram {
                 mirror_to_telegram(state, user_id, turn.conversation_id, turn.reply.clone()).await;
             }
@@ -573,9 +726,11 @@ mod tests {
         let morning: jiff::Timestamp = "2026-09-17T00:00:00Z".parse().unwrap();
         let noon: jiff::Timestamp = "2026-09-17T03:00:00Z".parse().unwrap();
         let first =
-            checkin_thread(&conn, 1, "2026-09-17", "Morning — how did you sleep?", morning).unwrap();
+            checkin_thread(&conn, 1, "2026-09-17", "08:00", "Morning — how did you sleep?", morning)
+                .unwrap();
         let again =
-            checkin_thread(&conn, 1, "2026-09-17", "Midday. How is it going?", noon).unwrap();
+            checkin_thread(&conn, 1, "2026-09-17", "11:00", "Midday. How is it going?", noon)
+                .unwrap();
         assert_eq!(first, again);
         assert_ne!(first, 1, "the user's own thread is never reused");
 
@@ -589,13 +744,13 @@ mod tests {
                 Ok((r.get(0)?, r.get(1)?))
             })
             .unwrap();
-        assert_eq!(title, "Morning — how did you sleep?");
+        assert_eq!(title, "Thursday's 08:00 check-in", "the opener names the day, not the question");
         assert_eq!(updated, noon.to_string());
         assert_eq!(checkin_date(&conn, first).unwrap().as_deref(), Some("2026-09-17"));
         assert_eq!(checkin_date(&conn, 1).unwrap(), None);
         assert_eq!(checkin_date(&conn, 99).unwrap(), None);
 
-        let next = checkin_thread(&conn, 1, "2026-09-18", "Morning again", noon).unwrap();
+        let next = checkin_thread(&conn, 1, "2026-09-18", "08:00", "Morning again", noon).unwrap();
         assert_ne!(next, first);
     }
 
@@ -607,8 +762,8 @@ mod tests {
             [],
         )
         .unwrap();
-        let mine = checkin_thread(&conn, 1, "2026-09-17", "hi", now()).unwrap();
-        let theirs = checkin_thread(&conn, 2, "2026-09-17", "hi", now()).unwrap();
+        let mine = checkin_thread(&conn, 1, "2026-09-17", "09:00", "hi", now()).unwrap();
+        let theirs = checkin_thread(&conn, 2, "2026-09-17", "09:00", "hi", now()).unwrap();
         assert_ne!(mine, theirs);
         assert!(owned(&conn, 2, theirs).unwrap());
         assert!(!owned(&conn, 2, mine).unwrap());
@@ -670,6 +825,75 @@ mod tests {
 
         let exact = "a".repeat(MAX_TITLE_CHARS);
         assert_eq!(title_from(&exact), exact);
+    }
+
+    #[test]
+    fn a_title_is_kept_only_when_it_reads_as_a_name() {
+        for (raw, want) in [
+            ("AP Physics test on Friday", Some("AP Physics test on Friday")),
+            ("  \"Dentist on Tuesday\".  ", Some("Dentist on Tuesday")),
+            ("\u{201c}Grandma's birthday\u{201d}", Some("Grandma's birthday")),
+            ("Essay   plan\tfor Monday", Some("Essay plan for Monday")),
+            ("金曜日の物理のテスト", Some("金曜日の物理のテスト")),
+            ("   ", None),
+            ("Title: a thread about\nthe essay", None),
+            ("A title (about the essay)", None),
+            ("a b c d e f g h i", None),
+            ("x the user asked what to do about the physics test that is set for Friday", None),
+        ] {
+            assert_eq!(normalize_title(raw).as_deref(), want, "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn a_generated_title_replaces_a_draft_and_never_a_rename() {
+        use crate::providers::{mock::MockLLM, ChatResponse};
+        let conn = conn_with_conversation();
+        assert!(opening_exchange(&conn, 1).unwrap().is_none());
+        append_text(&conn, 1, "user", &"の".repeat(TITLE_EXCHANGE_CHARS + 50), now()).unwrap();
+        append_text(&conn, 1, "assistant", "I put it in Now.", now()).unwrap();
+
+        let exchange = opening_exchange(&conn, 1).unwrap().unwrap();
+        assert_eq!(
+            exchange.lines().next().unwrap().chars().count(),
+            TITLE_EXCHANGE_CHARS + "User: ".len(),
+            "each turn is clipped"
+        );
+        assert!(exchange.ends_with("Assistant: I put it in Now."));
+
+        let llm = MockLLM::scripted(vec![
+            ChatResponse { text: " \"Physics test on Friday\" ".into(), tool_calls: vec![] },
+            ChatResponse { text: "Second thoughts".into(), tool_calls: vec![] },
+        ]);
+        assert!(title_is_draft(&conn, 1).unwrap());
+        let title = ask_for_title(&llm, "name it", &exchange).unwrap();
+        assert_eq!(title, "Physics test on Friday");
+        assert!(set_title_if_draft(&conn, 1, &title).unwrap());
+        assert!(!title_is_draft(&conn, 1).unwrap());
+
+        let again = ask_for_title(&llm, "name it", &exchange).unwrap();
+        assert!(!set_title_if_draft(&conn, 1, &again).unwrap(), "a named thread is left alone");
+        assert!(set_title_unless_renamed(&conn, 1, &again).unwrap());
+
+        conn.execute("UPDATE conversations SET title_kind = 'user' WHERE id = 1", []).unwrap();
+        assert!(!set_title_unless_renamed(&conn, 1, "something else").unwrap());
+        let (title, kind): (String, String) = conn
+            .query_row("SELECT title, title_kind FROM conversations WHERE id = 1", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!((title.as_str(), kind.as_str()), ("Second thoughts", "user"));
+    }
+
+    #[test]
+    fn a_reply_that_is_not_a_title_is_an_error_rather_than_a_name() {
+        use crate::providers::{mock::MockLLM, ChatResponse};
+        let llm = MockLLM::scripted(vec![ChatResponse {
+            text: "The user asked about their physics test, which is on Friday.".into(),
+            tool_calls: vec![],
+        }]);
+        let err = ask_for_title(&llm, "name it", "User: hi").unwrap_err().to_string();
+        assert!(err.contains("not a title"), "{err}");
     }
 
     #[test]
