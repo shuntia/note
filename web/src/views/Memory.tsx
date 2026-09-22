@@ -17,6 +17,49 @@ import type { MemoryFact, MemoryHit } from '../types'
 const SINGLE_PANE = '(max-width: 1087.98px)'
 const AUTO_OPEN_AFTER = 8
 
+type Filter = '' | 'semantic' | 'episodic'
+
+const FILTERS: { id: Filter; label: string }[] = [
+  { id: '', label: 'All' },
+  { id: 'semantic', label: 'Facts' },
+  { id: 'episodic', label: 'Episodes' },
+]
+
+// An episode is written as "<date> · <thread title>: <what happened>"; the date has a
+// column of its own and the thread title is not what the row is about.
+function displaySummary(hit: MemoryHit): string {
+  if (hit.category !== 'episodic') return hit.summary
+  const text = hit.summary.replace(/^\d{4}-\d{2}-\d{2} · /, '')
+  const at = text.indexOf(': ')
+  return at >= 0 && at < 80 ? text.slice(at + 2) : text
+}
+
+// A fact's body may open with `key: value` lines; they are written for the model and
+// read as a row of quiet chips rather than as prose.
+function frontMatter(body: string): { meta: [string, string][]; rest: string } {
+  const lines = body.split('\n')
+  const meta: [string, string][] = []
+  let i = 0
+  for (; i < lines.length; i++) {
+    const line = lines[i]
+    if (line.trim() === '') {
+      i += 1
+      break
+    }
+    const at = line.indexOf(': ')
+    if (at <= 0) break
+    meta.push([line.slice(0, at).trim(), line.slice(at + 2).trim()])
+  }
+  if (meta.length === 0) return { meta, rest: body }
+  return { meta, rest: lines.slice(i).join('\n') }
+}
+
+const unwrap = (value: string) =>
+  value
+    .replace(/^\[(.*)\]$/s, '$1')
+    .replace(/^"(.*)"$/s, '$1')
+    .trim()
+
 function shortDate(iso: string): string {
   const at = new Date(iso)
   if (Number.isNaN(at.getTime())) return ''
@@ -102,6 +145,7 @@ function useListMotion(list: RefObject<HTMLUListElement | null>, sig: string) {
 export function Memory({ notify, refresh, openTalk }: ViewProps) {
   const [draft, setDraft] = useState('')
   const [query, setQuery] = useState('')
+  const [filter, setFilter] = useState<Filter>('')
   const [items, setItems] = useState<MemoryHit[] | null>(null)
   const [listFailed, setListFailed] = useState(false)
   const [selected, setSelected] = useState<string | null>(null)
@@ -125,7 +169,7 @@ export function Memory({ notify, refresh, openTalk }: ViewProps) {
     const era = ++listEra.current
     setListFailed(false)
     api
-      .memoryList(query ? { q: query } : {})
+      .memoryList(query ? { q: query } : filter ? { category: filter } : {})
       .then((res) => {
         if (era === listEra.current) setItems(res.items)
       })
@@ -134,7 +178,7 @@ export function Memory({ notify, refresh, openTalk }: ViewProps) {
         setListFailed(true)
         notify("Couldn't load memories. Try again.")
       })
-  }, [query, notify])
+  }, [query, filter, notify])
 
   useEffect(load, [load, refresh])
 
@@ -196,6 +240,26 @@ export function Memory({ notify, refresh, openTalk }: ViewProps) {
             onChange={(e) => setDraft(e.target.value)}
           />
         </div>
+        {draft.trim() === '' && (
+          <div className="memory-filter">
+            <div className="seg" role="group" aria-label="Show">
+              {FILTERS.map((f) => (
+                <button
+                  key={f.id || 'all'}
+                  type="button"
+                  aria-pressed={filter === f.id}
+                  onClick={() => {
+                    setFilter(f.id)
+                    setSelected(null)
+                    setFact(null)
+                  }}
+                >
+                  {f.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
         {listFailed ? (
           <p className="memory-empty">
             Couldn't load memories.{' '}
@@ -275,10 +339,21 @@ function MemoryRow({
   return (
     <li ref={row} data-mem={hit.id}>
       <button className="memory-row" aria-current={selected} onClick={() => onOpen(hit.id)}>
-        <span className="memory-summary">{hit.summary}</span>
+        <Glyph category={hit.category} />
+        <span className="memory-summary">{displaySummary(hit)}</span>
         {saved && <span className="memory-when">{factDate(saved)}</span>}
       </button>
     </li>
+  )
+}
+
+function Glyph({ category }: { category: string }) {
+  if (category !== 'episodic') return <span className="memory-dot" aria-hidden="true" />
+  return (
+    <svg className="memory-clock" viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="12" cy="12" r="8" />
+      <path d="M12 7.5v4.75l3 1.75" />
+    </svg>
   )
 }
 
@@ -291,14 +366,36 @@ function FactBody({
   openTalk: (draft: string) => void
   cardRef: RefObject<HTMLElement | null>
 }) {
+  const { meta, rest } = frontMatter(fact.body)
   return (
     <article className="memory-card" ref={cardRef}>
-      <h2 className="memory-title">{fact.summary}</h2>
+      <h2 className="memory-title">{displaySummary(fact)}</h2>
       <p className="memory-meta">
         From a chat on {shortDate(fact.created)}
         {fact.archived && <span className="memory-flag">archived</span>}
       </p>
-      {fact.body.trim() !== fact.summary.trim() && <Markdown text={fact.body} />}
+      {meta.length > 0 && (
+        <div className="memory-facts">
+          {meta.flatMap(([key, value]) =>
+            key === 'tags'
+              ? unwrap(value)
+                  .split(',')
+                  .map((tag) => tag.trim())
+                  .filter(Boolean)
+                  .map((tag) => (
+                    <span className="meta" key={`tag:${tag}`}>
+                      {tag}
+                    </span>
+                  ))
+              : [
+                  <span className="meta" key={key}>
+                    {key} {unwrap(value)}
+                  </span>,
+                ],
+          )}
+        </div>
+      )}
+      {rest.trim() !== '' && rest.trim() !== fact.summary.trim() && <Markdown text={rest} />}
       <div className="memory-acts">
         <button
           className="btn-haze"
