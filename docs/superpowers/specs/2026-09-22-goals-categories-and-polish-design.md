@@ -87,3 +87,33 @@ whose D0 visual language applies throughout.
   no empty right half on Memory/Chat when a pane could use it, tables/lists never
   narrower than 60 % of the column at ≥1024. Fix what is found; record what was found
   in this file's appendix.
+
+## Appendix — layout audit 2026-09-22
+
+Every view (Today face, Today stage, Today ground, Tasks, Chat with a thread and
+the list column, Memory with a fact open, Settings) at 390, 768, 1024, 1280, 1440
+and 1920 wide, light, plus one desktop and one phone capture of each in dark.
+
+- **768–1920, Chat.** The only view with no rail: the list column sat against the
+  window's edge and the thread started at 44 (768) to 516 (1440) where every other
+  view starts at the rail. `.chat` takes the rail on both sides and the column
+  loses its panel fill, so it reads as a column of the page as Memory's list does.
+- **1280–1920, Settings.** One 520px column, 43 % of the page at 1440 and 35 % at
+  1920, with the right two thirds empty. The groups pair into two columns from
+  1200 up; a group clips its switches' hit boxes so they stay out of the column
+  beside them.
+- **768–1920, calendar sheet.** It hung off the window's bottom-right corner, 96px
+  past the grid and over the Saturday and Sunday columns. It now hangs off the rail,
+  flush with the grid's right edge.
+- **768–1920, week grid.** Before 06:00 the now-line and its quiet marker rendered
+  above the grid and painted over the month, *Fill my free time* and the add button.
+  The line is drawn only while now is inside the grid's hours.
+- **768–1920, week grid.** The current day's column was a near-white wash and a
+  task block's fill is the same near-white, so the day's own blocks were invisible
+  on it, in both themes. The column is a 5 % ink tint.
+- **768, 1024, week grid.** A band's name was sliced mid-line (*Crimson / Meeting*).
+  A band clamps its name to the whole lines its height has room for, and carries no
+  padding under the last one.
+- **390.** The phone gutter was 20px on Chat and 24px on Memory and Settings against
+  the 16px the shell and Tasks hold. All three sit on 16. Today's sheet and the
+  calendar keep their own centred width.

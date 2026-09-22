@@ -531,12 +531,15 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 .meta { font-size: 0.78rem; color: var(--faint); font-variant-numeric: tabular-nums; }
 .meta.warn { color: var(--rose); }
 
+/* the sheet hangs off the right edge of the grid it came from, not off the window */
 @media (min-width: 768px) {
-  .sheet { left: auto; right: 1.5rem; bottom: 1.5rem; width: 26.25rem; border-radius: var(--radius-xl); padding-bottom: 1.75rem; }
+  .sheet { left: auto; right: var(--rail); bottom: 1.5rem; width: 26.25rem; border-radius: var(--radius-xl); padding-bottom: 1.75rem; }
 }
 
 /* ── horizon: chat ──────────────────────────────────────────────── */
 .chat { display: flex; width: 100%; min-height: 0; position: relative; }
+/* the thread starts where every other view starts */
+@media (min-width: 768px) { .chat { padding-inline: var(--rail); } }
 
 /* the thread list is a drawer at every width: the board keeps the column clear */
 .chat-side {
@@ -663,8 +666,9 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
   cursor: pointer;
 }
 .chat-toggle:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
-.chat-pane { flex: 1; min-height: 0; overflow-y: auto; padding: 3.5rem 1.25rem 0; }
-@media (min-width: 768px) { .chat-pane { padding-top: 2.875rem; } }
+.chat-pane { flex: 1; min-height: 0; overflow-y: auto; padding: 3.5rem 1rem 0; }
+/* the rail is on the chat itself from here up, so the pane adds none of its own */
+@media (min-width: 768px) { .chat-pane { padding: 2.875rem 0 0; } }
 .chat-stream {
   width: 100%;
   max-width: max(42.5rem, 34vw);
@@ -915,10 +919,10 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 }
 .code-block:hover .code-copy, .code-copy:focus-visible { opacity: 1; color: var(--text); }
 
-.chat-foot { flex: none; padding: 0.75rem 1.25rem 1.5rem; }
+.chat-foot { flex: none; padding: 0.75rem 1rem 1.5rem; }
 .chat-foot .tellnote { width: 100%; }
 @media (max-width: 767.98px) { .chat-foot { padding-bottom: 84px; } }
-@media (min-width: 768px) { .chat-foot { padding: 0.75rem 1.25rem 2.5rem; } }
+@media (min-width: 768px) { .chat-foot { padding: 0.75rem 0 2.5rem; } }
 
 @media (prefers-reduced-motion: reduce) {
   .chat-side, .chat-side.open { transition: none; }
