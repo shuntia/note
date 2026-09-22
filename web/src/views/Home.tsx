@@ -792,7 +792,7 @@ export function Home({
             key={`c${row.occ.entry_id}-${row.occ.start}`}
             className={`cal ${row.occ.kind}${row.to <= now ? ' past' : row.at <= now ? ' on' : ''}`}
           >
-            <span className="home-when">{row.occ.start} – {row.occ.end}</span>
+            <span className="home-when">{row.occ.start}<span className="home-when-end"> – {row.occ.end}</span></span>
             <span className="home-what">{row.occ.title}</span>
           </li>
         ),
