@@ -11,7 +11,7 @@ import { api, ApiError } from '../api'
 import type { ViewProps } from '../app'
 import { collapse, flip, settle } from '../motion-gsap'
 import { reducedMotion } from '../motion'
-import { Overflow, type OverflowItem } from '../overflow'
+import { Overflow, useMenuSheet, type OverflowItem } from '../overflow'
 import { Tick } from '../tick'
 import '../styles/tasks.css'
 import type { NewStep, Task, TaskNode, TaskNotify, TaskState, TaskUpdate } from '../types'
@@ -67,7 +67,7 @@ const nodeProgress = (node: TaskNode) =>
 
 function parentSub(node: TaskNode): string {
   const done = node.children.filter((c) => c.state === 'done').length
-  return `${node.children.length} steps · ${done} done`
+  return `${done} of ${node.children.length} steps done`
 }
 
 function sameDay(iso: string, today: Date): boolean {
@@ -195,9 +195,10 @@ type RowActions = {
   moveToNow: (node: TaskNode) => void
   moveToLater: (node: TaskNode) => void
   drop: (node: TaskNode) => void
-  keepAsOne: (node: TaskNode) => void
+  mergeSteps: (node: TaskNode) => void
   startFocus: (node: TaskNode) => void
   announce: (node: TaskNode, notify: TaskNotify) => void
+  toggleSteps: (id: number) => void
 }
 
 export function Tasks({ notify, refresh, openNow }: ViewProps) {
@@ -206,6 +207,8 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
   const [title, setTitle] = useState('')
   const [showDone, setShowDone] = useState(false)
   const [leaving, setLeaving] = useState<Leaving[]>([])
+  const [openSteps, setOpenSteps] = useState<Set<number>>(new Set())
+  const seeded = useRef(false)
   const unfinished = useRef(new Map<number, number>())
   const root = useRef<HTMLDivElement>(null)
   useRowMotion(root, leaving.length > 0)
@@ -216,6 +219,9 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
       .then((ts) => {
         setNodes(ts)
         setFailed(false)
+        if (seeded.current) return
+        seeded.current = true
+        setOpenSteps(new Set(ts.filter((t) => t.is_now && t.children.length > 0).map((t) => t.id)))
       })
       .catch(() => setFailed(true))
   }, [])
@@ -327,14 +333,28 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
     void patch(node.id, { notify })
   }
 
+  // A task carries the fold its group asks for: open in Now, closed in Later.
   const setNow = (node: TaskNode, is_now: boolean) => {
     setNodes((ns) => (ns ? ns.map((n) => (n.id === node.id ? { ...n, is_now } : n)) : ns))
+    setOpenSteps((open) => {
+      const next = new Set(open)
+      if (is_now) next.add(node.id)
+      else next.delete(node.id)
+      return next
+    })
     void patch(node.id, { is_now })
   }
 
+  const toggleSteps = (id: number) =>
+    setOpenSteps((open) => {
+      const next = new Set(open)
+      if (!next.delete(id)) next.add(id)
+      return next
+    })
+
   // The only reversal a flatten has is replaying the split, so the steps travel
   // into the undo closure rather than being read back off a stale row.
-  const keepAsOne = (node: TaskNode) => {
+  const mergeSteps = (node: TaskNode) => {
     const steps: NewStep[] = node.children
       .filter((c) => c.duration_min !== null)
       .map((c) => ({ title: c.title, duration_min: c.duration_min as number }))
@@ -348,7 +368,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
         notify("Couldn't update the task. Try again.")
         load()
       })
-    notify(`${node.title} — kept as one task`, {
+    notify(`${node.title} — merged the steps`, {
       label: 'Undo',
       run: () =>
         void api
@@ -461,9 +481,10 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
     moveToNow: (node) => (g.now.length >= NOW_CAP ? notify(NOW_FULL) : setNow(node, true)),
     moveToLater: (node) => setNow(node, false),
     drop,
-    keepAsOne,
+    mergeSteps,
     startFocus,
     announce,
+    toggleSteps,
   }
 
   const now = placed(g.now, nodes, leaving, 'now')
@@ -485,22 +506,42 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
           </svg>
         </button>
       </form>
-      {now.length > 0 && (
-        <section className="task-group now">
-          <h3 className="task-group-head">NOW</h3>
+      <section className="task-group now">
+        <h3 className="task-group-head">Now</h3>
+        {now.length === 0 ? (
+          <p className="task-empty">Nothing in Now yet. Up to three tasks you are on right now.</p>
+        ) : (
           <div className="task-list">
             {now.map((p) => (
-              <Row key={p.node.id} node={p.node} group="now" actions={actions} leaving={p.leaving} onGone={gone} />
+              <Row
+                key={p.node.id}
+                node={p.node}
+                group="now"
+                actions={actions}
+                leaving={p.leaving}
+                onGone={gone}
+                stepsOpen={openSteps.has(p.node.id)}
+              />
             ))}
           </div>
-        </section>
-      )}
+        )}
+      </section>
       {later.length > 0 && (
         <section className="task-group later">
-          <h3 className="task-group-head">LATER · {g.later.length}</h3>
+          <h3 className="task-group-head">
+            Later <span className="task-count">{g.later.length}</span>
+          </h3>
           <div className="task-list">
             {later.map((p) => (
-              <Row key={p.node.id} node={p.node} group="later" actions={actions} leaving={p.leaving} onGone={gone} />
+              <Row
+                key={p.node.id}
+                node={p.node}
+                group="later"
+                actions={actions}
+                leaving={p.leaving}
+                onGone={gone}
+                stepsOpen={openSteps.has(p.node.id)}
+              />
             ))}
           </div>
         </section>
@@ -512,7 +553,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
             aria-expanded={showDone}
             onClick={() => setShowDone((v) => !v)}
           >
-            Done today · {g.doneToday.length}
+            Done today <span className="task-count">{g.doneToday.length}</span>
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <path d="M9 6l6 6-6 6" />
             </svg>
@@ -520,7 +561,15 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
           {showDone && (
             <div className="task-list">
               {g.doneToday.map((n) => (
-                <Row key={n.id} node={n} group="done" actions={actions} leaving={null} onGone={gone} />
+                <Row
+                  key={n.id}
+                  node={n}
+                  group="done"
+                  actions={actions}
+                  leaving={null}
+                  onGone={gone}
+                  stepsOpen={false}
+                />
               ))}
             </div>
           )}
@@ -532,7 +581,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
 
 function Duration({ task }: { task: Task }) {
   if (task.duration_min === null) return null
-  return <span className="task-dur">≈ {round5(task.duration_min)} min</span>
+  return <span className="meta">{round5(task.duration_min)} min</span>
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000
@@ -560,10 +609,13 @@ function Due({ task }: { task: Task }) {
   if (task.due_at === null) return null
   const label = dueLabel(task.due_at, new Date())
   if (label === null) return null
-  return <span className={`task-dur task-due${label === 'overdue' ? ' overdue' : ''}`}>{label}</span>
+  return <span className={`meta${label === 'overdue' ? ' warn' : ''}`}>{label}</span>
 }
 
 const PROGRESS_STEP = 5
+
+// Where the phone sets progress, having no bar to drag.
+const PROGRESS_PICKS = [25, 50, 75]
 
 const snapProgress = (v: number) =>
   Math.min(100, Math.max(0, Math.round(v / PROGRESS_STEP) * PROGRESS_STEP))
@@ -585,10 +637,12 @@ function Progress({
   task,
   value: held,
   onSet,
+  quiet,
 }: {
   task: Task
   value: number
   onSet?: (progress: number) => void
+  quiet?: boolean
 }) {
   const [value, setValue] = useState(held)
   const [dragging, setDragging] = useState(false)
@@ -625,9 +679,11 @@ function Progress({
     <span className="task-left">{task.remaining_min} min left</span>
   )
 
+  const cls = `task-prog${quiet ? ' quiet' : ''}`
+
   if (!onSet)
     return (
-      <span className="task-prog">
+      <span className={cls}>
         <span
           className="task-bar-wrap"
           role="progressbar"
@@ -644,7 +700,7 @@ function Progress({
     )
 
   return (
-    <span className="task-prog">
+    <span className={cls}>
       <span
         ref={track}
         className="task-bar-wrap"
@@ -701,15 +757,18 @@ function Row({
   actions,
   leaving,
   onGone,
+  stepsOpen,
 }: {
   node: TaskNode
   group: Group
   actions: RowActions
   leaving: TaskState | null
   onGone: (id: number) => void
+  stepsOpen: boolean
 }) {
   const item = useRef<HTMLDivElement>(null)
   const [reviving, setReviving] = useState(false)
+  const sheet = useMenuSheet()
   const done = group === 'done'
   const finished = (done && !reviving) || leaving === 'done'
   const steps = done ? [] : node.children
@@ -730,27 +789,44 @@ function Row({
     revive.current = setTimeout(() => actions.reopen(node), reducedMotion() ? 0 : REVIVE_MS)
   }
 
-  const items: OverflowItem[] = [
+  const live = !done && leaving === null
+  const loose = live && steps.length === 0
+
+  const items: OverflowItem[] = []
+  if (live) items.push({ label: 'Start', run: () => actions.startFocus(node) })
+  items.push(
     group === 'now'
       ? { label: 'Move to Later', run: () => actions.moveToLater(node) }
       : { label: 'Move to Now', run: () => actions.moveToNow(node) },
-  ]
-  if (steps.length > 0) items.push({ label: 'Keep as one task', run: () => actions.keepAsOne(node) })
-  for (const choice of ANNOUNCE) {
-    items.push({
-      label: `Announce: ${choice.label}`,
+  )
+  items.push({
+    label: 'Announce',
+    children: ANNOUNCE.map((choice) => ({
+      label: choice.label,
       run: () => actions.announce(node, choice.id),
       checked: node.notify === choice.id,
+    })),
+  })
+  if (steps.length > 0) items.push({ label: 'Merge steps', run: () => actions.mergeSteps(node) })
+  if (sheet && loose)
+    items.push({
+      label: 'Progress',
+      children: [
+        ...PROGRESS_PICKS.map((p) => ({
+          label: `${p} %`,
+          run: () => actions.setProgress(node, p),
+        })),
+        { label: 'Done', run: () => actions.complete(node) },
+      ],
     })
-  }
-  items.push({ label: 'Drop', run: () => actions.drop(node) })
-  const sub =
-    steps.length > 0
-      ? parentSub(node)
-      : group === 'now' && node.duration_min === null && node.duration_source === 'none'
-        ? 'Note will estimate'
-        : null
-  const live = !done && leaving === null
+  items.push({ label: 'Drop', kind: 'danger', run: () => actions.drop(node) })
+
+  const hint =
+    group === 'now' && node.duration_min === null && node.duration_source === 'none'
+      ? 'Note will estimate'
+      : null
+  const progress = finished ? 100 : nodeProgress(node)
+  const speaks = progress > 0 || steps.length > 0 || group === 'now'
 
   return (
     <div
@@ -768,26 +844,42 @@ function Row({
         />
         <div className="task-body">
           <span className="task-title">{node.title}</span>
-          {sub && <span className="task-sub">{sub}</span>}
+          {steps.length > 0 ? (
+            <button
+              className="task-fold"
+              aria-expanded={stepsOpen}
+              onClick={() => actions.toggleSteps(node.id)}
+            >
+              {parentSub(node)}
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M9 6l6 6-6 6" />
+              </svg>
+            </button>
+          ) : (
+            hint && <span className="task-sub">{hint}</span>
+          )}
         </div>
         <div className="task-foot">
           {!done && (
-            <span className="task-chips">
+            <span className="task-meta">
               <Duration task={node} />
               <Due task={node} />
             </span>
           )}
-          <Progress
-            task={node}
-            value={finished ? 100 : nodeProgress(node)}
-            onSet={live && steps.length === 0 ? (p) => actions.setProgress(node, p) : undefined}
-          />
+          {(speaks || !sheet) && (
+            <Progress
+              task={node}
+              value={progress}
+              quiet={!speaks}
+              onSet={loose ? (p) => actions.setProgress(node, p) : undefined}
+            />
+          )}
         </div>
         <span className="task-acts">
           {!done && (
             <Overflow className="task-more" label={`More actions for ${node.title}`} items={items} />
           )}
-          {group === 'now' && (
+          {group === 'now' && !sheet && (
             <button
               className="task-start"
               data-tip="Start"
@@ -801,7 +893,7 @@ function Row({
           )}
         </span>
       </div>
-      {steps.length > 0 && (
+      {steps.length > 0 && stepsOpen && (
         <ul className="task-steps">
           {steps.map((c) => (
             <li key={c.id} className={`task-step${c.state === 'done' ? ' done' : ''}`}>
@@ -814,13 +906,16 @@ function Row({
               />
               <span className="task-step-title">{c.title}</span>
               {c.duration_min !== null && (
-                <span className="task-step-min">{round5(c.duration_min)}</span>
+                <span className="task-step-min meta">{round5(c.duration_min)} min</span>
               )}
-              <Progress
-                task={c}
-                value={shown(c)}
-                onSet={live && c.state !== 'done' ? (p) => actions.setProgress(c, p) : undefined}
-              />
+              {(shown(c) > 0 || !sheet) && (
+                <Progress
+                  task={c}
+                  value={shown(c)}
+                  quiet={shown(c) === 0}
+                  onSet={live && c.state !== 'done' ? (p) => actions.setProgress(c, p) : undefined}
+                />
+              )}
             </li>
           ))}
         </ul>
