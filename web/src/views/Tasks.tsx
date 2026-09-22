@@ -5,6 +5,7 @@ import {
   useRef,
   useState,
   type FormEvent,
+  type ReactNode,
   type RefObject,
 } from 'react'
 import { api, ApiError } from '../api'
@@ -14,11 +15,12 @@ import { reducedMotion } from '../motion'
 import { Overflow, useMenuSheet, type OverflowItem } from '../overflow'
 import { Tick } from '../tick'
 import '../styles/tasks.css'
-import type { NewStep, Task, TaskNode, TaskNotify, TaskState, TaskUpdate } from '../types'
+import type { Goal, NewStep, Task, TaskNode, TaskNotify, TaskState, TaskUpdate } from '../types'
 
 const NOW_CAP = 3
 const UNDO_MS = 5000
 const NOW_FULL = 'Now is full — finish or move something first'
+const UNCATEGORISED = 'Uncategorised'
 
 // What a block laid for the task does when it starts.
 const ANNOUNCE: { id: TaskNotify; label: string }[] = [
@@ -28,6 +30,90 @@ const ANNOUNCE: { id: TaskNotify; label: string }[] = [
 ]
 
 type Group = 'now' | 'later' | 'done'
+
+const SORTS = [
+  { id: 'schedule', label: 'Schedule' },
+  { id: 'due', label: 'Due' },
+  { id: 'newest', label: 'Newest' },
+  { id: 'category', label: 'Category' },
+] as const
+
+type SortKey = (typeof SORTS)[number]['id']
+
+const SORT_KEY = 'note.taskSort'
+
+function storedSort(): SortKey {
+  try {
+    const held = localStorage.getItem(SORT_KEY)
+    const found = SORTS.find((s) => s.id === held)
+    if (found) return found.id
+  } catch {
+    // storage blocked; the default order holds
+  }
+  return 'schedule'
+}
+
+function keepSort(id: SortKey) {
+  try {
+    localStorage.setItem(SORT_KEY, id)
+  } catch {
+    // storage blocked; the choice still holds for this session
+  }
+}
+
+// An undated or unscheduled task sorts behind every dated one.
+function when(iso: string | null): number {
+  if (iso === null) return Infinity
+  const t = new Date(iso).getTime()
+  return Number.isNaN(t) ? Infinity : t
+}
+
+const earlier = (a: string | null, b: string | null) => {
+  const [x, y] = [when(a), when(b)]
+  return x === y ? 0 : x < y ? -1 : 1
+}
+
+const newest = (a: TaskNode, b: TaskNode) => b.id - a.id
+
+const bySchedule = (a: TaskNode, b: TaskNode) =>
+  earlier(a.scheduled_at, b.scheduled_at) || earlier(a.due_at, b.due_at) || newest(a, b)
+
+const COMPARE: Record<SortKey, (a: TaskNode, b: TaskNode) => number> = {
+  schedule: bySchedule,
+  due: (a, b) => earlier(a.due_at, b.due_at) || newest(a, b),
+  newest,
+  category: bySchedule,
+}
+
+// Every word has to land somewhere on the task for it to stay in the list.
+function matches(node: TaskNode, words: string[]): boolean {
+  if (words.length === 0) return true
+  const hay = [node.title, node.description, node.notes, node.category, node.goal_title ?? '']
+    .join(' ')
+    .toLowerCase()
+  return words.every((w) => hay.includes(w))
+}
+
+// The user's categories, the ones they use most first.
+function categoriesOf(nodes: TaskNode[]): string[] {
+  const counts = new Map<string, number>()
+  for (const n of nodes) {
+    if (!isLive(n) || n.category === '') continue
+    counts.set(n.category, (counts.get(n.category) ?? 0) + 1)
+  }
+  return [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([c]) => c)
+}
+
+// Later's rows under their category headings, in the pills' order, the
+// uncategorised ones last.
+function byCategory(list: Placed[], categories: string[]): [string, Placed[]][] {
+  const out: [string, Placed[]][] = []
+  for (const category of [...categories, '']) {
+    const rows = list.filter((p) => p.node.category === category)
+    if (rows.length > 0) out.push([category === '' ? UNCATEGORISED : category, rows])
+  }
+  return out
+}
 
 // The prior states a completion has to put back, steps first: reopening a step
 // cascades the parent, so the parent's own state must land last to win.
@@ -201,6 +287,8 @@ function useRowMotion(root: RefObject<HTMLDivElement | null>, busy: boolean) {
 const PROGRESS_SETTLE_MS = 400
 
 type RowActions = {
+  setCategory: (node: TaskNode, category: string) => void
+  setGoal: (node: TaskNode, goal_id: number | null) => void
   setProgress: (task: Task, progress: number) => void
   complete: (node: TaskNode, step?: Task) => void
   reopen: (node: TaskNode) => void
@@ -216,17 +304,30 @@ type RowActions = {
 
 export function Tasks({ notify, refresh, openNow }: ViewProps) {
   const [nodes, setNodes] = useState<TaskNode[] | null>(null)
+  const [goals, setGoals] = useState<Goal[]>([])
   const [failed, setFailed] = useState(false)
   const [title, setTitle] = useState('')
   const [showDone, setShowDone] = useState(false)
   const [leaving, setLeaving] = useState<Leaving[]>([])
   const [openSteps, setOpenSteps] = useState<Set<number>>(new Set())
+  const [openGoals, setOpenGoals] = useState<Set<number>>(new Set())
+  const [filter, setFilter] = useState<string | null>(null)
+  const [sort, setSort] = useState<SortKey>(storedSort)
+  const [goalDraft, setGoalDraft] = useState<{ title: string; due: string } | null>(null)
   const seeded = useRef(false)
   const unfinished = useRef(new Map<number, number>())
   const root = useRef<HTMLDivElement>(null)
   useRowMotion(root, leaving.length > 0)
 
+  const loadGoals = useCallback(() => {
+    api
+      .goals()
+      .then((gs) => setGoals(gs.filter((g) => g.state === 'open')))
+      .catch(() => setGoals([]))
+  }, [])
+
   const load = useCallback(() => {
+    loadGoals()
     api
       .tasks()
       .then((ts) => {
@@ -237,13 +338,20 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
         setOpenSteps(new Set(ts.filter((t) => t.is_now && t.children.length > 0).map((t) => t.id)))
       })
       .catch(() => setFailed(true))
-  }, [])
+  }, [loadGoals])
   useEffect(load, [load, refresh])
 
   const patch = useCallback(
     async (
       id: number,
-      body: { state?: TaskState; is_now?: boolean; notify?: TaskNotify; progress?: number },
+      body: {
+        state?: TaskState
+        is_now?: boolean
+        notify?: TaskNotify
+        progress?: number
+        category?: string
+        goal_id?: number | null
+      },
     ) => {
       try {
         const updated = await api.patchTask(id, body)
@@ -268,8 +376,9 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
         ns ? snap.reduce((acc, s) => withState(acc, s.id, s.state, s.progress), ns) : ns,
       )
       for (const s of snap) await patch(s.id, { state: s.state, progress: s.progress })
+      loadGoals()
     },
-    [patch],
+    [loadGoals, patch],
   )
 
   const markLeaving = (node: TaskNode, state: TaskState) => {
@@ -297,7 +406,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
     for (const s of snap) unfinished.current.set(s.id, s.progress)
     if (!step || lastStep) markLeaving(node, 'done')
     setNodes((ns) => (ns ? snap.reduce((acc, s) => withState(acc, s.id, 'done'), ns) : ns))
-    void patch(step ? step.id : node.id, { state: 'done' })
+    void patch(step ? step.id : node.id, { state: 'done' }).then(loadGoals)
     notify(`${step && !lastStep ? step.title : node.title} — done`, {
       label: 'Undo',
       run: () => void restore(snap),
@@ -328,7 +437,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
     }))
     markLeaving(node, 'dropped')
     setNodes((ns) => (ns ? snap.reduce((acc, s) => withState(acc, s.id, 'dropped'), ns) : ns))
-    void patch(node.id, { state: 'dropped' })
+    void patch(node.id, { state: 'dropped' }).then(loadGoals)
     notify(`${node.title} — dropped`, {
       label: 'Undo',
       run: () => void restore(snap),
@@ -346,6 +455,33 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
     void patch(node.id, { notify })
   }
 
+  // A category rides on the task and is read back by its steps.
+  const setCategory = (node: TaskNode, category: string) => {
+    setNodes((ns) =>
+      ns
+        ? ns.map((n) =>
+            n.id === node.id
+              ? { ...n, category, children: n.children.map((c) => ({ ...c, category })) }
+              : n,
+          )
+        : ns,
+    )
+    if (filter !== null && filter !== category) setFilter(null)
+    void patch(node.id, { category })
+  }
+
+  const setGoal = (node: TaskNode, goal_id: number | null) => {
+    const goal = goals.find((g) => g.id === goal_id) ?? null
+    setNodes((ns) =>
+      ns
+        ? ns.map((n) =>
+            n.id === node.id ? { ...n, goal_id, goal_title: goal ? goal.title : null } : n,
+          )
+        : ns,
+    )
+    void patch(node.id, { goal_id }).then(loadGoals)
+  }
+
   // A task carries the fold its group asks for: open in Now, closed in Later.
   const setNow = (node: TaskNode, is_now: boolean) => {
     setNodes((ns) => (ns ? ns.map((n) => (n.id === node.id ? { ...n, is_now } : n)) : ns))
@@ -356,6 +492,56 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
       return next
     })
     void patch(node.id, { is_now })
+  }
+
+  const toggleGoal = (id: number) =>
+    setOpenGoals((open) => {
+      const next = new Set(open)
+      if (!next.delete(id)) next.add(id)
+      return next
+    })
+
+  const editGoal = (goal: Goal, patch: { title?: string; due_at?: string | null }) => {
+    setGoals((gs) => gs.map((g) => (g.id === goal.id ? { ...g, ...patch } : g)))
+    api.patchGoal(goal.id, patch).catch(() => {
+      notify("Couldn't update the goal. Try again.")
+      loadGoals()
+    })
+  }
+
+  const closeGoal = (goal: Goal, state: 'done' | 'dropped') => {
+    setGoals((gs) => gs.filter((g) => g.id !== goal.id))
+    api
+      .patchGoal(goal.id, { state })
+      .then(() => load())
+      .catch(() => {
+        notify("Couldn't update the goal. Try again.")
+        loadGoals()
+      })
+    notify(`${goal.title} — ${state === 'done' ? 'done' : 'dropped'}`, {
+      label: 'Undo',
+      run: () =>
+        void api
+          .patchGoal(goal.id, { state: 'open' })
+          .then(() => load())
+          .catch(() => notify("Couldn't put the goal back. Try again.")),
+      windowMs: UNDO_MS,
+    })
+  }
+
+  const addGoal = (e: FormEvent) => {
+    e.preventDefault()
+    const draft = goalDraft
+    const text = draft?.title.trim()
+    if (!draft || !text) return
+    setGoalDraft(null)
+    api
+      .addGoal({ title: text, due_at: draft.due === '' ? null : endOfDay(draft.due) })
+      .then((g) => {
+        setGoals((gs) => [...gs, g])
+        setOpenGoals((open) => new Set(open).add(g.id))
+      })
+      .catch(() => notify("Couldn't add the goal. Try again."))
   }
 
   const toggleSteps = (id: number) =>
@@ -418,6 +604,9 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
     setTitle('')
     const g = groups(nodes)
     const is_now = g.now.length === 0 && g.later.length === 0
+    // A task added while a category is picked lands in it, so the list the user
+    // is looking at is the list it joins.
+    const category = filter ?? ''
     const optimistic: TaskNode = {
       id: -Date.now(),
       title: text,
@@ -434,6 +623,10 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
       external_id: null,
       url: '',
       notify: 'notify',
+      category,
+      goal_id: null,
+      goal_title: null,
+      scheduled_at: null,
       progress: 0,
       expected_min: null,
       remaining_min: null,
@@ -446,7 +639,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
     let undone = false
     const forget = (id: number) => setNodes((ns) => (ns ? ns.filter((n) => n.id !== id) : ns))
     api
-      .addTask(text, is_now ? { is_now: true } : undefined)
+      .addTask(text, { ...(is_now && { is_now: true }), ...(category !== '' && { category }) })
       .then((t) => {
         created = t
         if (undone) {
@@ -487,6 +680,8 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
 
   const g = groups(nodes)
   const actions: RowActions = {
+    setCategory,
+    setGoal,
     setProgress,
     complete,
     reopen,
@@ -500,66 +695,176 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
     toggleSteps,
   }
 
-  const now = placed(g.now, nodes, leaving, 'now')
-  const later = placed(g.later, nodes, leaving, 'later')
+  const search = title.trim().toLowerCase()
+  const words = search === '' ? [] : search.split(/\s+/)
+  const categories = categoriesOf(nodes)
+  const visible = (n: TaskNode) =>
+    (filter === null || n.category === filter) && matches(n, words)
+
+  const now = placed(g.now.filter(visible), nodes, leaving, 'now')
+  const later = placed(g.later.filter(visible).sort(COMPARE[sort]), nodes, leaving, 'later')
   // A task settles into Done today only once it has folded away: until then it is
   // still in the list it is leaving, and a row is never in two lists at once.
   const doneToday = g.doneToday.filter((n) => !leaving.some((l) => l.id === n.id))
+  const nothingFound = search !== '' && now.length === 0 && later.length === 0
+
+  const row = (p: Placed, group: Exclude<Group, 'done'>, scope = '') => (
+    <Row
+      key={p.node.id}
+      node={p.node}
+      group={group}
+      scope={scope}
+      actions={actions}
+      leaving={p.leaving}
+      onGone={gone}
+      stepsOpen={openSteps.has(p.node.id)}
+      categories={categories}
+      goals={goals}
+      // Under a category sub-heading the row would only say it again.
+      showCategory={
+        filter === null && !(sort === 'category' && group === 'later' && scope === '')
+      }
+    />
+  )
 
   return (
     <div className="tasks" ref={root}>
-      <form className="task-add tellnote" onSubmit={add}>
-        <input
-          value={title}
-          placeholder="Add a task"
-          aria-label="Add a task"
-          onChange={(e) => setTitle(e.target.value)}
-        />
-        <button type="submit" aria-label="Add" disabled={!title.trim()}>
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M5 12h14" />
-            <path d="M13 6l6 6-6 6" />
-          </svg>
-        </button>
-      </form>
+      <div className="task-box">
+        {goalDraft === null ? (
+          <>
+            <form className="task-add tellnote" onSubmit={add}>
+              <input
+                value={title}
+                placeholder="Add a task"
+                aria-label="Add a task, or search what is here"
+                onChange={(e) => setTitle(e.target.value)}
+              />
+              <button type="submit" aria-label="Add" disabled={!title.trim()}>
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M5 12h14" />
+                  <path d="M13 6l6 6-6 6" />
+                </svg>
+              </button>
+            </form>
+            <Overflow
+              className="task-add-more"
+              label="More ways to add"
+              items={[{ label: 'New goal…', run: () => setGoalDraft({ title: '', due: '' }) }]}
+            />
+          </>
+        ) : (
+          <form className="task-add tellnote task-goal-add" onSubmit={addGoal}>
+            <input
+              value={goalDraft.title}
+              placeholder="New goal"
+              aria-label="Goal"
+              autoFocus
+              onChange={(e) => setGoalDraft({ ...goalDraft, title: e.target.value })}
+            />
+            <input
+              type="date"
+              value={goalDraft.due}
+              aria-label="Due date"
+              onChange={(e) => setGoalDraft({ ...goalDraft, due: e.target.value })}
+            />
+            <button type="submit" disabled={!goalDraft.title.trim()}>
+              Save
+            </button>
+            <button type="button" onClick={() => setGoalDraft(null)}>
+              Cancel
+            </button>
+          </form>
+        )}
+      </div>
+      {categories.length > 0 && (
+        <div className="seg task-cats" role="group" aria-label="Category">
+          <button type="button" aria-pressed={filter === null} onClick={() => setFilter(null)}>
+            All
+          </button>
+          {categories.map((c) => (
+            <button
+              key={c}
+              type="button"
+              aria-pressed={filter === c}
+              onClick={() => setFilter(filter === c ? null : c)}
+            >
+              {c}
+            </button>
+          ))}
+        </div>
+      )}
+      {nothingFound && <p className="task-empty task-hint">Add "{title.trim()}"</p>}
+      {goals.length > 0 && (
+        <section className="task-group goals">
+          <h3 className="task-group-head">Goals</h3>
+          <div className="task-list">
+            {goals.map((goal) => (
+              <GoalRow
+                key={goal.id}
+                goal={goal}
+                open={openGoals.has(goal.id)}
+                onToggle={() => toggleGoal(goal.id)}
+                onEdit={(patch) => editGoal(goal, patch)}
+                onClose={(state) => closeGoal(goal, state)}
+              >
+                {nodes
+                  .filter(
+                    (n) =>
+                      n.goal_id === goal.id &&
+                      visible(n) &&
+                      (isLive(n) || leaving.some((l) => l.id === n.id)),
+                  )
+                  .sort(bySchedule)
+                  .map((n) =>
+                    row(
+                      { node: n, leaving: leaving.find((l) => l.id === n.id)?.state ?? null },
+                      n.is_now ? 'now' : 'later',
+                      'g',
+                    ),
+                  )}
+              </GoalRow>
+            ))}
+          </div>
+        </section>
+      )}
       <section className="task-group now">
         <h3 className="task-group-head">Now</h3>
         {now.length === 0 ? (
           <p className="task-empty">Nothing in Now yet. Up to three tasks you are on right now.</p>
         ) : (
-          <div className="task-list">
-            {now.map((p) => (
-              <Row
-                key={p.node.id}
-                node={p.node}
-                group="now"
-                actions={actions}
-                leaving={p.leaving}
-                onGone={gone}
-                stepsOpen={openSteps.has(p.node.id)}
-              />
-            ))}
-          </div>
+          <div className="task-list">{now.map((p) => row(p, 'now'))}</div>
         )}
       </section>
       {later.length > 0 && (
         <section className="task-group later">
           <h3 className="task-group-head">
             Later <span className="task-count">{later.length}</span>
+            <div className="seg task-sort" role="group" aria-label="Order">
+              {SORTS.map((s) => (
+                <button
+                  key={s.id}
+                  type="button"
+                  aria-pressed={sort === s.id}
+                  onClick={() => {
+                    setSort(s.id)
+                    keepSort(s.id)
+                  }}
+                >
+                  {s.label}
+                </button>
+              ))}
+            </div>
           </h3>
-          <div className="task-list">
-            {later.map((p) => (
-              <Row
-                key={p.node.id}
-                node={p.node}
-                group="later"
-                actions={actions}
-                leaving={p.leaving}
-                onGone={gone}
-                stepsOpen={openSteps.has(p.node.id)}
-              />
-            ))}
-          </div>
+          {sort === 'category' ? (
+            byCategory(later, categories).map(([head, rows]) => (
+              <div key={head} className="task-cat">
+                <h4 className="task-sub-head">{head}</h4>
+                <div className="task-list">{rows.map((p) => row(p, 'later'))}</div>
+              </div>
+            ))
+          ) : (
+            <div className="task-list">{later.map((p) => row(p, 'later'))}</div>
+          )}
         </section>
       )}
       {doneToday.length > 0 && (
@@ -585,6 +890,9 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
                   leaving={null}
                   onGone={gone}
                   stepsOpen={false}
+                  categories={categories}
+                  goals={goals}
+                  showCategory={filter === null}
                 />
               ))}
             </div>
@@ -626,6 +934,52 @@ function Due({ task }: { task: Task }) {
   const label = dueLabel(task.due_at, new Date())
   if (label === null) return null
   return <span className={`meta${label === 'overdue' ? ' warn' : ''}`}>{label}</span>
+}
+
+const DATE = { day: 'numeric', month: 'short' } as const
+
+function scheduleLabel(iso: string, now: Date): string | null {
+  const at = new Date(iso)
+  if (Number.isNaN(at.getTime())) return null
+  const days = daysUntil(at, now)
+  if (days < 0 || days >= 7) return at.toLocaleDateString(undefined, DATE)
+  const time = at.toLocaleTimeString(undefined, {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  })
+  if (days === 0) return `${time} today`
+  return `${at.toLocaleDateString(undefined, { weekday: 'short' })} ${time}`
+}
+
+function Scheduled({ task }: { task: Task }) {
+  if (task.scheduled_at === null) return null
+  const label = scheduleLabel(task.scheduled_at, new Date())
+  if (label === null) return null
+  return <span className="meta">{label}</span>
+}
+
+// A date input speaks in calendar days; a deadline is the end of one.
+function endOfDay(date: string): string | null {
+  const [y, m, d] = date.split('-').map(Number)
+  if (!y || !m || !d) return null
+  return new Date(y, m - 1, d, 23, 59).toISOString()
+}
+
+function dateValue(iso: string | null): string {
+  if (iso === null) return ''
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+}
+
+function goalSub(goal: Goal): string {
+  const counts = `${goal.done_tasks} of ${goal.tasks} tasks done`
+  if (goal.due_at === null) return counts
+  const due = new Date(goal.due_at)
+  if (Number.isNaN(due.getTime())) return counts
+  return `${counts}, due ${due.toLocaleDateString(undefined, DATE)}`
 }
 
 const PROGRESS_STEP = 5
@@ -762,6 +1116,120 @@ function Progress({
   )
 }
 
+type GoalEdit = 'title' | 'due' | null
+
+function GoalRow({
+  goal,
+  open,
+  onToggle,
+  onEdit,
+  onClose,
+  children,
+}: {
+  goal: Goal
+  open: boolean
+  onToggle: () => void
+  onEdit: (patch: { title?: string; due_at?: string | null }) => void
+  onClose: (state: 'done' | 'dropped') => void
+  children: ReactNode
+}) {
+  const [editing, setEditing] = useState<GoalEdit>(null)
+  const [draft, setDraft] = useState('')
+  const pct = goal.tasks === 0 ? 0 : Math.round((goal.done_tasks / goal.tasks) * 100)
+
+  const start = (what: Exclude<GoalEdit, null>) => {
+    setDraft(what === 'title' ? goal.title : dateValue(goal.due_at))
+    setEditing(what)
+  }
+  const keep = (e: FormEvent) => {
+    e.preventDefault()
+    if (editing === 'title') {
+      const text = draft.trim()
+      if (text !== '' && text !== goal.title) onEdit({ title: text })
+    } else if (editing === 'due') {
+      onEdit({ due_at: draft === '' ? null : endOfDay(draft) })
+    }
+    setEditing(null)
+  }
+
+  const items: OverflowItem[] = [
+    { label: 'Rename', run: () => start('title') },
+    { label: 'Set due date', run: () => start('due') },
+    { label: 'Mark done', run: () => onClose('done') },
+    { label: 'Drop', kind: 'danger', run: () => onClose('dropped') },
+  ]
+
+  return (
+    <div className="task-item goal-item" data-row={`goal${goal.id}`}>
+      <div className="task-row goal-row">
+        <button
+          className="goal-chev"
+          aria-expanded={open}
+          aria-label={`The tasks of ${goal.title}`}
+          onClick={onToggle}
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M9 6l6 6-6 6" />
+          </svg>
+        </button>
+        <div className="task-body">
+          <span className="task-title">{goal.title}</span>
+          <span className="meta">{goalSub(goal)}</span>
+        </div>
+        <div className="task-foot">
+          <span className="task-prog">
+            <span
+              className="task-bar-wrap"
+              role="progressbar"
+              aria-valuenow={pct}
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-label={`${goal.title} progress`}
+            >
+              <span className="task-bar">
+                <span className="task-bar-fill" style={{ width: `${pct}%` }} />
+              </span>
+            </span>
+          </span>
+        </div>
+        <span className="task-acts">
+          <Overflow
+            className="task-more"
+            row=".goal-row"
+            label={`More actions for ${goal.title}`}
+            items={items}
+          />
+        </span>
+      </div>
+      {editing !== null && (
+        <form className="task-inline" onSubmit={keep}>
+          {editing === 'title' ? (
+            <input
+              value={draft}
+              aria-label={`Rename ${goal.title}`}
+              autoFocus
+              onChange={(e) => setDraft(e.target.value)}
+            />
+          ) : (
+            <input
+              type="date"
+              value={draft}
+              aria-label={`Due date for ${goal.title}`}
+              autoFocus
+              onChange={(e) => setDraft(e.target.value)}
+            />
+          )}
+          <button type="submit">Save</button>
+          <button type="button" onClick={() => setEditing(null)}>
+            Cancel
+          </button>
+        </form>
+      )}
+      {open && <div className="goal-tasks">{children}</div>}
+    </div>
+  )
+}
+
 // Finishing a row plays out in the stylesheet — the bar fills, the row greys,
 // the bar fades — and the row folds away once that has been seen.
 const FINISH_HOLD_S = 1.15
@@ -770,20 +1238,30 @@ const REVIVE_MS = 420
 function Row({
   node,
   group,
+  scope = '',
   actions,
   leaving,
   onGone,
   stepsOpen,
+  categories,
+  goals,
+  showCategory,
 }: {
   node: TaskNode
   group: Group
+  // Keeps the motion keys apart where the same task is drawn twice.
+  scope?: string
   actions: RowActions
   leaving: TaskState | null
   onGone: (id: number) => void
   stepsOpen: boolean
+  categories: string[]
+  goals: Goal[]
+  showCategory: boolean
 }) {
   const item = useRef<HTMLDivElement>(null)
   const [reviving, setReviving] = useState(false)
+  const [naming, setNaming] = useState<string | null>(null)
   const sheet = useMenuSheet()
   const done = group === 'done'
   const finished = (done && !reviving) || leaving === 'done'
@@ -823,6 +1301,32 @@ function Row({
       checked: node.notify === choice.id,
     })),
   })
+  if (live)
+    items.push(
+      {
+        label: 'Category',
+        children: [
+          ...categories.map((c) => ({
+            label: c,
+            run: () => actions.setCategory(node, c),
+            checked: node.category === c,
+          })),
+          { label: 'None', run: () => actions.setCategory(node, ''), checked: node.category === '' },
+          { label: 'New…', run: () => setNaming('') },
+        ],
+      },
+      {
+        label: 'Goal',
+        children: [
+          ...goals.map((g) => ({
+            label: g.title,
+            run: () => actions.setGoal(node, g.id),
+            checked: node.goal_id === g.id,
+          })),
+          { label: 'None', run: () => actions.setGoal(node, null), checked: node.goal_id === null },
+        ],
+      },
+    )
   if (steps.length > 0) items.push({ label: 'Merge steps', run: () => actions.mergeSteps(node) })
   if (sheet && loose)
     items.push({
@@ -848,7 +1352,7 @@ function Row({
     <div
       className="task-item"
       ref={item}
-      data-row={`${leaving ? 'x' : 't'}${node.id}`}
+      data-row={`${leaving ? 'x' : 't'}${scope}${node.id}`}
       data-leaving={leaving ?? undefined}
       data-finished={finished || undefined}
     >
@@ -878,6 +1382,10 @@ function Row({
         <div className="task-foot">
           {!done && (
             <span className="task-meta">
+              {showCategory && node.category !== '' && (
+                <span className="meta">{node.category}</span>
+              )}
+              <Scheduled task={node} />
               <Duration task={node} />
               <Due task={node} />
             </span>
@@ -914,6 +1422,29 @@ function Row({
           )}
         </span>
       </div>
+      {naming !== null && (
+        <form
+          className="task-inline"
+          onSubmit={(e) => {
+            e.preventDefault()
+            const text = naming.trim()
+            if (text !== '') actions.setCategory(node, text)
+            setNaming(null)
+          }}
+        >
+          <input
+            value={naming}
+            placeholder="New category"
+            aria-label={`Category for ${node.title}`}
+            autoFocus
+            onChange={(e) => setNaming(e.target.value)}
+          />
+          <button type="submit">Save</button>
+          <button type="button" onClick={() => setNaming(null)}>
+            Cancel
+          </button>
+        </form>
+      )}
       {steps.length > 0 && stepsOpen && (
         <ul className="task-steps">
           {steps.map((c) => (

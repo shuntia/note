@@ -59,6 +59,14 @@ export type Task = {
   external_id: string | null
   url: string
   notify: TaskNotify
+  // Free text, one per task; a step reports the one its parent carries.
+  category: string
+  // The goal this task belongs to; steps never carry one.
+  goal_id: number | null
+  goal_title: string | null
+  // When the task's next block still to come starts, as a date-time in the
+  // user's own zone; null when nothing is laid for it.
+  scheduled_at: string | null
   // How far along it is, 0 to 100.
   progress: number
   // Where the minutes already worked say the task lands, and what is left of
@@ -69,6 +77,25 @@ export type Task = {
 
 // A top-level task with its steps; the list never nests deeper than this.
 export type TaskNode = Task & { children: Task[] }
+
+export type GoalState = 'open' | 'done' | 'dropped'
+
+// `tasks` counts everything hanging from the goal that was not dropped;
+// `next_*` name the unfinished one whose deadline comes first.
+export type Goal = {
+  id: number
+  title: string
+  description: string
+  due_at: string | null
+  state: GoalState
+  created_at: string
+  updated_at: string
+  tasks: number
+  done_tasks: number
+  next_task_id: number | null
+  next_task_title: string | null
+  next_due_at: string | null
+}
 
 export type Token = {
   id: number
