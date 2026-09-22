@@ -86,6 +86,35 @@ Left as is. Two notes for later: the gate has no link to the security fold it na
 
 ## Part 2 — Design
 
+### D0. Visual language
+
+The identity stays: the page is a day (sky above the horizon, earth below), the face
+is the one loud element, and the sun is the only accent. What changes is discipline.
+
+- **Colour roles.** Sun / sun-ink mean *time and attention* only: the arc, the wait,
+  a task block's left rule. Sage means done. Rose means overdue or destructive. Ink is
+  text and the single filled button of a screen. Fixed calendar time is ink at 14 %,
+  never a solid slab. Nothing else carries colour.
+- **Type.** Bricolage Grotesque, weight 500, sentence case, for the counter, the face
+  name and every screen or section title. Atkinson for everything read or pressed.
+  Scale in rem: 4.5 hero, 1.375 section title, 1 body, 0.875 secondary, 0.78 meta.
+  Tabular numerals wherever a number sits in a column.
+- **No chrome tells.** No tracked all-caps labels (`NOW`, `LATER · 34`, `HOME`,
+  `CLOSE THE DAY`, `SO FAR TODAY` all become sentence-case display headings; the face
+  eyebrow becomes the word *Now* or *Next* in sun-ink). No middle-dot meta strings:
+  `2 steps · 0 done` → *0 of 2 steps done*; a count follows a heading as a quiet
+  numeral (*Later 34*, the numeral in `--faint`). No bordered chips: a duration or a
+  due date is quiet tabular text after the title, overdue in rose.
+- **Rows.** One row is one line. A row's controls are a tick and a `⋯`; everything
+  else is in the menu. A menu group row reads like a settings row: label left, current
+  value right in `--quiet`, chevron (*Announce ……… Notify ›*).
+- **Words.** Controls say what happens and keep their name through the flow
+  (*Move to tomorrow* → toast *Moved to tomorrow*). Empty states invite an action in
+  one line; errors say what happened and what to do.
+- **Motion.** Only the two orchestrated moments the app already has (the face
+  morphing into the day; the sent bubble's flight). Menus, sheets and folds answer a
+  press with a short settle and nothing else moves on its own.
+
 ### D1. One menu everywhere
 
 `Overflow` becomes the single action menu of the app and takes over the calendar's
@@ -97,8 +126,9 @@ Left as is. Two notes for later: the gate has no link to the security fold it na
 - **Items carry a `kind`**: `action` (default), `danger` (rose text, always last,
   separated), `radio` (a check mark shows which holds).
 - **Groups fold in place.** An item may carry `children: OverflowItem[]`. It renders as
-  one row `Announce · Notify ›`; tapping it expands the children under it (radio rows)
-  and the row's chevron rotates. So a three-way choice is one row until it is asked for.
+  one row with the label left and the checked child's label right in `--quiet`, then a
+  chevron (*Announce ……… Notify ›*); tapping it expands the children under it (radio
+  rows) and the chevron rotates. So a three-way choice is one row until it is asked for.
 - **A header is optional**: `title` and `subtitle` props render a first non-interactive
   row (the block's name and time, where the calendar's modal had them).
 - Keyboard: Escape closes; arrow keys move between rows; the first row takes focus.
@@ -127,6 +157,8 @@ same set, in this order: **Start**, **Done**, then in the menu **Move to tomorro
   timeline like the list rows are (`from(.close-day, .sofar …)` at 0.42), so nothing
   paints over the face at progress 0. In the desktop hero branch they are inside
   `.today-line` already.
+- The face eyebrow is the word *Now* or *Next* (display face, sun-ink), not tracked caps;
+  *Close the day* and *So far today* are sentence-case display headings.
 - **T2**: `eventFacts` gains `wait: string` for the face: `≤ 90 min` → `N min`;
   otherwise `H h` (rounded to the half hour: `2½ h` → written `2.5 h`). The hero keeps
   `in <wait>`; the ring number shows `<wait>`.
@@ -174,10 +206,12 @@ same set, in this order: **Start**, **Done**, then in the menu **Move to tomorro
 - **K2**: a parent's sub-line (`2 steps · 0 done`) is the fold toggle, with a chevron.
   Now-group parents open by default; Later-group parents start closed. The open set is
   component state (not persisted).
-- **K3**: the `NOW` section always renders. Empty, it shows one muted line: *Nothing in
-  Now. Up to three tasks you are on right now.*
-- **X4**: one `.chip` class (bordered pill, `--faint` text) for duration, due and
-  overdue (rose border and text); step durations read `10 min`.
+- **K3**: the *Now* section always renders, headed *Now* and *Later 34* in the display
+  face, sentence case, the count a quiet numeral. Empty, Now shows one muted line:
+  *Nothing in Now yet. Up to three tasks you are on right now.*
+- **X4**: duration, due date and overdue are quiet tabular text after the title (`.meta`,
+  `--faint`; overdue in rose, no border); step durations read `10 min`. The parent
+  sub-line reads *0 of 2 steps done*.
 - **K4/K5**: menu as in D2.
 
 ### D6. Chat
@@ -241,7 +275,8 @@ ADMIN        Admin panel ›         (admins only)
              Sign out              (a haze button, not a bare link)
 ```
 
-Values are sentence case. The column widens to 40rem on desktop.
+Values and group headings are sentence case, headings in the display face. The column
+widens to 40rem on desktop.
 
 ### D9. Generated thread titles (server)
 
@@ -260,7 +295,7 @@ Values are sentence case. The column widens to 40rem on desktop.
   SET title, title_kind='generated' WHERE id AND title_kind='draft'` (a rename in the
   meantime wins) → `hub.send(user_id, {"kind":"changed"})`. Failures are logged as
   `title_error` and leave the draft.
-- **Check-in threads** are titled `Check-in · <weekday> <HH:MM>` at creation
+- **Check-in threads** are titled `<Weekday>'s <HH:MM> check-in` at creation
   (`talk::checkin_thread`) and keep `draft`, so the first user reply re-titles them the
   same way.
 - **Work-session threads** are created with `Session: <title>` as now; the pass
@@ -295,7 +330,8 @@ Values are sentence case. The column widens to 40rem on desktop.
 
 ### D11. Chips, ticks, and other shared bits
 
-- `.chip` (styles.css): bordered pill, `0.72rem`, `--faint`; `.chip.warn` rose.
+- `.meta` (styles.css): quiet tabular text, `0.78rem`, `--faint`; `.meta.warn` rose. No
+  borders.
 - `web/src/tick.tsx` exports `Tick` (moved from Tasks) so Today and Tasks share it.
 - `Overflow` as in D1 lives in `overflow.tsx`; its sheet styling reuses `.scrim` and
   `.sheet` from calendar.css, which move into styles.css as shared rules.
