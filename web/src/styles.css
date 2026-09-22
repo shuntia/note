@@ -432,8 +432,6 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
   backdrop-filter: blur(14px);
   box-shadow: 0 1.5rem 3.125rem -1.875rem oklch(23% 0.03 255 / 0.5);
 }
-/* with the Later panel open below, the menu opens upward so the two never overlap */
-.beside-later .ev-menu { top: auto; bottom: calc(100% + 0.625rem); }
 .ev-menu-item {
   display: block;
   width: 100%;
@@ -927,115 +925,6 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
   .receipt-chev { transition: none; }
 }
 
-/* ── horizon: settings ──────────────────────────────────────────── */
-.view:has(> .settings) { padding: 0; }
-.settings { padding: 3.5rem 1.5rem 6.25rem; max-width: 35rem; display: flex; flex-direction: column; gap: 1.625rem; }
-@media (min-width: 768px) { .settings { padding: 2.875rem 0 0 var(--rail); max-width: max(42.5rem, 38vw); } }
-.set-group { display: flex; flex-direction: column; gap: 0.125rem; }
-.set-group-head { font-size: 0.72rem; letter-spacing: 0.12em; font-weight: 700; color: var(--faint); margin: 0 0 0.25rem; }
-.set-row { display: flex; align-items: center; gap: 0.625rem; min-height: 3.5rem; }
-.set-row-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
-.set-label { font-size: 1rem; color: var(--ink); }
-.set-sub { font-size: 0.78rem; color: var(--faint); }
-.set-value { font-size: 0.9rem; color: var(--quiet); font-variant-numeric: tabular-nums; }
-.sw { width: 2.75rem; height: 1.625rem; border-radius: 0.8125rem; border: 0; background: var(--ink); position: relative; cursor: pointer; flex: none; padding: 0; }
-.sw::after { content: ""; position: absolute; top: 0.1875rem; right: 0.1875rem; width: 1.25rem; height: 1.25rem; border-radius: 50%; background: var(--ivory); }
-.sw[aria-checked='false'] { background: var(--line); }
-.sw[aria-checked='false']::after { right: auto; left: 0.1875rem; }
-.sw:disabled { opacity: 0.5; cursor: default; }
-.sw:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
-
-.set-fold { display: flex; flex-direction: column; }
-.set-open { width: 100%; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
-.set-chev {
-  width: 1rem;
-  height: 1rem;
-  flex: none;
-  fill: none;
-  stroke: var(--faint);
-  stroke-width: 1.8;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-  transition: transform 200ms;
-}
-.set-open[aria-expanded='true'] .set-chev { transform: rotate(90deg); }
-.set-fold-body { display: flex; flex-direction: column; align-items: flex-start; gap: 0.75rem; padding: 0 0 1.125rem; width: 100%; }
-.set-fold-body .set-row { align-self: stretch; min-height: 2.75rem; }
-.set-fold-body :is(input, select, textarea) {
-  max-width: 100%;
-  min-height: 2.75rem;
-  border: 0;
-  border-radius: 999px;
-  background: var(--haze-strong);
-  padding: 0.6875rem 1.125rem;
-  color: var(--ink);
-  font: inherit;
-  font-size: 0.9375rem;
-}
-.set-fold-body textarea { border-radius: 1.125rem; padding: 0.875rem 1.125rem; }
-.set-fold-body select {
-  appearance: none;
-  padding-right: 2.5rem;
-  background-image: linear-gradient(45deg, transparent 50%, currentColor 50%), linear-gradient(135deg, currentColor 50%, transparent 50%);
-  background-position: right 1.25rem center, right 0.9375rem center;
-  background-size: 0.3125rem 0.3125rem, 0.3125rem 0.3125rem;
-  background-repeat: no-repeat;
-}
-.set-fold-body :is(input, select, textarea):focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
-.set-signout {
-  align-self: flex-start;
-  padding: 0;
-  border: 0;
-  background: none;
-  color: var(--quiet);
-  font: inherit;
-  font-size: 0.9375rem;
-  cursor: pointer;
-}
-.set-link {
-  padding: 0;
-  border: 0;
-  background: none;
-  color: var(--quiet);
-  font: inherit;
-  font-size: 0.875rem;
-  text-decoration: underline;
-  text-underline-offset: 2px;
-  cursor: pointer;
-}
-.set-badge {
-  align-self: flex-start;
-  border-radius: 999px;
-  padding: 1px 9px;
-  font-size: 0.68rem;
-  color: var(--sun-ink);
-  background: color-mix(in srgb, var(--sun-ink) 13%, transparent);
-}
-.set-prompt-rows { width: 100%; min-width: 0; margin: 0; padding: 0; border: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 0.625rem; }
-.set-prompt { resize: vertical; font-size: 0.8rem; line-height: 1.6; }
-.set-acts { display: flex; align-items: center; gap: 0.875rem; flex-wrap: wrap; }
-.btn-haze.small { padding: 0.5625rem 1.125rem; font-size: 0.9375rem; }
-.set-token-form { display: flex; align-items: center; gap: 0.625rem; width: 100%; }
-.set-token-form input { flex: 1; min-width: 0; }
-.set-token-fresh { display: flex; flex-direction: column; gap: 0.25rem; width: 100%; }
-.set-token-secret { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85rem; word-break: break-all; user-select: all; color: var(--ink); }
-.set-token-row { width: 100%; min-height: 3rem; }
-.set-name { align-self: flex-start; font-size: 0.9375rem; color: var(--ink); text-decoration-color: var(--faint); }
-.set-enrol { display: flex; flex-direction: column; align-items: flex-start; gap: 0.625rem; width: 100%; }
-/* scanners need a white ground whatever the theme is doing around it */
-.set-qr { align-self: flex-start; background: #fff; padding: 0.5rem; border-radius: 0.5rem; }
-
-/* the day's shape entry by entry: when each one lands, what it is, and whether it
-   may reach for your attention */
-.sched-list { list-style: none; width: 100%; margin: 0; padding: 0; display: flex; flex-direction: column; }
-.sched-row { display: flex; align-items: center; gap: 0.75rem; min-height: 3rem; }
-.sched-time { flex: none; width: 5.25rem; font-size: 0.8125rem; color: var(--faint); font-variant-numeric: tabular-nums; }
-.sched-row .set-label { font-size: 0.9375rem; }
-
-@media (prefers-reduced-motion: reduce) {
-  .set-chev { transition: none; }
-}
-
 .pane-status { font-size: 0.85rem; animation: fade-in 180ms ease-out; }
 .pane-status.ok { color: var(--moss); }
 .pane-status.bad { color: var(--clay); }
@@ -1240,7 +1129,9 @@ textarea.mono { font-family: var(--mono); }
 .gauge-num.over { color: var(--sun-ink); }
 .gauge-name { margin-top: calc(6 * var(--u)); font-family: var(--display); font-weight: 500; letter-spacing: -0.015em; line-height: 1.2; color: var(--quiet); text-wrap: balance; }
 .gauge-sub { font-size: calc(12 * var(--u)); color: var(--faint); font-variant-numeric: tabular-nums; }
-.gauge-eyebrow { font-size: calc(12.5 * var(--u)); letter-spacing: 0.12em; font-weight: 700; color: var(--sun-ink); margin-bottom: calc(6 * var(--u)); }
+/* the task a step belongs to, under its name */
+.gauge-of { font-size: calc(12.5 * var(--u)); color: var(--faint); line-height: 1.3; }
+.gauge-eyebrow { font-family: var(--display); font-size: calc(13.5 * var(--u)); font-weight: 500; letter-spacing: 0; text-transform: none; color: var(--sun-ink); margin-bottom: calc(6 * var(--u)); }
 
 .dayline { position: relative; height: 0; width: 100%; }
 .dl-line { position: absolute; left: 0; right: 0; top: 0; height: 1px; background: var(--line); }
@@ -1307,42 +1198,61 @@ textarea.mono { font-family: var(--mono); }
 .home-actions { position: relative; display: flex; align-items: center; gap: calc(10 * var(--u)); margin-top: calc(50 * var(--u)); }
 .home-actions .ev-more-wrap { position: relative; top: auto; right: auto; margin-left: calc(6 * var(--u)); }
 .home-actions .ev-more { width: calc(44 * var(--u)); height: calc(44 * var(--u)); font-size: calc(21 * var(--u)); color: var(--quiet); }
-.later-pick { position: absolute; left: 50%; transform: translateX(-50%); top: calc(100% + 14 * var(--u)); width: min(calc(400 * var(--u)), 88vw); padding: calc(14 * var(--u)) calc(16 * var(--u)); border-radius: calc(18 * var(--u)); background: var(--haze-strong); box-shadow: 0 1.5rem 3.125rem -1.875rem oklch(23% 0.03 255 / 0.5); display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; z-index: 5; }
-.later-lead { width: 100%; font-size: calc(13 * var(--u)); color: var(--quiet); }
-.later-min { flex: 1; font: inherit; font-variant-numeric: tabular-nums; padding: 0.5625rem 0; border: 0; border-radius: 999px; background: var(--earth); color: var(--ink); cursor: pointer; }
-.later-min:hover, .later-min:focus-visible { background: var(--ink); color: var(--ivory); outline: none; }
-.later-unit { flex: 1; text-align: center; font-size: calc(13 * var(--u)); color: var(--quiet); }
+/* Later is a menu of its own, so its trigger wears the haze button's clothes */
+.later-wrap { margin-left: 0; }
+.home-actions .later-wrap .ev-more, .today-actions .later-wrap .ev-more, .home-face.compact .later-wrap .ev-more {
+  width: auto; height: auto; border-radius: 999px; background: var(--haze-strong); color: var(--ink); font-size: 0;
+  padding: calc(14 * var(--u)) calc(24 * var(--u));
+}
+.home-face.compact .later-wrap .ev-more { padding: calc(10 * var(--u)) calc(18 * var(--u)); }
+.later-wrap .ev-more::before { content: 'Later'; font-size: calc(17 * var(--u)); line-height: 1.2; }
+.home-face.compact .later-wrap .ev-more::before { font-size: calc(15 * var(--u)); }
 .home-sheet { display: flex; flex-direction: column; align-items: center; gap: 1.375rem; width: min(21.375rem, 88vw); margin-top: 2.5rem; }
 .home-today .jot-wrap { box-sizing: border-box; }
 .btn-fill.wide { width: 100%; }
 .btn-fill.small { padding: calc(10 * var(--u)) calc(18 * var(--u)); font-size: calc(15 * var(--u)); box-shadow: none; }
+.btn-haze.small { padding: calc(10 * var(--u)) calc(18 * var(--u)); font-size: calc(15 * var(--u)); }
 .home-today { width: min(21.375rem, 88vw); margin-top: 3.75rem; display: flex; flex-direction: column; gap: 2.5rem; }
 .home:not(.mobile) .home-today { width: min(var(--column), 100%); }
 /* the line itself has no height: the room is for the labels it hangs outside its box */
 .home-today .dayline { margin: 2.125rem 0 1.125rem; }
 .home-today .dayline.compact { margin: 6px 0 0; }
 .home-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; mask-image: var(--under-line); -webkit-mask-image: var(--under-line); }
-.home-list li { display: grid; grid-template-columns: 6rem minmax(0, 1fr) auto; align-items: center; gap: 0.75rem; min-height: 2.75rem; color: var(--quiet); }
+.home-list li { display: flex; flex-direction: row; align-items: center; gap: 0.75rem; width: auto; min-height: 2.75rem; color: var(--quiet); }
 .home-list li.next { color: var(--ink); font-weight: 700; }
 .home-list li.task .home-what { border-left: 2px solid var(--sun-ink); padding-left: 0.625rem; }
 .home-list li.overdue .home-when { color: var(--rose); }
 /* the day's own windows: the one standing now is the only one in full ink */
 .home-list li.cal.on { color: var(--ink); }
 .home-list li.past { color: var(--faint); opacity: 0.7; }
-.home-row-actions { position: relative; display: flex; align-items: center; gap: 0.5rem; }
-.home-row-actions .btn-haze { padding: 0.375rem 0.875rem; font-size: 0.875rem; }
-.home-row-actions .ev-more-wrap { position: relative; top: auto; right: auto; }
+.home-list li .tick { width: 1.25rem; height: 1.25rem; }
+.home-list li .tick svg { width: 0.75rem; height: 0.75rem; }
+.home-list li .ev-more-wrap { position: relative; top: auto; right: auto; flex: none; margin-left: auto; }
+.home-list li .ev-more { width: 1.75rem; height: 1.75rem; color: var(--faint); }
+/* the play glyph is the pointer's shortcut into a row; a finger uses the menu */
+.home-start { display: none; }
+@media (min-width: 768px) and (pointer: fine) {
+  .home-start {
+    display: grid; place-items: center; flex: none; width: 1.75rem; height: 1.75rem;
+    padding: 0; border: 0; border-radius: 50%; background: var(--haze-strong); color: var(--ink); cursor: pointer;
+    margin-left: auto; opacity: 0; transition: opacity 160ms ease;
+  }
+  .home-start svg { width: 0.875rem; height: 0.875rem; fill: currentColor; }
+  .home-start:disabled { cursor: default; }
+  .home-list li:hover .home-start, .home-list li:focus-within .home-start { opacity: 1; }
+  .home-list li:has(.home-start) .ev-more-wrap { margin-left: 0; }
+}
 
 /* ── the close of the day ───────────────────────────────────────── */
 .close-day { background: var(--haze-strong); border-radius: 16px; padding: 16px 18px; display: flex; flex-direction: column; gap: 6px; }
-.close-day-head { margin: 0; color: var(--faint); font-size: 0.8125rem; letter-spacing: 0.06em; text-transform: uppercase; }
+.close-day-head { margin: 0; font-family: var(--display); font-weight: 500; font-size: 1rem; letter-spacing: -0.01em; color: var(--ink); }
 .close-day-line { margin: 0; color: var(--ink); }
 .close-day-actions { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 10px; }
 
 /* ── so far today ───────────────────────────────────────────────── */
 .sofar { margin-top: 8px; }
-.sofar-fold { display: flex; align-items: center; gap: 0.625rem; width: 100%; background: none; border: 0; padding: 0.625rem 0; color: var(--faint); font: inherit; font-size: 0.8125rem; letter-spacing: 0.06em; text-transform: uppercase; cursor: pointer; }
-.sofar-count { margin-left: -4px; color: var(--quiet); }
+.sofar-fold { display: flex; align-items: center; gap: 0.5rem; width: 100%; background: none; border: 0; padding: 0.625rem 0; color: var(--ink); font: inherit; font-family: var(--display); font-weight: 500; font-size: 1rem; letter-spacing: -0.01em; cursor: pointer; }
+.sofar-count { color: var(--faint); }
 .sofar-chev { margin-left: auto; display: flex; }
 .sofar-chev svg { width: 1.125rem; height: 1.125rem; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; transition: transform 0.2s ease; }
 .sofar.open .sofar-chev svg { transform: rotate(180deg); }
@@ -1357,8 +1267,15 @@ textarea.mono { font-family: var(--mono); }
 .sofar-list li.event-dropped .sofar-what { text-decoration: line-through; text-decoration-color: var(--line); }
 .sofar-list li.event-moved .sofar-mark { color: var(--quiet); }
 .sofar-empty { margin: 0 0 10px; color: var(--faint); font-size: 0.9375rem; }
-.home-when { font-size: 0.8125rem; color: var(--faint); font-variant-numeric: tabular-nums; font-weight: 400; }
-.home-what { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.home-when { flex: none; width: 6rem; font-size: 0.8125rem; color: var(--faint); font-variant-numeric: tabular-nums; font-weight: 400; }
+.home-what { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* a step names itself first; the task behind it gives way before the step does */
+.home-what:has(.home-name) { display: flex; align-items: baseline; gap: 0.375rem; overflow: visible; }
+.home-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.home-of { flex: 0 6 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--faint); font-weight: 400; font-size: 0.875rem; }
+/* the phone has room for the start alone; the span is the menu header's */
+.home.mobile .home-when { width: 3rem; }
+.home.mobile .home-when-end { display: none; }
 .home-text { display: flex; flex-direction: column; gap: calc(10 * var(--u)); padding: 0 calc(28 * var(--u)); width: 100%; box-sizing: border-box; }
 .home-title { font-family: var(--display); font-weight: 500; font-size: calc(44 * var(--u)); letter-spacing: -0.03em; line-height: 1.02; color: var(--ink); text-wrap: balance; }
 
@@ -1366,9 +1283,9 @@ textarea.mono { font-family: var(--mono); }
 .view:has(> .today) { padding: 0; }
 .today { position: relative; min-height: calc(100dvh - var(--bar)); }
 .today-hero { position: relative; padding: var(--hero-top) 0 0 var(--rail); width: 51.25rem; max-width: calc(100% - 2 * var(--rail)); display: flex; flex-direction: column; gap: 0.875rem; }
-.today-eyebrow { display: flex; align-items: center; gap: 0.625rem; font-size: 0.8125rem; letter-spacing: 0.1em; font-weight: 700; color: var(--sun-ink); font-variant-numeric: tabular-nums; }
-.today-dot { width: 0.25rem; height: 0.25rem; border-radius: 50%; background: var(--sun-ink); opacity: 0.6; }
+.today-eyebrow { font-family: var(--display); font-size: 1rem; font-weight: 500; letter-spacing: 0; text-transform: none; color: var(--sun-ink); font-variant-numeric: tabular-nums; }
 .today-title { margin: 0; font-family: var(--display); font-weight: 500; font-size: 4.5rem; letter-spacing: -0.025em; line-height: 1.02; color: var(--ink); }
+.today-of { margin: -0.25rem 0 0; font-size: 1.0625rem; color: var(--faint); }
 .today-when { display: flex; align-items: baseline; gap: 0.875rem; margin-top: 0.25rem; }
 .today-in { font-family: var(--display); font-weight: 500; font-size: 1.875rem; letter-spacing: -0.02em; color: var(--ink); font-variant-numeric: tabular-nums; }
 .today-span { font-size: 0.9375rem; color: var(--quiet); font-variant-numeric: tabular-nums; }
@@ -1376,16 +1293,6 @@ textarea.mono { font-family: var(--mono); }
 .today-actions .ev-more-wrap { position: relative; top: auto; right: auto; margin-left: 0.375rem; }
 .today-actions .ev-more { width: 2.75rem; height: 2.75rem; font-size: 1.3rem; color: var(--quiet); }
 .today-actions .ev-menu { left: 0; right: auto; z-index: 6; min-width: 12rem; }
-/* wide enough for the menu to stand beside the Later panel instead of over the hero */
-@media (min-width: 1000px) {
-  .home-actions .beside-later, .today-actions .beside-later { position: static; }
-  .home-actions .beside-later .ev-menu, .today-actions .beside-later .ev-menu {
-    top: calc(100% + 0.875rem);
-    bottom: auto;
-    left: calc(50% + 13.25rem);
-    right: auto;
-  }
-}
 .today-line { position: absolute; left: var(--rail); right: var(--rail); top: calc(var(--hero-top) + 25.625rem); }
 /* the desktop list has the ground beneath it for a floor, so the day scrolls
    through the room between the line and it */

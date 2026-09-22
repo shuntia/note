@@ -14,6 +14,7 @@ import { minutesOf } from '../dayline'
 import { useEscape } from '../escape'
 import { makeHold } from '../held'
 import { reducedMotion } from '../motion'
+import { Overflow, type OverflowItem } from '../overflow'
 import type { CalendarEntry, CalendarKind, DayView, PlanEvent } from '../types'
 import '../styles/calendar.css'
 
@@ -41,7 +42,7 @@ const KIND_LABEL: Record<CalendarKind, string> = {
   fixed: 'Fixed',
   busy: 'Busy',
   note: 'Note',
-  free: 'Free time',
+  free: 'Free',
 }
 
 // Removal has no server-side reversal, so the request waits out the undo window.
@@ -118,6 +119,24 @@ const hasGoneBy = (draft: Draft): boolean => {
   return draft.date === today && draft.end <= `${pad(now.getHours())}:${pad(now.getMinutes())}`
 }
 
+const blockTitle = (ev: PlanEvent) => ev.task?.title ?? ev.kind
+
+const blockWhen = (ev: PlanEvent) =>
+  `${ev.wall_time} – ${ev.end_wall_time ?? ev.wall_time}${ev.origin === 'auto' ? ', laid automatically' : ''}`
+
+// The block itself is the trigger: the menu's button fills it, glyph and all.
+function BlockMenu({ event, items }: { event: PlanEvent; items: OverflowItem[] }) {
+  return (
+    <Overflow
+      className="band-menu"
+      label={blockTitle(event)}
+      title={blockTitle(event)}
+      subtitle={blockWhen(event)}
+      items={items}
+    />
+  )
+}
+
 const bandClass = (o: Occurrence, base: string) =>
   [base, o.entry.kind, o.once ? 'once' : '', o.skipped ? 'skipped' : ''].filter(Boolean).join(' ')
 
@@ -137,11 +156,12 @@ export function CalendarSection({
   refresh,
   onChanged,
   day,
-  onStartBlock,
+  blockItems,
 }: Pick<ViewProps, 'notify' | 'refresh' | 'onChanged'> & {
   // Today, as Home read it: the quiet window and the free time both come from there.
   day: DayView | null
-  onStartBlock: (event: PlanEvent) => void
+  // What a task block offers, as Today's own rows offer it.
+  blockItems: (event: PlanEvent) => OverflowItem[]
 }) {
   const [entries, setEntries] = useState<CalendarEntry[] | null>(null)
   const [today, setToday] = useState(() => isoOf(new Date()))
@@ -149,7 +169,6 @@ export function CalendarSection({
   const [grid, setGrid] = useState(false)
   const [sheet, setSheet] = useState<{ entry: CalendarEntry | null; date: string } | null>(null)
   const [blocks, setBlocks] = useState<Record<string, PlanEvent[]>>({})
-  const [block, setBlock] = useState<PlanEvent | null>(null)
   const [filling, setFilling] = useState(false)
   const [, tick] = useState(0)
   const wide = useMedia('(min-width: 768px)')
@@ -211,11 +230,6 @@ export function CalendarSection({
       })
       .catch(() => notify("Couldn't fill that day. Try again."))
       .finally(() => setFilling(false))
-  }
-
-  const settle = (run: Promise<unknown>, failure: string) => {
-    setBlock(null)
-    run.then(onChanged).catch(() => notify(failure))
   }
 
   const replace = (entry: CalendarEntry) =>
@@ -364,7 +378,7 @@ export function CalendarSection({
             quietUntil={quietUntil}
             onSelect={setSelected}
             onPick={(entry, date) => setSheet({ entry, date })}
-            onBlock={setBlock}
+            blockItems={blockItems}
           />
           <p className="cal-day">
             {DAYS[weekdayOf(selected)]} {dateOf(selected).getDate()}
@@ -394,7 +408,7 @@ export function CalendarSection({
               entries={visible}
               blocks={blocks[selected] ?? []}
               quietUntil={quietUntil}
-              onBlock={setBlock}
+              blockItems={blockItems}
             />
           </div>
           <DayList
@@ -407,27 +421,6 @@ export function CalendarSection({
         </>
       )}
       {tips.node}
-      {block && (
-        <BlockMenu
-          event={block}
-          onStart={() => {
-            const event = block
-            setBlock(null)
-            onStartBlock(event)
-          }}
-          onDone={() =>
-            settle(
-              api.eventAction(block.id, 'done').then(() =>
-                block.task ? api.patchTask(block.task.id, { state: 'done' }) : undefined,
-              ),
-              "Couldn't mark that done. Try again.",
-            )
-          }
-          onDrop={() => settle(api.eventAction(block.id, 'drop'), "Couldn't drop that. Try again.")}
-          onMove={() => settle(api.moveTomorrow(block.id), "Couldn't move that. Try again.")}
-          onClose={() => setBlock(null)}
-        />
-      )}
       {sheet && (
         <EntrySheet
           key={sheet.entry?.id ?? 'new'}
@@ -498,7 +491,7 @@ function DayBands({
   entries,
   blocks,
   quietUntil,
-  onBlock,
+  blockItems,
 }: {
   date: string
   today: string
@@ -506,7 +499,7 @@ function DayBands({
   entries: CalendarEntry[]
   blocks: PlanEvent[]
   quietUntil: string | null
-  onBlock: (event: PlanEvent) => void
+  blockItems: (event: PlanEvent) => OverflowItem[]
 }) {
   const isToday = date === today
   return (
@@ -540,14 +533,15 @@ function DayBands({
         const start = minutesOf(ev.wall_time)
         const end = minutesOf(ev.end_wall_time ?? ev.wall_time)
         return (
-          <button
+          <span
             key={ev.id}
             className={`dl-span task cal-band${ev.status === 'done' || ev.status === 'dropped' ? ' settled' : ''}`}
-            data-tip={`${ev.wall_time} – ${ev.end_wall_time ?? ev.wall_time} ${ev.task?.title ?? ev.kind}${ev.origin === 'auto' ? ' · auto' : ''}`}
-            aria-label={`${ev.task?.title ?? ev.kind} ${ev.wall_time}`}
-            style={{ left: pct(start), width: `${Math.max(0.6, ((end - start) / (END - START)) * 100)}%` }}
-            onClick={() => onBlock(ev)}
-          />
+            data-tip={`${blockWhen(ev)} ${blockTitle(ev)}`}
+            data-opens=""
+            style={{ left: pct(start), width: `${Math.max(0.4, ((end - start) / (END - START)) * 100)}%` }}
+          >
+            <BlockMenu event={ev} items={blockItems(ev)} />
+          </span>
         )
       })}
       {HOURS.map((h, i) => (
@@ -616,7 +610,7 @@ function WeekGrid({
   quietUntil,
   onSelect,
   onPick,
-  onBlock,
+  blockItems,
 }: {
   week: string[]
   today: string
@@ -627,7 +621,7 @@ function WeekGrid({
   quietUntil: string | null
   onSelect: (date: string) => void
   onPick: (entry: CalendarEntry, date: string) => void
-  onBlock: (event: PlanEvent) => void
+  blockItems: (event: PlanEvent) => OverflowItem[]
 }) {
   const hours = Array.from({ length: 19 }, (_, i) => i + 6)
   const thisWeek = week.includes(today)
@@ -666,15 +660,15 @@ function WeekGrid({
         {week.map((date) => (
           <div key={date} className={`week-col${date === today ? ' is-today' : ''}`}>
             {occurrencesOn(entries, date).map((o) => {
-              const height = Math.max(0.5, (o.end - o.start) / 60)
+              const height = Math.max(0.25, (o.end - o.start) / 60)
               return (
                 <div
                   key={o.entry.id}
-                  className={`${bandClass(o, 'band')}${height < 0.75 ? ' short' : ''}`}
+                  className={`${bandClass(o, 'band')}${height < 0.5 && o.entry.kind !== 'note' ? ' short' : ''}`}
                   role="button"
                   tabIndex={0}
-                  data-entry={o.entry.id}
-                  data-tip={spanOf(o)}
+                  data-opens=""
+                  data-tip={`${spanOf(o)} ${o.entry.title}`}
                   data-tip-skipped={o.skipped ? '' : undefined}
                   aria-label={`${o.entry.title} ${spanOf(o)}`}
                   style={{
@@ -694,27 +688,20 @@ function WeekGrid({
             })}
             {(blocks[date] ?? []).map((ev) => {
               const start = minutesOf(ev.wall_time)
-              const height = Math.max(0.5, (minutesOf(ev.end_wall_time ?? ev.wall_time) - start) / 60)
+              const height = Math.max(0.25, (minutesOf(ev.end_wall_time ?? ev.wall_time) - start) / 60)
               return (
                 <div
                   key={`b${ev.id}`}
-                  className={`band task${ev.status === 'done' || ev.status === 'dropped' ? ' settled' : ''}${height < 0.75 ? ' short' : ''}`}
-                  role="button"
-                  tabIndex={0}
-                  data-tip={`${ev.wall_time} – ${ev.end_wall_time ?? ev.wall_time}${ev.origin === 'auto' ? ' · auto' : ''}`}
-                  aria-label={`${ev.task?.title ?? ev.kind} ${ev.wall_time}`}
+                  className={`band task${ev.status === 'done' || ev.status === 'dropped' ? ' settled' : ''}${height < 0.5 ? ' short' : ''}`}
+                  data-opens=""
+                  data-tip={`${blockWhen(ev)} ${blockTitle(ev)}`}
                   style={{
                     top: `calc(var(--hour) * ${(start - START) / 60})`,
                     height: `calc(var(--hour) * ${height})`,
                   }}
-                  onClick={() => onBlock(ev)}
-                  onKeyDown={(e) => {
-                    if (e.key !== 'Enter' && e.key !== ' ') return
-                    e.preventDefault()
-                    onBlock(ev)
-                  }}
                 >
-                  <span className="band-label">{ev.task?.title ?? ev.kind}</span>
+                  <span className="band-label">{blockTitle(ev)}</span>
+                  <BlockMenu event={ev} items={blockItems(ev)} />
                 </div>
               )
             })}
@@ -769,7 +756,6 @@ function EntrySheet({
     days: entry?.days ?? 0,
     date: entry?.on_date ?? date,
   }))
-  const [menu, setMenu] = useState(false)
   const [refused, setRefused] = useState('')
   const scrim = useRef<HTMLDivElement>(null)
   const panel = useRef<HTMLDivElement>(null)
@@ -836,35 +822,14 @@ function EntrySheet({
             onChange={(e) => set({ title: e.target.value })}
           />
           {entry && (
-            <div className="ev-more-wrap">
-              <button
-                className="ev-more"
-                aria-label="More"
-                aria-haspopup="menu"
-                aria-expanded={menu}
-                onClick={() => setMenu((v) => !v)}
-              >
-                ⋯
-              </button>
-              {menu && (
-                <SheetMenu
-                  kind={draft.kind}
-                  onKind={(kind) => {
-                    setMenu(false)
-                    set({ kind, quiet: kind === 'note' || kind === 'free' ? false : draft.quiet })
-                  }}
-                  onSkip={() => {
-                    onSkip()
-                    close()
-                  }}
-                  onDelete={() => {
-                    onDelete()
-                    close()
-                  }}
-                  onClose={() => setMenu(false)}
-                />
-              )}
-            </div>
+            <Overflow
+              label="More"
+              className="ev-more-wrap"
+              items={[
+                { label: 'Skip this day', run: () => { onSkip(); close() } },
+                { label: 'Delete', kind: 'danger', run: () => { onDelete(); close() } },
+              ]}
+            />
           )}
         </div>
         <div className="sheet-time">
@@ -888,34 +853,56 @@ function EntrySheet({
             onBlur={(e) => set({ end: asTime(e.target.value) })}
           />
         </div>
-        <div className="days" role="group" aria-label="Days">
-          {LETTERS.map((letter, i) => (
+        <div className="sheet-when">
+          {draft.days === 0 ? (
+            <>
+              <span className="sheet-date">{`${DAYS[weekdayOf(draft.date)]} ${dateOf(draft.date).getDate()} ${MONTHS[dateOf(draft.date).getMonth()].slice(0, 3)}`}</span>
+              <button className="set-link" onClick={() => set({ days: 1 << weekdayOf(draft.date) })}>
+                Repeat weekly
+              </button>
+            </>
+          ) : (
+            <>
+              <div className="days" role="group" aria-label="Days">
+                {LETTERS.map((letter, i) => (
+                  <button
+                    key={DAYS[i]}
+                    className="day-dot"
+                    aria-pressed={(draft.days & (1 << i)) !== 0}
+                    aria-label={DAYS[i]}
+                    onClick={() => toggleDay(i)}
+                  >
+                    {letter}
+                  </button>
+                ))}
+              </div>
+              <button className="set-link" onClick={() => set({ days: 0 })}>
+                Just once
+              </button>
+            </>
+          )}
+        </div>
+        <div className="seg" role="group" aria-label="Kind">
+          {KINDS.map((k) => (
             <button
-              key={DAYS[i]}
-              className="day-dot"
-              aria-pressed={(draft.days & (1 << i)) !== 0}
-              aria-label={DAYS[i]}
-              onClick={() => toggleDay(i)}
+              key={k}
+              aria-pressed={draft.kind === k}
+              onClick={() => set({ kind: k, quiet: k === 'note' || k === 'free' ? false : draft.quiet })}
             >
-              {letter}
+              {KIND_LABEL[k]}
             </button>
           ))}
         </div>
-        <div className="sheet-row">
-          {draft.kind === 'note' ? (
-            <span className="label">A mark on the day, not a window</span>
-          ) : draft.kind === 'free' ? (
-            <span className="label">Time set aside for tasks</span>
-          ) : (
+        {draft.kind === 'note' || draft.kind === 'free' ? (
+          <p className="set-sub sheet-hint">
+            {draft.kind === 'note' ? 'A mark on the day, not a window' : 'Time set aside for tasks'}
+          </p>
+        ) : (
+          <div className="sheet-row">
             <span className="label">
               <BellOff />
               Quiet
             </span>
-          )}
-          {draft.days === 0 && (
-            <span className="sheet-date">{`${DAYS[weekdayOf(draft.date)]} ${dateOf(draft.date).getDate()} ${MONTHS[dateOf(draft.date).getMonth()].slice(0, 3)}`}</span>
-          )}
-          {draft.kind !== 'note' && draft.kind !== 'free' && (
             <button
               className="sw"
               role="switch"
@@ -923,8 +910,8 @@ function EntrySheet({
               aria-label="Quiet"
               onClick={() => set({ quiet: !draft.quiet })}
             />
-          )}
-        </div>
+          </div>
+        )}
         {refused && <p className="sheet-refused">{refused}</p>}
         <button
           className="btn-fill wide sheet-save"
@@ -940,114 +927,6 @@ function EntrySheet({
       </div>
     </>,
     document.body,
-  )
-}
-
-// A task block is the plan's, not the calendar's: clicking one offers the row's
-// own actions rather than the entry sheet.
-function BlockMenu({
-  event,
-  onStart,
-  onDone,
-  onDrop,
-  onMove,
-  onClose,
-}: {
-  event: PlanEvent
-  onStart: () => void
-  onDone: () => void
-  onDrop: () => void
-  onMove: () => void
-  onClose: () => void
-}) {
-  useEscape(true, onClose)
-  const settled = event.status === 'done' || event.status === 'dropped'
-  return createPortal(
-    <>
-      <div className="scrim" onClick={onClose} />
-      <div className="block-menu" role="dialog" aria-modal="true" aria-label={event.task?.title ?? event.kind}>
-        <span className="block-menu-head">
-          <span className="block-menu-title">{event.task?.title ?? event.kind}</span>
-          <span className="block-menu-when tnum">
-            {event.wall_time} – {event.end_wall_time ?? event.wall_time}
-            {event.origin === 'auto' && <span className="block-menu-auto">auto</span>}
-          </span>
-        </span>
-        {!settled && (
-          <>
-            <button className="ev-menu-item" onClick={onStart}>Start</button>
-            <button className="ev-menu-item" onClick={onDone}>Done</button>
-            <div className="ev-menu-sep" />
-            <button className="ev-menu-item" onClick={onDrop}>Drop today</button>
-            <button className="ev-menu-item" onClick={onMove}>Move to tomorrow</button>
-          </>
-        )}
-        {settled && <p className="block-menu-settled">Already {event.status}.</p>}
-      </div>
-    </>,
-    document.body,
-  )
-}
-
-function SheetMenu({
-  kind,
-  onKind,
-  onSkip,
-  onDelete,
-  onClose,
-}: {
-  kind: CalendarKind
-  onKind: (kind: CalendarKind) => void
-  onSkip: () => void
-  onDelete: () => void
-  onClose: () => void
-}) {
-  const wrap = useRef<HTMLDivElement>(null)
-  const first = useRef<HTMLButtonElement>(null)
-
-  useEffect(() => {
-    first.current?.focus()
-    if (!reducedMotion()) {
-      gsap.from(wrap.current, {
-        autoAlpha: 0,
-        y: 6,
-        scale: 0.97,
-        transformOrigin: 'bottom right',
-        duration: 0.24,
-        ease: 'power2.out',
-        clearProps: 'transform,opacity,visibility',
-      })
-    }
-    const onDown = (e: globalThis.MouseEvent) => {
-      if (!wrap.current?.parentElement?.contains(e.target as Node)) onClose()
-    }
-    document.addEventListener('mousedown', onDown)
-    return () => document.removeEventListener('mousedown', onDown)
-  }, [onClose])
-
-  return (
-    <div className="ev-menu up" role="menu" ref={wrap}>
-      {KINDS.map((k, i) => (
-        <button
-          key={k}
-          className="ev-menu-item"
-          role="menuitemradio"
-          aria-checked={k === kind}
-          ref={i === 0 ? first : undefined}
-          onClick={() => onKind(k)}
-        >
-          {KIND_LABEL[k]}
-          {k === kind && <Check />}
-        </button>
-      ))}
-      <div className="ev-menu-sep" />
-      <button className="ev-menu-item" role="menuitem" onClick={onSkip}>
-        Skip this day
-      </button>
-      <button className="ev-menu-item" role="menuitem" onClick={onDelete}>
-        Delete
-      </button>
-    </div>
   )
 }
 
@@ -1094,8 +973,8 @@ function useTips() {
     },
     click: (e: ReactMouseEvent) => {
       const el = marked(e)
-      // A band that opens the sheet keeps its tap for the sheet.
-      if (!el || el.dataset.entry !== undefined || el === pinned) {
+      // A band whose tap opens something keeps that tap for it.
+      if (!el || el.dataset.opens !== undefined || el === pinned) {
         setPinned(null)
         setAnchor(null)
         return
@@ -1130,14 +1009,6 @@ function ChevronRight() {
   return (
     <svg className="glyph cal-chev" viewBox="0 0 24 24" aria-hidden="true">
       <path d="M9 6l6 6-6 6" />
-    </svg>
-  )
-}
-
-function Check() {
-  return (
-    <svg className="glyph check" viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M5 12.5l4.5 4.5L19 7" />
     </svg>
   )
 }

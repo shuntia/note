@@ -4,10 +4,6 @@
    layout under it and the sky behind them never blinks. */
 .view.leaving { z-index: 4; pointer-events: none; }
 
-/* the tab bar belongs to the shell at every view, so the mark can cross between
-   them; on Home it waits for the morph to say where it sits */
-.shell:has(.home.motion:not(.morph-ready)) > .tabs { visibility: hidden; }
-
 /* ── the mark behind the current view's name ──────────────────────
    One element per bar, moved by the shell rather than restyled per button, so the
    change of view reads as the mark travelling to it. */

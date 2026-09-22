@@ -46,12 +46,12 @@ function read(session: FocusSession | null, events: PlanEvent[]): Reading | null
   const now = d.getHours() * 60 + d.getMinutes()
   const next = nextUp(events, now)
   if (!next) return null
-  const { minutes } = eventFacts(next, now)
+  const { minutes, wait } = eventFacts(next, now)
   if (minutes === null) return { frac: 1, text: 'now', over: false, faded: false }
   const from = waitStart(events, now)
   const to = minutesOf(next.wall_time)
   const frac = to <= from ? 1 : (now - from) / (to - from)
-  return { frac, text: `${minutes} min`, over: false, faded: true }
+  return { frac, text: wait, over: false, faded: true }
 }
 
 // The session or the wait, as one small ring (a bar on desktop) with its

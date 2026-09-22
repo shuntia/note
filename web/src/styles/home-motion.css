@@ -9,7 +9,7 @@
 
 .face-big { position: absolute; top: 0; left: 0; right: 0; height: 100dvh; z-index: 5; display: flex; flex-direction: column; align-items: center; pointer-events: none; }
 .home.desktop .face-big { height: calc(100dvh - var(--bar)); }
-.face-big button, .face-big .later-pick, .face-big .ev-menu { pointer-events: auto; }
+.face-big button, .face-big .ev-menu { pointer-events: auto; }
 .face-big .rest { display: flex; flex-direction: column; align-items: center; }
 /* the whole face reads in --face, so the arc keeps its share of the screen; the
    page's gentler scale picks up again at the compact header and the stage */
@@ -17,6 +17,8 @@
 .face-big .home-face, .face-still .home-face { flex-direction: column; padding-top: 170px; }
 .home.desktop .face-big .home-face, .home.desktop .face-still .home-face { padding-top: clamp(calc(40 * var(--u)), max(9vh, calc((100dvh - 704 * var(--u)) / 2)), calc(480 * var(--u))); }
 .face-big .chev { position: absolute; left: 50%; transform: translateX(-50%); bottom: 1.75rem; }
+/* on the phone the tab bar is always there, so the chevron sits above it */
+.home.mobile .face-big .chev { bottom: calc(84px + 1.75rem); }
 .home.desktop .face-big .chev { bottom: 2.5rem; }
 .home.no-arc .face-big .home-text .gauge-num, .home.no-arc .face-still .home-text .gauge-num { justify-content: flex-start; }
 .home.no-arc .face-big .home-actions, .home.no-arc .face-still .home-actions { align-self: flex-start; margin-left: 1.75rem; }
@@ -24,14 +26,18 @@
 /* the words the morph carries take the target's optical size and tracking on the way */
 .atom { display: inline-block; font-variation-settings: 'opsz' var(--opsz); letter-spacing: var(--ls); }
 
-/* the landing spots are hidden until the timeline owns them (it measures them first);
-   the tab bar is the shell's, so shell.css hides that one on the same condition */
+/* the landing spots are hidden until the timeline owns them (it measures them first) */
 .home.motion:not(.morph-ready) :is(.home-face.compact, .home-sheet, .home-today, .today-hero, .today-line, .today-bar) { visibility: hidden; }
 
 /* ── the compact header ── */
 .home-face.compact { flex-direction: row; align-items: center; gap: 1rem; width: 100%; padding: 54px 24px 0; box-sizing: border-box; }
 .home.desktop .home-face.compact { width: min(var(--column), 100%); padding: calc(54 * var(--u)) 0 0; }
 .home-face.compact .btn-round { flex: none; }
+.home-face.compact .home-head-actions { display: flex; align-items: center; gap: 0.5rem; flex: none; }
+.home-face.compact .home-head-actions .ev-more-wrap { position: relative; top: auto; right: auto; flex: none; }
+/* the phone has no room beside a 120px arc: the actions take a line of their own */
+.home.mobile .home-face.compact { flex-wrap: wrap; row-gap: 1rem; }
+.home.mobile .home-face.compact .home-head-actions { flex: 1 0 100%; }
 .home.desktop .home-face.compact .btn-fill { margin-left: 0.5rem; }
 .home.motion .home-sheet { margin-top: 1.5rem; }
 
@@ -63,11 +69,12 @@
 
 /* ── desktop: the buttons and the top bar rest after two idle seconds ──
    Nothing the morph tweens carries a transition (a mid-transition opacity would be
-   read as a tween's end value), so the rest belongs to a wrapper. */
+   read as a tween's end value), so the rest belongs to a wrapper. The bar only dims:
+   navigation is never out of reach. */
 @media (min-width: 768px) {
   .rest, .topbar > * { transition: opacity 0.25s ease; }
-  html.idle .rest:not(:hover):not(:focus-within):not(:has(.ev-menu, .later-pick)),
-  html.idle .topbar:not(:hover):not(:focus-within) > * { opacity: 0; pointer-events: none; transition-duration: 0.6s; }
+  html.idle .rest:not(:hover):not(:focus-within):not(:has(.ev-menu)) { opacity: 0; pointer-events: none; transition-duration: 0.6s; }
+  html.idle .topbar:not(:hover):not(:focus-within) > * { opacity: 0.35; transition-duration: 0.6s; }
 }
 @media (prefers-reduced-motion: reduce) {
   .rest, .topbar > * { transition: none; }
@@ -92,5 +99,5 @@
 .home.mobile.in-session .home-sheet { margin-top: 84px; }
 
 @media (min-width: 768px) {
-  html.in-session .topbar:not(:hover):not(:focus-within) > * { opacity: 0; pointer-events: none; transition-duration: 0.6s; }
+  html.in-session .topbar:not(:hover):not(:focus-within) > * { opacity: 0.35; transition-duration: 0.6s; }
 }
