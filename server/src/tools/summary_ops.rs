@@ -9,6 +9,9 @@ pub const MAX_SUMMARY: usize = 1200;
 #[serde(deny_unknown_fields)]
 pub struct WriteArgs {
     pub summary: String,
+    /// What to call the thread: 3 to 6 words naming its subject.
+    #[serde(default)]
+    pub title: Option<String>,
 }
 
 /// Validates the summary and hands it back; the caller owns the conversation
@@ -28,7 +31,13 @@ pub fn write(
     if summary.lines().any(|l| l.trim_start().starts_with('#')) {
         return Err(ToolError::rejected("summary is plain text: no markdown headers"));
     }
-    Ok(serde_json::json!({ "summary": summary }))
+    let title = match args.title.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+        None => None,
+        Some(raw) => Some(crate::talk::normalize_title(raw).ok_or_else(|| {
+            ToolError::rejected("title is a name of 3 to 6 words on one line, no quotes")
+        })?),
+    };
+    Ok(serde_json::json!({ "summary": summary, "title": title }))
 }
 
 #[cfg(test)]
@@ -70,6 +79,40 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out["summary"], "Aki asked about the essay.");
+    }
+
+    #[test]
+    fn a_title_comes_back_normalised_and_prose_is_refused() {
+        let (conn, tmp) = env();
+        let out = dispatch(
+            &conn,
+            &ctx(&tmp),
+            SessionKind::Summarize,
+            "summary_write",
+            r#"{"summary":"Aki asked about the essay.","title":"  \"Essay due on Friday\".  "}"#,
+        )
+        .unwrap();
+        assert_eq!(out["title"], "Essay due on Friday");
+
+        let out = dispatch(
+            &conn,
+            &ctx(&tmp),
+            SessionKind::Summarize,
+            "summary_write",
+            r#"{"summary":"Aki asked about the essay."}"#,
+        )
+        .unwrap();
+        assert!(out["title"].is_null(), "a summary without a title is still a summary");
+
+        let e = dispatch(
+            &conn,
+            &ctx(&tmp),
+            SessionKind::Summarize,
+            "summary_write",
+            r#"{"summary":"Aki asked.","title":"Aki asked what to do about the essay that is due"}"#,
+        )
+        .unwrap_err();
+        assert_eq!(e.kind, "rejected");
     }
 
     #[test]

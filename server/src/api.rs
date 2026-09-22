@@ -868,8 +868,10 @@ fn conversation_not_found() -> axum::response::Response {
 async fn conversations_list(user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
     let conn = state.db();
     let mut stmt = match conn.prepare(
-        "SELECT id, title, updated_at, summary, via FROM conversations
-         WHERE user_id = ?1 ORDER BY updated_at DESC, id DESC",
+        "SELECT id, title, updated_at, summary, via, title_kind FROM conversations
+         WHERE user_id = ?1
+           AND EXISTS (SELECT 1 FROM talk_messages m WHERE m.conversation_id = conversations.id)
+         ORDER BY updated_at DESC, id DESC",
     ) {
         Ok(s) => s,
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
@@ -882,6 +884,7 @@ async fn conversations_list(user: CurrentUser, State(state): State<AppState>) ->
                 "updated_at": r.get::<_, String>(2)?,
                 "summary": r.get::<_, Option<String>>(3)?,
                 "via": r.get::<_, String>(4)?,
+                "title_kind": r.get::<_, String>(5)?,
             }))
         })
         .and_then(|m| m.collect());
@@ -914,7 +917,8 @@ async fn conversation_rename(
     }
     let conn = state.db();
     match conn.execute(
-        "UPDATE conversations SET title = ?1 WHERE id = ?2 AND user_id = ?3",
+        "UPDATE conversations SET title = ?1, title_kind = 'user'
+         WHERE id = ?2 AND user_id = ?3",
         (title, id, user.id),
     ) {
         Ok(0) => conversation_not_found(),

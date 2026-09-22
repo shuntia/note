@@ -226,6 +226,7 @@ pub struct BlockStart {
     pub user_id: i64,
     pub username: String,
     pub date: String,
+    pub wall_time: String,
     /// The task the block holds, and when the block gives it back.
     pub task: String,
     pub end_wall_time: String,
@@ -298,6 +299,7 @@ pub fn block_starts(
             user_id: c.user_id,
             username: c.username,
             date: c.date,
+            wall_time: c.wall_time,
             task,
             end_wall_time,
             notify,

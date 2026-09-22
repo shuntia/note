@@ -484,6 +484,11 @@ const MIGRATIONS: &[&str] = &[
     ), progress)
     WHERE state != 'done' AND parent_id IS NULL;
     ",
+    // v36
+    "
+    ALTER TABLE conversations ADD COLUMN title_kind TEXT NOT NULL DEFAULT 'draft'
+        CHECK (title_kind IN ('draft','generated','user'));
+    ",
 ];
 
 pub fn open(path: &Path) -> Result<Connection> {
@@ -1388,6 +1393,38 @@ mod tests {
         };
         assert_eq!(progress(1), 33, "one of three live steps done");
         assert_eq!(progress(6), 30, "a task without steps keeps its own");
+    }
+
+    #[test]
+    fn v36_opens_every_conversation_as_a_draft_title() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_migrations(&conn, &MIGRATIONS[..35]).unwrap();
+        conn.execute(
+            "INSERT INTO users (username, pass_hash, role) VALUES ('a','h','member')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO conversations (id, user_id, title, created_at, updated_at)
+             VALUES (1, 1, 'call mom', 'x', 'x')",
+            [],
+        )
+        .unwrap();
+        apply_migrations(&conn, MIGRATIONS).unwrap();
+        let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, MIGRATIONS.len() as i64);
+        let kind: String = conn
+            .query_row("SELECT title_kind FROM conversations WHERE id = 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(kind, "draft");
+        assert!(
+            conn.execute("UPDATE conversations SET title_kind = 'guessed' WHERE id = 1", [])
+                .is_err(),
+            "the check rejects a kind outside the three"
+        );
+        for good in ["generated", "user", "draft"] {
+            conn.execute("UPDATE conversations SET title_kind = ?1 WHERE id = 1", [good]).unwrap();
+        }
     }
 
     #[test]

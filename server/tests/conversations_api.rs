@@ -112,6 +112,23 @@ async fn rename_round_trips_into_the_list() {
 
     let v = json(get(&app, "/api/conversations", &cookie).await).await;
     assert_eq!(v[0]["title"], "groceries");
+    assert_eq!(v[0]["title_kind"], "user", "a rename is the user's own name for it");
+}
+
+#[tokio::test]
+async fn a_thread_nobody_has_spoken_in_is_not_listed() {
+    let (app, cookie, state, _cfg) = common::app_with_logged_in_user_and_state().await;
+    let spoken = seed(&state, 1, "the essay", "2026-08-30T09:00:00Z");
+    {
+        let conn = state.db();
+        talk::create(&conn, 1, "Session: read the chapter", "2026-08-31T09:00:00Z".parse().unwrap())
+            .unwrap();
+    }
+
+    let v = json(get(&app, "/api/conversations", &cookie).await).await;
+    assert_eq!(v.as_array().unwrap().len(), 1);
+    assert_eq!(v[0]["id"], spoken);
+    assert_eq!(v[0]["title_kind"], "draft");
 }
 
 #[tokio::test]

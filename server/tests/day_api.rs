@@ -318,7 +318,8 @@ async fn a_day_that_is_over_cannot_be_filled() {
 fn answered_checkin(state: &AppState, date: jiff::civil::Date) {
     let conn = state.db();
     let now = jiff::Timestamp::now();
-    let id = note_server::talk::checkin_thread(&conn, 1, &date.to_string(), "How is it going?", now)
-        .unwrap();
+    let id =
+        note_server::talk::checkin_thread(&conn, 1, &date.to_string(), "09:00", "How is it going?", now)
+            .unwrap();
     note_server::talk::append_text(&conn, id, "user", "fine", now).unwrap();
 }
