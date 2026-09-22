@@ -4,7 +4,6 @@ import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, use
 import { api, ApiError } from '../api'
 import type { ToastAction } from '../app'
 import { DayLine, minutesOf } from '../dayline'
-import { useEscape } from '../escape'
 import { eventFacts, nextUp } from '../events'
 import { arcPath, Gauge, STROKE, VB, type ArcLine } from '../gauge'
 import { makeHold } from '../held'
@@ -28,13 +27,15 @@ import {
   type FocusSession,
 } from '../session'
 import { SoFar } from '../sofar'
-import type { DayView, PlanEvent, SessionStart, Task, TaskNotify, TaskRef } from '../types'
+import { Tick } from '../tick'
+import type { DayView, PlanEvent, SessionStart, Task, TaskNotify } from '../types'
 import { CalendarSection } from './Calendar'
 import { DebriefFold } from '../debrief'
 import { ReviewFold } from '../review'
 import '../styles/home-motion.css'
 
 const LATER_MINUTES = [5, 10, 15, 30, 60]
+const laterLabel = (m: number) => (m < 60 ? `${m} min` : `${m / 60} h`)
 const ROUTINE_MIN = 15
 const PIN_MOBILE = 520
 const PIN_DESKTOP = 600
@@ -82,11 +83,12 @@ function todayIso(): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
 }
 
-// What the row is called: a block laid for a task carries the task's own name,
-// and a block laid for one of its steps names the step after it.
-function rowLabel(ev: PlanEvent): string {
-  if (!ev.task) return eventLabel(ev.kind)
-  return ev.task.step ? `${ev.task.title} · ${ev.task.step}` : ev.task.title
+// What the row is called: a block laid for a task carries the task's own name, and
+// a block laid for one of its steps is named after the step, the task behind it.
+function rowParts(ev: PlanEvent): { name: string; of: string | null } {
+  if (!ev.task) return { name: eventLabel(ev.kind), of: null }
+  if (ev.task.step) return { name: ev.task.step, of: ev.task.title }
+  return { name: ev.task.title, of: null }
 }
 
 function minutesOfDayNow(): number {
@@ -202,14 +204,11 @@ export function Home({
   const [day, setDay] = useState<DayView | null>(null)
   const [beat, tick] = useState(0)
   const [pending, setPending] = useState(false)
-  const [later, setLater] = useState(false)
   const [left, setLeft] = useState(leftToday)
   const inSession = session !== null
   const prefs = readPrefs()
   const motion = useMotion()
   useIdle(!mobile)
-
-  useEscape(later, () => setLater(false))
 
   const load = useCallback(() => {
     const date = todayIso()
@@ -283,7 +282,8 @@ export function Home({
   const next = nextUp(visible, now)
   const [hoverId, setHoverId] = useState<number | null>(null)
   const facts = next ? eventFacts(next, now) : null
-  const label = next ? rowLabel(next) : ''
+  const face = next ? rowParts(next) : null
+  const label = face?.name ?? ''
 
   // A routine is timed to its span; without an end the routine default stands in.
   // A block laid for a task runs as that task, so finishing it settles both.
@@ -295,7 +295,7 @@ export function Home({
       ? Math.max(1, minutesOf(ev.end_wall_time) - minutesOf(ev.wall_time))
       : ROUTINE_MIN
     openNow({
-      title: rowLabel(ev),
+      title: rowParts(ev).name,
       ...(ev.task && { task_id: ev.task.id }),
       event_id: ev.id,
       planned_min: span,
@@ -493,43 +493,71 @@ export function Home({
     return to <= from ? 1 : clamp((minutesOfDayNow() - from) / (to - from))
   }
 
-  const nextActions = (ev: PlanEvent) => ev.task ? (
+  // What a block offers wherever it appears: the face, a list row, the calendar grid
+  // and the line all hand out this one list.
+  const laterItems = (ev: PlanEvent): OverflowItem[] =>
+    LATER_MINUTES.map((m) => ({
+      label: laterLabel(m),
+      run: () => act(() => api.snooze(ev.id, m)),
+      disabled: pending,
+    }))
+
+  const blockMenuItems = (ev: PlanEvent): OverflowItem[] => {
+    if (ev.status === 'done' || ev.status === 'dropped') {
+      return [{ label: ev.status === 'done' ? 'Already done' : 'Already dropped', disabled: true }]
+    }
+    const tomorrow: OverflowItem = {
+      label: 'Move to tomorrow',
+      run: () => act(() => api.moveTomorrow(ev.id)),
+      disabled: pending,
+    }
+    const dropToday: OverflowItem = {
+      label: 'Drop today',
+      kind: 'danger',
+      run: () => drop(ev),
+      disabled: pending,
+    }
+    const task = ev.task
+    if (task) {
+      return [
+        { label: 'Start', run: () => start(ev), disabled: pending },
+        { label: 'Done', run: () => finishBlock(ev), disabled: pending },
+        tomorrow,
+        dropToday,
+        {
+          label: 'Announce',
+          children: ANNOUNCE.map((choice) => ({
+            label: choice.label,
+            run: () => act(() => api.patchTask(task.id, { notify: choice.id })),
+            disabled: pending,
+            checked: task.notify === undefined ? undefined : task.notify === choice.id,
+          })),
+        },
+      ]
+    }
+    return [
+      { label: 'Start', run: () => start(ev), disabled: pending },
+      { label: 'Later', children: laterItems(ev) },
+      {
+        label: 'Ping me',
+        run: () => act(() => api.setEventAlert(ev.id, !ev.alert)),
+        disabled: pending,
+        checked: ev.alert,
+      },
+      tomorrow,
+      dropToday,
+    ]
+  }
+
+  const nextActions = (ev: PlanEvent) => (
     <>
       <button className="btn-fill" disabled={pending} onClick={() => start(ev)}>Start</button>
-      <button className="btn-haze" disabled={pending} onClick={() => finishBlock(ev)}>Done</button>
-      <Overflow
-        label="More"
-        className="ev-more-wrap"
-        items={[
-          { label: 'Drop today', run: () => drop(ev), disabled: pending },
-          { label: 'Move to tomorrow', run: () => act(() => api.moveTomorrow(ev.id)), disabled: pending },
-        ]}
-      />
-    </>
-  ) : (
-    <>
-      <button className="btn-fill" disabled={pending} onClick={() => start(ev)}>Start</button>
-      <button className="btn-haze" aria-expanded={later} disabled={pending} onClick={() => setLater((v) => !v)}>Later</button>
-      <Overflow
-        label="More"
-        className={`ev-more-wrap${later ? ' beside-later' : ''}`}
-        items={[
-          { label: 'Drop today', run: () => drop(ev), disabled: pending },
-          { label: 'Move to tomorrow', run: () => act(() => api.moveTomorrow(ev.id)), disabled: pending },
-          { label: ev.alert ? 'Silent' : 'Ping me', run: () => act(() => api.setEventAlert(ev.id, !ev.alert)), disabled: pending },
-        ]}
-      />
-      {later && (
-        <div className="later-pick" role="group" aria-label="Later by">
-          <span className="later-lead">Later by</span>
-          {LATER_MINUTES.map((m) => (
-            <button key={m} className="later-min" disabled={pending} onClick={() => { setLater(false); act(() => api.snooze(ev.id, m)) }}>
-              {m}
-            </button>
-          ))}
-          <span className="later-unit">min</span>
-        </div>
+      {ev.task ? (
+        <button className="btn-haze" disabled={pending} onClick={() => finishBlock(ev)}>Done</button>
+      ) : (
+        <Overflow label="Later" className="ev-more-wrap later-wrap" items={laterItems(ev)} />
       )}
+      <Overflow label="More" className="ev-more-wrap" items={blockMenuItems(ev)} />
     </>
   )
 
@@ -552,18 +580,20 @@ export function Home({
         prefs.showArc ? (
           <Gauge size={mobile ? 320 : 440} fracAt={waitFracAt(next)} faded>
             <div className="gauge-eyebrow"><Atoms text={facts.eyebrow} /></div>
-            {facts.minutes !== null && (
-              <div className="gauge-num" style={{ fontSize: u(mobile ? 50 : 58) }}><Atoms text={`${facts.minutes} min`} /></div>
+            {facts.wait && (
+              <div className="gauge-num" style={{ fontSize: u(mobile ? 50 : 58) }}><Atoms text={facts.wait} /></div>
             )}
             <div className="gauge-name" style={{ fontSize: u(mobile ? 18 : 22) }}><Atoms text={label} /></div>
+            {face?.of && <div className="gauge-of"><Atoms text={face.of} /></div>}
             <div className="gauge-sub" style={{ fontSize: mobile ? undefined : u(14) }}><Atoms text={facts.span} /></div>
           </Gauge>
         ) : (
           <div className="home-text">
             <div className="gauge-eyebrow"><Atoms text={facts.eyebrow} /></div>
             <div className="home-title"><Atoms text={label} /></div>
-            {facts.minutes !== null && (
-              <div className="gauge-num" style={{ fontSize: u(30) }}><Atoms text={`in ${facts.minutes} min`} /></div>
+            {face?.of && <div className="gauge-of"><Atoms text={face.of} /></div>}
+            {facts.wait && (
+              <div className="gauge-num" style={{ fontSize: u(30) }}><Atoms text={`in ${facts.wait}`} /></div>
             )}
             <div className="gauge-sub"><Atoms text={facts.span} /></div>
           </div>
@@ -610,39 +640,40 @@ export function Home({
     <div className="home-face compact">
       {prefs.showArc ? (
         <Gauge size={120} fracAt={waitFracAt(next)} faded>
-          {facts.minutes !== null && <span className="gauge-num" style={{ fontSize: u(22) }}>{facts.minutes} min</span>}
+          {facts.wait && <span className="gauge-num" style={{ fontSize: u(22) }}>{facts.wait}</span>}
         </Gauge>
       ) : (
-        facts.minutes !== null && <span className="gauge-num" style={{ fontSize: u(22) }}>{facts.minutes} min</span>
+        facts.wait && <span className="gauge-num" style={{ fontSize: u(22) }}>{facts.wait}</span>
       )}
       <div className="home-head">
         <span className="gauge-eyebrow">{facts.eyebrow}</span>
         <span className="home-head-name">{label}</span>
+        {face?.of && <span className="gauge-of">{face.of}</span>}
         <span className="gauge-sub">{facts.span}</span>
       </div>
-      <button className="btn-fill small" disabled={pending} onClick={() => start(next)}>Start</button>
+      <div className="home-head-actions">
+        <button className="btn-fill small" disabled={pending} onClick={() => start(next)}>Start</button>
+        {next.task ? (
+          <button className="btn-haze small" disabled={pending} onClick={() => finishBlock(next)}>Done</button>
+        ) : (
+          <Overflow label="Later" className="ev-more-wrap later-wrap" items={laterItems(next)} />
+        )}
+        <Overflow label="More" className="ev-more-wrap" items={blockMenuItems(next)} />
+      </div>
     </div>
   ) : null
 
-  const nowLabel = `${String(Math.floor(now / 60)).padStart(2, '0')}:${String(now % 60).padStart(2, '0')}`
   const hero = (
     <section className="today-hero">
       {next && facts ? (
         <>
-          <div className="today-eyebrow">
-            NOW {nowLabel}
-            {facts.eyebrow === 'NEXT' && (
-              <>
-                {' '}
-                <span className="today-dot" aria-hidden="true" /> UP NEXT
-              </>
-            )}
-          </div>
+          <div className="today-eyebrow">{facts.eyebrow} {next.wall_time}</div>
           <h1 className="today-title">{label}</h1>
+          {face?.of && <p className="today-of">{face.of}</p>}
           <div className="today-wait">
             <div className="today-when">
-              {facts.minutes !== null && (
-                <span className="today-in"><span className="in-word">in</span><span className="in-num">{facts.minutes} min</span></span>
+              {facts.wait && (
+                <span className="today-in"><span className="in-word">in</span><span className="in-num">{facts.wait}</span></span>
               )}
               <span className="today-span">{facts.span}</span>
             </div>
@@ -673,29 +704,6 @@ export function Home({
     }))
     return [...plan, ...cal].sort((a, b) => a.at - b.at || a.to - b.to)
   }, [visible, day])
-
-  const announce = (task: TaskRef): OverflowItem[] =>
-    ANNOUNCE.map((choice) => ({
-      label: `Announce: ${choice.label}`,
-      run: () => act(() => api.patchTask(task.id, { notify: choice.id })),
-      disabled: pending,
-      checked: task.notify === undefined ? undefined : task.notify === choice.id,
-    }))
-
-  const blockActions = (ev: PlanEvent) => (
-    <span className="home-row-actions">
-      <button className="btn-haze small" disabled={pending} onClick={() => start(ev)}>Start</button>
-      <button className="btn-haze small" disabled={pending} onClick={() => finishBlock(ev)}>Done</button>
-      <Overflow
-        label="More"
-        items={[
-          { label: 'Drop today', run: () => drop(ev), disabled: pending },
-          { label: 'Move to tomorrow', run: () => act(() => api.moveTomorrow(ev.id)), disabled: pending },
-          ...(ev.task ? announce(ev.task) : []),
-        ]}
-      />
-    </span>
-  )
 
   const openBlocks = useMemo(
     () => visible.filter((ev) => ev.task && ev.status !== 'done' && ev.status !== 'dropped'),
@@ -733,6 +741,32 @@ export function Home({
     </section>
   )
 
+  const planRow = (ev: PlanEvent) => {
+    const { name, of } = rowParts(ev)
+    return (
+      <>
+        <span className="home-when">{ev.wall_time}<span className="home-when-end"> – {ev.end_wall_time ?? ev.wall_time}</span></span>
+        {ev.task && (
+          <Tick
+            checked={ev.status === 'done'}
+            label={`Done: ${name}`}
+            onClick={() => finishBlock(ev)}
+          />
+        )}
+        <span className="home-what">
+          <span className="home-name">{name}</span>
+          {of && <span className="home-of">{of}</span>}
+        </span>
+        <button className="home-start" aria-label={`Start ${name}`} disabled={pending} onClick={() => start(ev)}>
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M9 7.5v9l7-4.5z" />
+          </svg>
+        </button>
+        <Overflow label={`More: ${name}`} items={blockMenuItems(ev)} />
+      </>
+    )
+  }
+
   const list = (
     <ul className="home-list" onMouseLeave={() => setHoverId(null)}>
       {rows.map((row) =>
@@ -751,9 +785,7 @@ export function Home({
               .filter(Boolean)
               .join(' ')}
           >
-            <span className="home-when">{row.ev.wall_time} – {row.ev.end_wall_time ?? row.ev.wall_time}</span>
-            <span className="home-what">{rowLabel(row.ev)}</span>
-            {row.ev.task && blockActions(row.ev)}
+            {planRow(row.ev)}
           </li>
         ) : (
           <li
@@ -845,8 +877,9 @@ export function Home({
     next?.id,
     label,
     facts?.eyebrow,
-    facts?.minutes,
+    facts?.wait,
     facts?.span,
+    face?.of,
     session?.started_at,
     session?.step_index,
     session?.step_name,
@@ -883,13 +916,13 @@ export function Home({
       const from = (targets: HTMLElement[], vars: gsap.TweenVars, at: number) => {
         if (targets.length) timeline.from(targets, vars, at)
       }
-      const tabsEl = document.querySelectorAll<HTMLElement>('.shell > .tabs')
       if (compactLanding) {
         travel(timeline, q('.face-big .gauge-ring'), q('.home-face.compact .gauge-ring'), { mode: 'box' })
         travel(timeline, q('.face-big .gauge-num'), q('.home-face.compact .gauge-num'), { mode: inSession ? 'box' : 'text' })
         travel(timeline, q('.face-big .gauge-eyebrow'), q('.home-face.compact .gauge-eyebrow'))
         travel(timeline, q('.face-big .gauge-name, .face-big .home-title'), q('.home-face.compact .home-head-name, .home-face.compact .gauge-name'))
         travel(timeline, q('.face-big .gauge-sub'), q('.home-face.compact .home-head .gauge-sub, .home-face.compact .gauge-sub'))
+        travel(timeline, q('.face-big .gauge-of'), q('.home-face.compact .home-head .gauge-of'))
         if (inSession) {
           // The controls settle in once the ring has cleared the header row.
           from(qa('.home-face.compact .btn-round, .home-face.compact .btn-fill'), { autoAlpha: 0, scale: 0.85, duration: 0.3, ease: 'power2.out' }, 0.65)
@@ -897,10 +930,12 @@ export function Home({
         } else {
           travel(timeline, q('.face-big .home-actions .btn-fill'), q('.home-face.compact .btn-fill'), { mode: 'box', fit: 'both' })
           to(qa('.face-big .btn-haze, .face-big .ev-more-wrap'), { autoAlpha: 0, x: -24, y: -10, duration: 0.45, ease: 'power2.in' }, 0.2)
+          from(qa('.home-head-actions .btn-haze, .home-head-actions .ev-more-wrap'), { autoAlpha: 0, duration: 0.3, ease: 'power2.out' }, 0.7)
         }
         if (!q('.home-face.compact')) to(qa('.face-big .home-text'), { autoAlpha: 0, y: -20, duration: 0.4, ease: 'power2.in' }, 0.2)
         from(qa('.home-today .dayline'), { autoAlpha: 0, y: 28, duration: 0.4, ease: 'power2.out' }, 0.35)
         from(qa('.home-list li'), { autoAlpha: 0, y: 24, duration: 0.35, ease: 'power2.out', stagger: 0.04 }, 0.42)
+        from(qa('.home-today .close-day, .home-today .sofar'), { autoAlpha: 0, y: 24, duration: 0.35, ease: 'power2.out' }, 0.42)
         from(qa('.home-today .jot-wrap'), { autoAlpha: 0, y: 24, duration: 0.35, ease: 'power2.out' }, 0.5)
       } else {
         const ring = q('.face-big .gauge-ring') as SVGSVGElement | null
@@ -930,12 +965,12 @@ export function Home({
         travel(timeline, q('.face-big .gauge-num'), q('.in-num'))
         travel(timeline, q('.face-big .gauge-name, .face-big .home-title'), q('.today-title'))
         travel(timeline, q('.face-big .gauge-sub'), q('.today-span'))
+        travel(timeline, q('.face-big .gauge-of'), q('.today-of'))
         travel(timeline, q('.face-big .gauge-eyebrow'), q('.today-eyebrow'))
         travel(timeline, q('.face-big .home-actions'), q('.today-actions'), { mode: 'children', fit: 'both' })
         from(qa('.today-line'), { autoAlpha: 0, y: 28, duration: 0.45, ease: 'power2.out' }, 0.35)
       }
       to(qa('.face-big .chev'), { autoAlpha: 0, duration: 0.35 }, 0)
-      from([...tabsEl], { autoAlpha: 0, duration: 0.45, ease: 'none' }, 0.4)
       tl.current = timeline
       timeline.progress(st.current?.progress ?? 0)
       setReady(true)
@@ -1056,7 +1091,7 @@ export function Home({
             refresh={refresh}
             onChanged={onChanged}
             day={day}
-            onStartBlock={start}
+            blockItems={blockMenuItems}
           />
         </section>
       </section>

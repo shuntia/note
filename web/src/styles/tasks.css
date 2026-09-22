@@ -238,7 +238,8 @@
   height: 2.25rem;
   border: 0;
   border-radius: 50%;
-  background: var(--sun);
+  background: var(--haze-strong);
+  color: var(--ink);
   display: grid;
   place-items: center;
   cursor: pointer;
@@ -246,7 +247,7 @@
   transition: transform 200ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 .task-start:hover { transform: scale(1.08); }
-.task-start svg { width: 1rem; height: 1rem; fill: var(--accent-fg); }
+.task-start svg { width: 1rem; height: 1rem; fill: currentColor; }
 
 /* the row keeps one status and its title; its other actions wait under the dots */
 .task-more { position: relative; flex: none; }
