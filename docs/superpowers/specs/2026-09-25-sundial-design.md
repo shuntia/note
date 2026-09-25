@@ -135,98 +135,67 @@ of each). The place is, in order:
 Testing: server test for the setting's default and round trip; a client unit test of the decision
 function `zoneChange(settings, deviceZone) → {from, to} | null`.
 
-## E. The circle: tap to start, swipe to switch, form instead of words
+## E. Begin working
 
-Mockups: `mockups/sundial/flow.html` (interactive), `effects.html`, `face-*.html`, `fx.js`.
-
-### Server
+### Server: the queue
 `GET /api/tasks/queue?limit=5` returns the open work in the order the planner would lay it:
 ```json
-[{ "task": TaskNode, "step": Task | null, "planned_min": 30 | null, "reason": "overdue" }]
+[{ "task": Task, "step": Task | null, "planned_min": 30 | null, "reason": "overdue" }]
 ```
-- One entry per top-level task in `open`/`in_progress`; `step` is its first not-done child.
-- Order: the `allocate::pack` key without minutes: in Now first, then `tasks::urgency_rank`
-  ascending, then dated before undated, then due ascending, then created ascending, then id. The
-  comparator is shared with `allocate.rs`.
+- Candidates: top-level tasks in `open`/`in_progress`, one entry per task, `step` = its first not-done
+  child if any (the same choice as the Tasks view's `focusTarget`).
+- Order: the `allocate::pack` key without `minutes`: in Now first, then `tasks::urgency_rank`
+  ascending, then dated before undated, then due ascending, then created ascending, then id. Share
+  the comparator with `allocate.rs` rather than copying it.
 - `planned_min`: the step's duration, else the task's, rounded to 5; null when neither is set.
-- `reason`, first that applies: `now`, `overdue`, `urgent` (urgency high), `due_soon` (pressing),
-  `oldest`. The client shows it as a hairline, never as words.
-- Not exposed through share links.
+- `reason`, first that applies: `now` (in the Now group), `overdue` (due before now), `urgent`
+  (urgency high), `due_soon` (pressing), `oldest`.
+- Sharing: not exposed through share links.
 
-`GET /api/sessions/today` returns `{ "rounds": 3 }`: work sessions that started today in the user's
-zone and ended, counting one per single session and `round` per pomodoro session. The running
-session adds its own rounds on the client.
+`GET /api/sessions/today` returns `{ "focused_min": 52 }`: the sum of work time over sessions that
+started today in the user's zone and have ended, minus their `paused_ms`, and for pomodoro sessions
+minus break phases. The running session is not included; the client adds its own elapsed work time.
 
-Switching task mid-session is a new session: the client ends the running one with outcome
-`stopped` and starts the next with the same shape the Tasks view's `startFocus` builds. A switch
-within the first 60 s of a session deletes the abandoned one instead of ending it, so a browse
-through the strip leaves no stubs: `POST /api/sessions/{id}/end` with `{"outcome":"stopped",
-"discard": true}` removes a session younger than 60 s and answers 200; older ones are ended as
-today and `discard` is ignored.
+### Client: the face
+Home shows **Begin working** when `session === null` and the day has no block on right now (`!next`
+or `facts.wait` is non-empty). It is the first action in the row, styled `btn-sun` (background
+`--sun`, text `--accent-fg`, the fill button's size and shadow). When a next block exists its
+"Start" becomes **Start early** as a haze button; the overflow stays. Desktop hero, compact header
+and mobile face all carry it.
 
-### The face when idle (mobile and desktop)
-- The arc alone, faded, breathing (the existing `breathe`), no buttons. With a block coming, the
-  wait fills the arc as today; the block's title and start time stay, the eyebrow word goes.
-- One hint under the arc, `hint` style (12.5px, `--faint`, 75% opacity): "tap the circle to start
-  working". It shows until the user has started three sessions from the circle (counter in
-  localStorage `note.hints.start`), then never.
-- Mobile: the tab bar rests after 4 s without a touch (slides down and fades, 500 ms) and a 56×4
-  handle in `--track` stays at the bottom edge; any touch brings the bar back. During a session the
-  bar rests after 2.5 s. Desktop keeps its existing idle rest.
+Tapping it fetches the queue and enters `pick` state `{items, index}`. The face keeps the faded arc
+and shows, in place of the wait: eyebrow "Up next", the task title (`gauge-name`), chips for
+category, planned minutes and one of `overdue` (rose) / `urgent` (sun ink), a one-sentence reason,
+and a row of dots for the candidates with the current one ringed. Reason copy:
+- now: "You're already on it."
+- overdue: "Due {relative day}, so it goes first."
+- urgent: "Marked urgent."
+- due_soon: "Due {weekday}, the soonest."
+- oldest: "Nothing is due soon; this has waited longest."
+If a following candidate exists, append " Then {its title}."
 
-### Tap
-Tapping the circle (the 320/440 face box) fetches the queue and starts a session on the first
-entry at once. The queue becomes a horizontal strip of slots under the arc's centre: `[Work time]
-[entry 1] [entry 2] …`, landing on entry 1. Work time is a session with title "Work time", no
-task, and no planned minutes, so it counts up.
+Actions: **Start · {planned} min** (or **Start** when null) calls `openNow` with the same fields the
+Tasks view's `startFocus` builds (title, task_id, notes, step index/count/name, planned_min).
+**Another** advances the index, wrapping. **Not now** below the row returns to the face. An empty
+queue leaves the face and toasts "Nothing open to work on." Fetch failure toasts "Couldn't reach
+Note." and stays.
 
-Effects on start: **ignite** (the fill's head flares where the arc begins, then stays as a 5.5px
-bead leading the fill) and one **ripple** (a 2px sun ring leaves the arc to r+38 and fades over
-900 ms). Both from `fx.js`.
+Pomodoro is the server's decision from settings, as today; nothing is passed.
 
-### Swipe
-- Sideways on the face moves the strip with the finger (rubber-band at the ends), snaps on release
-  (60 px or a quick 20 px flick), and switches the session to the landed slot as above. While the
-  finger is down and for 1.4 s after, a dot row appears 50 px under the arc: one dot per slot, a
-  ring for Work time, the current one larger in `--sun`. Otherwise no dots.
-- The neighbouring slot peeks: slots are 320 wide in a 320 box with `overflow: visible` and the
-  rail's neighbours at 35% opacity.
-- Down on the face by 70 px finishes the session: `POST /api/sessions/{id}/end {"outcome":"done"}`
-  and, for a task session, the same advance/complete choice the Done button makes today.
-- Tap on the face while working pauses; tap again resumes. A 20 px pause glyph in `--quiet` sits
-  under the arc while paused and the fill dims to 38%.
-- Desktop: click the circle to start; ← → move the strip; Escape pauses and resumes; Enter finishes.
-  Wheel with horizontal delta moves the strip.
-- A second hint, "tap to pause · swipe down when done", shows under the arc during the first three
-  sessions only (`note.hints.session`).
-
-Effects on finish: **close the ring** (the fill runs to the arc's end over 550 ms `power3.inOut`,
-the stroke swells 9→11→9, a bead drops into the ring's opening with `back.out(2.2)`, one ripple)
-then **warm** (a radial `--sun` wash over the frame, 16% peak, 250 ms in, 200 ms hold, out).
-
-### Marks instead of words
-- **Rounds are beads** across the ring's opening (the 120° at the bottom), evenly spaced,
-  `total = max(4, rounds today + 1)`, 4.5px, filled `--sun` for rounds done today, `--track`
-  otherwise. Each finished round or session drops one in. No eyebrow, no focused-minutes line.
-- **Urgency is a hairline** 26×2 over the counter: `--rose` for overdue, `--sun` for urgent or
-  pressing, none otherwise.
-- **A break** drains the arc from its far end in `--sage` and a `--ink` veil at 14% dims the ground.
-  No "BREAK" word; the counter alone.
-- **Steps are segments**: a task with steps splits the arc into equal segments with 5° gaps; done
-  segments filled, the current one filling with its own time, the rest track. The step's title is
-  the `sub` line as today; "n of m" goes.
-- Reduced motion: no ripple, ignite, breath or warm; the ring closes with a 200 ms opacity change;
-  the strip snaps without tweening.
+### Client: rounds
+In a pomodoro session the face gains, under the name: a `dots` row with one dot per round up to
+`max(4, round)`, rounds before the current one filled, the current one ringed; and beneath it
+"{n} min focused today" from `GET /api/sessions/today` plus the running session's elapsed work time,
+refreshed on `refresh`. Non-pomodoro sessions show only the focused line.
 
 ### Testing
-- Server: queue order across the five reasons; `planned_min` rounding; a share token gets 401/403;
-  `rounds` counts one per single and `round` per pomodoro, excludes the open one; `discard` deletes
-  a 30 s old session and only ends a 5 min old one.
-- Client: pure helpers with vitest: `slotAfter(index, dx, quick, count)`, hint counters, bead
-  geometry `beadAt(i, total)`, the segment geometry for steps, `sessionFor(entry)`.
-- Manual: audit harness shots of idle (bar rested), working, mid-swipe with dots, break, steps.
+- Server: queue order across the five reasons with fixture tasks; `planned_min` rounding; a shared
+  task is not listed for a share token; `focused_min` sums two ended sessions and excludes the open one.
+- Client: the reason sentence builder; the visibility rule (`session`, `next`, `facts.wait`) as a pure
+  function; the pick's Another wraps.
+- Manual: audit harness shots of idle, pick and round 2, phone and desktop.
 
 ## Out of scope
 - Folding rows removed by another device (they still vanish at once).
-- A quiet-window gate on the tap.
+- A quiet-window gate on Begin working.
 - Sunrise and sunset in the Calendar.
