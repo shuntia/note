@@ -36,8 +36,8 @@ A link belongs to one user and carries:
 | `today` | share the day's plan blocks |
 | `tasks` | share open tasks |
 | `categories` | JSON array; empty means every category |
-| `goals` | share goals and their progress |
-| `progress` | share what was completed in the last 7 days |
+| `goals` | share goals and their progress; off also withholds a task's goal |
+| `progress` | share what was completed in the last 7 days; off keeps the tools to live tasks, on lets them reach tasks done inside 7 days (never dropped ones) |
 | `details` | include task descriptions and notes; off means titles only |
 | `horizon_days` | how far ahead the plan and calendar reach, 1–14, default 3 |
 | `notes` | the visitor may leave a note for the owner |
@@ -225,7 +225,8 @@ is the deserialised `scope` column. Application:
 2. The link's `brief`, under a heading `# From {owner}`.
 3. The opening context (below), under `# What is shared`.
 4. When `notes` is on, one line: a message the visitor wants passed on is
-   filed with `share_note`; confirm in one sentence.
+   filed with `share_note`, which ends the turn; the visitor is told it was
+   passed on.
 
 `context::assemble` is not called. Nothing from the standing document,
 the debrief, settings, recent activity, or nightly notes reaches this
@@ -262,10 +263,11 @@ The text is capped at 8 KiB by trimming the tasks section first, then
    server-wide permit, not the per-user one, so a visitor never blocks the
    owner's own chat and vice versa.
 3. Load the thread's history (last 40 messages, `user`/`assistant` only).
-4. `agent::run_session` with `SessionKind::Share`, `user_id` = owner,
+4. Append the visitor's `user` row, so a `note` filed during the session
+   sorts after it, then `agent::run_session` with `SessionKind::Share`, `user_id` = owner,
    `deps.share = Some(scope)`, `thread_note = None`.
-5. Persist the user and assistant rows in one transaction; a failed session
-   persists nothing and returns 502 `{"error": "Note could not answer"}`.
+5. Append the assistant row. A failed session deletes the visitor's row
+   again, so the turn persists nothing of its own, and returns 502 `{"error": "Note could not answer"}`.
 
 ### `share_note`
 
@@ -274,7 +276,8 @@ Offered only when `notes` is on. `share_note {text}`: writes a
 the owner through the existing ladder (`channels::deliver_via`) as a message
 titled "Note from {link name}" whose body is the text, with an action that
 opens Settings on the link's conversations. It is a terminal tool for this
-kind. It is the only write on the surface, and it writes to the share's own
+kind: the stored and returned reply is the fixed sentence "Passed on to
+{owner display name}." It is the only write on the surface, and it writes to the share's own
 table and the delivery ladder, never to tasks, plan, memory, or context.
 
 ## Logging and limits

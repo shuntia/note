@@ -710,7 +710,9 @@ Note and answers questions about it, with no account on the visitor's side.
   `403`.
   Names are 1 to 64 characters and a brief at most 4 KiB (`422`). An expiry in
   the past is a `422`; one beyond `share_max_days` is pulled back to it. A user
-  at `shares_per_user` links is refused with `409`.
+  at `shares_per_user` links is refused with `409`. A `PATCH`'s `scope` is a
+  whole object: switches it leaves out take their defaults, so a caller sends
+  the full scope (the Settings page always does).
 - In Settings a link's URL is shown once it is made, and *Copy link* and
   *Preview as visitor* work for as long as it lives; *Conversations* reads its
   threads, and *Revoke* asks for confirmation in a toast.
@@ -721,8 +723,12 @@ Note and answers questions about it, with no account on the visitor's side.
   empty means all; otherwise every task read, goal count and plan block is
   confined to them. `details` off means titles only: descriptions, notes, `url`
   and `external_id` are withheld, and keyword search and `task_search` match
-  titles alone. `notes` lets the visitor leave a message that reaches the
-  owner's channels as "Note from <link name>". `messages_per_day` caps visitor
+  titles alone. `goals` off also withholds the goal a task hangs from.
+  `progress` governs finished tasks: off, the tools reach live tasks alone;
+  on, they reach tasks done in the last 7 days too, never older ones and never
+  dropped ones. `notes` lets the visitor leave a message that reaches the
+  owner's channels as "Note from <link name>"; filing it ends the turn and the
+  visitor reads "Passed on to <owner>." `messages_per_day` caps visitor
   messages across all of a link's threads in any 24 hours (`429` beyond it).
 - The visitor opens `/s/<token>`, reads `GET /api/share/{token}` (owner's
   display name, what is shared, until when), `GET /api/share/{token}/view`
