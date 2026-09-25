@@ -21,3 +21,4 @@
 .share-thread { display: flex; flex-direction: column; gap: 0.5rem; margin-bottom: 1rem; }
 .share.ended { text-align: center; padding-top: 6rem; }
 .share.ended p { color: var(--quiet); }
+.share .share-chat { display: block; }

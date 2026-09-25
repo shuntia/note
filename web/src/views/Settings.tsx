@@ -1618,7 +1618,7 @@ function ShareForm({
     >
       <input aria-label="Link name" placeholder="Who is this for" maxLength={64} value={d.name} onChange={(e) => setD({ ...d, name: e.target.value })} />
       {expiryNote && <span className="set-sub">{expiryNote}</span>}
-      <div className="set-row">
+      <div className="set-row set-share-expiry">
         <span className="set-row-body"><span className="set-label">Ends after</span></span>
         <div className="seg" role="group" aria-label="Expiry">
           {EXPIRIES.map((x) => (
@@ -1767,6 +1767,7 @@ function SharesSection({ notify }: { notify: Notify }) {
                 </span>
               </span>
               <Overflow
+                className="set-share-more"
                 label={`More for ${s.name}`}
                 items={[
                   { label: 'Copy link', run: () => copy(s) },

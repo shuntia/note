@@ -126,6 +126,11 @@
 .set-share-cats { display: flex; flex-direction: column; gap: 0.375rem; }
 .seg.wrap { flex-wrap: wrap; }
 .set-share { width: 100%; }
+.set-share-more { flex: none; }
+.set-share-expiry { flex-wrap: wrap; row-gap: 0.5rem; }
+.set-share-expiry .set-row-body { flex-basis: 100%; }
+.set-share-expiry .seg { flex: 0 1 auto; max-width: 100%; flex-wrap: wrap; }
+.set-share-expiry .seg button { white-space: nowrap; }
 .set-share-threads { display: flex; flex-direction: column; gap: 0.75rem; padding: 0.25rem 0 0.75rem; }
 .set-share-thread { display: flex; flex-direction: column; gap: 0.25rem; }
 .set-share-msg { margin: 0; font-size: 0.875rem; }
