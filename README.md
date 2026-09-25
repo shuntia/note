@@ -705,8 +705,9 @@ Note and answers questions about it, with no account on the visitor's side.
   `GET /api/shares` lists them with their `url`, `messages_today` and thread
   count; `PATCH /api/shares/{id}` changes name, brief, scope or expiry;
   `DELETE /api/shares/{id}` revokes; `GET /api/shares/{id}/threads` reads every
-  visitor conversation. A write whose `Sec-Fetch-Site` is neither
-  `same-origin` nor `none` is a `403`.
+  visitor conversation. A write passes only with `Sec-Fetch-Site` set to
+  `same-origin` or `none`, or with no such header at all; any other value is a
+  `403`.
   Names are 1 to 64 characters and a brief at most 4 KiB (`422`). An expiry in
   the past is a `422`; one beyond `share_max_days` is pulled back to it. A user
   at `shares_per_user` links is refused with `409`.
@@ -738,8 +739,9 @@ Note and answers questions about it, with no account on the visitor's side.
   `calendar_list` when `today` is, `goal_list` when `goals` is, and
   `share_note` when `notes` is. `plan_list` and `calendar_list` refuse dates
   outside the horizon. Under a share, `plan_list` never returns a trigger's
-  `prompt` or `cancel_if`, every row carries `task_title`, and a block for a
-  task outside the shared categories is `{"kind":"busy","start","end","status"}`.
+  `prompt` or `cancel_if`; a block for a task outside the shared categories is
+  `{"kind":"busy","start","end","status"}`; every other block row carries
+  `task_title`, as it does in any session.
 - Its system prompt is the `share` prompt file (editable per user like
   `persona`, under Settings → Advanced → How Note talks), the owner's per-link
   brief, and a fresh rendering of the scope on every message. It never sees the
