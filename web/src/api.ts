@@ -29,6 +29,10 @@ import type {
   SessionStart,
   Settings,
   SettingsSaved,
+  ShareInfo,
+  ShareMessage,
+  ShareTurn,
+  ShareView,
   SqlResult,
   TalkMessage,
   TalkReply,
@@ -319,6 +323,13 @@ export const api = {
     request<void>(`/api/calendar/${id}/skip`, { method: 'POST', body: JSON.stringify({ date }) }),
   unskipCalendarDate: (id: number, date: string) =>
     request<void>(`/api/calendar/${id}/skip/${date}`, { method: 'DELETE' }),
+  share: {
+    info: (token: string) => request<ShareInfo>(`/api/share/${token}`, { quiet401: true }),
+    view: (token: string) => request<ShareView>(`/api/share/${token}/view`, { quiet401: true }),
+    messages: (token: string) => request<ShareMessage[]>(`/api/share/${token}/messages`, { quiet401: true }),
+    send: (token: string, message: string) =>
+      request<ShareTurn>(`/api/share/${token}/messages`, { method: 'POST', body: JSON.stringify({ message }), quiet401: true }),
+  },
 }
 
 const SECURITY = '/api/security'
