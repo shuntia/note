@@ -50,6 +50,17 @@ pub struct SessionDeps<'a> {
     /// What the model should know about the thread it is replying in, appended
     /// after the context block.
     pub thread_note: Option<String>,
+    pub share: Option<ShareSession>,
+}
+
+/// The link a share session answers for.
+#[derive(Debug, Clone)]
+pub struct ShareSession {
+    pub id: i64,
+    pub thread_id: i64,
+    /// The owner's per-link instruction, appended under `# From {owner}`.
+    pub brief: String,
+    pub scope: crate::shares::ShareScope,
 }
 
 #[derive(Debug, Clone)]
@@ -324,6 +335,8 @@ impl CallEnv<'_> {
                     task_scope: self.deps.task_scope,
                     inbox_source: self.deps.inbox_source.clone(),
                     memory_source: self.deps.memory_source.clone(),
+                    share: self.deps.share.as_ref().map(|s| s.scope.clone()),
+                    share_thread: self.deps.share.as_ref().map(|s| s.thread_id),
                 };
                 tools::dispatch(&conn, &ctx, self.kind, name, args)
             }
@@ -488,7 +501,8 @@ mod tests {
         llm: &'a dyn LLMProvider,
     ) -> SessionDeps<'a> {
         SessionDeps { db, config_dir: tmp.path(), data_dir: tmp.path(), llm, embeddings: None,
-            search: None, task_scope: None, inbox_source: None, memory_source: None, token_id: None, thread_note: None }
+            search: None, task_scope: None, inbox_source: None, memory_source: None, token_id: None, thread_note: None,
+            share: None }
     }
 
     fn now() -> jiff::Timestamp {
@@ -646,6 +660,7 @@ mod tests {
             memory_source: None,
             token_id: None,
             thread_note: None,
+            share: None,
         };
         let err = run_session_watched(
             &deps,
@@ -1568,6 +1583,7 @@ mod tests {
             memory_source: None,
             token_id: None,
             thread_note: None,
+            share: None,
         };
         assert!(run_session(&d, 1, "aki", SessionKind::Talk, now(), &[], "hi").is_err());
     }

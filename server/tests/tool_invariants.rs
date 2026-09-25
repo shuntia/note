@@ -248,6 +248,8 @@ proptest! {
             task_scope: None,
             inbox_source: None,
             memory_source: None,
+            share: None,
+            share_thread: None,
         };
 
         let mut mem_ids = Vec::new();

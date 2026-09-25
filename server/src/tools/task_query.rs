@@ -79,6 +79,32 @@ pub struct ListArgs {
     pub limit: Option<u32>,
 }
 
+/// The category clause a share scope imposes, appended to every task read.
+fn share_category_clause(
+    ctx: &ToolCtx,
+    requested: Option<&str>,
+    wheres: &mut Vec<String>,
+    params: &mut Vec<SqlValue>,
+) -> Result<(), ToolError> {
+    let Some(scope) = &ctx.share else { return Ok(()) };
+    if scope.categories.is_empty() {
+        return Ok(());
+    }
+    if let Some(c) = requested {
+        if !scope.allows_category(c.trim()) {
+            return Err(ToolError::rejected(format!(
+                "category must be one of {}",
+                scope.categories.join(", ")
+            )));
+        }
+        return Ok(());
+    }
+    let marks = std::iter::repeat_n("?", scope.categories.len()).collect::<Vec<_>>().join(", ");
+    wheres.push(format!("category IN ({marks})"));
+    params.extend(scope.categories.iter().map(|c| SqlValue::from(c.clone())));
+    Ok(())
+}
+
 /// The filters, as SQL and its parameters, shared by the page and its count.
 fn list_filters(ctx: &ToolCtx, args: &ListArgs) -> Result<(String, Vec<SqlValue>), ToolError> {
     let mut wheres = vec!["user_id = ?".to_string(), "parent_id IS NULL".to_string()];
@@ -165,6 +191,7 @@ fn list_filters(ctx: &ToolCtx, args: &ListArgs) -> Result<(String, Vec<SqlValue>
         wheres.push("urgency = ?".into());
         params.push(u.clone().into());
     }
+    share_category_clause(ctx, args.category.as_deref(), &mut wheres, &mut params)?;
     Ok((wheres.join(" AND "), params))
 }
 
@@ -291,13 +318,16 @@ pub fn search(conn: &Connection, ctx: &ToolCtx, args: SearchArgs) -> Result<serd
     let text = "lower(title) || ' ' || lower(description) || ' ' || lower(notes)";
     // the parameters are pushed in the order the statement below binds them
     let text_match = clause(text, &mut params);
+    let mut shared = Vec::new();
+    share_category_clause(ctx, None, &mut shared, &mut params)?;
+    let shared: String = shared.iter().map(|c| format!(" AND {c}")).collect();
     let title_match = clause("lower(title)", &mut params);
 
     let mut stmt = conn
         .prepare(&format!(
             "SELECT id, title, state, is_now, duration_min, due_at
              FROM tasks
-             WHERE user_id = ? AND parent_id IS NULL AND state != 'dropped' AND ({text_match})
+             WHERE user_id = ? AND parent_id IS NULL AND state != 'dropped' AND ({text_match}){shared}
              ORDER BY CASE WHEN {title_match} THEN 0 ELSE 1 END,
                       CASE WHEN state = 'done' THEN 1 ELSE 0 END,
                       created_at DESC, id DESC
@@ -334,6 +364,11 @@ pub fn read(conn: &Connection, ctx: &ToolCtx, args: ReadArgs) -> Result<serde_js
     else {
         return Err(ToolError::not_found(format!("no task {}", args.task_id)));
     };
+    if let Some(scope) = &ctx.share {
+        if !scope.allows_category(&node.task.category) {
+            return Err(ToolError::not_found(format!("no task {}", args.task_id)));
+        }
+    }
     let tz = crate::triggers::timezone(ctx.config_dir, ctx.username);
     crate::tasks::stamp_schedule(conn, ctx.user_id, &tz, std::iter::once(&mut node.task))
         .map_err(internal)?;
@@ -351,7 +386,18 @@ pub fn read(conn: &Connection, ctx: &ToolCtx, args: ReadArgs) -> Result<serde_js
             stamp(child, &added);
         }
     }
+    if ctx.share.as_ref().is_some_and(|scope| !scope.details) {
+        titles_only(&mut out);
+        if let Some(children) = out["children"].as_array_mut() {
+            children.iter_mut().for_each(titles_only);
+        }
+    }
     Ok(out)
+}
+
+fn titles_only(task: &mut serde_json::Value) {
+    task["description"] = serde_json::json!("");
+    task["notes"] = serde_json::json!("");
 }
 
 fn stamp(task: &mut serde_json::Value, added: &std::collections::HashMap<i64, String>) {
@@ -496,6 +542,8 @@ mod tests {
             task_scope: scope,
             inbox_source: None,
             memory_source: None,
+            share: None,
+            share_thread: None,
         }
     }
 
@@ -1004,5 +1052,41 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(e.kind, "forbidden");
+    }
+
+    fn share_ctx(tmp: &tempfile::TempDir, scope: crate::shares::ShareScope) -> ToolCtx<'_> {
+        ToolCtx { share: Some(scope), ..ctx(tmp, None) }
+    }
+
+    fn out_id(v: &Value) -> i64 {
+        v["tasks"][0]["id"].as_i64().unwrap()
+    }
+
+    fn school_only() -> crate::shares::ShareScope {
+        crate::shares::ShareScope { categories: vec!["school".into()], ..Default::default() }
+    }
+
+    #[test]
+    fn a_share_scope_confines_the_task_tools_to_its_categories() {
+        let (conn, tmp) = env();
+        call(&conn, &tmp, "task_create", r#"{"title":"lab report","category":"school","description":"secret grade talk"}"#).unwrap();
+        call(&conn, &tmp, "task_create", r#"{"title":"therapy forms","category":"health"}"#).unwrap();
+        let sctx = share_ctx(&tmp, school_only());
+        let out = dispatch(&conn, &sctx, SessionKind::Share, "task_list", "{}").unwrap();
+        assert_eq!(out["total"], 1);
+        assert_eq!(out["tasks"][0]["title"], "lab report");
+        let err = dispatch(&conn, &sctx, SessionKind::Share, "task_list", r#"{"category":"health"}"#).unwrap_err();
+        assert_eq!(err.kind, "rejected");
+        let out = dispatch(&conn, &sctx, SessionKind::Share, "task_search", r#"{"query":"forms"}"#).unwrap();
+        assert_eq!(out["tasks"].as_array().unwrap().len(), 0);
+        let id = out_id(&call(&conn, &tmp, "task_list", r#"{"category":"health"}"#).unwrap());
+        let err = dispatch(&conn, &sctx, SessionKind::Share, "task_read", &format!(r#"{{"task_id":{id}}}"#)).unwrap_err();
+        assert_eq!(err.kind, "not_found");
+        let school = out_id(&call(&conn, &tmp, "task_list", r#"{"category":"school"}"#).unwrap());
+        let read = dispatch(&conn, &sctx, SessionKind::Share, "task_read", &format!(r#"{{"task_id":{school}}}"#)).unwrap();
+        assert_eq!(read["description"], "", "details are off");
+        let detailed = share_ctx(&tmp, crate::shares::ShareScope { details: true, ..school_only() });
+        let read = dispatch(&conn, &detailed, SessionKind::Share, "task_read", &format!(r#"{{"task_id":{school}}}"#)).unwrap();
+        assert_eq!(read["description"], "secret grade talk");
     }
 }

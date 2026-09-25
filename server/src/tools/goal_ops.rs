@@ -1,7 +1,7 @@
 use super::task_ops::{checked_due, task_error};
 use super::{check_text, ToolCtx, ToolError};
 use crate::goals::{GoalPatch, NewGoal};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
@@ -96,14 +96,17 @@ pub fn list(
     args: ListArgs,
 ) -> Result<serde_json::Value, ToolError> {
     super::task_query::unscoped(ctx)?;
-    let goals = crate::goals::list(conn, ctx.user_id, args.state.as_deref()).map_err(task_error)?;
+    let mut goals = crate::goals::list(conn, ctx.user_id, args.state.as_deref()).map_err(task_error)?;
+    if let Some(scope) = ctx.share.as_ref().filter(|s| !s.categories.is_empty()) {
+        goals = confined(conn, goals, &scope.categories)?;
+    }
+    let details = ctx.share.as_ref().is_none_or(|s| s.details);
     let goals: Vec<serde_json::Value> = goals
         .into_iter()
         .map(|g| {
-            serde_json::json!({
+            let mut row = serde_json::json!({
                 "goal_id": g.id,
                 "title": g.title,
-                "description": g.description,
                 "state": g.state,
                 "due_at": g.due_at,
                 "tasks": g.tasks,
@@ -111,10 +114,65 @@ pub fn list(
                 "next_task_id": g.next_task_id,
                 "next_task_title": g.next_task_title,
                 "next_due_at": g.next_due_at,
-            })
+            });
+            if details {
+                row["description"] = serde_json::json!(g.description);
+            }
+            row
         })
         .collect();
     Ok(serde_json::json!({ "goals": goals }))
+}
+
+/// Recounts each goal, and picks its next task, from the shared categories
+/// alone, dropping the goals none of them reach.
+fn confined(
+    conn: &Connection,
+    goals: Vec<crate::goals::Goal>,
+    categories: &[String],
+) -> Result<Vec<crate::goals::Goal>, ToolError> {
+    let internal = |e: rusqlite::Error| ToolError::internal(e.to_string());
+    let marks = std::iter::repeat_n("?", categories.len()).collect::<Vec<_>>().join(", ");
+    let filter = format!("goal_id = ? AND parent_id IS NULL AND category IN ({marks})");
+    let mut out = Vec::with_capacity(goals.len());
+    for mut g in goals {
+        let params: Vec<rusqlite::types::Value> = std::iter::once(g.id.into())
+            .chain(categories.iter().map(|c| c.clone().into()))
+            .collect();
+        let (tasks, done_tasks): (i64, i64) = conn
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*), COALESCE(SUM(state = 'done'), 0) FROM tasks
+                     WHERE {filter} AND state != 'dropped'"
+                ),
+                rusqlite::params_from_iter(params.iter()),
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map_err(internal)?;
+        if tasks == 0 {
+            continue;
+        }
+        let next: Option<(i64, String, Option<String>)> = conn
+            .query_row(
+                &format!(
+                    "SELECT id, title, due_at FROM tasks
+                     WHERE {filter} AND state IN ('open','in_progress')
+                     ORDER BY due_at IS NULL, due_at, id LIMIT 1"
+                ),
+                rusqlite::params_from_iter(params.iter()),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()
+            .map_err(internal)?;
+        g.tasks = tasks;
+        g.done_tasks = done_tasks;
+        (g.next_task_id, g.next_task_title, g.next_due_at) = match next {
+            Some((id, title, due)) => (Some(id), Some(title), due),
+            None => (None, None, None),
+        };
+        out.push(g);
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -150,6 +208,8 @@ mod tests {
             task_scope: scope,
             inbox_source: None,
             memory_source: None,
+            share: None,
+            share_thread: None,
         }
     }
 
@@ -236,5 +296,31 @@ mod tests {
         let e = dispatch(&conn, &ctx(&tmp, Some(1)), SessionKind::Talk, "goal_list", "{}")
             .unwrap_err();
         assert_eq!(e.kind, "rejected", "a scoped session surveys nothing");
+    }
+
+    fn share_ctx(tmp: &tempfile::TempDir, scope: crate::shares::ShareScope) -> ToolCtx<'_> {
+        ToolCtx { share: Some(scope), ..ctx(tmp, None) }
+    }
+
+    #[test]
+    fn goal_list_under_a_share_counts_only_allowed_tasks_and_hides_empty_goals() {
+        let (conn, tmp) = env();
+        let g = call(&conn, &tmp, "goal_create", r#"{"title":"pass chemistry"}"#);
+        let h = call(&conn, &tmp, "goal_create", r#"{"title":"get healthy","description":"private"}"#);
+        let gid = g["goal_id"].as_i64().unwrap();
+        let hid = h["goal_id"].as_i64().unwrap();
+        call(&conn, &tmp, "task_create", &format!(r#"{{"title":"lab","category":"school","goal_id":{gid}}}"#));
+        let quiz = call(&conn, &tmp, "task_create", &format!(r#"{{"title":"quiz","category":"school","goal_id":{gid}}}"#));
+        call(&conn, &tmp, "task_update", &format!(r#"{{"task_id":{},"state":"done"}}"#, quiz["task_id"]));
+        call(&conn, &tmp, "task_create", &format!(r#"{{"title":"gym","category":"health","goal_id":{gid}}}"#));
+        call(&conn, &tmp, "task_create", &format!(r#"{{"title":"forms","category":"health","goal_id":{hid}}}"#));
+        let sctx = share_ctx(&tmp, crate::shares::ShareScope { categories: vec!["school".into()], ..Default::default() });
+        let out = dispatch(&conn, &sctx, SessionKind::Share, "goal_list", "{}").unwrap();
+        let goals = out["goals"].as_array().unwrap();
+        assert_eq!(goals.len(), 1, "{out}");
+        assert_eq!(goals[0]["tasks"], 2);
+        assert_eq!(goals[0]["done_tasks"], 1);
+        assert!(goals[0].get("description").is_none(), "details are off");
+        assert_eq!(goals[0]["next_task_title"], "lab", "the next task due is an allowed one");
     }
 }
