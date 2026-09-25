@@ -2,6 +2,7 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type FormEvent,
@@ -9,6 +10,7 @@ import {
 } from 'react'
 import { flushSync } from 'react-dom'
 import { api, ApiError, setOnUnauthorized } from './api'
+import { trailing } from './coalesce'
 import { Jot } from './jot'
 import { glide, lift, viewIn, viewOut } from './motion-gsap'
 import { reducedMotion } from './motion'
@@ -135,7 +137,7 @@ export function App() {
     )
   }, [])
 
-  const onChanged = useCallback(() => setRefresh((n) => n + 1), [])
+  const onChanged = useMemo(() => trailing(() => setRefresh((n) => n + 1), 80), [])
 
   const openTalk = useCallback(
     (draft: string) => {
