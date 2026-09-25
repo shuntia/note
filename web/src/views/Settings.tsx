@@ -1630,7 +1630,7 @@ function ShareForm({
         <span className="set-row-body"><span className="set-label">Or ends on a date</span></span>
         <input type="date" aria-label="Ends on a date" min={localToday()} value={d.date} onChange={(e) => setD({ ...d, date: e.target.value })} />
       </div>
-      <div className="set-row"><span className="set-row-body"><span className="set-label">Plan for the next days</span></span><Switch label="Share the plan" on={d.scope.today} onToggle={() => scope({ today: !d.scope.today })} /></div>
+      <div className="set-row"><span className="set-row-body"><span className="set-label">The plan for the next days</span></span><Switch label="Share the plan" on={d.scope.today} onToggle={() => scope({ today: !d.scope.today })} /></div>
       {d.scope.today && (
         <div className="set-row"><span className="set-row-body"><span className="set-label">How many days ahead</span></span><input type="number" aria-label="How many days ahead" min={1} max={14} value={d.scope.horizon_days} onChange={(e) => scope({ horizon_days: clampedOr(e.target.value, d.scope.horizon_days, 1, 14) })} /></div>
       )}
@@ -1748,7 +1748,7 @@ function SharesSection({ notify }: { notify: Notify }) {
 
   return (
     <div className="set-fold-body">
-      <span className="set-sub">A link lets someone you trust see part of your Note and ask about it. It ends on the date you pick and the moment you revoke it.</span>
+      <span className="set-sub">A link lets someone you trust chat with Note about part of your day. The switches say what Note may look at for them.</span>
       {!creating && <button type="button" className="btn-haze small" onClick={() => setCreating(true)}>New link</button>}
       {creating && <ShareForm initial={blank} categories={categories} submit={(d) => void create(d)} busy={busy} label="Create link" />}
       {fresh && (

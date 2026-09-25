@@ -697,8 +697,8 @@ route still needs the session cookie.
 
 ### Share links
 
-A user can hand someone they trust a link that shows a chosen slice of their
-Note and answers questions about it, with no account on the visitor's side.
+A user can hand someone they trust a link to a chat with Note about a chosen
+slice of their day, with no account on the visitor's side.
 
 - Mint one in Settings → Advanced → Share links, or over the session:
   `POST /api/shares {name, brief, scope, expires_at}` → the row plus `url`.
@@ -730,9 +730,11 @@ Note and answers questions about it, with no account on the visitor's side.
   owner's channels as "Note from <link name>"; filing it ends the turn and the
   visitor reads "Passed on to <owner>." `messages_per_day` caps visitor
   messages across all of a link's threads in any 24 hours (`429` beyond it).
-- The visitor opens `/s/<token>`, reads `GET /api/share/{token}` (owner's
-  display name, what is shared, until when), `GET /api/share/{token}/view`
-  (the slice as data), and talks over `GET/POST /api/share/{token}/messages`.
+- The visitor opens `/s/<token>`: a chat with Note, headed by the owner's
+  name and one line on what is shared and until when (`GET /api/share/{token}`).
+  It talks over `GET/POST /api/share/{token}/messages`, and Note's replies come
+  from the tools the switches allow. `GET /api/share/{token}/view` returns the
+  slice as data.
   A cookie keys their thread; two people on one link never see each other's
   questions. Every one of these is `404` once the link expires, is revoked, or
   its owner is disabled. A stored scope that no longer parses fails the request
