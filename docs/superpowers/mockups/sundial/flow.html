@@ -15,7 +15,7 @@ body{margin:0;background:#ddd;font-family:var(--sans)}
 .beads{display:flex;gap:6px;margin-top:6px;height:8px}
 .beads i{width:8px;height:8px;border-radius:50%;background:var(--track)}
 .beads i.on{background:var(--sun)}.beads i.now{background:var(--sun);box-shadow:0 0 0 3px var(--track)}
-.dots{position:absolute;left:0;right:0;top:498px;display:flex;justify-content:center;gap:7px;opacity:0;transition:opacity .4s}
+.dots{position:absolute;left:0;right:0;top:540px;display:flex;justify-content:center;gap:7px;opacity:0;transition:opacity .4s}
 .dots i{width:7px;height:7px;border-radius:50%;background:var(--track);transition:transform .25s,background .25s}
 .dots i.ring{background:none;border:1.5px solid var(--faint);box-sizing:border-box}
 .dots i.now{background:var(--sun);transform:scale(1.35)}
@@ -48,12 +48,13 @@ body{margin:0;background:#ddd;font-family:var(--sans)}
   <p>Wait: the bar leaves. Touch anywhere: it returns.</p>
   <p>Tap the circle: work begins on the most pressing task.</p>
   <p>Swipe left: the next task. Swipe right past the first: work time on nothing in particular.</p>
-  <p>Tap the circle while working: pause. Tap again: back to it. Swipe down: done.</p>
+  <p>Tap the circle while working: pause. Tap again: back to it. Swipe down: done, and a bead joins the ring's opening.</p>
   <p>The hint under the circle shows the first three times only.</p>
 </div>
 <script src="/web/node_modules/gsap/dist/gsap.min.js"></script>
 <script type="module">
   import { arc, tabs, mount } from './parts.js'
+  import { ripple, ignite, closeRing, warm, beadsAtRest } from './fx.js'
   mount('#tabs', tabs('Today'))
   const tabsEl = document.querySelector('.tabs'), handle = document.getElementById('handle')
   const app = document.getElementById('app'), face = document.getElementById('face'), rail = document.getElementById('rail')
@@ -76,13 +77,29 @@ body{margin:0;background:#ddd;font-family:var(--sans)}
   app.addEventListener('pointerdown', wake); wake()
 
   const PLAN = 25 * 60
-  const setArc = (frac, faded) => mount('#arc', arc(frac, { faded }))
+  const C = 929.9, SPAN = 619.9
+  document.getElementById('arc').innerHTML = `<div class="arc" id="arcbox"><svg viewBox="0 0 320 320">
+    <circle cx="160" cy="160" r="148" fill="none" stroke="var(--track)" stroke-width="9" stroke-linecap="round" stroke-dasharray="${SPAN} ${C}" transform="rotate(150 160 160)"/>
+    <circle id="fill" cx="160" cy="160" r="148" fill="none" stroke="var(--sun)" stroke-width="9" stroke-linecap="round" stroke-dasharray="0 ${C}" transform="rotate(150 160 160)"/>
+  </svg></div>`
+  const fill = document.getElementById('fill'), arcbox = document.getElementById('arcbox')
+  let rounds = 2
+  const headAt = (frac) => { const a = (240 + 240 * frac) * Math.PI / 180; return { cx: 160 + 148 * Math.cos(a), cy: 160 + 148 * Math.sin(a) } }
+  const setArc = (frac, faded) => {
+    if (gsap.isTweening(fill)) return
+    fill.setAttribute('stroke-dasharray', `${SPAN * frac} ${C}`)
+    const head = face.querySelector('.head'); if (head) { const p = headAt(frac); head.setAttribute('cx', p.cx); head.setAttribute('cy', p.cy) }
+    arcbox.style.opacity = faded ? 0.38 : 1
+  }
+  beadsAtRest(face, rounds)
   setArc(0, true)
 
   const renderRail = () => {
-    rail.innerHTML = slots.map((s) => `<div class="slot">${s.mark ? `<i class="mark ${s.mark}"></i>` : ''}<div class="num tnum">25:00</div><div class="name">${s.name}</div>${s.sub ? `<div class="sub">${s.sub}</div>` : ''}<div class="beads"><i class="on"></i><i class="on"></i><i class="now"></i><i></i></div></div>`).join('')
+    rail.innerHTML = slots.map((s) => `<div class="slot">${s.mark ? `<i class="mark ${s.mark}"></i>` : ''}<div class="num tnum">25:00</div><div class="name">${s.name}</div>${s.sub ? `<div class="sub">${s.sub}</div>` : ''}</div>`).join('')
     dotsEl.innerHTML = slots.map((s, i) => `<i class="${s.kind === 'free' ? 'ring' : ''}${i === index ? ' now' : ''}"></i>`).join('')
   }
+  let dotsTimer
+  const showDots = () => { dotsEl.style.opacity = 1; clearTimeout(dotsTimer); dotsTimer = setTimeout(() => (dotsEl.style.opacity = 0), 1400) }
   const snap = (animate = true) => {
     gsap.to(rail, { x: -index * 320, duration: animate ? 0.38 : 0, ease: 'power3.out', overwrite: true })
     dotsEl.querySelectorAll('i').forEach((d, i) => d.classList.toggle('now', i === index))
@@ -103,14 +120,17 @@ body{margin:0;background:#ddd;font-family:var(--sans)}
     running = true; paused = false; startAt = Date.now(); pausedMs = 0; index = 1
     renderRail(); snap(false)
     gsap.fromTo(rail, { autoAlpha: 0, y: 10 }, { autoAlpha: 1, y: 0, duration: 0.4, ease: 'power2.out' })
-    hint.style.opacity = 0; dotsEl.style.opacity = 1
+    hint.style.opacity = 0
+    ignite(face); ripple(face)
     rest()
   }
   const finish = () => {
     running = false
-    gsap.to(rail, { autoAlpha: 0, y: -10, duration: 0.3 })
-    setArc(1, false); setTimeout(() => setArc(0, true), 500)
-    dotsEl.style.opacity = 0; hint.style.opacity = 0.75
+    const bead = rounds++
+    closeRing(face, fill, bead)
+    setTimeout(() => warm(face), 450)
+    gsap.to(rail, { autoAlpha: 0, y: -10, duration: 0.3, delay: 0.6 })
+    setTimeout(() => { face.querySelector('.head')?.remove(); fill.setAttribute('stroke-dasharray', `0 ${C}`); setArc(0, true); hint.style.opacity = 0.75 }, 1400)
   }
   const togglePause = () => {
     if (paused) { pausedMs += Date.now() - pausedAt; paused = false } else { pausedAt = Date.now(); paused = true }
@@ -124,6 +144,7 @@ body{margin:0;background:#ddd;font-family:var(--sans)}
     if (!down || !running) return
     dx = e.clientX - down.x; dy = e.clientY - down.y
     if (Math.abs(dx) > Math.abs(dy)) {
+      showDots()
       const edge = (index === 0 && dx > 0) || (index === slots.length - 1 && dx < 0)
       gsap.set(rail, { x: -index * 320 + (edge ? dx * 0.3 : dx) })
     }

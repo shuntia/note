@@ -1,0 +1,63 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Effects · start and finish</title>
+<link rel="stylesheet" href="tokens.css"><style>
+body{margin:0;background:#e8e4de;font-family:var(--sans);color:#1c2430}
+.wrap{display:flex;gap:36px;padding:28px 32px}
+.shot{border-radius:14px;overflow:hidden;box-shadow:0 30px 60px -36px rgba(0,0,0,.6);flex:none}
+.face{left:35px;top:170px;width:320px;height:320px}
+.handle{position:absolute;left:167px;bottom:8px;width:56px;height:4px;border-radius:2px;background:var(--track)}
+h1{font-family:var(--display);font-weight:600;font-size:22px;margin:0 0 4px;letter-spacing:-.02em}
+h2{font-family:var(--display);font-weight:600;font-size:14px;color:#6b6f77;margin:22px 0 8px}
+p{max-width:520px;color:#444;margin:0 0 10px;line-height:1.5;font-size:14px}
+.btns{display:flex;gap:8px;flex-wrap:wrap}
+button{font:inherit;font-family:var(--display);font-weight:600;font-size:14px;border:0;border-radius:999px;padding:9px 16px;background:oklch(99% 0.004 80 / 0.86);color:#1c2430;cursor:pointer}
+button.pick{background:oklch(23% 0.03 255);color:#fff}
+small{display:block;color:#666;font-size:12.5px;margin-top:4px}
+</style></head>
+<body><div class="wrap">
+  <div class="shot"><div class="frame-app p-day" id="app" style="width:390px;height:844px">
+    <div class="face" id="face">
+      <div class="arc"><svg viewBox="0 0 320 320">
+        <circle cx="160" cy="160" r="148" fill="none" stroke="var(--track)" stroke-width="9" stroke-linecap="round" stroke-dasharray="619.9 929.9" transform="rotate(150 160 160)"/>
+        <circle id="fill" cx="160" cy="160" r="148" fill="none" stroke="var(--sun)" stroke-width="9" stroke-linecap="round" stroke-dasharray="0 929.9" transform="rotate(150 160 160)"/>
+      </svg></div>
+      <div class="inner"><div class="num tnum" id="num" style="font-size:60px">25:00</div><div class="name">Focus on Reading 2.2</div><div class="sub">Letter 6.16.13–22</div></div>
+    </div>
+    <div class="handle"></div>
+  </div></div>
+  <div>
+    <h1>Start and finish</h1>
+    <p>Each plays once, under a second, on the arc itself. Nothing falls from the sky.</p>
+    <h2>Session start</h2>
+    <div class="btns">
+      <button data-fx="ripple">Ripple</button>
+      <button data-fx="ignite">Ignite</button>
+      <button data-fx="breath">Breath</button>
+      <button data-fx="start" class="pick">Ignite + ripple</button>
+    </div>
+    <small>Ripple: one ring leaves the arc and fades. Ignite: the head of the fill flares where the arc begins and stays as the bead that leads it. Breath: the face draws in from slightly small with a faint warmth behind.</small>
+    <h2>Task finish</h2>
+    <div class="btns">
+      <button data-fx="close">Close the ring</button>
+      <button data-fx="warm">Warm the ground</button>
+      <button data-fx="pair">Ripple pair</button>
+      <button data-fx="finish" class="pick">Close the ring + warm</button>
+    </div>
+    <small>Close the ring: the fill runs to the end, the ends meet, and a bead drops into the opening. Warm: the ground brightens for a moment. Pair: two rings a beat apart.</small>
+    <h2>Rounds</h2>
+    <div class="btns"><button data-fx="rest">Beads at rest</button><button data-fx="reset">Reset</button></div>
+    <small>Beads sit in the ring's opening, one per round today; each finish adds one. This replaces both dot rows.</small>
+  </div>
+</div>
+<script src="/web/node_modules/gsap/dist/gsap.min.js"></script>
+<script type="module">
+  import { ripple, ignite, breath, closeRing, warm, beadsAtRest } from './fx.js'
+  const face = document.getElementById('face'), fill = document.getElementById('fill')
+  let done = 0
+  const reset = () => { face.querySelectorAll('.head, .bead, .glow').forEach((e) => e.remove()); fill.setAttribute('stroke-dasharray', '0 929.9'); fill.setAttribute('stroke-width', 9); done = 0 }
+  const run = { ripple: () => ripple(face), ignite: () => { fill.setAttribute('stroke-dasharray', '3 929.9'); ignite(face) }, breath: () => breath(face),
+    start: () => { fill.setAttribute('stroke-dasharray', '3 929.9'); ignite(face); ripple(face) },
+    close: () => closeRing(face, fill, done++), warm: () => warm(face), pair: () => ripple(face, 2),
+    finish: () => { closeRing(face, fill, done++); setTimeout(() => warm(face), 450) },
+    rest: () => { face.querySelectorAll('.bead').forEach((e) => e.remove()); beadsAtRest(face, 2); done = 2 }, reset }
+  document.querySelectorAll('[data-fx]').forEach((b) => (b.onclick = () => run[b.dataset.fx]()))
+</script></body></html>
