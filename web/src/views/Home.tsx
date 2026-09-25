@@ -30,6 +30,7 @@ import {
 import { SoFar } from '../sofar'
 import { Tick } from '../tick'
 import type { DayView, PlanEvent, SessionStart, Task, TaskNotify } from '../types'
+import { capped } from '../wave'
 import { CalendarSection } from './Calendar'
 import { Urgent } from './Tasks'
 import { DebriefFold } from '../debrief'
@@ -955,7 +956,7 @@ export function Home({
         }
         if (!q('.home-face.compact')) to(qa('.face-big .home-text'), { autoAlpha: 0, y: -20, duration: 0.4, ease: 'power2.in' }, 0.2)
         from(qa('.home-today .dayline'), { autoAlpha: 0, y: 28, duration: 0.4, ease: 'power2.out' }, 0.35)
-        from(qa('.home-list li'), { autoAlpha: 0, y: 24, duration: 0.35, ease: 'power2.out', stagger: 0.04 }, 0.42)
+        from(qa('.home-list li'), { autoAlpha: 0, y: 24, duration: 0.35, ease: 'power2.out', stagger: capped(0.04, qa('.home-list li').length) }, 0.42)
         from(qa('.home-today .close-day, .home-today .sofar'), { autoAlpha: 0, y: 24, duration: 0.35, ease: 'power2.out' }, 0.42)
         from(qa('.home-today .jot-wrap'), { autoAlpha: 0, y: 24, duration: 0.35, ease: 'power2.out' }, 0.5)
       } else {
@@ -1029,12 +1030,12 @@ export function Home({
         (t) => {
           from(t, qa('.debrief-row, .debrief-note, .sofar'), { autoAlpha: 0, y: 28, duration: 0.8, ease: 'power2.out' }, 0)
           from(t, qa('#calendar-slot'), { autoAlpha: 0, y: 40, duration: 1, ease: 'power2.out' }, mobile ? 0 : 0.25)
-          from(t, qa('.ws-seg'), { scaleY: 0, transformOrigin: 'top', duration: 0.6, ease: 'power2.out', stagger: 0.04 }, 0.35)
-          from(t, qa('.cal-line .cal-band'), { scaleX: 0, transformOrigin: 'left center', duration: 0.6, ease: 'power2.out', stagger: 0.1 }, 0.6)
+          from(t, qa('.ws-seg'), { scaleY: 0, transformOrigin: 'top', duration: 0.6, ease: 'power2.out', stagger: capped(0.04, qa('.ws-seg').length) }, 0.35)
+          from(t, qa('.cal-line .cal-band'), { scaleX: 0, transformOrigin: 'left center', duration: 0.6, ease: 'power2.out', stagger: capped(0.1, qa('.cal-line .cal-band').length) }, 0.6)
           from(t, qa('.cal-line .dl-label, .cal-line .dl-now'), { autoAlpha: 0, duration: 0.4 }, 1.0)
-          from(t, qa('.cal-list li'), { autoAlpha: 0, y: 10, duration: 0.5, ease: 'power2.out', stagger: 0.08 }, 0.85)
+          from(t, qa('.cal-list li'), { autoAlpha: 0, y: 10, duration: 0.5, ease: 'power2.out', stagger: capped(0.08, qa('.cal-list li').length) }, 0.85)
           from(t, qa('.week'), { autoAlpha: 0, y: 36, duration: 1, ease: 'power2.out' }, 0.45)
-          from(t, qa('.week .band'), { autoAlpha: 0, y: 10, duration: 0.6, ease: 'power2.out', stagger: 0.05 }, 0.9)
+          from(t, qa('.week .band'), { autoAlpha: 0, y: 10, duration: 0.6, ease: 'power2.out', stagger: capped(0.05, qa('.week .band').length) }, 0.9)
         },
         { trigger: el, start: mobile ? 'clamp(top 92%)' : 'clamp(top 88%)', end: mobile ? 'clamp(top 45%)' : 'clamp(top 30%)' },
       )

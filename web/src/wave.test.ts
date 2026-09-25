@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest'
-import { waveDelays } from './wave'
+import { capped, waveDelays } from './wave'
 
 const r = (top: number, height = 36): DOMRectReadOnly =>
   ({ top, bottom: top + height, left: 0, right: 100, height, width: 100, x: 0, y: top, toJSON() {} }) as DOMRectReadOnly
@@ -21,4 +21,10 @@ test('two columns rise together', () => {
   const left = [r(0), r(40)]
   const right = [r(0), r(40)].map((x) => ({ ...x, left: 500, right: 600 }) as DOMRectReadOnly)
   expect(waveDelays([...left, ...right])).toEqual([0, 0.24, 0, 0.24])
+})
+
+test('a short list keeps its stagger, a long one is capped', () => {
+  expect(capped(0.04, 3)).toBe(0.04)
+  expect(capped(0.04, 30)).toBeCloseTo(0.01)
+  expect(capped(0.1, 1)).toBe(0.1)
 })
