@@ -9,6 +9,7 @@ import {
   type RefObject,
 } from 'react'
 import { api, ApiError } from '../api'
+import { latest } from '../coalesce'
 import type { ViewProps } from '../app'
 import { collapse, flip, settle } from '../motion-gsap'
 import { reducedMotion } from '../motion'
@@ -337,11 +338,12 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
       .catch(() => setGoals([]))
   }, [])
 
+  const newest = useRef(latest<TaskNode[]>()).current
   const load = useCallback(() => {
     loadGoals()
-    api
-      .tasks()
+    newest(api.tasks())
       .then((ts) => {
+        if (!ts) return
         setNodes(ts)
         setFailed(false)
         if (seeded.current) return
@@ -349,7 +351,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
         setOpenSteps(new Set(ts.filter((t) => t.is_now && t.children.length > 0).map((t) => t.id)))
       })
       .catch(() => setFailed(true))
-  }, [loadGoals])
+  }, [loadGoals, newest])
   useEffect(load, [load, refresh])
 
   const patch = useCallback(

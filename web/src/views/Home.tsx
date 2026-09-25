@@ -2,6 +2,7 @@ import { gsap } from 'gsap'
 import { ScrollTrigger } from 'gsap/ScrollTrigger'
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { api, ApiError } from '../api'
+import { latest } from '../coalesce'
 import type { ToastAction } from '../app'
 import { DayLine, minutesOf } from '../dayline'
 import { eventFacts, nextUp } from '../events'
@@ -220,15 +221,15 @@ export function Home({
   const motion = useMotion()
   useIdle(!mobile)
 
+  const newest = useRef(latest<DayView>()).current
   const load = useCallback(() => {
     const date = todayIso()
-    api
-      .day(date)
-      .then(setDay)
+    newest(api.day(date))
+      .then((d) => d && setDay(d))
       .catch(() =>
         setDay({ date, events: [], calendar: [], free: [], quiet_now: null, history: [] }),
       )
-  }, [])
+  }, [newest])
   useEffect(load, [load, refresh])
   const events = day?.events ?? null
 
