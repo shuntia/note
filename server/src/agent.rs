@@ -50,6 +50,7 @@ pub struct SessionDeps<'a> {
     /// What the model should know about the thread it is replying in, appended
     /// after the context block.
     pub thread_note: Option<String>,
+    /// Set on a visitor's session: the link whose scope its tools are held to.
     pub share: Option<ShareSession>,
 }
 

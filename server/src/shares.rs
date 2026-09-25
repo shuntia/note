@@ -82,6 +82,25 @@ impl ShareScope {
     pub fn allows_category(&self, category: &str) -> bool {
         self.categories.is_empty() || self.categories.iter().any(|c| c == category)
     }
+
+    /// ` AND <column> IN (?, ...)` with its parameters; `None` when every
+    /// category is shared.
+    pub fn category_clause(&self, column: &str) -> Option<(String, Vec<rusqlite::types::Value>)> {
+        if self.categories.is_empty() {
+            return None;
+        }
+        let marks = std::iter::repeat_n("?", self.categories.len()).collect::<Vec<_>>().join(", ");
+        let params = self.categories.iter().map(|c| c.clone().into()).collect();
+        Some((format!(" AND {column} IN ({marks})"), params))
+    }
+
+    /// The days this link shares, as `[start, end)` from `today`.
+    pub fn horizon(&self, today: jiff::civil::Date) -> (jiff::civil::Date, jiff::civil::Date) {
+        let end = today
+            .checked_add(jiff::Span::new().days(i64::from(self.horizon_days)))
+            .unwrap_or(jiff::civil::Date::MAX);
+        (today, end)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

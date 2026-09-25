@@ -376,10 +376,7 @@ pub fn plan_list(conn: &Connection, ctx: &ToolCtx, args: PlanListArgs) -> Result
         None => today(ctx),
     };
     if let Some(scope) = &ctx.share {
-        let start = today(ctx);
-        let end = start
-            .checked_add(jiff::Span::new().days(i64::from(scope.horizon_days)))
-            .map_err(internal)?;
+        let (start, end) = scope.horizon(today(ctx));
         if date < start || date >= end {
             return Err(ToolError::rejected(format!(
                 "this link shares {} to {}",
@@ -417,7 +414,7 @@ pub fn plan_list(conn: &Connection, ctx: &ToolCtx, args: PlanListArgs) -> Result
             "task_id": task_id,
             "task_title": e.task.as_ref().map(|t| t.title.clone()),
         });
-        if e.kind == crate::triggers::KIND {
+        if e.kind == crate::triggers::KIND && ctx.share.is_none() {
             let cancel_if: Option<String> = conn
                 .query_row("SELECT cancel_if FROM events WHERE id = ?1", [e.id], |r| r.get(0))
                 .optional()
@@ -939,5 +936,22 @@ mod tests {
         let far = today().checked_add(jiff::Span::new().days(5)).unwrap();
         let err = dispatch(&conn, &sctx, SessionKind::Share, "plan_list", &format!(r#"{{"date":"{far}"}}"#)).unwrap_err();
         assert_eq!(err.kind, "rejected");
+    }
+
+    #[test]
+    fn plan_list_under_a_share_keeps_trigger_notes_back() {
+        let (conn, tmp) = env();
+        pin_to_midday(&tmp);
+        call(&conn, &tmp, "trigger_set", r#"{"at":"+120min","prompt":"ask about the therapy forms"}"#).unwrap();
+        let own = call(&conn, &tmp, "plan_list", "{}").unwrap();
+        let trigger = own["events"].as_array().unwrap().iter().find(|r| r["kind"] == crate::triggers::KIND).unwrap();
+        assert_eq!(trigger["prompt"], "ask about the therapy forms");
+        let sctx = share_ctx(&tmp, crate::shares::ShareScope::default());
+        let out = dispatch(&conn, &sctx, SessionKind::Share, "plan_list", "{}").unwrap();
+        let rows = out["events"].as_array().unwrap();
+        assert!(!rows.is_empty());
+        for row in rows {
+            assert!(row.get("prompt").is_none() && row.get("cancel_if").is_none(), "{row}");
+        }
     }
 }
