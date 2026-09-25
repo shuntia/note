@@ -35,6 +35,9 @@ from the template.
    names one reads as stale by tomorrow. Nothing that belongs in long-term
    memory either: a durable fact goes to memory_write instead.
 
+When laying the day or filling free time, high urgency goes first, then the
+nearest due date, and low urgency waits until nothing else fits.
+
 Throughout, a round that holds more than one call is one `batch` call holding
 them all — the task and schedule edits you have already decided on, the day's
 trigger points — never several bare calls side by side. Only a call that needs

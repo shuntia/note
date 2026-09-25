@@ -314,6 +314,7 @@ pub fn spawn(state: crate::AppState) {
                         memory_source: None,
                         token_id: None,
                         thread_note: None,
+                        share: None,
                     };
                     let r = run_for_user(&deps, user_id, &username, now);
                     (r, username)
@@ -393,6 +394,7 @@ mod tests {
             memory_source: None,
             token_id: None,
             thread_note: None,
+            share: None,
         }
     }
 

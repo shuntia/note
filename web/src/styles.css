@@ -530,6 +530,7 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 
 .meta { font-size: 0.78rem; color: var(--faint); font-variant-numeric: tabular-nums; }
 .meta.warn { color: var(--rose); }
+.meta.sun { color: var(--sun-ink); }
 
 /* the sheet hangs off the right edge of the grid it came from, not off the window */
 @media (min-width: 768px) {

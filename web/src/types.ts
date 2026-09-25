@@ -5,6 +5,8 @@ export type MovedTo = { event_id: number; date: string; wall_time: string; kind:
 // Where the event came from: the template, the agent, the allocator, or a user edit.
 export type EventOrigin = 'template' | 'agent' | 'auto' | 'user'
 
+export type TaskUrgency = 'low' | 'normal' | 'high'
+
 // The task a block holds, carried so the block can offer the task's own actions.
 // `title` is always the top-level task; `step` names the one this block holds.
 export type TaskRef = {
@@ -13,6 +15,8 @@ export type TaskRef = {
   state: TaskState
   step: string | null
   category: string
+  urgency: TaskUrgency
+  pressing: boolean
   notify?: TaskNotify
 }
 
@@ -62,6 +66,10 @@ export type Task = {
   notify: TaskNotify
   // Free text, one per task; a step reports the one its parent carries.
   category: string
+  // low, normal or high; a step reports its parent's.
+  urgency: TaskUrgency
+  // Due inside the next two days or already past due. Derived by the server.
+  pressing: boolean
   // The goal this task belongs to; steps never carry one.
   goal_id: number | null
   goal_title: string | null
@@ -228,7 +236,7 @@ export type SettingsSaved = Pick<
   | 'pomodoro_break_min'
 > & { schedule: ScheduleRow[] }
 
-export type PromptName = 'persona' | 'planning'
+export type PromptName = 'persona' | 'planning' | 'share'
 
 // `content` is the effective prompt; `custom` marks it as the user's own override.
 export type PromptDoc = { name: PromptName; content: string; custom: boolean }
@@ -484,3 +492,58 @@ export type Allocation = {
   placed: { event_id: number; task_id: number; start: string; end: string }[]
   cleared: number
 }
+
+export type ShareScope = {
+  today: boolean
+  tasks: boolean
+  categories: string[]
+  goals: boolean
+  progress: boolean
+  details: boolean
+  horizon_days: number
+  notes: boolean
+  messages_per_day: number
+}
+
+// What a visitor learns about the link itself; `owner` is a display name.
+export type ShareInfo = { owner: string; name: string; expires_at: string; scope: ShareScope; notes: boolean }
+
+export type ShareDayRow = { start: string; end: string | null; title: string; status: string; busy: boolean }
+export type ShareTask = {
+  id: number
+  title: string
+  state: TaskState
+  due_at: string | null
+  urgency: TaskUrgency
+  pressing: boolean
+  steps: number
+  done_steps: number
+  category: string
+  goal_title?: string | null
+  description?: string
+}
+export type ShareGoal = { id: number; title: string; due_at: string | null; tasks: number; done_tasks: number }
+// Each section is present only when its switch is on.
+export type ShareView = {
+  days?: { date: string; rows: ShareDayRow[] }[]
+  tasks?: ShareTask[]
+  goals?: ShareGoal[]
+  done_recent?: { title: string; completed_at: string }[]
+}
+export type ShareMessage = { role: 'user' | 'assistant' | 'note'; content: string; created_at: string }
+export type Share = {
+  id: number
+  name: string
+  brief: string
+  scope: ShareScope
+  expires_at: string
+  created_at: string
+  last_used_at: string | null
+  url: string
+  messages_today: number
+  threads: number
+}
+export type NewShare = { name: string; brief: string; scope: ShareScope; expires_at: string }
+export type SharePatch = Partial<NewShare>
+export type ShareThread = { id: number; created_at: string; updated_at: string; messages: ShareMessage[] }
+export type ShareTurn = { reply: string; note: boolean }

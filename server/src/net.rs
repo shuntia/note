@@ -96,6 +96,21 @@ pub fn fetch_site_ok(headers: &axum::http::HeaderMap) -> bool {
     }
 }
 
+/// The address a per-client limiter keys on: Cloudflare's header behind the
+/// tunnel, the first forwarded hop otherwise, and one shared bucket when the
+/// request came straight to the socket.
+pub fn client_key(headers: &axum::http::HeaderMap) -> String {
+    let pick = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.split(',').next())
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+    pick("cf-connecting-ip").or_else(|| pick("x-forwarded-for")).unwrap_or_else(|| "local".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,5 +172,15 @@ mod tests {
             h.insert("sec-fetch-site", bad.parse().unwrap());
             assert!(!fetch_site_ok(&h), "{bad}");
         }
+    }
+
+    #[test]
+    fn client_key_prefers_cloudflare_then_forwarded_then_local() {
+        let mut h = axum::http::HeaderMap::new();
+        assert_eq!(client_key(&h), "local");
+        h.insert("x-forwarded-for", "10.0.0.7, 172.16.0.1".parse().unwrap());
+        assert_eq!(client_key(&h), "10.0.0.7");
+        h.insert("cf-connecting-ip", "203.0.113.9".parse().unwrap());
+        assert_eq!(client_key(&h), "203.0.113.9");
     }
 }

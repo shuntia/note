@@ -375,8 +375,33 @@ pub fn plan_list(conn: &Connection, ctx: &ToolCtx, args: PlanListArgs) -> Result
             .map_err(|_| ToolError::rejected(format!("date must be YYYY-MM-DD, got {d:?}")))?,
         None => today(ctx),
     };
+    if let Some(scope) = &ctx.share {
+        let (start, end) = scope.horizon(today(ctx));
+        if date < start || date >= end {
+            return Err(ToolError::rejected(format!(
+                "this link shares {} to {}",
+                start,
+                end.yesterday().map_err(internal)?
+            )));
+        }
+    }
     let mut events = Vec::new();
     for e in crate::plan::events_for(conn, ctx.user_id, date).map_err(internal)? {
+        if ctx.share.is_some() && e.kind == crate::triggers::KIND {
+            continue;
+        }
+        let hidden = ctx.share.as_ref().is_some_and(|scope| {
+            e.task.as_ref().is_some_and(|t| !scope.allows_category(&t.category))
+        });
+        if hidden {
+            events.push(serde_json::json!({
+                "kind": "busy",
+                "start": e.wall_time,
+                "end": e.end_wall_time,
+                "status": e.status,
+            }));
+            continue;
+        }
         let task_id: Option<i64> = conn
             .query_row("SELECT task_id FROM event_tasks WHERE event_id = ?1", [e.id], |r| r.get(0))
             .optional()
@@ -390,6 +415,7 @@ pub fn plan_list(conn: &Connection, ctx: &ToolCtx, args: PlanListArgs) -> Result
             "status": e.status,
             "flexibility": e.flexibility,
             "task_id": task_id,
+            "task_title": e.task.as_ref().map(|t| t.title.clone()),
         });
         if e.kind == crate::triggers::KIND {
             let cancel_if: Option<String> = conn
@@ -431,6 +457,8 @@ mod tests {
             task_scope: scope,
             inbox_source: None,
             memory_source: None,
+            share: None,
+            share_thread: None,
         }
     }
 
@@ -885,5 +913,46 @@ mod tests {
         for kind in [SessionKind::Talk, SessionKind::Checkin, SessionKind::Nightly] {
             assert!(registry(kind).contains(&"plan_list"), "{kind:?}");
         }
+    }
+
+    fn share_ctx(tmp: &tempfile::TempDir, scope: crate::shares::ShareScope) -> ToolCtx<'_> {
+        ToolCtx { share: Some(scope), ..ctx(tmp, None) }
+    }
+
+    #[test]
+    fn plan_list_under_a_share_masks_hidden_blocks_and_clamps_the_horizon() {
+        let (conn, tmp) = env();
+        let hidden = task(&conn, &tmp, r#"{"title":"therapy forms","category":"health","duration_min":30}"#);
+        let shown = task(&conn, &tmp, r#"{"title":"lab report","category":"school","duration_min":30}"#);
+        let date = tomorrow();
+        for (id, start) in [(hidden, "16:00"), (shown, "17:00")] {
+            call(&conn, &tmp, "plan_tasks", &format!(r#"{{"date":"{date}","task_ids":[{id}],"start":"{start}"}}"#)).unwrap();
+        }
+        let sctx = share_ctx(&tmp, crate::shares::ShareScope { categories: vec!["school".into()], horizon_days: 2, ..Default::default() });
+        let out = dispatch(&conn, &sctx, SessionKind::Share, "plan_list", &format!(r#"{{"date":"{date}"}}"#)).unwrap();
+        let rows = out["events"].as_array().unwrap();
+        let busy = rows.iter().find(|r| r["kind"] == "busy").expect("the hidden block is busy");
+        assert!(busy.get("task_id").is_none() && busy.get("task_title").is_none() && busy.get("prompt").is_none());
+        assert_eq!(busy["start"], "16:00");
+        let named = rows.iter().find(|r| r["task_title"] == "lab report").expect("the shown block keeps its title");
+        assert_eq!(named["start"], "17:00");
+        let far = today().checked_add(jiff::Span::new().days(5)).unwrap();
+        let err = dispatch(&conn, &sctx, SessionKind::Share, "plan_list", &format!(r#"{{"date":"{far}"}}"#)).unwrap_err();
+        assert_eq!(err.kind, "rejected");
+    }
+
+    #[test]
+    fn plan_list_under_a_share_leaves_trigger_points_out() {
+        let (conn, tmp) = env();
+        pin_to_midday(&tmp);
+        call(&conn, &tmp, "trigger_set", r#"{"at":"+120min","prompt":"ask about the therapy forms"}"#).unwrap();
+        let own = call(&conn, &tmp, "plan_list", "{}").unwrap();
+        let trigger = own["events"].as_array().unwrap().iter().find(|r| r["kind"] == crate::triggers::KIND).unwrap();
+        assert_eq!(trigger["prompt"], "ask about the therapy forms");
+        let sctx = share_ctx(&tmp, crate::shares::ShareScope::default());
+        let out = dispatch(&conn, &sctx, SessionKind::Share, "plan_list", "{}").unwrap();
+        let rows = out["events"].as_array().unwrap();
+        assert!(rows.iter().all(|r| r["kind"] != crate::triggers::KIND), "{out}");
+        assert!(!out.to_string().contains("therapy forms"), "{out}");
     }
 }

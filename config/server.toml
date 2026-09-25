@@ -57,6 +57,15 @@ require_second_factor = true
 # [agent]
 # idle_summary_min = 60
 
+# --- Limits -------------------------------------------------------------
+# Spend ceilings; every key defaults to the value shown.
+#
+# [limits]
+# agent_sessions_per_day = 200   # per user in any 24 hours; 0 lifts the ceiling
+# share_max_days = 120           # the farthest a share link may run; 1 to 36500
+# share_messages_per_day = 100   # the ceiling a link's own daily cap may reach; at least 1
+# shares_per_user = 20           # 0 turns share links off
+
 # --- Channels -----------------------------------------------------------
 # Delivery ladder: connected WebSocket clients first, then Web Push.
 # Without a [channels.webpush] section, only in-app WebSocket delivery is

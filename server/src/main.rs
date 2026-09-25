@@ -118,6 +118,7 @@ async fn main() -> anyhow::Result<()> {
         .with_admin_secrets(secrets)
         .with_passkeys(passkeys)
         .with_limits(&cfg.limits)
+        .with_public_base_url(&cfg.public_base_url)
         .with_idle_summary_min(cfg.idle_summary_min());
     state.secure_cookies = cfg.public_base_url.starts_with("https://");
     if let Some(wp) = &cfg.channels.webpush {
