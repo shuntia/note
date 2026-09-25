@@ -296,6 +296,7 @@ pub fn run_for_user(
         memory_source: Some(format!("review:{week}")),
         token_id: deps.token_id,
         thread_note: None,
+        share: None,
     };
     let sunday = week_start.checked_add(jiff::Span::new().days(6))?;
     let opening = format!("The week of {week}, up to and including {sunday}.\n\n{digest}");
@@ -428,6 +429,7 @@ mod tests {
             memory_source: None,
             token_id: None,
             thread_note: None,
+            share: None,
         }
     }
 

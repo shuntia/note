@@ -585,6 +585,7 @@ pub async fn run_turn(
             memory_source: None,
             token_id: None,
             thread_note,
+            share: None,
         };
         let now = jiff::Timestamp::now();
         let past = match conversation {

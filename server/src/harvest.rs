@@ -347,6 +347,7 @@ pub fn run_for_user(
             memory_source: Some(format!("harvest:{date}")),
             token_id: deps.token_id,
             thread_note: None,
+            share: None,
         };
         match crate::agent::run_session(
             &deps,
@@ -440,6 +441,7 @@ mod tests {
             memory_source: None,
             token_id: None,
             thread_note: None,
+            share: None,
         }
     }
 

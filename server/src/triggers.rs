@@ -667,6 +667,7 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
         memory_source: None,
         token_id: None,
         thread_note,
+        share: None,
     };
     let outcome = crate::agent::run_session(
         &deps,

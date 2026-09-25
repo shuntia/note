@@ -598,6 +598,7 @@ async fn task_agent(
             memory_source: None,
             token_id,
             thread_note: None,
+            share: None,
         };
         let session = crate::agent::run_session(
             &deps,
@@ -763,6 +764,7 @@ async fn agent_inbox(
             memory_source: None,
             token_id,
             thread_note: None,
+            share: None,
         };
         crate::agent::run_session(
             &deps,

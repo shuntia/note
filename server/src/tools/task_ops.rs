@@ -501,6 +501,8 @@ mod tests {
             task_scope: scope,
             inbox_source: None,
             memory_source: None,
+            share: None,
+            share_thread: None,
         }
     }
 

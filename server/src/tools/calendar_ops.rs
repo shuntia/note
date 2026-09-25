@@ -132,6 +132,21 @@ pub fn list(
     if !(1..=MAX_DAYS_AHEAD).contains(&span) {
         return Err(ToolError::rejected(format!("days must be in 1..={MAX_DAYS_AHEAD}")));
     }
+    if let Some(scope) = &ctx.share {
+        let first = today(ctx);
+        let internal = |e: jiff::Error| ToolError::internal(e.to_string());
+        let shared_end = first
+            .checked_add(jiff::Span::new().days(i64::from(scope.horizon_days)))
+            .map_err(internal)?;
+        let asked_end = start.checked_add(jiff::Span::new().days(i64::from(span))).map_err(internal)?;
+        if start < first || asked_end > shared_end {
+            return Err(ToolError::rejected(format!(
+                "this link shares {} to {}",
+                first,
+                shared_end.yesterday().map_err(internal)?
+            )));
+        }
+    }
     let mut days = Vec::with_capacity(span as usize);
     let mut date = start;
     for _ in 0..span {
@@ -322,6 +337,8 @@ mod tests {
             config_dir: tmp.path(), data_dir: tmp.path(), user_id: 1, username: "aki",
             vectors: PreparedVectors::default(), task_scope: None, inbox_source: None,
             memory_source: None,
+            share: None,
+            share_thread: None,
         }
     }
 

@@ -8,6 +8,7 @@ pub mod outreach_ops;
 pub mod plan_ops;
 pub mod review_ops;
 pub mod schedule_ops;
+pub mod share_ops;
 pub mod summary_ops;
 pub mod task_ops;
 pub mod task_query;
@@ -36,7 +37,12 @@ pub enum SessionKind {
     /// The week just ended, read once for the letter that stands beside Monday's
     /// debrief.
     Review,
+    /// A visitor on a share link: a read-only slice of one user's day, tasks
+    /// and goals, and nothing else.
+    Share,
 }
+
+pub const SHARE_MAX_TURNS: usize = 8;
 
 /// A tool failure returned to the model as a value; `kind` is machine-matchable,
 /// `message` is for the model to read.
@@ -93,6 +99,11 @@ pub struct ToolCtx<'a> {
     /// When set, every fact `memory_write` lands is recorded against this
     /// source id.
     pub memory_source: Option<String>,
+    /// When set, the read tools see only what this link shares: its categories,
+    /// its horizon, and titles alone unless it carries details.
+    pub share: Option<crate::shares::ShareScope>,
+    /// The visitor thread `share_note` files into.
+    pub share_thread: Option<i64>,
 }
 
 pub const MAX_ARGS_BYTES: usize = 64 * 1024;
@@ -235,7 +246,8 @@ const CONTEXT: &[&str] = &["context_edit"];
 const TASK_READ: &[&str] = &["task_list", "task_search", "task_read"];
 const TASK_WRITE: &[&str] = &["task_create", "task_update", "task_split", "task_delete"];
 const TASK_BULK: &[&str] = &["task_bulk_update"];
-const GOALS: &[&str] = &["goal_create", "goal_update", "goal_list"];
+const GOALS_WRITE: &[&str] = &["goal_create", "goal_update"];
+const GOALS_READ: &[&str] = &["goal_list"];
 const PLAN_READ: &[&str] = &["plan_list"];
 const PLAN_LAY: &[&str] = &["plan_tasks", "plan_auto"];
 /// Moving the rest of a day to the next is the user's call, so it lives only
@@ -260,6 +272,7 @@ const SUMMARY: &[&str] = &["summary_write"];
 const HARVEST_DONE: &[&str] = &["harvest_done"];
 const REVIEW_WRITE: &[&str] = &["review_write"];
 const SPEAK: &[&str] = &["say", "stay_quiet"];
+const SHARE_NOTE: &[&str] = &["share_note"];
 
 /// Every domain, in the one order each session's tools are offered in; the
 /// tests hold the registries below to it.
@@ -271,7 +284,8 @@ const DOMAINS: &[&[&str]] = &[
     TASK_READ,
     TASK_WRITE,
     TASK_BULK,
-    GOALS,
+    GOALS_WRITE,
+    GOALS_READ,
     PLAN_READ,
     PLAN_LAY,
     PLAN_CARRY,
@@ -291,6 +305,7 @@ const DOMAINS: &[&[&str]] = &[
     HARVEST_DONE,
     REVIEW_WRITE,
     SPEAK,
+    SHARE_NOTE,
 ];
 
 const fn joined<const N: usize>(domains: &[&[&'static str]]) -> [&'static str; N] {
@@ -323,7 +338,8 @@ const CHECKIN: &[&str] = registry_of![
     MEMORY_WRITE,
     TASK_READ,
     TASK_WRITE,
-    GOALS,
+    GOALS_WRITE,
+    GOALS_READ,
     PLAN_READ,
     PLAN_CARRY,
     SCHEDULE,
@@ -340,7 +356,8 @@ const TALK: &[&str] = registry_of![
     TASK_READ,
     TASK_WRITE,
     TASK_BULK,
-    GOALS,
+    GOALS_WRITE,
+    GOALS_READ,
     PLAN_READ,
     PLAN_LAY,
     PLAN_CARRY,
@@ -359,7 +376,8 @@ const NIGHTLY: &[&str] = registry_of![
     TASK_READ,
     TASK_WRITE,
     TASK_BULK,
-    GOALS,
+    GOALS_WRITE,
+    GOALS_READ,
     PLAN_READ,
     PLAN_LAY,
     SCHEDULE,
@@ -379,6 +397,8 @@ const INBOX: &[&str] = registry_of![MEMORY_READ, DECIDE];
 const SUMMARIZE: &[&str] = registry_of![SUMMARY];
 const HARVEST: &[&str] = registry_of![MEMORY_READ, MEMORY_WRITE, BATCH, HARVEST_DONE];
 const REVIEW: &[&str] = registry_of![MEMORY_READ, MEMORY_WRITE, BATCH, REVIEW_WRITE];
+const SHARE: &[&str] =
+    registry_of![TASK_READ, GOALS_READ, PLAN_READ, CALENDAR_READ, SHARE_NOTE];
 
 /// A tool whose success is the session's whole job: `run_session` returns on
 /// it instead of spending another model round on a closing sentence.
@@ -390,6 +410,7 @@ pub fn is_terminal(kind: SessionKind, name: &str) -> bool {
         SessionKind::Harvest => name == "harvest_done",
         SessionKind::Review => name == "review_write",
         SessionKind::Trigger => name == "say" || name == "stay_quiet",
+        SessionKind::Share => name == "share_note",
         _ => false,
     }
 }
@@ -405,7 +426,26 @@ pub fn registry(kind: SessionKind) -> &'static [&'static str] {
         SessionKind::Harvest => HARVEST,
         SessionKind::Review => REVIEW,
         SessionKind::Trigger => TRIGGER,
+        SessionKind::Share => SHARE,
     }
+}
+
+/// Which of the share registry a link's switches leave on.
+pub fn share_allows(scope: &crate::shares::ShareScope, name: &str) -> bool {
+    match name {
+        "task_list" | "task_search" | "task_read" => scope.tasks,
+        "plan_list" | "calendar_list" => scope.today,
+        "goal_list" => scope.goals,
+        "share_note" => scope.notes,
+        _ => false,
+    }
+}
+
+pub fn share_schemas(scope: &crate::shares::ShareScope) -> Vec<serde_json::Value> {
+    schemas(SessionKind::Share)
+        .into_iter()
+        .filter(|s| share_allows(scope, s["name"].as_str().unwrap_or("")))
+        .collect()
 }
 
 fn schema<T: schemars::JsonSchema>() -> serde_json::Value {
@@ -695,6 +735,11 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
              nor a tool that ends the session.",
             schema::<BatchArgs>(),
         ),
+        "share_note" => (
+            "File a message the visitor wants passed on to the owner. Use it only when they ask \
+             you to tell, remind or pass something along; confirm in one sentence.",
+            schema::<share_ops::NoteArgs>(),
+        ),
         _ => unreachable!("describe covers every registered tool"),
     }
 }
@@ -729,11 +774,16 @@ pub fn dispatch(
         )));
     }
     if !registry(kind).contains(&name) {
-        return Err(if NIGHTLY.contains(&name) {
+        return Err(if NIGHTLY.contains(&name) || SHARE.contains(&name) {
             ToolError::forbidden(format!("tool {name} is not available in this session type"))
         } else {
             ToolError::unknown_tool(format!("no such tool: {name}"))
         });
+    }
+    if let Some(scope) = &ctx.share {
+        if !share_allows(scope, name) {
+            return Err(ToolError::forbidden(format!("tool {name} is not shared on this link")));
+        }
     }
     let tx = conn.unchecked_transaction().map_err(|e| ToolError::internal(e.to_string()))?;
     let out = run(&tx, ctx, kind, name, raw_args)?;
@@ -791,6 +841,7 @@ fn run(
         "trigger_budget" => trigger_ops::budget(conn, ctx, parse(raw)?),
         "say" => trigger_ops::say(conn, ctx, parse(raw)?),
         "stay_quiet" => trigger_ops::stay_quiet(conn, ctx, parse(raw)?),
+        "share_note" => share_ops::note(conn, ctx, parse(raw)?),
         // Both run in the session around this dispatch: one reaches the
         // network, the other expands into calls of its own.
         "web_search" | "batch" => {
@@ -816,7 +867,7 @@ mod tests {
     }
 
     fn ctx<'a>(tmp: &'a tempfile::TempDir) -> ToolCtx<'a> {
-        ToolCtx { config_dir: tmp.path(), data_dir: tmp.path(), user_id: 1, username: "aki", vectors: PreparedVectors::default(), task_scope: None, inbox_source: None, memory_source: None }
+        ToolCtx { config_dir: tmp.path(), data_dir: tmp.path(), user_id: 1, username: "aki", vectors: PreparedVectors::default(), task_scope: None, inbox_source: None, memory_source: None, share: None, share_thread: None }
     }
 
     #[test]
@@ -1177,7 +1228,7 @@ mod tests {
         }
     }
 
-    const KINDS: [SessionKind; 9] = [
+    const KINDS: [SessionKind; 10] = [
         SessionKind::Nightly,
         SessionKind::Checkin,
         SessionKind::Talk,
@@ -1187,6 +1238,7 @@ mod tests {
         SessionKind::Harvest,
         SessionKind::Review,
         SessionKind::Trigger,
+        SessionKind::Share,
     ];
 
     /// The membership a kind offers is a union of whole domains, and the order
@@ -1230,13 +1282,14 @@ mod tests {
     /// other.
     #[test]
     fn every_terminal_tool_is_offered_by_its_own_kind_alone() {
-        let terminals: [(SessionKind, &[&str]); 6] = [
+        let terminals: [(SessionKind, &[&str]); 7] = [
             (SessionKind::Import, BRIEF),
             (SessionKind::Inbox, DECIDE),
             (SessionKind::Summarize, SUMMARY),
             (SessionKind::Harvest, HARVEST_DONE),
             (SessionKind::Review, REVIEW_WRITE),
             (SessionKind::Trigger, SPEAK),
+            (SessionKind::Share, SHARE_NOTE),
         ];
         for (kind, names) in terminals {
             for name in names {
@@ -1444,6 +1497,7 @@ mod tests {
             SessionKind::Harvest,
             SessionKind::Review,
             SessionKind::Trigger,
+            SessionKind::Share,
         ] {
             let schemas = schemas(kind);
             assert_eq!(schemas.len(), registry(kind).len());
@@ -1453,5 +1507,50 @@ mod tests {
                 assert!(s["input_schema"].is_object());
             }
         }
+    }
+
+    #[test]
+    fn the_share_registry_reads_only() {
+        let r = registry(SessionKind::Share);
+        for name in r {
+            assert!(
+                ["task_list", "task_search", "task_read", "plan_list", "calendar_list", "goal_list", "share_note"].contains(name),
+                "{name} has no place on the share surface"
+            );
+        }
+        for gone in ["memory_query", "memory_read", "memory_write", "context_edit", "task_create", "task_update", "web_search", "batch", "trigger_set", "notify_send"] {
+            assert!(!r.contains(&gone), "{gone} leaked into the share registry");
+        }
+        assert!(is_terminal(SessionKind::Share, "share_note"));
+        assert!(TALK.contains(&"goal_list") && TALK.contains(&"goal_create"));
+    }
+
+    #[test]
+    fn share_schemas_follow_the_switches() {
+        let names = |s: &crate::shares::ShareScope| -> Vec<String> {
+            share_schemas(s).iter().map(|v| v["name"].as_str().unwrap().to_string()).collect()
+        };
+        let all = crate::shares::ShareScope { notes: true, ..Default::default() };
+        assert_eq!(names(&all).len(), 7);
+        let no_tasks = crate::shares::ShareScope { tasks: false, ..Default::default() };
+        assert!(!names(&no_tasks).iter().any(|n| n.starts_with("task_")));
+        let no_today = crate::shares::ShareScope { today: false, ..Default::default() };
+        assert!(!names(&no_today).iter().any(|n| n == "plan_list" || n == "calendar_list"));
+        let no_goals = crate::shares::ShareScope { goals: false, ..Default::default() };
+        assert!(!names(&no_goals).contains(&"goal_list".to_string()));
+        assert!(!names(&crate::shares::ShareScope::default()).contains(&"share_note".to_string()));
+    }
+
+    #[test]
+    fn a_switched_off_tool_is_forbidden_on_the_link() {
+        let (conn, tmp) = env();
+        let scope = crate::shares::ShareScope { tasks: false, ..Default::default() };
+        let sctx = ToolCtx { share: Some(scope), share_thread: Some(1), ..ctx(&tmp) };
+        let e = dispatch(&conn, &sctx, SessionKind::Share, "task_list", "{}").unwrap_err();
+        assert_eq!(e.kind, "forbidden");
+        let e = dispatch(&conn, &sctx, SessionKind::Share, "share_note", r#"{"text":"hi"}"#).unwrap_err();
+        assert_eq!(e.kind, "forbidden", "notes are off by default");
+        let e = dispatch(&conn, &sctx, SessionKind::Share, "memory_write", "{}").unwrap_err();
+        assert_eq!(e.kind, "forbidden");
     }
 }

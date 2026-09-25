@@ -50,6 +50,8 @@ mod tests {
             task_scope: None,
             inbox_source: None,
             memory_source: None,
+            share: None,
+            share_thread: None,
         }
     }
 
