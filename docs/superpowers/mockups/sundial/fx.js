@@ -41,10 +41,9 @@ function glow(face, peak) {
 // The fill runs to the end, the two ends meet, and a bead drops into the opening.
 export function closeRing(face, fill, beadIndex = 0) {
   const svg = svgOf(face)
-  const head = svg.querySelector('.head')
   const tl = gsap.timeline()
+  fill.style.opacity = 1
   tl.to(fill, { attr: { 'stroke-dasharray': `${SPAN} ${C}` }, duration: 0.55, ease: 'power3.inOut' }, 0)
-  if (head) tl.to(head, { attr: headAt(1), duration: 0.55, ease: 'power3.inOut' }, 0)
   tl.to([fill], { attr: { 'stroke-width': 11 }, duration: 0.18, yoyo: true, repeat: 1, ease: 'sine.inOut' }, 0.45)
   tl.add(() => bead(face, beadIndex), 0.5)
   tl.add(() => ripple(face, 1), 0.5)
@@ -81,29 +80,22 @@ export function beadsAtRest(face, done, total = 4) {
   }
 }
 
-// The ring closes clockwise from where the arc begins, the grey track appears
-// beneath it, and the ring opens again from its tail, unwinding round to the head;
-// the head then fades and the fill is ready to count. `done` runs when it is.
+// The arc draws clockwise from where it begins, the grey track appears beneath
+// it, and the arc unwinds again from its tail: the fill is then ready to count.
+// `done` runs when it is.
 export function open(face, fill, track, done) {
-  const svg = svgOf(face)
-  svg.querySelector('.head')?.remove()
-  const head = circle({ cx: 0, cy: 0, r: 5.5, fill: 'var(--sun)', class: 'head' })
-  svg.append(head)
   const s = { len: 0, cut: 0 }
   const paint = () => {
     const len = Math.max(0, s.len - s.cut)
     fill.setAttribute('stroke-dasharray', `${len} ${C}`)
     fill.setAttribute('stroke-dashoffset', -s.cut)
-    fill.style.opacity = len > 0.5 ? 1 : 0
-    const a = (240 + (360 * s.len) / C) * Math.PI / 180
-    head.setAttribute('cx', 160 + 148 * Math.cos(a)); head.setAttribute('cy', 160 + 148 * Math.sin(a))
+    fill.style.opacity = len > 9 ? 1 : 0
   }
   gsap.set(track, { opacity: 0 })
-  const tl = gsap.timeline({ onUpdate: paint, onComplete: () => { fill.setAttribute('stroke-dashoffset', 0); fill.setAttribute('stroke-dasharray', `0 ${C}`); done?.() } })
-  tl.to(s, { len: C, duration: 0.75, ease: 'power2.inOut' }, 0)
-  tl.to(track, { opacity: 1, duration: 0.5, ease: 'power1.out' }, 0.5)
-  tl.to(s, { cut: C, duration: 0.65, ease: 'power2.inOut' }, 0.8)
-  tl.to(head, { opacity: 0, duration: 0.3, onComplete: () => head.remove() }, 1.3)
+  const tl = gsap.timeline({ onUpdate: paint, onComplete: () => { fill.setAttribute('stroke-dashoffset', 0); fill.setAttribute('stroke-dasharray', `0 ${C}`); fill.style.opacity = 0; done?.() } })
+  tl.to(s, { len: SPAN, duration: 0.7, ease: 'power2.inOut' }, 0)
+  tl.to(track, { opacity: 1, duration: 0.5, ease: 'power1.out' }, 0.45)
+  tl.to(s, { cut: SPAN, duration: 0.6, ease: 'power2.inOut' }, 0.75)
   return tl
 }
 

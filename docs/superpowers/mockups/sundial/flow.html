@@ -46,7 +46,7 @@ body{margin:0;background:#ddd;font-family:var(--sans)}
 <div class="legend">
   <b>Try it</b>
   <p>Wait: the bar leaves. Touch anywhere: it returns.</p>
-  <p>Tap the circle: the ring closes, the track appears beneath, the ring opens again, and work begins on the most pressing task.</p>
+  <p>Tap the circle: the arc draws, the track appears beneath, the arc unwinds, and work begins on the most pressing task.</p>
   <p>Swipe left: the next task. Swipe right past the first: work time on nothing in particular.</p>
   <p>Tap the circle while working: pause. Tap again: back to it. Swipe down: done, and a bead joins the ring's opening.</p>
   <p>The hint under the circle shows the first three times only.</p>
@@ -89,7 +89,7 @@ body{margin:0;background:#ddd;font-family:var(--sans)}
   const setArc = (frac, faded) => {
     if (opening || gsap.isTweening(fill)) return
     fill.setAttribute('stroke-dasharray', `${SPAN * frac} ${C}`)
-    fill.style.opacity = frac > 0.002 ? 1 : 0
+    fill.style.opacity = SPAN * frac > 9 ? 1 : 0
     const head = face.querySelector('.head'); if (head) { const p = headAt(frac); head.setAttribute('cx', p.cx); head.setAttribute('cy', p.cy) }
     arcbox.style.opacity = faded ? 0.38 : 1
   }
