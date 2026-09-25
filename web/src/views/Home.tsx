@@ -222,7 +222,7 @@ export function Home({
   const motion = useMotion()
   useIdle(!mobile)
 
-  const newest = useRef(latest<DayView>()).current
+  const newest = useState(() => latest<DayView>())[0]
   const load = useCallback(() => {
     const date = todayIso()
     newest(api.day(date))

@@ -338,7 +338,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
       .catch(() => setGoals([]))
   }, [])
 
-  const newest = useRef(latest<TaskNode[]>()).current
+  const newest = useState(() => latest<TaskNode[]>())[0]
   const load = useCallback(() => {
     loadGoals()
     newest(api.tasks())
@@ -385,6 +385,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
   // A restored row still folding away stays where it is and unfolds its finish.
   const restore = useCallback(
     async (snap: Snapshot) => {
+      mark()
       setLeaving((ls) => ls.filter((l) => !snap.some((s) => s.id === l.id)))
       setNodes((ns) =>
         ns ? snap.reduce((acc, s) => withState(acc, s.id, s.state, s.progress), ns) : ns,
@@ -392,7 +393,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
       for (const s of snap) await patch(s.id, { state: s.state, progress: s.progress })
       loadGoals()
     },
-    [loadGoals, patch],
+    [loadGoals, mark, patch],
   )
 
   const markLeaving = (node: TaskNode, state: TaskState) => {

@@ -180,7 +180,7 @@ export function CalendarSection({
   const tips = useTips()
   const quietUntil = day?.date === today ? day.quiet_now : null
 
-  const newest = useRef(latest<{ entries: CalendarEntry[] }>()).current
+  const newest = useState(() => latest<{ entries: CalendarEntry[] }>())[0]
   const load = useCallback(() => {
     setToday(isoOf(new Date()))
     newest(api.calendar())

@@ -1,5 +1,9 @@
-import { expect, test } from 'vitest'
+import { expect, test, vi } from 'vitest'
+import { settle } from './motion-gsap'
 import { capped, waveDelays } from './wave'
+
+const tween = vi.hoisted(() => vi.fn())
+vi.mock('gsap', () => ({ default: { from: tween } }))
 
 const r = (top: number, height = 36): DOMRectReadOnly =>
   ({ top, bottom: top + height, left: 0, right: 100, height, width: 100, x: 0, y: top, toJSON() {} }) as DOMRectReadOnly
@@ -27,4 +31,23 @@ test('a short list keeps its stagger, a long one is capped', () => {
   expect(capped(0.04, 3)).toBe(0.04)
   expect(capped(0.04, 30)).toBeCloseTo(0.01)
   expect(capped(0.1, 1)).toBe(0.1)
+})
+
+test('settle pairs each shown row with its own delay, skipping rows off screen', () => {
+  vi.stubGlobal('window', { innerWidth: 1000, innerHeight: 400, matchMedia: () => ({ matches: false }) })
+  vi.stubGlobal(
+    'DOMRect',
+    class {
+      constructor(public x: number, public y: number, public width: number, public height: number) {}
+      get top() { return this.y }
+      get bottom() { return this.y + this.height }
+    },
+  )
+  const row = (top: number) => ({ getBoundingClientRect: () => r(top) }) as unknown as Element
+  const rows = [row(-100), row(0), row(500), row(100), row(200)]
+  settle(rows)
+  const [shown, vars] = tween.mock.calls[0] as [Element[], { stagger: (i: number) => number }]
+  expect(shown).toEqual([rows[1], rows[3], rows[4]])
+  expect(shown.map((_, i) => vars.stagger(i))).toEqual([0, 0.12, 0.24])
+  vi.unstubAllGlobals()
 })

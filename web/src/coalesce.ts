@@ -10,11 +10,14 @@ export function trailing(fn: () => void, ms: number): () => void {
   }
 }
 
-/** Only the newest request's answer counts; an older one resolves to undefined. */
+/** Only the newest request's answer or failure counts; an older one resolves to undefined. */
 export function latest<T>(): (p: Promise<T>) => Promise<T | undefined> {
   let seq = 0
   return (p) => {
     const mine = ++seq
-    return p.then((v) => (mine === seq ? v : undefined))
+    return p.then(
+      (v) => (mine === seq ? v : undefined),
+      (err: unknown) => (mine === seq ? Promise.reject(err) : undefined),
+    )
   }
 }
