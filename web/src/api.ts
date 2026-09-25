@@ -38,6 +38,7 @@ import type {
   TaskNotify,
   TaskState,
   TaskUpdate,
+  TaskUrgency,
   Token,
   TokenCreated,
   TotpEnrolment,
@@ -110,6 +111,7 @@ type TaskPatch = {
   notify?: TaskNotify
   progress?: number
   category?: string
+  urgency?: TaskUrgency
   // null detaches the task from whatever goal it was on.
   goal_id?: number | null
 }
