@@ -1642,7 +1642,7 @@ mod tests {
         }
         let llm = MockLLM::scripted(vec![ChatResponse { text: "Aki has a lab report.".into(), tool_calls: vec![] }]);
         let share = ShareSession { id: 1, thread_id: 1, brief: "be warm".into(), scope: crate::shares::ShareScope::default() };
-        let deps = SessionDeps { db: &db, config_dir: tmp.path(), data_dir: tmp.path(), llm: &llm, embeddings: None, search: None, task_scope: None, inbox_source: None, memory_source: None, token_id: None, thread_note: None, share: Some(share) };
+        let deps = SessionDeps { db: &db, config_dir: tmp.path(), data_dir: tmp.path(), llm: &llm, embeddings: None, search: None, task_scope: None, inbox_source: None, memory_source: None, token_id: None, thread_note: Some("SECRET NOTE".into()), share: Some(share) };
         let out = run_session(&deps, 1, "aki", SessionKind::Share, jiff::Timestamp::now(), &[], "what does aki have?").unwrap();
         assert_eq!(out.reply, "Aki has a lab report.");
         let seen = llm.seen();
@@ -1652,10 +1652,12 @@ mod tests {
         assert!(seen[0].system.contains("lab report"));
         assert!(!seen[0].system.contains("SECRET STANDING LINE"));
         assert!(!seen[0].system.contains("# Standing context"));
+        assert!(!seen[0].system.contains("SECRET NOTE"));
         assert!(!seen[0].tool_names.iter().any(|n| n.starts_with("memory_") || n == "task_create" || n == "share_note"));
         let conn = db.lock().unwrap();
-        let kind: String = conn.query_row("SELECT kind FROM event_log WHERE kind LIKE 'share%'", [], |r| r.get(0)).unwrap();
+        let (kind, detail): (String, String) = conn.query_row("SELECT kind, detail FROM event_log WHERE kind LIKE 'share%'", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
         assert_eq!(kind, "share_session");
+        assert!(detail.contains("share=1"), "{detail}");
         assert_eq!(crate::log::agent_sessions_since(&conn, 1, jiff::Timestamp::now() - jiff::Span::new().hours(1)).unwrap(), 0);
     }
 }
