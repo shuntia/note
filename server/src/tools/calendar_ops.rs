@@ -407,6 +407,18 @@ mod tests {
     }
 
     #[test]
+    fn a_share_lists_only_inside_its_horizon() {
+        let (conn, tmp) = env();
+        let sctx = ToolCtx { share: Some(crate::shares::ShareScope::default()), ..ctx(&tmp) };
+        let today = jiff::Timestamp::now().to_zoned(jiff::tz::TimeZone::UTC).date();
+        let list = |args: String| dispatch(&conn, &sctx, SessionKind::Share, "calendar_list", &args);
+        assert_eq!(list(format!(r#"{{"date":"{today}","days":3}}"#)).unwrap()["days"].as_array().unwrap().len(), 3);
+        let yesterday = today.yesterday().unwrap();
+        assert_eq!(list(format!(r#"{{"date":"{yesterday}"}}"#)).unwrap_err().kind, "rejected");
+        assert_eq!(list(format!(r#"{{"date":"{today}","days":4}}"#)).unwrap_err().kind, "rejected");
+    }
+
+    #[test]
     fn listing_without_a_date_reads_today_in_the_users_timezone() {
         let (conn, tmp) = env();
         let out =

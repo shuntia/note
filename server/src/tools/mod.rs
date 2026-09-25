@@ -737,7 +737,8 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
         ),
         "share_note" => (
             "File a message the visitor wants passed on to the owner. Use it only when they ask \
-             you to tell, remind or pass something along; confirm in one sentence.",
+             you to tell, remind or pass something along. It ends the turn, and the visitor is told \
+             it was passed on.",
             schema::<share_ops::NoteArgs>(),
         ),
         _ => unreachable!("describe covers every registered tool"),

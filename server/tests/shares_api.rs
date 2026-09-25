@@ -388,12 +388,101 @@ async fn a_note_is_filed_and_delivered_only_when_the_switch_is_on() {
     let (status, turn) = read(visitor(&app2, Method::POST, &format!("/api/share/{}/messages", token_of(&on)), Some(r#"{"message":"tell aki I'm late"}"#), None).await).await;
     assert_eq!(status, StatusCode::OK, "{turn}");
     assert_eq!(turn["note"], true);
+    assert_eq!(turn["reply"], "Passed on to X.");
     let seen = mock.seen();
     assert_eq!(seen.len(), 1);
     assert_eq!(seen[0].1.title, "Note from Dad");
     assert_eq!(seen[0].1.body, "I will be late tonight");
     let (_, threads) = owner(&app2, &cookie, Method::GET, &format!("/api/shares/{}/threads", on["id"]), None).await;
-    assert!(threads[0]["messages"].as_array().unwrap().iter().any(|m| m["role"] == "note"));
+    let thread: Vec<(&str, &str)> = threads[0]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| (m["role"].as_str().unwrap(), m["content"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        thread,
+        vec![("user", "tell aki I'm late"), ("note", "I will be late tonight"), ("assistant", "Passed on to X.")]
+    );
+}
+
+#[tokio::test]
+async fn a_failed_turn_leaves_nothing_on_the_thread() {
+    struct Down;
+    impl note_server::providers::LLMProvider for Down {
+        fn chat(&self, _req: &note_server::providers::ChatRequest) -> anyhow::Result<ChatResponse> {
+            anyhow::bail!("provider down")
+        }
+    }
+    let llm = Arc::new(Down);
+    let (app, cookie, state, _cfg) = common::app_with_logged_in_user_llm_and_state(llm).await;
+    let token = token_of(&mint(&app, &cookie, "Mom", "{}").await);
+    let res = visitor(&app, Method::POST, &format!("/api/share/{token}/messages"), Some(r#"{"message":"hello?"}"#), None).await;
+    assert!(!res.status().is_success(), "{}", res.status());
+    let n: i64 = state.db().query_row("SELECT COUNT(*) FROM share_messages", [], |r| r.get(0)).unwrap();
+    assert_eq!(n, 0);
+}
+
+#[tokio::test]
+async fn a_goal_title_travels_only_when_goals_are_shared() {
+    let (app, cookie, state, _cfg) = common::app_with_logged_in_user_and_state().await;
+    let (_, goal) = owner(&app, &cookie, Method::POST, "/api/goals", Some(r#"{"title":"GOAL-TITLE-SECRET"}"#)).await;
+    let (_, task) = owner(&app, &cookie, Method::POST, "/api/tasks", Some(&format!(r#"{{"title":"lab report","category":"school","goal_id":{}}}"#, goal["id"]))).await;
+    let read_task = format!(r#"{{"task_id":{}}}"#, task["id"]);
+    let probes: Vec<(&str, &str)> = vec![("task_list", "{}"), ("task_read", &read_task), ("task_search", r#"{"query":"lab"}"#)];
+    for goals in [false, true] {
+        let llm = scripted(vec![calls(&probes), say("done looking")]);
+        let mut state = state.clone();
+        state.llm = llm.clone();
+        let app = note_server::api::router(state);
+        let token = token_of(&mint(&app, &cookie, &format!("goals {goals}"), &format!(r#"{{"categories":["school"],"goals":{goals}}}"#)).await);
+        let (_, view) = read(visitor(&app, Method::GET, &format!("/api/share/{token}/view"), None, None).await).await;
+        let (status, turn) = read(visitor(&app, Method::POST, &format!("/api/share/{token}/messages"), Some(r#"{"message":"what is it for?"}"#), None).await).await;
+        assert_eq!(status, StatusCode::OK, "{turn}");
+        let mut everything = transcript(&llm.seen());
+        everything.push_str(&view.to_string());
+        assert!(everything.contains("lab report"));
+        assert_eq!(everything.contains("GOAL-TITLE-SECRET"), goals, "goals {goals}:\n{everything}");
+    }
+}
+
+#[tokio::test]
+async fn another_users_link_is_404_the_cap_is_409_and_the_log_names_the_link() {
+    let cfg = common::config_dir();
+    let dir = cfg.path().to_path_buf();
+    let conn = note_server::db::open_memory().unwrap();
+    note_server::auth::create_user(&conn, "aki", "pw", true).unwrap();
+    note_server::auth::create_user(&conn, "rin", "pw", false).unwrap();
+    let limits = note_server::config::LimitsConfig { shares_per_user: 2, ..Default::default() };
+    let state = note_server::AppState::new(conn, dir.clone(), dir).with_limits(&limits);
+    let app = note_server::api::router(state.clone());
+    let aki = common::login(&app, "aki", "pw").await;
+    let rin = common::login(&app, "rin", "pw").await;
+
+    let first = mint(&app, &aki, "Mom", "{}").await;
+    let id = first["id"].as_i64().unwrap();
+    for (method, path, body) in [
+        (Method::PATCH, format!("/api/shares/{id}"), Some(r#"{"name":"mine now"}"#)),
+        (Method::DELETE, format!("/api/shares/{id}"), None),
+        (Method::GET, format!("/api/shares/{id}/threads"), None),
+    ] {
+        let (status, _) = owner(&app, &rin, method.clone(), &path, body).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{method} {path}");
+    }
+
+    mint(&app, &aki, "Dad", "{}").await;
+    let (status, _) = owner(&app, &aki, Method::POST, "/api/shares", Some(&format!(r#"{{"name":"Third","expires_at":"{}"}}"#, in_days(1)))).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    let (status, _) = owner(&app, &aki, Method::DELETE, &format!("/api/shares/{id}"), None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let conn = state.db();
+    for kind in ["share_created", "share_revoked"] {
+        let detail: String = conn
+            .query_row("SELECT detail FROM event_log WHERE kind = ?1 ORDER BY id LIMIT 1", [kind], |r| r.get(0))
+            .unwrap();
+        assert!(detail.starts_with(&format!("share={id} ")), "{kind}: {detail}");
+    }
 }
 
 #[tokio::test]
