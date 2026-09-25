@@ -1566,7 +1566,19 @@ function scopeWords(s: ShareScope): string {
   if (s.today) parts.push('plan')
   if (s.goals) parts.push('goals')
   if (s.progress) parts.push('progress')
-  return parts.join(', ') || 'nothing'
+  const words = parts.join(', ') || 'nothing'
+  return words.charAt(0).toUpperCase() + words.slice(1)
+}
+
+function localToday(): string {
+  const d = new Date()
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
+function clampedOr(raw: string, current: number, min: number, max: number): number {
+  const n = Number(raw)
+  if (raw.trim() === '' || !Number.isFinite(n)) return current
+  return Math.min(max, Math.max(min, Math.round(n)))
 }
 
 type ShareDraft = { name: string; brief: string; scope: ShareScope; days: number; date: string }
@@ -1577,14 +1589,17 @@ function ShareForm({
   submit,
   busy,
   label,
+  expiryNote,
 }: {
   initial: ShareDraft
   categories: string[]
   submit: (d: ShareDraft) => void
   busy: boolean
   label: string
+  expiryNote?: string
 }) {
   const [d, setD] = useState<ShareDraft>(initial)
+  const pills = [...new Set([...categories, ...d.scope.categories])].sort()
   const scope = (patch: Partial<ShareScope>) => setD((x) => ({ ...x, scope: { ...x.scope, ...patch } }))
   const toggleCategory = (c: string) =>
     scope({
@@ -1601,35 +1616,38 @@ function ShareForm({
       }}
     >
       <input aria-label="Link name" placeholder="Who is this for" maxLength={64} value={d.name} onChange={(e) => setD({ ...d, name: e.target.value })} />
+      {expiryNote && <span className="set-sub">{expiryNote}</span>}
       <div className="set-row">
         <span className="set-row-body"><span className="set-label">Ends after</span></span>
         <div className="seg" role="group" aria-label="Expiry">
           {EXPIRIES.map((x) => (
             <button key={x.id} type="button" aria-pressed={d.days === x.id && d.date === ''} onClick={() => setD({ ...d, days: x.id, date: '' })}>{x.label}</button>
           ))}
-          <input type="date" aria-label="Ends on a date" value={d.date} onChange={(e) => setD({ ...d, date: e.target.value })} />
+          <input type="date" aria-label="Ends on a date" min={localToday()} value={d.date} onChange={(e) => setD({ ...d, date: e.target.value })} />
         </div>
       </div>
       <div className="set-row"><span className="set-row-body"><span className="set-label">Plan for the next days</span></span><Switch label="Share the plan" on={d.scope.today} onToggle={() => scope({ today: !d.scope.today })} /></div>
       {d.scope.today && (
-        <div className="set-row"><span className="set-row-body"><span className="set-label">How many days ahead</span></span><input type="number" min={1} max={14} value={d.scope.horizon_days} onChange={(e) => scope({ horizon_days: Number(e.target.value) })} /></div>
+        <div className="set-row"><span className="set-row-body"><span className="set-label">How many days ahead</span></span><input type="number" aria-label="How many days ahead" min={1} max={14} value={d.scope.horizon_days} onChange={(e) => scope({ horizon_days: clampedOr(e.target.value, d.scope.horizon_days, 1, 14) })} /></div>
       )}
       <div className="set-row"><span className="set-row-body"><span className="set-label">Open tasks</span></span><Switch label="Share tasks" on={d.scope.tasks} onToggle={() => scope({ tasks: !d.scope.tasks })} /></div>
-      {categories.length > 0 && (
+      {d.scope.tasks && pills.length > 0 && (
         <div className="set-share-cats">
           <span className="set-sub">Only these categories, or none for all</span>
-          <div className="seg wrap">
-            {categories.map((c) => (
+          <div className="seg wrap" role="group" aria-label="Categories">
+            {pills.map((c) => (
               <button key={c} type="button" aria-pressed={d.scope.categories.includes(c)} onClick={() => toggleCategory(c)}>{c}</button>
             ))}
           </div>
         </div>
       )}
-      <div className="set-row"><span className="set-row-body"><span className="set-label">Task descriptions and notes</span></span><Switch label="Share details" on={d.scope.details} onToggle={() => scope({ details: !d.scope.details })} /></div>
+      {d.scope.tasks && (
+        <div className="set-row"><span className="set-row-body"><span className="set-label">Task descriptions and notes</span></span><Switch label="Share details" on={d.scope.details} onToggle={() => scope({ details: !d.scope.details })} /></div>
+      )}
       <div className="set-row"><span className="set-row-body"><span className="set-label">Goals</span></span><Switch label="Share goals" on={d.scope.goals} onToggle={() => scope({ goals: !d.scope.goals })} /></div>
       <div className="set-row"><span className="set-row-body"><span className="set-label">Done this week</span></span><Switch label="Share progress" on={d.scope.progress} onToggle={() => scope({ progress: !d.scope.progress })} /></div>
       <div className="set-row"><span className="set-row-body"><span className="set-label">They can leave you a note</span></span><Switch label="Allow notes" on={d.scope.notes} onToggle={() => scope({ notes: !d.scope.notes })} /></div>
-      <div className="set-row"><span className="set-row-body"><span className="set-label">Messages a day</span></span><input type="number" min={1} max={100} value={d.scope.messages_per_day} onChange={(e) => scope({ messages_per_day: Number(e.target.value) })} /></div>
+      <div className="set-row"><span className="set-row-body"><span className="set-label">Messages a day</span></span><input type="number" aria-label="Messages a day" min={1} max={100} value={d.scope.messages_per_day} onChange={(e) => scope({ messages_per_day: clampedOr(e.target.value, d.scope.messages_per_day, 1, 100) })} /></div>
       <textarea aria-label="Brief for Note" placeholder="Tell Note how to talk to them and what to steer clear of" rows={3} maxLength={4096} value={d.brief} onChange={(e) => setD({ ...d, brief: e.target.value })} />
       <span className="set-sub">Note reads this before every reply on this link.</span>
       <button type="submit" className="btn-haze small" disabled={busy || !d.name.trim()}>{label}</button>
@@ -1646,7 +1664,7 @@ function SharesSection({ notify }: { notify: Notify }) {
   const [threads, setThreads] = useState<ShareThread[] | undefined>(undefined)
   const [busy, setBusy] = useState(false)
   const [fresh, setFresh] = useState<Share | null>(null)
-  const [arming, setArming] = useState<number | null>(null)
+  const threadsFor = useRef<number | null>(null)
 
   useEffect(() => {
     api.shares().then(setShares).catch(() => setShares('error'))
@@ -1688,12 +1706,7 @@ function SharesSection({ notify }: { notify: Notify }) {
     }
   }
 
-  const revoke = async (s: Share) => {
-    if (arming !== s.id) {
-      setArming(s.id)
-      return
-    }
-    setArming(null)
+  const doRevoke = async (s: Share) => {
     try {
       await api.revokeShare(s.id)
       setShares((all) => (Array.isArray(all) ? all.filter((x) => x.id !== s.id) : all))
@@ -1705,18 +1718,25 @@ function SharesSection({ notify }: { notify: Notify }) {
   }
 
   const copy = (s: Share) => {
-    navigator.clipboard?.writeText(s.url).then(() => notify('Link copied'), () => notify('Copy the link from the box below'))
+    const fallback = () => notify('Copy the link from the box above')
+    if (navigator.clipboard) navigator.clipboard.writeText(s.url).then(() => notify('Link copied'), fallback)
+    else fallback()
     setFresh(s)
   }
 
   const showThreads = (s: Share) => {
     if (openThreads === s.id) {
+      threadsFor.current = null
       setOpenThreads(null)
       return
     }
+    threadsFor.current = s.id
     setOpenThreads(s.id)
     setThreads(undefined)
-    api.shareThreads(s.id).then(setThreads).catch(() => setThreads([]))
+    const land = (ts: ShareThread[]) => {
+      if (threadsFor.current === s.id) setThreads(ts)
+    }
+    api.shareThreads(s.id).then(land).catch(() => land([]))
   }
 
   const blank: ShareDraft = { name: '', brief: '', scope: DEFAULT_SCOPE, days: 30, date: '' }
@@ -1752,11 +1772,20 @@ function SharesSection({ notify }: { notify: Notify }) {
                   { label: 'Preview as visitor', run: () => window.open(s.url, '_blank', 'noopener') },
                   { label: openThreads === s.id ? 'Hide conversations' : 'Conversations', run: () => showThreads(s) },
                   { label: editing === s.id ? 'Stop editing' : 'Edit', run: () => setEditing(editing === s.id ? null : s.id) },
-                  { label: arming === s.id ? 'Really revoke?' : 'Revoke', kind: 'danger', run: () => void revoke(s) },
+                  { label: 'Revoke', kind: 'danger', run: () => notify('Revoke this link?', { label: 'Revoke', run: () => void doRevoke(s) }) },
                 ]}
               />
             </div>
-            {editing === s.id && <ShareForm initial={draftOf(s)} categories={categories} submit={(d) => void save(s, d)} busy={busy} label="Save" />}
+            {editing === s.id && (
+              <ShareForm
+                initial={draftOf(s)}
+                categories={categories}
+                submit={(d) => void save(s, d)}
+                busy={busy}
+                label="Save"
+                expiryNote={`Currently until ${dayOf(s.expires_at)}; pick a preset or a date to change it`}
+              />
+            )}
             {openThreads === s.id && (
               <div className="set-share-threads">
                 {threads === undefined && <span className="set-sub">Loading</span>}
