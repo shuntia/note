@@ -86,7 +86,7 @@
 **Interfaces:**
 - Produces: `tasks::URGENCY: &[&str]`, `Task.urgency: String`, `Task.pressing: bool`, `NewTask.urgency: Option<String>`, `TaskPatch.urgency: Option<String>`, `pub fn pressing_at(due_at: Option<&str>, now: jiff::Timestamp) -> bool`, `pub const PRESSING_HOURS: i64 = 48`, `plan::TaskRef { urgency: String, pressing: bool }`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `mod tests` in `server/src/tasks.rs` (the module already has an `env()`-style helper that opens `db::open_memory()` and inserts user 1; reuse whatever helper the existing tests use to get a `Connection` with user id 1, referred to below as `conn()`):
 
@@ -164,12 +164,12 @@ fn pressing_flips_at_forty_eight_hours_and_for_overdue() {
 }
 ```
 
-- [ ] **Step 2: Run the tests to see them fail**
+- [x] **Step 2: Run the tests to see them fail**
 
 Run: `cargo test -p note-server tasks::tests::urgency -- --nocapture` and the two others by name.
 Expected: compile errors — `urgency` and `pressing_at` do not exist.
 
-- [ ] **Step 3: Migration v39**
+- [x] **Step 3: Migration v39**
 
 Append to `MIGRATIONS` in `server/src/db.rs` after the v38 entry:
 
@@ -212,7 +212,7 @@ Append to `MIGRATIONS` in `server/src/db.rs` after the v38 entry:
 
 The whole v39 goes in now so later tasks need no further migration.
 
-- [ ] **Step 4: Urgency on the task model**
+- [x] **Step 4: Urgency on the task model**
 
 In `server/src/tasks.rs`:
 
@@ -268,16 +268,16 @@ and after `parent_id` is settled:
 ```
 Add `urgency = COALESCE(?18, urgency),` to the UPDATE and `urgency,` as param 18.
 
-- [ ] **Step 5: `TaskRef` carries urgency**
+- [x] **Step 5: `TaskRef` carries urgency**
 
 In `server/src/plan.rs`, `TaskRef` gains `pub urgency: String, pub pressing: bool`. Find where `TaskRef { id, title, state, step, category }` is built inside `events_for` (it joins `event_tasks` to `tasks`); extend that SELECT with `COALESCE(p.urgency, t.urgency)` and the top-level task's `due_at`, and fill `urgency` and `pressing: crate::tasks::pressing_at(due_at.as_deref(), jiff::Timestamp::now())`. If the query reads only the block's own task row, join its parent the way `tasks::FROM` does.
 
-- [ ] **Step 6: Run the tests**
+- [x] **Step 6: Run the tests**
 
 Run: `cargo test -p note-server`
 Expected: the three new tests pass; every existing test still passes (a `Task` literal in some test may need the two new fields — add `urgency: "normal".into(), pressing: false`).
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add server/src/db.rs server/src/tasks.rs server/src/plan.rs
@@ -300,7 +300,7 @@ git commit -m "feat(tasks): an urgency on every task, pressing derived from the 
 - Consumes: `tasks::URGENCY`, `tasks::pressing_at`, `TaskPatch.urgency`, `NewTask.urgency` (Task 1).
 - Produces: `task_list` args `urgency: Option<String>` and `sort: "urgency"`; list rows carry `urgency`, `pressing`; `Candidate.urgency_rank: u8`; `pub fn urgency_rank(urgency: &str, pressing: bool) -> u8` in `tasks.rs`.
 
-- [ ] **Step 1: Failing tool tests**
+- [x] **Step 1: Failing tool tests**
 
 In `server/src/tools/task_query.rs` tests (use the module's existing `env()`/`ctx()` helpers, as `goal_ops.rs` tests do):
 
@@ -351,12 +351,12 @@ fn high_urgency_is_placed_before_an_earlier_due_normal_task_and_low_goes_last() 
 
 (Match the `Window` constructor and `Placement.id` field to what the module's other tests use.)
 
-- [ ] **Step 2: Run them to see them fail**
+- [x] **Step 2: Run them to see them fail**
 
 Run: `cargo test -p note-server task_list_filters_and_sorts_by_urgency high_urgency_is_placed`
 Expected: compile errors on `urgency_rank` and rejected-arg on `urgency`.
 
-- [ ] **Step 3: Rank helper and tool arguments**
+- [x] **Step 3: Rank helper and tool arguments**
 
 In `server/src/tasks.rs`:
 
@@ -410,7 +410,7 @@ Bind the cutoff as an extra positional parameter appended after the filter param
 
 Update the `task_list` `describe` text in `tools/mod.rs` to mention the urgency filter and sort.
 
-- [ ] **Step 4: Allocator ordering**
+- [x] **Step 4: Allocator ordering**
 
 `Candidate` gains `pub urgency_rank: u8`. `pack`'s sort becomes
 ```rust
@@ -424,7 +424,7 @@ Update the `task_list` `describe` text in `tools/mod.rs` to mention the urgency 
 ```
 `candidates` selects `urgency` too (`TaskRow.urgency: String`) and every `Candidate { .. }` literal in the function sets `urgency_rank: crate::tasks::urgency_rank(&row.urgency, crate::tasks::pressing_at(row.due_at.as_deref(), now))` — `run` already receives `now`; thread it into `candidates` as a parameter. The test helper `task()` sets `urgency_rank: 2`.
 
-- [ ] **Step 5: Prompts**
+- [x] **Step 5: Prompts**
 
 Append to `config/defaults/prompts/persona.md`, in the rules list after the goals bullet:
 
@@ -441,7 +441,7 @@ When laying the day or filling free time, high urgency goes first, then the
 nearest due date, and low urgency waits until nothing else fits.
 ```
 
-- [ ] **Step 6: API integration test**
+- [x] **Step 6: API integration test**
 
 In `server/tests/tasks_api.rs`:
 
@@ -464,12 +464,12 @@ async fn urgency_is_created_patched_and_validated() {
 
 Use the file's existing `post`/`patch` helpers (add a `patch` helper shaped like `post` if the file lacks one).
 
-- [ ] **Step 7: Run everything**
+- [x] **Step 7: Run everything**
 
 Run: `cargo test -p note-server`
 Expected: all green.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add server/src config/defaults/prompts
@@ -491,7 +491,7 @@ git commit -m "feat(tasks,plan): urgency reaches the task tools, the allocator l
 - Consumes: server rows carrying `urgency` and `pressing` (Tasks 1–2).
 - Produces: `TaskUrgency = 'low' | 'normal' | 'high'`; `<Urgent task={…} />` component exported from `Tasks.tsx` for Home to reuse; `.meta.sun` rule.
 
-- [ ] **Step 1: Types and patch**
+- [x] **Step 1: Types and patch**
 
 `web/src/types.ts`:
 ```ts
@@ -506,7 +506,7 @@ export type TaskUrgency = 'low' | 'normal' | 'high'
 ```
 `TaskRef` gains `urgency: TaskUrgency` and `pressing: boolean`. In `web/src/api.ts`, `TaskPatch` gains `urgency?: TaskUrgency` (import the type).
 
-- [ ] **Step 2: The `Urgent` meta and the rank**
+- [x] **Step 2: The `Urgent` meta and the rank**
 
 In `web/src/views/Tasks.tsx`, next to `Due`:
 
@@ -533,7 +533,7 @@ In the row's `task-meta` span, render `<Urgent task={node} />` right after the c
 .task-meta .meta.sun { color: var(--sun-ink); }
 ```
 
-- [ ] **Step 3: Sort**
+- [x] **Step 3: Sort**
 
 `SORTS` gains `{ id: 'urgency', label: 'Urgency' }` after `due`. Comparators:
 ```ts
@@ -549,7 +549,7 @@ const COMPARE: Record<SortKey, (a: TaskNode, b: TaskNode) => number> = {
 }
 ```
 
-- [ ] **Step 4: Menu**
+- [x] **Step 4: Menu**
 
 `RowActions` gains `setUrgency: (node: TaskNode, urgency: TaskUrgency) => void`. Next to `setCategory`:
 ```ts
@@ -578,16 +578,16 @@ Add it to the `actions` object. In the row menu, inside the `if (live)` push, af
       },
 ```
 
-- [ ] **Step 5: Today block**
+- [x] **Step 5: Today block**
 
 In `web/src/views/Home.tsx`, find where a block row prints its task's title from `ev.task` (search for `.task.title` or `task?.title`). Right after that title, render `{ev.task && <Urgent task={{ ...ev.task, due_at: null }} />}` (import `Urgent` from `./Tasks`). A `TaskRef` has no `due_at`, so pass `null`; the server already folded overdue into `pressing`, which is fine here because the block row has no rose `Due` of its own.
 
-- [ ] **Step 6: Build**
+- [x] **Step 6: Build**
 
 Run: `cd web && pnpm build`
 Expected: `tsc` and Vite both succeed. Open the Tasks view with the UI audit harness from memory (`server on 3299 + vite 5174`) if a visual check is wanted; the word *urgent* appears in sun-ink on a high task.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add web/src
@@ -614,7 +614,7 @@ git commit -m "feat(web): a task's urgency in its menu, an Urgency sort, urgent 
   - `auth::LoginLimiter::with_limit(max: u32) -> Self`
   - in `shares.rs`: `ShareScope`, `Share`, `NewShare`, `SharePatch`, `ShareError`, `Limits`, `generate_token`, `clamp_expiry`, `create`, `list`, `get`, `update`, `revoke`, `resolve`, `Resolved`, `messages_today`, `thread_for`, `history`, `append`, `threads`, `ThreadOut`, `url_for`.
 
-- [ ] **Step 1: Failing tests**
+- [x] **Step 1: Failing tests**
 
 `server/src/shares.rs` will end with:
 
@@ -747,12 +747,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run to see them fail**
+- [x] **Step 2: Run to see them fail**
 
 Run: `cargo test -p note-server shares::`
 Expected: the module does not exist yet.
 
-- [ ] **Step 3: Limits and state**
+- [x] **Step 3: Limits and state**
 
 `server/src/config.rs`:
 ```rust
@@ -821,7 +821,7 @@ and `try_attempt` compares `entry.0 >= self.max`.
 ```
 `server/src/main.rs`: chain `.with_public_base_url(&cfg.public_base_url)` after `.with_limits(&cfg.limits)`.
 
-- [ ] **Step 4: The module**
+- [x] **Step 4: The module**
 
 `server/src/shares.rs`:
 
@@ -1195,12 +1195,12 @@ pub fn threads(conn: &Connection, share_id: i64) -> rusqlite::Result<Vec<ThreadO
 
 `revoke` relies on `ON DELETE CASCADE`; `db::init` already turns `foreign_keys` on.
 
-- [ ] **Step 5: Run the tests**
+- [x] **Step 5: Run the tests**
 
 Run: `cargo test -p note-server shares:: config::`
 Expected: all pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add server/src/shares.rs server/src/lib.rs server/src/config.rs server/src/auth.rs server/src/main.rs
@@ -1226,7 +1226,7 @@ git commit -m "feat(shares): link rows with a scope, a plaintext share token, pe
   - Routes `GET/POST /api/shares`, `PATCH/DELETE /api/shares/{id}`, `GET /api/shares/{id}/threads`.
   - `api::share_info_json(state, share) -> serde_json::Value` (the owner-side row shape, reused by create and patch).
 
-- [ ] **Step 1: Unit tests**
+- [x] **Step 1: Unit tests**
 
 `server/src/net.rs` tests:
 ```rust
@@ -1276,12 +1276,12 @@ async fn a_share_principal_resolves_a_live_link_and_404s_the_rest() {
 }
 ```
 
-- [ ] **Step 2: Run to see them fail**
+- [x] **Step 2: Run to see them fail**
 
 Run: `cargo test -p note-server client_key_prefers a_share_principal`
 Expected: compile errors.
 
-- [ ] **Step 3: `client_key` and the extractor**
+- [x] **Step 3: `client_key` and the extractor**
 
 `server/src/net.rs`:
 ```rust
@@ -1337,7 +1337,7 @@ impl FromRequestParts<AppState> for SharePrincipal {
 }
 ```
 
-- [ ] **Step 4: Owner routes**
+- [x] **Step 4: Owner routes**
 
 In `server/src/api.rs` `router()`, after the `/api/tokens/{id}` route:
 ```rust
@@ -1455,7 +1455,7 @@ async fn shares_threads(user: CurrentUser, State(state): State<AppState>, Path(i
 ```
 `HeaderMap` is `axum::http::HeaderMap`; check the file's imports.
 
-- [ ] **Step 5: Integration suite, owner half**
+- [x] **Step 5: Integration suite, owner half**
 
 Create `server/tests/shares_api.rs`:
 
@@ -1560,12 +1560,12 @@ async fn a_cross_site_write_is_refused_and_a_stranger_gets_nothing() {
 }
 ```
 
-- [ ] **Step 6: Run**
+- [x] **Step 6: Run**
 
 Run: `cargo test -p note-server --test shares_api` and `cargo test -p note-server auth:: net::`
 Expected: green.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add server/src/auth.rs server/src/net.rs server/src/api.rs server/tests/shares_api.rs
@@ -1594,7 +1594,7 @@ git commit -m "feat(shares): the owner mints, edits, lists and revokes links, an
   - `share_ops::note(conn, ctx, NoteArgs { text }) -> {"filed": true}`.
   - `plan_list` rows gain `"task_title"`; masked rows are `{"kind":"busy","start","end","status"}`.
 
-- [ ] **Step 1: Failing tests**
+- [x] **Step 1: Failing tests**
 
 `server/src/tools/mod.rs` tests:
 ```rust
@@ -1710,12 +1710,12 @@ fn goal_list_under_a_share_counts_only_allowed_tasks_and_hides_empty_goals() {
 }
 ```
 
-- [ ] **Step 2: Run to see them fail**
+- [x] **Step 2: Run to see them fail**
 
 Run: `cargo test -p note-server tools::`
 Expected: compile errors on `SessionKind::Share`, `share_ctx`, `share_schemas`.
 
-- [ ] **Step 3: Kind, domains, context**
+- [x] **Step 3: Kind, domains, context**
 
 In `server/src/tools/mod.rs`:
 
@@ -1816,7 +1816,7 @@ pub fn note(conn: &Connection, ctx: &ToolCtx, args: NoteArgs) -> Result<serde_js
 }
 ```
 
-- [ ] **Step 4: Scope in the task tools**
+- [x] **Step 4: Scope in the task tools**
 
 `task_query.rs`:
 
@@ -1872,7 +1872,7 @@ and skip the trigger `prompt`/`cancel_if` branch for that row.
 ```
 where `category_filter` is `" AND category IN (?, ...)"` bound after the goal id when the scope has categories, and empty otherwise; drop goals whose `tasks == 0` when the scope has categories; omit `description` from the row when `!scope.details`.
 
-- [ ] **Step 5: `SessionDeps.share` and every construction site**
+- [x] **Step 5: `SessionDeps.share` and every construction site**
 
 `agent.rs`:
 ```rust
@@ -1893,12 +1893,12 @@ pub struct ShareSession {
 ```
 Run `cargo build -p note-server` and add `share: None,` to every `SessionDeps { .. }` literal and `share: None, share_thread: None,` to every `ToolCtx { .. }` literal the compiler names, in `src/` and in `tests/`. Add a `share_ctx(tmp, scope)` helper to each tool test module that needs one, identical to `ctx(tmp, None)` but with `share: Some(scope)`.
 
-- [ ] **Step 6: Run**
+- [x] **Step 6: Run**
 
 Run: `cargo test -p note-server`
 Expected: green, including the fuzz and invariant suites (they build `ToolCtx` literals).
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add server/src server/tests
@@ -1927,7 +1927,7 @@ git commit -m "feat(tools): a Share session kind whose read tools see only the l
   - `prompts::EDITABLE` includes `"share"`.
   - Log kinds `share_session`, `share_max_turns`.
 
-- [ ] **Step 1: The prompt**
+- [x] **Step 1: The prompt**
 
 `config/defaults/prompts/share.md`:
 
@@ -1957,7 +1957,7 @@ Rules:
 
 `server/src/prompts.rs`: `EDITABLE` becomes `[&str; 11]` with `"share"` appended. `server/tests/common/mod.rs` `config_dir()` gains `write("defaults/prompts/share.md", "you answer for {owner}; stay inside the slice");`. Run `cargo test -p note-server --test prompts_api` and fix any test that counted the editable names.
 
-- [ ] **Step 2: Failing renderer tests**
+- [x] **Step 2: Failing renderer tests**
 
 `server/src/shares.rs` tests:
 ```rust
@@ -2037,12 +2037,12 @@ Rules:
     }
 ```
 
-- [ ] **Step 3: Run to see them fail**
+- [x] **Step 3: Run to see them fail**
 
 Run: `cargo test -p note-server shares::tests::render`
 Expected: `render` is undefined.
 
-- [ ] **Step 4: The renderer**
+- [x] **Step 4: The renderer**
 
 In `server/src/shares.rs`:
 
@@ -2273,7 +2273,7 @@ fn goal_counts(conn: &Connection, goal_id: i64, scope: &ShareScope) -> rusqlite:
 
 `goal_ops::list` (Task 6) should call this same `shares::goal_counts` rather than carry a copy; make it `pub` and switch that call over.
 
-- [ ] **Step 5: The agent's Share branch**
+- [x] **Step 5: The agent's Share branch**
 
 In `agent.rs` `run_traced`, the `system` match gains `SessionKind::Share => crate::prompts::load(deps.config_dir, username, "share")?`. Replace the `if !single_call(kind)` block with:
 
@@ -2315,7 +2315,7 @@ fn log_kind(kind: SessionKind, base: &'static str) -> &'static str {
 ```
 `finish` appends ` share=<id>` when `deps.share` is set. The empty-reply fallback `MAX_TURNS_REPLY` applies to `Share` too (add it to the `matches!`).
 
-- [ ] **Step 6: Recent activity**
+- [x] **Step 6: Recent activity**
 
 In `context.rs`, add `"share_session", "share_max_turns"` to `OPERATIONAL_LOG_KINDS` and extend `recent_activity`'s WHERE with `AND kind NOT LIKE 'share\_%' ESCAPE '\'`. Test:
 ```rust
@@ -2332,7 +2332,7 @@ fn recent_activity_leaves_share_rows_out() {
 }
 ```
 
-- [ ] **Step 7: Agent test**
+- [x] **Step 7: Agent test**
 
 In `agent.rs` tests, following the module's `env()` pattern and mock scripting:
 ```rust
@@ -2366,12 +2366,12 @@ fn a_share_session_gets_the_share_prompt_the_opener_and_no_context_block() {
 ```
 (`env()` in that module writes `defaults/user.toml` with `display_name = "X"`; if it does not create `defaults/prompts`, create the directory first.)
 
-- [ ] **Step 8: Run**
+- [x] **Step 8: Run**
 
 Run: `cargo test -p note-server`
 Expected: green.
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add config/defaults/prompts/share.md server/src server/tests/common/mod.rs
@@ -2396,7 +2396,7 @@ git commit -m "feat(shares): a share prompt, a fresh opener rendered from the sc
   - `shares::run_turn(state: &AppState, principal: &SharePrincipal, visitor_key: &str, message: &str) -> Result<VisitorTurn, TurnError>` with `VisitorTurn { reply: String, note: bool }` and `TurnError { Blank, Cap, Busy, Unavailable, Internal }`.
   - Routes `GET /api/share/{token}`, `GET /api/share/{token}/view`, `GET /api/share/{token}/messages`, `POST /api/share/{token}/messages`, and `GET /s/{token}` (shell).
 
-- [ ] **Step 1: Failing integration tests, visitor half**
+- [x] **Step 1: Failing integration tests, visitor half**
 
 Append to `server/tests/shares_api.rs`:
 
@@ -2642,12 +2642,12 @@ In `server/tests/web_static.rs`, inside `serves_the_web_build_with_spa_fallback`
     assert!(String::from_utf8_lossy(&body).contains("<title>Note</title>"));
 ```
 
-- [ ] **Step 2: Run to see them fail**
+- [x] **Step 2: Run to see them fail**
 
 Run: `cargo test -p note-server --test shares_api --test web_static`
 Expected: 404s and compile errors on missing routes.
 
-- [ ] **Step 3: The visitor turn**
+- [x] **Step 3: The visitor turn**
 
 In `server/src/shares.rs`:
 
@@ -2751,7 +2751,7 @@ pub async fn run_turn(state: &crate::AppState, principal: &crate::auth::SharePri
 ```
 `crate::talk::MAX_MESSAGE` is already `pub`. Check `EMPTY_REPLY_FALLBACK` is `pub` in `lib.rs`. The note tool wrote its row inside the dispatch transaction, so the note row sits between the visitor's earlier turns and this turn's user row; the owner-side thread view orders by id, which is fine.
 
-- [ ] **Step 4: Routes, middleware, shell**
+- [x] **Step 4: Routes, middleware, shell**
 
 In `server/src/api.rs`:
 
@@ -2881,12 +2881,12 @@ Shell: in `router_with_web`, before `.fallback_service(files)`:
 ```
 (The `GET /s/{token}` route needs no principal: the page asks the API and draws "This link has ended" on a 404.)
 
-- [ ] **Step 5: Run**
+- [x] **Step 5: Run**
 
 Run: `cargo test -p note-server`
 Expected: green. The leak test is the gate for this task; if a secret appears, fix the renderer or the tool, never the assertion.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add server/src server/tests
@@ -2905,7 +2905,7 @@ git commit -m "feat(shares): a visitor reads the link, the view and their thread
 - Consumes: `GET /api/share/{token}`, `/view`, `/messages`, `POST /messages` (Task 8).
 - Produces: `api.share.{info, view, messages, send}`; types `ShareInfo`, `ShareScope`, `ShareView`, `ShareMessage`, `ShareTurn`; `SharePage` component.
 
-- [ ] **Step 1: Types and calls**
+- [x] **Step 1: Types and calls**
 
 `web/src/types.ts`:
 ```ts
@@ -2961,7 +2961,7 @@ export type ShareTurn = { reply: string; note: boolean }
   },
 ```
 
-- [ ] **Step 2: Mount before the session gate**
+- [x] **Step 2: Mount before the session gate**
 
 `web/src/main.tsx`:
 ```tsx
@@ -2975,7 +2975,7 @@ createRoot(document.getElementById('root')!).render(
 ```
 Keep the service-worker registration and theme lines as they are.
 
-- [ ] **Step 3: The page**
+- [x] **Step 3: The page**
 
 `web/src/views/Share.tsx`:
 ```tsx
@@ -3199,7 +3199,7 @@ export function SharePage({ token }: { token: string }) {
 ```
 Check `Markdown`'s export name and prop in `web/src/markdown.tsx` and match it.
 
-- [ ] **Step 4: Styles**
+- [x] **Step 4: Styles**
 
 `web/src/styles/share.css` (the D0 palette; the page wears the sky like every view):
 ```css
@@ -3230,12 +3230,12 @@ Check `Markdown`'s export name and prop in `web/src/markdown.tsx` and match it.
 ```
 The `.chat` class on the chat section lets the existing `.chat .turn.*` rules in `talk.css` style the bubbles; import `../styles/talk.css` in `Share.tsx` if it is not already loaded globally.
 
-- [ ] **Step 5: Build and look**
+- [x] **Step 5: Build and look**
 
 Run: `cd web && pnpm build`
 Expected: green. With the audit harness (server on 3299, vite on 5174), mint a link in Settings once Task 10 lands, or `curl -X POST /api/shares` with the session cookie, and open `/s/<token>` at 390 and 1280 wide: header, panels, chat; a hidden block reads *Busy* on a 14 % ink wash; the word *urgent* is sun-ink.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add web/src
@@ -3255,7 +3255,7 @@ git commit -m "feat(web): the share page — who shared what until when, the sha
 - Consumes: `GET/POST /api/shares`, `PATCH/DELETE /api/shares/{id}`, `GET /api/shares/{id}/threads` (Task 5), `ShareScope`, `ShareMessage` (Task 9).
 - Produces: `api.shares()`, `api.createShare(body)`, `api.updateShare(id, body)`, `api.revokeShare(id)`, `api.shareThreads(id)`; types `Share`, `NewShare`, `SharePatch`, `ShareThread`.
 
-- [ ] **Step 1: Types and calls**
+- [x] **Step 1: Types and calls**
 
 `web/src/types.ts`:
 ```ts
@@ -3287,7 +3287,7 @@ export type PromptName = 'persona' | 'planning' | 'share'
   shareThreads: (id: number) => request<ShareThread[]>(`/api/shares/${id}/threads`),
 ```
 
-- [ ] **Step 2: The section**
+- [x] **Step 2: The section**
 
 In `web/src/views/Settings.tsx`, after `TokensSection`:
 
@@ -3535,7 +3535,7 @@ Import `Overflow` from `'../overflow'` and the new types. In the *Advanced* grou
 ```
 `PROMPTS` gains `{ id: 'share', label: 'Share links' }` so the share persona is editable under *How Note talks*.
 
-- [ ] **Step 3: Styles**
+- [x] **Step 3: Styles**
 
 `web/src/styles/settings.css`:
 ```css
@@ -3551,12 +3551,12 @@ Import `Overflow` from `'../overflow'` and the new types. In the *Advanced* grou
 .set-share-msg.note { color: var(--sun-ink); }
 ```
 
-- [ ] **Step 4: Build and check**
+- [x] **Step 4: Build and check**
 
 Run: `cd web && pnpm build`
 Expected: green. In the harness: Settings → Advanced → Share links → New link → Create link shows the URL once under the form; the row's menu offers Copy link, Preview as visitor, Conversations, Edit, Revoke (two taps).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add web/src
@@ -3572,7 +3572,7 @@ git commit -m "feat(web): share links in Settings — make one, copy it, preview
 - Modify: `config/server.toml` (commented `[limits]` keys)
 - Modify: `docs/superpowers/plans/2026-09-24-share-links.md` (tick every box)
 
-- [ ] **Step 1: README**
+- [x] **Step 1: README**
 
 After the `### API tokens` subsection add:
 
@@ -3624,7 +3624,7 @@ time, then the nearest due date, and low waits. `PATCH /api/tasks/{id}` takes
 filters and sorts by it.
 ```
 
-- [ ] **Step 2: server.toml**
+- [x] **Step 2: server.toml**
 
 After the existing `[limits]` mention (search `agent_sessions_per_day` in `config/server.toml`; add a commented block if there is none):
 
@@ -3636,19 +3636,19 @@ After the existing `[limits]` mention (search `agent_sessions_per_day` in `confi
 # shares_per_user = 20
 ```
 
-- [ ] **Step 3: Full verification**
+- [x] **Step 3: Full verification**
 
 Run: `cargo test -p note-server && cargo clippy -p note-server --all-targets && (cd web && pnpm build)`
 Expected: all green.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add README.md config/server.toml docs/superpowers/plans/2026-09-24-share-links.md
 git commit -m "docs: share links, task urgency, and the three share limits"
 ```
 
-- [ ] **Step 5: Deploy (the user runs the last command)**
+- [x] **Step 5: Deploy (the user runs the last command)**
 
 After the branch is merged to `main`:
 1. In `configuration-nix`: `nix flake update note`.
