@@ -1,0 +1,87 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Sky theme · live</title>
+<link rel="stylesheet" href="tokens.css"><style>
+body{margin:0;background:#e8e4de;font-family:var(--sans);color:#1c2430}
+.wrap{padding:28px 32px 60px;max-width:1500px}
+h1{font-family:var(--display);font-weight:600;font-size:24px;margin:0 0 4px;letter-spacing:-.02em}
+p.lead{max-width:760px;color:#444;margin:0 0 18px;line-height:1.5}
+.ctl{display:flex;gap:26px;align-items:center;flex-wrap:wrap;margin:0 0 16px;font-size:14px}
+.ctl label{display:flex;flex-direction:column;gap:4px;color:#555}
+.ctl input[type=range]{width:460px}
+.ctl select,.ctl input[type=date]{font:inherit;padding:4px 8px}
+.read{font-variant-numeric:tabular-nums;font-size:15px;color:#1c2430}
+.read b{font-family:var(--display);font-size:18px;margin-right:12px}
+.stage{display:flex;gap:24px;align-items:flex-start;flex-wrap:wrap}
+.shot{border-radius:14px;overflow:hidden;box-shadow:0 30px 60px -36px rgba(0,0,0,.6)}
+.frame-app{transition:none}
+.keys{display:flex;gap:18px;margin-top:28px;flex-wrap:wrap}
+.key{width:200px}
+.key .frame-app{width:200px;height:200px;border-radius:12px}
+.key h4{font-family:var(--display);font-weight:600;font-size:14px;margin:8px 0 2px}
+.key p{font-size:12.5px;color:#555;margin:0;line-height:1.4}
+.pause{position:absolute;left:167px;top:576px;width:56px;height:56px;border-radius:50%;background:var(--haze-strong)}
+</style></head>
+<body><div class="wrap">
+  <h1>Sky: the theme follows the sun</h1>
+  <p class="lead">Drag the hour. The palette below is computed by <code>sky.js</code> from the sun's altitude at that moment: plain day above 12°, a golden hour on the horizon, dusk through civil and nautical twilight, night below −10°. Ground colours blend; text and lines switch sets once the ground crosses the middle, so contrast never dips.</p>
+  <div class="ctl">
+    <label>Hour <input id="h" type="range" min="0" max="1440" step="5" value="1080"></label>
+    <label>Date <input id="d" type="date"></label>
+    <label>Place <select id="p">
+      <option value="zone">From time zone only (lat 35°)</option>
+      <option value="34.05,-118.24,America/Los_Angeles">Los Angeles</option>
+      <option value="35.68,139.69,Asia/Tokyo">Tokyo</option>
+      <option value="51.5,-0.12,Europe/London">London</option>
+      <option value="64.15,-21.94,Atlantic/Reykjavik">Reykjavík</option>
+    </select></label>
+    <div class="read"><b id="clock">18:00</b><span id="alt"></span></div>
+  </div>
+  <div class="stage">
+    <div class="shot"><div id="phone" class="frame-app" style="width:390px;height:844px">
+      <div class="face" style="left:35px;top:170px;width:320px;height:320px">
+        <div id="arc"></div>
+        <div class="inner"><div class="eyebrow">Round 2</div><div class="num tnum">18:42</div><div class="name">Focus on Reading 2.2</div><div class="sub">Letter 6.16.13–22</div></div>
+      </div>
+      <div class="pause"></div>
+      <div id="tabs"></div>
+    </div></div>
+    <div class="shot"><div id="desk" class="frame-app desk" style="width:960px;height:600px;font-size:12px">
+      <div id="nav"></div>
+      <div class="face" style="left:330px;top:120px;width:300px;height:300px">
+        <div id="arc2"></div>
+        <div class="inner"><div class="name" style="font-size:20px">That's everything today.</div><div class="sub" style="font-size:12px">Two things are due this week.</div></div>
+      </div>
+      <div class="actions" style="top:440px"><button class="btn sun small">Begin working</button><button class="btn quiet small">···</button></div>
+    </div></div>
+  </div>
+  <div class="keys">
+    <div class="key"><div class="frame-app p-day"></div><h4>Day</h4><p>The current light theme, untouched. Sun above 12°.</p></div>
+    <div class="key"><div class="frame-app p-golden"></div><h4>Golden</h4><p>Sun on the horizon, 0–8°. The blue deepens, the mid-sky warms, the ground stays light.</p></div>
+    <div class="key"><div class="frame-app p-dusk"></div><h4>Dusk</h4><p>Civil and nautical twilight, −2 to −10°. Indigo over ember; the ground has gone dark and text has switched sets.</p></div>
+    <div class="key"><div class="frame-app p-night"></div><h4>Night</h4><p>The current dark theme with the bluer sky top the system-dark branch already uses; the two dark branches become one.</p></div>
+  </div>
+</div>
+<script type="module">
+  import { arc, tabs, topnav, mount } from './parts.js'
+  import { solarAltitude, placeFromZone, zoneOffsetHours, applyPalette } from './sky.js'
+  mount('#arc', arc(0.25)); mount('#arc2', arc(0, { faded: true, size: 300, r: 138, w: 8 })); mount('#tabs', tabs('Today')); mount('#nav', topnav('Today'))
+  const h = document.getElementById('h'), d = document.getElementById('d'), p = document.getElementById('p')
+  d.valueAsDate = new Date()
+  const zone = Intl.DateTimeFormat().resolvedOptions().timeZone
+  const render = () => {
+    const [y, m, day] = d.value.split('-').map(Number)
+    const hh = Math.floor(h.value / 60), mm = h.value % 60
+    let place, local
+    if (p.value === 'zone') { local = new Date(y, m - 1, day, hh, mm); place = placeFromZone(zone) }
+    else {
+      const [lat, lon, z] = p.value.split(',')
+      // the wall clock is read in that place's own zone
+      const offH = zoneOffsetHours(new Date(Date.UTC(y, m - 1, day, hh, mm)), z)
+      local = new Date(Date.UTC(y, m - 1, day, hh, mm) - offH * 3600000); place = { lat: Number(lat), lon: Number(lon) }
+    }
+    const alt = solarAltitude(local, place.lat, place.lon)
+    const { phase } = applyPalette(document.getElementById('phone'), alt); applyPalette(document.getElementById('desk'), alt)
+    document.getElementById('clock').textContent = `${String(Math.floor(h.value / 60)).padStart(2, '0')}:${String(h.value % 60).padStart(2, '0')}`
+    document.getElementById('alt').textContent = `sun ${alt.toFixed(1)}° · ${phase}`
+  }
+  h.oninput = d.onchange = p.onchange = render; render()
+</script></body></html>

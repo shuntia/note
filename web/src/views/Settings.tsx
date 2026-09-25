@@ -1,5 +1,5 @@
 import QRCode from 'qrcode'
-import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { api, ApiError, security } from '../api'
 import type { ToastAction, ViewProps } from '../app'
 import { Overflow } from '../overflow'
@@ -7,8 +7,18 @@ import { prefsFrom, writePrefs } from '../prefs'
 import { disablePush, enablePush, pushState } from '../push'
 import { eventLabel } from '../receipts'
 import type { CounterMode } from '../session'
+import { paletteAt, solarAltitude, sunTimes } from '../sky'
 import '../styles/settings.css'
-import { applyTheme, saveTheme, storedTheme, type ThemeChoice } from '../theme'
+import {
+  applyTheme,
+  currentPlace,
+  paintSky,
+  savePlace,
+  saveTheme,
+  storedPlace,
+  storedTheme,
+  type ThemeChoice,
+} from '../theme'
 import type {
   Me,
   Passkey,
@@ -27,6 +37,7 @@ import type {
   TotpEnrolment,
 } from '../types'
 import { createCredential, webauthnSupported, type RegistrationJSON } from '../webauthn'
+import { deviceZone, knownDeviceZone } from '../zone'
 
 type Notify = (msg: string, action?: ToastAction) => void
 
@@ -57,6 +68,7 @@ type Loaded = {
   nightly: boolean
   checkins: boolean
   pomodoro: boolean
+  zoneAuto: boolean
   telegramEnabled: boolean
   telegramLinked: boolean
   telegramBot: string
@@ -67,7 +79,42 @@ const THEMES: { id: ThemeChoice; label: string }[] = [
   { id: 'system', label: 'System' },
   { id: 'light', label: 'Light' },
   { id: 'dark', label: 'Dark' },
+  { id: 'sky', label: 'Sky' },
 ]
+
+// Today's sky from midnight to midnight at half-hour stops, with a mark at now.
+function SkyStrip() {
+  const [minute, setMinute] = useState(() => Math.floor(Date.now() / 60_000))
+  useEffect(() => {
+    const id = window.setInterval(() => setMinute(Math.floor(Date.now() / 60_000)), 60_000)
+    return () => window.clearInterval(id)
+  }, [])
+  const { times, stops, mins } = useMemo(() => {
+    const zone = deviceZone()
+    const place = currentPlace()
+    const now = new Date(minute * 60_000)
+    const stops = Array.from({ length: 49 }, (_, i) => {
+      const at = new Date(now)
+      at.setHours(0, i * 30, 0, 0)
+      const { tokens } = paletteAt(solarAltitude(at, place.lat, place.lon))
+      return `${tokens['sky-mid']} ${(i / 48) * 100}%`
+    })
+    return { times: sunTimes(now, place, zone), stops, mins: now.getHours() * 60 + now.getMinutes() }
+  }, [minute])
+  return (
+    <div className="sky-strip-wrap">
+      <div className="sky-strip" style={{ background: `linear-gradient(90deg, ${stops.join(', ')})` }}>
+        <i style={{ left: `${(mins / 1440) * 100}%` }} />
+      </div>
+      <div className="sky-ticks">
+        <span>0:00</span>
+        <span>{times.rise ? `${times.rise} rise` : 'no sunrise'}</span>
+        <span>{times.set ? `${times.set} set` : 'no sunset'}</span>
+        <span>24:00</span>
+      </div>
+    </div>
+  )
+}
 
 const COUNTERS: { id: CounterMode; label: string }[] = [
   { id: 'remaining', label: 'Remaining' },
@@ -182,6 +229,7 @@ function FoldRow({
 export function Settings({
   me,
   notify,
+  onChanged,
   onSignedOut,
   openAdmin,
 }: ViewProps & { me: Me; onSignedOut: () => void; openAdmin: () => void }) {
@@ -189,6 +237,7 @@ export function Settings({
   const [save, setSave] = useState<Save>(null)
   const [open, setOpen] = useState<string | null>(null)
   const [theme, setTheme] = useState<ThemeChoice>(storedTheme)
+  const [place, setPlace] = useState(storedPlace)
   const [invite, setInvite] = useState<TelegramLink | null>(null)
 
   const load = () => {
@@ -207,6 +256,7 @@ export function Settings({
           nightly: s.nightly_enabled,
           checkins: s.checkins_enabled,
           pomodoro: s.pomodoro_enabled,
+          zoneAuto: s.timezone_auto,
           telegramEnabled: s.telegram_enabled,
           telegramLinked: s.telegram_linked,
           telegramBot: s.telegram_bot,
@@ -374,6 +424,57 @@ export function Settings({
     setTheme(choice)
     applyTheme(choice)
     saveTheme(choice)
+  }
+
+  // Turning the switch on moves the day to this device at once rather than on the
+  // next focus.
+  const commitZoneAuto = async (on: boolean) => {
+    if (!loaded) return
+    const device = deviceZone()
+    const follow = on && knownDeviceZone(device, loaded.choices.timezones)
+    setSave({ row: 'timezone', kind: 'busy' })
+    try {
+      const saved = await api.saveSettings(
+        follow ? { timezone_auto: on, timezone: device } : { timezone_auto: on },
+      )
+      setState((s) =>
+        s && s !== 'error'
+          ? {
+              ...s,
+              zoneAuto: saved.timezone_auto,
+              baseline: { ...s.baseline, timezone: saved.timezone },
+              draft: { ...s.draft, timezone: saved.timezone },
+              rows: saved.schedule,
+            }
+          : s,
+      )
+      setSave({ row: 'timezone', kind: 'saved' })
+      onChanged()
+    } catch (err) {
+      setSave({ row: 'timezone', kind: 'failed', message: failure(err) })
+    }
+  }
+
+  const locate = () => {
+    if (!navigator.geolocation) return notify("Couldn't get your location.")
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        const p = {
+          lat: Math.round(pos.coords.latitude * 10) / 10,
+          lon: Math.round(pos.coords.longitude * 10) / 10,
+        }
+        savePlace(p)
+        setPlace(p)
+        paintSky()
+      },
+      () => notify("Couldn't get your location."),
+      { maximumAge: 3_600_000, timeout: 10_000 },
+    )
+  }
+  const forget = () => {
+    savePlace(null)
+    setPlace(null)
+    paintSky()
   }
 
   const commitOn = (row: string) => ({
@@ -594,15 +695,33 @@ export function Settings({
           >
             {open === 'timezone' && (
               <div className="set-fold-body">
-                <input
-                  list="tz-list"
-                  aria-label="Time zone"
-                  spellCheck={false}
-                  autoCapitalize="none"
-                  value={loaded.draft.timezone}
-                  onChange={(e) => edit('timezone', e.target.value)}
-                  {...commitOn('timezone')}
-                />
+                <div className="set-row">
+                  <span className="set-row-body">
+                    <span className="set-label">Follow this device</span>
+                  </span>
+                  <Switch
+                    label="Follow this device"
+                    on={loaded.zoneAuto}
+                    disabled={busy}
+                    onToggle={() => void commitZoneAuto(!loaded.zoneAuto)}
+                  />
+                </div>
+                {loaded.zoneAuto ? (
+                  <span className="set-zone">
+                    <input aria-label="Time zone" disabled value={loaded.draft.timezone} />
+                    {loaded.draft.timezone === deviceZone() && <span className="set-hint">detected</span>}
+                  </span>
+                ) : (
+                  <input
+                    list="tz-list"
+                    aria-label="Time zone"
+                    spellCheck={false}
+                    autoCapitalize="none"
+                    value={loaded.draft.timezone}
+                    onChange={(e) => edit('timezone', e.target.value)}
+                    {...commitOn('timezone')}
+                  />
+                )}
                 <datalist id="tz-list">
                   {loaded.choices.timezones.map((tz) => (
                     <option key={tz} value={tz} />
@@ -785,6 +904,16 @@ export function Settings({
                   </button>
                 ))}
               </div>
+              {theme === 'sky' && (
+                <>
+                  <SkyStrip key={place ? `${place.lat},${place.lon}` : 'zone'} />
+                  <p className="set-note">
+                    <button type="button" className="link" onClick={place ? forget : locate}>
+                      {place ? 'Forget my location' : 'Use my location'}
+                    </button>
+                  </p>
+                </>
+              )}
             </div>
           )}
         </FoldRow>

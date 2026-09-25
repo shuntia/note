@@ -1,0 +1,27 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Steps as segments</title>
+<link rel="stylesheet" href="tokens.css"><style>body{margin:0;background:#ddd}
+.handle{position:absolute;left:167px;bottom:8px;width:56px;height:4px;border-radius:2px;background:var(--track)}
+</style></head>
+<body><div class="frame-app p-golden" style="width:390px;height:844px">
+  <div class="face" style="left:35px;top:170px;width:320px;height:320px">
+    <div class="arc"><svg viewBox="0 0 320 320" id="seg"></svg></div>
+    <div class="inner"><div class="num tnum" style="font-size:60px">18:42</div><div class="name">Draft 4 short answer essays</div><div class="sub">Outline the second</div></div>
+  </div>
+  <div class="handle"></div>
+</div>
+<script>
+  // three steps, the second is on: each step is a segment of the arc; done ones are
+  // filled, the current one fills as its time runs, the rest wait as track
+  const steps = 3, current = 1, frac = 0.35
+  const r = 148, c = 2 * Math.PI * r, span = 240, gap = 5
+  const seg = (span - gap * (steps - 1)) / steps
+  let out = ''
+  for (let i = 0; i < steps; i++) {
+    const start = 150 + i * (seg + gap)
+    const len = (c * seg) / 360
+    out += `<circle cx="160" cy="160" r="${r}" fill="none" stroke="var(--track)" stroke-width="9" stroke-linecap="round" stroke-dasharray="${len} ${c}" transform="rotate(${start} 160 160)"/>`
+    const f = i < current ? 1 : i === current ? frac : 0
+    if (f > 0) out += `<circle cx="160" cy="160" r="${r}" fill="none" stroke="var(--sun)" stroke-width="9" stroke-linecap="round" stroke-dasharray="${len * f} ${c}" transform="rotate(${start} 160 160)"/>`
+  }
+  document.getElementById('seg').innerHTML = out
+</script></body></html>

@@ -244,6 +244,9 @@ impl Features {
 pub struct UserConfig {
     pub display_name: String,
     pub timezone: String,
+    /// Whether the client moves `timezone` to the device's zone when they differ.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone_auto: Option<bool>,
     pub template: String,
     #[serde(default = "default_nightly_time")]
     pub nightly_time: String,
@@ -311,6 +314,10 @@ impl UserConfig {
             Some(n) => n,
             None => DEFAULT_TRIGGERS_PER_DAY,
         }
+    }
+
+    pub fn timezone_auto(&self) -> bool {
+        self.timezone_auto.unwrap_or(true)
     }
 
     pub fn pomodoro_enabled(&self) -> bool {
@@ -566,6 +573,21 @@ mod tests {
             ServerConfig::load(tmp.path()).unwrap().channels.telegram.unwrap().base_url,
             "http://127.0.0.1:9"
         );
+    }
+
+    #[test]
+    fn timezone_follows_the_device_unless_told_otherwise() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), "defaults/user.toml",
+            "display_name = \"X\"\ntimezone = \"UTC\"\ntemplate = \"default\"\n");
+        let cfg = UserConfig::load(tmp.path(), "aki").unwrap();
+        assert!(cfg.timezone_auto());
+        cfg.save(tmp.path(), "aki").unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join("users/aki/user.toml")).unwrap();
+        assert!(!raw.contains("timezone_auto"), "unexpected file: {raw}");
+
+        write(tmp.path(), "users/aki/user.toml", "timezone_auto = false\n");
+        assert!(!UserConfig::load(tmp.path(), "aki").unwrap().timezone_auto());
     }
 
     #[test]
