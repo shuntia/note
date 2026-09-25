@@ -392,3 +392,15 @@ async fn the_pomodoro_settings_round_trip_and_hold_their_range() {
     let v = json(app.oneshot(get(&cookie)).await.unwrap()).await;
     assert_eq!(v["pomodoro_work_min"], 50, "a refused write changes nothing");
 }
+
+#[tokio::test]
+async fn the_device_zone_switch_defaults_on_and_round_trips() {
+    let (app, cookie, _cfg) = common::app_with_logged_in_user().await;
+    let v = json(app.clone().oneshot(get(&cookie)).await.unwrap()).await;
+    assert_eq!(v["timezone_auto"], true);
+
+    let res = app.clone().oneshot(put(&cookie, r#"{"timezone_auto":false}"#)).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let v = json(app.oneshot(get(&cookie)).await.unwrap()).await;
+    assert_eq!(v["timezone_auto"], false);
+}
