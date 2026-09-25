@@ -13,31 +13,46 @@ code{font-size:13px;background:#e3ddd3;padding:1px 5px;border-radius:4px}
 </style></head>
 <body>
 <h1>Sundial</h1>
-<p>Six proposals for Note, 2026-09-25: list motion that stays quick at any size, no zoom when the chat is tapped on a phone, a Sky theme that follows the sun, the day following the device's time zone, and a Begin working button for the moments nothing is planned. Every board is a live page; click its name to open it full size.</p>
+<p>Proposals for Note, 2026-09-25. The principle: the arc is the control, form carries the information, words retire once learned.</p>
 
-<h2>1 · Begin working</h2>
-<p>When no session is running and no block is on right now, the Today face offers one sun-coloured button. It asks the server for the queue of open tasks in the order the planner itself would schedule them (high urgency, then pressing, then soonest due, then oldest), and shows the first one in the arc before anything starts: what it is, why it came first, how long it is planned for. <b>Start</b> opens a session on it exactly as the Tasks view's own start does, so pomodoro comes on if it is enabled. <b>Another</b> moves to the next candidate; <b>Not now</b> returns to the face.</p>
-<p>In a pomodoro session the face gains a row of round marks under the name, one per round, and the day's focused minutes so far. That is the count of sessions the timer keeps.</p>
+<h2>1 · The circle</h2>
+<p>Idle, the arc breathes and one faint line sits under it. A tap starts work on the most pressing task; the queue becomes a strip you swipe through, with work time on nothing in particular one swipe the other way. Tap to pause, swipe down when done. No buttons. The bar rests when the hand does.</p>
+<a class="live" href="flow.html">Open the flow and try it ↗</a>
 <div class="row">
-<div class="board"><div class="cap"><b><a href="begin-idle.html">Nothing left today</a></b><span>the empty state becomes an invitation</span></div>
-<div class="frame" style="width:390px;height:844px"><iframe src="begin-idle.html" style="width:390px;height:844px"></iframe></div></div>
-<div class="board"><div class="cap"><b><a href="begin-next.html">Next block later</a></b><span>the planned block keeps its early start</span></div>
-<div class="frame" style="width:390px;height:844px"><iframe src="begin-next.html" style="width:390px;height:844px"></iframe></div></div>
-<div class="board"><div class="cap"><b><a href="begin-pick.html">The pick</a></b><span>after tapping Begin working</span></div>
-<div class="frame" style="width:390px;height:844px"><iframe src="begin-pick.html" style="width:390px;height:844px"></iframe></div></div>
-<div class="board"><div class="cap"><b><a href="begin-session.html">Round 2</a></b><span>round marks and the day's focus, in the golden hour</span></div>
-<div class="frame" style="width:390px;height:844px"><iframe src="begin-session.html" style="width:390px;height:844px"></iframe></div></div>
+<div class="board"><div class="cap"><b><a href="flow.html">Live</a></b><span>tap, swipe sideways, tap, swipe down</span></div>
+<div class="frame" style="width:390px;height:844px"><iframe src="flow.html" style="width:390px;height:844px"></iframe></div></div>
+<div class="board"><div class="cap"><b><a href="face-idle.html">Idle</a></b><span>the bar has gone; a handle remains</span></div>
+<div class="frame" style="width:390px;height:844px"><iframe src="face-idle.html" style="width:390px;height:844px"></iframe></div></div>
+<div class="board"><div class="cap"><b><a href="face-next.html">A block coming</a></b><span>the wait fills the arc; the same tap starts work now</span></div>
+<div class="frame" style="width:390px;height:844px"><iframe src="face-next.html" style="width:390px;height:844px"></iframe></div></div>
 </div>
-<div class="board"><div class="cap"><b><a href="begin-desktop.html">Desktop</a></b><span></span></div>
-<div class="frame" style="width:1152px;height:720px"><iframe src="begin-desktop.html" style="width:1440px;height:900px;transform:scale(.8)"></iframe></div></div>
+
+<h2>Form instead of words</h2>
+<ul>
+<li><b>Rounds are beads.</b> Under the title, one bead per round today, the current one ringed. No "Round 2", no "52 min focused".</li>
+<li><b>Urgency is a hairline.</b> A rose line over an overdue task, a sun line over an urgent one. No badges.</li>
+<li><b>A break runs the arc backwards</b> in sage, and the ground dims a step. No "BREAK".</li>
+<li><b>Steps are segments</b> of the arc; done ones filled, the current one filling. No "2 of 3".</li>
+<li><b>The next task peeks</b> at the edge of the strip; the dots say where you are, a ring marks work time.</li>
+<li><b>The hint retires.</b> "tap the circle to start working" shows the first three times, then never. The same for "tap to pause · swipe down when done", once, inside the first session.</li>
+<li><b>Time of day is the theme.</b> Sky, below.</li>
+<li><b>Desktop</b> keeps the same face: click the circle, arrow keys or a horizontal wheel move the strip, Escape pauses, Enter finishes. The top bar already rests on idle; the face's hint is the only text added.</li>
+</ul>
+<div class="row">
+<div class="board"><div class="cap"><b><a href="face-break.html">Break</a></b><span></span></div>
+<div class="frame" style="width:390px;height:844px"><iframe src="face-break.html" style="width:390px;height:844px"></iframe></div></div>
+<div class="board"><div class="cap"><b><a href="face-steps.html">Steps</a></b><span>in the golden hour</span></div>
+<div class="frame" style="width:390px;height:844px"><iframe src="face-steps.html" style="width:390px;height:844px"></iframe></div></div>
+</div>
+<p>Further along the same line, not drawn: the Tasks view's "due Oct 5" column as a dot on a two-week rail; the Today list's times as positions on the dayline only.</p>
 
 <h2>2 · Sky theme</h2>
-<p>A fourth theme choice next to System, Light and Dark. The page computes the sun's altitude once a minute from the date and a place, and blends the sky between four keyframes: day (the light theme as it is), golden, dusk, and night (the dark theme, with its two branches made one). Ground colours cross-fade; text and lines switch sets where the ground crosses the middle so contrast never dips. The place comes from the time zone unless the user offers their location, which stays on the device. The last palette is cached so the first paint at night is already dark.</p>
+<p>A fourth choice next to System, Light and Dark. The sun's altitude, once a minute, blends four keyframes: day, golden, dusk, night. Ground colours cross-fade; text switches sets where the ground crosses the middle. The place comes from the time zone, or the device's location if offered.</p>
 <a class="live" href="sky.html">Open the live sky ↗</a>
 <div class="board"><div class="frame" style="width:1152px;height:640px"><iframe src="sky.html" style="width:1440px;height:800px;transform:scale(.8)"></iframe></div></div>
 
 <h2>3 · Time zone follows the device</h2>
-<p>A switch under the time zone row, on by default. On load and on focus the client reads the device's zone; when it differs from the saved one, the client saves it and says so in a toast with an Undo that turns the switch off. Nothing else changes: the server's day boundaries, nightly plan and close-the-day already run in the saved zone.</p>
+<p>A switch under the time zone row, on by default. When the device's zone differs from the saved one, the client saves it and shows a toast with Undo, which turns the switch off.</p>
 <div class="board"><div class="cap"><b><a href="settings.html">Settings</a></b><span>Theme with Sky, and the time zone row</span></div>
 <div class="frame" style="width:390px;height:844px"><iframe src="settings.html" style="width:390px;height:844px"></iframe></div></div>
 
@@ -54,9 +69,9 @@ code{font-size:13px;background:#e3ddd3;padding:1px 5px;border-radius:4px}
 <h2>5 · No zoom on the phone</h2>
 <p>iOS zooms into any focused field whose text is under 16 px. The chat composer and the jot field sit at 0.92 rem, which is 14.7 px on a phone. On coarse pointers every text field goes to 1 rem, the viewport meta gains <code>interactive-widget=resizes-content</code> so the keyboard pushes the composer up instead of covering it, and buttons get <code>touch-action: manipulation</code> so a fast double tap never zooms. Nothing is mocked because nothing looks different.</p>
 
-<h2>What is not in these boards</h2>
+<h2>Not in these boards</h2>
 <ul>
-<li>Light mode already exists as a choice; Sky reuses it as its day keyframe. The only light-mode change is that the two dark branches (chosen and system) get the same sky.</li>
-<li>Rows removed by another device still vanish without a fold. A fold needs the old row kept around after the data drops it; it is a separate change if wanted.</li>
+<li>Light mode exists already; Sky reuses it as its day keyframe.</li>
+<li>Rows removed by another device still vanish without a fold.</li>
 </ul>
 </body></html>
