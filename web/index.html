@@ -6,14 +6,22 @@
     <meta name="theme-color" content="#f0e8de" />
     <!--
       Pre-paint theme, ahead of the stylesheet Vite injects below: without this the page
-      paints light before the bundle lands. The key and choices mirror src/theme.ts,
-      which cannot be imported here. theme.ts keeps the theme-color meta above in step.
+      paints light before the bundle lands. The keys and choices mirror src/theme.ts,
+      which cannot be imported here; under Sky, note.sky holds the last painted palette.
+      theme.ts keeps the theme-color meta above in step.
     -->
     <script>
       try {
         var choice = localStorage.getItem('note.theme')
-        if (choice === 'dark' || choice === 'light') {
+        if (choice === 'dark' || choice === 'light' || choice === 'sky') {
           document.documentElement.setAttribute('data-theme', choice)
+        }
+        if (choice === 'sky') {
+          var sky = JSON.parse(localStorage.getItem('note.sky') || 'null')
+          if (sky && sky.tokens) {
+            for (var k in sky.tokens) document.documentElement.style.setProperty('--' + k, sky.tokens[k])
+            document.documentElement.style.colorScheme = sky.dark ? 'dark' : 'light'
+          }
         }
       } catch (e) {
         /* storage blocked; follow the system scheme */
