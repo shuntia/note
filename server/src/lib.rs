@@ -24,6 +24,7 @@ pub mod review;
 pub mod runner;
 pub mod search;
 pub mod security;
+pub mod shares;
 pub mod summaries;
 pub mod talk;
 pub mod tasks;
@@ -88,6 +89,12 @@ impl TalkGate {
         }
     }
 
+    /// The server-wide slot alone, for a caller that is not one of the users
+    /// the per-user rule protects.
+    pub fn try_enter_global(&self) -> Result<tokio::sync::OwnedSemaphorePermit, TalkBusy> {
+        self.semaphore.clone().try_acquire_owned().map_err(|_| TalkBusy::Full)
+    }
+
     pub fn try_enter(self: &Arc<Self>, user_id: i64) -> Result<TalkPermit, TalkBusy> {
         if !self.active.lock().unwrap().insert(user_id) {
             return Err(TalkBusy::UserBusy);
@@ -141,6 +148,13 @@ pub struct AppState {
     /// Minutes of quiet after which a conversation is summarised; 0 turns the
     /// pass off.
     pub idle_summary_min: u32,
+    pub share_max_days: u32,
+    pub share_messages_per_day: u32,
+    pub shares_per_user: u32,
+    /// Counts unknown-token lookups and message posts per client address.
+    pub share_limiter: Arc<crate::auth::LoginLimiter>,
+    /// The origin a share URL is built on; `server.toml`'s `public_base_url`.
+    pub public_base_url: String,
     pub started_at: jiff::Timestamp,
 }
 
@@ -149,6 +163,7 @@ impl AppState {
     /// built without `with_providers` is still fully runnable.
     pub fn new(conn: Connection, config_dir: PathBuf, data_dir: PathBuf) -> Self {
         let hub = Arc::new(crate::channels::ws::ClientHub::new());
+        let limits = crate::config::LimitsConfig::default();
         let ws: Arc<dyn crate::channels::Channel> =
             Arc::new(crate::channels::ws::WsChannel::new(hub.clone()));
         Self {
@@ -173,8 +188,15 @@ impl AppState {
             admin_secrets: Arc::new(crate::admin::AdminSecrets::default()),
             passkeys: Arc::new(crate::security::PasskeyService::default()),
             providers_info: crate::admin::ProvidersInfo::default(),
-            agent_sessions_per_day: crate::config::LimitsConfig::default().agent_sessions_per_day,
+            agent_sessions_per_day: limits.agent_sessions_per_day,
             idle_summary_min: crate::config::AgentConfig::default().idle_summary_min,
+            share_max_days: limits.share_max_days,
+            share_messages_per_day: limits.share_messages_per_day,
+            shares_per_user: limits.shares_per_user,
+            share_limiter: Arc::new(crate::auth::LoginLimiter::with_limit(
+                crate::shares::ADDRESS_ATTEMPTS,
+            )),
+            public_base_url: "http://localhost:3271".into(),
             started_at: jiff::Timestamp::now(),
         }
     }
@@ -195,6 +217,14 @@ impl AppState {
 
     pub fn with_limits(mut self, limits: &crate::config::LimitsConfig) -> Self {
         self.agent_sessions_per_day = limits.agent_sessions_per_day;
+        self.share_max_days = limits.share_max_days;
+        self.share_messages_per_day = limits.share_messages_per_day;
+        self.shares_per_user = limits.shares_per_user;
+        self
+    }
+
+    pub fn with_public_base_url(mut self, url: &str) -> Self {
+        self.public_base_url = url.trim_end_matches('/').to_string();
         self
     }
 
