@@ -1,7 +1,7 @@
 use crate::auth::{self, CurrentUser, TaskPrincipal};
 use crate::AppState;
 use axum::extract::{Path, Query, State};
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
@@ -29,6 +29,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/agent/inbox", post(agent_inbox))
         .route("/api/tokens", get(tokens_list).post(tokens_create))
         .route("/api/tokens/{id}", axum::routing::delete(tokens_revoke))
+        .route("/api/shares", get(shares_list).post(shares_create))
+        .route("/api/shares/{id}", patch(shares_update).delete(shares_revoke))
+        .route("/api/shares/{id}/threads", get(shares_threads))
         .route("/api/talk", post(talk))
         .route("/api/conversations", get(conversations_list))
         .route(
@@ -2541,4 +2544,109 @@ async fn calendar_day(
         "quiet_now": quiet_now,
     }))
     .into_response()
+}
+
+/// The owner-side row: the link with its URL and today's spend.
+pub(crate) fn share_info_json(state: &AppState, conn: &rusqlite::Connection, s: &crate::shares::Share) -> serde_json::Value {
+    let since = jiff::Timestamp::now() - jiff::Span::new().hours(24);
+    let messages_today = crate::shares::messages_today(conn, s.id, since).unwrap_or(0);
+    let threads: i64 = conn
+        .query_row("SELECT COUNT(*) FROM share_threads WHERE share_id = ?1", [s.id], |r| r.get(0))
+        .unwrap_or(0);
+    serde_json::json!({
+        "id": s.id,
+        "name": s.name,
+        "brief": s.brief,
+        "scope": s.scope,
+        "expires_at": s.expires_at,
+        "created_at": s.created_at,
+        "last_used_at": s.last_used_at,
+        "url": crate::shares::url_for(&state.public_base_url, &s.token),
+        "messages_today": messages_today,
+        "threads": threads,
+    })
+}
+
+fn share_error(e: crate::shares::ShareError) -> axum::response::Response {
+    use crate::shares::ShareError as E;
+    match e {
+        E::Invalid(m) => (StatusCode::UNPROCESSABLE_ENTITY, Json(serde_json::json!({ "error": m }))).into_response(),
+        E::TooMany => (StatusCode::CONFLICT, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
+        E::Db(_) | E::Json(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn shares_list(user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
+    let conn = state.db();
+    match crate::shares::list(&conn, user.id) {
+        Ok(rows) => Json(rows.iter().map(|s| share_info_json(&state, &conn, s)).collect::<Vec<_>>()).into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn shares_create(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<crate::shares::NewShare>,
+) -> impl IntoResponse {
+    if !crate::net::fetch_site_ok(&headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let conn = state.db();
+    match crate::shares::create(&conn, user.id, req, jiff::Timestamp::now(), &crate::shares::Limits::of(&state)) {
+        Ok(s) => {
+            let _ = crate::log::record(&conn, Some(user.id), "share_created", &format!("share={} {:?}", s.id, s.name));
+            (StatusCode::CREATED, Json(share_info_json(&state, &conn, &s))).into_response()
+        }
+        Err(e) => share_error(e),
+    }
+}
+
+async fn shares_update(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(patch): Json<crate::shares::SharePatch>,
+) -> impl IntoResponse {
+    if !crate::net::fetch_site_ok(&headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let conn = state.db();
+    match crate::shares::update(&conn, user.id, id, patch, jiff::Timestamp::now(), &crate::shares::Limits::of(&state)) {
+        Ok(Some(s)) => {
+            let _ = crate::log::record(&conn, Some(user.id), "share_updated", &format!("share={} {:?}", s.id, s.name));
+            Json(share_info_json(&state, &conn, &s)).into_response()
+        }
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => share_error(e),
+    }
+}
+
+async fn shares_revoke(user: CurrentUser, State(state): State<AppState>, headers: HeaderMap, Path(id): Path<i64>) -> impl IntoResponse {
+    if !crate::net::fetch_site_ok(&headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let conn = state.db();
+    match crate::shares::revoke(&conn, user.id, id) {
+        Ok(Some(s)) => {
+            let _ = crate::log::record(&conn, Some(user.id), "share_revoked", &format!("share={} {:?}", s.id, s.name));
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn shares_threads(user: CurrentUser, State(state): State<AppState>, Path(id): Path<i64>) -> impl IntoResponse {
+    let conn = state.db();
+    match crate::shares::get(&conn, user.id, id) {
+        Ok(Some(s)) => match crate::shares::threads(&conn, s.id) {
+            Ok(t) => Json(t).into_response(),
+            Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        },
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
 }
