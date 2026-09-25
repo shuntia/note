@@ -529,8 +529,10 @@ pub fn threads(conn: &Connection, share_id: i64) -> rusqlite::Result<Vec<ThreadO
 pub const OPENER_MAX_BYTES: usize = 8192;
 const RECENT_DAYS: i64 = 7;
 const DONE_RECENT_MAX: usize = 40;
-/// Task and done-recently row caps tried in order until the opener fits.
-const CAPS: &[(usize, usize)] = &[(80, 40), (20, 10), (0, 0)];
+const GOAL_ROWS_MAX: usize = 30;
+/// Task and done-recently row caps tried in order until the opener fits: the
+/// task list gives way entirely before the done list is touched.
+const CAPS: &[(usize, usize)] = &[(80, 40), (40, 40), (20, 40), (0, 40), (0, 10), (0, 0)];
 
 pub struct Rendered {
     /// The `# What is shared` block for the system prompt.
@@ -690,14 +692,19 @@ pub fn render(
             if total == 0 && !scope.categories.is_empty() {
                 continue;
             }
-            let due = g.due_at.as_deref().map(|d| format!(", due {}", day_of(d))).unwrap_or_default();
-            goals_text.push_str(&format!("- {} ({done} of {total} tasks done{due})\n", g.title));
+            if rows.len() < GOAL_ROWS_MAX {
+                let due = g.due_at.as_deref().map(|d| format!(", due {}", day_of(d))).unwrap_or_default();
+                goals_text.push_str(&format!("- {} ({done} of {total} tasks done{due})\n", g.title));
+            }
             rows.push(serde_json::json!({
                 "id": g.id, "title": g.title, "due_at": g.due_at, "tasks": total, "done_tasks": done,
             }));
         }
         if rows.is_empty() {
             goals_text.push_str("- none\n");
+        }
+        if rows.len() > GOAL_ROWS_MAX {
+            goals_text.push_str(&format!("- and {} more\n", rows.len() - GOAL_ROWS_MAX));
         }
         goals_text.push('\n');
         view.insert("goals".into(), serde_json::Value::Array(rows));
@@ -736,7 +743,7 @@ pub fn render(
         if scope.tasks {
             s.push_str("# Open tasks\n\n");
             let urgent: Vec<&TaskRow> = tasks.iter().filter(|t| t.rank <= 1).collect();
-            if !urgent.is_empty() {
+            if !urgent.is_empty() && task_cap > 0 {
                 s.push_str("Urgent:\n");
                 for t in urgent.iter().take(task_cap) {
                     s.push_str(&task_line(t, scope));
@@ -744,7 +751,7 @@ pub fn render(
             }
             let rest: Vec<&TaskRow> = tasks.iter().filter(|t| t.rank > 1).collect();
             let room = task_cap.saturating_sub(urgent.len().min(task_cap));
-            if !rest.is_empty() {
+            if !rest.is_empty() && room > 0 {
                 s.push_str("Others:\n");
                 for t in rest.iter().take(room) {
                     s.push_str(&task_line(t, scope));
@@ -781,6 +788,13 @@ pub fn render(
             break;
         }
         text = render_text(*t, *d);
+    }
+    if text.len() > OPENER_MAX_BYTES {
+        let mut cut = OPENER_MAX_BYTES;
+        while !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        text.truncate(cut);
     }
     Ok(Rendered { text, view: serde_json::Value::Object(view) })
 }
@@ -829,6 +843,28 @@ pub fn goal_counts(conn: &Connection, goal_id: i64, scope: &ShareScope) -> rusql
         rusqlite::params_from_iter(params.iter()),
         |r| Ok((r.get(0)?, r.get(1)?)),
     )
+}
+
+/// The goal's open or in-progress top-level task due soonest, from the shared
+/// categories alone: its id, title and due time.
+pub fn goal_next_task(
+    conn: &Connection,
+    goal_id: i64,
+    scope: &ShareScope,
+) -> rusqlite::Result<Option<(i64, String, Option<String>)>> {
+    let (filter, category_params) = scope.category_clause("category").unwrap_or_default();
+    let params: Vec<rusqlite::types::Value> =
+        std::iter::once(goal_id.into()).chain(category_params).collect();
+    conn.query_row(
+        &format!(
+            "SELECT id, title, due_at FROM tasks
+             WHERE goal_id = ? AND parent_id IS NULL AND state IN ('open','in_progress'){filter}
+             ORDER BY due_at IS NULL, due_at, id LIMIT 1"
+        ),
+        rusqlite::params_from_iter(params.iter()),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )
+    .optional()
 }
 
 #[cfg(test)]
@@ -1135,11 +1171,21 @@ mod tests {
         let conn = conn();
         let (tmp, _) = seed_owner(&conn);
         for i in 0..200 {
-            crate::tasks::create(&conn, 1, crate::tasks::NewTask { title: format!("filler task number {i} with a long enough title to matter"), ..Default::default() }, "manual", crate::tasks::Actor::User).unwrap();
+            crate::tasks::create(&conn, 1, crate::tasks::NewTask { title: format!("filler task number {i} with a title long enough that eighty of these lines overflow the opener"), ..Default::default() }, "manual", crate::tasks::Actor::User).unwrap();
         }
+        for i in 0..30 {
+            let id = crate::tasks::create(&conn, 1, crate::tasks::NewTask { title: format!("finished {i}"), ..Default::default() }, "manual", crate::tasks::Actor::User).unwrap().id;
+            crate::tasks::update(&conn, 1, id, crate::tasks::TaskPatch { state: Some("done".into()), ..Default::default() }).unwrap();
+        }
+        conn.execute("UPDATE tasks SET completed_at = '2026-09-24T11:00:00Z' WHERE state = 'done'", []).unwrap();
         let r = render(&conn, tmp.path(), 1, "aki", &ShareScope::default(), now()).unwrap();
         assert!(r.text.len() <= OPENER_MAX_BYTES, "{}", r.text.len());
         assert!(r.text.contains("more; ask"), "{}", r.text);
+        let task_lines = r.text.lines().filter(|l| l.contains("filler task")).count();
+        assert!(task_lines < 80, "the task list was trimmed: {task_lines} lines");
+        let done_lines = r.text.lines().filter(|l| l.starts_with("- finished") || l.starts_with("- reading")).count();
+        assert!(done_lines > 10, "the done list outlasts the task list: {done_lines} rows\n{}", r.text);
+        assert!(r.text.contains("# Today and ahead"), "{}", r.text);
         assert!(r.view["tasks"].as_array().unwrap().len() > 80, "the view is not trimmed with the text");
     }
 }

@@ -1,7 +1,7 @@
 use super::task_ops::{checked_due, task_error};
 use super::{check_text, ToolCtx, ToolError};
 use crate::goals::{GoalPatch, NewGoal};
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::Connection;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
@@ -132,7 +132,6 @@ fn confined(
     scope: &crate::shares::ShareScope,
 ) -> Result<Vec<crate::goals::Goal>, ToolError> {
     let internal = |e: rusqlite::Error| ToolError::internal(e.to_string());
-    let (categories, category_params) = scope.category_clause("category").unwrap_or_default();
     let mut out = Vec::with_capacity(goals.len());
     for mut g in goals {
         let (tasks, done_tasks) =
@@ -140,22 +139,7 @@ fn confined(
         if tasks == 0 {
             continue;
         }
-        let params: Vec<rusqlite::types::Value> = std::iter::once(g.id.into())
-            .chain(category_params.iter().cloned())
-            .collect();
-        let next: Option<(i64, String, Option<String>)> = conn
-            .query_row(
-                &format!(
-                    "SELECT id, title, due_at FROM tasks
-                     WHERE goal_id = ? AND parent_id IS NULL{categories}
-                       AND state IN ('open','in_progress')
-                     ORDER BY due_at IS NULL, due_at, id LIMIT 1"
-                ),
-                rusqlite::params_from_iter(params.iter()),
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-            .optional()
-            .map_err(internal)?;
+        let next = crate::shares::goal_next_task(conn, g.id, scope).map_err(internal)?;
         g.tasks = tasks;
         g.done_tasks = done_tasks;
         (g.next_task_id, g.next_task_title, g.next_due_at) = match next {
