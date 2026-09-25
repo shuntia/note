@@ -7,8 +7,19 @@ import { prefsFrom, writePrefs } from '../prefs'
 import { disablePush, enablePush, pushState } from '../push'
 import { eventLabel } from '../receipts'
 import type { CounterMode } from '../session'
+import { paletteAt, solarAltitude, sunTimes } from '../sky'
 import '../styles/settings.css'
-import { applyTheme, saveTheme, storedTheme, type ThemeChoice } from '../theme'
+import {
+  applyTheme,
+  currentPlace,
+  deviceZone,
+  paintSky,
+  savePlace,
+  saveTheme,
+  storedPlace,
+  storedTheme,
+  type ThemeChoice,
+} from '../theme'
 import type {
   Me,
   Passkey,
@@ -67,7 +78,36 @@ const THEMES: { id: ThemeChoice; label: string }[] = [
   { id: 'system', label: 'System' },
   { id: 'light', label: 'Light' },
   { id: 'dark', label: 'Dark' },
+  { id: 'sky', label: 'Sky' },
 ]
+
+// Today's sky from midnight to midnight at half-hour stops, with a mark at now.
+function SkyStrip() {
+  const zone = deviceZone()
+  const place = currentPlace()
+  const now = new Date()
+  const times = sunTimes(now, place, zone)
+  const stops = Array.from({ length: 49 }, (_, i) => {
+    const at = new Date(now)
+    at.setHours(0, i * 30, 0, 0)
+    const { tokens } = paletteAt(solarAltitude(at, place.lat, place.lon))
+    return `${tokens['sky-mid']} ${(i / 48) * 100}%`
+  })
+  const mins = now.getHours() * 60 + now.getMinutes()
+  return (
+    <div className="sky-strip-wrap">
+      <div className="sky-strip" style={{ background: `linear-gradient(90deg, ${stops.join(', ')})` }}>
+        <i style={{ left: `${(mins / 1440) * 100}%` }} />
+      </div>
+      <div className="sky-ticks">
+        <span>0:00</span>
+        <span>{times.rise ? `${times.rise} rise` : 'no sunrise'}</span>
+        <span>{times.set ? `${times.set} set` : 'no sunset'}</span>
+        <span>24:00</span>
+      </div>
+    </div>
+  )
+}
 
 const COUNTERS: { id: CounterMode; label: string }[] = [
   { id: 'remaining', label: 'Remaining' },
@@ -189,6 +229,7 @@ export function Settings({
   const [save, setSave] = useState<Save>(null)
   const [open, setOpen] = useState<string | null>(null)
   const [theme, setTheme] = useState<ThemeChoice>(storedTheme)
+  const [place, setPlace] = useState(storedPlace)
   const [invite, setInvite] = useState<TelegramLink | null>(null)
 
   const load = () => {
@@ -374,6 +415,26 @@ export function Settings({
     setTheme(choice)
     applyTheme(choice)
     saveTheme(choice)
+  }
+
+  const locate = () =>
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        const p = {
+          lat: Math.round(pos.coords.latitude * 10) / 10,
+          lon: Math.round(pos.coords.longitude * 10) / 10,
+        }
+        savePlace(p)
+        setPlace(p)
+        paintSky()
+      },
+      () => notify("Couldn't get your location."),
+      { maximumAge: 3_600_000, timeout: 10_000 },
+    )
+  const forget = () => {
+    savePlace(null)
+    setPlace(null)
+    paintSky()
   }
 
   const commitOn = (row: string) => ({
@@ -785,6 +846,16 @@ export function Settings({
                   </button>
                 ))}
               </div>
+              {theme === 'sky' && (
+                <>
+                  <SkyStrip key={place ? `${place.lat},${place.lon}` : 'zone'} />
+                  <p className="set-note">
+                    <button type="button" className="link" onClick={place ? forget : locate}>
+                      {place ? 'Forget my location' : 'Use my location'}
+                    </button>
+                  </p>
+                </>
+              )}
             </div>
           )}
         </FoldRow>

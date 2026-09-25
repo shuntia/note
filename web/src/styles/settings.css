@@ -135,3 +135,10 @@
 .set-share-msg { margin: 0; font-size: 0.875rem; }
 .set-share-msg.user { color: var(--quiet); }
 .set-share-msg.note { color: var(--sun-ink); }
+
+.sky-strip-wrap { align-self: stretch; margin: 0.25rem 0 0; }
+.sky-strip { position: relative; height: 2.375rem; border-radius: 0.625rem; overflow: hidden; }
+.sky-strip i { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--ink); box-shadow: 0 0 0 2px var(--ivory); }
+.sky-ticks { display: flex; justify-content: space-between; font-size: 0.72rem; color: var(--faint); padding: 0.25rem 0.125rem 0; font-variant-numeric: tabular-nums; }
+.set-note { margin: 0; font-size: 0.85rem; color: var(--quiet); line-height: 1.45; }
+.set-note .link { font: inherit; font-weight: 700; color: var(--sun-ink); background: none; border: 0; padding: 0; cursor: pointer; }
