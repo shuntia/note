@@ -2,6 +2,7 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type FormEvent,
@@ -9,6 +10,7 @@ import {
 } from 'react'
 import { flushSync } from 'react-dom'
 import { api, ApiError, setOnUnauthorized } from './api'
+import { trailing } from './coalesce'
 import { Jot } from './jot'
 import { glide, lift, viewIn, viewOut } from './motion-gsap'
 import { reducedMotion } from './motion'
@@ -23,6 +25,7 @@ import { Settings } from './views/Settings'
 import { Talk } from './views/Talk'
 import { Tasks } from './views/Tasks'
 import { connectEvents } from './ws'
+import { deviceZone, zoneChange } from './zone'
 import './styles/shell.css'
 
 // `admin` is reached from Settings only, so it never joins NAV.
@@ -134,7 +137,7 @@ export function App() {
     )
   }, [])
 
-  const onChanged = useCallback(() => setRefresh((n) => n + 1), [])
+  const onChanged = useMemo(() => trailing(() => setRefresh((n) => n + 1), 80), [])
 
   const openTalk = useCallback(
     (draft: string) => {
@@ -243,6 +246,36 @@ export function App() {
       .then((s) => writePrefs(prefsFrom(s)))
       .catch(() => {})
   }, [me])
+
+  useEffect(() => {
+    if (!me) return
+    let busy = false
+    const check = async () => {
+      if (busy) return
+      busy = true
+      try {
+        const change = zoneChange(await api.settings(), deviceZone())
+        if (!change) return
+        await api.saveSettings({ timezone: change.to })
+        onChanged()
+        notify(`Your day now follows ${change.to.replace(/_/g, ' ')}`, {
+          label: 'Undo',
+          windowMs: 8000,
+          run: () =>
+            void api
+              .saveSettings({ timezone: change.from, timezone_auto: false })
+              .then(onChanged, () => notify("Couldn't undo that. Try again.")),
+        })
+      } catch {
+        // The next focus tries again.
+      } finally {
+        busy = false
+      }
+    }
+    void check()
+    window.addEventListener('focus', check)
+    return () => window.removeEventListener('focus', check)
+  }, [me, notify, onChanged])
 
   useEffect(() => {
     if (!me) return

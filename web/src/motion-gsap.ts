@@ -1,4 +1,5 @@
 import gsap from 'gsap'
+import { waveDelays } from './wave'
 
 const still = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches
 
@@ -6,16 +7,30 @@ type Target = Element | null | undefined
 
 const live = (els: readonly Target[]): Element[] => els.filter((el): el is Element => !!el)
 
-/** Rows arriving in a list: a short rise, one just behind the next. */
-export function settle(targets: readonly Target[], y = 6): void {
+/** Rows arriving in a list: one wave from the top of `within` (the viewport by
+ *  default), a quarter second long whatever the count; rows outside it do not move. */
+export function settle(targets: readonly Target[], y = 6, within?: Element): void {
   const els = live(targets)
   if (still() || els.length === 0) return
-  gsap.from(els, {
+  const box = within
+    ? within.getBoundingClientRect()
+    : new DOMRect(0, 0, window.innerWidth, window.innerHeight)
+  const delays = waveDelays(els.map((el) => el.getBoundingClientRect()), box)
+  const shown: Element[] = []
+  const delay: number[] = []
+  delays.forEach((d, i) => {
+    if (d === null) return
+    shown.push(els[i])
+    delay.push(d)
+  })
+  if (shown.length === 0) return
+  gsap.from(shown, {
     autoAlpha: 0,
     y,
     duration: 0.32,
     ease: 'power2.out',
-    stagger: 0.03,
+    stagger: (i: number) => delay[i],
+    overwrite: 'auto',
     clearProps: 'transform,opacity,visibility',
   })
 }
@@ -117,7 +132,7 @@ export function flip(moves: readonly { el: Element; dx?: number; dy: number }[])
   if (still()) return
   for (const { el, dx = 0, dy } of moves) {
     if (Math.abs(dx) < 1 && Math.abs(dy) < 1) continue
-    gsap.from(el, { x: dx, y: dy, duration: 0.38, ease: 'power2.out', clearProps: 'transform' })
+    gsap.from(el, { x: dx, y: dy, duration: 0.38, ease: 'power2.out', overwrite: 'auto', clearProps: 'transform' })
   }
 }
 

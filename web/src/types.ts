@@ -191,6 +191,7 @@ export type ScheduleRow = {
 export type Settings = {
   display_name: string
   timezone: string
+  timezone_auto: boolean
   nightly_time: string
   // When the close-the-day card appears; '' where the user turned it off.
   close_day_time: string
@@ -223,6 +224,7 @@ export type SettingsSaved = Pick<
   Settings,
   | 'display_name'
   | 'timezone'
+  | 'timezone_auto'
   | 'nightly_time'
   | 'close_day_time'
   | 'template'

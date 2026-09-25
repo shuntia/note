@@ -2,6 +2,7 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type FormEvent,
@@ -9,6 +10,7 @@ import {
   type RefObject,
 } from 'react'
 import { api, ApiError } from '../api'
+import { latest } from '../coalesce'
 import type { ViewProps } from '../app'
 import { collapse, flip, settle } from '../motion-gsap'
 import { reducedMotion } from '../motion'
@@ -194,6 +196,21 @@ function groups(nodes: TaskNode[]) {
   }
 }
 
+const searchWords = (title: string) => {
+  const search = title.trim().toLowerCase()
+  return search === '' ? [] : search.split(/\s+/)
+}
+
+const shownBy = (filter: string | null, words: string[]) => (n: TaskNode) =>
+  (filter === null || n.category === filter) && matches(n, words)
+
+// The live rows in the order they are drawn, before any leaving row is put back.
+function shownGroups(nodes: TaskNode[], filter: string | null, title: string, sort: SortKey) {
+  const visible = shownBy(filter, searchWords(title))
+  const g = groups(nodes)
+  return { now: g.now.filter(visible), later: g.later.filter(visible).sort(COMPARE[sort]) }
+}
+
 function withTask(nodes: TaskNode[], t: Task): TaskNode[] {
   return nodes.map((n) => {
     if (n.id === t.id) return { ...n, ...t, children: n.children }
@@ -250,9 +267,8 @@ function placed(list: TaskNode[], nodes: TaskNode[], leaving: Leaving[], group: 
 }
 
 // Rows that were already there slide from where they were; rows that are new settle
-// in. A row folding away drives the layout itself, so the FLIP stands down for it and
-// re-reads the rows each frame instead: whatever moves as the row finally leaves the
-// list travels from where it stood one frame before, not from before the fold.
+// in. While a row folds away it drives the layout itself, so the FLIP stands down and
+// `mark` takes the snapshot the next pass compares against.
 function useRowMotion(root: RefObject<HTMLDivElement | null>, busy: boolean) {
   const tops = useRef<Map<string, DOMRect> | null>(null)
 
@@ -267,22 +283,17 @@ function useRowMotion(root: RefObject<HTMLDivElement | null>, busy: boolean) {
     return { at, els }
   }, [root])
 
-  useEffect(() => {
-    if (!busy) return
-    let raf = 0
-    const sample = () => {
-      tops.current = read().at
-      raf = requestAnimationFrame(sample)
-    }
-    raf = requestAnimationFrame(sample)
-    return () => cancelAnimationFrame(raf)
-  }, [busy, read])
+  // Called with a folded row at zero height, so rows that already slid up are not
+  // moved again by the pass that follows its removal.
+  const mark = useCallback(() => {
+    tops.current = read().at
+  }, [read])
 
   useLayoutEffect(() => {
+    if (busy) return
     const { at, els } = read()
     const was = tops.current
     tops.current = at
-    if (busy) return
     if (was === null) return settle([...els.values()])
     const moves: { el: Element; dx: number; dy: number }[] = []
     const fresh: Element[] = []
@@ -295,6 +306,8 @@ function useRowMotion(root: RefObject<HTMLDivElement | null>, busy: boolean) {
     flip(moves)
     settle(fresh)
   })
+
+  return { mark }
 }
 
 // Dragging the bar fires all the way along; the write waits for the hand to settle.
@@ -332,7 +345,11 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
   const seeded = useRef(false)
   const unfinished = useRef(new Map<number, number>())
   const root = useRef<HTMLDivElement>(null)
-  useRowMotion(root, leaving.length > 0)
+  const { mark } = useRowMotion(root, leaving.length > 0)
+  const shown = useMemo(
+    () => (nodes ? shownGroups(nodes, filter, title, sort) : null),
+    [nodes, filter, title, sort],
+  )
 
   const loadGoals = useCallback(() => {
     api
@@ -341,11 +358,12 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
       .catch(() => setGoals([]))
   }, [])
 
+  const newest = useState(() => latest<TaskNode[]>())[0]
   const load = useCallback(() => {
     loadGoals()
-    api
-      .tasks()
+    newest(api.tasks())
       .then((ts) => {
+        if (!ts) return
         setNodes(ts)
         setFailed(false)
         if (seeded.current) return
@@ -353,7 +371,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
         setOpenSteps(new Set(ts.filter((t) => t.is_now && t.children.length > 0).map((t) => t.id)))
       })
       .catch(() => setFailed(true))
-  }, [loadGoals])
+  }, [loadGoals, newest])
   useEffect(load, [load, refresh])
 
   const patch = useCallback(
@@ -387,6 +405,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
   // A restored row still folding away stays where it is and unfolds its finish.
   const restore = useCallback(
     async (snap: Snapshot) => {
+      mark()
       setLeaving((ls) => ls.filter((l) => !snap.some((s) => s.id === l.id)))
       setNodes((ns) =>
         ns ? snap.reduce((acc, s) => withState(acc, s.id, s.state, s.progress), ns) : ns,
@@ -394,18 +413,23 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
       for (const s of snap) await patch(s.id, { state: s.state, progress: s.progress })
       loadGoals()
     },
-    [loadGoals, patch],
+    [loadGoals, mark, patch],
   )
 
   const markLeaving = (node: TaskNode, state: TaskState) => {
-    if (!nodes) return
-    const g = groups(nodes)
-    const now = g.now.findIndex((n) => n.id === node.id)
-    const index = now === -1 ? g.later.findIndex((n) => n.id === node.id) : now
+    if (!shown) return
+    const now = shown.now.findIndex((n) => n.id === node.id)
+    const index = now === -1 ? shown.later.findIndex((n) => n.id === node.id) : now
     if (index === -1) return
     setLeaving((ls) => [...ls, { id: node.id, group: now === -1 ? 'later' : 'now', index, state }])
   }
-  const gone = useCallback((id: number) => setLeaving((ls) => ls.filter((l) => l.id !== id)), [])
+  const gone = useCallback(
+    (id: number) => {
+      mark()
+      setLeaving((ls) => ls.filter((l) => l.id !== id))
+    },
+    [mark],
+  )
 
   // Finishing a task takes its live steps with it, and finishing the last step
   // finishes the task, so undo has to put the whole cascade back.
@@ -728,13 +752,11 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
   }
 
   const search = title.trim().toLowerCase()
-  const words = search === '' ? [] : search.split(/\s+/)
   const categories = categoriesOf(nodes)
-  const visible = (n: TaskNode) =>
-    (filter === null || n.category === filter) && matches(n, words)
+  const visible = shownBy(filter, searchWords(title))
 
-  const now = placed(g.now.filter(visible), nodes, leaving, 'now')
-  const later = placed(g.later.filter(visible).sort(COMPARE[sort]), nodes, leaving, 'later')
+  const now = placed(shown?.now ?? [], nodes, leaving, 'now')
+  const later = placed(shown?.later ?? [], nodes, leaving, 'later')
   // A task settles into Done today only once it has folded away: until then it is
   // still in the list it is leaving, and a row is never in two lists at once.
   const doneToday = g.doneToday.filter((n) => !leaving.some((l) => l.id === n.id))

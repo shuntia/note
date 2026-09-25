@@ -1219,6 +1219,7 @@ struct AlertPatch {
 struct SettingsPatch {
     display_name: Option<String>,
     timezone: Option<String>,
+    timezone_auto: Option<bool>,
     nightly_time: Option<String>,
     close_day_time: Option<String>,
     template: Option<String>,
@@ -1253,6 +1254,7 @@ fn settings_body(
     serde_json::json!({
         "display_name": cfg.display_name,
         "timezone": cfg.timezone,
+        "timezone_auto": cfg.timezone_auto(),
         "nightly_time": cfg.nightly_time,
         "close_day_time": cfg.close_day_time(),
         "template": cfg.template,
@@ -1403,6 +1405,9 @@ async fn settings_put(
             );
         }
         cfg.triggers_per_day = Some(n);
+    }
+    if let Some(on) = req.timezone_auto {
+        cfg.timezone_auto = Some(on);
     }
     if let Some(on) = req.pomodoro_enabled {
         cfg.pomodoro_enabled = Some(on);
