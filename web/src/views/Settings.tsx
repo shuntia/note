@@ -1,5 +1,5 @@
 import QRCode from 'qrcode'
-import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { api, ApiError, security } from '../api'
 import type { ToastAction, ViewProps } from '../app'
 import { Overflow } from '../overflow'
@@ -83,17 +83,23 @@ const THEMES: { id: ThemeChoice; label: string }[] = [
 
 // Today's sky from midnight to midnight at half-hour stops, with a mark at now.
 function SkyStrip() {
-  const zone = deviceZone()
-  const place = currentPlace()
-  const now = new Date()
-  const times = sunTimes(now, place, zone)
-  const stops = Array.from({ length: 49 }, (_, i) => {
-    const at = new Date(now)
-    at.setHours(0, i * 30, 0, 0)
-    const { tokens } = paletteAt(solarAltitude(at, place.lat, place.lon))
-    return `${tokens['sky-mid']} ${(i / 48) * 100}%`
-  })
-  const mins = now.getHours() * 60 + now.getMinutes()
+  const [minute, setMinute] = useState(() => Math.floor(Date.now() / 60_000))
+  useEffect(() => {
+    const id = window.setInterval(() => setMinute(Math.floor(Date.now() / 60_000)), 60_000)
+    return () => window.clearInterval(id)
+  }, [])
+  const { times, stops, mins } = useMemo(() => {
+    const zone = deviceZone()
+    const place = currentPlace()
+    const now = new Date(minute * 60_000)
+    const stops = Array.from({ length: 49 }, (_, i) => {
+      const at = new Date(now)
+      at.setHours(0, i * 30, 0, 0)
+      const { tokens } = paletteAt(solarAltitude(at, place.lat, place.lon))
+      return `${tokens['sky-mid']} ${(i / 48) * 100}%`
+    })
+    return { times: sunTimes(now, place, zone), stops, mins: now.getHours() * 60 + now.getMinutes() }
+  }, [minute])
   return (
     <div className="sky-strip-wrap">
       <div className="sky-strip" style={{ background: `linear-gradient(90deg, ${stops.join(', ')})` }}>
@@ -417,7 +423,8 @@ export function Settings({
     saveTheme(choice)
   }
 
-  const locate = () =>
+  const locate = () => {
+    if (!navigator.geolocation) return notify("Couldn't get your location.")
     navigator.geolocation.getCurrentPosition(
       (pos) => {
         const p = {
@@ -431,6 +438,7 @@ export function Settings({
       () => notify("Couldn't get your location."),
       { maximumAge: 3_600_000, timeout: 10_000 },
     )
+  }
   const forget = () => {
     savePlace(null)
     setPlace(null)

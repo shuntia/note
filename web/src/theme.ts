@@ -32,9 +32,7 @@ export function savePlace(p: Place | null) {
   try {
     if (p) localStorage.setItem(PLACE_KEY, JSON.stringify(p))
     else localStorage.removeItem(PLACE_KEY)
-  } catch {
-    // the place still holds until the next load
-  }
+  } catch {}
 }
 
 export const currentPlace = (): Place => storedPlace() ?? placeFromZone(deviceZone())
@@ -48,15 +46,19 @@ function stopSky() {
   const root = document.documentElement
   for (const t of TOKENS) root.style.removeProperty(`--${t}`)
   root.style.removeProperty('color-scheme')
+  root.removeAttribute('data-scheme')
 }
 
 // Writes the palette for this minute inline on :root, and keeps it for the pre-paint.
+// Does nothing unless Sky is the active theme and the page is visible.
 export function paintSky() {
   const root = document.documentElement
+  if (root.getAttribute('data-theme') !== 'sky' || document.hidden) return
   const place = currentPlace()
   const { tokens, dark } = paletteAt(solarAltitude(new Date(), place.lat, place.lon))
   for (const [k, v] of Object.entries(tokens)) root.style.setProperty(`--${k}`, v)
   root.style.colorScheme = dark ? 'dark' : 'light'
+  root.setAttribute('data-scheme', dark ? 'dark' : 'light')
   try {
     localStorage.setItem(SKY_KEY, JSON.stringify({ tokens, dark }))
   } catch {
