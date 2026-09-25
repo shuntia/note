@@ -867,6 +867,103 @@ pub fn goal_next_task(
     .optional()
 }
 
+const HISTORY_LIMIT: usize = 40;
+pub const MAX_MESSAGE: usize = crate::talk::MAX_MESSAGE;
+
+/// The visitor's thread key, placed on the request by the share middleware.
+#[derive(Debug, Clone)]
+pub struct VisitorKey(pub String);
+
+pub struct VisitorTurn {
+    pub reply: String,
+    /// Whether the session filed a note for the owner.
+    pub note: bool,
+}
+
+#[derive(Debug)]
+pub enum TurnError {
+    Blank,
+    Cap,
+    Busy,
+    /// The session did not finish; nothing was persisted.
+    Unavailable,
+    Internal,
+}
+
+pub async fn run_turn(state: &crate::AppState, principal: &crate::auth::SharePrincipal, visitor_key: &str, message: &str) -> Result<VisitorTurn, TurnError> {
+    let message = message.trim().to_string();
+    if message.is_empty() || message.len() > MAX_MESSAGE {
+        return Err(TurnError::Blank);
+    }
+    let share = principal.share.clone();
+    let now = jiff::Timestamp::now();
+    let thread_id = {
+        let conn = state.db();
+        let used = messages_today(&conn, share.id, now - jiff::Span::new().hours(24)).map_err(|_| TurnError::Internal)?;
+        if used >= share.scope.messages_per_day {
+            return Err(TurnError::Cap);
+        }
+        thread_for(&conn, share.id, visitor_key, now).map_err(|_| TurnError::Internal)?
+    };
+    let permit = state.talk_gate.try_enter_global().map_err(|_| TurnError::Busy)?;
+    let st = state.clone();
+    let owner_id = principal.owner_id;
+    let owner = principal.owner_username.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let deps = crate::agent::SessionDeps {
+            db: &st.db,
+            config_dir: &st.config_dir,
+            data_dir: &st.data_dir,
+            llm: st.llm.as_ref(),
+            embeddings: None,
+            search: None,
+            task_scope: None,
+            inbox_source: None,
+            memory_source: None,
+            token_id: None,
+            thread_note: None,
+            share: Some(crate::agent::ShareSession { id: share.id, thread_id, brief: share.brief.clone(), scope: share.scope.clone() }),
+        };
+        let past = history(&st.db(), thread_id, HISTORY_LIMIT)?;
+        let out = crate::agent::run_session(&deps, owner_id, &owner, crate::tools::SessionKind::Share, now, &past, &message)?;
+        let noted = out.steps.iter().find(|s| s.name == "share_note" && !s.is_error).map(|s| {
+            serde_json::from_str::<serde_json::Value>(&s.args).ok().and_then(|v| v["text"].as_str().map(str::to_string)).unwrap_or_default()
+        });
+        let reply = if out.reply.trim().is_empty() {
+            match &noted {
+                Some(_) => "Passed on.".to_string(),
+                None => crate::EMPTY_REPLY_FALLBACK.to_string(),
+            }
+        } else {
+            out.reply.clone()
+        };
+        {
+            let conn = st.db();
+            append(&conn, thread_id, "user", &message, now)?;
+            append(&conn, thread_id, "assistant", &reply, now)?;
+        }
+        if let Some(text) = &noted {
+            let msg = crate::channels::OutboundMessage {
+                title: format!("Note from {}", share.name),
+                body: text.clone(),
+                urgency: crate::channels::Urgency::Normal,
+                event_id: None,
+                conversation_id: None,
+                actions: Vec::new(),
+            };
+            crate::channels::deliver_via(&st.db, &st.channels, owner_id, &owner, &msg);
+        }
+        Ok::<_, anyhow::Error>(VisitorTurn { reply, note: noted.is_some() })
+    })
+    .await;
+    match result {
+        Ok(Ok(turn)) => Ok(turn),
+        Ok(Err(_)) => Err(TurnError::Unavailable),
+        Err(_) => Err(TurnError::Internal),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

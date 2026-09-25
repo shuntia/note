@@ -1,10 +1,11 @@
 use crate::auth::{self, CurrentUser, TaskPrincipal};
 use crate::AppState;
 use axum::extract::{Path, Query, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
+use base64::Engine;
 use rusqlite::OptionalExtension;
 use serde::Deserialize;
 
@@ -78,6 +79,7 @@ pub fn router(state: AppState) -> Router {
         .merge(calendar_router())
         .nest("/api/security", crate::security::routes())
         .nest("/api/admin", crate::admin::routes())
+        .merge(share_router(state.clone()))
         .with_state(state)
 }
 
@@ -92,6 +94,20 @@ pub fn router_with_web(state: AppState, web_dir: &std::path::Path) -> Router {
     }
     let files = tower_http::services::ServeDir::new(web_dir)
         .fallback(tower_http::services::ServeFile::new(web_dir.join("index.html")));
+    let shell = std::fs::read_to_string(web_dir.join("index.html")).unwrap_or_default();
+    let api = api.route(
+        "/s/{token}",
+        get(move || async move {
+            (
+                [
+                    (header::CACHE_CONTROL, "no-store"),
+                    (header::HeaderName::from_static("referrer-policy"), "no-referrer"),
+                    (header::HeaderName::from_static("x-robots-tag"), "noindex"),
+                ],
+                axum::response::Html(shell.clone()),
+            )
+        }),
+    );
     // `{*rest}` needs at least one character, so the bare prefix forms are
     // registered separately or they would fall through to the SPA shell.
     api.route(
@@ -101,6 +117,106 @@ pub fn router_with_web(state: AppState, web_dir: &std::path::Path) -> Router {
     .route("/api", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
     .route("/api/", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
     .fallback_service(files)
+}
+
+/// Every share response is uncacheable, sends no referrer, and asks not to be
+/// indexed; the first response a visitor gets also hands them their thread key.
+async fn share_envelope(State(state): State<AppState>, mut req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
+    let jar = axum_extra::extract::CookieJar::from_headers(req.headers());
+    let (key, fresh) = match jar.get("share_visitor") {
+        Some(c) if !c.value().is_empty() => (c.value().to_string(), false),
+        _ => {
+            let mut bytes = [0u8; 16];
+            getrandom::fill(&mut bytes).expect("os rng");
+            (base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes), true)
+        }
+    };
+    req.extensions_mut().insert(crate::shares::VisitorKey(key.clone()));
+    let mut res = next.run(req).await;
+    let h = res.headers_mut();
+    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    h.insert("referrer-policy", HeaderValue::from_static("no-referrer"));
+    h.insert("x-robots-tag", HeaderValue::from_static("noindex"));
+    if fresh {
+        let secure = if state.secure_cookies { "; Secure" } else { "" };
+        h.append(
+            header::SET_COOKIE,
+            HeaderValue::from_str(&format!("share_visitor={key}; HttpOnly; SameSite=Lax; Path=/api/share/; Max-Age=10368000{secure}")).expect("ascii"),
+        );
+    }
+    res
+}
+
+fn share_router(state: AppState) -> Router<AppState> {
+    Router::new()
+        .route("/api/share/{token}", get(share_info))
+        .route("/api/share/{token}/view", get(share_view))
+        .route("/api/share/{token}/messages", get(share_messages).post(share_send))
+        .layer(axum::middleware::from_fn_with_state(state, share_envelope))
+}
+
+fn share_display_name(state: &AppState, username: &str) -> String {
+    crate::config::UserConfig::load(&state.config_dir, username).map(|c| c.display_name).unwrap_or_else(|_| username.to_string())
+}
+
+async fn share_info(p: auth::SharePrincipal, State(state): State<AppState>) -> impl IntoResponse {
+    Json(serde_json::json!({
+        "owner": share_display_name(&state, &p.owner_username),
+        "name": p.share.name,
+        "expires_at": p.share.expires_at,
+        "scope": p.share.scope,
+        "notes": p.share.scope.notes,
+    }))
+}
+
+async fn share_view(p: auth::SharePrincipal, State(state): State<AppState>) -> impl IntoResponse {
+    let conn = state.db();
+    match crate::shares::render(&conn, &state.config_dir, p.owner_id, &p.owner_username, &p.share.scope, jiff::Timestamp::now()) {
+        Ok(r) => Json(r.view).into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn share_messages(p: auth::SharePrincipal, State(state): State<AppState>, axum::Extension(key): axum::Extension<crate::shares::VisitorKey>) -> impl IntoResponse {
+    let conn = state.db();
+    let thread: Option<i64> = conn
+        .query_row("SELECT id FROM share_threads WHERE share_id = ?1 AND visitor_key = ?2", (p.share.id, &key.0), |r| r.get(0))
+        .optional()
+        .unwrap_or(None);
+    match thread {
+        Some(id) => match crate::shares::messages(&conn, id) {
+            Ok(m) => Json(m).into_response(),
+            Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        },
+        None => Json(Vec::<crate::shares::MessageOut>::new()).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct ShareSendReq {
+    message: String,
+}
+
+async fn share_send(
+    p: auth::SharePrincipal,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::Extension(key): axum::Extension<crate::shares::VisitorKey>,
+    Json(req): Json<ShareSendReq>,
+) -> impl IntoResponse {
+    use crate::shares::TurnError as E;
+    let now = jiff::Timestamp::now();
+    if !state.share_limiter.try_attempt(&crate::net::client_key(&headers), now) {
+        return (StatusCode::TOO_MANY_REQUESTS, Json(serde_json::json!({ "error": "too many messages from this address; try again later" }))).into_response();
+    }
+    match crate::shares::run_turn(&state, &p, &key.0, &req.message).await {
+        Ok(t) => Json(serde_json::json!({ "reply": t.reply, "note": t.note })).into_response(),
+        Err(E::Blank) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "message must be non-blank and at most 16384 bytes" }))).into_response(),
+        Err(E::Cap) => (StatusCode::TOO_MANY_REQUESTS, Json(serde_json::json!({ "error": "this link has reached today's message limit" }))).into_response(),
+        Err(E::Busy) => session_busy_response(crate::TalkBusy::Full),
+        Err(E::Unavailable) => (StatusCode::BAD_GATEWAY, Json(serde_json::json!({ "error": "Note could not answer" }))).into_response(),
+        Err(E::Internal) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
 }
 
 #[derive(Deserialize)]
