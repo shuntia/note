@@ -12,6 +12,7 @@ pub const MAX_HORIZON_DAYS: u8 = 14;
 /// limiter window before it is refused.
 pub const ADDRESS_ATTEMPTS: u32 = 60;
 const TOUCH_INTERVAL_SECS: i64 = 60;
+const MAX_EXPIRY_DAYS: u32 = 36500;
 
 /// What a link lets its visitor learn. Stored as JSON in `shares.scope`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -104,8 +105,8 @@ impl Default for Limits {
 impl Limits {
     pub fn of(state: &crate::AppState) -> Self {
         Self {
-            max_days: state.share_max_days,
-            messages_per_day: state.share_messages_per_day,
+            max_days: state.share_max_days.clamp(1, MAX_EXPIRY_DAYS),
+            messages_per_day: state.share_messages_per_day.max(1),
             per_user: state.shares_per_user,
         }
     }
@@ -148,7 +149,7 @@ pub struct SharePatch {
 pub enum ShareError {
     #[error("{0}")]
     Invalid(String),
-    #[error("at most this many share links per user")]
+    #[error("share links are off, or the cap is reached")]
     TooMany,
     #[error(transparent)]
     Db(#[from] rusqlite::Error),
@@ -180,7 +181,9 @@ pub fn clamp_expiry(
             "expires_at must be in the future".into(),
         ));
     }
-    let ceiling = now + jiff::Span::new().hours(i64::from(max_days) * 24);
+    let ceiling = now
+        .checked_add(jiff::SignedDuration::from_hours(i64::from(max_days) * 24))
+        .map_err(|_| ShareError::Invalid("share_max_days reaches past the calendar".into()))?;
     Ok(if requested > ceiling {
         ceiling
     } else {
@@ -200,12 +203,13 @@ fn checked_name(raw: &str) -> Result<String, ShareError> {
 }
 
 fn checked_brief(raw: &str) -> Result<String, ShareError> {
-    if raw.len() > MAX_BRIEF_BYTES {
+    let brief = raw.trim();
+    if brief.len() > MAX_BRIEF_BYTES {
         return Err(ShareError::Invalid(format!(
             "brief must be at most {MAX_BRIEF_BYTES} bytes"
         )));
     }
-    Ok(raw.trim().to_string())
+    Ok(brief.to_string())
 }
 
 const COLS: &str =
@@ -219,7 +223,9 @@ fn row_to_share(r: &rusqlite::Row) -> rusqlite::Result<Share> {
         name: r.get(2)?,
         brief: r.get(3)?,
         token: r.get(4)?,
-        scope: serde_json::from_str(&scope).unwrap_or_default(),
+        scope: serde_json::from_str(&scope).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, Box::new(e))
+        })?,
         expires_at: r.get(6)?,
         created_at: r.get(7)?,
         updated_at: r.get(8)?,
@@ -559,6 +565,52 @@ mod tests {
             ok.checked(&Limits::default()).unwrap().categories,
             vec!["school".to_string()]
         );
+    }
+
+    #[test]
+    fn an_unreadable_stored_scope_is_an_error_not_the_default() {
+        let conn = conn();
+        let s = create(&conn, 1, new("Mom"), now(), &Limits::default()).unwrap();
+        conn.execute("UPDATE shares SET scope = '{\"nope\":1}' WHERE id = ?1", [s.id]).unwrap();
+        assert!(get(&conn, 1, s.id).is_err());
+        assert!(list(&conn, 1).is_err());
+        assert!(resolve(&conn, &s.token, now()).is_err());
+    }
+
+    #[test]
+    fn zero_shares_per_user_turns_links_off() {
+        let conn = conn();
+        let limits = Limits { per_user: 0, ..Limits::default() };
+        assert!(matches!(create(&conn, 1, new("Mom"), now(), &limits), Err(ShareError::TooMany)));
+    }
+
+    #[test]
+    fn zero_expiry_and_message_ceilings_floor_at_one() {
+        let mut state = crate::AppState::new(
+            crate::db::open_memory().unwrap(),
+            std::path::PathBuf::new(),
+            std::path::PathBuf::new(),
+        );
+        state.share_max_days = 0;
+        state.share_messages_per_day = 0;
+        let limits = Limits::of(&state);
+        assert_eq!(limits.max_days, 1);
+        assert_eq!(limits.messages_per_day, 1);
+        state.share_max_days = u32::MAX;
+        assert_eq!(Limits::of(&state).max_days, MAX_EXPIRY_DAYS);
+    }
+
+    #[test]
+    fn an_expiry_ceiling_past_the_calendar_is_refused_not_a_panic() {
+        let far = now() + jiff::Span::new().hours(400 * 24);
+        assert!(matches!(clamp_expiry(far, now(), u32::MAX), Err(ShareError::Invalid(_))));
+    }
+
+    #[test]
+    fn a_brief_is_measured_after_trimming() {
+        let padded = format!("  {}  ", "a".repeat(MAX_BRIEF_BYTES));
+        assert_eq!(checked_brief(&padded).unwrap().len(), MAX_BRIEF_BYTES);
+        assert!(checked_brief(&"a".repeat(MAX_BRIEF_BYTES + 1)).is_err());
     }
 
     #[test]

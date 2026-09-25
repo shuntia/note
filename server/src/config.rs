@@ -195,15 +195,17 @@ impl Default for AdminConfig {
     }
 }
 
-/// Spend ceilings an operator can raise or lift; 0 means unlimited.
+/// Spend ceilings an operator can raise or lift.
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct LimitsConfig {
+    /// 0 means unlimited.
     pub agent_sessions_per_day: u32,
-    /// The farthest a share link may be set to expire.
+    /// The farthest a share link may be set to expire; the floor is one day.
     pub share_max_days: u32,
-    /// The ceiling a link's own daily message cap may be raised to.
+    /// The ceiling a link's own daily message cap may be raised to; the floor is one.
     pub share_messages_per_day: u32,
+    /// Share links one user may hold; 0 turns share links off.
     pub shares_per_user: u32,
 }
 
