@@ -224,12 +224,13 @@ fn row_to_task(r: &rusqlite::Row) -> rusqlite::Result<Task> {
     let progress: u32 = r.get(16)?;
     let (expected_min, remaining_min) = projection(progress, actual_min);
     let due_at: Option<String> = r.get(11)?;
-    let pressing = pressing_at(due_at.as_deref(), jiff::Timestamp::now());
+    let state: String = r.get(3)?;
+    let pressing = pressing_at(&state, due_at.as_deref(), jiff::Timestamp::now());
     Ok(Task {
         id: r.get(0)?,
         title: r.get(1)?,
         description: r.get(2)?,
-        state: r.get(3)?,
+        state,
         source: r.get(4)?,
         notes: r.get(5)?,
         duration_min: r.get(6)?,
@@ -380,7 +381,10 @@ fn checked_urgency(raw: &str) -> Result<String, UpdateError> {
     Ok(raw.to_owned())
 }
 
-pub fn pressing_at(due_at: Option<&str>, now: jiff::Timestamp) -> bool {
+pub fn pressing_at(state: &str, due_at: Option<&str>, now: jiff::Timestamp) -> bool {
+    if !matches!(state, "open" | "in_progress") {
+        return false;
+    }
     let Some(due) = due_at.and_then(|d| d.parse::<jiff::Timestamp>().ok()) else { return false };
     due < now + jiff::Span::new().hours(PRESSING_HOURS)
 }
@@ -1139,10 +1143,10 @@ pub fn update(
     let due_at = due_at.unwrap_or(before.due_at);
     checked_due_placement(parent_id, due_at.as_deref())?;
     checked_step_placement(parent_id, category.as_deref(), patch.goal_id.flatten())?;
-    // becoming a step is giving up a category and a goal, as it is leaving Now
-    let (category, goal_id) = match parent_id {
-        Some(_) => (Some(String::new()), None),
-        None => (category, patch.goal_id.unwrap_or(before.goal_id)),
+    // becoming a step is giving up a category, an urgency and a goal, as it is leaving Now
+    let (category, urgency, goal_id) = match parent_id {
+        Some(_) => (Some(String::new()), Some("normal".to_string()), None),
+        None => (category, urgency, patch.goal_id.unwrap_or(before.goal_id)),
     };
     if let Some(id) = goal_id {
         checked_goal(conn, user_id, id)?;
@@ -1726,15 +1730,33 @@ mod tests {
         let err = update(&conn, uid, step.id, TaskPatch { urgency: Some("low".into()), ..Default::default() })
             .unwrap_err();
         assert!(matches!(err, UpdateError::InvalidHierarchy(_)), "{err:?}");
+
+        let urgent = create(
+            &conn,
+            uid,
+            NewTask { title: "quiz".into(), urgency: Some("high".into()), ..Default::default() },
+            "manual",
+            Actor::User,
+        )
+        .unwrap();
+        update(&conn, uid, urgent.id, TaskPatch { parent_id: Some(Some(parent.id)), ..Default::default() })
+            .unwrap()
+            .unwrap();
+        let promoted = update(&conn, uid, urgent.id, TaskPatch { parent_id: Some(None), ..Default::default() })
+            .unwrap()
+            .unwrap();
+        assert_eq!(promoted.task.urgency, "normal", "a demoted task gives up its urgency");
     }
 
     #[test]
     fn pressing_flips_at_forty_eight_hours_and_for_overdue() {
         let now: jiff::Timestamp = "2026-09-24T12:00:00Z".parse().unwrap();
-        assert!(!pressing_at(None, now));
-        assert!(pressing_at(Some("2026-09-24T11:00:00Z"), now), "overdue is pressing");
-        assert!(pressing_at(Some("2026-09-26T11:59:59Z"), now), "inside 48h");
-        assert!(!pressing_at(Some("2026-09-26T12:00:01Z"), now), "past 48h");
-        assert!(!pressing_at(Some("not a time"), now));
+        assert!(!pressing_at("open", None, now));
+        assert!(pressing_at("open", Some("2026-09-24T11:00:00Z"), now), "overdue is pressing");
+        assert!(pressing_at("in_progress", Some("2026-09-26T11:59:59Z"), now), "inside 48h");
+        assert!(!pressing_at("open", Some("2026-09-26T12:00:01Z"), now), "past 48h");
+        assert!(!pressing_at("open", Some("not a time"), now));
+        assert!(!pressing_at("done", Some("2026-09-24T11:00:00Z"), now), "a done task is never pressing");
+        assert!(!pressing_at("dropped", Some("2026-09-24T11:00:00Z"), now));
     }
 }
