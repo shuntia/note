@@ -88,7 +88,8 @@ config/
 
 Per-user files are optional; anything not overridden falls back to the
 `defaults/` tree. `server.toml` also takes an optional `[limits]` section
-(`agent_sessions_per_day`, see "Sessions & limits").
+(`agent_sessions_per_day`, see "Sessions & limits"; `share_max_days`,
+`share_messages_per_day` and `shares_per_user`, see "Share links").
 
 ### Settings API
 
@@ -170,6 +171,15 @@ takes the same fields, with explicit `null` clearing `due_at`, `duration_min`,
 `422`; an `external_id` another task already holds is a `409`. Both routes, and
 every listing, return `due_at`, `external_id`, `url` and `source` on the task
 and on each of its steps.
+
+Every task carries an `urgency` of `low`, `normal` (default) or `high`; a step
+reads its parent's and cannot carry its own. Rows also carry `pressing`, true
+when a live task is overdue or due inside 48 hours. When Note fills free time,
+tasks in Now go first, then high, then pressing, then normal, then low, the
+nearest due date first within each. `POST /api/tasks` and
+`PATCH /api/tasks/{id}` take `urgency`; the tools take it on create, update and
+bulk update, and `task_list` filters by it and sorts by it in that same order
+(high, pressing, normal, low).
 
 ### Importing from another system
 
@@ -684,6 +694,62 @@ route still needs the session cookie.
   `external_id` leaves a tombstone behind (see "Importing from another
   system").
 - Minting and revoking log `token_created` / `token_revoked` to `event_log`.
+
+### Share links
+
+A user can hand someone they trust a link that shows a chosen slice of their
+Note and answers questions about it, with no account on the visitor's side.
+
+- Mint one in Settings → Advanced → Share links, or over the session:
+  `POST /api/shares {name, brief, scope, expires_at}` → the row plus `url`.
+  `GET /api/shares` lists them with their `url`, `messages_today` and thread
+  count; `PATCH /api/shares/{id}` changes name, brief, scope or expiry;
+  `DELETE /api/shares/{id}` revokes; `GET /api/shares/{id}/threads` reads every
+  visitor conversation. A write whose `Sec-Fetch-Site` is neither
+  `same-origin` nor `none` is a `403`.
+  Names are 1 to 64 characters and a brief at most 4 KiB (`422`). An expiry in
+  the past is a `422`; one beyond `share_max_days` is pulled back to it. A user
+  at `shares_per_user` links is refused with `409`.
+- In Settings a link's URL is shown once it is made, and *Copy link* and
+  *Preview as visitor* work for as long as it lives; *Conversations* reads its
+  threads, and *Revoke* asks for confirmation in a toast.
+- The scope is `{today, tasks, categories, goals, progress, details,
+  horizon_days, notes, messages_per_day}`. `today` shares the plan and the
+  calendar for `horizon_days` (1 to 14) days from today; calendar titles travel
+  whenever it is on, since calendar entries carry no category. `categories`
+  empty means all; otherwise every task read, goal count and plan block is
+  confined to them. `details` off means titles only: descriptions, notes, `url`
+  and `external_id` are withheld, and keyword search and `task_search` match
+  titles alone. `notes` lets the visitor leave a message that reaches the
+  owner's channels as "Note from <link name>". `messages_per_day` caps visitor
+  messages across all of a link's threads in any 24 hours (`429` beyond it).
+- The visitor opens `/s/<token>`, reads `GET /api/share/{token}` (owner's
+  display name, what is shared, until when), `GET /api/share/{token}/view`
+  (the slice as data), and talks over `GET/POST /api/share/{token}/messages`.
+  A cookie keys their thread; two people on one link never see each other's
+  questions. Every one of these is `404` once the link expires, is revoked, or
+  its owner is disabled. A stored scope that no longer parses fails the request
+  rather than widening what it shows.
+- Unknown-token lookups and message posts are counted per client address
+  (`cf-connecting-ip`, then the first `x-forwarded-for` hop): 60 in 15 minutes,
+  then `429`.
+- The assistant runs as its own session kind with read-only tools: `task_list`,
+  `task_search` and `task_read` when `tasks` is on, `plan_list` and
+  `calendar_list` when `today` is, `goal_list` when `goals` is, and
+  `share_note` when `notes` is. `plan_list` and `calendar_list` refuse dates
+  outside the horizon. Under a share, `plan_list` never returns a trigger's
+  `prompt` or `cancel_if`, every row carries `task_title`, and a block for a
+  task outside the shared categories is `{"kind":"busy","start","end","status"}`.
+- Its system prompt is the `share` prompt file (editable per user like
+  `persona`, under Settings → Advanced → How Note talks), the owner's per-link
+  brief, and a fresh rendering of the scope on every message. It never sees the
+  standing context, memory, chat threads, or settings. Its turns log as
+  `share_session`, outside the owner's `agent_sessions_per_day` and outside the
+  recent-activity block the owner's own sessions read.
+- `[limits]` takes `share_max_days` (default 120, at least 1, at most 36500),
+  `share_messages_per_day` (default 100, at least 1; the ceiling a link's own
+  `messages_per_day` may be raised to), and `shares_per_user` (default 20;
+  `0` turns share links off).
 
 ### Briefing an imported task
 
