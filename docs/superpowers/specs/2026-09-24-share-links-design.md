@@ -366,6 +366,80 @@ section shape `TokensSection` uses. The section:
 Owner-side `api.ts`: `shares()`, `createShare(body)`, `updateShare(id,
 body)`, `revokeShare(id)`, `shareThreads(id)`.
 
+## Urgency
+
+A task carries an urgency the owner or the model sets, and the app reads a
+second, derived signal from the due date. Both reach the share surface.
+
+### Attribute
+
+`tasks.urgency TEXT NOT NULL DEFAULT 'normal' CHECK (urgency IN
+('low','normal','high'))`, in the same migration as the share tables. Top-level
+tasks only; a step reads its parent's, as with `due_at` and `goal_id`. No
+backfill: every existing task is `normal`.
+
+### Pressing
+
+A live task is *pressing* when it is overdue or due within the next 48 hours
+of the user's local time. Pressing is computed on read, never stored, and
+exposed on every task row the server returns as `pressing: bool`. Overdue
+keeps rose; pressing-but-not-overdue and `high` urgency both read as the word
+*urgent* in sun-ink meta after the title.
+
+### Tools and prompts
+
+- `task_create`, `task_update`, `task_bulk_update` take `urgency`;
+  `task_list` filters by `urgency` and sorts by `urgency` (high, then
+  pressing, then normal, then low; due date inside each); `task_read` and
+  every list row return `urgency` and `pressing`.
+- `persona.md` and `planning.md`: set `high` when the user says it is urgent
+  or when the deadline is near and the work is large; never lower a task the
+  user raised. When laying a plan or filling free time, high goes first, then
+  due date, and low waits until nothing else fits.
+- `allocate.rs` (free-time fill) and `plan_auto` order candidates by urgency
+  rank, then due date, then the existing order, so the rule holds in code.
+
+### API and UI
+
+- Task routes carry `urgency`; `PATCH /api/tasks/{id}` accepts it; 422 on a
+  value outside the three.
+- Tasks view: the row menu gains *Urgency ›* with radio children *Low*,
+  *Normal*, *High*. The sort control gains *Urgency*. The default *Later*
+  order becomes urgency rank first (high, pressing, normal, low), then the
+  existing schedule, due, newest chain. A step never shows urgency of its own.
+- Today: a task block whose task is high or pressing shows the *urgent* meta.
+
+### Share
+
+Task rows in the view and the opener carry `urgency` and `pressing`; the
+opener lists urgent and pressing tasks first under their own line "Urgent".
+The `share` prompt tells the assistant to lead with them when asked what
+someone has.
+
+### Testing
+
+Unit, `tasks.rs`: the column round-trips through create, update, and bulk
+update; a bad value is rejected; steps report the parent's; `pressing` flips
+at the 48-hour edge and for overdue tasks, in the user's zone.
+
+Unit, `allocate.rs` and `plan_ops.rs`: a high task is placed before an
+earlier-due normal one; a low task is placed last.
+
+Integration, `tasks_api.rs`: `urgency` on create and patch; 422 on a bad
+value; list rows carry `pressing`.
+
+Web: the type check and lint as before.
+
+## Deploy
+
+Migration v39 adds the three share tables and the urgency column. The
+deploy is the standing path: merge to main, `nix flake update note` in
+configuration-nix, `sudo nixos-rebuild switch` run by the user. The
+migration runs on first start; nothing is backfilled. The `share` prompt
+file ships in `defaults/` and needs no per-user step. The `[limits]` keys
+have defaults, so `server.toml` needs no edit unless the ceilings should
+differ.
+
 ## Docs
 
 README gains a "Share links" subsection after "API tokens": what a link is,
