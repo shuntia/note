@@ -1,6 +1,7 @@
 /* the visitor's page is the chat alone, a viewport tall with no nav under it */
 .chat.share-chat { height: 100dvh; color: var(--ink); }
 .chat.share-chat .chat-head { padding-top: 1rem; padding-bottom: 0; }
+.share-chat .chat-title .chat-retitle.plain { color: var(--ink); cursor: default; }
 .chat.share-chat .chat-pane { padding-top: 0.75rem; }
 .share-cover { margin: 0; padding: 0 1.125rem 0.5rem; color: var(--quiet); font-size: 0.875rem; }
 .chat.share-chat .chat-foot { padding-bottom: max(1.25rem, env(safe-area-inset-bottom)); }
