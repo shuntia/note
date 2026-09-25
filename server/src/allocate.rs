@@ -29,6 +29,8 @@ pub struct Candidate {
     pub id: i64,
     pub minutes: u16,
     pub is_now: bool,
+    /// From `tasks::urgency_rank`; lower is laid first.
+    pub urgency_rank: u8,
     pub due: Option<jiff::civil::Date>,
     pub created: String,
     /// Which piece of a split task this is, 1-based, and how many there are.
@@ -117,15 +119,16 @@ fn usable(free: &[Window], busy: &[Window]) -> Vec<Window> {
     out
 }
 
-/// First-fit in priority order: `is_now`, then earliest due (overdue first, no
-/// due date last), then oldest created. A task that fits nowhere is skipped and
-/// the next one is tried. `GAP_MIN` separates placements.
+/// First-fit in priority order: `is_now`, then urgency rank, then earliest due
+/// (overdue first, no due date last), then oldest created. A task that fits
+/// nowhere is skipped and the next one is tried. `GAP_MIN` separates placements.
 pub fn pack(free: &[Window], busy: &[Window], tasks: &[Candidate], cap: usize) -> Vec<Placement> {
     let mut slots = usable(free, busy);
     let mut order: Vec<&Candidate> = tasks.iter().collect();
     order.sort_by(|a, b| {
         b.is_now
             .cmp(&a.is_now)
+            .then(a.urgency_rank.cmp(&b.urgency_rank))
             .then(a.due.is_none().cmp(&b.due.is_none()))
             .then(a.due.cmp(&b.due))
             .then(a.created.cmp(&b.created))
@@ -213,6 +216,8 @@ struct TaskRow {
     id: i64,
     len: Length,
     is_now: bool,
+    state: String,
+    urgency: String,
     due_at: Option<String>,
     created: String,
 }
@@ -226,6 +231,7 @@ fn candidates(
     user_id: i64,
     date: jiff::civil::Date,
     longest: u16,
+    now: jiff::Timestamp,
 ) -> rusqlite::Result<Vec<Candidate>> {
     let held = crate::tools::plan_ops::planned_on(conn, user_id, date)?;
     let factor = crate::learn::plan_factor(conn, user_id)?;
@@ -233,7 +239,8 @@ fn candidates(
         crate::learn::stretch(minutes, factor).clamp(1, i64::from(u16::MAX)) as u16
     };
     let mut stmt = conn.prepare(
-        "SELECT id, is_now, due_at, created_at, duration_min, progress, actual_min FROM tasks
+        "SELECT id, is_now, due_at, created_at, duration_min, progress, actual_min, state, urgency
+         FROM tasks
          WHERE user_id = ?1 AND parent_id IS NULL AND state IN ('open','in_progress')
          ORDER BY id",
     )?;
@@ -245,6 +252,8 @@ fn candidates(
                 due_at: r.get(2)?,
                 created: r.get(3)?,
                 len: Length::read(r, 4)?,
+                state: r.get(7)?,
+                urgency: r.get(8)?,
             })
         })?
         .collect::<rusqlite::Result<_>>()?;
@@ -252,10 +261,14 @@ fn candidates(
 
     let mut out = Vec::new();
     for row in rows {
-        let TaskRow { id, len, is_now, due_at, created } = row;
+        let TaskRow { id, len, is_now, state, urgency, due_at, created } = row;
         if held.contains_key(&id) {
             continue;
         }
+        let urgency_rank = crate::tasks::urgency_rank(
+            &urgency,
+            crate::tasks::pressing_at(&state, due_at.as_deref(), now),
+        );
         let due = due_at.and_then(|d| d.parse().ok());
         let steps = open_steps(conn, id)?;
         if steps.is_empty() {
@@ -266,6 +279,7 @@ fn candidates(
                     id,
                     minutes: piece,
                     is_now,
+                    urgency_rank,
                     due,
                     created: created.clone(),
                     part: (n > 1).then_some((i as u16 + 1, n)),
@@ -282,6 +296,7 @@ fn candidates(
                 id: step_id,
                 minutes: step_len.minutes(share, stretched),
                 is_now,
+                urgency_rank,
                 due,
                 created: created.clone(),
                 part: None,
@@ -343,7 +358,7 @@ pub fn run(
     }
 
     let longest = usable(&free, &busy).iter().map(|w| w.end - w.start).max().unwrap_or(0);
-    let tasks = candidates(conn, user_id, date, longest)?;
+    let tasks = candidates(conn, user_id, date, longest, now)?;
     let placed = pack(&free, &busy, &tasks, MAX_AUTO_BLOCKS);
 
     let mut laid = Vec::with_capacity(placed.len());
@@ -403,6 +418,7 @@ mod tests {
             id,
             minutes,
             is_now: false,
+            urgency_rank: 2,
             due: None,
             created: "2026-01-01T00:00:00Z".into(),
             part: None,
@@ -440,6 +456,7 @@ mod tests {
             id,
             minutes: 30,
             is_now: false,
+            urgency_rank: 2,
             due: Some(due.parse().unwrap()),
             created: created.into(),
             part: None,
@@ -454,6 +471,17 @@ mod tests {
         let order: Vec<i64> =
             pack(&free, &[], &tasks, MAX_AUTO_BLOCKS).iter().map(|p| p.task_id).collect();
         assert_eq!(order, vec![4, 3, 2, 5, 1]);
+    }
+
+    #[test]
+    fn high_urgency_is_placed_before_an_earlier_due_normal_task_and_low_goes_last() {
+        let free = [w("09:00", "11:00")];
+        let a = Candidate { due: Some("2026-01-01".parse().unwrap()), ..task(1, 20) };
+        let b = Candidate { urgency_rank: 0, ..task(2, 20) };
+        let c = Candidate { urgency_rank: 3, due: Some("2025-12-01".parse().unwrap()), ..task(3, 20) };
+        let order: Vec<i64> =
+            pack(&free, &[], &[a, b, c], MAX_AUTO_BLOCKS).iter().map(|p| p.task_id).collect();
+        assert_eq!(order, vec![2, 1, 3]);
     }
 
     #[test]

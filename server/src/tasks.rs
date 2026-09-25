@@ -389,6 +389,16 @@ pub fn pressing_at(state: &str, due_at: Option<&str>, now: jiff::Timestamp) -> b
     due < now + jiff::Span::new().hours(PRESSING_HOURS)
 }
 
+/// 0 high, 1 pressing, 2 normal, 3 low: the order planning reads.
+pub fn urgency_rank(urgency: &str, pressing: bool) -> u8 {
+    match (urgency, pressing) {
+        ("high", _) => 0,
+        (_, true) => 1,
+        ("low", false) => 3,
+        _ => 2,
+    }
+}
+
 fn checked_category(raw: &str) -> Result<String, UpdateError> {
     let category = raw.trim();
     if category.len() > MAX_CATEGORY_BYTES {
