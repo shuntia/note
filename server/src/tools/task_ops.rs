@@ -117,6 +117,9 @@ pub struct CreateArgs {
     /// The goal this task is part of, from goal_list.
     #[serde(default)]
     pub goal_id: Option<i64>,
+    /// low, normal (default) or high. High goes first when the day is laid.
+    #[serde(default)]
+    pub urgency: Option<String>,
 }
 
 pub fn create(
@@ -139,6 +142,7 @@ pub fn create(
             progress: args.progress,
             category: args.category,
             goal_id: args.goal_id,
+            urgency: args.urgency,
             ..NewTask::default()
         },
         "agent",
@@ -189,6 +193,9 @@ pub struct UpdateArgs {
     /// belongs to no goal of its own.
     #[serde(default, deserialize_with = "crate::tasks::present")]
     pub goal_id: Option<Option<i64>>,
+    /// low, normal or high. High goes first when the day is laid. A step reads
+    /// its parent's.
+    pub urgency: Option<String>,
 }
 
 pub fn update(
@@ -244,6 +251,7 @@ pub fn update(
         progress: args.progress,
         category: args.category,
         goal_id: args.goal_id,
+        urgency: args.urgency,
         actor: Actor::Agent,
         ..Default::default()
     };

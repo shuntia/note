@@ -530,8 +530,10 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
             "Survey the user's top-level tasks, newest first, each with its due date, its \
              category, its step count and how many of those are done. Filter by state, by a \
              case-insensitive keyword over title, description and notes, by category, by when \
-             the task was added, by when it is due or whether it is overdue, or to the Now list; sort due to put the soonest deadline \
-             first and the undated tasks last; total says how many matched, which can be more \
+             the task was added, by when it is due or whether it is overdue, by urgency, or to the Now list; sort due to put the \
+             soonest deadline first and the undated tasks last, or sort urgency to see what presses: \
+             high first, then anything due within two days or overdue, then normal, then low. Each \
+             task carries its urgency and whether it is pressing; total says how many matched, which can be more \
              than one page holds.",
             schema::<task_query::ListArgs>(),
         ),

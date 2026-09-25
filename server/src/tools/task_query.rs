@@ -67,7 +67,11 @@ pub struct ListArgs {
     /// True for tasks whose due date has passed, false for everything else.
     #[serde(default)]
     pub overdue: Option<bool>,
-    /// added (default), newest first, or due, soonest first with undated last.
+    /// Only tasks at this urgency: low, normal or high.
+    #[serde(default)]
+    pub urgency: Option<String>,
+    /// added (default), newest first; due, soonest first with undated last; or
+    /// urgency (high, then pressing, then normal, then low; soonest due inside each).
     #[serde(default)]
     pub sort: Option<String>,
     /// How many tasks to return, 1 to 200. Default 50.
@@ -151,6 +155,16 @@ fn list_filters(ctx: &ToolCtx, args: &ListArgs) -> Result<(String, Vec<SqlValue>
         );
         params.push(jiff::Timestamp::now().to_string().into());
     }
+    if let Some(u) = &args.urgency {
+        if !crate::tasks::URGENCY.contains(&u.as_str()) {
+            return Err(ToolError::rejected(format!(
+                "urgency must be one of {}",
+                crate::tasks::URGENCY.join(", ")
+            )));
+        }
+        wheres.push("urgency = ?".into());
+        params.push(u.clone().into());
+    }
     Ok((wheres.join(" AND "), params))
 }
 
@@ -174,11 +188,23 @@ pub fn list(conn: &Connection, ctx: &ToolCtx, args: ListArgs) -> Result<serde_js
     if !(1..=MAX_LIMIT).contains(&limit) {
         return Err(ToolError::rejected(format!("limit must be in 1..={MAX_LIMIT}")));
     }
+    let now = jiff::Timestamp::now();
+    let mut pressing_cutoff = None;
     let order = match args.sort.as_deref() {
         None | Some("added") => "created_at DESC, id DESC",
         Some("due") => "due_at IS NULL, due_at ASC, created_at DESC, id DESC",
+        Some("urgency") => {
+            pressing_cutoff =
+                Some((now + jiff::Span::new().hours(crate::tasks::PRESSING_HOURS)).to_string());
+            "CASE WHEN urgency = 'high' THEN 0
+                  WHEN state IN ('open','in_progress') AND due_at IS NOT NULL AND due_at < ? THEN 1
+                  WHEN urgency = 'normal' THEN 2 ELSE 3 END,
+             due_at IS NULL, due_at ASC, created_at DESC, id DESC"
+        }
         Some(other) => {
-            return Err(ToolError::rejected(format!("sort must be added or due, got {other:?}")))
+            return Err(ToolError::rejected(format!(
+                "sort must be added, due or urgency, got {other:?}"
+            )))
         }
     };
     let (wheres, params) = list_filters(ctx, &args)?;
@@ -190,30 +216,35 @@ pub fn list(conn: &Connection, ctx: &ToolCtx, args: ListArgs) -> Result<serde_js
             |r| r.get(0),
         )
         .map_err(internal)?;
+    let mut page_params = params;
+    page_params.extend(pressing_cutoff.map(SqlValue::from));
     let mut stmt = conn
         .prepare(&format!(
             "SELECT id, title, state, is_now, duration_min, created_at, updated_at, due_at,
                     (SELECT COUNT(*) FROM tasks s WHERE s.parent_id = tasks.id AND s.state != 'dropped'),
                     (SELECT COUNT(*) FROM tasks s WHERE s.parent_id = tasks.id AND s.state = 'done'),
-                    progress, actual_min, category, goal_id
+                    progress, actual_min, category, goal_id, urgency
              FROM tasks WHERE {wheres}
              ORDER BY {order} LIMIT {limit}"
         ))
         .map_err(internal)?;
     let tasks = stmt
-        .query_map(rusqlite::params_from_iter(params.iter()), |r| {
+        .query_map(rusqlite::params_from_iter(page_params.iter()), |r| {
             let progress: u32 = r.get(10)?;
             let (expected_min, remaining_min) =
                 crate::tasks::projection(progress, r.get(11)?);
+            let state: String = r.get(2)?;
+            let due_at: Option<String> = r.get(7)?;
+            let pressing = crate::tasks::pressing_at(&state, due_at.as_deref(), now);
             Ok(serde_json::json!({
                 "id": r.get::<_, i64>(0)?,
                 "title": r.get::<_, String>(1)?,
-                "state": r.get::<_, String>(2)?,
+                "state": state,
                 "is_now": r.get::<_, bool>(3)?,
                 "duration_min": r.get::<_, Option<i64>>(4)?,
                 "created_at": r.get::<_, String>(5)?,
                 "updated_at": r.get::<_, String>(6)?,
-                "due_at": r.get::<_, Option<String>>(7)?,
+                "due_at": due_at,
                 "steps": r.get::<_, i64>(8)?,
                 "done_steps": r.get::<_, i64>(9)?,
                 "progress": progress,
@@ -221,6 +252,8 @@ pub fn list(conn: &Connection, ctx: &ToolCtx, args: ListArgs) -> Result<serde_js
                 "remaining_min": remaining_min,
                 "category": r.get::<_, String>(12)?,
                 "goal_id": r.get::<_, Option<i64>>(13)?,
+                "urgency": r.get::<_, String>(14)?,
+                "pressing": pressing,
             }))
         })
         .and_then(|rows| rows.collect::<rusqlite::Result<Vec<_>>>())
@@ -343,6 +376,9 @@ pub struct BulkUpdateArgs {
     /// Hangs them all from this goal; null detaches them.
     #[serde(default, deserialize_with = "crate::tasks::present")]
     pub goal_id: Option<Option<i64>>,
+    /// Sets them all to this urgency: low, normal or high.
+    #[serde(default)]
+    pub urgency: Option<String>,
     /// True deletes them all, with their steps and their place on the day's plan.
     #[serde(default)]
     pub delete: Option<bool>,
@@ -368,6 +404,7 @@ pub fn bulk_update(
         args.is_now.is_some(),
         args.category.is_some(),
         args.goal_id.is_some(),
+        args.urgency.is_some(),
         args.delete.is_some(),
     ]
     .iter()
@@ -375,7 +412,7 @@ pub fn bulk_update(
     .count();
     if changes != 1 {
         return Err(ToolError::rejected(
-            "set exactly one of state, is_now, category, goal_id or delete",
+            "set exactly one of state, is_now, category, goal_id, urgency or delete",
         ));
     }
     if args.delete == Some(false) {
@@ -402,6 +439,7 @@ pub fn bulk_update(
             is_now: args.is_now,
             category: args.category.clone(),
             goal_id: args.goal_id,
+            urgency: args.urgency.clone(),
             actor: crate::tasks::Actor::Agent,
             ..Default::default()
         };
@@ -499,6 +537,56 @@ mod tests {
         )
         .unwrap();
         out["step_ids"].as_array().unwrap().iter().map(|v| v.as_i64().unwrap()).collect()
+    }
+
+    #[test]
+    fn task_list_filters_and_sorts_by_urgency() {
+        let (conn, tmp) = env();
+        let mk = |title: &str, urgency: &str, due: Option<&str>| {
+            let due = due.map(|d| format!(r#","due_at":"{d}""#)).unwrap_or_default();
+            task(&conn, &tmp, &format!(r#"{{"title":"{title}","urgency":"{urgency}"{due}}}"#));
+        };
+        mk("low one", "low", None);
+        mk("plain", "normal", None);
+        mk("soon", "normal", Some("2026-01-02T00:00:00Z"));
+        mk("top", "high", None);
+        let out = call(&conn, &tmp, "task_list", r#"{"sort":"urgency"}"#).unwrap();
+        let titles: Vec<&str> =
+            out["tasks"].as_array().unwrap().iter().map(|t| t["title"].as_str().unwrap()).collect();
+        assert_eq!(titles, vec!["top", "soon", "plain", "low one"]);
+        assert_eq!(out["tasks"][0]["urgency"], "high");
+        assert_eq!(out["tasks"][1]["pressing"], true);
+        assert_eq!(out["tasks"][2]["pressing"], false);
+        let out = call(&conn, &tmp, "task_list", r#"{"urgency":"low"}"#).unwrap();
+        assert_eq!(out["total"], 1);
+        let err = call(&conn, &tmp, "task_list", r#"{"urgency":"asap"}"#).unwrap_err();
+        assert_eq!(err.kind, "rejected");
+    }
+
+    #[test]
+    fn a_finished_task_with_a_past_due_date_is_not_ranked_pressing() {
+        let (conn, tmp) = env();
+        let done = task(&conn, &tmp, r#"{"title":"filed","due_at":"2026-01-02T00:00:00Z"}"#);
+        patch(&conn, &tmp, done, r#""state":"done""#);
+        let in_an_hour = jiff::Timestamp::now() + jiff::Span::new().hours(1);
+        task(&conn, &tmp, &format!(r#"{{"title":"soon","due_at":"{in_an_hour}"}}"#));
+        let out = call(&conn, &tmp, "task_list", r#"{"state":"any","sort":"urgency"}"#).unwrap();
+        let titles: Vec<&str> =
+            out["tasks"].as_array().unwrap().iter().map(|t| t["title"].as_str().unwrap()).collect();
+        assert_eq!(titles, vec!["soon", "filed"]);
+        assert_eq!(out["tasks"][0]["pressing"], true);
+        assert_eq!(out["tasks"][1]["pressing"], false);
+    }
+
+    #[test]
+    fn task_bulk_update_sets_urgency_on_every_task() {
+        let (conn, tmp) = env();
+        let a = task(&conn, &tmp, r#"{"title":"a"}"#);
+        let b = task(&conn, &tmp, r#"{"title":"b"}"#);
+        call(&conn, &tmp, "task_bulk_update", &format!(r#"{{"task_ids":[{a},{b}],"urgency":"high"}}"#))
+            .unwrap();
+        let out = call(&conn, &tmp, "task_list", r#"{"urgency":"high"}"#).unwrap();
+        assert_eq!(out["total"], 2);
     }
 
     #[test]

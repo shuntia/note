@@ -777,3 +777,18 @@ async fn a_task_row_says_when_its_next_block_starts() {
         serde_json::json!(format!("{today}T18:15:00+00:00"))
     );
 }
+
+#[tokio::test]
+async fn urgency_is_created_patched_and_validated() {
+    let (app, cookie, _tmp) = app_with_user().await;
+    let (status, t) = post(&app, &cookie, "/api/tasks", r#"{"title":"exam","urgency":"high"}"#).await;
+    assert_eq!(status, StatusCode::OK, "{t}");
+    assert_eq!(t["urgency"], "high");
+    assert_eq!(t["pressing"], false);
+    let id = t["id"].as_i64().unwrap();
+    let (status, t) = patch_task(&app, &cookie, id, r#"{"urgency":"low"}"#).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(t["urgency"], "low");
+    let (status, e) = patch_task(&app, &cookie, id, r#"{"urgency":"asap"}"#).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{e}");
+}
