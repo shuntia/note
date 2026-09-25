@@ -744,8 +744,8 @@ Note and answers questions about it, with no account on the visitor's side.
   `task_search` and `task_read` when `tasks` is on, `plan_list` and
   `calendar_list` when `today` is, `goal_list` when `goals` is, and
   `share_note` when `notes` is. `plan_list` and `calendar_list` refuse dates
-  outside the horizon. Under a share, `plan_list` never returns a trigger's
-  `prompt` or `cancel_if`; a block for a task outside the shared categories is
+  outside the horizon. Under a share, `plan_list`, the opener and the page
+  leave the owner's trigger points out entirely; a block for a task outside the shared categories is
   `{"kind":"busy","start","end","status"}`; every other block row carries
   `task_title`, as it does in any session.
 - Its system prompt is the `share` prompt file (editable per user like

@@ -387,6 +387,9 @@ pub fn plan_list(conn: &Connection, ctx: &ToolCtx, args: PlanListArgs) -> Result
     }
     let mut events = Vec::new();
     for e in crate::plan::events_for(conn, ctx.user_id, date).map_err(internal)? {
+        if ctx.share.is_some() && e.kind == crate::triggers::KIND {
+            continue;
+        }
         let hidden = ctx.share.as_ref().is_some_and(|scope| {
             e.task.as_ref().is_some_and(|t| !scope.allows_category(&t.category))
         });
@@ -414,7 +417,7 @@ pub fn plan_list(conn: &Connection, ctx: &ToolCtx, args: PlanListArgs) -> Result
             "task_id": task_id,
             "task_title": e.task.as_ref().map(|t| t.title.clone()),
         });
-        if e.kind == crate::triggers::KIND && ctx.share.is_none() {
+        if e.kind == crate::triggers::KIND {
             let cancel_if: Option<String> = conn
                 .query_row("SELECT cancel_if FROM events WHERE id = ?1", [e.id], |r| r.get(0))
                 .optional()
@@ -939,7 +942,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_list_under_a_share_keeps_trigger_notes_back() {
+    fn plan_list_under_a_share_leaves_trigger_points_out() {
         let (conn, tmp) = env();
         pin_to_midday(&tmp);
         call(&conn, &tmp, "trigger_set", r#"{"at":"+120min","prompt":"ask about the therapy forms"}"#).unwrap();
@@ -949,9 +952,7 @@ mod tests {
         let sctx = share_ctx(&tmp, crate::shares::ShareScope::default());
         let out = dispatch(&conn, &sctx, SessionKind::Share, "plan_list", "{}").unwrap();
         let rows = out["events"].as_array().unwrap();
-        assert!(!rows.is_empty());
-        for row in rows {
-            assert!(row.get("prompt").is_none() && row.get("cancel_if").is_none(), "{row}");
-        }
+        assert!(rows.iter().all(|r| r["kind"] != crate::triggers::KIND), "{out}");
+        assert!(!out.to_string().contains("therapy forms"), "{out}");
     }
 }
