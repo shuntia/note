@@ -16,16 +16,12 @@ export function ripple(face, count = 1) {
   }
 }
 
-// The head of the fill flares where the arc begins, then settles as the bead that
-// leads the fill from then on.
+// A flare where the arc begins.
 export function ignite(face, frac = 0) {
   const svg = svgOf(face)
   const { x, y } = headAt(frac)
-  let head = svg.querySelector('.head')
-  if (!head) { head = circle({ cx: x, cy: y, r: 5.5, fill: 'var(--sun)', class: 'head' }); svg.append(head) }
   const flare = circle({ cx: x, cy: y, r: 6, fill: 'var(--sun)', opacity: 0.7 })
   svg.append(flare)
-  gsap.fromTo(head, { attr: { r: 0 } }, { attr: { r: 5.5 }, duration: 0.5, ease: 'back.out(3)' })
   gsap.to(flare, { attr: { r: 26 }, opacity: 0, duration: 0.7, ease: 'power2.out', onComplete: () => flare.remove() })
 }
 
@@ -83,4 +79,47 @@ export function beadsAtRest(face, done, total = 4) {
     const { x, y } = beadAt(i, total)
     svg.append(circle({ cx: x, cy: y, r: 4.5, fill: i < done ? 'var(--sun)' : 'var(--track)', class: 'bead' }))
   }
+}
+
+// The ring closes clockwise from where the arc begins, the grey track appears
+// beneath it, and the ring opens again from its tail, unwinding round to the head;
+// the head then fades and the fill is ready to count. `done` runs when it is.
+export function open(face, fill, track, done) {
+  const svg = svgOf(face)
+  svg.querySelector('.head')?.remove()
+  const head = circle({ cx: 0, cy: 0, r: 5.5, fill: 'var(--sun)', class: 'head' })
+  svg.append(head)
+  const s = { len: 0, cut: 0 }
+  const paint = () => {
+    const len = Math.max(0, s.len - s.cut)
+    fill.setAttribute('stroke-dasharray', `${len} ${C}`)
+    fill.setAttribute('stroke-dashoffset', -s.cut)
+    fill.style.opacity = len > 0.5 ? 1 : 0
+    const a = (240 + (360 * s.len) / C) * Math.PI / 180
+    head.setAttribute('cx', 160 + 148 * Math.cos(a)); head.setAttribute('cy', 160 + 148 * Math.sin(a))
+  }
+  gsap.set(track, { opacity: 0 })
+  const tl = gsap.timeline({ onUpdate: paint, onComplete: () => { fill.setAttribute('stroke-dashoffset', 0); fill.setAttribute('stroke-dasharray', `0 ${C}`); done?.() } })
+  tl.to(s, { len: C, duration: 0.75, ease: 'power2.inOut' }, 0)
+  tl.to(track, { opacity: 1, duration: 0.5, ease: 'power1.out' }, 0.5)
+  tl.to(s, { cut: C, duration: 0.65, ease: 'power2.inOut' }, 0.8)
+  tl.to(head, { opacity: 0, duration: 0.3, onComplete: () => head.remove() }, 1.3)
+  return tl
+}
+
+// A soft band of the arc's own colour widens out from the ring and fades: the
+// ripple as a gradient rather than a line.
+export function wave(face, color = 'var(--sun)', peak = 0.4) {
+  const app = face.closest('.frame-app')
+  const box = face.getBoundingClientRect(), root = app.getBoundingClientRect()
+  const cx = box.left - root.left + box.width / 2, cy = box.top - root.top + box.height / 2
+  const w = document.createElement('div')
+  w.style.cssText = 'position:absolute;inset:0;pointer-events:none;mix-blend-mode:multiply'
+  app.append(w)
+  const s = { r: 150, o: peak }
+  gsap.to(s, { r: 560, o: 0, duration: 1.2, ease: 'power2.out', onUpdate: () => {
+    const band = 26 + (s.r - 150) * 0.28
+    w.style.opacity = s.o
+    w.style.background = `radial-gradient(circle at ${cx}px ${cy}px, transparent ${s.r - band}px, ${color} ${s.r}px, transparent ${s.r + band}px)`
+  }, onComplete: () => w.remove() })
 }

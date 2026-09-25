@@ -1,13 +1,11 @@
 <!doctype html><html><head><meta charset="utf-8"><title>Idle</title>
 <link rel="stylesheet" href="tokens.css"><style>body{margin:0;background:#ddd}
-.hint{position:absolute;left:0;right:0;top:512px;text-align:center;font-size:12.5px;color:var(--faint);opacity:.75}
+.hint{position:absolute;left:0;right:0;top:322px;text-align:center;font-size:12.5px;color:var(--faint);opacity:.75}
 .handle{position:absolute;left:167px;bottom:8px;width:56px;height:4px;border-radius:2px;background:var(--track)}
 @keyframes breathe{0%,100%{opacity:.3}50%{opacity:.5}} .arc{animation:breathe 6s ease-in-out infinite}
 </style></head>
 <body><div class="frame-app p-day" style="width:390px;height:844px">
-  <div class="face" style="left:35px;top:170px;width:320px;height:320px"><div id="arc"></div></div>
   <div class="hint">tap the circle to start working</div>
   <div class="handle"></div>
 </div>
-<script type="module">import { arc, mount } from './parts.js'; mount('#arc', arc(0, { faded: true }))</script>
 </body></html>

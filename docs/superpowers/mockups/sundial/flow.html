@@ -3,7 +3,7 @@
 body{margin:0;background:#ddd;font-family:var(--sans)}
 .frame-app{touch-action:none;user-select:none}
 .face{left:35px;top:170px;width:320px;height:320px;cursor:pointer}
-.hint{position:absolute;left:0;right:0;top:512px;text-align:center;font-size:12.5px;color:var(--faint);opacity:.75;transition:opacity .5s}
+.hint{pointer-events:none;position:absolute;left:0;right:0;top:322px;text-align:center;font-size:12.5px;color:var(--faint);opacity:.75;transition:opacity .5s}
 .strip{position:absolute;left:0;top:0;width:320px;height:320px;overflow:visible}
 .rail{position:absolute;left:0;top:0;height:320px;display:flex;will-change:transform}
 .slot{width:320px;height:320px;flex:none;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:0 46px;gap:4px;position:relative}
@@ -46,7 +46,7 @@ body{margin:0;background:#ddd;font-family:var(--sans)}
 <div class="legend">
   <b>Try it</b>
   <p>Wait: the bar leaves. Touch anywhere: it returns.</p>
-  <p>Tap the circle: work begins on the most pressing task.</p>
+  <p>Tap the circle: the ring closes, the track appears beneath, the ring opens again, and work begins on the most pressing task.</p>
   <p>Swipe left: the next task. Swipe right past the first: work time on nothing in particular.</p>
   <p>Tap the circle while working: pause. Tap again: back to it. Swipe down: done, and a bead joins the ring's opening.</p>
   <p>The hint under the circle shows the first three times only.</p>
@@ -54,7 +54,7 @@ body{margin:0;background:#ddd;font-family:var(--sans)}
 <script src="/web/node_modules/gsap/dist/gsap.min.js"></script>
 <script type="module">
   import { arc, tabs, mount } from './parts.js'
-  import { ripple, ignite, closeRing, warm, beadsAtRest } from './fx.js'
+  import { closeRing, beadsAtRest, open, wave } from './fx.js'
   mount('#tabs', tabs('Today'))
   const tabsEl = document.querySelector('.tabs'), handle = document.getElementById('handle')
   const app = document.getElementById('app'), face = document.getElementById('face'), rail = document.getElementById('rail')
@@ -79,20 +79,23 @@ body{margin:0;background:#ddd;font-family:var(--sans)}
   const PLAN = 25 * 60
   const C = 929.9, SPAN = 619.9
   document.getElementById('arc').innerHTML = `<div class="arc" id="arcbox"><svg viewBox="0 0 320 320">
-    <circle cx="160" cy="160" r="148" fill="none" stroke="var(--track)" stroke-width="9" stroke-linecap="round" stroke-dasharray="${SPAN} ${C}" transform="rotate(150 160 160)"/>
+    <circle id="track" cx="160" cy="160" r="148" fill="none" stroke="var(--track)" stroke-width="9" stroke-linecap="round" stroke-dasharray="${SPAN} ${C}" transform="rotate(150 160 160)"/>
     <circle id="fill" cx="160" cy="160" r="148" fill="none" stroke="var(--sun)" stroke-width="9" stroke-linecap="round" stroke-dasharray="0 ${C}" transform="rotate(150 160 160)"/>
   </svg></div>`
-  const fill = document.getElementById('fill'), arcbox = document.getElementById('arcbox')
+  const fill = document.getElementById('fill'), arcbox = document.getElementById('arcbox'), track = document.getElementById('track')
   let rounds = 2
   const headAt = (frac) => { const a = (240 + 240 * frac) * Math.PI / 180; return { cx: 160 + 148 * Math.cos(a), cy: 160 + 148 * Math.sin(a) } }
+  let opening = false
   const setArc = (frac, faded) => {
-    if (gsap.isTweening(fill)) return
+    if (opening || gsap.isTweening(fill)) return
     fill.setAttribute('stroke-dasharray', `${SPAN * frac} ${C}`)
+    fill.style.opacity = frac > 0.002 ? 1 : 0
     const head = face.querySelector('.head'); if (head) { const p = headAt(frac); head.setAttribute('cx', p.cx); head.setAttribute('cy', p.cy) }
     arcbox.style.opacity = faded ? 0.38 : 1
   }
-  beadsAtRest(face, rounds)
-  setArc(0, true)
+  // idle shows nothing of the ring; the track and beads arrive with the start
+  const idleFace = () => { face.querySelectorAll('.head, .bead').forEach((e) => e.remove()); gsap.set(track, { opacity: 0 }); fill.setAttribute('stroke-dasharray', `0 ${C}`); fill.style.opacity = 0; arcbox.style.opacity = 1 }
+  idleFace()
 
   const renderRail = () => {
     rail.innerHTML = slots.map((s) => `<div class="slot">${s.mark ? `<i class="mark ${s.mark}"></i>` : ''}<div class="num tnum">25:00</div><div class="name">${s.name}</div>${s.sub ? `<div class="sub">${s.sub}</div>` : ''}</div>`).join('')
@@ -121,16 +124,18 @@ body{margin:0;background:#ddd;font-family:var(--sans)}
     renderRail(); snap(false)
     gsap.fromTo(rail, { autoAlpha: 0, y: 10 }, { autoAlpha: 1, y: 0, duration: 0.4, ease: 'power2.out' })
     hint.style.opacity = 0
-    ignite(face); ripple(face)
+    opening = true
+    open(face, fill, track, () => { opening = false; beadsIn() })
     rest()
   }
+  const beadsIn = () => { beadsAtRest(face, rounds); gsap.from(face.querySelectorAll('.bead'), { opacity: 0, duration: 0.5, stagger: 0.05 }) }
   const finish = () => {
     running = false
     const bead = rounds++
     closeRing(face, fill, bead)
-    setTimeout(() => warm(face), 450)
+    setTimeout(() => wave(face), 420)
     gsap.to(rail, { autoAlpha: 0, y: -10, duration: 0.3, delay: 0.6 })
-    setTimeout(() => { face.querySelector('.head')?.remove(); fill.setAttribute('stroke-dasharray', `0 ${C}`); setArc(0, true); hint.style.opacity = 0.75 }, 1400)
+    setTimeout(() => { gsap.to([track, fill, ...face.querySelectorAll('.head, .bead')], { opacity: 0, duration: 0.6, onComplete: () => { idleFace(); gsap.set([track, fill], { clearProps: 'opacity' }); idleFace(); hint.style.opacity = 0.75 } }) }, 1500)
   }
   const togglePause = () => {
     if (paused) { pausedMs += Date.now() - pausedAt; paused = false } else { pausedAt = Date.now(); paused = true }
@@ -141,9 +146,9 @@ body{margin:0;background:#ddd;font-family:var(--sans)}
   let down = null, dx = 0, dy = 0
   face.addEventListener('pointerdown', (e) => { down = { x: e.clientX, y: e.clientY, t: Date.now() }; dx = dy = 0; face.setPointerCapture(e.pointerId); gsap.killTweensOf(rail) })
   face.addEventListener('pointermove', (e) => {
-    if (!down || !running) return
+    if (!down) return
     dx = e.clientX - down.x; dy = e.clientY - down.y
-    if (Math.abs(dx) > Math.abs(dy)) {
+    if (running && Math.abs(dx) > Math.abs(dy)) {
       showDots()
       const edge = (index === 0 && dx > 0) || (index === slots.length - 1 && dx < 0)
       gsap.set(rail, { x: -index * 320 + (edge ? dx * 0.3 : dx) })
