@@ -12,3 +12,7 @@ export function waveDelays(
   const hi = Math.max(...tops)
   return rects.map((r, i) => (seen[i] ? (hi === lo ? 0 : ((r.top - lo) / (hi - lo)) * total) : null))
 }
+
+/** The per-item stagger that keeps a run of `count` items within `total` seconds. */
+export const capped = (each: number, count: number, total = 0.3): number =>
+  count <= 1 ? each : Math.min(each, total / (count - 1))
