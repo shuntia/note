@@ -22,9 +22,9 @@ pub const MAX_CONCURRENT_LOGINS: usize = 4;
 
 /// Per-username fixed-window counter of *failed* attempts, consulted only after
 /// a verification has already failed, so a correct password is never refused.
-#[derive(Default)]
 pub struct LoginLimiter {
     attempts: Mutex<HashMap<String, (u32, jiff::Timestamp)>>,
+    max: u32,
 }
 
 fn window_elapsed(now: jiff::Timestamp, start: jiff::Timestamp) -> bool {
@@ -45,9 +45,19 @@ fn limiter_key(username: &str) -> &str {
     &username[..end]
 }
 
+impl Default for LoginLimiter {
+    fn default() -> Self {
+        Self::with_limit(MAX_ATTEMPTS)
+    }
+}
+
 impl LoginLimiter {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_limit(max: u32) -> Self {
+        Self { attempts: Mutex::new(HashMap::new()), max }
     }
 
     /// Admits an attempt and counts it in one lock acquisition; a separate
@@ -58,7 +68,7 @@ impl LoginLimiter {
         if window_elapsed(now, entry.1) {
             *entry = (0, now);
         }
-        if entry.0 >= MAX_ATTEMPTS {
+        if entry.0 >= self.max {
             return false;
         }
         entry.0 += 1;

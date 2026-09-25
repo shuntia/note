@@ -200,11 +200,21 @@ impl Default for AdminConfig {
 #[serde(default)]
 pub struct LimitsConfig {
     pub agent_sessions_per_day: u32,
+    /// The farthest a share link may be set to expire.
+    pub share_max_days: u32,
+    /// The ceiling a link's own daily message cap may be raised to.
+    pub share_messages_per_day: u32,
+    pub shares_per_user: u32,
 }
 
 impl Default for LimitsConfig {
     fn default() -> Self {
-        Self { agent_sessions_per_day: 200 }
+        Self {
+            agent_sessions_per_day: 200,
+            share_max_days: 120,
+            share_messages_per_day: 100,
+            shares_per_user: 20,
+        }
     }
 }
 
@@ -595,6 +605,12 @@ mod tests {
         assert_eq!(ServerConfig::load(tmp.path()).unwrap().limits.agent_sessions_per_day, 200);
         write(tmp.path(), "server.toml", &format!("{base}[limits]\nagent_sessions_per_day = 0\n"));
         assert_eq!(ServerConfig::load(tmp.path()).unwrap().limits.agent_sessions_per_day, 0);
+        write(tmp.path(), "server.toml", &format!("{base}[limits]\nshare_max_days = 30\n"));
+        let limits = ServerConfig::load(tmp.path()).unwrap().limits;
+        assert_eq!(limits.share_max_days, 30);
+        assert_eq!(limits.agent_sessions_per_day, 200);
+        assert_eq!(limits.share_messages_per_day, 100);
+        assert_eq!(limits.shares_per_user, 20);
     }
 
     #[test]
