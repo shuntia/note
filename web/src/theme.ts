@@ -16,7 +16,6 @@ function paintChrome() {
   if (meta && earth) meta.setAttribute('content', earth)
 }
 
-
 export function storedPlace(): Place | null {
   try {
     const raw = localStorage.getItem(PLACE_KEY)

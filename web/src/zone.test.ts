@@ -11,3 +11,7 @@ test('the same zone, an unknown zone, or the switch off is no change', () => {
   expect(zoneChange(s, 'Asia/Calcutta')).toBeNull()
   expect(zoneChange({ ...s, timezone_auto: false }, 'Asia/Tokyo')).toBeNull()
 })
+test('a zoneless browser never moves the day', () => {
+  const all = { ...s, timezones: [...s.timezones, 'UTC', 'Etc/UTC', 'Etc/GMT+8', 'GMT'] }
+  for (const z of ['UTC', 'Etc/UTC', 'Etc/GMT+8', 'GMT']) expect(zoneChange(all, z)).toBeNull()
+})
