@@ -21,7 +21,7 @@
     const len = (c * seg) / 360
     out += `<circle cx="160" cy="160" r="${r}" fill="none" stroke="var(--track)" stroke-width="9" stroke-linecap="round" stroke-dasharray="${len} ${c}" transform="rotate(${start} 160 160)"/>`
     const f = i < current ? 1 : i === current ? frac : 0
-    if (f > 0) out += `<circle cx="160" cy="160" r="${r}" fill="none" stroke="var(--sun)" stroke-width="9" stroke-linecap="round" stroke-dasharray="${len * f} ${c}" transform="rotate(${start} 160 160)"/>`
+    if (f > 0) out += `<circle cx="160" cy="160" r="${r}" fill="none" stroke="var(--arc-sun)" stroke-width="9" stroke-linecap="round" stroke-dasharray="${len * f} ${c}" transform="rotate(${start} 160 160)"/>`
   }
   document.getElementById('seg').innerHTML = out
 </script></body></html>

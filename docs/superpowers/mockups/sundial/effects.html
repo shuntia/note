@@ -18,7 +18,7 @@ small{display:block;color:#666;font-size:12.5px;margin-top:4px}
     <div class="face" id="face">
       <div class="arc"><svg viewBox="0 0 320 320">
         <circle id="track" cx="160" cy="160" r="148" fill="none" stroke="var(--track)" stroke-width="9" stroke-linecap="round" stroke-dasharray="619.9 929.9" transform="rotate(150 160 160)"/>
-        <circle id="fill" cx="160" cy="160" r="148" fill="none" stroke="var(--sun)" stroke-width="9" stroke-linecap="round" stroke-dasharray="0 929.9" transform="rotate(150 160 160)" style="opacity:0"/>
+        <circle id="fill" cx="160" cy="160" r="148" fill="none" stroke="var(--arc-sun)" stroke-width="9" stroke-linecap="round" stroke-dasharray="0 929.9" transform="rotate(150 160 160)" style="opacity:0"/>
       </svg></div>
       <div class="inner"><div class="num tnum" id="num" style="font-size:60px">25:00</div><div class="name">Focus on Reading 2.2</div><div class="sub">Letter 6.16.13–22</div></div>
     </div>
@@ -47,7 +47,7 @@ small{display:block;color:#666;font-size:12.5px;margin-top:4px}
     <small>Close the ring: the fill runs to the end and a bead drops into the opening. Gradient ripple: a soft band of the arc's own colour widens out from the ring. Warm: the ground brightens for a moment. Pair: two thin rings a beat apart.</small>
     <h2>Round done to break</h2>
     <div class="btns"><button data-fx="tobreak" class="pick">Round done → break</button><button data-fx="towork">Break over → work</button></div>
-    <small>The ring closes in sun and a bead drops; the arc then tints to sage while the ground dims a step and the counter flips to 05:00; the break drains from the far end. At its end the ground brightens and the empty sun arc is ready.</small>
+    <small>The ring closes in sun and a bead drops; the arc then tints to sage while the ground dims a step and the counter flips to 05:00; the break drains from the far end. At its end the ground brightens and the arc is drawn and unwound again, as at the session's start.</small>
     <h2>Rounds</h2>
     <div class="btns"><button data-fx="rest">Beads at rest</button><button data-fx="reset">Reset</button></div>
     <small>Beads sit in the ring's opening, one per round today; each finish adds one. This replaces both dot rows.</small>
@@ -67,7 +67,7 @@ small{display:block;color:#666;font-size:12.5px;margin-top:4px}
     tobreak: () => { fill.style.opacity = 1; closeRing(face, fill, done++); setTimeout(() => wave(face), 420)
       setTimeout(() => { toBreak(face, fill, true); document.getElementById('num').textContent = '05:00'; gsap.to(face.querySelectorAll('.name, .sub'), { autoAlpha: 0, duration: 0.5 })
         let left = 620; const iv = setInterval(() => { left -= 2.4; if (left <= 0) return clearInterval(iv); drain(fill, left) }, 50); face.dataset.iv = iv }, 1300) },
-    towork: () => { clearInterval(Number(face.dataset.iv)); toWork(face, fill); document.getElementById('num').textContent = '25:00'; gsap.to(face.querySelectorAll('.name, .sub'), { autoAlpha: 1, duration: 0.5, delay: 0.4 }) },
+    towork: () => { clearInterval(Number(face.dataset.iv)); toWork(face, fill, track); document.getElementById('num').textContent = '25:00'; gsap.to(face.querySelectorAll('.name, .sub'), { autoAlpha: 1, duration: 0.5, delay: 0.4 }); setTimeout(() => open(face, fill, track), 500) },
     rest: () => { face.querySelectorAll('.bead').forEach((e) => e.remove()); beadsAtRest(face, 2); done = 2 }, reset }
   document.querySelectorAll('[data-fx]').forEach((b) => (b.onclick = () => run[b.dataset.fx]()))
 </script></body></html>

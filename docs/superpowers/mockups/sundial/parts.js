@@ -4,7 +4,7 @@ export const arc = (frac = 0, { faded = false, size = 320, r = 148, w = 9 } = {}
   const span = c * (240 / 360)
   return `<div class="arc" style="opacity:${faded ? 0.38 : 1}"><svg viewBox="0 0 ${size} ${size}">
     <circle cx="${size / 2}" cy="${size / 2}" r="${r}" fill="none" stroke="var(--track)" stroke-width="${w}" stroke-linecap="round" stroke-dasharray="${span.toFixed(1)} ${c.toFixed(1)}" transform="rotate(150 ${size / 2} ${size / 2})"/>
-    ${frac > 0 ? `<circle cx="${size / 2}" cy="${size / 2}" r="${r}" fill="none" stroke="var(--sun)" stroke-width="${w}" stroke-linecap="round" stroke-dasharray="${(span * frac).toFixed(1)} ${c.toFixed(1)}" transform="rotate(150 ${size / 2} ${size / 2})"/>` : ''}
+    ${frac > 0 ? `<circle cx="${size / 2}" cy="${size / 2}" r="${r}" fill="none" stroke="var(--arc-sun)" stroke-width="${w}" stroke-linecap="round" stroke-dasharray="${(span * frac).toFixed(1)} ${c.toFixed(1)}" transform="rotate(150 ${size / 2} ${size / 2})"/>` : ''}
   </svg></div>`
 }
 

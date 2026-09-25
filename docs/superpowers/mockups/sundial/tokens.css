@@ -9,6 +9,9 @@
   --sans: 'Atkinson Hyperlegible', system-ui, -apple-system, 'Segoe UI', sans-serif;
   --sun: oklch(80% 0.15 76);
   --accent-fg: oklch(23% 0.03 255);
+  /* the arc and its beads burn a step brighter than the buttons' sun */
+  --arc-sun: oklch(86% 0.18 84);
+  --arc-sage: oklch(76% 0.15 150);
 }
 .p-day, :root {
   --sky-top: oklch(84% 0.035 230);

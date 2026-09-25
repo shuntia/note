@@ -83,7 +83,7 @@ body{margin:0;background:#ddd;font-family:var(--sans)}
   const C = 929.9, SPAN = 619.9
   document.getElementById('arc').innerHTML = `<div class="arc" id="arcbox"><svg viewBox="0 0 320 320">
     <circle id="track" cx="160" cy="160" r="148" fill="none" stroke="var(--track)" stroke-width="9" stroke-linecap="round" stroke-dasharray="${SPAN} ${C}" transform="rotate(150 160 160)"/>
-    <circle id="fill" cx="160" cy="160" r="148" fill="none" stroke="var(--sun)" stroke-width="9" stroke-linecap="round" stroke-dasharray="0 ${C}" transform="rotate(150 160 160)"/>
+    <circle id="fill" cx="160" cy="160" r="148" fill="none" stroke="var(--arc-sun)" stroke-width="9" stroke-linecap="round" stroke-dasharray="0 ${C}" transform="rotate(150 160 160)"/>
   </svg></div>`
   const fill = document.getElementById('fill'), arcbox = document.getElementById('arcbox'), track = document.getElementById('track')
   let rounds = 2
@@ -139,13 +139,15 @@ body{margin:0;background:#ddd;font-family:var(--sans)}
     }, 1300)
   }
   // the break ends: the ground brightens, the title returns, the sun arc is empty
+  // the break ends: the ground brightens, the title returns, and the round begins
+  // the way the session did, with the arc drawn and unwound
   const breakDone = () => {
     switching = true
-    toWork(face, fill)
+    toWork(face, fill, track)
     gsap.to(rail.querySelectorAll('.name, .sub, .mark'), { autoAlpha: 1, duration: 0.5, delay: 0.4 })
-    phase = 'work'; startAt = Date.now() + 700; pausedMs = 0; paused = false
+    phase = 'work'; pausedMs = 0; paused = false
     rail.querySelectorAll('.num').forEach((n) => (n.textContent = '25:00'))
-    setTimeout(() => { switching = false }, 700)
+    setTimeout(() => open(face, fill, track, () => { startAt = Date.now(); switching = false }), 500)
   }
   // press D to jump to the last three seconds of the phase
   document.addEventListener('keydown', (e) => { if (e.key === 'd' && running && !switching) { startAt = Date.now() - (planOf() - 3) * 1000; pausedMs = 0 } })

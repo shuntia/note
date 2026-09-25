@@ -10,7 +10,7 @@ const headAt = (frac) => { const a = (150 + 90 + 240 * frac) * Math.PI / 180; re
 export function ripple(face, count = 1) {
   const svg = svgOf(face)
   for (let i = 0; i < count; i++) {
-    const r = circle({ cx: 160, cy: 160, r: 148, fill: 'none', stroke: 'var(--sun)', 'stroke-width': 2, opacity: 0.5, 'stroke-dasharray': `${SPAN} ${C}`, transform: 'rotate(150 160 160)', 'stroke-linecap': 'round' })
+    const r = circle({ cx: 160, cy: 160, r: 148, fill: 'none', stroke: 'var(--arc-sun)', 'stroke-width': 2, opacity: 0.5, 'stroke-dasharray': `${SPAN} ${C}`, transform: 'rotate(150 160 160)', 'stroke-linecap': 'round' })
     svg.append(r)
     gsap.to(r, { attr: { r: 186, 'stroke-width': 0.5 }, opacity: 0, duration: 0.9, delay: i * 0.16, ease: 'power2.out', onComplete: () => r.remove() })
   }
@@ -20,7 +20,7 @@ export function ripple(face, count = 1) {
 export function ignite(face, frac = 0) {
   const svg = svgOf(face)
   const { x, y } = headAt(frac)
-  const flare = circle({ cx: x, cy: y, r: 6, fill: 'var(--sun)', opacity: 0.7 })
+  const flare = circle({ cx: x, cy: y, r: 6, fill: 'var(--arc-sun)', opacity: 0.7 })
   svg.append(flare)
   gsap.to(flare, { attr: { r: 26 }, opacity: 0, duration: 0.7, ease: 'power2.out', onComplete: () => flare.remove() })
 }
@@ -58,7 +58,7 @@ const beadAt = (i, total) => { const a = (30 + (120 * (i + 1)) / (total + 1)) * 
 export function bead(face, i, total = 4) {
   const svg = svgOf(face)
   const { x, y } = beadAt(i, total)
-  const b = circle({ cx: x, cy: y - 18, r: 4.5, fill: 'var(--sun)', opacity: 0, class: 'bead' })
+  const b = circle({ cx: x, cy: y - 18, r: 4.5, fill: 'var(--arc-sun)', opacity: 0, class: 'bead' })
   svg.append(b)
   gsap.to(b, { attr: { cy: y }, opacity: 1, duration: 0.5, ease: 'back.out(2.2)' })
 }
@@ -76,7 +76,7 @@ export function beadsAtRest(face, done, total = 4) {
   const svg = svgOf(face)
   for (let i = 0; i < total; i++) {
     const { x, y } = beadAt(i, total)
-    svg.append(circle({ cx: x, cy: y, r: 4.5, fill: i < done ? 'var(--sun)' : 'var(--track)', class: 'bead' }))
+    svg.append(circle({ cx: x, cy: y, r: 4.5, fill: i < done ? 'var(--arc-sun)' : 'var(--track)', class: 'bead' }))
   }
 }
 
@@ -101,7 +101,7 @@ export function open(face, fill, track, done) {
 
 // A soft band of the arc's own colour widens out from the ring and fades: the
 // ripple as a gradient rather than a line.
-export function wave(face, color = 'var(--sun)', peak = 0.18) {
+export function wave(face, color = 'var(--arc-sun)', peak = 0.18) {
   const app = face.closest('.frame-app')
   const box = face.getBoundingClientRect(), root = app.getBoundingClientRect()
   const cx = box.left - root.left + box.width / 2, cy = box.top - root.top + box.height / 2
@@ -120,7 +120,7 @@ export function wave(face, color = 'var(--sun)', peak = 0.18) {
 // the break is ready to drain from the far end. Returns the timeline.
 export function toBreak(face, fill, veilOn) {
   fill.style.transition = 'stroke 700ms ease'
-  fill.style.stroke = 'var(--sage)'
+  fill.style.stroke = 'var(--arc-sage)'
   const app = face.closest('.frame-app')
   let veil = app.querySelector('.veil')
   if (!veil) { veil = document.createElement('div'); veil.className = 'veil'; veil.style.cssText = 'position:absolute;inset:0;pointer-events:none;background:oklch(30% 0.03 250 / 0.14);opacity:0'; app.prepend(veil) }
@@ -131,13 +131,13 @@ export function toBreak(face, fill, veilOn) {
 
 // The break is over: the ground brightens, the last of the sage goes, and the sun
 // arc is empty and ready.
-export function toWork(face, fill) {
+export function toWork(face, fill, track) {
   const app = face.closest('.frame-app')
   const veil = app.querySelector('.veil')
   const tl = gsap.timeline()
   if (veil) tl.to(veil, { opacity: 0, duration: 0.6, ease: 'power1.inOut' }, 0)
-  tl.to(fill, { opacity: 0, duration: 0.4 }, 0)
-  tl.add(() => { fill.style.stroke = 'var(--sun)'; fill.setAttribute('stroke-dashoffset', 0); fill.setAttribute('stroke-dasharray', `0 ${C}`) }, 0.45)
+  tl.to(track ? [fill, track] : fill, { opacity: 0, duration: 0.4 }, 0)
+  tl.add(() => { fill.style.stroke = ''; fill.setAttribute('stroke-dashoffset', 0); fill.setAttribute('stroke-dasharray', `0 ${C}`) }, 0.45)
   return tl
 }
 
