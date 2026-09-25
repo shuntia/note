@@ -232,66 +232,132 @@ async fn the_link_cap_is_429_and_the_owners_budget_and_activity_stay_untouched()
     assert_eq!(list[0]["messages_today"], 2);
 }
 
+fn calls(list: &[(&str, &str)]) -> ChatResponse {
+    ChatResponse {
+        text: String::new(),
+        tool_calls: list.iter().enumerate().map(|(i, (name, args))| ToolCall { id: format!("c{i}"), name: (*name).into(), args: (*args).into() }).collect(),
+    }
+}
+
+fn transcript(chats: &[note_server::providers::mock::RecordedChat]) -> String {
+    let mut out = String::new();
+    for chat in chats {
+        out.push_str(&chat.system);
+        for m in &chat.messages {
+            out.push_str(&format!("{m:?}"));
+        }
+    }
+    out
+}
+
+fn tool_results(chats: &[note_server::providers::mock::RecordedChat]) -> Vec<String> {
+    chats
+        .last()
+        .map(|c| {
+            c.messages
+                .iter()
+                .filter_map(|m| match m {
+                    note_server::providers::Message::ToolResult { content, .. } => Some(content.clone()),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 #[tokio::test]
 async fn nothing_outside_the_scope_reaches_the_prompt_the_tools_or_the_view() {
-    let llm = scripted(vec![
-        call_tool("task_list", "{}"),
-        call_tool("plan_list", "{}"),
-        call_tool("goal_list", "{}"),
-        say("done looking"),
-        say("with details"),
-    ]);
-    let (app, cookie, state, cfg) = common::app_with_logged_in_user_llm_and_state(llm.clone()).await;
+    let (app, cookie, state, cfg) = common::app_with_logged_in_user_and_state().await;
     // private material in every store
     std::fs::create_dir_all(cfg.path().join("users/aki")).unwrap();
     std::fs::write(note_server::context::standing_path(cfg.path(), "aki"), "STANDING-SECRET").unwrap();
     owner(&app, &cookie, Method::POST, "/api/tasks", Some(r#"{"title":"therapy forms","category":"health","description":"HEALTH-SECRET"}"#)).await;
-    let (_, shown) = owner(&app, &cookie, Method::POST, "/api/tasks", Some(r#"{"title":"lab report","category":"school","description":"SCHOOL-DETAIL"}"#)).await;
+    owner(&app, &cookie, Method::POST, "/api/tasks", Some(r#"{"title":"lab report","category":"school","description":"SCHOOL-DETAIL"}"#)).await;
     let (_, hidden_goal) = owner(&app, &cookie, Method::POST, "/api/goals", Some(r#"{"title":"GOAL-SECRET","description":"private"}"#)).await;
     owner(&app, &cookie, Method::POST, "/api/tasks", Some(&format!(r#"{{"title":"forms 2","category":"health","goal_id":{}}}"#, hidden_goal["id"]))).await;
     {
         let conn = state.db();
         conn.execute("INSERT INTO conversations (user_id, title, created_at, updated_at) VALUES (1, 'CHAT-SECRET', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')", []).unwrap();
         conn.execute("INSERT INTO talk_messages (conversation_id, role, content, created_at) VALUES (1, 'user', 'CHAT-BODY-SECRET', '2026-01-01T00:00:00Z')", []).unwrap();
-        conn.execute("INSERT INTO memory_index (user, id, category, summary, path) VALUES ('aki', 'm1', 'semantic', 'MEMORY-SECRET', 'x.md')", []).ok();
+        conn.execute("INSERT INTO memory_index (user, id, category, summary, path) VALUES ('aki', 'm1', 'semantic', 'MEMORY-SECRET', 'x.md')", []).unwrap();
     }
     let today = jiff::Timestamp::now().to_zoned(jiff::tz::TimeZone::UTC).date();
+    let tomorrow = today.tomorrow().unwrap();
     let (status, _) = owner(&app, &cookie, Method::POST, "/api/calendar", Some(&format!(r#"{{"title":"CAL-SECRET appointment","kind":"fixed","start_time":"15:00","end_time":"16:00","on_date":"{today}"}}"#))).await;
     assert_eq!(status, StatusCode::CREATED);
-    // lay a block for the hidden task on today
+    // tomorrow, so the block is laid whatever the time of day
+    let (status, _) = owner(&app, &cookie, Method::POST, "/api/calendar", Some(&format!(r#"{{"title":"desk time","kind":"free","start_time":"10:00","end_time":"12:00","on_date":"{tomorrow}"}}"#))).await;
+    assert_eq!(status, StatusCode::CREATED);
     let (_, hidden) = owner(&app, &cookie, Method::POST, "/api/tasks", Some(r#"{"title":"HIDDEN-BLOCK task","category":"health","duration_min":30}"#)).await;
-    owner(&app, &cookie, Method::POST, &format!("/api/plan/{today}/allocate"), Some("{}")).await;
-    let _ = hidden;
-
-    let made = mint(&app, &cookie, "Mom", r#"{"categories":["school"],"today":false}"#).await;
-    let token = token_of(&made);
-    let (status, view) = read(visitor(&app, Method::GET, &format!("/api/share/{token}/view"), None, None).await).await;
-    assert_eq!(status, StatusCode::OK);
-    let view_text = view.to_string();
-    let (status, turn) = read(visitor(&app, Method::POST, &format!("/api/share/{token}/messages"), Some(r#"{"message":"tell me everything"}"#), None).await).await;
-    assert_eq!(status, StatusCode::OK, "{turn}");
-
-    let seen = llm.seen();
-    let mut everything = String::new();
-    for chat in &seen {
-        everything.push_str(&chat.system);
-        for m in &chat.messages {
-            everything.push_str(&format!("{m:?}"));
-        }
+    let hidden_id = hidden["id"].as_i64().unwrap();
+    let (status, placed) = owner(&app, &cookie, Method::POST, &format!("/api/plan/{tomorrow}/allocate"), Some("{}")).await;
+    assert_eq!(status, StatusCode::OK, "{placed}");
+    {
+        let conn = state.db();
+        let blocks: i64 = conn.query_row("SELECT COUNT(*) FROM event_tasks WHERE task_id = ?1", [hidden_id], |r| r.get(0)).unwrap();
+        assert!(blocks > 0, "the hidden task has a block on the plan: {placed}");
     }
-    everything.push_str(&view_text);
+
+    let read_hidden = format!(r#"{{"task_id":{hidden_id}}}"#);
+    let plan_tomorrow = format!(r#"{{"date":"{tomorrow}"}}"#);
+    let probes: Vec<(&str, &str)> = vec![
+        ("task_list", "{}"),
+        ("task_read", &read_hidden),
+        ("task_search", r#"{"query":"therapy"}"#),
+        ("plan_list", &plan_tomorrow),
+        ("calendar_list", "{}"),
+        ("goal_list", "{}"),
+    ];
+    let llm = scripted(vec![calls(&probes), say("done looking"), calls(&probes), say("done again")]);
+    let mut state = state.clone();
+    state.llm = llm.clone();
+    let app = note_server::api::router(state);
+
+    // today off: no day, no calendar, no blocks
+    let off = mint(&app, &cookie, "Mom", r#"{"categories":["school"],"today":false}"#).await;
+    let off_token = token_of(&off);
+    let (status, view) = read(visitor(&app, Method::GET, &format!("/api/share/{off_token}/view"), None, None).await).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, turn) = read(visitor(&app, Method::POST, &format!("/api/share/{off_token}/messages"), Some(r#"{"message":"tell me everything"}"#), None).await).await;
+    assert_eq!(status, StatusCode::OK, "{turn}");
+    let first = llm.seen();
+    let mut everything = transcript(&first);
+    everything.push_str(&view.to_string());
     for secret in ["STANDING-SECRET", "HEALTH-SECRET", "SCHOOL-DETAIL", "GOAL-SECRET", "CHAT-SECRET", "CHAT-BODY-SECRET", "MEMORY-SECRET", "CAL-SECRET", "HIDDEN-BLOCK", "therapy forms", "forms 2"] {
-        assert!(!everything.contains(secret), "{secret} leaked:\n{everything}");
+        assert!(!everything.contains(secret), "{secret} leaked with today off:\n{everything}");
     }
     assert!(everything.contains("lab report"));
-    // plan_list was refused because today is off; the tool result says so, not the data
     assert!(everything.contains("not shared on this link"), "{everything}");
 
-    // details on: the shown task's description travels, the hidden one still does not
-    owner(&app, &cookie, Method::PATCH, &format!("/api/shares/{}", made["id"]), Some(r#"{"scope":{"categories":["school"],"today":false,"details":true}}"#)).await;
-    let (_, view) = read(visitor(&app, Method::GET, &format!("/api/share/{token}/view"), None, None).await).await;
+    // today on: calendar titles are shared, a hidden block is only Busy
+    let on = mint(&app, &cookie, "Dad", r#"{"categories":["school"],"today":true}"#).await;
+    let on_token = token_of(&on);
+    let (status, view) = read(visitor(&app, Method::GET, &format!("/api/share/{on_token}/view"), None, None).await).await;
+    assert_eq!(status, StatusCode::OK);
+    let rows: Vec<&serde_json::Value> = view["days"].as_array().unwrap().iter().flat_map(|d| d["rows"].as_array().unwrap()).collect();
+    assert!(rows.iter().any(|r| r["busy"] == true && r["title"] == "Busy"), "{view}");
+    let view_text = view.to_string();
+    assert!(view_text.contains("CAL-SECRET"), "calendar titles travel when today is on: {view_text}");
+    let (status, turn) = read(visitor(&app, Method::POST, &format!("/api/share/{on_token}/messages"), Some(r#"{"message":"tell me everything"}"#), None).await).await;
+    assert_eq!(status, StatusCode::OK, "{turn}");
+    let second = llm.seen().split_off(first.len());
+    assert!(tool_results(&second).iter().any(|r| r.contains(r#""kind":"busy""#)), "{:?}", tool_results(&second));
+    let mut everything = transcript(&second);
+    everything.push_str(&view_text);
+    for secret in ["STANDING-SECRET", "HEALTH-SECRET", "SCHOOL-DETAIL", "GOAL-SECRET", "CHAT-SECRET", "CHAT-BODY-SECRET", "MEMORY-SECRET", "HIDDEN-BLOCK", "therapy forms", "forms 2"] {
+        assert!(!everything.contains(secret), "{secret} leaked with today on:\n{everything}");
+    }
+    assert!(everything.contains("lab report"));
+
+    // details on: the shown task's description travels, the hidden ones still do not
+    let (status, _) = owner(&app, &cookie, Method::PATCH, &format!("/api/shares/{}", on["id"]), Some(r#"{"scope":{"categories":["school"],"today":true,"details":true}}"#)).await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, view) = read(visitor(&app, Method::GET, &format!("/api/share/{on_token}/view"), None, None).await).await;
     assert_eq!(view["tasks"][0]["description"], "SCHOOL-DETAIL");
-    let _ = shown;
+    let view_text = view.to_string();
+    for secret in ["HEALTH-SECRET", "therapy forms", "HIDDEN-BLOCK", "forms 2", "GOAL-SECRET"] {
+        assert!(!view_text.contains(secret), "{secret} leaked with details on:\n{view_text}");
+    }
 }
 
 #[tokio::test]
@@ -344,4 +410,22 @@ async fn misses_from_one_address_are_limited_and_another_address_is_not() {
     }
     assert_eq!(miss("203.0.113.9").await, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(miss("198.51.100.4").await, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn a_malformed_visitor_cookie_is_replaced_and_a_stray_share_path_keeps_the_envelope() {
+    let (app, cookie, _cfg) = common::app_with_logged_in_user().await;
+    let token = token_of(&mint(&app, &cookie, "Mom", "{}").await);
+    let res = visitor(&app, Method::GET, &format!("/api/share/{token}"), None, Some("share_visitor=..junk..")).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let set = cookie_of(&res).expect("a malformed key is replaced");
+    assert_eq!(set.strip_prefix("share_visitor=").unwrap().len(), 22);
+    let res = visitor(&app, Method::GET, &format!("/api/share/{token}"), None, Some(&set)).await;
+    assert!(res.headers().get(header::SET_COOKIE).is_none(), "a well-formed key is kept");
+
+    let res = visitor(&app, Method::GET, &format!("/api/share/{token}/nope"), None, None).await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    assert_eq!(res.headers()["cache-control"], "no-store");
+    assert_eq!(res.headers()["referrer-policy"], "no-referrer");
+    assert_eq!(res.headers()["x-robots-tag"], "noindex");
 }

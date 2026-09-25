@@ -124,7 +124,7 @@ pub fn router_with_web(state: AppState, web_dir: &std::path::Path) -> Router {
 async fn share_envelope(State(state): State<AppState>, mut req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
     let jar = axum_extra::extract::CookieJar::from_headers(req.headers());
     let (key, fresh) = match jar.get("share_visitor") {
-        Some(c) if !c.value().is_empty() => (c.value().to_string(), false),
+        Some(c) if is_visitor_key(c.value()) => (c.value().to_string(), false),
         _ => {
             let mut bytes = [0u8; 16];
             getrandom::fill(&mut bytes).expect("os rng");
@@ -147,11 +147,17 @@ async fn share_envelope(State(state): State<AppState>, mut req: axum::extract::R
     res
 }
 
+/// The form `share_envelope` mints: 16 random bytes in unpadded base64url.
+fn is_visitor_key(v: &str) -> bool {
+    v.len() == 22 && v.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
 fn share_router(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/api/share/{token}", get(share_info))
         .route("/api/share/{token}/view", get(share_view))
         .route("/api/share/{token}/messages", get(share_messages).post(share_send))
+        .route("/api/share/{token}/{*rest}", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         .layer(axum::middleware::from_fn_with_state(state, share_envelope))
 }
 
@@ -179,16 +185,16 @@ async fn share_view(p: auth::SharePrincipal, State(state): State<AppState>) -> i
 
 async fn share_messages(p: auth::SharePrincipal, State(state): State<AppState>, axum::Extension(key): axum::Extension<crate::shares::VisitorKey>) -> impl IntoResponse {
     let conn = state.db();
-    let thread: Option<i64> = conn
-        .query_row("SELECT id FROM share_threads WHERE share_id = ?1 AND visitor_key = ?2", (p.share.id, &key.0), |r| r.get(0))
-        .optional()
-        .unwrap_or(None);
+    let thread = conn
+        .query_row("SELECT id FROM share_threads WHERE share_id = ?1 AND visitor_key = ?2", (p.share.id, &key.0), |r| r.get::<_, i64>(0))
+        .optional();
     match thread {
-        Some(id) => match crate::shares::messages(&conn, id) {
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        Ok(Some(id)) => match crate::shares::messages(&conn, id) {
             Ok(m) => Json(m).into_response(),
             Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         },
-        None => Json(Vec::<crate::shares::MessageOut>::new()).into_response(),
+        Ok(None) => Json(Vec::<crate::shares::MessageOut>::new()).into_response(),
     }
 }
 

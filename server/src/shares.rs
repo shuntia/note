@@ -885,7 +885,8 @@ pub enum TurnError {
     Blank,
     Cap,
     Busy,
-    /// The session did not finish; nothing was persisted.
+    /// The session did not finish. The turn is not stored, but a note the
+    /// session already filed stays on the thread undelivered.
     Unavailable,
     Internal,
 }
@@ -897,15 +898,15 @@ pub async fn run_turn(state: &crate::AppState, principal: &crate::auth::SharePri
     }
     let share = principal.share.clone();
     let now = jiff::Timestamp::now();
-    let thread_id = {
+    {
         let conn = state.db();
         let used = messages_today(&conn, share.id, now - jiff::Span::new().hours(24)).map_err(|_| TurnError::Internal)?;
         if used >= share.scope.messages_per_day {
             return Err(TurnError::Cap);
         }
-        thread_for(&conn, share.id, visitor_key, now).map_err(|_| TurnError::Internal)?
-    };
+    }
     let permit = state.talk_gate.try_enter_global().map_err(|_| TurnError::Busy)?;
+    let thread_id = thread_for(&state.db(), share.id, visitor_key, now).map_err(|_| TurnError::Internal)?;
     let st = state.clone();
     let owner_id = principal.owner_id;
     let owner = principal.owner_username.clone();
@@ -927,13 +928,22 @@ pub async fn run_turn(state: &crate::AppState, principal: &crate::auth::SharePri
         };
         let past = history(&st.db(), thread_id, HISTORY_LIMIT)?;
         let out = crate::agent::run_session(&deps, owner_id, &owner, crate::tools::SessionKind::Share, now, &past, &message)?;
-        let noted = out.steps.iter().find(|s| s.name == "share_note" && !s.is_error).map(|s| {
-            serde_json::from_str::<serde_json::Value>(&s.args).ok().and_then(|v| v["text"].as_str().map(str::to_string)).unwrap_or_default()
-        });
+        let noted: Vec<String> = out
+            .steps
+            .iter()
+            .filter(|s| s.name == "share_note" && !s.is_error)
+            .map(|s| {
+                serde_json::from_str::<serde_json::Value>(&s.args)
+                    .ok()
+                    .and_then(|v| v["text"].as_str().map(|t| t.trim().to_string()))
+                    .unwrap_or_default()
+            })
+            .collect();
         let reply = if out.reply.trim().is_empty() {
-            match &noted {
-                Some(_) => "Passed on.".to_string(),
-                None => crate::EMPTY_REPLY_FALLBACK.to_string(),
+            if noted.is_empty() {
+                crate::EMPTY_REPLY_FALLBACK.to_string()
+            } else {
+                "Passed on.".to_string()
             }
         } else {
             out.reply.clone()
@@ -943,7 +953,7 @@ pub async fn run_turn(state: &crate::AppState, principal: &crate::auth::SharePri
             append(&conn, thread_id, "user", &message, now)?;
             append(&conn, thread_id, "assistant", &reply, now)?;
         }
-        if let Some(text) = &noted {
+        for text in &noted {
             let msg = crate::channels::OutboundMessage {
                 title: format!("Note from {}", share.name),
                 body: text.clone(),
@@ -954,7 +964,7 @@ pub async fn run_turn(state: &crate::AppState, principal: &crate::auth::SharePri
             };
             crate::channels::deliver_via(&st.db, &st.channels, owner_id, &owner, &msg);
         }
-        Ok::<_, anyhow::Error>(VisitorTurn { reply, note: noted.is_some() })
+        Ok::<_, anyhow::Error>(VisitorTurn { reply, note: !noted.is_empty() })
     })
     .await;
     match result {
