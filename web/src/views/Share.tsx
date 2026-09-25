@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react'
 import { api, ApiError } from '../api'
 import { Markdown } from '../markdown'
 import type { ShareInfo, ShareMessage, ShareTask, ShareView } from '../types'
@@ -117,6 +117,8 @@ export function SharePage({ token }: { token: string }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const end = useRef<HTMLDivElement>(null)
+  const input = useRef<HTMLTextAreaElement>(null)
+  const sentOnce = useRef(false)
 
   const failed = (e: unknown): 'ended' | 'error' => (e instanceof ApiError && e.status === 404 ? 'ended' : 'error')
 
@@ -127,25 +129,52 @@ export function SharePage({ token }: { token: string }) {
   }, [token])
 
   useEffect(() => {
-    end.current?.scrollIntoView({ block: 'end' })
+    if (sentOnce.current) end.current?.scrollIntoView({ block: 'end' })
   }, [thread, busy])
+
+  // Grows the composer with its text up to eight lines, then scrolls inside it.
+  useLayoutEffect(() => {
+    const el = input.current
+    if (!el) return
+    el.style.height = 'auto'
+    const style = window.getComputedStyle(el)
+    const line = parseFloat(style.lineHeight) || 22
+    const frame =
+      parseFloat(style.paddingTop) +
+      parseFloat(style.paddingBottom) +
+      parseFloat(style.borderTopWidth) +
+      parseFloat(style.borderBottomWidth)
+    const max = line * 8 + frame
+    el.style.height = `${Math.min(el.scrollHeight, max)}px`
+    el.style.overflowY = el.scrollHeight > max ? 'auto' : 'hidden'
+  }, [draft, info])
 
   const send = async (e: FormEvent) => {
     e.preventDefault()
     const text = draft.trim()
     if (!text || busy) return
+    sentOnce.current = true
     setBusy(true)
     setError(null)
     setDraft('')
-    const now = new Date().toISOString()
-    setThread((t) => [...t, { role: 'user', content: text, created_at: now }])
+    const asked: ShareMessage = { role: 'user', content: text, created_at: new Date().toISOString() }
+    setThread((t) => [...t, asked])
     try {
       const turn = await api.share.send(token, text)
-      setThread((t) => [...t, { role: 'assistant', content: turn.reply, created_at: new Date().toISOString() }])
+      const answered: ShareMessage = { role: 'assistant', content: turn.reply, created_at: new Date().toISOString() }
+      const stored = turn.note ? await api.share.messages(token).catch(() => null) : null
+      setThread((t) => stored ?? [...t, answered])
       api.share.view(token).then(setView).catch(() => {})
     } catch (err) {
+      setThread((t) => t.filter((m) => m !== asked))
+      setDraft(text)
       if (err instanceof ApiError && err.status === 404) setInfo('ended')
-      else if (err instanceof ApiError && err.status === 429) setError('This link has reached today’s limit. Try again tomorrow.')
+      else if (err instanceof ApiError && err.status === 429)
+        setError(
+          err.message.includes('limit')
+            ? 'This link has reached today’s limit; try again tomorrow.'
+            : 'Too many messages from this address; try again in a little while.',
+        )
       else setError('Note could not answer. Try again.')
     } finally {
       setBusy(false)
@@ -179,7 +208,7 @@ export function SharePage({ token }: { token: string }) {
       {view && view !== 'ended' && view !== 'error' && <Panels view={view} />}
       <section className="share-chat chat">
         <h2>Ask Note</h2>
-        <div className="share-thread">
+        <div className="share-thread" role="log" aria-live="polite">
           {thread.length === 0 && (
             <p className="share-empty">Ask what {info.owner} has today, what is done, or what is due.</p>
           )}
@@ -190,19 +219,20 @@ export function SharePage({ token }: { token: string }) {
               <div key={i} className={`turn ${m.role}`}>{m.role === 'assistant' ? <Markdown text={m.content} /> : m.content}</div>
             ),
           )}
-          {busy && <div className="turn assistant muted">Note is thinking</div>}
+          {busy && <div className="turn pending">Note is thinking</div>}
           {error && <div className="turn system" role="alert">{error}</div>}
           <div ref={end} />
         </div>
         <form className={`tellnote${draft.trim() ? ' armed' : ''}`} onSubmit={(e) => void send(e)}>
           <textarea
+            ref={input}
             rows={1}
             value={draft}
             placeholder={info.notes ? `Ask, or leave a note for ${info.owner}` : 'Ask about the plan'}
             aria-label="Ask Note"
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey) {
+              if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
                 e.preventDefault()
                 void send(e)
               }
