@@ -97,8 +97,8 @@ pub fn list(
 ) -> Result<serde_json::Value, ToolError> {
     super::task_query::unscoped(ctx)?;
     let mut goals = crate::goals::list(conn, ctx.user_id, args.state.as_deref()).map_err(task_error)?;
-    if let Some(clause) = ctx.share.as_ref().and_then(|s| s.category_clause("category")) {
-        goals = confined(conn, goals, clause)?;
+    if let Some(scope) = ctx.share.as_ref().filter(|s| !s.categories.is_empty()) {
+        goals = confined(conn, goals, scope)?;
     }
     let details = ctx.share.as_ref().is_none_or(|s| s.details);
     let goals: Vec<serde_json::Value> = goals
@@ -129,33 +129,26 @@ pub fn list(
 fn confined(
     conn: &Connection,
     goals: Vec<crate::goals::Goal>,
-    (categories, category_params): (String, Vec<rusqlite::types::Value>),
+    scope: &crate::shares::ShareScope,
 ) -> Result<Vec<crate::goals::Goal>, ToolError> {
     let internal = |e: rusqlite::Error| ToolError::internal(e.to_string());
-    let filter = format!("goal_id = ? AND parent_id IS NULL{categories}");
+    let (categories, category_params) = scope.category_clause("category").unwrap_or_default();
     let mut out = Vec::with_capacity(goals.len());
     for mut g in goals {
-        let params: Vec<rusqlite::types::Value> = std::iter::once(g.id.into())
-            .chain(category_params.iter().cloned())
-            .collect();
-        let (tasks, done_tasks): (i64, i64) = conn
-            .query_row(
-                &format!(
-                    "SELECT COUNT(*), COALESCE(SUM(state = 'done'), 0) FROM tasks
-                     WHERE {filter} AND state != 'dropped'"
-                ),
-                rusqlite::params_from_iter(params.iter()),
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .map_err(internal)?;
+        let (tasks, done_tasks) =
+            crate::shares::goal_counts(conn, g.id, scope).map_err(internal)?;
         if tasks == 0 {
             continue;
         }
+        let params: Vec<rusqlite::types::Value> = std::iter::once(g.id.into())
+            .chain(category_params.iter().cloned())
+            .collect();
         let next: Option<(i64, String, Option<String>)> = conn
             .query_row(
                 &format!(
                     "SELECT id, title, due_at FROM tasks
-                     WHERE {filter} AND state IN ('open','in_progress')
+                     WHERE goal_id = ? AND parent_id IS NULL{categories}
+                       AND state IN ('open','in_progress')
                      ORDER BY due_at IS NULL, due_at, id LIMIT 1"
                 ),
                 rusqlite::params_from_iter(params.iter()),

@@ -526,6 +526,311 @@ pub fn threads(conn: &Connection, share_id: i64) -> rusqlite::Result<Vec<ThreadO
         .collect()
 }
 
+pub const OPENER_MAX_BYTES: usize = 8192;
+const RECENT_DAYS: i64 = 7;
+const DONE_RECENT_MAX: usize = 40;
+/// Task and done-recently row caps tried in order until the opener fits.
+const CAPS: &[(usize, usize)] = &[(80, 40), (20, 10), (0, 0)];
+
+pub struct Rendered {
+    /// The `# What is shared` block for the system prompt.
+    pub text: String,
+    /// The same facts as data for the visitor page: `days`, `tasks`, `goals`,
+    /// `done_recent`, each present only when its switch is on.
+    pub view: serde_json::Value,
+}
+
+struct DayRow {
+    start: String,
+    end: Option<String>,
+    title: String,
+    status: String,
+    busy: bool,
+}
+
+struct TaskRow {
+    id: i64,
+    title: String,
+    state: String,
+    due_at: Option<String>,
+    urgency: String,
+    pressing: bool,
+    steps: i64,
+    done_steps: i64,
+    category: String,
+    goal_title: Option<String>,
+    description: Option<String>,
+    rank: u8,
+}
+
+/// One pass over the owner's data, filtered by the scope, rendered twice.
+pub fn render(
+    conn: &Connection,
+    config_dir: &std::path::Path,
+    owner_id: i64,
+    owner_username: &str,
+    scope: &ShareScope,
+    now: jiff::Timestamp,
+) -> anyhow::Result<Rendered> {
+    let tz = crate::triggers::timezone(config_dir, owner_username);
+    let today = now.to_zoned(tz).date();
+    let mut view = serde_json::Map::new();
+    let mut sections: Vec<String> = Vec::new();
+
+    if scope.today {
+        let mut days_json = Vec::new();
+        let mut text = String::from("# Today and ahead\n\n");
+        let mut date = today;
+        for _ in 0..scope.horizon_days {
+            let calendar = crate::calendar::occurrences(conn, owner_id, date)?;
+            let events = crate::plan::events_for(conn, owner_id, date)?;
+            let mut rows: Vec<DayRow> = calendar
+                .iter()
+                .map(|o| DayRow {
+                    start: o.start.clone(),
+                    end: Some(o.end.clone()),
+                    title: o.title.clone(),
+                    status: "calendar".into(),
+                    busy: false,
+                })
+                .collect();
+            for e in &events {
+                let (title, busy) = match &e.task {
+                    Some(t) if !scope.allows_category(&t.category) => ("Busy".to_string(), true),
+                    Some(t) => (t.title.clone(), false),
+                    None => (e.kind.clone(), false),
+                };
+                rows.push(DayRow {
+                    start: e.wall_time.clone(),
+                    end: e.end_wall_time.clone(),
+                    title,
+                    status: e.status.clone(),
+                    busy,
+                });
+            }
+            rows.sort_by(|a, b| a.start.cmp(&b.start));
+            text.push_str(&format!("{date}{}:\n", if date == today { " (today)" } else { "" }));
+            if rows.is_empty() {
+                text.push_str("- nothing planned\n");
+            }
+            for r in &rows {
+                let end = r.end.as_deref().map(|e| format!("-{e}")).unwrap_or_default();
+                text.push_str(&format!("- {}{end} {} [{}]\n", r.start, r.title, r.status));
+            }
+            text.push('\n');
+            days_json.push(serde_json::json!({
+                "date": date.to_string(),
+                "rows": rows.iter().map(|r| serde_json::json!({
+                    "start": r.start, "end": r.end, "title": r.title, "status": r.status, "busy": r.busy,
+                })).collect::<Vec<_>>(),
+            }));
+            date = date.tomorrow()?;
+        }
+        view.insert("days".into(), serde_json::Value::Array(days_json));
+        sections.push(text);
+    }
+
+    let mut tasks: Vec<TaskRow> = Vec::new();
+    if scope.tasks {
+        for node in crate::tasks::list(conn, owner_id)? {
+            let t = &node.task;
+            if !(t.state == "open" || t.state == "in_progress") || !scope.allows_category(&t.category) {
+                continue;
+            }
+            let pressing = crate::tasks::pressing_at(&t.state, t.due_at.as_deref(), now);
+            tasks.push(TaskRow {
+                id: t.id,
+                title: t.title.clone(),
+                state: t.state.clone(),
+                due_at: t.due_at.clone(),
+                urgency: t.urgency.clone(),
+                pressing,
+                steps: node.children.iter().filter(|c| c.state != "dropped").count() as i64,
+                done_steps: node.children.iter().filter(|c| c.state == "done").count() as i64,
+                category: t.category.clone(),
+                goal_title: t.goal_title.clone(),
+                description: scope.details.then(|| t.description.clone()),
+                rank: crate::tasks::urgency_rank(&t.urgency, pressing),
+            });
+        }
+        tasks.sort_by(|a, b| {
+            a.rank
+                .cmp(&b.rank)
+                .then(a.due_at.is_none().cmp(&b.due_at.is_none()))
+                .then(a.due_at.cmp(&b.due_at))
+                .then(b.id.cmp(&a.id))
+        });
+        view.insert(
+            "tasks".into(),
+            serde_json::Value::Array(
+                tasks
+                    .iter()
+                    .map(|t| {
+                        let mut v = serde_json::json!({
+                            "id": t.id, "title": t.title, "state": t.state, "due_at": t.due_at,
+                            "urgency": t.urgency, "pressing": t.pressing, "steps": t.steps,
+                            "done_steps": t.done_steps, "category": t.category, "goal_title": t.goal_title,
+                        });
+                        if let Some(d) = &t.description {
+                            v["description"] = serde_json::json!(d);
+                        }
+                        v
+                    })
+                    .collect(),
+            ),
+        );
+    }
+
+    let mut goals_text = String::new();
+    if scope.goals {
+        let mut rows = Vec::new();
+        goals_text.push_str("# Goals\n\n");
+        for g in crate::goals::list(conn, owner_id, None)? {
+            let (total, done) = goal_counts(conn, g.id, scope)?;
+            if total == 0 && !scope.categories.is_empty() {
+                continue;
+            }
+            let due = g.due_at.as_deref().map(|d| format!(", due {}", day_of(d))).unwrap_or_default();
+            goals_text.push_str(&format!("- {} ({done} of {total} tasks done{due})\n", g.title));
+            rows.push(serde_json::json!({
+                "id": g.id, "title": g.title, "due_at": g.due_at, "tasks": total, "done_tasks": done,
+            }));
+        }
+        if rows.is_empty() {
+            goals_text.push_str("- none\n");
+        }
+        goals_text.push('\n');
+        view.insert("goals".into(), serde_json::Value::Array(rows));
+    }
+
+    let mut done_recent: Vec<(String, String)> = Vec::new();
+    if scope.progress {
+        let since = (now - jiff::Span::new().hours(24 * RECENT_DAYS)).to_string();
+        let (filter, category_params) = scope.category_clause("category").unwrap_or_default();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT title, completed_at FROM tasks
+             WHERE user_id = ? AND parent_id IS NULL AND state = 'done' AND completed_at >= ?{filter}
+             ORDER BY completed_at DESC LIMIT {DONE_RECENT_MAX}"
+        ))?;
+        let params: Vec<rusqlite::types::Value> =
+            [owner_id.into(), since.into()].into_iter().chain(category_params).collect();
+        done_recent = stmt
+            .query_map(rusqlite::params_from_iter(params.iter()), |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        view.insert(
+            "done_recent".into(),
+            serde_json::Value::Array(
+                done_recent
+                    .iter()
+                    .map(|(t, at)| serde_json::json!({ "title": t, "completed_at": at }))
+                    .collect(),
+            ),
+        );
+    }
+
+    let render_text = |task_cap: usize, done_cap: usize| -> String {
+        let mut s = String::from("# What is shared\n\n");
+        for sec in &sections {
+            s.push_str(sec);
+        }
+        if scope.tasks {
+            s.push_str("# Open tasks\n\n");
+            let urgent: Vec<&TaskRow> = tasks.iter().filter(|t| t.rank <= 1).collect();
+            if !urgent.is_empty() {
+                s.push_str("Urgent:\n");
+                for t in urgent.iter().take(task_cap) {
+                    s.push_str(&task_line(t, scope));
+                }
+            }
+            let rest: Vec<&TaskRow> = tasks.iter().filter(|t| t.rank > 1).collect();
+            let room = task_cap.saturating_sub(urgent.len().min(task_cap));
+            if !rest.is_empty() {
+                s.push_str("Others:\n");
+                for t in rest.iter().take(room) {
+                    s.push_str(&task_line(t, scope));
+                }
+            }
+            let shown = urgent.len().min(task_cap) + rest.len().min(room);
+            if tasks.len() > shown {
+                s.push_str(&format!("- and {} more; ask\n", tasks.len() - shown));
+            }
+            if tasks.is_empty() {
+                s.push_str("- none open\n");
+            }
+            s.push('\n');
+        }
+        s.push_str(&goals_text);
+        if scope.progress {
+            s.push_str(&format!("# Done in the last {RECENT_DAYS} days\n\n"));
+            if done_recent.is_empty() {
+                s.push_str("- nothing yet\n");
+            }
+            for (t, at) in done_recent.iter().take(done_cap) {
+                s.push_str(&format!("- {t} ({})\n", day_of(at)));
+            }
+            if done_recent.len() > done_cap {
+                s.push_str(&format!("- and {} more\n", done_recent.len() - done_cap));
+            }
+            s.push('\n');
+        }
+        s
+    };
+    let mut text = render_text(CAPS[0].0, CAPS[0].1);
+    for (t, d) in &CAPS[1..] {
+        if text.len() <= OPENER_MAX_BYTES {
+            break;
+        }
+        text = render_text(*t, *d);
+    }
+    Ok(Rendered { text, view: serde_json::Value::Object(view) })
+}
+
+fn day_of(timestamp: &str) -> &str {
+    timestamp.get(..10).unwrap_or(timestamp)
+}
+
+fn task_line(t: &TaskRow, scope: &ShareScope) -> String {
+    let mut s = format!("- {}", t.title);
+    if t.urgency == "high" {
+        s.push_str(" [urgent]");
+    } else if t.pressing {
+        s.push_str(" [due soon]");
+    }
+    if let Some(d) = &t.due_at {
+        s.push_str(&format!(", due {}", day_of(d)));
+    }
+    if t.steps > 0 {
+        s.push_str(&format!(", {} of {} steps done", t.done_steps, t.steps));
+    }
+    if scope.categories.len() != 1 && !t.category.is_empty() {
+        s.push_str(&format!(" ({})", t.category));
+    }
+    if let Some(g) = &t.goal_title {
+        s.push_str(&format!(", goal: {g}"));
+    }
+    if let Some(d) = t.description.as_deref().filter(|d| !d.trim().is_empty()) {
+        s.push_str(&format!(" — {}", d.trim().chars().take(200).collect::<String>()));
+    }
+    s.push_str(&format!(" (task_id {})\n", t.id));
+    s
+}
+
+/// A goal's non-dropped top-level tasks and how many are done, counted from the
+/// shared categories alone.
+pub fn goal_counts(conn: &Connection, goal_id: i64, scope: &ShareScope) -> rusqlite::Result<(i64, i64)> {
+    let (filter, category_params) = scope.category_clause("category").unwrap_or_default();
+    let params: Vec<rusqlite::types::Value> =
+        std::iter::once(goal_id.into()).chain(category_params).collect();
+    conn.query_row(
+        &format!(
+            "SELECT COUNT(*), COALESCE(SUM(state = 'done'), 0) FROM tasks
+             WHERE goal_id = ? AND parent_id IS NULL AND state != 'dropped'{filter}"
+        ),
+        rusqlite::params_from_iter(params.iter()),
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -761,5 +1066,80 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM share_messages", [], |r| r.get(0))
             .unwrap();
         assert_eq!(left, 0, "revocation cascades");
+    }
+
+    fn seed_owner(conn: &Connection) -> (tempfile::TempDir, i64) {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("defaults")).unwrap();
+        std::fs::write(tmp.path().join("defaults/user.toml"), "display_name = \"Aki\"\ntimezone = \"UTC\"\ntemplate = \"default\"\n").unwrap();
+        let mk = |title: &str, cat: &str, urgency: &str, due: Option<&str>| {
+            crate::tasks::create(
+                conn,
+                1,
+                crate::tasks::NewTask {
+                    title: title.into(),
+                    category: Some(cat.into()),
+                    urgency: Some(urgency.into()),
+                    due_at: due.map(|d| Some(d.to_string())),
+                    description: Some("private detail".into()),
+                    ..Default::default()
+                },
+                "manual",
+                crate::tasks::Actor::User,
+            )
+            .unwrap()
+            .id
+        };
+        let lab = mk("lab report", "school", "high", None);
+        mk("problem set", "school", "normal", Some("2026-09-25T00:00:00Z"));
+        mk("therapy forms", "health", "normal", None);
+        let done = mk("reading", "school", "normal", None);
+        crate::tasks::update(conn, 1, done, crate::tasks::TaskPatch { state: Some("done".into()), ..Default::default() }).unwrap();
+        (tmp, lab)
+    }
+
+    #[test]
+    fn render_keeps_to_the_scope_and_leads_with_urgency() {
+        let conn = conn();
+        let (tmp, _) = seed_owner(&conn);
+        let scope = ShareScope { categories: vec!["school".into()], ..ShareScope::default() };
+        let r = render(&conn, tmp.path(), 1, "aki", &scope, now()).unwrap();
+        assert!(r.text.contains("# What is shared"));
+        assert!(r.text.contains("lab report"), "{}", r.text);
+        assert!(!r.text.contains("therapy"), "a hidden category never renders:\n{}", r.text);
+        assert!(!r.text.contains("private detail"), "details are off:\n{}", r.text);
+        let urgent = r.text.find("Urgent").unwrap();
+        assert!(urgent < r.text.find("lab report").unwrap());
+        assert!(r.text.find("lab report").unwrap() < r.text.find("problem set").unwrap(), "high before pressing");
+        assert_eq!(r.view["tasks"][0]["title"], "lab report");
+        assert_eq!(r.view["tasks"][0]["urgency"], "high");
+        assert_eq!(r.view["tasks"][1]["pressing"], true);
+        assert!(r.view["tasks"].as_array().unwrap().iter().all(|t| t.get("description").is_none()));
+        assert_eq!(r.view["done_recent"][0]["title"], "reading");
+        assert_eq!(r.view["days"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn render_leaves_out_what_is_switched_off_and_carries_details_when_asked() {
+        let conn = conn();
+        let (tmp, _) = seed_owner(&conn);
+        let scope = ShareScope { today: false, goals: false, progress: false, details: true, ..ShareScope::default() };
+        let r = render(&conn, tmp.path(), 1, "aki", &scope, now()).unwrap();
+        assert!(r.view.get("days").is_none() && r.view.get("goals").is_none() && r.view.get("done_recent").is_none());
+        assert_eq!(r.view["tasks"][0]["description"], "private detail");
+        assert!(!r.text.contains("# Today"));
+    }
+
+    #[test]
+    fn render_trims_tasks_first_to_stay_under_the_cap() {
+        let conn = conn();
+        let (tmp, _) = seed_owner(&conn);
+        for i in 0..200 {
+            crate::tasks::create(&conn, 1, crate::tasks::NewTask { title: format!("filler task number {i} with a long enough title to matter"), ..Default::default() }, "manual", crate::tasks::Actor::User).unwrap();
+        }
+        let r = render(&conn, tmp.path(), 1, "aki", &ShareScope::default(), now()).unwrap();
+        assert!(r.text.len() <= OPENER_MAX_BYTES, "{}", r.text.len());
+        assert!(r.text.contains("more; ask"), "{}", r.text);
+        assert!(r.view["tasks"].as_array().unwrap().len() > 80, "the view is not trimmed with the text");
     }
 }

@@ -165,6 +165,7 @@ fn run_traced(
         SessionKind::Summarize => crate::prompts::load(deps.config_dir, username, "summarize")?,
         SessionKind::Harvest => crate::prompts::load(deps.config_dir, username, "harvest")?,
         SessionKind::Review => crate::prompts::load(deps.config_dir, username, "review")?,
+        SessionKind::Share => crate::prompts::load(deps.config_dir, username, "share")?,
         _ => crate::prompts::load(deps.config_dir, username, "persona")?,
     };
     if kind == SessionKind::Nightly {
@@ -175,7 +176,25 @@ fn run_traced(
         system.push_str("\n\n");
         system.push_str(&crate::prompts::load(deps.config_dir, username, "trigger")?);
     }
-    if !single_call(kind) {
+    if kind == SessionKind::Share {
+        let share = deps.share.as_ref().ok_or_else(|| anyhow::anyhow!("a share session needs its link"))?;
+        let conn = crate::db_guard(deps.db);
+        let display = crate::config::UserConfig::load(deps.config_dir, username)
+            .map(|c| c.display_name)
+            .unwrap_or_else(|_| username.to_string());
+        system = system.replace("{owner}", &display);
+        if !share.brief.trim().is_empty() {
+            system.push_str(&format!("\n\n# From {display}\n\n{}", share.brief.trim()));
+        }
+        let rendered = crate::shares::render(&conn, deps.config_dir, user_id, username, &share.scope, now)?;
+        system.push_str("\n\n");
+        system.push_str(&rendered.text);
+        if share.scope.notes {
+            system.push_str(&format!(
+                "\n\nA message the visitor wants passed on to {display} is filed with share_note; confirm in one sentence."
+            ));
+        }
+    } else if !single_call(kind) {
         let conn = crate::db_guard(deps.db);
         let context = crate::context::assemble(&conn, deps.config_dir, user_id, username, now)?;
         system.push_str("\n\n");
@@ -186,7 +205,10 @@ fn run_traced(
         }
     }
 
-    let mut schemas = tools::schemas(kind);
+    let mut schemas = match (kind, &deps.share) {
+        (SessionKind::Share, Some(s)) => tools::share_schemas(&s.scope),
+        _ => tools::schemas(kind),
+    };
     if deps.search.is_none() {
         schemas.retain(|s| s["name"] != "web_search");
     }
@@ -201,11 +223,14 @@ fn run_traced(
         SessionKind::Harvest => HARVEST_MAX_TURNS,
         SessionKind::Review => REVIEW_MAX_TURNS,
         SessionKind::Trigger => TRIGGER_MAX_TURNS,
+        SessionKind::Share => tools::SHARE_MAX_TURNS,
         _ => MAX_TURNS,
     };
-    // Talk, import and inbox sessions answer a caller who is waiting on them.
-    let background =
-        !matches!(kind, SessionKind::Talk | SessionKind::Import | SessionKind::Inbox);
+    // Talk, import, inbox and share sessions answer a caller who is waiting on them.
+    let background = !matches!(
+        kind,
+        SessionKind::Talk | SessionKind::Import | SessionKind::Inbox | SessionKind::Share
+    );
     let env = CallEnv { deps, user_id, username, kind, background };
     let started = std::time::Instant::now();
 
@@ -235,7 +260,7 @@ fn run_traced(
         if resp.tool_calls.is_empty() {
             on_event(AgentEvent::Reply { text: &last_text });
             trace.ok(&last_text);
-            finish(deps, user_id, kind, turns, tool_calls, "agent_session")?;
+            finish(deps, user_id, kind, turns, tool_calls, log_kind(kind, "agent_session"))?;
             let thought_ms = started.elapsed().as_millis() as u64;
             return Ok(SessionOutcome {
                 reply: last_text,
@@ -268,7 +293,7 @@ fn run_traced(
             if !is_error && tools::is_terminal(kind, &call.name) {
                 on_event(AgentEvent::Reply { text: &content });
                 trace.ok(&content);
-                finish(deps, user_id, kind, turns, tool_calls, "agent_session")?;
+                finish(deps, user_id, kind, turns, tool_calls, log_kind(kind, "agent_session"))?;
                 let thought_ms = started.elapsed().as_millis() as u64;
                 return Ok(SessionOutcome {
                     reply: content,
@@ -282,12 +307,14 @@ fn run_traced(
             messages.push(Message::ToolResult { call_id: call.id, content, is_error });
         }
     }
-    if last_text.trim().is_empty() && matches!(kind, SessionKind::Talk | SessionKind::Checkin) {
+    if last_text.trim().is_empty()
+        && matches!(kind, SessionKind::Talk | SessionKind::Checkin | SessionKind::Share)
+    {
         last_text = MAX_TURNS_REPLY.to_string();
     }
     on_event(AgentEvent::Reply { text: &last_text });
     trace.max_turns(&last_text);
-    finish(deps, user_id, kind, turns, tool_calls, "agent_max_turns")?;
+    finish(deps, user_id, kind, turns, tool_calls, log_kind(kind, "agent_max_turns"))?;
     let thought_ms = started.elapsed().as_millis() as u64;
     Ok(SessionOutcome {
         reply: last_text,
@@ -459,8 +486,21 @@ fn finish(
     if let Some(id) = deps.token_id {
         detail.push_str(&format!(" token={id}"));
     }
+    if let Some(share) = &deps.share {
+        detail.push_str(&format!(" share={}", share.id));
+    }
     let conn = crate::db_guard(deps.db);
     crate::log::record(&conn, Some(user_id), log_kind, &detail)
+}
+
+/// A share session logs under its own kinds, so it never counts against the
+/// owner's session budget or shows in their activity.
+fn log_kind(kind: SessionKind, base: &'static str) -> &'static str {
+    match (kind, base) {
+        (SessionKind::Share, "agent_session") => "share_session",
+        (SessionKind::Share, _) => "share_max_turns",
+        _ => base,
+    }
 }
 
 #[cfg(test)]
@@ -1587,5 +1627,35 @@ mod tests {
             share: None,
         };
         assert!(run_session(&d, 1, "aki", SessionKind::Talk, now(), &[], "hi").is_err());
+    }
+
+    #[test]
+    fn a_share_session_gets_the_share_prompt_the_opener_and_no_context_block() {
+        let (db, tmp) = env();
+        std::fs::write(tmp.path().join("defaults/prompts/share.md"), "answer for {owner}").unwrap();
+        let standing = crate::context::standing_path(tmp.path(), "aki");
+        std::fs::create_dir_all(standing.parent().unwrap()).unwrap();
+        std::fs::write(standing, "SECRET STANDING LINE").unwrap();
+        {
+            let conn = db.lock().unwrap();
+            crate::tasks::create(&conn, 1, crate::tasks::NewTask { title: "lab report".into(), category: Some("school".into()), ..Default::default() }, "manual", crate::tasks::Actor::User).unwrap();
+        }
+        let llm = MockLLM::scripted(vec![ChatResponse { text: "Aki has a lab report.".into(), tool_calls: vec![] }]);
+        let share = ShareSession { id: 1, thread_id: 1, brief: "be warm".into(), scope: crate::shares::ShareScope::default() };
+        let deps = SessionDeps { db: &db, config_dir: tmp.path(), data_dir: tmp.path(), llm: &llm, embeddings: None, search: None, task_scope: None, inbox_source: None, memory_source: None, token_id: None, thread_note: None, share: Some(share) };
+        let out = run_session(&deps, 1, "aki", SessionKind::Share, jiff::Timestamp::now(), &[], "what does aki have?").unwrap();
+        assert_eq!(out.reply, "Aki has a lab report.");
+        let seen = llm.seen();
+        assert!(seen[0].system.starts_with("answer for X"), "{}", seen[0].system);
+        assert!(seen[0].system.contains("# From X\n\nbe warm"));
+        assert!(seen[0].system.contains("# What is shared"));
+        assert!(seen[0].system.contains("lab report"));
+        assert!(!seen[0].system.contains("SECRET STANDING LINE"));
+        assert!(!seen[0].system.contains("# Standing context"));
+        assert!(!seen[0].tool_names.iter().any(|n| n.starts_with("memory_") || n == "task_create" || n == "share_note"));
+        let conn = db.lock().unwrap();
+        let kind: String = conn.query_row("SELECT kind FROM event_log WHERE kind LIKE 'share%'", [], |r| r.get(0)).unwrap();
+        assert_eq!(kind, "share_session");
+        assert_eq!(crate::log::agent_sessions_since(&conn, 1, jiff::Timestamp::now() - jiff::Span::new().hours(1)).unwrap(), 0);
     }
 }

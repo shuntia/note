@@ -137,6 +137,8 @@ const OPERATIONAL_LOG_KINDS: &[&str] = &[
     "passkey_removed",
     "passkeys_unavailable",
     "runner_error",
+    "share_max_turns",
+    "share_session",
     "token_created",
     "token_revoked",
     "totp_enrolled",
@@ -689,6 +691,7 @@ fn recent_activity(conn: &Connection, user_id: i64) -> Result<Vec<(String, Strin
         "SELECT ts, kind, detail FROM event_log
          WHERE user_id = ?1 AND kind NOT IN ({denied})
                AND kind NOT LIKE 'admin\\_%' ESCAPE '\\'
+               AND kind NOT LIKE 'share\\_%' ESCAPE '\\'
          ORDER BY id DESC LIMIT 10"
     ))?;
     let rows: Vec<(String, String, String)> = stmt
@@ -1186,6 +1189,18 @@ mod tests {
         crate::plan::generate(&conn, uid, &tmpl, date).unwrap();
         let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
         assert!(out.contains("Tomorrow's plan (2026-09-01): generated"), "{out}");
+    }
+
+    #[test]
+    fn recent_activity_leaves_share_rows_out() {
+        let conn = crate::db::open_memory().unwrap();
+        conn.execute("INSERT INTO users (username, pass_hash, role) VALUES ('aki','x','member')", []).unwrap();
+        crate::log::record(&conn, Some(1), "share_created", "share=1").unwrap();
+        crate::log::record(&conn, Some(1), "share_session", "share=1").unwrap();
+        crate::log::record(&conn, Some(1), "task_created", "x").unwrap();
+        let rows = recent_activity(&conn, 1).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].1, "task_created");
     }
 
     #[test]
