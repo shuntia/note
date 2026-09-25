@@ -1624,8 +1624,11 @@ function ShareForm({
           {EXPIRIES.map((x) => (
             <button key={x.id} type="button" aria-pressed={d.days === x.id && d.date === ''} onClick={() => setD({ ...d, days: x.id, date: '' })}>{x.label}</button>
           ))}
-          <input type="date" aria-label="Ends on a date" min={localToday()} value={d.date} onChange={(e) => setD({ ...d, date: e.target.value })} />
         </div>
+      </div>
+      <div className="set-row">
+        <span className="set-row-body"><span className="set-label">Or ends on a date</span></span>
+        <input type="date" aria-label="Ends on a date" min={localToday()} value={d.date} onChange={(e) => setD({ ...d, date: e.target.value })} />
       </div>
       <div className="set-row"><span className="set-row-body"><span className="set-label">Plan for the next days</span></span><Switch label="Share the plan" on={d.scope.today} onToggle={() => scope({ today: !d.scope.today })} /></div>
       {d.scope.today && (

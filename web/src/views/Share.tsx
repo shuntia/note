@@ -2,7 +2,6 @@ import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 're
 import { api, ApiError } from '../api'
 import { Markdown } from '../markdown'
 import type { ShareInfo, ShareMessage, ShareTask, ShareView } from '../types'
-import '../styles/talk.css'
 import '../styles/share.css'
 
 type Load<T> = T | 'ended' | 'error' | undefined
@@ -40,7 +39,7 @@ function TaskRow({ task }: { task: ShareTask }) {
           {urgent && <span className="meta sun">urgent</span>}
           {task.steps > 0 && <span className="meta">{task.done_steps} of {task.steps} steps done</span>}
           {due && <span className={`meta${due === 'overdue' ? ' warn' : ''}`}>{due}</span>}
-          {task.goal_title && <span className="meta">{task.goal_title}</span>}
+          {task.goal_title && <span className="meta">for {task.goal_title}</span>}
         </span>
       </div>
       {task.description && <p className="share-desc">{task.description}</p>}
@@ -206,7 +205,7 @@ export function SharePage({ token }: { token: string }) {
         <p className="share-cover">{coverage(info)}</p>
       </header>
       {view && view !== 'ended' && view !== 'error' && <Panels view={view} />}
-      <section className="share-chat chat">
+      <section className="share-chat">
         <h2>Ask Note</h2>
         <div className="share-thread" role="log" aria-live="polite">
           {thread.length === 0 && (
