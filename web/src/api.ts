@@ -29,8 +29,12 @@ import type {
   SessionStart,
   Settings,
   SettingsSaved,
+  NewShare,
+  Share,
   ShareInfo,
   ShareMessage,
+  SharePatch,
+  ShareThread,
   ShareTurn,
   ShareView,
   SqlResult,
@@ -323,6 +327,12 @@ export const api = {
     request<void>(`/api/calendar/${id}/skip`, { method: 'POST', body: JSON.stringify({ date }) }),
   unskipCalendarDate: (id: number, date: string) =>
     request<void>(`/api/calendar/${id}/skip/${date}`, { method: 'DELETE' }),
+  shares: () => request<Share[]>('/api/shares'),
+  createShare: (body: NewShare) => request<Share>('/api/shares', { method: 'POST', body: JSON.stringify(body) }),
+  updateShare: (id: number, body: SharePatch) =>
+    request<Share>(`/api/shares/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  revokeShare: (id: number) => request<void>(`/api/shares/${id}`, { method: 'DELETE' }),
+  shareThreads: (id: number) => request<ShareThread[]>(`/api/shares/${id}/threads`),
   share: {
     info: (token: string) => request<ShareInfo>(`/api/share/${token}`, { quiet401: true }),
     view: (token: string) => request<ShareView>(`/api/share/${token}/view`, { quiet401: true }),
