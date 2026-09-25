@@ -605,11 +605,11 @@ pub fn render(
                     busy: false,
                 })
                 .collect();
-            for e in &events {
+            for e in events.iter().filter(|e| e.kind != crate::triggers::KIND) {
                 let (title, busy) = match &e.task {
                     Some(t) if !scope.allows_category(&t.category) => ("Busy".to_string(), true),
                     Some(t) => (t.title.clone(), false),
-                    None => (e.kind.clone(), false),
+                    None => (kind_label(&e.kind), false),
                 };
                 rows.push(DayRow {
                     start: e.wall_time.clone(),
@@ -814,6 +814,16 @@ pub fn render(
         text.truncate(cut);
     }
     Ok(Rendered { text, view: serde_json::Value::Object(view) })
+}
+
+/// `checkin_call` reads "Checkin call".
+fn kind_label(kind: &str) -> String {
+    let spaced = kind.replace('_', " ");
+    let mut chars = spaced.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => spaced,
+    }
 }
 
 fn day_of(timestamp: &str) -> &str {
@@ -1360,5 +1370,20 @@ mod tests {
         let r = render(&conn, tmp.path(), 1, "aki", &hidden, now()).unwrap();
         assert!(!r.text.contains("GOAL-TITLE-SECRET"), "{}", r.text);
         assert!(!r.view.to_string().contains("GOAL-TITLE-SECRET"), "{}", r.view);
+    }
+
+    #[test]
+    fn the_plan_leaves_triggers_out_and_labels_a_routine_block() {
+        let conn = conn();
+        let (tmp, _) = seed_owner(&conn);
+        conn.execute("INSERT INTO plans (user_id, date, created_at) VALUES (1, '2026-09-24', 'x')", []).unwrap();
+        let plan = conn.last_insert_rowid();
+        conn.execute("INSERT INTO events (plan_id, kind, wall_time) VALUES (?1, ?2, '13:00')", (plan, crate::triggers::KIND)).unwrap();
+        conn.execute("INSERT INTO events (plan_id, kind, wall_time) VALUES (?1, 'checkin_call', '14:00')", [plan]).unwrap();
+        let r = render(&conn, tmp.path(), 1, "aki", &ShareScope::default(), now()).unwrap();
+        let today = r.view["days"][0]["rows"].as_array().unwrap();
+        assert!(today.iter().all(|row| row["title"] != crate::triggers::KIND && row["start"] != "13:00"), "{today:?}");
+        assert!(today.iter().any(|row| row["title"] == "Checkin call"), "{today:?}");
+        assert!(!r.text.contains("13:00"), "{}", r.text);
     }
 }
