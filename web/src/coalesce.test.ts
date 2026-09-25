@@ -22,3 +22,14 @@ test('an older response arriving late is dropped', async () => {
   doneFirst('one')
   expect(await first).toBeUndefined()
 })
+
+test('an older request failing late is dropped, the newest failure still surfaces', async () => {
+  const guard = latest<string>()
+  let failFirst!: (e: Error) => void
+  const first = guard(new Promise<string>((_, reject) => (failFirst = reject)))
+  const second = guard(Promise.resolve('two'))
+  expect(await second).toBe('two')
+  failFirst(new Error('stale'))
+  expect(await first).toBeUndefined()
+  await expect(guard(Promise.reject(new Error('fresh')))).rejects.toThrow('fresh')
+})
