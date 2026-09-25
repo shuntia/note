@@ -780,6 +780,9 @@ pub fn dispatch(
             ToolError::unknown_tool(format!("no such tool: {name}"))
         });
     }
+    if kind == SessionKind::Share && ctx.share.is_none() {
+        return Err(ToolError::forbidden("a share session needs its link"));
+    }
     if let Some(scope) = &ctx.share {
         if !share_allows(scope, name) {
             return Err(ToolError::forbidden(format!("tool {name} is not shared on this link")));
@@ -1552,5 +1555,36 @@ mod tests {
         assert_eq!(e.kind, "forbidden", "notes are off by default");
         let e = dispatch(&conn, &sctx, SessionKind::Share, "memory_write", "{}").unwrap_err();
         assert_eq!(e.kind, "forbidden");
+    }
+
+    #[test]
+    fn a_share_session_without_its_link_runs_nothing() {
+        let (conn, tmp) = env();
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Share, "task_list", "{}").unwrap_err();
+        assert_eq!(e.kind, "forbidden");
+    }
+
+    #[test]
+    fn share_note_files_onto_the_visitor_thread() {
+        let (conn, tmp) = env();
+        let now = jiff::Timestamp::now();
+        let new = crate::shares::NewShare {
+            name: "Mom".into(),
+            brief: String::new(),
+            scope: crate::shares::ShareScope::default(),
+            expires_at: now + jiff::Span::new().hours(24),
+        };
+        let share = crate::shares::create(&conn, 1, new, now, &crate::shares::Limits::default()).unwrap();
+        let thread = crate::shares::thread_for(&conn, share.id, "v1", now).unwrap();
+        let scope = crate::shares::ShareScope { notes: true, ..Default::default() };
+        let sctx = ToolCtx { share: Some(scope), share_thread: Some(thread), ..ctx(&tmp) };
+        let out = dispatch(&conn, &sctx, SessionKind::Share, "share_note", r#"{"text":" call me tonight "}"#).unwrap();
+        assert_eq!(out, serde_json::json!({ "filed": true }));
+        let messages = crate::shares::messages(&conn, thread).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!((messages[0].role.as_str(), messages[0].content.as_str()), ("note", "call me tonight"));
+        let e = dispatch(&conn, &sctx, SessionKind::Share, "share_note", r#"{"text":"   "}"#).unwrap_err();
+        assert_eq!(e.kind, "rejected");
+        assert_eq!(crate::shares::messages(&conn, thread).unwrap().len(), 1);
     }
 }

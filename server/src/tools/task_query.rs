@@ -79,30 +79,27 @@ pub struct ListArgs {
     pub limit: Option<u32>,
 }
 
-/// The category clause a share scope imposes, appended to every task read.
-fn share_category_clause(
+/// The category clause a share scope imposes on a task read; a category the
+/// caller names itself must be one the link shares, and then needs no clause.
+fn share_categories(
     ctx: &ToolCtx,
     requested: Option<&str>,
-    wheres: &mut Vec<String>,
-    params: &mut Vec<SqlValue>,
-) -> Result<(), ToolError> {
-    let Some(scope) = &ctx.share else { return Ok(()) };
-    if scope.categories.is_empty() {
-        return Ok(());
+) -> Result<Option<(String, Vec<SqlValue>)>, ToolError> {
+    let Some(scope) = &ctx.share else { return Ok(None) };
+    match requested {
+        Some(c) if !scope.allows_category(c.trim()) => Err(ToolError::rejected(format!(
+            "category must be one of {}",
+            scope.categories.join(", ")
+        ))),
+        Some(_) => Ok(None),
+        None => Ok(scope.category_clause("category")),
     }
-    if let Some(c) = requested {
-        if !scope.allows_category(c.trim()) {
-            return Err(ToolError::rejected(format!(
-                "category must be one of {}",
-                scope.categories.join(", ")
-            )));
-        }
-        return Ok(());
-    }
-    let marks = std::iter::repeat_n("?", scope.categories.len()).collect::<Vec<_>>().join(", ");
-    wheres.push(format!("category IN ({marks})"));
-    params.extend(scope.categories.iter().map(|c| SqlValue::from(c.clone())));
-    Ok(())
+}
+
+/// Whether a text match may reach descriptions and notes, which a link
+/// without details keeps back.
+fn matches_details(ctx: &ToolCtx) -> bool {
+    ctx.share.as_ref().is_none_or(|scope| scope.details)
 }
 
 /// The filters, as SQL and its parameters, shared by the page and its count.
@@ -131,12 +128,17 @@ fn list_filters(ctx: &ToolCtx, args: &ListArgs) -> Result<(String, Vec<SqlValue>
                 "keyword must be 1 to {MAX_KEYWORD_CHARS} characters"
             )));
         }
-        wheres.push(
-            "(instr(lower(title), ?) > 0 OR instr(lower(description), ?) > 0 \
-              OR instr(lower(notes), ?) > 0)"
-                .into(),
-        );
-        params.extend([needle.clone().into(), needle.clone().into(), needle.into()]);
+        if matches_details(ctx) {
+            wheres.push(
+                "(instr(lower(title), ?) > 0 OR instr(lower(description), ?) > 0 \
+                  OR instr(lower(notes), ?) > 0)"
+                    .into(),
+            );
+            params.extend([needle.clone().into(), needle.clone().into(), needle.into()]);
+        } else {
+            wheres.push("instr(lower(title), ?) > 0".into());
+            params.push(needle.into());
+        }
     }
     if let Some(category) = &args.category {
         wheres.push("category = ?".into());
@@ -191,8 +193,12 @@ fn list_filters(ctx: &ToolCtx, args: &ListArgs) -> Result<(String, Vec<SqlValue>
         wheres.push("urgency = ?".into());
         params.push(u.clone().into());
     }
-    share_category_clause(ctx, args.category.as_deref(), &mut wheres, &mut params)?;
-    Ok((wheres.join(" AND "), params))
+    let mut sql = wheres.join(" AND ");
+    if let Some((clause, shared)) = share_categories(ctx, args.category.as_deref())? {
+        sql.push_str(&clause);
+        params.extend(shared);
+    }
+    Ok((sql, params))
 }
 
 /// The instant a local day begins, which is what a due-date filter compares
@@ -315,12 +321,15 @@ pub fn search(conn: &Connection, ctx: &ToolCtx, args: SearchArgs) -> Result<serd
             .collect::<Vec<_>>()
             .join(" AND ")
     };
-    let text = "lower(title) || ' ' || lower(description) || ' ' || lower(notes)";
+    let text = if matches_details(ctx) {
+        "lower(title) || ' ' || lower(description) || ' ' || lower(notes)"
+    } else {
+        "lower(title)"
+    };
     // the parameters are pushed in the order the statement below binds them
     let text_match = clause(text, &mut params);
-    let mut shared = Vec::new();
-    share_category_clause(ctx, None, &mut shared, &mut params)?;
-    let shared: String = shared.iter().map(|c| format!(" AND {c}")).collect();
+    let (shared, shared_params) = share_categories(ctx, None)?.unwrap_or_default();
+    params.extend(shared_params);
     let title_match = clause("lower(title)", &mut params);
 
     let mut stmt = conn
@@ -396,8 +405,10 @@ pub fn read(conn: &Connection, ctx: &ToolCtx, args: ReadArgs) -> Result<serde_js
 }
 
 fn titles_only(task: &mut serde_json::Value) {
-    task["description"] = serde_json::json!("");
-    task["notes"] = serde_json::json!("");
+    for field in ["description", "notes", "url"] {
+        task[field] = serde_json::json!("");
+    }
+    task["external_id"] = serde_json::Value::Null;
 }
 
 fn stamp(task: &mut serde_json::Value, added: &std::collections::HashMap<i64, String>) {
@@ -1079,14 +1090,42 @@ mod tests {
         assert_eq!(err.kind, "rejected");
         let out = dispatch(&conn, &sctx, SessionKind::Share, "task_search", r#"{"query":"forms"}"#).unwrap();
         assert_eq!(out["tasks"].as_array().unwrap().len(), 0);
+        let out = dispatch(&conn, &sctx, SessionKind::Share, "task_search", r#"{"query":"lab"}"#).unwrap();
+        assert_eq!(out["tasks"].as_array().unwrap().len(), 1);
+        assert_eq!(out["tasks"][0]["title"], "lab report");
         let id = out_id(&call(&conn, &tmp, "task_list", r#"{"category":"health"}"#).unwrap());
         let err = dispatch(&conn, &sctx, SessionKind::Share, "task_read", &format!(r#"{{"task_id":{id}}}"#)).unwrap_err();
         assert_eq!(err.kind, "not_found");
         let school = out_id(&call(&conn, &tmp, "task_list", r#"{"category":"school"}"#).unwrap());
+        conn.execute(
+            "UPDATE tasks SET url = 'https://lms.example/lab', external_id = 'lms-7' WHERE id = ?1",
+            [school],
+        )
+        .unwrap();
         let read = dispatch(&conn, &sctx, SessionKind::Share, "task_read", &format!(r#"{{"task_id":{school}}}"#)).unwrap();
         assert_eq!(read["description"], "", "details are off");
+        assert_eq!(read["url"], "");
+        assert!(read["external_id"].is_null());
         let detailed = share_ctx(&tmp, crate::shares::ShareScope { details: true, ..school_only() });
         let read = dispatch(&conn, &detailed, SessionKind::Share, "task_read", &format!(r#"{{"task_id":{school}}}"#)).unwrap();
         assert_eq!(read["description"], "secret grade talk");
+        assert_eq!(read["url"], "https://lms.example/lab");
+        assert_eq!(read["external_id"], "lms-7");
+    }
+
+    #[test]
+    fn without_details_a_share_matches_titles_alone() {
+        let (conn, tmp) = env();
+        call(&conn, &tmp, "task_create", r#"{"title":"lab report","description":"secret grade talk"}"#).unwrap();
+        let plain = share_ctx(&tmp, crate::shares::ShareScope::default());
+        let detailed = share_ctx(&tmp, crate::shares::ShareScope { details: true, ..Default::default() });
+        for (sctx, hits) in [(&plain, 0), (&detailed, 1)] {
+            let out = dispatch(&conn, sctx, SessionKind::Share, "task_list", r#"{"keyword":"grade"}"#).unwrap();
+            assert_eq!(out["total"], hits);
+            let out = dispatch(&conn, sctx, SessionKind::Share, "task_search", r#"{"query":"grade"}"#).unwrap();
+            assert_eq!(out["tasks"].as_array().unwrap().len(), hits);
+        }
+        let out = dispatch(&conn, &plain, SessionKind::Share, "task_list", r#"{"keyword":"lab"}"#).unwrap();
+        assert_eq!(out["total"], 1);
     }
 }

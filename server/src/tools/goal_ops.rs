@@ -97,8 +97,8 @@ pub fn list(
 ) -> Result<serde_json::Value, ToolError> {
     super::task_query::unscoped(ctx)?;
     let mut goals = crate::goals::list(conn, ctx.user_id, args.state.as_deref()).map_err(task_error)?;
-    if let Some(scope) = ctx.share.as_ref().filter(|s| !s.categories.is_empty()) {
-        goals = confined(conn, goals, &scope.categories)?;
+    if let Some(clause) = ctx.share.as_ref().and_then(|s| s.category_clause("category")) {
+        goals = confined(conn, goals, clause)?;
     }
     let details = ctx.share.as_ref().is_none_or(|s| s.details);
     let goals: Vec<serde_json::Value> = goals
@@ -129,15 +129,14 @@ pub fn list(
 fn confined(
     conn: &Connection,
     goals: Vec<crate::goals::Goal>,
-    categories: &[String],
+    (categories, category_params): (String, Vec<rusqlite::types::Value>),
 ) -> Result<Vec<crate::goals::Goal>, ToolError> {
     let internal = |e: rusqlite::Error| ToolError::internal(e.to_string());
-    let marks = std::iter::repeat_n("?", categories.len()).collect::<Vec<_>>().join(", ");
-    let filter = format!("goal_id = ? AND parent_id IS NULL AND category IN ({marks})");
+    let filter = format!("goal_id = ? AND parent_id IS NULL{categories}");
     let mut out = Vec::with_capacity(goals.len());
     for mut g in goals {
         let params: Vec<rusqlite::types::Value> = std::iter::once(g.id.into())
-            .chain(categories.iter().map(|c| c.clone().into()))
+            .chain(category_params.iter().cloned())
             .collect();
         let (tasks, done_tasks): (i64, i64) = conn
             .query_row(
