@@ -21,4 +21,11 @@
 .share-thread { display: flex; flex-direction: column; gap: 0.5rem; margin-bottom: 1rem; }
 .share.ended { text-align: center; padding-top: 6rem; }
 .share.ended p { color: var(--quiet); }
-.share .share-chat { display: block; }
+/* Note answers in prose; only what the visitor said is a bubble */
+.share-chat .turn.user + .turn.user { margin-top: -0.375rem; }
+.share-chat .turn.assistant { max-width: 100%; background: none; padding: 0.25rem 0.375rem; }
+.share-chat .turn.user { max-width: min(28rem, 72%); }
+.share-chat .tellnote { width: 100%; }
+.share-chat .tellnote button { transition: background-color 180ms ease, color 180ms ease; }
+.share-chat .tellnote.armed button:not(:disabled) { background: var(--ink); color: var(--ivory); }
+@media (prefers-reduced-motion: reduce) { .share-chat .tellnote button { transition: none; } }
