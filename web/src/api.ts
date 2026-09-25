@@ -62,6 +62,7 @@ import type {
 const WRITABLE_SETTINGS = [
   'display_name',
   'timezone',
+  'timezone_auto',
   'nightly_time',
   'close_day_time',
   'template',

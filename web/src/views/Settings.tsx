@@ -27,6 +27,7 @@ import type {
   TotpEnrolment,
 } from '../types'
 import { createCredential, webauthnSupported, type RegistrationJSON } from '../webauthn'
+import { deviceZone } from '../zone'
 
 type Notify = (msg: string, action?: ToastAction) => void
 
@@ -57,6 +58,7 @@ type Loaded = {
   nightly: boolean
   checkins: boolean
   pomodoro: boolean
+  zoneAuto: boolean
   telegramEnabled: boolean
   telegramLinked: boolean
   telegramBot: string
@@ -207,6 +209,7 @@ export function Settings({
           nightly: s.nightly_enabled,
           checkins: s.checkins_enabled,
           pomodoro: s.pomodoro_enabled,
+          zoneAuto: s.timezone_auto,
           telegramEnabled: s.telegram_enabled,
           telegramLinked: s.telegram_linked,
           telegramBot: s.telegram_bot,
@@ -374,6 +377,34 @@ export function Settings({
     setTheme(choice)
     applyTheme(choice)
     saveTheme(choice)
+  }
+
+  // Turning the switch on moves the day to this device at once rather than on the
+  // next focus.
+  const commitZoneAuto = async (on: boolean) => {
+    if (!loaded) return
+    const device = deviceZone()
+    const follow = on && loaded.choices.timezones.includes(device)
+    setSave({ row: 'timezone', kind: 'busy' })
+    try {
+      const saved = await api.saveSettings(
+        follow ? { timezone_auto: on, timezone: device } : { timezone_auto: on },
+      )
+      setState((s) =>
+        s && s !== 'error'
+          ? {
+              ...s,
+              zoneAuto: saved.timezone_auto,
+              baseline: { ...s.baseline, timezone: saved.timezone },
+              draft: { ...s.draft, timezone: saved.timezone },
+              rows: saved.schedule,
+            }
+          : s,
+      )
+      setSave({ row: 'timezone', kind: 'saved' })
+    } catch (err) {
+      setSave({ row: 'timezone', kind: 'failed', message: failure(err) })
+    }
   }
 
   const commitOn = (row: string) => ({
@@ -594,15 +625,33 @@ export function Settings({
           >
             {open === 'timezone' && (
               <div className="set-fold-body">
-                <input
-                  list="tz-list"
-                  aria-label="Time zone"
-                  spellCheck={false}
-                  autoCapitalize="none"
-                  value={loaded.draft.timezone}
-                  onChange={(e) => edit('timezone', e.target.value)}
-                  {...commitOn('timezone')}
-                />
+                <div className="set-row">
+                  <span className="set-row-body">
+                    <span className="set-label">Follow this device</span>
+                  </span>
+                  <Switch
+                    label="Follow this device"
+                    on={loaded.zoneAuto}
+                    disabled={busy}
+                    onToggle={() => void commitZoneAuto(!loaded.zoneAuto)}
+                  />
+                </div>
+                {loaded.zoneAuto ? (
+                  <span className="set-zone">
+                    <input aria-label="Time zone" disabled value={deviceZone()} />
+                    <span className="set-hint">detected</span>
+                  </span>
+                ) : (
+                  <input
+                    list="tz-list"
+                    aria-label="Time zone"
+                    spellCheck={false}
+                    autoCapitalize="none"
+                    value={loaded.draft.timezone}
+                    onChange={(e) => edit('timezone', e.target.value)}
+                    {...commitOn('timezone')}
+                  />
+                )}
                 <datalist id="tz-list">
                   {loaded.choices.timezones.map((tz) => (
                     <option key={tz} value={tz} />
