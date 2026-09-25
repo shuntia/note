@@ -101,7 +101,7 @@ export function open(face, fill, track, done) {
 
 // A soft band of the arc's own colour widens out from the ring and fades: the
 // ripple as a gradient rather than a line.
-export function wave(face, color = 'var(--sun)', peak = 0.4) {
+export function wave(face, color = 'var(--sun)', peak = 0.18) {
   const app = face.closest('.frame-app')
   const box = face.getBoundingClientRect(), root = app.getBoundingClientRect()
   const cx = box.left - root.left + box.width / 2, cy = box.top - root.top + box.height / 2
@@ -109,8 +109,8 @@ export function wave(face, color = 'var(--sun)', peak = 0.4) {
   w.style.cssText = 'position:absolute;inset:0;pointer-events:none;mix-blend-mode:multiply'
   app.append(w)
   const s = { r: 150, o: peak }
-  gsap.to(s, { r: 560, o: 0, duration: 1.2, ease: 'power2.out', onUpdate: () => {
-    const band = 26 + (s.r - 150) * 0.28
+  gsap.to(s, { r: 720, o: 0, duration: 1.6, ease: 'power1.out', onUpdate: () => {
+    const band = 70 + (s.r - 150) * 0.45
     w.style.opacity = s.o
     w.style.background = `radial-gradient(circle at ${cx}px ${cy}px, transparent ${s.r - band}px, ${color} ${s.r}px, transparent ${s.r + band}px)`
   }, onComplete: () => w.remove() })
