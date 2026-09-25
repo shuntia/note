@@ -94,8 +94,8 @@
 
 :root[data-theme='dark'] {
   color-scheme: dark;
-  --sky-top: oklch(24% 0.02 70);
-  --sky-mid: oklch(22% 0.02 60);
+  --sky-top: oklch(23% 0.03 258);
+  --sky-mid: oklch(21% 0.022 240);
   --earth: oklch(20% 0.018 60);
   --haze: oklch(30% 0.02 60 / 0.6);
   --haze-strong: oklch(28% 0.02 60 / 0.92);
@@ -113,8 +113,8 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme='light']) {
     color-scheme: dark;
-    --sky-top: oklch(24% 0.03 250);
-    --sky-mid: oklch(22% 0.025 240);
+    --sky-top: oklch(23% 0.03 258);
+    --sky-mid: oklch(21% 0.022 240);
     --earth: oklch(20% 0.018 60);
     --haze: oklch(30% 0.02 60 / 0.6);
     --haze-strong: oklch(28% 0.02 60 / 0.92);
@@ -128,6 +128,25 @@
     --sage: oklch(72% 0.08 150);
     --rose: oklch(70% 0.06 30);
   }
+}
+
+/* under Sky the ground blends minute by minute while text switches sets at
+   twilight; registering the stepped tokens lets that switch fade */
+@property --ink { syntax: '<color>'; inherits: true; initial-value: oklch(23% 0.03 255); }
+@property --ivory { syntax: '<color>'; inherits: true; initial-value: oklch(98% 0.008 85); }
+@property --quiet { syntax: '<color>'; inherits: true; initial-value: oklch(40% 0.025 250); }
+@property --faint { syntax: '<color>'; inherits: true; initial-value: oklch(45% 0.02 245); }
+@property --line { syntax: '<color>'; inherits: true; initial-value: oklch(30% 0.03 250 / 0.45); }
+@property --track { syntax: '<color>'; inherits: true; initial-value: oklch(30% 0.03 250 / 0.16); }
+@property --sun-ink { syntax: '<color>'; inherits: true; initial-value: oklch(45% 0.13 55); }
+@property --haze { syntax: '<color>'; inherits: true; initial-value: oklch(99% 0.004 80 / 0.55); }
+@property --haze-strong { syntax: '<color>'; inherits: true; initial-value: oklch(99% 0.004 80 / 0.86); }
+@property --sage { syntax: '<color>'; inherits: true; initial-value: oklch(50% 0.09 150); }
+@property --rose { syntax: '<color>'; inherits: true; initial-value: oklch(55% 0.07 30); }
+:root[data-theme='sky'] {
+  transition: --ink 400ms ease, --ivory 400ms ease, --quiet 400ms ease, --faint 400ms ease,
+    --line 400ms ease, --track 400ms ease, --sun-ink 400ms ease, --haze 400ms ease, --haze-strong 400ms ease,
+    --sage 400ms ease, --rose 400ms ease;
 }
 
 * { box-sizing: border-box; }
