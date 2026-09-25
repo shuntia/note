@@ -9,6 +9,9 @@ pub const SOURCES: &[&str] = &["manual", "agent", "import"];
 /// How the block holding a task announces itself when it starts: silently, in
 /// the day's thread, or as a notification.
 pub const NOTIFY: &[&str] = &["none", "chat", "notify"];
+pub const URGENCY: &[&str] = &["low", "normal", "high"];
+/// A live task due inside this many hours reads as pressing.
+pub const PRESSING_HOURS: i64 = 48;
 const DURATION_STEP_MIN: u32 = 5;
 const MAX_DURATION_MIN: u32 = 24 * 60;
 const MAX_PROGRESS: u32 = 100;
@@ -83,6 +86,10 @@ pub struct Task {
     pub notify: String,
     /// Free text, one per task; a step reports the one its parent carries.
     pub category: String,
+    /// low, normal or high; a step reports its parent's.
+    pub urgency: String,
+    /// Due inside `PRESSING_HOURS` or already past due. Derived on read.
+    pub pressing: bool,
     /// The goal this task belongs to, and its title; only a top-level task
     /// carries one.
     pub goal_id: Option<i64>,
@@ -167,6 +174,8 @@ pub struct NewTask {
     pub category: Option<String>,
     #[serde(default)]
     pub goal_id: Option<i64>,
+    #[serde(default)]
+    pub urgency: Option<String>,
 }
 
 /// `Option<Option<T>>` fields separate "absent, leave alone" (`None`) from
@@ -193,6 +202,7 @@ pub struct TaskPatch {
     pub category: Option<String>,
     #[serde(default, deserialize_with = "present")]
     pub goal_id: Option<Option<i64>>,
+    pub urgency: Option<String>,
     #[serde(skip)]
     pub actor: Actor,
 }
@@ -213,6 +223,8 @@ fn row_to_task(r: &rusqlite::Row) -> rusqlite::Result<Task> {
     let actual_min: Option<u32> = r.get(15)?;
     let progress: u32 = r.get(16)?;
     let (expected_min, remaining_min) = projection(progress, actual_min);
+    let due_at: Option<String> = r.get(11)?;
+    let pressing = pressing_at(due_at.as_deref(), jiff::Timestamp::now());
     Ok(Task {
         id: r.get(0)?,
         title: r.get(1)?,
@@ -225,11 +237,13 @@ fn row_to_task(r: &rusqlite::Row) -> rusqlite::Result<Task> {
         parent_id: r.get(8)?,
         is_now: r.get(9)?,
         updated_at: r.get(10)?,
-        due_at: r.get(11)?,
+        due_at,
         external_id: r.get(12)?,
         url: r.get(13)?,
         notify: r.get(14)?,
         category: r.get(17)?,
+        urgency: r.get(20)?,
+        pressing,
         goal_id: r.get(18)?,
         goal_title: r.get(19)?,
         scheduled_at: None,
@@ -243,7 +257,8 @@ fn row_to_task(r: &rusqlite::Row) -> rusqlite::Result<Task> {
 const COLS: &str = "t.id, t.title, t.description, t.state, t.source, t.notes, t.duration_min, \
                     t.duration_source, t.parent_id, t.is_now, t.updated_at, t.due_at, \
                     t.external_id, t.url, t.notify, t.actual_min, t.progress, \
-                    COALESCE(p.category, t.category), t.goal_id, g.title";
+                    COALESCE(p.category, t.category), t.goal_id, g.title, \
+                    COALESCE(p.urgency, t.urgency)";
 
 /// A step reports the category of the task it belongs to, and a task its goal's
 /// title, so one read carries what a row needs to draw itself.
@@ -356,6 +371,18 @@ fn checked_due_placement(parent_id: Option<i64>, due_at: Option<&str>) -> Result
         ));
     }
     Ok(())
+}
+
+fn checked_urgency(raw: &str) -> Result<String, UpdateError> {
+    if !URGENCY.contains(&raw) {
+        return Err(UpdateError::Invalid(format!("urgency must be one of {}", URGENCY.join(", "))));
+    }
+    Ok(raw.to_owned())
+}
+
+pub fn pressing_at(due_at: Option<&str>, now: jiff::Timestamp) -> bool {
+    let Some(due) = due_at.and_then(|d| d.parse::<jiff::Timestamp>().ok()) else { return false };
+    due < now + jiff::Span::new().hours(PRESSING_HOURS)
 }
 
 fn checked_category(raw: &str) -> Result<String, UpdateError> {
@@ -521,6 +548,10 @@ pub fn create(
     let due_at = new.due_at.flatten().as_deref().map(checked_due).transpose()?;
     checked_due_placement(new.parent_id, due_at.as_deref())?;
     let category = new.category.as_deref().map(checked_category).transpose()?;
+    let urgency = new.urgency.as_deref().map(checked_urgency).transpose()?;
+    if new.parent_id.is_some() && urgency.is_some() {
+        return Err(UpdateError::InvalidHierarchy("a step reads its parent's urgency".into()));
+    }
     checked_step_placement(new.parent_id, category.as_deref(), new.goal_id)?;
     if let Some(goal_id) = new.goal_id {
         checked_goal(conn, user_id, goal_id)?;
@@ -557,12 +588,12 @@ pub fn create(
         "INSERT INTO tasks
             (user_id, title, description, notes, source, state, parent_id, duration_min,
              duration_source, is_now, due_at, url, external_id, notify, created_at, updated_at,
-             completed_at, progress, category, goal_id)
+             completed_at, progress, category, goal_id, urgency)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
                  COALESCE(?15, 'notify'), ?14, ?14,
                  CASE WHEN ?6 = 'done' THEN ?14 END,
                  CASE WHEN ?6 = 'done' THEN 100 ELSE ?16 END,
-                 COALESCE(?17, ''), ?18)",
+                 COALESCE(?17, ''), ?18, ?19)",
         rusqlite::params![
             user_id,
             &title,
@@ -582,6 +613,7 @@ pub fn create(
             progress,
             category,
             new.goal_id,
+            urgency.unwrap_or_else(|| "normal".to_string()),
         ],
     )?;
     let id = conn.last_insert_rowid();
@@ -1085,6 +1117,7 @@ pub fn update(
     let notify = patch.notify.as_deref().map(checked_notify).transpose()?;
     let progress = patch.progress.map(checked_progress).transpose()?;
     let category = patch.category.as_deref().map(checked_category).transpose()?;
+    let urgency = patch.urgency.as_deref().map(checked_urgency).transpose()?;
     let Some(before) = get(conn, user_id, task_id)? else { return Ok(None) };
     if let Some(Some(p)) = patch.parent_id {
         if has_children(conn, task_id)? {
@@ -1100,6 +1133,9 @@ pub fn update(
         Some(Some(m)) => (Some(m), patch.actor.as_str().to_string()),
     };
     let parent_id = patch.parent_id.unwrap_or(before.parent_id);
+    if parent_id.is_some() && urgency.is_some() {
+        return Err(UpdateError::InvalidHierarchy("a step reads its parent's urgency".into()));
+    }
     let due_at = due_at.unwrap_or(before.due_at);
     checked_due_placement(parent_id, due_at.as_deref())?;
     checked_step_placement(parent_id, category.as_deref(), patch.goal_id.flatten())?;
@@ -1151,6 +1187,7 @@ pub fn update(
                 ELSE COALESCE(?15, progress) END,
             category = COALESCE(?16, category),
             goal_id = ?17,
+            urgency = COALESCE(?18, urgency),
             updated_at = ?12,
             completed_at = CASE WHEN COALESCE(?3, state) = 'done'
                 THEN COALESCE(completed_at, ?12) END
@@ -1173,6 +1210,7 @@ pub fn update(
             progress,
             category,
             goal_id,
+            urgency,
         ],
     )?;
     if patch.state.is_some() {
@@ -1619,5 +1657,84 @@ mod tests {
         let theirs = task(&conn, bo, "theirs", None);
         assert!(!delete(&conn, uid, theirs).unwrap());
         assert!(get(&conn, bo, theirs).unwrap().is_some());
+    }
+
+    #[test]
+    fn urgency_defaults_to_normal_and_round_trips() {
+        let (conn, uid) = db_with_user();
+        let t = create(
+            &conn,
+            uid,
+            NewTask { title: "read".into(), ..Default::default() },
+            "manual",
+            Actor::User,
+        )
+        .unwrap();
+        assert_eq!(t.urgency, "normal");
+        let t = create(
+            &conn,
+            uid,
+            NewTask { title: "exam".into(), urgency: Some("high".into()), ..Default::default() },
+            "manual",
+            Actor::User,
+        )
+        .unwrap();
+        assert_eq!(t.urgency, "high");
+        let up = update(&conn, uid, t.id, TaskPatch { urgency: Some("low".into()), ..Default::default() })
+            .unwrap()
+            .unwrap();
+        assert_eq!(up.task.urgency, "low");
+        let err = update(&conn, uid, t.id, TaskPatch { urgency: Some("asap".into()), ..Default::default() })
+            .unwrap_err();
+        assert!(matches!(err, UpdateError::Invalid(_)), "{err:?}");
+    }
+
+    #[test]
+    fn a_step_reads_its_parents_urgency_and_cannot_carry_its_own() {
+        let (conn, uid) = db_with_user();
+        let parent = create(
+            &conn,
+            uid,
+            NewTask { title: "essay".into(), urgency: Some("high".into()), ..Default::default() },
+            "manual",
+            Actor::User,
+        )
+        .unwrap();
+        let step = create(
+            &conn,
+            uid,
+            NewTask { title: "outline".into(), parent_id: Some(parent.id), ..Default::default() },
+            "manual",
+            Actor::User,
+        )
+        .unwrap();
+        assert_eq!(step.urgency, "high");
+        let err = create(
+            &conn,
+            uid,
+            NewTask {
+                title: "draft".into(),
+                parent_id: Some(parent.id),
+                urgency: Some("low".into()),
+                ..Default::default()
+            },
+            "manual",
+            Actor::User,
+        )
+        .unwrap_err();
+        assert!(matches!(err, UpdateError::InvalidHierarchy(_)), "{err:?}");
+        let err = update(&conn, uid, step.id, TaskPatch { urgency: Some("low".into()), ..Default::default() })
+            .unwrap_err();
+        assert!(matches!(err, UpdateError::InvalidHierarchy(_)), "{err:?}");
+    }
+
+    #[test]
+    fn pressing_flips_at_forty_eight_hours_and_for_overdue() {
+        let now: jiff::Timestamp = "2026-09-24T12:00:00Z".parse().unwrap();
+        assert!(!pressing_at(None, now));
+        assert!(pressing_at(Some("2026-09-24T11:00:00Z"), now), "overdue is pressing");
+        assert!(pressing_at(Some("2026-09-26T11:59:59Z"), now), "inside 48h");
+        assert!(!pressing_at(Some("2026-09-26T12:00:01Z"), now), "past 48h");
+        assert!(!pressing_at(Some("not a time"), now));
     }
 }
