@@ -519,7 +519,7 @@ export type ShareTask = {
   steps: number
   done_steps: number
   category: string
-  goal_title: string | null
+  goal_title?: string | null
   description?: string
 }
 export type ShareGoal = { id: number; title: string; due_at: string | null; tasks: number; done_tasks: number }

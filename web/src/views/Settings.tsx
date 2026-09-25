@@ -1600,6 +1600,7 @@ function ShareForm({
 }) {
   const [d, setD] = useState<ShareDraft>(initial)
   const pills = [...new Set([...categories, ...d.scope.categories])].sort()
+  const filtered = d.scope.today || d.scope.tasks || d.scope.goals || d.scope.progress
   const scope = (patch: Partial<ShareScope>) => setD((x) => ({ ...x, scope: { ...x.scope, ...patch } }))
   const toggleCategory = (c: string) =>
     scope({
@@ -1631,7 +1632,12 @@ function ShareForm({
         <div className="set-row"><span className="set-row-body"><span className="set-label">How many days ahead</span></span><input type="number" aria-label="How many days ahead" min={1} max={14} value={d.scope.horizon_days} onChange={(e) => scope({ horizon_days: clampedOr(e.target.value, d.scope.horizon_days, 1, 14) })} /></div>
       )}
       <div className="set-row"><span className="set-row-body"><span className="set-label">Open tasks</span></span><Switch label="Share tasks" on={d.scope.tasks} onToggle={() => scope({ tasks: !d.scope.tasks })} /></div>
-      {d.scope.tasks && pills.length > 0 && (
+      {d.scope.tasks && (
+        <div className="set-row"><span className="set-row-body"><span className="set-label">Task descriptions and notes</span></span><Switch label="Share details" on={d.scope.details} onToggle={() => scope({ details: !d.scope.details })} /></div>
+      )}
+      <div className="set-row"><span className="set-row-body"><span className="set-label">Goals</span></span><Switch label="Share goals" on={d.scope.goals} onToggle={() => scope({ goals: !d.scope.goals })} /></div>
+      <div className="set-row"><span className="set-row-body"><span className="set-label">Done this week</span></span><Switch label="Share progress" on={d.scope.progress} onToggle={() => scope({ progress: !d.scope.progress })} /></div>
+      {filtered && pills.length > 0 && (
         <div className="set-share-cats">
           <span className="set-sub">Only these categories, or none for all</span>
           <div className="seg wrap" role="group" aria-label="Categories">
@@ -1641,11 +1647,6 @@ function ShareForm({
           </div>
         </div>
       )}
-      {d.scope.tasks && (
-        <div className="set-row"><span className="set-row-body"><span className="set-label">Task descriptions and notes</span></span><Switch label="Share details" on={d.scope.details} onToggle={() => scope({ details: !d.scope.details })} /></div>
-      )}
-      <div className="set-row"><span className="set-row-body"><span className="set-label">Goals</span></span><Switch label="Share goals" on={d.scope.goals} onToggle={() => scope({ goals: !d.scope.goals })} /></div>
-      <div className="set-row"><span className="set-row-body"><span className="set-label">Done this week</span></span><Switch label="Share progress" on={d.scope.progress} onToggle={() => scope({ progress: !d.scope.progress })} /></div>
       <div className="set-row"><span className="set-row-body"><span className="set-label">They can leave you a note</span></span><Switch label="Allow notes" on={d.scope.notes} onToggle={() => scope({ notes: !d.scope.notes })} /></div>
       <div className="set-row"><span className="set-row-body"><span className="set-label">Messages a day</span></span><input type="number" aria-label="Messages a day" min={1} max={100} value={d.scope.messages_per_day} onChange={(e) => scope({ messages_per_day: clampedOr(e.target.value, d.scope.messages_per_day, 1, 100) })} /></div>
       <textarea aria-label="Brief for Note" placeholder="Tell Note how to talk to them and what to steer clear of" rows={3} maxLength={4096} value={d.brief} onChange={(e) => setD({ ...d, brief: e.target.value })} />
