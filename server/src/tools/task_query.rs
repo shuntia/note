@@ -102,19 +102,44 @@ fn matches_details(ctx: &ToolCtx) -> bool {
     ctx.share.as_ref().is_none_or(|scope| scope.details)
 }
 
+fn hides_goals(ctx: &ToolCtx) -> bool {
+    ctx.share.as_ref().is_some_and(|scope| !scope.goals)
+}
+
 /// The filters, as SQL and its parameters, shared by the page and its count.
 fn list_filters(ctx: &ToolCtx, args: &ListArgs) -> Result<(String, Vec<SqlValue>), ToolError> {
     let mut wheres = vec!["user_id = ?".to_string(), "parent_id IS NULL".to_string()];
     let mut params: Vec<SqlValue> = vec![ctx.user_id.into()];
 
-    match args.state.as_deref() {
-        None => wheres.push("state IN ('open','in_progress')".into()),
-        Some("any") => {}
-        Some(s) if crate::tasks::STATES.contains(&s) => {
+    match (&ctx.share, args.state.as_deref()) {
+        (_, None) => wheres.push("state IN ('open','in_progress')".into()),
+        (Some(_), Some(s @ ("open" | "in_progress"))) => {
             wheres.push("state = ?".into());
             params.push(s.to_string().into());
         }
-        Some(s) => {
+        (Some(scope), Some("done")) if scope.progress => {
+            wheres.push("state = 'done' AND completed_at >= ?".into());
+            params.push(crate::shares::done_since(jiff::Timestamp::now()).to_string().into());
+        }
+        (Some(scope), Some(s)) => {
+            return Err(ToolError::rejected(if scope.progress {
+                format!(
+                    "this link shares live tasks and those done in the last {} days; state must be \
+                     omitted, open, in_progress or done, got {s:?}",
+                    crate::shares::RECENT_DAYS
+                )
+            } else {
+                format!(
+                    "this link shares live tasks alone; state must be omitted, open or in_progress, got {s:?}"
+                )
+            }))
+        }
+        (None, Some("any")) => {}
+        (None, Some(s)) if crate::tasks::STATES.contains(&s) => {
+            wheres.push("state = ?".into());
+            params.push(s.to_string().into());
+        }
+        (None, Some(s)) => {
             return Err(ToolError::rejected(format!(
                 "state must be one of {}, any, got {s:?}",
                 crate::tasks::STATES.join(", ")
@@ -241,6 +266,7 @@ pub fn list(conn: &Connection, ctx: &ToolCtx, args: ListArgs) -> Result<serde_js
         }
     };
     let (wheres, params) = list_filters(ctx, &args)?;
+    let goals_hidden = hides_goals(ctx);
 
     let total: i64 = conn
         .query_row(
@@ -284,7 +310,7 @@ pub fn list(conn: &Connection, ctx: &ToolCtx, args: ListArgs) -> Result<serde_js
                 "expected_min": expected_min,
                 "remaining_min": remaining_min,
                 "category": r.get::<_, String>(12)?,
-                "goal_id": r.get::<_, Option<i64>>(13)?,
+                "goal_id": if goals_hidden { None } else { r.get::<_, Option<i64>>(13)? },
                 "urgency": r.get::<_, String>(14)?,
                 "pressing": pressing,
             }))
@@ -313,6 +339,14 @@ pub fn search(conn: &Connection, ctx: &ToolCtx, args: SearchArgs) -> Result<serd
     }
     let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
     let mut params: Vec<SqlValue> = vec![ctx.user_id.into()];
+    let finished = match &ctx.share {
+        None => "",
+        Some(scope) if scope.progress => {
+            params.push(crate::shares::done_since(jiff::Timestamp::now()).to_string().into());
+            " AND (state != 'done' OR completed_at >= ?)"
+        }
+        Some(_) => " AND state != 'done'",
+    };
     let clause = |column: &str, params: &mut Vec<SqlValue>| {
         params.extend(words.iter().map(|w| SqlValue::from(w.clone())));
         words
@@ -336,7 +370,7 @@ pub fn search(conn: &Connection, ctx: &ToolCtx, args: SearchArgs) -> Result<serd
         .prepare(&format!(
             "SELECT id, title, state, is_now, duration_min, due_at
              FROM tasks
-             WHERE user_id = ? AND parent_id IS NULL AND state != 'dropped' AND ({text_match}){shared}
+             WHERE user_id = ? AND parent_id IS NULL AND state != 'dropped'{finished} AND ({text_match}){shared}
              ORDER BY CASE WHEN {title_match} THEN 0 ELSE 1 END,
                       CASE WHEN state = 'done' THEN 1 ELSE 0 END,
                       created_at DESC, id DESC
@@ -374,8 +408,23 @@ pub fn read(conn: &Connection, ctx: &ToolCtx, args: ReadArgs) -> Result<serde_js
         return Err(ToolError::not_found(format!("no task {}", args.task_id)));
     };
     if let Some(scope) = &ctx.share {
-        if !scope.allows_category(&node.task.category) {
+        let finished_in_view = || {
+            scope.progress
+                && completed_at(conn, args.task_id)
+                    .is_ok_and(|at| at.is_some_and(|at| at >= crate::shares::done_since(jiff::Timestamp::now()).to_string()))
+        };
+        let shared = scope.allows_category(&node.task.category)
+            && match node.task.state.as_str() {
+                "dropped" => false,
+                "done" => finished_in_view(),
+                _ => true,
+            };
+        if !shared {
             return Err(ToolError::not_found(format!("no task {}", args.task_id)));
+        }
+        if !scope.goals {
+            node.task.goal_id = None;
+            node.task.goal_title = None;
         }
     }
     let tz = crate::triggers::timezone(ctx.config_dir, ctx.username);
@@ -402,6 +451,10 @@ pub fn read(conn: &Connection, ctx: &ToolCtx, args: ReadArgs) -> Result<serde_js
         }
     }
     Ok(out)
+}
+
+fn completed_at(conn: &Connection, id: i64) -> rusqlite::Result<Option<String>> {
+    conn.query_row("SELECT completed_at FROM tasks WHERE id = ?1", [id], |r| r.get(0))
 }
 
 fn titles_only(task: &mut serde_json::Value) {
@@ -1127,5 +1180,64 @@ mod tests {
         }
         let out = dispatch(&conn, &plain, SessionKind::Share, "task_list", r#"{"keyword":"lab"}"#).unwrap();
         assert_eq!(out["total"], 1);
+    }
+
+    #[test]
+    fn a_share_reaches_finished_tasks_only_with_progress_and_only_recent_ones() {
+        let (conn, tmp) = env();
+        let recent = task(&conn, &tmp, r#"{"title":"essay draft"}"#);
+        let old = task(&conn, &tmp, r#"{"title":"essay outline"}"#);
+        let dropped = task(&conn, &tmp, r#"{"title":"essay idea"}"#);
+        patch(&conn, &tmp, recent, r#""state":"done""#);
+        patch(&conn, &tmp, old, r#""state":"done""#);
+        patch(&conn, &tmp, dropped, r#""state":"dropped""#);
+        let at = |days: i64| (jiff::Timestamp::now() - jiff::Span::new().hours(24 * days)).to_string();
+        conn.execute("UPDATE tasks SET completed_at = ?1 WHERE id = ?2", (at(1), recent)).unwrap();
+        conn.execute("UPDATE tasks SET completed_at = ?1 WHERE id = ?2", (at(10), old)).unwrap();
+        let read = |sctx: &ToolCtx, id: i64| {
+            dispatch(&conn, sctx, SessionKind::Share, "task_read", &format!(r#"{{"task_id":{id}}}"#))
+        };
+
+        let closed = share_ctx(&tmp, crate::shares::ShareScope { progress: false, ..Default::default() });
+        for state in ["done", "any", "dropped"] {
+            let err = dispatch(&conn, &closed, SessionKind::Share, "task_list", &format!(r#"{{"state":"{state}"}}"#))
+                .unwrap_err();
+            assert_eq!(err.kind, "rejected", "{state}");
+        }
+        assert_eq!(read(&closed, recent).unwrap_err().kind, "not_found");
+        let out = dispatch(&conn, &closed, SessionKind::Share, "task_search", r#"{"query":"essay"}"#).unwrap();
+        assert!(out["tasks"].as_array().unwrap().is_empty(), "{out}");
+
+        let open = share_ctx(&tmp, crate::shares::ShareScope::default());
+        let out = dispatch(&conn, &open, SessionKind::Share, "task_list", r#"{"state":"done"}"#).unwrap();
+        assert_eq!(ids(&out, "tasks"), vec![recent]);
+        for state in ["any", "dropped"] {
+            let err = dispatch(&conn, &open, SessionKind::Share, "task_list", &format!(r#"{{"state":"{state}"}}"#))
+                .unwrap_err();
+            assert_eq!(err.kind, "rejected", "{state}");
+        }
+        assert_eq!(read(&open, recent).unwrap()["id"], recent);
+        assert_eq!(read(&open, old).unwrap_err().kind, "not_found");
+        assert_eq!(read(&open, dropped).unwrap_err().kind, "not_found");
+        let out = dispatch(&conn, &open, SessionKind::Share, "task_search", r#"{"query":"essay"}"#).unwrap();
+        assert_eq!(ids(&out, "tasks"), vec![recent]);
+    }
+
+    #[test]
+    fn a_share_without_goals_leaves_the_goal_off_its_tasks() {
+        let (conn, tmp) = env();
+        let goal = call(&conn, &tmp, "goal_create", r#"{"title":"GOAL-TITLE-SECRET"}"#).unwrap()["goal_id"]
+            .as_i64()
+            .unwrap();
+        let id = task(&conn, &tmp, &format!(r#"{{"title":"essay","goal_id":{goal}}}"#));
+        let hidden = share_ctx(&tmp, crate::shares::ShareScope { goals: false, ..Default::default() });
+        let shown = share_ctx(&tmp, crate::shares::ShareScope::default());
+        for (sctx, visible) in [(&hidden, false), (&shown, true)] {
+            let list = dispatch(&conn, sctx, SessionKind::Share, "task_list", "{}").unwrap();
+            assert_eq!(!list["tasks"][0]["goal_id"].is_null(), visible);
+            let read = dispatch(&conn, sctx, SessionKind::Share, "task_read", &format!(r#"{{"task_id":{id}}}"#)).unwrap();
+            assert_eq!(!read["goal_id"].is_null(), visible);
+            assert_eq!(read.to_string().contains("GOAL-TITLE-SECRET"), visible, "{read}");
+        }
     }
 }

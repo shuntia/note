@@ -191,7 +191,7 @@ fn run_traced(
         system.push_str(&rendered.text);
         if share.scope.notes {
             system.push_str(&format!(
-                "\n\nA message the visitor wants passed on to {display} is filed with share_note; confirm in one sentence."
+                "\n\nA message the visitor wants passed on to {display} is filed with share_note, which ends the turn; the visitor is told it was passed on."
             ));
         }
     } else if !single_call(kind) {

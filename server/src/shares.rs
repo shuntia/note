@@ -460,22 +460,24 @@ pub fn history(
     Ok(out)
 }
 
+/// Returns the new message's id.
 pub fn append(
     conn: &Connection,
     thread_id: i64,
     role: &str,
     content: &str,
     now: jiff::Timestamp,
-) -> rusqlite::Result<()> {
+) -> rusqlite::Result<i64> {
     conn.execute(
         "INSERT INTO share_messages (thread_id, role, content, created_at) VALUES (?1, ?2, ?3, ?4)",
         (thread_id, role, content, now.to_string()),
     )?;
+    let id = conn.last_insert_rowid();
     conn.execute(
         "UPDATE share_threads SET updated_at = ?1 WHERE id = ?2",
         (now.to_string(), thread_id),
     )?;
-    Ok(())
+    Ok(id)
 }
 
 #[derive(Debug, Serialize)]
@@ -527,7 +529,13 @@ pub fn threads(conn: &Connection, share_id: i64) -> rusqlite::Result<Vec<ThreadO
 }
 
 pub const OPENER_MAX_BYTES: usize = 8192;
-const RECENT_DAYS: i64 = 7;
+/// How far back a link with progress on reaches into finished tasks.
+pub const RECENT_DAYS: i64 = 7;
+
+/// The earliest completion a link with progress on still shows.
+pub fn done_since(now: jiff::Timestamp) -> jiff::Timestamp {
+    now - jiff::Span::new().hours(24 * RECENT_DAYS)
+}
 const DONE_RECENT_MAX: usize = 40;
 const GOAL_ROWS_MAX: usize = 30;
 /// Task and done-recently row caps tried in order until the opener fits: the
@@ -557,6 +565,7 @@ struct TaskRow {
     due_at: Option<String>,
     urgency: String,
     pressing: bool,
+    overdue: bool,
     steps: i64,
     done_steps: i64,
     category: String,
@@ -647,10 +656,15 @@ pub fn render(
                 due_at: t.due_at.clone(),
                 urgency: t.urgency.clone(),
                 pressing,
+                overdue: t
+                    .due_at
+                    .as_deref()
+                    .and_then(|d| d.parse::<jiff::Timestamp>().ok())
+                    .is_some_and(|d| d < now),
                 steps: node.children.iter().filter(|c| c.state != "dropped").count() as i64,
                 done_steps: node.children.iter().filter(|c| c.state == "done").count() as i64,
                 category: t.category.clone(),
-                goal_title: t.goal_title.clone(),
+                goal_title: t.goal_title.clone().filter(|_| scope.goals),
                 description: scope.details.then(|| t.description.clone()),
                 rank: crate::tasks::urgency_rank(&t.urgency, pressing),
             });
@@ -671,8 +685,11 @@ pub fn render(
                         let mut v = serde_json::json!({
                             "id": t.id, "title": t.title, "state": t.state, "due_at": t.due_at,
                             "urgency": t.urgency, "pressing": t.pressing, "steps": t.steps,
-                            "done_steps": t.done_steps, "category": t.category, "goal_title": t.goal_title,
+                            "done_steps": t.done_steps, "category": t.category,
                         });
+                        if scope.goals {
+                            v["goal_title"] = serde_json::json!(t.goal_title);
+                        }
                         if let Some(d) = &t.description {
                             v["description"] = serde_json::json!(d);
                         }
@@ -712,7 +729,7 @@ pub fn render(
 
     let mut done_recent: Vec<(String, String)> = Vec::new();
     if scope.progress {
-        let since = (now - jiff::Span::new().hours(24 * RECENT_DAYS)).to_string();
+        let since = done_since(now).to_string();
         let (filter, category_params) = scope.category_clause("category").unwrap_or_default();
         let mut stmt = conn.prepare(&format!(
             "SELECT title, completed_at FROM tasks
@@ -808,7 +825,7 @@ fn task_line(t: &TaskRow, scope: &ShareScope) -> String {
     if t.urgency == "high" {
         s.push_str(" [urgent]");
     } else if t.pressing {
-        s.push_str(" [due soon]");
+        s.push_str(if t.overdue { " [overdue]" } else { " [due soon]" });
     }
     if let Some(d) = &t.due_at {
         s.push_str(&format!(", due {}", day_of(d)));
@@ -927,32 +944,40 @@ pub async fn run_turn(state: &crate::AppState, principal: &crate::auth::SharePri
             share: Some(crate::agent::ShareSession { id: share.id, thread_id, brief: share.brief.clone(), scope: share.scope.clone() }),
         };
         let past = history(&st.db(), thread_id, HISTORY_LIMIT)?;
-        let out = crate::agent::run_session(&deps, owner_id, &owner, crate::tools::SessionKind::Share, now, &past, &message)?;
-        let noted: Vec<String> = out
-            .steps
-            .iter()
-            .filter(|s| s.name == "share_note" && !s.is_error)
-            .map(|s| {
-                serde_json::from_str::<serde_json::Value>(&s.args)
-                    .ok()
-                    .and_then(|v| v["text"].as_str().map(|t| t.trim().to_string()))
-                    .unwrap_or_default()
-            })
-            .collect();
-        let reply = if out.reply.trim().is_empty() {
-            if noted.is_empty() {
+        let question = append(&st.db(), thread_id, "user", &message, now)?;
+        let answered = (|| {
+            let out = crate::agent::run_session(&deps, owner_id, &owner, crate::tools::SessionKind::Share, now, &past, &message)?;
+            let noted: Vec<String> = out
+                .steps
+                .iter()
+                .filter(|s| s.name == "share_note" && !s.is_error)
+                .map(|s| {
+                    serde_json::from_str::<serde_json::Value>(&s.args)
+                        .ok()
+                        .and_then(|v| v["text"].as_str().map(|t| t.trim().to_string()))
+                        .unwrap_or_default()
+                })
+                .collect();
+            let reply = if !noted.is_empty() {
+                let display = crate::config::UserConfig::load(&st.config_dir, &owner)
+                    .map(|c| c.display_name)
+                    .unwrap_or_else(|_| owner.clone());
+                format!("Passed on to {display}.")
+            } else if out.reply.trim().is_empty() {
                 crate::EMPTY_REPLY_FALLBACK.to_string()
             } else {
-                "Passed on.".to_string()
+                out.reply.clone()
+            };
+            append(&st.db(), thread_id, "assistant", &reply, jiff::Timestamp::now())?;
+            Ok::<_, anyhow::Error>((reply, noted))
+        })();
+        let (reply, noted) = match answered {
+            Ok(done) => done,
+            Err(e) => {
+                let _ = st.db().execute("DELETE FROM share_messages WHERE id = ?1", [question]);
+                return Err(e);
             }
-        } else {
-            out.reply.clone()
         };
-        {
-            let conn = st.db();
-            append(&conn, thread_id, "user", &message, now)?;
-            append(&conn, thread_id, "assistant", &reply, now)?;
-        }
         for text in &noted {
             let msg = crate::channels::OutboundMessage {
                 title: format!("Note from {}", share.name),
@@ -1294,5 +1319,46 @@ mod tests {
         assert!(done_lines > 10, "the done list outlasts the task list: {done_lines} rows\n{}", r.text);
         assert!(r.text.contains("# Today and ahead"), "{}", r.text);
         assert!(r.view["tasks"].as_array().unwrap().len() > 80, "the view is not trimmed with the text");
+    }
+
+    #[test]
+    fn threads_come_newest_first() {
+        let conn = conn();
+        let s = create(&conn, 1, new("Mom"), now(), &Limits::default()).unwrap();
+        let older = thread_for(&conn, s.id, "v1", now()).unwrap();
+        let newer = thread_for(&conn, s.id, "v2", now()).unwrap();
+        append(&conn, newer, "user", "first", now()).unwrap();
+        append(&conn, older, "user", "later", now() + jiff::Span::new().minutes(5)).unwrap();
+        let ids: Vec<i64> = threads(&conn, s.id).unwrap().iter().map(|t| t.id).collect();
+        assert_eq!(ids, vec![older, newer], "the thread spoken in last leads");
+    }
+
+    #[test]
+    fn an_overdue_task_reads_overdue_and_a_goal_title_needs_goals() {
+        let conn = conn();
+        let (tmp, lab) = seed_owner(&conn);
+        crate::tasks::create(
+            &conn,
+            1,
+            crate::tasks::NewTask {
+                title: "late essay".into(),
+                category: Some("school".into()),
+                due_at: Some(Some("2026-09-23T00:00:00Z".into())),
+                ..Default::default()
+            },
+            "manual",
+            crate::tasks::Actor::User,
+        )
+        .unwrap();
+        let goal = crate::goals::create(&conn, 1, crate::goals::NewGoal { title: "GOAL-TITLE-SECRET".into(), ..Default::default() }).unwrap();
+        conn.execute("UPDATE tasks SET goal_id = ?1 WHERE id = ?2", [goal.id, lab]).unwrap();
+        let r = render(&conn, tmp.path(), 1, "aki", &ShareScope::default(), now()).unwrap();
+        assert!(r.text.contains("- late essay [overdue]"), "{}", r.text);
+        assert!(r.text.contains("- problem set [due soon]"), "{}", r.text);
+        assert!(r.text.contains(", goal: GOAL-TITLE-SECRET"), "{}", r.text);
+        let hidden = ShareScope { goals: false, ..ShareScope::default() };
+        let r = render(&conn, tmp.path(), 1, "aki", &hidden, now()).unwrap();
+        assert!(!r.text.contains("GOAL-TITLE-SECRET"), "{}", r.text);
+        assert!(!r.view.to_string().contains("GOAL-TITLE-SECRET"), "{}", r.view);
     }
 }
