@@ -22,9 +22,9 @@ pub const MAX_CONCURRENT_LOGINS: usize = 4;
 
 /// Per-username fixed-window counter of *failed* attempts, consulted only after
 /// a verification has already failed, so a correct password is never refused.
-#[derive(Default)]
 pub struct LoginLimiter {
     attempts: Mutex<HashMap<String, (u32, jiff::Timestamp)>>,
+    max: u32,
 }
 
 fn window_elapsed(now: jiff::Timestamp, start: jiff::Timestamp) -> bool {
@@ -45,9 +45,19 @@ fn limiter_key(username: &str) -> &str {
     &username[..end]
 }
 
+impl Default for LoginLimiter {
+    fn default() -> Self {
+        Self::with_limit(MAX_ATTEMPTS)
+    }
+}
+
 impl LoginLimiter {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_limit(max: u32) -> Self {
+        Self { attempts: Mutex::new(HashMap::new()), max }
     }
 
     /// Admits an attempt and counts it in one lock acquisition; a separate
@@ -58,7 +68,7 @@ impl LoginLimiter {
         if window_elapsed(now, entry.1) {
             *entry = (0, now);
         }
-        if entry.0 >= MAX_ATTEMPTS {
+        if entry.0 >= self.max {
             return false;
         }
         entry.0 += 1;
@@ -325,6 +335,39 @@ impl FromRequestParts<AppState> for TaskPrincipal {
     }
 }
 
+/// The visitor on a share route. This is the only extractor that reads a
+/// share token, which arrives as the route's `{token}` segment, so a token can
+/// never authenticate a route that takes `CurrentUser` or `TaskPrincipal`.
+/// A missing, expired or disabled-owner link is a 404: to a visitor there is
+/// simply nothing there. Misses count against the address's share limiter.
+#[derive(Debug, Clone)]
+pub struct SharePrincipal {
+    pub share: crate::shares::Share,
+    pub owner_id: i64,
+    pub owner_username: String,
+}
+
+impl FromRequestParts<AppState> for SharePrincipal {
+    type Rejection = StatusCode;
+
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, StatusCode> {
+        let axum::extract::Path(token) = axum::extract::Path::<String>::from_request_parts(parts, state)
+            .await
+            .map_err(|_| StatusCode::NOT_FOUND)?;
+        let now = jiff::Timestamp::now();
+        let key = crate::net::client_key(&parts.headers);
+        let resolved = {
+            let conn = state.db();
+            crate::shares::resolve(&conn, &token, now).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        };
+        match resolved {
+            Some(r) => Ok(SharePrincipal { owner_id: r.share.user_id, share: r.share, owner_username: r.owner_username }),
+            None if state.share_limiter.try_attempt(&key, now) => Err(StatusCode::NOT_FOUND),
+            None => Err(StatusCode::TOO_MANY_REQUESTS),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -478,5 +521,37 @@ mod tests {
             clear_cookie(true),
             "session=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0; Secure"
         );
+    }
+
+    #[tokio::test]
+    async fn a_share_principal_resolves_a_live_link_and_404s_the_rest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let conn = crate::db::open_memory().unwrap();
+        create_user(&conn, "aki", "pw", false).unwrap();
+        let share = crate::shares::create(
+            &conn,
+            1,
+            crate::shares::NewShare {
+                name: "Mom".into(),
+                brief: String::new(),
+                scope: Default::default(),
+                expires_at: jiff::Timestamp::now() + jiff::Span::new().hours(24),
+            },
+            jiff::Timestamp::now(),
+            &crate::shares::Limits::default(),
+        )
+        .unwrap();
+        let state = crate::AppState::new(conn, tmp.path().to_path_buf(), tmp.path().to_path_buf());
+        let app = axum::Router::new()
+            .route("/api/share/{token}", axum::routing::get(|p: SharePrincipal| async move { p.owner_username }))
+            .with_state(state.clone());
+        use tower::ServiceExt;
+        let ok = app.clone().oneshot(axum::http::Request::get(format!("/api/share/{}", share.token)).body(axum::body::Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(ok.status(), StatusCode::OK);
+        let miss = app.clone().oneshot(axum::http::Request::get("/api/share/share_nope").body(axum::body::Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(miss.status(), StatusCode::NOT_FOUND);
+        state.db().execute("UPDATE shares SET expires_at = '2000-01-01T00:00:00Z'", []).unwrap();
+        let gone = app.oneshot(axum::http::Request::get(format!("/api/share/{}", share.token)).body(axum::body::Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(gone.status(), StatusCode::NOT_FOUND);
     }
 }

@@ -37,6 +37,8 @@ pub struct TaskRef {
     pub state: String,
     pub step: Option<String>,
     pub category: String,
+    pub urgency: String,
+    pub pressing: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -206,7 +208,8 @@ pub fn events_for(conn: &Connection, user_id: i64, date: jiff::civil::Date) -> R
                 e.slide_window_min, e.channel, e.alert,
                 m.id, mp.date, m.wall_time, m.kind, e.span_min,
                 e.origin, e.decided_at, t.id, t.title, t.state, e.prompt, pt.title,
-                COALESCE(pt.category, t.category)
+                COALESCE(pt.category, t.category), COALESCE(pt.urgency, t.urgency),
+                COALESCE(pt.due_at, t.due_at), COALESCE(pt.state, t.state)
          FROM events e JOIN plans p ON p.id = e.plan_id
          LEFT JOIN events m ON m.id = e.moved_to_event_id
          LEFT JOIN plans mp ON mp.id = m.plan_id
@@ -248,10 +251,16 @@ pub fn events_for(conn: &Connection, user_id: i64, date: jiff::civil::Date) -> R
                 let title: String = r.get(17)?;
                 let state: String = r.get(18)?;
                 let category: String = r.get::<_, Option<String>>(21)?.unwrap_or_default();
-                Ok::<_, rusqlite::Error>(match r.get::<_, Option<String>>(20)? {
-                    Some(parent) => TaskRef { id, title: parent, state, step: Some(title), category },
-                    None => TaskRef { id, title, state, step: None, category },
-                })
+                let urgency: String = r.get(22)?;
+                let due_at: Option<String> = r.get(23)?;
+                let top_state: String = r.get(24)?;
+                let pressing =
+                    crate::tasks::pressing_at(&top_state, due_at.as_deref(), jiff::Timestamp::now());
+                let (title, step) = match r.get::<_, Option<String>>(20)? {
+                    Some(parent) => (parent, Some(title)),
+                    None => (title, None),
+                };
+                Ok::<_, rusqlite::Error>(TaskRef { id, title, state, step, category, urgency, pressing })
             }).transpose()?,
         })
     })?;
@@ -863,6 +872,50 @@ mod tests {
         .unwrap();
         conn.execute("INSERT INTO event_tasks (event_id, task_id) VALUES (2, ?1)", [task.id]).unwrap();
         (conn, uid, tmp, date)
+    }
+
+    #[test]
+    fn a_block_for_a_step_carries_its_parents_urgency_and_pressing() {
+        let (conn, uid, _tmp, date) = day_with_a_block();
+        let due = (jiff::Timestamp::now() + jiff::Span::new().hours(24)).to_string();
+        let parent = crate::tasks::create(
+            &conn,
+            uid,
+            crate::tasks::NewTask {
+                title: "exam".into(),
+                urgency: Some("high".into()),
+                due_at: Some(Some(due)),
+                ..Default::default()
+            },
+            "manual",
+            crate::tasks::Actor::User,
+        )
+        .unwrap();
+        let step = crate::tasks::create(
+            &conn,
+            uid,
+            crate::tasks::NewTask { title: "revise".into(), parent_id: Some(parent.id), ..Default::default() },
+            "manual",
+            crate::tasks::Actor::User,
+        )
+        .unwrap();
+        conn.execute("UPDATE event_tasks SET task_id = ?1 WHERE event_id = 2", [step.id]).unwrap();
+        let task_ref = |conn: &Connection| {
+            let evs = events_for(conn, uid, date).unwrap();
+            let block = evs.into_iter().find(|e| e.id == 2).unwrap();
+            let r = block.task.unwrap();
+            (r.urgency, r.pressing)
+        };
+        assert_eq!(task_ref(&conn), ("high".to_string(), true));
+        crate::tasks::update(
+            &conn,
+            uid,
+            parent.id,
+            crate::tasks::TaskPatch { state: Some("done".into()), ..Default::default() },
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(task_ref(&conn), ("high".to_string(), false), "a done parent is not pressing");
     }
 
     #[test]

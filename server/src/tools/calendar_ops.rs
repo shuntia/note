@@ -132,6 +132,18 @@ pub fn list(
     if !(1..=MAX_DAYS_AHEAD).contains(&span) {
         return Err(ToolError::rejected(format!("days must be in 1..={MAX_DAYS_AHEAD}")));
     }
+    if let Some(scope) = &ctx.share {
+        let (first, shared_end) = scope.horizon(today(ctx));
+        let internal = |e: jiff::Error| ToolError::internal(e.to_string());
+        let asked_end = start.checked_add(jiff::Span::new().days(i64::from(span))).map_err(internal)?;
+        if start < first || asked_end > shared_end {
+            return Err(ToolError::rejected(format!(
+                "this link shares {} to {}",
+                first,
+                shared_end.yesterday().map_err(internal)?
+            )));
+        }
+    }
     let mut days = Vec::with_capacity(span as usize);
     let mut date = start;
     for _ in 0..span {
@@ -322,6 +334,8 @@ mod tests {
             config_dir: tmp.path(), data_dir: tmp.path(), user_id: 1, username: "aki",
             vectors: PreparedVectors::default(), task_scope: None, inbox_source: None,
             memory_source: None,
+            share: None,
+            share_thread: None,
         }
     }
 
@@ -390,6 +404,18 @@ mod tests {
         let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "calendar_list",
             r#"{"date":"18/09/2026"}"#).unwrap_err();
         assert_eq!(e.kind, "rejected");
+    }
+
+    #[test]
+    fn a_share_lists_only_inside_its_horizon() {
+        let (conn, tmp) = env();
+        let sctx = ToolCtx { share: Some(crate::shares::ShareScope::default()), ..ctx(&tmp) };
+        let today = jiff::Timestamp::now().to_zoned(jiff::tz::TimeZone::UTC).date();
+        let list = |args: String| dispatch(&conn, &sctx, SessionKind::Share, "calendar_list", &args);
+        assert_eq!(list(format!(r#"{{"date":"{today}","days":3}}"#)).unwrap()["days"].as_array().unwrap().len(), 3);
+        let yesterday = today.yesterday().unwrap();
+        assert_eq!(list(format!(r#"{{"date":"{yesterday}"}}"#)).unwrap_err().kind, "rejected");
+        assert_eq!(list(format!(r#"{{"date":"{today}","days":4}}"#)).unwrap_err().kind, "rejected");
     }
 
     #[test]

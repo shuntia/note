@@ -57,6 +57,13 @@ async fn serves_the_web_build_with_spa_fallback() {
     let (status, body) = get(&app, "/healthz").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, "ok");
+    let res = app.clone().oneshot(Request::get("/s/share_abc").body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.headers()["cache-control"], "no-store");
+    assert_eq!(res.headers()["referrer-policy"], "no-referrer");
+    assert_eq!(res.headers()["x-robots-tag"], "noindex");
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    assert!(String::from_utf8_lossy(&body).contains("<title>Note</title>"));
 }
 
 #[tokio::test]

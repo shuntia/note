@@ -514,6 +514,40 @@ const MIGRATIONS: &[&str] = &[
         CHECK (goal_id IS NULL OR parent_id IS NULL);
     CREATE INDEX idx_tasks_goal ON tasks(goal_id);
     ",
+    // v39
+    "
+    ALTER TABLE tasks ADD COLUMN urgency TEXT NOT NULL DEFAULT 'normal'
+        CHECK (urgency IN ('low','normal','high'));
+    CREATE TABLE shares (
+        id INTEGER PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id),
+        name TEXT NOT NULL,
+        brief TEXT NOT NULL DEFAULT '',
+        token TEXT NOT NULL UNIQUE,
+        scope TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        last_used_at TEXT
+    );
+    CREATE INDEX idx_shares_user ON shares(user_id, id);
+    CREATE TABLE share_threads (
+        id INTEGER PRIMARY KEY,
+        share_id INTEGER NOT NULL REFERENCES shares(id) ON DELETE CASCADE,
+        visitor_key TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(share_id, visitor_key)
+    );
+    CREATE TABLE share_messages (
+        id INTEGER PRIMARY KEY,
+        thread_id INTEGER NOT NULL REFERENCES share_threads(id) ON DELETE CASCADE,
+        role TEXT NOT NULL CHECK (role IN ('user','assistant','note')),
+        content TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    );
+    CREATE INDEX idx_share_messages_thread ON share_messages(thread_id, id);
+    ",
 ];
 
 pub fn open(path: &Path) -> Result<Connection> {

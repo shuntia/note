@@ -67,7 +67,11 @@ pub struct ListArgs {
     /// True for tasks whose due date has passed, false for everything else.
     #[serde(default)]
     pub overdue: Option<bool>,
-    /// added (default), newest first, or due, soonest first with undated last.
+    /// Only tasks at this urgency: low, normal or high.
+    #[serde(default)]
+    pub urgency: Option<String>,
+    /// added (default), newest first; due, soonest first with undated last; or
+    /// urgency (high, then pressing, then normal, then low; soonest due inside each).
     #[serde(default)]
     pub sort: Option<String>,
     /// How many tasks to return, 1 to 200. Default 50.
@@ -75,19 +79,67 @@ pub struct ListArgs {
     pub limit: Option<u32>,
 }
 
+/// The category clause a share scope imposes on a task read; a category the
+/// caller names itself must be one the link shares, and then needs no clause.
+fn share_categories(
+    ctx: &ToolCtx,
+    requested: Option<&str>,
+) -> Result<Option<(String, Vec<SqlValue>)>, ToolError> {
+    let Some(scope) = &ctx.share else { return Ok(None) };
+    match requested {
+        Some(c) if !scope.allows_category(c.trim()) => Err(ToolError::rejected(format!(
+            "category must be one of {}",
+            scope.categories.join(", ")
+        ))),
+        Some(_) => Ok(None),
+        None => Ok(scope.category_clause("category")),
+    }
+}
+
+/// Whether a text match may reach descriptions and notes, which a link
+/// without details keeps back.
+fn matches_details(ctx: &ToolCtx) -> bool {
+    ctx.share.as_ref().is_none_or(|scope| scope.details)
+}
+
+fn hides_goals(ctx: &ToolCtx) -> bool {
+    ctx.share.as_ref().is_some_and(|scope| !scope.goals)
+}
+
 /// The filters, as SQL and its parameters, shared by the page and its count.
 fn list_filters(ctx: &ToolCtx, args: &ListArgs) -> Result<(String, Vec<SqlValue>), ToolError> {
     let mut wheres = vec!["user_id = ?".to_string(), "parent_id IS NULL".to_string()];
     let mut params: Vec<SqlValue> = vec![ctx.user_id.into()];
 
-    match args.state.as_deref() {
-        None => wheres.push("state IN ('open','in_progress')".into()),
-        Some("any") => {}
-        Some(s) if crate::tasks::STATES.contains(&s) => {
+    match (&ctx.share, args.state.as_deref()) {
+        (_, None) => wheres.push("state IN ('open','in_progress')".into()),
+        (Some(_), Some(s @ ("open" | "in_progress"))) => {
             wheres.push("state = ?".into());
             params.push(s.to_string().into());
         }
-        Some(s) => {
+        (Some(scope), Some("done")) if scope.progress => {
+            wheres.push("state = 'done' AND completed_at >= ?".into());
+            params.push(crate::shares::done_since(jiff::Timestamp::now()).to_string().into());
+        }
+        (Some(scope), Some(s)) => {
+            return Err(ToolError::rejected(if scope.progress {
+                format!(
+                    "this link shares live tasks and those done in the last {} days; state must be \
+                     omitted, open, in_progress or done, got {s:?}",
+                    crate::shares::RECENT_DAYS
+                )
+            } else {
+                format!(
+                    "this link shares live tasks alone; state must be omitted, open or in_progress, got {s:?}"
+                )
+            }))
+        }
+        (None, Some("any")) => {}
+        (None, Some(s)) if crate::tasks::STATES.contains(&s) => {
+            wheres.push("state = ?".into());
+            params.push(s.to_string().into());
+        }
+        (None, Some(s)) => {
             return Err(ToolError::rejected(format!(
                 "state must be one of {}, any, got {s:?}",
                 crate::tasks::STATES.join(", ")
@@ -101,12 +153,17 @@ fn list_filters(ctx: &ToolCtx, args: &ListArgs) -> Result<(String, Vec<SqlValue>
                 "keyword must be 1 to {MAX_KEYWORD_CHARS} characters"
             )));
         }
-        wheres.push(
-            "(instr(lower(title), ?) > 0 OR instr(lower(description), ?) > 0 \
-              OR instr(lower(notes), ?) > 0)"
-                .into(),
-        );
-        params.extend([needle.clone().into(), needle.clone().into(), needle.into()]);
+        if matches_details(ctx) {
+            wheres.push(
+                "(instr(lower(title), ?) > 0 OR instr(lower(description), ?) > 0 \
+                  OR instr(lower(notes), ?) > 0)"
+                    .into(),
+            );
+            params.extend([needle.clone().into(), needle.clone().into(), needle.into()]);
+        } else {
+            wheres.push("instr(lower(title), ?) > 0".into());
+            params.push(needle.into());
+        }
     }
     if let Some(category) = &args.category {
         wheres.push("category = ?".into());
@@ -151,7 +208,22 @@ fn list_filters(ctx: &ToolCtx, args: &ListArgs) -> Result<(String, Vec<SqlValue>
         );
         params.push(jiff::Timestamp::now().to_string().into());
     }
-    Ok((wheres.join(" AND "), params))
+    if let Some(u) = &args.urgency {
+        if !crate::tasks::URGENCY.contains(&u.as_str()) {
+            return Err(ToolError::rejected(format!(
+                "urgency must be one of {}",
+                crate::tasks::URGENCY.join(", ")
+            )));
+        }
+        wheres.push("urgency = ?".into());
+        params.push(u.clone().into());
+    }
+    let mut sql = wheres.join(" AND ");
+    if let Some((clause, shared)) = share_categories(ctx, args.category.as_deref())? {
+        sql.push_str(&clause);
+        params.extend(shared);
+    }
+    Ok((sql, params))
 }
 
 /// The instant a local day begins, which is what a due-date filter compares
@@ -174,14 +246,27 @@ pub fn list(conn: &Connection, ctx: &ToolCtx, args: ListArgs) -> Result<serde_js
     if !(1..=MAX_LIMIT).contains(&limit) {
         return Err(ToolError::rejected(format!("limit must be in 1..={MAX_LIMIT}")));
     }
+    let now = jiff::Timestamp::now();
+    let mut pressing_cutoff = None;
     let order = match args.sort.as_deref() {
         None | Some("added") => "created_at DESC, id DESC",
         Some("due") => "due_at IS NULL, due_at ASC, created_at DESC, id DESC",
+        Some("urgency") => {
+            pressing_cutoff =
+                Some((now + jiff::Span::new().hours(crate::tasks::PRESSING_HOURS)).to_string());
+            "CASE WHEN urgency = 'high' THEN 0
+                  WHEN state IN ('open','in_progress') AND due_at IS NOT NULL AND due_at < ? THEN 1
+                  WHEN urgency = 'normal' THEN 2 ELSE 3 END,
+             due_at IS NULL, due_at ASC, created_at DESC, id DESC"
+        }
         Some(other) => {
-            return Err(ToolError::rejected(format!("sort must be added or due, got {other:?}")))
+            return Err(ToolError::rejected(format!(
+                "sort must be added, due or urgency, got {other:?}"
+            )))
         }
     };
     let (wheres, params) = list_filters(ctx, &args)?;
+    let goals_hidden = hides_goals(ctx);
 
     let total: i64 = conn
         .query_row(
@@ -190,37 +275,44 @@ pub fn list(conn: &Connection, ctx: &ToolCtx, args: ListArgs) -> Result<serde_js
             |r| r.get(0),
         )
         .map_err(internal)?;
+    let mut page_params = params;
+    page_params.extend(pressing_cutoff.map(SqlValue::from));
     let mut stmt = conn
         .prepare(&format!(
             "SELECT id, title, state, is_now, duration_min, created_at, updated_at, due_at,
                     (SELECT COUNT(*) FROM tasks s WHERE s.parent_id = tasks.id AND s.state != 'dropped'),
                     (SELECT COUNT(*) FROM tasks s WHERE s.parent_id = tasks.id AND s.state = 'done'),
-                    progress, actual_min, category, goal_id
+                    progress, actual_min, category, goal_id, urgency
              FROM tasks WHERE {wheres}
              ORDER BY {order} LIMIT {limit}"
         ))
         .map_err(internal)?;
     let tasks = stmt
-        .query_map(rusqlite::params_from_iter(params.iter()), |r| {
+        .query_map(rusqlite::params_from_iter(page_params.iter()), |r| {
             let progress: u32 = r.get(10)?;
             let (expected_min, remaining_min) =
                 crate::tasks::projection(progress, r.get(11)?);
+            let state: String = r.get(2)?;
+            let due_at: Option<String> = r.get(7)?;
+            let pressing = crate::tasks::pressing_at(&state, due_at.as_deref(), now);
             Ok(serde_json::json!({
                 "id": r.get::<_, i64>(0)?,
                 "title": r.get::<_, String>(1)?,
-                "state": r.get::<_, String>(2)?,
+                "state": state,
                 "is_now": r.get::<_, bool>(3)?,
                 "duration_min": r.get::<_, Option<i64>>(4)?,
                 "created_at": r.get::<_, String>(5)?,
                 "updated_at": r.get::<_, String>(6)?,
-                "due_at": r.get::<_, Option<String>>(7)?,
+                "due_at": due_at,
                 "steps": r.get::<_, i64>(8)?,
                 "done_steps": r.get::<_, i64>(9)?,
                 "progress": progress,
                 "expected_min": expected_min,
                 "remaining_min": remaining_min,
                 "category": r.get::<_, String>(12)?,
-                "goal_id": r.get::<_, Option<i64>>(13)?,
+                "goal_id": if goals_hidden { None } else { r.get::<_, Option<i64>>(13)? },
+                "urgency": r.get::<_, String>(14)?,
+                "pressing": pressing,
             }))
         })
         .and_then(|rows| rows.collect::<rusqlite::Result<Vec<_>>>())
@@ -247,6 +339,14 @@ pub fn search(conn: &Connection, ctx: &ToolCtx, args: SearchArgs) -> Result<serd
     }
     let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
     let mut params: Vec<SqlValue> = vec![ctx.user_id.into()];
+    let finished = match &ctx.share {
+        None => "",
+        Some(scope) if scope.progress => {
+            params.push(crate::shares::done_since(jiff::Timestamp::now()).to_string().into());
+            " AND (state != 'done' OR completed_at >= ?)"
+        }
+        Some(_) => " AND state != 'done'",
+    };
     let clause = |column: &str, params: &mut Vec<SqlValue>| {
         params.extend(words.iter().map(|w| SqlValue::from(w.clone())));
         words
@@ -255,16 +355,22 @@ pub fn search(conn: &Connection, ctx: &ToolCtx, args: SearchArgs) -> Result<serd
             .collect::<Vec<_>>()
             .join(" AND ")
     };
-    let text = "lower(title) || ' ' || lower(description) || ' ' || lower(notes)";
+    let text = if matches_details(ctx) {
+        "lower(title) || ' ' || lower(description) || ' ' || lower(notes)"
+    } else {
+        "lower(title)"
+    };
     // the parameters are pushed in the order the statement below binds them
     let text_match = clause(text, &mut params);
+    let (shared, shared_params) = share_categories(ctx, None)?.unwrap_or_default();
+    params.extend(shared_params);
     let title_match = clause("lower(title)", &mut params);
 
     let mut stmt = conn
         .prepare(&format!(
             "SELECT id, title, state, is_now, duration_min, due_at
              FROM tasks
-             WHERE user_id = ? AND parent_id IS NULL AND state != 'dropped' AND ({text_match})
+             WHERE user_id = ? AND parent_id IS NULL AND state != 'dropped'{finished} AND ({text_match}){shared}
              ORDER BY CASE WHEN {title_match} THEN 0 ELSE 1 END,
                       CASE WHEN state = 'done' THEN 1 ELSE 0 END,
                       created_at DESC, id DESC
@@ -301,6 +407,28 @@ pub fn read(conn: &Connection, ctx: &ToolCtx, args: ReadArgs) -> Result<serde_js
     else {
         return Err(ToolError::not_found(format!("no task {}", args.task_id)));
     };
+    if let Some(scope) = &ctx.share {
+        let finished_in_view = || {
+            scope.progress
+                && completed_at(conn, args.task_id)
+                    .is_ok_and(|at| at.is_some_and(|at| at >= crate::shares::done_since(jiff::Timestamp::now()).to_string()))
+        };
+        let shared = scope.allows_category(&node.task.category)
+            && match node.task.state.as_str() {
+                "dropped" => false,
+                "done" => finished_in_view(),
+                _ => true,
+            };
+        if !shared {
+            return Err(ToolError::not_found(format!("no task {}", args.task_id)));
+        }
+        if !scope.goals {
+            for task in std::iter::once(&mut node.task).chain(node.children.iter_mut()) {
+                task.goal_id = None;
+                task.goal_title = None;
+            }
+        }
+    }
     let tz = crate::triggers::timezone(ctx.config_dir, ctx.username);
     crate::tasks::stamp_schedule(conn, ctx.user_id, &tz, std::iter::once(&mut node.task))
         .map_err(internal)?;
@@ -318,7 +446,24 @@ pub fn read(conn: &Connection, ctx: &ToolCtx, args: ReadArgs) -> Result<serde_js
             stamp(child, &added);
         }
     }
+    if ctx.share.as_ref().is_some_and(|scope| !scope.details) {
+        titles_only(&mut out);
+        if let Some(children) = out["children"].as_array_mut() {
+            children.iter_mut().for_each(titles_only);
+        }
+    }
     Ok(out)
+}
+
+fn completed_at(conn: &Connection, id: i64) -> rusqlite::Result<Option<String>> {
+    conn.query_row("SELECT completed_at FROM tasks WHERE id = ?1", [id], |r| r.get(0))
+}
+
+fn titles_only(task: &mut serde_json::Value) {
+    for field in ["description", "notes", "url"] {
+        task[field] = serde_json::json!("");
+    }
+    task["external_id"] = serde_json::Value::Null;
 }
 
 fn stamp(task: &mut serde_json::Value, added: &std::collections::HashMap<i64, String>) {
@@ -343,6 +488,9 @@ pub struct BulkUpdateArgs {
     /// Hangs them all from this goal; null detaches them.
     #[serde(default, deserialize_with = "crate::tasks::present")]
     pub goal_id: Option<Option<i64>>,
+    /// Sets them all to this urgency: low, normal or high.
+    #[serde(default)]
+    pub urgency: Option<String>,
     /// True deletes them all, with their steps and their place on the day's plan.
     #[serde(default)]
     pub delete: Option<bool>,
@@ -368,6 +516,7 @@ pub fn bulk_update(
         args.is_now.is_some(),
         args.category.is_some(),
         args.goal_id.is_some(),
+        args.urgency.is_some(),
         args.delete.is_some(),
     ]
     .iter()
@@ -375,7 +524,7 @@ pub fn bulk_update(
     .count();
     if changes != 1 {
         return Err(ToolError::rejected(
-            "set exactly one of state, is_now, category, goal_id or delete",
+            "set exactly one of state, is_now, category, goal_id, urgency or delete",
         ));
     }
     if args.delete == Some(false) {
@@ -402,6 +551,7 @@ pub fn bulk_update(
             is_now: args.is_now,
             category: args.category.clone(),
             goal_id: args.goal_id,
+            urgency: args.urgency.clone(),
             actor: crate::tasks::Actor::Agent,
             ..Default::default()
         };
@@ -458,6 +608,8 @@ mod tests {
             task_scope: scope,
             inbox_source: None,
             memory_source: None,
+            share: None,
+            share_thread: None,
         }
     }
 
@@ -499,6 +651,56 @@ mod tests {
         )
         .unwrap();
         out["step_ids"].as_array().unwrap().iter().map(|v| v.as_i64().unwrap()).collect()
+    }
+
+    #[test]
+    fn task_list_filters_and_sorts_by_urgency() {
+        let (conn, tmp) = env();
+        let mk = |title: &str, urgency: &str, due: Option<&str>| {
+            let due = due.map(|d| format!(r#","due_at":"{d}""#)).unwrap_or_default();
+            task(&conn, &tmp, &format!(r#"{{"title":"{title}","urgency":"{urgency}"{due}}}"#));
+        };
+        mk("low one", "low", None);
+        mk("plain", "normal", None);
+        mk("soon", "normal", Some("2026-01-02T00:00:00Z"));
+        mk("top", "high", None);
+        let out = call(&conn, &tmp, "task_list", r#"{"sort":"urgency"}"#).unwrap();
+        let titles: Vec<&str> =
+            out["tasks"].as_array().unwrap().iter().map(|t| t["title"].as_str().unwrap()).collect();
+        assert_eq!(titles, vec!["top", "soon", "plain", "low one"]);
+        assert_eq!(out["tasks"][0]["urgency"], "high");
+        assert_eq!(out["tasks"][1]["pressing"], true);
+        assert_eq!(out["tasks"][2]["pressing"], false);
+        let out = call(&conn, &tmp, "task_list", r#"{"urgency":"low"}"#).unwrap();
+        assert_eq!(out["total"], 1);
+        let err = call(&conn, &tmp, "task_list", r#"{"urgency":"asap"}"#).unwrap_err();
+        assert_eq!(err.kind, "rejected");
+    }
+
+    #[test]
+    fn a_finished_task_with_a_past_due_date_is_not_ranked_pressing() {
+        let (conn, tmp) = env();
+        let done = task(&conn, &tmp, r#"{"title":"filed","due_at":"2026-01-02T00:00:00Z"}"#);
+        patch(&conn, &tmp, done, r#""state":"done""#);
+        let in_an_hour = jiff::Timestamp::now() + jiff::Span::new().hours(1);
+        task(&conn, &tmp, &format!(r#"{{"title":"soon","due_at":"{in_an_hour}"}}"#));
+        let out = call(&conn, &tmp, "task_list", r#"{"state":"any","sort":"urgency"}"#).unwrap();
+        let titles: Vec<&str> =
+            out["tasks"].as_array().unwrap().iter().map(|t| t["title"].as_str().unwrap()).collect();
+        assert_eq!(titles, vec!["soon", "filed"]);
+        assert_eq!(out["tasks"][0]["pressing"], true);
+        assert_eq!(out["tasks"][1]["pressing"], false);
+    }
+
+    #[test]
+    fn task_bulk_update_sets_urgency_on_every_task() {
+        let (conn, tmp) = env();
+        let a = task(&conn, &tmp, r#"{"title":"a"}"#);
+        let b = task(&conn, &tmp, r#"{"title":"b"}"#);
+        call(&conn, &tmp, "task_bulk_update", &format!(r#"{{"task_ids":[{a},{b}],"urgency":"high"}}"#))
+            .unwrap();
+        let out = call(&conn, &tmp, "task_list", r#"{"urgency":"high"}"#).unwrap();
+        assert_eq!(out["total"], 2);
     }
 
     #[test]
@@ -916,5 +1118,128 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(e.kind, "forbidden");
+    }
+
+    fn share_ctx(tmp: &tempfile::TempDir, scope: crate::shares::ShareScope) -> ToolCtx<'_> {
+        ToolCtx { share: Some(scope), ..ctx(tmp, None) }
+    }
+
+    fn out_id(v: &Value) -> i64 {
+        v["tasks"][0]["id"].as_i64().unwrap()
+    }
+
+    fn school_only() -> crate::shares::ShareScope {
+        crate::shares::ShareScope { categories: vec!["school".into()], ..Default::default() }
+    }
+
+    #[test]
+    fn a_share_scope_confines_the_task_tools_to_its_categories() {
+        let (conn, tmp) = env();
+        call(&conn, &tmp, "task_create", r#"{"title":"lab report","category":"school","description":"secret grade talk"}"#).unwrap();
+        call(&conn, &tmp, "task_create", r#"{"title":"therapy forms","category":"health"}"#).unwrap();
+        let sctx = share_ctx(&tmp, school_only());
+        let out = dispatch(&conn, &sctx, SessionKind::Share, "task_list", "{}").unwrap();
+        assert_eq!(out["total"], 1);
+        assert_eq!(out["tasks"][0]["title"], "lab report");
+        let err = dispatch(&conn, &sctx, SessionKind::Share, "task_list", r#"{"category":"health"}"#).unwrap_err();
+        assert_eq!(err.kind, "rejected");
+        let out = dispatch(&conn, &sctx, SessionKind::Share, "task_search", r#"{"query":"forms"}"#).unwrap();
+        assert_eq!(out["tasks"].as_array().unwrap().len(), 0);
+        let out = dispatch(&conn, &sctx, SessionKind::Share, "task_search", r#"{"query":"lab"}"#).unwrap();
+        assert_eq!(out["tasks"].as_array().unwrap().len(), 1);
+        assert_eq!(out["tasks"][0]["title"], "lab report");
+        let id = out_id(&call(&conn, &tmp, "task_list", r#"{"category":"health"}"#).unwrap());
+        let err = dispatch(&conn, &sctx, SessionKind::Share, "task_read", &format!(r#"{{"task_id":{id}}}"#)).unwrap_err();
+        assert_eq!(err.kind, "not_found");
+        let school = out_id(&call(&conn, &tmp, "task_list", r#"{"category":"school"}"#).unwrap());
+        conn.execute(
+            "UPDATE tasks SET url = 'https://lms.example/lab', external_id = 'lms-7' WHERE id = ?1",
+            [school],
+        )
+        .unwrap();
+        let read = dispatch(&conn, &sctx, SessionKind::Share, "task_read", &format!(r#"{{"task_id":{school}}}"#)).unwrap();
+        assert_eq!(read["description"], "", "details are off");
+        assert_eq!(read["url"], "");
+        assert!(read["external_id"].is_null());
+        let detailed = share_ctx(&tmp, crate::shares::ShareScope { details: true, ..school_only() });
+        let read = dispatch(&conn, &detailed, SessionKind::Share, "task_read", &format!(r#"{{"task_id":{school}}}"#)).unwrap();
+        assert_eq!(read["description"], "secret grade talk");
+        assert_eq!(read["url"], "https://lms.example/lab");
+        assert_eq!(read["external_id"], "lms-7");
+    }
+
+    #[test]
+    fn without_details_a_share_matches_titles_alone() {
+        let (conn, tmp) = env();
+        call(&conn, &tmp, "task_create", r#"{"title":"lab report","description":"secret grade talk"}"#).unwrap();
+        let plain = share_ctx(&tmp, crate::shares::ShareScope::default());
+        let detailed = share_ctx(&tmp, crate::shares::ShareScope { details: true, ..Default::default() });
+        for (sctx, hits) in [(&plain, 0), (&detailed, 1)] {
+            let out = dispatch(&conn, sctx, SessionKind::Share, "task_list", r#"{"keyword":"grade"}"#).unwrap();
+            assert_eq!(out["total"], hits);
+            let out = dispatch(&conn, sctx, SessionKind::Share, "task_search", r#"{"query":"grade"}"#).unwrap();
+            assert_eq!(out["tasks"].as_array().unwrap().len(), hits);
+        }
+        let out = dispatch(&conn, &plain, SessionKind::Share, "task_list", r#"{"keyword":"lab"}"#).unwrap();
+        assert_eq!(out["total"], 1);
+    }
+
+    #[test]
+    fn a_share_reaches_finished_tasks_only_with_progress_and_only_recent_ones() {
+        let (conn, tmp) = env();
+        let recent = task(&conn, &tmp, r#"{"title":"essay draft"}"#);
+        let old = task(&conn, &tmp, r#"{"title":"essay outline"}"#);
+        let dropped = task(&conn, &tmp, r#"{"title":"essay idea"}"#);
+        patch(&conn, &tmp, recent, r#""state":"done""#);
+        patch(&conn, &tmp, old, r#""state":"done""#);
+        patch(&conn, &tmp, dropped, r#""state":"dropped""#);
+        let at = |days: i64| (jiff::Timestamp::now() - jiff::Span::new().hours(24 * days)).to_string();
+        conn.execute("UPDATE tasks SET completed_at = ?1 WHERE id = ?2", (at(1), recent)).unwrap();
+        conn.execute("UPDATE tasks SET completed_at = ?1 WHERE id = ?2", (at(10), old)).unwrap();
+        let read = |sctx: &ToolCtx, id: i64| {
+            dispatch(&conn, sctx, SessionKind::Share, "task_read", &format!(r#"{{"task_id":{id}}}"#))
+        };
+
+        let closed = share_ctx(&tmp, crate::shares::ShareScope { progress: false, ..Default::default() });
+        for state in ["done", "any", "dropped"] {
+            let err = dispatch(&conn, &closed, SessionKind::Share, "task_list", &format!(r#"{{"state":"{state}"}}"#))
+                .unwrap_err();
+            assert_eq!(err.kind, "rejected", "{state}");
+        }
+        assert_eq!(read(&closed, recent).unwrap_err().kind, "not_found");
+        let out = dispatch(&conn, &closed, SessionKind::Share, "task_search", r#"{"query":"essay"}"#).unwrap();
+        assert!(out["tasks"].as_array().unwrap().is_empty(), "{out}");
+
+        let open = share_ctx(&tmp, crate::shares::ShareScope::default());
+        let out = dispatch(&conn, &open, SessionKind::Share, "task_list", r#"{"state":"done"}"#).unwrap();
+        assert_eq!(ids(&out, "tasks"), vec![recent]);
+        for state in ["any", "dropped"] {
+            let err = dispatch(&conn, &open, SessionKind::Share, "task_list", &format!(r#"{{"state":"{state}"}}"#))
+                .unwrap_err();
+            assert_eq!(err.kind, "rejected", "{state}");
+        }
+        assert_eq!(read(&open, recent).unwrap()["id"], recent);
+        assert_eq!(read(&open, old).unwrap_err().kind, "not_found");
+        assert_eq!(read(&open, dropped).unwrap_err().kind, "not_found");
+        let out = dispatch(&conn, &open, SessionKind::Share, "task_search", r#"{"query":"essay"}"#).unwrap();
+        assert_eq!(ids(&out, "tasks"), vec![recent]);
+    }
+
+    #[test]
+    fn a_share_without_goals_leaves_the_goal_off_its_tasks() {
+        let (conn, tmp) = env();
+        let goal = call(&conn, &tmp, "goal_create", r#"{"title":"GOAL-TITLE-SECRET"}"#).unwrap()["goal_id"]
+            .as_i64()
+            .unwrap();
+        let id = task(&conn, &tmp, &format!(r#"{{"title":"essay","goal_id":{goal}}}"#));
+        let hidden = share_ctx(&tmp, crate::shares::ShareScope { goals: false, ..Default::default() });
+        let shown = share_ctx(&tmp, crate::shares::ShareScope::default());
+        for (sctx, visible) in [(&hidden, false), (&shown, true)] {
+            let list = dispatch(&conn, sctx, SessionKind::Share, "task_list", "{}").unwrap();
+            assert_eq!(!list["tasks"][0]["goal_id"].is_null(), visible);
+            let read = dispatch(&conn, sctx, SessionKind::Share, "task_read", &format!(r#"{{"task_id":{id}}}"#)).unwrap();
+            assert_eq!(!read["goal_id"].is_null(), visible);
+            assert_eq!(read.to_string().contains("GOAL-TITLE-SECRET"), visible, "{read}");
+        }
     }
 }

@@ -176,6 +176,8 @@ proptest! {
             task_scope: None,
             inbox_source: None,
             memory_source: None,
+            share: None,
+            share_thread: None,
         };
         let kind = [SessionKind::Nightly, SessionKind::Checkin, SessionKind::Talk][kind_idx];
         let before_counts = snapshot(&conn);

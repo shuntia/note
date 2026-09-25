@@ -30,6 +30,7 @@ import { SoFar } from '../sofar'
 import { Tick } from '../tick'
 import type { DayView, PlanEvent, SessionStart, Task, TaskNotify } from '../types'
 import { CalendarSection } from './Calendar'
+import { Urgent } from './Tasks'
 import { DebriefFold } from '../debrief'
 import { ReviewFold } from '../review'
 import '../styles/home-motion.css'
@@ -764,6 +765,7 @@ export function Home({
         )}
         <span className="home-what">
           <span className="home-name">{name}</span>
+          {ev.task && <Urgent task={{ ...ev.task, due_at: null }} />}
           {of && <span className="home-of">{of}</span>}
         </span>
         <button className="home-start" aria-label={`Start ${name}`} disabled={pending} onClick={() => start(ev)}>

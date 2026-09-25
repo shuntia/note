@@ -77,6 +77,7 @@ fn a_full_simulated_day() {
             memory_source: None,
             token_id: None,
             thread_note: None,
+            share: None,
         };
         assert_eq!(note_server::nightly::due(&db.lock().unwrap(), tmp.path(), now).unwrap().len(), 1);
         note_server::nightly::run_for_user(&deps, 1, "aki", now).unwrap();
@@ -146,6 +147,7 @@ fn a_full_simulated_day() {
             memory_source: None,
             token_id: None,
             thread_note: None,
+            share: None,
         };
         let out = note_server::agent::run_session(
             &deps,
