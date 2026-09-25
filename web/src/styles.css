@@ -1351,3 +1351,11 @@ textarea.mono { font-family: var(--mono); }
   position: absolute;
   inset: -24px -10px -24px -100vw;
 }
+
+/* A phone zooms into a field whose text is under 16px; the :is() list carries the
+   specificity of the most specific field rule above so this floor wins over each. */
+@media (hover: none) and (pointer: coarse) {
+  :is(.jot-wrap.flow .jot, .tellnote, .jot, .task-add, .task-inline, .task-goal-add, .set-fold-body, .chat .chat-title, form) :is(input, textarea, select),
+  input, textarea, select { font-size: max(1rem, 16px); }
+}
+button, [role='button'], a { touch-action: manipulation; }
