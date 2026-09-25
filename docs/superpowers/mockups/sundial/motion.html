@@ -1,0 +1,87 @@
+<!doctype html><html><head><meta charset="utf-8"><title>List motion · current vs proposed</title>
+<link rel="stylesheet" href="tokens.css"><style>
+body{margin:0;background:#e8e4de;font-family:var(--sans);color:#1c2430}
+.wrap{padding:28px 32px 60px;max-width:1500px}
+h1{font-family:var(--display);font-weight:600;font-size:24px;margin:0 0 4px;letter-spacing:-.02em}
+p.lead{max-width:780px;color:#444;margin:0 0 18px;line-height:1.5}
+.ctl{display:flex;gap:10px;flex-wrap:wrap;margin:0 0 16px;align-items:center}
+.ctl button{font:inherit;font-family:var(--display);font-weight:600;font-size:14px;border:0;border-radius:999px;padding:9px 16px;background:oklch(23% 0.03 255);color:#fff;cursor:pointer}
+.ctl button.alt{background:oklch(99% 0.004 80 / 0.86);color:#1c2430}
+.ctl .read{margin-left:auto;font-variant-numeric:tabular-nums;font-size:14px;color:#555}
+.two{display:flex;gap:24px}
+.pane{flex:1;min-width:0}
+.pane h3{font-family:var(--display);font-weight:600;font-size:15px;margin:0 0 8px}
+.pane h3 small{font-weight:400;color:#666;margin-left:8px}
+.frame-app{height:520px;border-radius:14px;box-shadow:0 30px 60px -36px rgba(0,0,0,.6);padding:20px 24px;overflow:hidden}
+.list{columns:2;column-gap:32px}
+.row{break-inside:avoid;display:flex;align-items:center;gap:12px;height:36px;font-size:14px;color:var(--ink);will-change:transform,opacity}
+.row i{width:20px;height:20px;border-radius:50%;border:1.5px solid var(--line);flex:none}
+.row span{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.row em{font-style:normal;font-size:12px;color:var(--faint);font-variant-numeric:tabular-nums}
+</style></head>
+<body><div class="wrap">
+  <h1>List motion at sixty rows</h1>
+  <p class="lead">Both panes hold the same sixty tasks in the two-column layout the Tasks view uses on a wide screen. The current entrance gives every row its own 30 ms head start in DOM order, so with columns the left one finishes before the right one begins, and the whole thing lasts 0.32 s + 0.03 s × rows. The proposal delays each row by where it sits on the page instead, caps the whole wave at a quarter second, and leaves rows below the fold alone.</p>
+  <div class="ctl">
+    <button id="enter">Play entrance</button>
+    <button id="burst" class="alt">Eight updates in 300 ms</button>
+    <button id="one" class="alt">One task done</button>
+    <span class="read" id="read"></span>
+  </div>
+  <div class="two">
+    <div class="pane"><h3>Current<small>stagger 0.03 s each, DOM order</small></h3><div class="frame-app p-day"><div class="list" id="a"></div></div></div>
+    <div class="pane"><h3>Proposed<small>wave by position, 0.24 s total, coalesced updates</small></h3><div class="frame-app p-day"><div class="list" id="b"></div></div></div>
+  </div>
+</div>
+<script src="/web/node_modules/gsap/dist/gsap.min.js"></script>
+<script>
+  const N = 60
+  const names = ['Focus on Reading 2.2', 'Research article filling', 'Brainstorm short answers', 'Draft essays (350w each)', 'Revise and polish', 'Choose 4 prompts', 'Ask for a letter', 'Problem set 7', 'Film analysis notes', 'Mix the cover project']
+  const rows = (root) => { root.innerHTML = ''; for (let i = 0; i < N; i++) { const r = document.createElement('div'); r.className = 'row'; r.dataset.row = i; r.innerHTML = `<i></i><span>${names[i % names.length]} ${i + 1}</span><em>${30 + (i * 7) % 90} min</em>`; root.append(r) } }
+  const A = document.getElementById('a'), B = document.getElementById('b'); rows(A); rows(B)
+  const read = document.getElementById('read')
+  const all = (root) => [...root.querySelectorAll('.row')]
+
+  // current: settle() as it is in motion-gsap.ts
+  const settleNow = (els) => gsap.from(els, { autoAlpha: 0, y: 6, duration: 0.32, ease: 'power2.out', stagger: 0.03, clearProps: 'transform,opacity,visibility', overwrite: 'auto' })
+
+  // proposed: delay by vertical position within the viewport, whole wave ≤ 0.24 s, off-screen rows skipped
+  const settleWave = (els, root) => {
+    const box = root.getBoundingClientRect()
+    const seen = els.filter((el) => { const r = el.getBoundingClientRect(); return r.bottom > box.top && r.top < box.bottom })
+    if (!seen.length) return
+    const tops = seen.map((el) => el.getBoundingClientRect().top), lo = Math.min(...tops), hi = Math.max(...tops)
+    return gsap.from(seen, { autoAlpha: 0, y: 6, duration: 0.32, ease: 'power2.out', overwrite: 'auto', clearProps: 'transform,opacity,visibility',
+      stagger: (i, el) => hi === lo ? 0 : 0.24 * (el.getBoundingClientRect().top - lo) / (hi - lo) })
+  }
+
+  const time = (label, tl) => { const t0 = performance.now(); if (tl) tl.eventCallback('onComplete', () => read.textContent = `${label}: settled in ${((performance.now() - t0) / 1000).toFixed(2)} s`) }
+  document.getElementById('enter').onclick = () => {
+    gsap.killTweensOf('.row'); rows(A); rows(B)
+    const ta = settleNow(all(A)); const tb = settleWave(all(B), B.parentElement)
+    const t0 = performance.now(); ta.eventCallback('onComplete', () => read.textContent += ` · current ${((performance.now() - t0) / 1000).toFixed(2)} s`)
+    tb.eventCallback('onComplete', () => read.textContent += ` · proposed ${((performance.now() - t0) / 1000).toFixed(2)} s`); read.textContent = ''
+  }
+
+  // a "changed" frame re-fetches and re-renders; a reorder of the top rows stands in for it
+  const shuffleTop = (root) => { const els = all(root); const k = 1 + Math.floor(Math.random() * 6); root.prepend(els[k]) }
+  const flipAll = (root, before) => {
+    const moves = all(root).map((el) => { const b = before.get(el), n = el.getBoundingClientRect(); return { el, dx: b.left - n.left, dy: b.top - n.top } }).filter((m) => m.dx || m.dy)
+    for (const m of moves) gsap.from(m.el, { x: m.dx, y: m.dy, duration: 0.38, ease: 'power2.out', clearProps: 'transform', overwrite: 'auto' })
+  }
+  const snap = (root) => new Map(all(root).map((el) => [el, el.getBoundingClientRect()]))
+  document.getElementById('burst').onclick = () => {
+    read.textContent = 'current: 8 overlapping FLIP passes · proposed: 1 pass after the burst'
+    for (let i = 0; i < 8; i++) setTimeout(() => { const b = snap(A); shuffleTop(A); flipAll(A, b) }, i * 38)
+    // proposed: the burst coalesces (trailing 80 ms), then one FLIP from the pre-burst positions
+    const b = snap(B); let pending = 0
+    for (let i = 0; i < 8; i++) setTimeout(() => { shuffleTop(B); clearTimeout(pending); pending = setTimeout(() => flipAll(B, b), 80) }, i * 38)
+  }
+  document.getElementById('one').onclick = () => {
+    for (const root of [A, B]) {
+      const el = all(root)[2]; const b = snap(root)
+      gsap.to(el, { height: 0, autoAlpha: 0, duration: 0.34, ease: 'power2.inOut', onComplete: () => { el.remove(); flipAll(root, b) } })
+    }
+    read.textContent = 'one row folds; the rest slide up together in both'
+  }
+</script></body></html>

@@ -1,0 +1,30 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Begin working · pomodoro round 2</title>
+<link rel="stylesheet" href="tokens.css"><style>body{margin:0;background:#ddd}
+.rounds{position:absolute;left:0;right:0;top:512px;display:flex;flex-direction:column;align-items:center;gap:8px}
+.rounds .sub{font-size:12.5px}
+.pause{position:absolute;left:167px;top:576px;width:56px;height:56px;border-radius:50%;background:var(--haze-strong);display:flex;align-items:center;justify-content:center}
+.pause svg{width:22px;height:22px;fill:var(--quiet)}
+@keyframes breathe{0%,100%{opacity:.55}50%{opacity:1}} .breathe{animation:breathe 7s ease-in-out infinite}
+</style></head>
+<body><div class="frame-app p-golden" style="width:390px;height:844px">
+  <div class="face" style="left:35px;top:170px;width:320px;height:320px">
+    <div id="arc" class="breathe"></div>
+    <div class="inner">
+      <div class="eyebrow">Round 2</div>
+      <div class="num tnum">18:42</div>
+      <div class="name">Focus on Reading 2.2</div>
+      <div class="sub">Letter 6.16.13–22</div>
+    </div>
+  </div>
+  <div class="rounds">
+    <div class="dots"><i class="on"></i><i class="now"></i><i></i><i></i></div>
+    <div class="sub tnum">52 min focused today</div>
+  </div>
+  <div class="pause"><svg viewBox="0 0 24 24"><rect x="6" y="5" width="4" height="14" rx="1.2"/><rect x="14" y="5" width="4" height="14" rx="1.2"/></svg></div>
+  <div id="tabs"></div>
+</div>
+<script type="module">
+  import { arc, tabs, mount } from './parts.js'
+  mount('#arc', arc(0.25))
+  mount('#tabs', tabs('Today'))
+</script></body></html>

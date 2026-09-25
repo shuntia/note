@@ -1,0 +1,32 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Begin working · the pick</title>
+<link rel="stylesheet" href="tokens.css"><style>body{margin:0;background:#ddd}
+.why{font-size:13px;color:var(--quiet);margin:10px 0 0;line-height:1.45}
+.pick-dots{position:absolute;left:0;right:0;top:498px;display:flex;justify-content:center}
+</style></head>
+<body><div class="frame-app p-day" style="width:390px;height:844px">
+  <div class="face" style="left:35px;top:170px;width:320px;height:320px">
+    <div id="arc"></div>
+    <div class="inner" style="padding:0 30px">
+      <div class="eyebrow">Up next</div>
+      <div class="name" style="font-size:21px">Focus on Reading 2.2 (Letter 6.16.13–22)</div>
+      <div class="meta" style="margin-top:6px">
+        <span class="chip">7 Greksouk AP Latin</span>
+        <span class="chip tnum">30 min</span>
+        <span class="chip over"><b>overdue</b></span>
+      </div>
+      <p class="why">Due yesterday, so it goes first. Then the WARN article count, due tomorrow.</p>
+    </div>
+  </div>
+  <div class="pick-dots"><div class="dots"><i class="now"></i><i></i><i></i><i></i><i></i></div></div>
+  <div class="actions" style="top:538px">
+    <button class="btn sun" style="white-space:nowrap">Start · 30 min</button>
+    <button class="btn haze">Another</button>
+  </div>
+  <div class="actions" style="top:604px"><button class="btn quiet small">Not now</button></div>
+  <div id="tabs"></div>
+</div>
+<script type="module">
+  import { arc, tabs, mount } from './parts.js'
+  mount('#arc', arc(0, { faded: true }))
+  mount('#tabs', tabs('Today'))
+</script></body></html>

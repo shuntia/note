@@ -1,0 +1,22 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Begin working · desktop</title>
+<link rel="stylesheet" href="tokens.css"><style>body{margin:0;background:#ddd}</style></head>
+<body><div class="frame-app desk p-day" style="width:1440px;height:900px">
+  <div id="nav"></div>
+  <div class="face" style="left:500px;top:160px;width:440px;height:440px">
+    <div id="arc"></div>
+    <div class="inner">
+      <div class="name" style="font-size:26px">That's everything today.</div>
+      <div class="sub" style="font-size:14px">Two things are due this week.</div>
+    </div>
+  </div>
+  <div class="actions" style="top:650px">
+    <button class="btn sun">Begin working</button>
+    <button class="btn quiet">···</button>
+  </div>
+  <div style="position:absolute;left:0;right:0;top:826px;text-align:center;color:var(--faint);font-size:12px">⌃</div>
+</div>
+<script type="module">
+  import { arc, topnav, mount } from './parts.js'
+  mount('#arc', arc(0, { faded: true, size: 440, r: 204, w: 11 }))
+  mount('#nav', topnav('Today'))
+</script></body></html>

@@ -1,0 +1,22 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Begin working · nothing planned</title>
+<link rel="stylesheet" href="tokens.css"><style>body{margin:0;background:#ddd}</style></head>
+<body><div class="frame-app p-day" style="width:390px;height:844px">
+  <div class="face" style="left:35px;top:170px;width:320px;height:320px">
+    <div id="arc"></div>
+    <div class="inner">
+      <div class="name" style="font-size:22px">That's everything today.</div>
+      <div class="sub">Two things are due this week.</div>
+    </div>
+  </div>
+  <div class="actions" style="top:538px">
+    <button class="btn sun">Begin working</button>
+    <button class="btn quiet">···</button>
+  </div>
+  <div style="position:absolute;left:0;right:0;top:706px;text-align:center;color:var(--faint);font-size:12px">⌃</div>
+  <div id="tabs"></div>
+</div>
+<script type="module">
+  import { arc, tabs, mount } from './parts.js'
+  mount('#arc', arc(0, { faded: true }))
+  mount('#tabs', tabs('Today'))
+</script></body></html>

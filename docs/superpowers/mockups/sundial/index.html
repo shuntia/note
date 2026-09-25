@@ -1,0 +1,62 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Note · Sundial proposals</title>
+<style>
+body{font-family:system-ui,sans-serif;margin:0;padding:32px 24px 80px;background:#efe9e1;color:#1c2430;line-height:1.5}
+h1{font-size:22px;margin:0 0 4px}h2{font-size:13px;letter-spacing:.08em;text-transform:uppercase;color:#6b6f77;margin:44px 0 12px}
+p,li{max-width:820px;color:#444}p{margin:0 0 8px}a{color:#8a4b12}ul{margin:0 0 12px;padding-left:20px}
+.board{margin:0 0 28px}.board .cap{display:flex;gap:14px;align-items:baseline;margin:0 0 8px;font-size:14px}.board .cap b{font-size:15px}
+.frame{position:relative;overflow:hidden;border-radius:12px;box-shadow:0 20px 50px -30px rgba(0,0,0,.5);background:#fff}
+.frame iframe{border:0;display:block;transform-origin:0 0}
+.row{display:flex;gap:28px;flex-wrap:wrap;align-items:flex-start}
+code{font-size:13px;background:#e3ddd3;padding:1px 5px;border-radius:4px}
+.live{display:inline-block;margin:6px 0 14px;padding:8px 14px;border-radius:999px;background:#1c2430;color:#fff;text-decoration:none;font-weight:600;font-size:14px}
+</style></head>
+<body>
+<h1>Sundial</h1>
+<p>Six proposals for Note, 2026-09-25: list motion that stays quick at any size, no zoom when the chat is tapped on a phone, a Sky theme that follows the sun, the day following the device's time zone, and a Begin working button for the moments nothing is planned. Every board is a live page; click its name to open it full size.</p>
+
+<h2>1 · Begin working</h2>
+<p>When no session is running and no block is on right now, the Today face offers one sun-coloured button. It asks the server for the queue of open tasks in the order the planner itself would schedule them (high urgency, then pressing, then soonest due, then oldest), and shows the first one in the arc before anything starts: what it is, why it came first, how long it is planned for. <b>Start</b> opens a session on it exactly as the Tasks view's own start does, so pomodoro comes on if it is enabled. <b>Another</b> moves to the next candidate; <b>Not now</b> returns to the face.</p>
+<p>In a pomodoro session the face gains a row of round marks under the name, one per round, and the day's focused minutes so far. That is the count of sessions the timer keeps.</p>
+<div class="row">
+<div class="board"><div class="cap"><b><a href="begin-idle.html">Nothing left today</a></b><span>the empty state becomes an invitation</span></div>
+<div class="frame" style="width:390px;height:844px"><iframe src="begin-idle.html" style="width:390px;height:844px"></iframe></div></div>
+<div class="board"><div class="cap"><b><a href="begin-next.html">Next block later</a></b><span>the planned block keeps its early start</span></div>
+<div class="frame" style="width:390px;height:844px"><iframe src="begin-next.html" style="width:390px;height:844px"></iframe></div></div>
+<div class="board"><div class="cap"><b><a href="begin-pick.html">The pick</a></b><span>after tapping Begin working</span></div>
+<div class="frame" style="width:390px;height:844px"><iframe src="begin-pick.html" style="width:390px;height:844px"></iframe></div></div>
+<div class="board"><div class="cap"><b><a href="begin-session.html">Round 2</a></b><span>round marks and the day's focus, in the golden hour</span></div>
+<div class="frame" style="width:390px;height:844px"><iframe src="begin-session.html" style="width:390px;height:844px"></iframe></div></div>
+</div>
+<div class="board"><div class="cap"><b><a href="begin-desktop.html">Desktop</a></b><span></span></div>
+<div class="frame" style="width:1152px;height:720px"><iframe src="begin-desktop.html" style="width:1440px;height:900px;transform:scale(.8)"></iframe></div></div>
+
+<h2>2 · Sky theme</h2>
+<p>A fourth theme choice next to System, Light and Dark. The page computes the sun's altitude once a minute from the date and a place, and blends the sky between four keyframes: day (the light theme as it is), golden, dusk, and night (the dark theme, with its two branches made one). Ground colours cross-fade; text and lines switch sets where the ground crosses the middle so contrast never dips. The place comes from the time zone unless the user offers their location, which stays on the device. The last palette is cached so the first paint at night is already dark.</p>
+<a class="live" href="sky.html">Open the live sky ↗</a>
+<div class="board"><div class="frame" style="width:1152px;height:640px"><iframe src="sky.html" style="width:1440px;height:800px;transform:scale(.8)"></iframe></div></div>
+
+<h2>3 · Time zone follows the device</h2>
+<p>A switch under the time zone row, on by default. On load and on focus the client reads the device's zone; when it differs from the saved one, the client saves it and says so in a toast with an Undo that turns the switch off. Nothing else changes: the server's day boundaries, nightly plan and close-the-day already run in the saved zone.</p>
+<div class="board"><div class="cap"><b><a href="settings.html">Settings</a></b><span>Theme with Sky, and the time zone row</span></div>
+<div class="frame" style="width:390px;height:844px"><iframe src="settings.html" style="width:390px;height:844px"></iframe></div></div>
+
+<h2>4 · List motion at any size</h2>
+<p>Three changes, none visible when the list is short.</p>
+<ul>
+<li><b>Entrance as a wave, not a queue.</b> Rows delay by their position on the page, the whole wave lasts a quarter second whatever the count, and rows below the fold are placed without animating. In two columns both columns rise together.</li>
+<li><b>Bursts coalesce.</b> A run of <code>changed</code> frames within 80 ms triggers one reload, each reload carries a sequence number so a slow older response cannot overwrite a newer one, and one FLIP pass runs from the positions before the burst.</li>
+<li><b>No per-frame measuring.</b> While rows fold away the list stops measuring every row on every frame; it measures once when the fold begins and once when it ends.</li>
+</ul>
+<a class="live" href="motion.html">Open the motion comparison ↗</a>
+<div class="board"><div class="frame" style="width:1152px;height:620px"><iframe src="motion.html" style="width:1440px;height:775px;transform:scale(.8)"></iframe></div></div>
+
+<h2>5 · No zoom on the phone</h2>
+<p>iOS zooms into any focused field whose text is under 16 px. The chat composer and the jot field sit at 0.92 rem, which is 14.7 px on a phone. On coarse pointers every text field goes to 1 rem, the viewport meta gains <code>interactive-widget=resizes-content</code> so the keyboard pushes the composer up instead of covering it, and buttons get <code>touch-action: manipulation</code> so a fast double tap never zooms. Nothing is mocked because nothing looks different.</p>
+
+<h2>What is not in these boards</h2>
+<ul>
+<li>Light mode already exists as a choice; Sky reuses it as its day keyframe. The only light-mode change is that the two dark branches (chosen and system) get the same sky.</li>
+<li>Rows removed by another device still vanish without a fold. A fold needs the old row kept around after the data drops it; it is a separate change if wanted.</li>
+</ul>
+</body></html>
