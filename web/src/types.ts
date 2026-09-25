@@ -492,3 +492,43 @@ export type Allocation = {
   placed: { event_id: number; task_id: number; start: string; end: string }[]
   cleared: number
 }
+
+export type ShareScope = {
+  today: boolean
+  tasks: boolean
+  categories: string[]
+  goals: boolean
+  progress: boolean
+  details: boolean
+  horizon_days: number
+  notes: boolean
+  messages_per_day: number
+}
+
+// What a visitor learns about the link itself; `owner` is a display name.
+export type ShareInfo = { owner: string; name: string; expires_at: string; scope: ShareScope; notes: boolean }
+
+export type ShareDayRow = { start: string; end: string | null; title: string; status: string; busy: boolean }
+export type ShareTask = {
+  id: number
+  title: string
+  state: TaskState
+  due_at: string | null
+  urgency: TaskUrgency
+  pressing: boolean
+  steps: number
+  done_steps: number
+  category: string
+  goal_title: string | null
+  description?: string
+}
+export type ShareGoal = { id: number; title: string; due_at: string | null; tasks: number; done_tasks: number }
+// Each section is present only when its switch is on.
+export type ShareView = {
+  days?: { date: string; rows: ShareDayRow[] }[]
+  tasks?: ShareTask[]
+  goals?: ShareGoal[]
+  done_recent?: { title: string; completed_at: string }[]
+}
+export type ShareMessage = { role: 'user' | 'assistant' | 'note'; content: string; created_at: string }
+export type ShareTurn = { reply: string; note: boolean }
