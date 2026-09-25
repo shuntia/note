@@ -2,6 +2,7 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type FormEvent,
@@ -195,6 +196,21 @@ function groups(nodes: TaskNode[]) {
   }
 }
 
+const searchWords = (title: string) => {
+  const search = title.trim().toLowerCase()
+  return search === '' ? [] : search.split(/\s+/)
+}
+
+const shownBy = (filter: string | null, words: string[]) => (n: TaskNode) =>
+  (filter === null || n.category === filter) && matches(n, words)
+
+// The live rows in the order they are drawn, before any leaving row is put back.
+function shownGroups(nodes: TaskNode[], filter: string | null, title: string, sort: SortKey) {
+  const visible = shownBy(filter, searchWords(title))
+  const g = groups(nodes)
+  return { now: g.now.filter(visible), later: g.later.filter(visible).sort(COMPARE[sort]) }
+}
+
 function withTask(nodes: TaskNode[], t: Task): TaskNode[] {
   return nodes.map((n) => {
     if (n.id === t.id) return { ...n, ...t, children: n.children }
@@ -330,6 +346,10 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
   const unfinished = useRef(new Map<number, number>())
   const root = useRef<HTMLDivElement>(null)
   const { mark } = useRowMotion(root, leaving.length > 0)
+  const shown = useMemo(
+    () => (nodes ? shownGroups(nodes, filter, title, sort) : null),
+    [nodes, filter, title, sort],
+  )
 
   const loadGoals = useCallback(() => {
     api
@@ -397,10 +417,9 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
   )
 
   const markLeaving = (node: TaskNode, state: TaskState) => {
-    if (!nodes) return
-    const g = groups(nodes)
-    const now = g.now.findIndex((n) => n.id === node.id)
-    const index = now === -1 ? g.later.findIndex((n) => n.id === node.id) : now
+    if (!shown) return
+    const now = shown.now.findIndex((n) => n.id === node.id)
+    const index = now === -1 ? shown.later.findIndex((n) => n.id === node.id) : now
     if (index === -1) return
     setLeaving((ls) => [...ls, { id: node.id, group: now === -1 ? 'later' : 'now', index, state }])
   }
@@ -733,13 +752,11 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
   }
 
   const search = title.trim().toLowerCase()
-  const words = search === '' ? [] : search.split(/\s+/)
   const categories = categoriesOf(nodes)
-  const visible = (n: TaskNode) =>
-    (filter === null || n.category === filter) && matches(n, words)
+  const visible = shownBy(filter, searchWords(title))
 
-  const now = placed(g.now.filter(visible), nodes, leaving, 'now')
-  const later = placed(g.later.filter(visible).sort(COMPARE[sort]), nodes, leaving, 'later')
+  const now = placed(shown?.now ?? [], nodes, leaving, 'now')
+  const later = placed(shown?.later ?? [], nodes, leaving, 'later')
   // A task settles into Done today only once it has folded away: until then it is
   // still in the list it is leaving, and a row is never in two lists at once.
   const doneToday = g.doneToday.filter((n) => !leaving.some((l) => l.id === n.id))

@@ -37,7 +37,7 @@ import type {
   TotpEnrolment,
 } from '../types'
 import { createCredential, webauthnSupported, type RegistrationJSON } from '../webauthn'
-import { deviceZone } from '../zone'
+import { deviceZone, knownDeviceZone } from '../zone'
 
 type Notify = (msg: string, action?: ToastAction) => void
 
@@ -229,6 +229,7 @@ function FoldRow({
 export function Settings({
   me,
   notify,
+  onChanged,
   onSignedOut,
   openAdmin,
 }: ViewProps & { me: Me; onSignedOut: () => void; openAdmin: () => void }) {
@@ -430,7 +431,7 @@ export function Settings({
   const commitZoneAuto = async (on: boolean) => {
     if (!loaded) return
     const device = deviceZone()
-    const follow = on && loaded.choices.timezones.includes(device)
+    const follow = on && knownDeviceZone(device, loaded.choices.timezones)
     setSave({ row: 'timezone', kind: 'busy' })
     try {
       const saved = await api.saveSettings(
@@ -448,6 +449,7 @@ export function Settings({
           : s,
       )
       setSave({ row: 'timezone', kind: 'saved' })
+      onChanged()
     } catch (err) {
       setSave({ row: 'timezone', kind: 'failed', message: failure(err) })
     }
@@ -706,8 +708,8 @@ export function Settings({
                 </div>
                 {loaded.zoneAuto ? (
                   <span className="set-zone">
-                    <input aria-label="Time zone" disabled value={deviceZone()} />
-                    <span className="set-hint">detected</span>
+                    <input aria-label="Time zone" disabled value={loaded.draft.timezone} />
+                    {loaded.draft.timezone === deviceZone() && <span className="set-hint">detected</span>}
                   </span>
                 ) : (
                   <input
