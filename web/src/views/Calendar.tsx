@@ -10,6 +10,7 @@ import {
 } from 'react'
 import { createPortal } from 'react-dom'
 import { api } from '../api'
+import { latest } from '../coalesce'
 import type { ViewProps } from '../app'
 import { minutesOf } from '../dayline'
 import { useEscape } from '../escape'
@@ -179,13 +180,13 @@ export function CalendarSection({
   const tips = useTips()
   const quietUntil = day?.date === today ? day.quiet_now : null
 
+  const newest = useRef(latest<{ entries: CalendarEntry[] }>()).current
   const load = useCallback(() => {
     setToday(isoOf(new Date()))
-    api
-      .calendar()
-      .then((r) => setEntries(r.entries))
+    newest(api.calendar())
+      .then((r) => r && setEntries(r.entries))
       .catch(() => notify("Couldn't load the calendar. Try again."))
-  }, [notify])
+  }, [newest, notify])
   useEffect(load, [load, refresh])
 
   useEffect(() => {
