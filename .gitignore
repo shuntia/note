@@ -11,3 +11,6 @@ config/openrouter.key
 config/telegram.token
 config/*.key
 config/*.pem
+
+# session worktrees
+.claude/worktrees/
