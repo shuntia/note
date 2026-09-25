@@ -423,8 +423,10 @@ pub fn read(conn: &Connection, ctx: &ToolCtx, args: ReadArgs) -> Result<serde_js
             return Err(ToolError::not_found(format!("no task {}", args.task_id)));
         }
         if !scope.goals {
-            node.task.goal_id = None;
-            node.task.goal_title = None;
+            for task in std::iter::once(&mut node.task).chain(node.children.iter_mut()) {
+                task.goal_id = None;
+                task.goal_title = None;
+            }
         }
     }
     let tz = crate::triggers::timezone(ctx.config_dir, ctx.username);
