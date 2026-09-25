@@ -15,7 +15,7 @@ import { reducedMotion } from '../motion'
 import { Overflow, useMenuSheet, type OverflowItem } from '../overflow'
 import { Tick } from '../tick'
 import '../styles/tasks.css'
-import type { Goal, NewStep, Task, TaskNode, TaskNotify, TaskState, TaskUpdate } from '../types'
+import type { Goal, NewStep, Task, TaskNode, TaskNotify, TaskState, TaskUpdate, TaskUrgency } from '../types'
 
 const NOW_CAP = 3
 const UNDO_MS = 5000
@@ -34,6 +34,7 @@ type Group = 'now' | 'later' | 'done'
 const SORTS = [
   { id: 'schedule', label: 'Schedule' },
   { id: 'due', label: 'Due' },
+  { id: 'urgency', label: 'Urgency' },
   { id: 'newest', label: 'Newest' },
   { id: 'category', label: 'Category' },
 ] as const
@@ -78,9 +79,13 @@ const newest = (a: TaskNode, b: TaskNode) => b.id - a.id
 const bySchedule = (a: TaskNode, b: TaskNode) =>
   earlier(a.scheduled_at, b.scheduled_at) || earlier(a.due_at, b.due_at) || newest(a, b)
 
+const byUrgency = (a: TaskNode, b: TaskNode) =>
+  urgencyRank(a) - urgencyRank(b) || earlier(a.due_at, b.due_at) || newest(a, b)
+
 const COMPARE: Record<SortKey, (a: TaskNode, b: TaskNode) => number> = {
-  schedule: bySchedule,
+  schedule: (a, b) => urgencyRank(a) - urgencyRank(b) || bySchedule(a, b),
   due: (a, b) => earlier(a.due_at, b.due_at) || newest(a, b),
+  urgency: byUrgency,
   newest,
   category: bySchedule,
 }
@@ -297,6 +302,7 @@ const PROGRESS_SETTLE_MS = 400
 
 type RowActions = {
   setCategory: (node: TaskNode, category: string) => void
+  setUrgency: (node: TaskNode, urgency: TaskUrgency) => void
   setGoal: (node: TaskNode, goal_id: number | null) => void
   setProgress: (task: Task, progress: number) => void
   complete: (node: TaskNode, step?: Task) => void
@@ -359,6 +365,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
         notify?: TaskNotify
         progress?: number
         category?: string
+        urgency?: TaskUrgency
         goal_id?: number | null
       },
     ) => {
@@ -477,6 +484,19 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
     )
     if (filter !== null && filter !== category) setFilter(null)
     void patch(node.id, { category })
+  }
+
+  const setUrgency = (node: TaskNode, urgency: TaskUrgency) => {
+    setNodes((ns) =>
+      ns
+        ? ns.map((n) =>
+            n.id === node.id
+              ? { ...n, urgency, children: n.children.map((c) => ({ ...c, urgency })) }
+              : n,
+          )
+        : ns,
+    )
+    void patch(node.id, { urgency })
   }
 
   const setGoal = (node: TaskNode, goal_id: number | null) => {
@@ -633,6 +653,8 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
       url: '',
       notify: 'notify',
       category,
+      urgency: 'normal',
+      pressing: false,
       goal_id: null,
       goal_title: null,
       scheduled_at: null,
@@ -690,6 +712,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
   const g = groups(nodes)
   const actions: RowActions = {
     setCategory,
+    setUrgency,
     setGoal,
     setProgress,
     complete,
@@ -943,6 +966,22 @@ function Due({ task }: { task: Task }) {
   const label = dueLabel(task.due_at, new Date())
   if (label === null) return null
   return <span className={`meta${label === 'overdue' ? ' warn' : ''}`}>{label}</span>
+}
+
+const URGENCY_RANK: Record<TaskUrgency, number> = { high: 0, normal: 2, low: 3 }
+
+// 0 high, 1 pressing, 2 normal, 3 low: the order Later reads by default.
+export function urgencyRank(task: Pick<Task, 'urgency' | 'pressing'>): number {
+  if (task.urgency === 'high') return 0
+  if (task.pressing) return 1
+  return URGENCY_RANK[task.urgency]
+}
+
+// The word sits in sun-ink after the title; overdue keeps rose through `Due`.
+export function Urgent({ task }: { task: Pick<Task, 'urgency' | 'pressing' | 'due_at'> }) {
+  const overdue = task.due_at !== null && new Date(task.due_at).getTime() < Date.now()
+  if (task.urgency !== 'high' && !(task.pressing && !overdue)) return null
+  return <span className="meta sun">urgent</span>
 }
 
 const DATE = { day: 'numeric', month: 'short' } as const
@@ -1335,6 +1374,14 @@ function Row({
           { label: 'None', run: () => actions.setGoal(node, null), checked: node.goal_id === null },
         ],
       },
+      {
+        label: 'Urgency',
+        children: (['low', 'normal', 'high'] as const).map((u) => ({
+          label: u === 'low' ? 'Low' : u === 'normal' ? 'Normal' : 'High',
+          run: () => actions.setUrgency(node, u),
+          checked: node.urgency === u,
+        })),
+      },
     )
   if (steps.length > 0) items.push({ label: 'Merge steps', run: () => actions.mergeSteps(node) })
   if (sheet && loose)
@@ -1394,6 +1441,7 @@ function Row({
               {showCategory && node.category !== '' && (
                 <span className="meta">{node.category}</span>
               )}
+              <Urgent task={node} />
               <Scheduled task={node} />
               <Duration task={node} />
               <Due task={node} />

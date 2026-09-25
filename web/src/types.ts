@@ -5,6 +5,8 @@ export type MovedTo = { event_id: number; date: string; wall_time: string; kind:
 // Where the event came from: the template, the agent, the allocator, or a user edit.
 export type EventOrigin = 'template' | 'agent' | 'auto' | 'user'
 
+export type TaskUrgency = 'low' | 'normal' | 'high'
+
 // The task a block holds, carried so the block can offer the task's own actions.
 // `title` is always the top-level task; `step` names the one this block holds.
 export type TaskRef = {
@@ -13,6 +15,8 @@ export type TaskRef = {
   state: TaskState
   step: string | null
   category: string
+  urgency: TaskUrgency
+  pressing: boolean
   notify?: TaskNotify
 }
 
@@ -62,6 +66,10 @@ export type Task = {
   notify: TaskNotify
   // Free text, one per task; a step reports the one its parent carries.
   category: string
+  // low, normal or high; a step reports its parent's.
+  urgency: TaskUrgency
+  // Due inside the next two days or already past due. Derived by the server.
+  pressing: boolean
   // The goal this task belongs to; steps never carry one.
   goal_id: number | null
   goal_title: string | null
