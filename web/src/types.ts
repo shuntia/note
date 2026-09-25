@@ -236,7 +236,7 @@ export type SettingsSaved = Pick<
   | 'pomodoro_break_min'
 > & { schedule: ScheduleRow[] }
 
-export type PromptName = 'persona' | 'planning'
+export type PromptName = 'persona' | 'planning' | 'share'
 
 // `content` is the effective prompt; `custom` marks it as the user's own override.
 export type PromptDoc = { name: PromptName; content: string; custom: boolean }
@@ -531,4 +531,19 @@ export type ShareView = {
   done_recent?: { title: string; completed_at: string }[]
 }
 export type ShareMessage = { role: 'user' | 'assistant' | 'note'; content: string; created_at: string }
+export type Share = {
+  id: number
+  name: string
+  brief: string
+  scope: ShareScope
+  expires_at: string
+  created_at: string
+  last_used_at: string | null
+  url: string
+  messages_today: number
+  threads: number
+}
+export type NewShare = { name: string; brief: string; scope: ShareScope; expires_at: string }
+export type SharePatch = Partial<NewShare>
+export type ShareThread = { id: number; created_at: string; updated_at: string; messages: ShareMessage[] }
 export type ShareTurn = { reply: string; note: boolean }
