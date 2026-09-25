@@ -49,12 +49,13 @@ body{margin:0;background:#ddd;font-family:var(--sans)}
   <p>Tap the circle: the arc draws, the track appears beneath, the arc unwinds, and work begins on the most pressing task.</p>
   <p>Swipe left: the next task. Swipe right past the first: work time on nothing in particular.</p>
   <p>Tap the circle while working: pause. Tap again: back to it. Swipe down: done, and a bead joins the ring's opening.</p>
+  <p>Press D to jump to the last three seconds of the round or the break.</p>
   <p>The hint under the circle shows the first three times only.</p>
 </div>
 <script src="/web/node_modules/gsap/dist/gsap.min.js"></script>
 <script type="module">
   import { arc, tabs, mount } from './parts.js'
-  import { closeRing, beadsAtRest, open, wave } from './fx.js'
+  import { closeRing, beadsAtRest, open, wave, toBreak, toWork, drain } from './fx.js'
   mount('#tabs', tabs('Today'))
   const tabsEl = document.querySelector('.tabs'), handle = document.getElementById('handle')
   const app = document.getElementById('app'), face = document.getElementById('face'), rail = document.getElementById('rail')
@@ -69,6 +70,9 @@ body{margin:0;background:#ddd;font-family:var(--sans)}
     { name: 'Draft 4 short answer essays', sub: '1 of 2' },
   ]
   let index = 1, running = false, paused = false, startAt = 0, pausedAt = 0, pausedMs = 0
+  let phase = 'work', switching = false
+  const WORK = 25 * 60, BREAK = 5 * 60
+  const planOf = () => (phase === 'work' ? WORK : BREAK)
 
   // ── the bar rests when the hand does ──
   let restTimer
@@ -76,7 +80,6 @@ body{margin:0;background:#ddd;font-family:var(--sans)}
   const rest = () => { tabsEl.classList.add('away'); handle.classList.add('on') }
   app.addEventListener('pointerdown', wake); wake()
 
-  const PLAN = 25 * 60
   const C = 929.9, SPAN = 619.9
   document.getElementById('arc').innerHTML = `<div class="arc" id="arcbox"><svg viewBox="0 0 320 320">
     <circle id="track" cx="160" cy="160" r="148" fill="none" stroke="var(--track)" stroke-width="9" stroke-linecap="round" stroke-dasharray="${SPAN} ${C}" transform="rotate(150 160 160)"/>
@@ -110,17 +113,46 @@ body{margin:0;background:#ddd;font-family:var(--sans)}
 
   // ── the clock ──
   const tick = () => {
-    if (!running) return
+    if (!running || switching) return
     const elapsed = Math.floor(((paused ? pausedAt : Date.now()) - startAt - pausedMs) / 1000)
+    const PLAN = planOf()
     const left = Math.max(0, PLAN - elapsed)
     const t = `${String(Math.floor(left / 60)).padStart(2, '0')}:${String(left % 60).padStart(2, '0')}`
     rail.querySelectorAll('.num').forEach((n) => (n.textContent = t))
-    setArc(elapsed / PLAN, paused)
+    if (phase === 'work') setArc(elapsed / PLAN, paused)
+    else drain(fill, (SPAN * left) / PLAN)
+    if (left === 0) phase === 'work' ? roundDone() : breakDone()
   }
+  // the round ends: the ring closes, a bead drops, then the arc turns to the break
+  const roundDone = () => {
+    switching = true
+    const bead = rounds++
+    closeRing(face, fill, bead)
+    setTimeout(() => wave(face), 420)
+    setTimeout(() => {
+      toBreak(face, fill, true)
+      gsap.to(rail.querySelectorAll('.name, .sub, .mark'), { autoAlpha: 0, duration: 0.5 })
+      phase = 'break'; startAt = Date.now(); pausedMs = 0; paused = false
+      rail.querySelectorAll('.num').forEach((n) => (n.textContent = '05:00'))
+      fill.setAttribute('stroke-dashoffset', 0)
+      setTimeout(() => { switching = false }, 750)
+    }, 1300)
+  }
+  // the break ends: the ground brightens, the title returns, the sun arc is empty
+  const breakDone = () => {
+    switching = true
+    toWork(face, fill)
+    gsap.to(rail.querySelectorAll('.name, .sub, .mark'), { autoAlpha: 1, duration: 0.5, delay: 0.4 })
+    phase = 'work'; startAt = Date.now() + 700; pausedMs = 0; paused = false
+    rail.querySelectorAll('.num').forEach((n) => (n.textContent = '25:00'))
+    setTimeout(() => { switching = false }, 700)
+  }
+  // press D to jump to the last three seconds of the phase
+  document.addEventListener('keydown', (e) => { if (e.key === 'd' && running && !switching) { startAt = Date.now() - (planOf() - 3) * 1000; pausedMs = 0 } })
   setInterval(tick, 250)
 
   const begin = () => {
-    running = true; paused = false; startAt = Date.now(); pausedMs = 0; index = 1
+    running = true; paused = false; startAt = Date.now(); pausedMs = 0; index = 1; phase = 'work'
     renderRail(); snap(false)
     gsap.fromTo(rail, { autoAlpha: 0, y: 10 }, { autoAlpha: 1, y: 0, duration: 0.4, ease: 'power2.out' })
     hint.style.opacity = 0
@@ -135,7 +167,8 @@ body{margin:0;background:#ddd;font-family:var(--sans)}
     closeRing(face, fill, bead)
     setTimeout(() => wave(face), 420)
     gsap.to(rail, { autoAlpha: 0, y: -10, duration: 0.3, delay: 0.6 })
-    setTimeout(() => { gsap.to([track, fill, ...face.querySelectorAll('.head, .bead')], { opacity: 0, duration: 0.6, onComplete: () => { idleFace(); gsap.set([track, fill], { clearProps: 'opacity' }); idleFace(); hint.style.opacity = 0.75 } }) }, 1500)
+    const veil = app.querySelector('.veil'); if (veil) gsap.to(veil, { opacity: 0, duration: 0.6 })
+    setTimeout(() => { gsap.to([track, fill, ...face.querySelectorAll('.head, .bead')], { opacity: 0, duration: 0.6, onComplete: () => { idleFace(); gsap.set([track, fill], { clearProps: 'opacity' }); fill.style.stroke = ''; fill.setAttribute('stroke-dashoffset', 0); phase = 'work'; idleFace(); hint.style.opacity = 0.75 } }) }, 1500)
   }
   const togglePause = () => {
     if (paused) { pausedMs += Date.now() - pausedAt; paused = false } else { pausedAt = Date.now(); paused = true }

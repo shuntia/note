@@ -45,6 +45,9 @@ small{display:block;color:#666;font-size:12.5px;margin-top:4px}
       <button data-fx="finish" class="pick">Close the ring + gradient ripple</button>
     </div>
     <small>Close the ring: the fill runs to the end and a bead drops into the opening. Gradient ripple: a soft band of the arc's own colour widens out from the ring. Warm: the ground brightens for a moment. Pair: two thin rings a beat apart.</small>
+    <h2>Round done to break</h2>
+    <div class="btns"><button data-fx="tobreak" class="pick">Round done → break</button><button data-fx="towork">Break over → work</button></div>
+    <small>The ring closes in sun and a bead drops; the arc then tints to sage while the ground dims a step and the counter flips to 05:00; the break drains from the far end. At its end the ground brightens and the empty sun arc is ready.</small>
     <h2>Rounds</h2>
     <div class="btns"><button data-fx="rest">Beads at rest</button><button data-fx="reset">Reset</button></div>
     <small>Beads sit in the ring's opening, one per round today; each finish adds one. This replaces both dot rows.</small>
@@ -52,15 +55,19 @@ small{display:block;color:#666;font-size:12.5px;margin-top:4px}
 </div>
 <script src="/web/node_modules/gsap/dist/gsap.min.js"></script>
 <script type="module">
-  import { ripple, ignite, breath, closeRing, warm, beadsAtRest, open, wave } from './fx.js'
+  import { ripple, ignite, breath, closeRing, warm, beadsAtRest, open, wave, toBreak, toWork, drain } from './fx.js'
   const face = document.getElementById('face'), fill = document.getElementById('fill'), track = document.getElementById('track')
   let done = 0
-  const reset = () => { face.querySelectorAll('.head, .bead, .glow').forEach((e) => e.remove()); fill.setAttribute('stroke-dasharray', '0 929.9'); fill.setAttribute('stroke-dashoffset', 0); fill.setAttribute('stroke-width', 9); fill.style.opacity = 0; gsap.set(track, { opacity: 1 }); done = 0 }
+  const reset = () => { clearInterval(Number(face.dataset.iv)); fill.style.stroke = ''; fill.style.transition = ''; const v = document.querySelector('.veil'); if (v) v.style.opacity = 0; gsap.set(face.querySelectorAll('.name, .sub'), { clearProps: 'all' }); document.getElementById('num').textContent = '25:00'; face.querySelectorAll('.head, .bead, .glow').forEach((e) => e.remove()); fill.setAttribute('stroke-dasharray', '0 929.9'); fill.setAttribute('stroke-dashoffset', 0); fill.setAttribute('stroke-width', 9); fill.style.opacity = 0; gsap.set(track, { opacity: 1 }); done = 0 }
   const run = { ripple: () => ripple(face), ignite: () => { fill.setAttribute('stroke-dasharray', '3 929.9'); fill.style.opacity = 1; ignite(face) }, breath: () => breath(face),
     start: () => { fill.setAttribute('stroke-dasharray', '3 929.9'); fill.style.opacity = 1; ignite(face); ripple(face) },
     close: () => { fill.style.opacity = 1; closeRing(face, fill, done++) }, warm: () => warm(face), pair: () => ripple(face, 2),
     finish: () => { fill.style.opacity = 1; closeRing(face, fill, done++); setTimeout(() => wave(face), 420) },
     open: () => { reset(); open(face, fill, track) }, wave: () => wave(face),
+    tobreak: () => { fill.style.opacity = 1; closeRing(face, fill, done++); setTimeout(() => wave(face), 420)
+      setTimeout(() => { toBreak(face, fill, true); document.getElementById('num').textContent = '05:00'; gsap.to(face.querySelectorAll('.name, .sub'), { autoAlpha: 0, duration: 0.5 })
+        let left = 620; const iv = setInterval(() => { left -= 2.4; if (left <= 0) return clearInterval(iv); drain(fill, left) }, 50); face.dataset.iv = iv }, 1300) },
+    towork: () => { clearInterval(Number(face.dataset.iv)); toWork(face, fill); document.getElementById('num').textContent = '25:00'; gsap.to(face.querySelectorAll('.name, .sub'), { autoAlpha: 1, duration: 0.5, delay: 0.4 }) },
     rest: () => { face.querySelectorAll('.bead').forEach((e) => e.remove()); beadsAtRest(face, 2); done = 2 }, reset }
   document.querySelectorAll('[data-fx]').forEach((b) => (b.onclick = () => run[b.dataset.fx]()))
 </script></body></html>

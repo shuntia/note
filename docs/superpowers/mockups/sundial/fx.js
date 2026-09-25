@@ -115,3 +115,35 @@ export function wave(face, color = 'var(--sun)', peak = 0.18) {
     w.style.background = `radial-gradient(circle at ${cx}px ${cy}px, transparent ${s.r - band}px, ${color} ${s.r}px, transparent ${s.r + band}px)`
   }, onComplete: () => w.remove() })
 }
+
+// The round is done: the closed sun arc tints to sage, the ground dims a step, and
+// the break is ready to drain from the far end. Returns the timeline.
+export function toBreak(face, fill, veilOn) {
+  fill.style.transition = 'stroke 700ms ease'
+  fill.style.stroke = 'var(--sage)'
+  const app = face.closest('.frame-app')
+  let veil = app.querySelector('.veil')
+  if (!veil) { veil = document.createElement('div'); veil.className = 'veil'; veil.style.cssText = 'position:absolute;inset:0;pointer-events:none;background:oklch(30% 0.03 250 / 0.14);opacity:0'; app.prepend(veil) }
+  const tl = gsap.timeline()
+  tl.to(veil, { opacity: veilOn ? 1 : 0, duration: 0.7, ease: 'power1.inOut' }, 0)
+  return tl
+}
+
+// The break is over: the ground brightens, the last of the sage goes, and the sun
+// arc is empty and ready.
+export function toWork(face, fill) {
+  const app = face.closest('.frame-app')
+  const veil = app.querySelector('.veil')
+  const tl = gsap.timeline()
+  if (veil) tl.to(veil, { opacity: 0, duration: 0.6, ease: 'power1.inOut' }, 0)
+  tl.to(fill, { opacity: 0, duration: 0.4 }, 0)
+  tl.add(() => { fill.style.stroke = 'var(--sun)'; fill.setAttribute('stroke-dashoffset', 0); fill.setAttribute('stroke-dasharray', `0 ${C}`) }, 0.45)
+  return tl
+}
+
+// A break drains from the far end of the arc: `left` of the span is still to go.
+export function drain(fill, left) {
+  fill.setAttribute('stroke-dasharray', `${left} ${C}`)
+  fill.setAttribute('stroke-dashoffset', -(SPAN - left))
+  fill.style.opacity = left > 9 ? 1 : 0
+}
