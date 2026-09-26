@@ -1,17 +1,30 @@
 import { gsap } from 'gsap'
 import { ScrollTrigger } from 'gsap/ScrollTrigger'
-import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as KeyEvent,
+  type PointerEvent as PointEvent,
+  type WheelEvent as WheelEv,
+} from 'react'
 import { api, ApiError } from '../api'
+import { hintShown, hintUsed, railX, sessionFor, slotAfter, WORK_TIME } from '../circle'
 import { latest } from '../coalesce'
 import type { ToastAction } from '../app'
 import { DayLine, minutesOf } from '../dayline'
 import { eventFacts, nextUp } from '../events'
-import { arcPath, Gauge, STROKE, VB, type ArcLine } from '../gauge'
+import * as fx from '../fx'
+import { arcPath, Circle, Gauge, STROKE, VB, type ArcLine } from '../gauge'
 import { makeHold } from '../held'
 import { Jot } from '../jot'
 import { clampStops, clearTimeline, scrollReveal, scrollToY, scrub, travel, type Timeline, type Trigger } from '../homeMotion'
 import { reducedMotion } from '../motion'
-import { ghostOut, rise } from '../motion-gsap'
+import { rise } from '../motion-gsap'
 import { NowCounter } from '../nowcounter'
 import { Overflow, type OverflowItem } from '../overflow'
 import { readPrefs } from '../prefs'
@@ -29,7 +42,7 @@ import {
 } from '../session'
 import { SoFar } from '../sofar'
 import { Tick } from '../tick'
-import type { DayView, PlanEvent, SessionStart, Task, TaskNotify } from '../types'
+import type { DayView, PlanEvent, QueueEntry, QueueReason, SessionStart, Task, TaskNotify } from '../types'
 import { capped } from '../wave'
 import { CalendarSection } from './Calendar'
 import { Urgent } from './Tasks'
@@ -67,6 +80,14 @@ function leftToday(): boolean {
 }
 
 const isLive = (t: Task) => t.state === 'open' || t.state === 'in_progress'
+
+// A discarded session's id can be handed out again, so its start tells the two apart.
+const keyOf = (s: FocusSession) => `${s.id}@${s.started_at}`
+
+const firstLine = (text: string) => text.split('\n').map((l) => l.trim()).find(Boolean) ?? ''
+
+const hairline = (reason?: QueueReason) =>
+  reason === 'overdue' ? 'rose' : reason === 'urgent' || reason === 'due_soon' ? 'sun' : null
 
 // What a block laid for the task does when it starts.
 const ANNOUNCE: { id: TaskNotify; label: string }[] = [
@@ -217,7 +238,11 @@ export function Home({
   const [beat, tick] = useState(0)
   const [pending, setPending] = useState(false)
   const [left, setLeft] = useState(leftToday)
-  const inSession = session !== null
+  // From leaving one session for a slot of the strip until the next arrives, the
+  // face holds on to the one left behind and shows only slots.
+  const [landing, setLanding] = useState<FocusSession | null>(null)
+  const shown = session ?? landing
+  const inSession = shown !== null
   const prefs = readPrefs()
   const motion = useMotion()
   useIdle(!mobile)
@@ -300,9 +325,6 @@ export function Home({
   // A routine is timed to its span; without an end the routine default stands in.
   // A block laid for a task runs as that task, so finishing it settles both.
   const start = (ev: PlanEvent) => {
-    home.current
-      ?.querySelectorAll('.home-actions, .today-actions, .home-face.compact .btn-fill')
-      .forEach(ghostOut)
     const span = ev.end_wall_time
       ? Math.max(1, minutesOf(ev.end_wall_time) - minutesOf(ev.wall_time))
       : ROUTINE_MIN
@@ -460,14 +482,8 @@ export function Home({
     </div>
   )
 
-  const eyebrow = (s: FocusSession) =>
-    s.mode !== 'pomodoro' ? null : s.phase === 'break' ? 'BREAK' : `ROUND ${s.round}`
-
-  const faceName = (s: FocusSession) =>
-    onBreak ? `Round ${s.round} done` : (s.step_name ?? s.title)
-
-  const stepOf = (s: FocusSession) =>
-    s.step_index === null || onBreak ? null : `${s.step_index} of ${s.step_count}`
+  // The line under the title: the step being worked on, else the first line of the notes.
+  const subOf = (s: FocusSession) => s.step_name ?? firstLine(s.notes)
 
   const pauseButton = (s: FocusSession) => (
     <button className="btn-round" aria-label={isPaused(s) ? 'Back to it' : 'Break'} onClick={isPaused(s) ? resume : pause}>
@@ -480,7 +496,7 @@ export function Home({
   )
 
   const doneButton = (
-    <button className={`btn-fill${mobile ? ' wide' : ''}`} disabled={pending} onClick={() => void finish()}>Done with this step</button>
+    <button className={`btn-fill${mobile ? ' wide' : ''}`} disabled={pending} onClick={() => void finishSession()}>Done with this step</button>
   )
 
   // The break asks for a word about the round, in the session's own thread.
@@ -496,6 +512,262 @@ export function Home({
       />
     </div>
   )
+
+  // ── the circle ───────────────────────────────────────────────
+  // One surface: a tap starts work or pauses it, sideways moves along the queue,
+  // down finishes. The fx helpers own the arc while `hold` is set.
+  const faceBox = useRef<HTMLDivElement>(null)
+  const fillEl = useRef<SVGCircleElement>(null)
+  const trackEl = useRef<SVGCircleElement>(null)
+  const railEl = useRef<HTMLDivElement>(null)
+  const dotsEl = useRef<HTMLDivElement>(null)
+  const hold = useRef(false)
+  const drawNext = useRef(false)
+  const switching = useRef(false)
+  const lastStartAt = useRef(0)
+  const drag = useRef<{ x: number; y: number; t: number; dx: number; dy: number } | null>(null)
+  const wheel = useRef({ dx: 0, timer: 0 })
+  const dotsTimer = useRef(0)
+  const [settling, setSettling] = useState(false)
+  const [strip, setStrip] = useState<{ items: QueueEntry[]; index: number } | null>(null)
+  const [sessionHint, setSessionHint] = useState(() => hintShown('session'))
+  const phase: 'idle' | 'settling' | 'working' | 'paused' | 'break' = settling
+    ? 'settling'
+    : !shown
+      ? 'idle'
+      : isPaused(shown)
+        ? 'paused'
+        : onBreak
+          ? 'break'
+          : 'working'
+  const sessionKey = session ? keyOf(session) : null
+  const slotCount = strip ? strip.items.length + 1 : 1
+  const slotIndex = strip?.index ?? 0
+  const faceSize = mobile ? 320 : 440
+  const boxWidth = () => faceBox.current?.offsetWidth ?? faceSize
+
+  const snapTo = (i: number) => {
+    const rail = railEl.current
+    if (rail) gsap.to(rail, { x: -i * boxWidth(), duration: reducedMotion() ? 0 : 0.38, ease: 'power3.out', overwrite: true })
+  }
+
+  const showDots = (held = false) => {
+    const dots = dotsEl.current
+    if (!dots) return
+    dots.classList.add('on')
+    window.clearTimeout(dotsTimer.current)
+    if (!held) dotsTimer.current = window.setTimeout(() => dots.classList.remove('on'), 1400)
+  }
+
+  const begin = async () => {
+    if (settling || pending) return
+    setSettling(true)
+    let items: QueueEntry[]
+    try {
+      items = await api.queue(5)
+    } catch {
+      setSettling(false)
+      notify("Couldn't reach Note. Try again.")
+      return
+    }
+    if (!items.length) {
+      setSettling(false)
+      notify('Nothing open to work on.')
+      return
+    }
+    hintUsed('start')
+    setSessionHint(hintShown('session'))
+    hintUsed('session')
+    setStrip({ items, index: 1 })
+    lastStartAt.current = Date.now()
+    drawNext.current = true
+    openNow(sessionFor(items[0]))
+    // A start the server refused leaves no session to draw.
+    window.setTimeout(() => {
+      if (!drawNext.current) return
+      drawNext.current = false
+      setSettling(false)
+    }, 10_000)
+  }
+
+  // Within a minute of its start the session left behind is discarded, not ended.
+  const switchTo = async (slot: number) => {
+    const s = session
+    const target = Math.min(slotCount - 1, Math.max(0, slot))
+    if (!s || !strip || switching.current || hold.current || target === strip.index) {
+      snapTo(strip?.index ?? 0)
+      return
+    }
+    snapTo(target)
+    showDots()
+    switching.current = true
+    setLanding(s)
+    setStrip({ ...strip, index: target })
+    try {
+      await api.endWorkSession(s.id, 'stopped', Date.now() - lastStartAt.current < 60_000)
+    } catch {
+      switching.current = false
+      setLanding(null)
+      setStrip(strip)
+      snapTo(strip.index)
+      notify("Couldn't reach Note. Try again.")
+      return
+    }
+    lastStartAt.current = Date.now()
+    openNow(target === 0 ? WORK_TIME : sessionFor(strip.items[target - 1]))
+    window.setTimeout(() => {
+      switching.current = false
+      setLanding((l) => (l === s ? null : l))
+    }, 10_000)
+  }
+
+  const finishSession = async () => {
+    if (!session || settling || hold.current) return
+    await finish()
+  }
+
+  const tap = () => {
+    if (settling || pending || hold.current || switching.current) return
+    if (!session) void begin()
+    else if (isPaused(session)) resume()
+    else pause()
+  }
+
+  const surface = {
+    tabIndex: 0,
+    role: 'button',
+    'aria-label': !session ? 'Start working' : isPaused(session) ? 'Back to it' : 'Break',
+    onPointerDown: (e: PointEvent<HTMLDivElement>) => {
+      if (e.button !== 0) return
+      drag.current = { x: e.clientX, y: e.clientY, t: Date.now(), dx: 0, dy: 0 }
+      e.currentTarget.setPointerCapture(e.pointerId)
+    },
+    onPointerMove: (e: PointEvent<HTMLDivElement>) => {
+      const d = drag.current
+      if (!d) return
+      d.dx = e.clientX - d.x
+      d.dy = e.clientY - d.y
+      const rail = railEl.current
+      if (!session || !strip || !rail || settling || Math.abs(d.dx) < 8 || Math.abs(d.dx) <= Math.abs(d.dy)) return
+      showDots(true)
+      gsap.killTweensOf(rail)
+      gsap.set(rail, { x: railX(slotIndex, d.dx, slotCount, boxWidth()) })
+    },
+    onPointerUp: () => {
+      const d = drag.current
+      drag.current = null
+      if (!d) return
+      if (Math.abs(d.dx) < 8 && Math.abs(d.dy) < 8) return tap()
+      if (!session || settling) return
+      if (Math.abs(d.dx) > Math.abs(d.dy)) {
+        if (!strip) return
+        showDots()
+        void switchTo(slotAfter(slotIndex, d.dx, Date.now() - d.t < 300, slotCount))
+      } else if (d.dy >= 70) void finishSession()
+    },
+    onPointerCancel: () => {
+      drag.current = null
+      snapTo(slotIndex)
+    },
+    onKeyDown: (e: KeyEvent<HTMLDivElement>) => {
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+        if (!session || !strip) return
+        e.preventDefault()
+        void switchTo(slotIndex + (e.key === 'ArrowRight' ? 1 : -1))
+      } else if (e.key === 'Escape') {
+        if (!session) return
+        e.preventDefault()
+        tap()
+      } else if (e.key === 'Enter' || (e.key === ' ' && !session)) {
+        e.preventDefault()
+        if (session) void finishSession()
+        else tap()
+      }
+    },
+    // A horizontal wheel is a drag with no finger: it gathers until it would snap.
+    onWheel: (e: WheelEv<HTMLDivElement>) => {
+      const rail = railEl.current
+      if (!session || !strip || !rail || settling || Math.abs(e.deltaX) <= Math.abs(e.deltaY)) return
+      const w = wheel.current
+      w.dx -= e.deltaX
+      window.clearTimeout(w.timer)
+      showDots(true)
+      if (Math.abs(w.dx) >= 60) {
+        const target = slotIndex + (w.dx < 0 ? 1 : -1)
+        w.dx = 0
+        void switchTo(target)
+        showDots()
+        return
+      }
+      gsap.killTweensOf(rail)
+      gsap.set(rail, { x: railX(slotIndex, w.dx, slotCount, boxWidth()) })
+      w.timer = window.setTimeout(() => {
+        w.dx = 0
+        snapTo(slotIndex)
+        showDots()
+      }, 250)
+    },
+  }
+
+  // The session the tap asked for has arrived: the arc draws and unwinds over it.
+  useLayoutEffect(() => {
+    if (!session || !drawNext.current) return
+    drawNext.current = false
+    const face = faceBox.current
+    const fill = fillEl.current
+    const track = trackEl.current
+    if (!face || !fill || !track) {
+      setSettling(false)
+      return
+    }
+    hold.current = true
+    fx.open(face, fill, track, () => {
+      hold.current = false
+      setSettling(false)
+    })
+  }, [sessionKey])
+
+  useEffect(() => {
+    if (landing) {
+      if (!sessionKey || sessionKey === keyOf(landing)) return
+      switching.current = false
+      setLanding(null)
+      return
+    }
+    if (!session && !settling) setStrip(null)
+  }, [sessionKey, settling, landing])
+
+  // A session started anywhere else still gets the queue around it, when it is in it.
+  useEffect(() => {
+    if (!session || strip || settling) return
+    let live = true
+    api
+      .queue(5)
+      .then((items) => {
+        if (!live) return
+        const found = items.findIndex((e) => e.task.id === session.task_id)
+        const index =
+          session.task_id === null ? (session.title === WORK_TIME.title ? 0 : -1) : found === -1 ? -1 : found + 1
+        if (index < 0) return
+        lastStartAt.current = Date.parse(session.started_at)
+        setStrip({ items, index })
+      })
+      .catch(() => {})
+    return () => {
+      live = false
+    }
+  }, [sessionKey, !!strip, settling])
+
+  useLayoutEffect(() => {
+    const rail = railEl.current
+    if (!rail) return
+    const place = () => {
+      if (!gsap.isTweening(rail)) gsap.set(rail, { x: -slotIndex * boxWidth() })
+    }
+    place()
+    addEventListener('resize', place)
+    return () => removeEventListener('resize', place)
+  }, [slotIndex, !!strip, sessionKey])
 
   // ── the wait ─────────────────────────────────────────────────
   const from = waitStart(visible, now)
@@ -561,63 +833,88 @@ export function Home({
     ]
   }
 
-  const nextActions = (ev: PlanEvent) => (
-    <>
-      <button className="btn-fill" disabled={pending} onClick={() => start(ev)}>Start</button>
-      {ev.task ? (
-        <button className="btn-haze" disabled={pending} onClick={() => finishBlock(ev)}>Done</button>
-      ) : (
-        <Overflow label="Later" className="ev-more-wrap later-wrap" items={laterItems(ev)} />
-      )}
-      <Overflow label="More" className="ev-more-wrap" items={blockMenuItems(ev)} />
-    </>
-  )
-
   // ── the two faces ────────────────────────────────────────────
-  const bigFace = session ? (
+  const startHint = !settling && hintShown('start')
+
+  // Slot 0 is Work time, then the queue; the one landed on is the session itself.
+  const slot = (s: FocusSession, i: number) => {
+    const entry = strip && i > 0 ? strip.items[i - 1] : null
+    const mark = hairline(entry?.reason)
+    if (!strip || (i === strip.index && !landing)) {
+      const sub = subOf(s)
+      return (
+        <div key={i} className="slot now">
+          {mark && <i className={`mark ${mark}`} />}
+          {sessionNum(s, mobile ? 64 : 76)}
+          <div className="gauge-name" style={{ fontSize: u(mobile ? 20 : 22) }}><Atoms text={s.title} /></div>
+          {sub && <div className="gauge-sub"><Atoms text={sub} /></div>}
+        </div>
+      )
+    }
+    const sub = entry ? (entry.step?.title ?? firstLine(entry.task.notes)) : ''
+    return (
+      <div key={i} className={`slot${i === strip.index ? ' now' : ''}`} aria-hidden="true">
+        {mark && <i className={`mark ${mark}`} />}
+        <div className="slot-num" style={{ fontSize: u(mobile ? 64 : 76) }}>{`${entry?.planned_min ?? 0}:00`}</div>
+        <div className="slot-name" style={{ fontSize: u(mobile ? 20 : 22) }}>{entry ? entry.task.title : WORK_TIME.title}</div>
+        {sub && <div className="slot-sub">{sub}</div>}
+      </div>
+    )
+  }
+
+  const bigFace = shown ? (
     <div className="home-face">
-      <Gauge size={mobile ? 320 : 440} fracAt={sessionFracAt(session)} breathe paused={isPaused(session)}>
-        {eyebrow(session) && <div className="gauge-eyebrow"><Atoms text={eyebrow(session) ?? ''} /></div>}
-        {sessionNum(session, mobile ? 64 : 76)}
-        <div className="gauge-name" style={{ fontSize: u(mobile ? 20 : 22) }}><Atoms text={faceName(session)} /></div>
-        {stepOf(session) && <div className="gauge-sub"><Atoms text={stepOf(session) ?? ''} /></div>}
-      </Gauge>
+      <div ref={faceBox} className="circle-face" style={{ width: u(faceSize), height: u(faceSize) }} {...surface}>
+        <Circle size={faceSize} fracAt={landing ? undefined : sessionFracAt(shown)} breathe paused={isPaused(shown)} hold={hold} fill={fillEl} track={trackEl}>
+          <div className="strip">
+            <div ref={railEl} className="rail">
+              {Array.from({ length: slotCount }, (_, i) => slot(shown, i))}
+            </div>
+          </div>
+        </Circle>
+        <svg className={`pause-glyph${isPaused(shown) ? ' on' : ''}`} viewBox="0 0 24 24" aria-hidden="true">
+          <rect x="6" y="5" width="4" height="14" rx="1.2" /><rect x="14" y="5" width="4" height="14" rx="1.2" />
+        </svg>
+        {sessionHint && phase !== 'idle' && <p className="face-hint under">tap to pause · swipe down when done</p>}
+        {strip && (
+          <div ref={dotsEl} className="strip-dots" aria-hidden="true">
+            {Array.from({ length: slotCount }, (_, i) => (
+              <i key={i} className={[i === 0 ? 'ring' : '', i === strip.index ? 'now' : ''].filter(Boolean).join(' ')} />
+            ))}
+          </div>
+        )}
+      </div>
       {breakSheet}
     </div>
   ) : (
     <div className="home-face">
-      {events === null ? (
-        <Gauge size={mobile ? 320 : 440} faded />
-      ) : next && facts ? (
-        prefs.showArc ? (
-          <Gauge size={mobile ? 320 : 440} fracAt={waitFracAt(next)} faded>
-            <div className="gauge-eyebrow"><Atoms text={facts.eyebrow} /></div>
+      <div ref={faceBox} className="circle-face" style={{ width: u(faceSize), height: u(faceSize) }} {...surface}>
+        {next && facts && prefs.showArc ? (
+          <Gauge size={faceSize} fracAt={waitFracAt(next)} faded>
             {facts.wait && (
               <div className="gauge-num" style={{ fontSize: u(mobile ? 50 : 58) }}><Atoms text={facts.wait} /></div>
             )}
             <div className="gauge-name" style={{ fontSize: u(mobile ? 18 : 22) }}><Atoms text={label} /></div>
             {face?.of && <div className="gauge-of"><Atoms text={face.of} /></div>}
             <div className="gauge-sub" style={{ fontSize: mobile ? undefined : u(14) }}><Atoms text={facts.span} /></div>
+            {startHint && <p className="face-hint inline">tap the circle to start working</p>}
           </Gauge>
         ) : (
-          <div className="home-text">
-            <div className="gauge-eyebrow"><Atoms text={facts.eyebrow} /></div>
-            <div className="home-title"><Atoms text={label} /></div>
-            {face?.of && <div className="gauge-of"><Atoms text={face.of} /></div>}
-            {facts.wait && (
-              <div className="gauge-num" style={{ fontSize: u(30) }}><Atoms text={`in ${facts.wait}`} /></div>
-            )}
-            <div className="gauge-sub"><Atoms text={facts.span} /></div>
-          </div>
-        )
-      ) : (
-        <div className="home-text"><div className="home-title"><Atoms text="That's everything today." /></div></div>
+          startHint && <p className="face-hint">tap the circle to start working</p>
+        )}
+      </div>
+      {next && facts && !prefs.showArc && (
+        <div className="home-text">
+          <div className="home-title"><Atoms text={label} /></div>
+          {face?.of && <div className="gauge-of"><Atoms text={face.of} /></div>}
+          {facts.wait && (
+            <div className="gauge-num" style={{ fontSize: u(30) }}><Atoms text={`in ${facts.wait}`} /></div>
+          )}
+          <div className="gauge-sub"><Atoms text={facts.span} /></div>
+        </div>
       )}
     </div>
   )
-
-  // The wrapper is what rests when the desktop goes idle; the group inside is what the morph moves.
-  const bigActions = session ? null : next && <div className="rest"><div className="home-actions">{nextActions(next)}</div></div>
 
   // Mobile, and any session, land on the compact header; the desktop wait lands on
   // the hero.
@@ -626,10 +923,9 @@ export function Home({
       <div className="home-face compact session">
         <div className="session-arc">
           <Gauge size={230} fracAt={sessionFracAt(session)} breathe paused={isPaused(session)}>
-            {eyebrow(session) && <span className="gauge-eyebrow">{eyebrow(session)}</span>}
             {sessionNum(session, 40)}
-            <div className="gauge-name" style={{ fontSize: u(15) }}>{faceName(session)}</div>
-            {stepOf(session) && <span className="gauge-sub">{stepOf(session)}</span>}
+            <div className="gauge-name" style={{ fontSize: u(15) }}>{session.title}</div>
+            {subOf(session) && <span className="gauge-sub">{subOf(session)}</span>}
           </Gauge>
           {pauseButton(session)}
         </div>
@@ -640,9 +936,8 @@ export function Home({
           {sessionNum(session, 24)}
         </Gauge>
         <div className="home-head">
-          {eyebrow(session) && <span className="gauge-eyebrow">{eyebrow(session)}</span>}
-          <span className="home-head-name">{faceName(session)}</span>
-          {stepOf(session) && <span className="gauge-sub">{stepOf(session)}</span>}
+          <span className="home-head-name">{session.title}</span>
+          {subOf(session) && <span className="gauge-sub">{subOf(session)}</span>}
         </div>
         {doneButton}
         {pauseButton(session)}
@@ -658,19 +953,9 @@ export function Home({
         facts.wait && <span className="gauge-num" style={{ fontSize: u(22) }}>{facts.wait}</span>
       )}
       <div className="home-head">
-        <span className="gauge-eyebrow">{facts.eyebrow}</span>
         <span className="home-head-name">{label}</span>
         {face?.of && <span className="gauge-of">{face.of}</span>}
         <span className="gauge-sub">{facts.span}</span>
-      </div>
-      <div className="home-head-actions">
-        <button className="btn-fill small" disabled={pending} onClick={() => start(next)}>Start</button>
-        {next.task ? (
-          <button className="btn-haze small" disabled={pending} onClick={() => finishBlock(next)}>Done</button>
-        ) : (
-          <Overflow label="Later" className="ev-more-wrap later-wrap" items={laterItems(next)} />
-        )}
-        <Overflow label="More" className="ev-more-wrap" items={blockMenuItems(next)} />
       </div>
     </div>
   ) : null
@@ -691,7 +976,6 @@ export function Home({
             </div>
             <div className="today-bar" aria-hidden="true"><span className="today-bar-fill" style={{ width: `${waitFracAt(next)() * 100}%` }} /></div>
           </div>
-          <div className="rest"><div className="today-actions">{nextActions(next)}</div></div>
         </>
       ) : (
         events && <h1 className="today-title">That's everything today.</h1>
@@ -903,6 +1187,9 @@ export function Home({
     facts?.span,
     face?.of,
     session?.started_at,
+    !!landing,
+    strip?.index,
+    strip?.items.length,
     session?.step_index,
     session?.step_name,
     session?.phase,
@@ -941,7 +1228,6 @@ export function Home({
       if (compactLanding) {
         travel(timeline, q('.face-big .gauge-ring'), q('.home-face.compact .gauge-ring'), { mode: 'box' })
         travel(timeline, q('.face-big .gauge-num'), q('.home-face.compact .gauge-num'), { mode: inSession ? 'box' : 'text' })
-        travel(timeline, q('.face-big .gauge-eyebrow'), q('.home-face.compact .gauge-eyebrow'))
         travel(timeline, q('.face-big .gauge-name, .face-big .home-title'), q('.home-face.compact .home-head-name, .home-face.compact .gauge-name'))
         travel(timeline, q('.face-big .gauge-sub'), q('.home-face.compact .home-head .gauge-sub, .home-face.compact .gauge-sub'))
         travel(timeline, q('.face-big .gauge-of'), q('.home-face.compact .home-head .gauge-of'))
@@ -949,10 +1235,6 @@ export function Home({
           // The controls settle in once the ring has cleared the header row.
           from(qa('.home-face.compact .btn-round, .home-face.compact .btn-fill'), { autoAlpha: 0, scale: 0.85, duration: 0.3, ease: 'power2.out' }, 0.65)
           from(qa('.home-sheet'), { autoAlpha: 0, y: 24, duration: 0.3, ease: 'power2.out' }, 0.62)
-        } else {
-          travel(timeline, q('.face-big .home-actions .btn-fill'), q('.home-face.compact .btn-fill'), { mode: 'box', fit: 'both' })
-          to(qa('.face-big .btn-haze, .face-big .ev-more-wrap'), { autoAlpha: 0, x: -24, y: -10, duration: 0.45, ease: 'power2.in' }, 0.2)
-          from(qa('.home-head-actions .btn-haze, .home-head-actions .ev-more-wrap'), { autoAlpha: 0, duration: 0.3, ease: 'power2.out' }, 0.7)
         }
         if (!q('.home-face.compact')) to(qa('.face-big .home-text'), { autoAlpha: 0, y: -20, duration: 0.4, ease: 'power2.in' }, 0.2)
         from(qa('.home-today .dayline'), { autoAlpha: 0, y: 28, duration: 0.4, ease: 'power2.out' }, 0.35)
@@ -988,11 +1270,10 @@ export function Home({
         travel(timeline, q('.face-big .gauge-name, .face-big .home-title'), q('.today-title'))
         travel(timeline, q('.face-big .gauge-sub'), q('.today-span'))
         travel(timeline, q('.face-big .gauge-of'), q('.today-of'))
-        travel(timeline, q('.face-big .gauge-eyebrow'), q('.today-eyebrow'))
-        travel(timeline, q('.face-big .home-actions'), q('.today-actions'), { mode: 'children', fit: 'both' })
+        from(qa('.today-eyebrow'), { autoAlpha: 0, duration: 0.4, ease: 'none' }, 0.6)
         from(qa('.today-line'), { autoAlpha: 0, y: 28, duration: 0.45, ease: 'power2.out' }, 0.35)
       }
-      to(qa('.face-big .chev'), { autoAlpha: 0, duration: 0.35 }, 0)
+      to(qa('.face-big .chev, .face-big .face-hint, .face-big .slot:not(.now)'), { autoAlpha: 0, duration: 0.35 }, 0)
       tl.current = timeline
       timeline.progress(st.current?.progress ?? 0)
       setReady(true)
@@ -1084,13 +1365,11 @@ export function Home({
         {motion ? (
           <div className="face-big">
             {bigFace}
-            {bigActions}
             {chevron}
           </div>
         ) : (
           <div className="face-still">
             {bigFace}
-            {bigActions}
             {session && <div className="home-sheet">{pauseButton(session)}{doneButton}</div>}
           </div>
         )}

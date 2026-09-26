@@ -21,6 +21,7 @@ import type {
   MemoryHit,
   NewStep,
   PlanEvent,
+  QueueEntry,
   Passkey,
   PromptDoc,
   PromptName,
@@ -306,11 +307,15 @@ export const api = {
     }),
   skipBreak: (id: number) =>
     request<WorkSession>(`/api/sessions/${id}/skip_break`, { method: 'POST' }),
-  endWorkSession: (id: number, outcome: 'done' | 'stopped') =>
+  // `discard` deletes a session younger than a minute instead of ending it.
+  endWorkSession: (id: number, outcome: 'done' | 'stopped', discard = false) =>
     request<{ ended: number | null }>(`/api/sessions/${id}/end`, {
       method: 'POST',
-      body: JSON.stringify({ outcome }),
+      body: JSON.stringify({ outcome, ...(discard && { discard: true }) }),
     }),
+  rounds: () => request<{ rounds: number }>('/api/sessions/today'),
+  // Open work in the order the planner would lay it.
+  queue: (limit = 5) => request<QueueEntry[]>(`/api/tasks/queue?limit=${limit}`),
   calendar: () => request<{ entries: CalendarEntry[] }>('/api/calendar'),
   addCalendarEntry: (fields: CalendarFields) =>
     request<CalendarEntry>('/api/calendar', { method: 'POST', body: JSON.stringify(fields) }),
