@@ -223,6 +223,27 @@ export function App() {
     [go, notify, putSession],
   )
 
+  // The phone's bar rests on Today once the hand has been still a while, sooner in a
+  // session; any touch anywhere brings it back.
+  const [rested, setRested] = useState(false)
+  const inSession = session !== null
+  useEffect(() => {
+    setRested(false)
+    if (!mobile || tab !== 'today') return
+    let timer = 0
+    const wake = () => {
+      setRested(false)
+      window.clearTimeout(timer)
+      timer = window.setTimeout(() => setRested(true), inSession ? 2500 : 4000)
+    }
+    wake()
+    document.addEventListener('pointerdown', wake)
+    return () => {
+      window.clearTimeout(timer)
+      document.removeEventListener('pointerdown', wake)
+    }
+  }, [mobile, tab, inSession])
+
   // Desktop rests the top bar and its jot for as long as a session runs.
   useEffect(() => {
     document.documentElement.classList.toggle('in-session', session !== null)
@@ -280,8 +301,10 @@ export function App() {
   useEffect(() => {
     if (!me) return
     return connectEvents((ev) => {
-      // A check-in's question is waiting in its thread, so the thread is the notice.
-      if (ev.conversation_id !== null) openConversation(ev.conversation_id)
+      // A check-in (it carries its event) or an urgent ask has its question waiting in
+      // the thread, so the thread is the notice; a session's notices are toasts over
+      // whatever is open.
+      if (ev.conversation_id !== null && (ev.event_id !== null || ev.urgency === 'high')) openConversation(ev.conversation_id)
       else notify(ev.body ? `${ev.title} — ${ev.body}` : ev.title)
       onChanged()
     }, onChanged)
@@ -391,7 +414,8 @@ export function App() {
           {viewOf(l.tab)}
         </main>
       ))}
-      {mobile && <Rail kind="tabs" current={current} go={go} />}
+      {mobile && <Rail kind="tabs" current={current} go={go} away={rested} />}
+      {mobile && <div className={`handle${rested ? ' on' : ''}`} aria-hidden="true" />}
       {toastNode}
     </div>
   )
@@ -403,10 +427,12 @@ function Rail({
   kind,
   current,
   go,
+  away = false,
 }: {
   kind: 'topnav' | 'tabs'
   current: NavTab
   go: (t: NavTab) => void
+  away?: boolean
 }) {
   const nav = useRef<HTMLElement>(null)
   const mark = useRef<HTMLSpanElement>(null)
@@ -429,7 +455,7 @@ function Rail({
   }, [kind, current])
 
   return (
-    <nav ref={nav} className={kind} aria-label="Views">
+    <nav ref={nav} className={`${kind}${away ? ' away' : ''}`} aria-label="Views">
       <span className="nav-glide" aria-hidden="true" ref={mark} />
       {NAV.map((t) => (
         <button key={t.id} aria-current={current === t.id} onClick={() => go(t.id)}>

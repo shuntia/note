@@ -68,6 +68,7 @@ type Loaded = {
   nightly: boolean
   checkins: boolean
   pomodoro: boolean
+  endNotify: boolean
   zoneAuto: boolean
   telegramEnabled: boolean
   telegramLinked: boolean
@@ -256,6 +257,7 @@ export function Settings({
           nightly: s.nightly_enabled,
           checkins: s.checkins_enabled,
           pomodoro: s.pomodoro_enabled,
+          endNotify: s.session_end_notify,
           zoneAuto: s.timezone_auto,
           telegramEnabled: s.telegram_enabled,
           telegramLinked: s.telegram_linked,
@@ -328,7 +330,12 @@ export function Settings({
 
   const commitFeature = async (
     row: string,
-    patch: { nightly_enabled?: boolean; checkins_enabled?: boolean; pomodoro_enabled?: boolean },
+    patch: {
+      nightly_enabled?: boolean
+      checkins_enabled?: boolean
+      pomodoro_enabled?: boolean
+      session_end_notify?: boolean
+    },
   ) => {
     setSave({ row, kind: 'busy' })
     try {
@@ -340,6 +347,7 @@ export function Settings({
               nightly: saved.nightly_enabled,
               checkins: saved.checkins_enabled,
               pomodoro: saved.pomodoro_enabled,
+              endNotify: saved.session_end_notify,
             }
           : s,
       )
@@ -558,6 +566,20 @@ export function Settings({
               </div>
             )}
           </FoldRow>
+          <div className="set-row">
+            <span className="set-row-body">
+              <span className="set-label">Notify when a session ends</span>
+            </span>
+            <Status save={save} row="session_end_notify" />
+            <Switch
+              label="Notify when a session ends"
+              on={loaded.endNotify}
+              disabled={busy}
+              onToggle={() =>
+                void commitFeature('session_end_notify', { session_end_notify: !loaded.endNotify })
+              }
+            />
+          </div>
           <FoldRow
             label="Counter"
             value={counterLabel}

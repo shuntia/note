@@ -213,6 +213,8 @@ export type Settings = {
   pomodoro_enabled: boolean
   pomodoro_work_min: number
   pomodoro_break_min: number
+  // Gates the pomodoro phase messages and the "Time's up." at a session's planned end.
+  session_end_notify: boolean
 }
 
 // A live code and the deep link that carries it to the bot.
@@ -236,6 +238,7 @@ export type SettingsSaved = Pick<
   | 'pomodoro_enabled'
   | 'pomodoro_work_min'
   | 'pomodoro_break_min'
+  | 'session_end_notify'
 > & { schedule: ScheduleRow[] }
 
 export type PromptName = 'persona' | 'planning' | 'share'
@@ -484,6 +487,11 @@ export type SessionStart = {
   step_name?: string
   notes?: string
 }
+
+export type QueueReason = 'now' | 'overdue' | 'urgent' | 'due_soon' | 'oldest'
+
+// `task` is the whole task with its steps; `step` is the one to work on, if any.
+export type QueueEntry = { task: TaskNode; step: Task | null; planned_min: number | null; reason: QueueReason }
 
 // How many blocks the close of the day sent to tomorrow.
 export type Carried = { moved: number }

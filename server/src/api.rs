@@ -19,6 +19,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/goals", get(goals_list).post(goals_create))
         .route("/api/goals/{id}", patch(goals_update).delete(goals_delete))
         .route("/api/tasks", get(tasks_list).post(tasks_create))
+        .route("/api/tasks/queue", get(tasks_queue))
         .route("/api/tasks/{id}", patch(tasks_update).delete(tasks_delete))
         .route(
             "/api/tasks/by-external/{external_id}",
@@ -67,6 +68,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/events/{id}/move_tomorrow", post(event_move_tomorrow))
         .route("/api/sessions", post(work_session_start))
         .route("/api/sessions/open", get(work_session_open))
+        .route("/api/sessions/today", get(work_session_today))
         .route("/api/sessions/{id}/end", post(work_session_end))
         .route("/api/sessions/{id}/pause", post(work_session_pause))
         .route("/api/sessions/{id}/resume", post(work_session_resume))
@@ -404,6 +406,29 @@ async fn tasks_list(user: TaskPrincipal, State(state): State<AppState>) -> impl 
     });
     match listed {
         Ok(ts) => Json(ts).into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct QueueQuery {
+    limit: Option<usize>,
+}
+
+async fn tasks_queue(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Query(q): Query<QueueQuery>,
+) -> impl IntoResponse {
+    let conn = state.db();
+    let tz = user_zone(&state, &user.username);
+    let limit = q.limit.unwrap_or(5).clamp(1, 20);
+    let listed = crate::tasks::queue(&conn, user.id, &tz, jiff::Timestamp::now(), limit).and_then(|mut q| {
+        crate::tasks::stamp_schedule(&conn, user.id, &tz, q.iter_mut().map(|e| &mut e.task.task))?;
+        Ok(q)
+    });
+    match listed {
+        Ok(q) => Json(q).into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
@@ -1231,6 +1256,7 @@ struct SettingsPatch {
     pomodoro_enabled: Option<bool>,
     pomodoro_work_min: Option<u32>,
     pomodoro_break_min: Option<u32>,
+    session_end_notify: Option<bool>,
     alerts: Option<Vec<AlertPatch>>,
 }
 
@@ -1270,6 +1296,7 @@ fn settings_body(
         "pomodoro_enabled": cfg.pomodoro_enabled(),
         "pomodoro_work_min": cfg.pomodoro_work_min(),
         "pomodoro_break_min": cfg.pomodoro_break_min(),
+        "session_end_notify": cfg.session_end_notify(),
         "schedule": schedule,
     })
 }
@@ -1411,6 +1438,9 @@ async fn settings_put(
     }
     if let Some(on) = req.pomodoro_enabled {
         cfg.pomodoro_enabled = Some(on);
+    }
+    if let Some(on) = req.session_end_notify {
+        cfg.session_end_notify = Some(on);
     }
     if let Some(n) = req.pomodoro_work_min {
         if !POMODORO_WORK_MIN.contains(&n) {
@@ -2137,6 +2167,8 @@ struct NewWorkSession {
 #[serde(deny_unknown_fields)]
 struct EndWorkSession {
     outcome: String,
+    #[serde(default)]
+    discard: bool,
 }
 
 #[derive(Deserialize)]
@@ -2194,6 +2226,18 @@ async fn work_session_end(
         return unprocessable_field("outcome", "must be done or stopped");
     }
     let conn = state.db();
+    let now = jiff::Timestamp::now();
+    if req.discard {
+        match crate::work::discard(&conn, user.id, id, now) {
+            Ok(true) => {
+                drop(conn);
+                state.hub.broadcast_changed(user.id);
+                return Json(serde_json::json!({ "ended": id })).into_response();
+            }
+            Ok(false) => {}
+            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        }
+    }
     let ended = crate::work::end(
         &conn,
         &state.config_dir,
@@ -2201,7 +2245,7 @@ async fn work_session_end(
         &user.username,
         Some(id),
         &req.outcome,
-        jiff::Timestamp::now(),
+        now,
     );
     match ended {
         Ok(ended) => Json(serde_json::json!({ "ended": ended })).into_response(),
@@ -2212,8 +2256,8 @@ async fn work_session_end(
 /// The four ways a client moves the session the server holds. Each answers with
 /// the whole session, so the face repaints from one reply, and a stale id is a
 /// 404 rather than a silent write to whatever is running now.
-fn session_reply(
-    moved: rusqlite::Result<Option<crate::work::Session>>,
+fn session_reply<E>(
+    moved: Result<Option<crate::work::Session>, E>,
 ) -> axum::response::Response {
     match moved {
         Ok(Some(session)) => Json(session).into_response(),
@@ -2228,7 +2272,7 @@ async fn work_session_pause(
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
     let conn = state.db();
-    session_reply(crate::work::pause(&conn, user.id, id, jiff::Timestamp::now()))
+    session_reply(crate::work::pause(&conn, &state.config_dir, user.id, id, jiff::Timestamp::now()))
 }
 
 async fn work_session_resume(
@@ -2237,7 +2281,7 @@ async fn work_session_resume(
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
     let conn = state.db();
-    session_reply(crate::work::resume(&conn, user.id, id, jiff::Timestamp::now()))
+    session_reply(crate::work::resume(&conn, &state.config_dir, user.id, id, jiff::Timestamp::now()))
 }
 
 async fn work_session_step(
@@ -2265,7 +2309,7 @@ async fn work_session_skip_break(
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
     let conn = state.db();
-    let skipped = crate::work::skip_break(&conn, user.id, id, jiff::Timestamp::now());
+    let skipped = crate::work::skip_break(&conn, &state.config_dir, user.id, id, jiff::Timestamp::now());
     drop(conn);
     if matches!(skipped, Ok(Some(_))) {
         state.hub.broadcast_changed(user.id);
@@ -2277,6 +2321,15 @@ async fn work_session_open(user: CurrentUser, State(state): State<AppState>) -> 
     let conn = state.db();
     match crate::work::open(&conn, user.id) {
         Ok(session) => Json(session).into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn work_session_today(user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
+    let tz = user_zone(&state, &user.username);
+    let conn = state.db();
+    match crate::work::rounds_today(&conn, user.id, &tz, jiff::Timestamp::now()) {
+        Ok(rounds) => Json(serde_json::json!({ "rounds": rounds })).into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
