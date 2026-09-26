@@ -247,6 +247,7 @@ async fn bearer_token_is_refused_outside_tasks() {
         "/api/plan/today",
         "/api/conversations",
         "/api/tasks/queue",
+        "/api/sessions/today",
     ] {
         let (status, _) = with_bearer(&app, &token, Method::GET, path, None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "{path}");

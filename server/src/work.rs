@@ -372,6 +372,56 @@ pub fn end(
     Ok(Some(session.id))
 }
 
+/// Rounds of work in sessions that started today and have ended: one for a
+/// single session, `round` for a pomodoro.
+pub fn rounds_today(
+    conn: &Connection,
+    user_id: i64,
+    tz: &jiff::tz::TimeZone,
+    now: jiff::Timestamp,
+) -> Result<u32> {
+    let (from, to) = crate::day::bounds(tz, now.to_zoned(tz.clone()).date())?;
+    let n: i64 = conn.query_row(
+        "SELECT COALESCE(SUM(CASE WHEN mode = 'pomodoro' THEN round ELSE 1 END), 0)
+         FROM work_sessions
+         WHERE user_id = ?1 AND ended_at IS NOT NULL AND started_at >= ?2 AND started_at < ?3",
+        rusqlite::params![user_id, from.to_string(), to.to_string()],
+        |r| r.get(0),
+    )?;
+    Ok(n as u32)
+}
+
+/// A session abandoned within its first minute leaves nothing behind: its row,
+/// its thread and its waiting checks go. Answers whether it did.
+pub fn discard(
+    conn: &Connection,
+    user_id: i64,
+    id: i64,
+    now: jiff::Timestamp,
+) -> rusqlite::Result<bool> {
+    let Some(session) = open_named(conn, user_id, id)? else { return Ok(false) };
+    if since(&session.started_at, now) >= 60_000 {
+        return Ok(false);
+    }
+    let tx = conn.unchecked_transaction()?;
+    conn.execute(
+        "UPDATE events SET status = 'dropped', decided_at = ?1
+         WHERE work_session_id = ?2 AND status IN ('pending','snoozed')",
+        (now.to_string(), id),
+    )?;
+    conn.execute("UPDATE events SET work_session_id = NULL WHERE work_session_id = ?1", [id])?;
+    conn.execute("DELETE FROM work_sessions WHERE id = ?1", [id])?;
+    if let Some(thread) = session.conversation_id {
+        conn.execute("UPDATE events SET conversation_id = NULL WHERE conversation_id = ?1", [thread])?;
+        conn.execute(
+            "DELETE FROM conversations WHERE id = ?1 AND user_id = ?2",
+            (thread, user_id),
+        )?;
+    }
+    tx.commit()?;
+    Ok(true)
+}
+
 /// Books the minutes worked against the task, and against its parent as well
 /// when the session ran a step.
 fn book_minutes(conn: &Connection, task_id: i64, minutes: i64) -> rusqlite::Result<()> {
@@ -1178,5 +1228,50 @@ mod tests {
         let s = start_one(&conn, &tmp, uid, Some(10));
         pause(&conn, uid, s.id, at("2026-09-17T09:05:00Z")).unwrap();
         assert!(overrun(&conn, tmp.path(), at("2026-09-17T09:30:00Z")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn rounds_today_counts_singles_once_and_pomodoros_by_round() {
+        let (conn, _tmp, uid) = env();
+        let insert = |mode: &str, round: i64, started: &str, ended: Option<&str>| {
+            conn.execute(
+                "INSERT INTO work_sessions
+                    (user_id, title, started_at, ended_at, mode, phase, phase_started_at, round)
+                 VALUES (?1, 'x', ?2, ?3, ?4, 'work', ?2, ?5)",
+                rusqlite::params![uid, started, ended, mode, round],
+            )
+            .unwrap();
+        };
+        insert("single", 1, "2026-09-17T08:00:00Z", Some("2026-09-17T08:30:00Z"));
+        insert("pomodoro", 3, "2026-09-17T09:00:00Z", Some("2026-09-17T10:30:00Z"));
+        insert("pomodoro", 2, "2026-09-16T09:00:00Z", Some("2026-09-16T10:00:00Z"));
+        insert("single", 1, "2026-09-17T11:00:00Z", None);
+        let tz = jiff::tz::TimeZone::UTC;
+        assert_eq!(rounds_today(&conn, uid, &tz, at("2026-09-17T12:00:00Z")).unwrap(), 4);
+        assert_eq!(rounds_today(&conn, uid, &tz, at("2026-09-18T12:00:00Z")).unwrap(), 0);
+    }
+
+    #[test]
+    fn discard_removes_only_a_young_session() {
+        let (conn, tmp, uid) = env();
+        let young = start_one(&conn, &tmp, uid, Some(25));
+        let thread = young.conversation_id.unwrap();
+        assert!(discard(&conn, uid, young.id, at("2026-09-17T09:00:30Z")).unwrap());
+        assert!(open(&conn, uid).unwrap().is_none());
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM conversations WHERE id = ?1", [thread], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        let waiting: i64 = conn
+            .query_row("SELECT COUNT(*) FROM events WHERE status IN ('pending','snoozed')", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(waiting, 0, "the discarded session's checks never fire");
+
+        let old = start_one(&conn, &tmp, uid, Some(25));
+        assert!(!discard(&conn, uid, old.id, at("2026-09-17T09:05:00Z")).unwrap());
+        assert_eq!(reload(&conn, uid).id, old.id);
+        assert!(!discard(&conn, uid + 1, old.id, at("2026-09-17T09:00:10Z")).unwrap());
     }
 }
