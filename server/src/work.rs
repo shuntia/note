@@ -333,6 +333,22 @@ pub fn end(
     now: jiff::Timestamp,
 ) -> Result<Option<i64>> {
     anyhow::ensure!(outcome == "done" || outcome == "stopped", "invalid outcome: {outcome}");
+    if let Some(session) = open(conn, user_id)? {
+        catch_up(conn, config_dir, &session, now)?;
+    }
+    close(conn, config_dir, user_id, username, id, outcome, now)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn close(
+    conn: &Connection,
+    config_dir: &Path,
+    user_id: i64,
+    username: &str,
+    id: Option<i64>,
+    outcome: &str,
+    now: jiff::Timestamp,
+) -> Result<Option<i64>> {
     let Some(session) = open(conn, user_id)? else {
         return Ok(None);
     };
@@ -487,10 +503,13 @@ fn lay_farewell(
 /// nothing.
 pub fn pause(
     conn: &Connection,
+    config_dir: &Path,
     user_id: i64,
     id: i64,
     now: jiff::Timestamp,
-) -> rusqlite::Result<Option<Session>> {
+) -> Result<Option<Session>> {
+    let Some(session) = open_named(conn, user_id, id)? else { return Ok(None) };
+    catch_up(conn, config_dir, &session, now)?;
     let Some(session) = open_named(conn, user_id, id)? else { return Ok(None) };
     if session.paused_at.is_none() {
         conn.execute(
@@ -498,17 +517,20 @@ pub fn pause(
             (now.to_string(), id),
         )?;
     }
-    open_named(conn, user_id, id)
+    Ok(open_named(conn, user_id, id)?)
 }
 
 /// Starts the clock again, adding the pause to both the session's total and the
 /// round's; resuming a session that is running changes nothing.
 pub fn resume(
     conn: &Connection,
+    config_dir: &Path,
     user_id: i64,
     id: i64,
     now: jiff::Timestamp,
-) -> rusqlite::Result<Option<Session>> {
+) -> Result<Option<Session>> {
+    let Some(session) = open_named(conn, user_id, id)? else { return Ok(None) };
+    catch_up(conn, config_dir, &session, now)?;
     let Some(session) = open_named(conn, user_id, id)? else { return Ok(None) };
     if let Some(at) = session.paused_at.as_deref() {
         let held = since(at, now);
@@ -519,7 +541,7 @@ pub fn resume(
             (held, id),
         )?;
     }
-    open_named(conn, user_id, id)
+    Ok(open_named(conn, user_id, id)?)
 }
 
 /// Where in the task's steps the session has reached.
@@ -544,15 +566,18 @@ pub fn set_step(
 /// nothing to cut.
 pub fn skip_break(
     conn: &Connection,
+    config_dir: &Path,
     user_id: i64,
     id: i64,
     now: jiff::Timestamp,
-) -> rusqlite::Result<Option<Session>> {
+) -> Result<Option<Session>> {
+    let Some(session) = open_named(conn, user_id, id)? else { return Ok(None) };
+    catch_up(conn, config_dir, &session, now)?;
     let Some(session) = open_named(conn, user_id, id)? else { return Ok(None) };
     if session.phase == "break" {
         flip(conn, &session, "work", session.round + 1, now)?;
     }
-    open_named(conn, user_id, id)
+    Ok(open_named(conn, user_id, id)?)
 }
 
 fn flip(
@@ -589,71 +614,120 @@ pub fn tick(conn: &Connection, config_dir: &Path, now: jiff::Timestamp) -> Resul
          JOIN users u ON u.id = w.user_id
          WHERE w.ended_at IS NULL AND w.mode = 'pomodoro' AND w.paused_at IS NULL"
     ))?;
-    let due: Vec<(Session, i64, String)> = stmt
+    let running: Vec<(Session, i64, String)> = stmt
         .query_map([], |r| Ok((row_to_session(r)?, r.get(20)?, r.get(21)?)))?
-        .collect::<rusqlite::Result<Vec<_>>>()?
-        .into_iter()
-        .filter(|(s, _, _)| s.phase_len_ms().is_some_and(|len| s.phase_elapsed_ms(now) >= len))
-        .collect();
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     drop(stmt);
 
     let mut flips = Vec::new();
-    for (session, user_id, username) in due {
-        let notify = wants_end_notice(config_dir, &username);
-        let message = if session.phase == "work" {
-            if session.round >= MAX_ROUNDS {
-                end(conn, config_dir, user_id, &username, Some(session.id), "stopped", now)?;
-                crate::log::record(
-                    conn,
-                    Some(user_id),
-                    "session_ended",
-                    &format!("session {} ran its {MAX_ROUNDS} rounds", session.id),
-                )?;
-                None
-            } else {
-                flip(conn, &session, "break", session.round, now)?;
-                crate::log::record(
-                    conn,
-                    Some(user_id),
-                    "session_break",
-                    &format!("session {} round {}", session.id, session.round),
-                )?;
-                notify.then(|| crate::channels::OutboundMessage {
-                    title: "Break".into(),
-                    body: format!(
-                        "{} min. Round {} of {} done.",
-                        session.break_min.unwrap_or_default(),
-                        session.round,
-                        session.title
-                    ),
-                    urgency: crate::channels::Urgency::Normal,
-                    event_id: None,
-                    conversation_id: session.conversation_id,
-                    actions: Vec::new(),
-                })
-            }
-        } else {
-            let round = session.round + 1;
-            flip(conn, &session, "work", round, now)?;
+    for (session, user_id, username) in running {
+        flips.extend(advance(conn, config_dir, &session, user_id, &username, now)?);
+    }
+    flips.extend(overrun(conn, config_dir, now)?);
+    Ok(flips)
+}
+
+/// Applies a phase change the sweep has not reached yet, so a move the user
+/// makes acts on the phase their clock already shows. Its notice is dropped:
+/// the user is looking at the face.
+fn catch_up(
+    conn: &Connection,
+    config_dir: &Path,
+    session: &Session,
+    now: jiff::Timestamp,
+) -> Result<()> {
+    let (user_id, username): (i64, String) = conn.query_row(
+        "SELECT u.id, u.username FROM work_sessions w JOIN users u ON u.id = w.user_id
+         WHERE w.id = ?1",
+        [session.id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    advance(conn, config_dir, session, user_id, &username, now)?;
+    Ok(())
+}
+
+/// When a phase of `len_ms` ran out: its start plus its pauses plus its length,
+/// or `now` when that is more than a phase ago and nobody was there to see it.
+fn phase_end(session: &Session, len_ms: i64, now: jiff::Timestamp) -> jiff::Timestamp {
+    let end = session.phase_started_at.parse::<jiff::Timestamp>().ok().and_then(|t| {
+        t.checked_add(jiff::SignedDuration::from_millis(session.phase_paused_ms + len_ms)).ok()
+    });
+    match end {
+        Some(end) if now.duration_since(end).as_millis() <= i128::from(len_ms) => end,
+        _ => now,
+    }
+}
+
+/// Moves one session on if its phase has run out; the next phase starts at the
+/// moment the last one ended.
+fn advance(
+    conn: &Connection,
+    config_dir: &Path,
+    session: &Session,
+    user_id: i64,
+    username: &str,
+    now: jiff::Timestamp,
+) -> Result<Option<Flip>> {
+    if session.paused_at.is_some() {
+        return Ok(None);
+    }
+    let Some(len) = session.phase_len_ms() else { return Ok(None) };
+    if session.phase_elapsed_ms(now) < len {
+        return Ok(None);
+    }
+    let at = phase_end(session, len, now);
+    let notify = wants_end_notice(config_dir, username);
+    let message = if session.phase == "work" {
+        if session.round >= MAX_ROUNDS {
+            close(conn, config_dir, user_id, username, Some(session.id), "stopped", now)?;
             crate::log::record(
                 conn,
                 Some(user_id),
-                "session_round",
-                &format!("session {} round {round}", session.id),
+                "session_ended",
+                &format!("session {} ran its {MAX_ROUNDS} rounds", session.id),
+            )?;
+            None
+        } else {
+            flip(conn, session, "break", session.round, at)?;
+            crate::log::record(
+                conn,
+                Some(user_id),
+                "session_break",
+                &format!("session {} round {}", session.id, session.round),
             )?;
             notify.then(|| crate::channels::OutboundMessage {
-                title: format!("Round {round}"),
-                body: format!("Back to {}.", session.title),
+                title: "Break".into(),
+                body: format!(
+                    "{} min. Round {} of {} done.",
+                    session.break_min.unwrap_or_default(),
+                    session.round,
+                    session.title
+                ),
                 urgency: crate::channels::Urgency::Normal,
                 event_id: None,
                 conversation_id: session.conversation_id,
                 actions: Vec::new(),
             })
-        };
-        flips.push(Flip { user_id, username, message });
-    }
-    flips.extend(overrun(conn, config_dir, now)?);
-    Ok(flips)
+        }
+    } else {
+        let round = session.round + 1;
+        flip(conn, session, "work", round, at)?;
+        crate::log::record(
+            conn,
+            Some(user_id),
+            "session_round",
+            &format!("session {} round {round}", session.id),
+        )?;
+        notify.then(|| crate::channels::OutboundMessage {
+            title: format!("Round {round}"),
+            body: format!("Back to {}.", session.title),
+            urgency: crate::channels::Urgency::Normal,
+            event_id: None,
+            conversation_id: session.conversation_id,
+            actions: Vec::new(),
+        })
+    };
+    Ok(Some(Flip { user_id, username: username.to_string(), message }))
 }
 
 fn wants_end_notice(config_dir: &Path, username: &str) -> bool {
@@ -1100,22 +1174,22 @@ mod tests {
         let session = start_one(&conn, &tmp, uid, Some(60));
         assert_eq!(session.elapsed_ms(at("2026-09-17T09:10:00Z")), 600_000);
 
-        let paused = pause(&conn, uid, session.id, at("2026-09-17T09:10:00Z")).unwrap().unwrap();
+        let paused = pause(&conn, tmp.path(), uid, session.id, at("2026-09-17T09:10:00Z")).unwrap().unwrap();
         assert_eq!(paused.paused_at.as_deref(), Some("2026-09-17T09:10:00Z"));
         assert_eq!(paused.elapsed_ms(at("2026-09-17T09:12:00Z")), 600_000, "a pause holds the clock");
         assert_eq!(paused.phase_elapsed_ms(at("2026-09-17T09:12:00Z")), 600_000);
 
-        let again = pause(&conn, uid, session.id, at("2026-09-17T09:12:00Z")).unwrap().unwrap();
+        let again = pause(&conn, tmp.path(), uid, session.id, at("2026-09-17T09:12:00Z")).unwrap().unwrap();
         assert_eq!(again.paused_at, paused.paused_at, "pausing twice changes nothing");
 
-        let running = resume(&conn, uid, session.id, at("2026-09-17T09:12:00Z")).unwrap().unwrap();
+        let running = resume(&conn, tmp.path(), uid, session.id, at("2026-09-17T09:12:00Z")).unwrap().unwrap();
         assert_eq!((running.paused_ms, running.phase_paused_ms), (120_000, 120_000));
         assert!(running.paused_at.is_none());
         assert_eq!(running.elapsed_ms(at("2026-09-17T09:13:00Z")), 660_000);
-        let untouched = resume(&conn, uid, session.id, at("2026-09-17T09:14:00Z")).unwrap().unwrap();
+        let untouched = resume(&conn, tmp.path(), uid, session.id, at("2026-09-17T09:14:00Z")).unwrap().unwrap();
         assert_eq!(untouched.paused_ms, 120_000, "resuming a running session changes nothing");
 
-        assert!(pause(&conn, uid, session.id + 9, at("2026-09-17T09:15:00Z")).unwrap().is_none());
+        assert!(pause(&conn, tmp.path(), uid, session.id + 9, at("2026-09-17T09:15:00Z")).unwrap().is_none());
     }
 
     #[test]
@@ -1125,8 +1199,8 @@ mod tests {
         assert_eq!((session.mode.as_str(), session.work_min, session.break_min),
                    ("pomodoro", Some(25), Some(5)));
 
-        pause(&conn, uid, session.id, at("2026-09-17T09:10:00Z")).unwrap();
-        resume(&conn, uid, session.id, at("2026-09-17T09:20:00Z")).unwrap();
+        pause(&conn, tmp.path(), uid, session.id, at("2026-09-17T09:10:00Z")).unwrap();
+        resume(&conn, tmp.path(), uid, session.id, at("2026-09-17T09:20:00Z")).unwrap();
         assert!(tick(&conn, tmp.path(), at("2026-09-17T09:30:00Z")).unwrap().is_empty(),
                 "ten of those minutes were a pause");
 
@@ -1153,7 +1227,7 @@ mod tests {
     fn a_paused_session_and_a_session_running_straight_through_never_flip() {
         let (conn, tmp, uid) = pomodoro_env();
         let session = start_one(&conn, &tmp, uid, None);
-        pause(&conn, uid, session.id, at("2026-09-17T09:05:00Z")).unwrap();
+        pause(&conn, tmp.path(), uid, session.id, at("2026-09-17T09:05:00Z")).unwrap();
         assert!(tick(&conn, tmp.path(), at("2026-09-17T10:00:00Z")).unwrap().is_empty());
 
         let (conn, tmp, uid) = env();
@@ -1167,15 +1241,62 @@ mod tests {
         let session = start_one(&conn, &tmp, uid, None);
         tick(&conn, tmp.path(), at("2026-09-17T09:25:00Z")).unwrap();
 
-        let back = skip_break(&conn, uid, session.id, at("2026-09-17T09:27:00Z")).unwrap().unwrap();
+        let back = skip_break(&conn, tmp.path(), uid, session.id, at("2026-09-17T09:27:00Z")).unwrap().unwrap();
         assert_eq!((back.phase.as_str(), back.round), ("work", 2));
         assert_eq!(back.phase_started_at, "2026-09-17T09:27:00Z");
 
         let unchanged =
-            skip_break(&conn, uid, session.id, at("2026-09-17T09:28:00Z")).unwrap().unwrap();
+            skip_break(&conn, tmp.path(), uid, session.id, at("2026-09-17T09:28:00Z")).unwrap().unwrap();
         assert_eq!((unchanged.phase.as_str(), unchanged.round), ("work", 2),
                    "outside a break there is nothing to cut");
-        assert!(skip_break(&conn, uid, session.id + 9, at("2026-09-17T09:29:00Z")).unwrap().is_none());
+        assert!(skip_break(&conn, tmp.path(), uid, session.id + 9, at("2026-09-17T09:29:00Z")).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_phase_flips_at_its_real_end_not_at_the_sweep() {
+        let (conn, tmp, uid) = pomodoro_env();
+        start_one(&conn, &tmp, uid, None);
+        tick(&conn, tmp.path(), at("2026-09-17T09:25:20Z")).unwrap();
+        let session = reload(&conn, uid);
+        assert_eq!(session.phase, "break");
+        assert_eq!(session.phase_started_at, "2026-09-17T09:25:00Z");
+
+        tick(&conn, tmp.path(), at("2026-09-17T09:30:10Z")).unwrap();
+        let session = reload(&conn, uid);
+        assert_eq!((session.phase.as_str(), session.round), ("work", 2));
+        assert_eq!(session.phase_started_at, "2026-09-17T09:30:00Z");
+    }
+
+    #[test]
+    fn a_phase_that_ran_out_long_before_the_sweep_flips_now() {
+        let (conn, tmp, uid) = pomodoro_env();
+        start_one(&conn, &tmp, uid, None);
+        tick(&conn, tmp.path(), at("2026-09-17T10:00:00Z")).unwrap();
+        assert_eq!(reload(&conn, uid).phase_started_at, "2026-09-17T10:00:00Z");
+    }
+
+    #[test]
+    fn a_break_cut_short_before_the_sweep_saw_it_starts_the_next_round() {
+        let (conn, tmp, uid) = pomodoro_env();
+        let session = start_one(&conn, &tmp, uid, None);
+        let back = skip_break(&conn, tmp.path(), uid, session.id, at("2026-09-17T09:25:10Z"))
+            .unwrap()
+            .unwrap();
+        assert_eq!((back.phase.as_str(), back.round), ("work", 2));
+        assert!(back.paused_at.is_none());
+        assert_eq!(back.phase_started_at, "2026-09-17T09:25:10Z");
+    }
+
+    #[test]
+    fn a_pause_in_a_break_the_sweep_has_not_reached_holds_the_break() {
+        let (conn, tmp, uid) = pomodoro_env();
+        let session = start_one(&conn, &tmp, uid, None);
+        let held = pause(&conn, tmp.path(), uid, session.id, at("2026-09-17T09:25:10Z"))
+            .unwrap()
+            .unwrap();
+        assert_eq!((held.phase.as_str(), held.round), ("break", 1));
+        assert_eq!(held.phase_started_at, "2026-09-17T09:25:00Z");
+        assert!(held.paused_at.is_some());
     }
 
     #[test]
@@ -1276,7 +1397,7 @@ mod tests {
         assert!(overrun(&conn, tmp.path(), at("2026-09-17T12:00:00Z")).unwrap().is_empty());
         end_one(&conn, &tmp, uid, None, "stopped", "2026-09-17T12:00:00Z");
         let s = start_one(&conn, &tmp, uid, Some(10));
-        pause(&conn, uid, s.id, at("2026-09-17T09:05:00Z")).unwrap();
+        pause(&conn, tmp.path(), uid, s.id, at("2026-09-17T09:05:00Z")).unwrap();
         assert!(overrun(&conn, tmp.path(), at("2026-09-17T09:30:00Z")).unwrap().is_empty());
     }
 
@@ -1354,9 +1475,9 @@ mod tests {
     fn planned_end_waits_out_a_pause() {
         let (conn, tmp, uid) = env();
         let s = start_one(&conn, &tmp, uid, Some(25));
-        pause(&conn, uid, s.id, at("2026-09-17T09:10:00Z")).unwrap();
+        pause(&conn, tmp.path(), uid, s.id, at("2026-09-17T09:10:00Z")).unwrap();
         assert!(planned_end(&conn, tmp.path(), at("2026-09-17T09:30:00Z")).unwrap().is_empty());
-        resume(&conn, uid, s.id, at("2026-09-17T09:20:00Z")).unwrap();
+        resume(&conn, tmp.path(), uid, s.id, at("2026-09-17T09:20:00Z")).unwrap();
         assert!(planned_end(&conn, tmp.path(), at("2026-09-17T09:34:00Z")).unwrap().is_empty());
         assert_eq!(planned_end(&conn, tmp.path(), at("2026-09-17T09:35:00Z")).unwrap().len(), 1);
     }

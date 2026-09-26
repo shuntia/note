@@ -2232,7 +2232,7 @@ async fn work_session_end(
             Ok(true) => {
                 drop(conn);
                 state.hub.broadcast_changed(user.id);
-                return Json(serde_json::json!({})).into_response();
+                return Json(serde_json::json!({ "ended": id })).into_response();
             }
             Ok(false) => {}
             Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
@@ -2256,8 +2256,8 @@ async fn work_session_end(
 /// The four ways a client moves the session the server holds. Each answers with
 /// the whole session, so the face repaints from one reply, and a stale id is a
 /// 404 rather than a silent write to whatever is running now.
-fn session_reply(
-    moved: rusqlite::Result<Option<crate::work::Session>>,
+fn session_reply<E>(
+    moved: Result<Option<crate::work::Session>, E>,
 ) -> axum::response::Response {
     match moved {
         Ok(Some(session)) => Json(session).into_response(),
@@ -2272,7 +2272,7 @@ async fn work_session_pause(
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
     let conn = state.db();
-    session_reply(crate::work::pause(&conn, user.id, id, jiff::Timestamp::now()))
+    session_reply(crate::work::pause(&conn, &state.config_dir, user.id, id, jiff::Timestamp::now()))
 }
 
 async fn work_session_resume(
@@ -2281,7 +2281,7 @@ async fn work_session_resume(
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
     let conn = state.db();
-    session_reply(crate::work::resume(&conn, user.id, id, jiff::Timestamp::now()))
+    session_reply(crate::work::resume(&conn, &state.config_dir, user.id, id, jiff::Timestamp::now()))
 }
 
 async fn work_session_step(
@@ -2309,7 +2309,7 @@ async fn work_session_skip_break(
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
     let conn = state.db();
-    let skipped = crate::work::skip_break(&conn, user.id, id, jiff::Timestamp::now());
+    let skipped = crate::work::skip_break(&conn, &state.config_dir, user.id, id, jiff::Timestamp::now());
     drop(conn);
     if matches!(skipped, Ok(Some(_))) {
         state.hub.broadcast_changed(user.id);
