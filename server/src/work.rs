@@ -231,7 +231,7 @@ pub fn start(
     )?;
     let id = conn.last_insert_rowid();
     if !pomodoro {
-        lay_opening_checks(conn, config_dir, user_id, username, id, title, new.planned_min, now)
+        lay_opening_checks(conn, config_dir, user_id, username, id, title, new.planned_min, cfg.as_ref(), now)
             .map_err(StartError::Other)?;
     }
     crate::log::record(conn, Some(user_id), "work_session_started", &format!("session {id} {title:?}"))
@@ -248,7 +248,7 @@ fn first_check_minutes(planned_min: Option<i64>) -> i64 {
 }
 
 /// The checks a session opens with: the midpoint, and — where the session named
-/// a length — one at the planned end.
+/// a length and "Time's up." is not wanted in its place — one at the planned end.
 #[allow(clippy::too_many_arguments)]
 fn lay_opening_checks(
     conn: &Connection,
@@ -258,6 +258,7 @@ fn lay_opening_checks(
     session_id: i64,
     title: &str,
     planned_min: Option<i64>,
+    cfg: Option<&crate::config::UserConfig>,
     now: jiff::Timestamp,
 ) -> Result<()> {
     lay_session_check(
@@ -270,7 +271,8 @@ fn lay_opening_checks(
         &format!("Progress check on {title}."),
         now,
     )?;
-    if let Some(min) = planned_min {
+    let times_up = cfg.is_none_or(|c| c.session_end_notify());
+    if let Some(min) = planned_min.filter(|_| !times_up) {
         lay_session_check(
             conn,
             config_dir,
@@ -331,6 +333,22 @@ pub fn end(
     now: jiff::Timestamp,
 ) -> Result<Option<i64>> {
     anyhow::ensure!(outcome == "done" || outcome == "stopped", "invalid outcome: {outcome}");
+    if let Some(session) = open(conn, user_id)? {
+        catch_up(conn, config_dir, &session, now)?;
+    }
+    close(conn, config_dir, user_id, username, id, outcome, now)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn close(
+    conn: &Connection,
+    config_dir: &Path,
+    user_id: i64,
+    username: &str,
+    id: Option<i64>,
+    outcome: &str,
+    now: jiff::Timestamp,
+) -> Result<Option<i64>> {
     let Some(session) = open(conn, user_id)? else {
         return Ok(None);
     };
@@ -370,6 +388,57 @@ pub fn end(
         tx.commit()?;
     }
     Ok(Some(session.id))
+}
+
+/// Rounds of work in sessions that started today and have ended: one for a
+/// single session, `round` for a pomodoro.
+pub fn rounds_today(
+    conn: &Connection,
+    user_id: i64,
+    tz: &jiff::tz::TimeZone,
+    now: jiff::Timestamp,
+) -> Result<u32> {
+    let (from, to) = crate::day::bounds(tz, now.to_zoned(tz.clone()).date())?;
+    let n: i64 = conn.query_row(
+        "SELECT COALESCE(SUM(CASE WHEN mode = 'pomodoro' THEN round ELSE 1 END), 0)
+         FROM work_sessions
+         WHERE user_id = ?1 AND ended_at IS NOT NULL AND started_at >= ?2 AND started_at < ?3",
+        rusqlite::params![user_id, from.to_string(), to.to_string()],
+        |r| r.get(0),
+    )?;
+    Ok(n as u32)
+}
+
+/// A session abandoned within its first minute leaves nothing behind: its row,
+/// its thread and its waiting checks go. Answers whether it did.
+pub fn discard(
+    conn: &Connection,
+    user_id: i64,
+    id: i64,
+    now: jiff::Timestamp,
+) -> Result<bool> {
+    let Some(session) = open_named(conn, user_id, id)? else { return Ok(false) };
+    if since(&session.started_at, now) >= 60_000 {
+        return Ok(false);
+    }
+    let tx = conn.unchecked_transaction()?;
+    conn.execute(
+        "UPDATE events SET status = 'dropped', decided_at = ?1
+         WHERE work_session_id = ?2 AND status IN ('pending','snoozed')",
+        (now.to_string(), id),
+    )?;
+    conn.execute("UPDATE events SET work_session_id = NULL WHERE work_session_id = ?1", [id])?;
+    conn.execute("DELETE FROM work_sessions WHERE id = ?1", [id])?;
+    crate::log::record(conn, Some(user_id), "work_session_discarded", &format!("session {id}"))?;
+    if let Some(thread) = session.conversation_id {
+        conn.execute("UPDATE events SET conversation_id = NULL WHERE conversation_id = ?1", [thread])?;
+        conn.execute(
+            "DELETE FROM conversations WHERE id = ?1 AND user_id = ?2",
+            (thread, user_id),
+        )?;
+    }
+    tx.commit()?;
+    Ok(true)
 }
 
 /// Books the minutes worked against the task, and against its parent as well
@@ -434,10 +503,13 @@ fn lay_farewell(
 /// nothing.
 pub fn pause(
     conn: &Connection,
+    config_dir: &Path,
     user_id: i64,
     id: i64,
     now: jiff::Timestamp,
-) -> rusqlite::Result<Option<Session>> {
+) -> Result<Option<Session>> {
+    let Some(session) = open_named(conn, user_id, id)? else { return Ok(None) };
+    catch_up(conn, config_dir, &session, now)?;
     let Some(session) = open_named(conn, user_id, id)? else { return Ok(None) };
     if session.paused_at.is_none() {
         conn.execute(
@@ -445,17 +517,20 @@ pub fn pause(
             (now.to_string(), id),
         )?;
     }
-    open_named(conn, user_id, id)
+    Ok(open_named(conn, user_id, id)?)
 }
 
 /// Starts the clock again, adding the pause to both the session's total and the
 /// round's; resuming a session that is running changes nothing.
 pub fn resume(
     conn: &Connection,
+    config_dir: &Path,
     user_id: i64,
     id: i64,
     now: jiff::Timestamp,
-) -> rusqlite::Result<Option<Session>> {
+) -> Result<Option<Session>> {
+    let Some(session) = open_named(conn, user_id, id)? else { return Ok(None) };
+    catch_up(conn, config_dir, &session, now)?;
     let Some(session) = open_named(conn, user_id, id)? else { return Ok(None) };
     if let Some(at) = session.paused_at.as_deref() {
         let held = since(at, now);
@@ -466,7 +541,7 @@ pub fn resume(
             (held, id),
         )?;
     }
-    open_named(conn, user_id, id)
+    Ok(open_named(conn, user_id, id)?)
 }
 
 /// Where in the task's steps the session has reached.
@@ -491,15 +566,18 @@ pub fn set_step(
 /// nothing to cut.
 pub fn skip_break(
     conn: &Connection,
+    config_dir: &Path,
     user_id: i64,
     id: i64,
     now: jiff::Timestamp,
-) -> rusqlite::Result<Option<Session>> {
+) -> Result<Option<Session>> {
+    let Some(session) = open_named(conn, user_id, id)? else { return Ok(None) };
+    catch_up(conn, config_dir, &session, now)?;
     let Some(session) = open_named(conn, user_id, id)? else { return Ok(None) };
     if session.phase == "break" {
         flip(conn, &session, "work", session.round + 1, now)?;
     }
-    open_named(conn, user_id, id)
+    Ok(open_named(conn, user_id, id)?)
 }
 
 fn flip(
@@ -536,69 +614,166 @@ pub fn tick(conn: &Connection, config_dir: &Path, now: jiff::Timestamp) -> Resul
          JOIN users u ON u.id = w.user_id
          WHERE w.ended_at IS NULL AND w.mode = 'pomodoro' AND w.paused_at IS NULL"
     ))?;
-    let due: Vec<(Session, i64, String)> = stmt
+    let running: Vec<(Session, i64, String)> = stmt
         .query_map([], |r| Ok((row_to_session(r)?, r.get(20)?, r.get(21)?)))?
-        .collect::<rusqlite::Result<Vec<_>>>()?
-        .into_iter()
-        .filter(|(s, _, _)| s.phase_len_ms().is_some_and(|len| s.phase_elapsed_ms(now) >= len))
-        .collect();
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     drop(stmt);
 
     let mut flips = Vec::new();
-    for (session, user_id, username) in due {
-        let message = if session.phase == "work" {
-            if session.round >= MAX_ROUNDS {
-                end(conn, config_dir, user_id, &username, Some(session.id), "stopped", now)?;
-                crate::log::record(
-                    conn,
-                    Some(user_id),
-                    "session_ended",
-                    &format!("session {} ran its {MAX_ROUNDS} rounds", session.id),
-                )?;
-                None
-            } else {
-                flip(conn, &session, "break", session.round, now)?;
-                crate::log::record(
-                    conn,
-                    Some(user_id),
-                    "session_break",
-                    &format!("session {} round {}", session.id, session.round),
-                )?;
-                Some(crate::channels::OutboundMessage {
-                    title: "Break".into(),
-                    body: format!(
-                        "{} min. Round {} of {} done.",
-                        session.break_min.unwrap_or_default(),
-                        session.round,
-                        session.title
-                    ),
-                    urgency: crate::channels::Urgency::Normal,
-                    event_id: None,
-                    conversation_id: session.conversation_id,
-                    actions: Vec::new(),
-                })
+    for (session, user_id, username) in running {
+        flips.extend(advance(conn, config_dir, &session, user_id, &username, true, now)?);
+    }
+    flips.extend(overrun(conn, config_dir, now)?);
+    Ok(flips)
+}
+
+/// Applies a phase change the sweep has not reached yet, so a move the user
+/// makes acts on the phase their clock already shows. Its notice is dropped:
+/// the user is looking at the face.
+fn catch_up(
+    conn: &Connection,
+    config_dir: &Path,
+    session: &Session,
+    now: jiff::Timestamp,
+) -> Result<()> {
+    let (user_id, username): (i64, String) = conn.query_row(
+        "SELECT u.id, u.username FROM work_sessions w JOIN users u ON u.id = w.user_id
+         WHERE w.id = ?1",
+        [session.id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    advance(conn, config_dir, session, user_id, &username, false, now)?;
+    Ok(())
+}
+
+/// When a phase of `len_ms` ran out: its start plus its pauses plus its length,
+/// or `now` when that is more than a phase ago and nobody was there to see it.
+fn phase_end(session: &Session, len_ms: i64, now: jiff::Timestamp) -> jiff::Timestamp {
+    let end = session.phase_started_at.parse::<jiff::Timestamp>().ok().and_then(|t| {
+        t.checked_add(jiff::SignedDuration::from_millis(session.phase_paused_ms + len_ms)).ok()
+    });
+    match end {
+        Some(end) if now.duration_since(end).as_millis() <= i128::from(len_ms) => end,
+        _ => now,
+    }
+}
+
+/// Moves one session on if its phase has run out; the next phase starts at the
+/// moment the last one ended. Without `auto_close` a last round that has run out
+/// is left open for the caller to close.
+#[allow(clippy::too_many_arguments)]
+fn advance(
+    conn: &Connection,
+    config_dir: &Path,
+    session: &Session,
+    user_id: i64,
+    username: &str,
+    auto_close: bool,
+    now: jiff::Timestamp,
+) -> Result<Option<Flip>> {
+    if session.paused_at.is_some() {
+        return Ok(None);
+    }
+    let Some(len) = session.phase_len_ms() else { return Ok(None) };
+    if session.phase_elapsed_ms(now) < len {
+        return Ok(None);
+    }
+    let at = phase_end(session, len, now);
+    let notify = wants_end_notice(config_dir, username);
+    let message = if session.phase == "work" {
+        if session.round >= MAX_ROUNDS {
+            if !auto_close {
+                return Ok(None);
             }
-        } else {
-            let round = session.round + 1;
-            flip(conn, &session, "work", round, now)?;
+            close(conn, config_dir, user_id, username, Some(session.id), "stopped", now)?;
             crate::log::record(
                 conn,
                 Some(user_id),
-                "session_round",
-                &format!("session {} round {round}", session.id),
+                "session_ended",
+                &format!("session {} ran its {MAX_ROUNDS} rounds", session.id),
             )?;
-            Some(crate::channels::OutboundMessage {
-                title: format!("Round {round}"),
-                body: format!("Back to {}.", session.title),
+            None
+        } else {
+            flip(conn, session, "break", session.round, at)?;
+            crate::log::record(
+                conn,
+                Some(user_id),
+                "session_break",
+                &format!("session {} round {}", session.id, session.round),
+            )?;
+            notify.then(|| crate::channels::OutboundMessage {
+                title: "Break".into(),
+                body: format!(
+                    "{} min. Round {} of {} done.",
+                    session.break_min.unwrap_or_default(),
+                    session.round,
+                    session.title
+                ),
                 urgency: crate::channels::Urgency::Normal,
                 event_id: None,
                 conversation_id: session.conversation_id,
                 actions: Vec::new(),
             })
-        };
+        }
+    } else {
+        let round = session.round + 1;
+        flip(conn, session, "work", round, at)?;
+        crate::log::record(
+            conn,
+            Some(user_id),
+            "session_round",
+            &format!("session {} round {round}", session.id),
+        )?;
+        notify.then(|| crate::channels::OutboundMessage {
+            title: format!("Round {round}"),
+            body: format!("Back to {}.", session.title),
+            urgency: crate::channels::Urgency::Normal,
+            event_id: None,
+            conversation_id: session.conversation_id,
+            actions: Vec::new(),
+        })
+    };
+    Ok(Some(Flip { user_id, username: username.to_string(), message }))
+}
+
+fn wants_end_notice(config_dir: &Path, username: &str) -> bool {
+    crate::config::UserConfig::load(config_dir, username)
+        .map_or(true, |c| c.session_end_notify())
+}
+
+/// Marks every running single session that has reached its planned length, once,
+/// and says "Time's up." where the user wants to hear it.
+pub fn planned_end(conn: &Connection, config_dir: &Path, now: jiff::Timestamp) -> Result<Vec<Flip>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {COLS_W}, w.user_id, u.username FROM work_sessions w
+         JOIN users u ON u.id = w.user_id
+         WHERE w.ended_at IS NULL AND w.paused_at IS NULL AND w.planned_min IS NOT NULL
+           AND w.mode = 'single' AND w.end_notified_at IS NULL"
+    ))?;
+    let due: Vec<(Session, i64, String)> = stmt
+        .query_map([], |r| Ok((row_to_session(r)?, r.get(20)?, r.get(21)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .into_iter()
+        .filter(|(s, _, _)| s.elapsed_ms(now) >= s.planned_min.unwrap_or_default() * 60_000)
+        .collect();
+    drop(stmt);
+
+    let mut flips = Vec::new();
+    for (session, user_id, username) in due {
+        conn.execute(
+            "UPDATE work_sessions SET end_notified_at = ?1 WHERE id = ?2",
+            (now.to_string(), session.id),
+        )?;
+        let message = wants_end_notice(config_dir, &username).then(|| crate::channels::OutboundMessage {
+            title: session.title.clone(),
+            body: "Time's up.".into(),
+            urgency: crate::channels::Urgency::Normal,
+            event_id: None,
+            conversation_id: session.conversation_id,
+            actions: Vec::new(),
+        });
         flips.push(Flip { user_id, username, message });
     }
-    flips.extend(overrun(conn, config_dir, now)?);
     Ok(flips)
 }
 
@@ -702,6 +877,11 @@ mod tests {
 
     fn env() -> (Connection, tempfile::TempDir, i64) {
         env_with("")
+    }
+
+    /// The planned-end check is laid only where "Time's up." is turned off.
+    fn checked_env() -> (Connection, tempfile::TempDir, i64) {
+        env_with("session_end_notify = false\n")
     }
 
     /// 25 minutes of work, 5 of break, as the defaults have it.
@@ -840,7 +1020,7 @@ mod tests {
 
     #[test]
     fn a_session_that_named_a_length_is_asked_about_it_at_the_end() {
-        let (conn, tmp, uid) = env();
+        let (conn, tmp, uid) = checked_env();
         start_one(&conn, &tmp, uid, Some(50));
         let rows = checks(&conn);
         assert_eq!(rows.len(), 2);
@@ -872,7 +1052,7 @@ mod tests {
 
     #[test]
     fn a_new_session_stops_the_one_still_running() {
-        let (conn, tmp, uid) = env();
+        let (conn, tmp, uid) = checked_env();
         let first = start_one(&conn, &tmp, uid, Some(30));
         let second = start_one(&conn, &tmp, uid, Some(30));
         assert_ne!(first.id, second.id);
@@ -925,7 +1105,7 @@ mod tests {
 
     #[test]
     fn ending_a_session_drops_its_waiting_checks_and_leaves_the_rest_alone() {
-        let (conn, tmp, uid) = env();
+        let (conn, tmp, uid) = checked_env();
         let session = start_one(&conn, &tmp, uid, Some(60));
         crate::triggers::lay(
             &conn,
@@ -1000,22 +1180,22 @@ mod tests {
         let session = start_one(&conn, &tmp, uid, Some(60));
         assert_eq!(session.elapsed_ms(at("2026-09-17T09:10:00Z")), 600_000);
 
-        let paused = pause(&conn, uid, session.id, at("2026-09-17T09:10:00Z")).unwrap().unwrap();
+        let paused = pause(&conn, tmp.path(), uid, session.id, at("2026-09-17T09:10:00Z")).unwrap().unwrap();
         assert_eq!(paused.paused_at.as_deref(), Some("2026-09-17T09:10:00Z"));
         assert_eq!(paused.elapsed_ms(at("2026-09-17T09:12:00Z")), 600_000, "a pause holds the clock");
         assert_eq!(paused.phase_elapsed_ms(at("2026-09-17T09:12:00Z")), 600_000);
 
-        let again = pause(&conn, uid, session.id, at("2026-09-17T09:12:00Z")).unwrap().unwrap();
+        let again = pause(&conn, tmp.path(), uid, session.id, at("2026-09-17T09:12:00Z")).unwrap().unwrap();
         assert_eq!(again.paused_at, paused.paused_at, "pausing twice changes nothing");
 
-        let running = resume(&conn, uid, session.id, at("2026-09-17T09:12:00Z")).unwrap().unwrap();
+        let running = resume(&conn, tmp.path(), uid, session.id, at("2026-09-17T09:12:00Z")).unwrap().unwrap();
         assert_eq!((running.paused_ms, running.phase_paused_ms), (120_000, 120_000));
         assert!(running.paused_at.is_none());
         assert_eq!(running.elapsed_ms(at("2026-09-17T09:13:00Z")), 660_000);
-        let untouched = resume(&conn, uid, session.id, at("2026-09-17T09:14:00Z")).unwrap().unwrap();
+        let untouched = resume(&conn, tmp.path(), uid, session.id, at("2026-09-17T09:14:00Z")).unwrap().unwrap();
         assert_eq!(untouched.paused_ms, 120_000, "resuming a running session changes nothing");
 
-        assert!(pause(&conn, uid, session.id + 9, at("2026-09-17T09:15:00Z")).unwrap().is_none());
+        assert!(pause(&conn, tmp.path(), uid, session.id + 9, at("2026-09-17T09:15:00Z")).unwrap().is_none());
     }
 
     #[test]
@@ -1025,8 +1205,8 @@ mod tests {
         assert_eq!((session.mode.as_str(), session.work_min, session.break_min),
                    ("pomodoro", Some(25), Some(5)));
 
-        pause(&conn, uid, session.id, at("2026-09-17T09:10:00Z")).unwrap();
-        resume(&conn, uid, session.id, at("2026-09-17T09:20:00Z")).unwrap();
+        pause(&conn, tmp.path(), uid, session.id, at("2026-09-17T09:10:00Z")).unwrap();
+        resume(&conn, tmp.path(), uid, session.id, at("2026-09-17T09:20:00Z")).unwrap();
         assert!(tick(&conn, tmp.path(), at("2026-09-17T09:30:00Z")).unwrap().is_empty(),
                 "ten of those minutes were a pause");
 
@@ -1053,7 +1233,7 @@ mod tests {
     fn a_paused_session_and_a_session_running_straight_through_never_flip() {
         let (conn, tmp, uid) = pomodoro_env();
         let session = start_one(&conn, &tmp, uid, None);
-        pause(&conn, uid, session.id, at("2026-09-17T09:05:00Z")).unwrap();
+        pause(&conn, tmp.path(), uid, session.id, at("2026-09-17T09:05:00Z")).unwrap();
         assert!(tick(&conn, tmp.path(), at("2026-09-17T10:00:00Z")).unwrap().is_empty());
 
         let (conn, tmp, uid) = env();
@@ -1067,15 +1247,95 @@ mod tests {
         let session = start_one(&conn, &tmp, uid, None);
         tick(&conn, tmp.path(), at("2026-09-17T09:25:00Z")).unwrap();
 
-        let back = skip_break(&conn, uid, session.id, at("2026-09-17T09:27:00Z")).unwrap().unwrap();
+        let back = skip_break(&conn, tmp.path(), uid, session.id, at("2026-09-17T09:27:00Z")).unwrap().unwrap();
         assert_eq!((back.phase.as_str(), back.round), ("work", 2));
         assert_eq!(back.phase_started_at, "2026-09-17T09:27:00Z");
 
         let unchanged =
-            skip_break(&conn, uid, session.id, at("2026-09-17T09:28:00Z")).unwrap().unwrap();
+            skip_break(&conn, tmp.path(), uid, session.id, at("2026-09-17T09:28:00Z")).unwrap().unwrap();
         assert_eq!((unchanged.phase.as_str(), unchanged.round), ("work", 2),
                    "outside a break there is nothing to cut");
-        assert!(skip_break(&conn, uid, session.id + 9, at("2026-09-17T09:29:00Z")).unwrap().is_none());
+        assert!(skip_break(&conn, tmp.path(), uid, session.id + 9, at("2026-09-17T09:29:00Z")).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_phase_flips_at_its_real_end_not_at_the_sweep() {
+        let (conn, tmp, uid) = pomodoro_env();
+        start_one(&conn, &tmp, uid, None);
+        tick(&conn, tmp.path(), at("2026-09-17T09:25:20Z")).unwrap();
+        let session = reload(&conn, uid);
+        assert_eq!(session.phase, "break");
+        assert_eq!(session.phase_started_at, "2026-09-17T09:25:00Z");
+
+        tick(&conn, tmp.path(), at("2026-09-17T09:30:10Z")).unwrap();
+        let session = reload(&conn, uid);
+        assert_eq!((session.phase.as_str(), session.round), ("work", 2));
+        assert_eq!(session.phase_started_at, "2026-09-17T09:30:00Z");
+    }
+
+    #[test]
+    fn a_phase_that_ran_out_long_before_the_sweep_flips_now() {
+        let (conn, tmp, uid) = pomodoro_env();
+        start_one(&conn, &tmp, uid, None);
+        tick(&conn, tmp.path(), at("2026-09-17T10:00:00Z")).unwrap();
+        assert_eq!(reload(&conn, uid).phase_started_at, "2026-09-17T10:00:00Z");
+    }
+
+    #[test]
+    fn a_break_cut_short_before_the_sweep_saw_it_starts_the_next_round() {
+        let (conn, tmp, uid) = pomodoro_env();
+        let session = start_one(&conn, &tmp, uid, None);
+        let back = skip_break(&conn, tmp.path(), uid, session.id, at("2026-09-17T09:25:10Z"))
+            .unwrap()
+            .unwrap();
+        assert_eq!((back.phase.as_str(), back.round), ("work", 2));
+        assert!(back.paused_at.is_none());
+        assert_eq!(back.phase_started_at, "2026-09-17T09:25:10Z");
+    }
+
+    #[test]
+    fn a_pause_in_a_break_the_sweep_has_not_reached_holds_the_break() {
+        let (conn, tmp, uid) = pomodoro_env();
+        let session = start_one(&conn, &tmp, uid, None);
+        let held = pause(&conn, tmp.path(), uid, session.id, at("2026-09-17T09:25:10Z"))
+            .unwrap()
+            .unwrap();
+        assert_eq!((held.phase.as_str(), held.round), ("break", 1));
+        assert_eq!(held.phase_started_at, "2026-09-17T09:25:00Z");
+        assert!(held.paused_at.is_some());
+    }
+
+    #[test]
+    fn ending_a_last_round_the_sweep_has_not_reached_keeps_the_users_outcome() {
+        let (conn, tmp, uid) = pomodoro_env();
+        let session = start_one(&conn, &tmp, uid, None);
+        conn.execute(
+            "UPDATE work_sessions SET round = ?1, phase_started_at = '2026-09-17T09:00:00Z'
+             WHERE id = ?2",
+            (MAX_ROUNDS, session.id),
+        )
+        .unwrap();
+
+        let ended = end_one(&conn, &tmp, uid, Some(session.id), "done", "2026-09-17T09:25:10Z");
+        assert_eq!(ended, Some(session.id));
+        let outcome: String = conn
+            .query_row("SELECT outcome FROM work_sessions WHERE id = ?1", [session.id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(outcome, "done");
+    }
+
+    #[test]
+    fn a_pause_on_a_last_round_run_out_still_finds_the_session() {
+        let (conn, tmp, uid) = pomodoro_env();
+        let session = start_one(&conn, &tmp, uid, None);
+        conn.execute(
+            "UPDATE work_sessions SET round = ?1, phase_started_at = '2026-09-17T09:00:00Z'
+             WHERE id = ?2",
+            (MAX_ROUNDS, session.id),
+        )
+        .unwrap();
+        let held = pause(&conn, tmp.path(), uid, session.id, at("2026-09-17T09:25:10Z")).unwrap();
+        assert!(held.is_some_and(|s| s.paused_at.is_some()));
     }
 
     #[test]
@@ -1176,7 +1436,123 @@ mod tests {
         assert!(overrun(&conn, tmp.path(), at("2026-09-17T12:00:00Z")).unwrap().is_empty());
         end_one(&conn, &tmp, uid, None, "stopped", "2026-09-17T12:00:00Z");
         let s = start_one(&conn, &tmp, uid, Some(10));
-        pause(&conn, uid, s.id, at("2026-09-17T09:05:00Z")).unwrap();
+        pause(&conn, tmp.path(), uid, s.id, at("2026-09-17T09:05:00Z")).unwrap();
         assert!(overrun(&conn, tmp.path(), at("2026-09-17T09:30:00Z")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn rounds_today_counts_singles_once_and_pomodoros_by_round() {
+        let (conn, _tmp, uid) = env();
+        let insert = |mode: &str, round: i64, started: &str, ended: Option<&str>| {
+            conn.execute(
+                "INSERT INTO work_sessions
+                    (user_id, title, started_at, ended_at, mode, phase, phase_started_at, round)
+                 VALUES (?1, 'x', ?2, ?3, ?4, 'work', ?2, ?5)",
+                rusqlite::params![uid, started, ended, mode, round],
+            )
+            .unwrap();
+        };
+        insert("single", 1, "2026-09-17T08:00:00Z", Some("2026-09-17T08:30:00Z"));
+        insert("pomodoro", 3, "2026-09-17T09:00:00Z", Some("2026-09-17T10:30:00Z"));
+        insert("pomodoro", 2, "2026-09-16T09:00:00Z", Some("2026-09-16T10:00:00Z"));
+        insert("single", 1, "2026-09-17T11:00:00Z", None);
+        let tz = jiff::tz::TimeZone::UTC;
+        assert_eq!(rounds_today(&conn, uid, &tz, at("2026-09-17T12:00:00Z")).unwrap(), 4);
+        assert_eq!(rounds_today(&conn, uid, &tz, at("2026-09-18T12:00:00Z")).unwrap(), 0);
+    }
+
+    #[test]
+    fn discard_removes_only_a_young_session() {
+        let (conn, tmp, uid) = env();
+        let young = start_one(&conn, &tmp, uid, Some(25));
+        let thread = young.conversation_id.unwrap();
+        assert!(discard(&conn, uid, young.id, at("2026-09-17T09:00:30Z")).unwrap());
+        assert!(open(&conn, uid).unwrap().is_none());
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM conversations WHERE id = ?1", [thread], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        let waiting: i64 = conn
+            .query_row("SELECT COUNT(*) FROM events WHERE status IN ('pending','snoozed')", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(waiting, 0, "the discarded session's checks never fire");
+
+        let old = start_one(&conn, &tmp, uid, Some(25));
+        assert!(!discard(&conn, uid, old.id, at("2026-09-17T09:05:00Z")).unwrap());
+        assert_eq!(reload(&conn, uid).id, old.id);
+        assert!(!discard(&conn, uid + 1, old.id, at("2026-09-17T09:00:10Z")).unwrap());
+        let logged: i64 = conn
+            .query_row("SELECT COUNT(*) FROM event_log WHERE kind = 'work_session_discarded'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(logged, 1);
+    }
+
+    #[test]
+    fn planned_end_notifies_once_and_only_when_wanted() {
+        let (conn, tmp, uid) = env();
+        start_one(&conn, &tmp, uid, Some(25));
+        assert!(planned_end(&conn, tmp.path(), at("2026-09-17T09:24:00Z")).unwrap().is_empty());
+        let flips = planned_end(&conn, tmp.path(), at("2026-09-17T09:25:00Z")).unwrap();
+        assert_eq!(flips.len(), 1);
+        let msg = flips[0].message.as_ref().unwrap();
+        assert_eq!(msg.title, "read the chapter");
+        assert_eq!(msg.body, "Time's up.");
+        assert_eq!(msg.conversation_id, reload(&conn, uid).conversation_id);
+        assert!(planned_end(&conn, tmp.path(), at("2026-09-17T09:26:00Z")).unwrap().is_empty());
+
+        let (conn, tmp, uid) = env_with("session_end_notify = false\n");
+        start_one(&conn, &tmp, uid, Some(25));
+        let flips = planned_end(&conn, tmp.path(), at("2026-09-17T09:25:00Z")).unwrap();
+        assert_eq!(flips.len(), 1);
+        assert!(flips[0].message.is_none());
+        assert!(planned_end(&conn, tmp.path(), at("2026-09-17T09:26:00Z")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn planned_end_waits_out_a_pause() {
+        let (conn, tmp, uid) = env();
+        let s = start_one(&conn, &tmp, uid, Some(25));
+        pause(&conn, tmp.path(), uid, s.id, at("2026-09-17T09:10:00Z")).unwrap();
+        assert!(planned_end(&conn, tmp.path(), at("2026-09-17T09:30:00Z")).unwrap().is_empty());
+        resume(&conn, tmp.path(), uid, s.id, at("2026-09-17T09:20:00Z")).unwrap();
+        assert!(planned_end(&conn, tmp.path(), at("2026-09-17T09:34:00Z")).unwrap().is_empty());
+        assert_eq!(planned_end(&conn, tmp.path(), at("2026-09-17T09:35:00Z")).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn work_time_never_gets_a_notice() {
+        let (conn, tmp, uid) = env();
+        start_one(&conn, &tmp, uid, None);
+        assert!(planned_end(&conn, tmp.path(), at("2026-09-17T11:00:00Z")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn tick_flip_messages_follow_the_setting() {
+        let (conn, tmp, uid) = env_with("pomodoro_enabled = true\nsession_end_notify = false\n");
+        start_one(&conn, &tmp, uid, None);
+        let flips = tick(&conn, tmp.path(), at("2026-09-17T09:25:00Z")).unwrap();
+        assert_eq!(flips.len(), 1);
+        assert!(flips[0].message.is_none());
+        assert_eq!(reload(&conn, uid).phase, "break");
+        let flips = tick(&conn, tmp.path(), at("2026-09-17T09:30:00Z")).unwrap();
+        assert_eq!(flips.len(), 1);
+        assert!(flips[0].message.is_none());
+        assert_eq!(reload(&conn, uid).phase, "work");
+    }
+
+    #[test]
+    fn times_up_stands_in_for_the_planned_end_check() {
+        let (conn, tmp, uid) = env();
+        start_one(&conn, &tmp, uid, Some(25));
+        let prompts: Vec<String> = checks(&conn).into_iter().map(|c| c.3).collect();
+        assert_eq!(prompts, ["Progress check on read the chapter."]);
+
+        let (conn, tmp, uid) = checked_env();
+        start_one(&conn, &tmp, uid, Some(25));
+        let prompts: Vec<String> = checks(&conn).into_iter().map(|c| c.3).collect();
+        assert_eq!(prompts.len(), 2);
+        assert!(prompts[1].contains("has run its planned 25 minutes"), "{prompts:?}");
     }
 }
