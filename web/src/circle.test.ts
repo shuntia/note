@@ -1,5 +1,5 @@
 import { beforeEach, expect, test, vi } from 'vitest'
-import { beadAt, C, hintShown, hintUsed, railX, segments, sessionFor, slotAfter, WORK_TIME } from './circle'
+import { beadAt, C, hintShown, hintUsed, railX, segments, sessionFor, slotAfter, withoutCategory, WORK_TIME } from './circle'
 import type { QueueEntry, Task } from './types'
 
 const task = (o: Partial<Task>): Task =>
@@ -52,6 +52,19 @@ test('a session is built like the Tasks view builds one', () => {
   expect(sessionFor(entry({ task: parent, step, planned_min: 20 }))).toEqual({
     title: 'Essay', task_id: 3, notes: 'n', step_index: 2, step_count: 3, step_name: 'Step two', planned_min: 20,
   })
+})
+
+test('the category leaves the title and the step name', () => {
+  const step = task({ id: 9, title: 'MIT — Draft essays 1-2', category: 'MIT' })
+  const parent = { ...task({ id: 3, title: 'MIT — Draft 4 essays', category: 'MIT' }), children: [step] }
+  expect(sessionFor(entry({ task: parent, step }))).toMatchObject({ title: 'Draft 4 essays', step_name: 'Draft essays 1-2' })
+})
+
+test('only a leading "category — " goes, and never the whole title', () => {
+  expect(withoutCategory('MIT — Draft', 'MIT')).toBe('Draft')
+  expect(withoutCategory('Draft for MIT', 'MIT')).toBe('Draft for MIT')
+  expect(withoutCategory('MIT — ', 'MIT')).toBe('MIT — ')
+  expect(withoutCategory('MIT — Draft', '')).toBe('MIT — Draft')
 })
 
 test('a task without steps carries its own notes and no step fields', () => {

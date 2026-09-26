@@ -57,15 +57,28 @@ export function hintUsed(key: Hint): void {
   }
 }
 
+/** A title that opens with the task's own category ("MIT — Draft essays") says the course twice over. */
+export function withoutCategory(title: string, category: string): string {
+  const prefix = `${category} — `
+  if (!category || !title.startsWith(prefix)) return title
+  const rest = title.slice(prefix.length).trim()
+  return rest === '' ? title : rest
+}
+
 /** The session fields for a queue entry, as the Tasks view's startFocus builds them. */
 export function sessionFor(entry: QueueEntry): SessionStart {
   const { task, step, planned_min } = entry
   const index = step ? task.children.findIndex((c) => c.id === step.id) : -1
   return {
-    title: task.title,
+    title: withoutCategory(task.title, task.category),
     task_id: task.id,
     notes: (step ?? task).notes,
-    ...(index !== -1 && step && { step_index: index + 1, step_count: task.children.length, step_name: step.title }),
+    ...(index !== -1 &&
+      step && {
+        step_index: index + 1,
+        step_count: task.children.length,
+        step_name: withoutCategory(step.title, task.category),
+      }),
     ...(planned_min !== null && { planned_min }),
   }
 }

@@ -13,7 +13,7 @@ import {
   type WheelEvent as WheelEv,
 } from 'react'
 import { api, ApiError } from '../api'
-import { hintShown, hintUsed, railX, sessionFor, slotAfter, WORK_TIME } from '../circle'
+import { hintShown, hintUsed, railX, sessionFor, slotAfter, withoutCategory, WORK_TIME } from '../circle'
 import { latest } from '../coalesce'
 import type { ToastAction } from '../app'
 import { DayLine, minutesOf } from '../dayline'
@@ -83,6 +83,24 @@ const isLive = (t: Task) => t.state === 'open' || t.state === 'in_progress'
 // A discarded session's id can be handed out again, so its start tells the two apart.
 const keyOf = (s: FocusSession) => `${s.id}@${s.started_at}`
 
+const HINTED_KEY = 'note.hints.session.last'
+
+function lastHinted(): string | null {
+  try {
+    return localStorage.getItem(HINTED_KEY)
+  } catch {
+    return null
+  }
+}
+
+function markHinted(key: string): void {
+  try {
+    localStorage.setItem(HINTED_KEY, key)
+  } catch {
+    // storage blocked; the hint may count this session again after a reload
+  }
+}
+
 const firstLine = (text: string) => text.split('\n').map((l) => l.trim()).find(Boolean) ?? ''
 
 const hairline = (reason?: QueueReason) =>
@@ -108,13 +126,6 @@ function todayIso(): string {
 
 // What the row is called: a block laid for a task carries the task's own name, and
 // a block laid for one of its steps is named after the step, the task behind it.
-// A title that opens with the task's own category says the course twice over.
-function withoutCategory(title: string, category: string): string {
-  const prefix = `${category} — `
-  if (!category || !title.startsWith(prefix)) return title
-  const rest = title.slice(prefix.length).trim()
-  return rest === '' ? title : rest
-}
 
 function rowParts(ev: PlanEvent): { name: string; of: string | null } {
   if (!ev.task) return { name: eventLabel(ev.kind), of: null }
@@ -510,7 +521,6 @@ export function Home({
   // The break asks for a word about the round, in the session's own thread.
   const breakSheet = session && onBreak && (
     <div className="break-sheet">
-      <button className="btn-haze" disabled={pending} onClick={backToIt}>Back to it</button>
       <Jot
         flow
         conversationId={session.conversation_id}
@@ -544,7 +554,7 @@ export function Home({
   const [rounds, setRounds] = useState(0)
   const [settling, setSettling] = useState(false)
   const [strip, setStrip] = useState<{ items: QueueEntry[]; index: number } | null>(null)
-  const [sessionHint, setSessionHint] = useState(() => hintShown('session'))
+  const [sessionHint, setSessionHint] = useState(false)
   const phase: 'idle' | 'settling' | 'working' | 'paused' | 'break' = settling
     ? 'settling'
     : !shown
@@ -596,8 +606,6 @@ export function Home({
       return
     }
     hintUsed('start')
-    setSessionHint(hintShown('session'))
-    hintUsed('session')
     setStrip({ items, index: 1 })
     lastStartAt.current = Date.now()
     drawNext.current = true
@@ -712,7 +720,9 @@ export function Home({
       hold.current = false
       return
     }
-    gsap.set([railEl.current, veil].filter((el) => el !== null), { clearProps: 'opacity' })
+    if (railEl.current) gsap.set(railEl.current, { clearProps: 'opacity' })
+    if (veil && onBreak) gsap.set(veil, { opacity: 1 })
+    else veil?.remove()
     layBeads()
     if (result === 'advanced') fx.open(face, fill, track, () => (hold.current = false))
     else hold.current = false
@@ -721,6 +731,7 @@ export function Home({
   const tap = () => {
     if (settling || pending || hold.current || switching.current) return
     if (!session) void begin()
+    else if (onBreak) backToIt()
     else if (isPaused(session)) resume()
     else pause()
   }
@@ -728,7 +739,7 @@ export function Home({
   const surface = {
     tabIndex: 0,
     role: 'button',
-    'aria-label': !session ? 'Start working' : isPaused(session) ? 'Back to it' : 'Break',
+    'aria-label': !session ? 'Start working' : onBreak || isPaused(session) ? 'Back to it' : 'Break',
     onPointerDown: (e: PointEvent<HTMLDivElement>) => {
       if (e.button !== 0) return
       drag.current = { x: e.clientX, y: e.clientY, t: Date.now(), dx: 0, dy: 0 }
@@ -826,6 +837,15 @@ export function Home({
     },
     [],
   )
+
+  // Every session counts toward the hint once, however it was started.
+  useEffect(() => {
+    if (!sessionKey) return
+    setSessionHint(hintShown('session'))
+    if (lastHinted() === sessionKey) return
+    hintUsed('session')
+    markHinted(sessionKey)
+  }, [sessionKey])
 
   useEffect(() => {
     if (!sessionKey) return
@@ -1027,12 +1047,15 @@ export function Home({
         </div>
       )
     }
-    const sub = entry ? (entry.step?.title ?? firstLine(entry.task.notes)) : ''
+    const category = entry?.task.category ?? ''
+    const sub = entry ? withoutCategory(entry.step?.title ?? firstLine(entry.task.notes), category) : ''
     return (
       <div key={i} className={`slot${i === strip.index ? ' now' : ''}`} aria-hidden="true">
         {mark && <i className={`mark ${mark}`} />}
-        <div className="slot-num" style={{ fontSize: u(mobile ? 64 : 76) }}>{`${entry?.planned_min ?? 0}:00`}</div>
-        <div className="slot-name" style={{ fontSize: u(mobile ? 20 : 22) }}>{entry ? entry.task.title : WORK_TIME.title}</div>
+        <div className="slot-gap" style={{ height: u(mobile ? 64 : 76) }} />
+        <div className="slot-name" style={{ fontSize: u(mobile ? 20 : 22) }}>
+          {entry ? withoutCategory(entry.task.title, category) : WORK_TIME.title}
+        </div>
         {sub && <div className="slot-sub">{sub}</div>}
       </div>
     )
@@ -1061,7 +1084,7 @@ export function Home({
         <svg className={`pause-glyph${isPaused(shown) ? ' on' : ''}`} viewBox="0 0 24 24" aria-hidden="true">
           <rect x="6" y="5" width="4" height="14" rx="1.2" /><rect x="14" y="5" width="4" height="14" rx="1.2" />
         </svg>
-        {sessionHint && phase !== 'idle' && <p className="face-hint under">tap to pause · swipe down when done</p>}
+        {sessionHint && phase !== 'idle' && phase !== 'break' && <p className="face-hint under">tap to pause · swipe down when done</p>}
         {strip && (
           <div ref={dotsEl} className="strip-dots" aria-hidden="true">
             {Array.from({ length: slotCount }, (_, i) => (
@@ -1556,7 +1579,6 @@ export function Home({
         ) : (
           <div className="face-still">
             {bigFace}
-            {session && <div className="home-sheet">{pauseButton(session)}{doneButton}</div>}
           </div>
         )}
         {motion && (compactLanding ? compactHeader : hero)}
