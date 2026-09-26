@@ -111,6 +111,38 @@ pub fn client_key(headers: &axum::http::HeaderMap) -> String {
     pick("cf-connecting-ip").or_else(|| pick("x-forwarded-for")).unwrap_or_else(|| "local".to_string())
 }
 
+/// Where Cloudflare's visitor location headers place a request; every field is
+/// absent when the headers are.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Place {
+    pub city: Option<String>,
+    pub country: Option<String>,
+    pub coords: Option<(f64, f64)>,
+}
+
+pub fn place(headers: &axum::http::HeaderMap) -> Place {
+    let text = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty() && v != "XX" && v != "T1")
+    };
+    let num = |name: &str| text(name).and_then(|v| v.parse::<f64>().ok()).filter(|v| v.is_finite());
+    let coords = match (num("cf-iplatitude"), num("cf-iplongitude")) {
+        (Some(lat), Some(lon)) if lat.abs() <= 90.0 && lon.abs() <= 180.0 => Some((lat, lon)),
+        _ => None,
+    };
+    Place { city: text("cf-ipcity"), country: text("cf-ipcountry"), coords }
+}
+
+/// Great-circle distance in kilometres between two (latitude, longitude) points.
+pub fn km(a: (f64, f64), b: (f64, f64)) -> f64 {
+    let (la1, lo1, la2, lo2) = (a.0.to_radians(), a.1.to_radians(), b.0.to_radians(), b.1.to_radians());
+    let h = ((la2 - la1) / 2.0).sin().powi(2) + la1.cos() * la2.cos() * ((lo2 - lo1) / 2.0).sin().powi(2);
+    6371.0 * 2.0 * h.sqrt().min(1.0).asin()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,5 +214,31 @@ mod tests {
         assert_eq!(client_key(&h), "10.0.0.7");
         h.insert("cf-connecting-ip", "203.0.113.9".parse().unwrap());
         assert_eq!(client_key(&h), "203.0.113.9");
+    }
+
+    #[test]
+    fn place_reads_cloudflare_location_and_drops_the_unknowns() {
+        let mut h = axum::http::HeaderMap::new();
+        assert_eq!(place(&h), Place::default());
+        h.insert("cf-ipcountry", "XX".parse().unwrap());
+        h.insert("cf-iplatitude", "north".parse().unwrap());
+        h.insert("cf-iplongitude", "-122.3".parse().unwrap());
+        assert_eq!(place(&h), Place::default());
+        h.insert("cf-ipcountry", "US".parse().unwrap());
+        h.insert("cf-ipcity", "Seattle".parse().unwrap());
+        h.insert("cf-iplatitude", "47.6".parse().unwrap());
+        let p = place(&h);
+        assert_eq!(p.city.as_deref(), Some("Seattle"));
+        assert_eq!(p.country.as_deref(), Some("US"));
+        assert_eq!(p.coords, Some((47.6, -122.3)));
+    }
+
+    #[test]
+    fn km_measures_the_great_circle() {
+        assert_eq!(km((47.6, -122.3), (47.6, -122.3)), 0.0);
+        let seattle_portland = km((47.6062, -122.3321), (45.5152, -122.6784));
+        assert!((seattle_portland - 234.0).abs() < 3.0, "{seattle_portland}");
+        let london_tokyo = km((51.5074, -0.1278), (35.6762, 139.6503));
+        assert!((london_tokyo - 9560.0).abs() < 30.0, "{london_tokyo}");
     }
 }

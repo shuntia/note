@@ -1576,7 +1576,7 @@ mod tests {
             expires_at: now + jiff::Span::new().hours(24),
         };
         let share = crate::shares::create(&conn, 1, new, now, &crate::shares::Limits::default()).unwrap();
-        let thread = crate::shares::thread_for(&conn, share.id, "v1", now).unwrap();
+        let thread = crate::shares::new_thread(&conn, share.id, "v1", now).unwrap();
         let scope = crate::shares::ShareScope { notes: true, ..Default::default() };
         let sctx = ToolCtx { share: Some(scope), share_thread: Some(thread), ..ctx(&tmp) };
         let out = dispatch(&conn, &sctx, SessionKind::Share, "share_note", r#"{"text":" call me tonight "}"#).unwrap();

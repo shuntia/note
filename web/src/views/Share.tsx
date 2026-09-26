@@ -30,6 +30,7 @@ export function SharePage({ token }: { token: string }) {
   const pane = useRef<HTMLDivElement>(null)
   const input = useRef<HTMLTextAreaElement>(null)
   const sentOnce = useRef(false)
+  const threadId = useRef<number | null>(null)
   const stick = useRef(true)
 
   useEffect(() => {
@@ -37,7 +38,6 @@ export function SharePage({ token }: { token: string }) {
       .info(token)
       .then(setInfo)
       .catch((e: unknown) => setInfo(e instanceof ApiError && e.status === 404 ? 'ended' : 'error'))
-    api.share.messages(token).then(setThread).catch(() => setThread([]))
   }, [token])
 
   useEffect(() => {
@@ -77,9 +77,10 @@ export function SharePage({ token }: { token: string }) {
     const asked: ShareMessage = { role: 'user', content: text, created_at: new Date().toISOString() }
     setThread((t) => [...t, asked])
     try {
-      const turn = await api.share.send(token, text)
+      const turn = await api.share.send(token, text, threadId.current)
+      threadId.current = turn.thread
       const answered: ShareMessage = { role: 'assistant', content: turn.reply, created_at: new Date().toISOString() }
-      const stored = turn.note ? await api.share.messages(token).catch(() => null) : null
+      const stored = turn.note ? await api.share.messages(token, turn.thread).catch(() => null) : null
       setThread((t) => stored ?? [...t, answered])
     } catch (err) {
       setThread((t) => t.filter((m) => m !== asked))

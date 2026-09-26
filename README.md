@@ -702,10 +702,11 @@ slice of their day, with no account on the visitor's side.
 
 - Mint one in Settings → Advanced → Share links, or over the session:
   `POST /api/shares {name, brief, scope, expires_at}` → the row plus `url`.
-  `GET /api/shares` lists them with their `url`, `messages_today` and thread
-  count; `PATCH /api/shares/{id}` changes name, brief, scope or expiry;
+  `GET /api/shares` lists them with their `url`, `messages_today`, thread
+  count, `visitors` and `distant_visits`; `PATCH /api/shares/{id}` changes name, brief, scope or expiry;
   `DELETE /api/shares/{id}` revokes; `GET /api/shares/{id}/threads` reads every
-  visitor conversation. A write passes only with `Sec-Fetch-Site` set to
+  visitor conversation and `GET /api/shares/{id}/visits` every opening of the
+  link, newest first, as `{city, country, km, distant, at}`. A write passes only with `Sec-Fetch-Site` set to
   `same-origin` or `none`, or with no such header at all; any other value is a
   `403`.
   Names are 1 to 64 characters and a brief at most 4 KiB (`422`). An expiry in
@@ -714,8 +715,9 @@ slice of their day, with no account on the visitor's side.
   whole object: switches it leaves out take their defaults, so a caller sends
   the full scope (the Settings page always does).
 - In Settings a link's URL is shown once it is made, and *Copy link* and
-  *Preview as visitor* work for as long as it lives; *Conversations* reads its
-  threads, and *Revoke* asks for confirmation in a toast.
+  *Preview as visitor* work for as long as it lives; *Activity* lists its visits
+  and threads, and *Revoke* asks for confirmation in a toast. A link opened
+  from far away carries a rose dot beside its name.
 - The scope is `{today, tasks, categories, goals, progress, details,
   horizon_days, notes, messages_per_day}`. `today` shares the plan and the
   calendar for `horizon_days` (1 to 14) days from today; calendar titles travel
@@ -732,11 +734,21 @@ slice of their day, with no account on the visitor's side.
   messages across all of a link's threads in any 24 hours (`429` beyond it).
 - The visitor opens `/s/<token>`: a chat with Note, headed by the owner's
   name and one line on what is shared and until when (`GET /api/share/{token}`).
-  It talks over `GET/POST /api/share/{token}/messages`, and Note's replies come
-  from the tools the switches allow. `GET /api/share/{token}/view` returns the
-  slice as data.
-  A cookie keys their thread; two people on one link never see each other's
-  questions. Every one of these is `404` once the link expires, is revoked, or
+  It talks over `POST /api/share/{token}/messages {message, thread?}`, and
+  Note's replies come from the tools the switches allow; the reply names its
+  `thread`, which the page sends back to continue. Without one a new thread
+  starts, so every page load begins a fresh conversation and old history is
+  never re-sent to the model. `GET /api/share/{token}/messages?thread=<id>`
+  reads a thread back. `GET /api/share/{token}/view` returns the slice as data.
+  A cookie marks the visitor: a thread answers only to the cookie that started
+  it (`404` otherwise), and distinct cookies are what `visitors` counts.
+- Each `GET /api/share/{token}` is one visit. Its place comes from Cloudflare's
+  visitor location headers (`cf-ipcity`, `cf-ipcountry`, `cf-iplatitude`,
+  `cf-iplongitude`; the zone's *Add visitor location headers* managed
+  transform), and its distance from where the owner was last seen, which
+  `GET /api/me` records from the same headers. A visit farther than
+  `share_distant_km` is distant; one with no coordinates on either side has no
+  distance and is never marked. Every one of these is `404` once the link expires, is revoked, or
   its owner is disabled. A stored scope that no longer parses fails the request
   rather than widening what it shows.
 - Unknown-token lookups and message posts are counted per client address
@@ -758,8 +770,8 @@ slice of their day, with no account on the visitor's side.
   recent-activity block the owner's own sessions read.
 - `[limits]` takes `share_max_days` (default 120, at least 1, at most 36500),
   `share_messages_per_day` (default 100, at least 1; the ceiling a link's own
-  `messages_per_day` may be raised to), and `shares_per_user` (default 20;
-  `0` turns share links off).
+  `messages_per_day` may be raised to), `shares_per_user` (default 20;
+  `0` turns share links off), and `share_distant_km` (default 300).
 
 ### Briefing an imported task
 

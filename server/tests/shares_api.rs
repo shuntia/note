@@ -162,21 +162,67 @@ async fn a_visitor_reads_the_link_the_view_and_talks_with_a_cookie_thread() {
     assert!(seen[0].tool_names.contains(&"task_list".to_string()));
     assert!(!seen[0].tool_names.iter().any(|n| n.starts_with("memory_")));
 
-    let (_, msgs) = read(visitor(&app, Method::GET, &format!("/api/share/{token}/messages"), None, Some(&set)).await).await;
+    let thread = turn["thread"].as_i64().expect("the turn names its thread");
+    let (_, msgs) = read(visitor(&app, Method::GET, &format!("/api/share/{token}/messages?thread={thread}"), None, Some(&set)).await).await;
     assert_eq!(msgs.as_array().unwrap().len(), 2);
     assert_eq!(msgs[0]["role"], "user");
     assert_eq!(msgs[1]["content"], "Aki has a lab report due Friday.");
 
-    // a second visitor without the cookie starts a thread of their own
-    let (_, msgs) = read(visitor(&app, Method::GET, &format!("/api/share/{token}/messages"), None, None).await).await;
-    assert_eq!(msgs.as_array().unwrap().len(), 0);
-    let (status, turn) = read(visitor(&app, Method::POST, &format!("/api/share/{token}/messages"), Some(r#"{"message":"Anything else?"}"#), None).await).await;
-    assert_eq!(status, StatusCode::OK, "{turn}");
-    assert_eq!(turn["reply"], "Nothing else today.");
+    // a stranger cannot read or continue someone else's thread
+    let res = visitor(&app, Method::GET, &format!("/api/share/{token}/messages?thread={thread}"), None, None).await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    let res = visitor(&app, Method::POST, &format!("/api/share/{token}/messages"), Some(&format!(r#"{{"message":"hi","thread":{thread}}}"#)), None).await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+    // the same visitor sending without a thread (a reloaded page) starts a new one
+    let (status, again) = read(visitor(&app, Method::POST, &format!("/api/share/{token}/messages"), Some(r#"{"message":"Anything else?"}"#), Some(&set)).await).await;
+    assert_eq!(status, StatusCode::OK, "{again}");
+    assert_eq!(again["reply"], "Nothing else today.");
+    assert_ne!(again["thread"], thread);
+    let seen = llm.seen();
+    assert_eq!(seen[1].n_messages, seen[0].n_messages, "a new thread carries no history");
 
     let (status, threads) = owner(&app, &cookie, Method::GET, &format!("/api/shares/{}/threads", made["id"]), None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(threads.as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn opening_the_link_counts_a_visit_measured_from_the_owner() {
+    let (app, cookie, _cfg) = common::app_with_logged_in_user().await;
+    let made = mint(&app, &cookie, "Mom", "{}").await;
+    let token = token_of(&made);
+    let located = |lat: &str, lon: &str, city: &str| {
+        Request::get(format!("/api/share/{token}"))
+            .header("cf-iplatitude", lat)
+            .header("cf-iplongitude", lon)
+            .header("cf-ipcity", city)
+            .header("cf-ipcountry", "US")
+    };
+    let seen = Request::get("/api/me")
+        .header(header::COOKIE, &cookie)
+        .header("cf-iplatitude", "47.61")
+        .header("cf-iplongitude", "-122.33")
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(app.clone().oneshot(seen).await.unwrap().status(), StatusCode::OK);
+
+    let first = app.clone().oneshot(located("45.52", "-122.68", "Portland").body(Body::empty()).unwrap()).await.unwrap();
+    let set = cookie_of(&first).unwrap();
+    let near_again = located("45.52", "-122.68", "Portland").header(header::COOKIE, &set).body(Body::empty()).unwrap();
+    app.clone().oneshot(near_again).await.unwrap();
+    app.clone().oneshot(located("40.71", "-74.01", "New York").body(Body::empty()).unwrap()).await.unwrap();
+
+    let (_, list) = owner(&app, &cookie, Method::GET, "/api/shares", None).await;
+    assert_eq!(list[0]["visitors"], 2);
+    assert_eq!(list[0]["distant_visits"], 1);
+    let (status, visits) = owner(&app, &cookie, Method::GET, &format!("/api/shares/{}/visits", made["id"]), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let visits = visits.as_array().unwrap();
+    assert_eq!(visits.len(), 3);
+    assert_eq!(visits[0]["city"], "New York");
+    assert_eq!(visits[0]["distant"], true);
+    assert_eq!(visits[1]["distant"], false);
 }
 
 #[tokio::test]
@@ -220,6 +266,8 @@ async fn an_expired_link_refuses_a_message_and_persists_nothing() {
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
     let n: i64 = state.db().query_row("SELECT COUNT(*) FROM share_messages", [], |r| r.get(0)).unwrap();
     assert_eq!(n, 0);
+    let t: i64 = state.db().query_row("SELECT COUNT(*) FROM share_threads", [], |r| r.get(0)).unwrap();
+    assert_eq!(t, 0, "a failed first turn leaves no empty thread");
 }
 
 #[tokio::test]
