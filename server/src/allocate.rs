@@ -233,6 +233,7 @@ struct TaskRow {
 fn candidates(
     conn: &Connection,
     user_id: i64,
+    tz: &jiff::tz::TimeZone,
     date: jiff::civil::Date,
     longest: u16,
     now: jiff::Timestamp,
@@ -273,7 +274,9 @@ fn candidates(
             &urgency,
             crate::tasks::pressing_at(&state, due_at.as_deref(), now),
         );
-        let due = due_at.and_then(|d| d.parse().ok());
+        let due = due_at
+            .and_then(|d| d.parse::<jiff::Timestamp>().ok())
+            .map(|t| t.to_zoned(tz.clone()).date());
         let steps = open_steps(conn, id)?;
         if steps.is_empty() {
             let pieces = split(len.minutes(None, stretched), longest);
@@ -362,7 +365,7 @@ pub fn run(
     }
 
     let longest = usable(&free, &busy).iter().map(|w| w.end - w.start).max().unwrap_or(0);
-    let tasks = candidates(conn, user_id, date, longest, now)?;
+    let tasks = candidates(conn, user_id, tz, date, longest, now)?;
     let placed = pack(&free, &busy, &tasks, MAX_AUTO_BLOCKS);
 
     let mut laid = Vec::with_capacity(placed.len());
@@ -891,5 +894,33 @@ mod tests {
             ("16:00", "16:45"),
             "42 minutes rounds up to the grain"
         );
+    }
+
+    #[test]
+    fn a_dated_task_is_laid_before_an_undated_one_of_the_same_rank() {
+        let (conn, uid, _tmp) = env();
+        let date = day(&conn, uid);
+        let undated = new_task(&conn, uid, "tidy the desk", Some(30));
+        let dated = new_task(&conn, uid, "hand in the form", Some(30));
+        conn.execute("UPDATE tasks SET due_at = '2026-09-25T09:00:00Z' WHERE id = ?1", [dated])
+            .unwrap();
+        let mut order =
+            candidates(&conn, uid, &jiff::tz::TimeZone::UTC, date, 600, at("2026-09-20T09:00:00Z"))
+                .unwrap();
+        assert_eq!(order.iter().find(|c| c.id == dated).unwrap().due, Some("2026-09-25".parse().unwrap()));
+        order.sort_by_cached_key(|c| rank_key(c.is_now, c.urgency_rank, c.due, &c.created, c.id));
+        let ids: Vec<i64> = order.iter().map(|c| c.id).collect();
+        assert_eq!(ids, [dated, undated]);
+    }
+
+    #[test]
+    fn the_due_date_is_read_in_the_users_zone() {
+        let (conn, uid, _tmp) = env();
+        let date = day(&conn, uid);
+        let id = new_task(&conn, uid, "hand in the form", Some(30));
+        conn.execute("UPDATE tasks SET due_at = '2026-09-25T03:00:00Z' WHERE id = ?1", [id]).unwrap();
+        let la = jiff::tz::TimeZone::get("America/Los_Angeles").unwrap();
+        let c = candidates(&conn, uid, &la, date, 600, at("2026-09-20T09:00:00Z")).unwrap();
+        assert_eq!(c[0].due, Some("2026-09-24".parse().unwrap()));
     }
 }

@@ -231,7 +231,7 @@ pub fn start(
     )?;
     let id = conn.last_insert_rowid();
     if !pomodoro {
-        lay_opening_checks(conn, config_dir, user_id, username, id, title, new.planned_min, now)
+        lay_opening_checks(conn, config_dir, user_id, username, id, title, new.planned_min, cfg.as_ref(), now)
             .map_err(StartError::Other)?;
     }
     crate::log::record(conn, Some(user_id), "work_session_started", &format!("session {id} {title:?}"))
@@ -248,7 +248,7 @@ fn first_check_minutes(planned_min: Option<i64>) -> i64 {
 }
 
 /// The checks a session opens with: the midpoint, and — where the session named
-/// a length — one at the planned end.
+/// a length and "Time's up." is not wanted in its place — one at the planned end.
 #[allow(clippy::too_many_arguments)]
 fn lay_opening_checks(
     conn: &Connection,
@@ -258,6 +258,7 @@ fn lay_opening_checks(
     session_id: i64,
     title: &str,
     planned_min: Option<i64>,
+    cfg: Option<&crate::config::UserConfig>,
     now: jiff::Timestamp,
 ) -> Result<()> {
     lay_session_check(
@@ -270,7 +271,8 @@ fn lay_opening_checks(
         &format!("Progress check on {title}."),
         now,
     )?;
-    if let Some(min) = planned_min {
+    let times_up = cfg.is_none_or(|c| c.session_end_notify());
+    if let Some(min) = planned_min.filter(|_| !times_up) {
         lay_session_check(
             conn,
             config_dir,
@@ -398,7 +400,7 @@ pub fn discard(
     user_id: i64,
     id: i64,
     now: jiff::Timestamp,
-) -> rusqlite::Result<bool> {
+) -> Result<bool> {
     let Some(session) = open_named(conn, user_id, id)? else { return Ok(false) };
     if since(&session.started_at, now) >= 60_000 {
         return Ok(false);
@@ -411,6 +413,7 @@ pub fn discard(
     )?;
     conn.execute("UPDATE events SET work_session_id = NULL WHERE work_session_id = ?1", [id])?;
     conn.execute("DELETE FROM work_sessions WHERE id = ?1", [id])?;
+    crate::log::record(conn, Some(user_id), "work_session_discarded", &format!("session {id}"))?;
     if let Some(thread) = session.conversation_id {
         conn.execute("UPDATE events SET conversation_id = NULL WHERE conversation_id = ?1", [thread])?;
         conn.execute(
@@ -796,6 +799,11 @@ mod tests {
         env_with("")
     }
 
+    /// The planned-end check is laid only where "Time's up." is turned off.
+    fn checked_env() -> (Connection, tempfile::TempDir, i64) {
+        env_with("session_end_notify = false\n")
+    }
+
     /// 25 minutes of work, 5 of break, as the defaults have it.
     fn pomodoro_env() -> (Connection, tempfile::TempDir, i64) {
         env_with("pomodoro_enabled = true\n")
@@ -932,7 +940,7 @@ mod tests {
 
     #[test]
     fn a_session_that_named_a_length_is_asked_about_it_at_the_end() {
-        let (conn, tmp, uid) = env();
+        let (conn, tmp, uid) = checked_env();
         start_one(&conn, &tmp, uid, Some(50));
         let rows = checks(&conn);
         assert_eq!(rows.len(), 2);
@@ -964,7 +972,7 @@ mod tests {
 
     #[test]
     fn a_new_session_stops_the_one_still_running() {
-        let (conn, tmp, uid) = env();
+        let (conn, tmp, uid) = checked_env();
         let first = start_one(&conn, &tmp, uid, Some(30));
         let second = start_one(&conn, &tmp, uid, Some(30));
         assert_ne!(first.id, second.id);
@@ -1017,7 +1025,7 @@ mod tests {
 
     #[test]
     fn ending_a_session_drops_its_waiting_checks_and_leaves_the_rest_alone() {
-        let (conn, tmp, uid) = env();
+        let (conn, tmp, uid) = checked_env();
         let session = start_one(&conn, &tmp, uid, Some(60));
         crate::triggers::lay(
             &conn,
@@ -1315,6 +1323,10 @@ mod tests {
         assert!(!discard(&conn, uid, old.id, at("2026-09-17T09:05:00Z")).unwrap());
         assert_eq!(reload(&conn, uid).id, old.id);
         assert!(!discard(&conn, uid + 1, old.id, at("2026-09-17T09:00:10Z")).unwrap());
+        let logged: i64 = conn
+            .query_row("SELECT COUNT(*) FROM event_log WHERE kind = 'work_session_discarded'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(logged, 1);
     }
 
     #[test]
@@ -1368,5 +1380,19 @@ mod tests {
         assert_eq!(flips.len(), 1);
         assert!(flips[0].message.is_none());
         assert_eq!(reload(&conn, uid).phase, "work");
+    }
+
+    #[test]
+    fn times_up_stands_in_for_the_planned_end_check() {
+        let (conn, tmp, uid) = env();
+        start_one(&conn, &tmp, uid, Some(25));
+        let prompts: Vec<String> = checks(&conn).into_iter().map(|c| c.3).collect();
+        assert_eq!(prompts, ["Progress check on read the chapter."]);
+
+        let (conn, tmp, uid) = checked_env();
+        start_one(&conn, &tmp, uid, Some(25));
+        let prompts: Vec<String> = checks(&conn).into_iter().map(|c| c.3).collect();
+        assert_eq!(prompts.len(), 2);
+        assert!(prompts[1].contains("has run its planned 25 minutes"), "{prompts:?}");
     }
 }

@@ -140,6 +140,8 @@ async fn the_open_session_is_the_whole_face_the_client_paints() {
 #[tokio::test]
 async fn a_session_lays_its_checks_and_takes_them_along_when_it_ends() {
     let w = world(Vec::new()).await;
+    let (status, _) = send(&w, Request::put("/api/settings"), r#"{"session_end_notify":false}"#).await;
+    assert_eq!(status, StatusCode::OK);
     let session = start(&w, r#"{"title":"read the chapter","planned_min":30}"#).await;
     let id = session["id"].as_i64().unwrap();
 
