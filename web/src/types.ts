@@ -213,6 +213,8 @@ export type Settings = {
   pomodoro_enabled: boolean
   pomodoro_work_min: number
   pomodoro_break_min: number
+  // Gates the pomodoro phase messages and the "Time's up." at a session's planned end.
+  session_end_notify: boolean
 }
 
 // A live code and the deep link that carries it to the bot.
@@ -236,6 +238,7 @@ export type SettingsSaved = Pick<
   | 'pomodoro_enabled'
   | 'pomodoro_work_min'
   | 'pomodoro_break_min'
+  | 'session_end_notify'
 > & { schedule: ScheduleRow[] }
 
 export type PromptName = 'persona' | 'planning' | 'share'

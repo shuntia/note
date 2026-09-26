@@ -75,6 +75,7 @@ const WRITABLE_SETTINGS = [
   'pomodoro_enabled',
   'pomodoro_work_min',
   'pomodoro_break_min',
+  'session_end_notify',
 ] as const
 
 type SettingsPatch = Partial<Pick<Settings, (typeof WRITABLE_SETTINGS)[number]>>
