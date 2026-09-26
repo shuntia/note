@@ -31,6 +31,7 @@ import type {
   SharePatch,
   ShareScope,
   ShareThread,
+  ShareVisit,
   TelegramLink,
   Token,
   TokenCreated,
@@ -1817,6 +1818,7 @@ function SharesSection({ notify }: { notify: Notify }) {
   const [editing, setEditing] = useState<number | null>(null)
   const [openThreads, setOpenThreads] = useState<number | null>(null)
   const [threads, setThreads] = useState<ShareThread[] | undefined>(undefined)
+  const [visits, setVisits] = useState<ShareVisit[] | undefined>(undefined)
   const [busy, setBusy] = useState(false)
   const [fresh, setFresh] = useState<Share | null>(null)
   const threadsFor = useRef<number | null>(null)
@@ -1888,10 +1890,15 @@ function SharesSection({ notify }: { notify: Notify }) {
     threadsFor.current = s.id
     setOpenThreads(s.id)
     setThreads(undefined)
+    setVisits(undefined)
     const land = (ts: ShareThread[]) => {
       if (threadsFor.current === s.id) setThreads(ts)
     }
+    const landVisits = (vs: ShareVisit[]) => {
+      if (threadsFor.current === s.id) setVisits(vs)
+    }
     api.shareThreads(s.id).then(land).catch(() => land([]))
+    api.shareVisits(s.id).then(landVisits).catch(() => landVisits([]))
   }
 
   const blank: ShareDraft = { name: '', brief: '', scope: DEFAULT_SCOPE, days: 30, date: '' }
@@ -1915,9 +1922,13 @@ function SharesSection({ notify }: { notify: Notify }) {
           <div key={s.id} className="set-share">
             <div className="set-row set-token-row">
               <span className="set-row-body">
-                <span className="set-label">{s.name}</span>
+                <span className="set-label">
+                  {s.name}
+                  {s.distant_visits > 0 && <i className="set-share-far" role="img" aria-label="Opened from far away" title="Opened from far away" />}
+                </span>
                 <span className="set-sub">
-                  {scopeWords(s.scope)}, until {dayOf(s.expires_at)}, {s.messages_today} {s.messages_today === 1 ? 'message' : 'messages'} today
+                  {scopeWords(s.scope)}, until {dayOf(s.expires_at)}, {s.visitors} {s.visitors === 1 ? 'visitor' : 'visitors'}, {s.messages_today}{' '}
+                  {s.messages_today === 1 ? 'message' : 'messages'} today
                 </span>
               </span>
               <Overflow
@@ -1926,7 +1937,7 @@ function SharesSection({ notify }: { notify: Notify }) {
                 items={[
                   { label: 'Copy link', run: () => copy(s) },
                   { label: 'Preview as visitor', run: () => window.open(s.url, '_blank', 'noopener') },
-                  { label: openThreads === s.id ? 'Hide conversations' : 'Conversations', run: () => showThreads(s) },
+                  { label: openThreads === s.id ? 'Hide activity' : 'Activity', run: () => showThreads(s) },
                   { label: editing === s.id ? 'Stop editing' : 'Edit', run: () => setEditing(editing === s.id ? null : s.id) },
                   { label: 'Revoke', kind: 'danger', run: () => notify('Revoke this link?', { label: 'Revoke', run: () => void doRevoke(s) }) },
                 ]}
@@ -1944,6 +1955,17 @@ function SharesSection({ notify }: { notify: Notify }) {
             )}
             {openThreads === s.id && (
               <div className="set-share-threads">
+                {visits && visits.length > 0 && (
+                  <ul className="set-share-visits">
+                    {visits.map((v, i) => (
+                      <li key={i} className={v.distant ? 'far' : undefined}>
+                        {[[v.city, v.country].filter(Boolean).join(', ') || 'Somewhere', v.km === null ? null : `${Math.round(v.km)} km`, dayOf(v.at)]
+                          .filter(Boolean)
+                          .join(' · ')}
+                      </li>
+                    ))}
+                  </ul>
+                )}
                 {threads === undefined && <span className="set-sub">Loading</span>}
                 {threads && threads.length === 0 && <span className="set-sub">No one has asked anything yet.</span>}
                 {threads?.map((t) => (

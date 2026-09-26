@@ -411,27 +411,91 @@ pub fn messages_today(
     )
 }
 
-pub fn thread_for(
+pub fn new_thread(
     conn: &Connection,
     share_id: i64,
     visitor_key: &str,
     now: jiff::Timestamp,
 ) -> rusqlite::Result<i64> {
-    if let Some(id) = conn
-        .query_row(
-            "SELECT id FROM share_threads WHERE share_id = ?1 AND visitor_key = ?2",
-            (share_id, visitor_key),
-            |r| r.get(0),
-        )
-        .optional()?
-    {
-        return Ok(id);
-    }
     conn.execute(
         "INSERT INTO share_threads (share_id, visitor_key, created_at, updated_at) VALUES (?1, ?2, ?3, ?3)",
         (share_id, visitor_key, now.to_string()),
     )?;
     Ok(conn.last_insert_rowid())
+}
+
+/// `Some(id)` only when the thread was started on this link by this visitor.
+pub fn thread_of(
+    conn: &Connection,
+    share_id: i64,
+    visitor_key: &str,
+    id: i64,
+) -> rusqlite::Result<Option<i64>> {
+    conn.query_row(
+        "SELECT id FROM share_threads WHERE id = ?1 AND share_id = ?2 AND visitor_key = ?3",
+        (id, share_id, visitor_key),
+        |r| r.get(0),
+    )
+    .optional()
+}
+
+/// Records one opening of the link; `km` is measured from where the owner was
+/// last seen, when both places are known.
+pub fn record_visit(
+    conn: &Connection,
+    share_id: i64,
+    owner_id: i64,
+    visitor_key: &str,
+    place: &crate::net::Place,
+    now: jiff::Timestamp,
+) -> rusqlite::Result<()> {
+    let owner: Option<(f64, f64)> = conn
+        .query_row(
+            "SELECT seen_lat, seen_lon FROM users WHERE id = ?1 AND seen_lat IS NOT NULL AND seen_lon IS NOT NULL",
+            [owner_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let km = owner.zip(place.coords).map(|(a, b)| crate::net::km(a, b));
+    conn.execute(
+        "INSERT INTO share_visits (share_id, visitor_key, city, country, km, at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        (share_id, visitor_key, &place.city, &place.country, km, now.to_string()),
+    )?;
+    Ok(())
+}
+
+#[derive(Debug, Serialize)]
+pub struct VisitOut {
+    pub city: Option<String>,
+    pub country: Option<String>,
+    pub km: Option<f64>,
+    pub distant: bool,
+    pub at: String,
+}
+
+/// Every opening of a link, newest first.
+pub fn visits(conn: &Connection, share_id: i64, distant_km: u32) -> rusqlite::Result<Vec<VisitOut>> {
+    let mut stmt = conn.prepare("SELECT city, country, km, at FROM share_visits WHERE share_id = ?1 ORDER BY id DESC")?;
+    let rows = stmt.query_map([share_id], |r| {
+        let km: Option<f64> = r.get(2)?;
+        Ok(VisitOut {
+            city: r.get(0)?,
+            country: r.get(1)?,
+            km,
+            distant: km.is_some_and(|k| k > distant_km as f64),
+            at: r.get(3)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// Distinct visitors a link has had, and how many of its openings were distant.
+pub fn visit_counts(conn: &Connection, share_id: i64, distant_km: u32) -> rusqlite::Result<(i64, i64)> {
+    conn.query_row(
+        "SELECT COUNT(DISTINCT visitor_key), COALESCE(SUM(km > ?2), 0) FROM share_visits WHERE share_id = ?1",
+        (share_id, distant_km as f64),
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
 }
 
 /// The last `limit` user and assistant turns, oldest first; notes stay out.
@@ -902,6 +966,7 @@ pub const MAX_MESSAGE: usize = crate::talk::MAX_MESSAGE;
 pub struct VisitorKey(pub String);
 
 pub struct VisitorTurn {
+    pub thread: i64,
     pub reply: String,
     /// Whether the session filed a note for the owner.
     pub note: bool,
@@ -910,6 +975,8 @@ pub struct VisitorTurn {
 #[derive(Debug)]
 pub enum TurnError {
     Blank,
+    /// The thread named is not this visitor's on this link.
+    NoThread,
     Cap,
     Busy,
     /// The session did not finish. The turn is not stored, but a note the
@@ -918,7 +985,8 @@ pub enum TurnError {
     Internal,
 }
 
-pub async fn run_turn(state: &crate::AppState, principal: &crate::auth::SharePrincipal, visitor_key: &str, message: &str) -> Result<VisitorTurn, TurnError> {
+/// Continues `thread` when given, and otherwise starts a new one.
+pub async fn run_turn(state: &crate::AppState, principal: &crate::auth::SharePrincipal, visitor_key: &str, thread: Option<i64>, message: &str) -> Result<VisitorTurn, TurnError> {
     let message = message.trim().to_string();
     if message.is_empty() || message.len() > MAX_MESSAGE {
         return Err(TurnError::Blank);
@@ -932,8 +1000,17 @@ pub async fn run_turn(state: &crate::AppState, principal: &crate::auth::SharePri
             return Err(TurnError::Cap);
         }
     }
+    if let Some(id) = thread {
+        if thread_of(&state.db(), share.id, visitor_key, id).map_err(|_| TurnError::Internal)?.is_none() {
+            return Err(TurnError::NoThread);
+        }
+    }
     let permit = state.talk_gate.try_enter_global().map_err(|_| TurnError::Busy)?;
-    let thread_id = thread_for(&state.db(), share.id, visitor_key, now).map_err(|_| TurnError::Internal)?;
+    let thread_id = match thread {
+        Some(id) => id,
+        None => new_thread(&state.db(), share.id, visitor_key, now).map_err(|_| TurnError::Internal)?,
+    };
+    let started = thread.is_none();
     let st = state.clone();
     let owner_id = principal.owner_id;
     let owner = principal.owner_username.clone();
@@ -985,6 +1062,12 @@ pub async fn run_turn(state: &crate::AppState, principal: &crate::auth::SharePri
             Ok(done) => done,
             Err(e) => {
                 let _ = st.db().execute("DELETE FROM share_messages WHERE id = ?1", [question]);
+                if started {
+                    let _ = st.db().execute(
+                        "DELETE FROM share_threads WHERE id = ?1 AND NOT EXISTS (SELECT 1 FROM share_messages WHERE thread_id = ?1)",
+                        [thread_id],
+                    );
+                }
                 return Err(e);
             }
         };
@@ -999,7 +1082,7 @@ pub async fn run_turn(state: &crate::AppState, principal: &crate::auth::SharePri
             };
             crate::channels::deliver_via(&st.db, &st.channels, owner_id, &owner, &msg);
         }
-        Ok::<_, anyhow::Error>(VisitorTurn { reply, note: !noted.is_empty() })
+        Ok::<_, anyhow::Error>(VisitorTurn { thread: thread_id, reply, note: !noted.is_empty() })
     })
     .await;
     match result {
@@ -1219,13 +1302,15 @@ mod tests {
     }
 
     #[test]
-    fn threads_are_per_visitor_and_history_reads_back_in_order() {
+    fn threads_belong_to_their_visitor_and_history_reads_back_in_order() {
         let conn = conn();
         let s = create(&conn, 1, new("Mom"), now(), &Limits::default()).unwrap();
-        let t1 = thread_for(&conn, s.id, "v1", now()).unwrap();
-        let t2 = thread_for(&conn, s.id, "v2", now()).unwrap();
-        assert_ne!(t1, t2);
-        assert_eq!(thread_for(&conn, s.id, "v1", now()).unwrap(), t1);
+        let t1 = new_thread(&conn, s.id, "v1", now()).unwrap();
+        let again = new_thread(&conn, s.id, "v1", now()).unwrap();
+        assert_ne!(t1, again, "a visitor may hold many threads");
+        assert_eq!(thread_of(&conn, s.id, "v1", t1).unwrap(), Some(t1));
+        assert_eq!(thread_of(&conn, s.id, "v2", t1).unwrap(), None, "another visitor's thread");
+        assert_eq!(thread_of(&conn, s.id + 1, "v1", t1).unwrap(), None, "another link's thread");
         append(&conn, t1, "user", "hi", now()).unwrap();
         append(&conn, t1, "assistant", "hello", now()).unwrap();
         append(&conn, t1, "note", "tell aki", now()).unwrap();
@@ -1244,6 +1329,29 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM share_messages", [], |r| r.get(0))
             .unwrap();
         assert_eq!(left, 0, "revocation cascades");
+    }
+
+    #[test]
+    fn visits_measure_from_the_owner_and_count_distinct_visitors() {
+        let conn = conn();
+        let s = create(&conn, 1, new("Mom"), now(), &Limits::default()).unwrap();
+        let far = crate::net::Place { city: Some("Tokyo".into()), country: Some("JP".into()), coords: Some((35.68, 139.65)) };
+        record_visit(&conn, s.id, 1, "v1", &far, now()).unwrap();
+        assert_eq!(visits(&conn, s.id, 300).unwrap()[0].km, None, "no distance before the owner is seen");
+
+        conn.execute("UPDATE users SET seen_lat = 47.61, seen_lon = -122.33 WHERE id = 1", []).unwrap();
+        let near = crate::net::Place { city: Some("Portland".into()), country: Some("US".into()), coords: Some((45.52, -122.68)) };
+        record_visit(&conn, s.id, 1, "v1", &near, now()).unwrap();
+        record_visit(&conn, s.id, 1, "v2", &far, now()).unwrap();
+        record_visit(&conn, s.id, 1, "v3", &crate::net::Place::default(), now()).unwrap();
+
+        let all = visits(&conn, s.id, 300).unwrap();
+        assert_eq!(all.len(), 4);
+        assert!(all[0].km.is_none() && !all[0].distant, "an unplaced visit is not marked");
+        assert!(all[1].distant && all[1].country.as_deref() == Some("JP"));
+        assert!(!all[2].distant && all[2].km.unwrap() < 300.0);
+        assert_eq!(visit_counts(&conn, s.id, 300).unwrap(), (3, 1));
+        assert_eq!(visit_counts(&conn, s.id, 10_000).unwrap(), (3, 0));
     }
 
     fn seed_owner(conn: &Connection) -> (tempfile::TempDir, i64) {
@@ -1335,8 +1443,8 @@ mod tests {
     fn threads_come_newest_first() {
         let conn = conn();
         let s = create(&conn, 1, new("Mom"), now(), &Limits::default()).unwrap();
-        let older = thread_for(&conn, s.id, "v1", now()).unwrap();
-        let newer = thread_for(&conn, s.id, "v2", now()).unwrap();
+        let older = new_thread(&conn, s.id, "v1", now()).unwrap();
+        let newer = new_thread(&conn, s.id, "v2", now()).unwrap();
         append(&conn, newer, "user", "first", now()).unwrap();
         append(&conn, older, "user", "later", now() + jiff::Span::new().minutes(5)).unwrap();
         let ids: Vec<i64> = threads(&conn, s.id).unwrap().iter().map(|t| t.id).collect();
