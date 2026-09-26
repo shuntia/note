@@ -405,7 +405,7 @@ async fn a_session_discarded_in_its_first_minute_is_gone_and_an_older_one_just_e
     let (status, reply) =
         post(&w, &format!("/api/sessions/{id}/end"), r#"{"outcome":"stopped","discard":true}"#).await;
     assert_eq!(status, StatusCode::OK, "{reply}");
-    assert_eq!(reply, serde_json::json!({}));
+    assert_eq!(reply, serde_json::json!({ "ended": id }));
     assert!(rows::<i64>(&w, "SELECT id FROM work_sessions").is_empty());
     assert!(rows::<i64>(&w, "SELECT id FROM conversations").is_empty());
     assert_eq!(get(&w, "/api/sessions/today").await.1["rounds"], 0);
