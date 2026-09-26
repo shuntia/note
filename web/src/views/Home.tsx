@@ -41,7 +41,7 @@ import {
 } from '../session'
 import { SoFar } from '../sofar'
 import { Tick } from '../tick'
-import type { DayView, PlanEvent, QueueEntry, QueueReason, SessionPhase, SessionStart, Task, TaskNotify } from '../types'
+import type { DayView, PlanEvent, QueueEntry, QueueReason, SessionPhase, SessionStart, Task, TaskNode, TaskNotify } from '../types'
 import { capped } from '../wave'
 import { CalendarSection } from './Calendar'
 import { Urgent } from './Tasks'
@@ -427,6 +427,35 @@ export function Home({
     })
   }
 
+  // The task the session runs, as the task list has it.
+  const [own, setOwn] = useState<{ key: string; node: TaskNode } | null>(null)
+  const ownNow = useRef(own)
+  ownNow.current = own
+  useEffect(() => {
+    if (!session || session.task_id === null) return
+    const key = keyOf(session)
+    const id = session.task_id
+    let live = true
+    api
+      .tasks()
+      .then((nodes) => {
+        const node =
+          nodes.find((n) => n.id === id) ??
+          nodes.flatMap((n) => n.children).map((c) => ({ ...c, children: [] })).find((c) => c.id === id)
+        if (live && node) setOwn({ key, node })
+      })
+      .catch(() => {})
+    return () => {
+      live = false
+    }
+  }, [session ? keyOf(session) : null])
+
+  // A title the server holds may still carry its category; only a known category is cut.
+  const categoryOf = (s: FocusSession) =>
+    own?.key === keyOf(s)
+      ? own.node.category
+      : (strip?.items.find((e) => e.task.id === s.task_id)?.task.category ?? '')
+
   // The step reached by an advance on this screen fills by its own clock; a step
   // found on load fills by the session's.
   const stepClock = useRef<{ key: string; stepIndex: number; startedAt: number; pausedMs: number; plannedSec: number } | null>(null)
@@ -518,7 +547,8 @@ export function Home({
   )
 
   // The line under the title: the step being worked on, else the first line of the notes.
-  const subOf = (s: FocusSession) => s.step_name ?? firstLine(s.notes)
+  const subOf = (s: FocusSession) => withoutCategory(s.step_name ?? firstLine(s.notes), categoryOf(s))
+  const titleOf = (s: FocusSession) => withoutCategory(s.title, categoryOf(s))
 
   const pauseButton = (s: FocusSession) => (
     <button
@@ -585,6 +615,8 @@ export function Home({
           ? 'break'
           : 'working'
   const sessionKey = session ? keyOf(session) : null
+  const sessionKeyNow = useRef(sessionKey)
+  sessionKeyNow.current = sessionKey
   const phaseKey = session ? `${sessionKey}:${shownPhase}:${shownRound}` : null
   // Rounds and sessions finished today are beads; the running round is the next one,
   // and a break stands on the round it follows, which is already lit.
@@ -638,6 +670,44 @@ export function Home({
       drawNext.current = false
       setSettling(false)
     }, 10_000)
+  }
+
+  // A session started anywhere else is one slot until it is swiped; the queue is laid
+  // around it then, with the session itself in the slot after Work time when the
+  // queue does not hold it.
+  const stripFor = useRef('')
+  const loadStrip = async () => {
+    const s = session
+    if (!s || strip || settling || stripFor.current === keyOf(s)) return
+    const key = keyOf(s)
+    stripFor.current = key
+    let items: QueueEntry[]
+    try {
+      items = await api.queue(5)
+    } catch {
+      stripFor.current = ''
+      return
+    }
+    if (sessionKeyNow.current !== key) return
+    let index: number
+    if (s.task_id === null) {
+      if (s.title !== WORK_TIME.title) return
+      index = 0
+    } else {
+      const found = items.findIndex((e) => e.task.id === s.task_id)
+      const node = ownNow.current?.key === key ? ownNow.current.node : null
+      if (found !== -1) index = found + 1
+      else if (node) {
+        const step = s.step_index !== null ? (node.children[s.step_index - 1] ?? null) : null
+        items = [{ task: node, step, planned_min: s.planned_min, reason: 'oldest' }, ...items]
+        index = 1
+      } else {
+        stripFor.current = ''
+        return
+      }
+    }
+    lastStartAt.current = Date.parse(s.started_at)
+    setStrip({ items, index })
   }
 
   // Within a minute of its start the session left behind is discarded, not ended.
@@ -773,7 +843,9 @@ export function Home({
       d.dx = e.clientX - d.x
       d.dy = e.clientY - d.y
       const rail = railEl.current
-      if (!session || !strip || !rail || settling || Math.abs(d.dx) < 8 || Math.abs(d.dx) <= Math.abs(d.dy)) return
+      if (!session || settling || Math.abs(d.dx) < 8 || Math.abs(d.dx) <= Math.abs(d.dy)) return
+      if (!strip) return void loadStrip()
+      if (!rail) return
       showDots(true)
       gsap.killTweensOf(rail)
       gsap.set(rail, { x: railX(slotIndex, d.dx, slotCount, boxWidth()) })
@@ -796,6 +868,7 @@ export function Home({
     },
     onKeyDown: (e: KeyEvent<HTMLDivElement>) => {
       if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+        if (session && !strip) void loadStrip()
         if (!session || !strip) return
         e.preventDefault()
         void switchTo(slotIndex + (e.key === 'ArrowRight' ? 1 : -1))
@@ -812,7 +885,9 @@ export function Home({
     // A horizontal wheel is a drag with no finger: it gathers until it would snap.
     onWheel: (e: WheelEv<HTMLDivElement>) => {
       const rail = railEl.current
-      if (!session || !strip || !rail || settling || Math.abs(e.deltaX) <= Math.abs(e.deltaY)) return
+      if (!session || settling || Math.abs(e.deltaX) <= Math.abs(e.deltaY)) return
+      if (!strip) return void loadStrip()
+      if (!rail) return
       const w = wheel.current
       w.dx -= e.deltaX
       window.clearTimeout(w.timer)
@@ -955,27 +1030,6 @@ export function Home({
     if (!session && !settling) setStrip(null)
   }, [sessionKey, settling, landing])
 
-  // A session started anywhere else still gets the queue around it, when it is in it.
-  useEffect(() => {
-    if (!session || strip || settling) return
-    let live = true
-    api
-      .queue(5)
-      .then((items) => {
-        if (!live) return
-        const found = items.findIndex((e) => e.task.id === session.task_id)
-        const index =
-          session.task_id === null ? (session.title === WORK_TIME.title ? 0 : -1) : found === -1 ? -1 : found + 1
-        if (index < 0) return
-        lastStartAt.current = Date.parse(session.started_at)
-        setStrip({ items, index })
-      })
-      .catch(() => {})
-    return () => {
-      live = false
-    }
-  }, [sessionKey, !!strip, settling])
-
   useLayoutEffect(() => {
     const rail = railEl.current
     if (!rail) return
@@ -1064,7 +1118,7 @@ export function Home({
         <div key={i} className="slot now">
           {mark && <i className={`mark ${mark}`} />}
           {sessionNum(s, mobile ? 64 : 76)}
-          <div className="gauge-name" style={{ fontSize: u(mobile ? 20 : 22) }}><Atoms text={s.title} /></div>
+          <div className="gauge-name" style={{ fontSize: u(mobile ? 20 : 22) }}><Atoms text={titleOf(s)} /></div>
           {sub && <div className="gauge-sub"><Atoms text={sub} /></div>}
         </div>
       )
@@ -1155,7 +1209,7 @@ export function Home({
         <div className="session-arc">
           <Gauge size={230} fracAt={sessionFracAt(session)} breathe paused={isPaused(session)}>
             {sessionNum(session, 40)}
-            <div className="gauge-name" style={{ fontSize: u(15) }}>{session.title}</div>
+            <div className="gauge-name" style={{ fontSize: u(15) }}>{titleOf(session)}</div>
             {subOf(session) && <span className="gauge-sub">{subOf(session)}</span>}
           </Gauge>
           {pauseButton(session)}
@@ -1167,7 +1221,7 @@ export function Home({
           {sessionNum(session, 24)}
         </Gauge>
         <div className="home-head">
-          <span className="home-head-name">{session.title}</span>
+          <span className="home-head-name">{titleOf(session)}</span>
           {subOf(session) && <span className="gauge-sub">{subOf(session)}</span>}
         </div>
         {doneButton}
