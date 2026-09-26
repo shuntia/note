@@ -423,7 +423,7 @@ async fn tasks_queue(
     let conn = state.db();
     let tz = user_zone(&state, &user.username);
     let limit = q.limit.unwrap_or(5).clamp(1, 20);
-    let listed = crate::tasks::queue(&conn, user.id, jiff::Timestamp::now(), limit).and_then(|mut q| {
+    let listed = crate::tasks::queue(&conn, user.id, &tz, jiff::Timestamp::now(), limit).and_then(|mut q| {
         crate::tasks::stamp_schedule(&conn, user.id, &tz, q.iter_mut().map(|e| &mut e.task.task))?;
         Ok(q)
     });

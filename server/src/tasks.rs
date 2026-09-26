@@ -106,6 +106,8 @@ pub struct Task {
     /// of that. Derived from `progress` and `actual_min`, never stored.
     pub expected_min: Option<u32>,
     pub remaining_min: Option<u32>,
+    #[serde(skip)]
+    pub(crate) created_at: String,
 }
 
 /// Rounds to the nearest quarter hour; anything above zero lands on at least one.
@@ -252,6 +254,7 @@ fn row_to_task(r: &rusqlite::Row) -> rusqlite::Result<Task> {
         progress,
         expected_min,
         remaining_min,
+        created_at: r.get(21)?,
     })
 }
 
@@ -259,7 +262,7 @@ const COLS: &str = "t.id, t.title, t.description, t.state, t.source, t.notes, t.
                     t.duration_source, t.parent_id, t.is_now, t.updated_at, t.due_at, \
                     t.external_id, t.url, t.notify, t.actual_min, t.progress, \
                     COALESCE(p.category, t.category), t.goal_id, g.title, \
-                    COALESCE(p.urgency, t.urgency)";
+                    COALESCE(p.urgency, t.urgency), t.created_at";
 
 /// A step reports the category of the task it belongs to, and a task its goal's
 /// title, so one read carries what a row needs to draw itself.
@@ -685,13 +688,10 @@ pub struct QueueEntry {
 pub fn queue(
     conn: &Connection,
     user_id: i64,
+    tz: &jiff::tz::TimeZone,
     now: jiff::Timestamp,
     limit: usize,
 ) -> rusqlite::Result<Vec<QueueEntry>> {
-    let created: std::collections::HashMap<i64, String> = conn
-        .prepare("SELECT id, created_at FROM tasks WHERE user_id = ?1 AND parent_id IS NULL")?
-        .query_map([user_id], |r| Ok((r.get(0)?, r.get(1)?)))?
-        .collect::<rusqlite::Result<_>>()?;
     let mut nodes: Vec<TaskNode> = list(conn, user_id)?
         .into_iter()
         .filter(|n| matches!(n.task.state.as_str(), "open" | "in_progress"))
@@ -701,13 +701,12 @@ pub fn queue(
         n.task.pressing = pressing_at(&n.task.state, n.task.due_at.as_deref(), now);
     }
     nodes.sort_by_cached_key(|n| {
-        let due = due_of(&n.task).map(|t| t.to_zoned(jiff::tz::TimeZone::UTC).date());
-        let made = created.get(&n.task.id).map_or("", String::as_str);
+        let due = due_of(&n.task).map(|t| t.to_zoned(tz.clone()).date());
         crate::allocate::rank_key(
             n.task.is_now,
             urgency_rank(&n.task.urgency, n.task.pressing),
             due,
-            made,
+            &n.task.created_at,
             n.task.id,
         )
     });
@@ -1862,12 +1861,12 @@ mod tests {
         set(&conn, current, None, "low", true);
         conn.execute("UPDATE tasks SET state = 'done' WHERE id = ?1", [done]).unwrap();
 
-        let q = queue(&conn, uid, now, 10).unwrap();
+        let q = queue(&conn, uid, &jiff::tz::TimeZone::UTC, now, 10).unwrap();
         let ids: Vec<i64> = q.iter().map(|e| e.task.task.id).collect();
         assert_eq!(ids, [current, urgent, over, soon, oldest]);
         let reasons: Vec<&str> = q.iter().map(|e| e.reason).collect();
         assert_eq!(reasons, ["now", "urgent", "overdue", "due_soon", "oldest"]);
-        assert_eq!(queue(&conn, uid, now, 2).unwrap().len(), 2);
+        assert_eq!(queue(&conn, uid, &jiff::tz::TimeZone::UTC, now, 2).unwrap().len(), 2);
     }
 
     #[test]
@@ -1884,12 +1883,25 @@ mod tests {
         }
         conn.execute("UPDATE tasks SET state = 'done' WHERE id = ?1", [first]).unwrap();
 
-        let q = queue(&conn, uid, now, 10).unwrap();
+        let q = queue(&conn, uid, &jiff::tz::TimeZone::UTC, now, 10).unwrap();
         let entry = |id: i64| q.iter().find(|e| e.task.task.id == id).unwrap();
         assert_eq!(entry(stepped).step.as_ref().map(|s| s.id), Some(second));
         assert_eq!(entry(stepped).planned_min, Some(20));
         assert!(entry(whole).step.is_none());
         assert_eq!(entry(whole).planned_min, Some(45));
         assert_eq!(entry(bare).planned_min, None);
+    }
+
+    #[test]
+    fn queue_lays_a_dated_task_before_an_undated_one_of_the_same_rank() {
+        let (conn, uid) = db_with_user();
+        let now: jiff::Timestamp = "2026-09-20T09:00:00Z".parse().unwrap();
+        let undated = task(&conn, uid, "tidy the desk", None);
+        let dated = task(&conn, uid, "hand in the form", None);
+        set(&conn, dated, Some("2026-09-25T09:00:00Z"), "normal", false);
+        let q = queue(&conn, uid, &jiff::tz::TimeZone::UTC, now, 10).unwrap();
+        let ids: Vec<i64> = q.iter().map(|e| e.task.task.id).collect();
+        assert_eq!(ids, [dated, undated]);
+        assert_eq!(q[0].reason, "oldest");
     }
 }
