@@ -1416,3 +1416,10 @@ button, [role='button'], a { touch-action: manipulation; }
 .pause-glyph { position: absolute; left: 50%; top: 71.875%; width: calc(20 * var(--u)); height: calc(20 * var(--u)); margin-left: calc(-10 * var(--u)); fill: var(--quiet); opacity: 0; pointer-events: none; transition: opacity 300ms ease; }
 .pause-glyph.on { opacity: 1; }
 .face-hint.inline { position: static; transform: none; margin-top: calc(10 * var(--u)); }
+/* a break takes the words off the face and the round brings them back; colour, not
+   opacity, so the scroll morph's own fades are left alone */
+.slot.now :is(.gauge-name, .gauge-sub) { transition: color 500ms ease 400ms; }
+.slot.now .mark { transition: background-color 500ms ease 400ms; }
+.circle-face.resting .slot.now :is(.gauge-name, .gauge-sub) { color: transparent; transition-delay: 0s; }
+.circle-face.resting .slot.now .mark { background-color: transparent; transition-delay: 0s; }
+@media (prefers-reduced-motion: reduce) { .slot.now :is(.gauge-name, .gauge-sub, .mark) { transition: none; } }

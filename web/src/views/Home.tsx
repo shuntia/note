@@ -35,14 +35,13 @@ import {
   isPaused,
   markEnding,
   pausedAt,
-  phaseLengthSec,
   phaseStart,
   plannedSec,
   type FocusSession,
 } from '../session'
 import { SoFar } from '../sofar'
 import { Tick } from '../tick'
-import type { DayView, PlanEvent, QueueEntry, QueueReason, SessionStart, Task, TaskNotify } from '../types'
+import type { DayView, PlanEvent, QueueEntry, QueueReason, SessionPhase, SessionStart, Task, TaskNotify } from '../types'
 import { capped } from '../wave'
 import { CalendarSection } from './Calendar'
 import { Urgent } from './Tasks'
@@ -418,9 +417,9 @@ export function Home({
   }
 
   // The step the session is on, and whatever is still open after it.
-  const finish = async () => {
+  const finish = async (): Promise<'advanced' | 'completed' | null> => {
     const s = session
-    if (!s || pending) return
+    if (!s || pending) return null
     setPending(true)
     try {
       const nodes = s.task_id === null ? [] : await api.tasks()
@@ -438,19 +437,28 @@ export function Home({
           }),
         )
         advance(s, current)
-      } else {
-        complete(s, current)
+        return 'advanced'
       }
+      complete(s, current)
+      return 'completed'
     } catch {
       notify("Couldn't save the session. Try again.")
+      return null
     } finally {
       setPending(false)
     }
   }
 
+  // A phase the client clock has reached before the server's sweep has flipped it.
+  const [ahead, setAhead] = useState<{ key: string; phase: SessionPhase; round: number; at: number } | null>(null)
+  const lead = session && ahead?.key === keyOf(session) ? ahead : null
   const pomodoro = session?.mode === 'pomodoro'
-  const onBreak = pomodoro && session?.phase === 'break'
-  const phaseSec = session && pomodoro ? phaseLengthSec(session) : null
+  const shownPhase = lead?.phase ?? session?.phase ?? 'work'
+  const shownRound = lead?.round ?? session?.round ?? 1
+  const onBreak = pomodoro && shownPhase === 'break'
+  const phaseMin = session && pomodoro ? (onBreak ? session.break_min : session.work_min) : null
+  const phaseSec = phaseMin === null ? null : phaseMin * 60
+  const phaseFrom = (s: FocusSession) => lead?.at ?? phaseStart(s)
   const planned = session ? plannedSec(session) : null
   // Past the planned end the counter leaves the preference behind and counts the
   // overrun up; a pomodoro round is the server's to end, so it never runs over.
@@ -460,7 +468,7 @@ export function Home({
     const total = pomodoro ? phaseSec : planned
     return (
       <NowCounter
-        startedAt={pomodoro ? phaseStart(s) : effectiveStart(s) + (over ? (total ?? 0) * 1000 : 0)}
+        startedAt={pomodoro ? phaseFrom(s) : effectiveStart(s) + (over ? (total ?? 0) * 1000 : 0)}
         durationSec={total ?? 0}
         mode={pomodoro ? 'remaining' : over || total === null ? 'elapsed' : prefs.counter}
         pausedAt={pausedAt(s)}
@@ -471,7 +479,7 @@ export function Home({
   const sessionFracAt = (s: FocusSession) => () => {
     const total = pomodoro ? phaseSec : planned
     if (!total) return 0
-    const from = pomodoro ? phaseStart(s) : effectiveStart(s)
+    const from = pomodoro ? phaseFrom(s) : effectiveStart(s)
     return ((pausedAt(s) ?? Date.now()) - from) / (total * 1000)
   }
 
@@ -528,6 +536,12 @@ export function Home({
   const drag = useRef<{ x: number; y: number; t: number; dx: number; dy: number } | null>(null)
   const wheel = useRef({ dx: 0, timer: 0 })
   const dotsTimer = useRef(0)
+  const timers = useRef<number[]>([])
+  const closing = useRef(false)
+  const arrived = useRef(false)
+  const seen = useRef<{ session: string; phase: string } | null>(null)
+  const asked = useRef('')
+  const [rounds, setRounds] = useState(0)
   const [settling, setSettling] = useState(false)
   const [strip, setStrip] = useState<{ items: QueueEntry[]; index: number } | null>(null)
   const [sessionHint, setSessionHint] = useState(() => hintShown('session'))
@@ -541,6 +555,12 @@ export function Home({
           ? 'break'
           : 'working'
   const sessionKey = session ? keyOf(session) : null
+  const phaseKey = session ? `${sessionKey}:${shownPhase}:${shownRound}` : null
+  // Rounds and sessions finished today are beads; the running round is the next one.
+  const done = rounds + (pomodoro ? shownRound - 1 : 0)
+  const total = Math.max(4, done + 1)
+  const marks = useRef({ done, total })
+  marks.current = { done, total }
   const slotCount = strip ? strip.items.length + 1 : 1
   const slotIndex = strip?.index ?? 0
   const faceSize = mobile ? 320 : 440
@@ -621,9 +641,81 @@ export function Home({
     }, 10_000)
   }
 
+  const later = (fn: () => void, ms: number) => {
+    timers.current.push(window.setTimeout(fn, ms))
+  }
+  // Not cleared on unmount: a finish under way still reaches the server.
+  const wait = (ms: number) => new Promise<void>((r) => window.setTimeout(r, ms))
+
+  const layBeads = () => {
+    const face = faceBox.current
+    if (!face) return
+    face.querySelectorAll('.bead').forEach((b) => b.remove())
+    fx.beadsAtRest(face, marks.current.done, marks.current.total)
+  }
+
+  // The round's end: the ring closes on a new bead, a wave leaves it, and the arc
+  // turns to the break. `then` runs as the break takes over.
+  const playRoundDone = (then?: () => void) => {
+    const face = faceBox.current
+    const fill = fillEl.current
+    if (!face || !fill) return then?.()
+    hold.current = true
+    navigator.vibrate?.([30, 40, 30])
+    fx.closeRing(face, fill, marks.current.done, marks.current.total)
+    later(() => home.current && fx.wave(face, home.current), 420)
+    later(() => {
+      fx.toBreak(face, fill, true)
+      hold.current = false
+      then?.()
+    }, 1300)
+  }
+
+  // The break's end: the ground brightens and the round opens the way a session does.
+  const playBreakDone = () => {
+    const face = faceBox.current
+    const fill = fillEl.current
+    const track = trackEl.current
+    if (!face || !fill || !track) return
+    hold.current = true
+    fx.toWork(face, fill, track)
+    later(() => fx.open(face, fill, track, () => (hold.current = false)), 500)
+  }
+
+  // The ring closes, the wave leaves it, and the face empties before the session
+  // settles; a task with a step left draws the ring again for that step.
   const finishSession = async () => {
-    if (!session || settling || hold.current) return
-    await finish()
+    const face = faceBox.current
+    const fill = fillEl.current
+    const track = trackEl.current
+    if (!session || settling || pending || hold.current) return
+    if (!face || !fill || !track) {
+      await finish()
+      return
+    }
+    hold.current = true
+    closing.current = true
+    navigator.vibrate?.([30, 40, 30])
+    fx.closeRing(face, fill, marks.current.done, marks.current.total)
+    const still = reducedMotion()
+    await wait(still ? 200 : 420)
+    if (!still && home.current) fx.wave(face, home.current)
+    if (!still) await wait(1080)
+    const veil = home.current?.querySelector<HTMLElement>('.veil') ?? null
+    const fading = [track, fill, railEl.current, veil, ...face.querySelectorAll('.bead')].filter((el) => el !== null)
+    if (still) gsap.set(fading, { opacity: 0 })
+    else await gsap.to(fading, { opacity: 0, duration: 0.6 })
+    const result = await finish()
+    closing.current = false
+    if (result === 'completed') {
+      veil?.remove()
+      hold.current = false
+      return
+    }
+    gsap.set([railEl.current, veil].filter((el) => el !== null), { clearProps: 'opacity' })
+    layBeads()
+    if (result === 'advanced') fx.open(face, fill, track, () => (hold.current = false))
+    else hold.current = false
   }
 
   const tap = () => {
@@ -721,11 +813,95 @@ export function Home({
       return
     }
     hold.current = true
+    arrived.current = true
     fx.open(face, fill, track, () => {
       hold.current = false
       setSettling(false)
     })
   }, [sessionKey])
+
+  useEffect(
+    () => () => {
+      timers.current.forEach(window.clearTimeout)
+    },
+    [],
+  )
+
+  useEffect(() => {
+    if (!sessionKey) return
+    api
+      .rounds()
+      .then((r) => setRounds(r.rounds))
+      .catch(() => {})
+  }, [sessionKey, refresh])
+
+  useLayoutEffect(() => {
+    const face = faceBox.current
+    if (!face || !shown || closing.current) return
+    face.querySelectorAll('.bead').forEach((b) => b.remove())
+    if (settling) return
+    layBeads()
+    if (arrived.current && !reducedMotion()) gsap.from(face.querySelectorAll('.bead'), { opacity: 0, duration: 0.5, stagger: 0.05 })
+    arrived.current = false
+  }, [sessionKey, !!shown, done, total, settling])
+
+  // The server's sweep has caught up with the phase on screen, or moved past it.
+  useEffect(() => {
+    setAhead(null)
+  }, [sessionKey, session?.phase, session?.round])
+
+  // A phase change plays once, whichever clock saw it first; a session seen for the
+  // first time takes its phase as it stands.
+  useLayoutEffect(() => {
+    const prev = seen.current
+    if (!session || !sessionKey || !phaseKey) {
+      seen.current = null
+      if (!landing) home.current?.querySelector('.veil')?.remove()
+      return
+    }
+    if (prev?.phase === phaseKey) return
+    seen.current = { session: sessionKey, phase: phaseKey }
+    const face = faceBox.current
+    const fill = fillEl.current
+    if (!face || !fill) return
+    if (prev?.session !== sessionKey) {
+      if (onBreak) fx.toBreak(face, fill, true)
+      else {
+        fill.style.stroke = ''
+        home.current?.querySelector('.veil')?.remove()
+      }
+      return
+    }
+    if (onBreak) playRoundDone()
+    else playBreakDone()
+  }, [phaseKey])
+
+  // The client's own clock turns the phase at 00:00, so the face never waits for the
+  // sweep; a phase long past is left to the server.
+  const clock = useRef<{ key: string; phase: SessionPhase; round: number; end: number; paused: boolean } | null>(null)
+  clock.current =
+    session && pomodoro && phaseSec !== null
+      ? { key: keyOf(session), phase: shownPhase, round: shownRound, end: phaseFrom(session) + phaseSec * 1000, paused: isPaused(session) }
+      : null
+  useEffect(() => {
+    if (!pomodoro) return
+    const id = window.setInterval(() => {
+      const c = clock.current
+      const now = Date.now()
+      if (!c || c.paused || hold.current || now < c.end || now - c.end > 5000) return
+      if (seen.current?.session !== c.key) return
+      const next = c.phase === 'work' ? { phase: 'break' as const, round: c.round } : { phase: 'work' as const, round: c.round + 1 }
+      const nextKey = `${c.key}:${next.phase}:${next.round}`
+      if (asked.current === nextKey) return
+      asked.current = nextKey
+      const lead = { key: c.key, ...next, at: c.end }
+      if (next.phase === 'break') {
+        seen.current = { session: c.key, phase: nextKey }
+        playRoundDone(() => setAhead(lead))
+      } else setAhead(lead)
+    }, 250)
+    return () => window.clearInterval(id)
+  }, [pomodoro])
 
   useEffect(() => {
     if (landing) {
@@ -864,8 +1040,18 @@ export function Home({
 
   const bigFace = shown ? (
     <div className="home-face">
-      <div ref={faceBox} className="circle-face" style={{ width: u(faceSize), height: u(faceSize) }} {...surface}>
-        <Circle size={faceSize} fracAt={landing ? undefined : sessionFracAt(shown)} breathe paused={isPaused(shown)} hold={hold} fill={fillEl} track={trackEl}>
+      <div ref={faceBox} className={`circle-face${onBreak ? ' resting' : ''}`} style={{ width: u(faceSize), height: u(faceSize) }} {...surface}>
+        <Circle
+          size={faceSize}
+          fracAt={landing ? undefined : sessionFracAt(shown)}
+          drain={onBreak}
+          steps={!landing && shown.step_count && shown.step_index ? { count: shown.step_count, current: shown.step_index - 1 } : null}
+          breathe
+          paused={isPaused(shown)}
+          hold={hold}
+          fill={fillEl}
+          track={trackEl}
+        >
           <div className="strip">
             <div ref={railEl} className="rail">
               {Array.from({ length: slotCount }, (_, i) => slot(shown, i))}
