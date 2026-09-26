@@ -140,6 +140,8 @@ async fn the_open_session_is_the_whole_face_the_client_paints() {
 #[tokio::test]
 async fn a_session_lays_its_checks_and_takes_them_along_when_it_ends() {
     let w = world(Vec::new()).await;
+    let (status, _) = send(&w, Request::put("/api/settings"), r#"{"session_end_notify":false}"#).await;
+    assert_eq!(status, StatusCode::OK);
     let session = start(&w, r#"{"title":"read the chapter","planned_min":30}"#).await;
     let id = session["id"].as_i64().unwrap();
 
@@ -391,4 +393,54 @@ async fn a_block_announces_itself_the_way_its_task_asks() {
 
     note_server::runner::sweep_once(&w.state);
     assert_eq!(w.push.seen().len(), 1, "a block starts once");
+}
+
+#[tokio::test]
+async fn a_session_discarded_in_its_first_minute_is_gone_and_an_older_one_just_ends() {
+    let w = world(Vec::new()).await;
+    assert_eq!(get(&w, "/api/sessions/today").await.1["rounds"], 0);
+
+    let young = start(&w, r#"{"title":"read the chapter","planned_min":30}"#).await;
+    let id = young["id"].as_i64().unwrap();
+    let (status, reply) =
+        post(&w, &format!("/api/sessions/{id}/end"), r#"{"outcome":"stopped","discard":true}"#).await;
+    assert_eq!(status, StatusCode::OK, "{reply}");
+    assert_eq!(reply, serde_json::json!({}));
+    assert!(rows::<i64>(&w, "SELECT id FROM work_sessions").is_empty());
+    assert!(rows::<i64>(&w, "SELECT id FROM conversations").is_empty());
+    assert_eq!(get(&w, "/api/sessions/today").await.1["rounds"], 0);
+
+    let old = start(&w, r#"{"title":"read the chapter","planned_min":30}"#).await;
+    let id = old["id"].as_i64().unwrap();
+    {
+        let then = jiff::Timestamp::now() - jiff::Span::new().minutes(2);
+        let conn = w.state.db.lock().unwrap();
+        conn.execute("UPDATE work_sessions SET started_at = ?1", [then.to_string()]).unwrap();
+    }
+    let (status, reply) =
+        post(&w, &format!("/api/sessions/{id}/end"), r#"{"outcome":"stopped","discard":true}"#).await;
+    assert_eq!(status, StatusCode::OK, "{reply}");
+    assert_eq!(reply["ended"], id);
+    assert_eq!(get(&w, "/api/sessions/today").await.1["rounds"], 1);
+}
+
+#[tokio::test]
+async fn a_session_that_reaches_its_plan_says_times_up_once() {
+    let w = world(Vec::new()).await;
+    let session = start(&w, r#"{"title":"read the chapter","planned_min":30}"#).await;
+    note_server::runner::sweep_once(&w.state);
+    assert!(w.push.seen().is_empty());
+
+    {
+        let then = jiff::Timestamp::now() - jiff::Span::new().minutes(31);
+        let conn = w.state.db.lock().unwrap();
+        conn.execute("UPDATE work_sessions SET started_at = ?1", [then.to_string()]).unwrap();
+    }
+    note_server::runner::sweep_once(&w.state);
+    note_server::runner::sweep_once(&w.state);
+    let seen = w.push.seen();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].1.title, "read the chapter");
+    assert_eq!(seen[0].1.body, "Time's up.");
+    assert_eq!(seen[0].1.conversation_id, session["conversation_id"].as_i64());
 }

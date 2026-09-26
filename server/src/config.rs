@@ -274,6 +274,10 @@ pub struct UserConfig {
     pub pomodoro_work_min: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pomodoro_break_min: Option<u32>,
+    /// Whether the end of a session's planned time, and each pomodoro phase,
+    /// is announced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_end_notify: Option<bool>,
 }
 
 pub const DEFAULT_TRIGGERS_PER_DAY: u32 = 4;
@@ -322,6 +326,10 @@ impl UserConfig {
 
     pub fn pomodoro_enabled(&self) -> bool {
         self.pomodoro_enabled.unwrap_or(false)
+    }
+
+    pub fn session_end_notify(&self) -> bool {
+        self.session_end_notify.unwrap_or(true)
     }
 
     pub fn pomodoro_work_min(&self) -> u32 {
