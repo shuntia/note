@@ -1159,7 +1159,7 @@ textarea.mono { font-family: var(--mono); }
   display: flex; flex-direction: column; align-items: center; justify-content: center;
   text-align: center; gap: calc(4 * var(--u)); padding: 0 14%;
 }
-.gauge-num, .slot-num { font-family: var(--display); font-weight: 500; letter-spacing: -0.035em; line-height: 1; color: var(--ink); font-variant-numeric: tabular-nums; font-variation-settings: 'opsz' 32; }
+.gauge-num { font-family: var(--display); font-weight: 500; letter-spacing: -0.035em; line-height: 1; color: var(--ink); font-variant-numeric: tabular-nums; font-variation-settings: 'opsz' 32; }
 .gauge-num.over { color: var(--sun-ink); }
 .gauge-name, .slot-name { margin-top: calc(6 * var(--u)); font-family: var(--display); font-weight: 500; letter-spacing: -0.015em; line-height: 1.2; color: var(--quiet); text-wrap: balance; }
 .gauge-sub, .slot-sub { font-size: calc(12 * var(--u)); color: var(--faint); font-variant-numeric: tabular-nums; }
@@ -1391,7 +1391,7 @@ button, [role='button'], a { touch-action: manipulation; }
 
 /* ── the circle: one surface for tap, swipe and keys ─────────────── */
 .circle-face { position: relative; flex: none; pointer-events: auto; touch-action: none; user-select: none; -webkit-user-select: none; cursor: pointer; border-radius: 50%; outline: none; }
-.circle-face:focus-visible { outline: 2px solid var(--ring); outline-offset: calc(12 * var(--u)); }
+.circle-face:focus-visible { outline: 2px solid color-mix(in oklch, var(--ring) 40%, transparent); outline-offset: 2px; }
 .arc-track, .arc-fill { fill: none; stroke-linecap: round; }
 .arc-track { stroke: var(--track); }
 .arc-fill { stroke: var(--arc-sun); }
@@ -1418,8 +1418,8 @@ button, [role='button'], a { touch-action: manipulation; }
 .face-hint.inline { position: static; transform: none; margin-top: calc(10 * var(--u)); }
 /* a break takes the words off the face and the round brings them back; colour, not
    opacity, so the scroll morph's own fades are left alone */
-.slot.now :is(.gauge-name, .gauge-sub) { transition: color 500ms ease 400ms; }
+.slot.now :is(.gauge-name, .gauge-sub) { transition: color 500ms ease 400ms, visibility 0s linear 0s; }
 .slot.now .mark { transition: background-color 500ms ease 400ms; }
-.circle-face.resting .slot.now :is(.gauge-name, .gauge-sub) { color: transparent; transition-delay: 0s; }
+.circle-face.resting .slot.now :is(.gauge-name, .gauge-sub) { color: transparent; visibility: hidden; transition: color 500ms ease, visibility 0s linear 500ms; }
 .circle-face.resting .slot.now .mark { background-color: transparent; transition-delay: 0s; }
 @media (prefers-reduced-motion: reduce) { .slot.now :is(.gauge-name, .gauge-sub, .mark) { transition: none; } }

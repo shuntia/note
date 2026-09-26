@@ -301,8 +301,9 @@ export function App() {
   useEffect(() => {
     if (!me) return
     return connectEvents((ev) => {
-      // A check-in's question is waiting in its thread, so the thread is the notice.
-      if (ev.conversation_id !== null) openConversation(ev.conversation_id)
+      // A check-in (it carries its event) has its question waiting in the thread, so
+      // the thread is the notice; a session's notices are toasts over whatever is open.
+      if (ev.event_id !== null && ev.conversation_id !== null) openConversation(ev.conversation_id)
       else notify(ev.body ? `${ev.title} — ${ev.body}` : ev.title)
       onChanged()
     }, onChanged)
