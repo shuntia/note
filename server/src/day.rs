@@ -37,7 +37,7 @@ fn on_date(at: &str, tz: &jiff::tz::TimeZone, date: jiff::civil::Date) -> bool {
 }
 
 /// The half-open span of instants that local date covers.
-fn bounds(
+pub(crate) fn bounds(
     tz: &jiff::tz::TimeZone,
     date: jiff::civil::Date,
 ) -> Result<(jiff::Timestamp, jiff::Timestamp)> {
