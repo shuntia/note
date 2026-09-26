@@ -621,7 +621,7 @@ pub fn tick(conn: &Connection, config_dir: &Path, now: jiff::Timestamp) -> Resul
 
     let mut flips = Vec::new();
     for (session, user_id, username) in running {
-        flips.extend(advance(conn, config_dir, &session, user_id, &username, now)?);
+        flips.extend(advance(conn, config_dir, &session, user_id, &username, true, now)?);
     }
     flips.extend(overrun(conn, config_dir, now)?);
     Ok(flips)
@@ -642,7 +642,7 @@ fn catch_up(
         [session.id],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
-    advance(conn, config_dir, session, user_id, &username, now)?;
+    advance(conn, config_dir, session, user_id, &username, false, now)?;
     Ok(())
 }
 
@@ -659,13 +659,16 @@ fn phase_end(session: &Session, len_ms: i64, now: jiff::Timestamp) -> jiff::Time
 }
 
 /// Moves one session on if its phase has run out; the next phase starts at the
-/// moment the last one ended.
+/// moment the last one ended. Without `auto_close` a last round that has run out
+/// is left open for the caller to close.
+#[allow(clippy::too_many_arguments)]
 fn advance(
     conn: &Connection,
     config_dir: &Path,
     session: &Session,
     user_id: i64,
     username: &str,
+    auto_close: bool,
     now: jiff::Timestamp,
 ) -> Result<Option<Flip>> {
     if session.paused_at.is_some() {
@@ -679,6 +682,9 @@ fn advance(
     let notify = wants_end_notice(config_dir, username);
     let message = if session.phase == "work" {
         if session.round >= MAX_ROUNDS {
+            if !auto_close {
+                return Ok(None);
+            }
             close(conn, config_dir, user_id, username, Some(session.id), "stopped", now)?;
             crate::log::record(
                 conn,
@@ -1297,6 +1303,39 @@ mod tests {
         assert_eq!((held.phase.as_str(), held.round), ("break", 1));
         assert_eq!(held.phase_started_at, "2026-09-17T09:25:00Z");
         assert!(held.paused_at.is_some());
+    }
+
+    #[test]
+    fn ending_a_last_round_the_sweep_has_not_reached_keeps_the_users_outcome() {
+        let (conn, tmp, uid) = pomodoro_env();
+        let session = start_one(&conn, &tmp, uid, None);
+        conn.execute(
+            "UPDATE work_sessions SET round = ?1, phase_started_at = '2026-09-17T09:00:00Z'
+             WHERE id = ?2",
+            (MAX_ROUNDS, session.id),
+        )
+        .unwrap();
+
+        let ended = end_one(&conn, &tmp, uid, Some(session.id), "done", "2026-09-17T09:25:10Z");
+        assert_eq!(ended, Some(session.id));
+        let outcome: String = conn
+            .query_row("SELECT outcome FROM work_sessions WHERE id = ?1", [session.id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(outcome, "done");
+    }
+
+    #[test]
+    fn a_pause_on_a_last_round_run_out_still_finds_the_session() {
+        let (conn, tmp, uid) = pomodoro_env();
+        let session = start_one(&conn, &tmp, uid, None);
+        conn.execute(
+            "UPDATE work_sessions SET round = ?1, phase_started_at = '2026-09-17T09:00:00Z'
+             WHERE id = ?2",
+            (MAX_ROUNDS, session.id),
+        )
+        .unwrap();
+        let held = pause(&conn, tmp.path(), uid, session.id, at("2026-09-17T09:25:10Z")).unwrap();
+        assert!(held.is_some_and(|s| s.paused_at.is_some()));
     }
 
     #[test]
