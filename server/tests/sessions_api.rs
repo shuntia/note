@@ -421,3 +421,24 @@ async fn a_session_discarded_in_its_first_minute_is_gone_and_an_older_one_just_e
     assert_eq!(reply["ended"], id);
     assert_eq!(get(&w, "/api/sessions/today").await.1["rounds"], 1);
 }
+
+#[tokio::test]
+async fn a_session_that_reaches_its_plan_says_times_up_once() {
+    let w = world(Vec::new()).await;
+    let session = start(&w, r#"{"title":"read the chapter","planned_min":30}"#).await;
+    note_server::runner::sweep_once(&w.state);
+    assert!(w.push.seen().is_empty());
+
+    {
+        let then = jiff::Timestamp::now() - jiff::Span::new().minutes(31);
+        let conn = w.state.db.lock().unwrap();
+        conn.execute("UPDATE work_sessions SET started_at = ?1", [then.to_string()]).unwrap();
+    }
+    note_server::runner::sweep_once(&w.state);
+    note_server::runner::sweep_once(&w.state);
+    let seen = w.push.seen();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].1.title, "read the chapter");
+    assert_eq!(seen[0].1.body, "Time's up.");
+    assert_eq!(seen[0].1.conversation_id, session["conversation_id"].as_i64());
+}

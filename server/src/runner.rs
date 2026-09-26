@@ -354,10 +354,14 @@ pub fn sweep_once(state: &AppState) {
             note(e);
             Vec::new()
         });
-        let flips = crate::work::tick(&conn, &state.config_dir, now).unwrap_or_else(|e| {
+        let mut flips = crate::work::tick(&conn, &state.config_dir, now).unwrap_or_else(|e| {
             note(e);
             Vec::new()
         });
+        flips.extend(crate::work::planned_end(&conn, &state.config_dir, now).unwrap_or_else(|e| {
+            note(e);
+            Vec::new()
+        }));
         (fired, started, flips)
     };
     for start in &started {

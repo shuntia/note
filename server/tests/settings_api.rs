@@ -404,3 +404,14 @@ async fn the_device_zone_switch_defaults_on_and_round_trips() {
     let v = json(app.oneshot(get(&cookie)).await.unwrap()).await;
     assert_eq!(v["timezone_auto"], false);
 }
+
+#[tokio::test]
+async fn the_session_end_notice_is_on_until_turned_off() {
+    let (app, cookie, _cfg) = common::app_with_logged_in_user().await;
+    let v = json(app.clone().oneshot(get(&cookie)).await.unwrap()).await;
+    assert_eq!(v["session_end_notify"], true);
+    let saved = json(app.clone().oneshot(put(&cookie, r#"{"session_end_notify":false}"#)).await.unwrap()).await;
+    assert_eq!(saved["session_end_notify"], false);
+    let v = json(app.oneshot(get(&cookie)).await.unwrap()).await;
+    assert_eq!(v["session_end_notify"], false);
+}
