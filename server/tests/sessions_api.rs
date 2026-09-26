@@ -392,3 +392,32 @@ async fn a_block_announces_itself_the_way_its_task_asks() {
     note_server::runner::sweep_once(&w.state);
     assert_eq!(w.push.seen().len(), 1, "a block starts once");
 }
+
+#[tokio::test]
+async fn a_session_discarded_in_its_first_minute_is_gone_and_an_older_one_just_ends() {
+    let w = world(Vec::new()).await;
+    assert_eq!(get(&w, "/api/sessions/today").await.1["rounds"], 0);
+
+    let young = start(&w, r#"{"title":"read the chapter","planned_min":30}"#).await;
+    let id = young["id"].as_i64().unwrap();
+    let (status, reply) =
+        post(&w, &format!("/api/sessions/{id}/end"), r#"{"outcome":"stopped","discard":true}"#).await;
+    assert_eq!(status, StatusCode::OK, "{reply}");
+    assert_eq!(reply, serde_json::json!({}));
+    assert!(rows::<i64>(&w, "SELECT id FROM work_sessions").is_empty());
+    assert!(rows::<i64>(&w, "SELECT id FROM conversations").is_empty());
+    assert_eq!(get(&w, "/api/sessions/today").await.1["rounds"], 0);
+
+    let old = start(&w, r#"{"title":"read the chapter","planned_min":30}"#).await;
+    let id = old["id"].as_i64().unwrap();
+    {
+        let then = jiff::Timestamp::now() - jiff::Span::new().minutes(2);
+        let conn = w.state.db.lock().unwrap();
+        conn.execute("UPDATE work_sessions SET started_at = ?1", [then.to_string()]).unwrap();
+    }
+    let (status, reply) =
+        post(&w, &format!("/api/sessions/{id}/end"), r#"{"outcome":"stopped","discard":true}"#).await;
+    assert_eq!(status, StatusCode::OK, "{reply}");
+    assert_eq!(reply["ended"], id);
+    assert_eq!(get(&w, "/api/sessions/today").await.1["rounds"], 1);
+}

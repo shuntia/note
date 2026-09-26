@@ -68,6 +68,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/events/{id}/move_tomorrow", post(event_move_tomorrow))
         .route("/api/sessions", post(work_session_start))
         .route("/api/sessions/open", get(work_session_open))
+        .route("/api/sessions/today", get(work_session_today))
         .route("/api/sessions/{id}/end", post(work_session_end))
         .route("/api/sessions/{id}/pause", post(work_session_pause))
         .route("/api/sessions/{id}/resume", post(work_session_resume))
@@ -2161,6 +2162,8 @@ struct NewWorkSession {
 #[serde(deny_unknown_fields)]
 struct EndWorkSession {
     outcome: String,
+    #[serde(default)]
+    discard: bool,
 }
 
 #[derive(Deserialize)]
@@ -2218,6 +2221,18 @@ async fn work_session_end(
         return unprocessable_field("outcome", "must be done or stopped");
     }
     let conn = state.db();
+    let now = jiff::Timestamp::now();
+    if req.discard {
+        match crate::work::discard(&conn, user.id, id, now) {
+            Ok(true) => {
+                drop(conn);
+                state.hub.broadcast_changed(user.id);
+                return Json(serde_json::json!({})).into_response();
+            }
+            Ok(false) => {}
+            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        }
+    }
     let ended = crate::work::end(
         &conn,
         &state.config_dir,
@@ -2225,7 +2240,7 @@ async fn work_session_end(
         &user.username,
         Some(id),
         &req.outcome,
-        jiff::Timestamp::now(),
+        now,
     );
     match ended {
         Ok(ended) => Json(serde_json::json!({ "ended": ended })).into_response(),
@@ -2301,6 +2316,15 @@ async fn work_session_open(user: CurrentUser, State(state): State<AppState>) -> 
     let conn = state.db();
     match crate::work::open(&conn, user.id) {
         Ok(session) => Json(session).into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn work_session_today(user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
+    let tz = user_zone(&state, &user.username);
+    let conn = state.db();
+    match crate::work::rounds_today(&conn, user.id, &tz, jiff::Timestamp::now()) {
+        Ok(rounds) => Json(serde_json::json!({ "rounds": rounds })).into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }

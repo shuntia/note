@@ -199,7 +199,7 @@ async fn a_share_token_opens_no_other_door_and_a_dead_link_is_404() {
 async fn a_share_token_cannot_read_the_circle() {
     let (app, cookie, _cfg) = common::app_with_logged_in_user().await;
     let token = token_of(&mint(&app, &cookie, "Mom", "{}").await);
-    for path in ["/api/tasks/queue"] {
+    for path in ["/api/tasks/queue", "/api/sessions/today"] {
         let res = app.clone().oneshot(Request::get(path).header(header::AUTHORIZATION, format!("Bearer {token}")).body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED, "{path}");
         let res = visitor(&app, Method::GET, path, None, Some(&format!("session={token}"))).await;
