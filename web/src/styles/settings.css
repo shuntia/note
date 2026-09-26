@@ -139,6 +139,9 @@
 .set-share-msg { margin: 0; font-size: 0.875rem; }
 .set-share-msg.user { color: var(--quiet); }
 .set-share-msg.note { color: var(--sun-ink); }
+.set-share-far { display: inline-block; width: 0.4375rem; height: 0.4375rem; margin-left: 0.4375rem; border-radius: 50%; background: var(--rose); vertical-align: 0.125em; }
+.set-share-visits { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.125rem; font-size: 0.8125rem; color: var(--quiet); }
+.set-share-visits li.far { color: var(--rose); }
 
 .sky-strip-wrap { align-self: stretch; margin: 0.25rem 0 0; }
 .sky-strip { position: relative; height: 2.375rem; border-radius: 0.625rem; overflow: hidden; }

@@ -207,6 +207,8 @@ pub struct LimitsConfig {
     pub share_messages_per_day: u32,
     /// Share links one user may hold; 0 turns share links off.
     pub shares_per_user: u32,
+    /// How far from the owner's last seen place a share visit is marked distant.
+    pub share_distant_km: u32,
 }
 
 impl Default for LimitsConfig {
@@ -216,6 +218,7 @@ impl Default for LimitsConfig {
             share_max_days: 120,
             share_messages_per_day: 100,
             shares_per_user: 20,
+            share_distant_km: 300,
         }
     }
 }

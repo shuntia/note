@@ -65,6 +65,7 @@ require_second_factor = true
 # share_max_days = 120           # the farthest a share link may run; 1 to 36500
 # share_messages_per_day = 100   # the ceiling a link's own daily cap may reach; at least 1
 # shares_per_user = 20           # 0 turns share links off
+# share_distant_km = 300         # a share visit farther than this from you is marked
 
 # --- Channels -----------------------------------------------------------
 # Delivery ladder: connected WebSocket clients first, then Web Push.

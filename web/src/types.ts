@@ -530,8 +530,11 @@ export type Share = {
   url: string
   messages_today: number
   threads: number
+  visitors: number
+  distant_visits: number
 }
 export type NewShare = { name: string; brief: string; scope: ShareScope; expires_at: string }
 export type SharePatch = Partial<NewShare>
 export type ShareThread = { id: number; created_at: string; updated_at: string; messages: ShareMessage[] }
-export type ShareTurn = { reply: string; note: boolean }
+export type ShareTurn = { thread: number; reply: string; note: boolean }
+export type ShareVisit = { city: string | null; country: string | null; km: number | null; distant: boolean; at: string }
