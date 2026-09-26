@@ -1256,6 +1256,7 @@ struct SettingsPatch {
     pomodoro_enabled: Option<bool>,
     pomodoro_work_min: Option<u32>,
     pomodoro_break_min: Option<u32>,
+    session_end_notify: Option<bool>,
     alerts: Option<Vec<AlertPatch>>,
 }
 
@@ -1295,6 +1296,7 @@ fn settings_body(
         "pomodoro_enabled": cfg.pomodoro_enabled(),
         "pomodoro_work_min": cfg.pomodoro_work_min(),
         "pomodoro_break_min": cfg.pomodoro_break_min(),
+        "session_end_notify": cfg.session_end_notify(),
         "schedule": schedule,
     })
 }
@@ -1436,6 +1438,9 @@ async fn settings_put(
     }
     if let Some(on) = req.pomodoro_enabled {
         cfg.pomodoro_enabled = Some(on);
+    }
+    if let Some(on) = req.session_end_notify {
+        cfg.session_end_notify = Some(on);
     }
     if let Some(n) = req.pomodoro_work_min {
         if !POMODORO_WORK_MIN.contains(&n) {

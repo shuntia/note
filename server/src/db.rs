@@ -548,6 +548,10 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX idx_share_messages_thread ON share_messages(thread_id, id);
     ",
+    // v40
+    "
+    ALTER TABLE work_sessions ADD COLUMN end_notified_at TEXT;
+    ",
 ];
 
 pub fn open(path: &Path) -> Result<Connection> {

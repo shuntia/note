@@ -596,6 +596,7 @@ pub fn tick(conn: &Connection, config_dir: &Path, now: jiff::Timestamp) -> Resul
 
     let mut flips = Vec::new();
     for (session, user_id, username) in due {
+        let notify = wants_end_notice(config_dir, &username);
         let message = if session.phase == "work" {
             if session.round >= MAX_ROUNDS {
                 end(conn, config_dir, user_id, &username, Some(session.id), "stopped", now)?;
@@ -614,7 +615,7 @@ pub fn tick(conn: &Connection, config_dir: &Path, now: jiff::Timestamp) -> Resul
                     "session_break",
                     &format!("session {} round {}", session.id, session.round),
                 )?;
-                Some(crate::channels::OutboundMessage {
+                notify.then(|| crate::channels::OutboundMessage {
                     title: "Break".into(),
                     body: format!(
                         "{} min. Round {} of {} done.",
@@ -637,7 +638,7 @@ pub fn tick(conn: &Connection, config_dir: &Path, now: jiff::Timestamp) -> Resul
                 "session_round",
                 &format!("session {} round {round}", session.id),
             )?;
-            Some(crate::channels::OutboundMessage {
+            notify.then(|| crate::channels::OutboundMessage {
                 title: format!("Round {round}"),
                 body: format!("Back to {}.", session.title),
                 urgency: crate::channels::Urgency::Normal,
@@ -649,6 +650,47 @@ pub fn tick(conn: &Connection, config_dir: &Path, now: jiff::Timestamp) -> Resul
         flips.push(Flip { user_id, username, message });
     }
     flips.extend(overrun(conn, config_dir, now)?);
+    Ok(flips)
+}
+
+fn wants_end_notice(config_dir: &Path, username: &str) -> bool {
+    crate::config::UserConfig::load(config_dir, username)
+        .map_or(true, |c| c.session_end_notify())
+}
+
+/// Marks every running single session that has reached its planned length, once,
+/// and says "Time's up." where the user wants to hear it.
+pub fn planned_end(conn: &Connection, config_dir: &Path, now: jiff::Timestamp) -> Result<Vec<Flip>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {COLS_W}, w.user_id, u.username FROM work_sessions w
+         JOIN users u ON u.id = w.user_id
+         WHERE w.ended_at IS NULL AND w.paused_at IS NULL AND w.planned_min IS NOT NULL
+           AND w.mode = 'single' AND w.end_notified_at IS NULL"
+    ))?;
+    let due: Vec<(Session, i64, String)> = stmt
+        .query_map([], |r| Ok((row_to_session(r)?, r.get(20)?, r.get(21)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .into_iter()
+        .filter(|(s, _, _)| s.elapsed_ms(now) >= s.planned_min.unwrap_or_default() * 60_000)
+        .collect();
+    drop(stmt);
+
+    let mut flips = Vec::new();
+    for (session, user_id, username) in due {
+        conn.execute(
+            "UPDATE work_sessions SET end_notified_at = ?1 WHERE id = ?2",
+            (now.to_string(), session.id),
+        )?;
+        let message = wants_end_notice(config_dir, &username).then(|| crate::channels::OutboundMessage {
+            title: session.title.clone(),
+            body: "Time's up.".into(),
+            urgency: crate::channels::Urgency::Normal,
+            event_id: None,
+            conversation_id: session.conversation_id,
+            actions: Vec::new(),
+        });
+        flips.push(Flip { user_id, username, message });
+    }
     Ok(flips)
 }
 
@@ -1273,5 +1315,58 @@ mod tests {
         assert!(!discard(&conn, uid, old.id, at("2026-09-17T09:05:00Z")).unwrap());
         assert_eq!(reload(&conn, uid).id, old.id);
         assert!(!discard(&conn, uid + 1, old.id, at("2026-09-17T09:00:10Z")).unwrap());
+    }
+
+    #[test]
+    fn planned_end_notifies_once_and_only_when_wanted() {
+        let (conn, tmp, uid) = env();
+        start_one(&conn, &tmp, uid, Some(25));
+        assert!(planned_end(&conn, tmp.path(), at("2026-09-17T09:24:00Z")).unwrap().is_empty());
+        let flips = planned_end(&conn, tmp.path(), at("2026-09-17T09:25:00Z")).unwrap();
+        assert_eq!(flips.len(), 1);
+        let msg = flips[0].message.as_ref().unwrap();
+        assert_eq!(msg.title, "read the chapter");
+        assert_eq!(msg.body, "Time's up.");
+        assert_eq!(msg.conversation_id, reload(&conn, uid).conversation_id);
+        assert!(planned_end(&conn, tmp.path(), at("2026-09-17T09:26:00Z")).unwrap().is_empty());
+
+        let (conn, tmp, uid) = env_with("session_end_notify = false\n");
+        start_one(&conn, &tmp, uid, Some(25));
+        let flips = planned_end(&conn, tmp.path(), at("2026-09-17T09:25:00Z")).unwrap();
+        assert_eq!(flips.len(), 1);
+        assert!(flips[0].message.is_none());
+        assert!(planned_end(&conn, tmp.path(), at("2026-09-17T09:26:00Z")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn planned_end_waits_out_a_pause() {
+        let (conn, tmp, uid) = env();
+        let s = start_one(&conn, &tmp, uid, Some(25));
+        pause(&conn, uid, s.id, at("2026-09-17T09:10:00Z")).unwrap();
+        assert!(planned_end(&conn, tmp.path(), at("2026-09-17T09:30:00Z")).unwrap().is_empty());
+        resume(&conn, uid, s.id, at("2026-09-17T09:20:00Z")).unwrap();
+        assert!(planned_end(&conn, tmp.path(), at("2026-09-17T09:34:00Z")).unwrap().is_empty());
+        assert_eq!(planned_end(&conn, tmp.path(), at("2026-09-17T09:35:00Z")).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn work_time_never_gets_a_notice() {
+        let (conn, tmp, uid) = env();
+        start_one(&conn, &tmp, uid, None);
+        assert!(planned_end(&conn, tmp.path(), at("2026-09-17T11:00:00Z")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn tick_flip_messages_follow_the_setting() {
+        let (conn, tmp, uid) = env_with("pomodoro_enabled = true\nsession_end_notify = false\n");
+        start_one(&conn, &tmp, uid, None);
+        let flips = tick(&conn, tmp.path(), at("2026-09-17T09:25:00Z")).unwrap();
+        assert_eq!(flips.len(), 1);
+        assert!(flips[0].message.is_none());
+        assert_eq!(reload(&conn, uid).phase, "break");
+        let flips = tick(&conn, tmp.path(), at("2026-09-17T09:30:00Z")).unwrap();
+        assert_eq!(flips.len(), 1);
+        assert!(flips[0].message.is_none());
+        assert_eq!(reload(&conn, uid).phase, "work");
     }
 }
