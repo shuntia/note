@@ -34,6 +34,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/shares", get(shares_list).post(shares_create))
         .route("/api/shares/{id}", patch(shares_update).delete(shares_revoke))
         .route("/api/shares/{id}/threads", get(shares_threads))
+        .route("/api/shares/{id}/visits", get(shares_visits))
         .route("/api/talk", post(talk))
         .route("/api/conversations", get(conversations_list))
         .route(
@@ -167,7 +168,14 @@ fn share_display_name(state: &AppState, username: &str) -> String {
     crate::config::UserConfig::load(&state.config_dir, username).map(|c| c.display_name).unwrap_or_else(|_| username.to_string())
 }
 
-async fn share_info(p: auth::SharePrincipal, State(state): State<AppState>) -> impl IntoResponse {
+/// Each page load reads this once, so it is where a visit is counted.
+async fn share_info(
+    p: auth::SharePrincipal,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::Extension(key): axum::Extension<crate::shares::VisitorKey>,
+) -> impl IntoResponse {
+    let _ = crate::shares::record_visit(&state.db(), p.share.id, p.owner_id, &key.0, &crate::net::place(&headers), jiff::Timestamp::now());
     Json(serde_json::json!({
         "owner": share_display_name(&state, &p.owner_username),
         "name": p.share.name,
@@ -185,24 +193,33 @@ async fn share_view(p: auth::SharePrincipal, State(state): State<AppState>) -> i
     }
 }
 
-async fn share_messages(p: auth::SharePrincipal, State(state): State<AppState>, axum::Extension(key): axum::Extension<crate::shares::VisitorKey>) -> impl IntoResponse {
+#[derive(Deserialize)]
+struct ShareThreadQuery {
+    thread: i64,
+}
+
+async fn share_messages(
+    p: auth::SharePrincipal,
+    State(state): State<AppState>,
+    axum::Extension(key): axum::Extension<crate::shares::VisitorKey>,
+    Query(q): Query<ShareThreadQuery>,
+) -> impl IntoResponse {
     let conn = state.db();
-    let thread = conn
-        .query_row("SELECT id FROM share_threads WHERE share_id = ?1 AND visitor_key = ?2", (p.share.id, &key.0), |r| r.get::<_, i64>(0))
-        .optional();
-    match thread {
+    match crate::shares::thread_of(&conn, p.share.id, &key.0, q.thread) {
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         Ok(Some(id)) => match crate::shares::messages(&conn, id) {
             Ok(m) => Json(m).into_response(),
             Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         },
-        Ok(None) => Json(Vec::<crate::shares::MessageOut>::new()).into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
     }
 }
 
 #[derive(Deserialize)]
 struct ShareSendReq {
     message: String,
+    #[serde(default)]
+    thread: Option<i64>,
 }
 
 async fn share_send(
@@ -217,8 +234,9 @@ async fn share_send(
     if !state.share_limiter.try_attempt(&crate::net::client_key(&headers), now) {
         return (StatusCode::TOO_MANY_REQUESTS, Json(serde_json::json!({ "error": "too many messages from this address; try again later" }))).into_response();
     }
-    match crate::shares::run_turn(&state, &p, &key.0, &req.message).await {
-        Ok(t) => Json(serde_json::json!({ "reply": t.reply, "note": t.note })).into_response(),
+    match crate::shares::run_turn(&state, &p, &key.0, req.thread, &req.message).await {
+        Ok(t) => Json(serde_json::json!({ "thread": t.thread, "reply": t.reply, "note": t.note })).into_response(),
+        Err(E::NoThread) => (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "no such conversation" }))).into_response(),
         Err(E::Blank) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "message must be non-blank and at most 16384 bytes" }))).into_response(),
         Err(E::Cap) => (StatusCode::TOO_MANY_REQUESTS, Json(serde_json::json!({ "error": "this link has reached today's message limit" }))).into_response(),
         Err(E::Busy) => session_busy_response(crate::TalkBusy::Full),
@@ -297,7 +315,11 @@ async fn logout(State(state): State<AppState>, headers: axum::http::HeaderMap) -
         .into_response()
 }
 
-async fn me(user: CurrentUser) -> Json<serde_json::Value> {
+/// Also notes where the user is, for measuring share visits against.
+async fn me(user: CurrentUser, State(state): State<AppState>, headers: HeaderMap) -> Json<serde_json::Value> {
+    if let Some((lat, lon)) = crate::net::place(&headers).coords {
+        let _ = state.db().execute("UPDATE users SET seen_lat = ?1, seen_lon = ?2 WHERE id = ?3", (lat, lon, user.id));
+    }
     Json(serde_json::json!({ "username": user.username, "admin": user.admin }))
 }
 
@@ -2735,6 +2757,7 @@ pub(crate) fn share_info_json(state: &AppState, conn: &rusqlite::Connection, s: 
     let threads: i64 = conn
         .query_row("SELECT COUNT(*) FROM share_threads WHERE share_id = ?1", [s.id], |r| r.get(0))
         .unwrap_or(0);
+    let (visitors, distant) = crate::shares::visit_counts(conn, s.id, state.share_distant_km).unwrap_or((0, 0));
     serde_json::json!({
         "id": s.id,
         "name": s.name,
@@ -2746,6 +2769,8 @@ pub(crate) fn share_info_json(state: &AppState, conn: &rusqlite::Connection, s: 
         "url": crate::shares::url_for(&state.public_base_url, &s.token),
         "messages_today": messages_today,
         "threads": threads,
+        "visitors": visitors,
+        "distant_visits": distant,
     })
 }
 
@@ -2816,6 +2841,18 @@ async fn shares_revoke(user: CurrentUser, State(state): State<AppState>, headers
             let _ = crate::log::record(&conn, Some(user.id), "share_revoked", &format!("share={} {:?}", s.id, s.name));
             StatusCode::NO_CONTENT.into_response()
         }
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn shares_visits(user: CurrentUser, State(state): State<AppState>, Path(id): Path<i64>) -> impl IntoResponse {
+    let conn = state.db();
+    match crate::shares::get(&conn, user.id, id) {
+        Ok(Some(s)) => match crate::shares::visits(&conn, s.id, state.share_distant_km) {
+            Ok(v) => Json(v).into_response(),
+            Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        },
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }

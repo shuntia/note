@@ -36,6 +36,7 @@ import type {
   ShareMessage,
   SharePatch,
   ShareThread,
+  ShareVisit,
   ShareTurn,
   SqlResult,
   TalkMessage,
@@ -339,11 +340,17 @@ export const api = {
     request<Share>(`/api/shares/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
   revokeShare: (id: number) => request<void>(`/api/shares/${id}`, { method: 'DELETE' }),
   shareThreads: (id: number) => request<ShareThread[]>(`/api/shares/${id}/threads`),
+  shareVisits: (id: number) => request<ShareVisit[]>(`/api/shares/${id}/visits`),
   share: {
     info: (token: string) => request<ShareInfo>(`/api/share/${token}`, { quiet401: true }),
-    messages: (token: string) => request<ShareMessage[]>(`/api/share/${token}/messages`, { quiet401: true }),
-    send: (token: string, message: string) =>
-      request<ShareTurn>(`/api/share/${token}/messages`, { method: 'POST', body: JSON.stringify({ message }), quiet401: true }),
+    messages: (token: string, thread: number) =>
+      request<ShareMessage[]>(`/api/share/${token}/messages?thread=${thread}`, { quiet401: true }),
+    send: (token: string, message: string, thread: number | null) =>
+      request<ShareTurn>(`/api/share/${token}/messages`, {
+        method: 'POST',
+        body: JSON.stringify(thread === null ? { message } : { message, thread }),
+        quiet401: true,
+      }),
   },
 }
 

@@ -552,6 +552,43 @@ const MIGRATIONS: &[&str] = &[
     "
     ALTER TABLE work_sessions ADD COLUMN end_notified_at TEXT;
     ",
+    // v41
+    "
+    CREATE TABLE share_threads_v2 (
+        id INTEGER PRIMARY KEY,
+        share_id INTEGER NOT NULL REFERENCES shares(id) ON DELETE CASCADE,
+        visitor_key TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    INSERT INTO share_threads_v2 SELECT * FROM share_threads;
+    CREATE TABLE share_messages_v2 (
+        id INTEGER PRIMARY KEY,
+        thread_id INTEGER NOT NULL REFERENCES share_threads_v2(id) ON DELETE CASCADE,
+        role TEXT NOT NULL CHECK (role IN ('user','assistant','note')),
+        content TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    );
+    INSERT INTO share_messages_v2 SELECT * FROM share_messages;
+    DROP TABLE share_messages;
+    DROP TABLE share_threads;
+    ALTER TABLE share_threads_v2 RENAME TO share_threads;
+    ALTER TABLE share_messages_v2 RENAME TO share_messages;
+    CREATE INDEX idx_share_threads_share ON share_threads(share_id, visitor_key);
+    CREATE INDEX idx_share_messages_thread ON share_messages(thread_id, id);
+    CREATE TABLE share_visits (
+        id INTEGER PRIMARY KEY,
+        share_id INTEGER NOT NULL REFERENCES shares(id) ON DELETE CASCADE,
+        visitor_key TEXT NOT NULL,
+        city TEXT,
+        country TEXT,
+        km REAL,
+        at TEXT NOT NULL
+    );
+    CREATE INDEX idx_share_visits_share ON share_visits(share_id, id);
+    ALTER TABLE users ADD COLUMN seen_lat REAL;
+    ALTER TABLE users ADD COLUMN seen_lon REAL;
+    ",
 ];
 
 pub fn open(path: &Path) -> Result<Connection> {
@@ -1645,5 +1682,31 @@ mod tests {
             .query_row("SELECT last_used_at FROM api_tokens WHERE id = 1", [], |r| r.get(0))
             .unwrap();
         assert!(last.is_none());
+    }
+
+    #[test]
+    fn v41_keeps_every_share_message_and_lets_a_visitor_hold_many_threads() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        apply_migrations(&conn, &MIGRATIONS[..40]).unwrap();
+        conn.execute_batch(
+            "INSERT INTO users (username, pass_hash, role) VALUES ('a','h','member');
+             INSERT INTO shares (id, user_id, name, token, scope, expires_at, created_at, updated_at)
+                 VALUES (1, 1, 'Mom', 'share_x', '{}', 'z', 't', 't');
+             INSERT INTO share_threads (id, share_id, visitor_key, created_at, updated_at) VALUES (7, 1, 'v1', 't', 't');
+             INSERT INTO share_messages (thread_id, role, content, created_at) VALUES (7, 'user', 'hi', 't');
+             INSERT INTO share_messages (thread_id, role, content, created_at) VALUES (7, 'assistant', 'hello', 't');",
+        )
+        .unwrap();
+        apply_migrations(&conn, MIGRATIONS).unwrap();
+        let kept: i64 = conn
+            .query_row("SELECT COUNT(*) FROM share_messages WHERE thread_id = 7", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(kept, 2);
+        conn.execute("INSERT INTO share_threads (share_id, visitor_key, created_at, updated_at) VALUES (1, 'v1', 't', 't')", [])
+            .unwrap();
+        conn.execute("DELETE FROM shares WHERE id = 1", []).unwrap();
+        let left: i64 = conn.query_row("SELECT COUNT(*) FROM share_messages", [], |r| r.get(0)).unwrap();
+        assert_eq!(left, 0, "revoking a link still takes its threads with it");
     }
 }

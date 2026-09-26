@@ -151,6 +151,7 @@ pub struct AppState {
     pub share_max_days: u32,
     pub share_messages_per_day: u32,
     pub shares_per_user: u32,
+    pub share_distant_km: u32,
     /// Counts unknown-token lookups and message posts per client address.
     pub share_limiter: Arc<crate::auth::LoginLimiter>,
     /// The origin a share URL is built on; `server.toml`'s `public_base_url`.
@@ -193,6 +194,7 @@ impl AppState {
             share_max_days: limits.share_max_days,
             share_messages_per_day: limits.share_messages_per_day,
             shares_per_user: limits.shares_per_user,
+            share_distant_km: limits.share_distant_km,
             share_limiter: Arc::new(crate::auth::LoginLimiter::with_limit(
                 crate::shares::ADDRESS_ATTEMPTS,
             )),
@@ -220,6 +222,7 @@ impl AppState {
         self.share_max_days = limits.share_max_days;
         self.share_messages_per_day = limits.share_messages_per_day;
         self.shares_per_user = limits.shares_per_user;
+        self.share_distant_km = limits.share_distant_km;
         self
     }
 
