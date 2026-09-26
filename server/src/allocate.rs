@@ -119,21 +119,25 @@ fn usable(free: &[Window], busy: &[Window]) -> Vec<Window> {
     out
 }
 
+/// The order work is laid: what the user is on, then urgency, then dated before
+/// undated and soonest first, then oldest.
+pub fn rank_key(
+    is_now: bool,
+    urgency_rank: u8,
+    due: Option<jiff::civil::Date>,
+    created: &str,
+    id: i64,
+) -> (std::cmp::Reverse<bool>, u8, bool, Option<jiff::civil::Date>, String, i64) {
+    (std::cmp::Reverse(is_now), urgency_rank, due.is_none(), due, created.to_owned(), id)
+}
+
 /// First-fit in priority order: `is_now`, then urgency rank, then earliest due
 /// (overdue first, no due date last), then oldest created. A task that fits
 /// nowhere is skipped and the next one is tried. `GAP_MIN` separates placements.
 pub fn pack(free: &[Window], busy: &[Window], tasks: &[Candidate], cap: usize) -> Vec<Placement> {
     let mut slots = usable(free, busy);
     let mut order: Vec<&Candidate> = tasks.iter().collect();
-    order.sort_by(|a, b| {
-        b.is_now
-            .cmp(&a.is_now)
-            .then(a.urgency_rank.cmp(&b.urgency_rank))
-            .then(a.due.is_none().cmp(&b.due.is_none()))
-            .then(a.due.cmp(&b.due))
-            .then(a.created.cmp(&b.created))
-            .then(a.id.cmp(&b.id))
-    });
+    order.sort_by_cached_key(|c| rank_key(c.is_now, c.urgency_rank, c.due, &c.created, c.id));
     let mut out = Vec::new();
     for c in order {
         if out.len() >= cap {

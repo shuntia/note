@@ -792,3 +792,31 @@ async fn urgency_is_created_patched_and_validated() {
     let (status, e) = patch_task(&app, &cookie, id, r#"{"urgency":"asap"}"#).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{e}");
 }
+
+#[tokio::test]
+async fn queue_puts_now_first_and_says_why() {
+    let (app, cookie, _tmp) = app_with_user().await;
+    post(&app, &cookie, "/api/tasks", r#"{"title":"email landlord"}"#).await;
+    post(&app, &cookie, "/api/tasks", r#"{"title":"refill meds","is_now":true}"#).await;
+    post(&app, &cookie, "/api/tasks", r#"{"title":"file taxes"}"#).await;
+    let res = app
+        .clone()
+        .oneshot(
+            Request::get("/api/tasks/queue?limit=2")
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let (status, q) = read(res).await;
+    assert_eq!(status, StatusCode::OK, "{q}");
+    let q = q.as_array().unwrap();
+    assert_eq!(q.len(), 2);
+    assert_eq!(q[0]["task"]["title"], "refill meds");
+    assert_eq!(q[0]["reason"], "now");
+    assert_eq!(q[1]["task"]["title"], "email landlord");
+    assert_eq!(q[1]["reason"], "oldest");
+    assert!(q[0]["task"]["children"].is_array());
+    assert!(q[0]["step"].is_null());
+}
