@@ -1229,18 +1229,6 @@ textarea.mono { font-family: var(--mono); }
 .home-head { display: flex; flex-direction: column; gap: 0.125rem; min-width: 0; flex: 1; }
 .home-head .gauge-eyebrow { margin-bottom: 0; }
 .home-head-name { font-family: var(--display); font-weight: 500; font-size: 1.0625rem; letter-spacing: -0.015em; color: var(--ink); }
-.home-actions { position: relative; display: flex; align-items: center; gap: calc(10 * var(--u)); margin-top: calc(50 * var(--u)); }
-.home-actions .ev-more-wrap { position: relative; top: auto; right: auto; margin-left: calc(6 * var(--u)); }
-.home-actions .ev-more { width: calc(44 * var(--u)); height: calc(44 * var(--u)); font-size: calc(21 * var(--u)); color: var(--quiet); }
-/* Later is a menu of its own, so its trigger wears the haze button's clothes */
-.later-wrap { margin-left: 0; }
-.home-actions .later-wrap .ev-more, .today-actions .later-wrap .ev-more, .home-face.compact .later-wrap .ev-more {
-  width: auto; height: auto; border-radius: 999px; background: var(--haze-strong); color: var(--ink); font-size: 0;
-  padding: calc(14 * var(--u)) calc(24 * var(--u));
-}
-.home-face.compact .later-wrap .ev-more { padding: calc(10 * var(--u)) calc(18 * var(--u)); }
-.later-wrap .ev-more::before { content: 'Later'; font-size: calc(17 * var(--u)); line-height: 1.2; }
-.home-face.compact .later-wrap .ev-more::before { font-size: calc(15 * var(--u)); }
 .home-sheet { display: flex; flex-direction: column; align-items: center; gap: 1.375rem; width: min(21.375rem, 88vw); margin-top: 2.5rem; }
 .home-today .jot-wrap { box-sizing: border-box; }
 .btn-fill.wide { width: 100%; }
@@ -1323,10 +1311,6 @@ textarea.mono { font-family: var(--mono); }
 .today-when { display: flex; align-items: baseline; gap: 0.875rem; margin-top: 0.25rem; }
 .today-in { font-family: var(--display); font-weight: 500; font-size: 1.875rem; letter-spacing: -0.02em; color: var(--ink); font-variant-numeric: tabular-nums; }
 .today-span { font-size: 0.9375rem; color: var(--quiet); font-variant-numeric: tabular-nums; }
-.today-actions { position: relative; display: flex; align-items: center; gap: 0.75rem; margin-top: 1.125rem; }
-.today-actions .ev-more-wrap { position: relative; top: auto; right: auto; margin-left: 0.375rem; }
-.today-actions .ev-more { width: 2.75rem; height: 2.75rem; font-size: 1.3rem; color: var(--quiet); }
-.today-actions .ev-menu { left: 0; right: auto; z-index: 6; min-width: 12rem; }
 .today-line { position: absolute; left: var(--rail); right: var(--rail); top: calc(var(--hero-top) + 25.625rem); }
 /* the desktop list has the ground beneath it for a floor, so the day scrolls
    through the room between the line and it */
@@ -1391,6 +1375,7 @@ button, [role='button'], a { touch-action: manipulation; }
 
 /* ── the circle: one surface for tap, swipe and keys ─────────────── */
 .circle-face { position: relative; flex: none; pointer-events: auto; touch-action: none; user-select: none; -webkit-user-select: none; cursor: pointer; border-radius: 50%; outline: none; }
+.circle-face.idle { touch-action: pan-y; }
 .circle-face:focus-visible { outline: 2px solid color-mix(in oklch, var(--ring) 40%, transparent); outline-offset: 2px; }
 .arc-track, .arc-fill { fill: none; stroke-linecap: round; }
 .arc-track { stroke: var(--track); }

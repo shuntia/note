@@ -427,6 +427,10 @@ export function Home({
     })
   }
 
+  // The step reached by an advance on this screen fills by its own clock; a step
+  // found on load fills by the session's.
+  const stepClock = useRef<{ key: string; stepIndex: number; startedAt: number; pausedMs: number; plannedSec: number } | null>(null)
+
   // The step the session is on, and whatever is still open after it.
   const finish = async (): Promise<'advanced' | 'completed' | null> => {
     const s = session
@@ -441,12 +445,18 @@ export function Home({
       const current = at !== null && steps.length ? (steps[at - 1] ?? own) : own
       const next = at !== null ? (steps.slice(at).find(isLive) ?? null) : null
       if (next && current) {
-        setSession(
-          await api.stepWorkSession(s.id, {
-            step_index: steps.indexOf(next) + 1,
-            step_name: next.title,
-          }),
-        )
+        const stepped = await api.stepWorkSession(s.id, {
+          step_index: steps.indexOf(next) + 1,
+          step_name: next.title,
+        })
+        const left = steps.slice(steps.indexOf(next)).filter(isLive).length
+        const share = s.planned_min === null ? null : (s.planned_min * 60) / left
+        const stepSec = next.duration_min !== null ? next.duration_min * 60 : share
+        stepClock.current =
+          stepSec && stepped.step_index !== null
+            ? { key: keyOf(stepped), stepIndex: stepped.step_index, startedAt: Date.now(), pausedMs: stepped.paused_ms, plannedSec: stepSec }
+            : null
+        setSession(stepped)
         advance(s, current)
         return 'advanced'
       }
@@ -494,6 +504,12 @@ export function Home({
     return ((pausedAt(s) ?? Date.now()) - from) / (total * 1000)
   }
 
+  const stepFracAt = (s: FocusSession) => {
+    const c = stepClock.current
+    if (onBreak || !c || c.key !== keyOf(s) || c.stepIndex !== s.step_index) return sessionFracAt(s)
+    return () => ((pausedAt(s) ?? Date.now()) - c.startedAt - (s.paused_ms - c.pausedMs)) / (c.plannedSec * 1000)
+  }
+
   const sessionNum = (s: FocusSession, size: number) => (
     <div className={`gauge-num${over ? ' over' : ''}`} style={{ fontSize: u(size) }}>
       {over ? '+' : ''}
@@ -505,8 +521,12 @@ export function Home({
   const subOf = (s: FocusSession) => s.step_name ?? firstLine(s.notes)
 
   const pauseButton = (s: FocusSession) => (
-    <button className="btn-round" aria-label={isPaused(s) ? 'Back to it' : 'Break'} onClick={isPaused(s) ? resume : pause}>
-      {isPaused(s) ? (
+    <button
+      className="btn-round"
+      aria-label={onBreak || isPaused(s) ? 'Back to it' : 'Break'}
+      onClick={onBreak ? backToIt : isPaused(s) ? resume : pause}
+    >
+      {onBreak || isPaused(s) ? (
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10-6.5z" /></svg>
       ) : (
         <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1.2" /><rect x="14" y="5" width="4" height="14" rx="1.2" /></svg>
@@ -566,11 +586,13 @@ export function Home({
           : 'working'
   const sessionKey = session ? keyOf(session) : null
   const phaseKey = session ? `${sessionKey}:${shownPhase}:${shownRound}` : null
-  // Rounds and sessions finished today are beads; the running round is the next one.
-  const done = rounds + (pomodoro ? shownRound - 1 : 0)
+  // Rounds and sessions finished today are beads; the running round is the next one,
+  // and a break stands on the round it follows, which is already lit.
+  const ring = rounds + (pomodoro ? shownRound - 1 : 0)
+  const done = ring + (onBreak ? 1 : 0)
   const total = Math.max(4, done + 1)
-  const marks = useRef({ done, total })
-  marks.current = { done, total }
+  const marks = useRef({ ring, done, total })
+  marks.current = { ring, done, total }
   const slotCount = strip ? strip.items.length + 1 : 1
   const slotIndex = strip?.index ?? 0
   const faceSize = mobile ? 320 : 440
@@ -670,7 +692,7 @@ export function Home({
     if (!face || !fill) return then?.()
     hold.current = true
     navigator.vibrate?.([30, 40, 30])
-    fx.closeRing(face, fill, marks.current.done, marks.current.total)
+    fx.closeRing(face, fill, marks.current.ring, marks.current.total)
     later(() => home.current && fx.wave(face, home.current), 420)
     later(() => {
       fx.toBreak(face, fill, true)
@@ -704,7 +726,7 @@ export function Home({
     hold.current = true
     closing.current = true
     navigator.vibrate?.([30, 40, 30])
-    fx.closeRing(face, fill, marks.current.done, marks.current.total)
+    fx.closeRing(face, fill, marks.current.ring, marks.current.total)
     const still = reducedMotion()
     await wait(still ? 200 : 420)
     if (!still && home.current) fx.wave(face, home.current)
@@ -1066,7 +1088,7 @@ export function Home({
       <div ref={faceBox} className={`circle-face${onBreak ? ' resting' : ''}`} style={{ width: u(faceSize), height: u(faceSize) }} {...surface}>
         <Circle
           size={faceSize}
-          fracAt={landing ? undefined : sessionFracAt(shown)}
+          fracAt={landing ? undefined : shown.step_count && shown.step_index ? stepFracAt(shown) : sessionFracAt(shown)}
           drain={onBreak}
           steps={!landing && shown.step_count && shown.step_index ? { count: shown.step_count, current: shown.step_index - 1 } : null}
           breathe
@@ -1097,7 +1119,7 @@ export function Home({
     </div>
   ) : (
     <div className="home-face">
-      <div ref={faceBox} className="circle-face" style={{ width: u(faceSize), height: u(faceSize) }} {...surface}>
+      <div ref={faceBox} className="circle-face idle" style={{ width: u(faceSize), height: u(faceSize) }} {...surface}>
         {next && facts && prefs.showArc ? (
           <Gauge size={faceSize} fracAt={waitFracAt(next)} faded>
             {facts.wait && (

@@ -301,9 +301,10 @@ export function App() {
   useEffect(() => {
     if (!me) return
     return connectEvents((ev) => {
-      // A check-in (it carries its event) has its question waiting in the thread, so
-      // the thread is the notice; a session's notices are toasts over whatever is open.
-      if (ev.event_id !== null && ev.conversation_id !== null) openConversation(ev.conversation_id)
+      // A check-in (it carries its event) or an urgent ask has its question waiting in
+      // the thread, so the thread is the notice; a session's notices are toasts over
+      // whatever is open.
+      if (ev.conversation_id !== null && (ev.event_id !== null || ev.urgency === 'high')) openConversation(ev.conversation_id)
       else notify(ev.body ? `${ev.title} — ${ev.body}` : ev.title)
       onChanged()
     }, onChanged)
