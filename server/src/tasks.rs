@@ -65,7 +65,7 @@ impl Actor {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Task {
     pub id: i64,
     pub title: String,
@@ -669,6 +669,74 @@ pub fn list(conn: &Connection, user_id: i64) -> rusqlite::Result<Vec<TaskNode>> 
             Ok(TaskNode { task, children })
         })
         .collect()
+}
+
+/// One open task as the next thing to start: the step it would begin with, the
+/// minutes a round of it is planned for (to the nearest five), and why it is here.
+#[derive(Debug, Serialize)]
+pub struct QueueEntry {
+    pub task: TaskNode,
+    pub step: Option<Task>,
+    pub planned_min: Option<u32>,
+    pub reason: &'static str,
+}
+
+/// The user's open top-level tasks in the order the planner lays them.
+pub fn queue(
+    conn: &Connection,
+    user_id: i64,
+    now: jiff::Timestamp,
+    limit: usize,
+) -> rusqlite::Result<Vec<QueueEntry>> {
+    let created: std::collections::HashMap<i64, String> = conn
+        .prepare("SELECT id, created_at FROM tasks WHERE user_id = ?1 AND parent_id IS NULL")?
+        .query_map([user_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut nodes: Vec<TaskNode> = list(conn, user_id)?
+        .into_iter()
+        .filter(|n| matches!(n.task.state.as_str(), "open" | "in_progress"))
+        .collect();
+    let due_of = |t: &Task| t.due_at.as_deref().and_then(|d| d.parse::<jiff::Timestamp>().ok());
+    for n in &mut nodes {
+        n.task.pressing = pressing_at(&n.task.state, n.task.due_at.as_deref(), now);
+    }
+    nodes.sort_by_cached_key(|n| {
+        let due = due_of(&n.task).map(|t| t.to_zoned(jiff::tz::TimeZone::UTC).date());
+        let made = created.get(&n.task.id).map_or("", String::as_str);
+        crate::allocate::rank_key(
+            n.task.is_now,
+            urgency_rank(&n.task.urgency, n.task.pressing),
+            due,
+            made,
+            n.task.id,
+        )
+    });
+    Ok(nodes
+        .into_iter()
+        .take(limit)
+        .map(|n| {
+            let step = n.children.iter().find(|c| c.state != "done").cloned();
+            let minutes = step.as_ref().and_then(|s| s.duration_min).or(n.task.duration_min);
+            let overdue = due_of(&n.task).is_some_and(|d| d < now);
+            let reason = if n.task.is_now {
+                "now"
+            } else if overdue {
+                "overdue"
+            } else if n.task.urgency == "high" {
+                "urgent"
+            } else if n.task.pressing {
+                "due_soon"
+            } else {
+                "oldest"
+            };
+            QueueEntry {
+                task: n,
+                step,
+                planned_min: minutes.map(|m| ((m + 2) / 5 * 5).max(5)),
+                reason,
+            }
+        })
+        .collect())
 }
 
 /// The next block each of the user's top-level tasks still has waiting — its
@@ -1768,5 +1836,60 @@ mod tests {
         assert!(!pressing_at("open", Some("not a time"), now));
         assert!(!pressing_at("done", Some("2026-09-24T11:00:00Z"), now), "a done task is never pressing");
         assert!(!pressing_at("dropped", Some("2026-09-24T11:00:00Z"), now));
+    }
+
+    fn set(conn: &Connection, id: i64, due_at: Option<&str>, urgency: &str, is_now: bool) {
+        conn.execute(
+            "UPDATE tasks SET due_at = ?1, urgency = ?2, is_now = ?3 WHERE id = ?4",
+            rusqlite::params![due_at, urgency, is_now, id],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn queue_orders_now_then_urgent_then_due_then_oldest() {
+        let (conn, uid) = db_with_user();
+        let now: jiff::Timestamp = "2026-09-25T20:00:00Z".parse().unwrap();
+        let oldest = task(&conn, uid, "oldest", None);
+        let soon = task(&conn, uid, "soon", None);
+        let over = task(&conn, uid, "over", None);
+        let urgent = task(&conn, uid, "urgent", None);
+        let current = task(&conn, uid, "now", None);
+        let done = task(&conn, uid, "done", None);
+        set(&conn, soon, Some("2026-09-26T09:00:00Z"), "normal", false);
+        set(&conn, over, Some("2026-09-24T09:00:00Z"), "normal", false);
+        set(&conn, urgent, None, "high", false);
+        set(&conn, current, None, "low", true);
+        conn.execute("UPDATE tasks SET state = 'done' WHERE id = ?1", [done]).unwrap();
+
+        let q = queue(&conn, uid, now, 10).unwrap();
+        let ids: Vec<i64> = q.iter().map(|e| e.task.task.id).collect();
+        assert_eq!(ids, [current, urgent, over, soon, oldest]);
+        let reasons: Vec<&str> = q.iter().map(|e| e.reason).collect();
+        assert_eq!(reasons, ["now", "urgent", "overdue", "due_soon", "oldest"]);
+        assert_eq!(queue(&conn, uid, now, 2).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn queue_plans_the_open_step_before_the_whole_task() {
+        let (conn, uid) = db_with_user();
+        let now: jiff::Timestamp = "2026-09-25T20:00:00Z".parse().unwrap();
+        let stepped = task(&conn, uid, "stepped", None);
+        let first = task(&conn, uid, "first", Some(stepped));
+        let second = task(&conn, uid, "second", Some(stepped));
+        let whole = task(&conn, uid, "whole", None);
+        let bare = task(&conn, uid, "bare", None);
+        for (id, min) in [(stepped, 50), (first, 10), (second, 20), (whole, 45)] {
+            conn.execute("UPDATE tasks SET duration_min = ?1 WHERE id = ?2", [min, id]).unwrap();
+        }
+        conn.execute("UPDATE tasks SET state = 'done' WHERE id = ?1", [first]).unwrap();
+
+        let q = queue(&conn, uid, now, 10).unwrap();
+        let entry = |id: i64| q.iter().find(|e| e.task.task.id == id).unwrap();
+        assert_eq!(entry(stepped).step.as_ref().map(|s| s.id), Some(second));
+        assert_eq!(entry(stepped).planned_min, Some(20));
+        assert!(entry(whole).step.is_none());
+        assert_eq!(entry(whole).planned_min, Some(45));
+        assert_eq!(entry(bare).planned_min, None);
     }
 }

@@ -19,6 +19,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/goals", get(goals_list).post(goals_create))
         .route("/api/goals/{id}", patch(goals_update).delete(goals_delete))
         .route("/api/tasks", get(tasks_list).post(tasks_create))
+        .route("/api/tasks/queue", get(tasks_queue))
         .route("/api/tasks/{id}", patch(tasks_update).delete(tasks_delete))
         .route(
             "/api/tasks/by-external/{external_id}",
@@ -404,6 +405,29 @@ async fn tasks_list(user: TaskPrincipal, State(state): State<AppState>) -> impl 
     });
     match listed {
         Ok(ts) => Json(ts).into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct QueueQuery {
+    limit: Option<usize>,
+}
+
+async fn tasks_queue(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Query(q): Query<QueueQuery>,
+) -> impl IntoResponse {
+    let conn = state.db();
+    let tz = user_zone(&state, &user.username);
+    let limit = q.limit.unwrap_or(5).clamp(1, 20);
+    let listed = crate::tasks::queue(&conn, user.id, jiff::Timestamp::now(), limit).and_then(|mut q| {
+        crate::tasks::stamp_schedule(&conn, user.id, &tz, q.iter_mut().map(|e| &mut e.task.task))?;
+        Ok(q)
+    });
+    match listed {
+        Ok(q) => Json(q).into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }

@@ -196,6 +196,20 @@ async fn a_share_token_opens_no_other_door_and_a_dead_link_is_404() {
 }
 
 #[tokio::test]
+async fn a_share_token_cannot_read_the_circle() {
+    let (app, cookie, _cfg) = common::app_with_logged_in_user().await;
+    let token = token_of(&mint(&app, &cookie, "Mom", "{}").await);
+    for path in ["/api/tasks/queue"] {
+        let res = app.clone().oneshot(Request::get(path).header(header::AUTHORIZATION, format!("Bearer {token}")).body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED, "{path}");
+        let res = visitor(&app, Method::GET, path, None, Some(&format!("session={token}"))).await;
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED, "{path}");
+        let (status, _) = owner(&app, &cookie, Method::GET, path, None).await;
+        assert_eq!(status, StatusCode::OK, "{path}");
+    }
+}
+
+#[tokio::test]
 async fn an_expired_link_refuses_a_message_and_persists_nothing() {
     let llm = scripted(vec![say("hi")]);
     let (app, cookie, state, _cfg) = common::app_with_logged_in_user_llm_and_state(llm).await;
