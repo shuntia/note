@@ -18,12 +18,15 @@ pub type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 /// applied in the same durable step as the frame's effect. An `Err` from it
 /// drops the connection so the frame is redelivered, so it is for storage
 /// failures only: a frame whose content makes no sense is recorded as applied
-/// and ignored.
+/// and ignored. `apply` is only called with `seq == applied(call_id) + 1`, one
+/// call at a time across every connection of the peer.
 pub trait Handler: Send + Sync + 'static {
     fn applied(&self, call_id: &str) -> u64;
     fn apply(&self, call_id: &str, seq: u64, body: CallBody) -> Result<(), String>;
     fn request(&self, body: Request) -> BoxFuture<Result<Reply, Refusal>>;
     fn acked(&self, _call_id: &str, _upto: u64) {}
+    /// Reports the link's level, not an edge: `true` repeats when a
+    /// connection is replaced.
     fn link_changed(&self, _up: bool) {}
 }
 
@@ -69,6 +72,9 @@ struct Inner {
     handler: Arc<dyn Handler>,
     shared: Mutex<Shared>,
     pending: Mutex<HashMap<u64, oneshot::Sender<Result<Reply, Refusal>>>>,
+    /// Held across `applied` and `apply`, so an apply still running for a
+    /// dropped connection commits before the next connection checks its seq.
+    apply_gate: Mutex<()>,
     next_request: AtomicU64,
     generation: AtomicU64,
     up: watch::Sender<bool>,
@@ -97,6 +103,7 @@ impl Peer {
                 handler,
                 shared: Mutex::new(Shared { outbox, current: None }),
                 pending: Mutex::new(HashMap::new()),
+                apply_gate: Mutex::new(()),
                 next_request: AtomicU64::new(0),
                 generation: AtomicU64::new(0),
                 up: watch::channel(false).0,
@@ -122,7 +129,8 @@ impl Peer {
 
     /// Stores the frame durably and sends it if the link is up. It is resent
     /// on every reconnect until acknowledged. Never call while holding a lock
-    /// the handler's `apply` takes.
+    /// the outbox takes (Note's DB guard): an arriving ack holds this peer's
+    /// lock and then enters the outbox.
     pub fn send_call(&self, call_id: &str, body: CallBody) -> io::Result<u64> {
         let mut sh = crate::lock(&self.inner.shared);
         let seq = sh.outbox.append(call_id, &body)?;
@@ -187,30 +195,8 @@ impl Peer {
         }
 
         let (tx, mut rx) = mpsc::unbounded_channel::<Frame>();
-        // Replay and install under one lock, so a frame appended meanwhile is
-        // neither missed nor sent ahead of an older one.
-        {
-            let mut sh = crate::lock(&self.inner.shared);
-            let calls = match sh.outbox.pending_calls() {
-                Ok(c) => c,
-                Err(e) => return Disconnect::Protocol(format!("outbox unreadable: {e}")),
-            };
-            for call_id in calls {
-                match sh.outbox.unacked(&call_id, 0) {
-                    Ok(frames) => {
-                        for (seq, body) in frames {
-                            let _ = tx.send(Frame::Call {
-                                call_id: call_id.clone(),
-                                dir: self.inner.out_dir,
-                                seq,
-                                body,
-                            });
-                        }
-                    }
-                    Err(e) => return Disconnect::Protocol(format!("outbox unreadable: {e}")),
-                }
-            }
-            sh.current = Some(tx.clone());
+        if let Err(d) = self.install(generation, &tx) {
+            return d;
         }
         self.inner.up.send_replace(true);
         self.inner.handler.link_changed(true);
@@ -233,13 +219,42 @@ impl Peer {
             }
         })));
 
-        self.run(&mut in_rx, &tx).await
+        let (calls_tx, calls_rx) = mpsc::unbounded_channel::<Arriving>();
+        let (failed_tx, failed_rx) = oneshot::channel::<Disconnect>();
+        let _applier = AbortOnDrop(Some(tokio::spawn(apply_in_order(
+            self.inner.clone(),
+            calls_rx,
+            tx.clone(),
+            failed_tx,
+        ))));
+
+        let conn = Conn { tx, calls: calls_tx };
+        self.run(&mut in_rx, failed_rx, &conn).await
+    }
+
+    /// Queues every unacknowledged frame on `tx` and makes it the live sender,
+    /// under one lock, so a frame appended meanwhile is neither missed nor sent
+    /// ahead of an older one.
+    fn install(&self, generation: u64, tx: &mpsc::UnboundedSender<Frame>) -> Result<(), Disconnect> {
+        let mut sh = crate::lock(&self.inner.shared);
+        if self.inner.generation.load(SeqCst) != generation {
+            return Err(Disconnect::Protocol("superseded".into()));
+        }
+        let unreadable = |e: io::Error| Disconnect::Protocol(format!("outbox unreadable: {e}"));
+        for call_id in sh.outbox.pending_calls().map_err(unreadable)? {
+            for (seq, body) in sh.outbox.unacked(&call_id, 0).map_err(unreadable)? {
+                let _ = tx.send(Frame::Call { call_id: call_id.clone(), dir: self.inner.out_dir, seq, body });
+            }
+        }
+        sh.current = Some(tx.clone());
+        Ok(())
     }
 
     async fn run(
         &self,
         incoming: &mut mpsc::UnboundedReceiver<Result<Option<Frame>, CodecError>>,
-        tx: &mpsc::UnboundedSender<Frame>,
+        mut failed: oneshot::Receiver<Disconnect>,
+        conn: &Conn,
     ) -> Disconnect {
         let mut tick = tokio::time::interval(self.inner.cfg.heartbeat);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -251,17 +266,20 @@ impl Peer {
                         return Disconnect::HeartbeatLost;
                     }
                     pinged += 1;
-                    let _ = tx.send(Frame::Ping { n: pinged });
+                    let _ = conn.tx.send(Frame::Ping { n: pinged });
+                }
+                d = &mut failed => {
+                    return d.unwrap_or_else(|_| Disconnect::Protocol("the applier stopped".into()));
                 }
                 got = incoming.recv() => match got {
                     None | Some(Ok(None)) => return Disconnect::Eof,
                     Some(Err(e)) => return Disconnect::Codec(e.to_string()),
                     Some(Ok(Some(frame))) => {
                         if let Frame::Pong { n } = frame {
-                            ponged = ponged.max(n);
+                            ponged = ponged.max(n.min(pinged));
                             continue;
                         }
-                        if let Err(d) = self.on_frame(frame, tx).await {
+                        if let Err(d) = self.on_frame(frame, conn) {
                             return d;
                         }
                     }
@@ -270,7 +288,8 @@ impl Peer {
         }
     }
 
-    async fn on_frame(&self, frame: Frame, tx: &mpsc::UnboundedSender<Frame>) -> Result<(), Disconnect> {
+    fn on_frame(&self, frame: Frame, conn: &Conn) -> Result<(), Disconnect> {
+        let tx = &conn.tx;
         let wrong_way = |what: &str| Disconnect::Protocol(format!("{what} travelling the wrong way"));
         match frame {
             Frame::Ping { n } => {
@@ -298,28 +317,7 @@ impl Peer {
                 if !valid_call_id(&call_id) {
                     return Err(Disconnect::Protocol(format!("bad call id {call_id:?}")));
                 }
-                let handler = self.inner.handler.clone();
-                let id = call_id.clone();
-                let applied = tokio::task::spawn_blocking(move || handler.applied(&id))
-                    .await
-                    .map_err(|e| Disconnect::Protocol(e.to_string()))?;
-                match classify(applied, seq) {
-                    Arrival::Apply => {
-                        let handler = self.inner.handler.clone();
-                        let id = call_id.clone();
-                        tokio::task::spawn_blocking(move || handler.apply(&id, seq, body))
-                            .await
-                            .map_err(|e| Disconnect::Protocol(e.to_string()))?
-                            .map_err(|e| Disconnect::Protocol(format!("applying {call_id}#{seq}: {e}")))?;
-                        let _ = tx.send(Frame::Ack { call_id, dir, seq });
-                    }
-                    Arrival::Duplicate => {
-                        let _ = tx.send(Frame::Ack { call_id, dir, seq: applied });
-                    }
-                    Arrival::Gap => {
-                        let _ = tx.send(Frame::Resume { call_id, dir, after: applied });
-                    }
-                }
+                let _ = conn.calls.send(Arriving { call_id, dir, seq, body });
             }
             Frame::Ack { call_id, dir, seq } => {
                 if dir != self.inner.out_dir {
@@ -346,6 +344,57 @@ impl Peer {
             }
         }
         Ok(())
+    }
+}
+
+struct Arriving {
+    call_id: String,
+    dir: Dir,
+    seq: u64,
+    body: CallBody,
+}
+
+struct Conn {
+    tx: mpsc::UnboundedSender<Frame>,
+    calls: mpsc::UnboundedSender<Arriving>,
+}
+
+/// Applies one connection's call frames in arrival order, off the run loop so
+/// heartbeats keep flowing, and answers each with an ack or a resume.
+async fn apply_in_order(
+    inner: Arc<Inner>,
+    mut calls: mpsc::UnboundedReceiver<Arriving>,
+    tx: mpsc::UnboundedSender<Frame>,
+    failed: oneshot::Sender<Disconnect>,
+) {
+    while let Some(Arriving { call_id, dir, seq, body }) = calls.recv().await {
+        let inner = inner.clone();
+        let answered = tokio::task::spawn_blocking(move || {
+            let _gate = crate::lock(&inner.apply_gate);
+            let applied = inner.handler.applied(&call_id);
+            match classify(applied, seq) {
+                Arrival::Apply => match inner.handler.apply(&call_id, seq, body) {
+                    Ok(()) => Ok(Frame::Ack { call_id, dir, seq }),
+                    Err(e) => Err(format!("applying {call_id}#{seq}: {e}")),
+                },
+                Arrival::Duplicate => Ok(Frame::Ack { call_id, dir, seq: applied }),
+                Arrival::Gap => Ok(Frame::Resume { call_id, dir, after: applied }),
+            }
+        })
+        .await;
+        match answered {
+            Ok(Ok(frame)) => {
+                let _ = tx.send(frame);
+            }
+            Ok(Err(e)) => {
+                let _ = failed.send(Disconnect::Protocol(e));
+                return;
+            }
+            Err(e) => {
+                let _ = failed.send(Disconnect::Protocol(e.to_string()));
+                return;
+            }
+        }
     }
 }
 
@@ -427,5 +476,29 @@ pub async fn listen_forever(peer: Peer, listener: UnixListener) {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::stream::MemOutbox;
+    use crate::testkit::Recording;
+
+    #[test]
+    fn a_superseded_connection_does_not_install_over_a_newer_one() {
+        let peer = Peer::new(
+            PeerConfig::new(Role::Note),
+            Dir::ToVoice,
+            Arc::new(Recording::default()),
+            Box::new(MemOutbox::default()),
+        );
+        peer.inner.generation.store(2, SeqCst);
+        let (newer, _rx_newer) = mpsc::unbounded_channel();
+        let (older, _rx_older) = mpsc::unbounded_channel();
+        assert!(peer.install(2, &newer).is_ok());
+        assert!(peer.install(1, &older).is_err());
+        let sh = crate::lock(&peer.inner.shared);
+        assert!(sh.current.as_ref().unwrap().same_channel(&newer));
     }
 }
