@@ -51,11 +51,13 @@ const EDITABLE = [
   'triggers_per_day',
   'pomodoro_work_min',
   'pomodoro_break_min',
+  'idle_nudge_min',
 ] as const
 
 const MAX_TRIGGERS_PER_DAY = 20
 const WORK_MIN = { min: 5, max: 120 }
 const BREAK_MIN = { min: 1, max: 60 }
+const IDLE_MIN = { min: 0, max: 240 }
 
 type Draft = Pick<UserSettings, (typeof EDITABLE)[number]>
 type Choices = Pick<UserSettings, 'templates' | 'timezones'>
@@ -136,6 +138,7 @@ function draftOf(s: UserSettings): Draft {
     triggers_per_day: s.triggers_per_day,
     pomodoro_work_min: s.pomodoro_work_min,
     pomodoro_break_min: s.pomodoro_break_min,
+    idle_nudge_min: s.idle_nudge_min,
   }
 }
 
@@ -1045,6 +1048,34 @@ export function Settings({
                   </button>
                   <Status save={save} row="test" />
                 </div>
+              </div>
+            )}
+          </FoldRow>
+        )}
+        {loaded && (
+          <FoldRow
+            label="Nudge when idle"
+            value={loaded.draft.idle_nudge_min ? `${loaded.draft.idle_nudge_min} min` : 'Off'}
+            open={open === 'idle'}
+            onToggle={fold('idle')}
+          >
+            {open === 'idle' && (
+              <div className="set-fold-body">
+                <input
+                  aria-label="Minutes idle before a nudge"
+                  type="number"
+                  min={IDLE_MIN.min}
+                  max={IDLE_MIN.max}
+                  value={loaded.draft.idle_nudge_min}
+                  onChange={(e) =>
+                    edit(
+                      'idle_nudge_min',
+                      Math.min(IDLE_MIN.max, Math.max(IDLE_MIN.min, Math.round(Number(e.target.value) || 0))),
+                    )
+                  }
+                  {...commitOn('idle')}
+                />
+                <Status save={save} row="idle" />
               </div>
             )}
           </FoldRow>
