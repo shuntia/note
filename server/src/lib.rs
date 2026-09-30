@@ -17,6 +17,7 @@ pub mod log;
 pub mod memory;
 pub mod net;
 pub mod nightly;
+pub mod notes;
 pub mod plan;
 pub mod prompts;
 pub mod providers;

@@ -646,6 +646,19 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX idx_inbox_items_recent ON inbox_items(user_id, received_at DESC, id DESC);
     ",
+    // v44
+    "
+    CREATE TABLE notes (
+        id INTEGER PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id),
+        text TEXT NOT NULL CHECK (length(text) BETWEEN 1 AND 200),
+        pinned INTEGER NOT NULL DEFAULT 0 CHECK (pinned IN (0, 1)),
+        created_at TEXT NOT NULL,
+        done_at TEXT,
+        last_nudged_at TEXT
+    );
+    CREATE INDEX idx_notes_user ON notes(user_id, done_at);
+    ",
 ];
 
 pub fn open(path: &Path) -> Result<Connection> {
@@ -1832,5 +1845,29 @@ mod tests {
         assert!(insert("s1", "material", None).is_err(), "a source is one row");
         assert!(insert("s3", "gossip", None).is_err());
         assert!(insert("s4", "material", Some("maybe")).is_err());
+    }
+    #[test]
+    fn notes_hold_one_line_of_text_and_a_pinned_flag() {
+        let conn = open_memory().unwrap();
+        conn.execute("INSERT INTO users (username, pass_hash, role) VALUES ('a','h','member')", [])
+            .unwrap();
+        let insert = |text: &str, pinned: i64| {
+            conn.execute(
+                "INSERT INTO notes (user_id, text, pinned, created_at)
+                 VALUES (1, ?1, ?2, '2026-09-30T12:00:00Z')",
+                (text, pinned),
+            )
+        };
+        insert("milk", 0).unwrap();
+        insert(&"あ".repeat(200), 1).unwrap();
+        assert!(insert("", 0).is_err());
+        assert!(insert(&"あ".repeat(201), 0).is_err());
+        assert!(insert("milk", 2).is_err());
+        let (pinned, done, nudged): (i64, Option<String>, Option<String>) = conn
+            .query_row("SELECT pinned, done_at, last_nudged_at FROM notes WHERE id = 1", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .unwrap();
+        assert_eq!((pinned, done, nudged), (0, None, None));
     }
 }
