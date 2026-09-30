@@ -46,7 +46,7 @@
             inherit version;
             src = lib.fileset.toSource {
               root = ./.;
-              fileset = lib.fileset.unions [ ./Cargo.toml ./Cargo.lock ./server ./voice-proto ];
+              fileset = lib.fileset.unions [ ./Cargo.toml ./Cargo.lock ./server ./voice-proto ./voice ];
             };
             strictDeps = true;
             nativeBuildInputs = [ pkgs.pkg-config ];
@@ -59,6 +59,7 @@
 
           server = craneLib.buildPackage (commonArgs // {
             inherit cargoArtifacts;
+            cargoExtraArgs = "-p note-server";
             doCheck = false;
             NOTE_DEFAULT_WEB_DIR = "${placeholder "out"}/share/note/web";
             postInstall = ''
@@ -74,25 +75,43 @@
             };
           });
 
-          # The prompt tests read the shipped defaults beside the crate.
+          voice = craneLib.buildPackage (commonArgs // {
+            pname = "note-voice";
+            inherit cargoArtifacts;
+            cargoExtraArgs = "-p note-voice";
+            doCheck = false;
+            meta = {
+              description = "Rings a linked Matrix account for Note";
+              license = lib.licenses.unlicense;
+              mainProgram = "note-voice";
+            };
+          });
+
+          # The prompt tests read the shipped defaults beside the crate; the
+          # voice tests build HTTP clients, which refuse to start without CA roots.
           tests = craneLib.cargoTest (commonArgs // {
             inherit cargoArtifacts;
+            SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
             src = lib.fileset.toSource {
               root = ./.;
-              fileset = lib.fileset.unions [ ./Cargo.toml ./Cargo.lock ./server ./voice-proto ./config/defaults ];
+              fileset = lib.fileset.unions [ ./Cargo.toml ./Cargo.lock ./server ./voice-proto ./voice ./config/defaults ];
             };
           });
         in
-        { inherit web server tests; };
+        { inherit web server voice tests; };
     in {
       nixosModules.default = import ./nix/module.nix self;
 
-      overlays.default = final: prev: { note-server = (build final).server; };
+      overlays.default = final: prev: {
+        note-server = (build final).server;
+        note-voice = (build final).voice;
+      };
 
       packages = forAllSystems (pkgs:
         let b = build pkgs; in {
           default = b.server;
           note-server = b.server;
+          note-voice = b.voice;
           note-web = b.web;
         });
 
