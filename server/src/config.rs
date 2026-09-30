@@ -24,6 +24,15 @@ pub struct ServerConfig {
     /// Absent turns the `web_search` tool off: no session is offered it.
     #[serde(default)]
     pub search: Option<SearchConfig>,
+    #[serde(default)]
+    pub voice: Option<VoiceConfig>,
+}
+
+/// Present turns the voice link on: Note listens on `socket` for the voice
+/// service.
+#[derive(Debug, Clone, Deserialize)]
+pub struct VoiceConfig {
+    pub socket: PathBuf,
 }
 
 /// `NOTE_DEFAULT_WEB_DIR` at build time bakes in an install-specific location
