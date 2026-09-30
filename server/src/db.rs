@@ -592,7 +592,7 @@ const MIGRATIONS: &[&str] = &[
     // v42
     "
     CREATE TABLE voice_links (
-        id INTEGER PRIMARY KEY,
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
         mxid TEXT NOT NULL,
         room_id TEXT,
@@ -1789,5 +1789,13 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM voice_frames", [], |r| r.get(0))
             .unwrap();
         assert_eq!(left, 0, "frames go with their call");
+        conn.execute("DELETE FROM voice_links", []).unwrap();
+        conn.execute(
+            "INSERT INTO voice_links (user_id, mxid, state, created_at) VALUES (1, '@a:t', 'invited', 'x')",
+            [],
+        )
+        .unwrap();
+        let id: i64 = conn.query_row("SELECT id FROM voice_links", [], |r| r.get(0)).unwrap();
+        assert_eq!(id, 2, "a relink never reuses an unlinked id");
     }
 }

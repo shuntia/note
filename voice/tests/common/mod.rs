@@ -23,6 +23,9 @@ pub struct Hs {
     pub direct_get_fails: bool,
     pub direct_put_fails: bool,
     pub direct_puts: Vec<Value>,
+    /// Answered with a 400 once, as a homeserver refuses a stale token.
+    pub reject_since: Option<String>,
+    pub sync_sinces: Vec<Option<String>>,
     rooms: u32,
     events: u32,
 }
@@ -96,16 +99,28 @@ async fn joined_members(State(hs): State<SharedHs>, Path(room): Path<String>) ->
     Json(json!({ "joined": joined }))
 }
 
-async fn sync(State(hs): State<SharedHs>, Query(q): Query<HashMap<String, String>>) -> Json<Value> {
+async fn sync(
+    State(hs): State<SharedHs>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, (axum::http::StatusCode, Json<Value>)> {
+    {
+        let mut hs = hs.lock().unwrap();
+        let since = q.get("since").cloned();
+        hs.sync_sinces.push(since.clone());
+        if since.is_some() && hs.reject_since == since {
+            hs.reject_since = None;
+            return Err((axum::http::StatusCode::BAD_REQUEST, Json(json!({ "errcode": "M_UNKNOWN" }))));
+        }
+    }
     let n: u64 = q.get("since").and_then(|s| s.trim_start_matches('s').parse().ok()).unwrap_or(0);
     for _ in 0..20 {
         if let Some(mut next) = hs.lock().unwrap().syncs.pop_front() {
             next["next_batch"] = json!(format!("s{}", n + 1));
-            return Json(next);
+            return Ok(Json(next));
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
-    Json(json!({ "next_batch": format!("s{}", n + 1), "rooms": {} }))
+    Ok(Json(json!({ "next_batch": format!("s{}", n + 1), "rooms": {} })))
 }
 
 pub async fn homeserver() -> (String, SharedHs) {

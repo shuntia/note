@@ -1895,7 +1895,7 @@ Append to `MIGRATIONS` after v41:
     // v42
     "
     CREATE TABLE voice_links (
-        id INTEGER PRIMARY KEY,
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
         mxid TEXT NOT NULL,
         room_id TEXT,
@@ -4693,7 +4693,9 @@ In `config`:
         StateDirectoryMode = "0700";
         LoadCredential = [ "matrix-bot.token:${voiceCfg.tokenFile}" ];
         Restart = "always";
-        RestartSec = 1;
+        RestartSec = 2;
+        RestartSteps = 5;
+        RestartMaxDelaySec = 60;
         UMask = "0077";
         NoNewPrivileges = true;
         PrivateTmp = true;
@@ -4762,6 +4764,12 @@ If the scratchpad is gone, log the bot in again with its password from the same 
     };
 ```
 
+The voice service's state (`state.json`, the journal of frames Note has not acknowledged, and the sync token) must survive a reboot, so in the same file add to `environment.persistence."/persist".directories`:
+
+```nix
+    { directory = "/var/lib/note-voice"; user = "note-voice"; group = "note"; mode = "0700"; }
+```
+
 Also add `#   matrix-bot.token  access token of @note:uwu.shuntia.net (the voice service's bot)` to the secrets list in the header comment.
 
 - [ ] **Step 3 (Claude): Bump and build.** Merge the branch to `main`, then in `~/Documents/configuration-nix` run `nix flake update note` and `nix build .#nixosConfigurations.$(hostname).config.system.build.toplevel --no-link`. Confirm that `note-voice.service` exists in the build and that the generated `server.toml` holds `[voice] socket = "/run/note/voice.sock"`.
@@ -4780,6 +4788,10 @@ Expected:
 - Answering ends it at once.
 - "This was a test call from Note." arrives via Telegram or push.
 - `voice_calls` shows `ended/answered` (via `sudo note-ctl`, or the admin view when one is added).
+
+Then a decline check: the user taps **Ring me** again and declines on the phone. Expected: the ring stops at once, the test message still arrives, and `voice_calls` shows `ended/declined`.
+
+Finally, `journalctl -u note-voice -b` shows no sandbox denials: no `Permission denied`, `Read-only file system` or `Operation not permitted` on `/var/lib/note-voice` or `/run/note/voice.sock`, and no `SIGSYS` exit.
 
 - [ ] **Step 7 (Claude): Update memory.** Record in `note-deployment.md` the deployed commit, DB v42, `note-voice.service`, and the token location. Mark phase 1 done in `matrix-ring-poc.md`.
 
