@@ -1,8 +1,11 @@
 pub mod codec;
 pub mod frame;
+pub mod peer;
 pub mod stream;
+pub mod testkit;
 
 pub use frame::*;
+pub use peer::{dial_forever, listen_forever, BoxFuture, Disconnect, Handler, Peer, PeerConfig};
 pub use stream::{classify, Arrival, MemOutbox, Outbox};
 
 /// A lock poisoned by a panic elsewhere still guards intact data.
