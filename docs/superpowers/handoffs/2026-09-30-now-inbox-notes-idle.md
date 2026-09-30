@@ -54,7 +54,7 @@ Then `nix flake update note && sudo nixos-rebuild switch`. `RuntimeDirectory =
 
 - Now: the strip opens on the seeded block; Stop → Undo restores the paused
   session and a focus refetch inside the window does not bring it back; idle
-  in a session hides everything but the arc and counter, and the first touch
+  in a session hides everything but the arc, the counter and the session's name and step, and the first touch
   only wakes the face. Phone and desktop.
 - Inbox: list, detail and the spinning Refresh at both widths; the signal
   file receives the stamp.

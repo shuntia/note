@@ -95,18 +95,18 @@
 .circle-face + .face-stop { margin-top: calc(64 * var(--u)); }
 .session-arc .btn-round.face-stop { left: calc(50% + 2.75rem); }
 
-/* ── a resting session: only the timer ── */
-html.in-session.idle :is(.circle-face .bead, .strip .slot:not(.now), .slot.now :is(.gauge-name, .gauge-sub, .mark), .strip-dots, .face-hint, .face-stop, .face-big .chev, .topbar, .shell > .tabs, .handle) {
+/* ── a resting session: only the timer and its words ── */
+html.in-session.idle :is(.circle-face .bead, .strip .slot:not(.now), .slot.now .mark, .strip-dots, .face-hint, .face-stop, .face-big .chev, .topbar, .shell > .tabs, .handle) {
   opacity: 0 !important;
   visibility: hidden !important;
   pointer-events: none !important;
   transition: opacity 300ms ease, visibility 0s linear 300ms !important;
 }
-html.in-session.waking :is(.circle-face .bead, .strip .slot:not(.now), .slot.now :is(.gauge-name, .gauge-sub, .mark), .strip-dots, .face-hint, .face-stop, .face-big .chev, .topbar, .shell > .tabs, .handle) {
+html.in-session.waking :is(.circle-face .bead, .strip .slot:not(.now), .slot.now .mark, .strip-dots, .face-hint, .face-stop, .face-big .chev, .topbar, .shell > .tabs, .handle) {
   transition: opacity 200ms ease, visibility 0s !important;
 }
 @media (prefers-reduced-motion: reduce) {
-  html.in-session:is(.idle, .waking) :is(.circle-face .bead, .strip .slot:not(.now), .slot.now :is(.gauge-name, .gauge-sub, .mark), .strip-dots, .face-hint, .face-stop, .face-big .chev, .topbar, .shell > .tabs, .handle) {
+  html.in-session:is(.idle, .waking) :is(.circle-face .bead, .strip .slot:not(.now), .slot.now .mark, .strip-dots, .face-hint, .face-stop, .face-big .chev, .topbar, .shell > .tabs, .handle) {
     transition: none !important;
   }
 }

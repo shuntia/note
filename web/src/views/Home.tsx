@@ -196,8 +196,8 @@ function useMotion(): boolean {
 }
 
 // After two idle seconds the desktop dims its top bar and a session keeps only its
-// timer (the CSS reads `html.idle`); any sign of a hand brings everything back, over
-// WAKE_MS while `html.waking` is set.
+// timer and its words (the CSS reads `html.idle`); any sign of a hand brings
+// everything back, over WAKE_MS while `html.waking` is set.
 function useIdle(on: boolean) {
   useEffect(() => {
     if (!on) return
