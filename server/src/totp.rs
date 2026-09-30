@@ -37,7 +37,7 @@ pub fn code(seed: &[u8], step: i64) -> String {
     let offset = (digest[19] & 0x0f) as usize;
     let bin = u32::from_be_bytes([digest[offset], digest[offset + 1], digest[offset + 2], digest[offset + 3]])
         & 0x7fff_ffff;
-    format!("{:0width$}", bin % 10u32.pow(u32::try_from(DIGITS).unwrap_or(6)), width = DIGITS)
+    format!("{:0width$}", bin % 10u32.pow(DIGITS as u32), width = DIGITS)
 }
 
 fn ct_eq(a: &str, b: &str) -> bool {

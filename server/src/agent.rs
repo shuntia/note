@@ -239,11 +239,11 @@ fn run_traced(
         let round = std::time::Instant::now();
         let (resp, thinking) = match deps.llm.chat_with_reasoning(&req) {
             Ok(v) => {
-                trace.round(millis(round.elapsed()));
+                trace.round(round.elapsed().as_millis() as u64);
                 v
             }
             Err(e) => {
-                trace.round_failed(millis(round.elapsed()), &format!("{e:#}"));
+                trace.round_failed(round.elapsed().as_millis() as u64, &format!("{e:#}"));
                 on_event(AgentEvent::Error { message: &e.to_string() });
                 return Err(e);
             }
@@ -261,7 +261,7 @@ fn run_traced(
             on_event(AgentEvent::Reply { text: &last_text });
             trace.ok(&last_text);
             finish(deps, user_id, kind, turns, tool_calls, log_kind(kind, "agent_session"))?;
-            let thought_ms = millis(started.elapsed());
+            let thought_ms = started.elapsed().as_millis() as u64;
             return Ok(SessionOutcome {
                 reply: last_text,
                 turns,
@@ -294,7 +294,7 @@ fn run_traced(
                 on_event(AgentEvent::Reply { text: &content });
                 trace.ok(&content);
                 finish(deps, user_id, kind, turns, tool_calls, log_kind(kind, "agent_session"))?;
-                let thought_ms = millis(started.elapsed());
+                let thought_ms = started.elapsed().as_millis() as u64;
                 return Ok(SessionOutcome {
                     reply: content,
                     turns,
@@ -315,7 +315,7 @@ fn run_traced(
     on_event(AgentEvent::Reply { text: &last_text });
     trace.max_turns(&last_text);
     finish(deps, user_id, kind, turns, tool_calls, log_kind(kind, "agent_max_turns"))?;
-    let thought_ms = millis(started.elapsed());
+    let thought_ms = started.elapsed().as_millis() as u64;
     Ok(SessionOutcome {
         reply: last_text,
         turns,
@@ -391,7 +391,7 @@ impl CallEnv<'_> {
         on_event(AgentEvent::ToolCall { index, name, args });
         let started = std::time::Instant::now();
         let (content, is_error) = self.run(name, args);
-        trace.call(name, args, &content, is_error, millis(started.elapsed()));
+        trace.call(name, args, &content, is_error, started.elapsed().as_millis() as u64);
         on_event(AgentEvent::ToolResult { index, name, result: &content, is_error });
         steps.push(SessionStep {
             name: name.to_string(),
@@ -501,10 +501,6 @@ fn log_kind(kind: SessionKind, base: &'static str) -> &'static str {
         (SessionKind::Share, _) => "share_max_turns",
         _ => base,
     }
-}
-
-fn millis(d: std::time::Duration) -> u64 {
-    u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]
@@ -1438,12 +1434,12 @@ mod tests {
 
         let (outcome, turns, tool_calls, error, detail) = trace_row(&db);
         assert_eq!(outcome, "ok");
-        assert_eq!(turns, i64::try_from(out.turns).unwrap());
-        assert_eq!(tool_calls, i64::try_from(out.tool_calls).unwrap());
+        assert_eq!(turns, out.turns as i64);
+        assert_eq!(tool_calls, out.tool_calls as i64);
         assert!(error.is_none());
         assert_eq!(detail["opening"], "add milk");
         assert_eq!(detail["reply"], "added buy milk!");
-        assert_eq!(rounds(&detail).len(), usize::try_from(turns).unwrap(), "every answered round is a turn");
+        assert_eq!(rounds(&detail).len(), turns as usize, "every answered round is a turn");
         let calls: Vec<&serde_json::Value> =
             rounds(&detail).iter().flat_map(|r| r["calls"].as_array().unwrap()).collect();
         assert_eq!(calls.len(), out.steps.len());
@@ -1474,8 +1470,8 @@ mod tests {
 
         let (outcome, turns, tool_calls, _, detail) = trace_row(&db);
         assert_eq!(outcome, "max_turns");
-        assert_eq!(turns, i64::try_from(MAX_TURNS).unwrap());
-        assert_eq!(tool_calls, i64::try_from(MAX_TURNS).unwrap());
+        assert_eq!(turns, MAX_TURNS as i64);
+        assert_eq!(tool_calls, MAX_TURNS as i64);
         assert_eq!(rounds(&detail).len(), MAX_TURNS);
         assert_eq!(detail["reply"], "looping");
     }

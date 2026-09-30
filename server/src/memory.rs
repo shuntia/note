@@ -500,7 +500,7 @@ pub fn query(
     limit: i64,
     query_vec: Option<&[f32]>,
 ) -> Result<Vec<QueryHit>> {
-    let take = usize::try_from(limit).unwrap_or(0);
+    let take = limit as usize;
     let lexical = lexical_query(conn, user, q, limit.max(32))?;
     let vector = match query_vec {
         Some(qv) => vector_query(conn, user, qv, 32)?,
@@ -511,10 +511,10 @@ pub fn query(
     }
     let mut scores: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
     for (rank, hit) in lexical.iter().enumerate() {
-        *scores.entry(hit.id.clone()).or_default() += 1.0 / (60.0 + f64::from(u32::try_from(rank).unwrap_or(u32::MAX)));
+        *scores.entry(hit.id.clone()).or_default() += 1.0 / (60.0 + rank as f64);
     }
     for (rank, id) in vector.iter().enumerate() {
-        *scores.entry(id.clone()).or_default() += 1.0 / (60.0 + f64::from(u32::try_from(rank).unwrap_or(u32::MAX)));
+        *scores.entry(id.clone()).or_default() += 1.0 / (60.0 + rank as f64);
     }
     let mut ids: Vec<(String, f64)> = scores.into_iter().collect();
     ids.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
@@ -562,7 +562,7 @@ pub fn list(
          WHERE user = ?1 AND archived = 0 AND (?2 IS NULL OR category = ?2)
          ORDER BY rowid DESC LIMIT ?3",
     )?;
-    let rows = stmt.query_map((user, category, i64::try_from(limit).unwrap_or(i64::MAX)), |r| {
+    let rows = stmt.query_map((user, category, limit as i64), |r| {
         Ok(QueryHit { id: r.get(0)?, category: r.get(1)?, summary: r.get(2)? })
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)

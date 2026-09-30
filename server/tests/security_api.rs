@@ -285,7 +285,7 @@ async fn one_credential_cannot_be_registered_twice_and_the_count_is_capped() {
             conn.execute(
                 "INSERT INTO passkeys (user_id, name, credential, cred_id, created_at)
                  VALUES (1, ?1, '{}', ?2, 'now')",
-                (format!("k{i}"), vec![200 + u8::try_from(i).unwrap()]),
+                (format!("k{i}"), vec![200 + i as u8]),
             )
             .unwrap();
         }

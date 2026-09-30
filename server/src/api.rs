@@ -1923,7 +1923,7 @@ async fn memory_list(
     }
     let conn = state.db();
     let hits = match blank_as_none(q.q.as_ref()) {
-        Some(search) => crate::memory::query(&conn, &user.username, search, i64::try_from(limit).unwrap_or(i64::MAX), None),
+        Some(search) => crate::memory::query(&conn, &user.username, search, limit as i64, None),
         None => crate::memory::list(&conn, &user.username, category, limit),
     };
     match hits {

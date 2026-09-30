@@ -126,7 +126,7 @@ async fn concurrent_talk_for_same_user_is_conflict() {
 async fn talk_at_global_capacity_is_service_unavailable() {
     let (app, cookie, state, _cfg) = common::app_with_logged_in_user_and_state().await;
     let permits: Vec<_> = (0..note_server::MAX_CONCURRENT_TALKS)
-        .map(|i| state.talk_gate.try_enter(-1 - i64::try_from(i).unwrap()).unwrap())
+        .map(|i| state.talk_gate.try_enter(-1 - i as i64).unwrap())
         .collect();
     let res = app
         .clone()
@@ -380,7 +380,7 @@ async fn multiple_tool_calls_keep_call_order_in_steps_and_rows() {
 async fn bad_conversation_at_global_capacity_is_404_not_503() {
     let (app, cookie, state, _cfg) = common::app_with_logged_in_user_and_state().await;
     let _permits: Vec<_> = (0..note_server::MAX_CONCURRENT_TALKS)
-        .map(|i| state.talk_gate.try_enter(-1 - i64::try_from(i).unwrap()).unwrap())
+        .map(|i| state.talk_gate.try_enter(-1 - i as i64).unwrap())
         .collect();
     let res = app
         .oneshot(

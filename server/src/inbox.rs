@@ -113,7 +113,7 @@ pub fn list(
          ORDER BY received_at DESC, id DESC
          LIMIT ?3",
     )?;
-    let rows = stmt.query_map((user_id, before, i64::try_from(limit).unwrap_or(i64::MAX)), |r| {
+    let rows = stmt.query_map((user_id, before, limit as i64), |r| {
         Ok(InboxRow {
             id: r.get(0)?,
             source_id: r.get(1)?,
@@ -381,7 +381,7 @@ mod tests {
     fn the_list_is_newest_first_per_user_with_a_strict_cursor() {
         let (conn, _tmp) = env();
         for (i, s) in ["a", "b", "c"].iter().enumerate() {
-            upsert(&conn, 1, s, "announcement", s, at(i64::try_from(i).unwrap())).unwrap();
+            upsert(&conn, 1, s, "announcement", s, at(i as i64)).unwrap();
         }
         upsert(&conn, 2, "theirs", "material", "theirs", at(10)).unwrap();
         let all: Vec<String> = list(&conn, 1, None, 50).unwrap().into_iter().map(|r| r.source_id).collect();

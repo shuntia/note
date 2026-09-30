@@ -405,7 +405,7 @@ pub fn rounds_today(
         rusqlite::params![user_id, from.to_string(), to.to_string()],
         |r| r.get(0),
     )?;
-    Ok(u32::try_from(n).unwrap_or(0))
+    Ok(n as u32)
 }
 
 /// A session abandoned within its first minute leaves nothing behind: its row,

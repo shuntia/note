@@ -117,7 +117,7 @@ fn quantize(minutes: u64) -> u32 {
     }
     let step = u64::from(PROJECTION_STEP_MIN);
     let rounded = (minutes + step / 2) / step * step;
-    u32::try_from(rounded.max(step)).unwrap_or(u32::MAX)
+    rounded.max(step) as u32
 }
 
 /// The total the task is heading for and what is left of it, read off how far it
@@ -209,7 +209,6 @@ pub struct TaskPatch {
     pub actor: Actor,
 }
 
-#[expect(clippy::option_option, reason = "a field left out and a field set to null mean different things")]
 pub(crate) fn present<'de, D, T>(d: D) -> Result<Option<Option<T>>, D::Error>
 where
     D: Deserializer<'de>,

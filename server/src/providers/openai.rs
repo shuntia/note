@@ -156,11 +156,6 @@ pub fn parse(v: &serde_json::Value) -> Result<ChatResponse> {
     Ok(ChatResponse { text, tool_calls })
 }
 
-#[expect(clippy::cast_possible_truncation, reason = "an embedding's components are f32 wherever they are used")]
-fn narrow(x: f64) -> f32 {
-    x as f32
-}
-
 pub fn parse_embeddings(v: &serde_json::Value) -> Result<Vec<Vec<f32>>> {
     let mut rows: Vec<(i64, Vec<f32>)> = v["data"]
         .as_array()
@@ -171,7 +166,7 @@ pub fn parse_embeddings(v: &serde_json::Value) -> Result<Vec<Vec<f32>>> {
                 .as_array()
                 .context("no embedding")?
                 .iter()
-                .map(|x| narrow(x.as_f64().unwrap_or(0.0)))
+                .map(|x| x.as_f64().unwrap_or(0.0) as f32)
                 .collect();
             Ok((d["index"].as_i64().unwrap_or(0), vec))
         })

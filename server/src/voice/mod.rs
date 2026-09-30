@@ -319,7 +319,7 @@ impl Handler for NoteHandler {
             .query_row("SELECT applied_seq FROM voice_calls WHERE id = ?1", [call_id], |r| r.get::<_, i64>(0)).map_or_else(|e| match e {
                 rusqlite::Error::QueryReturnedNoRows => u64::MAX,
                 _ => 0,
-            }, |n| u64::try_from(n).unwrap_or(0))
+            }, |n| n as u64)
     }
 
     fn apply(&self, call_id: &str, seq: u64, body: CallBody) -> Result<(), String> {
@@ -331,7 +331,7 @@ impl Handler for NoteHandler {
             let conn = crate::db_guard(&self.db);
             let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
             let known = tx
-                .execute("UPDATE voice_calls SET applied_seq = ?2 WHERE id = ?1", (call_id, i64::try_from(seq).unwrap_or(i64::MAX)))
+                .execute("UPDATE voice_calls SET applied_seq = ?2 WHERE id = ?1", (call_id, seq as i64))
                 .map_err(|e| e.to_string())?
                 > 0;
             let mut ended = None;

@@ -66,8 +66,8 @@ fn wall(minutes: u16) -> String {
 
 fn window(start: &str, end: &str) -> Window {
     Window {
-        start: u16::try_from(crate::templates::wall_minutes(start).clamp(0, i64::from(END_OF_DAY_MIN))).unwrap_or(END_OF_DAY_MIN),
-        end: u16::try_from(crate::templates::wall_minutes(end).clamp(0, i64::from(END_OF_DAY_MIN))).unwrap_or(END_OF_DAY_MIN),
+        start: crate::templates::wall_minutes(start).clamp(0, i64::from(END_OF_DAY_MIN)) as u16,
+        end: crate::templates::wall_minutes(end).clamp(0, i64::from(END_OF_DAY_MIN)) as u16,
     }
 }
 
@@ -197,7 +197,7 @@ impl Length {
             self.actual_min.and_then(|m| u32::try_from(m).ok()),
         );
         match left.filter(|m| *m > 0) {
-            Some(m) => u16::try_from(m.max(1)).unwrap_or(u16::MAX),
+            Some(m) => m.clamp(1, u32::from(u16::MAX)) as u16,
             None => {
                 stretch(self.duration_min.or(fallback).unwrap_or(i64::from(DEFAULT_BLOCK_MIN)))
             }
@@ -241,7 +241,7 @@ fn candidates(
     let held = crate::tools::plan_ops::planned_on(conn, user_id, date)?;
     let factor = crate::learn::plan_factor(conn, user_id)?;
     let stretched = |minutes: i64| {
-        u16::try_from(crate::learn::stretch(minutes, factor).max(1)).unwrap_or(u16::MAX)
+        crate::learn::stretch(minutes, factor).clamp(1, i64::from(u16::MAX)) as u16
     };
     let mut stmt = conn.prepare(
         "SELECT id, is_now, due_at, created_at, duration_min, progress, actual_min, state, urgency
@@ -280,7 +280,7 @@ fn candidates(
         let steps = open_steps(conn, id)?;
         if steps.is_empty() {
             let pieces = split(len.minutes(None, stretched), longest);
-            let n = u16::try_from(pieces.len()).unwrap_or(u16::MAX);
+            let n = pieces.len() as u16;
             for (i, piece) in pieces.into_iter().enumerate() {
                 out.push(Candidate {
                     id,
@@ -289,12 +289,12 @@ fn candidates(
                     urgency_rank,
                     due,
                     created: created.clone(),
-                    part: (n > 1).then_some((u16::try_from(i + 1).unwrap_or(u16::MAX), n)),
+                    part: (n > 1).then_some((i as u16 + 1, n)),
                 });
             }
             continue;
         }
-        let share = len.duration_min.map(|m| (m / i64::try_from(steps.len()).unwrap_or(i64::MAX)).max(1));
+        let share = len.duration_min.map(|m| (m / steps.len() as i64).max(1));
         for (step_id, step_len) in steps {
             if held.contains_key(&step_id) {
                 continue;
@@ -354,14 +354,14 @@ pub fn run(
         crate::tools::plan_ops::occupied(conn, user_id, date)?
             .into_iter()
             .map(|(_, from, to)| Window {
-                start: u16::try_from(from.clamp(0, i64::from(END_OF_DAY_MIN))).unwrap_or(END_OF_DAY_MIN),
-                end: u16::try_from(to.clamp(0, i64::from(END_OF_DAY_MIN))).unwrap_or(END_OF_DAY_MIN),
+                start: from.clamp(0, i64::from(END_OF_DAY_MIN)) as u16,
+                end: to.clamp(0, i64::from(END_OF_DAY_MIN)) as u16,
             }),
     );
     let local = now.to_zoned(tz.clone());
     if local.date() == date {
         let cut = i64::from(local.hour()) * 60 + i64::from(local.minute()) + LEAD_MIN;
-        busy.push(Window { start: 0, end: u16::try_from(cut.clamp(0, i64::from(END_OF_DAY_MIN))).unwrap_or(END_OF_DAY_MIN) });
+        busy.push(Window { start: 0, end: cut.clamp(0, i64::from(END_OF_DAY_MIN)) as u16 });
     }
 
     let longest = usable(&free, &busy).iter().map(|w| w.end - w.start).max().unwrap_or(0);

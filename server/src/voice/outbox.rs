@@ -35,7 +35,7 @@ impl Outbox for SqliteOutbox {
         )
         .map_err(io_err)?;
         tx.commit().map_err(io_err)?;
-        Ok(u64::try_from(seq).unwrap_or(0))
+        Ok(seq as u64)
     }
 
     fn unacked(&self, call_id: &str, after: u64) -> io::Result<Vec<(u64, CallBody)>> {
@@ -44,19 +44,19 @@ impl Outbox for SqliteOutbox {
             .prepare("SELECT seq, body FROM voice_frames WHERE call_id = ?1 AND seq > ?2 ORDER BY seq")
             .map_err(io_err)?;
         let rows = stmt
-            .query_map((call_id, i64::try_from(after).unwrap_or(i64::MAX)), |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+            .query_map((call_id, after as i64), |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
             .map_err(io_err)?;
         let mut out = Vec::new();
         for row in rows {
             let (seq, body) = row.map_err(io_err)?;
-            out.push((u64::try_from(seq).unwrap_or(0), serde_json::from_str(&body)?));
+            out.push((seq as u64, serde_json::from_str(&body)?));
         }
         Ok(out)
     }
 
     fn ack(&mut self, call_id: &str, upto: u64) -> io::Result<()> {
         crate::db_guard(&self.db)
-            .execute("DELETE FROM voice_frames WHERE call_id = ?1 AND seq <= ?2", (call_id, i64::try_from(upto).unwrap_or(i64::MAX)))
+            .execute("DELETE FROM voice_frames WHERE call_id = ?1 AND seq <= ?2", (call_id, upto as i64))
             .map_err(io_err)?;
         Ok(())
     }

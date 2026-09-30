@@ -78,7 +78,7 @@ pub fn create(conn: &Connection, user_id: i64, name: &str) -> Result<Created, Cr
         [user_id],
         |r| r.get(0),
     )?;
-    if usize::try_from(count).unwrap_or(usize::MAX) >= MAX_PER_USER {
+    if count as usize >= MAX_PER_USER {
         return Err(CreateError::TooMany);
     }
     let token = generate_secret();
