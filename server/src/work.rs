@@ -77,8 +77,7 @@ fn row_to_session(r: &rusqlite::Row) -> rusqlite::Result<Session> {
 fn since(at: &str, now: jiff::Timestamp) -> i64 {
     at.parse::<jiff::Timestamp>()
         .ok()
-        .and_then(|t| (now - t).total(jiff::Unit::Millisecond).ok())
-        .map_or(0, |ms| ms as i64)
+        .map_or(0, |t| now.as_millisecond() - t.as_millisecond())
         .max(0)
 }
 
@@ -194,13 +193,13 @@ pub fn start(
         }
     }
     let cfg = crate::config::UserConfig::load(config_dir, username).ok();
-    let pomodoro = cfg.as_ref().is_some_and(|c| c.pomodoro_enabled());
-    let work_min = cfg.as_ref().map_or(crate::config::DEFAULT_POMODORO_WORK_MIN, |c| {
+    let pomodoro = cfg.as_ref().is_some_and(super::config::UserConfig::pomodoro_enabled);
+    let work_min = i64::from(cfg.as_ref().map_or(crate::config::DEFAULT_POMODORO_WORK_MIN, |c| {
         c.pomodoro_work_min()
-    }) as i64;
-    let break_min = cfg.as_ref().map_or(crate::config::DEFAULT_POMODORO_BREAK_MIN, |c| {
+    }));
+    let break_min = i64::from(cfg.as_ref().map_or(crate::config::DEFAULT_POMODORO_BREAK_MIN, |c| {
         c.pomodoro_break_min()
-    }) as i64;
+    }));
     let tx = conn.unchecked_transaction()?;
     end(conn, config_dir, user_id, username, None, "stopped", now).map_err(StartError::Other)?;
     let conversation_id =
@@ -271,7 +270,7 @@ fn lay_opening_checks(
         &format!("Progress check on {title}."),
         now,
     )?;
-    let times_up = cfg.is_none_or(|c| c.session_end_notify());
+    let times_up = cfg.is_none_or(super::config::UserConfig::session_end_notify);
     if let Some(min) = planned_min.filter(|_| !times_up) {
         lay_session_check(
             conn,
@@ -406,7 +405,7 @@ pub fn rounds_today(
         rusqlite::params![user_id, from.to_string(), to.to_string()],
         |r| r.get(0),
     )?;
-    Ok(n as u32)
+    Ok(u32::try_from(n).unwrap_or(0))
 }
 
 /// A session abandoned within its first minute leaves nothing behind: its row,

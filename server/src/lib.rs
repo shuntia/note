@@ -54,14 +54,14 @@ use std::sync::{Arc, Mutex, MutexGuard};
 pub const MAX_CONCURRENT_TALKS: usize = 4;
 pub const EMPTY_REPLY_FALLBACK: &str = "(the assistant is not configured on this server)";
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum TalkBusy {
     UserBusy,
     Full,
 }
 
 /// Caps concurrent talk sessions globally (each pins a blocking thread for up
-/// to MAX_TURNS provider calls) and to one per user (interleaved tool calls
+/// to `MAX_TURNS` provider calls) and to one per user (interleaved tool calls
 /// from two sessions of the same user would race).
 pub struct TalkGate {
     semaphore: Arc<tokio::sync::Semaphore>,
@@ -104,12 +104,9 @@ impl TalkGate {
         if !self.active.lock().unwrap().insert(user_id) {
             return Err(TalkBusy::UserBusy);
         }
-        match self.semaphore.clone().try_acquire_owned() {
-            Ok(permit) => Ok(TalkPermit { gate: self.clone(), user_id, _permit: permit }),
-            Err(_) => {
-                self.active.lock().unwrap().remove(&user_id);
-                Err(TalkBusy::Full)
-            }
+        if let Ok(permit) = self.semaphore.clone().try_acquire_owned() { Ok(TalkPermit { gate: self.clone(), user_id, _permit: permit }) } else {
+            self.active.lock().unwrap().remove(&user_id);
+            Err(TalkBusy::Full)
         }
     }
 }
@@ -118,7 +115,7 @@ impl TalkGate {
 /// request: the panicking scope already reported itself, the connection behind
 /// the lock is intact, and refusing it would turn one bug into a dead server.
 pub fn db_guard(db: &Mutex<Connection>) -> MutexGuard<'_, Connection> {
-    db.lock().unwrap_or_else(|e| e.into_inner())
+    db.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[derive(Clone)]
@@ -217,16 +214,19 @@ impl AppState {
         db_guard(&self.db)
     }
 
+    #[must_use]
     pub fn with_admin_secrets(mut self, secrets: crate::admin::AdminSecrets) -> Self {
         self.admin_secrets = Arc::new(secrets);
         self
     }
 
+    #[must_use]
     pub fn with_passkeys(mut self, passkeys: crate::security::PasskeyService) -> Self {
         self.passkeys = Arc::new(passkeys);
         self
     }
 
+    #[must_use]
     pub fn with_limits(mut self, limits: &crate::config::LimitsConfig) -> Self {
         self.agent_sessions_per_day = limits.agent_sessions_per_day;
         self.share_max_days = limits.share_max_days;
@@ -236,26 +236,31 @@ impl AppState {
         self
     }
 
+    #[must_use]
     pub fn with_public_base_url(mut self, url: &str) -> Self {
         self.public_base_url = url.trim_end_matches('/').to_string();
         self
     }
 
+    #[must_use]
     pub fn with_idle_summary_min(mut self, minutes: u32) -> Self {
         self.idle_summary_min = minutes;
         self
     }
 
+    #[must_use]
     pub fn with_inbox_refresh(mut self, path: Option<PathBuf>) -> Self {
         self.inbox_refresh = path;
         self
     }
 
+    #[must_use]
     pub fn with_providers_info(mut self, info: crate::admin::ProvidersInfo) -> Self {
         self.providers_info = info;
         self
     }
 
+    #[must_use]
     pub fn with_providers(
         mut self,
         llm: Arc<dyn LLMProvider>,
@@ -266,11 +271,13 @@ impl AppState {
         self
     }
 
+    #[must_use]
     pub fn with_search(mut self, search: Arc<dyn SearchProvider>) -> Self {
         self.search = Some(search);
         self
     }
 
+    #[must_use]
     pub fn with_webpush(
         mut self,
         ch: crate::channels::webpush::WebPushChannel,
@@ -282,6 +289,7 @@ impl AppState {
     }
 
     /// First in the ladder: a linked chat is where the user already is.
+    #[must_use]
     pub fn with_telegram(mut self, ch: crate::channels::telegram::TelegramChannel) -> Self {
         let ch = Arc::new(ch);
         self.channels.insert(0, ch.clone());
@@ -291,6 +299,7 @@ impl AppState {
 
     /// Must come after every other channel: the ones present now are what a
     /// rung message falls through to.
+    #[must_use]
     pub fn with_voice(mut self, voice: Arc<crate::voice::Voice>) -> Self {
         voice.set_fallback(self.channels.clone());
         let ch = crate::channels::voice::VoiceChannel::new(voice.clone(), self.db.clone(), self.config_dir.clone());
@@ -299,6 +308,7 @@ impl AppState {
         self
     }
 
+    #[must_use]
     pub fn with_channels(mut self, channels: Vec<Arc<dyn crate::channels::Channel>>) -> Self {
         self.channels = channels;
         self

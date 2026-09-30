@@ -92,22 +92,22 @@ fn run_stages(
     };
     // The day's conversations become memory before the plan is built, so the
     // planning session already counts what they left behind.
-    let at = report.start();
+    let at = std::time::Instant::now();
     let harvested = crate::harvest::run_for_user(deps, user_id, username, &tz, date, now);
     report.stage("harvest", at, harvested.as_ref().err().inspect(|e| note("harvest_error", e)));
     // Monday's run looks back before it looks forward, so the planning session
     // already has the week's letter in memory.
-    let at = report.start();
+    let at = std::time::Instant::now();
     let reviewed = crate::review::run_for_user(deps, user_id, username, &tz, date, now);
     report.stage("review", at, reviewed.as_ref().err().inspect(|e| note("review_error", e)));
-    let at = report.start();
+    let at = std::time::Instant::now();
     let learned = {
         let conn = crate::db_guard(deps.db);
         crate::learn::run_for_user(&conn, user_id, now)
     };
     report.stage("learn", at, learned.as_ref().err().inspect(|e| note("learn_error", e)));
 
-    let at = report.start();
+    let at = std::time::Instant::now();
     let generated = (|| -> Result<()> {
         let conn = crate::db_guard(deps.db);
         let tmpl = crate::templates::Template::load(deps.config_dir, username, &ucfg.template)?;
@@ -116,7 +116,7 @@ fn run_stages(
     })();
     report.stage("plan", at, generated.as_ref().err());
     generated?;
-    let at = report.start();
+    let at = std::time::Instant::now();
     let allocated = {
         let conn = crate::db_guard(deps.db);
         if let Err(e) = crate::review::lay_event(&conn, user_id, date) {
@@ -125,14 +125,14 @@ fn run_stages(
         crate::allocate::run(&conn, user_id, &tz, date, now)
     };
     report.stage("allocate", at, allocated.as_ref().err().inspect(|e| note("allocate_error", e)));
-    let at = report.start();
+    let at = std::time::Instant::now();
     let closed = {
         let conn = crate::db_guard(deps.db);
         crate::triggers::lay_close_day(&conn, deps.config_dir, username, user_id, date, now)
     };
     report.stage("close_day", at, closed.as_ref().err().inspect(|e| note("close_day_error", e)));
 
-    let at = report.start();
+    let at = std::time::Instant::now();
     let outcome = crate::agent::run_session(
         deps,
         user_id,
@@ -156,10 +156,7 @@ fn run_stages(
                     crate::log::ERROR_LOG_WINDOW_MINS,
                 );
             }
-            match out.reply.trim().is_empty() {
-                true => FALLBACK_DEBRIEF.to_string(),
-                false => out.reply,
-            }
+            if out.reply.trim().is_empty() { FALLBACK_DEBRIEF.to_string() } else { out.reply }
         }
         Err(e) => {
             let conn = crate::db_guard(deps.db);
@@ -188,10 +185,6 @@ struct Report {
 impl Report {
     fn new(date: jiff::civil::Date) -> Self {
         Self { date, stages: Vec::new(), debrief: None }
-    }
-
-    fn start(&self) -> std::time::Instant {
-        std::time::Instant::now()
     }
 
     fn stage(&mut self, name: &str, at: std::time::Instant, failure: Option<&anyhow::Error>) {

@@ -238,7 +238,7 @@ pub fn split(text: &str) -> Vec<String> {
     let mut parts = Vec::new();
     let mut rest = text;
     while rest.chars().count() > MAX_CHARS {
-        let limit = rest.char_indices().nth(MAX_CHARS).map(|(i, _)| i).unwrap_or(rest.len());
+        let limit = rest.char_indices().nth(MAX_CHARS).map_or(rest.len(), |(i, _)| i);
         let cut = rest[..limit].rfind('\n').map_or(limit, |i| i + 1);
         parts.push(rest[..cut].trim_end().to_string());
         rest = &rest[cut..];

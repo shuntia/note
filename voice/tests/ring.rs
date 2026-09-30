@@ -6,7 +6,7 @@ use note_voice_proto::testkit::{eventually, fast};
 use note_voice_proto::{CallBody, Outcome, Role};
 
 struct Rig {
-    _dir: tempfile::TempDir,
+    dir: tempfile::TempDir,
     hs: SharedHs,
     note: FakeNote,
 }
@@ -35,7 +35,7 @@ async fn rig_with(seed: impl FnOnce(&std::path::Path, &SharedHs, &FakeNote)) -> 
     tokio::spawn(async move { note_voice::service::run_with(cfg, fast(Role::Voice)).await.unwrap() });
     let p = note.peer.clone();
     eventually("voice connects", || p.is_up()).await;
-    Rig { _dir: dir, hs, note }
+    Rig { dir, hs, note }
 }
 
 fn start(ring_secs: u32, ring_by_ms: i64) -> CallBody {
@@ -50,7 +50,7 @@ fn start(ring_secs: u32, ring_by_ms: i64) -> CallBody {
 }
 
 fn soon() -> i64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64 + 10_000
+    i64::try_from(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()).unwrap() + 10_000
 }
 
 fn outcome_of(r: &Rig, call: &str) -> Option<Outcome> {
@@ -86,7 +86,7 @@ async fn an_answer_ends_the_ring_as_answered() {
     let r = rig().await;
     r.note.peer.send_call("c1", start(30, soon())).unwrap();
     wait_for_ring(&r).await;
-    r.hs.lock().unwrap().syncs.push_back(joined_room("!r:t", vec![member_event("@aki:t", true)]));
+    r.hs.lock().unwrap().syncs.push_back(joined_room("!r:t", &[member_event("@aki:t", true)]));
     let rec = r.note.rec.clone();
     eventually("an outcome and Ended", || rec.bodies("c1").contains(&CallBody::Ended)).await;
     assert_eq!(outcome_of(&r, "c1"), Some(Outcome::Answered));
@@ -99,7 +99,7 @@ async fn decline_ends_the_ring() {
     let r = rig().await;
     r.note.peer.send_call("c2", start(30, soon())).unwrap();
     let notification = wait_for_ring(&r).await;
-    r.hs.lock().unwrap().syncs.push_back(joined_room("!r:t", vec![decline_event("@aki:t", &notification)]));
+    r.hs.lock().unwrap().syncs.push_back(joined_room("!r:t", &[decline_event("@aki:t", &notification)]));
     let rec = r.note.rec.clone();
     eventually("declined", || rec.bodies("c2").contains(&CallBody::Ended)).await;
     assert_eq!(outcome_of(&r, "c2"), Some(Outcome::Declined));
@@ -150,7 +150,7 @@ async fn open_dm_is_idempotent_and_the_join_is_reported() {
         assert_eq!(hs.created[0]["preset"], "trusted_private_chat");
         assert_eq!(hs.created[0]["is_direct"], true);
     }
-    r.hs.lock().unwrap().syncs.push_back(joined_room(&room_id, vec![join_event("@aki:t")]));
+    r.hs.lock().unwrap().syncs.push_back(joined_room(&room_id, &[join_event("@aki:t")]));
     let rec = r.note.rec.clone();
     eventually("DmJoined reaches Note", || {
         rec.requests.lock().unwrap().iter().any(|q| matches!(q, note_voice_proto::Request::DmJoined { link_id: 7, .. }))
@@ -158,12 +158,12 @@ async fn open_dm_is_idempotent_and_the_join_is_reported() {
     .await;
 }
 
-fn seed_state(state_dir: &std::path::Path, state: serde_json::Value) {
+fn seed_state(state_dir: &std::path::Path, state: &serde_json::Value) {
     std::fs::write(state_dir.join("state.json"), state.to_string()).unwrap();
 }
 
 fn saved_state(r: &Rig) -> serde_json::Value {
-    serde_json::from_slice(&std::fs::read(r._dir.path().join("state/state.json")).unwrap()).unwrap()
+    serde_json::from_slice(&std::fs::read(r.dir.path().join("state/state.json")).unwrap()).unwrap()
 }
 
 fn dm_joined(r: &Rig, link: i64) -> usize {
@@ -182,7 +182,7 @@ async fn a_join_missed_before_a_restart_is_reported_at_startup() {
     let r = rig_with(|dir, hs, _| {
         seed_state(
             dir,
-            serde_json::json!({
+            &serde_json::json!({
                 "links": { "3": { "mxid": "@aki:t", "room_id": "!dm:t", "reported": false } },
                 "calls": {},
                 "since": "s9",
@@ -205,7 +205,7 @@ async fn open_dm_for_a_known_link_reports_a_join_it_missed() {
     let r = rig_with(|dir, _, _| {
         seed_state(
             dir,
-            serde_json::json!({
+            &serde_json::json!({
                 "links": { "4": { "mxid": "@aki:t", "room_id": "!dm:t", "reported": false } },
                 "calls": {},
                 "since": "s9",
@@ -227,15 +227,15 @@ async fn one_join_report_runs_per_link_at_a_time() {
         note_voice_proto::Request::DmJoined { .. } => {
             Err(note_voice_proto::Refusal::new(note_voice_proto::RefusalCode::Failed, "not yet"))
         }
-        _ => Ok(note_voice_proto::Reply::Done),
+        note_voice_proto::Request::OpenDm { .. } => Ok(note_voice_proto::Reply::Done),
     });
     let Ok(note_voice_proto::Reply::Dm { room_id }) =
         r.note.peer.request(note_voice_proto::Request::OpenDm { link_id: 5, mxid: "@aki:t".into() }).await
     else {
         panic!()
     };
-    r.hs.lock().unwrap().syncs.push_back(joined_room(&room_id, vec![join_event("@aki:t")]));
-    r.hs.lock().unwrap().syncs.push_back(joined_room(&room_id, vec![join_event("@aki:t")]));
+    r.hs.lock().unwrap().syncs.push_back(joined_room(&room_id, &[join_event("@aki:t")]));
+    r.hs.lock().unwrap().syncs.push_back(joined_room(&room_id, &[join_event("@aki:t")]));
     eventually("a DmJoined reaches Note", || dm_joined(&r, 5) >= 1).await;
     let hs = r.hs.clone();
     eventually("both syncs are consumed", || hs.lock().unwrap().syncs.is_empty()).await;
@@ -249,7 +249,7 @@ async fn a_replayed_start_after_recovery_neither_rings_nor_reopens_the_call() {
         note.hold.set(true);
         seed_state(
             dir,
-            serde_json::json!({
+            &serde_json::json!({
                 "links": {},
                 "calls": { "c9": { "room_id": "!r:t", "done": false, "ended_seq": null } },
                 "since": "s9",
@@ -278,7 +278,7 @@ async fn finished_calls_with_nothing_pending_are_dropped_at_startup() {
     let r = rig_with(|dir, _, _| {
         seed_state(
             dir,
-            serde_json::json!({
+            &serde_json::json!({
                 "links": {},
                 "calls": { "c8": { "room_id": "!r:t", "done": true, "ended_seq": 2 } },
                 "since": "s9",
@@ -362,7 +362,7 @@ async fn relinking_the_same_account_reports_the_join_again() {
     let r = rig_with(|dir, hs, _| {
         seed_state(
             dir,
-            serde_json::json!({
+            &serde_json::json!({
                 "links": { "4": { "mxid": "@aki:t", "room_id": "!dm:t", "reported": true } },
                 "calls": {},
                 "since": "s9",
@@ -380,7 +380,7 @@ async fn relinking_the_same_account_reports_the_join_again() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_rejected_since_starts_the_sync_over() {
     let r = rig_with(|dir, hs, _| {
-        seed_state(dir, serde_json::json!({ "links": {}, "calls": {}, "since": "s9" }));
+        seed_state(dir, &serde_json::json!({ "links": {}, "calls": {}, "since": "s9" }));
         hs.lock().unwrap().reject_since = Some("s9".into());
     })
     .await;

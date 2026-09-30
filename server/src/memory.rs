@@ -2,6 +2,7 @@ use anyhow::{bail, Context, Result};
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
+use std::fmt::Write as _;
 
 pub const CATEGORIES: [&str; 3] = ["semantic", "episodic", "procedural"];
 
@@ -56,10 +57,10 @@ fn render(f: &MemoryFile) -> String {
         f.id, f.category, f.summary, f.created
     );
     if let Some(s) = &f.supersedes {
-        fm.push_str(&format!("supersedes: {s}\n"));
+        let _ = writeln!(fm, "supersedes: {s}");
     }
     if let Some(u) = &f.until {
-        fm.push_str(&format!("until: {u}\n"));
+        let _ = writeln!(fm, "until: {u}");
     }
     format!("{fm}---\n\n{}\n", f.body)
 }
@@ -117,7 +118,7 @@ fn index_insert(conn: &Connection, user: &str, f: &MemoryFile, path: &Path) -> r
     conn.execute(
         "INSERT OR REPLACE INTO memory_index (user, id, category, summary, archived, path, until)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        (user, &f.id, &f.category, &f.summary, f.archived as i64, path.to_string_lossy(), &f.until),
+        (user, &f.id, &f.category, &f.summary, i64::from(f.archived), path.to_string_lossy(), &f.until),
     )?;
     conn.execute("DELETE FROM memory_fts WHERE user = ?1 AND id = ?2", (user, &f.id))?;
     if !f.archived {
@@ -244,7 +245,17 @@ pub fn add(
     body: &str,
     vector: Option<&[f32]>,
 ) -> Result<String> {
-    add_until(conn, data_dir, user, category, summary, body, None, vector)
+    add_until(conn, data_dir, user, &Fact { category, summary, body, until: None }, vector)
+}
+
+/// What a memory says, before it has an id: `until` is an expiry date
+/// (`YYYY-MM-DD`) past which the nightly sweep archives it.
+#[derive(Debug, Clone, Copy)]
+pub struct Fact<'a> {
+    pub category: &'a str,
+    pub summary: &'a str,
+    pub body: &'a str,
+    pub until: Option<&'a str>,
 }
 
 /// `add` with an expiry date (`YYYY-MM-DD`) written into the file, so a fact
@@ -253,12 +264,10 @@ pub fn add_until(
     conn: &Connection,
     data_dir: &Path,
     user: &str,
-    category: &str,
-    summary: &str,
-    body: &str,
-    until: Option<&str>,
+    fact: &Fact,
     vector: Option<&[f32]>,
 ) -> Result<String> {
+    let Fact { category, summary, body, until } = *fact;
     if !CATEGORIES.contains(&category) {
         bail!("invalid category: {category}");
     }
@@ -491,7 +500,7 @@ pub fn query(
     limit: i64,
     query_vec: Option<&[f32]>,
 ) -> Result<Vec<QueryHit>> {
-    let take = limit as usize;
+    let take = usize::try_from(limit).unwrap_or(0);
     let lexical = lexical_query(conn, user, q, limit.max(32))?;
     let vector = match query_vec {
         Some(qv) => vector_query(conn, user, qv, 32)?,
@@ -502,10 +511,10 @@ pub fn query(
     }
     let mut scores: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
     for (rank, hit) in lexical.iter().enumerate() {
-        *scores.entry(hit.id.clone()).or_default() += 1.0 / (60.0 + rank as f64);
+        *scores.entry(hit.id.clone()).or_default() += 1.0 / (60.0 + f64::from(u32::try_from(rank).unwrap_or(u32::MAX)));
     }
     for (rank, id) in vector.iter().enumerate() {
-        *scores.entry(id.clone()).or_default() += 1.0 / (60.0 + rank as f64);
+        *scores.entry(id.clone()).or_default() += 1.0 / (60.0 + f64::from(u32::try_from(rank).unwrap_or(u32::MAX)));
     }
     let mut ids: Vec<(String, f64)> = scores.into_iter().collect();
     ids.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
@@ -553,7 +562,7 @@ pub fn list(
          WHERE user = ?1 AND archived = 0 AND (?2 IS NULL OR category = ?2)
          ORDER BY rowid DESC LIMIT ?3",
     )?;
-    let rows = stmt.query_map((user, category, limit as i64), |r| {
+    let rows = stmt.query_map((user, category, i64::try_from(limit).unwrap_or(i64::MAX)), |r| {
         Ok(QueryHit { id: r.get(0)?, category: r.get(1)?, summary: r.get(2)? })
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -814,8 +823,7 @@ mod tests {
     #[test]
     fn an_until_date_survives_a_reindex() {
         let (conn, tmp) = env();
-        let id = add_until(&conn, tmp.path(), "aki", "semantic", "quiz", "chapter 4 quiz",
-            Some("2026-09-25"), None).unwrap();
+        let id = add_until(&conn, tmp.path(), "aki", &Fact { category: "semantic", summary: "quiz", body: "chapter 4 quiz", until: Some("2026-09-25") }, None).unwrap();
         let plain = add(&conn, tmp.path(), "aki", "semantic", "rule", "bring a pencil", None).unwrap();
         let until = |id: &str| -> Option<String> {
             conn.query_row("SELECT until FROM memory_index WHERE user='aki' AND id=?1", [id],
@@ -852,7 +860,7 @@ mod tests {
     fn archive_expired_keeps_yesterday_and_archives_the_day_before() {
         let (conn, tmp) = env();
         let today: jiff::civil::Date = "2026-09-16".parse().unwrap();
-        let live = |d: &str| add_until(&conn, tmp.path(), "aki", "semantic", d, d, Some(d), None).unwrap();
+        let live = |d: &str| add_until(&conn, tmp.path(), "aki", &Fact { category: "semantic", summary: d, body: d, until: Some(d) }, None).unwrap();
         let today_id = live("2026-09-16");
         let yesterday = live("2026-09-15");
         let two_days = live("2026-09-14");
@@ -881,8 +889,8 @@ mod tests {
     fn archive_expired_leaves_other_users_alone() {
         let (conn, tmp) = env();
         let today: jiff::civil::Date = "2026-09-16".parse().unwrap();
-        let bo = add_until(&conn, tmp.path(), "bo", "semantic", "s", "b", Some("2026-01-01"), None).unwrap();
-        add_until(&conn, tmp.path(), "aki", "semantic", "s", "b", Some("2026-01-01"), None).unwrap();
+        let bo = add_until(&conn, tmp.path(), "bo", &Fact { category: "semantic", summary: "s", body: "b", until: Some("2026-01-01") }, None).unwrap();
+        add_until(&conn, tmp.path(), "aki", &Fact { category: "semantic", summary: "s", body: "b", until: Some("2026-01-01") }, None).unwrap();
         assert_eq!(archive_expired(&conn, tmp.path(), "aki", today).unwrap(), 1);
         assert!(!read(tmp.path(), "bo", &bo).unwrap().unwrap().archived);
     }

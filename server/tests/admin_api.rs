@@ -20,7 +20,7 @@ fn req(method: Method, path: &str, cookies: &str, body: Option<&str>) -> Request
     if body.is_some() {
         b = b.header(header::CONTENT_TYPE, "application/json");
     }
-    b.body(body.map(|s| Body::from(s.to_string())).unwrap_or_else(Body::empty))
+    b.body(body.map_or_else(Body::empty, |s| Body::from(s.to_string())))
         .unwrap()
 }
 

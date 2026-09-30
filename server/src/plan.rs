@@ -531,29 +531,26 @@ pub fn move_to_tomorrow(
             |r| r.get(0),
         )
         .optional()?;
-    let new_id = match existing {
-        Some(id) => id,
-        None => {
-            conn.execute(
-                "INSERT INTO events (plan_id, kind, wall_time, orig_wall_time, end_wall_time,
-                                     flexibility, slide_window_min, channel, alert, span_min,
-                                     message, origin)
-                 SELECT ?1,
-                        kind,
-                        CASE WHEN end_wall_time IS NULL THEN orig_wall_time ELSE wall_time END,
-                        orig_wall_time, end_wall_time,
-                        flexibility, slide_window_min, channel, alert, span_min, message, origin
-                 FROM events WHERE id = ?2",
-                (plan_id, event_id),
-            )?;
-            let id = conn.last_insert_rowid();
-            conn.execute(
-                "INSERT INTO event_tasks (event_id, task_id)
-                 SELECT ?1, task_id FROM event_tasks WHERE event_id = ?2",
-                (id, event_id),
-            )?;
-            id
-        }
+    let new_id = if let Some(id) = existing { id } else {
+        conn.execute(
+            "INSERT INTO events (plan_id, kind, wall_time, orig_wall_time, end_wall_time,
+                                 flexibility, slide_window_min, channel, alert, span_min,
+                                 message, origin)
+             SELECT ?1,
+                    kind,
+                    CASE WHEN end_wall_time IS NULL THEN orig_wall_time ELSE wall_time END,
+                    orig_wall_time, end_wall_time,
+                    flexibility, slide_window_min, channel, alert, span_min, message, origin
+             FROM events WHERE id = ?2",
+            (plan_id, event_id),
+        )?;
+        let id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO event_tasks (event_id, task_id)
+             SELECT ?1, task_id FROM event_tasks WHERE event_id = ?2",
+            (id, event_id),
+        )?;
+        id
     };
     conn.execute(
         "UPDATE events SET status = 'dropped', moved_to_event_id = ?1, decided_at = ?3
@@ -911,7 +908,7 @@ mod tests {
             &conn,
             uid,
             parent.id,
-            crate::tasks::TaskPatch { state: Some("done".into()), ..Default::default() },
+            &crate::tasks::TaskPatch { state: Some("done".into()), ..Default::default() },
         )
         .unwrap()
         .unwrap();
@@ -1047,7 +1044,7 @@ mod tests {
         assert!(plan_id > 0);
     }
 
-    /// Tool dispatch calls `generate` inside its own transaction, where SQLite
+    /// Tool dispatch calls `generate` inside its own transaction, where `SQLite`
     /// forbids a nested one: the plan must still be written, and must still
     /// vanish when the caller aborts.
     #[test]

@@ -5,6 +5,7 @@ use anyhow::Result;
 use rusqlite::Connection;
 use std::path::Path;
 use std::sync::Mutex;
+use std::fmt::Write as _;
 
 pub const MAX_TURNS: usize = 16;
 /// An import session is one brief, an inbox session one decision, and a
@@ -179,20 +180,19 @@ fn run_traced(
     if kind == SessionKind::Share {
         let share = deps.share.as_ref().ok_or_else(|| anyhow::anyhow!("a share session needs its link"))?;
         let conn = crate::db_guard(deps.db);
-        let display = crate::config::UserConfig::load(deps.config_dir, username)
-            .map(|c| c.display_name)
-            .unwrap_or_else(|_| username.to_string());
+        let display = crate::config::UserConfig::load(deps.config_dir, username).map_or_else(|_| username.to_string(), |c| c.display_name);
         system = system.replace("{owner}", &display);
         if !share.brief.trim().is_empty() {
-            system.push_str(&format!("\n\n# From {display}\n\n{}", share.brief.trim()));
+            let _ = write!(system, "\n\n# From {display}\n\n{}", share.brief.trim());
         }
         let rendered = crate::shares::render(&conn, deps.config_dir, user_id, username, &share.scope, now)?;
         system.push_str("\n\n");
         system.push_str(&rendered.text);
         if share.scope.notes {
-            system.push_str(&format!(
+            let _ = write!(
+                system,
                 "\n\nA message the visitor wants passed on to {display} is filed with share_note, which ends the turn; the visitor is told it was passed on."
-            ));
+            );
         }
     } else if !single_call(kind) {
         let conn = crate::db_guard(deps.db);
@@ -239,11 +239,11 @@ fn run_traced(
         let round = std::time::Instant::now();
         let (resp, thinking) = match deps.llm.chat_with_reasoning(&req) {
             Ok(v) => {
-                trace.round(round.elapsed().as_millis() as u64);
+                trace.round(millis(round.elapsed()));
                 v
             }
             Err(e) => {
-                trace.round_failed(round.elapsed().as_millis() as u64, &format!("{e:#}"));
+                trace.round_failed(millis(round.elapsed()), &format!("{e:#}"));
                 on_event(AgentEvent::Error { message: &e.to_string() });
                 return Err(e);
             }
@@ -261,7 +261,7 @@ fn run_traced(
             on_event(AgentEvent::Reply { text: &last_text });
             trace.ok(&last_text);
             finish(deps, user_id, kind, turns, tool_calls, log_kind(kind, "agent_session"))?;
-            let thought_ms = started.elapsed().as_millis() as u64;
+            let thought_ms = millis(started.elapsed());
             return Ok(SessionOutcome {
                 reply: last_text,
                 turns,
@@ -294,7 +294,7 @@ fn run_traced(
                 on_event(AgentEvent::Reply { text: &content });
                 trace.ok(&content);
                 finish(deps, user_id, kind, turns, tool_calls, log_kind(kind, "agent_session"))?;
-                let thought_ms = started.elapsed().as_millis() as u64;
+                let thought_ms = millis(started.elapsed());
                 return Ok(SessionOutcome {
                     reply: content,
                     turns,
@@ -315,7 +315,7 @@ fn run_traced(
     on_event(AgentEvent::Reply { text: &last_text });
     trace.max_turns(&last_text);
     finish(deps, user_id, kind, turns, tool_calls, log_kind(kind, "agent_max_turns"))?;
-    let thought_ms = started.elapsed().as_millis() as u64;
+    let thought_ms = millis(started.elapsed());
     Ok(SessionOutcome {
         reply: last_text,
         turns,
@@ -391,7 +391,7 @@ impl CallEnv<'_> {
         on_event(AgentEvent::ToolCall { index, name, args });
         let started = std::time::Instant::now();
         let (content, is_error) = self.run(name, args);
-        trace.call(name, args, &content, is_error, started.elapsed().as_millis() as u64);
+        trace.call(name, args, &content, is_error, millis(started.elapsed()));
         on_event(AgentEvent::ToolResult { index, name, result: &content, is_error });
         steps.push(SessionStep {
             name: name.to_string(),
@@ -484,10 +484,10 @@ fn finish(
 ) -> Result<()> {
     let mut detail = format!("kind={kind:?} turns={turns} tools={calls}");
     if let Some(id) = deps.token_id {
-        detail.push_str(&format!(" token={id}"));
+        let _ = write!(detail, " token={id}");
     }
     if let Some(share) = &deps.share {
-        detail.push_str(&format!(" share={}", share.id));
+        let _ = write!(detail, " share={}", share.id);
     }
     let conn = crate::db_guard(deps.db);
     crate::log::record(&conn, Some(user_id), log_kind, &detail)
@@ -501,6 +501,10 @@ fn log_kind(kind: SessionKind, base: &'static str) -> &'static str {
         (SessionKind::Share, _) => "share_max_turns",
         _ => base,
     }
+}
+
+fn millis(d: std::time::Duration) -> u64 {
+    u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]
@@ -640,7 +644,7 @@ mod tests {
         let llm = MockLLM::scripted(vec![
             batch_call(
                 "b1",
-                serde_json::json!([
+                &serde_json::json!([
                     { "tool": "task_create", "args": { "title": "buy milk" } },
                     { "tool": "task_create", "args": { "title": "call the dentist" } },
                 ]),
@@ -681,13 +685,13 @@ mod tests {
 
     #[test]
     fn a_failing_provider_reports_an_error_event() {
-        let (db, tmp) = env();
         struct Broken;
         impl crate::providers::LLMProvider for Broken {
             fn chat(&self, _req: &ChatRequest) -> Result<ChatResponse> {
                 anyhow::bail!("provider is down")
             }
         }
+        let (db, tmp) = env();
         let seen = std::cell::RefCell::new(Vec::new());
         let deps = SessionDeps {
             db: &db,
@@ -1007,7 +1011,7 @@ mod tests {
         assert_eq!(log_rows(&db, "agent_max_turns"), 1);
     }
 
-    fn batch_call(id: &str, calls: serde_json::Value) -> ChatResponse {
+    fn batch_call(id: &str, calls: &serde_json::Value) -> ChatResponse {
         ChatResponse {
             text: String::new(),
             tool_calls: vec![ToolCall {
@@ -1036,7 +1040,7 @@ mod tests {
         let llm = MockLLM::scripted(vec![
             batch_call(
                 "b1",
-                serde_json::json!([
+                &serde_json::json!([
                     { "tool": "task_create", "args": { "title": "buy milk" } },
                     { "tool": "task_update", "args": { "task_id": 999, "state": "done" } },
                     { "tool": "task_create", "args": { "title": "call the dentist" } },
@@ -1099,7 +1103,7 @@ mod tests {
         let llm = MockLLM::scripted(vec![
             batch_call(
                 "b1",
-                serde_json::json!([
+                &serde_json::json!([
                     { "tool": "batch", "args": { "calls": [] } },
                     { "tool": "say", "args": { "text": "hello" } },
                     { "tool": "memory_query", "args": { "query": "school" } },
@@ -1150,7 +1154,7 @@ mod tests {
             serde_json::json!([]),
         ] {
             let llm = MockLLM::scripted(vec![
-                batch_call("b1", calls),
+                batch_call("b1", &calls),
                 ChatResponse { text: "fine".into(), tool_calls: vec![] },
             ]);
             let out =
@@ -1386,7 +1390,7 @@ mod tests {
         );
     }
 
-    /// The one trace the session left, as (outcome, turns, tool_calls, error, detail).
+    /// The one trace the session left, as (outcome, turns, `tool_calls`, error, detail).
     fn trace_row(
         db: &Mutex<rusqlite::Connection>,
     ) -> (String, i64, i64, Option<String>, serde_json::Value) {
@@ -1434,12 +1438,12 @@ mod tests {
 
         let (outcome, turns, tool_calls, error, detail) = trace_row(&db);
         assert_eq!(outcome, "ok");
-        assert_eq!(turns, out.turns as i64);
-        assert_eq!(tool_calls, out.tool_calls as i64);
+        assert_eq!(turns, i64::try_from(out.turns).unwrap());
+        assert_eq!(tool_calls, i64::try_from(out.tool_calls).unwrap());
         assert!(error.is_none());
         assert_eq!(detail["opening"], "add milk");
         assert_eq!(detail["reply"], "added buy milk!");
-        assert_eq!(rounds(&detail).len(), turns as usize, "every answered round is a turn");
+        assert_eq!(rounds(&detail).len(), usize::try_from(turns).unwrap(), "every answered round is a turn");
         let calls: Vec<&serde_json::Value> =
             rounds(&detail).iter().flat_map(|r| r["calls"].as_array().unwrap()).collect();
         assert_eq!(calls.len(), out.steps.len());
@@ -1470,8 +1474,8 @@ mod tests {
 
         let (outcome, turns, tool_calls, _, detail) = trace_row(&db);
         assert_eq!(outcome, "max_turns");
-        assert_eq!(turns, MAX_TURNS as i64);
-        assert_eq!(tool_calls, MAX_TURNS as i64);
+        assert_eq!(turns, i64::try_from(MAX_TURNS).unwrap());
+        assert_eq!(tool_calls, i64::try_from(MAX_TURNS).unwrap());
         assert_eq!(rounds(&detail).len(), MAX_TURNS);
         assert_eq!(detail["reply"], "looping");
     }
@@ -1545,7 +1549,7 @@ mod tests {
         let llm = MockLLM::scripted(vec![
             batch_call(
                 "b1",
-                serde_json::json!([
+                &serde_json::json!([
                     { "tool": "task_create", "args": { "title": "buy milk" } },
                     { "tool": "task_update", "args": { "task_id": 999, "state": "done" } },
                 ]),

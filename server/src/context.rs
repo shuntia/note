@@ -2,6 +2,7 @@ use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
+use std::fmt::Write as _;
 
 /// The whole standing document is prepended to every system prompt, so its
 /// size is a per-call cost on every session, not just a disk figure.
@@ -292,13 +293,14 @@ fn now_section(
     quiet: Option<&crate::calendar::QuietWindow>,
 ) -> String {
     let mut s = String::from("# Now\n\n");
-    s.push_str(&format!(
-        "{} {tz_label} {} | {} | {}\n",
+    let _ = writeln!(
+        s,
+        "{} {tz_label} {} | {} | {}",
         local.strftime("%A %Y-%m-%d %H:%M"),
         local.strftime("UTC%:z"),
         now.strftime("%Y-%m-%dT%H:%MZ"),
         part_of_day(local.hour()),
-    ));
+    );
     match events.first() {
         None => s.push_str("Day's plan: none generated for today\n"),
         Some(first) => {
@@ -307,18 +309,19 @@ fn now_section(
                 .iter()
                 .filter(|e| crate::templates::wall_minutes(&e.wall_time) > now_min)
                 .count();
-            s.push_str(&format!(
-                "Day's plan: {}-{last}; now {}, {left} event{} left\n",
+            let _ = writeln!(
+                s,
+                "Day's plan: {}-{last}; now {}, {left} event{} left",
                 first.wall_time,
                 local.strftime("%H:%M"),
                 if left == 1 { "" } else { "s" },
-            ));
+            );
         }
     }
     let until = (crate::templates::wall_minutes(nightly_time) - now_min).rem_euclid(24 * 60);
-    s.push_str(&format!("Nightly run {nightly_time}, in {}\n", in_words(until)));
+    let _ = writeln!(s, "Nightly run {nightly_time}, in {}", in_words(until));
     if let Some(q) = quiet {
-        s.push_str(&format!("Quiet until {} ({})\n", q.end, q.title));
+        let _ = writeln!(s, "Quiet until {} ({})", q.end, q.title);
     }
     s.push('\n');
     s
@@ -335,10 +338,10 @@ fn calendar_lines(calendar: &[crate::calendar::Occurrence]) -> String {
     let mut s = String::from("Calendar:\n");
     for o in calendar.iter().take(MAX_CALENDAR_LINES) {
         let marks = if o.quiet { format!("{}, quiet", o.kind) } else { o.kind.clone() };
-        s.push_str(&format!("- {}-{} {} [{marks}]\n", o.start, o.end, o.title));
+        let _ = writeln!(s, "- {}-{} {} [{marks}]", o.start, o.end, o.title);
     }
     if let Some(rest) = calendar.len().checked_sub(MAX_CALENDAR_LINES).filter(|n| *n > 0) {
-        s.push_str(&format!("- (+{rest} more)\n"));
+        let _ = writeln!(s, "- (+{rest} more)");
     }
     s.push('\n');
     s
@@ -370,17 +373,19 @@ fn plan_section(
             String::new()
         };
         if e.entry == "block" {
-            s.push_str(&format!(
-                "- {}-{} {} [{}] block (event_id {}){mark}\n",
+            let _ = writeln!(
+                s,
+                "- {}-{} {} [{}] block (event_id {}){mark}",
                 e.wall_time,
                 end_of(e),
                 e.kind,
                 e.status,
                 e.id,
-            ));
+            );
         } else {
-            s.push_str(&format!(
-                "- {}-{} {} [{}] routine via {}{} (event_id {}){mark}\n",
+            let _ = writeln!(
+                s,
+                "- {}-{} {} [{}] routine via {}{} (event_id {}){mark}",
                 e.wall_time,
                 end_of(e),
                 e.kind,
@@ -388,20 +393,22 @@ fn plan_section(
                 e.channel,
                 if e.alert { "" } else { " (silent)" },
                 e.id,
-            ));
+            );
         }
     }
     if !events.is_empty() {
         let n = |status: &str| events.iter().filter(|e| e.status == status).count();
-        s.push_str(&format!(
-            "{} pending, {} fired, {} done, {} dropped, {} snoozed\n",
+        let _ = writeln!(
+            s,
+            "{} pending, {} fired, {} done, {} dropped, {} snoozed",
             n("pending"), n("fired"), n("done"), n("dropped"), n("snoozed"),
-        ));
+        );
     }
-    s.push_str(&format!(
+    let _ = write!(
+        s,
         "Tomorrow's plan ({tomorrow}): {}\n\n",
         if tomorrow_planned { "generated" } else { "not generated yet" },
-    ));
+    );
     s
 }
 
@@ -484,59 +491,63 @@ fn tasks_section(
     } else {
         s.push_str("Now:\n");
         for n in now_tasks {
-            s.push_str(&format!(
-                "- {} [{}]{}{}{} (task_id {})\n",
+            let _ = writeln!(
+                s,
+                "- {} [{}]{}{}{} (task_id {})",
                 n.task.title,
                 n.task.state,
                 duration(n.task.duration_min),
                 progress(&n.task),
                 due(&n.task, tz, today, now),
                 n.task.id,
-            ));
+            );
             for c in &n.children {
                 let mark = match c.state.as_str() {
                     "done" => 'x',
                     "in_progress" => '~',
                     _ => ' ',
                 };
-                s.push_str(&format!(
-                    "  - [{mark}] {}{}{} (task_id {})\n",
+                let _ = writeln!(
+                    s,
+                    "  - [{mark}] {}{}{} (task_id {})",
                     c.title,
                     duration(c.duration_min),
                     progress(c),
                     c.id,
-                ));
+                );
             }
         }
     }
     if later.is_empty() {
         s.push_str("Later: (none)\n");
     } else if cap == 0 {
-        s.push_str(&format!("Later: {} open (titles trimmed for size)\n", later.len()));
+        let _ = writeln!(s, "Later: {} open (titles trimmed for size)", later.len());
     } else {
-        s.push_str(&format!("Later ({} open):\n", later.len()));
+        let _ = writeln!(s, "Later ({} open):", later.len());
         for t in later.iter().take(cap) {
-            s.push_str(&format!(
-                "- {}{}{}{} (task_id {})\n",
+            let _ = writeln!(
+                s,
+                "- {}{}{}{} (task_id {})",
                 t.task.title,
                 duration(t.task.duration_min),
                 progress(&t.task),
                 due(&t.task, tz, today, now),
                 t.task.id,
-            ));
+            );
         }
         if let Some(rest) = later.len().checked_sub(cap).filter(|r| *r > 0) {
-            s.push_str(&format!("- ... and {rest} more\n"));
+            let _ = writeln!(s, "- ... and {rest} more");
         }
     }
     let dated: Vec<_> = now_tasks.iter().chain(later.iter()).copied().collect();
     let (soon, overdue) = due_soon(&dated, now);
     if soon > 0 || overdue > 0 {
-        s.push_str(&format!(
-            "Due soon: {soon} in the next {DUE_SOON_DAYS} days, {overdue} overdue\n"
-        ));
+        let _ = writeln!(
+            s,
+            "Due soon: {soon} in the next {DUE_SOON_DAYS} days, {overdue} overdue"
+        );
     }
-    s.push_str(&format!("Done today: {done_today}\n\n"));
+    let _ = write!(s, "Done today: {done_today}\n\n");
     s
 }
 
@@ -590,14 +601,15 @@ fn debrief_section(row: Option<&(String, String)>, today: jiff::civil::Date, cap
     match row {
         None => s.push_str("(no debrief yet)\n\n"),
         Some((date, content)) if cap == 0 => {
-            s.push_str(&format!("{date} ({}): (trimmed for size)\n\n", days_ago(date, today)));
+            let _ = write!(s, "{date} ({}): (trimmed for size)\n\n", days_ago(date, today));
         }
         Some((date, content)) => {
-            s.push_str(&format!(
+            let _ = write!(
+                s,
                 "{date} ({}): {}\n\n",
                 days_ago(date, today),
                 excerpt(content, cap),
-            ));
+            );
         }
     }
     s
@@ -661,10 +673,8 @@ fn activity_section(
     }
     for (ts, kind, detail) in rows.iter().take(cap) {
         let when = ts
-            .parse::<jiff::Timestamp>()
-            .map(|t| t.to_zoned(tz.clone()).strftime("%Y-%m-%d %H:%M").to_string())
-            .unwrap_or_else(|_| ts.clone());
-        s.push_str(&format!("- {when} {kind}: {detail}\n"));
+            .parse::<jiff::Timestamp>().map_or_else(|_| ts.clone(), |t| t.to_zoned(tz.clone()).strftime("%Y-%m-%d %H:%M").to_string());
+        let _ = writeln!(s, "- {when} {kind}: {detail}");
     }
     s
 }
@@ -704,7 +714,7 @@ fn recent_activity(conn: &Connection, user_id: i64) -> Result<Vec<(String, Strin
 mod tests {
     use super::*;
 
-    /// Monday; 21:00 in Asia/Tokyo, 08:00 in America/New_York.
+    /// Monday; 21:00 in Asia/Tokyo, 08:00 in `America/New_York`.
     const NOW: &str = "2026-08-31T12:00:00Z";
 
     fn now_ts() -> jiff::Timestamp {
@@ -912,8 +922,8 @@ mod tests {
         let (conn, uid) = user();
         plan_today(&conn, uid, vec![routine("checkin_call", "09:00")]);
         for i in 0..MAX_CALENDAR_LINES + 3 {
-            commitment(&conn, uid, &format!("class {i}"), &format!("{:02}:00", i),
-                       &format!("{:02}:30", i), "fixed", true);
+            commitment(&conn, uid, &format!("class {i}"), &format!("{i:02}:00"),
+                       &format!("{i:02}:30"), "fixed", true);
         }
         let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
         assert_eq!(out.matches("class ").count(), MAX_CALENDAR_LINES);

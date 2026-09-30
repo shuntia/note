@@ -50,7 +50,7 @@ struct Decided {
     id: i64,
     kind: String,
     status: String,
-    decided_at: Option<String>,
+    settled_at: Option<String>,
     fired_at: Option<String>,
     wall_time: String,
     end_wall_time: Option<String>,
@@ -86,7 +86,7 @@ pub fn history(
                 id: r.get(0)?,
                 kind: r.get(1)?,
                 status: r.get(2)?,
-                decided_at: r.get(3)?,
+                settled_at: r.get(3)?,
                 fired_at: r.get(4)?,
                 wall_time: r.get(5)?,
                 end_wall_time: r.get(6)?,
@@ -107,7 +107,7 @@ pub fn history(
         if e.kind == crate::triggers::KIND {
             continue;
         }
-        match &e.decided_at {
+        match &e.settled_at {
             Some(at) if on_date(at, tz, date) => {
                 let (kind, label) = match (e.status.as_str(), &e.moved) {
                     ("done", _) => ("event_done", e.kind.clone()),
@@ -308,7 +308,7 @@ mod tests {
             [task],
         )
         .unwrap();
-        let conv = crate::talk::checkin_thread(
+        let thread = crate::talk::checkin_thread(
             &conn,
             uid,
             &date.to_string(),
@@ -324,14 +324,14 @@ mod tests {
             "an unanswered check-in is not history"
         );
 
-        crate::talk::append_text(&conn, conv, "user", "fine", "2026-09-21T09:20:00Z".parse().unwrap())
+        crate::talk::append_text(&conn, thread, "user", "fine", "2026-09-21T09:20:00Z".parse().unwrap())
             .unwrap();
         let out = rows(&conn, uid, date, "2026-09-21T20:00:00Z");
         assert_eq!(
             out.iter().map(|r| r.kind.as_str()).collect::<Vec<_>>(),
             vec!["event_done", "checkin", "task_done"]
         );
-        assert_eq!(out[1].conversation_id, Some(conv));
+        assert_eq!(out[1].conversation_id, Some(thread));
         assert_eq!(out[2].task_id, Some(task));
     }
 }

@@ -144,9 +144,11 @@ pub(crate) fn embeddings_http_agent() -> ureq::Agent {
         .into()
 }
 
+pub type Providers = (Arc<dyn LLMProvider>, Option<Arc<dyn EmbeddingsProvider>>);
+
 /// Builds providers from config. Absent or "mock" LLM config yields a
 /// null provider, so the system is fully runnable with no tokens.
-pub fn build(cfg: &crate::config::ProvidersConfig) -> Result<(Arc<dyn LLMProvider>, Option<Arc<dyn EmbeddingsProvider>>)> {
+pub fn build(cfg: &crate::config::ProvidersConfig) -> Result<Providers> {
     let llm: Arc<dyn LLMProvider> = match &cfg.llm {
         None => Arc::new(mock::NullLLM),
         Some(p) => match p.kind.as_str() {

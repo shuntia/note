@@ -126,7 +126,7 @@ async fn concurrent_talk_for_same_user_is_conflict() {
 async fn talk_at_global_capacity_is_service_unavailable() {
     let (app, cookie, state, _cfg) = common::app_with_logged_in_user_and_state().await;
     let permits: Vec<_> = (0..note_server::MAX_CONCURRENT_TALKS)
-        .map(|i| state.talk_gate.try_enter(-1 - i as i64).unwrap())
+        .map(|i| state.talk_gate.try_enter(-1 - i64::try_from(i).unwrap()).unwrap())
         .collect();
     let res = app
         .clone()
@@ -248,6 +248,7 @@ async fn blank_reply_is_replaced_with_the_canned_line_and_persisted_as_such() {
 
 #[tokio::test]
 async fn talk_persists_the_exchange_and_surfaces_tool_steps() {
+    type MsgRow = (String, String, Option<String>, Option<String>, bool);
     let llm = Arc::new(MockLLM::scripted(vec![
         ChatResponse {
             text: String::new(),
@@ -294,7 +295,6 @@ async fn talk_persists_the_exchange_and_surfaces_tool_steps() {
              FROM talk_messages WHERE conversation_id = ?1 ORDER BY id",
         )
         .unwrap();
-    type MsgRow = (String, String, Option<String>, Option<String>, bool);
     let rows: Vec<MsgRow> = stmt
         .query_map([conv_id], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
@@ -380,7 +380,7 @@ async fn multiple_tool_calls_keep_call_order_in_steps_and_rows() {
 async fn bad_conversation_at_global_capacity_is_404_not_503() {
     let (app, cookie, state, _cfg) = common::app_with_logged_in_user_and_state().await;
     let _permits: Vec<_> = (0..note_server::MAX_CONCURRENT_TALKS)
-        .map(|i| state.talk_gate.try_enter(-1 - i as i64).unwrap())
+        .map(|i| state.talk_gate.try_enter(-1 - i64::try_from(i).unwrap()).unwrap())
         .collect();
     let res = app
         .oneshot(
@@ -400,6 +400,7 @@ async fn bad_conversation_at_global_capacity_is_404_not_503() {
 
 #[tokio::test]
 async fn second_post_with_the_conversation_id_replays_history() {
+    use note_server::providers::Message;
     let llm = Arc::new(MockLLM::scripted(vec![
         ChatResponse { text: "hello aki".into(), tool_calls: vec![] },
         ChatResponse { text: "still here".into(), tool_calls: vec![] },
@@ -444,7 +445,6 @@ async fn second_post_with_the_conversation_id_replays_history() {
     let seen = llm.seen();
     assert_eq!(seen[0].n_messages, 1);
     assert_eq!(seen[1].n_messages, 3);
-    use note_server::providers::Message;
     assert!(matches!(&seen[1].messages[0], Message::User(t) if t == "hi there"));
     assert!(matches!(&seen[1].messages[1], Message::Assistant { text, .. } if text == "hello aki"));
     assert!(matches!(&seen[1].messages[2], Message::User(t) if t == "you there?"));

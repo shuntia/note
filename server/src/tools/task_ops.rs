@@ -114,7 +114,7 @@ pub struct CreateArgs {
     /// text; reuse one the user already has rather than coining a near-copy.
     #[serde(default)]
     pub category: Option<String>,
-    /// The goal this task is part of, from goal_list.
+    /// The goal this task is part of, from `goal_list`.
     #[serde(default)]
     pub goal_id: Option<i64>,
     /// low, normal (default) or high. High goes first when the day is laid.
@@ -154,7 +154,7 @@ pub fn create(
             conn,
             ctx.user_id,
             task.id,
-            TaskPatch {
+            &TaskPatch {
                 description: Some(args.description),
                 ..Default::default()
             },
@@ -170,7 +170,7 @@ pub struct UpdateArgs {
     pub task_id: i64,
     pub title: Option<String>,
     pub description: Option<String>,
-    /// One of open, in_progress, done, dropped.
+    /// One of open, `in_progress`, done, dropped.
     pub state: Option<String>,
     pub notes: Option<String>,
     /// Rough estimate in whole 5-minute blocks.
@@ -189,7 +189,7 @@ pub struct UpdateArgs {
     /// What the task belongs to — a course, a project, a part of life. An empty
     /// string clears it. A step carries none: it reads its parent's.
     pub category: Option<String>,
-    /// The goal this task is part of, from goal_list; null detaches it. A step
+    /// The goal this task is part of, from `goal_list`; null detaches it. A step
     /// belongs to no goal of its own.
     #[serde(default, deserialize_with = "crate::tasks::present")]
     pub goal_id: Option<Option<i64>>,
@@ -255,7 +255,7 @@ pub fn update(
         actor: Actor::Agent,
         ..Default::default()
     };
-    match crate::tasks::update(conn, ctx.user_id, args.task_id, patch) {
+    match crate::tasks::update(conn, ctx.user_id, args.task_id, &patch) {
         Ok(Some(t)) => Ok(serde_json::json!({
             "task_id": t.task.id,
             "state": t.task.state,
@@ -278,7 +278,7 @@ pub struct DeleteArgs {
 pub fn delete(
     conn: &Connection,
     ctx: &ToolCtx,
-    args: DeleteArgs,
+    args: &DeleteArgs,
 ) -> Result<serde_json::Value, ToolError> {
     in_scope(conn, ctx, args.task_id, true)?;
     match crate::tasks::delete_within(conn, ctx.user_id, args.task_id) {
@@ -379,7 +379,7 @@ pub fn brief(
             conn,
             ctx,
             args.task_id,
-            TaskPatch {
+            &TaskPatch {
                 description,
                 duration_min: args.duration_min.map(Some),
                 category: args.category,
@@ -436,7 +436,7 @@ fn drop_as_not_homework(
         conn,
         ctx,
         task.id,
-        TaskPatch {
+        &TaskPatch {
             description: Some(format!("Not homework: {reason}")),
             state: Some("dropped".into()),
             actor: Actor::Agent,
@@ -456,7 +456,7 @@ fn checked_step_title(title: &str) -> Result<&str, ToolError> {
     Ok(title)
 }
 
-fn patch(conn: &Connection, ctx: &ToolCtx, task_id: i64, p: TaskPatch) -> Result<(), ToolError> {
+fn patch(conn: &Connection, ctx: &ToolCtx, task_id: i64, p: &TaskPatch) -> Result<(), ToolError> {
     match crate::tasks::update(conn, ctx.user_id, task_id, p) {
         Ok(Some(_)) => Ok(()),
         Ok(None) => Err(ToolError::not_found(format!("no task {task_id}"))),
@@ -491,7 +491,7 @@ mod tests {
         (conn, tempfile::tempdir().unwrap())
     }
 
-    fn ctx<'a>(tmp: &'a tempfile::TempDir, scope: Option<i64>) -> ToolCtx<'a> {
+    fn ctx(tmp: &tempfile::TempDir, scope: Option<i64>) -> ToolCtx<'_> {
         ToolCtx {
             config_dir: tmp.path(),
             data_dir: tmp.path(),
@@ -768,7 +768,7 @@ mod tests {
                 &conn,
                 1,
                 1,
-                crate::tasks::TaskPatch { state: Some(state.into()), ..Default::default() },
+                &crate::tasks::TaskPatch { state: Some(state.into()), ..Default::default() },
             )
             .unwrap();
             let e = brief(&conn, &tmp, r#"{"task_id":1,"homework":false,"reason":"a rubric"}"#)

@@ -24,7 +24,7 @@ type Pending<T> = Mutex<HashMap<String, (T, i64)>>;
 
 pub struct PasskeyService {
     webauthn: Option<Webauthn>,
-    /// Browsers only speak WebAuthn to an https origin (or http://localhost).
+    /// Browsers only speak `WebAuthn` to an https origin (or <http://localhost>).
     secure_origin: bool,
     registrations: Pending<PasskeyRegistration>,
     authentications: Pending<PasskeyAuthentication>,
@@ -65,7 +65,7 @@ fn put<T>(map: &Pending<T>, session: &str, state: T, now: i64) {
 
 impl PasskeyService {
     /// The relying party is the host of `public_base_url` unless `rp_id` and
-    /// `rp_origin` override it. A URL WebAuthn cannot describe (a bare IP, say)
+    /// `rp_origin` override it. A URL `WebAuthn` cannot describe (a bare IP, say)
     /// leaves the service off with a warning rather than failing startup.
     pub fn build(
         public_base_url: &str,
@@ -168,7 +168,7 @@ impl PasskeyService {
     }
 }
 
-/// The WebAuthn user handle. Derived from the account id so it is stable for
+/// The `WebAuthn` user handle. Derived from the account id so it is stable for
 /// the life of the account without a column of its own.
 fn user_handle(user_id: i64) -> Uuid {
     Uuid::new_v5(
@@ -257,7 +257,7 @@ pub fn add(
     key: &Passkey,
 ) -> Result<PasskeyInfo, SaveError> {
     let name = clean_name(name)?;
-    if count(conn, user_id)? as usize >= MAX_PASSKEYS {
+    if usize::try_from(count(conn, user_id)?).unwrap_or(usize::MAX) >= MAX_PASSKEYS {
         return Err(SaveError::TooMany);
     }
     let created_at = jiff::Timestamp::now().to_string();
@@ -567,7 +567,7 @@ async fn passkey_challenge(
     let existing = {
         let conn = state.db();
         match (count(&conn, user.id), credentials(&conn, user.id)) {
-            (Ok(held), _) if held as usize >= MAX_PASSKEYS => {
+            (Ok(held), _) if usize::try_from(held).unwrap_or(usize::MAX) >= MAX_PASSKEYS => {
                 return error(StatusCode::CONFLICT, &SaveError::TooMany.to_string())
             }
             (Ok(_), Ok(keys)) => keys,
@@ -850,7 +850,7 @@ mod tests {
             conn.execute(
                 "INSERT INTO passkeys (user_id, name, credential, cred_id, created_at)
                  VALUES (?1, ?2, '{}', ?3, 'now')",
-                (uid, format!("k{i}"), vec![i as u8]),
+                (uid, format!("k{i}"), vec![u8::try_from(i).unwrap()]),
             )
             .unwrap();
         }

@@ -26,3 +26,6 @@ urlencoding = "2"
 [dev-dependencies]
 axum = "0.8"
 tempfile = "3"
+
+[lints]
+workspace = true

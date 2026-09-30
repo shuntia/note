@@ -2,6 +2,7 @@ use base64::Engine;
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use std::fmt::Write as _;
 
 pub const PREFIX: &str = "share_";
 pub const MAX_NAME_LEN: usize = 64;
@@ -17,6 +18,7 @@ const MAX_EXPIRY_DAYS: u32 = 36500;
 /// What a link lets its visitor learn. Stored as JSON in `shares.scope`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
+#[expect(clippy::struct_excessive_bools, reason = "each flag is one switch of the stored JSON scope")]
 pub struct ShareScope {
     pub today: bool,
     pub tasks: bool,
@@ -255,7 +257,7 @@ fn row_to_share(r: &rusqlite::Row) -> rusqlite::Result<Share> {
 pub fn create(
     conn: &Connection,
     user_id: i64,
-    new: NewShare,
+    new: &NewShare,
     now: jiff::Timestamp,
     limits: &Limits,
 ) -> Result<Share, ShareError> {
@@ -302,7 +304,7 @@ pub fn update(
     conn: &Connection,
     user_id: i64,
     id: i64,
-    patch: SharePatch,
+    patch: &SharePatch,
     now: jiff::Timestamp,
     limits: &Limits,
 ) -> Result<Option<Share>, ShareError> {
@@ -482,7 +484,7 @@ pub fn visits(conn: &Connection, share_id: i64, distant_km: u32) -> rusqlite::Re
             city: r.get(0)?,
             country: r.get(1)?,
             km,
-            distant: km.is_some_and(|k| k > distant_km as f64),
+            distant: km.is_some_and(|k| k > f64::from(distant_km)),
             at: r.get(3)?,
         })
     })?;
@@ -493,7 +495,7 @@ pub fn visits(conn: &Connection, share_id: i64, distant_km: u32) -> rusqlite::Re
 pub fn visit_counts(conn: &Connection, share_id: i64, distant_km: u32) -> rusqlite::Result<(i64, i64)> {
     conn.query_row(
         "SELECT COUNT(DISTINCT visitor_key), COALESCE(SUM(km > ?2), 0) FROM share_visits WHERE share_id = ?1",
-        (share_id, distant_km as f64),
+        (share_id, f64::from(distant_km)),
         |r| Ok((r.get(0)?, r.get(1)?)),
     )
 }
@@ -508,7 +510,7 @@ pub fn history(
         "SELECT role, content FROM share_messages WHERE thread_id = ?1 AND role IN ('user','assistant') ORDER BY id DESC LIMIT ?2",
     )?;
     let mut out: Vec<crate::providers::Message> = stmt
-        .query_map((thread_id, limit as i64), |r| {
+        .query_map((thread_id, i64::try_from(limit).unwrap_or(i64::MAX)), |r| {
             let role: String = r.get(0)?;
             let content: String = r.get(1)?;
             Ok(match role.as_str() {
@@ -684,13 +686,13 @@ pub fn render(
                 });
             }
             rows.sort_by(|a, b| a.start.cmp(&b.start));
-            text.push_str(&format!("{date}{}:\n", if date == today { " (today)" } else { "" }));
+            let _ = writeln!(text, "{date}{}:", if date == today { " (today)" } else { "" });
             if rows.is_empty() {
                 text.push_str("- nothing planned\n");
             }
             for r in &rows {
                 let end = r.end.as_deref().map(|e| format!("-{e}")).unwrap_or_default();
-                text.push_str(&format!("- {}{end} {} [{}]\n", r.start, r.title, r.status));
+                let _ = writeln!(text, "- {}{end} {} [{}]", r.start, r.title, r.status);
             }
             text.push('\n');
             days_json.push(serde_json::json!({
@@ -725,8 +727,8 @@ pub fn render(
                     .as_deref()
                     .and_then(|d| d.parse::<jiff::Timestamp>().ok())
                     .is_some_and(|d| d < now),
-                steps: node.children.iter().filter(|c| c.state != "dropped").count() as i64,
-                done_steps: node.children.iter().filter(|c| c.state == "done").count() as i64,
+                steps: i64::try_from(node.children.iter().filter(|c| c.state != "dropped").count()).unwrap_or(i64::MAX),
+                done_steps: i64::try_from(node.children.iter().filter(|c| c.state == "done").count()).unwrap_or(i64::MAX),
                 category: t.category.clone(),
                 goal_title: t.goal_title.clone().filter(|_| scope.goals),
                 description: scope.details.then(|| t.description.clone()),
@@ -775,7 +777,7 @@ pub fn render(
             }
             if rows.len() < GOAL_ROWS_MAX {
                 let due = g.due_at.as_deref().map(|d| format!(", due {}", day_of(d))).unwrap_or_default();
-                goals_text.push_str(&format!("- {} ({done} of {total} tasks done{due})\n", g.title));
+                let _ = writeln!(goals_text, "- {} ({done} of {total} tasks done{due})", g.title);
             }
             rows.push(serde_json::json!({
                 "id": g.id, "title": g.title, "due_at": g.due_at, "tasks": total, "done_tasks": done,
@@ -785,7 +787,7 @@ pub fn render(
             goals_text.push_str("- none\n");
         }
         if rows.len() > GOAL_ROWS_MAX {
-            goals_text.push_str(&format!("- and {} more\n", rows.len() - GOAL_ROWS_MAX));
+            let _ = writeln!(goals_text, "- and {} more", rows.len() - GOAL_ROWS_MAX);
         }
         goals_text.push('\n');
         view.insert("goals".into(), serde_json::Value::Array(rows));
@@ -840,7 +842,7 @@ pub fn render(
             }
             let shown = urgent.len().min(task_cap) + rest.len().min(room);
             if tasks.len() > shown {
-                s.push_str(&format!("- and {} more; ask\n", tasks.len() - shown));
+                let _ = writeln!(s, "- and {} more; ask", tasks.len() - shown);
             }
             if tasks.is_empty() {
                 s.push_str("- none open\n");
@@ -849,15 +851,15 @@ pub fn render(
         }
         s.push_str(&goals_text);
         if scope.progress {
-            s.push_str(&format!("# Done in the last {RECENT_DAYS} days\n\n"));
+            let _ = write!(s, "# Done in the last {RECENT_DAYS} days\n\n");
             if done_recent.is_empty() {
                 s.push_str("- nothing yet\n");
             }
             for (t, at) in done_recent.iter().take(done_cap) {
-                s.push_str(&format!("- {t} ({})\n", day_of(at)));
+                let _ = writeln!(s, "- {t} ({})", day_of(at));
             }
             if done_recent.len() > done_cap {
-                s.push_str(&format!("- and {} more\n", done_recent.len() - done_cap));
+                let _ = writeln!(s, "- and {} more", done_recent.len() - done_cap);
             }
             s.push('\n');
         }
@@ -902,21 +904,21 @@ fn task_line(t: &TaskRow, scope: &ShareScope) -> String {
         s.push_str(if t.overdue { " [overdue]" } else { " [due soon]" });
     }
     if let Some(d) = &t.due_at {
-        s.push_str(&format!(", due {}", day_of(d)));
+        let _ = write!(s, ", due {}", day_of(d));
     }
     if t.steps > 0 {
-        s.push_str(&format!(", {} of {} steps done", t.done_steps, t.steps));
+        let _ = write!(s, ", {} of {} steps done", t.done_steps, t.steps);
     }
     if scope.categories.len() != 1 && !t.category.is_empty() {
-        s.push_str(&format!(" ({})", t.category));
+        let _ = write!(s, " ({})", t.category);
     }
     if let Some(g) = &t.goal_title {
-        s.push_str(&format!(", goal: {g}"));
+        let _ = write!(s, ", goal: {g}");
     }
     if let Some(d) = t.description.as_deref().filter(|d| !d.trim().is_empty()) {
-        s.push_str(&format!(" — {}", d.trim().chars().take(200).collect::<String>()));
+        let _ = write!(s, " — {}", d.trim().chars().take(200).collect::<String>());
     }
-    s.push_str(&format!(" (task_id {})\n", t.id));
+    let _ = writeln!(s, " (task_id {})", t.id);
     s
 }
 
@@ -1046,9 +1048,7 @@ pub async fn run_turn(state: &crate::AppState, principal: &crate::auth::SharePri
                 })
                 .collect();
             let reply = if !noted.is_empty() {
-                let display = crate::config::UserConfig::load(&st.config_dir, &owner)
-                    .map(|c| c.display_name)
-                    .unwrap_or_else(|_| owner.clone());
+                let display = crate::config::UserConfig::load(&st.config_dir, &owner).map_or_else(|_| owner.clone(), |c| c.display_name);
                 format!("Passed on to {display}.")
             } else if out.reply.trim().is_empty() {
                 crate::EMPTY_REPLY_FALLBACK.to_string()
@@ -1143,7 +1143,7 @@ mod tests {
             Err(ShareError::Invalid(_))
         ));
         let ok = ShareScope {
-            categories: vec![" school ".into(), "".into()],
+            categories: vec![" school ".into(), String::new()],
             ..ShareScope::default()
         };
         assert_eq!(
@@ -1155,7 +1155,7 @@ mod tests {
     #[test]
     fn an_unreadable_stored_scope_is_an_error_not_the_default() {
         let conn = conn();
-        let s = create(&conn, 1, new("Mom"), now(), &Limits::default()).unwrap();
+        let s = create(&conn, 1, &new("Mom"), now(), &Limits::default()).unwrap();
         conn.execute("UPDATE shares SET scope = '{\"nope\":1}' WHERE id = ?1", [s.id]).unwrap();
         assert!(get(&conn, 1, s.id).is_err());
         assert!(list(&conn, 1).is_err());
@@ -1166,7 +1166,7 @@ mod tests {
     fn zero_shares_per_user_turns_links_off() {
         let conn = conn();
         let limits = Limits { per_user: 0, ..Limits::default() };
-        assert!(matches!(create(&conn, 1, new("Mom"), now(), &limits), Err(ShareError::TooMany)));
+        assert!(matches!(create(&conn, 1, &new("Mom"), now(), &limits), Err(ShareError::TooMany)));
     }
 
     #[test]
@@ -1229,16 +1229,16 @@ mod tests {
             per_user: 2,
             ..Limits::default()
         };
-        let a = create(&conn, 1, new("Mom"), now(), &limits).unwrap();
+        let a = create(&conn, 1, &new("Mom"), now(), &limits).unwrap();
         assert_eq!(a.name, "Mom");
         assert!(a.token.starts_with(PREFIX));
-        let _b = create(&conn, 1, new("Tutor"), now(), &limits).unwrap();
+        let _b = create(&conn, 1, &new("Tutor"), now(), &limits).unwrap();
         assert!(matches!(
-            create(&conn, 1, new("Third"), now(), &limits),
+            create(&conn, 1, &new("Third"), now(), &limits),
             Err(ShareError::TooMany)
         ));
         assert!(matches!(
-            create(&conn, 1, new(""), now(), &limits),
+            create(&conn, 1, &new(""), now(), &limits),
             Err(ShareError::Invalid(_))
         ));
         assert_eq!(list(&conn, 1).unwrap().len(), 2);
@@ -1246,7 +1246,7 @@ mod tests {
             &conn,
             1,
             a.id,
-            SharePatch {
+            &SharePatch {
                 name: Some("Mother".into()),
                 brief: Some("be kind".into()),
                 scope: None,
@@ -1271,7 +1271,7 @@ mod tests {
     #[test]
     fn resolve_refuses_expired_missing_and_disabled_and_throttles_touch() {
         let conn = conn();
-        let s = create(&conn, 1, new("Mom"), now(), &Limits::default()).unwrap();
+        let s = create(&conn, 1, &new("Mom"), now(), &Limits::default()).unwrap();
         assert!(resolve(&conn, "share_nope", now()).unwrap().is_none());
         let r = resolve(&conn, &s.token, now()).unwrap().unwrap();
         assert_eq!(r.share.id, s.id);
@@ -1304,7 +1304,7 @@ mod tests {
     #[test]
     fn threads_belong_to_their_visitor_and_history_reads_back_in_order() {
         let conn = conn();
-        let s = create(&conn, 1, new("Mom"), now(), &Limits::default()).unwrap();
+        let s = create(&conn, 1, &new("Mom"), now(), &Limits::default()).unwrap();
         let t1 = new_thread(&conn, s.id, "v1", now()).unwrap();
         let again = new_thread(&conn, s.id, "v1", now()).unwrap();
         assert_ne!(t1, again, "a visitor may hold many threads");
@@ -1334,7 +1334,7 @@ mod tests {
     #[test]
     fn visits_measure_from_the_owner_and_count_distinct_visitors() {
         let conn = conn();
-        let s = create(&conn, 1, new("Mom"), now(), &Limits::default()).unwrap();
+        let s = create(&conn, 1, &new("Mom"), now(), &Limits::default()).unwrap();
         let far = crate::net::Place { city: Some("Tokyo".into()), country: Some("JP".into()), coords: Some((35.68, 139.65)) };
         record_visit(&conn, s.id, 1, "v1", &far, now()).unwrap();
         assert_eq!(visits(&conn, s.id, 300).unwrap()[0].km, None, "no distance before the owner is seen");
@@ -1380,7 +1380,7 @@ mod tests {
         mk("problem set", "school", "normal", Some("2026-09-25T00:00:00Z"));
         mk("therapy forms", "health", "normal", None);
         let done = mk("reading", "school", "normal", None);
-        crate::tasks::update(conn, 1, done, crate::tasks::TaskPatch { state: Some("done".into()), ..Default::default() }).unwrap();
+        crate::tasks::update(conn, 1, done, &crate::tasks::TaskPatch { state: Some("done".into()), ..Default::default() }).unwrap();
         (tmp, lab)
     }
 
@@ -1425,7 +1425,7 @@ mod tests {
         }
         for i in 0..30 {
             let id = crate::tasks::create(&conn, 1, crate::tasks::NewTask { title: format!("finished {i}"), ..Default::default() }, "manual", crate::tasks::Actor::User).unwrap().id;
-            crate::tasks::update(&conn, 1, id, crate::tasks::TaskPatch { state: Some("done".into()), ..Default::default() }).unwrap();
+            crate::tasks::update(&conn, 1, id, &crate::tasks::TaskPatch { state: Some("done".into()), ..Default::default() }).unwrap();
         }
         conn.execute("UPDATE tasks SET completed_at = '2026-09-24T11:00:00Z' WHERE state = 'done'", []).unwrap();
         let r = render(&conn, tmp.path(), 1, "aki", &ShareScope::default(), now()).unwrap();
@@ -1442,7 +1442,7 @@ mod tests {
     #[test]
     fn threads_come_newest_first() {
         let conn = conn();
-        let s = create(&conn, 1, new("Mom"), now(), &Limits::default()).unwrap();
+        let s = create(&conn, 1, &new("Mom"), now(), &Limits::default()).unwrap();
         let older = new_thread(&conn, s.id, "v1", now()).unwrap();
         let newer = new_thread(&conn, s.id, "v2", now()).unwrap();
         append(&conn, newer, "user", "first", now()).unwrap();

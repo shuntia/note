@@ -14,7 +14,7 @@ pub struct AddArgs {
 
 pub fn add(conn: &Connection, ctx: &ToolCtx, args: AddArgs) -> Result<serde_json::Value, ToolError> {
     super::task_query::unscoped(ctx)?;
-    let note = crate::notes::create(conn, ctx.user_id, NewNote { text: args.text }, jiff::Timestamp::now())
+    let note = crate::notes::create(conn, ctx.user_id, &NewNote { text: args.text }, jiff::Timestamp::now())
         .map_err(task_error)?;
     Ok(serde_json::json!({ "note_id": note.id, "text": note.text }))
 }
@@ -35,7 +35,7 @@ pub fn update(conn: &Connection, ctx: &ToolCtx, args: UpdateArgs) -> Result<serd
         return Err(ToolError::rejected("set text, pinned or both"));
     }
     let patch = NotePatch { text: args.text, pinned: args.pinned, done: None };
-    match crate::notes::update(conn, ctx.user_id, args.note_id, patch, jiff::Timestamp::now()) {
+    match crate::notes::update(conn, ctx.user_id, args.note_id, &patch, jiff::Timestamp::now()) {
         Ok(Some(n)) => Ok(serde_json::json!({ "note_id": n.id, "text": n.text, "pinned": n.pinned })),
         Ok(None) => Err(ToolError::not_found(format!("no note {}", args.note_id))),
         Err(e) => Err(task_error(e)),
@@ -48,10 +48,10 @@ pub struct DoneArgs {
     pub note_id: i64,
 }
 
-pub fn done(conn: &Connection, ctx: &ToolCtx, args: DoneArgs) -> Result<serde_json::Value, ToolError> {
+pub fn done(conn: &Connection, ctx: &ToolCtx, args: &DoneArgs) -> Result<serde_json::Value, ToolError> {
     super::task_query::unscoped(ctx)?;
     let patch = NotePatch { done: Some(true), ..Default::default() };
-    match crate::notes::update(conn, ctx.user_id, args.note_id, patch, jiff::Timestamp::now()) {
+    match crate::notes::update(conn, ctx.user_id, args.note_id, &patch, jiff::Timestamp::now()) {
         Ok(Some(n)) => Ok(serde_json::json!({ "note_id": n.id, "text": n.text, "done_at": n.done_at })),
         Ok(None) => Err(ToolError::not_found(format!("no note {}", args.note_id))),
         Err(e) => Err(task_error(e)),

@@ -70,7 +70,7 @@ pub fn update(
         state: args.state,
         due_at,
     };
-    match crate::goals::update(conn, ctx.user_id, args.goal_id, patch) {
+    match crate::goals::update(conn, ctx.user_id, args.goal_id, &patch) {
         Ok(Some(g)) => Ok(serde_json::json!({
             "goal_id": g.id,
             "title": g.title,
@@ -93,7 +93,7 @@ pub struct ListArgs {
 pub fn list(
     conn: &Connection,
     ctx: &ToolCtx,
-    args: ListArgs,
+    args: &ListArgs,
 ) -> Result<serde_json::Value, ToolError> {
     super::task_query::unscoped(ctx)?;
     let mut goals = crate::goals::list(conn, ctx.user_id, args.state.as_deref()).map_err(task_error)?;
@@ -174,7 +174,7 @@ mod tests {
         (conn, tmp)
     }
 
-    fn ctx<'a>(tmp: &'a tempfile::TempDir, scope: Option<i64>) -> ToolCtx<'a> {
+    fn ctx(tmp: &tempfile::TempDir, scope: Option<i64>) -> ToolCtx<'_> {
         ToolCtx {
             config_dir: tmp.path(),
             data_dir: tmp.path(),

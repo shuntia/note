@@ -128,7 +128,7 @@ pub fn render(conn: &Connection, ev: &crate::runner::FiredEvent) -> OutboundMess
         (ev.kind.clone(), format!("scheduled for {}", ev.wall_time), Urgency::Normal)
     };
     if !ev.message.is_empty() {
-        body = ev.message.clone();
+        body.clone_from(&ev.message);
     }
     let actions =
         if is_checkin(&ev.kind) { event_actions(ev.event_id) } else { Vec::new() };
