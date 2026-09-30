@@ -7,7 +7,7 @@ and Idle nudges plans. Design rules are the ones in
 words, the sun the only accent, and motion only in the orchestrated moments
 (the face morphing into the day, the sent bubble's flight).
 
-Eight groups, each shippable on its own, in this order.
+Nine groups, each shippable on its own, in this order.
 
 ## 1. Today's resting face as it was
 
@@ -48,8 +48,9 @@ Eight groups, each shippable on its own, in this order.
 ## 4. Steps are tasks on the face
 
 - A session on a task with steps shows **the current step as if it were a
-  task**: the step's title is the face name, the first line of the step's
-  notes is the line under it. The parent's title is not shown.
+  task**: the step's title is the face name. Under it, in `--faint`, the
+  parent task's title. Idle takes the parent line away with the rest, so a
+  resting session shows the timer and the step's name.
 - The arc is one continuous span for the step, never split into segments. It
   fills by the step's own clock (`stepFracAt`), as now.
 - Swipe down finishes the step and advances to the next as now; the face
@@ -82,53 +83,49 @@ Glossy and out of the way:
 ## 6. Briefs on Now
 
 The morning letter (`/api/debrief`) and the weekly review (`/api/review`)
-appear on the resting Now face when the morning is open.
+appear on the resting Now face while the morning is open.
 
 ### When
 
-The brief shows on the resting face (no session, Today on its face, not
-scrolled) when either holds:
+The brief shows on the resting face (no session, Today on its face) when all
+hold:
 
-- **Open morning:** local time is between the day's first activity and 12:00,
-  and nothing on today's plan starts within the next 90 minutes (no pending
-  block, routine or calendar entry whose start is ≤ 90 min away and none
-  running).
-- **At a set time:** the local time is within 30 minutes after one of the
-  user's `brief_times` (a new user setting, list of `HH:MM`, empty by default).
+- local time is before the user's `morning_until` (a new setting, `HH:MM`,
+  default `11:00`);
+- nothing on today's plan is running or starts within the next 90 minutes;
+- the brief has not been read today on this device (localStorage, keyed by the
+  letter's date or the review's `week_start`).
 
-It stops showing once it has been read today (opened and closed, or dismissed),
-remembered per device in localStorage under the letter's date (the review's
-`week_start`).
+The morning letter shows when there is one dated today. The weekly review
+shows when its `week_start` is this week's or last week's Monday and it is
+unread; when both are due, the letter first, then the review.
 
-### What
+### Form
 
-- The morning letter shows when there is one dated today. The weekly review
-  shows when its `week_start` is this week's or last week's Monday and it has
-  not been read; when both are due, the letter first, the review after it has
-  been read.
-- **Form:** the resting face keeps its circle, wait arc and next block, so the
-  morph is untouched. Under the circle sits one quiet line: a small sun-ink
-  mark and the letter's first sentence (the review: its week range), ellipsed
-  to one line. Tapping it opens the letter as a sheet over the face (the
-  `Overflow` sheet styling: scrim, handle, full text, scrollable). Closing the
-  sheet marks it read.
+- **The message takes the circle's place.** The circle, its wait and the start
+  hint leave (fade and settle down 12 px, 0.35 s), and the letter rises into
+  the face (0.45 s, `power2.out`): a reading column (`min(34rem, 100vw − 48px)`,
+  max height the face's, scrolling inside), a small sun-ink mark, the text.
+- A round check button under it marks it read: the letter fades and lowers,
+  and the circle comes back with the arc drawing in (`fx.open`'s track fade).
+- Scrolling down from the message: the message fades out with the face as the
+  hint and chevron do; the compact header and the hero fade in rather than
+  morph, since the circle's parts are not on screen. Back at the top the
+  message is there again until it is read.
+- Reduced motion: opacity only, 200 ms.
 - The desktop `DebriefFold` / `ReviewFold` in the day list stay as the place to
   re-read it.
-- The line fades out with the rest of the face in the scroll morph, like the
-  hint.
 
 ### Server
 
-- `UserConfig.brief_times: Option<Vec<String>>`, each validated by
-  `templates::valid_time`, at most 4. Settings GET/PUT carry `brief_times`.
-- No new route: the client already has `/api/debrief`, `/api/review` and
-  `/api/day` (for the next block).
+- `UserConfig.morning_until: Option<String>`, validated by
+  `templates::valid_time`; accessor defaulting to `11:00`. Settings GET/PUT
+  carry it.
 
 ### Settings
 
-Under **Day**, a row **Briefs** whose value is the times (`07:30, 19:00`) or
-`Morning` when the list is empty. The fold holds up to four time inputs and a
-`+`.
+Under **Day**, a row **Morning ends** with the time as its value; the fold
+holds one time input.
 
 ## 7. Translation plumbing
 
@@ -154,21 +151,33 @@ landing in two passes:
 ## 8. Checks
 
 - Web: `pnpm -C web build && pnpm -C web test`; vitest for `t()`, plurals, the
-  formatters, the brief-window decision (a pure `briefDue(now, day, times,
+  formatters, the brief-window decision (a pure `briefDue(now, day, until,
   read)`), and the string check.
-- Server: `brief_times` default, validation and round trip.
+- Server: `morning_until` default, validation and round trip.
 - Harness at 390×844 and 1440×900: the resting morph at scroll 0 / 50 / 100 %,
   the Notes tab, the icon-only bar, a two-step session (one arc, step as the
-  name), a toast over the face, and the brief line and sheet at 08:00 with
-  nothing for two hours.
+  name, parent faint, gone when idle), a toast over the face, and the brief in
+  the circle's place at 08:00 with nothing for two hours, read and back.
 
-## Open questions
+## 9. Clippy pedantic
 
-1. **Notes tab contents:** notes as the first group above the tasks (this
-   spec), or notes only, with tasks moved elsewhere?
-2. **Step context:** the parent task's title is dropped from the face. Keep it
-   as a faint line instead?
-3. **Morning:** "between first activity and 12:00" — or a fixed window, say
-   05:00–11:00?
-4. **i18n:** is the two-pass split acceptable, and which second language, if
-   any, should the first pass prove against (Japanese)?
+- The workspace `Cargo.toml` sets `clippy::pedantic` to warn for all three
+  crates (`[workspace.lints]`, each crate `lints.workspace = true`), and the
+  checks run `cargo clippy --workspace --all-targets -- -D warnings`.
+- Allowed at the workspace, with the reason in `Cargo.toml`:
+  - `missing_errors_doc`, `missing_panics_doc`: they demand a doc section on
+    every fallible function, against the comment policy in `CLAUDE.md`;
+  - `must_use_candidate`: an attribute on most getters, with no caller that
+    drops the value today;
+  - `too_many_lines`: the long functions are route handlers and the agent
+    loop, which read top to bottom; splitting them is its own change.
+- Every other pedantic finding, and the four default findings already on the
+  branch, is fixed in the code.
+
+## Decisions
+
+- Notes sit above the tasks on the Notes tab.
+- The parent task stays as a faint line under the step, until idle.
+- Mornings end at 11:00 by default, per user.
+- No set brief times; briefs are not tied to quiet windows.
+- i18n lands in two passes, English only.
