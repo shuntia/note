@@ -1,10 +1,12 @@
 pub mod codec;
 pub mod frame;
+pub mod journal;
 pub mod peer;
 pub mod stream;
 pub mod testkit;
 
 pub use frame::*;
+pub use journal::{AppliedFile, FileOutbox};
 pub use peer::{dial_forever, listen_forever, BoxFuture, Disconnect, Handler, Peer, PeerConfig};
 pub use stream::{classify, Arrival, MemOutbox, Outbox};
 
