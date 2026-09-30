@@ -28,6 +28,7 @@ import { Tasks } from './views/Tasks'
 import { connectEvents } from './ws'
 import { deviceZone, zoneChange } from './zone'
 import './styles/shell.css'
+import { t, type Key } from './i18n'
 
 // `admin` is reached from Settings only, so it never joins NAV.
 type Tab = 'today' | 'tasks' | 'chat' | 'memory' | 'settings' | 'admin'
@@ -62,12 +63,12 @@ const TOAST_LEAVE_MS = 200
 // On a phone Today sits in the middle of the bar, under the thumb.
 const PHONE_ORDER: NavTab[] = ['tasks', 'chat', 'today', 'memory', 'settings']
 
-const NAV: { id: NavTab; label: string }[] = [
-  { id: 'today', label: 'Today' },
-  { id: 'tasks', label: 'Notes' },
-  { id: 'chat', label: 'Chat' },
-  { id: 'memory', label: 'Memory' },
-  { id: 'settings', label: 'Settings' },
+const NAV: { id: NavTab; label: Key }[] = [
+  { id: 'today', label: 'nav.today' },
+  { id: 'tasks', label: 'nav.notes' },
+  { id: 'chat', label: 'nav.chat' },
+  { id: 'memory', label: 'nav.memory' },
+  { id: 'settings', label: 'nav.settings' },
 ]
 
 // A view on screen. A turn keeps the one being replaced alive under its own id until
@@ -228,7 +229,7 @@ export function App() {
       try {
         putSession(await api.startWorkSession(fields))
       } catch {
-        notify("Couldn't start that session. Try again.")
+        notify(t('session.startFailed'))
       }
     },
     [go, notify, putSession],
@@ -290,13 +291,13 @@ export function App() {
         if (!change) return
         await api.saveSettings({ timezone: change.to })
         onChanged()
-        notify(`Your day now follows ${change.to.replace(/_/g, ' ')}`, {
-          label: 'Undo',
+        notify(t('zone.follows', { zone: change.to.replace(/_/g, ' ') }), {
+          label: t('toast.undo'),
           windowMs: 8000,
           run: () =>
             void api
               .saveSettings({ timezone: change.from, timezone_auto: false })
-              .then(onChanged, () => notify("Couldn't undo that. Try again.")),
+              .then(onChanged, () => notify(t('toast.undoFailed'))),
         })
       } catch {
         // The next focus tries again.
@@ -410,7 +411,7 @@ export function App() {
     <div className="shell">
       {!mobile && (
         <header className="topbar">
-          <span className="brand">Note</span>
+          <span className="brand">{t('app.name')}</span>
           <Rail kind="topnav" current={current} go={go} />
           <Jot openTalk={openTalk} openConversation={openConversation} tab={tab} />
         </header>
@@ -476,17 +477,17 @@ function Rail({
   }, [kind, current])
 
   return (
-    <nav ref={nav} className={`${kind}${away ? ' away' : ''}`} aria-label="Views">
+    <nav ref={nav} className={`${kind}${away ? ' away' : ''}`} aria-label={t('nav.views')}>
       <span className="nav-glide" aria-hidden="true" ref={mark} />
       {kind === 'tabs'
-        ? PHONE_ORDER.map((id) => NAV.find((t) => t.id === id)!).map((t) => (
-            <button key={t.id} aria-current={current === t.id} aria-label={t.label} onClick={() => go(t.id)}>
-              <NavIcon id={t.id} />
+        ? PHONE_ORDER.map((id) => NAV.find((item) => item.id === id)!).map((item) => (
+            <button key={item.id} aria-current={current === item.id} aria-label={t(item.label)} onClick={() => go(item.id)}>
+              <NavIcon id={item.id} />
             </button>
           ))
-        : NAV.map((t) => (
-            <button key={t.id} aria-current={current === t.id} onClick={() => go(t.id)}>
-              {t.label}
+        : NAV.map((item) => (
+            <button key={item.id} aria-current={current === item.id} onClick={() => go(item.id)}>
+              {t(item.label)}
             </button>
           ))}
     </nav>
@@ -519,11 +520,11 @@ function Login({ onSignedIn }: { onSignedIn: (me: Me) => void }) {
       onSignedIn(await api.me())
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
-        setError('Wrong username or password.')
+        setError(t('login.wrong'))
       } else if (err instanceof ApiError && err.status === 429) {
-        setError('Too many attempts. Wait a few minutes.')
+        setError(t('login.throttled'))
       } else {
-        setError("Couldn't sign in. Try again.")
+        setError(t('login.failed'))
       }
     } finally {
       setBusy(false)
@@ -532,11 +533,11 @@ function Login({ onSignedIn }: { onSignedIn: (me: Me) => void }) {
 
   return (
     <div className="login">
-      <h1>Note</h1>
+      <h1>{t('app.name')}</h1>
       <form onSubmit={submit}>
         <div className="field">
           <input
-            placeholder="Username"
+            placeholder={t('login.username')}
             autoComplete="username"
             value={username}
             onChange={(e) => setUsername(e.target.value)}
@@ -545,7 +546,7 @@ function Login({ onSignedIn }: { onSignedIn: (me: Me) => void }) {
         <div className="field">
           <input
             type="password"
-            placeholder="Password"
+            placeholder={t('login.password')}
             autoComplete="current-password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
@@ -553,7 +554,7 @@ function Login({ onSignedIn }: { onSignedIn: (me: Me) => void }) {
         </div>
         {error && <p role="alert">{error}</p>}
         <button className="primary" disabled={busy || !username || !password}>
-          Sign in
+          {t('login.signIn')}
         </button>
       </form>
     </div>

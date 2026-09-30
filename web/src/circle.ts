@@ -1,4 +1,5 @@
 import type { QueueEntry, SessionStart } from './types'
+import { t } from './i18n'
 
 export const R = 148
 export const C = 2 * Math.PI * R
@@ -72,4 +73,4 @@ export function sessionFor(entry: QueueEntry): SessionStart {
   }
 }
 
-export const WORK_TIME: SessionStart = { title: 'Work time' }
+export const workTime = (): SessionStart => ({ title: t('session.workTime') })

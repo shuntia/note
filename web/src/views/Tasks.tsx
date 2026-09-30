@@ -19,27 +19,27 @@ import { Tick } from '../tick'
 import { Notes } from './Notes'
 import '../styles/tasks.css'
 import type { Goal, NewStep, Task, TaskNode, TaskNotify, TaskState, TaskUpdate, TaskUrgency } from '../types'
+import { t, type Key } from '../i18n'
+import * as format from '../i18n/format'
 
 const NOW_CAP = 3
 const UNDO_MS = 5000
-const NOW_FULL = 'Now is full — finish or move something first'
-const UNCATEGORISED = 'Uncategorised'
 
 // What a block laid for the task does when it starts.
-const ANNOUNCE: { id: TaskNotify; label: string }[] = [
-  { id: 'none', label: 'None' },
-  { id: 'chat', label: 'Chat' },
-  { id: 'notify', label: 'Notify' },
+const ANNOUNCE: { id: TaskNotify; label: Key }[] = [
+  { id: 'none', label: 'announce.none' },
+  { id: 'chat', label: 'announce.chat' },
+  { id: 'notify', label: 'announce.notify' },
 ]
 
 type Group = 'now' | 'later' | 'done'
 
 const SORTS = [
-  { id: 'schedule', label: 'Schedule' },
-  { id: 'due', label: 'Due' },
-  { id: 'urgency', label: 'Urgency' },
-  { id: 'newest', label: 'Newest' },
-  { id: 'category', label: 'Category' },
+  { id: 'schedule', label: 'tasks.sort.schedule' },
+  { id: 'due', label: 'tasks.sort.due' },
+  { id: 'urgency', label: 'tasks.sort.urgency' },
+  { id: 'newest', label: 'tasks.sort.newest' },
+  { id: 'category', label: 'tasks.sort.category' },
 ] as const
 
 type SortKey = (typeof SORTS)[number]['id']
@@ -127,7 +127,7 @@ function byCategory(list: Placed[], categories: string[]): [string, Placed[]][] 
   const out: [string, Placed[]][] = []
   for (const category of [...categories, '']) {
     const rows = list.filter((p) => p.node.category === category)
-    if (rows.length > 0) out.push([category === '' ? UNCATEGORISED : category, rows])
+    if (rows.length > 0) out.push([category === '' ? t('tasks.uncategorised') : category, rows])
   }
   return out
 }
@@ -170,7 +170,7 @@ const nodeProgress = (node: TaskNode) =>
 
 function parentSub(node: TaskNode): string {
   const done = node.children.filter((c) => c.state === 'done').length
-  return `${done} of ${node.children.length} steps done`
+  return t('tasks.stepsDone', { done, count: node.children.length })
 }
 
 function sameDay(iso: string, today: Date): boolean {
@@ -394,8 +394,8 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
       } catch (err) {
         notify(
           err instanceof ApiError && err.status === 409
-            ? NOW_FULL
-            : "Couldn't update the task. Try again.",
+            ? t('tasks.nowFull')
+            : t('tasks.updateFailed'),
         )
         load()
       }
@@ -448,8 +448,8 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
     if (!step || lastStep) markLeaving(node, 'done')
     setNodes((ns) => (ns ? snap.reduce((acc, s) => withState(acc, s.id, 'done'), ns) : ns))
     void patch(step ? step.id : node.id, { state: 'done' }).then(loadGoals)
-    notify(`${step && !lastStep ? step.title : node.title} — done`, {
-      label: 'Undo',
+    notify(t('tasks.doneToast', { title: step && !lastStep ? step.title : node.title }), {
+      label: t('toast.undo'),
       run: () => void restore(snap),
       windowMs: UNDO_MS,
     })
@@ -479,8 +479,8 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
     markLeaving(node, 'dropped')
     setNodes((ns) => (ns ? snap.reduce((acc, s) => withState(acc, s.id, 'dropped'), ns) : ns))
     void patch(node.id, { state: 'dropped' }).then(loadGoals)
-    notify(`${node.title} — dropped`, {
-      label: 'Undo',
+    notify(t('tasks.droppedToast', { title: node.title }), {
+      label: t('toast.undo'),
       run: () => void restore(snap),
       windowMs: UNDO_MS,
     })
@@ -558,7 +558,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
   const editGoal = (goal: Goal, patch: { title?: string; due_at?: string | null }) => {
     setGoals((gs) => gs.map((g) => (g.id === goal.id ? { ...g, ...patch } : g)))
     api.patchGoal(goal.id, patch).catch(() => {
-      notify("Couldn't update the goal. Try again.")
+      notify(t('goals.updateFailed'))
       loadGoals()
     })
   }
@@ -569,16 +569,16 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
       .patchGoal(goal.id, { state })
       .then(() => load())
       .catch(() => {
-        notify("Couldn't update the goal. Try again.")
+        notify(t('goals.updateFailed'))
         loadGoals()
       })
-    notify(`${goal.title} — ${state === 'done' ? 'done' : 'dropped'}`, {
-      label: 'Undo',
+    notify(t(state === 'done' ? 'tasks.doneToast' : 'tasks.droppedToast', { title: goal.title }), {
+      label: t('toast.undo'),
       run: () =>
         void api
           .patchGoal(goal.id, { state: 'open' })
           .then(() => load())
-          .catch(() => notify("Couldn't put the goal back. Try again.")),
+          .catch(() => notify(t('goals.restoreFailed'))),
       windowMs: UNDO_MS,
     })
   }
@@ -595,7 +595,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
         setGoals((gs) => [...gs, g])
         setOpenGoals((open) => new Set(open).add(g.id))
       })
-      .catch(() => notify("Couldn't add the goal. Try again."))
+      .catch(() => notify(t('goals.addFailed')))
   }
 
   const toggleSteps = (id: number) =>
@@ -618,17 +618,17 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
       .flattenTask(node.id)
       .then((r) => put(r.task))
       .catch(() => {
-        notify("Couldn't update the task. Try again.")
+        notify(t('tasks.updateFailed'))
         load()
       })
-    notify(`${node.title} — merged the steps`, {
-      label: 'Undo',
+    notify(t('tasks.mergedToast', { title: node.title }), {
+      label: t('toast.undo'),
       run: () =>
         void api
           .splitTask(node.id, steps)
           .then(put)
           .catch(() => {
-            notify("Couldn't put the steps back. Try again.")
+            notify(t('tasks.splitFailed'))
             load()
           }),
       windowMs: UNDO_MS,
@@ -708,10 +708,10 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
       })
       .catch(() => {
         forget(optimistic.id)
-        notify("Couldn't add the task. Try again.")
+        notify(t('tasks.addFailed'))
       })
-    notify(`${text} — added`, {
-      label: 'Undo',
+    notify(t('tasks.addedToast', { title: text }), {
+      label: t('toast.undo'),
       run: () => {
         undone = true
         forget(created ? created.id : optimistic.id)
@@ -725,9 +725,9 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
     return (
       <div className="tasks">
         <p className="muted">
-          Couldn't load tasks.{' '}
+          {t('tasks.loadFailed')}{' '}
           <button className="quiet" onClick={load}>
-            Retry
+            {t('common.retry')}
           </button>
         </p>
       </div>
@@ -743,7 +743,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
     complete,
     reopen,
     reopenStep,
-    moveToNow: (node) => (g.now.length >= NOW_CAP ? notify(NOW_FULL) : setNow(node, true)),
+    moveToNow: (node) => (g.now.length >= NOW_CAP ? notify(t('tasks.nowFull')) : setNow(node, true)),
     moveToLater: (node) => setNow(node, false),
     drop,
     mergeSteps,
@@ -790,11 +790,11 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
             <form className="task-add tellnote" onSubmit={add}>
               <input
                 value={title}
-                placeholder="Add a task"
-                aria-label="Add a task, or search what is here"
+                placeholder={t('tasks.add')}
+                aria-label={t('tasks.addOrSearch')}
                 onChange={(e) => setTitle(e.target.value)}
               />
-              <button type="submit" aria-label="Add" disabled={!title.trim()}>
+              <button type="submit" aria-label={t('tasks.addButton')} disabled={!title.trim()}>
                 <svg viewBox="0 0 24 24" aria-hidden="true">
                   <path d="M5 12h14" />
                   <path d="M13 6l6 6-6 6" />
@@ -803,38 +803,38 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
             </form>
             <Overflow
               className="task-add-more"
-              label="More ways to add"
-              items={[{ label: 'New goal…', run: () => setGoalDraft({ title: '', due: '' }) }]}
+              label={t('tasks.moreWays')}
+              items={[{ label: t('goals.new'), run: () => setGoalDraft({ title: '', due: '' }) }]}
             />
           </>
         ) : (
           <form className="task-add tellnote task-goal-add" onSubmit={addGoal}>
             <input
               value={goalDraft.title}
-              placeholder="New goal"
-              aria-label="Goal"
+              placeholder={t('goals.placeholder')}
+              aria-label={t('goals.goal')}
               autoFocus
               onChange={(e) => setGoalDraft({ ...goalDraft, title: e.target.value })}
             />
             <input
               type="date"
               value={goalDraft.due}
-              aria-label="Due date"
+              aria-label={t('goals.due')}
               onChange={(e) => setGoalDraft({ ...goalDraft, due: e.target.value })}
             />
             <button type="submit" disabled={!goalDraft.title.trim()}>
-              Save
+              {t('common.save')}
             </button>
             <button type="button" onClick={() => setGoalDraft(null)}>
-              Cancel
+              {t('common.cancel')}
             </button>
           </form>
         )}
       </div>
       {categories.length > 0 && (
-        <div className="seg task-cats" role="group" aria-label="Category">
+        <div className="seg task-cats" role="group" aria-label={t('tasks.category')}>
           <button type="button" aria-pressed={filter === null} onClick={() => setFilter(null)}>
-            All
+            {t('memory.all')}
           </button>
           {categories.map((c) => (
             <button
@@ -848,11 +848,11 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
           ))}
         </div>
       )}
-      {nothingFound && <p className="task-empty task-hint">Add "{title.trim()}"</p>}
+      {nothingFound && <p className="task-empty task-hint">{t('tasks.addHint', { title: title.trim() })}</p>}
       <Notes notify={notify} refresh={refresh} />
       {goals.length > 0 && (
         <section className="task-group goals">
-          <h3 className="task-group-head">Goals</h3>
+          <h3 className="task-group-head">{t('goals.head')}</h3>
           <div className="task-list">
             {goals.map((goal) => (
               <GoalRow
@@ -884,9 +884,9 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
         </section>
       )}
       <section className="task-group now">
-        <h3 className="task-group-head">Now</h3>
+        <h3 className="task-group-head">{t('tasks.now')}</h3>
         {now.length === 0 ? (
-          <p className="task-empty">Nothing in Now yet. Up to three tasks you are on right now.</p>
+          <p className="task-empty">{t('tasks.nowEmpty')}</p>
         ) : (
           <div className="task-list">{now.map((p) => row(p, 'now'))}</div>
         )}
@@ -894,8 +894,8 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
       {later.length > 0 && (
         <section className="task-group later">
           <h3 className="task-group-head">
-            Later <span className="task-count">{later.length}</span>
-            <div className="seg task-sort" role="group" aria-label="Order">
+            {t('tasks.later')} <span className="task-count">{later.length}</span>
+            <div className="seg task-sort" role="group" aria-label={t('tasks.order')}>
               {SORTS.map((s) => (
                 <button
                   key={s.id}
@@ -906,7 +906,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
                     keepSort(s.id)
                   }}
                 >
-                  {s.label}
+                  {t(s.label)}
                 </button>
               ))}
             </div>
@@ -930,7 +930,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
             aria-expanded={showDone}
             onClick={() => setShowDone((v) => !v)}
           >
-            Done today <span className="task-count">{doneToday.length}</span>
+            {t('tasks.doneToday')} <span className="task-count">{doneToday.length}</span>
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <path d="M9 6l6 6-6 6" />
             </svg>
@@ -961,7 +961,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
 
 function Duration({ task }: { task: Task }) {
   if (task.duration_min === null) return null
-  return <span className="meta">{round5(task.duration_min)} min</span>
+  return <span className="meta">{t('time.minutes', { n: round5(task.duration_min) })}</span>
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000
@@ -974,22 +974,20 @@ const daysUntil = (due: Date, now: Date) =>
       DAY_MS,
   )
 
-function dueLabel(due_at: string, now: Date): string | null {
-  const due = new Date(due_at)
-  if (Number.isNaN(due.getTime())) return null
-  if (due.getTime() < now.getTime()) return 'overdue'
+function dueLabel(due: Date, now: Date): string {
   const days = daysUntil(due, now)
-  if (days === 0) return 'due today'
-  if (days === 1) return 'due tomorrow'
-  if (days < 7) return `due ${due.toLocaleDateString(undefined, { weekday: 'short' })}`
-  return `due ${due.toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}`
+  if (days === 0) return t('due.today')
+  if (days === 1) return t('due.tomorrow')
+  return t('due.on', { day: days < 7 ? format.weekday(due) : format.day(due, due) })
 }
 
 function Due({ task }: { task: Task }) {
   if (task.due_at === null) return null
-  const label = dueLabel(task.due_at, new Date())
-  if (label === null) return null
-  return <span className={`meta${label === 'overdue' ? ' warn' : ''}`}>{label}</span>
+  const due = new Date(task.due_at)
+  if (Number.isNaN(due.getTime())) return null
+  const now = new Date()
+  if (due.getTime() < now.getTime()) return <span className="meta warn">{t('due.overdue')}</span>
+  return <span className="meta">{dueLabel(due, now)}</span>
 }
 
 const URGENCY_RANK: Record<TaskUrgency, number> = { high: 0, normal: 2, low: 3 }
@@ -1005,23 +1003,17 @@ export function urgencyRank(task: Pick<Task, 'urgency' | 'pressing'>): number {
 export function Urgent({ task }: { task: Pick<Task, 'urgency' | 'pressing' | 'due_at'> }) {
   const overdue = task.due_at !== null && new Date(task.due_at).getTime() < Date.now()
   if (task.urgency !== 'high' && !(task.pressing && !overdue)) return null
-  return <span className="meta sun">urgent</span>
+  return <span className="meta sun">{t('tasks.urgent')}</span>
 }
-
-const DATE = { day: 'numeric', month: 'short' } as const
 
 function scheduleLabel(iso: string, now: Date): string | null {
   const at = new Date(iso)
   if (Number.isNaN(at.getTime())) return null
   const days = daysUntil(at, now)
-  if (days < 0 || days >= 7) return at.toLocaleDateString(undefined, DATE)
-  const time = at.toLocaleTimeString(undefined, {
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  })
-  if (days === 0) return `${time} today`
-  return `${at.toLocaleDateString(undefined, { weekday: 'short' })} ${time}`
+  if (days < 0 || days >= 7) return format.day(at, at)
+  const time = format.clock24(at)
+  if (days === 0) return t('schedule.today', { time })
+  return t('schedule.on', { day: format.weekday(at), time })
 }
 
 function Scheduled({ task }: { task: Task }) {
@@ -1047,11 +1039,11 @@ function dateValue(iso: string | null): string {
 }
 
 function goalSub(goal: Goal): string {
-  const counts = `${goal.done_tasks} of ${goal.tasks} tasks done`
+  const counts = t('goals.counts', { done: goal.done_tasks, count: goal.tasks })
   if (goal.due_at === null) return counts
   const due = new Date(goal.due_at)
   if (Number.isNaN(due.getTime())) return counts
-  return `${counts}, due ${due.toLocaleDateString(undefined, DATE)}`
+  return t('goals.countsDue', { counts, day: format.day(due, due) })
 }
 
 const PROGRESS_STEP = 5
@@ -1118,7 +1110,7 @@ function Progress({
     </span>
   )
   const left = task.remaining_min !== null && (
-    <span className="task-left">{task.remaining_min} min left</span>
+    <span className="task-left">{t('tasks.minLeft', { n: task.remaining_min })}</span>
   )
 
   const cls = `task-prog${quiet ? ' quiet' : ''}`
@@ -1132,8 +1124,8 @@ function Progress({
           aria-valuenow={value}
           aria-valuemin={0}
           aria-valuemax={100}
-          aria-valuetext={`${value}% done`}
-          aria-label={`${task.title} progress`}
+          aria-valuetext={t('tasks.percentDone', { n: value })}
+          aria-label={t('tasks.progressOf', { title: task.title })}
         >
           {bar}
         </span>
@@ -1152,8 +1144,8 @@ function Progress({
         aria-valuenow={value}
         aria-valuemin={0}
         aria-valuemax={100}
-        aria-valuetext={`${value}% done`}
-        aria-label={`${task.title} progress`}
+        aria-valuetext={t('tasks.percentDone', { n: value })}
+        aria-label={t('tasks.progressOf', { title: task.title })}
         onPointerDown={(e) => {
           if (e.button !== 0) return
           e.currentTarget.setPointerCapture(e.pointerId)
@@ -1225,10 +1217,10 @@ function GoalRow({
   }
 
   const items: OverflowItem[] = [
-    { label: 'Rename', run: () => start('title') },
-    { label: 'Set due date', run: () => start('due') },
-    { label: 'Mark done', run: () => onClose('done') },
-    { label: 'Drop', kind: 'danger', run: () => onClose('dropped') },
+    { label: t('goals.rename'), run: () => start('title') },
+    { label: t('goals.setDue'), run: () => start('due') },
+    { label: t('goals.markDone'), run: () => onClose('done') },
+    { label: t('menu.drop'), kind: 'danger', run: () => onClose('dropped') },
   ]
 
   return (
@@ -1237,7 +1229,7 @@ function GoalRow({
         <button
           className="goal-chev"
           aria-expanded={open}
-          aria-label={`The tasks of ${goal.title}`}
+          aria-label={t('goals.tasksOf', { title: goal.title })}
           onClick={onToggle}
         >
           <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -1256,7 +1248,7 @@ function GoalRow({
               aria-valuenow={pct}
               aria-valuemin={0}
               aria-valuemax={100}
-              aria-label={`${goal.title} progress`}
+              aria-label={t('tasks.progressOf', { title: goal.title })}
             >
               <span className="task-bar">
                 <span className="task-bar-fill" style={{ width: `${pct}%` }} />
@@ -1268,7 +1260,7 @@ function GoalRow({
           <Overflow
             className="task-more"
             row=".goal-row"
-            label={`More actions for ${goal.title}`}
+            label={t('memory.moreFor', { name: goal.title })}
             items={items}
           />
         </span>
@@ -1278,7 +1270,7 @@ function GoalRow({
           {editing === 'title' ? (
             <input
               value={draft}
-              aria-label={`Rename ${goal.title}`}
+              aria-label={t('goals.renameFor', { title: goal.title })}
               autoFocus
               onChange={(e) => setDraft(e.target.value)}
             />
@@ -1286,14 +1278,14 @@ function GoalRow({
             <input
               type="date"
               value={draft}
-              aria-label={`Due date for ${goal.title}`}
+              aria-label={t('goals.dueFor', { title: goal.title })}
               autoFocus
               onChange={(e) => setDraft(e.target.value)}
             />
           )}
-          <button type="submit">Save</button>
+          <button type="submit">{t('common.save')}</button>
           <button type="button" onClick={() => setEditing(null)}>
-            Cancel
+            {t('common.cancel')}
           </button>
         </form>
       )}
@@ -1359,16 +1351,16 @@ function Row({
   const loose = live && steps.length === 0
 
   const items: OverflowItem[] = []
-  if (live) items.push({ label: 'Start', run: () => actions.startFocus(node) })
+  if (live) items.push({ label: t('block.start'), run: () => actions.startFocus(node) })
   items.push(
     group === 'now'
-      ? { label: 'Move to Later', run: () => actions.moveToLater(node) }
-      : { label: 'Move to Now', run: () => actions.moveToNow(node) },
+      ? { label: t('tasks.toLater'), run: () => actions.moveToLater(node) }
+      : { label: t('tasks.toNow'), run: () => actions.moveToNow(node) },
   )
   items.push({
-    label: 'Announce',
+    label: t('block.announce'),
     children: ANNOUNCE.map((choice) => ({
-      label: choice.label,
+      label: t(choice.label),
       run: () => actions.announce(node, choice.id),
       checked: node.notify === choice.id,
     })),
@@ -1376,54 +1368,54 @@ function Row({
   if (live)
     items.push(
       {
-        label: 'Category',
+        label: t('tasks.category'),
         children: [
           ...categories.map((c) => ({
             label: c,
             run: () => actions.setCategory(node, c),
             checked: node.category === c,
           })),
-          { label: 'None', run: () => actions.setCategory(node, ''), checked: node.category === '' },
-          { label: 'New…', run: () => setNaming('') },
+          { label: t('announce.none'), run: () => actions.setCategory(node, ''), checked: node.category === '' },
+          { label: t('tasks.newCategory'), run: () => setNaming('') },
         ],
       },
       {
-        label: 'Goal',
+        label: t('goals.goal'),
         children: [
           ...goals.map((g) => ({
             label: g.title,
             run: () => actions.setGoal(node, g.id),
             checked: node.goal_id === g.id,
           })),
-          { label: 'None', run: () => actions.setGoal(node, null), checked: node.goal_id === null },
+          { label: t('announce.none'), run: () => actions.setGoal(node, null), checked: node.goal_id === null },
         ],
       },
       {
-        label: 'Urgency',
+        label: t('tasks.sort.urgency'),
         children: (['low', 'normal', 'high'] as const).map((u) => ({
-          label: u === 'low' ? 'Low' : u === 'normal' ? 'Normal' : 'High',
+          label: t(`urgency.${u}`),
           run: () => actions.setUrgency(node, u),
           checked: node.urgency === u,
         })),
       },
     )
-  if (steps.length > 0) items.push({ label: 'Merge steps', run: () => actions.mergeSteps(node) })
+  if (steps.length > 0) items.push({ label: t('tasks.mergeSteps'), run: () => actions.mergeSteps(node) })
   if (sheet && loose)
     items.push({
-      label: 'Progress',
+      label: t('tasks.progress'),
       children: [
         ...PROGRESS_PICKS.map((p) => ({
-          label: `${p} %`,
+          label: format.number(p / 100, { style: 'percent' }),
           run: () => actions.setProgress(node, p),
         })),
-        { label: 'Done', run: () => actions.complete(node) },
+        { label: t('menu.done'), run: () => actions.complete(node) },
       ],
     })
-  items.push({ label: 'Drop', kind: 'danger', run: () => actions.drop(node) })
+  items.push({ label: t('menu.drop'), kind: 'danger', run: () => actions.drop(node) })
 
   const hint =
     group === 'now' && node.duration_min === null && node.duration_source === 'none'
-      ? 'Note will estimate'
+      ? t('tasks.willEstimate')
       : null
   const progress = finished ? 100 : nodeProgress(node)
   const speaks = progress > 0 || steps.length > 0 || group === 'now'
@@ -1439,7 +1431,7 @@ function Row({
       <div className="task-row">
         <Tick
           checked={finished}
-          label={done ? `Mark ${node.title} not done` : `Mark ${node.title} done`}
+          label={t(done ? 'tasks.markUndone' : 'notes.tick', { text: node.title })}
           onClick={() => (done ? reopen() : actions.complete(node))}
         />
         <div className="task-body">
@@ -1485,15 +1477,15 @@ function Row({
             <Overflow
               className="task-more"
               row=".task-row"
-              label={`More actions for ${node.title}`}
+              label={t('memory.moreFor', { name: node.title })}
               items={items}
             />
           )}
           {group === 'now' && !sheet && (
             <button
               className="task-start"
-              data-tip="Start"
-              aria-label={`Start ${focusTarget(node).title}`}
+              data-tip={t('block.start')}
+              aria-label={t('block.startFor', { name: focusTarget(node).title })}
               onClick={() => actions.startFocus(node)}
             >
               <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -1515,14 +1507,14 @@ function Row({
         >
           <input
             value={naming}
-            placeholder="New category"
-            aria-label={`Category for ${node.title}`}
+            placeholder={t('tasks.newCategoryPlaceholder')}
+            aria-label={t('tasks.categoryFor', { title: node.title })}
             autoFocus
             onChange={(e) => setNaming(e.target.value)}
           />
-          <button type="submit">Save</button>
+          <button type="submit">{t('common.save')}</button>
           <button type="button" onClick={() => setNaming(null)}>
-            Cancel
+            {t('common.cancel')}
           </button>
         </form>
       )}
@@ -1532,7 +1524,7 @@ function Row({
             <li key={c.id} className={`task-step${c.state === 'done' ? ' done' : ''}`}>
               <Tick
                 checked={c.state === 'done'}
-                label={c.state === 'done' ? `Mark ${c.title} not done` : `Mark ${c.title} done`}
+                label={t(c.state === 'done' ? 'tasks.markUndone' : 'notes.tick', { text: c.title })}
                 onClick={() =>
                   c.state === 'done' ? actions.reopenStep(c) : actions.complete(node, c)
                 }

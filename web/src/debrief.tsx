@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api, ApiError } from './api'
 import type { Debrief } from './types'
+import { t } from './i18n'
 
 const FOLD_KEY = 'note.debriefFolded'
 
@@ -50,14 +51,14 @@ export function DebriefFold() {
 
   if (debrief === undefined) return null
   if (debrief === null) {
-    return <p className="debrief-note muted">No letter yet — it arrives overnight.</p>
+    return <p className="debrief-note muted">{t('letter.none')}</p>
   }
   if (debrief === 'error') {
     return (
       <p className="debrief-note muted">
-        The morning letter didn't load.{' '}
+        {t('letter.failed')}{' '}
         <button className="quiet" onClick={load}>
-          Retry
+          {t('common.retry')}
         </button>
       </p>
     )
@@ -74,7 +75,7 @@ export function DebriefFold() {
       <button className="debrief-fold" aria-expanded={!folded} onClick={toggle}>
         <span className="debrief-mark" aria-hidden="true" />
         <span className="debrief-lead">
-          <b>This morning:</b> {firstSentence(debrief.content)}
+          <b>{t('letter.lead')}</b> {firstSentence(debrief.content)}
         </span>
         <span className="debrief-chev" aria-hidden="true">
           <svg viewBox="0 0 24 24">

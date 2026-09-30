@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react'
 import { api, ApiError } from './api'
 import { stillCurrent } from './brief'
 import type { Review } from './types'
+import { t } from './i18n'
+import * as format from './i18n/format'
 
 const FOLD_KEY = 'note.reviewFolded'
 
@@ -29,8 +31,7 @@ function weekWords(week: string): string {
   if (Number.isNaN(monday.getTime())) return week
   const sunday = new Date(monday)
   sunday.setDate(sunday.getDate() + 6)
-  const day = (at: Date) => at.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
-  return `${day(monday)} – ${day(sunday)}`
+  return t('review.range', { from: format.day(monday, monday), to: format.day(sunday, monday) })
 }
 
 export function ReviewFold() {
@@ -67,7 +68,7 @@ export function ReviewFold() {
       <button className="debrief-fold" aria-expanded={!folded} onClick={toggle}>
         <span className="debrief-mark" aria-hidden="true" />
         <span className="debrief-lead">
-          <b>Your week:</b> {weekWords(review.week_start)}
+          <b>{t('review.lead')}</b> {weekWords(review.week_start)}
         </span>
         <span className="debrief-chev" aria-hidden="true">
           <svg viewBox="0 0 24 24">

@@ -14,7 +14,7 @@ import {
 } from 'react'
 import { api, ApiError } from '../api'
 import { busyIn, markBriefRead, morningOpen, pickBrief, readBriefs, type Brief } from '../brief'
-import { hintShown, hintUsed, railX, sessionFor, slotAfter, withoutCategory, WORK_TIME } from '../circle'
+import { hintShown, hintUsed, railX, sessionFor, slotAfter, withoutCategory, workTime } from '../circle'
 import { latest } from '../coalesce'
 import type { ToastAction } from '../app'
 import { DayLine, minutesOf } from '../dayline'
@@ -50,9 +50,10 @@ import { Urgent } from './Tasks'
 import { DebriefFold } from '../debrief'
 import { ReviewFold } from '../review'
 import '../styles/home-motion.css'
+import { t, type Key } from '../i18n'
 
 const LATER_MINUTES = [5, 10, 15, 30, 60]
-const laterLabel = (m: number) => (m < 60 ? `${m} min` : `${m / 60} h`)
+const laterLabel = (m: number) => (m < 60 ? t('time.minutes', { n: m }) : t('time.hours', { n: m / 60 }))
 const ROUTINE_MIN = 15
 const PIN_MOBILE = 520
 const PIN_DESKTOP = 600
@@ -111,10 +112,10 @@ const hairline = (reason?: QueueReason) =>
   reason === 'overdue' ? 'rose' : reason === 'urgent' || reason === 'due_soon' ? 'sun' : null
 
 // What a block laid for the task does when it starts.
-const ANNOUNCE: { id: TaskNotify; label: string }[] = [
-  { id: 'none', label: 'None' },
-  { id: 'chat', label: 'Chat' },
-  { id: 'notify', label: 'Notify' },
+const ANNOUNCE: { id: TaskNotify; label: Key }[] = [
+  { id: 'none', label: 'announce.none' },
+  { id: 'chat', label: 'announce.chat' },
+  { id: 'notify', label: 'announce.notify' },
 ]
 
 function nowMinutes(): number {
@@ -144,10 +145,10 @@ function minutesOfDayNow(): number {
 
 function actionMessage(err: unknown): string {
   if (err instanceof ApiError) {
-    if (err.status === 409) return 'Already settled.'
-    if (err.status === 404) return 'That event is gone.'
+    if (err.status === 409) return t('block.settled')
+    if (err.status === 404) return t('block.gone')
   }
-  return 'Something went wrong. Try again.'
+  return t('common.failed')
 }
 
 // Where the wait started: the end of the last settled routine before now, else 06:00.
@@ -163,7 +164,7 @@ function waitStart(events: PlanEvent[], now: number): number {
 // session started with has to travel back out with the new line.
 function withElapsedNote(previous: string, elapsed: number): string {
   const day = new Date().toISOString().slice(0, 10)
-  const line = `${day} · focused ${Math.max(1, Math.round(elapsed / 60))} min`
+  const line = t('session.focusedNote', { day, n: Math.max(1, Math.round(elapsed / 60)) })
   return previous.trim() ? `${previous.trim()}\n${line}` : line
 }
 
@@ -316,8 +317,8 @@ export function Home({
       api.eventAction(ev.id, 'drop').then(settled, settled)
     })
     tick((n) => n + 1)
-    notify(`Dropped ${eventLabel(ev.kind)}`, {
-      label: 'Undo',
+    notify(t('block.dropped', { name: eventLabel(ev.kind) }), {
+      label: t('toast.undo'),
       run: () => {
         if (dropHold.cancel(ev.id)) tick((n) => n + 1)
       },
@@ -394,7 +395,7 @@ export function Home({
     try {
       setSession(await fn())
     } catch {
-      notify("Couldn't reach Note. Try again.")
+      notify(t('common.unreachable'))
     } finally {
       setPending(false)
     }
@@ -419,20 +420,20 @@ export function Home({
         api
           .patchTask(task.id, { state: 'done', notes: withElapsedNote(task.notes, elapsed) })
           .then(onChanged)
-          .catch(() => notify("Couldn't save the session. Try again."))
+          .catch(() => notify(t('session.saveFailed')))
       }
       if (s.event_id !== null) {
         api
           .eventAction(s.event_id, 'done')
           .then(onChanged)
-          .catch(() => notify("Couldn't mark that done. Try again."))
+          .catch(() => notify(t('block.doneFailed')))
       }
     }
     doneHold.start(s, send)
     setSession(null)
     onChanged()
-    notify('Done', {
-      label: 'Undo',
+    notify(t('toast.done'), {
+      label: t('toast.undo'),
       run: () => {
         if (!doneHold.cancel(s)) return
         markEnding(null)
@@ -450,11 +451,11 @@ export function Home({
       api
         .patchTask(step.id, { state: 'done', notes })
         .then(onChanged)
-        .catch(() => notify("Couldn't save the session. Try again."))
+        .catch(() => notify(t('session.saveFailed')))
     })
     onChanged()
-    notify('Done', {
-      label: 'Undo',
+    notify(t('toast.done'), {
+      label: t('toast.undo'),
       run: () => {
         if (!doneHold.cancel(s)) return
         void route(() =>
@@ -532,7 +533,7 @@ export function Home({
       complete(s, current)
       return 'completed'
     } catch {
-      notify("Couldn't save the session. Try again.")
+      notify(t('session.saveFailed'))
       return null
     } finally {
       setPending(false)
@@ -595,7 +596,7 @@ export function Home({
   const pauseButton = (s: FocusSession) => (
     <button
       className="btn-round"
-      aria-label={onBreak || isPaused(s) ? 'Back to it' : 'Break'}
+      aria-label={onBreak || isPaused(s) ? t('session.backToIt') : t('session.break')}
       onClick={onBreak ? backToIt : isPaused(s) ? resume : pause}
     >
       {onBreak || isPaused(s) ? (
@@ -607,7 +608,7 @@ export function Home({
   )
 
   const doneButton = (
-    <button className={`btn-fill${mobile ? ' wide' : ''}`} disabled={pending} onClick={() => void finishSession()}>Done with this step</button>
+    <button className={`btn-fill${mobile ? ' wide' : ''}`} disabled={pending} onClick={() => void finishSession()}>{t('session.stepDone')}</button>
   )
 
   // The break asks for a word about the round, in the session's own thread.
@@ -616,7 +617,7 @@ export function Home({
       <Jot
         flow
         conversationId={session.conversation_id}
-        placeholder="How did that round go?"
+        placeholder={t('session.roundNote')}
         openTalk={openTalk}
         openConversation={openConversation}
       />
@@ -732,12 +733,12 @@ export function Home({
       items = await api.candidates(5)
     } catch {
       setSettling(false)
-      notify("Couldn't reach Note. Try again.")
+      notify(t('common.unreachable'))
       return
     }
     if (!items.length) {
       setSettling(false)
-      notify('Nothing open to work on.')
+      notify(t('session.nothingOpen'))
       return
     }
     hintUsed('start')
@@ -772,7 +773,7 @@ export function Home({
     if (sessionKeyNow.current !== key) return
     let index: number
     if (s.task_id === null) {
-      if (s.title !== WORK_TIME.title) return
+      if (s.title !== workTime().title) return
       index = 0
     } else {
       const found = items.findIndex((e) => e.task.id === s.task_id)
@@ -811,11 +812,11 @@ export function Home({
       setLanding(null)
       setStrip(strip)
       snapTo(strip.index)
-      notify("Couldn't reach Note. Try again.")
+      notify(t('common.unreachable'))
       return
     }
     lastStartAt.current = Date.now()
-    openNow(target === 0 ? WORK_TIME : sessionFor(strip.items[target - 1]))
+    openNow(target === 0 ? workTime() : sessionFor(strip.items[target - 1]))
     window.setTimeout(() => {
       switching.current = false
       setLanding((l) => (l === s ? null : l))
@@ -925,8 +926,8 @@ export function Home({
     })
     setSession(null)
     onChanged()
-    notify('Stopped', {
-      label: 'Undo',
+    notify(t('session.stopped'), {
+      label: t('toast.undo'),
       run: () => {
         if (!stopHold.cancel(s)) return
         markEnding(null)
@@ -937,7 +938,7 @@ export function Home({
 
   const stopButton = (s: FocusSession) =>
     isPaused(s) && (
-      <button className="btn-round face-stop" aria-label="Stop" disabled={pending} onClick={stop}>
+      <button className="btn-round face-stop" aria-label={t('session.stop')} disabled={pending} onClick={stop}>
         <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6.5" y="6.5" width="11" height="11" rx="1.8" /></svg>
       </button>
     )
@@ -945,7 +946,7 @@ export function Home({
   const surface = {
     tabIndex: 0,
     role: 'button',
-    'aria-label': !session ? 'Start working' : onBreak || isPaused(session) ? 'Back to it' : 'Break',
+    'aria-label': !session ? t('session.start') : onBreak || isPaused(session) ? t('session.backToIt') : t('session.break'),
     onPointerDown: (e: PointEvent<HTMLDivElement>) => {
       if (e.button !== 0) return
       drag.current = { x: e.clientX, y: e.clientY, t: Date.now(), dx: 0, dy: 0, asleep: !!session && asleep() }
@@ -1174,15 +1175,15 @@ export function Home({
 
   const blockMenuItems = (ev: PlanEvent): OverflowItem[] => {
     if (ev.status === 'done' || ev.status === 'dropped') {
-      return [{ label: ev.status === 'done' ? 'Already done' : 'Already dropped', disabled: true }]
+      return [{ label: ev.status === 'done' ? t('block.alreadyDone') : t('block.alreadyDropped'), disabled: true }]
     }
     const tomorrow: OverflowItem = {
-      label: 'Move to tomorrow',
+      label: t('block.tomorrow'),
       run: () => act(() => api.moveTomorrow(ev.id)),
       disabled: pending,
     }
     const dropToday: OverflowItem = {
-      label: 'Drop today',
+      label: t('block.dropToday'),
       kind: 'danger',
       run: () => drop(ev),
       disabled: pending,
@@ -1190,14 +1191,14 @@ export function Home({
     const task = ev.task
     if (task) {
       return [
-        { label: 'Start', run: () => start(ev), disabled: pending },
-        { label: 'Done', run: () => finishBlock(ev), disabled: pending },
+        { label: t('block.start'), run: () => start(ev), disabled: pending },
+        { label: t('block.done'), run: () => finishBlock(ev), disabled: pending },
         tomorrow,
         dropToday,
         {
-          label: 'Announce',
+          label: t('block.announce'),
           children: ANNOUNCE.map((choice) => ({
-            label: choice.label,
+            label: t(choice.label),
             run: () => act(() => api.patchTask(task.id, { notify: choice.id })),
             disabled: pending,
             checked: task.notify === undefined ? undefined : task.notify === choice.id,
@@ -1206,10 +1207,10 @@ export function Home({
       ]
     }
     return [
-      { label: 'Start', run: () => start(ev), disabled: pending },
-      { label: 'Later', children: laterItems(ev) },
+      { label: t('block.start'), run: () => start(ev), disabled: pending },
+      { label: t('block.later'), children: laterItems(ev) },
       {
-        label: 'Ping me',
+        label: t('block.pingMe'),
         run: () => act(() => api.setEventAlert(ev.id, !ev.alert)),
         disabled: pending,
         checked: ev.alert,
@@ -1238,7 +1239,7 @@ export function Home({
       )
     }
     const category = entry?.task.category ?? ''
-    const name = entry ? withoutCategory((entry.step ?? entry.task).title, category) : WORK_TIME.title
+    const name = entry ? withoutCategory((entry.step ?? entry.task).title, category) : workTime().title
     const sub = entry ? withoutCategory(entry.step ? entry.task.title : firstLine(entry.task.notes), category) : ''
     return (
       <div key={i} className={`slot${i === strip.index ? ' now' : ''}`} aria-hidden="true">
@@ -1272,7 +1273,7 @@ export function Home({
         <svg className={`pause-glyph${isPaused(shown) ? ' on' : ''}`} viewBox="0 0 24 24" aria-hidden="true">
           <rect x="6" y="5" width="4" height="14" rx="1.2" /><rect x="14" y="5" width="4" height="14" rx="1.2" />
         </svg>
-        {sessionHint && phase !== 'idle' && phase !== 'break' && phase !== 'paused' && <p className="face-hint under">tap to pause · swipe down when done</p>}
+        {sessionHint && phase !== 'idle' && phase !== 'break' && phase !== 'paused' && <p className="face-hint under">{t('hint.session')}</p>}
         {strip && (
           <div ref={dotsEl} className="strip-dots" aria-hidden="true">
             {Array.from({ length: slotCount }, (_, i) => (
@@ -1290,7 +1291,7 @@ export function Home({
         <div ref={briefBody} className="brief-body">
           <span className="brief-mark" aria-hidden="true" />
           <div className="letter">{briefView.content}</div>
-          <button className="btn-round brief-read" aria-label="Read" onClick={readBrief}>
+          <button className="btn-round brief-read" aria-label={t('brief.read')} onClick={readBrief}>
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5" /></svg>
           </button>
         </div>
@@ -1307,10 +1308,10 @@ export function Home({
             <div className="gauge-name" style={{ fontSize: u(mobile ? 18 : 22) }}><Atoms text={label} /></div>
             {face?.of && <div className="gauge-of"><Atoms text={face.of} /></div>}
             <div className="gauge-sub" style={{ fontSize: mobile ? undefined : u(14) }}><Atoms text={facts.span} /></div>
-            {startHint && <p className="face-hint inline">tap the circle to start working</p>}
+            {startHint && <p className="face-hint inline">{t('hint.start')}</p>}
           </Gauge>
         ) : (
-          startHint && <p className="face-hint">tap the circle to start working</p>
+          startHint && <p className="face-hint">{t('hint.start')}</p>
         )}
       </div>
       {next && facts && !prefs.showArc && (
@@ -1376,7 +1377,7 @@ export function Home({
     <section className="today-hero">
       {next && facts ? (
         <>
-          <div className="today-eyebrow">{facts.eyebrow} {next.wall_time}</div>
+          <div className="today-eyebrow">{t(`face.${facts.eyebrow}`)} {next.wall_time}</div>
           <h1 className="today-title">{label}</h1>
           {face?.of && <p className="today-of">{face.of}</p>}
           <div className="today-wait">
@@ -1390,7 +1391,7 @@ export function Home({
           </div>
         </>
       ) : (
-        events && <h1 className="today-title">That's everything today.</h1>
+        events && <h1 className="today-title">{t('today.empty')}</h1>
       )}
     </section>
   )
@@ -1430,20 +1431,18 @@ export function Home({
   const pastCloseDay = prefs.closeDay !== '' && now >= minutesOf(prefs.closeDay)
   const closeDay = pastCloseDay && !left && openBlocks.length > 0 && (
     <section className="close-day">
-      <p className="close-day-head">Close the day</p>
-      <p className="close-day-line">
-        {openBlocks.length} block{openBlocks.length === 1 ? '' : 's'} still open.
-      </p>
+      <p className="close-day-head">{t('closeDay.head')}</p>
+      <p className="close-day-line">{t('closeDay.open', { count: openBlocks.length })}</p>
       <div className="close-day-actions">
         <button
           className="btn-fill small"
           disabled={pending}
           onClick={() => act(() => api.carry(todayIso()))}
         >
-          Carry to tomorrow
+          {t('closeDay.carry')}
         </button>
         <button className="btn-haze small" disabled={pending} onClick={leaveThem}>
-          Leave them
+          {t('closeDay.leave')}
         </button>
       </div>
     </section>
@@ -1457,7 +1456,7 @@ export function Home({
         {ev.task && (
           <Tick
             checked={ev.status === 'done'}
-            label={`Done: ${name}`}
+            label={t('block.doneFor', { name })}
             onClick={() => finishBlock(ev)}
           />
         )}
@@ -1466,12 +1465,12 @@ export function Home({
           {ev.task && <Urgent task={{ ...ev.task, due_at: null }} />}
           {of && <span className="home-of">{of}</span>}
         </span>
-        <button className="home-start" aria-label={`Start ${name}`} disabled={pending} onClick={() => start(ev)}>
+        <button className="home-start" aria-label={t('block.startFor', { name })} disabled={pending} onClick={() => start(ev)}>
           <svg viewBox="0 0 24 24" aria-hidden="true">
             <path d="M9 7.5v9l7-4.5z" />
           </svg>
         </button>
-        <Overflow label={`More: ${name}`} row=".home-list li" items={blockMenuItems(ev)} />
+        <Overflow label={t('menu.more', { name })} row=".home-list li" items={blockMenuItems(ev)} />
       </>
     )
   }
@@ -1776,7 +1775,7 @@ export function Home({
   }, [inSession])
 
   const chevron = (
-    <button className="chev" aria-label="Today" onClick={() => st.current && scrollToY(st.current.end)}>
+    <button className="chev" aria-label={t('nav.today')} onClick={() => st.current && scrollToY(st.current.end)}>
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 14l6-6 6 6" /></svg>
     </button>
   )
@@ -1794,7 +1793,7 @@ export function Home({
 
   return (
     <div ref={home} className={cls}>
-      <section ref={stage} className="stage" aria-label="Today">
+      <section ref={stage} className="stage" aria-label={t('nav.today')}>
         {motion ? (
           <div className="face-big">
             {bigFace}
@@ -1809,7 +1808,7 @@ export function Home({
         {motion && session && mobile && (
           <div className="home-sheet">
             {doneButton}
-            <Jot flow placeholder="Tell Note" openTalk={openTalk} openConversation={openConversation} />
+            <Jot flow placeholder={t('jot.tellNote')} openTalk={openTalk} openConversation={openConversation} />
           </div>
         )}
         {compactLanding ? today : events && <section className="today-line"><DayLine events={visible} calendar={day?.calendar} now={now} nextId={next?.id} hoverId={hoverId} onHover={setHoverId} />{closeDay}{list}</section>}
