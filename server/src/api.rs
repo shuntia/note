@@ -1592,14 +1592,23 @@ async fn voice_link(
     match voice.open_dm(link_id, &mxid).await {
         Ok(room_id) => {
             let conn = state.db();
-            if crate::voice::links::set_room(&conn, link_id, &room_id).is_err() {
-                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            match crate::voice::links::set_room(&conn, link_id, &room_id) {
+                Ok(true) => {}
+                Ok(false) => {
+                    return (
+                        StatusCode::CONFLICT,
+                        Json(serde_json::json!({ "error": "the link was removed" })),
+                    )
+                        .into_response();
+                }
+                Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
             }
             Json(serde_json::json!({ "mxid": mxid, "state": "invited", "room_id": room_id }))
                 .into_response()
         }
         Err(refusal) => {
             let conn = state.db();
+            let _ = crate::voice::links::forget_unsent(&conn, link_id);
             let _ = crate::log::record(&conn, Some(user.id), "voice_link_error", &refusal.to_string());
             (
                 StatusCode::SERVICE_UNAVAILABLE,

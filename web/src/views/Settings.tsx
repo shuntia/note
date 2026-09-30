@@ -288,6 +288,11 @@ export function Settings({
       ? err.message
       : "That didn't save. Try again."
 
+  const callFailure = (err: unknown) =>
+    err instanceof ApiError && [400, 409, 422, 503].includes(err.status)
+      ? err.message
+      : "That didn't go through. Try again."
+
   // Only the fields that moved travel, so an edit left open in another row is never
   // written by someone else's save. `override` carries a value whose state update
   // has not landed yet, for controls that save on change.
@@ -415,7 +420,7 @@ export function Settings({
       )
       setSave(null)
     } catch (err) {
-      setSave({ row: 'calls', kind: 'failed', message: failure(err) })
+      setSave({ row: 'calls', kind: 'failed', message: callFailure(err) })
     }
   }
 
@@ -426,7 +431,7 @@ export function Settings({
       setState((s) => (s && s !== 'error' ? { ...s, voiceLink: null } : s))
       setSave({ row: 'calls', kind: 'saved' })
     } catch (err) {
-      setSave({ row: 'calls', kind: 'failed', message: failure(err) })
+      setSave({ row: 'calls', kind: 'failed', message: callFailure(err) })
     }
   }
 
@@ -436,7 +441,7 @@ export function Settings({
       await api.voiceTest()
       setSave({ row: 'calls', kind: 'saved', message: 'Ringing' })
     } catch (err) {
-      setSave({ row: 'calls', kind: 'failed', message: failure(err) })
+      setSave({ row: 'calls', kind: 'failed', message: callFailure(err) })
     }
   }
 
@@ -459,9 +464,13 @@ export function Settings({
       void api
         .settings()
         .then((s) => {
-          if (s.voice_link?.state !== 'linked') return
+          const next = s.voice_link
           setState((prev) =>
-            prev && prev !== 'error' ? { ...prev, voiceLink: s.voice_link } : prev,
+            prev &&
+            prev !== 'error' &&
+            (prev.voiceLink?.mxid !== next?.mxid || prev.voiceLink?.state !== next?.state)
+              ? { ...prev, voiceLink: next }
+              : prev,
           )
         })
         .catch(() => undefined)
