@@ -18,7 +18,7 @@ pub async fn write_frame<W: AsyncWrite + Unpin>(w: &mut W, frame: &Frame) -> Res
     if bytes.len() > MAX_FRAME {
         return Err(CodecError::TooLarge(bytes.len()));
     }
-    w.write_u32(u32::try_from(bytes.len()).map_err(|_| CodecError::TooLarge(bytes.len()))?).await?;
+    w.write_u32(bytes.len() as u32).await?;
     w.write_all(&bytes).await?;
     w.flush().await?;
     Ok(())
@@ -104,7 +104,7 @@ mod tests {
     #[tokio::test]
     async fn an_oversized_length_is_refused_before_reading_the_body() {
         let (mut a, mut b) = tokio::io::duplex(64);
-        a.write_u32(u32::try_from(MAX_FRAME + 1).unwrap()).await.unwrap();
+        a.write_u32((MAX_FRAME + 1) as u32).await.unwrap();
         match read_frame(&mut b).await {
             Err(CodecError::TooLarge(n)) => assert_eq!(n, MAX_FRAME + 1),
             other => panic!("expected TooLarge, got {other:?}"),

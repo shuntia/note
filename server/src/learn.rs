@@ -32,11 +32,6 @@ pub fn plan_factor(conn: &Connection, user_id: i64) -> rusqlite::Result<Option<L
 
 /// A planned duration as the factor says it will really run, rounded up to the
 /// grain. Without a factor the duration stands as it was.
-#[expect(
-    clippy::cast_possible_truncation,
-    clippy::cast_precision_loss,
-    reason = "block lengths are minutes, far inside both types"
-)]
 pub fn stretch(minutes: i64, factor: Option<Learned>) -> i64 {
     let Some(f) = factor else { return minutes };
     let stretched = (minutes as f64 * f.value / GRAIN as f64).ceil() as i64 * GRAIN;
@@ -54,7 +49,6 @@ fn median(values: &mut [f64]) -> f64 {
 
 /// Elapsed over planned for every session in the window that finished what it
 /// set out to do and ran long enough to be told from a false start.
-#[expect(clippy::cast_precision_loss, reason = "session lengths are minutes, far inside f64")]
 fn ratios(conn: &Connection, user_id: i64, now: jiff::Timestamp) -> rusqlite::Result<Vec<f64>> {
     let since = now
         .checked_sub(jiff::Span::new().hours(WINDOW_HOURS))
@@ -99,7 +93,7 @@ pub fn run_for_user(conn: &Connection, user_id: i64, now: jiff::Timestamp) -> Re
         )?;
         return Ok(());
     }
-    let sample = i64::try_from(ratios.len()).unwrap_or(i64::MAX);
+    let sample = ratios.len() as i64;
     let value = median(&mut ratios).clamp(FLOOR, CEILING);
     conn.execute(
         "INSERT INTO learning (user_id, key, value, sample, computed_at)

@@ -257,7 +257,7 @@ pub fn add(
     key: &Passkey,
 ) -> Result<PasskeyInfo, SaveError> {
     let name = clean_name(name)?;
-    if usize::try_from(count(conn, user_id)?).unwrap_or(usize::MAX) >= MAX_PASSKEYS {
+    if count(conn, user_id)? as usize >= MAX_PASSKEYS {
         return Err(SaveError::TooMany);
     }
     let created_at = jiff::Timestamp::now().to_string();
@@ -567,7 +567,7 @@ async fn passkey_challenge(
     let existing = {
         let conn = state.db();
         match (count(&conn, user.id), credentials(&conn, user.id)) {
-            (Ok(held), _) if usize::try_from(held).unwrap_or(usize::MAX) >= MAX_PASSKEYS => {
+            (Ok(held), _) if held as usize >= MAX_PASSKEYS => {
                 return error(StatusCode::CONFLICT, &SaveError::TooMany.to_string())
             }
             (Ok(_), Ok(keys)) => keys,
@@ -850,7 +850,7 @@ mod tests {
             conn.execute(
                 "INSERT INTO passkeys (user_id, name, credential, cred_id, created_at)
                  VALUES (?1, ?2, '{}', ?3, 'now')",
-                (uid, format!("k{i}"), vec![u8::try_from(i).unwrap()]),
+                (uid, format!("k{i}"), vec![i as u8]),
             )
             .unwrap();
         }

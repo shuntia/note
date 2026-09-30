@@ -47,7 +47,7 @@ pub fn digest(
     )?;
     let threads = stmt
         .query_map(
-            (user_id, since.to_string(), now.to_string(), i64::try_from(MAX_CONVERSATIONS).unwrap_or(i64::MAX)),
+            (user_id, since.to_string(), now.to_string(), MAX_CONVERSATIONS as i64),
             |r| {
                 Ok(Thread {
                     id: r.get(0)?,
@@ -93,7 +93,7 @@ fn raw_turns(conn: &Connection, conversation_id: i64) -> Result<String> {
          ORDER BY id DESC LIMIT ?2",
     )?;
     let mut rows = stmt
-        .query_map((conversation_id, i64::try_from(RAW_ROWS).unwrap_or(i64::MAX)), |r| {
+        .query_map((conversation_id, RAW_ROWS as i64), |r| {
             let role: String = r.get(0)?;
             let content: String = r.get(1)?;
             let speaker = if role == "user" { "user" } else { "note" };
@@ -322,7 +322,7 @@ pub fn run_for_user(
         }
         digest.trim().to_string()
     };
-    let written = i64::try_from(kept.len()).unwrap_or(i64::MAX)
+    let written = kept.len() as i64
         + if digest.is_empty() {
         0
     } else {
@@ -350,7 +350,7 @@ pub fn run_for_user(
             &digest,
         ) {
             Ok(out) => {
-                i64::try_from(out.steps.iter().filter(|s| s.name == "memory_write" && !s.is_error).count()).unwrap_or(i64::MAX)
+                out.steps.iter().filter(|s| s.name == "memory_write" && !s.is_error).count() as i64
             }
             Err(e) => {
                 let conn = crate::db_guard(deps.db);

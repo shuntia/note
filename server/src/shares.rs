@@ -18,7 +18,6 @@ const MAX_EXPIRY_DAYS: u32 = 36500;
 /// What a link lets its visitor learn. Stored as JSON in `shares.scope`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-#[expect(clippy::struct_excessive_bools, reason = "each flag is one switch of the stored JSON scope")]
 pub struct ShareScope {
     pub today: bool,
     pub tasks: bool,
@@ -510,7 +509,7 @@ pub fn history(
         "SELECT role, content FROM share_messages WHERE thread_id = ?1 AND role IN ('user','assistant') ORDER BY id DESC LIMIT ?2",
     )?;
     let mut out: Vec<crate::providers::Message> = stmt
-        .query_map((thread_id, i64::try_from(limit).unwrap_or(i64::MAX)), |r| {
+        .query_map((thread_id, limit as i64), |r| {
             let role: String = r.get(0)?;
             let content: String = r.get(1)?;
             Ok(match role.as_str() {
@@ -727,8 +726,8 @@ pub fn render(
                     .as_deref()
                     .and_then(|d| d.parse::<jiff::Timestamp>().ok())
                     .is_some_and(|d| d < now),
-                steps: i64::try_from(node.children.iter().filter(|c| c.state != "dropped").count()).unwrap_or(i64::MAX),
-                done_steps: i64::try_from(node.children.iter().filter(|c| c.state == "done").count()).unwrap_or(i64::MAX),
+                steps: node.children.iter().filter(|c| c.state != "dropped").count() as i64,
+                done_steps: node.children.iter().filter(|c| c.state == "done").count() as i64,
                 category: t.category.clone(),
                 goal_title: t.goal_title.clone().filter(|_| scope.goals),
                 description: scope.details.then(|| t.description.clone()),

@@ -181,7 +181,7 @@ pub fn append_assistant(
         "INSERT INTO talk_messages
             (conversation_id, role, content, reasoning, thought_ms, created_at)
          VALUES (?1, 'assistant', ?2, ?3, ?4, ?5)",
-        (conversation_id, content, reasoning, i64::try_from(thought_ms).unwrap_or(i64::MAX), now.to_string()),
+        (conversation_id, content, reasoning, thought_ms as i64, now.to_string()),
     )?;
     Ok(())
 }
@@ -258,7 +258,7 @@ pub fn history(conn: &Connection, conversation_id: i64, limit: usize) -> Result<
          ORDER BY id DESC LIMIT ?2",
     )?;
     let mut msgs = stmt
-        .query_map((conversation_id, i64::try_from(limit).unwrap_or(i64::MAX)), |r| {
+        .query_map((conversation_id, limit as i64), |r| {
             let role: String = r.get(0)?;
             let content: String = r.get(1)?;
             Ok(match role.as_str() {
@@ -285,7 +285,7 @@ pub fn history_after(
          ORDER BY id DESC LIMIT ?3",
     )?;
     let mut msgs = stmt
-        .query_map((conversation_id, after_id, i64::try_from(limit).unwrap_or(i64::MAX)), |r| {
+        .query_map((conversation_id, after_id, limit as i64), |r| {
             let role: String = r.get(0)?;
             let content: String = r.get(1)?;
             Ok(match role.as_str() {
@@ -307,7 +307,7 @@ pub fn text_turns(conn: &Connection, conversation_id: i64) -> Result<usize> {
         [conversation_id],
         |r| r.get(0),
     )?;
-    Ok(usize::try_from(n).unwrap_or(0))
+    Ok(n as usize)
 }
 
 /// The summary a conversation carries, with the row it covers up to.

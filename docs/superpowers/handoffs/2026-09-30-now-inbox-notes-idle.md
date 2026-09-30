@@ -79,7 +79,7 @@ Built to `specs/2026-09-30-quiet-today-notes-tab-briefs-i18n-design.md`.
   formatters. `i18n/strings.test.ts` fails on any reader-facing text in the
   covered files; Settings, Calendar, Talk, receipts, Share and Admin are the
   second pass.
-- **Clippy**: `clippy::pedantic` is on for the workspace (four lints allowed,
+- **Clippy**: `clippy::pedantic` is on for the workspace (the noisy lints allowed,
   reasons in `Cargo.toml`). `cargo clippy --workspace --all-targets -- -D
   warnings` is clean; the flake's checks do not run it yet.
 

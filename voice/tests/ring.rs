@@ -50,7 +50,7 @@ fn start(ring_secs: u32, ring_by_ms: i64) -> CallBody {
 }
 
 fn soon() -> i64 {
-    i64::try_from(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()).unwrap() + 10_000
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64 + 10_000
 }
 
 fn outcome_of(r: &Rig, call: &str) -> Option<Outcome> {

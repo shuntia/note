@@ -163,7 +163,7 @@ mod tests {
         let out = dispatch(&conn, &ctx(&tmp), SessionKind::Nightly, "nightly_notes_write",
             &serde_json::json!({ "text": NOTES }).to_string()).unwrap();
         assert_eq!(out["ok"], true);
-        assert_eq!(usize::try_from(out["bytes"].as_u64().unwrap()).unwrap(), NOTES.len());
+        assert_eq!(out["bytes"].as_u64().unwrap() as usize, NOTES.len());
 
         let path = crate::context::nightly_notes_path(tmp.path(), "aki");
         assert_eq!(

@@ -172,7 +172,7 @@ impl Matrix {
     }
 
     pub async fn ring(&self, room: &str, target: &str, member_event_id: &str, lifetime_ms: u64) -> Result<String> {
-        let sender_ts = u64::try_from(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis())?;
+        let sender_ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as u64;
         let path = format!(
             "/_matrix/client/v3/rooms/{}/send/{NOTIFICATION_TYPE}/{}",
             enc(room),

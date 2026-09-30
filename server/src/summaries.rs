@@ -42,7 +42,7 @@ pub fn due(conn: &Connection, config_dir: &Path, cutoff: jiff::Timestamp) -> Res
          ORDER BY c.updated_at LIMIT ?2",
     )?;
     let rows = stmt
-        .query_map((cutoff.to_string(), i64::try_from(SCAN).unwrap_or(i64::MAX)), |r| {
+        .query_map((cutoff.to_string(), SCAN as i64), |r| {
             Ok((
                 Candidate {
                     conversation_id: r.get(0)?,

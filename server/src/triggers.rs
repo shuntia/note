@@ -135,7 +135,7 @@ pub fn allowance(
         )
         .optional()?
         .unwrap_or(0);
-    Ok(allowance_of(config_dir, username).saturating_add(u32::try_from(extra.max(0)).unwrap_or(u32::MAX)))
+    Ok(allowance_of(config_dir, username).saturating_add(extra.max(0) as u32))
 }
 
 /// Triggers the agent laid, or idleness laid, for that day out of its own
@@ -149,7 +149,7 @@ pub fn spent(conn: &Connection, user_id: i64, date: jiff::civil::Date) -> rusqli
         (user_id, date.to_string(), KIND),
         |r| r.get(0),
     )?;
-    Ok(u32::try_from(n).unwrap_or(0))
+    Ok(n as u32)
 }
 
 /// Raises today's allowance, once the user has agreed to it. Returns the new
@@ -168,7 +168,7 @@ pub fn add_extra(
     conn.query_row(
         "SELECT extra FROM trigger_budgets WHERE user_id = ?1 AND date = ?2",
         (user_id, date.to_string()),
-        |r| r.get::<_, i64>(0).map(|n| u32::try_from(n).unwrap_or(0)),
+        |r| r.get::<_, i64>(0).map(|n| n as u32),
     )
 }
 
@@ -402,7 +402,7 @@ fn overrun_lead(session: &WorkSession, now: jiff::Timestamp) -> Option<i64> {
     let planned = session.planned_min?;
     let started: jiff::Timestamp = session.started_at.parse().ok()?;
     let end = started + jiff::Span::new().minutes(planned + OVERRUN_MIN);
-    Some((end.as_second() - now.as_second()) / 60)
+    (end - now).total(jiff::Unit::Minute).ok().map(|m| m as i64)
 }
 
 /// A trigger row as the runner reads it at fire time.

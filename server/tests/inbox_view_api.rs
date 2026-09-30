@@ -34,7 +34,7 @@ fn titles(v: &serde_json::Value) -> Vec<String> {
 async fn the_list_is_newest_first_and_pages_with_before() {
     let (app, cookie, state, _cfg) = common::app_with_logged_in_user_and_state().await;
     for (i, s) in ["a", "b", "c"].iter().enumerate() {
-        seed(&state, 1, s, i64::try_from(i).unwrap());
+        seed(&state, 1, s, i as i64);
     }
     let (status, v) = call(&app, Some(&cookie), Method::GET, "/api/inbox").await;
     assert_eq!(status, StatusCode::OK, "{v}");
