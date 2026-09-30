@@ -83,6 +83,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/push/unsubscribe", post(push_unsubscribe))
         .route("/api/push/vapid_public_key", get(vapid_public_key))
         .merge(calendar_router())
+        .merge(crate::inbox::routes())
         .nest("/api/security", crate::security::routes())
         .nest("/api/admin", crate::admin::routes())
         .merge(share_router(state.clone()))

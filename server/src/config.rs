@@ -25,6 +25,8 @@ pub struct ServerConfig {
     #[serde(default)]
     pub search: Option<SearchConfig>,
     #[serde(default)]
+    pub inbox: InboxConfig,
+    #[serde(default)]
     pub voice: Option<VoiceConfig>,
 }
 
@@ -110,6 +112,13 @@ fn default_search_max_results() -> usize {
 
 fn default_search_timeout() -> u64 {
     DEFAULT_SEARCH_TIMEOUT_SECS
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct InboxConfig {
+    /// A file the host watches: writing it asks for a sync. Unset hides Refresh.
+    pub refresh_signal: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -698,5 +707,17 @@ mod tests {
         assert_eq!(llm.kind, "anthropic");
         assert_eq!(llm.api_key_file, PathBuf::from("/run/secrets/llm"));
         assert_eq!(cfg.providers.embeddings.unwrap().base_url, "http://localhost:8080/v1");
+    }
+    #[test]
+    fn inbox_section_names_the_refresh_signal_and_defaults_to_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), "server.toml", concat!(
+            "bind_addr = \"127.0.0.1:0\"\npublic_base_url = \"http://x\"\ndata_dir = \"data\"\n",
+            "[inbox]\nrefresh_signal = \"/run/note/inbox-refresh\"\n"));
+        let cfg = ServerConfig::load(tmp.path()).unwrap();
+        assert_eq!(cfg.inbox.refresh_signal, Some(PathBuf::from("/run/note/inbox-refresh")));
+        write(tmp.path(), "server.toml",
+            "bind_addr = \"127.0.0.1:0\"\npublic_base_url = \"http://x\"\ndata_dir = \"data\"\n");
+        assert!(ServerConfig::load(tmp.path()).unwrap().inbox.refresh_signal.is_none());
     }
 }

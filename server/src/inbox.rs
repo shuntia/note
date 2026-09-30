@@ -1,5 +1,12 @@
+use crate::auth::CurrentUser;
+use crate::AppState;
+use axum::extract::{Path as UrlPath, Query, State};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use axum::routing;
+use axum::{Json, Router};
 use rusqlite::{Connection, OptionalExtension};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 pub const KINDS: [&str; 2] = ["announcement", "material"];
@@ -178,6 +185,110 @@ pub fn get(
     Ok(Some(item))
 }
 
+pub fn routes() -> Router<AppState> {
+    Router::new()
+        .route("/api/inbox", routing::get(list_route))
+        .route("/api/inbox/refresh", routing::post(refresh_route))
+        .route("/api/inbox/{id}", routing::get(read_route))
+}
+
+#[derive(Deserialize)]
+struct ListQuery {
+    before: Option<String>,
+    limit: Option<String>,
+}
+
+fn bad_request(message: &str) -> Response {
+    (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": message }))).into_response()
+}
+
+fn non_blank(s: &Option<String>) -> Option<&str> {
+    s.as_deref().map(str::trim).filter(|s| !s.is_empty())
+}
+
+async fn list_route(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Query(q): Query<ListQuery>,
+) -> Response {
+    let limit = match non_blank(&q.limit) {
+        Some(raw) => match raw.parse::<usize>() {
+            Ok(n) => n.clamp(1, LIST_LIMIT_MAX),
+            Err(_) => return bad_request("limit must be a number"),
+        },
+        None => LIST_LIMIT_DEFAULT,
+    };
+    let before = match non_blank(&q.before) {
+        Some(raw) => match raw.parse::<jiff::Timestamp>() {
+            Ok(ts) => Some(stamp(ts)),
+            Err(_) => return bad_request("before must be a timestamp"),
+        },
+        None => None,
+    };
+    let conn = state.db();
+    match (list(&conn, user.id, before.as_deref(), limit), latest(&conn, user.id)) {
+        (Ok(items), Ok(latest)) => {
+            Json(serde_json::json!({
+                "items": items,
+                "latest": latest,
+                "refresh": state.inbox_refresh.is_some(),
+            }))
+            .into_response()
+        }
+        _ => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+/// Another user's item is indistinguishable from one that does not exist.
+async fn read_route(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    UrlPath(id): UrlPath<String>,
+) -> Response {
+    let Ok(id) = id.parse::<i64>() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let conn = state.db();
+    match get(&conn, &state.data_dir, &user.username, user.id, id) {
+        Ok(Some(item)) => Json(item).into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+/// The host starts a sync when the file changes; Note never runs it itself.
+async fn refresh_route(user: CurrentUser, State(state): State<AppState>) -> Response {
+    let Some(path) = state.inbox_refresh.clone() else {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": "refresh is not configured" })),
+        )
+            .into_response();
+    };
+    let requested_at = stamp(jiff::Timestamp::now());
+    match std::fs::write(&path, format!("{requested_at}\n")) {
+        Ok(()) => (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({ "requested_at": requested_at })),
+        )
+            .into_response(),
+        Err(e) => {
+            let conn = state.db();
+            let _ = crate::log::record(
+                &conn,
+                Some(user.id),
+                "inbox_refresh_error",
+                &format!("{}: {e}", path.display()),
+            );
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({ "error": "refresh is unavailable" })),
+            )
+                .into_response()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -249,7 +360,8 @@ mod tests {
         upsert(&conn, 2, "s1", "announcement", "x", at(0)).unwrap();
         record_decision(&conn, 1, "s1", "task", "a study guide", at(5)).unwrap();
         record_decision(&conn, 1, "unknown", "nothing", "no row", at(5)).unwrap();
-        let rows: Vec<(i64, Option<String>, Option<String>, Option<String>)> = conn
+        type Decided = (i64, Option<String>, Option<String>, Option<String>);
+        let rows: Vec<Decided> = conn
             .prepare("SELECT user_id, outcome, reason, decided_at FROM inbox_items ORDER BY user_id")
             .unwrap()
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
