@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api, ApiError } from './api'
+import { stillCurrent } from './brief'
 import type { Review } from './types'
 
 const FOLD_KEY = 'note.reviewFolded'
@@ -23,22 +24,6 @@ function writeFold(week: string, folded: boolean) {
   }
 }
 
-function mondayOf(day: Date): string {
-  const at = new Date(day)
-  at.setHours(0, 0, 0, 0)
-  at.setDate(at.getDate() - ((at.getDay() + 6) % 7))
-  const month = `${at.getMonth() + 1}`.padStart(2, '0')
-  return `${at.getFullYear()}-${month}-${`${at.getDate()}`.padStart(2, '0')}`
-}
-
-// A letter older than last week belongs to a week nobody is still living in.
-function stillCurrent(week: string): boolean {
-  const today = new Date()
-  const previous = new Date(today)
-  previous.setDate(previous.getDate() - 7)
-  return week === mondayOf(today) || week === mondayOf(previous)
-}
-
 function weekWords(week: string): string {
   const monday = new Date(`${week}T00:00`)
   if (Number.isNaN(monday.getTime())) return week
@@ -56,7 +41,7 @@ export function ReviewFold() {
     api
       .review()
       .then((r) => {
-        if (!stillCurrent(r.week_start)) {
+        if (!stillCurrent(r.week_start, new Date())) {
           setReview(null)
           return
         }

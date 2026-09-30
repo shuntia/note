@@ -71,6 +71,7 @@ const WRITABLE_SETTINGS = [
   'timezone_auto',
   'nightly_time',
   'close_day_time',
+  'morning_until',
   'template',
   'show_arc_between_sessions',
   'counter',

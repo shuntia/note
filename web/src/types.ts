@@ -207,6 +207,8 @@ export type Settings = {
   nightly_time: string
   // When the close-the-day card appears; '' where the user turned it off.
   close_day_time: string
+  // Until when an open morning brings the letter to the face, HH:MM.
+  morning_until: string
   template: string
   templates: string[]
   timezones: string[]
@@ -247,6 +249,7 @@ export type SettingsSaved = Pick<
   | 'timezone_auto'
   | 'nightly_time'
   | 'close_day_time'
+  | 'morning_until'
   | 'template'
   | 'show_arc_between_sessions'
   | 'counter'

@@ -13,6 +13,7 @@ import {
   type WheelEvent as WheelEv,
 } from 'react'
 import { api, ApiError } from '../api'
+import { busyIn, markBriefRead, morningOpen, pickBrief, readBriefs, type Brief } from '../brief'
 import { hintShown, hintUsed, railX, sessionFor, slotAfter, withoutCategory, WORK_TIME } from '../circle'
 import { latest } from '../coalesce'
 import type { ToastAction } from '../app'
@@ -42,7 +43,7 @@ import {
 } from '../session'
 import { SoFar } from '../sofar'
 import { Tick } from '../tick'
-import type { DayView, PlanEvent, QueueEntry, QueueReason, SessionPhase, SessionStart, Task, TaskNode, TaskNotify } from '../types'
+import type { DayView, Debrief, PlanEvent, QueueEntry, QueueReason, SessionPhase, SessionStart, Review, Task, TaskNode, TaskNotify } from '../types'
 import { capped } from '../wave'
 import { CalendarSection } from './Calendar'
 import { Urgent } from './Tasks'
@@ -347,6 +348,30 @@ export function Home({
   const face = next ? rowParts(next) : null
   const label = face?.name ?? ''
 
+  // An open morning brings the day's letter, then the week's, to the face in the
+  // circle's place until it has been read.
+  const [letters, setLetters] = useState<{ letter: Debrief | null; review: Review | null }>({ letter: null, review: null })
+  const [morningUntil, setMorningUntil] = useState('11:00')
+  const [briefsRead, setBriefsRead] = useState(readBriefs)
+  useEffect(() => {
+    api.debrief().then((letter) => setLetters((l) => ({ ...l, letter })), () => {})
+    api.review().then((review) => setLetters((l) => ({ ...l, review })), () => {})
+    api.settings().then((s) => setMorningUntil(s.morning_until), () => {})
+  }, [refresh])
+  const busy = busyIn(
+    [
+      ...visible
+        .filter((ev) => ev.status === 'pending' || ev.status === 'snoozed' || ev.status === 'fired')
+        .map((ev) => ({ start: ev.wall_time, end: ev.end_wall_time ?? ev.wall_time })),
+      ...(day?.calendar ?? []).filter((occ) => occ.kind === 'fixed' || occ.kind === 'busy'),
+    ],
+    now,
+  )
+  const brief =
+    !shown && day && morningOpen(now, morningUntil, busy)
+      ? pickBrief(letters.letter, letters.review, day.date, new Date(), briefsRead)
+      : null
+
   // A routine is timed to its span; without an end the routine default stands in.
   // A block laid for a task runs as that task, so finishing it settles both.
   const start = (ev: PlanEvent) => {
@@ -646,6 +671,45 @@ export function Home({
   const slotIndex = strip?.index ?? 0
   const faceSize = mobile ? 320 : 440
   const boxWidth = () => faceBox.current?.offsetWidth ?? faceSize
+
+  // The brief on screen trails the one due, so each change can leave before the next
+  // arrives: the circle settles away and the letter rises, and back again once read.
+  const [briefView, setBriefView] = useState<Brief | null>(null)
+  const briefBody = useRef<HTMLDivElement>(null)
+  const briefMoving = useRef(false)
+  const hadBrief = useRef(false)
+  useEffect(() => {
+    if (briefMoving.current || brief?.key === briefView?.key) return
+    const still = reducedMotion()
+    const leaving = briefView ? briefBody.current : faceBox.current
+    const land = () => {
+      briefMoving.current = false
+      setBriefView(brief)
+    }
+    if (!leaving) return land()
+    briefMoving.current = true
+    gsap.to(leaving, {
+      autoAlpha: 0,
+      y: still ? 0 : 12,
+      duration: still ? 0.2 : 0.35,
+      ease: 'power2.in',
+      onComplete: land,
+    })
+  }, [brief?.key, briefView?.key])
+  useLayoutEffect(() => {
+    const still = reducedMotion()
+    const arriving = briefView ? briefBody.current : hadBrief.current ? faceBox.current : null
+    hadBrief.current = briefView !== null
+    if (!arriving) return
+    gsap.fromTo(
+      arriving,
+      { autoAlpha: 0, y: still ? 0 : 16 },
+      { autoAlpha: 1, y: 0, duration: still ? 0.2 : 0.45, ease: 'power2.out', clearProps: 'opacity,visibility,transform' },
+    )
+  }, [briefView?.key])
+  const readBrief = () => {
+    if (briefView) setBriefsRead(markBriefRead(briefView.key))
+  }
 
   const snapTo = (i: number) => {
     const rail = railEl.current
@@ -1220,8 +1284,20 @@ export function Home({
       {session && stopButton(session)}
       {breakSheet}
     </div>
+  ) : briefView ? (
+    <div key="brief" className="home-face">
+      <div className={`brief ${briefView.kind}`}>
+        <div ref={briefBody} className="brief-body">
+          <span className="brief-mark" aria-hidden="true" />
+          <div className="letter">{briefView.content}</div>
+          <button className="btn-round brief-read" aria-label="Read" onClick={readBrief}>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5" /></svg>
+          </button>
+        </div>
+      </div>
+    </div>
   ) : (
-    <div className="home-face">
+    <div key="rest" className="home-face">
       <div ref={faceBox} className="circle-face idle" style={{ width: u(faceSize), height: u(faceSize) }} {...surface}>
         {next && facts && prefs.showArc ? (
           <Gauge size={faceSize} fracAt={waitFracAt(next)} faded>
@@ -1524,6 +1600,7 @@ export function Home({
     face?.of,
     session?.started_at,
     session?.paused_at,
+    briefView?.key,
     !!landing,
     strip?.index,
     strip?.items.length,
@@ -1609,6 +1686,25 @@ export function Home({
         travel(timeline, q('.face-big .gauge-of'), q('.today-of'))
         from(qa('.today-eyebrow'), { autoAlpha: 0, duration: 0.4, ease: 'none' }, 0.6)
         from(qa('.today-line'), { autoAlpha: 0, y: 28, duration: 0.45, ease: 'power2.out' }, 0.35)
+      }
+      if (q('.face-big .brief')) {
+        // Nothing of the circle is on the face to morph, so the letter leaves and what
+        // the circle would have become arrives in its own place.
+        timeline.fromTo(
+          qa('.face-big .brief'),
+          { autoAlpha: 1, y: 0 },
+          { autoAlpha: 0, y: -24, duration: 0.4, ease: 'power2.in', immediateRender: false },
+          0,
+        )
+        from(
+          qa(
+            compactLanding
+              ? '.home-face.compact .gauge, .home-face.compact > .gauge-num, .home-face.compact .home-head'
+              : '.today-eyebrow, .today-title, .today-of, .today-in, .today-span, .today-bar',
+          ),
+          { autoAlpha: 0, y: 16, duration: 0.4, ease: 'power2.out' },
+          0.45,
+        )
       }
       to(qa('.face-big .chev, .face-big .face-hint, .face-big .slot:not(.now)'), { autoAlpha: 0, duration: 0.35 }, 0)
       tl.current = timeline
