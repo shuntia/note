@@ -1,3 +1,9 @@
+mod common;
+
+use axum::body::Body;
+use axum::http::{header, Request as HttpRequest, StatusCode};
+use http_body_util::BodyExt;
+use tower::ServiceExt;
 use note_server::channels::mock::MockChannel;
 use note_server::channels::{deliver_via, OutboundMessage, Urgency};
 use note_server::voice::{links, Voice};
@@ -150,4 +156,84 @@ async fn note_restart_mid_ring_applies_the_outcome_once() {
         .query_row("SELECT outcome FROM voice_calls WHERE id = ?1", [&id], |x| x.get(0))
         .unwrap();
     assert_eq!(outcome, "declined");
+}
+
+async fn api_rig() -> (axum::Router, String, Rig) {
+    let r = rig(false).await;
+    let app = note_server::api::router(r.state.clone());
+    let cookie = common::login(&app, "aki", "pw").await;
+    (app, cookie, r)
+}
+
+async fn call(app: &axum::Router, cookie: &str, method: &str, uri: &str, body: &str) -> (StatusCode, serde_json::Value) {
+    let res = app
+        .clone()
+        .oneshot(
+            HttpRequest::builder()
+                .method(method)
+                .uri(uri)
+                .header(header::COOKIE, cookie)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = res.status();
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    (status, serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn linking_opens_a_dm_and_settings_show_it() {
+    let (app, cookie, r) = api_rig().await;
+    r.fake_rec.answer_with(|req| match req {
+        note_voice_proto::Request::OpenDm { link_id, .. } => {
+            Ok(note_voice_proto::Reply::Dm { room_id: format!("!dm{link_id}:t") })
+        }
+        _ => Err(note_voice_proto::Refusal::new(note_voice_proto::RefusalCode::BadRequest, "no")),
+    });
+    let (status, body) = call(&app, &cookie, "POST", "/api/voice/link", r#"{"mxid":"@aki:t"}"#).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["state"], "invited");
+    let (_, s) = call(&app, &cookie, "GET", "/api/settings", "").await;
+    assert_eq!(s["voice_enabled"], true);
+    assert_eq!(s["voice_link"]["mxid"], "@aki:t");
+    assert_eq!(s["ring_for"], "urgent");
+
+    let (status, _) = call(&app, &cookie, "PUT", "/api/settings", r#"{"ring_for":"never"}"#).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = call(&app, &cookie, "PUT", "/api/settings", r#"{"ring_for":"sometimes"}"#).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, _) = call(&app, &cookie, "DELETE", "/api/voice/link", "").await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, s) = call(&app, &cookie, "GET", "/api/settings", "").await;
+    assert!(s["voice_link"].is_null());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bad_matrix_id_is_refused_before_anything_is_stored() {
+    let (app, cookie, r) = api_rig().await;
+    for bad in [r#"{"mxid":"aki"}"#, r#"{"mxid":"@aki"}"#, r#"{"mxid":"@a ki:t"}"#] {
+        let (status, _) = call(&app, &cookie, "POST", "/api/voice/link", bad).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+    }
+    assert!(links::get(&r.state.db(), 1).unwrap().is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_test_ring_needs_a_joined_link() {
+    let (app, cookie, r) = api_rig().await;
+    let (status, _) = call(&app, &cookie, "POST", "/api/voice/test", "").await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    {
+        let conn = r.state.db();
+        let id = links::begin(&conn, 1, "@aki:t", jiff::Timestamp::now()).unwrap();
+        links::mark_joined(&conn, id, "!r:t", jiff::Timestamp::now()).unwrap();
+    }
+    let (status, body) = call(&app, &cookie, "POST", "/api/voice/test", "").await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    let rec = r.fake_rec.clone();
+    eventually("the test ring starts", || !rec.seen.lock().unwrap().is_empty()).await;
 }
