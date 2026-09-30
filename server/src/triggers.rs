@@ -664,7 +664,10 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
         let Ok(Some(ev)) = read(&conn, fired.event_id) else {
             return;
         };
-        let opening = situation(&conn, fired.user_id, &ev, &tz);
+        let mut opening = situation(&conn, fired.user_id, &ev, &tz);
+        if ev.origin == crate::idle::ORIGIN {
+            opening.push_str(&crate::idle::context(&conn, fired.user_id, now).unwrap_or_default());
+        }
         let (history, note) = thread_context(&conn, ev.conversation_id);
         (ev, opening, history, note)
     };
@@ -744,6 +747,11 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
             now,
         );
         let _ = settle(&conn, ev.event_id, now);
+        if ev.origin == crate::idle::ORIGIN {
+            let named: Vec<i64> =
+                serde_json::from_value(result["notes"].clone()).unwrap_or_default();
+            let _ = crate::idle::stamp_nudged(&conn, fired.user_id, &named, now);
+        }
         let _ = crate::log::record(
             &conn,
             Some(fired.user_id),
@@ -769,6 +777,8 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
                     label: "Carry to tomorrow".into(),
                     data: format!("carry:{}", fired.date),
                 }]
+            } else if ev.origin == crate::idle::ORIGIN {
+                Vec::new()
             } else {
                 crate::channels::event_actions(ev.event_id)
             },

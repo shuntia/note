@@ -56,6 +56,9 @@ pub struct BudgetArgs {
 pub struct SayArgs {
     /// One or two warm sentences, as the user will read them.
     pub text: String,
+    /// The ids of the notes these words are about, when a nudge names any.
+    #[serde(default)]
+    pub notes: Vec<i64>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -213,7 +216,7 @@ pub fn say(
             triggers::MAX_SAY_BYTES
         )));
     }
-    Ok(serde_json::json!({ "said": text }))
+    Ok(serde_json::json!({ "said": text, "notes": args.notes }))
 }
 
 pub fn stay_quiet(
@@ -477,5 +480,15 @@ mod tests {
             let e = dispatch(&conn, &ctx(&tmp), kind, "say", r#"{"text":"hi"}"#).unwrap_err();
             assert_eq!(e.kind, "unknown_tool", "{kind:?} can speak out of turn");
         }
+    }
+    #[test]
+    fn say_carries_the_notes_it_names() {
+        let (conn, tmp) = env();
+        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Trigger, "say",
+            r#"{"text":"the bank closes at five","notes":[3]}"#).unwrap();
+        assert_eq!(out["notes"], serde_json::json!([3]));
+        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Trigger, "say", r#"{"text":"hi"}"#)
+            .unwrap();
+        assert_eq!(out["notes"], serde_json::json!([]));
     }
 }
