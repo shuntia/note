@@ -132,6 +132,15 @@ pub fn decide(
         .map_err(|e| ToolError::internal(e.to_string()))?;
         memory_ids.push(id);
     }
+    crate::inbox::record_decision(
+        conn,
+        ctx.user_id,
+        scope,
+        args.outcome.as_str(),
+        reason,
+        jiff::Timestamp::now(),
+    )
+    .map_err(|e| ToolError::internal(e.to_string()))?;
     Ok(serde_json::json!({
         "outcome": args.outcome.as_str(),
         "reason": reason,
@@ -422,5 +431,30 @@ mod tests {
         let stored: Vec<f32> =
             stored.chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect();
         assert_eq!(stored, want[0]);
+    }
+    #[test]
+    fn the_decision_is_recorded_on_the_inbox_row() {
+        let (conn, tmp) = env();
+        let now = jiff::Timestamp::now();
+        crate::inbox::upsert(&conn, 1, "s1", "announcement", "Quiz Friday", now).unwrap();
+        decide(&conn, &tmp, "s1", TWO_FACTS).unwrap();
+        let (outcome, reason, decided): (Option<String>, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT outcome, reason, decided_at FROM inbox_items WHERE user_id = 1 AND source_id = 's1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(outcome.as_deref(), Some("remembered"));
+        assert_eq!(reason.as_deref(), Some("quiz and rule"));
+        assert!(decided.unwrap() >= crate::inbox::stamp(now));
+
+        // a rejected call leaves the row as it was
+        crate::inbox::upsert(&conn, 1, "s1", "announcement", "Quiz moved", now).unwrap();
+        decide(&conn, &tmp, "s1", r#"{"source_id":"s1","outcome":"nothing","reason":"  "}"#).unwrap_err();
+        let outcome: Option<String> = conn
+            .query_row("SELECT outcome FROM inbox_items WHERE source_id = 's1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(outcome, None);
     }
 }

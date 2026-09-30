@@ -880,7 +880,6 @@ async fn task_agent(
 }
 
 const MAX_SOURCE_ID: usize = 200;
-const INBOX_KINDS: [&str; 2] = ["announcement", "material"];
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -899,9 +898,10 @@ fn valid_source_id(id: &str) -> bool {
 }
 
 /// Judges one learning-management item in a fresh agent session scoped to its
-/// source id, with no history and nothing kept as a conversation. Memory is
-/// written only by the terminal decision, so any failure before it leaves the
-/// source's previous facts exactly as they were.
+/// source id, with no history and nothing kept as a conversation. The item is
+/// kept before the session runs; memory is written only by the terminal
+/// decision, so any failure before it leaves the source's previous facts
+/// exactly as they were.
 async fn agent_inbox(
     user: TaskPrincipal,
     State(state): State<AppState>,
@@ -917,7 +917,7 @@ async fn agent_inbox(
             &format!("source_id must be 1 to {MAX_SOURCE_ID} characters of A-Za-z0-9:._-"),
         );
     }
-    if !INBOX_KINDS.contains(&req.kind.as_str()) {
+    if !crate::inbox::KINDS.contains(&req.kind.as_str()) {
         return brief_error(
             StatusCode::UNPROCESSABLE_ENTITY,
             "kind must be \"announcement\" or \"material\"",
@@ -936,6 +936,21 @@ async fn agent_inbox(
         Ok(p) => p,
         Err(busy) => return session_busy_response(busy),
     };
+    let recorded = {
+        let conn = state.db();
+        crate::inbox::upsert(
+            &conn,
+            user.id,
+            &req.source_id,
+            &req.kind,
+            &req.context,
+            jiff::Timestamp::now(),
+        )
+    };
+    if let Err(e) = recorded {
+        log_inbox_error(&state, user.id, &format!("{}: keeping the item failed: {e}", req.source_id));
+        return brief_error(StatusCode::INTERNAL_SERVER_ERROR, "the item could not be read");
+    }
     let token_id = match user.via {
         auth::Credential::Token(id) => Some(id),
         auth::Credential::Session => None,
