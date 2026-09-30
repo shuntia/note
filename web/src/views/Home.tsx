@@ -45,6 +45,7 @@ import { Tick } from '../tick'
 import type { DayView, PlanEvent, QueueEntry, QueueReason, SessionPhase, SessionStart, Task, TaskNode, TaskNotify } from '../types'
 import { capped } from '../wave'
 import { CalendarSection } from './Calendar'
+import { Notes } from './Notes'
 import { Urgent } from './Tasks'
 import { DebriefFold } from '../debrief'
 import { ReviewFold } from '../review'
@@ -643,6 +644,7 @@ export function Home({
   const slotCount = strip ? strip.items.length + 1 : 1
   const slotIndex = strip?.index ?? 0
   const faceSize = mobile ? 320 : 440
+  const startSize = mobile ? 96 : 120
   const boxWidth = () => faceBox.current?.offsetWidth ?? faceSize
 
   const snapTo = (i: number) => {
@@ -1221,32 +1223,12 @@ export function Home({
       {breakSheet}
     </div>
   ) : (
-    <div className="home-face">
-      <div ref={faceBox} className="circle-face idle" style={{ width: u(faceSize), height: u(faceSize) }} {...surface}>
-        {next && facts && prefs.showArc ? (
-          <Gauge size={faceSize} fracAt={waitFracAt(next)} faded>
-            {facts.wait && (
-              <div className="gauge-num" style={{ fontSize: u(mobile ? 50 : 58) }}><Atoms text={facts.wait} /></div>
-            )}
-            <div className="gauge-name" style={{ fontSize: u(mobile ? 18 : 22) }}><Atoms text={label} /></div>
-            {face?.of && <div className="gauge-of"><Atoms text={face.of} /></div>}
-            <div className="gauge-sub" style={{ fontSize: mobile ? undefined : u(14) }}><Atoms text={facts.span} /></div>
-            {startHint && <p className="face-hint inline">tap the circle to start working</p>}
-          </Gauge>
-        ) : (
-          startHint && <p className="face-hint">tap the circle to start working</p>
-        )}
+    <div className="home-face at-rest">
+      <div ref={faceBox} className="circle-face idle" style={{ width: u(startSize), height: u(startSize) }} {...surface}>
+        <Gauge size={startSize} fracAt={next && prefs.showArc ? waitFracAt(next) : undefined} faded />
+        {startHint && <p className="face-hint under">tap the circle to start working</p>}
       </div>
-      {next && facts && !prefs.showArc && (
-        <div className="home-text">
-          <div className="home-title"><Atoms text={label} /></div>
-          {face?.of && <div className="gauge-of"><Atoms text={face.of} /></div>}
-          {facts.wait && (
-            <div className="gauge-num" style={{ fontSize: u(30) }}><Atoms text={`in ${facts.wait}`} /></div>
-          )}
-          <div className="gauge-sub"><Atoms text={facts.span} /></div>
-        </div>
-      )}
+      <Notes notify={notify} refresh={refresh} />
     </div>
   )
 
@@ -1611,6 +1593,7 @@ export function Home({
         from(qa('.today-line'), { autoAlpha: 0, y: 28, duration: 0.45, ease: 'power2.out' }, 0.35)
       }
       to(qa('.face-big .chev, .face-big .face-hint, .face-big .slot:not(.now)'), { autoAlpha: 0, duration: 0.35 }, 0)
+      to(qa('.face-big .notes'), { autoAlpha: 0, duration: 0.35 }, 0)
       tl.current = timeline
       timeline.progress(st.current?.progress ?? 0)
       setReady(true)

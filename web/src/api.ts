@@ -22,6 +22,8 @@ import type {
   MemoryFact,
   MemoryHit,
   NewStep,
+  Note,
+  NotePatch,
   PlanEvent,
   QueueEntry,
   Passkey,
@@ -229,6 +231,12 @@ export const api = {
   patchGoal: (id: number, patch: GoalPatch) =>
     request<Goal>(`/api/goals/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
   deleteGoal: (id: number) => request<void>(`/api/goals/${id}`, { method: 'DELETE' }),
+  // Open notes first, then the ones done in the last week.
+  notes: () => request<Note[]>('/api/notes'),
+  addNote: (text: string) =>
+    request<Note>('/api/notes', { method: 'POST', body: JSON.stringify({ text }) }),
+  patchNote: (id: number, patch: NotePatch) =>
+    request<Note>(`/api/notes/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
   // 401 when `current` is wrong, 422 when the new one is too short.
   changePassword: (current: string, next: string) =>
     request<void>('/api/password', {
