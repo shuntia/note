@@ -18,6 +18,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/me", get(me))
         .route("/api/goals", get(goals_list).post(goals_create))
         .route("/api/goals/{id}", patch(goals_update).delete(goals_delete))
+        .route("/api/notes", get(notes_list).post(notes_create))
+        .route("/api/notes/{id}", patch(notes_update).delete(notes_delete))
         .route("/api/tasks", get(tasks_list).post(tasks_create))
         .route("/api/tasks/queue", get(tasks_queue))
         .route("/api/tasks/candidates", get(tasks_candidates))
@@ -413,6 +415,53 @@ async fn goals_delete(
 ) -> impl IntoResponse {
     let conn = state.db();
     match crate::goals::delete(&conn, user.id, id) {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => StatusCode::NOT_FOUND.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn notes_list(user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
+    let conn = state.db();
+    match crate::notes::list(&conn, user.id, jiff::Timestamp::now()) {
+        Ok(ns) => Json(ns).into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn notes_create(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Json(req): Json<crate::notes::NewNote>,
+) -> impl IntoResponse {
+    let conn = state.db();
+    match crate::notes::create(&conn, user.id, req, jiff::Timestamp::now()) {
+        Ok(n) => (StatusCode::CREATED, Json(n)).into_response(),
+        Err(e) => task_error(e),
+    }
+}
+
+async fn notes_update(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(patch): Json<crate::notes::NotePatch>,
+) -> impl IntoResponse {
+    let conn = state.db();
+    match crate::notes::update(&conn, user.id, id, patch, jiff::Timestamp::now()) {
+        Ok(Some(n)) => Json(n).into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => task_error(e),
+    }
+}
+
+async fn notes_delete(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    let conn = state.db();
+    match crate::notes::delete(&conn, user.id, id) {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => StatusCode::NOT_FOUND.into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
