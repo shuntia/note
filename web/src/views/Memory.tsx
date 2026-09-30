@@ -12,18 +12,20 @@ import { Markdown } from '../markdown'
 import { flip, popOut, rise, settle } from '../motion-gsap'
 import { Overflow } from '../overflow'
 import '../styles/memory.css'
+import { InboxBar, InboxCard, InboxRows, useInbox } from './Inbox'
 import type { MemoryFact, MemoryHit } from '../types'
 
 // matches the stylesheet's master-detail breakpoint
 const SINGLE_PANE = '(max-width: 1087.98px)'
 const AUTO_OPEN_AFTER = 8
 
-type Filter = '' | 'semantic' | 'episodic'
+type Filter = '' | 'semantic' | 'episodic' | 'inbox'
 
 const FILTERS: { id: Filter; label: string }[] = [
   { id: '', label: 'All' },
   { id: 'semantic', label: 'Facts' },
   { id: 'episodic', label: 'Episodes' },
+  { id: 'inbox', label: 'Inbox' },
 ]
 
 // An episode is written as "<date> · <thread title>: <what happened>"; the date has a
@@ -153,6 +155,9 @@ export function Memory({ notify, refresh, openTalk }: ViewProps) {
   const [fact, setFact] = useState<MemoryFact | null>(null)
 
   const facts = useFacts()
+  const inbox = useInbox(refresh, notify)
+  const onInbox = filter === 'inbox'
+  const { page: inboxPage, selected: inboxSelected, item: inboxItem, open: openItem, close: closeItem } = inbox
   const detail = useRef<HTMLDivElement>(null)
   const list = useRef<HTMLUListElement>(null)
   const card = useRef<HTMLElement>(null)
@@ -167,6 +172,7 @@ export function Memory({ notify, refresh, openTalk }: ViewProps) {
   }, [draft])
 
   const load = useCallback(() => {
+    if (filter === 'inbox') return
     const era = ++listEra.current
     setListFailed(false)
     api
@@ -208,43 +214,62 @@ export function Memory({ notify, refresh, openTalk }: ViewProps) {
   const head = items?.slice(0, AUTO_OPEN_AFTER) ?? []
   const dated = head.length > 0 && head.every((m) => facts.get(m.id) !== undefined)
   useEffect(() => {
-    if (selected !== null || !items || !dated || window.matchMedia(SINGLE_PANE).matches) return
+    if (filter === 'inbox' || selected !== null || !items || !dated) return
+    if (window.matchMedia(SINGLE_PANE).matches) return
     openFact(newestFirst(items, (id) => factCache.get(id))[0].id)
-  }, [items, dated, selected, openFact])
+  }, [filter, items, dated, selected, openFact])
+
+  useEffect(() => {
+    if (!onInbox || inboxSelected !== null || !inboxPage?.items.length) return
+    if (window.matchMedia(SINGLE_PANE).matches) return
+    openItem(inboxPage.items[0].id)
+  }, [onInbox, inboxSelected, inboxPage, openItem])
+
+  const shown = onInbox ? inboxSelected : selected
 
   // On the single-pane layout the detail replaces the list, so bring it into view.
   useEffect(() => {
-    if (selected === null) return
+    if (shown === null) return
     if (!window.matchMedia(SINGLE_PANE).matches) return
     detail.current?.scrollIntoView()
-  }, [selected])
+  }, [shown])
 
-  // Where the fact replaces the list it rises like a sheet; beside it, it settles.
+  // Where the detail replaces the list it rises like a sheet; beside it, it settles.
   useLayoutEffect(() => {
-    if (fact === null) return
+    if (fact === null && inboxItem === null) return
     rise(card.current, window.matchMedia(SINGLE_PANE).matches ? 28 : 14)
-  }, [fact])
+  }, [fact, inboxItem])
 
-  const closeFact = () => popOut(card.current, () => setSelected(null), true)
+  const closeDetail = () =>
+    popOut(card.current, () => (onInbox ? closeItem() : setSelected(null)), true)
 
+  const openMemory = (id: string) => {
+    setFilter('')
+    closeItem()
+    openFact(id)
+  }
+
+  const filters = inboxPage?.items.length ? FILTERS : FILTERS.filter((f) => f.id !== 'inbox')
   const count = items?.length ?? 0
 
   return (
-    <div className="memory" data-pane={selected === null ? 'list' : 'detail'}>
+    <div className="memory" data-pane={shown === null ? 'list' : 'detail'}>
       <div className="memory-side">
-        <div className="tellnote memory-search">
-          <input
-            type="search"
-            value={draft}
-            placeholder="Search what Note knows"
-            aria-label="Search what Note knows"
-            onChange={(e) => setDraft(e.target.value)}
-          />
-        </div>
-        {draft.trim() === '' && (
+        {!onInbox && (
+          <div className="tellnote memory-search">
+            <input
+              type="search"
+              value={draft}
+              placeholder="Search what Note knows"
+              aria-label="Search what Note knows"
+              onChange={(e) => setDraft(e.target.value)}
+            />
+          </div>
+        )}
+        {(onInbox || draft.trim() === '') && (
           <div className="memory-filter">
             <div className="seg" role="group" aria-label="Show">
-              {FILTERS.map((f) => (
+              {filters.map((f) => (
                 <button
                   key={f.id || 'all'}
                   type="button"
@@ -253,6 +278,7 @@ export function Memory({ notify, refresh, openTalk }: ViewProps) {
                     setFilter(f.id)
                     setSelected(null)
                     setFact(null)
+                    closeItem()
                   }}
                 >
                   {f.label}
@@ -261,7 +287,26 @@ export function Memory({ notify, refresh, openTalk }: ViewProps) {
             </div>
           </div>
         )}
-        {listFailed ? (
+        {onInbox ? (
+          inboxPage && (
+            <>
+              {inboxPage.refresh && (
+                <InboxBar
+                  latest={inboxPage.latest}
+                  refreshing={inbox.refreshing}
+                  upToDate={inbox.upToDate}
+                  onRefresh={inbox.pull}
+                />
+              )}
+              <InboxRows rows={inboxPage.items} selected={inboxSelected} onOpen={openItem} />
+              {inbox.more && (
+                <button className="memory-link inbox-more" onClick={inbox.loadMore}>
+                  More
+                </button>
+              )}
+            </>
+          )
+        ) : listFailed ? (
           <p className="memory-empty">
             Couldn't load memories.{' '}
             <button className="memory-link" onClick={load}>
@@ -287,17 +332,20 @@ export function Memory({ notify, refresh, openTalk }: ViewProps) {
         )}
       </div>
       <div className="memory-detail" ref={detail}>
-        {selected !== null && (
-          <button className="memory-back" onClick={closeFact}>
+        {shown !== null && (
+          <button className="memory-back" onClick={closeDetail}>
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <path d="M15 6l-6 6 6 6" />
             </svg>
             Memory
           </button>
         )}
-        {selected !== null && fact !== null && (
-          <FactBody fact={fact} openTalk={openTalk} cardRef={card} />
-        )}
+        {onInbox
+          ? inboxItem !== null && (
+              <InboxCard item={inboxItem} cardRef={card} onMemory={openMemory} />
+            )
+          : selected !== null &&
+            fact !== null && <FactBody fact={fact} openTalk={openTalk} cardRef={card} />}
       </div>
     </div>
   )

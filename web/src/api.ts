@@ -15,6 +15,8 @@ import type {
   FlattenResult,
   Goal,
   GoalState,
+  InboxItem,
+  InboxPage,
   InspectUser,
   Me,
   MemoryFact,
@@ -284,6 +286,16 @@ export const api = {
     return request<{ items: MemoryHit[] }>(`/api/memory${query ? `?${query}` : ''}`)
   },
   memoryRead: (id: string) => request<MemoryFact>(`/api/memory/${encodeURIComponent(id)}`),
+  inboxList: (params: { before?: string; limit?: number } = {}) => {
+    const search = new URLSearchParams()
+    if (params.before) search.set('before', params.before)
+    if (params.limit) search.set('limit', String(params.limit))
+    const query = search.toString()
+    return request<InboxPage>(`/api/inbox${query ? `?${query}` : ''}`)
+  },
+  inboxRead: (id: number) => request<InboxItem>(`/api/inbox/${id}`),
+  inboxRefresh: () =>
+    request<{ requested_at: string }>('/api/inbox/refresh', { method: 'POST' }),
   debrief: () => request<Debrief>('/api/debrief'),
   review: () => request<Review>('/api/review'),
   vapidKey: () => request<{ key: string }>('/api/push/vapid_public_key'),

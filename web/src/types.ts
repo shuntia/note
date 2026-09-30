@@ -285,6 +285,27 @@ export type MemoryFact = {
   supersedes: string | null
 }
 
+export type InboxKind = 'announcement' | 'material'
+export type InboxOutcome = 'remembered' | 'nothing' | 'task'
+
+export type InboxRow = {
+  id: number
+  source_id: string
+  kind: InboxKind
+  title: string
+  received_at: string
+  outcome: InboxOutcome | null
+}
+
+export type InboxPage = { items: InboxRow[]; latest: string | null; refresh: boolean }
+
+export type InboxItem = InboxRow & {
+  body: string
+  reason: string | null
+  decided_at: string | null
+  memories: { id: string; summary: string; archived: boolean }[]
+}
+
 export type LogRow = {
   id: number
   ts: string
