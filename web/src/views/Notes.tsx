@@ -92,7 +92,8 @@ export function Notes({
   ]
 
   return (
-    <div className="notes">
+    <section className="task-group notes">
+      <h3 className="task-group-head">Notes</h3>
       <ul className="notes-list">
         {openNotes(notes).map((note) => (
           <li key={note.id} className="note-row">
@@ -142,6 +143,6 @@ export function Notes({
           onChange={(e) => setDraft(e.target.value)}
         />
       </form>
-    </div>
+    </section>
   )
 }

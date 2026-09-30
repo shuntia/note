@@ -57,9 +57,12 @@ export type ViewProps = {
 
 type NavTab = Exclude<Tab, 'admin'>
 
+// On a phone Today sits in the middle of the bar, under the thumb.
+const PHONE_ORDER: NavTab[] = ['tasks', 'chat', 'today', 'memory', 'settings']
+
 const NAV: { id: NavTab; label: string }[] = [
   { id: 'today', label: 'Today' },
-  { id: 'tasks', label: 'Tasks' },
+  { id: 'tasks', label: 'Notes' },
   { id: 'chat', label: 'Chat' },
   { id: 'memory', label: 'Memory' },
   { id: 'settings', label: 'Settings' },
@@ -468,12 +471,17 @@ function Rail({
   return (
     <nav ref={nav} className={`${kind}${away ? ' away' : ''}`} aria-label="Views">
       <span className="nav-glide" aria-hidden="true" ref={mark} />
-      {NAV.map((t) => (
-        <button key={t.id} aria-current={current === t.id} onClick={() => go(t.id)}>
-          {kind === 'tabs' && <NavIcon id={t.id} />}
-          {t.label}
-        </button>
-      ))}
+      {kind === 'tabs'
+        ? PHONE_ORDER.map((id) => NAV.find((t) => t.id === id)!).map((t) => (
+            <button key={t.id} aria-current={current === t.id} aria-label={t.label} onClick={() => go(t.id)}>
+              <NavIcon id={t.id} />
+            </button>
+          ))
+        : NAV.map((t) => (
+            <button key={t.id} aria-current={current === t.id} onClick={() => go(t.id)}>
+              {t.label}
+            </button>
+          ))}
     </nav>
   )
 }
