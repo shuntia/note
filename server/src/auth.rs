@@ -239,6 +239,8 @@ pub fn clear_cookie(secure: bool) -> String {
     c
 }
 
+/// A cookie session. A write through one stamps the user as present; a read
+/// does not, because an open page polls.
 #[derive(Debug, Clone)]
 pub struct CurrentUser {
     pub id: i64,
@@ -273,8 +275,12 @@ impl FromRequestParts<AppState> for CurrentUser {
             return Err(StatusCode::UNAUTHORIZED);
         };
         let expires: jiff::Timestamp = expires_at.parse().map_err(|_| StatusCode::UNAUTHORIZED)?;
-        if disabled || expires < jiff::Timestamp::now() {
+        let now = jiff::Timestamp::now();
+        if disabled || expires < now {
             return Err(StatusCode::UNAUTHORIZED);
+        }
+        if !parts.method.is_safe() {
+            let _ = crate::presence::touch(&conn, id, now);
         }
         Ok(CurrentUser {
             id,

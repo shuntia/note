@@ -248,6 +248,7 @@ pub async fn receive_callback(state: &AppState, cb: &Callback) {
     let applied = {
         let conn = state.db();
         link_for_chat(&conn, cb.chat_id).unwrap_or(None).and_then(|link| {
+            let _ = crate::presence::touch(&conn, link.user_id, now);
             let did = apply(&conn, &state.config_dir, &link, &cb.data, now)?;
             let _ = crate::log::record(
                 &conn,

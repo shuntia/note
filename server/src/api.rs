@@ -46,6 +46,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/conversations/{id}/messages", get(conversation_messages))
         .route("/api/settings", get(settings_get).put(settings_put))
+        .route("/api/presence", post(presence))
         .route(
             "/api/telegram/link",
             post(telegram_link).delete(telegram_unlink),
@@ -1449,6 +1450,12 @@ fn unprocessable_field(field: &str, requirement: &str) -> axum::response::Respon
 
 /// The effective settings plus the two closed choice lists the client needs to
 /// render them.
+/// The extractor has already stamped the user; the route is how a page that
+/// only reads says someone is looking at it.
+async fn presence(_user: CurrentUser) -> StatusCode {
+    StatusCode::NO_CONTENT
+}
+
 async fn settings_get(user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
     let cfg = match crate::config::UserConfig::load(&state.config_dir, &user.username) {
         Ok(c) => c,
@@ -2680,7 +2687,7 @@ async fn ws_connect(
     State(state): State<AppState>,
     ws: axum::extract::ws::WebSocketUpgrade,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| ws_pump(socket, state.hub.clone(), user.id))
+    ws.on_upgrade(move |socket| ws_pump(socket, state.hub.clone(), state.db.clone(), user.id))
 }
 
 /// A session allowed to open a socket: not started by a foreign page, and not
@@ -2727,6 +2734,7 @@ const WS_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
 async fn ws_pump(
     mut socket: axum::extract::ws::WebSocket,
     hub: std::sync::Arc<crate::channels::ws::ClientHub>,
+    db: std::sync::Arc<std::sync::Mutex<rusqlite::Connection>>,
     user_id: i64,
 ) {
     use axum::extract::ws::Message;
@@ -2749,7 +2757,13 @@ async fn ws_pump(
             },
             inbound = socket.recv() => match inbound {
                 Some(Ok(Message::Close(_))) => break,
-                Some(Ok(_)) => last_inbound = tokio::time::Instant::now(),
+                Some(Ok(msg)) => {
+                    last_inbound = tokio::time::Instant::now();
+                    if crate::channels::ws::is_presence(&msg) {
+                        let conn = crate::db_guard(&db);
+                        let _ = crate::presence::touch(&conn, user_id, jiff::Timestamp::now());
+                    }
+                }
                 _ => break,
             },
             _ = ping.tick() => {
