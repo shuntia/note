@@ -611,7 +611,8 @@ const MIGRATIONS: &[&str] = &[
         sent_seq INTEGER NOT NULL DEFAULT 0,
         applied_seq INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL,
-        ended_at TEXT
+        ended_at TEXT,
+        fell_through_at TEXT
     );
     CREATE INDEX idx_voice_calls_open ON voice_calls(state) WHERE state != 'ended';
     CREATE TABLE voice_frames (
@@ -1769,8 +1770,8 @@ mod tests {
             "one link per user"
         );
         conn.execute(
-            "INSERT INTO voice_calls (id, user_id, direction, state, ring_by, created_at)
-             VALUES ('c1', 1, 'outbound', 'starting', 'x', 'x')",
+            "INSERT INTO voice_calls (id, user_id, direction, state, ring_by, created_at, fell_through_at)
+             VALUES ('c1', 1, 'outbound', 'starting', 'x', 'x', NULL)",
             [],
         )
         .unwrap();
