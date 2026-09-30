@@ -81,15 +81,26 @@ impl FileOutbox {
         self.dir.join(format!("{call_id}.out.ndjson"))
     }
 
+    /// Appends `line` durably; a failed write is cut back off the file so the
+    /// next line starts clean.
     fn write_line(&self, call_id: &str, line: &Line) -> io::Result<()> {
+        let path = self.path(call_id);
+        let existed = path.exists();
+        let mut bytes = serde_json::to_vec(line)?;
+        bytes.push(b'\n');
         let mut f = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(self.path(call_id))?;
-        let mut bytes = serde_json::to_vec(line)?;
-        bytes.push(b'\n');
-        f.write_all(&bytes)?;
-        f.sync_data()
+            .open(&path)?;
+        let len = f.metadata()?.len();
+        if let Err(e) = f.write_all(&bytes).and_then(|()| f.sync_data()) {
+            let _ = f.set_len(len);
+            return Err(e);
+        }
+        if !existed {
+            std::fs::File::open(&self.dir)?.sync_all()?;
+        }
+        Ok(())
     }
 }
 
@@ -118,7 +129,7 @@ impl Outbox for FileOutbox {
             .get(call_id)
             .map(|j| {
                 j.frames
-                    .range(after + 1..)
+                    .range(after.saturating_add(1)..)
                     .map(|(s, b)| (*s, b.clone()))
                     .collect()
             })
@@ -148,6 +159,9 @@ impl Outbox for FileOutbox {
     }
 
     fn forget(&mut self, call_id: &str) -> io::Result<()> {
+        if !valid_call_id(call_id) {
+            return Err(bad_id(call_id));
+        }
         self.calls.remove(call_id);
         match std::fs::remove_file(self.path(call_id)) {
             Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
@@ -197,12 +211,16 @@ impl AppliedFile {
     }
 
     pub fn forget(&self, call_id: &str) -> io::Result<()> {
+        if !valid_call_id(call_id) {
+            return Err(bad_id(call_id));
+        }
         match std::fs::remove_file(self.path(call_id)) {
             Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
             _ => Ok(()),
         }
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -296,5 +314,33 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut o = FileOutbox::open(dir.path()).unwrap();
         assert!(o.append("../x", &CallBody::Ringing).is_err());
+    }
+
+    #[test]
+    fn forget_refuses_an_unsafe_call_id() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("journal");
+        std::fs::write(root.path().join("x.out.ndjson"), b"").unwrap();
+        std::fs::write(root.path().join("x.in"), b"1").unwrap();
+        let mut o = FileOutbox::open(&dir).unwrap();
+        assert_eq!(
+            o.forget("../x").unwrap_err().kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        let a = AppliedFile::new(&dir);
+        assert_eq!(
+            a.forget("../x").unwrap_err().kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        assert!(root.path().join("x.out.ndjson").exists());
+        assert!(root.path().join("x.in").exists());
+    }
+
+    #[test]
+    fn unacked_after_the_last_possible_seq_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut o = FileOutbox::open(dir.path()).unwrap();
+        o.append("c1", &CallBody::Ringing).unwrap();
+        assert!(o.unacked("c1", u64::MAX).unwrap().is_empty());
     }
 }

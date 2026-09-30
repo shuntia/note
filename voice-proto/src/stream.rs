@@ -39,7 +39,7 @@ impl Outbox for MemOutbox {
         Ok(self
             .calls
             .get(call_id)
-            .map(|c| c.frames.range(after + 1..).map(|(s, b)| (*s, b.clone())).collect())
+            .map(|c| c.frames.range(after.saturating_add(1)..).map(|(s, b)| (*s, b.clone())).collect())
             .unwrap_or_default())
     }
 
@@ -127,6 +127,13 @@ mod tests {
         assert_eq!(seqs, vec![3, 4, 5]);
         let seqs: Vec<u64> = o.unacked("c", 4).unwrap().into_iter().map(|(s, _)| s).collect();
         assert_eq!(seqs, vec![5]);
+    }
+
+    #[test]
+    fn unacked_after_the_last_possible_seq_is_empty() {
+        let mut o = MemOutbox::default();
+        o.append("c", &CallBody::Ringing).unwrap();
+        assert!(o.unacked("c", u64::MAX).unwrap().is_empty());
     }
 
     #[test]
