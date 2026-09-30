@@ -612,3 +612,33 @@ async fn a_checkin_carries_its_three_buttons_into_the_chat() {
         ]] })
     );
 }
+
+#[tokio::test]
+async fn a_telegram_message_or_button_counts_as_presence() {
+    let fake = common::fake_telegram();
+    fake.answer(common::GET_ME);
+    let (_app, _cookie, state, _cfg) =
+        common::app_with_telegram(says(&["the day is yours"]), &fake.base).await;
+    fake.call();
+    link(&state, 42);
+    let seen = |state: &AppState| -> Option<String> {
+        let conn = state.db();
+        conn.query_row("SELECT last_active_at FROM users WHERE id = 1", [], |r| r.get(0)).unwrap()
+    };
+    assert!(seen(&state).is_none());
+
+    fake.answer(&updates(&[(11, 42, "how does today look?")]));
+    fake.answer(common::SENT);
+    let mut chats = note_server::telegram::Chats::default();
+    note_server::telegram::poll_once(&state, &mut chats).await.unwrap();
+    assert!(seen(&state).is_some(), "a message is the user");
+
+    state.db().execute("UPDATE users SET last_active_at = NULL", []).unwrap();
+    let event_id = routine(&state, 1, "2026-01-05");
+    fake.answer(&presses(&[(12, 42, "q1", &format!("ev:done:{event_id}"))]));
+    for _ in 0..3 {
+        fake.answer(ANSWERED);
+    }
+    note_server::telegram::poll_once(&state, &mut chats).await.unwrap();
+    assert!(seen(&state).is_some(), "a button is the user");
+}

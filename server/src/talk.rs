@@ -539,6 +539,10 @@ pub async fn run_turn(
     if message.is_empty() || message.len() > MAX_MESSAGE {
         return Err(TurnError::Blank);
     }
+    {
+        let conn = state.db();
+        let _ = crate::presence::touch(&conn, user_id, jiff::Timestamp::now());
+    }
     let mut notes: Vec<String> = Vec::new();
     let mut spoke_from = Via::Web;
     if let Some(id) = conversation {

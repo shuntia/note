@@ -19,6 +19,7 @@ pub mod net;
 pub mod nightly;
 pub mod notes;
 pub mod plan;
+pub mod presence;
 pub mod prompts;
 pub mod providers;
 pub mod push_subs;

@@ -77,6 +77,13 @@ impl ClientHub {
     }
 }
 
+/// A frame the client chose to send. Ping and pong are answered by the
+/// browser whether or not anyone is there.
+pub fn is_presence(msg: &axum::extract::ws::Message) -> bool {
+    use axum::extract::ws::Message;
+    matches!(msg, Message::Text(_) | Message::Binary(_))
+}
+
 /// Cap on one agent frame's variable text, so a large tool payload cannot
 /// flood a socket; what is left ends in an ellipsis.
 pub const MAX_FRAME_TEXT: usize = 4 * 1024;
@@ -292,5 +299,13 @@ mod tests {
         ch.deliver(1, "aki", &plain).unwrap();
         let v: serde_json::Value = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
         assert!(v["conversation_id"].is_null());
+    }
+    #[test]
+    fn only_a_frame_the_client_chose_to_send_is_presence() {
+        use axum::extract::ws::Message;
+        assert!(is_presence(&Message::Text("hi".into())));
+        assert!(is_presence(&Message::Binary(Vec::new().into())));
+        assert!(!is_presence(&Message::Pong(Vec::new().into())));
+        assert!(!is_presence(&Message::Ping(Vec::new().into())));
     }
 }
