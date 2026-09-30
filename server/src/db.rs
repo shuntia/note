@@ -589,6 +589,45 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE users ADD COLUMN seen_lat REAL;
     ALTER TABLE users ADD COLUMN seen_lon REAL;
     ",
+    // v42
+    "
+    CREATE TABLE voice_links (
+        id INTEGER PRIMARY KEY,
+        user_id INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+        mxid TEXT NOT NULL,
+        room_id TEXT,
+        state TEXT NOT NULL CHECK (state IN ('invited','linked')),
+        created_at TEXT NOT NULL,
+        linked_at TEXT
+    );
+    CREATE TABLE voice_calls (
+        id TEXT PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        direction TEXT NOT NULL CHECK (direction IN ('outbound','inbound')),
+        message TEXT,
+        state TEXT NOT NULL CHECK (state IN ('starting','ringing','answered','ended')),
+        outcome TEXT,
+        ring_by TEXT NOT NULL,
+        sent_seq INTEGER NOT NULL DEFAULT 0,
+        applied_seq INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        ended_at TEXT
+    );
+    CREATE INDEX idx_voice_calls_open ON voice_calls(state) WHERE state != 'ended';
+    CREATE TABLE voice_frames (
+        call_id TEXT NOT NULL REFERENCES voice_calls(id) ON DELETE CASCADE,
+        seq INTEGER NOT NULL,
+        body TEXT NOT NULL,
+        PRIMARY KEY (call_id, seq)
+    );
+    CREATE TABLE voice_ops (
+        call_id TEXT NOT NULL REFERENCES voice_calls(id) ON DELETE CASCADE,
+        op_key TEXT NOT NULL,
+        result TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (call_id, op_key)
+    );
+    ",
 ];
 
 pub fn open(path: &Path) -> Result<Connection> {
@@ -1255,9 +1294,10 @@ mod tests {
 
     #[test]
     fn v25_leaves_no_voice_calls_table() {
-        let conn = open_memory().unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        apply_migrations(&conn, &MIGRATIONS[..25]).unwrap();
         let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(v, MIGRATIONS.len() as i64);
+        assert_eq!(v, 25);
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM sqlite_master WHERE name = 'voice_calls'", [], |r| {
                 r.get(0)
@@ -1708,5 +1748,45 @@ mod tests {
         conn.execute("DELETE FROM shares WHERE id = 1", []).unwrap();
         let left: i64 = conn.query_row("SELECT COUNT(*) FROM share_messages", [], |r| r.get(0)).unwrap();
         assert_eq!(left, 0, "revoking a link still takes its threads with it");
+    }
+
+    #[test]
+    fn v42_adds_the_voice_tables() {
+        let conn = open_memory().unwrap();
+        conn.execute("INSERT INTO users (username, pass_hash, role) VALUES ('a','h','member')", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO voice_links (user_id, mxid, state, created_at) VALUES (1, '@a:t', 'invited', 'x')",
+            [],
+        )
+        .unwrap();
+        assert!(
+            conn.execute(
+                "INSERT INTO voice_links (user_id, mxid, state, created_at) VALUES (1, '@b:t', 'invited', 'x')",
+                [],
+            )
+            .is_err(),
+            "one link per user"
+        );
+        conn.execute(
+            "INSERT INTO voice_calls (id, user_id, direction, state, ring_by, created_at)
+             VALUES ('c1', 1, 'outbound', 'starting', 'x', 'x')",
+            [],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO voice_frames (call_id, seq, body) VALUES ('c1', 1, '{}')", []).unwrap();
+        conn.execute(
+            "INSERT INTO voice_ops (call_id, op_key, result, created_at) VALUES ('c1', '1:0', '{}', 'x')",
+            [],
+        )
+        .unwrap();
+        assert!(conn
+            .execute("UPDATE voice_calls SET state = 'dialing' WHERE id = 'c1'", [])
+            .is_err());
+        conn.execute("DELETE FROM voice_calls WHERE id = 'c1'", []).unwrap();
+        let left: i64 = conn
+            .query_row("SELECT COUNT(*) FROM voice_frames", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 0, "frames go with their call");
     }
 }
