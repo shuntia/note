@@ -46,7 +46,7 @@
             inherit version;
             src = lib.fileset.toSource {
               root = ./.;
-              fileset = lib.fileset.unions [ ./Cargo.toml ./Cargo.lock ./server ];
+              fileset = lib.fileset.unions [ ./Cargo.toml ./Cargo.lock ./server ./voice-proto ];
             };
             strictDeps = true;
             nativeBuildInputs = [ pkgs.pkg-config ];
@@ -79,7 +79,7 @@
             inherit cargoArtifacts;
             src = lib.fileset.toSource {
               root = ./.;
-              fileset = lib.fileset.unions [ ./Cargo.toml ./Cargo.lock ./server ./config/defaults ];
+              fileset = lib.fileset.unions [ ./Cargo.toml ./Cargo.lock ./server ./voice-proto ./config/defaults ];
             };
           });
         in
