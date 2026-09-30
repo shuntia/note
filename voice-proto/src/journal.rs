@@ -85,7 +85,6 @@ impl FileOutbox {
     /// next line starts clean.
     fn write_line(&self, call_id: &str, line: &Line) -> io::Result<()> {
         let path = self.path(call_id);
-        let existed = path.exists();
         let mut bytes = serde_json::to_vec(line)?;
         bytes.push(b'\n');
         let mut f = std::fs::OpenOptions::new()
@@ -97,7 +96,7 @@ impl FileOutbox {
             let _ = f.set_len(len);
             return Err(e);
         }
-        if !existed {
+        if !self.calls.contains_key(call_id) {
             std::fs::File::open(&self.dir)?.sync_all()?;
         }
         Ok(())
