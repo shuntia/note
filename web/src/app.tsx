@@ -57,6 +57,8 @@ export type ViewProps = {
 
 type NavTab = Exclude<Tab, 'admin'>
 
+const TOAST_LEAVE_MS = 200
+
 // On a phone Today sits in the middle of the bar, under the thumb.
 const PHONE_ORDER: NavTab[] = ['tasks', 'chat', 'today', 'memory', 'settings']
 
@@ -79,7 +81,7 @@ export function App() {
   const [leaving, setLeaving] = useState<Layer | null>(null)
   // true from the moment a turn starts until the arriving layer has settled
   const [turning, setTurning] = useState(false)
-  const [toast, setToast] = useState<{ msg: string; action?: ToastAction } | null>(null)
+  const [toast, setToast] = useState<{ msg: string; action?: ToastAction; leaving?: boolean } | null>(null)
   const [refresh, setRefresh] = useState(0)
   const [talkPrefill, setTalkPrefill] = useState<string | null>(null)
   // A thread to land on, with a nonce so the same thread can be asked for twice.
@@ -132,14 +134,19 @@ export function App() {
   }, [leaving, layer])
 
   const toastTimer = useRef(0)
-  const notify = useCallback((msg: string, action?: ToastAction) => {
-    setToast({ msg, action })
+  const dismissToast = useCallback(() => {
     window.clearTimeout(toastTimer.current)
-    toastTimer.current = window.setTimeout(
-      () => setToast(null),
-      action ? (action.windowMs ?? 5000) : 4000,
-    )
+    setToast((t) => t && { ...t, leaving: true })
+    toastTimer.current = window.setTimeout(() => setToast(null), TOAST_LEAVE_MS)
   }, [])
+  const notify = useCallback(
+    (msg: string, action?: ToastAction) => {
+      setToast({ msg, action })
+      window.clearTimeout(toastTimer.current)
+      toastTimer.current = window.setTimeout(dismissToast, action ? (action.windowMs ?? 5000) : 4000)
+    },
+    [dismissToast],
+  )
 
   const onChanged = useMemo(() => trailing(() => setRefresh((n) => n + 1), 80), [])
 
@@ -337,14 +344,14 @@ export function App() {
   }
 
   const toastNode = toast && (
-    <div className={`toast${mobile ? ' above-tabs' : ''}`} role="status">
+    <div className={`toast${mobile ? ' above-tabs' : ''}${toast.leaving ? ' leaving' : ''}`} role="status">
       <span className="toast-msg">{toast.msg}</span>
       {toast.action && (
         <button
           className="toast-action"
           onClick={() => {
             toast.action?.run()
-            setToast(null)
+            dismissToast()
           }}
         >
           {toast.action.label}

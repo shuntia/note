@@ -1361,6 +1361,7 @@ struct SettingsPatch {
     timezone_auto: Option<bool>,
     nightly_time: Option<String>,
     close_day_time: Option<String>,
+    morning_until: Option<String>,
     template: Option<String>,
     show_arc_between_sessions: Option<bool>,
     counter: Option<String>,
@@ -1401,6 +1402,7 @@ fn settings_body(
         "timezone_auto": cfg.timezone_auto(),
         "nightly_time": cfg.nightly_time,
         "close_day_time": cfg.close_day_time(),
+        "morning_until": cfg.morning_until(),
         "template": cfg.template,
         "show_arc_between_sessions": cfg.show_arc_between_sessions,
         "counter": cfg.counter,
@@ -1533,6 +1535,12 @@ async fn settings_put(
             );
         }
         cfg.close_day_time = Some(time.to_string());
+    }
+    if let Some(time) = req.morning_until {
+        if !crate::templates::valid_time(&time) {
+            return invalid_field("morning_until", "must be a zero-padded 24-hour HH:MM");
+        }
+        cfg.morning_until = Some(time);
     }
     if let Some(template) = req.template {
         if !templates.contains(&template) {

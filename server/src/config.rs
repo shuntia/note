@@ -276,6 +276,9 @@ pub struct UserConfig {
     /// ritual off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub close_day_time: Option<String>,
+    /// Until when, zero-padded HH:MM, an open morning brings the letter to the face.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub morning_until: Option<String>,
     #[serde(default = "default_true")]
     pub show_arc_between_sessions: bool,
     #[serde(default = "default_counter")]
@@ -311,6 +314,7 @@ pub struct UserConfig {
 
 pub const DEFAULT_TRIGGERS_PER_DAY: u32 = 4;
 pub const DEFAULT_CLOSE_DAY_TIME: &str = "21:30";
+pub const DEFAULT_MORNING_UNTIL: &str = "11:00";
 pub const DEFAULT_POMODORO_WORK_MIN: u32 = 25;
 pub const DEFAULT_POMODORO_BREAK_MIN: u32 = 5;
 pub const RING_FOR_URGENT: &str = "urgent";
@@ -343,6 +347,10 @@ impl UserConfig {
     /// Blank where the user has turned the close of the day off.
     pub fn close_day_time(&self) -> &str {
         self.close_day_time.as_deref().unwrap_or(DEFAULT_CLOSE_DAY_TIME)
+    }
+
+    pub fn morning_until(&self) -> &str {
+        self.morning_until.as_deref().unwrap_or(DEFAULT_MORNING_UNTIL)
     }
 
     pub fn triggers_per_day(&self) -> u32 {
@@ -406,6 +414,11 @@ impl UserConfig {
             cfg.close_day_time().is_empty() || crate::templates::valid_time(cfg.close_day_time()),
             "invalid close_day_time {:?}",
             cfg.close_day_time()
+        );
+        anyhow::ensure!(
+            crate::templates::valid_time(cfg.morning_until()),
+            "invalid morning_until {:?}",
+            cfg.morning_until()
         );
         Ok(cfg)
     }
@@ -742,5 +755,22 @@ mod tests {
 
         write(tmp.path(), "users/aki/user.toml", "idle_nudge_min = 0\n");
         assert_eq!(UserConfig::load(tmp.path(), "aki").unwrap().idle_nudge_min(), 0);
+    }
+
+    #[test]
+    fn mornings_end_at_eleven_unless_set_and_stay_out_of_an_untouched_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), "defaults/user.toml",
+            "display_name = \"X\"\ntimezone = \"UTC\"\ntemplate = \"default\"\n");
+        let cfg = UserConfig::load(tmp.path(), "aki").unwrap();
+        assert_eq!(cfg.morning_until(), "11:00");
+        cfg.save(tmp.path(), "aki").unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join("users/aki/user.toml")).unwrap();
+        assert!(!raw.contains("morning_until"), "unexpected file: {raw}");
+
+        write(tmp.path(), "users/aki/user.toml", "morning_until = \"09:30\"\n");
+        assert_eq!(UserConfig::load(tmp.path(), "aki").unwrap().morning_until(), "09:30");
+        write(tmp.path(), "users/aki/user.toml", "morning_until = \"9:30\"\n");
+        assert!(UserConfig::load(tmp.path(), "aki").is_err());
     }
 }

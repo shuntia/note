@@ -47,6 +47,7 @@ const EDITABLE = [
   'timezone',
   'nightly_time',
   'close_day_time',
+  'morning_until',
   'template',
   'triggers_per_day',
   'pomodoro_work_min',
@@ -134,6 +135,7 @@ function draftOf(s: UserSettings): Draft {
     timezone: s.timezone,
     nightly_time: s.nightly_time,
     close_day_time: s.close_day_time,
+    morning_until: s.morning_until,
     template: s.template,
     triggers_per_day: s.triggers_per_day,
     pomodoro_work_min: s.pomodoro_work_min,
@@ -790,6 +792,25 @@ export function Settings({
                   {...commitOn('close_day')}
                 />
                 <Status save={save} row="close_day" />
+              </div>
+            )}
+          </FoldRow>
+          <FoldRow
+            label="Morning ends"
+            value={loaded.draft.morning_until}
+            open={open === 'morning'}
+            onToggle={fold('morning')}
+          >
+            {open === 'morning' && (
+              <div className="set-fold-body">
+                <input
+                  type="time"
+                  aria-label="Morning ends"
+                  value={loaded.draft.morning_until}
+                  onChange={(e) => edit('morning_until', e.target.value)}
+                  {...commitOn('morning')}
+                />
+                <Status save={save} row="morning" />
               </div>
             )}
           </FoldRow>
