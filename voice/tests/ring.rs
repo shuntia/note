@@ -309,3 +309,50 @@ async fn a_failed_m_direct_write_still_links_one_room() {
     assert_eq!(first, second);
     assert_eq!(r.hs.lock().unwrap().created.len(), 1);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_voice_restart_mid_ring_closes_the_call_and_reports_it_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, hs) = homeserver().await;
+    let token = dir.path().join("token");
+    std::fs::write(&token, "secret").unwrap();
+    let socket = dir.path().join("voice.sock");
+    let note = fake_note(&socket);
+    let cfg = VoiceServiceConfig {
+        homeserver: base,
+        token_file: token,
+        livekit_service_url: "https://rtc.t".into(),
+        socket,
+        state_dir: dir.path().join("state"),
+    };
+    let first = {
+        let cfg = cfg.clone();
+        tokio::spawn(async move { note_voice::service::run_with(cfg, fast(Role::Voice)).await.unwrap() })
+    };
+    let p = note.peer.clone();
+    eventually("voice connects", || p.is_up()).await;
+    note.peer.send_call("c9", start(30, soon())).unwrap();
+    let rec = note.rec.clone();
+    eventually("ringing", || rec.bodies("c9").contains(&CallBody::Ringing)).await;
+
+    first.abort();
+    let p = note.peer.clone();
+    eventually("Note sees the voice side gone", || !p.is_up()).await;
+    tokio::spawn(async move { note_voice::service::run_with(cfg, fast(Role::Voice)).await.unwrap() });
+
+    let rec = note.rec.clone();
+    eventually("the call is closed after the restart", || rec.bodies("c9").contains(&CallBody::Ended)).await;
+    let outcomes: Vec<Outcome> = note
+        .rec
+        .bodies("c9")
+        .into_iter()
+        .filter_map(|b| match b {
+            CallBody::Outcome { outcome } => Some(outcome),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(outcomes, vec![Outcome::Failed { reason: "the voice service restarted".into() }]);
+    assert_eq!(note.rec.seqs("c9"), (1..=note.rec.seqs("c9").len() as u64).collect::<Vec<_>>());
+    let cleared = hs.lock().unwrap().state_puts.iter().filter(|(_, _, _, b)| b == &serde_json::json!({})).count();
+    assert!(cleared >= 1, "the orphaned membership is cleared");
+}
