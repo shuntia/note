@@ -415,3 +415,21 @@ async fn the_session_end_notice_is_on_until_turned_off() {
     let v = json(app.oneshot(get(&cookie)).await.unwrap()).await;
     assert_eq!(v["session_end_notify"], false);
 }
+
+#[tokio::test]
+async fn idle_nudges_are_a_setting_that_zero_turns_off() {
+    let (app, cookie, _cfg) = common::app_with_logged_in_user().await;
+    let v = json(app.clone().oneshot(get(&cookie)).await.unwrap()).await;
+    assert_eq!(v["idle_nudge_min"], 20);
+
+    let res = app.clone().oneshot(put(&cookie, r#"{"idle_nudge_min":0}"#)).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(json(res).await["idle_nudge_min"], 0);
+
+    let res = app.clone().oneshot(put(&cookie, r#"{"idle_nudge_min":241}"#)).await.unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(json(res).await["error"], "idle_nudge_min must be 0 to 240");
+
+    let v = json(app.oneshot(get(&cookie)).await.unwrap()).await;
+    assert_eq!(v["idle_nudge_min"], 0);
+}

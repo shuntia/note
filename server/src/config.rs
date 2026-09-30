@@ -104,6 +104,7 @@ pub struct SearchConfig {
 }
 
 pub const DEFAULT_SEARCH_MAX_RESULTS: usize = 8;
+pub const DEFAULT_IDLE_NUDGE_MIN: u32 = 20;
 pub const DEFAULT_SEARCH_TIMEOUT_SECS: u64 = 15;
 
 fn default_search_max_results() -> usize {
@@ -299,6 +300,10 @@ pub struct UserConfig {
     /// is announced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_end_notify: Option<bool>,
+    /// Minutes without a sign of the user before Note may nudge about open
+    /// notes; 0 turns idle nudges off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_nudge_min: Option<u32>,
     /// Which messages ring the linked phone: `urgent` or `never`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ring_for: Option<String>,
@@ -357,6 +362,10 @@ impl UserConfig {
 
     pub fn session_end_notify(&self) -> bool {
         self.session_end_notify.unwrap_or(true)
+    }
+
+    pub fn idle_nudge_min(&self) -> u32 {
+        self.idle_nudge_min.unwrap_or(DEFAULT_IDLE_NUDGE_MIN)
     }
 
     pub fn ring_for(&self) -> &str {
@@ -719,5 +728,19 @@ mod tests {
         write(tmp.path(), "server.toml",
             "bind_addr = \"127.0.0.1:0\"\npublic_base_url = \"http://x\"\ndata_dir = \"data\"\n");
         assert!(ServerConfig::load(tmp.path()).unwrap().inbox.refresh_signal.is_none());
+    }
+    #[test]
+    fn idle_nudges_default_to_twenty_minutes_and_stay_out_of_an_untouched_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), "defaults/user.toml",
+            "display_name = \"X\"\ntimezone = \"UTC\"\ntemplate = \"default\"\n");
+        let cfg = UserConfig::load(tmp.path(), "aki").unwrap();
+        assert_eq!(cfg.idle_nudge_min(), DEFAULT_IDLE_NUDGE_MIN);
+        cfg.save(tmp.path(), "aki").unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join("users/aki/user.toml")).unwrap();
+        assert!(!raw.contains("idle_nudge_min"), "unexpected file: {raw}");
+
+        write(tmp.path(), "users/aki/user.toml", "idle_nudge_min = 0\n");
+        assert_eq!(UserConfig::load(tmp.path(), "aki").unwrap().idle_nudge_min(), 0);
     }
 }

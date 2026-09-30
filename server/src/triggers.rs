@@ -47,6 +47,7 @@ pub enum Cancel {
     Replied,
     TaskDone(i64),
     EventDecided(i64),
+    Active,
 }
 
 impl Cancel {
@@ -55,12 +56,13 @@ impl Cancel {
             Cancel::Replied => "replied",
             Cancel::TaskDone(_) => "task_done",
             Cancel::EventDecided(_) => "event_decided",
+            Cancel::Active => "active",
         }
     }
 
     fn reference(&self) -> Option<i64> {
         match self {
-            Cancel::Replied => None,
+            Cancel::Replied | Cancel::Active => None,
             Cancel::TaskDone(id) | Cancel::EventDecided(id) => Some(*id),
         }
     }
@@ -135,14 +137,14 @@ pub fn allowance(
     Ok(allowance_of(config_dir, username).saturating_add(extra.max(0) as u32))
 }
 
-/// Triggers the agent laid for that day out of its own budget: a check inside a
-/// work session is the session's, not the day's, and a dropped one gives its
-/// place back.
+/// Triggers the agent laid, or idleness laid, for that day out of its own
+/// budget: a check inside a work session is the session's, not the day's, and
+/// a dropped one gives its place back.
 pub fn spent(conn: &Connection, user_id: i64, date: jiff::civil::Date) -> rusqlite::Result<u32> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM events e JOIN plans p ON p.id = e.plan_id
          WHERE p.user_id = ?1 AND p.date = ?2 AND e.kind = ?3
-           AND e.origin = 'agent' AND e.work_session_id IS NULL AND e.status != 'dropped'",
+           AND e.origin IN ('agent', 'idle') AND e.work_session_id IS NULL AND e.status != 'dropped'",
         (user_id, date.to_string(), KIND),
         |r| r.get(0),
     )?;
@@ -415,12 +417,13 @@ pub struct Firing {
     pub work_session_id: Option<i64>,
     pub created_at: Option<String>,
     pub wall_time: String,
+    pub origin: String,
 }
 
 pub fn read(conn: &Connection, event_id: i64) -> rusqlite::Result<Option<Firing>> {
     conn.query_row(
         "SELECT id, prompt, cancel_if, cancel_ref, conversation_id, work_session_id,
-                created_at, wall_time
+                created_at, wall_time, origin
          FROM events WHERE id = ?1",
         [event_id],
         |r| {
@@ -433,6 +436,7 @@ pub fn read(conn: &Connection, event_id: i64) -> rusqlite::Result<Option<Firing>
                 work_session_id: r.get(5)?,
                 created_at: r.get(6)?,
                 wall_time: r.get(7)?,
+                origin: r.get(8)?,
             })
         },
     )
@@ -440,8 +444,8 @@ pub fn read(conn: &Connection, event_id: i64) -> rusqlite::Result<Option<Firing>
 }
 
 /// Whether the reason this trigger was laid has already taken care of itself:
-/// the user replied in the thread, finished or dropped the task, or settled the
-/// event it was waiting on.
+/// the user replied in the thread, finished or dropped the task, settled the
+/// event it was waiting on, or came back after going quiet.
 pub fn cancelled(conn: &Connection, user_id: i64, ev: &Firing) -> rusqlite::Result<bool> {
     let Some(rule) = ev.cancel_if.as_deref() else {
         return Ok(false);
@@ -477,6 +481,15 @@ pub fn cancelled(conn: &Connection, user_id: i64, ev: &Firing) -> rusqlite::Resu
                 .flatten()
                 .map(|(_, status)| status);
             Ok(matches!(status.as_deref(), Some("done") | Some("dropped")))
+        }
+        "active" => {
+            let Some(since) =
+                ev.created_at.as_deref().and_then(|t| t.parse::<jiff::Timestamp>().ok())
+            else {
+                return Ok(false);
+            };
+            Ok(crate::presence::last_active(conn, user_id)?
+                .is_some_and(|at| at.as_second() >= since.as_second()))
         }
         _ => Ok(false),
     }
@@ -1052,5 +1065,31 @@ mod tests {
         assert!(text.contains("\"read the chapter\", started 08:55, planned 60 min"), "{text}");
         assert!(text.contains("0 steps done since the last check"), "{text}");
         assert!(text.contains("Last message from the user: 08:40."), "{text}");
+    }
+    #[test]
+    fn an_idle_trigger_spends_the_days_budget() {
+        let (conn, tmp, uid) = env();
+        let plan_id = crate::plan::ensure(&conn, tmp.path(), "aki", uid, date()).unwrap();
+        insert(&conn, plan_id, "09:00", "idle", "idle", Some(Cancel::Active), None, None,
+            at("2026-09-17T09:00:00Z")).unwrap();
+        assert_eq!(spent(&conn, uid, date()).unwrap(), 1);
+    }
+
+    #[test]
+    fn activity_after_an_idle_trigger_was_laid_cancels_it() {
+        let (conn, tmp, uid) = env();
+        let plan_id = crate::plan::ensure(&conn, tmp.path(), "aki", uid, date()).unwrap();
+        let id = insert(&conn, plan_id, "09:00", "idle", "idle", Some(Cancel::Active), None, None,
+            at("2026-09-17T09:00:00.400Z")).unwrap();
+        let ev = read(&conn, id).unwrap().unwrap();
+        assert_eq!(ev.origin, "idle");
+        assert_eq!(ev.cancel_if.as_deref(), Some("active"));
+
+        conn.execute("UPDATE users SET last_active_at = '2026-09-17T08:30:00Z' WHERE id = ?1", [uid])
+            .unwrap();
+        assert!(!cancelled(&conn, uid, &ev).unwrap(), "the quiet before it is what laid it");
+
+        crate::presence::touch(&conn, uid, at("2026-09-17T09:00:00.900Z")).unwrap();
+        assert!(cancelled(&conn, uid, &ev).unwrap(), "a stamp in the same second still counts");
     }
 }
