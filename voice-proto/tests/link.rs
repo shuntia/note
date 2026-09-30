@@ -207,3 +207,85 @@ async fn an_unsolicited_pong_does_not_stop_the_dialer() {
     let redial = tokio::time::timeout(std::time::Duration::from_secs(3), listener.accept()).await;
     assert!(redial.is_ok(), "the dialer reconnects");
 }
+
+/// Applies slowly and remembers every call to `apply`, so a double apply
+/// shows up.
+#[derive(Default)]
+struct Slow {
+    applied: Mutex<std::collections::HashMap<String, u64>>,
+    calls: Mutex<Vec<u64>>,
+    started: std::sync::atomic::AtomicU64,
+    downs: std::sync::atomic::AtomicU64,
+}
+
+impl Handler for Slow {
+    fn applied(&self, call_id: &str) -> u64 {
+        self.applied.lock().unwrap().get(call_id).copied().unwrap_or(0)
+    }
+
+    fn apply(&self, call_id: &str, seq: u64, _body: CallBody) -> Result<(), String> {
+        self.started.fetch_add(1, SeqCst);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        self.calls.lock().unwrap().push(seq);
+        self.applied.lock().unwrap().insert(call_id.to_string(), seq);
+        Ok(())
+    }
+
+    fn request(&self, _body: Request) -> BoxFuture<Result<Reply, Refusal>> {
+        Box::pin(async { Ok(Reply::Done) })
+    }
+
+    fn link_changed(&self, up: bool) {
+        if !up {
+            self.downs.fetch_add(1, SeqCst);
+        }
+    }
+}
+
+struct SlowRig {
+    _dir: tempfile::TempDir,
+    proxy: FaultProxy,
+    slow: Arc<Slow>,
+    voice: Peer,
+}
+
+async fn slow_rig() -> SlowRig {
+    let dir = tempfile::tempdir().unwrap();
+    let note_path = dir.path().join("note.sock");
+    let proxy_path = dir.path().join("proxy.sock");
+    let slow = Arc::new(Slow::default());
+    let note = Peer::new(fast(Role::Note), Dir::ToVoice, slow.clone(), Box::new(MemOutbox::default()));
+    let voice = side(Role::Voice, Dir::ToNote, Arc::default(), Arc::default()).peer;
+    tokio::spawn(listen_forever(note.clone(), UnixListener::bind(&note_path).unwrap()));
+    let proxy = FaultProxy::start(proxy_path.clone(), note_path).await.unwrap();
+    tokio::spawn(dial_forever(voice.clone(), proxy_path));
+    let (n, v) = (note.clone(), voice.clone());
+    eventually("both sides up", || n.is_up() && v.is_up()).await;
+    SlowRig { _dir: dir, proxy, slow, voice }
+}
+
+#[tokio::test]
+async fn a_slow_apply_keeps_the_link_up() {
+    let r = slow_rig().await;
+    for _ in 0..3 {
+        r.voice.send_call("c5", CallBody::Ringing).unwrap();
+    }
+    let v = r.voice.clone();
+    eventually("all acknowledged", || v.pending_calls().is_empty()).await;
+    assert_eq!(*r.slow.calls.lock().unwrap(), one_to(3));
+    assert_eq!(r.slow.downs.load(SeqCst), 0, "the link never dropped");
+}
+
+#[tokio::test]
+async fn a_cut_mid_apply_applies_each_seq_once() {
+    let r = slow_rig().await;
+    for _ in 0..3 {
+        r.voice.send_call("c6", CallBody::Ringing).unwrap();
+    }
+    let slow = r.slow.clone();
+    eventually("the first apply is under way", || slow.started.load(SeqCst) >= 1).await;
+    r.proxy.faults.cut();
+    let v = r.voice.clone();
+    eventually("all acknowledged after the cut", || v.pending_calls().is_empty()).await;
+    assert_eq!(*r.slow.calls.lock().unwrap(), one_to(3));
+}
