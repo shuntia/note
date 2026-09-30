@@ -135,6 +135,14 @@ async fn main() -> anyhow::Result<()> {
         let ch = channels::telegram::TelegramChannel::new(state.db.clone(), t)?;
         state = state.with_telegram(ch);
     }
+    if let Some(v) = &cfg.voice {
+        let voice = note_server::voice::Voice::new(state.db.clone());
+        state = state.with_voice(voice.clone());
+        voice
+            .listen(&v.socket)
+            .with_context(|| format!("listening for the voice service on {}", v.socket.display()))?;
+        voice.spawn_sweeper();
+    }
     if let Some(embeddings) = state.embeddings.clone() {
         let db = state.db.clone();
         let data_dir = state.data_dir.clone();

@@ -89,3 +89,7 @@ require_second_factor = true
 # [channels.telegram]
 # token_file = "config/telegram.token"   # mode 600, gitignored
 # base_url = "https://api.telegram.org"  # the default
+
+# The voice service (note-voice) connects here to ring a linked Matrix account.
+# [voice]
+# socket = "/run/note/voice.sock"

@@ -290,12 +290,18 @@ pub struct UserConfig {
     /// is announced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_end_notify: Option<bool>,
+    /// Which messages ring the linked phone: `urgent` or `never`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ring_for: Option<String>,
 }
 
 pub const DEFAULT_TRIGGERS_PER_DAY: u32 = 4;
 pub const DEFAULT_CLOSE_DAY_TIME: &str = "21:30";
 pub const DEFAULT_POMODORO_WORK_MIN: u32 = 25;
 pub const DEFAULT_POMODORO_BREAK_MIN: u32 = 5;
+pub const RING_FOR_URGENT: &str = "urgent";
+pub const RING_FOR_NEVER: &str = "never";
+pub const RING_FOR: &[&str] = &[RING_FOR_URGENT, RING_FOR_NEVER];
 
 fn default_nightly_time() -> String {
     "03:00".into()
@@ -342,6 +348,10 @@ impl UserConfig {
 
     pub fn session_end_notify(&self) -> bool {
         self.session_end_notify.unwrap_or(true)
+    }
+
+    pub fn ring_for(&self) -> &str {
+        self.ring_for.as_deref().unwrap_or(RING_FOR_URGENT)
     }
 
     pub fn pomodoro_work_min(&self) -> u32 {
