@@ -16,6 +16,7 @@ import { glide, lift, viewIn, viewOut } from './motion-gsap'
 import { reducedMotion } from './motion'
 import { NavIcon } from './navicon'
 import { prefsFrom, writePrefs } from './prefs'
+import { startPresence } from './presence'
 import { readSession, stillEnding, writeSession, type FocusSession } from './session'
 import type { Me, SessionStart } from './types'
 import { Admin } from './views/Admin'
@@ -297,6 +298,16 @@ export function App() {
     window.addEventListener('focus', check)
     return () => window.removeEventListener('focus', check)
   }, [me, notify, onChanged])
+
+  useEffect(() => {
+    if (!me) return
+    return startPresence({
+      ping: () => void api.presence().catch(() => {}),
+      target: window,
+      visible: () => !document.hidden,
+      now: Date.now,
+    })
+  }, [me])
 
   useEffect(() => {
     if (!me) return

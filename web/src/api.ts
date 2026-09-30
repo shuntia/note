@@ -81,6 +81,7 @@ const WRITABLE_SETTINGS = [
   'pomodoro_work_min',
   'pomodoro_break_min',
   'session_end_notify',
+  'idle_nudge_min',
   'ring_for',
 ] as const
 
@@ -265,6 +266,7 @@ export const api = {
       ),
     }),
   settings: () => request<Settings>('/api/settings'),
+  presence: () => request<void>('/api/presence', { method: 'POST' }),
   // The server rejects unknown fields, so only the writable keys actually set go on the
   // wire. Bell toggles apply to the template the request leaves selected.
   saveSettings: (patch: SettingsPatch, alerts?: AlertPatch[]) => {

@@ -3,7 +3,7 @@ export type Me = { username: string; admin: boolean }
 export type MovedTo = { event_id: number; date: string; wall_time: string; kind: string }
 
 // Where the event came from: the template, the agent, the allocator, or a user edit.
-export type EventOrigin = 'template' | 'agent' | 'auto' | 'user'
+export type EventOrigin = 'template' | 'agent' | 'auto' | 'user' | 'idle'
 
 export type TaskUrgency = 'low' | 'normal' | 'high'
 
@@ -227,6 +227,8 @@ export type Settings = {
   pomodoro_break_min: number
   // Gates the pomodoro phase messages and the "Time's up." at a session's planned end.
   session_end_notify: boolean
+  // Minutes quiet before Note may nudge about open notes; 0 is off.
+  idle_nudge_min: number
   // Whether this server can ring a phone; the Calls row hides without it.
   voice_enabled: boolean
   voice_link: { mxid: string; state: 'invited' | 'linked' } | null
@@ -255,6 +257,7 @@ export type SettingsSaved = Pick<
   | 'pomodoro_work_min'
   | 'pomodoro_break_min'
   | 'session_end_notify'
+  | 'idle_nudge_min'
   | 'ring_for'
 > & { schedule: ScheduleRow[] }
 
