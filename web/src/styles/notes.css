@@ -1,0 +1,9 @@
+.notes { width: min(calc(100% - 48px), calc(440 * var(--u))); max-height: calc(360 * var(--u)); overflow-y: auto; pointer-events: auto; }
+.notes-list { list-style: none; margin: 0; padding: 0; }
+.note-row { display: flex; align-items: center; gap: calc(10 * var(--u)); padding: calc(6 * var(--u)) 0; }
+.note-text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.note-edit, .note-new input { flex: 1; width: 100%; font: inherit; color: inherit; background: none; border: 0; border-bottom: 1px solid var(--line); padding: calc(4 * var(--u)) 0; outline: none; }
+.note-new { display: flex; margin-top: calc(6 * var(--u)); }
+.note-pin { flex: none; width: calc(14 * var(--u)); height: calc(14 * var(--u)); fill: none; stroke: currentColor; stroke-width: 1.6; opacity: 0.5; }
+.home-face.at-rest { gap: calc(44 * var(--u)); padding-top: calc(120 * var(--u)); }
+.home-face.at-rest .face-hint.under { left: 50%; right: auto; transform: translateX(-50%); white-space: nowrap; }
