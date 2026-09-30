@@ -196,7 +196,7 @@ body {
 .view.view-talk { flex-direction: row; padding: 0; min-height: 0; overflow: hidden; }
 
 .tabs { display: flex; height: 84px; padding: 12px 18px 22px; box-sizing: border-box; background: var(--haze-strong); }
-.tabs button { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 4px; font: inherit; font-size: 0.66rem; border: 0; background: none; color: var(--faint); cursor: pointer; }
+.tabs button { flex: 1; display: flex; align-items: center; justify-content: center; font: inherit; border: 0; background: none; color: var(--faint); cursor: pointer; }
 .tabs button[aria-current='true'] { color: var(--ink); }
 .tabs .nav-icon { width: 22px; height: 22px; }
 .tabs button:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
@@ -1014,41 +1014,55 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
   .letter { animation: none; }
 }
 
-/* toast */
+/* toast: a frosted pill under the top bar, above the tab bar on a phone */
 .toast {
+  --toast-from: -8px;
   position: fixed;
-  bottom: 1.25rem;
+  top: calc(var(--bar) + 0.75rem);
   left: 50%;
   transform: translateX(-50%);
+  z-index: 30;
   display: flex;
   align-items: center;
-  gap: 0.9rem;
-  background: var(--text);
-  color: var(--bg);
-  padding: 0.6rem 0.7rem 0.6rem 1rem;
-  border-radius: var(--radius-lg);
-  max-width: 24rem;
-  z-index: 30;
-  box-shadow: 0 8px 24px color-mix(in srgb, var(--text) 20%, transparent);
+  gap: 0.5rem;
+  max-width: min(22rem, calc(100vw - 32px));
+  padding: 0.4rem 0.4rem 0.4rem 1rem;
+  border-radius: 999px;
+  border: 1px solid color-mix(in oklch, var(--line) 45%, transparent);
+  background: linear-gradient(to bottom, color-mix(in oklch, var(--ivory) 80%, transparent), color-mix(in oklch, var(--ivory) 56%, transparent));
+  -webkit-backdrop-filter: blur(18px) saturate(1.6);
+  backdrop-filter: blur(18px) saturate(1.6);
+  box-shadow:
+    inset 0 1px 0 color-mix(in oklch, white 45%, transparent),
+    0 8px 20px -10px color-mix(in oklch, var(--ink) 30%, transparent);
+  color: var(--ink);
+  font-size: 0.875rem;
+  animation: toast-in 200ms ease-out;
 }
-.toast-msg { min-width: 0; }
+.toast:not(:has(.toast-action)) { padding-right: 1rem; }
+.toast.leaving { animation: toast-out 200ms ease-in forwards; pointer-events: none; }
+.toast-msg { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .toast-action {
   flex: none;
-  background: none;
-  border: 1px solid color-mix(in srgb, var(--bg) 45%, transparent);
+  padding: 0.25rem 0.7rem;
+  border: 0;
   border-radius: 999px;
-  padding: 0.25rem 0.8rem;
-  color: inherit;
+  background: none;
+  color: var(--sun-ink);
   font: inherit;
-  font-size: 0.85rem;
   font-weight: 600;
   cursor: pointer;
 }
-.toast-action:hover { background: color-mix(in srgb, var(--bg) 16%, transparent); }
-.toast-action:focus-visible { outline: 2px solid var(--bg); outline-offset: 2px; }
+.toast-action:hover { background: color-mix(in oklch, var(--ink) 7%, transparent); }
+.toast-action:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
+@keyframes toast-in { from { opacity: 0; transform: translate(-50%, var(--toast-from)); } }
+@keyframes toast-out { to { opacity: 0; transform: translate(-50%, var(--toast-from)); } }
 @media (max-width: 767.98px) {
-  .toast { bottom: calc(1.25rem + env(safe-area-inset-bottom)); }
+  .toast { --toast-from: 8px; top: auto; bottom: calc(1.25rem + env(safe-area-inset-bottom)); }
   .toast.above-tabs { bottom: calc(96px + env(safe-area-inset-bottom)); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .toast { --toast-from: 0px; }
 }
 
 /* admin */

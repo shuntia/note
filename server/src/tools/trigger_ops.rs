@@ -56,6 +56,9 @@ pub struct BudgetArgs {
 pub struct SayArgs {
     /// One or two warm sentences, as the user will read them.
     pub text: String,
+    /// The ids of the notes these words are about, when a nudge names any.
+    #[serde(default)]
+    pub notes: Vec<i64>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -137,7 +140,7 @@ pub fn set(
     conn: &Connection,
     ctx: &ToolCtx,
     kind: SessionKind,
-    args: SetArgs,
+    args: &SetArgs,
 ) -> Result<serde_json::Value, ToolError> {
     lay(conn, ctx, kind, &args.at, &args.prompt, None, args.thread)
 }
@@ -146,7 +149,7 @@ pub fn wait_until(
     conn: &Connection,
     ctx: &ToolCtx,
     kind: SessionKind,
-    args: WaitUntilArgs,
+    args: &WaitUntilArgs,
 ) -> Result<serde_json::Value, ToolError> {
     lay(conn, ctx, kind, &args.at, &args.prompt, Some(Cancel::Replied), args.thread)
 }
@@ -155,7 +158,7 @@ pub fn wait_for(
     conn: &Connection,
     ctx: &ToolCtx,
     kind: SessionKind,
-    args: WaitForArgs,
+    args: &WaitForArgs,
 ) -> Result<serde_json::Value, ToolError> {
     let cancel = match (args.task_id, args.event_id) {
         (Some(id), None) => Cancel::TaskDone(id),
@@ -170,7 +173,7 @@ pub fn wait_for(
 pub fn budget(
     conn: &Connection,
     ctx: &ToolCtx,
-    args: BudgetArgs,
+    args: &BudgetArgs,
 ) -> Result<serde_json::Value, ToolError> {
     if !(1..=triggers::MAX_EXTRA).contains(&args.extra) {
         return Err(ToolError::rejected(format!(
@@ -204,7 +207,7 @@ pub fn budget(
 pub fn say(
     _conn: &Connection,
     _ctx: &ToolCtx,
-    args: SayArgs,
+    args: &SayArgs,
 ) -> Result<serde_json::Value, ToolError> {
     let text = args.text.trim();
     if text.is_empty() || text.len() > triggers::MAX_SAY_BYTES {
@@ -213,13 +216,13 @@ pub fn say(
             triggers::MAX_SAY_BYTES
         )));
     }
-    Ok(serde_json::json!({ "said": text }))
+    Ok(serde_json::json!({ "said": text, "notes": args.notes }))
 }
 
 pub fn stay_quiet(
     _conn: &Connection,
     _ctx: &ToolCtx,
-    args: QuietArgs,
+    args: &QuietArgs,
 ) -> Result<serde_json::Value, ToolError> {
     let reason = args.reason.trim();
     if reason.is_empty() {
@@ -406,7 +409,7 @@ mod tests {
         assert_eq!(events, 0);
     }
 
-    /// An evening nightly_time plans tomorrow, so its triggers land there too
+    /// An evening `nightly_time` plans tomorrow, so its triggers land there too
     /// whatever the hour the run happens at.
     #[test]
     fn the_nightly_lays_on_the_day_it_is_planning() {
@@ -477,5 +480,15 @@ mod tests {
             let e = dispatch(&conn, &ctx(&tmp), kind, "say", r#"{"text":"hi"}"#).unwrap_err();
             assert_eq!(e.kind, "unknown_tool", "{kind:?} can speak out of turn");
         }
+    }
+    #[test]
+    fn say_carries_the_notes_it_names() {
+        let (conn, tmp) = env();
+        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Trigger, "say",
+            r#"{"text":"the bank closes at five","notes":[3]}"#).unwrap();
+        assert_eq!(out["notes"], serde_json::json!([3]));
+        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Trigger, "say", r#"{"text":"hi"}"#)
+            .unwrap();
+        assert_eq!(out["notes"], serde_json::json!([]));
     }
 }

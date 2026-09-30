@@ -24,7 +24,7 @@ impl ClientHub {
 
     /// `None` once the user already holds `MAX_PER_USER` sockets.
     pub fn register(&self, user_id: i64) -> Option<(u64, UnboundedReceiver<String>)> {
-        let mut conns = self.conns.lock().unwrap_or_else(|e| e.into_inner());
+        let mut conns = self.conns.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let held = conns.entry(user_id).or_default();
         if held.len() >= MAX_PER_USER {
             return None;
@@ -38,13 +38,13 @@ impl ClientHub {
     pub fn at_capacity(&self, user_id: i64) -> bool {
         self.conns
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&user_id)
             .is_some_and(|v| v.len() >= MAX_PER_USER)
     }
 
     pub fn unregister(&self, user_id: i64, conn_id: u64) {
-        let mut conns = self.conns.lock().unwrap_or_else(|e| e.into_inner());
+        let mut conns = self.conns.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(v) = conns.get_mut(&user_id) {
             v.retain(|(id, _)| *id != conn_id);
             if v.is_empty() {
@@ -56,7 +56,7 @@ impl ClientHub {
     /// Sends to every live connection of `user_id`, pruning closed ones, and
     /// returns how many actually received it.
     pub fn send(&self, user_id: i64, text: &str) -> usize {
-        let mut conns = self.conns.lock().unwrap_or_else(|e| e.into_inner());
+        let mut conns = self.conns.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(v) = conns.get_mut(&user_id) else {
             return 0;
         };
@@ -75,6 +75,13 @@ impl ClientHub {
     pub fn broadcast_changed(&self, user_id: i64) {
         self.send(user_id, "{\"type\":\"changed\"}");
     }
+}
+
+/// A frame the client chose to send. Ping and pong are answered by the
+/// browser whether or not anyone is there.
+pub fn is_presence(msg: &axum::extract::ws::Message) -> bool {
+    use axum::extract::ws::Message;
+    matches!(msg, Message::Text(_) | Message::Binary(_))
 }
 
 /// Cap on one agent frame's variable text, so a large tool payload cannot
@@ -292,5 +299,13 @@ mod tests {
         ch.deliver(1, "aki", &plain).unwrap();
         let v: serde_json::Value = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
         assert!(v["conversation_id"].is_null());
+    }
+    #[test]
+    fn only_a_frame_the_client_chose_to_send_is_presence() {
+        use axum::extract::ws::Message;
+        assert!(is_presence(&Message::Text("hi".into())));
+        assert!(is_presence(&Message::Binary(Vec::new().into())));
+        assert!(!is_presence(&Message::Pong(Vec::new().into())));
+        assert!(!is_presence(&Message::Ping(Vec::new().into())));
     }
 }

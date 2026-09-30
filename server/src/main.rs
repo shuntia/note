@@ -9,9 +9,7 @@ const USAGE: &str = "usage: note-server [create-user <name> <password> [--admin]
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let config_dir = std::env::var("NOTE_CONFIG_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("./config"));
+    let config_dir = std::env::var("NOTE_CONFIG_DIR").map_or_else(|_| PathBuf::from("./config"), PathBuf::from);
     let cfg = match std::env::var_os("NOTE_SERVER_CONFIG") {
         Some(path) => ServerConfig::load_file(std::path::Path::new(&path))?,
         None => ServerConfig::load(&config_dir)?,
@@ -119,7 +117,8 @@ async fn main() -> anyhow::Result<()> {
         .with_passkeys(passkeys)
         .with_limits(&cfg.limits)
         .with_public_base_url(&cfg.public_base_url)
-        .with_idle_summary_min(cfg.idle_summary_min());
+        .with_idle_summary_min(cfg.idle_summary_min())
+        .with_inbox_refresh(cfg.inbox.refresh_signal.clone());
     state.secure_cookies = cfg.public_base_url.starts_with("https://");
     if let Some(wp) = &cfg.channels.webpush {
         let pem = std::fs::read(&wp.vapid_pem_file)

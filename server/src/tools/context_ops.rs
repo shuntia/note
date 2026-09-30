@@ -52,7 +52,7 @@ pub struct NightlyNotesArgs {
 pub fn nightly_notes_write(
     conn: &Connection,
     ctx: &ToolCtx,
-    args: NightlyNotesArgs,
+    args: &NightlyNotesArgs,
 ) -> Result<serde_json::Value, ToolError> {
     let _ = conn;
     let text = args.text.trim();
@@ -100,7 +100,7 @@ mod tests {
         (conn, tmp)
     }
 
-    fn ctx<'a>(tmp: &'a tempfile::TempDir) -> ToolCtx<'a> {
+    fn ctx(tmp: &tempfile::TempDir) -> ToolCtx<'_> {
         ToolCtx { config_dir: tmp.path(), data_dir: tmp.path(), user_id: 1, username: "aki", vectors: crate::tools::PreparedVectors::default(), task_scope: None, inbox_source: None, memory_source: None, share: None, share_thread: None }
     }
 
@@ -135,7 +135,7 @@ mod tests {
     fn bad_combinations_and_misses_are_typed() {
         let (conn, tmp) = env();
         for raw in [
-            r#"{}"#,
+            r"{}",
             r#"{"find":"x"}"#,
             r#"{"append":"a","find":"x","replace":"y"}"#,
         ] {

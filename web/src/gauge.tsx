@@ -1,6 +1,6 @@
 import { gsap } from 'gsap'
-import { Fragment, useLayoutEffect, useRef, type ReactNode, type RefObject } from 'react'
-import { C, R as RING, SPAN, segments } from './circle'
+import { useLayoutEffect, useRef, type ReactNode, type RefObject } from 'react'
+import { C, R as RING, SPAN } from './circle'
 import { drain as drainArc } from './fx'
 import { reducedMotion } from './motion'
 
@@ -125,14 +125,12 @@ export function Gauge({
   )
 }
 
-export type Steps = { count: number; current: number }
-
 const ARC = { cx: 160, cy: 160, r: RING, strokeWidth: STROKE }
 
 /**
  * The session's arc as two circles the fx helpers drive (`track`, `fill`). While
  * `hold` is set the effects own them and the painter keeps off; otherwise the fill
- * follows `fracAt`, drains from its far end when `drain`, or splits into `steps`.
+ * follows `fracAt`, or drains from its far end when `drain`.
  */
 export function Circle({
   size,
@@ -140,7 +138,6 @@ export function Circle({
   drain = false,
   paused = false,
   breathe = false,
-  steps = null,
   hold,
   fill,
   track,
@@ -151,13 +148,11 @@ export function Circle({
   drain?: boolean
   paused?: boolean
   breathe?: boolean
-  steps?: Steps | null
   hold: RefObject<boolean>
   fill: RefObject<SVGCircleElement | null>
   track: RefObject<SVGCircleElement | null>
   children?: ReactNode
 }) {
-  const group = useRef<SVGGElement>(null)
   const at = useRef(fracAt)
   at.current = fracAt
   const dim = useRef({ v: paused ? 1 : 0 })
@@ -173,39 +168,20 @@ export function Circle({
     }
   }, [paused])
 
-  const count = steps?.count ?? 0
-  const current = steps?.current ?? 0
   useLayoutEffect(() => {
     const f = fill.current
     const t = track.current
     if (!f || !t) return
     const still = reducedMotion()
     const paint = () => {
-      if (hold.current) {
-        if (group.current) group.current.style.opacity = '0'
-        return
-      }
+      if (hold.current) return
       const frac = clamp(at.current?.() ?? 0)
       const pulse = breathe && !still ? 0.775 + 0.225 * Math.sin((performance.now() / BREATHE_MS) * 2 * Math.PI) : 1
       const lit = String(pulse * (1 - 0.62 * dim.current.v))
-      const g = group.current
       if (drain) {
         drainArc(f, SPAN * (1 - frac))
         if (f.style.opacity !== '0') f.style.opacity = lit
         t.style.opacity = String(pulse)
-        if (g) g.style.opacity = '0'
-        return
-      }
-      if (g && count > 0) {
-        t.style.opacity = '0'
-        f.style.opacity = '0'
-        g.style.opacity = String(pulse)
-        const segs = segments(count, current, frac)
-        g.querySelectorAll<SVGCircleElement>('.seg-fill').forEach((c, i) => {
-          const len = segs[i].len * segs[i].frac
-          c.setAttribute('stroke-dasharray', `${len} ${C}`)
-          c.style.opacity = len > 9 ? lit : '0'
-        })
         return
       }
       const len = SPAN * frac
@@ -220,22 +196,12 @@ export function Circle({
       id = requestAnimationFrame(step)
     })
     return () => cancelAnimationFrame(id)
-  }, [drain, breathe, count, current, fill, track, hold])
+  }, [drain, breathe, fill, track, hold])
 
   return (
     <div className="gauge arc" style={{ width: `calc(${size} * var(--u))`, height: `calc(${size} * var(--u))` }}>
       <svg className="gauge-ring" viewBox={`0 0 ${VB} ${VB}`} aria-hidden="true">
         <circle ref={track} className="arc-track" {...ARC} strokeDasharray={`${SPAN} ${C}`} transform="rotate(150 160 160)" />
-        {count > 0 && (
-          <g ref={group} className="arc-steps">
-            {segments(count, current, 0).map((s, i) => (
-              <Fragment key={i}>
-                <circle className="arc-track" {...ARC} strokeDasharray={`${s.len} ${C}`} transform={`rotate(${s.start} 160 160)`} />
-                <circle className="arc-fill seg-fill" {...ARC} strokeDasharray={`0 ${C}`} transform={`rotate(${s.start} 160 160)`} />
-              </Fragment>
-            ))}
-          </g>
-        )}
         <circle ref={fill} className="arc-fill" {...ARC} strokeDasharray={`0 ${C}`} transform="rotate(150 160 160)" />
       </svg>
       <div className="gauge-centre">{children}</div>

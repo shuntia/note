@@ -5,6 +5,7 @@ use axum::http::{header, Method, Request, StatusCode};
 use http_body_util::BodyExt;
 use note_server::providers::{mock::MockLLM, ChatRequest, ChatResponse, LLMProvider, ToolCall};
 use note_server::{auth, tokens, AppState};
+use rusqlite::OptionalExtension;
 use std::sync::{Arc, Mutex};
 use tower::ServiceExt;
 
@@ -98,6 +99,33 @@ fn live_files(cfg: &tempfile::TempDir, user: &str) -> usize {
     std::fs::read_dir(cfg.path().join(format!("memory/{user}/semantic")))
         .map(|d| d.flatten().count())
         .unwrap_or(0)
+}
+
+fn inbox_row(state: &AppState, source: &str) -> Option<serde_json::Value> {
+    let conn = state.db.lock().unwrap();
+    conn.query_row(
+        "SELECT kind, title, body, received_at, outcome, reason, decided_at
+         FROM inbox_items WHERE user_id = 1 AND source_id = ?1",
+        [source],
+        |r| {
+            Ok(serde_json::json!({
+                "kind": r.get::<_, String>(0)?,
+                "title": r.get::<_, String>(1)?,
+                "body": r.get::<_, String>(2)?,
+                "received_at": r.get::<_, String>(3)?,
+                "outcome": r.get::<_, Option<String>>(4)?,
+                "reason": r.get::<_, Option<String>>(5)?,
+                "decided_at": r.get::<_, Option<String>>(6)?,
+            }))
+        },
+    )
+    .optional()
+    .unwrap()
+}
+
+fn inbox_rows(state: &AppState) -> i64 {
+    let conn = state.db.lock().unwrap();
+    conn.query_row("SELECT COUNT(*) FROM inbox_items", [], |r| r.get(0)).unwrap()
 }
 
 const REMEMBER_TWO: &str = r#"{"source_id":"lms:post:77","outcome":"remembered",
@@ -425,7 +453,7 @@ async fn a_malformed_body_says_so_and_nothing_more() {
 
 #[tokio::test]
 async fn bad_fields_are_422_with_an_error_body() {
-    let (app, cookie, _state, _cfg) = common::app_with_logged_in_user_and_state().await;
+    let (app, cookie, state, _cfg) = common::app_with_logged_in_user_and_state().await;
     let oversize = format!(
         r#"{{"source_id":"lms:post:1","kind":"announcement","context":"{}"}}"#,
         "x".repeat(32 * 1024 + 1)
@@ -441,6 +469,7 @@ async fn bad_fields_are_422_with_an_error_body() {
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
         assert!(!v["error"].as_str().unwrap_or("").is_empty(), "{v}");
     }
+    assert_eq!(inbox_rows(&state), 0);
 }
 
 #[tokio::test]
@@ -487,6 +516,7 @@ async fn a_second_session_for_the_same_user_is_refused() {
     .await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{v}");
     assert_eq!(v["error"], "a session is already in progress");
+    assert_eq!(inbox_rows(&state), 0, "a refused item is not kept");
 }
 
 #[tokio::test]
@@ -507,4 +537,60 @@ async fn the_daily_session_cap_refuses_an_item() {
     .await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{v}");
     assert_eq!(v["error"], "daily session limit reached");
+    assert_eq!(inbox_rows(&state), 0, "a refused item is not kept");
+}
+
+#[tokio::test]
+async fn an_item_is_kept_with_its_decision() {
+    let llm = Arc::new(MockLLM::scripted(vec![decide("c1", REMEMBER_TWO)]));
+    let (app, _cookie, state, _cfg) = common::app_with_logged_in_user_llm_and_state(llm).await;
+    let token = token_for(&state, 1);
+    let context = "\n  Quiz Friday  \nLate work loses 10% a day.";
+    let body = serde_json::json!({"source_id":"lms:post:77","kind":"announcement","context":context}).to_string();
+    let (status, v) = post_inbox(&app, bearer(&token), &body).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+
+    let row = inbox_row(&state, "lms:post:77").expect("the item is kept");
+    assert_eq!(row["kind"], "announcement");
+    assert_eq!(row["title"], "Quiz Friday");
+    assert_eq!(row["body"], context);
+    assert_eq!(row["outcome"], "remembered");
+    assert_eq!(row["reason"], "two dated facts about the biology quiz");
+    assert!(row["decided_at"].as_str().unwrap() >= row["received_at"].as_str().unwrap());
+}
+
+#[tokio::test]
+async fn a_re_send_keeps_one_row_and_takes_the_new_decision() {
+    let llm = Arc::new(MockLLM::scripted(vec![
+        decide("c1", REMEMBER_TWO),
+        decide("c2", r#"{"source_id":"lms:post:77","outcome":"nothing","reason":"the edit added nothing durable"}"#),
+    ]));
+    let (app, cookie, state, _cfg) = common::app_with_logged_in_user_llm_and_state(llm).await;
+    post_inbox(&app, cookie_auth(&cookie), r#"{"source_id":"lms:post:77","kind":"announcement","context":"Quiz Friday"}"#).await;
+    let first = inbox_row(&state, "lms:post:77").unwrap();
+    let (status, _) = post_inbox(&app, cookie_auth(&cookie), r#"{"source_id":"lms:post:77","kind":"material","context":"Quiz moved"}"#).await;
+    assert_eq!(status, StatusCode::OK);
+    let second = inbox_row(&state, "lms:post:77").unwrap();
+    assert_eq!(inbox_rows(&state), 1);
+    assert_eq!(second["kind"], "material");
+    assert_eq!(second["title"], "Quiz moved");
+    assert_eq!(second["outcome"], "nothing");
+    assert!(second["received_at"].as_str().unwrap() > first["received_at"].as_str().unwrap());
+}
+
+#[tokio::test]
+async fn a_failed_re_send_leaves_the_item_undecided_and_its_facts_in_place() {
+    let llm = Arc::new(ScriptThenFail { script: Mutex::new(vec![decide("c1", REMEMBER_TWO)].into()) });
+    let (app, cookie, state, cfg) = common::app_with_logged_in_user_llm_and_state(llm).await;
+    let (status, _) = post_inbox(&app, cookie_auth(&cookie), r#"{"source_id":"lms:post:77","kind":"announcement","context":"Quiz Friday"}"#).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = post_inbox(&app, cookie_auth(&cookie), r#"{"source_id":"lms:post:77","kind":"announcement","context":"Quiz moved"}"#).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+
+    let row = inbox_row(&state, "lms:post:77").unwrap();
+    assert_eq!(row["title"], "Quiz moved");
+    assert_eq!(row["outcome"], serde_json::Value::Null);
+    assert_eq!(row["reason"], serde_json::Value::Null);
+    assert_eq!(source_rows(&state), 2);
+    assert_eq!(live_files(&cfg, "aki"), 2);
 }

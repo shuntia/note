@@ -12,10 +12,9 @@ import { Markdown } from './markdown'
 import { fold, settle, unfold } from './motion-gsap'
 import { doing } from './receipts'
 import { onAgentFrame, type AgentFrame } from './ws'
+import { t } from './i18n'
 
 const DRAFT_KEY = 'note.captureDraft'
-const PLACEHOLDER = 'Jot anything'
-const TROUBLE = "Couldn't reach Note. Try again."
 
 type Line =
   | { kind: 'said'; key: string; text: string }
@@ -66,7 +65,7 @@ export function Jot({
   flow = false,
   tab,
   conversationId = null,
-  placeholder = PLACEHOLDER,
+  placeholder = t('jot.placeholder'),
 }: {
   openTalk: (draft: string) => void
   openConversation: (id: number) => void
@@ -192,7 +191,7 @@ export function Jot({
       setLines((prev) => [...prev, { kind: 'reply', key: nextKey(), text: answer.reply }])
     } catch {
       if (era.current !== sentIn) return
-      setLines((prev) => [...prev, { kind: 'oops', key: nextKey(), text: TROUBLE }])
+      setLines((prev) => [...prev, { kind: 'oops', key: nextKey(), text: t('common.unreachable') }])
       change(message)
     } finally {
       if (era.current === sentIn) {
@@ -220,7 +219,7 @@ export function Jot({
     ? null
     : live.step
       ? `${doing(live.step.name, live.step.args)}…`
-      : 'Note is thinking…'
+      : t('jot.thinking')
 
   return (
     <div className={`jot-wrap${flow ? ' flow' : ''}`} ref={wrap}>
@@ -251,7 +250,7 @@ export function Jot({
           <button
             className="jot-send"
             type="submit"
-            aria-label="Send"
+            aria-label={t('jot.send')}
             disabled={busy || !text.trim()}
           >
             <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -271,7 +270,7 @@ export function Jot({
           ref={panel}
           role="button"
           tabIndex={0}
-          aria-label="Open in Chat"
+          aria-label={t('jot.openChat')}
           onClick={onPanelClick}
           onKeyDown={(e) => {
             if (e.key !== 'Enter') return
@@ -305,7 +304,7 @@ export function Jot({
             </p>
           )}
           <span className="jot-hint" aria-hidden="true">
-            Open in Chat ›
+            {t('jot.openChatHint')}
           </span>
         </div>
       )}

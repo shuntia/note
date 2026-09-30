@@ -160,7 +160,7 @@ pub(crate) fn occupied(
 pub fn plan_tasks(
     conn: &Connection,
     ctx: &ToolCtx,
-    args: PlanTasksArgs,
+    args: &PlanTasksArgs,
 ) -> Result<serde_json::Value, ToolError> {
     unscoped(ctx)?;
     let date: jiff::civil::Date = args.date.parse().map_err(|_| {
@@ -447,7 +447,7 @@ mod tests {
         (conn, tempfile::tempdir().unwrap())
     }
 
-    fn ctx<'a>(tmp: &'a tempfile::TempDir, scope: Option<i64>) -> ToolCtx<'a> {
+    fn ctx(tmp: &tempfile::TempDir, scope: Option<i64>) -> ToolCtx<'_> {
         ToolCtx {
             config_dir: tmp.path(),
             data_dir: tmp.path(),

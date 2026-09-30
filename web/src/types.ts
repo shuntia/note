@@ -3,7 +3,7 @@ export type Me = { username: string; admin: boolean }
 export type MovedTo = { event_id: number; date: string; wall_time: string; kind: string }
 
 // Where the event came from: the template, the agent, the allocator, or a user edit.
-export type EventOrigin = 'template' | 'agent' | 'auto' | 'user'
+export type EventOrigin = 'template' | 'agent' | 'auto' | 'user' | 'idle'
 
 export type TaskUrgency = 'low' | 'normal' | 'high'
 
@@ -106,6 +106,18 @@ export type Goal = {
   next_due_at: string | null
 }
 
+// A one-line post-it: `done_at` is null while it is open.
+export type Note = {
+  id: number
+  text: string
+  pinned: boolean
+  created_at: string
+  done_at: string | null
+  last_nudged_at: string | null
+}
+
+export type NotePatch = { text?: string; pinned?: boolean; done?: boolean }
+
 export type Token = {
   id: number
   name: string
@@ -195,6 +207,8 @@ export type Settings = {
   nightly_time: string
   // When the close-the-day card appears; '' where the user turned it off.
   close_day_time: string
+  // Until when an open morning brings the letter to the face, HH:MM.
+  morning_until: string
   template: string
   templates: string[]
   timezones: string[]
@@ -215,6 +229,8 @@ export type Settings = {
   pomodoro_break_min: number
   // Gates the pomodoro phase messages and the "Time's up." at a session's planned end.
   session_end_notify: boolean
+  // Minutes quiet before Note may nudge about open notes; 0 is off.
+  idle_nudge_min: number
   // Whether this server can ring a phone; the Calls row hides without it.
   voice_enabled: boolean
   voice_link: { mxid: string; state: 'invited' | 'linked' } | null
@@ -233,6 +249,7 @@ export type SettingsSaved = Pick<
   | 'timezone_auto'
   | 'nightly_time'
   | 'close_day_time'
+  | 'morning_until'
   | 'template'
   | 'show_arc_between_sessions'
   | 'counter'
@@ -243,6 +260,7 @@ export type SettingsSaved = Pick<
   | 'pomodoro_work_min'
   | 'pomodoro_break_min'
   | 'session_end_notify'
+  | 'idle_nudge_min'
   | 'ring_for'
 > & { schedule: ScheduleRow[] }
 
@@ -283,6 +301,27 @@ export type MemoryFact = {
   created: string
   archived: boolean
   supersedes: string | null
+}
+
+export type InboxKind = 'announcement' | 'material'
+export type InboxOutcome = 'remembered' | 'nothing' | 'task'
+
+export type InboxRow = {
+  id: number
+  source_id: string
+  kind: InboxKind
+  title: string
+  received_at: string
+  outcome: InboxOutcome | null
+}
+
+export type InboxPage = { items: InboxRow[]; latest: string | null; refresh: boolean }
+
+export type InboxItem = InboxRow & {
+  body: string
+  reason: string | null
+  decided_at: string | null
+  memories: { id: string; summary: string; archived: boolean }[]
 }
 
 export type LogRow = {
@@ -493,10 +532,17 @@ export type SessionStart = {
   notes?: string
 }
 
-export type QueueReason = 'now' | 'overdue' | 'urgent' | 'due_soon' | 'oldest'
+export type QueueReason = 'now' | 'overdue' | 'urgent' | 'due_soon' | 'oldest' | 'scheduled'
 
-// `task` is the whole task with its steps; `step` is the one to work on, if any.
-export type QueueEntry = { task: TaskNode; step: Task | null; planned_min: number | null; reason: QueueReason }
+// `task` is the whole task with its steps; `step` is the one to work on, if any;
+// `event_id` is the block a scheduled entry was laid in.
+export type QueueEntry = {
+  task: TaskNode
+  step: Task | null
+  planned_min: number | null
+  reason: QueueReason
+  event_id?: number
+}
 
 // How many blocks the close of the day sent to tomorrow.
 export type Carried = { moved: number }

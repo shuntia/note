@@ -16,6 +16,7 @@ import { glide, lift, viewIn, viewOut } from './motion-gsap'
 import { reducedMotion } from './motion'
 import { NavIcon } from './navicon'
 import { prefsFrom, writePrefs } from './prefs'
+import { startPresence } from './presence'
 import { readSession, stillEnding, writeSession, type FocusSession } from './session'
 import type { Me, SessionStart } from './types'
 import { Admin } from './views/Admin'
@@ -27,6 +28,7 @@ import { Tasks } from './views/Tasks'
 import { connectEvents } from './ws'
 import { deviceZone, zoneChange } from './zone'
 import './styles/shell.css'
+import { t, type Key } from './i18n'
 
 // `admin` is reached from Settings only, so it never joins NAV.
 type Tab = 'today' | 'tasks' | 'chat' | 'memory' | 'settings' | 'admin'
@@ -56,12 +58,17 @@ export type ViewProps = {
 
 type NavTab = Exclude<Tab, 'admin'>
 
-const NAV: { id: NavTab; label: string }[] = [
-  { id: 'today', label: 'Today' },
-  { id: 'tasks', label: 'Tasks' },
-  { id: 'chat', label: 'Chat' },
-  { id: 'memory', label: 'Memory' },
-  { id: 'settings', label: 'Settings' },
+const TOAST_LEAVE_MS = 200
+
+// On a phone Today sits in the middle of the bar, under the thumb.
+const PHONE_ORDER: NavTab[] = ['tasks', 'chat', 'today', 'memory', 'settings']
+
+const NAV: { id: NavTab; label: Key }[] = [
+  { id: 'today', label: 'nav.today' },
+  { id: 'tasks', label: 'nav.notes' },
+  { id: 'chat', label: 'nav.chat' },
+  { id: 'memory', label: 'nav.memory' },
+  { id: 'settings', label: 'nav.settings' },
 ]
 
 // A view on screen. A turn keeps the one being replaced alive under its own id until
@@ -75,7 +82,7 @@ export function App() {
   const [leaving, setLeaving] = useState<Layer | null>(null)
   // true from the moment a turn starts until the arriving layer has settled
   const [turning, setTurning] = useState(false)
-  const [toast, setToast] = useState<{ msg: string; action?: ToastAction } | null>(null)
+  const [toast, setToast] = useState<{ msg: string; action?: ToastAction; leaving?: boolean } | null>(null)
   const [refresh, setRefresh] = useState(0)
   const [talkPrefill, setTalkPrefill] = useState<string | null>(null)
   // A thread to land on, with a nonce so the same thread can be asked for twice.
@@ -128,14 +135,19 @@ export function App() {
   }, [leaving, layer])
 
   const toastTimer = useRef(0)
-  const notify = useCallback((msg: string, action?: ToastAction) => {
-    setToast({ msg, action })
+  const dismissToast = useCallback(() => {
     window.clearTimeout(toastTimer.current)
-    toastTimer.current = window.setTimeout(
-      () => setToast(null),
-      action ? (action.windowMs ?? 5000) : 4000,
-    )
+    setToast((t) => t && { ...t, leaving: true })
+    toastTimer.current = window.setTimeout(() => setToast(null), TOAST_LEAVE_MS)
   }, [])
+  const notify = useCallback(
+    (msg: string, action?: ToastAction) => {
+      setToast({ msg, action })
+      window.clearTimeout(toastTimer.current)
+      toastTimer.current = window.setTimeout(dismissToast, action ? (action.windowMs ?? 5000) : 4000)
+    },
+    [dismissToast],
+  )
 
   const onChanged = useMemo(() => trailing(() => setRefresh((n) => n + 1), 80), [])
 
@@ -217,24 +229,24 @@ export function App() {
       try {
         putSession(await api.startWorkSession(fields))
       } catch {
-        notify("Couldn't start that session. Try again.")
+        notify(t('session.startFailed'))
       }
     },
     [go, notify, putSession],
   )
 
-  // The phone's bar rests on Today once the hand has been still a while, sooner in a
-  // session; any touch anywhere brings it back.
+  // The phone's bar rests on Today once the hand has been still a while; any touch
+  // anywhere brings it back. In a session Today's own idle takes the bar away instead.
   const [rested, setRested] = useState(false)
   const inSession = session !== null
   useEffect(() => {
     setRested(false)
-    if (!mobile || tab !== 'today') return
+    if (!mobile || tab !== 'today' || inSession) return
     let timer = 0
     const wake = () => {
       setRested(false)
       window.clearTimeout(timer)
-      timer = window.setTimeout(() => setRested(true), inSession ? 2500 : 4000)
+      timer = window.setTimeout(() => setRested(true), 4000)
     }
     wake()
     document.addEventListener('pointerdown', wake)
@@ -279,13 +291,13 @@ export function App() {
         if (!change) return
         await api.saveSettings({ timezone: change.to })
         onChanged()
-        notify(`Your day now follows ${change.to.replace(/_/g, ' ')}`, {
-          label: 'Undo',
+        notify(t('zone.follows', { zone: change.to.replace(/_/g, ' ') }), {
+          label: t('toast.undo'),
           windowMs: 8000,
           run: () =>
             void api
               .saveSettings({ timezone: change.from, timezone_auto: false })
-              .then(onChanged, () => notify("Couldn't undo that. Try again.")),
+              .then(onChanged, () => notify(t('toast.undoFailed'))),
         })
       } catch {
         // The next focus tries again.
@@ -297,6 +309,16 @@ export function App() {
     window.addEventListener('focus', check)
     return () => window.removeEventListener('focus', check)
   }, [me, notify, onChanged])
+
+  useEffect(() => {
+    if (!me) return
+    return startPresence({
+      ping: () => void api.presence().catch(() => {}),
+      target: window,
+      visible: () => !document.hidden,
+      now: Date.now,
+    })
+  }, [me])
 
   useEffect(() => {
     if (!me) return
@@ -323,14 +345,14 @@ export function App() {
   }
 
   const toastNode = toast && (
-    <div className={`toast${mobile ? ' above-tabs' : ''}`} role="status">
+    <div className={`toast${mobile ? ' above-tabs' : ''}${toast.leaving ? ' leaving' : ''}`} role="status">
       <span className="toast-msg">{toast.msg}</span>
       {toast.action && (
         <button
           className="toast-action"
           onClick={() => {
             toast.action?.run()
-            setToast(null)
+            dismissToast()
           }}
         >
           {toast.action.label}
@@ -389,7 +411,7 @@ export function App() {
     <div className="shell">
       {!mobile && (
         <header className="topbar">
-          <span className="brand">Note</span>
+          <span className="brand">{t('app.name')}</span>
           <Rail kind="topnav" current={current} go={go} />
           <Jot openTalk={openTalk} openConversation={openConversation} tab={tab} />
         </header>
@@ -455,14 +477,19 @@ function Rail({
   }, [kind, current])
 
   return (
-    <nav ref={nav} className={`${kind}${away ? ' away' : ''}`} aria-label="Views">
+    <nav ref={nav} className={`${kind}${away ? ' away' : ''}`} aria-label={t('nav.views')}>
       <span className="nav-glide" aria-hidden="true" ref={mark} />
-      {NAV.map((t) => (
-        <button key={t.id} aria-current={current === t.id} onClick={() => go(t.id)}>
-          {kind === 'tabs' && <NavIcon id={t.id} />}
-          {t.label}
-        </button>
-      ))}
+      {kind === 'tabs'
+        ? PHONE_ORDER.map((id) => NAV.find((item) => item.id === id)!).map((item) => (
+            <button key={item.id} aria-current={current === item.id} aria-label={t(item.label)} onClick={() => go(item.id)}>
+              <NavIcon id={item.id} />
+            </button>
+          ))
+        : NAV.map((item) => (
+            <button key={item.id} aria-current={current === item.id} onClick={() => go(item.id)}>
+              {t(item.label)}
+            </button>
+          ))}
     </nav>
   )
 }
@@ -493,11 +520,11 @@ function Login({ onSignedIn }: { onSignedIn: (me: Me) => void }) {
       onSignedIn(await api.me())
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
-        setError('Wrong username or password.')
+        setError(t('login.wrong'))
       } else if (err instanceof ApiError && err.status === 429) {
-        setError('Too many attempts. Wait a few minutes.')
+        setError(t('login.throttled'))
       } else {
-        setError("Couldn't sign in. Try again.")
+        setError(t('login.failed'))
       }
     } finally {
       setBusy(false)
@@ -506,11 +533,11 @@ function Login({ onSignedIn }: { onSignedIn: (me: Me) => void }) {
 
   return (
     <div className="login">
-      <h1>Note</h1>
+      <h1>{t('app.name')}</h1>
       <form onSubmit={submit}>
         <div className="field">
           <input
-            placeholder="Username"
+            placeholder={t('login.username')}
             autoComplete="username"
             value={username}
             onChange={(e) => setUsername(e.target.value)}
@@ -519,7 +546,7 @@ function Login({ onSignedIn }: { onSignedIn: (me: Me) => void }) {
         <div className="field">
           <input
             type="password"
-            placeholder="Password"
+            placeholder={t('login.password')}
             autoComplete="current-password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
@@ -527,7 +554,7 @@ function Login({ onSignedIn }: { onSignedIn: (me: Me) => void }) {
         </div>
         {error && <p role="alert">{error}</p>}
         <button className="primary" disabled={busy || !username || !password}>
-          Sign in
+          {t('login.signIn')}
         </button>
       </form>
     </div>

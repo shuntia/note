@@ -16,7 +16,7 @@ pub struct DoneArgs {
 pub fn done(
     conn: &Connection,
     ctx: &ToolCtx,
-    args: DoneArgs,
+    args: &DoneArgs,
 ) -> Result<serde_json::Value, ToolError> {
     let _ = (conn, ctx);
     let note = args.note.trim();

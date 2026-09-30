@@ -19,7 +19,7 @@ fn override_path(config_dir: &Path, user: &str, name: &str) -> PathBuf {
 }
 
 /// Per-user prompt override with shipped-default fallback, mirroring
-/// Template::load's resolution order.
+/// `Template::load`'s resolution order.
 pub fn load(config_dir: &Path, user: &str, name: &str) -> Result<String> {
     checked(name)?;
     let user_path = override_path(config_dir, user, name);

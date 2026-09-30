@@ -157,7 +157,7 @@ pub fn spawn(state: crate::AppState) {
         loop {
             tick.tick().await;
             let now = jiff::Timestamp::now();
-            let Some(cutoff) = now.checked_sub(jiff::Span::new().minutes(idle as i64)).ok() else {
+            let Some(cutoff) = now.checked_sub(jiff::Span::new().minutes(i64::from(idle))).ok() else {
                 continue;
             };
             let candidates = {

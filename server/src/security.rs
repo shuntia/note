@@ -24,7 +24,7 @@ type Pending<T> = Mutex<HashMap<String, (T, i64)>>;
 
 pub struct PasskeyService {
     webauthn: Option<Webauthn>,
-    /// Browsers only speak WebAuthn to an https origin (or http://localhost).
+    /// Browsers only speak `WebAuthn` to an https origin (or <http://localhost>).
     secure_origin: bool,
     registrations: Pending<PasskeyRegistration>,
     authentications: Pending<PasskeyAuthentication>,
@@ -65,7 +65,7 @@ fn put<T>(map: &Pending<T>, session: &str, state: T, now: i64) {
 
 impl PasskeyService {
     /// The relying party is the host of `public_base_url` unless `rp_id` and
-    /// `rp_origin` override it. A URL WebAuthn cannot describe (a bare IP, say)
+    /// `rp_origin` override it. A URL `WebAuthn` cannot describe (a bare IP, say)
     /// leaves the service off with a warning rather than failing startup.
     pub fn build(
         public_base_url: &str,
@@ -168,7 +168,7 @@ impl PasskeyService {
     }
 }
 
-/// The WebAuthn user handle. Derived from the account id so it is stable for
+/// The `WebAuthn` user handle. Derived from the account id so it is stable for
 /// the life of the account without a column of its own.
 fn user_handle(user_id: i64) -> Uuid {
     Uuid::new_v5(

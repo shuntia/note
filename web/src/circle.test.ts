@@ -1,5 +1,5 @@
 import { beforeEach, expect, test, vi } from 'vitest'
-import { beadAt, C, hintShown, hintUsed, railX, segments, sessionFor, slotAfter, withoutCategory, WORK_TIME } from './circle'
+import { beadAt, hintShown, hintUsed, railX, sessionFor, slotAfter, withoutCategory, workTime } from './circle'
 import type { QueueEntry, Task } from './types'
 
 const task = (o: Partial<Task>): Task =>
@@ -21,15 +21,6 @@ test('beads sit evenly across the opening', () => {
   expect(a.x).toBeGreaterThan(160); expect(d.x).toBeLessThan(160)
   expect(Math.hypot(a.x - 160, a.y - 160)).toBeCloseTo(148, 5)
   expect(a.y).toBeCloseTo(d.y, 5)
-})
-
-test('segments split the span with 5° gaps', () => {
-  const s = segments(3, 1, 0.35)
-  expect(s).toHaveLength(3)
-  expect(s.map((x) => x.frac)).toEqual([1, 0.35, 0])
-  expect(s[0].start).toBe(150)
-  expect(s[1].start - s[0].start).toBeCloseTo((240 - 10) / 3 + 5, 5)
-  expect(s.reduce((n, x) => n + x.len, 0)).toBeCloseTo((C * (240 - 10)) / 360, 3)
 })
 
 test('a release lands on the next slot at 60 px or a quick 20 px', () => {
@@ -73,7 +64,7 @@ test('a task without steps carries its own notes and no step fields', () => {
 })
 
 test('work time is a bare title', () => {
-  expect(WORK_TIME).toEqual({ title: 'Work time' })
+  expect(workTime()).toEqual({ title: 'Work time' })
 })
 
 test('each hint shows three times, counted separately', () => {
@@ -94,4 +85,11 @@ test('an unreadable counter starts over, and a throwing store never hides the hi
   vi.stubGlobal('localStorage', { getItem: () => { throw new Error('denied') }, setItem: () => { throw new Error('denied') } })
   expect(hintShown('start')).toBe(true)
   expect(() => hintUsed('start')).not.toThrow()
+})
+
+test('a scheduled entry starts in its own block', () => {
+  const parent = { ...task({ id: 4, title: 'Call', notes: 'ring' }), children: [] }
+  expect(sessionFor(entry({ task: parent, planned_min: 25, reason: 'scheduled', event_id: 71 }))).toEqual({
+    title: 'Call', task_id: 4, notes: 'ring', planned_min: 25, event_id: 71,
+  })
 })

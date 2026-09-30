@@ -35,6 +35,7 @@ impl AdminSecrets {
 
     /// `false` is the operator's opt-out: elevation re-asks for the account
     /// password alone and no second factor is consulted.
+    #[must_use]
     pub fn require_second_factor(mut self, require: bool) -> Self {
         self.require_second_factor = require;
         self
@@ -72,9 +73,8 @@ impl AdminSecrets {
     /// for and there is none to ask for.
     pub fn mode_with_factor(&self, user_has_factor: bool) -> TotpMode {
         match (self.require_second_factor, self.totp_seed.is_some() || user_has_factor, INSPECT) {
-            (false, _, _) => TotpMode::PasswordOnly,
+            (false, _, _) | (true, false, true) => TotpMode::PasswordOnly,
             (true, true, _) => TotpMode::Required,
-            (true, false, true) => TotpMode::PasswordOnly,
             (true, false, false) => TotpMode::Missing,
         }
     }
@@ -162,7 +162,7 @@ impl FromRequestParts<AppState> for AdminUser {
         }
         let user = CurrentUser::from_request_parts(parts, state)
             .await
-            .map_err(|s| s.into_response())?;
+            .map_err(axum::response::IntoResponse::into_response)?;
         if !user.admin {
             return Err(error(StatusCode::FORBIDDEN, "admin only"));
         }
@@ -244,7 +244,7 @@ fn record(state: &AppState, actor: i64, kind: &str, detail: &str) {
 }
 
 /// What this admin can present as a second factor. A passkey counts only where
-/// browsers will speak WebAuthn; the shared seed answers as this user's TOTP
+/// browsers will speak `WebAuthn`; the shared seed answers as this user's TOTP
 /// until they enrol a secret of their own.
 #[derive(Debug, Clone, Copy)]
 pub struct Methods {
@@ -253,11 +253,11 @@ pub struct Methods {
 }
 
 impl Methods {
-    fn any(&self) -> bool {
+    fn any(self) -> bool {
         self.passkey || self.totp
     }
 
-    fn preferred(&self) -> &'static str {
+    fn preferred(self) -> &'static str {
         match (self.passkey, self.totp) {
             (true, _) => "passkey",
             (false, true) => "totp",
@@ -460,12 +460,9 @@ async fn elevate(
         return error(StatusCode::TOO_MANY_REQUESTS, "too many attempts");
     }
     let factor = match req.assertion {
-        Some(raw) => match serde_json::from_value(raw) {
-            Ok(cred) => SecondFactor::Assertion(Box::new(cred)),
-            Err(_) => {
-                record(&state, user.id, "admin_elevate_denied", &user.username);
-                return error(StatusCode::UNAUTHORIZED, "that passkey could not be verified");
-            }
+        Some(raw) => if let Ok(cred) = serde_json::from_value(raw) { SecondFactor::Assertion(Box::new(cred)) } else {
+            record(&state, user.id, "admin_elevate_denied", &user.username);
+            return error(StatusCode::UNAUTHORIZED, "that passkey could not be verified");
         },
         None => match req.code.filter(|c| !c.trim().is_empty()) {
             Some(code) => SecondFactor::Code(code),

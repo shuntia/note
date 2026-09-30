@@ -16,7 +16,7 @@ pub struct WriteArgs {
 pub fn write(
     conn: &Connection,
     ctx: &ToolCtx,
-    args: WriteArgs,
+    args: &WriteArgs,
 ) -> Result<serde_json::Value, ToolError> {
     let _ = (conn, ctx);
     let text = args.text.trim();
@@ -40,7 +40,7 @@ mod tests {
         (conn, tempfile::tempdir().unwrap())
     }
 
-    fn ctx<'a>(tmp: &'a tempfile::TempDir) -> ToolCtx<'a> {
+    fn ctx(tmp: &tempfile::TempDir) -> ToolCtx<'_> {
         ToolCtx {
             config_dir: tmp.path(),
             data_dir: tmp.path(),

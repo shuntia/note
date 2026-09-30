@@ -1,8 +1,8 @@
 use crate::codec::{read_frame, write_frame};
-use crate::frame::*;
+use crate::frame::{Role, Request, Reply, Refusal, CallBody, Frame};
 use crate::peer::{BoxFuture, Handler, PeerConfig};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::SeqCst};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -124,8 +124,8 @@ impl Drop for FaultProxy {
 }
 
 impl FaultProxy {
-    pub async fn start(listen: PathBuf, target: PathBuf) -> std::io::Result<FaultProxy> {
-        let listener = UnixListener::bind(&listen)?;
+    pub fn start(listen: &Path, target: PathBuf) -> std::io::Result<FaultProxy> {
+        let listener = UnixListener::bind(listen)?;
         let faults = Arc::new(Faults {
             duplicate_calls: AtomicBool::new(false),
             drop_acks: AtomicBool::new(false),
@@ -152,8 +152,8 @@ async fn pump_pair(a: UnixStream, b: UnixStream, f: Arc<Faults>) {
     let (br, bw) = b.into_split();
     let calls = Arc::new(AtomicU64::new(0));
     tokio::select! {
-        _ = pump(ar, bw, f.clone(), calls.clone()) => {}
-        _ = pump(br, aw, f.clone(), calls) => {}
+        () = pump(ar, bw, f.clone(), calls.clone()) => {}
+        () = pump(br, aw, f.clone(), calls) => {}
         _ = kick.changed() => {}
     }
 }

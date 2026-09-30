@@ -371,10 +371,7 @@ mod tests {
             (1, SessionKind::Talk, true),
         ] {
             let mut b = Builder::new(kind, "x");
-            match ok {
-                true => b.ok("y"),
-                false => b.failed("down"),
-            }
+            if ok { b.ok("y") } else { b.failed("down") }
             b.insert(&conn, user).unwrap();
         }
         let all = list(&conn, &Filter { limit: 10, ..Filter::default() }).unwrap();

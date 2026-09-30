@@ -62,7 +62,7 @@ fn refusal(conn: &Connection, user_id: i64, event_id: i64, verb: &str) -> ToolEr
     }
 }
 
-pub fn slide(conn: &Connection, ctx: &ToolCtx, args: SlideArgs) -> Result<serde_json::Value, ToolError> {
+pub fn slide(conn: &Connection, ctx: &ToolCtx, args: &SlideArgs) -> Result<serde_json::Value, ToolError> {
     if let Some((date, wall)) = event_day(conn, ctx.user_id, args.event_id) {
         let target = crate::templates::wall_add(&wall, args.minutes);
         check_calendar(conn, ctx.user_id, date, &target, &target)?;
@@ -84,7 +84,7 @@ pub struct SnoozeArgs {
     pub minutes: i64,
 }
 
-pub fn snooze(conn: &Connection, ctx: &ToolCtx, args: SnoozeArgs) -> Result<serde_json::Value, ToolError> {
+pub fn snooze(conn: &Connection, ctx: &ToolCtx, args: &SnoozeArgs) -> Result<serde_json::Value, ToolError> {
     if !(1..=1440).contains(&args.minutes) {
         return Err(ToolError::rejected("snooze minutes must be in 1..=1440"));
     }
@@ -158,7 +158,7 @@ pub struct DropArgs {
 /// and only while they are still undecided; abandoning anything else — or
 /// rewriting a decision the user already made — is the user's call, not the
 /// model's.
-pub fn drop_event(conn: &Connection, ctx: &ToolCtx, args: DropArgs) -> Result<serde_json::Value, ToolError> {
+pub fn drop_event(conn: &Connection, ctx: &ToolCtx, args: &DropArgs) -> Result<serde_json::Value, ToolError> {
     if let Some(target) = args.moved_to_event_id {
         if target == args.event_id {
             return Err(ToolError::rejected("an event cannot have moved to itself"));
@@ -242,7 +242,7 @@ pub struct InsertArgs {
 
 /// Adds an event to an already-generated day plan; creating the plan itself
 /// stays with the nightly job, so a missing plan is a rejection, not an insert.
-pub fn insert(conn: &Connection, ctx: &ToolCtx, args: InsertArgs) -> Result<serde_json::Value, ToolError> {
+pub fn insert(conn: &Connection, ctx: &ToolCtx, args: &InsertArgs) -> Result<serde_json::Value, ToolError> {
     let kind = args.kind.trim();
     if kind.is_empty() || kind.len() > 100 {
         return Err(ToolError::rejected("kind must be 1..=100 characters"));
@@ -341,7 +341,7 @@ mod tests {
         (conn, tmp)
     }
 
-    fn ctx<'a>(tmp: &'a tempfile::TempDir) -> ToolCtx<'a> {
+    fn ctx(tmp: &tempfile::TempDir) -> ToolCtx<'_> {
         ToolCtx { config_dir: tmp.path(), data_dir: tmp.path(), user_id: 1, username: "aki", vectors: crate::tools::PreparedVectors::default(), task_scope: None, inbox_source: None, memory_source: None, share: None, share_thread: None }
     }
 

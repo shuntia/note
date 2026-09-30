@@ -1,5 +1,5 @@
 use crate::codec::{read_frame, write_frame, CodecError};
-use crate::frame::*;
+use crate::frame::{CallBody, Request, Reply, Refusal, Role, Frame, Dir, RefusalCode, PROTO_VERSION, valid_call_id};
 use crate::stream::{classify, Arrival, Outbox};
 use std::collections::HashMap;
 use std::future::Future;
@@ -258,15 +258,15 @@ impl Peer {
     ) -> Disconnect {
         let mut tick = tokio::time::interval(self.inner.cfg.heartbeat);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        let (mut pinged, mut ponged) = (0u64, 0u64);
+        let (mut sent, mut answered) = (0u64, 0u64);
         loop {
             tokio::select! {
                 _ = tick.tick() => {
-                    if pinged.saturating_sub(ponged) >= self.inner.cfg.missed_pongs as u64 {
+                    if sent.saturating_sub(answered) >= u64::from(self.inner.cfg.missed_pongs) {
                         return Disconnect::HeartbeatLost;
                     }
-                    pinged += 1;
-                    let _ = conn.tx.send(Frame::Ping { n: pinged });
+                    sent += 1;
+                    let _ = conn.tx.send(Frame::Ping { n: sent });
                 }
                 d = &mut failed => {
                     return d.unwrap_or_else(|_| Disconnect::Protocol("the applier stopped".into()));
@@ -276,7 +276,7 @@ impl Peer {
                     Some(Err(e)) => return Disconnect::Codec(e.to_string()),
                     Some(Ok(Some(frame))) => {
                         if let Frame::Pong { n } = frame {
-                            ponged = ponged.max(n.min(pinged));
+                            answered = answered.max(n.min(sent));
                             continue;
                         }
                         if let Err(d) = self.on_frame(frame, conn) {
@@ -415,7 +415,7 @@ pub async fn dial_forever(peer: Peer, path: PathBuf) {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.subsec_millis() % 100)
             .unwrap_or(0);
-        tokio::time::sleep(delay + Duration::from_millis(jitter as u64)).await;
+        tokio::time::sleep(delay + Duration::from_millis(u64::from(jitter))).await;
         delay = (delay * 2).min(Duration::from_secs(2));
     }
 }
