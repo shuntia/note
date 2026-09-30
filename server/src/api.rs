@@ -47,6 +47,8 @@ pub fn router(state: AppState) -> Router {
             "/api/telegram/link",
             post(telegram_link).delete(telegram_unlink),
         )
+        .route("/api/voice/link", post(voice_link).delete(voice_unlink))
+        .route("/api/voice/test", post(voice_test))
         .route("/api/notify/test", post(notify_test))
         .route(
             "/api/prompts/{name}",
@@ -1279,6 +1281,7 @@ struct SettingsPatch {
     pomodoro_work_min: Option<u32>,
     pomodoro_break_min: Option<u32>,
     session_end_notify: Option<bool>,
+    ring_for: Option<String>,
     alerts: Option<Vec<AlertPatch>>,
 }
 
@@ -1288,14 +1291,15 @@ const MAX_TRIGGERS_PER_DAY: u32 = 20;
 const POMODORO_WORK_MIN: std::ops::RangeInclusive<u32> = 5..=120;
 const POMODORO_BREAK_MIN: std::ops::RangeInclusive<u32> = 1..=60;
 
-/// `telegram_linked` is read by the caller, which already holds the DB guard on
-/// the write path.
+/// `telegram_linked` and `voice_link` are read by the caller, which already
+/// holds the DB guard on the write path.
 fn settings_body(
     state: &AppState,
     cfg: &crate::config::UserConfig,
     user: &CurrentUser,
     schedule: Vec<crate::templates::ScheduleRow>,
     telegram_linked: bool,
+    voice_link: Option<crate::voice::links::Link>,
 ) -> serde_json::Value {
     let category = user.category.as_str();
     let features = cfg.features(category);
@@ -1319,6 +1323,9 @@ fn settings_body(
         "pomodoro_work_min": cfg.pomodoro_work_min(),
         "pomodoro_break_min": cfg.pomodoro_break_min(),
         "session_end_notify": cfg.session_end_notify(),
+        "voice_enabled": state.voice.is_some(),
+        "voice_link": voice_link.map(|l| serde_json::json!({ "mxid": l.mxid, "state": l.state })),
+        "ring_for": cfg.ring_for(),
         "schedule": schedule,
     })
 }
@@ -1365,11 +1372,14 @@ async fn settings_get(user: CurrentUser, State(state): State<AppState>) -> impl 
     zones.sort_unstable();
     let templates = crate::templates::available(&state.config_dir, &user.username);
     let schedule = schedule_rows(&state, &user.username, &cfg.template);
-    let linked = {
+    let (linked, voice_link) = {
         let conn = state.db();
-        crate::telegram::chat_for_user(&conn, user.id).unwrap_or(None).is_some()
+        (
+            crate::telegram::chat_for_user(&conn, user.id).unwrap_or(None).is_some(),
+            crate::voice::links::get(&conn, user.id).unwrap_or(None),
+        )
     };
-    let mut body = settings_body(&state, &cfg, &user, schedule, linked);
+    let mut body = settings_body(&state, &cfg, &user, schedule, linked, voice_link);
     body["templates"] = serde_json::json!(templates);
     body["timezones"] = serde_json::json!(zones);
     Json(body).into_response()
@@ -1482,6 +1492,12 @@ async fn settings_put(
         }
         cfg.pomodoro_break_min = Some(n);
     }
+    if let Some(ring_for) = req.ring_for {
+        if !crate::config::RING_FOR.contains(&ring_for.as_str()) {
+            return invalid_field("ring_for", "must be urgent or never");
+        }
+        cfg.ring_for = Some(ring_for);
+    }
     if let Some(alerts) = req.alerts {
         let changes: Vec<(usize, bool)> = alerts.iter().map(|a| (a.index, a.alert)).collect();
         if let Err(e) =
@@ -1494,7 +1510,8 @@ async fn settings_put(
     match cfg.save(&state.config_dir, &user.username) {
         Ok(()) => {
             let linked = crate::telegram::chat_for_user(&conn, user.id).unwrap_or(None).is_some();
-            Json(settings_body(&state, &cfg, &user, schedule, linked)).into_response()
+            let voice_link = crate::voice::links::get(&conn, user.id).unwrap_or(None);
+            Json(settings_body(&state, &cfg, &user, schedule, linked, voice_link)).into_response()
         }
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
@@ -1529,6 +1546,117 @@ async fn telegram_unlink(user: CurrentUser, State(state): State<AppState>) -> im
     let conn = state.db();
     match crate::telegram::unlink(&conn, user.id) {
         Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+fn valid_mxid(mxid: &str) -> bool {
+    let Some(rest) = mxid.strip_prefix('@') else { return false };
+    let Some((local, server)) = rest.split_once(':') else { return false };
+    !local.is_empty()
+        && !server.is_empty()
+        && mxid.len() <= 255
+        && !mxid.chars().any(|c| c.is_whitespace() || c.is_control())
+}
+
+#[derive(Deserialize)]
+struct VoiceLinkReq {
+    mxid: String,
+}
+
+/// Starts or restarts the link and has the voice service invite the account
+/// to a fresh DM; the link turns `linked` when the invite is accepted.
+async fn voice_link(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Json(req): Json<VoiceLinkReq>,
+) -> impl IntoResponse {
+    let Some(voice) = state.voice.clone() else {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": "calls are not set up on this server" })),
+        )
+            .into_response();
+    };
+    let mxid = req.mxid.trim().to_string();
+    if !valid_mxid(&mxid) {
+        return invalid_field("mxid", "must look like @name:server");
+    }
+    let link_id = {
+        let conn = state.db();
+        match crate::voice::links::begin(&conn, user.id, &mxid, jiff::Timestamp::now()) {
+            Ok(id) => id,
+            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        }
+    };
+    match voice.open_dm(link_id, &mxid).await {
+        Ok(room_id) => {
+            let conn = state.db();
+            match crate::voice::links::set_room(&conn, link_id, &room_id) {
+                Ok(true) => {}
+                Ok(false) => {
+                    return (
+                        StatusCode::CONFLICT,
+                        Json(serde_json::json!({ "error": "the link was removed" })),
+                    )
+                        .into_response();
+                }
+                Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+            }
+            Json(serde_json::json!({ "mxid": mxid, "state": "invited", "room_id": room_id }))
+                .into_response()
+        }
+        Err(refusal) => {
+            let conn = state.db();
+            let _ = crate::voice::links::forget_unsent(&conn, link_id);
+            let _ = crate::log::record(&conn, Some(user.id), "voice_link_error", &refusal.to_string());
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "error": "The call service isn't reachable right now. Try again in a minute."
+                })),
+            )
+                .into_response()
+        }
+    }
+}
+
+async fn voice_unlink(user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
+    let conn = state.db();
+    match crate::voice::links::remove(&conn, user.id) {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+/// Rings the linked phone now, whatever `ring_for` says.
+async fn voice_test(user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
+    let conflict = |msg: &str| {
+        (StatusCode::CONFLICT, Json(serde_json::json!({ "error": msg }))).into_response()
+    };
+    let Some(voice) = state.voice.clone() else {
+        return conflict("calls are not set up on this server");
+    };
+    let link = {
+        let conn = state.db();
+        crate::voice::links::ringable(&conn, user.id).unwrap_or(None)
+    };
+    let Some(link) = link else { return conflict("link a Matrix account first") };
+    if !voice.is_up() {
+        return conflict("the call service isn't connected");
+    }
+    let msg = crate::channels::OutboundMessage {
+        title: "Test call".into(),
+        body: "This was a test call from Note.".into(),
+        urgency: crate::channels::Urgency::High,
+        event_id: None,
+        conversation_id: None,
+        actions: Vec::new(),
+    };
+    match voice.start_call(user.id, &link, &msg, jiff::Timestamp::now()) {
+        Ok(call_id) => {
+            (StatusCode::ACCEPTED, Json(serde_json::json!({ "call_id": call_id }))).into_response()
+        }
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }

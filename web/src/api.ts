@@ -77,6 +77,7 @@ const WRITABLE_SETTINGS = [
   'pomodoro_work_min',
   'pomodoro_break_min',
   'session_end_notify',
+  'ring_for',
 ] as const
 
 type SettingsPatch = Partial<Pick<Settings, (typeof WRITABLE_SETTINGS)[number]>>
@@ -293,6 +294,13 @@ export const api = {
   // A new code replaces whatever the account was last given.
   telegramLink: () => request<TelegramLink>('/api/telegram/link', { method: 'POST' }),
   telegramUnlink: () => request<void>('/api/telegram/link', { method: 'DELETE' }),
+  voiceLink: (mxid: string) =>
+    request<{ mxid: string; state: 'invited'; room_id: string }>('/api/voice/link', {
+      method: 'POST',
+      body: JSON.stringify({ mxid }),
+    }),
+  voiceUnlink: () => request<void>('/api/voice/link', { method: 'DELETE' }),
+  voiceTest: () => request<{ call_id: string }>('/api/voice/test', { method: 'POST' }),
   notifyTest: () => request<{ via: string }>('/api/notify/test', { method: 'POST' }),
   openWorkSession: () => request<WorkSession | null>('/api/sessions/open'),
   // Opening one ends whatever was still running, farewell and all.

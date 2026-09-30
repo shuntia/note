@@ -74,6 +74,9 @@ type Loaded = {
   telegramEnabled: boolean
   telegramLinked: boolean
   telegramBot: string
+  voiceEnabled: boolean
+  voiceLink: UserSettings['voice_link']
+  ringFor: 'urgent' | 'never'
 }
 type Save = { row: string; kind: 'busy' | 'saved' | 'failed'; message?: string } | null
 
@@ -241,6 +244,7 @@ export function Settings({
   const [theme, setTheme] = useState<ThemeChoice>(storedTheme)
   const [place, setPlace] = useState(storedPlace)
   const [invite, setInvite] = useState<TelegramLink | null>(null)
+  const [mxid, setMxid] = useState('')
 
   const load = () => {
     setState(undefined)
@@ -263,6 +267,9 @@ export function Settings({
           telegramEnabled: s.telegram_enabled,
           telegramLinked: s.telegram_linked,
           telegramBot: s.telegram_bot,
+          voiceEnabled: s.voice_enabled,
+          voiceLink: s.voice_link,
+          ringFor: s.ring_for,
         })
       })
       .catch(() => setState('error'))
@@ -280,6 +287,11 @@ export function Settings({
     err instanceof ApiError && (err.status === 400 || err.status === 422)
       ? err.message
       : "That didn't save. Try again."
+
+  const callFailure = (err: unknown) =>
+    err instanceof ApiError && [400, 409, 422, 503].includes(err.status)
+      ? err.message
+      : "That didn't go through. Try again."
 
   // Only the fields that moved travel, so an edit left open in another row is never
   // written by someone else's save. `override` carries a value whose state update
@@ -398,6 +410,74 @@ export function Settings({
     }, 3000)
     return () => window.clearInterval(id)
   }, [invite])
+
+  const linkVoice = async () => {
+    setSave({ row: 'calls', kind: 'busy' })
+    try {
+      const got = await api.voiceLink(mxid.trim())
+      setState((s) =>
+        s && s !== 'error' ? { ...s, voiceLink: { mxid: got.mxid, state: 'invited' } } : s,
+      )
+      setMxid('')
+      setSave(null)
+    } catch (err) {
+      setSave({ row: 'calls', kind: 'failed', message: callFailure(err) })
+    }
+  }
+
+  const unlinkVoice = async () => {
+    setSave({ row: 'calls', kind: 'busy' })
+    try {
+      await api.voiceUnlink()
+      setState((s) => (s && s !== 'error' ? { ...s, voiceLink: null } : s))
+      setSave({ row: 'calls', kind: 'saved' })
+    } catch (err) {
+      setSave({ row: 'calls', kind: 'failed', message: callFailure(err) })
+    }
+  }
+
+  const ringNow = async () => {
+    setSave({ row: 'calls', kind: 'busy' })
+    try {
+      await api.voiceTest()
+      setSave({ row: 'calls', kind: 'saved', message: 'Ringing' })
+    } catch (err) {
+      setSave({ row: 'calls', kind: 'failed', message: callFailure(err) })
+    }
+  }
+
+  const saveRingFor = async (ringFor: 'urgent' | 'never') => {
+    setSave({ row: 'calls', kind: 'busy' })
+    try {
+      const saved = await api.saveSettings({ ring_for: ringFor })
+      setState((s) => (s && s !== 'error' ? { ...s, ringFor: saved.ring_for } : s))
+      setSave({ row: 'calls', kind: 'saved' })
+    } catch (err) {
+      setSave({ row: 'calls', kind: 'failed', message: failure(err) })
+    }
+  }
+
+  // The invite is accepted over in Element, so the row watches for it.
+  const invited = loaded?.voiceLink?.state === 'invited'
+  useEffect(() => {
+    if (!invited) return
+    const id = window.setInterval(() => {
+      void api
+        .settings()
+        .then((s) => {
+          const next = s.voice_link
+          setState((prev) =>
+            prev &&
+            prev !== 'error' &&
+            (prev.voiceLink?.mxid !== next?.mxid || prev.voiceLink?.state !== next?.state)
+              ? { ...prev, voiceLink: next }
+              : prev,
+          )
+        })
+        .catch(() => undefined)
+    }, 3000)
+    return () => window.clearInterval(id)
+  }, [invited])
 
   const sendTest = async () => {
     setSave({ row: 'test', kind: 'busy' })
@@ -816,6 +896,95 @@ export function Settings({
                   </button>
                 )}
                 <Status save={save} row="telegram" />
+              </div>
+            )}
+          </FoldRow>
+        )}
+        {loaded?.voiceEnabled && (
+          <FoldRow
+            label="Calls"
+            value={
+              loaded.voiceLink?.state === 'linked'
+                ? loaded.ringFor === 'never'
+                  ? 'Off'
+                  : 'Urgent'
+                : loaded.voiceLink
+                  ? 'Invited'
+                  : 'Not linked'
+            }
+            open={open === 'calls'}
+            onToggle={fold('calls')}
+          >
+            {open === 'calls' && (
+              <div className="set-fold-body">
+                {loaded.voiceLink?.state === 'linked' ? (
+                  <>
+                    <span className="set-sub">{loaded.voiceLink.mxid}</span>
+                    <div className="seg" role="group" aria-label="Ring me for">
+                      {(['urgent', 'never'] as const).map((v) => (
+                        <button
+                          key={v}
+                          type="button"
+                          aria-pressed={loaded.ringFor === v}
+                          disabled={busy}
+                          onClick={() => void saveRingFor(v)}
+                        >
+                          {v === 'urgent' ? 'Urgent' : 'Never'}
+                        </button>
+                      ))}
+                    </div>
+                    <button
+                      type="button"
+                      className="btn-haze small"
+                      disabled={busy}
+                      onClick={() => void ringNow()}
+                    >
+                      Ring me
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-haze small"
+                      disabled={busy}
+                      onClick={() => void unlinkVoice()}
+                    >
+                      Unlink
+                    </button>
+                  </>
+                ) : loaded.voiceLink ? (
+                  <>
+                    <span className="set-sub">Accept Note's invite in Element</span>
+                    <button
+                      type="button"
+                      className="btn-haze small"
+                      disabled={busy}
+                      onClick={() => void unlinkVoice()}
+                    >
+                      Cancel
+                    </button>
+                  </>
+                ) : (
+                  <form
+                    className="set-token-form"
+                    onSubmit={(e) => {
+                      e.preventDefault()
+                      void linkVoice()
+                    }}
+                  >
+                    <input
+                      aria-label="Matrix account"
+                      placeholder="@you:server"
+                      autoComplete="off"
+                      autoCapitalize="none"
+                      spellCheck={false}
+                      value={mxid}
+                      onChange={(e) => setMxid(e.target.value)}
+                    />
+                    <button type="submit" className="btn-haze small" disabled={busy || !mxid.trim()}>
+                      Link
+                    </button>
+                  </form>
+                )}
+                <Status save={save} row="calls" />
               </div>
             )}
           </FoldRow>

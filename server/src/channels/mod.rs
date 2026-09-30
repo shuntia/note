@@ -1,9 +1,11 @@
 pub mod mock;
 pub mod telegram;
+pub mod voice;
 pub mod webpush;
 pub mod ws;
 
 use rusqlite::Connection;
+use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 
 /// An error line without the request URL, which for Web Push is a per-device
@@ -20,7 +22,8 @@ pub(crate) fn describe_http_error(err: &ureq::Error) -> String {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Urgency {
     Low,
     Normal,
@@ -38,7 +41,7 @@ impl Urgency {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OutboundMessage {
     pub title: String,
     pub body: String,
@@ -54,7 +57,7 @@ pub struct OutboundMessage {
 
 /// A button on a message. `data` travels back verbatim when it is pressed, and
 /// Telegram caps it at 64 bytes.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Action {
     pub label: String,
     pub data: String,
