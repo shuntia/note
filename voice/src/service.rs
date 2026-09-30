@@ -6,7 +6,7 @@ use note_voice_proto::{
     dial_forever, AppliedFile, BoxFuture, CallBody, Dir, FileOutbox, Handler, Outcome, Peer, PeerConfig,
     Refusal, RefusalCode, Reply, Request, Role,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::{broadcast, watch};
 
@@ -28,6 +28,7 @@ struct Service {
     applied: AppliedFile,
     events: broadcast::Sender<RoomEvent>,
     hang_ups: Mutex<HashMap<String, watch::Sender<bool>>>,
+    reporting: Mutex<HashSet<i64>>,
     peer: OnceLock<Peer>,
 }
 
@@ -46,13 +47,15 @@ impl Service {
         }
     }
 
+    /// A call whose `Ended` could not be journaled stays open, so the next
+    /// start's recovery closes it again.
     fn finish(&self, call_id: &str, outcome: Outcome) {
         self.send(call_id, CallBody::Outcome { outcome });
         let ended = self.send(call_id, CallBody::Ended);
         let mut st = lock(&self.state);
-        if let Some(c) = st.data.calls.get_mut(call_id) {
+        if let (Some(c), Some(seq)) = (st.data.calls.get_mut(call_id), ended) {
             c.done = true;
-            c.ended_seq = ended;
+            c.ended_seq = Some(seq);
         }
         let _ = st.save();
         drop(st);
@@ -73,7 +76,12 @@ impl Service {
 
     fn begin_ring(self: &Arc<Self>, call_id: String, room_id: String, mxid: String, ring_secs: u32) {
         let (tx, rx) = watch::channel(false);
-        lock(&self.hang_ups).insert(call_id.clone(), tx);
+        match lock(&self.hang_ups).entry(call_id.clone()) {
+            std::collections::hash_map::Entry::Occupied(_) => return,
+            std::collections::hash_map::Entry::Vacant(v) => {
+                v.insert(tx);
+            }
+        }
         let events = self.events.subscribe();
         let svc = self.clone();
         tokio::spawn(async move {
@@ -109,10 +117,50 @@ impl Service {
         }
     }
 
-    async fn open_dm(&self, link_id: i64, mxid: String) -> Result<Reply, Refusal> {
+    /// Finished calls Note already holds every frame of.
+    fn drop_delivered(&self) {
+        let pending = self.peer().pending_calls();
+        let delivered: Vec<String> = lock(&self.state)
+            .data
+            .calls
+            .iter()
+            .filter(|(id, c)| c.done && !pending.contains(id))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for call_id in delivered {
+            self.drop_call(&call_id);
+        }
+    }
+
+    /// Reports the link's join if its user is in the room already, which
+    /// covers joins a restart kept this side from seeing.
+    async fn check_joined(self: &Arc<Self>, link_id: i64) {
+        let Some(link) = lock(&self.state).data.links.get(&link_id).cloned().filter(|l| !l.reported) else {
+            return;
+        };
+        match self.matrix.joined_members(&link.room_id).await {
+            Ok(members) if members.contains(&link.mxid) => self.report_join(&link.room_id, &link.mxid).await,
+            Ok(_) => {}
+            Err(e) => eprintln!("voice: reading the members of {} failed: {e:#}", link.room_id),
+        }
+    }
+
+    async fn check_unreported(self: Arc<Self>) {
+        let unreported: Vec<i64> =
+            lock(&self.state).data.links.iter().filter(|(_, l)| !l.reported).map(|(id, _)| *id).collect();
+        for link_id in unreported {
+            self.check_joined(link_id).await;
+        }
+    }
+
+    async fn open_dm(self: &Arc<Self>, link_id: i64, mxid: String) -> Result<Reply, Refusal> {
         let known = lock(&self.state).data.links.get(&link_id).cloned();
         if let Some(link) = known.filter(|l| l.mxid == mxid) {
             let _ = self.matrix.invite(&link.room_id, &mxid).await;
+            tokio::spawn({
+                let svc = self.clone();
+                async move { svc.check_joined(link_id).await }
+            });
             return Ok(Reply::Dm { room_id: link.room_id });
         }
         let room_id = self
@@ -135,10 +183,15 @@ impl Service {
             .map(|(id, _)| *id)
             .collect();
         for link_id in pending {
+            if !lock(&self.reporting).insert(link_id) {
+                continue;
+            }
             let svc = self.clone();
             let room = room.to_string();
             tokio::spawn(async move {
+                let mut up = svc.peer().up_watch();
                 loop {
+                    let _ = up.wait_for(|up| *up).await;
                     let got = svc.peer().request(Request::DmJoined { link_id, room_id: room.clone() }).await;
                     if got.is_ok() {
                         let mut st = lock(&svc.state);
@@ -146,10 +199,11 @@ impl Service {
                             l.reported = true;
                         }
                         let _ = st.save();
-                        return;
+                        break;
                     }
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                 }
+                lock(&svc.reporting).remove(&link_id);
             });
         }
     }
@@ -199,6 +253,10 @@ impl Handler for VoiceHandler {
             CallBody::Start { room_id, mxid, ring_secs, ring_by_ms, .. } => {
                 {
                     let mut st = lock(&svc.state);
+                    if st.data.calls.contains_key(call_id) {
+                        drop(st);
+                        return svc.applied.set_applied(call_id, seq).map_err(|e| e.to_string());
+                    }
                     st.data.calls.insert(
                         call_id.to_string(),
                         CallState { room_id: room_id.clone(), done: false, ended_seq: None },
@@ -261,13 +319,16 @@ pub async fn run_with(cfg: VoiceServiceConfig, peer_cfg: PeerConfig) -> anyhow::
         applied,
         events: broadcast::channel(256).0,
         hang_ups: Mutex::new(HashMap::new()),
+        reporting: Mutex::new(HashSet::new()),
         peer: OnceLock::new(),
     });
     let handler = Arc::new(VoiceHandler { svc: OnceLock::new() });
     let _ = handler.svc.set(svc.clone());
     let peer = Peer::new(peer_cfg, Dir::ToNote, handler, Box::new(journal));
     let _ = svc.peer.set(peer.clone());
+    svc.drop_delivered();
     svc.recover().await;
+    tokio::spawn(svc.clone().check_unreported());
     tokio::spawn(svc.clone().sync_forever());
     dial_forever(peer, cfg.socket.clone()).await;
     Ok(())

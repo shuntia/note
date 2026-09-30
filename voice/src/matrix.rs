@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::time::Duration;
 
@@ -6,6 +6,20 @@ pub const MEMBER_TYPE: &str = "org.matrix.msc3401.call.member";
 pub const NOTIFICATION_TYPE: &str = "m.rtc.notification";
 const DECLINE_TYPES: [&str; 2] = ["org.matrix.msc4310.rtc.decline", "m.rtc.decline"];
 const USER_AGENT: &str = concat!("note-voice/", env!("CARGO_PKG_VERSION"));
+
+#[derive(Debug)]
+pub struct HomeserverError {
+    pub status: reqwest::StatusCode,
+    pub errcode: String,
+}
+
+impl std::fmt::Display for HomeserverError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "homeserver said {}: {}", self.status, self.errcode)
+    }
+}
+
+impl std::error::Error for HomeserverError {}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum RoomEvent {
@@ -63,7 +77,7 @@ impl Matrix {
         let status = resp.status();
         let body: Value = resp.json().await.unwrap_or(Value::Null);
         if !status.is_success() {
-            bail!("homeserver said {status}: {}", body["errcode"].as_str().unwrap_or("?"));
+            return Err(HomeserverError { status, errcode: body["errcode"].as_str().unwrap_or("?").to_string() }.into());
         }
         Ok(body)
     }
@@ -86,7 +100,8 @@ impl Matrix {
         format!("_{}_{}_m.call", self.user_id, self.device_id)
     }
 
-    /// An unencrypted DM inviting `mxid`, recorded in the bot's `m.direct`.
+    /// An unencrypted DM inviting `mxid`. Recording it in the bot's
+    /// `m.direct` is best-effort: only room creation can fail.
     pub async fn create_dm(&self, mxid: &str) -> Result<String> {
         let created = self
             .post(
@@ -95,17 +110,30 @@ impl Matrix {
             )
             .await?;
         let room = created["room_id"].as_str().context("createRoom without room_id")?.to_string();
-        let path = format!("/_matrix/client/v3/user/{}/account_data/m.direct", enc(&self.user_id));
-        let mut direct = self.get(&path).await.unwrap_or_else(|_| json!({}));
-        if !direct.is_object() {
-            direct = json!({});
+        if let Err(e) = self.mark_direct(mxid, &room).await {
+            eprintln!("voice: recording {room} in m.direct failed: {e:#}");
         }
+        Ok(room)
+    }
+
+    async fn mark_direct(&self, mxid: &str, room: &str) -> Result<()> {
+        let path = format!("/_matrix/client/v3/user/{}/account_data/m.direct", enc(&self.user_id));
+        let mut direct = match self.get(&path).await {
+            Ok(v) if v.is_object() => v,
+            Ok(_) => json!({}),
+            Err(e) if e.downcast_ref::<HomeserverError>().is_some_and(|h| h.errcode == "M_NOT_FOUND") => json!({}),
+            Err(e) => return Err(e.context("reading m.direct")),
+        };
         let rooms = direct[mxid].as_array().cloned().unwrap_or_default();
         let mut rooms: Vec<Value> = rooms.into_iter().filter(|r| r != &json!(room)).collect();
         rooms.push(json!(room));
         direct[mxid] = json!(rooms);
-        self.put(&path, &direct).await?;
-        Ok(room)
+        self.put(&path, &direct).await.map(|_| ())
+    }
+
+    pub async fn joined_members(&self, room: &str) -> Result<Vec<String>> {
+        let got = self.get(&format!("/_matrix/client/v3/rooms/{}/joined_members", enc(room))).await?;
+        Ok(got["joined"].as_object().map(|m| m.keys().cloned().collect()).unwrap_or_default())
     }
 
     pub async fn invite(&self, room: &str, mxid: &str) -> Result<()> {

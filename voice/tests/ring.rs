@@ -12,12 +12,19 @@ struct Rig {
 }
 
 async fn rig() -> Rig {
+    rig_with(|_, _, _| {}).await
+}
+
+/// `seed` gets the state dir, the homeserver and Note before the service starts.
+async fn rig_with(seed: impl FnOnce(&std::path::Path, &SharedHs, &FakeNote)) -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let (base, hs) = homeserver().await;
     let token = dir.path().join("token");
     std::fs::write(&token, "secret\n").unwrap();
     let socket = dir.path().join("voice.sock");
     let note = fake_note(&socket);
+    std::fs::create_dir_all(dir.path().join("state")).unwrap();
+    seed(&dir.path().join("state"), &hs, &note);
     let cfg = VoiceServiceConfig {
         homeserver: base,
         token_file: token,
@@ -149,4 +156,156 @@ async fn open_dm_is_idempotent_and_the_join_is_reported() {
         rec.requests.lock().unwrap().iter().any(|q| matches!(q, note_voice_proto::Request::DmJoined { link_id: 7, .. }))
     })
     .await;
+}
+
+fn seed_state(state_dir: &std::path::Path, state: serde_json::Value) {
+    std::fs::write(state_dir.join("state.json"), state.to_string()).unwrap();
+}
+
+fn saved_state(r: &Rig) -> serde_json::Value {
+    serde_json::from_slice(&std::fs::read(r._dir.path().join("state/state.json")).unwrap()).unwrap()
+}
+
+fn dm_joined(r: &Rig, link: i64) -> usize {
+    r.note
+        .rec
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|q| matches!(q, note_voice_proto::Request::DmJoined { link_id, .. } if *link_id == link))
+        .count()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_join_missed_before_a_restart_is_reported_at_startup() {
+    let r = rig_with(|dir, hs, _| {
+        seed_state(
+            dir,
+            serde_json::json!({
+                "links": { "3": { "mxid": "@aki:t", "room_id": "!dm:t", "reported": false } },
+                "calls": {},
+                "since": "s9",
+            }),
+        );
+        hs.lock().unwrap().joined.insert("!dm:t".into(), vec!["@note:t".into(), "@aki:t".into()]);
+    })
+    .await;
+    eventually("DmJoined reaches Note", || dm_joined(&r, 3) == 1).await;
+    let rec = r.note.rec.clone();
+    assert!(rec.requests.lock().unwrap().iter().any(|q| matches!(
+        q,
+        note_voice_proto::Request::DmJoined { link_id: 3, room_id } if room_id == "!dm:t"
+    )));
+    eventually("the link is marked reported", || saved_state(&r)["links"]["3"]["reported"] == true).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn open_dm_for_a_known_link_reports_a_join_it_missed() {
+    let r = rig_with(|dir, _, _| {
+        seed_state(
+            dir,
+            serde_json::json!({
+                "links": { "4": { "mxid": "@aki:t", "room_id": "!dm:t", "reported": false } },
+                "calls": {},
+                "since": "s9",
+            }),
+        );
+    })
+    .await;
+    r.hs.lock().unwrap().joined.insert("!dm:t".into(), vec!["@note:t".into(), "@aki:t".into()]);
+    let got = r.note.peer.request(note_voice_proto::Request::OpenDm { link_id: 4, mxid: "@aki:t".into() }).await;
+    assert_eq!(got, Ok(note_voice_proto::Reply::Dm { room_id: "!dm:t".into() }));
+    eventually("DmJoined reaches Note", || dm_joined(&r, 4) == 1).await;
+    assert!(r.hs.lock().unwrap().created.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn one_join_report_runs_per_link_at_a_time() {
+    let r = rig().await;
+    r.note.rec.answer_with(|q| match q {
+        note_voice_proto::Request::DmJoined { .. } => {
+            Err(note_voice_proto::Refusal::new(note_voice_proto::RefusalCode::Failed, "not yet"))
+        }
+        _ => Ok(note_voice_proto::Reply::Done),
+    });
+    let Ok(note_voice_proto::Reply::Dm { room_id }) =
+        r.note.peer.request(note_voice_proto::Request::OpenDm { link_id: 5, mxid: "@aki:t".into() }).await
+    else {
+        panic!()
+    };
+    r.hs.lock().unwrap().syncs.push_back(joined_room(&room_id, vec![join_event("@aki:t")]));
+    r.hs.lock().unwrap().syncs.push_back(joined_room(&room_id, vec![join_event("@aki:t")]));
+    eventually("a DmJoined reaches Note", || dm_joined(&r, 5) >= 1).await;
+    let hs = r.hs.clone();
+    eventually("both syncs are consumed", || hs.lock().unwrap().syncs.is_empty()).await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(dm_joined(&r, 5), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_replayed_start_after_recovery_neither_rings_nor_reopens_the_call() {
+    let r = rig_with(|dir, _, note| {
+        note.hold.set(true);
+        seed_state(
+            dir,
+            serde_json::json!({
+                "links": {},
+                "calls": { "c9": { "room_id": "!r:t", "done": false, "ended_seq": null } },
+                "since": "s9",
+            }),
+        );
+    })
+    .await;
+    r.note.peer.send_call("c9", start(30, soon())).unwrap();
+    let rec = r.note.rec.clone();
+    eventually("the replayed Start is acked", || rec.acks.lock().unwrap().get("c9") == Some(&1)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    {
+        let hs = r.hs.lock().unwrap();
+        assert!(hs.sends.is_empty(), "no ring");
+        assert!(hs.state_puts.iter().all(|(_, _, _, body)| body == &serde_json::json!({})), "no membership");
+    }
+    assert_eq!(saved_state(&r)["calls"]["c9"]["done"], true);
+    r.note.hold.set(false);
+    eventually("Ended reaches Note", || rec.bodies("c9").contains(&CallBody::Ended)).await;
+    assert_eq!(rec.bodies("c9").iter().filter(|b| **b == CallBody::Ended).count(), 1);
+    assert_eq!(outcome_of(&r, "c9"), Some(Outcome::Failed { reason: "the voice service restarted".into() }));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn finished_calls_with_nothing_pending_are_dropped_at_startup() {
+    let r = rig_with(|dir, _, _| {
+        seed_state(
+            dir,
+            serde_json::json!({
+                "links": {},
+                "calls": { "c8": { "room_id": "!r:t", "done": true, "ended_seq": 2 } },
+                "since": "s9",
+            }),
+        );
+    })
+    .await;
+    assert!(saved_state(&r)["calls"].get("c8").is_none());
+    assert!(r.note.rec.bodies("c8").is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unreadable_m_direct_is_left_alone() {
+    let r = rig().await;
+    r.hs.lock().unwrap().direct_get_fails = true;
+    let got = r.note.peer.request(note_voice_proto::Request::OpenDm { link_id: 6, mxid: "@aki:t".into() }).await;
+    assert!(matches!(got, Ok(note_voice_proto::Reply::Dm { .. })));
+    assert!(r.hs.lock().unwrap().direct_puts.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_m_direct_write_still_links_one_room() {
+    let r = rig().await;
+    r.hs.lock().unwrap().direct_put_fails = true;
+    let first = r.note.peer.request(note_voice_proto::Request::OpenDm { link_id: 7, mxid: "@aki:t".into() }).await;
+    let second = r.note.peer.request(note_voice_proto::Request::OpenDm { link_id: 7, mxid: "@aki:t".into() }).await;
+    assert!(matches!(first, Ok(note_voice_proto::Reply::Dm { .. })));
+    assert_eq!(first, second);
+    assert_eq!(r.hs.lock().unwrap().created.len(), 1);
 }
