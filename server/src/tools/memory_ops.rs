@@ -20,7 +20,7 @@ fn default_limit() -> i64 {
 pub fn query(
     conn: &Connection,
     ctx: &ToolCtx,
-    args: QueryArgs,
+    args: &QueryArgs,
 ) -> Result<serde_json::Value, ToolError> {
     if !(1..=50).contains(&args.limit) {
         return Err(ToolError::rejected("limit must be in 1..=50"));
@@ -42,7 +42,7 @@ pub struct ReadArgs {
 pub fn read(
     conn: &Connection,
     ctx: &ToolCtx,
-    args: ReadArgs,
+    args: &ReadArgs,
 ) -> Result<serde_json::Value, ToolError> {
     let _ = conn;
     if !crate::memory::valid_id(&args.id) {
@@ -100,7 +100,7 @@ pub struct WriteArgs {
 pub fn write(
     conn: &Connection,
     ctx: &ToolCtx,
-    args: WriteArgs,
+    args: &WriteArgs,
 ) -> Result<serde_json::Value, ToolError> {
     if args.summary.trim().is_empty() || args.summary.len() > MAX_SUMMARY {
         return Err(ToolError::rejected(format!(
@@ -132,16 +132,7 @@ pub fn write(
                 .category
                 .as_ref()
                 .ok_or_else(|| ToolError::rejected("add requires a category"))?;
-            let id = crate::memory::add_until(
-                conn,
-                ctx.data_dir,
-                ctx.username,
-                cat.as_str(),
-                &args.summary,
-                &args.body,
-                args.until.as_deref(),
-                ctx.vectors.content.as_deref(),
-            )
+            let id = crate::memory::add_until(conn, ctx.data_dir, ctx.username, &crate::memory::Fact { category: cat.as_str(), summary: &args.summary, body: &args.body, until: args.until.as_deref() }, ctx.vectors.content.as_deref())
             .map_err(|e| ToolError::internal(e.to_string()))?;
             record_source(conn, ctx, &id)?;
             Ok(serde_json::json!({ "id": id }))
@@ -219,7 +210,7 @@ mod tests {
         (conn, tempfile::tempdir().unwrap())
     }
 
-    fn ctx<'a>(tmp: &'a tempfile::TempDir) -> ToolCtx<'a> {
+    fn ctx(tmp: &tempfile::TempDir) -> ToolCtx<'_> {
         ToolCtx { config_dir: tmp.path(), data_dir: tmp.path(), user_id: 1, username: "aki", vectors: PreparedVectors::default(), task_scope: None, inbox_source: None, memory_source: None, share: None, share_thread: None }
     }
 

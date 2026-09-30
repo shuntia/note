@@ -25,6 +25,8 @@ pub struct ServerConfig {
     #[serde(default)]
     pub search: Option<SearchConfig>,
     #[serde(default)]
+    pub inbox: InboxConfig,
+    #[serde(default)]
     pub voice: Option<VoiceConfig>,
 }
 
@@ -44,9 +46,7 @@ fn default_web_dir() -> PathBuf {
 /// Shipped defaults (`user.toml`, `prompts/`, `templates/`): `NOTE_DEFAULTS_DIR`
 /// when set, so a packaged install keeps them apart from per-user state.
 pub fn defaults_dir(config_dir: &Path) -> PathBuf {
-    std::env::var_os("NOTE_DEFAULTS_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| config_dir.join("defaults"))
+    std::env::var_os("NOTE_DEFAULTS_DIR").map_or_else(|| config_dir.join("defaults"), PathBuf::from)
 }
 
 fn default_secrets_dir() -> PathBuf {
@@ -91,7 +91,7 @@ impl Default for AgentConfig {
     }
 }
 
-/// The SearXNG instance the `web_search` tool queries.
+/// The `SearXNG` instance the `web_search` tool queries.
 #[derive(Debug, Clone, Deserialize)]
 pub struct SearchConfig {
     pub searxng_url: String,
@@ -102,6 +102,7 @@ pub struct SearchConfig {
 }
 
 pub const DEFAULT_SEARCH_MAX_RESULTS: usize = 8;
+pub const DEFAULT_IDLE_NUDGE_MIN: u32 = 20;
 pub const DEFAULT_SEARCH_TIMEOUT_SECS: u64 = 15;
 
 fn default_search_max_results() -> usize {
@@ -110,6 +111,13 @@ fn default_search_max_results() -> usize {
 
 fn default_search_timeout() -> u64 {
     DEFAULT_SEARCH_TIMEOUT_SECS
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct InboxConfig {
+    /// A file the host watches: writing it asks for a sync. Unset hides Refresh.
+    pub refresh_signal: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -266,6 +274,9 @@ pub struct UserConfig {
     /// ritual off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub close_day_time: Option<String>,
+    /// Until when, zero-padded HH:MM, an open morning brings the letter to the face.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub morning_until: Option<String>,
     #[serde(default = "default_true")]
     pub show_arc_between_sessions: bool,
     #[serde(default = "default_counter")]
@@ -290,6 +301,10 @@ pub struct UserConfig {
     /// is announced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_end_notify: Option<bool>,
+    /// Minutes without a sign of the user before Note may nudge about open
+    /// notes; 0 turns idle nudges off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_nudge_min: Option<u32>,
     /// Which messages ring the linked phone: `urgent` or `never`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ring_for: Option<String>,
@@ -297,6 +312,7 @@ pub struct UserConfig {
 
 pub const DEFAULT_TRIGGERS_PER_DAY: u32 = 4;
 pub const DEFAULT_CLOSE_DAY_TIME: &str = "21:30";
+pub const DEFAULT_MORNING_UNTIL: &str = "11:00";
 pub const DEFAULT_POMODORO_WORK_MIN: u32 = 25;
 pub const DEFAULT_POMODORO_BREAK_MIN: u32 = 5;
 pub const RING_FOR_URGENT: &str = "urgent";
@@ -331,6 +347,10 @@ impl UserConfig {
         self.close_day_time.as_deref().unwrap_or(DEFAULT_CLOSE_DAY_TIME)
     }
 
+    pub fn morning_until(&self) -> &str {
+        self.morning_until.as_deref().unwrap_or(DEFAULT_MORNING_UNTIL)
+    }
+
     pub fn triggers_per_day(&self) -> u32 {
         match self.triggers_per_day {
             Some(n) => n,
@@ -348,6 +368,10 @@ impl UserConfig {
 
     pub fn session_end_notify(&self) -> bool {
         self.session_end_notify.unwrap_or(true)
+    }
+
+    pub fn idle_nudge_min(&self) -> u32 {
+        self.idle_nudge_min.unwrap_or(DEFAULT_IDLE_NUDGE_MIN)
     }
 
     pub fn ring_for(&self) -> &str {
@@ -388,6 +412,11 @@ impl UserConfig {
             cfg.close_day_time().is_empty() || crate::templates::valid_time(cfg.close_day_time()),
             "invalid close_day_time {:?}",
             cfg.close_day_time()
+        );
+        anyhow::ensure!(
+            crate::templates::valid_time(cfg.morning_until()),
+            "invalid morning_until {:?}",
+            cfg.morning_until()
         );
         Ok(cfg)
     }
@@ -698,5 +727,48 @@ mod tests {
         assert_eq!(llm.kind, "anthropic");
         assert_eq!(llm.api_key_file, PathBuf::from("/run/secrets/llm"));
         assert_eq!(cfg.providers.embeddings.unwrap().base_url, "http://localhost:8080/v1");
+    }
+    #[test]
+    fn inbox_section_names_the_refresh_signal_and_defaults_to_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), "server.toml", concat!(
+            "bind_addr = \"127.0.0.1:0\"\npublic_base_url = \"http://x\"\ndata_dir = \"data\"\n",
+            "[inbox]\nrefresh_signal = \"/run/note/inbox-refresh\"\n"));
+        let cfg = ServerConfig::load(tmp.path()).unwrap();
+        assert_eq!(cfg.inbox.refresh_signal, Some(PathBuf::from("/run/note/inbox-refresh")));
+        write(tmp.path(), "server.toml",
+            "bind_addr = \"127.0.0.1:0\"\npublic_base_url = \"http://x\"\ndata_dir = \"data\"\n");
+        assert!(ServerConfig::load(tmp.path()).unwrap().inbox.refresh_signal.is_none());
+    }
+    #[test]
+    fn idle_nudges_default_to_twenty_minutes_and_stay_out_of_an_untouched_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), "defaults/user.toml",
+            "display_name = \"X\"\ntimezone = \"UTC\"\ntemplate = \"default\"\n");
+        let cfg = UserConfig::load(tmp.path(), "aki").unwrap();
+        assert_eq!(cfg.idle_nudge_min(), DEFAULT_IDLE_NUDGE_MIN);
+        cfg.save(tmp.path(), "aki").unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join("users/aki/user.toml")).unwrap();
+        assert!(!raw.contains("idle_nudge_min"), "unexpected file: {raw}");
+
+        write(tmp.path(), "users/aki/user.toml", "idle_nudge_min = 0\n");
+        assert_eq!(UserConfig::load(tmp.path(), "aki").unwrap().idle_nudge_min(), 0);
+    }
+
+    #[test]
+    fn mornings_end_at_eleven_unless_set_and_stay_out_of_an_untouched_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), "defaults/user.toml",
+            "display_name = \"X\"\ntimezone = \"UTC\"\ntemplate = \"default\"\n");
+        let cfg = UserConfig::load(tmp.path(), "aki").unwrap();
+        assert_eq!(cfg.morning_until(), "11:00");
+        cfg.save(tmp.path(), "aki").unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join("users/aki/user.toml")).unwrap();
+        assert!(!raw.contains("morning_until"), "unexpected file: {raw}");
+
+        write(tmp.path(), "users/aki/user.toml", "morning_until = \"09:30\"\n");
+        assert_eq!(UserConfig::load(tmp.path(), "aki").unwrap().morning_until(), "09:30");
+        write(tmp.path(), "users/aki/user.toml", "morning_until = \"9:30\"\n");
+        assert!(UserConfig::load(tmp.path(), "aki").is_err());
     }
 }

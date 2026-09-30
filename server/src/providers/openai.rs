@@ -31,10 +31,7 @@ impl OpenAILLM {
         let body = body(&self.model, req, self.reasoning.as_deref());
         self.agents.post_json(req.background, "openai", &body, |agent| {
             let request = agent.post(&url);
-            match self.api_key.is_empty() {
-                true => request,
-                false => request.header("Authorization", format!("Bearer {}", self.api_key)),
-            }
+            if self.api_key.is_empty() { request } else { request.header("Authorization", format!("Bearer {}", self.api_key)) }
         })
     }
 }
@@ -68,7 +65,7 @@ fn wrap_tool(t: &serde_json::Value) -> serde_json::Value {
     })
 }
 
-/// `reasoning` asks an endpoint that supports it (OpenRouter) for the model's
+/// `reasoning` asks an endpoint that supports it (`OpenRouter`) for the model's
 /// reasoning text; the field is absent when no effort is configured.
 pub fn body(model: &str, req: &ChatRequest, reasoning: Option<&str>) -> serde_json::Value {
     let mut messages: Vec<serde_json::Value> = vec![serde_json::json!({"role": "system", "content": req.system})];
@@ -107,7 +104,7 @@ pub fn body(model: &str, req: &ChatRequest, reasoning: Option<&str>) -> serde_js
     v
 }
 
-/// `content` is a plain string in the OpenAI spec, but some compatible servers
+/// `content` is a plain string in the `OpenAI` spec, but some compatible servers
 /// send the multi-part array shape back; the parts' texts are concatenated.
 fn content_text(v: &serde_json::Value) -> String {
     match v {
@@ -129,7 +126,7 @@ fn tool_args(v: &serde_json::Value) -> String {
     }
 }
 
-/// OpenRouter returns the model's reasoning in `message.reasoning`; some
+/// `OpenRouter` returns the model's reasoning in `message.reasoning`; some
 /// OpenAI-compatible servers name it `reasoning_content`.
 pub fn reasoning_text(v: &serde_json::Value) -> String {
     let message = &v["choices"][0]["message"];

@@ -4,6 +4,7 @@ use axum::body::Body;
 use axum::http::{header, Method, Request, StatusCode};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
+use std::fmt::Write as _;
 
 async fn read(res: axum::response::Response) -> (StatusCode, serde_json::Value) {
     let status = res.status();
@@ -306,7 +307,7 @@ fn transcript(chats: &[note_server::providers::mock::RecordedChat]) -> String {
     for chat in chats {
         out.push_str(&chat.system);
         for m in &chat.messages {
-            out.push_str(&format!("{m:?}"));
+            let _ = write!(out, "{m:?}");
         }
     }
     out

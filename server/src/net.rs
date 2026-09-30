@@ -235,7 +235,7 @@ mod tests {
 
     #[test]
     fn km_measures_the_great_circle() {
-        assert_eq!(km((47.6, -122.3), (47.6, -122.3)), 0.0);
+        assert!(km((47.6, -122.3), (47.6, -122.3)).abs() < 1e-9);
         let seattle_portland = km((47.6062, -122.3321), (45.5152, -122.6784));
         assert!((seattle_portland - 234.0).abs() < 3.0, "{seattle_portland}");
         let london_tokyo = km((51.5074, -0.1278), (35.6762, 139.6503));

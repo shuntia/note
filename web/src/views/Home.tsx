@@ -13,7 +13,8 @@ import {
   type WheelEvent as WheelEv,
 } from 'react'
 import { api, ApiError } from '../api'
-import { hintShown, hintUsed, railX, sessionFor, slotAfter, withoutCategory, WORK_TIME } from '../circle'
+import { busyIn, markBriefRead, morningOpen, pickBrief, readBriefs, type Brief } from '../brief'
+import { hintShown, hintUsed, railX, sessionFor, slotAfter, withoutCategory, workTime } from '../circle'
 import { latest } from '../coalesce'
 import type { ToastAction } from '../app'
 import { DayLine, minutesOf } from '../dayline'
@@ -37,30 +38,34 @@ import {
   pausedAt,
   phaseStart,
   plannedSec,
+  quickStop,
   type FocusSession,
 } from '../session'
 import { SoFar } from '../sofar'
 import { Tick } from '../tick'
-import type { DayView, PlanEvent, QueueEntry, QueueReason, SessionPhase, SessionStart, Task, TaskNode, TaskNotify } from '../types'
+import type { DayView, Debrief, PlanEvent, QueueEntry, QueueReason, SessionPhase, SessionStart, Review, Task, TaskNode, TaskNotify } from '../types'
 import { capped } from '../wave'
 import { CalendarSection } from './Calendar'
 import { Urgent } from './Tasks'
 import { DebriefFold } from '../debrief'
 import { ReviewFold } from '../review'
 import '../styles/home-motion.css'
+import { t, type Key } from '../i18n'
 
 const LATER_MINUTES = [5, 10, 15, 30, 60]
-const laterLabel = (m: number) => (m < 60 ? `${m} min` : `${m / 60} h`)
+const laterLabel = (m: number) => (m < 60 ? t('time.minutes', { n: m }) : t('time.hours', { n: m / 60 }))
 const ROUTINE_MIN = 15
 const PIN_MOBILE = 520
 const PIN_DESKTOP = 600
 const IDLE_MS = 2000
+const WAKE_MS = 200
 const WAKE_EVENTS = ['mousemove', 'wheel', 'keydown', 'touchstart', 'pointerdown', 'scroll', 'focusin'] as const
 
 // Drop has no server-side reversal, so the request waits out the undo window.
 const dropHold = makeHold<number>()
 // Nor does finishing, so the last step's write waits the same way.
 const doneHold = makeHold<FocusSession>()
+const stopHold = makeHold<FocusSession>()
 
 const clamp = (v: number) => Math.min(1, Math.max(0, v))
 
@@ -107,10 +112,10 @@ const hairline = (reason?: QueueReason) =>
   reason === 'overdue' ? 'rose' : reason === 'urgent' || reason === 'due_soon' ? 'sun' : null
 
 // What a block laid for the task does when it starts.
-const ANNOUNCE: { id: TaskNotify; label: string }[] = [
-  { id: 'none', label: 'None' },
-  { id: 'chat', label: 'Chat' },
-  { id: 'notify', label: 'Notify' },
+const ANNOUNCE: { id: TaskNotify; label: Key }[] = [
+  { id: 'none', label: 'announce.none' },
+  { id: 'chat', label: 'announce.chat' },
+  { id: 'notify', label: 'announce.notify' },
 ]
 
 function nowMinutes(): number {
@@ -140,10 +145,10 @@ function minutesOfDayNow(): number {
 
 function actionMessage(err: unknown): string {
   if (err instanceof ApiError) {
-    if (err.status === 409) return 'Already settled.'
-    if (err.status === 404) return 'That event is gone.'
+    if (err.status === 409) return t('block.settled')
+    if (err.status === 404) return t('block.gone')
   }
-  return 'Something went wrong. Try again.'
+  return t('common.failed')
 }
 
 // Where the wait started: the end of the last settled routine before now, else 06:00.
@@ -159,7 +164,7 @@ function waitStart(events: PlanEvent[], now: number): number {
 // session started with has to travel back out with the new line.
 function withElapsedNote(previous: string, elapsed: number): string {
   const day = new Date().toISOString().slice(0, 10)
-  const line = `${day} · focused ${Math.max(1, Math.round(elapsed / 60))} min`
+  const line = t('session.focusedNote', { day, n: Math.max(1, Math.round(elapsed / 60)) })
   return previous.trim() ? `${previous.trim()}\n${line}` : line
 }
 
@@ -191,14 +196,21 @@ function useMotion(): boolean {
   return on
 }
 
-// Desktop rests its buttons and the top bar after two idle seconds; any sign of a
-// hand brings them back (the CSS reads `html.idle`).
+// After two idle seconds the desktop dims its top bar and a session keeps only its
+// timer and its words (the CSS reads `html.idle`); any sign of a hand brings
+// everything back, over WAKE_MS while `html.waking` is set.
 function useIdle(on: boolean) {
   useEffect(() => {
     if (!on) return
     const root = document.documentElement
     let timer = 0
+    let fade = 0
     const wake = () => {
+      if (root.classList.contains('idle')) {
+        root.classList.add('waking')
+        window.clearTimeout(fade)
+        fade = window.setTimeout(() => root.classList.remove('waking'), WAKE_MS)
+      }
       root.classList.remove('idle')
       window.clearTimeout(timer)
       timer = window.setTimeout(() => root.classList.add('idle'), IDLE_MS)
@@ -207,11 +219,16 @@ function useIdle(on: boolean) {
     wake()
     return () => {
       window.clearTimeout(timer)
-      root.classList.remove('idle')
+      window.clearTimeout(fade)
+      root.classList.remove('idle', 'waking')
       for (const ev of WAKE_EVENTS) removeEventListener(ev, wake)
     }
   }, [on])
 }
+
+// React's handlers run before the window's wake listener, so this still reads the
+// state the gesture began in.
+const asleep = () => document.documentElement.classList.contains('idle')
 
 const isTyping = (target: EventTarget | null) => {
   const el = target as HTMLElement | null
@@ -255,7 +272,7 @@ export function Home({
   const inSession = shown !== null
   const prefs = readPrefs()
   const motion = useMotion()
-  useIdle(!mobile)
+  useIdle(!mobile || inSession)
 
   const newest = useState(() => latest<DayView>())[0]
   const load = useCallback(() => {
@@ -300,8 +317,8 @@ export function Home({
       api.eventAction(ev.id, 'drop').then(settled, settled)
     })
     tick((n) => n + 1)
-    notify(`Dropped ${eventLabel(ev.kind)}`, {
-      label: 'Undo',
+    notify(t('block.dropped', { name: eventLabel(ev.kind) }), {
+      label: t('toast.undo'),
       run: () => {
         if (dropHold.cancel(ev.id)) tick((n) => n + 1)
       },
@@ -332,6 +349,30 @@ export function Home({
   const face = next ? rowParts(next) : null
   const label = face?.name ?? ''
 
+  // An open morning brings the day's letter, then the week's, to the face in the
+  // circle's place until it has been read.
+  const [letters, setLetters] = useState<{ letter: Debrief | null; review: Review | null }>({ letter: null, review: null })
+  const [morningUntil, setMorningUntil] = useState('11:00')
+  const [briefsRead, setBriefsRead] = useState(readBriefs)
+  useEffect(() => {
+    api.debrief().then((letter) => setLetters((l) => ({ ...l, letter })), () => {})
+    api.review().then((review) => setLetters((l) => ({ ...l, review })), () => {})
+    api.settings().then((s) => setMorningUntil(s.morning_until), () => {})
+  }, [refresh])
+  const busy = busyIn(
+    [
+      ...visible
+        .filter((ev) => ev.status === 'pending' || ev.status === 'snoozed' || ev.status === 'fired')
+        .map((ev) => ({ start: ev.wall_time, end: ev.end_wall_time ?? ev.wall_time })),
+      ...(day?.calendar ?? []).filter((occ) => occ.kind === 'fixed' || occ.kind === 'busy'),
+    ],
+    now,
+  )
+  const brief =
+    !shown && day && morningOpen(now, morningUntil, busy)
+      ? pickBrief(letters.letter, letters.review, day.date, new Date(), briefsRead)
+      : null
+
   // A routine is timed to its span; without an end the routine default stands in.
   // A block laid for a task runs as that task, so finishing it settles both.
   const start = (ev: PlanEvent) => {
@@ -354,7 +395,7 @@ export function Home({
     try {
       setSession(await fn())
     } catch {
-      notify("Couldn't reach Note. Try again.")
+      notify(t('common.unreachable'))
     } finally {
       setPending(false)
     }
@@ -379,20 +420,20 @@ export function Home({
         api
           .patchTask(task.id, { state: 'done', notes: withElapsedNote(task.notes, elapsed) })
           .then(onChanged)
-          .catch(() => notify("Couldn't save the session. Try again."))
+          .catch(() => notify(t('session.saveFailed')))
       }
       if (s.event_id !== null) {
         api
           .eventAction(s.event_id, 'done')
           .then(onChanged)
-          .catch(() => notify("Couldn't mark that done. Try again."))
+          .catch(() => notify(t('block.doneFailed')))
       }
     }
     doneHold.start(s, send)
     setSession(null)
     onChanged()
-    notify('Done', {
-      label: 'Undo',
+    notify(t('toast.done'), {
+      label: t('toast.undo'),
       run: () => {
         if (!doneHold.cancel(s)) return
         markEnding(null)
@@ -410,11 +451,11 @@ export function Home({
       api
         .patchTask(step.id, { state: 'done', notes })
         .then(onChanged)
-        .catch(() => notify("Couldn't save the session. Try again."))
+        .catch(() => notify(t('session.saveFailed')))
     })
     onChanged()
-    notify('Done', {
-      label: 'Undo',
+    notify(t('toast.done'), {
+      label: t('toast.undo'),
       run: () => {
         if (!doneHold.cancel(s)) return
         void route(() =>
@@ -492,7 +533,7 @@ export function Home({
       complete(s, current)
       return 'completed'
     } catch {
-      notify("Couldn't save the session. Try again.")
+      notify(t('session.saveFailed'))
       return null
     } finally {
       setPending(false)
@@ -546,14 +587,16 @@ export function Home({
     </div>
   )
 
-  // The line under the title: the step being worked on, else the first line of the notes.
-  const subOf = (s: FocusSession) => withoutCategory(s.step_name ?? firstLine(s.notes), categoryOf(s))
-  const titleOf = (s: FocusSession) => withoutCategory(s.title, categoryOf(s))
+  // A step reads as a task of its own, with the task it belongs to under it; any other
+  // session keeps the first line of its notes there.
+  const titleOf = (s: FocusSession) => withoutCategory(s.step_name ?? s.title, categoryOf(s))
+  const subOf = (s: FocusSession) => withoutCategory(s.step_name ? s.title : firstLine(s.notes), categoryOf(s))
+  const subClass = (s: FocusSession) => (s.step_name ? 'gauge-sub parent' : 'gauge-sub')
 
   const pauseButton = (s: FocusSession) => (
     <button
       className="btn-round"
-      aria-label={onBreak || isPaused(s) ? 'Back to it' : 'Break'}
+      aria-label={onBreak || isPaused(s) ? t('session.backToIt') : t('session.break')}
       onClick={onBreak ? backToIt : isPaused(s) ? resume : pause}
     >
       {onBreak || isPaused(s) ? (
@@ -565,7 +608,7 @@ export function Home({
   )
 
   const doneButton = (
-    <button className={`btn-fill${mobile ? ' wide' : ''}`} disabled={pending} onClick={() => void finishSession()}>Done with this step</button>
+    <button className={`btn-fill${mobile ? ' wide' : ''}`} disabled={pending} onClick={() => void finishSession()}>{t('session.stepDone')}</button>
   )
 
   // The break asks for a word about the round, in the session's own thread.
@@ -574,7 +617,7 @@ export function Home({
       <Jot
         flow
         conversationId={session.conversation_id}
-        placeholder="How did that round go?"
+        placeholder={t('session.roundNote')}
         openTalk={openTalk}
         openConversation={openConversation}
       />
@@ -593,7 +636,7 @@ export function Home({
   const drawNext = useRef(false)
   const switching = useRef(false)
   const lastStartAt = useRef(0)
-  const drag = useRef<{ x: number; y: number; t: number; dx: number; dy: number } | null>(null)
+  const drag = useRef<{ x: number; y: number; t: number; dx: number; dy: number; asleep: boolean } | null>(null)
   const wheel = useRef({ dx: 0, timer: 0 })
   const dotsTimer = useRef(0)
   const timers = useRef<number[]>([])
@@ -630,6 +673,45 @@ export function Home({
   const faceSize = mobile ? 320 : 440
   const boxWidth = () => faceBox.current?.offsetWidth ?? faceSize
 
+  // The brief on screen trails the one due, so each change can leave before the next
+  // arrives: the circle settles away and the letter rises, and back again once read.
+  const [briefView, setBriefView] = useState<Brief | null>(null)
+  const briefBody = useRef<HTMLDivElement>(null)
+  const briefMoving = useRef(false)
+  const hadBrief = useRef(false)
+  useEffect(() => {
+    if (briefMoving.current || brief?.key === briefView?.key) return
+    const still = reducedMotion()
+    const leaving = briefView ? briefBody.current : faceBox.current
+    const land = () => {
+      briefMoving.current = false
+      setBriefView(brief)
+    }
+    if (!leaving) return land()
+    briefMoving.current = true
+    gsap.to(leaving, {
+      autoAlpha: 0,
+      y: still ? 0 : 12,
+      duration: still ? 0.2 : 0.35,
+      ease: 'power2.in',
+      onComplete: land,
+    })
+  }, [brief?.key, briefView?.key])
+  useLayoutEffect(() => {
+    const still = reducedMotion()
+    const arriving = briefView ? briefBody.current : hadBrief.current ? faceBox.current : null
+    hadBrief.current = briefView !== null
+    if (!arriving) return
+    gsap.fromTo(
+      arriving,
+      { autoAlpha: 0, y: still ? 0 : 16 },
+      { autoAlpha: 1, y: 0, duration: still ? 0.2 : 0.45, ease: 'power2.out', clearProps: 'opacity,visibility,transform' },
+    )
+  }, [briefView?.key])
+  const readBrief = () => {
+    if (briefView) setBriefsRead(markBriefRead(briefView.key))
+  }
+
   const snapTo = (i: number) => {
     const rail = railEl.current
     if (rail) gsap.to(rail, { x: -i * boxWidth(), duration: reducedMotion() ? 0 : 0.38, ease: 'power3.out', overwrite: true })
@@ -648,15 +730,15 @@ export function Home({
     setSettling(true)
     let items: QueueEntry[]
     try {
-      items = await api.queue(5)
+      items = await api.candidates(5)
     } catch {
       setSettling(false)
-      notify("Couldn't reach Note. Try again.")
+      notify(t('common.unreachable'))
       return
     }
     if (!items.length) {
       setSettling(false)
-      notify('Nothing open to work on.')
+      notify(t('session.nothingOpen'))
       return
     }
     hintUsed('start')
@@ -672,9 +754,9 @@ export function Home({
     }, 10_000)
   }
 
-  // A session started anywhere else is one slot until it is swiped; the queue is laid
-  // around it then, with the session itself in the slot after Work time when the
-  // queue does not hold it.
+  // A session started anywhere else is one slot until it is swiped; the candidates are
+  // laid around it then, with the session itself in the slot after Work time when they
+  // do not hold it.
   const stripFor = useRef('')
   const loadStrip = async () => {
     const s = session
@@ -683,7 +765,7 @@ export function Home({
     stripFor.current = key
     let items: QueueEntry[]
     try {
-      items = await api.queue(5)
+      items = await api.candidates(5)
     } catch {
       stripFor.current = ''
       return
@@ -691,7 +773,7 @@ export function Home({
     if (sessionKeyNow.current !== key) return
     let index: number
     if (s.task_id === null) {
-      if (s.title !== WORK_TIME.title) return
+      if (s.title !== workTime().title) return
       index = 0
     } else {
       const found = items.findIndex((e) => e.task.id === s.task_id)
@@ -730,11 +812,11 @@ export function Home({
       setLanding(null)
       setStrip(strip)
       snapTo(strip.index)
-      notify("Couldn't reach Note. Try again.")
+      notify(t('common.unreachable'))
       return
     }
     lastStartAt.current = Date.now()
-    openNow(target === 0 ? WORK_TIME : sessionFor(strip.items[target - 1]))
+    openNow(target === 0 ? workTime() : sessionFor(strip.items[target - 1]))
     window.setTimeout(() => {
       switching.current = false
       setLanding((l) => (l === s ? null : l))
@@ -828,18 +910,51 @@ export function Home({
     else pause()
   }
 
+  // Stopping takes finishing's path: the face clears at once and the end waits out
+  // the undo window.
+  const stop = () => {
+    const s = session
+    if (!s || pending || hold.current) return
+    const discard = quickStop(s, Date.now())
+    markEnding(s.id)
+    stopHold.start(s, () => {
+      const settled = () => {
+        markEnding(null)
+        onChanged()
+      }
+      api.endWorkSession(s.id, 'stopped', discard).then(settled, settled)
+    })
+    setSession(null)
+    onChanged()
+    notify(t('session.stopped'), {
+      label: t('toast.undo'),
+      run: () => {
+        if (!stopHold.cancel(s)) return
+        markEnding(null)
+        setSession(s)
+      },
+    })
+  }
+
+  const stopButton = (s: FocusSession) =>
+    isPaused(s) && (
+      <button className="btn-round face-stop" aria-label={t('session.stop')} disabled={pending} onClick={stop}>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6.5" y="6.5" width="11" height="11" rx="1.8" /></svg>
+      </button>
+    )
+
   const surface = {
     tabIndex: 0,
     role: 'button',
-    'aria-label': !session ? 'Start working' : onBreak || isPaused(session) ? 'Back to it' : 'Break',
+    'aria-label': !session ? t('session.start') : onBreak || isPaused(session) ? t('session.backToIt') : t('session.break'),
     onPointerDown: (e: PointEvent<HTMLDivElement>) => {
       if (e.button !== 0) return
-      drag.current = { x: e.clientX, y: e.clientY, t: Date.now(), dx: 0, dy: 0 }
+      drag.current = { x: e.clientX, y: e.clientY, t: Date.now(), dx: 0, dy: 0, asleep: !!session && asleep() }
       e.currentTarget.setPointerCapture(e.pointerId)
     },
     onPointerMove: (e: PointEvent<HTMLDivElement>) => {
       const d = drag.current
-      if (!d) return
+      if (!d || d.asleep) return
       d.dx = e.clientX - d.x
       d.dy = e.clientY - d.y
       const rail = railEl.current
@@ -853,7 +968,7 @@ export function Home({
     onPointerUp: () => {
       const d = drag.current
       drag.current = null
-      if (!d) return
+      if (!d || d.asleep) return
       if (Math.abs(d.dx) < 8 && Math.abs(d.dy) < 8) return tap()
       if (!session || settling) return
       if (Math.abs(d.dx) > Math.abs(d.dy)) {
@@ -885,7 +1000,7 @@ export function Home({
     // A horizontal wheel is a drag with no finger: it gathers until it would snap.
     onWheel: (e: WheelEv<HTMLDivElement>) => {
       const rail = railEl.current
-      if (!session || settling || Math.abs(e.deltaX) <= Math.abs(e.deltaY)) return
+      if (!session || settling || asleep() || Math.abs(e.deltaX) <= Math.abs(e.deltaY)) return
       if (!strip) return void loadStrip()
       if (!rail) return
       const w = wheel.current
@@ -1060,15 +1175,15 @@ export function Home({
 
   const blockMenuItems = (ev: PlanEvent): OverflowItem[] => {
     if (ev.status === 'done' || ev.status === 'dropped') {
-      return [{ label: ev.status === 'done' ? 'Already done' : 'Already dropped', disabled: true }]
+      return [{ label: ev.status === 'done' ? t('block.alreadyDone') : t('block.alreadyDropped'), disabled: true }]
     }
     const tomorrow: OverflowItem = {
-      label: 'Move to tomorrow',
+      label: t('block.tomorrow'),
       run: () => act(() => api.moveTomorrow(ev.id)),
       disabled: pending,
     }
     const dropToday: OverflowItem = {
-      label: 'Drop today',
+      label: t('block.dropToday'),
       kind: 'danger',
       run: () => drop(ev),
       disabled: pending,
@@ -1076,14 +1191,14 @@ export function Home({
     const task = ev.task
     if (task) {
       return [
-        { label: 'Start', run: () => start(ev), disabled: pending },
-        { label: 'Done', run: () => finishBlock(ev), disabled: pending },
+        { label: t('block.start'), run: () => start(ev), disabled: pending },
+        { label: t('block.done'), run: () => finishBlock(ev), disabled: pending },
         tomorrow,
         dropToday,
         {
-          label: 'Announce',
+          label: t('block.announce'),
           children: ANNOUNCE.map((choice) => ({
-            label: choice.label,
+            label: t(choice.label),
             run: () => act(() => api.patchTask(task.id, { notify: choice.id })),
             disabled: pending,
             checked: task.notify === undefined ? undefined : task.notify === choice.id,
@@ -1092,10 +1207,10 @@ export function Home({
       ]
     }
     return [
-      { label: 'Start', run: () => start(ev), disabled: pending },
-      { label: 'Later', children: laterItems(ev) },
+      { label: t('block.start'), run: () => start(ev), disabled: pending },
+      { label: t('block.later'), children: laterItems(ev) },
       {
-        label: 'Ping me',
+        label: t('block.pingMe'),
         run: () => act(() => api.setEventAlert(ev.id, !ev.alert)),
         disabled: pending,
         checked: ev.alert,
@@ -1119,20 +1234,19 @@ export function Home({
           {mark && <i className={`mark ${mark}`} />}
           {sessionNum(s, mobile ? 64 : 76)}
           <div className="gauge-name" style={{ fontSize: u(mobile ? 20 : 22) }}><Atoms text={titleOf(s)} /></div>
-          {sub && <div className="gauge-sub"><Atoms text={sub} /></div>}
+          {sub && <div className={subClass(s)}><Atoms text={sub} /></div>}
         </div>
       )
     }
     const category = entry?.task.category ?? ''
-    const sub = entry ? withoutCategory(entry.step?.title ?? firstLine(entry.task.notes), category) : ''
+    const name = entry ? withoutCategory((entry.step ?? entry.task).title, category) : workTime().title
+    const sub = entry ? withoutCategory(entry.step ? entry.task.title : firstLine(entry.task.notes), category) : ''
     return (
       <div key={i} className={`slot${i === strip.index ? ' now' : ''}`} aria-hidden="true">
         {mark && <i className={`mark ${mark}`} />}
         <div className="slot-gap" style={{ height: u(mobile ? 64 : 76) }} />
-        <div className="slot-name" style={{ fontSize: u(mobile ? 20 : 22) }}>
-          {entry ? withoutCategory(entry.task.title, category) : WORK_TIME.title}
-        </div>
-        {sub && <div className="slot-sub">{sub}</div>}
+        <div className="slot-name" style={{ fontSize: u(mobile ? 20 : 22) }}>{name}</div>
+        {sub && <div className={entry?.step ? 'slot-sub parent' : 'slot-sub'}>{sub}</div>}
       </div>
     )
   }
@@ -1144,7 +1258,6 @@ export function Home({
           size={faceSize}
           fracAt={landing ? undefined : shown.step_count && shown.step_index ? stepFracAt(shown) : sessionFracAt(shown)}
           drain={onBreak}
-          steps={!landing && shown.step_count && shown.step_index ? { count: shown.step_count, current: shown.step_index - 1 } : null}
           breathe
           paused={isPaused(shown)}
           hold={hold}
@@ -1160,7 +1273,7 @@ export function Home({
         <svg className={`pause-glyph${isPaused(shown) ? ' on' : ''}`} viewBox="0 0 24 24" aria-hidden="true">
           <rect x="6" y="5" width="4" height="14" rx="1.2" /><rect x="14" y="5" width="4" height="14" rx="1.2" />
         </svg>
-        {sessionHint && phase !== 'idle' && phase !== 'break' && <p className="face-hint under">tap to pause · swipe down when done</p>}
+        {sessionHint && phase !== 'idle' && phase !== 'break' && phase !== 'paused' && <p className="face-hint under">{t('hint.session')}</p>}
         {strip && (
           <div ref={dotsEl} className="strip-dots" aria-hidden="true">
             {Array.from({ length: slotCount }, (_, i) => (
@@ -1169,10 +1282,23 @@ export function Home({
           </div>
         )}
       </div>
+      {session && stopButton(session)}
       {breakSheet}
     </div>
+  ) : briefView ? (
+    <div key="brief" className="home-face">
+      <div className={`brief ${briefView.kind}`}>
+        <div ref={briefBody} className="brief-body">
+          <span className="brief-mark" aria-hidden="true" />
+          <div className="letter">{briefView.content}</div>
+          <button className="btn-round brief-read" aria-label={t('brief.read')} onClick={readBrief}>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5" /></svg>
+          </button>
+        </div>
+      </div>
+    </div>
   ) : (
-    <div className="home-face">
+    <div key="rest" className="home-face">
       <div ref={faceBox} className="circle-face idle" style={{ width: u(faceSize), height: u(faceSize) }} {...surface}>
         {next && facts && prefs.showArc ? (
           <Gauge size={faceSize} fracAt={waitFracAt(next)} faded>
@@ -1182,10 +1308,10 @@ export function Home({
             <div className="gauge-name" style={{ fontSize: u(mobile ? 18 : 22) }}><Atoms text={label} /></div>
             {face?.of && <div className="gauge-of"><Atoms text={face.of} /></div>}
             <div className="gauge-sub" style={{ fontSize: mobile ? undefined : u(14) }}><Atoms text={facts.span} /></div>
-            {startHint && <p className="face-hint inline">tap the circle to start working</p>}
+            {startHint && <p className="face-hint inline">{t('hint.start')}</p>}
           </Gauge>
         ) : (
-          startHint && <p className="face-hint">tap the circle to start working</p>
+          startHint && <p className="face-hint">{t('hint.start')}</p>
         )}
       </div>
       {next && facts && !prefs.showArc && (
@@ -1210,9 +1336,10 @@ export function Home({
           <Gauge size={230} fracAt={sessionFracAt(session)} breathe paused={isPaused(session)}>
             {sessionNum(session, 40)}
             <div className="gauge-name" style={{ fontSize: u(15) }}>{titleOf(session)}</div>
-            {subOf(session) && <span className="gauge-sub">{subOf(session)}</span>}
+            {subOf(session) && <span className={subClass(session)}>{subOf(session)}</span>}
           </Gauge>
           {pauseButton(session)}
+          {stopButton(session)}
         </div>
       </div>
     ) : (
@@ -1222,10 +1349,11 @@ export function Home({
         </Gauge>
         <div className="home-head">
           <span className="home-head-name">{titleOf(session)}</span>
-          {subOf(session) && <span className="gauge-sub">{subOf(session)}</span>}
+          {subOf(session) && <span className={subClass(session)}>{subOf(session)}</span>}
         </div>
         {doneButton}
         {pauseButton(session)}
+        {stopButton(session)}
       </div>
     )
   ) : next && facts ? (
@@ -1249,7 +1377,7 @@ export function Home({
     <section className="today-hero">
       {next && facts ? (
         <>
-          <div className="today-eyebrow">{facts.eyebrow} {next.wall_time}</div>
+          <div className="today-eyebrow">{t(`face.${facts.eyebrow}`)} {next.wall_time}</div>
           <h1 className="today-title">{label}</h1>
           {face?.of && <p className="today-of">{face.of}</p>}
           <div className="today-wait">
@@ -1263,7 +1391,7 @@ export function Home({
           </div>
         </>
       ) : (
-        events && <h1 className="today-title">That's everything today.</h1>
+        events && <h1 className="today-title">{t('today.empty')}</h1>
       )}
     </section>
   )
@@ -1303,20 +1431,18 @@ export function Home({
   const pastCloseDay = prefs.closeDay !== '' && now >= minutesOf(prefs.closeDay)
   const closeDay = pastCloseDay && !left && openBlocks.length > 0 && (
     <section className="close-day">
-      <p className="close-day-head">Close the day</p>
-      <p className="close-day-line">
-        {openBlocks.length} block{openBlocks.length === 1 ? '' : 's'} still open.
-      </p>
+      <p className="close-day-head">{t('closeDay.head')}</p>
+      <p className="close-day-line">{t('closeDay.open', { count: openBlocks.length })}</p>
       <div className="close-day-actions">
         <button
           className="btn-fill small"
           disabled={pending}
           onClick={() => act(() => api.carry(todayIso()))}
         >
-          Carry to tomorrow
+          {t('closeDay.carry')}
         </button>
         <button className="btn-haze small" disabled={pending} onClick={leaveThem}>
-          Leave them
+          {t('closeDay.leave')}
         </button>
       </div>
     </section>
@@ -1330,7 +1456,7 @@ export function Home({
         {ev.task && (
           <Tick
             checked={ev.status === 'done'}
-            label={`Done: ${name}`}
+            label={t('block.doneFor', { name })}
             onClick={() => finishBlock(ev)}
           />
         )}
@@ -1339,12 +1465,12 @@ export function Home({
           {ev.task && <Urgent task={{ ...ev.task, due_at: null }} />}
           {of && <span className="home-of">{of}</span>}
         </span>
-        <button className="home-start" aria-label={`Start ${name}`} disabled={pending} onClick={() => start(ev)}>
+        <button className="home-start" aria-label={t('block.startFor', { name })} disabled={pending} onClick={() => start(ev)}>
           <svg viewBox="0 0 24 24" aria-hidden="true">
             <path d="M9 7.5v9l7-4.5z" />
           </svg>
         </button>
-        <Overflow label={`More: ${name}`} row=".home-list li" items={blockMenuItems(ev)} />
+        <Overflow label={t('menu.more', { name })} row=".home-list li" items={blockMenuItems(ev)} />
       </>
     )
   }
@@ -1472,6 +1598,8 @@ export function Home({
     facts?.span,
     face?.of,
     session?.started_at,
+    session?.paused_at,
+    briefView?.key,
     !!landing,
     strip?.index,
     strip?.items.length,
@@ -1558,6 +1686,25 @@ export function Home({
         from(qa('.today-eyebrow'), { autoAlpha: 0, duration: 0.4, ease: 'none' }, 0.6)
         from(qa('.today-line'), { autoAlpha: 0, y: 28, duration: 0.45, ease: 'power2.out' }, 0.35)
       }
+      if (q('.face-big .brief')) {
+        // Nothing of the circle is on the face to morph, so the letter leaves and what
+        // the circle would have become arrives in its own place.
+        timeline.fromTo(
+          qa('.face-big .brief'),
+          { autoAlpha: 1, y: 0 },
+          { autoAlpha: 0, y: -24, duration: 0.4, ease: 'power2.in', immediateRender: false },
+          0,
+        )
+        from(
+          qa(
+            compactLanding
+              ? '.home-face.compact .gauge, .home-face.compact > .gauge-num, .home-face.compact .home-head'
+              : '.today-eyebrow, .today-title, .today-of, .today-in, .today-span, .today-bar',
+          ),
+          { autoAlpha: 0, y: 16, duration: 0.4, ease: 'power2.out' },
+          0.45,
+        )
+      }
       to(qa('.face-big .chev, .face-big .face-hint, .face-big .slot:not(.now)'), { autoAlpha: 0, duration: 0.35 }, 0)
       tl.current = timeline
       timeline.progress(st.current?.progress ?? 0)
@@ -1628,7 +1775,7 @@ export function Home({
   }, [inSession])
 
   const chevron = (
-    <button className="chev" aria-label="Today" onClick={() => st.current && scrollToY(st.current.end)}>
+    <button className="chev" aria-label={t('nav.today')} onClick={() => st.current && scrollToY(st.current.end)}>
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 14l6-6 6 6" /></svg>
     </button>
   )
@@ -1646,7 +1793,7 @@ export function Home({
 
   return (
     <div ref={home} className={cls}>
-      <section ref={stage} className="stage" aria-label="Today">
+      <section ref={stage} className="stage" aria-label={t('nav.today')}>
         {motion ? (
           <div className="face-big">
             {bigFace}
@@ -1661,7 +1808,7 @@ export function Home({
         {motion && session && mobile && (
           <div className="home-sheet">
             {doneButton}
-            <Jot flow placeholder="Tell Note" openTalk={openTalk} openConversation={openConversation} />
+            <Jot flow placeholder={t('jot.tellNote')} openTalk={openTalk} openConversation={openConversation} />
           </div>
         )}
         {compactLanding ? today : events && <section className="today-line"><DayLine events={visible} calendar={day?.calendar} now={now} nextId={next?.id} hoverId={hoverId} onHover={setHoverId} />{closeDay}{list}</section>}

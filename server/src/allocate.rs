@@ -66,8 +66,8 @@ fn wall(minutes: u16) -> String {
 
 fn window(start: &str, end: &str) -> Window {
     Window {
-        start: crate::templates::wall_minutes(start).clamp(0, END_OF_DAY_MIN as i64) as u16,
-        end: crate::templates::wall_minutes(end).clamp(0, END_OF_DAY_MIN as i64) as u16,
+        start: crate::templates::wall_minutes(start).clamp(0, i64::from(END_OF_DAY_MIN)) as u16,
+        end: crate::templates::wall_minutes(end).clamp(0, i64::from(END_OF_DAY_MIN)) as u16,
     }
 }
 
@@ -354,14 +354,14 @@ pub fn run(
         crate::tools::plan_ops::occupied(conn, user_id, date)?
             .into_iter()
             .map(|(_, from, to)| Window {
-                start: from.clamp(0, END_OF_DAY_MIN as i64) as u16,
-                end: to.clamp(0, END_OF_DAY_MIN as i64) as u16,
+                start: from.clamp(0, i64::from(END_OF_DAY_MIN)) as u16,
+                end: to.clamp(0, i64::from(END_OF_DAY_MIN)) as u16,
             }),
     );
     let local = now.to_zoned(tz.clone());
     if local.date() == date {
         let cut = i64::from(local.hour()) * 60 + i64::from(local.minute()) + LEAD_MIN;
-        busy.push(Window { start: 0, end: cut.clamp(0, END_OF_DAY_MIN as i64) as u16 });
+        busy.push(Window { start: 0, end: cut.clamp(0, i64::from(END_OF_DAY_MIN)) as u16 });
     }
 
     let longest = usable(&free, &busy).iter().map(|w| w.end - w.start).max().unwrap_or(0);
@@ -811,7 +811,7 @@ mod tests {
             &conn,
             uid,
             outline,
-            crate::tasks::TaskPatch { state: Some("done".into()), ..Default::default() },
+            &crate::tasks::TaskPatch { state: Some("done".into()), ..Default::default() },
         )
         .unwrap();
         let out = run(&conn, uid, &jiff::tz::TimeZone::UTC, date, at("2026-09-20T09:00:00Z")).unwrap();

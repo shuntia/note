@@ -820,3 +820,65 @@ async fn queue_puts_now_first_and_says_why() {
     assert!(q[0]["task"]["children"].is_array());
     assert!(q[0]["step"].is_null());
 }
+
+async fn candidates(app: &axum::Router, cookie: &str) -> (StatusCode, serde_json::Value) {
+    let res = app
+        .clone()
+        .oneshot(
+            Request::get("/api/tasks/candidates?limit=5")
+                .header(header::COOKIE, cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    read(res).await
+}
+
+#[tokio::test]
+async fn candidates_are_todays_blocks_else_the_queue() {
+    let (app, cookie, state, _tmp) = app_with_user_and_state().await;
+    post(&app, &cookie, "/api/tasks", r#"{"title":"email landlord"}"#).await;
+    let (_, taxes) = post(&app, &cookie, "/api/tasks", r#"{"title":"file taxes"}"#).await;
+
+    let (status, q) = candidates(&app, &cookie).await;
+    assert_eq!(status, StatusCode::OK, "{q}");
+    let q = q.as_array().unwrap();
+    assert_eq!(q.len(), 2, "with nothing laid today the queue stands in");
+    assert_eq!(q[0]["reason"], "oldest");
+    assert!(q[0].get("event_id").is_none());
+
+    let today = jiff::Timestamp::now().to_zoned(jiff::tz::TimeZone::UTC).date().to_string();
+    let event = {
+        let conn = state.db();
+        conn.execute(
+            "INSERT INTO plans (user_id, date, created_at) SELECT id, ?1, 'x' FROM users WHERE username = 'aki'",
+            [&today],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO events (plan_id, kind, wall_time, alert, end_wall_time)
+             SELECT id, 'file taxes', '00:00', 0, '23:59' FROM plans",
+            [],
+        )
+        .unwrap();
+        let event = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO event_tasks (event_id, task_id) VALUES (?1, ?2)",
+            (event, taxes["id"].as_i64().unwrap()),
+        )
+        .unwrap();
+        event
+    };
+
+    let (status, q) = candidates(&app, &cookie).await;
+    assert_eq!(status, StatusCode::OK, "{q}");
+    let q = q.as_array().unwrap();
+    assert_eq!(q.len(), 1, "a laid day is the strip, not the queue: {q:?}");
+    assert_eq!(q[0]["task"]["title"], "file taxes");
+    assert_eq!(q[0]["reason"], "scheduled");
+    assert_eq!(q[0]["planned_min"], 1439);
+    assert_eq!(q[0]["event_id"], event);
+    assert!(q[0]["task"]["children"].is_array());
+    assert_eq!(q[0]["task"]["scheduled_at"], format!("{today}T00:00:00+00:00"));
+}

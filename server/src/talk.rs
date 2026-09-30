@@ -3,6 +3,7 @@ use crate::providers::{ChatRequest, LLMProvider, Message};
 use crate::AppState;
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
+use std::fmt::Write as _;
 
 const MAX_TITLE_CHARS: usize = 60;
 const MAX_TITLE_WORDS: usize = 8;
@@ -123,16 +124,13 @@ pub fn checkin_thread(
             |r| r.get(0),
         )
         .optional()?;
-    let id = match existing {
-        Some(id) => id,
-        None => {
-            conn.execute(
-                "INSERT INTO conversations (user_id, title, created_at, updated_at, checkin_date)
-                 VALUES (?1, ?2, ?3, ?3, ?4)",
-                (user_id, checkin_title(date, at), now.to_string(), date),
-            )?;
-            conn.last_insert_rowid()
-        }
+    let id = if let Some(id) = existing { id } else {
+        conn.execute(
+            "INSERT INTO conversations (user_id, title, created_at, updated_at, checkin_date)
+             VALUES (?1, ?2, ?3, ?3, ?4)",
+            (user_id, checkin_title(date, at), now.to_string(), date),
+        )?;
+        conn.last_insert_rowid()
     };
     append_text(conn, id, "assistant", question, now)?;
     touch(conn, id, now)?;
@@ -406,7 +404,7 @@ fn opening_exchange(conn: &Connection, conversation_id: i64) -> Result<Option<St
     let Some(user) = first("user")? else { return Ok(None) };
     let mut exchange = format!("User: {}", clip_chars(&user, TITLE_EXCHANGE_CHARS));
     if let Some(assistant) = first("assistant")? {
-        exchange.push_str(&format!("\nAssistant: {}", clip_chars(&assistant, TITLE_EXCHANGE_CHARS)));
+        let _ = write!(exchange, "\nAssistant: {}", clip_chars(&assistant, TITLE_EXCHANGE_CHARS));
     }
     Ok(Some(exchange))
 }
@@ -539,6 +537,10 @@ pub async fn run_turn(
     if message.is_empty() || message.len() > MAX_MESSAGE {
         return Err(TurnError::Blank);
     }
+    {
+        let conn = state.db();
+        let _ = crate::presence::touch(&conn, user_id, jiff::Timestamp::now());
+    }
     let mut notes: Vec<String> = Vec::new();
     let mut spoke_from = Via::Web;
     if let Some(id) = conversation {
@@ -653,7 +655,7 @@ pub async fn run_turn(
             let titled_user = username.to_string();
             let conv_id = turn.conversation_id;
             tokio::task::spawn_blocking(move || {
-                generate_title(&st, user_id, &titled_user, conv_id)
+                generate_title(&st, user_id, &titled_user, conv_id);
             });
             if via == Via::Web && spoke_from == Via::Telegram {
                 mirror_to_telegram(state, user_id, turn.conversation_id, turn.reply.clone()).await;

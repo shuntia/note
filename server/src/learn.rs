@@ -42,7 +42,7 @@ fn median(values: &mut [f64]) -> f64 {
     values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let n = values.len();
     match n % 2 {
-        0 => (values[n / 2 - 1] + values[n / 2]) / 2.0,
+        0 => f64::midpoint(values[n / 2 - 1], values[n / 2]),
         _ => values[n / 2],
     }
 }
@@ -73,8 +73,7 @@ fn ratios(conn: &Connection, user_id: i64, now: jiff::Timestamp) -> rusqlite::Re
         else {
             continue;
         };
-        let Ok(ms) = (ended - started).total(jiff::Unit::Millisecond) else { continue };
-        let elapsed = (ms as i64 - paused).max(0) / 60_000;
+        let elapsed = (ended.as_millisecond() - started.as_millisecond() - paused).max(0) / 60_000;
         if elapsed < MIN_RUN_MIN {
             continue;
         }
@@ -161,7 +160,7 @@ mod tests {
         session(&conn, uid, 30, 60, 3);
         session(&conn, uid, 30, 60, 4);
         run_for_user(&conn, uid, now()).unwrap();
-        assert_eq!(plan_factor(&conn, uid).unwrap().unwrap().value, 1.5);
+        assert!((plan_factor(&conn, uid).unwrap().unwrap().value - 1.5).abs() < 1e-9);
     }
 
     #[test]
@@ -171,14 +170,14 @@ mod tests {
             session(&conn, uid, 10, 120, d);
         }
         run_for_user(&conn, uid, now()).unwrap();
-        assert_eq!(plan_factor(&conn, uid).unwrap().unwrap().value, CEILING);
+        assert!((plan_factor(&conn, uid).unwrap().unwrap().value - CEILING).abs() < 1e-9);
 
         let (conn, uid) = env();
         for d in 1..=3 {
             session(&conn, uid, 120, 6, d);
         }
         run_for_user(&conn, uid, now()).unwrap();
-        assert_eq!(plan_factor(&conn, uid).unwrap().unwrap().value, FLOOR);
+        assert!((plan_factor(&conn, uid).unwrap().unwrap().value - FLOOR).abs() < 1e-9);
     }
 
     #[test]
@@ -232,7 +231,7 @@ mod tests {
         }
         conn.execute("UPDATE work_sessions SET paused_ms = 30 * 60000", []).unwrap();
         run_for_user(&conn, uid, now()).unwrap();
-        assert_eq!(plan_factor(&conn, uid).unwrap().unwrap().value, 1.0);
+        assert!((plan_factor(&conn, uid).unwrap().unwrap().value - 1.0).abs() < 1e-9);
     }
 
     #[test]

@@ -675,13 +675,16 @@ pub fn list(conn: &Connection, user_id: i64) -> rusqlite::Result<Vec<TaskNode>> 
 }
 
 /// One open task as the next thing to start: the step it would begin with, the
-/// minutes a round of it is planned for (to the nearest five), and why it is here.
+/// minutes a round of it is planned for, and why it is here.
 #[derive(Debug, Serialize)]
 pub struct QueueEntry {
     pub task: TaskNode,
     pub step: Option<Task>,
     pub planned_min: Option<u32>,
     pub reason: &'static str,
+    /// The block a scheduled entry was laid in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_id: Option<i64>,
 }
 
 /// The user's open top-level tasks in the order the planner lays them.
@@ -733,9 +736,82 @@ pub fn queue(
                 step,
                 planned_min: minutes.map(|m| ((m + 2) / 5 * 5).max(5)),
                 reason,
+                event_id: None,
             }
         })
         .collect())
+}
+
+/// Today's blocks laid for tasks and not yet settled, one per task or step, as
+/// queue entries: the block current or next by the clock first, then the rest
+/// of the day in time order, then the blocks already behind. `planned_min` is
+/// the block's own length.
+pub fn candidates(
+    conn: &Connection,
+    user_id: i64,
+    tz: &jiff::tz::TimeZone,
+    now: jiff::Timestamp,
+    limit: usize,
+) -> rusqlite::Result<Vec<QueueEntry>> {
+    let here = now.to_zoned(tz.clone());
+    let minute = i64::from(here.hour()) * 60 + i64::from(here.minute());
+    let mut stmt = conn.prepare(
+        "SELECT e.id, e.wall_time, e.end_wall_time, et.task_id
+         FROM events e
+         JOIN plans p ON p.id = e.plan_id
+         JOIN event_tasks et ON et.event_id = e.id
+         WHERE p.user_id = ?1 AND p.date = ?2 AND e.end_wall_time IS NOT NULL
+           AND e.status IN ('pending','snoozed','fired')
+         ORDER BY e.wall_time, e.id",
+    )?;
+    let blocks = stmt
+        .query_map((user_id, here.date().to_string()), |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let span = |wall: &str, end: &str| {
+        Some((crate::plan::parse_minutes(wall).ok()?, crate::plan::parse_minutes(end).ok()?))
+    };
+    let first = blocks
+        .iter()
+        .position(|(_, wall, end, _)| span(wall, end).is_some_and(|(_, to)| to > minute))
+        .unwrap_or(0);
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for (event_id, wall, end, linked) in blocks[first..].iter().chain(&blocks[..first]) {
+        if out.len() == limit {
+            break;
+        }
+        if !seen.insert(*linked) {
+            continue;
+        }
+        let Some((from, to)) = span(wall, end) else { continue };
+        let Some(held) = get(conn, user_id, *linked)? else { continue };
+        let (mut top, step) = match held.parent_id {
+            Some(parent) => {
+                if matches!(held.state.as_str(), "done" | "dropped") {
+                    continue;
+                }
+                let Some(top) = get(conn, user_id, parent)? else { continue };
+                (top, Some(held))
+            }
+            None => (held, None),
+        };
+        if !matches!(top.state.as_str(), "open" | "in_progress") {
+            continue;
+        }
+        top.pressing = pressing_at(&top.state, top.due_at.as_deref(), now);
+        let children = children_of(conn, top.id)?;
+        let step = step.or_else(|| children.iter().find(|c| c.state != "done").cloned());
+        out.push(QueueEntry {
+            task: TaskNode { task: top, children },
+            step,
+            planned_min: Some(u32::try_from((to - from).max(1)).unwrap_or(1)),
+            reason: "scheduled",
+            event_id: Some(*event_id),
+        });
+    }
+    Ok(out)
 }
 
 /// The next block each of the user's top-level tasks still has waiting — its
@@ -1039,7 +1115,7 @@ pub fn upsert(
         state,
         ..Default::default()
     };
-    update(conn, user_id, id, patch)?;
+    update(conn, user_id, id, &patch)?;
     let node = node(conn, user_id, id)?.expect("row was just updated");
     Ok(Upsert::Updated(node))
 }
@@ -1162,7 +1238,7 @@ pub fn update(
     conn: &Connection,
     user_id: i64,
     task_id: i64,
-    patch: TaskPatch,
+    patch: &TaskPatch,
 ) -> Result<Option<Updated>, UpdateError> {
     if let Some(s) = &patch.state {
         if !STATES.contains(&s.as_str()) {
@@ -1379,7 +1455,7 @@ mod tests {
             &conn,
             uid,
             id,
-            TaskPatch {
+            &TaskPatch {
                 description: Some("the caller's own text".into()),
                 duration_min: Some(Some(15)),
                 ..Default::default()
@@ -1406,7 +1482,7 @@ mod tests {
             &conn,
             uid,
             id,
-            TaskPatch {
+            &TaskPatch {
                 description: Some("the agent's brief".into()),
                 state: Some("dropped".into()),
                 ..Default::default()
@@ -1433,13 +1509,13 @@ mod tests {
                 .unwrap()
         };
         assert!(completed(id).is_none());
-        update(&conn, uid, id, TaskPatch { state: Some("done".into()), ..Default::default() })
+        update(&conn, uid, id, &TaskPatch { state: Some("done".into()), ..Default::default() })
             .unwrap();
         let first = completed(id).expect("done carries a completion time");
-        update(&conn, uid, id, TaskPatch { notes: Some("later".into()), ..Default::default() })
+        update(&conn, uid, id, &TaskPatch { notes: Some("later".into()), ..Default::default() })
             .unwrap();
         assert_eq!(completed(id).as_deref(), Some(first.as_str()), "an unrelated write keeps it");
-        update(&conn, uid, id, TaskPatch { state: Some("open".into()), ..Default::default() })
+        update(&conn, uid, id, &TaskPatch { state: Some("open".into()), ..Default::default() })
             .unwrap();
         assert!(completed(id).is_none(), "reopening clears it");
     }
@@ -1448,7 +1524,7 @@ mod tests {
     fn done_between_counts_by_completion_time() {
         let (conn, uid) = db_with_user();
         let id = task(&conn, uid, "write it up", None);
-        update(&conn, uid, id, TaskPatch { state: Some("done".into()), ..Default::default() })
+        update(&conn, uid, id, &TaskPatch { state: Some("done".into()), ..Default::default() })
             .unwrap();
         let now = jiff::Timestamp::now();
         let hour = jiff::Span::new().hours(1);
@@ -1482,7 +1558,7 @@ mod tests {
         let id = task(&conn, uid, "the chapter", None);
         assert_eq!(get(&conn, uid, id).unwrap().unwrap().progress, 0);
 
-        update(&conn, uid, id, TaskPatch { progress: Some(40), ..Default::default() }).unwrap();
+        update(&conn, uid, id, &TaskPatch { progress: Some(40), ..Default::default() }).unwrap();
         let t = get(&conn, uid, id).unwrap().unwrap();
         assert_eq!(t.progress, 40);
         assert_eq!((t.expected_min, t.remaining_min), (None, None), "no minutes to read from yet");
@@ -1491,7 +1567,7 @@ mod tests {
         let t = get(&conn, uid, id).unwrap().unwrap();
         assert_eq!((t.expected_min, t.remaining_min), (Some(105), Some(60)));
 
-        let e = update(&conn, uid, id, TaskPatch { progress: Some(101), ..Default::default() });
+        let e = update(&conn, uid, id, &TaskPatch { progress: Some(101), ..Default::default() });
         assert!(matches!(e, Err(UpdateError::Invalid(_))), "{e:?}");
         assert_eq!(get(&conn, uid, id).unwrap().unwrap().progress, 40);
     }
@@ -1501,7 +1577,7 @@ mod tests {
         let (conn, uid) = db_with_user();
         let parent = task(&conn, uid, "essay", None);
         let step = task(&conn, uid, "draft", Some(parent));
-        update(&conn, uid, step, TaskPatch { state: Some("done".into()), ..Default::default() })
+        update(&conn, uid, step, &TaskPatch { state: Some("done".into()), ..Default::default() })
             .unwrap();
         assert_eq!(get(&conn, uid, step).unwrap().unwrap().progress, 100);
         assert_eq!(
@@ -1510,7 +1586,7 @@ mod tests {
             "the parent the last step finished is finished too"
         );
 
-        update(&conn, uid, parent, TaskPatch { state: Some("open".into()), ..Default::default() })
+        update(&conn, uid, parent, &TaskPatch { state: Some("open".into()), ..Default::default() })
             .unwrap();
         assert_eq!(get(&conn, uid, parent).unwrap().unwrap().progress, 100);
     }
@@ -1541,19 +1617,19 @@ mod tests {
         let progress = |id| get(&conn, uid, id).unwrap().unwrap().progress;
         assert_eq!(progress(parent), 0);
 
-        let u = update(&conn, uid, watch, TaskPatch { state: Some("done".into()), ..Default::default() })
+        let u = update(&conn, uid, watch, &TaskPatch { state: Some("done".into()), ..Default::default() })
             .unwrap()
             .unwrap();
         assert_eq!(progress(parent), 44, "60 of 60 + 30 + an unsized step weighing their mean, 45");
         assert_eq!(u.parent.map(|p| p.progress), Some(44), "the write hands the parent back");
 
-        update(&conn, uid, notes, TaskPatch { progress: Some(50), ..Default::default() }).unwrap();
+        update(&conn, uid, notes, &TaskPatch { progress: Some(50), ..Default::default() }).unwrap();
         assert_eq!(progress(parent), 56);
 
-        update(&conn, uid, parent, TaskPatch { progress: Some(5), ..Default::default() }).unwrap();
+        update(&conn, uid, parent, &TaskPatch { progress: Some(5), ..Default::default() }).unwrap();
         assert_eq!(progress(parent), 56, "a parent with steps is not set by hand");
 
-        update(&conn, uid, write, TaskPatch { state: Some("dropped".into()), ..Default::default() })
+        update(&conn, uid, write, &TaskPatch { state: Some("dropped".into()), ..Default::default() })
             .unwrap();
         assert_eq!(progress(parent), 83, "a dropped step weighs nothing");
 
@@ -1602,11 +1678,11 @@ mod tests {
             &conn,
             uid,
             step,
-            TaskPatch { category: Some("History".into()), ..Default::default() },
+            &TaskPatch { category: Some("History".into()), ..Default::default() },
         );
         assert!(matches!(refused, Err(UpdateError::Invalid(_))), "{refused:?}");
 
-        update(&conn, uid, parent.id, TaskPatch { category: Some("Chemistry".into()), ..Default::default() })
+        update(&conn, uid, parent.id, &TaskPatch { category: Some("Chemistry".into()), ..Default::default() })
             .unwrap();
         assert_eq!(get(&conn, uid, step).unwrap().unwrap().category, "Chemistry");
     }
@@ -1635,7 +1711,7 @@ mod tests {
 
         let step = task(&conn, uid, "draft", Some(id));
         let refused =
-            update(&conn, uid, step, TaskPatch { goal_id: Some(Some(goal.id)), ..Default::default() });
+            update(&conn, uid, step, &TaskPatch { goal_id: Some(Some(goal.id)), ..Default::default() });
         assert!(matches!(refused, Err(UpdateError::Invalid(_))), "{refused:?}");
 
         let bo = crate::auth::create_user(&conn, "bo", "pw", false).unwrap();
@@ -1646,10 +1722,10 @@ mod tests {
         )
         .unwrap();
         let refused =
-            update(&conn, uid, id, TaskPatch { goal_id: Some(Some(theirs.id)), ..Default::default() });
+            update(&conn, uid, id, &TaskPatch { goal_id: Some(Some(theirs.id)), ..Default::default() });
         assert!(matches!(refused, Err(UpdateError::Invalid(_))), "{refused:?}");
 
-        update(&conn, uid, id, TaskPatch { goal_id: Some(None), ..Default::default() }).unwrap();
+        update(&conn, uid, id, &TaskPatch { goal_id: Some(None), ..Default::default() }).unwrap();
         assert!(get(&conn, uid, id).unwrap().unwrap().goal_id.is_none());
     }
 
@@ -1761,11 +1837,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(t.urgency, "high");
-        let up = update(&conn, uid, t.id, TaskPatch { urgency: Some("low".into()), ..Default::default() })
+        let up = update(&conn, uid, t.id, &TaskPatch { urgency: Some("low".into()), ..Default::default() })
             .unwrap()
             .unwrap();
         assert_eq!(up.task.urgency, "low");
-        let err = update(&conn, uid, t.id, TaskPatch { urgency: Some("asap".into()), ..Default::default() })
+        let err = update(&conn, uid, t.id, &TaskPatch { urgency: Some("asap".into()), ..Default::default() })
             .unwrap_err();
         assert!(matches!(err, UpdateError::Invalid(_)), "{err:?}");
     }
@@ -1804,7 +1880,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, UpdateError::InvalidHierarchy(_)), "{err:?}");
-        let err = update(&conn, uid, step.id, TaskPatch { urgency: Some("low".into()), ..Default::default() })
+        let err = update(&conn, uid, step.id, &TaskPatch { urgency: Some("low".into()), ..Default::default() })
             .unwrap_err();
         assert!(matches!(err, UpdateError::InvalidHierarchy(_)), "{err:?}");
 
@@ -1816,10 +1892,10 @@ mod tests {
             Actor::User,
         )
         .unwrap();
-        update(&conn, uid, urgent.id, TaskPatch { parent_id: Some(Some(parent.id)), ..Default::default() })
+        update(&conn, uid, urgent.id, &TaskPatch { parent_id: Some(Some(parent.id)), ..Default::default() })
             .unwrap()
             .unwrap();
-        let promoted = update(&conn, uid, urgent.id, TaskPatch { parent_id: Some(None), ..Default::default() })
+        let promoted = update(&conn, uid, urgent.id, &TaskPatch { parent_id: Some(None), ..Default::default() })
             .unwrap()
             .unwrap();
         assert_eq!(promoted.task.urgency, "normal", "a demoted task gives up its urgency");
@@ -1903,5 +1979,138 @@ mod tests {
         let ids: Vec<i64> = q.iter().map(|e| e.task.task.id).collect();
         assert_eq!(ids, [dated, undated]);
         assert_eq!(q[0].reason, "oldest");
+    }
+
+    fn lay(conn: &Connection, uid: i64, date: &str, wall: &str, end: &str, status: &str, task_id: i64) -> i64 {
+        conn.execute(
+            "INSERT OR IGNORE INTO plans (user_id, date, created_at) VALUES (?1, ?2, 'x')",
+            (uid, date),
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO events (plan_id, kind, wall_time, alert, end_wall_time, status)
+             SELECT id, 'block', ?3, 0, ?4, ?5 FROM plans WHERE user_id = ?1 AND date = ?2",
+            rusqlite::params![uid, date, wall, end, status],
+        )
+        .unwrap();
+        let event = conn.last_insert_rowid();
+        conn.execute("INSERT INTO event_tasks (event_id, task_id) VALUES (?1, ?2)", (event, task_id))
+            .unwrap();
+        event
+    }
+
+    fn at(ts: &str) -> jiff::Timestamp {
+        ts.parse().unwrap()
+    }
+
+    type Picked<'a> = (&'a str, Option<&'a str>, Option<u32>, Option<i64>, &'a str);
+
+    fn picked(got: &[QueueEntry]) -> Vec<Picked<'_>> {
+        got.iter()
+            .map(|e| {
+                (
+                    e.task.task.title.as_str(),
+                    e.step.as_ref().map(|s| s.title.as_str()),
+                    e.planned_min,
+                    e.event_id,
+                    e.reason,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn candidates_open_on_the_block_current_or_next() {
+        let (conn, uid) = db_with_user();
+        let read = task(&conn, uid, "read", None);
+        let write = task(&conn, uid, "write", None);
+        let call = task(&conn, uid, "call", None);
+        let file = task(&conn, uid, "file", None);
+        let e_read = lay(&conn, uid, "2026-09-30", "09:00", "10:00", "pending", read);
+        let e_write = lay(&conn, uid, "2026-09-30", "11:30", "12:20", "fired", write);
+        let e_call = lay(&conn, uid, "2026-09-30", "14:00", "14:25", "snoozed", call);
+        lay(&conn, uid, "2026-09-30", "16:00", "16:45", "done", file);
+        lay(&conn, uid, "2026-09-30", "17:00", "17:45", "dropped", file);
+        let utc = jiff::tz::TimeZone::UTC;
+
+        let got = candidates(&conn, uid, &utc, at("2026-09-30T12:00:00Z"), 5).unwrap();
+        assert_eq!(
+            picked(&got),
+            vec![
+                ("write", None, Some(50), Some(e_write), "scheduled"),
+                ("call", None, Some(25), Some(e_call), "scheduled"),
+                ("read", None, Some(60), Some(e_read), "scheduled"),
+            ],
+            "the running block first, then the day ahead, then what is behind"
+        );
+
+        let two = candidates(&conn, uid, &utc, at("2026-09-30T12:00:00Z"), 2).unwrap();
+        assert_eq!(picked(&two).iter().map(|p| p.0).collect::<Vec<_>>(), vec!["write", "call"]);
+
+        let early = candidates(&conn, uid, &utc, at("2026-09-30T13:00:00Z"), 5).unwrap();
+        assert_eq!(early[0].task.task.title, "call", "between blocks, the next one leads");
+    }
+
+    #[test]
+    fn candidates_behind_the_clock_keep_time_order() {
+        let (conn, uid) = db_with_user();
+        let read = task(&conn, uid, "read", None);
+        let write = task(&conn, uid, "write", None);
+        lay(&conn, uid, "2026-09-30", "14:00", "15:00", "fired", write);
+        lay(&conn, uid, "2026-09-30", "09:00", "10:00", "pending", read);
+
+        let got = candidates(&conn, uid, &jiff::tz::TimeZone::UTC, at("2026-09-30T20:00:00Z"), 5).unwrap();
+        assert_eq!(picked(&got).iter().map(|p| p.0).collect::<Vec<_>>(), vec!["read", "write"]);
+    }
+
+    #[test]
+    fn candidates_skip_settled_work_and_repeat_blocks() {
+        let (conn, uid) = db_with_user();
+        let essay = task(&conn, uid, "essay", None);
+        let draft = task(&conn, uid, "draft", Some(essay));
+        let edit = task(&conn, uid, "edit", Some(essay));
+        let ticked = task(&conn, uid, "ticked", None);
+        let solo = task(&conn, uid, "solo", None);
+        conn.execute("UPDATE tasks SET state = 'done' WHERE id IN (?1, ?2)", (ticked, edit)).unwrap();
+        lay(&conn, uid, "2026-09-30", "13:00", "13:30", "pending", ticked);
+        let e_draft = lay(&conn, uid, "2026-09-30", "13:00", "13:45", "pending", draft);
+        let e_solo = lay(&conn, uid, "2026-09-30", "14:00", "14:30", "pending", solo);
+        lay(&conn, uid, "2026-09-30", "15:00", "15:30", "pending", solo);
+        lay(&conn, uid, "2026-09-30", "16:00", "16:20", "pending", edit);
+
+        let got = candidates(&conn, uid, &jiff::tz::TimeZone::UTC, at("2026-09-30T12:00:00Z"), 5).unwrap();
+        assert_eq!(
+            picked(&got),
+            vec![
+                ("essay", Some("draft"), Some(45), Some(e_draft), "scheduled"),
+                ("solo", None, Some(30), Some(e_solo), "scheduled"),
+            ]
+        );
+        assert_eq!(got[0].task.children.len(), 2, "a step's block still carries the whole task");
+    }
+
+    #[test]
+    fn candidates_follow_the_users_own_day_and_no_one_elses() {
+        let (conn, uid) = db_with_user();
+        let bo = crate::auth::create_user(&conn, "bo", "pw", false).unwrap();
+        let theirs = task(&conn, bo, "theirs", None);
+        let mine = task(&conn, uid, "mine", None);
+        lay(&conn, bo, "2026-10-01", "09:00", "10:00", "pending", theirs);
+        lay(&conn, uid, "2026-09-30", "09:00", "10:00", "pending", mine);
+        let tokyo = jiff::tz::TimeZone::fixed(jiff::tz::offset(9));
+        let morning = at("2026-09-30T23:30:00Z");
+
+        assert!(
+            candidates(&conn, uid, &tokyo, morning, 5).unwrap().is_empty(),
+            "08:30 in Tokyo is already 1 October, and bo's day is bo's"
+        );
+
+        lay(&conn, uid, "2026-10-01", "11:00", "12:00", "pending", theirs);
+        let e_mine = lay(&conn, uid, "2026-10-01", "09:00", "10:00", "pending", mine);
+        assert_eq!(
+            picked(&candidates(&conn, uid, &tokyo, morning, 5).unwrap()),
+            vec![("mine", None, Some(60), Some(e_mine), "scheduled")],
+            "another user's task linked into this plan is not a candidate"
+        );
     }
 }

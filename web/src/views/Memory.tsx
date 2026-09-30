@@ -12,18 +12,22 @@ import { Markdown } from '../markdown'
 import { flip, popOut, rise, settle } from '../motion-gsap'
 import { Overflow } from '../overflow'
 import '../styles/memory.css'
+import { InboxBar, InboxCard, InboxRows, useInbox } from './Inbox'
 import type { MemoryFact, MemoryHit } from '../types'
+import { t, type Key } from '../i18n'
+import * as format from '../i18n/format'
 
 // matches the stylesheet's master-detail breakpoint
 const SINGLE_PANE = '(max-width: 1087.98px)'
 const AUTO_OPEN_AFTER = 8
 
-type Filter = '' | 'semantic' | 'episodic'
+type Filter = '' | 'semantic' | 'episodic' | 'inbox'
 
-const FILTERS: { id: Filter; label: string }[] = [
-  { id: '', label: 'All' },
-  { id: 'semantic', label: 'Facts' },
-  { id: 'episodic', label: 'Episodes' },
+const FILTERS: { id: Filter; label: Key }[] = [
+  { id: '', label: 'memory.all' },
+  { id: 'semantic', label: 'memory.facts' },
+  { id: 'episodic', label: 'memory.episodes' },
+  { id: 'inbox', label: 'memory.inbox' },
 ]
 
 // An episode is written as "<date> · <thread title>: <what happened>"; the date has a
@@ -63,13 +67,7 @@ const unwrap = (value: string) =>
 
 function shortDate(iso: string): string {
   const at = new Date(iso)
-  if (Number.isNaN(at.getTime())) return ''
-  const sameYear = at.getFullYear() === new Date().getFullYear()
-  return at.toLocaleDateString(undefined, {
-    month: 'short',
-    day: 'numeric',
-    ...(sameYear ? {} : { year: 'numeric' }),
-  })
+  return Number.isNaN(at.getTime()) ? '' : format.day(at)
 }
 
 // Day boundaries, not elapsed hours: something saved at 00:30 still reads "today".
@@ -77,7 +75,7 @@ function factDate(iso: string): string {
   const at = new Date(iso)
   if (Number.isNaN(at.getTime())) return ''
   const midnight = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
-  return midnight(at) === midnight(new Date()) ? 'today' : shortDate(iso)
+  return midnight(at) === midnight(new Date()) ? t('memory.today') : shortDate(iso)
 }
 
 // The list endpoint has no dates, so the order settles as the rows read theirs back;
@@ -153,6 +151,9 @@ export function Memory({ notify, refresh, openTalk }: ViewProps) {
   const [fact, setFact] = useState<MemoryFact | null>(null)
 
   const facts = useFacts()
+  const inbox = useInbox(refresh, notify)
+  const onInbox = filter === 'inbox'
+  const { page: inboxPage, selected: inboxSelected, item: inboxItem, open: openItem, close: closeItem } = inbox
   const detail = useRef<HTMLDivElement>(null)
   const list = useRef<HTMLUListElement>(null)
   const card = useRef<HTMLElement>(null)
@@ -167,6 +168,7 @@ export function Memory({ notify, refresh, openTalk }: ViewProps) {
   }, [draft])
 
   const load = useCallback(() => {
+    if (filter === 'inbox') return
     const era = ++listEra.current
     setListFailed(false)
     api
@@ -177,7 +179,7 @@ export function Memory({ notify, refresh, openTalk }: ViewProps) {
       .catch(() => {
         if (era !== listEra.current) return
         setListFailed(true)
-        notify("Couldn't load memories. Try again.")
+        notify(t('memory.loadFailed'))
       })
   }, [query, filter, notify])
 
@@ -196,7 +198,7 @@ export function Memory({ notify, refresh, openTalk }: ViewProps) {
         })
         .catch(() => {
           if (era !== factEra.current) return
-          notify("Couldn't open that memory. Try again.")
+          notify(t('memory.openFailed'))
           setSelected(null)
         })
     },
@@ -208,43 +210,62 @@ export function Memory({ notify, refresh, openTalk }: ViewProps) {
   const head = items?.slice(0, AUTO_OPEN_AFTER) ?? []
   const dated = head.length > 0 && head.every((m) => facts.get(m.id) !== undefined)
   useEffect(() => {
-    if (selected !== null || !items || !dated || window.matchMedia(SINGLE_PANE).matches) return
+    if (filter === 'inbox' || selected !== null || !items || !dated) return
+    if (window.matchMedia(SINGLE_PANE).matches) return
     openFact(newestFirst(items, (id) => factCache.get(id))[0].id)
-  }, [items, dated, selected, openFact])
+  }, [filter, items, dated, selected, openFact])
+
+  useEffect(() => {
+    if (!onInbox || inboxSelected !== null || !inboxPage?.items.length) return
+    if (window.matchMedia(SINGLE_PANE).matches) return
+    openItem(inboxPage.items[0].id)
+  }, [onInbox, inboxSelected, inboxPage, openItem])
+
+  const shown = onInbox ? inboxSelected : selected
 
   // On the single-pane layout the detail replaces the list, so bring it into view.
   useEffect(() => {
-    if (selected === null) return
+    if (shown === null) return
     if (!window.matchMedia(SINGLE_PANE).matches) return
     detail.current?.scrollIntoView()
-  }, [selected])
+  }, [shown])
 
-  // Where the fact replaces the list it rises like a sheet; beside it, it settles.
+  // Where the detail replaces the list it rises like a sheet; beside it, it settles.
   useLayoutEffect(() => {
-    if (fact === null) return
+    if (fact === null && inboxItem === null) return
     rise(card.current, window.matchMedia(SINGLE_PANE).matches ? 28 : 14)
-  }, [fact])
+  }, [fact, inboxItem])
 
-  const closeFact = () => popOut(card.current, () => setSelected(null), true)
+  const closeDetail = () =>
+    popOut(card.current, () => (onInbox ? closeItem() : setSelected(null)), true)
 
+  const openMemory = (id: string) => {
+    setFilter('')
+    closeItem()
+    openFact(id)
+  }
+
+  const filters = inboxPage?.items.length ? FILTERS : FILTERS.filter((f) => f.id !== 'inbox')
   const count = items?.length ?? 0
 
   return (
-    <div className="memory" data-pane={selected === null ? 'list' : 'detail'}>
+    <div className="memory" data-pane={shown === null ? 'list' : 'detail'}>
       <div className="memory-side">
-        <div className="tellnote memory-search">
-          <input
-            type="search"
-            value={draft}
-            placeholder="Search what Note knows"
-            aria-label="Search what Note knows"
-            onChange={(e) => setDraft(e.target.value)}
-          />
-        </div>
-        {draft.trim() === '' && (
+        {!onInbox && (
+          <div className="tellnote memory-search">
+            <input
+              type="search"
+              value={draft}
+              placeholder={t('memory.search')}
+              aria-label={t('memory.search')}
+              onChange={(e) => setDraft(e.target.value)}
+            />
+          </div>
+        )}
+        {(onInbox || draft.trim() === '') && (
           <div className="memory-filter">
-            <div className="seg" role="group" aria-label="Show">
-              {FILTERS.map((f) => (
+            <div className="seg" role="group" aria-label={t('memory.show')}>
+              {filters.map((f) => (
                 <button
                   key={f.id || 'all'}
                   type="button"
@@ -253,23 +274,43 @@ export function Memory({ notify, refresh, openTalk }: ViewProps) {
                     setFilter(f.id)
                     setSelected(null)
                     setFact(null)
+                    closeItem()
                   }}
                 >
-                  {f.label}
+                  {t(f.label)}
                 </button>
               ))}
             </div>
           </div>
         )}
-        {listFailed ? (
+        {onInbox ? (
+          inboxPage && (
+            <>
+              {inboxPage.refresh && (
+                <InboxBar
+                  latest={inboxPage.latest}
+                  refreshing={inbox.refreshing}
+                  upToDate={inbox.upToDate}
+                  onRefresh={inbox.pull}
+                />
+              )}
+              <InboxRows rows={inboxPage.items} selected={inboxSelected} onOpen={openItem} />
+              {inbox.more && (
+                <button className="memory-link inbox-more" onClick={inbox.loadMore}>
+                  {t('inbox.more')}
+                </button>
+              )}
+            </>
+          )
+        ) : listFailed ? (
           <p className="memory-empty">
-            Couldn't load memories.{' '}
+            {t('memory.listFailed')}{' '}
             <button className="memory-link" onClick={load}>
-              Retry
+              {t('common.retry')}
             </button>
           </p>
         ) : items === null ? null : count === 0 ? (
-          <p className="memory-empty">{query ? 'Nothing matches.' : 'Nothing yet.'}</p>
+          <p className="memory-empty">{query ? t('memory.noMatch') : t('memory.empty')}</p>
         ) : (
           <ul className="memory-list" ref={list}>
             {newestFirst(items, facts.get).map((m) => (
@@ -287,17 +328,20 @@ export function Memory({ notify, refresh, openTalk }: ViewProps) {
         )}
       </div>
       <div className="memory-detail" ref={detail}>
-        {selected !== null && (
-          <button className="memory-back" onClick={closeFact}>
+        {shown !== null && (
+          <button className="memory-back" onClick={closeDetail}>
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <path d="M15 6l-6 6 6 6" />
             </svg>
-            Memory
+            {t('nav.memory')}
           </button>
         )}
-        {selected !== null && fact !== null && (
-          <FactBody fact={fact} openTalk={openTalk} cardRef={card} />
-        )}
+        {onInbox
+          ? inboxItem !== null && (
+              <InboxCard item={inboxItem} cardRef={card} onMemory={openMemory} />
+            )
+          : selected !== null &&
+            fact !== null && <FactBody fact={fact} openTalk={openTalk} cardRef={card} />}
       </div>
     </div>
   )
@@ -351,11 +395,11 @@ function MemoryRow({
         className="memory-more-wrap"
         row="li[data-mem]"
         trigger={false}
-        label={`More actions for ${displaySummary(hit)}`}
+        label={t('memory.moreFor', { name: displaySummary(hit) })}
         items={[
-          { label: 'Open', run: () => onOpen(hit.id) },
-          { label: 'Tell Note more', run: () => openTalk(`About "${hit.summary}": `) },
-          { label: "That's wrong", run: () => openTalk(`This is wrong: "${hit.summary}". `) },
+          { label: t('menu.open'), run: () => onOpen(hit.id) },
+          { label: t('memory.tellMore'), run: () => openTalk(t('memory.aboutDraft', { summary: hit.summary })) },
+          { label: t('memory.wrong'), run: () => openTalk(t('memory.wrongDraft', { summary: hit.summary })) },
         ]}
       />
     </li>
@@ -386,8 +430,8 @@ function FactBody({
     <article className="memory-card" ref={cardRef}>
       <h2 className="memory-title">{displaySummary(fact)}</h2>
       <p className="memory-meta">
-        From a chat on {shortDate(fact.created)}
-        {fact.archived && <span className="memory-flag">archived</span>}
+        {t('memory.from', { date: shortDate(fact.created) })}
+        {fact.archived && <span className="memory-flag">{t('memory.archived')}</span>}
       </p>
       {meta.length > 0 && (
         <div className="memory-facts">
@@ -414,12 +458,12 @@ function FactBody({
       <div className="memory-acts">
         <button
           className="btn-haze"
-          onClick={() => openTalk(`This is wrong: "${fact.summary}". `)}
+          onClick={() => openTalk(t('memory.wrongDraft', { summary: fact.summary }))}
         >
-          That's wrong
+          {t('memory.wrong')}
         </button>
-        <button className="memory-more" onClick={() => openTalk(`About "${fact.summary}": `)}>
-          Tell Note more
+        <button className="memory-more" onClick={() => openTalk(t('memory.aboutDraft', { summary: fact.summary }))}>
+          {t('memory.tellMore')}
         </button>
       </div>
     </article>

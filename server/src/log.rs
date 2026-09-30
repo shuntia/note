@@ -44,9 +44,7 @@ pub fn record_throttled(
         )
         .optional()?;
     if let Some(ts) = last.and_then(|s| s.parse::<jiff::Timestamp>().ok()) {
-        if (now - ts)
-            .total(jiff::Unit::Second)
-            .is_ok_and(|s| (0.0..(window_mins * 60) as f64).contains(&s))
+        if (0..window_mins * 60).contains(&(now.as_second() - ts.as_second()))
         {
             return Ok(false);
         }

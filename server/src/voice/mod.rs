@@ -90,7 +90,7 @@ impl Voice {
     pub async fn open_dm(&self, link_id: i64, mxid: &str) -> Result<String, Refusal> {
         match self.peer.request(Request::OpenDm { link_id, mxid: mxid.to_string() }).await? {
             Reply::Dm { room_id } => Ok(room_id),
-            other => Err(Refusal::new(RefusalCode::Failed, format!("unexpected reply {other:?}"))),
+            other @ Reply::Done => Err(Refusal::new(RefusalCode::Failed, format!("unexpected reply {other:?}"))),
         }
     }
 
@@ -316,12 +316,10 @@ impl Handler for NoteHandler {
     /// that was deleted are acknowledged and drained on the voice side.
     fn applied(&self, call_id: &str) -> u64 {
         crate::db_guard(&self.db)
-            .query_row("SELECT applied_seq FROM voice_calls WHERE id = ?1", [call_id], |r| r.get::<_, i64>(0))
-            .map(|n| n as u64)
-            .unwrap_or_else(|e| match e {
+            .query_row("SELECT applied_seq FROM voice_calls WHERE id = ?1", [call_id], |r| r.get::<_, i64>(0)).map_or_else(|e| match e {
                 rusqlite::Error::QueryReturnedNoRows => u64::MAX,
                 _ => 0,
-            })
+            }, |n| n as u64)
     }
 
     fn apply(&self, call_id: &str, seq: u64, body: CallBody) -> Result<(), String> {
@@ -527,10 +525,10 @@ mod tests {
         assert_eq!(stale, vec![(id.clone(), "starting".to_string())]);
         voice.handler.apply(&id, 1, CallBody::Ringing).unwrap();
         assert_eq!(voice.fail_stale(stale, now), 0);
-        let state: String = crate::db_guard(&voice.db)
+        let status: String = crate::db_guard(&voice.db)
             .query_row("SELECT state FROM voice_calls WHERE id = ?1", [&id], |r| r.get(0))
             .unwrap();
-        assert_eq!(state, "ringing");
+        assert_eq!(status, "ringing");
         settle().await;
         assert!(mock.seen().is_empty());
     }

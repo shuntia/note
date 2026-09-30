@@ -159,7 +159,7 @@ pub fn update(
     conn: &Connection,
     user_id: i64,
     goal_id: i64,
-    patch: GoalPatch,
+    patch: &GoalPatch,
 ) -> Result<Option<Goal>, UpdateError> {
     let title = patch.title.as_deref().map(checked_title).transpose()?;
     if let Some(d) = &patch.description {
@@ -258,7 +258,7 @@ mod tests {
             &conn,
             uid,
             done,
-            crate::tasks::TaskPatch { state: Some("done".into()), ..Default::default() },
+            &crate::tasks::TaskPatch { state: Some("done".into()), ..Default::default() },
         )
         .unwrap();
         task(&conn, uid, "unrelated", None, None);
@@ -289,7 +289,7 @@ mod tests {
         let undated = make("someday", None);
         let late = make("november", Some("2026-11-01T12:00:00Z"));
         let early = make("october", Some("2026-10-01T12:00:00Z"));
-        update(&conn, uid, late, GoalPatch { state: Some("done".into()), ..Default::default() })
+        update(&conn, uid, late, &GoalPatch { state: Some("done".into()), ..Default::default() })
             .unwrap();
 
         let ids = |state: Option<&str>| -> Vec<i64> {
@@ -316,7 +316,7 @@ mod tests {
         .unwrap();
 
         let after =
-            update(&conn, uid, goal.id, GoalPatch { title: Some("apply early".into()), ..Default::default() })
+            update(&conn, uid, goal.id, &GoalPatch { title: Some("apply early".into()), ..Default::default() })
                 .unwrap()
                 .unwrap();
         assert_eq!(after.title, "apply early");
@@ -324,11 +324,11 @@ mod tests {
         assert_eq!(after.due_at.as_deref(), Some("2026-11-01T12:00:00Z"));
 
         let after =
-            update(&conn, uid, goal.id, GoalPatch { due_at: Some(None), ..Default::default() })
+            update(&conn, uid, goal.id, &GoalPatch { due_at: Some(None), ..Default::default() })
                 .unwrap()
                 .unwrap();
         assert!(after.due_at.is_none());
-        assert!(update(&conn, uid, goal.id, GoalPatch { title: Some("  ".into()), ..Default::default() })
+        assert!(update(&conn, uid, goal.id, &GoalPatch { title: Some("  ".into()), ..Default::default() })
             .is_err());
     }
 
@@ -349,7 +349,7 @@ mod tests {
         let bo = crate::auth::create_user(&conn, "bo", "pw", false).unwrap();
         let theirs = create(&conn, bo, NewGoal { title: "theirs".into(), ..Default::default() }).unwrap();
         assert!(get(&conn, uid, theirs.id).unwrap().is_none());
-        assert!(update(&conn, uid, theirs.id, GoalPatch { title: Some("mine".into()), ..Default::default() })
+        assert!(update(&conn, uid, theirs.id, &GoalPatch { title: Some("mine".into()), ..Default::default() })
             .unwrap()
             .is_none());
         assert!(!delete(&conn, uid, theirs.id).unwrap());

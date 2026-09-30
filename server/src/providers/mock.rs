@@ -28,6 +28,7 @@ impl MockLLM {
     }
 
     /// One reasoning text per scripted round, in order.
+    #[must_use]
     pub fn thinking(self, texts: Vec<&str>) -> Self {
         *self.thinking.lock().unwrap() = texts.into_iter().map(String::from).collect();
         self
@@ -90,7 +91,9 @@ impl EmbeddingsProvider for MockEmbeddings {
                 }
                 let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
                 if norm > 0.0 {
-                    v.iter_mut().for_each(|x| *x /= norm);
+                    for x in &mut v {
+                        *x /= norm;
+                    }
                 }
                 v.to_vec()
             })

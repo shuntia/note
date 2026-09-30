@@ -143,7 +143,7 @@ pub fn day_mask(names: &[impl AsRef<str>]) -> Result<i64, CalendarError> {
 }
 
 fn weekday_bit(date: jiff::civil::Date) -> i64 {
-    1 << (date.weekday().to_monday_zero_offset() as i64)
+    1 << i64::from(date.weekday().to_monday_zero_offset())
 }
 
 fn blank_to_none(s: Option<String>) -> Option<String> {
@@ -160,7 +160,7 @@ fn checked_external_id(raw: &str) -> Result<String, CalendarError> {
     Ok(id.to_owned())
 }
 
-fn check_date(field: &str, value: &Option<String>) -> Result<(), CalendarError> {
+fn check_date(field: &str, value: Option<&str>) -> Result<(), CalendarError> {
     match value {
         Some(v) if v.parse::<jiff::civil::Date>().is_err() => {
             Err(invalid(format!("{field} must be YYYY-MM-DD, got {v:?}")))
@@ -203,9 +203,9 @@ fn validate(f: Fields) -> Result<Fields, CalendarError> {
     let on_date = blank_to_none(f.on_date);
     let from_date = blank_to_none(f.from_date);
     let until_date = blank_to_none(f.until_date);
-    check_date("on_date", &on_date)?;
-    check_date("from_date", &from_date)?;
-    check_date("until_date", &until_date)?;
+    check_date("on_date", on_date.as_deref())?;
+    check_date("from_date", from_date.as_deref())?;
+    check_date("until_date", until_date.as_deref())?;
     if days == 0 && on_date.is_none() {
         return Err(invalid(
             "an entry with no days needs on_date, the one day it happens",
@@ -263,12 +263,12 @@ fn holder(
 fn check_free(
     conn: &Connection,
     user_id: i64,
-    external_id: &Option<String>,
+    external_id: Option<&str>,
     except: Option<i64>,
 ) -> Result<(), CalendarError> {
     let Some(id) = external_id else { return Ok(()) };
     match holder(conn, user_id, id, except)? {
-        Some(entry_id) => Err(CalendarError::Duplicate { id: id.clone(), entry_id }),
+        Some(entry_id) => Err(CalendarError::Duplicate { id: id.to_string(), entry_id }),
         None => Ok(()),
     }
 }
@@ -334,7 +334,7 @@ pub fn list(conn: &Connection, user_id: i64) -> rusqlite::Result<Vec<Entry>> {
 
 pub fn create(conn: &Connection, user_id: i64, fields: Fields) -> Result<Entry, CalendarError> {
     let f = validate(fields)?;
-    check_free(conn, user_id, &f.external_id, None)?;
+    check_free(conn, user_id, f.external_id.as_deref(), None)?;
     let held: i64 = conn.query_row(
         "SELECT COUNT(*) FROM calendar_entries WHERE user_id = ?1",
         [user_id],
@@ -406,7 +406,7 @@ pub fn update(
         external_id: patch.external_id.or(cur.external_id),
     };
     let f = validate(f)?;
-    check_free(conn, user_id, &f.external_id, Some(id))?;
+    check_free(conn, user_id, f.external_id.as_deref(), Some(id))?;
     conn.execute(
         "UPDATE calendar_entries SET title = ?1, kind = ?2, quiet = ?3, start_time = ?4,
              end_time = ?5, days = ?6, on_date = ?7, from_date = ?8, until_date = ?9,
@@ -1021,7 +1021,7 @@ mod tests {
             1,
             e.id,
             Patch {
-                until_date: Some("".into()),
+                until_date: Some(String::new()),
                 ..Default::default()
             },
         )

@@ -192,7 +192,9 @@ async fn linking_opens_a_dm_and_settings_show_it() {
         note_voice_proto::Request::OpenDm { link_id, .. } => {
             Ok(note_voice_proto::Reply::Dm { room_id: format!("!dm{link_id}:t") })
         }
-        _ => Err(note_voice_proto::Refusal::new(note_voice_proto::RefusalCode::BadRequest, "no")),
+        note_voice_proto::Request::DmJoined { .. } => {
+            Err(note_voice_proto::Refusal::new(note_voice_proto::RefusalCode::BadRequest, "no"))
+        }
     });
     let (status, body) = call(&app, &cookie, "POST", "/api/voice/link", r#"{"mxid":"@aki:t"}"#).await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -262,7 +264,9 @@ async fn a_link_removed_while_the_invite_is_out_is_not_reported_invited() {
             links::remove(&db.lock().unwrap(), 1).unwrap();
             Ok(note_voice_proto::Reply::Dm { room_id: "!dm:t".into() })
         }
-        _ => Err(note_voice_proto::Refusal::new(note_voice_proto::RefusalCode::BadRequest, "no")),
+        note_voice_proto::Request::DmJoined { .. } => {
+            Err(note_voice_proto::Refusal::new(note_voice_proto::RefusalCode::BadRequest, "no"))
+        }
     });
     let (status, body) = call(&app, &cookie, "POST", "/api/voice/link", r#"{"mxid":"@aki:t"}"#).await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");

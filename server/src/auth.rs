@@ -167,12 +167,9 @@ pub fn stored_hash(conn: &Connection, user_id: i64) -> Result<Option<String>> {
 /// Verifies against the stored hash, or against a dummy hash when there is
 /// none, so every path pays the same argon2 cost. Runs with no lock held.
 pub fn verify_against(password: &str, hash: Option<&str>) -> bool {
-    match hash {
-        Some(h) => verify(password, h),
-        None => {
-            let _ = verify(password, dummy_hash());
-            false
-        }
+    if let Some(h) = hash { verify(password, h) } else {
+        let _ = verify(password, dummy_hash());
+        false
     }
 }
 
@@ -201,12 +198,9 @@ pub fn login(db: &Mutex<Connection>, username: &str, password: &str) -> Result<O
         )
         .optional()?
     };
-    let ok = match &row {
-        Some((_, hash, disabled)) => verify(password, hash) && !disabled,
-        None => {
-            let _ = verify(password, dummy_hash());
-            false
-        }
+    let ok = if let Some((_, hash, disabled)) = &row { verify(password, hash) && !disabled } else {
+        let _ = verify(password, dummy_hash());
+        false
     };
     if !ok {
         return Ok(None);
@@ -239,6 +233,8 @@ pub fn clear_cookie(secure: bool) -> String {
     c
 }
 
+/// A cookie session. A write through one stamps the user as present; a read
+/// does not, because an open page polls.
 #[derive(Debug, Clone)]
 pub struct CurrentUser {
     pub id: i64,
@@ -273,8 +269,12 @@ impl FromRequestParts<AppState> for CurrentUser {
             return Err(StatusCode::UNAUTHORIZED);
         };
         let expires: jiff::Timestamp = expires_at.parse().map_err(|_| StatusCode::UNAUTHORIZED)?;
-        if disabled || expires < jiff::Timestamp::now() {
+        let now = jiff::Timestamp::now();
+        if disabled || expires < now {
             return Err(StatusCode::UNAUTHORIZED);
+        }
+        if !parts.method.is_safe() {
+            let _ = crate::presence::touch(&conn, id, now);
         }
         Ok(CurrentUser {
             id,
@@ -525,16 +525,17 @@ mod tests {
 
     #[tokio::test]
     async fn a_share_principal_resolves_a_live_link_and_404s_the_rest() {
+        use tower::ServiceExt;
         let tmp = tempfile::tempdir().unwrap();
         let conn = crate::db::open_memory().unwrap();
         create_user(&conn, "aki", "pw", false).unwrap();
         let share = crate::shares::create(
             &conn,
             1,
-            crate::shares::NewShare {
+            &crate::shares::NewShare {
                 name: "Mom".into(),
                 brief: String::new(),
-                scope: Default::default(),
+                scope: crate::shares::ShareScope::default(),
                 expires_at: jiff::Timestamp::now() + jiff::Span::new().hours(24),
             },
             jiff::Timestamp::now(),
@@ -545,7 +546,6 @@ mod tests {
         let app = axum::Router::new()
             .route("/api/share/{token}", axum::routing::get(|p: SharePrincipal| async move { p.owner_username }))
             .with_state(state.clone());
-        use tower::ServiceExt;
         let ok = app.clone().oneshot(axum::http::Request::get(format!("/api/share/{}", share.token)).body(axum::body::Body::empty()).unwrap()).await.unwrap();
         assert_eq!(ok.status(), StatusCode::OK);
         let miss = app.clone().oneshot(axum::http::Request::get("/api/share/share_nope").body(axum::body::Body::empty()).unwrap()).await.unwrap();

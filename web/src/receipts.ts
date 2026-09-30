@@ -201,6 +201,36 @@ const TABLE: Record<string, Receipt> = {
     failed: "Couldn't update those tasks",
   },
 
+  note_add: {
+    doing: 'Adding a note',
+    done: (a) => {
+      const text = str(a, 'text')
+      return text ? `Noted ${quoted(text)}` : 'Added a note'
+    },
+    failed: "Couldn't add that note",
+  },
+  note_update: {
+    doing: 'Updating a note',
+    done: (a) => {
+      const pinned = flag(a, 'pinned')
+      if (pinned === true) return 'Pinned a note'
+      if (pinned === false) return 'Unpinned a note'
+      const text = str(a, 'text')
+      return text ? `Changed a note to ${quoted(text)}` : 'Updated a note'
+    },
+    failed: "Couldn't update that note",
+  },
+  note_done: {
+    doing: 'Checking off a note',
+    done: 'Checked off a note',
+    failed: "Couldn't check off that note",
+  },
+  note_list: {
+    doing: 'Reading your notes',
+    done: 'Read your notes',
+    failed: "Couldn't read your notes",
+  },
+
   plan_tasks: {
     doing: 'Laying tasks onto the day',
     done: (a) => {

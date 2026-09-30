@@ -4,6 +4,7 @@ pub mod goal_ops;
 pub mod harvest_ops;
 pub mod inbox_ops;
 pub mod memory_ops;
+pub mod note_ops;
 pub mod outreach_ops;
 pub mod plan_ops;
 pub mod review_ops;
@@ -208,7 +209,7 @@ pub fn prepare(
                                 .iter()
                                 .enumerate()
                                 .map(|(i, _)| vs.get(i).cloned())
-                                .collect()
+                                .collect();
                         }
                         Err(e) => out.error = Some(e.to_string()),
                     }
@@ -248,6 +249,7 @@ const TASK_WRITE: &[&str] = &["task_create", "task_update", "task_split", "task_
 const TASK_BULK: &[&str] = &["task_bulk_update"];
 const GOALS_WRITE: &[&str] = &["goal_create", "goal_update"];
 const GOALS_READ: &[&str] = &["goal_list"];
+const NOTES: &[&str] = &["note_add", "note_update", "note_done", "note_list"];
 const PLAN_READ: &[&str] = &["plan_list"];
 const PLAN_LAY: &[&str] = &["plan_tasks", "plan_auto"];
 /// Moving the rest of a day to the next is the user's call, so it lives only
@@ -286,6 +288,7 @@ const DOMAINS: &[&[&str]] = &[
     TASK_BULK,
     GOALS_WRITE,
     GOALS_READ,
+    NOTES,
     PLAN_READ,
     PLAN_LAY,
     PLAN_CARRY,
@@ -340,6 +343,7 @@ const CHECKIN: &[&str] = registry_of![
     TASK_WRITE,
     GOALS_WRITE,
     GOALS_READ,
+    NOTES,
     PLAN_READ,
     PLAN_CARRY,
     SCHEDULE,
@@ -358,6 +362,7 @@ const TALK: &[&str] = registry_of![
     TASK_BULK,
     GOALS_WRITE,
     GOALS_READ,
+    NOTES,
     PLAN_READ,
     PLAN_LAY,
     PLAN_CARRY,
@@ -378,6 +383,7 @@ const NIGHTLY: &[&str] = registry_of![
     TASK_BULK,
     GOALS_WRITE,
     GOALS_READ,
+    NOTES,
     PLAN_READ,
     PLAN_LAY,
     SCHEDULE,
@@ -391,7 +397,7 @@ const NIGHTLY: &[&str] = registry_of![
     BATCH,
 ];
 const TRIGGER: &[&str] =
-    registry_of![MEMORY_READ, TASK_READ, PLAN_READ, PLAN_CARRY, TRIGGERS, BATCH, SPEAK];
+    registry_of![MEMORY_READ, TASK_READ, NOTES, PLAN_READ, PLAN_CARRY, TRIGGERS, BATCH, SPEAK];
 const IMPORT: &[&str] = registry_of![BRIEF];
 const INBOX: &[&str] = registry_of![MEMORY_READ, DECIDE];
 const SUMMARIZE: &[&str] = registry_of![SUMMARY];
@@ -618,6 +624,25 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
              how to check a goal's remaining tasks against its date.",
             schema::<goal_ops::ListArgs>(),
         ),
+        "note_add" => (
+            "Put a quick thing to keep in mind on the user's notes: one line, no size, no plan \
+             — buy milk, call the bank back. Anything with a size or a deadline is a task \
+             instead.",
+            schema::<note_ops::AddArgs>(),
+        ),
+        "note_update" => (
+            "Reword a note or pin it. A pinned note is never nudged about.",
+            schema::<note_ops::UpdateArgs>(),
+        ),
+        "note_done" => (
+            "Check a note off once it is handled. It stays a week for undo, then goes.",
+            schema::<note_ops::DoneArgs>(),
+        ),
+        "note_list" => (
+            "Read the user's open notes, pinned first, each with when it was added and when \
+             it was last nudged about.",
+            schema::<note_ops::ListArgs>(),
+        ),
         "plan_tasks" => (
             "Lay tasks out as consecutive blocks of time on one day's plan — this is how \
              \"schedule these tasks for tomorrow morning\" is done. Each block runs as long as \
@@ -807,45 +832,49 @@ fn run(
         "task_update" => task_ops::update(conn, ctx, parse(raw)?),
         "task_split" => task_ops::split(conn, ctx, parse(raw)?),
         "task_brief" => task_ops::brief(conn, ctx, parse(raw)?),
-        "task_delete" => task_ops::delete(conn, ctx, parse(raw)?),
+        "task_delete" => task_ops::delete(conn, ctx, &parse(raw)?),
         "inbox_decide" => inbox_ops::decide(conn, ctx, parse(raw)?),
-        "memory_query" => memory_ops::query(conn, ctx, parse(raw)?),
-        "memory_read" => memory_ops::read(conn, ctx, parse(raw)?),
-        "memory_write" => memory_ops::write(conn, ctx, parse(raw)?),
-        "summary_write" => summary_ops::write(conn, ctx, parse(raw)?),
-        "harvest_done" => harvest_ops::done(conn, ctx, parse(raw)?),
-        "review_write" => review_ops::write(conn, ctx, parse(raw)?),
+        "memory_query" => memory_ops::query(conn, ctx, &parse(raw)?),
+        "memory_read" => memory_ops::read(conn, ctx, &parse(raw)?),
+        "memory_write" => memory_ops::write(conn, ctx, &parse(raw)?),
+        "summary_write" => summary_ops::write(conn, ctx, &parse(raw)?),
+        "harvest_done" => harvest_ops::done(conn, ctx, &parse(raw)?),
+        "review_write" => review_ops::write(conn, ctx, &parse(raw)?),
         "context_edit" => context_ops::edit(conn, ctx, parse(raw)?),
-        "schedule_slide" => schedule_ops::slide(conn, ctx, parse(raw)?),
-        "schedule_snooze" => schedule_ops::snooze(conn, ctx, parse(raw)?),
-        "schedule_drop" => schedule_ops::drop_event(conn, ctx, parse(raw)?),
+        "schedule_slide" => schedule_ops::slide(conn, ctx, &parse(raw)?),
+        "schedule_snooze" => schedule_ops::snooze(conn, ctx, &parse(raw)?),
+        "schedule_drop" => schedule_ops::drop_event(conn, ctx, &parse(raw)?),
         "schedule_reshape" => schedule_ops::reshape(conn, ctx, parse(raw)?),
-        "schedule_insert" => schedule_ops::insert(conn, ctx, parse(raw)?),
-        "notify_send" => outreach_ops::send(conn, ctx, parse(raw)?),
-        "nightly_notes_write" => context_ops::nightly_notes_write(conn, ctx, parse(raw)?),
-        "task_list" => task_query::list(conn, ctx, parse(raw)?),
-        "task_search" => task_query::search(conn, ctx, parse(raw)?),
-        "task_read" => task_query::read(conn, ctx, parse(raw)?),
-        "task_bulk_update" => task_query::bulk_update(conn, ctx, parse(raw)?),
+        "schedule_insert" => schedule_ops::insert(conn, ctx, &parse(raw)?),
+        "notify_send" => outreach_ops::send(conn, ctx, &parse(raw)?),
+        "nightly_notes_write" => context_ops::nightly_notes_write(conn, ctx, &parse(raw)?),
+        "task_list" => task_query::list(conn, ctx, &parse(raw)?),
+        "task_search" => task_query::search(conn, ctx, &parse(raw)?),
+        "task_read" => task_query::read(conn, ctx, &parse(raw)?),
+        "task_bulk_update" => task_query::bulk_update(conn, ctx, &parse(raw)?),
         "goal_create" => goal_ops::create(conn, ctx, parse(raw)?),
         "goal_update" => goal_ops::update(conn, ctx, parse(raw)?),
-        "goal_list" => goal_ops::list(conn, ctx, parse(raw)?),
-        "plan_tasks" => plan_ops::plan_tasks(conn, ctx, parse(raw)?),
+        "goal_list" => goal_ops::list(conn, ctx, &parse(raw)?),
+        "note_add" => note_ops::add(conn, ctx, parse(raw)?),
+        "note_update" => note_ops::update(conn, ctx, parse(raw)?),
+        "note_done" => note_ops::done(conn, ctx, &parse(raw)?),
+        "note_list" => note_ops::list(conn, ctx, parse(raw)?),
+        "plan_tasks" => plan_ops::plan_tasks(conn, ctx, &parse(raw)?),
         "plan_auto" => plan_ops::plan_auto(conn, ctx, parse(raw)?),
         "plan_carry" => plan_ops::plan_carry(conn, ctx, parse(raw)?),
         "plan_list" => plan_ops::plan_list(conn, ctx, parse(raw)?),
-        "calendar_list" => calendar_ops::list(conn, ctx, parse(raw)?),
+        "calendar_list" => calendar_ops::list(conn, ctx, &parse(raw)?),
         "calendar_add" => calendar_ops::add(conn, ctx, parse(raw)?),
         "calendar_update" => calendar_ops::update(conn, ctx, parse(raw)?),
-        "calendar_remove" => calendar_ops::remove(conn, ctx, parse(raw)?),
-        "calendar_skip" => calendar_ops::skip(conn, ctx, parse(raw)?),
-        "trigger_set" => trigger_ops::set(conn, ctx, kind, parse(raw)?),
-        "wait_until" => trigger_ops::wait_until(conn, ctx, kind, parse(raw)?),
-        "wait_for" => trigger_ops::wait_for(conn, ctx, kind, parse(raw)?),
-        "trigger_budget" => trigger_ops::budget(conn, ctx, parse(raw)?),
-        "say" => trigger_ops::say(conn, ctx, parse(raw)?),
-        "stay_quiet" => trigger_ops::stay_quiet(conn, ctx, parse(raw)?),
-        "share_note" => share_ops::note(conn, ctx, parse(raw)?),
+        "calendar_remove" => calendar_ops::remove(conn, ctx, &parse(raw)?),
+        "calendar_skip" => calendar_ops::skip(conn, ctx, &parse(raw)?),
+        "trigger_set" => trigger_ops::set(conn, ctx, kind, &parse(raw)?),
+        "wait_until" => trigger_ops::wait_until(conn, ctx, kind, &parse(raw)?),
+        "wait_for" => trigger_ops::wait_for(conn, ctx, kind, &parse(raw)?),
+        "trigger_budget" => trigger_ops::budget(conn, ctx, &parse(raw)?),
+        "say" => trigger_ops::say(conn, ctx, &parse(raw)?),
+        "stay_quiet" => trigger_ops::stay_quiet(conn, ctx, &parse(raw)?),
+        "share_note" => share_ops::note(conn, ctx, &parse(raw)?),
         // Both run in the session around this dispatch: one reaches the
         // network, the other expands into calls of its own.
         "web_search" | "batch" => {
@@ -870,7 +899,7 @@ mod tests {
         (conn, tempfile::tempdir().unwrap())
     }
 
-    fn ctx<'a>(tmp: &'a tempfile::TempDir) -> ToolCtx<'a> {
+    fn ctx(tmp: &tempfile::TempDir) -> ToolCtx<'_> {
         ToolCtx { config_dir: tmp.path(), data_dir: tmp.path(), user_id: 1, username: "aki", vectors: PreparedVectors::default(), task_scope: None, inbox_source: None, memory_source: None, share: None, share_thread: None }
     }
 
@@ -1148,6 +1177,12 @@ mod tests {
 
     #[test]
     fn prepare_embeds_only_memory_tools_and_reports_failures() {
+        struct FailingEmb;
+        impl crate::providers::EmbeddingsProvider for FailingEmb {
+            fn embed(&self, _: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+                anyhow::bail!("endpoint down")
+            }
+        }
         use crate::providers::mock::MockEmbeddings;
         let emb = MockEmbeddings;
 
@@ -1169,12 +1204,6 @@ mod tests {
         let v = prepare(None, "memory_query", r#"{"query":"abba"}"#);
         assert!(v.query.is_none());
 
-        struct FailingEmb;
-        impl crate::providers::EmbeddingsProvider for FailingEmb {
-            fn embed(&self, _: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
-                anyhow::bail!("endpoint down")
-            }
-        }
         let v = prepare(Some(&FailingEmb), "memory_query", r#"{"query":"abba"}"#);
         assert!(v.query.is_none());
         assert!(v.error.as_deref().unwrap_or("").contains("endpoint down"));
@@ -1375,7 +1404,7 @@ mod tests {
         assert!(!is_terminal(SessionKind::Talk, "task_update"));
     }
 
-    fn scoped<'a>(tmp: &'a tempfile::TempDir, task_id: i64) -> ToolCtx<'a> {
+    fn scoped(tmp: &tempfile::TempDir, task_id: i64) -> ToolCtx<'_> {
         ToolCtx { task_scope: Some(task_id), ..ctx(tmp) }
     }
 
@@ -1575,7 +1604,7 @@ mod tests {
             scope: crate::shares::ShareScope::default(),
             expires_at: now + jiff::Span::new().hours(24),
         };
-        let share = crate::shares::create(&conn, 1, new, now, &crate::shares::Limits::default()).unwrap();
+        let share = crate::shares::create(&conn, 1, &new, now, &crate::shares::Limits::default()).unwrap();
         let thread = crate::shares::new_thread(&conn, share.id, "v1", now).unwrap();
         let scope = crate::shares::ShareScope { notes: true, ..Default::default() };
         let sctx = ToolCtx { share: Some(scope), share_thread: Some(thread), ..ctx(&tmp) };

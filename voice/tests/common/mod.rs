@@ -141,7 +141,7 @@ pub async fn homeserver() -> (String, SharedHs) {
     (base, hs)
 }
 
-pub fn joined_room(room: &str, events: Vec<Value>) -> Value {
+pub fn joined_room(room: &str, events: &[Value]) -> Value {
     json!({ "rooms": { "join": { room: { "timeline": { "events": events }, "state": { "events": [] } } } } })
 }
 
@@ -202,7 +202,7 @@ impl Handler for HeldNote {
     }
 
     fn acked(&self, call_id: &str, upto: u64) {
-        self.rec.acked(call_id, upto)
+        self.rec.acked(call_id, upto);
     }
 }
 

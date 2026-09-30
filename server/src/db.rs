@@ -629,6 +629,51 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (call_id, op_key)
     );
     ",
+    // v43
+    "
+    CREATE TABLE inbox_items (
+        id INTEGER PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id),
+        source_id TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('announcement','material')),
+        title TEXT NOT NULL,
+        body TEXT NOT NULL,
+        received_at TEXT NOT NULL,
+        outcome TEXT CHECK (outcome IN ('remembered','nothing','task')),
+        reason TEXT,
+        decided_at TEXT,
+        UNIQUE (user_id, source_id)
+    );
+    CREATE INDEX idx_inbox_items_recent ON inbox_items(user_id, received_at DESC, id DESC);
+    ",
+    // v44
+    "
+    CREATE TABLE notes (
+        id INTEGER PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id),
+        text TEXT NOT NULL CHECK (length(text) BETWEEN 1 AND 200),
+        pinned INTEGER NOT NULL DEFAULT 0 CHECK (pinned IN (0, 1)),
+        created_at TEXT NOT NULL,
+        done_at TEXT,
+        last_nudged_at TEXT
+    );
+    CREATE INDEX idx_notes_user ON notes(user_id, done_at);
+    ",
+    // v45
+    "
+    ALTER TABLE users ADD COLUMN last_active_at TEXT;
+    ALTER TABLE events ADD COLUMN origin_next TEXT NOT NULL DEFAULT 'template'
+        CHECK (origin_next IN ('template','agent','auto','user','idle'));
+    UPDATE events SET origin_next = origin;
+    ALTER TABLE events DROP COLUMN origin;
+    ALTER TABLE events RENAME COLUMN origin_next TO origin;
+    ALTER TABLE events ADD COLUMN cancel_if_next TEXT
+        CHECK (cancel_if_next IS NULL
+               OR cancel_if_next IN ('replied','task_done','event_decided','active'));
+    UPDATE events SET cancel_if_next = cancel_if;
+    ALTER TABLE events DROP COLUMN cancel_if;
+    ALTER TABLE events RENAME COLUMN cancel_if_next TO cancel_if;
+    ",
 ];
 
 pub fn open(path: &Path) -> Result<Connection> {
@@ -651,17 +696,17 @@ fn init(conn: &Connection) -> Result<()> {
 /// Each step and its `user_version` bump commit atomically, so a failure
 /// partway through a step leaves the database exactly at the previous version.
 fn apply_migrations(conn: &Connection, migrations: &[&str]) -> Result<()> {
-    let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    if version as usize > migrations.len() {
+    let version = usize::try_from(conn.query_row::<i64, _, _>("PRAGMA user_version", [], |r| r.get(0))?)?;
+    if version > migrations.len() {
         anyhow::bail!(
             "database schema version {version} is newer than this binary supports ({})",
             migrations.len()
         );
     }
-    for (i, sql) in migrations.iter().enumerate().skip(version as usize) {
+    for (i, sql) in migrations.iter().enumerate().skip(version) {
         let tx = conn.unchecked_transaction()?;
         tx.execute_batch(sql)?;
-        tx.pragma_update(None, "user_version", (i + 1) as i64)?;
+        tx.pragma_update(None, "user_version", i64::try_from(i + 1)?)?;
         tx.commit()?;
     }
     Ok(())
@@ -1797,5 +1842,90 @@ mod tests {
         .unwrap();
         let id: i64 = conn.query_row("SELECT id FROM voice_links", [], |r| r.get(0)).unwrap();
         assert_eq!(id, 2, "a relink never reuses an unlinked id");
+    }
+    #[test]
+    fn inbox_items_hold_one_row_per_source_and_check_their_words() {
+        let conn = open_memory().unwrap();
+        conn.execute("INSERT INTO users (username, pass_hash, role) VALUES ('a','h','member')", [])
+            .unwrap();
+        let insert = |source: &str, kind: &str, outcome: Option<&str>| {
+            conn.execute(
+                "INSERT INTO inbox_items (user_id, source_id, kind, title, body, received_at, outcome)
+                 VALUES (1, ?1, ?2, 't', 'b', '2026-09-30T00:00:00.000000Z', ?3)",
+                (source, kind, outcome),
+            )
+        };
+        insert("s1", "announcement", None).unwrap();
+        insert("s2", "material", Some("task")).unwrap();
+        assert!(insert("s1", "material", None).is_err(), "a source is one row");
+        assert!(insert("s3", "gossip", None).is_err());
+        assert!(insert("s4", "material", Some("maybe")).is_err());
+    }
+    #[test]
+    fn notes_hold_one_line_of_text_and_a_pinned_flag() {
+        let conn = open_memory().unwrap();
+        conn.execute("INSERT INTO users (username, pass_hash, role) VALUES ('a','h','member')", [])
+            .unwrap();
+        let insert = |text: &str, pinned: i64| {
+            conn.execute(
+                "INSERT INTO notes (user_id, text, pinned, created_at)
+                 VALUES (1, ?1, ?2, '2026-09-30T12:00:00Z')",
+                (text, pinned),
+            )
+        };
+        insert("milk", 0).unwrap();
+        insert(&"あ".repeat(200), 1).unwrap();
+        assert!(insert("", 0).is_err());
+        assert!(insert(&"あ".repeat(201), 0).is_err());
+        assert!(insert("milk", 2).is_err());
+        let (pinned, done, nudged): (i64, Option<String>, Option<String>) = conn
+            .query_row("SELECT pinned, done_at, last_nudged_at FROM notes WHERE id = 1", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .unwrap();
+        assert_eq!((pinned, done, nudged), (0, None, None));
+    }
+    #[test]
+    fn the_idle_migration_opens_origin_and_cancel_if_and_keeps_every_row() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        apply_migrations(&conn, &MIGRATIONS[..MIGRATIONS.len() - 1]).unwrap();
+        conn.execute_batch(
+            "INSERT INTO users (username, pass_hash, role) VALUES ('a','h','member');
+             INSERT INTO plans (user_id, date, created_at) VALUES (1, '2026-09-30', 'x');
+             INSERT INTO events (plan_id, kind, wall_time, origin, cancel_if)
+                 VALUES (1, 'trigger', '10:00', 'agent', 'replied');
+             INSERT INTO event_tasks (event_id, task_id)
+                 SELECT 1, id FROM tasks WHERE 0;",
+        )
+        .unwrap();
+        apply_migrations(&conn, MIGRATIONS).unwrap();
+
+        let kept: (String, Option<String>) = conn
+            .query_row("SELECT origin, cancel_if FROM events WHERE id = 1", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(kept, ("agent".to_string(), Some("replied".to_string())));
+        conn.execute("UPDATE events SET origin = 'idle', cancel_if = 'active' WHERE id = 1", [])
+            .unwrap();
+        assert!(
+            conn.execute("UPDATE events SET origin = 'somewhere' WHERE id = 1", []).is_err(),
+            "origin is still a closed set"
+        );
+        assert!(
+            conn.execute("UPDATE events SET cancel_if = 'whenever' WHERE id = 1", []).is_err(),
+            "the cancel rule is still a closed set"
+        );
+        let fresh: String = {
+            conn.execute("INSERT INTO events (plan_id, kind, wall_time) VALUES (1, 'nudge', '11:00')", [])
+                .unwrap();
+            conn.query_row("SELECT origin FROM events WHERE id = 2", [], |r| r.get(0)).unwrap()
+        };
+        assert_eq!(fresh, "template");
+        let seen: Option<String> = conn
+            .query_row("SELECT last_active_at FROM users WHERE id = 1", [], |r| r.get(0))
+            .unwrap();
+        assert!(seen.is_none());
     }
 }

@@ -2,6 +2,7 @@ use crate::agent::SessionDeps;
 use crate::tools::SessionKind;
 use anyhow::Result;
 use rusqlite::Connection;
+use std::fmt::Write as _;
 
 /// What one night's reading is allowed to cost: the newest conversations, up
 /// to a digest the model can hold in one prompt.
@@ -201,15 +202,13 @@ fn episodes(
     let mut out = Vec::with_capacity(rows.len());
     for (id, title, summary, updated_at, checkin, via) in rows {
         let day = updated_at
-            .parse::<jiff::Timestamp>()
-            .map(|ts| ts.to_zoned(tz.clone()).date().to_string())
-            .unwrap_or_else(|_| updated_at.clone());
+            .parse::<jiff::Timestamp>().map_or_else(|_| updated_at.clone(), |ts| ts.to_zoned(tz.clone()).date().to_string());
         let kind = thread_kind(conn, id, checkin, &via);
         let mut body = format!("{}\n\nThread: {title} ({kind}, {day}).", summary.trim());
         let touched = tasks_touched(conn, id);
         if !touched.is_empty() {
             let ids: Vec<String> = touched.iter().map(i64::to_string).collect();
-            body.push_str(&format!(" Tasks touched: {}.", ids.join(", ")));
+            let _ = write!(body, " Tasks touched: {}.", ids.join(", "));
         }
         out.push(Episode {
             conversation_id: id,
@@ -259,16 +258,7 @@ fn remember(
     let conn = crate::db_guard(deps.db);
     let mut lines = Vec::with_capacity(episodes.len());
     for (i, e) in episodes.iter().enumerate() {
-        let id = crate::memory::add_until(
-            &conn,
-            deps.data_dir,
-            username,
-            "episodic",
-            &e.summary,
-            &e.body,
-            until.as_deref(),
-            vectors.get(i).and_then(|v| v.as_deref()),
-        )?;
+        let id = crate::memory::add_until(&conn, deps.data_dir, username, &crate::memory::Fact { category: "episodic", summary: &e.summary, body: &e.body, until: until.as_deref() }, vectors.get(i).and_then(|v| v.as_deref()))?;
         for source in [format!("harvest:{date}"), format!("conversation:{}", e.conversation_id)] {
             conn.execute(
                 "INSERT OR IGNORE INTO memory_sources (user_id, source_id, memory_id)
@@ -324,10 +314,11 @@ pub fn run_for_user(
         let conn = crate::db_guard(deps.db);
         let mut digest = digest(&conn, user_id, tz, now)?;
         if !kept.is_empty() {
-            digest.push_str(&format!(
+            let _ = write!(
+                digest,
                 "\n\n## Tonight's episodic entries\n{}",
                 kept.join("\n")
-            ));
+            );
         }
         digest.trim().to_string()
     };
@@ -497,7 +488,7 @@ mod tests {
 
         for i in 0..14 {
             let id = crate::talk::create(&conn, 1, &format!("t{i}"), now()).unwrap();
-            talk(&conn, id, "user", "something", &format!("2026-09-17T{:02}:00:00Z", i));
+            talk(&conn, id, "user", "something", &format!("2026-09-17T{i:02}:00:00Z"));
         }
         let out = digest(&conn, 1, &tokyo(), now()).unwrap();
         assert_eq!(out.matches("## t").count(), MAX_CONVERSATIONS);

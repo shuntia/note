@@ -114,16 +114,7 @@ pub fn decide(
     let superseded = supersede_source(conn, ctx, scope)?;
     let mut memory_ids = Vec::with_capacity(facts.len());
     for (i, f) in facts.iter().enumerate() {
-        let id = crate::memory::add_until(
-            conn,
-            ctx.data_dir,
-            ctx.username,
-            "semantic",
-            &f.summary,
-            &f.body,
-            f.until.as_deref(),
-            ctx.vectors.facts.get(i).and_then(|v| v.as_deref()),
-        )
+        let id = crate::memory::add_until(conn, ctx.data_dir, ctx.username, &crate::memory::Fact { category: "semantic", summary: &f.summary, body: &f.body, until: f.until.as_deref() }, ctx.vectors.facts.get(i).and_then(|v| v.as_deref()))
         .map_err(|e| ToolError::internal(e.to_string()))?;
         conn.execute(
             "INSERT INTO memory_sources (user_id, source_id, memory_id) VALUES (?1, ?2, ?3)",
@@ -132,6 +123,15 @@ pub fn decide(
         .map_err(|e| ToolError::internal(e.to_string()))?;
         memory_ids.push(id);
     }
+    crate::inbox::record_decision(
+        conn,
+        ctx.user_id,
+        scope,
+        args.outcome.as_str(),
+        reason,
+        jiff::Timestamp::now(),
+    )
+    .map_err(|e| ToolError::internal(e.to_string()))?;
     Ok(serde_json::json!({
         "outcome": args.outcome.as_str(),
         "reason": reason,
@@ -319,7 +319,7 @@ mod tests {
             // eleven facts
             format!(
                 r#"{{"source_id":"s1","outcome":"remembered","reason":"r","facts":[{}]}}"#,
-                vec![r#"{"summary":"s","body":"b"}"#; 11].join(",")
+                [r#"{"summary":"s","body":"b"}"#; 11].join(",")
             ),
             // nothing / task with facts
             r#"{"source_id":"s1","outcome":"nothing","reason":"r","facts":[{"summary":"s","body":"b"}]}"#.to_string(),
@@ -399,7 +399,7 @@ mod tests {
             TWO_FACTS,
         );
         assert_eq!(vectors.facts.len(), 2);
-        assert!(vectors.facts.iter().all(|v| v.is_some()));
+        assert!(vectors.facts.iter().all(std::option::Option::is_some));
         assert_ne!(vectors.facts[0], vectors.facts[1]);
 
         let mut c = ctx(&tmp, "s1");
@@ -422,5 +422,30 @@ mod tests {
         let stored: Vec<f32> =
             stored.chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect();
         assert_eq!(stored, want[0]);
+    }
+    #[test]
+    fn the_decision_is_recorded_on_the_inbox_row() {
+        let (conn, tmp) = env();
+        let now = jiff::Timestamp::now();
+        crate::inbox::upsert(&conn, 1, "s1", "announcement", "Quiz Friday", now).unwrap();
+        decide(&conn, &tmp, "s1", TWO_FACTS).unwrap();
+        let (outcome, reason, decided): (Option<String>, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT outcome, reason, decided_at FROM inbox_items WHERE user_id = 1 AND source_id = 's1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(outcome.as_deref(), Some("remembered"));
+        assert_eq!(reason.as_deref(), Some("quiz and rule"));
+        assert!(decided.unwrap() >= crate::inbox::stamp(now));
+
+        // a rejected call leaves the row as it was
+        crate::inbox::upsert(&conn, 1, "s1", "announcement", "Quiz moved", now).unwrap();
+        decide(&conn, &tmp, "s1", r#"{"source_id":"s1","outcome":"nothing","reason":"  "}"#).unwrap_err();
+        let outcome: Option<String> = conn
+            .query_row("SELECT outcome FROM inbox_items WHERE source_id = 's1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(outcome, None);
     }
 }

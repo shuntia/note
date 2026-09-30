@@ -15,11 +15,15 @@ import type {
   FlattenResult,
   Goal,
   GoalState,
+  InboxItem,
+  InboxPage,
   InspectUser,
   Me,
   MemoryFact,
   MemoryHit,
   NewStep,
+  Note,
+  NotePatch,
   PlanEvent,
   QueueEntry,
   Passkey,
@@ -67,6 +71,7 @@ const WRITABLE_SETTINGS = [
   'timezone_auto',
   'nightly_time',
   'close_day_time',
+  'morning_until',
   'template',
   'show_arc_between_sessions',
   'counter',
@@ -77,6 +82,7 @@ const WRITABLE_SETTINGS = [
   'pomodoro_work_min',
   'pomodoro_break_min',
   'session_end_notify',
+  'idle_nudge_min',
   'ring_for',
 ] as const
 
@@ -227,6 +233,12 @@ export const api = {
   patchGoal: (id: number, patch: GoalPatch) =>
     request<Goal>(`/api/goals/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
   deleteGoal: (id: number) => request<void>(`/api/goals/${id}`, { method: 'DELETE' }),
+  // Open notes first, then the ones done in the last week.
+  notes: () => request<Note[]>('/api/notes'),
+  addNote: (text: string) =>
+    request<Note>('/api/notes', { method: 'POST', body: JSON.stringify({ text }) }),
+  patchNote: (id: number, patch: NotePatch) =>
+    request<Note>(`/api/notes/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
   // 401 when `current` is wrong, 422 when the new one is too short.
   changePassword: (current: string, next: string) =>
     request<void>('/api/password', {
@@ -255,6 +267,7 @@ export const api = {
       ),
     }),
   settings: () => request<Settings>('/api/settings'),
+  presence: () => request<void>('/api/presence', { method: 'POST' }),
   // The server rejects unknown fields, so only the writable keys actually set go on the
   // wire. Bell toggles apply to the template the request leaves selected.
   saveSettings: (patch: SettingsPatch, alerts?: AlertPatch[]) => {
@@ -284,6 +297,16 @@ export const api = {
     return request<{ items: MemoryHit[] }>(`/api/memory${query ? `?${query}` : ''}`)
   },
   memoryRead: (id: string) => request<MemoryFact>(`/api/memory/${encodeURIComponent(id)}`),
+  inboxList: (params: { before?: string; limit?: number } = {}) => {
+    const search = new URLSearchParams()
+    if (params.before) search.set('before', params.before)
+    if (params.limit) search.set('limit', String(params.limit))
+    const query = search.toString()
+    return request<InboxPage>(`/api/inbox${query ? `?${query}` : ''}`)
+  },
+  inboxRead: (id: number) => request<InboxItem>(`/api/inbox/${id}`),
+  inboxRefresh: () =>
+    request<{ requested_at: string }>('/api/inbox/refresh', { method: 'POST' }),
   debrief: () => request<Debrief>('/api/debrief'),
   review: () => request<Review>('/api/review'),
   vapidKey: () => request<{ key: string }>('/api/push/vapid_public_key'),
@@ -324,8 +347,8 @@ export const api = {
       body: JSON.stringify({ outcome, ...(discard && { discard: true }) }),
     }),
   rounds: () => request<{ rounds: number }>('/api/sessions/today'),
-  // Open work in the order the planner would lay it.
-  queue: (limit = 5) => request<QueueEntry[]>(`/api/tasks/queue?limit=${limit}`),
+  // Today's blocks, current or next first; the priority queue when none are laid.
+  candidates: (limit = 5) => request<QueueEntry[]>(`/api/tasks/candidates?limit=${limit}`),
   calendar: () => request<{ entries: CalendarEntry[] }>('/api/calendar'),
   addCalendarEntry: (fields: CalendarFields) =>
     request<CalendarEntry>('/api/calendar', { method: 'POST', body: JSON.stringify(fields) }),
