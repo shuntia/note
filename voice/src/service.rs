@@ -1,6 +1,6 @@
 use crate::calls::{ring_once, Ring};
 use crate::config::VoiceServiceConfig;
-use crate::matrix::{Matrix, RoomEvent};
+use crate::matrix::{HomeserverError, Matrix, RoomEvent};
 use crate::state::{CallState, LinkState, StateFile};
 use note_voice_proto::{
     dial_forever, AppliedFile, BoxFuture, CallBody, Dir, FileOutbox, Handler, Outcome, Peer, PeerConfig,
@@ -19,6 +19,16 @@ fn now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+/// A client error other than auth or rate limiting, which is how a
+/// homeserver refuses a `since` token it no longer knows.
+fn rejects_since(e: &anyhow::Error) -> bool {
+    use reqwest::StatusCode;
+    e.downcast_ref::<HomeserverError>().is_some_and(|h| {
+        h.status.is_client_error()
+            && ![StatusCode::UNAUTHORIZED, StatusCode::FORBIDDEN, StatusCode::TOO_MANY_REQUESTS].contains(&h.status)
+    })
 }
 
 struct Service {
@@ -156,6 +166,13 @@ impl Service {
     async fn open_dm(self: &Arc<Self>, link_id: i64, mxid: String) -> Result<Reply, Refusal> {
         let known = lock(&self.state).data.links.get(&link_id).cloned();
         if let Some(link) = known.filter(|l| l.mxid == mxid) {
+            {
+                let mut st = lock(&self.state);
+                if let Some(l) = st.data.links.get_mut(&link_id) {
+                    l.reported = false;
+                }
+                st.save().map_err(|e| Refusal::new(RefusalCode::Failed, e.to_string()))?;
+            }
             let _ = self.matrix.invite(&link.room_id, &mxid).await;
             tokio::spawn({
                 let svc = self.clone();
@@ -188,6 +205,7 @@ impl Service {
             }
             let svc = self.clone();
             let room = room.to_string();
+            let user = user.to_string();
             tokio::spawn(async move {
                 let mut up = svc.peer().up_watch();
                 loop {
@@ -195,7 +213,9 @@ impl Service {
                     let got = svc.peer().request(Request::DmJoined { link_id, room_id: room.clone() }).await;
                     if got.is_ok() {
                         let mut st = lock(&svc.state);
-                        if let Some(l) = st.data.links.get_mut(&link_id) {
+                        if let Some(l) =
+                            st.data.links.get_mut(&link_id).filter(|l| l.room_id == room && l.mxid == user)
+                        {
                             l.reported = true;
                         }
                         let _ = st.save();
@@ -225,6 +245,11 @@ impl Service {
                 }
                 Err(e) => {
                     eprintln!("voice: sync failed: {e:#}");
+                    if rejects_since(&e) {
+                        let mut st = lock(&self.state);
+                        st.data.since = None;
+                        let _ = st.save();
+                    }
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 }
             }

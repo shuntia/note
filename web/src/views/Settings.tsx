@@ -418,6 +418,7 @@ export function Settings({
       setState((s) =>
         s && s !== 'error' ? { ...s, voiceLink: { mxid: got.mxid, state: 'invited' } } : s,
       )
+      setMxid('')
       setSave(null)
     } catch (err) {
       setSave({ row: 'calls', kind: 'failed', message: callFailure(err) })

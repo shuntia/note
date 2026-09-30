@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 pub const RING_SECS: u32 = 30;
 pub const RING_BY_SECS: i64 = 10;
 pub const STALE_START_SECS: i64 = 20;
+pub const STALE_RING_SECS: i64 = 90;
 
 type Ladder = Arc<OnceLock<Vec<Arc<dyn Channel>>>>;
 
@@ -63,7 +64,7 @@ impl Voice {
         Ok(tokio::spawn(note_voice_proto::listen_forever(self.peer.clone(), listener)))
     }
 
-    /// Every 5 s fails stale starts; the first tick after the fallback is set
+    /// Every 5 s fails stale calls; the first tick after the fallback is set
     /// also re-delivers what an earlier run ended but never delivered.
     pub fn spawn_sweeper(self: &Arc<Self>) {
         let voice = self.clone();
@@ -108,6 +109,12 @@ impl Voice {
         let ring_by = now + jiff::SignedDuration::from_secs(RING_BY_SECS);
         {
             let conn = crate::db_guard(&self.db);
+            let busy: bool = conn.query_row(
+                "SELECT EXISTS (SELECT 1 FROM voice_calls WHERE user_id = ?1 AND state IN ('starting', 'ringing'))",
+                [user_id],
+                |r| r.get(0),
+            )?;
+            anyhow::ensure!(!busy, "a ring is already under way");
             conn.execute(
                 "INSERT INTO voice_calls (id, user_id, direction, message, state, ring_by, created_at)
                  VALUES (?1, ?2, 'outbound', ?3, 'starting', ?4, ?5)",
@@ -137,14 +144,14 @@ impl Voice {
         Ok(id)
     }
 
-    /// Fails every call the voice side never took up and returns how many.
-    /// Does nothing until the fallback is set.
+    /// Fails every call the voice side never took up or never reported the
+    /// end of, and returns how many. Does nothing until the fallback is set.
     pub fn sweep(&self, now: jiff::Timestamp) -> usize {
         if self.fallback.get().is_none() {
             return 0;
         }
-        let stale = self.stale_starts(now);
-        self.fail_starts(stale, now)
+        let stale = self.stale_calls(now);
+        self.fail_stale(stale, now)
     }
 
     /// Delivers every ended call's message that was never delivered after its
@@ -173,33 +180,40 @@ impl Voice {
         n
     }
 
-    fn stale_starts(&self, now: jiff::Timestamp) -> Vec<String> {
-        let cutoff = now - jiff::SignedDuration::from_secs(STALE_START_SECS);
-        let stale: Vec<String> = {
-            let conn = crate::db_guard(&self.db);
-            let mut stmt = match conn.prepare("SELECT id, ring_by FROM voice_calls WHERE state = 'starting'") {
-                Ok(s) => s,
-                Err(_) => return Vec::new(),
-            };
-            let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)));
-            let Ok(rows) = rows else { return Vec::new() };
-            rows.flatten()
-                .filter(|(_, ring_by)| ring_by.parse::<jiff::Timestamp>().is_ok_and(|t| t < cutoff))
-                .map(|(id, _)| id)
-                .collect()
+    /// Each stale call's id and the state it went stale in.
+    fn stale_calls(&self, now: jiff::Timestamp) -> Vec<(String, String)> {
+        let cutoff = |state: &str| {
+            let secs = if state == "ringing" { STALE_RING_SECS } else { STALE_START_SECS };
+            now - jiff::SignedDuration::from_secs(secs)
         };
-        stale
+        let conn = crate::db_guard(&self.db);
+        let Ok(mut stmt) =
+            conn.prepare("SELECT id, state, ring_by FROM voice_calls WHERE state IN ('starting', 'ringing')")
+        else {
+            return Vec::new();
+        };
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)));
+        let Ok(rows) = rows else { return Vec::new() };
+        rows.flatten()
+            .filter(|(_, state, ring_by)| ring_by.parse::<jiff::Timestamp>().is_ok_and(|t| t < cutoff(state)))
+            .map(|(id, state, _)| (id, state))
+            .collect()
     }
 
-    fn fail_starts(&self, stale: Vec<String>, now: jiff::Timestamp) -> usize {
+    /// Fails each call still in the state it went stale in, tells the voice
+    /// side to hang up, and delivers the message.
+    fn fail_stale(&self, stale: Vec<(String, String)>, now: jiff::Timestamp) -> usize {
         let mut failed = 0;
-        for id in stale {
+        for (id, state) in stale {
             let ended = {
                 let conn = crate::db_guard(&self.db);
-                end_call(&conn, &id, "failed", Some("starting"), now).ok().flatten()
+                end_call(&conn, &id, "failed", Some(&state), now).ok().flatten()
             };
             if let Some((user_id, message)) = ended {
                 failed += 1;
+                if let Err(e) = self.peer.send_call(&id, CallBody::HangUp) {
+                    eprintln!("voice: journaling a hang-up for {id} failed: {e}");
+                }
                 self.handler.fall_through(&id, user_id, message);
             }
         }
@@ -509,16 +523,70 @@ mod tests {
         let then = jiff::Timestamp::now() - jiff::SignedDuration::from_secs(60);
         let id = voice.start_call(1, &link(), &msg(), then).unwrap();
         let now = jiff::Timestamp::now();
-        let stale = voice.stale_starts(now);
-        assert_eq!(stale, vec![id.clone()]);
+        let stale = voice.stale_calls(now);
+        assert_eq!(stale, vec![(id.clone(), "starting".to_string())]);
         voice.handler.apply(&id, 1, CallBody::Ringing).unwrap();
-        assert_eq!(voice.fail_starts(stale, now), 0);
+        assert_eq!(voice.fail_stale(stale, now), 0);
         let state: String = crate::db_guard(&voice.db)
             .query_row("SELECT state FROM voice_calls WHERE id = ?1", [&id], |r| r.get(0))
             .unwrap();
         assert_eq!(state, "ringing");
         settle().await;
         assert!(mock.seen().is_empty());
+    }
+
+    fn frames(voice: &Voice, id: &str) -> Vec<CallBody> {
+        let conn = crate::db_guard(&voice.db);
+        let mut stmt = conn.prepare("SELECT body FROM voice_frames WHERE call_id = ?1 ORDER BY seq").unwrap();
+        stmt.query_map([id], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(|b| serde_json::from_str(&b.unwrap()).unwrap())
+            .collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_ring_nobody_reports_on_is_failed_by_the_sweep_once() {
+        let (voice, mock) = rig();
+        let then = jiff::Timestamp::now() - jiff::SignedDuration::from_secs(120);
+        let id = voice.start_call(1, &link(), &msg(), then).unwrap();
+        voice.handler.apply(&id, 1, CallBody::Ringing).unwrap();
+        assert_eq!(voice.sweep(jiff::Timestamp::now()), 1);
+        assert_eq!(voice.sweep(jiff::Timestamp::now()), 0);
+        settle().await;
+        assert_eq!(mock.seen().len(), 1);
+        assert!(frames(&voice, &id).contains(&CallBody::HangUp), "the voice side is told to stop");
+        voice.handler.apply(&id, 2, CallBody::Outcome { outcome: Outcome::Missed }).unwrap();
+        voice.handler.apply(&id, 3, CallBody::Ended).unwrap();
+        settle().await;
+        assert_eq!(mock.seen().len(), 1, "the late outcome does not deliver again");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_fresh_ring_is_left_to_the_voice_side() {
+        let (voice, mock) = rig();
+        let then = jiff::Timestamp::now() - jiff::SignedDuration::from_secs(60);
+        let id = voice.start_call(1, &link(), &msg(), then).unwrap();
+        voice.handler.apply(&id, 1, CallBody::Ringing).unwrap();
+        assert_eq!(voice.sweep(jiff::Timestamp::now()), 0);
+        settle().await;
+        assert!(mock.seen().is_empty());
+        assert!(!frames(&voice, &id).contains(&CallBody::HangUp));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_second_ring_waits_for_the_first_to_end() {
+        let (voice, _mock) = rig();
+        let now = jiff::Timestamp::now();
+        let first = voice.start_call(1, &link(), &msg(), now).unwrap();
+        assert!(voice.start_call(1, &link(), &msg(), now).is_err(), "starting");
+        voice.handler.apply(&first, 1, CallBody::Ringing).unwrap();
+        assert!(voice.start_call(1, &link(), &msg(), now).is_err(), "ringing");
+        let calls: i64 = crate::db_guard(&voice.db)
+            .query_row("SELECT COUNT(*) FROM voice_calls", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(calls, 1, "a refused ring leaves no row");
+        voice.handler.apply(&first, 2, CallBody::Outcome { outcome: Outcome::Missed }).unwrap();
+        assert!(voice.start_call(1, &link(), &msg(), now).is_ok());
     }
 
     struct Unwritable;

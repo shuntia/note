@@ -205,7 +205,9 @@ in
         StateDirectoryMode = "0700";
         LoadCredential = [ "matrix-bot.token:${voiceCfg.tokenFile}" ];
         Restart = "always";
-        RestartSec = 1;
+        RestartSec = 2;
+        RestartSteps = 5;
+        RestartMaxDelaySec = 60;
         UMask = "0077";
         NoNewPrivileges = true;
         PrivateTmp = true;

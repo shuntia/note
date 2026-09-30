@@ -356,3 +356,35 @@ async fn a_voice_restart_mid_ring_closes_the_call_and_reports_it_once() {
     let cleared = hs.lock().unwrap().state_puts.iter().filter(|(_, _, _, b)| b == &serde_json::json!({})).count();
     assert!(cleared >= 1, "the orphaned membership is cleared");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn relinking_the_same_account_reports_the_join_again() {
+    let r = rig_with(|dir, hs, _| {
+        seed_state(
+            dir,
+            serde_json::json!({
+                "links": { "4": { "mxid": "@aki:t", "room_id": "!dm:t", "reported": true } },
+                "calls": {},
+                "since": "s9",
+            }),
+        );
+        hs.lock().unwrap().joined.insert("!dm:t".into(), vec!["@note:t".into(), "@aki:t".into()]);
+    })
+    .await;
+    let got = r.note.peer.request(note_voice_proto::Request::OpenDm { link_id: 4, mxid: "@aki:t".into() }).await;
+    assert_eq!(got, Ok(note_voice_proto::Reply::Dm { room_id: "!dm:t".into() }));
+    eventually("DmJoined reaches Note", || dm_joined(&r, 4) == 1).await;
+    eventually("the link is marked reported", || saved_state(&r)["links"]["4"]["reported"] == true).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rejected_since_starts_the_sync_over() {
+    let r = rig_with(|dir, hs, _| {
+        seed_state(dir, serde_json::json!({ "links": {}, "calls": {}, "since": "s9" }));
+        hs.lock().unwrap().reject_since = Some("s9".into());
+    })
+    .await;
+    let hs = r.hs.clone();
+    eventually("a sync after the refusal", || hs.lock().unwrap().sync_sinces.len() >= 2).await;
+    assert_eq!(r.hs.lock().unwrap().sync_sinces[..2], [Some("s9".to_string()), None]);
+}
