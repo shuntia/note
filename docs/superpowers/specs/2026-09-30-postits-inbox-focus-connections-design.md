@@ -1,11 +1,11 @@
-# Post-its, inbox, a quieter Now, Matrix messaging, and translation plumbing
+# Notes, inbox, a quieter Now, Matrix messaging, and translation plumbing
 
 Six changes, specified together and built as separate plans. Each group
 ships on its own, in this order:
 
 1. The Now face
 2. Inbox
-3. Post-it reminders
+3. Notes
 4. Idle nudges
 5. Matrix messaging and Connections
 6. Translation plumbing
@@ -94,63 +94,59 @@ A new table `inbox_items`:
 - The file path is configurable as `[inbox] refresh_signal`. With it unset,
   the route answers `409` and the button is hidden.
 
-## 3. Post-it reminders
+## 3. Notes
+
+Quick, low-effort things to keep in mind: a post-it on the screen, not an
+entry in a notebook. Styling is deliberately plain for now; a visual pass
+comes later.
 
 ### The data
 
-A new table `reminders`:
+A new table `notes`:
 
 | Column | Meaning |
 |---|---|
 | `id` | Primary key |
 | `user_id` | Owner |
 | `text` | One line, 200 characters at most |
-| `color` | `yellow`, `pink`, `blue` or `green`, default `yellow` |
-| `pinned` | Pinned post-its are never nudged about |
-| `created_at` | When it was stuck up |
-| `peeled_at` | Null while it is up |
+| `pinned` | Pinned notes are never nudged about |
+| `created_at` | When it was added |
+| `done_at` | Null while it is open |
 | `last_nudged_at` | Last idle nudge about it |
 
-Peeled post-its are kept 7 days for undo, then deleted by the nightly job.
+Done notes are kept 7 days for undo, then deleted by the nightly job.
 
 Routes:
 
-- `GET /api/reminders` returns the open ones plus those peeled in the last
-  7 days.
-- `POST /api/reminders {text, color?}`.
-- `PATCH /api/reminders/{id} {text?, color?, pinned?, peeled?}`.
-- `DELETE /api/reminders/{id}`.
+- `GET /api/notes` returns the open ones plus those done in the last 7 days.
+- `POST /api/notes {text}`.
+- `PATCH /api/notes/{id} {text?, pinned?, done?}`.
+- `DELETE /api/notes/{id}`.
 
-### Today's resting face: the board
+### Today's resting face
 
-When no session is running, Today's session face is replaced by a board of
-the open post-its.
+When no session is running, Today's session face is replaced by the list of
+open notes.
 
-- **Each note:** a small square in its colour with a slight tilt from a
-  stable per-id angle, and the text wrapped to four lines.
-- **Adding:** an empty tile at the end. Typing and pressing Enter sticks a
-  new note, which lands with a small drop.
-- **Peeling:** a swipe up, or a check that appears on hover or focus. The
-  note lifts away, and an undo toast brings it back.
+- **Each note:** its text, and a check to mark it done. An undo toast brings
+  it back.
+- **Adding:** an input at the end. Typing and pressing Enter adds a note.
 - **Menu:** right-click or long-press (the existing `Overflow`) offers edit
-  in place, colour, pin and peel.
-- **Layout:** the board wraps and centres. At phone width it is a two-column
-  grid.
-- **Starting a session:** the existing way to start stays (tapping the
-  timer's place, or the start control). The board fades out as the session
-  face comes in.
+  in place, pin and done.
+- **No flourishes:** no colours, tilts, drops or swipe gestures.
+- **Starting a session:** the existing way to start stays.
 
 ### Chat
 
-A new tool group `reminder_*` in the Talk, Check-in and Trigger registries:
+A new tool group `note_*` in the Talk, Check-in and Trigger registries:
 
-- `reminder_add {text, color?}`
-- `reminder_update {id, text?, color?, pinned?}`
-- `reminder_peel {id}`
-- `reminder_list {}`
+- `note_add {text}`
+- `note_update {id, text?, pinned?}`
+- `note_done {id}`
+- `note_list {}`
 
 Receipts in `receipts.ts`. The persona prompt gains one line: a quick thing
-to keep in mind is a post-it, not a task.
+to keep in mind is a note, not a task.
 
 ## 4. Idle nudges
 
@@ -171,7 +167,7 @@ hold:
 - `now - last_active_at >= idle_nudge_min` (per-user setting, default 20,
   `0` turns it off),
 - `now` is outside quiet windows and before the close-of-day time,
-- the user has open, unpinned post-its,
+- the user has open, unpinned notes,
 - no idle trigger is already pending.
 
 ### What Note does
@@ -180,7 +176,7 @@ hold:
   `origin = 'idle'`) for now. It counts against the daily trigger budget, and
   none is laid when the budget is spent.
 - The trigger session runs with the Trigger kind and an idle note in its
-  context: the open post-its with ages and last nudges, and the minutes
+  context: the open notes with ages and last nudges, and the minutes
   idle.
 - It uses the existing tools:
   - `say` sends a notification through the ladder.
@@ -189,8 +185,8 @@ hold:
     answer and lay a follow-up.
 - The prompt `trigger.md` gains an idle section: when to stay quiet, one
   nudge at a time, escalate only after silence, never repeat the same
-  post-it within an hour.
-- `last_nudged_at` is stamped on the post-its a nudge names.
+  note within an hour.
+- `last_nudged_at` is stamped on the notes a nudge names.
 
 ### Stopping
 
@@ -263,7 +259,7 @@ Ringing the phone becomes a choice here once voice calls ship.
 ## Testing
 
 - **Server:**
-  - route tests for inbox, refresh, reminders and presence;
+  - route tests for inbox, refresh, notes and presence;
   - the candidate route against a fixture day;
   - idle detection over a clock-controlled check (idle, active, budget,
     quiet window, cancel on activity);
@@ -272,8 +268,7 @@ Ringing the phone becomes a choice here once voice calls ship.
 - **Web:**
   - vitest for `t()` placeholders and plurals, and the formatters;
   - the hardcoded-string check;
-  - pure helpers for board layout and tilt;
-  - screenshots through the UI audit harness for the board, the idle Now
+  - screenshots through the UI audit harness for the notes list, the idle Now
     face, the inbox and Connections, at phone and desktop widths.
 
 ## Risks
