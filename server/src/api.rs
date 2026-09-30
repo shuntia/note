@@ -1371,6 +1371,7 @@ struct SettingsPatch {
     pomodoro_work_min: Option<u32>,
     pomodoro_break_min: Option<u32>,
     session_end_notify: Option<bool>,
+    idle_nudge_min: Option<u32>,
     ring_for: Option<String>,
     alerts: Option<Vec<AlertPatch>>,
 }
@@ -1380,6 +1381,7 @@ struct SettingsPatch {
 const MAX_TRIGGERS_PER_DAY: u32 = 20;
 const POMODORO_WORK_MIN: std::ops::RangeInclusive<u32> = 5..=120;
 const POMODORO_BREAK_MIN: std::ops::RangeInclusive<u32> = 1..=60;
+const IDLE_NUDGE_MIN: std::ops::RangeInclusive<u32> = 0..=240;
 
 /// `telegram_linked` and `voice_link` are read by the caller, which already
 /// holds the DB guard on the write path.
@@ -1413,6 +1415,7 @@ fn settings_body(
         "pomodoro_work_min": cfg.pomodoro_work_min(),
         "pomodoro_break_min": cfg.pomodoro_break_min(),
         "session_end_notify": cfg.session_end_notify(),
+        "idle_nudge_min": cfg.idle_nudge_min(),
         "voice_enabled": state.voice.is_some(),
         "voice_link": voice_link.map(|l| serde_json::json!({ "mxid": l.mxid, "state": l.state })),
         "ring_for": cfg.ring_for(),
@@ -1587,6 +1590,15 @@ async fn settings_put(
             );
         }
         cfg.pomodoro_break_min = Some(n);
+    }
+    if let Some(n) = req.idle_nudge_min {
+        if !IDLE_NUDGE_MIN.contains(&n) {
+            return invalid_field(
+                "idle_nudge_min",
+                &format!("must be {} to {}", IDLE_NUDGE_MIN.start(), IDLE_NUDGE_MIN.end()),
+            );
+        }
+        cfg.idle_nudge_min = Some(n);
     }
     if let Some(ring_for) = req.ring_for {
         if !crate::config::RING_FOR.contains(&ring_for.as_str()) {
