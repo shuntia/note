@@ -50,6 +50,7 @@ async fn rig(linked: bool) -> Rig {
     auth::create_user(&conn, "aki", "pw", false).unwrap();
     if linked {
         let id = links::begin(&conn, 1, "@aki:t", jiff::Timestamp::now()).unwrap();
+        links::set_room(&conn, id, "!r:t").unwrap();
         links::mark_joined(&conn, id, "!r:t", jiff::Timestamp::now()).unwrap();
     }
     let push = Arc::new(MockChannel::new("push"));
@@ -230,10 +231,40 @@ async fn a_test_ring_needs_a_joined_link() {
     {
         let conn = r.state.db();
         let id = links::begin(&conn, 1, "@aki:t", jiff::Timestamp::now()).unwrap();
+        links::set_room(&conn, id, "!r:t").unwrap();
         links::mark_joined(&conn, id, "!r:t", jiff::Timestamp::now()).unwrap();
     }
     let (status, body) = call(&app, &cookie, "POST", "/api/voice/test", "").await;
     assert_eq!(status, StatusCode::ACCEPTED, "{body}");
     let rec = r.fake_rec.clone();
     eventually("the test ring starts", || !rec.seen.lock().unwrap().is_empty()).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_invite_leaves_no_link_behind() {
+    let (app, cookie, r) = api_rig().await;
+    r.fake_rec.answer_with(|_| {
+        Err(note_voice_proto::Refusal::new(note_voice_proto::RefusalCode::Failed, "homeserver down"))
+    });
+    let (status, _) = call(&app, &cookie, "POST", "/api/voice/link", r#"{"mxid":"@aki:t"}"#).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(links::get(&r.state.db(), 1).unwrap().is_none());
+    let (_, s) = call(&app, &cookie, "GET", "/api/settings", "").await;
+    assert!(s["voice_link"].is_null());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_link_removed_while_the_invite_is_out_is_not_reported_invited() {
+    let (app, cookie, r) = api_rig().await;
+    let db = r.state.db.clone();
+    r.fake_rec.answer_with(move |req| match req {
+        note_voice_proto::Request::OpenDm { .. } => {
+            links::remove(&db.lock().unwrap(), 1).unwrap();
+            Ok(note_voice_proto::Reply::Dm { room_id: "!dm:t".into() })
+        }
+        _ => Err(note_voice_proto::Refusal::new(note_voice_proto::RefusalCode::BadRequest, "no")),
+    });
+    let (status, body) = call(&app, &cookie, "POST", "/api/voice/link", r#"{"mxid":"@aki:t"}"#).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(links::get(&r.state.db(), 1).unwrap().is_none());
 }

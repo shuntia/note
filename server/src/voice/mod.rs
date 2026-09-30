@@ -585,14 +585,16 @@ mod tests {
         let (voice, _mock) = rig();
         let link_id = {
             let conn = crate::db_guard(&voice.db);
-            links::begin(&conn, 1, "@aki:t", jiff::Timestamp::now()).unwrap()
+            let id = links::begin(&conn, 1, "@aki:t", jiff::Timestamp::now()).unwrap();
+            links::set_room(&conn, id, "!r:t").unwrap();
+            id
         };
-        let got = voice
-            .handler
-            .request(note_voice_proto::Request::DmJoined { link_id, room_id: "!r:t".into() })
-            .await;
-        assert_eq!(got, Ok(note_voice_proto::Reply::Done));
-        let conn = crate::db_guard(&voice.db);
-        assert!(links::ringable(&conn, 1).unwrap().is_some());
+        let join = |room: &str| {
+            voice.handler.request(note_voice_proto::Request::DmJoined { link_id, room_id: room.into() })
+        };
+        assert_eq!(join("!old:t").await, Ok(note_voice_proto::Reply::Done));
+        assert!(links::ringable(&crate::db_guard(&voice.db), 1).unwrap().is_none());
+        assert_eq!(join("!r:t").await, Ok(note_voice_proto::Reply::Done));
+        assert!(links::ringable(&crate::db_guard(&voice.db), 1).unwrap().is_some());
     }
 }

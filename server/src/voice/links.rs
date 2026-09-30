@@ -37,17 +37,24 @@ pub fn begin(conn: &Connection, user_id: i64, mxid: &str, now: jiff::Timestamp) 
     )?)
 }
 
-pub fn set_room(conn: &Connection, link_id: i64, room_id: &str) -> Result<()> {
-    conn.execute("UPDATE voice_links SET room_id = ?2 WHERE id = ?1", (link_id, room_id))?;
-    Ok(())
+/// False when the link is gone.
+pub fn set_room(conn: &Connection, link_id: i64, room_id: &str) -> Result<bool> {
+    Ok(conn.execute("UPDATE voice_links SET room_id = ?2 WHERE id = ?1", (link_id, room_id))? > 0)
 }
 
+/// Links only a join of the room this link invited to, so a join from an
+/// account the user has since replaced changes nothing.
 pub fn mark_joined(conn: &Connection, link_id: i64, room_id: &str, now: jiff::Timestamp) -> Result<bool> {
     Ok(conn.execute(
-        "UPDATE voice_links SET state = 'linked', room_id = ?2, linked_at = COALESCE(linked_at, ?3)
-         WHERE id = ?1",
+        "UPDATE voice_links SET state = 'linked', linked_at = COALESCE(linked_at, ?3)
+         WHERE id = ?1 AND room_id = ?2",
         (link_id, room_id, now.to_string()),
     )? > 0)
+}
+
+/// Drops a link whose invite never went out.
+pub fn forget_unsent(conn: &Connection, link_id: i64) -> Result<bool> {
+    Ok(conn.execute("DELETE FROM voice_links WHERE id = ?1 AND room_id IS NULL", [link_id])? > 0)
 }
 
 pub fn remove(conn: &Connection, user_id: i64) -> Result<bool> {
@@ -82,6 +89,7 @@ mod tests {
         let c = conn();
         let now = jiff::Timestamp::now();
         let first = begin(&c, 1, "@aki:t", now).unwrap();
+        set_room(&c, first, "!r:t").unwrap();
         mark_joined(&c, first, "!r:t", now).unwrap();
         let second = begin(&c, 1, "@other:t", now).unwrap();
         assert_eq!(first, second, "one row per user, same id");
@@ -90,5 +98,33 @@ mod tests {
         assert!(!mark_joined(&c, 999, "!r:t", now).unwrap(), "an unknown link changes nothing");
         assert!(remove(&c, 1).unwrap());
         assert!(get(&c, 1).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_join_counts_only_for_the_room_the_link_invited_to() {
+        let c = conn();
+        let now = jiff::Timestamp::now();
+        let id = begin(&c, 1, "@aki:t", now).unwrap();
+        assert!(!mark_joined(&c, id, "!old:t", now).unwrap(), "no room yet");
+        assert!(set_room(&c, id, "!new:t").unwrap());
+        assert!(!mark_joined(&c, id, "!old:t", now).unwrap(), "a previous account's room");
+        assert!(ringable(&c, 1).unwrap().is_none());
+        assert!(mark_joined(&c, id, "!new:t", now).unwrap());
+        assert!(ringable(&c, 1).unwrap().is_some());
+    }
+
+    #[test]
+    fn only_a_link_whose_invite_never_went_out_is_forgotten() {
+        let c = conn();
+        let now = jiff::Timestamp::now();
+        let id = begin(&c, 1, "@aki:t", now).unwrap();
+        assert!(forget_unsent(&c, id).unwrap());
+        assert!(get(&c, 1).unwrap().is_none());
+        let id = begin(&c, 1, "@aki:t", now).unwrap();
+        set_room(&c, id, "!r:t").unwrap();
+        assert!(!forget_unsent(&c, id).unwrap());
+        assert!(get(&c, 1).unwrap().is_some());
+        assert!(remove(&c, 1).unwrap());
+        assert!(!set_room(&c, id, "!r:t").unwrap(), "a removed link takes no room");
     }
 }
