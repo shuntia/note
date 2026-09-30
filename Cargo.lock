@@ -1713,6 +1713,7 @@ dependencies = [
  "hmac 0.13.0",
  "http-body-util",
  "jiff",
+ "note-voice-proto",
  "proptest",
  "rusqlite",
  "schemars",
