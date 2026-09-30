@@ -629,6 +629,23 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (call_id, op_key)
     );
     ",
+    // v43
+    "
+    CREATE TABLE inbox_items (
+        id INTEGER PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id),
+        source_id TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('announcement','material')),
+        title TEXT NOT NULL,
+        body TEXT NOT NULL,
+        received_at TEXT NOT NULL,
+        outcome TEXT CHECK (outcome IN ('remembered','nothing','task')),
+        reason TEXT,
+        decided_at TEXT,
+        UNIQUE (user_id, source_id)
+    );
+    CREATE INDEX idx_inbox_items_recent ON inbox_items(user_id, received_at DESC, id DESC);
+    ",
 ];
 
 pub fn open(path: &Path) -> Result<Connection> {
@@ -1797,5 +1814,23 @@ mod tests {
         .unwrap();
         let id: i64 = conn.query_row("SELECT id FROM voice_links", [], |r| r.get(0)).unwrap();
         assert_eq!(id, 2, "a relink never reuses an unlinked id");
+    }
+    #[test]
+    fn inbox_items_hold_one_row_per_source_and_check_their_words() {
+        let conn = open_memory().unwrap();
+        conn.execute("INSERT INTO users (username, pass_hash, role) VALUES ('a','h','member')", [])
+            .unwrap();
+        let insert = |source: &str, kind: &str, outcome: Option<&str>| {
+            conn.execute(
+                "INSERT INTO inbox_items (user_id, source_id, kind, title, body, received_at, outcome)
+                 VALUES (1, ?1, ?2, 't', 'b', '2026-09-30T00:00:00.000000Z', ?3)",
+                (source, kind, outcome),
+            )
+        };
+        insert("s1", "announcement", None).unwrap();
+        insert("s2", "material", Some("task")).unwrap();
+        assert!(insert("s1", "material", None).is_err(), "a source is one row");
+        assert!(insert("s3", "gossip", None).is_err());
+        assert!(insert("s4", "material", Some("maybe")).is_err());
     }
 }
