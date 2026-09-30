@@ -11,6 +11,7 @@ pub mod day;
 pub mod db;
 pub mod goals;
 pub mod harvest;
+pub mod idle;
 pub mod inbox;
 pub mod learn;
 pub mod log;
