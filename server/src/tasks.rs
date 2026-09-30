@@ -117,7 +117,7 @@ fn quantize(minutes: u64) -> u32 {
     }
     let step = u64::from(PROJECTION_STEP_MIN);
     let rounded = (minutes + step / 2) / step * step;
-    rounded.max(step) as u32
+    u32::try_from(rounded.max(step)).unwrap_or(u32::MAX)
 }
 
 /// The total the task is heading for and what is left of it, read off how far it
@@ -209,6 +209,7 @@ pub struct TaskPatch {
     pub actor: Actor,
 }
 
+#[expect(clippy::option_option, reason = "a field left out and a field set to null mean different things")]
 pub(crate) fn present<'de, D, T>(d: D) -> Result<Option<Option<T>>, D::Error>
 where
     D: Deserializer<'de>,
@@ -774,7 +775,7 @@ pub fn candidates(
     };
     let first = blocks
         .iter()
-        .position(|(_, wall, end, _)| span(wall, end).is_some_and(|(_, stop)| stop > minute))
+        .position(|(_, wall, end, _)| span(wall, end).is_some_and(|(_, to)| to > minute))
         .unwrap_or(0);
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
@@ -785,7 +786,7 @@ pub fn candidates(
         if !seen.insert(*linked) {
             continue;
         }
-        let Some((start, stop)) = span(wall, end) else { continue };
+        let Some((from, to)) = span(wall, end) else { continue };
         let Some(held) = get(conn, user_id, *linked)? else { continue };
         let (mut top, step) = match held.parent_id {
             Some(parent) => {
@@ -806,7 +807,7 @@ pub fn candidates(
         out.push(QueueEntry {
             task: TaskNode { task: top, children },
             step,
-            planned_min: Some(u32::try_from((stop - start).max(1)).unwrap_or(1)),
+            planned_min: Some(u32::try_from((to - from).max(1)).unwrap_or(1)),
             reason: "scheduled",
             event_id: Some(*event_id),
         });
@@ -1115,7 +1116,7 @@ pub fn upsert(
         state,
         ..Default::default()
     };
-    update(conn, user_id, id, patch)?;
+    update(conn, user_id, id, &patch)?;
     let node = node(conn, user_id, id)?.expect("row was just updated");
     Ok(Upsert::Updated(node))
 }
@@ -1238,7 +1239,7 @@ pub fn update(
     conn: &Connection,
     user_id: i64,
     task_id: i64,
-    patch: TaskPatch,
+    patch: &TaskPatch,
 ) -> Result<Option<Updated>, UpdateError> {
     if let Some(s) = &patch.state {
         if !STATES.contains(&s.as_str()) {
@@ -1455,7 +1456,7 @@ mod tests {
             &conn,
             uid,
             id,
-            TaskPatch {
+            &TaskPatch {
                 description: Some("the caller's own text".into()),
                 duration_min: Some(Some(15)),
                 ..Default::default()
@@ -1482,7 +1483,7 @@ mod tests {
             &conn,
             uid,
             id,
-            TaskPatch {
+            &TaskPatch {
                 description: Some("the agent's brief".into()),
                 state: Some("dropped".into()),
                 ..Default::default()
@@ -1509,13 +1510,13 @@ mod tests {
                 .unwrap()
         };
         assert!(completed(id).is_none());
-        update(&conn, uid, id, TaskPatch { state: Some("done".into()), ..Default::default() })
+        update(&conn, uid, id, &TaskPatch { state: Some("done".into()), ..Default::default() })
             .unwrap();
         let first = completed(id).expect("done carries a completion time");
-        update(&conn, uid, id, TaskPatch { notes: Some("later".into()), ..Default::default() })
+        update(&conn, uid, id, &TaskPatch { notes: Some("later".into()), ..Default::default() })
             .unwrap();
         assert_eq!(completed(id).as_deref(), Some(first.as_str()), "an unrelated write keeps it");
-        update(&conn, uid, id, TaskPatch { state: Some("open".into()), ..Default::default() })
+        update(&conn, uid, id, &TaskPatch { state: Some("open".into()), ..Default::default() })
             .unwrap();
         assert!(completed(id).is_none(), "reopening clears it");
     }
@@ -1524,7 +1525,7 @@ mod tests {
     fn done_between_counts_by_completion_time() {
         let (conn, uid) = db_with_user();
         let id = task(&conn, uid, "write it up", None);
-        update(&conn, uid, id, TaskPatch { state: Some("done".into()), ..Default::default() })
+        update(&conn, uid, id, &TaskPatch { state: Some("done".into()), ..Default::default() })
             .unwrap();
         let now = jiff::Timestamp::now();
         let hour = jiff::Span::new().hours(1);
@@ -1558,7 +1559,7 @@ mod tests {
         let id = task(&conn, uid, "the chapter", None);
         assert_eq!(get(&conn, uid, id).unwrap().unwrap().progress, 0);
 
-        update(&conn, uid, id, TaskPatch { progress: Some(40), ..Default::default() }).unwrap();
+        update(&conn, uid, id, &TaskPatch { progress: Some(40), ..Default::default() }).unwrap();
         let t = get(&conn, uid, id).unwrap().unwrap();
         assert_eq!(t.progress, 40);
         assert_eq!((t.expected_min, t.remaining_min), (None, None), "no minutes to read from yet");
@@ -1567,7 +1568,7 @@ mod tests {
         let t = get(&conn, uid, id).unwrap().unwrap();
         assert_eq!((t.expected_min, t.remaining_min), (Some(105), Some(60)));
 
-        let e = update(&conn, uid, id, TaskPatch { progress: Some(101), ..Default::default() });
+        let e = update(&conn, uid, id, &TaskPatch { progress: Some(101), ..Default::default() });
         assert!(matches!(e, Err(UpdateError::Invalid(_))), "{e:?}");
         assert_eq!(get(&conn, uid, id).unwrap().unwrap().progress, 40);
     }
@@ -1577,7 +1578,7 @@ mod tests {
         let (conn, uid) = db_with_user();
         let parent = task(&conn, uid, "essay", None);
         let step = task(&conn, uid, "draft", Some(parent));
-        update(&conn, uid, step, TaskPatch { state: Some("done".into()), ..Default::default() })
+        update(&conn, uid, step, &TaskPatch { state: Some("done".into()), ..Default::default() })
             .unwrap();
         assert_eq!(get(&conn, uid, step).unwrap().unwrap().progress, 100);
         assert_eq!(
@@ -1586,7 +1587,7 @@ mod tests {
             "the parent the last step finished is finished too"
         );
 
-        update(&conn, uid, parent, TaskPatch { state: Some("open".into()), ..Default::default() })
+        update(&conn, uid, parent, &TaskPatch { state: Some("open".into()), ..Default::default() })
             .unwrap();
         assert_eq!(get(&conn, uid, parent).unwrap().unwrap().progress, 100);
     }
@@ -1617,19 +1618,19 @@ mod tests {
         let progress = |id| get(&conn, uid, id).unwrap().unwrap().progress;
         assert_eq!(progress(parent), 0);
 
-        let u = update(&conn, uid, watch, TaskPatch { state: Some("done".into()), ..Default::default() })
+        let u = update(&conn, uid, watch, &TaskPatch { state: Some("done".into()), ..Default::default() })
             .unwrap()
             .unwrap();
         assert_eq!(progress(parent), 44, "60 of 60 + 30 + an unsized step weighing their mean, 45");
         assert_eq!(u.parent.map(|p| p.progress), Some(44), "the write hands the parent back");
 
-        update(&conn, uid, notes, TaskPatch { progress: Some(50), ..Default::default() }).unwrap();
+        update(&conn, uid, notes, &TaskPatch { progress: Some(50), ..Default::default() }).unwrap();
         assert_eq!(progress(parent), 56);
 
-        update(&conn, uid, parent, TaskPatch { progress: Some(5), ..Default::default() }).unwrap();
+        update(&conn, uid, parent, &TaskPatch { progress: Some(5), ..Default::default() }).unwrap();
         assert_eq!(progress(parent), 56, "a parent with steps is not set by hand");
 
-        update(&conn, uid, write, TaskPatch { state: Some("dropped".into()), ..Default::default() })
+        update(&conn, uid, write, &TaskPatch { state: Some("dropped".into()), ..Default::default() })
             .unwrap();
         assert_eq!(progress(parent), 83, "a dropped step weighs nothing");
 
@@ -1678,11 +1679,11 @@ mod tests {
             &conn,
             uid,
             step,
-            TaskPatch { category: Some("History".into()), ..Default::default() },
+            &TaskPatch { category: Some("History".into()), ..Default::default() },
         );
         assert!(matches!(refused, Err(UpdateError::Invalid(_))), "{refused:?}");
 
-        update(&conn, uid, parent.id, TaskPatch { category: Some("Chemistry".into()), ..Default::default() })
+        update(&conn, uid, parent.id, &TaskPatch { category: Some("Chemistry".into()), ..Default::default() })
             .unwrap();
         assert_eq!(get(&conn, uid, step).unwrap().unwrap().category, "Chemistry");
     }
@@ -1711,7 +1712,7 @@ mod tests {
 
         let step = task(&conn, uid, "draft", Some(id));
         let refused =
-            update(&conn, uid, step, TaskPatch { goal_id: Some(Some(goal.id)), ..Default::default() });
+            update(&conn, uid, step, &TaskPatch { goal_id: Some(Some(goal.id)), ..Default::default() });
         assert!(matches!(refused, Err(UpdateError::Invalid(_))), "{refused:?}");
 
         let bo = crate::auth::create_user(&conn, "bo", "pw", false).unwrap();
@@ -1722,10 +1723,10 @@ mod tests {
         )
         .unwrap();
         let refused =
-            update(&conn, uid, id, TaskPatch { goal_id: Some(Some(theirs.id)), ..Default::default() });
+            update(&conn, uid, id, &TaskPatch { goal_id: Some(Some(theirs.id)), ..Default::default() });
         assert!(matches!(refused, Err(UpdateError::Invalid(_))), "{refused:?}");
 
-        update(&conn, uid, id, TaskPatch { goal_id: Some(None), ..Default::default() }).unwrap();
+        update(&conn, uid, id, &TaskPatch { goal_id: Some(None), ..Default::default() }).unwrap();
         assert!(get(&conn, uid, id).unwrap().unwrap().goal_id.is_none());
     }
 
@@ -1837,11 +1838,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(t.urgency, "high");
-        let up = update(&conn, uid, t.id, TaskPatch { urgency: Some("low".into()), ..Default::default() })
+        let up = update(&conn, uid, t.id, &TaskPatch { urgency: Some("low".into()), ..Default::default() })
             .unwrap()
             .unwrap();
         assert_eq!(up.task.urgency, "low");
-        let err = update(&conn, uid, t.id, TaskPatch { urgency: Some("asap".into()), ..Default::default() })
+        let err = update(&conn, uid, t.id, &TaskPatch { urgency: Some("asap".into()), ..Default::default() })
             .unwrap_err();
         assert!(matches!(err, UpdateError::Invalid(_)), "{err:?}");
     }
@@ -1880,7 +1881,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, UpdateError::InvalidHierarchy(_)), "{err:?}");
-        let err = update(&conn, uid, step.id, TaskPatch { urgency: Some("low".into()), ..Default::default() })
+        let err = update(&conn, uid, step.id, &TaskPatch { urgency: Some("low".into()), ..Default::default() })
             .unwrap_err();
         assert!(matches!(err, UpdateError::InvalidHierarchy(_)), "{err:?}");
 
@@ -1892,10 +1893,10 @@ mod tests {
             Actor::User,
         )
         .unwrap();
-        update(&conn, uid, urgent.id, TaskPatch { parent_id: Some(Some(parent.id)), ..Default::default() })
+        update(&conn, uid, urgent.id, &TaskPatch { parent_id: Some(Some(parent.id)), ..Default::default() })
             .unwrap()
             .unwrap();
-        let promoted = update(&conn, uid, urgent.id, TaskPatch { parent_id: Some(None), ..Default::default() })
+        let promoted = update(&conn, uid, urgent.id, &TaskPatch { parent_id: Some(None), ..Default::default() })
             .unwrap()
             .unwrap();
         assert_eq!(promoted.task.urgency, "normal", "a demoted task gives up its urgency");

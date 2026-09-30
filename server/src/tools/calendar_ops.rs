@@ -61,9 +61,8 @@ fn mask(days: &[Day]) -> i64 {
 fn failed(e: CalendarError) -> ToolError {
     match e {
         CalendarError::Invalid(m) => ToolError::rejected(m),
-        e @ CalendarError::TooMany => ToolError::rejected(e.to_string()),
+        e @ (CalendarError::TooMany | CalendarError::Duplicate { .. }) => ToolError::rejected(e.to_string()),
         e @ CalendarError::NotFound(_) => ToolError::not_found(e.to_string()),
-        e @ CalendarError::Duplicate { .. } => ToolError::rejected(e.to_string()),
         CalendarError::Db(e) => ToolError::internal(e.to_string()),
     }
 }
@@ -121,7 +120,7 @@ pub struct ListArgs {
 pub fn list(
     conn: &Connection,
     ctx: &ToolCtx,
-    args: ListArgs,
+    args: &ListArgs,
 ) -> Result<serde_json::Value, ToolError> {
     unscoped(ctx)?;
     let start = match args.date.as_deref() {
@@ -169,7 +168,7 @@ pub struct AddArgs {
     pub start_time: String,
     pub end_time: String,
     /// The weekdays it repeats on. Leave it out for a one-off entry and give
-    /// on_date instead.
+    /// `on_date` instead.
     #[serde(default)]
     pub days: Option<Vec<Day>>,
     /// The single date a one-off entry happens, YYYY-MM-DD.
@@ -279,7 +278,7 @@ pub struct RemoveArgs {
 pub fn remove(
     conn: &Connection,
     ctx: &ToolCtx,
-    args: RemoveArgs,
+    args: &RemoveArgs,
 ) -> Result<serde_json::Value, ToolError> {
     unscoped(ctx)?;
     match calendar::delete(conn, ctx.user_id, args.entry_id) {
@@ -300,7 +299,7 @@ pub struct SkipArgs {
 pub fn skip(
     conn: &Connection,
     ctx: &ToolCtx,
-    args: SkipArgs,
+    args: &SkipArgs,
 ) -> Result<serde_json::Value, ToolError> {
     unscoped(ctx)?;
     calendar::skip(conn, ctx.user_id, args.entry_id, &args.date).map_err(failed)?;
@@ -329,7 +328,7 @@ mod tests {
         (conn, tmp)
     }
 
-    fn ctx<'a>(tmp: &'a tempfile::TempDir) -> ToolCtx<'a> {
+    fn ctx(tmp: &tempfile::TempDir) -> ToolCtx<'_> {
         ToolCtx {
             config_dir: tmp.path(), data_dir: tmp.path(), user_id: 1, username: "aki",
             vectors: PreparedVectors::default(), task_scope: None, inbox_source: None,

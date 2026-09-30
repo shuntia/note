@@ -114,16 +114,7 @@ pub fn decide(
     let superseded = supersede_source(conn, ctx, scope)?;
     let mut memory_ids = Vec::with_capacity(facts.len());
     for (i, f) in facts.iter().enumerate() {
-        let id = crate::memory::add_until(
-            conn,
-            ctx.data_dir,
-            ctx.username,
-            "semantic",
-            &f.summary,
-            &f.body,
-            f.until.as_deref(),
-            ctx.vectors.facts.get(i).and_then(|v| v.as_deref()),
-        )
+        let id = crate::memory::add_until(conn, ctx.data_dir, ctx.username, &crate::memory::Fact { category: "semantic", summary: &f.summary, body: &f.body, until: f.until.as_deref() }, ctx.vectors.facts.get(i).and_then(|v| v.as_deref()))
         .map_err(|e| ToolError::internal(e.to_string()))?;
         conn.execute(
             "INSERT INTO memory_sources (user_id, source_id, memory_id) VALUES (?1, ?2, ?3)",
@@ -328,7 +319,7 @@ mod tests {
             // eleven facts
             format!(
                 r#"{{"source_id":"s1","outcome":"remembered","reason":"r","facts":[{}]}}"#,
-                vec![r#"{"summary":"s","body":"b"}"#; 11].join(",")
+                [r#"{"summary":"s","body":"b"}"#; 11].join(",")
             ),
             // nothing / task with facts
             r#"{"source_id":"s1","outcome":"nothing","reason":"r","facts":[{"summary":"s","body":"b"}]}"#.to_string(),
@@ -408,7 +399,7 @@ mod tests {
             TWO_FACTS,
         );
         assert_eq!(vectors.facts.len(), 2);
-        assert!(vectors.facts.iter().all(|v| v.is_some()));
+        assert!(vectors.facts.iter().all(std::option::Option::is_some));
         assert_ne!(vectors.facts[0], vectors.facts[1]);
 
         let mut c = ctx(&tmp, "s1");

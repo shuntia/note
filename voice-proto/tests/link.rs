@@ -34,7 +34,7 @@ async fn rig() -> Rig {
     let voice = side(Role::Voice, Dir::ToNote, Arc::default(), Arc::default());
     let listener = UnixListener::bind(&note_path).unwrap();
     let note_task = tokio::spawn(listen_forever(note.peer.clone(), listener));
-    let proxy = FaultProxy::start(proxy_path.clone(), note_path).await.unwrap();
+    let proxy = FaultProxy::start(&proxy_path, note_path).unwrap();
     let voice_task = tokio::spawn(dial_forever(voice.peer.clone(), proxy_path.clone()));
     let (n, v) = (note.peer.clone(), voice.peer.clone());
     eventually("both sides up", || n.is_up() && v.is_up()).await;
@@ -133,7 +133,7 @@ async fn requests_round_trip_and_fail_cleanly() {
     let r = rig().await;
     r.voice.rec.answer_with(|req| match req {
         Request::OpenDm { link_id, .. } => Ok(Reply::Dm { room_id: format!("!room{link_id}:t") }),
-        _ => Err(Refusal::new(RefusalCode::BadRequest, "wrong way")),
+        Request::DmJoined { .. } => Err(Refusal::new(RefusalCode::BadRequest, "wrong way")),
     });
     let got = r.note.peer.request(Request::OpenDm { link_id: 4, mxid: "@a:t".into() }).await;
     assert_eq!(got, Ok(Reply::Dm { room_id: "!room4:t".into() }));
@@ -257,7 +257,7 @@ async fn slow_rig() -> SlowRig {
     let note = Peer::new(fast(Role::Note), Dir::ToVoice, slow.clone(), Box::new(MemOutbox::default()));
     let voice = side(Role::Voice, Dir::ToNote, Arc::default(), Arc::default()).peer;
     tokio::spawn(listen_forever(note.clone(), UnixListener::bind(&note_path).unwrap()));
-    let proxy = FaultProxy::start(proxy_path.clone(), note_path).await.unwrap();
+    let proxy = FaultProxy::start(&proxy_path, note_path).unwrap();
     tokio::spawn(dial_forever(voice.clone(), proxy_path));
     let (n, v) = (note.clone(), voice.clone());
     eventually("both sides up", || n.is_up() && v.is_up()).await;

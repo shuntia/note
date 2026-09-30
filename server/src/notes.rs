@@ -90,7 +90,7 @@ pub fn get(conn: &Connection, user_id: i64, id: i64) -> rusqlite::Result<Option<
 pub fn create(
     conn: &Connection,
     user_id: i64,
-    new: NewNote,
+    new: &NewNote,
     now: jiff::Timestamp,
 ) -> Result<Note, UpdateError> {
     let text = checked_text(&new.text)?;
@@ -107,7 +107,7 @@ pub fn update(
     conn: &Connection,
     user_id: i64,
     id: i64,
-    patch: NotePatch,
+    patch: &NotePatch,
     now: jiff::Timestamp,
 ) -> Result<Option<Note>, UpdateError> {
     let text = patch.text.as_deref().map(checked_text).transpose()?;
@@ -153,11 +153,11 @@ mod tests {
     }
 
     fn add(conn: &Connection, uid: i64, text: &str, now: &str) -> Note {
-        create(conn, uid, NewNote { text: text.into() }, at(now)).unwrap()
+        create(conn, uid, &NewNote { text: text.into() }, at(now)).unwrap()
     }
 
     fn mark(conn: &Connection, uid: i64, id: i64, done: bool, now: &str) -> Note {
-        update(conn, uid, id, NotePatch { done: Some(done), ..Default::default() }, at(now))
+        update(conn, uid, id, &NotePatch { done: Some(done), ..Default::default() }, at(now))
             .unwrap()
             .unwrap()
     }
@@ -185,7 +185,7 @@ mod tests {
         let recent = add(&conn, aki, "recent", now).id;
         let old = add(&conn, aki, "old", now).id;
         add(&conn, bo, "theirs", now);
-        update(&conn, aki, second, NotePatch { pinned: Some(true), ..Default::default() }, at(now))
+        update(&conn, aki, second, &NotePatch { pinned: Some(true), ..Default::default() }, at(now))
             .unwrap();
         mark(&conn, aki, recent, true, "2026-09-23T12:00:00Z");
         mark(&conn, aki, old, true, "2026-09-23T11:59:59Z");
@@ -209,14 +209,14 @@ mod tests {
         assert!(mark(&conn, aki, id, false, "2026-09-30T11:30:00Z").done_at.is_none());
 
         let later = at("2026-09-30T12:00:00Z");
-        let n = update(&conn, aki, id, NotePatch { text: Some("oat milk".into()), ..Default::default() }, later)
+        let n = update(&conn, aki, id, &NotePatch { text: Some("oat milk".into()), ..Default::default() }, later)
             .unwrap()
             .unwrap();
         assert_eq!(
             (n.text.as_str(), n.pinned, n.created_at.as_str()),
             ("oat milk", false, "2026-09-30T09:00:00Z")
         );
-        assert!(update(&conn, aki, id, NotePatch { text: Some(" ".into()), ..Default::default() }, later)
+        assert!(update(&conn, aki, id, &NotePatch { text: Some(" ".into()), ..Default::default() }, later)
             .is_err());
     }
 
@@ -226,7 +226,7 @@ mod tests {
         let theirs = add(&conn, bo, "theirs", "2026-09-30T09:00:00Z").id;
         let now = at("2026-09-30T10:00:00Z");
         assert!(get(&conn, aki, theirs).unwrap().is_none());
-        assert!(update(&conn, aki, theirs, NotePatch { done: Some(true), ..Default::default() }, now)
+        assert!(update(&conn, aki, theirs, &NotePatch { done: Some(true), ..Default::default() }, now)
             .unwrap()
             .is_none());
         assert!(!delete(&conn, aki, theirs).unwrap());

@@ -37,7 +37,7 @@ fn checked_date(field: &str, value: &str) -> Result<String, ToolError> {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ListArgs {
-    /// open, in_progress, done, dropped, or any. Omitted: the live ones, open and in_progress.
+    /// open, `in_progress`, done, dropped, or any. Omitted: the live ones, open and `in_progress`.
     #[serde(default)]
     pub state: Option<String>,
     /// Case-insensitive substring of the title, the description or the notes.
@@ -240,7 +240,7 @@ fn day_start(ctx: &ToolCtx, field: &str, day: &str) -> Result<String, ToolError>
 }
 
 /// The user's top-level tasks, newest first, with how far their steps have got.
-pub fn list(conn: &Connection, ctx: &ToolCtx, args: ListArgs) -> Result<serde_json::Value, ToolError> {
+pub fn list(conn: &Connection, ctx: &ToolCtx, args: &ListArgs) -> Result<serde_json::Value, ToolError> {
     unscoped(ctx)?;
     let limit = args.limit.unwrap_or(DEFAULT_LIMIT);
     if !(1..=MAX_LIMIT).contains(&limit) {
@@ -265,7 +265,7 @@ pub fn list(conn: &Connection, ctx: &ToolCtx, args: ListArgs) -> Result<serde_js
             )))
         }
     };
-    let (wheres, params) = list_filters(ctx, &args)?;
+    let (wheres, params) = list_filters(ctx, args)?;
     let goals_hidden = hides_goals(ctx);
 
     let total: i64 = conn
@@ -329,7 +329,7 @@ pub struct SearchArgs {
 
 /// Every word of the query against the title first, then against the task's
 /// whole text; live tasks before finished ones.
-pub fn search(conn: &Connection, ctx: &ToolCtx, args: SearchArgs) -> Result<serde_json::Value, ToolError> {
+pub fn search(conn: &Connection, ctx: &ToolCtx, args: &SearchArgs) -> Result<serde_json::Value, ToolError> {
     unscoped(ctx)?;
     let query = args.query.trim();
     if query.is_empty() || query.chars().count() > MAX_QUERY_CHARS {
@@ -401,7 +401,7 @@ pub struct ReadArgs {
 
 /// One task in full, exactly as `GET /api/tasks` renders it, plus when it was
 /// added.
-pub fn read(conn: &Connection, ctx: &ToolCtx, args: ReadArgs) -> Result<serde_json::Value, ToolError> {
+pub fn read(conn: &Connection, ctx: &ToolCtx, args: &ReadArgs) -> Result<serde_json::Value, ToolError> {
     unscoped(ctx)?;
     let Some(mut node) = crate::tasks::node(conn, ctx.user_id, args.task_id).map_err(internal)?
     else {
@@ -476,7 +476,7 @@ fn stamp(task: &mut serde_json::Value, added: &std::collections::HashMap<i64, St
 pub struct BulkUpdateArgs {
     /// 1 to 50 task ids. Every one must be the user's own, or nothing happens.
     pub task_ids: Vec<i64>,
-    /// One of open, in_progress, done, dropped, for all of them.
+    /// One of open, `in_progress`, done, dropped, for all of them.
     #[serde(default)]
     pub state: Option<String>,
     /// True moves them all into Now, false moves them all back to Later.
@@ -501,7 +501,7 @@ pub struct BulkUpdateArgs {
 pub fn bulk_update(
     conn: &Connection,
     ctx: &ToolCtx,
-    args: BulkUpdateArgs,
+    args: &BulkUpdateArgs,
 ) -> Result<serde_json::Value, ToolError> {
     unscoped(ctx)?;
     if args.task_ids.is_empty() || args.task_ids.len() > MAX_BATCH {
@@ -555,7 +555,7 @@ pub fn bulk_update(
             actor: crate::tasks::Actor::Agent,
             ..Default::default()
         };
-        match crate::tasks::update(conn, ctx.user_id, *id, patch) {
+        match crate::tasks::update(conn, ctx.user_id, *id, &patch) {
             Ok(Some(t)) => demoted.extend(t.demoted_from_now),
             Ok(None) => return Err(ToolError::not_found(format!("no task {id}"))),
             Err(e) => return Err(task_error(e)),
@@ -598,7 +598,7 @@ mod tests {
         (conn, tempfile::tempdir().unwrap())
     }
 
-    fn ctx<'a>(tmp: &'a tempfile::TempDir, scope: Option<i64>) -> ToolCtx<'a> {
+    fn ctx(tmp: &tempfile::TempDir, scope: Option<i64>) -> ToolCtx<'_> {
         ToolCtx {
             config_dir: tmp.path(),
             data_dir: tmp.path(),
@@ -959,7 +959,7 @@ mod tests {
             .iter()
             .map(|t| task(&conn, &tmp, &format!(r#"{{"title":"{t}"}}"#)))
             .collect();
-        let list = all.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+        let list = all.iter().map(std::string::ToString::to_string).collect::<Vec<_>>().join(",");
         let out = call(
             &conn,
             &tmp,

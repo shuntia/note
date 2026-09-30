@@ -2,6 +2,7 @@ use crate::agent::SessionDeps;
 use crate::tools::SessionKind;
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
+use std::fmt::Write as _;
 
 /// The plan event the week's letter is delivered on.
 pub const EVENT_KIND: &str = "review";
@@ -61,12 +62,10 @@ fn clip(text: &str) -> String {
 
 fn day_label(stamp: &str, tz: &jiff::tz::TimeZone) -> String {
     stamp
-        .parse::<jiff::Timestamp>()
-        .map(|ts| ts.to_zoned(tz.clone()).strftime("%a").to_string())
-        .unwrap_or_else(|_| "?".into())
+        .parse::<jiff::Timestamp>().map_or_else(|_| "?".into(), |ts| ts.to_zoned(tz.clone()).strftime("%a").to_string())
 }
 
-fn section(title: &str, lines: Vec<String>) -> String {
+fn section(title: &str, lines: &[String]) -> String {
     if lines.is_empty() {
         return String::new();
     }
@@ -90,7 +89,7 @@ fn tasks(conn: &Connection, user_id: i64, w: &Window, tz: &jiff::tz::TimeZone) -
             Ok(format!("- {} ({state}, {})", clip(&title), day_label(&at, tz)))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(section("Tasks", lines))
+    Ok(section("Tasks", &lines))
 }
 
 fn sessions(conn: &Connection, user_id: i64, w: &Window, tz: &jiff::tz::TimeZone) -> Result<String> {
@@ -111,13 +110,13 @@ fn sessions(conn: &Connection, user_id: i64, w: &Window, tz: &jiff::tz::TimeZone
             let paused_ms: i64 = r.get(6)?;
             let mut line = format!("- {} ({})", clip(&title), day_label(&started, tz));
             if let Some(p) = planned {
-                line.push_str(&format!(", planned {p} min"));
+                let _ = write!(line, ", planned {p} min");
             }
             if let Some(min) = elapsed_min(&started, ended.as_deref(), paused_ms) {
-                line.push_str(&format!(", ran {min} min"));
+                let _ = write!(line, ", ran {min} min");
             }
             match outcome.as_deref() {
-                Some(o) => line.push_str(&format!(", {o}")),
+                Some(o) => { let _ = write!(line, ", {o}"); },
                 None => line.push_str(", never ended"),
             }
             if overrun.is_some() {
@@ -126,13 +125,13 @@ fn sessions(conn: &Connection, user_id: i64, w: &Window, tz: &jiff::tz::TimeZone
             Ok(line)
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(section("Sessions", lines))
+    Ok(section("Sessions", &lines))
 }
 
 fn elapsed_min(started: &str, ended: Option<&str>, paused_ms: i64) -> Option<i64> {
     let from: jiff::Timestamp = started.parse().ok()?;
     let to: jiff::Timestamp = ended?.parse().ok()?;
-    let ms = (to - from).total(jiff::Unit::Millisecond).ok()? as i64 - paused_ms;
+    let ms = to.as_millisecond() - from.as_millisecond() - paused_ms;
     Some((ms / 60_000).max(0))
 }
 
@@ -162,7 +161,7 @@ fn triggers(conn: &Connection, user_id: i64, w: &Window) -> Result<String> {
     };
     Ok(section(
         "Trigger points",
-        vec![format!(
+        &[format!(
             "{} — said {}, stayed quiet {}",
             by_status.join(", "),
             spoken("trigger_said"),
@@ -181,7 +180,7 @@ fn nights(conn: &Connection, user_id: i64, w: &Window) -> Result<String> {
             Ok(format!("- {}: {} fact(s) kept", r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(section("Nights", lines))
+    Ok(section("Nights", &lines))
 }
 
 fn conversations(
@@ -204,7 +203,7 @@ fn conversations(
             Ok(format!("- {} ({}): {}", clip(&title), day_label(&at, tz), clip(&summary)))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(section("Conversations", lines))
+    Ok(section("Conversations", &lines))
 }
 
 fn days_remembered(
@@ -223,7 +222,7 @@ fn days_remembered(
         lines.push(format!("- {}\n{}", f.summary, f.body.trim()));
     }
     lines.reverse();
-    Ok(section("The week as memory holds it", lines))
+    Ok(section("The week as memory holds it", &lines))
 }
 
 /// The week just ended, as the review session reads it: what finished and what
@@ -499,16 +498,7 @@ mod tests {
         let (db, tmp) = env();
         let conn = db.lock().unwrap();
         a_week_of_work(&conn);
-        let id = crate::memory::add_until(
-            &conn,
-            tmp.path(),
-            "aki",
-            "episodic",
-            "2026-09-16 · the essay: Aki sent the draft",
-            "Aki drafted for an hour and sent it.",
-            Some("2026-12-15"),
-            None,
-        )
+        let id = crate::memory::add_until(&conn, tmp.path(), "aki", &crate::memory::Fact { category: "episodic", summary: "2026-09-16 · the essay: Aki sent the draft", body: "Aki drafted for an hour and sent it.", until: Some("2026-12-15") }, None)
         .unwrap();
         let raw = crate::memory::read_raw(tmp.path(), "aki", &id).unwrap().unwrap();
         let dated: Vec<&str> = raw

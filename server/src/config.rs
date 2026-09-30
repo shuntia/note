@@ -46,9 +46,7 @@ fn default_web_dir() -> PathBuf {
 /// Shipped defaults (`user.toml`, `prompts/`, `templates/`): `NOTE_DEFAULTS_DIR`
 /// when set, so a packaged install keeps them apart from per-user state.
 pub fn defaults_dir(config_dir: &Path) -> PathBuf {
-    std::env::var_os("NOTE_DEFAULTS_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| config_dir.join("defaults"))
+    std::env::var_os("NOTE_DEFAULTS_DIR").map_or_else(|| config_dir.join("defaults"), PathBuf::from)
 }
 
 fn default_secrets_dir() -> PathBuf {
@@ -93,7 +91,7 @@ impl Default for AgentConfig {
     }
 }
 
-/// The SearXNG instance the `web_search` tool queries.
+/// The `SearXNG` instance the `web_search` tool queries.
 #[derive(Debug, Clone, Deserialize)]
 pub struct SearchConfig {
     pub searxng_url: String,

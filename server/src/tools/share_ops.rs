@@ -14,7 +14,7 @@ pub struct NoteArgs {
 
 /// Writes the note onto the visitor's own thread; the session that called it
 /// hands it to the owner's channels once the tool has returned.
-pub fn note(conn: &Connection, ctx: &ToolCtx, args: NoteArgs) -> Result<serde_json::Value, ToolError> {
+pub fn note(conn: &Connection, ctx: &ToolCtx, args: &NoteArgs) -> Result<serde_json::Value, ToolError> {
     let Some(thread) = ctx.share_thread else {
         return Err(ToolError::forbidden("notes are filed from a share link alone"));
     };

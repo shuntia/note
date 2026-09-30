@@ -3,6 +3,7 @@ use crate::providers::{ChatRequest, LLMProvider, Message};
 use crate::AppState;
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
+use std::fmt::Write as _;
 
 const MAX_TITLE_CHARS: usize = 60;
 const MAX_TITLE_WORDS: usize = 8;
@@ -123,16 +124,13 @@ pub fn checkin_thread(
             |r| r.get(0),
         )
         .optional()?;
-    let id = match existing {
-        Some(id) => id,
-        None => {
-            conn.execute(
-                "INSERT INTO conversations (user_id, title, created_at, updated_at, checkin_date)
-                 VALUES (?1, ?2, ?3, ?3, ?4)",
-                (user_id, checkin_title(date, at), now.to_string(), date),
-            )?;
-            conn.last_insert_rowid()
-        }
+    let id = if let Some(id) = existing { id } else {
+        conn.execute(
+            "INSERT INTO conversations (user_id, title, created_at, updated_at, checkin_date)
+             VALUES (?1, ?2, ?3, ?3, ?4)",
+            (user_id, checkin_title(date, at), now.to_string(), date),
+        )?;
+        conn.last_insert_rowid()
     };
     append_text(conn, id, "assistant", question, now)?;
     touch(conn, id, now)?;
@@ -183,7 +181,7 @@ pub fn append_assistant(
         "INSERT INTO talk_messages
             (conversation_id, role, content, reasoning, thought_ms, created_at)
          VALUES (?1, 'assistant', ?2, ?3, ?4, ?5)",
-        (conversation_id, content, reasoning, thought_ms as i64, now.to_string()),
+        (conversation_id, content, reasoning, i64::try_from(thought_ms).unwrap_or(i64::MAX), now.to_string()),
     )?;
     Ok(())
 }
@@ -260,7 +258,7 @@ pub fn history(conn: &Connection, conversation_id: i64, limit: usize) -> Result<
          ORDER BY id DESC LIMIT ?2",
     )?;
     let mut msgs = stmt
-        .query_map((conversation_id, limit as i64), |r| {
+        .query_map((conversation_id, i64::try_from(limit).unwrap_or(i64::MAX)), |r| {
             let role: String = r.get(0)?;
             let content: String = r.get(1)?;
             Ok(match role.as_str() {
@@ -287,7 +285,7 @@ pub fn history_after(
          ORDER BY id DESC LIMIT ?3",
     )?;
     let mut msgs = stmt
-        .query_map((conversation_id, after_id, limit as i64), |r| {
+        .query_map((conversation_id, after_id, i64::try_from(limit).unwrap_or(i64::MAX)), |r| {
             let role: String = r.get(0)?;
             let content: String = r.get(1)?;
             Ok(match role.as_str() {
@@ -309,7 +307,7 @@ pub fn text_turns(conn: &Connection, conversation_id: i64) -> Result<usize> {
         [conversation_id],
         |r| r.get(0),
     )?;
-    Ok(n as usize)
+    Ok(usize::try_from(n).unwrap_or(0))
 }
 
 /// The summary a conversation carries, with the row it covers up to.
@@ -406,7 +404,7 @@ fn opening_exchange(conn: &Connection, conversation_id: i64) -> Result<Option<St
     let Some(user) = first("user")? else { return Ok(None) };
     let mut exchange = format!("User: {}", clip_chars(&user, TITLE_EXCHANGE_CHARS));
     if let Some(assistant) = first("assistant")? {
-        exchange.push_str(&format!("\nAssistant: {}", clip_chars(&assistant, TITLE_EXCHANGE_CHARS)));
+        let _ = write!(exchange, "\nAssistant: {}", clip_chars(&assistant, TITLE_EXCHANGE_CHARS));
     }
     Ok(Some(exchange))
 }
@@ -657,7 +655,7 @@ pub async fn run_turn(
             let titled_user = username.to_string();
             let conv_id = turn.conversation_id;
             tokio::task::spawn_blocking(move || {
-                generate_title(&st, user_id, &titled_user, conv_id)
+                generate_title(&st, user_id, &titled_user, conv_id);
             });
             if via == Via::Web && spoke_from == Via::Telegram {
                 mirror_to_telegram(state, user_id, turn.conversation_id, turn.reply.clone()).await;

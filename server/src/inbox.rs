@@ -113,7 +113,7 @@ pub fn list(
          ORDER BY received_at DESC, id DESC
          LIMIT ?3",
     )?;
-    let rows = stmt.query_map((user_id, before, limit as i64), |r| {
+    let rows = stmt.query_map((user_id, before, i64::try_from(limit).unwrap_or(i64::MAX)), |r| {
         Ok(InboxRow {
             id: r.get(0)?,
             source_id: r.get(1)?,
@@ -202,8 +202,8 @@ fn bad_request(message: &str) -> Response {
     (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": message }))).into_response()
 }
 
-fn non_blank(s: &Option<String>) -> Option<&str> {
-    s.as_deref().map(str::trim).filter(|s| !s.is_empty())
+fn non_blank(s: Option<&str>) -> Option<&str> {
+    s.map(str::trim).filter(|s| !s.is_empty())
 }
 
 async fn list_route(
@@ -211,14 +211,14 @@ async fn list_route(
     State(state): State<AppState>,
     Query(q): Query<ListQuery>,
 ) -> Response {
-    let limit = match non_blank(&q.limit) {
+    let limit = match non_blank(q.limit.as_deref()) {
         Some(raw) => match raw.parse::<usize>() {
             Ok(n) => n.clamp(1, LIST_LIMIT_MAX),
             Err(_) => return bad_request("limit must be a number"),
         },
         None => LIST_LIMIT_DEFAULT,
     };
-    let before = match non_blank(&q.before) {
+    let before = match non_blank(q.before.as_deref()) {
         Some(raw) => match raw.parse::<jiff::Timestamp>() {
             Ok(ts) => Some(stamp(ts)),
             Err(_) => return bad_request("before must be a timestamp"),
@@ -355,12 +355,12 @@ mod tests {
 
     #[test]
     fn a_decision_lands_on_its_own_row_and_nowhere_else() {
+        type Decided = (i64, Option<String>, Option<String>, Option<String>);
         let (conn, _tmp) = env();
         upsert(&conn, 1, "s1", "announcement", "x", at(0)).unwrap();
         upsert(&conn, 2, "s1", "announcement", "x", at(0)).unwrap();
         record_decision(&conn, 1, "s1", "task", "a study guide", at(5)).unwrap();
         record_decision(&conn, 1, "unknown", "nothing", "no row", at(5)).unwrap();
-        type Decided = (i64, Option<String>, Option<String>, Option<String>);
         let rows: Vec<Decided> = conn
             .prepare("SELECT user_id, outcome, reason, decided_at FROM inbox_items ORDER BY user_id")
             .unwrap()
@@ -381,7 +381,7 @@ mod tests {
     fn the_list_is_newest_first_per_user_with_a_strict_cursor() {
         let (conn, _tmp) = env();
         for (i, s) in ["a", "b", "c"].iter().enumerate() {
-            upsert(&conn, 1, s, "announcement", s, at(i as i64)).unwrap();
+            upsert(&conn, 1, s, "announcement", s, at(i64::try_from(i).unwrap())).unwrap();
         }
         upsert(&conn, 2, "theirs", "material", "theirs", at(10)).unwrap();
         let all: Vec<String> = list(&conn, 1, None, 50).unwrap().into_iter().map(|r| r.source_id).collect();
@@ -404,9 +404,7 @@ mod tests {
     fn an_item_reads_back_with_the_memories_its_source_holds() {
         let (conn, tmp) = env();
         let id = upsert(&conn, 1, "s1", "announcement", "Quiz Friday\nLate work loses 10%", at(0)).unwrap();
-        let mem = crate::memory::add_until(
-            &conn, tmp.path(), "aki", "semantic", "Biology quiz", "Biology: quiz Friday.", None, None,
-        )
+        let mem = crate::memory::add_until(&conn, tmp.path(), "aki", &crate::memory::Fact { category: "semantic", summary: "Biology quiz", body: "Biology: quiz Friday.", until: None }, None)
         .unwrap();
         conn.execute(
             "INSERT INTO memory_sources (user_id, source_id, memory_id) VALUES (1, 's1', ?1)",

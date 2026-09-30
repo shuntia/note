@@ -1,6 +1,7 @@
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
 use std::path::Path;
+use std::fmt::Write as _;
 
 /// The event kind a trigger point carries on the day's plan.
 pub const KIND: &str = "trigger";
@@ -134,7 +135,7 @@ pub fn allowance(
         )
         .optional()?
         .unwrap_or(0);
-    Ok(allowance_of(config_dir, username).saturating_add(extra.max(0) as u32))
+    Ok(allowance_of(config_dir, username).saturating_add(u32::try_from(extra.max(0)).unwrap_or(u32::MAX)))
 }
 
 /// Triggers the agent laid, or idleness laid, for that day out of its own
@@ -148,7 +149,7 @@ pub fn spent(conn: &Connection, user_id: i64, date: jiff::civil::Date) -> rusqli
         (user_id, date.to_string(), KIND),
         |r| r.get(0),
     )?;
-    Ok(n as u32)
+    Ok(u32::try_from(n).unwrap_or(0))
 }
 
 /// Raises today's allowance, once the user has agreed to it. Returns the new
@@ -167,7 +168,7 @@ pub fn add_extra(
     conn.query_row(
         "SELECT extra FROM trigger_budgets WHERE user_id = ?1 AND date = ?2",
         (user_id, date.to_string()),
-        |r| r.get::<_, i64>(0).map(|n| n as u32),
+        |r| r.get::<_, i64>(0).map(|n| u32::try_from(n).unwrap_or(0)),
     )
 }
 
@@ -324,10 +325,7 @@ pub fn lay(conn: &Connection, lay: &Lay) -> Result<Laid, Refusal> {
         if lay.system { "template" } else { "agent" },
         lay.cancel,
         lay.conversation_id,
-        match lay.system {
-            true => None,
-            false => lay.work_session_id.or_else(|| session.as_ref().map(|s| s.id)),
-        },
+        if lay.system { None } else { lay.work_session_id.or_else(|| session.as_ref().map(|s| s.id)) },
         lay.now,
     )
     .map_err(internal)?;
@@ -404,7 +402,7 @@ fn overrun_lead(session: &WorkSession, now: jiff::Timestamp) -> Option<i64> {
     let planned = session.planned_min?;
     let started: jiff::Timestamp = session.started_at.parse().ok()?;
     let end = started + jiff::Span::new().minutes(planned + OVERRUN_MIN);
-    (end - now).total(jiff::Unit::Minute).ok().map(|m| m as i64)
+    Some((end.as_second() - now.as_second()) / 60)
 }
 
 /// A trigger row as the runner reads it at fire time.
@@ -472,7 +470,7 @@ pub fn cancelled(conn: &Connection, user_id: i64, ev: &Firing) -> rusqlite::Resu
                     |r| r.get(0),
                 )
                 .optional()?;
-            Ok(matches!(state.as_deref(), Some("done") | Some("dropped")))
+            Ok(matches!(state.as_deref(), Some("done" | "dropped")))
         }
         "event_decided" => {
             let Some(event_id) = ev.cancel_ref else { return Ok(false) };
@@ -480,7 +478,7 @@ pub fn cancelled(conn: &Connection, user_id: i64, ev: &Firing) -> rusqlite::Resu
                 .ok()
                 .flatten()
                 .map(|(_, status)| status);
-            Ok(matches!(status.as_deref(), Some("done") | Some("dropped")))
+            Ok(matches!(status.as_deref(), Some("done" | "dropped")))
         }
         "active" => {
             let Some(since) =
@@ -520,14 +518,12 @@ pub fn situation(
     tz: &jiff::tz::TimeZone,
 ) -> String {
     let clock = |ts: &str| -> String {
-        ts.parse::<jiff::Timestamp>()
-            .map(|t| t.to_zoned(tz.clone()).strftime("%H:%M").to_string())
-            .unwrap_or_else(|_| ts.to_string())
+        ts.parse::<jiff::Timestamp>().map_or_else(|_| ts.to_string(), |t| t.to_zoned(tz.clone()).strftime("%H:%M").to_string())
     };
     let mut s = format!("{}\n\n", ev.prompt);
     match ev.created_at.as_deref() {
-        Some(at) => s.push_str(&format!("Laid at {}, meant for {}.\n", clock(at), ev.wall_time)),
-        None => s.push_str(&format!("Meant for {}.\n", ev.wall_time)),
+        Some(at) => { let _ = writeln!(s, "Laid at {}, meant for {}.", clock(at), ev.wall_time); },
+        None => { let _ = writeln!(s, "Meant for {}.", ev.wall_time); },
     }
     if let Some(id) = ev.work_session_id {
         let row: Option<(String, Option<i64>, String, String, String, i64)> = conn
@@ -541,20 +537,23 @@ pub fn situation(
             .ok()
             .flatten();
         if let Some((title, planned, started, mode, phase, round)) = row {
-            s.push_str(&format!("Work session: {title:?}, started {}", clock(&started)));
+            let _ = write!(s, "Work session: {title:?}, started {}", clock(&started));
             if let Some(min) = planned {
-                s.push_str(&format!(", planned {min} min"));
+                let _ = write!(s, ", planned {min} min");
             }
             if mode == "pomodoro" {
-                s.push_str(&format!(", in the {phase} of round {round}"));
+                let _ = write!(s, ", in the {phase} of round {round}");
             }
             let done = steps_done_since(conn, user_id, id, &started).unwrap_or(0);
-            s.push_str(&format!(", {done} step{} done since the last check.\n",
-                if done == 1 { "" } else { "s" }));
+            let _ = writeln!(
+                s,
+                ", {done} step{} done since the last check.",
+                if done == 1 { "" } else { "s" }
+            );
         }
     }
     match last_user_message(conn, user_id).ok().flatten() {
-        Some(at) => s.push_str(&format!("Last message from the user: {}.\n", clock(&at))),
+        Some(at) => { let _ = writeln!(s, "Last message from the user: {}.", clock(&at)); },
         None => s.push_str("The user has not written anything yet.\n"),
     }
     s

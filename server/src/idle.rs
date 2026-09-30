@@ -2,6 +2,7 @@ use crate::triggers::{self, Cancel};
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
 use std::path::Path;
+use std::fmt::Write as _;
 
 pub const ORIGIN: &str = "idle";
 
@@ -171,10 +172,11 @@ fn ago(ts: &str, now: jiff::Timestamp) -> String {
 pub fn context(conn: &Connection, user_id: i64, now: jiff::Timestamp) -> rusqlite::Result<String> {
     let mut s = String::new();
     if let Some(at) = crate::presence::last_active(conn, user_id)? {
-        s.push_str(&format!(
-            "Nothing from the user for {} min.\n",
+        let _ = writeln!(
+            s,
+            "Nothing from the user for {} min.",
             (now.as_second() - at.as_second()).max(0) / 60
-        ));
+        );
     }
     s.push_str("Open notes (id: text, age, last nudge):\n");
     let mut stmt = conn.prepare(
@@ -196,7 +198,7 @@ pub fn context(conn: &Connection, user_id: i64, now: jiff::Timestamp) -> rusqlit
             Some(t) => format!("nudged {} ago", ago(&t, now)),
             None => "never nudged".to_string(),
         };
-        s.push_str(&format!("- {id}: {text:?}, added {} ago, {nudge}\n", ago(&created, now)));
+        let _ = writeln!(s, "- {id}: {text:?}, added {} ago, {nudge}", ago(&created, now));
     }
     Ok(s)
 }
@@ -251,7 +253,7 @@ mod tests {
         conn.execute(
             "INSERT INTO notes (user_id, text, pinned, created_at)
              VALUES (?1, ?2, ?3, '2026-09-30T08:00:00Z')",
-            (uid, text, pinned as i64),
+            (uid, text, i64::from(pinned)),
         )
         .unwrap();
         conn.last_insert_rowid()

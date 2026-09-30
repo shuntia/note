@@ -144,9 +144,9 @@ impl Builder {
                 user_id,
                 &self.kind,
                 self.outcome,
-                self.turns as i64,
-                self.tool_calls as i64,
-                self.started.elapsed().as_millis() as i64,
+                i64::try_from(self.turns).unwrap_or(i64::MAX),
+                i64::try_from(self.tool_calls).unwrap_or(i64::MAX),
+                i64::try_from(self.started.elapsed().as_millis()).unwrap_or(i64::MAX),
                 self.error.as_deref(),
                 detail,
             ),
@@ -161,7 +161,7 @@ fn prune(conn: &Connection, user_id: i64) -> rusqlite::Result<usize> {
         "DELETE FROM agent_traces WHERE user_id = ?1 AND id <= (
              SELECT id FROM agent_traces WHERE user_id = ?1 ORDER BY id DESC LIMIT 1 OFFSET ?2
          )",
-        (user_id, KEEP_PER_USER as i64),
+        (user_id, i64::try_from(KEEP_PER_USER).unwrap_or(i64::MAX)),
     )
 }
 
@@ -301,7 +301,7 @@ mod tests {
             })
             .unwrap()
         };
-        assert_eq!(count(1), KEEP_PER_USER as i64);
+        assert_eq!(count(1), i64::try_from(KEEP_PER_USER).unwrap());
         assert_eq!(count(2), 1);
         let oldest: i64 = conn
             .query_row("SELECT MIN(id) FROM agent_traces WHERE user_id = 1", [], |r| r.get(0))
@@ -371,10 +371,7 @@ mod tests {
             (1, SessionKind::Talk, true),
         ] {
             let mut b = Builder::new(kind, "x");
-            match ok {
-                true => b.ok("y"),
-                false => b.failed("down"),
-            }
+            if ok { b.ok("y") } else { b.failed("down") }
             b.insert(&conn, user).unwrap();
         }
         let all = list(&conn, &Filter { limit: 10, ..Filter::default() }).unwrap();

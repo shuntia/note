@@ -37,21 +37,21 @@ async fn ring_inner(
     on_ringing: impl FnOnce(),
 ) -> Outcome {
     let failed = |e: anyhow::Error| Outcome::Failed { reason: format!("{e:#}") };
-    let expires = (r.ring_secs as u64 + MEMBER_GRACE_SECS) * 1000;
+    let expires = (u64::from(r.ring_secs) + MEMBER_GRACE_SECS) * 1000;
     let member = match r.matrix.put_member(r.room_id, expires, r.livekit_url).await {
         Ok(id) => id,
         Err(e) => return failed(e),
     };
-    let notification = match r.matrix.ring(r.room_id, r.mxid, &member, r.ring_secs as u64 * 1000).await {
+    let notification = match r.matrix.ring(r.room_id, r.mxid, &member, u64::from(r.ring_secs) * 1000).await {
         Ok(id) => id,
         Err(e) => return failed(e),
     };
     on_ringing();
-    let deadline = tokio::time::sleep(Duration::from_secs(r.ring_secs as u64));
+    let deadline = tokio::time::sleep(Duration::from_secs(u64::from(r.ring_secs)));
     tokio::pin!(deadline);
     loop {
         tokio::select! {
-            _ = &mut deadline => return Outcome::Missed,
+            () = &mut deadline => return Outcome::Missed,
             changed = hang_up.changed() => {
                 if changed.is_err() || *hang_up.borrow() {
                     return Outcome::Failed { reason: "hung up by Note".into() };

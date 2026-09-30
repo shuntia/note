@@ -209,7 +209,7 @@ pub fn prepare(
                                 .iter()
                                 .enumerate()
                                 .map(|(i, _)| vs.get(i).cloned())
-                                .collect()
+                                .collect();
                         }
                         Err(e) => out.error = Some(e.to_string()),
                     }
@@ -832,49 +832,49 @@ fn run(
         "task_update" => task_ops::update(conn, ctx, parse(raw)?),
         "task_split" => task_ops::split(conn, ctx, parse(raw)?),
         "task_brief" => task_ops::brief(conn, ctx, parse(raw)?),
-        "task_delete" => task_ops::delete(conn, ctx, parse(raw)?),
+        "task_delete" => task_ops::delete(conn, ctx, &parse(raw)?),
         "inbox_decide" => inbox_ops::decide(conn, ctx, parse(raw)?),
-        "memory_query" => memory_ops::query(conn, ctx, parse(raw)?),
-        "memory_read" => memory_ops::read(conn, ctx, parse(raw)?),
-        "memory_write" => memory_ops::write(conn, ctx, parse(raw)?),
-        "summary_write" => summary_ops::write(conn, ctx, parse(raw)?),
-        "harvest_done" => harvest_ops::done(conn, ctx, parse(raw)?),
-        "review_write" => review_ops::write(conn, ctx, parse(raw)?),
+        "memory_query" => memory_ops::query(conn, ctx, &parse(raw)?),
+        "memory_read" => memory_ops::read(conn, ctx, &parse(raw)?),
+        "memory_write" => memory_ops::write(conn, ctx, &parse(raw)?),
+        "summary_write" => summary_ops::write(conn, ctx, &parse(raw)?),
+        "harvest_done" => harvest_ops::done(conn, ctx, &parse(raw)?),
+        "review_write" => review_ops::write(conn, ctx, &parse(raw)?),
         "context_edit" => context_ops::edit(conn, ctx, parse(raw)?),
-        "schedule_slide" => schedule_ops::slide(conn, ctx, parse(raw)?),
-        "schedule_snooze" => schedule_ops::snooze(conn, ctx, parse(raw)?),
-        "schedule_drop" => schedule_ops::drop_event(conn, ctx, parse(raw)?),
+        "schedule_slide" => schedule_ops::slide(conn, ctx, &parse(raw)?),
+        "schedule_snooze" => schedule_ops::snooze(conn, ctx, &parse(raw)?),
+        "schedule_drop" => schedule_ops::drop_event(conn, ctx, &parse(raw)?),
         "schedule_reshape" => schedule_ops::reshape(conn, ctx, parse(raw)?),
-        "schedule_insert" => schedule_ops::insert(conn, ctx, parse(raw)?),
-        "notify_send" => outreach_ops::send(conn, ctx, parse(raw)?),
-        "nightly_notes_write" => context_ops::nightly_notes_write(conn, ctx, parse(raw)?),
-        "task_list" => task_query::list(conn, ctx, parse(raw)?),
-        "task_search" => task_query::search(conn, ctx, parse(raw)?),
-        "task_read" => task_query::read(conn, ctx, parse(raw)?),
-        "task_bulk_update" => task_query::bulk_update(conn, ctx, parse(raw)?),
+        "schedule_insert" => schedule_ops::insert(conn, ctx, &parse(raw)?),
+        "notify_send" => outreach_ops::send(conn, ctx, &parse(raw)?),
+        "nightly_notes_write" => context_ops::nightly_notes_write(conn, ctx, &parse(raw)?),
+        "task_list" => task_query::list(conn, ctx, &parse(raw)?),
+        "task_search" => task_query::search(conn, ctx, &parse(raw)?),
+        "task_read" => task_query::read(conn, ctx, &parse(raw)?),
+        "task_bulk_update" => task_query::bulk_update(conn, ctx, &parse(raw)?),
         "goal_create" => goal_ops::create(conn, ctx, parse(raw)?),
         "goal_update" => goal_ops::update(conn, ctx, parse(raw)?),
-        "goal_list" => goal_ops::list(conn, ctx, parse(raw)?),
+        "goal_list" => goal_ops::list(conn, ctx, &parse(raw)?),
         "note_add" => note_ops::add(conn, ctx, parse(raw)?),
         "note_update" => note_ops::update(conn, ctx, parse(raw)?),
-        "note_done" => note_ops::done(conn, ctx, parse(raw)?),
+        "note_done" => note_ops::done(conn, ctx, &parse(raw)?),
         "note_list" => note_ops::list(conn, ctx, parse(raw)?),
-        "plan_tasks" => plan_ops::plan_tasks(conn, ctx, parse(raw)?),
+        "plan_tasks" => plan_ops::plan_tasks(conn, ctx, &parse(raw)?),
         "plan_auto" => plan_ops::plan_auto(conn, ctx, parse(raw)?),
         "plan_carry" => plan_ops::plan_carry(conn, ctx, parse(raw)?),
         "plan_list" => plan_ops::plan_list(conn, ctx, parse(raw)?),
-        "calendar_list" => calendar_ops::list(conn, ctx, parse(raw)?),
+        "calendar_list" => calendar_ops::list(conn, ctx, &parse(raw)?),
         "calendar_add" => calendar_ops::add(conn, ctx, parse(raw)?),
         "calendar_update" => calendar_ops::update(conn, ctx, parse(raw)?),
-        "calendar_remove" => calendar_ops::remove(conn, ctx, parse(raw)?),
-        "calendar_skip" => calendar_ops::skip(conn, ctx, parse(raw)?),
-        "trigger_set" => trigger_ops::set(conn, ctx, kind, parse(raw)?),
-        "wait_until" => trigger_ops::wait_until(conn, ctx, kind, parse(raw)?),
-        "wait_for" => trigger_ops::wait_for(conn, ctx, kind, parse(raw)?),
-        "trigger_budget" => trigger_ops::budget(conn, ctx, parse(raw)?),
-        "say" => trigger_ops::say(conn, ctx, parse(raw)?),
-        "stay_quiet" => trigger_ops::stay_quiet(conn, ctx, parse(raw)?),
-        "share_note" => share_ops::note(conn, ctx, parse(raw)?),
+        "calendar_remove" => calendar_ops::remove(conn, ctx, &parse(raw)?),
+        "calendar_skip" => calendar_ops::skip(conn, ctx, &parse(raw)?),
+        "trigger_set" => trigger_ops::set(conn, ctx, kind, &parse(raw)?),
+        "wait_until" => trigger_ops::wait_until(conn, ctx, kind, &parse(raw)?),
+        "wait_for" => trigger_ops::wait_for(conn, ctx, kind, &parse(raw)?),
+        "trigger_budget" => trigger_ops::budget(conn, ctx, &parse(raw)?),
+        "say" => trigger_ops::say(conn, ctx, &parse(raw)?),
+        "stay_quiet" => trigger_ops::stay_quiet(conn, ctx, &parse(raw)?),
+        "share_note" => share_ops::note(conn, ctx, &parse(raw)?),
         // Both run in the session around this dispatch: one reaches the
         // network, the other expands into calls of its own.
         "web_search" | "batch" => {
@@ -899,7 +899,7 @@ mod tests {
         (conn, tempfile::tempdir().unwrap())
     }
 
-    fn ctx<'a>(tmp: &'a tempfile::TempDir) -> ToolCtx<'a> {
+    fn ctx(tmp: &tempfile::TempDir) -> ToolCtx<'_> {
         ToolCtx { config_dir: tmp.path(), data_dir: tmp.path(), user_id: 1, username: "aki", vectors: PreparedVectors::default(), task_scope: None, inbox_source: None, memory_source: None, share: None, share_thread: None }
     }
 
@@ -1177,6 +1177,12 @@ mod tests {
 
     #[test]
     fn prepare_embeds_only_memory_tools_and_reports_failures() {
+        struct FailingEmb;
+        impl crate::providers::EmbeddingsProvider for FailingEmb {
+            fn embed(&self, _: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+                anyhow::bail!("endpoint down")
+            }
+        }
         use crate::providers::mock::MockEmbeddings;
         let emb = MockEmbeddings;
 
@@ -1198,12 +1204,6 @@ mod tests {
         let v = prepare(None, "memory_query", r#"{"query":"abba"}"#);
         assert!(v.query.is_none());
 
-        struct FailingEmb;
-        impl crate::providers::EmbeddingsProvider for FailingEmb {
-            fn embed(&self, _: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
-                anyhow::bail!("endpoint down")
-            }
-        }
         let v = prepare(Some(&FailingEmb), "memory_query", r#"{"query":"abba"}"#);
         assert!(v.query.is_none());
         assert!(v.error.as_deref().unwrap_or("").contains("endpoint down"));
@@ -1404,7 +1404,7 @@ mod tests {
         assert!(!is_terminal(SessionKind::Talk, "task_update"));
     }
 
-    fn scoped<'a>(tmp: &'a tempfile::TempDir, task_id: i64) -> ToolCtx<'a> {
+    fn scoped(tmp: &tempfile::TempDir, task_id: i64) -> ToolCtx<'_> {
         ToolCtx { task_scope: Some(task_id), ..ctx(tmp) }
     }
 
@@ -1604,7 +1604,7 @@ mod tests {
             scope: crate::shares::ShareScope::default(),
             expires_at: now + jiff::Span::new().hours(24),
         };
-        let share = crate::shares::create(&conn, 1, new, now, &crate::shares::Limits::default()).unwrap();
+        let share = crate::shares::create(&conn, 1, &new, now, &crate::shares::Limits::default()).unwrap();
         let thread = crate::shares::new_thread(&conn, share.id, "v1", now).unwrap();
         let scope = crate::shares::ShareScope { notes: true, ..Default::default() };
         let sctx = ToolCtx { share: Some(scope), share_thread: Some(thread), ..ctx(&tmp) };

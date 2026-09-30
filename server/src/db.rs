@@ -696,17 +696,17 @@ fn init(conn: &Connection) -> Result<()> {
 /// Each step and its `user_version` bump commit atomically, so a failure
 /// partway through a step leaves the database exactly at the previous version.
 fn apply_migrations(conn: &Connection, migrations: &[&str]) -> Result<()> {
-    let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    if version as usize > migrations.len() {
+    let version = usize::try_from(conn.query_row::<i64, _, _>("PRAGMA user_version", [], |r| r.get(0))?)?;
+    if version > migrations.len() {
         anyhow::bail!(
             "database schema version {version} is newer than this binary supports ({})",
             migrations.len()
         );
     }
-    for (i, sql) in migrations.iter().enumerate().skip(version as usize) {
+    for (i, sql) in migrations.iter().enumerate().skip(version) {
         let tx = conn.unchecked_transaction()?;
         tx.execute_batch(sql)?;
-        tx.pragma_update(None, "user_version", (i + 1) as i64)?;
+        tx.pragma_update(None, "user_version", i64::try_from(i + 1)?)?;
         tx.commit()?;
     }
     Ok(())
@@ -720,7 +720,7 @@ mod tests {
     fn migrations_apply_and_are_idempotent() {
         let conn = open_memory().unwrap();
         let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(v, MIGRATIONS.len() as i64);
+        assert_eq!(v, i64::try_from(MIGRATIONS.len()).unwrap());
         init(&conn).unwrap();
         conn.execute(
             "INSERT INTO users (username, pass_hash, role) VALUES ('a','h','admin')",
@@ -986,7 +986,7 @@ mod tests {
     fn v14_adds_the_memory_source_map_and_the_until_column() {
         let conn = open_memory().unwrap();
         let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(v, MIGRATIONS.len() as i64);
+        assert_eq!(v, i64::try_from(MIGRATIONS.len()).unwrap());
         conn.execute(
             "INSERT INTO users (username, pass_hash, role) VALUES ('a','h','member')",
             [],
@@ -1022,7 +1022,7 @@ mod tests {
     fn v15_creates_calendar_entries_and_their_exceptions() {
         let conn = open_memory().unwrap();
         let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(v, MIGRATIONS.len() as i64);
+        assert_eq!(v, i64::try_from(MIGRATIONS.len()).unwrap());
         conn.execute(
             "INSERT INTO users (username, pass_hash, role) VALUES ('a','h','member')",
             [],
@@ -1081,7 +1081,7 @@ mod tests {
     fn v16_adds_the_trace_columns_to_talk_messages() {
         let conn = open_memory().unwrap();
         let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(v, MIGRATIONS.len() as i64);
+        assert_eq!(v, i64::try_from(MIGRATIONS.len()).unwrap());
         conn.execute(
             "INSERT INTO users (username, pass_hash, role) VALUES ('a','h','member')",
             [],
@@ -1119,7 +1119,7 @@ mod tests {
     fn v17_adds_the_due_date_the_external_identity_and_the_tombstones() {
         let conn = open_memory().unwrap();
         let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(v, MIGRATIONS.len() as i64);
+        assert_eq!(v, i64::try_from(MIGRATIONS.len()).unwrap());
         conn.execute(
             "INSERT INTO users (username, pass_hash, role) VALUES ('a','h','member')",
             [],
@@ -1195,7 +1195,7 @@ mod tests {
     fn v18_adds_the_checkin_date_to_conversations() {
         let conn = open_memory().unwrap();
         let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(v, MIGRATIONS.len() as i64);
+        assert_eq!(v, i64::try_from(MIGRATIONS.len()).unwrap());
         conn.execute(
             "INSERT INTO users (username, pass_hash, role) VALUES ('a','h','member')",
             [],
@@ -1458,7 +1458,7 @@ mod tests {
     fn v30_gives_a_calendar_entry_a_name_from_outside() {
         let conn = open_memory().unwrap();
         let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(v, MIGRATIONS.len() as i64);
+        assert_eq!(v, i64::try_from(MIGRATIONS.len()).unwrap());
         conn.execute(
             "INSERT INTO users (username, pass_hash, role) VALUES ('a','h','member')",
             [],
@@ -1494,7 +1494,7 @@ mod tests {
     fn v31_counts_real_minutes_and_holds_what_was_learned() {
         let conn = open_memory().unwrap();
         let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(v, MIGRATIONS.len() as i64);
+        assert_eq!(v, i64::try_from(MIGRATIONS.len()).unwrap());
         conn.execute(
             "INSERT INTO users (username, pass_hash, role) VALUES ('a','h','member')",
             [],
@@ -1530,7 +1530,7 @@ mod tests {
     fn v34_starts_a_task_at_no_progress_and_holds_it_in_range() {
         let conn = open_memory().unwrap();
         let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(v, MIGRATIONS.len() as i64);
+        assert_eq!(v, i64::try_from(MIGRATIONS.len()).unwrap());
         conn.execute(
             "INSERT INTO users (username, pass_hash, role) VALUES ('a','h','member')",
             [],
@@ -1598,7 +1598,7 @@ mod tests {
         .unwrap();
         apply_migrations(&conn, MIGRATIONS).unwrap();
         let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(v, MIGRATIONS.len() as i64);
+        assert_eq!(v, i64::try_from(MIGRATIONS.len()).unwrap());
         let kind: String = conn
             .query_row("SELECT title_kind FROM conversations WHERE id = 1", [], |r| r.get(0))
             .unwrap();
@@ -1649,7 +1649,7 @@ mod tests {
     fn v38_opens_the_goals_table_and_hangs_top_level_tasks_from_it() {
         let conn = open_memory().unwrap();
         let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(v, MIGRATIONS.len() as i64);
+        assert_eq!(v, i64::try_from(MIGRATIONS.len()).unwrap());
         conn.execute(
             "INSERT INTO users (username, pass_hash, role) VALUES ('a','h','member')",
             [],
@@ -1695,7 +1695,7 @@ mod tests {
     fn v26_opens_the_telegram_tables_and_stamps_conversations() {
         let conn = open_memory().unwrap();
         let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(v, MIGRATIONS.len() as i64);
+        assert_eq!(v, i64::try_from(MIGRATIONS.len()).unwrap());
         conn.execute(
             "INSERT INTO users (username, pass_hash, role)
              VALUES ('a','h','member'), ('b','h','member')",

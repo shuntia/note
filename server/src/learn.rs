@@ -32,6 +32,11 @@ pub fn plan_factor(conn: &Connection, user_id: i64) -> rusqlite::Result<Option<L
 
 /// A planned duration as the factor says it will really run, rounded up to the
 /// grain. Without a factor the duration stands as it was.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    reason = "block lengths are minutes, far inside both types"
+)]
 pub fn stretch(minutes: i64, factor: Option<Learned>) -> i64 {
     let Some(f) = factor else { return minutes };
     let stretched = (minutes as f64 * f.value / GRAIN as f64).ceil() as i64 * GRAIN;
@@ -42,13 +47,14 @@ fn median(values: &mut [f64]) -> f64 {
     values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let n = values.len();
     match n % 2 {
-        0 => (values[n / 2 - 1] + values[n / 2]) / 2.0,
+        0 => f64::midpoint(values[n / 2 - 1], values[n / 2]),
         _ => values[n / 2],
     }
 }
 
 /// Elapsed over planned for every session in the window that finished what it
 /// set out to do and ran long enough to be told from a false start.
+#[expect(clippy::cast_precision_loss, reason = "session lengths are minutes, far inside f64")]
 fn ratios(conn: &Connection, user_id: i64, now: jiff::Timestamp) -> rusqlite::Result<Vec<f64>> {
     let since = now
         .checked_sub(jiff::Span::new().hours(WINDOW_HOURS))
@@ -73,8 +79,7 @@ fn ratios(conn: &Connection, user_id: i64, now: jiff::Timestamp) -> rusqlite::Re
         else {
             continue;
         };
-        let Ok(ms) = (ended - started).total(jiff::Unit::Millisecond) else { continue };
-        let elapsed = (ms as i64 - paused).max(0) / 60_000;
+        let elapsed = (ended.as_millisecond() - started.as_millisecond() - paused).max(0) / 60_000;
         if elapsed < MIN_RUN_MIN {
             continue;
         }
@@ -94,7 +99,7 @@ pub fn run_for_user(conn: &Connection, user_id: i64, now: jiff::Timestamp) -> Re
         )?;
         return Ok(());
     }
-    let sample = ratios.len() as i64;
+    let sample = i64::try_from(ratios.len()).unwrap_or(i64::MAX);
     let value = median(&mut ratios).clamp(FLOOR, CEILING);
     conn.execute(
         "INSERT INTO learning (user_id, key, value, sample, computed_at)
@@ -161,7 +166,7 @@ mod tests {
         session(&conn, uid, 30, 60, 3);
         session(&conn, uid, 30, 60, 4);
         run_for_user(&conn, uid, now()).unwrap();
-        assert_eq!(plan_factor(&conn, uid).unwrap().unwrap().value, 1.5);
+        assert!((plan_factor(&conn, uid).unwrap().unwrap().value - 1.5).abs() < 1e-9);
     }
 
     #[test]
@@ -171,14 +176,14 @@ mod tests {
             session(&conn, uid, 10, 120, d);
         }
         run_for_user(&conn, uid, now()).unwrap();
-        assert_eq!(plan_factor(&conn, uid).unwrap().unwrap().value, CEILING);
+        assert!((plan_factor(&conn, uid).unwrap().unwrap().value - CEILING).abs() < 1e-9);
 
         let (conn, uid) = env();
         for d in 1..=3 {
             session(&conn, uid, 120, 6, d);
         }
         run_for_user(&conn, uid, now()).unwrap();
-        assert_eq!(plan_factor(&conn, uid).unwrap().unwrap().value, FLOOR);
+        assert!((plan_factor(&conn, uid).unwrap().unwrap().value - FLOOR).abs() < 1e-9);
     }
 
     #[test]
@@ -232,7 +237,7 @@ mod tests {
         }
         conn.execute("UPDATE work_sessions SET paused_ms = 30 * 60000", []).unwrap();
         run_for_user(&conn, uid, now()).unwrap();
-        assert_eq!(plan_factor(&conn, uid).unwrap().unwrap().value, 1.0);
+        assert!((plan_factor(&conn, uid).unwrap().unwrap().value - 1.0).abs() < 1e-9);
     }
 
     #[test]

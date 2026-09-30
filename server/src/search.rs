@@ -4,6 +4,7 @@ use crate::tools::ToolError;
 use anyhow::Result;
 use schemars::JsonSchema;
 use serde::Deserialize;
+use std::fmt::Write as _;
 
 /// How much of one result's text the model is shown.
 pub const MAX_SNIPPET_CHARS: usize = 500;
@@ -21,7 +22,7 @@ pub trait SearchProvider: Send + Sync {
     fn search(&self, query: &str) -> Result<Vec<SearchHit>>;
 }
 
-/// A SearXNG instance's JSON API.
+/// A `SearXNG` instance's JSON API.
 pub struct SearxngSearch {
     agent: ureq::Agent,
     url: String,
@@ -111,15 +112,12 @@ pub fn run_tool(
         log(deps, user_id, 0, "none");
         return Ok(serde_json::json!({ "summary": "no results", "sources": [] }));
     }
-    match summarize(deps, username, background, &args, &hits) {
-        Some(summary) => {
-            log(deps, user_id, hits.len(), "ok");
-            Ok(serde_json::json!({ "summary": summary, "sources": sources(&hits) }))
-        }
-        None => {
-            log(deps, user_id, hits.len(), "fallback");
-            Ok(serde_json::json!({ "summary": null, "hits": raw_hits(&hits) }))
-        }
+    if let Some(summary) = summarize(deps, username, background, &args, &hits) {
+        log(deps, user_id, hits.len(), "ok");
+        Ok(serde_json::json!({ "summary": summary, "sources": sources(&hits) }))
+    } else {
+        log(deps, user_id, hits.len(), "fallback");
+        Ok(serde_json::json!({ "summary": null, "hits": raw_hits(&hits) }))
     }
 }
 
@@ -135,11 +133,11 @@ fn summarize(
     let system = crate::prompts::load(deps.config_dir, username, "search").ok()?;
     let mut prompt = format!("Query: {}\n", args.query.trim());
     if let Some(q) = args.question.as_deref().map(str::trim).filter(|q| !q.is_empty()) {
-        prompt.push_str(&format!("Question: {q}\n"));
+        let _ = writeln!(prompt, "Question: {q}");
     }
     prompt.push_str("\nResults:\n");
     for (i, h) in hits.iter().enumerate() {
-        prompt.push_str(&format!("{}. {}\n{}\n{}\n\n", i + 1, h.title, h.url, h.snippet));
+        let _ = write!(prompt, "{}. {}\n{}\n{}\n\n", i + 1, h.title, h.url, h.snippet);
     }
     let messages = [Message::User(prompt)];
     let req = ChatRequest { system: &system, messages: &messages, tools: &[], background };

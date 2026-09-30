@@ -16,7 +16,7 @@ pub struct SendArgs {
 /// Unlike `schedule_insert`, which rejects a day with no plan, this generates
 /// today's plan when the nightly job has not run yet: an outreach nudge is
 /// about right now, so it must land whether or not the day was planned.
-pub fn send(conn: &Connection, ctx: &ToolCtx, args: SendArgs) -> Result<serde_json::Value, ToolError> {
+pub fn send(conn: &Connection, ctx: &ToolCtx, args: &SendArgs) -> Result<serde_json::Value, ToolError> {
     check_text("text", &args.text)?;
     let text = args.text.trim();
     if text.is_empty() {

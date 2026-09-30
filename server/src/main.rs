@@ -9,9 +9,7 @@ const USAGE: &str = "usage: note-server [create-user <name> <password> [--admin]
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let config_dir = std::env::var("NOTE_CONFIG_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("./config"));
+    let config_dir = std::env::var("NOTE_CONFIG_DIR").map_or_else(|_| PathBuf::from("./config"), PathBuf::from);
     let cfg = match std::env::var_os("NOTE_SERVER_CONFIG") {
         Some(path) => ServerConfig::load_file(std::path::Path::new(&path))?,
         None => ServerConfig::load(&config_dir)?,

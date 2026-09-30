@@ -11,13 +11,13 @@ use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::{broadcast, watch};
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
+        .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
         .unwrap_or(0)
 }
 
@@ -149,7 +149,7 @@ impl Service {
             return;
         };
         match self.matrix.joined_members(&link.room_id).await {
-            Ok(members) if members.contains(&link.mxid) => self.report_join(&link.room_id, &link.mxid).await,
+            Ok(members) if members.contains(&link.mxid) => self.report_join(&link.room_id, &link.mxid),
             Ok(_) => {}
             Err(e) => eprintln!("voice: reading the members of {} failed: {e:#}", link.room_id),
         }
@@ -191,7 +191,7 @@ impl Service {
         Ok(Reply::Dm { room_id })
     }
 
-    async fn report_join(self: &Arc<Self>, room: &str, user: &str) {
+    fn report_join(self: &Arc<Self>, room: &str, user: &str) {
         let pending: Vec<i64> = lock(&self.state)
             .data
             .links
@@ -235,7 +235,7 @@ impl Service {
                 Ok(batch) => {
                     for ev in batch.events {
                         if let RoomEvent::Joined { room, user } = &ev {
-                            self.report_join(room, user).await;
+                            self.report_join(room, user);
                         }
                         let _ = self.events.send(ev);
                     }

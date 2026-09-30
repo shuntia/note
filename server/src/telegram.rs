@@ -219,7 +219,7 @@ pub async fn receive(state: &AppState, chats: &mut Chats, update: &Update) {
         None
     } else {
         let conn = state.db();
-        let cutoff = now - jiff::Span::new().minutes(state.idle_summary_min as i64);
+        let cutoff = now - jiff::Span::new().minutes(i64::from(state.idle_summary_min));
         thread_for(&conn, link.user_id, cutoff).unwrap_or(None)
     };
     match crate::talk::run_turn(state, link.user_id, &link.username, conversation, text, Via::Telegram)
@@ -292,9 +292,9 @@ fn apply(
                 .map(|()| format!("Snoozed {minutes} min"))
         }
         ["block", "start", id] => start_block(conn, config_dir, link, id.parse().ok()?, now),
-        ["carry", date] => {
-            let date: jiff::civil::Date = date.parse().ok()?;
-            crate::plan::carry(conn, config_dir, &link.username, link.user_id, date, now)
+        ["carry", raw] => {
+            let day: jiff::civil::Date = raw.parse().ok()?;
+            crate::plan::carry(conn, config_dir, &link.username, link.user_id, day, now)
                 .ok()
                 .map(|_| "Carried".to_string())
         }
@@ -392,9 +392,7 @@ async fn offer_linking(
         };
         if let Some(link) = linked {
             chats.told.remove(&update.chat_id);
-            let name = crate::config::UserConfig::load(&state.config_dir, &link.username)
-                .map(|cfg| cfg.display_name)
-                .unwrap_or_else(|_| link.username.clone());
+            let name = crate::config::UserConfig::load(&state.config_dir, &link.username).map_or_else(|_| link.username.clone(), |cfg| cfg.display_name);
             return say(state, update.chat_id, &format!("Linked to Note as {name}")).await;
         }
     }

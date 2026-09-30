@@ -8,6 +8,7 @@ use axum::{Json, Router};
 use base64::Engine;
 use rusqlite::OptionalExtension;
 use serde::Deserialize;
+use std::fmt::Write as _;
 
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -172,7 +173,7 @@ fn share_router(state: AppState) -> Router<AppState> {
 }
 
 fn share_display_name(state: &AppState, username: &str) -> String {
-    crate::config::UserConfig::load(&state.config_dir, username).map(|c| c.display_name).unwrap_or_else(|_| username.to_string())
+    crate::config::UserConfig::load(&state.config_dir, username).map_or_else(|_| username.to_string(), |c| c.display_name)
 }
 
 /// Each page load reads this once, so it is where a visit is counted.
@@ -402,7 +403,7 @@ async fn goals_update(
     Json(patch): Json<crate::goals::GoalPatch>,
 ) -> impl IntoResponse {
     let conn = state.db();
-    match crate::goals::update(&conn, user.id, id, patch) {
+    match crate::goals::update(&conn, user.id, id, &patch) {
         Ok(Some(g)) => Json(g).into_response(),
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(e) => task_error(e),
@@ -436,7 +437,7 @@ async fn notes_create(
     Json(req): Json<crate::notes::NewNote>,
 ) -> impl IntoResponse {
     let conn = state.db();
-    match crate::notes::create(&conn, user.id, req, jiff::Timestamp::now()) {
+    match crate::notes::create(&conn, user.id, &req, jiff::Timestamp::now()) {
         Ok(n) => (StatusCode::CREATED, Json(n)).into_response(),
         Err(e) => task_error(e),
     }
@@ -449,7 +450,7 @@ async fn notes_update(
     Json(patch): Json<crate::notes::NotePatch>,
 ) -> impl IntoResponse {
     let conn = state.db();
-    match crate::notes::update(&conn, user.id, id, patch, jiff::Timestamp::now()) {
+    match crate::notes::update(&conn, user.id, id, &patch, jiff::Timestamp::now()) {
         Ok(Some(n)) => Json(n).into_response(),
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(e) => task_error(e),
@@ -573,7 +574,7 @@ async fn tasks_update(
 ) -> impl IntoResponse {
     let conn = state.db();
     let tz = user_zone(&state, &user.username);
-    match crate::tasks::update(&conn, user.id, id, patch) {
+    match crate::tasks::update(&conn, user.id, id, &patch) {
         Ok(Some(mut t)) => {
             let _ = crate::tasks::stamp_schedule(
                 &conn,
@@ -746,15 +747,16 @@ fn brief_message(node: &crate::tasks::TaskNode, context: &str, tz: &jiff::tz::Ti
         t.id, t.title, t.state, t.description, t.notes
     );
     if let Some(at) = t.due_at.as_deref().and_then(|d| d.parse::<jiff::Timestamp>().ok()) {
-        m.push_str(&format!(
-            "Due: {}\n",
+        let _ = writeln!(
+            m,
+            "Due: {}",
             at.to_zoned(tz.clone()).strftime("%Y-%m-%d %H:%M")
-        ));
+        );
     }
     if !node.children.is_empty() {
         m.push_str("Steps:\n");
         for c in &node.children {
-            m.push_str(&format!("- {}\n", c.title));
+            let _ = writeln!(m, "- {}", c.title);
         }
     }
     if !context.trim().is_empty() {
@@ -774,7 +776,7 @@ async fn task_agent(
     Path(id): Path<i64>,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
-    let req: BriefReq = if body.iter().all(|b| b.is_ascii_whitespace()) {
+    let req: BriefReq = if body.iter().all(u8::is_ascii_whitespace) {
         BriefReq::default()
     } else {
         match serde_json::from_slice(&body) {
@@ -1250,14 +1252,13 @@ fn conversation_not_found() -> axum::response::Response {
 
 async fn conversations_list(user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
     let conn = state.db();
-    let mut stmt = match conn.prepare(
+    let Ok(mut stmt) = conn.prepare(
         "SELECT id, title, updated_at, summary, via, title_kind FROM conversations
          WHERE user_id = ?1
            AND EXISTS (SELECT 1 FROM talk_messages m WHERE m.conversation_id = conversations.id)
          ORDER BY updated_at DESC, id DESC",
-    ) {
-        Ok(s) => s,
-        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    ) else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
     let rows: Result<Vec<serde_json::Value>, _> = stmt
         .query_map([user.id], |r| {
@@ -1390,7 +1391,7 @@ fn settings_body(
     state: &AppState,
     cfg: &crate::config::UserConfig,
     user: &CurrentUser,
-    schedule: Vec<crate::templates::ScheduleRow>,
+    schedule: &[crate::templates::ScheduleRow],
     telegram_linked: bool,
     voice_link: Option<crate::voice::links::Link>,
 ) -> serde_json::Value {
@@ -1462,9 +1463,8 @@ async fn presence(_user: CurrentUser) -> StatusCode {
 }
 
 async fn settings_get(user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
-    let cfg = match crate::config::UserConfig::load(&state.config_dir, &user.username) {
-        Ok(c) => c,
-        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    let Ok(cfg) = crate::config::UserConfig::load(&state.config_dir, &user.username) else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
     let mut zones: Vec<String> = jiff::tz::db()
         .available()
@@ -1480,7 +1480,7 @@ async fn settings_get(user: CurrentUser, State(state): State<AppState>) -> impl 
             crate::voice::links::get(&conn, user.id).unwrap_or(None),
         )
     };
-    let mut body = settings_body(&state, &cfg, &user, schedule, linked, voice_link);
+    let mut body = settings_body(&state, &cfg, &user, &schedule, linked, voice_link);
     body["templates"] = serde_json::json!(templates);
     body["timezones"] = serde_json::json!(zones);
     Json(body).into_response()
@@ -1500,9 +1500,8 @@ async fn settings_put(
 ) -> impl IntoResponse {
     let templates = crate::templates::available(&state.config_dir, &user.username);
     let conn = state.db();
-    let mut cfg = match crate::config::UserConfig::load(&state.config_dir, &user.username) {
-        Ok(c) => c,
-        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    let Ok(mut cfg) = crate::config::UserConfig::load(&state.config_dir, &user.username) else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
     if let Some(name) = req.display_name {
         let name = name.trim();
@@ -1627,7 +1626,7 @@ async fn settings_put(
         Ok(()) => {
             let linked = crate::telegram::chat_for_user(&conn, user.id).unwrap_or(None).is_some();
             let voice_link = crate::voice::links::get(&conn, user.id).unwrap_or(None);
-            Json(settings_body(&state, &cfg, &user, schedule, linked, voice_link)).into_response()
+            Json(settings_body(&state, &cfg, &user, &schedule, linked, voice_link)).into_response()
         }
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
@@ -1924,7 +1923,7 @@ async fn memory_list(
     }
     let conn = state.db();
     let hits = match blank_as_none(q.q.as_ref()) {
-        Some(search) => crate::memory::query(&conn, &user.username, search, limit as i64, None),
+        Some(search) => crate::memory::query(&conn, &user.username, search, i64::try_from(limit).unwrap_or(i64::MAX), None),
         None => crate::memory::list(&conn, &user.username, category, limit),
     };
     match hits {
@@ -1990,9 +1989,8 @@ async fn plan_today(
     State(state): State<AppState>,
     Query(q): Query<PlanQuery>,
 ) -> impl IntoResponse {
-    let ucfg = match crate::config::UserConfig::load(&state.config_dir, &user.username) {
-        Ok(c) => c,
-        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    let Ok(ucfg) = crate::config::UserConfig::load(&state.config_dir, &user.username) else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
     let date = match q.date {
         Some(d) => match d.parse::<jiff::civil::Date>() {
@@ -2004,9 +2002,8 @@ async fn plan_today(
             Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         },
     };
-    let tmpl = match crate::templates::Template::load(&state.config_dir, &user.username, &ucfg.template) {
-        Ok(t) => t,
-        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    let Ok(tmpl) = crate::templates::Template::load(&state.config_dir, &user.username, &ucfg.template) else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
     let conn = state.db();
     if crate::plan::generate(&conn, user.id, &tmpl, date).is_err() {
@@ -2123,7 +2120,7 @@ async fn plan_range(
         return StatusCode::BAD_REQUEST.into_response();
     };
     let span = (to - from).get_days();
-    if span < 0 || span >= MAX_RANGE_DAYS {
+    if !(0..MAX_RANGE_DAYS).contains(&span) {
         return StatusCode::BAD_REQUEST.into_response();
     }
     let conn = state.db();
@@ -2224,22 +2221,17 @@ async fn debrief(
     State(state): State<AppState>,
     Query(q): Query<DebriefQuery>,
 ) -> impl IntoResponse {
-    let date = match q.date {
-        Some(d) => match d.parse::<jiff::civil::Date>() {
-            Ok(d) => d.to_string(),
-            Err(_) => return StatusCode::BAD_REQUEST.into_response(),
-        },
-        None => {
-            let ucfg = match crate::config::UserConfig::load(&state.config_dir, &user.username) {
-                Ok(c) => c,
-                Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-            };
-            let tz = match jiff::tz::TimeZone::get(&ucfg.timezone) {
-                Ok(tz) => tz,
-                Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-            };
-            jiff::Timestamp::now().to_zoned(tz).date().to_string()
-        }
+    let date = if let Some(d) = q.date { match d.parse::<jiff::civil::Date>() {
+        Ok(d) => d.to_string(),
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    } } else {
+        let Ok(ucfg) = crate::config::UserConfig::load(&state.config_dir, &user.username) else {
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        };
+        let Ok(tz) = jiff::tz::TimeZone::get(&ucfg.timezone) else {
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        };
+        jiff::Timestamp::now().to_zoned(tz).date().to_string()
     };
     let conn = state.db();
     let row = conn
@@ -2390,13 +2382,11 @@ async fn event_move_tomorrow(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
-    let ucfg = match crate::config::UserConfig::load(&state.config_dir, &user.username) {
-        Ok(c) => c,
-        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    let Ok(ucfg) = crate::config::UserConfig::load(&state.config_dir, &user.username) else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
-    let tmpl = match crate::templates::Template::load(&state.config_dir, &user.username, &ucfg.template) {
-        Ok(t) => t,
-        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    let Ok(tmpl) = crate::templates::Template::load(&state.config_dir, &user.username, &ucfg.template) else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
     let conn = state.db();
     match crate::plan::move_to_tomorrow(&conn, user.id, id, &tmpl) {
@@ -2731,7 +2721,7 @@ impl axum::extract::FromRequestParts<AppState> for WsAdmission {
         }
         let user = CurrentUser::from_request_parts(parts, state)
             .await
-            .map_err(|s| s.into_response())?;
+            .map_err(axum::response::IntoResponse::into_response)?;
         if state.hub.at_capacity(user.id) {
             return Err((
                 StatusCode::TOO_MANY_REQUESTS,
@@ -2819,9 +2809,8 @@ fn calendar_failed(e: crate::calendar::CalendarError) -> axum::response::Respons
     use crate::calendar::CalendarError as E;
     match e {
         E::Invalid(m) => calendar_error(StatusCode::UNPROCESSABLE_ENTITY, &m),
-        e @ E::TooMany => calendar_error(StatusCode::CONFLICT, &e.to_string()),
+        e @ (E::TooMany | E::Duplicate { .. }) => calendar_error(StatusCode::CONFLICT, &e.to_string()),
         e @ E::NotFound(_) => calendar_error(StatusCode::NOT_FOUND, &e.to_string()),
-        e @ E::Duplicate { .. } => calendar_error(StatusCode::CONFLICT, &e.to_string()),
         E::Db(_) => calendar_error(StatusCode::INTERNAL_SERVER_ERROR, "database error"),
     }
 }
@@ -3052,7 +3041,7 @@ async fn shares_create(
         return StatusCode::FORBIDDEN.into_response();
     }
     let conn = state.db();
-    match crate::shares::create(&conn, user.id, req, jiff::Timestamp::now(), &crate::shares::Limits::of(&state)) {
+    match crate::shares::create(&conn, user.id, &req, jiff::Timestamp::now(), &crate::shares::Limits::of(&state)) {
         Ok(s) => {
             let _ = crate::log::record(&conn, Some(user.id), "share_created", &format!("share={} {:?}", s.id, s.name));
             (StatusCode::CREATED, Json(share_info_json(&state, &conn, &s))).into_response()
@@ -3072,7 +3061,7 @@ async fn shares_update(
         return StatusCode::FORBIDDEN.into_response();
     }
     let conn = state.db();
-    match crate::shares::update(&conn, user.id, id, patch, jiff::Timestamp::now(), &crate::shares::Limits::of(&state)) {
+    match crate::shares::update(&conn, user.id, id, &patch, jiff::Timestamp::now(), &crate::shares::Limits::of(&state)) {
         Ok(Some(s)) => {
             let _ = crate::log::record(&conn, Some(user.id), "share_updated", &format!("share={} {:?}", s.id, s.name));
             Json(share_info_json(&state, &conn, &s)).into_response()

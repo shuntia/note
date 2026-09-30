@@ -42,8 +42,8 @@ async fn call(
     .await
 }
 
-fn password(pw: &str) -> Option<serde_json::Value> {
-    Some(serde_json::json!({ "password": pw }))
+fn password(pw: &str) -> serde_json::Value {
+    serde_json::json!({ "password": pw })
 }
 
 fn authenticator() -> WebauthnAuthenticator<SoftPasskey> {
@@ -64,7 +64,7 @@ async fn enrol_passkey(
         cookie,
         Method::POST,
         "/api/security/passkeys/challenge",
-        password("pw"),
+        Some(password("pw")),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{challenge}");
@@ -145,7 +145,7 @@ async fn an_http_origin_reports_passkeys_unavailable() {
         &cookie,
         Method::POST,
         "/api/security/passkeys/challenge",
-        password("pw"),
+        Some(password("pw")),
     )
     .await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
@@ -161,7 +161,7 @@ async fn every_mutating_call_re_checks_the_password() {
         (Method::DELETE, "/api/security/totp"),
         (Method::DELETE, "/api/security/passkeys/1"),
     ] {
-        let (status, v) = call(&app, &cookie, method, path, password("wrong")).await;
+        let (status, v) = call(&app, &cookie, method, path, Some(password("wrong"))).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "{path}: {v}");
         assert!(v["error"].is_string(), "{path}");
     }
@@ -224,7 +224,7 @@ async fn a_passkey_is_registered_renamed_and_removed() {
         &cookie,
         Method::DELETE,
         &format!("/api/security/passkeys/{id}"),
-        password("pw"),
+        Some(password("pw")),
     )
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
@@ -248,7 +248,7 @@ async fn one_credential_cannot_be_registered_twice_and_the_count_is_capped() {
         &cookie,
         Method::POST,
         "/api/security/passkeys/challenge",
-        password("pw"),
+        Some(password("pw")),
     )
     .await;
     let ccr: CreationChallengeResponse = serde_json::from_value(challenge).unwrap();
@@ -285,7 +285,7 @@ async fn one_credential_cannot_be_registered_twice_and_the_count_is_capped() {
             conn.execute(
                 "INSERT INTO passkeys (user_id, name, credential, cred_id, created_at)
                  VALUES (1, ?1, '{}', ?2, 'now')",
-                (format!("k{i}"), vec![200 + i as u8]),
+                (format!("k{i}"), vec![200 + u8::try_from(i).unwrap()]),
             )
             .unwrap();
         }
@@ -295,7 +295,7 @@ async fn one_credential_cannot_be_registered_twice_and_the_count_is_capped() {
         &cookie,
         Method::POST,
         "/api/security/passkeys/challenge",
-        password("pw"),
+        Some(password("pw")),
     )
     .await;
     assert_eq!(status, StatusCode::CONFLICT, "{v}");
@@ -316,7 +316,7 @@ async fn a_member_enrols_an_authenticator_app() {
         &bo,
         Method::POST,
         "/api/security/totp/start",
-        password("pw"),
+        Some(password("pw")),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{start}");
@@ -385,7 +385,7 @@ async fn a_member_enrols_an_authenticator_app() {
         &bo,
         Method::DELETE,
         "/api/security/totp",
-        password("pw"),
+        Some(password("pw")),
     )
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
@@ -443,7 +443,7 @@ async fn enrol_totp_at(app: &axum::Router, cookie: &str, step: i64) -> Vec<u8> {
         cookie,
         Method::POST,
         "/api/security/totp/start",
-        password("pw"),
+        Some(password("pw")),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{start}");
@@ -668,7 +668,7 @@ async fn removing_a_passkey_leaves_it_unable_to_elevate() {
         &cookie,
         Method::DELETE,
         &format!("/api/security/passkeys/{id}"),
-        password("pw"),
+        Some(password("pw")),
     )
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
@@ -701,7 +701,7 @@ async fn the_enrolment_routes_need_a_session() {
         "session=nobody",
         Method::POST,
         "/api/security/totp/start",
-        password("pw"),
+        Some(password("pw")),
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);

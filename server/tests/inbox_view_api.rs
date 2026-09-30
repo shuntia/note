@@ -34,7 +34,7 @@ fn titles(v: &serde_json::Value) -> Vec<String> {
 async fn the_list_is_newest_first_and_pages_with_before() {
     let (app, cookie, state, _cfg) = common::app_with_logged_in_user_and_state().await;
     for (i, s) in ["a", "b", "c"].iter().enumerate() {
-        seed(&state, 1, s, i as i64);
+        seed(&state, 1, s, i64::try_from(i).unwrap());
     }
     let (status, v) = call(&app, Some(&cookie), Method::GET, "/api/inbox").await;
     assert_eq!(status, StatusCode::OK, "{v}");
@@ -87,9 +87,7 @@ async fn an_item_reads_back_with_its_reason_and_memories() {
     let id = seed(&state, 1, "lms:post:77", 0);
     let mem = {
         let conn = state.db.lock().unwrap();
-        let mem = note_server::memory::add_until(
-            &conn, cfg.path(), "aki", "semantic", "Biology quiz", "Biology: quiz Friday.", None, None,
-        )
+        let mem = note_server::memory::add_until(&conn, cfg.path(), "aki", &note_server::memory::Fact { category: "semantic", summary: "Biology quiz", body: "Biology: quiz Friday.", until: None }, None)
         .unwrap();
         conn.execute(
             "INSERT INTO memory_sources (user_id, source_id, memory_id) VALUES (1, 'lms:post:77', ?1)",

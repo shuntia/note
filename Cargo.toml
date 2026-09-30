@@ -1,3 +1,13 @@
 [workspace]
 members = ["server", "voice-proto", "voice"]
 resolver = "2"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# A doc section on every fallible function would go against the comment policy in CLAUDE.md.
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+# The attribute would sit on most getters, and no caller drops their value.
+must_use_candidate = "allow"
+# The long functions are route handlers and the agent loop, which read top to bottom.
+too_many_lines = "allow"

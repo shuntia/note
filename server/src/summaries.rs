@@ -42,7 +42,7 @@ pub fn due(conn: &Connection, config_dir: &Path, cutoff: jiff::Timestamp) -> Res
          ORDER BY c.updated_at LIMIT ?2",
     )?;
     let rows = stmt
-        .query_map((cutoff.to_string(), SCAN as i64), |r| {
+        .query_map((cutoff.to_string(), i64::try_from(SCAN).unwrap_or(i64::MAX)), |r| {
             Ok((
                 Candidate {
                     conversation_id: r.get(0)?,
@@ -157,7 +157,7 @@ pub fn spawn(state: crate::AppState) {
         loop {
             tick.tick().await;
             let now = jiff::Timestamp::now();
-            let Some(cutoff) = now.checked_sub(jiff::Span::new().minutes(idle as i64)).ok() else {
+            let Some(cutoff) = now.checked_sub(jiff::Span::new().minutes(i64::from(idle))).ok() else {
                 continue;
             };
             let candidates = {
