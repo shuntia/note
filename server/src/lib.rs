@@ -131,6 +131,7 @@ pub struct AppState {
     /// Set when the telegram channel is configured; it also names the bot a
     /// link invites the user to, and carries a mirrored reply back.
     pub telegram: Option<Arc<crate::channels::telegram::TelegramChannel>>,
+    pub voice: Option<Arc<crate::voice::Voice>>,
     pub hub: Arc<crate::channels::ws::ClientHub>,
     pub channels: Vec<Arc<dyn crate::channels::Channel>>,
     pub secure_cookies: bool,
@@ -177,6 +178,7 @@ impl AppState {
             search: None,
             vapid_public_key: None,
             telegram: None,
+            voice: None,
             hub,
             channels: vec![ws],
             secure_cookies: false,
@@ -272,6 +274,16 @@ impl AppState {
         let ch = Arc::new(ch);
         self.channels.insert(0, ch.clone());
         self.telegram = Some(ch);
+        self
+    }
+
+    /// Must come after every other channel: the ones present now are what a
+    /// rung message falls through to.
+    pub fn with_voice(mut self, voice: Arc<crate::voice::Voice>) -> Self {
+        voice.set_fallback(self.channels.clone());
+        let ch = crate::channels::voice::VoiceChannel::new(voice.clone(), self.db.clone(), self.config_dir.clone());
+        self.channels.insert(0, Arc::new(ch));
+        self.voice = Some(voice);
         self
     }
 
