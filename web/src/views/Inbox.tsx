@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type RefObject } from 'react'
 import { api } from '../api'
 import {
   arrivalLabel,
+  kindLabel,
   mergePage,
   outcomeLabel,
   REFRESH_POLL_MS,
@@ -10,6 +11,7 @@ import {
   UP_TO_DATE_MS,
 } from '../inbox'
 import type { InboxItem, InboxKind, InboxOutcome, InboxPage, InboxRow } from '../types'
+import { t } from '../i18n'
 
 const PAGE_SIZE = 50
 
@@ -58,7 +60,7 @@ export function useInbox(refresh: number, notify: (msg: string) => void) {
         setPage((cur) => (cur ? { ...cur, items: mergePage(cur.items, p.items) } : cur))
         setMore(p.items.length === PAGE_SIZE)
       })
-      .catch(() => notify("Couldn't load more. Try again."))
+      .catch(() => notify(t('inbox.moreFailed')))
   }, [page, notify])
 
   const pull = useCallback(async () => {
@@ -75,7 +77,7 @@ export function useInbox(refresh: number, notify: (msg: string) => void) {
       }
       if (alive.current) setUpToDate(true)
     } catch {
-      notify("Couldn't refresh. Try again.")
+      notify(t('inbox.refreshFailed'))
     } finally {
       if (alive.current) setRefreshing(false)
     }
@@ -99,7 +101,7 @@ export function useInbox(refresh: number, notify: (msg: string) => void) {
         })
         .catch(() => {
           if (era !== itemEra.current) return
-          notify("Couldn't open that item. Try again.")
+          notify(t('inbox.openFailed'))
           setSelected(null)
         })
     },
@@ -118,7 +120,7 @@ export function useInbox(refresh: number, notify: (msg: string) => void) {
 function Chips({ kind, outcome }: { kind: InboxKind; outcome: InboxOutcome | null }) {
   return (
     <span className="inbox-chips">
-      <span className="inbox-chip">{kind}</span>
+      <span className="inbox-chip">{kindLabel(kind)}</span>
       <span className="inbox-chip" data-outcome={outcome ?? 'pending'}>
         {outcomeLabel(outcome)}
       </span>
@@ -142,7 +144,7 @@ export function InboxBar({
       <button
         type="button"
         className="inbox-refresh"
-        aria-label="Refresh"
+        aria-label={t('inbox.refresh')}
         aria-busy={refreshing}
         disabled={refreshing}
         onClick={onRefresh}
@@ -153,7 +155,7 @@ export function InboxBar({
         </svg>
       </button>
       <span className="inbox-when" aria-live="polite">
-        {upToDate ? 'Up to date' : latest ? arrivalLabel(latest, new Date()) : ''}
+        {upToDate ? t('inbox.upToDate') : latest ? arrivalLabel(latest, new Date()) : ''}
       </span>
     </div>
   )
@@ -210,7 +212,7 @@ export function InboxCard({
               <button className="memory-link" onClick={() => onMemory(m.id)}>
                 {m.summary}
               </button>
-              {m.archived && <span className="memory-flag">archived</span>}
+              {m.archived && <span className="memory-flag">{t('memory.archived')}</span>}
             </li>
           ))}
         </ul>

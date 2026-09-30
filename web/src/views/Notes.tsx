@@ -6,6 +6,7 @@ import { Overflow, type OverflowItem } from '../overflow'
 import { Tick } from '../tick'
 import type { Note, NotePatch } from '../types'
 import '../styles/notes.css'
+import { t } from '../i18n'
 
 const UNDO_MS = 5000
 
@@ -39,14 +40,14 @@ export function Notes({
   const done = (note: Note) => {
     put({ ...note, done_at: new Date().toISOString() })
     const sent = api.patchNote(note.id, { done: true }).catch(() => {
-      notify("Couldn't check that off. Try again.")
+      notify(t('notes.doneFailed'))
       load()
     })
-    notify('Done', {
-      label: 'Undo',
+    notify(t('toast.done'), {
+      label: t('toast.undo'),
       run: () => {
         put(note)
-        void sent.then(() => send(note, { done: false }, "Couldn't bring that back. Try again."))
+        void sent.then(() => send(note, { done: false }, t('notes.undoFailed')))
       },
       windowMs: UNDO_MS,
     })
@@ -54,7 +55,7 @@ export function Notes({
 
   const pin = (note: Note) => {
     put({ ...note, pinned: !note.pinned })
-    void send(note, { pinned: !note.pinned }, "Couldn't pin that. Try again.")
+    void send(note, { pinned: !note.pinned }, t('notes.pinFailed'))
   }
 
   const keep = () => {
@@ -68,7 +69,7 @@ export function Notes({
     const text = noteText(edit.text)
     if (!note || !text || text === note.text) return
     put({ ...note, text })
-    void send(note, { text }, "Couldn't change that note. Try again.")
+    void send(note, { text }, t('notes.editFailed'))
   }
 
   const add = (e: FormEvent) => {
@@ -81,29 +82,29 @@ export function Notes({
       .then(put)
       .catch(() => {
         setDraft(text)
-        notify("Couldn't add that note. Try again.")
+        notify(t('notes.addFailed'))
       })
   }
 
   const items = (note: Note): OverflowItem[] => [
-    { label: 'Edit', run: () => setEditing({ id: note.id, text: note.text }) },
-    { label: note.pinned ? 'Unpin' : 'Pin', run: () => pin(note) },
-    { label: 'Done', run: () => done(note) },
+    { label: t('menu.edit'), run: () => setEditing({ id: note.id, text: note.text }) },
+    { label: note.pinned ? t('menu.unpin') : t('menu.pin'), run: () => pin(note) },
+    { label: t('menu.done'), run: () => done(note) },
   ]
 
   return (
     <section className="task-group notes">
-      <h3 className="task-group-head">Notes</h3>
+      <h3 className="task-group-head">{t('notes.head')}</h3>
       <ul className="notes-list">
         {openNotes(notes).map((note) => (
           <li key={note.id} className="note-row">
-            <Tick checked={false} label={`Mark ${note.text} done`} onClick={() => done(note)} />
+            <Tick checked={false} label={t('notes.tick', { text: note.text })} onClick={() => done(note)} />
             {editing?.id === note.id ? (
               <input
                 className="note-edit"
                 value={editing.text}
                 maxLength={NOTE_MAX * 2}
-                aria-label={`Edit ${note.text}`}
+                aria-label={t('notes.editing', { text: note.text })}
                 autoFocus
                 onChange={(e) => setEditing({ id: note.id, text: e.target.value })}
                 onBlur={keep}
@@ -119,7 +120,7 @@ export function Notes({
               <span className="note-text">{note.text}</span>
             )}
             {note.pinned && (
-              <svg className="note-pin" viewBox="0 0 24 24" role="img" aria-label="Pinned">
+              <svg className="note-pin" viewBox="0 0 24 24" role="img" aria-label={t('notes.pinned')}>
                 <path d="M9 4h6l-1 6 3 3H7l3-3-1-6zM12 13v7" />
               </svg>
             )}
@@ -127,7 +128,7 @@ export function Notes({
               className="note-more"
               row=".note-row"
               trigger={false}
-              label={`More: ${note.text}`}
+              label={t('menu.more', { name: note.text })}
               items={items(note)}
             />
           </li>
@@ -138,7 +139,7 @@ export function Notes({
           value={draft}
           maxLength={NOTE_MAX * 2}
           placeholder="+"
-          aria-label="Add a note"
+          aria-label={t('notes.add')}
           enterKeyHint="done"
           onChange={(e) => setDraft(e.target.value)}
         />

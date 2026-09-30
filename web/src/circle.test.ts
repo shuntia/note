@@ -1,5 +1,5 @@
 import { beforeEach, expect, test, vi } from 'vitest'
-import { beadAt, hintShown, hintUsed, railX, sessionFor, slotAfter, withoutCategory, WORK_TIME } from './circle'
+import { beadAt, hintShown, hintUsed, railX, sessionFor, slotAfter, withoutCategory, workTime } from './circle'
 import type { QueueEntry, Task } from './types'
 
 const task = (o: Partial<Task>): Task =>
@@ -64,7 +64,7 @@ test('a task without steps carries its own notes and no step fields', () => {
 })
 
 test('work time is a bare title', () => {
-  expect(WORK_TIME).toEqual({ title: 'Work time' })
+  expect(workTime()).toEqual({ title: 'Work time' })
 })
 
 test('each hint shows three times, counted separately', () => {

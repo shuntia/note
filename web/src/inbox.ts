@@ -1,11 +1,17 @@
-import type { InboxOutcome } from './types'
+import { t } from './i18n'
+import * as format from './i18n/format'
+import type { InboxKind, InboxOutcome } from './types'
 
 export const REFRESH_WINDOW_MS = 60_000
 export const REFRESH_POLL_MS = 3_000
 export const UP_TO_DATE_MS = 4_000
 
 export function outcomeLabel(outcome: InboxOutcome | null): string {
-  return outcome ?? 'pending'
+  return t(`inbox.outcome.${outcome ?? 'pending'}`)
+}
+
+export function kindLabel(kind: InboxKind): string {
+  return t(`inbox.kind.${kind}`)
 }
 
 // Both times are the server's fixed-width stamps, so text order is time order.
@@ -16,14 +22,7 @@ export function refreshSettled(requestedAt: string, latest: string | null, elaps
 export function arrivalLabel(iso: string, now: Date): string {
   const at = new Date(iso)
   if (Number.isNaN(at.getTime())) return ''
-  if (at.toDateString() === now.toDateString()) {
-    return at.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
-  }
-  return at.toLocaleDateString(undefined, {
-    month: 'short',
-    day: 'numeric',
-    ...(at.getFullYear() === now.getFullYear() ? {} : { year: 'numeric' }),
-  })
+  return at.toDateString() === now.toDateString() ? format.clock(at) : format.day(at, now)
 }
 
 export function mergePage<T extends { id: number }>(current: T[], next: T[]): T[] {

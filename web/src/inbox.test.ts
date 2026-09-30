@@ -26,18 +26,18 @@ describe('arrivalLabel', () => {
   test('today reads as a time', () => {
     const at = new Date(2026, 8, 30, 9, 5)
     expect(arrivalLabel(at.toISOString(), now)).toBe(
-      at.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }),
+      at.toLocaleTimeString('en', { hour: 'numeric', minute: '2-digit' }),
     )
   })
 
   test('an earlier day reads as a date, with the year only when it differs', () => {
     const sameYear = new Date(2026, 8, 28, 9, 5)
     expect(arrivalLabel(sameYear.toISOString(), now)).toBe(
-      sameYear.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }),
+      sameYear.toLocaleDateString('en', { month: 'short', day: 'numeric' }),
     )
     const lastYear = new Date(2025, 11, 31, 9, 5)
     expect(arrivalLabel(lastYear.toISOString(), now)).toBe(
-      lastYear.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }),
+      lastYear.toLocaleDateString('en', { month: 'short', day: 'numeric', year: 'numeric' }),
     )
   })
 

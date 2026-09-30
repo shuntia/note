@@ -14,6 +14,8 @@ import { Overflow } from '../overflow'
 import '../styles/memory.css'
 import { InboxBar, InboxCard, InboxRows, useInbox } from './Inbox'
 import type { MemoryFact, MemoryHit } from '../types'
+import { t, type Key } from '../i18n'
+import * as format from '../i18n/format'
 
 // matches the stylesheet's master-detail breakpoint
 const SINGLE_PANE = '(max-width: 1087.98px)'
@@ -21,11 +23,11 @@ const AUTO_OPEN_AFTER = 8
 
 type Filter = '' | 'semantic' | 'episodic' | 'inbox'
 
-const FILTERS: { id: Filter; label: string }[] = [
-  { id: '', label: 'All' },
-  { id: 'semantic', label: 'Facts' },
-  { id: 'episodic', label: 'Episodes' },
-  { id: 'inbox', label: 'Inbox' },
+const FILTERS: { id: Filter; label: Key }[] = [
+  { id: '', label: 'memory.all' },
+  { id: 'semantic', label: 'memory.facts' },
+  { id: 'episodic', label: 'memory.episodes' },
+  { id: 'inbox', label: 'memory.inbox' },
 ]
 
 // An episode is written as "<date> · <thread title>: <what happened>"; the date has a
@@ -65,13 +67,7 @@ const unwrap = (value: string) =>
 
 function shortDate(iso: string): string {
   const at = new Date(iso)
-  if (Number.isNaN(at.getTime())) return ''
-  const sameYear = at.getFullYear() === new Date().getFullYear()
-  return at.toLocaleDateString(undefined, {
-    month: 'short',
-    day: 'numeric',
-    ...(sameYear ? {} : { year: 'numeric' }),
-  })
+  return Number.isNaN(at.getTime()) ? '' : format.day(at)
 }
 
 // Day boundaries, not elapsed hours: something saved at 00:30 still reads "today".
@@ -79,7 +75,7 @@ function factDate(iso: string): string {
   const at = new Date(iso)
   if (Number.isNaN(at.getTime())) return ''
   const midnight = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
-  return midnight(at) === midnight(new Date()) ? 'today' : shortDate(iso)
+  return midnight(at) === midnight(new Date()) ? t('memory.today') : shortDate(iso)
 }
 
 // The list endpoint has no dates, so the order settles as the rows read theirs back;
@@ -183,7 +179,7 @@ export function Memory({ notify, refresh, openTalk }: ViewProps) {
       .catch(() => {
         if (era !== listEra.current) return
         setListFailed(true)
-        notify("Couldn't load memories. Try again.")
+        notify(t('memory.loadFailed'))
       })
   }, [query, filter, notify])
 
@@ -202,7 +198,7 @@ export function Memory({ notify, refresh, openTalk }: ViewProps) {
         })
         .catch(() => {
           if (era !== factEra.current) return
-          notify("Couldn't open that memory. Try again.")
+          notify(t('memory.openFailed'))
           setSelected(null)
         })
     },
@@ -260,15 +256,15 @@ export function Memory({ notify, refresh, openTalk }: ViewProps) {
             <input
               type="search"
               value={draft}
-              placeholder="Search what Note knows"
-              aria-label="Search what Note knows"
+              placeholder={t('memory.search')}
+              aria-label={t('memory.search')}
               onChange={(e) => setDraft(e.target.value)}
             />
           </div>
         )}
         {(onInbox || draft.trim() === '') && (
           <div className="memory-filter">
-            <div className="seg" role="group" aria-label="Show">
+            <div className="seg" role="group" aria-label={t('memory.show')}>
               {filters.map((f) => (
                 <button
                   key={f.id || 'all'}
@@ -281,7 +277,7 @@ export function Memory({ notify, refresh, openTalk }: ViewProps) {
                     closeItem()
                   }}
                 >
-                  {f.label}
+                  {t(f.label)}
                 </button>
               ))}
             </div>
@@ -301,20 +297,20 @@ export function Memory({ notify, refresh, openTalk }: ViewProps) {
               <InboxRows rows={inboxPage.items} selected={inboxSelected} onOpen={openItem} />
               {inbox.more && (
                 <button className="memory-link inbox-more" onClick={inbox.loadMore}>
-                  More
+                  {t('inbox.more')}
                 </button>
               )}
             </>
           )
         ) : listFailed ? (
           <p className="memory-empty">
-            Couldn't load memories.{' '}
+            {t('memory.listFailed')}{' '}
             <button className="memory-link" onClick={load}>
-              Retry
+              {t('common.retry')}
             </button>
           </p>
         ) : items === null ? null : count === 0 ? (
-          <p className="memory-empty">{query ? 'Nothing matches.' : 'Nothing yet.'}</p>
+          <p className="memory-empty">{query ? t('memory.noMatch') : t('memory.empty')}</p>
         ) : (
           <ul className="memory-list" ref={list}>
             {newestFirst(items, facts.get).map((m) => (
@@ -337,7 +333,7 @@ export function Memory({ notify, refresh, openTalk }: ViewProps) {
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <path d="M15 6l-6 6 6 6" />
             </svg>
-            Memory
+            {t('nav.memory')}
           </button>
         )}
         {onInbox
@@ -399,11 +395,11 @@ function MemoryRow({
         className="memory-more-wrap"
         row="li[data-mem]"
         trigger={false}
-        label={`More actions for ${displaySummary(hit)}`}
+        label={t('memory.moreFor', { name: displaySummary(hit) })}
         items={[
-          { label: 'Open', run: () => onOpen(hit.id) },
-          { label: 'Tell Note more', run: () => openTalk(`About "${hit.summary}": `) },
-          { label: "That's wrong", run: () => openTalk(`This is wrong: "${hit.summary}". `) },
+          { label: t('menu.open'), run: () => onOpen(hit.id) },
+          { label: t('memory.tellMore'), run: () => openTalk(t('memory.aboutDraft', { summary: hit.summary })) },
+          { label: t('memory.wrong'), run: () => openTalk(t('memory.wrongDraft', { summary: hit.summary })) },
         ]}
       />
     </li>
@@ -434,8 +430,8 @@ function FactBody({
     <article className="memory-card" ref={cardRef}>
       <h2 className="memory-title">{displaySummary(fact)}</h2>
       <p className="memory-meta">
-        From a chat on {shortDate(fact.created)}
-        {fact.archived && <span className="memory-flag">archived</span>}
+        {t('memory.from', { date: shortDate(fact.created) })}
+        {fact.archived && <span className="memory-flag">{t('memory.archived')}</span>}
       </p>
       {meta.length > 0 && (
         <div className="memory-facts">
@@ -462,12 +458,12 @@ function FactBody({
       <div className="memory-acts">
         <button
           className="btn-haze"
-          onClick={() => openTalk(`This is wrong: "${fact.summary}". `)}
+          onClick={() => openTalk(t('memory.wrongDraft', { summary: fact.summary }))}
         >
-          That's wrong
+          {t('memory.wrong')}
         </button>
-        <button className="memory-more" onClick={() => openTalk(`About "${fact.summary}": `)}>
-          Tell Note more
+        <button className="memory-more" onClick={() => openTalk(t('memory.aboutDraft', { summary: fact.summary }))}>
+          {t('memory.tellMore')}
         </button>
       </div>
     </article>
