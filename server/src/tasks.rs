@@ -675,13 +675,16 @@ pub fn list(conn: &Connection, user_id: i64) -> rusqlite::Result<Vec<TaskNode>> 
 }
 
 /// One open task as the next thing to start: the step it would begin with, the
-/// minutes a round of it is planned for (to the nearest five), and why it is here.
+/// minutes a round of it is planned for, and why it is here.
 #[derive(Debug, Serialize)]
 pub struct QueueEntry {
     pub task: TaskNode,
     pub step: Option<Task>,
     pub planned_min: Option<u32>,
     pub reason: &'static str,
+    /// The block a scheduled entry was laid in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_id: Option<i64>,
 }
 
 /// The user's open top-level tasks in the order the planner lays them.
@@ -733,9 +736,82 @@ pub fn queue(
                 step,
                 planned_min: minutes.map(|m| ((m + 2) / 5 * 5).max(5)),
                 reason,
+                event_id: None,
             }
         })
         .collect())
+}
+
+/// Today's blocks laid for tasks and not yet settled, one per task or step, as
+/// queue entries: the block current or next by the clock first, then the rest
+/// of the day in time order, then the blocks already behind. `planned_min` is
+/// the block's own length.
+pub fn candidates(
+    conn: &Connection,
+    user_id: i64,
+    tz: &jiff::tz::TimeZone,
+    now: jiff::Timestamp,
+    limit: usize,
+) -> rusqlite::Result<Vec<QueueEntry>> {
+    let here = now.to_zoned(tz.clone());
+    let minute = i64::from(here.hour()) * 60 + i64::from(here.minute());
+    let mut stmt = conn.prepare(
+        "SELECT e.id, e.wall_time, e.end_wall_time, et.task_id
+         FROM events e
+         JOIN plans p ON p.id = e.plan_id
+         JOIN event_tasks et ON et.event_id = e.id
+         WHERE p.user_id = ?1 AND p.date = ?2 AND e.end_wall_time IS NOT NULL
+           AND e.status IN ('pending','snoozed','fired')
+         ORDER BY e.wall_time, e.id",
+    )?;
+    let blocks = stmt
+        .query_map((user_id, here.date().to_string()), |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let span = |wall: &str, end: &str| {
+        Some((crate::plan::parse_minutes(wall).ok()?, crate::plan::parse_minutes(end).ok()?))
+    };
+    let first = blocks
+        .iter()
+        .position(|(_, wall, end, _)| span(wall, end).is_some_and(|(_, stop)| stop > minute))
+        .unwrap_or(0);
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for (event_id, wall, end, linked) in blocks[first..].iter().chain(&blocks[..first]) {
+        if out.len() == limit {
+            break;
+        }
+        if !seen.insert(*linked) {
+            continue;
+        }
+        let Some((start, stop)) = span(wall, end) else { continue };
+        let Some(held) = get(conn, user_id, *linked)? else { continue };
+        let (mut top, step) = match held.parent_id {
+            Some(parent) => {
+                if matches!(held.state.as_str(), "done" | "dropped") {
+                    continue;
+                }
+                let Some(top) = get(conn, user_id, parent)? else { continue };
+                (top, Some(held))
+            }
+            None => (held, None),
+        };
+        if !matches!(top.state.as_str(), "open" | "in_progress") {
+            continue;
+        }
+        top.pressing = pressing_at(&top.state, top.due_at.as_deref(), now);
+        let children = children_of(conn, top.id)?;
+        let step = step.or_else(|| children.iter().find(|c| c.state != "done").cloned());
+        out.push(QueueEntry {
+            task: TaskNode { task: top, children },
+            step,
+            planned_min: Some(u32::try_from((stop - start).max(1)).unwrap_or(1)),
+            reason: "scheduled",
+            event_id: Some(*event_id),
+        });
+    }
+    Ok(out)
 }
 
 /// The next block each of the user's top-level tasks still has waiting — its
@@ -1903,5 +1979,138 @@ mod tests {
         let ids: Vec<i64> = q.iter().map(|e| e.task.task.id).collect();
         assert_eq!(ids, [dated, undated]);
         assert_eq!(q[0].reason, "oldest");
+    }
+
+    fn lay(conn: &Connection, uid: i64, date: &str, wall: &str, end: &str, status: &str, task_id: i64) -> i64 {
+        conn.execute(
+            "INSERT OR IGNORE INTO plans (user_id, date, created_at) VALUES (?1, ?2, 'x')",
+            (uid, date),
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO events (plan_id, kind, wall_time, alert, end_wall_time, status)
+             SELECT id, 'block', ?3, 0, ?4, ?5 FROM plans WHERE user_id = ?1 AND date = ?2",
+            rusqlite::params![uid, date, wall, end, status],
+        )
+        .unwrap();
+        let event = conn.last_insert_rowid();
+        conn.execute("INSERT INTO event_tasks (event_id, task_id) VALUES (?1, ?2)", (event, task_id))
+            .unwrap();
+        event
+    }
+
+    fn at(ts: &str) -> jiff::Timestamp {
+        ts.parse().unwrap()
+    }
+
+    type Picked<'a> = (&'a str, Option<&'a str>, Option<u32>, Option<i64>, &'a str);
+
+    fn picked(got: &[QueueEntry]) -> Vec<Picked<'_>> {
+        got.iter()
+            .map(|e| {
+                (
+                    e.task.task.title.as_str(),
+                    e.step.as_ref().map(|s| s.title.as_str()),
+                    e.planned_min,
+                    e.event_id,
+                    e.reason,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn candidates_open_on_the_block_current_or_next() {
+        let (conn, uid) = db_with_user();
+        let read = task(&conn, uid, "read", None);
+        let write = task(&conn, uid, "write", None);
+        let call = task(&conn, uid, "call", None);
+        let file = task(&conn, uid, "file", None);
+        let e_read = lay(&conn, uid, "2026-09-30", "09:00", "10:00", "pending", read);
+        let e_write = lay(&conn, uid, "2026-09-30", "11:30", "12:20", "fired", write);
+        let e_call = lay(&conn, uid, "2026-09-30", "14:00", "14:25", "snoozed", call);
+        lay(&conn, uid, "2026-09-30", "16:00", "16:45", "done", file);
+        lay(&conn, uid, "2026-09-30", "17:00", "17:45", "dropped", file);
+        let utc = jiff::tz::TimeZone::UTC;
+
+        let got = candidates(&conn, uid, &utc, at("2026-09-30T12:00:00Z"), 5).unwrap();
+        assert_eq!(
+            picked(&got),
+            vec![
+                ("write", None, Some(50), Some(e_write), "scheduled"),
+                ("call", None, Some(25), Some(e_call), "scheduled"),
+                ("read", None, Some(60), Some(e_read), "scheduled"),
+            ],
+            "the running block first, then the day ahead, then what is behind"
+        );
+
+        let two = candidates(&conn, uid, &utc, at("2026-09-30T12:00:00Z"), 2).unwrap();
+        assert_eq!(picked(&two).iter().map(|p| p.0).collect::<Vec<_>>(), vec!["write", "call"]);
+
+        let early = candidates(&conn, uid, &utc, at("2026-09-30T13:00:00Z"), 5).unwrap();
+        assert_eq!(early[0].task.task.title, "call", "between blocks, the next one leads");
+    }
+
+    #[test]
+    fn candidates_behind_the_clock_keep_time_order() {
+        let (conn, uid) = db_with_user();
+        let read = task(&conn, uid, "read", None);
+        let write = task(&conn, uid, "write", None);
+        lay(&conn, uid, "2026-09-30", "14:00", "15:00", "fired", write);
+        lay(&conn, uid, "2026-09-30", "09:00", "10:00", "pending", read);
+
+        let got = candidates(&conn, uid, &jiff::tz::TimeZone::UTC, at("2026-09-30T20:00:00Z"), 5).unwrap();
+        assert_eq!(picked(&got).iter().map(|p| p.0).collect::<Vec<_>>(), vec!["read", "write"]);
+    }
+
+    #[test]
+    fn candidates_skip_settled_work_and_repeat_blocks() {
+        let (conn, uid) = db_with_user();
+        let essay = task(&conn, uid, "essay", None);
+        let draft = task(&conn, uid, "draft", Some(essay));
+        let edit = task(&conn, uid, "edit", Some(essay));
+        let ticked = task(&conn, uid, "ticked", None);
+        let solo = task(&conn, uid, "solo", None);
+        conn.execute("UPDATE tasks SET state = 'done' WHERE id IN (?1, ?2)", (ticked, edit)).unwrap();
+        lay(&conn, uid, "2026-09-30", "13:00", "13:30", "pending", ticked);
+        let e_draft = lay(&conn, uid, "2026-09-30", "13:00", "13:45", "pending", draft);
+        let e_solo = lay(&conn, uid, "2026-09-30", "14:00", "14:30", "pending", solo);
+        lay(&conn, uid, "2026-09-30", "15:00", "15:30", "pending", solo);
+        lay(&conn, uid, "2026-09-30", "16:00", "16:20", "pending", edit);
+
+        let got = candidates(&conn, uid, &jiff::tz::TimeZone::UTC, at("2026-09-30T12:00:00Z"), 5).unwrap();
+        assert_eq!(
+            picked(&got),
+            vec![
+                ("essay", Some("draft"), Some(45), Some(e_draft), "scheduled"),
+                ("solo", None, Some(30), Some(e_solo), "scheduled"),
+            ]
+        );
+        assert_eq!(got[0].task.children.len(), 2, "a step's block still carries the whole task");
+    }
+
+    #[test]
+    fn candidates_follow_the_users_own_day_and_no_one_elses() {
+        let (conn, uid) = db_with_user();
+        let bo = crate::auth::create_user(&conn, "bo", "pw", false).unwrap();
+        let theirs = task(&conn, bo, "theirs", None);
+        let mine = task(&conn, uid, "mine", None);
+        lay(&conn, bo, "2026-10-01", "09:00", "10:00", "pending", theirs);
+        lay(&conn, uid, "2026-09-30", "09:00", "10:00", "pending", mine);
+        let tokyo = jiff::tz::TimeZone::fixed(jiff::tz::offset(9));
+        let morning = at("2026-09-30T23:30:00Z");
+
+        assert!(
+            candidates(&conn, uid, &tokyo, morning, 5).unwrap().is_empty(),
+            "08:30 in Tokyo is already 1 October, and bo's day is bo's"
+        );
+
+        lay(&conn, uid, "2026-10-01", "11:00", "12:00", "pending", theirs);
+        let e_mine = lay(&conn, uid, "2026-10-01", "09:00", "10:00", "pending", mine);
+        assert_eq!(
+            picked(&candidates(&conn, uid, &tokyo, morning, 5).unwrap()),
+            vec![("mine", None, Some(60), Some(e_mine), "scheduled")],
+            "another user's task linked into this plan is not a candidate"
+        );
     }
 }

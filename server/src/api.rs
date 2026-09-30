@@ -20,6 +20,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/goals/{id}", patch(goals_update).delete(goals_delete))
         .route("/api/tasks", get(tasks_list).post(tasks_create))
         .route("/api/tasks/queue", get(tasks_queue))
+        .route("/api/tasks/candidates", get(tasks_candidates))
         .route("/api/tasks/{id}", patch(tasks_update).delete(tasks_delete))
         .route(
             "/api/tasks/by-external/{external_id}",
@@ -451,6 +452,29 @@ async fn tasks_queue(
         crate::tasks::stamp_schedule(&conn, user.id, &tz, q.iter_mut().map(|e| &mut e.task.task))?;
         Ok(q)
     });
+    match listed {
+        Ok(q) => Json(q).into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+/// Today's scheduled blocks as queue entries, or the queue itself when today
+/// holds none.
+async fn tasks_candidates(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Query(q): Query<QueueQuery>,
+) -> impl IntoResponse {
+    let conn = state.db();
+    let tz = user_zone(&state, &user.username);
+    let limit = q.limit.unwrap_or(5).clamp(1, 20);
+    let now = jiff::Timestamp::now();
+    let listed = crate::tasks::candidates(&conn, user.id, &tz, now, limit)
+        .and_then(|c| if c.is_empty() { crate::tasks::queue(&conn, user.id, &tz, now, limit) } else { Ok(c) })
+        .and_then(|mut q| {
+            crate::tasks::stamp_schedule(&conn, user.id, &tz, q.iter_mut().map(|e| &mut e.task.task))?;
+            Ok(q)
+        });
     match listed {
         Ok(q) => Json(q).into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
