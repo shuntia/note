@@ -215,6 +215,10 @@ export type Settings = {
   pomodoro_break_min: number
   // Gates the pomodoro phase messages and the "Time's up." at a session's planned end.
   session_end_notify: boolean
+  // Whether this server can ring a phone; the Calls row hides without it.
+  voice_enabled: boolean
+  voice_link: { mxid: string; state: 'invited' | 'linked' } | null
+  ring_for: 'urgent' | 'never'
 }
 
 // A live code and the deep link that carries it to the bot.
@@ -239,6 +243,7 @@ export type SettingsSaved = Pick<
   | 'pomodoro_work_min'
   | 'pomodoro_break_min'
   | 'session_end_notify'
+  | 'ring_for'
 > & { schedule: ScheduleRow[] }
 
 export type PromptName = 'persona' | 'planning' | 'share'
