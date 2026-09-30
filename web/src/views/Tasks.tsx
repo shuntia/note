@@ -16,6 +16,7 @@ import { collapse, flip, settle } from '../motion-gsap'
 import { reducedMotion } from '../motion'
 import { Overflow, useMenuSheet, type OverflowItem } from '../overflow'
 import { Tick } from '../tick'
+import { Notes } from './Notes'
 import '../styles/tasks.css'
 import type { Goal, NewStep, Task, TaskNode, TaskNotify, TaskState, TaskUpdate, TaskUrgency } from '../types'
 
@@ -848,6 +849,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
         </div>
       )}
       {nothingFound && <p className="task-empty task-hint">Add "{title.trim()}"</p>}
+      <Notes notify={notify} refresh={refresh} />
       {goals.length > 0 && (
         <section className="task-group goals">
           <h3 className="task-group-head">Goals</h3>
