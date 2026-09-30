@@ -186,11 +186,19 @@ provider when available.
   ONNX, about 12 ms on a CPU) over the last 8 s of the user's audio.
   - *complete*: commit the turn.
   - *incomplete*: wait for more speech, up to a hard cap (1.2 s of silence).
-- **Turn received cue.** When a turn commits, the voice side plays a short
-  cue ahead of the reply, so the user knows the phrase arrived.
-  - The default is a soft two-note chime (about 150 ms, around −18 dBFS),
-    synthesized in code at startup. There is no asset to license or lose.
-  - `[voice] cue_file` overrides it with a WAV.
+- **Cues.** Short sounds tell the user the call is listening and that each
+  phrase arrived. The heard cue plays ahead of the reply.
+  - Two recorded cues, both from Ubuntu's Yaru sound theme (`yaru-theme` in
+    nixpkgs, CC-BY-SA 4.0), picked by ear:
+    - **ready**: `message-new-instant.oga` (0.42 s), played once when the
+      call connects and Note starts listening;
+    - **heard**: `message.oga` (0.61 s), played at each committed end of the
+      user's turn.
+  - The Nix package copies both from `yaru-theme` into `note-voice`'s share
+    directory, decoded to 48 kHz mono PCM at build time. No copy lives in
+    this repo.
+  - `[voice] ready_cue_file` and `[voice] heard_cue_file` override them with
+    any WAV or Ogg.
   - A draft that is cancelled plays nothing. A backchannel during playout
     plays nothing.
   - The cue is the first item in the playout queue, so the reply's first
@@ -377,7 +385,8 @@ Nix:
   - The pipeline driven by recorded WAV fixtures: transcript, turn commits,
     barge-in versus backchannel.
   - TTS chunking.
-  - The cue plays once per committed turn and never for a cancelled draft.
+  - The ready cue plays once per call. The heard cue plays once per committed
+    turn and never for a cancelled draft.
   - Voice selection falls back to the default voice.
   - The Matrix client against a mock homeserver: ring, answer detection,
     hang-up, sync resume.
