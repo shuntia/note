@@ -561,9 +561,11 @@ export function Home({
     </div>
   )
 
-  // The line under the title: the step being worked on, else the first line of the notes.
-  const subOf = (s: FocusSession) => withoutCategory(s.step_name ?? firstLine(s.notes), categoryOf(s))
-  const titleOf = (s: FocusSession) => withoutCategory(s.title, categoryOf(s))
+  // A step reads as a task of its own, with the task it belongs to under it; any other
+  // session keeps the first line of its notes there.
+  const titleOf = (s: FocusSession) => withoutCategory(s.step_name ?? s.title, categoryOf(s))
+  const subOf = (s: FocusSession) => withoutCategory(s.step_name ? s.title : firstLine(s.notes), categoryOf(s))
+  const subClass = (s: FocusSession) => (s.step_name ? 'gauge-sub parent' : 'gauge-sub')
 
   const pauseButton = (s: FocusSession) => (
     <button
@@ -1167,20 +1169,19 @@ export function Home({
           {mark && <i className={`mark ${mark}`} />}
           {sessionNum(s, mobile ? 64 : 76)}
           <div className="gauge-name" style={{ fontSize: u(mobile ? 20 : 22) }}><Atoms text={titleOf(s)} /></div>
-          {sub && <div className="gauge-sub"><Atoms text={sub} /></div>}
+          {sub && <div className={subClass(s)}><Atoms text={sub} /></div>}
         </div>
       )
     }
     const category = entry?.task.category ?? ''
-    const sub = entry ? withoutCategory(entry.step?.title ?? firstLine(entry.task.notes), category) : ''
+    const name = entry ? withoutCategory((entry.step ?? entry.task).title, category) : WORK_TIME.title
+    const sub = entry ? withoutCategory(entry.step ? entry.task.title : firstLine(entry.task.notes), category) : ''
     return (
       <div key={i} className={`slot${i === strip.index ? ' now' : ''}`} aria-hidden="true">
         {mark && <i className={`mark ${mark}`} />}
         <div className="slot-gap" style={{ height: u(mobile ? 64 : 76) }} />
-        <div className="slot-name" style={{ fontSize: u(mobile ? 20 : 22) }}>
-          {entry ? withoutCategory(entry.task.title, category) : WORK_TIME.title}
-        </div>
-        {sub && <div className="slot-sub">{sub}</div>}
+        <div className="slot-name" style={{ fontSize: u(mobile ? 20 : 22) }}>{name}</div>
+        {sub && <div className={entry?.step ? 'slot-sub parent' : 'slot-sub'}>{sub}</div>}
       </div>
     )
   }
@@ -1192,7 +1193,6 @@ export function Home({
           size={faceSize}
           fracAt={landing ? undefined : shown.step_count && shown.step_index ? stepFracAt(shown) : sessionFracAt(shown)}
           drain={onBreak}
-          steps={!landing && shown.step_count && shown.step_index ? { count: shown.step_count, current: shown.step_index - 1 } : null}
           breathe
           paused={isPaused(shown)}
           hold={hold}
@@ -1259,7 +1259,7 @@ export function Home({
           <Gauge size={230} fracAt={sessionFracAt(session)} breathe paused={isPaused(session)}>
             {sessionNum(session, 40)}
             <div className="gauge-name" style={{ fontSize: u(15) }}>{titleOf(session)}</div>
-            {subOf(session) && <span className="gauge-sub">{subOf(session)}</span>}
+            {subOf(session) && <span className={subClass(session)}>{subOf(session)}</span>}
           </Gauge>
           {pauseButton(session)}
           {stopButton(session)}
@@ -1272,7 +1272,7 @@ export function Home({
         </Gauge>
         <div className="home-head">
           <span className="home-head-name">{titleOf(session)}</span>
-          {subOf(session) && <span className="gauge-sub">{subOf(session)}</span>}
+          {subOf(session) && <span className={subClass(session)}>{subOf(session)}</span>}
         </div>
         {doneButton}
         {pauseButton(session)}
