@@ -13,7 +13,15 @@ let
   cfg = config.services.note;
   toml = pkgs.formats.toml { };
   credDir = "/run/credentials/note.service";
-  serverToml = toml.generate "server.toml" cfg.settings;
+  voiceCfg = cfg.voice;
+  voiceSocket = "/run/note/voice.sock";
+  voiceToml = toml.generate "note-voice.toml" (voiceCfg.settings // {
+    socket = voiceSocket;
+    state_dir = "/var/lib/note-voice";
+    token_file = "/run/credentials/note-voice.service/matrix-bot.token";
+  });
+  serverToml = toml.generate "server.toml"
+    (lib.recursiveUpdate cfg.settings (lib.optionalAttrs voiceCfg.enable { voice.socket = voiceSocket; }));
   env = {
     NOTE_SERVER_CONFIG = "${serverToml}";
     NOTE_CONFIG_DIR = "${cfg.stateDir}/config";
@@ -93,12 +101,41 @@ in
     };
 
     openFirewall = lib.mkOption { type = lib.types.bool; default = false; };
+
+    voice = {
+      enable = lib.mkEnableOption "the voice service that rings a linked Matrix account";
+      package = lib.mkOption {
+        type = lib.types.package;
+        default = self.packages.${pkgs.stdenv.hostPlatform.system}.note-voice;
+        defaultText = lib.literalExpression "note.packages.\${system}.note-voice";
+      };
+      settings = lib.mkOption {
+        type = lib.types.submodule {
+          freeformType = toml.type;
+          options = {
+            homeserver = lib.mkOption { type = lib.types.str; example = "https://matrix.example.com"; };
+            livekit_service_url = lib.mkOption { type = lib.types.str; };
+          };
+        };
+        default = { };
+        description = "note-voice.toml; socket, state_dir and token_file are filled in.";
+      };
+      tokenFile = lib.mkOption {
+        type = lib.types.path;
+        description = "The bot account's access token, handed over with LoadCredential.";
+      };
+    };
   };
 
   config = lib.mkIf cfg.enable {
-    users.users = lib.mkIf (cfg.user == "note") {
-      note = { isSystemUser = true; group = cfg.group; home = cfg.stateDir; };
-    };
+    users.users = lib.mkMerge [
+      (lib.mkIf (cfg.user == "note") {
+        note = { isSystemUser = true; group = cfg.group; home = cfg.stateDir; };
+      })
+      (lib.mkIf voiceCfg.enable {
+        note-voice = { isSystemUser = true; group = cfg.group; };
+      })
+    ];
     users.groups = lib.mkIf (cfg.group == "note") { note = { }; };
 
     environment.systemPackages = [ ctl ];
@@ -122,14 +159,56 @@ in
         WorkingDirectory = cfg.stateDir;
         LoadCredential = lib.mapAttrsToList (name: path: "${name}:${path}") cfg.credentials;
         EnvironmentFile = lib.mkIf (cfg.environmentFile != null) cfg.environmentFile;
-        Restart = "on-failure";
+        Restart = "always";
         RestartSec = 3;
+        RuntimeDirectory = "note";
+        RuntimeDirectoryMode = "0750";
 
         ReadWritePaths = [ cfg.stateDir ];
         UMask = "0077";
         NoNewPrivileges = true;
         PrivateTmp = true;
         PrivateDevices = true;
+        ProtectSystem = "strict";
+        ProtectHome = true;
+        ProtectKernelTunables = true;
+        ProtectKernelModules = true;
+        ProtectKernelLogs = true;
+        ProtectControlGroups = true;
+        ProtectClock = true;
+        ProtectHostname = true;
+        ProtectProc = "invisible";
+        RestrictAddressFamilies = [ "AF_INET" "AF_INET6" "AF_UNIX" ];
+        RestrictNamespaces = true;
+        RestrictRealtime = true;
+        RestrictSUIDSGID = true;
+        LockPersonality = true;
+        MemoryDenyWriteExecute = true;
+        SystemCallArchitectures = "native";
+        SystemCallFilter = [ "@system-service" "~@privileged" ];
+        CapabilityBoundingSet = "";
+      };
+    };
+
+    systemd.services.note-voice = lib.mkIf voiceCfg.enable {
+      description = "Note voice service";
+      wantedBy = [ "multi-user.target" ];
+      after = [ "note.service" "network-online.target" ];
+      wants = [ "network-online.target" ];
+      environment.NOTE_VOICE_CONFIG = "${voiceToml}";
+      unitConfig.StartLimitIntervalSec = 0;
+      serviceConfig = {
+        ExecStart = lib.getExe voiceCfg.package;
+        User = "note-voice";
+        Group = cfg.group;
+        StateDirectory = "note-voice";
+        StateDirectoryMode = "0700";
+        LoadCredential = [ "matrix-bot.token:${voiceCfg.tokenFile}" ];
+        Restart = "always";
+        RestartSec = 1;
+        UMask = "0077";
+        NoNewPrivileges = true;
+        PrivateTmp = true;
         ProtectSystem = "strict";
         ProtectHome = true;
         ProtectKernelTunables = true;
