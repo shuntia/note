@@ -5,23 +5,11 @@ export const C = 2 * Math.PI * R
 export const SPAN = (C * 240) / 360
 
 export type Pt = { x: number; y: number }
-export type Segment = { start: number; len: number; frac: number }
 
 /** Bead i of total across the ring's opening (30°..150°, SVG degrees). */
 export function beadAt(i: number, total: number): Pt {
   const a = ((30 + (120 * (i + 1)) / (total + 1)) * Math.PI) / 180
   return { x: 160 + R * Math.cos(a), y: 160 + R * Math.sin(a) }
-}
-
-/** Arc segments for a task's steps: `start` in degrees, `len` in px; done 1, current `frac`, rest 0. */
-export function segments(steps: number, current: number, frac: number): Segment[] {
-  const gap = 5
-  const seg = (240 - gap * (steps - 1)) / steps
-  return Array.from({ length: steps }, (_, i) => ({
-    start: 150 + i * (seg + gap),
-    len: (C * seg) / 360,
-    frac: i < current ? 1 : i === current ? frac : 0,
-  }))
 }
 
 /** Where a horizontal release lands: one slot past 60 px, or 20 px when quick. */
