@@ -57,6 +57,13 @@ require_second_factor = true
 # [agent]
 # idle_summary_min = 60
 
+# --- Inbox --------------------------------------------------------------
+# The Memory tab's Refresh writes the time to this file; the host watches
+# it and starts the sync (schoolwork-check). Unset hides the button.
+#
+# [inbox]
+# refresh_signal = "/run/note/inbox-refresh"
+
 # --- Limits -------------------------------------------------------------
 # Spend ceilings; every key defaults to the value shown.
 #

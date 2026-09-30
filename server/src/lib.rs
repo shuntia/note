@@ -159,6 +159,8 @@ pub struct AppState {
     pub share_limiter: Arc<crate::auth::LoginLimiter>,
     /// The origin a share URL is built on; `server.toml`'s `public_base_url`.
     pub public_base_url: String,
+    /// Written by `POST /api/inbox/refresh`; `[inbox] refresh_signal`.
+    pub inbox_refresh: Option<PathBuf>,
     pub started_at: jiff::Timestamp,
 }
 
@@ -203,6 +205,7 @@ impl AppState {
                 crate::shares::ADDRESS_ATTEMPTS,
             )),
             public_base_url: "http://localhost:3271".into(),
+            inbox_refresh: None,
             started_at: jiff::Timestamp::now(),
         }
     }
@@ -237,6 +240,11 @@ impl AppState {
 
     pub fn with_idle_summary_min(mut self, minutes: u32) -> Self {
         self.idle_summary_min = minutes;
+        self
+    }
+
+    pub fn with_inbox_refresh(mut self, path: Option<PathBuf>) -> Self {
+        self.inbox_refresh = path;
         self
     }
 
