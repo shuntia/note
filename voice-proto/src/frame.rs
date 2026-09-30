@@ -1,0 +1,128 @@
+use serde::{Deserialize, Serialize};
+
+/// Bumped on any change to a frame's shape; both sides must agree exactly.
+pub const PROTO_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Role {
+    Note,
+    Voice,
+}
+
+/// The way a call frame travels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Dir {
+    ToVoice,
+    ToNote,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "t", rename_all = "snake_case")]
+pub enum Frame {
+    Hello { proto: u32, role: Role, instance: String },
+    Ping { n: u64 },
+    Pong { n: u64 },
+    Request { id: u64, body: Request },
+    Response { id: u64, result: Result<Reply, Refusal> },
+    Call { call_id: String, dir: Dir, seq: u64, body: CallBody },
+    /// Cumulative: every frame of the call up to `seq` is applied.
+    Ack { call_id: String, dir: Dir, seq: u64 },
+    /// Asks the sender to resend every frame of the call after `after`.
+    Resume { call_id: String, dir: Dir, after: u64 },
+}
+
+/// Requests are idempotent: each carries the key of what it creates or
+/// changes, and repeating one returns the first answer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "k", rename_all = "snake_case")]
+pub enum Request {
+    /// Note → voice: open, or reopen, the DM a link lives in.
+    OpenDm { link_id: i64, mxid: String },
+    /// Voice → Note: the invited account joined the link's DM.
+    DmJoined { link_id: i64, room_id: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "k", rename_all = "snake_case")]
+pub enum Reply {
+    Dm { room_id: String },
+    Done,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RefusalCode {
+    LinkDown,
+    Timeout,
+    BadRequest,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Refusal {
+    pub code: RefusalCode,
+    pub message: String,
+}
+
+impl Refusal {
+    pub fn new(code: RefusalCode, message: impl Into<String>) -> Self {
+        Self { code, message: message.into() }
+    }
+}
+
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}: {}", self.code, self.message)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "k", rename_all = "snake_case")]
+pub enum CallBody {
+    /// Note → voice: ring the linked account, unless `ring_by_ms` has passed.
+    Start {
+        user_id: i64,
+        room_id: String,
+        mxid: String,
+        title: String,
+        ring_secs: u32,
+        ring_by_ms: i64,
+    },
+    /// Note → voice: end the call now, ringing or not.
+    HangUp,
+    /// Voice → Note: the phone is ringing.
+    Ringing,
+    /// Voice → Note: how the ring ended.
+    Outcome { outcome: Outcome },
+    /// Voice → Note: the voice side holds nothing more for this call.
+    Ended,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "o", rename_all = "snake_case")]
+pub enum Outcome {
+    Answered,
+    Declined,
+    Missed,
+    Failed { reason: String },
+}
+
+impl Outcome {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Outcome::Answered => "answered",
+            Outcome::Declined => "declined",
+            Outcome::Missed => "missed",
+            Outcome::Failed { .. } => "failed",
+        }
+    }
+}
+
+/// Call ids name journal files on the voice side.
+pub fn valid_call_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+}
