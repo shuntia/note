@@ -324,8 +324,8 @@ export const api = {
       body: JSON.stringify({ outcome, ...(discard && { discard: true }) }),
     }),
   rounds: () => request<{ rounds: number }>('/api/sessions/today'),
-  // Open work in the order the planner would lay it.
-  queue: (limit = 5) => request<QueueEntry[]>(`/api/tasks/queue?limit=${limit}`),
+  // Today's blocks, current or next first; the priority queue when none are laid.
+  candidates: (limit = 5) => request<QueueEntry[]>(`/api/tasks/candidates?limit=${limit}`),
   calendar: () => request<{ entries: CalendarEntry[] }>('/api/calendar'),
   addCalendarEntry: (fields: CalendarFields) =>
     request<CalendarEntry>('/api/calendar', { method: 'POST', body: JSON.stringify(fields) }),

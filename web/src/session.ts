@@ -81,6 +81,12 @@ export function elapsedSec(s: FocusSession): number {
   return since(s, effectiveStart(s))
 }
 
+// The server discards a session ended within a minute of its start, by the wall clock.
+export function quickStop(s: FocusSession, now: number): boolean {
+  const start = at(s.started_at)
+  return start !== null && now - start < 60_000
+}
+
 export function phaseElapsedSec(s: FocusSession): number {
   return since(s, phaseStart(s))
 }

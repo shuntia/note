@@ -223,18 +223,18 @@ export function App() {
     [go, notify, putSession],
   )
 
-  // The phone's bar rests on Today once the hand has been still a while, sooner in a
-  // session; any touch anywhere brings it back.
+  // The phone's bar rests on Today once the hand has been still a while; any touch
+  // anywhere brings it back. In a session Today's own idle takes the bar away instead.
   const [rested, setRested] = useState(false)
   const inSession = session !== null
   useEffect(() => {
     setRested(false)
-    if (!mobile || tab !== 'today') return
+    if (!mobile || tab !== 'today' || inSession) return
     let timer = 0
     const wake = () => {
       setRested(false)
       window.clearTimeout(timer)
-      timer = window.setTimeout(() => setRested(true), inSession ? 2500 : 4000)
+      timer = window.setTimeout(() => setRested(true), 4000)
     }
     wake()
     document.addEventListener('pointerdown', wake)

@@ -37,6 +37,7 @@ import {
   pausedAt,
   phaseStart,
   plannedSec,
+  quickStop,
   type FocusSession,
 } from '../session'
 import { SoFar } from '../sofar'
@@ -55,12 +56,14 @@ const ROUTINE_MIN = 15
 const PIN_MOBILE = 520
 const PIN_DESKTOP = 600
 const IDLE_MS = 2000
+const WAKE_MS = 200
 const WAKE_EVENTS = ['mousemove', 'wheel', 'keydown', 'touchstart', 'pointerdown', 'scroll', 'focusin'] as const
 
 // Drop has no server-side reversal, so the request waits out the undo window.
 const dropHold = makeHold<number>()
 // Nor does finishing, so the last step's write waits the same way.
 const doneHold = makeHold<FocusSession>()
+const stopHold = makeHold<FocusSession>()
 
 const clamp = (v: number) => Math.min(1, Math.max(0, v))
 
@@ -191,14 +194,21 @@ function useMotion(): boolean {
   return on
 }
 
-// Desktop rests its buttons and the top bar after two idle seconds; any sign of a
-// hand brings them back (the CSS reads `html.idle`).
+// After two idle seconds the desktop dims its top bar and a session keeps only its
+// timer (the CSS reads `html.idle`); any sign of a hand brings everything back, over
+// WAKE_MS while `html.waking` is set.
 function useIdle(on: boolean) {
   useEffect(() => {
     if (!on) return
     const root = document.documentElement
     let timer = 0
+    let fade = 0
     const wake = () => {
+      if (root.classList.contains('idle')) {
+        root.classList.add('waking')
+        window.clearTimeout(fade)
+        fade = window.setTimeout(() => root.classList.remove('waking'), WAKE_MS)
+      }
       root.classList.remove('idle')
       window.clearTimeout(timer)
       timer = window.setTimeout(() => root.classList.add('idle'), IDLE_MS)
@@ -207,11 +217,16 @@ function useIdle(on: boolean) {
     wake()
     return () => {
       window.clearTimeout(timer)
-      root.classList.remove('idle')
+      window.clearTimeout(fade)
+      root.classList.remove('idle', 'waking')
       for (const ev of WAKE_EVENTS) removeEventListener(ev, wake)
     }
   }, [on])
 }
+
+// React's handlers run before the window's wake listener, so this still reads the
+// state the gesture began in.
+const asleep = () => document.documentElement.classList.contains('idle')
 
 const isTyping = (target: EventTarget | null) => {
   const el = target as HTMLElement | null
@@ -255,7 +270,7 @@ export function Home({
   const inSession = shown !== null
   const prefs = readPrefs()
   const motion = useMotion()
-  useIdle(!mobile)
+  useIdle(!mobile || inSession)
 
   const newest = useState(() => latest<DayView>())[0]
   const load = useCallback(() => {
@@ -593,7 +608,7 @@ export function Home({
   const drawNext = useRef(false)
   const switching = useRef(false)
   const lastStartAt = useRef(0)
-  const drag = useRef<{ x: number; y: number; t: number; dx: number; dy: number } | null>(null)
+  const drag = useRef<{ x: number; y: number; t: number; dx: number; dy: number; asleep: boolean } | null>(null)
   const wheel = useRef({ dx: 0, timer: 0 })
   const dotsTimer = useRef(0)
   const timers = useRef<number[]>([])
@@ -648,7 +663,7 @@ export function Home({
     setSettling(true)
     let items: QueueEntry[]
     try {
-      items = await api.queue(5)
+      items = await api.candidates(5)
     } catch {
       setSettling(false)
       notify("Couldn't reach Note. Try again.")
@@ -672,9 +687,9 @@ export function Home({
     }, 10_000)
   }
 
-  // A session started anywhere else is one slot until it is swiped; the queue is laid
-  // around it then, with the session itself in the slot after Work time when the
-  // queue does not hold it.
+  // A session started anywhere else is one slot until it is swiped; the candidates are
+  // laid around it then, with the session itself in the slot after Work time when they
+  // do not hold it.
   const stripFor = useRef('')
   const loadStrip = async () => {
     const s = session
@@ -683,7 +698,7 @@ export function Home({
     stripFor.current = key
     let items: QueueEntry[]
     try {
-      items = await api.queue(5)
+      items = await api.candidates(5)
     } catch {
       stripFor.current = ''
       return
@@ -828,18 +843,51 @@ export function Home({
     else pause()
   }
 
+  // Stopping takes finishing's path: the face clears at once and the end waits out
+  // the undo window.
+  const stop = () => {
+    const s = session
+    if (!s || pending || hold.current) return
+    const discard = quickStop(s, Date.now())
+    markEnding(s.id)
+    stopHold.start(s, () => {
+      const settled = () => {
+        markEnding(null)
+        onChanged()
+      }
+      api.endWorkSession(s.id, 'stopped', discard).then(settled, settled)
+    })
+    setSession(null)
+    onChanged()
+    notify('Stopped', {
+      label: 'Undo',
+      run: () => {
+        if (!stopHold.cancel(s)) return
+        markEnding(null)
+        setSession(s)
+      },
+    })
+  }
+
+  const stopButton = (s: FocusSession) =>
+    isPaused(s) && (
+      <button className="btn-round face-stop" aria-label="Stop" disabled={pending} onClick={stop}>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6.5" y="6.5" width="11" height="11" rx="1.8" /></svg>
+      </button>
+    )
+
   const surface = {
     tabIndex: 0,
     role: 'button',
     'aria-label': !session ? 'Start working' : onBreak || isPaused(session) ? 'Back to it' : 'Break',
     onPointerDown: (e: PointEvent<HTMLDivElement>) => {
       if (e.button !== 0) return
-      drag.current = { x: e.clientX, y: e.clientY, t: Date.now(), dx: 0, dy: 0 }
+      drag.current = { x: e.clientX, y: e.clientY, t: Date.now(), dx: 0, dy: 0, asleep: !!session && asleep() }
       e.currentTarget.setPointerCapture(e.pointerId)
     },
     onPointerMove: (e: PointEvent<HTMLDivElement>) => {
       const d = drag.current
-      if (!d) return
+      if (!d || d.asleep) return
       d.dx = e.clientX - d.x
       d.dy = e.clientY - d.y
       const rail = railEl.current
@@ -853,7 +901,7 @@ export function Home({
     onPointerUp: () => {
       const d = drag.current
       drag.current = null
-      if (!d) return
+      if (!d || d.asleep) return
       if (Math.abs(d.dx) < 8 && Math.abs(d.dy) < 8) return tap()
       if (!session || settling) return
       if (Math.abs(d.dx) > Math.abs(d.dy)) {
@@ -885,7 +933,7 @@ export function Home({
     // A horizontal wheel is a drag with no finger: it gathers until it would snap.
     onWheel: (e: WheelEv<HTMLDivElement>) => {
       const rail = railEl.current
-      if (!session || settling || Math.abs(e.deltaX) <= Math.abs(e.deltaY)) return
+      if (!session || settling || asleep() || Math.abs(e.deltaX) <= Math.abs(e.deltaY)) return
       if (!strip) return void loadStrip()
       if (!rail) return
       const w = wheel.current
@@ -1160,7 +1208,7 @@ export function Home({
         <svg className={`pause-glyph${isPaused(shown) ? ' on' : ''}`} viewBox="0 0 24 24" aria-hidden="true">
           <rect x="6" y="5" width="4" height="14" rx="1.2" /><rect x="14" y="5" width="4" height="14" rx="1.2" />
         </svg>
-        {sessionHint && phase !== 'idle' && phase !== 'break' && <p className="face-hint under">tap to pause · swipe down when done</p>}
+        {sessionHint && phase !== 'idle' && phase !== 'break' && phase !== 'paused' && <p className="face-hint under">tap to pause · swipe down when done</p>}
         {strip && (
           <div ref={dotsEl} className="strip-dots" aria-hidden="true">
             {Array.from({ length: slotCount }, (_, i) => (
@@ -1169,6 +1217,7 @@ export function Home({
           </div>
         )}
       </div>
+      {session && stopButton(session)}
       {breakSheet}
     </div>
   ) : (
@@ -1213,6 +1262,7 @@ export function Home({
             {subOf(session) && <span className="gauge-sub">{subOf(session)}</span>}
           </Gauge>
           {pauseButton(session)}
+          {stopButton(session)}
         </div>
       </div>
     ) : (
@@ -1226,6 +1276,7 @@ export function Home({
         </div>
         {doneButton}
         {pauseButton(session)}
+        {stopButton(session)}
       </div>
     )
   ) : next && facts ? (
@@ -1472,6 +1523,7 @@ export function Home({
     facts?.span,
     face?.of,
     session?.started_at,
+    session?.paused_at,
     !!landing,
     strip?.index,
     strip?.items.length,

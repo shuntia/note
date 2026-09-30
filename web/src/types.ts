@@ -493,10 +493,17 @@ export type SessionStart = {
   notes?: string
 }
 
-export type QueueReason = 'now' | 'overdue' | 'urgent' | 'due_soon' | 'oldest'
+export type QueueReason = 'now' | 'overdue' | 'urgent' | 'due_soon' | 'oldest' | 'scheduled'
 
-// `task` is the whole task with its steps; `step` is the one to work on, if any.
-export type QueueEntry = { task: TaskNode; step: Task | null; planned_min: number | null; reason: QueueReason }
+// `task` is the whole task with its steps; `step` is the one to work on, if any;
+// `event_id` is the block a scheduled entry was laid in.
+export type QueueEntry = {
+  task: TaskNode
+  step: Task | null
+  planned_min: number | null
+  reason: QueueReason
+  event_id?: number
+}
 
 // How many blocks the close of the day sent to tomorrow.
 export type Carried = { moved: number }

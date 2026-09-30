@@ -95,3 +95,10 @@ test('an unreadable counter starts over, and a throwing store never hides the hi
   expect(hintShown('start')).toBe(true)
   expect(() => hintUsed('start')).not.toThrow()
 })
+
+test('a scheduled entry starts in its own block', () => {
+  const parent = { ...task({ id: 4, title: 'Call', notes: 'ring' }), children: [] }
+  expect(sessionFor(entry({ task: parent, planned_min: 25, reason: 'scheduled', event_id: 71 }))).toEqual({
+    title: 'Call', task_id: 4, notes: 'ring', planned_min: 25, event_id: 71,
+  })
+})
