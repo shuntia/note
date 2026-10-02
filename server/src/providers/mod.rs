@@ -43,6 +43,32 @@ pub trait LLMProvider: Send + Sync {
     fn chat_with_reasoning(&self, req: &ChatRequest) -> Result<(ChatResponse, String)> {
         Ok((self.chat(req)?, String::new()))
     }
+
+    fn model(&self) -> Option<String> {
+        None
+    }
+
+    /// Swaps the model later calls ask for; false for a provider with none.
+    fn set_model(&self, _model: &str) -> bool {
+        false
+    }
+}
+
+/// A model name the admin can swap while calls are in flight.
+pub(crate) struct LiveModel(std::sync::RwLock<String>);
+
+impl LiveModel {
+    pub(crate) fn new(model: &str) -> Self {
+        Self(std::sync::RwLock::new(model.to_string()))
+    }
+
+    pub(crate) fn get(&self) -> String {
+        self.0.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+    }
+
+    pub(crate) fn set(&self, model: &str) {
+        *self.0.write().unwrap_or_else(std::sync::PoisonError::into_inner) = model.to_string();
+    }
 }
 
 pub trait EmbeddingsProvider: Send + Sync {

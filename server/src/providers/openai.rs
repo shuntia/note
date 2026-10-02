@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 pub struct OpenAILLM {
     agents: super::ChatAgents,
     base_url: String,
-    model: String,
+    model: super::LiveModel,
     api_key: String,
     reasoning: Option<String>,
 }
@@ -20,7 +20,7 @@ impl OpenAILLM {
         Self {
             agents,
             base_url: base_url.trim_end_matches('/').to_string(),
-            model: model.to_string(),
+            model: super::LiveModel::new(model),
             api_key: api_key.to_string(),
             reasoning: reasoning.map(String::from),
         }
@@ -28,7 +28,7 @@ impl OpenAILLM {
 
     fn post(&self, req: &ChatRequest) -> Result<serde_json::Value> {
         let url = format!("{}/chat/completions", self.base_url);
-        let body = body(&self.model, req, self.reasoning.as_deref());
+        let body = body(&self.model.get(), req, self.reasoning.as_deref());
         self.agents.post_json(req.background, "openai", &body, |agent| {
             let request = agent.post(&url);
             if self.api_key.is_empty() { request } else { request.header("Authorization", format!("Bearer {}", self.api_key)) }
@@ -184,6 +184,15 @@ impl LLMProvider for OpenAILLM {
         let resp = self.post(req)?;
         let reasoning = if self.reasoning.is_some() { reasoning_text(&resp) } else { String::new() };
         Ok((parse(&resp)?, reasoning))
+    }
+
+    fn model(&self) -> Option<String> {
+        Some(self.model.get())
+    }
+
+    fn set_model(&self, model: &str) -> bool {
+        self.model.set(model);
+        true
     }
 }
 

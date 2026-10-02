@@ -674,7 +674,28 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE events DROP COLUMN cancel_if;
     ALTER TABLE events RENAME COLUMN cancel_if_next TO cancel_if;
     ",
+    // v46
+    "
+    CREATE TABLE server_settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    );
+    ",
 ];
+
+pub fn server_setting(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
+    use rusqlite::OptionalExtension;
+    conn.query_row("SELECT value FROM server_settings WHERE key = ?1", [key], |r| r.get(0)).optional()
+}
+
+pub fn set_server_setting(conn: &Connection, key: &str, value: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO server_settings (key, value) VALUES (?1, ?2)
+         ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+        [key, value],
+    )
+    .map(|_| ())
+}
 
 pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;

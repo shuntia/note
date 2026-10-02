@@ -110,6 +110,9 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let (llm, embeddings) = providers::build(&cfg.providers)?;
+    if let Some(model) = db::server_setting(&conn, admin::LLM_MODEL_SETTING)? {
+        llm.set_model(&model);
+    }
     let mut state = AppState::new(conn, config_dir, cfg.data_dir.clone())
         .with_providers(llm, embeddings)
         .with_providers_info(admin::ProvidersInfo::from(&cfg.providers))

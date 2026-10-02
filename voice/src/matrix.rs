@@ -21,6 +21,13 @@ impl std::fmt::Display for HomeserverError {
 
 impl std::error::Error for HomeserverError {}
 
+fn is_transient(e: &anyhow::Error) -> bool {
+    match e.downcast_ref::<HomeserverError>() {
+        Some(h) => h.status.is_server_error() || h.status == reqwest::StatusCode::TOO_MANY_REQUESTS,
+        None => e.downcast_ref::<reqwest::Error>().is_some(),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum RoomEvent {
     Joined { room: String, user: String },
@@ -67,10 +74,27 @@ impl Matrix {
             user_id: String::new(),
             device_id: String::new(),
         };
-        let who = m.get("/_matrix/client/v3/account/whoami").await.context("whoami")?;
+        let who = m.whoami().await.context("whoami")?;
         m.user_id = who["user_id"].as_str().context("whoami without user_id")?.to_string();
         m.device_id = who["device_id"].as_str().context("whoami without device_id")?.to_string();
         Ok(m)
+    }
+
+    /// Waits out a homeserver (or the tunnel in front of it) that is still
+    /// starting; a refused token fails at once.
+    async fn whoami(&self) -> Result<Value> {
+        const DELAYS_S: [u64; 6] = [1, 2, 4, 8, 15, 30];
+        let mut delays = DELAYS_S.iter();
+        loop {
+            match self.get("/_matrix/client/v3/account/whoami").await {
+                Err(e) if is_transient(&e) => {
+                    let Some(delay) = delays.next() else { return Err(e) };
+                    eprintln!("voice: homeserver not ready ({e:#}), retrying in {delay}s");
+                    tokio::time::sleep(Duration::from_secs(*delay)).await;
+                }
+                r => return r,
+            }
+        }
     }
 
     async fn check(resp: reqwest::Response) -> Result<Value> {
@@ -243,4 +267,22 @@ fn parse_sync(body: &Value) -> Vec<RoomEvent> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn said(code: u16) -> anyhow::Error {
+        HomeserverError { status: reqwest::StatusCode::from_u16(code).unwrap(), errcode: "?".into() }.into()
+    }
+
+    #[test]
+    fn a_starting_homeserver_is_waited_out_and_a_bad_token_is_not() {
+        assert!(is_transient(&said(530)));
+        assert!(is_transient(&said(502)));
+        assert!(is_transient(&said(429)));
+        assert!(!is_transient(&said(401)));
+        assert!(!is_transient(&anyhow::anyhow!("whoami without user_id")));
+    }
 }

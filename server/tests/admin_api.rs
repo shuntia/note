@@ -75,6 +75,7 @@ async fn members_get_403_on_every_admin_route() {
         (Method::GET, "/api/admin/log", None),
         (Method::GET, "/api/admin/traces", None),
         (Method::GET, "/api/admin/traces/1", None),
+        (Method::PUT, "/api/admin/providers/llm/model", Some(r#"{"model":"x/y"}"#)),
     ] {
         let res = app.clone().oneshot(req(m.clone(), p, &kid, body)).await.unwrap();
         assert_eq!(res.status(), StatusCode::FORBIDDEN, "{m} {p}");
@@ -501,4 +502,46 @@ async fn an_admin_cannot_reset_another_admins_password() {
     assert_eq!(res.status(), StatusCode::OK, "your own password stays resettable");
     let peer = common::login(&app, "peer", "pw").await;
     assert!(!peer.is_empty(), "the peer admin still signs in with the untouched password");
+}
+
+#[tokio::test]
+async fn the_chat_model_switches_live_and_is_kept() {
+    let llm = std::sync::Arc::new(note_server::providers::openai::OpenAILLM::new(
+        "http://127.0.0.1:9",
+        "old/model",
+        "",
+        note_server::providers::ChatAgents::new(1, 1),
+        None,
+    ));
+    let (app, session, state, _cfg) = common::app_with_admin_seed_and_llm(SEED.to_vec(), llm).await;
+    let path = "/api/admin/providers/llm/model";
+    let res = app.clone().oneshot(req(Method::PUT, path, &session, Some(r#"{"model":"x/y"}"#))).await.unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+    let cookies = elevate(&app, &session, &code_now()).await.expect("elevation");
+    let res = app.clone().oneshot(req(Method::PUT, path, &cookies, Some(r#"{"model":"has space"}"#))).await.unwrap();
+    assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let res = app.clone().oneshot(req(Method::PUT, path, &cookies, Some(r#"{"model":" stealth/space-bunny-alpha "}"#))).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(json(res).await["model"], "stealth/space-bunny-alpha");
+    assert_eq!(state.llm.model().as_deref(), Some("stealth/space-bunny-alpha"));
+    let conn = state.db.lock().unwrap();
+    assert_eq!(
+        note_server::db::server_setting(&conn, "llm_model").unwrap().as_deref(),
+        Some("stealth/space-bunny-alpha")
+    );
+    let detail: String = conn
+        .query_row("SELECT detail FROM event_log WHERE kind = 'admin_llm_model'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(detail, "old/model -> stealth/space-bunny-alpha");
+}
+
+#[tokio::test]
+async fn a_provider_without_a_model_refuses_the_switch() {
+    let (app, _session, cookies, _state, _cfg) = elevated_app().await;
+    let res = app
+        .oneshot(req(Method::PUT, "/api/admin/providers/llm/model", &cookies, Some(r#"{"model":"x/y"}"#)))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CONFLICT);
 }

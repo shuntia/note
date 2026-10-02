@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 pub struct AnthropicLLM {
     agents: super::ChatAgents,
     base_url: String,
-    model: String,
+    model: super::LiveModel,
     api_key: String,
 }
 
@@ -14,7 +14,7 @@ impl AnthropicLLM {
         Self {
             agents,
             base_url: base.trim_end_matches('/').to_string(),
-            model: model.to_string(),
+            model: super::LiveModel::new(model),
             api_key: api_key.to_string(),
         }
     }
@@ -85,7 +85,8 @@ pub fn parse(v: &serde_json::Value) -> Result<ChatResponse> {
 impl LLMProvider for AnthropicLLM {
     fn chat(&self, req: &ChatRequest) -> Result<ChatResponse> {
         let url = format!("{}/v1/messages", self.base_url);
-        let resp = self.agents.post_json(req.background, "anthropic", &body(&self.model, req), |agent| {
+        let body = body(&self.model.get(), req);
+        let resp = self.agents.post_json(req.background, "anthropic", &body, |agent| {
             agent
                 .post(&url)
                 .header("x-api-key", &self.api_key)
@@ -93,6 +94,15 @@ impl LLMProvider for AnthropicLLM {
                 .header("content-type", "application/json")
         })?;
         parse(&resp)
+    }
+
+    fn model(&self) -> Option<String> {
+        Some(self.model.get())
+    }
+
+    fn set_model(&self, model: &str) -> bool {
+        self.model.set(model);
+        true
     }
 }
 

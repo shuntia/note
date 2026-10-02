@@ -16,6 +16,7 @@ const TOTP_FILE: &str = "admin_totp";
 const COOKIE: &str = "admin";
 const LOG_LIMIT_DEFAULT: i64 = 100;
 const LOG_LIMIT_MAX: i64 = 500;
+pub const LLM_MODEL_SETTING: &str = "llm_model";
 
 pub struct AdminSecrets {
     pub totp_seed: Option<Vec<u8>>,
@@ -223,6 +224,7 @@ pub fn routes() -> Router<AppState> {
         .route("/users", get(users_list).post(users_create))
         .route("/users/{id}", patch(users_patch))
         .route("/users/{id}/revoke_sessions", post(users_revoke))
+        .route("/providers/llm/model", axum::routing::put(llm_model_put))
         .route("/log", get(log_list))
         .route("/traces", get(traces_list))
         .route("/traces/{id}", get(traces_detail));
@@ -560,7 +562,7 @@ async fn status(_e: Elevated, State(state): State<AppState>) -> Response {
         "users": users,
         "sessions": sessions,
         "push_subscriptions": push,
-        "providers": state.providers_info,
+        "providers": live_providers(&state),
         "webpush": state.vapid_public_key.is_some(),
         "secrets": { "admin_totp": state.admin_secrets.totp_seed.is_some() },
     }))
@@ -791,6 +793,53 @@ async fn users_patch(
         record(&state, actor.id, "admin_user_update", &format!("user {id}: {}", changed.join(", ")));
     }
     StatusCode::OK.into_response()
+}
+
+fn live_providers(state: &AppState) -> ProvidersInfo {
+    let mut info = state.providers_info.clone();
+    if let (Some(llm), Some(model)) = (info.llm.as_mut(), state.llm.model()) {
+        llm.model = model;
+    }
+    info
+}
+
+#[derive(Deserialize)]
+struct ModelReq {
+    model: String,
+}
+
+fn valid_model_name(model: &str) -> bool {
+    !model.is_empty() && model.len() <= 200 && !model.chars().any(|c| c.is_whitespace() || c.is_control())
+}
+
+/// Switches the chat model for every later call and keeps the choice across
+/// restarts, overriding `server.toml`.
+async fn llm_model_put(
+    Elevated { user: actor, .. }: Elevated,
+    State(state): State<AppState>,
+    Json(req): Json<ModelReq>,
+) -> Response {
+    let model = req.model.trim();
+    if !valid_model_name(model) {
+        return error(StatusCode::UNPROCESSABLE_ENTITY, "model must be a non-empty name without spaces");
+    }
+    let before = state.llm.model();
+    if !state.llm.set_model(model) {
+        return error(StatusCode::CONFLICT, "the configured chat provider has no model to change");
+    }
+    {
+        let conn = state.db();
+        if crate::db::set_server_setting(&conn, LLM_MODEL_SETTING, model).is_err() {
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    }
+    record(
+        &state,
+        actor.id,
+        "admin_llm_model",
+        &format!("{} -> {model}", before.as_deref().unwrap_or("?")),
+    );
+    Json(serde_json::json!({ "model": model })).into_response()
 }
 
 async fn users_revoke(

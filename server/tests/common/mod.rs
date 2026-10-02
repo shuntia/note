@@ -208,6 +208,14 @@ pub async fn app_with_admin_seed(seed: Vec<u8>) -> (axum::Router, String, AppSta
     build_with(None, Some(AdminSecrets::with_seed(seed)), None).await
 }
 
+#[allow(dead_code)] // only the admin suite swaps the model
+pub async fn app_with_admin_seed_and_llm(
+    seed: Vec<u8>,
+    llm: Arc<dyn LLMProvider>,
+) -> (axum::Router, String, AppState, TempDir) {
+    build_with(Some(llm), Some(AdminSecrets::with_seed(seed)), None).await
+}
+
 #[allow(dead_code)] // only the admin suite elevates on the password alone
 pub async fn app_with_password_only_admin() -> (axum::Router, String, AppState, TempDir) {
     build_with(
