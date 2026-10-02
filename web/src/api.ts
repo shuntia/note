@@ -11,7 +11,6 @@ import type {
   Carried,
   Conversation,
   DayView,
-  Debrief,
   FlattenResult,
   Goal,
   GoalState,
@@ -22,14 +21,11 @@ import type {
   MemoryFact,
   MemoryHit,
   NewStep,
-  Note,
-  NotePatch,
   PlanEvent,
   QueueEntry,
   Passkey,
   PromptDoc,
   PromptName,
-  Review,
   SecurityState,
   SessionStart,
   Settings,
@@ -233,12 +229,6 @@ export const api = {
   patchGoal: (id: number, patch: GoalPatch) =>
     request<Goal>(`/api/goals/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
   deleteGoal: (id: number) => request<void>(`/api/goals/${id}`, { method: 'DELETE' }),
-  // Open notes first, then the ones done in the last week.
-  notes: () => request<Note[]>('/api/notes'),
-  addNote: (text: string) =>
-    request<Note>('/api/notes', { method: 'POST', body: JSON.stringify({ text }) }),
-  patchNote: (id: number, patch: NotePatch) =>
-    request<Note>(`/api/notes/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
   // 401 when `current` is wrong, 422 when the new one is too short.
   changePassword: (current: string, next: string) =>
     request<void>('/api/password', {
@@ -307,8 +297,6 @@ export const api = {
   inboxRead: (id: number) => request<InboxItem>(`/api/inbox/${id}`),
   inboxRefresh: () =>
     request<{ requested_at: string }>('/api/inbox/refresh', { method: 'POST' }),
-  debrief: () => request<Debrief>('/api/debrief'),
-  review: () => request<Review>('/api/review'),
   vapidKey: () => request<{ key: string }>('/api/push/vapid_public_key'),
   pushSubscribe: (sub: PushSubscriptionJSON) =>
     request<void>('/api/push/subscribe', { method: 'POST', body: JSON.stringify(sub) }),

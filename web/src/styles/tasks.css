@@ -50,14 +50,6 @@
 .tasks .task-cats button[aria-pressed='true'] { background: var(--haze-strong); }
 .task-hint { margin: 0 0 1.25rem; }
 
-.task-sort { align-self: center; }
-.tasks .task-sort button { padding: 0.3125rem 0.6875rem; font-size: 0.8125rem; }
-/* wide enough to sit at the far end of the heading's line; narrow, it takes
-   the next line and starts where the heading did */
-@media (min-width: 768px) {
-  .task-sort { margin-left: auto; }
-}
-
 .task-sub-head {
   margin: 1rem 0 0.125rem;
   font-family: var(--display);
@@ -153,15 +145,15 @@
 }
 .task-empty { margin: 0.125rem 0 0; font-size: 0.875rem; color: var(--faint); }
 
-/* a wide screen reads Later in columns, each row whole in one of them; Now
-   stays one list, as wide as a column once there are two */
+/* a wide screen reads Later in columns, each row whole in one of them; the
+   soon list stays one, as wide as a column once there are two */
 .tasks { container-type: inline-size; }
 @media (min-width: 1088px) {
-  .task-group:not(.now, .goals) .task-list { columns: 38rem; column-gap: 4rem; }
+  .task-group:is(.later, .done) .task-list { columns: 38rem; column-gap: 4rem; }
   .task-item { break-inside: avoid; }
 }
 @container (min-width: 80rem) {
-  .task-group.now .task-list { max-width: calc((100% - 4rem) / 2); }
+  .task-group.soon .task-list { max-width: calc((100% - 4rem) / 2); }
 }
 
 .task-item { position: relative; }
@@ -174,9 +166,9 @@
    the same edge and the steps below count to that edge too */
 .task-group { --acts: 1.5rem; --bar: 12rem; }
 .task-group.done { --acts: 0px; }
-/* the play glyph is a desktop control, so only there does Now hold room for it */
+/* the play glyph is a desktop control, so only there does the soon list hold room for it */
 @media (min-width: 768px) and (pointer: fine) {
-  .task-group.now { --acts: 4.25rem; }
+  .task-group.soon { --acts: 4.25rem; }
 }
 
 /* narrow: the title has the row, and its chips and bar take the line under it */
@@ -214,7 +206,8 @@
 .task-body { min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 0.0625rem; }
 .task-title { max-width: 100%; }
 .task-title { position: relative; font-size: 1rem; }
-.task-sub { font-size: 0.78rem; color: var(--faint); }
+.task-body:has(.task-fold) { flex-direction: row; align-items: center; gap: 0.375rem; }
+.task-dot { width: 0.375rem; height: 0.375rem; border-radius: 50%; background: var(--sun-ink); }
 .task-fold {
   display: flex;
   align-items: center;

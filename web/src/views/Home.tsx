@@ -13,7 +13,6 @@ import {
   type WheelEvent as WheelEv,
 } from 'react'
 import { api, ApiError } from '../api'
-import { busyIn, markBriefRead, morningOpen, pickBrief, readBriefs, type Brief } from '../brief'
 import { hintShown, hintUsed, railX, sessionFor, slotAfter, withoutCategory, workTime } from '../circle'
 import { latest } from '../coalesce'
 import type { ToastAction } from '../app'
@@ -41,14 +40,11 @@ import {
   quickStop,
   type FocusSession,
 } from '../session'
-import { SoFar } from '../sofar'
 import { Tick } from '../tick'
-import type { DayView, Debrief, PlanEvent, QueueEntry, QueueReason, SessionPhase, SessionStart, Review, Task, TaskNode, TaskNotify } from '../types'
+import type { DayView, PlanEvent, QueueEntry, QueueReason, SessionPhase, SessionStart, Task, TaskNode, TaskNotify } from '../types'
 import { capped } from '../wave'
 import { CalendarSection } from './Calendar'
 import { Urgent } from './Tasks'
-import { DebriefFold } from '../debrief'
-import { ReviewFold } from '../review'
 import '../styles/home-motion.css'
 import { t, type Key } from '../i18n'
 
@@ -349,29 +345,6 @@ export function Home({
   const face = next ? rowParts(next) : null
   const label = face?.name ?? ''
 
-  // An open morning brings the day's letter, then the week's, to the face in the
-  // circle's place until it has been read.
-  const [letters, setLetters] = useState<{ letter: Debrief | null; review: Review | null }>({ letter: null, review: null })
-  const [morningUntil, setMorningUntil] = useState('11:00')
-  const [briefsRead, setBriefsRead] = useState(readBriefs)
-  useEffect(() => {
-    api.debrief().then((letter) => setLetters((l) => ({ ...l, letter })), () => {})
-    api.review().then((review) => setLetters((l) => ({ ...l, review })), () => {})
-    api.settings().then((s) => setMorningUntil(s.morning_until), () => {})
-  }, [refresh])
-  const busy = busyIn(
-    [
-      ...visible
-        .filter((ev) => ev.status === 'pending' || ev.status === 'snoozed' || ev.status === 'fired')
-        .map((ev) => ({ start: ev.wall_time, end: ev.end_wall_time ?? ev.wall_time })),
-      ...(day?.calendar ?? []).filter((occ) => occ.kind === 'fixed' || occ.kind === 'busy'),
-    ],
-    now,
-  )
-  const brief =
-    !shown && day && morningOpen(now, morningUntil, busy)
-      ? pickBrief(letters.letter, letters.review, day.date, new Date(), briefsRead)
-      : null
 
   // A routine is timed to its span; without an end the routine default stands in.
   // A block laid for a task runs as that task, so finishing it settles both.
@@ -673,44 +646,6 @@ export function Home({
   const faceSize = mobile ? 320 : 440
   const boxWidth = () => faceBox.current?.offsetWidth ?? faceSize
 
-  // The brief on screen trails the one due, so each change can leave before the next
-  // arrives: the circle settles away and the letter rises, and back again once read.
-  const [briefView, setBriefView] = useState<Brief | null>(null)
-  const briefBody = useRef<HTMLDivElement>(null)
-  const briefMoving = useRef(false)
-  const hadBrief = useRef(false)
-  useEffect(() => {
-    if (briefMoving.current || brief?.key === briefView?.key) return
-    const still = reducedMotion()
-    const leaving = briefView ? briefBody.current : faceBox.current
-    const land = () => {
-      briefMoving.current = false
-      setBriefView(brief)
-    }
-    if (!leaving) return land()
-    briefMoving.current = true
-    gsap.to(leaving, {
-      autoAlpha: 0,
-      y: still ? 0 : 12,
-      duration: still ? 0.2 : 0.35,
-      ease: 'power2.in',
-      onComplete: land,
-    })
-  }, [brief?.key, briefView?.key])
-  useLayoutEffect(() => {
-    const still = reducedMotion()
-    const arriving = briefView ? briefBody.current : hadBrief.current ? faceBox.current : null
-    hadBrief.current = briefView !== null
-    if (!arriving) return
-    gsap.fromTo(
-      arriving,
-      { autoAlpha: 0, y: still ? 0 : 16 },
-      { autoAlpha: 1, y: 0, duration: still ? 0.2 : 0.45, ease: 'power2.out', clearProps: 'opacity,visibility,transform' },
-    )
-  }, [briefView?.key])
-  const readBrief = () => {
-    if (briefView) setBriefsRead(markBriefRead(briefView.key))
-  }
 
   const snapTo = (i: number) => {
     const rail = railEl.current
@@ -1285,18 +1220,6 @@ export function Home({
       {session && stopButton(session)}
       {breakSheet}
     </div>
-  ) : briefView ? (
-    <div key="brief" className="home-face">
-      <div className={`brief ${briefView.kind}`}>
-        <div ref={briefBody} className="brief-body">
-          <span className="brief-mark" aria-hidden="true" />
-          <div className="letter">{briefView.content}</div>
-          <button className="btn-round brief-read" aria-label={t('brief.read')} onClick={readBrief}>
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5" /></svg>
-          </button>
-        </div>
-      </div>
-    </div>
   ) : (
     <div key="rest" className="home-face">
       <div ref={faceBox} className="circle-face idle" style={{ width: u(faceSize), height: u(faceSize) }} {...surface}>
@@ -1515,7 +1438,6 @@ export function Home({
       <DayLine events={visible} calendar={day.calendar} now={now} compact={mobile} nextId={next?.id} hoverId={hoverId} onHover={setHoverId} />
       {closeDay}
       {list}
-      {mobile && <SoFar rows={day.history} />}
       {mobile && <Jot flow openTalk={openTalk} openConversation={openConversation} />}
     </div>
   )
@@ -1599,7 +1521,6 @@ export function Home({
     face?.of,
     session?.started_at,
     session?.paused_at,
-    briefView?.key,
     !!landing,
     strip?.index,
     strip?.items.length,
@@ -1686,25 +1607,6 @@ export function Home({
         from(qa('.today-eyebrow'), { autoAlpha: 0, duration: 0.4, ease: 'none' }, 0.6)
         from(qa('.today-line'), { autoAlpha: 0, y: 28, duration: 0.45, ease: 'power2.out' }, 0.35)
       }
-      if (q('.face-big .brief')) {
-        // Nothing of the circle is on the face to morph, so the letter leaves and what
-        // the circle would have become arrives in its own place.
-        timeline.fromTo(
-          qa('.face-big .brief'),
-          { autoAlpha: 1, y: 0 },
-          { autoAlpha: 0, y: -24, duration: 0.4, ease: 'power2.in', immediateRender: false },
-          0,
-        )
-        from(
-          qa(
-            compactLanding
-              ? '.home-face.compact .gauge, .home-face.compact > .gauge-num, .home-face.compact .home-head'
-              : '.today-eyebrow, .today-title, .today-of, .today-in, .today-span, .today-bar',
-          ),
-          { autoAlpha: 0, y: 16, duration: 0.4, ease: 'power2.out' },
-          0.45,
-        )
-      }
       to(qa('.face-big .chev, .face-big .face-hint, .face-big .slot:not(.now)'), { autoAlpha: 0, duration: 0.35 }, 0)
       tl.current = timeline
       timeline.progress(st.current?.progress ?? 0)
@@ -1741,7 +1643,7 @@ export function Home({
       }
       undo = scrollReveal(
         (t) => {
-          from(t, qa('.debrief-row, .debrief-note, .sofar'), { autoAlpha: 0, y: 28, duration: 0.8, ease: 'power2.out' }, 0)
+          from(t, qa('.today-ground > :not(#calendar-slot)'), { autoAlpha: 0, y: 28, duration: 0.8, ease: 'power2.out' }, 0)
           from(t, qa('#calendar-slot'), { autoAlpha: 0, y: 40, duration: 1, ease: 'power2.out' }, mobile ? 0 : 0.25)
           from(t, qa('.ws-seg'), { scaleY: 0, transformOrigin: 'top', duration: 0.6, ease: 'power2.out', stagger: capped(0.04, qa('.ws-seg').length) }, 0.35)
           from(t, qa('.cal-line .cal-band'), { scaleX: 0, transformOrigin: 'left center', duration: 0.6, ease: 'power2.out', stagger: capped(0.1, qa('.cal-line .cal-band').length) }, 0.6)
@@ -1814,9 +1716,6 @@ export function Home({
         {compactLanding ? today : events && <section className="today-line"><DayLine events={visible} calendar={day?.calendar} now={now} nextId={next?.id} hoverId={hoverId} onHover={setHoverId} />{closeDay}{list}</section>}
       </section>
       <section ref={ground} className="today-ground">
-        {!mobile && <DebriefFold />}
-        {!mobile && <ReviewFold />}
-        {!mobile && day && <SoFar rows={day.history} />}
         <section id="calendar-slot">
           <CalendarSection
             notify={notify}

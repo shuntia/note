@@ -796,25 +796,6 @@ export function Settings({
             )}
           </FoldRow>
           <FoldRow
-            label="Morning ends"
-            value={loaded.draft.morning_until}
-            open={open === 'morning'}
-            onToggle={fold('morning')}
-          >
-            {open === 'morning' && (
-              <div className="set-fold-body">
-                <input
-                  type="time"
-                  aria-label="Morning ends"
-                  value={loaded.draft.morning_until}
-                  onChange={(e) => edit('morning_until', e.target.value)}
-                  {...commitOn('morning')}
-                />
-                <Status save={save} row="morning" />
-              </div>
-            )}
-          </FoldRow>
-          <FoldRow
             label="Time zone"
             value={zoneCity(loaded.draft.timezone)}
             open={open === 'timezone'}

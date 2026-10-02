@@ -106,18 +106,6 @@ export type Goal = {
   next_due_at: string | null
 }
 
-// A one-line post-it: `done_at` is null while it is open.
-export type Note = {
-  id: number
-  text: string
-  pinned: boolean
-  created_at: string
-  done_at: string | null
-  last_nudged_at: string | null
-}
-
-export type NotePatch = { text?: string; pinned?: boolean; done?: boolean }
-
 export type Token = {
   id: number
   name: string
@@ -135,10 +123,6 @@ export type TaskUpdate = Task & { parent?: Task; demoted_from_now?: number[] }
 export type NewStep = { title: string; duration_min: number }
 
 export type FlattenResult = { task: TaskNode; removed: Task[] }
-
-export type Debrief = { date: string; content: string }
-
-export type Review = { week_start: string; content: string }
 
 // Where the user last spoke to the thread from; Note answers there.
 export type ConversationVia = 'web' | 'telegram'

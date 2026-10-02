@@ -625,22 +625,23 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
             schema::<goal_ops::ListArgs>(),
         ),
         "note_add" => (
-            "Put a quick thing to keep in mind on the user's notes: one line, no size, no plan \
-             — buy milk, call the bank back. Anything with a size or a deadline is a task \
-             instead.",
+            "Add a line to your scratchpad: your own working context, one line each — something \
+             to raise later, a pattern you noticed, a loose end. The user never sees it; every \
+             session you run reads it. Anything the user has to do is a task instead.",
             schema::<note_ops::AddArgs>(),
         ),
         "note_update" => (
-            "Reword a note or pin it. A pinned note is never nudged about.",
+            "Reword a scratchpad line or pin it. Pinned lines stay at the top and are never \
+             raised when the user goes idle.",
             schema::<note_ops::UpdateArgs>(),
         ),
         "note_done" => (
-            "Check a note off once it is handled. It stays a week for undo, then goes.",
+            "Clear a scratchpad line once it no longer matters.",
             schema::<note_ops::DoneArgs>(),
         ),
         "note_list" => (
-            "Read the user's open notes, pinned first, each with when it was added and when \
-             it was last nudged about.",
+            "Read the whole scratchpad, pinned first, each line with when it was added and \
+             when it was last raised.",
             schema::<note_ops::ListArgs>(),
         ),
         "plan_tasks" => (

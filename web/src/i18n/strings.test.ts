@@ -4,19 +4,15 @@ import { expect, test } from 'vitest'
 // Views whose words all go through `t()`. The rest move over in the second pass.
 const COVERED = [
   'app.tsx',
-  'brief.ts',
   'circle.ts',
-  'debrief.tsx',
   'events.ts',
   'inbox.ts',
   'jot.tsx',
   'overflow.tsx',
-  'review.tsx',
   'tick.tsx',
   'views/Home.tsx',
   'views/Inbox.tsx',
   'views/Memory.tsx',
-  'views/Notes.tsx',
   'views/Tasks.tsx',
 ]
 

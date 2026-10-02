@@ -6,8 +6,8 @@ use std::fmt::Write as _;
 
 pub const ORIGIN: &str = "idle";
 
-pub const PROMPT: &str = "The user has gone quiet with notes still open. Decide whether one \
-     of them is worth a nudge now.";
+pub const PROMPT: &str = "The user has gone quiet while your scratchpad holds open lines. \
+     Decide whether one of them is worth raising now.";
 
 struct Seen {
     user_id: i64,
@@ -178,7 +178,7 @@ pub fn context(conn: &Connection, user_id: i64, now: jiff::Timestamp) -> rusqlit
             (now.as_second() - at.as_second()).max(0) / 60
         );
     }
-    s.push_str("Open notes (id: text, age, last nudge):\n");
+    s.push_str("Open scratchpad lines (id: text, age, last raised):\n");
     let mut stmt = conn.prepare(
         "SELECT id, text, created_at, last_nudged_at FROM notes
          WHERE user_id = ?1 AND done_at IS NULL AND pinned = 0

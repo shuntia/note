@@ -16,7 +16,6 @@ import { collapse, flip, settle } from '../motion-gsap'
 import { reducedMotion } from '../motion'
 import { Overflow, useMenuSheet, type OverflowItem } from '../overflow'
 import { Tick } from '../tick'
-import { Notes } from './Notes'
 import '../styles/tasks.css'
 import type { Goal, NewStep, Task, TaskNode, TaskNotify, TaskState, TaskUpdate, TaskUrgency } from '../types'
 import { t, type Key } from '../i18n'
@@ -32,7 +31,7 @@ const ANNOUNCE: { id: TaskNotify; label: Key }[] = [
   { id: 'notify', label: 'announce.notify' },
 ]
 
-type Group = 'now' | 'later' | 'done'
+type Group = 'soon' | 'later' | 'done'
 
 const SORTS = [
   { id: 'schedule', label: 'tasks.sort.schedule' },
@@ -182,17 +181,30 @@ function sameDay(iso: string, today: Date): boolean {
   )
 }
 
+const SOON_DAYS = 7
+
+const near = (iso: string | null, today: Date) =>
+  iso !== null && daysUntil(new Date(iso), today) < SOON_DAYS
+
 // The server caps Now itself, but a frame between an agent write and the reload
-// must not render a fourth: the newest live members overflow into Later, which
-// is the order the server demotes in.
+// must not count a fourth: the newest live members fall out of it, which is the
+// order the server demotes in. Soon is Now, the urgent, and whatever falls due or
+// is planned within the week; the rest waits folded away.
 function groups(nodes: TaskNode[]) {
   const today = new Date()
   const live = nodes.filter(isLive)
   const now = live.filter((n) => n.is_now).slice(0, NOW_CAP)
   const inNow = new Set(now.map((n) => n.id))
+  const soon = (n: TaskNode) =>
+    inNow.has(n.id) ||
+    n.urgency === 'high' ||
+    n.pressing ||
+    near(n.due_at, today) ||
+    near(n.scheduled_at, today)
   return {
     now,
-    later: live.filter((n) => !inNow.has(n.id)),
+    soon: live.filter(soon),
+    later: live.filter((n) => !soon(n)),
     doneToday: nodes.filter((n) => n.state === 'done' && sameDay(n.updated_at, today)),
   }
 }
@@ -209,7 +221,8 @@ const shownBy = (filter: string | null, words: string[]) => (n: TaskNode) =>
 function shownGroups(nodes: TaskNode[], filter: string | null, title: string, sort: SortKey) {
   const visible = shownBy(filter, searchWords(title))
   const g = groups(nodes)
-  return { now: g.now.filter(visible), later: g.later.filter(visible).sort(COMPARE[sort]) }
+  const order = COMPARE[sort]
+  return { soon: g.soon.filter(visible).sort(order), later: g.later.filter(visible).sort(order) }
 }
 
 function withTask(nodes: TaskNode[], t: Task): TaskNode[] {
@@ -337,6 +350,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
   const [failed, setFailed] = useState(false)
   const [title, setTitle] = useState('')
   const [showDone, setShowDone] = useState(false)
+  const [showLater, setShowLater] = useState(false)
   const [leaving, setLeaving] = useState<Leaving[]>([])
   const [openSteps, setOpenSteps] = useState<Set<number>>(new Set())
   const [openGoals, setOpenGoals] = useState<Set<number>>(new Set())
@@ -419,10 +433,10 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
 
   const markLeaving = (node: TaskNode, state: TaskState) => {
     if (!shown) return
-    const now = shown.now.findIndex((n) => n.id === node.id)
-    const index = now === -1 ? shown.later.findIndex((n) => n.id === node.id) : now
+    const soon = shown.soon.findIndex((n) => n.id === node.id)
+    const index = soon === -1 ? shown.later.findIndex((n) => n.id === node.id) : soon
     if (index === -1) return
-    setLeaving((ls) => [...ls, { id: node.id, group: now === -1 ? 'later' : 'now', index, state }])
+    setLeaving((ls) => [...ls, { id: node.id, group: soon === -1 ? 'later' : 'soon', index, state }])
   }
   const gone = useCallback(
     (id: number) => {
@@ -657,7 +671,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
     if (!text || !nodes) return
     setTitle('')
     const g = groups(nodes)
-    const is_now = g.now.length === 0 && g.later.length === 0
+    const is_now = g.soon.length === 0 && g.later.length === 0
     // A task added while a category is picked lands in it, so the list the user
     // is looking at is the list it joins.
     const category = filter ?? ''
@@ -756,12 +770,13 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
   const categories = categoriesOf(nodes)
   const visible = shownBy(filter, searchWords(title))
 
-  const now = placed(shown?.now ?? [], nodes, leaving, 'now')
+  const soon = placed(shown?.soon ?? [], nodes, leaving, 'soon')
   const later = placed(shown?.later ?? [], nodes, leaving, 'later')
   // A task settles into Done today only once it has folded away: until then it is
   // still in the list it is leaving, and a row is never in two lists at once.
   const doneToday = g.doneToday.filter((n) => !leaving.some((l) => l.id === n.id))
-  const nothingFound = search !== '' && now.length === 0 && later.length === 0
+  const nothingFound = search !== '' && soon.length === 0 && later.length === 0
+  const laterOpen = showLater || search !== ''
 
   const row = (p: Placed, group: Exclude<Group, 'done'>, scope = '') => (
     <Row
@@ -775,12 +790,20 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
       stepsOpen={openSteps.has(p.node.id)}
       categories={categories}
       goals={goals}
-      // Under a category sub-heading the row would only say it again.
-      showCategory={
-        filter === null && !(sort === 'category' && group === 'later' && scope === '')
-      }
     />
   )
+
+  const list = (ps: Placed[], group: Exclude<Group, 'done'>) =>
+    sort === 'category' ? (
+      byCategory(ps, categories).map(([head, rows]) => (
+        <div key={head} className="task-cat">
+          <h4 className="task-sub-head">{head}</h4>
+          <div className="task-list">{rows.map((p) => row(p, group))}</div>
+        </div>
+      ))
+    ) : (
+      <div className="task-list">{ps.map((p) => row(p, group))}</div>
+    )
 
   return (
     <div className="tasks" ref={root}>
@@ -804,7 +827,20 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
             <Overflow
               className="task-add-more"
               label={t('tasks.moreWays')}
-              items={[{ label: t('goals.new'), run: () => setGoalDraft({ title: '', due: '' }) }]}
+              items={[
+                { label: t('goals.new'), run: () => setGoalDraft({ title: '', due: '' }) },
+                {
+                  label: t('tasks.order'),
+                  children: SORTS.map((o) => ({
+                    label: t(o.label),
+                    checked: sort === o.id,
+                    run: () => {
+                      setSort(o.id)
+                      keepSort(o.id)
+                    },
+                  })),
+                },
+              ]}
             />
           </>
         ) : (
@@ -849,7 +885,6 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
         </div>
       )}
       {nothingFound && <p className="task-empty task-hint">{t('tasks.addHint', { title: title.trim() })}</p>}
-      <Notes notify={notify} refresh={refresh} />
       {goals.length > 0 && (
         <section className="task-group goals">
           <h3 className="task-group-head">{t('goals.head')}</h3>
@@ -874,7 +909,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
                   .map((n) =>
                     row(
                       { node: n, leaving: leaving.find((l) => l.id === n.id)?.state ?? null },
-                      n.is_now ? 'now' : 'later',
+                      'soon',
                       'g',
                     ),
                   )}
@@ -883,44 +918,20 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
           </div>
         </section>
       )}
-      <section className="task-group now">
-        <h3 className="task-group-head">{t('tasks.now')}</h3>
-        {now.length === 0 ? (
-          <p className="task-empty">{t('tasks.nowEmpty')}</p>
-        ) : (
-          <div className="task-list">{now.map((p) => row(p, 'now'))}</div>
-        )}
-      </section>
+      {soon.length > 0 && <section className="task-group soon">{list(soon, 'soon')}</section>}
       {later.length > 0 && (
         <section className="task-group later">
-          <h3 className="task-group-head">
+          <button
+            className="task-done-fold"
+            aria-expanded={laterOpen}
+            onClick={() => setShowLater((v) => !v)}
+          >
             {t('tasks.later')} <span className="task-count">{later.length}</span>
-            <div className="seg task-sort" role="group" aria-label={t('tasks.order')}>
-              {SORTS.map((s) => (
-                <button
-                  key={s.id}
-                  type="button"
-                  aria-pressed={sort === s.id}
-                  onClick={() => {
-                    setSort(s.id)
-                    keepSort(s.id)
-                  }}
-                >
-                  {t(s.label)}
-                </button>
-              ))}
-            </div>
-          </h3>
-          {sort === 'category' ? (
-            byCategory(later, categories).map(([head, rows]) => (
-              <div key={head} className="task-cat">
-                <h4 className="task-sub-head">{head}</h4>
-                <div className="task-list">{rows.map((p) => row(p, 'later'))}</div>
-              </div>
-            ))
-          ) : (
-            <div className="task-list">{later.map((p) => row(p, 'later'))}</div>
-          )}
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M9 6l6 6-6 6" />
+            </svg>
+          </button>
+          {laterOpen && list(later, 'later')}
         </section>
       )}
       {doneToday.length > 0 && (
@@ -948,7 +959,6 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
                   stepsOpen={false}
                   categories={categories}
                   goals={goals}
-                  showCategory={filter === null}
                 />
               ))}
             </div>
@@ -957,11 +967,6 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
       )}
     </div>
   )
-}
-
-function Duration({ task }: { task: Task }) {
-  if (task.duration_min === null) return null
-  return <span className="meta">{t('time.minutes', { n: round5(task.duration_min) })}</span>
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000
@@ -981,13 +986,16 @@ function dueLabel(due: Date, now: Date): string {
   return t('due.on', { day: days < 7 ? format.weekday(due) : format.day(due, due) })
 }
 
+// Urgency is the date's colour; an urgent task with no date keeps a dot of it.
 function Due({ task }: { task: Task }) {
-  if (task.due_at === null) return null
+  const urgent = task.urgency === 'high' || task.pressing
+  if (task.due_at === null)
+    return urgent ? <span className="task-dot" role="img" aria-label={t('tasks.urgent')} /> : null
   const due = new Date(task.due_at)
   if (Number.isNaN(due.getTime())) return null
   const now = new Date()
   if (due.getTime() < now.getTime()) return <span className="meta warn">{t('due.overdue')}</span>
-  return <span className="meta">{dueLabel(due, now)}</span>
+  return <span className={urgent ? 'meta sun' : 'meta'}>{dueLabel(due, now)}</span>
 }
 
 const URGENCY_RANK: Record<TaskUrgency, number> = { high: 0, normal: 2, low: 3 }
@@ -1006,23 +1014,6 @@ export function Urgent({ task }: { task: Pick<Task, 'urgency' | 'pressing' | 'du
   return <span className="meta sun">{t('tasks.urgent')}</span>
 }
 
-function scheduleLabel(iso: string, now: Date): string | null {
-  const at = new Date(iso)
-  if (Number.isNaN(at.getTime())) return null
-  const days = daysUntil(at, now)
-  if (days < 0 || days >= 7) return format.day(at, at)
-  const time = format.clock24(at)
-  if (days === 0) return t('schedule.today', { time })
-  return t('schedule.on', { day: format.weekday(at), time })
-}
-
-function Scheduled({ task }: { task: Task }) {
-  if (task.scheduled_at === null) return null
-  const label = scheduleLabel(task.scheduled_at, new Date())
-  if (label === null) return null
-  return <span className="meta">{label}</span>
-}
-
 // A date input speaks in calendar days; a deadline is the end of one.
 function endOfDay(date: string): string | null {
   const [y, m, d] = date.split('-').map(Number)
@@ -1038,12 +1029,10 @@ function dateValue(iso: string | null): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
 }
 
-function goalSub(goal: Goal): string {
-  const counts = t('goals.counts', { done: goal.done_tasks, count: goal.tasks })
-  if (goal.due_at === null) return counts
+function goalDue(goal: Goal): string | null {
+  if (goal.due_at === null) return null
   const due = new Date(goal.due_at)
-  if (Number.isNaN(due.getTime())) return counts
-  return t('goals.countsDue', { counts, day: format.day(due, due) })
+  return Number.isNaN(due.getTime()) ? null : format.day(due, due)
 }
 
 const PROGRESS_STEP = 5
@@ -1238,7 +1227,7 @@ function GoalRow({
         </button>
         <div className="task-body">
           <span className="task-title">{goal.title}</span>
-          <span className="meta">{goalSub(goal)}</span>
+          {goalDue(goal) && <span className="meta">{goalDue(goal)}</span>}
         </div>
         <div className="task-foot">
           <span className="task-prog">
@@ -1309,7 +1298,6 @@ function Row({
   stepsOpen,
   categories,
   goals,
-  showCategory,
 }: {
   node: TaskNode
   group: Group
@@ -1321,7 +1309,6 @@ function Row({
   stepsOpen: boolean
   categories: string[]
   goals: Goal[]
-  showCategory: boolean
 }) {
   const item = useRef<HTMLDivElement>(null)
   const [reviving, setReviving] = useState(false)
@@ -1353,7 +1340,7 @@ function Row({
   const items: OverflowItem[] = []
   if (live) items.push({ label: t('block.start'), run: () => actions.startFocus(node) })
   items.push(
-    group === 'now'
+    node.is_now
       ? { label: t('tasks.toLater'), run: () => actions.moveToLater(node) }
       : { label: t('tasks.toNow'), run: () => actions.moveToNow(node) },
   )
@@ -1413,12 +1400,8 @@ function Row({
     })
   items.push({ label: t('menu.drop'), kind: 'danger', run: () => actions.drop(node) })
 
-  const hint =
-    group === 'now' && node.duration_min === null && node.duration_source === 'none'
-      ? t('tasks.willEstimate')
-      : null
   const progress = finished ? 100 : nodeProgress(node)
-  const speaks = progress > 0 || steps.length > 0 || group === 'now'
+  const speaks = progress > 0
 
   return (
     <div
@@ -1431,35 +1414,27 @@ function Row({
       <div className="task-row">
         <Tick
           checked={finished}
-          label={t(done ? 'tasks.markUndone' : 'notes.tick', { text: node.title })}
+          label={t(done ? 'tasks.markUndone' : 'tasks.tick', { text: node.title })}
           onClick={() => (done ? reopen() : actions.complete(node))}
         />
         <div className="task-body">
           <span className="task-title">{shownTitle(node)}</span>
-          {steps.length > 0 ? (
+          {steps.length > 0 && (
             <button
               className="task-fold"
               aria-expanded={stepsOpen}
+              aria-label={parentSub(node)}
               onClick={() => actions.toggleSteps(node.id)}
             >
-              {parentSub(node)}
               <svg viewBox="0 0 24 24" aria-hidden="true">
                 <path d="M9 6l6 6-6 6" />
               </svg>
             </button>
-          ) : (
-            hint && <span className="task-sub">{hint}</span>
           )}
         </div>
         <div className="task-foot">
           {!done && (
             <span className="task-meta">
-              {showCategory && node.category !== '' && (
-                <span className="meta">{node.category}</span>
-              )}
-              <Urgent task={node} />
-              <Scheduled task={node} />
-              <Duration task={node} />
               <Due task={node} />
             </span>
           )}
@@ -1481,7 +1456,7 @@ function Row({
               items={items}
             />
           )}
-          {group === 'now' && !sheet && (
+          {node.is_now && !sheet && (
             <button
               className="task-start"
               data-tip={t('block.start')}
@@ -1524,7 +1499,7 @@ function Row({
             <li key={c.id} className={`task-step${c.state === 'done' ? ' done' : ''}`}>
               <Tick
                 checked={c.state === 'done'}
-                label={t(c.state === 'done' ? 'tasks.markUndone' : 'notes.tick', { text: c.title })}
+                label={t(c.state === 'done' ? 'tasks.markUndone' : 'tasks.tick', { text: c.title })}
                 onClick={() =>
                   c.state === 'done' ? actions.reopenStep(c) : actions.complete(node, c)
                 }

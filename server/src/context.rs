@@ -152,21 +152,22 @@ struct Caps {
     later: usize,
     debrief: usize,
     activity: usize,
+    scratch: usize,
     notes: bool,
 }
 
 /// Walked in order until the block fits: the Later list gives way first, then
-/// the debrief, then the activity tail, and last night's notes only once all
-/// of those are gone. The real-time line, the Now list and the plan are never
+/// the debrief, then the activity tail and the scratchpad's oldest lines, and
+/// last night's notes only once all of those are gone. The real-time line, the Now list and the plan are never
 /// among them.
 const CAPS: [Caps; 7] = [
-    Caps { later: 10, debrief: 600, activity: 10, notes: true },
-    Caps { later: 4, debrief: 600, activity: 10, notes: true },
-    Caps { later: 0, debrief: 600, activity: 10, notes: true },
-    Caps { later: 0, debrief: 200, activity: 10, notes: true },
-    Caps { later: 0, debrief: 0, activity: 10, notes: true },
-    Caps { later: 0, debrief: 0, activity: 3, notes: true },
-    Caps { later: 0, debrief: 0, activity: 3, notes: false },
+    Caps { later: 10, debrief: 600, activity: 10, scratch: 12, notes: true },
+    Caps { later: 4, debrief: 600, activity: 10, scratch: 12, notes: true },
+    Caps { later: 0, debrief: 600, activity: 10, scratch: 12, notes: true },
+    Caps { later: 0, debrief: 200, activity: 10, scratch: 12, notes: true },
+    Caps { later: 0, debrief: 0, activity: 10, scratch: 12, notes: true },
+    Caps { later: 0, debrief: 0, activity: 3, scratch: 6, notes: true },
+    Caps { later: 0, debrief: 0, activity: 3, scratch: 6, notes: false },
 ];
 
 /// Renders the full injection context: the standing document verbatim, then a
@@ -210,6 +211,10 @@ pub fn assemble(conn: &Connection, config_dir: &Path, user_id: i64, username: &s
     let debrief = latest_debrief(conn, user_id, today)?;
     let activity = recent_activity(conn, user_id)?;
     let notes = read_nightly_notes(config_dir, username);
+    let scratch: Vec<_> = crate::notes::list(conn, user_id, now)?
+        .into_iter()
+        .filter(|n| n.done_at.is_none())
+        .collect();
 
     let quiet = crate::calendar::quiet_window(conn, user_id, &tz, now)?;
     let calendar = crate::calendar::occurrences(conn, user_id, today)?;
@@ -237,6 +242,7 @@ pub fn assemble(conn: &Connection, config_dir: &Path, user_id: i64, username: &s
         s.push_str(&now_s);
         s.push_str(&plan_s);
         s.push_str(&tasks_section(&now_tasks, &later, done_today, caps.later, &tz, today, now));
+        s.push_str(&scratch_section(&scratch, caps.scratch));
         s.push_str(&debrief_section(debrief.as_ref(), today, caps.debrief));
         s.push_str(&settings_s);
         s.push_str(&activity_section(&activity, &tz, caps.activity));
@@ -596,6 +602,20 @@ fn notes_section(
     )
 }
 
+/// Pinned lines first, then the newest of the rest, up to `cap`.
+fn scratch_section(lines: &[crate::notes::Note], cap: usize) -> String {
+    if lines.is_empty() {
+        return String::new();
+    }
+    let (pinned, rest): (Vec<_>, Vec<_>) = lines.iter().partition(|n| n.pinned);
+    let mut s = String::from("# Your scratchpad (note_* tools; the user does not see it)\n\n");
+    for n in pinned.into_iter().chain(rest.into_iter().rev()).take(cap) {
+        let _ = writeln!(s, "- {}{}: {}", n.id, if n.pinned { " (pinned)" } else { "" }, n.text);
+    }
+    s.push('\n');
+    s
+}
+
 fn debrief_section(row: Option<&(String, String)>, today: jiff::civil::Date, cap: usize) -> String {
     let mut s = String::from("# Latest debrief\n\n");
     match row {
@@ -866,6 +886,32 @@ mod tests {
         assert!(out.contains("Asia/Tokyo"), "{out}");
         assert!(out.contains("- 09:00-09:15 checkin_call [pending] routine via push"), "{out}");
         assert!(out.contains("event_fired"), "{out}");
+    }
+
+    #[test]
+    fn the_scratchpad_shows_open_lines_pinned_first_then_newest() {
+        let tmp = cfg_dir();
+        let (conn, uid) = user();
+        let at = now_ts();
+        let add = |text: &str| crate::notes::create(&conn, uid, &crate::notes::NewNote { text: text.into() }, at).unwrap().id;
+        let old = add("asked about the essay twice");
+        let pin = add("prefers short check-ins");
+        let new = add("sat score lands friday");
+        let done = add("handled");
+        let set = |id: i64, patch: crate::notes::NotePatch| crate::notes::update(&conn, uid, id, &patch, at).unwrap();
+        set(pin, crate::notes::NotePatch { pinned: Some(true), ..Default::default() });
+        set(done, crate::notes::NotePatch { done: Some(true), ..Default::default() });
+        let out = assemble(&conn, tmp.path(), uid, "aki", at).unwrap();
+        let pad = &out[out.find("# Your scratchpad").expect(&out)..];
+        let lines: Vec<&str> = pad.lines().skip(2).take_while(|l| !l.is_empty()).collect();
+        assert_eq!(
+            lines,
+            vec![
+                format!("- {pin} (pinned): prefers short check-ins"),
+                format!("- {new}: sat score lands friday"),
+                format!("- {old}: asked about the essay twice"),
+            ]
+        );
     }
 
     fn commitment(conn: &rusqlite::Connection, uid: i64, title: &str, start: &str, end: &str,

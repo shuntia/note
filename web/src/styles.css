@@ -159,13 +159,16 @@
 
 body {
   margin: 0;
-  background: var(--sky);
-  background-attachment: fixed;
+  background: var(--earth);
   color: var(--ink);
   font-family: var(--sans);
   font-size: 1rem;
   line-height: 1.5;
 }
+
+/* the sky is held to the viewport on its own layer, since mobile browsers ignore
+   a fixed background-attachment */
+body::before { content: ''; position: fixed; inset: 0; z-index: -1; background: var(--sky); pointer-events: none; }
 
 #root { display: contents; }
 
@@ -400,35 +403,6 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 /* the label reads the same before the form is filled; only the fill waits */
 .login .primary:disabled { opacity: 1; background: var(--haze-strong); color: var(--quiet); cursor: default; }
 
-.debrief-row { margin-bottom: 1.6rem; }
-.debrief-fold {
-  display: flex;
-  align-items: center;
-  gap: 0.6rem;
-  width: 100%;
-  text-align: left;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  padding: 0.7rem 1rem;
-  color: var(--text-muted);
-  font: inherit;
-  font-size: 0.95rem;
-  cursor: pointer;
-  transition: border-color 120ms ease;
-}
-.debrief-fold:hover { border-color: var(--border-input); }
-.debrief-lead {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.debrief-lead b { color: var(--text); font-weight: 700; }
-.debrief-chev { margin-left: auto; }
-.debrief-row .letter { margin: 0; padding: 0 1.1rem 1.1rem 2.2rem; font-size: 1rem; }
-.debrief-note { margin: 0 0 1.6rem; font-size: 0.9rem; }
-
 .ev-more-wrap { position: absolute; top: 0.55rem; right: 0.6rem; }
 .ev-more {
   display: grid;
@@ -498,7 +472,7 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .debrief-fold, .ev-more, .jot, .jot-hint, .ev-menu-chev, .tick, .tick svg { transition: none; }
+  .ev-more, .jot, .jot-hint, .ev-menu-chev, .tick, .tick svg { transition: none; }
   .jot-dot { animation: none; opacity: 1; }
 }
 
@@ -999,21 +973,6 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
   .seg button { transition: none; }
 }
 
-/* debrief letter */
-.letter {
-  font-size: 1.05rem;
-  line-height: 1.7;
-  white-space: pre-wrap;
-  animation: rise 250ms ease-out;
-}
-@keyframes rise {
-  from { opacity: 0; transform: translateY(8px); }
-  to { opacity: 1; transform: none; }
-}
-@media (prefers-reduced-motion: reduce) {
-  .letter { animation: none; }
-}
-
 /* toast: a frosted pill under the top bar, above the tab bar on a phone */
 .toast {
   --toast-from: -8px;
@@ -1235,7 +1194,7 @@ textarea.mono { font-family: var(--mono); }
 .btn-round svg { width: calc(18 * var(--u)); height: calc(18 * var(--u)); fill: currentColor; }
 
 /* ── horizon: home ───────────────────────────────────────────────── */
-.home { position: relative; flex: 1; display: flex; flex-direction: column; align-items: center; outline: none; background: var(--sky); background-attachment: fixed; overflow-x: clip; }
+.home { position: relative; flex: 1; display: flex; flex-direction: column; align-items: center; outline: none; overflow-x: clip; }
 .home-face { display: flex; flex-direction: column; align-items: center; width: 100%; padding-top: 200px; }
 .gauge-num { display: flex; align-items: baseline; justify-content: center; }
 /* the counter carries its own size; on a face the centre sets it */
@@ -1286,23 +1245,6 @@ textarea.mono { font-family: var(--mono); }
 .close-day-actions { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 10px; }
 
 /* ── so far today ───────────────────────────────────────────────── */
-.sofar { margin-top: 8px; }
-.sofar-fold { display: flex; align-items: center; gap: 0.5rem; width: 100%; background: none; border: 0; padding: 0.625rem 0; color: var(--ink); font: inherit; font-family: var(--display); font-weight: 500; font-size: 1rem; letter-spacing: -0.01em; cursor: pointer; }
-.sofar-count { color: var(--faint); }
-.sofar-chev { margin-left: auto; display: flex; }
-.sofar-chev svg { width: 1.125rem; height: 1.125rem; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; transition: transform 0.2s ease; }
-.sofar.open .sofar-chev svg { transform: rotate(180deg); }
-.sofar-list { list-style: none; margin: 0; padding: 0 0 8px; display: flex; flex-direction: column; }
-.sofar-list li { display: grid; grid-template-columns: 3.5rem 1.25rem minmax(0, 1fr); align-items: center; gap: 0.625rem; min-height: 2rem; color: var(--quiet); font-size: 0.9375rem; }
-.sofar-when { font-size: 0.8125rem; color: var(--faint); }
-.sofar-mark { display: flex; align-items: center; justify-content: center; color: var(--sage); }
-.sofar-mark .glyph { width: 0.9375rem; height: 0.9375rem; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
-.sofar-dot { width: 0.3125rem; height: 0.3125rem; border-radius: 50%; background: var(--line); }
-.sofar-what { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sofar-list li.event-dropped { color: var(--faint); }
-.sofar-list li.event-dropped .sofar-what { text-decoration: line-through; text-decoration-color: var(--line); }
-.sofar-list li.event-moved .sofar-mark { color: var(--quiet); }
-.sofar-empty { margin: 0 0 10px; color: var(--faint); font-size: 0.9375rem; }
 .home-when { flex: none; width: 6rem; font-size: 0.8125rem; color: var(--faint); font-variant-numeric: tabular-nums; font-weight: 400; }
 .home-what { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* a step names itself first; the task behind it gives way before the step does */
@@ -1338,16 +1280,6 @@ textarea.mono { font-family: var(--mono); }
 }
 .today-line .home-list li { min-height: 2.375rem; }
 .today-ground { position: absolute; left: 0; right: 0; top: calc(var(--hero-top) + 29.625rem); bottom: 0; background: var(--earth); padding: 6.25rem 0 0 var(--rail); }
-.today-ground .debrief-row { width: 51.25rem; max-width: calc(100% - 2 * var(--rail)); }
-.today-ground .sofar { width: 51.25rem; max-width: calc(100% - 2 * var(--rail)); margin: 0 auto 1.6rem; }
-.debrief-fold { background: var(--haze-strong); border: 0; border-radius: 1rem; }
-.debrief-row.open { background: var(--haze-strong); border-radius: 1rem; }
-.debrief-row.open .debrief-fold { background: none; }
-.debrief-row.open .debrief-lead { white-space: normal; overflow: visible; }
-.debrief-mark { width: 1.125rem; height: 1.125rem; border-radius: 50%; border: 1.7px solid var(--sun-ink); box-sizing: border-box; flex: none; }
-.review-row .debrief-mark { background: var(--sun-ink); }
-.debrief-chev svg { width: 1rem; height: 1rem; fill: none; stroke: var(--faint); stroke-width: 1.8; transition: transform 200ms; }
-.debrief-fold[aria-expanded='true'] .debrief-chev svg { transform: rotate(180deg); }
 
 /* small marks that answer to a whole fingertip whatever the pointer */
 .tellnote button, .jot-send, .receipt-chip, .set-signout { position: relative; }
