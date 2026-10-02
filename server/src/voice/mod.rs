@@ -18,6 +18,11 @@ pub const STALE_RING_SECS: i64 = 90;
 
 type Ladder = Arc<OnceLock<Vec<Arc<dyn Channel>>>>;
 
+/// The user already has a ring starting or ringing.
+#[derive(Debug, thiserror::Error)]
+#[error("a ring is already under way")]
+pub struct RingBusy;
+
 pub struct Voice {
     db: Arc<Mutex<Connection>>,
     peer: Peer,
@@ -114,7 +119,9 @@ impl Voice {
                 [user_id],
                 |r| r.get(0),
             )?;
-            anyhow::ensure!(!busy, "a ring is already under way");
+            if busy {
+                return Err(RingBusy.into());
+            }
             conn.execute(
                 "INSERT INTO voice_calls (id, user_id, direction, message, state, ring_by, created_at)
                  VALUES (?1, ?2, 'outbound', ?3, 'starting', ?4, ?5)",
@@ -576,7 +583,7 @@ mod tests {
         let (voice, _mock) = rig();
         let now = jiff::Timestamp::now();
         let first = voice.start_call(1, &link(), &msg(), now).unwrap();
-        assert!(voice.start_call(1, &link(), &msg(), now).is_err(), "starting");
+        assert!(voice.start_call(1, &link(), &msg(), now).unwrap_err().is::<RingBusy>(), "starting");
         voice.handler.apply(&first, 1, CallBody::Ringing).unwrap();
         assert!(voice.start_call(1, &link(), &msg(), now).is_err(), "ringing");
         let calls: i64 = crate::db_guard(&voice.db)

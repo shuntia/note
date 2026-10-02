@@ -10,6 +10,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::{broadcast, watch};
 
+const APPLIED_KEEP: std::time::Duration = std::time::Duration::from_hours(7 * 24);
+
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
@@ -75,10 +77,10 @@ impl Service {
         }
     }
 
-    /// Once Note holds the `Ended` frame, nothing of the call is kept here.
+    /// Once Note holds the `Ended` frame, nothing of the call is kept here
+    /// but its applied seq, which `run_with` prunes once it is old.
     fn drop_call(&self, call_id: &str) {
         let _ = self.peer().forget(call_id);
-        let _ = self.applied.forget(call_id);
         let mut st = lock(&self.state);
         st.data.calls.remove(call_id);
         let _ = st.save();
@@ -336,6 +338,9 @@ pub async fn run_with(cfg: VoiceServiceConfig, peer_cfg: PeerConfig) -> anyhow::
     eprintln!("voice: signed in as {} ({})", matrix.user_id, matrix.device_id);
     let journal = FileOutbox::open(&cfg.state_dir.join("journal"))?;
     let applied = AppliedFile::new(&cfg.state_dir.join("journal"));
+    if let Err(e) = applied.prune(APPLIED_KEEP) {
+        eprintln!("voice: pruning old applied records failed: {e}");
+    }
     let state = StateFile::open(&cfg.state_dir)?;
     let svc = Arc::new(Service {
         cfg: cfg.clone(),

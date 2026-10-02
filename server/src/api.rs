@@ -1772,6 +1772,7 @@ async fn voice_test(user: CurrentUser, State(state): State<AppState>) -> impl In
         Ok(call_id) => {
             (StatusCode::ACCEPTED, Json(serde_json::json!({ "call_id": call_id }))).into_response()
         }
+        Err(e) if e.is::<crate::voice::RingBusy>() => conflict("Already ringing"),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }

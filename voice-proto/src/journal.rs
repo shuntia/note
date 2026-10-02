@@ -218,6 +218,27 @@ impl AppliedFile {
             _ => Ok(()),
         }
     }
+
+    /// Removes the records last written more than `age` ago and returns how
+    /// many. A record outlives its call so a frame still in flight for it is
+    /// acknowledged rather than mistaken for the start of a new call.
+    pub fn prune(&self, age: std::time::Duration) -> io::Result<usize> {
+        let cutoff = std::time::SystemTime::now() - age;
+        let entries = match std::fs::read_dir(&self.dir) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(0),
+            other => other?,
+        };
+        let mut removed = 0;
+        for entry in entries {
+            let entry = entry?;
+            let is_record = entry.path().extension().is_some_and(|x| x == "in");
+            if is_record && entry.metadata()?.modified()? < cutoff {
+                std::fs::remove_file(entry.path())?;
+                removed += 1;
+            }
+        }
+        Ok(removed)
+    }
 }
 
 #[cfg(test)]
@@ -295,6 +316,23 @@ mod tests {
             .pending_calls()
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn pruning_drops_only_old_applied_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = AppliedFile::new(dir.path());
+        a.set_applied("old", 3).unwrap();
+        a.set_applied("new", 2).unwrap();
+        std::fs::write(dir.path().join("old.out.ndjson"), b"").unwrap();
+        let past = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        for name in ["old.in", "old.out.ndjson"] {
+            std::fs::File::options().write(true).open(dir.path().join(name)).unwrap().set_modified(past).unwrap();
+        }
+        assert_eq!(a.prune(std::time::Duration::from_secs(60)).unwrap(), 1);
+        assert_eq!((a.applied("old"), a.applied("new")), (0, 2));
+        assert!(dir.path().join("old.out.ndjson").exists(), "only applied records go");
+        assert_eq!(AppliedFile::new(&dir.path().join("absent")).prune(std::time::Duration::ZERO).unwrap(), 0);
     }
 
     #[test]

@@ -240,6 +240,9 @@ async fn a_test_ring_needs_a_joined_link() {
     assert_eq!(status, StatusCode::ACCEPTED, "{body}");
     let rec = r.fake_rec.clone();
     eventually("the test ring starts", || !rec.seen.lock().unwrap().is_empty()).await;
+    let (status, body) = call(&app, &cookie, "POST", "/api/voice/test", "").await;
+    assert_eq!(status, StatusCode::CONFLICT, "a second ring while the first is out");
+    assert_eq!(body["error"], "Already ringing");
 }
 
 #[tokio::test(flavor = "multi_thread")]
