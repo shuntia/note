@@ -1,7 +1,7 @@
 use super::render::{Item, JobOutcome, Running};
 use crate::tools::ToolError;
 use rusqlite::{Connection, OptionalExtension};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{mpsc, Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -72,6 +72,8 @@ pub struct JobTable {
     running: HashMap<u32, RunningJob>,
     /// Jobs already reported to the model, with the state they were reported in.
     reported: HashMap<u32, &'static str>,
+    /// Writes reported as timed out whose real result is still owed to the model.
+    owed: HashSet<u32>,
     done_tx: mpsc::Sender<JobDone>,
 }
 
@@ -96,6 +98,7 @@ impl JobTable {
             next: last + 1,
             running: HashMap::new(),
             reported: HashMap::new(),
+            owed: HashSet::new(),
             done_tx,
         }
     }
@@ -104,8 +107,8 @@ impl JobTable {
     pub fn start(&mut self, reply: u64, call_index: usize, name: &str, args: &str) -> (String, bool) {
         if self.running.len() >= self.limits.max_running {
             return error(ToolError::cap_reached(format!(
-                "{} jobs are already running; wait for one to finish or cancel_job one",
-                self.running.len()
+                "{} jobs are running; wait for a result",
+                self.limits.max_running
             )));
         }
         let job = self.next;
@@ -220,9 +223,17 @@ impl JobTable {
     }
 
     /// Called by the driver when a JobDone arrives, before rendering it; false means discard it (already reported).
+    /// A write reported as timed out is reported once more when its real result lands.
     pub fn settle(&mut self, done: &JobDone) -> bool {
-        if self.running.remove(&done.job).is_none() {
-            return false;
+        let real = matches!(done.outcome, JobOutcome::Done(_) | JobOutcome::Error(_));
+        match self.running.remove(&done.job) {
+            Some(job) => {
+                if done.outcome == JobOutcome::TimedOut && !job.network {
+                    self.owed.insert(done.job);
+                }
+            }
+            None if real && self.owed.remove(&done.job) => {}
+            None => return false,
         }
         self.reported.insert(done.job, state_of(&done.outcome));
         true
@@ -247,18 +258,22 @@ impl JobTable {
         }
     }
 
-    /// After a Note restart: every `running` row of `call_id` becomes `done` (from voice_ops) or `interrupted`; returns them as items.
+    /// After a Note restart: every `running` row of `call_id` becomes `done` (from voice_ops) or `interrupted`,
+    /// and a `timed_out` row whose write landed becomes `done`; returns them as items.
     pub fn recover(db: &Mutex<Connection>, call_id: &str) -> Vec<Item> {
         let conn = crate::db_guard(db);
-        let rows: Vec<(u32, i64, i64, String)> = conn
-            .prepare("SELECT job, reply, call_index, tool FROM voice_jobs WHERE call_id = ?1 AND state = 'running' ORDER BY job")
+        let rows: Vec<(u32, i64, i64, String, bool)> = conn
+            .prepare(
+                "SELECT job, reply, call_index, tool, state = 'timed_out' FROM voice_jobs
+                 WHERE call_id = ?1 AND state IN ('running', 'timed_out') ORDER BY job",
+            )
             .and_then(|mut stmt| {
-                stmt.query_map([call_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?.collect()
+                stmt.query_map([call_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?.collect()
             })
             .unwrap_or_default();
         let finished = now();
         rows.into_iter()
-            .map(|(job, reply, call_index, tool)| {
+            .filter_map(|(job, reply, call_index, tool, timed_out)| {
                 let stored: Option<String> = conn
                     .query_row(
                         "SELECT result FROM voice_ops WHERE call_id = ?1 AND op_key = ?2",
@@ -269,13 +284,14 @@ impl JobTable {
                     .unwrap_or(None);
                 let (state, outcome) = match &stored {
                     Some(result) => ("done", JobOutcome::Done(result.clone())),
+                    None if timed_out => return None,
                     None => ("interrupted", JobOutcome::Interrupted),
                 };
                 let _ = conn.execute(
                     "UPDATE voice_jobs SET state = ?3, result = ?4, finished_at = ?5 WHERE call_id = ?1 AND job = ?2",
                     (call_id, job, state, &stored, &finished),
                 );
-                Item::Job { job, tool, outcome }
+                Some(Item::Job { job, tool, outcome })
             })
             .collect()
     }
@@ -326,6 +342,7 @@ mod tests {
         delay: Duration,
         result: &'static str,
         network: bool,
+        fails: bool,
     }
 
     struct FakeRunner(HashMap<&'static str, Fake>);
@@ -334,7 +351,7 @@ mod tests {
         fn run(&self, name: &str, _args: &str, _once: (&str, &str)) -> (String, bool) {
             let fake = &self.0[name];
             std::thread::sleep(fake.delay);
-            (fake.result.to_string(), false)
+            (fake.result.to_string(), fake.fails)
         }
         fn is_network(&self, name: &str) -> bool {
             self.0[name].network
@@ -342,7 +359,11 @@ mod tests {
     }
 
     fn fake(name: &'static str, ms: u64, result: &'static str, network: bool) -> (&'static str, Fake) {
-        (name, Fake { delay: Duration::from_millis(ms), result, network })
+        (name, Fake { delay: Duration::from_millis(ms), result, network, fails: false })
+    }
+
+    fn failing(name: &'static str, ms: u64, result: &'static str) -> (&'static str, Fake) {
+        (name, Fake { delay: Duration::from_millis(ms), result, network: false, fails: true })
     }
 
     fn db() -> Arc<Mutex<Connection>> {
@@ -415,7 +436,10 @@ mod tests {
         }
         let (text, is_error) = jobs.start(1, 8, "slow", "{}");
         assert!(is_error);
-        assert_eq!(json(&text)["kind"], "cap_reached");
+        assert_eq!(
+            json(&text),
+            serde_json::json!({"kind": "cap_reached", "message": "8 jobs are running; wait for a result"})
+        );
         let rows: i64 = crate::db_guard(&db)
             .query_row("SELECT COUNT(*) FROM voice_jobs", [], |r| r.get(0))
             .unwrap();
@@ -423,7 +447,7 @@ mod tests {
     }
 
     #[test]
-    fn a_job_past_its_timeout_reports_timed_out_once() {
+    fn a_write_past_its_timeout_reports_timed_out_then_its_result() {
         let db = db();
         let (mut jobs, rx) = table(&db, vec![fake("task_add", 200, r#"{"ok":1}"#, false)], 50);
         jobs.start(1, 0, "task_add", "{}");
@@ -432,11 +456,36 @@ mod tests {
         assert!(jobs.settle(&first));
         let late = next(&rx);
         assert_eq!(late.outcome, JobOutcome::Done(r#"{"ok":1}"#.into()));
-        assert!(!jobs.settle(&late));
+        assert!(jobs.settle(&late), "a landed write is reported after its timeout");
+        assert!(!jobs.settle(&late), "but only once");
         assert_eq!(state(&db, 1), ("done".into(), Some(r#"{"ok":1}"#.into())), "the write landed");
         let (text, is_error) = jobs.cancel(1);
         assert!(!is_error);
-        assert_eq!(json(&text), serde_json::json!({"job": 1, "already": "timed_out"}));
+        assert_eq!(json(&text), serde_json::json!({"job": 1, "already": "done"}));
+    }
+
+    #[test]
+    fn a_network_job_past_its_timeout_drops_its_late_result() {
+        let db = db();
+        let (mut jobs, rx) = table(&db, vec![fake("web_search", 200, "{}", true)], 50);
+        jobs.start(1, 0, "web_search", "{}");
+        let first = next(&rx);
+        assert_eq!(first.outcome, JobOutcome::TimedOut);
+        assert!(jobs.settle(&first));
+        assert!(!jobs.settle(&next(&rx)));
+        assert_eq!(state(&db, 1).0, "timed_out");
+    }
+
+    #[test]
+    fn cancelling_a_write_that_fails_in_the_wait_reports_the_error() {
+        let db = db();
+        let (mut jobs, rx) = table(&db, vec![failing("task_done", 20, r#"{"kind":"not_found"}"#)], 5000);
+        jobs.start(1, 0, "task_done", "{}");
+        let (text, is_error) = jobs.cancel(1);
+        assert!(!is_error);
+        assert_eq!(json(&text), serde_json::json!({"job": 1, "error": {"kind": "not_found"}}));
+        assert!(!jobs.settle(&next(&rx)));
+        assert_eq!(state(&db, 1).0, "error");
     }
 
     #[test]
@@ -504,8 +553,11 @@ mod tests {
                 "INSERT INTO voice_jobs (call_id, job, reply, call_index, tool, args, state, started_at)
                      VALUES ('c1', 1, 3, 0, 'task_add', '{}', 'running', 'x'),
                             ('c1', 2, 3, 1, 'web_search', '{}', 'running', 'x'),
-                            ('c1', 3, 2, 0, 'task_add', '{}', 'done', 'x');
-                 INSERT INTO voice_ops (call_id, op_key, result, created_at) VALUES ('c1', '3:0', '{\"id\":9}', 'x');",
+                            ('c1', 3, 2, 0, 'task_add', '{}', 'done', 'x'),
+                            ('c1', 4, 3, 2, 'task_add', '{}', 'timed_out', 'x'),
+                            ('c1', 5, 3, 3, 'web_search', '{}', 'timed_out', 'x');
+                 INSERT INTO voice_ops (call_id, op_key, result, created_at)
+                     VALUES ('c1', '3:0', '{\"id\":9}', 'x'), ('c1', '3:2', '{\"id\":10}', 'x');",
             )
             .unwrap();
         let items = JobTable::recover(&db, "c1");
@@ -514,12 +566,15 @@ mod tests {
             vec![
                 Item::Job { job: 1, tool: "task_add".into(), outcome: JobOutcome::Done(r#"{"id":9}"#.into()) },
                 Item::Job { job: 2, tool: "web_search".into(), outcome: JobOutcome::Interrupted },
+                Item::Job { job: 4, tool: "task_add".into(), outcome: JobOutcome::Done(r#"{"id":10}"#.into()) },
             ]
         );
         assert_eq!(state(&db, 1), ("done".into(), Some(r#"{"id":9}"#.into())));
         assert_eq!(state(&db, 2).0, "interrupted");
         assert_eq!(state(&db, 3).0, "done");
+        assert_eq!(state(&db, 4), ("done".into(), Some(r#"{"id":10}"#.into())));
+        assert_eq!(state(&db, 5).0, "timed_out");
         let (mut jobs, _rx) = table(&db, vec![fake("task_add", 0, "{}", false)], 5000);
-        assert_eq!(jobs.start(4, 0, "task_add", "{}").0, r#"{"job":4,"started":true}"#, "numbering continues");
+        assert_eq!(jobs.start(4, 0, "task_add", "{}").0, r#"{"job":6,"started":true}"#, "numbering continues");
     }
 }
