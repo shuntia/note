@@ -1,10 +1,8 @@
 pub mod call;
 pub mod links;
 pub mod outbox;
-pub mod standin;
 
 use crate::channels::{Channel, OutboundMessage};
-pub use standin::{Conversation, StandIn};
 use note_voice_proto::{
     BoxFuture, CallBody, Dir, Handler, Outcome, Peer, PeerConfig, Refusal, RefusalCode, Reply,
     Request, Role, VoiceProfile,
@@ -22,6 +20,13 @@ pub const STALE_LIVE_SECS: i64 = 40 * 60;
 
 type Ladder = Arc<OnceLock<Vec<Arc<dyn Channel>>>>;
 
+/// What Note says on a call. `on_frame` sees every frame of a live call, and
+/// every `Outcome` and `Ended`, after it is stored; it is never called while
+/// the DB guard is held.
+pub trait Conversation: Send + Sync {
+    fn on_frame(&self, call_id: &str, body: &CallBody);
+}
+
 /// The user already has a call starting, ringing or live.
 #[derive(Debug, thiserror::Error)]
 #[error("a ring is already under way")]
@@ -32,6 +37,7 @@ pub struct Voice {
     peer: Peer,
     handler: Arc<NoteHandler>,
     fallback: Ladder,
+    calls: Arc<call::CallManager>,
 }
 
 impl Voice {
@@ -46,16 +52,29 @@ impl Voice {
 
     fn with_outbox(db: Arc<Mutex<Connection>>, cfg: PeerConfig, outbox: Box<dyn note_voice_proto::Outbox>) -> Arc<Voice> {
         let fallback: Ladder = Arc::new(OnceLock::new());
+        let cell: Arc<OnceLock<Peer>> = Arc::default();
+        let to_voice = cell.clone();
+        let calls = Arc::new(call::CallManager::new(Arc::new(move |call_id: &str, body| {
+            let Some(peer) = to_voice.get() else { return };
+            if let Err(e) = peer.send_call(call_id, body) {
+                eprintln!("voice: journaling a reply for {call_id} failed: {e}");
+            }
+        })));
         let handler = Arc::new(NoteHandler {
             db: db.clone(),
             fallback: fallback.clone(),
             in_flight: Arc::default(),
-            conversation: Arc::new(StandIn::new(db.clone())),
-            peer: OnceLock::new(),
+            conversation: calls.clone(),
         });
         let peer = Peer::new(cfg, Dir::ToVoice, handler.clone(), outbox);
-        let _ = handler.peer.set(peer.clone());
-        Arc::new(Voice { db, peer, handler, fallback })
+        let _ = cell.set(peer.clone());
+        Arc::new(Voice { db, peer, handler, fallback, calls })
+    }
+
+    /// What a live call needs to hold a conversation; until set, an answered
+    /// call stays silent.
+    pub fn set_calls(&self, deps: call::CallDeps) {
+        self.calls.set_deps(deps);
     }
 
     /// The channels a message falls through to after a ring; the voice
@@ -80,7 +99,8 @@ impl Voice {
     }
 
     /// Every 5 s fails stale calls; the first tick after the fallback is set
-    /// also re-delivers what an earlier run ended but never delivered.
+    /// also takes up the calls an earlier run left live and re-delivers what
+    /// it ended but never delivered.
     pub fn spawn_sweeper(self: &Arc<Self>) {
         let voice = self.clone();
         tokio::spawn(async move {
@@ -93,6 +113,7 @@ impl Voice {
                 redriven |= redrive;
                 let _ = tokio::task::spawn_blocking(move || {
                     if redrive {
+                        v.calls.resume();
                         v.redrive();
                     }
                     v.sweep(jiff::Timestamp::now())
@@ -159,6 +180,7 @@ impl Voice {
             )?;
             return Err(e.into());
         }
+        self.calls.warm_up(user_id, msg);
         Ok(id)
     }
 
@@ -235,6 +257,7 @@ impl Voice {
                 if let Err(e) = self.peer.send_call(&id, CallBody::HangUp) {
                     eprintln!("voice: journaling a hang-up for {id} failed: {e}");
                 }
+                self.handler.conversation.on_frame(&id, &CallBody::Ended);
                 self.handler.fall_through(&id, user_id, message);
             }
         }
@@ -263,6 +286,16 @@ fn end_call(
     .optional()
 }
 
+/// A call whose message was spoken into a thread does not fall through: it
+/// is stamped delivered. True when it did.
+fn held_conversation(conn: &Connection, call_id: &str, now: jiff::Timestamp) -> rusqlite::Result<bool> {
+    let n = conn.execute(
+        "UPDATE voice_calls SET fell_through_at = ?2 WHERE id = ?1 AND conversation_id IS NOT NULL",
+        (call_id, now.to_string()),
+    )?;
+    Ok(n > 0)
+}
+
 fn state(conn: &Connection, call_id: &str) -> Result<Option<String>, String> {
     use rusqlite::OptionalExtension;
     conn.query_row("SELECT state FROM voice_calls WHERE id = ?1", [call_id], |r| r.get(0))
@@ -279,27 +312,12 @@ pub(crate) struct NoteHandler {
     fallback: Ladder,
     in_flight: Arc<Mutex<HashSet<String>>>,
     conversation: Arc<dyn Conversation>,
-    peer: OnceLock<Peer>,
 }
 
 impl NoteHandler {
-    /// Runs the conversation on a stored frame of a live call, then sends
-    /// what it said.
-    fn converse(&self, call_id: &str, body: &CallBody) {
-        let said = std::cell::RefCell::new(Vec::new());
-        self.conversation.on_frame(call_id, body, &|b| said.borrow_mut().push(b));
-        let Some(peer) = self.peer.get() else { return };
-        for b in said.into_inner() {
-            if let Err(e) = peer.send_call(call_id, b) {
-                eprintln!("voice: journaling a reply for {call_id} failed: {e}");
-            }
-        }
-    }
-
-    /// Every call, answered or not, is followed by the message through the
-    /// rest of the ladder, so a spoken message also lands as a push or
-    /// Telegram message to keep. Delivery is stamped in `fell_through_at`,
-    /// and a call already stamped or already being delivered is skipped.
+    /// Sends the message on through the rest of the ladder. Delivery is
+    /// stamped in `fell_through_at`, and a call already stamped or already
+    /// being delivered is skipped.
     fn fall_through(&self, call_id: &str, user_id: i64, message: Option<String>) {
         let Some(raw) = message else { return };
         if !claim(&self.in_flight).insert(call_id.to_string()) {
@@ -343,14 +361,7 @@ impl NoteHandler {
             stamped(&db, &call_id);
             claim(&in_flight).remove(&call_id);
         };
-        match tokio::runtime::Handle::try_current() {
-            Ok(rt) => {
-                rt.spawn_blocking(deliver);
-            }
-            Err(_) => {
-                std::thread::spawn(deliver);
-            }
-        }
+        call::spawn_blocking(deliver);
     }
 }
 
@@ -370,7 +381,7 @@ impl Handler for NoteHandler {
             return Err("the fallback ladder is not set yet".into());
         }
         let now = jiff::Timestamp::now();
-        let (ended, live) = {
+        let (ended, live, known) = {
             let conn = crate::db_guard(&self.db);
             let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
             let known = tx
@@ -401,8 +412,12 @@ impl Handler for NoteHandler {
                         }
                     }
                     CallBody::Ended => {
-                        let outcome = if state(&tx, call_id)?.as_deref() == Some("answered") { "answered" } else { "failed" };
+                        let answered = state(&tx, call_id)?.as_deref() == Some("answered");
+                        let outcome = if answered { "answered" } else { "failed" };
                         ended = end_call(&tx, call_id, outcome, None, now).map_err(|e| e.to_string())?;
+                        if answered && ended.is_some() && held_conversation(&tx, call_id, now).map_err(|e| e.to_string())? {
+                            ended = None;
+                        }
                         tx.execute("DELETE FROM voice_frames WHERE call_id = ?1", [call_id])
                             .map_err(|e| e.to_string())?;
                     }
@@ -422,10 +437,10 @@ impl Handler for NoteHandler {
             }
             let live = known && state(&tx, call_id)?.as_deref() == Some("answered");
             tx.commit().map_err(|e| e.to_string())?;
-            (ended, live)
+            (ended, live, known)
         };
-        if live {
-            self.converse(call_id, &body);
+        if live || (known && matches!(body, CallBody::Outcome { .. } | CallBody::Ended)) {
+            self.conversation.on_frame(call_id, &body);
         }
         if let Some((user_id, message)) = ended {
             self.fall_through(call_id, user_id, message);
@@ -719,21 +734,99 @@ mod tests {
         id
     }
 
+    struct Talk {
+        voice: Arc<Voice>,
+        mock: Arc<MockChannel>,
+        llm: Arc<crate::providers::mock::MockLLM>,
+        _dir: tempfile::TempDir,
+    }
+
+    /// A rig whose calls hold a conversation on `rounds`; completions alone never wake it.
+    fn talking(rounds: Vec<Vec<crate::providers::mock::StreamPiece>>) -> Talk {
+        let (voice, mock) = rig();
+        let dir = tempfile::tempdir().unwrap();
+        let prompts = dir.path().join("defaults/prompts");
+        std::fs::create_dir_all(&prompts).unwrap();
+        std::fs::write(
+            dir.path().join("defaults/user.toml"),
+            "display_name = \"Aki\"\ntimezone = \"UTC\"\ntemplate = \"default\"\n",
+        )
+        .unwrap();
+        let shipped = Path::new(env!("CARGO_MANIFEST_DIR")).join("../config/defaults/prompts/voice.md");
+        std::fs::copy(shipped, prompts.join("voice.md")).unwrap();
+        let llm = Arc::new(crate::providers::mock::MockLLM::streamed(rounds));
+        voice.set_calls(call::CallDeps {
+            db: voice.db.clone(),
+            config_dir: dir.path().to_path_buf(),
+            data_dir: dir.path().to_path_buf(),
+            llm: llm.clone(),
+            voice_llm: llm.clone(),
+            embeddings: None,
+            search: None,
+            settings: call::CallSettings { wake_settle: std::time::Duration::from_secs(60), ..Default::default() },
+        });
+        Talk { voice, mock, llm, _dir: dir }
+    }
+
+    /// Answers a rung call and waits for its opening to be sent.
+    async fn answered_and_spoken(t: &Talk) -> String {
+        let id = t.voice.start_call(1, &link(), &msg(), jiff::Timestamp::now()).unwrap();
+        let llm = t.llm.clone();
+        note_voice_proto::testkit::eventually("the warm-up", || llm.seen().len() == 1).await;
+        t.voice.handler.apply(&id, 1, CallBody::Ringing).unwrap();
+        t.voice.handler.apply(&id, 2, CallBody::Outcome { outcome: Outcome::Answered }).unwrap();
+        note_voice_proto::testkit::eventually("the opening", || frames(&t.voice, &id).contains(&CallBody::Play { reply: 1 }))
+            .await;
+        id
+    }
+
+    fn call_conversation(voice: &Voice, id: &str) -> i64 {
+        crate::db_guard(&voice.db)
+            .query_row("SELECT conversation_id FROM voice_calls WHERE id = ?1", [id], |r| r.get(0))
+            .unwrap()
+    }
+
+    fn thread(voice: &Voice, conv: i64) -> Vec<(String, String)> {
+        let conn = crate::db_guard(&voice.db);
+        let mut stmt = conn.prepare("SELECT role, content FROM talk_messages WHERE conversation_id = ?1 ORDER BY id").unwrap();
+        stmt.query_map([conv], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().map(Result::unwrap).collect()
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn an_answered_call_stays_live_and_speaks_the_message() {
-        let (voice, mock) = rig();
-        let id = answered(&voice);
-        let state: String = crate::db_guard(&voice.db)
+        let t = talking(vec![vec![]]);
+        let id = answered_and_spoken(&t).await;
+        let state: String = crate::db_guard(&t.voice.db)
             .query_row("SELECT state FROM voice_calls WHERE id = ?1", [&id], |r| r.get(0))
             .unwrap();
         assert_eq!(state, "answered");
-        let sent = frames(&voice, &id);
-        assert!(sent.contains(&CallBody::Speak { reply: 1, idx: 0, text: "Check-in.".into() }));
-        assert!(sent.iter().any(|b| matches!(b, CallBody::Speak { reply: 1, idx: 1, text } if text.contains("essay"))));
+        let sent = frames(&t.voice, &id);
+        assert!(sent.contains(&CallBody::Speak { reply: 1, idx: 0, text: "how is the essay going?".into() }), "{sent:?}");
         assert!(sent.contains(&CallBody::SpeakDone { reply: 1 }));
-        assert!(sent.contains(&CallBody::Play { reply: 1 }));
         settle().await;
-        assert!(mock.seen().is_empty(), "nothing falls through while the call is live");
+        assert!(t.mock.seen().is_empty(), "nothing falls through while the call is live");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_answered_call_runs_the_conversation() {
+        use crate::providers::mock::StreamPiece::Text;
+        let t = talking(vec![vec![], vec![Text("Glad to hear it.")]]);
+        let id = answered_and_spoken(&t).await;
+        assert!(t.llm.seen()[0].system.contains("You called about: Check-in."), "the warm-up sends the brief");
+        t.voice.handler.apply(&id, 3, CallBody::Commit { turn: 1, text: "thanks".into() }).unwrap();
+        let v = t.voice.clone();
+        let reply = CallBody::Speak { reply: 2, idx: 0, text: "Glad to hear it.".into() };
+        note_voice_proto::testkit::eventually("the reply", || frames(&v, &id).contains(&reply)).await;
+        let conv = call_conversation(&t.voice, &id);
+        let v = t.voice.clone();
+        note_voice_proto::testkit::eventually("the reply is recorded", || thread(&v, conv).len() == 3).await;
+        let row = |role: &str, text: &str| (role.to_string(), text.to_string());
+        assert_eq!(
+            thread(&t.voice, conv),
+            vec![row("assistant", "how is the essay going?"), row("user", "thanks"), row("assistant", "Glad to hear it.")]
+        );
+        let via = crate::talk::via_of(&crate::db_guard(&t.voice.db), conv).unwrap();
+        assert_eq!(via, crate::talk::Via::Voice);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -746,36 +839,86 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_committed_turn_gets_the_stand_in_reply() {
-        let (voice, _mock) = rig();
-        let id = answered(&voice);
-        voice.handler.apply(&id, 3, CallBody::Draft { turn: 1, text: "hel".into() }).unwrap();
-        voice.handler.apply(&id, 4, CallBody::Commit { turn: 1, text: "hello".into() }).unwrap();
-        let sent = frames(&voice, &id);
-        let reply: Vec<&str> = sent
-            .iter()
-            .filter_map(|b| match b {
-                CallBody::Speak { reply: 2, text, .. } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(reply.join(" "), "I heard: hello. The conversation part comes next.");
-        assert!(sent.contains(&CallBody::SpeakDone { reply: 2 }));
-        assert!(sent.contains(&CallBody::Play { reply: 2 }));
+    async fn ended_after_answered_records_answered_and_does_not_fall_through() {
+        let t = talking(vec![vec![]]);
+        let id = answered_and_spoken(&t).await;
+        t.voice.handler.apply(&id, 3, CallBody::Ended).unwrap();
+        settle().await;
+        assert!(t.mock.seen().is_empty(), "the message was spoken and is in the thread");
+        let (state, outcome): (String, String) = crate::db_guard(&t.voice.db)
+            .query_row("SELECT state, outcome FROM voice_calls WHERE id = ?1", [&id], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap();
+        assert_eq!((state.as_str(), outcome.as_str()), ("ended", "answered"));
+        assert_eq!(t.voice.redrive(), 0);
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn ended_after_answered_records_answered_and_falls_through_once() {
+    async fn an_answered_call_does_not_fall_through() {
+        let t = talking(vec![vec![], vec![]]);
+        let id = answered_and_spoken(&t).await;
+        t.voice.handler.apply(&id, 3, CallBody::Ended).unwrap();
+        let reborn = Voice::new(t.voice.db.clone());
+        reborn.set_fallback(vec![t.mock.clone()]);
+        assert_eq!(reborn.redrive(), 0, "a restart does not deliver it either");
+
+        let missed = t.voice.start_call(1, &link(), &msg(), jiff::Timestamp::now()).unwrap();
+        t.voice.handler.apply(&missed, 1, CallBody::Outcome { outcome: Outcome::Missed }).unwrap();
+        settle().await;
+        assert_eq!(t.mock.seen().len(), 1, "only the missed call falls through");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_answered_call_that_never_held_a_conversation_falls_through_once() {
         let (voice, mock) = rig();
         let id = answered(&voice);
         voice.handler.apply(&id, 3, CallBody::Ended).unwrap();
         settle().await;
-        assert_eq!(mock.seen().len(), 1, "one fallthrough");
-        let (state, outcome): (String, String) = crate::db_guard(&voice.db)
-            .query_row("SELECT state, outcome FROM voice_calls WHERE id = ?1", [&id], |r| Ok((r.get(0)?, r.get(1)?)))
-            .unwrap();
-        assert_eq!((state.as_str(), outcome.as_str()), ("ended", "answered"));
+        assert_eq!(mock.seen().len(), 1);
         assert_eq!(voice.redrive(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_note_restart_resumes_a_live_call() {
+        use crate::providers::mock::StreamPiece::Text;
+        let t = talking(vec![vec![Text("Still here.")]]);
+        let conv = {
+            let conn = crate::db_guard(&t.voice.db);
+            let now = jiff::Timestamp::now();
+            let conv = crate::talk::create(&conn, 1, "Call", now).unwrap();
+            crate::talk::append_text(&conn, conv, "assistant", "how is the essay going?", now).unwrap();
+            conn.execute(
+                "INSERT INTO voice_calls (id, user_id, direction, message, state, ring_by, created_at, conversation_id)
+                 VALUES ('c1', 1, 'outbound', ?1, 'answered', ?2, ?2, ?3)",
+                (serde_json::to_string(&msg()).unwrap(), now.to_string(), conv),
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO voice_jobs (call_id, job, reply, call_index, tool, args, state, started_at)
+                 VALUES ('c1', 1, 2, 0, 'task_create', '{}', 'running', 'x')",
+                [],
+            )
+            .unwrap();
+            conv
+        };
+        t.voice.spawn_sweeper();
+        let calls = t.voice.calls.clone();
+        note_voice_proto::testkit::eventually("the call resumes", || calls.is_live("c1")).await;
+        t.voice.handler.apply("c1", 5, CallBody::Commit { turn: 2, text: "hello".into() }).unwrap();
+        let llm = t.llm.clone();
+        note_voice_proto::testkit::eventually("the reply model is asked", || !llm.seen().is_empty()).await;
+        let messages = &t.llm.seen()[0].messages;
+        assert!(
+            matches!(&messages[0], crate::providers::Message::Assistant { text, .. } if text == "how is the essay going?"),
+            "the thread so far is the history: {messages:?}"
+        );
+        let Some(crate::providers::Message::User(block)) = messages.last() else { panic!("{messages:?}") };
+        assert!(block.contains("[job 1 · task_create · interrupted]"), "{block}");
+        assert!(block.contains("[note] Note restarted; the call is still on"), "{block}");
+        assert!(block.ends_with("[you] hello"), "{block}");
+        let v = t.voice.clone();
+        let reply = CallBody::Speak { reply: 3, idx: 0, text: "Still here.".into() };
+        note_voice_proto::testkit::eventually("the reply", || frames(&v, "c1").contains(&reply)).await;
+        assert!(thread(&t.voice, conv).contains(&("assistant".into(), "Still here.".into())));
     }
 
     #[tokio::test(flavor = "multi_thread")]

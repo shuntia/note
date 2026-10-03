@@ -50,11 +50,13 @@ const TICK: Duration = Duration::from_millis(50);
 const END_WAIT: Duration = Duration::from_secs(2);
 const DRAFT_WAIT: Duration = Duration::from_secs(3);
 
-/// Runs until Stop or Ended; `opening` is spoken as reply 1 before anything else.
+/// Runs until Stop or Ended; `opening` is spoken as reply 1 before anything
+/// else, and `initial` is queued before the first event.
 pub fn run(
     deps: DriverDeps,
     opening: Option<String>,
     history: Vec<Message>,
+    initial: Vec<Item>,
     rx: mpsc::Receiver<DriverIn>,
     tx: mpsc::Sender<DriverIn>,
 ) {
@@ -68,6 +70,9 @@ pub fn run(
         });
     }
     let mut driver = Driver::new(deps, opening.as_deref().unwrap_or(""), history, tx);
+    for item in initial {
+        driver.queue.push(item, driver.now());
+    }
     if let Some(text) = &opening {
         driver.open(text);
     }
@@ -979,7 +984,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         let driver_tx = tx.clone();
         let opening = opening.map(String::from);
-        let driver = std::thread::spawn(move || run(deps, opening, vec![], rx, driver_tx));
+        let driver = std::thread::spawn(move || run(deps, opening, vec![], vec![], rx, driver_tx));
         Harness {
             tx,
             frames,

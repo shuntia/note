@@ -18,7 +18,7 @@ pub fn build(
     user_id: i64,
     username: &str,
     reason: &Reason,
-    conversation_id: i64,
+    conversation_id: Option<i64>,
     now: jiff::Timestamp,
 ) -> Result<String> {
     let mut brief = system_prompt(deps, user_id, username, SessionKind::Call, now)?;
@@ -29,7 +29,10 @@ pub fn build(
         }
         Reason::UserCalled => brief.push_str("The user called you."),
     }
-    let thread = crate::talk::history(&crate::db_guard(deps.db), conversation_id, THREAD_TAIL)?;
+    let thread = match conversation_id {
+        Some(id) => crate::talk::history(&crate::db_guard(deps.db), id, THREAD_TAIL)?,
+        None => Vec::new(),
+    };
     if !thread.is_empty() {
         brief.push_str("\n\n# Earlier in this thread\n");
         for message in thread {
@@ -93,7 +96,7 @@ mod tests {
             share: None,
         };
         let reason = Reason::CheckIn { title: "Essay".into(), body: "How is the essay going?".into() };
-        let brief = build(&deps, 1, "aki", &reason, thread, now).unwrap();
+        let brief = build(&deps, 1, "aki", &reason, Some(thread), now).unwrap();
 
         assert!(brief.starts_with("You are Note, on a phone call with Aki."), "{brief}");
         assert!(brief.contains("You called about: Essay. You opened with: How is the essay going?"));
@@ -142,7 +145,7 @@ mod tests {
             thread_note: None,
             share: None,
         };
-        let brief = build(&deps, 1, "aki", &Reason::UserCalled, thread, now).unwrap();
+        let brief = build(&deps, 1, "aki", &Reason::UserCalled, Some(thread), now).unwrap();
         assert!(brief.starts_with("call Aki"));
         assert!(brief.contains("write {name} on the form"), "the user's context is left as written");
         assert!(brief.ends_with("# Why this call\n\nThe user called you."), "{brief}");

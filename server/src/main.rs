@@ -138,6 +138,8 @@ async fn main() -> anyhow::Result<()> {
         state = state.with_telegram(ch);
     }
     if let Some(v) = &cfg.voice {
+        let voice_llm = providers::build_voice(&cfg.providers, v, &state.llm)?;
+        state = state.with_voice_llm(voice_llm, note_server::voice::call::CallSettings::from(v));
         let voice = note_server::voice::Voice::new(state.db.clone());
         state = state.with_voice(voice.clone());
         voice

@@ -277,6 +277,33 @@ pub fn build(cfg: &crate::config::ProvidersConfig) -> Result<Providers> {
 }
 
 /// The configured reasoning effort, or `None` for the default "none".
+/// A call's reply model: for an `openai` provider, `[voice] model` (else the
+/// main model) with reasoning off and `OpenRouter`'s `provider.sort`; any other
+/// provider speaks on `main` as is.
+pub fn build_voice(
+    cfg: &crate::config::ProvidersConfig,
+    voice: &crate::config::VoiceConfig,
+    main: &Arc<dyn LLMProvider>,
+) -> Result<Arc<dyn LLMProvider>> {
+    let Some(p) = cfg.llm.as_ref().filter(|p| p.kind == "openai") else {
+        return Ok(main.clone());
+    };
+    let model = voice.model.clone().or_else(|| main.model()).unwrap_or_else(|| p.model.clone());
+    let key = read_key(p, false)?;
+    let mut llm = openai::OpenAILLM::new(
+        &p.base_url,
+        &model,
+        &key,
+        ChatAgents::new(p.timeout_secs, p.background_timeout_secs),
+        reasoning_effort(p)?,
+    )
+    .without_reasoning();
+    if let Some(sort) = &voice.provider_sort {
+        llm = llm.with_extra(serde_json::json!({"provider": {"sort": sort}}));
+    }
+    Ok(Arc::new(llm))
+}
+
 fn reasoning_effort(p: &crate::config::ProviderConfig) -> Result<Option<&str>> {
     match p.reasoning.as_str() {
         "" | "none" => Ok(None),
@@ -405,6 +432,21 @@ mod tests {
             model: "m".into(), api_key_env: String::new(), api_key_file: path,
             timeout_secs: 45, background_timeout_secs: 180, reasoning: String::new(), cache_ttl_min: None,
         }
+    }
+
+    #[test]
+    fn a_call_speaks_on_its_own_model_only_through_openai() {
+        let voice: crate::config::VoiceConfig =
+            toml::from_str("socket = \"/run/v.sock\"\nmodel = \"fast\"").unwrap();
+        let main: Arc<dyn LLMProvider> = Arc::new(mock::NullLLM);
+        let mut cfg = crate::config::ProvidersConfig { llm: None, embeddings: None };
+        assert!(Arc::ptr_eq(&build_voice(&cfg, &voice, &main).unwrap(), &main));
+        cfg.llm = Some(file_key_config(std::path::PathBuf::new()));
+        let llm = build_voice(&cfg, &voice, &main).unwrap();
+        assert!(!Arc::ptr_eq(&llm, &main));
+        assert_eq!(llm.model().as_deref(), Some("fast"));
+        let unset: crate::config::VoiceConfig = toml::from_str("socket = \"/run/v.sock\"").unwrap();
+        assert_eq!(build_voice(&cfg, &unset, &main).unwrap().model().as_deref(), Some("m"));
     }
 
     #[test]

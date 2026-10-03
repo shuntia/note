@@ -58,23 +58,23 @@ fn default_voice_provider_sort() -> Option<String> {
     Some("latency".into())
 }
 
-fn default_wake_settle_ms() -> u64 {
+pub(crate) fn default_wake_settle_ms() -> u64 {
     600
 }
 
-fn default_max_wakes() -> u32 {
+pub(crate) fn default_max_wakes() -> u32 {
     4
 }
 
-fn default_job_timeout_secs() -> u64 {
+pub(crate) fn default_job_timeout_secs() -> u64 {
     60
 }
 
-fn default_max_jobs() -> usize {
+pub(crate) fn default_max_jobs() -> usize {
     8
 }
 
-fn default_first_token_ms() -> u64 {
+pub(crate) fn default_first_token_ms() -> u64 {
     8000
 }
 
