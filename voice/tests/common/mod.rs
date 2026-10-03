@@ -258,7 +258,12 @@ pub fn fake_note(socket: &std::path::Path) -> FakeNote {
     FakeNote { peer, rec, hold, _outbox: outbox }
 }
 
-/// Hears nothing and says nothing; `loaded: false` has no languages.
+/// The sample value of the one frame the fake TTS speaks `text` as.
+pub fn spoken_marker(text: &str) -> i16 {
+    -(text.len() as i16)
+}
+
+/// Hears nothing and speaks each text as one marked frame; `loaded: false` has no languages.
 pub struct SilentEngines {
     pub loaded: bool,
 }
@@ -292,8 +297,8 @@ impl note_voice::audio::engines::TurnDetector for Deaf {
 }
 
 impl note_voice::audio::engines::TextToSpeech for Deaf {
-    fn synthesize(&self, _text: &str, _voice: &str) -> anyhow::Result<Vec<i16>> {
-        Ok(Vec::new())
+    fn synthesize(&self, text: &str, _voice: &str) -> anyhow::Result<Vec<i16>> {
+        Ok(vec![spoken_marker(text); 480])
     }
 
     fn voices(&self) -> Vec<note_voice::audio::engines::VoiceInfo> {
@@ -327,7 +332,8 @@ impl note_voice::audio::engines::SpeechEngines for SilentEngines {
 #[derive(Default)]
 pub struct MediaProbe {
     pub joins: AtomicUsize,
-    pub frames_sent: AtomicUsize,
+    /// The first sample of every frame sent.
+    pub sent: Mutex<Vec<i16>>,
     pub left: AtomicBool,
 }
 
@@ -342,8 +348,8 @@ impl note_voice::media::MediaIo for QuietRoom {
         std::future::pending().await
     }
 
-    async fn send(&self, _frame: &[i16; 480]) -> anyhow::Result<()> {
-        self.probe.frames_sent.fetch_add(1, Ordering::SeqCst);
+    async fn send(&self, frame: &[i16; 480]) -> anyhow::Result<()> {
+        self.probe.sent.lock().unwrap().push(frame[0]);
         Ok(())
     }
 

@@ -179,8 +179,7 @@ impl Service {
         direction: Direction,
     ) {
         if self.backends.engines.languages().is_empty() {
-            clear_member(&self.matrix, room_id).await;
-            return self.finish(call_id, Outcome::Failed { reason: "no voice models".into() });
+            return self.fail_before_join(call_id, room_id, mxid, direction, "no voice models".into()).await;
         }
         let (svc, id) = (self.clone(), call_id.to_string());
         let writer = match CallWriter::spawn(move |body| {
@@ -188,8 +187,8 @@ impl Service {
         }) {
             Ok(writer) => writer,
             Err(e) => {
-                clear_member(&self.matrix, room_id).await;
-                return self.finish(call_id, Outcome::Failed { reason: format!("starting the frame writer: {e}") });
+                let reason = format!("starting the frame writer: {e}");
+                return self.fail_before_join(call_id, room_id, mxid, direction, reason).await;
             }
         };
         let (tx, inbox) = mpsc::unbounded_channel();
@@ -239,6 +238,15 @@ impl Service {
         lock(&self.sessions).remove(call_id);
         clear_member(&self.matrix, room_id).await;
         self.end(call_id);
+    }
+
+    /// An inbound caller is still answered and told, rather than left ringing.
+    async fn fail_before_join(&self, call_id: &str, room_id: &str, mxid: &str, direction: Direction, reason: String) {
+        self.finish(call_id, Outcome::Failed { reason });
+        match direction {
+            Direction::Outbound => clear_member(&self.matrix, room_id).await,
+            Direction::Inbound => self.cant_reach(room_id, mxid, None).await,
+        }
     }
 
     fn set_live(&self, call_id: &str) {
@@ -485,19 +493,14 @@ impl Service {
     }
 
     /// Answers the linked users' calls as they start. A user's ring carries
-    /// no device, so it is checked against the device of their last call membership.
-    fn detect(
-        self: &Arc<Self>,
-        detector: &mut Detector,
-        devices: &mut HashMap<(String, String), String>,
-        ev: &RoomEvent,
-    ) {
+    /// no device, so it is checked against one of their devices in a call.
+    fn detect(self: &Arc<Self>, detector: &mut Detector, in_call: &mut HashSet<(String, String, String)>, ev: &RoomEvent) {
         if let RoomEvent::CallMember { room, user, device, active, .. } = ev {
-            let at = (room.clone(), user.clone());
+            let at = (room.clone(), user.clone(), device.clone());
             if *active {
-                devices.insert(at, device.clone());
+                in_call.insert(at);
             } else {
-                devices.remove(&at);
+                in_call.remove(&at);
             }
         }
         let links: Vec<(String, String)> =
@@ -505,7 +508,11 @@ impl Service {
         let Detect::Answer { room, mxid, key } = detector.on_event(ev, &links, &|room| self.busy(room), now_ms()) else {
             return;
         };
-        let device = devices.get(&(room.clone(), mxid.clone())).cloned().filter(|d| !d.is_empty());
+        let device = match ev {
+            RoomEvent::CallMember { device, .. } => Some(device.clone()),
+            _ => in_call.iter().find(|(r, u, _)| *r == room && *u == mxid).map(|(_, _, d)| d.clone()),
+        }
+        .filter(|d| !d.is_empty());
         let (tx, started) = oneshot::channel();
         lock(&self.answering).insert(room.clone(), Some(tx));
         eprintln!("voice: {mxid} is calling in {room}");
@@ -514,7 +521,7 @@ impl Service {
 
     async fn sync_forever(self: Arc<Self>) {
         let mut detector = Detector::new(lock(&self.state).data.since.is_none(), now_ms());
-        let mut devices = HashMap::new();
+        let mut in_call = HashSet::new();
         loop {
             let since = lock(&self.state).data.since.clone();
             match self.matrix.sync(since.as_deref(), 30_000).await {
@@ -523,7 +530,7 @@ impl Service {
                         if let RoomEvent::Joined { room, user } = &ev {
                             self.report_join(room, user);
                         }
-                        self.detect(&mut detector, &mut devices, &ev);
+                        self.detect(&mut detector, &mut in_call, &ev);
                         let _ = self.events.send(ev);
                     }
                     let mut st = lock(&self.state);
@@ -536,7 +543,6 @@ impl Service {
                         let mut st = lock(&self.state);
                         st.data.since = None;
                         let _ = st.save();
-                        detector = Detector::new(true, now_ms());
                     }
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 }
@@ -564,6 +570,7 @@ impl Handler for VoiceHandler {
         let svc = self.svc().clone();
         match body {
             CallBody::Start { room_id, mxid, ring_secs, ring_by_ms, voice, direction, .. } => {
+                let room_busy = direction == Direction::Outbound && svc.busy(&room_id);
                 {
                     let mut st = lock(&svc.state);
                     if st.data.calls.contains_key(call_id) {
@@ -579,6 +586,8 @@ impl Handler for VoiceHandler {
                 svc.applied.set_applied(call_id, seq).map_err(|e| e.to_string())?;
                 if direction == Direction::Inbound {
                     svc.begin_answer(call_id, &room_id, voice);
+                } else if room_busy {
+                    svc.finish(call_id, Outcome::Failed { reason: "a call is already up in this room".into() });
                 } else if now_ms() > ring_by_ms {
                     svc.finish(call_id, Outcome::Failed { reason: "late".into() });
                 } else {

@@ -4,8 +4,8 @@ use crate::media::MediaIo;
 use std::collections::HashMap;
 use std::time::Duration;
 
-/// On a cold start, older events are a call that has likely ended.
-const COLD_START_MAX_AGE_MS: i64 = 30_000;
+/// An older event is a call that has likely ended.
+const MAX_AGE_MS: i64 = 30_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Detect {
@@ -13,24 +13,21 @@ pub enum Detect {
     Ignore,
 }
 
-/// Picks out the linked users' own calls from the room events. A call
-/// membership starts a call only on its edge from inactive to active, since
-/// Element X re-sends it while in a call; a ring counts once per event.
+/// Picks out the linked users' own calls from the room events. A device's
+/// call membership starts a call only on its edge from inactive to active,
+/// since Element X re-sends it while in a call; a ring counts once per event.
+/// Events over 30 s old are recorded but never answered, which also covers
+/// the state a cold start's first sync carries.
+#[derive(Default)]
 pub struct Detector {
-    /// Events from before this are recorded but not answered.
-    cutoff_ms: Option<i64>,
-    /// Whether each `(room, user)`'s call membership is set.
-    active: HashMap<(String, String), bool>,
+    /// Whether each `(room, user, device)`'s call membership is set.
+    active: HashMap<(String, String, String), bool>,
     answered_rings: HashMap<String, String>,
 }
 
 impl Detector {
-    pub fn new(cold_start: bool, now_ms: i64) -> Self {
-        Detector {
-            cutoff_ms: cold_start.then(|| now_ms - COLD_START_MAX_AGE_MS),
-            active: HashMap::new(),
-            answered_rings: HashMap::new(),
-        }
+    pub fn new(_cold_start: bool, _now_ms: i64) -> Self {
+        Detector::default()
     }
 
     /// `links` are `(room_id, mxid)` pairs; `busy` reports a room with a call starting, ringing or live.
@@ -40,11 +37,12 @@ impl Detector {
         ev: &RoomEvent,
         links: &[(String, String)],
         busy: &dyn Fn(&str) -> bool,
-        _now_ms: i64,
+        now_ms: i64,
     ) -> Detect {
         let (room, caller, key, ts_ms) = match ev {
-            RoomEvent::CallMember { room, user, active, event_id, ts_ms, .. } => {
-                let was_active = self.active.insert((room.clone(), user.clone()), *active).unwrap_or(false);
+            RoomEvent::CallMember { room, user, device, active, event_id, ts_ms } => {
+                let at = (room.clone(), user.clone(), device.clone());
+                let was_active = self.active.insert(at, *active).unwrap_or(false);
                 if !*active || was_active {
                     return Detect::Ignore;
                 }
@@ -61,7 +59,7 @@ impl Detector {
         if !links.iter().any(|(r, m)| r == room && m == caller) {
             return Detect::Ignore;
         }
-        if self.cutoff_ms.is_some_and(|cutoff| ts_ms < cutoff) {
+        if ts_ms < now_ms - MAX_AGE_MS {
             return Detect::Ignore;
         }
         if busy(room) {
@@ -119,10 +117,25 @@ mod tests {
     }
 
     fn left(event_id: &str, ts_ms: i64) -> RoomEvent {
+        left_from("PHONE", event_id, ts_ms)
+    }
+
+    fn joined_from(device: &str, event_id: &str, ts_ms: i64) -> RoomEvent {
         RoomEvent::CallMember {
             room: "!dm:t".into(),
             user: "@aki:t".into(),
-            device: "PHONE".into(),
+            device: device.into(),
+            active: true,
+            event_id: event_id.into(),
+            ts_ms,
+        }
+    }
+
+    fn left_from(device: &str, event_id: &str, ts_ms: i64) -> RoomEvent {
+        RoomEvent::CallMember {
+            room: "!dm:t".into(),
+            user: "@aki:t".into(),
+            device: device.into(),
             active: false,
             event_id: event_id.into(),
             ts_ms,
@@ -159,9 +172,12 @@ mod tests {
         let mut warm = Detector::new(false, NOW);
         assert_eq!(
             warm.on_event(&member("!dm:t", "@aki:t", "$1", NOW - 60_000), &links(), &idle, NOW),
-            answer("$1"),
-            "a resumed sync has not seen the event before"
+            Detect::Ignore,
+            "a resumed sync's old call has likely ended too"
         );
+        let old_ring =
+            RoomEvent::RingForBot { room: "!dm:t".into(), sender: "@aki:t".into(), event_id: "$r".into(), ts_ms: NOW - 60_000 };
+        assert_eq!(warm.on_event(&old_ring, &links(), &idle, NOW), Detect::Ignore);
     }
 
     #[test]
@@ -200,6 +216,17 @@ mod tests {
         );
         assert_eq!(d.on_event(&left("$3", NOW + 2_000), &links(), &idle, NOW), Detect::Ignore);
         assert_eq!(d.on_event(&member("!dm:t", "@aki:t", "$4", NOW + 3_000), &links(), &idle, NOW), answer("$4"));
+    }
+
+    #[test]
+    fn one_device_leaving_leaves_the_others_call_as_it_was() {
+        let mut d = Detector::new(false, NOW);
+        let busy = |room: &str| room == "!dm:t";
+        assert_eq!(d.on_event(&joined_from("PHONE", "$1", NOW), &links(), &idle, NOW), answer("$1"));
+        assert_eq!(d.on_event(&joined_from("LAPTOP", "$2", NOW), &links(), &busy, NOW), Detect::Ignore);
+        assert_eq!(d.on_event(&left_from("PHONE", "$3", NOW), &links(), &idle, NOW), Detect::Ignore);
+        assert_eq!(d.on_event(&joined_from("LAPTOP", "$4", NOW), &links(), &idle, NOW), Detect::Ignore, "a refresh");
+        assert_eq!(d.on_event(&joined_from("PHONE", "$5", NOW), &links(), &idle, NOW), answer("$5"));
     }
 
     #[test]

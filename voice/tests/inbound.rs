@@ -2,6 +2,7 @@
 mod common;
 
 use common::*;
+use note_voice::audio::lines::{text, Line};
 use note_voice_proto::testkit::{eventually, fast};
 use note_voice_proto::{CallBody, Direction, Outcome, Reply, Request, Role, VoiceProfile};
 use serde_json::{json, Value};
@@ -12,6 +13,7 @@ const ROOM: &str = "!r:t";
 const USER: &str = "@aki:t";
 const USER_KEY: &str = "_@aki:t_PHONE_m.call";
 const BOT_KEY: &str = "_@note:t_DEV_m.call";
+const READY: i16 = 0x2010;
 
 struct Rig {
     _dir: tempfile::TempDir,
@@ -26,13 +28,17 @@ impl Rig {
     }
 }
 
-/// The service with `@aki:t` linked in `!r:t`, a 100 ms ready cue, and Note up if `with_note`.
+/// The service with `@aki:t` linked in `!r:t`, a 100 ms ready cue of `READY`, and Note up if `with_note`.
 async fn rig(with_note: bool) -> Rig {
+    rig_with(with_note, true).await
+}
+
+async fn rig_with(with_note: bool, models: bool) -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let (base, hs) = homeserver().await;
     let mut cfg = voice_config(dir.path(), base);
     let cue = dir.path().join("ready.pcm");
-    std::fs::write(&cue, [0x10u8, 0x20].repeat(4800)).unwrap();
+    std::fs::write(&cue, READY.to_le_bytes().repeat(4800)).unwrap();
     cfg.ready_cue_file = Some(cue);
     std::fs::create_dir_all(&cfg.state_dir).unwrap();
     let state = json!({
@@ -42,7 +48,7 @@ async fn rig(with_note: bool) -> Rig {
     });
     std::fs::write(cfg.state_dir.join("state.json"), state.to_string()).unwrap();
     let note = with_note.then(|| fake_note(&cfg.socket));
-    let (backends, media) = probed_backends(true, Join::Quiet);
+    let (backends, media) = probed_backends(models, Join::Quiet);
     tokio::spawn(async move { note_voice::service::run_with(cfg, fast(Role::Voice), backends).await.unwrap() });
     if let Some(note) = &note {
         let p = note.peer.clone();
@@ -145,7 +151,9 @@ async fn an_incoming_call_with_note_down_says_it_cant_reach() {
     let media = r.media.clone();
     eventually("the bot leaves the call", || media.left.load(Ordering::SeqCst)).await;
     assert_eq!(r.media.joins.load(Ordering::SeqCst), 1);
-    assert!(r.media.frames_sent.load(Ordering::SeqCst) >= 10, "the ready cue plays");
+    let sent = r.media.sent.lock().unwrap().clone();
+    assert_eq!(sent.iter().filter(|&&s| s == READY).count(), 10, "the ready cue plays");
+    assert_eq!(sent.last(), Some(&spoken_marker(text(Line::CantReach, "en"))), "then the line, last");
     eventually("the membership is cleared", || bot_memberships(&r) == vec![true, false]).await;
 }
 
@@ -166,17 +174,7 @@ async fn a_call_abandoned_before_join_is_not_joined() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_call_while_ringing_answers_instead() {
     let r = rig(true).await;
-    let start = CallBody::Start {
-        user_id: 1,
-        room_id: ROOM.into(),
-        mxid: USER.into(),
-        title: "Check-in".into(),
-        ring_secs: 30,
-        ring_by_ms: now_ms() + 10_000,
-        voice: VoiceProfile::default(),
-        direction: Direction::Outbound,
-    };
-    r.note().peer.send_call("c1", start).unwrap();
+    r.note().peer.send_call("c1", outbound_start()).unwrap();
     let hs = r.hs.clone();
     eventually("the ring is sent", || !hs.lock().unwrap().sends.is_empty()).await;
     user_calls(&r, true);
@@ -185,4 +183,52 @@ async fn a_call_while_ringing_answers_instead() {
     assert_eq!(outcomes(&r, "c1"), vec![Outcome::Answered]);
     assert!(incoming_calls(&r).is_empty(), "no second call");
     assert_eq!(r.media.joins.load(Ordering::SeqCst), 1);
+}
+
+fn outbound_start() -> CallBody {
+    CallBody::Start {
+        user_id: 1,
+        room_id: ROOM.into(),
+        mxid: USER.into(),
+        title: "Check-in".into(),
+        ring_secs: 30,
+        ring_by_ms: now_ms() + 10_000,
+        voice: VoiceProfile::default(),
+        direction: Direction::Outbound,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_ring_during_an_incoming_call_is_refused() {
+    let r = rig(true).await;
+    note_opens(&r, "c9");
+    user_calls(&r, true);
+    eventually("Note is asked to open the call", || !incoming_calls(&r).is_empty()).await;
+    r.note().peer.send_call("c9", inbound_start()).unwrap();
+    eventually("answered", || !outcomes(&r, "c9").is_empty()).await;
+
+    r.note().peer.send_call("c2", outbound_start()).unwrap();
+    let rec = r.note().rec.clone();
+    eventually("the ring is refused", || rec.bodies("c2").contains(&CallBody::Ended)).await;
+    assert_eq!(outcomes(&r, "c2"), vec![Outcome::Failed { reason: "a call is already up in this room".into() }]);
+    assert!(r.hs.lock().unwrap().sends.is_empty(), "nothing rings");
+    assert_eq!(bot_memberships(&r), vec![true], "the incoming call keeps its membership");
+    assert!(!rec.bodies("c9").contains(&CallBody::Ended));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_incoming_call_with_no_voice_models_is_answered_and_hung_up() {
+    let r = rig_with(true, false).await;
+    note_opens(&r, "c9");
+    user_calls(&r, true);
+    eventually("Note is asked to open the call", || !incoming_calls(&r).is_empty()).await;
+    r.note().peer.send_call("c9", inbound_start()).unwrap();
+    let rec = r.note().rec.clone();
+    eventually("Ended", || rec.bodies("c9").contains(&CallBody::Ended)).await;
+    assert_eq!(outcomes(&r, "c9"), vec![Outcome::Failed { reason: "no voice models".into() }]);
+    let media = r.media.clone();
+    eventually("the bot leaves the call", || media.left.load(Ordering::SeqCst)).await;
+    assert_eq!(r.media.joins.load(Ordering::SeqCst), 1, "the caller is answered, not left ringing");
+    assert_eq!(*r.media.sent.lock().unwrap(), vec![READY; 10], "the ready cue alone");
+    eventually("the membership is cleared", || bot_memberships(&r) == vec![true, false]).await;
 }

@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -11,7 +11,7 @@ use tokio::time::{Instant, MissedTickBehavior};
 use crate::audio::engines::{SpeechEngines, SpeechToText, TurnDetector, Vad};
 use crate::audio::lines::{Line, Lines};
 use crate::audio::playout::{Clip, Playout};
-use crate::audio::speech::SpeechQueue;
+use crate::audio::speech::{Gate, SpeechQueue};
 use crate::audio::turn::{backchannels, Action, Input, TurnConfig, TurnMachine};
 use crate::media::{Gone, MediaIo};
 
@@ -121,12 +121,8 @@ enum Event {
     Partial(String),
     Score { at: Duration, p: f32 },
     Finished { turn: u64, text: String },
-    Lines {
-        lost: Option<Arc<Vec<i16>>>,
-        goodbye: Option<Arc<Vec<i16>>>,
-        moment: Option<Arc<Vec<i16>>>,
-        hi: Option<Arc<Vec<i16>>>,
-    },
+    /// `pcm` is None for a line that failed to render.
+    Line { line: Line, pcm: Option<Arc<Vec<i16>>> },
 }
 
 enum SttCmd {
@@ -183,14 +179,11 @@ struct Live<S> {
     events_tx: mpsc::UnboundedSender<Event>,
     events: mpsc::UnboundedReceiver<Event>,
     heard_cue: Option<Arc<Vec<i16>>>,
-    lines_ready: bool,
-    lost_line: Option<Arc<Vec<i16>>>,
-    goodbye_line: Option<Arc<Vec<i16>>>,
-    moment_line: Option<Arc<Vec<i16>>>,
-    hi_line: Option<Arc<Vec<i16>>>,
+    /// The lines rendered so far.
+    lines: HashMap<Line, Option<Arc<Vec<i16>>>>,
     goodbye_pending: bool,
-    /// The line to fill with if no reply is speaking by `FILLER_AFTER` past the instant: "hi" from the
-    /// start of an inbound call, "one moment" from a Commit.
+    /// The line to fill with by `FILLER_AFTER` past the instant: "hi" from the start of an inbound
+    /// call unless Note's words arrive, "one moment" from a Commit unless a reply is speaking.
     awaiting_reply: Option<(Instant, Line)>,
     drafted: Option<u64>,
     start: Instant,
@@ -224,19 +217,20 @@ impl<S: Fn(CallBody)> Live<S> {
         {
             let (lines, tts, language, voice, events) =
                 (deps.lines.clone(), tts.clone(), language.clone(), voice.clone(), events_tx.clone());
+            let order: &[Line] = match deps.direction {
+                Direction::Inbound => &[Line::Hi, Line::OneMoment, Line::LostNotes, Line::Goodbye],
+                Direction::Outbound => &[Line::OneMoment, Line::LostNotes, Line::Goodbye],
+            };
             tokio::task::spawn_blocking(move || {
-                let render = |line| {
-                    lines
+                for &line in order {
+                    let pcm = lines
                         .get(&*tts, &language, &voice, line)
                         .map_err(|e| eprintln!("voice: rendering {line:?} failed: {e:#}"))
-                        .ok()
-                };
-                let _ = events.send(Event::Lines {
-                    lost: render(Line::LostNotes),
-                    goodbye: render(Line::Goodbye),
-                    moment: render(Line::OneMoment),
-                    hi: render(Line::Hi),
-                });
+                        .ok();
+                    if events.send(Event::Line { line, pcm }).is_err() {
+                        return;
+                    }
+                }
             });
         }
         let mut playout = Playout::default();
@@ -255,11 +249,7 @@ impl<S: Fn(CallBody)> Live<S> {
             events_tx,
             events,
             heard_cue: deps.profile.cue.then(|| deps.cues.heard.clone()),
-            lines_ready: false,
-            lost_line: None,
-            goodbye_line: None,
-            moment_line: None,
-            hi_line: None,
+            lines: HashMap::new(),
             goodbye_pending: false,
             awaiting_reply: (deps.direction == Direction::Inbound).then_some((start, Line::Hi)),
             drafted: None,
@@ -345,11 +335,9 @@ impl<S: Fn(CallBody)> Live<S> {
             self.act(actions);
         }
         if let Some(since) = self.link_down_since {
-            if !self.lost_played && self.lines_ready && since.elapsed() >= LOST_NOTICE {
+            if !self.lost_played && self.lines.contains_key(&Line::LostNotes) && since.elapsed() >= LOST_NOTICE {
                 self.lost_played = true;
-                if let Some(pcm) = &self.lost_line {
-                    self.playout.push(Clip { reply: None, chars: 0, pcm: pcm.to_vec() });
-                }
+                self.play_line(Line::LostNotes);
             }
             if since.elapsed() >= link_grace {
                 self.say_goodbye(SessionEnd::LinkLost);
@@ -358,24 +346,25 @@ impl<S: Fn(CallBody)> Live<S> {
         if self.start.elapsed() >= max_len {
             self.say_goodbye(SessionEnd::TimedOut);
         }
-        if self.lines_ready && self.awaiting_reply.is_some_and(|(at, _)| at.elapsed() >= FILLER_AFTER) {
-            let filler = match self.awaiting_reply.take() {
-                Some((_, Line::Hi)) => &self.hi_line,
-                _ => &self.moment_line,
-            };
-            if let Some(pcm) = filler {
-                self.playout.push(Clip { reply: None, chars: 0, pcm: pcm.to_vec() });
+        if let Some((at, line)) = self.awaiting_reply {
+            if self.lines.contains_key(&line) && at.elapsed() >= FILLER_AFTER {
+                self.awaiting_reply = None;
+                self.play_line(line);
             }
         }
-        if self.goodbye_pending && self.lines_ready {
+        if self.goodbye_pending && self.lines.contains_key(&Line::Goodbye) {
             self.goodbye_pending = false;
-            if let Some(pcm) = &self.goodbye_line {
-                self.playout.push(Clip { reply: None, chars: 0, pcm: pcm.to_vec() });
-            }
+            self.play_line(Line::Goodbye);
         }
         let ending = self.ending.as_ref()?;
         let drained = !self.goodbye_pending && self.playout.is_empty() && self.speech.is_idle();
         (drained || Instant::now() >= ending.by).then(|| ending.end.clone())
+    }
+
+    fn play_line(&mut self, line: Line) {
+        if let Some(Some(pcm)) = self.lines.get(&line) {
+            self.playout.push(Clip { reply: None, chars: 0, pcm: pcm.to_vec() });
+        }
     }
 
     fn act(&mut self, actions: Vec<Action>) {
@@ -425,12 +414,8 @@ impl<S: Fn(CallBody)> Live<S> {
 
     fn event(&mut self, ev: Event) {
         let input = match ev {
-            Event::Lines { lost, goodbye, moment, hi } => {
-                self.lines_ready = true;
-                self.lost_line = lost;
-                self.goodbye_line = goodbye;
-                self.moment_line = moment;
-                self.hi_line = hi;
+            Event::Line { line, pcm } => {
+                self.lines.insert(line, pcm);
                 return;
             }
             _ if self.ending.is_some() => return,
@@ -465,6 +450,10 @@ impl<S: Fn(CallBody)> Live<S> {
             CallBody::Speak { reply, .. } | CallBody::Play { reply } => Some(*reply),
             _ => None,
         };
+        let spoke = match &body {
+            CallBody::Speak { reply, .. } => Some(*reply),
+            _ => None,
+        };
         match body {
             CallBody::Speak { reply, idx, text } => self.speech.speak(reply, idx, text),
             CallBody::SpeakDone { reply } => self.speech.speak_done(reply),
@@ -476,7 +465,9 @@ impl<S: Fn(CallBody)> Live<S> {
             }
             _ => {}
         }
-        if reply.is_some_and(|r| self.speech.is_speaking(r)) {
+        let greeted = matches!(self.awaiting_reply, Some((_, Line::Hi)))
+            && spoke.is_some_and(|r| self.speech.gate(r) != Gate::Dropped);
+        if greeted || reply.is_some_and(|r| self.speech.is_speaking(r)) {
             self.awaiting_reply = None;
         }
     }
@@ -905,13 +896,32 @@ mod tests {
         let c = inbound();
         sleep_ms(500).await;
         c.frame(CallBody::Speak { reply: 1, idx: 0, text: "hello there".into() });
-        c.frame(CallBody::Play { reply: 1 });
         sleep_ms(3000).await;
-        assert_eq!(c.probe.frames_of(hi), 0, "Note's own greeting needs no filler");
+        assert_eq!(c.probe.frames_of(hi), 0, "Note's own greeting needs no filler, even held");
+
+        let c = inbound();
+        sleep_ms(500).await;
+        c.frame(CallBody::Drop { reply: 1 });
+        c.frame(CallBody::Speak { reply: 1, idx: 0, text: "hello there".into() });
+        sleep_ms(3000).await;
+        assert_eq!(c.probe.frames_of(hi), hi, "a dropped reply's words are no greeting");
 
         let c = call(Vec::new(), Vec::new(), false);
         sleep_ms(3000).await;
         assert_eq!(c.probe.frames_of(hi), 0, "an outbound call opens with Note's words");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_line_a_call_needs_first_renders_first() {
+        let tts: Arc<FakeTts> = Arc::default();
+        let c = call_with(SessionDeps { direction: Direction::Inbound, ..deps(Vec::new(), false, &tts) }, Vec::new(), tts);
+        c.synthesized(text(Line::Goodbye, "en")).await;
+        assert_eq!(c.tts.said.lock().unwrap()[0], text(Line::Hi, "en"));
+
+        let tts: Arc<FakeTts> = Arc::default();
+        let c = call_with(deps(Vec::new(), false, &tts), Vec::new(), tts);
+        c.synthesized(text(Line::Goodbye, "en")).await;
+        assert_eq!(c.tts.said.lock().unwrap()[0], text(Line::OneMoment, "en"));
     }
 
     #[tokio::test(start_paused = true)]
