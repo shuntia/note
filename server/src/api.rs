@@ -127,7 +127,39 @@ pub fn router_with_web(state: AppState, web_dir: &std::path::Path) -> Router {
     )
     .route("/api", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
     .route("/api/", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
-    .fallback_service(files)
+    .nest_service(
+        "/assets",
+        Router::new()
+            .fallback_service(tower_http::services::ServeDir::new(web_dir.join("assets")))
+            .layer(axum::middleware::map_response(hashed_asset_headers)),
+    )
+    .fallback_service(Router::new().fallback_service(files).layer(axum::middleware::from_fn(always_revalidate)))
+}
+
+/// The shell and the unhashed files beside it change on every deploy while
+/// their Nix-store mtime never does, so `Last-Modified` would vouch for a stale
+/// copy forever: drop it both ways and make the browser ask every time.
+async fn always_revalidate(mut req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
+    for h in [header::IF_MODIFIED_SINCE, header::IF_UNMODIFIED_SINCE, header::IF_RANGE] {
+        req.headers_mut().remove(h);
+    }
+    let mut res = next.run(req).await;
+    res.headers_mut().remove(header::LAST_MODIFIED);
+    res.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    res
+}
+
+/// Hashed bundles never change under their name. A miss is a shell from an
+/// earlier deploy, so it is told to drop its cache and fetch the shell anew.
+async fn hashed_asset_headers(mut res: axum::response::Response) -> axum::response::Response {
+    let status = res.status();
+    let h = res.headers_mut();
+    if status.is_success() {
+        h.insert(header::CACHE_CONTROL, HeaderValue::from_static("public, max-age=31536000, immutable"));
+    } else if status == StatusCode::NOT_FOUND {
+        h.insert("clear-site-data", HeaderValue::from_static("\"cache\""));
+    }
+    res
 }
 
 /// Every share response is uncacheable, sends no referrer, and asks not to be

@@ -76,3 +76,34 @@ async fn missing_web_dir_leaves_the_api_router_untouched() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, "ok");
 }
+
+#[tokio::test]
+async fn the_shell_always_revalidates_and_hashed_assets_never_do() {
+    let cfg = common::config_dir();
+    let web = tempfile::tempdir().unwrap();
+    std::fs::write(web.path().join("index.html"), "<title>Note</title>").unwrap();
+    std::fs::write(web.path().join("sw.js"), "").unwrap();
+    std::fs::create_dir(web.path().join("assets")).unwrap();
+    std::fs::write(web.path().join("assets/app-abc123.js"), "console.log(1)").unwrap();
+    let app = api::router_with_web(state(&cfg), web.path());
+
+    for path in ["/", "/today", "/sw.js"] {
+        let req = Request::get(path)
+            .header("if-modified-since", "Thu, 01 Jan 1970 00:00:01 GMT")
+            .body(Body::empty())
+            .unwrap();
+        let res = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "{path}");
+        assert_eq!(res.headers()["cache-control"], "no-cache", "{path}");
+        assert!(!res.headers().contains_key("last-modified"), "{path}");
+    }
+
+    let res = app.clone().oneshot(Request::get("/assets/app-abc123.js").body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.headers()["cache-control"], "public, max-age=31536000, immutable");
+
+    // a shell from before a deploy asks for a bundle that is gone
+    let res = app.clone().oneshot(Request::get("/assets/app-old999.js").body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    assert_eq!(res.headers()["clear-site-data"], "\"cache\"");
+}

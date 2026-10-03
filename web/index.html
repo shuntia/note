@@ -27,6 +27,25 @@
         /* storage blocked; follow the system scheme */
       }
     </script>
+    <!-- A bundle that fails to load (a shell left over from an earlier deploy) reloads once, not to a blank page. -->
+    <script>
+      addEventListener(
+        'error',
+        function (e) {
+          var t = e.target
+          if (!t || (t.tagName !== 'SCRIPT' && t.tagName !== 'LINK')) return
+          try {
+            var last = Number(sessionStorage.getItem('note.reloaded') || 0)
+            if (Date.now() - last < 30000) return
+            sessionStorage.setItem('note.reloaded', String(Date.now()))
+          } catch (err) {
+            return
+          }
+          location.reload()
+        },
+        true,
+      )
+    </script>
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" href="/icon.svg" type="image/svg+xml" />
     <title>Note</title>
