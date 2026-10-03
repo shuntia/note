@@ -10,6 +10,8 @@ pub struct OpenAILLM {
     model: super::LiveModel,
     api_key: String,
     reasoning: Option<String>,
+    /// Sends `OpenRouter`'s explicit off switch rather than leaving reasoning to the model's default.
+    reasoning_off: bool,
     extra: serde_json::Map<String, serde_json::Value>,
 }
 
@@ -27,6 +29,7 @@ impl OpenAILLM {
             model: super::LiveModel::new(model),
             api_key: api_key.to_string(),
             reasoning: reasoning.map(String::from),
+            reasoning_off: false,
             extra: serde_json::Map::new(),
         }
     }
@@ -43,6 +46,7 @@ impl OpenAILLM {
     #[must_use]
     pub fn without_reasoning(mut self) -> Self {
         self.reasoning = None;
+        self.reasoning_off = true;
         self
     }
 
@@ -52,6 +56,9 @@ impl OpenAILLM {
 
     fn request_body(&self, req: &ChatRequest) -> serde_json::Value {
         let mut v = body(&self.model.get(), req, self.reasoning.as_deref());
+        if self.reasoning_off {
+            v["reasoning"] = serde_json::json!({"enabled": false});
+        }
         for (k, field) in &self.extra {
             v[k] = field.clone();
         }
@@ -189,13 +196,17 @@ pub fn parse(v: &serde_json::Value) -> Result<ChatResponse> {
     Ok(ChatResponse { text, tool_calls })
 }
 
+/// No line for this long after the first delta fails the stream.
+const STALL: Duration = Duration::from_secs(8);
+
 /// Reads the lines of a streamed chat completion into `sink`. Tool calls
-/// arrive in pieces keyed by `index`; one is complete once another index
-/// begins or the stream ends.
+/// arrive in pieces keyed by `index`; one is complete once a piece with
+/// another index or another `id` begins, or the stream ends.
 fn read_stream(
     lines: &mpsc::Receiver<std::io::Result<String>>,
     started: Instant,
     first_token: Duration,
+    stall: Duration,
     sink: &mut dyn StreamSink,
 ) -> Result<ChatResponse> {
     let mut resp = ChatResponse::default();
@@ -204,9 +215,10 @@ fn read_stream(
     let mut done = false;
     loop {
         let line = if heard {
-            match lines.recv() {
+            match lines.recv_timeout(stall) {
                 Ok(line) => line,
-                Err(mpsc::RecvError) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => anyhow::bail!("openai stream stalled for {stall:?}"),
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
         } else {
             match lines.recv_timeout(first_token.saturating_sub(started.elapsed())) {
@@ -238,13 +250,17 @@ fn read_stream(
         for piece in delta["tool_calls"].as_array().into_iter().flatten() {
             heard = true;
             let index = piece["index"].as_u64().or(pending.as_ref().map(|(i, _)| *i)).unwrap_or(0);
-            if let Some((_, finished)) = pending.take_if(|(i, _)| *i != index) {
+            let id = piece["id"].as_str().filter(|id| !id.is_empty());
+            let another = |(i, call): &mut (u64, ToolCall)| {
+                *i != index || id.is_some_and(|id| !call.id.is_empty() && call.id != id)
+            };
+            if let Some((_, finished)) = pending.take_if(another) {
                 if !complete_call(finished, &mut resp, sink) {
                     return Ok(resp);
                 }
             }
             let (_, call) = pending.get_or_insert_with(|| (index, ToolCall { id: String::new(), name: String::new(), args: String::new() }));
-            if let Some(id) = piece["id"].as_str().filter(|_| call.id.is_empty()) {
+            if let Some(id) = id.filter(|_| call.id.is_empty()) {
                 call.id = id.to_string();
             }
             if let Some(name) = piece["function"]["name"].as_str().filter(|_| call.name.is_empty()) {
@@ -332,7 +348,7 @@ impl LLMProvider for OpenAILLM {
             let head: String = resp.body_mut().read_to_string().unwrap_or_default().chars().take(300).collect();
             anyhow::bail!("openai stream request failed: status {code}: {head}");
         }
-        read_stream(&spawn_line_reader(resp.into_body()), started, opts.first_token, sink)
+        read_stream(&spawn_line_reader(resp.into_body()), started, opts.first_token, STALL, sink)
     }
 
     fn model(&self) -> Option<String> {
@@ -597,6 +613,37 @@ mod tests {
         let sent = crate::testhttp::body_json(&rx.recv().unwrap());
         assert_eq!(sent["provider"]["sort"], "latency");
         assert_eq!(sent["stream"], true);
-        assert!(sent.get("reasoning").is_none());
+        assert_eq!(sent["reasoning"], serde_json::json!({"enabled": false}), "reasoning is switched off outright");
+    }
+
+    #[test]
+    fn a_new_id_at_the_same_or_no_index_starts_another_call() {
+        let base = stub_sse(concat!(
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"function\":{\"name\":\"task_add\",\"arguments\":\"{}\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c2\",\"function\":{\"name\":\"web_search\",\"arguments\":\"{\\\"q\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\":1}\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"c3\",\"function\":{\"name\":\"task_list\",\"arguments\":\"{}\"}}]}}]}\n\n",
+            "data: [DONE]\n\n",
+        ));
+        let llm = OpenAILLM::new(&base, "m", "", ChatAgents::new(30, 30), None);
+        let mut sink = Collect::default();
+        llm.chat_stream(&req(), &opts(Duration::from_secs(5)), &mut sink).unwrap();
+        assert_eq!(
+            sink.calls.iter().map(|c| (c.id.as_str(), c.name.as_str(), c.args.as_str())).collect::<Vec<_>>(),
+            vec![("c1", "task_add", "{}"), ("c2", "web_search", r#"{"q":1}"#), ("c3", "task_list", "{}")]
+        );
+    }
+
+    #[test]
+    fn silence_after_the_first_delta_fails_the_stream() {
+        let (tx, rx) = mpsc::channel();
+        tx.send(Ok("data: {\"choices\":[{\"delta\":{\"content\":\"On it\"}}]}".to_string())).unwrap();
+        let mut sink = Collect::default();
+        let started = Instant::now();
+        let err = read_stream(&rx, started, Duration::from_secs(5), Duration::from_millis(100), &mut sink).unwrap_err();
+        assert!(err.to_string().contains("stalled"), "{err:#}");
+        assert_eq!(sink.text, "On it");
+        assert!(started.elapsed() < Duration::from_secs(2));
+        drop(tx);
     }
 }
