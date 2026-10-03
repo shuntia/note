@@ -1,5 +1,7 @@
-use super::{ChatRequest, ChatResponse, EmbeddingsProvider, LLMProvider, ToolCall};
+use super::{ChatRequest, ChatResponse, EmbeddingsProvider, FirstTokenTimeout, LLMProvider, StreamOpts, StreamSink, ToolCall};
 use anyhow::{Context, Result};
+use std::io::BufRead;
+use std::time::{Duration, Instant};
 
 pub struct OpenAILLM {
     agents: super::ChatAgents,
@@ -7,6 +9,7 @@ pub struct OpenAILLM {
     model: super::LiveModel,
     api_key: String,
     reasoning: Option<String>,
+    extra: serde_json::Map<String, serde_json::Value>,
 }
 
 impl OpenAILLM {
@@ -23,16 +26,45 @@ impl OpenAILLM {
             model: super::LiveModel::new(model),
             api_key: api_key.to_string(),
             reasoning: reasoning.map(String::from),
+            extra: serde_json::Map::new(),
         }
     }
 
+    /// Top-level fields of `extra` go into every request body.
+    #[must_use]
+    pub fn with_extra(mut self, extra: serde_json::Value) -> Self {
+        if let serde_json::Value::Object(fields) = extra {
+            self.extra.extend(fields);
+        }
+        self
+    }
+
+    #[must_use]
+    pub fn without_reasoning(mut self) -> Self {
+        self.reasoning = None;
+        self
+    }
+
+    fn url(&self) -> String {
+        format!("{}/chat/completions", self.base_url)
+    }
+
+    fn request_body(&self, req: &ChatRequest) -> serde_json::Value {
+        let mut v = body(&self.model.get(), req, self.reasoning.as_deref());
+        for (k, field) in &self.extra {
+            v[k] = field.clone();
+        }
+        v
+    }
+
+    fn authorized(&self, request: ureq::RequestBuilder<ureq::typestate::WithBody>) -> ureq::RequestBuilder<ureq::typestate::WithBody> {
+        if self.api_key.is_empty() { request } else { request.header("Authorization", format!("Bearer {}", self.api_key)) }
+    }
+
     fn post(&self, req: &ChatRequest) -> Result<serde_json::Value> {
-        let url = format!("{}/chat/completions", self.base_url);
-        let body = body(&self.model.get(), req, self.reasoning.as_deref());
-        self.agents.post_json(req.background, "openai", &body, |agent| {
-            let request = agent.post(&url);
-            if self.api_key.is_empty() { request } else { request.header("Authorization", format!("Bearer {}", self.api_key)) }
-        })
+        let url = self.url();
+        let body = self.request_body(req);
+        self.agents.post_json(req.background, "openai", &body, |agent| self.authorized(agent.post(&url)))
     }
 }
 
@@ -156,6 +188,71 @@ pub fn parse(v: &serde_json::Value) -> Result<ChatResponse> {
     Ok(ChatResponse { text, tool_calls })
 }
 
+/// Reads Server-Sent Events of a streamed chat completion into `sink`. Tool
+/// calls arrive in pieces keyed by `index`; one is complete once another index
+/// begins or the stream ends.
+fn read_stream(
+    reader: impl BufRead,
+    started: Instant,
+    first_token: Duration,
+    sink: &mut dyn StreamSink,
+) -> Result<ChatResponse> {
+    let mut resp = ChatResponse::default();
+    let mut pending: Option<(u64, ToolCall)> = None;
+    let mut heard = false;
+    for line in reader.lines() {
+        let line = line.context("reading the openai stream")?;
+        if !heard && started.elapsed() > first_token {
+            return Err(FirstTokenTimeout(first_token).into());
+        }
+        let Some(data) = line.strip_prefix("data:").map(str::trim) else { continue };
+        if data == "[DONE]" {
+            break;
+        }
+        let event: serde_json::Value =
+            serde_json::from_str(data).with_context(|| format!("openai stream event {data:?}"))?;
+        if let Some(err) = event.get("error") {
+            anyhow::bail!("openai stream failed: {err}");
+        }
+        let delta = &event["choices"][0]["delta"];
+        let text = content_text(&delta["content"]);
+        if !text.is_empty() {
+            heard = true;
+            resp.text.push_str(&text);
+            if !sink.text(&text) {
+                return Ok(resp);
+            }
+        }
+        for piece in delta["tool_calls"].as_array().into_iter().flatten() {
+            heard = true;
+            let index = piece["index"].as_u64().or(pending.as_ref().map(|(i, _)| *i)).unwrap_or(0);
+            if let Some((_, done)) = pending.take_if(|(i, _)| *i != index) {
+                if !complete_call(done, &mut resp, sink) {
+                    return Ok(resp);
+                }
+            }
+            let (_, call) = pending.get_or_insert_with(|| (index, ToolCall { id: String::new(), name: String::new(), args: String::new() }));
+            if let Some(id) = piece["id"].as_str().filter(|_| call.id.is_empty()) {
+                call.id = id.to_string();
+            }
+            if let Some(name) = piece["function"]["name"].as_str().filter(|_| call.name.is_empty()) {
+                call.name = name.to_string();
+            }
+            call.args.push_str(&tool_args(&piece["function"]["arguments"]));
+        }
+    }
+    if let Some((_, done)) = pending {
+        complete_call(done, &mut resp, sink);
+    }
+    Ok(resp)
+}
+
+fn complete_call(call: ToolCall, resp: &mut ChatResponse, sink: &mut dyn StreamSink) -> bool {
+    let go_on = sink.tool_call(&call);
+    resp.tool_calls.push(call);
+    go_on
+}
+
 pub fn parse_embeddings(v: &serde_json::Value) -> Result<Vec<Vec<f32>>> {
     let mut rows: Vec<(i64, Vec<f32>)> = v["data"]
         .as_array()
@@ -184,6 +281,27 @@ impl LLMProvider for OpenAILLM {
         let resp = self.post(req)?;
         let reasoning = if self.reasoning.is_some() { reasoning_text(&resp) } else { String::new() };
         Ok((parse(&resp)?, reasoning))
+    }
+
+    fn chat_stream(&self, req: &ChatRequest, opts: &StreamOpts, sink: &mut dyn StreamSink) -> Result<ChatResponse> {
+        let mut body = self.request_body(req);
+        body["stream"] = serde_json::Value::Bool(true);
+        let agent = self.agents.stream_agent(req.background, opts.first_token);
+        let started = Instant::now();
+        let mut resp = match self.authorized(agent.post(&self.url())).send_json(&body) {
+            Ok(resp) => resp,
+            Err(ureq::Error::Timeout(ureq::Timeout::RecvResponse)) => {
+                return Err(FirstTokenTimeout(opts.first_token).into());
+            }
+            Err(e) => anyhow::bail!("openai stream request failed: {e}"),
+        };
+        if !resp.status().is_success() {
+            let code = resp.status().as_u16();
+            let head: String = resp.body_mut().read_to_string().unwrap_or_default().chars().take(300).collect();
+            anyhow::bail!("openai stream request failed: status {code}: {head}");
+        }
+        let reader = std::io::BufReader::new(resp.body_mut().as_reader());
+        read_stream(reader, started, opts.first_token, sink)
     }
 
     fn model(&self) -> Option<String> {
@@ -302,5 +420,109 @@ mod tests {
         ]});
         let vs = parse_embeddings(&v).unwrap();
         assert_eq!(vs, vec![vec![1.0f32], vec![2.0f32]]);
+    }
+
+    use crate::providers::{ChatAgents, FirstTokenTimeout, StreamOpts, StreamSink};
+    use std::time::Duration;
+
+    const SSE: &str = concat!(
+        ": OPENROUTER PROCESSING\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"On it, \"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"looking now.\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"function\":{\"name\":\"web_search\",\"arguments\":\"{\\\"q\"}}]}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\":\\\"train\\\"}\"}}]}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"c2\",\"function\":{\"name\":\"task_list\",\"arguments\":\"{}\"}}]}}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+
+    #[derive(Default)]
+    struct Collect {
+        text: String,
+        calls: Vec<ToolCall>,
+        order: Vec<String>,
+        stop_after: Option<usize>,
+    }
+
+    impl Collect {
+        fn go_on(&self) -> bool {
+            self.stop_after.is_none_or(|n| self.order.len() < n)
+        }
+    }
+
+    impl StreamSink for Collect {
+        fn text(&mut self, delta: &str) -> bool {
+            self.text.push_str(delta);
+            self.order.push("text".into());
+            self.go_on()
+        }
+
+        fn tool_call(&mut self, call: &ToolCall) -> bool {
+            self.calls.push(call.clone());
+            self.order.push(format!("call:{}", call.id));
+            self.go_on()
+        }
+    }
+
+    fn stub_sse(sse: &'static str) -> String {
+        crate::testhttp::serve_stream(sse, Duration::ZERO).0
+    }
+
+    fn req() -> ChatRequest<'static> {
+        static MSGS: std::sync::LazyLock<Vec<Message>> = std::sync::LazyLock::new(|| vec![Message::User("hi".into())]);
+        ChatRequest { system: "sys", messages: &MSGS, tools: &[], background: false }
+    }
+
+    fn opts(first_token: Duration) -> StreamOpts {
+        StreamOpts { first_token }
+    }
+
+    #[test]
+    fn streams_text_and_assembles_tool_calls_by_index() {
+        let base = stub_sse(SSE);
+        let llm = OpenAILLM::new(&base, "m", "", ChatAgents::new(30, 30), None);
+        let mut sink = Collect::default();
+        let resp = llm.chat_stream(&req(), &opts(Duration::from_secs(5)), &mut sink).unwrap();
+        assert_eq!(sink.text, "On it, looking now.");
+        assert_eq!(
+            sink.calls.iter().map(|c| (c.id.as_str(), c.name.as_str(), c.args.as_str())).collect::<Vec<_>>(),
+            vec![("c1", "web_search", r#"{"q":"train"}"#), ("c2", "task_list", "{}")]
+        );
+        assert_eq!(sink.order, vec!["text", "text", "call:c1", "call:c2"], "c1 completes when index 1 begins");
+        assert_eq!(resp.text, "On it, looking now.");
+        assert_eq!(resp.tool_calls.len(), 2);
+    }
+
+    #[test]
+    fn a_sink_that_stops_ends_the_stream_early() {
+        let base = stub_sse(SSE);
+        let llm = OpenAILLM::new(&base, "m", "", ChatAgents::new(30, 30), None);
+        let mut sink = Collect { stop_after: Some(1), ..Collect::default() };
+        let resp = llm.chat_stream(&req(), &opts(Duration::from_secs(5)), &mut sink).unwrap();
+        assert_eq!(resp.text, "On it, ");
+        assert!(resp.tool_calls.is_empty());
+        assert_eq!(sink.order, vec!["text"]);
+    }
+
+    #[test]
+    fn no_first_token_in_time_is_a_first_token_timeout() {
+        let (base, _rx) = crate::testhttp::serve_stream(SSE, Duration::from_secs(2));
+        let llm = OpenAILLM::new(&base, "m", "", ChatAgents::new(30, 30), None);
+        let started = std::time::Instant::now();
+        let err = llm.chat_stream(&req(), &opts(Duration::from_millis(300)), &mut Collect::default()).unwrap_err();
+        assert!(err.is::<FirstTokenTimeout>(), "{err:#}");
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn extra_body_fields_reach_the_request() {
+        let (base, rx) = crate::testhttp::serve_stream(SSE, Duration::ZERO);
+        let llm = OpenAILLM::new(&base, "m", "", ChatAgents::new(30, 30), Some("high"))
+            .with_extra(serde_json::json!({"provider": {"sort": "latency"}}))
+            .without_reasoning();
+        llm.chat_stream(&req(), &opts(Duration::from_secs(5)), &mut Collect::default()).unwrap();
+        let sent = crate::testhttp::body_json(&rx.recv().unwrap());
+        assert_eq!(sent["provider"]["sort"], "latency");
+        assert_eq!(sent["stream"], true);
+        assert!(sent.get("reasoning").is_none());
     }
 }

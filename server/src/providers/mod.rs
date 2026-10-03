@@ -35,8 +35,39 @@ pub struct ChatResponse {
     pub tool_calls: Vec<ToolCall>,
 }
 
+pub trait StreamSink {
+    /// A piece of assistant text. Returning false stops the stream.
+    fn text(&mut self, delta: &str) -> bool;
+    /// A tool call whose arguments are complete. Returning false stops the stream.
+    fn tool_call(&mut self, call: &ToolCall) -> bool;
+}
+
+pub struct StreamOpts {
+    /// Fails the call if no text or tool call has arrived by then.
+    pub first_token: std::time::Duration,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("no first token within {0:?}")]
+pub struct FirstTokenTimeout(pub std::time::Duration);
+
 pub trait LLMProvider: Send + Sync {
     fn chat(&self, req: &ChatRequest) -> Result<ChatResponse>;
+
+    /// Streams one round. The returned response holds everything that arrived,
+    /// also when the sink stopped the stream early.
+    fn chat_stream(&self, req: &ChatRequest, _opts: &StreamOpts, sink: &mut dyn StreamSink) -> Result<ChatResponse> {
+        let resp = self.chat(req)?;
+        if !resp.text.is_empty() && !sink.text(&resp.text) {
+            return Ok(resp);
+        }
+        for c in &resp.tool_calls {
+            if !sink.tool_call(c) {
+                break;
+            }
+        }
+        Ok(resp)
+    }
 
     /// The reply plus the model's reasoning text for this round, blank when the
     /// provider returns none or reasoning is off.
@@ -100,16 +131,37 @@ const RETRY_DELAYS_MS: [u64; 2] = [1_500, 4_000];
 pub struct ChatAgents {
     interactive: ureq::Agent,
     background: ureq::Agent,
+    timeout_secs: u64,
+    background_timeout_secs: u64,
     retry_delays_ms: &'static [u64],
 }
 
 impl ChatAgents {
     pub fn new(timeout_secs: u64, background_timeout_secs: u64) -> Self {
+        let background_timeout_secs = background_timeout_secs.max(timeout_secs);
         Self {
             interactive: http_agent(timeout_secs),
-            background: http_agent(background_timeout_secs.max(timeout_secs)),
+            background: http_agent(background_timeout_secs),
+            timeout_secs,
+            background_timeout_secs,
             retry_delays_ms: &RETRY_DELAYS_MS,
         }
+    }
+
+    /// An agent for one streamed call: the response head must arrive within
+    /// `first_token`, and the whole body within the usual chat cap.
+    pub(crate) fn stream_agent(&self, background: bool, first_token: std::time::Duration) -> ureq::Agent {
+        let secs = if background { self.background_timeout_secs } else { self.timeout_secs };
+        let cap = Some(std::time::Duration::from_secs(secs));
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .timeout_connect(Some(std::time::Duration::from_secs(5)))
+            .timeout_send_request(cap)
+            .timeout_send_body(cap)
+            .timeout_recv_response(Some(first_token))
+            .timeout_recv_body(cap)
+            .build()
+            .into()
     }
 
     /// Posts `body` and reads the JSON reply. A transport failure, a reply that
