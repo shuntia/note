@@ -3,7 +3,7 @@ mod common;
 use common::*;
 use note_voice::config::VoiceServiceConfig;
 use note_voice_proto::testkit::{eventually, fast};
-use note_voice_proto::{CallBody, Outcome, Role, VoiceProfile};
+use note_voice_proto::{CallBody, Direction, Outcome, Role, VoiceProfile};
 
 struct Rig {
     dir: tempfile::TempDir,
@@ -60,6 +60,7 @@ fn start(ring_secs: u32, ring_by_ms: i64) -> CallBody {
         ring_secs,
         ring_by_ms,
         voice: VoiceProfile::default(),
+        direction: Direction::Outbound,
     }
 }
 
@@ -309,7 +310,7 @@ async fn one_join_report_runs_per_link_at_a_time() {
         note_voice_proto::Request::DmJoined { .. } => {
             Err(note_voice_proto::Refusal::new(note_voice_proto::RefusalCode::Failed, "not yet"))
         }
-        note_voice_proto::Request::OpenDm { .. } => Ok(note_voice_proto::Reply::Done),
+        _ => Ok(note_voice_proto::Reply::Done),
     });
     let Ok(note_voice_proto::Reply::Dm { room_id }) =
         r.note.peer.request(note_voice_proto::Request::OpenDm { link_id: 5, mxid: "@aki:t".into() }).await

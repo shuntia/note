@@ -447,6 +447,12 @@ impl Handler for VoiceHandler {
             match body {
                 Request::OpenDm { link_id, mxid } => svc.open_dm(link_id, mxid).await,
                 Request::DmJoined { .. } => Err(Refusal::new(RefusalCode::BadRequest, "the voice side reports joins")),
+                Request::IncomingCall { .. } => {
+                    Err(Refusal::new(RefusalCode::BadRequest, "the voice side reports incoming calls"))
+                }
+                Request::ListVoices { .. } | Request::Preview { .. } => {
+                    Err(Refusal::new(RefusalCode::BadRequest, "voice previews are not offered yet"))
+                }
             }
         })
     }

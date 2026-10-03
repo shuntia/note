@@ -703,6 +703,11 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE conversations DROP COLUMN via;
     ALTER TABLE conversations RENAME COLUMN via_next TO via;
     ",
+    // v48
+    "
+    ALTER TABLE voice_calls ADD COLUMN inbound_key TEXT;
+    CREATE UNIQUE INDEX idx_voice_calls_inbound ON voice_calls(inbound_key) WHERE inbound_key IS NOT NULL;
+    ",
 ];
 
 pub fn server_setting(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
@@ -1983,7 +1988,7 @@ mod tests {
                  VALUES (1, 'chat', 'now', 'now', 'telegram');",
         )
         .unwrap();
-        apply_migrations(&conn, MIGRATIONS).unwrap();
+        apply_migrations(&conn, &MIGRATIONS[..47]).unwrap();
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
         assert_eq!(version, 47);
         let via: String =
@@ -2024,5 +2029,35 @@ mod tests {
             .query_row("SELECT conversation_id FROM voice_calls WHERE id = 'c2'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(thread, None, "a deleted thread leaves its call standing");
+    }
+    #[test]
+    fn v48_keys_inbound_calls_once_each() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        apply_migrations(&conn, &MIGRATIONS[..47]).unwrap();
+        conn.execute_batch(
+            "INSERT INTO users (username, pass_hash, role) VALUES ('a','h','member');
+             INSERT INTO voice_calls (id, user_id, direction, state, ring_by, created_at)
+                 VALUES ('c1', 1, 'outbound', 'ended', 'x', 'x');",
+        )
+        .unwrap();
+        apply_migrations(&conn, MIGRATIONS).unwrap();
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(version, 48);
+        let key: Option<String> =
+            conn.query_row("SELECT inbound_key FROM voice_calls WHERE id = 'c1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(key, None);
+        let call = |id: &str, key: Option<&str>| {
+            conn.execute(
+                "INSERT INTO voice_calls (id, user_id, direction, state, ring_by, created_at, inbound_key)
+                 VALUES (?1, 1, 'inbound', 'starting', 'x', 'x', ?2)",
+                (id, key),
+            )
+        };
+        call("c2", Some("$ev1")).unwrap();
+        assert!(call("c3", Some("$ev1")).is_err(), "a call attempt opens one call");
+        call("c4", Some("$ev2")).unwrap();
+        call("c5", None).unwrap();
+        call("c6", None).unwrap();
     }
 }

@@ -4,7 +4,7 @@ pub mod outbox;
 
 use crate::channels::{Channel, OutboundMessage};
 use note_voice_proto::{
-    BoxFuture, CallBody, Dir, Handler, Outcome, Peer, PeerConfig, Refusal, RefusalCode, Reply,
+    BoxFuture, CallBody, Dir, Direction, Handler, Outcome, Peer, PeerConfig, Refusal, RefusalCode, Reply,
     Request, Role, VoiceProfile,
 };
 use rusqlite::Connection;
@@ -126,7 +126,7 @@ impl Voice {
     pub async fn open_dm(&self, link_id: i64, mxid: &str) -> Result<String, Refusal> {
         match self.peer.request(Request::OpenDm { link_id, mxid: mxid.to_string() }).await? {
             Reply::Dm { room_id } => Ok(room_id),
-            other @ Reply::Done => Err(Refusal::new(RefusalCode::Failed, format!("unexpected reply {other:?}"))),
+            other => Err(Refusal::new(RefusalCode::Failed, format!("unexpected reply {other:?}"))),
         }
     }
 
@@ -169,6 +169,7 @@ impl Voice {
                 ring_secs: RING_SECS,
                 ring_by_ms: ring_by.as_millisecond(),
                 voice: VoiceProfile::default(),
+                direction: Direction::Outbound,
             },
         );
         if let Err(e) = sent {
@@ -460,6 +461,12 @@ impl Handler for NoteHandler {
                 }
                 Request::OpenDm { .. } => {
                     Err(Refusal::new(RefusalCode::BadRequest, "Note does not open rooms"))
+                }
+                Request::IncomingCall { .. } => {
+                    Err(Refusal::new(RefusalCode::BadRequest, "Note does not take incoming calls yet"))
+                }
+                Request::ListVoices { .. } | Request::Preview { .. } => {
+                    Err(Refusal::new(RefusalCode::BadRequest, "Note holds no voices"))
                 }
             }
         })

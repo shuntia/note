@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Bumped on any change to a frame's shape; both sides must agree exactly.
-pub const PROTO_VERSION: u32 = 2;
+pub const PROTO_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -33,6 +33,15 @@ pub enum Frame {
     Resume { call_id: String, dir: Dir, after: u64 },
 }
 
+/// Who placed the call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Direction {
+    #[default]
+    Outbound,
+    Inbound,
+}
+
 /// Requests are idempotent: each carries the key of what it creates or
 /// changes, and repeating one returns the first answer.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -42,6 +51,12 @@ pub enum Request {
     OpenDm { link_id: i64, mxid: String },
     /// Voice → Note: the invited account joined the link's DM.
     DmJoined { link_id: i64, room_id: String },
+    /// Voice → Note: the linked user is calling in `room_id`; `key` names this call attempt (the call.member event id).
+    IncomingCall { room_id: String, mxid: String, key: String },
+    /// Note → voice: the voices on offer for `language`.
+    ListVoices { language: String },
+    /// Note → voice: a short sample of `voice`, as 24 kHz mono 16-bit WAV, base64.
+    Preview { language: String, voice: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -49,6 +64,17 @@ pub enum Request {
 pub enum Reply {
     Dm { room_id: String },
     Done,
+    /// The call Note opened for an IncomingCall; its Start follows on the call stream.
+    Call { call_id: String },
+    Voices { voices: Vec<VoiceOption> },
+    Audio { wav_base64: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VoiceOption {
+    pub id: String,
+    pub label: String,
+    pub language: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -91,6 +117,8 @@ pub enum CallBody {
         ring_by_ms: i64,
         #[serde(default)]
         voice: VoiceProfile,
+        #[serde(default)]
+        direction: Direction,
     },
     /// Note → voice: end the call now, ringing or not.
     HangUp,
@@ -200,6 +228,52 @@ mod tests {
         ] {
             let s = serde_json::to_string(&body).unwrap();
             assert_eq!(serde_json::from_str::<CallBody>(&s).unwrap(), body, "{s}");
+        }
+    }
+
+    #[test]
+    fn a_start_without_a_direction_reads_as_outbound() {
+        let raw = r#"{"k":"start","user_id":1,"room_id":"!r","mxid":"@a","title":"t","ring_secs":30,"ring_by_ms":5}"#;
+        let CallBody::Start { direction, .. } = serde_json::from_str(raw).unwrap() else { panic!() };
+        assert_eq!(direction, Direction::Outbound);
+    }
+
+    #[test]
+    fn an_inbound_start_round_trips() {
+        let body = CallBody::Start {
+            user_id: 1,
+            room_id: "!r".into(),
+            mxid: "@a".into(),
+            title: "t".into(),
+            ring_secs: 30,
+            ring_by_ms: 5,
+            voice: VoiceProfile::default(),
+            direction: Direction::Inbound,
+        };
+        let s = serde_json::to_string(&body).unwrap();
+        assert!(s.contains(r#""direction":"inbound""#), "{s}");
+        assert_eq!(serde_json::from_str::<CallBody>(&s).unwrap(), body);
+    }
+
+    #[test]
+    fn every_inbound_and_preview_request_and_reply_round_trips() {
+        for req in [
+            Request::IncomingCall { room_id: "!r".into(), mxid: "@a".into(), key: "$ev".into() },
+            Request::ListVoices { language: "ja".into() },
+            Request::Preview { language: "en".into(), voice: "af_heart".into() },
+        ] {
+            let s = serde_json::to_string(&req).unwrap();
+            assert_eq!(serde_json::from_str::<Request>(&s).unwrap(), req, "{s}");
+        }
+        for reply in [
+            Reply::Call { call_id: "c-1".into() },
+            Reply::Voices {
+                voices: vec![VoiceOption { id: "af_heart".into(), label: "Heart".into(), language: "en".into() }],
+            },
+            Reply::Audio { wav_base64: "UklGRg==".into() },
+        ] {
+            let s = serde_json::to_string(&reply).unwrap();
+            assert_eq!(serde_json::from_str::<Reply>(&s).unwrap(), reply, "{s}");
         }
     }
 }
