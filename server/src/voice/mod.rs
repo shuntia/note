@@ -934,8 +934,8 @@ mod tests {
             let conv = crate::talk::create(&conn, 1, "Call", now).unwrap();
             crate::talk::append_text(&conn, conv, "assistant", "how is the essay going?", now).unwrap();
             conn.execute(
-                "INSERT INTO voice_calls (id, user_id, direction, message, state, ring_by, created_at, conversation_id)
-                 VALUES ('c1', 1, 'outbound', ?1, 'answered', ?2, ?2, ?3)",
+                "INSERT INTO voice_calls (id, user_id, direction, message, state, ring_by, created_at, conversation_id, last_reply)
+                 VALUES ('c1', 1, 'outbound', ?1, 'answered', ?2, ?2, ?3, 2)",
                 (serde_json::to_string(&msg()).unwrap(), now.to_string(), conv),
             )
             .unwrap();
