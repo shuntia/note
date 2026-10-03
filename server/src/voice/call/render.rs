@@ -21,6 +21,7 @@ pub enum Item {
     System(String),
 }
 
+#[derive(Debug)]
 pub struct Running {
     pub job: u32,
     pub tool: String,
@@ -98,7 +99,7 @@ mod tests {
 
     #[test]
     fn a_long_result_is_cut_and_says_so() {
-        let result = "é".repeat(2500);
+        let result = format!("a{}", "é".repeat(2500));
         let s = block(
             &[Item::Job {
                 job: 1,
@@ -113,7 +114,7 @@ mod tests {
             .strip_suffix(" …(cut)")
             .expect("ends with the cut marker");
         assert!(kept.len() <= RESULT_CAP);
-        assert!(kept.len() >= RESULT_CAP - 1);
+        assert_eq!(kept.len(), RESULT_CAP - 1, "backs off to the char boundary");
     }
 
     #[test]

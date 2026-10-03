@@ -1,6 +1,7 @@
 #[derive(Default)]
 pub struct Clauses {
     buf: String,
+    scanned: usize,
     emitted_any: bool,
 }
 
@@ -12,6 +13,7 @@ impl Clauses {
         while let Some((end, skip)) = self.cut_point() {
             let clause = self.buf[..end].trim().to_string();
             self.buf.drain(..end + skip);
+            self.scanned = 0;
             if !clause.is_empty() {
                 self.emitted_any = true;
                 out.push(clause);
@@ -23,6 +25,7 @@ impl Clauses {
     /// The remainder at the end of the stream.
     pub fn finish(&mut self) -> Option<String> {
         let rest = std::mem::take(&mut self.buf);
+        self.scanned = 0;
         let rest = rest.trim();
         (!rest.is_empty()).then(|| {
             self.emitted_any = true;
@@ -31,18 +34,23 @@ impl Clauses {
     }
 
     /// The first place to cut the buffer: the clause's byte end and how many bytes after it to drop.
-    fn cut_point(&self) -> Option<(usize, usize)> {
+    /// Resumes at the last char that still waited for its next one.
+    fn cut_point(&mut self) -> Option<(usize, usize)> {
         let comma_floor = if self.emitted_any {
             LATER_COMMA_FLOOR
         } else {
             FIRST_COMMA_FLOOR
         };
-        let mut chars = self.buf.char_indices().peekable();
+        let mut chars = self.buf[self.scanned..]
+            .char_indices()
+            .map(|(i, c)| (i + self.scanned, c))
+            .peekable();
         while let Some((i, c)) = chars.next() {
             if c == '\n' {
                 return Some((i, 1));
             }
             let Some(&(_, next)) = chars.peek() else {
+                self.scanned = i;
                 break;
             };
             if !next.is_whitespace() {
@@ -63,8 +71,9 @@ const FIRST_COMMA_FLOOR: usize = 8;
 const LATER_COMMA_FLOOR: usize = 24;
 
 /// Strips `*`, `_`, `#`, backticks and leading "- ", and collapses whitespace.
+/// An `_` between word characters reads as a space ("web_search" → "web search").
 pub fn speakable(text: &str) -> String {
-    let stripped: String = text
+    let chars: Vec<char> = text
         .lines()
         .map(|line| {
             let line = line.trim_start();
@@ -73,9 +82,21 @@ pub fn speakable(text: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ")
         .chars()
-        .filter(|c| !matches!(c, '*' | '_' | '#' | '`'))
         .collect();
-    stripped.split_whitespace().collect::<Vec<_>>().join(" ")
+    let mut spoken = String::with_capacity(chars.len());
+    for (i, &c) in chars.iter().enumerate() {
+        match c {
+            '_' if i > 0
+                && chars[i - 1].is_alphanumeric()
+                && chars.get(i + 1).is_some_and(|n| n.is_alphanumeric()) =>
+            {
+                spoken.push(' ')
+            }
+            '*' | '_' | '#' | '`' => {}
+            _ => spoken.push(c),
+        }
+    }
+    spoken.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 #[cfg(test)]
@@ -146,6 +167,23 @@ mod tests {
     #[test]
     fn markdown_is_not_spoken() {
         assert_eq!(speakable("**Done** — `task 4`"), "Done — task 4");
+    }
+
+    #[test]
+    fn snake_case_reads_as_words_and_emphasis_underscores_go() {
+        assert_eq!(
+            speakable("ran web_search, _really_ __done__"),
+            "ran web search, really done"
+        );
+    }
+
+    #[test]
+    fn a_comma_rejected_for_length_stays_rejected_across_pushes() {
+        let mut c = Clauses::default();
+        assert!(c.push("Sure, ").is_empty());
+        assert!(c.push("ok").is_empty());
+        assert_eq!(c.push(". Next"), vec!["Sure, ok."]);
+        assert_eq!(c.finish().as_deref(), Some("Next"));
     }
 
     #[test]

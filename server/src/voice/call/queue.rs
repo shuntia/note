@@ -10,7 +10,7 @@ pub struct WakeConfig {
 pub struct Queue {
     cfg: WakeConfig,
     items: Vec<Item>,
-    floor: Option<Floor>,
+    user_speaking: bool,
     note_playing: bool,
     floor_free_since: Option<Duration>,
     wakes_in_a_row: u32,
@@ -26,7 +26,7 @@ impl Queue {
         Self {
             cfg,
             items: Vec::new(),
-            floor: None,
+            user_speaking: false,
             note_playing: false,
             floor_free_since: Some(now),
             wakes_in_a_row: 0,
@@ -38,7 +38,11 @@ impl Queue {
     }
 
     pub fn floor(&mut self, floor: Floor, now: Duration) {
-        self.floor = Some(floor);
+        match floor {
+            Floor::UserSpeaking => self.user_speaking = true,
+            Floor::UserQuiet => self.user_speaking = false,
+            Floor::Drained => self.note_playing = false,
+        }
         self.refresh_floor(now);
     }
 
@@ -83,8 +87,7 @@ impl Queue {
     }
 
     fn refresh_floor(&mut self, now: Duration) {
-        let user_quiet = !matches!(self.floor, Some(Floor::UserSpeaking));
-        if user_quiet && !self.note_playing {
+        if !self.user_speaking && !self.note_playing {
             self.floor_free_since.get_or_insert(now);
         } else {
             self.floor_free_since = None;
@@ -175,14 +178,24 @@ mod tests {
     }
 
     #[test]
-    fn a_quiet_user_still_waits_for_note_to_stop() {
+    fn a_barge_in_holds_the_floor_until_the_user_is_quiet() {
         let mut q = Queue::new(cfg(), ms(0));
-        q.floor(Floor::UserSpeaking, ms(0));
-        q.note_playing(true, ms(100));
+        q.floor(Floor::UserSpeaking, ms(100));
         q.floor(Floor::Drained, ms(200));
         q.push(job_done(1), ms(300));
-        assert!(q.take_turn(ms(1000)).is_none());
-        q.note_playing(false, ms(1000));
+        assert!(q.take_turn(ms(5000)).is_none(), "the user is still talking");
+        q.floor(Floor::UserQuiet, ms(5000));
+        assert!(q.take_turn(ms(5599)).is_none(), "settling");
+        assert!(matches!(q.take_turn(ms(5600)), Some((Start::Wake, _))));
+    }
+
+    #[test]
+    fn a_drained_playout_frees_the_floor_like_note_stopping() {
+        let mut q = Queue::new(cfg(), ms(0));
+        q.note_playing(true, ms(0));
+        q.push(job_done(1), ms(10));
+        q.floor(Floor::Drained, ms(1000));
+        assert!(q.take_turn(ms(1599)).is_none(), "settling");
         assert!(matches!(q.take_turn(ms(1600)), Some((Start::Wake, _))));
     }
 
