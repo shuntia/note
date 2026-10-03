@@ -143,15 +143,15 @@ impl CallDeps {
         }
     }
 
-    /// The call's system prompt and tool schemas.
+    /// The call's system prompt, with the tail of the `thread_tail` thread, and tool schemas.
     fn prompt(
         &self,
         user_id: i64,
         username: &str,
         reason: &brief::Reason,
-        conversation_id: Option<i64>,
+        thread_tail: Option<i64>,
     ) -> anyhow::Result<(String, Vec<serde_json::Value>)> {
-        let system = brief::build(&self.session(), user_id, username, reason, conversation_id, jiff::Timestamp::now())?;
+        let system = brief::build(&self.session(), user_id, username, reason, thread_tail, jiff::Timestamp::now())?;
         let mut tools = crate::tools::schemas(SessionKind::Call);
         if self.search.is_none() {
             tools.retain(|s| s["name"] != "web_search");
@@ -167,7 +167,7 @@ struct Live {
     conversation_id: i64,
     system: String,
     tools: Vec<serde_json::Value>,
-    opening: Option<String>,
+    opening: Option<driver::Opening>,
     history: Vec<Message>,
     initial: Vec<render::Item>,
 }
@@ -238,7 +238,7 @@ impl CallManager {
             .flatten();
         let Some((user_id, username, message, conversation_id)) = row else { return false };
         let msg = message.and_then(|m| serde_json::from_str::<OutboundMessage>(&m).ok());
-        let started = d.prompt(user_id, &username, &reason(msg.as_ref()), Some(conversation_id)).and_then(|(system, tools)| {
+        let started = d.prompt(user_id, &username, &reason(msg.as_ref()), None).and_then(|(system, tools)| {
             let history = crate::talk::history(&crate::db_guard(&d.db), conversation_id, RESUMED_HISTORY)?;
             Ok((system, tools, history))
         });
@@ -323,7 +323,7 @@ impl CallManager {
                 conversation_id,
                 system,
                 tools,
-                opening: msg.map(|m| m.body),
+                opening: msg.map(|m| driver::Opening { text: m.body, in_thread: existing.is_some() }),
                 history: Vec::new(),
                 initial: Vec::new(),
             },
@@ -391,8 +391,9 @@ impl CallManager {
         (self.send)(call_id, CallBody::HangUp);
     }
 
-    /// Hangs up a call whose conversation could not start.
+    /// Hangs up a call whose conversation could not start; it is not tried again.
     fn give_up(&self, d: &CallDeps, call_id: &str, user_id: i64, e: &anyhow::Error) {
+        self.dead.lock().unwrap_or_else(PoisonError::into_inner).insert(call_id.to_string());
         eprintln!("voice: starting the conversation of {call_id} failed: {e:#}");
         {
             let conn = crate::db_guard(&d.db);
@@ -586,6 +587,148 @@ mod tests {
         m.on_frame("c1", &CallBody::Commit { turn: 1, text: "hello".into() });
         m.on_frame("c1", &CallBody::Commit { turn: 2, text: "hello?".into() });
         assert!(!m.is_live("c1"));
+        assert_eq!(*sent.lock().unwrap(), vec![CallBody::HangUp]);
+        let logged: i64 = crate::db_guard(&db)
+            .query_row("SELECT COUNT(*) FROM event_log WHERE kind = 'voice_error'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(logged, 1);
+    }
+
+    fn configured(dir: &std::path::Path) {
+        let prompts = dir.join("defaults/prompts");
+        std::fs::create_dir_all(&prompts).unwrap();
+        std::fs::write(
+            dir.join("defaults/user.toml"),
+            "display_name = \"Aki\"\ntimezone = \"UTC\"\ntemplate = \"default\"\n",
+        )
+        .unwrap();
+        let shipped = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../config/defaults/prompts/voice.md");
+        std::fs::copy(shipped, prompts.join("voice.md")).unwrap();
+    }
+
+    fn managed(db: &Arc<Mutex<Connection>>, dir: &std::path::Path, voice: Arc<dyn LLMProvider>) -> (Arc<CallManager>, Arc<Mutex<Vec<CallBody>>>) {
+        let (m, sent) = recording();
+        m.set_deps(CallDeps {
+            db: db.clone(),
+            config_dir: dir.to_path_buf(),
+            data_dir: dir.to_path_buf(),
+            llm: Arc::new(crate::providers::mock::MockLLM::scripted(vec![])),
+            voice_llm: voice,
+            embeddings: None,
+            search: None,
+            settings: CallSettings::default(),
+        });
+        (m, sent)
+    }
+
+    fn seeded() -> (Arc<Mutex<Connection>>, i64) {
+        let conn = crate::db::open_memory().unwrap();
+        conn.execute("INSERT INTO users (username, pass_hash, role) VALUES ('aki', 'x', 'member')", []).unwrap();
+        let now = jiff::Timestamp::now();
+        let thread = crate::talk::create(&conn, 1, "chat", now).unwrap();
+        crate::talk::append_text(&conn, thread, "user", "the essay is due friday", now).unwrap();
+        crate::talk::append_text(&conn, thread, "assistant", "How is the essay going?", now).unwrap();
+        (Arc::new(Mutex::new(conn)), thread)
+    }
+
+    fn check_in(conversation_id: Option<i64>) -> String {
+        serde_json::json!({
+            "title": "Essay", "body": "How is the essay going?", "urgency": "normal",
+            "event_id": null, "conversation_id": conversation_id, "actions": [],
+        })
+        .to_string()
+    }
+
+    fn wait_until(what: &str, done: impl Fn() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !done() {
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn answering_writes_the_opening_only_into_a_new_thread() {
+        let tmp = tempfile::tempdir().unwrap();
+        configured(tmp.path());
+        let (db, thread) = seeded();
+        crate::db_guard(&db)
+            .execute(
+                "INSERT INTO voice_calls (id, user_id, direction, state, ring_by, created_at, message)
+                 VALUES ('c1', 1, 'outbound', 'answered', 'x', 'x', ?1), ('c2', 1, 'outbound', 'answered', 'x', 'x', ?2)",
+                (check_in(Some(thread)), check_in(None)),
+            )
+            .unwrap();
+        let (m, sent) = managed(&db, tmp.path(), Arc::new(crate::providers::mock::MockLLM::streamed(vec![])));
+        let opened = |n: usize| {
+            let sent = sent.clone();
+            move || sent.lock().unwrap().iter().filter(|b| **b == CallBody::Play { reply: 1 }).count() == n
+        };
+        m.on_frame("c1", &CallBody::Outcome { outcome: Outcome::Answered });
+        wait_until("the first opening", opened(1));
+        m.on_frame("c2", &CallBody::Outcome { outcome: Outcome::Answered });
+        wait_until("the second opening", opened(2));
+        m.on_frame("c1", &CallBody::Ended);
+        m.on_frame("c2", &CallBody::Ended);
+        let openings = |sql: &str| -> i64 {
+            crate::db_guard(&db)
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) FROM talk_messages WHERE content = 'How is the essay going?' AND conversation_id {sql}"
+                    ),
+                    [thread],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(openings("= ?1"), 1, "the check-in is already in its thread");
+        assert_eq!(openings("!= ?1"), 1, "a new thread gets the opening");
+    }
+
+    #[test]
+    fn a_resumed_brief_leaves_the_thread_to_the_history() {
+        let tmp = tempfile::tempdir().unwrap();
+        configured(tmp.path());
+        let (db, thread) = seeded();
+        crate::db_guard(&db)
+            .execute(
+                "INSERT INTO voice_calls (id, user_id, direction, state, ring_by, created_at, message, conversation_id)
+                 VALUES ('c1', 1, 'outbound', 'answered', 'x', 'x', ?1, ?2)",
+                (check_in(Some(thread)), thread),
+            )
+            .unwrap();
+        let llm = Arc::new(crate::providers::mock::MockLLM::streamed(vec![vec![crate::providers::mock::StreamPiece::Text(
+            "Still here.",
+        )]]));
+        let (m, _) = managed(&db, tmp.path(), llm.clone());
+        assert_eq!(m.resume(), 1);
+        m.on_frame("c1", &CallBody::Commit { turn: 1, text: "hello?".into() });
+        wait_until("a turn", || !llm.seen().is_empty());
+        m.on_frame("c1", &CallBody::Ended);
+        let seen = &llm.seen()[0];
+        assert!(!seen.system.contains("Earlier in this thread"), "{}", seen.system);
+        assert!(
+            seen.messages.iter().any(|msg| matches!(msg, Message::User(t) if t.contains("the essay is due friday"))),
+            "{:?}",
+            seen.messages
+        );
+    }
+
+    #[test]
+    fn a_call_whose_resume_fails_is_hung_up_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (db, thread) = seeded();
+        crate::db_guard(&db)
+            .execute(
+                "INSERT INTO voice_calls (id, user_id, direction, state, ring_by, created_at, conversation_id)
+                 VALUES ('c1', 1, 'outbound', 'answered', 'x', 'x', ?1)",
+                [thread],
+            )
+            .unwrap();
+        let (m, sent) = managed(&db, tmp.path(), Arc::new(crate::providers::mock::MockLLM::streamed(vec![])));
+        assert_eq!(m.resume(), 0, "no voice prompt, so no conversation");
+        m.on_frame("c1", &CallBody::Commit { turn: 1, text: "hello".into() });
+        m.on_frame("c1", &CallBody::Commit { turn: 2, text: "hello?".into() });
         assert_eq!(*sent.lock().unwrap(), vec![CallBody::HangUp]);
         let logged: i64 = crate::db_guard(&db)
             .query_row("SELECT COUNT(*) FROM event_log WHERE kind = 'voice_error'", [], |r| r.get(0))

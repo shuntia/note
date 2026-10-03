@@ -51,11 +51,17 @@ const TICK: Duration = Duration::from_millis(50);
 const END_WAIT: Duration = Duration::from_secs(2);
 const DRAFT_WAIT: Duration = Duration::from_secs(3);
 
+pub struct Opening {
+    pub text: String,
+    /// The thread already holds it as a row, so it is not written again.
+    pub in_thread: bool,
+}
+
 /// Runs until Stop or Ended; `opening` is spoken as reply 1 before anything
 /// else, and `initial` is queued before the first event.
 pub fn run(
     deps: DriverDeps,
-    opening: Option<String>,
+    opening: Option<Opening>,
     history: Vec<Message>,
     initial: Vec<Item>,
     rx: mpsc::Receiver<DriverIn>,
@@ -70,12 +76,17 @@ pub fn run(
             }
         });
     }
-    let mut driver = Driver::new(deps, opening.as_deref().unwrap_or(""), history, tx);
+    let mut driver = Driver::new(
+        deps,
+        opening.as_ref().map_or("", |o| o.text.as_str()),
+        history,
+        tx,
+    );
     for item in initial {
         driver.queue.push(item, driver.now());
     }
-    if let Some(text) = &opening {
-        driver.open(text);
+    if let Some(opening) = &opening {
+        driver.open(opening);
     }
     while let Ok(msg) = rx.recv() {
         match msg {
@@ -245,7 +256,8 @@ impl Driver {
         (self.deps.send)(body);
     }
 
-    fn open(&mut self, text: &str) {
+    fn open(&mut self, opening: &Opening) {
+        let text = opening.text.as_str();
         let mut clauses = Clauses::default();
         let mut spoken: Vec<String> = clauses.push(text);
         spoken.extend(clauses.finish());
@@ -254,11 +266,11 @@ impl Driver {
             .map(|c| speakable(c))
             .filter(|c| !c.is_empty())
             .collect();
-        self.say(1, &spoken, text);
+        self.say(1, &spoken, text, !opening.in_thread);
     }
 
-    /// Speaks a reply Note already holds whole, and commits it as `text`.
-    fn say(&mut self, reply: u64, clauses: &[String], text: &str) {
+    /// Speaks a reply Note already holds whole, and commits it as `text`; `write` adds it to the thread.
+    fn say(&mut self, reply: u64, clauses: &[String], text: &str, write: bool) {
         for (idx, clause) in clauses.iter().enumerate() {
             self.send(CallBody::Speak {
                 reply,
@@ -273,7 +285,11 @@ impl Driver {
             text: text.to_string(),
             tool_calls: vec![],
         });
-        let row = self.append_assistant(text);
+        let row = if write {
+            self.append_assistant(text)
+        } else {
+            None
+        };
         self.last_reply = text.to_string();
         self.replies.insert(
             reply,
@@ -699,7 +715,7 @@ impl Driver {
                 APOLOGY
             };
             let reply = self.take_reply();
-            self.say(reply, &[line.to_string()], line);
+            self.say(reply, &[line.to_string()], line, true);
         } else if end.error.is_none() || !silent {
             self.failed_turns = 0;
         }
@@ -960,13 +976,17 @@ mod tests {
         opening: Option<&str>,
         seed: &str,
     ) -> Harness {
+        let opening = opening.map(|text| Opening {
+            text: text.into(),
+            in_thread: false,
+        });
         start_with(rounds, tools, opening, seed, Duration::from_secs(5))
     }
 
     fn start_with(
         rounds: Vec<Vec<StreamPiece>>,
         tools: &[(&'static str, u64, &'static str)],
-        opening: Option<&str>,
+        opening: Option<Opening>,
         seed: &str,
         job_timeout: Duration,
     ) -> Harness {
@@ -1026,7 +1046,6 @@ mod tests {
         };
         let (tx, rx) = mpsc::channel();
         let driver_tx = tx.clone();
-        let opening = opening.map(String::from);
         let driver = std::thread::spawn(move || run(deps, opening, vec![], vec![], rx, driver_tx));
         Harness {
             tx,
@@ -1674,6 +1693,29 @@ mod tests {
         ]);
         assert_eq!(h.quiet(100), vec![], "no hang-up");
         h.stop();
+    }
+
+    #[test]
+    fn an_opening_is_written_to_the_thread_only_when_it_is_not_there_yet() {
+        for in_thread in [true, false] {
+            let opening = Opening {
+                text: "Hi, it's Note.".into(),
+                in_thread,
+            };
+            let mut h = start_with(vec![], &[], Some(opening), "", Duration::from_secs(5));
+            h.expect(&[
+                speak(1, 0, "Hi, it's Note."),
+                CallBody::SpeakDone { reply: 1 },
+                CallBody::Play { reply: 1 },
+            ]);
+            h.stop();
+            let want = if in_thread {
+                vec![]
+            } else {
+                vec![row("assistant", "Hi, it's Note.", None)]
+            };
+            assert_eq!(h.rows(), want, "in_thread: {in_thread}");
+        }
     }
 
     #[test]
