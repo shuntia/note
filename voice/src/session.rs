@@ -651,6 +651,10 @@ mod tests {
             Ok(vec![text.len() as i16; text.len() * FRAME])
         }
 
+        fn synthesize_native(&self, text: &str, voice: &str) -> anyhow::Result<Vec<i16>> {
+            self.synthesize(text, voice)
+        }
+
         fn voices(&self) -> Vec<VoiceInfo> {
             Vec::new()
         }

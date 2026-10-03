@@ -301,6 +301,10 @@ impl note_voice::audio::engines::TextToSpeech for Deaf {
         Ok(vec![spoken_marker(text); 480])
     }
 
+    fn synthesize_native(&self, text: &str, voice: &str) -> anyhow::Result<Vec<i16>> {
+        self.synthesize(text, voice)
+    }
+
     fn voices(&self) -> Vec<note_voice::audio::engines::VoiceInfo> {
         Vec::new()
     }

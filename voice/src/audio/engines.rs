@@ -35,6 +35,8 @@ pub trait TurnDetector: Send + Sync {
 pub trait TextToSpeech: Send + Sync {
     /// 48 kHz mono i16 for `text` in `voice` (empty = the language default).
     fn synthesize(&self, text: &str, voice: &str) -> anyhow::Result<Vec<i16>>;
+    /// `synthesize` at the model's own `NATIVE_RATE`.
+    fn synthesize_native(&self, text: &str, voice: &str) -> anyhow::Result<Vec<i16>>;
     fn voices(&self) -> Vec<VoiceInfo>;
 }
 
@@ -67,6 +69,7 @@ pub enum Device {
 
 const SAMPLE_RATE: i32 = 16_000;
 const KOKORO_RATE: i32 = 24_000;
+pub const NATIVE_RATE: u32 = KOKORO_RATE as u32;
 
 struct Language {
     vad_model: String,
@@ -373,14 +376,24 @@ impl SherpaTts {
     }
 }
 
-impl TextToSpeech for SherpaTts {
-    fn synthesize(&self, text: &str, voice: &str) -> anyhow::Result<Vec<i16>> {
+impl SherpaTts {
+    fn generate(&self, text: &str, voice: &str) -> anyhow::Result<Vec<f32>> {
         let config = GenerationConfig { sid: resolve_sid(&self.set, voice), ..Default::default() };
         let audio = self
             .tts
             .generate_with_config::<fn(&[f32], f32) -> bool>(text, &config, None)
             .ok_or_else(|| anyhow!("synthesizing {text:?} failed"))?;
-        Ok(to_48k_i16(audio.samples()))
+        Ok(audio.samples().to_vec())
+    }
+}
+
+impl TextToSpeech for SherpaTts {
+    fn synthesize(&self, text: &str, voice: &str) -> anyhow::Result<Vec<i16>> {
+        Ok(to_48k_i16(&self.generate(text, voice)?))
+    }
+
+    fn synthesize_native(&self, text: &str, voice: &str) -> anyhow::Result<Vec<i16>> {
+        Ok(self.generate(text, voice)?.into_iter().map(pcm).collect())
     }
 
     fn voices(&self) -> Vec<VoiceInfo> {
@@ -392,9 +405,12 @@ impl TextToSpeech for SherpaTts {
     }
 }
 
+fn pcm(x: f32) -> i16 {
+    (x.clamp(-1.0, 1.0) * 32767.0).round() as i16
+}
+
 /// 24 kHz float to 48 kHz i16: each sample, then the midpoint to the next.
 fn to_48k_i16(samples_24k: &[f32]) -> Vec<i16> {
-    let pcm = |x: f32| (x.clamp(-1.0, 1.0) * 32767.0).round() as i16;
     let mut out = Vec::with_capacity(samples_24k.len() * 2);
     for (i, &s) in samples_24k.iter().enumerate() {
         let next = samples_24k.get(i + 1).copied().unwrap_or(s);

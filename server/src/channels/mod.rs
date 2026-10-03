@@ -46,6 +46,9 @@ pub struct OutboundMessage {
     pub title: String,
     pub body: String,
     pub urgency: Urgency,
+    /// Note asking how the user is doing, as a fired check-in or one of its own trigger points.
+    #[serde(default)]
+    pub checkin: bool,
     pub event_id: Option<i64>,
     /// The conversation the message opened or joined; a check-in carries one,
     /// so the client can land on the thread where its question waits.
@@ -136,6 +139,7 @@ pub fn render(conn: &Connection, ev: &crate::runner::FiredEvent) -> OutboundMess
         title,
         body,
         urgency,
+        checkin: is_checkin(&ev.kind),
         event_id: Some(ev.event_id),
         conversation_id: None,
         actions,
@@ -260,6 +264,7 @@ pub fn deliver_block_start(
             title: "Starting now".into(),
             body: format!("{} · until {}", start.task, start.end_wall_time),
             urgency: Urgency::Normal,
+            checkin: false,
             event_id: Some(start.event_id),
             conversation_id: None,
             actions: vec![Action {
@@ -408,6 +413,7 @@ mod tests {
             title: "Note".into(),
             body: "Test notification".into(),
             urgency: Urgency::Normal,
+            checkin: false,
             event_id: None,
             conversation_id: None,
             actions: Vec::new(),

@@ -769,6 +769,7 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
             title: "Note".into(),
             body: text,
             urgency: crate::channels::Urgency::Normal,
+            checkin: ev.origin != crate::idle::ORIGIN,
             event_id: Some(ev.event_id),
             conversation_id,
             actions: if ev.prompt == CLOSE_DAY_PROMPT {

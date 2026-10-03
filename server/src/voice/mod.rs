@@ -5,10 +5,10 @@ pub mod outbox;
 use crate::channels::{Channel, OutboundMessage};
 use note_voice_proto::{
     BoxFuture, CallBody, Dir, Direction, Handler, Outcome, Peer, PeerConfig, Refusal, RefusalCode, Reply,
-    Request, Role, VoiceProfile,
+    Request, Role, VoiceOption, VoiceProfile,
 };
 use rusqlite::Connection;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -66,6 +66,7 @@ impl Voice {
             in_flight: Arc::default(),
             conversation: calls.clone(),
             to_voice: cell.clone(),
+            config_dir: Arc::default(),
         });
         let peer = Peer::new(cfg, Dir::ToVoice, handler.clone(), outbox);
         let _ = cell.set(peer.clone());
@@ -75,6 +76,7 @@ impl Voice {
     /// What a live call needs to hold a conversation; until set, an answered
     /// call stays silent.
     pub fn set_calls(&self, deps: call::CallDeps) {
+        let _ = self.handler.config_dir.set(deps.config_dir.clone());
         self.calls.set_deps(deps);
     }
 
@@ -131,6 +133,25 @@ impl Voice {
         }
     }
 
+    pub async fn voices(&self, language: &str) -> Result<Vec<VoiceOption>, Refusal> {
+        match self.peer.request(Request::ListVoices { language: language.to_string() }).await? {
+            Reply::Voices { voices } => Ok(voices),
+            other => Err(Refusal::new(RefusalCode::Failed, format!("unexpected reply {other:?}"))),
+        }
+    }
+
+    /// The WAV bytes of a short sample of `voice`.
+    pub async fn preview(&self, language: &str, voice: &str) -> Result<Vec<u8>, Refusal> {
+        use base64::Engine as _;
+        let request = Request::Preview { language: language.to_string(), voice: voice.to_string() };
+        match self.peer.request(request).await? {
+            Reply::Audio { wav_base64 } => base64::engine::general_purpose::STANDARD
+                .decode(wav_base64)
+                .map_err(|e| Refusal::new(RefusalCode::Failed, format!("the sample is not base64: {e}"))),
+            other => Err(Refusal::new(RefusalCode::Failed, format!("unexpected reply {other:?}"))),
+        }
+    }
+
     /// Records the call, then hands the voice side a `Start` it will refuse
     /// once `RING_BY_SECS` have passed. On `Err` the call is already ended and
     /// never falls through: the caller's ladder delivers the message.
@@ -160,6 +181,7 @@ impl Voice {
                 (&id, user_id, serde_json::to_string(msg)?, ring_by.to_string(), now.to_string()),
             )?;
         }
+        let voice = self.handler.profile(user_id);
         let sent = self.peer.send_call(
             &id,
             CallBody::Start {
@@ -169,7 +191,7 @@ impl Voice {
                 title: msg.title.clone(),
                 ring_secs: RING_SECS,
                 ring_by_ms: ring_by.as_millisecond(),
-                voice: VoiceProfile::default(),
+                voice,
                 direction: Direction::Outbound,
             },
         );
@@ -315,9 +337,22 @@ pub(crate) struct NoteHandler {
     in_flight: Arc<Mutex<HashSet<String>>>,
     conversation: Arc<dyn Conversation>,
     to_voice: Arc<OnceLock<Peer>>,
+    config_dir: Arc<OnceLock<PathBuf>>,
 }
 
 impl NoteHandler {
+    /// The user's call voice; the defaults when their config cannot be read.
+    fn profile(&self, user_id: i64) -> VoiceProfile {
+        let Some(config_dir) = self.config_dir.get() else { return VoiceProfile::default() };
+        let username: Option<String> = crate::db_guard(&self.db)
+            .query_row("SELECT username FROM users WHERE id = ?1", [user_id], |r| r.get(0))
+            .ok();
+        username
+            .and_then(|u| crate::config::UserConfig::load(config_dir, &u).ok())
+            .map(|cfg| cfg.voice_profile())
+            .unwrap_or_default()
+    }
+
     /// Opens a call for the linked user calling in `room_id`, once per `key`,
     /// then hands the voice side its `Start`.
     fn incoming_call(&self, room_id: &str, mxid: &str, key: &str, now: jiff::Timestamp) -> Result<Reply, Refusal> {
@@ -364,7 +399,7 @@ impl NoteHandler {
             title: "Call".into(),
             ring_secs: 0,
             ring_by_ms: ring_by.as_millisecond(),
-            voice: VoiceProfile::default(),
+            voice: self.profile(user_id),
             direction: Direction::Inbound,
         };
         let sent = match self.to_voice.get() {
@@ -544,6 +579,7 @@ mod tests {
             title: "Check-in".into(),
             body: "how is the essay going?".into(),
             urgency: Urgency::High,
+            checkin: false,
             event_id: Some(4),
             conversation_id: Some(9),
             actions: Vec::new(),

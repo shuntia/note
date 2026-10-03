@@ -24,6 +24,7 @@ import type {
   Passkey,
   PromptDoc,
   PromptName,
+  RingFor,
   ScheduleRow,
   SecurityState,
   Settings as UserSettings,
@@ -36,7 +37,9 @@ import type {
   Token,
   TokenCreated,
   TotpEnrolment,
+  VoiceChoice,
 } from '../types'
+import { previewPlayer } from '../voicePreview'
 import { createCredential, webauthnSupported, type RegistrationJSON } from '../webauthn'
 import { deviceZone, knownDeviceZone } from '../zone'
 
@@ -79,9 +82,43 @@ type Loaded = {
   telegramBot: string
   voiceEnabled: boolean
   voiceLink: UserSettings['voice_link']
-  ringFor: 'urgent' | 'never'
+  ringFor: RingFor
+  voice: string
+  cue: boolean
 }
 type Save = { row: string; kind: 'busy' | 'saved' | 'failed'; message?: string } | null
+
+const RING_CHOICES: { id: RingFor; label: string }[] = [
+  { id: 'urgent', label: 'Pressing' },
+  { id: 'checkins', label: 'Check-ins' },
+  { id: 'never', label: 'Never' },
+]
+
+export function RingChoices({
+  value,
+  disabled,
+  onPick,
+}: {
+  value: RingFor
+  disabled?: boolean
+  onPick: (choice: RingFor) => void
+}) {
+  return (
+    <div className="seg" role="group" aria-label="Ring me for">
+      {RING_CHOICES.map((c) => (
+        <button
+          key={c.id}
+          type="button"
+          aria-pressed={value === c.id}
+          disabled={disabled}
+          onClick={() => onPick(c.id)}
+        >
+          {c.label}
+        </button>
+      ))}
+    </div>
+  )
+}
 
 const THEMES: { id: ThemeChoice; label: string }[] = [
   { id: 'system', label: 'System' },
@@ -275,6 +312,8 @@ export function Settings({
           voiceEnabled: s.voice_enabled,
           voiceLink: s.voice_link,
           ringFor: s.ring_for,
+          voice: s.voice_voice,
+          cue: s.voice_cue,
         })
       })
       .catch(() => setState('error'))
@@ -451,12 +490,50 @@ export function Settings({
     }
   }
 
-  const saveRingFor = async (ringFor: 'urgent' | 'never') => {
+  const saveRingFor = async (ringFor: RingFor) => {
     setSave({ row: 'calls', kind: 'busy' })
     try {
       const saved = await api.saveSettings({ ring_for: ringFor })
       setState((s) => (s && s !== 'error' ? { ...s, ringFor: saved.ring_for } : s))
       setSave({ row: 'calls', kind: 'saved' })
+    } catch (err) {
+      setSave({ row: 'calls', kind: 'failed', message: failure(err) })
+    }
+  }
+
+  const [voices, setVoices] = useState<VoiceChoice[] | null>(null)
+  const [preview] = useState(() => previewPlayer())
+  const callsLinked = open === 'calls' && loaded?.voiceLink?.state === 'linked'
+  useEffect(() => {
+    if (!callsLinked) return
+    let live = true
+    api
+      .voiceVoices()
+      .then(({ voices }) => live && setVoices(voices))
+      .catch(() => undefined)
+    return () => {
+      live = false
+    }
+  }, [callsLinked])
+
+  const pickVoice = async (voice: string) => {
+    preview(voice)
+    const before = loaded?.voice ?? ''
+    setState((s) => (s && s !== 'error' ? { ...s, voice } : s))
+    try {
+      await api.saveSettings({ voice_voice: voice })
+    } catch (err) {
+      setState((s) => (s && s !== 'error' && s.voice === voice ? { ...s, voice: before } : s))
+      setSave({ row: 'calls', kind: 'failed', message: failure(err) })
+    }
+  }
+
+  const saveCue = async (cue: boolean) => {
+    setSave({ row: 'calls', kind: 'busy' })
+    try {
+      const saved = await api.saveSettings({ voice_cue: cue })
+      setState((s) => (s && s !== 'error' ? { ...s, cue: saved.voice_cue } : s))
+      setSave(null)
     } catch (err) {
       setSave({ row: 'calls', kind: 'failed', message: failure(err) })
     }
@@ -910,9 +987,7 @@ export function Settings({
             label="Calls"
             value={
               loaded.voiceLink?.state === 'linked'
-                ? loaded.ringFor === 'never'
-                  ? 'Off'
-                  : 'Urgent'
+                ? RING_CHOICES.find((c) => c.id === loaded.ringFor)?.label
                 : loaded.voiceLink
                   ? 'Invited'
                   : 'Not linked'
@@ -925,18 +1000,35 @@ export function Settings({
                 {loaded.voiceLink?.state === 'linked' ? (
                   <>
                     <span className="set-sub">{loaded.voiceLink.mxid}</span>
-                    <div className="seg" role="group" aria-label="Ring me for">
-                      {(['urgent', 'never'] as const).map((v) => (
-                        <button
-                          key={v}
-                          type="button"
-                          aria-pressed={loaded.ringFor === v}
-                          disabled={busy}
-                          onClick={() => void saveRingFor(v)}
-                        >
-                          {v === 'urgent' ? 'Urgent' : 'Never'}
-                        </button>
-                      ))}
+                    <RingChoices
+                      value={loaded.ringFor}
+                      disabled={busy}
+                      onPick={(v) => void saveRingFor(v)}
+                    />
+                    {voices && voices.length > 0 && (
+                      <div className="seg set-voices" role="group" aria-label="Voice">
+                        {voices.map((v) => (
+                          <button
+                            key={v.id}
+                            type="button"
+                            aria-pressed={(loaded.voice || voices[0].id) === v.id}
+                            onClick={() => void pickVoice(v.id)}
+                          >
+                            {v.label}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    <div className="set-row">
+                      <span className="set-row-body">
+                        <span className="set-label">Sounds</span>
+                      </span>
+                      <Switch
+                        label="Sounds"
+                        on={loaded.cue}
+                        disabled={busy}
+                        onToggle={() => void saveCue(!loaded.cue)}
+                      />
                     </div>
                     <button
                       type="button"

@@ -54,6 +54,7 @@ mod tests {
             title: "t".into(),
             body: "b".into(),
             urgency: Urgency::Low,
+            checkin: false,
             event_id: None,
             conversation_id: None,
             actions: Vec::new(),

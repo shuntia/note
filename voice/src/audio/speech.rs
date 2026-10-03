@@ -232,6 +232,10 @@ mod tests {
             Ok(vec![text.len() as i16; text.len() * FRAME])
         }
 
+        fn synthesize_native(&self, text: &str, voice: &str) -> anyhow::Result<Vec<i16>> {
+            self.synthesize(text, voice)
+        }
+
         fn voices(&self) -> Vec<VoiceInfo> {
             Vec::new()
         }
@@ -426,6 +430,9 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(5));
                 self.busy.store(false, Ordering::SeqCst);
                 Ok(vec![1; FRAME])
+            }
+            fn synthesize_native(&self, text: &str, voice: &str) -> anyhow::Result<Vec<i16>> {
+                self.synthesize(text, voice)
             }
             fn voices(&self) -> Vec<VoiceInfo> {
                 Vec::new()

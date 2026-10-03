@@ -1,4 +1,4 @@
-use crate::audio::engines::{Engines, SpeechEngines};
+use crate::audio::engines::{Engines, SpeechEngines, TextToSpeech, NATIVE_RATE};
 use crate::audio::lines::{Line, Lines};
 use crate::calls::{clear_member, ring_once, Ring};
 use crate::config::VoiceServiceConfig;
@@ -10,7 +10,7 @@ use crate::session::{run_session, Cues, SessionDeps, SessionEnd, SessionIn};
 use crate::state::{CallState, LinkState, StateFile};
 use note_voice_proto::{
     dial_forever, AppliedFile, BoxFuture, CallBody, Dir, Direction, FileOutbox, Handler, Outcome, Peer, PeerConfig,
-    Refusal, RefusalCode, Reply, Request, Role, VoiceProfile,
+    Refusal, RefusalCode, Reply, Request, Role, VoiceOption, VoiceProfile,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -55,6 +55,36 @@ fn rejects_since(e: &anyhow::Error) -> bool {
     })
 }
 
+const PREVIEW_TEXT: &str = "Hi, it's Note. This is how I sound.";
+
+/// Voice samples as WAV, rendered once per language and voice.
+#[derive(Default)]
+struct Previews(Mutex<HashMap<(String, String), Arc<Vec<u8>>>>);
+
+impl Previews {
+    fn get(&self, tts: &dyn TextToSpeech, language: &str, voice: &str) -> anyhow::Result<Arc<Vec<u8>>> {
+        let key = (language.to_string(), voice.to_string());
+        if let Some(wav) = lock(&self.0).get(&key) {
+            return Ok(wav.clone());
+        }
+        let wav = Arc::new(wav(&tts.synthesize_native(PREVIEW_TEXT, voice)?, NATIVE_RATE)?);
+        lock(&self.0).insert(key, wav.clone());
+        Ok(wav)
+    }
+}
+
+/// Mono 16-bit WAV.
+fn wav(samples: &[i16], sample_rate: u32) -> anyhow::Result<Vec<u8>> {
+    let spec = hound::WavSpec { channels: 1, sample_rate, bits_per_sample: 16, sample_format: hound::SampleFormat::Int };
+    let mut out = std::io::Cursor::new(Vec::new());
+    let mut writer = hound::WavWriter::new(&mut out, spec)?;
+    for &s in samples {
+        writer.write_sample(s)?;
+    }
+    writer.finalize()?;
+    Ok(out.into_inner())
+}
+
 /// The `Start` Note sent for an incoming call it opened.
 struct InboundStart {
     call_id: String,
@@ -76,6 +106,7 @@ struct Service {
     reporting: Mutex<HashSet<i64>>,
     /// Rooms with an incoming call being answered, each with the way to its `Start` until it arrives.
     answering: Mutex<HashMap<String, Option<oneshot::Sender<InboundStart>>>>,
+    previews: Previews,
     peer: OnceLock<Peer>,
 }
 
@@ -124,6 +155,37 @@ impl Service {
         let mut st = lock(&self.state);
         st.data.calls.remove(call_id);
         let _ = st.save();
+    }
+
+    fn no_models(&self) -> Option<Refusal> {
+        self.backends.engines.languages().is_empty().then(|| Refusal::new(RefusalCode::Failed, "no voice models"))
+    }
+
+    fn voices(&self, language: &str) -> Result<Reply, Refusal> {
+        if let Some(refusal) = self.no_models() {
+            return Err(refusal);
+        }
+        let voices = self.backends.engines.tts(language).voices();
+        Ok(Reply::Voices {
+            voices: voices.into_iter().map(|v| VoiceOption { id: v.id, label: v.label, language: v.language }).collect(),
+        })
+    }
+
+    async fn preview(self: Arc<Self>, language: String, voice: String) -> Result<Reply, Refusal> {
+        use base64::Engine as _;
+        if let Some(refusal) = self.no_models() {
+            return Err(refusal);
+        }
+        let rendered = tokio::task::spawn_blocking(move || {
+            self.previews.get(&*self.backends.engines.tts(&language), &language, &voice)
+        })
+        .await
+        .map_err(anyhow::Error::from)
+        .and_then(|r| r);
+        match rendered {
+            Ok(wav) => Ok(Reply::Audio { wav_base64: base64::engine::general_purpose::STANDARD.encode(&*wav) }),
+            Err(e) => Err(Refusal::new(RefusalCode::Failed, format!("rendering the sample failed: {e:#}"))),
+        }
     }
 
     fn begin_ring(
@@ -627,9 +689,8 @@ impl Handler for VoiceHandler {
                 Request::IncomingCall { .. } => {
                     Err(Refusal::new(RefusalCode::BadRequest, "the voice side reports incoming calls"))
                 }
-                Request::ListVoices { .. } | Request::Preview { .. } => {
-                    Err(Refusal::new(RefusalCode::BadRequest, "voice previews are not offered yet"))
-                }
+                Request::ListVoices { language } => svc.voices(&language),
+                Request::Preview { language, voice } => svc.preview(language, voice).await,
             }
         })
     }
@@ -711,6 +772,7 @@ pub async fn run_with(cfg: VoiceServiceConfig, peer_cfg: PeerConfig, backends: B
         cues: Arc::new(cues),
         reporting: Mutex::new(HashSet::new()),
         answering: Mutex::new(HashMap::new()),
+        previews: Previews::default(),
         peer: OnceLock::new(),
     });
     let handler = Arc::new(VoiceHandler { svc: OnceLock::new() });
@@ -729,8 +791,63 @@ pub async fn run_with(cfg: VoiceServiceConfig, peer_cfg: PeerConfig, backends: B
 mod tests {
     use super::*;
 
+    use crate::audio::engines::VoiceInfo;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     #[test]
     fn a_failed_model_load_leaves_no_languages_instead_of_an_error() {
         assert!(loaded_or_empty(Err(anyhow::anyhow!("libonnxruntime.so not found"))).languages().is_empty());
+    }
+
+    #[test]
+    fn the_wav_header_is_44_bytes_at_24_khz() {
+        let bytes = wav(&[0, 1, -1], NATIVE_RATE).unwrap();
+        assert_eq!(bytes.len(), 44 + 3 * 2);
+        assert_eq!(&bytes[..4], b"RIFF");
+        assert_eq!(u32::from_le_bytes(bytes[24..28].try_into().unwrap()), 24_000);
+        assert_eq!(u16::from_le_bytes(bytes[22..24].try_into().unwrap()), 1, "mono");
+    }
+
+    #[derive(Default)]
+    struct CountingTts(AtomicUsize);
+
+    impl TextToSpeech for CountingTts {
+        fn synthesize(&self, _text: &str, _voice: &str) -> anyhow::Result<Vec<i16>> {
+            anyhow::bail!("a preview is rendered at the native rate")
+        }
+
+        fn synthesize_native(&self, text: &str, _voice: &str) -> anyhow::Result<Vec<i16>> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![1; text.len()])
+        }
+
+        fn voices(&self) -> Vec<VoiceInfo> {
+            Vec::new()
+        }
+    }
+
+    #[test]
+    fn a_preview_is_rendered_once_per_voice() {
+        let (tts, previews) = (CountingTts::default(), Previews::default());
+        let first = previews.get(&tts, "en", "af_heart").unwrap();
+        assert_eq!(previews.get(&tts, "en", "af_heart").unwrap(), first);
+        previews.get(&tts, "en", "bm_george").unwrap();
+        assert_eq!(tts.0.load(Ordering::SeqCst), 2);
+        assert_eq!(first.len(), 44 + PREVIEW_TEXT.len() * 2);
+    }
+
+    #[test]
+    #[ignore = "needs NOTE_VOICE_MODELS"]
+    fn preview_is_a_wav_and_cached() {
+        let dir = std::env::var_os("NOTE_VOICE_MODELS").unwrap();
+        let models = crate::config::models_from_dir(std::path::Path::new(&dir));
+        let engines = Engines::load(&models, crate::audio::engines::Device::Auto).unwrap();
+        let tts = engines.tts("en");
+        let previews = Previews::default();
+        let first = previews.get(&*tts, "en", "").unwrap();
+        let reader = hound::WavReader::new(std::io::Cursor::new(first.to_vec())).unwrap();
+        assert_eq!((reader.spec().sample_rate, reader.spec().channels), (24_000, 1));
+        assert!(reader.duration() > 24_000, "at least a second of speech");
+        assert!(Arc::ptr_eq(&previews.get(&*tts, "en", "").unwrap(), &first));
     }
 }

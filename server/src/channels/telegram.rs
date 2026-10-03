@@ -332,6 +332,7 @@ mod tests {
             title: "Check-in".into(),
             body: "how is the day going?".into(),
             urgency: Urgency::High,
+            checkin: false,
             event_id: Some(7),
             conversation_id: None,
             actions: Vec::new(),

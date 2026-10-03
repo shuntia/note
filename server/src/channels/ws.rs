@@ -170,6 +170,7 @@ mod tests {
             title: "Check-in".into(),
             body: "at 09:00".into(),
             urgency: Urgency::High,
+            checkin: false,
             event_id: Some(7),
             conversation_id: Some(3),
             actions: Vec::new(),

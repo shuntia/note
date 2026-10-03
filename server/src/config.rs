@@ -353,9 +353,17 @@ pub struct UserConfig {
     /// notes; 0 turns idle nudges off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_nudge_min: Option<u32>,
-    /// Which messages ring the linked phone: `urgent` or `never`.
+    /// Which messages ring the linked phone: one of `RING_FOR`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ring_for: Option<String>,
+    /// The call voice's id; absent means the language's default voice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice_voice: Option<String>,
+    /// Whether a call plays its ready and heard sounds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice_cue: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice_language: Option<String>,
 }
 
 pub const DEFAULT_TRIGGERS_PER_DAY: u32 = 4;
@@ -364,8 +372,10 @@ pub const DEFAULT_MORNING_UNTIL: &str = "11:00";
 pub const DEFAULT_POMODORO_WORK_MIN: u32 = 25;
 pub const DEFAULT_POMODORO_BREAK_MIN: u32 = 5;
 pub const RING_FOR_URGENT: &str = "urgent";
+pub const RING_FOR_CHECKINS: &str = "checkins";
 pub const RING_FOR_NEVER: &str = "never";
-pub const RING_FOR: &[&str] = &[RING_FOR_URGENT, RING_FOR_NEVER];
+pub const RING_FOR: &[&str] = &[RING_FOR_URGENT, RING_FOR_CHECKINS, RING_FOR_NEVER];
+pub const DEFAULT_VOICE_LANGUAGE: &str = "en";
 
 fn default_nightly_time() -> String {
     "03:00".into()
@@ -424,6 +434,14 @@ impl UserConfig {
 
     pub fn ring_for(&self) -> &str {
         self.ring_for.as_deref().unwrap_or(RING_FOR_URGENT)
+    }
+
+    pub fn voice_profile(&self) -> note_voice_proto::VoiceProfile {
+        note_voice_proto::VoiceProfile {
+            language: self.voice_language.clone().unwrap_or_else(|| DEFAULT_VOICE_LANGUAGE.into()),
+            voice: self.voice_voice.clone().unwrap_or_default(),
+            cue: self.voice_cue.unwrap_or(true),
+        }
     }
 
     pub fn pomodoro_work_min(&self) -> u32 {
@@ -533,6 +551,18 @@ mod tests {
         let cfg = ServerConfig::load(tmp.path()).unwrap();
         assert!(cfg.providers.llm.is_none());
         assert_eq!(cfg.secrets_dir, PathBuf::from("persist/secrets"));
+    }
+
+    #[test]
+    fn the_voice_profile_defaults_to_english_the_default_voice_and_cues() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), "defaults/user.toml",
+            "display_name = \"X\"\ntimezone = \"UTC\"\ntemplate = \"default\"\n");
+        let p = UserConfig::load(tmp.path(), "a").unwrap().voice_profile();
+        assert_eq!(p, note_voice_proto::VoiceProfile { language: "en".into(), voice: String::new(), cue: true });
+        write(tmp.path(), "users/aki/user.toml", "voice_voice = \"bm_george\"\nvoice_cue = false\n");
+        let p = UserConfig::load(tmp.path(), "aki").unwrap().voice_profile();
+        assert_eq!((p.voice.as_str(), p.cue), ("bm_george", false));
     }
 
     #[test]

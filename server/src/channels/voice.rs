@@ -6,7 +6,13 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 pub fn rings_for(ring_for: &str, msg: &OutboundMessage) -> bool {
-    ring_for == crate::config::RING_FOR_URGENT && msg.urgency == Urgency::High
+    use crate::config::{RING_FOR_CHECKINS, RING_FOR_URGENT};
+    let urgent = msg.urgency == Urgency::High;
+    match ring_for {
+        RING_FOR_URGENT => urgent,
+        RING_FOR_CHECKINS => urgent || msg.checkin,
+        _ => false,
+    }
 }
 
 /// First in the ladder: rings the linked phone. `Ok` means the voice side
@@ -53,6 +59,7 @@ mod tests {
             title: "t".into(),
             body: "b".into(),
             urgency,
+            checkin: false,
             event_id: None,
             conversation_id: None,
             actions: Vec::new(),
@@ -65,5 +72,15 @@ mod tests {
         assert!(!rings_for("urgent", &msg(Urgency::Normal)));
         assert!(!rings_for("never", &msg(Urgency::High)));
         assert!(!rings_for("something else", &msg(Urgency::Normal)));
+    }
+
+    #[test]
+    fn checkins_ring_for_checkins_and_urgent() {
+        let checkin = OutboundMessage { checkin: true, ..msg(Urgency::Normal) };
+        assert!(rings_for("checkins", &checkin));
+        assert!(rings_for("checkins", &msg(Urgency::High)));
+        assert!(!rings_for("checkins", &msg(Urgency::Normal)));
+        assert!(!rings_for("urgent", &checkin));
+        assert!(!rings_for("never", &checkin));
     }
 }

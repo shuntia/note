@@ -54,6 +54,8 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/voice/link", post(voice_link).delete(voice_unlink))
         .route("/api/voice/test", post(voice_test))
+        .route("/api/voice/voices", get(voice_voices))
+        .route("/api/voice/preview", get(voice_preview))
         .route("/api/notify/test", post(notify_test))
         .route(
             "/api/prompts/{name}",
@@ -1407,6 +1409,8 @@ struct SettingsPatch {
     session_end_notify: Option<bool>,
     idle_nudge_min: Option<u32>,
     ring_for: Option<String>,
+    voice_voice: Option<String>,
+    voice_cue: Option<bool>,
     alerts: Option<Vec<AlertPatch>>,
 }
 
@@ -1454,6 +1458,8 @@ fn settings_body(
         "voice_enabled": state.voice.is_some(),
         "voice_link": voice_link.map(|l| serde_json::json!({ "mxid": l.mxid, "state": l.state })),
         "ring_for": cfg.ring_for(),
+        "voice_voice": cfg.voice_voice.clone().unwrap_or_default(),
+        "voice_cue": cfg.voice_profile().cue,
         "schedule": schedule,
     })
 }
@@ -1530,6 +1536,11 @@ async fn settings_put(
     State(state): State<AppState>,
     Json(req): Json<SettingsPatch>,
 ) -> impl IntoResponse {
+    if let Some(voice) = req.voice_voice.as_deref().filter(|v| !v.is_empty()) {
+        if let Err(refused) = check_voice(&state, &user, voice).await {
+            return refused;
+        }
+    }
     let templates = crate::templates::available(&state.config_dir, &user.username);
     let conn = state.db();
     let Ok(mut cfg) = crate::config::UserConfig::load(&state.config_dir, &user.username) else {
@@ -1641,9 +1652,15 @@ async fn settings_put(
     }
     if let Some(ring_for) = req.ring_for {
         if !crate::config::RING_FOR.contains(&ring_for.as_str()) {
-            return invalid_field("ring_for", "must be urgent or never");
+            return invalid_field("ring_for", "must be urgent, checkins or never");
         }
         cfg.ring_for = Some(ring_for);
+    }
+    if let Some(voice) = req.voice_voice {
+        cfg.voice_voice = (!voice.is_empty()).then_some(voice);
+    }
+    if let Some(cue) = req.voice_cue {
+        cfg.voice_cue = Some(cue);
     }
     if let Some(alerts) = req.alerts {
         let changes: Vec<(usize, bool)> = alerts.iter().map(|a| (a.index, a.alert)).collect();
@@ -1718,13 +1735,7 @@ async fn voice_link(
     State(state): State<AppState>,
     Json(req): Json<VoiceLinkReq>,
 ) -> impl IntoResponse {
-    let Some(voice) = state.voice.clone() else {
-        return (
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({ "error": "calls are not set up on this server" })),
-        )
-            .into_response();
-    };
+    let Some(voice) = state.voice.clone() else { return calls_not_set_up() };
     let mxid = req.mxid.trim().to_string();
     if !valid_mxid(&mxid) {
         return invalid_field("mxid", "must look like @name:server");
@@ -1757,13 +1768,7 @@ async fn voice_link(
             let conn = state.db();
             let _ = crate::voice::links::forget_unsent(&conn, link_id);
             let _ = crate::log::record(&conn, Some(user.id), "voice_link_error", &refusal.to_string());
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({
-                    "error": "The call service isn't reachable right now. Try again in a minute."
-                })),
-            )
-                .into_response()
+            voice_unavailable()
         }
     }
 }
@@ -1773,6 +1778,78 @@ async fn voice_unlink(user: CurrentUser, State(state): State<AppState>) -> impl 
     match crate::voice::links::remove(&conn, user.id) {
         Ok(_) => StatusCode::NO_CONTENT.into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+fn voice_unavailable() -> axum::response::Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({ "error": "The call service isn't reachable right now. Try again in a minute." })),
+    )
+        .into_response()
+}
+
+fn calls_not_set_up() -> axum::response::Response {
+    (StatusCode::CONFLICT, Json(serde_json::json!({ "error": "calls are not set up on this server" })))
+        .into_response()
+}
+
+fn voice_language(state: &AppState, user: &CurrentUser) -> Result<String, axum::response::Response> {
+    crate::config::UserConfig::load(&state.config_dir, &user.username)
+        .map(|cfg| cfg.voice_profile().language)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+/// `Err` holds the response that refuses `voice`: not one the voice side offers, or no voice side to ask.
+async fn check_voice(state: &AppState, user: &CurrentUser, voice: &str) -> Result<(), axum::response::Response> {
+    let Some(calls) = state.voice.clone() else { return Err(calls_not_set_up()) };
+    let language = voice_language(state, user)?;
+    let voices = calls.voices(&language).await.map_err(|_| voice_unavailable())?;
+    if voices.iter().any(|v| v.id == voice) {
+        Ok(())
+    } else {
+        Err(invalid_field("voice_voice", "is not one of the available voices"))
+    }
+}
+
+async fn voice_voices(user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
+    let Some(voice) = state.voice.clone() else { return calls_not_set_up() };
+    let language = match voice_language(&state, &user) {
+        Ok(language) => language,
+        Err(response) => return response,
+    };
+    match voice.voices(&language).await {
+        Ok(voices) => {
+            let voices: Vec<_> =
+                voices.into_iter().map(|v| serde_json::json!({ "id": v.id, "label": v.label })).collect();
+            Json(serde_json::json!({ "voices": voices })).into_response()
+        }
+        Err(_) => voice_unavailable(),
+    }
+}
+
+#[derive(Deserialize)]
+struct PreviewQuery {
+    voice: String,
+}
+
+async fn voice_preview(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Query(q): Query<PreviewQuery>,
+) -> impl IntoResponse {
+    let Some(voice) = state.voice.clone() else { return calls_not_set_up() };
+    let language = match voice_language(&state, &user) {
+        Ok(language) => language,
+        Err(response) => return response,
+    };
+    match voice.preview(&language, &q.voice).await {
+        Ok(wav) => (
+            [(header::CONTENT_TYPE, "audio/wav"), (header::CACHE_CONTROL, "private, max-age=86400")],
+            wav,
+        )
+            .into_response(),
+        Err(_) => voice_unavailable(),
     }
 }
 
@@ -1796,6 +1873,7 @@ async fn voice_test(user: CurrentUser, State(state): State<AppState>) -> impl In
         title: "Test call".into(),
         body: "This was a test call from Note.".into(),
         urgency: crate::channels::Urgency::High,
+        checkin: false,
         event_id: None,
         conversation_id: None,
         actions: Vec::new(),
@@ -1816,6 +1894,7 @@ async fn notify_test(user: CurrentUser, State(state): State<AppState>) -> impl I
         title: "Note".into(),
         body: "Test notification".into(),
         urgency: crate::channels::Urgency::Normal,
+        checkin: false,
         event_id: None,
         conversation_id: None,
         actions: Vec::new(),
