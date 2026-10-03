@@ -46,6 +46,7 @@ pub fn touch(conn: &Connection, id: i64, now: jiff::Timestamp) -> Result<()> {
 pub enum Via {
     Web,
     Telegram,
+    Voice,
 }
 
 impl Via {
@@ -53,6 +54,7 @@ impl Via {
         match self {
             Via::Web => "web",
             Via::Telegram => "telegram",
+            Via::Voice => "voice",
         }
     }
 }
@@ -63,6 +65,7 @@ pub fn via_of(conn: &Connection, id: i64) -> Result<Via> {
         .optional()?;
     Ok(match via.as_deref() {
         Some("telegram") => Via::Telegram,
+        Some("voice") => Via::Voice,
         _ => Via::Web,
     })
 }
@@ -77,7 +80,7 @@ pub fn mark_via(conn: &Connection, id: i64, via: Via, now: jiff::Timestamp) -> R
                 (via.as_str(), now.to_string(), id),
             )?;
         }
-        Via::Web => {
+        Via::Web | Via::Voice => {
             conn.execute(
                 "UPDATE conversations SET via = ?1 WHERE id = ?2",
                 (via.as_str(), id),

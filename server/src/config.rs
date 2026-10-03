@@ -35,6 +35,47 @@ pub struct ServerConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct VoiceConfig {
     pub socket: PathBuf,
+    /// The chat model a call talks on; `None` keeps the server's own.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// `OpenRouter`'s `provider.sort` for a call's chat requests.
+    #[serde(default = "default_voice_provider_sort")]
+    pub provider_sort: Option<String>,
+    #[serde(default = "default_wake_settle_ms")]
+    pub wake_settle_ms: u64,
+    #[serde(default = "default_max_wakes")]
+    pub max_wakes: u32,
+    #[serde(default = "default_job_timeout_secs")]
+    pub job_timeout_secs: u64,
+    #[serde(default = "default_max_jobs")]
+    pub max_jobs: usize,
+    #[serde(default = "default_first_token_ms")]
+    pub first_token_ms: u64,
+}
+
+#[allow(clippy::unnecessary_wraps)]
+fn default_voice_provider_sort() -> Option<String> {
+    Some("latency".into())
+}
+
+fn default_wake_settle_ms() -> u64 {
+    600
+}
+
+fn default_max_wakes() -> u32 {
+    4
+}
+
+fn default_job_timeout_secs() -> u64 {
+    60
+}
+
+fn default_max_jobs() -> usize {
+    8
+}
+
+fn default_first_token_ms() -> u64 {
+    8000
 }
 
 /// `NOTE_DEFAULT_WEB_DIR` at build time bakes in an install-specific location

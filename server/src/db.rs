@@ -681,6 +681,28 @@ const MIGRATIONS: &[&str] = &[
         value TEXT NOT NULL
     );
     ",
+    // v47
+    "
+    CREATE TABLE voice_jobs (
+        call_id TEXT NOT NULL REFERENCES voice_calls(id) ON DELETE CASCADE,
+        job INTEGER NOT NULL,
+        reply INTEGER NOT NULL,
+        call_index INTEGER NOT NULL,
+        tool TEXT NOT NULL,
+        args TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('running','done','error','cancelled','timed_out','interrupted')),
+        result TEXT,
+        started_at TEXT NOT NULL,
+        finished_at TEXT,
+        PRIMARY KEY (call_id, job)
+    );
+    ALTER TABLE voice_calls ADD COLUMN conversation_id INTEGER REFERENCES conversations(id);
+    ALTER TABLE conversations ADD COLUMN via_next TEXT NOT NULL DEFAULT 'web'
+        CHECK (via_next IN ('web','telegram','voice'));
+    UPDATE conversations SET via_next = via;
+    ALTER TABLE conversations DROP COLUMN via;
+    ALTER TABLE conversations RENAME COLUMN via_next TO via;
+    ",
 ];
 
 pub fn server_setting(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
@@ -1758,6 +1780,7 @@ mod tests {
             .unwrap();
         assert_eq!(via, "web");
         assert!(at.is_none());
+        conn.execute("UPDATE conversations SET via = 'voice' WHERE id = 1", []).unwrap();
         assert!(
             conn.execute("UPDATE conversations SET via = 'sms' WHERE id = 1", []).is_err(),
             "via is a closed set"
@@ -1948,5 +1971,47 @@ mod tests {
             .query_row("SELECT last_active_at FROM users WHERE id = 1", [], |r| r.get(0))
             .unwrap();
         assert!(seen.is_none());
+    }
+    #[test]
+    fn v47_adds_voice_jobs_and_opens_via_to_voice() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        apply_migrations(&conn, &MIGRATIONS[..46]).unwrap();
+        conn.execute_batch(
+            "INSERT INTO users (username, pass_hash, role) VALUES ('a','h','member');
+             INSERT INTO conversations (user_id, title, created_at, updated_at, via)
+                 VALUES (1, 'chat', 'now', 'now', 'telegram');",
+        )
+        .unwrap();
+        apply_migrations(&conn, MIGRATIONS).unwrap();
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(version, 47);
+        let via: String =
+            conn.query_row("SELECT via FROM conversations WHERE id = 1", [], |r| r.get(0)).unwrap();
+        assert_eq!(via, "telegram");
+        conn.execute("UPDATE conversations SET via = 'voice' WHERE id = 1", []).unwrap();
+        assert!(
+            conn.execute("UPDATE conversations SET via = 'sms' WHERE id = 1", []).is_err(),
+            "via is still a closed set"
+        );
+        conn.execute(
+            "INSERT INTO voice_calls (id, user_id, direction, state, ring_by, created_at, conversation_id)
+             VALUES ('c1', 1, 'outbound', 'answered', 'x', 'x', 1)",
+            [],
+        )
+        .unwrap();
+        let job = |n: i64, state: &str| {
+            conn.execute(
+                "INSERT INTO voice_jobs (call_id, job, reply, call_index, tool, args, state, started_at)
+                 VALUES ('c1', ?1, 1, 0, 'web_search', '{}', ?2, 'x')",
+                (n, state),
+            )
+        };
+        job(1, "running").unwrap();
+        assert!(job(1, "done").is_err(), "a job number is one row per call");
+        assert!(job(2, "lost").is_err(), "the state is a closed set");
+        conn.execute("DELETE FROM voice_calls WHERE id = 'c1'", []).unwrap();
+        let left: i64 = conn.query_row("SELECT COUNT(*) FROM voice_jobs", [], |r| r.get(0)).unwrap();
+        assert_eq!(left, 0, "jobs go with their call");
     }
 }
