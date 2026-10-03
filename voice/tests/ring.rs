@@ -31,6 +31,12 @@ async fn rig_with(seed: impl FnOnce(&std::path::Path, &SharedHs, &FakeNote)) -> 
         livekit_service_url: "https://rtc.t".into(),
         socket,
         state_dir: dir.path().join("state"),
+        models_dir: None,
+        models: Default::default(),
+        device: Default::default(),
+        cues_dir: None,
+        ready_cue_file: None,
+        heard_cue_file: None,
     };
     tokio::spawn(async move { note_voice::service::run_with(cfg, fast(Role::Voice)).await.unwrap() });
     let p = note.peer.clone();
@@ -325,6 +331,12 @@ async fn a_voice_restart_mid_ring_closes_the_call_and_reports_it_once() {
         livekit_service_url: "https://rtc.t".into(),
         socket,
         state_dir: dir.path().join("state"),
+        models_dir: None,
+        models: Default::default(),
+        device: Default::default(),
+        cues_dir: None,
+        ready_cue_file: None,
+        heard_cue_file: None,
     };
     let first = {
         let cfg = cfg.clone();
