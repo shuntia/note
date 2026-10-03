@@ -21,7 +21,12 @@ const STT_CHUNK: usize = RATE * 160 / 1000;
 const TURN_SPAN: usize = RATE * 8;
 const TICK: Duration = Duration::from_millis(10);
 const LOST_NOTICE: Duration = Duration::from_secs(1);
+/// How long an ending waits on audio that makes no progress.
 const DRAIN_CAP: Duration = Duration::from_secs(5);
+/// The longest an ending waits on audio that keeps playing.
+const DRAIN_LIMIT: Duration = Duration::from_secs(60);
+/// What the media path still holds once playout is empty, played out before leaving.
+const DRAIN_TAIL: Duration = Duration::from_millis(500);
 const FILLER_AFTER: Duration = Duration::from_millis(1500);
 
 /// 48 kHz mono audio for the call's cues; an empty one plays nothing.
@@ -164,7 +169,27 @@ struct Tasks {
 
 struct Ending {
     end: SessionEnd,
-    by: Instant,
+    stalled_by: Instant,
+    limit: Instant,
+    drained_at: Option<Instant>,
+}
+
+impl Ending {
+    fn new(end: SessionEnd) -> Self {
+        let now = Instant::now();
+        Self { end, stalled_by: now + DRAIN_CAP, limit: now + DRAIN_LIMIT, drained_at: None }
+    }
+
+    /// The end, once every sound has played out or the audio has stopped moving.
+    fn due(&mut self, drained: bool, now: Instant) -> Option<SessionEnd> {
+        if !drained {
+            self.drained_at = None;
+        } else if self.drained_at.is_none() {
+            self.drained_at = Some(now);
+        }
+        let played_out = self.drained_at.is_some_and(|at| now.duration_since(at) >= DRAIN_TAIL);
+        (played_out || now >= self.stalled_by || now >= self.limit).then(|| self.end.clone())
+    }
 }
 
 struct Live<S> {
@@ -319,6 +344,9 @@ impl<S: Fn(CallBody)> Live<S> {
             if let Err(e) = self.media.send(&frame).await {
                 return Some(SessionEnd::MediaFailed(format!("{e:#}")));
             }
+            if let Some(ending) = self.ending.as_mut() {
+                ending.stalled_by = Instant::now() + DRAIN_CAP;
+            }
         }
         for reply in self.speech.take_finished(&mut self.playout) {
             (self.send)(CallBody::Played { reply });
@@ -356,9 +384,8 @@ impl<S: Fn(CallBody)> Live<S> {
             self.goodbye_pending = false;
             self.play_line(Line::Goodbye);
         }
-        let ending = self.ending.as_ref()?;
         let drained = !self.goodbye_pending && self.playout.is_empty() && self.speech.is_idle();
-        (drained || Instant::now() >= ending.by).then(|| ending.end.clone())
+        self.ending.as_mut()?.due(drained, Instant::now())
     }
 
     fn play_line(&mut self, line: Line) {
@@ -461,7 +488,7 @@ impl<S: Fn(CallBody)> Live<S> {
             CallBody::Drop { reply } => self.speech.drop_reply(reply),
             CallBody::HangUp => {
                 self.playout.resume();
-                self.ending = Some(Ending { end: SessionEnd::HungUp, by: Instant::now() + DRAIN_CAP });
+                self.ending = Some(Ending::new(SessionEnd::HungUp));
             }
             _ => {}
         }
@@ -490,7 +517,7 @@ impl<S: Fn(CallBody)> Live<S> {
         self.speech.flush(&mut self.playout);
         self.playout.resume();
         self.goodbye_pending = true;
-        self.ending = Some(Ending { end, by: Instant::now() + DRAIN_CAP });
+        self.ending = Some(Ending::new(end));
     }
 }
 
@@ -593,6 +620,28 @@ mod tests {
     use crate::audio::playout::FRAME;
     use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::sync::Notify;
+
+    #[test]
+    fn an_ending_waits_out_the_audio_and_its_tail() {
+        let mut ending = Ending::new(SessionEnd::HungUp);
+        let t0 = ending.stalled_by - DRAIN_CAP;
+        assert_eq!(ending.due(false, t0 + Duration::from_secs(4)), None);
+        ending.stalled_by = t0 + Duration::from_secs(12);
+        assert_eq!(ending.due(false, t0 + Duration::from_secs(10)), None, "audio still playing past the stall cap");
+        assert_eq!(ending.due(true, t0 + Duration::from_secs(11)), None, "the tail is still in flight");
+        assert_eq!(ending.due(true, t0 + Duration::from_secs(11) + DRAIN_TAIL), Some(SessionEnd::HungUp));
+    }
+
+    #[test]
+    fn an_ending_gives_up_on_audio_that_stops_moving() {
+        let mut ending = Ending::new(SessionEnd::HungUp);
+        let t0 = ending.stalled_by - DRAIN_CAP;
+        assert_eq!(ending.due(false, t0 + DRAIN_CAP), Some(SessionEnd::HungUp));
+        let mut ending = Ending::new(SessionEnd::HungUp);
+        let t0 = ending.limit - DRAIN_LIMIT;
+        ending.stalled_by = t0 + DRAIN_LIMIT * 2;
+        assert_eq!(ending.due(false, t0 + DRAIN_LIMIT), Some(SessionEnd::HungUp));
+    }
 
     struct FakeVad;
 
