@@ -605,6 +605,7 @@ impl Driver {
     fn run_call(&mut self, reply: u64, index: usize, call: &ToolCall) -> (String, bool) {
         match call.name.as_str() {
             "hang_up" => {
+                eprintln!("voice: Note hangs up {}", self.deps.call_id);
                 self.ending = true;
                 self.hang_up_reply = Some(reply);
                 (serde_json::json!({"ok": true}).to_string(), false)
@@ -647,6 +648,11 @@ impl Driver {
             return;
         };
         let reply = f.reply;
+        if let Some(e) = &error {
+            eprintln!("voice: a turn of {} failed: {e}", self.deps.call_id);
+            let conn = crate::db_guard(&self.deps.db);
+            let _ = crate::log::record(&conn, Some(self.deps.user_id), "voice_error", &format!("a call's turn failed: {e}"));
+        }
         f.ended = Some(TurnEnd {
             calls,
             stopped,
