@@ -14,6 +14,9 @@ pub struct LinkState {
 pub struct CallState {
     pub room_id: String,
     pub done: bool,
+    /// A session is running for the answered call.
+    #[serde(default)]
+    pub live: bool,
     /// The seq of this side's `Ended` frame, once sent.
     pub ended_seq: Option<u64>,
 }

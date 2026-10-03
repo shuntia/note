@@ -1,16 +1,32 @@
-use crate::calls::{ring_once, Ring};
+use crate::audio::engines::{Engines, SpeechEngines};
+use crate::audio::lines::Lines;
+use crate::calls::{clear_member, ring_once, Ring};
 use crate::config::VoiceServiceConfig;
 use crate::matrix::{HomeserverError, Matrix, RoomEvent};
+use crate::media::{LiveKitJoin, MediaJoin};
+use crate::session::{run_session, Cues, SessionDeps, SessionIn};
 use crate::state::{CallState, LinkState, StateFile};
 use note_voice_proto::{
     dial_forever, AppliedFile, BoxFuture, CallBody, Dir, FileOutbox, Handler, Outcome, Peer, PeerConfig,
-    Refusal, RefusalCode, Reply, Request, Role,
+    Refusal, RefusalCode, Reply, Request, Role, VoiceProfile,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
-use tokio::sync::{broadcast, watch};
+use std::time::Duration;
+use tokio::sync::{broadcast, mpsc, watch};
 
-const APPLIED_KEEP: std::time::Duration = std::time::Duration::from_hours(7 * 24);
+const APPLIED_KEEP: Duration = Duration::from_hours(7 * 24);
+/// Element X treats an expired membership as left, so a live call's outlasts the longest call.
+const LIVE_MEMBER_MS: u64 = 60 * 60 * 1000;
+const MAX_CALL: Duration = Duration::from_mins(30);
+const LINK_GRACE: Duration = Duration::from_secs(10);
+const JOIN_WAIT: Duration = Duration::from_secs(10);
+
+/// What a live call runs on: the speech engines, and how to join a room's media.
+pub struct Backends {
+    pub engines: Arc<dyn SpeechEngines>,
+    pub media: Arc<dyn MediaJoin>,
+}
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -40,6 +56,10 @@ struct Service {
     applied: AppliedFile,
     events: broadcast::Sender<RoomEvent>,
     hang_ups: Mutex<HashMap<String, watch::Sender<bool>>>,
+    sessions: Mutex<HashMap<String, mpsc::UnboundedSender<SessionIn>>>,
+    backends: Backends,
+    lines: Arc<Lines>,
+    cues: Arc<Cues>,
     reporting: Mutex<HashSet<i64>>,
     peer: OnceLock<Peer>,
 }
@@ -59,14 +79,19 @@ impl Service {
         }
     }
 
-    /// A call whose `Ended` could not be journaled stays open, so the next
-    /// start's recovery closes it again.
     fn finish(&self, call_id: &str, outcome: Outcome) {
         self.send(call_id, CallBody::Outcome { outcome });
+        self.end(call_id);
+    }
+
+    /// A call whose `Ended` could not be journaled stays open, so the next
+    /// start's recovery closes it again.
+    fn end(&self, call_id: &str) {
         let ended = self.send(call_id, CallBody::Ended);
         let mut st = lock(&self.state);
         if let (Some(c), Some(seq)) = (st.data.calls.get_mut(call_id), ended) {
             c.done = true;
+            c.live = false;
             c.ended_seq = Some(seq);
         }
         let _ = st.save();
@@ -86,7 +111,14 @@ impl Service {
         let _ = st.save();
     }
 
-    fn begin_ring(self: &Arc<Self>, call_id: String, room_id: String, mxid: String, ring_secs: u32) {
+    fn begin_ring(
+        self: &Arc<Self>,
+        call_id: String,
+        room_id: String,
+        mxid: String,
+        ring_secs: u32,
+        profile: VoiceProfile,
+    ) {
         let (tx, rx) = watch::channel(false);
         match lock(&self.hang_ups).entry(call_id.clone()) {
             std::collections::hash_map::Entry::Occupied(_) => return,
@@ -106,15 +138,91 @@ impl Service {
             };
             let id = call_id.clone();
             let s = svc.clone();
-            let outcome = ring_once(ring, events, rx, move || {
+            let outcome = ring_once(ring, events, rx.clone(), move || {
                 s.send(&id, CallBody::Ringing);
             })
             .await;
-            svc.finish(&call_id, outcome);
+            if outcome == Outcome::Answered {
+                svc.go_live(&call_id, &room_id, &mxid, profile, &rx).await;
+            } else {
+                svc.finish(&call_id, outcome);
+            }
         });
     }
 
-    /// Calls a crash left open cannot be resumed; each is closed and reported.
+    /// Joins the answered call's media and runs its session to the end. The
+    /// session's inbox is open from the answer on, so a `HangUp` during the
+    /// join is not lost.
+    async fn go_live(
+        self: &Arc<Self>,
+        call_id: &str,
+        room_id: &str,
+        mxid: &str,
+        profile: VoiceProfile,
+        hang_up: &watch::Receiver<bool>,
+    ) {
+        if self.backends.engines.languages().is_empty() {
+            clear_member(&self.matrix, room_id).await;
+            return self.finish(call_id, Outcome::Failed { reason: "no voice models".into() });
+        }
+        let (tx, inbox) = mpsc::unbounded_channel();
+        lock(&self.sessions).insert(call_id.to_string(), tx.clone());
+        if *hang_up.borrow() {
+            let _ = tx.send(SessionIn::Frame(CallBody::HangUp));
+        }
+        if !self.peer().is_up() {
+            let _ = tx.send(SessionIn::LinkUp(false));
+        }
+        drop(tx);
+        let joined = async {
+            self.matrix.put_member(room_id, LIVE_MEMBER_MS, &self.cfg.livekit_service_url).await?;
+            self.backends.media.join(&self.matrix, &self.cfg.livekit_service_url, room_id, mxid).await
+        }
+        .await;
+        let media = match joined {
+            Ok(media) => media,
+            Err(e) => {
+                lock(&self.sessions).remove(call_id);
+                clear_member(&self.matrix, room_id).await;
+                return self.finish(call_id, Outcome::Failed { reason: format!("{e:#}") });
+            }
+        };
+        self.send(call_id, CallBody::Outcome { outcome: Outcome::Answered });
+        self.set_live(call_id);
+        let deps = SessionDeps {
+            engines: self.backends.engines.clone(),
+            lines: self.lines.clone(),
+            cues: self.cues.clone(),
+            profile,
+            max_len: MAX_CALL,
+            link_grace: LINK_GRACE,
+        };
+        let (svc, id) = (self.clone(), call_id.to_string());
+        let end = run_session(deps, media, inbox, move |body| {
+            svc.send(&id, body);
+        })
+        .await;
+        eprintln!("voice: call {call_id} ended: {end:?}");
+        lock(&self.sessions).remove(call_id);
+        clear_member(&self.matrix, room_id).await;
+        self.end(call_id);
+    }
+
+    fn set_live(&self, call_id: &str) {
+        let mut st = lock(&self.state);
+        if let Some(c) = st.data.calls.get_mut(call_id) {
+            c.live = true;
+        }
+        let _ = st.save();
+    }
+
+    fn to_session(&self, call_id: &str, msg: SessionIn) {
+        if let Some(tx) = lock(&self.sessions).get(call_id) {
+            let _ = tx.send(msg);
+        }
+    }
+
+    /// Calls a crash left open, ringing or live, cannot be resumed; each is closed and reported.
     async fn recover(self: &Arc<Self>) {
         let open: Vec<(String, String)> = lock(&self.state)
             .data
@@ -124,7 +232,7 @@ impl Service {
             .map(|(id, c)| (id.clone(), c.room_id.clone()))
             .collect();
         for (call_id, room_id) in open {
-            let _ = self.matrix.clear_member(&room_id).await;
+            clear_member(&self.matrix, &room_id).await;
             self.finish(&call_id, Outcome::Failed { reason: "the voice service restarted".into() });
         }
     }
@@ -277,7 +385,7 @@ impl Handler for VoiceHandler {
     fn apply(&self, call_id: &str, seq: u64, body: CallBody) -> Result<(), String> {
         let svc = self.svc().clone();
         match body {
-            CallBody::Start { room_id, mxid, ring_secs, ring_by_ms, .. } => {
+            CallBody::Start { room_id, mxid, ring_secs, ring_by_ms, voice, .. } => {
                 {
                     let mut st = lock(&svc.state);
                     if st.data.calls.contains_key(call_id) {
@@ -286,7 +394,7 @@ impl Handler for VoiceHandler {
                     }
                     st.data.calls.insert(
                         call_id.to_string(),
-                        CallState { room_id: room_id.clone(), done: false, ended_seq: None },
+                        CallState { room_id: room_id.clone(), done: false, live: false, ended_seq: None },
                     );
                     st.save().map_err(|e| e.to_string())?;
                 }
@@ -294,16 +402,29 @@ impl Handler for VoiceHandler {
                 if now_ms() > ring_by_ms {
                     svc.finish(call_id, Outcome::Failed { reason: "late".into() });
                 } else {
-                    svc.begin_ring(call_id.to_string(), room_id, mxid, ring_secs);
+                    svc.begin_ring(call_id.to_string(), room_id, mxid, ring_secs, voice);
                 }
             }
             CallBody::HangUp => {
                 if let Some(tx) = lock(&svc.hang_ups).get(call_id) {
                     let _ = tx.send(true);
                 }
+                svc.to_session(call_id, SessionIn::Frame(CallBody::HangUp));
                 svc.applied.set_applied(call_id, seq).map_err(|e| e.to_string())?;
             }
-            _ => svc.applied.set_applied(call_id, seq).map_err(|e| e.to_string())?,
+            body @ (CallBody::Speak { .. } | CallBody::SpeakDone { .. } | CallBody::Play { .. } | CallBody::Drop { .. }) => {
+                svc.to_session(call_id, SessionIn::Frame(body));
+                svc.applied.set_applied(call_id, seq).map_err(|e| e.to_string())?;
+            }
+            CallBody::Ringing
+            | CallBody::Outcome { .. }
+            | CallBody::Ended
+            | CallBody::Draft { .. }
+            | CallBody::Commit { .. }
+            | CallBody::Retract { .. }
+            | CallBody::Floor { .. }
+            | CallBody::BargeIn { .. }
+            | CallBody::Played { .. } => svc.applied.set_applied(call_id, seq).map_err(|e| e.to_string())?,
         }
         Ok(())
     }
@@ -318,6 +439,13 @@ impl Handler for VoiceHandler {
         })
     }
 
+    fn link_changed(&self, up: bool) {
+        let Some(svc) = self.svc.get() else { return };
+        for tx in lock(&svc.sessions).values() {
+            let _ = tx.send(SessionIn::LinkUp(up));
+        }
+    }
+
     fn acked(&self, call_id: &str, upto: u64) {
         let svc = self.svc();
         let done = lock(&svc.state).data.calls.get(call_id).and_then(|c| c.ended_seq).is_some_and(|s| upto >= s);
@@ -328,10 +456,17 @@ impl Handler for VoiceHandler {
 }
 
 pub async fn run(cfg: VoiceServiceConfig) -> anyhow::Result<()> {
-    run_with(cfg, PeerConfig::new(Role::Voice)).await
+    let (models, device) = (cfg.model_sets(), cfg.device);
+    let engines = tokio::task::spawn_blocking(move || Engines::load(&models, device)).await??;
+    let backends = Backends { engines: Arc::new(engines), media: Arc::new(LiveKitJoin { wait: JOIN_WAIT }) };
+    run_with(cfg, PeerConfig::new(Role::Voice), backends).await
 }
 
-pub async fn run_with(cfg: VoiceServiceConfig, peer_cfg: PeerConfig) -> anyhow::Result<()> {
+pub async fn run_with(cfg: VoiceServiceConfig, peer_cfg: PeerConfig, backends: Backends) -> anyhow::Result<()> {
+    if backends.engines.languages().is_empty() {
+        eprintln!("voice: no voice models are loaded; answered calls will fail with \"no voice models\"");
+    }
+    let cues = Cues::load(cfg.ready_cue().as_deref(), cfg.heard_cue().as_deref());
     let token = std::fs::read_to_string(&cfg.token_file)
         .map_err(|e| anyhow::anyhow!("reading {}: {e}", cfg.token_file.display()))?;
     let matrix = Arc::new(Matrix::connect(&cfg.homeserver, &token).await?);
@@ -349,6 +484,10 @@ pub async fn run_with(cfg: VoiceServiceConfig, peer_cfg: PeerConfig) -> anyhow::
         applied,
         events: broadcast::channel(256).0,
         hang_ups: Mutex::new(HashMap::new()),
+        sessions: Mutex::new(HashMap::new()),
+        backends,
+        lines: Arc::new(Lines::default()),
+        cues: Arc::new(cues),
         reporting: Mutex::new(HashSet::new()),
         peer: OnceLock::new(),
     });

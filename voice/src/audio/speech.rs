@@ -159,6 +159,11 @@ impl SpeechQueue {
         })
     }
 
+    /// No reply told to play is still waiting to finish.
+    pub fn is_idle(&self) -> bool {
+        self.playing.is_empty()
+    }
+
     /// Replies told to play whose every clause has been synthesized and played out, each reported once.
     pub fn take_finished(&mut self, playout: &mut Playout) -> Vec<u64> {
         playout.take_finished();

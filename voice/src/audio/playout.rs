@@ -92,6 +92,10 @@ impl Playout {
         cut
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.queue.is_empty()
+    }
+
     /// Not paused and not empty.
     pub fn is_playing(&self) -> bool {
         !self.paused && !self.queue.is_empty()

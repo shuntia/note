@@ -4,4 +4,5 @@ pub mod config;
 pub mod matrix;
 pub mod media;
 pub mod service;
+pub mod session;
 pub mod state;

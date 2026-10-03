@@ -229,3 +229,118 @@ pub fn fake_note(socket: &std::path::Path) -> FakeNote {
     tokio::spawn(listen_forever(peer.clone(), listener));
     FakeNote { peer, rec, hold, _outbox: outbox }
 }
+
+/// Hears nothing and says nothing; `loaded: false` has no languages.
+pub struct SilentEngines {
+    pub loaded: bool,
+}
+
+struct Deaf;
+
+impl note_voice::audio::engines::Vad for Deaf {
+    fn push(&mut self, _window: &[f32]) -> bool {
+        false
+    }
+
+    fn reset(&mut self) {}
+}
+
+impl note_voice::audio::engines::SpeechToText for Deaf {
+    fn accept(&mut self, _samples_16k: &[f32]) {}
+
+    fn partial(&mut self) -> String {
+        String::new()
+    }
+
+    fn finish(&mut self) -> String {
+        String::new()
+    }
+}
+
+impl note_voice::audio::engines::TurnDetector for Deaf {
+    fn complete(&self, _samples_16k: &[f32]) -> f32 {
+        0.0
+    }
+}
+
+impl note_voice::audio::engines::TextToSpeech for Deaf {
+    fn synthesize(&self, _text: &str, _voice: &str) -> anyhow::Result<Vec<i16>> {
+        Ok(Vec::new())
+    }
+
+    fn voices(&self) -> Vec<note_voice::audio::engines::VoiceInfo> {
+        Vec::new()
+    }
+}
+
+impl note_voice::audio::engines::SpeechEngines for SilentEngines {
+    fn languages(&self) -> Vec<String> {
+        if self.loaded { vec!["en".into()] } else { Vec::new() }
+    }
+
+    fn vad(&self, _language: &str) -> anyhow::Result<Box<dyn note_voice::audio::engines::Vad>> {
+        Ok(Box::new(Deaf))
+    }
+
+    fn stt(&self, _language: &str) -> anyhow::Result<Box<dyn note_voice::audio::engines::SpeechToText>> {
+        Ok(Box::new(Deaf))
+    }
+
+    fn turn(&self, _language: &str) -> Arc<dyn note_voice::audio::engines::TurnDetector> {
+        Arc::new(Deaf)
+    }
+
+    fn tts(&self, _language: &str) -> Arc<dyn note_voice::audio::engines::TextToSpeech> {
+        Arc::new(Deaf)
+    }
+}
+
+/// A room where the user stays, silent, until the bot leaves.
+struct QuietRoom;
+
+#[async_trait::async_trait]
+impl note_voice::media::MediaIo for QuietRoom {
+    async fn recv(&self) -> Option<Vec<f32>> {
+        std::future::pending().await
+    }
+
+    async fn send(&self, _frame: &[i16; 480]) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn clear(&self) {}
+
+    async fn left(&self) {
+        std::future::pending::<()>().await;
+    }
+
+    async fn leave(&self) {}
+}
+
+/// Joins a `QuietRoom`, or fails every join with `fail`.
+pub struct FakeJoin {
+    pub fail: bool,
+}
+
+#[async_trait::async_trait]
+impl note_voice::media::MediaJoin for FakeJoin {
+    async fn join(
+        &self,
+        _matrix: &note_voice::matrix::Matrix,
+        _livekit_service_url: &str,
+        _room_id: &str,
+        _mxid: &str,
+    ) -> anyhow::Result<Box<dyn note_voice::media::MediaIo>> {
+        if self.fail {
+            anyhow::bail!("no audio track from the user");
+        }
+        Ok(Box::new(QuietRoom))
+    }
+}
+
+pub fn backends(loaded: bool, join_fails: bool) -> note_voice::service::Backends {
+    note_voice::service::Backends {
+        engines: Arc::new(SilentEngines { loaded }),
+        media: Arc::new(FakeJoin { fail: join_fails }),
+    }
+}

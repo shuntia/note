@@ -32,6 +32,7 @@ futures-util = "0.3"
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
 
 [dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
 axum = "0.8"
 tempfile = "3"
 hound = "3"
