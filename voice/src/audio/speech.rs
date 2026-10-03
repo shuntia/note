@@ -27,6 +27,8 @@ struct Synthesized {
 
 struct Reply {
     gate: Gate,
+    /// Any clause arrived while not dropped.
+    spoken: bool,
     done: bool,
     unplayed: BTreeSet<u32>,
     ready: BTreeMap<u32, Option<Clip>>,
@@ -34,7 +36,7 @@ struct Reply {
 
 impl Default for Reply {
     fn default() -> Self {
-        Self { gate: Gate::Held, done: false, unplayed: BTreeSet::new(), ready: BTreeMap::new() }
+        Self { gate: Gate::Held, spoken: false, done: false, unplayed: BTreeSet::new(), ready: BTreeMap::new() }
     }
 }
 
@@ -94,6 +96,7 @@ impl SpeechQueue {
         if state.gate == Gate::Dropped {
             return;
         }
+        state.spoken = true;
         state.unplayed.insert(idx);
         self.outstanding += 1;
         self.jobs.send(Job { reply, idx, text }).expect("the TTS thread outlives the queue");
@@ -146,6 +149,11 @@ impl SpeechQueue {
             }
             self.play_order.pop_front();
         }
+    }
+
+    /// Told to play, not dropped, and has words to say.
+    pub fn is_speaking(&self, reply: u64) -> bool {
+        self.replies.get(&reply).is_some_and(|s| s.gate == Gate::Playing && s.spoken)
     }
 
     pub fn gate(&self, reply: u64) -> Gate {

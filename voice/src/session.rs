@@ -181,7 +181,7 @@ struct Live<S> {
     goodbye_line: Option<Arc<Vec<i16>>>,
     moment_line: Option<Arc<Vec<i16>>>,
     goodbye_pending: bool,
-    /// A Commit sent with no Speak or Play since.
+    /// A Commit sent with no reply speaking since.
     awaiting_reply: Option<Instant>,
     drafted: Option<u64>,
     start: Instant,
@@ -446,9 +446,10 @@ impl<S: Fn(CallBody)> Live<S> {
         if self.ending.is_some() {
             return;
         }
-        if matches!(body, CallBody::Speak { .. } | CallBody::Play { .. }) {
-            self.awaiting_reply = None;
-        }
+        let reply = match &body {
+            CallBody::Speak { reply, .. } | CallBody::Play { reply } => Some(*reply),
+            _ => None,
+        };
         match body {
             CallBody::Speak { reply, idx, text } => self.speech.speak(reply, idx, text),
             CallBody::SpeakDone { reply } => self.speech.speak_done(reply),
@@ -459,6 +460,9 @@ impl<S: Fn(CallBody)> Live<S> {
                 self.ending = Some(Ending { end: SessionEnd::HungUp, by: Instant::now() + DRAIN_CAP });
             }
             _ => {}
+        }
+        if reply.is_some_and(|r| self.speech.is_speaking(r)) {
+            self.awaiting_reply = None;
         }
     }
 
@@ -838,8 +842,32 @@ mod tests {
         let c = call(turn(), words(), false);
         until_committed(&c).await;
         c.frame(CallBody::Speak { reply: 2, idx: 0, text: "ok".into() });
+        c.frame(CallBody::Play { reply: 2 });
         sleep_ms(4000).await;
         assert_eq!(c.probe.frames_of(moment), 0, "a reply on its way needs no filler");
+
+        let c = call(turn(), words(), false);
+        until_committed(&c).await;
+        c.frame(CallBody::Speak { reply: 2, idx: 0, text: "ok".into() });
+        sleep_ms(4000).await;
+        assert_eq!(c.probe.frames_of(moment), moment, "a held draft's words are not on their way");
+
+        let c = call(turn(), words(), false);
+        until_committed(&c).await;
+        c.frame(CallBody::Speak { reply: 2, idx: 0, text: "ok".into() });
+        c.frame(CallBody::Drop { reply: 2 });
+        c.frame(CallBody::Play { reply: 2 });
+        sleep_ms(4000).await;
+        assert_eq!(c.probe.frames_of(moment), moment, "a dropped reply says nothing");
+
+        let c = call(turn(), words(), false);
+        until_committed(&c).await;
+        c.frame(CallBody::Play { reply: 2 });
+        c.frame(CallBody::SpeakDone { reply: 2 });
+        sleep_ms(1400).await;
+        assert_eq!(c.probe.frames_of(moment), 0, "not before 1.5 s");
+        sleep_ms(4000).await;
+        assert_eq!(c.probe.frames_of(moment), moment, "a tool-only reply still gets the filler");
     }
 
     #[tokio::test(start_paused = true)]
