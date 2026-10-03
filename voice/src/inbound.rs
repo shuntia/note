@@ -13,16 +13,24 @@ pub enum Detect {
     Ignore,
 }
 
-/// Picks out the linked users' own calls from the room events.
+/// Picks out the linked users' own calls from the room events. A call
+/// membership starts a call only on its edge from inactive to active, since
+/// Element X re-sends it while in a call; a ring counts once per event.
 pub struct Detector {
-    /// Events from before this are ignored.
+    /// Events from before this are recorded but not answered.
     cutoff_ms: Option<i64>,
-    answered: HashMap<String, String>,
+    /// Whether each `(room, user)`'s call membership is set.
+    active: HashMap<(String, String), bool>,
+    answered_rings: HashMap<String, String>,
 }
 
 impl Detector {
     pub fn new(cold_start: bool, now_ms: i64) -> Self {
-        Detector { cutoff_ms: cold_start.then(|| now_ms - COLD_START_MAX_AGE_MS), answered: HashMap::new() }
+        Detector {
+            cutoff_ms: cold_start.then(|| now_ms - COLD_START_MAX_AGE_MS),
+            active: HashMap::new(),
+            answered_rings: HashMap::new(),
+        }
     }
 
     /// `links` are `(room_id, mxid)` pairs; `busy` reports a room with a call starting, ringing or live.
@@ -35,8 +43,19 @@ impl Detector {
         _now_ms: i64,
     ) -> Detect {
         let (room, caller, key, ts_ms) = match ev {
-            RoomEvent::CallMember { room, user, active: true, event_id, ts_ms, .. } => (room, user, event_id, *ts_ms),
-            RoomEvent::RingForBot { room, sender, event_id, ts_ms } => (room, sender, event_id, *ts_ms),
+            RoomEvent::CallMember { room, user, active, event_id, ts_ms, .. } => {
+                let was_active = self.active.insert((room.clone(), user.clone()), *active).unwrap_or(false);
+                if !*active || was_active {
+                    return Detect::Ignore;
+                }
+                (room, user, event_id, *ts_ms)
+            }
+            RoomEvent::RingForBot { room, sender, event_id, ts_ms } => {
+                if self.answered_rings.get(room) == Some(event_id) {
+                    return Detect::Ignore;
+                }
+                (room, sender, event_id, *ts_ms)
+            }
             _ => return Detect::Ignore,
         };
         if !links.iter().any(|(r, m)| r == room && m == caller) {
@@ -45,10 +64,12 @@ impl Detector {
         if self.cutoff_ms.is_some_and(|cutoff| ts_ms < cutoff) {
             return Detect::Ignore;
         }
-        if self.answered.get(room) == Some(key) || busy(room) {
+        if busy(room) {
             return Detect::Ignore;
         }
-        self.answered.insert(room.clone(), key.clone());
+        if matches!(ev, RoomEvent::RingForBot { .. }) {
+            self.answered_rings.insert(room.clone(), key.clone());
+        }
         Detect::Answer { room: room.clone(), mxid: caller.clone(), key: key.clone() }
     }
 }
@@ -97,6 +118,17 @@ mod tests {
         }
     }
 
+    fn left(event_id: &str, ts_ms: i64) -> RoomEvent {
+        RoomEvent::CallMember {
+            room: "!dm:t".into(),
+            user: "@aki:t".into(),
+            device: "PHONE".into(),
+            active: false,
+            event_id: event_id.into(),
+            ts_ms,
+        }
+    }
+
     fn idle(_: &str) -> bool {
         false
     }
@@ -110,15 +142,7 @@ mod tests {
         let mut d = Detector::new(false, NOW);
         assert_eq!(d.on_event(&member("!dm:t", "@eve:t", "$1", NOW), &links(), &idle, NOW), Detect::Ignore);
         assert_eq!(d.on_event(&member("!other:t", "@aki:t", "$2", NOW), &links(), &idle, NOW), Detect::Ignore);
-        let left = RoomEvent::CallMember {
-            room: "!dm:t".into(),
-            user: "@aki:t".into(),
-            device: "PHONE".into(),
-            active: false,
-            event_id: "$3".into(),
-            ts_ms: NOW,
-        };
-        assert_eq!(d.on_event(&left, &links(), &idle, NOW), Detect::Ignore);
+        assert_eq!(d.on_event(&left("$3", NOW), &links(), &idle, NOW), Detect::Ignore);
         assert_eq!(d.on_event(&member("!dm:t", "@aki:t", "$4", NOW), &links(), &idle, NOW), answer("$4"));
         let ring = RoomEvent::RingForBot { room: "!dm:t".into(), sender: "@aki:t".into(), event_id: "$5".into(), ts_ms: NOW };
         assert_eq!(d.on_event(&ring, &links(), &idle, NOW), answer("$5"));
@@ -130,7 +154,8 @@ mod tests {
     fn stale_call_members_after_a_restart_are_ignored() {
         let mut d = Detector::new(true, NOW);
         assert_eq!(d.on_event(&member("!dm:t", "@aki:t", "$1", NOW - 60_000), &links(), &idle, NOW), Detect::Ignore);
-        assert_eq!(d.on_event(&member("!dm:t", "@aki:t", "$2", NOW - 5_000), &links(), &idle, NOW), answer("$2"));
+        let mut fresh = Detector::new(true, NOW);
+        assert_eq!(fresh.on_event(&member("!dm:t", "@aki:t", "$2", NOW - 5_000), &links(), &idle, NOW), answer("$2"));
         let mut warm = Detector::new(false, NOW);
         assert_eq!(
             warm.on_event(&member("!dm:t", "@aki:t", "$1", NOW - 60_000), &links(), &idle, NOW),
@@ -144,6 +169,37 @@ mod tests {
         let mut d = Detector::new(false, NOW);
         assert_eq!(d.on_event(&member("!dm:t", "@aki:t", "$1", NOW), &links(), &idle, NOW), answer("$1"));
         assert_eq!(d.on_event(&member("!dm:t", "@aki:t", "$1", NOW), &links(), &idle, NOW), Detect::Ignore);
+        let ring = RoomEvent::RingForBot { room: "!dm:t".into(), sender: "@aki:t".into(), event_id: "$r".into(), ts_ms: NOW };
+        assert_eq!(d.on_event(&ring, &links(), &idle, NOW), answer("$r"));
+        assert_eq!(d.on_event(&ring, &links(), &idle, NOW), Detect::Ignore);
+    }
+
+    #[test]
+    fn a_refresh_while_in_the_call_is_not_a_new_call() {
+        let mut d = Detector::new(false, NOW);
+        assert_eq!(d.on_event(&member("!dm:t", "@aki:t", "$1", NOW), &links(), &idle, NOW), answer("$1"));
+        assert_eq!(d.on_event(&member("!dm:t", "@aki:t", "$2", NOW + 1_000), &links(), &idle, NOW), Detect::Ignore);
+    }
+
+    #[test]
+    fn leaving_and_calling_again_is_answered_again() {
+        let mut d = Detector::new(false, NOW);
+        assert_eq!(d.on_event(&member("!dm:t", "@aki:t", "$1", NOW), &links(), &idle, NOW), answer("$1"));
+        assert_eq!(d.on_event(&left("$2", NOW + 1_000), &links(), &idle, NOW), Detect::Ignore);
+        assert_eq!(d.on_event(&member("!dm:t", "@aki:t", "$3", NOW + 2_000), &links(), &idle, NOW), answer("$3"));
+    }
+
+    #[test]
+    fn a_user_already_in_a_call_at_a_cold_start_is_not_answered() {
+        let mut d = Detector::new(true, NOW);
+        assert_eq!(d.on_event(&member("!dm:t", "@aki:t", "$1", NOW - 120_000), &links(), &idle, NOW), Detect::Ignore);
+        assert_eq!(
+            d.on_event(&member("!dm:t", "@aki:t", "$2", NOW + 1_000), &links(), &idle, NOW),
+            Detect::Ignore,
+            "a refresh of the call already up"
+        );
+        assert_eq!(d.on_event(&left("$3", NOW + 2_000), &links(), &idle, NOW), Detect::Ignore);
+        assert_eq!(d.on_event(&member("!dm:t", "@aki:t", "$4", NOW + 3_000), &links(), &idle, NOW), answer("$4"));
     }
 
     #[test]
@@ -152,9 +208,9 @@ mod tests {
         let busy = |room: &str| room == "!dm:t";
         assert_eq!(d.on_event(&member("!dm:t", "@aki:t", "$1", NOW), &links(), &busy, NOW), Detect::Ignore);
         assert_eq!(
-            d.on_event(&member("!dm:t", "@aki:t", "$1", NOW), &links(), &idle, NOW),
-            answer("$1"),
-            "an event ignored while busy is not counted as answered"
+            d.on_event(&member("!dm:t", "@aki:t", "$2", NOW + 1_000), &links(), &idle, NOW),
+            Detect::Ignore,
+            "the call that began while busy is still the same call"
         );
     }
 }
