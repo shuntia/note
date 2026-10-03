@@ -54,7 +54,7 @@ impl Queue {
 
     /// Called when no turn is in flight; if a turn should start, drains and returns its items.
     pub fn take_turn(&mut self, now: Duration) -> Option<(Start, Vec<Item>)> {
-        if self.items.iter().any(|item| matches!(item, Item::Heard(_))) {
+        if self.has_heard() {
             self.wakes_in_a_row = 0;
             return Some((Start::Heard, std::mem::take(&mut self.items)));
         }
@@ -66,6 +66,15 @@ impl Queue {
         }
         self.wakes_in_a_row += 1;
         Some((Start::Wake, std::mem::take(&mut self.items)))
+    }
+
+    /// The user's words started a turn outside `take_turn` (a promoted draft); resets the wake cap.
+    pub fn heard(&mut self) {
+        self.wakes_in_a_row = 0;
+    }
+
+    pub fn has_heard(&self) -> bool {
+        self.items.iter().any(|item| matches!(item, Item::Heard(_)))
     }
 
     /// Drains the queued completions for a draft turn, leaving any `Heard` queued.

@@ -141,6 +141,7 @@ struct JobMeta {
     args: String,
     started: Duration,
     written: bool,
+    row: Option<i64>,
 }
 
 struct Driver {
@@ -310,6 +311,10 @@ impl Driver {
         if self.in_flight.is_some() || self.ending {
             return;
         }
+        if self.queue.has_heard() {
+            self.try_start();
+            return;
+        }
         let snapshot = self.queue.snapshot();
         let mut items = snapshot.clone();
         items.push(Item::Heard(text.clone()));
@@ -328,6 +333,7 @@ impl Driver {
         let reply = f.reply;
         let held = std::mem::take(&mut f.calls);
         self.send(CallBody::Play { reply });
+        self.queue.heard();
         if self
             .replies
             .get(&reply)
@@ -363,6 +369,7 @@ impl Driver {
         record.heard_chars = Some(heard_chars);
         let heard = record.heard_text();
         let (message, row) = (record.message, record.row);
+        self.queue.note_playing(false, self.now());
         if let Some(f) = self.in_flight.as_ref().filter(|f| f.reply == reply) {
             f.stop.store(true, Ordering::SeqCst);
         }
@@ -566,6 +573,7 @@ impl Driver {
                             args: call.args.clone(),
                             started,
                             written: false,
+                            row: None,
                         },
                     );
                 }
@@ -596,13 +604,10 @@ impl Driver {
             return;
         };
         let Some(end) = f.ended else { return };
-        let now = self.now();
-        self.trace.round(
-            f.first_clause
-                .unwrap_or(now)
-                .saturating_sub(f.since)
-                .as_millis() as u64,
-        );
+        if let Some(first) = f.first_clause {
+            self.trace
+                .round(first.saturating_sub(f.since).as_millis() as u64);
+        }
         push_user(&mut self.messages, f.input);
         let (spoken_any, heard) = match self.replies.get(&f.reply) {
             Some(record) => (!record.full_text.is_empty(), record.heard_text()),
@@ -648,6 +653,7 @@ impl Driver {
         if self.ending {
             self.send(CallBody::HangUp);
         }
+        self.try_start();
     }
 
     fn on_job(&mut self, done: &JobDone) {
@@ -674,15 +680,16 @@ impl Driver {
 
     fn record_job(&mut self, done: &JobDone) {
         let now = self.now();
-        let (args, ms) = match self.job_meta.get_mut(&done.job) {
+        let (args, ms, row) = match self.job_meta.get_mut(&done.job) {
             Some(meta) => {
                 meta.written = true;
                 (
                     meta.args.clone(),
                     now.saturating_sub(meta.started).as_millis() as u64,
+                    meta.row,
                 )
             }
-            None => (String::new(), 0),
+            None => (String::new(), 0, None),
         };
         let (result, is_error) = match &done.outcome {
             JobOutcome::Done(text) => (text.clone(), false),
@@ -701,16 +708,32 @@ impl Driver {
             ),
         };
         self.trace.call(&done.tool, &args, &result, is_error, ms);
-        let written = crate::talk::append_tool(
-            &crate::db_guard(&self.deps.db),
-            self.deps.conversation_id,
-            &done.tool,
-            &args,
-            &result,
-            is_error,
-            None,
-            jiff::Timestamp::now(),
-        );
+        let written = if let Some(id) = row {
+            crate::db_guard(&self.deps.db)
+                .execute(
+                    "UPDATE talk_messages SET content = ?1, is_error = ?2 WHERE id = ?3",
+                    (&result, is_error, id),
+                )
+                .map(|_| ())
+                .map_err(anyhow::Error::from)
+        } else {
+            let conn = crate::db_guard(&self.deps.db);
+            crate::talk::append_tool(
+                &conn,
+                self.deps.conversation_id,
+                &done.tool,
+                &args,
+                &result,
+                is_error,
+                None,
+                jiff::Timestamp::now(),
+            )
+            .map(|()| {
+                if let Some(meta) = self.job_meta.get_mut(&done.job) {
+                    meta.row = Some(conn.last_insert_rowid());
+                }
+            })
+        };
         if let Err(e) = written {
             eprintln!(
                 "voice: recording job {} of {} failed: {e:#}",
@@ -889,6 +912,16 @@ mod tests {
         opening: Option<&str>,
         seed: &str,
     ) -> Harness {
+        start_with(rounds, tools, opening, seed, Duration::from_secs(5))
+    }
+
+    fn start_with(
+        rounds: Vec<Vec<StreamPiece>>,
+        tools: &[(&'static str, u64, &'static str)],
+        opening: Option<&str>,
+        seed: &str,
+        job_timeout: Duration,
+    ) -> Harness {
         let conn = crate::db::open_memory().unwrap();
         conn.execute(
             "INSERT INTO users (username, pass_hash, role) VALUES ('aki', 'x', 'member')",
@@ -932,7 +965,7 @@ mod tests {
                     max_wakes: 4,
                 },
                 jobs: JobLimits {
-                    timeout: Duration::from_secs(5),
+                    timeout: job_timeout,
                     max_running: 8,
                 },
                 first_token: Duration::from_secs(1),
@@ -1413,6 +1446,7 @@ mod tests {
             h.rows(),
             vec![row("user", "hello?", None), row("assistant", APOLOGY, None)]
         );
+        assert_eq!(traces(&h), vec![0], "a turn with no clause has no round");
     }
 
     #[test]
@@ -1500,5 +1534,314 @@ mod tests {
         );
         assert!(block.contains("[you] so"), "{block}");
         h.stop();
+    }
+
+    fn traces(h: &Harness) -> Vec<i64> {
+        let conn = crate::db_guard(&h.db);
+        let mut stmt = conn.prepare("SELECT turns FROM agent_traces").unwrap();
+        stmt.query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_promoted_draft_resets_the_wake_cap() {
+        let mut h = start(
+            vec![
+                vec![
+                    Calls(call("t1", "task_add", r#"{"n":1}"#)),
+                    Calls(call("t2", "task_add2", r#"{"n":2}"#)),
+                    Calls(call("t3", "task_add3", r#"{"n":3}"#)),
+                    Calls(call("t4", "task_add4", r#"{"n":4}"#)),
+                ],
+                vec![Text("")],
+                vec![Text("")],
+                vec![Text("")],
+                vec![Text("")],
+                vec![Calls(call("t5", "task_add", r#"{"n":5}"#))],
+                vec![Text("Done.")],
+            ],
+            &[
+                ("task_add", 10, "{}"),
+                ("task_add2", 250, "{}"),
+                ("task_add3", 500, "{}"),
+                ("task_add4", 750, "{}"),
+            ],
+            None,
+            "",
+        );
+        h.frame(CallBody::Commit {
+            turn: 1,
+            text: "add four things".into(),
+        });
+        h.expect(&[CallBody::SpeakDone { reply: 2 }]);
+        h.at(1000);
+        h.tick_until(&CallBody::SpeakDone { reply: 6 });
+        assert_eq!(h.llm.seen().len(), 5, "four separate wakes");
+
+        h.frame(CallBody::Draft {
+            turn: 2,
+            text: "and one more".into(),
+        });
+        h.expect(&[CallBody::SpeakDone { reply: 7 }]);
+        h.frame(CallBody::Commit {
+            turn: 2,
+            text: "And one more.".into(),
+        });
+        h.expect(&[CallBody::Play { reply: 7 }]);
+        h.tick_until(&speak(8, 0, "Done."));
+        h.stop();
+    }
+
+    #[test]
+    fn a_barge_in_frees_the_floor_for_a_wake() {
+        let mut h = start(
+            vec![
+                vec![Text("Let me check."), Calls(call("t1", "task_add", "{}"))],
+                vec![Text("Anything else?")],
+            ],
+            &[("task_add", 10, "{}")],
+            None,
+            "",
+        );
+        h.frame(CallBody::Commit {
+            turn: 1,
+            text: "add it".into(),
+        });
+        h.expect(&[
+            speak(2, 0, "Let me check."),
+            CallBody::Play { reply: 2 },
+            CallBody::SpeakDone { reply: 2 },
+        ]);
+        h.frame(CallBody::BargeIn {
+            reply: 2,
+            heard_chars: 3,
+        });
+        h.tick_until(&speak(3, 0, "Anything else?"));
+        h.stop();
+    }
+
+    #[test]
+    fn a_heard_queued_during_a_turn_starts_when_it_ends() {
+        let mut h = start(
+            vec![
+                vec![
+                    Text("One sec,"),
+                    StreamPiece::Wait(Duration::from_millis(200)),
+                    Text(" here."),
+                ],
+                vec![Text("And that too.")],
+            ],
+            &[],
+            None,
+            "",
+        );
+        h.frame(CallBody::Commit {
+            turn: 1,
+            text: "first".into(),
+        });
+        h.expect(&[speak(2, 0, "One sec,"), CallBody::Play { reply: 2 }]);
+        h.frame(CallBody::Commit {
+            turn: 2,
+            text: "second".into(),
+        });
+        h.expect(&[
+            speak(2, 1, "here."),
+            CallBody::SpeakDone { reply: 2 },
+            speak(3, 0, "And that too."),
+            CallBody::Play { reply: 3 },
+            CallBody::SpeakDone { reply: 3 },
+        ]);
+        assert_eq!(h.last_user(1), "[you] second");
+        h.stop();
+    }
+
+    #[test]
+    fn a_timed_out_write_updates_its_row_when_it_lands() {
+        let mut h = start_with(
+            vec![vec![Text("Adding."), Calls(call("t1", "task_add", "{}"))]],
+            &[("task_add", 300, r#"{"id":5}"#)],
+            None,
+            "",
+            Duration::from_millis(100),
+        );
+        h.frame(CallBody::Commit {
+            turn: 1,
+            text: "add it".into(),
+        });
+        h.expect(&[
+            speak(2, 0, "Adding."),
+            CallBody::Play { reply: 2 },
+            CallBody::SpeakDone { reply: 2 },
+        ]);
+        h.wait_for("the late result", |h| {
+            h.rows()
+                .contains(&row("tool", r#"{"id":5}"#, Some("task_add")))
+        });
+        h.stop();
+        let tools = h
+            .rows()
+            .into_iter()
+            .filter(|(role, ..)| role == "tool")
+            .count();
+        assert_eq!(tools, 1);
+    }
+
+    #[test]
+    fn ending_with_jobs_running_records_them_and_one_trace() {
+        let mut h = start(
+            vec![vec![
+                Text("Working on it."),
+                Calls(call("t1", "task_add", "{}")),
+                Calls(call("t2", "web_search", r#"{"q":"x"}"#)),
+            ]],
+            &[("task_add", 200, r#"{"id":5}"#), ("web_search", 3000, "{}")],
+            None,
+            "",
+        );
+        h.frame(CallBody::Commit {
+            turn: 1,
+            text: "do both".into(),
+        });
+        h.expect(&[
+            speak(2, 0, "Working on it."),
+            CallBody::Play { reply: 2 },
+            CallBody::SpeakDone { reply: 2 },
+        ]);
+        h.frame(CallBody::Ended);
+        h.driver.take().unwrap().join().unwrap();
+        let rows = h.rows();
+        assert!(
+            rows.contains(&row("tool", r#"{"id":5}"#, Some("task_add"))),
+            "{rows:?}"
+        );
+        assert!(
+            rows.contains(&row(
+                "tool",
+                r#"{"cancelled":true,"job":2}"#,
+                Some("web_search")
+            )),
+            "{rows:?}"
+        );
+        assert_eq!(traces(&h), vec![1]);
+    }
+
+    #[test]
+    fn a_hang_up_held_in_a_draft_ends_the_call_once_committed() {
+        let mut h = start(
+            vec![vec![Text("Bye!"), Calls(call("t1", "hang_up", "{}"))]],
+            &[],
+            None,
+            "",
+        );
+        h.frame(CallBody::Draft {
+            turn: 1,
+            text: "bye".into(),
+        });
+        h.expect(&[speak(2, 0, "Bye!"), CallBody::SpeakDone { reply: 2 }]);
+        assert_eq!(h.quiet(100), vec![], "a held hang_up does nothing yet");
+        h.frame(CallBody::Commit {
+            turn: 1,
+            text: "Bye.".into(),
+        });
+        h.expect(&[CallBody::Play { reply: 2 }, CallBody::HangUp]);
+        h.stop();
+    }
+
+    #[test]
+    fn a_hang_up_held_in_a_retracted_draft_never_runs() {
+        let mut h = start(
+            vec![
+                vec![Text("Bye!"), Calls(call("t1", "hang_up", "{}"))],
+                vec![Text("Go on.")],
+            ],
+            &[],
+            None,
+            "",
+        );
+        h.frame(CallBody::Draft {
+            turn: 1,
+            text: "bye".into(),
+        });
+        h.expect(&[speak(2, 0, "Bye!"), CallBody::SpeakDone { reply: 2 }]);
+        h.frame(CallBody::Retract { turn: 1 });
+        h.expect(&[CallBody::Drop { reply: 2 }]);
+        h.frame(CallBody::Commit {
+            turn: 1,
+            text: "bye the way, one more thing".into(),
+        });
+        h.expect(&[
+            speak(3, 0, "Go on."),
+            CallBody::Play { reply: 3 },
+            CallBody::SpeakDone { reply: 3 },
+        ]);
+        assert_eq!(h.quiet(100), vec![]);
+        h.stop();
+    }
+
+    #[test]
+    fn a_draft_during_a_cut_off_wake_waits_for_the_commit() {
+        let mut h = start(
+            vec![
+                vec![Text("On it."), Calls(call("t1", "task_add", "{}"))],
+                vec![
+                    Text("Done with that. "),
+                    StreamPiece::Wait(Duration::from_millis(300)),
+                    Text("Anything else?"),
+                ],
+                vec![Text("Okay.")],
+            ],
+            &[("task_add", 10, "{}")],
+            None,
+            "",
+        );
+        h.frame(CallBody::Commit {
+            turn: 1,
+            text: "add it".into(),
+        });
+        h.expect(&[
+            speak(2, 0, "On it."),
+            CallBody::Play { reply: 2 },
+            CallBody::SpeakDone { reply: 2 },
+        ]);
+        h.frame(CallBody::Floor {
+            floor: Floor::Drained,
+        });
+        h.tick_until(&speak(3, 0, "Done with that."));
+        h.frame(CallBody::BargeIn {
+            reply: 3,
+            heard_chars: 4,
+        });
+        h.frame(CallBody::Draft {
+            turn: 2,
+            text: "wait".into(),
+        });
+        h.expect(&[
+            CallBody::Play { reply: 3 },
+            CallBody::SpeakDone { reply: 3 },
+        ]);
+        assert_eq!(
+            h.quiet(100),
+            vec![],
+            "the draft came while the wake was in flight"
+        );
+        h.frame(CallBody::Commit {
+            turn: 2,
+            text: "wait".into(),
+        });
+        h.expect(&[
+            speak(4, 0, "Okay."),
+            CallBody::Play { reply: 4 },
+            CallBody::SpeakDone { reply: 4 },
+        ]);
+        let messages = &h.llm.seen()[2].messages;
+        assert!(
+            matches!(&messages[4], Message::Assistant { text, .. } if text == "Done…"),
+            "{messages:?}"
+        );
+        assert_eq!(h.last_user(2), "[you] wait");
+        h.stop();
+        assert!(h.rows().contains(&row("assistant", "Done…", None)));
     }
 }
