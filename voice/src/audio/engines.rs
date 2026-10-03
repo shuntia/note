@@ -337,6 +337,7 @@ impl SherpaTts {
                         voices: Some(path_str(&set.tts_voices)?),
                         tokens: Some(path_str(&set.tts_tokens)?),
                         data_dir: Some(path_str(&set.tts_data_dir)?),
+                        lexicon: set.tts_lexicon.clone(),
                         ..Default::default()
                     },
                     num_threads: 2,

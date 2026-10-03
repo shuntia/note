@@ -35,6 +35,9 @@ pub struct ModelSet {
     pub tts_voices: PathBuf,
     pub tts_tokens: PathBuf,
     pub tts_data_dir: PathBuf,
+    /// Kokoro v1 pronunciation lexicons, comma-separated in priority order.
+    #[serde(default)]
+    pub tts_lexicon: Option<String>,
     pub vad: PathBuf,
     pub turn: PathBuf,
     /// Kokoro speaker ids offered, with labels; the first is the default.
@@ -50,18 +53,36 @@ pub struct VoiceEntry {
 
 pub type ModelsConfig = BTreeMap<String, ModelSet>;
 
-const KOKORO_EN_VOICES: [(&str, i32, &str); 11] = [
-    ("af_sarah", 3, "Sarah"),
-    ("af", 0, "Bella & Sarah"),
-    ("af_bella", 1, "Bella"),
-    ("af_nicole", 2, "Nicole"),
-    ("af_sky", 4, "Sky"),
-    ("am_adam", 5, "Adam"),
-    ("am_michael", 6, "Michael"),
-    ("bf_emma", 7, "Emma"),
-    ("bf_isabella", 8, "Isabella"),
-    ("bm_george", 9, "George"),
-    ("bm_lewis", 10, "Lewis"),
+/// Kokoro v1.0's English speakers (ids 0-27 of 53); the first is the default.
+const KOKORO_EN_VOICES: [(&str, i32, &str); 28] = [
+    ("af_heart", 3, "Heart"),
+    ("af_alloy", 0, "Alloy"),
+    ("af_aoede", 1, "Aoede"),
+    ("af_bella", 2, "Bella"),
+    ("af_jessica", 4, "Jessica"),
+    ("af_kore", 5, "Kore"),
+    ("af_nicole", 6, "Nicole"),
+    ("af_nova", 7, "Nova"),
+    ("af_river", 8, "River"),
+    ("af_sarah", 9, "Sarah"),
+    ("af_sky", 10, "Sky"),
+    ("am_adam", 11, "Adam"),
+    ("am_echo", 12, "Echo"),
+    ("am_eric", 13, "Eric"),
+    ("am_fenrir", 14, "Fenrir"),
+    ("am_liam", 15, "Liam"),
+    ("am_michael", 16, "Michael"),
+    ("am_onyx", 17, "Onyx"),
+    ("am_puck", 18, "Puck"),
+    ("am_santa", 19, "Santa"),
+    ("bf_alice", 20, "Alice"),
+    ("bf_emma", 21, "Emma"),
+    ("bf_isabella", 22, "Isabella"),
+    ("bf_lily", 23, "Lily"),
+    ("bm_daniel", 24, "Daniel"),
+    ("bm_fable", 25, "Fable"),
+    ("bm_george", 26, "George"),
+    ("bm_lewis", 27, "Lewis"),
 ];
 
 /// The "en" set, laid out as `packages.note-voice-models`.
@@ -75,6 +96,11 @@ pub fn models_from_dir(dir: &Path) -> ModelsConfig {
         tts_voices: dir.join("kokoro/voices.bin"),
         tts_tokens: dir.join("kokoro/tokens.txt"),
         tts_data_dir: dir.join("kokoro/espeak-ng-data"),
+        tts_lexicon: Some(format!(
+            "{},{}",
+            dir.join("kokoro/lexicon-us-en.txt").display(),
+            dir.join("kokoro/lexicon-gb-en.txt").display()
+        )),
         vad: dir.join("silero_vad.onnx"),
         turn: dir.join("smart-turn.onnx"),
         voices: KOKORO_EN_VOICES
@@ -144,7 +170,7 @@ mod tests {
         .unwrap();
         assert_eq!(cfg.device, Device::Cpu);
         assert_eq!(cfg.model_sets()["en"].turn, Path::new("/m/smart-turn.onnx"));
-        assert_eq!(cfg.model_sets()["en"].voices[0].id, "af_sarah");
+        assert_eq!(cfg.model_sets()["en"].voices[0].id, "af_heart");
         assert_eq!(cfg.ready_cue(), vec![PathBuf::from("/c/ready.pcm")]);
         assert_eq!(cfg.heard_cue(), vec![PathBuf::from("/h.pcm"), PathBuf::from("/c/heard.pcm")]);
     }

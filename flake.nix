@@ -115,9 +115,10 @@
               hash = "sha256-Cuc6Qc1RWZ3HysmsCD2dNd5T12LKRZI1Bf3kejdRgUs=";
             }} -C $out/nemotron --strip-components=1
             tar xjf ${pkgs.fetchurl {
-              url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-en-v0_19.tar.bz2";
-              hash = "sha256-kSgEhVoEdF+nejC+VFs/ml0VxNZtsAuIy81JId9gWsc=";
+              url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-multi-lang-v1_0.tar.bz2";
+              hash = "sha256-xffi0srwgrwdIPtwM0ph2Z0gtIRQCq0y58+EwSjqMpg=";
             }} -C $out/kokoro --strip-components=1
+            rm -rf $out/kokoro/dict $out/kokoro/*-zh.*
             rm -rf $out/nemotron/test_wavs
             cp ${pkgs.fetchurl {
               url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx";
