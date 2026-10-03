@@ -46,6 +46,7 @@ pub struct DriverDeps {
 }
 
 const APOLOGY: &str = "Sorry, I lost my train of thought. Could you say that again?";
+const BOW_OUT: &str = "I'm having trouble thinking right now. I'll message you instead.";
 const TICK: Duration = Duration::from_millis(50);
 const END_WAIT: Duration = Duration::from_secs(2);
 const DRAFT_WAIT: Duration = Duration::from_secs(3);
@@ -161,6 +162,8 @@ struct Driver {
     in_flight: Option<InFlight>,
     replies: HashMap<u64, ReplyRecord>,
     ending: bool,
+    /// Turns in a row that failed with nothing said or called.
+    failed_turns: u32,
     trace: crate::trace::Builder,
     last_reply: String,
 }
@@ -214,6 +217,7 @@ impl Driver {
             in_flight: None,
             replies: HashMap::new(),
             ending: false,
+            failed_turns: 0,
             trace: crate::trace::Builder::new(SessionKind::Call, opening),
             last_reply: String::new(),
         }
@@ -641,7 +645,7 @@ impl Driver {
         if spoken_any || !end.calls.is_empty() {
             self.messages.push(Message::Assistant {
                 text: heard.clone(),
-                tool_calls: end.calls.clone(),
+                tool_calls: end.calls.iter().map(with_object_args).collect(),
             });
             message = Some(self.messages.len() - 1);
             for (index, call) in end.calls.iter().enumerate() {
@@ -669,9 +673,19 @@ impl Driver {
             record.message = message;
             record.row = row;
         }
-        if end.error.is_some() && !spoken_any && end.calls.is_empty() && !end.stopped {
+        let silent = !spoken_any && end.calls.is_empty();
+        if end.error.is_some() && silent && !end.stopped {
+            self.failed_turns += 1;
+            let line = if self.failed_turns >= 2 {
+                self.ending = true;
+                BOW_OUT
+            } else {
+                APOLOGY
+            };
             let reply = self.take_reply();
-            self.say(reply, &[APOLOGY.to_string()], APOLOGY);
+            self.say(reply, &[line.to_string()], line);
+        } else if end.error.is_none() || !silent {
+            self.failed_turns = 0;
         }
         if self.ending {
             self.send(CallBody::HangUp);
@@ -845,6 +859,15 @@ fn normalize(text: &str) -> String {
     collapsed
         .trim_end_matches(|c: char| c.is_ascii_punctuation() || c.is_whitespace())
         .to_string()
+}
+
+/// `call` with args that are not a JSON object stored as `{}`, so the next request stays valid.
+fn with_object_args(call: &ToolCall) -> ToolCall {
+    let object = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&call.args).is_ok();
+    ToolCall {
+        args: if object { call.args.clone() } else { "{}".into() },
+        ..call.clone()
+    }
 }
 
 fn tool_error(e: ToolError) -> (String, bool) {
@@ -1456,6 +1479,78 @@ mod tests {
             vec![row("user", "hello?", None), row("assistant", APOLOGY, None)]
         );
         assert_eq!(traces(&h), vec![0], "a turn with no clause has no round");
+    }
+
+    #[test]
+    fn a_model_failing_twice_in_a_row_bows_out_and_hangs_up() {
+        let fail = || vec![Fail("status 400")];
+        let mut h = start(vec![fail(), fail(), fail(), fail(), fail()], &[], None, "");
+        h.frame(CallBody::Commit {
+            turn: 1,
+            text: "hello?".into(),
+        });
+        h.expect(&[
+            CallBody::SpeakDone { reply: 2 },
+            speak(3, 0, APOLOGY),
+            CallBody::SpeakDone { reply: 3 },
+            CallBody::Play { reply: 3 },
+        ]);
+        h.frame(CallBody::Commit {
+            turn: 2,
+            text: "are you there?".into(),
+        });
+        h.expect(&[
+            CallBody::SpeakDone { reply: 4 },
+            speak(5, 0, BOW_OUT),
+            CallBody::SpeakDone { reply: 5 },
+            CallBody::Play { reply: 5 },
+            CallBody::HangUp,
+        ]);
+        h.frame(CallBody::Commit {
+            turn: 3,
+            text: "hello??".into(),
+        });
+        assert_eq!(h.quiet(200), vec![], "the call is ending");
+        assert_eq!(h.llm.seen().len(), 4);
+        h.stop();
+    }
+
+    #[test]
+    fn a_call_whose_args_are_not_an_object_is_stored_with_empty_args() {
+        let mut h = start(
+            vec![
+                vec![
+                    Text("Adding."),
+                    Calls(call("t1", "task_add", "")),
+                    Calls(call("t2", "task_add", "[1]")),
+                ],
+                vec![Text("Done.")],
+            ],
+            &[("task_add", 10, r#"{"kind":"invalid_args"}"#)],
+            None,
+            "",
+        );
+        h.frame(CallBody::Commit {
+            turn: 1,
+            text: "add it".into(),
+        });
+        h.expect(&[
+            speak(2, 0, "Adding."),
+            CallBody::Play { reply: 2 },
+            CallBody::SpeakDone { reply: 2 },
+        ]);
+        h.frame(CallBody::Commit {
+            turn: 2,
+            text: "thanks".into(),
+        });
+        h.expect(&[speak(3, 0, "Done.")]);
+        let messages = &h.llm.seen()[1].messages;
+        let Message::Assistant { tool_calls, .. } = &messages[1] else {
+            panic!("{messages:?}");
+        };
+        let args: Vec<&str> = tool_calls.iter().map(|c| c.args.as_str()).collect();
+        assert_eq!(args, vec!["{}", "{}"]);
+        h.stop();
     }
 
     #[test]
