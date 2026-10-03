@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 
 const RESUMED_HISTORY: usize = 40;
 const RESTARTED: &str = "Note restarted; the call is still on";
+const GREET: &str = "the user called you; greet them briefly";
 
 /// Sends a frame of the named call to the voice side.
 pub type CallSender = Arc<dyn Fn(&str, CallBody) + Send + Sync>;
@@ -283,7 +284,7 @@ impl CallManager {
     }
 
     /// Starts the conversation of a call just answered, in the thread its
-    /// message belongs to or a new one.
+    /// message belongs to or a new one; a call with no message opens with a greeting.
     fn answer(&self, d: &CallDeps, call_id: &str) -> anyhow::Result<()> {
         let _once = self.resuming.lock().unwrap_or_else(PoisonError::into_inner);
         if self.is_live(call_id) {
@@ -323,9 +324,9 @@ impl CallManager {
                 conversation_id,
                 system,
                 tools,
+                initial: if msg.is_none() { vec![render::Item::System(GREET.into())] } else { Vec::new() },
                 opening: msg.map(|m| driver::Opening { text: m.body, in_thread: existing.is_some() }),
                 history: Vec::new(),
-                initial: Vec::new(),
             },
         );
         Ok(())
@@ -690,6 +691,43 @@ mod tests {
         };
         assert_eq!(openings("= ?1"), 1, "the check-in is already in its thread");
         assert_eq!(openings("!= ?1"), 1, "a new thread gets the opening");
+    }
+
+    #[test]
+    fn an_inbound_call_greets_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        configured(tmp.path());
+        let (db, _) = seeded();
+        crate::db_guard(&db)
+            .execute(
+                "INSERT INTO voice_calls (id, user_id, direction, state, ring_by, created_at, inbound_key)
+                 VALUES ('c1', 1, 'inbound', 'answered', 'x', 'x', '$ev')",
+                [],
+            )
+            .unwrap();
+        let llm = Arc::new(crate::providers::mock::MockLLM::streamed(vec![vec![crate::providers::mock::StreamPiece::Text(
+            "Hey Aki.",
+        )]]));
+        let (m, sent) = managed(&db, tmp.path(), llm.clone());
+        m.on_frame("c1", &CallBody::Outcome { outcome: Outcome::Answered });
+        wait_until("the greeting", || !llm.seen().is_empty());
+        m.on_frame("c1", &CallBody::Ended);
+        let seen = &llm.seen()[0];
+        assert!(seen.system.contains("The user called you."), "{}", seen.system);
+        let last_user = seen.messages.iter().rev().find_map(|msg| match msg {
+            Message::User(t) => Some(t.clone()),
+            _ => None,
+        });
+        assert!(last_user.as_deref().is_some_and(|t| t.contains("[note] the user called you")), "{:?}", seen.messages);
+        assert!(!sent.lock().unwrap().contains(&CallBody::HangUp));
+        let title: String = crate::db_guard(&db)
+            .query_row(
+                "SELECT v.title FROM voice_calls c JOIN conversations v ON v.id = c.conversation_id WHERE c.id = 'c1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(title, "Call");
     }
 
     #[test]

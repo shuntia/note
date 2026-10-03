@@ -65,6 +65,7 @@ impl Voice {
             fallback: fallback.clone(),
             in_flight: Arc::default(),
             conversation: calls.clone(),
+            to_voice: cell.clone(),
         });
         let peer = Peer::new(cfg, Dir::ToVoice, handler.clone(), outbox);
         let _ = cell.set(peer.clone());
@@ -313,9 +314,71 @@ pub(crate) struct NoteHandler {
     fallback: Ladder,
     in_flight: Arc<Mutex<HashSet<String>>>,
     conversation: Arc<dyn Conversation>,
+    to_voice: Arc<OnceLock<Peer>>,
 }
 
 impl NoteHandler {
+    /// Opens a call for the linked user calling in `room_id`, once per `key`,
+    /// then hands the voice side its `Start`.
+    fn incoming_call(&self, room_id: &str, mxid: &str, key: &str, now: jiff::Timestamp) -> Result<Reply, Refusal> {
+        use rusqlite::OptionalExtension;
+        let failed = |e: &dyn std::fmt::Display| Refusal::new(RefusalCode::Failed, e.to_string());
+        let ring_by = now + jiff::SignedDuration::from_secs(RING_BY_SECS);
+        let (id, user_id) = {
+            let conn = crate::db_guard(&self.db);
+            let tx = conn.unchecked_transaction().map_err(|e| failed(&e))?;
+            let Some(user_id) = links::linked_user(&tx, room_id, mxid).map_err(|e| failed(&e))? else {
+                return Err(Refusal::new(RefusalCode::BadRequest, "no linked account calls from there"));
+            };
+            let seen: Option<String> = tx
+                .query_row("SELECT id FROM voice_calls WHERE inbound_key = ?1", [key], |r| r.get(0))
+                .optional()
+                .map_err(|e| failed(&e))?;
+            if let Some(id) = seen {
+                return Ok(Reply::Call { call_id: id });
+            }
+            let busy: bool = tx
+                .query_row(
+                    "SELECT EXISTS (SELECT 1 FROM voice_calls WHERE user_id = ?1 AND state != 'ended')",
+                    [user_id],
+                    |r| r.get(0),
+                )
+                .map_err(|e| failed(&e))?;
+            if busy {
+                return Err(Refusal::new(RefusalCode::Failed, "a call is already up"));
+            }
+            let id = uuid::Uuid::new_v4().to_string();
+            tx.execute(
+                "INSERT INTO voice_calls (id, user_id, direction, state, ring_by, created_at, inbound_key)
+                 VALUES (?1, ?2, 'inbound', 'starting', ?3, ?4, ?5)",
+                (&id, user_id, ring_by.to_string(), now.to_string(), key),
+            )
+            .map_err(|e| failed(&e))?;
+            tx.commit().map_err(|e| failed(&e))?;
+            (id, user_id)
+        };
+        let start = CallBody::Start {
+            user_id,
+            room_id: room_id.to_string(),
+            mxid: mxid.to_string(),
+            title: "Call".into(),
+            ring_secs: 0,
+            ring_by_ms: ring_by.as_millisecond(),
+            voice: VoiceProfile::default(),
+            direction: Direction::Inbound,
+        };
+        let sent = match self.to_voice.get() {
+            Some(peer) => peer.send_call(&id, start).map_err(|e| failed(&e)),
+            None => Err(Refusal::new(RefusalCode::Failed, "the voice link is not set up")),
+        };
+        if let Err(refusal) = sent {
+            let conn = crate::db_guard(&self.db);
+            let _ = end_call(&conn, &id, "failed", None, now);
+            return Err(refusal);
+        }
+        Ok(Reply::Call { call_id: id })
+    }
+
     /// Sends the message on through the rest of the ladder. Delivery is
     /// stamped in `fell_through_at`, and a call already stamped or already
     /// being delivered is skipped.
@@ -450,26 +513,22 @@ impl Handler for NoteHandler {
     }
 
     fn request(&self, body: Request) -> BoxFuture<Result<Reply, Refusal>> {
-        let db = self.db.clone();
-        Box::pin(async move {
-            match body {
-                Request::DmJoined { link_id, room_id } => {
-                    let conn = crate::db_guard(&db);
-                    links::mark_joined(&conn, link_id, &room_id, jiff::Timestamp::now())
-                        .map(|_| Reply::Done)
-                        .map_err(|e| Refusal::new(RefusalCode::Failed, e.to_string()))
-                }
-                Request::OpenDm { .. } => {
-                    Err(Refusal::new(RefusalCode::BadRequest, "Note does not open rooms"))
-                }
-                Request::IncomingCall { .. } => {
-                    Err(Refusal::new(RefusalCode::BadRequest, "Note does not take incoming calls yet"))
-                }
-                Request::ListVoices { .. } | Request::Preview { .. } => {
-                    Err(Refusal::new(RefusalCode::BadRequest, "Note holds no voices"))
-                }
+        let reply = match body {
+            Request::DmJoined { link_id, room_id } => {
+                let conn = crate::db_guard(&self.db);
+                links::mark_joined(&conn, link_id, &room_id, jiff::Timestamp::now())
+                    .map(|_| Reply::Done)
+                    .map_err(|e| Refusal::new(RefusalCode::Failed, e.to_string()))
             }
-        })
+            Request::IncomingCall { room_id, mxid, key } => {
+                self.incoming_call(&room_id, &mxid, &key, jiff::Timestamp::now())
+            }
+            Request::OpenDm { .. } => Err(Refusal::new(RefusalCode::BadRequest, "Note does not open rooms")),
+            Request::ListVoices { .. } | Request::Preview { .. } => {
+                Err(Refusal::new(RefusalCode::BadRequest, "Note holds no voices"))
+            }
+        };
+        Box::pin(async move { reply })
     }
 }
 
@@ -1005,6 +1064,86 @@ mod tests {
         assert!(frames(&voice, &id).contains(&CallBody::HangUp));
         settle().await;
         assert_eq!(mock.seen().len(), 1);
+    }
+
+    fn linked(voice: &Voice) {
+        let conn = crate::db_guard(&voice.db);
+        let id = links::begin(&conn, 1, "@aki:t", jiff::Timestamp::now()).unwrap();
+        links::set_room(&conn, id, "!r:t").unwrap();
+        links::mark_joined(&conn, id, "!r:t", jiff::Timestamp::now()).unwrap();
+    }
+
+    fn incoming(voice: &Voice, mxid: &str, key: &str) -> BoxFuture<Result<Reply, Refusal>> {
+        voice.handler.request(Request::IncomingCall { room_id: "!r:t".into(), mxid: mxid.into(), key: key.into() })
+    }
+
+    fn call_count(voice: &Voice) -> i64 {
+        crate::db_guard(&voice.db).query_row("SELECT COUNT(*) FROM voice_calls", [], |r| r.get(0)).unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_incoming_call_opens_a_call_and_starts_it() {
+        let (voice, _mock) = rig();
+        linked(&voice);
+        let Ok(Reply::Call { call_id: id }) = incoming(&voice, "@aki:t", "$ev").await else { panic!("no call") };
+        let (direction, state, message): (String, String, Option<String>) = crate::db_guard(&voice.db)
+            .query_row("SELECT direction, state, message FROM voice_calls WHERE id = ?1", [&id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .unwrap();
+        assert_eq!((direction.as_str(), state.as_str(), message), ("inbound", "starting", None));
+        let starts: Vec<CallBody> = frames(&voice, &id).into_iter().filter(|b| matches!(b, CallBody::Start { .. })).collect();
+        assert!(
+            matches!(
+                starts.as_slice(),
+                [CallBody::Start { user_id: 1, ring_secs: 0, direction: Direction::Inbound, room_id, mxid, .. }]
+                    if room_id == "!r:t" && mxid == "@aki:t"
+            ),
+            "{starts:?}"
+        );
+        assert_eq!(incoming(&voice, "@aki:t", "$ev").await, Ok(Reply::Call { call_id: id.clone() }));
+        assert_eq!(call_count(&voice), 1);
+        assert_eq!(frames(&voice, &id).iter().filter(|b| matches!(b, CallBody::Start { .. })).count(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unlinked_caller_is_refused() {
+        let (voice, _mock) = rig();
+        let refused = |r: Result<Reply, Refusal>| matches!(r, Err(Refusal { code: RefusalCode::BadRequest, .. }));
+        assert!(refused(incoming(&voice, "@aki:t", "$a").await), "no link");
+        {
+            let conn = crate::db_guard(&voice.db);
+            let id = links::begin(&conn, 1, "@aki:t", jiff::Timestamp::now()).unwrap();
+            links::set_room(&conn, id, "!r:t").unwrap();
+        }
+        assert!(refused(incoming(&voice, "@aki:t", "$b").await), "invited, not joined");
+        linked(&voice);
+        assert!(refused(incoming(&voice, "@other:t", "$c").await), "another account in the room");
+        assert_eq!(call_count(&voice), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_incoming_call_while_a_call_is_up_is_refused() {
+        let (voice, _mock) = rig();
+        linked(&voice);
+        voice.start_call(1, &link(), &msg(), jiff::Timestamp::now()).unwrap();
+        assert_eq!(
+            incoming(&voice, "@aki:t", "$ev").await,
+            Err(Refusal::new(RefusalCode::Failed, "a call is already up"))
+        );
+        assert_eq!(call_count(&voice), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_inbound_call_never_falls_through() {
+        let (voice, mock) = rig();
+        linked(&voice);
+        let Ok(Reply::Call { call_id: id }) = incoming(&voice, "@aki:t", "$ev").await else { panic!("no call") };
+        voice.handler.apply(&id, 1, CallBody::Outcome { outcome: Outcome::Failed { reason: "x".into() } }).unwrap();
+        voice.handler.apply(&id, 2, CallBody::Ended).unwrap();
+        assert_eq!(voice.redrive(), 0);
+        settle().await;
+        assert!(mock.seen().is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread")]
