@@ -98,17 +98,21 @@ pub async fn run_session(
 ) -> SessionEnd {
     let media: Arc<dyn MediaIo> = Arc::from(media);
     let end = match Live::start(&deps, media.clone(), send) {
-        Ok((mut live, tasks)) => {
-            let end = live.run(inbox, deps.max_len, deps.link_grace).await;
-            for task in tasks {
-                task.abort();
-            }
+        Ok((mut live, mut tasks)) => {
+            let end = live.run(inbox, &mut tasks, deps.max_len, deps.link_grace).await;
+            tasks.audio.abort();
+            tasks.stt.abort();
             end
         }
         Err(e) => SessionEnd::MediaFailed(format!("{e:#}")),
     };
     media.leave().await;
     end
+}
+
+struct Tasks {
+    audio: JoinHandle<()>,
+    stt: JoinHandle<()>,
 }
 
 struct Ending {
@@ -128,8 +132,10 @@ struct Live<S> {
     events_tx: mpsc::UnboundedSender<Event>,
     events: mpsc::UnboundedReceiver<Event>,
     heard_cue: Option<Arc<Vec<i16>>>,
+    lines_ready: bool,
     lost_line: Option<Arc<Vec<i16>>>,
     goodbye_line: Option<Arc<Vec<i16>>>,
+    goodbye_pending: bool,
     start: Instant,
     playing: bool,
     played_reply: bool,
@@ -139,7 +145,7 @@ struct Live<S> {
 }
 
 impl<S: Fn(CallBody)> Live<S> {
-    fn start(deps: &SessionDeps, media: Arc<dyn MediaIo>, send: S) -> anyhow::Result<(Self, Vec<JoinHandle<()>>)> {
+    fn start(deps: &SessionDeps, media: Arc<dyn MediaIo>, send: S) -> anyhow::Result<(Self, Tasks)> {
         let languages = deps.engines.languages();
         let language = if languages.contains(&deps.profile.language) {
             deps.profile.language.clone()
@@ -154,10 +160,10 @@ impl<S: Fn(CallBody)> Live<S> {
         let (events_tx, events) = mpsc::unbounded_channel();
         let (stt_tx, stt_rx) = mpsc::unbounded_channel();
         let recent = Arc::new(Mutex::new(VecDeque::with_capacity(TURN_SPAN)));
-        let tasks = vec![
-            tokio::spawn(stt_worker(stt, stt_rx, events_tx.clone())),
-            tokio::spawn(audio_in(media.clone(), vad, stt_tx.clone(), events_tx.clone(), recent.clone(), start)),
-        ];
+        let tasks = Tasks {
+            stt: tokio::spawn(stt_worker(stt, stt_rx, events_tx.clone())),
+            audio: tokio::spawn(audio_in(media.clone(), vad, stt_tx.clone(), events_tx.clone(), recent.clone(), start)),
+        };
         {
             let (lines, tts, language, voice, events) =
                 (deps.lines.clone(), tts.clone(), language.clone(), voice.clone(), events_tx.clone());
@@ -187,8 +193,10 @@ impl<S: Fn(CallBody)> Live<S> {
             events_tx,
             events,
             heard_cue: deps.profile.cue.then(|| deps.cues.heard.clone()),
+            lines_ready: false,
             lost_line: None,
             goodbye_line: None,
+            goodbye_pending: false,
             start,
             playing: false,
             played_reply: false,
@@ -199,16 +207,30 @@ impl<S: Fn(CallBody)> Live<S> {
         Ok((live, tasks))
     }
 
-    async fn run(&mut self, mut inbox: mpsc::UnboundedReceiver<SessionIn>, max_len: Duration, link_grace: Duration) -> SessionEnd {
+    /// Ends with `MediaFailed` if the STT worker stops or the audio-in task panics; audio-in running out of
+    /// audio is left to `left()`.
+    async fn run(
+        &mut self,
+        mut inbox: mpsc::UnboundedReceiver<SessionIn>,
+        tasks: &mut Tasks,
+        max_len: Duration,
+        link_grace: Duration,
+    ) -> SessionEnd {
         let media = self.media.clone();
         let left = media.left();
         tokio::pin!(left);
         let mut tick = tokio::time::interval(TICK);
         tick.set_missed_tick_behavior(MissedTickBehavior::Burst);
         let mut inbox_open = true;
+        let mut audio_running = true;
         loop {
             tokio::select! {
                 () = &mut left => return SessionEnd::UserLeft,
+                got = &mut tasks.stt => return task_died("speech recognition", got.err()),
+                got = &mut tasks.audio, if audio_running => match got {
+                    Ok(()) => audio_running = false,
+                    Err(e) => return task_died("the audio input", Some(e)),
+                },
                 _ = tick.tick() => {
                     if let Some(end) = self.tick(max_len, link_grace).await {
                         return end;
@@ -254,7 +276,7 @@ impl<S: Fn(CallBody)> Live<S> {
             self.act(actions);
         }
         if let Some(since) = self.link_down_since {
-            if !self.lost_played && since.elapsed() >= LOST_NOTICE {
+            if !self.lost_played && self.lines_ready && since.elapsed() >= LOST_NOTICE {
                 self.lost_played = true;
                 if let Some(pcm) = &self.lost_line {
                     self.playout.push(Clip { reply: None, chars: 0, pcm: pcm.to_vec() });
@@ -267,8 +289,14 @@ impl<S: Fn(CallBody)> Live<S> {
         if self.start.elapsed() >= max_len {
             self.say_goodbye(SessionEnd::TimedOut);
         }
+        if self.goodbye_pending && self.lines_ready {
+            self.goodbye_pending = false;
+            if let Some(pcm) = &self.goodbye_line {
+                self.playout.push(Clip { reply: None, chars: 0, pcm: pcm.to_vec() });
+            }
+        }
         let ending = self.ending.as_ref()?;
-        let drained = self.playout.is_empty() && self.speech.is_idle();
+        let drained = !self.goodbye_pending && self.playout.is_empty() && self.speech.is_idle();
         (drained || Instant::now() >= ending.by).then(|| ending.end.clone())
     }
 
@@ -314,6 +342,7 @@ impl<S: Fn(CallBody)> Live<S> {
     fn event(&mut self, ev: Event) {
         let input = match ev {
             Event::Lines { lost, goodbye } => {
+                self.lines_ready = true;
                 self.lost_line = lost;
                 self.goodbye_line = goodbye;
                 return;
@@ -370,11 +399,18 @@ impl<S: Fn(CallBody)> Live<S> {
         self.media.clear();
         self.speech.flush(&mut self.playout);
         self.playout.resume();
-        if let Some(pcm) = &self.goodbye_line {
-            self.playout.push(Clip { reply: None, chars: 0, pcm: pcm.to_vec() });
-        }
+        self.goodbye_pending = true;
         self.ending = Some(Ending { end, by: Instant::now() + DRAIN_CAP });
     }
+}
+
+fn task_died(what: &str, err: Option<tokio::task::JoinError>) -> SessionEnd {
+    let reason = match err {
+        Some(e) => format!("{what} failed: {e}"),
+        None => format!("{what} stopped"),
+    };
+    eprintln!("voice: {reason}");
+    SessionEnd::MediaFailed(reason)
 }
 
 /// Splits the user's audio into VAD windows and STT chunks, and keeps the last 8 s for Smart Turn.
@@ -431,7 +467,13 @@ async fn stt_worker(
             };
             (stt, out)
         });
-        let Ok((back, out)) = step.await else { return };
+        let (back, out) = match step.await {
+            Ok(done) => done,
+            Err(e) => {
+                eprintln!("voice: an STT step failed: {e}");
+                return;
+            }
+        };
         stt = back;
         match out {
             SttOut::Partial(partial) => {
@@ -476,10 +518,12 @@ mod tests {
     struct FakeStt {
         script: Vec<(usize, &'static str)>,
         heard: usize,
+        panics: bool,
     }
 
     impl SpeechToText for FakeStt {
         fn accept(&mut self, samples_16k: &[f32]) {
+            assert!(!self.panics, "the recognizer crashed");
             if samples_16k.iter().any(|&s| s != 0.0) {
                 self.heard += 1;
             }
@@ -524,6 +568,7 @@ mod tests {
     struct FakeEngines {
         stt: Vec<(usize, &'static str)>,
         tts: Arc<FakeTts>,
+        stt_panics: bool,
     }
 
     impl SpeechEngines for FakeEngines {
@@ -536,7 +581,7 @@ mod tests {
         }
 
         fn stt(&self, _language: &str) -> anyhow::Result<Box<dyn SpeechToText>> {
-            Ok(Box::new(FakeStt { script: self.stt.clone(), heard: 0 }))
+            Ok(Box::new(FakeStt { script: self.stt.clone(), heard: 0, panics: self.stt_panics }))
         }
 
         fn turn(&self, _language: &str) -> Arc<dyn TurnDetector> {
@@ -636,7 +681,7 @@ mod tests {
 
     fn deps(stt: Vec<(usize, &'static str)>, cue: bool, tts: &Arc<FakeTts>) -> SessionDeps {
         SessionDeps {
-            engines: Arc::new(FakeEngines { stt, tts: tts.clone() }),
+            engines: Arc::new(FakeEngines { stt, tts: tts.clone(), stt_panics: false }),
             lines: Arc::new(Lines::default()),
             cues: Arc::new(Cues { ready: Arc::new(vec![READY; FRAME]), heard: Arc::new(vec![HEARD; FRAME]) }),
             profile: VoiceProfile { language: "en".into(), voice: String::new(), cue },
@@ -785,5 +830,15 @@ mod tests {
         let end = tokio::time::timeout(Duration::from_secs(5), c.end).await.unwrap().unwrap();
         assert_eq!(end, SessionEnd::TimedOut);
         assert_eq!(c.probe.frames_of(goodbye), goodbye);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_crashed_recognizer_ends_the_call() {
+        let tts: Arc<FakeTts> = Arc::default();
+        let engines = Arc::new(FakeEngines { stt: Vec::new(), tts: tts.clone(), stt_panics: true });
+        let c = call_with(SessionDeps { engines, ..deps(Vec::new(), false, &tts) }, audio(&[(0.1, 1000)]), tts);
+        let end = tokio::time::timeout(Duration::from_secs(2), c.end).await.unwrap().unwrap();
+        assert!(matches!(end, SessionEnd::MediaFailed(_)), "{end:?}");
+        assert!(c.probe.left_room.load(Ordering::SeqCst));
     }
 }

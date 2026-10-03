@@ -1,10 +1,10 @@
 use crate::audio::engines::{Engines, SpeechEngines};
-use crate::audio::lines::Lines;
+use crate::audio::lines::{Line, Lines};
 use crate::calls::{clear_member, ring_once, Ring};
 use crate::config::VoiceServiceConfig;
 use crate::matrix::{HomeserverError, Matrix, RoomEvent};
 use crate::media::{LiveKitJoin, MediaJoin};
-use crate::session::{run_session, Cues, SessionDeps, SessionIn};
+use crate::session::{run_session, Cues, SessionDeps, SessionEnd, SessionIn};
 use crate::state::{CallState, LinkState, StateFile};
 use note_voice_proto::{
     dial_forever, AppliedFile, BoxFuture, CallBody, Dir, FileOutbox, Handler, Outcome, Peer, PeerConfig,
@@ -150,9 +150,9 @@ impl Service {
         });
     }
 
-    /// Joins the answered call's media and runs its session to the end. The
-    /// session's inbox is open from the answer on, so a `HangUp` during the
-    /// join is not lost.
+    /// Joins the answered call's media and runs its session to the end. A
+    /// `HangUp` during the join abandons it; the session's inbox is open from
+    /// the answer on, so one after the join is not lost.
     async fn go_live(
         self: &Arc<Self>,
         call_id: &str,
@@ -166,25 +166,28 @@ impl Service {
             return self.finish(call_id, Outcome::Failed { reason: "no voice models".into() });
         }
         let (tx, inbox) = mpsc::unbounded_channel();
-        lock(&self.sessions).insert(call_id.to_string(), tx.clone());
-        if *hang_up.borrow() {
-            let _ = tx.send(SessionIn::Frame(CallBody::HangUp));
+        {
+            let mut sessions = lock(&self.sessions);
+            if !self.peer().is_up() {
+                let _ = tx.send(SessionIn::LinkUp(false));
+            }
+            sessions.insert(call_id.to_string(), tx);
         }
-        if !self.peer().is_up() {
-            let _ = tx.send(SessionIn::LinkUp(false));
-        }
-        drop(tx);
-        let joined = async {
+        let join = async {
             self.matrix.put_member(room_id, LIVE_MEMBER_MS, &self.cfg.livekit_service_url).await?;
             self.backends.media.join(&self.matrix, &self.cfg.livekit_service_url, room_id, mxid).await
-        }
-        .await;
+        };
+        let mut hang_up = hang_up.clone();
+        let joined = tokio::select! {
+            joined = join => joined.map_err(|e| format!("{e:#}")),
+            Ok(_) = hang_up.wait_for(|h| *h) => Err("hung up by Note".to_string()),
+        };
         let media = match joined {
             Ok(media) => media,
-            Err(e) => {
+            Err(reason) => {
                 lock(&self.sessions).remove(call_id);
                 clear_member(&self.matrix, room_id).await;
-                return self.finish(call_id, Outcome::Failed { reason: format!("{e:#}") });
+                return self.finish(call_id, Outcome::Failed { reason });
             }
         };
         self.send(call_id, CallBody::Outcome { outcome: Outcome::Answered });
@@ -198,10 +201,10 @@ impl Service {
             link_grace: LINK_GRACE,
         };
         let (svc, id) = (self.clone(), call_id.to_string());
-        let end = run_session(deps, media, inbox, move |body| {
+        let session = tokio::spawn(run_session(deps, media, inbox, move |body| {
             svc.send(&id, body);
-        })
-        .await;
+        }));
+        let end = session.await.unwrap_or_else(|e| SessionEnd::MediaFailed(format!("the session failed: {e}")));
         eprintln!("voice: call {call_id} ended: {end:?}");
         lock(&self.sessions).remove(call_id);
         clear_member(&self.matrix, room_id).await;
@@ -455,6 +458,21 @@ impl Handler for VoiceHandler {
     }
 }
 
+/// Renders each loaded language's call lines in its default voice, off the runtime.
+fn warm_lines(engines: &Arc<dyn SpeechEngines>, lines: &Arc<Lines>) {
+    let (engines, lines) = (engines.clone(), lines.clone());
+    tokio::task::spawn_blocking(move || {
+        for language in engines.languages() {
+            let tts = engines.tts(&language);
+            for line in [Line::LostNotes, Line::Goodbye] {
+                if let Err(e) = lines.get(&*tts, &language, "", line) {
+                    eprintln!("voice: rendering {line:?} in {language} failed: {e:#}");
+                }
+            }
+        }
+    });
+}
+
 pub async fn run(cfg: VoiceServiceConfig) -> anyhow::Result<()> {
     let (models, device) = (cfg.model_sets(), cfg.device);
     let engines = tokio::task::spawn_blocking(move || Engines::load(&models, device)).await??;
@@ -467,6 +485,8 @@ pub async fn run_with(cfg: VoiceServiceConfig, peer_cfg: PeerConfig, backends: B
         eprintln!("voice: no voice models are loaded; answered calls will fail with \"no voice models\"");
     }
     let cues = Cues::load(cfg.ready_cue().as_deref(), cfg.heard_cue().as_deref());
+    let lines = Arc::new(Lines::default());
+    warm_lines(&backends.engines, &lines);
     let token = std::fs::read_to_string(&cfg.token_file)
         .map_err(|e| anyhow::anyhow!("reading {}: {e}", cfg.token_file.display()))?;
     let matrix = Arc::new(Matrix::connect(&cfg.homeserver, &token).await?);
@@ -486,7 +506,7 @@ pub async fn run_with(cfg: VoiceServiceConfig, peer_cfg: PeerConfig, backends: B
         hang_ups: Mutex::new(HashMap::new()),
         sessions: Mutex::new(HashMap::new()),
         backends,
-        lines: Arc::new(Lines::default()),
+        lines,
         cues: Arc::new(cues),
         reporting: Mutex::new(HashSet::new()),
         peer: OnceLock::new(),

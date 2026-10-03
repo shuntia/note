@@ -317,9 +317,39 @@ impl note_voice::media::MediaIo for QuietRoom {
     async fn leave(&self) {}
 }
 
-/// Joins a `QuietRoom`, or fails every join with `fail`.
+/// A room whose media panics the session that reads it.
+struct BrokenRoom;
+
+#[async_trait::async_trait]
+impl note_voice::media::MediaIo for BrokenRoom {
+    async fn recv(&self) -> Option<Vec<f32>> {
+        std::future::pending().await
+    }
+
+    async fn send(&self, _frame: &[i16; 480]) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn clear(&self) {}
+
+    async fn left(&self) {
+        panic!("the media layer crashed");
+    }
+
+    async fn leave(&self) {}
+}
+
+#[derive(Clone, Copy)]
+pub enum Join {
+    Quiet,
+    Fails,
+    /// Never finishes joining.
+    Hangs,
+    Broken,
+}
+
 pub struct FakeJoin {
-    pub fail: bool,
+    pub how: Join,
 }
 
 #[async_trait::async_trait]
@@ -331,16 +361,15 @@ impl note_voice::media::MediaJoin for FakeJoin {
         _room_id: &str,
         _mxid: &str,
     ) -> anyhow::Result<Box<dyn note_voice::media::MediaIo>> {
-        if self.fail {
-            anyhow::bail!("no audio track from the user");
+        match self.how {
+            Join::Quiet => Ok(Box::new(QuietRoom)),
+            Join::Fails => anyhow::bail!("no audio track from the user"),
+            Join::Hangs => std::future::pending().await,
+            Join::Broken => Ok(Box::new(BrokenRoom)),
         }
-        Ok(Box::new(QuietRoom))
     }
 }
 
-pub fn backends(loaded: bool, join_fails: bool) -> note_voice::service::Backends {
-    note_voice::service::Backends {
-        engines: Arc::new(SilentEngines { loaded }),
-        media: Arc::new(FakeJoin { fail: join_fails }),
-    }
+pub fn backends(loaded: bool, how: Join) -> note_voice::service::Backends {
+    note_voice::service::Backends { engines: Arc::new(SilentEngines { loaded }), media: Arc::new(FakeJoin { how }) }
 }
