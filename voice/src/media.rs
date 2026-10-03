@@ -39,23 +39,35 @@ pub enum Gone {
     Failed(String),
 }
 
-/// Joins a room's call for a session.
+/// Joins a room's call for a session; a user not in it within `wait` ends the media.
 #[async_trait::async_trait]
 pub trait MediaJoin: Send + Sync {
-    async fn join(&self, matrix: &Matrix, livekit_service_url: &str, room_id: &str, mxid: &str) -> Result<Box<dyn MediaIo>>;
+    async fn join(
+        &self,
+        matrix: &Matrix,
+        livekit_service_url: &str,
+        room_id: &str,
+        mxid: &str,
+        wait: Duration,
+    ) -> Result<Box<dyn MediaIo>>;
 }
 
 /// Element X's `LiveKit` identity is `<mxid>:<device>`.
-pub struct LiveKitJoin {
-    pub wait: Duration,
-}
+pub struct LiveKitJoin;
 
 #[async_trait::async_trait]
 impl MediaJoin for LiveKitJoin {
-    async fn join(&self, matrix: &Matrix, livekit_service_url: &str, room_id: &str, mxid: &str) -> Result<Box<dyn MediaIo>> {
+    async fn join(
+        &self,
+        matrix: &Matrix,
+        livekit_service_url: &str,
+        room_id: &str,
+        mxid: &str,
+        wait: Duration,
+    ) -> Result<Box<dyn MediaIo>> {
         let (url, jwt) = matrix.livekit_jwt(livekit_service_url, room_id).await?;
         let who = Who { user_prefix: format!("{mxid}:"), bot_prefix: format!("{}:", matrix.user_id) };
-        Ok(Box::new(LiveKitMedia::join(&url, &jwt, &who, self.wait).await?))
+        Ok(Box::new(LiveKitMedia::join(&url, &jwt, &who, wait).await?))
     }
 }
 

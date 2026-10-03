@@ -1,7 +1,6 @@
 mod common;
 
 use common::*;
-use note_voice::config::VoiceServiceConfig;
 use note_voice_proto::testkit::{eventually, fast};
 use note_voice_proto::{CallBody, Direction, Outcome, Role, VoiceProfile};
 
@@ -26,25 +25,10 @@ async fn rig_on(
 ) -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let (base, hs) = homeserver().await;
-    let token = dir.path().join("token");
-    std::fs::write(&token, "secret\n").unwrap();
-    let socket = dir.path().join("voice.sock");
-    let note = fake_note(&socket);
-    std::fs::create_dir_all(dir.path().join("state")).unwrap();
-    seed(&dir.path().join("state"), &hs, &note);
-    let cfg = VoiceServiceConfig {
-        homeserver: base,
-        token_file: token,
-        livekit_service_url: "https://rtc.t".into(),
-        socket,
-        state_dir: dir.path().join("state"),
-        models_dir: None,
-        models: Default::default(),
-        device: Default::default(),
-        cues_dir: None,
-        ready_cue_file: None,
-        heard_cue_file: None,
-    };
+    let cfg = voice_config(dir.path(), base);
+    let note = fake_note(&cfg.socket);
+    std::fs::create_dir_all(&cfg.state_dir).unwrap();
+    seed(&cfg.state_dir, &hs, &note);
     tokio::spawn(async move { note_voice::service::run_with(cfg, fast(Role::Voice), backends).await.unwrap() });
     let p = note.peer.clone();
     eventually("voice connects", || p.is_up()).await;
@@ -397,23 +381,8 @@ async fn a_failed_m_direct_write_still_links_one_room() {
 async fn a_voice_restart_mid_ring_closes_the_call_and_reports_it_once() {
     let dir = tempfile::tempdir().unwrap();
     let (base, hs) = homeserver().await;
-    let token = dir.path().join("token");
-    std::fs::write(&token, "secret").unwrap();
-    let socket = dir.path().join("voice.sock");
-    let note = fake_note(&socket);
-    let cfg = VoiceServiceConfig {
-        homeserver: base,
-        token_file: token,
-        livekit_service_url: "https://rtc.t".into(),
-        socket,
-        state_dir: dir.path().join("state"),
-        models_dir: None,
-        models: Default::default(),
-        device: Default::default(),
-        cues_dir: None,
-        ready_cue_file: None,
-        heard_cue_file: None,
-    };
+    let cfg = voice_config(dir.path(), base);
+    let note = fake_note(&cfg.socket);
     let first = {
         let cfg = cfg.clone();
         tokio::spawn(async move { note_voice::service::run_with(cfg, fast(Role::Voice), backends(true, Join::Quiet)).await.unwrap() })

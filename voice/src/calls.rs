@@ -65,7 +65,7 @@ async fn ring_inner(
                 }
             }
             ev = events.recv() => match ev {
-                Ok(RoomEvent::CallMember { room, user, active: true }) if room == r.room_id && user == r.mxid => {
+                Ok(RoomEvent::CallMember { room, user, active: true, .. }) if room == r.room_id && user == r.mxid => {
                     return Outcome::Answered;
                 }
                 Ok(RoomEvent::Declined { room, notification: n }) if room == r.room_id && n == notification => {

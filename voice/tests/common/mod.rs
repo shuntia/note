@@ -1,5 +1,6 @@
 use axum::extract::{Path, Query, State};
 use axum::routing::{get, post, put};
+use note_voice::config::VoiceServiceConfig;
 use axum::{Json, Router};
 use note_voice_proto::testkit::{fast, Recording};
 use note_voice_proto::{
@@ -7,6 +8,7 @@ use note_voice_proto::{
 };
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 #[derive(Default)]
@@ -14,6 +16,8 @@ pub struct Hs {
     pub created: Vec<Value>,
     pub invites: Vec<(String, String)>,
     pub state_puts: Vec<(String, String, String, Value)>,
+    /// Call membership content by room and state key, as a state read returns it; missing is 404.
+    pub member_state: HashMap<(String, String), Value>,
     /// Room, event type, content, and the event id handed back.
     pub sends: Vec<(String, String, Value, String)>,
     pub syncs: VecDeque<Value>,
@@ -57,6 +61,16 @@ async fn put_state(
     hs.events += 1;
     hs.state_puts.push((room, kind, key, body));
     Json(json!({ "event_id": format!("$s{}", hs.events) }))
+}
+
+async fn get_state(
+    State(hs): State<SharedHs>,
+    Path((room, _kind, key)): Path<(String, String, String)>,
+) -> (axum::http::StatusCode, Json<Value>) {
+    match hs.lock().unwrap().member_state.get(&(room, key)) {
+        Some(content) => (axum::http::StatusCode::OK, Json(content.clone())),
+        None => (axum::http::StatusCode::NOT_FOUND, Json(json!({ "errcode": "M_NOT_FOUND" }))),
+    }
 }
 
 async fn send(
@@ -130,7 +144,7 @@ pub async fn homeserver() -> (String, SharedHs) {
         .route("/_matrix/client/v3/createRoom", post(create_room))
         .route("/_matrix/client/v3/rooms/{room}/invite", post(invite))
         .route("/_matrix/client/v3/rooms/{room}/joined_members", get(joined_members))
-        .route("/_matrix/client/v3/rooms/{room}/state/{kind}/{key}", put(put_state))
+        .route("/_matrix/client/v3/rooms/{room}/state/{kind}/{key}", get(get_state).put(put_state))
         .route("/_matrix/client/v3/rooms/{room}/send/{kind}/{txn}", put(send))
         .route("/_matrix/client/v3/user/{user}/account_data/m.direct", get(direct).put(set_direct))
         .route("/_matrix/client/v3/sync", get(sync))
@@ -145,13 +159,27 @@ pub fn joined_room(room: &str, events: &[Value]) -> Value {
     json!({ "rooms": { "join": { room: { "timeline": { "events": events }, "state": { "events": [] } } } } })
 }
 
+pub fn now_ms() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64
+}
+
+fn next_event_id() -> String {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    format!("$ev{}", NEXT.fetch_add(1, Ordering::SeqCst))
+}
+
+pub fn member_content(active: bool) -> Value {
+    if active { json!({ "application": "m.call", "device_id": "PHONE" }) } else { json!({}) }
+}
+
 pub fn member_event(user: &str, active: bool) -> Value {
-    let content = if active { json!({ "application": "m.call", "device_id": "PHONE" }) } else { json!({}) };
     json!({
         "type": "org.matrix.msc3401.call.member",
         "state_key": format!("_{user}_PHONE_m.call"),
         "sender": user,
-        "content": content,
+        "event_id": next_event_id(),
+        "origin_server_ts": now_ms(),
+        "content": member_content(active),
     })
 }
 
@@ -295,8 +323,18 @@ impl note_voice::audio::engines::SpeechEngines for SilentEngines {
     }
 }
 
+/// What the fake media saw.
+#[derive(Default)]
+pub struct MediaProbe {
+    pub joins: AtomicUsize,
+    pub frames_sent: AtomicUsize,
+    pub left: AtomicBool,
+}
+
 /// A room where the user stays, silent, until the bot leaves.
-struct QuietRoom;
+struct QuietRoom {
+    probe: Arc<MediaProbe>,
+}
 
 #[async_trait::async_trait]
 impl note_voice::media::MediaIo for QuietRoom {
@@ -305,6 +343,7 @@ impl note_voice::media::MediaIo for QuietRoom {
     }
 
     async fn send(&self, _frame: &[i16; 480]) -> anyhow::Result<()> {
+        self.probe.frames_sent.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 
@@ -314,7 +353,9 @@ impl note_voice::media::MediaIo for QuietRoom {
         std::future::pending().await
     }
 
-    async fn leave(&self) {}
+    async fn leave(&self) {
+        self.probe.left.store(true, Ordering::SeqCst);
+    }
 }
 
 /// A room whose media panics the session that reads it.
@@ -350,6 +391,7 @@ pub enum Join {
 
 pub struct FakeJoin {
     pub how: Join,
+    pub probe: Arc<MediaProbe>,
 }
 
 #[async_trait::async_trait]
@@ -360,9 +402,11 @@ impl note_voice::media::MediaJoin for FakeJoin {
         _livekit_service_url: &str,
         _room_id: &str,
         _mxid: &str,
+        _wait: std::time::Duration,
     ) -> anyhow::Result<Box<dyn note_voice::media::MediaIo>> {
+        self.probe.joins.fetch_add(1, Ordering::SeqCst);
         match self.how {
-            Join::Quiet => Ok(Box::new(QuietRoom)),
+            Join::Quiet => Ok(Box::new(QuietRoom { probe: self.probe.clone() })),
             Join::Fails => anyhow::bail!("no audio track from the user"),
             Join::Hangs => std::future::pending().await,
             Join::Broken => Ok(Box::new(BrokenRoom)),
@@ -371,5 +415,30 @@ impl note_voice::media::MediaJoin for FakeJoin {
 }
 
 pub fn backends(loaded: bool, how: Join) -> note_voice::service::Backends {
-    note_voice::service::Backends { engines: Arc::new(SilentEngines { loaded }), media: Arc::new(FakeJoin { how }) }
+    probed_backends(loaded, how).0
+}
+
+pub fn probed_backends(loaded: bool, how: Join) -> (note_voice::service::Backends, Arc<MediaProbe>) {
+    let probe: Arc<MediaProbe> = Arc::default();
+    let media = Arc::new(FakeJoin { how, probe: probe.clone() });
+    (note_voice::service::Backends { engines: Arc::new(SilentEngines { loaded }), media }, probe)
+}
+
+/// The service's config for a test under `dir`; the token file is written here.
+pub fn voice_config(dir: &std::path::Path, homeserver: String) -> VoiceServiceConfig {
+    let token = dir.join("token");
+    std::fs::write(&token, "secret\n").unwrap();
+    VoiceServiceConfig {
+        homeserver,
+        token_file: token,
+        livekit_service_url: "https://rtc.t".into(),
+        socket: dir.join("voice.sock"),
+        state_dir: dir.join("state"),
+        models_dir: None,
+        models: Default::default(),
+        device: Default::default(),
+        cues_dir: None,
+        ready_cue_file: None,
+        heard_cue_file: None,
+    }
 }

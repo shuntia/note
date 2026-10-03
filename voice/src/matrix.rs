@@ -4,6 +4,7 @@ use std::time::Duration;
 
 pub const MEMBER_TYPE: &str = "org.matrix.msc3401.call.member";
 pub const NOTIFICATION_TYPE: &str = "m.rtc.notification";
+const RING_TYPES: [&str; 2] = [NOTIFICATION_TYPE, "org.matrix.msc4075.rtc.notification"];
 const DECLINE_TYPES: [&str; 2] = ["org.matrix.msc4310.rtc.decline", "m.rtc.decline"];
 const USER_AGENT: &str = concat!("note-voice/", env!("CARGO_PKG_VERSION"));
 
@@ -31,7 +32,10 @@ fn is_transient(e: &anyhow::Error) -> bool {
 #[derive(Debug, Clone, PartialEq)]
 pub enum RoomEvent {
     Joined { room: String, user: String },
-    CallMember { room: String, user: String, active: bool },
+    /// `device` is read from the state key `_<user>_<device>_m.call`.
+    CallMember { room: String, user: String, device: String, active: bool, event_id: String, ts_ms: i64 },
+    /// A ring that mentions the bot.
+    RingForBot { room: String, sender: String, event_id: String, ts_ms: i64 },
     Declined { room: String, notification: String },
 }
 
@@ -122,6 +126,17 @@ impl Matrix {
 
     pub fn member_key(&self) -> String {
         format!("_{}_{}_m.call", self.user_id, self.device_id)
+    }
+
+    /// Whether `user`'s call membership from `device` is still set in `room`.
+    pub async fn member_active(&self, room: &str, user: &str, device: &str) -> Result<bool> {
+        let path =
+            format!("/_matrix/client/v3/rooms/{}/state/{MEMBER_TYPE}/{}", enc(room), enc(&format!("_{user}_{device}_m.call")));
+        match self.get(&path).await {
+            Ok(content) => Ok(content.as_object().is_some_and(|c| !c.is_empty())),
+            Err(e) if e.downcast_ref::<HomeserverError>().is_some_and(|h| h.errcode == "M_NOT_FOUND") => Ok(false),
+            Err(e) => Err(e),
+        }
     }
 
     /// An unencrypted DM inviting `mxid`. Recording it in the bot's
@@ -254,12 +269,12 @@ impl Matrix {
         let body = Self::check(resp).await?;
         Ok(SyncBatch {
             next_batch: body["next_batch"].as_str().context("sync without next_batch")?.to_string(),
-            events: parse_sync(&body),
+            events: parse_sync(&body, &self.user_id),
         })
     }
 }
 
-fn parse_sync(body: &Value) -> Vec<RoomEvent> {
+fn parse_sync(body: &Value, bot: &str) -> Vec<RoomEvent> {
     let mut out = Vec::new();
     let Some(rooms) = body["rooms"]["join"].as_object() else { return out };
     for (room, data) in rooms {
@@ -267,13 +282,25 @@ fn parse_sync(body: &Value) -> Vec<RoomEvent> {
         for ev in lists.into_iter().filter_map(|l| l.as_array()).flatten() {
             let kind = ev["type"].as_str().unwrap_or_default();
             let sender = ev["sender"].as_str().unwrap_or_default().to_string();
+            let event_id = ev["event_id"].as_str().unwrap_or_default().to_string();
+            let ts_ms = ev["origin_server_ts"].as_i64().unwrap_or(0);
             if kind == "m.room.member" && ev["content"]["membership"] == "join" {
                 if let Some(user) = ev["state_key"].as_str() {
                     out.push(RoomEvent::Joined { room: room.clone(), user: user.to_string() });
                 }
             } else if kind == MEMBER_TYPE {
                 let active = ev["content"].as_object().is_some_and(|c| !c.is_empty());
-                out.push(RoomEvent::CallMember { room: room.clone(), user: sender, active });
+                let device = ev["state_key"]
+                    .as_str()
+                    .and_then(|k| k.strip_prefix(&format!("_{sender}_"))?.strip_suffix("_m.call"))
+                    .unwrap_or_default()
+                    .to_string();
+                out.push(RoomEvent::CallMember { room: room.clone(), user: sender, device, active, event_id, ts_ms });
+            } else if RING_TYPES.contains(&kind) {
+                let mentions = ev["content"]["m.mentions"]["user_ids"].as_array();
+                if mentions.is_some_and(|ids| ids.iter().any(|id| id == bot)) {
+                    out.push(RoomEvent::RingForBot { room: room.clone(), sender, event_id, ts_ms });
+                }
             } else if DECLINE_TYPES.contains(&kind) {
                 if let Some(id) = ev["content"]["m.relates_to"]["event_id"].as_str() {
                     out.push(RoomEvent::Declined { room: room.clone(), notification: id.to_string() });
@@ -299,5 +326,68 @@ mod tests {
         assert!(is_transient(&said(429)));
         assert!(!is_transient(&said(401)));
         assert!(!is_transient(&anyhow::anyhow!("whoami without user_id")));
+    }
+
+    #[test]
+    fn element_x_call_members_and_rings_for_the_bot_are_read() {
+        let body = json!({ "rooms": { "join": { "!r:t": { "timeline": { "events": [
+            {
+                "type": MEMBER_TYPE,
+                "state_key": "_@shuntia:matrix.example.org_ALICEPHONE_m.call",
+                "sender": "@shuntia:matrix.example.org",
+                "event_id": "$m1",
+                "origin_server_ts": 1_700_000_000_000_i64,
+                "content": { "application": "m.call", "call_id": "", "device_id": "ALICEPHONE", "scope": "m.room" },
+            },
+            {
+                "type": "org.matrix.msc4075.rtc.notification",
+                "sender": "@shuntia:matrix.example.org",
+                "event_id": "$n1",
+                "origin_server_ts": 1_700_000_000_100_i64,
+                "content": { "notification_type": "ring", "m.mentions": { "user_ids": ["@note:t"] } },
+            },
+            {
+                "type": NOTIFICATION_TYPE,
+                "sender": "@shuntia:matrix.example.org",
+                "event_id": "$n2",
+                "content": { "notification_type": "ring", "m.mentions": { "user_ids": ["@someone:t"] } },
+            },
+            {
+                "type": MEMBER_TYPE,
+                "state_key": "_@shuntia:matrix.example.org_ALICEPHONE_m.call",
+                "sender": "@shuntia:matrix.example.org",
+                "event_id": "$m2",
+                "origin_server_ts": 1_700_000_000_200_i64,
+                "content": {},
+            },
+        ] } } } } });
+        let user = "@shuntia:matrix.example.org".to_string();
+        assert_eq!(
+            parse_sync(&body, "@note:t"),
+            vec![
+                RoomEvent::CallMember {
+                    room: "!r:t".into(),
+                    user: user.clone(),
+                    device: "ALICEPHONE".into(),
+                    active: true,
+                    event_id: "$m1".into(),
+                    ts_ms: 1_700_000_000_000,
+                },
+                RoomEvent::RingForBot {
+                    room: "!r:t".into(),
+                    sender: user.clone(),
+                    event_id: "$n1".into(),
+                    ts_ms: 1_700_000_000_100,
+                },
+                RoomEvent::CallMember {
+                    room: "!r:t".into(),
+                    user,
+                    device: "ALICEPHONE".into(),
+                    active: false,
+                    event_id: "$m2".into(),
+                    ts_ms: 1_700_000_000_200,
+                },
+            ]
+        );
     }
 }

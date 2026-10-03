@@ -1,6 +1,7 @@
 pub mod audio;
 pub mod calls;
 pub mod config;
+pub mod inbound;
 pub mod matrix;
 pub mod media;
 pub mod outgoing;

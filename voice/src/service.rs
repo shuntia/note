@@ -2,19 +2,20 @@ use crate::audio::engines::{Engines, SpeechEngines};
 use crate::audio::lines::{Line, Lines};
 use crate::calls::{clear_member, ring_once, Ring};
 use crate::config::VoiceServiceConfig;
+use crate::inbound::{say_and_leave, Detect, Detector};
 use crate::matrix::{HomeserverError, Matrix, RoomEvent};
 use crate::media::{LiveKitJoin, MediaJoin};
 use crate::outgoing::CallWriter;
 use crate::session::{run_session, Cues, SessionDeps, SessionEnd, SessionIn};
 use crate::state::{CallState, LinkState, StateFile};
 use note_voice_proto::{
-    dial_forever, AppliedFile, BoxFuture, CallBody, Dir, FileOutbox, Handler, Outcome, Peer, PeerConfig,
+    dial_forever, AppliedFile, BoxFuture, CallBody, Dir, Direction, FileOutbox, Handler, Outcome, Peer, PeerConfig,
     Refusal, RefusalCode, Reply, Request, Role, VoiceProfile,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
-use tokio::sync::{broadcast, mpsc, watch};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 const APPLIED_KEEP: Duration = Duration::from_hours(7 * 24);
 /// Element X treats an expired membership as left, so a live call's outlasts the longest call.
@@ -22,6 +23,10 @@ const LIVE_MEMBER_MS: u64 = 60 * 60 * 1000;
 const MAX_CALL: Duration = Duration::from_mins(30);
 const LINK_GRACE: Duration = Duration::from_secs(10);
 const JOIN_WAIT: Duration = Duration::from_secs(20);
+const INBOUND_JOIN_WAIT: Duration = Duration::from_secs(10);
+const INCOMING_CALL_WAIT: Duration = Duration::from_secs(3);
+const INBOUND_START_WAIT: Duration = Duration::from_secs(5);
+const CANT_REACH_MEMBER_MS: u64 = 60 * 1000;
 
 /// What a live call runs on: the speech engines, and how to join a room's media.
 pub struct Backends {
@@ -50,6 +55,13 @@ fn rejects_since(e: &anyhow::Error) -> bool {
     })
 }
 
+/// The `Start` Note sent for an incoming call it opened.
+struct InboundStart {
+    call_id: String,
+    profile: VoiceProfile,
+    hang_up: watch::Receiver<bool>,
+}
+
 struct Service {
     cfg: VoiceServiceConfig,
     matrix: Arc<Matrix>,
@@ -62,6 +74,8 @@ struct Service {
     lines: Arc<Lines>,
     cues: Arc<Cues>,
     reporting: Mutex<HashSet<i64>>,
+    /// Rooms with an incoming call being answered, each with the way to its `Start` until it arrives.
+    answering: Mutex<HashMap<String, Option<oneshot::Sender<InboundStart>>>>,
     peer: OnceLock<Peer>,
 }
 
@@ -144,23 +158,25 @@ impl Service {
             })
             .await;
             if outcome == Outcome::Answered {
-                svc.go_live(&call_id, &room_id, &mxid, profile, &rx).await;
+                svc.join_and_run(&call_id, &room_id, &mxid, profile, &rx, Direction::Outbound).await;
             } else {
                 svc.finish(&call_id, outcome);
             }
         });
     }
 
-    /// Joins the answered call's media and runs its session to the end. A
-    /// `HangUp` during the join abandons it; the session's inbox is open from
-    /// the answer on, so one after the join is not lost.
-    async fn go_live(
+    /// Puts the bot's membership, which answers an inbound call, joins the
+    /// media and runs the session to the end. A `HangUp` during the join
+    /// abandons it; the session's inbox is open from the answer on, so one
+    /// after the join is not lost.
+    async fn join_and_run(
         self: &Arc<Self>,
         call_id: &str,
         room_id: &str,
         mxid: &str,
         profile: VoiceProfile,
         hang_up: &watch::Receiver<bool>,
+        direction: Direction,
     ) {
         if self.backends.engines.languages().is_empty() {
             clear_member(&self.matrix, room_id).await;
@@ -186,7 +202,11 @@ impl Service {
         }
         let join = async {
             self.matrix.put_member(room_id, LIVE_MEMBER_MS, &self.cfg.livekit_service_url).await?;
-            self.backends.media.join(&self.matrix, &self.cfg.livekit_service_url, room_id, mxid).await
+            let wait = match direction {
+                Direction::Outbound => JOIN_WAIT,
+                Direction::Inbound => INBOUND_JOIN_WAIT,
+            };
+            self.backends.media.join(&self.matrix, &self.cfg.livekit_service_url, room_id, mxid, wait).await
         };
         let mut hang_up = hang_up.clone();
         let joined = tokio::select! {
@@ -208,6 +228,7 @@ impl Service {
             lines: self.lines.clone(),
             cues: self.cues.clone(),
             profile,
+            direction,
             max_len: MAX_CALL,
             link_grace: LINK_GRACE,
         };
@@ -226,6 +247,119 @@ impl Service {
             c.live = true;
         }
         let _ = st.save();
+    }
+
+    /// A room with an incoming call being answered, or a call of its own not yet done.
+    fn busy(&self, room: &str) -> bool {
+        lock(&self.answering).contains_key(room)
+            || lock(&self.state).data.calls.values().any(|c| c.room_id == room && !c.done)
+    }
+
+    /// Asks Note to open the user's call; with no Note to take it, answers to say so.
+    async fn answer_incoming(
+        self: Arc<Self>,
+        room: String,
+        mxid: String,
+        key: String,
+        device: Option<String>,
+        started: oneshot::Receiver<InboundStart>,
+    ) {
+        let ask = Request::IncomingCall { room_id: room.clone(), mxid: mxid.clone(), key };
+        let why = match tokio::time::timeout(INCOMING_CALL_WAIT, self.peer().request(ask)).await {
+            Ok(Ok(Reply::Call { call_id })) => match tokio::time::timeout(INBOUND_START_WAIT, started).await {
+                Ok(Ok(start)) if start.call_id == call_id => {
+                    self.answer_for_note(start, &room, &mxid, device.as_deref()).await;
+                    lock(&self.answering).remove(&room);
+                    return;
+                }
+                Ok(Ok(start)) => {
+                    self.finish(&start.call_id, Outcome::Failed { reason: format!("Note opened {call_id} instead") });
+                    format!("a Start for {} came for {call_id}", start.call_id)
+                }
+                _ => format!("the Start for {call_id} never came"),
+            },
+            Ok(Ok(reply)) => format!("Note answered {reply:?}"),
+            Ok(Err(refusal)) => refusal.to_string(),
+            Err(_) => "no answer in time".into(),
+        };
+        eprintln!("voice: Note cannot take {mxid}'s call in {room} ({why}); answering to say so");
+        self.cant_reach(&room, &mxid, device.as_deref()).await;
+        lock(&self.answering).remove(&room);
+    }
+
+    async fn answer_for_note(self: &Arc<Self>, start: InboundStart, room: &str, mxid: &str, device: Option<&str>) {
+        if !self.still_calling(room, mxid, device).await {
+            return self.finish(&start.call_id, Outcome::Failed { reason: "the caller hung up".into() });
+        }
+        self.join_and_run(&start.call_id, room, mxid, start.profile, &start.hang_up, Direction::Inbound).await;
+    }
+
+    /// Whether the user's call membership from `device` is still set; an
+    /// unknown device or an unreadable state counts as still calling.
+    async fn still_calling(&self, room: &str, mxid: &str, device: Option<&str>) -> bool {
+        let Some(device) = device else { return true };
+        match self.matrix.member_active(room, mxid, device).await {
+            Ok(active) => active,
+            Err(e) => {
+                eprintln!("voice: reading {mxid}'s call membership in {room} failed: {e:#}");
+                true
+            }
+        }
+    }
+
+    /// Answers, plays the ready cue and `Line::CantReach`, and leaves; Note hears nothing of it.
+    async fn cant_reach(&self, room: &str, mxid: &str, device: Option<&str>) {
+        if !self.still_calling(room, mxid, device).await {
+            return eprintln!("voice: {mxid}'s call in {room} ended before it was answered");
+        }
+        if let Err(e) = self.matrix.put_member(room, CANT_REACH_MEMBER_MS, &self.cfg.livekit_service_url).await {
+            eprintln!("voice: answering {mxid}'s call in {room} failed: {e:#}");
+            return clear_member(&self.matrix, room).await;
+        }
+        let url = &self.cfg.livekit_service_url;
+        match self.backends.media.join(&self.matrix, url, room, mxid, INBOUND_JOIN_WAIT).await {
+            Ok(media) => say_and_leave(&*media, self.cant_reach_clips().await).await,
+            Err(e) => eprintln!("voice: joining {mxid}'s call in {room} failed: {e:#}"),
+        }
+        clear_member(&self.matrix, room).await;
+    }
+
+    async fn cant_reach_clips(&self) -> Vec<Vec<i16>> {
+        let profile = VoiceProfile::default();
+        let mut clips = Vec::new();
+        if profile.cue {
+            clips.push(self.cues.ready.to_vec());
+        }
+        let languages = self.backends.engines.languages();
+        let Some(language) = languages.iter().find(|l| **l == profile.language).or(languages.first()).cloned() else {
+            return clips;
+        };
+        let (engines, lines) = (self.backends.engines.clone(), self.lines.clone());
+        let line = tokio::task::spawn_blocking(move || lines.get(&*engines.tts(&language), &language, "", Line::CantReach))
+            .await
+            .map_err(anyhow::Error::from)
+            .and_then(|r| r);
+        match line {
+            Ok(pcm) => clips.push(pcm.to_vec()),
+            Err(e) => eprintln!("voice: rendering {:?} failed: {e:#}", Line::CantReach),
+        }
+        clips
+    }
+
+    /// Opens the inbound call Note started for the attempt in `room`.
+    fn begin_answer(&self, call_id: &str, room_id: &str, profile: VoiceProfile) {
+        let (tx, hang_up) = watch::channel(false);
+        match lock(&self.hang_ups).entry(call_id.to_string()) {
+            std::collections::hash_map::Entry::Occupied(_) => return,
+            std::collections::hash_map::Entry::Vacant(v) => {
+                v.insert(tx);
+            }
+        }
+        let waiting = lock(&self.answering).get_mut(room_id).and_then(Option::take);
+        let start = InboundStart { call_id: call_id.to_string(), profile, hang_up };
+        if waiting.is_none_or(|w| w.send(start).is_err()) {
+            self.finish(call_id, Outcome::Failed { reason: "no incoming call to answer".into() });
+        }
     }
 
     fn to_session(&self, call_id: &str, msg: SessionIn) {
@@ -350,7 +484,37 @@ impl Service {
         }
     }
 
+    /// Answers the linked users' calls as they start. A user's ring carries
+    /// no device, so it is checked against the device of their last call membership.
+    fn detect(
+        self: &Arc<Self>,
+        detector: &mut Detector,
+        devices: &mut HashMap<(String, String), String>,
+        ev: &RoomEvent,
+    ) {
+        if let RoomEvent::CallMember { room, user, device, active, .. } = ev {
+            let at = (room.clone(), user.clone());
+            if *active {
+                devices.insert(at, device.clone());
+            } else {
+                devices.remove(&at);
+            }
+        }
+        let links: Vec<(String, String)> =
+            lock(&self.state).data.links.values().map(|l| (l.room_id.clone(), l.mxid.clone())).collect();
+        let Detect::Answer { room, mxid, key } = detector.on_event(ev, &links, &|room| self.busy(room), now_ms()) else {
+            return;
+        };
+        let device = devices.get(&(room.clone(), mxid.clone())).cloned().filter(|d| !d.is_empty());
+        let (tx, started) = oneshot::channel();
+        lock(&self.answering).insert(room.clone(), Some(tx));
+        eprintln!("voice: {mxid} is calling in {room}");
+        tokio::spawn(self.clone().answer_incoming(room, mxid, key, device, started));
+    }
+
     async fn sync_forever(self: Arc<Self>) {
+        let mut detector = Detector::new(lock(&self.state).data.since.is_none(), now_ms());
+        let mut devices = HashMap::new();
         loop {
             let since = lock(&self.state).data.since.clone();
             match self.matrix.sync(since.as_deref(), 30_000).await {
@@ -359,6 +523,7 @@ impl Service {
                         if let RoomEvent::Joined { room, user } = &ev {
                             self.report_join(room, user);
                         }
+                        self.detect(&mut detector, &mut devices, &ev);
                         let _ = self.events.send(ev);
                     }
                     let mut st = lock(&self.state);
@@ -371,6 +536,7 @@ impl Service {
                         let mut st = lock(&self.state);
                         st.data.since = None;
                         let _ = st.save();
+                        detector = Detector::new(true, now_ms());
                     }
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 }
@@ -397,7 +563,7 @@ impl Handler for VoiceHandler {
     fn apply(&self, call_id: &str, seq: u64, body: CallBody) -> Result<(), String> {
         let svc = self.svc().clone();
         match body {
-            CallBody::Start { room_id, mxid, ring_secs, ring_by_ms, voice, .. } => {
+            CallBody::Start { room_id, mxid, ring_secs, ring_by_ms, voice, direction, .. } => {
                 {
                     let mut st = lock(&svc.state);
                     if st.data.calls.contains_key(call_id) {
@@ -411,7 +577,9 @@ impl Handler for VoiceHandler {
                     st.save().map_err(|e| e.to_string())?;
                 }
                 svc.applied.set_applied(call_id, seq).map_err(|e| e.to_string())?;
-                if now_ms() > ring_by_ms {
+                if direction == Direction::Inbound {
+                    svc.begin_answer(call_id, &room_id, voice);
+                } else if now_ms() > ring_by_ms {
                     svc.finish(call_id, Outcome::Failed { reason: "late".into() });
                 } else {
                     svc.begin_ring(call_id.to_string(), room_id, mxid, ring_secs, voice);
@@ -479,7 +647,7 @@ fn warm_lines(engines: &Arc<dyn SpeechEngines>, lines: &Arc<Lines>) {
     tokio::task::spawn_blocking(move || {
         for language in engines.languages() {
             let tts = engines.tts(&language);
-            for line in [Line::LostNotes, Line::Goodbye] {
+            for line in [Line::LostNotes, Line::Goodbye, Line::CantReach, Line::Hi] {
                 if let Err(e) = lines.get(&*tts, &language, "", line) {
                     eprintln!("voice: rendering {line:?} in {language} failed: {e:#}");
                 }
@@ -500,7 +668,7 @@ pub async fn run(cfg: VoiceServiceConfig) -> anyhow::Result<()> {
     let (models, device) = (cfg.model_sets(), cfg.device);
     let loaded = tokio::task::spawn_blocking(move || Engines::load(&models, device)).await;
     let engines = loaded_or_empty(loaded.map_err(anyhow::Error::from).and_then(|r| r));
-    let backends = Backends { engines: Arc::new(engines), media: Arc::new(LiveKitJoin { wait: JOIN_WAIT }) };
+    let backends = Backends { engines: Arc::new(engines), media: Arc::new(LiveKitJoin) };
     run_with(cfg, PeerConfig::new(Role::Voice), backends).await
 }
 
@@ -533,6 +701,7 @@ pub async fn run_with(cfg: VoiceServiceConfig, peer_cfg: PeerConfig, backends: B
         lines,
         cues: Arc::new(cues),
         reporting: Mutex::new(HashSet::new()),
+        answering: Mutex::new(HashMap::new()),
         peer: OnceLock::new(),
     });
     let handler = Arc::new(VoiceHandler { svc: OnceLock::new() });

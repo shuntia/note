@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use note_voice_proto::{CallBody, Floor, VoiceProfile};
+use note_voice_proto::{CallBody, Direction, Floor, VoiceProfile};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, MissedTickBehavior};
@@ -22,7 +22,7 @@ const TURN_SPAN: usize = RATE * 8;
 const TICK: Duration = Duration::from_millis(10);
 const LOST_NOTICE: Duration = Duration::from_secs(1);
 const DRAIN_CAP: Duration = Duration::from_secs(5);
-const ONE_MOMENT_AFTER: Duration = Duration::from_millis(1500);
+const FILLER_AFTER: Duration = Duration::from_millis(1500);
 
 /// 48 kHz mono audio for the call's cues; an empty one plays nothing.
 pub struct Cues {
@@ -96,6 +96,8 @@ pub struct SessionDeps {
     pub lines: Arc<Lines>,
     pub cues: Arc<Cues>,
     pub profile: VoiceProfile,
+    /// An inbound call is greeted with `Line::Hi` if Note is quiet at first.
+    pub direction: Direction,
     pub max_len: Duration,
     pub link_grace: Duration,
 }
@@ -119,7 +121,12 @@ enum Event {
     Partial(String),
     Score { at: Duration, p: f32 },
     Finished { turn: u64, text: String },
-    Lines { lost: Option<Arc<Vec<i16>>>, goodbye: Option<Arc<Vec<i16>>>, moment: Option<Arc<Vec<i16>>> },
+    Lines {
+        lost: Option<Arc<Vec<i16>>>,
+        goodbye: Option<Arc<Vec<i16>>>,
+        moment: Option<Arc<Vec<i16>>>,
+        hi: Option<Arc<Vec<i16>>>,
+    },
 }
 
 enum SttCmd {
@@ -180,9 +187,11 @@ struct Live<S> {
     lost_line: Option<Arc<Vec<i16>>>,
     goodbye_line: Option<Arc<Vec<i16>>>,
     moment_line: Option<Arc<Vec<i16>>>,
+    hi_line: Option<Arc<Vec<i16>>>,
     goodbye_pending: bool,
-    /// A Commit sent with no reply speaking since.
-    awaiting_reply: Option<Instant>,
+    /// The line to fill with if no reply is speaking by `FILLER_AFTER` past the instant: "hi" from the
+    /// start of an inbound call, "one moment" from a Commit.
+    awaiting_reply: Option<(Instant, Line)>,
     drafted: Option<u64>,
     start: Instant,
     playing: bool,
@@ -226,6 +235,7 @@ impl<S: Fn(CallBody)> Live<S> {
                     lost: render(Line::LostNotes),
                     goodbye: render(Line::Goodbye),
                     moment: render(Line::OneMoment),
+                    hi: render(Line::Hi),
                 });
             });
         }
@@ -249,8 +259,9 @@ impl<S: Fn(CallBody)> Live<S> {
             lost_line: None,
             goodbye_line: None,
             moment_line: None,
+            hi_line: None,
             goodbye_pending: false,
-            awaiting_reply: None,
+            awaiting_reply: (deps.direction == Direction::Inbound).then_some((start, Line::Hi)),
             drafted: None,
             start,
             playing: false,
@@ -347,9 +358,12 @@ impl<S: Fn(CallBody)> Live<S> {
         if self.start.elapsed() >= max_len {
             self.say_goodbye(SessionEnd::TimedOut);
         }
-        if self.awaiting_reply.is_some_and(|at| at.elapsed() >= ONE_MOMENT_AFTER) {
-            self.awaiting_reply = None;
-            if let Some(pcm) = &self.moment_line {
+        if self.lines_ready && self.awaiting_reply.is_some_and(|(at, _)| at.elapsed() >= FILLER_AFTER) {
+            let filler = match self.awaiting_reply.take() {
+                Some((_, Line::Hi)) => &self.hi_line,
+                _ => &self.moment_line,
+            };
+            if let Some(pcm) = filler {
                 self.playout.push(Clip { reply: None, chars: 0, pcm: pcm.to_vec() });
             }
         }
@@ -411,11 +425,12 @@ impl<S: Fn(CallBody)> Live<S> {
 
     fn event(&mut self, ev: Event) {
         let input = match ev {
-            Event::Lines { lost, goodbye, moment } => {
+            Event::Lines { lost, goodbye, moment, hi } => {
                 self.lines_ready = true;
                 self.lost_line = lost;
                 self.goodbye_line = goodbye;
                 self.moment_line = moment;
+                self.hi_line = hi;
                 return;
             }
             _ if self.ending.is_some() => return,
@@ -430,7 +445,7 @@ impl<S: Fn(CallBody)> Live<S> {
                     }
                 } else {
                     (self.send)(CallBody::Commit { turn, text });
-                    self.awaiting_reply = Some(Instant::now());
+                    self.awaiting_reply = Some((Instant::now(), Line::OneMoment));
                     if let Some(cue) = &self.heard_cue {
                         self.playout.push_front(Clip { reply: None, chars: 0, pcm: cue.to_vec() });
                     }
@@ -774,6 +789,7 @@ mod tests {
             lines: Arc::new(Lines::default()),
             cues: Arc::new(Cues { ready: Arc::new(vec![READY; FRAME]), heard: Arc::new(vec![HEARD; FRAME]) }),
             profile: VoiceProfile { language: "en".into(), voice: String::new(), cue },
+            direction: Direction::Outbound,
             max_len: Duration::from_mins(30),
             link_grace: Duration::from_secs(10),
         }
@@ -868,6 +884,34 @@ mod tests {
         assert_eq!(c.probe.frames_of(moment), 0, "not before 1.5 s");
         sleep_ms(4000).await;
         assert_eq!(c.probe.frames_of(moment), moment, "a tool-only reply still gets the filler");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_quiet_start_to_an_inbound_call_says_hi() {
+        let hi = text(Line::Hi, "en").len();
+        let inbound = || {
+            let tts: Arc<FakeTts> = Arc::default();
+            call_with(SessionDeps { direction: Direction::Inbound, ..deps(Vec::new(), false, &tts) }, Vec::new(), tts)
+        };
+
+        let c = inbound();
+        sleep_ms(1400).await;
+        assert_eq!(c.probe.frames_of(hi), 0, "not before 1.5 s");
+        sleep_ms(2000).await;
+        assert_eq!(c.probe.frames_of(hi), hi, "the line plays once");
+        sleep_ms(3000).await;
+        assert_eq!(c.probe.frames_of(hi), hi);
+
+        let c = inbound();
+        sleep_ms(500).await;
+        c.frame(CallBody::Speak { reply: 1, idx: 0, text: "hello there".into() });
+        c.frame(CallBody::Play { reply: 1 });
+        sleep_ms(3000).await;
+        assert_eq!(c.probe.frames_of(hi), 0, "Note's own greeting needs no filler");
+
+        let c = call(Vec::new(), Vec::new(), false);
+        sleep_ms(3000).await;
+        assert_eq!(c.probe.frames_of(hi), 0, "an outbound call opens with Note's words");
     }
 
     #[tokio::test(start_paused = true)]
