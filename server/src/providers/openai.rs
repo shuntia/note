@@ -1,6 +1,7 @@
 use super::{ChatRequest, ChatResponse, EmbeddingsProvider, FirstTokenTimeout, LLMProvider, StreamOpts, StreamSink, ToolCall};
 use anyhow::{Context, Result};
 use std::io::BufRead;
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 pub struct OpenAILLM {
@@ -188,11 +189,11 @@ pub fn parse(v: &serde_json::Value) -> Result<ChatResponse> {
     Ok(ChatResponse { text, tool_calls })
 }
 
-/// Reads Server-Sent Events of a streamed chat completion into `sink`. Tool
-/// calls arrive in pieces keyed by `index`; one is complete once another index
+/// Reads the lines of a streamed chat completion into `sink`. Tool calls
+/// arrive in pieces keyed by `index`; one is complete once another index
 /// begins or the stream ends.
 fn read_stream(
-    reader: impl BufRead,
+    lines: &mpsc::Receiver<std::io::Result<String>>,
     started: Instant,
     first_token: Duration,
     sink: &mut dyn StreamSink,
@@ -200,13 +201,24 @@ fn read_stream(
     let mut resp = ChatResponse::default();
     let mut pending: Option<(u64, ToolCall)> = None;
     let mut heard = false;
-    for line in reader.lines() {
+    let mut done = false;
+    loop {
+        let line = if heard {
+            match lines.recv() {
+                Ok(line) => line,
+                Err(mpsc::RecvError) => break,
+            }
+        } else {
+            match lines.recv_timeout(first_token.saturating_sub(started.elapsed())) {
+                Ok(line) => line,
+                Err(mpsc::RecvTimeoutError::Timeout) => return Err(FirstTokenTimeout(first_token).into()),
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        };
         let line = line.context("reading the openai stream")?;
-        if !heard && started.elapsed() > first_token {
-            return Err(FirstTokenTimeout(first_token).into());
-        }
         let Some(data) = line.strip_prefix("data:").map(str::trim) else { continue };
         if data == "[DONE]" {
+            done = true;
             break;
         }
         let event: serde_json::Value =
@@ -226,8 +238,8 @@ fn read_stream(
         for piece in delta["tool_calls"].as_array().into_iter().flatten() {
             heard = true;
             let index = piece["index"].as_u64().or(pending.as_ref().map(|(i, _)| *i)).unwrap_or(0);
-            if let Some((_, done)) = pending.take_if(|(i, _)| *i != index) {
-                if !complete_call(done, &mut resp, sink) {
+            if let Some((_, finished)) = pending.take_if(|(i, _)| *i != index) {
+                if !complete_call(finished, &mut resp, sink) {
                     return Ok(resp);
                 }
             }
@@ -241,10 +253,26 @@ fn read_stream(
             call.args.push_str(&tool_args(&piece["function"]["arguments"]));
         }
     }
-    if let Some((_, done)) = pending {
-        complete_call(done, &mut resp, sink);
+    anyhow::ensure!(done || heard, "openai stream ended before any reply");
+    if let Some((_, call)) = pending {
+        complete_call(call, &mut resp, sink);
     }
     Ok(resp)
+}
+
+/// Reads the body's lines on a thread of their own, so the first-token
+/// deadline holds while a read is blocked. The thread ends with the body or
+/// once the receiver is gone.
+fn spawn_line_reader(body: ureq::Body) -> mpsc::Receiver<std::io::Result<String>> {
+    let (tx, rx) = mpsc::sync_channel(64);
+    std::thread::spawn(move || {
+        for line in std::io::BufReader::new(body.into_reader()).lines() {
+            if tx.send(line).is_err() {
+                return;
+            }
+        }
+    });
+    rx
 }
 
 fn complete_call(call: ToolCall, resp: &mut ChatResponse, sink: &mut dyn StreamSink) -> bool {
@@ -293,15 +321,14 @@ impl LLMProvider for OpenAILLM {
             Err(ureq::Error::Timeout(ureq::Timeout::RecvResponse)) => {
                 return Err(FirstTokenTimeout(opts.first_token).into());
             }
-            Err(e) => anyhow::bail!("openai stream request failed: {e}"),
+            Err(e) => return Err(anyhow::Error::new(e).context("openai stream request failed")),
         };
         if !resp.status().is_success() {
             let code = resp.status().as_u16();
             let head: String = resp.body_mut().read_to_string().unwrap_or_default().chars().take(300).collect();
             anyhow::bail!("openai stream request failed: status {code}: {head}");
         }
-        let reader = std::io::BufReader::new(resp.body_mut().as_reader());
-        read_stream(reader, started, opts.first_token, sink)
+        read_stream(&spawn_line_reader(resp.into_body()), started, opts.first_token, sink)
     }
 
     fn model(&self) -> Option<String> {
@@ -464,7 +491,15 @@ mod tests {
     }
 
     fn stub_sse(sse: &'static str) -> String {
-        crate::testhttp::serve_stream(sse, Duration::ZERO).0
+        crate::testhttp::serve_stream(Duration::ZERO, vec![(Duration::ZERO, sse)]).0
+    }
+
+    fn timed_out_quickly(base: &str) {
+        let llm = OpenAILLM::new(base, "m", "", ChatAgents::new(30, 30), None);
+        let started = std::time::Instant::now();
+        let err = llm.chat_stream(&req(), &opts(Duration::from_millis(300)), &mut Collect::default()).unwrap_err();
+        assert!(err.is::<FirstTokenTimeout>(), "{err:#}");
+        assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
     }
 
     fn req() -> ChatRequest<'static> {
@@ -505,17 +540,52 @@ mod tests {
 
     #[test]
     fn no_first_token_in_time_is_a_first_token_timeout() {
-        let (base, _rx) = crate::testhttp::serve_stream(SSE, Duration::from_secs(2));
+        let (base, _rx) = crate::testhttp::serve_stream(Duration::from_secs(2), vec![(Duration::ZERO, SSE)]);
+        timed_out_quickly(&base);
+    }
+
+    #[test]
+    fn silence_after_the_head_is_a_first_token_timeout() {
+        let (base, _rx) = crate::testhttp::serve_stream(Duration::ZERO, vec![(Duration::from_secs(2), SSE)]);
+        timed_out_quickly(&base);
+    }
+
+    #[test]
+    fn keep_alive_comments_do_not_hold_off_the_first_token_deadline() {
+        let ping = (Duration::from_millis(100), ": OPENROUTER PROCESSING\n\n");
+        let mut chunks = vec![ping; 15];
+        chunks.push((Duration::ZERO, SSE));
+        let (base, _rx) = crate::testhttp::serve_stream(Duration::ZERO, chunks);
+        timed_out_quickly(&base);
+    }
+
+    #[test]
+    fn a_stream_cut_off_before_any_delta_fails() {
+        let base = stub_sse(": OPENROUTER PROCESSING\n\n");
         let llm = OpenAILLM::new(&base, "m", "", ChatAgents::new(30, 30), None);
-        let started = std::time::Instant::now();
-        let err = llm.chat_stream(&req(), &opts(Duration::from_millis(300)), &mut Collect::default()).unwrap_err();
-        assert!(err.is::<FirstTokenTimeout>(), "{err:#}");
-        assert!(started.elapsed() < Duration::from_secs(2));
+        let err = llm.chat_stream(&req(), &opts(Duration::from_secs(5)), &mut Collect::default()).unwrap_err();
+        assert!(err.to_string().contains("ended"), "{err:#}");
+    }
+
+    #[test]
+    fn a_stream_cut_off_after_deltas_keeps_what_arrived() {
+        let base = stub_sse("data: {\"choices\":[{\"delta\":{\"content\":\"On it\"}}]}\n\n");
+        let llm = OpenAILLM::new(&base, "m", "", ChatAgents::new(30, 30), None);
+        let resp = llm.chat_stream(&req(), &opts(Duration::from_secs(5)), &mut Collect::default()).unwrap();
+        assert_eq!(resp.text, "On it");
+    }
+
+    #[test]
+    fn stream_agents_are_reused_per_first_token_deadline() {
+        let agents = ChatAgents::new(30, 30);
+        let a = agents.stream_agent(false, Duration::from_secs(1));
+        assert!(std::ptr::eq(a.config(), agents.stream_agent(false, Duration::from_secs(1)).config()));
+        assert!(!std::ptr::eq(a.config(), agents.stream_agent(false, Duration::from_secs(2)).config()));
     }
 
     #[test]
     fn extra_body_fields_reach_the_request() {
-        let (base, rx) = crate::testhttp::serve_stream(SSE, Duration::ZERO);
+        let (base, rx) = crate::testhttp::serve_stream(Duration::ZERO, vec![(Duration::ZERO, SSE)]);
         let llm = OpenAILLM::new(&base, "m", "", ChatAgents::new(30, 30), Some("high"))
             .with_extra(serde_json::json!({"provider": {"sort": "latency"}}))
             .without_reasoning();

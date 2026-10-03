@@ -25,9 +25,12 @@ pub fn serve(responses: Vec<(&'static str, &'static str)>) -> (String, Receiver<
     (base, rx)
 }
 
-/// Answers one request with a `text/event-stream` body, sent after `delay`
-/// and with no byte written before it.
-pub fn serve_stream(body: &'static str, delay: std::time::Duration) -> (String, Receiver<String>) {
+/// Answers one request with a `text/event-stream` body: the head after
+/// `head_delay`, then each chunk after its own delay.
+pub fn serve_stream(
+    head_delay: std::time::Duration,
+    chunks: Vec<(std::time::Duration, &'static str)>,
+) -> (String, Receiver<String>) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let (tx, rx) = std::sync::mpsc::channel();
@@ -35,14 +38,20 @@ pub fn serve_stream(body: &'static str, delay: std::time::Duration) -> (String, 
         let Ok((mut sock, _)) = listener.accept() else { return };
         let Some(raw) = read_request(&mut sock) else { return };
         let _ = tx.send(raw);
-        std::thread::sleep(delay);
-        let _ = sock.write_all(
-            format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            )
-            .as_bytes(),
+        std::thread::sleep(head_delay);
+        let len: usize = chunks.iter().map(|(_, c)| c.len()).sum();
+        let head = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n"
         );
+        if sock.write_all(head.as_bytes()).is_err() {
+            return;
+        }
+        for (delay, chunk) in chunks {
+            std::thread::sleep(delay);
+            if sock.write_all(chunk.as_bytes()).is_err() {
+                return;
+            }
+        }
     });
     (base, rx)
 }
