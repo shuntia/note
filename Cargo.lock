@@ -2674,7 +2674,9 @@ name = "note-voice"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
+ "futures-util",
  "hound",
  "livekit",
  "ndarray",
@@ -2682,6 +2684,7 @@ dependencies = [
  "ort",
  "reqwest 0.13.5",
  "rustfft",
+ "rustls",
  "serde",
  "serde_json",
  "sherpa-onnx",

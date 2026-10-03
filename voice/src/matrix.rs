@@ -214,6 +214,21 @@ impl Matrix {
         Ok(got["event_id"].as_str().context("send without event_id")?.to_string())
     }
 
+    pub async fn openid_token(&self) -> Result<Value> {
+        self.post(&format!("/_matrix/client/v3/user/{}/openid/request_token", enc(&self.user_id)), &json!({})).await
+    }
+
+    /// Returns `(url, jwt)` for the `LiveKit` SFU behind the `MatrixRTC` JWT service.
+    pub async fn livekit_jwt(&self, service_url: &str, room_id: &str) -> Result<(String, String)> {
+        let body = json!({ "room": room_id, "openid_token": self.openid_token().await?, "device_id": self.device_id });
+        let url = format!("{}/sfu/get", service_url.trim_end_matches('/'));
+        let got = Self::check(self.http.post(url).json(&body).send().await?).await.context("sfu/get")?;
+        Ok((
+            got["url"].as_str().context("sfu/get without url")?.to_string(),
+            got["jwt"].as_str().context("sfu/get without jwt")?.to_string(),
+        ))
+    }
+
     pub async fn sync(&self, since: Option<&str>, timeout_ms: u64) -> Result<SyncBatch> {
         let filter = json!({
             "presence": { "not_types": ["*"] },
