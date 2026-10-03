@@ -57,18 +57,30 @@ fn rejects_since(e: &anyhow::Error) -> bool {
 
 const PREVIEW_TEXT: &str = "Hi, it's Note. This is how I sound.";
 
-/// Voice samples as WAV, rendered once per language and voice.
+type Slot = Arc<Mutex<Option<Arc<Vec<u8>>>>>;
+
+/// Voice samples as WAV, rendered once per language and offered voice; a
+/// render in progress holds its slot, so a second ask for it waits.
 #[derive(Default)]
-struct Previews(Mutex<HashMap<(String, String), Arc<Vec<u8>>>>);
+struct Previews(Mutex<HashMap<(String, String), Slot>>);
 
 impl Previews {
-    fn get(&self, tts: &dyn TextToSpeech, language: &str, voice: &str) -> anyhow::Result<Arc<Vec<u8>>> {
-        let key = (language.to_string(), voice.to_string());
-        if let Some(wav) = lock(&self.0).get(&key) {
+    /// `voice` empty is the language default; any other id `tts` does not offer is refused.
+    fn get(&self, tts: &dyn TextToSpeech, language: &str, voice: &str) -> Result<Arc<Vec<u8>>, Refusal> {
+        if !voice.is_empty() && !tts.voices().iter().any(|v| v.id == voice) {
+            return Err(Refusal::new(RefusalCode::BadRequest, format!("no voice {voice:?}")));
+        }
+        let slot = lock(&self.0).entry((language.to_string(), voice.to_string())).or_default().clone();
+        let mut held = lock(&slot);
+        if let Some(wav) = &*held {
             return Ok(wav.clone());
         }
-        let wav = Arc::new(wav(&tts.synthesize_native(PREVIEW_TEXT, voice)?, NATIVE_RATE)?);
-        lock(&self.0).insert(key, wav.clone());
+        let rendered = tts
+            .synthesize_native(PREVIEW_TEXT, voice)
+            .and_then(|pcm| wav(&pcm, NATIVE_RATE))
+            .map_err(|e| Refusal::new(RefusalCode::Failed, format!("rendering the sample failed: {e:#}")))?;
+        let wav = Arc::new(rendered);
+        *held = Some(wav.clone());
         Ok(wav)
     }
 }
@@ -176,16 +188,12 @@ impl Service {
         if let Some(refusal) = self.no_models() {
             return Err(refusal);
         }
-        let rendered = tokio::task::spawn_blocking(move || {
+        let wav = tokio::task::spawn_blocking(move || {
             self.previews.get(&*self.backends.engines.tts(&language), &language, &voice)
         })
         .await
-        .map_err(anyhow::Error::from)
-        .and_then(|r| r);
-        match rendered {
-            Ok(wav) => Ok(Reply::Audio { wav_base64: base64::engine::general_purpose::STANDARD.encode(&*wav) }),
-            Err(e) => Err(Refusal::new(RefusalCode::Failed, format!("rendering the sample failed: {e:#}"))),
-        }
+        .map_err(|e| Refusal::new(RefusalCode::Failed, format!("rendering the sample failed: {e}")))??;
+        Ok(Reply::Audio { wav_base64: base64::engine::general_purpose::STANDARD.encode(&*wav) })
     }
 
     fn begin_ring(
@@ -818,12 +826,39 @@ mod tests {
 
         fn synthesize_native(&self, text: &str, _voice: &str) -> anyhow::Result<Vec<i16>> {
             self.0.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(20));
             Ok(vec![1; text.len()])
         }
 
         fn voices(&self) -> Vec<VoiceInfo> {
-            Vec::new()
+            ["af_heart", "bm_george"]
+                .map(|id| VoiceInfo { id: id.into(), label: id.into(), language: "en".into() })
+                .to_vec()
         }
+    }
+
+    #[test]
+    fn a_voice_not_offered_is_refused_and_not_cached() {
+        let (tts, previews) = (CountingTts::default(), Previews::default());
+        let refused = previews.get(&tts, "en", "a1").unwrap_err();
+        assert_eq!(refused.code, RefusalCode::BadRequest);
+        assert_eq!(tts.0.load(Ordering::SeqCst), 0, "nothing is rendered");
+        assert!(lock(&previews.0).is_empty(), "nothing is cached");
+    }
+
+    #[test]
+    fn concurrent_asks_for_one_voice_render_it_once() {
+        let (tts, previews) = (Arc::new(CountingTts::default()), Arc::new(Previews::default()));
+        let asks: Vec<_> = (0..4)
+            .map(|_| {
+                let (tts, previews) = (tts.clone(), previews.clone());
+                std::thread::spawn(move || previews.get(&*tts, "en", "af_heart").unwrap())
+            })
+            .collect();
+        for ask in asks {
+            ask.join().unwrap();
+        }
+        assert_eq!(tts.0.load(Ordering::SeqCst), 1);
     }
 
     #[test]

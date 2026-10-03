@@ -1794,17 +1794,29 @@ fn calls_not_set_up() -> axum::response::Response {
         .into_response()
 }
 
-fn voice_language(state: &AppState, user: &CurrentUser) -> Result<String, axum::response::Response> {
-    crate::config::UserConfig::load(&state.config_dir, &user.username)
-        .map(|cfg| cfg.voice_profile().language)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+fn voice_language(state: &AppState, user: &CurrentUser) -> Option<String> {
+    crate::config::UserConfig::load(&state.config_dir, &user.username).ok().map(|cfg| cfg.voice_profile().language)
+}
+
+/// A voice side that cannot be reached is 503; one that refused says why, and
+/// the refusal is logged. `field` names what a bad request got wrong.
+fn voice_refused(state: &AppState, user: &CurrentUser, field: &str, refusal: &note_voice_proto::Refusal) -> axum::response::Response {
+    use note_voice_proto::RefusalCode;
+    if matches!(refusal.code, RefusalCode::LinkDown | RefusalCode::Timeout) {
+        return voice_unavailable();
+    }
+    let _ = crate::log::record(&state.db(), Some(user.id), "voice_refused", &refusal.to_string());
+    match refusal.code {
+        RefusalCode::BadRequest => invalid_field(field, "is not one of the available voices"),
+        _ => (StatusCode::BAD_GATEWAY, Json(serde_json::json!({ "error": refusal.message }))).into_response(),
+    }
 }
 
 /// `Err` holds the response that refuses `voice`: not one the voice side offers, or no voice side to ask.
 async fn check_voice(state: &AppState, user: &CurrentUser, voice: &str) -> Result<(), axum::response::Response> {
     let Some(calls) = state.voice.clone() else { return Err(calls_not_set_up()) };
-    let language = voice_language(state, user)?;
-    let voices = calls.voices(&language).await.map_err(|_| voice_unavailable())?;
+    let language = voice_language(state, user).ok_or_else(|| StatusCode::INTERNAL_SERVER_ERROR.into_response())?;
+    let voices = calls.voices(&language).await.map_err(|r| voice_refused(state, user, "voice_voice", &r))?;
     if voices.iter().any(|v| v.id == voice) {
         Ok(())
     } else {
@@ -1814,9 +1826,8 @@ async fn check_voice(state: &AppState, user: &CurrentUser, voice: &str) -> Resul
 
 async fn voice_voices(user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
     let Some(voice) = state.voice.clone() else { return calls_not_set_up() };
-    let language = match voice_language(&state, &user) {
-        Ok(language) => language,
-        Err(response) => return response,
+    let Some(language) = voice_language(&state, &user) else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
     match voice.voices(&language).await {
         Ok(voices) => {
@@ -1824,7 +1835,7 @@ async fn voice_voices(user: CurrentUser, State(state): State<AppState>) -> impl 
                 voices.into_iter().map(|v| serde_json::json!({ "id": v.id, "label": v.label })).collect();
             Json(serde_json::json!({ "voices": voices })).into_response()
         }
-        Err(_) => voice_unavailable(),
+        Err(refusal) => voice_refused(&state, &user, "language", &refusal),
     }
 }
 
@@ -1839,9 +1850,8 @@ async fn voice_preview(
     Query(q): Query<PreviewQuery>,
 ) -> impl IntoResponse {
     let Some(voice) = state.voice.clone() else { return calls_not_set_up() };
-    let language = match voice_language(&state, &user) {
-        Ok(language) => language,
-        Err(response) => return response,
+    let Some(language) = voice_language(&state, &user) else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
     match voice.preview(&language, &q.voice).await {
         Ok(wav) => (
@@ -1849,7 +1859,7 @@ async fn voice_preview(
             wav,
         )
             .into_response(),
-        Err(_) => voice_unavailable(),
+        Err(refusal) => voice_refused(&state, &user, "voice", &refusal),
     }
 }
 

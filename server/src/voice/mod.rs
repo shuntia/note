@@ -343,7 +343,11 @@ pub(crate) struct NoteHandler {
 impl NoteHandler {
     /// The user's call voice; the defaults when their config cannot be read.
     fn profile(&self, user_id: i64) -> VoiceProfile {
-        let Some(config_dir) = self.config_dir.get() else { return VoiceProfile::default() };
+        let Some(config_dir) = self.config_dir.get() else {
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| eprintln!("voice: no config dir yet; calls use the default voice"));
+            return VoiceProfile::default();
+        };
         let username: Option<String> = crate::db_guard(&self.db)
             .query_row("SELECT username FROM users WHERE id = ?1", [user_id], |r| r.get(0))
             .ok();

@@ -503,6 +503,7 @@ export function Settings({
 
   const [voices, setVoices] = useState<VoiceChoice[] | null>(null)
   const [preview] = useState(() => previewPlayer())
+  useEffect(() => () => preview.stop(), [preview])
   const callsLinked = open === 'calls' && loaded?.voiceLink?.state === 'linked'
   useEffect(() => {
     if (!callsLinked) return
@@ -517,7 +518,7 @@ export function Settings({
   }, [callsLinked])
 
   const pickVoice = async (voice: string) => {
-    preview(voice)
+    preview.play(voice)
     const before = loaded?.voice ?? ''
     setState((s) => (s && s !== 'error' ? { ...s, voice } : s))
     try {
@@ -987,7 +988,7 @@ export function Settings({
             label="Calls"
             value={
               loaded.voiceLink?.state === 'linked'
-                ? RING_CHOICES.find((c) => c.id === loaded.ringFor)?.label
+                ? (RING_CHOICES.find((c) => c.id === loaded.ringFor) ?? RING_CHOICES[0]).label
                 : loaded.voiceLink
                   ? 'Invited'
                   : 'Not linked'

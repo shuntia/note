@@ -284,6 +284,12 @@ fn offers_voices(r: &Rig) {
                 .map(|id| note_voice_proto::VoiceOption { id: id.into(), label: id.into(), language: language.clone() })
                 .to_vec(),
         }),
+        note_voice_proto::Request::Preview { voice, .. } if voice == "nope" => {
+            Err(note_voice_proto::Refusal::new(note_voice_proto::RefusalCode::BadRequest, "no voice \"nope\""))
+        }
+        note_voice_proto::Request::Preview { voice, .. } if voice == "broken" => {
+            Err(note_voice_proto::Refusal::new(note_voice_proto::RefusalCode::Failed, "no voice models"))
+        }
         note_voice_proto::Request::Preview { voice, .. } => {
             use base64::Engine as _;
             let wav = format!("RIFF{voice}");
@@ -379,4 +385,26 @@ async fn an_answered_incoming_call_carries_the_users_voice() {
     let body = r.fake_rec.seen.lock().unwrap()[0].2.clone();
     let CallBody::Start { voice, .. } = body else { panic!("{body:?}") };
     assert_eq!(voice.voice, "af_heart");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_preview_says_why_and_an_unreachable_one_is_unavailable() {
+    let (app, cookie, r) = api_rig().await;
+    offers_voices(&r);
+    let (status, _) = call(&app, &cookie, "GET", "/api/voice/preview?voice=nope", "").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, body) = call(&app, &cookie, "GET", "/api/voice/preview?voice=broken", "").await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(body["error"], "no voice models");
+    let logged: i64 = r
+        .state
+        .db()
+        .query_row("SELECT COUNT(*) FROM event_log WHERE kind = 'voice_refused'", [], |x| x.get(0))
+        .unwrap();
+    assert_eq!(logged, 2);
+    r.listen.abort();
+    let v = r.voice.clone();
+    eventually("Note sees the link down", || !v.is_up()).await;
+    let (status, _) = call(&app, &cookie, "GET", "/api/voice/preview?voice=af_heart", "").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
 }

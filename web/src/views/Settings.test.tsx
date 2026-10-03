@@ -11,12 +11,14 @@ test('a_second_preview_replaces_the_first', () => {
   }
   const make = vi.fn(() => audio)
   const preview = previewPlayer(make)
-  preview('af_heart')
-  preview('bm_george')
+  preview.play('af_heart')
+  preview.play('bm_george')
   expect(make).toHaveBeenCalledTimes(1)
   expect(audio.pause).toHaveBeenCalledTimes(1)
   expect(audio.play).toHaveBeenCalledTimes(2)
   expect(audio.src.endsWith('bm_george')).toBe(true)
+  preview.stop()
+  expect(audio.pause).toHaveBeenCalledTimes(2)
 })
 
 test('ring_for_offers_three_choices', () => {
