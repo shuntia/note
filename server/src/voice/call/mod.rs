@@ -391,16 +391,23 @@ impl CallManager {
         (self.send)(call_id, CallBody::HangUp);
     }
 
-    /// Hangs up a call whose conversation could not start; it is not tried again.
+    /// Hangs up a call whose conversation could not start; it is not tried again, and its message falls through.
     fn give_up(&self, d: &CallDeps, call_id: &str, user_id: i64, e: &anyhow::Error) {
         self.dead.lock().unwrap_or_else(PoisonError::into_inner).insert(call_id.to_string());
         eprintln!("voice: starting the conversation of {call_id} failed: {e:#}");
         {
             let conn = crate::db_guard(&d.db);
             let _ = crate::log::record(&conn, Some(user_id), "voice_error", &format!("a call's conversation did not start: {e:#}"));
+            if let Err(e) = mark_bowed_out(&conn, call_id) {
+                eprintln!("voice: recording the bow-out of {call_id} failed: {e:#}");
+            }
         }
         (self.send)(call_id, CallBody::HangUp);
     }
+}
+
+pub(crate) fn mark_bowed_out(conn: &Connection, call_id: &str) -> rusqlite::Result<()> {
+    conn.execute("UPDATE voice_calls SET bowed_out = 1 WHERE id = ?1", [call_id]).map(|_| ())
 }
 
 impl Conversation for CallManager {

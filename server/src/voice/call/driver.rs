@@ -710,6 +710,7 @@ impl Driver {
             self.failed_turns += 1;
             let line = if self.failed_turns >= 2 {
                 self.ending = true;
+                self.mark_bowed_out();
                 BOW_OUT
             } else {
                 APOLOGY
@@ -812,6 +813,12 @@ impl Driver {
     }
 
     /// The row id of the new assistant row.
+    fn mark_bowed_out(&self) {
+        if let Err(e) = super::mark_bowed_out(&crate::db_guard(&self.deps.db), &self.deps.call_id) {
+            eprintln!("voice: recording the bow-out of {} failed: {e:#}", self.deps.call_id);
+        }
+    }
+
     fn append_assistant(&self, text: &str) -> Option<i64> {
         let conn = crate::db_guard(&self.deps.db);
         match crate::talk::append_assistant(

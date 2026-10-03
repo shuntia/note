@@ -698,6 +698,7 @@ const MIGRATIONS: &[&str] = &[
     );
     ALTER TABLE voice_calls ADD COLUMN conversation_id INTEGER REFERENCES conversations(id) ON DELETE SET NULL;
     ALTER TABLE voice_calls ADD COLUMN last_reply INTEGER NOT NULL DEFAULT 1;
+    ALTER TABLE voice_calls ADD COLUMN bowed_out INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE conversations ADD COLUMN via_next TEXT NOT NULL DEFAULT 'web'
         CHECK (via_next IN ('web','telegram','voice'));
     UPDATE conversations SET via_next = via;

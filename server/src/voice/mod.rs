@@ -288,10 +288,10 @@ fn end_call(
 }
 
 /// A call whose message was spoken into a thread does not fall through: it
-/// is stamped delivered. True when it did.
+/// is stamped delivered, unless the call bowed out. True when it was stamped.
 fn held_conversation(conn: &Connection, call_id: &str, now: jiff::Timestamp) -> rusqlite::Result<bool> {
     let n = conn.execute(
-        "UPDATE voice_calls SET fell_through_at = ?2 WHERE id = ?1 AND conversation_id IS NOT NULL",
+        "UPDATE voice_calls SET fell_through_at = ?2 WHERE id = ?1 AND conversation_id IS NOT NULL AND bowed_out = 0",
         (call_id, now.to_string()),
     )?;
     Ok(n > 0)
@@ -894,6 +894,29 @@ mod tests {
         settle().await;
         assert_eq!(mock.seen().len(), 1);
         assert_eq!(voice.redrive(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_answered_call_that_bowed_out_falls_through_once() {
+        use crate::providers::mock::StreamPiece::Fail;
+        let t = talking((0..5).map(|i| if i == 0 { vec![] } else { vec![Fail("status 400")] }).collect());
+        let id = answered_and_spoken(&t).await;
+        t.voice.handler.apply(&id, 3, CallBody::Commit { turn: 1, text: "hello?".into() }).unwrap();
+        let v = t.voice.clone();
+        note_voice_proto::testkit::eventually("the apology", || frames(&v, &id).contains(&CallBody::Play { reply: 3 })).await;
+        t.voice.handler.apply(&id, 4, CallBody::Commit { turn: 2, text: "are you there?".into() }).unwrap();
+        note_voice_proto::testkit::eventually("the bow-out", || frames(&v, &id).contains(&CallBody::HangUp)).await;
+        let bowed: bool = crate::db_guard(&t.voice.db)
+            .query_row("SELECT bowed_out FROM voice_calls WHERE id = ?1", [&id], |r| r.get(0))
+            .unwrap();
+        assert!(bowed, "recorded before the hang-up goes out");
+        t.voice.handler.apply(&id, 5, CallBody::Ended).unwrap();
+        settle().await;
+        assert_eq!(t.mock.seen().len(), 1, "the promised message is sent");
+        assert_eq!(t.voice.redrive(), 0);
+        let reborn = Voice::new(t.voice.db.clone());
+        reborn.set_fallback(vec![t.mock.clone()]);
+        assert_eq!(reborn.redrive(), 0, "a restart does not send it again");
     }
 
     #[tokio::test(flavor = "multi_thread")]

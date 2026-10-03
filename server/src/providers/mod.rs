@@ -282,7 +282,8 @@ pub fn build(cfg: &crate::config::ProvidersConfig) -> Result<Providers> {
 }
 
 /// A call's reply model: for an `openai` provider, `[voice] model` (else the
-/// main model) with reasoning off and `OpenRouter`'s `provider.sort`; any other
+/// main model) with reasoning off unless `[voice] reasoning_off = false`, and
+/// `OpenRouter`'s `provider.sort`; any other
 /// provider speaks on `main` as is.
 pub fn build_voice(
     cfg: &crate::config::ProvidersConfig,
@@ -300,8 +301,10 @@ pub fn build_voice(
         &key,
         ChatAgents::new(p.timeout_secs, p.background_timeout_secs),
         reasoning_effort(p)?,
-    )
-    .without_reasoning();
+    );
+    if voice.reasoning_off {
+        llm = llm.without_reasoning();
+    }
     if let Some(sort) = &voice.provider_sort {
         llm = llm.with_extra(serde_json::json!({"provider": {"sort": sort}}));
     }
@@ -452,6 +455,26 @@ mod tests {
         assert_eq!(llm.model().as_deref(), Some("fast"));
         let unset: crate::config::VoiceConfig = toml::from_str("socket = \"/run/v.sock\"").unwrap();
         assert_eq!(build_voice(&cfg, &unset, &main).unwrap().model().as_deref(), Some("m"));
+    }
+
+    #[test]
+    fn a_call_switches_reasoning_off_unless_told_not_to() {
+        let reply = r#"{"choices":[{"message":{"content":"hi"}}]}"#;
+        let main: Arc<dyn LLMProvider> = Arc::new(mock::NullLLM);
+        let req = ChatRequest { system: "s", messages: &[], tools: &[], background: false };
+        let sent = |toml: &str| {
+            let (base, rx) = crate::testhttp::serve(vec![("200 OK", reply)]);
+            let mut p = file_key_config(std::path::PathBuf::new());
+            p.base_url = base;
+            let cfg = crate::config::ProvidersConfig { llm: Some(p), embeddings: None };
+            let voice: crate::config::VoiceConfig = toml::from_str(toml).unwrap();
+            build_voice(&cfg, &voice, &main).unwrap().chat(&req).unwrap();
+            crate::testhttp::body_json(&rx.recv().unwrap())
+        };
+        let on = sent("socket = \"/run/v.sock\"");
+        assert_eq!(on["reasoning"], serde_json::json!({"enabled": false}));
+        let off = sent("socket = \"/run/v.sock\"\nreasoning_off = false");
+        assert!(off.get("reasoning").is_none(), "{off}");
     }
 
     #[test]
