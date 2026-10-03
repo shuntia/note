@@ -1,7 +1,9 @@
 pub mod links;
 pub mod outbox;
+pub mod standin;
 
 use crate::channels::{Channel, OutboundMessage};
+pub use standin::{Conversation, StandIn};
 use note_voice_proto::{
     BoxFuture, CallBody, Dir, Handler, Outcome, Peer, PeerConfig, Refusal, RefusalCode, Reply,
     Request, Role, VoiceProfile,
@@ -15,10 +17,11 @@ pub const RING_SECS: u32 = 30;
 pub const RING_BY_SECS: i64 = 10;
 pub const STALE_START_SECS: i64 = 20;
 pub const STALE_RING_SECS: i64 = 90;
+pub const STALE_LIVE_SECS: i64 = 40 * 60;
 
 type Ladder = Arc<OnceLock<Vec<Arc<dyn Channel>>>>;
 
-/// The user already has a ring starting or ringing.
+/// The user already has a call starting, ringing or live.
 #[derive(Debug, thiserror::Error)]
 #[error("a ring is already under way")]
 pub struct RingBusy;
@@ -42,9 +45,15 @@ impl Voice {
 
     fn with_outbox(db: Arc<Mutex<Connection>>, cfg: PeerConfig, outbox: Box<dyn note_voice_proto::Outbox>) -> Arc<Voice> {
         let fallback: Ladder = Arc::new(OnceLock::new());
-        let handler =
-            Arc::new(NoteHandler { db: db.clone(), fallback: fallback.clone(), in_flight: Arc::default() });
+        let handler = Arc::new(NoteHandler {
+            db: db.clone(),
+            fallback: fallback.clone(),
+            in_flight: Arc::default(),
+            conversation: Arc::new(StandIn::new(db.clone())),
+            peer: OnceLock::new(),
+        });
         let peer = Peer::new(cfg, Dir::ToVoice, handler.clone(), outbox);
+        let _ = handler.peer.set(peer.clone());
         Arc::new(Voice { db, peer, handler, fallback })
     }
 
@@ -115,7 +124,7 @@ impl Voice {
         {
             let conn = crate::db_guard(&self.db);
             let busy: bool = conn.query_row(
-                "SELECT EXISTS (SELECT 1 FROM voice_calls WHERE user_id = ?1 AND state IN ('starting', 'ringing'))",
+                "SELECT EXISTS (SELECT 1 FROM voice_calls WHERE user_id = ?1 AND state != 'ended')",
                 [user_id],
                 |r| r.get(0),
             )?;
@@ -152,8 +161,9 @@ impl Voice {
         Ok(id)
     }
 
-    /// Fails every call the voice side never took up or never reported the
-    /// end of, and returns how many. Does nothing until the fallback is set.
+    /// Fails every call the voice side never took up, never reported the end
+    /// of, or that stayed live past `STALE_LIVE_SECS`, and returns how many.
+    /// Does nothing until the fallback is set.
     pub fn sweep(&self, now: jiff::Timestamp) -> usize {
         if self.fallback.get().is_none() {
             return 0;
@@ -191,13 +201,15 @@ impl Voice {
     /// Each stale call's id and the state it went stale in.
     fn stale_calls(&self, now: jiff::Timestamp) -> Vec<(String, String)> {
         let cutoff = |state: &str| {
-            let secs = if state == "ringing" { STALE_RING_SECS } else { STALE_START_SECS };
+            let secs = match state {
+                "ringing" => STALE_RING_SECS,
+                "answered" => STALE_LIVE_SECS,
+                _ => STALE_START_SECS,
+            };
             now - jiff::SignedDuration::from_secs(secs)
         };
         let conn = crate::db_guard(&self.db);
-        let Ok(mut stmt) =
-            conn.prepare("SELECT id, state, ring_by FROM voice_calls WHERE state IN ('starting', 'ringing')")
-        else {
+        let Ok(mut stmt) = conn.prepare("SELECT id, state, ring_by FROM voice_calls WHERE state != 'ended'") else {
             return Vec::new();
         };
         let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)));
@@ -250,6 +262,13 @@ fn end_call(
     .optional()
 }
 
+fn state(conn: &Connection, call_id: &str) -> Result<Option<String>, String> {
+    use rusqlite::OptionalExtension;
+    conn.query_row("SELECT state FROM voice_calls WHERE id = ?1", [call_id], |r| r.get(0))
+        .optional()
+        .map_err(|e| e.to_string())
+}
+
 fn claim(set: &Mutex<HashSet<String>>) -> std::sync::MutexGuard<'_, HashSet<String>> {
     set.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
@@ -258,9 +277,24 @@ pub(crate) struct NoteHandler {
     db: Arc<Mutex<Connection>>,
     fallback: Ladder,
     in_flight: Arc<Mutex<HashSet<String>>>,
+    conversation: Arc<dyn Conversation>,
+    peer: OnceLock<Peer>,
 }
 
 impl NoteHandler {
+    /// Runs the conversation on a stored frame of a live call, then sends
+    /// what it said.
+    fn converse(&self, call_id: &str, body: &CallBody) {
+        let said = std::cell::RefCell::new(Vec::new());
+        self.conversation.on_frame(call_id, body, &|b| said.borrow_mut().push(b));
+        let Some(peer) = self.peer.get() else { return };
+        for b in said.into_inner() {
+            if let Err(e) = peer.send_call(call_id, b) {
+                eprintln!("voice: journaling a reply for {call_id} failed: {e}");
+            }
+        }
+    }
+
     /// A call does not carry the message's content yet, so every ring is
     /// followed by the message through the rest of the ladder. Delivery is
     /// stamped in `fell_through_at`, and a call already stamped or already
@@ -335,7 +369,7 @@ impl Handler for NoteHandler {
             return Err("the fallback ladder is not set yet".into());
         }
         let now = jiff::Timestamp::now();
-        let ended = {
+        let (ended, live) = {
             let conn = crate::db_guard(&self.db);
             let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
             let known = tx
@@ -352,6 +386,13 @@ impl Handler for NoteHandler {
                         )
                         .map_err(|e| e.to_string())?;
                     }
+                    CallBody::Outcome { outcome: Outcome::Answered } => {
+                        tx.execute(
+                            "UPDATE voice_calls SET state = 'answered' WHERE id = ?1 AND state IN ('starting', 'ringing')",
+                            [call_id],
+                        )
+                        .map_err(|e| e.to_string())?;
+                    }
                     CallBody::Outcome { outcome } => {
                         ended = end_call(&tx, call_id, outcome.as_str(), None, now).map_err(|e| e.to_string())?;
                         if let (Some((user_id, _)), Outcome::Failed { reason }) = (&ended, outcome) {
@@ -359,7 +400,8 @@ impl Handler for NoteHandler {
                         }
                     }
                     CallBody::Ended => {
-                        ended = end_call(&tx, call_id, "failed", None, now).map_err(|e| e.to_string())?;
+                        let outcome = if state(&tx, call_id)?.as_deref() == Some("answered") { "answered" } else { "failed" };
+                        ended = end_call(&tx, call_id, outcome, None, now).map_err(|e| e.to_string())?;
                         tx.execute("DELETE FROM voice_frames WHERE call_id = ?1", [call_id])
                             .map_err(|e| e.to_string())?;
                     }
@@ -377,9 +419,13 @@ impl Handler for NoteHandler {
                     | CallBody::Played { .. } => {}
                 }
             }
+            let live = known && state(&tx, call_id)?.as_deref() == Some("answered");
             tx.commit().map_err(|e| e.to_string())?;
-            ended
+            (ended, live)
         };
+        if live {
+            self.converse(call_id, &body);
+        }
         if let Some((user_id, message)) = ended {
             self.fall_through(call_id, user_id, message);
         }
@@ -661,6 +707,79 @@ mod tests {
         settle().await;
         assert_eq!(mock.seen().len(), 1);
         assert_eq!(voice.redrive(), 0);
+        settle().await;
+        assert_eq!(mock.seen().len(), 1);
+    }
+
+    fn answered(voice: &Voice) -> String {
+        let id = voice.start_call(1, &link(), &msg(), jiff::Timestamp::now()).unwrap();
+        voice.handler.apply(&id, 1, CallBody::Ringing).unwrap();
+        voice.handler.apply(&id, 2, CallBody::Outcome { outcome: Outcome::Answered }).unwrap();
+        id
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_answered_call_stays_live_and_speaks_the_message() {
+        let (voice, mock) = rig();
+        let id = answered(&voice);
+        let state: String = crate::db_guard(&voice.db)
+            .query_row("SELECT state FROM voice_calls WHERE id = ?1", [&id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(state, "answered");
+        let sent = frames(&voice, &id);
+        assert!(sent.contains(&CallBody::Speak { reply: 1, idx: 0, text: "Check-in.".into() }));
+        assert!(sent.iter().any(|b| matches!(b, CallBody::Speak { reply: 1, idx: 1, text } if text.contains("essay"))));
+        assert!(sent.contains(&CallBody::SpeakDone { reply: 1 }));
+        assert!(sent.contains(&CallBody::Play { reply: 1 }));
+        settle().await;
+        assert!(mock.seen().is_empty(), "nothing falls through while the call is live");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_committed_turn_gets_the_stand_in_reply() {
+        let (voice, _mock) = rig();
+        let id = answered(&voice);
+        voice.handler.apply(&id, 3, CallBody::Draft { turn: 1, text: "hel".into() }).unwrap();
+        voice.handler.apply(&id, 4, CallBody::Commit { turn: 1, text: "hello".into() }).unwrap();
+        let sent = frames(&voice, &id);
+        let reply: Vec<&str> = sent
+            .iter()
+            .filter_map(|b| match b {
+                CallBody::Speak { reply: 2, text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reply.join(" "), "I heard: hello. The conversation part comes next.");
+        assert!(sent.contains(&CallBody::SpeakDone { reply: 2 }));
+        assert!(sent.contains(&CallBody::Play { reply: 2 }));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ended_after_answered_records_answered_and_falls_through_once() {
+        let (voice, mock) = rig();
+        let id = answered(&voice);
+        voice.handler.apply(&id, 3, CallBody::Ended).unwrap();
+        settle().await;
+        assert_eq!(mock.seen().len(), 1, "one fallthrough");
+        let (state, outcome): (String, String) = crate::db_guard(&voice.db)
+            .query_row("SELECT state, outcome FROM voice_calls WHERE id = ?1", [&id], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap();
+        assert_eq!((state.as_str(), outcome.as_str()), ("ended", "answered"));
+        assert_eq!(voice.redrive(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_live_call_is_left_alone_until_it_outlives_the_live_limit() {
+        let (voice, mock) = rig();
+        let id = answered(&voice);
+        let now = jiff::Timestamp::now();
+        assert_eq!(voice.sweep(now + jiff::SignedDuration::from_secs(STALE_RING_SECS + 60)), 0);
+        assert_eq!(voice.sweep(now + jiff::SignedDuration::from_secs(STALE_LIVE_SECS + 60)), 1);
+        let (state, outcome): (String, String) = crate::db_guard(&voice.db)
+            .query_row("SELECT state, outcome FROM voice_calls WHERE id = ?1", [&id], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap();
+        assert_eq!((state.as_str(), outcome.as_str()), ("ended", "failed"));
+        assert!(frames(&voice, &id).contains(&CallBody::HangUp));
         settle().await;
         assert_eq!(mock.seen().len(), 1);
     }
