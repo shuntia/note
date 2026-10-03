@@ -97,8 +97,48 @@
               fileset = lib.fileset.unions [ ./Cargo.toml ./Cargo.lock ./server ./voice-proto ./voice ./config/defaults ];
             };
           });
+
+          # Loads the live site, so only the shell's own files ship; nixpkgs'
+          # electron stands in for the npm binary, which cannot run on NixOS.
+          desktop = pkgs.stdenv.mkDerivation {
+            pname = "note-desktop";
+            version = (lib.importJSON ./desktop/package.json).version;
+            src = lib.fileset.toSource {
+              root = ./desktop;
+              fileset = lib.fileset.unions [ ./desktop/main.js ./desktop/offline.html ./desktop/package.json ./desktop/icons ];
+            };
+            nativeBuildInputs = with pkgs; [ makeWrapper copyDesktopItems ];
+            desktopItems = [
+              (pkgs.makeDesktopItem {
+                name = "note-desktop";
+                desktopName = "Note";
+                comment = "Daily planning";
+                exec = "note-desktop %U";
+                icon = "note-desktop";
+                categories = [ "Office" ];
+              })
+            ];
+            installPhase = ''
+              runHook preInstall
+              mkdir -p $out/share/note-desktop
+              cp -r main.js offline.html package.json icons $out/share/note-desktop/
+              for f in icons/*x*.png; do
+                size=$(basename $f .png)
+                install -Dm644 $f $out/share/icons/hicolor/$size/apps/note-desktop.png
+              done
+              makeWrapper ${pkgs.electron}/bin/electron $out/bin/note-desktop \
+                --add-flags $out/share/note-desktop \
+                --set NOTE_DESKTOP_EXEC $out/bin/note-desktop
+              runHook postInstall
+            '';
+            meta = {
+              description = "Desktop wrapper for the Note daily planning app";
+              license = lib.licenses.unlicense;
+              mainProgram = "note-desktop";
+            };
+          };
         in
-        { inherit web server voice tests; };
+        { inherit web server voice tests desktop; };
     in {
       nixosModules.default = import ./nix/module.nix self;
 
@@ -113,6 +153,8 @@
           note-server = b.server;
           note-voice = b.voice;
           note-web = b.web;
+          note-desktop = b.desktop;
+          desktop = b.desktop;
         });
 
       checks = forAllSystems (pkgs:
