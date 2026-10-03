@@ -40,6 +40,7 @@ import type {
   VoiceChoice,
 } from '../types'
 import { previewPlayer } from '../voicePreview'
+import { VoiceSheet } from '../voiceSheet'
 import { createCredential, webauthnSupported, type RegistrationJSON } from '../webauthn'
 import { deviceZone, knownDeviceZone } from '../zone'
 
@@ -517,8 +518,8 @@ export function Settings({
     }
   }, [callsLinked])
 
+  const [choosingVoice, setChoosingVoice] = useState(false)
   const pickVoice = async (voice: string) => {
-    preview.play(voice)
     const before = loaded?.voice ?? ''
     setState((s) => (s && s !== 'error' ? { ...s, voice } : s))
     try {
@@ -1007,18 +1008,23 @@ export function Settings({
                       onPick={(v) => void saveRingFor(v)}
                     />
                     {voices && voices.length > 0 && (
-                      <div className="seg set-voices" role="group" aria-label="Voice">
-                        {voices.map((v) => (
-                          <button
-                            key={v.id}
-                            type="button"
-                            aria-pressed={(loaded.voice || voices[0].id) === v.id}
-                            onClick={() => void pickVoice(v.id)}
-                          >
-                            {v.label}
-                          </button>
-                        ))}
-                      </div>
+                      <button type="button" className="set-row set-row-button" onClick={() => setChoosingVoice(true)}>
+                        <span className="set-row-body">
+                          <span className="set-label">Voice</span>
+                        </span>
+                        <span className="set-value">
+                          {(voices.find((v) => v.id === loaded.voice) ?? voices[0]).label}
+                        </span>
+                      </button>
+                    )}
+                    {choosingVoice && voices && (
+                      <VoiceSheet
+                        voices={voices}
+                        chosen={loaded.voice || voices[0].id}
+                        preview={preview}
+                        onPick={(v) => void pickVoice(v)}
+                        onClose={() => setChoosingVoice(false)}
+                      />
                     )}
                     <div className="set-row">
                       <span className="set-row-body">

@@ -1,4 +1,4 @@
-export type Sample = Pick<HTMLAudioElement, 'src' | 'play' | 'pause'>
+export type Sample = Pick<HTMLAudioElement, 'src' | 'play' | 'pause' | 'onended'>
 
 export const previewUrl = (voice: string) => `/api/voice/preview?voice=${encodeURIComponent(voice)}`
 
@@ -6,11 +6,12 @@ export const previewUrl = (voice: string) => `/api/voice/preview?voice=${encodeU
 export function previewPlayer(make: () => Sample = () => new Audio()) {
   let audio: Sample | null = null
   return {
-    play(voice: string) {
+    play(voice: string, onEnd?: () => void) {
       if (audio) audio.pause()
       else audio = make()
+      audio.onended = () => onEnd?.()
       audio.src = previewUrl(voice)
-      void audio.play().catch(() => undefined)
+      void audio.play().catch(() => onEnd?.())
     },
     stop() {
       audio?.pause()
