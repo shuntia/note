@@ -1,0 +1,36 @@
+{
+  "name": "note-desktop",
+  "productName": "Note",
+  "version": "0.1.0",
+  "description": "Desktop wrapper for the Note daily planning app",
+  "license": "Unlicense",
+  "author": "shuntia <shuntia@shuntia.net>",
+  "homepage": "https://note.example.com",
+  "private": true,
+  "main": "main.js",
+  "desktopName": "note-desktop.desktop",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev --url=http://localhost:5173",
+    "dist": "electron-builder --linux AppImage deb"
+  },
+  "devDependencies": {
+    "electron": "43.4.1",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "net.shuntia.note",
+    "productName": "Note",
+    "files": ["main.js", "offline.html", "icons/**"],
+    "directories": { "output": "dist" },
+    "linux": {
+      "target": ["AppImage", "deb"],
+      "icon": "icons",
+      "category": "Office",
+      "executableName": "note-desktop"
+    },
+    "deb": { "maintainer": "shuntia <shuntia@shuntia.net>" },
+    "mac": { "target": ["dmg", "zip"], "icon": "icons/512x512.png", "category": "public.app-category.productivity" },
+    "win": { "target": ["nsis"], "icon": "icons/256x256.png" }
+  }
+}

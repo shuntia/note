@@ -19,8 +19,9 @@ function serviceWorkerReady(): Promise<ServiceWorkerRegistration> {
   return Promise.race([navigator.serviceWorker.ready, timeout])
 }
 
+// Electron exposes PushManager but has no push service behind it.
 export async function pushState(): Promise<'unsupported' | 'off' | 'on'> {
-  if (!('serviceWorker' in navigator) || !('PushManager' in window)) return 'unsupported'
+  if (!('serviceWorker' in navigator) || !('PushManager' in window) || navigator.userAgent.includes('Electron/')) return 'unsupported'
   const reg = await serviceWorkerReady()
   const sub = await reg.pushManager.getSubscription()
   return sub ? 'on' : 'off'
