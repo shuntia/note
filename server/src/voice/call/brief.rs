@@ -21,9 +21,7 @@ pub fn build(
     conversation_id: i64,
     now: jiff::Timestamp,
 ) -> Result<String> {
-    let name = crate::config::UserConfig::load(deps.config_dir, username)?.display_name;
-    let mut brief =
-        system_prompt(deps, user_id, username, SessionKind::Call, now)?.replace("{name}", &name);
+    let mut brief = system_prompt(deps, user_id, username, SessionKind::Call, now)?;
     brief.push_str("\n\n# Why this call\n\n");
     match reason {
         Reason::CheckIn { title, body } => {
@@ -35,14 +33,13 @@ pub fn build(
     if !thread.is_empty() {
         brief.push_str("\n\n# Earlier in this thread\n");
         for message in thread {
-            match message {
-                Message::User(text) => {
-                    let _ = write!(brief, "\nyou: {text}");
-                }
-                Message::Assistant { text, .. } => {
-                    let _ = write!(brief, "\nNote: {text}");
-                }
-                Message::ToolResult { .. } => {}
+            let (who, text) = match &message {
+                Message::User(text) => ("you", text),
+                Message::Assistant { text, .. } => ("Note", text),
+                Message::ToolResult { .. } => continue,
+            };
+            if !text.trim().is_empty() {
+                let _ = write!(brief, "\n{who}: {text}");
             }
         }
     }
@@ -64,6 +61,7 @@ mod tests {
         let now: jiff::Timestamp = "2026-10-02T18:00:00Z".parse().unwrap();
         let thread = crate::talk::create(&conn, 1, "chat", now).unwrap();
         crate::talk::append_text(&conn, thread, "user", "the essay is due friday", now).unwrap();
+        crate::talk::append_text(&conn, thread, "assistant", "   ", now).unwrap();
         crate::talk::append_text(&conn, thread, "assistant", "I'll check in thursday", now)
             .unwrap();
         let db = Mutex::new(conn);
@@ -100,7 +98,13 @@ mod tests {
         assert!(brief.starts_with("You are Note, on a phone call with Aki."), "{brief}");
         assert!(brief.contains("You called about: Essay. You opened with: How is the essay going?"));
         assert!(brief.contains("you: the essay is due friday"), "{brief}");
-        assert!(brief.contains("Note: I'll check in thursday"), "{brief}");
+        let user_at = brief.find("you: the essay is due friday").expect(&brief);
+        let note_at = brief.find("Note: I'll check in thursday").expect(&brief);
+        assert!(user_at < note_at, "{brief}");
+        assert!(
+            brief.ends_with("# Earlier in this thread\n\nyou: the essay is due friday\nNote: I'll check in thursday"),
+            "a blank row renders no line: {brief}"
+        );
         assert!(!brief.contains("{name}"));
     }
 
@@ -120,6 +124,9 @@ mod tests {
         )
         .unwrap();
         std::fs::write(tmp.path().join("defaults/prompts/voice.md"), "call {name}").unwrap();
+        let standing = crate::context::standing_path(tmp.path(), "aki");
+        std::fs::create_dir_all(standing.parent().unwrap()).unwrap();
+        std::fs::write(standing, "write {name} on the form").unwrap();
         let llm = MockLLM::scripted(vec![]);
         let deps = SessionDeps {
             db: &db,
@@ -137,6 +144,7 @@ mod tests {
         };
         let brief = build(&deps, 1, "aki", &Reason::UserCalled, thread, now).unwrap();
         assert!(brief.starts_with("call Aki"));
+        assert!(brief.contains("write {name} on the form"), "the user's context is left as written");
         assert!(brief.ends_with("# Why this call\n\nThe user called you."), "{brief}");
     }
 }

@@ -696,7 +696,7 @@ const MIGRATIONS: &[&str] = &[
         finished_at TEXT,
         PRIMARY KEY (call_id, job)
     );
-    ALTER TABLE voice_calls ADD COLUMN conversation_id INTEGER REFERENCES conversations(id);
+    ALTER TABLE voice_calls ADD COLUMN conversation_id INTEGER REFERENCES conversations(id) ON DELETE SET NULL;
     ALTER TABLE conversations ADD COLUMN via_next TEXT NOT NULL DEFAULT 'web'
         CHECK (via_next IN ('web','telegram','voice'));
     UPDATE conversations SET via_next = via;
@@ -2007,11 +2007,22 @@ mod tests {
                 (n, state),
             )
         };
+        conn.execute(
+            "INSERT INTO voice_calls (id, user_id, direction, state, ring_by, created_at, conversation_id)
+             VALUES ('c2', 1, 'outbound', 'ended', 'x', 'x', 1)",
+            [],
+        )
+        .unwrap();
         job(1, "running").unwrap();
         assert!(job(1, "done").is_err(), "a job number is one row per call");
         assert!(job(2, "lost").is_err(), "the state is a closed set");
         conn.execute("DELETE FROM voice_calls WHERE id = 'c1'", []).unwrap();
         let left: i64 = conn.query_row("SELECT COUNT(*) FROM voice_jobs", [], |r| r.get(0)).unwrap();
         assert_eq!(left, 0, "jobs go with their call");
+        conn.execute("DELETE FROM conversations WHERE id = 1", []).unwrap();
+        let thread: Option<i64> = conn
+            .query_row("SELECT conversation_id FROM voice_calls WHERE id = 'c2'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(thread, None, "a deleted thread leaves its call standing");
     }
 }

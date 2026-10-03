@@ -164,7 +164,10 @@ pub(crate) fn system_prompt(
         SessionKind::Harvest => crate::prompts::load(deps.config_dir, username, "harvest")?,
         SessionKind::Review => crate::prompts::load(deps.config_dir, username, "review")?,
         SessionKind::Share => crate::prompts::load(deps.config_dir, username, "share")?,
-        SessionKind::Call => crate::prompts::load(deps.config_dir, username, "voice")?,
+        SessionKind::Call => {
+            let display = crate::config::UserConfig::load(deps.config_dir, username).map_or_else(|_| username.to_string(), |c| c.display_name);
+            crate::prompts::load(deps.config_dir, username, "voice")?.replace("{name}", &display)
+        }
         _ => crate::prompts::load(deps.config_dir, username, "persona")?,
     };
     if kind == SessionKind::Nightly {
