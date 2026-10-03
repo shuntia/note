@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{anyhow, Context};
@@ -76,11 +77,15 @@ impl Engines {
                 recognizer: Arc::new(recognizer(set).with_context(|| format!("loading the {code} recognizer"))?),
                 turn: Arc::new(OrtTurn::create(&set.turn).with_context(|| format!("loading the {code} turn model"))?),
                 tts: Arc::new(
-                    SherpaTts::create(code, set, device).with_context(|| format!("loading the {code} voice"))?,
+                    SherpaTts::create(code, set, device, GpuAttempt::Try)
+                        .with_context(|| format!("loading the {code} voice"))?,
                 ),
             };
             language.tts.synthesize("Hello.", "")?;
-            language.turn.complete(&vec![0.0; SAMPLE_RATE as usize]);
+            language
+                .turn
+                .run(&vec![0.0; SAMPLE_RATE as usize])
+                .with_context(|| format!("warming the {code} turn model"))?;
             languages.insert(code.clone(), language);
         }
         Ok(Engines { languages })
@@ -228,6 +233,7 @@ impl SpeechToText for SherpaStt {
 
 struct OrtTurn {
     session: Mutex<ort::session::Session>,
+    warned: AtomicBool,
 }
 
 /// Binds ort to the onnxruntime sherpa-onnx already loaded, so the process holds one;
@@ -260,7 +266,7 @@ impl OrtTurn {
             .with_intra_threads(1)
             .map_err(|e| anyhow!("{e}"))?
             .commit_from_file(model)?;
-        Ok(OrtTurn { session: Mutex::new(session) })
+        Ok(OrtTurn { session: Mutex::new(session), warned: AtomicBool::new(false) })
     }
 
     fn run(&self, samples_16k: &[f32]) -> anyhow::Result<f32> {
@@ -273,26 +279,38 @@ impl OrtTurn {
 }
 
 impl TurnDetector for OrtTurn {
-    /// A failed pass scores 0, so the turn stays open.
+    /// A failed pass scores 0, so the turn stays open; only the first failure is logged.
     fn complete(&self, samples_16k: &[f32]) -> f32 {
         match self.run(samples_16k) {
             Ok(p) => p.clamp(0.0, 1.0),
             Err(e) => {
-                eprintln!("voice: Smart Turn failed: {e:#}");
+                if !self.warned.swap(true, Ordering::Relaxed) {
+                    eprintln!("voice: Smart Turn failed: {e:#}");
+                }
                 0.0
             }
         }
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GpuAttempt {
+    Try,
+    /// Treats the GPU engine as unavailable without asking sherpa-onnx for it.
+    #[cfg(test)]
+    Fail,
+}
+
 struct SherpaTts {
     tts: OfflineTts,
+    #[cfg_attr(not(test), allow(dead_code))]
+    provider: &'static str,
     set: ModelSet,
     language: String,
 }
 
 impl SherpaTts {
-    fn create(language: &str, set: &ModelSet, device: Device) -> anyhow::Result<Self> {
+    fn create(language: &str, set: &ModelSet, device: Device, gpu: GpuAttempt) -> anyhow::Result<Self> {
         let config = |provider: &str| -> anyhow::Result<OfflineTtsConfig> {
             Ok(OfflineTtsConfig {
                 model: OfflineTtsModelConfig {
@@ -310,22 +328,33 @@ impl SherpaTts {
                 ..Default::default()
             })
         };
-        let mut tts = None;
+        let mut cuda = None;
         if device != Device::Cpu {
-            let gpu = std::env::var("NOTE_VOICE_FORCE_TTS_PROVIDER").unwrap_or_else(|_| "cuda".into());
-            tts = OfflineTts::create(&config(&gpu)?);
-            if tts.is_none() {
+            if gpu == GpuAttempt::Try {
+                cuda = OfflineTts::create(&config("cuda")?);
+            }
+            if cuda.is_none() {
                 eprintln!("voice: CUDA TTS unavailable, using the CPU");
             }
         }
-        let tts = match tts {
-            Some(t) => t,
-            None => OfflineTts::create(&config("cpu")?).ok_or_else(|| anyhow!("sherpa-onnx refused the TTS config"))?,
+        let (tts, provider) = match cuda {
+            Some(t) => (t, "cuda"),
+            None => (
+                OfflineTts::create(&config("cpu")?).ok_or_else(|| anyhow!("sherpa-onnx refused the TTS config"))?,
+                "cpu",
+            ),
         };
         if tts.sample_rate() != KOKORO_RATE {
             anyhow::bail!("expected {KOKORO_RATE} Hz from the TTS, got {}", tts.sample_rate());
         }
-        Ok(SherpaTts { tts, set: set.clone(), language: language.into() })
+        Ok(SherpaTts { tts, provider, set: set.clone(), language: language.into() })
+    }
+}
+
+impl SherpaTts {
+    #[cfg(test)]
+    pub(crate) fn provider(&self) -> &'static str {
+        self.provider
     }
 }
 
@@ -396,11 +425,9 @@ mod tests {
     #[ignore = "needs NOTE_VOICE_MODELS"]
     fn a_failed_cuda_engine_falls_back_to_cpu() {
         let mut m = models().unwrap();
-        // A provider string sherpa does not know makes CUDA creation fail the same way a missing GPU does.
-        std::env::set_var("NOTE_VOICE_FORCE_TTS_PROVIDER", "nonexistent");
-        let e = Engines::load(&m, Device::Cuda).unwrap();
-        std::env::remove_var("NOTE_VOICE_FORCE_TTS_PROVIDER");
-        assert!(!e.tts("en").synthesize("Hi.", "").unwrap().is_empty());
+        let tts = SherpaTts::create("en", &m["en"], Device::Cuda, GpuAttempt::Fail).unwrap();
+        assert_eq!(tts.provider(), "cpu");
+        assert!(!tts.synthesize("Hi.", "").unwrap().is_empty());
         m.clear();
         assert!(Engines::load(&m, Device::Auto).unwrap().languages().is_empty());
     }
