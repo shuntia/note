@@ -91,23 +91,34 @@ pub fn run(
 
 #[derive(Default)]
 struct ReplyRecord {
-    /// The clauses sent as `Speak`, joined with spaces.
-    full_text: String,
+    /// The clauses sent as `Speak`.
+    clauses: Vec<String>,
+    /// Counted over the clauses' own chars, with no separators between them.
     heard_chars: Option<u32>,
     message: Option<usize>,
     row: Option<i64>,
 }
 
 impl ReplyRecord {
+    /// The clauses joined with spaces, cut with `…` where a barge-in stopped them.
     fn heard_text(&self) -> String {
-        let cut = self
-            .heard_chars
-            .and_then(|n| self.full_text.char_indices().nth(n as usize))
-            .map(|(at, _)| at);
-        match cut {
-            Some(at) => format!("{}…", &self.full_text[..at]),
-            None => self.full_text.clone(),
+        let Some(mut left) = self.heard_chars.map(|n| n as usize) else {
+            return self.clauses.join(" ");
+        };
+        let mut heard: Vec<String> = Vec::new();
+        for clause in &self.clauses {
+            let len = clause.chars().count();
+            if left >= len {
+                heard.push(clause.clone());
+                left -= len;
+                continue;
+            }
+            if left > 0 {
+                heard.push(clause.chars().take(left).collect());
+            }
+            return format!("{}…", heard.join(" "));
         }
+        heard.join(" ")
     }
 }
 
@@ -162,6 +173,8 @@ struct Driver {
     in_flight: Option<InFlight>,
     replies: HashMap<u64, ReplyRecord>,
     ending: bool,
+    /// The reply whose turn called `hang_up`.
+    hang_up_reply: Option<u64>,
     /// Turns in a row that failed with nothing said or called.
     failed_turns: u32,
     trace: crate::trace::Builder,
@@ -217,6 +230,7 @@ impl Driver {
             in_flight: None,
             replies: HashMap::new(),
             ending: false,
+            hang_up_reply: None,
             failed_turns: 0,
             trace: crate::trace::Builder::new(SessionKind::Call, opening),
             last_reply: String::new(),
@@ -264,7 +278,7 @@ impl Driver {
         self.replies.insert(
             reply,
             ReplyRecord {
-                full_text: clauses.join(" "),
+                clauses: clauses.to_vec(),
                 heard_chars: None,
                 message: Some(self.messages.len() - 1),
                 row,
@@ -346,7 +360,7 @@ impl Driver {
         if self
             .replies
             .get(&reply)
-            .is_some_and(|r| !r.full_text.is_empty())
+            .is_some_and(|r| !r.clauses.is_empty())
         {
             self.queue.note_playing(true, now);
         }
@@ -372,6 +386,10 @@ impl Driver {
     }
 
     fn on_barge_in(&mut self, reply: u64, heard_chars: u32) {
+        if self.hang_up_reply == Some(reply) {
+            self.hang_up_reply = None;
+            self.ending = false;
+        }
         let Some(record) = self.replies.get_mut(&reply) else {
             return;
         };
@@ -536,10 +554,7 @@ impl Driver {
         else {
             return;
         };
-        if !record.full_text.is_empty() {
-            record.full_text.push(' ');
-        }
-        record.full_text.push_str(&text);
+        record.clauses.push(text.clone());
         (self.deps.send)(CallBody::Speak { reply, idx, text });
         let Some(f) = self.in_flight.as_mut() else {
             return;
@@ -575,6 +590,7 @@ impl Driver {
         match call.name.as_str() {
             "hang_up" => {
                 self.ending = true;
+                self.hang_up_reply = Some(reply);
                 (serde_json::json!({"ok": true}).to_string(), false)
             }
             "cancel_job" => match serde_json::from_str::<CancelJobArgs>(&call.args) {
@@ -638,7 +654,7 @@ impl Driver {
         }
         push_user(&mut self.messages, f.input);
         let (spoken_any, heard) = match self.replies.get(&f.reply) {
-            Some(record) => (!record.full_text.is_empty(), record.heard_text()),
+            Some(record) => (!record.clauses.is_empty(), record.heard_text()),
             None => (false, String::new()),
         };
         let mut message = None;
@@ -700,7 +716,7 @@ impl Driver {
             .job_meta
             .get(&done.job)
             .is_some_and(|meta| !meta.written);
-        if settled {
+        if settled && done.outcome != JobOutcome::Cancelled {
             self.queue.push(
                 Item::Job {
                     job: done.job,
@@ -1550,6 +1566,113 @@ mod tests {
         };
         let args: Vec<&str> = tool_calls.iter().map(|c| c.args.as_str()).collect();
         assert_eq!(args, vec!["{}", "{}"]);
+        h.stop();
+    }
+
+    #[test]
+    fn heard_chars_cut_over_the_clauses_without_separators() {
+        let record = |heard| ReplyRecord {
+            clauses: vec!["One sec,".into(), "here it is.".into()],
+            heard_chars: heard,
+            ..ReplyRecord::default()
+        };
+        assert_eq!(record(None).heard_text(), "One sec, here it is.");
+        assert_eq!(record(Some(10)).heard_text(), "One sec, he…");
+        assert_eq!(record(Some(8)).heard_text(), "One sec,…");
+        assert_eq!(record(Some(19)).heard_text(), "One sec, here it is.");
+    }
+
+    #[test]
+    fn a_job_cancelled_by_the_model_does_not_wake_it() {
+        let mut h = start(
+            vec![
+                vec![
+                    Text("Searching."),
+                    Calls(call("t1", "web_search", r#"{"q":"x"}"#)),
+                ],
+                vec![
+                    Text("Okay, stopped."),
+                    Calls(call("t2", "cancel_job", r#"{"job":1}"#)),
+                ],
+                vec![Text("Woke.")],
+            ],
+            &[("web_search", 2000, "{}")],
+            None,
+            "",
+        );
+        h.frame(CallBody::Commit {
+            turn: 1,
+            text: "look it up".into(),
+        });
+        h.expect(&[
+            speak(2, 0, "Searching."),
+            CallBody::Play { reply: 2 },
+            CallBody::SpeakDone { reply: 2 },
+        ]);
+        h.frame(CallBody::Commit {
+            turn: 2,
+            text: "never mind".into(),
+        });
+        h.expect(&[
+            speak(3, 0, "Okay, stopped."),
+            CallBody::Play { reply: 3 },
+            CallBody::SpeakDone { reply: 3 },
+        ]);
+        h.wait_for("the cancel to be recorded", |h| {
+            h.rows()
+                .contains(&row("tool", r#"{"cancelled":true,"job":1}"#, Some("web_search")))
+        });
+        h.frame(CallBody::Floor {
+            floor: Floor::Drained,
+        });
+        assert_eq!(h.quiet(50), vec![]);
+        let mut sent = Vec::new();
+        for _ in 0..30 {
+            h.now_ms.fetch_add(100, Ordering::SeqCst);
+            h.tx.send(DriverIn::Tick).unwrap();
+            sent.extend(h.quiet(10));
+        }
+        assert_eq!(sent, vec![], "nothing new to tell the model");
+        assert_eq!(h.llm.seen().len(), 2);
+        h.stop();
+    }
+
+    #[test]
+    fn a_barge_in_on_the_goodbye_keeps_the_call_going() {
+        let mut h = start(
+            vec![
+                vec![
+                    Text("Bye then."),
+                    Calls(call("t1", "hang_up", "{}")),
+                    StreamPiece::Wait(Duration::from_millis(400)),
+                ],
+                vec![Text("Sure, go on.")],
+            ],
+            &[],
+            None,
+            "",
+        );
+        h.frame(CallBody::Commit {
+            turn: 1,
+            text: "that's all".into(),
+        });
+        h.expect(&[speak(2, 0, "Bye then."), CallBody::Play { reply: 2 }]);
+        assert_eq!(h.quiet(50), vec![]);
+        h.frame(CallBody::BargeIn {
+            reply: 2,
+            heard_chars: 3,
+        });
+        h.frame(CallBody::Commit {
+            turn: 2,
+            text: "wait, one more thing".into(),
+        });
+        h.expect(&[
+            CallBody::SpeakDone { reply: 2 },
+            speak(3, 0, "Sure, go on."),
+            CallBody::Play { reply: 3 },
+            CallBody::SpeakDone { reply: 3 },
+        ]);
+        assert_eq!(h.quiet(100), vec![], "no hang-up");
         h.stop();
     }
 
