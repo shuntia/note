@@ -117,7 +117,68 @@ pub const MAX_BATCH_CALLS: usize = 10;
 pub struct BatchCall {
     pub tool: String,
     #[serde(default)]
+    #[schemars(extend("type" = "object"))]
     pub args: serde_json::Value,
+}
+
+/// Reads a batch sub-call's arguments the way the tool's own schema would have
+/// shaped them: the batch schema cannot carry each tool's types, so a model
+/// writes `"42"` for an id or sends the whole object as a JSON string. Only
+/// strings that parse cleanly into the declared type are changed.
+pub fn coerce_batch_args(tool: &str, args: serde_json::Value) -> serde_json::Value {
+    let mut args = match args {
+        serde_json::Value::String(s) => match serde_json::from_str(&s) {
+            Ok(v @ serde_json::Value::Object(_)) => v,
+            _ => serde_json::Value::String(s),
+        },
+        v => v,
+    };
+    let (_, root) = describe(tool);
+    coerce(&mut args, &root, &root);
+    args
+}
+
+fn coerce(value: &mut serde_json::Value, schema: &serde_json::Value, root: &serde_json::Value) {
+    use serde_json::Value;
+    if let Some(name) = schema["$ref"].as_str().and_then(|r| r.strip_prefix("#/$defs/")) {
+        return coerce(value, &root["$defs"][name], root);
+    }
+    if let Some(branch) = schema["anyOf"]
+        .as_array()
+        .and_then(|bs| bs.iter().find(|b| b["type"] != "null"))
+    {
+        return coerce(value, branch, root);
+    }
+    let types: Vec<&str> = match &schema["type"] {
+        Value::String(t) => vec![t.as_str()],
+        Value::Array(ts) => ts.iter().filter_map(Value::as_str).collect(),
+        _ => Vec::new(),
+    };
+    match value {
+        Value::String(s) if !types.contains(&"string") => {
+            let s = s.trim();
+            if let (true, Ok(n)) = (types.contains(&"integer"), s.parse::<i64>()) {
+                *value = n.into();
+            } else if let (true, Some(n)) =
+                (types.contains(&"number"), s.parse::<f64>().ok().and_then(serde_json::Number::from_f64))
+            {
+                *value = Value::Number(n);
+            } else if let (true, Ok(b)) = (types.contains(&"boolean"), s.parse::<bool>()) {
+                *value = b.into();
+            }
+        }
+        Value::Object(map) => {
+            for (k, v) in map.iter_mut() {
+                coerce(v, &schema["properties"][k], root);
+            }
+        }
+        Value::Array(items) => {
+            for v in items {
+                coerce(v, &schema["items"], root);
+            }
+        }
+        _ => {}
+    }
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]

@@ -458,8 +458,11 @@ fn run_batch(
             continue;
         }
         *tool_calls += 1;
-        let sub_args = match &sub.args {
+        let sub_args = match sub.args {
             serde_json::Value::Null => "{}".to_string(),
+            v if tools::registry(env.kind).contains(&sub.tool.as_str()) => {
+                tools::coerce_batch_args(&sub.tool, v).to_string()
+            }
             v => v.to_string(),
         };
         let (content, is_error) = env.step(&sub.tool, &sub_args, steps, thinking, trace, on_event);
@@ -1091,6 +1094,39 @@ mod tests {
             rows.collect::<rusqlite::Result<_>>().unwrap()
         };
         assert_eq!(titles, vec!["buy milk", "call the dentist"]);
+    }
+
+    #[test]
+    fn a_batch_reads_quoted_numbers_and_stringified_args_by_the_tool_schema() {
+        let (db, tmp) = env();
+        let llm = MockLLM::scripted(vec![
+            batch_call(
+                "b1",
+                &serde_json::json!([
+                    { "tool": "task_create", "args": { "title": "buy milk", "is_now": "true" } },
+                    { "tool": "task_update", "args": { "task_id": "1", "duration_min": "30", "state": "in_progress" } },
+                    { "tool": "task_update", "args": "{\"task_id\": 1, \"progress\": \"40\"}" },
+                    { "tool": "task_update", "args": { "task_id": "one", "state": "done" } },
+                ]),
+            ),
+            ChatResponse { text: "done".into(), tool_calls: vec![] },
+        ]);
+        run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, now(), &[], "milk").unwrap();
+
+        let (result, _) = batch_result(&llm, 1);
+        let results = result["results"].as_array().unwrap();
+        for (i, r) in results.iter().enumerate().take(3) {
+            assert_eq!(r["ok"], true, "call {i}: {r}");
+        }
+        assert_eq!(results[3]["ok"], false, "a string that is no number stays a string");
+
+        let conn = db.lock().unwrap();
+        let row: (String, i64, i64) = conn
+            .query_row("SELECT state, duration_min, progress FROM tasks WHERE id = 1", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .unwrap();
+        assert_eq!(row, ("in_progress".into(), 30, 40));
     }
 
     #[test]
