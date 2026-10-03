@@ -878,6 +878,34 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn a_frame_before_the_first_sweep_resumes_its_call() {
+        use crate::providers::mock::StreamPiece::Text;
+        let t = talking(vec![vec![Text("Still here.")]]);
+        {
+            let conn = crate::db_guard(&t.voice.db);
+            let now = jiff::Timestamp::now();
+            let conv = crate::talk::create(&conn, 1, "Call", now).unwrap();
+            conn.execute(
+                "INSERT INTO voice_calls (id, user_id, direction, message, state, ring_by, created_at, conversation_id)
+                 VALUES ('c1', 1, 'outbound', ?1, 'answered', ?2, ?2, ?3)",
+                (serde_json::to_string(&msg()).unwrap(), now.to_string(), conv),
+            )
+            .unwrap();
+        }
+        assert!(!t.voice.calls.is_live("c1"));
+        t.voice.handler.apply("c1", 5, CallBody::Commit { turn: 2, text: "hello".into() }).unwrap();
+        assert!(t.voice.calls.is_live("c1"));
+        let llm = t.llm.clone();
+        note_voice_proto::testkit::eventually("the reply model is asked", || !llm.seen().is_empty()).await;
+        let Some(crate::providers::Message::User(block)) = t.llm.seen()[0].messages.last().cloned() else {
+            panic!("{:?}", t.llm.seen()[0].messages)
+        };
+        assert!(block.contains("[note] Note restarted; the call is still on"), "{block}");
+        assert!(block.ends_with("[you] hello"), "{block}");
+        assert_eq!(t.voice.calls.resume(), 0, "the sweeper does not resume it again");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn a_note_restart_resumes_a_live_call() {
         use crate::providers::mock::StreamPiece::Text;
         let t = talking(vec![vec![Text("Still here.")]]);

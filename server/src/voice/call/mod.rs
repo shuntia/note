@@ -70,6 +70,8 @@ pub struct CallSettings {
     pub job_timeout: Duration,
     pub max_jobs: usize,
     pub first_token: Duration,
+    /// No `[voice] model`: each call speaks on the main model of the moment.
+    pub follows_main_model: bool,
 }
 
 impl From<&crate::config::VoiceConfig> for CallSettings {
@@ -80,6 +82,7 @@ impl From<&crate::config::VoiceConfig> for CallSettings {
             job_timeout: Duration::from_secs(v.job_timeout_secs),
             max_jobs: v.max_jobs,
             first_token: Duration::from_millis(v.first_token_ms),
+            follows_main_model: v.model.is_none(),
         }
     }
 }
@@ -93,6 +96,7 @@ impl Default for CallSettings {
             job_timeout: Duration::from_secs(c::default_job_timeout_secs()),
             max_jobs: c::default_max_jobs(),
             first_token: Duration::from_millis(c::default_first_token_ms()),
+            follows_main_model: true,
         }
     }
 }
@@ -125,6 +129,17 @@ impl CallDeps {
             token_id: None,
             thread_note: None,
             share: None,
+        }
+    }
+
+    /// Points the voice model at the main model's current one, unless
+    /// `[voice] model` names its own.
+    fn follow_main_model(&self) {
+        if !self.settings.follows_main_model {
+            return;
+        }
+        if let Some(model) = self.llm.model() {
+            self.voice_llm.set_model(&model);
         }
     }
 
@@ -163,11 +178,12 @@ pub struct CallManager {
     deps: OnceLock<CallDeps>,
     send: CallSender,
     calls: Mutex<HashMap<String, mpsc::Sender<DriverIn>>>,
+    resuming: Mutex<()>,
 }
 
 impl CallManager {
     pub fn new(send: CallSender) -> Self {
-        Self { deps: OnceLock::new(), send, calls: Mutex::default() }
+        Self { deps: OnceLock::new(), send, calls: Mutex::default(), resuming: Mutex::new(()) }
     }
 
     pub fn set_deps(&self, deps: CallDeps) {
@@ -186,46 +202,55 @@ impl CallManager {
         self.calls.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Takes up every answered call an earlier run of Note held, telling the
-    /// model how its running jobs ended; returns how many.
+    /// Takes up every answered call an earlier run of Note held; returns how many.
     pub fn resume(&self) -> usize {
         let Some(d) = self.deps.get() else { return 0 };
-        let rows: Vec<(String, i64, String, Option<String>, i64)> = {
+        let ids: Vec<String> = {
             let conn = crate::db_guard(&d.db);
-            conn.prepare(
-                "SELECT c.id, c.user_id, u.username, c.message, c.conversation_id
-                 FROM voice_calls c JOIN users u ON u.id = c.user_id
-                 WHERE c.state = 'answered' AND c.conversation_id IS NOT NULL",
-            )
-            .and_then(|mut stmt| {
-                stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?.collect()
-            })
-            .unwrap_or_default()
+            conn.prepare("SELECT id FROM voice_calls WHERE state = 'answered' AND conversation_id IS NOT NULL")
+                .and_then(|mut stmt| stmt.query_map([], |r| r.get(0))?.collect())
+                .unwrap_or_default()
         };
-        let mut resumed = 0;
-        for (call_id, user_id, username, message, conversation_id) in rows {
-            if self.is_live(&call_id) {
-                continue;
+        ids.iter().filter(|id| self.resume_call(d, id)).count()
+    }
+
+    /// Respawns the driver of an answered call that has none, telling the
+    /// model how its running jobs ended; true when it did.
+    fn resume_call(&self, d: &CallDeps, call_id: &str) -> bool {
+        let _once = self.resuming.lock().unwrap_or_else(PoisonError::into_inner);
+        if self.is_live(call_id) {
+            return false;
+        }
+        let row: Option<(i64, String, Option<String>, i64)> = crate::db_guard(&d.db)
+            .query_row(
+                "SELECT c.user_id, u.username, c.message, c.conversation_id
+                 FROM voice_calls c JOIN users u ON u.id = c.user_id
+                 WHERE c.id = ?1 AND c.state = 'answered' AND c.conversation_id IS NOT NULL",
+                [call_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()
+            .ok()
+            .flatten();
+        let Some((user_id, username, message, conversation_id)) = row else { return false };
+        let msg = message.and_then(|m| serde_json::from_str::<OutboundMessage>(&m).ok());
+        let started = d.prompt(user_id, &username, &reason(msg.as_ref()), Some(conversation_id)).and_then(|(system, tools)| {
+            let history = crate::talk::history(&crate::db_guard(&d.db), conversation_id, RESUMED_HISTORY)?;
+            Ok((system, tools, history))
+        });
+        match started {
+            Ok((system, tools, history)) => {
+                let mut initial = jobs::JobTable::recover(&d.db, call_id);
+                initial.push(render::Item::System(RESTARTED.into()));
+                let call_id = call_id.to_string();
+                self.spawn(d, Live { call_id, user_id, username, conversation_id, system, tools, opening: None, history, initial });
+                true
             }
-            let msg = message.and_then(|m| serde_json::from_str::<OutboundMessage>(&m).ok());
-            let started = d.prompt(user_id, &username, &reason(msg.as_ref()), Some(conversation_id)).and_then(|(system, tools)| {
-                let history = crate::talk::history(&crate::db_guard(&d.db), conversation_id, RESUMED_HISTORY)?;
-                Ok((system, tools, history))
-            });
-            match started {
-                Ok((system, tools, history)) => {
-                    let mut initial = jobs::JobTable::recover(&d.db, &call_id);
-                    initial.push(render::Item::System(RESTARTED.into()));
-                    self.spawn(
-                        d,
-                        Live { call_id, user_id, username, conversation_id, system, tools, opening: None, history, initial },
-                    );
-                    resumed += 1;
-                }
-                Err(e) => self.give_up(d, &call_id, user_id, &e),
+            Err(e) => {
+                self.give_up(d, call_id, user_id, &e);
+                false
             }
         }
-        resumed
     }
 
     /// Primes the reply model's connection and prompt cache while the phone
@@ -237,6 +262,7 @@ impl CallManager {
         let (me, msg) = (self.clone(), msg.clone());
         spawn_blocking(move || {
             let Some(d) = me.deps.get() else { return };
+            d.follow_main_model();
             let username: Option<String> = crate::db_guard(&d.db)
                 .query_row("SELECT username FROM users WHERE id = ?1", [user_id], |r| r.get(0))
                 .ok();
@@ -299,6 +325,7 @@ impl CallManager {
     }
 
     fn spawn(&self, d: &CallDeps, live: Live) {
+        d.follow_main_model();
         let (tx, rx) = mpsc::channel();
         self.calls().insert(live.call_id.clone(), tx.clone());
         let send = self.send.clone();
@@ -370,6 +397,9 @@ impl Conversation for CallManager {
                 }
             }
             other => {
+                if let Some(d) = self.deps.get().filter(|_| !self.is_live(call_id)) {
+                    self.resume_call(d, call_id);
+                }
                 if let Some(tx) = self.calls().get(call_id) {
                     let _ = tx.send(DriverIn::Frame(other.clone()));
                 }
@@ -423,6 +453,52 @@ pub(crate) fn spawn_blocking(f: impl FnOnce() + Send + 'static) {
 mod tests {
     use super::*;
     use jobs::ToolRunner;
+
+    struct Named(Mutex<String>);
+
+    impl LLMProvider for Named {
+        fn chat(&self, _req: &ChatRequest) -> anyhow::Result<crate::providers::ChatResponse> {
+            Ok(crate::providers::ChatResponse::default())
+        }
+
+        fn model(&self) -> Option<String> {
+            Some(self.0.lock().unwrap().clone())
+        }
+
+        fn set_model(&self, model: &str) -> bool {
+            *self.0.lock().unwrap() = model.to_string();
+            true
+        }
+    }
+
+    fn deps_on(main: &Arc<Named>, voice: &Arc<Named>, follows_main_model: bool) -> CallDeps {
+        CallDeps {
+            db: Arc::new(Mutex::new(crate::db::open_memory().unwrap())),
+            config_dir: PathBuf::new(),
+            data_dir: PathBuf::new(),
+            llm: main.clone(),
+            voice_llm: voice.clone(),
+            embeddings: None,
+            search: None,
+            settings: CallSettings { follows_main_model, ..Default::default() },
+        }
+    }
+
+    #[test]
+    fn a_call_starts_on_the_main_model_of_the_moment_unless_it_has_its_own() {
+        let main = Arc::new(Named(Mutex::new("a".into())));
+        let voice = Arc::new(Named(Mutex::new("startup".into())));
+        let d = deps_on(&main, &voice, true);
+        d.follow_main_model();
+        assert_eq!(voice.model().as_deref(), Some("a"));
+        main.set_model("b");
+        d.follow_main_model();
+        assert_eq!(voice.model().as_deref(), Some("b"), "an admin switch reaches the next call");
+
+        let own = Arc::new(Named(Mutex::new("fast".into())));
+        deps_on(&main, &own, false).follow_main_model();
+        assert_eq!(own.model().as_deref(), Some("fast"));
+    }
 
     #[test]
     fn the_runner_lands_a_write_once_per_op_key() {
