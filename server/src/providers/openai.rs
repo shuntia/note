@@ -12,6 +12,8 @@ pub struct OpenAILLM {
     reasoning: Option<String>,
     /// Sends `OpenRouter`'s explicit off switch rather than leaving reasoning to the model's default.
     reasoning_off: bool,
+    /// Models that refused the off switch; they are asked for the least reasoning instead.
+    reasoning_mandatory: std::sync::Mutex<std::collections::HashSet<String>>,
     extra: serde_json::Map<String, serde_json::Value>,
 }
 
@@ -30,6 +32,7 @@ impl OpenAILLM {
             api_key: api_key.to_string(),
             reasoning: reasoning.map(String::from),
             reasoning_off: false,
+            reasoning_mandatory: std::sync::Mutex::default(),
             extra: serde_json::Map::new(),
         }
     }
@@ -55,14 +58,53 @@ impl OpenAILLM {
     }
 
     fn request_body(&self, req: &ChatRequest) -> serde_json::Value {
-        let mut v = body(&self.model.get(), req, self.reasoning.as_deref());
+        let model = self.model.get();
+        let mut v = body(&model, req, self.reasoning.as_deref());
         if self.reasoning_off {
-            v["reasoning"] = serde_json::json!({"enabled": false});
+            v["reasoning"] = if self.mandatory(&model) {
+                serde_json::json!({"effort": "low", "exclude": true})
+            } else {
+                serde_json::json!({"enabled": false})
+            };
         }
         for (k, field) in &self.extra {
             v[k] = field.clone();
         }
         v
+    }
+
+    fn mandatory(&self, model: &str) -> bool {
+        self.reasoning_mandatory.lock().unwrap_or_else(std::sync::PoisonError::into_inner).contains(model)
+    }
+
+    /// True when `error` is a refusal of the off switch, which is remembered for the model.
+    fn refused_off(&self, error: &str) -> bool {
+        let model = self.model.get();
+        if !self.reasoning_off || self.mandatory(&model) || !error.contains("Reasoning is mandatory") {
+            return false;
+        }
+        self.reasoning_mandatory.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(model);
+        true
+    }
+
+    fn stream_once(&self, req: &ChatRequest, opts: &StreamOpts, sink: &mut dyn StreamSink) -> Result<ChatResponse> {
+        let mut body = self.request_body(req);
+        body["stream"] = serde_json::Value::Bool(true);
+        let agent = self.agents.stream_agent(req.background, opts.first_token);
+        let started = Instant::now();
+        let mut resp = match self.authorized(agent.post(&self.url())).send_json(&body) {
+            Ok(resp) => resp,
+            Err(ureq::Error::Timeout(ureq::Timeout::RecvResponse)) => {
+                return Err(FirstTokenTimeout(opts.first_token).into());
+            }
+            Err(e) => return Err(anyhow::Error::new(e).context("openai stream request failed")),
+        };
+        if !resp.status().is_success() {
+            let code = resp.status().as_u16();
+            let head: String = resp.body_mut().read_to_string().unwrap_or_default().chars().take(300).collect();
+            anyhow::bail!("openai stream request failed: status {code}: {head}");
+        }
+        read_stream(&spawn_line_reader(resp.into_body()), started, opts.first_token, STALL, sink)
     }
 
     fn authorized(&self, request: ureq::RequestBuilder<ureq::typestate::WithBody>) -> ureq::RequestBuilder<ureq::typestate::WithBody> {
@@ -332,23 +374,10 @@ impl LLMProvider for OpenAILLM {
     }
 
     fn chat_stream(&self, req: &ChatRequest, opts: &StreamOpts, sink: &mut dyn StreamSink) -> Result<ChatResponse> {
-        let mut body = self.request_body(req);
-        body["stream"] = serde_json::Value::Bool(true);
-        let agent = self.agents.stream_agent(req.background, opts.first_token);
-        let started = Instant::now();
-        let mut resp = match self.authorized(agent.post(&self.url())).send_json(&body) {
-            Ok(resp) => resp,
-            Err(ureq::Error::Timeout(ureq::Timeout::RecvResponse)) => {
-                return Err(FirstTokenTimeout(opts.first_token).into());
-            }
-            Err(e) => return Err(anyhow::Error::new(e).context("openai stream request failed")),
-        };
-        if !resp.status().is_success() {
-            let code = resp.status().as_u16();
-            let head: String = resp.body_mut().read_to_string().unwrap_or_default().chars().take(300).collect();
-            anyhow::bail!("openai stream request failed: status {code}: {head}");
+        match self.stream_once(req, opts, sink) {
+            Err(e) if self.refused_off(&format!("{e:#}")) => self.stream_once(req, opts, sink),
+            result => result,
         }
-        read_stream(&spawn_line_reader(resp.into_body()), started, opts.first_token, STALL, sink)
     }
 
     fn model(&self) -> Option<String> {
@@ -614,6 +643,20 @@ mod tests {
         assert_eq!(sent["provider"]["sort"], "latency");
         assert_eq!(sent["stream"], true);
         assert_eq!(sent["reasoning"], serde_json::json!({"enabled": false}), "reasoning is switched off outright");
+    }
+
+    #[test]
+    fn a_model_that_must_reason_is_asked_for_the_least_from_then_on() {
+        const MANDATORY: &str = r#"{"error":{"message":"Reasoning is mandatory for this endpoint and cannot be disabled.","code":400}}"#;
+        let (base, rx) = crate::testhttp::serve(vec![("400 Bad Request", MANDATORY), ("200 OK", SSE), ("200 OK", SSE)]);
+        let llm = OpenAILLM::new(&base, "m", "", ChatAgents::new(30, 30), None).without_reasoning();
+        let o = opts(Duration::from_secs(5));
+        let resp = llm.chat_stream(&req(), &o, &mut Collect::default()).unwrap();
+        assert!(resp.text.starts_with("On it"));
+        llm.chat_stream(&req(), &o, &mut Collect::default()).unwrap();
+        let sent: Vec<_> = rx.try_iter().map(|raw| crate::testhttp::body_json(&raw)["reasoning"].clone()).collect();
+        let least = serde_json::json!({"effort": "low", "exclude": true});
+        assert_eq!(sent, vec![serde_json::json!({"enabled": false}), least.clone(), least]);
     }
 
     #[test]
