@@ -1,16 +1,38 @@
-use crate::calls::{ring_once, Ring};
+use crate::audio::engines::{Engines, SpeechEngines, TextToSpeech, NATIVE_RATE};
+use crate::audio::lines::{Line, Lines};
+use crate::calls::{clear_member, ring_once, Ring};
 use crate::config::VoiceServiceConfig;
+use crate::inbound::{say_and_leave, Detect, Detector};
 use crate::matrix::{HomeserverError, Matrix, RoomEvent};
+use crate::media::{LiveKitJoin, MediaJoin};
+use crate::outgoing::CallWriter;
+use crate::session::{run_session, Cues, SessionDeps, SessionEnd, SessionIn};
 use crate::state::{CallState, LinkState, StateFile};
 use note_voice_proto::{
-    dial_forever, AppliedFile, BoxFuture, CallBody, Dir, FileOutbox, Handler, Outcome, Peer, PeerConfig,
-    Refusal, RefusalCode, Reply, Request, Role,
+    dial_forever, AppliedFile, BoxFuture, CallBody, Dir, Direction, FileOutbox, Handler, Outcome, Peer, PeerConfig,
+    Refusal, RefusalCode, Reply, Request, Role, VoiceOption, VoiceProfile,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
-use tokio::sync::{broadcast, watch};
+use std::time::Duration;
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
-const APPLIED_KEEP: std::time::Duration = std::time::Duration::from_hours(7 * 24);
+const APPLIED_KEEP: Duration = Duration::from_hours(7 * 24);
+/// Element X treats an expired membership as left, so a live call's outlasts the longest call.
+const LIVE_MEMBER_MS: u64 = 60 * 60 * 1000;
+const MAX_CALL: Duration = Duration::from_mins(30);
+const LINK_GRACE: Duration = Duration::from_secs(10);
+const JOIN_WAIT: Duration = Duration::from_secs(20);
+const INBOUND_JOIN_WAIT: Duration = Duration::from_secs(10);
+const INCOMING_CALL_WAIT: Duration = Duration::from_secs(3);
+const INBOUND_START_WAIT: Duration = Duration::from_secs(5);
+const CANT_REACH_MEMBER_MS: u64 = 60 * 1000;
+
+/// What a live call runs on: the speech engines, and how to join a room's media.
+pub struct Backends {
+    pub engines: Arc<dyn SpeechEngines>,
+    pub media: Arc<dyn MediaJoin>,
+}
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -33,6 +55,136 @@ fn rejects_since(e: &anyhow::Error) -> bool {
     })
 }
 
+const PREVIEW_TEXT: &str = "Hi, it's Note. This is how I sound.";
+
+type Slot = Arc<Mutex<Option<Arc<Vec<u8>>>>>;
+
+/// Voice samples as WAV, rendered once per language and offered voice; a
+/// render in progress holds its slot, so a second ask for it waits.
+#[derive(Default)]
+struct Previews(Mutex<HashMap<(String, String), Slot>>);
+
+impl Previews {
+    /// `voice` empty is the language default; any other id `tts` does not offer is refused.
+    fn get(&self, tts: &dyn TextToSpeech, language: &str, voice: &str) -> Result<Arc<Vec<u8>>, Refusal> {
+        if !voice.is_empty() && !tts.voices().iter().any(|v| v.id == voice) {
+            return Err(Refusal::new(RefusalCode::BadRequest, format!("no voice {voice:?}")));
+        }
+        let slot = lock(&self.0).entry((language.to_string(), voice.to_string())).or_default().clone();
+        let mut held = lock(&slot);
+        if let Some(wav) = &*held {
+            return Ok(wav.clone());
+        }
+        let rendered = tts
+            .synthesize_native(PREVIEW_TEXT, voice)
+            .and_then(|pcm| wav(&pcm, NATIVE_RATE))
+            .map_err(|e| Refusal::new(RefusalCode::Failed, format!("rendering the sample failed: {e:#}")))?;
+        let wav = Arc::new(rendered);
+        *held = Some(wav.clone());
+        Ok(wav)
+    }
+}
+
+/// Mono 16-bit WAV.
+fn wav(samples: &[i16], sample_rate: u32) -> anyhow::Result<Vec<u8>> {
+    let spec = hound::WavSpec { channels: 1, sample_rate, bits_per_sample: 16, sample_format: hound::SampleFormat::Int };
+    let mut out = std::io::Cursor::new(Vec::new());
+    let mut writer = hound::WavWriter::new(&mut out, spec)?;
+    for &s in samples {
+        writer.write_sample(s)?;
+    }
+    writer.finalize()?;
+    Ok(out.into_inner())
+}
+
+/// The `Start` Note sent for an incoming call it opened.
+struct InboundStart {
+    call_id: String,
+    profile: VoiceProfile,
+    hang_up: watch::Receiver<bool>,
+}
+
+/// Incoming calls being answered, one per room. Each takes only the `Start`
+/// of the call Note opened for it; one that comes before Note names that call
+/// is held until it does.
+#[derive(Default)]
+struct Answering(Mutex<HashMap<String, Pending>>);
+
+#[derive(Default)]
+struct Pending {
+    call_id: Option<String>,
+    early: Vec<InboundStart>,
+    waiter: Option<oneshot::Sender<InboundStart>>,
+}
+
+/// An attempt's hold on its room. Dropping it frees the room and turns away
+/// any `Start` it still holds.
+struct Attempt {
+    answering: Arc<Answering>,
+    room: String,
+    turn_away: Box<dyn Fn(InboundStart) + Send + Sync>,
+}
+
+impl Answering {
+    fn begin(self: &Arc<Self>, room: &str, turn_away: impl Fn(InboundStart) + Send + Sync + 'static) -> Attempt {
+        lock(&self.0).insert(room.to_string(), Pending::default());
+        Attempt { answering: self.clone(), room: room.to_string(), turn_away: Box::new(turn_away) }
+    }
+
+    fn busy(&self, room: &str) -> bool {
+        lock(&self.0).contains_key(room)
+    }
+
+    /// Hands `start` to the attempt in its room; `Err` gives back a `Start` no attempt is waiting for.
+    fn start(&self, room: &str, start: InboundStart) -> Result<(), InboundStart> {
+        let mut rooms = lock(&self.0);
+        let Some(pending) = rooms.get_mut(room) else { return Err(start) };
+        match &pending.call_id {
+            None => {
+                pending.early.push(start);
+                Ok(())
+            }
+            Some(id) if *id == start.call_id => match pending.waiter.take() {
+                Some(waiter) => waiter.send(start),
+                None => Err(start),
+            },
+            Some(_) => Err(start),
+        }
+    }
+}
+
+impl Attempt {
+    /// From now on only `call_id`'s `Start` is taken; any other held is turned away.
+    fn expect(&self, call_id: &str) -> oneshot::Receiver<InboundStart> {
+        let (tx, rx) = oneshot::channel();
+        let others = {
+            let mut rooms = lock(&self.answering.0);
+            let pending = rooms.entry(self.room.clone()).or_default();
+            pending.call_id = Some(call_id.to_string());
+            let (mine, others): (Vec<_>, Vec<_>) =
+                std::mem::take(&mut pending.early).into_iter().partition(|s| s.call_id == call_id);
+            match mine.into_iter().next() {
+                Some(start) => drop(tx.send(start)),
+                None => pending.waiter = Some(tx),
+            }
+            others
+        };
+        for start in others {
+            (self.turn_away)(start);
+        }
+        rx
+    }
+}
+
+impl Drop for Attempt {
+    fn drop(&mut self) {
+        let held = lock(&self.answering.0).remove(&self.room).map(|p| p.early).unwrap_or_default();
+        for start in held {
+            (self.turn_away)(start);
+        }
+    }
+}
+
 struct Service {
     cfg: VoiceServiceConfig,
     matrix: Arc<Matrix>,
@@ -40,7 +192,13 @@ struct Service {
     applied: AppliedFile,
     events: broadcast::Sender<RoomEvent>,
     hang_ups: Mutex<HashMap<String, watch::Sender<bool>>>,
+    sessions: Mutex<HashMap<String, mpsc::UnboundedSender<SessionIn>>>,
+    backends: Backends,
+    lines: Arc<Lines>,
+    cues: Arc<Cues>,
     reporting: Mutex<HashSet<i64>>,
+    answering: Arc<Answering>,
+    previews: Previews,
     peer: OnceLock<Peer>,
 }
 
@@ -59,14 +217,19 @@ impl Service {
         }
     }
 
-    /// A call whose `Ended` could not be journaled stays open, so the next
-    /// start's recovery closes it again.
     fn finish(&self, call_id: &str, outcome: Outcome) {
         self.send(call_id, CallBody::Outcome { outcome });
+        self.end(call_id);
+    }
+
+    /// A call whose `Ended` could not be journaled stays open, so the next
+    /// start's recovery closes it again.
+    fn end(&self, call_id: &str) {
         let ended = self.send(call_id, CallBody::Ended);
         let mut st = lock(&self.state);
         if let (Some(c), Some(seq)) = (st.data.calls.get_mut(call_id), ended) {
             c.done = true;
+            c.live = false;
             c.ended_seq = Some(seq);
         }
         let _ = st.save();
@@ -86,7 +249,41 @@ impl Service {
         let _ = st.save();
     }
 
-    fn begin_ring(self: &Arc<Self>, call_id: String, room_id: String, mxid: String, ring_secs: u32) {
+    fn no_models(&self) -> Option<Refusal> {
+        self.backends.engines.languages().is_empty().then(|| Refusal::new(RefusalCode::Failed, "no voice models"))
+    }
+
+    fn voices(&self, language: &str) -> Result<Reply, Refusal> {
+        if let Some(refusal) = self.no_models() {
+            return Err(refusal);
+        }
+        let voices = self.backends.engines.tts(language).voices();
+        Ok(Reply::Voices {
+            voices: voices.into_iter().map(|v| VoiceOption { id: v.id, label: v.label, language: v.language }).collect(),
+        })
+    }
+
+    async fn preview(self: Arc<Self>, language: String, voice: String) -> Result<Reply, Refusal> {
+        use base64::Engine as _;
+        if let Some(refusal) = self.no_models() {
+            return Err(refusal);
+        }
+        let wav = tokio::task::spawn_blocking(move || {
+            self.previews.get(&*self.backends.engines.tts(&language), &language, &voice)
+        })
+        .await
+        .map_err(|e| Refusal::new(RefusalCode::Failed, format!("rendering the sample failed: {e}")))??;
+        Ok(Reply::Audio { wav_base64: base64::engine::general_purpose::STANDARD.encode(&*wav) })
+    }
+
+    fn begin_ring(
+        self: &Arc<Self>,
+        call_id: String,
+        room_id: String,
+        mxid: String,
+        ring_secs: u32,
+        profile: VoiceProfile,
+    ) {
         let (tx, rx) = watch::channel(false);
         match lock(&self.hang_ups).entry(call_id.clone()) {
             std::collections::hash_map::Entry::Occupied(_) => return,
@@ -106,15 +303,227 @@ impl Service {
             };
             let id = call_id.clone();
             let s = svc.clone();
-            let outcome = ring_once(ring, events, rx, move || {
+            let outcome = ring_once(ring, events, rx.clone(), move || {
                 s.send(&id, CallBody::Ringing);
             })
             .await;
-            svc.finish(&call_id, outcome);
+            if outcome == Outcome::Answered {
+                svc.join_and_run(&call_id, &room_id, &mxid, profile, &rx, Direction::Outbound).await;
+            } else {
+                svc.finish(&call_id, outcome);
+            }
         });
     }
 
-    /// Calls a crash left open cannot be resumed; each is closed and reported.
+    /// Puts the bot's membership, which answers an inbound call, joins the
+    /// media and runs the session to the end. A `HangUp` during the join
+    /// abandons it; the session's inbox is open from the answer on, so one
+    /// after the join is not lost.
+    async fn join_and_run(
+        self: &Arc<Self>,
+        call_id: &str,
+        room_id: &str,
+        mxid: &str,
+        profile: VoiceProfile,
+        hang_up: &watch::Receiver<bool>,
+        direction: Direction,
+    ) {
+        if self.backends.engines.languages().is_empty() {
+            return self.fail_before_join(call_id, room_id, mxid, direction, "no voice models".into()).await;
+        }
+        let (svc, id) = (self.clone(), call_id.to_string());
+        let writer = match CallWriter::spawn(move |body| {
+            svc.send(&id, body);
+        }) {
+            Ok(writer) => writer,
+            Err(e) => {
+                let reason = format!("starting the frame writer: {e}");
+                return self.fail_before_join(call_id, room_id, mxid, direction, reason).await;
+            }
+        };
+        let (tx, inbox) = mpsc::unbounded_channel();
+        {
+            let mut sessions = lock(&self.sessions);
+            if !self.peer().is_up() {
+                let _ = tx.send(SessionIn::LinkUp(false));
+            }
+            sessions.insert(call_id.to_string(), tx);
+        }
+        let join = async {
+            self.matrix.put_member(room_id, LIVE_MEMBER_MS, &self.cfg.livekit_service_url).await?;
+            let wait = match direction {
+                Direction::Outbound => JOIN_WAIT,
+                Direction::Inbound => INBOUND_JOIN_WAIT,
+            };
+            self.backends.media.join(&self.matrix, &self.cfg.livekit_service_url, room_id, mxid, wait).await
+        };
+        let mut hang_up = hang_up.clone();
+        let joined = tokio::select! {
+            joined = join => joined.map_err(|e| format!("{e:#}")),
+            Ok(_) = hang_up.wait_for(|h| *h) => Err("hung up by Note".to_string()),
+        };
+        let media = match joined {
+            Ok(media) => media,
+            Err(reason) => {
+                lock(&self.sessions).remove(call_id);
+                clear_member(&self.matrix, room_id).await;
+                return self.finish(call_id, Outcome::Failed { reason });
+            }
+        };
+        self.send(call_id, CallBody::Outcome { outcome: Outcome::Answered });
+        self.set_live(call_id);
+        let deps = SessionDeps {
+            engines: self.backends.engines.clone(),
+            lines: self.lines.clone(),
+            cues: self.cues.clone(),
+            profile,
+            direction,
+            max_len: MAX_CALL,
+            link_grace: LINK_GRACE,
+        };
+        let session = tokio::spawn(run_session(deps, media, inbox, writer.sender()));
+        let end = session.await.unwrap_or_else(|e| SessionEnd::MediaFailed(format!("the session failed: {e}")));
+        writer.close().await;
+        eprintln!("voice: call {call_id} ended: {end:?}");
+        lock(&self.sessions).remove(call_id);
+        clear_member(&self.matrix, room_id).await;
+        self.end(call_id);
+    }
+
+    /// An inbound caller is still answered and told, rather than left ringing.
+    async fn fail_before_join(&self, call_id: &str, room_id: &str, mxid: &str, direction: Direction, reason: String) {
+        self.finish(call_id, Outcome::Failed { reason });
+        match direction {
+            Direction::Outbound => clear_member(&self.matrix, room_id).await,
+            Direction::Inbound => self.cant_reach(room_id, mxid, None).await,
+        }
+    }
+
+    fn set_live(&self, call_id: &str) {
+        let mut st = lock(&self.state);
+        if let Some(c) = st.data.calls.get_mut(call_id) {
+            c.live = true;
+        }
+        let _ = st.save();
+    }
+
+    /// A room with an incoming call being answered, or a call of its own not yet done.
+    fn busy(&self, room: &str) -> bool {
+        self.answering.busy(room)
+            || lock(&self.state).data.calls.values().any(|c| c.room_id == room && !c.done)
+    }
+
+    /// Asks Note to open the user's call; with no Note to take it, answers to say so.
+    async fn answer_incoming(self: Arc<Self>, attempt: Attempt, mxid: String, key: String, device: Option<String>) {
+        let room = attempt.room.clone();
+        let ask = Request::IncomingCall { room_id: room.clone(), mxid: mxid.clone(), key };
+        let why = match tokio::time::timeout(INCOMING_CALL_WAIT, self.peer().request(ask)).await {
+            Ok(Ok(Reply::Call { call_id })) => {
+                let mut started = attempt.expect(&call_id);
+                let start = if let Ok(start) = tokio::time::timeout(INBOUND_START_WAIT, &mut started).await {
+                    start.ok()
+                } else {
+                    started.close();
+                    started.try_recv().ok()
+                };
+                if let Some(start) = start {
+                    return self.answer_for_note(start, &room, &mxid, device.as_deref()).await;
+                }
+                format!("the Start for {call_id} never came")
+            }
+            Ok(Ok(reply)) => format!("Note answered {reply:?}"),
+            Ok(Err(refusal)) => refusal.to_string(),
+            Err(_) => "no answer in time".into(),
+        };
+        eprintln!("voice: Note cannot take {mxid}'s call in {room} ({why}); answering to say so");
+        self.cant_reach(&room, &mxid, device.as_deref()).await;
+    }
+
+    fn turn_away(&self, start: &InboundStart) {
+        self.finish(&start.call_id, Outcome::Failed { reason: "no incoming call to answer".into() });
+    }
+
+    async fn answer_for_note(self: &Arc<Self>, start: InboundStart, room: &str, mxid: &str, device: Option<&str>) {
+        if !self.still_calling(room, mxid, device).await {
+            return self.finish(&start.call_id, Outcome::Failed { reason: "the caller hung up".into() });
+        }
+        self.join_and_run(&start.call_id, room, mxid, start.profile, &start.hang_up, Direction::Inbound).await;
+    }
+
+    /// Whether the user's call membership from `device` is still set; an
+    /// unknown device or an unreadable state counts as still calling.
+    async fn still_calling(&self, room: &str, mxid: &str, device: Option<&str>) -> bool {
+        let Some(device) = device else { return true };
+        match self.matrix.member_active(room, mxid, device).await {
+            Ok(active) => active,
+            Err(e) => {
+                eprintln!("voice: reading {mxid}'s call membership in {room} failed: {e:#}");
+                true
+            }
+        }
+    }
+
+    /// Answers, plays the ready cue and `Line::CantReach`, and leaves; Note hears nothing of it.
+    async fn cant_reach(&self, room: &str, mxid: &str, device: Option<&str>) {
+        if !self.still_calling(room, mxid, device).await {
+            return eprintln!("voice: {mxid}'s call in {room} ended before it was answered");
+        }
+        if let Err(e) = self.matrix.put_member(room, CANT_REACH_MEMBER_MS, &self.cfg.livekit_service_url).await {
+            eprintln!("voice: answering {mxid}'s call in {room} failed: {e:#}");
+            return clear_member(&self.matrix, room).await;
+        }
+        let url = &self.cfg.livekit_service_url;
+        match self.backends.media.join(&self.matrix, url, room, mxid, INBOUND_JOIN_WAIT).await {
+            Ok(media) => say_and_leave(&*media, self.cant_reach_clips().await).await,
+            Err(e) => eprintln!("voice: joining {mxid}'s call in {room} failed: {e:#}"),
+        }
+        clear_member(&self.matrix, room).await;
+    }
+
+    async fn cant_reach_clips(&self) -> Vec<Vec<i16>> {
+        let profile = VoiceProfile::default();
+        let mut clips = Vec::new();
+        if profile.cue {
+            clips.push(self.cues.ready.to_vec());
+        }
+        let languages = self.backends.engines.languages();
+        let Some(language) = languages.iter().find(|l| **l == profile.language).or(languages.first()).cloned() else {
+            return clips;
+        };
+        let (engines, lines) = (self.backends.engines.clone(), self.lines.clone());
+        let line = tokio::task::spawn_blocking(move || lines.get(&*engines.tts(&language), &language, "", Line::CantReach))
+            .await
+            .map_err(anyhow::Error::from)
+            .and_then(|r| r);
+        match line {
+            Ok(pcm) => clips.push(pcm.to_vec()),
+            Err(e) => eprintln!("voice: rendering {:?} failed: {e:#}", Line::CantReach),
+        }
+        clips
+    }
+
+    /// Opens the inbound call Note started for the attempt in `room`.
+    fn begin_answer(&self, call_id: &str, room_id: &str, profile: VoiceProfile) {
+        let (tx, hang_up) = watch::channel(false);
+        match lock(&self.hang_ups).entry(call_id.to_string()) {
+            std::collections::hash_map::Entry::Occupied(_) => return,
+            std::collections::hash_map::Entry::Vacant(v) => {
+                v.insert(tx);
+            }
+        }
+        let start = InboundStart { call_id: call_id.to_string(), profile, hang_up };
+        if let Err(start) = self.answering.start(room_id, start) {
+            self.turn_away(&start);
+        }
+    }
+
+    fn to_session(&self, call_id: &str, msg: SessionIn) {
+        if let Some(tx) = lock(&self.sessions).get(call_id) {
+            let _ = tx.send(msg);
+        }
+    }
+
+    /// Calls a crash left open, ringing or live, cannot be resumed; each is closed and reported.
     async fn recover(self: &Arc<Self>) {
         let open: Vec<(String, String)> = lock(&self.state)
             .data
@@ -124,7 +533,7 @@ impl Service {
             .map(|(id, c)| (id.clone(), c.room_id.clone()))
             .collect();
         for (call_id, room_id) in open {
-            let _ = self.matrix.clear_member(&room_id).await;
+            clear_member(&self.matrix, &room_id).await;
             self.finish(&call_id, Outcome::Failed { reason: "the voice service restarted".into() });
         }
     }
@@ -230,7 +639,36 @@ impl Service {
         }
     }
 
+    /// Answers the linked users' calls as they start. A user's ring carries
+    /// no device, so it is checked against one of their devices in a call.
+    fn detect(self: &Arc<Self>, detector: &mut Detector, in_call: &mut HashSet<(String, String, String)>, ev: &RoomEvent) {
+        if let RoomEvent::CallMember { room, user, device, active, .. } = ev {
+            let at = (room.clone(), user.clone(), device.clone());
+            if *active {
+                in_call.insert(at);
+            } else {
+                in_call.remove(&at);
+            }
+        }
+        let links: Vec<(String, String)> =
+            lock(&self.state).data.links.values().map(|l| (l.room_id.clone(), l.mxid.clone())).collect();
+        let Detect::Answer { room, mxid, key } = detector.on_event(ev, &links, &|room| self.busy(room), now_ms()) else {
+            return;
+        };
+        let device = match ev {
+            RoomEvent::CallMember { device, .. } => Some(device.clone()),
+            _ => in_call.iter().find(|(r, u, _)| *r == room && *u == mxid).map(|(_, _, d)| d.clone()),
+        }
+        .filter(|d| !d.is_empty());
+        let svc = self.clone();
+        let attempt = self.answering.begin(&room, move |start| svc.turn_away(&start));
+        eprintln!("voice: {mxid} is calling in {room}");
+        tokio::spawn(self.clone().answer_incoming(attempt, mxid, key, device));
+    }
+
     async fn sync_forever(self: Arc<Self>) {
+        let mut detector = Detector::default();
+        let mut in_call = HashSet::new();
         loop {
             let since = lock(&self.state).data.since.clone();
             match self.matrix.sync(since.as_deref(), 30_000).await {
@@ -239,6 +677,7 @@ impl Service {
                         if let RoomEvent::Joined { room, user } = &ev {
                             self.report_join(room, user);
                         }
+                        self.detect(&mut detector, &mut in_call, &ev);
                         let _ = self.events.send(ev);
                     }
                     let mut st = lock(&self.state);
@@ -277,7 +716,8 @@ impl Handler for VoiceHandler {
     fn apply(&self, call_id: &str, seq: u64, body: CallBody) -> Result<(), String> {
         let svc = self.svc().clone();
         match body {
-            CallBody::Start { room_id, mxid, ring_secs, ring_by_ms, .. } => {
+            CallBody::Start { room_id, mxid, ring_secs, ring_by_ms, voice, direction, .. } => {
+                let room_busy = direction == Direction::Outbound && svc.busy(&room_id);
                 {
                     let mut st = lock(&svc.state);
                     if st.data.calls.contains_key(call_id) {
@@ -286,24 +726,41 @@ impl Handler for VoiceHandler {
                     }
                     st.data.calls.insert(
                         call_id.to_string(),
-                        CallState { room_id: room_id.clone(), done: false, ended_seq: None },
+                        CallState { room_id: room_id.clone(), done: false, live: false, ended_seq: None },
                     );
                     st.save().map_err(|e| e.to_string())?;
                 }
                 svc.applied.set_applied(call_id, seq).map_err(|e| e.to_string())?;
-                if now_ms() > ring_by_ms {
+                if direction == Direction::Inbound {
+                    svc.begin_answer(call_id, &room_id, voice);
+                } else if room_busy {
+                    svc.finish(call_id, Outcome::Failed { reason: "a call is already up in this room".into() });
+                } else if now_ms() > ring_by_ms {
                     svc.finish(call_id, Outcome::Failed { reason: "late".into() });
                 } else {
-                    svc.begin_ring(call_id.to_string(), room_id, mxid, ring_secs);
+                    svc.begin_ring(call_id.to_string(), room_id, mxid, ring_secs, voice);
                 }
             }
             CallBody::HangUp => {
                 if let Some(tx) = lock(&svc.hang_ups).get(call_id) {
                     let _ = tx.send(true);
                 }
+                svc.to_session(call_id, SessionIn::Frame(CallBody::HangUp));
                 svc.applied.set_applied(call_id, seq).map_err(|e| e.to_string())?;
             }
-            _ => svc.applied.set_applied(call_id, seq).map_err(|e| e.to_string())?,
+            body @ (CallBody::Speak { .. } | CallBody::SpeakDone { .. } | CallBody::Play { .. } | CallBody::Drop { .. }) => {
+                svc.to_session(call_id, SessionIn::Frame(body));
+                svc.applied.set_applied(call_id, seq).map_err(|e| e.to_string())?;
+            }
+            CallBody::Ringing
+            | CallBody::Outcome { .. }
+            | CallBody::Ended
+            | CallBody::Draft { .. }
+            | CallBody::Commit { .. }
+            | CallBody::Retract { .. }
+            | CallBody::Floor { .. }
+            | CallBody::BargeIn { .. }
+            | CallBody::Played { .. } => svc.applied.set_applied(call_id, seq).map_err(|e| e.to_string())?,
         }
         Ok(())
     }
@@ -314,8 +771,20 @@ impl Handler for VoiceHandler {
             match body {
                 Request::OpenDm { link_id, mxid } => svc.open_dm(link_id, mxid).await,
                 Request::DmJoined { .. } => Err(Refusal::new(RefusalCode::BadRequest, "the voice side reports joins")),
+                Request::IncomingCall { .. } => {
+                    Err(Refusal::new(RefusalCode::BadRequest, "the voice side reports incoming calls"))
+                }
+                Request::ListVoices { language } => svc.voices(&language),
+                Request::Preview { language, voice } => svc.preview(language, voice).await,
             }
         })
+    }
+
+    fn link_changed(&self, up: bool) {
+        let Some(svc) = self.svc.get() else { return };
+        for tx in lock(&svc.sessions).values() {
+            let _ = tx.send(SessionIn::LinkUp(up));
+        }
     }
 
     fn acked(&self, call_id: &str, upto: u64) {
@@ -327,11 +796,44 @@ impl Handler for VoiceHandler {
     }
 }
 
-pub async fn run(cfg: VoiceServiceConfig) -> anyhow::Result<()> {
-    run_with(cfg, PeerConfig::new(Role::Voice)).await
+/// Renders each loaded language's call lines in its default voice, off the runtime.
+fn warm_lines(engines: &Arc<dyn SpeechEngines>, lines: &Arc<Lines>) {
+    let (engines, lines) = (engines.clone(), lines.clone());
+    tokio::task::spawn_blocking(move || {
+        for language in engines.languages() {
+            let tts = engines.tts(&language);
+            for line in [Line::LostNotes, Line::Goodbye, Line::CantReach, Line::Hi] {
+                if let Err(e) = lines.get(&*tts, &language, "", line) {
+                    eprintln!("voice: rendering {line:?} in {language} failed: {e:#}");
+                }
+            }
+        }
+    });
 }
 
-pub async fn run_with(cfg: VoiceServiceConfig, peer_cfg: PeerConfig) -> anyhow::Result<()> {
+/// A load failure leaves ringing up: answered calls fail and fall through.
+fn loaded_or_empty(loaded: anyhow::Result<Engines>) -> Engines {
+    loaded.unwrap_or_else(|e| {
+        eprintln!("voice: loading the speech models failed: {e:#}; answered calls will fail");
+        Engines::empty()
+    })
+}
+
+pub async fn run(cfg: VoiceServiceConfig) -> anyhow::Result<()> {
+    let (models, device) = (cfg.model_sets(), cfg.device);
+    let loaded = tokio::task::spawn_blocking(move || Engines::load(&models, device)).await;
+    let engines = loaded_or_empty(loaded.map_err(anyhow::Error::from).and_then(|r| r));
+    let backends = Backends { engines: Arc::new(engines), media: Arc::new(LiveKitJoin) };
+    run_with(cfg, PeerConfig::new(Role::Voice), backends).await
+}
+
+pub async fn run_with(cfg: VoiceServiceConfig, peer_cfg: PeerConfig, backends: Backends) -> anyhow::Result<()> {
+    if backends.engines.languages().is_empty() {
+        eprintln!("voice: no voice models are loaded; answered calls will fail with \"no voice models\"");
+    }
+    let cues = Cues::load(&cfg.ready_cue(), &cfg.heard_cue());
+    let lines = Arc::new(Lines::default());
+    warm_lines(&backends.engines, &lines);
     let token = std::fs::read_to_string(&cfg.token_file)
         .map_err(|e| anyhow::anyhow!("reading {}: {e}", cfg.token_file.display()))?;
     let matrix = Arc::new(Matrix::connect(&cfg.homeserver, &token).await?);
@@ -349,7 +851,13 @@ pub async fn run_with(cfg: VoiceServiceConfig, peer_cfg: PeerConfig) -> anyhow::
         applied,
         events: broadcast::channel(256).0,
         hang_ups: Mutex::new(HashMap::new()),
+        sessions: Mutex::new(HashMap::new()),
+        backends,
+        lines,
+        cues: Arc::new(cues),
         reporting: Mutex::new(HashSet::new()),
+        answering: Arc::default(),
+        previews: Previews::default(),
         peer: OnceLock::new(),
     });
     let handler = Arc::new(VoiceHandler { svc: OnceLock::new() });
@@ -362,4 +870,150 @@ pub async fn run_with(cfg: VoiceServiceConfig, peer_cfg: PeerConfig) -> anyhow::
     tokio::spawn(svc.clone().sync_forever());
     dial_forever(peer, cfg.socket.clone()).await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::audio::engines::VoiceInfo;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn a_failed_model_load_leaves_no_languages_instead_of_an_error() {
+        assert!(loaded_or_empty(Err(anyhow::anyhow!("libonnxruntime.so not found"))).languages().is_empty());
+    }
+
+    #[test]
+    fn the_wav_header_is_44_bytes_at_24_khz() {
+        let bytes = wav(&[0, 1, -1], NATIVE_RATE).unwrap();
+        assert_eq!(bytes.len(), 44 + 3 * 2);
+        assert_eq!(&bytes[..4], b"RIFF");
+        assert_eq!(u32::from_le_bytes(bytes[24..28].try_into().unwrap()), 24_000);
+        assert_eq!(u16::from_le_bytes(bytes[22..24].try_into().unwrap()), 1, "mono");
+    }
+
+    fn inbound(call_id: &str) -> InboundStart {
+        InboundStart { call_id: call_id.into(), profile: VoiceProfile::default(), hang_up: watch::channel(false).1 }
+    }
+
+    fn attempt(answering: &Arc<Answering>) -> (Attempt, Arc<Mutex<Vec<String>>>) {
+        let turned_away = Arc::new(Mutex::new(Vec::new()));
+        let seen = turned_away.clone();
+        (answering.begin("!dm:t", move |s| lock(&seen).push(s.call_id)), turned_away)
+    }
+
+    #[test]
+    fn a_start_before_note_names_the_call_is_held_for_it() {
+        let answering = Arc::new(Answering::default());
+        let (attempt, turned_away) = attempt(&answering);
+        assert!(answering.start("!dm:t", inbound("b")).is_ok());
+        assert_eq!(attempt.expect("b").try_recv().unwrap().call_id, "b");
+        assert!(lock(&turned_away).is_empty());
+    }
+
+    #[test]
+    fn a_late_start_from_an_earlier_attempt_takes_nothing() {
+        let answering = Arc::new(Answering::default());
+        let (attempt, turned_away) = attempt(&answering);
+        assert!(answering.start("!dm:t", inbound("a")).is_ok(), "held until Note names the call");
+        let mut started = attempt.expect("b");
+        assert_eq!(*lock(&turned_away), ["a"]);
+        assert_eq!(answering.start("!dm:t", inbound("a")).unwrap_err().call_id, "a");
+        assert!(started.try_recv().is_err(), "still waiting");
+        assert!(answering.start("!dm:t", inbound("b")).is_ok());
+        assert_eq!(started.try_recv().unwrap().call_id, "b");
+    }
+
+    #[test]
+    fn a_start_with_no_attempt_is_turned_away() {
+        let answering = Answering::default();
+        assert_eq!(answering.start("!dm:t", inbound("a")).unwrap_err().call_id, "a");
+    }
+
+    #[test]
+    fn a_panicking_attempt_frees_its_room() {
+        let answering = Arc::new(Answering::default());
+        let turned_away = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let (_attempt, turned_away) = attempt(&answering);
+            assert!(answering.busy("!dm:t"));
+            assert!(answering.start("!dm:t", inbound("a")).is_ok());
+            std::panic::panic_any(turned_away)
+        }))
+        .unwrap_err()
+        .downcast::<Arc<Mutex<Vec<String>>>>()
+        .unwrap();
+        assert!(!answering.busy("!dm:t"));
+        assert_eq!(*lock(&turned_away), ["a"]);
+    }
+
+    #[derive(Default)]
+    struct CountingTts(AtomicUsize);
+
+    impl TextToSpeech for CountingTts {
+        fn synthesize(&self, _text: &str, _voice: &str) -> anyhow::Result<Vec<i16>> {
+            anyhow::bail!("a preview is rendered at the native rate")
+        }
+
+        fn synthesize_native(&self, text: &str, _voice: &str) -> anyhow::Result<Vec<i16>> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            Ok(vec![1; text.len()])
+        }
+
+        fn voices(&self) -> Vec<VoiceInfo> {
+            ["af_heart", "bm_george"]
+                .map(|id| VoiceInfo { id: id.into(), label: id.into(), language: "en".into() })
+                .to_vec()
+        }
+    }
+
+    #[test]
+    fn a_voice_not_offered_is_refused_and_not_cached() {
+        let (tts, previews) = (CountingTts::default(), Previews::default());
+        let refused = previews.get(&tts, "en", "a1").unwrap_err();
+        assert_eq!(refused.code, RefusalCode::BadRequest);
+        assert_eq!(tts.0.load(Ordering::SeqCst), 0, "nothing is rendered");
+        assert!(lock(&previews.0).is_empty(), "nothing is cached");
+    }
+
+    #[test]
+    fn concurrent_asks_for_one_voice_render_it_once() {
+        let (tts, previews) = (Arc::new(CountingTts::default()), Arc::new(Previews::default()));
+        let asks: Vec<_> = (0..4)
+            .map(|_| {
+                let (tts, previews) = (tts.clone(), previews.clone());
+                std::thread::spawn(move || previews.get(&*tts, "en", "af_heart").unwrap())
+            })
+            .collect();
+        for ask in asks {
+            ask.join().unwrap();
+        }
+        assert_eq!(tts.0.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_preview_is_rendered_once_per_voice() {
+        let (tts, previews) = (CountingTts::default(), Previews::default());
+        let first = previews.get(&tts, "en", "af_heart").unwrap();
+        assert_eq!(previews.get(&tts, "en", "af_heart").unwrap(), first);
+        previews.get(&tts, "en", "bm_george").unwrap();
+        assert_eq!(tts.0.load(Ordering::SeqCst), 2);
+        assert_eq!(first.len(), 44 + PREVIEW_TEXT.len() * 2);
+    }
+
+    #[test]
+    #[ignore = "needs NOTE_VOICE_MODELS"]
+    fn preview_is_a_wav_and_cached() {
+        let dir = std::env::var_os("NOTE_VOICE_MODELS").unwrap();
+        let models = crate::config::models_from_dir(std::path::Path::new(&dir));
+        let engines = Engines::load(&models, crate::audio::engines::Device::Auto).unwrap();
+        let tts = engines.tts("en");
+        let previews = Previews::default();
+        let first = previews.get(&*tts, "en", "").unwrap();
+        let reader = hound::WavReader::new(std::io::Cursor::new(first.to_vec())).unwrap();
+        assert_eq!((reader.spec().sample_rate, reader.spec().channels), (24_000, 1));
+        assert!(reader.duration() > 24_000, "at least a second of speech");
+        assert!(Arc::ptr_eq(&previews.get(&*tts, "en", "").unwrap(), &first));
+    }
 }

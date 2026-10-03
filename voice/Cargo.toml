@@ -22,8 +22,19 @@ toml = "1"
 anyhow = "1"
 uuid = { version = "1", features = ["v4"] }
 urlencoding = "2"
+livekit = { version = "0.9.3", features = ["rustls-tls-webpki-roots"] }
+sherpa-onnx = { version = "1.13.8", default-features = false, features = ["shared"] }
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["load-dynamic", "ndarray"] }
+ndarray = "0.17"
+rustfft = "6"
+hound = "3"
+base64 = "0.23"
+async-trait = "0.1"
+futures-util = "0.3"
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
 
 [dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
 axum = "0.8"
 tempfile = "3"
 

@@ -17,6 +17,7 @@ fn urgent() -> OutboundMessage {
         title: "Check-in".into(),
         body: "how is the essay going?".into(),
         urgency: Urgency::High,
+        checkin: false,
         event_id: Some(1),
         conversation_id: None,
         actions: Vec::new(),
@@ -192,7 +193,7 @@ async fn linking_opens_a_dm_and_settings_show_it() {
         note_voice_proto::Request::OpenDm { link_id, .. } => {
             Ok(note_voice_proto::Reply::Dm { room_id: format!("!dm{link_id}:t") })
         }
-        note_voice_proto::Request::DmJoined { .. } => {
+        _ => {
             Err(note_voice_proto::Refusal::new(note_voice_proto::RefusalCode::BadRequest, "no"))
         }
     });
@@ -267,11 +268,143 @@ async fn a_link_removed_while_the_invite_is_out_is_not_reported_invited() {
             links::remove(&db.lock().unwrap(), 1).unwrap();
             Ok(note_voice_proto::Reply::Dm { room_id: "!dm:t".into() })
         }
-        note_voice_proto::Request::DmJoined { .. } => {
+        _ => {
             Err(note_voice_proto::Refusal::new(note_voice_proto::RefusalCode::BadRequest, "no"))
         }
     });
     let (status, body) = call(&app, &cookie, "POST", "/api/voice/link", r#"{"mxid":"@aki:t"}"#).await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert!(links::get(&r.state.db(), 1).unwrap().is_none());
+}
+
+fn offers_voices(r: &Rig) {
+    r.fake_rec.answer_with(|req| match req {
+        note_voice_proto::Request::ListVoices { language } => Ok(note_voice_proto::Reply::Voices {
+            voices: ["af_heart", "bm_george"]
+                .map(|id| note_voice_proto::VoiceOption { id: id.into(), label: id.into(), language: language.clone() })
+                .to_vec(),
+        }),
+        note_voice_proto::Request::Preview { voice, .. } if voice == "nope" => {
+            Err(note_voice_proto::Refusal::new(note_voice_proto::RefusalCode::BadRequest, "no voice \"nope\""))
+        }
+        note_voice_proto::Request::Preview { voice, .. } if voice == "broken" => {
+            Err(note_voice_proto::Refusal::new(note_voice_proto::RefusalCode::Failed, "no voice models"))
+        }
+        note_voice_proto::Request::Preview { voice, .. } => {
+            use base64::Engine as _;
+            let wav = format!("RIFF{voice}");
+            Ok(note_voice_proto::Reply::Audio { wav_base64: base64::engine::general_purpose::STANDARD.encode(wav) })
+        }
+        _ => Err(note_voice_proto::Refusal::new(note_voice_proto::RefusalCode::BadRequest, "no")),
+    });
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ring_for_checkins_is_saved() {
+    let (app, cookie, _r) = api_rig().await;
+    let (status, body) = call(&app, &cookie, "PUT", "/api/settings", r#"{"ring_for":"checkins"}"#).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["ring_for"], "checkins");
+    let (_, s) = call(&app, &cookie, "GET", "/api/settings", "").await;
+    assert_eq!(s["ring_for"], "checkins");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn only_an_offered_voice_is_saved_and_a_ring_carries_it() {
+    let (app, cookie, r) = api_rig().await;
+    offers_voices(&r);
+    let (_, s) = call(&app, &cookie, "GET", "/api/settings", "").await;
+    assert_eq!((&s["voice_voice"], &s["voice_cue"]), (&serde_json::json!(""), &serde_json::json!(true)));
+    let (status, _) = call(&app, &cookie, "PUT", "/api/settings", r#"{"voice_voice":"nope"}"#).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, body) =
+        call(&app, &cookie, "PUT", "/api/settings", r#"{"voice_voice":"bm_george","voice_cue":false}"#).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!((&body["voice_voice"], &body["voice_cue"]), (&serde_json::json!("bm_george"), &serde_json::json!(false)));
+    let (_, voices) = call(&app, &cookie, "GET", "/api/voice/voices", "").await;
+    assert_eq!(voices["voices"][1], serde_json::json!({ "id": "bm_george", "label": "bm_george" }));
+
+    {
+        let conn = r.state.db();
+        let id = links::begin(&conn, 1, "@aki:t", jiff::Timestamp::now()).unwrap();
+        links::set_room(&conn, id, "!r:t").unwrap();
+        links::mark_joined(&conn, id, "!r:t", jiff::Timestamp::now()).unwrap();
+    }
+    let (status, _) = call(&app, &cookie, "POST", "/api/voice/test", "").await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let rec = r.fake_rec.clone();
+    eventually("the ring starts", || !rec.seen.lock().unwrap().is_empty()).await;
+    let body = r.fake_rec.seen.lock().unwrap()[0].2.clone();
+    let CallBody::Start { voice, .. } = body else { panic!("{body:?}") };
+    assert_eq!((voice.voice.as_str(), voice.cue, voice.language.as_str()), ("bm_george", false, "en"));
+
+    let (status, body) = call(&app, &cookie, "PUT", "/api/settings", r#"{"voice_voice":""}"#).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["voice_voice"], "");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_preview_is_served_as_wav() {
+    let (app, cookie, r) = api_rig().await;
+    offers_voices(&r);
+    let res = app
+        .clone()
+        .oneshot(
+            HttpRequest::builder()
+                .uri("/api/voice/preview?voice=af_heart")
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.headers()[header::CONTENT_TYPE], "audio/wav");
+    assert_eq!(res.headers()[header::CACHE_CONTROL], "private, max-age=86400");
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&bytes[..], b"RIFFaf_heart");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_answered_incoming_call_carries_the_users_voice() {
+    let (app, cookie, r) = api_rig().await;
+    offers_voices(&r);
+    let (status, _) = call(&app, &cookie, "PUT", "/api/settings", r#"{"voice_voice":"af_heart"}"#).await;
+    assert_eq!(status, StatusCode::OK);
+    {
+        let conn = r.state.db();
+        let id = links::begin(&conn, 1, "@aki:t", jiff::Timestamp::now()).unwrap();
+        links::set_room(&conn, id, "!r:t").unwrap();
+        links::mark_joined(&conn, id, "!r:t", jiff::Timestamp::now()).unwrap();
+    }
+    let incoming = note_voice_proto::Request::IncomingCall { room_id: "!r:t".into(), mxid: "@aki:t".into(), key: "$ev".into() };
+    let reply = r.fake.request(incoming).await;
+    assert!(matches!(reply, Ok(note_voice_proto::Reply::Call { .. })), "{reply:?}");
+    let rec = r.fake_rec.clone();
+    eventually("the Start arrives", || !rec.seen.lock().unwrap().is_empty()).await;
+    let body = r.fake_rec.seen.lock().unwrap()[0].2.clone();
+    let CallBody::Start { voice, .. } = body else { panic!("{body:?}") };
+    assert_eq!(voice.voice, "af_heart");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_preview_says_why_and_an_unreachable_one_is_unavailable() {
+    let (app, cookie, r) = api_rig().await;
+    offers_voices(&r);
+    let (status, _) = call(&app, &cookie, "GET", "/api/voice/preview?voice=nope", "").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, body) = call(&app, &cookie, "GET", "/api/voice/preview?voice=broken", "").await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(body["error"], "no voice models");
+    let logged: i64 = r
+        .state
+        .db()
+        .query_row("SELECT COUNT(*) FROM event_log WHERE kind = 'voice_refused'", [], |x| x.get(0))
+        .unwrap();
+    assert_eq!(logged, 2);
+    r.listen.abort();
+    let v = r.voice.clone();
+    eventually("Note sees the link down", || !v.is_up()).await;
+    let (status, _) = call(&app, &cookie, "GET", "/api/voice/preview?voice=af_heart", "").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
 }

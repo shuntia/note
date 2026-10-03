@@ -19,6 +19,8 @@ let
     socket = voiceSocket;
     state_dir = "/var/lib/note-voice";
     token_file = "/run/credentials/note-voice.service/matrix-bot.token";
+    models_dir = "${voiceCfg.package.models}";
+    cues_dir = "${voiceCfg.package.cues}";
   });
   serverToml = toml.generate "server.toml"
     (lib.recursiveUpdate cfg.settings (lib.optionalAttrs voiceCfg.enable { voice.socket = voiceSocket; }));
@@ -195,7 +197,11 @@ in
       wantedBy = [ "multi-user.target" ];
       after = [ "note.service" "network-online.target" ];
       wants = [ "network-online.target" ];
-      environment.NOTE_VOICE_CONFIG = "${voiceToml}";
+      # HOME holds the CUDA kernel cache.
+      environment = {
+        NOTE_VOICE_CONFIG = "${voiceToml}";
+        HOME = "/var/cache/note-voice";
+      };
       unitConfig.StartLimitIntervalSec = 0;
       serviceConfig = {
         ExecStart = lib.getExe voiceCfg.package;
@@ -203,6 +209,7 @@ in
         Group = cfg.group;
         StateDirectory = "note-voice";
         StateDirectoryMode = "0700";
+        CacheDirectory = "note-voice";
         LoadCredential = [ "matrix-bot.token:${voiceCfg.tokenFile}" ];
         Restart = "always";
         RestartSec = 2;
@@ -211,6 +218,9 @@ in
         UMask = "0077";
         NoNewPrivileges = true;
         PrivateTmp = true;
+        PrivateDevices = false;
+        DeviceAllow = [ "/dev/nvidia0 rw" "/dev/nvidiactl rw" "/dev/nvidia-uvm rw" "/dev/nvidia-uvm-tools rw" ];
+        SupplementaryGroups = [ "video" ];
         ProtectSystem = "strict";
         ProtectHome = true;
         ProtectKernelTunables = true;
@@ -220,12 +230,14 @@ in
         ProtectClock = true;
         ProtectHostname = true;
         ProtectProc = "invisible";
-        RestrictAddressFamilies = [ "AF_INET" "AF_INET6" "AF_UNIX" ];
+        # libwebrtc's network monitor reads netlink.
+        RestrictAddressFamilies = [ "AF_INET" "AF_INET6" "AF_UNIX" "AF_NETLINK" ];
         RestrictNamespaces = true;
         RestrictRealtime = true;
         RestrictSUIDSGID = true;
         LockPersonality = true;
-        MemoryDenyWriteExecute = true;
+        # The CUDA runtime JIT-compiles kernels.
+        MemoryDenyWriteExecute = false;
         SystemCallArchitectures = "native";
         SystemCallFilter = [ "@system-service" "~@privileged" ];
         CapabilityBoundingSet = "";

@@ -1075,6 +1075,7 @@ pub async fn run_turn(state: &crate::AppState, principal: &crate::auth::SharePri
                 title: format!("Note from {}", share.name),
                 body: text.clone(),
                 urgency: crate::channels::Urgency::Normal,
+                checkin: false,
                 event_id: None,
                 conversation_id: None,
                 actions: Vec::new(),

@@ -54,6 +54,11 @@ mod tests {
             Frame::Request { id: 2, body: Request::DmJoined { link_id: 3, room_id: "!r:b".into() } },
             Frame::Response { id: 1, result: Ok(Reply::Dm { room_id: "!r:b".into() }) },
             Frame::Response { id: 2, result: Ok(Reply::Done) },
+            Frame::Request {
+                id: 4,
+                body: Request::IncomingCall { room_id: "!r:b".into(), mxid: "@a:b".into(), key: "$ev".into() },
+            },
+            Frame::Response { id: 4, result: Ok(Reply::Call { call_id: "c-2".into() }) },
             Frame::Response {
                 id: 3,
                 result: Err(Refusal::new(RefusalCode::Timeout, "no answer in time")),
@@ -69,6 +74,8 @@ mod tests {
                     title: "Check-in".into(),
                     ring_secs: 30,
                     ring_by_ms: 1_790_000_000_000,
+                    voice: VoiceProfile::default(),
+                    direction: Direction::Inbound,
                 },
             },
             Frame::Call { call_id: "c-1".into(), dir: Dir::ToVoice, seq: 2, body: CallBody::HangUp },

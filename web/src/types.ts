@@ -218,8 +218,16 @@ export type Settings = {
   // Whether this server can ring a phone; the Calls row hides without it.
   voice_enabled: boolean
   voice_link: { mxid: string; state: 'invited' | 'linked' } | null
-  ring_for: 'urgent' | 'never'
+  ring_for: RingFor
+  // The call voice's id; '' for the language's default.
+  voice_voice: string
+  // Whether a call plays its ready and heard sounds.
+  voice_cue: boolean
 }
+
+export type RingFor = 'urgent' | 'checkins' | 'never'
+
+export type VoiceChoice = { id: string; label: string }
 
 // A live code and the deep link that carries it to the bot.
 export type TelegramLink = { code: string; bot: string; url: string }
@@ -246,6 +254,8 @@ export type SettingsSaved = Pick<
   | 'session_end_notify'
   | 'idle_nudge_min'
   | 'ring_for'
+  | 'voice_voice'
+  | 'voice_cue'
 > & { schedule: ScheduleRow[] }
 
 export type PromptName = 'persona' | 'planning' | 'share'

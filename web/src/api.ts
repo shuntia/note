@@ -48,6 +48,7 @@ import type {
   TaskState,
   TaskUpdate,
   TaskUrgency,
+  VoiceChoice,
   Token,
   TokenCreated,
   TotpEnrolment,
@@ -80,6 +81,8 @@ const WRITABLE_SETTINGS = [
   'session_end_notify',
   'idle_nudge_min',
   'ring_for',
+  'voice_voice',
+  'voice_cue',
 ] as const
 
 type SettingsPatch = Partial<Pick<Settings, (typeof WRITABLE_SETTINGS)[number]>>
@@ -312,6 +315,7 @@ export const api = {
     }),
   voiceUnlink: () => request<void>('/api/voice/link', { method: 'DELETE' }),
   voiceTest: () => request<{ call_id: string }>('/api/voice/test', { method: 'POST' }),
+  voiceVoices: () => request<{ voices: VoiceChoice[] }>('/api/voice/voices'),
   notifyTest: () => request<{ via: string }>('/api/notify/test', { method: 'POST' }),
   openWorkSession: () => request<WorkSession | null>('/api/sessions/open'),
   // Opening one ends whatever was still running, farewell and all.

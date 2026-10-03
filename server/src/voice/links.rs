@@ -24,6 +24,17 @@ pub fn ringable(conn: &Connection, user_id: i64) -> Result<Option<Link>> {
     Ok(get(conn, user_id)?.filter(|l| l.state == "linked" && l.room_id.is_some()))
 }
 
+/// The user whose joined link is `mxid` in `room_id`.
+pub fn linked_user(conn: &Connection, room_id: &str, mxid: &str) -> Result<Option<i64>> {
+    Ok(conn
+        .query_row(
+            "SELECT user_id FROM voice_links WHERE room_id = ?1 AND mxid = ?2 AND state = 'linked'",
+            (room_id, mxid),
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
 /// Starts, or restarts, the user's one link, keeping its id.
 pub fn begin(conn: &Connection, user_id: i64, mxid: &str, now: jiff::Timestamp) -> Result<i64> {
     Ok(conn.query_row(

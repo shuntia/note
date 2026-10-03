@@ -15,8 +15,9 @@ pub struct Ring<'a> {
     pub ring_secs: u32,
 }
 
-/// Rings once and returns how it ended; the membership is cleared on every
-/// path. `on_ringing` fires once the ring event is out.
+/// Rings once and returns how it ended. An answered call keeps the bot's
+/// membership for the session; every other path clears it. `on_ringing` fires
+/// once the ring event is out.
 pub async fn ring_once(
     r: Ring<'_>,
     mut events: broadcast::Receiver<RoomEvent>,
@@ -24,10 +25,16 @@ pub async fn ring_once(
     on_ringing: impl FnOnce(),
 ) -> Outcome {
     let outcome = ring_inner(&r, &mut events, &mut hang_up, on_ringing).await;
-    if let Err(e) = r.matrix.clear_member(r.room_id).await {
-        eprintln!("voice: clearing the call membership in {} failed: {e:#}", r.room_id);
+    if outcome != Outcome::Answered {
+        clear_member(r.matrix, r.room_id).await;
     }
     outcome
+}
+
+pub async fn clear_member(matrix: &Matrix, room_id: &str) {
+    if let Err(e) = matrix.clear_member(room_id).await {
+        eprintln!("voice: clearing the call membership in {room_id} failed: {e:#}");
+    }
 }
 
 async fn ring_inner(
@@ -58,7 +65,7 @@ async fn ring_inner(
                 }
             }
             ev = events.recv() => match ev {
-                Ok(RoomEvent::CallMember { room, user, active: true }) if room == r.room_id && user == r.mxid => {
+                Ok(RoomEvent::CallMember { room, user, active: true, .. }) if room == r.room_id && user == r.mxid => {
                     return Outcome::Answered;
                 }
                 Ok(RoomEvent::Declined { room, notification: n }) if room == r.room_id && n == notification => {

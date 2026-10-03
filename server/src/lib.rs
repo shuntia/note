@@ -133,6 +133,9 @@ pub struct AppState {
     /// link invites the user to, and carries a mirrored reply back.
     pub telegram: Option<Arc<crate::channels::telegram::TelegramChannel>>,
     pub voice: Option<Arc<crate::voice::Voice>>,
+    /// The model a call speaks on; `None` speaks on `llm`.
+    pub voice_llm: Option<Arc<dyn LLMProvider>>,
+    pub call_settings: crate::voice::call::CallSettings,
     pub hub: Arc<crate::channels::ws::ClientHub>,
     pub channels: Vec<Arc<dyn crate::channels::Channel>>,
     pub secure_cookies: bool,
@@ -182,6 +185,8 @@ impl AppState {
             vapid_public_key: None,
             telegram: None,
             voice: None,
+            voice_llm: None,
+            call_settings: crate::voice::call::CallSettings::default(),
             hub,
             channels: vec![ws],
             secure_cookies: false,
@@ -297,11 +302,29 @@ impl AppState {
         self
     }
 
-    /// Must come after every other channel: the ones present now are what a
-    /// rung message falls through to.
+    #[must_use]
+    pub fn with_voice_llm(mut self, llm: Arc<dyn LLMProvider>, settings: crate::voice::call::CallSettings) -> Self {
+        self.voice_llm = Some(llm);
+        self.call_settings = settings;
+        self
+    }
+
+    /// Must come after every other channel, the providers and search: the
+    /// channels present now are what a rung message falls through to, and a
+    /// call talks with the providers and search present now.
     #[must_use]
     pub fn with_voice(mut self, voice: Arc<crate::voice::Voice>) -> Self {
         voice.set_fallback(self.channels.clone());
+        voice.set_calls(crate::voice::call::CallDeps {
+            db: self.db.clone(),
+            config_dir: self.config_dir.clone(),
+            data_dir: self.data_dir.clone(),
+            llm: self.llm.clone(),
+            voice_llm: self.voice_llm.clone().unwrap_or_else(|| self.llm.clone()),
+            embeddings: self.embeddings.clone(),
+            search: self.search.clone(),
+            settings: self.call_settings.clone(),
+        });
         let ch = crate::channels::voice::VoiceChannel::new(voice.clone(), self.db.clone(), self.config_dir.clone());
         self.channels.insert(0, Arc::new(ch));
         self.voice = Some(voice);

@@ -189,6 +189,7 @@ v5mC8db8ZSK9ruR2mEgvMEvePYwohpr98g==
             title: "Nudge".into(),
             body: "stretch break".into(),
             urgency: Urgency::Normal,
+            checkin: false,
             event_id: Some(3),
             conversation_id: None,
             actions: Vec::new(),

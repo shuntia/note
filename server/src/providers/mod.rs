@@ -35,8 +35,39 @@ pub struct ChatResponse {
     pub tool_calls: Vec<ToolCall>,
 }
 
+pub trait StreamSink {
+    /// A piece of assistant text. Returning false stops the stream.
+    fn text(&mut self, delta: &str) -> bool;
+    /// A tool call whose arguments are complete. Returning false stops the stream.
+    fn tool_call(&mut self, call: &ToolCall) -> bool;
+}
+
+pub struct StreamOpts {
+    /// Fails the call if no text or tool call has arrived by then.
+    pub first_token: std::time::Duration,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("no first token within {0:?}")]
+pub struct FirstTokenTimeout(pub std::time::Duration);
+
 pub trait LLMProvider: Send + Sync {
     fn chat(&self, req: &ChatRequest) -> Result<ChatResponse>;
+
+    /// Streams one round. The returned response holds everything that arrived,
+    /// also when the sink stopped the stream early.
+    fn chat_stream(&self, req: &ChatRequest, _opts: &StreamOpts, sink: &mut dyn StreamSink) -> Result<ChatResponse> {
+        let resp = self.chat(req)?;
+        if !resp.text.is_empty() && !sink.text(&resp.text) {
+            return Ok(resp);
+        }
+        for c in &resp.tool_calls {
+            if !sink.tool_call(c) {
+                break;
+            }
+        }
+        Ok(resp)
+    }
 
     /// The reply plus the model's reasoning text for this round, blank when the
     /// provider returns none or reasoning is off.
@@ -46,6 +77,11 @@ pub trait LLMProvider: Send + Sync {
 
     fn model(&self) -> Option<String> {
         None
+    }
+
+    /// Whether `chat_stream` streams; the default runs a whole `chat`.
+    fn streams(&self) -> bool {
+        false
     }
 
     /// Swaps the model later calls ask for; false for a provider with none.
@@ -100,16 +136,44 @@ const RETRY_DELAYS_MS: [u64; 2] = [1_500, 4_000];
 pub struct ChatAgents {
     interactive: ureq::Agent,
     background: ureq::Agent,
+    timeout_secs: u64,
+    background_timeout_secs: u64,
+    stream_agents: std::sync::Mutex<std::collections::HashMap<(bool, std::time::Duration), ureq::Agent>>,
     retry_delays_ms: &'static [u64],
 }
 
 impl ChatAgents {
     pub fn new(timeout_secs: u64, background_timeout_secs: u64) -> Self {
+        let background_timeout_secs = background_timeout_secs.max(timeout_secs);
         Self {
             interactive: http_agent(timeout_secs),
-            background: http_agent(background_timeout_secs.max(timeout_secs)),
+            background: http_agent(background_timeout_secs),
+            timeout_secs,
+            background_timeout_secs,
+            stream_agents: std::sync::Mutex::default(),
             retry_delays_ms: &RETRY_DELAYS_MS,
         }
+    }
+
+    /// The agent for streamed calls with this deadline: the response head must
+    /// arrive within `first_token`, and the whole body within the usual chat cap.
+    pub(crate) fn stream_agent(&self, background: bool, first_token: std::time::Duration) -> ureq::Agent {
+        let mut agents = self.stream_agents.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        agents.entry((background, first_token)).or_insert_with(|| self.new_stream_agent(background, first_token)).clone()
+    }
+
+    fn new_stream_agent(&self, background: bool, first_token: std::time::Duration) -> ureq::Agent {
+        let secs = if background { self.background_timeout_secs } else { self.timeout_secs };
+        let cap = Some(std::time::Duration::from_secs(secs));
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .timeout_connect(Some(std::time::Duration::from_secs(5)))
+            .timeout_send_request(cap)
+            .timeout_send_body(cap)
+            .timeout_recv_response(Some(first_token))
+            .timeout_recv_body(cap)
+            .build()
+            .into()
     }
 
     /// Posts `body` and reads the JSON reply. A transport failure, a reply that
@@ -215,6 +279,36 @@ pub fn build(cfg: &crate::config::ProvidersConfig) -> Result<Providers> {
         },
     };
     Ok((llm, emb))
+}
+
+/// A call's reply model: for an `openai` provider, `[voice] model` (else the
+/// main model) with reasoning off unless `[voice] reasoning_off = false`, and
+/// `OpenRouter`'s `provider.sort`; any other
+/// provider speaks on `main` as is.
+pub fn build_voice(
+    cfg: &crate::config::ProvidersConfig,
+    voice: &crate::config::VoiceConfig,
+    main: &Arc<dyn LLMProvider>,
+) -> Result<Arc<dyn LLMProvider>> {
+    let Some(p) = cfg.llm.as_ref().filter(|p| p.kind == "openai") else {
+        return Ok(main.clone());
+    };
+    let model = voice.model.clone().or_else(|| main.model()).unwrap_or_else(|| p.model.clone());
+    let key = read_key(p, false)?;
+    let mut llm = openai::OpenAILLM::new(
+        &p.base_url,
+        &model,
+        &key,
+        ChatAgents::new(p.timeout_secs, p.background_timeout_secs),
+        reasoning_effort(p)?,
+    );
+    if voice.reasoning_off {
+        llm = llm.without_reasoning();
+    }
+    if let Some(sort) = &voice.provider_sort {
+        llm = llm.with_extra(serde_json::json!({"provider": {"sort": sort}}));
+    }
+    Ok(Arc::new(llm))
 }
 
 /// The configured reasoning effort, or `None` for the default "none".
@@ -346,6 +440,41 @@ mod tests {
             model: "m".into(), api_key_env: String::new(), api_key_file: path,
             timeout_secs: 45, background_timeout_secs: 180, reasoning: String::new(), cache_ttl_min: None,
         }
+    }
+
+    #[test]
+    fn a_call_speaks_on_its_own_model_only_through_openai() {
+        let voice: crate::config::VoiceConfig =
+            toml::from_str("socket = \"/run/v.sock\"\nmodel = \"fast\"").unwrap();
+        let main: Arc<dyn LLMProvider> = Arc::new(mock::NullLLM);
+        let mut cfg = crate::config::ProvidersConfig { llm: None, embeddings: None };
+        assert!(Arc::ptr_eq(&build_voice(&cfg, &voice, &main).unwrap(), &main));
+        cfg.llm = Some(file_key_config(std::path::PathBuf::new()));
+        let llm = build_voice(&cfg, &voice, &main).unwrap();
+        assert!(!Arc::ptr_eq(&llm, &main));
+        assert_eq!(llm.model().as_deref(), Some("fast"));
+        let unset: crate::config::VoiceConfig = toml::from_str("socket = \"/run/v.sock\"").unwrap();
+        assert_eq!(build_voice(&cfg, &unset, &main).unwrap().model().as_deref(), Some("m"));
+    }
+
+    #[test]
+    fn a_call_switches_reasoning_off_unless_told_not_to() {
+        let reply = r#"{"choices":[{"message":{"content":"hi"}}]}"#;
+        let main: Arc<dyn LLMProvider> = Arc::new(mock::NullLLM);
+        let req = ChatRequest { system: "s", messages: &[], tools: &[], background: false };
+        let sent = |toml: &str| {
+            let (base, rx) = crate::testhttp::serve(vec![("200 OK", reply)]);
+            let mut p = file_key_config(std::path::PathBuf::new());
+            p.base_url = base;
+            let cfg = crate::config::ProvidersConfig { llm: Some(p), embeddings: None };
+            let voice: crate::config::VoiceConfig = toml::from_str(toml).unwrap();
+            build_voice(&cfg, &voice, &main).unwrap().chat(&req).unwrap();
+            crate::testhttp::body_json(&rx.recv().unwrap())
+        };
+        let on = sent("socket = \"/run/v.sock\"");
+        assert_eq!(on["reasoning"], serde_json::json!({"enabled": false}));
+        let off = sent("socket = \"/run/v.sock\"\nreasoning_off = false");
+        assert!(off.get("reasoning").is_none(), "{off}");
     }
 
     #[test]

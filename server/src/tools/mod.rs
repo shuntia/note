@@ -41,6 +41,8 @@ pub enum SessionKind {
     /// A visitor on a share link: a read-only slice of one user's day, tasks
     /// and goals, and nothing else.
     Share,
+    /// A live phone call: every tool runs as a background job.
+    Call,
 }
 
 pub const SHARE_MAX_TURNS: usize = 8;
@@ -186,6 +188,16 @@ fn coerce(value: &mut serde_json::Value, schema: &serde_json::Value, root: &serd
 pub struct BatchArgs {
     pub calls: Vec<BatchCall>,
 }
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CancelJobArgs {
+    pub job: i64,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HangUpArgs {}
 
 #[derive(Default, Debug)]
 pub struct PreparedVectors {
@@ -336,6 +348,8 @@ const HARVEST_DONE: &[&str] = &["harvest_done"];
 const REVIEW_WRITE: &[&str] = &["review_write"];
 const SPEAK: &[&str] = &["say", "stay_quiet"];
 const SHARE_NOTE: &[&str] = &["share_note"];
+/// A call's own job control, run by the call rather than dispatched.
+const CALL_ONLY: &[&str] = &["cancel_job", "hang_up"];
 
 /// Every domain, in the one order each session's tools are offered in; the
 /// tests hold the registries below to it.
@@ -370,6 +384,7 @@ const DOMAINS: &[&[&str]] = &[
     REVIEW_WRITE,
     SPEAK,
     SHARE_NOTE,
+    CALL_ONLY,
 ];
 
 const fn joined<const N: usize>(domains: &[&[&'static str]]) -> [&'static str; N] {
@@ -466,6 +481,21 @@ const HARVEST: &[&str] = registry_of![MEMORY_READ, MEMORY_WRITE, BATCH, HARVEST_
 const REVIEW: &[&str] = registry_of![MEMORY_READ, MEMORY_WRITE, BATCH, REVIEW_WRITE];
 const SHARE: &[&str] =
     registry_of![TASK_READ, GOALS_READ, PLAN_READ, CALENDAR_READ, SHARE_NOTE];
+const CALL: &[&str] = registry_of![
+    MEMORY_READ,
+    MEMORY_WRITE,
+    TASK_READ,
+    TASK_WRITE,
+    GOALS_WRITE,
+    GOALS_READ,
+    NOTES,
+    PLAN_READ,
+    SCHEDULE,
+    CALENDAR_READ,
+    CALENDAR_WRITE,
+    SEARCH,
+    CALL_ONLY,
+];
 
 /// A tool whose success is the session's whole job: `run_session` returns on
 /// it instead of spending another model round on a closing sentence.
@@ -494,6 +524,7 @@ pub fn registry(kind: SessionKind) -> &'static [&'static str] {
         SessionKind::Review => REVIEW,
         SessionKind::Trigger => TRIGGER,
         SessionKind::Share => SHARE,
+        SessionKind::Call => CALL,
     }
 }
 
@@ -822,6 +853,14 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
              nor a tool that ends the session.",
             schema::<BatchArgs>(),
         ),
+        "cancel_job" => (
+            "Stops a running job. A job whose change already landed is reported done instead.",
+            schema::<CancelJobArgs>(),
+        ),
+        "hang_up" => (
+            "Ends the call once what you are saying has played.",
+            schema::<HangUpArgs>(),
+        ),
         "share_note" => (
             "File a message the visitor wants passed on to the owner. Use it only when they ask \
              you to tell, remind or pass something along. It ends the turn, and the visitor is told \
@@ -846,7 +885,7 @@ fn parse<T: serde::de::DeserializeOwned>(raw: &str) -> Result<T, ToolError> {
     serde_json::from_str(raw).map_err(|e| ToolError::invalid_args(e.to_string()))
 }
 
-/// Sole entrypoint for model-originated calls: enforces the payload cap and
+/// The entrypoint for model-originated calls: enforces the payload cap and
 /// the per-session registry, then runs the handler inside one transaction so
 /// a failed call leaves no trace.
 pub fn dispatch(
@@ -856,6 +895,51 @@ pub fn dispatch(
     name: &str,
     raw_args: &str,
 ) -> Result<serde_json::Value, ToolError> {
+    admit(ctx, kind, name, raw_args)?;
+    let tx = conn.unchecked_transaction().map_err(|e| ToolError::internal(e.to_string()))?;
+    let out = run(&tx, ctx, kind, name, raw_args)?;
+    tx.commit().map_err(|e| ToolError::internal(e.to_string()))?;
+    Ok(out)
+}
+
+/// `dispatch` keyed by one call's `(call_id, op_key)`: a key already in
+/// `voice_ops` returns the result it stored and runs nothing, so a retried
+/// operation lands its change once.
+pub fn dispatch_once(
+    conn: &Connection,
+    ctx: &ToolCtx,
+    kind: SessionKind,
+    name: &str,
+    raw_args: &str,
+    call_id: &str,
+    op_key: &str,
+) -> Result<serde_json::Value, ToolError> {
+    use rusqlite::OptionalExtension;
+    admit(ctx, kind, name, raw_args)?;
+    let internal = |e: rusqlite::Error| ToolError::internal(e.to_string());
+    let tx = conn.unchecked_transaction().map_err(internal)?;
+    let stored: Option<String> = tx
+        .query_row(
+            "SELECT result FROM voice_ops WHERE call_id = ?1 AND op_key = ?2",
+            [call_id, op_key],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(internal)?;
+    if let Some(stored) = stored {
+        return serde_json::from_str(&stored).map_err(|e| ToolError::internal(e.to_string()));
+    }
+    let out = run(&tx, ctx, kind, name, raw_args)?;
+    tx.execute(
+        "INSERT INTO voice_ops (call_id, op_key, result, created_at) VALUES (?1, ?2, ?3, ?4)",
+        (call_id, op_key, out.to_string(), jiff::Timestamp::now().to_string()),
+    )
+    .map_err(internal)?;
+    tx.commit().map_err(internal)?;
+    Ok(out)
+}
+
+fn admit(ctx: &ToolCtx, kind: SessionKind, name: &str, raw_args: &str) -> Result<(), ToolError> {
     if raw_args.len() > MAX_ARGS_BYTES {
         return Err(ToolError::rejected(format!(
             "arguments exceed {MAX_ARGS_BYTES} bytes"
@@ -876,10 +960,7 @@ pub fn dispatch(
             return Err(ToolError::forbidden(format!("tool {name} is not shared on this link")));
         }
     }
-    let tx = conn.unchecked_transaction().map_err(|e| ToolError::internal(e.to_string()))?;
-    let out = run(&tx, ctx, kind, name, raw_args)?;
-    tx.commit().map_err(|e| ToolError::internal(e.to_string()))?;
-    Ok(out)
+    Ok(())
 }
 
 fn run(
@@ -937,9 +1018,10 @@ fn run(
         "say" => trigger_ops::say(conn, ctx, &parse(raw)?),
         "stay_quiet" => trigger_ops::stay_quiet(conn, ctx, &parse(raw)?),
         "share_note" => share_ops::note(conn, ctx, &parse(raw)?),
-        // Both run in the session around this dispatch: one reaches the
-        // network, the other expands into calls of its own.
-        "web_search" | "batch" => {
+        // These run in the session around this dispatch: one reaches the
+        // network, one expands into calls of its own, and the call's own job
+        // control acts on the call itself.
+        "web_search" | "batch" | "cancel_job" | "hang_up" => {
             Err(ToolError::rejected(format!("{name} is run by the session, not dispatched")))
         }
         _ => unreachable!("registry guarantees a known name"),
@@ -1323,7 +1405,7 @@ mod tests {
         }
     }
 
-    const KINDS: [SessionKind; 10] = [
+    const KINDS: [SessionKind; 11] = [
         SessionKind::Nightly,
         SessionKind::Checkin,
         SessionKind::Talk,
@@ -1334,6 +1416,7 @@ mod tests {
         SessionKind::Review,
         SessionKind::Trigger,
         SessionKind::Share,
+        SessionKind::Call,
     ];
 
     /// The membership a kind offers is a union of whole domains, and the order
@@ -1581,6 +1664,53 @@ mod tests {
     }
 
     #[test]
+    fn call_registry_has_no_batch_and_owns_cancel_and_hang_up() {
+        let call = registry(SessionKind::Call);
+        for name in ["web_search", "cancel_job", "hang_up", "task_create"] {
+            assert!(call.contains(&name), "a call cannot reach {name}");
+        }
+        assert!(!call.contains(&"batch"));
+        let talk = registry(SessionKind::Talk);
+        assert!(!talk.contains(&"cancel_job") && !talk.contains(&"hang_up"));
+    }
+
+    #[test]
+    fn dispatch_once_runs_a_write_once_per_key() {
+        let (conn, tmp) = env();
+        conn.execute(
+            "INSERT INTO voice_calls (id, user_id, direction, state, ring_by, created_at)
+             VALUES ('c1', 1, 'outbound', 'answered', 'x', 'x')",
+            [],
+        )
+        .unwrap();
+        let once = |key: &str, args: &str| {
+            dispatch_once(&conn, &ctx(&tmp), SessionKind::Call, "task_create", args, "c1", key)
+        };
+        let tasks = || -> i64 { conn.query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0)).unwrap() };
+        let first = once("2:0", r#"{"title":"essay"}"#).unwrap();
+        let again = once("2:0", r#"{"title":"essay"}"#).unwrap();
+        assert_eq!(first, again);
+        assert_eq!(tasks(), 1);
+        once("2:1", r#"{"title":"essay"}"#).unwrap();
+        assert_eq!(tasks(), 2);
+        once("3:0", r#"{"title":""}"#).unwrap_err();
+        let recorded: i64 = conn
+            .query_row("SELECT COUNT(*) FROM voice_ops WHERE op_key = '3:0'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(recorded, 0);
+        assert_eq!(tasks(), 2);
+    }
+
+    #[test]
+    fn the_call_only_tools_are_run_by_the_session() {
+        let (conn, tmp) = env();
+        for name in ["cancel_job", "hang_up"] {
+            let e = dispatch(&conn, &ctx(&tmp), SessionKind::Call, name, "{}").unwrap_err();
+            assert_eq!(e.kind, "rejected", "{name}");
+        }
+    }
+
+    #[test]
     fn schemas_cover_the_registry_and_are_objects() {
         for kind in [
             SessionKind::Nightly,
@@ -1593,6 +1723,7 @@ mod tests {
             SessionKind::Review,
             SessionKind::Trigger,
             SessionKind::Share,
+            SessionKind::Call,
         ] {
             let schemas = schemas(kind);
             assert_eq!(schemas.len(), registry(kind).len());

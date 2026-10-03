@@ -1,9 +1,8 @@
 mod common;
 
 use common::*;
-use note_voice::config::VoiceServiceConfig;
 use note_voice_proto::testkit::{eventually, fast};
-use note_voice_proto::{CallBody, Outcome, Role};
+use note_voice_proto::{CallBody, Direction, Outcome, Role, VoiceProfile};
 
 struct Rig {
     dir: tempfile::TempDir,
@@ -15,24 +14,22 @@ async fn rig() -> Rig {
     rig_with(|_, _, _| {}).await
 }
 
-/// `seed` gets the state dir, the homeserver and Note before the service starts.
 async fn rig_with(seed: impl FnOnce(&std::path::Path, &SharedHs, &FakeNote)) -> Rig {
+    rig_on(backends(true, Join::Quiet), seed).await
+}
+
+/// `seed` gets the state dir, the homeserver and Note before the service starts.
+async fn rig_on(
+    backends: note_voice::service::Backends,
+    seed: impl FnOnce(&std::path::Path, &SharedHs, &FakeNote),
+) -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let (base, hs) = homeserver().await;
-    let token = dir.path().join("token");
-    std::fs::write(&token, "secret\n").unwrap();
-    let socket = dir.path().join("voice.sock");
-    let note = fake_note(&socket);
-    std::fs::create_dir_all(dir.path().join("state")).unwrap();
-    seed(&dir.path().join("state"), &hs, &note);
-    let cfg = VoiceServiceConfig {
-        homeserver: base,
-        token_file: token,
-        livekit_service_url: "https://rtc.t".into(),
-        socket,
-        state_dir: dir.path().join("state"),
-    };
-    tokio::spawn(async move { note_voice::service::run_with(cfg, fast(Role::Voice)).await.unwrap() });
+    let cfg = voice_config(dir.path(), base);
+    let note = fake_note(&cfg.socket);
+    std::fs::create_dir_all(&cfg.state_dir).unwrap();
+    seed(&cfg.state_dir, &hs, &note);
+    tokio::spawn(async move { note_voice::service::run_with(cfg, fast(Role::Voice), backends).await.unwrap() });
     let p = note.peer.clone();
     eventually("voice connects", || p.is_up()).await;
     Rig { dir, hs, note }
@@ -46,6 +43,8 @@ fn start(ring_secs: u32, ring_by_ms: i64) -> CallBody {
         title: "Check-in".into(),
         ring_secs,
         ring_by_ms,
+        voice: VoiceProfile::default(),
+        direction: Direction::Outbound,
     }
 }
 
@@ -81,17 +80,59 @@ fn cleared(r: &Rig) -> bool {
     })
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn an_answer_ends_the_ring_as_answered() {
-    let r = rig().await;
-    r.note.peer.send_call("c1", start(30, soon())).unwrap();
-    wait_for_ring(&r).await;
+fn member_expiries(r: &Rig) -> Vec<u64> {
+    r.hs.lock()
+        .unwrap()
+        .state_puts
+        .iter()
+        .filter_map(|(_, k, _, body)| (k == "org.matrix.msc3401.call.member").then(|| body["expires"].as_u64()).flatten())
+        .collect()
+}
+
+async fn answer(r: &Rig, call: &str) {
+    r.note.peer.send_call(call, start(30, soon())).unwrap();
+    wait_for_ring(r).await;
     r.hs.lock().unwrap().syncs.push_back(joined_room("!r:t", &[member_event("@aki:t", true)]));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_answer_goes_live_until_note_hangs_up() {
+    let r = rig().await;
+    answer(&r, "c1").await;
     let rec = r.note.rec.clone();
-    eventually("an outcome and Ended", || rec.bodies("c1").contains(&CallBody::Ended)).await;
+    eventually("answered", || outcome_of(&r, "c1").is_some()).await;
     assert_eq!(outcome_of(&r, "c1"), Some(Outcome::Answered));
-    assert_eq!(r.note.rec.bodies("c1")[0], CallBody::Ringing);
+    assert_eq!(rec.bodies("c1")[0], CallBody::Ringing);
+    assert_eq!(member_expiries(&r), vec![60_000, 3_600_000], "the membership is renewed for the call");
+    eventually("the call is recorded live", || saved_state(&r)["calls"]["c1"]["live"] == true).await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(!rec.bodies("c1").contains(&CallBody::Ended), "an answered call stays up");
+    assert!(!cleared(&r));
+
+    r.note.peer.send_call("c1", CallBody::HangUp).unwrap();
+    eventually("Ended", || rec.bodies("c1").contains(&CallBody::Ended)).await;
+    assert_eq!(rec.bodies("c1").iter().filter(|b| matches!(b, CallBody::Outcome { .. })).count(), 1);
     assert!(cleared(&r), "the bot leaves the call");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_answer_with_no_voice_models_fails_the_call() {
+    let r = rig_on(backends(false, Join::Quiet), |_, _, _| {}).await;
+    answer(&r, "c1").await;
+    let rec = r.note.rec.clone();
+    eventually("Ended", || rec.bodies("c1").contains(&CallBody::Ended)).await;
+    assert_eq!(outcome_of(&r, "c1"), Some(Outcome::Failed { reason: "no voice models".into() }));
+    assert!(cleared(&r));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_join_fails_the_call() {
+    let r = rig_on(backends(true, Join::Fails), |_, _, _| {}).await;
+    answer(&r, "c1").await;
+    let rec = r.note.rec.clone();
+    eventually("Ended", || rec.bodies("c1").contains(&CallBody::Ended)).await;
+    assert_eq!(outcome_of(&r, "c1"), Some(Outcome::Failed { reason: "no audio track from the user".into() }));
+    assert!(cleared(&r));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -156,6 +197,32 @@ async fn open_dm_is_idempotent_and_the_join_is_reported() {
         rec.requests.lock().unwrap().iter().any(|q| matches!(q, note_voice_proto::Request::DmJoined { link_id: 7, .. }))
     })
     .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hang_up_during_the_join_abandons_it() {
+    let r = rig_on(backends(true, Join::Hangs), |_, _, _| {}).await;
+    answer(&r, "c1").await;
+    eventually("the join starts", || member_expiries(&r).contains(&3_600_000)).await;
+    r.note.peer.send_call("c1", CallBody::HangUp).unwrap();
+    let rec = r.note.rec.clone();
+    eventually("Ended", || rec.bodies("c1").contains(&CallBody::Ended)).await;
+    assert_eq!(outcome_of(&r, "c1"), Some(Outcome::Failed { reason: "hung up by Note".into() }));
+    assert_eq!(rec.bodies("c1").iter().filter(|b| matches!(b, CallBody::Outcome { .. })).count(), 1);
+    assert!(cleared(&r));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_crashed_session_still_ends_the_call() {
+    let r = rig_on(backends(true, Join::Broken), |_, _, _| {}).await;
+    answer(&r, "c1").await;
+    let rec = r.note.rec.clone();
+    eventually("Ended", || rec.bodies("c1").contains(&CallBody::Ended)).await;
+    assert_eq!(outcome_of(&r, "c1"), Some(Outcome::Answered));
+    assert_eq!(rec.bodies("c1").iter().filter(|b| matches!(b, CallBody::Outcome { .. })).count(), 1);
+    assert_eq!(rec.bodies("c1").iter().filter(|b| **b == CallBody::Ended).count(), 1);
+    assert!(cleared(&r), "the membership does not outlive the session");
+    eventually("the call is no longer live", || saved_state(&r)["calls"]["c1"]["live"] != true).await;
 }
 
 fn seed_state(state_dir: &std::path::Path, state: &serde_json::Value) {
@@ -227,7 +294,7 @@ async fn one_join_report_runs_per_link_at_a_time() {
         note_voice_proto::Request::DmJoined { .. } => {
             Err(note_voice_proto::Refusal::new(note_voice_proto::RefusalCode::Failed, "not yet"))
         }
-        note_voice_proto::Request::OpenDm { .. } => Ok(note_voice_proto::Reply::Done),
+        _ => Ok(note_voice_proto::Reply::Done),
     });
     let Ok(note_voice_proto::Reply::Dm { room_id }) =
         r.note.peer.request(note_voice_proto::Request::OpenDm { link_id: 5, mxid: "@aki:t".into() }).await
@@ -314,20 +381,11 @@ async fn a_failed_m_direct_write_still_links_one_room() {
 async fn a_voice_restart_mid_ring_closes_the_call_and_reports_it_once() {
     let dir = tempfile::tempdir().unwrap();
     let (base, hs) = homeserver().await;
-    let token = dir.path().join("token");
-    std::fs::write(&token, "secret").unwrap();
-    let socket = dir.path().join("voice.sock");
-    let note = fake_note(&socket);
-    let cfg = VoiceServiceConfig {
-        homeserver: base,
-        token_file: token,
-        livekit_service_url: "https://rtc.t".into(),
-        socket,
-        state_dir: dir.path().join("state"),
-    };
+    let cfg = voice_config(dir.path(), base);
+    let note = fake_note(&cfg.socket);
     let first = {
         let cfg = cfg.clone();
-        tokio::spawn(async move { note_voice::service::run_with(cfg, fast(Role::Voice)).await.unwrap() })
+        tokio::spawn(async move { note_voice::service::run_with(cfg, fast(Role::Voice), backends(true, Join::Quiet)).await.unwrap() })
     };
     let p = note.peer.clone();
     eventually("voice connects", || p.is_up()).await;
@@ -338,7 +396,7 @@ async fn a_voice_restart_mid_ring_closes_the_call_and_reports_it_once() {
     first.abort();
     let p = note.peer.clone();
     eventually("Note sees the voice side gone", || !p.is_up()).await;
-    tokio::spawn(async move { note_voice::service::run_with(cfg, fast(Role::Voice)).await.unwrap() });
+    tokio::spawn(async move { note_voice::service::run_with(cfg, fast(Role::Voice), backends(true, Join::Quiet)).await.unwrap() });
 
     let rec = note.rec.clone();
     eventually("the call is closed after the restart", || rec.bodies("c9").contains(&CallBody::Ended)).await;

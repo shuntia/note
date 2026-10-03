@@ -145,18 +145,15 @@ pub fn run_session_watched(
     result
 }
 
-#[allow(clippy::too_many_arguments)]
-fn run_traced(
+/// The system prompt a session of `kind` runs on: its own instructions, then
+/// the context its kind is allowed to see.
+pub(crate) fn system_prompt(
     deps: &SessionDeps,
     user_id: i64,
     username: &str,
     kind: SessionKind,
     now: jiff::Timestamp,
-    history: &[Message],
-    opening: &str,
-    on_event: &dyn Fn(AgentEvent),
-    trace: &mut crate::trace::Builder,
-) -> Result<SessionOutcome> {
+) -> Result<String> {
     // An import session briefs one task and an inbox session judges one item,
     // both on a caller's behalf: each gets its own instructions and none of the
     // user's standing context.
@@ -167,6 +164,10 @@ fn run_traced(
         SessionKind::Harvest => crate::prompts::load(deps.config_dir, username, "harvest")?,
         SessionKind::Review => crate::prompts::load(deps.config_dir, username, "review")?,
         SessionKind::Share => crate::prompts::load(deps.config_dir, username, "share")?,
+        SessionKind::Call => {
+            let display = crate::config::UserConfig::load(deps.config_dir, username).map_or_else(|_| username.to_string(), |c| c.display_name);
+            crate::prompts::load(deps.config_dir, username, "voice")?.replace("{name}", &display)
+        }
         _ => crate::prompts::load(deps.config_dir, username, "persona")?,
     };
     if kind == SessionKind::Nightly {
@@ -204,7 +205,22 @@ fn run_traced(
             system.push_str(note);
         }
     }
+    Ok(system)
+}
 
+#[allow(clippy::too_many_arguments)]
+fn run_traced(
+    deps: &SessionDeps,
+    user_id: i64,
+    username: &str,
+    kind: SessionKind,
+    now: jiff::Timestamp,
+    history: &[Message],
+    opening: &str,
+    on_event: &dyn Fn(AgentEvent),
+    trace: &mut crate::trace::Builder,
+) -> Result<SessionOutcome> {
+    let system = system_prompt(deps, user_id, username, kind, now)?;
     let mut schemas = match (kind, &deps.share) {
         (SessionKind::Share, Some(s)) => tools::share_schemas(&s.scope),
         _ => tools::schemas(kind),
@@ -226,12 +242,8 @@ fn run_traced(
         SessionKind::Share => tools::SHARE_MAX_TURNS,
         _ => MAX_TURNS,
     };
-    // Talk, import, inbox and share sessions answer a caller who is waiting on them.
-    let background = !matches!(
-        kind,
-        SessionKind::Talk | SessionKind::Import | SessionKind::Inbox | SessionKind::Share
-    );
-    let env = CallEnv { deps, user_id, username, kind, background };
+    let background = is_background(kind);
+    let env = CallEnv { deps, user_id, username, kind };
     let started = std::time::Instant::now();
 
     while turns < max_turns {
@@ -326,6 +338,62 @@ fn run_traced(
     })
 }
 
+/// Talk, import, inbox and share sessions answer a caller who is waiting on them.
+fn is_background(kind: SessionKind) -> bool {
+    !matches!(
+        kind,
+        SessionKind::Talk | SessionKind::Import | SessionKind::Inbox | SessionKind::Share
+    )
+}
+
+/// Runs one tool call as the model made it and returns its result text and
+/// whether it failed. Embeddings first, outside the DB lock, then one dispatch
+/// inside it; `once` makes that dispatch `dispatch_once` under its
+/// `(call_id, op_key)`. `web_search` reaches the network instead, never takes
+/// the lock and ignores `once`.
+pub(crate) fn run_tool(
+    deps: &SessionDeps,
+    user_id: i64,
+    username: &str,
+    kind: SessionKind,
+    name: &str,
+    args: &str,
+    once: Option<(&str, &str)>,
+) -> (String, bool) {
+    let result = match name {
+        "web_search" if !tools::registry(kind).contains(&name) => Err(ToolError::forbidden(
+            format!("tool {name} is not available in this session type"),
+        )),
+        "web_search" => crate::search::run_tool(deps, user_id, username, is_background(kind), args),
+        _ => {
+            let vectors = tools::prepare(deps.embeddings, name, args);
+            let conn = crate::db_guard(deps.db);
+            let ctx = ToolCtx {
+                config_dir: deps.config_dir,
+                data_dir: deps.data_dir,
+                user_id,
+                username,
+                vectors,
+                task_scope: deps.task_scope,
+                inbox_source: deps.inbox_source.clone(),
+                memory_source: deps.memory_source.clone(),
+                share: deps.share.as_ref().map(|s| s.scope.clone()),
+                share_thread: deps.share.as_ref().map(|s| s.thread_id),
+            };
+            match once {
+                Some((call_id, op_key)) => {
+                    tools::dispatch_once(&conn, &ctx, kind, name, args, call_id, op_key)
+                }
+                None => tools::dispatch(&conn, &ctx, kind, name, args),
+            }
+        }
+    };
+    match result {
+        Ok(v) => (v.to_string(), false),
+        Err(e) => (error_json(&e), true),
+    }
+}
+
 /// What every tool call of one session shares, so a call the model made and a
 /// call inside a `batch` take exactly the same path.
 struct CallEnv<'a> {
@@ -333,46 +401,11 @@ struct CallEnv<'a> {
     user_id: i64,
     username: &'a str,
     kind: SessionKind,
-    background: bool,
 }
 
 impl CallEnv<'_> {
-    /// Embeddings first, outside the DB lock, then one dispatch inside it.
-    /// `web_search` reaches the network instead and never takes the lock.
     fn run(&self, name: &str, args: &str) -> (String, bool) {
-        let result = match name {
-            "web_search" if !tools::registry(self.kind).contains(&name) => Err(
-                ToolError::forbidden(format!("tool {name} is not available in this session type")),
-            ),
-            "web_search" => crate::search::run_tool(
-                self.deps,
-                self.user_id,
-                self.username,
-                self.background,
-                args,
-            ),
-            _ => {
-                let vectors = tools::prepare(self.deps.embeddings, name, args);
-                let conn = crate::db_guard(self.deps.db);
-                let ctx = ToolCtx {
-                    config_dir: self.deps.config_dir,
-                    data_dir: self.deps.data_dir,
-                    user_id: self.user_id,
-                    username: self.username,
-                    vectors,
-                    task_scope: self.deps.task_scope,
-                    inbox_source: self.deps.inbox_source.clone(),
-                    memory_source: self.deps.memory_source.clone(),
-                    share: self.deps.share.as_ref().map(|s| s.scope.clone()),
-                    share_thread: self.deps.share.as_ref().map(|s| s.thread_id),
-                };
-                tools::dispatch(&conn, &ctx, self.kind, name, args)
-            }
-        };
-        match result {
-            Ok(v) => (v.to_string(), false),
-            Err(e) => (error_json(&e), true),
-        }
+        run_tool(self.deps, self.user_id, self.username, self.kind, name, args, None)
     }
 
     /// `run` as a session step: its own index, its own pair of events, its own
@@ -1695,5 +1728,29 @@ mod tests {
         assert_eq!(kind, "share_session");
         assert!(detail.contains("share=1"), "{detail}");
         assert_eq!(crate::log::agent_sessions_since(&conn, 1, jiff::Timestamp::now() - jiff::Span::new().hours(1)).unwrap(), 0);
+    }
+
+    #[test]
+    fn a_tool_run_once_per_key_lands_its_change_once() {
+        let (db, tmp) = env();
+        db.lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO voice_calls (id, user_id, direction, state, ring_by, created_at)
+                 VALUES ('c1', 1, 'outbound', 'answered', 'x', 'x')",
+                [],
+            )
+            .unwrap();
+        let llm = MockLLM::scripted(vec![]);
+        let d = deps(&db, &tmp, &llm);
+        let run = |key| {
+            run_tool(&d, 1, "aki", SessionKind::Call, "task_create", r#"{"title":"essay"}"#, Some(("c1", key)))
+        };
+        let first = run("1:0");
+        assert!(!first.1, "{}", first.0);
+        assert_eq!(run("1:0"), first);
+        let tasks: i64 =
+            db.lock().unwrap().query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0)).unwrap();
+        assert_eq!(tasks, 1);
     }
 }
