@@ -13,7 +13,7 @@ use crate::audio::lines::{Line, Lines};
 use crate::audio::playout::{Clip, Playout};
 use crate::audio::speech::SpeechQueue;
 use crate::audio::turn::{backchannels, Action, Input, TurnConfig, TurnMachine};
-use crate::media::MediaIo;
+use crate::media::{Gone, MediaIo};
 
 const RATE: usize = 16_000;
 const VAD_WINDOW: usize = 512;
@@ -225,7 +225,10 @@ impl<S: Fn(CallBody)> Live<S> {
         let mut audio_running = true;
         loop {
             tokio::select! {
-                () = &mut left => return SessionEnd::UserLeft,
+                gone = &mut left => return match gone {
+                    Gone::Left => SessionEnd::UserLeft,
+                    Gone::Failed(reason) => SessionEnd::MediaFailed(reason),
+                },
                 got = &mut tasks.stt => return task_died("speech recognition", got.err()),
                 got = &mut tasks.audio, if audio_running => match got {
                     Ok(()) => audio_running = false,
@@ -633,8 +636,9 @@ mod tests {
 
         fn clear(&self) {}
 
-        async fn left(&self) {
+        async fn left(&self) -> Gone {
             self.probe.gone.notified().await;
+            Gone::Left
         }
 
         async fn leave(&self) {

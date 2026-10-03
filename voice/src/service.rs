@@ -20,7 +20,7 @@ const APPLIED_KEEP: Duration = Duration::from_hours(7 * 24);
 const LIVE_MEMBER_MS: u64 = 60 * 60 * 1000;
 const MAX_CALL: Duration = Duration::from_mins(30);
 const LINK_GRACE: Duration = Duration::from_secs(10);
-const JOIN_WAIT: Duration = Duration::from_secs(10);
+const JOIN_WAIT: Duration = Duration::from_secs(20);
 
 /// What a live call runs on: the speech engines, and how to join a room's media.
 pub struct Backends {

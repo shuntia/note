@@ -310,8 +310,8 @@ impl note_voice::media::MediaIo for QuietRoom {
 
     fn clear(&self) {}
 
-    async fn left(&self) {
-        std::future::pending::<()>().await;
+    async fn left(&self) -> note_voice::media::Gone {
+        std::future::pending().await
     }
 
     async fn leave(&self) {}
@@ -332,7 +332,7 @@ impl note_voice::media::MediaIo for BrokenRoom {
 
     fn clear(&self) {}
 
-    async fn left(&self) {
+    async fn left(&self) -> note_voice::media::Gone {
         panic!("the media layer crashed");
     }
 

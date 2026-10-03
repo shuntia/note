@@ -1,4 +1,4 @@
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, Context, Result};
 use futures_util::StreamExt;
 use livekit::options::TrackPublishOptions;
 use livekit::prelude::*;
@@ -28,9 +28,15 @@ pub trait MediaIo: Send + Sync {
     async fn send(&self, frame: &[i16; OUT_FRAME]) -> Result<()>;
     /// Drops audio queued in the outbound buffer (barge-in).
     fn clear(&self);
-    /// Resolves when the participant whose audio is read leaves, or the room disconnects.
-    async fn left(&self);
+    /// Resolves when the user leaves, the room disconnects, or the user never joins.
+    async fn left(&self) -> Gone;
     async fn leave(&self);
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Gone {
+    Left,
+    Failed(String),
 }
 
 /// Joins a room's call for a session.
@@ -48,7 +54,32 @@ pub struct LiveKitJoin {
 impl MediaJoin for LiveKitJoin {
     async fn join(&self, matrix: &Matrix, livekit_service_url: &str, room_id: &str, mxid: &str) -> Result<Box<dyn MediaIo>> {
         let (url, jwt) = matrix.livekit_jwt(livekit_service_url, room_id).await?;
-        Ok(Box::new(LiveKitMedia::join(&url, &jwt, &format!("{mxid}:"), self.wait).await?))
+        let who = Who { user_prefix: format!("{mxid}:"), bot_prefix: format!("{}:", matrix.user_id) };
+        Ok(Box::new(LiveKitMedia::join(&url, &jwt, &who, self.wait).await?))
+    }
+}
+
+/// `LiveKit` identity prefixes of the user and of the bot's own devices.
+pub struct Who {
+    pub user_prefix: String,
+    pub bot_prefix: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Match {
+    User,
+    Other,
+    Bot,
+}
+
+/// The bot's prefix wins, so a user prefix that happens to share it never makes the bot its own user.
+fn classify(identity: &str, who: &Who) -> Match {
+    if identity.starts_with(&who.bot_prefix) {
+        Match::Bot
+    } else if identity.starts_with(&who.user_prefix) {
+        Match::User
+    } else {
+        Match::Other
     }
 }
 
@@ -56,15 +87,16 @@ pub struct LiveKitMedia {
     room: Room,
     source: NativeAudioSource,
     frames: Mutex<mpsc::Receiver<Vec<f32>>>,
-    gone: watch::Receiver<bool>,
+    gone: watch::Receiver<Option<Gone>>,
     follower: JoinHandle<()>,
 }
 
 impl LiveKitMedia {
-    /// Connects, publishes the bot's track, and waits up to `wait` for `user_identity_prefix`'s audio track.
+    /// Connects and publishes the bot's track. The user's audio is picked up whenever it appears; a user
+    /// who has not joined within `wait` ends the media with `Gone::Failed`.
     /// Needs the process's rustls provider installed, since the build links two.
-    pub async fn join(url: &str, jwt: &str, user_identity_prefix: &str, wait: Duration) -> Result<LiveKitMedia> {
-        let (room, mut events) = tokio::time::timeout(CONNECT_WAIT, Room::connect(url, jwt, RoomOptions::default()))
+    pub async fn join(url: &str, jwt: &str, who: &Who, wait: Duration) -> Result<LiveKitMedia> {
+        let (room, events) = tokio::time::timeout(CONNECT_WAIT, Room::connect(url, jwt, RoomOptions::default()))
             .await
             .map_err(|_| anyhow!("joining LiveKit timed out after {CONNECT_WAIT:?}"))?
             .context("joining LiveKit")?;
@@ -75,21 +107,23 @@ impl LiveKitMedia {
             close(&room).await;
             return Err(anyhow::Error::from(e).context("publishing the bot's track"));
         }
-        let prefix = user_identity_prefix.to_string();
-        let (user, user_track) = match tokio::time::timeout(wait, user_audio(&mut events, &prefix)).await {
-            Ok(Some(t)) => t,
-            Ok(None) => {
-                close(&room).await;
-                bail!("the room closed before {prefix}* published audio");
-            }
-            Err(_) => {
-                close(&room).await;
-                bail!("no audio track from {prefix}* within {wait:?}");
-            }
-        };
+        eprintln!(
+            "voice: in LiveKit room {} ({}) as {}",
+            room.name(),
+            room.sid().await,
+            room.local_participant().identity().as_str()
+        );
+        let present: Vec<RemoteParticipant> = room.remote_participants().into_values().collect();
         let (frames_tx, frames) = mpsc::channel(50);
-        let (gone_tx, gone) = watch::channel(false);
-        let follower = tokio::spawn(follow(events, prefix, user, user_track, frames_tx, gone_tx));
+        let (gone_tx, gone) = watch::channel(None);
+        let follower = Follower {
+            who: Who { user_prefix: who.user_prefix.clone(), bot_prefix: who.bot_prefix.clone() },
+            present: Vec::new(),
+            user: None,
+            reading: None,
+            frames: frames_tx,
+        };
+        let follower = tokio::spawn(follower.run(events, present, wait, gone_tx));
         Ok(LiveKitMedia { room, source, frames: Mutex::new(frames), gone, follower })
     }
 }
@@ -120,8 +154,10 @@ impl MediaIo for LiveKitMedia {
         self.source.clear_buffer();
     }
 
-    async fn left(&self) {
-        let _ = self.gone.clone().wait_for(|gone| *gone).await;
+    async fn left(&self) -> Gone {
+        let mut gone = self.gone.clone();
+        let got = gone.wait_for(Option::is_some).await.map(|g| g.clone());
+        got.ok().flatten().unwrap_or(Gone::Left)
     }
 
     async fn leave(&self) {
@@ -135,66 +171,178 @@ async fn close(room: &Room) {
     }
 }
 
-fn is_user(participant: &RemoteParticipant, prefix: &str) -> bool {
-    participant.identity().as_str().starts_with(prefix)
+fn log_publication(what: &str, participant: &RemoteParticipant, publication: &RemoteTrackPublication) {
+    eprintln!(
+        "voice: LiveKit {what}: {} {:?} {:?} {} muted={} subscribed={} encryption={:?}",
+        participant.identity().as_str(),
+        publication.kind(),
+        publication.source(),
+        publication.sid(),
+        publication.is_muted(),
+        publication.is_subscribed(),
+        publication.encryption_type(),
+    );
 }
 
-async fn user_audio(
-    events: &mut mpsc::UnboundedReceiver<RoomEvent>,
-    prefix: &str,
-) -> Option<(ParticipantIdentity, RemoteAudioTrack)> {
-    while let Some(event) = events.recv().await {
-        match event {
-            RoomEvent::TrackSubscribed { track: RemoteTrack::Audio(track), participant, .. }
-                if is_user(&participant, prefix) =>
-            {
-                return Some((participant.identity(), track))
-            }
-            RoomEvent::Disconnected { .. } => return None,
-            _ => {}
-        }
-    }
-    None
-}
-
-/// Feeds the user's current audio track into `frames` until the participant it comes from or the room is gone;
-/// a resubscribed track replaces the old one.
-async fn follow(
-    mut events: mpsc::UnboundedReceiver<RoomEvent>,
-    prefix: String,
-    mut user: ParticipantIdentity,
-    first: RemoteAudioTrack,
+/// Finds the user among the room's participants and keeps `frames` fed from the user's current audio track.
+struct Follower {
+    who: Who,
+    present: Vec<RemoteParticipant>,
+    user: Option<ParticipantIdentity>,
+    reading: Option<(TrackSid, JoinHandle<()>)>,
     frames: mpsc::Sender<Vec<f32>>,
-    gone: watch::Sender<bool>,
-) {
-    let mut reading = Some((first.sid(), tokio::spawn(read(first, frames.clone()))));
-    while let Some(event) = events.recv().await {
-        match event {
-            RoomEvent::TrackSubscribed { track: RemoteTrack::Audio(track), participant, .. }
-                if is_user(&participant, &prefix) =>
-            {
-                if let Some((_, task)) = reading.take() {
-                    task.abort();
-                }
-                user = participant.identity();
-                reading = Some((track.sid(), tokio::spawn(read(track, frames.clone()))));
+}
+
+impl Follower {
+    /// Runs until the user leaves or the room is gone; with no user by `wait`, the first participant that is
+    /// not the bot is taken as the user, and with none the media ends as `the caller never joined`.
+    async fn run(
+        mut self,
+        mut events: mpsc::UnboundedReceiver<RoomEvent>,
+        present: Vec<RemoteParticipant>,
+        wait: Duration,
+        gone: watch::Sender<Option<Gone>>,
+    ) {
+        for participant in present {
+            eprintln!("voice: LiveKit participant {} ({}) was already in the room", participant.identity().as_str(), participant.sid());
+            for publication in participant.track_publications().values() {
+                log_publication("existing track", &participant, publication);
             }
-            RoomEvent::TrackUnsubscribed { track: RemoteTrack::Audio(track), .. }
-                if reading.as_ref().is_some_and(|(sid, _)| *sid == track.sid()) =>
-            {
-                if let Some((_, task)) = reading.take() {
-                    task.abort();
+            self.arrived(participant);
+        }
+        let deadline = tokio::time::sleep(wait);
+        tokio::pin!(deadline);
+        let mut waiting = true;
+        let end = loop {
+            let event = tokio::select! {
+                () = &mut deadline, if waiting => {
+                    waiting = false;
+                    if self.user.is_none() && !self.fall_back(wait) {
+                        break Gone::Failed("the caller never joined".into());
+                    }
+                    continue;
                 }
+                event = events.recv() => event,
+            };
+            match event {
+                None | Some(RoomEvent::Disconnected { .. }) => {
+                    eprintln!("voice: the LiveKit room disconnected");
+                    break Gone::Left;
+                }
+                Some(RoomEvent::ParticipantConnected(participant)) => {
+                    eprintln!("voice: LiveKit participant {} ({}) connected", participant.identity().as_str(), participant.sid());
+                    self.arrived(participant);
+                }
+                Some(RoomEvent::ParticipantDisconnected(participant)) => {
+                    eprintln!("voice: LiveKit participant {} disconnected", participant.identity().as_str());
+                    self.present.retain(|p| p.identity() != participant.identity());
+                    if self.user.as_ref() == Some(&participant.identity()) {
+                        break Gone::Left;
+                    }
+                }
+                Some(RoomEvent::TrackPublished { publication, participant }) => {
+                    log_publication("track published", &participant, &publication);
+                    if self.is_user(&participant) {
+                        subscribe(&publication);
+                    }
+                }
+                Some(RoomEvent::TrackSubscribed { track, publication, participant }) => {
+                    log_publication("track subscribed", &participant, &publication);
+                    if let (RemoteTrack::Audio(track), true) = (track, self.is_user(&participant)) {
+                        self.read(track);
+                    }
+                }
+                Some(RoomEvent::TrackSubscriptionFailed { participant, error, track_sid }) => {
+                    eprintln!("voice: LiveKit subscription to {} {track_sid} failed: {error}", participant.identity().as_str());
+                }
+                Some(RoomEvent::TrackUnsubscribed { publication, participant, .. }) => {
+                    log_publication("track unsubscribed", &participant, &publication);
+                    if self.reading.as_ref().is_some_and(|(sid, _)| *sid == publication.sid()) {
+                        if let Some((_, task)) = self.reading.take() {
+                            task.abort();
+                        }
+                    }
+                }
+                Some(RoomEvent::TrackMuted { participant, publication }) => {
+                    eprintln!("voice: LiveKit {} muted {:?} {}", participant.identity().as_str(), publication.kind(), publication.sid());
+                }
+                Some(RoomEvent::TrackUnmuted { participant, publication }) => {
+                    eprintln!("voice: LiveKit {} unmuted {:?} {}", participant.identity().as_str(), publication.kind(), publication.sid());
+                    if let Some(remote) = self.present.iter().find(|p| p.identity() == participant.identity()).cloned() {
+                        if self.is_user(&remote) {
+                            self.adopt(&remote);
+                        }
+                    }
+                }
+                Some(_) => {}
             }
-            RoomEvent::ParticipantDisconnected(participant) if participant.identity() == user => break,
-            RoomEvent::Disconnected { .. } => break,
-            _ => {}
+        };
+        if let Some((_, task)) = self.reading.take() {
+            task.abort();
+        }
+        let _ = gone.send(Some(end));
+    }
+
+    fn is_user(&self, participant: &RemoteParticipant) -> bool {
+        self.user.as_ref() == Some(&participant.identity())
+    }
+
+    fn arrived(&mut self, participant: RemoteParticipant) {
+        if self.user.is_none() && classify(participant.identity().as_str(), &self.who) == Match::User {
+            eprintln!("voice: {} is the user (identity prefix {})", participant.identity().as_str(), self.who.user_prefix);
+            self.user = Some(participant.identity());
+            self.adopt(&participant);
+        }
+        self.present.push(participant);
+    }
+
+    /// Takes the first participant present that is not the bot; false when there is none.
+    fn fall_back(&mut self, wait: Duration) -> bool {
+        let Some(other) =
+            self.present.iter().find(|p| classify(p.identity().as_str(), &self.who) == Match::Other).cloned()
+        else {
+            return false;
+        };
+        eprintln!(
+            "voice: no {}* participant within {wait:?}; {} is the user (first other participant)",
+            self.who.user_prefix,
+            other.identity().as_str()
+        );
+        self.user = Some(other.identity());
+        self.adopt(&other);
+        true
+    }
+
+    /// Reads the user's subscribed audio, and subscribes to audio not yet subscribed.
+    fn adopt(&mut self, participant: &RemoteParticipant) {
+        for publication in participant.track_publications().values() {
+            if publication.kind() != TrackKind::Audio {
+                continue;
+            }
+            match publication.track() {
+                Some(RemoteTrack::Audio(track)) => {
+                    if self.reading.as_ref().is_none_or(|(sid, _)| *sid != track.sid()) {
+                        self.read(track);
+                    }
+                }
+                _ => subscribe(publication),
+            }
         }
     }
-    if let Some((_, task)) = reading {
-        task.abort();
+
+    fn read(&mut self, track: RemoteAudioTrack) {
+        if let Some((_, task)) = self.reading.take() {
+            task.abort();
+        }
+        eprintln!("voice: reading the user's audio track {}", track.sid());
+        self.reading = Some((track.sid(), tokio::spawn(read(track, self.frames.clone()))));
     }
-    let _ = gone.send(true);
+}
+
+fn subscribe(publication: &RemoteTrackPublication) {
+    if publication.kind() == TrackKind::Audio && !publication.is_subscribed() {
+        publication.set_subscribed(true);
+    }
 }
 
 async fn read(track: RemoteAudioTrack, frames: mpsc::Sender<Vec<f32>>) {
@@ -228,6 +376,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_user_is_matched_by_prefix_and_the_bot_never_is() {
+        let who = Who { user_prefix: "@shuntia:matrix.example.org:".into(), bot_prefix: "@note:matrix.example.org:".into() };
+        assert_eq!(classify("@shuntia:matrix.example.org:ALICEPHONE", &who), Match::User);
+        assert_eq!(classify("@note:matrix.example.org:BOTDEV", &who), Match::Bot);
+        assert_eq!(classify("a1b2c3", &who), Match::Other);
+        assert_eq!(classify("@shuntia:matrix.example.org.evil:X", &who), Match::Other);
+        let same = Who { user_prefix: "@note:t:".into(), bot_prefix: "@note:t:".into() };
+        assert_eq!(classify("@note:t:DEV", &same), Match::Bot);
+    }
+
+    #[test]
     fn rechunking_turns_each_480_sample_frame_into_three_in_order() {
         let mut r = Rechunker::default();
         let a: Vec<i16> = (0..480).map(|i| i as i16).collect();
@@ -249,7 +408,9 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(std::env::var("NOTE_VOICE_LIVE").unwrap()).unwrap()).unwrap();
         let m = Matrix::connect("https://matrix.example.org", creds["access_token"].as_str().unwrap()).await.unwrap();
         let (url, jwt) = m.livekit_jwt("https://matrix-rtc.example.org", "!note-voice-selftest").await.unwrap();
-        let err = LiveKitMedia::join(&url, &jwt, "@nobody:", Duration::from_secs(2)).await.err().unwrap();
-        assert!(err.to_string().contains("no audio track"), "{err}");
+        let who = Who { user_prefix: "@nobody:".into(), bot_prefix: format!("{}:", m.user_id) };
+        let media = LiveKitMedia::join(&url, &jwt, &who, Duration::from_secs(2)).await.unwrap();
+        assert_eq!(media.left().await, Gone::Failed("the caller never joined".into()));
+        media.leave().await;
     }
 }
