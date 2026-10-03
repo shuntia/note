@@ -167,6 +167,23 @@ async fn a_version_mismatch_is_refused() {
     assert!(!note.peer.is_up());
 }
 
+#[tokio::test]
+async fn a_v1_peer_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("note.sock");
+    let note = side(Role::Note, Dir::ToVoice, Arc::default(), Arc::default());
+    tokio::spawn(listen_forever(note.peer.clone(), UnixListener::bind(&path).unwrap()));
+    let mut s = tokio::net::UnixStream::connect(&path).await.unwrap();
+    codec::write_frame(&mut s, &Frame::Hello { proto: 1, role: Role::Voice, instance: "x".into() })
+        .await
+        .unwrap();
+    let first = codec::read_frame(&mut s).await.unwrap();
+    assert!(matches!(first, Some(Frame::Hello { .. })));
+    let next = codec::read_frame(&mut s).await;
+    assert!(matches!(next, Ok(None) | Err(_)), "the connection closes: {next:?}");
+    assert!(!note.peer.is_up());
+}
+
 async fn raw_hello(path: &std::path::Path, proto: u32) -> tokio::net::UnixStream {
     let mut s = tokio::net::UnixStream::connect(path).await.unwrap();
     codec::write_frame(&mut s, &Frame::Hello { proto, role: Role::Voice, instance: "raw".into() })

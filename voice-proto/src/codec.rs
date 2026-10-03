@@ -69,6 +69,7 @@ mod tests {
                     title: "Check-in".into(),
                     ring_secs: 30,
                     ring_by_ms: 1_790_000_000_000,
+                    voice: VoiceProfile::default(),
                 },
             },
             Frame::Call { call_id: "c-1".into(), dir: Dir::ToVoice, seq: 2, body: CallBody::HangUp },

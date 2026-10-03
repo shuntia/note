@@ -3,7 +3,7 @@ mod common;
 use common::*;
 use note_voice::config::VoiceServiceConfig;
 use note_voice_proto::testkit::{eventually, fast};
-use note_voice_proto::{CallBody, Outcome, Role};
+use note_voice_proto::{CallBody, Outcome, Role, VoiceProfile};
 
 struct Rig {
     dir: tempfile::TempDir,
@@ -46,6 +46,7 @@ fn start(ring_secs: u32, ring_by_ms: i64) -> CallBody {
         title: "Check-in".into(),
         ring_secs,
         ring_by_ms,
+        voice: VoiceProfile::default(),
     }
 }
 

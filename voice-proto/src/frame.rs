@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Bumped on any change to a frame's shape; both sides must agree exactly.
-pub const PROTO_VERSION: u32 = 1;
+pub const PROTO_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -89,6 +89,8 @@ pub enum CallBody {
         title: String,
         ring_secs: u32,
         ring_by_ms: i64,
+        #[serde(default)]
+        voice: VoiceProfile,
     },
     /// Note → voice: end the call now, ringing or not.
     HangUp,
@@ -98,6 +100,49 @@ pub enum CallBody {
     Outcome { outcome: Outcome },
     /// Voice → Note: the voice side holds nothing more for this call.
     Ended,
+    /// Note → voice: one clause of reply `reply`, in order by `idx`.
+    Speak { reply: u64, idx: u32, text: String },
+    /// Note → voice: reply `reply` has no more clauses.
+    SpeakDone { reply: u64 },
+    /// Note → voice: reply `reply` may play once its turn is committed (wake replies are played at once).
+    Play { reply: u64 },
+    /// Note → voice: discard reply `reply` unplayed.
+    Drop { reply: u64 },
+    /// Voice → Note: the user paused; `text` is the transcript so far of turn `turn`.
+    Draft { turn: u64, text: String },
+    /// Voice → Note: the turn is over.
+    Commit { turn: u64, text: String },
+    /// Voice → Note: the user resumed speaking after a draft; the draft is void.
+    Retract { turn: u64 },
+    /// Voice → Note: floor changes.
+    Floor { floor: Floor },
+    /// Voice → Note: the user cut reply `reply` off; `heard_chars` of its text were played.
+    BargeIn { reply: u64, heard_chars: u32 },
+    /// Voice → Note: reply `reply` played through to its end.
+    Played { reply: u64 },
+}
+
+/// `UserQuiet`: VAD sees silence after speech. `Drained`: the playout queue emptied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Floor {
+    UserSpeaking,
+    UserQuiet,
+    Drained,
+}
+
+/// `voice` empty means the language's default voice.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VoiceProfile {
+    pub language: String,
+    pub voice: String,
+    pub cue: bool,
+}
+
+impl Default for VoiceProfile {
+    fn default() -> Self {
+        Self { language: "en".into(), voice: String::new(), cue: true }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -125,4 +170,36 @@ pub fn valid_call_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 64
         && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_v1_start_without_a_voice_profile_reads_with_defaults() {
+        let raw = r#"{"k":"start","user_id":1,"room_id":"!r","mxid":"@a","title":"t","ring_secs":30,"ring_by_ms":5}"#;
+        let body: CallBody = serde_json::from_str(raw).unwrap();
+        let CallBody::Start { voice, .. } = body else { panic!() };
+        assert_eq!(voice, VoiceProfile { language: "en".into(), voice: String::new(), cue: true });
+    }
+
+    #[test]
+    fn every_conversation_frame_round_trips() {
+        for body in [
+            CallBody::Speak { reply: 3, idx: 0, text: "Hey,".into() },
+            CallBody::SpeakDone { reply: 3 },
+            CallBody::Play { reply: 3 },
+            CallBody::Drop { reply: 3 },
+            CallBody::Draft { turn: 2, text: "move my".into() },
+            CallBody::Commit { turn: 2, text: "move my run".into() },
+            CallBody::Retract { turn: 2 },
+            CallBody::Floor { floor: Floor::UserSpeaking },
+            CallBody::BargeIn { reply: 3, heard_chars: 12 },
+            CallBody::Played { reply: 3 },
+        ] {
+            let s = serde_json::to_string(&body).unwrap();
+            assert_eq!(serde_json::from_str::<CallBody>(&s).unwrap(), body, "{s}");
+        }
+    }
 }

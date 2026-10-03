@@ -4,7 +4,7 @@ pub mod outbox;
 use crate::channels::{Channel, OutboundMessage};
 use note_voice_proto::{
     BoxFuture, CallBody, Dir, Handler, Outcome, Peer, PeerConfig, Refusal, RefusalCode, Reply,
-    Request, Role,
+    Request, Role, VoiceProfile,
 };
 use rusqlite::Connection;
 use std::path::Path;
@@ -137,6 +137,7 @@ impl Voice {
                 title: msg.title.clone(),
                 ring_secs: RING_SECS,
                 ring_by_ms: ring_by.as_millisecond(),
+                voice: VoiceProfile::default(),
             },
         );
         if let Err(e) = sent {
@@ -362,7 +363,18 @@ impl Handler for NoteHandler {
                         tx.execute("DELETE FROM voice_frames WHERE call_id = ?1", [call_id])
                             .map_err(|e| e.to_string())?;
                     }
-                    CallBody::Start { .. } | CallBody::HangUp => {}
+                    CallBody::Start { .. }
+                    | CallBody::HangUp
+                    | CallBody::Speak { .. }
+                    | CallBody::SpeakDone { .. }
+                    | CallBody::Play { .. }
+                    | CallBody::Drop { .. }
+                    | CallBody::Draft { .. }
+                    | CallBody::Commit { .. }
+                    | CallBody::Retract { .. }
+                    | CallBody::Floor { .. }
+                    | CallBody::BargeIn { .. }
+                    | CallBody::Played { .. } => {}
                 }
             }
             tx.commit().map_err(|e| e.to_string())?;
