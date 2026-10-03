@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use futures_util::StreamExt;
 use livekit::options::TrackPublishOptions;
 use livekit::prelude::*;
@@ -8,40 +8,66 @@ use livekit::webrtc::audio_source::{AudioSourceOptions, RtcAudioSource};
 use livekit::webrtc::audio_stream::native::NativeAudioStream;
 use std::borrow::Cow;
 use std::time::Duration;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, watch, Mutex};
 use tokio::task::JoinHandle;
+
+use crate::matrix::Matrix;
 
 const IN_RATE: i32 = 16_000;
 const IN_FRAME: usize = 160;
 const OUT_RATE: u32 = 48_000;
 const OUT_FRAME: usize = 480;
+const CONNECT_WAIT: Duration = Duration::from_secs(10);
 
 #[async_trait::async_trait]
-pub trait MediaIo: Send {
+pub trait MediaIo: Send + Sync {
     /// The next 10 ms of the user's audio at 16 kHz mono; None once the user's track is gone for good.
-    async fn recv(&mut self) -> Option<Vec<f32>>;
+    /// One caller at a time.
+    async fn recv(&self) -> Option<Vec<f32>>;
     /// Queues one 10 ms frame at 48 kHz mono; waits while the outbound buffer is full.
-    async fn send(&mut self, frame: &[i16; OUT_FRAME]) -> Result<()>;
+    async fn send(&self, frame: &[i16; OUT_FRAME]) -> Result<()>;
     /// Drops audio queued in the outbound buffer (barge-in).
     fn clear(&self);
-    /// Resolves when the given participant leaves the room.
-    async fn left(&mut self);
+    /// Resolves when the participant whose audio is read leaves, or the room disconnects.
+    async fn left(&self);
+    async fn leave(&self);
+}
+
+/// Joins a room's call for a session.
+#[async_trait::async_trait]
+pub trait MediaJoin: Send + Sync {
+    async fn join(&self, matrix: &Matrix, livekit_service_url: &str, room_id: &str, mxid: &str) -> Result<Box<dyn MediaIo>>;
+}
+
+/// Element X's `LiveKit` identity is `<mxid>:<device>`.
+pub struct LiveKitJoin {
+    pub wait: Duration,
+}
+
+#[async_trait::async_trait]
+impl MediaJoin for LiveKitJoin {
+    async fn join(&self, matrix: &Matrix, livekit_service_url: &str, room_id: &str, mxid: &str) -> Result<Box<dyn MediaIo>> {
+        let (url, jwt) = matrix.livekit_jwt(livekit_service_url, room_id).await?;
+        Ok(Box::new(LiveKitMedia::join(&url, &jwt, &format!("{mxid}:"), self.wait).await?))
+    }
 }
 
 pub struct LiveKitMedia {
     room: Room,
     source: NativeAudioSource,
-    frames: mpsc::Receiver<Vec<f32>>,
+    frames: Mutex<mpsc::Receiver<Vec<f32>>>,
     gone: watch::Receiver<bool>,
     follower: JoinHandle<()>,
 }
 
 impl LiveKitMedia {
     /// Connects, publishes the bot's track, and waits up to `wait` for `user_identity_prefix`'s audio track.
-    /// Installs the process's rustls provider if none is set, since the build links two.
+    /// Needs the process's rustls provider installed, since the build links two.
     pub async fn join(url: &str, jwt: &str, user_identity_prefix: &str, wait: Duration) -> Result<LiveKitMedia> {
-        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-        let (room, mut events) = Room::connect(url, jwt, RoomOptions::default()).await.context("joining LiveKit")?;
+        let (room, mut events) = tokio::time::timeout(CONNECT_WAIT, Room::connect(url, jwt, RoomOptions::default()))
+            .await
+            .map_err(|_| anyhow!("joining LiveKit timed out after {CONNECT_WAIT:?}"))?
+            .context("joining LiveKit")?;
         let options = AudioSourceOptions { echo_cancellation: false, noise_suppression: false, auto_gain_control: false };
         let source = NativeAudioSource::new(options, OUT_RATE, 1, 100);
         let track = LocalAudioTrack::create_audio_track("note", RtcAudioSource::Native(source.clone()));
@@ -50,7 +76,7 @@ impl LiveKitMedia {
             return Err(anyhow::Error::from(e).context("publishing the bot's track"));
         }
         let prefix = user_identity_prefix.to_string();
-        let user_track = match tokio::time::timeout(wait, user_audio(&mut events, &prefix)).await {
+        let (user, user_track) = match tokio::time::timeout(wait, user_audio(&mut events, &prefix)).await {
             Ok(Some(t)) => t,
             Ok(None) => {
                 close(&room).await;
@@ -63,12 +89,8 @@ impl LiveKitMedia {
         };
         let (frames_tx, frames) = mpsc::channel(50);
         let (gone_tx, gone) = watch::channel(false);
-        let follower = tokio::spawn(follow(events, prefix, user_track, frames_tx, gone_tx));
-        Ok(LiveKitMedia { room, source, frames, gone, follower })
-    }
-
-    pub async fn leave(self) {
-        close(&self.room).await;
+        let follower = tokio::spawn(follow(events, prefix, user, user_track, frames_tx, gone_tx));
+        Ok(LiveKitMedia { room, source, frames: Mutex::new(frames), gone, follower })
     }
 }
 
@@ -80,11 +102,11 @@ impl Drop for LiveKitMedia {
 
 #[async_trait::async_trait]
 impl MediaIo for LiveKitMedia {
-    async fn recv(&mut self) -> Option<Vec<f32>> {
-        self.frames.recv().await
+    async fn recv(&self) -> Option<Vec<f32>> {
+        self.frames.lock().await.recv().await
     }
 
-    async fn send(&mut self, frame: &[i16; OUT_FRAME]) -> Result<()> {
+    async fn send(&self, frame: &[i16; OUT_FRAME]) -> Result<()> {
         let frame = AudioFrame {
             data: Cow::Borrowed(&frame[..]),
             sample_rate: OUT_RATE,
@@ -98,8 +120,12 @@ impl MediaIo for LiveKitMedia {
         self.source.clear_buffer();
     }
 
-    async fn left(&mut self) {
-        let _ = self.gone.wait_for(|gone| *gone).await;
+    async fn left(&self) {
+        let _ = self.gone.clone().wait_for(|gone| *gone).await;
+    }
+
+    async fn leave(&self) {
+        close(&self.room).await;
     }
 }
 
@@ -113,13 +139,16 @@ fn is_user(participant: &RemoteParticipant, prefix: &str) -> bool {
     participant.identity().as_str().starts_with(prefix)
 }
 
-async fn user_audio(events: &mut mpsc::UnboundedReceiver<RoomEvent>, prefix: &str) -> Option<RemoteAudioTrack> {
+async fn user_audio(
+    events: &mut mpsc::UnboundedReceiver<RoomEvent>,
+    prefix: &str,
+) -> Option<(ParticipantIdentity, RemoteAudioTrack)> {
     while let Some(event) = events.recv().await {
         match event {
             RoomEvent::TrackSubscribed { track: RemoteTrack::Audio(track), participant, .. }
                 if is_user(&participant, prefix) =>
             {
-                return Some(track)
+                return Some((participant.identity(), track))
             }
             RoomEvent::Disconnected { .. } => return None,
             _ => {}
@@ -128,11 +157,12 @@ async fn user_audio(events: &mut mpsc::UnboundedReceiver<RoomEvent>, prefix: &st
     None
 }
 
-/// Feeds the user's current audio track into `frames` until the user or the room is gone;
+/// Feeds the user's current audio track into `frames` until the participant it comes from or the room is gone;
 /// a resubscribed track replaces the old one.
 async fn follow(
     mut events: mpsc::UnboundedReceiver<RoomEvent>,
     prefix: String,
+    mut user: ParticipantIdentity,
     first: RemoteAudioTrack,
     frames: mpsc::Sender<Vec<f32>>,
     gone: watch::Sender<bool>,
@@ -146,6 +176,7 @@ async fn follow(
                 if let Some((_, task)) = reading.take() {
                     task.abort();
                 }
+                user = participant.identity();
                 reading = Some((track.sid(), tokio::spawn(read(track, frames.clone()))));
             }
             RoomEvent::TrackUnsubscribed { track: RemoteTrack::Audio(track), .. }
@@ -155,7 +186,7 @@ async fn follow(
                     task.abort();
                 }
             }
-            RoomEvent::ParticipantDisconnected(participant) if is_user(&participant, &prefix) => break,
+            RoomEvent::ParticipantDisconnected(participant) if participant.identity() == user => break,
             RoomEvent::Disconnected { .. } => break,
             _ => {}
         }
@@ -195,7 +226,6 @@ impl Rechunker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::matrix::Matrix;
 
     #[test]
     fn rechunking_turns_each_480_sample_frame_into_three_in_order() {
@@ -214,6 +244,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "needs NOTE_VOICE_LIVE=<bot json> and the live homeserver"]
     async fn the_bot_joins_and_publishes() {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let creds: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(std::env::var("NOTE_VOICE_LIVE").unwrap()).unwrap()).unwrap();
         let m = Matrix::connect("https://matrix.example.org", creds["access_token"].as_str().unwrap()).await.unwrap();

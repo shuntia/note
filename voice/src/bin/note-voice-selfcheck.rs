@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use livekit::webrtc::audio_source::native::NativeAudioSource;
 use livekit::webrtc::audio_source::AudioSourceOptions;
-use note_voice::audio::engines::{Device, Engines};
+use note_voice::audio::engines::{Device, Engines, SpeechEngines};
 use note_voice::config::models_from_dir;
 
 const SENTENCE: &str = "Move my run to tomorrow at seven.";

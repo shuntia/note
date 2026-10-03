@@ -38,6 +38,17 @@ pub trait TextToSpeech: Send + Sync {
     fn voices(&self) -> Vec<VoiceInfo>;
 }
 
+/// The per-language engines a live call draws on.
+pub trait SpeechEngines: Send + Sync {
+    fn languages(&self) -> Vec<String>;
+    fn vad(&self, language: &str) -> anyhow::Result<Box<dyn Vad>>;
+    fn stt(&self, language: &str) -> anyhow::Result<Box<dyn SpeechToText>>;
+    /// Panics when no language is loaded.
+    fn turn(&self, language: &str) -> Arc<dyn TurnDetector>;
+    /// Panics when no language is loaded.
+    fn tts(&self, language: &str) -> Arc<dyn TextToSpeech>;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct VoiceInfo {
     pub id: String,
@@ -91,34 +102,34 @@ impl Engines {
         Ok(Engines { languages })
     }
 
-    pub fn vad(&self, language: &str) -> anyhow::Result<Box<dyn Vad>> {
-        Ok(Box::new(SherpaVad::create(&self.language(language)?.vad_model)?))
-    }
-
-    pub fn stt(&self, language: &str) -> anyhow::Result<Box<dyn SpeechToText>> {
-        Ok(Box::new(SherpaStt::new(self.language(language)?.recognizer.clone())))
-    }
-
-    /// Panics when no language is loaded.
-    pub fn turn(&self, language: &str) -> Arc<dyn TurnDetector> {
-        self.language(language).expect("no language loaded").turn.clone()
-    }
-
-    /// Panics when no language is loaded.
-    pub fn tts(&self, language: &str) -> Arc<dyn TextToSpeech> {
-        self.language(language).expect("no language loaded").tts.clone()
-    }
-
-    pub fn languages(&self) -> Vec<String> {
-        self.languages.keys().cloned().collect()
-    }
-
     /// `language`, or the first loaded one when it is not loaded.
     fn language(&self, language: &str) -> anyhow::Result<&Language> {
         self.languages
             .get(language)
             .or_else(|| self.languages.values().next())
             .ok_or_else(|| anyhow!("no voice models are loaded"))
+    }
+}
+
+impl SpeechEngines for Engines {
+    fn vad(&self, language: &str) -> anyhow::Result<Box<dyn Vad>> {
+        Ok(Box::new(SherpaVad::create(&self.language(language)?.vad_model)?))
+    }
+
+    fn stt(&self, language: &str) -> anyhow::Result<Box<dyn SpeechToText>> {
+        Ok(Box::new(SherpaStt::new(self.language(language)?.recognizer.clone())))
+    }
+
+    fn turn(&self, language: &str) -> Arc<dyn TurnDetector> {
+        self.language(language).expect("no language loaded").turn.clone()
+    }
+
+    fn tts(&self, language: &str) -> Arc<dyn TextToSpeech> {
+        self.language(language).expect("no language loaded").tts.clone()
+    }
+
+    fn languages(&self) -> Vec<String> {
+        self.languages.keys().cloned().collect()
     }
 }
 
