@@ -26,6 +26,7 @@ pub struct MockLLM {
     thinking: Mutex<VecDeque<String>>,
     rounds: Mutex<VecDeque<Vec<StreamPiece>>>,
     seen: Mutex<Vec<RecordedChat>>,
+    streams: bool,
 }
 
 impl MockLLM {
@@ -39,7 +40,7 @@ impl MockLLM {
 
     /// One round of pieces per `chat_stream` call, in order.
     pub fn streamed(rounds: Vec<Vec<StreamPiece>>) -> Self {
-        Self { rounds: Mutex::new(rounds.into()), ..Self::default() }
+        Self { rounds: Mutex::new(rounds.into()), streams: true, ..Self::default() }
     }
 
     /// One reasoning text per scripted round, in order.
@@ -68,6 +69,10 @@ impl MockLLM {
 }
 
 impl LLMProvider for MockLLM {
+    fn streams(&self) -> bool {
+        self.streams
+    }
+
     fn chat(&self, req: &ChatRequest) -> Result<ChatResponse> {
         self.record(req);
         Ok(self.script.lock().unwrap().pop_front().unwrap_or(ChatResponse {

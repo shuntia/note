@@ -178,12 +178,16 @@ pub struct CallManager {
     deps: OnceLock<CallDeps>,
     send: CallSender,
     calls: Mutex<HashMap<String, mpsc::Sender<DriverIn>>>,
+    /// Held from reading a call's state to registering its driver, and by
+    /// `Ended` while it removes one.
     resuming: Mutex<()>,
+    /// Calls whose driver died; they are hung up and never resumed.
+    dead: Mutex<std::collections::HashSet<String>>,
 }
 
 impl CallManager {
     pub fn new(send: CallSender) -> Self {
-        Self { deps: OnceLock::new(), send, calls: Mutex::default(), resuming: Mutex::new(()) }
+        Self { deps: OnceLock::new(), send, calls: Mutex::default(), resuming: Mutex::new(()), dead: Mutex::default() }
     }
 
     pub fn set_deps(&self, deps: CallDeps) {
@@ -218,7 +222,7 @@ impl CallManager {
     /// model how its running jobs ended; true when it did.
     fn resume_call(&self, d: &CallDeps, call_id: &str) -> bool {
         let _once = self.resuming.lock().unwrap_or_else(PoisonError::into_inner);
-        if self.is_live(call_id) {
+        if self.is_live(call_id) || self.is_dead(call_id) {
             return false;
         }
         let row: Option<(i64, String, Option<String>, i64)> = crate::db_guard(&d.db)
@@ -256,7 +260,7 @@ impl CallManager {
     /// Primes the reply model's connection and prompt cache while the phone
     /// rings: the call's own prompt, stopped at the first delta.
     pub fn warm_up(self: &Arc<Self>, user_id: i64, msg: &OutboundMessage) {
-        if !self.is_ready() {
+        if !self.deps.get().is_some_and(|d| d.voice_llm.streams()) {
             return;
         }
         let (me, msg) = (self.clone(), msg.clone());
@@ -281,6 +285,7 @@ impl CallManager {
     /// Starts the conversation of a call just answered, in the thread its
     /// message belongs to or a new one.
     fn answer(&self, d: &CallDeps, call_id: &str) -> anyhow::Result<()> {
+        let _once = self.resuming.lock().unwrap_or_else(PoisonError::into_inner);
         if self.is_live(call_id) {
             return Ok(());
         }
@@ -298,13 +303,15 @@ impl CallManager {
         let (system, tools) = d.prompt(user_id, &username, &reason(msg.as_ref()), existing)?;
         let conversation_id = {
             let conn = crate::db_guard(&d.db);
+            let tx = conn.unchecked_transaction()?;
             let now = jiff::Timestamp::now();
             let id = match existing {
                 Some(id) => id,
-                None => crate::talk::create(&conn, user_id, "Call", now)?,
+                None => crate::talk::create(&tx, user_id, "Call", now)?,
             };
-            conn.execute("UPDATE voice_calls SET conversation_id = ?2 WHERE id = ?1", (call_id, id))?;
-            crate::talk::mark_via(&conn, id, crate::talk::Via::Voice, now)?;
+            tx.execute("UPDATE voice_calls SET conversation_id = ?2 WHERE id = ?1", (call_id, id))?;
+            crate::talk::mark_via(&tx, id, crate::talk::Via::Voice, now)?;
+            tx.commit()?;
             id
         };
         self.spawn(
@@ -364,6 +371,26 @@ impl CallManager {
         std::thread::spawn(move || driver::run(deps, opening, history, initial, rx, tx));
     }
 
+    fn is_dead(&self, call_id: &str) -> bool {
+        self.dead.lock().unwrap_or_else(PoisonError::into_inner).contains(call_id)
+    }
+
+    /// Hangs up a call whose driver is gone, once.
+    fn bury(&self, call_id: &str) {
+        self.calls().remove(call_id);
+        if !self.dead.lock().unwrap_or_else(PoisonError::into_inner).insert(call_id.to_string()) {
+            return;
+        }
+        eprintln!("voice: the driver of {call_id} stopped");
+        if let Some(d) = self.deps.get() {
+            let conn = crate::db_guard(&d.db);
+            let user_id: Option<i64> =
+                conn.query_row("SELECT user_id FROM voice_calls WHERE id = ?1", [call_id], |r| r.get(0)).ok();
+            let _ = crate::log::record(&conn, user_id, "voice_error", "a call's driver stopped; hung up");
+        }
+        (self.send)(call_id, CallBody::HangUp);
+    }
+
     /// Hangs up a call whose conversation could not start.
     fn give_up(&self, d: &CallDeps, call_id: &str, user_id: i64, e: &anyhow::Error) {
         eprintln!("voice: starting the conversation of {call_id} failed: {e:#}");
@@ -392,6 +419,8 @@ impl Conversation for CallManager {
             }
             CallBody::Outcome { .. } => {}
             CallBody::Ended => {
+                let _once = self.resuming.lock().unwrap_or_else(PoisonError::into_inner);
+                self.dead.lock().unwrap_or_else(PoisonError::into_inner).remove(call_id);
                 if let Some(tx) = self.calls().remove(call_id) {
                     let _ = tx.send(DriverIn::Frame(CallBody::Ended));
                 }
@@ -400,8 +429,9 @@ impl Conversation for CallManager {
                 if let Some(d) = self.deps.get().filter(|_| !self.is_live(call_id)) {
                     self.resume_call(d, call_id);
                 }
-                if let Some(tx) = self.calls().get(call_id) {
-                    let _ = tx.send(DriverIn::Frame(other.clone()));
+                let sent = self.calls().get(call_id).map(|tx| tx.send(DriverIn::Frame(other.clone())).is_ok());
+                if sent == Some(false) {
+                    self.bury(call_id);
                 }
             }
         }
@@ -498,6 +528,69 @@ mod tests {
         let own = Arc::new(Named(Mutex::new("fast".into())));
         deps_on(&main, &own, false).follow_main_model();
         assert_eq!(own.model().as_deref(), Some("fast"));
+    }
+
+    fn recording() -> (Arc<CallManager>, Arc<Mutex<Vec<CallBody>>>) {
+        let sent: Arc<Mutex<Vec<CallBody>>> = Arc::default();
+        let log = sent.clone();
+        let m = CallManager::new(Arc::new(move |_: &str, body| log.lock().unwrap().push(body)));
+        (Arc::new(m), sent)
+    }
+
+    #[test]
+    fn ended_during_a_resume_stops_the_driver_it_registers() {
+        let (m, _) = recording();
+        let resume = m.resuming.lock().unwrap();
+        let ender = {
+            let m = m.clone();
+            std::thread::spawn(move || m.on_frame("c1", &CallBody::Ended))
+        };
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(!ender.is_finished(), "Ended waits for the resume in progress");
+        let (tx, rx) = mpsc::channel();
+        m.calls().insert("c1".into(), tx);
+        drop(resume);
+        ender.join().unwrap();
+        assert!(!m.is_live("c1"));
+        assert!(matches!(rx.try_recv(), Ok(DriverIn::Frame(CallBody::Ended))));
+    }
+
+    #[test]
+    fn a_call_whose_driver_died_is_hung_up_once_and_not_resumed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let conn = crate::db::open_memory().unwrap();
+        conn.execute("INSERT INTO users (username, pass_hash, role) VALUES ('aki', 'x', 'member')", []).unwrap();
+        let conv = crate::talk::create(&conn, 1, "Call", jiff::Timestamp::now()).unwrap();
+        conn.execute(
+            "INSERT INTO voice_calls (id, user_id, direction, state, ring_by, created_at, conversation_id)
+             VALUES ('c1', 1, 'outbound', 'answered', 'x', 'x', ?1)",
+            [conv],
+        )
+        .unwrap();
+        let db = Arc::new(Mutex::new(conn));
+        let llm: Arc<dyn LLMProvider> = Arc::new(crate::providers::mock::MockLLM::scripted(vec![]));
+        let (m, sent) = recording();
+        m.set_deps(CallDeps {
+            db: db.clone(),
+            config_dir: tmp.path().to_path_buf(),
+            data_dir: tmp.path().to_path_buf(),
+            llm: llm.clone(),
+            voice_llm: llm,
+            embeddings: None,
+            search: None,
+            settings: CallSettings::default(),
+        });
+        let (tx, rx) = mpsc::channel();
+        drop(rx);
+        m.calls().insert("c1".into(), tx);
+        m.on_frame("c1", &CallBody::Commit { turn: 1, text: "hello".into() });
+        m.on_frame("c1", &CallBody::Commit { turn: 2, text: "hello?".into() });
+        assert!(!m.is_live("c1"));
+        assert_eq!(*sent.lock().unwrap(), vec![CallBody::HangUp]);
+        let logged: i64 = crate::db_guard(&db)
+            .query_row("SELECT COUNT(*) FROM event_log WHERE kind = 'voice_error'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(logged, 1);
     }
 
     #[test]

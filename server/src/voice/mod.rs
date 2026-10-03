@@ -743,6 +743,10 @@ mod tests {
 
     /// A rig whose calls hold a conversation on `rounds`; completions alone never wake it.
     fn talking(rounds: Vec<Vec<crate::providers::mock::StreamPiece>>) -> Talk {
+        talking_on(crate::providers::mock::MockLLM::streamed(rounds))
+    }
+
+    fn talking_on(llm: crate::providers::mock::MockLLM) -> Talk {
         let (voice, mock) = rig();
         let dir = tempfile::tempdir().unwrap();
         let prompts = dir.path().join("defaults/prompts");
@@ -754,7 +758,7 @@ mod tests {
         .unwrap();
         let shipped = Path::new(env!("CARGO_MANIFEST_DIR")).join("../config/defaults/prompts/voice.md");
         std::fs::copy(shipped, prompts.join("voice.md")).unwrap();
-        let llm = Arc::new(crate::providers::mock::MockLLM::streamed(rounds));
+        let llm = Arc::new(llm);
         voice.set_calls(call::CallDeps {
             db: voice.db.clone(),
             config_dir: dir.path().to_path_buf(),
@@ -805,6 +809,14 @@ mod tests {
         assert!(sent.contains(&CallBody::SpeakDone { reply: 1 }));
         settle().await;
         assert!(t.mock.seen().is_empty(), "nothing falls through while the call is live");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_voice_model_that_does_not_stream_is_not_warmed_up() {
+        let t = talking_on(crate::providers::mock::MockLLM::scripted(vec![]));
+        t.voice.start_call(1, &link(), &msg(), jiff::Timestamp::now()).unwrap();
+        settle().await;
+        assert!(t.llm.seen().is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread")]

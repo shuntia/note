@@ -79,6 +79,11 @@ pub trait LLMProvider: Send + Sync {
         None
     }
 
+    /// Whether `chat_stream` streams; the default runs a whole `chat`.
+    fn streams(&self) -> bool {
+        false
+    }
+
     /// Swaps the model later calls ask for; false for a provider with none.
     fn set_model(&self, _model: &str) -> bool {
         false
@@ -276,7 +281,6 @@ pub fn build(cfg: &crate::config::ProvidersConfig) -> Result<Providers> {
     Ok((llm, emb))
 }
 
-/// The configured reasoning effort, or `None` for the default "none".
 /// A call's reply model: for an `openai` provider, `[voice] model` (else the
 /// main model) with reasoning off and `OpenRouter`'s `provider.sort`; any other
 /// provider speaks on `main` as is.
@@ -304,6 +308,7 @@ pub fn build_voice(
     Ok(Arc::new(llm))
 }
 
+/// The configured reasoning effort, or `None` for the default "none".
 fn reasoning_effort(p: &crate::config::ProviderConfig) -> Result<Option<&str>> {
     match p.reasoning.as_str() {
         "" | "none" => Ok(None),

@@ -301,6 +301,10 @@ pub fn parse_embeddings(v: &serde_json::Value) -> Result<Vec<Vec<f32>>> {
 }
 
 impl LLMProvider for OpenAILLM {
+    fn streams(&self) -> bool {
+        true
+    }
+
     fn chat(&self, req: &ChatRequest) -> Result<ChatResponse> {
         parse(&self.post(req)?)
     }
