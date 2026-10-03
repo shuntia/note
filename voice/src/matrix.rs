@@ -297,8 +297,10 @@ fn parse_sync(body: &Value, bot: &str) -> Vec<RoomEvent> {
                     .to_string();
                 out.push(RoomEvent::CallMember { room: room.clone(), user: sender, device, active, event_id, ts_ms });
             } else if RING_TYPES.contains(&kind) {
-                let mentions = ev["content"]["m.mentions"]["user_ids"].as_array();
-                if mentions.is_some_and(|ids| ids.iter().any(|id| id == bot)) {
+                let mentions = &ev["content"]["m.mentions"];
+                let for_bot = mentions["room"] == true
+                    || mentions["user_ids"].as_array().is_some_and(|ids| ids.iter().any(|id| id == bot));
+                if for_bot {
                     out.push(RoomEvent::RingForBot { room: room.clone(), sender, event_id, ts_ms });
                 }
             } else if DECLINE_TYPES.contains(&kind) {
@@ -353,6 +355,13 @@ mod tests {
                 "content": { "notification_type": "ring", "m.mentions": { "user_ids": ["@someone:t"] } },
             },
             {
+                "type": NOTIFICATION_TYPE,
+                "sender": "@shuntia:matrix.example.org",
+                "event_id": "$n3",
+                "origin_server_ts": 1_700_000_000_150_i64,
+                "content": { "notification_type": "ring", "m.mentions": { "user_ids": [], "room": true } },
+            },
+            {
                 "type": MEMBER_TYPE,
                 "state_key": "_@shuntia:matrix.example.org_ALICEPHONE_m.call",
                 "sender": "@shuntia:matrix.example.org",
@@ -378,6 +387,12 @@ mod tests {
                     sender: user.clone(),
                     event_id: "$n1".into(),
                     ts_ms: 1_700_000_000_100,
+                },
+                RoomEvent::RingForBot {
+                    room: "!r:t".into(),
+                    sender: user.clone(),
+                    event_id: "$n3".into(),
+                    ts_ms: 1_700_000_000_150,
                 },
                 RoomEvent::CallMember {
                     room: "!r:t".into(),

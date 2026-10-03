@@ -369,12 +369,18 @@ impl NoteHandler {
             let Some(user_id) = links::linked_user(&tx, room_id, mxid).map_err(|e| failed(&e))? else {
                 return Err(Refusal::new(RefusalCode::BadRequest, "no linked account calls from there"));
             };
-            let seen: Option<String> = tx
-                .query_row("SELECT id FROM voice_calls WHERE inbound_key = ?1", [key], |r| r.get(0))
+            let seen: Option<(String, String)> = tx
+                .query_row("SELECT id, state FROM voice_calls WHERE inbound_key = ?1", [key], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })
                 .optional()
                 .map_err(|e| failed(&e))?;
-            if let Some(id) = seen {
-                return Ok(Reply::Call { call_id: id });
+            match seen {
+                Some((_, state)) if state == "ended" => {
+                    return Err(Refusal::new(RefusalCode::Failed, "that call has ended"));
+                }
+                Some((id, _)) => return Ok(Reply::Call { call_id: id }),
+                None => {}
             }
             let busy: bool = tx
                 .query_row(
@@ -1144,6 +1150,13 @@ mod tests {
         assert_eq!(incoming(&voice, "@aki:t", "$ev").await, Ok(Reply::Call { call_id: id.clone() }));
         assert_eq!(call_count(&voice), 1);
         assert_eq!(frames(&voice, &id).iter().filter(|b| matches!(b, CallBody::Start { .. })).count(), 1);
+        voice.handler.apply(&id, 1, CallBody::Outcome { outcome: Outcome::Failed { reason: "x".into() } }).unwrap();
+        voice.handler.apply(&id, 2, CallBody::Ended).unwrap();
+        assert_eq!(
+            incoming(&voice, "@aki:t", "$ev").await,
+            Err(Refusal::new(RefusalCode::Failed, "that call has ended"))
+        );
+        assert_eq!(call_count(&voice), 1);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1181,6 +1194,23 @@ mod tests {
         let Ok(Reply::Call { call_id: id }) = incoming(&voice, "@aki:t", "$ev").await else { panic!("no call") };
         voice.handler.apply(&id, 1, CallBody::Outcome { outcome: Outcome::Failed { reason: "x".into() } }).unwrap();
         voice.handler.apply(&id, 2, CallBody::Ended).unwrap();
+        assert_eq!(voice.redrive(), 0);
+        settle().await;
+        assert!(mock.seen().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_inbound_call_stuck_starting_is_swept_without_delivering() {
+        let (voice, mock) = rig();
+        linked(&voice);
+        let Ok(Reply::Call { call_id: id }) = incoming(&voice, "@aki:t", "$ev").await else { panic!("no call") };
+        let later = jiff::Timestamp::now() + jiff::SignedDuration::from_secs(RING_BY_SECS + STALE_START_SECS + 1);
+        assert_eq!(voice.sweep(later), 1);
+        let (state, outcome): (String, String) = crate::db_guard(&voice.db)
+            .query_row("SELECT state, outcome FROM voice_calls WHERE id = ?1", [&id], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap();
+        assert_eq!((state.as_str(), outcome.as_str()), ("ended", "failed"));
+        assert!(frames(&voice, &id).contains(&CallBody::HangUp));
         assert_eq!(voice.redrive(), 0);
         settle().await;
         assert!(mock.seen().is_empty());

@@ -812,13 +812,13 @@ impl Driver {
         }
     }
 
-    /// The row id of the new assistant row.
     fn mark_bowed_out(&self) {
         if let Err(e) = super::mark_bowed_out(&crate::db_guard(&self.deps.db), &self.deps.call_id) {
             eprintln!("voice: recording the bow-out of {} failed: {e:#}", self.deps.call_id);
         }
     }
 
+    /// The row id of the new assistant row.
     fn append_assistant(&self, text: &str) -> Option<i64> {
         let conn = crate::db_guard(&self.deps.db);
         match crate::talk::append_assistant(

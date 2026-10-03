@@ -104,6 +104,87 @@ struct InboundStart {
     hang_up: watch::Receiver<bool>,
 }
 
+/// Incoming calls being answered, one per room. Each takes only the `Start`
+/// of the call Note opened for it; one that comes before Note names that call
+/// is held until it does.
+#[derive(Default)]
+struct Answering(Mutex<HashMap<String, Pending>>);
+
+#[derive(Default)]
+struct Pending {
+    call_id: Option<String>,
+    early: Vec<InboundStart>,
+    waiter: Option<oneshot::Sender<InboundStart>>,
+}
+
+/// An attempt's hold on its room. Dropping it frees the room and turns away
+/// any `Start` it still holds.
+struct Attempt {
+    answering: Arc<Answering>,
+    room: String,
+    turn_away: Box<dyn Fn(InboundStart) + Send + Sync>,
+}
+
+impl Answering {
+    fn begin(self: &Arc<Self>, room: &str, turn_away: impl Fn(InboundStart) + Send + Sync + 'static) -> Attempt {
+        lock(&self.0).insert(room.to_string(), Pending::default());
+        Attempt { answering: self.clone(), room: room.to_string(), turn_away: Box::new(turn_away) }
+    }
+
+    fn busy(&self, room: &str) -> bool {
+        lock(&self.0).contains_key(room)
+    }
+
+    /// Hands `start` to the attempt in its room; `Err` gives back a `Start` no attempt is waiting for.
+    fn start(&self, room: &str, start: InboundStart) -> Result<(), InboundStart> {
+        let mut rooms = lock(&self.0);
+        let Some(pending) = rooms.get_mut(room) else { return Err(start) };
+        match &pending.call_id {
+            None => {
+                pending.early.push(start);
+                Ok(())
+            }
+            Some(id) if *id == start.call_id => match pending.waiter.take() {
+                Some(waiter) => waiter.send(start),
+                None => Err(start),
+            },
+            Some(_) => Err(start),
+        }
+    }
+}
+
+impl Attempt {
+    /// From now on only `call_id`'s `Start` is taken; any other held is turned away.
+    fn expect(&self, call_id: &str) -> oneshot::Receiver<InboundStart> {
+        let (tx, rx) = oneshot::channel();
+        let others = {
+            let mut rooms = lock(&self.answering.0);
+            let pending = rooms.entry(self.room.clone()).or_default();
+            pending.call_id = Some(call_id.to_string());
+            let (mine, others): (Vec<_>, Vec<_>) =
+                std::mem::take(&mut pending.early).into_iter().partition(|s| s.call_id == call_id);
+            match mine.into_iter().next() {
+                Some(start) => drop(tx.send(start)),
+                None => pending.waiter = Some(tx),
+            }
+            others
+        };
+        for start in others {
+            (self.turn_away)(start);
+        }
+        rx
+    }
+}
+
+impl Drop for Attempt {
+    fn drop(&mut self) {
+        let held = lock(&self.answering.0).remove(&self.room).map(|p| p.early).unwrap_or_default();
+        for start in held {
+            (self.turn_away)(start);
+        }
+    }
+}
+
 struct Service {
     cfg: VoiceServiceConfig,
     matrix: Arc<Matrix>,
@@ -116,8 +197,7 @@ struct Service {
     lines: Arc<Lines>,
     cues: Arc<Cues>,
     reporting: Mutex<HashSet<i64>>,
-    /// Rooms with an incoming call being answered, each with the way to its `Start` until it arrives.
-    answering: Mutex<HashMap<String, Option<oneshot::Sender<InboundStart>>>>,
+    answering: Arc<Answering>,
     previews: Previews,
     peer: OnceLock<Peer>,
 }
@@ -329,40 +409,38 @@ impl Service {
 
     /// A room with an incoming call being answered, or a call of its own not yet done.
     fn busy(&self, room: &str) -> bool {
-        lock(&self.answering).contains_key(room)
+        self.answering.busy(room)
             || lock(&self.state).data.calls.values().any(|c| c.room_id == room && !c.done)
     }
 
     /// Asks Note to open the user's call; with no Note to take it, answers to say so.
-    async fn answer_incoming(
-        self: Arc<Self>,
-        room: String,
-        mxid: String,
-        key: String,
-        device: Option<String>,
-        started: oneshot::Receiver<InboundStart>,
-    ) {
+    async fn answer_incoming(self: Arc<Self>, attempt: Attempt, mxid: String, key: String, device: Option<String>) {
+        let room = attempt.room.clone();
         let ask = Request::IncomingCall { room_id: room.clone(), mxid: mxid.clone(), key };
         let why = match tokio::time::timeout(INCOMING_CALL_WAIT, self.peer().request(ask)).await {
-            Ok(Ok(Reply::Call { call_id })) => match tokio::time::timeout(INBOUND_START_WAIT, started).await {
-                Ok(Ok(start)) if start.call_id == call_id => {
-                    self.answer_for_note(start, &room, &mxid, device.as_deref()).await;
-                    lock(&self.answering).remove(&room);
-                    return;
+            Ok(Ok(Reply::Call { call_id })) => {
+                let mut started = attempt.expect(&call_id);
+                let start = if let Ok(start) = tokio::time::timeout(INBOUND_START_WAIT, &mut started).await {
+                    start.ok()
+                } else {
+                    started.close();
+                    started.try_recv().ok()
+                };
+                if let Some(start) = start {
+                    return self.answer_for_note(start, &room, &mxid, device.as_deref()).await;
                 }
-                Ok(Ok(start)) => {
-                    self.finish(&start.call_id, Outcome::Failed { reason: format!("Note opened {call_id} instead") });
-                    format!("a Start for {} came for {call_id}", start.call_id)
-                }
-                _ => format!("the Start for {call_id} never came"),
-            },
+                format!("the Start for {call_id} never came")
+            }
             Ok(Ok(reply)) => format!("Note answered {reply:?}"),
             Ok(Err(refusal)) => refusal.to_string(),
             Err(_) => "no answer in time".into(),
         };
         eprintln!("voice: Note cannot take {mxid}'s call in {room} ({why}); answering to say so");
         self.cant_reach(&room, &mxid, device.as_deref()).await;
-        lock(&self.answering).remove(&room);
+    }
+
+    fn turn_away(&self, start: &InboundStart) {
+        self.finish(&start.call_id, Outcome::Failed { reason: "no incoming call to answer".into() });
     }
 
     async fn answer_for_note(self: &Arc<Self>, start: InboundStart, room: &str, mxid: &str, device: Option<&str>) {
@@ -433,10 +511,9 @@ impl Service {
                 v.insert(tx);
             }
         }
-        let waiting = lock(&self.answering).get_mut(room_id).and_then(Option::take);
         let start = InboundStart { call_id: call_id.to_string(), profile, hang_up };
-        if waiting.is_none_or(|w| w.send(start).is_err()) {
-            self.finish(call_id, Outcome::Failed { reason: "no incoming call to answer".into() });
+        if let Err(start) = self.answering.start(room_id, start) {
+            self.turn_away(&start);
         }
     }
 
@@ -583,14 +660,14 @@ impl Service {
             _ => in_call.iter().find(|(r, u, _)| *r == room && *u == mxid).map(|(_, _, d)| d.clone()),
         }
         .filter(|d| !d.is_empty());
-        let (tx, started) = oneshot::channel();
-        lock(&self.answering).insert(room.clone(), Some(tx));
+        let svc = self.clone();
+        let attempt = self.answering.begin(&room, move |start| svc.turn_away(&start));
         eprintln!("voice: {mxid} is calling in {room}");
-        tokio::spawn(self.clone().answer_incoming(room, mxid, key, device, started));
+        tokio::spawn(self.clone().answer_incoming(attempt, mxid, key, device));
     }
 
     async fn sync_forever(self: Arc<Self>) {
-        let mut detector = Detector::new(lock(&self.state).data.since.is_none(), now_ms());
+        let mut detector = Detector::default();
         let mut in_call = HashSet::new();
         loop {
             let since = lock(&self.state).data.since.clone();
@@ -779,7 +856,7 @@ pub async fn run_with(cfg: VoiceServiceConfig, peer_cfg: PeerConfig, backends: B
         lines,
         cues: Arc::new(cues),
         reporting: Mutex::new(HashSet::new()),
-        answering: Mutex::new(HashMap::new()),
+        answering: Arc::default(),
         previews: Previews::default(),
         peer: OnceLock::new(),
     });
@@ -814,6 +891,60 @@ mod tests {
         assert_eq!(&bytes[..4], b"RIFF");
         assert_eq!(u32::from_le_bytes(bytes[24..28].try_into().unwrap()), 24_000);
         assert_eq!(u16::from_le_bytes(bytes[22..24].try_into().unwrap()), 1, "mono");
+    }
+
+    fn inbound(call_id: &str) -> InboundStart {
+        InboundStart { call_id: call_id.into(), profile: VoiceProfile::default(), hang_up: watch::channel(false).1 }
+    }
+
+    fn attempt(answering: &Arc<Answering>) -> (Attempt, Arc<Mutex<Vec<String>>>) {
+        let turned_away = Arc::new(Mutex::new(Vec::new()));
+        let seen = turned_away.clone();
+        (answering.begin("!dm:t", move |s| lock(&seen).push(s.call_id)), turned_away)
+    }
+
+    #[test]
+    fn a_start_before_note_names_the_call_is_held_for_it() {
+        let answering = Arc::new(Answering::default());
+        let (attempt, turned_away) = attempt(&answering);
+        assert!(answering.start("!dm:t", inbound("b")).is_ok());
+        assert_eq!(attempt.expect("b").try_recv().unwrap().call_id, "b");
+        assert!(lock(&turned_away).is_empty());
+    }
+
+    #[test]
+    fn a_late_start_from_an_earlier_attempt_takes_nothing() {
+        let answering = Arc::new(Answering::default());
+        let (attempt, turned_away) = attempt(&answering);
+        assert!(answering.start("!dm:t", inbound("a")).is_ok(), "held until Note names the call");
+        let mut started = attempt.expect("b");
+        assert_eq!(*lock(&turned_away), ["a"]);
+        assert_eq!(answering.start("!dm:t", inbound("a")).unwrap_err().call_id, "a");
+        assert!(started.try_recv().is_err(), "still waiting");
+        assert!(answering.start("!dm:t", inbound("b")).is_ok());
+        assert_eq!(started.try_recv().unwrap().call_id, "b");
+    }
+
+    #[test]
+    fn a_start_with_no_attempt_is_turned_away() {
+        let answering = Answering::default();
+        assert_eq!(answering.start("!dm:t", inbound("a")).unwrap_err().call_id, "a");
+    }
+
+    #[test]
+    fn a_panicking_attempt_frees_its_room() {
+        let answering = Arc::new(Answering::default());
+        let turned_away = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let (_attempt, turned_away) = attempt(&answering);
+            assert!(answering.busy("!dm:t"));
+            assert!(answering.start("!dm:t", inbound("a")).is_ok());
+            std::panic::panic_any(turned_away)
+        }))
+        .unwrap_err()
+        .downcast::<Arc<Mutex<Vec<String>>>>()
+        .unwrap();
+        assert!(!answering.busy("!dm:t"));
+        assert_eq!(*lock(&turned_away), ["a"]);
     }
 
     #[derive(Default)]
