@@ -858,7 +858,8 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
             schema::<CancelJobArgs>(),
         ),
         "hang_up" => (
-            "Ends the call once what you are saying has played.",
+            "Ends the call once what you are saying has played. Only after a goodbye, when the user is done \
+             or asks to end the call; never just because a request was handled.",
             schema::<HangUpArgs>(),
         ),
         "share_note" => (

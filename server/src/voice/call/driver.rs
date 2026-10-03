@@ -605,6 +605,15 @@ impl Driver {
     fn run_call(&mut self, reply: u64, index: usize, call: &ToolCall) -> (String, bool) {
         match call.name.as_str() {
             "hang_up" => {
+                let with_others = self
+                    .in_flight
+                    .as_ref()
+                    .is_some_and(|f| f.emitted.iter().any(|c| c.name != "hang_up"));
+                if with_others || !self.jobs.running().is_empty() {
+                    return tool_error(ToolError::rejected(
+                        "jobs are still going; the call stays on until their results are in and told",
+                    ));
+                }
                 eprintln!("voice: Note hangs up {}", self.deps.call_id);
                 self.ending = true;
                 self.hang_up_reply = Some(reply);
@@ -1500,6 +1509,43 @@ mod tests {
         h.frame(CallBody::Ended);
         h.driver.take().unwrap().join().unwrap();
         assert!(h.ran().is_empty());
+    }
+
+    #[test]
+    fn hang_up_beside_a_job_is_refused_and_the_call_stays_on() {
+        let mut h = start(
+            vec![
+                vec![
+                    Text("Done."),
+                    Calls(call("t1", "task_delete", r#"{"id":3}"#)),
+                    Calls(call("t2", "hang_up", "{}")),
+                ],
+                vec![Text("Anything else?")],
+            ],
+            &[("task_delete", 10, r#"{"ok":true}"#)],
+            None,
+            "",
+        );
+        h.frame(CallBody::Commit {
+            turn: 1,
+            text: "remove the SAT tasks".into(),
+        });
+        h.wait_for("the job to run", |h| !h.ran().is_empty());
+        h.frame(CallBody::Floor {
+            floor: Floor::Drained,
+        });
+        h.frame(CallBody::Commit {
+            turn: 2,
+            text: "thanks".into(),
+        });
+        h.wait_for("the next turn", |h| h.llm.seen().len() >= 2);
+        let sent = h.quiet(300);
+        assert!(!sent.contains(&CallBody::HangUp), "{sent:?}");
+        let refused = h.llm.seen().into_iter().flat_map(|r| r.messages).any(|m| {
+            matches!(m, Message::ToolResult { call_id, is_error: true, .. } if call_id == "t2")
+        });
+        assert!(refused, "the model is told the hang-up was refused");
+        h.stop();
     }
 
     #[test]
