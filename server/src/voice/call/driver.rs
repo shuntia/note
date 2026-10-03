@@ -156,7 +156,8 @@ struct Driver {
     queue: Queue,
     jobs: JobTable,
     job_meta: HashMap<u32, JobMeta>,
-    next_reply: u64,
+    /// The highest reply number taken, mirrored from `voice_calls.last_reply`.
+    taken: u64,
     in_flight: Option<InFlight>,
     replies: HashMap<u64, ReplyRecord>,
     ending: bool,
@@ -195,7 +196,6 @@ impl Driver {
             },
         );
         let queue = Queue::new(wake, (deps.clock)());
-        let next_reply = first_reply(&deps.db, &deps.call_id);
         let jobs = JobTable::new(
             deps.call_id.clone(),
             deps.db.clone(),
@@ -210,7 +210,7 @@ impl Driver {
             queue,
             jobs,
             job_meta: HashMap::new(),
-            next_reply,
+            taken: 1,
             in_flight: None,
             replies: HashMap::new(),
             ending: false,
@@ -430,9 +430,28 @@ impl Driver {
         }
     }
 
+    /// The next reply number, persisted so a resumed call continues above every number used.
+    fn take_reply(&mut self) -> u64 {
+        let taken = crate::db_guard(&self.deps.db).query_row(
+            "UPDATE voice_calls SET last_reply = MAX(last_reply, ?2) + 1 WHERE id = ?1 RETURNING last_reply",
+            (&self.deps.call_id, self.taken as i64),
+            |r| r.get::<_, i64>(0),
+        );
+        self.taken = match taken {
+            Ok(n) => n.max(0) as u64,
+            Err(e) => {
+                eprintln!(
+                    "voice: taking a reply number for {} failed: {e}",
+                    self.deps.call_id
+                );
+                self.taken + 1
+            }
+        };
+        self.taken
+    }
+
     fn spawn_turn(&mut self, input: String, draft: Option<(u64, String, Vec<Item>)>) {
-        let reply = self.next_reply;
-        self.next_reply += 1;
+        let reply = self.take_reply();
         let stop = Arc::new(AtomicBool::new(false));
         let end_sent = Arc::new(AtomicBool::new(false));
         let mut request = self.messages.clone();
@@ -651,8 +670,7 @@ impl Driver {
             record.row = row;
         }
         if end.error.is_some() && !spoken_any && end.calls.is_empty() && !end.stopped {
-            let reply = self.next_reply;
-            self.next_reply += 1;
+            let reply = self.take_reply();
             self.say(reply, &[APOLOGY.to_string()], APOLOGY);
         }
         if self.ending {
@@ -804,20 +822,6 @@ impl Driver {
             );
         }
     }
-}
-
-/// The first reply number no earlier run of this call has used; 1 is the opening.
-fn first_reply(db: &Mutex<Connection>, call_id: &str) -> u64 {
-    let last: i64 = crate::db_guard(db)
-        .query_row(
-            "SELECT MAX(COALESCE((SELECT MAX(reply) FROM voice_jobs WHERE call_id = ?1), 0),
-                        COALESCE((SELECT MAX(CAST(substr(op_key, 1, instr(op_key, ':') - 1) AS INTEGER))
-                                  FROM voice_ops WHERE call_id = ?1), 0))",
-            [call_id],
-            |r| r.get(0),
-        )
-        .unwrap_or(0);
-    (last.max(0) as u64 + 1).max(2)
 }
 
 /// Appends `input` as a user message, merged into the last message when that is one too.
@@ -1455,15 +1459,12 @@ mod tests {
     }
 
     #[test]
-    fn a_resumed_call_never_reuses_a_reply_number() {
+    fn a_resumed_call_continues_above_its_speech_only_replies() {
         let mut h = start(
             vec![vec![Text("Adding it."), Calls(call("t1", "task_add", r#"{"title":"x"}"#))]],
             &[("task_add", 10, r#"{"id":9}"#)],
             None,
-            "INSERT INTO voice_jobs (call_id, job, reply, call_index, tool, args, state, started_at)
-             VALUES ('c1', 1, 5, 0, 'task_add', '{}', 'done', 'x');
-             INSERT INTO voice_ops (call_id, op_key, result, created_at)
-             VALUES ('c1', '7:0', '{\"id\":1}', 'x'), ('c1', '5:0', '{\"id\":2}', 'x');",
+            "UPDATE voice_calls SET last_reply = 7 WHERE id = 'c1';",
         );
         h.frame(CallBody::Commit {
             turn: 1,
@@ -1477,9 +1478,10 @@ mod tests {
         h.wait_for("the tool to run", |h| !h.ran().is_empty());
         h.stop();
         assert_eq!(*h.runner.keys.lock().unwrap(), vec!["8:0"]);
-        assert!(h
-            .rows()
-            .contains(&row("tool", r#"{"id":9}"#, Some("task_add"))));
+        let last: i64 = crate::db_guard(&h.db)
+            .query_row("SELECT last_reply FROM voice_calls WHERE id = 'c1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(last, 8);
     }
 
     #[test]

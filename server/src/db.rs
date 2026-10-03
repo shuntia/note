@@ -697,6 +697,7 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (call_id, job)
     );
     ALTER TABLE voice_calls ADD COLUMN conversation_id INTEGER REFERENCES conversations(id) ON DELETE SET NULL;
+    ALTER TABLE voice_calls ADD COLUMN last_reply INTEGER NOT NULL DEFAULT 1;
     ALTER TABLE conversations ADD COLUMN via_next TEXT NOT NULL DEFAULT 'web'
         CHECK (via_next IN ('web','telegram','voice'));
     UPDATE conversations SET via_next = via;
@@ -2029,6 +2030,9 @@ mod tests {
             .query_row("SELECT conversation_id FROM voice_calls WHERE id = 'c2'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(thread, None, "a deleted thread leaves its call standing");
+        let last: i64 =
+            conn.query_row("SELECT last_reply FROM voice_calls WHERE id = 'c2'", [], |r| r.get(0)).unwrap();
+        assert_eq!(last, 1, "reply 1 is the opening");
     }
     #[test]
     fn v48_keys_inbound_calls_once_each() {
