@@ -295,10 +295,10 @@ impl NoteHandler {
         }
     }
 
-    /// A call does not carry the message's content yet, so every ring is
-    /// followed by the message through the rest of the ladder. Delivery is
-    /// stamped in `fell_through_at`, and a call already stamped or already
-    /// being delivered is skipped.
+    /// Every call, answered or not, is followed by the message through the
+    /// rest of the ladder, so a spoken message also lands as a push or
+    /// Telegram message to keep. Delivery is stamped in `fell_through_at`,
+    /// and a call already stamped or already being delivered is skipped.
     fn fall_through(&self, call_id: &str, user_id: i64, message: Option<String>) {
         let Some(raw) = message else { return };
         if !claim(&self.in_flight).insert(call_id.to_string()) {
@@ -733,6 +733,15 @@ mod tests {
         assert!(sent.contains(&CallBody::Play { reply: 1 }));
         settle().await;
         assert!(mock.seen().is_empty(), "nothing falls through while the call is live");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_ring_waits_for_an_answered_call_to_end() {
+        let (voice, _mock) = rig();
+        let id = answered(&voice);
+        assert!(voice.start_call(1, &link(), &msg(), jiff::Timestamp::now()).unwrap_err().is::<RingBusy>());
+        voice.handler.apply(&id, 3, CallBody::Ended).unwrap();
+        assert!(voice.start_call(1, &link(), &msg(), jiff::Timestamp::now()).is_ok());
     }
 
     #[tokio::test(flavor = "multi_thread")]

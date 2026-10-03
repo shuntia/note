@@ -3,6 +3,7 @@ pub mod calls;
 pub mod config;
 pub mod matrix;
 pub mod media;
+pub mod outgoing;
 pub mod service;
 pub mod session;
 pub mod state;

@@ -4,6 +4,7 @@ use crate::calls::{clear_member, ring_once, Ring};
 use crate::config::VoiceServiceConfig;
 use crate::matrix::{HomeserverError, Matrix, RoomEvent};
 use crate::media::{LiveKitJoin, MediaJoin};
+use crate::outgoing::CallWriter;
 use crate::session::{run_session, Cues, SessionDeps, SessionEnd, SessionIn};
 use crate::state::{CallState, LinkState, StateFile};
 use note_voice_proto::{
@@ -165,6 +166,16 @@ impl Service {
             clear_member(&self.matrix, room_id).await;
             return self.finish(call_id, Outcome::Failed { reason: "no voice models".into() });
         }
+        let (svc, id) = (self.clone(), call_id.to_string());
+        let writer = match CallWriter::spawn(move |body| {
+            svc.send(&id, body);
+        }) {
+            Ok(writer) => writer,
+            Err(e) => {
+                clear_member(&self.matrix, room_id).await;
+                return self.finish(call_id, Outcome::Failed { reason: format!("starting the frame writer: {e}") });
+            }
+        };
         let (tx, inbox) = mpsc::unbounded_channel();
         {
             let mut sessions = lock(&self.sessions);
@@ -200,11 +211,9 @@ impl Service {
             max_len: MAX_CALL,
             link_grace: LINK_GRACE,
         };
-        let (svc, id) = (self.clone(), call_id.to_string());
-        let session = tokio::spawn(run_session(deps, media, inbox, move |body| {
-            svc.send(&id, body);
-        }));
+        let session = tokio::spawn(run_session(deps, media, inbox, writer.sender()));
         let end = session.await.unwrap_or_else(|e| SessionEnd::MediaFailed(format!("the session failed: {e}")));
+        writer.close().await;
         eprintln!("voice: call {call_id} ended: {end:?}");
         lock(&self.sessions).remove(call_id);
         clear_member(&self.matrix, room_id).await;
@@ -473,9 +482,18 @@ fn warm_lines(engines: &Arc<dyn SpeechEngines>, lines: &Arc<Lines>) {
     });
 }
 
+/// A load failure leaves ringing up: answered calls fail and fall through.
+fn loaded_or_empty(loaded: anyhow::Result<Engines>) -> Engines {
+    loaded.unwrap_or_else(|e| {
+        eprintln!("voice: loading the speech models failed: {e:#}; answered calls will fail");
+        Engines::empty()
+    })
+}
+
 pub async fn run(cfg: VoiceServiceConfig) -> anyhow::Result<()> {
     let (models, device) = (cfg.model_sets(), cfg.device);
-    let engines = tokio::task::spawn_blocking(move || Engines::load(&models, device)).await??;
+    let loaded = tokio::task::spawn_blocking(move || Engines::load(&models, device)).await;
+    let engines = loaded_or_empty(loaded.map_err(anyhow::Error::from).and_then(|r| r));
     let backends = Backends { engines: Arc::new(engines), media: Arc::new(LiveKitJoin { wait: JOIN_WAIT }) };
     run_with(cfg, PeerConfig::new(Role::Voice), backends).await
 }
@@ -484,7 +502,7 @@ pub async fn run_with(cfg: VoiceServiceConfig, peer_cfg: PeerConfig, backends: B
     if backends.engines.languages().is_empty() {
         eprintln!("voice: no voice models are loaded; answered calls will fail with \"no voice models\"");
     }
-    let cues = Cues::load(cfg.ready_cue().as_deref(), cfg.heard_cue().as_deref());
+    let cues = Cues::load(&cfg.ready_cue(), &cfg.heard_cue());
     let lines = Arc::new(Lines::default());
     warm_lines(&backends.engines, &lines);
     let token = std::fs::read_to_string(&cfg.token_file)
@@ -521,4 +539,14 @@ pub async fn run_with(cfg: VoiceServiceConfig, peer_cfg: PeerConfig, backends: B
     tokio::spawn(svc.clone().sync_forever());
     dial_forever(peer, cfg.socket.clone()).await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_failed_model_load_leaves_no_languages_instead_of_an_error() {
+        assert!(loaded_or_empty(Err(anyhow::anyhow!("libonnxruntime.so not found"))).languages().is_empty());
+    }
 }

@@ -108,16 +108,17 @@ impl VoiceServiceConfig {
         self.models_dir.as_deref().map(models_from_dir).unwrap_or_default()
     }
 
-    pub fn ready_cue(&self) -> Option<PathBuf> {
+    /// The override, then the default in `cues_dir`, in the order to try them.
+    pub fn ready_cue(&self) -> Vec<PathBuf> {
         self.cue(self.ready_cue_file.as_ref(), "ready.pcm")
     }
 
-    pub fn heard_cue(&self) -> Option<PathBuf> {
+    pub fn heard_cue(&self) -> Vec<PathBuf> {
         self.cue(self.heard_cue_file.as_ref(), "heard.pcm")
     }
 
-    fn cue(&self, file: Option<&PathBuf>, name: &str) -> Option<PathBuf> {
-        file.cloned().or_else(|| self.cues_dir.as_ref().map(|d| d.join(name)))
+    fn cue(&self, file: Option<&PathBuf>, name: &str) -> Vec<PathBuf> {
+        file.cloned().into_iter().chain(self.cues_dir.as_ref().map(|d| d.join(name))).collect()
     }
 }
 
@@ -144,7 +145,7 @@ mod tests {
         assert_eq!(cfg.device, Device::Cpu);
         assert_eq!(cfg.model_sets()["en"].turn, Path::new("/m/smart-turn.onnx"));
         assert_eq!(cfg.model_sets()["en"].voices[0].id, "af_sarah");
-        assert_eq!(cfg.ready_cue(), Some(PathBuf::from("/c/ready.pcm")));
-        assert_eq!(cfg.heard_cue(), Some(PathBuf::from("/h.pcm")));
+        assert_eq!(cfg.ready_cue(), vec![PathBuf::from("/c/ready.pcm")]);
+        assert_eq!(cfg.heard_cue(), vec![PathBuf::from("/h.pcm"), PathBuf::from("/c/heard.pcm")]);
     }
 }

@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -30,21 +30,64 @@ pub struct Cues {
 }
 
 impl Cues {
-    /// Raw s16le files; a missing or unreadable one is logged and left silent.
-    pub fn load(ready: Option<&Path>, heard: Option<&Path>) -> Cues {
-        Cues { ready: Arc::new(read_pcm(ready)), heard: Arc::new(read_pcm(heard)) }
+    /// Each cue is the first of its candidates that reads: WAV at any rate, or raw 48 kHz mono s16le.
+    /// A cue none of whose files read is logged and left silent.
+    pub fn load(ready: &[PathBuf], heard: &[PathBuf]) -> Cues {
+        Cues { ready: Arc::new(first_cue(ready)), heard: Arc::new(first_cue(heard)) }
     }
 }
 
-fn read_pcm(path: Option<&Path>) -> Vec<i16> {
-    let Some(path) = path else { return Vec::new() };
-    match std::fs::read(path) {
-        Ok(bytes) => bytes.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]])).collect(),
-        Err(e) => {
-            eprintln!("voice: reading the cue {} failed: {e}", path.display());
-            Vec::new()
+fn first_cue(candidates: &[PathBuf]) -> Vec<i16> {
+    for path in candidates {
+        match read_cue(path) {
+            Ok(pcm) => return pcm,
+            Err(e) => eprintln!("voice: the cue {} is unusable: {e:#}", path.display()),
         }
     }
+    Vec::new()
+}
+
+fn read_cue(path: &Path) -> anyhow::Result<Vec<i16>> {
+    let ext = path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase);
+    match ext.as_deref() {
+        Some("wav") => read_wav(path),
+        Some("ogg" | "oga" | "opus") => anyhow::bail!("Ogg cues are not supported"),
+        _ => Ok(std::fs::read(path)?.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]])).collect()),
+    }
+}
+
+fn read_wav(path: &Path) -> anyhow::Result<Vec<i16>> {
+    let mut reader = hound::WavReader::open(path)?;
+    let spec = reader.spec();
+    let samples: Vec<f32> = match spec.sample_format {
+        hound::SampleFormat::Float => reader.samples::<f32>().collect::<Result<_, _>>()?,
+        hound::SampleFormat::Int => {
+            let scale = (1i64 << (spec.bits_per_sample - 1)) as f32;
+            reader.samples::<i32>().map(|s| s.map(|s| s as f32 / scale)).collect::<Result<_, _>>()?
+        }
+    };
+    let channels = usize::from(spec.channels.max(1));
+    let mono: Vec<f32> = samples.chunks(channels).map(|c| c.iter().sum::<f32>() / c.len() as f32).collect();
+    Ok(to_48k(&mono, spec.sample_rate))
+}
+
+/// Linear interpolation from `rate` to 48 kHz.
+fn to_48k(samples: &[f32], rate: u32) -> Vec<i16> {
+    let pcm = |x: f32| (x.clamp(-1.0, 1.0) * 32767.0).round() as i16;
+    if samples.is_empty() || rate == 0 {
+        return Vec::new();
+    }
+    let step = f64::from(rate) / 48_000.0;
+    let len = (samples.len() as f64 / step).round() as usize;
+    (0..len)
+        .map(|i| {
+            let pos = i as f64 * step;
+            let at = pos.floor() as usize;
+            let a = samples[at.min(samples.len() - 1)];
+            let b = samples.get(at + 1).copied().unwrap_or(a);
+            pcm(a + (b - a) * (pos - pos.floor()) as f32)
+        })
+        .collect()
 }
 
 pub struct SessionDeps {
@@ -600,6 +643,7 @@ mod tests {
     struct Probe {
         /// The first sample of every frame sent.
         sent: Arc<Mutex<Vec<i16>>>,
+        sent_at: Arc<Mutex<Vec<std::time::Instant>>>,
         gone: Arc<Notify>,
         left_room: Arc<AtomicBool>,
     }
@@ -631,6 +675,7 @@ mod tests {
 
         async fn send(&self, frame: &[i16; FRAME]) -> anyhow::Result<()> {
             self.probe.sent.lock().unwrap().push(frame[0]);
+            self.probe.sent_at.lock().unwrap().push(std::time::Instant::now());
             Ok(())
         }
 
@@ -844,5 +889,118 @@ mod tests {
         let end = tokio::time::timeout(Duration::from_secs(2), c.end).await.unwrap().unwrap();
         assert!(matches!(end, SessionEnd::MediaFailed(_)), "{end:?}");
         assert!(c.probe.left_room.load(Ordering::SeqCst));
+    }
+
+    /// An outbox whose every append takes as long as a slow fsync.
+    struct SlowOutbox(Arc<Mutex<note_voice_proto::MemOutbox>>);
+
+    impl note_voice_proto::Outbox for SlowOutbox {
+        fn append(&mut self, call_id: &str, body: &CallBody) -> std::io::Result<u64> {
+            std::thread::sleep(Duration::from_millis(50));
+            self.0.append(call_id, body)
+        }
+        fn unacked(&self, call_id: &str, after: u64) -> std::io::Result<Vec<(u64, CallBody)>> {
+            self.0.unacked(call_id, after)
+        }
+        fn ack(&mut self, call_id: &str, upto: u64) -> std::io::Result<()> {
+            self.0.ack(call_id, upto)
+        }
+        fn pending_calls(&self) -> std::io::Result<Vec<String>> {
+            self.0.pending_calls()
+        }
+        fn forget(&mut self, call_id: &str) -> std::io::Result<()> {
+            self.0.forget(call_id)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_slow_journal_neither_gaps_the_playout_nor_reorders_frames() {
+        use crate::outgoing::CallWriter;
+        use note_voice_proto::{testkit::Recording, Dir, MemOutbox, Outbox, Peer, PeerConfig, Role};
+
+        let journal: Arc<Mutex<MemOutbox>> = Arc::default();
+        let peer = Peer::new(
+            PeerConfig::new(Role::Voice),
+            Dir::ToNote,
+            Arc::new(Recording::default()),
+            Box::new(SlowOutbox(journal.clone())),
+        );
+        let writer = CallWriter::spawn(move |body| {
+            peer.send_call("c1", body).unwrap();
+        })
+        .unwrap();
+        let tts: Arc<FakeTts> = Arc::default();
+        let probe = Probe::default();
+        let media = FakeMedia { script: Mutex::new(VecDeque::new()), probe: probe.clone() };
+        let (inbox, rx) = mpsc::unbounded_channel();
+        let _session = tokio::spawn(run_session(deps(Vec::new(), false, &tts), Box::new(media), rx, writer.sender()));
+        let send = |body| inbox.send(SessionIn::Frame(body)).unwrap();
+
+        let texts: Vec<String> = (1..=8).map(|n| "x".repeat(n)).collect();
+        for (reply, text) in (1u64..).zip(&texts) {
+            send(CallBody::Speak { reply, idx: 0, text: text.clone() });
+            send(CallBody::SpeakDone { reply });
+        }
+        for text in &texts {
+            for _ in 0..1000 {
+                if tts.said.lock().unwrap().contains(text) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        }
+        for reply in 1..=8 {
+            send(CallBody::Play { reply });
+        }
+
+        let mut expected: Vec<CallBody> = (1..=8).map(|reply| CallBody::Played { reply }).collect();
+        expected.push(CallBody::Floor { floor: Floor::Drained });
+        let journaled = || journal.unacked("c1", 0).unwrap().into_iter().map(|(_, b)| b).collect::<Vec<_>>();
+        for _ in 0..300 {
+            if journaled().len() >= expected.len() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(journaled(), expected, "every frame is journaled, in order");
+
+        let at = probe.sent_at.lock().unwrap().clone();
+        assert_eq!(at.len(), 36, "every frame of every reply played");
+        let worst = at.windows(2).map(|w| w[1] - w[0]).max().unwrap();
+        assert!(worst < Duration::from_millis(40), "a {worst:?} gap between media frames");
+    }
+
+    fn write_wav(path: &Path, spec: hound::WavSpec, samples: &[i16]) {
+        let mut w = hound::WavWriter::create(path, spec).unwrap();
+        for &s in samples {
+            w.write_sample(s).unwrap();
+        }
+        w.finalize().unwrap();
+    }
+
+    #[test]
+    fn a_wav_cue_is_mixed_down_and_resampled_to_48k() {
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("ready.wav");
+        let spec = hound::WavSpec { channels: 2, sample_rate: 24_000, bits_per_sample: 16, sample_format: hound::SampleFormat::Int };
+        write_wav(&wav, spec, &[1000, 3000, 4000, 6000]);
+        let cues = Cues::load(&[wav], &[]);
+        assert_eq!(*cues.ready, vec![2000, 3500, 5000, 5000]);
+        assert!(cues.heard.is_empty());
+    }
+
+    #[test]
+    fn an_ogg_or_unreadable_override_falls_back_to_the_default_cue() {
+        let dir = tempfile::tempdir().unwrap();
+        let ogg = dir.path().join("ready.ogg");
+        std::fs::write(&ogg, b"OggS").unwrap();
+        let pcm = dir.path().join("ready.pcm");
+        std::fs::write(&pcm, [0x10, 0x00, 0x20, 0x00]).unwrap();
+        let wav = dir.path().join("heard.wav");
+        let spec = hound::WavSpec { channels: 1, sample_rate: 48_000, bits_per_sample: 16, sample_format: hound::SampleFormat::Int };
+        write_wav(&wav, spec, &[7, 8, 9]);
+        let cues = Cues::load(&[ogg, pcm.clone()], &[dir.path().join("missing.wav"), wav]);
+        assert_eq!(*cues.ready, vec![0x10, 0x20]);
+        assert_eq!(*cues.heard, vec![7, 8, 9]);
     }
 }

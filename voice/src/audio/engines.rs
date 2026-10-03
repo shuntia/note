@@ -80,6 +80,10 @@ pub struct Engines {
 }
 
 impl Engines {
+    pub fn empty() -> Engines {
+        Engines { languages: BTreeMap::new() }
+    }
+
     pub fn load(models: &ModelsConfig, device: Device) -> anyhow::Result<Engines> {
         let mut languages = BTreeMap::new();
         for (code, set) in models {
