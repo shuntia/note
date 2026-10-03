@@ -22,6 +22,7 @@ const TURN_SPAN: usize = RATE * 8;
 const TICK: Duration = Duration::from_millis(10);
 const LOST_NOTICE: Duration = Duration::from_secs(1);
 const DRAIN_CAP: Duration = Duration::from_secs(5);
+const ONE_MOMENT_AFTER: Duration = Duration::from_millis(1500);
 
 /// 48 kHz mono audio for the call's cues; an empty one plays nothing.
 pub struct Cues {
@@ -118,7 +119,7 @@ enum Event {
     Partial(String),
     Score { at: Duration, p: f32 },
     Finished { turn: u64, text: String },
-    Lines { lost: Option<Arc<Vec<i16>>>, goodbye: Option<Arc<Vec<i16>>> },
+    Lines { lost: Option<Arc<Vec<i16>>>, goodbye: Option<Arc<Vec<i16>>>, moment: Option<Arc<Vec<i16>>> },
 }
 
 enum SttCmd {
@@ -178,7 +179,11 @@ struct Live<S> {
     lines_ready: bool,
     lost_line: Option<Arc<Vec<i16>>>,
     goodbye_line: Option<Arc<Vec<i16>>>,
+    moment_line: Option<Arc<Vec<i16>>>,
     goodbye_pending: bool,
+    /// A Commit sent with no Speak or Play since.
+    awaiting_reply: Option<Instant>,
+    drafted: Option<u64>,
     start: Instant,
     playing: bool,
     played_reply: bool,
@@ -217,7 +222,11 @@ impl<S: Fn(CallBody)> Live<S> {
                         .map_err(|e| eprintln!("voice: rendering {line:?} failed: {e:#}"))
                         .ok()
                 };
-                let _ = events.send(Event::Lines { lost: render(Line::LostNotes), goodbye: render(Line::Goodbye) });
+                let _ = events.send(Event::Lines {
+                    lost: render(Line::LostNotes),
+                    goodbye: render(Line::Goodbye),
+                    moment: render(Line::OneMoment),
+                });
             });
         }
         let mut playout = Playout::default();
@@ -239,7 +248,10 @@ impl<S: Fn(CallBody)> Live<S> {
             lines_ready: false,
             lost_line: None,
             goodbye_line: None,
+            moment_line: None,
             goodbye_pending: false,
+            awaiting_reply: None,
+            drafted: None,
             start,
             playing: false,
             played_reply: false,
@@ -335,6 +347,12 @@ impl<S: Fn(CallBody)> Live<S> {
         if self.start.elapsed() >= max_len {
             self.say_goodbye(SessionEnd::TimedOut);
         }
+        if self.awaiting_reply.is_some_and(|at| at.elapsed() >= ONE_MOMENT_AFTER) {
+            self.awaiting_reply = None;
+            if let Some(pcm) = &self.moment_line {
+                self.playout.push(Clip { reply: None, chars: 0, pcm: pcm.to_vec() });
+            }
+        }
         if self.goodbye_pending && self.lines_ready {
             self.goodbye_pending = false;
             if let Some(pcm) = &self.goodbye_line {
@@ -350,11 +368,17 @@ impl<S: Fn(CallBody)> Live<S> {
         for action in actions {
             match action {
                 Action::ScoreTurn => self.score_turn(),
-                Action::Draft { turn, text } => (self.send)(CallBody::Draft { turn, text }),
+                Action::Draft { turn, text } => {
+                    self.drafted = Some(turn);
+                    (self.send)(CallBody::Draft { turn, text });
+                }
                 Action::Commit { turn, .. } => {
                     let _ = self.stt.send(SttCmd::Finish { turn });
                 }
-                Action::Retract { turn } => (self.send)(CallBody::Retract { turn }),
+                Action::Retract { turn } => {
+                    self.drafted = self.drafted.filter(|&d| d != turn);
+                    (self.send)(CallBody::Retract { turn });
+                }
                 Action::PausePlayout => self.playout.pause(),
                 Action::ResumePlayout => {
                     self.playout.resume();
@@ -387,10 +411,11 @@ impl<S: Fn(CallBody)> Live<S> {
 
     fn event(&mut self, ev: Event) {
         let input = match ev {
-            Event::Lines { lost, goodbye } => {
+            Event::Lines { lost, goodbye, moment } => {
                 self.lines_ready = true;
                 self.lost_line = lost;
                 self.goodbye_line = goodbye;
+                self.moment_line = moment;
                 return;
             }
             _ if self.ending.is_some() => return,
@@ -398,8 +423,14 @@ impl<S: Fn(CallBody)> Live<S> {
             Event::Partial(text) => Input::Partial { text },
             Event::Score { at, p } => Input::TurnScore { at, p },
             Event::Finished { turn, text } => {
-                if !text.is_empty() {
+                let drafted = self.drafted.take_if(|&mut d| d == turn).is_some();
+                if text.is_empty() {
+                    if drafted {
+                        (self.send)(CallBody::Retract { turn });
+                    }
+                } else {
                     (self.send)(CallBody::Commit { turn, text });
+                    self.awaiting_reply = Some(Instant::now());
                     if let Some(cue) = &self.heard_cue {
                         self.playout.push_front(Clip { reply: None, chars: 0, pcm: cue.to_vec() });
                     }
@@ -414,6 +445,9 @@ impl<S: Fn(CallBody)> Live<S> {
     fn frame(&mut self, body: CallBody) {
         if self.ending.is_some() {
             return;
+        }
+        if matches!(body, CallBody::Speak { .. } | CallBody::Play { .. }) {
+            self.awaiting_reply = None;
         }
         match body {
             CallBody::Speak { reply, idx, text } => self.speech.speak(reply, idx, text),
@@ -565,6 +599,7 @@ mod tests {
         script: Vec<(usize, &'static str)>,
         heard: usize,
         panics: bool,
+        blank_finish: bool,
     }
 
     impl SpeechToText for FakeStt {
@@ -580,7 +615,7 @@ mod tests {
         }
 
         fn finish(&mut self) -> String {
-            let text = self.partial();
+            let text = if self.blank_finish { String::new() } else { self.partial() };
             self.heard = 0;
             text
         }
@@ -615,6 +650,7 @@ mod tests {
         stt: Vec<(usize, &'static str)>,
         tts: Arc<FakeTts>,
         stt_panics: bool,
+        blank_finish: bool,
     }
 
     impl SpeechEngines for FakeEngines {
@@ -627,7 +663,7 @@ mod tests {
         }
 
         fn stt(&self, _language: &str) -> anyhow::Result<Box<dyn SpeechToText>> {
-            Ok(Box::new(FakeStt { script: self.stt.clone(), heard: 0, panics: self.stt_panics }))
+            Ok(Box::new(FakeStt { script: self.stt.clone(), heard: 0, panics: self.stt_panics, blank_finish: self.blank_finish }))
         }
 
         fn turn(&self, _language: &str) -> Arc<dyn TurnDetector> {
@@ -730,7 +766,7 @@ mod tests {
 
     fn deps(stt: Vec<(usize, &'static str)>, cue: bool, tts: &Arc<FakeTts>) -> SessionDeps {
         SessionDeps {
-            engines: Arc::new(FakeEngines { stt, tts: tts.clone(), stt_panics: false }),
+            engines: Arc::new(FakeEngines { stt, tts: tts.clone(), stt_panics: false, blank_finish: false }),
             lines: Arc::new(Lines::default()),
             cues: Arc::new(Cues { ready: Arc::new(vec![READY; FRAME]), heard: Arc::new(vec![HEARD; FRAME]) }),
             profile: VoiceProfile { language: "en".into(), voice: String::new(), cue },
@@ -774,6 +810,59 @@ mod tests {
         assert_eq!(log[3], CallBody::Commit { turn: 1, text: "move my run".into() });
         assert_eq!(c.probe.frames_of(READY as usize), 1, "the ready cue plays once");
         assert_eq!(c.probe.frames_of(HEARD as usize), 1, "the heard cue follows the commit");
+    }
+
+    async fn until_committed(c: &Call) {
+        for _ in 0..1000 {
+            if c.log().iter().any(|b| matches!(b, CallBody::Commit { .. })) {
+                return;
+            }
+            sleep_ms(10).await;
+        }
+        panic!("never committed: {:?}", c.log());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn no_speech_within_a_beat_plays_one_moment() {
+        let moment = text(Line::OneMoment, "en").len();
+        let turn = || audio(&[(0.1, 1000), (0.0, 1000)]);
+        let words = || vec![(2, "move"), (6, "move my run")];
+
+        let c = call(turn(), words(), false);
+        until_committed(&c).await;
+        sleep_ms(1400).await;
+        assert_eq!(c.probe.frames_of(moment), 0, "not before 1.5 s");
+        sleep_ms(4000).await;
+        assert_eq!(c.probe.frames_of(moment), moment, "the line plays once");
+
+        let c = call(turn(), words(), false);
+        until_committed(&c).await;
+        c.frame(CallBody::Speak { reply: 2, idx: 0, text: "ok".into() });
+        sleep_ms(4000).await;
+        assert_eq!(c.probe.frames_of(moment), 0, "a reply on its way needs no filler");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_empty_commit_retracts_its_draft() {
+        let tts: Arc<FakeTts> = Arc::default();
+        let engines = Arc::new(FakeEngines {
+            stt: vec![(2, "move"), (6, "move my run")],
+            tts: tts.clone(),
+            stt_panics: false,
+            blank_finish: true,
+        });
+        let c = call_with(
+            SessionDeps { engines, ..deps(Vec::new(), false, &tts) },
+            audio(&[(0.1, 1000), (0.0, 1000)]),
+            tts,
+        );
+        sleep_ms(3000).await;
+        let log = c.log();
+        let Some(CallBody::Draft { turn, .. }) = log.iter().find(|b| matches!(b, CallBody::Draft { .. })) else {
+            panic!("no draft: {log:?}")
+        };
+        assert!(!log.iter().any(|b| matches!(b, CallBody::Commit { .. })), "{log:?}");
+        assert_eq!(log.iter().filter(|b| **b == CallBody::Retract { turn: *turn }).count(), 1, "{log:?}");
     }
 
     #[tokio::test(start_paused = true)]
@@ -884,7 +973,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_crashed_recognizer_ends_the_call() {
         let tts: Arc<FakeTts> = Arc::default();
-        let engines = Arc::new(FakeEngines { stt: Vec::new(), tts: tts.clone(), stt_panics: true });
+        let engines = Arc::new(FakeEngines { stt: Vec::new(), tts: tts.clone(), stt_panics: true, blank_finish: false });
         let c = call_with(SessionDeps { engines, ..deps(Vec::new(), false, &tts) }, audio(&[(0.1, 1000)]), tts);
         let end = tokio::time::timeout(Duration::from_secs(2), c.end).await.unwrap().unwrap();
         assert!(matches!(end, SessionEnd::MediaFailed(_)), "{end:?}");
