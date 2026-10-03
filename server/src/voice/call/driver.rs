@@ -48,6 +48,7 @@ pub struct DriverDeps {
 const APOLOGY: &str = "Sorry, I lost my train of thought. Could you say that again?";
 const TICK: Duration = Duration::from_millis(50);
 const END_WAIT: Duration = Duration::from_secs(2);
+const DRAFT_WAIT: Duration = Duration::from_secs(3);
 
 /// Runs until Stop or Ended; `opening` is spoken as reply 1 before anything else.
 pub fn run(
@@ -188,6 +189,7 @@ impl Driver {
             },
         );
         let queue = Queue::new(wake, (deps.clock)());
+        let next_reply = first_reply(&deps.db, &deps.call_id);
         let jobs = JobTable::new(
             deps.call_id.clone(),
             deps.db.clone(),
@@ -202,7 +204,7 @@ impl Driver {
             queue,
             jobs,
             job_meta: HashMap::new(),
-            next_reply: 2,
+            next_reply,
             in_flight: None,
             replies: HashMap::new(),
             ending: false,
@@ -384,6 +386,14 @@ impl Driver {
     }
 
     fn on_tick(&mut self) {
+        let now = self.now();
+        if self
+            .in_flight
+            .as_ref()
+            .is_some_and(|f| f.held() && now.saturating_sub(f.since) >= DRAFT_WAIT)
+        {
+            self.drop_draft();
+        }
         let dead = self.in_flight.as_ref().is_some_and(|f| {
             f.ended.is_none() && f.handle.is_finished() && !f.end_sent.load(Ordering::SeqCst)
         });
@@ -768,6 +778,20 @@ impl Driver {
     }
 }
 
+/// The first reply number no earlier run of this call has used; 1 is the opening.
+fn first_reply(db: &Mutex<Connection>, call_id: &str) -> u64 {
+    let last: i64 = crate::db_guard(db)
+        .query_row(
+            "SELECT MAX(COALESCE((SELECT MAX(reply) FROM voice_jobs WHERE call_id = ?1), 0),
+                        COALESCE((SELECT MAX(CAST(substr(op_key, 1, instr(op_key, ':') - 1) AS INTEGER))
+                                  FROM voice_ops WHERE call_id = ?1), 0))",
+            [call_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    (last.max(0) as u64 + 1).max(2)
+}
+
 /// Appends `input` as a user message, merged into the last message when that is one too.
 fn push_user(messages: &mut Vec<Message>, input: String) {
     match messages.last_mut() {
@@ -815,11 +839,13 @@ mod tests {
     struct FakeRunner {
         tools: HashMap<&'static str, (u64, &'static str)>,
         ran: Mutex<Vec<String>>,
+        keys: Mutex<Vec<String>>,
     }
 
     impl ToolRunner for FakeRunner {
-        fn run(&self, name: &str, _args: &str, _once: (&str, &str)) -> (String, bool) {
+        fn run(&self, name: &str, _args: &str, once: (&str, &str)) -> (String, bool) {
             self.ran.lock().unwrap().push(name.to_string());
+            self.keys.lock().unwrap().push(once.1.to_string());
             let (ms, result) = self.tools[name];
             std::thread::sleep(Duration::from_millis(ms));
             (result.to_string(), false)
@@ -885,6 +911,7 @@ mod tests {
                 .map(|&(name, ms, result)| (name, (ms, result)))
                 .collect(),
             ran: Mutex::new(Vec::new()),
+            keys: Mutex::new(Vec::new()),
         });
         let now_ms = Arc::new(AtomicU64::new(0));
         let (frame_tx, frames) = mpsc::channel();
@@ -1386,5 +1413,92 @@ mod tests {
             h.rows(),
             vec![row("user", "hello?", None), row("assistant", APOLOGY, None)]
         );
+    }
+
+    #[test]
+    fn a_resumed_call_never_reuses_a_reply_number() {
+        let mut h = start(
+            vec![vec![Text("Adding it."), Calls(call("t1", "task_add", r#"{"title":"x"}"#))]],
+            &[("task_add", 10, r#"{"id":9}"#)],
+            None,
+            "INSERT INTO voice_jobs (call_id, job, reply, call_index, tool, args, state, started_at)
+             VALUES ('c1', 1, 5, 0, 'task_add', '{}', 'done', 'x');
+             INSERT INTO voice_ops (call_id, op_key, result, created_at)
+             VALUES ('c1', '7:0', '{\"id\":1}', 'x'), ('c1', '5:0', '{\"id\":2}', 'x');",
+        );
+        h.frame(CallBody::Commit {
+            turn: 1,
+            text: "add x".into(),
+        });
+        h.expect(&[
+            speak(8, 0, "Adding it."),
+            CallBody::Play { reply: 8 },
+            CallBody::SpeakDone { reply: 8 },
+        ]);
+        h.wait_for("the tool to run", |h| !h.ran().is_empty());
+        h.stop();
+        assert_eq!(*h.runner.keys.lock().unwrap(), vec!["8:0"]);
+        assert!(h
+            .rows()
+            .contains(&row("tool", r#"{"id":9}"#, Some("task_add"))));
+    }
+
+    #[test]
+    fn a_draft_left_unresolved_is_dropped_after_three_seconds() {
+        let mut h = start(
+            vec![
+                vec![
+                    Text("On it."),
+                    Calls(call("t1", "task_add", r#"{"title":"stretch"}"#)),
+                ],
+                vec![Text("Hm.")],
+                vec![Text("Sure.")],
+            ],
+            &[("task_add", 10, r#"{"id":5}"#)],
+            None,
+            "",
+        );
+        h.frame(CallBody::Commit {
+            turn: 1,
+            text: "remind me to stretch".into(),
+        });
+        h.expect(&[
+            speak(2, 0, "On it."),
+            CallBody::Play { reply: 2 },
+            CallBody::SpeakDone { reply: 2 },
+        ]);
+        h.wait_for("job 1 to land", |h| {
+            h.rows().iter().any(|(role, ..)| role == "tool")
+        });
+
+        h.at(1000);
+        h.frame(CallBody::Draft {
+            turn: 2,
+            text: "um".into(),
+        });
+        h.expect(&[speak(3, 0, "Hm."), CallBody::SpeakDone { reply: 3 }]);
+        h.at(3999);
+        h.tx.send(DriverIn::Tick).unwrap();
+        assert_eq!(h.quiet(100), vec![], "still inside the wait");
+        h.at(4000);
+        h.tx.send(DriverIn::Tick).unwrap();
+        h.expect(&[CallBody::Drop { reply: 3 }]);
+
+        h.frame(CallBody::Commit {
+            turn: 3,
+            text: "so".into(),
+        });
+        h.expect(&[
+            speak(4, 0, "Sure."),
+            CallBody::Play { reply: 4 },
+            CallBody::SpeakDone { reply: 4 },
+        ]);
+        let block = h.last_user(2);
+        assert!(
+            block.contains("[job 1 · task_add · done]"),
+            "the snapshot came back: {block}"
+        );
+        assert!(block.contains("[you] so"), "{block}");
+        h.stop();
     }
 }
