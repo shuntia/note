@@ -1,5 +1,5 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
-use std::sync::Arc;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::sync::{Arc, Mutex};
 
 use tokio::sync::mpsc;
 
@@ -11,6 +11,12 @@ pub enum Gate {
     Held,
     Playing,
     Dropped,
+}
+
+struct Job {
+    reply: u64,
+    idx: u32,
+    text: String,
 }
 
 struct Synthesized {
@@ -33,23 +39,56 @@ impl Default for Reply {
 }
 
 pub struct SpeechQueue {
-    tts: Arc<dyn TextToSpeech>,
-    voice: String,
+    jobs: std::sync::mpsc::Sender<Job>,
+    dropped: Arc<Mutex<HashSet<u64>>>,
+    to_remove: Vec<u64>,
     replies: HashMap<u64, Reply>,
     play_order: VecDeque<u64>,
     playing: Vec<u64>,
-    tx: mpsc::UnboundedSender<Synthesized>,
     rx: mpsc::UnboundedReceiver<Synthesized>,
     outstanding: usize,
 }
 
 impl SpeechQueue {
+    /// Starts one synthesis thread that works through clauses in the order they arrive.
     pub fn new(tts: Arc<dyn TextToSpeech>, voice: String) -> Self {
+        let (jobs, queued) = std::sync::mpsc::channel::<Job>();
         let (tx, rx) = mpsc::unbounded_channel();
-        Self { tts, voice, replies: HashMap::new(), play_order: VecDeque::new(), playing: Vec::new(), tx, rx, outstanding: 0 }
+        let dropped = Arc::new(Mutex::new(HashSet::new()));
+        let skip = dropped.clone();
+        std::thread::Builder::new()
+            .name("note-voice-tts".into())
+            .spawn(move || {
+                for Job { reply, idx, text } in queued {
+                    let clip = if skip.lock().expect("dropped lock").contains(&reply) {
+                        None
+                    } else {
+                        match tts.synthesize(&text, &voice) {
+                            Ok(pcm) => Some(Clip { reply: Some(reply), chars: text.chars().count() as u32, pcm }),
+                            Err(e) => {
+                                eprintln!("voice: synthesizing clause {idx} of reply {reply} failed: {e:#}");
+                                None
+                            }
+                        }
+                    };
+                    if tx.send(Synthesized { reply, idx, clip }).is_err() {
+                        break;
+                    }
+                }
+            })
+            .expect("spawning the TTS thread");
+        Self {
+            jobs,
+            dropped,
+            to_remove: Vec::new(),
+            replies: HashMap::new(),
+            play_order: VecDeque::new(),
+            playing: Vec::new(),
+            rx,
+            outstanding: 0,
+        }
     }
 
-    /// Starts synthesizing the clause on a blocking thread; must be called inside a Tokio runtime.
     pub fn speak(&mut self, reply: u64, idx: u32, text: String) {
         let state = self.replies.entry(reply).or_default();
         if state.gate == Gate::Dropped {
@@ -57,17 +96,7 @@ impl SpeechQueue {
         }
         state.unplayed.insert(idx);
         self.outstanding += 1;
-        let (tts, voice, tx) = (self.tts.clone(), self.voice.clone(), self.tx.clone());
-        tokio::task::spawn_blocking(move || {
-            let clip = match tts.synthesize(&text, &voice) {
-                Ok(pcm) => Some(Clip { reply: Some(reply), chars: text.chars().count() as u32, pcm }),
-                Err(e) => {
-                    eprintln!("voice: synthesizing clause {idx} of reply {reply} failed: {e:#}");
-                    None
-                }
-            };
-            let _ = tx.send(Synthesized { reply, idx, clip });
-        });
+        self.jobs.send(Job { reply, idx, text }).expect("the TTS thread outlives the queue");
     }
 
     pub fn speak_done(&mut self, reply: u64) {
@@ -83,7 +112,12 @@ impl SpeechQueue {
         }
     }
 
+    /// A reply already in the playout leaves it on the next `pump`.
     pub fn drop_reply(&mut self, reply: u64) {
+        self.dropped.lock().expect("dropped lock").insert(reply);
+        if self.playing.contains(&reply) {
+            self.to_remove.push(reply);
+        }
         let state = self.replies.entry(reply).or_default();
         state.gate = Gate::Dropped;
         state.unplayed.clear();
@@ -95,6 +129,9 @@ impl SpeechQueue {
     /// Moves synthesized clauses of playing replies, in idx order, into the playout.
     pub fn pump(&mut self, playout: &mut Playout) {
         self.receive();
+        for reply in self.to_remove.drain(..) {
+            playout.remove(reply);
+        }
         while let Some(&reply) = self.play_order.front() {
             let state = self.replies.get_mut(&reply).expect("a playing reply has state");
             while let Some(&idx) = state.unplayed.first() {
@@ -130,9 +167,15 @@ impl SpeechQueue {
         finished
     }
 
-    /// Flushes the playout and drops every reply that was playing, with the characters heard of each.
+    /// Flushes the playout and drops every reply still playing, with the characters heard of each.
+    /// A reply already fully played is left for `take_finished`.
     pub fn flush(&mut self, playout: &mut Playout) -> Vec<(u64, u32)> {
-        let between_clips: Vec<(u64, u32)> = self.playing.iter().map(|&r| (r, playout.heard(r))).collect();
+        let between_clips: Vec<(u64, u32)> = self
+            .playing
+            .iter()
+            .filter(|&&r| !self.is_done(r, playout))
+            .map(|&r| (r, playout.heard(r)))
+            .collect();
         let cut = playout.flush();
         let heard: Vec<(u64, u32)> = between_clips
             .into_iter()
@@ -218,8 +261,8 @@ mod tests {
     async fn clauses_play_in_idx_order_even_when_synthesized_out_of_order() {
         let mut q = SpeechQueue::new(Arc::new(FakeTts), String::new());
         let mut p = Playout::default();
-        q.speak(5, 0, "slow start".into());
         q.speak(5, 1, "ok".into());
+        q.speak(5, 0, "slow start".into());
         q.speak_done(5);
         q.play(5);
         while q.outstanding > 1 {
@@ -322,5 +365,73 @@ mod tests {
         assert_eq!(q.flush(&mut p), vec![(1, 2)]);
         assert_eq!(q.gate(2), Gate::Held);
         assert!(p.next_frame().is_none());
+    }
+
+    #[tokio::test]
+    async fn dropping_a_playing_reply_stops_its_audio() {
+        let mut q = SpeechQueue::new(Arc::new(FakeTts), String::new());
+        let mut p = Playout::default();
+        q.speak(4, 0, "abcdef".into());
+        q.speak_done(4);
+        q.play(4);
+        settle(&mut q).await;
+        q.pump(&mut p);
+        p.next_frame().unwrap();
+        q.drop_reply(4);
+        q.pump(&mut p);
+        assert!(p.next_frame().is_none());
+        assert!(q.take_finished(&mut p).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_flush_after_a_reply_played_out_reports_it_played_not_cut() {
+        let mut q = SpeechQueue::new(Arc::new(FakeTts), String::new());
+        let mut p = Playout::default();
+        q.speak(8, 0, "ab".into());
+        q.speak_done(8);
+        q.play(8);
+        settle(&mut q).await;
+        q.pump(&mut p);
+        drain(&mut p);
+        assert!(q.flush(&mut p).is_empty());
+        assert_eq!(q.take_finished(&mut p), vec![8]);
+    }
+
+    #[tokio::test]
+    async fn one_clause_synthesizes_at_a_time() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        #[derive(Default)]
+        struct Exclusive {
+            busy: AtomicBool,
+            overlapped: AtomicBool,
+        }
+        impl TextToSpeech for Exclusive {
+            fn synthesize(&self, _text: &str, _voice: &str) -> anyhow::Result<Vec<i16>> {
+                if self.busy.swap(true, Ordering::SeqCst) {
+                    self.overlapped.store(true, Ordering::SeqCst);
+                }
+                std::thread::sleep(Duration::from_millis(5));
+                self.busy.store(false, Ordering::SeqCst);
+                Ok(vec![1; FRAME])
+            }
+            fn voices(&self) -> Vec<VoiceInfo> {
+                Vec::new()
+            }
+        }
+        let tts = Arc::new(Exclusive::default());
+        let mut q = SpeechQueue::new(tts.clone(), String::new());
+        let mut p = Playout::default();
+        for idx in 0..4 {
+            q.speak(1, idx, "x".into());
+            q.speak(2, idx, "y".into());
+        }
+        q.speak_done(1);
+        q.speak_done(2);
+        q.play(1);
+        q.play(2);
+        settle(&mut q).await;
+        q.pump(&mut p);
+        assert_eq!(drain(&mut p).len(), 8);
+        assert!(!tts.overlapped.load(Ordering::SeqCst), "two syntheses overlapped");
     }
 }

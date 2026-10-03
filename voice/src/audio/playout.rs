@@ -19,23 +19,39 @@ pub struct Playout {
 }
 
 impl Playout {
+    /// A clip with no audio is not queued; its chars count as heard once the reply's earlier clips play.
     pub fn push(&mut self, clip: Clip) {
-        self.queue.push_back(clip);
+        if clip.pcm.is_empty() {
+            self.absorb_silent(&clip);
+        } else {
+            self.queue.push_back(clip);
+        }
     }
 
     /// Pushes ahead of everything not yet started (the heard cue goes before the reply).
     pub fn push_front(&mut self, clip: Clip) {
+        if clip.pcm.is_empty() {
+            self.absorb_silent(&clip);
+            return;
+        }
         let at = usize::from(self.cursor > 0).min(self.queue.len());
         self.queue.insert(at, clip);
+    }
+
+    /// Drops every queued clip of `reply`, including the one playing.
+    pub fn remove(&mut self, reply: u64) {
+        if self.queue.front().is_some_and(|c| c.reply == Some(reply)) {
+            self.cursor = 0;
+        }
+        self.queue.retain(|c| c.reply != Some(reply));
+        self.heard.remove(&reply);
+        self.finished.retain(|&r| r != reply);
     }
 
     /// The next 10 ms frame, or None when paused or empty. Pads the last frame of a clip with silence.
     pub fn next_frame(&mut self) -> Option<[i16; FRAME]> {
         if self.paused {
             return None;
-        }
-        while self.queue.front().is_some_and(|c| c.pcm.is_empty()) {
-            self.finish_front();
         }
         let clip = self.queue.front()?;
         let end = (self.cursor + FRAME).min(clip.pcm.len());
@@ -65,7 +81,7 @@ impl Playout {
                 continue;
             }
             let mut heard = self.heard.get(&reply).copied().unwrap_or(0);
-            if i == 0 {
+            if i == 0 && !clip.pcm.is_empty() {
                 heard += (u64::from(clip.chars) * self.cursor as u64 / clip.pcm.len() as u64) as u32;
             }
             cut.push((reply, heard));
@@ -93,6 +109,14 @@ impl Playout {
 
     pub fn holds(&self, reply: u64) -> bool {
         self.queue.iter().any(|c| c.reply == Some(reply))
+    }
+
+    fn absorb_silent(&mut self, clip: &Clip) {
+        let Some(reply) = clip.reply else { return };
+        match self.queue.iter_mut().rev().find(|c| c.reply == Some(reply)) {
+            Some(last) => last.chars += clip.chars,
+            None => *self.heard.entry(reply).or_default() += clip.chars,
+        }
     }
 
     fn finish_front(&mut self) {
@@ -142,5 +166,28 @@ mod tests {
         assert_eq!(p.next_frame().unwrap()[0], 9);
         assert_eq!(p.next_frame().unwrap()[0], 7);
         assert_eq!(p.take_finished(), vec![2]);
+    }
+
+    #[test]
+    fn a_silent_clip_is_skipped_but_its_chars_count_as_heard() {
+        let mut p = Playout::default();
+        p.push(Clip { reply: Some(6), chars: 1, pcm: Vec::new() });
+        assert!(!p.holds(6));
+        p.push(Clip { reply: Some(6), chars: 4, pcm: vec![1; FRAME * 2] });
+        p.push(Clip { reply: Some(6), chars: 2, pcm: Vec::new() });
+        p.push_front(Clip { reply: None, chars: 0, pcm: Vec::new() });
+        p.next_frame().unwrap();
+        assert_eq!(p.flush(), vec![(6, 1 + 3)]);
+    }
+
+    #[test]
+    fn removing_a_reply_stops_it_mid_clip() {
+        let mut p = Playout::default();
+        p.push(Clip { reply: Some(1), chars: 2, pcm: vec![1; FRAME * 2] });
+        p.push(Clip { reply: Some(2), chars: 1, pcm: vec![2; FRAME] });
+        p.next_frame().unwrap();
+        p.remove(1);
+        assert_eq!(p.next_frame().unwrap()[0], 2);
+        assert!(p.next_frame().is_none());
     }
 }
