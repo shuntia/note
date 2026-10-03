@@ -37,6 +37,7 @@ pub struct SpeechQueue {
     voice: String,
     replies: HashMap<u64, Reply>,
     play_order: VecDeque<u64>,
+    playing: Vec<u64>,
     tx: mpsc::UnboundedSender<Synthesized>,
     rx: mpsc::UnboundedReceiver<Synthesized>,
     outstanding: usize,
@@ -45,7 +46,7 @@ pub struct SpeechQueue {
 impl SpeechQueue {
     pub fn new(tts: Arc<dyn TextToSpeech>, voice: String) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
-        Self { tts, voice, replies: HashMap::new(), play_order: VecDeque::new(), tx, rx, outstanding: 0 }
+        Self { tts, voice, replies: HashMap::new(), play_order: VecDeque::new(), playing: Vec::new(), tx, rx, outstanding: 0 }
     }
 
     /// Starts synthesizing the clause on a blocking thread; must be called inside a Tokio runtime.
@@ -78,6 +79,7 @@ impl SpeechQueue {
         if state.gate == Gate::Held {
             state.gate = Gate::Playing;
             self.play_order.push_back(reply);
+            self.playing.push(reply);
         }
     }
 
@@ -87,6 +89,7 @@ impl SpeechQueue {
         state.unplayed.clear();
         state.ready.clear();
         self.play_order.retain(|&r| r != reply);
+        self.playing.retain(|&r| r != reply);
     }
 
     /// Moves synthesized clauses of playing replies, in idx order, into the playout.
@@ -117,6 +120,28 @@ impl SpeechQueue {
         self.replies.get(&reply).is_some_and(|s| {
             s.gate == Gate::Playing && s.done && s.unplayed.is_empty() && !playout.holds(reply)
         })
+    }
+
+    /// Replies told to play whose every clause has been synthesized and played out, each reported once.
+    pub fn take_finished(&mut self, playout: &mut Playout) -> Vec<u64> {
+        playout.take_finished();
+        let (finished, playing) = self.playing.iter().partition(|&&r| self.is_done(r, playout));
+        self.playing = playing;
+        finished
+    }
+
+    /// Flushes the playout and drops every reply that was playing, with the characters heard of each.
+    pub fn flush(&mut self, playout: &mut Playout) -> Vec<(u64, u32)> {
+        let between_clips: Vec<(u64, u32)> = self.playing.iter().map(|&r| (r, playout.heard(r))).collect();
+        let cut = playout.flush();
+        let heard: Vec<(u64, u32)> = between_clips
+            .into_iter()
+            .map(|(r, h)| cut.iter().find(|&&(c, _)| c == r).copied().unwrap_or((r, h)))
+            .collect();
+        for &(reply, _) in &heard {
+            self.drop_reply(reply);
+        }
+        heard
     }
 
     fn receive(&mut self) {
@@ -234,5 +259,68 @@ mod tests {
         q.pump(&mut p);
         assert_eq!(drain(&mut p), vec![4, 4, 4, 4]);
         assert!(q.is_done(1, &p));
+    }
+
+    async fn until_outstanding(q: &mut SpeechQueue, n: usize) {
+        while q.outstanding > n {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+            q.receive();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_synthesis_gap_mid_reply_is_not_reported_played() {
+        let mut q = SpeechQueue::new(Arc::new(FakeTts), String::new());
+        let mut p = Playout::default();
+        q.speak(3, 0, "abc".into());
+        q.speak(3, 1, "slow tail".into());
+        q.speak_done(3);
+        q.play(3);
+        until_outstanding(&mut q, 1).await;
+        q.pump(&mut p);
+        assert_eq!(drain(&mut p), vec![3, 3, 3]);
+        assert!(q.take_finished(&mut p).is_empty(), "clause 1 is still synthesizing");
+        settle(&mut q).await;
+        q.pump(&mut p);
+        assert_eq!(drain(&mut p), vec![9; 9]);
+        assert_eq!(q.take_finished(&mut p), vec![3]);
+        assert!(q.take_finished(&mut p).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_flush_in_a_synthesis_gap_cuts_the_reply_with_what_was_heard() {
+        let mut q = SpeechQueue::new(Arc::new(FakeTts), String::new());
+        let mut p = Playout::default();
+        q.speak(3, 0, "abc".into());
+        q.speak(3, 1, "slow tail".into());
+        q.speak_done(3);
+        q.play(3);
+        until_outstanding(&mut q, 1).await;
+        q.pump(&mut p);
+        assert_eq!(drain(&mut p), vec![3, 3, 3]);
+        assert_eq!(q.flush(&mut p), vec![(3, 3)]);
+        assert_eq!(q.gate(3), Gate::Dropped);
+        q.speak(3, 2, "more".into());
+        settle(&mut q).await;
+        q.pump(&mut p);
+        assert!(p.next_frame().is_none());
+        assert!(q.take_finished(&mut p).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_flush_mid_clip_reports_the_partial_and_spares_held_replies() {
+        let mut q = SpeechQueue::new(Arc::new(FakeTts), String::new());
+        let mut p = Playout::default();
+        q.speak(1, 0, "abcd".into());
+        q.speak(2, 0, "held".into());
+        q.speak_done(1);
+        q.play(1);
+        settle(&mut q).await;
+        q.pump(&mut p);
+        p.next_frame().unwrap();
+        p.next_frame().unwrap();
+        assert_eq!(q.flush(&mut p), vec![(1, 2)]);
+        assert_eq!(q.gate(2), Gate::Held);
+        assert!(p.next_frame().is_none());
     }
 }

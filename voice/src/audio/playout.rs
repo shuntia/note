@@ -86,6 +86,11 @@ impl Playout {
         std::mem::take(&mut self.finished)
     }
 
+    /// Characters of `reply`'s finished clips since the last flush.
+    pub fn heard(&self, reply: u64) -> u32 {
+        self.heard.get(&reply).copied().unwrap_or(0)
+    }
+
     pub fn holds(&self, reply: u64) -> bool {
         self.queue.iter().any(|c| c.reply == Some(reply))
     }
