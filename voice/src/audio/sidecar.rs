@@ -172,6 +172,7 @@ impl SpeechBackend for Sidecar {
             out,
             events,
             chunker: (self.input == TextInput::Chunks).then(Chunker::default),
+            in_flight: None,
             last_push: Instant::now(),
             marks: Marks::default(),
             pcm: Vec::new(),
@@ -180,6 +181,8 @@ impl SpeechBackend for Sidecar {
             end_sent: false,
             ended: false,
             cancelled: false,
+            heard_any: false,
+            owed_since: Instant::now(),
         }))
     }
 }
@@ -247,11 +250,12 @@ async fn talk(
                     let _ = sink.close().await;
                     return Ok(());
                 };
-                sink.send(Message::text(msg.json())).await?;
                 if matches!(msg, Msg::Cancel) {
+                    let _ = sink.send(Message::text(msg.json())).await;
                     let _ = sink.close().await;
                     return Ok(());
                 }
+                sink.send(Message::text(msg.json())).await?;
             }
             got = source.next() => match got {
                 Some(Ok(Message::Binary(pcm))) => {
@@ -329,14 +333,20 @@ impl Marks {
     }
 }
 
+/// The longest a sidecar may keep silent while it owes audio: before its first, and between later events.
+const FIRST_AUDIO: Duration = Duration::from_secs(3);
+const STALLED: Duration = Duration::from_secs(3);
+
 struct SidecarStream {
     out: mpsc::UnboundedSender<Msg>,
     events: std::sync::mpsc::Receiver<Event>,
     /// Set for a sidecar that takes whole chunks.
     chunker: Option<Chunker>,
+    /// The pushed characters of the chunk sent and not yet marked.
+    in_flight: Option<u32>,
     last_push: Instant,
     marks: Marks,
-    /// s16le received since the last mark.
+    /// s16le received and not yet passed on.
     pcm: Vec<u8>,
     rate: u32,
     /// The text sent so far ends in whitespace, or none was sent.
@@ -344,11 +354,26 @@ struct SidecarStream {
     end_sent: bool,
     ended: bool,
     cancelled: bool,
+    heard_any: bool,
+    /// Since when the sidecar has owed audio without sending anything.
+    owed_since: Instant,
 }
 
 impl SidecarStream {
     fn send(&self, msg: Msg) -> anyhow::Result<()> {
         self.out.send(msg).map_err(|_| anyhow!("the sidecar stream has stopped"))
+    }
+
+    /// The sidecar has text, or an end, it has not answered yet.
+    fn owes(&self) -> bool {
+        !self.marks.is_empty() || self.in_flight.is_some() || self.end_sent
+    }
+
+    fn send_owed(&mut self, msg: Msg) -> anyhow::Result<()> {
+        if !self.owes() {
+            self.owed_since = Instant::now();
+        }
+        self.send(msg)
     }
 
     fn take(&mut self, chars: u32) -> Audio {
@@ -357,24 +382,33 @@ impl SidecarStream {
         Audio { pcm: resample(&samples, self.rate), chars }
     }
 
-    /// For a chunks sidecar, sends the next chunk once the last one's audio is all in.
+    /// For a chunks sidecar, sends the next chunk once the last one is marked.
     fn feed(&mut self, ahead: Duration) -> anyhow::Result<Option<Audio>> {
         let Some(chunker) = self.chunker.as_mut() else { return Ok(None) };
-        let chunk = if self.marks.is_empty() { chunker.next(ahead, self.last_push.elapsed()) } else { None };
+        let chunk = if self.in_flight.is_none() { chunker.next(ahead, self.last_push.elapsed()) } else { None };
         let done = chunker.done();
         if let Some(chunk) = chunk {
             let text = chunk.text.trim();
             if text.is_empty() {
                 return Ok(Some(Audio { pcm: Vec::new(), chars: chunk.chars }));
             }
-            self.marks.sent(text.chars().count() as u32, chunk.chars);
-            self.send(Msg::Text(text.to_owned()))?;
+            let msg = Msg::Text(text.to_owned());
+            self.send_owed(msg)?;
+            self.in_flight = Some(chunk.chars);
         }
-        if done && !self.end_sent {
+        if done && self.in_flight.is_none() && !self.end_sent {
+            self.send_owed(Msg::End)?;
             self.end_sent = true;
-            self.send(Msg::End)?;
         }
         Ok(None)
+    }
+
+    fn check_silence(&self) -> anyhow::Result<()> {
+        let limit = if self.heard_any { STALLED } else { FIRST_AUDIO };
+        if self.owes() && self.owed_since.elapsed() > limit {
+            anyhow::bail!("the sidecar sent nothing for {limit:?}");
+        }
+        Ok(())
     }
 }
 
@@ -390,8 +424,10 @@ impl SpeechStream for SidecarStream {
         }
         let sent = if self.spaced || text.starts_with(char::is_whitespace) { text.to_owned() } else { format!(" {text}") };
         self.spaced = text.ends_with(char::is_whitespace);
-        self.marks.sent(sent.chars().count() as u32, text.chars().count() as u32);
-        self.send(Msg::Text(sent))
+        let msg_len = sent.chars().count() as u32;
+        self.send_owed(Msg::Text(sent))?;
+        self.marks.sent(msg_len, text.chars().count() as u32);
+        Ok(())
     }
 
     fn finish(&mut self) -> anyhow::Result<()> {
@@ -402,10 +438,13 @@ impl SpeechStream for SidecarStream {
         if self.end_sent {
             return Ok(());
         }
+        self.send_owed(Msg::End)?;
         self.end_sent = true;
-        self.send(Msg::End)
+        Ok(())
     }
 
+    /// Audio is passed on as it comes, its characters once the sidecar marks them. A sidecar that owes
+    /// audio and stays silent past its deadline fails the stream.
     fn next(&mut self, ahead: Duration) -> anyhow::Result<Next> {
         if self.cancelled || self.ended {
             return Ok(Next::Done);
@@ -414,17 +453,22 @@ impl SpeechStream for SidecarStream {
             return Ok(Next::Audio(silent));
         }
         loop {
-            match self.events.try_recv() {
+            let event = self.events.try_recv();
+            if event.is_ok() {
+                self.heard_any = true;
+                self.owed_since = Instant::now();
+            }
+            match event {
                 Ok(Event::Pcm(bytes)) => self.pcm.extend(bytes),
                 Ok(Event::Mark(n)) => {
-                    let chars = self.marks.mark(n);
+                    let chars = if self.chunker.is_some() { self.in_flight.take().unwrap_or(0) } else { self.marks.mark(n) };
                     if self.pcm.len() >= 2 || chars > 0 {
                         return Ok(Next::Audio(self.take(chars)));
                     }
                 }
                 Ok(Event::Done) => {
                     self.ended = true;
-                    let chars = self.marks.rest();
+                    let chars = self.in_flight.take().unwrap_or(0) + self.marks.rest();
                     if self.pcm.len() >= 2 || chars > 0 {
                         return Ok(Next::Audio(self.take(chars)));
                     }
@@ -434,7 +478,11 @@ impl SpeechStream for SidecarStream {
                     self.ended = true;
                     anyhow::bail!(message);
                 }
-                Err(TryRecvError::Empty) => return Ok(Next::Pending),
+                Err(TryRecvError::Empty) if self.pcm.len() >= 2 => return Ok(Next::Audio(self.take(0))),
+                Err(TryRecvError::Empty) => {
+                    self.check_silence()?;
+                    return Ok(Next::Pending);
+                }
                 Err(TryRecvError::Disconnected) => {
                     self.ended = true;
                     anyhow::bail!("the sidecar stream stopped");
@@ -453,7 +501,7 @@ impl SpeechStream for SidecarStream {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
     use axum::extract::State;
@@ -466,10 +514,16 @@ mod tests {
     use super::*;
 
     /// A sidecar at 24 kHz that speaks each text as one sample per character, valued 100 × its length,
-    /// in two binary frames; a text of "fail." errors.
+    /// in two binary frames, then marks it; a text of "fail." errors. `mute` answers nothing,
+    /// `undercount` marks one character short, `render_ms` delays each text's audio and `mark_after_ms`
+    /// its mark.
     struct Fake {
         input: &'static str,
         up: AtomicBool,
+        mute: AtomicBool,
+        undercount: AtomicBool,
+        mark_after_ms: AtomicU64,
+        render_ms: AtomicU64,
         seen: Mutex<Vec<serde_json::Value>>,
     }
 
@@ -500,6 +554,9 @@ mod tests {
             let v: serde_json::Value = serde_json::from_str(&text).unwrap();
             fake.seen.lock().unwrap().push(v.clone());
             let reply = |v: serde_json::Value| WsMessage::Text(v.to_string().into());
+            if fake.mute.load(Ordering::SeqCst) {
+                continue;
+            }
             match v["type"].as_str().unwrap() {
                 "text" => {
                     let text = v["text"].as_str().unwrap();
@@ -509,15 +566,17 @@ mod tests {
                     }
                     let n = text.chars().count();
                     let pcm: Vec<u8> = (0..n).flat_map(|_| (n as i16 * 100).to_le_bytes()).collect();
+                    tokio::time::sleep(Duration::from_millis(fake.render_ms.load(Ordering::SeqCst))).await;
                     let (a, b) = pcm.split_at(pcm.len() / 2 + 1);
-                    for msg in [
-                        WsMessage::Binary(a.to_vec().into()),
-                        WsMessage::Binary(b.to_vec().into()),
-                        reply(serde_json::json!({ "type": "mark", "chars": n })),
-                    ] {
+                    for msg in [WsMessage::Binary(a.to_vec().into()), WsMessage::Binary(b.to_vec().into())] {
                         if socket.send(msg).await.is_err() {
                             return;
                         }
+                    }
+                    tokio::time::sleep(Duration::from_millis(fake.mark_after_ms.load(Ordering::SeqCst))).await;
+                    let marked = n - usize::from(fake.undercount.load(Ordering::SeqCst));
+                    if socket.send(reply(serde_json::json!({ "type": "mark", "chars": marked }))).await.is_err() {
+                        return;
                     }
                 }
                 "end" => {
@@ -531,7 +590,15 @@ mod tests {
     }
 
     async fn fake(input: &'static str) -> (Arc<Fake>, SidecarConfig) {
-        let fake = Arc::new(Fake { input, up: AtomicBool::new(true), seen: Mutex::default() });
+        let fake = Arc::new(Fake {
+            input,
+            up: AtomicBool::new(true),
+            mute: AtomicBool::new(false),
+            undercount: AtomicBool::new(false),
+            mark_after_ms: AtomicU64::new(0),
+            render_ms: AtomicU64::new(0),
+            seen: Mutex::default(),
+        });
         let app = axum::Router::new().route("/info", get(info)).route("/stream", get(stream)).with_state(fake.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/", listener.local_addr().unwrap());
@@ -557,6 +624,14 @@ mod tests {
         panic!("the stream never ended: {}", pieces.len());
     }
 
+    fn marked(pieces: &[Audio]) -> Vec<u32> {
+        pieces.iter().map(|a| a.chars).filter(|&c| c > 0).collect()
+    }
+
+    fn pcm(pieces: &[Audio]) -> Vec<i16> {
+        pieces.iter().flat_map(|a| a.pcm.iter().copied()).collect()
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn marks_map_to_the_pushed_chars_and_audio_resamples_to_48k() {
         let (fake, config) = fake("incremental").await;
@@ -565,9 +640,10 @@ mod tests {
         stream.push("Bye.").unwrap();
         stream.finish().unwrap();
         let pieces = all(&mut *stream).await;
-        assert_eq!(pieces.iter().map(|a| a.chars).collect::<Vec<_>>(), [12, 4]);
-        assert_eq!(pieces[0].pcm, vec![1200; 24]);
-        assert_eq!(pieces[1].pcm, vec![500; 10], "the joining space is spoken but not counted");
+        assert_eq!(marked(&pieces), [12, 4], "the joining space is spoken but not counted");
+        let mut expected = vec![1200; 24];
+        expected.extend([500; 10]);
+        assert_eq!(pcm(&pieces), expected);
         assert_eq!(fake.seen("open")[0]["voice"], "alba");
         assert_eq!(fake.seen("text")[1]["text"], " Bye.");
     }
@@ -575,15 +651,78 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_chunks_sidecar_is_sent_whole_chunks_one_at_a_time() {
         let (fake, config) = fake("chunks").await;
+        fake.undercount.store(true, Ordering::SeqCst);
         let mut stream = live(config).await.open("").unwrap();
         stream.push("Sure, I can do that.").unwrap();
         stream.push("It is on Friday.").unwrap();
         stream.finish().unwrap();
         let pieces = all(&mut *stream).await;
-        assert_eq!(pieces.iter().map(|a| a.chars).collect::<Vec<_>>(), [20, 16]);
+        assert_eq!(marked(&pieces), [20, 16], "each mark completes its chunk, whatever it counts");
         let texts: Vec<_> = fake.seen("text").iter().map(|v| v["text"].as_str().unwrap().to_owned()).collect();
         assert_eq!(texts, ["Sure, I can do that.", "It is on Friday."]);
         assert_eq!(fake.seen("end").len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_chunks_sidecar_two_seconds_per_chunk_is_waited_for() {
+        let (fake, config) = fake("chunks").await;
+        fake.render_ms.store(2000, Ordering::SeqCst);
+        let mut stream = live(config).await.open("").unwrap();
+        stream.push("Sure, I can do that.").unwrap();
+        stream.push("It is on Friday.").unwrap();
+        stream.finish().unwrap();
+        let mut pieces = Vec::new();
+        for _ in 0..10_000 {
+            match stream.next(Duration::ZERO).expect("a slow sidecar is not a failed one") {
+                Next::Audio(audio) => pieces.push(audio),
+                Next::Done => break,
+                Next::Pending => tokio::time::sleep(Duration::from_millis(1)).await,
+            }
+        }
+        assert_eq!(marked(&pieces), [20, 16]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn audio_is_passed_on_before_its_mark() {
+        let (fake, config) = fake("incremental").await;
+        fake.mark_after_ms.store(300, Ordering::SeqCst);
+        let mut stream = live(config).await.open("alba").unwrap();
+        stream.push("Hello there.").unwrap();
+        stream.finish().unwrap();
+        let first = loop {
+            match stream.next(Duration::ZERO).unwrap() {
+                Next::Audio(audio) => break audio,
+                _ => tokio::time::sleep(Duration::from_millis(1)).await,
+            }
+        };
+        assert!(!first.pcm.is_empty() && first.chars == 0, "{first:?}");
+        let rest = all(&mut *stream).await;
+        assert_eq!(marked(&rest), [12]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_sidecar_that_connects_then_hangs_hands_the_reply_to_kokoro() {
+        let (fake, config) = fake("incremental").await;
+        fake.mute.store(true, Ordering::SeqCst);
+        let recorder = Arc::new(Recorder::default());
+        let kokoro: Arc<dyn SpeechBackend> = Arc::new(ChunkedBackend::new("kokoro", "Kokoro", recorder.clone(), Vec::new()));
+        let mut q = SpeechQueue::new(Speaker::new(live(config).await, "alba"), kokoro);
+        let mut p = Playout::default();
+        q.speak(1, 0, "Hello there.".into());
+        q.speak_done(1);
+        q.play(1);
+        let start = Instant::now();
+        while start.elapsed() < FIRST_AUDIO * 2 {
+            q.pump(&mut p);
+            while p.next_frame().is_some() {}
+            if q.take_finished(&mut p) == [1] {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(*recorder.0.lock().unwrap(), ["Hello there."]);
+        assert!(start.elapsed() > FIRST_AUDIO, "{:?}", start.elapsed());
+        assert_eq!(p.heard(1), 12);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -598,6 +737,8 @@ mod tests {
         assert!(matches!(stream.next(Duration::ZERO).unwrap(), Next::Done));
         for _ in 0..1000 {
             if !fake.seen("cancel").is_empty() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                assert!(matches!(stream.next(Duration::ZERO).unwrap(), Next::Done), "the close after a cancel is no error");
                 return;
             }
             tokio::time::sleep(Duration::from_millis(1)).await;
