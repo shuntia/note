@@ -48,10 +48,6 @@ pub fn router(state: AppState) -> Router {
         .route("/api/conversations/{id}/messages", get(conversation_messages))
         .route("/api/settings", get(settings_get).put(settings_put))
         .route("/api/presence", post(presence))
-        .route(
-            "/api/telegram/link",
-            post(telegram_link).delete(telegram_unlink),
-        )
         .route("/api/voice/link", post(voice_link).delete(voice_unlink))
         .route("/api/voice/test", post(voice_test))
         .route("/api/voice/voices", get(voice_voices))
@@ -1411,6 +1407,8 @@ struct SettingsPatch {
     ring_for: Option<String>,
     voice_voice: Option<String>,
     voice_cue: Option<bool>,
+    matrix_send: Option<bool>,
+    matrix_ping: Option<bool>,
     alerts: Option<Vec<AlertPatch>>,
 }
 
@@ -1421,14 +1419,13 @@ const POMODORO_WORK_MIN: std::ops::RangeInclusive<u32> = 5..=120;
 const POMODORO_BREAK_MIN: std::ops::RangeInclusive<u32> = 1..=60;
 const IDLE_NUDGE_MIN: std::ops::RangeInclusive<u32> = 0..=240;
 
-/// `telegram_linked` and `voice_link` are read by the caller, which already
-/// holds the DB guard on the write path.
+/// `voice_link` is read by the caller, which already holds the DB guard on the
+/// write path.
 fn settings_body(
     state: &AppState,
     cfg: &crate::config::UserConfig,
     user: &CurrentUser,
     schedule: &[crate::templates::ScheduleRow],
-    telegram_linked: bool,
     voice_link: Option<crate::voice::links::Link>,
 ) -> serde_json::Value {
     let category = user.category.as_str();
@@ -1446,9 +1443,6 @@ fn settings_body(
         "category": category,
         "nightly_enabled": features.nightly,
         "checkins_enabled": features.checkins,
-        "telegram_enabled": state.telegram.is_some(),
-        "telegram_linked": telegram_linked,
-        "telegram_bot": state.telegram.as_ref().map(|ch| ch.bot()).unwrap_or_default(),
         "triggers_per_day": cfg.triggers_per_day(),
         "pomodoro_enabled": cfg.pomodoro_enabled(),
         "pomodoro_work_min": cfg.pomodoro_work_min(),
@@ -1460,6 +1454,9 @@ fn settings_body(
         "ring_for": cfg.ring_for(),
         "voice_voice": cfg.voice_voice.clone().unwrap_or_default(),
         "voice_cue": cfg.voice_profile().cue,
+        "matrix_enabled": state.matrix.is_some(),
+        "matrix_send": cfg.matrix_send(),
+        "matrix_ping": cfg.matrix_ping(),
         "schedule": schedule,
     })
 }
@@ -1511,14 +1508,11 @@ async fn settings_get(user: CurrentUser, State(state): State<AppState>) -> impl 
     zones.sort_unstable();
     let templates = crate::templates::available(&state.config_dir, &user.username);
     let schedule = schedule_rows(&state, &user.username, &cfg.template);
-    let (linked, voice_link) = {
+    let voice_link = {
         let conn = state.db();
-        (
-            crate::telegram::chat_for_user(&conn, user.id).unwrap_or(None).is_some(),
-            crate::voice::links::get(&conn, user.id).unwrap_or(None),
-        )
+        crate::voice::links::get(&conn, user.id).unwrap_or(None)
     };
-    let mut body = settings_body(&state, &cfg, &user, &schedule, linked, voice_link);
+    let mut body = settings_body(&state, &cfg, &user, &schedule, voice_link);
     body["templates"] = serde_json::json!(templates);
     body["timezones"] = serde_json::json!(zones);
     Json(body).into_response()
@@ -1662,6 +1656,12 @@ async fn settings_put(
     if let Some(cue) = req.voice_cue {
         cfg.voice_cue = Some(cue);
     }
+    if let Some(on) = req.matrix_send {
+        cfg.matrix_send = Some(on);
+    }
+    if let Some(on) = req.matrix_ping {
+        cfg.matrix_ping = Some(on);
+    }
     if let Some(alerts) = req.alerts {
         let changes: Vec<(usize, bool)> = alerts.iter().map(|a| (a.index, a.alert)).collect();
         if let Err(e) =
@@ -1673,43 +1673,9 @@ async fn settings_put(
     let schedule = schedule_rows(&state, &user.username, &cfg.template);
     match cfg.save(&state.config_dir, &user.username) {
         Ok(()) => {
-            let linked = crate::telegram::chat_for_user(&conn, user.id).unwrap_or(None).is_some();
             let voice_link = crate::voice::links::get(&conn, user.id).unwrap_or(None);
-            Json(settings_body(&state, &cfg, &user, &schedule, linked, voice_link)).into_response()
+            Json(settings_body(&state, &cfg, &user, &schedule, voice_link)).into_response()
         }
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    }
-}
-
-/// A fresh code and the deep link that carries it to the bot; issuing one
-/// replaces whatever code the user was last given.
-async fn telegram_link(user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
-    let Some(ch) = state.telegram.clone() else {
-        return (
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({ "error": "telegram is not configured" })),
-        )
-            .into_response();
-    };
-    let conn = state.db();
-    match crate::telegram::issue_code(&conn, user.id, jiff::Timestamp::now()) {
-        Ok(code) => {
-            let bot = ch.bot();
-            Json(serde_json::json!({
-                "code": code,
-                "bot": bot,
-                "url": format!("https://t.me/{bot}?start={code}"),
-            }))
-            .into_response()
-        }
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    }
-}
-
-async fn telegram_unlink(user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
-    let conn = state.db();
-    match crate::telegram::unlink(&conn, user.id) {
-        Ok(_) => StatusCode::NO_CONTENT.into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }

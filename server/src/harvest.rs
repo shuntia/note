@@ -155,8 +155,8 @@ fn thread_kind(conn: &Connection, id: i64, checkin: bool, via: &str) -> &'static
     if worked > 0 {
         return "session";
     }
-    if via == "telegram" {
-        return "telegram";
+    if via == "matrix" {
+        return "matrix";
     }
     "talk"
 }

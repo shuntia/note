@@ -133,9 +133,9 @@ async fn main() -> anyhow::Result<()> {
     if let Some(s) = &cfg.search {
         state = state.with_search(std::sync::Arc::new(search::SearxngSearch::new(s)));
     }
-    if let Some(t) = &cfg.channels.telegram {
-        let ch = channels::telegram::TelegramChannel::new(state.db.clone(), t)?;
-        state = state.with_telegram(ch);
+    if let Some(m) = &cfg.channels.matrix {
+        let ch = channels::matrix::MatrixChannel::new(state.db.clone(), state.config_dir.clone(), m)?;
+        state = state.with_matrix(ch);
     }
     if let Some(v) = &cfg.voice {
         let voice_llm = providers::build_voice(&cfg.providers, v, &state.llm)?;
@@ -159,7 +159,7 @@ async fn main() -> anyhow::Result<()> {
         });
     }
     runner::spawn(state.clone());
-    note_server::telegram::spawn(state.clone());
+    note_server::matrix::spawn(state.clone());
     nightly::spawn(state.clone());
     summaries::spawn(state.clone());
 

@@ -872,11 +872,11 @@ export function Talk({
                 )}
                 <div className="chat-meta">
                   <span className="chat-when">
-                    {c.via === 'telegram' && (
+                    {c.via === 'matrix' && (
                       <svg className="chat-via" viewBox="0 0 24 24" role="img">
-                        <title>Last answered on Telegram</title>
-                        <path d="M21 3L2 11l8 3 3 8z" />
-                        <path d="M21 3l-11 11" />
+                        <title>Last answered on Matrix</title>
+                        <path d="M5 4H3v16h2" />
+                        <path d="M19 4h2v16h-2" />
                       </svg>
                     )}
                     {shortDate(c.updated_at)}

@@ -8,7 +8,7 @@ config/nvidianim.key
 config/vapid.pem
 persist/
 config/openrouter.key
-config/telegram.token
+config/matrix.token
 config/*.key
 config/*.pem
 

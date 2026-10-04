@@ -2663,6 +2663,7 @@ dependencies = [
  "tower",
  "tower-http 0.7.1",
  "ureq 3.4.2",
+ "urlencoding",
  "uuid",
  "web-push",
  "webauthn-authenticator-rs",

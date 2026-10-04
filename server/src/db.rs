@@ -710,6 +710,26 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE voice_calls ADD COLUMN inbound_key TEXT;
     CREATE UNIQUE INDEX idx_voice_calls_inbound ON voice_calls(inbound_key) WHERE inbound_key IS NOT NULL;
     ",
+    // v49
+    "
+    DROP TABLE telegram_links;
+    DROP TABLE telegram_link_codes;
+    DROP TABLE telegram_cursor;
+    DROP INDEX idx_conversations_telegram;
+    ALTER TABLE conversations DROP COLUMN telegram_at;
+    ALTER TABLE conversations ADD COLUMN via_next TEXT NOT NULL DEFAULT 'web'
+        CHECK (via_next IN ('web','matrix','voice'));
+    UPDATE conversations SET via_next = CASE via WHEN 'telegram' THEN 'web' ELSE via END;
+    ALTER TABLE conversations DROP COLUMN via;
+    ALTER TABLE conversations RENAME COLUMN via_next TO via;
+    ALTER TABLE conversations ADD COLUMN matrix_at TEXT;
+    CREATE INDEX idx_conversations_matrix ON conversations(user_id, matrix_at DESC);
+    ALTER TABLE voice_links RENAME TO matrix_links;
+    CREATE TABLE matrix_cursor (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        next_batch TEXT NOT NULL
+    );
+    ",
 ];
 
 pub fn server_setting(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
@@ -1742,59 +1762,6 @@ mod tests {
     }
 
     #[test]
-    fn v26_opens_the_telegram_tables_and_stamps_conversations() {
-        let conn = open_memory().unwrap();
-        let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(v, MIGRATIONS.len() as i64);
-        conn.execute(
-            "INSERT INTO users (username, pass_hash, role)
-             VALUES ('a','h','member'), ('b','h','member')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO telegram_links (user_id, chat_id, handle, linked_at)
-             VALUES (1, 42, 'aki', 'now')",
-            [],
-        )
-        .unwrap();
-        assert!(
-            conn.execute(
-                "INSERT INTO telegram_links (user_id, chat_id, handle, linked_at)
-                 VALUES (2, 42, 'bo', 'now')",
-                [],
-            )
-            .is_err(),
-            "one chat belongs to one account"
-        );
-        conn.execute("INSERT INTO telegram_cursor (id, last_update_id) VALUES (1, 7)", [])
-            .unwrap();
-        assert!(
-            conn.execute("INSERT INTO telegram_cursor (id, last_update_id) VALUES (2, 9)", [])
-                .is_err(),
-            "the cursor is a single row"
-        );
-        conn.execute(
-            "INSERT INTO conversations (user_id, title, created_at, updated_at)
-             VALUES (1, 'chat', 'now', 'now')",
-            [],
-        )
-        .unwrap();
-        let (via, at): (String, Option<String>) = conn
-            .query_row("SELECT via, telegram_at FROM conversations WHERE id = 1", [], |r| {
-                Ok((r.get(0)?, r.get(1)?))
-            })
-            .unwrap();
-        assert_eq!(via, "web");
-        assert!(at.is_none());
-        conn.execute("UPDATE conversations SET via = 'voice' WHERE id = 1", []).unwrap();
-        assert!(
-            conn.execute("UPDATE conversations SET via = 'sms' WHERE id = 1", []).is_err(),
-            "via is a closed set"
-        );
-    }
-
-    #[test]
     fn v11_creates_api_tokens_with_a_unique_hash() {
         let conn = open_memory().unwrap();
         conn.execute(
@@ -1853,13 +1820,13 @@ mod tests {
         conn.execute("INSERT INTO users (username, pass_hash, role) VALUES ('a','h','member')", [])
             .unwrap();
         conn.execute(
-            "INSERT INTO voice_links (user_id, mxid, state, created_at) VALUES (1, '@a:t', 'invited', 'x')",
+            "INSERT INTO matrix_links (user_id, mxid, state, created_at) VALUES (1, '@a:t', 'invited', 'x')",
             [],
         )
         .unwrap();
         assert!(
             conn.execute(
-                "INSERT INTO voice_links (user_id, mxid, state, created_at) VALUES (1, '@b:t', 'invited', 'x')",
+                "INSERT INTO matrix_links (user_id, mxid, state, created_at) VALUES (1, '@b:t', 'invited', 'x')",
                 [],
             )
             .is_err(),
@@ -1885,13 +1852,13 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM voice_frames", [], |r| r.get(0))
             .unwrap();
         assert_eq!(left, 0, "frames go with their call");
-        conn.execute("DELETE FROM voice_links", []).unwrap();
+        conn.execute("DELETE FROM matrix_links", []).unwrap();
         conn.execute(
-            "INSERT INTO voice_links (user_id, mxid, state, created_at) VALUES (1, '@a:t', 'invited', 'x')",
+            "INSERT INTO matrix_links (user_id, mxid, state, created_at) VALUES (1, '@a:t', 'invited', 'x')",
             [],
         )
         .unwrap();
-        let id: i64 = conn.query_row("SELECT id FROM voice_links", [], |r| r.get(0)).unwrap();
+        let id: i64 = conn.query_row("SELECT id FROM matrix_links", [], |r| r.get(0)).unwrap();
         assert_eq!(id, 2, "a relink never reuses an unlinked id");
     }
     #[test]
@@ -2046,7 +2013,7 @@ mod tests {
                  VALUES ('c1', 1, 'outbound', 'ended', 'x', 'x');",
         )
         .unwrap();
-        apply_migrations(&conn, MIGRATIONS).unwrap();
+        apply_migrations(&conn, &MIGRATIONS[..48]).unwrap();
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
         assert_eq!(version, 48);
         let key: Option<String> =
@@ -2064,5 +2031,44 @@ mod tests {
         call("c4", Some("$ev2")).unwrap();
         call("c5", None).unwrap();
         call("c6", None).unwrap();
+    }
+
+    #[test]
+    fn v49_trades_telegram_for_matrix() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        apply_migrations(&conn, &MIGRATIONS[..48]).unwrap();
+        conn.execute_batch(
+            "INSERT INTO users (username, pass_hash, role) VALUES ('a','h','member');
+             INSERT INTO conversations (user_id, title, created_at, updated_at, via, telegram_at)
+                 VALUES (1, 'tg', 'now', 'now', 'telegram', 'now'),
+                        (1, 'call', 'now', 'now', 'voice', NULL);
+             INSERT INTO voice_links (user_id, mxid, room_id, state, created_at)
+                 VALUES (1, '@a:t', '!dm:t', 'linked', 'x');",
+        )
+        .unwrap();
+        apply_migrations(&conn, &MIGRATIONS[..49]).unwrap();
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(version, 49);
+        let vias: Vec<String> = conn
+            .prepare("SELECT via FROM conversations ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(vias, ["web", "voice"]);
+        conn.execute("UPDATE conversations SET via = 'matrix', matrix_at = 'now' WHERE id = 1", []).unwrap();
+        assert!(conn.execute("UPDATE conversations SET via = 'telegram' WHERE id = 1", []).is_err());
+        let room: String =
+            conn.query_row("SELECT room_id FROM matrix_links WHERE user_id = 1", [], |r| r.get(0)).unwrap();
+        assert_eq!(room, "!dm:t");
+        conn.execute("INSERT INTO matrix_cursor (id, next_batch) VALUES (1, 's1')", []).unwrap();
+        for gone in ["telegram_links", "telegram_link_codes", "telegram_cursor", "voice_links"] {
+            let n: i64 = conn
+                .query_row("SELECT COUNT(*) FROM sqlite_master WHERE name = ?1", [gone], |r| r.get(0))
+                .unwrap();
+            assert_eq!(n, 0, "{gone} is gone");
+        }
     }
 }

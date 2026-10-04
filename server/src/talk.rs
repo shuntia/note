@@ -45,7 +45,7 @@ pub fn touch(conn: &Connection, id: i64, now: jiff::Timestamp) -> Result<()> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Via {
     Web,
-    Telegram,
+    Matrix,
     Voice,
 }
 
@@ -53,7 +53,7 @@ impl Via {
     pub fn as_str(&self) -> &'static str {
         match self {
             Via::Web => "web",
-            Via::Telegram => "telegram",
+            Via::Matrix => "matrix",
             Via::Voice => "voice",
         }
     }
@@ -64,38 +64,25 @@ pub fn via_of(conn: &Connection, id: i64) -> Result<Via> {
         .query_row("SELECT via FROM conversations WHERE id = ?1", [id], |r| r.get(0))
         .optional()?;
     Ok(match via.as_deref() {
-        Some("telegram") => Via::Telegram,
+        Some("matrix") => Via::Matrix,
         Some("voice") => Via::Voice,
         _ => Via::Web,
     })
 }
 
-/// A turn from Telegram also stamps the thread, so the next reply from that
-/// chat lands back in it.
+/// A turn from Matrix also stamps the thread, so the next message from the DM
+/// lands back in it.
 pub fn mark_via(conn: &Connection, id: i64, via: Via, now: jiff::Timestamp) -> Result<()> {
-    match via {
-        Via::Telegram => {
-            conn.execute(
-                "UPDATE conversations SET via = ?1, telegram_at = ?2 WHERE id = ?3",
-                (via.as_str(), now.to_string(), id),
-            )?;
-        }
-        Via::Web | Via::Voice => {
-            conn.execute(
-                "UPDATE conversations SET via = ?1 WHERE id = ?2",
-                (via.as_str(), id),
-            )?;
-        }
+    conn.execute("UPDATE conversations SET via = ?1 WHERE id = ?2", (via.as_str(), id))?;
+    if via == Via::Matrix {
+        stamp_matrix(conn, id, now)?;
     }
     Ok(())
 }
 
-/// When this thread last crossed Telegram, whichever way the message went.
-pub fn stamp_telegram(conn: &Connection, id: i64, now: jiff::Timestamp) -> Result<()> {
-    conn.execute(
-        "UPDATE conversations SET telegram_at = ?1 WHERE id = ?2",
-        (now.to_string(), id),
-    )?;
+/// When this thread last crossed the Matrix DM, whichever way the message went.
+pub fn stamp_matrix(conn: &Connection, id: i64, now: jiff::Timestamp) -> Result<()> {
+    conn.execute("UPDATE conversations SET matrix_at = ?1 WHERE id = ?2", (now.to_string(), id))?;
     Ok(())
 }
 
@@ -545,7 +532,6 @@ pub async fn run_turn(
         let _ = crate::presence::touch(&conn, user_id, jiff::Timestamp::now());
     }
     let mut notes: Vec<String> = Vec::new();
-    let mut spoke_from = Via::Web;
     if let Some(id) = conversation {
         let conn = state.db();
         match owned(&conn, user_id, id) {
@@ -553,7 +539,6 @@ pub async fn run_turn(
             Ok(false) => return Err(TurnError::NotFound),
             Err(_) => return Err(TurnError::Internal),
         }
-        spoke_from = via_of(&conn, id).map_err(|_| TurnError::Internal)?;
         match checkin_date(&conn, id) {
             Ok(Some(date)) => notes.push(checkin_thread_note(&date)),
             Ok(None) => {}
@@ -660,9 +645,6 @@ pub async fn run_turn(
             tokio::task::spawn_blocking(move || {
                 generate_title(&st, user_id, &titled_user, conv_id);
             });
-            if via == Via::Web && spoke_from == Via::Telegram {
-                mirror_to_telegram(state, user_id, turn.conversation_id, turn.reply.clone()).await;
-            }
             Ok(turn)
         }
         Ok(Err(e)) => {
@@ -677,34 +659,6 @@ pub async fn run_turn(
             Err(TurnError::Internal)
         }
     }
-}
-
-/// A thread the user was last speaking to from Telegram is answered there as
-/// well as on the web, so the handover back to the app leaves nothing behind.
-async fn mirror_to_telegram(state: &AppState, user_id: i64, conversation_id: i64, reply: String) {
-    let Some(ch) = state.telegram.clone() else { return };
-    let db = state.db.clone();
-    let _ = tokio::task::spawn_blocking(move || {
-        let now = jiff::Timestamp::now();
-        match ch.send_to_user(user_id, &reply) {
-            Ok(()) => {
-                let conn = crate::db_guard(&db);
-                let _ = stamp_telegram(&conn, conversation_id, now);
-            }
-            Err(e) => {
-                let conn = crate::db_guard(&db);
-                let _ = crate::log::record_throttled(
-                    &conn,
-                    Some(user_id),
-                    "telegram_error",
-                    &e.to_string(),
-                    now,
-                    crate::log::ERROR_LOG_WINDOW_MINS,
-                );
-            }
-        }
-    })
-    .await;
 }
 
 #[cfg(test)]

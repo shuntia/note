@@ -221,25 +221,18 @@ pub struct WebPushSettings {
     pub subject: String,
 }
 
-pub const DEFAULT_TELEGRAM_BASE_URL: &str = "https://api.telegram.org";
-
 #[derive(Debug, Clone, Deserialize)]
-pub struct TelegramSettings {
-    /// The bot token, alone on a line; the file is the only place it lives.
+pub struct MatrixSettings {
+    pub homeserver: String,
+    /// The bot's access token for this device, alone on a line.
     pub token_file: PathBuf,
-    #[serde(default = "default_telegram_base_url")]
-    pub base_url: String,
-}
-
-fn default_telegram_base_url() -> String {
-    DEFAULT_TELEGRAM_BASE_URL.into()
 }
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct ChannelsConfig {
     pub webpush: Option<WebPushSettings>,
-    pub telegram: Option<TelegramSettings>,
+    pub matrix: Option<MatrixSettings>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -362,6 +355,12 @@ pub struct UserConfig {
     /// Whether a call plays its ready and heard sounds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub voice_cue: Option<bool>,
+    /// Whether what Note sends on its own is also posted to the Matrix DM.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matrix_send: Option<bool>,
+    /// Whether those posts notify in Matrix, rather than arriving silently.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matrix_ping: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub voice_language: Option<String>,
 }
@@ -434,6 +433,14 @@ impl UserConfig {
 
     pub fn ring_for(&self) -> &str {
         self.ring_for.as_deref().unwrap_or(RING_FOR_URGENT)
+    }
+
+    pub fn matrix_send(&self) -> bool {
+        self.matrix_send.unwrap_or(false)
+    }
+
+    pub fn matrix_ping(&self) -> bool {
+        self.matrix_ping.unwrap_or(false)
     }
 
     pub fn voice_profile(&self) -> note_voice_proto::VoiceProfile {
@@ -697,27 +704,6 @@ mod tests {
         let admin = ServerConfig::load(tmp.path()).unwrap().admin;
         assert_eq!(admin.rp_id.unwrap(), "note.example.net");
         assert_eq!(admin.rp_origin.unwrap(), "https://note.example.net");
-    }
-
-    #[test]
-    fn telegram_section_parses_with_a_default_api_base_and_is_absent_by_default() {
-        let tmp = tempfile::tempdir().unwrap();
-        let base = "bind_addr = \"127.0.0.1:0\"\npublic_base_url = \"http://x\"\ndata_dir = \"data\"\n";
-        write(tmp.path(), "server.toml", base);
-        assert!(ServerConfig::load(tmp.path()).unwrap().channels.telegram.is_none());
-
-        write(tmp.path(), "server.toml", &format!(
-            "{base}[channels.telegram]\ntoken_file = \"config/telegram.token\"\n"));
-        let tg = ServerConfig::load(tmp.path()).unwrap().channels.telegram.unwrap();
-        assert_eq!(tg.token_file, PathBuf::from("config/telegram.token"));
-        assert_eq!(tg.base_url, DEFAULT_TELEGRAM_BASE_URL);
-
-        write(tmp.path(), "server.toml", &format!(
-            "{base}[channels.telegram]\ntoken_file = \"t\"\nbase_url = \"http://127.0.0.1:9\"\n"));
-        assert_eq!(
-            ServerConfig::load(tmp.path()).unwrap().channels.telegram.unwrap().base_url,
-            "http://127.0.0.1:9"
-        );
     }
 
     #[test]

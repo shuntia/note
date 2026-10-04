@@ -41,22 +41,16 @@ pub fn config_dir() -> TempDir {
     tmp
 }
 
-#[allow(dead_code)] // only the telegram suite stands up a fake Bot API
-pub const GET_ME: &str = r#"{"ok":true,"result":{"id":7,"username":"note_bot"}}"#;
-
-#[allow(dead_code)] // only the telegram suite stands up a fake Bot API
-pub const SENT: &str = r#"{"ok":true,"result":{"message_id":1}}"#;
-
-/// A stand-in Bot API: every request waits for the body the test has queued and
+/// A stand-in HTTP server: every request waits for the body the test has queued and
 /// is handed back for inspection, so a suite drives the wire in both directions.
-#[allow(dead_code)] // only the telegram suite stands up a fake Bot API
+#[allow(dead_code)] // only the Matrix suite stands up a fake homeserver
 pub struct Fake {
     pub base: String,
     replies: std::sync::mpsc::Sender<String>,
     requests: std::sync::mpsc::Receiver<String>,
 }
 
-#[allow(dead_code)] // only the telegram suite stands up a fake Bot API
+#[allow(dead_code)] // only the Matrix suite stands up a fake homeserver
 impl Fake {
     /// Queued before the call that consumes it; the fake holds the connection
     /// open until one is there.
@@ -82,8 +76,8 @@ impl Fake {
     }
 }
 
-#[allow(dead_code)] // only the telegram suite stands up a fake Bot API
-pub fn fake_telegram() -> Fake {
+#[allow(dead_code)] // only the Matrix suite stands up a fake homeserver
+pub fn fake_http() -> Fake {
     use std::io::{Read, Write};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
@@ -125,34 +119,6 @@ pub fn fake_telegram() -> Fake {
         let _ = seen.send(String::from_utf8_lossy(&raw).to_string());
     });
     Fake { base, replies, requests }
-}
-
-/// The fake must already hold an answer for `getMe`, which boot spends.
-#[allow(dead_code)] // only the telegram suite stands up a fake Bot API
-pub async fn app_with_telegram(
-    llm: Arc<dyn LLMProvider>,
-    base_url: &str,
-) -> (axum::Router, String, AppState, TempDir) {
-    let cfg = config_dir();
-    let dir = cfg.path().to_path_buf();
-    let conn = db::open_memory().unwrap();
-    auth::create_user(&conn, "aki", "pw", true).unwrap();
-    let token_file = dir.join("telegram.token");
-    std::fs::write(&token_file, "bot:secret").unwrap();
-    let mut state = AppState::new(conn, dir.clone(), dir).with_providers(llm, None);
-    let settings = note_server::config::TelegramSettings {
-        token_file,
-        base_url: base_url.into(),
-    };
-    let ch = match note_server::channels::telegram::TelegramChannel::new(state.db.clone(), &settings)
-    {
-        Ok(ch) => ch,
-        Err(e) => panic!("the telegram channel refused to boot: {e}"),
-    };
-    state = state.with_telegram(ch);
-    let app = api::router(state.clone());
-    let cookie = login(&app, "aki", "pw").await;
-    (app, cookie, state, cfg)
 }
 
 pub async fn login(app: &axum::Router, username: &str, password: &str) -> String {

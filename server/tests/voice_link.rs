@@ -306,6 +306,19 @@ fn offers_voices(r: &Rig) {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn matrix_switches_save_without_a_matrix_channel() {
+    let (app, cookie, _r) = api_rig().await;
+    let (status, body) =
+        call(&app, &cookie, "PUT", "/api/settings", r#"{"matrix_send":true,"matrix_ping":true}"#).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["matrix_send"], true);
+    assert_eq!(body["matrix_ping"], true);
+    assert_eq!(body["matrix_enabled"], false);
+    let (_, body) = call(&app, &cookie, "GET", "/api/settings", "").await;
+    assert_eq!(body["matrix_send"], true);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn ring_for_checkins_is_saved() {
     let (app, cookie, _r) = api_rig().await;
     let (status, body) = call(&app, &cookie, "PUT", "/api/settings", r#"{"ring_for":"checkins"}"#).await;

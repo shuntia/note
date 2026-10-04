@@ -33,7 +33,6 @@ import type {
   ShareScope,
   ShareThread,
   ShareVisit,
-  TelegramLink,
   Token,
   TokenCreated,
   TotpEnrolment,
@@ -78,14 +77,14 @@ type Loaded = {
   pomodoro: boolean
   endNotify: boolean
   zoneAuto: boolean
-  telegramEnabled: boolean
-  telegramLinked: boolean
-  telegramBot: string
   voiceEnabled: boolean
   voiceLink: UserSettings['voice_link']
   ringFor: RingFor
   voice: string
   cue: boolean
+  matrixEnabled: boolean
+  matrixSend: boolean
+  matrixPing: boolean
 }
 type Save = { row: string; kind: 'busy' | 'saved' | 'failed'; message?: string } | null
 
@@ -286,7 +285,6 @@ export function Settings({
   const [open, setOpen] = useState<string | null>(null)
   const [theme, setTheme] = useState<ThemeChoice>(storedTheme)
   const [place, setPlace] = useState(storedPlace)
-  const [invite, setInvite] = useState<TelegramLink | null>(null)
   const [mxid, setMxid] = useState('')
 
   const load = () => {
@@ -307,14 +305,14 @@ export function Settings({
           pomodoro: s.pomodoro_enabled,
           endNotify: s.session_end_notify,
           zoneAuto: s.timezone_auto,
-          telegramEnabled: s.telegram_enabled,
-          telegramLinked: s.telegram_linked,
-          telegramBot: s.telegram_bot,
           voiceEnabled: s.voice_enabled,
           voiceLink: s.voice_link,
           ringFor: s.ring_for,
           voice: s.voice_voice,
           cue: s.voice_cue,
+          matrixEnabled: s.matrix_enabled,
+          matrixSend: s.matrix_send,
+          matrixPing: s.matrix_ping,
         })
       })
       .catch(() => setState('error'))
@@ -415,49 +413,8 @@ export function Settings({
     }
   }
 
-  const startLink = async () => {
-    setSave({ row: 'telegram', kind: 'busy' })
-    try {
-      setInvite(await api.telegramLink())
-      setSave(null)
-    } catch (err) {
-      setSave({ row: 'telegram', kind: 'failed', message: failure(err) })
-    }
-  }
-
-  const unlinkTelegram = async () => {
-    setSave({ row: 'telegram', kind: 'busy' })
-    try {
-      await api.telegramUnlink()
-      setInvite(null)
-      setState((s) => (s && s !== 'error' ? { ...s, telegramLinked: false } : s))
-      setSave({ row: 'telegram', kind: 'saved' })
-    } catch (err) {
-      setSave({ row: 'telegram', kind: 'failed', message: failure(err) })
-    }
-  }
-
-  // The link is finished over in Telegram, so the card watches for it rather
-  // than asking for a reload.
-  useEffect(() => {
-    if (!invite) return
-    const id = window.setInterval(() => {
-      void api
-        .settings()
-        .then((s) => {
-          if (!s.telegram_linked) return
-          setInvite(null)
-          setState((prev) =>
-            prev && prev !== 'error' ? { ...prev, telegramLinked: true } : prev,
-          )
-        })
-        .catch(() => undefined)
-    }, 3000)
-    return () => window.clearInterval(id)
-  }, [invite])
-
   const linkVoice = async () => {
-    setSave({ row: 'calls', kind: 'busy' })
+    setSave({ row: 'matrix', kind: 'busy' })
     try {
       const got = await api.voiceLink(mxid.trim())
       setState((s) =>
@@ -466,18 +423,18 @@ export function Settings({
       setMxid('')
       setSave(null)
     } catch (err) {
-      setSave({ row: 'calls', kind: 'failed', message: callFailure(err) })
+      setSave({ row: 'matrix', kind: 'failed', message: callFailure(err) })
     }
   }
 
   const unlinkVoice = async () => {
-    setSave({ row: 'calls', kind: 'busy' })
+    setSave({ row: 'matrix', kind: 'busy' })
     try {
       await api.voiceUnlink()
       setState((s) => (s && s !== 'error' ? { ...s, voiceLink: null } : s))
-      setSave({ row: 'calls', kind: 'saved' })
+      setSave({ row: 'matrix', kind: 'saved' })
     } catch (err) {
-      setSave({ row: 'calls', kind: 'failed', message: callFailure(err) })
+      setSave({ row: 'matrix', kind: 'failed', message: callFailure(err) })
     }
   }
 
@@ -488,6 +445,19 @@ export function Settings({
       setSave({ row: 'calls', kind: 'saved', message: 'Ringing' })
     } catch (err) {
       setSave({ row: 'calls', kind: 'failed', message: callFailure(err) })
+    }
+  }
+
+  const saveMatrix = async (patch: { matrix_send?: boolean; matrix_ping?: boolean }) => {
+    setSave({ row: 'matrix', kind: 'busy' })
+    try {
+      const saved = await api.saveSettings(patch)
+      setState((s) =>
+        s && s !== 'error' ? { ...s, matrixSend: saved.matrix_send, matrixPing: saved.matrix_ping } : s,
+      )
+      setSave({ row: 'matrix', kind: 'saved' })
+    } catch (err) {
+      setSave({ row: 'matrix', kind: 'failed', message: failure(err) })
     }
   }
 
@@ -923,176 +893,6 @@ export function Settings({
 
       <Group head="Notifications">
         <PushRow notify={notify} />
-        {loaded?.telegramEnabled && (
-          <FoldRow
-            label="Telegram"
-            value={loaded.telegramLinked ? `@${loaded.telegramBot}` : 'Not linked'}
-            open={open === 'telegram'}
-            onToggle={fold('telegram')}
-          >
-            {open === 'telegram' && (
-              <div className="set-fold-body">
-                {loaded.telegramLinked ? (
-                  <>
-                    <span className="set-sub">
-                      Note answers you where you last wrote; the app keeps the whole record.
-                    </span>
-                    <button
-                      type="button"
-                      className="btn-haze small"
-                      disabled={busy}
-                      onClick={() => void unlinkTelegram()}
-                    >
-                      Unlink
-                    </button>
-                  </>
-                ) : invite ? (
-                  <div className="set-enrol">
-                    <QrCode uri={invite.url} label="Telegram link QR code" />
-                    <a
-                      className="set-link"
-                      href={invite.url}
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      Open @{invite.bot}
-                    </a>
-                    <span className="set-sub">Or send the bot this code</span>
-                    <code className="set-token-secret">/start {invite.code}</code>
-                    <span className="set-sub">It lasts ten minutes</span>
-                    <button
-                      type="button"
-                      className="btn-haze small"
-                      disabled={busy}
-                      onClick={() => void startLink()}
-                    >
-                      New code
-                    </button>
-                  </div>
-                ) : (
-                  <button
-                    type="button"
-                    className="btn-haze small"
-                    disabled={busy}
-                    onClick={() => void startLink()}
-                  >
-                    Link a chat
-                  </button>
-                )}
-                <Status save={save} row="telegram" />
-              </div>
-            )}
-          </FoldRow>
-        )}
-        {loaded?.voiceEnabled && (
-          <FoldRow
-            label="Calls"
-            value={
-              loaded.voiceLink?.state === 'linked'
-                ? (RING_CHOICES.find((c) => c.id === loaded.ringFor) ?? RING_CHOICES[0]).label
-                : loaded.voiceLink
-                  ? 'Invited'
-                  : 'Not linked'
-            }
-            open={open === 'calls'}
-            onToggle={fold('calls')}
-          >
-            {open === 'calls' && (
-              <div className="set-fold-body">
-                {loaded.voiceLink?.state === 'linked' ? (
-                  <>
-                    <span className="set-sub">{loaded.voiceLink.mxid}</span>
-                    <RingChoices
-                      value={loaded.ringFor}
-                      disabled={busy}
-                      onPick={(v) => void saveRingFor(v)}
-                    />
-                    {voices && voices.length > 0 && (
-                      <button type="button" className="set-row set-row-button" onClick={() => setChoosingVoice(true)}>
-                        <span className="set-row-body">
-                          <span className="set-label">Voice</span>
-                        </span>
-                        <span className="set-value">
-                          {(voices.find((v) => v.id === loaded.voice) ?? voices[0]).label}
-                        </span>
-                      </button>
-                    )}
-                    {choosingVoice && voices && (
-                      <VoiceSheet
-                        voices={voices}
-                        chosen={loaded.voice || voices[0].id}
-                        preview={preview}
-                        onPick={(v) => void pickVoice(v)}
-                        onClose={() => setChoosingVoice(false)}
-                      />
-                    )}
-                    <div className="set-row">
-                      <span className="set-row-body">
-                        <span className="set-label">Sounds</span>
-                      </span>
-                      <Switch
-                        label="Sounds"
-                        on={loaded.cue}
-                        disabled={busy}
-                        onToggle={() => void saveCue(!loaded.cue)}
-                      />
-                    </div>
-                    <button
-                      type="button"
-                      className="btn-haze small"
-                      disabled={busy}
-                      onClick={() => void ringNow()}
-                    >
-                      Ring me
-                    </button>
-                    <button
-                      type="button"
-                      className="btn-haze small"
-                      disabled={busy}
-                      onClick={() => void unlinkVoice()}
-                    >
-                      Unlink
-                    </button>
-                  </>
-                ) : loaded.voiceLink ? (
-                  <>
-                    <span className="set-sub">Accept Note's invite in Element</span>
-                    <button
-                      type="button"
-                      className="btn-haze small"
-                      disabled={busy}
-                      onClick={() => void unlinkVoice()}
-                    >
-                      Cancel
-                    </button>
-                  </>
-                ) : (
-                  <form
-                    className="set-token-form"
-                    onSubmit={(e) => {
-                      e.preventDefault()
-                      void linkVoice()
-                    }}
-                  >
-                    <input
-                      aria-label="Matrix account"
-                      placeholder="@you:server"
-                      autoComplete="off"
-                      autoCapitalize="none"
-                      spellCheck={false}
-                      value={mxid}
-                      onChange={(e) => setMxid(e.target.value)}
-                    />
-                    <button type="submit" className="btn-haze small" disabled={busy || !mxid.trim()}>
-                      Link
-                    </button>
-                  </form>
-                )}
-                <Status save={save} row="calls" />
-              </div>
-            )}
-          </FoldRow>
-        )}
         {loaded && (
           <div className="set-row">
             <span className="set-row-body">
@@ -1182,6 +982,159 @@ export function Settings({
           </FoldRow>
         )}
       </Group>
+
+      {loaded?.voiceEnabled && (
+        <Group head="Connections">
+          <FoldRow
+            label="Matrix"
+            value={
+              loaded.voiceLink?.state === 'linked'
+                ? loaded.voiceLink.mxid
+                : loaded.voiceLink
+                  ? 'Invited'
+                  : 'Not linked'
+            }
+            open={open === 'matrix'}
+            onToggle={fold('matrix')}
+          >
+            {open === 'matrix' && (
+              <div className="set-fold-body">
+                {loaded.voiceLink?.state === 'linked' ? (
+                  <>
+                    {loaded.matrixEnabled && (
+                      <>
+                        <div className="set-row">
+                          <span className="set-row-body">
+                            <span className="set-label">Note's messages</span>
+                          </span>
+                          <Switch
+                            label="Note's messages"
+                            on={loaded.matrixSend}
+                            disabled={busy}
+                            onToggle={() => void saveMatrix({ matrix_send: !loaded.matrixSend })}
+                          />
+                        </div>
+                        {loaded.matrixSend && (
+                          <div className="set-row">
+                            <span className="set-row-body">
+                              <span className="set-label">Ping</span>
+                            </span>
+                            <Switch
+                              label="Ping"
+                              on={loaded.matrixPing}
+                              disabled={busy}
+                              onToggle={() => void saveMatrix({ matrix_ping: !loaded.matrixPing })}
+                            />
+                          </div>
+                        )}
+                      </>
+                    )}
+                    <button
+                      type="button"
+                      className="btn-haze small"
+                      disabled={busy}
+                      onClick={() => void unlinkVoice()}
+                    >
+                      Unlink
+                    </button>
+                  </>
+                ) : loaded.voiceLink ? (
+                  <>
+                    <span className="set-sub">Accept Note's invite in Element</span>
+                    <button
+                      type="button"
+                      className="btn-haze small"
+                      disabled={busy}
+                      onClick={() => void unlinkVoice()}
+                    >
+                      Cancel
+                    </button>
+                  </>
+                ) : (
+                  <form
+                    className="set-token-form"
+                    onSubmit={(e) => {
+                      e.preventDefault()
+                      void linkVoice()
+                    }}
+                  >
+                    <input
+                      aria-label="Matrix account"
+                      placeholder="@you:server"
+                      autoComplete="off"
+                      autoCapitalize="none"
+                      spellCheck={false}
+                      value={mxid}
+                      onChange={(e) => setMxid(e.target.value)}
+                    />
+                    <button type="submit" className="btn-haze small" disabled={busy || !mxid.trim()}>
+                      Link
+                    </button>
+                  </form>
+                )}
+                <Status save={save} row="matrix" />
+              </div>
+            )}
+          </FoldRow>
+          {loaded.voiceLink?.state === 'linked' && (
+            <FoldRow
+              label="Calls"
+              value={(RING_CHOICES.find((c) => c.id === loaded.ringFor) ?? RING_CHOICES[0]).label}
+              open={open === 'calls'}
+              onToggle={fold('calls')}
+            >
+              {open === 'calls' && (
+                <div className="set-fold-body">
+                  <RingChoices
+                    value={loaded.ringFor}
+                    disabled={busy}
+                    onPick={(v) => void saveRingFor(v)}
+                  />
+                  {voices && voices.length > 0 && (
+                    <button type="button" className="set-row set-row-button" onClick={() => setChoosingVoice(true)}>
+                      <span className="set-row-body">
+                        <span className="set-label">Voice</span>
+                      </span>
+                      <span className="set-value">
+                        {(voices.find((v) => v.id === loaded.voice) ?? voices[0]).label}
+                      </span>
+                    </button>
+                  )}
+                  {choosingVoice && voices && (
+                    <VoiceSheet
+                      voices={voices}
+                      chosen={loaded.voice || voices[0].id}
+                      preview={preview}
+                      onPick={(v) => void pickVoice(v)}
+                      onClose={() => setChoosingVoice(false)}
+                    />
+                  )}
+                  <div className="set-row">
+                    <span className="set-row-body">
+                      <span className="set-label">Sounds</span>
+                    </span>
+                    <Switch
+                      label="Sounds"
+                      on={loaded.cue}
+                      disabled={busy}
+                      onToggle={() => void saveCue(!loaded.cue)}
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    className="btn-haze small"
+                    disabled={busy}
+                    onClick={() => void ringNow()}
+                  >
+                    Ring me
+                  </button>
+                  <Status save={save} row="calls" />
+                </div>
+              )}
+            </FoldRow>
+          )}
+        </Group>
+      )}
 
       <Group head="You">
         {loaded && (

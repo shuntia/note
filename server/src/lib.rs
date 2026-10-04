@@ -15,6 +15,7 @@ pub mod idle;
 pub mod inbox;
 pub mod learn;
 pub mod log;
+pub mod matrix;
 pub mod memory;
 pub mod net;
 pub mod nightly;
@@ -32,7 +33,6 @@ pub mod shares;
 pub mod summaries;
 pub mod talk;
 pub mod tasks;
-pub mod telegram;
 pub mod tokens;
 pub mod templates;
 #[cfg(test)]
@@ -129,9 +129,7 @@ pub struct AppState {
     /// offered the `web_search` tool.
     pub search: Option<Arc<dyn SearchProvider>>,
     pub vapid_public_key: Option<String>,
-    /// Set when the telegram channel is configured; it also names the bot a
-    /// link invites the user to, and carries a mirrored reply back.
-    pub telegram: Option<Arc<crate::channels::telegram::TelegramChannel>>,
+    pub matrix: Option<Arc<crate::channels::matrix::MatrixChannel>>,
     pub voice: Option<Arc<crate::voice::Voice>>,
     /// The model a call speaks on; `None` speaks on `llm`.
     pub voice_llm: Option<Arc<dyn LLMProvider>>,
@@ -183,7 +181,7 @@ impl AppState {
             embeddings: None,
             search: None,
             vapid_public_key: None,
-            telegram: None,
+            matrix: None,
             voice: None,
             voice_llm: None,
             call_settings: crate::voice::call::CallSettings::default(),
@@ -293,12 +291,13 @@ impl AppState {
         self
     }
 
-    /// First in the ladder: a linked chat is where the user already is.
+    /// Right after the voice channel in the ladder, which `with_voice` makes
+    /// true by inserting itself at the front afterwards.
     #[must_use]
-    pub fn with_telegram(mut self, ch: crate::channels::telegram::TelegramChannel) -> Self {
+    pub fn with_matrix(mut self, ch: crate::channels::matrix::MatrixChannel) -> Self {
         let ch = Arc::new(ch);
         self.channels.insert(0, ch.clone());
-        self.telegram = Some(ch);
+        self.matrix = Some(ch);
         self
     }
 

@@ -11,7 +11,7 @@ pub fn stamp(at: jiff::Timestamp) -> String {
 
 /// Records that the user is here: a session write, a message on their socket,
 /// or a chat turn on any channel that runs through `talk::run_turn` (web,
-/// Telegram, Matrix). Returns whether the stamp moved; it moves at most once
+/// Matrix). Returns whether the stamp moved; it moves at most once
 /// every `EVERY_SECS`.
 pub fn touch(conn: &Connection, user_id: i64, now: jiff::Timestamp) -> rusqlite::Result<bool> {
     let cutoff = stamp(now - jiff::Span::new().seconds(EVERY_SECS));
