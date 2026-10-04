@@ -153,6 +153,20 @@ fn parse_sync(body: &Value, bot: &str) -> Vec<Message> {
     out
 }
 
+impl Channel for MatrixChannel {
+    fn name(&self) -> &'static str {
+        "matrix"
+    }
+
+    fn companion(&self) -> bool {
+        true
+    }
+
+    fn deliver(&self, _user_id: i64, _username: &str, _msg: &OutboundMessage) -> Result<()> {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -89,6 +89,11 @@ pub fn is_checkin(kind: &str) -> bool {
 pub trait Channel: Send + Sync {
     fn name(&self) -> &'static str;
     fn deliver(&self, user_id: i64, username: &str, msg: &OutboundMessage) -> anyhow::Result<()>;
+
+    /// A companion keeps a copy: the walk posts to it and always goes on.
+    fn companion(&self) -> bool {
+        false
+    }
 }
 
 /// Pure rendering of a fired event into a user-facing message; a non-empty

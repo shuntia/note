@@ -15,6 +15,7 @@ pub mod idle;
 pub mod inbox;
 pub mod learn;
 pub mod log;
+pub mod matrix;
 pub mod memory;
 pub mod net;
 pub mod nightly;
@@ -128,6 +129,7 @@ pub struct AppState {
     /// offered the `web_search` tool.
     pub search: Option<Arc<dyn SearchProvider>>,
     pub vapid_public_key: Option<String>,
+    pub matrix: Option<Arc<crate::channels::matrix::MatrixChannel>>,
     pub voice: Option<Arc<crate::voice::Voice>>,
     /// The model a call speaks on; `None` speaks on `llm`.
     pub voice_llm: Option<Arc<dyn LLMProvider>>,
@@ -179,6 +181,7 @@ impl AppState {
             embeddings: None,
             search: None,
             vapid_public_key: None,
+            matrix: None,
             voice: None,
             voice_llm: None,
             call_settings: crate::voice::call::CallSettings::default(),
@@ -285,6 +288,16 @@ impl AppState {
     ) -> Self {
         self.channels.push(Arc::new(ch));
         self.vapid_public_key = Some(public_key);
+        self
+    }
+
+    /// Right after the voice channel in the ladder, which `with_voice` makes
+    /// true by inserting itself at the front afterwards.
+    #[must_use]
+    pub fn with_matrix(mut self, ch: crate::channels::matrix::MatrixChannel) -> Self {
+        let ch = Arc::new(ch);
+        self.channels.insert(0, ch.clone());
+        self.matrix = Some(ch);
         self
     }
 
