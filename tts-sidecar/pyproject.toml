@@ -1,0 +1,40 @@
+[project]
+name = "note-tts-chatterbox"
+version = "0.1.0"
+description = "Chatterbox TTS sidecar for Note's voice calls"
+license = "Unlicense"
+requires-python = "==3.11.*"
+dependencies = [
+    "aiohttp>=3.10",
+    "chatterbox-tts==0.1.7",
+    "numpy<2",
+    "soundfile>=0.12",
+    "torch==2.6.0",
+    "torchaudio==2.6.0",
+    # resemble-perth imports pkg_resources.
+    "setuptools<81",
+]
+
+[project.scripts]
+note-tts-chatterbox = "note_tts_chatterbox.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+# The web demo and the Japanese/Chinese tokenizers of chatterbox-tts are never imported.
+override-dependencies = [
+    "gradio; sys_platform == 'never'",
+    "pykakasi; sys_platform == 'never'",
+    "spacy-pkuseg; sys_platform == 'never'",
+]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu124" }
+torchaudio = { index = "pytorch-cu124" }
+
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
