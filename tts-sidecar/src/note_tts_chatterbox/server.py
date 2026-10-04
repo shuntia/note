@@ -127,7 +127,8 @@ class Engine:
 
 
 def _load_model(ckpt_dir: Path, device: str):
-    """ChatterboxTTS.from_local, but each checkpoint loads straight onto `device` to keep host RAM low."""
+    """ChatterboxTTS.from_local, but built and loaded straight onto `device` to keep host RAM low."""
+    import torch
     from chatterbox.models.s3gen import S3Gen
     from chatterbox.models.t3 import T3
     from chatterbox.models.tokenizers import EnTokenizer
@@ -135,21 +136,19 @@ def _load_model(ckpt_dir: Path, device: str):
     from chatterbox.tts import ChatterboxTTS
     from safetensors.torch import load_file
 
-    ve = VoiceEncoder()
+    with torch.device(device):
+        ve = VoiceEncoder()
+        t3 = T3()
+        s3gen = S3Gen()
     ve.load_state_dict(load_file(ckpt_dir / "ve.safetensors", device=device))
-    ve.to(device).eval()
-
-    t3 = T3()
     t3_state = load_file(ckpt_dir / "t3_cfg.safetensors", device=device)
     if "model" in t3_state:
         t3_state = t3_state["model"][0]
     t3.load_state_dict(t3_state)
     del t3_state
-    t3.to(device).eval()
-
-    s3gen = S3Gen()
     s3gen.load_state_dict(load_file(ckpt_dir / "s3gen.safetensors", device=device), strict=False)
-    s3gen.to(device).eval()
+    for m in (ve, t3, s3gen):
+        m.to(device).eval()
 
     tokenizer = EnTokenizer(str(ckpt_dir / "tokenizer.json"))
     return ChatterboxTTS(t3, s3gen, ve, tokenizer, device)
@@ -263,6 +262,7 @@ def settings_from_args() -> Settings:
 
 def main():
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    logging.getLogger("chatterbox").setLevel(logging.WARNING)
     settings = settings_from_args()
 
     async def start_loading(app: web.Application):
@@ -281,7 +281,7 @@ def main():
     app.router.add_get("/info", info)
     app.router.add_get("/stream", stream)
     app.on_startup.append(start_loading)
-    web.run_app(app, host=settings.host, port=settings.port, print=None)
+    web.run_app(app, host=settings.host, port=settings.port, print=None, access_log=None)
 
 
 if __name__ == "__main__":

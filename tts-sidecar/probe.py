@@ -87,6 +87,25 @@ async def cancel(session, base):
                 break
 
 
+async def interleave(session, base):
+    async def one(name, chunks):
+        async with session.ws_connect(f"{base}/stream") as ws:
+            t0 = time.perf_counter()
+            await ws.send_json({"type": "open", "voice": "default"})
+            for c in chunks:
+                await ws.send_json({"type": "text", "text": c})
+            await ws.send_json({"type": "end"})
+            first, marks = None, []
+            async for msg in ws:
+                if msg.type == aiohttp.WSMsgType.BINARY:
+                    first = first or round(time.perf_counter() - t0, 2)
+                elif json.loads(msg.data)["type"] == "mark":
+                    marks.append(round(time.perf_counter() - t0, 2))
+            print(f"interleave {name}: first audio {first} s, marks at {marks}")
+
+    await asyncio.gather(one("A", CHUNKS), one("B", CHUNKS[:2]))
+
+
 async def main():
     p = argparse.ArgumentParser()
     p.add_argument("--url", default="http://127.0.0.1:8890")
@@ -99,6 +118,7 @@ async def main():
         for i, v in enumerate(voices):
             await speak(session, a.url, v, a.out.replace(".wav", f"-{v}.wav") if a.out else None)
         await cancel(session, a.url)
+        await interleave(session, a.url)
 
 
 asyncio.run(main())
