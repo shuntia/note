@@ -14,14 +14,17 @@ let
   toml = pkgs.formats.toml { };
   credDir = "/run/credentials/note.service";
   voiceCfg = cfg.voice;
+  chatterboxCfg = cfg.tts.chatterbox;
   voiceSocket = "/run/note/voice.sock";
-  voiceToml = toml.generate "note-voice.toml" (voiceCfg.settings // {
+  voiceToml = toml.generate "note-voice.toml" (lib.recursiveUpdate voiceCfg.settings ({
     socket = voiceSocket;
     state_dir = "/var/lib/note-voice";
     token_file = "/run/credentials/note-voice.service/matrix-bot.token";
     models_dir = "${voiceCfg.package.models}";
     cues_dir = "${voiceCfg.package.cues}";
-  });
+  } // lib.optionalAttrs chatterboxCfg.enable {
+    tts.sidecars = [{ id = "chatterbox"; url = "http://127.0.0.1:${toString chatterboxCfg.port}"; }];
+  }));
   serverToml = toml.generate "server.toml"
     (lib.recursiveUpdate cfg.settings (lib.optionalAttrs voiceCfg.enable { voice.socket = voiceSocket; }));
   env = {
@@ -125,6 +128,26 @@ in
       tokenFile = lib.mkOption {
         type = lib.types.path;
         description = "The bot account's access token, handed over with LoadCredential.";
+      };
+    };
+
+    tts.chatterbox = {
+      enable = lib.mkEnableOption "the Chatterbox speech sidecar for voice calls (needs an NVIDIA GPU)";
+      package = lib.mkOption {
+        type = lib.types.package;
+        default = self.packages.${pkgs.stdenv.hostPlatform.system}.note-tts-chatterbox;
+        defaultText = lib.literalExpression "note.packages.\${system}.note-tts-chatterbox";
+      };
+      port = lib.mkOption {
+        type = lib.types.port;
+        default = 8890;
+        description = "Port on 127.0.0.1.";
+      };
+      environment = lib.mkOption {
+        type = lib.types.attrsOf lib.types.str;
+        default = { };
+        example = { NOTE_TTS_EXAGGERATION = "0.6"; NOTE_TTS_CFG_WEIGHT = "0.4"; NOTE_TTS_TEMPERATURE = "0.8"; };
+        description = "Extra environment, e.g. generation parameters or NOTE_TTS_VOICES_DIR.";
       };
     };
   };
@@ -232,6 +255,54 @@ in
         ProtectProc = "invisible";
         # libwebrtc's network monitor reads netlink.
         RestrictAddressFamilies = [ "AF_INET" "AF_INET6" "AF_UNIX" "AF_NETLINK" ];
+        RestrictNamespaces = true;
+        RestrictRealtime = true;
+        RestrictSUIDSGID = true;
+        LockPersonality = true;
+        # The CUDA runtime JIT-compiles kernels.
+        MemoryDenyWriteExecute = false;
+        SystemCallArchitectures = "native";
+        SystemCallFilter = [ "@system-service" "~@privileged" ];
+        CapabilityBoundingSet = "";
+      };
+    };
+
+    systemd.services.note-tts-chatterbox = lib.mkIf chatterboxCfg.enable {
+      description = "Note speech sidecar (Chatterbox)";
+      wantedBy = [ "multi-user.target" ];
+      before = lib.optional voiceCfg.enable "note-voice.service";
+      # HOME holds the CUDA kernel cache.
+      environment = chatterboxCfg.environment // {
+        NOTE_TTS_HOST = "127.0.0.1";
+        NOTE_TTS_PORT = toString chatterboxCfg.port;
+        HOME = "/var/lib/note-tts-chatterbox";
+      };
+      unitConfig.StartLimitIntervalSec = 0;
+      serviceConfig = {
+        ExecStart = lib.getExe chatterboxCfg.package;
+        DynamicUser = true;
+        StateDirectory = "note-tts-chatterbox";
+        StateDirectoryMode = "0700";
+        Restart = "on-failure";
+        RestartSec = 5;
+        RestartSteps = 5;
+        RestartMaxDelaySec = 120;
+        UMask = "0077";
+        NoNewPrivileges = true;
+        PrivateTmp = true;
+        PrivateDevices = false;
+        DeviceAllow = [ "/dev/nvidia0 rw" "/dev/nvidiactl rw" "/dev/nvidia-uvm rw" "/dev/nvidia-uvm-tools rw" ];
+        SupplementaryGroups = [ "video" ];
+        ProtectSystem = "strict";
+        ProtectHome = true;
+        ProtectKernelTunables = true;
+        ProtectKernelModules = true;
+        ProtectKernelLogs = true;
+        ProtectControlGroups = true;
+        ProtectClock = true;
+        ProtectHostname = true;
+        ProtectProc = "invisible";
+        RestrictAddressFamilies = [ "AF_INET" "AF_INET6" "AF_UNIX" ];
         RestrictNamespaces = true;
         RestrictRealtime = true;
         RestrictSUIDSGID = true;
