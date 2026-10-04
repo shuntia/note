@@ -35,6 +35,25 @@ pub struct TtsConfig {
     pub sidecars: Vec<SidecarConfig>,
 }
 
+impl TtsConfig {
+    /// A sidecar id prefixes its voice ids, so it must be unique, free of ':', and not Kokoro's.
+    pub fn check(&self) -> anyhow::Result<()> {
+        for (i, sidecar) in self.sidecars.iter().enumerate() {
+            let id = &sidecar.id;
+            if id.is_empty() || id.contains(':') {
+                anyhow::bail!("tts.sidecars: the id {id:?} must be non-empty and contain no ':'");
+            }
+            if id == crate::audio::engines::KOKORO {
+                anyhow::bail!("tts.sidecars: the id {id:?} is Kokoro's");
+            }
+            if self.sidecars[..i].iter().any(|s| s.id == *id) {
+                anyhow::bail!("tts.sidecars: the id {id:?} is used twice");
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct ModelSet {
     pub stt_encoder: PathBuf,
@@ -133,7 +152,9 @@ impl VoiceServiceConfig {
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let raw = std::fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?;
-        Ok(toml::from_str(&raw)?)
+        let cfg: Self = toml::from_str(&raw)?;
+        cfg.tts.check()?;
+        Ok(cfg)
     }
 
     /// `models` when set, else the sets found in `models_dir`, else none.
@@ -188,5 +209,18 @@ mod tests {
         assert_eq!(cfg.ready_cue(), vec![PathBuf::from("/c/ready.pcm")]);
         assert_eq!(cfg.heard_cue(), vec![PathBuf::from("/h.pcm"), PathBuf::from("/c/heard.pcm")]);
         assert_eq!(cfg.tts.sidecars, [SidecarConfig { id: "kyutai".into(), url: "http://127.0.0.1:8890".into() }]);
+        assert!(cfg.tts.check().is_ok());
+    }
+
+    #[test]
+    fn a_sidecar_id_that_would_shadow_a_voice_is_refused() {
+        let tts = |ids: &[&str]| TtsConfig {
+            sidecars: ids.iter().map(|id| SidecarConfig { id: (*id).into(), url: "http://127.0.0.1:1".into() }).collect(),
+        };
+        for ids in [&["a:b"][..], &["kokoro"], &["x", "x"], &[""]] {
+            let refused = tts(ids).check().unwrap_err().to_string();
+            assert!(refused.starts_with("tts.sidecars: the id"), "{refused}");
+        }
+        assert!(tts(&["kyutai", "chatterbox"]).check().is_ok());
     }
 }
