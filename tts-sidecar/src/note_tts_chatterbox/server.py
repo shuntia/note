@@ -20,6 +20,7 @@ FRAME_SAMPLES = SAMPLE_RATE // 4
 PEAK = 0.95
 DEFAULT_VOICE = "default"
 VOICE_SUFFIXES = (".wav", ".flac")
+WARM_UP = "Hello, this is a warm-up."
 
 
 @dataclass
@@ -53,13 +54,18 @@ def discover_voices(voices_dir: Path | None) -> dict[str, dict]:
 
 
 class Engine:
-    """One Chatterbox model with per-voice conditionals; renders one chunk at a time."""
+    """One Chatterbox model with per-voice conditionals; renders one chunk at a time.
+
+    Cloned voices follow their reference clip's loudness, so each gets a gain
+    that matches the built-in voice's level.
+    """
 
     def __init__(self, settings: Settings):
         self.settings = settings
         self.voices = discover_voices(settings.voices_dir)
         self.model = None
         self.conds = {}
+        self.gain = {}
         self.ready = False
         self.lock = asyncio.Lock()
         self.cancel_event: threading.Event | None = None
@@ -80,11 +86,13 @@ class Engine:
             if v["path"] is not None:
                 self.model.prepare_conditionals(str(v["path"]), exaggeration=s.exaggeration)
                 self.conds[vid] = self.model.conds
-        for vid in self.conds:
-            self._render("Hello, this is a warm-up.", vid)
+        levels = {vid: _rms(self._render(WARM_UP, vid)) for vid in self.conds}
+        for vid, level in levels.items():
+            self.gain[vid] = min(max(levels[DEFAULT_VOICE] / max(level, 1e-4), 0.5), 4.0)
         torch.cuda.empty_cache()
         self.ready = True
-        log.info("ready in %.1f s with voices %s", time.perf_counter() - t0, ", ".join(self.voices))
+        log.info("ready in %.1f s; voice gains %s", time.perf_counter() - t0,
+                 ", ".join(f"{vid} {g:.2f}" for vid, g in self.gain.items()))
 
     @staticmethod
     def _download() -> Path:
@@ -106,7 +114,7 @@ class Engine:
             cfg_weight=s.cfg_weight,
             temperature=s.temperature,
         )
-        audio = wav.squeeze(0).numpy().astype(np.float32)
+        audio = wav.squeeze(0).numpy().astype(np.float32) * self.gain.get(voice, 1.0)
         peak = float(np.abs(audio).max()) if audio.size else 0.0
         if peak > PEAK:
             audio *= PEAK / peak
@@ -125,6 +133,10 @@ class Engine:
             finally:
                 self.cancel_event = None
         return None if cancel.is_set() else pcm
+
+
+def _rms(pcm: np.ndarray) -> float:
+    return float(np.sqrt(np.mean((pcm.astype(np.float32) / 32767) ** 2))) if pcm.size else 0.0
 
 
 def _load_model(ckpt_dir: Path, device: str):
