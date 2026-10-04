@@ -12,6 +12,7 @@ use crate::audio::engines::{SpeechEngines, SpeechToText, TurnDetector, Vad};
 use crate::audio::lines::{Line, Lines};
 use crate::audio::playout::{Clip, Playout};
 use crate::audio::speech::{Gate, SpeechQueue};
+use crate::audio::tts::{speaker, SpeechBackend};
 use crate::audio::turn::{backchannels, Action, Input, TurnConfig, TurnMachine};
 use crate::media::{Gone, MediaIo};
 
@@ -101,6 +102,8 @@ pub struct SessionDeps {
     pub lines: Arc<Lines>,
     pub cues: Arc<Cues>,
     pub profile: VoiceProfile,
+    /// The speech sidecars up as the call starts.
+    pub sidecars: Vec<Arc<dyn SpeechBackend>>,
     /// An inbound call is greeted with `Line::Hi` if Note is quiet at first.
     pub direction: Direction,
     pub max_len: Duration,
@@ -227,10 +230,10 @@ impl<S: Fn(CallBody)> Live<S> {
         } else {
             languages.first().cloned().ok_or_else(|| anyhow::anyhow!("no voice models"))?
         };
-        let voice = deps.profile.voice.clone();
         let vad = deps.engines.vad(&language)?;
         let stt = deps.engines.stt(&language)?;
-        let tts = deps.engines.tts(&language);
+        let kokoro = deps.engines.tts(&language);
+        let speaker = speaker(&deps.profile.voice, &kokoro, &deps.sidecars);
         let start = Instant::now();
         let (events_tx, events) = mpsc::unbounded_channel();
         let (stt_tx, stt_rx) = mpsc::unbounded_channel();
@@ -240,8 +243,8 @@ impl<S: Fn(CallBody)> Live<S> {
             audio: tokio::spawn(audio_in(media.clone(), vad, stt_tx.clone(), events_tx.clone(), recent.clone(), start)),
         };
         {
-            let (lines, tts, language, voice, events) =
-                (deps.lines.clone(), tts.clone(), language.clone(), voice.clone(), events_tx.clone());
+            let (lines, kokoro, speaker, language, events) =
+                (deps.lines.clone(), kokoro.clone(), speaker.clone(), language.clone(), events_tx.clone());
             let order: &[Line] = match deps.direction {
                 Direction::Inbound => &[Line::Hi, Line::OneMoment, Line::LostNotes, Line::Goodbye],
                 Direction::Outbound => &[Line::OneMoment, Line::LostNotes, Line::Goodbye],
@@ -249,7 +252,7 @@ impl<S: Fn(CallBody)> Live<S> {
             tokio::task::spawn_blocking(move || {
                 for &line in order {
                     let pcm = lines
-                        .get(&*tts, &language, &voice, line)
+                        .get(&speaker, &*kokoro, &language, line)
                         .map_err(|e| eprintln!("voice: rendering {line:?} failed: {e:#}"))
                         .ok();
                     if events.send(Event::Line { line, pcm }).is_err() {
@@ -266,7 +269,7 @@ impl<S: Fn(CallBody)> Live<S> {
             send,
             media,
             playout,
-            speech: SpeechQueue::new(tts, voice),
+            speech: SpeechQueue::new(speaker, kokoro),
             turn: TurnMachine::new(TurnConfig::default(), backchannels(&language)),
             detector: deps.engines.turn(&language),
             recent,
@@ -615,7 +618,7 @@ async fn stt_worker(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::audio::engines::{TextToSpeech, VoiceInfo};
+    use crate::audio::tts::{ChunkedBackend, Renderer};
     use crate::audio::lines::text;
     use crate::audio::playout::FRAME;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -694,18 +697,10 @@ mod tests {
         said: Mutex<Vec<String>>,
     }
 
-    impl TextToSpeech for FakeTts {
-        fn synthesize(&self, text: &str, _voice: &str) -> anyhow::Result<Vec<i16>> {
+    impl Renderer for FakeTts {
+        fn render(&self, text: &str, _voice: &str) -> anyhow::Result<Vec<i16>> {
             self.said.lock().unwrap().push(text.into());
             Ok(vec![text.len() as i16; text.len() * FRAME])
-        }
-
-        fn synthesize_native(&self, text: &str, voice: &str) -> anyhow::Result<Vec<i16>> {
-            self.synthesize(text, voice)
-        }
-
-        fn voices(&self) -> Vec<VoiceInfo> {
-            Vec::new()
         }
     }
 
@@ -733,8 +728,8 @@ mod tests {
             Arc::new(FakeTurn(0.9))
         }
 
-        fn tts(&self, _language: &str) -> Arc<dyn TextToSpeech> {
-            self.tts.clone()
+        fn tts(&self, _language: &str) -> Arc<dyn SpeechBackend> {
+            Arc::new(ChunkedBackend::new("kokoro", "Kokoro", self.tts.clone(), Vec::new()))
         }
     }
 
@@ -814,7 +809,7 @@ mod tests {
             self.inbox.send(SessionIn::Frame(body)).unwrap();
         }
 
-        /// Waits, without advancing the paused clock, for the queue's TTS thread to synthesize `text`.
+        /// Waits, without advancing the paused clock, for the queue's TTS thread to render `text`.
         async fn synthesized(&self, text: &str) {
             for _ in 0..1000 {
                 if self.tts.said.lock().unwrap().iter().any(|t| t == text) {
@@ -833,6 +828,7 @@ mod tests {
             lines: Arc::new(Lines::default()),
             cues: Arc::new(Cues { ready: Arc::new(vec![READY; FRAME]), heard: Arc::new(vec![HEARD; FRAME]) }),
             profile: VoiceProfile { language: "en".into(), voice: String::new(), cue },
+            sidecars: Vec::new(),
             direction: Direction::Outbound,
             max_len: Duration::from_mins(30),
             link_grace: Duration::from_secs(10),

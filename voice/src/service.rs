@@ -1,5 +1,7 @@
-use crate::audio::engines::{Engines, SpeechEngines, TextToSpeech, NATIVE_RATE};
+use crate::audio::engines::{Engines, SpeechEngines};
 use crate::audio::lines::{Line, Lines};
+use crate::audio::sidecar::Sidecars;
+use crate::audio::tts::{find_speaker, Speaker, SpeechBackend, RATE};
 use crate::calls::{clear_member, ring_once, Ring};
 use crate::config::VoiceServiceConfig;
 use crate::inbound::{say_and_leave, Detect, Detector};
@@ -65,19 +67,28 @@ type Slot = Arc<Mutex<Option<Arc<Vec<u8>>>>>;
 struct Previews(Mutex<HashMap<(String, String), Slot>>);
 
 impl Previews {
-    /// `voice` empty is the language default; any other id `tts` does not offer is refused.
-    fn get(&self, tts: &dyn TextToSpeech, language: &str, voice: &str) -> Result<Arc<Vec<u8>>, Refusal> {
-        if !voice.is_empty() && !tts.voices().iter().any(|v| v.id == voice) {
+    /// `voice` empty is Kokoro's default; any other id no live backend offers is refused.
+    fn get(
+        &self,
+        kokoro: &Arc<dyn SpeechBackend>,
+        sidecars: &[Arc<dyn SpeechBackend>],
+        language: &str,
+        voice: &str,
+    ) -> Result<Arc<Vec<u8>>, Refusal> {
+        let speaker =
+            if voice.is_empty() { Some(Speaker::new(kokoro.clone(), "")) } else { find_speaker(voice, kokoro, sidecars) };
+        let Some(speaker) = speaker else {
             return Err(Refusal::new(RefusalCode::BadRequest, format!("no voice {voice:?}")));
-        }
+        };
         let slot = lock(&self.0).entry((language.to_string(), voice.to_string())).or_default().clone();
         let mut held = lock(&slot);
         if let Some(wav) = &*held {
             return Ok(wav.clone());
         }
-        let rendered = tts
-            .synthesize_native(PREVIEW_TEXT, voice)
-            .and_then(|pcm| wav(&pcm, NATIVE_RATE))
+        let rendered = speaker
+            .backend
+            .render(PREVIEW_TEXT, &speaker.voice)
+            .and_then(|pcm| wav(&pcm, RATE))
             .map_err(|e| Refusal::new(RefusalCode::Failed, format!("rendering the sample failed: {e:#}")))?;
         let wav = Arc::new(rendered);
         *held = Some(wav.clone());
@@ -194,6 +205,7 @@ struct Service {
     hang_ups: Mutex<HashMap<String, watch::Sender<bool>>>,
     sessions: Mutex<HashMap<String, mpsc::UnboundedSender<SessionIn>>>,
     backends: Backends,
+    sidecars: Arc<Sidecars>,
     lines: Arc<Lines>,
     cues: Arc<Cues>,
     reporting: Mutex<HashSet<i64>>,
@@ -257,10 +269,7 @@ impl Service {
         if let Some(refusal) = self.no_models() {
             return Err(refusal);
         }
-        let voices = self.backends.engines.tts(language).voices();
-        Ok(Reply::Voices {
-            voices: voices.into_iter().map(|v| VoiceOption { id: v.id, label: v.label, language: v.language }).collect(),
-        })
+        Ok(Reply::Voices { voices: voice_options(language, &self.backends.engines.tts(language), &self.sidecars.live()) })
     }
 
     async fn preview(self: Arc<Self>, language: String, voice: String) -> Result<Reply, Refusal> {
@@ -269,7 +278,7 @@ impl Service {
             return Err(refusal);
         }
         let wav = tokio::task::spawn_blocking(move || {
-            self.previews.get(&*self.backends.engines.tts(&language), &language, &voice)
+            self.previews.get(&self.backends.engines.tts(&language), &self.sidecars.live(), &language, &voice)
         })
         .await
         .map_err(|e| Refusal::new(RefusalCode::Failed, format!("rendering the sample failed: {e}")))??;
@@ -377,6 +386,7 @@ impl Service {
             lines: self.lines.clone(),
             cues: self.cues.clone(),
             profile,
+            sidecars: self.sidecars.live(),
             direction,
             max_len: MAX_CALL,
             link_grace: LINK_GRACE,
@@ -491,7 +501,10 @@ impl Service {
             return clips;
         };
         let (engines, lines) = (self.backends.engines.clone(), self.lines.clone());
-        let line = tokio::task::spawn_blocking(move || lines.get(&*engines.tts(&language), &language, "", Line::CantReach))
+        let line = tokio::task::spawn_blocking(move || {
+            let kokoro = engines.tts(&language);
+            lines.get(&Speaker::new(kokoro.clone(), ""), &*kokoro, &language, Line::CantReach)
+        })
             .await
             .map_err(anyhow::Error::from)
             .and_then(|r| r);
@@ -801,14 +814,32 @@ fn warm_lines(engines: &Arc<dyn SpeechEngines>, lines: &Arc<Lines>) {
     let (engines, lines) = (engines.clone(), lines.clone());
     tokio::task::spawn_blocking(move || {
         for language in engines.languages() {
-            let tts = engines.tts(&language);
+            let kokoro = engines.tts(&language);
+            let speaker = Speaker::new(kokoro.clone(), "");
             for line in [Line::LostNotes, Line::Goodbye, Line::CantReach, Line::Hi] {
-                if let Err(e) = lines.get(&*tts, &language, "", line) {
+                if let Err(e) = lines.get(&speaker, &*kokoro, &language, line) {
                     eprintln!("voice: rendering {line:?} in {language} failed: {e:#}");
                 }
             }
         }
     });
+}
+
+/// Kokoro's voices, then each live sidecar's as `<sidecar>:<voice>`.
+fn voice_options(language: &str, kokoro: &Arc<dyn SpeechBackend>, sidecars: &[Arc<dyn SpeechBackend>]) -> Vec<VoiceOption> {
+    let kokoro_voices = kokoro.voices().into_iter().map(|v| (kokoro, v.id.clone(), v));
+    let sidecar_voices =
+        sidecars.iter().flat_map(|b| b.voices().into_iter().map(move |v| (b, format!("{}:{}", b.id(), v.id), v)));
+    kokoro_voices
+        .chain(sidecar_voices)
+        .map(|(backend, id, v)| VoiceOption {
+            id,
+            label: v.label,
+            language: if v.language.is_empty() { language.to_owned() } else { v.language },
+            backend: backend.label().to_owned(),
+            slow: backend.slow(),
+        })
+        .collect()
 }
 
 /// A load failure leaves ringing up: answered calls fail and fall through.
@@ -834,6 +865,8 @@ pub async fn run_with(cfg: VoiceServiceConfig, peer_cfg: PeerConfig, backends: B
     let cues = Cues::load(&cfg.ready_cue(), &cfg.heard_cue());
     let lines = Arc::new(Lines::default());
     warm_lines(&backends.engines, &lines);
+    let sidecars = Arc::new(Sidecars::new(cfg.tts.sidecars.clone()));
+    sidecars.watch();
     let token = std::fs::read_to_string(&cfg.token_file)
         .map_err(|e| anyhow::anyhow!("reading {}: {e}", cfg.token_file.display()))?;
     let matrix = Arc::new(Matrix::connect(&cfg.homeserver, &token).await?);
@@ -853,6 +886,7 @@ pub async fn run_with(cfg: VoiceServiceConfig, peer_cfg: PeerConfig, backends: B
         hang_ups: Mutex::new(HashMap::new()),
         sessions: Mutex::new(HashMap::new()),
         backends,
+        sidecars,
         lines,
         cues: Arc::new(cues),
         reporting: Mutex::new(HashSet::new()),
@@ -877,6 +911,7 @@ mod tests {
     use super::*;
 
     use crate::audio::engines::VoiceInfo;
+    use crate::audio::tts::{ChunkedBackend, Renderer};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
@@ -885,11 +920,11 @@ mod tests {
     }
 
     #[test]
-    fn the_wav_header_is_44_bytes_at_24_khz() {
-        let bytes = wav(&[0, 1, -1], NATIVE_RATE).unwrap();
+    fn the_wav_header_is_44_bytes_at_48_khz() {
+        let bytes = wav(&[0, 1, -1], RATE).unwrap();
         assert_eq!(bytes.len(), 44 + 3 * 2);
         assert_eq!(&bytes[..4], b"RIFF");
-        assert_eq!(u32::from_le_bytes(bytes[24..28].try_into().unwrap()), 24_000);
+        assert_eq!(u32::from_le_bytes(bytes[24..28].try_into().unwrap()), 48_000);
         assert_eq!(u16::from_le_bytes(bytes[22..24].try_into().unwrap()), 1, "mono");
     }
 
@@ -950,29 +985,32 @@ mod tests {
     #[derive(Default)]
     struct CountingTts(AtomicUsize);
 
-    impl TextToSpeech for CountingTts {
-        fn synthesize(&self, _text: &str, _voice: &str) -> anyhow::Result<Vec<i16>> {
-            anyhow::bail!("a preview is rendered at the native rate")
-        }
-
-        fn synthesize_native(&self, text: &str, _voice: &str) -> anyhow::Result<Vec<i16>> {
+    impl Renderer for CountingTts {
+        fn render(&self, text: &str, _voice: &str) -> anyhow::Result<Vec<i16>> {
             self.0.fetch_add(1, Ordering::SeqCst);
             std::thread::sleep(std::time::Duration::from_millis(20));
             Ok(vec![1; text.len()])
         }
+    }
 
-        fn voices(&self) -> Vec<VoiceInfo> {
-            ["af_heart", "bm_george"]
-                .map(|id| VoiceInfo { id: id.into(), label: id.into(), language: "en".into() })
-                .to_vec()
-        }
+    fn backend(id: &str, label: &str, tts: &Arc<CountingTts>, ids: &[&str]) -> Arc<dyn SpeechBackend> {
+        let language = if id == "kokoro" { "en" } else { "" };
+        let voices = ids.iter().map(|v| VoiceInfo { id: (*v).into(), label: (*v).into(), language: language.into() }).collect();
+        Arc::new(ChunkedBackend::new(id, label, tts.clone(), voices))
+    }
+
+    fn kokoro(tts: &Arc<CountingTts>) -> Arc<dyn SpeechBackend> {
+        backend("kokoro", "Kokoro", tts, &["af_heart", "bm_george"])
     }
 
     #[test]
     fn a_voice_not_offered_is_refused_and_not_cached() {
-        let (tts, previews) = (CountingTts::default(), Previews::default());
-        let refused = previews.get(&tts, "en", "a1").unwrap_err();
-        assert_eq!(refused.code, RefusalCode::BadRequest);
+        let (tts, previews) = (Arc::new(CountingTts::default()), Previews::default());
+        let sidecars = [backend("kyutai", "Natural", &tts, &["alba"])];
+        for voice in ["a1", "kyutai:a1", "gone:alba", "kokoro:af_heart"] {
+            let refused = previews.get(&kokoro(&tts), &sidecars, "en", voice).unwrap_err();
+            assert_eq!(refused.code, RefusalCode::BadRequest, "{voice}");
+        }
         assert_eq!(tts.0.load(Ordering::SeqCst), 0, "nothing is rendered");
         assert!(lock(&previews.0).is_empty(), "nothing is cached");
     }
@@ -983,7 +1021,7 @@ mod tests {
         let asks: Vec<_> = (0..4)
             .map(|_| {
                 let (tts, previews) = (tts.clone(), previews.clone());
-                std::thread::spawn(move || previews.get(&*tts, "en", "af_heart").unwrap())
+                std::thread::spawn(move || previews.get(&kokoro(&tts), &[], "en", "af_heart").unwrap())
             })
             .collect();
         for ask in asks {
@@ -994,12 +1032,25 @@ mod tests {
 
     #[test]
     fn a_preview_is_rendered_once_per_voice() {
-        let (tts, previews) = (CountingTts::default(), Previews::default());
-        let first = previews.get(&tts, "en", "af_heart").unwrap();
-        assert_eq!(previews.get(&tts, "en", "af_heart").unwrap(), first);
-        previews.get(&tts, "en", "bm_george").unwrap();
-        assert_eq!(tts.0.load(Ordering::SeqCst), 2);
+        let (tts, previews) = (Arc::new(CountingTts::default()), Previews::default());
+        let sidecars = [backend("kyutai", "Natural", &tts, &["alba"])];
+        let first = previews.get(&kokoro(&tts), &sidecars, "en", "af_heart").unwrap();
+        assert_eq!(previews.get(&kokoro(&tts), &sidecars, "en", "af_heart").unwrap(), first);
+        previews.get(&kokoro(&tts), &sidecars, "en", "bm_george").unwrap();
+        previews.get(&kokoro(&tts), &sidecars, "en", "kyutai:alba").unwrap();
+        assert_eq!(tts.0.load(Ordering::SeqCst), 3);
         assert_eq!(first.len(), 44 + PREVIEW_TEXT.len() * 2);
+    }
+
+    #[test]
+    fn the_voice_list_is_kokoro_then_each_sidecar_under_its_label() {
+        let tts = Arc::new(CountingTts::default());
+        let sidecars = [backend("kyutai", "Natural", &tts, &["alba"])];
+        let listed: Vec<(String, String, String)> =
+            voice_options("en", &kokoro(&tts), &sidecars).into_iter().map(|v| (v.id, v.backend, v.language)).collect();
+        let expected = [("af_heart", "Kokoro"), ("bm_george", "Kokoro"), ("kyutai:alba", "Natural")]
+            .map(|(id, backend)| (id.to_owned(), backend.to_owned(), "en".to_owned()));
+        assert_eq!(listed, expected);
     }
 
     #[test]
@@ -1010,10 +1061,10 @@ mod tests {
         let engines = Engines::load(&models, crate::audio::engines::Device::Auto).unwrap();
         let tts = engines.tts("en");
         let previews = Previews::default();
-        let first = previews.get(&*tts, "en", "").unwrap();
+        let first = previews.get(&tts, &[], "en", "").unwrap();
         let reader = hound::WavReader::new(std::io::Cursor::new(first.to_vec())).unwrap();
-        assert_eq!((reader.spec().sample_rate, reader.spec().channels), (24_000, 1));
-        assert!(reader.duration() > 24_000, "at least a second of speech");
-        assert!(Arc::ptr_eq(&previews.get(&*tts, "en", "").unwrap(), &first));
+        assert_eq!((reader.spec().sample_rate, reader.spec().channels), (48_000, 1));
+        assert!(reader.duration() > 48_000, "at least a second of speech");
+        assert!(Arc::ptr_eq(&previews.get(&tts, &[], "en", "").unwrap(), &first));
     }
 }

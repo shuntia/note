@@ -296,17 +296,9 @@ impl note_voice::audio::engines::TurnDetector for Deaf {
     }
 }
 
-impl note_voice::audio::engines::TextToSpeech for Deaf {
-    fn synthesize(&self, text: &str, _voice: &str) -> anyhow::Result<Vec<i16>> {
+impl note_voice::audio::tts::Renderer for Deaf {
+    fn render(&self, text: &str, _voice: &str) -> anyhow::Result<Vec<i16>> {
         Ok(vec![spoken_marker(text); 480])
-    }
-
-    fn synthesize_native(&self, text: &str, voice: &str) -> anyhow::Result<Vec<i16>> {
-        self.synthesize(text, voice)
-    }
-
-    fn voices(&self) -> Vec<note_voice::audio::engines::VoiceInfo> {
-        Vec::new()
     }
 }
 
@@ -327,8 +319,8 @@ impl note_voice::audio::engines::SpeechEngines for SilentEngines {
         Arc::new(Deaf)
     }
 
-    fn tts(&self, _language: &str) -> Arc<dyn note_voice::audio::engines::TextToSpeech> {
-        Arc::new(Deaf)
+    fn tts(&self, _language: &str) -> Arc<dyn note_voice::audio::tts::SpeechBackend> {
+        Arc::new(note_voice::audio::tts::ChunkedBackend::new("kokoro", "Kokoro", Arc::new(Deaf), Vec::new()))
     }
 }
 
@@ -450,5 +442,6 @@ pub fn voice_config(dir: &std::path::Path, homeserver: String) -> VoiceServiceCo
         cues_dir: None,
         ready_cue_file: None,
         heard_cue_file: None,
+        tts: Default::default(),
     }
 }

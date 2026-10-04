@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 pub use crate::audio::engines::Device;
+pub use crate::audio::sidecar::SidecarConfig;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct VoiceServiceConfig {
@@ -23,6 +24,15 @@ pub struct VoiceServiceConfig {
     pub cues_dir: Option<PathBuf>,
     pub ready_cue_file: Option<PathBuf>,
     pub heard_cue_file: Option<PathBuf>,
+    #[serde(default)]
+    pub tts: TtsConfig,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct TtsConfig {
+    /// Speech models run as their own processes, offered beside Kokoro while they answer.
+    #[serde(default)]
+    pub sidecars: Vec<SidecarConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -165,6 +175,10 @@ mod tests {
             cues_dir = "/c"
             heard_cue_file = "/h.pcm"
             device = "cpu"
+
+            [[tts.sidecars]]
+            id = "kyutai"
+            url = "http://127.0.0.1:8890"
             "#,
         )
         .unwrap();
@@ -173,5 +187,6 @@ mod tests {
         assert_eq!(cfg.model_sets()["en"].voices[0].id, "af_heart");
         assert_eq!(cfg.ready_cue(), vec![PathBuf::from("/c/ready.pcm")]);
         assert_eq!(cfg.heard_cue(), vec![PathBuf::from("/h.pcm"), PathBuf::from("/c/heard.pcm")]);
+        assert_eq!(cfg.tts.sidecars, [SidecarConfig { id: "kyutai".into(), url: "http://127.0.0.1:8890".into() }]);
     }
 }

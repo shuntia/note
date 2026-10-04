@@ -2691,6 +2691,7 @@ dependencies = [
  "sherpa-onnx",
  "tempfile",
  "tokio",
+ "tokio-tungstenite",
  "toml",
  "urlencoding",
  "uuid",

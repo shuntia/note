@@ -11,6 +11,7 @@ use sherpa_onnx::{
 };
 
 use super::mel::{log_mel, MEL_BINS, MEL_FRAMES};
+use super::tts::{ChunkedBackend, Renderer, SpeechBackend};
 use crate::config::{ModelSet, ModelsConfig};
 
 pub trait Vad: Send {
@@ -32,14 +33,6 @@ pub trait TurnDetector: Send + Sync {
     fn complete(&self, samples_16k: &[f32]) -> f32;
 }
 
-pub trait TextToSpeech: Send + Sync {
-    /// 48 kHz mono i16 for `text` in `voice` (empty = the language default).
-    fn synthesize(&self, text: &str, voice: &str) -> anyhow::Result<Vec<i16>>;
-    /// `synthesize` at the model's own `NATIVE_RATE`.
-    fn synthesize_native(&self, text: &str, voice: &str) -> anyhow::Result<Vec<i16>>;
-    fn voices(&self) -> Vec<VoiceInfo>;
-}
-
 /// The per-language engines a live call draws on.
 pub trait SpeechEngines: Send + Sync {
     fn languages(&self) -> Vec<String>;
@@ -47,8 +40,8 @@ pub trait SpeechEngines: Send + Sync {
     fn stt(&self, language: &str) -> anyhow::Result<Box<dyn SpeechToText>>;
     /// Panics when no language is loaded.
     fn turn(&self, language: &str) -> Arc<dyn TurnDetector>;
-    /// Panics when no language is loaded.
-    fn tts(&self, language: &str) -> Arc<dyn TextToSpeech>;
+    /// Kokoro in `language`. Panics when no language is loaded.
+    fn tts(&self, language: &str) -> Arc<dyn SpeechBackend>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -69,13 +62,12 @@ pub enum Device {
 
 const SAMPLE_RATE: i32 = 16_000;
 const KOKORO_RATE: i32 = 24_000;
-pub const NATIVE_RATE: u32 = KOKORO_RATE as u32;
 
 struct Language {
     vad_model: String,
     recognizer: Arc<OnlineRecognizer>,
     turn: Arc<OrtTurn>,
-    tts: Arc<SherpaTts>,
+    tts: Arc<ChunkedBackend>,
 }
 
 pub struct Engines {
@@ -90,16 +82,16 @@ impl Engines {
     pub fn load(models: &ModelsConfig, device: Device) -> anyhow::Result<Engines> {
         let mut languages = BTreeMap::new();
         for (code, set) in models {
+            let kokoro =
+                SherpaTts::create(code, set, device, GpuAttempt::Try).with_context(|| format!("loading the {code} voice"))?;
+            kokoro.render("Hello.", "")?;
+            let voices = kokoro.voices();
             let language = Language {
                 vad_model: path_str(&set.vad)?,
                 recognizer: Arc::new(recognizer(set).with_context(|| format!("loading the {code} recognizer"))?),
                 turn: Arc::new(OrtTurn::create(&set.turn).with_context(|| format!("loading the {code} turn model"))?),
-                tts: Arc::new(
-                    SherpaTts::create(code, set, device, GpuAttempt::Try)
-                        .with_context(|| format!("loading the {code} voice"))?,
-                ),
+                tts: Arc::new(ChunkedBackend::new(KOKORO, "Kokoro", Arc::new(kokoro), voices)),
             };
-            language.tts.synthesize("Hello.", "")?;
             language
                 .turn
                 .run(&vec![0.0; SAMPLE_RATE as usize])
@@ -131,7 +123,7 @@ impl SpeechEngines for Engines {
         self.language(language).expect("no language loaded").turn.clone()
     }
 
-    fn tts(&self, language: &str) -> Arc<dyn TextToSpeech> {
+    fn tts(&self, language: &str) -> Arc<dyn SpeechBackend> {
         self.language(language).expect("no language loaded").tts.clone()
     }
 
@@ -139,6 +131,8 @@ impl SpeechEngines for Engines {
         self.languages.keys().cloned().collect()
     }
 }
+
+pub const KOKORO: &str = "kokoro";
 
 /// The Kokoro speaker id for `voice`, or the set's default for an unknown or empty one.
 pub fn resolve_sid(set: &ModelSet, voice: &str) -> i32 {
@@ -388,21 +382,19 @@ impl SherpaTts {
     }
 }
 
-impl TextToSpeech for SherpaTts {
-    fn synthesize(&self, text: &str, voice: &str) -> anyhow::Result<Vec<i16>> {
-        Ok(to_48k_i16(&self.generate(text, voice)?))
-    }
-
-    fn synthesize_native(&self, text: &str, voice: &str) -> anyhow::Result<Vec<i16>> {
-        Ok(self.generate(text, voice)?.into_iter().map(pcm).collect())
-    }
-
+impl SherpaTts {
     fn voices(&self) -> Vec<VoiceInfo> {
         self.set
             .voices
             .iter()
             .map(|v| VoiceInfo { id: v.id.clone(), label: v.label.clone(), language: self.language.clone() })
             .collect()
+    }
+}
+
+impl Renderer for SherpaTts {
+    fn render(&self, text: &str, voice: &str) -> anyhow::Result<Vec<i16>> {
+        Ok(to_48k_i16(&self.generate(text, voice)?))
     }
 }
 
@@ -443,7 +435,7 @@ mod tests {
     #[ignore = "needs NOTE_VOICE_MODELS"]
     fn tts_then_stt_round_trips_a_sentence() {
         let e = Engines::load(&models().unwrap(), Device::Auto).unwrap();
-        let pcm48 = e.tts("en").synthesize("Move my run to tomorrow at seven.", "").unwrap();
+        let pcm48 = e.tts("en").render("Move my run to tomorrow at seven.", "").unwrap();
         let pcm16: Vec<f32> = pcm48.iter().step_by(3).map(|s| f32::from(*s) / 32768.0).collect();
         let mut stt = e.stt("en").unwrap();
         for c in pcm16.chunks(2560) {
@@ -459,7 +451,7 @@ mod tests {
         let mut m = models().unwrap();
         let tts = SherpaTts::create("en", &m["en"], Device::Cuda, GpuAttempt::Fail).unwrap();
         assert_eq!(tts.provider(), "cpu");
-        assert!(!tts.synthesize("Hi.", "").unwrap().is_empty());
+        assert!(!tts.render("Hi.", "").unwrap().is_empty());
         m.clear();
         assert!(Engines::load(&m, Device::Auto).unwrap().languages().is_empty());
     }
@@ -470,10 +462,154 @@ mod tests {
         let e = Engines::load(&models().unwrap(), Device::Cpu).unwrap();
         let tts = e.tts("en");
         let down = |p: Vec<i16>| p.iter().step_by(3).map(|s| f32::from(*s) / 32768.0).collect::<Vec<f32>>();
-        let done = down(tts.synthesize("Can you move my run to tomorrow?", "").unwrap());
-        let cut = down(tts.synthesize("Can you move my", "").unwrap());
+        let done = down(tts.render("Can you move my run to tomorrow?", "").unwrap());
+        let cut = down(tts.render("Can you move my", "").unwrap());
         let t = e.turn("en");
         assert!(t.complete(&done) > t.complete(&cut));
+    }
+
+    const REPLY: [&str; 4] = [
+        "Sure, I moved your run to tomorrow at seven.",
+        "The weather looks clear,",
+        "so it should be a good morning for it.",
+        "Do you want a reminder the night before?",
+    ];
+
+    #[test]
+    #[ignore = "needs NOTE_VOICE_MODELS"]
+    fn kokoro_speaks_a_three_sentence_reply_in_two_or_three_chunks() {
+        use super::super::tts::Next;
+        let e = Engines::load(&models().unwrap(), Device::Auto).unwrap();
+        let mut stream = e.tts("en").open("").unwrap();
+        for clause in REPLY {
+            stream.push(clause).unwrap();
+        }
+        stream.finish().unwrap();
+        let mut pieces = Vec::new();
+        while let Next::Audio(audio) = stream.next(std::time::Duration::MAX).unwrap() {
+            assert!(!audio.pcm.is_empty());
+            pieces.push(audio.chars);
+        }
+        assert!((2..=3).contains(&pieces.len()), "{pieces:?}");
+        assert_eq!(pieces.iter().sum::<u32>(), REPLY.iter().map(|c| c.len() as u32).sum::<u32>());
+    }
+
+    /// Plays `backend` speaking `REPLY` in real time, its clauses `apart`; returns the time to the first
+    /// audio, the silences after it, and the pieces rendered.
+    fn play_in_real_time(
+        backend: Arc<dyn super::super::tts::SpeechBackend>,
+        apart: std::time::Duration,
+    ) -> (std::time::Duration, Vec<std::time::Duration>, usize) {
+        use super::super::playout::Playout;
+        use super::super::speech::SpeechQueue;
+        use super::super::tts::Speaker;
+        use std::time::{Duration, Instant};
+        const TICK: Duration = Duration::from_millis(10);
+        let mut q = SpeechQueue::new(Speaker::new(backend.clone(), ""), backend);
+        let mut p = Playout::default();
+        q.play(1);
+        let start = Instant::now();
+        let (mut said, mut first, mut silent, mut gaps, mut pieces) = (0, None, 0u32, Vec::new(), 0);
+        for tick in 0u32.. {
+            std::thread::sleep((start + TICK * tick).saturating_duration_since(Instant::now()));
+            while said < REPLY.len() && start.elapsed() >= apart * said as u32 {
+                q.speak(1, said as u32, REPLY[said].into());
+                said += 1;
+                if said == REPLY.len() {
+                    q.speak_done(1);
+                }
+            }
+            let queued = p.queued_samples();
+            q.pump(&mut p);
+            if p.queued_samples() > queued {
+                pieces += 1;
+            }
+            if p.next_frame().is_some() {
+                first.get_or_insert(start.elapsed());
+                if silent > 0 {
+                    gaps.push(TICK * silent);
+                    silent = 0;
+                }
+            } else if first.is_some() {
+                silent += 1;
+            }
+            if q.take_finished(&mut p) == [1] {
+                break;
+            }
+        }
+        (first.unwrap(), gaps, pieces)
+    }
+
+    /// Speaks each clause on its own, as one piece.
+    struct PerClause(Arc<dyn super::super::tts::SpeechBackend>);
+
+    struct PerClauseStream(Arc<dyn super::super::tts::SpeechBackend>, std::collections::VecDeque<String>, bool);
+
+    impl super::super::tts::SpeechBackend for PerClause {
+        fn id(&self) -> &'static str {
+            "per-clause"
+        }
+
+        fn label(&self) -> &'static str {
+            "Per clause"
+        }
+
+        fn input(&self) -> super::super::tts::TextInput {
+            super::super::tts::TextInput::Incremental
+        }
+
+        fn voices(&self) -> Vec<VoiceInfo> {
+            Vec::new()
+        }
+
+        fn open(&self, _voice: &str) -> anyhow::Result<Box<dyn super::super::tts::SpeechStream>> {
+            Ok(Box::new(PerClauseStream(self.0.clone(), std::collections::VecDeque::new(), false)))
+        }
+    }
+
+    impl super::super::tts::SpeechStream for PerClauseStream {
+        fn push(&mut self, text: &str) -> anyhow::Result<()> {
+            self.1.push_back(text.into());
+            Ok(())
+        }
+
+        fn finish(&mut self) -> anyhow::Result<()> {
+            self.2 = true;
+            Ok(())
+        }
+
+        fn next(&mut self, _ahead: std::time::Duration) -> anyhow::Result<super::super::tts::Next> {
+            use super::super::tts::{Audio, Next};
+            Ok(match self.1.pop_front() {
+                Some(text) => Next::Audio(Audio { pcm: self.0.render(&text, "")?, chars: text.chars().count() as u32 }),
+                None if self.2 => Next::Done,
+                None => Next::Pending,
+            })
+        }
+
+        fn cancel(&mut self) {}
+    }
+
+    #[test]
+    #[ignore = "needs NOTE_VOICE_MODELS; prints timings"]
+    fn streaming_against_per_clause_timing() {
+        use std::time::Duration;
+        for device in [Device::Auto, Device::Cpu] {
+            let e = Engines::load(&models().unwrap(), device).unwrap();
+            let kokoro = e.tts("en");
+            for apart in [Duration::ZERO, Duration::from_millis(150), Duration::from_millis(400)] {
+                for (name, backend) in [
+                    ("per clause", Arc::new(PerClause(kokoro.clone())) as Arc<dyn super::super::tts::SpeechBackend>),
+                    ("chunked", kokoro.clone()),
+                ] {
+                    let (first, gaps, pieces) = play_in_real_time(backend, apart);
+                    println!(
+                        "{device:?}, clauses {apart:?} apart, {name}: first audio at {first:?}, {pieces} pieces, gaps {gaps:?} (total {:?})",
+                        gaps.iter().sum::<Duration>()
+                    );
+                }
+            }
+        }
     }
 
     #[test]

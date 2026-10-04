@@ -3,4 +3,6 @@ pub mod engines;
 pub mod turn;
 pub mod lines;
 pub mod playout;
+pub mod sidecar;
 pub mod speech;
+pub mod tts;

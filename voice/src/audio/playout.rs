@@ -111,6 +111,11 @@ impl Playout {
         self.heard.get(&reply).copied().unwrap_or(0)
     }
 
+    /// Samples queued and not yet played.
+    pub fn queued_samples(&self) -> usize {
+        self.queue.iter().map(|c| c.pcm.len()).sum::<usize>() - self.cursor
+    }
+
     pub fn holds(&self, reply: u64) -> bool {
         self.queue.iter().any(|c| c.reply == Some(reply))
     }
@@ -146,6 +151,7 @@ mod tests {
         for _ in 0..15 {
             p.next_frame().unwrap();
         }
+        assert_eq!(p.queued_samples(), FRAME * 5);
         assert_eq!(p.flush(), vec![(4, 20)]);
         assert!(p.next_frame().is_none());
     }
