@@ -75,6 +75,12 @@ pub struct VoiceOption {
     pub id: String,
     pub label: String,
     pub language: String,
+    /// The label of the speech model the voice runs on, which voices are grouped by.
+    #[serde(default)]
+    pub backend: String,
+    /// Slow to start speaking.
+    #[serde(default)]
+    pub slow: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -268,7 +274,22 @@ mod tests {
         for reply in [
             Reply::Call { call_id: "c-1".into() },
             Reply::Voices {
-                voices: vec![VoiceOption { id: "af_heart".into(), label: "Heart".into(), language: "en".into() }],
+                voices: vec![
+                    VoiceOption {
+                        id: "af_heart".into(),
+                        label: "Heart".into(),
+                        language: "en".into(),
+                        backend: "Kokoro".into(),
+                        slow: false,
+                    },
+                    VoiceOption {
+                        id: "kyutai:alba".into(),
+                        label: "Alba".into(),
+                        language: "en".into(),
+                        backend: "Natural".into(),
+                        slow: true,
+                    },
+                ],
             },
             Reply::Audio { wav_base64: "UklGRg==".into() },
         ] {
