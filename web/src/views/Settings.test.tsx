@@ -42,3 +42,19 @@ test('the_voice_grid_marks_the_chosen_and_the_playing_voice', () => {
   expect(tiles.map((t) => t[1])).toEqual(['false', 'true'])
   expect(tiles.map((t) => t[2].includes('data-playing'))).toEqual([true, false])
 })
+
+test('the_voice_grid_groups_sidecar_voices_under_their_label_after_kokoros', () => {
+  const voices = [
+    { id: 'af_heart', label: 'Heart', backend: 'Kokoro' },
+    { id: 'kyutai:alba', label: 'Alba', backend: 'Natural', slow: true },
+    { id: 'bm_george', label: 'George', backend: 'Kokoro' },
+  ]
+  const html = renderToStaticMarkup(
+    <VoiceGrid voices={voices} chosen="kyutai:alba" playing={null} onPick={() => undefined} />,
+  )
+  const headings = [...html.matchAll(/<h3[^>]*>([^<]*)<\/h3>/g)].map((h) => h[1])
+  expect(headings).toEqual(['Natural'])
+  const names = [...html.matchAll(/class="voice-name">([^<]*)</g)].map((n) => n[1])
+  expect(names).toEqual(['Heart', 'George', 'Alba'])
+  expect(html.indexOf('Natural')).toBeLessThan(html.indexOf('Alba'))
+})

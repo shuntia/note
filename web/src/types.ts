@@ -227,7 +227,7 @@ export type Settings = {
 
 export type RingFor = 'urgent' | 'checkins' | 'never'
 
-export type VoiceChoice = { id: string; label: string }
+export type VoiceChoice = { id: string; label: string; backend?: string; slow?: boolean }
 
 // A live code and the deep link that carries it to the bot.
 export type TelegramLink = { code: string; bot: string; url: string }

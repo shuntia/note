@@ -6,6 +6,19 @@ import { reducedMotion } from './motion'
 import type { VoiceChoice } from './types'
 import type { previewPlayer } from './voicePreview'
 
+/** Voices by the model they run on, in the order each model first appears. */
+export function voiceGroups(voices: VoiceChoice[]): { backend: string; voices: VoiceChoice[] }[] {
+  const groups: { backend: string; voices: VoiceChoice[] }[] = []
+  for (const v of voices) {
+    const backend = v.backend ?? ''
+    const group = groups.find((g) => g.backend === backend)
+    if (group) group.voices.push(v)
+    else groups.push({ backend, voices: [v] })
+  }
+  return groups
+}
+
+/** The first group, Kokoro's, goes unlabelled; each later one is headed by its model's label. */
 export function VoiceGrid({
   voices,
   chosen,
@@ -18,7 +31,32 @@ export function VoiceGrid({
   onPick: (voice: string) => void
 }) {
   return (
-    <div className="voice-grid" role="group" aria-label="Voice">
+    <>
+      {voiceGroups(voices).map((g, i) => (
+        <section className="voice-group" key={g.backend}>
+          {i > 0 && <h3 className="voice-group-label">{g.backend}</h3>}
+          <VoiceTiles voices={g.voices} label={i > 0 ? g.backend : 'Voice'} chosen={chosen} playing={playing} onPick={onPick} />
+        </section>
+      ))}
+    </>
+  )
+}
+
+function VoiceTiles({
+  voices,
+  label,
+  chosen,
+  playing,
+  onPick,
+}: {
+  voices: VoiceChoice[]
+  label: string
+  chosen: string
+  playing: string | null
+  onPick: (voice: string) => void
+}) {
+  return (
+    <div className="voice-grid" role="group" aria-label={label}>
       {voices.map((v) => (
         <button
           key={v.id}
