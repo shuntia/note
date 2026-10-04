@@ -27,7 +27,7 @@ pub trait SpeechBackend: Send + Sync {
     fn open(&self, voice: &str) -> anyhow::Result<Box<dyn SpeechStream>>;
     /// All of `text` as one piece of audio.
     fn render(&self, text: &str, voice: &str) -> anyhow::Result<Vec<i16>> {
-        render_through(self.open(voice)?, text)
+        render_through(self.open(voice)?, text, RENDER_LIMIT, &|| false)?.ok_or_else(|| anyhow!("rendering {text:?} stopped"))
     }
 }
 
@@ -56,18 +56,38 @@ pub struct Audio {
 
 const RENDER_LIMIT: Duration = Duration::from_secs(30);
 
-fn render_through(mut stream: Box<dyn SpeechStream>, text: &str) -> anyhow::Result<Vec<i16>> {
+/// All of `text` through a stream of `backend`, within `limit`; `None` once `abort` turns true.
+pub fn render_within(
+    backend: &dyn SpeechBackend,
+    text: &str,
+    voice: &str,
+    limit: Duration,
+    abort: &dyn Fn() -> bool,
+) -> anyhow::Result<Option<Vec<i16>>> {
+    render_through(backend.open(voice)?, text, limit, abort)
+}
+
+fn render_through(
+    mut stream: Box<dyn SpeechStream>,
+    text: &str,
+    limit: Duration,
+    abort: &dyn Fn() -> bool,
+) -> anyhow::Result<Option<Vec<i16>>> {
     stream.push(text)?;
     stream.finish()?;
-    let deadline = Instant::now() + RENDER_LIMIT;
+    let deadline = Instant::now() + limit;
     let mut pcm = Vec::new();
     loop {
+        if abort() {
+            stream.cancel();
+            return Ok(None);
+        }
         match stream.next(Duration::MAX)? {
             Next::Audio(audio) => pcm.extend(audio.pcm),
-            Next::Done => return Ok(pcm),
+            Next::Done => return Ok(Some(pcm)),
             Next::Pending if Instant::now() >= deadline => {
                 stream.cancel();
-                return Err(anyhow!("rendering {text:?} took over {RENDER_LIMIT:?}"));
+                return Err(anyhow!("rendering {text:?} took over {limit:?}"));
             }
             Next::Pending => std::thread::sleep(Duration::from_millis(5)),
         }
@@ -222,6 +242,7 @@ pub const FIRST_STALL: Duration = Duration::from_millis(250);
 const FIRST_WORDS: usize = 6;
 const MAX_CHARS: usize = 300;
 const MAX_SENTENCES: usize = 2;
+const ABBREVIATIONS: [&str; 11] = ["dr", "mr", "mrs", "ms", "st", "vs", "etc", "a.m", "p.m", "e.g", "i.e"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Chunk {
@@ -358,12 +379,26 @@ impl Chunker {
         None
     }
 
+    /// The '.' at byte `at` closes an abbreviation or an initial, not a sentence.
+    fn abbreviates(&self, at: usize) -> bool {
+        let word = self.buf[..at]
+            .rsplit(char::is_whitespace)
+            .next()
+            .unwrap_or("")
+            .trim_start_matches(['"', '\'', '(', '[', '“', '‘']);
+        let mut letters = word.chars();
+        match (letters.next(), letters.next()) {
+            (Some(c), None) => c.is_ascii_uppercase() && c != 'I',
+            _ => ABBREVIATIONS.contains(&word.to_lowercase().as_str()),
+        }
+    }
+
     fn boundaries(&self) -> Vec<Boundary> {
         let chars: Vec<(usize, char)> = self.buf.char_indices().collect();
         let mut out: Vec<Boundary> = Vec::new();
-        for (k, &(_, c)) in chars.iter().enumerate() {
+        for (k, &(i, c)) in chars.iter().enumerate() {
             let sentence = matches!(c, '.' | '?' | '!' | '…');
-            if !(sentence || matches!(c, ',' | ';' | ':' | '—' | '–')) {
+            if !(sentence || matches!(c, ',' | ';' | ':' | '—' | '–')) || (c == '.' && self.abbreviates(i)) {
                 continue;
             }
             let mut j = k + 1;
@@ -482,6 +517,17 @@ mod tests {
         }
         assert_eq!(ahead, Duration::from_millis(900));
         assert_eq!(got.unwrap().text.trim(), "Then the run moves to Friday, and the swim");
+    }
+
+    #[test]
+    fn abbreviations_and_initials_do_not_end_sentences() {
+        let mut c = Chunker::default();
+        c.push("Sure, I can.");
+        c.next(PLENTY, NOW).unwrap();
+        c.push("Your run is at 7 a.m. with Dr. Smith, Mrs. Doe, J. R. Ray, e.g. Bo etc. and St. Ives vs. Al");
+        assert_eq!(c.next(PLENTY, NOW), None, "no sentence has ended");
+        c.push("Neither did I. Fine.");
+        assert!(c.next(PLENTY, NOW).unwrap().text.ends_with("Neither did I. Fine."));
     }
 
     #[test]

@@ -1,5 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -12,7 +13,7 @@ use crate::audio::engines::{SpeechEngines, SpeechToText, TurnDetector, Vad};
 use crate::audio::lines::{Line, Lines};
 use crate::audio::playout::{Clip, Playout};
 use crate::audio::speech::{Gate, SpeechQueue};
-use crate::audio::tts::{speaker, SpeechBackend};
+use crate::audio::tts::{speaker, Speaker, SpeechBackend};
 use crate::audio::turn::{backchannels, Action, Input, TurnConfig, TurnMachine};
 use crate::media::{Gone, MediaIo};
 
@@ -242,23 +243,16 @@ impl<S: Fn(CallBody)> Live<S> {
             stt: tokio::spawn(stt_worker(stt, stt_rx, events_tx.clone())),
             audio: tokio::spawn(audio_in(media.clone(), vad, stt_tx.clone(), events_tx.clone(), recent.clone(), start)),
         };
+        let speech = SpeechQueue::new(speaker.clone(), kokoro.clone());
+        let order: &'static [Line] = match deps.direction {
+            Direction::Inbound => &[Line::Hi, Line::OneMoment, Line::LostNotes, Line::Goodbye],
+            Direction::Outbound => &[Line::OneMoment, Line::LostNotes, Line::Goodbye],
+        };
         {
-            let (lines, kokoro, speaker, language, events) =
-                (deps.lines.clone(), kokoro.clone(), speaker.clone(), language.clone(), events_tx.clone());
-            let order: &[Line] = match deps.direction {
-                Direction::Inbound => &[Line::Hi, Line::OneMoment, Line::LostNotes, Line::Goodbye],
-                Direction::Outbound => &[Line::OneMoment, Line::LostNotes, Line::Goodbye],
-            };
+            let (lines, rendering, language, events) =
+                (deps.lines.clone(), speech.rendering(), language.clone(), events_tx.clone());
             tokio::task::spawn_blocking(move || {
-                for &line in order {
-                    let pcm = lines
-                        .get(&speaker, &*kokoro, &language, line)
-                        .map_err(|e| eprintln!("voice: rendering {line:?} failed: {e:#}"))
-                        .ok();
-                    if events.send(Event::Line { line, pcm }).is_err() {
-                        return;
-                    }
-                }
+                render_lines(&lines, &speaker, &kokoro, &language, order, &rendering, &events);
             });
         }
         let mut playout = Playout::default();
@@ -269,7 +263,7 @@ impl<S: Fn(CallBody)> Live<S> {
             send,
             media,
             playout,
-            speech: SpeechQueue::new(speaker, kokoro),
+            speech,
             turn: TurnMachine::new(TurnConfig::default(), backchannels(&language)),
             detector: deps.engines.turn(&language),
             recent,
@@ -521,6 +515,57 @@ impl<S: Fn(CallBody)> Live<S> {
         self.playout.resume();
         self.goodbye_pending = true;
         self.ending = Some(Ending::new(end));
+    }
+}
+
+/// Gives the call each line at once: in `speaker` if already rendered, else in Kokoro. A sidecar voice's
+/// lines are then rendered in it one by one, only while no reply is rendering, and replace Kokoro's.
+fn render_lines(
+    lines: &Lines,
+    speaker: &Speaker,
+    kokoro: &Arc<dyn SpeechBackend>,
+    language: &str,
+    order: &[Line],
+    rendering: &AtomicBool,
+    events: &mpsc::UnboundedSender<Event>,
+) {
+    let on_kokoro = speaker.backend.id() == kokoro.id();
+    let quick = if on_kokoro { speaker.clone() } else { Speaker::new(kokoro.clone(), "") };
+    let mut upgrades = Vec::new();
+    for &line in order {
+        let pcm = lines.cached(speaker, language, line).or_else(|| {
+            if !on_kokoro {
+                upgrades.push(line);
+            }
+            lines.get(&quick, &**kokoro, language, line).map_err(|e| eprintln!("voice: rendering {line:?} failed: {e:#}")).ok()
+        });
+        if events.send(Event::Line { line, pcm }).is_err() {
+            return;
+        }
+    }
+    let busy = || rendering.load(Ordering::SeqCst) || events.is_closed();
+    for line in upgrades {
+        loop {
+            while busy() {
+                if events.is_closed() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            match lines.upgrade(speaker, language, line, &busy) {
+                Ok(Some(pcm)) => {
+                    if events.send(Event::Line { line, pcm: Some(pcm) }).is_err() {
+                        return;
+                    }
+                    break;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    eprintln!("voice: rendering {line:?} in {} failed, keeping Kokoro's: {e:#}", speaker.backend.id());
+                    return;
+                }
+            }
+        }
     }
 }
 
@@ -971,6 +1016,53 @@ mod tests {
         let c = call_with(deps(Vec::new(), false, &tts), Vec::new(), tts);
         c.synthesized(text(Line::Goodbye, "en")).await;
         assert_eq!(c.tts.said.lock().unwrap()[0], text(Line::OneMoment, "en"));
+    }
+
+    /// Renders one frame valued `SIDE` per text, once opened.
+    #[derive(Default)]
+    struct Gated {
+        open: Mutex<bool>,
+        opened: std::sync::Condvar,
+        said: Mutex<Vec<String>>,
+    }
+
+    const SIDE: i16 = 7000;
+
+    impl Renderer for Gated {
+        fn render(&self, text: &str, _voice: &str) -> anyhow::Result<Vec<i16>> {
+            let mut open = self.open.lock().unwrap();
+            while !*open {
+                open = self.opened.wait(open).unwrap();
+            }
+            self.said.lock().unwrap().push(text.into());
+            Ok(vec![SIDE; FRAME])
+        }
+    }
+
+    /// In real time: a render blocked on the gate would hold a paused clock still.
+    #[tokio::test]
+    async fn a_sidecar_voices_lines_start_in_kokoro_and_switch_once_rendered() {
+        let hi = text(Line::Hi, "en").len();
+        let goodbye = text(Line::Goodbye, "en").len();
+        let gate = Arc::new(Gated::default());
+        let voices = vec![crate::audio::engines::VoiceInfo { id: "v".into(), label: "V".into(), language: String::new() }];
+        let side: Arc<dyn SpeechBackend> = Arc::new(ChunkedBackend::new("side", "Side", gate.clone(), voices));
+        let tts: Arc<FakeTts> = Arc::default();
+        let mut d = deps(Vec::new(), false, &tts);
+        d.direction = Direction::Inbound;
+        d.sidecars = vec![side];
+        d.profile.voice = "side:v".into();
+        d.max_len = Duration::from_secs(3);
+        let c = call_with(d, Vec::new(), tts);
+        sleep_ms(2000).await;
+        let early_hi = c.probe.frames_of(hi);
+        *gate.open.lock().unwrap() = true;
+        gate.opened.notify_all();
+        assert_eq!(early_hi, hi, "Kokoro's hi plays while the sidecar is busy");
+        let end = tokio::time::timeout(Duration::from_secs(10), c.end).await.unwrap().unwrap();
+        assert_eq!(end, SessionEnd::TimedOut);
+        assert!(c.probe.frames_of(SIDE as usize) > 0, "the goodbye is in the sidecar's voice");
+        assert_eq!(c.probe.frames_of(goodbye), 0);
     }
 
     #[tokio::test(start_paused = true)]

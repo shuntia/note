@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use super::tts::{Speaker, SpeechBackend};
+use super::tts::{render_within, Speaker, SpeechBackend};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Line {
@@ -49,14 +50,44 @@ impl Lines {
         }
     }
 
+    pub fn cached(&self, speaker: &Speaker, language: &str, line: Line) -> Option<Arc<Vec<i16>>> {
+        self.rendered.lock().expect("lines lock").get(&key(&*speaker.backend, &speaker.voice, language, line)).cloned()
+    }
+
+    /// The line rendered in `speaker` within `UPGRADE_LIMIT`, stopping with `None` once `abort` turns true.
+    pub fn upgrade(
+        &self,
+        speaker: &Speaker,
+        language: &str,
+        line: Line,
+        abort: &dyn Fn() -> bool,
+    ) -> anyhow::Result<Option<Arc<Vec<i16>>>> {
+        if let Some(pcm) = self.cached(speaker, language, line) {
+            return Ok(Some(pcm));
+        }
+        let Some(pcm) = render_within(&*speaker.backend, text(line, language), &speaker.voice, UPGRADE_LIMIT, abort)? else {
+            return Ok(None);
+        };
+        Ok(Some(self.keep(key(&*speaker.backend, &speaker.voice, language, line), pcm)))
+    }
+
     fn render(&self, backend: &dyn SpeechBackend, voice: &str, language: &str, line: Line) -> anyhow::Result<Arc<Vec<i16>>> {
-        let key = (language.to_owned(), backend.id().to_owned(), voice.to_owned(), line);
+        let key = key(backend, voice, language, line);
         if let Some(pcm) = self.rendered.lock().expect("lines lock").get(&key) {
             return Ok(pcm.clone());
         }
-        let pcm = Arc::new(backend.render(text(line, language), voice)?);
-        Ok(self.rendered.lock().expect("lines lock").entry(key).or_insert(pcm).clone())
+        Ok(self.keep(key, backend.render(text(line, language), voice)?))
     }
+
+    fn keep(&self, key: Key, pcm: Vec<i16>) -> Arc<Vec<i16>> {
+        self.rendered.lock().expect("lines lock").entry(key).or_insert_with(|| Arc::new(pcm)).clone()
+    }
+}
+
+const UPGRADE_LIMIT: Duration = Duration::from_secs(5);
+
+fn key(backend: &dyn SpeechBackend, voice: &str, language: &str, line: Line) -> Key {
+    (language.to_owned(), backend.id().to_owned(), voice.to_owned(), line)
 }
 
 #[cfg(test)]
@@ -112,5 +143,17 @@ mod tests {
         let lines = Lines::default();
         let pcm = lines.get(&Speaker::new(side, "down"), &*kokoro, "en", Line::Hi).unwrap();
         assert_eq!(*pcm, vec![3]);
+    }
+
+    #[test]
+    fn an_upgrade_is_cached_and_stops_when_asked() {
+        let tts = Arc::new(CountingTts::default());
+        let side = Speaker::new(Arc::new(ChunkedBackend::new("side", "Side", tts.clone(), Vec::new())), "v");
+        let lines = Lines::default();
+        assert!(lines.upgrade(&side, "en", Line::Hi, &|| true).unwrap().is_none());
+        assert!(lines.cached(&side, "en", Line::Hi).is_none());
+        let pcm = lines.upgrade(&side, "en", Line::Hi, &|| false).unwrap().unwrap();
+        assert_eq!(*pcm, vec![4]);
+        assert!(Arc::ptr_eq(&lines.cached(&side, "en", Line::Hi).unwrap(), &pcm));
     }
 }
