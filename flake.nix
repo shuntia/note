@@ -2,7 +2,22 @@
   description = "Note: self-hosted daily planning server";
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
   inputs.crane.url = "github:ipetkov/crane";
-  outputs = { self, nixpkgs, crane }:
+  inputs.pyproject-nix = {
+    url = "github:pyproject-nix/pyproject.nix";
+    inputs.nixpkgs.follows = "nixpkgs";
+  };
+  inputs.uv2nix = {
+    url = "github:pyproject-nix/uv2nix";
+    inputs.pyproject-nix.follows = "pyproject-nix";
+    inputs.nixpkgs.follows = "nixpkgs";
+  };
+  inputs.pyproject-build-systems = {
+    url = "github:pyproject-nix/build-system-pkgs";
+    inputs.pyproject-nix.follows = "pyproject-nix";
+    inputs.uv2nix.follows = "uv2nix";
+    inputs.nixpkgs.follows = "nixpkgs";
+  };
+  outputs = { self, nixpkgs, crane, pyproject-nix, uv2nix, pyproject-build-systems }:
     let
       inherit (nixpkgs) lib;
       systems = [ "x86_64-linux" "aarch64-linux" ];
@@ -229,8 +244,10 @@
               mainProgram = "note-desktop";
             };
           };
+
+          ttsChatterbox = import ./nix/tts-chatterbox.nix { inherit pkgs lib pyproject-nix uv2nix pyproject-build-systems; };
         in
-        { inherit web server voice voiceTests tests desktop; };
+        { inherit web server voice voiceTests tests desktop ttsChatterbox; };
     in {
       nixosModules.default = import ./nix/module.nix self;
 
@@ -249,6 +266,8 @@
           note-web = b.web;
           note-desktop = b.desktop;
           desktop = b.desktop;
+        } // lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == "x86_64-linux") {
+          note-tts-chatterbox = b.ttsChatterbox;
         });
 
       checks = forAllSystems (pkgs:
