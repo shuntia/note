@@ -7,6 +7,7 @@ use std::sync::Mutex;
 pub struct MockChannel {
     name: &'static str,
     fail: AtomicBool,
+    companion: AtomicBool,
     seen: Mutex<Vec<(i64, OutboundMessage)>>,
 }
 
@@ -15,12 +16,17 @@ impl MockChannel {
         Self {
             name,
             fail: AtomicBool::new(false),
+            companion: AtomicBool::new(false),
             seen: Mutex::new(Vec::new()),
         }
     }
 
     pub fn set_fail(&self, fail: bool) {
         self.fail.store(fail, Ordering::Relaxed);
+    }
+
+    pub fn set_companion(&self, on: bool) {
+        self.companion.store(on, Ordering::Relaxed);
     }
 
     pub fn seen(&self) -> Vec<(i64, OutboundMessage)> {
@@ -31,6 +37,10 @@ impl MockChannel {
 impl Channel for MockChannel {
     fn name(&self) -> &'static str {
         self.name
+    }
+
+    fn companion(&self) -> bool {
+        self.companion.load(Ordering::Relaxed)
     }
 
     fn deliver(&self, user_id: i64, _username: &str, msg: &OutboundMessage) -> anyhow::Result<()> {

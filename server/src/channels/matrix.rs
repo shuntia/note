@@ -162,7 +162,26 @@ impl Channel for MatrixChannel {
         true
     }
 
-    fn deliver(&self, _user_id: i64, _username: &str, _msg: &OutboundMessage) -> Result<()> {
+    /// Posts only for a user who opted in and whose link is joined; anyone
+    /// else is `Ok` with nothing sent.
+    fn deliver(&self, user_id: i64, username: &str, msg: &OutboundMessage) -> Result<()> {
+        let cfg = crate::config::UserConfig::load(&self.config_dir, username)?;
+        if !cfg.matrix_send() {
+            return Ok(());
+        }
+        let link = {
+            let conn = crate::db_guard(&self.db);
+            crate::voice::links::ringable(&conn, user_id)?
+        };
+        let Some(room_id) = link.and_then(|l| l.room_id) else { return Ok(()) };
+        let text =
+            if msg.title.trim().is_empty() { msg.body.clone() } else { format!("{}\n{}", msg.title, msg.body) };
+        let kind = if cfg.matrix_ping() { Kind::Text } else { Kind::Notice };
+        self.send(&room_id, &text, kind)?;
+        if let Some(id) = msg.conversation_id {
+            let conn = crate::db_guard(&self.db);
+            let _ = crate::talk::stamp_matrix(&conn, id, jiff::Timestamp::now());
+        }
         Ok(())
     }
 }
@@ -245,5 +264,88 @@ mod tests {
         assert_eq!(body_json(&raw), serde_json::json!({ "msgtype": "m.notice", "body": "hello" }));
         ch.send("!dm:t", "hello", Kind::Text).unwrap();
         assert_eq!(body_json(&took(&rx))["msgtype"], "m.text");
+    }
+
+    fn linked(ch: &MatrixChannel, tmp: &tempfile::TempDir, user_toml: &str) {
+        let conn = crate::db_guard(&ch.db);
+        conn.execute("INSERT INTO users (username, pass_hash, role) VALUES ('aki', 'x', 'member')", []).unwrap();
+        conn.execute(
+            "INSERT INTO matrix_links (user_id, mxid, room_id, state, created_at)
+             VALUES (1, '@aki:t', '!dm:t', 'linked', 'x')",
+            [],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO conversations (user_id, title, created_at, updated_at) VALUES (1, 't', 'c', 'c')", [])
+            .unwrap();
+        let base = "display_name = \"A\"\ntimezone = \"UTC\"\ntemplate = \"default\"\n";
+        for (dir, extra) in [("defaults", ""), ("users/aki", user_toml)] {
+            let dir = tmp.path().join(dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("user.toml"), format!("{base}{extra}")).unwrap();
+        }
+    }
+
+    fn checkin() -> OutboundMessage {
+        OutboundMessage {
+            title: "Check-in".into(),
+            body: "How is it going?".into(),
+            urgency: crate::channels::Urgency::High,
+            checkin: true,
+            event_id: Some(1),
+            conversation_id: Some(1),
+            actions: crate::channels::event_actions(1),
+        }
+    }
+
+    fn quiet(rx: &Receiver<String>) -> bool {
+        rx.recv_timeout(std::time::Duration::from_millis(250)).is_err()
+    }
+
+    #[test]
+    fn nothing_is_posted_until_the_user_opts_in() {
+        let (base, rx) = serve(vec![("200 OK", WHOAMI), ("200 OK", SENT)]);
+        let (ch, tmp) = channel(&base);
+        took(&rx);
+        linked(&ch, &tmp, "");
+        ch.deliver(1, "aki", &checkin()).unwrap();
+        assert!(quiet(&rx));
+    }
+
+    #[test]
+    fn opted_in_posts_a_silent_notice_and_stamps_the_thread() {
+        let (base, rx) = serve(vec![("200 OK", WHOAMI), ("200 OK", SENT)]);
+        let (ch, tmp) = channel(&base);
+        took(&rx);
+        linked(&ch, &tmp, "matrix_send = true\n");
+        ch.deliver(1, "aki", &checkin()).unwrap();
+        assert_eq!(
+            body_json(&took(&rx)),
+            serde_json::json!({ "msgtype": "m.notice", "body": "Check-in\nHow is it going?" })
+        );
+        let stamped: bool = crate::db_guard(&ch.db)
+            .query_row("SELECT matrix_at IS NOT NULL FROM conversations WHERE id = 1", [], |r| r.get(0))
+            .unwrap();
+        assert!(stamped);
+    }
+
+    #[test]
+    fn ping_posts_text_that_notifies() {
+        let (base, rx) = serve(vec![("200 OK", WHOAMI), ("200 OK", SENT)]);
+        let (ch, tmp) = channel(&base);
+        took(&rx);
+        linked(&ch, &tmp, "matrix_send = true\nmatrix_ping = true\n");
+        ch.deliver(1, "aki", &checkin()).unwrap();
+        assert_eq!(body_json(&took(&rx))["msgtype"], "m.text");
+    }
+
+    #[test]
+    fn an_unlinked_user_gets_nothing_posted() {
+        let (base, rx) = serve(vec![("200 OK", WHOAMI), ("200 OK", SENT)]);
+        let (ch, tmp) = channel(&base);
+        took(&rx);
+        linked(&ch, &tmp, "matrix_send = true\n");
+        crate::db_guard(&ch.db).execute("UPDATE matrix_links SET state = 'invited'", []).unwrap();
+        ch.deliver(1, "aki", &checkin()).unwrap();
+        assert!(quiet(&rx));
     }
 }

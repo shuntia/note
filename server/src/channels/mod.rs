@@ -171,9 +171,9 @@ fn open_checkin_thread(conn: &Connection, ev: &crate::runner::FiredEvent, msg: &
     }
 }
 
-/// Walks the ladder until one channel delivers, returning its name; every
-/// outcome is logged and none propagates — a failed delivery is a plainer day,
-/// never an error. The DB guard is never held across a channel's `deliver`.
+/// Walks the ladder until one channel delivers, returning its name, and posts
+/// to each companion it passes on the way. Every outcome is logged and none
+/// propagates — a failed delivery is a plainer day, never an error. The DB guard is never held across a channel's `deliver`.
 pub fn deliver_via(
     db: &Mutex<Connection>,
     ladder: &[Arc<dyn Channel>],
@@ -187,6 +187,18 @@ pub fn deliver_via(
     };
     let mut errors: Vec<String> = Vec::new();
     for ch in ladder {
+        if ch.companion() {
+            if let Err(e) = ch.deliver(user_id, username, msg) {
+                let conn = crate::db_guard(db);
+                let _ = crate::log::record(
+                    &conn,
+                    Some(user_id),
+                    &format!("{}_send_error", ch.name()),
+                    &format!("{subject}: {e}"),
+                );
+            }
+            continue;
+        }
         match ch.deliver(user_id, username, msg) {
             Ok(()) => {
                 let conn = crate::db_guard(db);
@@ -385,6 +397,59 @@ mod tests {
         let mut other = ev("review", "push", "");
         other.date = "2026-09-28".into();
         assert_eq!(render(&conn, &other).body, "(no week yet)");
+    }
+
+    fn plain(body: &str) -> OutboundMessage {
+        OutboundMessage {
+            title: "Note".into(),
+            body: body.into(),
+            urgency: Urgency::Normal,
+            checkin: false,
+            event_id: None,
+            conversation_id: None,
+            actions: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_companion_is_posted_to_and_the_walk_goes_on() {
+        let (db, _uid) = env();
+        let matrix = Arc::new(MockChannel::new("matrix"));
+        matrix.set_companion(true);
+        let push = Arc::new(MockChannel::new("webpush"));
+        let ladder: Vec<Arc<dyn Channel>> = vec![matrix.clone(), push.clone()];
+        assert_eq!(deliver_via(&db, &ladder, 1, "aki", &plain("hi")), Some("webpush"));
+        assert_eq!((matrix.seen().len(), push.seen().len()), (1, 1));
+    }
+
+    #[test]
+    fn a_failing_companion_is_logged_and_delivers_nothing() {
+        let (db, _uid) = env();
+        let matrix = Arc::new(MockChannel::new("matrix"));
+        matrix.set_companion(true);
+        matrix.set_fail(true);
+        let ladder: Vec<Arc<dyn Channel>> = vec![matrix];
+        assert_eq!(deliver_via(&db, &ladder, 1, "aki", &plain("hi")), None);
+        let conn = db.lock().unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM event_log WHERE kind = 'matrix_send_error'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn a_rung_message_posts_to_matrix_once() {
+        let (db, _uid) = env();
+        let voice = Arc::new(MockChannel::new("voice"));
+        let matrix = Arc::new(MockChannel::new("matrix"));
+        matrix.set_companion(true);
+        let push = Arc::new(MockChannel::new("webpush"));
+        let ladder: Vec<Arc<dyn Channel>> = vec![voice, matrix.clone(), push.clone()];
+        deliver_via(&db, &ladder, 1, "aki", &plain("ring"));
+        assert!(matrix.seen().is_empty(), "the ring holds the message");
+        let fallback: Vec<Arc<dyn Channel>> = vec![matrix.clone(), push];
+        deliver_via(&db, &fallback, 1, "aki", &plain("ring"));
+        assert_eq!(matrix.seen().len(), 1);
     }
 
     #[test]
