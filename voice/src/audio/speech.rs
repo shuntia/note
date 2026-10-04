@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -25,27 +25,30 @@ enum Cmd {
 
 enum Out {
     Piece { reply: u64, clip: Clip },
-    Ended { reply: u64 },
+    /// The reply's stream ended after `pushes` of its texts.
+    Ended { reply: u64, pushes: u32 },
+}
+
+#[derive(Clone)]
+struct Queued {
+    reply: u64,
+    /// Samples queued to play up to and including this reply's.
+    through: u64,
+    received: u64,
 }
 
 /// What the worker reads of the queue's state.
 #[derive(Default)]
 struct Shared {
-    /// Samples queued to play, as of the last pump.
-    queued: AtomicU64,
-    sent: AtomicU64,
-    received: AtomicU64,
+    /// The playing replies still producing audio, in play order, as of the last pump.
+    playing: Mutex<Vec<Queued>>,
     cmds_sent: AtomicU64,
     /// Commands applied when the worker last found nothing to do.
     quiet_at: AtomicU64,
 }
 
-impl Shared {
-    fn ahead(&self) -> Duration {
-        let in_flight = self.sent.load(Ordering::SeqCst).saturating_sub(self.received.load(Ordering::SeqCst));
-        let samples = self.queued.load(Ordering::SeqCst) + in_flight;
-        Duration::from_micros(samples * 1_000_000 / u64::from(RATE))
-    }
+fn duration(samples: u64) -> Duration {
+    Duration::from_micros(samples * 1_000_000 / u64::from(RATE))
 }
 
 #[derive(Default)]
@@ -57,8 +60,10 @@ struct Reply {
     next_idx: u32,
     waiting: BTreeMap<u32, String>,
     opened: bool,
+    pushes: u32,
     ended: bool,
     ready: VecDeque<Clip>,
+    received: u64,
 }
 
 impl Reply {
@@ -76,6 +81,7 @@ pub struct SpeechQueue {
     play_order: VecDeque<u64>,
     playing: Vec<u64>,
     rx: mpsc::UnboundedReceiver<Out>,
+    rendering: Arc<AtomicBool>,
 }
 
 impl SpeechQueue {
@@ -93,6 +99,7 @@ impl SpeechQueue {
             dropped: dropped.clone(),
             shared: shared.clone(),
             applied: 0,
+            pushes: HashMap::new(),
             tx,
         };
         std::thread::Builder::new()
@@ -108,12 +115,37 @@ impl SpeechQueue {
             play_order: VecDeque::new(),
             playing: Vec::new(),
             rx,
+            rendering: Arc::default(),
         }
     }
 
     fn send(&self, cmd: Cmd) {
         self.shared.cmds_sent.fetch_add(1, Ordering::SeqCst);
         self.cmds.send(cmd).expect("the TTS thread outlives the queue");
+    }
+
+    fn push(&mut self, reply: u64, texts: Vec<String>) {
+        if texts.is_empty() {
+            return;
+        }
+        let state = self.replies.get_mut(&reply).expect("a speaking reply has state");
+        state.opened = true;
+        state.ended = false;
+        state.pushes += texts.len() as u32;
+        for text in texts {
+            self.send(Cmd::Push { reply, text });
+        }
+        self.note_rendering();
+    }
+
+    /// Set while any reply has text not yet fully rendered.
+    pub fn rendering(&self) -> Arc<AtomicBool> {
+        self.rendering.clone()
+    }
+
+    fn note_rendering(&self) {
+        let busy = self.replies.values().any(|s| s.opened && !s.ended && s.gate != Gate::Dropped);
+        self.rendering.store(busy, Ordering::SeqCst);
     }
 
     /// Clauses reach the stream in idx order.
@@ -129,10 +161,7 @@ impl SpeechQueue {
             texts.push(text);
             state.next_idx += 1;
         }
-        state.opened |= !texts.is_empty();
-        for text in texts {
-            self.send(Cmd::Push { reply, text });
-        }
+        self.push(reply, texts);
     }
 
     /// Clauses still waiting on a missing idx are spoken in order.
@@ -146,12 +175,8 @@ impl SpeechQueue {
             return;
         }
         let texts: Vec<String> = std::mem::take(&mut state.waiting).into_values().collect();
-        state.opened |= !texts.is_empty();
-        let opened = state.opened;
-        for text in texts {
-            self.send(Cmd::Push { reply, text });
-        }
-        if opened {
+        self.push(reply, texts);
+        if self.replies[&reply].opened {
             self.send(Cmd::Finish { reply });
         }
     }
@@ -181,6 +206,7 @@ impl SpeechQueue {
         if cancel {
             self.send(Cmd::Cancel { reply });
         }
+        self.note_rendering();
     }
 
     /// Moves the audio of playing replies, in play order, into the playout.
@@ -199,13 +225,17 @@ impl SpeechQueue {
             }
             self.play_order.pop_front();
         }
-        let ready: usize = self
-            .playing
+        let mut through = playout.queued_samples() as u64;
+        let playing = self
+            .play_order
             .iter()
-            .filter_map(|r| self.replies.get(r))
-            .flat_map(|s| s.ready.iter().map(|c| c.pcm.len()))
-            .sum();
-        self.shared.queued.store((playout.queued_samples() + ready) as u64, Ordering::SeqCst);
+            .map(|&reply| {
+                let state = &self.replies[&reply];
+                through += state.ready.iter().map(|c| c.pcm.len() as u64).sum::<u64>();
+                Queued { reply, through, received: state.received }
+            })
+            .collect();
+        *self.shared.playing.lock().expect("playing lock") = playing;
     }
 
     /// Told to play, not dropped, and has words to say.
@@ -261,18 +291,19 @@ impl SpeechQueue {
         while let Ok(out) = self.rx.try_recv() {
             match out {
                 Out::Piece { reply, clip } => {
-                    self.shared.received.fetch_add(clip.pcm.len() as u64, Ordering::SeqCst);
                     if let Some(state) = self.replies.get_mut(&reply).filter(|s| s.gate != Gate::Dropped) {
+                        state.received += clip.pcm.len() as u64;
                         state.ready.push_back(clip);
                     }
                 }
-                Out::Ended { reply } => {
-                    if let Some(state) = self.replies.get_mut(&reply) {
+                Out::Ended { reply, pushes } => {
+                    if let Some(state) = self.replies.get_mut(&reply).filter(|s| pushes >= s.pushes) {
                         state.ended = true;
                     }
                 }
             }
         }
+        self.note_rendering();
     }
 }
 
@@ -287,6 +318,8 @@ struct Active {
     /// Characters of `pushed` already covered by audio.
     covered: u32,
     finished: bool,
+    /// Samples sent so far.
+    sent: u64,
 }
 
 struct Worker {
@@ -296,6 +329,8 @@ struct Worker {
     dropped: Arc<Mutex<HashSet<u64>>>,
     shared: Arc<Shared>,
     applied: u64,
+    /// Texts pushed per reply, across its streams.
+    pushes: HashMap<u64, u32>,
     tx: mpsc::UnboundedSender<Out>,
 }
 
@@ -339,6 +374,7 @@ impl Worker {
                 if self.is_dropped(reply) {
                     return;
                 }
+                *self.pushes.entry(reply).or_default() += 1;
                 let at = match self.streams.iter().position(|a| a.reply == reply) {
                     Some(at) => at,
                     None => match self.open(reply) {
@@ -359,7 +395,7 @@ impl Worker {
             }
             Cmd::Finish { reply } => {
                 let Some(at) = self.streams.iter().position(|a| a.reply == reply) else {
-                    let _ = self.tx.send(Out::Ended { reply });
+                    self.ended(reply);
                     return;
                 };
                 self.streams[at].finished = true;
@@ -383,7 +419,7 @@ impl Worker {
         });
         match opened {
             Ok((stream, on_fallback)) => {
-                Some(Active { reply, stream, on_fallback, pushed: Vec::new(), covered: 0, finished: false })
+                Some(Active { reply, stream, on_fallback, pushed: Vec::new(), covered: 0, finished: false, sent: 0 })
             }
             Err(e) => {
                 eprintln!("voice: reply {reply} cannot be spoken: {e:#}");
@@ -430,20 +466,40 @@ impl Worker {
             Err(e) => {
                 eprintln!("voice: reply {} cannot go on: {e:#}", active.reply);
                 let reply = self.streams.remove(at).reply;
-                let _ = self.tx.send(Out::Ended { reply });
+                self.ended(reply);
             }
         }
     }
 
-    /// Takes one piece from the first stream in reply order that has one; false when none moved.
+    fn ended(&self, reply: u64) {
+        let pushes = self.pushes.get(&reply).copied().unwrap_or(0);
+        let _ = self.tx.send(Out::Ended { reply, pushes });
+    }
+
+    /// Takes one piece from the first stream that has one, playing replies first in play order, then
+    /// held ones; false when none moved. A playing reply's audio ahead is everything queued to play
+    /// before its next piece; a held reply's is its own audio.
     fn step(&mut self) -> bool {
-        let ahead = self.shared.ahead();
-        for at in 0..self.streams.len() {
+        let playing = self.shared.playing.lock().expect("playing lock").clone();
+        let mut order: Vec<(usize, usize)> = (0..self.streams.len())
+            .map(|at| (playing.iter().position(|q| q.reply == self.streams[at].reply).unwrap_or(usize::MAX), at))
+            .collect();
+        order.sort_unstable();
+        self.step_in(&playing, &order)
+    }
+
+    fn step_in(&mut self, playing: &[Queued], order: &[(usize, usize)]) -> bool {
+        for &(_, at) in order {
             let reply = self.streams[at].reply;
             if self.is_dropped(reply) {
                 self.streams.remove(at).stream.cancel();
                 return true;
             }
+            let sent = self.streams[at].sent;
+            let ahead = duration(match playing.iter().find(|q| q.reply == reply) {
+                Some(q) => q.through + sent.saturating_sub(q.received),
+                None => sent,
+            });
             match self.streams[at].stream.next(ahead) {
                 Ok(Next::Pending) => {}
                 Ok(Next::Audio(audio)) => {
@@ -451,14 +507,14 @@ impl Worker {
                     if !active.on_fallback {
                         active.covered += audio.chars;
                     }
-                    self.shared.sent.fetch_add(audio.pcm.len() as u64, Ordering::SeqCst);
+                    active.sent += audio.pcm.len() as u64;
                     let clip = Clip { reply: Some(reply), chars: audio.chars, pcm: audio.pcm };
                     let _ = self.tx.send(Out::Piece { reply, clip });
                     return true;
                 }
                 Ok(Next::Done) => {
                     self.streams.remove(at);
-                    let _ = self.tx.send(Out::Ended { reply });
+                    self.ended(reply);
                     return true;
                 }
                 Err(e) => {
@@ -481,11 +537,13 @@ mod tests {
     use super::*;
 
     /// Speaks each push as one piece: `text.len()` frames, each sample equal to `text.len()`; text
-    /// starting "slow" takes 50 ms and "fail" errors. Tracks whether two renders ever overlap.
+    /// starting "slow" takes 50 ms, "fail" errors and "stop" ends the stream. Records the order of
+    /// renders and whether two ever overlap.
     #[derive(Default)]
     struct FakeBackend {
         busy: AtomicBool,
         overlapped: AtomicBool,
+        said: Mutex<Vec<String>>,
     }
 
     struct FakeStream {
@@ -531,6 +589,10 @@ mod tests {
             let Some(text) = self.texts.pop_front() else {
                 return Ok(if self.finished { Next::Done } else { Next::Pending });
             };
+            self.backend.said.lock().unwrap().push(text.clone());
+            if text == "stop" {
+                self.finished = true;
+            }
             if self.backend.busy.swap(true, Ordering::SeqCst) {
                 self.backend.overlapped.store(true, Ordering::SeqCst);
             }
@@ -809,6 +871,72 @@ mod tests {
         let heard = q.flush(&mut p);
         assert_eq!(heard.len(), 1);
         assert!(heard[0].1 > 0 && heard[0].1 < total, "{heard:?}");
+    }
+
+    #[tokio::test]
+    async fn text_after_a_stream_ended_early_still_plays_before_the_reply_counts_played() {
+        let mut q = queue();
+        let mut p = Playout::default();
+        q.speak(1, 0, "ab".into());
+        q.speak(1, 1, "stop".into());
+        q.play(1);
+        settle(&mut q).await;
+        q.pump(&mut p);
+        assert_eq!(drain(&mut p), vec![2, 2, 4, 4, 4, 4]);
+        assert!(q.take_finished(&mut p).is_empty());
+        q.speak(1, 2, "cde".into());
+        q.speak_done(1);
+        assert!(q.take_finished(&mut p).is_empty(), "the new text is not played yet");
+        settle(&mut q).await;
+        q.pump(&mut p);
+        assert_eq!(drain(&mut p), vec![3, 3, 3]);
+        assert_eq!(q.take_finished(&mut p), vec![1]);
+    }
+
+    #[tokio::test]
+    async fn playing_replies_are_rendered_before_held_ones() {
+        let fake = Arc::new(FakeBackend::default());
+        let backend: Arc<dyn SpeechBackend> = Arc::new(fake.clone());
+        let mut q = SpeechQueue::new(Speaker::new(backend.clone(), ""), backend);
+        let mut p = Playout::default();
+        q.play(2);
+        q.pump(&mut p);
+        q.speak(3, 0, "slow".into());
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        for idx in 0..3 {
+            q.speak(1, idx, format!("held {idx}"));
+            q.speak(2, idx, format!("live {idx}"));
+        }
+        settle(&mut q).await;
+        let said = fake.said.lock().unwrap().clone();
+        assert_eq!(said, ["slow", "live 0", "live 1", "live 2", "held 0", "held 1", "held 2"]);
+    }
+
+    /// Two seconds of audio per chunk, recording each.
+    #[derive(Default)]
+    struct Long(Mutex<Vec<String>>);
+
+    impl Renderer for Long {
+        fn render(&self, text: &str, _voice: &str) -> anyhow::Result<Vec<i16>> {
+            self.0.lock().unwrap().push(text.into());
+            Ok(vec![1; RATE as usize * 2])
+        }
+    }
+
+    #[tokio::test]
+    async fn a_held_reply_with_its_own_audio_ahead_waits_for_whole_sentences() {
+        let long = Arc::new(Long::default());
+        let backend: Arc<dyn SpeechBackend> = Arc::new(ChunkedBackend::new("kokoro", "Kokoro", long.clone(), Vec::new()));
+        let mut q = SpeechQueue::new(Speaker::new(backend.clone(), ""), backend);
+        q.speak(1, 0, "Sure, I can do that.".into());
+        settle(&mut q).await;
+        q.speak(1, 1, "The run moves to Friday,".into());
+        settle(&mut q).await;
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert_eq!(long.0.lock().unwrap().len(), 1, "a clause waits while two seconds are ahead");
+        q.speak(1, 2, "early in the morning.".into());
+        settle(&mut q).await;
+        assert_eq!(*long.0.lock().unwrap(), ["Sure, I can do that.", "The run moves to Friday, early in the morning."]);
     }
 
     struct Broken;
