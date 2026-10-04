@@ -1,3 +1,4 @@
+pub mod matrix;
 pub mod mock;
 pub mod voice;
 pub mod webpush;

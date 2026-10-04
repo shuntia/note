@@ -221,10 +221,18 @@ pub struct WebPushSettings {
     pub subject: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct MatrixSettings {
+    pub homeserver: String,
+    /// The bot's access token for this device, alone on a line.
+    pub token_file: PathBuf,
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct ChannelsConfig {
     pub webpush: Option<WebPushSettings>,
+    pub matrix: Option<MatrixSettings>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -347,6 +355,12 @@ pub struct UserConfig {
     /// Whether a call plays its ready and heard sounds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub voice_cue: Option<bool>,
+    /// Whether what Note sends on its own is also posted to the Matrix DM.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matrix_send: Option<bool>,
+    /// Whether those posts notify in Matrix, rather than arriving silently.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matrix_ping: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub voice_language: Option<String>,
 }
@@ -419,6 +433,14 @@ impl UserConfig {
 
     pub fn ring_for(&self) -> &str {
         self.ring_for.as_deref().unwrap_or(RING_FOR_URGENT)
+    }
+
+    pub fn matrix_send(&self) -> bool {
+        self.matrix_send.unwrap_or(false)
+    }
+
+    pub fn matrix_ping(&self) -> bool {
+        self.matrix_ping.unwrap_or(false)
     }
 
     pub fn voice_profile(&self) -> note_voice_proto::VoiceProfile {
