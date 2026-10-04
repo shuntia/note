@@ -32,7 +32,6 @@ pub mod shares;
 pub mod summaries;
 pub mod talk;
 pub mod tasks;
-pub mod telegram;
 pub mod tokens;
 pub mod templates;
 #[cfg(test)]
@@ -129,9 +128,6 @@ pub struct AppState {
     /// offered the `web_search` tool.
     pub search: Option<Arc<dyn SearchProvider>>,
     pub vapid_public_key: Option<String>,
-    /// Set when the telegram channel is configured; it also names the bot a
-    /// link invites the user to, and carries a mirrored reply back.
-    pub telegram: Option<Arc<crate::channels::telegram::TelegramChannel>>,
     pub voice: Option<Arc<crate::voice::Voice>>,
     /// The model a call speaks on; `None` speaks on `llm`.
     pub voice_llm: Option<Arc<dyn LLMProvider>>,
@@ -183,7 +179,6 @@ impl AppState {
             embeddings: None,
             search: None,
             vapid_public_key: None,
-            telegram: None,
             voice: None,
             voice_llm: None,
             call_settings: crate::voice::call::CallSettings::default(),
@@ -290,15 +285,6 @@ impl AppState {
     ) -> Self {
         self.channels.push(Arc::new(ch));
         self.vapid_public_key = Some(public_key);
-        self
-    }
-
-    /// First in the ladder: a linked chat is where the user already is.
-    #[must_use]
-    pub fn with_telegram(mut self, ch: crate::channels::telegram::TelegramChannel) -> Self {
-        let ch = Arc::new(ch);
-        self.channels.insert(0, ch.clone());
-        self.telegram = Some(ch);
         self
     }
 

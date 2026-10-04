@@ -15,7 +15,7 @@ fn row(r: &rusqlite::Row) -> rusqlite::Result<Link> {
 
 pub fn get(conn: &Connection, user_id: i64) -> Result<Option<Link>> {
     Ok(conn
-        .query_row("SELECT id, mxid, room_id, state FROM voice_links WHERE user_id = ?1", [user_id], row)
+        .query_row("SELECT id, mxid, room_id, state FROM matrix_links WHERE user_id = ?1", [user_id], row)
         .optional()?)
 }
 
@@ -28,7 +28,7 @@ pub fn ringable(conn: &Connection, user_id: i64) -> Result<Option<Link>> {
 pub fn linked_user(conn: &Connection, room_id: &str, mxid: &str) -> Result<Option<i64>> {
     Ok(conn
         .query_row(
-            "SELECT user_id FROM voice_links WHERE room_id = ?1 AND mxid = ?2 AND state = 'linked'",
+            "SELECT user_id FROM matrix_links WHERE room_id = ?1 AND mxid = ?2 AND state = 'linked'",
             (room_id, mxid),
             |r| r.get(0),
         )
@@ -38,7 +38,7 @@ pub fn linked_user(conn: &Connection, room_id: &str, mxid: &str) -> Result<Optio
 /// Starts, or restarts, the user's one link, keeping its id.
 pub fn begin(conn: &Connection, user_id: i64, mxid: &str, now: jiff::Timestamp) -> Result<i64> {
     Ok(conn.query_row(
-        "INSERT INTO voice_links (user_id, mxid, state, created_at) VALUES (?1, ?2, 'invited', ?3)
+        "INSERT INTO matrix_links (user_id, mxid, state, created_at) VALUES (?1, ?2, 'invited', ?3)
          ON CONFLICT(user_id) DO UPDATE SET
              mxid = excluded.mxid, state = 'invited', room_id = NULL, linked_at = NULL,
              created_at = excluded.created_at
@@ -50,14 +50,14 @@ pub fn begin(conn: &Connection, user_id: i64, mxid: &str, now: jiff::Timestamp) 
 
 /// False when the link is gone.
 pub fn set_room(conn: &Connection, link_id: i64, room_id: &str) -> Result<bool> {
-    Ok(conn.execute("UPDATE voice_links SET room_id = ?2 WHERE id = ?1", (link_id, room_id))? > 0)
+    Ok(conn.execute("UPDATE matrix_links SET room_id = ?2 WHERE id = ?1", (link_id, room_id))? > 0)
 }
 
 /// Links only a join of the room this link invited to, so a join from an
 /// account the user has since replaced changes nothing.
 pub fn mark_joined(conn: &Connection, link_id: i64, room_id: &str, now: jiff::Timestamp) -> Result<bool> {
     Ok(conn.execute(
-        "UPDATE voice_links SET state = 'linked', linked_at = COALESCE(linked_at, ?3)
+        "UPDATE matrix_links SET state = 'linked', linked_at = COALESCE(linked_at, ?3)
          WHERE id = ?1 AND room_id = ?2",
         (link_id, room_id, now.to_string()),
     )? > 0)
@@ -65,11 +65,11 @@ pub fn mark_joined(conn: &Connection, link_id: i64, room_id: &str, now: jiff::Ti
 
 /// Drops a link whose invite never went out.
 pub fn forget_unsent(conn: &Connection, link_id: i64) -> Result<bool> {
-    Ok(conn.execute("DELETE FROM voice_links WHERE id = ?1 AND room_id IS NULL", [link_id])? > 0)
+    Ok(conn.execute("DELETE FROM matrix_links WHERE id = ?1 AND room_id IS NULL", [link_id])? > 0)
 }
 
 pub fn remove(conn: &Connection, user_id: i64) -> Result<bool> {
-    Ok(conn.execute("DELETE FROM voice_links WHERE user_id = ?1", [user_id])? > 0)
+    Ok(conn.execute("DELETE FROM matrix_links WHERE user_id = ?1", [user_id])? > 0)
 }
 
 #[cfg(test)]

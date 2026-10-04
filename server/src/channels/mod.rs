@@ -1,5 +1,4 @@
 pub mod mock;
-pub mod telegram;
 pub mod voice;
 pub mod webpush;
 pub mod ws;
@@ -9,8 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 
 /// An error line without the request URL, which for Web Push is a per-device
-/// bearer capability and for Telegram carries the bot token; delivery errors
-/// are written to the event log.
+/// bearer capability; delivery errors are written to the event log.
 pub(crate) fn describe_http_error(err: &ureq::Error) -> String {
     match err {
         ureq::Error::StatusCode(code) => format!("status {code}"),
@@ -58,8 +56,7 @@ pub struct OutboundMessage {
     pub actions: Vec<Action>,
 }
 
-/// A button on a message. `data` travels back verbatim when it is pressed, and
-/// Telegram caps it at 64 bytes.
+/// A button on a message. `data` travels back verbatim when it is pressed.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Action {
     pub label: String,
