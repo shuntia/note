@@ -41,7 +41,6 @@ import type {
   SqlResult,
   TalkMessage,
   TalkReply,
-  TelegramLink,
   Task,
   TaskNode,
   TaskNotify,
@@ -83,6 +82,8 @@ const WRITABLE_SETTINGS = [
   'ring_for',
   'voice_voice',
   'voice_cue',
+  'matrix_send',
+  'matrix_ping',
 ] as const
 
 type SettingsPatch = Partial<Pick<Settings, (typeof WRITABLE_SETTINGS)[number]>>
@@ -305,9 +306,6 @@ export const api = {
     request<void>('/api/push/subscribe', { method: 'POST', body: JSON.stringify(sub) }),
   pushUnsubscribe: (endpoint: string) =>
     request<void>('/api/push/unsubscribe', { method: 'POST', body: JSON.stringify({ endpoint }) }),
-  // A new code replaces whatever the account was last given.
-  telegramLink: () => request<TelegramLink>('/api/telegram/link', { method: 'POST' }),
-  telegramUnlink: () => request<void>('/api/telegram/link', { method: 'DELETE' }),
   voiceLink: (mxid: string) =>
     request<{ mxid: string; state: 'invited'; room_id: string }>('/api/voice/link', {
       method: 'POST',

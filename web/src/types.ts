@@ -125,7 +125,7 @@ export type NewStep = { title: string; duration_min: number }
 export type FlattenResult = { task: TaskNode; removed: Task[] }
 
 // Where the user last spoke to the thread from; Note answers there.
-export type ConversationVia = 'web' | 'telegram'
+export type ConversationVia = 'web' | 'matrix' | 'voice'
 
 export type Conversation = {
   id: number
@@ -202,10 +202,6 @@ export type Settings = {
   category: 'member' | 'test'
   nightly_enabled: boolean
   checkins_enabled: boolean
-  telegram_enabled: boolean
-  telegram_linked: boolean
-  // The bot a link invites the user to; '' where no bot is configured.
-  telegram_bot: string
   // How many check-ins Note may start on its own in a day.
   triggers_per_day: number
   pomodoro_enabled: boolean
@@ -223,14 +219,16 @@ export type Settings = {
   voice_voice: string
   // Whether a call plays its ready and heard sounds.
   voice_cue: boolean
+  // Whether this server answers the Matrix DM; the message switches hide without it.
+  matrix_enabled: boolean
+  // Whether Note's own messages are also posted to the DM, and whether they notify there.
+  matrix_send: boolean
+  matrix_ping: boolean
 }
 
 export type RingFor = 'urgent' | 'checkins' | 'never'
 
 export type VoiceChoice = { id: string; label: string; backend?: string; slow?: boolean }
-
-// A live code and the deep link that carries it to the bot.
-export type TelegramLink = { code: string; bot: string; url: string }
 
 export type AlertPatch = { index: number; alert: boolean }
 
@@ -256,6 +254,8 @@ export type SettingsSaved = Pick<
   | 'ring_for'
   | 'voice_voice'
   | 'voice_cue'
+  | 'matrix_send'
+  | 'matrix_ping'
 > & { schedule: ScheduleRow[] }
 
 export type PromptName = 'persona' | 'planning' | 'share'

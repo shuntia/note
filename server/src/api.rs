@@ -1407,6 +1407,8 @@ struct SettingsPatch {
     ring_for: Option<String>,
     voice_voice: Option<String>,
     voice_cue: Option<bool>,
+    matrix_send: Option<bool>,
+    matrix_ping: Option<bool>,
     alerts: Option<Vec<AlertPatch>>,
 }
 
@@ -1452,6 +1454,9 @@ fn settings_body(
         "ring_for": cfg.ring_for(),
         "voice_voice": cfg.voice_voice.clone().unwrap_or_default(),
         "voice_cue": cfg.voice_profile().cue,
+        "matrix_enabled": state.matrix.is_some(),
+        "matrix_send": cfg.matrix_send(),
+        "matrix_ping": cfg.matrix_ping(),
         "schedule": schedule,
     })
 }
@@ -1650,6 +1655,12 @@ async fn settings_put(
     }
     if let Some(cue) = req.voice_cue {
         cfg.voice_cue = Some(cue);
+    }
+    if let Some(on) = req.matrix_send {
+        cfg.matrix_send = Some(on);
+    }
+    if let Some(on) = req.matrix_ping {
+        cfg.matrix_ping = Some(on);
     }
     if let Some(alerts) = req.alerts {
         let changes: Vec<(usize, bool)> = alerts.iter().map(|a| (a.index, a.alert)).collect();
