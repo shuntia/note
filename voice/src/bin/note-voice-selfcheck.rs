@@ -26,7 +26,7 @@ fn main() -> anyhow::Result<()> {
 
     let tts = engines.tts("en");
     let t = Instant::now();
-    let pcm48 = tts.synthesize(SENTENCE, "")?;
+    let pcm48 = tts.render(SENTENCE, "")?;
     println!("tts: {:.2} s of audio in {:.2?}", pcm48.len() as f64 / 48_000.0, t.elapsed());
 
     let pcm16: Vec<f32> = pcm48.iter().step_by(3).map(|s| f32::from(*s) / 32768.0).collect();

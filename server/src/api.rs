@@ -1838,8 +1838,10 @@ async fn voice_voices(user: CurrentUser, State(state): State<AppState>) -> impl 
     };
     match voice.voices(&language).await {
         Ok(voices) => {
-            let voices: Vec<_> =
-                voices.into_iter().map(|v| serde_json::json!({ "id": v.id, "label": v.label })).collect();
+            let voices: Vec<_> = voices
+                .into_iter()
+                .map(|v| serde_json::json!({ "id": v.id, "label": v.label, "backend": v.backend, "slow": v.slow }))
+                .collect();
             Json(serde_json::json!({ "voices": voices })).into_response()
         }
         Err(refusal) => voice_refused(&state, &user, NO_VOICES, &refusal),
