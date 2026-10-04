@@ -15,6 +15,7 @@ use note_voice_proto::{
     Refusal, RefusalCode, Reply, Request, Role, VoiceOption, VoiceProfile,
 };
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
@@ -61,10 +62,14 @@ const PREVIEW_TEXT: &str = "Hi, it's Note. This is how I sound.";
 
 type Slot = Arc<Mutex<Option<Arc<Vec<u8>>>>>;
 
-/// Voice samples as WAV, rendered once per language and offered voice; a
-/// render in progress holds its slot, so a second ask for it waits.
+/// Voice samples as WAV, rendered once per language, offered voice and
+/// `PREVIEW_TEXT`, and kept in `dir` across restarts; a render in progress
+/// holds its slot, so a second ask for it waits.
 #[derive(Default)]
-struct Previews(Mutex<HashMap<(String, String), Slot>>);
+struct Previews {
+    slots: Mutex<HashMap<(String, String), Slot>>,
+    dir: Option<PathBuf>,
+}
 
 impl Previews {
     /// `voice` empty is Kokoro's default; any other id no live backend offers is refused.
@@ -80,20 +85,52 @@ impl Previews {
         let Some(speaker) = speaker else {
             return Err(Refusal::new(RefusalCode::BadRequest, format!("no voice {voice:?}")));
         };
-        let slot = lock(&self.0).entry((language.to_string(), voice.to_string())).or_default().clone();
+        let slot = lock(&self.slots).entry((language.to_string(), voice.to_string())).or_default().clone();
         let mut held = lock(&slot);
         if let Some(wav) = &*held {
             return Ok(wav.clone());
         }
-        let rendered = speaker
-            .backend
-            .render(PREVIEW_TEXT, &speaker.voice)
-            .and_then(|pcm| wav(&pcm, RATE))
-            .map_err(|e| Refusal::new(RefusalCode::Failed, format!("rendering the sample failed: {e:#}")))?;
+        let file = self.dir.as_ref().map(|dir| dir.join(preview_file(language, voice)));
+        let kept = file.as_ref().and_then(|f| std::fs::read(f).ok());
+        let rendered = match kept {
+            Some(wav) => wav,
+            None => {
+                let wav = speaker
+                    .backend
+                    .render(PREVIEW_TEXT, &speaker.voice)
+                    .and_then(|pcm| wav(&pcm, RATE))
+                    .map_err(|e| Refusal::new(RefusalCode::Failed, format!("rendering the sample failed: {e:#}")))?;
+                if let Some(file) = &file {
+                    if let Err(e) = keep(file, &wav) {
+                        eprintln!("voice: keeping the sample at {} failed: {e:#}", file.display());
+                    }
+                }
+                wav
+            }
+        };
         let wav = Arc::new(rendered);
         *held = Some(wav.clone());
         Ok(wav)
     }
+}
+
+/// A name stable across builds: FNV-1a over the language, voice and text.
+fn preview_file(language: &str, voice: &str) -> String {
+    let hash = [language, voice, PREVIEW_TEXT].iter().flat_map(|part| part.bytes().chain([0])).fold(
+        0xcbf2_9ce4_8422_2325_u64,
+        |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3),
+    );
+    format!("{hash:016x}.wav")
+}
+
+fn keep(file: &Path, wav: &[u8]) -> anyhow::Result<()> {
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let partial = file.with_extension("partial");
+    std::fs::write(&partial, wav)?;
+    std::fs::rename(&partial, file)?;
+    Ok(())
 }
 
 /// Mono 16-bit WAV.
@@ -891,7 +928,7 @@ pub async fn run_with(cfg: VoiceServiceConfig, peer_cfg: PeerConfig, backends: B
         cues: Arc::new(cues),
         reporting: Mutex::new(HashSet::new()),
         answering: Arc::default(),
-        previews: Previews::default(),
+        previews: Previews { dir: Some(cfg.state_dir.join("previews")), ..Previews::default() },
         peer: OnceLock::new(),
     });
     let handler = Arc::new(VoiceHandler { svc: OnceLock::new() });
@@ -1012,7 +1049,7 @@ mod tests {
             assert_eq!(refused.code, RefusalCode::BadRequest, "{voice}");
         }
         assert_eq!(tts.0.load(Ordering::SeqCst), 0, "nothing is rendered");
-        assert!(lock(&previews.0).is_empty(), "nothing is cached");
+        assert!(lock(&previews.slots).is_empty(), "nothing is cached");
     }
 
     #[test]
@@ -1040,6 +1077,16 @@ mod tests {
         previews.get(&kokoro(&tts), &sidecars, "en", "kyutai:alba").unwrap();
         assert_eq!(tts.0.load(Ordering::SeqCst), 3);
         assert_eq!(first.len(), 44 + PREVIEW_TEXT.len() * 2);
+    }
+
+    #[test]
+    fn a_kept_preview_outlives_a_restart() {
+        let (tts, dir) = (Arc::new(CountingTts::default()), tempfile::tempdir().unwrap());
+        let previews = || Previews { dir: Some(dir.path().to_path_buf()), ..Previews::default() };
+        let first = previews().get(&kokoro(&tts), &[], "en", "af_heart").unwrap();
+        assert_eq!(previews().get(&kokoro(&tts), &[], "en", "af_heart").unwrap(), first);
+        previews().get(&kokoro(&tts), &[], "ja", "af_heart").unwrap();
+        assert_eq!(tts.0.load(Ordering::SeqCst), 2, "each language renders once");
     }
 
     #[test]
