@@ -1,6 +1,9 @@
 {
   description = "Note: self-hosted daily planning server";
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  # The web build's dependency hash depends on pnpm, so it keeps its own
+  # nixpkgs, pinned by rev, which a host's `follows` cannot move.
+  inputs.nixpkgs-web.url = "github:NixOS/nixpkgs/a7868a727837f3c09cee2ce0ca671c76b1589fed";
   inputs.crane.url = "github:ipetkov/crane";
   inputs.pyproject-nix = {
     url = "github:pyproject-nix/pyproject.nix";
@@ -17,7 +20,7 @@
     inputs.uv2nix.follows = "uv2nix";
     inputs.nixpkgs.follows = "nixpkgs";
   };
-  outputs = { self, nixpkgs, crane, pyproject-nix, uv2nix, pyproject-build-systems }:
+  outputs = { self, nixpkgs, nixpkgs-web, crane, pyproject-nix, uv2nix, pyproject-build-systems }:
     let
       inherit (nixpkgs) lib;
       systems = [ "x86_64-linux" "aarch64-linux" ];
@@ -27,13 +30,14 @@
       build = pkgs:
         let
           craneLib = crane.mkLib pkgs;
+          webPkgs = nixpkgs-web.legacyPackages.${pkgs.stdenv.hostPlatform.system};
 
-          web = pkgs.stdenv.mkDerivation (finalAttrs: {
+          web = webPkgs.stdenv.mkDerivation (finalAttrs: {
             pname = "note-web";
             inherit version;
             src = ./web;
-            nativeBuildInputs = with pkgs; [ nodejs pnpm pnpmConfigHook ];
-            pnpmDeps = pkgs.fetchPnpmDeps {
+            nativeBuildInputs = with webPkgs; [ nodejs pnpm pnpmConfigHook ];
+            pnpmDeps = webPkgs.fetchPnpmDeps {
               inherit (finalAttrs) pname version src;
               fetcherVersion = 4;
               hash = "sha256-VQy9T5tjyNdDRn+sa6ZgRFnW8Y3RLLbSwqJQbDdDmmw=";
