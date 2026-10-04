@@ -82,6 +82,7 @@ class Engine:
                 self.conds[vid] = self.model.conds
         for vid in self.conds:
             self._render("Hello, this is a warm-up.", vid)
+        torch.cuda.empty_cache()
         self.ready = True
         log.info("ready in %.1f s with voices %s", time.perf_counter() - t0, ", ".join(self.voices))
 
