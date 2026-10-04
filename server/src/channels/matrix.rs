@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use rusqlite::Connection;
 use serde_json::Value;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// How long a sync is asked to hold the connection open.
 pub const SYNC_SECS: u64 = 30;
@@ -44,7 +44,7 @@ pub struct MatrixChannel {
     config_dir: PathBuf,
     base: String,
     token: String,
-    user_id: String,
+    user_id: OnceLock<String>,
     agent: ureq::Agent,
     sync_agent: ureq::Agent,
 }
@@ -62,30 +62,33 @@ fn agent(global_secs: u64) -> ureq::Agent {
 }
 
 impl MatrixChannel {
-    /// A token file that will not read, or a token the homeserver refuses,
-    /// fails here rather than at the first message.
+    /// A token file that will not read fails here; the homeserver is first
+    /// asked about the token by the first sync, so an outage never stops boot.
     pub fn new(db: Arc<Mutex<Connection>>, config_dir: PathBuf, cfg: &MatrixSettings) -> Result<Self> {
         let token = std::fs::read_to_string(&cfg.token_file)
             .with_context(|| format!("reading matrix token file {}", cfg.token_file.display()))?
             .trim()
             .to_string();
         anyhow::ensure!(!token.is_empty(), "matrix token file {} is empty", cfg.token_file.display());
-        let mut ch = Self {
+        Ok(Self {
             db,
             config_dir,
             base: cfg.homeserver.trim_end_matches('/').to_string(),
             token,
-            user_id: String::new(),
+            user_id: OnceLock::new(),
             agent: agent(10),
             sync_agent: agent(SYNC_TIMEOUT_SECS),
-        };
-        let who = ch.get(&ch.agent, "/_matrix/client/v3/account/whoami", &[]).context("whoami")?;
-        ch.user_id = who["user_id"].as_str().context("whoami named no user_id")?.to_string();
-        Ok(ch)
+        })
     }
 
-    pub fn user_id(&self) -> &str {
-        &self.user_id
+    /// The bot's own id, asked of the homeserver once.
+    pub fn identify(&self) -> Result<&str> {
+        if let Some(id) = self.user_id.get() {
+            return Ok(id);
+        }
+        let who = self.get(&self.agent, "/_matrix/client/v3/account/whoami", &[]).context("whoami")?;
+        let id = who["user_id"].as_str().context("whoami named no user_id")?.to_string();
+        Ok(self.user_id.get_or_init(|| id))
     }
 
     fn get(&self, agent: &ureq::Agent, path: &str, query: &[(&str, &str)]) -> Result<Value> {
@@ -100,6 +103,7 @@ impl MatrixChannel {
     }
 
     pub fn sync(&self, since: Option<&str>, timeout_secs: u64) -> Result<Batch> {
+        let bot = self.identify()?;
         let filter = serde_json::json!({
             "presence": { "not_types": ["*"] },
             "account_data": { "not_types": ["*"] },
@@ -119,7 +123,7 @@ impl MatrixChannel {
         let body = self.get(&self.sync_agent, "/_matrix/client/v3/sync", &query)?;
         Ok(Batch {
             next_batch: body["next_batch"].as_str().context("sync without next_batch")?.to_string(),
-            messages: parse_sync(&body, &self.user_id),
+            messages: parse_sync(&body, bot),
         })
     }
 
@@ -135,14 +139,15 @@ impl MatrixChannel {
     }
 }
 
-/// Text messages in joined rooms from anyone but the bot.
+/// Text messages in joined rooms from anyone but the bot; an edit is not a new message.
 fn parse_sync(body: &Value, bot: &str) -> Vec<Message> {
     let Some(rooms) = body["rooms"]["join"].as_object() else { return Vec::new() };
     let mut out = Vec::new();
     for (room, data) in rooms {
         for ev in data["timeline"]["events"].as_array().into_iter().flatten() {
             let sender = ev["sender"].as_str().unwrap_or_default();
-            if ev["type"] != "m.room.message" || ev["content"]["msgtype"] != "m.text" || sender == bot {
+            let edit = ev["content"]["m.relates_to"]["rel_type"] == "m.replace";
+            if ev["type"] != "m.room.message" || ev["content"]["msgtype"] != "m.text" || sender == bot || edit {
                 continue;
             }
             if let Some(text) = ev["content"]["body"].as_str() {
@@ -205,7 +210,9 @@ mod tests {
         std::fs::write(&token_file, "syt_secret\n").unwrap();
         let db = Arc::new(Mutex::new(crate::db::open_memory().unwrap()));
         let cfg = MatrixSettings { homeserver: base.into(), token_file };
-        (MatrixChannel::new(db, tmp.path().into(), &cfg).unwrap(), tmp)
+        let ch = MatrixChannel::new(db, tmp.path().into(), &cfg).unwrap();
+        ch.identify().unwrap();
+        (ch, tmp)
     }
 
     fn timeline(events: serde_json::Value) -> serde_json::Value {
@@ -216,10 +223,24 @@ mod tests {
     }
 
     #[test]
-    fn boot_asks_who_the_token_is() {
+    fn a_homeserver_that_is_down_does_not_stop_boot() {
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", closed.local_addr().unwrap());
+        drop(closed);
+        let tmp = tempfile::tempdir().unwrap();
+        let token_file = tmp.path().join("matrix.token");
+        std::fs::write(&token_file, "syt_secret\n").unwrap();
+        let db = Arc::new(Mutex::new(crate::db::open_memory().unwrap()));
+        let cfg = MatrixSettings { homeserver: base, token_file };
+        let ch = MatrixChannel::new(db, tmp.path().into(), &cfg).unwrap();
+        assert!(ch.sync(None, 0).is_err(), "the sync fails and the loop backs off");
+    }
+
+    #[test]
+    fn identify_asks_who_the_token_is() {
         let (base, rx) = serve(vec![("200 OK", WHOAMI)]);
         let (ch, _tmp) = channel(&base);
-        assert_eq!(ch.user_id(), "@note:t");
+        assert_eq!(ch.identify().unwrap(), "@note:t");
         let raw = took(&rx);
         assert!(raw.starts_with("GET /_matrix/client/v3/account/whoami"), "{raw}");
         assert!(raw.to_lowercase().contains("authorization: bearer syt_secret"), "{raw}");
@@ -237,6 +258,18 @@ mod tests {
             parse_sync(&body, "@note:t"),
             vec![Message { room_id: "!dm:t".into(), sender: "@aki:t".into(), text: "hi".into() }]
         );
+    }
+
+    #[test]
+    fn parse_skips_edits() {
+        let body = timeline(serde_json::json!([
+            { "type": "m.room.message", "sender": "@aki:t", "content": {
+                "msgtype": "m.text", "body": "* fixed",
+                "m.new_content": { "msgtype": "m.text", "body": "fixed" },
+                "m.relates_to": { "rel_type": "m.replace", "event_id": "$1" },
+            } },
+        ]));
+        assert!(parse_sync(&body, "@note:t").is_empty());
     }
 
     #[test]

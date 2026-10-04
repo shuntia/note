@@ -46,6 +46,7 @@ fn rig(llm: Arc<MockLLM>, link_state: &str) -> (AppState, common::Fake, tempfile
     let settings = note_server::config::MatrixSettings { homeserver: fake.base.clone(), token_file };
     let mut state = AppState::new(conn, dir.clone(), dir.clone()).with_providers(llm, None);
     let ch = note_server::channels::matrix::MatrixChannel::new(state.db.clone(), dir, &settings).unwrap();
+    ch.identify().unwrap();
     state = state.with_matrix(ch);
     fake.took();
     (state, fake, cfg)
