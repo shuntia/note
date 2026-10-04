@@ -280,8 +280,14 @@ async fn a_link_removed_while_the_invite_is_out_is_not_reported_invited() {
 fn offers_voices(r: &Rig) {
     r.fake_rec.answer_with(|req| match req {
         note_voice_proto::Request::ListVoices { language } => Ok(note_voice_proto::Reply::Voices {
-            voices: ["af_heart", "bm_george"]
-                .map(|id| note_voice_proto::VoiceOption { id: id.into(), label: id.into(), language: language.clone() })
+            voices: [("af_heart", "Kokoro"), ("bm_george", "Kokoro"), ("kyutai:alba", "Natural")]
+                .map(|(id, backend)| note_voice_proto::VoiceOption {
+                    id: id.into(),
+                    label: id.into(),
+                    language: language.clone(),
+                    backend: backend.into(),
+                    slow: backend == "Natural",
+                })
                 .to_vec(),
         }),
         note_voice_proto::Request::Preview { voice, .. } if voice == "nope" => {
@@ -322,7 +328,16 @@ async fn only_an_offered_voice_is_saved_and_a_ring_carries_it() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!((&body["voice_voice"], &body["voice_cue"]), (&serde_json::json!("bm_george"), &serde_json::json!(false)));
     let (_, voices) = call(&app, &cookie, "GET", "/api/voice/voices", "").await;
-    assert_eq!(voices["voices"][1], serde_json::json!({ "id": "bm_george", "label": "bm_george" }));
+    assert_eq!(
+        voices["voices"][1],
+        serde_json::json!({ "id": "bm_george", "label": "bm_george", "backend": "Kokoro", "slow": false })
+    );
+    assert_eq!(voices["voices"][2]["backend"], "Natural");
+    let (status, body) = call(&app, &cookie, "PUT", "/api/settings", r#"{"voice_voice":"kyutai:alba"}"#).await;
+    assert_eq!((status, &body["voice_voice"]), (StatusCode::OK, &serde_json::json!("kyutai:alba")), "{body}");
+    let (status, _) = call(&app, &cookie, "PUT", "/api/settings", r#"{"voice_voice":"kyutai:nope"}"#).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    call(&app, &cookie, "PUT", "/api/settings", r#"{"voice_voice":"bm_george"}"#).await;
 
     {
         let conn = r.state.db();
