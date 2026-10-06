@@ -1,3 +1,4 @@
+import { t } from './i18n'
 import { eventLabel } from './receipts'
 import type { CalendarOccurrence, PlanEvent } from './types'
 
@@ -50,7 +51,7 @@ export function DayLine({
   const hours = compact ? [6, 15, 24] : [6, 9, 12, 15, 18, 21, 24]
 
   return (
-    <div className={`dayline${compact ? ' compact' : ''}`} role="img" aria-label="Today, drawn as a line">
+    <div className={`dayline${compact ? ' compact' : ''}`} role="img" aria-label={t('dayline.label')}>
       <span className="dl-line" />
       <span className="dl-gone" style={{ width: pct(now) }} />
       <span className="dl-ticks" />

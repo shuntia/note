@@ -106,7 +106,7 @@ impl JobTable {
     /// Starts `call` as a job of reply `reply`; returns the ack JSON for the model, or a tool error JSON when capped.
     pub fn start(&mut self, reply: u64, call_index: usize, name: &str, args: &str) -> (String, bool) {
         if self.running.len() >= self.limits.max_running {
-            return error(ToolError::cap_reached(format!(
+            return error(&ToolError::cap_reached(format!(
                 "{} jobs are running; wait for a result",
                 self.limits.max_running
             )));
@@ -118,7 +118,7 @@ impl JobTable {
             (&self.call_id, job, reply as i64, call_index as i64, name, args, now()),
         );
         if let Err(e) = inserted {
-            return error(ToolError::internal(e.to_string()));
+            return error(&ToolError::internal(e.to_string()));
         }
         self.next += 1;
         let network = self.runner.is_network(name);
@@ -181,7 +181,7 @@ impl JobTable {
         let Some(running) = self.running.get(&job) else {
             return match self.reported.get(&job) {
                 Some(state) => already(job, state),
-                None => error(ToolError::not_found(format!("no job {job} in this call"))),
+                None => error(&ToolError::not_found(format!("no job {job} in this call"))),
             };
         };
         if let Some(state) = running.slot.lock().ended_as {
@@ -222,7 +222,7 @@ impl JobTable {
         true
     }
 
-    /// Called by the driver when a JobDone arrives, before rendering it; false means discard it (already reported).
+    /// Called by the driver when a `JobDone` arrives, before rendering it; false means discard it (already reported).
     /// A write reported as timed out is reported once more when its real result lands.
     pub fn settle(&mut self, done: &JobDone) -> bool {
         let real = matches!(done.outcome, JobOutcome::Done(_) | JobOutcome::Error(_));
@@ -250,7 +250,7 @@ impl JobTable {
         out
     }
 
-    /// The call ended: cancel network jobs, let the rest finish (their JobDone still arrive).
+    /// The call ended: cancel network jobs, let the rest finish (their `JobDone` still arrive).
     pub fn end(&mut self) {
         let network: Vec<u32> = self.running.iter().filter(|(_, r)| r.network).map(|(job, _)| *job).collect();
         for job in network {
@@ -258,7 +258,7 @@ impl JobTable {
         }
     }
 
-    /// After a Note restart: every `running` row of `call_id` becomes `done` (from voice_ops) or `interrupted`,
+    /// After a Note restart: every `running` row of `call_id` becomes `done` (from `voice_ops`) or `interrupted`,
     /// and a `timed_out` row whose write landed becomes `done`; returns them as items.
     pub fn recover(db: &Mutex<Connection>, call_id: &str) -> Vec<Item> {
         let conn = crate::db_guard(db);
@@ -320,8 +320,8 @@ fn already(job: u32, state: &str) -> (String, bool) {
     (serde_json::json!({"job": job, "already": state}).to_string(), false)
 }
 
-fn error(e: ToolError) -> (String, bool) {
-    (serde_json::to_string(&e).unwrap_or_else(|_| r#"{"kind":"internal"}"#.into()), true)
+fn error(e: &ToolError) -> (String, bool) {
+    (serde_json::to_string(e).unwrap_or_else(|_| r#"{"kind":"internal"}"#.into()), true)
 }
 
 fn value(text: &str) -> serde_json::Value {

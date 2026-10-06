@@ -74,8 +74,8 @@
   --radius-lg: calc(16 * var(--u));
   --radius-xl: calc(18 * var(--u));
 
-  --display: 'Bricolage Grotesque', 'Avenir Next', 'Helvetica Neue', Arial, sans-serif;
-  --sans: 'Atkinson Hyperlegible', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --display: 'Bricolage Grotesque', 'Avenir Next', 'Helvetica Neue', Arial, 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Noto Sans JP', 'Noto Sans CJK JP', 'Yu Gothic UI', Meiryo, sans-serif;
+  --sans: 'Atkinson Hyperlegible', system-ui, -apple-system, 'Segoe UI', 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Noto Sans JP', 'Noto Sans CJK JP', 'Yu Gothic UI', Meiryo, sans-serif;
   --mono: ui-monospace, 'SF Mono', Menlo, monospace;
 
   /* aliases the older rules resolve through */
@@ -165,6 +165,9 @@ body {
   font-size: 1rem;
   line-height: 1.5;
 }
+
+/* Latin tightening crowds kana and kanji; phrases break whole */
+:lang(ja) * { letter-spacing: normal !important; line-break: strict; word-break: auto-phrase; }
 
 /* the sky is held to the viewport on its own layer, since mobile browsers ignore
    a fixed background-attachment */

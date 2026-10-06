@@ -61,10 +61,10 @@ pub struct Opening {
 /// else, and `initial` is queued before the first event.
 pub fn run(
     deps: DriverDeps,
-    opening: Option<Opening>,
+    opening: Option<&Opening>,
     history: Vec<Message>,
     initial: Vec<Item>,
-    rx: mpsc::Receiver<DriverIn>,
+    rx: &mpsc::Receiver<DriverIn>,
     tx: mpsc::Sender<DriverIn>,
 ) {
     if deps.cfg.ticker {
@@ -85,7 +85,7 @@ pub fn run(
     for item in initial {
         driver.queue.push(item, driver.now());
     }
-    if let Some(opening) = &opening {
+    if let Some(opening) = opening {
         driver.open(opening);
     }
     while let Ok(msg) = rx.recv() {
@@ -97,7 +97,7 @@ pub fn run(
             DriverIn::Tick => driver.on_tick(),
         }
     }
-    driver.finish(&rx);
+    driver.finish(rx);
 }
 
 #[derive(Default)]
@@ -610,7 +610,7 @@ impl Driver {
                     .as_ref()
                     .is_some_and(|f| f.emitted.iter().any(|c| c.name != "hang_up"));
                 if with_others || !self.jobs.running().is_empty() {
-                    return tool_error(ToolError::rejected(
+                    return tool_error(&ToolError::rejected(
                         "jobs are still going; the call stays on until their results are in and told",
                     ));
                 }
@@ -622,12 +622,12 @@ impl Driver {
             "cancel_job" => match serde_json::from_str::<CancelJobArgs>(&call.args) {
                 Ok(args) => match u32::try_from(args.job) {
                     Ok(job) => self.jobs.cancel(job),
-                    Err(_) => tool_error(ToolError::not_found(format!(
+                    Err(_) => tool_error(&ToolError::not_found(format!(
                         "no job {} in this call",
                         args.job
                     ))),
                 },
-                Err(e) => tool_error(ToolError::invalid_args(e.to_string())),
+                Err(e) => tool_error(&ToolError::invalid_args(e.to_string())),
             },
             name => {
                 let started = self.now();
@@ -700,7 +700,7 @@ impl Driver {
                     .results
                     .get(&index)
                     .cloned()
-                    .unwrap_or_else(|| tool_error(ToolError::internal("the call never ran")));
+                    .unwrap_or_else(|| tool_error(&ToolError::internal("the call never ran")));
                 self.messages.push(Message::ToolResult {
                     call_id: call.id.clone(),
                     content,
@@ -924,9 +924,9 @@ fn with_object_args(call: &ToolCall) -> ToolCall {
     }
 }
 
-fn tool_error(e: ToolError) -> (String, bool) {
+fn tool_error(e: &ToolError) -> (String, bool) {
     (
-        serde_json::to_string(&e).unwrap_or_else(|_| r#"{"kind":"internal"}"#.into()),
+        serde_json::to_string(e).unwrap_or_else(|_| r#"{"kind":"internal"}"#.into()),
         true,
     )
 }
@@ -1068,7 +1068,7 @@ mod tests {
         };
         let (tx, rx) = mpsc::channel();
         let driver_tx = tx.clone();
-        let driver = std::thread::spawn(move || run(deps, opening, vec![], vec![], rx, driver_tx));
+        let driver = std::thread::spawn(move || run(deps, opening.as_ref(), vec![], vec![], &rx, driver_tx));
         Harness {
             tx,
             frames,

@@ -33,6 +33,7 @@ pub mod shares;
 pub mod summaries;
 pub mod talk;
 pub mod tasks;
+pub mod text;
 pub mod tokens;
 pub mod templates;
 #[cfg(test)]
@@ -52,7 +53,6 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 pub const MAX_CONCURRENT_TALKS: usize = 4;
-pub const EMPTY_REPLY_FALLBACK: &str = "(the assistant is not configured on this server)";
 
 #[derive(Debug, Clone, Copy)]
 pub enum TalkBusy {

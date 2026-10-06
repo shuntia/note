@@ -28,7 +28,7 @@ import { Tasks } from './views/Tasks'
 import { connectEvents } from './ws'
 import { deviceZone, zoneChange } from './zone'
 import './styles/shell.css'
-import { t, type Key } from './i18n'
+import { adoptLanguage, t, type Key } from './i18n'
 
 // `admin` is reached from Settings only, so it never joins NAV.
 type Tab = 'today' | 'tasks' | 'chat' | 'memory' | 'settings' | 'admin'
@@ -276,7 +276,10 @@ export function App() {
     if (!me) return
     api
       .settings()
-      .then((s) => writePrefs(prefsFrom(s)))
+      .then((s) => {
+        writePrefs(prefsFrom(s))
+        if (adoptLanguage(s.language)) location.reload()
+      })
       .catch(() => {})
   }, [me])
 

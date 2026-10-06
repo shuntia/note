@@ -10,6 +10,11 @@ export function clock24(at: Date): string {
   return at.toLocaleTimeString(activeLocale(), { hour: '2-digit', minute: '2-digit', hour12: false })
 }
 
+/** Sep 30, 2026, 9:05:12 AM. */
+export function dateTime(at: Date): string {
+  return at.toLocaleString(activeLocale())
+}
+
 /** Sep 30, with the year only when it is not this year's. */
 export function day(at: Date, now: Date = new Date()): string {
   return at.toLocaleDateString(activeLocale(), {
@@ -24,17 +29,41 @@ export function fullDay(at: Date): string {
   return at.toLocaleDateString(activeLocale(), { month: 'short', day: 'numeric', year: 'numeric' })
 }
 
+/** "a, b and c" in the locale's own way of listing. */
+export function list(items: string[]): string {
+  return new Intl.ListFormat(activeLocale(), { type: 'conjunction' }).format(items)
+}
+
 /** Wednesday, September 30. */
 export function longDay(at: Date): string {
   return at.toLocaleDateString(activeLocale(), { weekday: 'long', month: 'long', day: 'numeric' })
 }
 
-export function weekday(at: Date, width: 'long' | 'short' = 'short'): string {
+/** September 30. */
+export function monthDay(at: Date): string {
+  return at.toLocaleDateString(activeLocale(), { month: 'long', day: 'numeric' })
+}
+
+/** Wed, Sep 30. */
+export function weekdayDay(at: Date): string {
+  return at.toLocaleDateString(activeLocale(), { weekday: 'short', month: 'short', day: 'numeric' })
+}
+
+export function weekday(at: Date, width: 'long' | 'short' | 'narrow' = 'short'): string {
   return at.toLocaleDateString(activeLocale(), { weekday: width })
+}
+
+export function month(at: Date, width: 'long' | 'short' = 'long'): string {
+  return at.toLocaleDateString(activeLocale(), { month: width })
 }
 
 export function number(n: number, options?: Intl.NumberFormatOptions): string {
   return new Intl.NumberFormat(activeLocale(), options).format(n)
+}
+
+/** "a, b, c", a short list run together the locale's way. */
+export function unitList(items: string[]): string {
+  return new Intl.ListFormat(activeLocale(), { style: 'short', type: 'unit' }).format(items)
 }
 
 /** "in 5 minutes", "2 days ago". */

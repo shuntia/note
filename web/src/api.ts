@@ -1,3 +1,4 @@
+import { t } from './i18n'
 import type {
   AdminGate,
   AdminLog,
@@ -84,6 +85,7 @@ const WRITABLE_SETTINGS = [
   'voice_cue',
   'matrix_send',
   'matrix_ping',
+  'language',
 ] as const
 
 type SettingsPatch = Partial<Pick<Settings, (typeof WRITABLE_SETTINGS)[number]>>
@@ -168,7 +170,7 @@ async function request<T>(path: string, init?: Options): Promise<T> {
   })
   if (!res.ok) {
     if (res.status === 401 && path !== '/api/login' && !quiet401) onUnauthorized?.()
-    let message = `Request failed (${res.status})`
+    let message = t('api.failed', { status: res.status })
     try {
       const body: unknown = await res.json()
       if (

@@ -26,6 +26,9 @@ pub const MAX_TURNS_REPLY: &str =
 
 /// The sessions that run on their own instructions alone, with none of the
 /// user's standing context and a single call to make.
+const REPLY_IN_JAPANESE: &str =
+    "The user reads Japanese: write every reply, note, title and summary in natural Japanese.";
+
 fn single_call(kind: SessionKind) -> bool {
     matches!(kind, SessionKind::Import | SessionKind::Inbox | SessionKind::Summarize)
 }
@@ -177,6 +180,13 @@ pub(crate) fn system_prompt(
     if kind == SessionKind::Trigger {
         system.push_str("\n\n");
         system.push_str(&crate::prompts::load(deps.config_dir, username, "trigger")?);
+    }
+    // A call's speech is English-only, and a visitor's language is not the user's.
+    if !matches!(kind, SessionKind::Call | SessionKind::Share)
+        && crate::text::Lang::for_user(deps.config_dir, username) == crate::text::Lang::Ja
+    {
+        system.push_str("\n\n");
+        system.push_str(REPLY_IN_JAPANESE);
     }
     if kind == SessionKind::Share {
         let share = deps.share.as_ref().ok_or_else(|| anyhow::anyhow!("a share session needs its link"))?;
@@ -584,6 +594,20 @@ mod tests {
 
     fn now() -> jiff::Timestamp {
         "2026-08-31T04:00:00Z".parse().unwrap()
+    }
+
+    #[test]
+    fn a_japanese_reader_is_answered_in_japanese() {
+        let (db, tmp) = env();
+        let llm = MockLLM::scripted(vec![]);
+        let prompt = |kind| system_prompt(&deps(&db, &tmp, &llm), 1, "aki", kind, now()).unwrap();
+        assert!(!prompt(SessionKind::Talk).contains(REPLY_IN_JAPANESE));
+        let dir = tmp.path().join("users/aki");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("user.toml"), "language = \"ja\"\n").unwrap();
+        assert!(prompt(SessionKind::Talk).contains(REPLY_IN_JAPANESE));
+        assert!(prompt(SessionKind::Nightly).contains(REPLY_IN_JAPANESE));
+        assert!(prompt(SessionKind::Import).contains(REPLY_IN_JAPANESE));
     }
 
     /// Every event as `kind:detail`, in the order the session emitted it.

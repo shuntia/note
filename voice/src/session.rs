@@ -60,7 +60,7 @@ fn read_cue(path: &Path) -> anyhow::Result<Vec<i16>> {
     match ext.as_deref() {
         Some("wav") => read_wav(path),
         Some("ogg" | "oga" | "opus") => anyhow::bail!("Ogg cues are not supported"),
-        _ => Ok(std::fs::read(path)?.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]])).collect()),
+        _ => Ok(std::fs::read(path)?.as_chunks::<2>().0.iter().map(|b| i16::from_le_bytes(*b)).collect()),
     }
 }
 

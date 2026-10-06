@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest'
-import { fill, t } from '.'
+import { fill, resolveLocale, t } from '.'
 import { en } from './en'
 import * as format from './format'
 
@@ -44,5 +44,14 @@ describe('format', () => {
 
   test('numbers follow the locale', () => {
     expect(format.number(0.25, { style: 'percent' })).toBe('25%')
+  })
+})
+
+describe('resolveLocale', () => {
+  test('a known choice wins, otherwise the first browser language with a dictionary', () => {
+    expect(resolveLocale('en', ['ja-JP'])).toBe('en')
+    expect(resolveLocale('', ['fr-FR', 'en-US'])).toBe('en')
+    expect(resolveLocale('', ['fr'])).toBe('en')
+    expect(resolveLocale('xx', [])).toBe('en')
   })
 })

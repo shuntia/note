@@ -987,7 +987,7 @@ pub enum TurnError {
 }
 
 /// Continues `thread` when given, and otherwise starts a new one.
-pub async fn run_turn(state: &crate::AppState, principal: &crate::auth::SharePrincipal, visitor_key: &str, thread: Option<i64>, message: &str) -> Result<VisitorTurn, TurnError> {
+pub async fn run_turn(state: &crate::AppState, principal: &crate::auth::SharePrincipal, visitor_key: &str, thread: Option<i64>, message: &str, visitor_lang: crate::text::Lang) -> Result<VisitorTurn, TurnError> {
     let message = message.trim().to_string();
     if message.is_empty() || message.len() > MAX_MESSAGE {
         return Err(TurnError::Blank);
@@ -1048,9 +1048,9 @@ pub async fn run_turn(state: &crate::AppState, principal: &crate::auth::SharePri
                 .collect();
             let reply = if !noted.is_empty() {
                 let display = crate::config::UserConfig::load(&st.config_dir, &owner).map_or_else(|_| owner.clone(), |c| c.display_name);
-                format!("Passed on to {display}.")
+                crate::text::share_passed_on(visitor_lang, &display)
             } else if out.reply.trim().is_empty() {
-                crate::EMPTY_REPLY_FALLBACK.to_string()
+                crate::text::empty_reply(visitor_lang)
             } else {
                 out.reply.clone()
             };
@@ -1072,7 +1072,7 @@ pub async fn run_turn(state: &crate::AppState, principal: &crate::auth::SharePri
         };
         for text in &noted {
             let msg = crate::channels::OutboundMessage {
-                title: format!("Note from {}", share.name),
+                title: crate::text::share_note_from(crate::text::Lang::for_user(&st.config_dir, &owner), &share.name),
                 body: text.clone(),
                 urgency: crate::channels::Urgency::Normal,
                 checkin: false,

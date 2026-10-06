@@ -2,6 +2,8 @@ import QRCode from 'qrcode'
 import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { api, ApiError, security } from '../api'
 import type { ToastAction, ViewProps } from '../app'
+import { adoptLanguage, t, type Key } from '../i18n'
+import * as format from '../i18n/format'
 import { Overflow } from '../overflow'
 import { prefsFrom, writePrefs } from '../prefs'
 import { disablePush, enablePush, pushState } from '../push'
@@ -20,6 +22,7 @@ import {
   type ThemeChoice,
 } from '../theme'
 import type {
+  Language,
   Me,
   Passkey,
   PromptDoc,
@@ -30,6 +33,7 @@ import type {
   Settings as UserSettings,
   Share,
   SharePatch,
+  ShareMessage,
   ShareScope,
   ShareThread,
   ShareVisit,
@@ -59,6 +63,7 @@ const EDITABLE = [
 ] as const
 
 const MAX_TRIGGERS_PER_DAY = 20
+const MXID_EXAMPLE = '@you:server'
 const WORK_MIN = { min: 5, max: 120 }
 const BREAK_MIN = { min: 1, max: 60 }
 const IDLE_MIN = { min: 0, max: 240 }
@@ -85,13 +90,20 @@ type Loaded = {
   matrixEnabled: boolean
   matrixSend: boolean
   matrixPing: boolean
+  language: Language
 }
 type Save = { row: string; kind: 'busy' | 'saved' | 'failed'; message?: string } | null
 
-const RING_CHOICES: { id: RingFor; label: string }[] = [
-  { id: 'urgent', label: 'Pressing' },
-  { id: 'checkins', label: 'Check-ins' },
-  { id: 'never', label: 'Never' },
+const LANGUAGES: { id: Language; key: Key }[] = [
+  { id: '', key: 'settings.language.auto' },
+  { id: 'en', key: 'settings.language.en' },
+  { id: 'ja', key: 'settings.language.ja' },
+]
+
+const RING_CHOICES: { id: RingFor; key: Key }[] = [
+  { id: 'urgent', key: 'settings.ring.urgent' },
+  { id: 'checkins', key: 'settings.ring.checkins' },
+  { id: 'never', key: 'settings.ring.never' },
 ]
 
 export function RingChoices({
@@ -104,7 +116,7 @@ export function RingChoices({
   onPick: (choice: RingFor) => void
 }) {
   return (
-    <div className="seg" role="group" aria-label="Ring me for">
+    <div className="seg" role="group" aria-label={t('settings.ring.label')}>
       {RING_CHOICES.map((c) => (
         <button
           key={c.id}
@@ -113,18 +125,18 @@ export function RingChoices({
           disabled={disabled}
           onClick={() => onPick(c.id)}
         >
-          {c.label}
+          {t(c.key)}
         </button>
       ))}
     </div>
   )
 }
 
-const THEMES: { id: ThemeChoice; label: string }[] = [
-  { id: 'system', label: 'System' },
-  { id: 'light', label: 'Light' },
-  { id: 'dark', label: 'Dark' },
-  { id: 'sky', label: 'Sky' },
+const THEMES: { id: ThemeChoice; key: Key }[] = [
+  { id: 'system', key: 'settings.theme.system' },
+  { id: 'light', key: 'settings.theme.light' },
+  { id: 'dark', key: 'settings.theme.dark' },
+  { id: 'sky', key: 'settings.theme.sky' },
 ]
 
 // Today's sky from midnight to midnight at half-hour stops, with a mark at now.
@@ -153,17 +165,17 @@ function SkyStrip() {
       </div>
       <div className="sky-ticks">
         <span>0:00</span>
-        <span>{times.rise ? `${times.rise} rise` : 'no sunrise'}</span>
-        <span>{times.set ? `${times.set} set` : 'no sunset'}</span>
+        <span>{times.rise ? t('settings.sky.rise', { time: times.rise }) : t('settings.sky.noSunrise')}</span>
+        <span>{times.set ? t('settings.sky.set', { time: times.set }) : t('settings.sky.noSunset')}</span>
         <span>24:00</span>
       </div>
     </div>
   )
 }
 
-const COUNTERS: { id: CounterMode; label: string }[] = [
-  { id: 'remaining', label: 'Remaining' },
-  { id: 'elapsed', label: 'Elapsed' },
+const COUNTERS: { id: CounterMode; key: Key }[] = [
+  { id: 'remaining', key: 'settings.counter.remaining' },
+  { id: 'elapsed', key: 'settings.counter.elapsed' },
 ]
 
 function draftOf(s: UserSettings): Draft {
@@ -193,7 +205,8 @@ const zoneCity = (tz: string) => tz.split('/').pop()?.replace(/_/g, ' ') ?? tz
 function slideWord(row: ScheduleRow): string | null {
   if (row.entry === 'block' || row.flexibility === 'fixed' || row.slide_window_min <= 0) return null
   const min = row.slide_window_min
-  return min % 60 === 0 ? `± ${min / 60} h` : `± ${min} min`
+  const span = min % 60 === 0 ? t('time.hours', { n: min / 60 }) : t('time.minutes', { n: min })
+  return `± ${span}`
 }
 
 function Group({ head, children }: { head: string; children: ReactNode }) {
@@ -210,7 +223,7 @@ function Status({ save, row }: { save: Save; row: string }) {
   if (save.kind === 'saved')
     return (
       <span className="pane-status ok" role="status">
-        {save.message ?? '✓ Saved'}
+        {save.message ?? t('settings.saved')}
       </span>
     )
   return (
@@ -313,6 +326,7 @@ export function Settings({
           matrixEnabled: s.matrix_enabled,
           matrixSend: s.matrix_send,
           matrixPing: s.matrix_ping,
+          language: s.language,
         })
       })
       .catch(() => setState('error'))
@@ -329,12 +343,12 @@ export function Settings({
   const failure = (err: unknown) =>
     err instanceof ApiError && (err.status === 400 || err.status === 422)
       ? err.message
-      : "That didn't save. Try again."
+      : t('settings.saveFailed')
 
   const callFailure = (err: unknown) =>
     err instanceof ApiError && [400, 409, 422, 503].includes(err.status)
       ? err.message
-      : "That didn't go through. Try again."
+      : t('settings.notThrough')
 
   // Only the fields that moved travel, so an edit left open in another row is never
   // written by someone else's save. `override` carries a value whose state update
@@ -381,6 +395,21 @@ export function Settings({
       setSave({ row, kind: 'saved' })
     } catch (err) {
       setSave({ row, kind: 'failed', message: failure(err) })
+    }
+  }
+
+  const chooseLanguage = async (language: Language) => {
+    setSave({ row: 'language', kind: 'busy' })
+    try {
+      const saved = await api.saveSettings({ language })
+      if (adoptLanguage(saved.language)) {
+        location.reload()
+        return
+      }
+      setState((s) => (s && s !== 'error' ? { ...s, language: saved.language } : s))
+      setSave({ row: 'language', kind: 'saved' })
+    } catch (err) {
+      setSave({ row: 'language', kind: 'failed', message: failure(err) })
     }
   }
 
@@ -442,7 +471,7 @@ export function Settings({
     setSave({ row: 'calls', kind: 'busy' })
     try {
       await api.voiceTest()
-      setSave({ row: 'calls', kind: 'saved', message: 'Ringing' })
+      setSave({ row: 'calls', kind: 'saved', message: t('settings.ringing') })
     } catch (err) {
       setSave({ row: 'calls', kind: 'failed', message: callFailure(err) })
     }
@@ -537,9 +566,9 @@ export function Settings({
     setSave({ row: 'test', kind: 'busy' })
     try {
       const { via } = await api.notifyTest()
-      setSave({ row: 'test', kind: 'saved', message: `✓ Sent via ${via}` })
+      setSave({ row: 'test', kind: 'saved', message: t('settings.test.sent', { via }) })
     } catch {
-      setSave({ row: 'test', kind: 'failed', message: "That didn't reach you. Try again." })
+      setSave({ row: 'test', kind: 'failed', message: t('settings.test.failed') })
     }
   }
 
@@ -599,7 +628,7 @@ export function Settings({
   }
 
   const locate = () => {
-    if (!navigator.geolocation) return notify("Couldn't get your location.")
+    if (!navigator.geolocation) return notify(t('settings.locateFailed'))
     navigator.geolocation.getCurrentPosition(
       (pos) => {
         const p = {
@@ -610,7 +639,7 @@ export function Settings({
         setPlace(p)
         paintSky()
       },
-      () => notify("Couldn't get your location."),
+      () => notify(t('settings.locateFailed')),
       { maximumAge: 3_600_000, timeout: 10_000 },
     )
   }
@@ -628,44 +657,44 @@ export function Settings({
   })
 
   const busy = save?.kind === 'busy'
-  const themeLabel = THEMES.find((t) => t.id === theme)?.label ?? 'System'
-  const counterLabel = COUNTERS.find((c) => c.id === loaded?.counter)?.label ?? 'Remaining'
+  const themeLabel = t(THEMES.find((x) => x.id === theme)?.key ?? 'settings.theme.system')
+  const counterLabel = t(COUNTERS.find((c) => c.id === loaded?.counter)?.key ?? 'settings.counter.remaining')
 
   return (
     <div className="settings">
       {state === 'error' && (
         <p className="set-sub">
-          Settings didn't load.{' '}
+          {t('settings.loadFailed')}{' '}
           <button className="set-link" onClick={load}>
-            Retry
+            {t('common.retry')}
           </button>
         </p>
       )}
 
       {loaded && (
-        <Group head="Sessions">
+        <Group head={t('settings.sessions')}>
           <FoldRow
-            label="Pomodoro"
+            label={t('settings.pomodoro')}
             value={
               loaded.pomodoro
-                ? `${loaded.draft.pomodoro_work_min} / ${loaded.draft.pomodoro_break_min} min`
-                : 'Off'
+                ? t('settings.pomodoro.value', {
+                    work: loaded.draft.pomodoro_work_min,
+                    rest: loaded.draft.pomodoro_break_min,
+                  })
+                : t('settings.off')
             }
             open={open === 'pomodoro'}
             onToggle={fold('pomodoro')}
           >
             {open === 'pomodoro' && (
               <div className="set-fold-body">
-                <span className="set-sub">
-                  A session runs in rounds: work, then a break, and Note says when each
-                  one is up.
-                </span>
+                <span className="set-sub">{t('settings.pomodoro.sub')}</span>
                 <div className="set-row">
                   <span className="set-row-body">
-                    <span className="set-label">Rounds</span>
+                    <span className="set-label">{t('settings.pomodoro.rounds')}</span>
                   </span>
                   <Switch
-                    label="Pomodoro"
+                    label={t('settings.pomodoro')}
                     on={loaded.pomodoro}
                     disabled={busy}
                     onToggle={() =>
@@ -674,7 +703,7 @@ export function Settings({
                   />
                 </div>
                 <label className="set-sub" htmlFor="pomodoro-work">
-                  Work, in minutes
+                  {t('settings.pomodoro.work')}
                 </label>
                 <input
                   id="pomodoro-work"
@@ -686,7 +715,7 @@ export function Settings({
                   {...commitOn('pomodoro')}
                 />
                 <label className="set-sub" htmlFor="pomodoro-break">
-                  Break, in minutes
+                  {t('settings.pomodoro.break')}
                 </label>
                 <input
                   id="pomodoro-break"
@@ -703,11 +732,11 @@ export function Settings({
           </FoldRow>
           <div className="set-row">
             <span className="set-row-body">
-              <span className="set-label">Notify when a session ends</span>
+              <span className="set-label">{t('settings.notifyEnd')}</span>
             </span>
             <Status save={save} row="session_end_notify" />
             <Switch
-              label="Notify when a session ends"
+              label={t('settings.notifyEnd')}
               on={loaded.endNotify}
               disabled={busy}
               onToggle={() =>
@@ -716,14 +745,14 @@ export function Settings({
             />
           </div>
           <FoldRow
-            label="Counter"
+            label={t('settings.counter')}
             value={counterLabel}
             open={open === 'counter'}
             onToggle={fold('counter')}
           >
             {open === 'counter' && (
               <div className="set-fold-body">
-                <div className="seg" role="group" aria-label="Counter">
+                <div className="seg" role="group" aria-label={t('settings.counter')}>
                   {COUNTERS.map((c) => (
                     <button
                       key={c.id}
@@ -731,7 +760,7 @@ export function Settings({
                       aria-pressed={loaded.counter === c.id}
                       onClick={() => void commitHome('counter', { counter: c.id })}
                     >
-                      {c.label}
+                      {t(c.key)}
                     </button>
                   ))}
                 </div>
@@ -741,11 +770,11 @@ export function Settings({
           </FoldRow>
           <div className="set-row">
             <span className="set-row-body">
-              <span className="set-label">Show the wait as an arc</span>
+              <span className="set-label">{t('settings.arc')}</span>
             </span>
             <Status save={save} row="arc" />
             <Switch
-              label="Show the wait as an arc"
+              label={t('settings.arc')}
               on={loaded.arc}
               disabled={busy}
               onToggle={() => void commitHome('arc', { show_arc_between_sessions: !loaded.arc })}
@@ -755,9 +784,9 @@ export function Settings({
       )}
 
       {loaded && (
-        <Group head="Day">
+        <Group head={t('settings.day')}>
           <FoldRow
-            label="Routines and blocks"
+            label={t('settings.schedule')}
             value={loaded.draft.template}
             open={open === 'schedule'}
             onToggle={fold('schedule')}
@@ -766,16 +795,16 @@ export function Settings({
               <div className="set-fold-body">
                 {templateChoices(loaded).length > 1 && (
                   <select
-                    aria-label="Shape of the day"
+                    aria-label={t('settings.schedule.shape')}
                     value={loaded.draft.template}
                     onChange={(e) => {
                       edit('template', e.target.value)
                       void commit('schedule', { template: e.target.value })
                     }}
                   >
-                    {templateChoices(loaded).map((t) => (
-                      <option key={t} value={t}>
-                        {t}
+                    {templateChoices(loaded).map((name) => (
+                      <option key={name} value={name}>
+                        {name}
                       </option>
                     ))}
                   </select>
@@ -786,8 +815,8 @@ export function Settings({
             )}
           </FoldRow>
           <FoldRow
-            label="Nightly plan"
-            value={loaded.nightly ? `On, ${loaded.draft.nightly_time}` : 'Off'}
+            label={t('settings.nightly')}
+            value={loaded.nightly ? t('settings.nightly.on', { time: loaded.draft.nightly_time }) : t('settings.off')}
             open={open === 'nightly'}
             onToggle={fold('nightly')}
           >
@@ -795,11 +824,11 @@ export function Settings({
               <div className="set-fold-body">
                 <div className="set-row">
                   <span className="set-row-body">
-                    <span className="set-label">Plans the day and writes the letter</span>
+                    <span className="set-label">{t('settings.nightly.sub')}</span>
                   </span>
                   <Status save={save} row="nightly_enabled" />
                   <Switch
-                    label="Nightly plan"
+                    label={t('settings.nightly')}
                     on={loaded.nightly}
                     disabled={busy}
                     onToggle={() =>
@@ -808,7 +837,7 @@ export function Settings({
                   />
                 </div>
                 <label className="set-sub" htmlFor="nightly-time">
-                  Lands at
+                  {t('settings.nightly.landsAt')}
                 </label>
                 <input
                   id="nightly-time"
@@ -822,20 +851,17 @@ export function Settings({
             )}
           </FoldRow>
           <FoldRow
-            label="Close the day"
-            value={loaded.draft.close_day_time || 'Off'}
+            label={t('settings.closeDay')}
+            value={loaded.draft.close_day_time || t('settings.off')}
             open={open === 'close_day'}
             onToggle={fold('close_day')}
           >
             {open === 'close_day' && (
               <div className="set-fold-body">
-                <span className="set-sub">
-                  At this hour Note asks what is still open and offers to carry it to
-                  tomorrow. Clear the time to leave the day to end on its own.
-                </span>
+                <span className="set-sub">{t('settings.closeDay.sub')}</span>
                 <input
                   type="time"
-                  aria-label="Close the day"
+                  aria-label={t('settings.closeDay')}
                   value={loaded.draft.close_day_time}
                   onChange={(e) => edit('close_day_time', e.target.value)}
                   {...commitOn('close_day')}
@@ -845,7 +871,7 @@ export function Settings({
             )}
           </FoldRow>
           <FoldRow
-            label="Time zone"
+            label={t('settings.timezone')}
             value={zoneCity(loaded.draft.timezone)}
             open={open === 'timezone'}
             onToggle={fold('timezone')}
@@ -854,10 +880,10 @@ export function Settings({
               <div className="set-fold-body">
                 <div className="set-row">
                   <span className="set-row-body">
-                    <span className="set-label">Follow this device</span>
+                    <span className="set-label">{t('settings.followDevice')}</span>
                   </span>
                   <Switch
-                    label="Follow this device"
+                    label={t('settings.followDevice')}
                     on={loaded.zoneAuto}
                     disabled={busy}
                     onToggle={() => void commitZoneAuto(!loaded.zoneAuto)}
@@ -865,13 +891,13 @@ export function Settings({
                 </div>
                 {loaded.zoneAuto ? (
                   <span className="set-zone">
-                    <input aria-label="Time zone" disabled value={loaded.draft.timezone} />
-                    {loaded.draft.timezone === deviceZone() && <span className="set-hint">detected</span>}
+                    <input aria-label={t('settings.timezone')} disabled value={loaded.draft.timezone} />
+                    {loaded.draft.timezone === deviceZone() && <span className="set-hint">{t('settings.detected')}</span>}
                   </span>
                 ) : (
                   <input
                     list="tz-list"
-                    aria-label="Time zone"
+                    aria-label={t('settings.timezone')}
                     spellCheck={false}
                     autoCapitalize="none"
                     value={loaded.draft.timezone}
@@ -891,17 +917,17 @@ export function Settings({
         </Group>
       )}
 
-      <Group head="Notifications">
+      <Group head={t('settings.notifications')}>
         <PushRow notify={notify} />
         {loaded && (
           <div className="set-row">
             <span className="set-row-body">
-              <span className="set-label">Check-ins</span>
-              <span className="set-sub">Routines on the day reach you when they fire</span>
+              <span className="set-label">{t('settings.checkins')}</span>
+              <span className="set-sub">{t('settings.checkins.sub')}</span>
             </span>
             <Status save={save} row="checkins_enabled" />
             <Switch
-              label="Check-ins"
+              label={t('settings.checkins')}
               on={loaded.checkins}
               disabled={busy}
               onToggle={() =>
@@ -912,19 +938,16 @@ export function Settings({
         )}
         {loaded && (
           <FoldRow
-            label="Check-ins from Note"
-            value={`Up to ${loaded.draft.triggers_per_day} a day`}
+            label={t('settings.triggers')}
+            value={t('settings.triggers.value', { n: loaded.draft.triggers_per_day })}
             open={open === 'triggers'}
             onToggle={fold('triggers')}
           >
             {open === 'triggers' && (
               <div className="set-fold-body">
-                <span className="set-sub">
-                  Moments Note sets aside to look at the day and reach out on its own. It asks
-                  before it goes past this.
-                </span>
+                <span className="set-sub">{t('settings.triggers.sub')}</span>
                 <input
-                  aria-label="Check-ins from Note a day"
+                  aria-label={t('settings.triggers.input')}
                   type="number"
                   min={0}
                   max={MAX_TRIGGERS_PER_DAY}
@@ -945,7 +968,7 @@ export function Settings({
                     disabled={busy}
                     onClick={() => void sendTest()}
                   >
-                    Send a test notification
+                    {t('settings.test.send')}
                   </button>
                   <Status save={save} row="test" />
                 </div>
@@ -955,15 +978,19 @@ export function Settings({
         )}
         {loaded && (
           <FoldRow
-            label="Nudge when idle"
-            value={loaded.draft.idle_nudge_min ? `${loaded.draft.idle_nudge_min} min` : 'Off'}
+            label={t('settings.idle')}
+            value={
+              loaded.draft.idle_nudge_min
+                ? t('time.minutes', { n: loaded.draft.idle_nudge_min })
+                : t('settings.off')
+            }
             open={open === 'idle'}
             onToggle={fold('idle')}
           >
             {open === 'idle' && (
               <div className="set-fold-body">
                 <input
-                  aria-label="Minutes idle before a nudge"
+                  aria-label={t('settings.idle.input')}
                   type="number"
                   min={IDLE_MIN.min}
                   max={IDLE_MIN.max}
@@ -984,15 +1011,15 @@ export function Settings({
       </Group>
 
       {loaded?.voiceEnabled && (
-        <Group head="Connections">
+        <Group head={t('settings.connections')}>
           <FoldRow
-            label="Matrix"
+            label={t('settings.matrix')}
             value={
               loaded.voiceLink?.state === 'linked'
                 ? loaded.voiceLink.mxid
                 : loaded.voiceLink
-                  ? 'Invited'
-                  : 'Not linked'
+                  ? t('settings.matrix.invited')
+                  : t('settings.matrix.notLinked')
             }
             open={open === 'matrix'}
             onToggle={fold('matrix')}
@@ -1005,10 +1032,10 @@ export function Settings({
                       <>
                         <div className="set-row">
                           <span className="set-row-body">
-                            <span className="set-label">Note's messages</span>
+                            <span className="set-label">{t('settings.matrix.send')}</span>
                           </span>
                           <Switch
-                            label="Note's messages"
+                            label={t('settings.matrix.send')}
                             on={loaded.matrixSend}
                             disabled={busy}
                             onToggle={() => void saveMatrix({ matrix_send: !loaded.matrixSend })}
@@ -1017,10 +1044,10 @@ export function Settings({
                         {loaded.matrixSend && (
                           <div className="set-row">
                             <span className="set-row-body">
-                              <span className="set-label">Ping</span>
+                              <span className="set-label">{t('settings.matrix.ping')}</span>
                             </span>
                             <Switch
-                              label="Ping"
+                              label={t('settings.matrix.ping')}
                               on={loaded.matrixPing}
                               disabled={busy}
                               onToggle={() => void saveMatrix({ matrix_ping: !loaded.matrixPing })}
@@ -1035,19 +1062,19 @@ export function Settings({
                       disabled={busy}
                       onClick={() => void unlinkVoice()}
                     >
-                      Unlink
+                      {t('settings.matrix.unlink')}
                     </button>
                   </>
                 ) : loaded.voiceLink ? (
                   <>
-                    <span className="set-sub">Accept Note's invite in Element</span>
+                    <span className="set-sub">{t('settings.matrix.accept')}</span>
                     <button
                       type="button"
                       className="btn-haze small"
                       disabled={busy}
                       onClick={() => void unlinkVoice()}
                     >
-                      Cancel
+                      {t('common.cancel')}
                     </button>
                   </>
                 ) : (
@@ -1059,8 +1086,8 @@ export function Settings({
                     }}
                   >
                     <input
-                      aria-label="Matrix account"
-                      placeholder="@you:server"
+                      aria-label={t('settings.matrix.account')}
+                      placeholder={MXID_EXAMPLE}
                       autoComplete="off"
                       autoCapitalize="none"
                       spellCheck={false}
@@ -1068,7 +1095,7 @@ export function Settings({
                       onChange={(e) => setMxid(e.target.value)}
                     />
                     <button type="submit" className="btn-haze small" disabled={busy || !mxid.trim()}>
-                      Link
+                      {t('settings.matrix.link')}
                     </button>
                   </form>
                 )}
@@ -1078,8 +1105,8 @@ export function Settings({
           </FoldRow>
           {loaded.voiceLink?.state === 'linked' && (
             <FoldRow
-              label="Calls"
-              value={(RING_CHOICES.find((c) => c.id === loaded.ringFor) ?? RING_CHOICES[0]).label}
+              label={t('settings.calls')}
+              value={t((RING_CHOICES.find((c) => c.id === loaded.ringFor) ?? RING_CHOICES[0]).key)}
               open={open === 'calls'}
               onToggle={fold('calls')}
             >
@@ -1093,7 +1120,7 @@ export function Settings({
                   {voices && voices.length > 0 && (
                     <button type="button" className="set-row set-row-button" onClick={() => setChoosingVoice(true)}>
                       <span className="set-row-body">
-                        <span className="set-label">Voice</span>
+                        <span className="set-label">{t('settings.voice')}</span>
                       </span>
                       <span className="set-value">
                         {(voices.find((v) => v.id === loaded.voice) ?? voices[0]).label}
@@ -1111,10 +1138,10 @@ export function Settings({
                   )}
                   <div className="set-row">
                     <span className="set-row-body">
-                      <span className="set-label">Sounds</span>
+                      <span className="set-label">{t('settings.sounds')}</span>
                     </span>
                     <Switch
-                      label="Sounds"
+                      label={t('settings.sounds')}
                       on={loaded.cue}
                       disabled={busy}
                       onToggle={() => void saveCue(!loaded.cue)}
@@ -1126,7 +1153,7 @@ export function Settings({
                     disabled={busy}
                     onClick={() => void ringNow()}
                   >
-                    Ring me
+                    {t('settings.ringMe')}
                   </button>
                   <Status save={save} row="calls" />
                 </div>
@@ -1136,10 +1163,10 @@ export function Settings({
         </Group>
       )}
 
-      <Group head="You">
+      <Group head={t('settings.you')}>
         {loaded && (
           <FoldRow
-            label="Your name"
+            label={t('settings.name')}
             value={loaded.draft.display_name}
             open={open === 'name'}
             onToggle={fold('name')}
@@ -1147,7 +1174,7 @@ export function Settings({
             {open === 'name' && (
               <div className="set-fold-body">
                 <input
-                  aria-label="Your name"
+                  aria-label={t('settings.name')}
                   autoComplete="name"
                   value={loaded.draft.display_name}
                   onChange={(e) => edit('display_name', e.target.value)}
@@ -1158,26 +1185,26 @@ export function Settings({
             )}
           </FoldRow>
         )}
-        <FoldRow label="Password" open={open === 'password'} onToggle={fold('password')}>
+        <FoldRow label={t('settings.password')} open={open === 'password'} onToggle={fold('password')}>
           {open === 'password' && <PasswordSection />}
         </FoldRow>
         <FoldRow
-          label="Theme"
+          label={t('settings.theme')}
           value={themeLabel}
           open={open === 'theme'}
           onToggle={fold('theme')}
         >
           {open === 'theme' && (
             <div className="set-fold-body">
-              <div className="seg" role="group" aria-label="Theme">
-                {THEMES.map((t) => (
+              <div className="seg" role="group" aria-label={t('settings.theme')}>
+                {THEMES.map((x) => (
                   <button
-                    key={t.id}
+                    key={x.id}
                     type="button"
-                    aria-pressed={theme === t.id}
-                    onClick={() => chooseTheme(t.id)}
+                    aria-pressed={theme === x.id}
+                    onClick={() => chooseTheme(x.id)}
                   >
-                    {t.label}
+                    {t(x.key)}
                   </button>
                 ))}
               </div>
@@ -1186,7 +1213,7 @@ export function Settings({
                   <SkyStrip key={place ? `${place.lat},${place.lon}` : 'zone'} />
                   <p className="set-note">
                     <button type="button" className="link" onClick={place ? forget : locate}>
-                      {place ? 'Forget my location' : 'Use my location'}
+                      {place ? t('settings.location.forget') : t('settings.location.use')}
                     </button>
                   </p>
                 </>
@@ -1194,30 +1221,58 @@ export function Settings({
             </div>
           )}
         </FoldRow>
+        {loaded && (
+          <FoldRow
+            label={t('settings.language')}
+            value={t(LANGUAGES.find((x) => x.id === loaded.language)?.key ?? 'settings.language.auto')}
+            open={open === 'language'}
+            onToggle={fold('language')}
+          >
+            {open === 'language' && (
+              <div className="set-fold-body">
+                <div className="seg" role="group" aria-label={t('settings.language')}>
+                  {LANGUAGES.map((x) => (
+                    <button
+                      key={x.id}
+                      type="button"
+                      lang={x.id || undefined}
+                      aria-pressed={loaded.language === x.id}
+                      disabled={busy}
+                      onClick={() => void chooseLanguage(x.id)}
+                    >
+                      {t(x.key)}
+                    </button>
+                  ))}
+                </div>
+                <Status save={save} row="language" />
+              </div>
+            )}
+          </FoldRow>
+        )}
       </Group>
 
-      <Group head="Advanced">
+      <Group head={t('settings.advanced')}>
         {/* The prompt editor stays mounted and renders nothing while closed, so an
             unsaved draft survives a detour through another row. */}
-        <FoldRow label="How Note talks" open={open === 'persona'} onToggle={fold('persona')}>
+        <FoldRow label={t('settings.persona')} open={open === 'persona'} onToggle={fold('persona')}>
           <PersonaSection active={open === 'persona'} notify={notify} />
         </FoldRow>
-        <FoldRow label="Passkeys and codes" open={open === 'security'} onToggle={fold('security')}>
+        <FoldRow label={t('settings.security')} open={open === 'security'} onToggle={fold('security')}>
           {open === 'security' && <SecuritySection notify={notify} />}
         </FoldRow>
-        <FoldRow label="API tokens" open={open === 'tokens'} onToggle={fold('tokens')}>
+        <FoldRow label={t('settings.tokens')} open={open === 'tokens'} onToggle={fold('tokens')}>
           {open === 'tokens' && <TokensSection notify={notify} />}
         </FoldRow>
-        <FoldRow label="Share links" open={open === 'shares'} onToggle={fold('shares')}>
+        <FoldRow label={t('settings.shares')} open={open === 'shares'} onToggle={fold('shares')}>
           {open === 'shares' && <SharesSection notify={notify} />}
         </FoldRow>
       </Group>
 
       {me.admin && (
-        <Group head="Admin">
+        <Group head={t('settings.admin')}>
           <button className="set-row set-open" onClick={openAdmin}>
             <span className="set-row-body">
-              <span className="set-label">Admin panel</span>
+              <span className="set-label">{t('settings.adminPanel')}</span>
             </span>
             <svg className="set-chev" viewBox="0 0 24 24" aria-hidden="true">
               <path d="M9 6l6 6-6 6" />
@@ -1238,14 +1293,13 @@ export function Settings({
           }
         }}
       >
-        Sign out
+        {t('settings.signOut')}
       </button>
     </div>
   )
 }
 
 const MIN_PASSWORD = 8
-const WRONG_PASSWORD = "That isn't your current password."
 
 function PasswordSection() {
   const [current, setCurrent] = useState('')
@@ -1264,14 +1318,14 @@ function PasswordSection() {
       setCurrent('')
       setNext('')
       setConfirm('')
-      setSave({ row: 'password', kind: 'saved', message: 'Changed' })
+      setSave({ row: 'password', kind: 'saved', message: t('settings.password.changed') })
     } catch (err) {
       const message =
         err instanceof ApiError
           ? err.status === 401
-            ? WRONG_PASSWORD
+            ? t('settings.password.wrong')
             : err.message
-          : "Couldn't change the password. Try again."
+          : t('settings.password.failed')
       setSave({ row: 'password', kind: 'failed', message })
     }
   }
@@ -1280,31 +1334,31 @@ function PasswordSection() {
     <form className="set-fold-body" onSubmit={(e) => void submit(e)}>
       <input
         type="password"
-        aria-label="Current password"
-        placeholder="Current password"
+        aria-label={t('settings.password.current')}
+        placeholder={t('settings.password.current')}
         autoComplete="current-password"
         value={current}
         onChange={(e) => setCurrent(e.target.value)}
       />
       <input
         type="password"
-        aria-label="New password"
-        placeholder="New password"
+        aria-label={t('settings.password.new')}
+        placeholder={t('settings.password.new')}
         autoComplete="new-password"
         value={next}
         onChange={(e) => setNext(e.target.value)}
       />
       <input
         type="password"
-        aria-label="Confirm the new password"
-        placeholder="Confirm the new password"
+        aria-label={t('settings.password.confirm')}
+        placeholder={t('settings.password.confirm')}
         autoComplete="new-password"
         value={confirm}
         onChange={(e) => setConfirm(e.target.value)}
       />
       <div className="set-acts">
         <button type="submit" className="btn-haze small" disabled={!ready || save?.kind === 'busy'}>
-          Change password
+          {t('settings.password.change')}
         </button>
         <Status save={save} row="password" />
       </div>
@@ -1337,7 +1391,7 @@ function ScheduleList({
           </span>
           {row.entry === 'routine' && (
             <Switch
-              label={`${eventLabel(row.kind)} pings you`}
+              label={t('settings.schedule.pings', { name: eventLabel(row.kind) })}
               on={row.alert}
               disabled={busy}
               onToggle={() => toggle(row)}
@@ -1350,10 +1404,10 @@ function ScheduleList({
   )
 }
 
-const PROMPTS: { id: PromptName; label: string }[] = [
-  { id: 'persona', label: 'Persona' },
-  { id: 'planning', label: 'Planning' },
-  { id: 'share', label: 'Share links' },
+const PROMPTS: { id: PromptName; key: Key }[] = [
+  { id: 'persona', key: 'settings.prompt.persona' },
+  { id: 'planning', key: 'settings.prompt.planning' },
+  { id: 'share', key: 'settings.prompt.share' },
 ]
 
 const UNDO_MS = 5000
@@ -1397,7 +1451,7 @@ function PersonaSection({ active, notify }: { active: boolean; notify: Notify })
   const doc = docs[name]
   const picker = (
     <select
-      aria-label="Prompt"
+      aria-label={t('settings.prompt')}
       value={name}
       onChange={(e) => {
         setSave(null)
@@ -1406,7 +1460,7 @@ function PersonaSection({ active, notify }: { active: boolean; notify: Notify })
     >
       {PROMPTS.map((p) => (
         <option key={p.id} value={p.id}>
-          {p.label}
+          {t(p.key)}
         </option>
       ))}
     </select>
@@ -1418,9 +1472,9 @@ function PersonaSection({ active, notify }: { active: boolean; notify: Notify })
         {picker}
         {doc === 'error' && (
           <p className="set-sub">
-            The prompt didn't load.{' '}
+            {t('settings.prompt.loadFailed')}{' '}
             <button className="set-link" onClick={() => load(name)}>
-              Retry
+              {t('common.retry')}
             </button>
           </p>
         )}
@@ -1449,7 +1503,7 @@ function PersonaSection({ active, notify }: { active: boolean; notify: Notify })
         message:
           err instanceof ApiError && err.status === 400
             ? err.message
-            : "The prompt didn't save. Try again.",
+            : t('settings.prompt.saveFailed'),
       })
     }
   }
@@ -1462,18 +1516,18 @@ function PersonaSection({ active, notify }: { active: boolean; notify: Notify })
       setDocs((all) => ({ ...all, [name]: d }))
       setEdits((all) => ({ ...all, [name]: undefined }))
       setSave(null)
-      notify('Reset to default', {
-        label: 'Undo',
+      notify(t('settings.prompt.reset'), {
+        label: t('toast.undo'),
         windowMs: UNDO_MS,
         run: () => {
           api
             .promptPut(name, previous)
             .then((back) => setDocs((all) => ({ ...all, [name]: back })))
-            .catch(() => notify("The prompt didn't come back. Try again."))
+            .catch(() => notify(t('settings.prompt.undoFailed')))
         },
       })
     } catch {
-      setSave({ row: 'prompt', kind: 'failed', message: "The prompt didn't reset. Try again." })
+      setSave({ row: 'prompt', kind: 'failed', message: t('settings.prompt.resetFailed') })
     } finally {
       setResets((n) => n + 1)
     }
@@ -1483,11 +1537,11 @@ function PersonaSection({ active, notify }: { active: boolean; notify: Notify })
     <form className="set-fold-body" onSubmit={submit}>
       <fieldset className="set-prompt-rows" disabled={busy}>
         {picker}
-        {doc.custom && <span className="set-badge">Customized</span>}
+        {doc.custom && <span className="set-badge">{t('settings.prompt.custom')}</span>}
         <textarea
           ref={editor}
           className="mono set-prompt"
-          aria-label={`${name} prompt`}
+          aria-label={t('settings.prompt.editor', { name: t(PROMPTS.find((p) => p.id === name)?.key ?? 'settings.prompt.persona') })}
           rows={14}
           value={text}
           onChange={(e) => setText(e.target.value)}
@@ -1495,7 +1549,7 @@ function PersonaSection({ active, notify }: { active: boolean; notify: Notify })
       </fieldset>
       <div className="set-acts">
         <button className="btn-haze small" disabled={!dirty || blank || busy}>
-          {busy ? 'Saving…' : 'Save'}
+          {busy ? t('settings.prompt.saving') : t('common.save')}
         </button>
         <button
           type="button"
@@ -1503,11 +1557,11 @@ function PersonaSection({ active, notify }: { active: boolean; notify: Notify })
           disabled={(!doc.custom && !dirty) || busy}
           onClick={() => void reset()}
         >
-          Reset to default
+          {t('settings.prompt.reset')}
         </button>
         {blank && dirty && (
           <span className="pane-status bad" role="alert">
-            A prompt can't be empty.
+            {t('settings.prompt.empty')}
           </span>
         )}
         {!dirty && <Status save={save} row="prompt" />}
@@ -1516,15 +1570,12 @@ function PersonaSection({ active, notify }: { active: boolean; notify: Notify })
   )
 }
 
-function dayOf(iso: string): string {
-  return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
-}
-
-
-const PASSKEY_HINT = 'Passkeys need an https address'
+const dayOf = (iso: string) => format.day(new Date(iso))
 
 const passkeyLine = (k: Passkey) =>
-  `Added ${dayOf(k.created_at)} · ${k.last_used_at ? `used ${dayOf(k.last_used_at)}` : 'never used'}`
+  k.last_used_at
+    ? t('settings.security.passkeyUsed', { added: dayOf(k.created_at), used: dayOf(k.last_used_at) })
+    : t('settings.security.passkeyNew', { added: dayOf(k.created_at) })
 
 // What the password prompt is standing in front of.
 type Ask =
@@ -1533,14 +1584,14 @@ type Ask =
   | { kind: 'start-totp' }
   | { kind: 'drop-totp' }
 
-const ASK_LABEL: Record<Ask['kind'], string> = {
-  'add-passkey': 'Add a passkey',
-  'drop-passkey': 'Remove this passkey',
-  'start-totp': 'Set up authenticator',
-  'drop-totp': 'Remove the authenticator app',
+const ASK_LABEL: Record<Ask['kind'], { action: Key; password: Key }> = {
+  'add-passkey': { action: 'settings.security.addPasskey', password: 'settings.security.passwordTo.addPasskey' },
+  'drop-passkey': { action: 'settings.security.dropPasskey', password: 'settings.security.passwordTo.dropPasskey' },
+  'start-totp': { action: 'settings.security.startTotp', password: 'settings.security.passwordTo.startTotp' },
+  'drop-totp': { action: 'settings.security.dropTotp', password: 'settings.security.passwordTo.dropTotp' },
 }
 
-function QrCode({ uri, label = 'Authenticator QR code' }: { uri: string; label?: string }) {
+function QrCode({ uri, label }: { uri: string; label?: string }) {
   const canvas = useRef<HTMLCanvasElement>(null)
   const [drawn, setDrawn] = useState(true)
 
@@ -1553,8 +1604,8 @@ function QrCode({ uri, label = 'Authenticator QR code' }: { uri: string; label?:
       .catch(() => setDrawn(false))
   }, [uri])
 
-  if (!drawn) return <span className="set-sub">Use the manual key below.</span>
-  return <canvas className="set-qr" ref={canvas} aria-label={label} />
+  if (!drawn) return <span className="set-sub">{t('settings.security.manualKeyBelow')}</span>
+  return <canvas className="set-qr" ref={canvas} aria-label={label ?? t('settings.security.qr')} />
 }
 
 function TotpEnrol({
@@ -1579,14 +1630,14 @@ function TotpEnrol({
     >
       <QrCode uri={enrol.otpauth_uri} />
       <a className="set-link" href={enrol.otpauth_uri}>
-        Open in your password manager
+        {t('settings.security.openManager')}
       </a>
-      <span className="set-sub">Manual key</span>
+      <span className="set-sub">{t('settings.security.manualKey')}</span>
       <code className="set-token-secret">{enrol.secret_base32}</code>
-      <span className="set-sub">Enter a code from the app to finish</span>
+      <span className="set-sub">{t('settings.security.enterCode')}</span>
       <div className="set-token-form">
         <input
-          aria-label="Code from the app"
+          aria-label={t('settings.security.code')}
           inputMode="numeric"
           autoComplete="one-time-code"
           pattern="\d{6}"
@@ -1595,10 +1646,10 @@ function TotpEnrol({
           onChange={(e) => setCode(e.target.value)}
         />
         <button type="submit" className="btn-haze small" disabled={busy || code.length !== 6}>
-          Finish
+          {t('settings.security.finish')}
         </button>
         <button type="button" className="set-link" onClick={onCancel}>
-          Cancel
+          {t('common.cancel')}
         </button>
       </div>
     </form>
@@ -1659,7 +1710,7 @@ function SecuritySection({ notify }: { notify: Notify }) {
       }
       setPassword('')
     } catch (err) {
-      fail(err, "That didn't go through. Try again.")
+      fail(err, t('settings.notThrough'))
     } finally {
       setBusy(false)
     }
@@ -1674,7 +1725,7 @@ function SecuritySection({ notify }: { notify: Notify }) {
       setNaming(null)
       load()
     } catch (err) {
-      fail(err, "That passkey wasn't saved. Try again.")
+      fail(err, t('settings.security.passkeyFailed'))
     } finally {
       setBusy(false)
     }
@@ -1690,7 +1741,7 @@ function SecuritySection({ notify }: { notify: Notify }) {
       await security.renamePasskey(id, name.trim())
       load()
     } catch (err) {
-      fail(err, "That name didn't save. Try again.")
+      fail(err, t('settings.security.nameFailed'))
     }
   }
 
@@ -1701,7 +1752,7 @@ function SecuritySection({ notify }: { notify: Notify }) {
       setEnrol(null)
       load()
     } catch (err) {
-      fail(err, "That code didn't match. Try the next one.")
+      fail(err, t('settings.security.codeFailed'))
     } finally {
       setBusy(false)
     }
@@ -1714,19 +1765,19 @@ function SecuritySection({ notify }: { notify: Notify }) {
       onClick={() => (arming === key ? onArmed() : setArming(key))}
       onBlur={() => setArming((a) => (a === key ? null : a))}
     >
-      {arming === key ? 'Really remove?' : label}
+      {arming === key ? t('settings.security.reallyRemove') : label}
     </button>
   )
 
   return (
     <div className="set-fold-body">
-      <span className="set-sub">Used when the admin panel asks you to confirm it's you.</span>
+      <span className="set-sub">{t('settings.security.sub')}</span>
 
       {state === 'error' && (
         <span className="set-sub">
-          Security didn't load.{' '}
+          {t('settings.security.loadFailed')}{' '}
           <button className="set-link" onClick={load}>
-            Retry
+            {t('common.retry')}
           </button>
         </span>
       )}
@@ -1736,7 +1787,7 @@ function SecuritySection({ notify }: { notify: Notify }) {
           <span className="set-row-body">
             {rename?.id === k.id ? (
               <input
-                aria-label="Passkey name"
+                aria-label={t('settings.security.passkeyName')}
                 maxLength={64}
                 autoFocus
                 value={rename.name}
@@ -1754,18 +1805,18 @@ function SecuritySection({ notify }: { notify: Notify }) {
             )}
             <span className="set-sub">{passkeyLine(k)}</span>
           </span>
-          {removeButton(`passkey:${k.id}`, () => open({ kind: 'drop-passkey', id: k.id }), 'Remove')}
+          {removeButton(`passkey:${k.id}`, () => open({ kind: 'drop-passkey', id: k.id }), t('settings.security.remove'))}
         </div>
       ))}
 
       {loaded && (
         <div className="set-row set-token-row">
           <span className="set-row-body">
-            <span className="set-label">Authenticator app</span>
-            <span className="set-sub">{loaded.totp.enabled ? 'on' : 'Any TOTP app or password manager'}</span>
+            <span className="set-label">{t('settings.security.app')}</span>
+            <span className="set-sub">{loaded.totp.enabled ? t('settings.security.appOn') : t('settings.security.appHint')}</span>
           </span>
           {loaded.totp.enabled
-            ? removeButton('totp', () => open({ kind: 'drop-totp' }), 'Remove')
+            ? removeButton('totp', () => open({ kind: 'drop-totp' }), t('settings.security.remove'))
             : !enrol && (
                 <button
                   type="button"
@@ -1773,7 +1824,7 @@ function SecuritySection({ notify }: { notify: Notify }) {
                   disabled={busy}
                   onClick={() => open({ kind: 'start-totp' })}
                 >
-                  Set up authenticator
+                  {t('settings.security.startTotp')}
                 </button>
               )}
         </div>
@@ -1796,9 +1847,9 @@ function SecuritySection({ notify }: { notify: Notify }) {
             disabled={!canPasskey || busy}
             onClick={() => open({ kind: 'add-passkey' })}
           >
-            Add a passkey
+            {t('settings.security.addPasskey')}
           </button>
-          {!canPasskey && <span className="set-sub">{PASSKEY_HINT}</span>}
+          {!canPasskey && <span className="set-sub">{t('settings.security.passkeyHint')}</span>}
         </div>
       )}
 
@@ -1806,18 +1857,18 @@ function SecuritySection({ notify }: { notify: Notify }) {
         <form className="set-token-form" onSubmit={(e) => void answer(e)}>
           <input
             type="password"
-            aria-label={`Password to ${ASK_LABEL[ask.kind].toLowerCase()}`}
-            placeholder="Your password"
+            aria-label={t(ASK_LABEL[ask.kind].password)}
+            placeholder={t('settings.security.password')}
             autoComplete="current-password"
             autoFocus
             value={password}
             onChange={(e) => setPassword(e.target.value)}
           />
           <button type="submit" className="btn-haze small" disabled={busy || !password}>
-            {ASK_LABEL[ask.kind]}
+            {t(ASK_LABEL[ask.kind].action)}
           </button>
           <button type="button" className="set-link" onClick={() => setAsk(null)}>
-            Cancel
+            {t('common.cancel')}
           </button>
         </form>
       )}
@@ -1825,15 +1876,15 @@ function SecuritySection({ notify }: { notify: Notify }) {
       {naming && (
         <form className="set-token-form" onSubmit={(e) => void keepPasskey(e)}>
           <input
-            aria-label="Name this passkey"
-            placeholder="Name this passkey"
+            aria-label={t('settings.security.namePasskey')}
+            placeholder={t('settings.security.namePasskey')}
             maxLength={64}
             autoFocus
             value={naming.name}
             onChange={(e) => setNaming({ ...naming, name: e.target.value })}
           />
           <button type="submit" className="btn-haze small" disabled={busy || !naming.name.trim()}>
-            Save
+            {t('common.save')}
           </button>
         </form>
       )}
@@ -1876,25 +1927,25 @@ function TokensSection({ notify }: { notify: Notify }) {
       notify(
         err instanceof ApiError && (err.status === 409 || err.status === 422)
           ? err.message
-          : "That token wasn't created. Try again.",
+          : t('settings.tokens.createFailed'),
       )
     } finally {
       setBusy(false)
     }
   }
 
-  const revoke = async (t: Token) => {
-    if (arming !== t.id) {
-      setArming(t.id)
+  const revoke = async (token: Token) => {
+    if (arming !== token.id) {
+      setArming(token.id)
       return
     }
     setArming(null)
     try {
-      await api.revokeToken(t.id)
-      setTokens((all) => (Array.isArray(all) ? all.filter((x) => x.id !== t.id) : all))
-      if (fresh?.id === t.id) setFresh(null)
+      await api.revokeToken(token.id)
+      setTokens((all) => (Array.isArray(all) ? all.filter((x) => x.id !== token.id) : all))
+      if (fresh?.id === token.id) setFresh(null)
     } catch {
-      notify("That token wasn't revoked. Try again.")
+      notify(t('settings.tokens.revokeFailed'))
     }
   }
 
@@ -1902,8 +1953,8 @@ function TokensSection({ notify }: { notify: Notify }) {
     <div className="set-fold-body">
       <form className="set-token-form" onSubmit={(e) => void create(e)}>
         <input
-          aria-label="Token name"
-          placeholder="Name this token"
+          aria-label={t('settings.tokens.name')}
+          placeholder={t('settings.tokens.namePlaceholder')}
           maxLength={64}
           spellCheck={false}
           value={name}
@@ -1914,36 +1965,40 @@ function TokensSection({ notify }: { notify: Notify }) {
           className="btn-haze small"
           disabled={busy || !name.trim() || !Array.isArray(tokens)}
         >
-          Create
+          {t('settings.tokens.create')}
         </button>
       </form>
       {fresh && (
         <div className="set-token-fresh">
           <code className="set-token-secret">{fresh.token}</code>
-          <span className="set-sub">Copy it now. It won't be shown again.</span>
+          <span className="set-sub">{t('settings.tokens.copyNow')}</span>
         </div>
       )}
-      {tokens === 'error' && <span className="set-sub">Tokens didn't load.</span>}
+      {tokens === 'error' && <span className="set-sub">{t('settings.tokens.loadFailed')}</span>}
       {Array.isArray(tokens) && tokens.length === 0 && (
-        <span className="set-sub">No tokens yet.</span>
+        <span className="set-sub">{t('settings.tokens.none')}</span>
       )}
       {Array.isArray(tokens) &&
-        tokens.map((t) => (
-          <div className="set-row set-token-row" key={t.id}>
+        tokens.map((token) => (
+          <div className="set-row set-token-row" key={token.id}>
             <span className="set-row-body">
-              <span className="set-label">{t.name}</span>
+              <span className="set-label">{token.name}</span>
               <span className="set-sub">
-                Created {dayOf(t.created_at)} ·{' '}
-                {t.last_used_at ? `used ${dayOf(t.last_used_at)}` : 'never used'}
+                {token.last_used_at
+                  ? t('settings.tokens.used', {
+                      created: dayOf(token.created_at),
+                      used: dayOf(token.last_used_at),
+                    })
+                  : t('settings.tokens.new', { created: dayOf(token.created_at) })}
               </span>
             </span>
             <button
               type="button"
               className="btn-haze small"
-              onClick={() => void revoke(t)}
-              onBlur={() => setArming((a) => (a === t.id ? null : a))}
+              onClick={() => void revoke(token)}
+              onBlur={() => setArming((a) => (a === token.id ? null : a))}
             >
-              {arming === t.id ? 'Really revoke?' : 'Revoke'}
+              {arming === token.id ? t('settings.tokens.reallyRevoke') : t('settings.tokens.revoke')}
             </button>
           </div>
         ))}
@@ -1951,11 +2006,7 @@ function TokensSection({ notify }: { notify: Notify }) {
   )
 }
 
-const EXPIRIES = [
-  { id: 7, label: '7 days' },
-  { id: 30, label: '30 days' },
-  { id: 120, label: '120 days' },
-] as const
+const EXPIRIES = [7, 30, 120] as const
 
 const DEFAULT_SCOPE: ShareScope = {
   today: true, tasks: true, categories: [], goals: true, progress: true,
@@ -1968,11 +2019,11 @@ function inDays(days: number): string {
 
 function scopeWords(s: ShareScope): string {
   const parts: string[] = []
-  if (s.tasks) parts.push(s.categories.length > 0 ? s.categories.join(', ') : 'tasks')
-  if (s.today) parts.push('plan')
-  if (s.goals) parts.push('goals')
-  if (s.progress) parts.push('progress')
-  const words = parts.join(', ') || 'nothing'
+  if (s.tasks) parts.push(...(s.categories.length > 0 ? s.categories : [t('settings.share.scope.tasks')]))
+  if (s.today) parts.push(t('settings.share.scope.plan'))
+  if (s.goals) parts.push(t('settings.share.scope.goals'))
+  if (s.progress) parts.push(t('settings.share.scope.progress'))
+  const words = parts.length > 0 ? format.unitList(parts) : t('settings.share.scope.nothing')
   return words.charAt(0).toUpperCase() + words.slice(1)
 }
 
@@ -1985,6 +2036,12 @@ function clampedOr(raw: string, current: number, min: number, max: number): numb
   const n = Number(raw)
   if (raw.trim() === '' || !Number.isFinite(n)) return current
   return Math.min(max, Math.max(min, Math.round(n)))
+}
+
+const MESSAGE_FROM: Record<ShareMessage['role'], Key> = {
+  note: 'settings.share.fromNote',
+  user: 'settings.share.fromThem',
+  assistant: 'settings.share.fromAssistant',
 }
 
 type ShareDraft = { name: string; brief: string; scope: ShareScope; days: number; date: string }
@@ -2022,44 +2079,44 @@ function ShareForm({
         submit(d)
       }}
     >
-      <input aria-label="Link name" placeholder="Who is this for" maxLength={64} value={d.name} onChange={(e) => setD({ ...d, name: e.target.value })} />
+      <input aria-label={t('settings.share.linkName')} placeholder={t('settings.share.whoFor')} maxLength={64} value={d.name} onChange={(e) => setD({ ...d, name: e.target.value })} />
       {expiryNote && <span className="set-sub">{expiryNote}</span>}
       <div className="set-row set-share-expiry">
-        <span className="set-row-body"><span className="set-label">Ends after</span></span>
-        <div className="seg" role="group" aria-label="Expiry">
-          {EXPIRIES.map((x) => (
-            <button key={x.id} type="button" aria-pressed={d.days === x.id && d.date === ''} onClick={() => setD({ ...d, days: x.id, date: '' })}>{x.label}</button>
+        <span className="set-row-body"><span className="set-label">{t('settings.share.endsAfter')}</span></span>
+        <div className="seg" role="group" aria-label={t('settings.share.expiry')}>
+          {EXPIRIES.map((days) => (
+            <button key={days} type="button" aria-pressed={d.days === days && d.date === ''} onClick={() => setD({ ...d, days, date: '' })}>{t('settings.share.days', { count: days })}</button>
           ))}
         </div>
       </div>
       <div className="set-row">
-        <span className="set-row-body"><span className="set-label">Or ends on a date</span></span>
-        <input type="date" aria-label="Ends on a date" min={localToday()} value={d.date} onChange={(e) => setD({ ...d, date: e.target.value })} />
+        <span className="set-row-body"><span className="set-label">{t('settings.share.orEndsOn')}</span></span>
+        <input type="date" aria-label={t('settings.share.endsOn')} min={localToday()} value={d.date} onChange={(e) => setD({ ...d, date: e.target.value })} />
       </div>
-      <div className="set-row"><span className="set-row-body"><span className="set-label">The plan for the next days</span></span><Switch label="Share the plan" on={d.scope.today} onToggle={() => scope({ today: !d.scope.today })} /></div>
+      <div className="set-row"><span className="set-row-body"><span className="set-label">{t('settings.share.plan')}</span></span><Switch label={t('settings.share.sharePlan')} on={d.scope.today} onToggle={() => scope({ today: !d.scope.today })} /></div>
       {d.scope.today && (
-        <div className="set-row"><span className="set-row-body"><span className="set-label">How many days ahead</span></span><input type="number" aria-label="How many days ahead" min={1} max={14} value={d.scope.horizon_days} onChange={(e) => scope({ horizon_days: clampedOr(e.target.value, d.scope.horizon_days, 1, 14) })} /></div>
+        <div className="set-row"><span className="set-row-body"><span className="set-label">{t('settings.share.daysAhead')}</span></span><input type="number" aria-label={t('settings.share.daysAhead')} min={1} max={14} value={d.scope.horizon_days} onChange={(e) => scope({ horizon_days: clampedOr(e.target.value, d.scope.horizon_days, 1, 14) })} /></div>
       )}
-      <div className="set-row"><span className="set-row-body"><span className="set-label">Open tasks</span></span><Switch label="Share tasks" on={d.scope.tasks} onToggle={() => scope({ tasks: !d.scope.tasks })} /></div>
+      <div className="set-row"><span className="set-row-body"><span className="set-label">{t('settings.share.tasks')}</span></span><Switch label={t('settings.share.shareTasks')} on={d.scope.tasks} onToggle={() => scope({ tasks: !d.scope.tasks })} /></div>
       {d.scope.tasks && (
-        <div className="set-row"><span className="set-row-body"><span className="set-label">Task descriptions and notes</span></span><Switch label="Share details" on={d.scope.details} onToggle={() => scope({ details: !d.scope.details })} /></div>
+        <div className="set-row"><span className="set-row-body"><span className="set-label">{t('settings.share.details')}</span></span><Switch label={t('settings.share.shareDetails')} on={d.scope.details} onToggle={() => scope({ details: !d.scope.details })} /></div>
       )}
-      <div className="set-row"><span className="set-row-body"><span className="set-label">Goals</span></span><Switch label="Share goals" on={d.scope.goals} onToggle={() => scope({ goals: !d.scope.goals })} /></div>
-      <div className="set-row"><span className="set-row-body"><span className="set-label">Done this week</span></span><Switch label="Share progress" on={d.scope.progress} onToggle={() => scope({ progress: !d.scope.progress })} /></div>
+      <div className="set-row"><span className="set-row-body"><span className="set-label">{t('settings.share.goals')}</span></span><Switch label={t('settings.share.shareGoals')} on={d.scope.goals} onToggle={() => scope({ goals: !d.scope.goals })} /></div>
+      <div className="set-row"><span className="set-row-body"><span className="set-label">{t('settings.share.progress')}</span></span><Switch label={t('settings.share.shareProgress')} on={d.scope.progress} onToggle={() => scope({ progress: !d.scope.progress })} /></div>
       {filtered && pills.length > 0 && (
         <div className="set-share-cats">
-          <span className="set-sub">Only these categories, or none for all</span>
-          <div className="seg wrap" role="group" aria-label="Categories">
+          <span className="set-sub">{t('settings.share.categoriesSub')}</span>
+          <div className="seg wrap" role="group" aria-label={t('settings.share.categories')}>
             {pills.map((c) => (
               <button key={c} type="button" aria-pressed={d.scope.categories.includes(c)} onClick={() => toggleCategory(c)}>{c}</button>
             ))}
           </div>
         </div>
       )}
-      <div className="set-row"><span className="set-row-body"><span className="set-label">They can leave you a note</span></span><Switch label="Allow notes" on={d.scope.notes} onToggle={() => scope({ notes: !d.scope.notes })} /></div>
-      <div className="set-row"><span className="set-row-body"><span className="set-label">Messages a day</span></span><input type="number" aria-label="Messages a day" min={1} max={100} value={d.scope.messages_per_day} onChange={(e) => scope({ messages_per_day: clampedOr(e.target.value, d.scope.messages_per_day, 1, 100) })} /></div>
-      <textarea aria-label="Brief for Note" placeholder="Tell Note how to talk to them and what to steer clear of" rows={3} maxLength={4096} value={d.brief} onChange={(e) => setD({ ...d, brief: e.target.value })} />
-      <span className="set-sub">Note reads this before every reply on this link.</span>
+      <div className="set-row"><span className="set-row-body"><span className="set-label">{t('settings.share.notes')}</span></span><Switch label={t('settings.share.allowNotes')} on={d.scope.notes} onToggle={() => scope({ notes: !d.scope.notes })} /></div>
+      <div className="set-row"><span className="set-row-body"><span className="set-label">{t('settings.share.messages')}</span></span><input type="number" aria-label={t('settings.share.messages')} min={1} max={100} value={d.scope.messages_per_day} onChange={(e) => scope({ messages_per_day: clampedOr(e.target.value, d.scope.messages_per_day, 1, 100) })} /></div>
+      <textarea aria-label={t('settings.share.brief')} placeholder={t('settings.share.briefHint')} rows={3} maxLength={4096} value={d.brief} onChange={(e) => setD({ ...d, brief: e.target.value })} />
+      <span className="set-sub">{t('settings.share.briefSub')}</span>
       <button type="submit" className="btn-haze small" disabled={busy || !d.name.trim()}>{label}</button>
     </form>
   )
@@ -2081,7 +2138,7 @@ function SharesSection({ notify }: { notify: Notify }) {
     api.shares().then(setShares).catch(() => setShares('error'))
     api
       .tasks()
-      .then((ts) => setCategories([...new Set(ts.map((t) => t.category).filter((c) => c !== ''))].sort()))
+      .then((ts) => setCategories([...new Set(ts.map((x) => x.category).filter((c) => c !== ''))].sort()))
       .catch(() => setCategories([]))
   }, [])
 
@@ -2095,7 +2152,7 @@ function SharesSection({ notify }: { notify: Notify }) {
       setFresh(made)
       setCreating(false)
     } catch (err) {
-      notify(err instanceof ApiError && (err.status === 409 || err.status === 422) ? err.message : "That link wasn't created. Try again.")
+      notify(err instanceof ApiError && (err.status === 409 || err.status === 422) ? err.message : t('settings.share.createFailed'))
     } finally {
       setBusy(false)
     }
@@ -2109,9 +2166,9 @@ function SharesSection({ notify }: { notify: Notify }) {
       const up = await api.updateShare(s.id, body)
       setShares((all) => (Array.isArray(all) ? all.map((x) => (x.id === s.id ? up : x)) : all))
       setEditing(null)
-      notify('Saved')
+      notify(t('settings.share.saved'))
     } catch (err) {
-      notify(err instanceof ApiError && err.status === 422 ? err.message : "That change wasn't saved. Try again.")
+      notify(err instanceof ApiError && err.status === 422 ? err.message : t('settings.share.saveFailed'))
     } finally {
       setBusy(false)
     }
@@ -2122,15 +2179,15 @@ function SharesSection({ notify }: { notify: Notify }) {
       await api.revokeShare(s.id)
       setShares((all) => (Array.isArray(all) ? all.filter((x) => x.id !== s.id) : all))
       if (fresh?.id === s.id) setFresh(null)
-      notify('Link revoked')
+      notify(t('settings.share.revoked'))
     } catch {
-      notify("That link wasn't revoked. Try again.")
+      notify(t('settings.share.revokeFailed'))
     }
   }
 
   const copy = (s: Share) => {
-    const fallback = () => notify('Copy the link from the box above')
-    if (navigator.clipboard) navigator.clipboard.writeText(s.url).then(() => notify('Link copied'), fallback)
+    const fallback = () => notify(t('settings.share.copyFallback'))
+    if (navigator.clipboard) navigator.clipboard.writeText(s.url).then(() => notify(t('settings.share.copied')), fallback)
     else fallback()
     setFresh(s)
   }
@@ -2160,17 +2217,17 @@ function SharesSection({ notify }: { notify: Notify }) {
 
   return (
     <div className="set-fold-body">
-      <span className="set-sub">A link lets someone you trust chat with Note about part of your day. The switches say what Note may look at for them.</span>
-      {!creating && <button type="button" className="btn-haze small" onClick={() => setCreating(true)}>New link</button>}
-      {creating && <ShareForm initial={blank} categories={categories} submit={(d) => void create(d)} busy={busy} label="Create link" />}
+      <span className="set-sub">{t('settings.share.intro')}</span>
+      {!creating && <button type="button" className="btn-haze small" onClick={() => setCreating(true)}>{t('settings.share.new')}</button>}
+      {creating && <ShareForm initial={blank} categories={categories} submit={(d) => void create(d)} busy={busy} label={t('settings.share.create')} />}
       {fresh && (
         <div className="set-token-fresh">
           <code className="set-token-secret">{fresh.url}</code>
-          <span className="set-sub">Anyone with this link sees what {fresh.name} was given until {dayOf(fresh.expires_at)}.</span>
+          <span className="set-sub">{t('settings.share.anyone', { name: fresh.name, day: dayOf(fresh.expires_at) })}</span>
         </div>
       )}
-      {shares === 'error' && <span className="set-sub">Links didn't load.</span>}
-      {Array.isArray(shares) && shares.length === 0 && !creating && <span className="set-sub">No links yet.</span>}
+      {shares === 'error' && <span className="set-sub">{t('settings.share.loadFailed')}</span>}
+      {Array.isArray(shares) && shares.length === 0 && !creating && <span className="set-sub">{t('settings.share.none')}</span>}
       {Array.isArray(shares) &&
         shares.map((s) => (
           <div key={s.id} className="set-share">
@@ -2178,22 +2235,40 @@ function SharesSection({ notify }: { notify: Notify }) {
               <span className="set-row-body">
                 <span className="set-label">
                   {s.name}
-                  {s.distant_visits > 0 && <i className="set-share-far" role="img" aria-label="Opened from far away" title="Opened from far away" />}
+                  {s.distant_visits > 0 && <i className="set-share-far" role="img" aria-label={t('settings.share.far')} title={t('settings.share.far')} />}
                 </span>
                 <span className="set-sub">
-                  {scopeWords(s.scope)}, until {dayOf(s.expires_at)}, {s.visitors} {s.visitors === 1 ? 'visitor' : 'visitors'}, {s.messages_today}{' '}
-                  {s.messages_today === 1 ? 'message' : 'messages'} today
+                  {t('settings.share.summary', {
+                    scope: scopeWords(s.scope),
+                    day: dayOf(s.expires_at),
+                    visitors: s.visitors,
+                    messages: s.messages_today,
+                  })}
                 </span>
               </span>
               <Overflow
                 className="set-share-more"
-                label={`More for ${s.name}`}
+                label={t('settings.share.moreFor', { name: s.name })}
                 items={[
-                  { label: 'Copy link', run: () => copy(s) },
-                  { label: 'Preview as visitor', run: () => window.open(s.url, '_blank', 'noopener') },
-                  { label: openThreads === s.id ? 'Hide activity' : 'Activity', run: () => showThreads(s) },
-                  { label: editing === s.id ? 'Stop editing' : 'Edit', run: () => setEditing(editing === s.id ? null : s.id) },
-                  { label: 'Revoke', kind: 'danger', run: () => notify('Revoke this link?', { label: 'Revoke', run: () => void doRevoke(s) }) },
+                  { label: t('settings.share.copy'), run: () => copy(s) },
+                  { label: t('settings.share.preview'), run: () => window.open(s.url, '_blank', 'noopener') },
+                  {
+                    label: openThreads === s.id ? t('settings.share.hideActivity') : t('settings.share.activity'),
+                    run: () => showThreads(s),
+                  },
+                  {
+                    label: editing === s.id ? t('settings.share.stopEditing') : t('menu.edit'),
+                    run: () => setEditing(editing === s.id ? null : s.id),
+                  },
+                  {
+                    label: t('settings.share.revoke'),
+                    kind: 'danger',
+                    run: () =>
+                      notify(t('settings.share.revokeAsk'), {
+                        label: t('settings.share.revoke'),
+                        run: () => void doRevoke(s),
+                      }),
+                  },
                 ]}
               />
             </div>
@@ -2203,8 +2278,8 @@ function SharesSection({ notify }: { notify: Notify }) {
                 categories={categories}
                 submit={(d) => void save(s, d)}
                 busy={busy}
-                label="Save"
-                expiryNote={`Currently until ${dayOf(s.expires_at)}; pick a preset or a date to change it`}
+                label={t('common.save')}
+                expiryNote={t('settings.share.currently', { day: dayOf(s.expires_at) })}
               />
             )}
             {openThreads === s.id && (
@@ -2213,22 +2288,27 @@ function SharesSection({ notify }: { notify: Notify }) {
                   <ul className="set-share-visits">
                     {visits.map((v, i) => (
                       <li key={i} className={v.distant ? 'far' : undefined}>
-                        {[[v.city, v.country].filter(Boolean).join(', ') || 'Somewhere', v.km === null ? null : `${Math.round(v.km)} km`, dayOf(v.at)]
+                        {[
+                          [v.city, v.country].filter(Boolean).join(', ') || t('settings.share.somewhere'),
+                          v.km === null ? null : t('settings.share.km', { n: format.number(Math.round(v.km)) }),
+                          dayOf(v.at),
+                        ]
                           .filter(Boolean)
                           .join(' · ')}
                       </li>
                     ))}
                   </ul>
                 )}
-                {threads === undefined && <span className="set-sub">Loading</span>}
-                {threads && threads.length === 0 && <span className="set-sub">No one has asked anything yet.</span>}
-                {threads?.map((t) => (
-                  <div key={t.id} className="set-share-thread">
-                    <span className="set-sub">Visitor from {dayOf(t.created_at)}, last {dayOf(t.updated_at)}</span>
-                    {t.messages.map((m, i) => (
+                {threads === undefined && <span className="set-sub">{t('settings.share.loading')}</span>}
+                {threads && threads.length === 0 && <span className="set-sub">{t('settings.share.noQuestions')}</span>}
+                {threads?.map((th) => (
+                  <div key={th.id} className="set-share-thread">
+                    <span className="set-sub">
+                      {t('settings.share.visitor', { from: dayOf(th.created_at), last: dayOf(th.updated_at) })}
+                    </span>
+                    {th.messages.map((m, i) => (
                       <p key={i} className={`set-share-msg ${m.role}`}>
-                        {m.role === 'note' ? 'Note for you: ' : m.role === 'user' ? 'They: ' : 'Note: '}
-                        {m.content}
+                        {t(MESSAGE_FROM[m.role], { text: m.content })}
                       </p>
                     ))}
                   </div>
@@ -2263,9 +2343,9 @@ function PushRow({ notify }: { notify: Notify }) {
       }
     } catch (err) {
       if (err instanceof ApiError && err.status === 404) {
-        notify('Web Push is not configured on this server.')
+        notify(t('settings.push.unconfigured'))
       } else {
-        notify("Notifications didn't change. Try again.")
+        notify(t('settings.push.failed'))
       }
       setState(was)
     }
@@ -2274,11 +2354,11 @@ function PushRow({ notify }: { notify: Notify }) {
   return (
     <div className="set-row">
       <span className="set-row-body">
-        <span className="set-label">Push on this phone</span>
-        {state === 'unsupported' && <span className="set-sub">Not on this browser</span>}
+        <span className="set-label">{t('settings.push')}</span>
+        {state === 'unsupported' && <span className="set-sub">{t('settings.push.unsupported')}</span>}
       </span>
       <Switch
-        label="Push on this phone"
+        label={t('settings.push')}
         on={state === 'on'}
         disabled={state === 'busy' || state === 'unsupported'}
         onToggle={() => void toggle()}

@@ -368,7 +368,13 @@ pub fn sweep_once(state: &AppState) {
         (fired, started, flips)
     };
     for start in &started {
-        crate::channels::deliver_block_start(&state.db, &state.channels, &state.hub, start);
+        crate::channels::deliver_block_start(
+            &state.db,
+            &state.channels,
+            &state.hub,
+            start,
+            crate::text::Lang::for_user(&state.config_dir, &start.username),
+        );
     }
     for flip in &flips {
         if let Some(msg) = &flip.message {
@@ -388,7 +394,12 @@ pub fn sweep_once(state: &AppState) {
         if ev.kind == crate::triggers::KIND {
             crate::triggers::fire(state, ev);
         } else {
-            crate::channels::deliver_event(&state.db, &state.channels, ev);
+            crate::channels::deliver_event(
+                &state.db,
+                &state.channels,
+                ev,
+                crate::text::Lang::for_user(&state.config_dir, &ev.username),
+            );
         }
     }
 }

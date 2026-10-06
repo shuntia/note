@@ -224,7 +224,11 @@ export type Settings = {
   // Whether Note's own messages are also posted to the DM, and whether they notify there.
   matrix_send: boolean
   matrix_ping: boolean
+  // '' follows the browser.
+  language: Language
 }
+
+export type Language = '' | 'en' | 'ja'
 
 export type RingFor = 'urgent' | 'checkins' | 'never'
 
@@ -256,6 +260,7 @@ export type SettingsSaved = Pick<
   | 'voice_cue'
   | 'matrix_send'
   | 'matrix_ping'
+  | 'language'
 > & { schedule: ScheduleRow[] }
 
 export type PromptName = 'persona' | 'planning' | 'share'

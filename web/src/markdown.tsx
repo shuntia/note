@@ -1,6 +1,7 @@
 import DOMPurify from 'dompurify'
 import { marked } from 'marked'
 import { useEffect, useMemo, useRef, type MouseEvent } from 'react'
+import { t } from './i18n'
 
 DOMPurify.addHook('afterSanitizeAttributes', (node) => {
   if (node.tagName === 'A') {
@@ -21,7 +22,7 @@ function render(text: string): string {
     const button = document.createElement('button')
     button.type = 'button'
     button.className = 'code-copy'
-    button.textContent = 'copy'
+    button.textContent = t('markdown.copy')
     wrap.append(button)
   }
   return holder.innerHTML
@@ -42,7 +43,7 @@ export function Markdown({ text }: { text: string }) {
     button.textContent = label
     window.clearTimeout(timers.current.get(button))
     const id = window.setTimeout(() => {
-      button.textContent = 'copy'
+      button.textContent = t('markdown.copy')
       timers.current.delete(button)
     }, 1500)
     timers.current.set(button, id)
@@ -53,12 +54,12 @@ export function Markdown({ text }: { text: string }) {
     if (!(button instanceof HTMLButtonElement)) return
     const code = button.parentElement?.querySelector('pre')?.textContent ?? ''
     if (!navigator.clipboard) {
-      flash(button, "couldn't copy")
+      flash(button, t('markdown.copyFailed'))
       return
     }
     navigator.clipboard.writeText(code).then(
-      () => flash(button, 'copied'),
-      () => flash(button, "couldn't copy"),
+      () => flash(button, t('markdown.copied')),
+      () => flash(button, t('markdown.copyFailed')),
     )
   }
 
