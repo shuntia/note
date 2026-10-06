@@ -1,11 +1,12 @@
 import { en } from './en'
+import { ja } from './ja'
 
 export type Key = keyof typeof en
 /** A language file: every key English has, each a string. */
 export type Dict = { readonly [K in Key]: string }
 export type Vars = Record<string, string | number>
 
-const DICTS: Record<string, Dict> = { en }
+const DICTS: Record<string, Dict> = { en, ja }
 
 let locale = 'en'
 
