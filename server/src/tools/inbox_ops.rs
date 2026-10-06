@@ -420,7 +420,7 @@ mod tests {
             )
             .unwrap();
         let stored: Vec<f32> =
-            stored.chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect();
+            stored.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)).collect();
         assert_eq!(stored, want[0]);
     }
     #[test]

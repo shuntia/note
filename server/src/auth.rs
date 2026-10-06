@@ -247,7 +247,16 @@ pub struct CurrentUser {
 impl FromRequestParts<AppState> for CurrentUser {
     type Rejection = StatusCode;
 
-    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, StatusCode> {
+    fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> impl std::future::Future<Output = Result<Self, StatusCode>> + Send {
+        std::future::ready(CurrentUser::from_parts(parts, state))
+    }
+}
+
+impl CurrentUser {
+    fn from_parts(parts: &Parts, state: &AppState) -> Result<Self, StatusCode> {
         let jar = axum_extra::extract::CookieJar::from_headers(&parts.headers);
         let token = jar
             .get("session")

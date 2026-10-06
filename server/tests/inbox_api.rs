@@ -97,8 +97,7 @@ fn source_rows(state: &AppState) -> i64 {
 
 fn live_files(cfg: &tempfile::TempDir, user: &str) -> usize {
     std::fs::read_dir(cfg.path().join(format!("memory/{user}/semantic")))
-        .map(|d| d.flatten().count())
-        .unwrap_or(0)
+        .map_or(0, |d| d.flatten().count())
 }
 
 fn inbox_row(state: &AppState, source: &str) -> Option<serde_json::Value> {

@@ -44,8 +44,7 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_millis() as i64)
 }
 
 /// A client error other than auth or rate limiting, which is how a
@@ -92,21 +91,20 @@ impl Previews {
         }
         let file = self.dir.as_ref().map(|dir| dir.join(preview_file(language, voice)));
         let kept = file.as_ref().and_then(|f| std::fs::read(f).ok());
-        let rendered = match kept {
-            Some(wav) => wav,
-            None => {
-                let wav = speaker
-                    .backend
-                    .render(PREVIEW_TEXT, &speaker.voice)
-                    .and_then(|pcm| wav(&pcm, RATE))
-                    .map_err(|e| Refusal::new(RefusalCode::Failed, format!("rendering the sample failed: {e:#}")))?;
-                if let Some(file) = &file {
-                    if let Err(e) = keep(file, &wav) {
-                        eprintln!("voice: keeping the sample at {} failed: {e:#}", file.display());
-                    }
+        let rendered = if let Some(wav) = kept {
+            wav
+        } else {
+            let wav = speaker
+                .backend
+                .render(PREVIEW_TEXT, &speaker.voice)
+                .and_then(|pcm| wav(&pcm, RATE))
+                .map_err(|e| Refusal::new(RefusalCode::Failed, format!("rendering the sample failed: {e:#}")))?;
+            if let Some(file) = &file {
+                if let Err(e) = keep(file, &wav) {
+                    eprintln!("voice: keeping the sample at {} failed: {e:#}", file.display());
                 }
-                wav
             }
+            wav
         };
         let wav = Arc::new(rendered);
         *held = Some(wav.clone());

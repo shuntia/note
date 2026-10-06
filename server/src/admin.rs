@@ -532,7 +532,7 @@ fn count(conn: &Connection, sql: &str) -> rusqlite::Result<i64> {
 }
 
 fn file_len(path: &FsPath) -> u64 {
-    std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+    std::fs::metadata(path).map_or(0, |m| m.len())
 }
 
 async fn status(_e: Elevated, State(state): State<AppState>) -> Response {
@@ -765,8 +765,7 @@ async fn users_patch(
         let target_is_admin = {
             let conn = state.db();
             conn.query_row("SELECT role FROM users WHERE id = ?1", [id], |r| r.get::<_, String>(0))
-                .map(|r| r == "admin")
-                .unwrap_or(false)
+                .is_ok_and(|r| r == "admin")
         };
         if id != actor.id && target_is_admin {
             return error(StatusCode::CONFLICT, "you can't reset another admin's password");

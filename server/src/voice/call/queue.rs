@@ -219,8 +219,8 @@ mod tests {
     fn wakes_are_capped_until_the_user_speaks() {
         let mut q = Queue::new(cfg(), ms(0));
         for i in 0..4 {
-            q.push(job_done(i), ms(i as u64 * 1000));
-            assert!(q.take_turn(ms(i as u64 * 1000 + 600)).is_some());
+            q.push(job_done(i), ms(u64::from(i) * 1000));
+            assert!(q.take_turn(ms(u64::from(i) * 1000 + 600)).is_some());
         }
         q.push(job_done(9), ms(10_000));
         assert!(q.take_turn(ms(20_000)).is_none(), "fifth wake refused");
