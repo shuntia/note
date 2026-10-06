@@ -86,15 +86,6 @@ pub fn stamp_matrix(conn: &Connection, id: i64, now: jiff::Timestamp) -> Result<
     Ok(())
 }
 
-/// How a check-in thread is named before its first reply: `at` is the wall
-/// time it opened at, in the user's own day.
-fn checkin_title(date: &str, at: &str) -> String {
-    match date.parse::<jiff::civil::Date>() {
-        Ok(day) => format!("{}'s {at} check-in", day.strftime("%A")),
-        Err(_) => format!("The {at} check-in"),
-    }
-}
-
 /// The thread a check-in's question lands in: one per user per plan date, so
 /// every check-in of a day appends to the same conversation and the next day
 /// starts a fresh one. The question is stored as an assistant row.
@@ -104,6 +95,7 @@ pub fn checkin_thread(
     date: &str,
     at: &str,
     question: &str,
+    lang: crate::text::Lang,
     now: jiff::Timestamp,
 ) -> Result<i64> {
     let existing: Option<i64> = conn
@@ -118,7 +110,7 @@ pub fn checkin_thread(
         conn.execute(
             "INSERT INTO conversations (user_id, title, created_at, updated_at, checkin_date)
              VALUES (?1, ?2, ?3, ?3, ?4)",
-            (user_id, checkin_title(date, at), now.to_string(), date),
+            (user_id, crate::text::checkin_thread_title(lang, date.parse().ok(), at), now.to_string(), date),
         )?;
         conn.last_insert_rowid()
     };
@@ -603,7 +595,7 @@ pub async fn run_turn(
             &on_event,
         )?;
         let reply = if out.reply.trim().is_empty() {
-            crate::EMPTY_REPLY_FALLBACK.to_string()
+            crate::text::empty_reply(crate::text::Lang::for_user(&st.config_dir, &session_user))
         } else {
             out.reply.clone()
         };
@@ -686,10 +678,10 @@ mod tests {
         let morning: jiff::Timestamp = "2026-09-17T00:00:00Z".parse().unwrap();
         let noon: jiff::Timestamp = "2026-09-17T03:00:00Z".parse().unwrap();
         let first =
-            checkin_thread(&conn, 1, "2026-09-17", "08:00", "Morning — how did you sleep?", morning)
+            checkin_thread(&conn, 1, "2026-09-17", "08:00", "Morning — how did you sleep?", crate::text::Lang::En, morning)
                 .unwrap();
         let again =
-            checkin_thread(&conn, 1, "2026-09-17", "11:00", "Midday. How is it going?", noon)
+            checkin_thread(&conn, 1, "2026-09-17", "11:00", "Midday. How is it going?", crate::text::Lang::En, noon)
                 .unwrap();
         assert_eq!(first, again);
         assert_ne!(first, 1, "the user's own thread is never reused");
@@ -710,7 +702,7 @@ mod tests {
         assert_eq!(checkin_date(&conn, 1).unwrap(), None);
         assert_eq!(checkin_date(&conn, 99).unwrap(), None);
 
-        let next = checkin_thread(&conn, 1, "2026-09-18", "08:00", "Morning again", noon).unwrap();
+        let next = checkin_thread(&conn, 1, "2026-09-18", "08:00", "Morning again", crate::text::Lang::En, noon).unwrap();
         assert_ne!(next, first);
     }
 
@@ -722,8 +714,8 @@ mod tests {
             [],
         )
         .unwrap();
-        let mine = checkin_thread(&conn, 1, "2026-09-17", "09:00", "hi", now()).unwrap();
-        let theirs = checkin_thread(&conn, 2, "2026-09-17", "09:00", "hi", now()).unwrap();
+        let mine = checkin_thread(&conn, 1, "2026-09-17", "09:00", "hi", crate::text::Lang::En, now()).unwrap();
+        let theirs = checkin_thread(&conn, 2, "2026-09-17", "09:00", "hi", crate::text::Lang::En, now()).unwrap();
         assert_ne!(mine, theirs);
         assert!(owned(&conn, 2, theirs).unwrap());
         assert!(!owned(&conn, 2, mine).unwrap());

@@ -363,6 +363,9 @@ pub struct UserConfig {
     pub matrix_ping: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub voice_language: Option<String>,
+    /// One of `text::LANGUAGES`; blank follows the browser.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
 }
 
 pub const DEFAULT_TRIGGERS_PER_DAY: u32 = 4;
@@ -402,6 +405,10 @@ impl UserConfig {
     /// Blank where the user has turned the close of the day off.
     pub fn close_day_time(&self) -> &str {
         self.close_day_time.as_deref().unwrap_or(DEFAULT_CLOSE_DAY_TIME)
+    }
+
+    pub fn language(&self) -> &str {
+        self.language.as_deref().unwrap_or_default()
     }
 
     pub fn morning_until(&self) -> &str {
@@ -490,6 +497,11 @@ impl UserConfig {
             crate::templates::valid_time(cfg.morning_until()),
             "invalid morning_until {:?}",
             cfg.morning_until()
+        );
+        anyhow::ensure!(
+            crate::text::LANGUAGES.contains(&cfg.language()),
+            "invalid language {:?}",
+            cfg.language()
         );
         Ok(cfg)
     }
@@ -841,6 +853,23 @@ mod tests {
         write(tmp.path(), "users/aki/user.toml", "morning_until = \"09:30\"\n");
         assert_eq!(UserConfig::load(tmp.path(), "aki").unwrap().morning_until(), "09:30");
         write(tmp.path(), "users/aki/user.toml", "morning_until = \"9:30\"\n");
+        assert!(UserConfig::load(tmp.path(), "aki").is_err());
+    }
+
+    #[test]
+    fn the_language_follows_the_browser_unless_set() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), "defaults/user.toml",
+            "display_name = \"X\"\ntimezone = \"UTC\"\ntemplate = \"default\"\n");
+        let cfg = UserConfig::load(tmp.path(), "aki").unwrap();
+        assert_eq!(cfg.language(), "");
+        cfg.save(tmp.path(), "aki").unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join("users/aki/user.toml")).unwrap();
+        assert!(!raw.contains("language"), "unexpected file: {raw}");
+
+        write(tmp.path(), "users/aki/user.toml", "language = \"ja\"\n");
+        assert_eq!(UserConfig::load(tmp.path(), "aki").unwrap().language(), "ja");
+        write(tmp.path(), "users/aki/user.toml", "language = \"fr\"\n");
         assert!(UserConfig::load(tmp.path(), "aki").is_err());
     }
 }

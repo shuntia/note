@@ -215,7 +215,7 @@ mod tests {
         (ch, tmp)
     }
 
-    fn timeline(events: serde_json::Value) -> serde_json::Value {
+    fn timeline(events: &serde_json::Value) -> serde_json::Value {
         serde_json::json!({
             "next_batch": "s2",
             "rooms": { "join": { "!dm:t": { "timeline": { "events": events } } } },
@@ -248,7 +248,7 @@ mod tests {
 
     #[test]
     fn parse_skips_the_bots_own_and_non_text_messages() {
-        let body = timeline(serde_json::json!([
+        let body = timeline(&serde_json::json!([
             { "type": "m.room.message", "sender": "@aki:t", "content": { "msgtype": "m.text", "body": "hi" } },
             { "type": "m.room.message", "sender": "@note:t", "content": { "msgtype": "m.text", "body": "echo" } },
             { "type": "m.room.message", "sender": "@aki:t", "content": { "msgtype": "m.image", "body": "pic" } },
@@ -262,7 +262,7 @@ mod tests {
 
     #[test]
     fn parse_skips_edits() {
-        let body = timeline(serde_json::json!([
+        let body = timeline(&serde_json::json!([
             { "type": "m.room.message", "sender": "@aki:t", "content": {
                 "msgtype": "m.text", "body": "* fixed",
                 "m.new_content": { "msgtype": "m.text", "body": "fixed" },
@@ -274,7 +274,7 @@ mod tests {
 
     #[test]
     fn sync_sends_since_and_timeout_and_reads_next_batch() {
-        let reply: &'static str = timeline(serde_json::json!([])).to_string().leak();
+        let reply: &'static str = timeline(&serde_json::json!([])).to_string().leak();
         let (base, rx) = serve(vec![("200 OK", WHOAMI), ("200 OK", reply)]);
         let (ch, _tmp) = channel(&base);
         took(&rx);
@@ -326,7 +326,7 @@ mod tests {
             checkin: true,
             event_id: Some(1),
             conversation_id: Some(1),
-            actions: crate::channels::event_actions(1),
+            actions: crate::channels::event_actions(1, crate::text::Lang::En),
         }
     }
 

@@ -1,4 +1,5 @@
 use crate::auth::{self, CurrentUser, TaskPrincipal};
+use crate::text::{self, Lang};
 use crate::AppState;
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
@@ -269,16 +270,17 @@ async fn share_send(
 ) -> impl IntoResponse {
     use crate::shares::TurnError as E;
     let now = jiff::Timestamp::now();
+    let lang = Lang::resolve("", accept_language(&headers));
     if !state.share_limiter.try_attempt(&crate::net::client_key(&headers), now) {
-        return (StatusCode::TOO_MANY_REQUESTS, Json(serde_json::json!({ "error": "too many messages from this address; try again later" }))).into_response();
+        return (StatusCode::TOO_MANY_REQUESTS, Json(serde_json::json!({ "error": text::err_share_rate(lang) }))).into_response();
     }
-    match crate::shares::run_turn(&state, &p, &key.0, req.thread, &req.message).await {
+    match crate::shares::run_turn(&state, &p, &key.0, req.thread, &req.message, lang).await {
         Ok(t) => Json(serde_json::json!({ "thread": t.thread, "reply": t.reply, "note": t.note })).into_response(),
-        Err(E::NoThread) => (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "no such conversation" }))).into_response(),
+        Err(E::NoThread) => (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": text::err_share_no_thread(lang) }))).into_response(),
         Err(E::Blank) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "message must be non-blank and at most 16384 bytes" }))).into_response(),
-        Err(E::Cap) => (StatusCode::TOO_MANY_REQUESTS, Json(serde_json::json!({ "error": "this link has reached today's message limit" }))).into_response(),
-        Err(E::Busy) => session_busy_response(crate::TalkBusy::Full),
-        Err(E::Unavailable) => (StatusCode::BAD_GATEWAY, Json(serde_json::json!({ "error": "Note could not answer" }))).into_response(),
+        Err(E::Cap) => (StatusCode::TOO_MANY_REQUESTS, Json(serde_json::json!({ "error": text::err_share_cap(lang) }))).into_response(),
+        Err(E::Busy) => session_busy_response(crate::TalkBusy::Full, lang),
+        Err(E::Unavailable) => (StatusCode::BAD_GATEWAY, Json(serde_json::json!({ "error": text::err_share_unavailable(lang) }))).into_response(),
         Err(E::Internal) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
@@ -737,27 +739,27 @@ pub(crate) fn daily_cap_reached(state: &AppState, user_id: i64) -> bool {
     crate::log::agent_sessions_since(&conn, user_id, since).unwrap_or(0) >= cap
 }
 
-fn daily_cap_response() -> axum::response::Response {
+fn daily_cap_response(lang: Lang) -> axum::response::Response {
     (
         StatusCode::TOO_MANY_REQUESTS,
-        Json(serde_json::json!({ "error": "daily session limit reached" })),
+        Json(serde_json::json!({ "error": text::err_daily_cap(lang) })),
     )
         .into_response()
 }
 
 /// Turns a busy gate into the response both agent routes give: one session per
 /// user, `MAX_CONCURRENT_TALKS` across the server.
-fn session_busy_response(busy: crate::TalkBusy) -> axum::response::Response {
+fn session_busy_response(busy: crate::TalkBusy, lang: Lang) -> axum::response::Response {
     match busy {
         crate::TalkBusy::UserBusy => (
             StatusCode::TOO_MANY_REQUESTS,
-            Json(serde_json::json!({ "error": "a session is already in progress" })),
+            Json(serde_json::json!({ "error": text::err_session_in_progress(lang) })),
         )
             .into_response(),
         crate::TalkBusy::Full => (
             StatusCode::SERVICE_UNAVAILABLE,
             [(header::RETRY_AFTER, "5")],
-            Json(serde_json::json!({ "error": "the server is at capacity" })),
+            Json(serde_json::json!({ "error": text::err_at_capacity(lang) })),
         )
             .into_response(),
     }
@@ -821,11 +823,11 @@ async fn task_agent(
         );
     }
     if daily_cap_reached(&state, user.id) {
-        return daily_cap_response();
+        return daily_cap_response(Lang::En);
     }
     let permit = match state.talk_gate.try_enter(user.id) {
         Ok(p) => p,
-        Err(busy) => return session_busy_response(busy),
+        Err(busy) => return session_busy_response(busy, Lang::En),
     };
     let token_id = match user.via {
         auth::Credential::Token(id) => Some(id),
@@ -1013,11 +1015,11 @@ async fn agent_inbox(
         );
     }
     if daily_cap_reached(&state, user.id) {
-        return daily_cap_response();
+        return daily_cap_response(Lang::En);
     }
     let permit = match state.talk_gate.try_enter(user.id) {
         Ok(p) => p,
-        Err(busy) => return session_busy_response(busy),
+        Err(busy) => return session_busy_response(busy, Lang::En),
     };
     let recorded = {
         let conn = state.db();
@@ -1210,9 +1212,11 @@ struct TalkReq {
 async fn talk(
     user: CurrentUser,
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<TalkReq>,
 ) -> impl IntoResponse {
     use crate::talk::TurnError as E;
+    let lang = request_lang(&state, &user, &headers);
     let turn = crate::talk::run_turn(
         &state,
         user.id,
@@ -1252,16 +1256,16 @@ async fn talk(
         )
             .into_response(),
         Err(E::NotFound) => conversation_not_found(),
-        Err(E::DailyCap) => daily_cap_response(),
+        Err(E::DailyCap) => daily_cap_response(lang),
         Err(E::Busy(crate::TalkBusy::UserBusy)) => (
             StatusCode::CONFLICT,
-            Json(serde_json::json!({ "error": "a reply is already in progress" })),
+            Json(serde_json::json!({ "error": text::err_reply_in_progress(lang) })),
         )
             .into_response(),
-        Err(E::Busy(busy)) => session_busy_response(busy),
+        Err(E::Busy(busy)) => session_busy_response(busy, lang),
         Err(E::Unavailable) => (
             StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({ "error": "the assistant is unavailable; try again" })),
+            Json(serde_json::json!({ "error": text::err_assistant_unavailable(lang) })),
         )
             .into_response(),
         Err(E::Internal) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
@@ -1409,6 +1413,7 @@ struct SettingsPatch {
     voice_cue: Option<bool>,
     matrix_send: Option<bool>,
     matrix_ping: Option<bool>,
+    language: Option<String>,
     alerts: Option<Vec<AlertPatch>>,
 }
 
@@ -1457,6 +1462,7 @@ fn settings_body(
         "matrix_enabled": state.matrix.is_some(),
         "matrix_send": cfg.matrix_send(),
         "matrix_ping": cfg.matrix_ping(),
+        "language": cfg.language(),
         "schedule": schedule,
     })
 }
@@ -1528,11 +1534,13 @@ async fn settings_get(user: CurrentUser, State(state): State<AppState>) -> impl 
 async fn settings_put(
     user: CurrentUser,
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<SettingsPatch>,
 ) -> impl IntoResponse {
     if let Some(voice) = req.voice_voice.as_deref().filter(|v| !v.is_empty()) {
-        if let Err(refused) = check_voice(&state, &user, voice).await {
-            return refused;
+        let lang = request_lang(&state, &user, &headers);
+        if let Err(refused) = check_voice(&state, &user, voice, lang).await {
+            return *refused;
         }
     }
     let templates = crate::templates::available(&state.config_dir, &user.username);
@@ -1662,6 +1670,12 @@ async fn settings_put(
     if let Some(on) = req.matrix_ping {
         cfg.matrix_ping = Some(on);
     }
+    if let Some(language) = req.language {
+        if !crate::text::LANGUAGES.contains(&language.as_str()) {
+            return invalid_field("language", "must be blank, en or ja");
+        }
+        cfg.language = (!language.is_empty()).then_some(language);
+    }
     if let Some(alerts) = req.alerts {
         let changes: Vec<(usize, bool)> = alerts.iter().map(|a| (a.index, a.alert)).collect();
         if let Err(e) =
@@ -1699,9 +1713,11 @@ struct VoiceLinkReq {
 async fn voice_link(
     user: CurrentUser,
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<VoiceLinkReq>,
 ) -> impl IntoResponse {
-    let Some(voice) = state.voice.clone() else { return calls_not_set_up() };
+    let lang = request_lang(&state, &user, &headers);
+    let Some(voice) = state.voice.clone() else { return calls_not_set_up(lang) };
     let mxid = req.mxid.trim().to_string();
     if !valid_mxid(&mxid) {
         return invalid_field("mxid", "must look like @name:server");
@@ -1734,7 +1750,7 @@ async fn voice_link(
             let conn = state.db();
             let _ = crate::voice::links::forget_unsent(&conn, link_id);
             let _ = crate::log::record(&conn, Some(user.id), "voice_link_error", &refusal.to_string());
-            voice_unavailable()
+            voice_unavailable(lang)
         }
     }
 }
@@ -1747,17 +1763,28 @@ async fn voice_unlink(user: CurrentUser, State(state): State<AppState>) -> impl 
     }
 }
 
-fn voice_unavailable() -> axum::response::Response {
+fn voice_unavailable(lang: Lang) -> axum::response::Response {
     (
         StatusCode::SERVICE_UNAVAILABLE,
-        Json(serde_json::json!({ "error": "The call service isn't reachable right now. Try again in a minute." })),
+        Json(serde_json::json!({ "error": text::err_call_service_unreachable(lang) })),
     )
         .into_response()
 }
 
-fn calls_not_set_up() -> axum::response::Response {
-    (StatusCode::CONFLICT, Json(serde_json::json!({ "error": "calls are not set up on this server" })))
+fn calls_not_set_up(lang: Lang) -> axum::response::Response {
+    (StatusCode::CONFLICT, Json(serde_json::json!({ "error": text::err_calls_not_set_up(lang) })))
         .into_response()
+}
+
+fn accept_language(headers: &HeaderMap) -> Option<&str> {
+    headers.get(header::ACCEPT_LANGUAGE).and_then(|v| v.to_str().ok())
+}
+
+fn request_lang(state: &AppState, user: &CurrentUser, headers: &HeaderMap) -> Lang {
+    let setting = crate::config::UserConfig::load(&state.config_dir, &user.username)
+        .map(|c| c.language().to_string())
+        .unwrap_or_default();
+    Lang::resolve(&setting, accept_language(headers))
 }
 
 fn voice_language(state: &AppState, user: &CurrentUser) -> Option<String> {
@@ -1769,12 +1796,13 @@ fn voice_language(state: &AppState, user: &CurrentUser) -> Option<String> {
 fn voice_refused(
     state: &AppState,
     user: &CurrentUser,
+    lang: Lang,
     (field, requirement): (&str, &str),
     refusal: &note_voice_proto::Refusal,
 ) -> axum::response::Response {
     use note_voice_proto::RefusalCode;
     if matches!(refusal.code, RefusalCode::LinkDown | RefusalCode::Timeout) {
-        return voice_unavailable();
+        return voice_unavailable(lang);
     }
     let _ = crate::log::record(&state.db(), Some(user.id), "voice_refused", &refusal.to_string());
     match refusal.code {
@@ -1786,19 +1814,20 @@ fn voice_refused(
 const NO_VOICES: (&str, &str) = ("voice_language", "has no voices");
 
 /// `Err` holds the response that refuses `voice`: not one the voice side offers, or no voice side to ask.
-async fn check_voice(state: &AppState, user: &CurrentUser, voice: &str) -> Result<(), axum::response::Response> {
-    let Some(calls) = state.voice.clone() else { return Err(calls_not_set_up()) };
-    let language = voice_language(state, user).ok_or_else(|| StatusCode::INTERNAL_SERVER_ERROR.into_response())?;
-    let voices = calls.voices(&language).await.map_err(|r| voice_refused(state, user, NO_VOICES, &r))?;
+async fn check_voice(state: &AppState, user: &CurrentUser, voice: &str, lang: Lang) -> Result<(), Box<axum::response::Response>> {
+    let Some(calls) = state.voice.clone() else { return Err(Box::new(calls_not_set_up(lang))) };
+    let language = voice_language(state, user).ok_or_else(|| Box::new(StatusCode::INTERNAL_SERVER_ERROR.into_response()))?;
+    let voices = calls.voices(&language).await.map_err(|r| Box::new(voice_refused(state, user, lang, NO_VOICES, &r)))?;
     if voices.iter().any(|v| v.id == voice) {
         Ok(())
     } else {
-        Err(invalid_field("voice_voice", "is not one of the available voices"))
+        Err(Box::new(invalid_field("voice_voice", "is not one of the available voices")))
     }
 }
 
-async fn voice_voices(user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
-    let Some(voice) = state.voice.clone() else { return calls_not_set_up() };
+async fn voice_voices(user: CurrentUser, State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    let lang = request_lang(&state, &user, &headers);
+    let Some(voice) = state.voice.clone() else { return calls_not_set_up(lang) };
     let Some(language) = voice_language(&state, &user) else {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
@@ -1810,7 +1839,7 @@ async fn voice_voices(user: CurrentUser, State(state): State<AppState>) -> impl 
                 .collect();
             Json(serde_json::json!({ "voices": voices })).into_response()
         }
-        Err(refusal) => voice_refused(&state, &user, NO_VOICES, &refusal),
+        Err(refusal) => voice_refused(&state, &user, lang, NO_VOICES, &refusal),
     }
 }
 
@@ -1822,9 +1851,11 @@ struct PreviewQuery {
 async fn voice_preview(
     user: CurrentUser,
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(q): Query<PreviewQuery>,
 ) -> impl IntoResponse {
-    let Some(voice) = state.voice.clone() else { return calls_not_set_up() };
+    let lang = request_lang(&state, &user, &headers);
+    let Some(voice) = state.voice.clone() else { return calls_not_set_up(lang) };
     let Some(language) = voice_language(&state, &user) else {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
@@ -1834,29 +1865,30 @@ async fn voice_preview(
             wav,
         )
             .into_response(),
-        Err(refusal) => voice_refused(&state, &user, ("voice", "is not one of the available voices"), &refusal),
+        Err(refusal) => voice_refused(&state, &user, lang, ("voice", "is not one of the available voices"), &refusal),
     }
 }
 
 /// Rings the linked phone now, whatever `ring_for` says.
-async fn voice_test(user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
-    let conflict = |msg: &str| {
+async fn voice_test(user: CurrentUser, State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    let lang = request_lang(&state, &user, &headers);
+    let conflict = |msg: String| {
         (StatusCode::CONFLICT, Json(serde_json::json!({ "error": msg }))).into_response()
     };
     let Some(voice) = state.voice.clone() else {
-        return conflict("calls are not set up on this server");
+        return conflict(text::err_calls_not_set_up(lang));
     };
     let link = {
         let conn = state.db();
         crate::voice::links::ringable(&conn, user.id).unwrap_or(None)
     };
-    let Some(link) = link else { return conflict("link a Matrix account first") };
+    let Some(link) = link else { return conflict(text::err_link_matrix_first(lang)) };
     if !voice.is_up() {
-        return conflict("the call service isn't connected");
+        return conflict(text::err_call_service_disconnected(lang));
     }
     let msg = crate::channels::OutboundMessage {
-        title: "Test call".into(),
-        body: "This was a test call from Note.".into(),
+        title: text::test_call_title(lang),
+        body: text::test_call_body(lang),
         urgency: crate::channels::Urgency::High,
         checkin: false,
         event_id: None,
@@ -1867,17 +1899,18 @@ async fn voice_test(user: CurrentUser, State(state): State<AppState>) -> impl In
         Ok(call_id) => {
             (StatusCode::ACCEPTED, Json(serde_json::json!({ "call_id": call_id }))).into_response()
         }
-        Err(e) if e.is::<crate::voice::RingBusy>() => conflict("Already ringing"),
+        Err(e) if e.is::<crate::voice::RingBusy>() => conflict(text::err_already_ringing(lang)),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
 
 /// Runs the delivery ladder the way a fired event does, so the reply names the
 /// channel that would actually reach the user right now.
-async fn notify_test(user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
+async fn notify_test(user: CurrentUser, State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    let lang = request_lang(&state, &user, &headers);
     let msg = crate::channels::OutboundMessage {
         title: "Note".into(),
-        body: "Test notification".into(),
+        body: text::test_notification(lang),
         urgency: crate::channels::Urgency::Normal,
         checkin: false,
         event_id: None,
@@ -1894,7 +1927,7 @@ async fn notify_test(user: CurrentUser, State(state): State<AppState>) -> impl I
         Ok(Some(name)) => Json(serde_json::json!({ "via": name })).into_response(),
         Ok(None) => (
             StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({ "error": "no channel could reach you" })),
+            Json(serde_json::json!({ "error": text::err_no_channel(lang) })),
         )
             .into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
