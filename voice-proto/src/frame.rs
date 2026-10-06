@@ -64,7 +64,7 @@ pub enum Request {
 pub enum Reply {
     Dm { room_id: String },
     Done,
-    /// The call Note opened for an IncomingCall; its Start follows on the call stream.
+    /// The call Note opened for an `IncomingCall`; its `Start` follows on the call stream.
     Call { call_id: String },
     Voices { voices: Vec<VoiceOption> },
     Audio { wav_base64: String },

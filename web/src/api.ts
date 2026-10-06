@@ -85,6 +85,7 @@ const WRITABLE_SETTINGS = [
   'voice_cue',
   'matrix_send',
   'matrix_ping',
+  'language',
 ] as const
 
 type SettingsPatch = Partial<Pick<Settings, (typeof WRITABLE_SETTINGS)[number]>>

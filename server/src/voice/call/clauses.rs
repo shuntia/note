@@ -71,7 +71,7 @@ const FIRST_COMMA_FLOOR: usize = 8;
 const LATER_COMMA_FLOOR: usize = 24;
 
 /// Strips `*`, `_`, `#`, backticks and leading "- ", and collapses whitespace.
-/// An `_` between word characters reads as a space ("web_search" → "web search").
+/// An `_` between word characters reads as a space ("`web_search`" → "web search").
 pub fn speakable(text: &str) -> String {
     let chars: Vec<char> = text
         .lines()
@@ -90,7 +90,7 @@ pub fn speakable(text: &str) -> String {
                 && chars[i - 1].is_alphanumeric()
                 && chars.get(i + 1).is_some_and(|n| n.is_alphanumeric()) =>
             {
-                spoken.push(' ')
+                spoken.push(' ');
             }
             '*' | '_' | '#' | '`' => {}
             _ => spoken.push(c),

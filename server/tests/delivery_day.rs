@@ -174,7 +174,7 @@ fn delivery_reaches_the_user_through_the_ladder() {
     };
     assert_eq!(fired.len(), 1);
     assert_eq!(fired[0].kind, "debrief");
-    channels::deliver_event(&db, &ladder, &fired[0]);
+    channels::deliver_event(&db, &ladder, &fired[0], note_server::text::Lang::En);
     let text = rx.try_recv().unwrap();
     assert!(text.contains("dentist rolled forward"), "ws frame: {text}");
     assert!(push.seen().is_empty());
@@ -189,7 +189,7 @@ fn delivery_reaches_the_user_through_the_ladder() {
     };
     assert_eq!(fired.len(), 1);
     assert_eq!(fired[0].kind, "nudge");
-    channels::deliver_event(&db, &ladder, &fired[0]);
+    channels::deliver_event(&db, &ladder, &fired[0], note_server::text::Lang::En);
     assert_eq!(push.seen().len(), 1);
     assert_eq!(push.seen()[0].0, uid);
 
@@ -218,7 +218,7 @@ fn delivery_reaches_the_user_through_the_ladder() {
     };
     assert_eq!(fired.len(), 1);
     assert_eq!(fired[0].kind, "checkin_call");
-    channels::deliver_event(&db, &ladder, &fired[0]);
+    channels::deliver_event(&db, &ladder, &fired[0], note_server::text::Lang::En);
     assert_eq!(push.seen().len(), 2);
     {
         let conn = db.lock().unwrap();
@@ -245,7 +245,7 @@ fn delivery_reaches_the_user_through_the_ladder() {
         note_server::runner::fire_due(&conn, tmp.path(), late).unwrap()
     };
     assert_eq!(fired.len(), 1);
-    channels::deliver_event(&db, &ladder, &fired[0]);
+    channels::deliver_event(&db, &ladder, &fired[0], note_server::text::Lang::En);
     {
         let conn = db.lock().unwrap();
         let n: i64 = conn
@@ -266,7 +266,7 @@ fn delivery_reaches_the_user_through_the_ladder() {
     assert_eq!(started.len(), 1);
     assert_eq!(started[0].notify, "notify");
     for start in &started {
-        note_server::channels::deliver_block_start(&db, &ladder, &hub, start);
+        note_server::channels::deliver_block_start(&db, &ladder, &hub, start, note_server::text::Lang::En);
     }
     let seen = push.seen();
     let last = seen.last().unwrap();

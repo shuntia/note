@@ -1,6 +1,7 @@
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
 use serde::Serialize;
+use crate::text::{self, Lang};
 use std::path::Path;
 
 /// How long after a session starts its first progress check lands, when the
@@ -679,6 +680,7 @@ fn advance(
     }
     let at = phase_end(session, len, now);
     let notify = wants_end_notice(config_dir, username);
+    let lang = Lang::for_user(config_dir, username);
     let message = if session.phase == "work" {
         if session.round >= MAX_ROUNDS {
             if !auto_close {
@@ -701,13 +703,8 @@ fn advance(
                 &format!("session {} round {}", session.id, session.round),
             )?;
             notify.then(|| crate::channels::OutboundMessage {
-                title: "Break".into(),
-                body: format!(
-                    "{} min. Round {} of {} done.",
-                    session.break_min.unwrap_or_default(),
-                    session.round,
-                    session.title
-                ),
+                title: text::break_title(lang),
+                body: text::break_body(lang, session.break_min.unwrap_or_default(), session.round, &session.title),
                 urgency: crate::channels::Urgency::Normal,
                 checkin: false,
                 event_id: None,
@@ -725,8 +722,8 @@ fn advance(
             &format!("session {} round {round}", session.id),
         )?;
         notify.then(|| crate::channels::OutboundMessage {
-            title: format!("Round {round}"),
-            body: format!("Back to {}.", session.title),
+            title: text::round_title(lang, round),
+            body: text::round_body(lang, &session.title),
             urgency: crate::channels::Urgency::Normal,
             checkin: false,
             event_id: None,
@@ -767,7 +764,7 @@ pub fn planned_end(conn: &Connection, config_dir: &Path, now: jiff::Timestamp) -
         )?;
         let message = wants_end_notice(config_dir, &username).then(|| crate::channels::OutboundMessage {
             title: session.title.clone(),
-            body: "Time's up.".into(),
+            body: text::times_up(Lang::for_user(config_dir, &username)),
             urgency: crate::channels::Urgency::Normal,
             checkin: false,
             event_id: None,
@@ -805,15 +802,12 @@ pub fn overrun(conn: &Connection, config_dir: &Path, now: jiff::Timestamp) -> Re
         let elapsed_ms = session.elapsed_ms(now);
         let past = |pct: i64| elapsed_ms >= planned * 60_000 * pct / 100;
         let elapsed = elapsed_ms / 60_000;
+        let lang = Lang::for_user(config_dir, &username);
         let (title, body, kind) = if past(OVERRUN_END_PCT) {
             end(conn, config_dir, user_id, &username, Some(session.id), "stopped", now)?;
             (
-                "Force-terminating",
-                format!(
-                    "{} ran {elapsed} min against {planned} planned, so it ends here. \
-                     Start it again when you are ready.",
-                    session.title
-                ),
+                text::overrun_ended_title(lang),
+                text::overrun_ended_body(lang, &session.title, elapsed, planned),
                 "session_force_ended",
             )
         } else if asked.is_none() && past(OVERRUN_ASK_PCT) {
@@ -823,19 +817,15 @@ pub fn overrun(conn: &Connection, config_dir: &Path, now: jiff::Timestamp) -> Re
                 (now.to_string(), session.id),
             )?;
             (
-                "Are you OK?",
-                format!(
-                    "{} has run {elapsed} min against {planned} planned. How is it going? \
-                     Take a break, or give it {extra} more minutes.",
-                    session.title
-                ),
+                text::overrun_ask_title(lang),
+                text::overrun_ask_body(lang, &session.title, elapsed, planned, extra),
                 "session_overrun",
             )
         } else {
             continue;
         };
         if let Some(thread) = session.conversation_id {
-            crate::talk::append_assistant(conn, thread, &format!("{title}: {body}"), "", 0, now)?;
+            crate::talk::append_assistant(conn, thread, &text::titled(lang, &title, &body), "", 0, now)?;
         }
         crate::log::record(
             conn,
@@ -847,7 +837,7 @@ pub fn overrun(conn: &Connection, config_dir: &Path, now: jiff::Timestamp) -> Re
             user_id,
             username,
             message: Some(crate::channels::OutboundMessage {
-                title: title.into(),
+                title,
                 body,
                 urgency: crate::channels::Urgency::High,
                 checkin: false,

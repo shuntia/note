@@ -618,9 +618,8 @@ fn thread_context(
 /// check-in thread. The text is written there whether or not a channel takes it.
 fn record_said(
     conn: &Connection,
-    user_id: i64,
-    date: &str,
-    at: &str,
+    fired: &crate::runner::FiredEvent,
+    lang: crate::text::Lang,
     conversation_id: Option<i64>,
     text: &str,
     now: jiff::Timestamp,
@@ -631,7 +630,7 @@ fn record_said(
             crate::talk::touch(conn, id, now)?;
             Ok(id)
         }
-        None => crate::talk::checkin_thread(conn, user_id, date, at, text, now),
+        None => crate::talk::checkin_thread(conn, fired.user_id, &fired.date, &fired.wall_time, text, lang, now),
     }
 }
 
@@ -734,13 +733,13 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
     let Some(text) = result["said"].as_str().map(str::to_string) else {
         return failed(format!("event {}: the session said nothing readable", ev.event_id));
     };
+    let lang = crate::text::Lang::for_user(&state.config_dir, &fired.username);
     let conversation_id = {
         let conn = state.db();
         let landed = record_said(
             &conn,
-            fired.user_id,
-            &fired.date,
-            &fired.wall_time,
+            fired,
+            lang,
             ev.conversation_id,
             &text,
             now,
@@ -774,13 +773,13 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
             conversation_id,
             actions: if ev.prompt == CLOSE_DAY_PROMPT {
                 vec![crate::channels::Action {
-                    label: "Carry to tomorrow".into(),
+                    label: crate::text::action_carry_to_tomorrow(lang),
                     data: format!("carry:{}", fired.date),
                 }]
             } else if ev.origin == crate::idle::ORIGIN {
                 Vec::new()
             } else {
-                crate::channels::event_actions(ev.event_id)
+                crate::channels::event_actions(ev.event_id, lang)
             },
         },
     );

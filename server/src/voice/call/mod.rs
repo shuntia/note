@@ -369,7 +369,7 @@ impl CallManager {
             clock: Arc::new(move || started.elapsed()),
         };
         let (opening, history, initial) = (live.opening, live.history, live.initial);
-        std::thread::spawn(move || driver::run(deps, opening, history, initial, rx, tx));
+        std::thread::spawn(move || driver::run(deps, opening.as_ref(), history, initial, &rx, tx));
     }
 
     fn is_dead(&self, call_id: &str) -> bool {

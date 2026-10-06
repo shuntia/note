@@ -88,8 +88,7 @@ pub struct Peer {
 fn instance_id() -> String {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_nanos());
     format!("{}-{nanos}", std::process::id())
 }
 
@@ -413,8 +412,7 @@ pub async fn dial_forever(peer: Peer, path: PathBuf) {
         }
         let jitter = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.subsec_millis() % 100)
-            .unwrap_or(0);
+            .map_or(0, |d| d.subsec_millis() % 100);
         tokio::time::sleep(delay + Duration::from_millis(u64::from(jitter))).await;
         delay = (delay * 2).min(Duration::from_secs(2));
     }

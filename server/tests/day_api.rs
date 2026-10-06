@@ -319,7 +319,7 @@ fn answered_checkin(state: &AppState, date: jiff::civil::Date) {
     let conn = state.db();
     let now = jiff::Timestamp::now();
     let id =
-        note_server::talk::checkin_thread(&conn, 1, &date.to_string(), "09:00", "How is it going?", now)
+        note_server::talk::checkin_thread(&conn, 1, &date.to_string(), "09:00", "How is it going?", note_server::text::Lang::En, now)
             .unwrap();
     note_server::talk::append_text(&conn, id, "user", "fine", now).unwrap();
 }

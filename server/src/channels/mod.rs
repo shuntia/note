@@ -4,6 +4,7 @@ pub mod voice;
 pub mod webpush;
 pub mod ws;
 
+use crate::text::{self, Lang};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
@@ -67,11 +68,11 @@ pub struct Action {
 pub const MAX_ACTION_DATA: usize = 64;
 
 /// What can be said about an event that has just asked for something.
-pub fn event_actions(event_id: i64) -> Vec<Action> {
+pub fn event_actions(event_id: i64, lang: Lang) -> Vec<Action> {
     vec![
-        Action { label: "Done".into(), data: format!("ev:done:{event_id}") },
-        Action { label: "Snooze 15".into(), data: format!("ev:snooze:{event_id}:15") },
-        Action { label: "Drop".into(), data: format!("ev:drop:{event_id}") },
+        Action { label: text::action_done(lang), data: format!("ev:done:{event_id}") },
+        Action { label: text::action_snooze_15(lang), data: format!("ev:snooze:{event_id}:15") },
+        Action { label: text::action_drop(lang), data: format!("ev:drop:{event_id}") },
     ]
 }
 
@@ -98,13 +99,9 @@ pub trait Channel: Send + Sync {
 
 /// Pure rendering of a fired event into a user-facing message; a non-empty
 /// per-event `message` (set by `notify_send`) overrides the generic body.
-pub fn render(conn: &Connection, ev: &crate::runner::FiredEvent) -> OutboundMessage {
+pub fn render(conn: &Connection, ev: &crate::runner::FiredEvent, lang: Lang) -> OutboundMessage {
     let (title, mut body, urgency) = if is_checkin(&ev.kind) {
-        (
-            "Check-in".to_string(),
-            format!("Time for your {} check-in — how is the day going?", ev.wall_time),
-            Urgency::High,
-        )
+        (text::checkin_title(lang), text::checkin_body(lang, &ev.wall_time), Urgency::High)
     } else if ev.kind == "debrief" {
         let content: String = conn
             .query_row(
@@ -112,8 +109,8 @@ pub fn render(conn: &Connection, ev: &crate::runner::FiredEvent) -> OutboundMess
                 (ev.user_id, &ev.date),
                 |r| r.get(0),
             )
-            .unwrap_or_else(|_| "(no debrief yet)".into());
-        ("Good morning".to_string(), content, Urgency::Normal)
+            .unwrap_or_else(|_| text::no_debrief(lang));
+        (text::good_morning(lang), content, Urgency::Normal)
     } else if ev.kind == crate::review::EVENT_KIND {
         let week = ev
             .date
@@ -128,16 +125,16 @@ pub fn render(conn: &Connection, ev: &crate::runner::FiredEvent) -> OutboundMess
                 (ev.user_id, &week),
                 |r| r.get(0),
             )
-            .unwrap_or_else(|_| "(no week yet)".into());
-        ("Your week".to_string(), content, Urgency::Low)
+            .unwrap_or_else(|_| text::no_week(lang));
+        (text::your_week(lang), content, Urgency::Low)
     } else {
-        (ev.kind.clone(), format!("scheduled for {}", ev.wall_time), Urgency::Normal)
+        (ev.kind.clone(), text::scheduled_for(lang, &ev.wall_time), Urgency::Normal)
     };
     if !ev.message.is_empty() {
         body.clone_from(&ev.message);
     }
     let actions =
-        if is_checkin(&ev.kind) { event_actions(ev.event_id) } else { Vec::new() };
+        if is_checkin(&ev.kind) { event_actions(ev.event_id, lang) } else { Vec::new() };
     OutboundMessage {
         title,
         body,
@@ -153,12 +150,12 @@ pub fn render(conn: &Connection, ev: &crate::runner::FiredEvent) -> OutboundMess
 /// thread before any channel carries it, so the thread exists whether or not
 /// delivery succeeds. A failure to open the thread is logged and the message
 /// still goes out, without an id.
-fn open_checkin_thread(conn: &Connection, ev: &crate::runner::FiredEvent, msg: &mut OutboundMessage) {
+fn open_checkin_thread(conn: &Connection, ev: &crate::runner::FiredEvent, lang: Lang, msg: &mut OutboundMessage) {
     if !is_checkin(&ev.kind) {
         return;
     }
     let now = jiff::Timestamp::now();
-    match crate::talk::checkin_thread(conn, ev.user_id, &ev.date, &ev.wall_time, &msg.body, now) {
+    match crate::talk::checkin_thread(conn, ev.user_id, &ev.date, &ev.wall_time, &msg.body, lang, now) {
         Ok(id) => msg.conversation_id = Some(id),
         Err(e) => {
             let _ = crate::log::record(
@@ -229,11 +226,12 @@ pub fn deliver_event(
     db: &Mutex<Connection>,
     ladder: &[Arc<dyn Channel>],
     ev: &crate::runner::FiredEvent,
+    lang: Lang,
 ) {
     let msg = {
         let conn = crate::db_guard(db);
-        let mut msg = render(&conn, ev);
-        open_checkin_thread(&conn, ev, &mut msg);
+        let mut msg = render(&conn, ev, lang);
+        open_checkin_thread(&conn, ev, lang, &mut msg);
         msg
     };
     deliver_via(db, ladder, ev.user_id, &ev.username, &msg);
@@ -247,16 +245,18 @@ pub fn deliver_block_start(
     ladder: &[Arc<dyn Channel>],
     hub: &ws::ClientHub,
     start: &crate::runner::BlockStart,
+    lang: Lang,
 ) {
     if start.notify == "chat" {
         let conn = crate::db_guard(db);
-        let line = format!("Starting now: {}, until {}.", start.task, start.end_wall_time);
+        let line = text::block_start_line(lang, &start.task, &start.end_wall_time);
         if let Err(e) = crate::talk::checkin_thread(
             &conn,
             start.user_id,
             &start.date,
             &start.wall_time,
             &line,
+            lang,
             jiff::Timestamp::now(),
         ) {
             let _ = crate::log::record(
@@ -276,14 +276,14 @@ pub fn deliver_block_start(
         start.user_id,
         &start.username,
         &OutboundMessage {
-            title: "Starting now".into(),
-            body: format!("{} · until {}", start.task, start.end_wall_time),
+            title: text::starting_now(lang),
+            body: text::block_start_body(lang, &start.task, &start.end_wall_time),
             urgency: Urgency::Normal,
             checkin: false,
             event_id: Some(start.event_id),
             conversation_id: None,
             actions: vec![Action {
-                label: "Start session".into(),
+                label: text::action_start_session(lang),
                 data: format!("block:start:{}", start.event_id),
             }],
         },
@@ -331,17 +331,17 @@ mod tests {
             [],
         )
         .unwrap();
-        let m = render(&conn, &ev("debrief", "push", ""));
+        let m = render(&conn, &ev("debrief", "push", ""), Lang::En);
         assert_eq!(m.title, "Good morning");
         assert!(m.body.contains("slept well"));
 
-        let m = render(&conn, &ev("checkin_call", "push", ""));
+        let m = render(&conn, &ev("checkin_call", "push", ""), Lang::En);
         assert_eq!(m.title, "Check-in");
         assert_eq!(m.urgency, Urgency::High);
         assert!(m.body.contains("09:00"), "body: {}", m.body);
         assert!(!m.body.contains("checkin_call"), "body leaks the kind: {}", m.body);
 
-        let m = render(&conn, &ev("nudge", "push", "you wanted a stretch break"));
+        let m = render(&conn, &ev("nudge", "push", "you wanted a stretch break"), Lang::En);
         assert_eq!(m.body, "you wanted a stretch break");
     }
 
@@ -349,7 +349,7 @@ mod tests {
     fn only_a_checkin_is_rendered_with_something_to_press() {
         let (db, _uid) = env();
         let conn = db.lock().unwrap();
-        let m = render(&conn, &ev("checkin_call", "push", ""));
+        let m = render(&conn, &ev("checkin_call", "push", ""), Lang::En);
         assert_eq!(
             m.actions,
             vec![
@@ -359,8 +359,18 @@ mod tests {
             ]
         );
         assert!(m.actions.iter().all(|a| a.data.len() <= MAX_ACTION_DATA));
-        assert!(render(&conn, &ev("nudge", "push", "stretch")).actions.is_empty());
-        assert!(render(&conn, &ev("debrief", "push", "")).actions.is_empty());
+        assert!(render(&conn, &ev("nudge", "push", "stretch"), Lang::En).actions.is_empty());
+        assert!(render(&conn, &ev("debrief", "push", ""), Lang::En).actions.is_empty());
+    }
+
+    #[test]
+    fn a_checkin_speaks_the_users_language_and_keeps_its_data() {
+        let (db, _uid) = env();
+        let conn = db.lock().unwrap();
+        let m = render(&conn, &ev("checkin_call", "push", ""), Lang::Ja);
+        assert_eq!(m.title, "チェックイン");
+        assert!(m.body.starts_with("09:00のチェックイン"), "body: {}", m.body);
+        assert_eq!(m.actions[0], Action { label: "完了".into(), data: "ev:done:11".into() });
     }
 
     #[test]
@@ -373,7 +383,7 @@ mod tests {
             [],
         )
         .unwrap();
-        let m = render(&conn, &ev("debrief", "push", ""));
+        let m = render(&conn, &ev("debrief", "push", ""), Lang::En);
         assert_eq!(m.body, "(no debrief yet)");
     }
 
@@ -389,14 +399,14 @@ mod tests {
         .unwrap();
         let mut monday = ev("review", "push", "");
         monday.date = "2026-09-21".into();
-        let m = render(&conn, &monday);
+        let m = render(&conn, &monday, Lang::En);
         assert_eq!(m.title, "Your week");
         assert_eq!(m.body, "You finished the essay.");
         assert_eq!(m.urgency, Urgency::Low);
 
         let mut other = ev("review", "push", "");
         other.date = "2026-09-28".into();
-        assert_eq!(render(&conn, &other).body, "(no week yet)");
+        assert_eq!(render(&conn, &other, Lang::En).body, "(no week yet)");
     }
 
     fn plain(body: &str) -> OutboundMessage {
@@ -460,7 +470,7 @@ mod tests {
         first.set_fail(true);
         let ladder: Vec<Arc<dyn Channel>> = vec![first.clone(), second.clone()];
 
-        deliver_event(&db, &ladder, &ev("nudge", "push", ""));
+        deliver_event(&db, &ladder, &ev("nudge", "push", ""), Lang::En);
         assert!(first.seen().is_empty());
         assert_eq!(second.seen().len(), 1);
         let conn = db.lock().unwrap();
@@ -506,7 +516,7 @@ mod tests {
         let only = Arc::new(MockChannel::new("only"));
         only.set_fail(true);
         let ladder: Vec<Arc<dyn Channel>> = vec![only];
-        deliver_event(&db, &ladder, &ev("nudge", "push", ""));
+        deliver_event(&db, &ladder, &ev("nudge", "push", ""), Lang::En);
         let conn = db.lock().unwrap();
         let detail: String = conn
             .query_row("SELECT detail FROM event_log WHERE kind='delivery_degraded'", [], |r| {
@@ -520,7 +530,7 @@ mod tests {
     #[test]
     fn empty_ladder_logs_a_named_reason() {
         let (db, _uid) = env();
-        deliver_event(&db, &[], &ev("nudge", "push", ""));
+        deliver_event(&db, &[], &ev("nudge", "push", ""), Lang::En);
         let conn = db.lock().unwrap();
         let detail: String = conn
             .query_row("SELECT detail FROM event_log WHERE kind='delivery_degraded'", [], |r| {
@@ -558,7 +568,7 @@ mod tests {
         let (db, _uid) = env();
         let db = Arc::new(db);
         let ladder: Vec<Arc<dyn Channel>> = vec![Arc::new(LockProbe(db.clone()))];
-        deliver_event(&db, &ladder, &ev("nudge", "push", ""));
+        deliver_event(&db, &ladder, &ev("nudge", "push", ""), Lang::En);
         let conn = db.lock().unwrap();
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM event_log WHERE kind='delivery_ok'", [], |r| r.get(0))
@@ -585,11 +595,11 @@ mod tests {
         let push = Arc::new(MockChannel::new("push"));
         let ladder: Vec<Arc<dyn Channel>> = vec![push.clone()];
 
-        deliver_event(&db, &ladder, &ev("checkin", "push", ""));
+        deliver_event(&db, &ladder, &ev("checkin", "push", ""), Lang::En);
         let mut later = ev("checkin_call", "push", "Afternoon. Where did the morning go?");
         later.event_id = 12;
         later.wall_time = "15:30".into();
-        deliver_event(&db, &ladder, &later);
+        deliver_event(&db, &ladder, &later, Lang::En);
 
         let seen = push.seen();
         assert_eq!(seen.len(), 2);
@@ -610,7 +620,7 @@ mod tests {
     #[test]
     fn the_thread_exists_even_when_no_channel_takes_the_checkin() {
         let (db, _uid) = env();
-        deliver_event(&db, &[], &ev("checkin", "push", ""));
+        deliver_event(&db, &[], &ev("checkin", "push", ""), Lang::En);
         let conn = db.lock().unwrap();
         assert_eq!(thread_rows(&conn).len(), 1);
     }
@@ -620,7 +630,7 @@ mod tests {
         let (db, _uid) = env();
         let push = Arc::new(MockChannel::new("push"));
         let ladder: Vec<Arc<dyn Channel>> = vec![push.clone()];
-        deliver_event(&db, &ladder, &ev("nudge", "push", "stretch"));
+        deliver_event(&db, &ladder, &ev("nudge", "push", "stretch"), Lang::En);
         assert_eq!(push.seen()[0].1.conversation_id, None);
         let conn = db.lock().unwrap();
         assert!(thread_rows(&conn).is_empty());

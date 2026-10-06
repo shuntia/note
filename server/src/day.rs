@@ -314,6 +314,7 @@ mod tests {
             &date.to_string(),
             "09:00",
             "How is it going?",
+            crate::text::Lang::En,
             "2026-09-21T09:00:00Z".parse().unwrap(),
         )
         .unwrap();

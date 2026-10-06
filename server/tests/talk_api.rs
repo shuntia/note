@@ -232,7 +232,7 @@ async fn blank_reply_is_replaced_with_the_canned_line_and_persisted_as_such() {
     assert_eq!(res.status(), StatusCode::OK);
     let body = res.into_body().collect().await.unwrap().to_bytes();
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(v["reply"], note_server::EMPTY_REPLY_FALLBACK);
+    assert_eq!(v["reply"], note_server::text::empty_reply(note_server::text::Lang::En));
 
     let persisted: String = {
         let conn = state.db.lock().unwrap();
@@ -243,7 +243,7 @@ async fn blank_reply_is_replaced_with_the_canned_line_and_persisted_as_such() {
         )
         .unwrap()
     };
-    assert_eq!(persisted, note_server::EMPTY_REPLY_FALLBACK);
+    assert_eq!(persisted, note_server::text::empty_reply(note_server::text::Lang::En));
 }
 
 #[tokio::test]

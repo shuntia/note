@@ -450,3 +450,24 @@ async fn the_morning_ends_at_eleven_until_it_is_moved() {
     let v = json(app.oneshot(get(&cookie)).await.unwrap()).await;
     assert_eq!(v["morning_until"], "09:45");
 }
+
+#[tokio::test]
+async fn the_language_follows_the_browser_until_it_is_chosen() {
+    let (app, cookie, _cfg) = common::app_with_logged_in_user().await;
+    let v = json(app.clone().oneshot(get(&cookie)).await.unwrap()).await;
+    assert_eq!(v["language"], "");
+
+    let res = app.clone().oneshot(put(&cookie, r#"{"language":"ja"}"#)).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(json(res).await["language"], "ja");
+
+    let res = app.clone().oneshot(put(&cookie, r#"{"language":"fr"}"#)).await.unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(json(res).await["error"], "language must be blank, en or ja");
+
+    let v = json(app.clone().oneshot(get(&cookie)).await.unwrap()).await;
+    assert_eq!(v["language"], "ja");
+
+    let res = app.oneshot(put(&cookie, r#"{"language":""}"#)).await.unwrap();
+    assert_eq!(json(res).await["language"], "");
+}

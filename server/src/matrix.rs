@@ -8,11 +8,6 @@ use std::collections::HashSet;
 const MIN_BACKOFF_SECS: u64 = 5;
 const MAX_BACKOFF_SECS: u64 = 60;
 
-const FRESH: &str = "Fresh start.";
-const CAPPED: &str = "You've used today's sessions.";
-const BUSY: &str = "Still on your last message.";
-const UNREACHABLE: &str = "Couldn't reach Note right now.";
-
 pub fn cursor(conn: &Connection) -> Result<Option<String>> {
     Ok(conn.query_row("SELECT next_batch FROM matrix_cursor WHERE id = 1", [], |r| r.get(0)).optional()?)
 }
@@ -113,10 +108,11 @@ pub async fn receive(state: &AppState, rooms: &mut Rooms, message: &Message) {
             })
     };
     let Some((user_id, username)) = linked else { return };
+    let lang = crate::text::Lang::for_user(&state.config_dir, &username);
     let text = message.text.trim();
     if text == "/new" {
         rooms.fresh.insert(user_id);
-        return say(state, &message.room_id, user_id, FRESH).await;
+        return say(state, &message.room_id, user_id, &crate::text::matrix_fresh(lang)).await;
     }
     let conversation = if rooms.fresh.remove(&user_id) {
         None
@@ -130,14 +126,14 @@ pub async fn receive(state: &AppState, rooms: &mut Rooms, message: &Message) {
             rooms.busy.remove(&user_id);
             say(state, &message.room_id, user_id, &turn.reply).await;
         }
-        Err(TurnError::DailyCap) => say(state, &message.room_id, user_id, CAPPED).await,
+        Err(TurnError::DailyCap) => say(state, &message.room_id, user_id, &crate::text::matrix_capped(lang)).await,
         Err(TurnError::Busy(_)) => {
             if rooms.busy.insert(user_id) {
-                say(state, &message.room_id, user_id, BUSY).await;
+                say(state, &message.room_id, user_id, &crate::text::matrix_busy(lang)).await;
             }
         }
         Err(TurnError::Blank) => {}
-        Err(_) => say(state, &message.room_id, user_id, UNREACHABLE).await,
+        Err(_) => say(state, &message.room_id, user_id, &crate::text::matrix_unreachable(lang)).await,
     }
 }
 
