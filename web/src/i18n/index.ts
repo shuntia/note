@@ -16,6 +16,46 @@ export function activeLocale(): string {
 /** Switches to `tag` when a dictionary exists for it; English otherwise. */
 export function setLocale(tag: string): void {
   locale = tag in DICTS ? tag : 'en'
+  if (typeof document !== 'undefined') document.documentElement.lang = locale
+}
+
+const CHOICE = 'note.lang'
+
+/** The language for a setting: '' follows the browser's preferred languages. */
+export function resolveLocale(choice: string, preferred: readonly string[] = browserLanguages()): string {
+  if (choice in DICTS) return choice
+  for (const tag of preferred) {
+    const base = tag.toLowerCase().split('-')[0]
+    if (base in DICTS) return base
+  }
+  return 'en'
+}
+
+function browserLanguages(): readonly string[] {
+  return typeof navigator === 'undefined' ? [] : navigator.languages ?? [navigator.language]
+}
+
+function storedChoice(): string {
+  try {
+    return localStorage.getItem(CHOICE) ?? ''
+  } catch {
+    return ''
+  }
+}
+
+/** Sets the locale before the first render from the last known setting. */
+export function bootLocale(): void {
+  setLocale(resolveLocale(storedChoice()))
+}
+
+/** Remembers the account's setting; true when the page must reload to show it. */
+export function adoptLanguage(choice: string): boolean {
+  try {
+    localStorage.setItem(CHOICE, choice)
+  } catch {
+    // storage blocked; the browser's language holds on the next load
+  }
+  return resolveLocale(choice) !== locale
 }
 
 /**
