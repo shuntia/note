@@ -1,3 +1,6 @@
+import { t, type Key } from './i18n'
+import { weekdayDay } from './i18n/format'
+
 type Args = Record<string, unknown>
 
 const MAX_QUOTE = 80
@@ -13,458 +16,475 @@ const flag = (a: Args, key: string): boolean | null =>
 
 const size = (a: Args, key: string): number => (Array.isArray(a[key]) ? (a[key] as unknown[]).length : 0)
 
-const tally = (n: number, thing: string) => `${n} ${thing}${n === 1 ? '' : 's'}`
-
 function clip(text: string): string {
   const flat = text.replace(/\s+/g, ' ').trim()
   return flat.length > MAX_QUOTE ? `${flat.slice(0, MAX_QUOTE - 1)}…` : flat
 }
 
-const quoted = (text: string) => `“${clip(text)}”`
-
 function span(minutes: number): string {
   const m = Math.abs(minutes)
-  if (m < 60 || m % 60 !== 0) return `${m} min`
-  return `${m / 60} hr`
+  if (m < 60 || m % 60 !== 0) return t('receipt.minutes', { n: m })
+  return t('receipt.hours', { n: m / 60 })
 }
 
+const KIND_LABEL: Record<string, Key> = {
+  debrief: 'receipt.kind.debrief',
+  review: 'receipt.kind.review',
+  trigger: 'receipt.kind.trigger',
+}
+
+// Any other kind is the user's own routine name, shown as written.
 export function eventLabel(kind: string): string {
-  if (kind === 'debrief') return 'Morning debrief'
-  if (kind === 'review') return 'Your week'
-  if (kind === 'trigger') return 'Note checks in'
+  if (kind in KIND_LABEL) return t(KIND_LABEL[kind])
   const words = kind.replaceAll('_', ' ').replace('checkin', 'check-in').trim()
   return words.charAt(0).toUpperCase() + words.slice(1)
 }
 
-function dayWord(iso: string): string {
-  if (!iso) return 'today'
+// "today", "tomorrow" (`near`), or the date itself.
+function dayOf(iso: string): { text: string; near: boolean } {
+  if (!iso) return { text: t('receipt.today'), near: true }
   const at = new Date(`${iso}T00:00`)
-  if (Number.isNaN(at.getTime())) return iso
+  if (Number.isNaN(at.getTime())) return { text: iso, near: false }
   const days = Math.round((at.setHours(0, 0, 0, 0) - new Date().setHours(0, 0, 0, 0)) / 86_400_000)
-  if (days === 0) return 'today'
-  if (days === 1) return 'tomorrow'
-  return new Date(`${iso}T00:00`).toLocaleDateString(undefined, {
-    weekday: 'short',
-    month: 'short',
-    day: 'numeric',
-  })
+  if (days === 0) return { text: t('receipt.today'), near: true }
+  if (days === 1) return { text: t('receipt.tomorrow'), near: true }
+  return { text: weekdayDay(new Date(`${iso}T00:00`)), near: false }
 }
+
+const dayWord = (iso: string) => dayOf(iso).text
 
 // The day as an adverbial: "today", "on Mon, Oct 3".
 function dayPhrase(iso: string): string {
-  const word = dayWord(iso)
-  return word === 'today' || word === 'tomorrow' ? word : `on ${word}`
+  const day = dayOf(iso)
+  return day.near ? day.text : t('receipt.onDay', { day: day.text })
 }
 
 // When Note will look at the day again, in the words the user set the time in.
 function laid(a: Args, key: string): string {
   const at = str(a, key)
-  const offset = at.startsWith('+') ? `in ${span(Number(at.replace(/\D/g, '')) || 0)}` : ''
-  const when = offset || (at ? `at ${at}` : '')
-  return when ? `Set a check-in ${when}` : 'Set a check-in'
+  if (at.startsWith('+')) return t('receipt.checkIn.in', { span: span(Number(at.replace(/\D/g, '')) || 0) })
+  return at ? t('receipt.checkIn.at', { time: at }) : t('receipt.checkIn.set')
 }
 
-type Line = string | ((a: Args) => string)
+const INSERTED: Record<string, Key> = {
+  'named.dayTime': 'receipt.scheduleInsert.namedDayTime',
+  'named.day': 'receipt.scheduleInsert.namedDay',
+  'named.time': 'receipt.scheduleInsert.namedTime',
+  'named.plan': 'receipt.scheduleInsert.namedPlan',
+  'event.dayTime': 'receipt.scheduleInsert.eventDayTime',
+  'event.day': 'receipt.scheduleInsert.eventDay',
+  'event.time': 'receipt.scheduleInsert.eventTime',
+  'event.plan': 'receipt.scheduleInsert.eventPlan',
+}
 
-type Receipt = { doing: Line; done: Line; failed: string }
+type Line = Key | ((a: Args) => string)
+
+type Receipt = { doing: Line; done: Line; failed: Key }
 
 // Every tool the server offers, by domain, in the order the registries list them.
 const TABLE: Record<string, Receipt> = {
   memory_query: {
     doing: (a) => {
       const q = str(a, 'query')
-      return q ? `Searching memory for ${quoted(q)}` : 'Searching memory'
+      return q ? t('receipt.memoryQuery.doingFor', { query: clip(q) }) : t('receipt.memoryQuery.doing')
     },
     done: (a) => {
       const q = str(a, 'query')
-      return q ? `Searched memory for ${quoted(q)}` : 'Searched memory'
+      return q ? t('receipt.memoryQuery.doneFor', { query: clip(q) }) : t('receipt.memoryQuery.done')
     },
-    failed: "Couldn't search memory",
+    failed: 'receipt.memoryQuery.failed',
   },
   memory_read: {
-    doing: 'Opening a saved note',
-    done: 'Read a saved note',
-    failed: "Couldn't open that note",
+    doing: 'receipt.memoryRead.doing',
+    done: 'receipt.memoryRead.done',
+    failed: 'receipt.memoryRead.failed',
   },
   memory_write: {
-    doing: 'Saving that to memory',
+    doing: 'receipt.memoryWrite.doing',
     done: (a) => {
-      const summary = str(a, 'summary')
-      const tail = summary ? `: ${clip(summary)}` : ''
-      if (str(a, 'op') === 'update') return `Updated a saved note${tail}`
-      if (str(a, 'op') === 'supersede') return `Replaced an older note${tail}`
-      return `Remembered${tail}`
+      const summary = clip(str(a, 'summary'))
+      const op = str(a, 'op')
+      if (op === 'update')
+        return summary ? t('receipt.memoryWrite.updatedWith', { summary }) : t('receipt.memoryWrite.updated')
+      if (op === 'supersede')
+        return summary ? t('receipt.memoryWrite.replacedWith', { summary }) : t('receipt.memoryWrite.replaced')
+      return summary ? t('receipt.memoryWrite.rememberedWith', { summary }) : t('receipt.memoryWrite.remembered')
     },
-    failed: "Couldn't save that to memory",
+    failed: 'receipt.memoryWrite.failed',
   },
 
   task_create: {
-    doing: 'Adding a task',
+    doing: 'receipt.taskCreate.doing',
     done: (a) => {
       const title = str(a, 'title')
-      return title ? `Added ${quoted(title)} to your tasks` : 'Added a task'
+      return title ? t('receipt.taskCreate.doneNamed', { title: clip(title) }) : t('receipt.taskCreate.done')
     },
-    failed: "Couldn't add that task",
+    failed: 'receipt.taskCreate.failed',
   },
   task_update: {
-    doing: 'Updating a task',
+    doing: 'receipt.taskUpdate.doing',
     done: (a) => {
       switch (str(a, 'state')) {
         case 'done':
-          return 'Marked a task done'
+          return t('receipt.taskUpdate.done')
         case 'dropped':
-          return 'Dropped a task'
+          return t('receipt.taskUpdate.dropped')
         case 'in_progress':
-          return 'Started a task'
+          return t('receipt.taskUpdate.started')
         case 'open':
-          return 'Reopened a task'
+          return t('receipt.taskUpdate.reopened')
       }
       const now = flag(a, 'is_now')
-      if (now === true) return 'Moved a task into Now'
-      if (now === false) return 'Moved a task back to Later'
+      if (now === true) return t('receipt.taskUpdate.toNow')
+      if (now === false) return t('receipt.taskUpdate.toLater')
       const title = str(a, 'title')
-      if (title) return `Renamed a task to ${quoted(title)}`
-      if (str(a, 'notes')) return 'Added a note to a task'
-      if (str(a, 'description')) return "Filled in a task's details"
+      if (title) return t('receipt.taskUpdate.renamed', { title: clip(title) })
+      if (str(a, 'notes')) return t('receipt.taskUpdate.noted')
+      if (str(a, 'description')) return t('receipt.taskUpdate.described')
       const progress = num(a, 'progress')
-      if (progress !== null) return `Set a task to ${progress}% done`
-      return 'Updated a task'
+      if (progress !== null) return t('receipt.taskUpdate.progress', { n: progress })
+      return t('receipt.taskUpdate.updated')
     },
-    failed: "Couldn't update that task",
+    failed: 'receipt.taskUpdate.failed',
   },
   task_split: {
-    doing: 'Breaking a task into steps',
+    doing: 'receipt.taskSplit.doing',
     done: (a) => {
-      const steps = size(a, 'steps')
-      return steps ? `Broke a task into ${tally(steps, 'step')}` : 'Broke a task into steps'
+      const count = size(a, 'steps')
+      return count ? t('receipt.taskSplit.doneCount', { count }) : t('receipt.taskSplit.done')
     },
-    failed: "Couldn't break that task into steps",
+    failed: 'receipt.taskSplit.failed',
   },
   task_delete: {
-    doing: 'Deleting a task',
-    done: 'Deleted a task',
-    failed: "Couldn't delete that task",
+    doing: 'receipt.taskDelete.doing',
+    done: 'receipt.taskDelete.done',
+    failed: 'receipt.taskDelete.failed',
   },
   task_list: {
-    doing: 'Looking over your tasks',
+    doing: 'receipt.taskList.doing',
     done: (a) => {
-      if (flag(a, 'overdue') === true) return 'Looked over what is overdue'
-      if (flag(a, 'is_now') === true) return 'Looked over what you are on now'
+      if (flag(a, 'overdue') === true) return t('receipt.taskList.overdue')
+      if (flag(a, 'is_now') === true) return t('receipt.taskList.now')
       const state = str(a, 'state')
-      if (state === 'done') return 'Looked over what you have finished'
-      if (state === 'dropped') return 'Looked over what you dropped'
+      if (state === 'done') return t('receipt.taskList.finished')
+      if (state === 'dropped') return t('receipt.taskList.dropped')
       const keyword = str(a, 'keyword')
-      if (keyword) return `Looked over your tasks matching ${quoted(keyword)}`
+      if (keyword) return t('receipt.taskList.matching', { keyword: clip(keyword) })
       const due = str(a, 'due_before')
-      if (due) return `Looked over what is due by ${dayWord(due)}`
-      return 'Looked over your tasks'
+      if (due) return t('receipt.taskList.dueBy', { day: dayWord(due) })
+      return t('receipt.taskList.done')
     },
-    failed: "Couldn't read your tasks",
+    failed: 'receipt.taskList.failed',
   },
   task_search: {
     doing: (a) => {
       const q = str(a, 'query')
-      return q ? `Looking for ${quoted(q)} in your tasks` : 'Searching your tasks'
+      return q ? t('receipt.taskSearch.doingFor', { query: clip(q) }) : t('receipt.taskSearch.doing')
     },
     done: (a) => {
       const q = str(a, 'query')
-      return q ? `Looked for ${quoted(q)} in your tasks` : 'Searched your tasks'
+      return q ? t('receipt.taskSearch.doneFor', { query: clip(q) }) : t('receipt.taskSearch.done')
     },
-    failed: "Couldn't search your tasks",
+    failed: 'receipt.taskSearch.failed',
   },
   task_read: {
-    doing: 'Opening a task',
-    done: 'Read a task',
-    failed: "Couldn't open that task",
+    doing: 'receipt.taskRead.doing',
+    done: 'receipt.taskRead.done',
+    failed: 'receipt.taskRead.failed',
   },
   task_bulk_update: {
-    doing: 'Updating several tasks',
+    doing: 'receipt.taskBulk.doing',
     done: (a) => {
-      const n = size(a, 'task_ids')
-      const many = tally(n, 'task')
-      if (flag(a, 'delete') === true) return `Deleted ${many}`
+      const count = size(a, 'task_ids')
+      if (flag(a, 'delete') === true) return t('receipt.taskBulk.deleted', { count })
       const now = flag(a, 'is_now')
-      if (now === true) return `Moved ${many} into Now`
-      if (now === false) return `Moved ${many} back to Later`
+      if (now === true) return t('receipt.taskBulk.toNow', { count })
+      if (now === false) return t('receipt.taskBulk.toLater', { count })
       switch (str(a, 'state')) {
         case 'done':
-          return `Marked ${many} done`
+          return t('receipt.taskBulk.done', { count })
         case 'dropped':
-          return `Dropped ${many}`
+          return t('receipt.taskBulk.dropped', { count })
         case 'in_progress':
-          return `Started ${many}`
+          return t('receipt.taskBulk.started', { count })
         case 'open':
-          return `Reopened ${many}`
+          return t('receipt.taskBulk.reopened', { count })
       }
-      return `Updated ${many}`
+      return t('receipt.taskBulk.updated', { count })
     },
-    failed: "Couldn't update those tasks",
+    failed: 'receipt.taskBulk.failed',
   },
 
   note_add: {
-    doing: 'Adding a note',
+    doing: 'receipt.noteAdd.doing',
     done: (a) => {
       const text = str(a, 'text')
-      return text ? `Noted ${quoted(text)}` : 'Added a note'
+      return text ? t('receipt.noteAdd.doneText', { text: clip(text) }) : t('receipt.noteAdd.done')
     },
-    failed: "Couldn't add that note",
+    failed: 'receipt.noteAdd.failed',
   },
   note_update: {
-    doing: 'Updating a note',
+    doing: 'receipt.noteUpdate.doing',
     done: (a) => {
       const pinned = flag(a, 'pinned')
-      if (pinned === true) return 'Pinned a note'
-      if (pinned === false) return 'Unpinned a note'
+      if (pinned === true) return t('receipt.noteUpdate.pinned')
+      if (pinned === false) return t('receipt.noteUpdate.unpinned')
       const text = str(a, 'text')
-      return text ? `Changed a note to ${quoted(text)}` : 'Updated a note'
+      return text ? t('receipt.noteUpdate.changed', { text: clip(text) }) : t('receipt.noteUpdate.done')
     },
-    failed: "Couldn't update that note",
+    failed: 'receipt.noteUpdate.failed',
   },
   note_done: {
-    doing: 'Checking off a note',
-    done: 'Checked off a note',
-    failed: "Couldn't check off that note",
+    doing: 'receipt.noteDone.doing',
+    done: 'receipt.noteDone.done',
+    failed: 'receipt.noteDone.failed',
   },
   note_list: {
-    doing: 'Reading your notes',
-    done: 'Read your notes',
-    failed: "Couldn't read your notes",
+    doing: 'receipt.noteList.doing',
+    done: 'receipt.noteList.done',
+    failed: 'receipt.noteList.failed',
   },
 
   plan_tasks: {
-    doing: 'Laying tasks onto the day',
+    doing: 'receipt.planTasks.doing',
     done: (a) => {
-      const n = size(a, 'task_ids')
+      const vars = { count: size(a, 'task_ids'), day: dayWord(str(a, 'date')) }
       const start = str(a, 'start')
-      const from = start ? ` from ${start}` : ''
-      return `Laid ${tally(n, 'task')} onto ${dayWord(str(a, 'date'))}${from}`
+      return start ? t('receipt.planTasks.doneFrom', { ...vars, start }) : t('receipt.planTasks.done', vars)
     },
-    failed: "Couldn't lay those tasks onto the day",
+    failed: 'receipt.planTasks.failed',
   },
   plan_auto: {
-    doing: "Filling the day's free time",
-    done: (a) => `Filled the free time ${dayPhrase(str(a, 'date'))}`,
-    failed: "Couldn't fill that day's free time",
+    doing: 'receipt.planAuto.doing',
+    done: (a) => t('receipt.planAuto.done', { day: dayPhrase(str(a, 'date')) }),
+    failed: 'receipt.planAuto.failed',
   },
   plan_carry: {
-    doing: 'Carrying the rest of the day over',
-    done: (a) => `Carried the rest of ${dayWord(str(a, 'date'))} over`,
-    failed: "Couldn't carry the rest of the day over",
+    doing: 'receipt.planCarry.doing',
+    done: (a) => t('receipt.planCarry.done', { day: dayWord(str(a, 'date')) }),
+    failed: 'receipt.planCarry.failed',
   },
   plan_list: {
-    doing: 'Reading the plan',
-    done: (a) => `Looked at ${dayWord(str(a, 'date'))}'s plan`,
-    failed: "Couldn't read that plan",
+    doing: 'receipt.planList.doing',
+    done: (a) => t('receipt.planList.done', { day: dayWord(str(a, 'date')) }),
+    failed: 'receipt.planList.failed',
   },
 
   schedule_slide: {
-    doing: 'Moving an event',
+    doing: 'receipt.scheduleSlide.doing',
     done: (a) => {
       const minutes = num(a, 'minutes')
-      if (minutes === null || minutes === 0) return 'Moved an event'
-      return `Moved an event ${span(minutes)} ${minutes < 0 ? 'earlier' : 'later'}`
+      if (minutes === null || minutes === 0) return t('receipt.scheduleSlide.done')
+      return t(minutes < 0 ? 'receipt.scheduleSlide.earlier' : 'receipt.scheduleSlide.later', {
+        span: span(minutes),
+      })
     },
-    failed: "Couldn't move that event",
+    failed: 'receipt.scheduleSlide.failed',
   },
   schedule_snooze: {
-    doing: 'Putting an event off',
+    doing: 'receipt.scheduleSnooze.doing',
     done: (a) => {
       const minutes = num(a, 'minutes')
-      return minutes === null ? 'Put an event off' : `Put an event off for ${span(minutes)}`
+      return minutes === null
+        ? t('receipt.scheduleSnooze.done')
+        : t('receipt.scheduleSnooze.doneFor', { span: span(minutes) })
     },
-    failed: "Couldn't put that event off",
+    failed: 'receipt.scheduleSnooze.failed',
   },
   schedule_drop: {
-    doing: 'Dropping an event',
-    done: 'Dropped an event from the day',
-    failed: "Couldn't drop that event",
+    doing: 'receipt.scheduleDrop.doing',
+    done: 'receipt.scheduleDrop.done',
+    failed: 'receipt.scheduleDrop.failed',
   },
   schedule_reshape: {
-    doing: 'Reshaping a block of time',
+    doing: 'receipt.scheduleReshape.doing',
     done: (a) => {
       const start = str(a, 'start')
       const end = str(a, 'end')
-      if (start && end) return `Reshaped a block to ${start}–${end}`
-      if (start) return `Moved a block to ${start}`
-      if (end) return `Stretched a block to ${end}`
-      return 'Reshaped a block'
+      if (start && end) return t('receipt.scheduleReshape.span', { start, end })
+      if (start) return t('receipt.scheduleReshape.moved', { start })
+      if (end) return t('receipt.scheduleReshape.stretched', { end })
+      return t('receipt.scheduleReshape.done')
     },
-    failed: "Couldn't reshape that block",
+    failed: 'receipt.scheduleReshape.failed',
   },
   schedule_insert: {
-    doing: 'Adding that to the plan',
+    doing: 'receipt.scheduleInsert.doing',
     done: (a) => {
       const kind = str(a, 'kind')
-      const name = kind ? quoted(eventLabel(kind)) : 'an event'
       const date = str(a, 'date')
       const time = str(a, 'time')
-      const when = [date ? dayWord(date) : '', time ? `at ${time}` : ''].filter(Boolean).join(' ')
-      return when ? `Added ${name} to ${when}` : `Added ${name} to the plan`
+      const when = date && time ? 'dayTime' : date ? 'day' : time ? 'time' : 'plan'
+      return t(INSERTED[`${kind ? 'named' : 'event'}.${when}`], {
+        name: kind ? eventLabel(kind) : '',
+        day: date ? dayWord(date) : '',
+        time,
+      })
     },
-    failed: "Couldn't add that to the plan",
+    failed: 'receipt.scheduleInsert.failed',
   },
 
   calendar_list: {
-    doing: 'Reading your calendar',
-    done: 'Read your calendar',
-    failed: "Couldn't read your calendar",
+    doing: 'receipt.calendarList.doing',
+    done: 'receipt.calendarList.done',
+    failed: 'receipt.calendarList.failed',
   },
   calendar_add: {
-    doing: 'Adding that to your calendar',
+    doing: 'receipt.calendarAdd.doing',
     done: (a) => {
       const title = str(a, 'title')
-      return title ? `Added ${quoted(title)} to your calendar` : 'Added a calendar entry'
+      return title ? t('receipt.calendarAdd.doneNamed', { title: clip(title) }) : t('receipt.calendarAdd.done')
     },
-    failed: "Couldn't add that to your calendar",
+    failed: 'receipt.calendarAdd.failed',
   },
   calendar_update: {
-    doing: 'Updating a calendar entry',
+    doing: 'receipt.calendarUpdate.doing',
     done: (a) => {
       const title = str(a, 'title')
-      return title ? `Renamed a calendar entry to ${quoted(title)}` : 'Updated a calendar entry'
+      return title
+        ? t('receipt.calendarUpdate.renamed', { title: clip(title) })
+        : t('receipt.calendarUpdate.done')
     },
-    failed: "Couldn't update that calendar entry",
+    failed: 'receipt.calendarUpdate.failed',
   },
   calendar_remove: {
-    doing: 'Removing a calendar entry',
-    done: 'Removed a calendar entry',
-    failed: "Couldn't remove that calendar entry",
+    doing: 'receipt.calendarRemove.doing',
+    done: 'receipt.calendarRemove.done',
+    failed: 'receipt.calendarRemove.failed',
   },
   calendar_skip: {
-    doing: 'Skipping a day of a calendar entry',
-    done: (a) => `Skipped a calendar entry ${dayPhrase(str(a, 'date'))}`,
-    failed: "Couldn't skip that day",
+    doing: 'receipt.calendarSkip.doing',
+    done: (a) => t('receipt.calendarSkip.done', { day: dayPhrase(str(a, 'date')) }),
+    failed: 'receipt.calendarSkip.failed',
   },
 
   trigger_set: {
-    doing: 'Setting a check-in',
+    doing: 'receipt.checkIn.doing',
     done: (a) => laid(a, 'at'),
-    failed: "Couldn't set that check-in",
+    failed: 'receipt.checkIn.failed',
   },
   wait_until: {
-    doing: 'Setting a check-in',
+    doing: 'receipt.checkIn.doing',
     done: (a) => laid(a, 'at'),
-    failed: "Couldn't set that check-in",
+    failed: 'receipt.checkIn.failed',
   },
   wait_for: {
-    doing: 'Setting a check-in',
+    doing: 'receipt.checkIn.doing',
     done: (a) => laid(a, 'until'),
-    failed: "Couldn't set that check-in",
+    failed: 'receipt.checkIn.failed',
   },
   trigger_budget: {
-    doing: "Raising today's check-in budget",
+    doing: 'receipt.triggerBudget.doing',
     done: (a) => {
       const extra = num(a, 'extra')
-      return extra === null
-        ? "Raised today's check-in budget"
-        : `Raised today's check-in budget by ${extra}`
+      return extra === null ? t('receipt.triggerBudget.done') : t('receipt.triggerBudget.doneBy', { n: extra })
     },
-    failed: "Couldn't raise today's check-in budget",
+    failed: 'receipt.triggerBudget.failed',
   },
 
   context_edit: {
-    doing: 'Updating your background notes',
+    doing: 'receipt.contextEdit.doing',
     done: (a) => {
       const append = str(a, 'append')
-      return append
-        ? `Added ${quoted(append)} to your background notes`
-        : 'Updated your background notes'
+      return append ? t('receipt.contextEdit.added', { text: clip(append) }) : t('receipt.contextEdit.done')
     },
-    failed: "Couldn't update your background notes",
+    failed: 'receipt.contextEdit.failed',
   },
 
   notify_send: {
-    doing: 'Sending you a nudge',
+    doing: 'receipt.notifySend.doing',
     done: (a) => {
       const text = str(a, 'text')
-      return text ? `Sent you a nudge: ${clip(text)}` : 'Sent you a nudge'
+      return text ? t('receipt.notifySend.doneText', { text: clip(text) }) : t('receipt.notifySend.done')
     },
-    failed: "Couldn't send that nudge",
+    failed: 'receipt.notifySend.failed',
   },
 
   web_search: {
     doing: (a) => {
       const q = str(a, 'query')
-      return q ? `Searching the web for ${quoted(q)}` : 'Searching the web'
+      return q ? t('receipt.webSearch.doingFor', { query: clip(q) }) : t('receipt.webSearch.doing')
     },
     done: (a) => {
       const q = str(a, 'query')
-      return q ? `Searched the web for ${quoted(q)}` : 'Searched the web'
+      return q ? t('receipt.webSearch.doneFor', { query: clip(q) }) : t('receipt.webSearch.done')
     },
-    failed: "Couldn't search the web",
+    failed: 'receipt.webSearch.failed',
   },
 
   say: {
-    doing: 'Writing back',
+    doing: 'receipt.say.doing',
     done: (a) => {
       const text = str(a, 'text')
-      return text ? `Said: ${clip(text)}` : 'Said something'
+      return text ? t('receipt.say.doneText', { text: clip(text) }) : t('receipt.say.done')
     },
-    failed: "Couldn't say that",
+    failed: 'receipt.say.failed',
   },
   stay_quiet: {
-    doing: 'Deciding whether to say anything',
-    done: 'Stayed quiet',
-    failed: "Couldn't close that check-in",
+    doing: 'receipt.stayQuiet.doing',
+    done: 'receipt.stayQuiet.done',
+    failed: 'receipt.stayQuiet.failed',
   },
   summary_write: {
-    doing: 'Summing up this conversation',
+    doing: 'receipt.summaryWrite.doing',
     done: (a) => {
       const summary = str(a, 'summary')
-      return summary ? `Summed up this conversation: ${clip(summary)}` : 'Summed up this conversation'
+      return summary
+        ? t('receipt.summaryWrite.doneText', { summary: clip(summary) })
+        : t('receipt.summaryWrite.done')
     },
-    failed: "Couldn't sum up this conversation",
+    failed: 'receipt.summaryWrite.failed',
   },
   harvest_done: {
-    doing: 'Finishing the harvest',
+    doing: 'receipt.harvest.doing',
     done: (a) => {
-      const written = num(a, 'written') ?? 0
+      const count = num(a, 'written') ?? 0
       const note = str(a, 'note')
-      return `Wrote ${tally(written, 'fact')} to memory${note ? `: ${clip(note)}` : ''}`
+      return note ? t('receipt.harvest.doneNote', { count, note: clip(note) }) : t('receipt.harvest.done', { count })
     },
-    failed: "Couldn't finish the harvest",
+    failed: 'receipt.harvest.failed',
   },
   review_write: {
-    doing: 'Writing your week',
-    done: 'Wrote your week',
-    failed: "Couldn't write your week",
+    doing: 'receipt.reviewWrite.doing',
+    done: 'receipt.reviewWrite.done',
+    failed: 'receipt.reviewWrite.failed',
   },
   task_brief: {
-    doing: 'Briefing an assignment',
+    doing: 'receipt.taskBrief.doing',
     done: (a) => {
       if (flag(a, 'homework') === false) {
         const reason = str(a, 'reason')
-        return reason ? `Set an import aside: ${clip(reason)}` : 'Set an import aside'
+        return reason ? t('receipt.taskBrief.asideFor', { reason: clip(reason) }) : t('receipt.taskBrief.aside')
       }
-      return 'Briefed an assignment'
+      return t('receipt.taskBrief.done')
     },
-    failed: "Couldn't brief that assignment",
+    failed: 'receipt.taskBrief.failed',
   },
   inbox_decide: {
-    doing: 'Deciding on an inbox item',
+    doing: 'receipt.inboxDecide.doing',
     done: (a) => {
       switch (str(a, 'outcome')) {
         case 'remembered':
-          return 'Remembered what an item was worth'
+          return t('receipt.inboxDecide.remembered')
         case 'nothing':
-          return 'Let an item go'
+          return t('receipt.inboxDecide.nothing')
         case 'task':
-          return 'Turned an item into a task'
+          return t('receipt.inboxDecide.task')
       }
-      return 'Decided on an item'
+      return t('receipt.inboxDecide.done')
     },
-    failed: "Couldn't decide on that item",
+    failed: 'receipt.inboxDecide.failed',
   },
   nightly_notes_write: {
-    doing: 'Leaving tomorrow a brief',
-    done: 'Left tomorrow a brief',
-    failed: "Couldn't leave tomorrow a brief",
+    doing: 'receipt.nightly.doing',
+    done: 'receipt.nightly.done',
+    failed: 'receipt.nightly.failed',
   },
 
   batch: {
-    doing: 'Doing several things at once',
-    done: (a) => `Did ${tally(size(a, 'calls'), 'thing')} at once`,
-    failed: "Couldn't do those at once",
+    doing: 'receipt.batch.doing',
+    done: (a) => t('receipt.batch.done', { count: size(a, 'calls') }),
+    failed: 'receipt.batch.failed',
   },
 }
 
@@ -477,19 +497,19 @@ function parse(raw: string): Args {
   }
 }
 
-const say = (line: Line, a: Args) => (typeof line === 'string' ? line : line(a))
+const say = (line: Line, a: Args) => (typeof line === 'string' ? t(line) : line(a))
 
 // The sentence for a call still in flight.
 export function doing(name: string, args: string): string {
   const entry = TABLE[name]
-  return entry ? say(entry.doing, parse(args)) : `Using ${name}`
+  return entry ? say(entry.doing, parse(args)) : t('receipt.using', { name })
 }
 
 // The sentence for one tool call; an unrecognised tool still gets a sentence, never a raw block.
 export function receipt(name: string, args: string, isError: boolean): string {
   const entry = TABLE[name]
-  if (isError) return entry?.failed ?? `Couldn't use ${name}`
-  return entry ? say(entry.done, parse(args)) : `Used ${name}`
+  if (isError) return entry ? t(entry.failed) : t('receipt.useFailed', { name })
+  return entry ? say(entry.done, parse(args)) : t('receipt.used', { name })
 }
 
 // A batch's inner calls, paired with the server's `{ results: [{ tool, ok, result | error }] }`.

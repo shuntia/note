@@ -15,36 +15,23 @@ import type { ViewProps } from '../app'
 import { minutesOf } from '../dayline'
 import { useEscape } from '../escape'
 import { makeHold } from '../held'
+import { t, type Key } from '../i18n'
+import { month as monthName, weekday } from '../i18n/format'
 import { reducedMotion } from '../motion'
 import { Overflow, type OverflowItem } from '../overflow'
+import { eventLabel } from '../receipts'
 import type { CalendarEntry, CalendarKind, DayView, PlanEvent } from '../types'
 import '../styles/calendar.css'
 
 const START = 6 * 60
 const END = 24 * 60
 const HOURS = [6, 9, 12, 15, 18, 21, 24]
-const LETTERS = ['M', 'T', 'W', 'T', 'F', 'S', 'S']
-const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
-const MONTHS = [
-  'January',
-  'February',
-  'March',
-  'April',
-  'May',
-  'June',
-  'July',
-  'August',
-  'September',
-  'October',
-  'November',
-  'December',
-]
 const KINDS: CalendarKind[] = ['fixed', 'busy', 'note', 'free']
-const KIND_LABEL: Record<CalendarKind, string> = {
-  fixed: 'Fixed',
-  busy: 'Busy',
-  note: 'Note',
-  free: 'Free',
+const KIND_LABEL: Record<CalendarKind, Key> = {
+  fixed: 'calendar.kind.fixed',
+  busy: 'calendar.kind.busy',
+  note: 'calendar.kind.note',
+  free: 'calendar.kind.free',
 }
 
 // Removal has no server-side reversal, so the request waits out the undo window.
@@ -71,6 +58,8 @@ function shift(iso: string, days: number): string {
 // Monday = 0, the order the server's day mask counts in.
 const weekdayOf = (iso: string) => (dateOf(iso).getDay() + 6) % 7
 const mondayOf = (iso: string) => shift(iso, -weekdayOf(iso))
+
+const dayLabel = (iso: string) => t('calendar.weekdayDate', { weekday: weekday(dateOf(iso)), day: dateOf(iso).getDate() })
 
 type Occurrence = {
   entry: CalendarEntry
@@ -123,10 +112,13 @@ const hasGoneBy = (draft: Draft): boolean => {
   return draft.date === today && draft.end <= `${pad(now.getHours())}:${pad(now.getMinutes())}`
 }
 
-const blockTitle = (ev: PlanEvent) => ev.task?.title ?? ev.kind
+const blockTitle = (ev: PlanEvent) => ev.task?.title ?? eventLabel(ev.kind)
 
 const blockWhen = (ev: PlanEvent) =>
-  `${ev.wall_time} – ${ev.end_wall_time ?? ev.wall_time}${ev.origin === 'auto' ? ', laid automatically' : ''}`
+  t(ev.origin === 'auto' ? 'calendar.blockWhenAuto' : 'calendar.blockWhen', {
+    start: ev.wall_time,
+    end: ev.end_wall_time ?? ev.wall_time,
+  })
 
 // The block itself is the trigger: the menu's button fills it, glyph and all.
 function BlockMenu({ event, items }: { event: PlanEvent; items: OverflowItem[] }) {
@@ -185,7 +177,7 @@ export function CalendarSection({
     setToday(isoOf(new Date()))
     newest(api.calendar())
       .then((r) => r && setEntries(r.entries))
-      .catch(() => notify("Couldn't load the calendar. Try again."))
+      .catch(() => notify(t('calendar.loadFailed')))
   }, [newest, notify])
   useEffect(load, [load, refresh])
 
@@ -230,10 +222,14 @@ export function CalendarSection({
     api
       .allocate(selected)
       .then((out) => {
-        notify(out.placed.length ? `${out.placed.length} laid into your free time` : 'Nothing to lay in')
+        notify(
+          out.placed.length
+            ? t('calendar.laid', { count: out.placed.length })
+            : t('calendar.nothingToLay'),
+        )
         onChanged()
       })
-      .catch(() => notify("Couldn't fill that day. Try again."))
+      .catch(() => notify(t('calendar.fillFailed')))
       .finally(() => setFilling(false))
   }
 
@@ -259,7 +255,7 @@ export function CalendarSection({
           onChanged()
         })
         .catch(() => {
-          notify("Couldn't save that entry. Try again.")
+          notify(t('calendar.saveFailed'))
           load()
         })
       return
@@ -285,7 +281,7 @@ export function CalendarSection({
       })
       .catch(() => {
         setEntries((list) => (list ?? []).filter((e) => e.id !== pending.id))
-        notify("Couldn't add that entry. Try again.")
+        notify(t('calendar.addFailed'))
       })
   }
 
@@ -298,8 +294,8 @@ export function CalendarSection({
       api.deleteCalendarEntry(entry.id).then(settled, settled)
     })
     tick((n) => n + 1)
-    notify(`${entry.title} — removed`, {
-      label: 'Undo',
+    notify(t('calendar.removed', { title: entry.title }), {
+      label: t('toast.undo'),
       run: () => {
         if (deleteHold.cancel(entry.id)) tick((n) => n + 1)
       },
@@ -317,27 +313,27 @@ export function CalendarSection({
     call(entry.id, date)
       .then(onChanged)
       .catch(() => {
-        notify("Couldn't change that day. Try again.")
+        notify(t('calendar.changeFailed'))
         load()
       })
   }
 
   const skip = (entry: CalendarEntry, date: string) => {
     setSkipped(entry, date, true)
-    notify(`${entry.title} — skipped ${DAYS[weekdayOf(date)]}`, {
-      label: 'Undo',
+    notify(t('calendar.skipped', { title: entry.title, day: weekday(dateOf(date)) }), {
+      label: t('toast.undo'),
       run: () => setSkipped(entry, date, false),
     })
   }
 
-  const month = MONTHS[dateOf(selected).getMonth()]
-  const range = `${dateOf(week[0]).getDate()} – ${dateOf(week[6]).getDate()}`
+  const month = monthName(dateOf(selected))
+  const range = t('calendar.range', { from: dateOf(week[0]).getDate(), to: dateOf(week[6]).getDate() })
   const showGrid = wide || grid
 
   return (
     <section
       className={`cal${wide ? ' desktop' : ''}`}
-      aria-label="Calendar"
+      aria-label={t('calendar.label')}
       onMouseOver={tips.over}
       onMouseOut={tips.out}
       onClick={tips.click}
@@ -360,12 +356,12 @@ export function CalendarSection({
         )}
         {hasFree && (
           <button className="quiet cal-fill" disabled={filling} onClick={fill}>
-            Fill my free time
+            {t('calendar.fill')}
           </button>
         )}
         <button
           className="btn-round"
-          aria-label="Add an entry"
+          aria-label={t('calendar.add')}
           onClick={() => setSheet({ entry: null, date: selected })}
         >
           <Plus />
@@ -385,9 +381,7 @@ export function CalendarSection({
             onPick={(entry, date) => setSheet({ entry, date })}
             blockItems={blockItems}
           />
-          <p className="cal-day">
-            {DAYS[weekdayOf(selected)]} {dateOf(selected).getDate()}
-          </p>
+          <p className="cal-day">{dayLabel(selected)}</p>
           <DayList
             date={selected}
             today={today}
@@ -456,15 +450,15 @@ function WeekStrip({
 }) {
   return (
     <div className="week-strip">
-      {week.map((date, i) => (
+      {week.map((date) => (
         <button
           key={date}
           className={`ws-day${date === today ? ' is-today' : date < today ? ' past' : ''}`}
           aria-pressed={date === selected}
-          aria-label={`${DAYS[i]} ${dateOf(date).getDate()}`}
+          aria-label={dayLabel(date)}
           onClick={() => onSelect(date)}
         >
-          <span className="ws-name">{LETTERS[i]}</span>
+          <span className="ws-name">{weekday(dateOf(date), 'narrow')}</span>
           <span className="ws-num">{dateOf(date).getDate()}</span>
           <span className="ws-col">
             {occurrencesOn(entries, date)
@@ -508,7 +502,7 @@ function DayBands({
 }) {
   const isToday = date === today
   return (
-    <div className="dayline" role="img" aria-label="The day, drawn as a line">
+    <div className="dayline" role="img" aria-label={t('calendar.dayline')}>
       <span className="dl-line" />
       {isToday && <span className="dl-gone" style={{ width: pct(now) }} />}
       <span className="dl-ticks" />
@@ -563,7 +557,7 @@ function DayBands({
           {quietUntil && (
             <span className="dl-label quiet cal-quiet">
               <BellOff />
-              <span>until {quietUntil}</span>
+              <span>{t('calendar.quietUntil', { time: quietUntil })}</span>
             </span>
           )}
         </span>
@@ -587,7 +581,7 @@ function DayList({
   onPick: (entry: CalendarEntry) => void
 }) {
   const occ = occurrencesOn(entries, date)
-  if (!occ.length) return <p className="cal-empty">Nothing on this day.</p>
+  if (!occ.length) return <p className="cal-empty">{t('calendar.empty')}</p>
   const gone = (o: Occurrence) => date < today || (date === today && o.end <= now)
   return (
     <ul className="cal-list">
@@ -634,15 +628,15 @@ function WeekGrid({
     <div className="week">
       <div className="week-head">
         <span />
-        {week.map((date, i) => (
+        {week.map((date) => (
           <button
             key={date}
             className={`ws-day${date === today ? ' is-today' : date < today ? ' past' : ''}`}
             aria-pressed={date === selected}
-            aria-label={`${DAYS[i]} ${dateOf(date).getDate()}`}
+            aria-label={dayLabel(date)}
             onClick={() => onSelect(date)}
           >
-            <span className="ws-name">{DAYS[i]}</span>
+            <span className="ws-name">{weekday(dateOf(date))}</span>
             <span className="ws-num">{dateOf(date).getDate()}</span>
           </button>
         ))}
@@ -719,7 +713,7 @@ function WeekGrid({
             {quietUntil && (
               <span className="cal-quiet">
                 <BellOff />
-                <span>until {quietUntil}</span>
+                <span>{t('calendar.quietUntil', { time: quietUntil })}</span>
               </span>
             )}
           </span>
@@ -815,7 +809,7 @@ function EntrySheet({
         className="sheet"
         role="dialog"
         aria-modal="true"
-        aria-label={entry ? entry.title : 'New entry'}
+        aria-label={entry ? entry.title : t('calendar.newEntry')}
         ref={panel}
       >
         <div className="sheet-handle" />
@@ -824,17 +818,17 @@ function EntrySheet({
             className="sheet-title"
             ref={title}
             value={draft.title}
-            placeholder="Title"
-            aria-label="Title"
+            placeholder={t('calendar.title')}
+            aria-label={t('calendar.title')}
             onChange={(e) => set({ title: e.target.value })}
           />
           {entry && (
             <Overflow
-              label="More"
+              label={t('calendar.more')}
               className="ev-more-wrap"
               items={[
-                { label: 'Skip this day', run: () => { onSkip(); close() } },
-                { label: 'Delete', kind: 'danger', run: () => { onDelete(); close() } },
+                { label: t('calendar.skipDay'), run: () => { onSkip(); close() } },
+                { label: t('calendar.delete'), kind: 'danger', run: () => { onDelete(); close() } },
               ]}
             />
           )}
@@ -844,7 +838,7 @@ function EntrySheet({
             className="pill-in tnum"
             inputMode="numeric"
             maxLength={5}
-            aria-label="Start"
+            aria-label={t('calendar.start')}
             value={draft.start}
             onChange={(e) => set({ start: e.target.value })}
             onBlur={(e) => set({ start: asTime(e.target.value) })}
@@ -854,7 +848,7 @@ function EntrySheet({
             className="pill-in tnum"
             inputMode="numeric"
             maxLength={5}
-            aria-label="End"
+            aria-label={t('calendar.end')}
             value={draft.end}
             onChange={(e) => set({ end: e.target.value })}
             onBlur={(e) => set({ end: asTime(e.target.value) })}
@@ -863,58 +857,64 @@ function EntrySheet({
         <div className="sheet-when">
           {draft.days === 0 ? (
             <>
-              <span className="sheet-date">{`${DAYS[weekdayOf(draft.date)]} ${dateOf(draft.date).getDate()} ${MONTHS[dateOf(draft.date).getMonth()].slice(0, 3)}`}</span>
+              <span className="sheet-date">
+                {t('calendar.sheetDate', {
+                  weekday: weekday(dateOf(draft.date)),
+                  day: dateOf(draft.date).getDate(),
+                  month: monthName(dateOf(draft.date), 'short'),
+                })}
+              </span>
               <button className="set-link" onClick={() => set({ days: 1 << weekdayOf(draft.date) })}>
-                Repeat weekly
+                {t('calendar.repeatWeekly')}
               </button>
             </>
           ) : (
             <>
-              <div className="days" role="group" aria-label="Days">
-                {LETTERS.map((letter, i) => (
+              <div className="days" role="group" aria-label={t('calendar.days')}>
+                {Array.from({ length: 7 }, (_, i) => dateOf(shift(mondayOf(draft.date), i))).map((d, i) => (
                   <button
-                    key={DAYS[i]}
+                    key={i}
                     className="day-dot"
                     aria-pressed={(draft.days & (1 << i)) !== 0}
-                    aria-label={DAYS[i]}
+                    aria-label={weekday(d)}
                     onClick={() => toggleDay(i)}
                   >
-                    {letter}
+                    {weekday(d, 'narrow')}
                   </button>
                 ))}
               </div>
               <button className="set-link" onClick={() => set({ days: 0 })}>
-                Just once
+                {t('calendar.justOnce')}
               </button>
             </>
           )}
         </div>
-        <div className="seg" role="group" aria-label="Kind">
+        <div className="seg" role="group" aria-label={t('calendar.kind')}>
           {KINDS.map((k) => (
             <button
               key={k}
               aria-pressed={draft.kind === k}
               onClick={() => set({ kind: k, quiet: k === 'note' || k === 'free' ? false : draft.quiet })}
             >
-              {KIND_LABEL[k]}
+              {t(KIND_LABEL[k])}
             </button>
           ))}
         </div>
         {draft.kind === 'note' || draft.kind === 'free' ? (
           <p className="set-sub sheet-hint">
-            {draft.kind === 'note' ? 'A mark on the day, not a window' : 'Time set aside for tasks'}
+            {t(draft.kind === 'note' ? 'calendar.noteHint' : 'calendar.freeHint')}
           </p>
         ) : (
           <div className="sheet-row">
             <span className="label">
               <BellOff />
-              Quiet
+              {t('calendar.quiet')}
             </span>
             <button
               className="sw"
               role="switch"
               aria-checked={draft.quiet}
-              aria-label="Quiet"
+              aria-label={t('calendar.quiet')}
               onClick={() => set({ quiet: !draft.quiet })}
             />
           </div>
@@ -924,12 +924,12 @@ function EntrySheet({
           className="btn-fill wide sheet-save"
           disabled={!ready}
           onClick={() => {
-            if (hasGoneBy(draft)) return setRefused('That time has gone by.')
+            if (hasGoneBy(draft)) return setRefused(t('calendar.goneBy'))
             onSave(draft)
             close()
           }}
         >
-          Save
+          {t('common.save')}
         </button>
       </div>
     </>,

@@ -13,6 +13,8 @@ import { flushSync } from 'react-dom'
 import gsap from 'gsap'
 import { api, ApiError } from '../api'
 import type { ViewProps } from '../app'
+import { t } from '../i18n'
+import { day } from '../i18n/format'
 import { Markdown } from '../markdown'
 import { reducedMotion } from '../motion'
 import { Overflow } from '../overflow'
@@ -148,13 +150,13 @@ function pretty(raw: string): string {
 
 function errorText(err: unknown): string {
   if (err instanceof ApiError) return err.message
-  return "Couldn't reach Note. Check your connection and try again."
+  return t('talk.unreachable')
 }
 
 function shortDate(iso: string): string {
   const at = new Date(iso)
   if (Number.isNaN(at.getTime())) return ''
-  return at.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+  return day(at)
 }
 
 const Mark = ({ isError, running }: { isError: boolean; running?: boolean }) => (
@@ -206,15 +208,12 @@ function Receipt({ item }: { item: ToolItem }) {
   )
 }
 
-const STEPS_LABEL = "Note's steps"
-
 // The header over a finished reply; null when it would open onto nothing.
 function thoughtLabel(item: AssistantItem): string | null {
   if (!item.reasoning && item.steps.length === 0) return null
-  if (item.thoughtMs === null) return STEPS_LABEL
-  if (item.thoughtMs < 1000) return 'Note thought for a moment'
-  const seconds = Math.round(item.thoughtMs / 1000)
-  return `Note thought for ${seconds} second${seconds === 1 ? '' : 's'}`
+  if (item.thoughtMs === null) return t('talk.steps')
+  if (item.thoughtMs < 1000) return t('talk.thoughtMoment')
+  return t('talk.thoughtFor', { count: Math.round(item.thoughtMs / 1000) })
 }
 
 const lastRunning = (steps: ToolItem[]): ToolItem | undefined =>
@@ -233,11 +232,11 @@ const lastFinished = (steps: ToolItem[]): ToolItem | undefined =>
 // just finished until RECEIPT_MS has run out.
 function liveLabel(steps: ToolItem[], now: number): string {
   const running = lastRunning(steps)
-  if (running) return `Note is thinking… · ${doing(running.name, running.args)}`
+  if (running) return t('talk.thinkingWith', { step: doing(running.name, running.args) })
   const just = lastFinished(steps)
   if (just?.finishedAt && now - just.finishedAt < RECEIPT_MS)
-    return `Note is thinking… · ${receipt(just.name, just.args, just.isError)}`
-  return 'Note is thinking…'
+    return t('talk.thinkingWith', { step: receipt(just.name, just.args, just.isError) })
+  return t('talk.thinking')
 }
 
 // One quiet line; the reasoning and the calls stay a chevron away, each round's
@@ -722,7 +721,7 @@ export function Talk({
           kind: 'system',
           key: nextKey(),
           text: errorText(err),
-          hint: 'Your message is back in the composer.',
+          hint: t('talk.backInComposer'),
         },
       ])
       setDraft(text)
@@ -782,8 +781,8 @@ export function Talk({
     }
     setSideNotice(null)
     tick((n) => n + 1)
-    notify(`Deleted "${c.title}"`, {
-      label: 'Undo',
+    notify(t('talk.deleted', { title: c.title }), {
+      label: t('toast.undo'),
       windowMs: UNDO_MS,
       run: () => {
         if (!deleteHold.cancel(c.id)) return
@@ -816,7 +815,7 @@ export function Talk({
       className="chat-rename"
       autoFocus
       value={renaming?.value ?? ''}
-      aria-label="Chat title"
+      aria-label={t('talk.chatTitle')}
       onChange={(e) => setRenaming({ id, value: e.target.value, at })}
       onBlur={() => void commitRename()}
       onKeyDown={(e) => {
@@ -833,25 +832,25 @@ export function Talk({
     <div className={`chat${column && listOpen ? ' with-column' : ''}`}>
       {!column && sideOpen && <div className="chat-scrim" onClick={() => setSideOpen(false)} />}
       {(!column || listOpen) && (
-        <aside className={`chat-side${sideOpen ? ' open' : ''}`} aria-label="Chats">
+        <aside className={`chat-side${sideOpen ? ' open' : ''}`} aria-label={t('talk.chats')}>
           {!column && (
             <div className="chat-side-head">
               <button className="chat-new" onClick={startNew}>
-                <span aria-hidden="true">+</span> New chat
+                <span aria-hidden="true">+</span> {t('talk.newChat')}
               </button>
             </div>
           )}
-          {listState === 'loading' && <p className="chat-side-note muted">Loading chats…</p>}
+          {listState === 'loading' && <p className="chat-side-note muted">{t('talk.loadingChats')}</p>}
           {listState === 'error' && (
             <p className="chat-side-note">
-              Couldn&rsquo;t load your chats.{' '}
+              {t('talk.listFailed')}{' '}
               <button className="chat-link" onClick={() => void loadList()}>
-                Try again
+                {t('talk.tryAgain')}
               </button>
             </p>
           )}
           {listState === 'ready' && visible.length === 0 && (
-            <p className="chat-side-note muted">No chats yet.</p>
+            <p className="chat-side-note muted">{t('talk.noChats')}</p>
           )}
           <ul className="chat-list">
             {visible.map((c) => (
@@ -874,7 +873,7 @@ export function Talk({
                   <span className="chat-when">
                     {c.via === 'matrix' && (
                       <svg className="chat-via" viewBox="0 0 24 24" role="img">
-                        <title>Last answered on Matrix</title>
+                        <title>{t('talk.viaMatrix')}</title>
                         <path d="M5 4H3v16h2" />
                         <path d="M19 4h2v16h-2" />
                       </svg>
@@ -884,13 +883,13 @@ export function Talk({
                   <Overflow
                     className="chat-more-wrap"
                     row=".chat-row"
-                    label={`More actions for ${c.title}`}
+                    label={t('talk.moreFor', { title: c.title })}
                     items={[
                       {
-                        label: 'Rename',
+                        label: t('talk.rename'),
                         run: () => setRenaming({ id: c.id, value: c.title, at: 'list' }),
                       },
-                      { label: 'Delete', kind: 'danger', run: () => remove(c) },
+                      { label: t('talk.delete'), kind: 'danger', run: () => remove(c) },
                     ]}
                   />
                 </div>
@@ -905,7 +904,7 @@ export function Talk({
         <div className="chat-head">
           <button
             className="chat-chats"
-            aria-label="Chats"
+            aria-label={t('talk.chats')}
             aria-expanded={shown}
             onClick={toggleList}
           >
@@ -914,7 +913,7 @@ export function Talk({
               <path d="M4 12h16" />
               <path d="M4 17h16" />
             </svg>
-            <span className="chat-chats-label">Chats</span>
+            <span className="chat-chats-label">{t('talk.chats')}</span>
           </button>
           <h1 className="chat-title">
             {here && renaming?.id === here.id && renaming.at === 'head' ? (
@@ -922,16 +921,16 @@ export function Talk({
             ) : here ? (
               <button
                 className="chat-retitle"
-                title="Rename this chat"
+                title={t('talk.renameTitle')}
                 onClick={() => setRenaming({ id: here.id, value: here.title, at: 'head' })}
               >
                 {here.title}
               </button>
             ) : (
-              <span className="chat-retitle plain">New chat</span>
+              <span className="chat-retitle plain">{t('talk.newChat')}</span>
             )}
           </h1>
-          <button className="btn-round chat-add" aria-label="New chat" onClick={startNew}>
+          <button className="btn-round chat-add" aria-label={t('talk.newChat')} onClick={startNew}>
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <path d="M12 5v14" />
               <path d="M5 12h14" />
@@ -941,18 +940,18 @@ export function Talk({
         </div>
         <div className="chat-pane" ref={pane} onScroll={onScroll}>
           <div className="chat-stream">
-            {msgState === 'loading' && <p className="muted">Loading this chat…</p>}
+            {msgState === 'loading' && <p className="muted">{t('talk.loadingChat')}</p>}
             {msgState === 'ready' && current === null && items.length === 0 && (
-              <p className="chat-empty">Tell Note anything — a task, a plan, a question.</p>
+              <p className="chat-empty">{t('talk.empty')}</p>
             )}
             {msgState === 'error' && (
               <p className="turn system">
-                Couldn&rsquo;t load these messages.{' '}
+                {t('talk.messagesFailed')}{' '}
                 <button
                   className="chat-link"
                   onClick={() => current !== null && void loadMessages(current)}
                 >
-                  Try again
+                  {t('talk.tryAgain')}
                 </button>
               </p>
             )}
@@ -961,7 +960,7 @@ export function Talk({
                 if (item.kind === 'assistant') return assistantTurn(item)
                 if (item.kind === 'steps')
                   return (
-                    <Trace key={item.key} label={STEPS_LABEL} reasoning="" steps={item.steps} />
+                    <Trace key={item.key} label={t('talk.steps')} reasoning="" steps={item.steps} />
                   )
                 return turn(item)
               })}
@@ -983,13 +982,13 @@ export function Talk({
               <textarea
                 ref={input}
                 rows={1}
-                placeholder="Tell Note"
-                aria-label="Tell Note"
+                placeholder={t('talk.tellNote')}
+                aria-label={t('talk.tellNote')}
                 value={draft}
                 onChange={(e) => setDraft(e.target.value)}
                 onKeyDown={onKeyDown}
               />
-              <button type="submit" aria-label="Send" disabled={busy || !draft.trim()}>
+              <button type="submit" aria-label={t('talk.send')} disabled={busy || !draft.trim()}>
                 <svg viewBox="0 0 24 24" aria-hidden="true">
                   <path d="M5 12h14" />
                   <path d="M13 6l6 6-6 6" />
