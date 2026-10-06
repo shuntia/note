@@ -2,7 +2,7 @@ import QRCode from 'qrcode'
 import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { api, ApiError, security } from '../api'
 import type { ToastAction, ViewProps } from '../app'
-import { t, type Key } from '../i18n'
+import { adoptLanguage, t, type Key } from '../i18n'
 import * as format from '../i18n/format'
 import { Overflow } from '../overflow'
 import { prefsFrom, writePrefs } from '../prefs'
@@ -22,6 +22,7 @@ import {
   type ThemeChoice,
 } from '../theme'
 import type {
+  Language,
   Me,
   Passkey,
   PromptDoc,
@@ -89,8 +90,15 @@ type Loaded = {
   matrixEnabled: boolean
   matrixSend: boolean
   matrixPing: boolean
+  language: Language
 }
 type Save = { row: string; kind: 'busy' | 'saved' | 'failed'; message?: string } | null
+
+const LANGUAGES: { id: Language; key: Key }[] = [
+  { id: '', key: 'settings.language.auto' },
+  { id: 'en', key: 'settings.language.en' },
+  { id: 'ja', key: 'settings.language.ja' },
+]
 
 const RING_CHOICES: { id: RingFor; key: Key }[] = [
   { id: 'urgent', key: 'settings.ring.urgent' },
@@ -318,6 +326,7 @@ export function Settings({
           matrixEnabled: s.matrix_enabled,
           matrixSend: s.matrix_send,
           matrixPing: s.matrix_ping,
+          language: s.language,
         })
       })
       .catch(() => setState('error'))
@@ -386,6 +395,21 @@ export function Settings({
       setSave({ row, kind: 'saved' })
     } catch (err) {
       setSave({ row, kind: 'failed', message: failure(err) })
+    }
+  }
+
+  const chooseLanguage = async (language: Language) => {
+    setSave({ row: 'language', kind: 'busy' })
+    try {
+      const saved = await api.saveSettings({ language })
+      if (adoptLanguage(saved.language)) {
+        location.reload()
+        return
+      }
+      setState((s) => (s && s !== 'error' ? { ...s, language: saved.language } : s))
+      setSave({ row: 'language', kind: 'saved' })
+    } catch (err) {
+      setSave({ row: 'language', kind: 'failed', message: failure(err) })
     }
   }
 
@@ -1197,6 +1221,34 @@ export function Settings({
             </div>
           )}
         </FoldRow>
+        {loaded && (
+          <FoldRow
+            label={t('settings.language')}
+            value={t(LANGUAGES.find((x) => x.id === loaded.language)?.key ?? 'settings.language.auto')}
+            open={open === 'language'}
+            onToggle={fold('language')}
+          >
+            {open === 'language' && (
+              <div className="set-fold-body">
+                <div className="seg" role="group" aria-label={t('settings.language')}>
+                  {LANGUAGES.map((x) => (
+                    <button
+                      key={x.id}
+                      type="button"
+                      lang={x.id || undefined}
+                      aria-pressed={loaded.language === x.id}
+                      disabled={busy}
+                      onClick={() => void chooseLanguage(x.id)}
+                    >
+                      {t(x.key)}
+                    </button>
+                  ))}
+                </div>
+                <Status save={save} row="language" />
+              </div>
+            )}
+          </FoldRow>
+        )}
       </Group>
 
       <Group head={t('settings.advanced')}>
