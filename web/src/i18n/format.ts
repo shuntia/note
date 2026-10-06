@@ -37,6 +37,11 @@ export function number(n: number, options?: Intl.NumberFormatOptions): string {
   return new Intl.NumberFormat(activeLocale(), options).format(n)
 }
 
+/** "a, b, c", a short list run together the locale's way. */
+export function list(items: string[]): string {
+  return new Intl.ListFormat(activeLocale(), { style: 'short', type: 'unit' }).format(items)
+}
+
 /** "in 5 minutes", "2 days ago". */
 export function relative(value: number, unit: Intl.RelativeTimeFormatUnit): string {
   return new Intl.RelativeTimeFormat(activeLocale(), { numeric: 'auto' }).format(value, unit)

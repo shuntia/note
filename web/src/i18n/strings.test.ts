@@ -13,6 +13,7 @@ const COVERED = [
   'views/Home.tsx',
   'views/Inbox.tsx',
   'views/Memory.tsx',
+  'views/Settings.tsx',
   'views/Tasks.tsx',
 ]
 
