@@ -10,9 +10,11 @@ const COVERED = [
   'jot.tsx',
   'overflow.tsx',
   'tick.tsx',
+  'views/Admin.tsx',
   'views/Home.tsx',
   'views/Inbox.tsx',
   'views/Memory.tsx',
+  'views/Share.tsx',
   'views/Tasks.tsx',
 ]
 
