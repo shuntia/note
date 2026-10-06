@@ -44,8 +44,17 @@ export function monthDay(at: Date): string {
   return at.toLocaleDateString(activeLocale(), { month: 'long', day: 'numeric' })
 }
 
-export function weekday(at: Date, width: 'long' | 'short' = 'short'): string {
+/** Wed, Sep 30. */
+export function weekdayDay(at: Date): string {
+  return at.toLocaleDateString(activeLocale(), { weekday: 'short', month: 'short', day: 'numeric' })
+}
+
+export function weekday(at: Date, width: 'long' | 'short' | 'narrow' = 'short'): string {
   return at.toLocaleDateString(activeLocale(), { weekday: width })
+}
+
+export function month(at: Date, width: 'long' | 'short' = 'long'): string {
+  return at.toLocaleDateString(activeLocale(), { month: width })
 }
 
 export function number(n: number, options?: Intl.NumberFormatOptions): string {

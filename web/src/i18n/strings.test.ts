@@ -1,23 +1,19 @@
-import { readFileSync } from 'node:fs'
+import { readdirSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { expect, test } from 'vitest'
 
-// Views whose words all go through `t()`. The rest move over in the second pass.
-const COVERED = [
-  'app.tsx',
-  'circle.ts',
-  'events.ts',
-  'inbox.ts',
-  'jot.tsx',
-  'overflow.tsx',
-  'tick.tsx',
-  'views/Admin.tsx',
-  'views/Home.tsx',
-  'views/Inbox.tsx',
-  'views/Memory.tsx',
-  'views/Settings.tsx',
-  'views/Share.tsx',
-  'views/Tasks.tsx',
-]
+const SRC = fileURLToPath(new URL('..', import.meta.url))
+
+function sources(dir: string): string[] {
+  return readdirSync(join(SRC, dir), { withFileTypes: true }).flatMap((e) => {
+    const path = dir ? `${dir}/${e.name}` : e.name
+    if (e.isDirectory()) return path === 'i18n' ? [] : sources(path)
+    return /\.tsx?$/.test(e.name) && !/\.test\./.test(e.name) ? [path] : []
+  })
+}
+
+const COVERED = sources('')
 
 const WORD = /[A-Za-z]{3,}/
 

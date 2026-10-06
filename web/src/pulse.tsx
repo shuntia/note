@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { api } from './api'
 import { minutesOf } from './dayline'
 import { eventFacts, nextUp } from './events'
+import { t } from './i18n'
 import { readPrefs } from './prefs'
 import {
   elapsedSec,
@@ -47,7 +48,7 @@ function read(session: FocusSession | null, events: PlanEvent[]): Reading | null
   const next = nextUp(events, now)
   if (!next) return null
   const { minutes, wait } = eventFacts(next, now)
-  if (minutes === null) return { frac: 1, text: 'now', over: false, faded: false }
+  if (minutes === null) return { frac: 1, text: t('pulse.now'), over: false, faded: false }
   const from = waitStart(events, now)
   const to = minutesOf(next.wall_time)
   const frac = to <= from ? 1 : (now - from) / (to - from)
@@ -94,7 +95,7 @@ export function Pulse({
   return (
     <button
       className={`pulse${faded ? ' faded' : ''}${over ? ' over' : ''}`}
-      aria-label={`${session ? 'Session' : 'Next'}: ${text}. Go home`}
+      aria-label={t(session ? 'pulse.session' : 'pulse.next', { text })}
       onClick={onOpen}
     >
       <svg className="pulse-ring" viewBox={`0 0 ${VB} ${VB}`} aria-hidden="true">

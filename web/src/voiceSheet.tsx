@@ -2,6 +2,7 @@ import gsap from 'gsap'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useEscape } from './escape'
+import { t } from './i18n'
 import { reducedMotion } from './motion'
 import type { VoiceChoice } from './types'
 import type { previewPlayer } from './voicePreview'
@@ -35,7 +36,7 @@ export function VoiceGrid({
       {voiceGroups(voices).map((g, i) => (
         <section className="voice-group" key={g.backend}>
           {i > 0 && <h3 className="voice-group-label">{g.backend}</h3>}
-          <VoiceTiles voices={g.voices} label={i > 0 ? g.backend : 'Voice'} chosen={chosen} playing={playing} onPick={onPick} />
+          <VoiceTiles voices={g.voices} label={i > 0 ? g.backend : t('voice.label')} chosen={chosen} playing={playing} onPick={onPick} />
         </section>
       ))}
     </>
@@ -121,7 +122,7 @@ export function VoiceSheet({
   return createPortal(
     <>
       <div className="scrim" ref={scrim} onClick={() => close()} />
-      <div className="sheet voice-sheet" role="dialog" aria-modal="true" aria-label="Voice" ref={panel}>
+      <div className="sheet voice-sheet" role="dialog" aria-modal="true" aria-label={t('voice.label')} ref={panel}>
         <div className="sheet-handle" />
         <VoiceGrid voices={voices} chosen={chosen} playing={playing} onPick={pick} />
       </div>
