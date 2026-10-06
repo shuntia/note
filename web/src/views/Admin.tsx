@@ -1,6 +1,8 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { admin, ApiError } from '../api'
 import type { ToastAction } from '../app'
+import { t } from '../i18n'
+import * as format from '../i18n/format'
 import '../styles/settings.css'
 import { signChallenge } from '../webauthn'
 import type {
@@ -30,16 +32,22 @@ const LOG_PAGE = 50
 
 const OUTCOMES = ['ok', 'max_turns', 'error'] as const
 
-const clock = (iso: string) =>
-  new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+const stamp = (iso: string) => format.dateTime(new Date(iso))
 
-const stamp = (iso: string) => new Date(iso).toLocaleString()
+const unit = (n: number, name: string, digits = 0) =>
+  format.number(n, {
+    style: 'unit',
+    unit: name,
+    unitDisplay: 'narrow',
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+  })
 
 function duration(ms: number): string {
-  if (ms < 1000) return `${ms}ms`
-  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`
+  if (ms < 1000) return unit(ms, 'millisecond')
+  if (ms < 60_000) return unit(ms / 1000, 'second', 1)
   const seconds = Math.round(ms / 1000)
-  return `${Math.floor(seconds / 60)}m ${seconds % 60}s`
+  return t('admin.minutesSeconds', { m: Math.floor(seconds / 60), s: seconds % 60 })
 }
 
 function pretty(raw: string): string {
@@ -55,17 +63,20 @@ function pretty(raw: string): string {
 function uptime(seconds: number): string {
   const h = Math.floor(seconds / 3600)
   const m = Math.floor((seconds % 3600) / 60)
-  return h ? `${h} h ${m} m` : `${m} m`
+  return h ? t('admin.hoursMinutes', { h, m }) : t('admin.minutes', { m })
 }
 
 function size(bytes: number): string {
   return bytes >= 1024 * 1024
-    ? `${(bytes / 1024 / 1024).toFixed(1)} MiB`
-    : `${Math.round(bytes / 1024)} KiB`
+    ? `${format.number(bytes / 1024 / 1024, { minimumFractionDigits: 1, maximumFractionDigits: 1 })} MiB`
+    : `${format.number(Math.round(bytes / 1024))} KiB`
 }
 
 const provider = (p: { kind: string; model: string } | null) =>
   p ? `${p.kind} · ${p.model}` : 'mock'
+
+const roleName = (role: 'admin' | 'member') =>
+  role === 'admin' ? t('admin.role.admin') : t('admin.role.member')
 
 const message = (err: unknown, fallback: string) =>
   err instanceof ApiError && err.message ? err.message : fallback
@@ -95,7 +106,7 @@ function Status({ save }: { save: Save }) {
   if (save.kind === 'saved')
     return (
       <span className="pane-status ok" role="status">
-        ✓ Saved
+        {t('admin.saved')}
       </span>
     )
   return (
@@ -175,7 +186,7 @@ export function Admin({ me, notify, onBack }: { me: Me; notify: Notify; onBack: 
   const expire: Expire = (err) => {
     if (!(err instanceof ApiError) || err.status !== 401) return false
     setGate((g) => (g && g !== 'error' ? { ...g, elevated: false, expires_at: undefined } : g))
-    notify('Admin session expired.')
+    notify(t('admin.expired'))
     return true
   }
 
@@ -184,9 +195,9 @@ export function Admin({ me, notify, onBack }: { me: Me; notify: Notify; onBack: 
     return (
       <div className="settings admin">
         <p className="set-sub">
-          The panel didn't load.{' '}
+          {t('admin.panelFailed')}{' '}
           <button className="set-link" onClick={load}>
-            Retry
+            {t('common.retry')}
           </button>
         </p>
       </div>
@@ -207,22 +218,24 @@ export function Admin({ me, notify, onBack }: { me: Me; notify: Notify; onBack: 
     <div className="settings admin">
       <div className="admin-head">
         <button className="set-link" onClick={onBack}>
-          ← Settings
+          ← {t('nav.settings')}
         </button>
         <span className="admin-head-right">
           {gate.expires_at && (
-            <span className="set-sub">Locked until {clock(gate.expires_at)}</span>
+            <span className="set-sub">
+              {t('admin.lockedUntil', { time: format.clock(new Date(gate.expires_at)) })}
+            </span>
           )}
           <button className="set-link" onClick={() => void lock()}>
-            Lock now
+            {t('admin.lockNow')}
           </button>
         </span>
       </div>
 
       {gate.inspect && (
         <div className="admin-dev-banner">
-          <b>DEV-INSPECT BUILD</b>
-          <span>User data is open to inspection and edits. Do not deploy this build.</span>
+          <b>{t('admin.devBanner')}</b>
+          <span>{t('admin.devBannerBody')}</span>
         </div>
       )}
 
@@ -253,7 +266,7 @@ function Gate({
   const { passkey, totp } = gate.methods
   const nothingEnrolled = gate.require_second_factor && !passkey && !totp
   const needsCode = gate.require_second_factor && useCode && totp
-  const unenrolled = 'Add a passkey or an authenticator app in Settings first.'
+  const unenrolled = t('admin.unenrolled')
 
   const attempt = async (run: () => Promise<void>) => {
     setBusy(true)
@@ -265,11 +278,11 @@ function Gate({
       onElevated()
     } catch (err) {
       const status = err instanceof ApiError ? err.status : 0
-      if (status === 401) setError('Wrong password or code.')
-      else if (status === 429) setError('Too many attempts. Wait a few minutes.')
+      if (status === 401) setError(t('admin.wrong'))
+      else if (status === 429) setError(t('admin.throttled'))
       else if (status === 503) setError(unenrolled)
-      else if (err instanceof DOMException) setError('That passkey was not confirmed.')
-      else setError("Couldn't unlock. Try again.")
+      else if (err instanceof DOMException) setError(t('admin.passkeyUnconfirmed'))
+      else setError(t('admin.unlockFailed'))
     } finally {
       setBusy(false)
     }
@@ -289,7 +302,7 @@ function Gate({
 
   return (
     <div className="login admin-gate">
-      <h1>Admin</h1>
+      <h1>{t('admin.admin')}</h1>
       {nothingEnrolled ? (
         <p className="admin-gate-note" role="alert">
           {unenrolled}
@@ -299,7 +312,7 @@ function Gate({
           <div className="field">
             <input
               type="password"
-              placeholder="Password"
+              placeholder={t('admin.password')}
               autoComplete="current-password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
@@ -308,7 +321,7 @@ function Gate({
           {needsCode && (
             <div className="field">
               <input
-                placeholder="6-digit code"
+                placeholder={t('admin.code')}
                 inputMode="numeric"
                 autoComplete="one-time-code"
                 pattern="\d{6}"
@@ -319,14 +332,14 @@ function Gate({
             </div>
           )}
           {!gate.require_second_factor && gate.inspect && (
-            <p className="admin-gate-dev">Dev build: password only</p>
+            <p className="admin-gate-dev">{t('admin.devPasswordOnly')}</p>
           )}
           {error && <p role="alert">{error}</p>}
           <button
             className="primary"
             disabled={busy || !password || (needsCode && code.length !== 6)}
           >
-            {gate.require_second_factor && passkey && !useCode ? 'Use passkey' : 'Unlock'}
+            {gate.require_second_factor && passkey && !useCode ? t('admin.usePasskey') : t('admin.unlock')}
           </button>
           {gate.require_second_factor && passkey && totp && (
             <button
@@ -337,13 +350,13 @@ function Gate({
                 setUseCode((c) => !c)
               }}
             >
-              {useCode ? 'Use a passkey instead' : 'Use a code instead'}
+              {useCode ? t('admin.usePasskeyInstead') : t('admin.useCodeInstead')}
             </button>
           )}
         </form>
       )}
       <button className="set-link admin-gate-back" onClick={onBack}>
-        ← Settings
+        ← {t('nav.settings')}
       </button>
     </div>
   )
@@ -364,25 +377,28 @@ function StatusGroup({ expire }: { expire: Expire }) {
   if (status === undefined) return null
   if (status === 'error')
     return (
-      <Group head="STATUS">
-        <p className="set-sub">Status didn't load.</p>
+      <Group head={t('admin.head.status')}>
+        <p className="set-sub">{t('admin.statusFailed')}</p>
       </Group>
     )
 
   return (
-    <Group head="STATUS">
-      <Row label="Version" value={status.version} />
-      <Row label="Build" value={status.build} />
-      <Row label="Started" value={stamp(status.started_at)} />
-      <Row label="Uptime" value={uptime(status.uptime_s)} />
-      <Row label="Database" value={size(status.db_bytes)} />
-      <Row label="Users" value={String(status.users)} />
-      <Row label="Sessions" value={String(status.sessions)} />
-      <Row label="Push subscriptions" value={String(status.push_subscriptions)} />
-      <Row label="LLM" value={provider(status.providers.llm)} />
-      <Row label="Embeddings" value={provider(status.providers.embeddings)} />
-      <Row label="Web push" value={status.webpush ? 'on' : 'off'} />
-      <Row label="Admin secret" value={status.secrets.admin_totp ? 'installed' : 'missing'} />
+    <Group head={t('admin.head.status')}>
+      <Row label={t('admin.version')} value={status.version} />
+      <Row label={t('admin.build')} value={status.build} />
+      <Row label={t('admin.started')} value={stamp(status.started_at)} />
+      <Row label={t('admin.uptime')} value={uptime(status.uptime_s)} />
+      <Row label={t('admin.database')} value={size(status.db_bytes)} />
+      <Row label={t('admin.users')} value={format.number(status.users)} />
+      <Row label={t('admin.sessions')} value={format.number(status.sessions)} />
+      <Row label={t('admin.pushSubscriptions')} value={format.number(status.push_subscriptions)} />
+      <Row label={t('admin.llm')} value={provider(status.providers.llm)} />
+      <Row label={t('admin.embeddings')} value={provider(status.providers.embeddings)} />
+      <Row label={t('admin.webPush')} value={status.webpush ? t('admin.on') : t('admin.off')} />
+      <Row
+        label={t('admin.adminSecret')}
+        value={status.secrets.admin_totp ? t('admin.installed') : t('admin.missing')}
+      />
     </Group>
   )
 }
@@ -406,18 +422,18 @@ function UsersGroup({ me, notify, expire }: { me: Me; notify: Notify; expire: Ex
   if (users === undefined) return null
   if (users === 'error')
     return (
-      <Group head="USERS">
+      <Group head={t('admin.head.users')}>
         <p className="set-sub">
-          Users didn't load.{' '}
+          {t('admin.usersFailed')}{' '}
           <button className="set-link" onClick={load}>
-            Retry
+            {t('common.retry')}
           </button>
         </p>
       </Group>
     )
 
   return (
-    <Group head="USERS">
+    <Group head={t('admin.head.users')}>
       {users.map((u) => (
         <UserFold
           key={u.id}
@@ -430,7 +446,7 @@ function UsersGroup({ me, notify, expire }: { me: Me; notify: Notify; expire: Ex
           onChanged={load}
         />
       ))}
-      <FoldRow label="Add user" open={open === 'new'} onToggle={fold('new')}>
+      <FoldRow label={t('admin.addUser')} open={open === 'new'} onToggle={fold('new')}>
         {open === 'new' && (
           <AddUser
             expire={expire}
@@ -473,7 +489,7 @@ function UserFold({
       onChanged()
       return true
     } catch (err) {
-      if (!expire(err)) notify(message(err, "That didn't save. Try again."))
+      if (!expire(err)) notify(message(err, t('admin.saveFailed')))
       return false
     } finally {
       setBusy(false)
@@ -497,10 +513,10 @@ function UserFold({
     setBusy(true)
     try {
       const { revoked } = await admin.revokeSessions(user.id)
-      notify(`Signed out ${revoked} sessions`)
+      notify(t('admin.revoked', { count: revoked }))
       onChanged()
     } catch (err) {
-      if (!expire(err)) notify(message(err, "That didn't work. Try again."))
+      if (!expire(err)) notify(message(err, t('admin.workFailed')))
     } finally {
       setBusy(false)
     }
@@ -509,8 +525,8 @@ function UserFold({
   return (
     <FoldRow
       label={user.username}
-      value={user.role + (user.disabled ? ' · disabled' : '')}
-      sub={`${user.sessions} session${user.sessions === 1 ? '' : 's'}`}
+      value={user.disabled ? t('admin.roleDisabled', { role: roleName(user.role) }) : roleName(user.role)}
+      sub={t('admin.sessionCount', { count: user.sessions })}
       open={open}
       onToggle={onToggle}
     >
@@ -519,24 +535,24 @@ function UserFold({
           <form className="admin-form" onSubmit={savePassword}>
             <input
               type="password"
-              placeholder="New password"
+              placeholder={t('admin.newPassword')}
               autoComplete="new-password"
-              aria-label={`New password for ${user.username}`}
+              aria-label={t('admin.newPasswordFor', { name: user.username })}
               value={password}
               onChange={(e) => setPassword(e.target.value)}
             />
             <button className="btn-haze small" disabled={!password || busy}>
-              Save
+              {t('common.save')}
             </button>
             <Status save={save} />
           </form>
           <div className="set-row admin-switch">
             <span className="set-row-body">
-              <span className="set-label">Admin</span>
-              {self && <span className="set-sub">That's you.</span>}
+              <span className="set-label">{t('admin.admin')}</span>
+              {self && <span className="set-sub">{t('admin.thatsYou')}</span>}
             </span>
             <Switch
-              label={`${user.username} is an admin`}
+              label={t('admin.isAdmin', { name: user.username })}
               on={user.role === 'admin'}
               disabled={self || busy}
               onToggle={() => void patch({ role: user.role === 'admin' ? 'member' : 'admin' })}
@@ -544,18 +560,18 @@ function UserFold({
           </div>
           <div className="set-row admin-switch">
             <span className="set-row-body">
-              <span className="set-label">Disabled</span>
-              {self && <span className="set-sub">That's you.</span>}
+              <span className="set-label">{t('admin.disabled')}</span>
+              {self && <span className="set-sub">{t('admin.thatsYou')}</span>}
             </span>
             <Switch
-              label={`${user.username} is disabled`}
+              label={t('admin.isDisabled', { name: user.username })}
               on={user.disabled}
               disabled={self || busy}
               onToggle={() => void patch({ disabled: !user.disabled })}
             />
           </div>
           <button className="set-link" disabled={busy} onClick={() => void revoke()}>
-            Sign out everywhere
+            {t('admin.signOutEverywhere')}
           </button>
         </div>
       )}
@@ -586,8 +602,8 @@ function AddUser({ expire, onCreated }: { expire: Expire; onCreated: () => void 
         kind: 'failed',
         message:
           status === 409
-            ? 'That username is taken.'
-            : message(err, "That didn't save. Try again."),
+            ? t('admin.usernameTaken')
+            : message(err, t('admin.saveFailed')),
       })
     }
   }
@@ -597,29 +613,29 @@ function AddUser({ expire, onCreated }: { expire: Expire; onCreated: () => void 
   return (
     <form className="set-fold-body" onSubmit={submit}>
       <input
-        placeholder="Username"
+        placeholder={t('admin.username')}
         autoComplete="off"
-        aria-label="Username"
+        aria-label={t('admin.username')}
         value={username}
         onChange={(e) => setUsername(e.target.value)}
       />
       <input
         type="password"
-        placeholder="Password"
+        placeholder={t('admin.password')}
         autoComplete="new-password"
-        aria-label="Password"
+        aria-label={t('admin.password')}
         value={password}
         onChange={(e) => setPassword(e.target.value)}
       />
       <div className="set-row admin-switch">
         <span className="set-row-body">
-          <span className="set-label">Admin</span>
+          <span className="set-label">{t('admin.admin')}</span>
         </span>
-        <Switch label="New user is an admin" on={isAdmin} onToggle={() => setIsAdmin((a) => !a)} />
+        <Switch label={t('admin.newUserIsAdmin')} on={isAdmin} onToggle={() => setIsAdmin((a) => !a)} />
       </div>
       <div className="set-acts">
         <button className="btn-haze small" disabled={busy || !username.trim() || !password}>
-          Create
+          {t('admin.create')}
         </button>
         <Status save={save} />
       </div>
@@ -654,10 +670,10 @@ function LogGroup({ expire }: { expire: Expire }) {
   const last = rows[rows.length - 1]
 
   return (
-    <Group head="SERVER LOG">
+    <Group head={t('admin.head.log')}>
       <div className="set-fold-body">
-        <select aria-label="Kind" value={kind} onChange={(e) => setKind(e.target.value)}>
-          <option value="">All</option>
+        <select aria-label={t('admin.kind')} value={kind} onChange={(e) => setKind(e.target.value)}>
+          <option value="">{t('admin.all')}</option>
           {kinds.map((k) => (
             <option key={k} value={k}>
               {k}
@@ -666,9 +682,9 @@ function LogGroup({ expire }: { expire: Expire }) {
         </select>
         {state === 'error' && (
           <p className="set-sub">
-            The log didn't load.{' '}
+            {t('admin.logFailed')}{' '}
             <button className="set-link" onClick={() => fetchPage(kind)}>
-              Retry
+              {t('common.retry')}
             </button>
           </p>
         )}
@@ -689,21 +705,21 @@ function LogGroup({ expire }: { expire: Expire }) {
             </table>
           </div>
         )}
-        {state === 'ready' && rows.length === 0 && <p className="set-sub">Nothing logged yet.</p>}
+        {state === 'ready' && rows.length === 0 && <p className="set-sub">{t('admin.nothingLogged')}</p>}
         <div className="set-acts">
           <button
             className="set-link"
             disabled={state === 'loading' || !last}
             onClick={() => last && fetchPage(kind, last.id)}
           >
-            Older
+            {t('admin.older')}
           </button>
           <button
             className="set-link"
             disabled={state === 'loading'}
             onClick={() => fetchPage(kind)}
           >
-            Refresh
+            {t('admin.refresh')}
           </button>
         </div>
       </div>
@@ -756,11 +772,11 @@ function TracesGroup({ expire }: { expire: Expire }) {
   const last = rows[rows.length - 1]
 
   return (
-    <Group head="SESSIONS">
+    <Group head={t('admin.head.sessions')}>
       <div className="set-fold-body">
         <div className="trace-filters">
-          <select aria-label="Kind" value={kind} onChange={(e) => setKind(e.target.value)}>
-            <option value="">All kinds</option>
+          <select aria-label={t('admin.kind')} value={kind} onChange={(e) => setKind(e.target.value)}>
+            <option value="">{t('admin.allKinds')}</option>
             {kinds.map((k) => (
               <option key={k} value={k}>
                 {k}
@@ -768,11 +784,11 @@ function TracesGroup({ expire }: { expire: Expire }) {
             ))}
           </select>
           <select
-            aria-label="Outcome"
+            aria-label={t('admin.outcome')}
             value={outcome}
             onChange={(e) => setOutcome(e.target.value)}
           >
-            <option value="">All outcomes</option>
+            <option value="">{t('admin.allOutcomes')}</option>
             {OUTCOMES.map((o) => (
               <option key={o} value={o}>
                 {o}
@@ -782,9 +798,9 @@ function TracesGroup({ expire }: { expire: Expire }) {
         </div>
         {state === 'error' && (
           <p className="set-sub">
-            The sessions didn't load.{' '}
+            {t('admin.sessionsFailed')}{' '}
             <button className="set-link" onClick={() => fetchPage()}>
-              Retry
+              {t('common.retry')}
             </button>
           </p>
         )}
@@ -793,14 +809,14 @@ function TracesGroup({ expire }: { expire: Expire }) {
             <table className="log-table admin-table trace-table">
               <thead>
                 <tr>
-                  <th>time</th>
-                  <th>user</th>
-                  <th>kind</th>
-                  <th>outcome</th>
-                  <th>turns</th>
-                  <th>tools</th>
-                  <th>took</th>
-                  <th>error</th>
+                  <th>{t('admin.col.time')}</th>
+                  <th>{t('admin.col.user')}</th>
+                  <th>{t('admin.col.kind')}</th>
+                  <th>{t('admin.col.outcome')}</th>
+                  <th>{t('admin.col.turns')}</th>
+                  <th>{t('admin.col.tools')}</th>
+                  <th>{t('admin.col.took')}</th>
+                  <th>{t('admin.col.error')}</th>
                 </tr>
               </thead>
               <tbody>
@@ -836,7 +852,7 @@ function TracesGroup({ expire }: { expire: Expire }) {
           </div>
         )}
         {state === 'ready' && rows.length === 0 && (
-          <p className="set-sub">No sessions recorded yet.</p>
+          <p className="set-sub">{t('admin.noSessions')}</p>
         )}
         {open !== null && <TraceFold id={open} expire={expire} />}
         <div className="set-acts">
@@ -845,10 +861,10 @@ function TracesGroup({ expire }: { expire: Expire }) {
             disabled={state === 'loading' || !last}
             onClick={() => last && fetchPage(last.id)}
           >
-            Older
+            {t('admin.older')}
           </button>
           <button className="set-link" disabled={state === 'loading'} onClick={() => fetchPage()}>
-            Refresh
+            {t('admin.refresh')}
           </button>
         </div>
       </div>
@@ -869,8 +885,8 @@ function TraceFold({ id, expire }: { id: number; expire: Expire }) {
       })
   }, [id])
 
-  if (trace === undefined) return <p className="set-sub">Loading…</p>
-  if (trace === 'error') return <p className="set-sub">That session didn't load.</p>
+  if (trace === undefined) return <p className="set-sub">{t('admin.loading')}</p>
+  if (trace === 'error') return <p className="set-sub">{t('admin.sessionFailed')}</p>
 
   const opening = trace.opening?.trim()
   const reply = trace.reply?.trim()
@@ -891,15 +907,15 @@ function TraceFold({ id, expire }: { id: number; expire: Expire }) {
       )}
       {opening && (
         <div className="trace-text">
-          <span className="receipt-tool">opening</span>
+          <span className="receipt-tool">{t('admin.opening')}</span>
           <pre className="receipt-block">{opening}</pre>
         </div>
       )}
-      {trace.rounds.length === 0 && <p className="set-sub">No rounds recorded.</p>}
+      {trace.rounds.length === 0 && <p className="set-sub">{t('admin.noRounds')}</p>}
       {trace.rounds.map((round, i) => (
         <div className="trace-round" key={i}>
           <div className="trace-round-head">
-            <span className="trace-round-n">Round {i + 1}</span>
+            <span className="trace-round-n">{t('admin.round', { n: i + 1 })}</span>
             <span className="set-sub">{duration(round.ms)}</span>
           </div>
           {round.error && <p className="pane-status bad">{round.error}</p>}
@@ -908,12 +924,12 @@ function TraceFold({ id, expire }: { id: number; expire: Expire }) {
       ))}
       {reply && (
         <div className="trace-text">
-          <span className="receipt-tool">reply</span>
+          <span className="receipt-tool">{t('admin.reply')}</span>
           <pre className="receipt-block">{reply}</pre>
         </div>
       )}
       {!trace.full && (
-        <p className="set-sub">Release build: arguments, results and text aren't recorded.</p>
+        <p className="set-sub">{t('admin.releaseBuild')}</p>
       )}
     </div>
   )
@@ -985,26 +1001,26 @@ function InspectGroup({ expire }: { expire: Expire }) {
   const loaded = data !== undefined && data !== 'error' ? data : null
 
   return (
-    <Group head="INSPECT">
+    <Group head={t('admin.head.inspect')}>
       <div className="set-fold-body">
         <select
-          aria-label="User"
+          aria-label={t('admin.user')}
           value={id === null ? '' : String(id)}
           onChange={(e) => setId(e.target.value ? Number(e.target.value) : null)}
         >
-          <option value="">Pick a user</option>
+          <option value="">{t('admin.pickUser')}</option>
           {users.map((u) => (
             <option key={u.id} value={u.id}>
               {u.username}
             </option>
           ))}
         </select>
-        {data === 'error' && <p className="set-sub">That user didn't load.</p>}
+        {data === 'error' && <p className="set-sub">{t('admin.userFailed')}</p>}
       </div>
 
       {loaded && id !== null && (
         <>
-          <FoldRow label="Config" open={open === 'config'} onToggle={fold('config')}>
+          <FoldRow label={t('admin.config')} open={open === 'config'} onToggle={fold('config')}>
             {open === 'config' && (
               <ConfigFold
                 id={id}
@@ -1016,8 +1032,8 @@ function InspectGroup({ expire }: { expire: Expire }) {
           </FoldRow>
 
           <FoldRow
-            label="Tasks"
-            value={String(loaded.tasks.length)}
+            label={t('admin.tasks')}
+            value={format.number(loaded.tasks.length)}
             open={open === 'tasks'}
             onToggle={fold('tasks')}
           >
@@ -1027,19 +1043,19 @@ function InspectGroup({ expire }: { expire: Expire }) {
                   <table className="log-table admin-table">
                     <thead>
                       <tr>
-                        <th>id</th>
-                        <th>title</th>
-                        <th>state</th>
-                        <th>now</th>
+                        <th>{t('admin.col.id')}</th>
+                        <th>{t('admin.col.title')}</th>
+                        <th>{t('admin.col.state')}</th>
+                        <th>{t('admin.col.now')}</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {loaded.tasks.flatMap((t) => [t, ...t.children]).map((t) => (
-                        <tr key={t.id}>
-                          <td className="mono">{t.id}</td>
-                          <td>{t.title}</td>
-                          <td className="set-sub">{t.state}</td>
-                          <td className="set-sub">{t.is_now ? 'yes' : ''}</td>
+                      {loaded.tasks.flatMap((task) => [task, ...task.children]).map((task) => (
+                        <tr key={task.id}>
+                          <td className="mono">{task.id}</td>
+                          <td>{task.title}</td>
+                          <td className="set-sub">{task.state}</td>
+                          <td className="set-sub">{task.is_now ? t('admin.yes') : ''}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -1050,8 +1066,8 @@ function InspectGroup({ expire }: { expire: Expire }) {
           </FoldRow>
 
           <FoldRow
-            label="Today"
-            value={String(loaded.events_today.length)}
+            label={t('admin.today')}
+            value={format.number(loaded.events_today.length)}
             open={open === 'today'}
             onToggle={fold('today')}
           >
@@ -1061,9 +1077,9 @@ function InspectGroup({ expire }: { expire: Expire }) {
                   <table className="log-table admin-table">
                     <thead>
                       <tr>
-                        <th>time</th>
-                        <th>kind</th>
-                        <th>status</th>
+                        <th>{t('admin.col.time')}</th>
+                        <th>{t('admin.col.kind')}</th>
+                        <th>{t('admin.col.status')}</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -1082,8 +1098,8 @@ function InspectGroup({ expire }: { expire: Expire }) {
           </FoldRow>
 
           <FoldRow
-            label="Conversations"
-            value={String(loaded.conversations.length)}
+            label={t('admin.conversations')}
+            value={format.number(loaded.conversations.length)}
             open={open === 'conversations'}
             onToggle={fold('conversations')}
           >
@@ -1093,8 +1109,8 @@ function InspectGroup({ expire }: { expire: Expire }) {
           </FoldRow>
 
           <FoldRow
-            label="Memory"
-            value={String(loaded.memory.length)}
+            label={t('admin.memory')}
+            value={format.number(loaded.memory.length)}
             open={open === 'memory'}
             onToggle={fold('memory')}
           >
@@ -1105,7 +1121,7 @@ function InspectGroup({ expire }: { expire: Expire }) {
         </>
       )}
 
-      <FoldRow label="SQL" open={open === 'sql'} onToggle={fold('sql')}>
+      <FoldRow label={t('admin.sql')} open={open === 'sql'} onToggle={fold('sql')}>
         {open === 'sql' && <SqlFold expire={expire} />}
       </FoldRow>
     </Group>
@@ -1133,7 +1149,7 @@ function ConfigFold({
       setSave({ kind: 'saved' })
     } catch (err) {
       if (expire(err)) return
-      setSave({ kind: 'failed', message: message(err, "That didn't save. Try again.") })
+      setSave({ kind: 'failed', message: message(err, t('admin.saveFailed')) })
     }
   }
 
@@ -1142,7 +1158,7 @@ function ConfigFold({
       <span className="set-sub">{path}</span>
       <textarea
         className="mono set-prompt"
-        aria-label="User config"
+        aria-label={t('admin.userConfig')}
         rows={14}
         value={text}
         onChange={(e) => setText(e.target.value)}
@@ -1153,7 +1169,7 @@ function ConfigFold({
           disabled={save?.kind === 'busy'}
           onClick={() => void submit()}
         >
-          Save
+          {t('common.save')}
         </button>
         <Status save={save} />
       </div>
@@ -1194,12 +1210,12 @@ function ConversationsFold({
               aria-current={cid === c.id}
               onClick={() => openOne(c.id)}
             >
-              {c.title || `Conversation ${c.id}`}
+              {c.title || t('admin.conversation', { id: c.id })}
             </button>
           </li>
         ))}
       </ul>
-      {messages === 'error' && <p className="set-sub">Those messages didn't load.</p>}
+      {messages === 'error' && <p className="set-sub">{t('admin.messagesFailed')}</p>}
       {Array.isArray(messages) && (
         <div className="log-scroll admin-msgs">
           {messages.map((m) => (
@@ -1238,7 +1254,7 @@ function MemoryFold({
       })
       .catch((err) => {
         if (expire(err)) return
-        setSave({ kind: 'failed', message: "That fact didn't load." })
+        setSave({ kind: 'failed', message: t('admin.factFailed') })
       })
   }
 
@@ -1250,7 +1266,7 @@ function MemoryFold({
       setSave({ kind: 'saved' })
     } catch (err) {
       if (expire(err)) return
-      setSave({ kind: 'failed', message: message(err, "That didn't save. Try again.") })
+      setSave({ kind: 'failed', message: message(err, t('admin.saveFailed')) })
     }
   }
 
@@ -1261,7 +1277,7 @@ function MemoryFold({
           <li key={m.id}>
             <button className="set-link" aria-current={mid === m.id} onClick={() => openOne(m.id)}>
               {m.id} · {m.category} · {m.summary}
-              {m.archived ? ' · archived' : ''}
+              {m.archived && <> · {t('admin.archived')}</>}
             </button>
           </li>
         ))}
@@ -1270,7 +1286,7 @@ function MemoryFold({
         <>
           <textarea
             className="mono set-prompt"
-            aria-label={`Memory ${mid}`}
+            aria-label={t('admin.memoryFor', { id: mid })}
             rows={10}
             value={text}
             onChange={(e) => setText(e.target.value)}
@@ -1281,7 +1297,7 @@ function MemoryFold({
               disabled={save?.kind === 'busy'}
               onClick={() => void submit()}
             >
-              Save
+              {t('common.save')}
             </button>
             <Status save={save} />
           </div>
@@ -1307,7 +1323,7 @@ function SqlFold({ expire }: { expire: Expire }) {
     } catch (err) {
       if (expire(err)) return
       setResult(null)
-      setError(message(err, "That didn't run."))
+      setError(message(err, t('admin.runFailed')))
     } finally {
       setBusy(false)
     }
@@ -1317,7 +1333,7 @@ function SqlFold({ expire }: { expire: Expire }) {
     <div className="set-fold-body">
       <textarea
         className="mono set-prompt"
-        aria-label="SQL"
+        aria-label={t('admin.sql')}
         rows={5}
         spellCheck={false}
         value={sql}
@@ -1325,7 +1341,7 @@ function SqlFold({ expire }: { expire: Expire }) {
       />
       <div className="set-acts">
         <button className="btn-haze small" disabled={busy || !sql.trim()} onClick={() => void run()}>
-          Run
+          {t('admin.run')}
         </button>
       </div>
       {error && (
@@ -1334,7 +1350,7 @@ function SqlFold({ expire }: { expire: Expire }) {
         </p>
       )}
       {result && 'changes' in result && (
-        <p className="set-sub">{result.changes} rows changed</p>
+        <p className="set-sub">{t('admin.rowsChanged', { count: result.changes })}</p>
       )}
       {result && 'columns' in result && (
         <>
@@ -1364,7 +1380,7 @@ function SqlFold({ expire }: { expire: Expire }) {
               </tbody>
             </table>
           </div>
-          {result.truncated && <p className="set-sub">Truncated at 500 rows.</p>}
+          {result.truncated && <p className="set-sub">{t('admin.truncated', { n: format.number(500) })}</p>}
         </>
       )}
     </div>

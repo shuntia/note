@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react'
 import { api, ApiError } from '../api'
+import { t } from '../i18n'
+import * as format from '../i18n/format'
 import { Markdown } from '../markdown'
 import type { ShareInfo, ShareMessage } from '../types'
 import '../styles/talk.css'
@@ -7,18 +9,23 @@ import '../styles/share.css'
 
 type Load<T> = T | 'ended' | 'error' | undefined
 
-const DATE = { month: 'long', day: 'numeric' } as const
-
 function coverage(info: ShareInfo): string {
   const s = info.scope
   const parts: string[] = []
-  if (s.tasks) parts.push(s.categories.length > 0 ? `${s.categories.join(', ')} tasks` : 'tasks')
-  if (s.today) parts.push(s.horizon_days === 1 ? "today's plan" : `the next ${s.horizon_days} days`)
-  if (s.goals) parts.push('goals')
-  if (s.progress) parts.push('recent progress')
-  const list = parts.length <= 1 ? parts.join('') : `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`
-  const until = new Date(info.expires_at).toLocaleDateString(undefined, DATE)
-  return `${info.owner}'s ${list || 'Note'}, shared until ${until}.`
+  if (s.tasks)
+    parts.push(
+      s.categories.length > 0
+        ? t('share.scope.categoryTasks', { categories: format.list(s.categories) })
+        : t('share.scope.tasks'),
+    )
+  if (s.today)
+    parts.push(s.horizon_days === 1 ? t('share.scope.today') : t('share.scope.days', { count: s.horizon_days }))
+  if (s.goals) parts.push(t('share.scope.goals'))
+  if (s.progress) parts.push(t('share.scope.progress'))
+  const until = format.monthDay(new Date(info.expires_at))
+  return parts.length > 0
+    ? t('share.cover', { owner: info.owner, list: format.list(parts), until })
+    : t('share.coverAll', { owner: info.owner, until })
 }
 
 export function SharePage({ token }: { token: string }) {
@@ -88,11 +95,9 @@ export function SharePage({ token }: { token: string }) {
       if (err instanceof ApiError && err.status === 404) setInfo('ended')
       else if (err instanceof ApiError && err.status === 429)
         setError(
-          err.message.includes('limit')
-            ? 'This link has reached today’s limit; try again tomorrow.'
-            : 'Too many messages from this address; try again in a little while.',
+          err.message.includes('limit') ? t('share.dailyLimit') : t('share.rateLimited'),
         )
-      else setError('Note could not answer. Try again.')
+      else setError(t('share.failed'))
     } finally {
       setBusy(false)
     }
@@ -118,8 +123,8 @@ export function SharePage({ token }: { token: string }) {
   if (info === 'ended') {
     return (
       <main className="share-state">
-        <h1>This link has ended</h1>
-        <p>Ask the person who shared it for a new one.</p>
+        <h1>{t('share.ended')}</h1>
+        <p>{t('share.endedHint')}</p>
       </main>
     )
   }
@@ -127,8 +132,8 @@ export function SharePage({ token }: { token: string }) {
   if (info === 'error') {
     return (
       <main className="share-state">
-        <h1>Note is not reachable</h1>
-        <p>Try again in a moment.</p>
+        <h1>{t('share.unreachable')}</h1>
+        <p>{t('share.unreachableHint')}</p>
       </main>
     )
   }
@@ -145,13 +150,13 @@ export function SharePage({ token }: { token: string }) {
         <div className="chat-pane" ref={pane} onScroll={onScroll}>
           <div className="chat-stream" role="log" aria-live="polite">
             {thread.length === 0 && (
-              <p className="chat-empty">Ask what {info.owner} has today, what is done, or what is due.</p>
+              <p className="chat-empty">{t('share.empty', { owner: info.owner })}</p>
             )}
             {thread.map((m, i) => {
               if (m.role === 'note')
                 return (
                   <div key={i} className="turn system">
-                    Sent to {info.owner}: {m.content}
+                    {t('share.sentTo', { owner: info.owner, text: m.content })}
                   </div>
                 )
               if (m.role === 'assistant')
@@ -168,7 +173,7 @@ export function SharePage({ token }: { token: string }) {
                 </div>
               )
             })}
-            {busy && <div className="turn pending">Note is thinking</div>}
+            {busy && <div className="turn pending">{t('share.thinking')}</div>}
             {error && (
               <div className="turn system" role="alert">
                 {error}
@@ -183,13 +188,17 @@ export function SharePage({ token }: { token: string }) {
               <textarea
                 ref={input}
                 rows={1}
-                placeholder={info.notes ? `Ask, or leave a note for ${info.owner}` : `Ask about ${info.owner}’s day`}
-                aria-label="Ask Note"
+                placeholder={
+                  info.notes
+                    ? t('share.askOrLeaveNote', { owner: info.owner })
+                    : t('share.askAboutDay', { owner: info.owner })
+                }
+                aria-label={t('share.ask')}
                 value={draft}
                 onChange={(e) => setDraft(e.target.value)}
                 onKeyDown={onKeyDown}
               />
-              <button type="submit" aria-label="Send" disabled={busy || !draft.trim()}>
+              <button type="submit" aria-label={t('share.send')} disabled={busy || !draft.trim()}>
                 <svg viewBox="0 0 24 24" aria-hidden="true">
                   <path d="M5 12h14" />
                   <path d="M13 6l6 6-6 6" />
