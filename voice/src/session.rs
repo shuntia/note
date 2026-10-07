@@ -10,7 +10,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant, MissedTickBehavior};
 
 use crate::audio::engines::{SpeechEngines, SpeechToText, TurnDetector, Vad};
-use crate::audio::language::{choose, Choice};
+use crate::audio::language::{confident, Choice, MIN_SECONDS};
 use crate::audio::lines::{Line, Lines};
 use crate::audio::playout::{Clip, Playout};
 use crate::audio::speech::SpeechQueue;
@@ -31,12 +31,15 @@ const DRAIN_LIMIT: Duration = Duration::from_secs(60);
 /// What the media path still holds once playout is empty, played out before leaving.
 const DRAIN_TAIL: Duration = Duration::from_millis(500);
 const FILLER_AFTER: Duration = Duration::from_millis(1500);
-/// The voiced audio the caller's language is told from, unless their first turn ends sooner.
+/// The voiced audio the caller's language is first judged from, unless their first turn ends sooner.
 const ID_SPAN: usize = RATE * 5 / 2;
-/// A first turn with less voiced audio than this leaves the language open.
+/// A turn with less voiced audio than this does not count toward `ID_TURNS`.
 const ID_MIN: usize = RATE * 3 / 10;
-/// The voiced audio that settles the language at the caller's first pause, ahead of the turn's end.
+/// The voiced audio that has the language judged at a pause, ahead of the turn's end.
 const ID_AT_PAUSE: usize = RATE;
+/// Turns, and voiced audio, heard without a confident language before the call keeps the user's.
+const ID_TURNS: u32 = 3;
+const ID_CAP: usize = RATE * 8;
 /// An inbound caller silent this long from the start is asked if they are there.
 const HELLO_AFTER: Duration = Duration::from_secs(8);
 /// Silent this long after that, the call ends.
@@ -238,7 +241,7 @@ struct Live<S> {
     sidecars: Vec<Arc<dyn SpeechBackend>>,
     line_store: Arc<Lines>,
     voice: String,
-    /// The language the call speaks, settled by the caller's first words.
+    /// The language the call speaks, settled by what the caller says.
     language: String,
     direction: Direction,
     /// The caller has made a sound, or Note has started to speak.
@@ -754,15 +757,23 @@ async fn audio_in(
 }
 
 /// The call's recognizers. Until the caller's language is settled, every language the call can
-/// speak listens at once with no partials shown, and the voiced audio is kept; it is settled from the
-/// first `ID_SPAN` of it, at the first pause after `ID_AT_PAUSE`, or when the first turn ends, and
-/// its recognizer, which heard the whole turn, carries on alone.
+/// speak listens at once with no partials shown, and the voiced audio of each turn is kept. It is
+/// judged at `ID_SPAN`, at a pause with `ID_AT_PAUSE` heard, and at the end of each turn, over all
+/// the voiced audio so far; the recognizer of a confident language, which heard the whole turn,
+/// carries on alone. A turn that ends unsettled is heard in the fallback language and the language
+/// stays open, until `ID_TURNS` such turns or `ID_CAP` of voiced audio settle it on the fallback.
 struct Ears {
     engines: Arc<dyn SpeechEngines>,
     speakable: Vec<String>,
     fallback: String,
     listening: Vec<(String, Box<dyn SpeechToText>)>,
     voiced: Vec<f32>,
+    /// Where the current turn's voiced audio starts in `voiced`.
+    turn_from: usize,
+    /// The voiced audio the last judgement saw.
+    judged: usize,
+    /// Turns that ended unsettled.
+    turns: u32,
     chosen: Option<Box<dyn SpeechToText>>,
 }
 
@@ -775,6 +786,9 @@ impl Ears {
             fallback: fallback.to_owned(),
             listening: Vec::new(),
             voiced: Vec::new(),
+            turn_from: 0,
+            judged: 0,
+            turns: 0,
             chosen: None,
             engines,
         };
@@ -797,38 +811,50 @@ impl Ears {
             stt.accept(samples);
         }
         if voiced {
-            self.voiced.extend_from_slice(samples);
+            let room = ID_CAP.saturating_sub(self.voiced.len());
+            self.voiced.extend_from_slice(&samples[..samples.len().min(room)]);
         }
-        (self.voiced.len() >= ID_SPAN).then(|| self.settle())
+        if self.voiced.len() >= ID_CAP {
+            return self.judge().or_else(|| Some(self.give_up()));
+        }
+        (self.voiced.len() >= ID_SPAN && self.judged < ID_SPAN).then(|| self.judge()).flatten()
     }
 
     fn partial(&mut self) -> String {
         self.chosen.as_mut().map(|stt| stt.partial()).unwrap_or_default()
     }
 
-    /// Settles at the caller's first pause once there is enough to go on.
     fn pause(&mut self) -> Option<Choice> {
-        (self.chosen.is_none() && self.voiced.len() >= ID_AT_PAUSE).then(|| self.settle())
+        let fresh = self.voiced.len() >= ID_AT_PAUSE && self.voiced.len() >= self.judged + ID_AT_PAUSE / 2;
+        (self.chosen.is_none() && fresh).then(|| self.judge()).flatten()
     }
 
-    /// A turn too short to identify is heard in the fallback language, and the language stays open.
     fn finish(&mut self) -> (Option<Choice>, String) {
-        if self.chosen.is_none() && self.voiced.len() < ID_MIN {
-            let mut text = String::new();
-            for (language, stt) in &mut self.listening {
-                let heard = stt.finish();
-                if *language == self.fallback {
-                    text = heard;
+        let mut settled = None;
+        if self.chosen.is_none() {
+            settled = self.judge();
+            if settled.is_none() && self.voiced.len() - self.turn_from >= ID_MIN {
+                self.turns += 1;
+                if self.turns >= ID_TURNS {
+                    settled = Some(self.give_up());
                 }
             }
-            self.voiced.clear();
-            return (None, text);
         }
-        let settled = self.chosen.is_none().then(|| self.settle());
-        let text = self.chosen.as_mut().map(|stt| stt.finish()).unwrap_or_default();
-        (settled, text)
+        if let Some(stt) = &mut self.chosen {
+            return (settled, stt.finish());
+        }
+        let mut text = String::new();
+        for (language, stt) in &mut self.listening {
+            let heard = stt.finish();
+            if *language == self.fallback {
+                text = heard;
+            }
+        }
+        self.turn_from = self.voiced.len();
+        (None, text)
     }
 
+    /// Forgets the current turn, its voiced audio with it.
     fn reset(&mut self) {
         if let Some(stt) = &mut self.chosen {
             stt.reset();
@@ -837,33 +863,42 @@ impl Ears {
         for (_, stt) in &mut self.listening {
             stt.reset();
         }
-        self.voiced.clear();
+        self.voiced.truncate(self.turn_from);
+        self.judged = self.judged.min(self.turn_from);
     }
 
-    fn settle(&mut self) -> Choice {
-        let voiced = std::mem::take(&mut self.voiced);
+    /// Settles on the language of the voiced audio so far, if it is confident.
+    fn judge(&mut self) -> Option<Choice> {
+        let seconds = self.voiced.len() as f32 / RATE as f32;
+        if self.voiced.len() == self.judged || seconds < MIN_SECONDS {
+            return None;
+        }
+        self.judged = self.voiced.len();
         let started = std::time::Instant::now();
-        let scores = self.engines.identify(&voiced);
-        let took = started.elapsed();
-        let scores = match scores {
-            Some(Ok(scores)) => Some(scores),
-            Some(Err(e)) => {
+        let scores = match self.engines.identify(&self.voiced)? {
+            Ok(scores) => scores,
+            Err(e) => {
                 eprintln!("voice: identifying the caller's language failed: {e:#}");
-                None
+                return None;
             }
-            None => None,
         };
-        let choice = choose(scores.as_deref(), voiced.len() as f32 / RATE as f32, &self.speakable, &self.fallback);
-        let top: Vec<String> = scores.iter().flatten().take(3).map(|(l, p)| format!("{l} {p:.2}")).collect();
-        eprintln!(
-            "voice: the call speaks {} ({}; {:.1} s voiced, {top:?}, identified in {took:.0?})",
-            choice.language,
-            if choice.identified { "identified" } else { "the user's language" },
-            voiced.len() as f64 / RATE as f64,
-        );
+        let took = started.elapsed();
+        let language = confident(&scores, seconds, &self.speakable);
+        let top: Vec<String> = scores.iter().take(3).map(|(l, p)| format!("{l} {p:.2}")).collect();
+        eprintln!("voice: over {seconds:.1} s voiced the caller sounds like {top:?} (judged in {took:.0?}); {language:?}");
+        Some(self.settle(Choice { language: language?, identified: true }))
+    }
+
+    fn give_up(&mut self) -> Choice {
+        eprintln!("voice: the caller's language stays unclear; the call speaks {}", self.fallback);
+        self.settle(Choice { language: self.fallback.clone(), identified: false })
+    }
+
+    fn settle(&mut self, choice: Choice) -> Choice {
         let at = self.listening.iter().position(|(l, _)| *l == choice.language).expect("the choice is speakable");
         self.chosen = Some(self.listening.swap_remove(at).1);
         self.listening.clear();
+        self.voiced = Vec::new();
         choice
     }
 }
@@ -1038,8 +1073,8 @@ mod tests {
         language: &'static str,
         stt: Vec<(usize, &'static str)>,
         sidecar: &'static str,
-        /// What identification says of any clip.
-        heard: Vec<(String, f32)>,
+        /// What identification says of each clip in turn, the last for every clip after.
+        heard: Vec<Vec<(String, f32)>>,
         /// The length of every clip identified.
         clips: Arc<Mutex<Vec<usize>>>,
     }
@@ -1079,8 +1114,10 @@ mod tests {
 
         fn identify(&self, samples_16k: &[f32]) -> Option<anyhow::Result<crate::audio::language::Scores>> {
             let second = self.second.as_ref()?;
-            second.clips.lock().unwrap().push(samples_16k.len());
-            Some(Ok(second.heard.clone()))
+            let mut clips = second.clips.lock().unwrap();
+            let heard = &second.heard[clips.len().min(second.heard.len() - 1)];
+            clips.push(samples_16k.len());
+            Some(Ok(heard.clone()))
         }
     }
 
@@ -1488,15 +1525,16 @@ mod tests {
         }
     }
 
-    /// An English user's call with Japanese loaded beside English, speaking through `japanese`.
-    fn bilingual(heard: &[(&str, f32)], japanese: &Arc<Japanese>, direction: Direction) -> (SessionDeps, Arc<FakeTts>, Arc<Mutex<Vec<usize>>>) {
+    /// An English user's call with Japanese loaded beside English, speaking through `japanese`; the
+    /// identifier answers each clip with the next of `heard`, the last one repeating.
+    fn bilingual(heard: &[&[(&str, f32)]], japanese: &Arc<Japanese>, direction: Direction) -> (SessionDeps, Arc<FakeTts>, Arc<Mutex<Vec<usize>>>) {
         let tts: Arc<FakeTts> = Arc::default();
         let clips: Arc<Mutex<Vec<usize>>> = Arc::default();
         let second = Second {
             language: "ja",
             stt: vec![(2, "明日"), (5, "明日の朝走る")],
             sidecar: "ja",
-            heard: heard.iter().map(|(l, p)| ((*l).to_owned(), *p)).collect(),
+            heard: heard.iter().map(|h| h.iter().map(|(l, p)| ((*l).to_owned(), *p)).collect()).collect(),
             clips: clips.clone(),
         };
         let engines = Arc::new(FakeEngines { second: Some(second), ..engines(vec![(2, "move"), (5, "move my run")], &tts) });
@@ -1508,10 +1546,34 @@ mod tests {
         c.log().into_iter().filter(|b| matches!(b, CallBody::Commit { .. } | CallBody::Draft { .. })).collect()
     }
 
+    fn commits(c: &Call) -> Vec<(String, Option<String>)> {
+        c.log()
+            .into_iter()
+            .filter_map(|b| match b {
+                CallBody::Commit { text, language, .. } => Some((text, language)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    async fn until_commits(c: &Call, n: usize) {
+        for _ in 0..3000 {
+            if commits(c).len() >= n {
+                return;
+            }
+            sleep_ms(10).await;
+        }
+        panic!("{n} commits never came: {:?}", c.log());
+    }
+
+    fn turns(parts: &[u64]) -> Vec<Vec<f32>> {
+        audio(&parts.iter().flat_map(|&ms| [(0.1, ms), (0.0, 1500)]).collect::<Vec<_>>())
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_caller_heard_speaking_japanese_is_transcribed_and_answered_in_japanese() {
         let japanese = Arc::new(Japanese::default());
-        let (d, tts, clips) = bilingual(&[("ja", 0.9), ("en", 0.05)], &japanese, Direction::Inbound);
+        let (d, tts, clips) = bilingual(&[&[("ja", 0.9), ("en", 0.05)]], &japanese, Direction::Inbound);
         let c = call_with(d, audio(&[(0.0, 300), (0.1, 1000), (0.0, 1000)]), tts);
         until_committed(&c).await;
         let turns = committed(&c);
@@ -1535,9 +1597,18 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn japanese_that_whisper_leans_to_chinese_is_answered_in_japanese() {
+        let japanese = Arc::new(Japanese::default());
+        let (d, tts, _) = bilingual(&[&[("zh", 0.85), ("ja", 0.09), ("en", 0.014)]], &japanese, Direction::Inbound);
+        let c = call_with(d, turns(&[1500]), tts);
+        until_commits(&c, 1).await;
+        assert_eq!(commits(&c), vec![("明日の朝走る".into(), Some("ja".into()))]);
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn a_long_first_turn_is_identified_from_its_first_seconds() {
         let japanese = Arc::new(Japanese::default());
-        let (d, tts, clips) = bilingual(&[("ja", 0.9)], &japanese, Direction::Inbound);
+        let (d, tts, clips) = bilingual(&[&[("ja", 0.9)]], &japanese, Direction::Inbound);
         let c = call_with(d, audio(&[(0.1, 4000), (0.0, 1000)]), tts);
         sleep_ms(3500).await;
         let clips = clips.lock().unwrap().clone();
@@ -1547,18 +1618,34 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn an_unsure_or_unspoken_language_keeps_the_users_setting() {
-        for heard in [&[("ja", 0.4), ("en", 0.3)][..], &[("ko", 0.95)]] {
+    async fn a_short_first_word_is_heard_in_the_setting_and_the_next_turn_settles_the_language() {
+        let japanese = Arc::new(Japanese::default());
+        let (d, tts, clips) = bilingual(&[&[("ja", 0.99)]], &japanese, Direction::Inbound);
+        let c = call_with(d, turns(&[500, 1500]), tts);
+        until_commits(&c, 2).await;
+        assert_eq!(
+            commits(&c),
+            vec![("move".into(), Some("en".into())), ("明日の朝走る".into(), Some("ja".into()))],
+            "「うん」 alone is not judged; the second turn is, over both turns' voice"
+        );
+        let clips = clips.lock().unwrap().clone();
+        assert!(matches!(clips[..], [n] if n > RATE * 3 / 2), "{clips:?}");
+        c.frame(CallBody::Speak { reply: 1, idx: 0, text: "うん。".into() });
+        c.frame(CallBody::SpeakDone { reply: 1 });
+        c.frame(CallBody::Play { reply: 1 });
+        sleep_ms(2000).await;
+        assert_eq!(c.probe.frames_of(JA as usize), "うん。".len(), "the voice switched with the language");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_unsure_or_unspoken_language_is_heard_in_the_setting_and_stays_open() {
+        for heard in [&[("ja", 0.4), ("en", 0.3)][..], &[("ko", 0.97), ("ja", 0.02)]] {
             let japanese = Arc::new(Japanese::default());
-            let (d, tts, clips) = bilingual(heard, &japanese, Direction::Outbound);
+            let (d, tts, clips) = bilingual(&[heard], &japanese, Direction::Outbound);
             let c = call_with(d, audio(&[(0.1, 1000), (0.0, 1000)]), tts);
             until_committed(&c).await;
             assert_eq!(clips.lock().unwrap().len(), 1);
-            assert_eq!(
-                committed(&c).last(),
-                Some(&CallBody::Commit { turn: 1, text: "move my run".into(), language: Some("en".into()) }),
-                "{heard:?}"
-            );
+            assert_eq!(commits(&c), vec![("move my run".into(), Some("en".into()))], "{heard:?}");
             c.frame(CallBody::Speak { reply: 1, idx: 0, text: "ok".into() });
             c.frame(CallBody::SpeakDone { reply: 1 });
             c.frame(CallBody::Play { reply: 1 });
@@ -1568,9 +1655,32 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn three_unsure_turns_settle_on_the_setting() {
+        let japanese = Arc::new(Japanese::default());
+        let (d, tts, clips) = bilingual(&[&[("ja", 0.6), ("en", 0.4)]], &japanese, Direction::Inbound);
+        let c = call_with(d, turns(&[1000, 1000, 1000, 1500]), tts);
+        until_commits(&c, 3).await;
+        let judged = clips.lock().unwrap().len();
+        until_commits(&c, 4).await;
+        assert_eq!(clips.lock().unwrap().len(), judged, "nothing is judged once the language is settled");
+        assert!(commits(&c).iter().all(|(_, l)| l.as_deref() == Some("en")), "{:?}", commits(&c));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn eight_seconds_of_unsure_voice_settle_on_the_setting() {
+        let japanese = Arc::new(Japanese::default());
+        let (d, tts, clips) = bilingual(&[&[("ja", 0.6), ("en", 0.4)]], &japanese, Direction::Inbound);
+        let c = call_with(d, turns(&[9500, 1500]), tts);
+        until_commits(&c, 2).await;
+        let clips = clips.lock().unwrap().clone();
+        assert_eq!(clips.last(), Some(&ID_CAP), "{clips:?}");
+        assert!(commits(&c).iter().all(|(_, l)| l.as_deref() == Some("en")), "{:?}", commits(&c));
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn a_blip_before_the_first_words_leaves_the_language_open() {
         let japanese = Arc::new(Japanese::default());
-        let (d, tts, clips) = bilingual(&[("ja", 0.9)], &japanese, Direction::Inbound);
+        let (d, tts, clips) = bilingual(&[&[("ja", 0.9)]], &japanese, Direction::Inbound);
         let c = call_with(d, audio(&[(0.0, 200), (0.1, 100), (0.0, 2000), (0.1, 1000), (0.0, 1500)]), tts);
         until_committed(&c).await;
         assert_eq!(clips.lock().unwrap().len(), 1, "the blip is not identified");
@@ -1578,14 +1688,12 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn the_language_holds_after_the_first_turn() {
+    async fn the_language_holds_once_settled() {
         let japanese = Arc::new(Japanese::default());
-        let (d, tts, clips) = bilingual(&[("ja", 0.9)], &japanese, Direction::Inbound);
-        let c = call_with(d, audio(&[(0.1, 1000), (0.0, 1500), (0.1, 1000), (0.0, 1500)]), tts);
-        sleep_ms(8000).await;
-        let commits: Vec<_> = committed(&c).into_iter().filter(|b| matches!(b, CallBody::Commit { .. })).collect();
-        assert_eq!(commits.len(), 2, "{commits:?}");
-        assert!(commits.iter().all(|b| matches!(b, CallBody::Commit { language: Some(l), .. } if l == "ja")));
+        let (d, tts, clips) = bilingual(&[&[("ja", 0.9)], &[("en", 0.99)]], &japanese, Direction::Inbound);
+        let c = call_with(d, turns(&[1000, 1000]), tts);
+        until_commits(&c, 2).await;
+        assert!(commits(&c).iter().all(|(_, l)| l.as_deref() == Some("ja")), "{:?}", commits(&c));
         assert_eq!(clips.lock().unwrap().len(), 1, "identified only from the first turn");
     }
 
@@ -1907,7 +2015,7 @@ mod tests {
             std::fs::read_dir(&clips).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
         names.sort();
         let (mut right, mut lag_with, mut lag_without) = (0, Vec::new(), Vec::new());
-        for name in names.iter().filter(|n| n.contains("-ami-") || n.contains("-bill-")) {
+        for name in names.iter().filter(|n| !n.contains("-caro-") && !n.contains("-himari-") && !n.contains("-default-")) {
             let want = &name[..2];
             let mut reader = hound::WavReader::open(clips.join(name)).unwrap();
             let speech: Vec<f32> = reader.samples::<i16>().map(|s| f32::from(s.unwrap()) / 32768.0).collect();

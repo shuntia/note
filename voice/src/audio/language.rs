@@ -5,11 +5,16 @@ use anyhow::{anyhow, Context};
 
 use super::mel::{whisper_log_mel, MEL_BINS};
 
-/// The least probability, over every language Whisper knows, that the top language needs to be taken.
-pub const CONFIDENT: f32 = 0.5;
-/// The same for under `SHORT` seconds of speech, which Whisper-tiny misjudges more often.
-pub const CONFIDENT_SHORT: f32 = 0.8;
-pub const SHORT: f32 = 0.8;
+/// Less speech than this is not judged at all; Whisper-tiny takes a word or two for the wrong language
+/// with near certainty.
+pub const MIN_SECONDS: f32 = 0.8;
+/// The share of the speakable languages' probability the top one needs.
+pub const CONFIDENT: f32 = 0.8;
+/// The same for under `SHORT` seconds of speech.
+pub const CONFIDENT_SHORT: f32 = 0.9;
+pub const SHORT: f32 = 1.2;
+/// Below this share of the whole distribution, Whisper heard none of the speakable languages.
+pub const SPEAKABLE_FLOOR: f32 = 0.05;
 /// Frames of the clip's floor after the speech; Whisper-tiny reads a clip cut off at the last word
 /// less surely than one that trails into quiet.
 const PAD_FRAMES: usize = 300;
@@ -26,18 +31,21 @@ pub trait LanguageId: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Choice {
     pub language: String,
-    /// False when the scores did not decide it and `fallback` stood in.
+    /// False when the scores never decided it and the user's language stood in.
     pub identified: bool,
 }
 
-/// The top language of `seconds` of speech when it is one the call can speak and confident enough;
-/// else `fallback`.
-pub fn choose(scores: Option<&[(String, f32)]>, seconds: f32, speakable: &[String], fallback: &str) -> Choice {
-    let confident = if seconds < SHORT { CONFIDENT_SHORT } else { CONFIDENT };
-    match scores.and_then(|s| s.first()) {
-        Some((top, p)) if *p >= confident && speakable.contains(top) => Choice { language: top.clone(), identified: true },
-        _ => Choice { language: fallback.to_owned(), identified: false },
+/// The language of `seconds` of speech, judged among the `speakable` ones alone: the likeliest of
+/// them once its share of their probability is confident, and they hold more than a trace of it.
+pub fn confident(scores: &[(String, f32)], seconds: f32, speakable: &[String]) -> Option<String> {
+    if seconds < MIN_SECONDS {
+        return None;
     }
+    let ours: Vec<&(String, f32)> = scores.iter().filter(|(l, _)| speakable.contains(l)).collect();
+    let mass: f32 = ours.iter().map(|(_, p)| p).sum();
+    let (top, p) = ours.into_iter().max_by(|a, b| a.1.total_cmp(&b.1))?;
+    let needed = if seconds < SHORT { CONFIDENT_SHORT } else { CONFIDENT };
+    (mass >= SPEAKABLE_FLOOR && p / mass >= needed).then(|| top.clone())
 }
 
 /// Spoken language identification on the sherpa-onnx export of Whisper-tiny: one encoder pass and one
@@ -117,8 +125,8 @@ impl LanguageId for WhisperLanguageId {
 mod tests {
     use super::*;
 
-    fn scores(top: &str, p: f32) -> Scores {
-        vec![(top.into(), p), ("de".into(), (1.0 - p) / 2.0)]
+    fn scores(pairs: &[(&str, f32)]) -> Scores {
+        pairs.iter().map(|(l, p)| ((*l).to_owned(), *p)).collect()
     }
 
     fn both() -> Vec<String> {
@@ -126,26 +134,28 @@ mod tests {
     }
 
     #[test]
-    fn a_confident_supported_language_is_taken() {
-        assert_eq!(choose(Some(&scores("ja", 0.9)), 2.0, &both(), "en"), Choice { language: "ja".into(), identified: true });
-        assert_eq!(choose(Some(&scores("en", 0.8)), 2.0, &both(), "ja"), Choice { language: "en".into(), identified: true });
+    fn a_confident_speakable_language_is_taken() {
+        assert_eq!(confident(&scores(&[("ja", 0.9), ("en", 0.05)]), 2.0, &both()).as_deref(), Some("ja"));
+        assert_eq!(confident(&scores(&[("en", 0.8), ("de", 0.1), ("ja", 0.1)]), 2.0, &both()).as_deref(), Some("en"));
     }
 
     #[test]
-    fn an_unsupported_top_language_falls_back_to_the_setting() {
-        let choice = choose(Some(&scores("ko", 0.95)), 2.0, &both(), "ja");
-        assert_eq!(choice, Choice { language: "ja".into(), identified: false });
-        let choice = choose(Some(&scores("ja", 0.95)), 2.0, &["en".to_string()], "en");
-        assert_eq!(choice, Choice { language: "en".into(), identified: false }, "a language without models is unsupported");
+    fn japanese_heard_as_chinese_is_still_japanese_among_the_speakable() {
+        let heard = scores(&[("zh", 0.85), ("ja", 0.09), ("en", 0.014)]);
+        assert_eq!(confident(&heard, 2.5, &both()).as_deref(), Some("ja"));
+        let heard = scores(&[("ko", 0.77), ("ja", 0.21), ("en", 0.003)]);
+        assert_eq!(confident(&heard, 1.7, &both()).as_deref(), Some("ja"));
     }
 
     #[test]
-    fn a_low_confidence_or_missing_result_falls_back() {
-        assert_eq!(choose(Some(&scores("ja", 0.45)), 2.0, &both(), "en"), Choice { language: "en".into(), identified: false });
-        assert_eq!(choose(None, 2.0, &both(), "ja"), Choice { language: "ja".into(), identified: false });
-        assert_eq!(choose(Some(&[]), 2.0, &both(), "en").language, "en");
-        assert_eq!(choose(Some(&scores("en", 0.6)), 0.5, &both(), "ja").language, "ja", "a word or two must be surer");
-        assert!(choose(Some(&scores("en", 0.9)), 0.5, &both(), "ja").identified);
+    fn a_split_short_or_foreign_result_is_not_confident() {
+        assert_eq!(confident(&scores(&[("ja", 0.42), ("en", 0.14)]), 2.0, &both()), None, "a 75/25 split");
+        assert_eq!(confident(&scores(&[("ko", 0.97), ("ja", 0.02), ("en", 0.001)]), 2.0, &both()), None, "barely any of ours");
+        assert_eq!(confident(&scores(&[("ja", 0.99)]), 0.5, &both()), None, "a word or two is not judged");
+        assert_eq!(confident(&scores(&[("ja", 0.85), ("en", 0.15)]), 1.0, &both()), None, "a short clip must be surer");
+        assert_eq!(confident(&scores(&[("ja", 0.85), ("en", 0.15)]), 1.5, &both()).as_deref(), Some("ja"));
+        assert_eq!(confident(&scores(&[("ja", 0.95)]), 2.0, &["en".to_string()]), None, "a language without models");
+        assert_eq!(confident(&[], 2.0, &both()), None);
     }
 
     fn model() -> Option<WhisperLanguageId> {
@@ -184,10 +194,10 @@ mod tests {
             let start = std::time::Instant::now();
             let scores = id.identify(samples).unwrap();
             times.push(start.elapsed());
-            let choice = choose(Some(&scores), samples.len() as f32 / 16_000.0, &["en".to_string(), "ja".to_string()], "--");
+            let taken_as = confident(&scores, samples.len() as f32 / 16_000.0, &["en".to_string(), "ja".to_string()]);
             right += usize::from(scores[0].0 == *want);
-            taken += usize::from(choice.identified && choice.language == *want);
-            wrong += usize::from(choice.identified && choice.language != *want);
+            taken += usize::from(taken_as.as_deref() == Some(want.as_str()));
+            wrong += usize::from(taken_as.as_ref().is_some_and(|l| l != want));
             println!(
                 "{:<24} {:<3} {:.2}  then {:<3} {:.2}  {:?}",
                 path.file_name().unwrap().to_string_lossy(),
@@ -200,7 +210,7 @@ mod tests {
         }
         times.sort();
         println!(
-            "{right}/{} top-1 right; {taken} taken, {wrong} taken wrongly, the rest fall back; median {:?}, worst {:?}",
+            "{right}/{} top-1 over all languages; {taken} taken, {wrong} taken wrongly, the rest left open; median {:?}, worst {:?}",
             clips.len(),
             times[times.len() / 2],
             times.last().unwrap()
