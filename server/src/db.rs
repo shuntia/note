@@ -746,6 +746,23 @@ const MIGRATIONS: &[&str] = &[
     );
     ALTER TABLE users ADD COLUMN onboarding INTEGER NOT NULL DEFAULT 0 CHECK (onboarding IN (0, 1));
     ",
+    // v51
+    "
+    CREATE TABLE memory_index_v51 (
+        user TEXT NOT NULL,
+        id TEXT NOT NULL,
+        category TEXT NOT NULL CHECK (category IN ('semantic','episodic','procedural','note')),
+        summary TEXT NOT NULL,
+        archived INTEGER NOT NULL DEFAULT 0,
+        path TEXT NOT NULL,
+        until TEXT,
+        PRIMARY KEY (user, id)
+    );
+    INSERT INTO memory_index_v51 (rowid, user, id, category, summary, archived, path, until)
+        SELECT rowid, user, id, category, summary, archived, path, until FROM memory_index;
+    DROP TABLE memory_index;
+    ALTER TABLE memory_index_v51 RENAME TO memory_index;
+    ",
 ];
 
 pub fn server_setting(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
@@ -2104,6 +2121,44 @@ mod tests {
         .unwrap();
         assert!(conn
             .execute("INSERT INTO invites (token_hash, role, created_at, expires_at) VALUES ('y', 'owner', 'now', 0)", [])
+            .is_err());
+    }
+
+    #[test]
+    fn v51_lets_the_memory_index_hold_notes_and_keeps_its_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_migrations(&conn, &MIGRATIONS[..50]).unwrap();
+        conn.execute(
+            "INSERT INTO memory_index (user, id, category, summary, archived, path, until)
+             VALUES ('a', 'x', 'semantic', 's', 1, 'p', '2026-10-08')",
+            [],
+        )
+        .unwrap();
+        apply_migrations(&conn, &MIGRATIONS[..51]).unwrap();
+        let kept: (String, String, String, i64, String, Option<String>) = conn
+            .query_row(
+                "SELECT user, category, summary, archived, path, until FROM memory_index WHERE id = 'x'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+            )
+            .unwrap();
+        assert_eq!(kept, ("a".into(), "semantic".into(), "s".into(), 1, "p".into(), Some("2026-10-08".into())));
+        conn.execute(
+            "INSERT INTO memory_index (user, id, category, summary, path) VALUES ('a', 'n', 'note', 's', 'p')",
+            [],
+        )
+        .unwrap();
+        assert!(conn
+            .execute(
+                "INSERT INTO memory_index (user, id, category, summary, path) VALUES ('a', 'y', 'archive', 's', 'p')",
+                [],
+            )
+            .is_err());
+        assert!(conn
+            .execute(
+                "INSERT INTO memory_index (user, id, category, summary, path) VALUES ('a', 'x', 'semantic', 's', 'p')",
+                [],
+            )
             .is_err());
     }
 }

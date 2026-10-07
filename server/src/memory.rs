@@ -6,6 +6,11 @@ use std::fmt::Write as _;
 
 pub const CATEGORIES: [&str; 3] = ["semantic", "episodic", "procedural"];
 
+pub const NOTE: &str = "note";
+
+/// Where live files sit: the long-term categories, then Note's working notes.
+const LIVE_DIRS: [&str; 4] = [CATEGORIES[0], CATEGORIES[1], CATEGORIES[2], NOTE];
+
 #[derive(Debug, Clone)]
 pub struct MemoryFile {
     pub id: String,
@@ -13,14 +18,18 @@ pub struct MemoryFile {
     pub summary: String,
     pub body: String,
     pub supersedes: Option<String>,
-    /// The date after which the fact stops mattering; the nightly sweep
-    /// archives it once it is more than a day past.
+    /// The date after which the fact stops mattering, swept a day after it
+    /// passes; on a working note, the RFC 3339 instant its window closes.
     pub until: Option<String>,
     pub created: String,
     pub archived: bool,
     /// What wrote the fact when it was not the user's own sessions; `note` for
     /// Note's built-in knowledge of itself.
     pub source: Option<String>,
+    /// A working note's window opening and bookkeeping, RFC 3339 instants.
+    pub from: Option<String>,
+    pub touched_at: Option<String>,
+    pub last_nudged_at: Option<String>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -68,6 +77,11 @@ fn render(f: &MemoryFile) -> String {
     if let Some(s) = &f.source {
         let _ = writeln!(fm, "source: {s}");
     }
+    for (key, value) in [("from", &f.from), ("touched_at", &f.touched_at), ("last_nudged_at", &f.last_nudged_at)] {
+        if let Some(v) = value {
+            let _ = writeln!(fm, "{key}: {v}");
+        }
+    }
     format!("{fm}---\n\n{}\n", f.body)
 }
 
@@ -84,6 +98,9 @@ fn parse(raw: &str, archived: bool) -> Result<MemoryFile> {
         created: String::new(),
         archived,
         source: None,
+        from: None,
+        touched_at: None,
+        last_nudged_at: None,
     };
     for line in fm.lines() {
         let Some((k, v)) = line.split_once(": ") else { continue };
@@ -95,13 +112,16 @@ fn parse(raw: &str, archived: bool) -> Result<MemoryFile> {
             "supersedes" => f.supersedes = Some(v.into()),
             "until" => f.until = Some(v.into()),
             "source" => f.source = Some(v.into()),
+            "from" => f.from = Some(v.into()),
+            "touched_at" => f.touched_at = Some(v.into()),
+            "last_nudged_at" => f.last_nudged_at = Some(v.into()),
             _ => {}
         }
     }
     if !valid_id(&f.id) {
         bail!("bad or missing id in memory file frontmatter");
     }
-    if !CATEGORIES.contains(&f.category.as_str()) {
+    if !LIVE_DIRS.contains(&f.category.as_str()) {
         bail!("bad category {:?} in memory file {}", f.category, f.id);
     }
     Ok(f)
@@ -112,7 +132,7 @@ fn locate(data_dir: &Path, user: &str, id: &str) -> Option<(PathBuf, bool)> {
         return None;
     }
     let name = format!("{id}.md");
-    for cat in CATEGORIES {
+    for cat in LIVE_DIRS {
         let p = user_root(data_dir, user).join(cat).join(&name);
         if p.exists() {
             return Some((p, false));
@@ -207,7 +227,7 @@ pub fn backfill_vectors(
         let mut stmt = conn.prepare(
             "SELECT i.user, i.id FROM memory_index i
              LEFT JOIN memory_vectors v ON v.user = i.user AND v.id = i.id
-             WHERE i.archived = 0 AND v.id IS NULL ORDER BY i.rowid",
+             WHERE i.archived = 0 AND i.category != 'note' AND v.id IS NULL ORDER BY i.rowid",
         )?;
         let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
         rows.collect::<rusqlite::Result<_>>()?
@@ -311,6 +331,9 @@ fn write_new(
         created: jiff::Timestamp::now().to_string(),
         archived: false,
         source: source.map(str::to_owned),
+        from: None,
+        touched_at: None,
+        last_nudged_at: None,
     };
     let dir = user_root(data_dir, user).join(category);
     std::fs::create_dir_all(&dir)?;
@@ -412,6 +435,9 @@ pub fn supersede_sourced(
         created: jiff::Timestamp::now().to_string(),
         archived: false,
         source: source.map(str::to_owned),
+        from: None,
+        touched_at: None,
+        last_nudged_at: None,
     };
     let new_path = user_root(data_dir, user).join(&new.category).join(format!("{}.md", new.id));
     write_atomic(&new_path, &render(&new))?;
@@ -448,6 +474,54 @@ pub fn archive(conn: &Connection, data_dir: &Path, user: &str, id: &str) -> Resu
     Ok(true)
 }
 
+/// Writes `f` into its category's directory and indexes it, replacing a live
+/// file with the same id.
+pub fn put(conn: &Connection, data_dir: &Path, user: &str, f: &MemoryFile) -> Result<()> {
+    if !valid_id(&f.id) {
+        bail!("bad memory id {:?}", f.id);
+    }
+    if !LIVE_DIRS.contains(&f.category.as_str()) {
+        bail!("invalid category: {}", f.category);
+    }
+    let dir = user_root(data_dir, user).join(&f.category);
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("{}.md", f.id));
+    write_atomic(&path, &render(f))?;
+    index_insert(conn, user, f, &path)?;
+    Ok(())
+}
+
+/// Deletes a live file with its index, search and vector rows; an archived or
+/// unknown id is left alone.
+pub fn remove(conn: &Connection, data_dir: &Path, user: &str, id: &str) -> Result<bool> {
+    let Some((path, false)) = locate(data_dir, user, id) else {
+        return Ok(false);
+    };
+    std::fs::remove_file(&path)?;
+    conn.execute("DELETE FROM memory_index WHERE user = ?1 AND id = ?2", (user, id))?;
+    conn.execute("DELETE FROM memory_fts WHERE user = ?1 AND id = ?2", (user, id))?;
+    conn.execute("DELETE FROM memory_vectors WHERE user = ?1 AND id = ?2", (user, id))?;
+    Ok(true)
+}
+
+/// Every readable live file of one category, in no particular order.
+pub fn live_files(data_dir: &Path, user: &str, category: &str) -> Result<Vec<MemoryFile>> {
+    let Ok(entries) = std::fs::read_dir(user_root(data_dir, user).join(category)) else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_none_or(|e| e != "md") {
+            continue;
+        }
+        if let Ok(f) = std::fs::read_to_string(&path).map_err(anyhow::Error::from).and_then(|raw| parse(&raw, false)) {
+            out.push(f);
+        }
+    }
+    Ok(out)
+}
+
 /// Archives the user's live facts whose `until` is more than one day past, so
 /// a quiz date still shows up on the day after it. Returns how many moved.
 pub fn archive_expired(
@@ -459,7 +533,7 @@ pub fn archive_expired(
     let cutoff = today.yesterday().unwrap_or(today).to_string();
     let mut stmt = conn.prepare(
         "SELECT id FROM memory_index
-         WHERE user = ?1 AND archived = 0 AND until IS NOT NULL AND until < ?2",
+         WHERE user = ?1 AND archived = 0 AND category != 'note' AND until IS NOT NULL AND until < ?2",
     )?;
     let ids: Vec<String> = stmt
         .query_map((user, &cutoff), |r| r.get(0))?
@@ -494,7 +568,7 @@ fn lexical_query(conn: &Connection, user: &str, q: &str, limit: i64) -> Result<V
         "SELECT f.id, i.category, i.summary
          FROM memory_fts f
          JOIN memory_index i ON i.user = f.user AND i.id = f.id
-         WHERE memory_fts MATCH ?1 AND f.user = ?2 AND i.archived = 0
+         WHERE memory_fts MATCH ?1 AND f.user = ?2 AND i.archived = 0 AND i.category != 'note'
          ORDER BY rank LIMIT ?3",
     )?;
     let rows = stmt.query_map((tokens.join(" OR "), user, limit), |r| {
@@ -509,7 +583,7 @@ fn vector_query(conn: &Connection, user: &str, qv: &[f32], limit: usize) -> Resu
         "SELECT v.id, v.vector
          FROM memory_vectors v
          JOIN memory_index i ON i.user = v.user AND i.id = v.id
-         WHERE v.user = ?1 AND i.archived = 0",
+         WHERE v.user = ?1 AND i.archived = 0 AND i.category != 'note'",
     )?;
     let rows = stmt.query_map([user], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?)))?;
     let mut scored: Vec<(String, f32)> = rows
@@ -572,7 +646,7 @@ pub fn query(
 /// session knows before searching whether there is anything to find.
 pub fn live_count(conn: &Connection, user: &str) -> Result<i64> {
     Ok(conn.query_row(
-        "SELECT COUNT(*) FROM memory_index WHERE user = ?1 AND archived = 0",
+        "SELECT COUNT(*) FROM memory_index WHERE user = ?1 AND archived = 0 AND category != 'note'",
         [user],
         |r| r.get(0),
     )?)
@@ -605,7 +679,7 @@ pub fn list(
 ) -> Result<Vec<QueryHit>> {
     let mut stmt = conn.prepare(
         "SELECT id, category, summary FROM memory_index
-         WHERE user = ?1 AND archived = 0 AND (?2 IS NULL OR category = ?2)
+         WHERE user = ?1 AND archived = 0 AND category != 'note' AND (?2 IS NULL OR category = ?2)
          ORDER BY rowid DESC LIMIT ?3",
     )?;
     let rows = stmt.query_map((user, category, limit as i64), |r| {
@@ -619,7 +693,7 @@ pub fn list(
 pub fn reindex_user(conn: &Connection, data_dir: &Path, user: &str) -> Result<()> {
     conn.execute("DELETE FROM memory_index WHERE user = ?1", [user])?;
     conn.execute("DELETE FROM memory_fts WHERE user = ?1", [user])?;
-    let dirs = CATEGORIES.iter().map(|c| (*c, false)).chain([("archive", true)]);
+    let dirs = LIVE_DIRS.iter().map(|c| (*c, false)).chain([("archive", true)]);
     for (dir_name, archived) in dirs {
         let dir = user_root(data_dir, user).join(dir_name);
         let Ok(entries) = std::fs::read_dir(&dir) else { continue };
@@ -948,5 +1022,101 @@ mod tests {
         for q in ["\"unbalanced", "a OR OR", "(((", "*", "co-lu:mn NEAR/x", "", "   "] {
             query(&conn, "aki", q, 10, None).unwrap();
         }
+    }
+
+    const NOTE_ID: &str = "00000000-0000-4000-8000-000000000001";
+
+    fn a_note(id: &str) -> MemoryFile {
+        MemoryFile {
+            id: id.into(),
+            category: NOTE.into(),
+            summary: "call the bank before five".into(),
+            body: String::new(),
+            supersedes: None,
+            until: Some("2026-10-07T17:00:00+09:00".into()),
+            created: "2026-10-07T00:00:00Z".into(),
+            archived: false,
+            source: None,
+            from: Some("2026-10-07T09:00:00+09:00".into()),
+            touched_at: Some("2026-10-07T01:00:00Z".into()),
+            last_nudged_at: Some("2026-10-07T02:00:00Z".into()),
+        }
+    }
+
+    #[test]
+    fn a_note_file_round_trips_its_window_and_stamps_through_a_reindex() {
+        let (conn, tmp) = env();
+        put(&conn, tmp.path(), "aki", &a_note(NOTE_ID)).unwrap();
+        assert!(tmp.path().join("memory/aki/note").join(format!("{NOTE_ID}.md")).exists());
+        let check = || {
+            let f = read(tmp.path(), "aki", NOTE_ID).unwrap().unwrap();
+            assert_eq!(f.category, "note");
+            assert_eq!(f.body, "");
+            assert_eq!(f.from.as_deref(), Some("2026-10-07T09:00:00+09:00"));
+            assert_eq!(f.until.as_deref(), Some("2026-10-07T17:00:00+09:00"));
+            assert_eq!(f.touched_at.as_deref(), Some("2026-10-07T01:00:00Z"));
+            assert_eq!(f.last_nudged_at.as_deref(), Some("2026-10-07T02:00:00Z"));
+        };
+        check();
+        reindex_user(&conn, tmp.path(), "aki").unwrap();
+        check();
+        let indexed: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memory_index WHERE user = 'aki' AND id = ?1 AND category = 'note'",
+                [NOTE_ID],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(indexed, 1, "a reindex keeps the note in the index");
+        assert_eq!(live_files(tmp.path(), "aki", NOTE).unwrap().len(), 1);
+        assert!(live_files(tmp.path(), "nobody", NOTE).unwrap().is_empty());
+    }
+
+    #[test]
+    fn notes_stay_out_of_search_browse_counts_and_the_expiry_sweep() {
+        let (conn, tmp) = env();
+        put(&conn, tmp.path(), "aki", &a_note(NOTE_ID)).unwrap();
+        let fact = add(&conn, tmp.path(), "aki", "semantic", "bank hours", "the bank closes at five", None).unwrap();
+        let hits: Vec<String> =
+            query(&conn, "aki", "bank", 10, None).unwrap().into_iter().map(|h| h.id).collect();
+        assert_eq!(hits, vec![fact.clone()]);
+        let listed: Vec<String> =
+            list(&conn, "aki", None, 50).unwrap().into_iter().map(|h| h.id).collect();
+        assert_eq!(listed, vec![fact]);
+        assert_eq!(live_count(&conn, "aki").unwrap(), 1);
+        assert_eq!(archive_expired(&conn, tmp.path(), "aki", "2026-12-01".parse().unwrap()).unwrap(), 0);
+        assert!(!read(tmp.path(), "aki", NOTE_ID).unwrap().unwrap().archived);
+    }
+
+    #[test]
+    fn remove_deletes_a_live_file_and_its_rows_but_never_an_archived_one() {
+        let (conn, tmp) = env();
+        put(&conn, tmp.path(), "aki", &a_note(NOTE_ID)).unwrap();
+        assert!(remove(&conn, tmp.path(), "aki", NOTE_ID).unwrap());
+        assert!(read(tmp.path(), "aki", NOTE_ID).unwrap().is_none());
+        let rows: i64 = conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM memory_index WHERE id = ?1)
+                      + (SELECT COUNT(*) FROM memory_fts WHERE id = ?1)",
+                [NOTE_ID],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 0);
+        assert!(!remove(&conn, tmp.path(), "aki", NOTE_ID).unwrap());
+
+        let old = add(&conn, tmp.path(), "aki", "semantic", "s", "b", None).unwrap();
+        archive(&conn, tmp.path(), "aki", &old).unwrap();
+        assert!(!remove(&conn, tmp.path(), "aki", &old).unwrap());
+        assert!(read(tmp.path(), "aki", &old).unwrap().is_some());
+    }
+
+    #[test]
+    fn put_refuses_a_bad_id_or_category() {
+        let (conn, tmp) = env();
+        assert!(put(&conn, tmp.path(), "aki", &a_note("../x")).is_err());
+        let mut f = a_note(NOTE_ID);
+        f.category = "archive".into();
+        assert!(put(&conn, tmp.path(), "aki", &f).is_err());
     }
 }
