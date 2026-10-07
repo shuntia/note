@@ -21,14 +21,20 @@ pub const REVIEW_MAX_TURNS: usize = 8;
 /// A trigger session looks around and then speaks or does not: room to read the
 /// situation, never room to hold a conversation with itself.
 pub const TRIGGER_MAX_TURNS: usize = 6;
-pub const MAX_TURNS_REPLY: &str =
-    "(I ran out of steps before finishing — ask again and I'll pick it up from here)";
 
 const REPLY_IN_JAPANESE: &str =
     "The user reads Japanese: write every reply, note, title and summary in natural Japanese.";
 const SPEAK_JAPANESE: &str = "The user speaks Japanese: speak natural, conversational Japanese, whatever language \
     the instructions above are written in. Short sentences, no markdown, no emoji, no lists. Say numbers, times \
     and dates the way they are spoken in Japanese (七時半, 二十分くらい, 来週の金曜).";
+/// Whom a session writes for: the visitor on a share link, the user otherwise.
+fn session_lang(deps: &SessionDeps, username: &str, kind: SessionKind) -> crate::text::Lang {
+    match kind {
+        SessionKind::Share => deps.share.as_ref().map_or_else(crate::text::Lang::default, |s| s.visitor_lang),
+        _ => crate::text::Lang::for_user(deps.config_dir, username),
+    }
+}
+
 /// `system` with the line that asks for Japanese, where the user reads it.
 pub(crate) fn with_language_line(mut system: String, config_dir: &Path, username: &str) -> String {
     if crate::text::Lang::for_user(config_dir, username) == crate::text::Lang::Ja {
@@ -204,10 +210,7 @@ pub(crate) fn system_prompt(
         system.push_str("\n\n");
         system.push_str(&crate::prompts::load(deps.config_dir, username, "trigger")?);
     }
-    let lang = match kind {
-        SessionKind::Share => deps.share.as_ref().map_or_else(crate::text::Lang::default, |s| s.visitor_lang),
-        _ => crate::text::Lang::for_user(deps.config_dir, username),
-    };
+    let lang = session_lang(deps, username, kind);
     if lang == crate::text::Lang::Ja && kind != SessionKind::Call {
         system.push_str("\n\n");
         system.push_str(if kind == SessionKind::Share { VISITOR_JAPANESE } else { REPLY_IN_JAPANESE });
@@ -356,7 +359,7 @@ fn run_traced(
     if last_text.trim().is_empty()
         && matches!(kind, SessionKind::Talk | SessionKind::Checkin | SessionKind::Share)
     {
-        last_text = MAX_TURNS_REPLY.to_string();
+        last_text = crate::text::max_turns_reply(session_lang(deps, username, kind));
     }
     on_event(AgentEvent::Reply { text: &last_text });
     trace.max_turns(&last_text);
@@ -986,7 +989,7 @@ mod tests {
         let out =
             run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, now(), &[], "hi")
                 .unwrap();
-        assert_eq!(out.reply, MAX_TURNS_REPLY);
+        assert_eq!(out.reply, crate::text::max_turns_reply(crate::text::Lang::En));
 
         let llm = MockLLM::scripted(vec![resp; MAX_TURNS]);
         let out =

@@ -337,14 +337,14 @@ pub fn title_from(message: &str) -> String {
 /// than a name: empty, long-winded, spread over lines, or parenthetical.
 pub fn normalize_title(raw: &str) -> Option<String> {
     let raw = raw.trim();
-    if raw.contains('\n') || raw.contains('(') {
+    if raw.contains('\n') || raw.contains('(') || raw.contains('（') {
         return None;
     }
     let mut stripped = raw;
     loop {
         let next = stripped
-            .trim_end_matches('.')
-            .trim_matches(|c| matches!(c, '"' | '\'' | '\u{201c}' | '\u{201d}'))
+            .trim_end_matches(['.', '。'])
+            .trim_matches(|c| matches!(c, '"' | '\'' | '\u{201c}' | '\u{201d}' | '「' | '」' | '『' | '』'))
             .trim();
         if next == stripped {
             break;
@@ -445,6 +445,7 @@ pub fn generate_title(state: &AppState, user_id: i64, username: &str, conversati
     let named = match exchange {
         Ok(None) => return,
         Ok(Some(exchange)) => crate::prompts::load(&state.config_dir, username, "title")
+            .map(|system| crate::agent::with_language_line(system, &state.config_dir, username))
             .and_then(|system| ask_for_title(state.llm.as_ref(), &system, &exchange))
             .and_then(|title| {
                 let conn = state.db();
@@ -787,6 +788,8 @@ mod tests {
             ("\u{201c}Grandma's birthday\u{201d}", Some("Grandma's birthday")),
             ("Essay   plan\tfor Monday", Some("Essay plan for Monday")),
             ("金曜日の物理のテスト", Some("金曜日の物理のテスト")),
+            ("「金曜の物理のテスト」。", Some("金曜の物理のテスト")),
+            ("物理のテスト（金曜）", None),
             ("   ", None),
             ("Title: a thread about\nthe essay", None),
             ("A title (about the essay)", None),
