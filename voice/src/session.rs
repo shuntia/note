@@ -10,9 +10,10 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant, MissedTickBehavior};
 
 use crate::audio::engines::{SpeechEngines, SpeechToText, TurnDetector, Vad};
+use crate::audio::language::{choose, Choice};
 use crate::audio::lines::{Line, Lines};
 use crate::audio::playout::{Clip, Playout};
-use crate::audio::speech::{Gate, SpeechQueue};
+use crate::audio::speech::SpeechQueue;
 use crate::audio::tts::{speaker, Mute, Speaker, SpeechBackend};
 use crate::audio::turn::{backchannels, Action, Input, TurnConfig, TurnMachine};
 use crate::media::{Gone, MediaIo};
@@ -30,6 +31,16 @@ const DRAIN_LIMIT: Duration = Duration::from_secs(60);
 /// What the media path still holds once playout is empty, played out before leaving.
 const DRAIN_TAIL: Duration = Duration::from_millis(500);
 const FILLER_AFTER: Duration = Duration::from_millis(1500);
+/// The voiced audio the caller's language is told from, unless their first turn ends sooner.
+const ID_SPAN: usize = RATE * 5 / 2;
+/// A first turn with less voiced audio than this leaves the language open.
+const ID_MIN: usize = RATE * 3 / 10;
+/// The voiced audio that settles the language at the caller's first pause, ahead of the turn's end.
+const ID_AT_PAUSE: usize = RATE;
+/// An inbound caller silent this long from the start is asked if they are there.
+const HELLO_AFTER: Duration = Duration::from_secs(8);
+/// Silent this long after that, the call ends.
+const NO_ONE_AFTER: Duration = Duration::from_secs(20);
 
 /// 48 kHz mono audio for the call's cues; an empty one plays nothing.
 pub struct Cues {
@@ -105,7 +116,7 @@ pub struct SessionDeps {
     pub profile: VoiceProfile,
     /// The speech sidecars up as the call starts.
     pub sidecars: Vec<Arc<dyn SpeechBackend>>,
-    /// An inbound call is greeted with `Line::Hi` if Note is quiet at first.
+    /// On an inbound call Note waits for the caller's first words, prompting once if they stay silent.
     pub direction: Direction,
     pub max_len: Duration,
     pub link_grace: Duration,
@@ -128,6 +139,8 @@ pub enum SessionEnd {
     VoiceLost,
     /// Speech recognition stopped mid-call.
     EarsLost,
+    /// The caller never spoke.
+    NoOneThere,
     MediaFailed(String),
 }
 
@@ -148,19 +161,24 @@ enum Event {
     Partial(String),
     Score { at: Duration, p: f32 },
     Finished { turn: u64, text: String },
+    /// The caller's first words settled the call's language.
+    Language(Choice),
     /// `pcm` is None for a line that failed to render.
-    Line { line: Line, pcm: Option<Arc<Vec<i16>>> },
+    Line { language: String, line: Line, pcm: Option<Arc<Vec<i16>>> },
 }
 
 enum SttCmd {
-    Accept(Vec<f32>),
+    /// `voiced`: the VAD heard speech in the chunk.
+    Accept { samples: Vec<f32>, voiced: bool },
     Finish { turn: u64 },
+    /// The caller paused.
+    Pause,
     Reset,
 }
 
 enum SttOut {
-    Partial(String),
-    Finished(Option<(u64, String)>),
+    Partial(Option<Choice>, String),
+    Finished(Option<Choice>, Option<(u64, String)>),
 }
 
 /// Runs one answered call until it ends. Outgoing frames go through `send` (journaled by the caller).
@@ -216,6 +234,16 @@ impl Ending {
 
 struct Live<S> {
     send: S,
+    engines: Arc<dyn SpeechEngines>,
+    sidecars: Vec<Arc<dyn SpeechBackend>>,
+    line_store: Arc<Lines>,
+    voice: String,
+    /// The language the call speaks, settled by the caller's first words.
+    language: String,
+    direction: Direction,
+    /// The caller has made a sound, or Note has started to speak.
+    broken_silence: bool,
+    hello_at: Option<Instant>,
     media: Arc<dyn MediaIo>,
     playout: Playout,
     speech: SpeechQueue,
@@ -230,9 +258,8 @@ struct Live<S> {
     lines: HashMap<Line, Option<Arc<Vec<i16>>>>,
     /// The line the ending waits to say once rendered.
     closing: Option<Line>,
-    /// The line to fill with by `FILLER_AFTER` past the instant: "hi" from the start of an inbound
-    /// call unless Note's words arrive, "one moment" from a Commit unless a reply is speaking.
-    awaiting_reply: Option<(Instant, Line)>,
+    /// "One moment" by `FILLER_AFTER` past the Commit at the instant, unless a reply is speaking.
+    awaiting_reply: Option<Instant>,
     drafted: Option<u64>,
     start: Instant,
     playing: bool,
@@ -251,7 +278,11 @@ impl<S: Fn(CallBody)> Live<S> {
             languages.first().cloned().ok_or_else(|| anyhow::anyhow!("no voice models"))?
         };
         let vad = deps.engines.vad(&language)?;
-        let stt = deps.engines.stt(&language)?;
+        let speakable: Vec<String> =
+            languages.iter().filter(|l| deps.engines.tts(l).live(&deps.sidecars).is_some()).cloned().collect();
+        let ears = Ears::new(deps.engines.clone(), &speakable, &language)?;
+        let mut turn = TurnMachine::new(TurnConfig::default(), backchannels(&language));
+        turn.set_blind(ears.chosen.is_none());
         let base = deps.engines.tts(&language);
         let voice_up = base.live(&deps.sidecars);
         let base: Arc<dyn SpeechBackend> = voice_up.clone().unwrap_or_else(|| Arc::new(Mute::new(base.id())));
@@ -261,14 +292,22 @@ impl<S: Fn(CallBody)> Live<S> {
         let (stt_tx, stt_rx) = mpsc::unbounded_channel();
         let recent = Arc::new(Mutex::new(VecDeque::with_capacity(TURN_SPAN)));
         let tasks = Tasks {
-            stt: tokio::spawn(stt_worker(stt, stt_rx, events_tx.clone())),
+            stt: tokio::spawn(stt_worker(ears, stt_rx, events_tx.clone())),
             audio: tokio::spawn(audio_in(media.clone(), vad, stt_tx.clone(), events_tx.clone(), recent.clone(), start)),
         };
         let speech = SpeechQueue::new(speaker.clone(), base.clone());
         let order: &'static [Line] = match (voice_up.is_some(), deps.direction) {
             (false, _) => &[Line::NoVoice],
-            (true, Direction::Inbound) => &[Line::Hi, Line::OneMoment, Line::LostNotes, Line::Goodbye, Line::NoVoice, Line::NoEars],
-            (true, Direction::Outbound) => &[Line::OneMoment, Line::LostNotes, Line::Goodbye, Line::NoVoice, Line::NoEars],
+            (true, Direction::Inbound) => &[
+                Line::OneMoment,
+                Line::Hello,
+                Line::NoOneThere,
+                Line::LostNotes,
+                Line::Goodbye,
+                Line::NoVoice,
+                Line::NoEars,
+            ],
+            (true, Direction::Outbound) => SPOKEN_TO,
         };
         {
             let (lines, rendering, language, events) =
@@ -286,10 +325,18 @@ impl<S: Fn(CallBody)> Live<S> {
         }
         let live = Live {
             send,
+            engines: deps.engines.clone(),
+            sidecars: deps.sidecars.clone(),
+            line_store: deps.lines.clone(),
+            voice: deps.profile.voice.clone(),
+            language: language.clone(),
+            direction: deps.direction,
+            broken_silence: false,
+            hello_at: None,
             media,
             playout,
             speech,
-            turn: TurnMachine::new(TurnConfig::default(), backchannels(&language)),
+            turn,
             detector: deps.engines.turn(&language),
             recent,
             stt: stt_tx,
@@ -298,7 +345,7 @@ impl<S: Fn(CallBody)> Live<S> {
             heard_cue: deps.profile.cue.then(|| deps.cues.heard.clone()),
             lines: HashMap::new(),
             closing: voice_up.is_none().then_some(Line::NoVoice),
-            awaiting_reply: (voice_up.is_some() && deps.direction == Direction::Inbound).then_some((start, Line::Hi)),
+            awaiting_reply: None,
             drafted: None,
             start,
             playing: false,
@@ -406,18 +453,58 @@ impl<S: Fn(CallBody)> Live<S> {
         if self.start.elapsed() >= max_len {
             self.say_goodbye(SessionEnd::TimedOut);
         }
-        if let Some((at, line)) = self.awaiting_reply {
-            if self.lines.contains_key(&line) && at.elapsed() >= FILLER_AFTER {
+        if let Some(at) = self.awaiting_reply {
+            if self.lines.contains_key(&Line::OneMoment) && at.elapsed() >= FILLER_AFTER {
                 self.awaiting_reply = None;
-                self.play_line(line);
+                self.play_line(Line::OneMoment);
             }
         }
+        self.wait_for_the_caller();
         if let Some(line) = self.closing.filter(|line| self.lines.contains_key(line)) {
             self.closing = None;
             self.play_line(line);
         }
         let drained = self.closing.is_none() && self.playout.is_empty() && self.speech.is_idle();
         self.ending.as_mut()?.due(drained, Instant::now())
+    }
+
+    /// An inbound caller who says nothing is asked once if they are there, then let go.
+    fn wait_for_the_caller(&mut self) {
+        if self.direction != Direction::Inbound || self.broken_silence || self.ending.is_some() {
+            return;
+        }
+        match self.hello_at {
+            None if self.start.elapsed() >= HELLO_AFTER && self.lines.contains_key(&Line::Hello) => {
+                self.hello_at = Some(Instant::now());
+                self.play_line(Line::Hello);
+            }
+            Some(at) if at.elapsed() >= NO_ONE_AFTER => self.close_with(Line::NoOneThere, SessionEnd::NoOneThere),
+            _ => {}
+        }
+    }
+
+    /// Speaks `choice.language` from here on: its recognizer is already listening, and replies not yet
+    /// opened, the canned lines and the backchannels follow.
+    fn settle(&mut self, choice: Choice) {
+        if choice.language == self.language {
+            return;
+        }
+        let base = self.engines.tts(&choice.language);
+        let Some(base) = base.live(&self.sidecars) else {
+            eprintln!("voice: the {} voice is down; the call keeps speaking {}", choice.language, self.language);
+            return;
+        };
+        let speaker = speaker(&self.voice, &choice.language, &base, &self.sidecars);
+        self.speech.set_voice(speaker.clone(), base.clone());
+        self.turn.set_backchannels(backchannels(&choice.language));
+        self.detector = self.engines.turn(&choice.language);
+        self.language = choice.language;
+        self.lines.clear();
+        let (lines, rendering, language, events) =
+            (self.line_store.clone(), self.speech.rendering(), self.language.clone(), self.events_tx.clone());
+        tokio::task::spawn_blocking(move || {
+            render_lines(&lines, &speaker, &base, &language, SPOKEN_TO, &rendering, &events);
+        });
     }
 
     fn play_line(&mut self, line: Line) {
@@ -432,7 +519,7 @@ impl<S: Fn(CallBody)> Live<S> {
                 Action::ScoreTurn => self.score_turn(),
                 Action::Draft { turn, text } => {
                     self.drafted = Some(turn);
-                    (self.send)(CallBody::Draft { turn, text });
+                    (self.send)(CallBody::Draft { turn, text, language: Some(self.language.clone()) });
                 }
                 Action::Commit { turn, .. } => {
                     let _ = self.stt.send(SttCmd::Finish { turn });
@@ -453,7 +540,12 @@ impl<S: Fn(CallBody)> Live<S> {
                     }
                     self.playout.resume();
                 }
-                Action::Floor(floor) => (self.send)(CallBody::Floor { floor }),
+                Action::Floor(floor) => {
+                    if floor == Floor::UserQuiet {
+                        let _ = self.stt.send(SttCmd::Pause);
+                    }
+                    (self.send)(CallBody::Floor { floor });
+                }
             }
         }
     }
@@ -473,12 +565,22 @@ impl<S: Fn(CallBody)> Live<S> {
 
     fn event(&mut self, ev: Event) {
         let input = match ev {
-            Event::Line { line, pcm } => {
-                self.lines.insert(line, pcm);
+            Event::Line { language, line, pcm } => {
+                if language == self.language {
+                    self.lines.insert(line, pcm);
+                }
+                return;
+            }
+            Event::Language(choice) => {
+                self.turn.set_blind(false);
+                self.settle(choice);
                 return;
             }
             _ if self.ending.is_some() => return,
-            Event::Vad { at, speech } => Input::Vad { at, speech },
+            Event::Vad { at, speech } => {
+                self.broken_silence |= speech;
+                Input::Vad { at, speech }
+            }
             Event::Partial(text) => Input::Partial { text },
             Event::Score { at, p } => Input::TurnScore { at, p },
             Event::Finished { turn, text } => {
@@ -488,8 +590,8 @@ impl<S: Fn(CallBody)> Live<S> {
                         (self.send)(CallBody::Retract { turn });
                     }
                 } else {
-                    (self.send)(CallBody::Commit { turn, text });
-                    self.awaiting_reply = Some((Instant::now(), Line::OneMoment));
+                    (self.send)(CallBody::Commit { turn, text, language: Some(self.language.clone()) });
+                    self.awaiting_reply = Some(Instant::now());
                     if let Some(cue) = &self.heard_cue {
                         self.playout.push_front(Clip { reply: None, chars: 0, pcm: cue.to_vec() });
                     }
@@ -509,10 +611,9 @@ impl<S: Fn(CallBody)> Live<S> {
             CallBody::Speak { reply, .. } | CallBody::Play { reply } => Some(*reply),
             _ => None,
         };
-        let spoke = match &body {
-            CallBody::Speak { reply, .. } => Some(*reply),
-            _ => None,
-        };
+        if matches!(body, CallBody::Speak { .. }) {
+            self.broken_silence = true;
+        }
         match body {
             CallBody::Speak { reply, idx, text } => self.speech.speak(reply, idx, text),
             CallBody::SpeakDone { reply } => self.speech.speak_done(reply),
@@ -524,9 +625,7 @@ impl<S: Fn(CallBody)> Live<S> {
             }
             _ => {}
         }
-        let greeted = matches!(self.awaiting_reply, Some((_, Line::Hi)))
-            && spoke.is_some_and(|r| self.speech.gate(r) != Gate::Dropped);
-        if greeted || reply.is_some_and(|r| self.speech.is_speaking(r)) {
+        if reply.is_some_and(|r| self.speech.is_speaking(r)) {
             self.awaiting_reply = None;
         }
     }
@@ -557,6 +656,9 @@ impl<S: Fn(CallBody)> Live<S> {
     }
 }
 
+/// The lines a call needs once the caller has spoken.
+const SPOKEN_TO: &[Line] = &[Line::OneMoment, Line::LostNotes, Line::Goodbye, Line::NoVoice, Line::NoEars];
+
 /// Gives the call each line at once: in `speaker` if already rendered, else in the base voice. A sidecar
 /// voice's lines are then rendered in it one by one, only while no reply is rendering, and replace the
 /// base's. A base that is down gives only what it rendered before.
@@ -579,7 +681,7 @@ fn render_lines(
             }
             lines.get(&quick, &**base, language, line).map_err(|e| eprintln!("voice: rendering {line:?} failed: {e:#}")).ok()
         });
-        if events.send(Event::Line { line, pcm }).is_err() {
+        if events.send(Event::Line { language: language.to_owned(), line, pcm }).is_err() {
             return;
         }
     }
@@ -594,7 +696,7 @@ fn render_lines(
             }
             match lines.upgrade(speaker, language, line, &busy) {
                 Ok(Some(pcm)) => {
-                    if events.send(Event::Line { line, pcm: Some(pcm) }).is_err() {
+                    if events.send(Event::Line { language: language.to_owned(), line, pcm: Some(pcm) }).is_err() {
                         return;
                     }
                     break;
@@ -629,6 +731,7 @@ async fn audio_in(
 ) {
     let mut window = Vec::with_capacity(VAD_WINDOW * 2);
     let mut chunk = Vec::with_capacity(STT_CHUNK * 2);
+    let mut voiced = false;
     while let Some(frame) = media.recv().await {
         {
             let mut recent = recent.lock().expect("recent audio lock");
@@ -641,18 +744,134 @@ async fn audio_in(
         while window.len() >= VAD_WINDOW {
             let speech = vad.push(&window[..VAD_WINDOW]);
             window.drain(..VAD_WINDOW);
+            voiced |= speech;
             let _ = events.send(Event::Vad { at: start.elapsed(), speech });
         }
         if chunk.len() >= STT_CHUNK {
-            let _ = stt.send(SttCmd::Accept(std::mem::take(&mut chunk)));
+            let _ = stt.send(SttCmd::Accept { samples: std::mem::take(&mut chunk), voiced: std::mem::take(&mut voiced) });
         }
     }
 }
 
-/// Owns the call's STT stream; each step runs on the blocking pool, in order. Reports partial changes,
-/// and an empty partial once a finish or reset clears the stream.
+/// The call's recognizers. Until the caller's language is settled, every language the call can
+/// speak listens at once with no partials shown, and the voiced audio is kept; it is settled from the
+/// first `ID_SPAN` of it, at the first pause after `ID_AT_PAUSE`, or when the first turn ends, and
+/// its recognizer, which heard the whole turn, carries on alone.
+struct Ears {
+    engines: Arc<dyn SpeechEngines>,
+    speakable: Vec<String>,
+    fallback: String,
+    listening: Vec<(String, Box<dyn SpeechToText>)>,
+    voiced: Vec<f32>,
+    chosen: Option<Box<dyn SpeechToText>>,
+}
+
+impl Ears {
+    /// Settled on `fallback` from the start when there is nothing to choose between.
+    fn new(engines: Arc<dyn SpeechEngines>, speakable: &[String], fallback: &str) -> anyhow::Result<Ears> {
+        let choosing = engines.identifies() && speakable.len() > 1 && speakable.iter().any(|l| l == fallback);
+        let mut ears = Ears {
+            speakable: speakable.to_vec(),
+            fallback: fallback.to_owned(),
+            listening: Vec::new(),
+            voiced: Vec::new(),
+            chosen: None,
+            engines,
+        };
+        if choosing {
+            for language in speakable {
+                ears.listening.push((language.clone(), ears.engines.stt(language)?));
+            }
+        } else {
+            ears.chosen = Some(ears.engines.stt(fallback)?);
+        }
+        Ok(ears)
+    }
+
+    fn accept(&mut self, samples: &[f32], voiced: bool) -> Option<Choice> {
+        if let Some(stt) = &mut self.chosen {
+            stt.accept(samples);
+            return None;
+        }
+        for (_, stt) in &mut self.listening {
+            stt.accept(samples);
+        }
+        if voiced {
+            self.voiced.extend_from_slice(samples);
+        }
+        (self.voiced.len() >= ID_SPAN).then(|| self.settle())
+    }
+
+    fn partial(&mut self) -> String {
+        self.chosen.as_mut().map(|stt| stt.partial()).unwrap_or_default()
+    }
+
+    /// Settles at the caller's first pause once there is enough to go on.
+    fn pause(&mut self) -> Option<Choice> {
+        (self.chosen.is_none() && self.voiced.len() >= ID_AT_PAUSE).then(|| self.settle())
+    }
+
+    /// A turn too short to identify is heard in the fallback language, and the language stays open.
+    fn finish(&mut self) -> (Option<Choice>, String) {
+        if self.chosen.is_none() && self.voiced.len() < ID_MIN {
+            let mut text = String::new();
+            for (language, stt) in &mut self.listening {
+                let heard = stt.finish();
+                if *language == self.fallback {
+                    text = heard;
+                }
+            }
+            self.voiced.clear();
+            return (None, text);
+        }
+        let settled = self.chosen.is_none().then(|| self.settle());
+        let text = self.chosen.as_mut().map(|stt| stt.finish()).unwrap_or_default();
+        (settled, text)
+    }
+
+    fn reset(&mut self) {
+        if let Some(stt) = &mut self.chosen {
+            stt.reset();
+            return;
+        }
+        for (_, stt) in &mut self.listening {
+            stt.reset();
+        }
+        self.voiced.clear();
+    }
+
+    fn settle(&mut self) -> Choice {
+        let voiced = std::mem::take(&mut self.voiced);
+        let started = std::time::Instant::now();
+        let scores = self.engines.identify(&voiced);
+        let took = started.elapsed();
+        let scores = match scores {
+            Some(Ok(scores)) => Some(scores),
+            Some(Err(e)) => {
+                eprintln!("voice: identifying the caller's language failed: {e:#}");
+                None
+            }
+            None => None,
+        };
+        let choice = choose(scores.as_deref(), voiced.len() as f32 / RATE as f32, &self.speakable, &self.fallback);
+        let top: Vec<String> = scores.iter().flatten().take(3).map(|(l, p)| format!("{l} {p:.2}")).collect();
+        eprintln!(
+            "voice: the call speaks {} ({}; {:.1} s voiced, {top:?}, identified in {took:.0?})",
+            choice.language,
+            if choice.identified { "identified" } else { "the user's language" },
+            voiced.len() as f64 / RATE as f64,
+        );
+        let at = self.listening.iter().position(|(l, _)| *l == choice.language).expect("the choice is speakable");
+        self.chosen = Some(self.listening.swap_remove(at).1);
+        self.listening.clear();
+        choice
+    }
+}
+
+/// Owns the call's recognizers; each step runs on the blocking pool, in order. Reports the language
+/// once settled, then partial changes, and an empty partial once a finish or reset clears the stream.
 async fn stt_worker(
-    mut stt: Box<dyn SpeechToText>,
+    mut ears: Ears,
     mut cmds: mpsc::UnboundedReceiver<SttCmd>,
     events: mpsc::UnboundedSender<Event>,
 ) {
@@ -660,17 +879,24 @@ async fn stt_worker(
     while let Some(cmd) = cmds.recv().await {
         let step = tokio::task::spawn_blocking(move || {
             let out = match cmd {
-                SttCmd::Accept(samples) => {
-                    stt.accept(&samples);
-                    SttOut::Partial(stt.partial())
+                SttCmd::Accept { samples, voiced } => {
+                    let settled = ears.accept(&samples, voiced);
+                    SttOut::Partial(settled, ears.partial())
                 }
-                SttCmd::Finish { turn } => SttOut::Finished(Some((turn, stt.finish()))),
+                SttCmd::Finish { turn } => {
+                    let (settled, text) = ears.finish();
+                    SttOut::Finished(settled, Some((turn, text)))
+                }
+                SttCmd::Pause => {
+                    let settled = ears.pause();
+                    SttOut::Partial(settled, ears.partial())
+                }
                 SttCmd::Reset => {
-                    stt.reset();
-                    SttOut::Finished(None)
+                    ears.reset();
+                    SttOut::Finished(None, None)
                 }
             };
-            (stt, out)
+            (ears, out)
         });
         let (back, out) = match step.await {
             Ok(done) => done,
@@ -679,15 +905,21 @@ async fn stt_worker(
                 return;
             }
         };
-        stt = back;
+        ears = back;
         match out {
-            SttOut::Partial(partial) => {
+            SttOut::Partial(settled, partial) => {
+                if let Some(choice) = settled {
+                    let _ = events.send(Event::Language(choice));
+                }
                 if partial != last {
                     last.clone_from(&partial);
                     let _ = events.send(Event::Partial(partial));
                 }
             }
-            SttOut::Finished(finished) => {
+            SttOut::Finished(settled, finished) => {
+                if let Some(choice) = settled {
+                    let _ = events.send(Event::Language(choice));
+                }
                 if let Some((turn, text)) = finished {
                     let _ = events.send(Event::Finished { turn, text });
                 }
@@ -795,33 +1027,60 @@ mod tests {
         tts: Arc<FakeTts>,
         stt_panics: bool,
         blank_finish: bool,
-        /// The one language loaded, and the sidecar it speaks through if not Kokoro.
+        /// The first language loaded, and the sidecar it speaks through if not Kokoro.
         language: &'static str,
         sidecar_base: Option<&'static str>,
+        second: Option<Second>,
+    }
+
+    /// A second language, which makes the call identify its caller's language.
+    struct Second {
+        language: &'static str,
+        stt: Vec<(usize, &'static str)>,
+        sidecar: &'static str,
+        /// What identification says of any clip.
+        heard: Vec<(String, f32)>,
+        /// The length of every clip identified.
+        clips: Arc<Mutex<Vec<usize>>>,
     }
 
     impl SpeechEngines for FakeEngines {
         fn languages(&self) -> Vec<String> {
-            vec![self.language.into()]
+            std::iter::once(self.language).chain(self.second.as_ref().map(|s| s.language)).map(String::from).collect()
         }
 
         fn vad(&self, _language: &str) -> anyhow::Result<Box<dyn Vad>> {
             Ok(Box::new(FakeVad))
         }
 
-        fn stt(&self, _language: &str) -> anyhow::Result<Box<dyn SpeechToText>> {
-            Ok(Box::new(FakeStt { script: self.stt.clone(), heard: 0, panics: self.stt_panics, blank_finish: self.blank_finish }))
+        fn stt(&self, language: &str) -> anyhow::Result<Box<dyn SpeechToText>> {
+            let script = match &self.second {
+                Some(second) if second.language == language => second.stt.clone(),
+                _ => self.stt.clone(),
+            };
+            Ok(Box::new(FakeStt { script, heard: 0, panics: self.stt_panics, blank_finish: self.blank_finish }))
         }
 
         fn turn(&self, _language: &str) -> Arc<dyn TurnDetector> {
             Arc::new(FakeTurn(0.9))
         }
 
-        fn tts(&self, _language: &str) -> BaseVoice {
-            match self.sidecar_base {
-                Some(id) => BaseVoice::Sidecar(id.into()),
-                None => BaseVoice::Kokoro(Arc::new(ChunkedBackend::new("kokoro", "Kokoro", self.tts.clone(), Vec::new()))),
+        fn tts(&self, language: &str) -> BaseVoice {
+            match (&self.second, self.sidecar_base) {
+                (Some(second), _) if second.language == language => BaseVoice::Sidecar(second.sidecar.into()),
+                (_, Some(id)) => BaseVoice::Sidecar(id.into()),
+                (_, None) => BaseVoice::Kokoro(Arc::new(ChunkedBackend::new("kokoro", "Kokoro", self.tts.clone(), Vec::new()))),
             }
+        }
+
+        fn identifies(&self) -> bool {
+            self.second.is_some()
+        }
+
+        fn identify(&self, samples_16k: &[f32]) -> Option<anyhow::Result<crate::audio::language::Scores>> {
+            let second = self.second.as_ref()?;
+            second.clips.lock().unwrap().push(samples_16k.len());
+            Some(Ok(second.heard.clone()))
         }
     }
 
@@ -915,7 +1174,7 @@ mod tests {
     }
 
     fn engines(stt: Vec<(usize, &'static str)>, tts: &Arc<FakeTts>) -> FakeEngines {
-        FakeEngines { stt, tts: tts.clone(), stt_panics: false, blank_finish: false, language: "en", sidecar_base: None }
+        FakeEngines { stt, tts: tts.clone(), stt_panics: false, blank_finish: false, language: "en", sidecar_base: None, second: None }
     }
 
     fn deps(stt: Vec<(usize, &'static str)>, cue: bool, tts: &Arc<FakeTts>) -> SessionDeps {
@@ -963,7 +1222,7 @@ mod tests {
         assert_eq!(log[0], CallBody::Floor { floor: Floor::UserSpeaking });
         assert_eq!(log[1], CallBody::Floor { floor: Floor::UserQuiet });
         assert!(matches!(&log[2], CallBody::Draft { turn: 1, .. }), "{log:?}");
-        assert_eq!(log[3], CallBody::Commit { turn: 1, text: "move my run".into() });
+        assert_eq!(log[3], CallBody::Commit { turn: 1, text: "move my run".into(), language: Some("en".into()) });
         assert_eq!(c.probe.frames_of(READY as usize), 1, "the ready cue plays once");
         assert_eq!(c.probe.frames_of(HEARD as usize), 1, "the heard cue follows the commit");
     }
@@ -1022,38 +1281,50 @@ mod tests {
         assert_eq!(c.probe.frames_of(moment), moment, "a tool-only reply still gets the filler");
     }
 
+    fn inbound(script: Vec<Vec<f32>>) -> Call {
+        let tts: Arc<FakeTts> = Arc::default();
+        call_with(SessionDeps { direction: Direction::Inbound, ..deps(Vec::new(), false, &tts) }, script, tts)
+    }
+
     #[tokio::test(start_paused = true)]
-    async fn a_quiet_start_to_an_inbound_call_says_hi() {
-        let hi = text(Line::Hi, "en").len();
-        let inbound = || {
-            let tts: Arc<FakeTts> = Arc::default();
-            call_with(SessionDeps { direction: Direction::Inbound, ..deps(Vec::new(), false, &tts) }, Vec::new(), tts)
-        };
-
-        let c = inbound();
-        sleep_ms(1400).await;
-        assert_eq!(c.probe.frames_of(hi), 0, "not before 1.5 s");
-        sleep_ms(2000).await;
-        assert_eq!(c.probe.frames_of(hi), hi, "the line plays once");
+    async fn an_inbound_call_is_silent_until_the_caller_speaks() {
+        let hello = text(Line::Hello, "en").len();
+        let c = inbound(Vec::new());
+        sleep_ms(7900).await;
+        assert!(c.probe.sent.lock().unwrap().is_empty(), "no word and no filler before the caller speaks");
+        assert!(c.log().is_empty());
         sleep_ms(3000).await;
-        assert_eq!(c.probe.frames_of(hi), hi);
+        assert_eq!(c.probe.frames_of(hello), hello, "a caller silent for 8 s is asked once");
+        assert_eq!(c.probe.sent.lock().unwrap().len(), hello);
 
-        let c = inbound();
+        let c = inbound(audio(&[(0.0, 2000), (0.1, 500), (0.0, 1000)]));
+        sleep_ms(30_000).await;
+        assert_eq!(c.probe.frames_of(hello), 0, "a caller who spoke is not asked");
+        assert!(!c.end.is_finished());
+
+        let c = inbound(Vec::new());
         sleep_ms(500).await;
         c.frame(CallBody::Speak { reply: 1, idx: 0, text: "hello there".into() });
-        sleep_ms(3000).await;
-        assert_eq!(c.probe.frames_of(hi), 0, "Note's own greeting needs no filler, even held");
-
-        let c = inbound();
-        sleep_ms(500).await;
-        c.frame(CallBody::Drop { reply: 1 });
-        c.frame(CallBody::Speak { reply: 1, idx: 0, text: "hello there".into() });
-        sleep_ms(3000).await;
-        assert_eq!(c.probe.frames_of(hi), hi, "a dropped reply's words are no greeting");
+        sleep_ms(10_000).await;
+        assert_eq!(c.probe.frames_of(hello), 0, "Note speaking first is not met with a prompt");
 
         let c = call(Vec::new(), Vec::new(), false);
-        sleep_ms(3000).await;
-        assert_eq!(c.probe.frames_of(hi), 0, "an outbound call opens with Note's words");
+        sleep_ms(30_000).await;
+        assert!(c.probe.sent.lock().unwrap().is_empty(), "an outbound call waits on Note's words");
+        assert!(!c.end.is_finished());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_inbound_caller_who_never_speaks_is_let_go_after_the_line() {
+        let gone = text(Line::NoOneThere, "en").len();
+        let mut c = inbound(Vec::new());
+        sleep_ms(27_000).await;
+        assert!(!c.end.is_finished());
+        let end = tokio::time::timeout(Duration::from_secs(20), &mut c.end).await.unwrap().unwrap();
+        assert_eq!(end, SessionEnd::NoOneThere);
+        assert_eq!(end.failure(), None);
+        assert_eq!(c.probe.frames_of(gone), gone, "the line plays out whole before the end");
+        assert!(c.probe.left_room.load(Ordering::SeqCst));
     }
 
     #[tokio::test(start_paused = true)]
@@ -1061,7 +1332,7 @@ mod tests {
         let tts: Arc<FakeTts> = Arc::default();
         let c = call_with(SessionDeps { direction: Direction::Inbound, ..deps(Vec::new(), false, &tts) }, Vec::new(), tts);
         c.synthesized(text(Line::Goodbye, "en")).await;
-        assert_eq!(c.tts.said.lock().unwrap()[0], text(Line::Hi, "en"));
+        assert_eq!(c.tts.said.lock().unwrap()[0], text(Line::OneMoment, "en"));
 
         let tts: Arc<FakeTts> = Arc::default();
         let c = call_with(deps(Vec::new(), false, &tts), Vec::new(), tts);
@@ -1093,23 +1364,23 @@ mod tests {
     /// In real time: a render blocked on the gate would hold a paused clock still.
     #[tokio::test]
     async fn a_sidecar_voices_lines_start_in_kokoro_and_switch_once_rendered() {
-        let hi = text(Line::Hi, "en").len();
+        let moment = text(Line::OneMoment, "en").len();
         let goodbye = text(Line::Goodbye, "en").len();
         let gate = Arc::new(Gated::default());
         let voices = vec![crate::audio::engines::VoiceInfo { id: "v".into(), label: "V".into(), languages: Vec::new(), credit: None }];
         let side: Arc<dyn SpeechBackend> = Arc::new(ChunkedBackend::new("side", "Side", gate.clone(), voices));
         let tts: Arc<FakeTts> = Arc::default();
-        let mut d = deps(Vec::new(), false, &tts);
-        d.direction = Direction::Inbound;
+        let mut d = deps(vec![(2, "move my run")], false, &tts);
         d.sidecars = vec![side];
         d.profile.voice = "side:v".into();
-        d.max_len = Duration::from_secs(3);
-        let c = call_with(d, Vec::new(), tts);
-        sleep_ms(2000).await;
-        let early_hi = c.probe.frames_of(hi);
+        d.max_len = Duration::from_secs(6);
+        let c = call_with(d, audio(&[(0.1, 600), (0.0, 1000)]), tts);
+        until_committed(&c).await;
+        sleep_ms(2500).await;
+        let early = c.probe.frames_of(moment);
         *gate.open.lock().unwrap() = true;
         gate.opened.notify_all();
-        assert_eq!(early_hi, hi, "Kokoro's hi plays while the sidecar is busy");
+        assert_eq!(early, moment, "Kokoro's filler plays while the sidecar is busy");
         let end = tokio::time::timeout(Duration::from_secs(10), c.end).await.unwrap().unwrap();
         assert_eq!(end, SessionEnd::TimedOut);
         assert!(c.probe.frames_of(SIDE as usize) > 0, "the goodbye is in the sidecar's voice");
@@ -1211,10 +1482,111 @@ mod tests {
         assert_eq!(c.probe.frames_of(JA as usize), "はい。".len(), "the reply is in the sidecar's voice");
         assert!(c.tts.said.lock().unwrap().is_empty(), "Kokoro says nothing on a Japanese call");
         let said = japanese.said.lock().unwrap().concat();
-        for line in [Line::Hi, Line::OneMoment, Line::LostNotes, Line::Goodbye, Line::NoVoice] {
+        for line in [Line::Hello, Line::OneMoment, Line::LostNotes, Line::Goodbye, Line::NoVoice] {
             assert!(said.contains(text(line, "ja")), "{line:?} in {said:?}");
             assert!(lines.kept("ja", "", "ja", line).is_some(), "{line:?} is kept");
         }
+    }
+
+    /// An English user's call with Japanese loaded beside English, speaking through `japanese`.
+    fn bilingual(heard: &[(&str, f32)], japanese: &Arc<Japanese>, direction: Direction) -> (SessionDeps, Arc<FakeTts>, Arc<Mutex<Vec<usize>>>) {
+        let tts: Arc<FakeTts> = Arc::default();
+        let clips: Arc<Mutex<Vec<usize>>> = Arc::default();
+        let second = Second {
+            language: "ja",
+            stt: vec![(2, "明日"), (5, "明日の朝走る")],
+            sidecar: "ja",
+            heard: heard.iter().map(|(l, p)| ((*l).to_owned(), *p)).collect(),
+            clips: clips.clone(),
+        };
+        let engines = Arc::new(FakeEngines { second: Some(second), ..engines(vec![(2, "move"), (5, "move my run")], &tts) });
+        let d = SessionDeps { engines, sidecars: vec![japanese_sidecar(japanese)], direction, ..deps(Vec::new(), false, &tts) };
+        (d, tts, clips)
+    }
+
+    fn committed(c: &Call) -> Vec<CallBody> {
+        c.log().into_iter().filter(|b| matches!(b, CallBody::Commit { .. } | CallBody::Draft { .. })).collect()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_caller_heard_speaking_japanese_is_transcribed_and_answered_in_japanese() {
+        let japanese = Arc::new(Japanese::default());
+        let (d, tts, clips) = bilingual(&[("ja", 0.9), ("en", 0.05)], &japanese, Direction::Inbound);
+        let c = call_with(d, audio(&[(0.0, 300), (0.1, 1000), (0.0, 1000)]), tts);
+        until_committed(&c).await;
+        let turns = committed(&c);
+        assert_eq!(
+            turns.last(),
+            Some(&CallBody::Commit { turn: 1, text: "明日の朝走る".into(), language: Some("ja".into()) }),
+            "the buffered first turn is transcribed by the Japanese recognizer: {turns:?}"
+        );
+        let clips = clips.lock().unwrap().clone();
+        assert_eq!(clips.len(), 1, "identified once");
+        assert!((ID_MIN..=ID_SPAN).contains(&clips[0]), "only the voiced audio: {clips:?}");
+
+        c.frame(CallBody::Speak { reply: 1, idx: 0, text: "はい。".into() });
+        c.frame(CallBody::SpeakDone { reply: 1 });
+        c.frame(CallBody::Play { reply: 1 });
+        sleep_ms(3000).await;
+        assert_eq!(c.probe.frames_of(JA as usize), "はい。".len(), "the reply is in the Japanese voice");
+        assert!(c.tts.said.lock().unwrap().iter().all(|t| t.is_ascii()), "Kokoro speaks no Japanese");
+        let said = japanese.said.lock().unwrap().concat();
+        assert!(said.contains(text(Line::OneMoment, "ja")), "the lines follow the language: {said}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_long_first_turn_is_identified_from_its_first_seconds() {
+        let japanese = Arc::new(Japanese::default());
+        let (d, tts, clips) = bilingual(&[("ja", 0.9)], &japanese, Direction::Inbound);
+        let c = call_with(d, audio(&[(0.1, 4000), (0.0, 1000)]), tts);
+        sleep_ms(3500).await;
+        let clips = clips.lock().unwrap().clone();
+        assert!(matches!(clips[..], [n] if (ID_SPAN..ID_SPAN + STT_CHUNK).contains(&n)), "settled while the caller still speaks: {clips:?}");
+        until_committed(&c).await;
+        assert!(matches!(committed(&c).last(), Some(CallBody::Commit { language: Some(l), .. }) if l == "ja"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_unsure_or_unspoken_language_keeps_the_users_setting() {
+        for heard in [&[("ja", 0.4), ("en", 0.3)][..], &[("ko", 0.95)]] {
+            let japanese = Arc::new(Japanese::default());
+            let (d, tts, clips) = bilingual(heard, &japanese, Direction::Outbound);
+            let c = call_with(d, audio(&[(0.1, 1000), (0.0, 1000)]), tts);
+            until_committed(&c).await;
+            assert_eq!(clips.lock().unwrap().len(), 1);
+            assert_eq!(
+                committed(&c).last(),
+                Some(&CallBody::Commit { turn: 1, text: "move my run".into(), language: Some("en".into()) }),
+                "{heard:?}"
+            );
+            c.frame(CallBody::Speak { reply: 1, idx: 0, text: "ok".into() });
+            c.frame(CallBody::SpeakDone { reply: 1 });
+            c.frame(CallBody::Play { reply: 1 });
+            c.synthesized("ok").await;
+            assert!(japanese.said.lock().unwrap().iter().all(|t| !t.contains("ok")));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_blip_before_the_first_words_leaves_the_language_open() {
+        let japanese = Arc::new(Japanese::default());
+        let (d, tts, clips) = bilingual(&[("ja", 0.9)], &japanese, Direction::Inbound);
+        let c = call_with(d, audio(&[(0.0, 200), (0.1, 100), (0.0, 2000), (0.1, 1000), (0.0, 1500)]), tts);
+        until_committed(&c).await;
+        assert_eq!(clips.lock().unwrap().len(), 1, "the blip is not identified");
+        assert!(matches!(committed(&c).last(), Some(CallBody::Commit { language: Some(l), .. }) if l == "ja"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_language_holds_after_the_first_turn() {
+        let japanese = Arc::new(Japanese::default());
+        let (d, tts, clips) = bilingual(&[("ja", 0.9)], &japanese, Direction::Inbound);
+        let c = call_with(d, audio(&[(0.1, 1000), (0.0, 1500), (0.1, 1000), (0.0, 1500)]), tts);
+        sleep_ms(8000).await;
+        let commits: Vec<_> = committed(&c).into_iter().filter(|b| matches!(b, CallBody::Commit { .. })).collect();
+        assert_eq!(commits.len(), 2, "{commits:?}");
+        assert!(commits.iter().all(|b| matches!(b, CallBody::Commit { language: Some(l), .. } if l == "ja")));
+        assert_eq!(clips.lock().unwrap().len(), 1, "identified only from the first turn");
     }
 
     #[tokio::test(start_paused = true)]
@@ -1365,7 +1737,7 @@ mod tests {
         assert_eq!(c.probe.frames_of(300), played, "the cut reply stays silent");
         assert_eq!(c.probe.frames_of(4), 0, "a late clause of the cut reply is ignored");
         assert!(!c.log().contains(&CallBody::Played { reply: 3 }));
-        assert!(c.log().contains(&CallBody::Commit { turn: 1, text: "wait actually".into() }));
+        assert!(c.log().contains(&CallBody::Commit { turn: 1, text: "wait actually".into(), language: Some("en".into()) }));
     }
 
     #[tokio::test(start_paused = true)]
@@ -1516,5 +1888,77 @@ mod tests {
         let cues = Cues::load(&[ogg, pcm.clone()], &[dir.path().join("missing.wav"), wav]);
         assert_eq!(*cues.ready, vec![0x10, 0x20]);
         assert_eq!(*cues.heard, vec![7, 8, 9]);
+    }
+
+    /// Plays clips of `NOTE_VOICE_LID_CLIPS` (16 kHz WAVs named `en-…`/`ja-…`) into calls on the real
+    /// models, each as a user set to the other language, and prints the first turn's commit and how
+    /// long after the speech it came, with the identifier and without it.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs NOTE_VOICE_MODELS and NOTE_VOICE_LID_CLIPS; prints timings"]
+    async fn the_real_models_settle_the_language_of_the_first_turn() {
+        use crate::audio::engines::{Device, Engines};
+        use crate::config::{language_id_from_dir, models_from_dir, TtsConfig};
+        let models = PathBuf::from(std::env::var_os("NOTE_VOICE_MODELS").unwrap());
+        let clips = PathBuf::from(std::env::var_os("NOTE_VOICE_LID_CLIPS").unwrap());
+        let load = || Engines::load(&models_from_dir(&models, &TtsConfig::default()), Device::Cpu).unwrap();
+        let with: Arc<dyn SpeechEngines> = Arc::new(load().with_identifier(language_id_from_dir(&models).as_ref()));
+        let without: Arc<dyn SpeechEngines> = Arc::new(load());
+        let mut names: Vec<String> =
+            std::fs::read_dir(&clips).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        names.sort();
+        let (mut right, mut lag_with, mut lag_without) = (0, Vec::new(), Vec::new());
+        for name in names.iter().filter(|n| n.contains("-ami-") || n.contains("-bill-")) {
+            let want = &name[..2];
+            let mut reader = hound::WavReader::open(clips.join(name)).unwrap();
+            let speech: Vec<f32> = reader.samples::<i16>().map(|s| f32::from(s.unwrap()) / 32768.0).collect();
+            let lead = vec![0.0; RATE * 3 / 10];
+            let tail = vec![0.0; RATE * 3];
+            let script: Vec<Vec<f32>> = [lead.as_slice(), &speech, &tail].concat().chunks(160).map(<[f32]>::to_vec).collect();
+            let spoken = Duration::from_millis(((lead.len() + speech.len()) / 16) as u64);
+            let setting = if want == "ja" { "en" } else { "ja" };
+            for (identifying, engines, lags, profile) in [(true, &with, &mut lag_with, setting), (false, &without, &mut lag_without, want)] {
+                let japanese = Arc::new(Japanese::default());
+                let tts: Arc<FakeTts> = Arc::default();
+                let d = SessionDeps {
+                    engines: engines.clone(),
+                    sidecars: vec![japanese_sidecar(&japanese)],
+                    profile: VoiceProfile { language: profile.into(), voice: String::new(), cue: false },
+                    direction: Direction::Inbound,
+                    ..deps(Vec::new(), false, &tts)
+                };
+                let started = std::time::Instant::now();
+                let c = call_with(d, script.clone(), tts);
+                let commit = loop {
+                    if let Some(b) = c.log().into_iter().find(|b| matches!(b, CallBody::Commit { .. })) {
+                        break Some((b, started.elapsed()));
+                    }
+                    if started.elapsed() > spoken + Duration::from_secs(5) {
+                        break None;
+                    }
+                    std::thread::sleep(Duration::from_millis(2));
+                };
+                c.inbox.send(SessionIn::Frame(CallBody::HangUp)).unwrap();
+                let Some((CallBody::Commit { text, language, .. }, at)) = commit else {
+                    println!("{name:<18} set to {profile}: nothing committed");
+                    continue;
+                };
+                let lag = at.saturating_sub(spoken);
+                lags.push(lag);
+                if identifying {
+                    right += usize::from(language.as_deref() == Some(want));
+                    println!("{name:<18} set to {setting}: {language:?} {text:?}, committed {lag:?} after the speech");
+                }
+            }
+        }
+        let median = |v: &mut Vec<Duration>| {
+            v.sort();
+            v[v.len() / 2]
+        };
+        println!(
+            "{right}/{} calls settled on the clip's language; median commit lag {:?} identifying, {:?} on the right language without",
+            lag_with.len(),
+            median(&mut lag_with),
+            median(&mut lag_without)
+        );
     }
 }

@@ -101,6 +101,7 @@ impl Default for CallSettings {
     }
 }
 
+#[derive(Clone)]
 pub struct CallDeps {
     pub db: Arc<Mutex<Connection>>,
     pub config_dir: PathBuf,
@@ -150,8 +151,9 @@ impl CallDeps {
         username: &str,
         reason: &brief::Reason,
         thread_tail: Option<i64>,
+        lang: crate::text::Lang,
     ) -> anyhow::Result<(String, Vec<serde_json::Value>)> {
-        let system = brief::build(&self.session(), user_id, username, reason, thread_tail, jiff::Timestamp::now())?;
+        let system = brief::build(&self.session(), user_id, username, reason, thread_tail, jiff::Timestamp::now(), lang)?;
         let mut tools = crate::tools::schemas(SessionKind::Call);
         if self.search.is_none() {
             tools.retain(|s| s["name"] != "web_search");
@@ -165,6 +167,9 @@ struct Live {
     user_id: i64,
     username: String,
     conversation_id: i64,
+    /// Why the call is happening and the thread its prompt quotes, to write it again in another language.
+    reason: brief::Reason,
+    thread_tail: Option<i64>,
     system: String,
     tools: Vec<serde_json::Value>,
     opening: Option<driver::Opening>,
@@ -238,7 +243,8 @@ impl CallManager {
             .flatten();
         let Some((user_id, username, message, conversation_id)) = row else { return false };
         let msg = message.and_then(|m| serde_json::from_str::<OutboundMessage>(&m).ok());
-        let started = d.prompt(user_id, &username, &reason(msg.as_ref()), None).and_then(|(system, tools)| {
+        let lang = crate::text::Lang::for_user(&d.config_dir, &username);
+        let started = d.prompt(user_id, &username, &reason(msg.as_ref()), None, lang).and_then(|(system, tools)| {
             let history = crate::talk::history(&crate::db_guard(&d.db), conversation_id, RESUMED_HISTORY)?;
             Ok((system, tools, history))
         });
@@ -247,7 +253,11 @@ impl CallManager {
                 let mut initial = jobs::JobTable::recover(&d.db, call_id);
                 initial.push(render::Item::System(RESTARTED.into()));
                 let call_id = call_id.to_string();
-                self.spawn(d, Live { call_id, user_id, username, conversation_id, system, tools, opening: None, history, initial });
+                let reason = reason(msg.as_ref());
+                self.spawn(
+                    d,
+                    Live { call_id, user_id, username, conversation_id, reason, thread_tail: None, system, tools, opening: None, history, initial },
+                );
                 true
             }
             Err(e) => {
@@ -272,10 +282,11 @@ impl CallManager {
                 .ok();
             let Some(username) = username else { return };
             let conversation_id = owned_conversation(&d.db, user_id, msg.conversation_id);
-            let Ok((system, tools)) = d.prompt(user_id, &username, &reason(Some(&msg)), conversation_id) else {
+            let lang = crate::text::Lang::for_user(&d.config_dir, &username);
+            let Ok((system, tools)) = d.prompt(user_id, &username, &reason(Some(&msg)), conversation_id, lang) else {
                 return;
             };
-            let ringing = crate::model_text::phone_ringing(crate::text::Lang::for_user(&d.config_dir, &username));
+            let ringing = crate::model_text::phone_ringing(lang);
             let messages = [Message::Assistant { text: msg.body.clone(), tool_calls: vec![] }, Message::User(ringing.into())];
             let req = ChatRequest { system: &system, messages: &messages, tools: &tools, background: false };
             let opts = StreamOpts { first_token: d.settings.first_token };
@@ -284,7 +295,8 @@ impl CallManager {
     }
 
     /// Starts the conversation of a call just answered, in the thread its
-    /// message belongs to or a new one; a call with no message opens with a greeting.
+    /// message belongs to or a new one. A call with no message is the user's,
+    /// and waits for them to speak first.
     fn answer(&self, d: &CallDeps, call_id: &str) -> anyhow::Result<()> {
         let _once = self.resuming.lock().unwrap_or_else(PoisonError::into_inner);
         if self.is_live(call_id) {
@@ -302,7 +314,7 @@ impl CallManager {
         let lang = crate::text::Lang::for_user(&d.config_dir, &username);
         let msg = message.map(|m| serde_json::from_str::<OutboundMessage>(&m)).transpose()?;
         let existing = owned_conversation(&d.db, user_id, msg.as_ref().and_then(|m| m.conversation_id));
-        let (system, tools) = d.prompt(user_id, &username, &reason(msg.as_ref()), existing)?;
+        let (system, tools) = d.prompt(user_id, &username, &reason(msg.as_ref()), existing, lang)?;
         let conversation_id = {
             let conn = crate::db_guard(&d.db);
             let tx = conn.unchecked_transaction()?;
@@ -323,9 +335,11 @@ impl CallManager {
                 user_id,
                 username,
                 conversation_id,
+                reason: reason(msg.as_ref()),
+                thread_tail: existing,
                 system,
                 tools,
-                initial: if msg.is_none() { vec![render::Item::System(crate::text::call_greet(lang))] } else { Vec::new() },
+                initial: Vec::new(),
                 opening: msg.map(|m| driver::Opening { text: m.body, in_thread: existing.is_some() }),
                 history: Vec::new(),
             },
@@ -341,6 +355,11 @@ impl CallManager {
         let id = live.call_id.clone();
         let started = Instant::now();
         let s = &d.settings;
+        let rebrief: driver::Rebrief = {
+            let (d, user_id, username, reason, tail) =
+                (d.clone(), live.user_id, live.username.clone(), live.reason, live.thread_tail);
+            Arc::new(move |lang| d.prompt(user_id, &username, &reason, tail, lang).map(|(system, _)| system))
+        };
         let deps = DriverDeps {
             call_id: live.call_id,
             user_id: live.user_id,
@@ -350,6 +369,7 @@ impl CallManager {
             db: d.db.clone(),
             llm: d.voice_llm.clone(),
             system: Arc::new(live.system),
+            rebrief,
             tools: Arc::new(live.tools),
             runner: Arc::new(CallRunner {
                 db: d.db.clone(),
@@ -594,8 +614,8 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         drop(rx);
         m.calls().insert("c1".into(), tx);
-        m.on_frame("c1", &CallBody::Commit { turn: 1, text: "hello".into() });
-        m.on_frame("c1", &CallBody::Commit { turn: 2, text: "hello?".into() });
+        m.on_frame("c1", &CallBody::Commit { turn: 1, text: "hello".into(), language: None });
+        m.on_frame("c1", &CallBody::Commit { turn: 2, text: "hello?".into(), language: None });
         assert!(!m.is_live("c1"));
         assert_eq!(*sent.lock().unwrap(), vec![CallBody::HangUp]);
         let logged: i64 = crate::db_guard(&db)
@@ -695,33 +715,42 @@ mod tests {
         assert_eq!(openings("!= ?1"), 1, "a new thread gets the opening");
     }
 
-    #[test]
-    fn an_inbound_call_greets_first() {
-        let tmp = tempfile::tempdir().unwrap();
-        configured(tmp.path());
-        let (db, _) = seeded();
-        crate::db_guard(&db)
+    fn inbound_call(db: &Arc<Mutex<Connection>>) {
+        crate::db_guard(db)
             .execute(
                 "INSERT INTO voice_calls (id, user_id, direction, state, ring_by, created_at, inbound_key)
                  VALUES ('c1', 1, 'inbound', 'answered', 'x', 'x', '$ev')",
                 [],
             )
             .unwrap();
+    }
+
+    #[test]
+    fn an_inbound_call_waits_for_the_caller_to_speak_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        configured(tmp.path());
+        let (db, _) = seeded();
+        inbound_call(&db);
         let llm = Arc::new(crate::providers::mock::MockLLM::streamed(vec![vec![crate::providers::mock::StreamPiece::Text(
             "Hey Aki.",
         )]]));
         let (m, sent) = managed(&db, tmp.path(), llm.clone());
         m.on_frame("c1", &CallBody::Outcome { outcome: Outcome::Answered });
-        wait_until("the greeting", || !llm.seen().is_empty());
+        wait_until("the call's thread", || {
+            crate::db_guard(&db)
+                .query_row("SELECT conversation_id IS NOT NULL FROM voice_calls WHERE id = 'c1'", [], |r| r.get(0))
+                .unwrap()
+        });
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(llm.seen().is_empty(), "no opening turn before the caller speaks");
+        assert!(sent.lock().unwrap().is_empty(), "nothing said: {:?}", sent.lock().unwrap());
+
+        m.on_frame("c1", &CallBody::Commit { turn: 1, text: "hey".into(), language: Some("en".into()) });
+        wait_until("the first reply", || !llm.seen().is_empty());
         m.on_frame("c1", &CallBody::Ended);
         let seen = &llm.seen()[0];
         assert!(seen.system.contains("The user called you."), "{}", seen.system);
-        let last_user = seen.messages.iter().rev().find_map(|msg| match msg {
-            Message::User(t) => Some(t.clone()),
-            _ => None,
-        });
-        assert!(last_user.as_deref().is_some_and(|t| t.contains("[note] the user called you")), "{:?}", seen.messages);
-        assert!(!sent.lock().unwrap().contains(&CallBody::HangUp));
+        assert!(seen.messages.iter().any(|msg| matches!(msg, Message::User(t) if t.contains("hey"))), "{:?}", seen.messages);
         let title: String = crate::db_guard(&db)
             .query_row(
                 "SELECT v.title FROM voice_calls c JOIN conversations v ON v.id = c.conversation_id WHERE c.id = 'c1'",
@@ -730,6 +759,33 @@ mod tests {
             )
             .unwrap();
         assert_eq!(title, "Call");
+    }
+
+    #[test]
+    fn a_caller_heard_in_japanese_is_answered_only_in_japanese() {
+        let tmp = tempfile::tempdir().unwrap();
+        configured(tmp.path());
+        let (db, _) = seeded();
+        inbound_call(&db);
+        let llm = Arc::new(crate::providers::mock::MockLLM::streamed(vec![vec![crate::providers::mock::StreamPiece::Text(
+            "うん。",
+        )]]));
+        let (m, _) = managed(&db, tmp.path(), llm.clone());
+        m.on_frame("c1", &CallBody::Outcome { outcome: Outcome::Answered });
+        wait_until("the call's thread", || {
+            crate::db_guard(&db)
+                .query_row("SELECT conversation_id IS NOT NULL FROM voice_calls WHERE id = 'c1'", [], |r| r.get(0))
+                .unwrap()
+        });
+        m.on_frame("c1", &CallBody::Commit { turn: 1, text: "もしもし".into(), language: Some("ja".into()) });
+        wait_until("the first reply", || !llm.seen().is_empty());
+        m.on_frame("c1", &CallBody::Ended);
+        let system = &llm.seen()[0].system;
+        let ja = crate::text::Lang::Ja;
+        assert!(system.starts_with(crate::model_text::call_briefly(ja)), "{system}");
+        assert!(system.contains(crate::model_text::SPEAK_JAPANESE), "{system}");
+        assert!(system.ends_with(crate::model_text::call_speaks_only(ja)), "{system}");
+        assert!(!system.contains(crate::model_text::call_speaks_only(crate::text::Lang::En)), "{system}");
     }
 
     #[test]
@@ -749,7 +805,7 @@ mod tests {
         )]]));
         let (m, _) = managed(&db, tmp.path(), llm.clone());
         assert_eq!(m.resume(), 1);
-        m.on_frame("c1", &CallBody::Commit { turn: 1, text: "hello?".into() });
+        m.on_frame("c1", &CallBody::Commit { turn: 1, text: "hello?".into(), language: None });
         wait_until("a turn", || !llm.seen().is_empty());
         m.on_frame("c1", &CallBody::Ended);
         let seen = &llm.seen()[0];
@@ -774,8 +830,8 @@ mod tests {
             .unwrap();
         let (m, sent) = managed(&db, tmp.path(), Arc::new(crate::providers::mock::MockLLM::streamed(vec![])));
         assert_eq!(m.resume(), 0, "no voice prompt, so no conversation");
-        m.on_frame("c1", &CallBody::Commit { turn: 1, text: "hello".into() });
-        m.on_frame("c1", &CallBody::Commit { turn: 2, text: "hello?".into() });
+        m.on_frame("c1", &CallBody::Commit { turn: 1, text: "hello".into(), language: None });
+        m.on_frame("c1", &CallBody::Commit { turn: 2, text: "hello?".into(), language: None });
         assert_eq!(*sent.lock().unwrap(), vec![CallBody::HangUp]);
         let logged: i64 = crate::db_guard(&db)
             .query_row("SELECT COUNT(*) FROM event_log WHERE kind = 'voice_error'", [], |r| r.get(0))

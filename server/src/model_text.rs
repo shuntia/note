@@ -37,6 +37,15 @@ pub fn call_briefly(l: Lang) -> &'static str {
     )
 }
 
+/// Closes every call's prompt: the language the caller was heard speaking, over their setting.
+pub fn call_speaks_only(l: Lang) -> &'static str {
+    l.of(
+        "The caller is speaking English on this call. Reply only in English, whatever language the rest of \
+         these instructions, the notes or the thread are in.",
+        "この通話で相手は日本語を話しています。ほかの指示やメモ、スレッドが何語で書かれていても、返事は日本語だけで話してください。",
+    )
+}
+
 pub fn share_from(l: Lang, owner: &str) -> String {
     match l {
         Lang::En => format!("# From {owner}"),

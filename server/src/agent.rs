@@ -175,10 +175,21 @@ pub(crate) fn system_prompt(
     kind: SessionKind,
     now: jiff::Timestamp,
 ) -> Result<String> {
+    system_prompt_in(deps, user_id, username, kind, now, session_lang(deps, username, kind))
+}
+
+/// `system_prompt` in `lang`, whatever the reader's setting.
+pub(crate) fn system_prompt_in(
+    deps: &SessionDeps,
+    user_id: i64,
+    username: &str,
+    kind: SessionKind,
+    now: jiff::Timestamp,
+    lang: Lang,
+) -> Result<String> {
     // An import session briefs one task and an inbox session judges one item,
     // both on a caller's behalf: each gets its own instructions and none of the
     // user's standing context.
-    let lang = session_lang(deps, username, kind);
     let load = |name| crate::prompts::load_in(deps.config_dir, username, name, lang);
     let mut system = match kind {
         SessionKind::Import => load("import")?,

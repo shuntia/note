@@ -11,15 +11,26 @@ pub enum Line {
     LostNotes,
     Goodbye,
     CantReach,
-    Hi,
+    /// An inbound caller has said nothing yet.
+    Hello,
+    /// An inbound caller stayed silent through `Hello`: said, then the call ends.
+    NoOneThere,
     /// The call's voice is down: said from the kept rendering, then the call ends.
     NoVoice,
     /// Speech recognition stopped mid-call: said, then the call ends.
     NoEars,
 }
 
-pub const ALL: [Line; 7] =
-    [Line::Hi, Line::OneMoment, Line::LostNotes, Line::Goodbye, Line::CantReach, Line::NoVoice, Line::NoEars];
+pub const ALL: [Line; 8] = [
+    Line::Hello,
+    Line::NoOneThere,
+    Line::OneMoment,
+    Line::LostNotes,
+    Line::Goodbye,
+    Line::CantReach,
+    Line::NoVoice,
+    Line::NoEars,
+];
 
 /// English stands in for any language without its own wording.
 pub fn text(line: Line, language: &str) -> &'static str {
@@ -28,14 +39,16 @@ pub fn text(line: Line, language: &str) -> &'static str {
         ("ja", Line::LostNotes) => "ごめん、メモを一瞬見失っちゃった。",
         ("ja", Line::Goodbye) => "あとでメッセージするね。またね。",
         ("ja", Line::CantReach) => "いまメモにつながらないから、メッセージで送るね。",
-        ("ja", Line::Hi) => "もしもし！",
+        ("ja", Line::Hello) => "もしもし、聞こえてる？",
+        ("ja", Line::NoOneThere) => "何も聞こえないから、いったん切るね。またかけてね。",
         ("ja", Line::NoVoice) => "ごめん、いま声が出せないから、メッセージで送るね。",
         ("ja", Line::NoEars) => "ごめん、いま声が聞き取れないから、いったん切るね。",
         (_, Line::OneMoment) => "One moment.",
         (_, Line::LostNotes) => "I lost my notes for a moment.",
         (_, Line::Goodbye) => "I'll message you instead. Bye for now.",
         (_, Line::CantReach) => "I can't reach your notes right now. I'll message you.",
-        (_, Line::Hi) => "Hi!",
+        (_, Line::Hello) => "Hello? I'm listening.",
+        (_, Line::NoOneThere) => "I can't hear anything, so I'll hang up for now. Call me anytime.",
         (_, Line::NoVoice) => "I can't speak right now. I'll message you instead.",
         (_, Line::NoEars) => "I can't make out what you're saying right now, so I'll hang up.",
     }
@@ -174,7 +187,7 @@ mod tests {
         assert_eq!(text(Line::LostNotes, "en"), "I lost my notes for a moment.");
         assert_eq!(text(Line::Goodbye, "en"), "I'll message you instead. Bye for now.");
         assert_eq!(text(Line::CantReach, "en"), "I can't reach your notes right now. I'll message you.");
-        assert_eq!(text(Line::Hi, "en"), "Hi!");
+        assert_eq!(text(Line::Hello, "en"), "Hello? I'm listening.");
         assert_eq!(text(Line::NoVoice, "en"), "I can't speak right now. I'll message you instead.");
         assert_eq!(text(Line::NoEars, "en"), "I can't make out what you're saying right now, so I'll hang up.");
     }
@@ -184,13 +197,13 @@ mod tests {
         for line in ALL {
             let ja = text(line, "ja");
             assert_ne!(ja, text(line, "en"), "{line:?}");
-            assert!(ja.ends_with(['。', '！']), "{ja}");
+            assert!(ja.ends_with(['。', '！', '？']), "{ja}");
             assert!(ja.chars().count() <= 28, "{ja}");
             assert!(!ja.chars().any(|c| c.is_ascii_alphabetic()), "{ja}");
         }
-        assert_eq!(text(Line::Hi, "ja"), "もしもし！");
+        assert_eq!(text(Line::Hello, "ja"), "もしもし、聞こえてる？");
         assert_eq!(text(Line::OneMoment, "ja"), "ちょっと待ってね。");
-        assert_eq!(text(Line::Hi, "fr"), text(Line::Hi, "en"), "English stands in");
+        assert_eq!(text(Line::Hello, "fr"), text(Line::Hello, "en"), "English stands in");
     }
 
     #[test]
@@ -199,12 +212,12 @@ mod tests {
         let kokoro: Arc<dyn SpeechBackend> = Arc::new(ChunkedBackend::new("kokoro", "Kokoro", tts.clone(), Vec::new()));
         let lines = Lines::default();
         let default = Speaker::new(kokoro.clone(), "");
-        let a = lines.get(&default, &*kokoro, "en", Line::Hi).unwrap();
-        let b = lines.get(&default, &*kokoro, "en", Line::Hi).unwrap();
+        let a = lines.get(&default, &*kokoro, "en", Line::Hello).unwrap();
+        let b = lines.get(&default, &*kokoro, "en", Line::Hello).unwrap();
         assert!(Arc::ptr_eq(&a, &b));
-        assert_eq!(*a, vec![3]);
-        let c = lines.get(&Speaker::new(kokoro.clone(), "af"), &*kokoro, "en", Line::Hi).unwrap();
-        assert_eq!(*c, vec![5]);
+        assert_eq!(*a, vec![21]);
+        let c = lines.get(&Speaker::new(kokoro.clone(), "af"), &*kokoro, "en", Line::Hello).unwrap();
+        assert_eq!(*c, vec![23]);
         lines.get(&default, &*kokoro, "en", Line::OneMoment).unwrap();
         assert_eq!(tts.0.load(Ordering::SeqCst), 3);
     }
@@ -215,8 +228,8 @@ mod tests {
         let kokoro: Arc<dyn SpeechBackend> = Arc::new(ChunkedBackend::new("kokoro", "Kokoro", tts.clone(), Vec::new()));
         let side: Arc<dyn SpeechBackend> = Arc::new(ChunkedBackend::new("side", "Side", tts.clone(), Vec::new()));
         let lines = Lines::default();
-        let pcm = lines.get(&Speaker::new(side, "down"), &*kokoro, "en", Line::Hi).unwrap();
-        assert_eq!(*pcm, vec![3]);
+        let pcm = lines.get(&Speaker::new(side, "down"), &*kokoro, "en", Line::Hello).unwrap();
+        assert_eq!(*pcm, vec![21]);
     }
 
     #[test]
@@ -224,11 +237,11 @@ mod tests {
         let tts = Arc::new(CountingTts::default());
         let side = Speaker::new(Arc::new(ChunkedBackend::new("side", "Side", tts.clone(), Vec::new())), "v");
         let lines = Lines::default();
-        assert!(lines.upgrade(&side, "en", Line::Hi, &|| true).unwrap().is_none());
-        assert!(lines.cached(&side, "en", Line::Hi).is_none());
-        let pcm = lines.upgrade(&side, "en", Line::Hi, &|| false).unwrap().unwrap();
-        assert_eq!(*pcm, vec![4]);
-        assert!(Arc::ptr_eq(&lines.cached(&side, "en", Line::Hi).unwrap(), &pcm));
+        assert!(lines.upgrade(&side, "en", Line::Hello, &|| true).unwrap().is_none());
+        assert!(lines.cached(&side, "en", Line::Hello).is_none());
+        let pcm = lines.upgrade(&side, "en", Line::Hello, &|| false).unwrap().unwrap();
+        assert_eq!(*pcm, vec![22]);
+        assert!(Arc::ptr_eq(&lines.cached(&side, "en", Line::Hello).unwrap(), &pcm));
     }
 
     #[test]
@@ -243,7 +256,7 @@ mod tests {
         drop(lines);
         let lines = Lines::new(Some(dir.path().join("lines")));
         assert_eq!(lines.kept("ja", "", "ja", Line::NoVoice).as_deref(), Some(&*pcm));
-        assert!(lines.kept("ja", "", "ja", Line::Hi).is_none());
+        assert!(lines.kept("ja", "", "ja", Line::Hello).is_none());
         assert!(lines.kept("ja", "other", "ja", Line::NoVoice).is_none());
         assert_eq!(tts.0.load(Ordering::SeqCst), 1);
     }

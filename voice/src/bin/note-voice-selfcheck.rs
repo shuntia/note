@@ -4,7 +4,7 @@ use std::time::Instant;
 use livekit::webrtc::audio_source::native::NativeAudioSource;
 use livekit::webrtc::audio_source::AudioSourceOptions;
 use note_voice::audio::engines::{Device, Engines, SpeechEngines, SpeechToText};
-use note_voice::config::{models_from_dir, TtsConfig, REAZON_DIR};
+use note_voice::config::{language_id_from_dir, models_from_dir, TtsConfig, REAZON_DIR};
 
 const SENTENCE: &str = "Move my run to tomorrow at seven.";
 /// 160 ms of 16 kHz audio, as a call feeds the recognizer.
@@ -27,7 +27,7 @@ fn main() -> anyhow::Result<()> {
         _ => Device::Auto,
     };
     let t = Instant::now();
-    let engines = Engines::load(&models_from_dir(&dir, &TtsConfig::default()), device)?;
+    let engines = Engines::load(&models_from_dir(&dir, &TtsConfig::default()), device)?.with_identifier(language_id_from_dir(&dir).as_ref());
     let languages = engines.languages();
     println!("engines loaded in {:.2?} (languages: {languages:?})", t.elapsed());
     println!("onnxruntime libraries mapped: {}", onnxruntime_images()?);
@@ -55,7 +55,21 @@ fn english(engines: &Engines) -> anyhow::Result<()> {
     let t = Instant::now();
     let p = engines.turn("en").complete(&pcm16);
     println!("en turn: {p:.3} complete in {:.2?}", t.elapsed());
+    identify(engines, "en", &pcm16);
     Ok(())
+}
+
+/// Prints the three likeliest languages of the clip's first 2.5 s and how long telling them took.
+fn identify(engines: &Engines, language: &str, pcm16: &[f32]) {
+    let t = Instant::now();
+    match engines.identify(&pcm16[..pcm16.len().min(40_000)]) {
+        Some(Ok(scores)) => {
+            let top: Vec<String> = scores.iter().take(3).map(|(l, p)| format!("{l} {p:.2}")).collect();
+            println!("{language} language id: {top:?} in {:.2?}", t.elapsed());
+        }
+        Some(Err(e)) => println!("{language} language id failed: {e:#}"),
+        None => println!("{language} language id: no identifier loaded"),
+    }
 }
 
 /// Decodes a 16 kHz mono WAV of Japanese speech, printing the transcript, the partials and the timings.
@@ -74,6 +88,7 @@ fn japanese(engines: &Engines, wav: &Path) -> anyhow::Result<()> {
     let t = Instant::now();
     let p = engines.turn("ja").complete(&pcm16);
     println!("ja turn: {p:.3} complete in {:.2?}", t.elapsed());
+    identify(engines, "ja", &pcm16);
     Ok(())
 }
 

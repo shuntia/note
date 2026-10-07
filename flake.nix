@@ -128,10 +128,14 @@
           };
 
           # English: Nemotron streaming STT + Kokoro; Japanese: ReazonSpeech offline STT (its voice is a
-          # sidecar); Silero VAD and Smart Turn serve every language. Two Japanese test clips stay for the
-          # selfcheck.
+          # sidecar); Silero VAD and Smart Turn serve every language, and Whisper-tiny (int8) tells which
+          # language a caller speaks. Two Japanese test clips stay for the selfcheck.
           voiceModels = pkgs.runCommand "note-voice-models" { } ''
-            mkdir -p $out/nemotron $out/kokoro $out/ja/reazonspeech
+            mkdir -p $out/nemotron $out/kokoro $out/ja/reazonspeech $out/whisper-tiny
+            tar xjf ${pkgs.fetchurl {
+              url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-whisper-tiny.tar.bz2";
+              hash = "sha256-xGEWmU5TmqFlJm2WsyUlJyhCnBJTXrnYtqKxDxKeZrE=";
+            }} -C $out/whisper-tiny --strip-components=1 --wildcards '*/tiny-encoder.int8.onnx' '*/tiny-decoder.int8.onnx' '*/tiny-tokens.txt'
             tar xjf ${pkgs.fetchurl {
               url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-zipformer-ja-reazonspeech-2024-08-01.tar.bz2";
               hash = "sha256-4JgdDV17RG1BAQgxtZCR6/V9Kqe3mYD2fKN69GC1hC0=";

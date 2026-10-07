@@ -21,6 +21,7 @@ enum Cmd {
     Push { reply: u64, text: String },
     Finish { reply: u64 },
     Cancel { reply: u64 },
+    Voice { speaker: Speaker, fallback: Arc<dyn SpeechBackend> },
 }
 
 enum Out {
@@ -156,6 +157,11 @@ impl SpeechQueue {
     fn note_rendering(&self) {
         let busy = self.replies.values().any(|s| s.opened && !s.ended && s.gate != Gate::Dropped);
         self.rendering.store(busy, Ordering::SeqCst);
+    }
+
+    /// Replies that open from here on speak in `speaker`, falling back to `fallback`.
+    pub fn set_voice(&mut self, speaker: Speaker, fallback: Arc<dyn SpeechBackend>) {
+        self.send(Cmd::Voice { speaker, fallback });
     }
 
     /// Clauses reach the stream in idx order.
@@ -422,6 +428,10 @@ impl Worker {
                 if let Some(at) = self.streams.iter().position(|a| a.reply == reply) {
                     self.streams.remove(at).stream.cancel();
                 }
+            }
+            Cmd::Voice { speaker, fallback } => {
+                self.speaker = speaker;
+                self.fallback = fallback;
             }
         }
     }

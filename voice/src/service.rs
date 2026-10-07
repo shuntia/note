@@ -929,8 +929,11 @@ fn loaded_or_empty(loaded: anyhow::Result<Engines>) -> Engines {
 }
 
 pub async fn run(cfg: VoiceServiceConfig) -> anyhow::Result<()> {
-    let (models, device) = (cfg.model_sets(), cfg.device);
-    let loaded = tokio::task::spawn_blocking(move || Engines::load(&models, device)).await;
+    let (models, device, language_id) = (cfg.model_sets(), cfg.device, cfg.language_id());
+    let loaded = tokio::task::spawn_blocking(move || {
+        Engines::load(&models, device).map(|e| e.with_identifier(language_id.as_ref()))
+    })
+    .await;
     let engines = loaded_or_empty(loaded.map_err(anyhow::Error::from).and_then(|r| r));
     let backends = Backends { engines: Arc::new(engines), media: Arc::new(LiveKitJoin) };
     run_with(cfg, PeerConfig::new(Role::Voice), backends).await

@@ -83,6 +83,8 @@ pub struct TurnMachine {
     state: State,
     partial: String,
     playing: bool,
+    /// Partials are withheld, so a turn without one may still hold words.
+    blind: bool,
 }
 
 impl TurnMachine {
@@ -94,7 +96,16 @@ impl TurnMachine {
             state: State::Idle,
             partial: String::new(),
             playing: false,
+            blind: false,
         }
+    }
+
+    pub fn set_backchannels(&mut self, backchannels: &'static [&'static str]) {
+        self.backchannels = backchannels.iter().map(|w| units(w)).collect();
+    }
+
+    pub fn set_blind(&mut self, blind: bool) {
+        self.blind = blind;
     }
 
     pub fn input(&mut self, i: Input) -> Vec<Action> {
@@ -137,7 +148,7 @@ impl TurnMachine {
                 out
             }
             State::Paused { since, .. } if now.saturating_sub(since) >= self.cfg.incomplete_cap => {
-                if self.partial.is_empty() {
+                if self.partial.is_empty() && !self.blind {
                     self.state = State::Idle;
                     Vec::new()
                 } else {
@@ -307,6 +318,23 @@ mod tests {
         m.input(Input::TurnScore { at: ms(710), p: 0.2 });
         assert!(m.tick(ms(1690)).is_empty());
         assert_eq!(m.tick(ms(1700)), vec![Action::Commit { turn: 1, text_hint: "so".into() }]);
+    }
+
+    #[test]
+    fn a_turn_heard_without_partials_still_commits_at_the_silence_cap() {
+        let mut m = TurnMachine::new(TurnConfig::default(), BACKCHANNELS_EN);
+        m.set_blind(true);
+        m.input(Input::Vad { at: ms(0), speech: true });
+        m.input(Input::Vad { at: ms(500), speech: false });
+        assert_eq!(m.tick(ms(700)), vec![Action::Floor(Floor::UserQuiet), Action::ScoreTurn], "no draft without words");
+        m.input(Input::TurnScore { at: ms(710), p: 0.2 });
+        assert_eq!(m.tick(ms(1700)), vec![Action::Commit { turn: 1, text_hint: String::new() }]);
+
+        m.set_blind(false);
+        m.input(Input::Vad { at: ms(2000), speech: true });
+        m.input(Input::Vad { at: ms(2500), speech: false });
+        m.tick(ms(2700));
+        assert!(m.tick(ms(3700)).is_empty(), "a wordless turn is let go once partials flow");
     }
 
     #[test]

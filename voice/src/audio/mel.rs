@@ -21,19 +21,38 @@ pub fn log_mel(samples_16k: &[f32]) -> Vec<f32> {
     let mut x = vec![0.0f32; WINDOW_SAMPLES - tail.len()];
     x.extend_from_slice(tail);
     normalize(&mut x);
+    whisper_features(&x, MEL_FRAMES, 0)
+}
 
-    let power = power_spectrogram(&x);
+/// Whisper's log-mel features of the whole clip, one frame per 10 ms, followed by `pad` frames of
+/// the clip's floor. Returns `MEL_BINS × (frames + pad)`, mel-major, and the frame count with the pad.
+pub fn whisper_log_mel(samples_16k: &[f32], pad: usize) -> (Vec<f32>, usize) {
+    let frames = samples_16k.len() / HOP;
+    (whisper_features(samples_16k, frames, pad), frames + pad)
+}
+
+fn whisper_features(x: &[f32], frames: usize, pad: usize) -> Vec<f32> {
+    let power = power_spectrogram(x, frames);
     let filters = mel_filters();
-    let mut out = vec![0.0f32; MEL_BINS * MEL_FRAMES];
+    let width = frames + pad;
+    let mut out = vec![0.0f32; MEL_BINS * width];
     for (bin, filter) in filters.iter().enumerate() {
         for (frame, spectrum) in power.iter().enumerate() {
             let energy: f64 = filter.iter().zip(spectrum).map(|(w, p)| w * p).sum();
-            out[bin * MEL_FRAMES + frame] = energy.max(1e-10).log10() as f32;
+            out[bin * width + frame] = energy.max(1e-10).log10() as f32;
         }
     }
-    let floor = out.iter().copied().fold(f32::NEG_INFINITY, f32::max) - 8.0;
-    for v in &mut out {
-        *v = (v.max(floor) + 4.0) / 4.0;
+    let peak = (0..MEL_BINS)
+        .flat_map(|bin| &out[bin * width..bin * width + frames])
+        .copied()
+        .fold(f32::NEG_INFINITY, f32::max);
+    let floor = peak - 8.0;
+    for bin in 0..MEL_BINS {
+        let row = &mut out[bin * width..(bin + 1) * width];
+        for v in &mut row[..frames] {
+            *v = (v.max(floor) + 4.0) / 4.0;
+        }
+        row[frames..].fill((floor + 4.0) / 4.0);
     }
     out
 }
@@ -52,8 +71,8 @@ fn normalize(x: &mut [f32]) {
     }
 }
 
-/// Centred, reflect-padded STFT power, `MEL_FRAMES` frames (the trailing frame dropped).
-fn power_spectrogram(x: &[f32]) -> Vec<[f64; FREQ_BINS]> {
+/// Centred, reflect-padded STFT power, `frames` frames (the trailing frame dropped).
+fn power_spectrogram(x: &[f32], frames: usize) -> Vec<[f64; FREQ_BINS]> {
     let pad = N_FFT / 2;
     let n = x.len();
     let padded: Vec<f64> = (0..n + 2 * pad)
@@ -69,7 +88,7 @@ fn power_spectrogram(x: &[f32]) -> Vec<[f64; FREQ_BINS]> {
     let window = hann_window();
     let fft = FftPlanner::<f64>::new().plan_fft_forward(N_FFT);
     let mut buf = vec![Complex::new(0.0f64, 0.0); N_FFT];
-    (0..MEL_FRAMES)
+    (0..frames)
         .map(|frame| {
             let start = frame * HOP;
             for (k, c) in buf.iter_mut().enumerate() {
@@ -156,6 +175,18 @@ mod tests {
                     "frame {f} bin {bin}: {got} vs {want}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn whisper_features_cover_the_clip_then_its_floor() {
+        let x: Vec<f32> = (0..16000).map(|i| (f64::from(i) * 0.05).sin() as f32 * 0.2).collect();
+        let (m, frames) = whisper_log_mel(&x, 30);
+        assert_eq!(frames, 100 + 30);
+        assert_eq!(m.len(), MEL_BINS * frames);
+        let low = m.iter().copied().fold(f32::INFINITY, f32::min);
+        for bin in 0..MEL_BINS {
+            assert!(m[bin * frames + 100..(bin + 1) * frames].iter().all(|&v| v == low), "bin {bin}");
         }
     }
 

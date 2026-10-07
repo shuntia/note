@@ -940,7 +940,7 @@ mod tests {
         let t = talking(vec![vec![], vec![Text("Glad to hear it.")]]);
         let id = answered_and_spoken(&t).await;
         assert!(t.llm.seen()[0].system.contains("You called about: Check-in."), "the warm-up sends the brief");
-        t.voice.handler.apply(&id, 3, CallBody::Commit { turn: 1, text: "thanks".into() }).unwrap();
+        t.voice.handler.apply(&id, 3, CallBody::Commit { turn: 1, text: "thanks".into(), language: None }).unwrap();
         let v = t.voice.clone();
         let reply = CallBody::Speak { reply: 2, idx: 0, text: "Glad to hear it.".into() };
         note_voice_proto::testkit::eventually("the reply", || frames(&v, &id).contains(&reply)).await;
@@ -1009,10 +1009,10 @@ mod tests {
         use crate::providers::mock::StreamPiece::Fail;
         let t = talking((0..5).map(|i| if i == 0 { vec![] } else { vec![Fail("status 400")] }).collect());
         let id = answered_and_spoken(&t).await;
-        t.voice.handler.apply(&id, 3, CallBody::Commit { turn: 1, text: "hello?".into() }).unwrap();
+        t.voice.handler.apply(&id, 3, CallBody::Commit { turn: 1, text: "hello?".into(), language: None }).unwrap();
         let v = t.voice.clone();
         note_voice_proto::testkit::eventually("the apology", || frames(&v, &id).contains(&CallBody::Play { reply: 3 })).await;
-        t.voice.handler.apply(&id, 4, CallBody::Commit { turn: 2, text: "are you there?".into() }).unwrap();
+        t.voice.handler.apply(&id, 4, CallBody::Commit { turn: 2, text: "are you there?".into(), language: None }).unwrap();
         note_voice_proto::testkit::eventually("the bow-out", || frames(&v, &id).contains(&CallBody::HangUp)).await;
         let bowed: bool = crate::db_guard(&t.voice.db)
             .query_row("SELECT bowed_out FROM voice_calls WHERE id = ?1", [&id], |r| r.get(0))
@@ -1043,7 +1043,7 @@ mod tests {
             .unwrap();
         }
         assert!(!t.voice.calls.is_live("c1"));
-        t.voice.handler.apply("c1", 5, CallBody::Commit { turn: 2, text: "hello".into() }).unwrap();
+        t.voice.handler.apply("c1", 5, CallBody::Commit { turn: 2, text: "hello".into(), language: None }).unwrap();
         assert!(t.voice.calls.is_live("c1"));
         let llm = t.llm.clone();
         note_voice_proto::testkit::eventually("the reply model is asked", || !llm.seen().is_empty()).await;
@@ -1081,7 +1081,7 @@ mod tests {
         t.voice.spawn_sweeper();
         let calls = t.voice.calls.clone();
         note_voice_proto::testkit::eventually("the call resumes", || calls.is_live("c1")).await;
-        t.voice.handler.apply("c1", 5, CallBody::Commit { turn: 2, text: "hello".into() }).unwrap();
+        t.voice.handler.apply("c1", 5, CallBody::Commit { turn: 2, text: "hello".into(), language: None }).unwrap();
         let llm = t.llm.clone();
         note_voice_proto::testkit::eventually("the reply model is asked", || !llm.seen().is_empty()).await;
         let messages = &t.llm.seen()[0].messages;

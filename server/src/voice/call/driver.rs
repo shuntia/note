@@ -30,16 +30,21 @@ pub struct CallConfig {
     pub ticker: bool,
 }
 
+/// The call's system prompt written in a language.
+pub type Rebrief = Arc<dyn Fn(crate::text::Lang) -> anyhow::Result<String> + Send + Sync>;
+
 pub struct DriverDeps {
     pub call_id: String,
     pub user_id: i64,
     pub username: String,
-    /// The language of what the driver says itself.
+    /// The language the call speaks: of `system`, and of what the driver says itself.
     pub lang: crate::text::Lang,
     pub conversation_id: i64,
     pub db: Arc<Mutex<Connection>>,
     pub llm: Arc<dyn LLMProvider>,
     pub system: Arc<String>,
+    /// Rewrites `system` once the caller is heard speaking another language.
+    pub rebrief: Rebrief,
     pub tools: Arc<Vec<serde_json::Value>>,
     pub runner: Arc<dyn ToolRunner>,
     pub cfg: CallConfig,
@@ -308,8 +313,14 @@ impl Driver {
 
     fn on_frame(&mut self, body: CallBody) {
         match body {
-            CallBody::Commit { turn, text } => self.on_commit(turn, text),
-            CallBody::Draft { turn, text } => self.on_draft(turn, text),
+            CallBody::Commit { turn, text, language } => {
+                self.hear_language(language.as_deref());
+                self.on_commit(turn, text);
+            }
+            CallBody::Draft { turn, text, language } => {
+                self.hear_language(language.as_deref());
+                self.on_draft(turn, text);
+            }
             CallBody::Retract { turn } => {
                 if self
                     .in_flight
@@ -322,6 +333,28 @@ impl Driver {
             CallBody::Floor { floor } => self.queue.floor(floor, self.now()),
             CallBody::BargeIn { reply, heard_chars } => self.on_barge_in(reply, heard_chars),
             _ => {}
+        }
+    }
+
+    /// The voice side heard the caller speak `code`: turns from here on are
+    /// prompted, and the driver's own lines spoken, in it.
+    fn hear_language(&mut self, code: Option<&str>) {
+        let Some(lang) = code.and_then(crate::text::Lang::from_setting) else {
+            return;
+        };
+        if lang == self.deps.lang {
+            return;
+        }
+        match (self.deps.rebrief)(lang) {
+            Ok(system) => {
+                self.deps.system = Arc::new(system);
+                self.deps.lang = lang;
+            }
+            Err(e) => eprintln!(
+                "voice: rewriting the prompt of {} in {} failed: {e:#}",
+                self.deps.call_id,
+                lang.code()
+            ),
         }
     }
 
@@ -1070,6 +1103,7 @@ mod tests {
             db: db.clone(),
             llm: llm.clone(),
             system: Arc::new("sys".into()),
+            rebrief: Arc::new(|l: crate::text::Lang| Ok(format!("sys in {}", l.code()))),
             tools: Arc::new(vec![]),
             runner: runner.clone(),
             cfg: CallConfig {
@@ -1207,6 +1241,7 @@ mod tests {
         h.frame(CallBody::Commit {
             turn: 1,
             text: "when is the next train".into(),
+            language: None,
         });
         h.tx.send(DriverIn::Tick).unwrap();
         h.expect(&[
@@ -1279,6 +1314,7 @@ mod tests {
         h.frame(CallBody::Commit {
             turn: 1,
             text: "find the venue and move my run".into(),
+            language: None,
         });
         h.expect(&[CallBody::SpeakDone { reply: 2 }]);
         h.at(1000);
@@ -1333,6 +1369,7 @@ mod tests {
         h.frame(CallBody::Draft {
             turn: 1,
             text: "move my run".into(),
+            language: None,
         });
         h.expect(&[speak(2, 0, "Moving it."), CallBody::SpeakDone { reply: 2 }]);
         assert_eq!(h.quiet(100), vec![], "a draft does not play");
@@ -1341,6 +1378,7 @@ mod tests {
         h.frame(CallBody::Commit {
             turn: 1,
             text: "Move my run.".into(),
+            language: None,
         });
         h.expect(&[CallBody::Play { reply: 2 }]);
         h.wait_for("the held call to run", |h| !h.ran().is_empty());
@@ -1354,6 +1392,45 @@ mod tests {
                 row("tool", r#"{"ok":true}"#, Some("calendar_update")),
             ]
         );
+    }
+
+    #[test]
+    fn the_language_the_caller_is_heard_in_rewrites_the_prompt_from_their_first_draft() {
+        let mut h = start(vec![vec![Text("うん。")], vec![Text("はい。")]], &[], None, "");
+        h.frame(CallBody::Draft {
+            turn: 1,
+            text: "もしもし".into(),
+            language: Some("ja".into()),
+        });
+        h.expect(&[speak(2, 0, "うん。"), CallBody::SpeakDone { reply: 2 }]);
+        h.frame(CallBody::Commit {
+            turn: 1,
+            text: "もしもし".into(),
+            language: Some("ja".into()),
+        });
+        h.expect(&[CallBody::Play { reply: 2 }]);
+        h.frame(CallBody::Floor {
+            floor: Floor::Drained,
+        });
+        h.frame(CallBody::Commit {
+            turn: 2,
+            text: "明日".into(),
+            language: Some("ja".into()),
+        });
+        h.expect(&[speak(3, 0, "はい。")]);
+        h.stop();
+        let systems: Vec<String> = h.llm.seen().iter().map(|r| r.system.clone()).collect();
+        assert_eq!(systems, vec!["sys in ja", "sys in ja"]);
+
+        let mut h = start(vec![vec![Text("Sure.")]], &[], None, "");
+        h.frame(CallBody::Commit {
+            turn: 1,
+            text: "hi".into(),
+            language: Some("en".into()),
+        });
+        h.expect(&[speak(2, 0, "Sure.")]);
+        h.stop();
+        assert_eq!(h.llm.seen()[0].system, "sys", "the language it was written in is kept");
     }
 
     #[test]
@@ -1373,11 +1450,13 @@ mod tests {
         h.frame(CallBody::Draft {
             turn: 1,
             text: "move my".into(),
+            language: None,
         });
         h.expect(&[speak(2, 0, "Sure."), CallBody::SpeakDone { reply: 2 }]);
         h.frame(CallBody::Commit {
             turn: 1,
             text: "move my run to Friday".into(),
+            language: None,
         });
         h.expect(&[
             CallBody::Drop { reply: 2 },
@@ -1411,6 +1490,7 @@ mod tests {
         h.frame(CallBody::Commit {
             turn: 1,
             text: "remind me to stretch".into(),
+            language: None,
         });
         h.expect(&[
             speak(2, 0, "On it."),
@@ -1424,6 +1504,7 @@ mod tests {
         h.frame(CallBody::Draft {
             turn: 2,
             text: "ok".into(),
+            language: None,
         });
         h.expect(&[speak(3, 0, "Okay."), CallBody::SpeakDone { reply: 3 }]);
         assert!(
@@ -1436,6 +1517,7 @@ mod tests {
         h.frame(CallBody::Commit {
             turn: 2,
             text: "ok".into(),
+            language: None,
         });
         h.expect(&[
             speak(4, 0, "Noted."),
@@ -1465,6 +1547,7 @@ mod tests {
         h.frame(CallBody::Commit {
             turn: 1,
             text: "move my run".into(),
+            language: None,
         });
         h.expect(&[
             speak(2, 0, "I'll move it to Friday and check the weather."),
@@ -1478,6 +1561,7 @@ mod tests {
         h.frame(CallBody::Commit {
             turn: 2,
             text: "wait".into(),
+            language: None,
         });
         h.expect(&[
             speak(3, 0, "Okay."),
@@ -1518,6 +1602,7 @@ mod tests {
         h.frame(CallBody::Commit {
             turn: 1,
             text: "that's all, thanks".into(),
+            language: None,
         });
         h.expect(&[
             speak(2, 0, "Bye!"),
@@ -1552,6 +1637,7 @@ mod tests {
         h.frame(CallBody::Commit {
             turn: 1,
             text: "remove the SAT tasks".into(),
+            language: None,
         });
         h.wait_for("the job to run", |h| !h.ran().is_empty());
         h.frame(CallBody::Floor {
@@ -1560,6 +1646,7 @@ mod tests {
         h.frame(CallBody::Commit {
             turn: 2,
             text: "thanks".into(),
+            language: None,
         });
         h.wait_for("the next turn", |h| h.llm.seen().len() >= 2);
         let sent = h.quiet(300);
@@ -1582,6 +1669,7 @@ mod tests {
         h.frame(CallBody::Commit {
             turn: 1,
             text: "hello?".into(),
+            language: None,
         });
         h.expect(&[
             CallBody::SpeakDone { reply: 2 },
@@ -1605,6 +1693,7 @@ mod tests {
         h.frame(CallBody::Commit {
             turn: 1,
             text: "hello?".into(),
+            language: None,
         });
         h.expect(&[
             CallBody::SpeakDone { reply: 2 },
@@ -1615,6 +1704,7 @@ mod tests {
         h.frame(CallBody::Commit {
             turn: 2,
             text: "are you there?".into(),
+            language: None,
         });
         h.expect(&[
             CallBody::SpeakDone { reply: 4 },
@@ -1626,6 +1716,7 @@ mod tests {
         h.frame(CallBody::Commit {
             turn: 3,
             text: "hello??".into(),
+            language: None,
         });
         assert_eq!(h.quiet(200), vec![], "the call is ending");
         assert_eq!(h.llm.seen().len(), 4);
@@ -1641,6 +1732,7 @@ mod tests {
         h.frame(CallBody::Commit {
             turn: 1,
             text: "もしもし".into(),
+            language: None,
         });
         let line = "すみません、AIモデルが見つかりません。設定を確認してください。";
         assert_eq!(line, crate::text::failure_spoken(crate::text::Lang::Ja, Reason::ModelUnavailable));
@@ -1663,6 +1755,7 @@ mod tests {
         h.frame(CallBody::Commit {
             turn: 1,
             text: "hello?".into(),
+            language: None,
         });
         h.expect(&[
             CallBody::SpeakDone { reply: 2 },
@@ -1673,6 +1766,7 @@ mod tests {
         h.frame(CallBody::Commit {
             turn: 2,
             text: "still there?".into(),
+            language: None,
         });
         h.expect(&[
             CallBody::SpeakDone { reply: 4 },
@@ -1702,6 +1796,7 @@ mod tests {
         h.frame(CallBody::Commit {
             turn: 1,
             text: "add it".into(),
+            language: None,
         });
         h.expect(&[
             speak(2, 0, "Adding."),
@@ -1711,6 +1806,7 @@ mod tests {
         h.frame(CallBody::Commit {
             turn: 2,
             text: "thanks".into(),
+            language: None,
         });
         h.expect(&[speak(3, 0, "Done.")]);
         let messages = &h.llm.seen()[1].messages;
@@ -1756,6 +1852,7 @@ mod tests {
         h.frame(CallBody::Commit {
             turn: 1,
             text: "look it up".into(),
+            language: None,
         });
         h.expect(&[
             speak(2, 0, "Searching."),
@@ -1765,6 +1862,7 @@ mod tests {
         h.frame(CallBody::Commit {
             turn: 2,
             text: "never mind".into(),
+            language: None,
         });
         h.expect(&[
             speak(3, 0, "Okay, stopped."),
@@ -1808,6 +1906,7 @@ mod tests {
         h.frame(CallBody::Commit {
             turn: 1,
             text: "that's all".into(),
+            language: None,
         });
         h.expect(&[speak(2, 0, "Bye then."), CallBody::Play { reply: 2 }]);
         assert_eq!(h.quiet(50), vec![]);
@@ -1818,6 +1917,7 @@ mod tests {
         h.frame(CallBody::Commit {
             turn: 2,
             text: "wait, one more thing".into(),
+            language: None,
         });
         h.expect(&[
             CallBody::SpeakDone { reply: 2 },
@@ -1863,6 +1963,7 @@ mod tests {
         h.frame(CallBody::Commit {
             turn: 1,
             text: "add x".into(),
+            language: None,
         });
         h.expect(&[
             speak(8, 0, "Adding it."),
@@ -1896,6 +1997,7 @@ mod tests {
         h.frame(CallBody::Commit {
             turn: 1,
             text: "remind me to stretch".into(),
+            language: None,
         });
         h.expect(&[
             speak(2, 0, "On it."),
@@ -1910,6 +2012,7 @@ mod tests {
         h.frame(CallBody::Draft {
             turn: 2,
             text: "um".into(),
+            language: None,
         });
         h.expect(&[speak(3, 0, "Hm."), CallBody::SpeakDone { reply: 3 }]);
         h.at(3999);
@@ -1922,6 +2025,7 @@ mod tests {
         h.frame(CallBody::Commit {
             turn: 3,
             text: "so".into(),
+            language: None,
         });
         h.expect(&[
             speak(4, 0, "Sure."),
@@ -1975,6 +2079,7 @@ mod tests {
         h.frame(CallBody::Commit {
             turn: 1,
             text: "add four things".into(),
+            language: None,
         });
         h.expect(&[CallBody::SpeakDone { reply: 2 }]);
         h.at(1000);
@@ -1984,11 +2089,13 @@ mod tests {
         h.frame(CallBody::Draft {
             turn: 2,
             text: "and one more".into(),
+            language: None,
         });
         h.expect(&[CallBody::SpeakDone { reply: 7 }]);
         h.frame(CallBody::Commit {
             turn: 2,
             text: "And one more.".into(),
+            language: None,
         });
         h.expect(&[CallBody::Play { reply: 7 }]);
         h.tick_until(&speak(8, 0, "Done."));
@@ -2009,6 +2116,7 @@ mod tests {
         h.frame(CallBody::Commit {
             turn: 1,
             text: "add it".into(),
+            language: None,
         });
         h.expect(&[
             speak(2, 0, "Let me check."),
@@ -2041,11 +2149,13 @@ mod tests {
         h.frame(CallBody::Commit {
             turn: 1,
             text: "first".into(),
+            language: None,
         });
         h.expect(&[speak(2, 0, "One sec,"), CallBody::Play { reply: 2 }]);
         h.frame(CallBody::Commit {
             turn: 2,
             text: "second".into(),
+            language: None,
         });
         h.expect(&[
             speak(2, 1, "here."),
@@ -2071,6 +2181,7 @@ mod tests {
         h.frame(CallBody::Commit {
             turn: 1,
             text: "add it".into(),
+            language: None,
         });
         h.expect(&[
             speak(2, 0, "Adding."),
@@ -2105,6 +2216,7 @@ mod tests {
         h.frame(CallBody::Commit {
             turn: 1,
             text: "do both".into(),
+            language: None,
         });
         h.expect(&[
             speak(2, 0, "Working on it."),
@@ -2140,12 +2252,14 @@ mod tests {
         h.frame(CallBody::Draft {
             turn: 1,
             text: "bye".into(),
+            language: None,
         });
         h.expect(&[speak(2, 0, "Bye!"), CallBody::SpeakDone { reply: 2 }]);
         assert_eq!(h.quiet(100), vec![], "a held hang_up does nothing yet");
         h.frame(CallBody::Commit {
             turn: 1,
             text: "Bye.".into(),
+            language: None,
         });
         h.expect(&[CallBody::Play { reply: 2 }, CallBody::HangUp]);
         h.stop();
@@ -2165,6 +2279,7 @@ mod tests {
         h.frame(CallBody::Draft {
             turn: 1,
             text: "bye".into(),
+            language: None,
         });
         h.expect(&[speak(2, 0, "Bye!"), CallBody::SpeakDone { reply: 2 }]);
         h.frame(CallBody::Retract { turn: 1 });
@@ -2172,6 +2287,7 @@ mod tests {
         h.frame(CallBody::Commit {
             turn: 1,
             text: "bye the way, one more thing".into(),
+            language: None,
         });
         h.expect(&[
             speak(3, 0, "Go on."),
@@ -2201,6 +2317,7 @@ mod tests {
         h.frame(CallBody::Commit {
             turn: 1,
             text: "add it".into(),
+            language: None,
         });
         h.expect(&[
             speak(2, 0, "On it."),
@@ -2218,6 +2335,7 @@ mod tests {
         h.frame(CallBody::Draft {
             turn: 2,
             text: "wait".into(),
+            language: None,
         });
         h.expect(&[
             CallBody::Play { reply: 3 },
@@ -2231,6 +2349,7 @@ mod tests {
         h.frame(CallBody::Commit {
             turn: 2,
             text: "wait".into(),
+            language: None,
         });
         h.expect(&[
             speak(4, 0, "Okay."),
