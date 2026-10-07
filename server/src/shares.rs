@@ -646,8 +646,10 @@ pub fn render(
     owner_id: i64,
     owner_username: &str,
     scope: &ShareScope,
+    l: crate::text::Lang,
     now: jiff::Timestamp,
 ) -> anyhow::Result<Rendered> {
+    use crate::model_text as mt;
     let tz = crate::triggers::timezone(config_dir, owner_username);
     let today = now.to_zoned(tz).date();
     let mut view = serde_json::Map::new();
@@ -655,7 +657,7 @@ pub fn render(
 
     if scope.today {
         let mut days_json = Vec::new();
-        let mut text = String::from("# Today and ahead\n\n");
+        let mut text = String::from(mt::share_today_ahead(l));
         let mut date = today;
         for _ in 0..scope.horizon_days {
             let calendar = crate::calendar::occurrences(conn, owner_id, date)?;
@@ -685,13 +687,14 @@ pub fn render(
                 });
             }
             rows.sort_by(|a, b| a.start.cmp(&b.start));
-            let _ = writeln!(text, "{date}{}:", if date == today { " (today)" } else { "" });
+            let _ = writeln!(text, "{date}{}:", if date == today { mt::share_today(l) } else { "" });
             if rows.is_empty() {
-                text.push_str("- nothing planned\n");
+                text.push_str(mt::share_nothing_planned(l));
             }
             for r in &rows {
                 let end = r.end.as_deref().map(|e| format!("-{e}")).unwrap_or_default();
-                let _ = writeln!(text, "- {}{end} {} [{}]", r.start, r.title, r.status);
+                let title = if r.busy { mt::share_busy(l) } else { &r.title };
+                let _ = writeln!(text, "- {}{end} {title} [{}]", r.start, r.status);
             }
             text.push('\n');
             days_json.push(serde_json::json!({
@@ -768,25 +771,25 @@ pub fn render(
     let mut goals_text = String::new();
     if scope.goals {
         let mut rows = Vec::new();
-        goals_text.push_str("# Goals\n\n");
+        goals_text.push_str(mt::share_goals(l));
         for g in crate::goals::list(conn, owner_id, None)? {
             let (total, done) = goal_counts(conn, g.id, scope)?;
             if total == 0 && !scope.categories.is_empty() {
                 continue;
             }
             if rows.len() < GOAL_ROWS_MAX {
-                let due = g.due_at.as_deref().map(|d| format!(", due {}", day_of(d))).unwrap_or_default();
-                let _ = writeln!(goals_text, "- {} ({done} of {total} tasks done{due})", g.title);
+                let due = g.due_at.as_deref().map(|d| mt::share_goal_due(l, day_of(d))).unwrap_or_default();
+                let _ = writeln!(goals_text, "{}", mt::share_goal(l, &g.title, done, total, &due));
             }
             rows.push(serde_json::json!({
                 "id": g.id, "title": g.title, "due_at": g.due_at, "tasks": total, "done_tasks": done,
             }));
         }
         if rows.is_empty() {
-            goals_text.push_str("- none\n");
+            goals_text.push_str(mt::share_none(l));
         }
         if rows.len() > GOAL_ROWS_MAX {
-            let _ = writeln!(goals_text, "- and {} more", rows.len() - GOAL_ROWS_MAX);
+            let _ = writeln!(goals_text, "{}", mt::share_and_more(l, rows.len() - GOAL_ROWS_MAX));
         }
         goals_text.push('\n');
         view.insert("goals".into(), serde_json::Value::Array(rows));
@@ -818,47 +821,47 @@ pub fn render(
     }
 
     let render_text = |task_cap: usize, done_cap: usize| -> String {
-        let mut s = String::from("# What is shared\n\n");
+        let mut s = String::from(mt::share_shared(l));
         for sec in &sections {
             s.push_str(sec);
         }
         if scope.tasks {
-            s.push_str("# Open tasks\n\n");
+            s.push_str(mt::share_open_tasks(l));
             let urgent: Vec<&TaskRow> = tasks.iter().filter(|t| t.rank <= 1).collect();
             if !urgent.is_empty() && task_cap > 0 {
-                s.push_str("Urgent:\n");
+                s.push_str(mt::share_urgent(l));
                 for t in urgent.iter().take(task_cap) {
-                    s.push_str(&task_line(t, scope));
+                    s.push_str(&task_line(l, t, scope));
                 }
             }
             let rest: Vec<&TaskRow> = tasks.iter().filter(|t| t.rank > 1).collect();
             let room = task_cap.saturating_sub(urgent.len().min(task_cap));
             if !rest.is_empty() && room > 0 {
-                s.push_str("Others:\n");
+                s.push_str(mt::share_others(l));
                 for t in rest.iter().take(room) {
-                    s.push_str(&task_line(t, scope));
+                    s.push_str(&task_line(l, t, scope));
                 }
             }
             let shown = urgent.len().min(task_cap) + rest.len().min(room);
             if tasks.len() > shown {
-                let _ = writeln!(s, "- and {} more; ask", tasks.len() - shown);
+                let _ = writeln!(s, "{}", mt::share_more_ask(l, tasks.len() - shown));
             }
             if tasks.is_empty() {
-                s.push_str("- none open\n");
+                s.push_str(mt::share_none_open(l));
             }
             s.push('\n');
         }
         s.push_str(&goals_text);
         if scope.progress {
-            let _ = write!(s, "# Done in the last {RECENT_DAYS} days\n\n");
+            s.push_str(&mt::share_done_recent(l, RECENT_DAYS));
             if done_recent.is_empty() {
-                s.push_str("- nothing yet\n");
+                s.push_str(mt::share_nothing_yet(l));
             }
             for (t, at) in done_recent.iter().take(done_cap) {
                 let _ = writeln!(s, "- {t} ({})", day_of(at));
             }
             if done_recent.len() > done_cap {
-                let _ = writeln!(s, "- and {} more", done_recent.len() - done_cap);
+                let _ = writeln!(s, "{}", mt::share_and_more(l, done_recent.len() - done_cap));
             }
             s.push('\n');
         }
@@ -895,24 +898,25 @@ fn day_of(timestamp: &str) -> &str {
     timestamp.get(..10).unwrap_or(timestamp)
 }
 
-fn task_line(t: &TaskRow, scope: &ShareScope) -> String {
+fn task_line(l: crate::text::Lang, t: &TaskRow, scope: &ShareScope) -> String {
+    use crate::model_text as mt;
     let mut s = format!("- {}", t.title);
     if t.urgency == "high" {
-        s.push_str(" [urgent]");
+        s.push_str(mt::share_mark_urgent(l));
     } else if t.pressing {
-        s.push_str(if t.overdue { " [overdue]" } else { " [due soon]" });
+        s.push_str(if t.overdue { mt::share_mark_overdue(l) } else { mt::share_mark_due_soon(l) });
     }
     if let Some(d) = &t.due_at {
-        let _ = write!(s, ", due {}", day_of(d));
+        s.push_str(&mt::share_goal_due(l, day_of(d)));
     }
     if t.steps > 0 {
-        let _ = write!(s, ", {} of {} steps done", t.done_steps, t.steps);
+        s.push_str(&mt::share_steps(l, t.done_steps, t.steps));
     }
     if scope.categories.len() != 1 && !t.category.is_empty() {
         let _ = write!(s, " ({})", t.category);
     }
     if let Some(g) = &t.goal_title {
-        let _ = write!(s, ", goal: {g}");
+        s.push_str(&mt::share_goal_of(l, g));
     }
     if let Some(d) = t.description.as_deref().filter(|d| !d.trim().is_empty()) {
         let _ = write!(s, " — {}", d.trim().chars().take(200).collect::<String>());
@@ -1389,7 +1393,7 @@ mod tests {
         let conn = conn();
         let (tmp, _) = seed_owner(&conn);
         let scope = ShareScope { categories: vec!["school".into()], ..ShareScope::default() };
-        let r = render(&conn, tmp.path(), 1, "aki", &scope, now()).unwrap();
+        let r = render(&conn, tmp.path(), 1, "aki", &scope, crate::text::Lang::En, now()).unwrap();
         assert!(r.text.contains("# What is shared"));
         assert!(r.text.contains("lab report"), "{}", r.text);
         assert!(!r.text.contains("therapy"), "a hidden category never renders:\n{}", r.text);
@@ -1410,7 +1414,7 @@ mod tests {
         let conn = conn();
         let (tmp, _) = seed_owner(&conn);
         let scope = ShareScope { today: false, goals: false, progress: false, details: true, ..ShareScope::default() };
-        let r = render(&conn, tmp.path(), 1, "aki", &scope, now()).unwrap();
+        let r = render(&conn, tmp.path(), 1, "aki", &scope, crate::text::Lang::En, now()).unwrap();
         assert!(r.view.get("days").is_none() && r.view.get("goals").is_none() && r.view.get("done_recent").is_none());
         assert_eq!(r.view["tasks"][0]["description"], "private detail");
         assert!(!r.text.contains("# Today"));
@@ -1428,7 +1432,7 @@ mod tests {
             crate::tasks::update(&conn, 1, id, &crate::tasks::TaskPatch { state: Some("done".into()), ..Default::default() }).unwrap();
         }
         conn.execute("UPDATE tasks SET completed_at = '2026-09-24T11:00:00Z' WHERE state = 'done'", []).unwrap();
-        let r = render(&conn, tmp.path(), 1, "aki", &ShareScope::default(), now()).unwrap();
+        let r = render(&conn, tmp.path(), 1, "aki", &ShareScope::default(), crate::text::Lang::En, now()).unwrap();
         assert!(r.text.len() <= OPENER_MAX_BYTES, "{}", r.text.len());
         assert!(r.text.contains("more; ask"), "{}", r.text);
         let task_lines = r.text.lines().filter(|l| l.contains("filler task")).count();
@@ -1470,12 +1474,12 @@ mod tests {
         .unwrap();
         let goal = crate::goals::create(&conn, 1, crate::goals::NewGoal { title: "GOAL-TITLE-SECRET".into(), ..Default::default() }).unwrap();
         conn.execute("UPDATE tasks SET goal_id = ?1 WHERE id = ?2", [goal.id, lab]).unwrap();
-        let r = render(&conn, tmp.path(), 1, "aki", &ShareScope::default(), now()).unwrap();
+        let r = render(&conn, tmp.path(), 1, "aki", &ShareScope::default(), crate::text::Lang::En, now()).unwrap();
         assert!(r.text.contains("- late essay [overdue]"), "{}", r.text);
         assert!(r.text.contains("- problem set [due soon]"), "{}", r.text);
         assert!(r.text.contains(", goal: GOAL-TITLE-SECRET"), "{}", r.text);
         let hidden = ShareScope { goals: false, ..ShareScope::default() };
-        let r = render(&conn, tmp.path(), 1, "aki", &hidden, now()).unwrap();
+        let r = render(&conn, tmp.path(), 1, "aki", &hidden, crate::text::Lang::En, now()).unwrap();
         assert!(!r.text.contains("GOAL-TITLE-SECRET"), "{}", r.text);
         assert!(!r.view.to_string().contains("GOAL-TITLE-SECRET"), "{}", r.view);
     }
@@ -1488,7 +1492,7 @@ mod tests {
         let plan = conn.last_insert_rowid();
         conn.execute("INSERT INTO events (plan_id, kind, wall_time) VALUES (?1, ?2, '13:00')", (plan, crate::triggers::KIND)).unwrap();
         conn.execute("INSERT INTO events (plan_id, kind, wall_time) VALUES (?1, 'checkin_call', '14:00')", [plan]).unwrap();
-        let r = render(&conn, tmp.path(), 1, "aki", &ShareScope::default(), now()).unwrap();
+        let r = render(&conn, tmp.path(), 1, "aki", &ShareScope::default(), crate::text::Lang::En, now()).unwrap();
         let today = r.view["days"][0]["rows"].as_array().unwrap();
         assert!(today.iter().all(|row| row["title"] != crate::triggers::KIND && row["start"] != "13:00"), "{today:?}");
         assert!(today.iter().any(|row| row["title"] == "Checkin call"), "{today:?}");

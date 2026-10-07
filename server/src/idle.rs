@@ -1,4 +1,6 @@
 use crate::triggers::{self, Cancel};
+use crate::model_text as mt;
+use crate::text::Lang;
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
 use std::path::Path;
@@ -6,8 +8,6 @@ use std::fmt::Write as _;
 
 pub const ORIGIN: &str = "idle";
 
-pub const PROMPT: &str = "The user has gone quiet while your scratchpad holds open lines. \
-     Decide whether one of them is worth raising now.";
 
 struct Seen {
     user_id: i64,
@@ -107,7 +107,7 @@ fn check_one(
         conn,
         plan_id,
         &wall,
-        PROMPT,
+        crate::model_text::idle_prompt(crate::text::Lang::for_user(config_dir, &user.username)),
         ORIGIN,
         Some(Cancel::Active),
         None,
@@ -155,30 +155,21 @@ fn open_notes(conn: &Connection, user_id: i64) -> rusqlite::Result<i64> {
     )
 }
 
-fn ago(ts: &str, now: jiff::Timestamp) -> String {
+fn ago(ts: &str, l: Lang, now: jiff::Timestamp) -> String {
     let Ok(t) = ts.parse::<jiff::Timestamp>() else {
         return ts.to_string();
     };
-    let min = (now.as_second() - t.as_second()).max(0) / 60;
-    match min {
-        0..=59 => format!("{min} min"),
-        60..=2879 => format!("{} h", min / 60),
-        _ => format!("{} d", min / 1440),
-    }
+    mt::ago_short(l, (now.as_second() - t.as_second()).max(0) / 60)
 }
 
 /// What an idle trigger's session reads under its prompt: how long the user
 /// has been quiet, then each open unpinned note with its id, age and last nudge.
-pub fn context(conn: &Connection, user_id: i64, now: jiff::Timestamp) -> rusqlite::Result<String> {
+pub fn context(conn: &Connection, user_id: i64, l: Lang, now: jiff::Timestamp) -> rusqlite::Result<String> {
     let mut s = String::new();
     if let Some(at) = crate::presence::last_active(conn, user_id)? {
-        let _ = writeln!(
-            s,
-            "Nothing from the user for {} min.",
-            (now.as_second() - at.as_second()).max(0) / 60
-        );
+        let _ = writeln!(s, "{}", mt::quiet_for(l, (now.as_second() - at.as_second()).max(0) / 60));
     }
-    s.push_str("Open scratchpad lines (id: text, age, last raised):\n");
+    s.push_str(mt::open_scratch_lines(l));
     let mut stmt = conn.prepare(
         "SELECT id, text, created_at, last_nudged_at FROM notes
          WHERE user_id = ?1 AND done_at IS NULL AND pinned = 0
@@ -195,10 +186,10 @@ pub fn context(conn: &Connection, user_id: i64, now: jiff::Timestamp) -> rusqlit
     for row in rows {
         let (id, text, created, nudged) = row?;
         let nudge = match nudged {
-            Some(t) => format!("nudged {} ago", ago(&t, now)),
-            None => "never nudged".to_string(),
+            Some(t) => mt::nudged_ago(l, &ago(&t, l, now)),
+            None => mt::never_nudged(l).to_string(),
         };
-        let _ = writeln!(s, "- {id}: {text:?}, added {} ago, {nudge}", ago(&created, now));
+        let _ = writeln!(s, "{}", mt::scratch_line(l, id, &text, &ago(&created, l, now), &nudge));
     }
     Ok(s)
 }
@@ -412,7 +403,7 @@ mod tests {
             .unwrap();
         note(&conn, uid, "pinned thing", true);
 
-        let text = context(&conn, uid, noon()).unwrap();
+        let text = context(&conn, uid, Lang::En, noon()).unwrap();
         assert!(text.contains("Nothing from the user for 20 min."), "{text}");
         assert!(text.contains(&format!("- {bank}: \"call the bank\", added 4 h ago, nudged 1 h ago")),
             "{text}");

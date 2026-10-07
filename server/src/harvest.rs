@@ -1,5 +1,7 @@
 use crate::agent::SessionDeps;
 use crate::tools::SessionKind;
+use crate::model_text as mt;
+use crate::text::Lang;
 use anyhow::Result;
 use rusqlite::Connection;
 use std::fmt::Write as _;
@@ -30,6 +32,7 @@ pub fn digest(
     conn: &Connection,
     user_id: i64,
     tz: &jiff::tz::TimeZone,
+    l: Lang,
     now: jiff::Timestamp,
 ) -> Result<String> {
     let since = now
@@ -64,10 +67,7 @@ pub fn digest(
 
     let mut out = String::new();
     for t in threads {
-        let kind = match &t.checkin_date {
-            Some(d) => format!("checkin {d}"),
-            None => "talk".to_string(),
-        };
+        let kind = mt::harvest_kind(l, t.checkin_date.as_deref());
         let when = t
             .updated_at
             .parse::<jiff::Timestamp>()
@@ -75,9 +75,9 @@ pub fn digest(
             .unwrap_or_default();
         let body = match &t.summary {
             Some(s) if t.summary_through >= t.last_id => s.clone(),
-            _ => raw_turns(conn, t.id)?,
+            _ => raw_turns(conn, t.id, l)?,
         };
-        let block = format!("## {} ({kind}, last active {when})\n{body}\n\n", t.title);
+        let block = mt::harvest_thread(l, &t.title, &kind, &when, &body);
         if out.len() + block.len() > MAX_DIGEST_BYTES {
             break;
         }
@@ -86,7 +86,7 @@ pub fn digest(
     Ok(out.trim_end().to_string())
 }
 
-fn raw_turns(conn: &Connection, conversation_id: i64) -> Result<String> {
+fn raw_turns(conn: &Connection, conversation_id: i64, l: Lang) -> Result<String> {
     let mut stmt = conn.prepare(
         "SELECT role, content FROM talk_messages
          WHERE conversation_id = ?1 AND role IN ('user','assistant')
@@ -96,7 +96,7 @@ fn raw_turns(conn: &Connection, conversation_id: i64) -> Result<String> {
         .query_map((conversation_id, RAW_ROWS as i64), |r| {
             let role: String = r.get(0)?;
             let content: String = r.get(1)?;
-            let speaker = if role == "user" { "user" } else { "note" };
+            let speaker = mt::speaker(l, role == "user");
             Ok(format!("{speaker}: {}", clip(&content)))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -312,13 +312,10 @@ pub fn run_for_user(
     };
     let digest = {
         let conn = crate::db_guard(deps.db);
-        let mut digest = digest(&conn, user_id, tz, now)?;
+        let l = Lang::for_user(deps.config_dir, username);
+        let mut digest = digest(&conn, user_id, tz, l, now)?;
         if !kept.is_empty() {
-            let _ = write!(
-                digest,
-                "\n\n## Tonight's episodic entries\n{}",
-                kept.join("\n")
-            );
+            let _ = write!(digest, "\n\n{}\n{}", mt::tonights_episodic(l), kept.join("\n"));
         }
         digest.trim().to_string()
     };
@@ -460,7 +457,7 @@ mod tests {
         crate::talk::store_summary(&conn, open, "stale", 1, now()).unwrap();
         talk(&conn, open, "assistant", "nice", "2026-09-17T12:01:00Z");
 
-        let out = digest(&conn, 1, &tokyo(), now()).unwrap();
+        let out = digest(&conn, 1, &tokyo(), Lang::En, now()).unwrap();
         assert!(out.starts_with("## mira (checkin 2026-09-17, last active 21:01)\n"), "{out}");
         assert!(out.contains("user: mira is coming over\nnote: nice"), "{out}");
         assert!(!out.contains("stale"), "a summary that misses the last turn is not used: {out}");
@@ -484,13 +481,13 @@ mod tests {
         let theirs = crate::talk::create(&conn, 2, "bo's", at("2026-09-17T09:00:00Z")).unwrap();
         talk(&conn, theirs, "user", "not mine", "2026-09-17T09:00:00Z");
 
-        assert_eq!(digest(&conn, 1, &tokyo(), now()).unwrap(), "");
+        assert_eq!(digest(&conn, 1, &tokyo(), Lang::En, now()).unwrap(), "");
 
         for i in 0..14 {
             let id = crate::talk::create(&conn, 1, &format!("t{i}"), now()).unwrap();
             talk(&conn, id, "user", "something", &format!("2026-09-17T{i:02}:00:00Z"));
         }
-        let out = digest(&conn, 1, &tokyo(), now()).unwrap();
+        let out = digest(&conn, 1, &tokyo(), Lang::En, now()).unwrap();
         assert_eq!(out.matches("## t").count(), MAX_CONVERSATIONS);
         assert!(out.len() <= MAX_DIGEST_BYTES);
         let _ = tmp;

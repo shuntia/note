@@ -91,10 +91,8 @@ pub fn run_for_conversation(
             HISTORY_LIMIT,
         )?
     };
-    let opening = match &candidate.summary {
-        Some(s) => format!("Summary so far: {s}\n\nSummarise this conversation."),
-        None => "Summarise this conversation.".to_string(),
-    };
+    let lang = crate::text::Lang::for_user(deps.config_dir, &candidate.username);
+    let opening = crate::model_text::summarize_opening(lang, candidate.summary.as_deref());
     let out = crate::agent::run_session(
         deps,
         candidate.user_id,

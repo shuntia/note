@@ -1,6 +1,8 @@
 use crate::agent::{AgentEvent, SessionDeps, SessionStep};
 use crate::providers::{ChatRequest, LLMProvider, Message};
 use crate::AppState;
+use crate::model_text as mt;
+use crate::text::Lang;
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
 use std::fmt::Write as _;
@@ -373,7 +375,7 @@ pub fn title_is_draft(conn: &Connection, conversation_id: i64) -> Result<bool> {
 
 /// The opening of a thread as the titler reads it: what the user first said and
 /// the first answer it drew. `None` where the user has not spoken yet.
-fn opening_exchange(conn: &Connection, conversation_id: i64) -> Result<Option<String>> {
+fn opening_exchange(conn: &Connection, conversation_id: i64, l: Lang) -> Result<Option<String>> {
     let first = |role: &str| -> rusqlite::Result<Option<String>> {
         conn.query_row(
             "SELECT content FROM talk_messages WHERE conversation_id = ?1 AND role = ?2
@@ -384,9 +386,9 @@ fn opening_exchange(conn: &Connection, conversation_id: i64) -> Result<Option<St
         .optional()
     };
     let Some(user) = first("user")? else { return Ok(None) };
-    let mut exchange = format!("User: {}", clip_chars(&user, TITLE_EXCHANGE_CHARS));
+    let mut exchange = format!("{}: {}", mt::title_user(l), clip_chars(&user, TITLE_EXCHANGE_CHARS));
     if let Some(assistant) = first("assistant")? {
-        let _ = write!(exchange, "\nAssistant: {}", clip_chars(&assistant, TITLE_EXCHANGE_CHARS));
+        let _ = write!(exchange, "\n{}: {}", mt::title_assistant(l), clip_chars(&assistant, TITLE_EXCHANGE_CHARS));
     }
     Ok(Some(exchange))
 }
@@ -434,17 +436,18 @@ pub fn generate_title(state: &AppState, user_id: i64, username: &str, conversati
     if state.providers_info.llm.is_none() {
         return;
     }
+    let lang = Lang::for_user(&state.config_dir, username);
     let exchange = {
         let conn = state.db();
         match title_is_draft(&conn, conversation_id) {
-            Ok(true) => opening_exchange(&conn, conversation_id),
+            Ok(true) => opening_exchange(&conn, conversation_id, lang),
             Ok(false) => return,
             Err(e) => Err(e),
         }
     };
     let named = match exchange {
         Ok(None) => return,
-        Ok(Some(exchange)) => crate::prompts::load(&state.config_dir, username, "title")
+        Ok(Some(exchange)) => crate::prompts::load_in(&state.config_dir, username, "title", lang)
             .map(|system| crate::agent::with_language_line(system, &state.config_dir, username))
             .and_then(|system| ask_for_title(state.llm.as_ref(), &system, &exchange))
             .and_then(|title| {
@@ -466,23 +469,6 @@ pub fn generate_title(state: &AppState, user_id: i64, username: &str, conversati
             );
         }
     }
-}
-
-/// The marker a reply in a check-in thread carries into its session, so the
-/// model reads the thread's opening assistant turns as its own scheduled
-/// check-ins rather than as answers it once gave.
-fn checkin_thread_note(date: &str) -> String {
-    format!(
-        "# This conversation\n\nOpened by your scheduled check-in on {date}: every assistant \
-         message the user has not answered yet is a check-in question you sent, and the user \
-         is replying to it now."
-    )
-}
-
-/// What the history window no longer reaches. A thread longer than the window
-/// loses its oldest turns, and only the summary still carries them.
-pub(crate) fn summary_thread_note(summary: &str) -> String {
-    format!("# This conversation\n\nEarlier in this conversation: {summary}")
 }
 
 pub struct Turn {
@@ -525,6 +511,7 @@ pub async fn run_turn(
         let _ = crate::presence::touch(&conn, user_id, jiff::Timestamp::now());
     }
     let mut notes: Vec<String> = Vec::new();
+    let lang = Lang::for_user(&state.config_dir, username);
     if let Some(id) = conversation {
         let conn = state.db();
         match owned(&conn, user_id, id) {
@@ -533,13 +520,13 @@ pub async fn run_turn(
             Err(_) => return Err(TurnError::Internal),
         }
         match checkin_date(&conn, id) {
-            Ok(Some(date)) => notes.push(checkin_thread_note(&date)),
+            Ok(Some(date)) => notes.push(mt::checkin_thread_note(lang, &date)),
             Ok(None) => {}
             Err(_) => return Err(TurnError::Internal),
         }
         if text_turns(&conn, id).unwrap_or(0) > HISTORY_LIMIT {
             if let Ok(Some((summary, _))) = summary(&conn, id) {
-                notes.push(summary_thread_note(&summary));
+                notes.push(mt::summary_thread_note(lang, &summary));
             }
         }
     }
@@ -804,11 +791,11 @@ mod tests {
     fn a_generated_title_replaces_a_draft_and_never_a_rename() {
         use crate::providers::{mock::MockLLM, ChatResponse};
         let conn = conn_with_conversation();
-        assert!(opening_exchange(&conn, 1).unwrap().is_none());
+        assert!(opening_exchange(&conn, 1, Lang::En).unwrap().is_none());
         append_text(&conn, 1, "user", &"の".repeat(TITLE_EXCHANGE_CHARS + 50), now()).unwrap();
         append_text(&conn, 1, "assistant", "I put it in Now.", now()).unwrap();
 
-        let exchange = opening_exchange(&conn, 1).unwrap().unwrap();
+        let exchange = opening_exchange(&conn, 1, Lang::En).unwrap().unwrap();
         assert_eq!(
             exchange.lines().next().unwrap().chars().count(),
             TITLE_EXCHANGE_CHARS + "User: ".len(),

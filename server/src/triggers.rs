@@ -1,3 +1,5 @@
+use crate::model_text as mt;
+use crate::text::Lang;
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
 use std::path::Path;
@@ -339,11 +341,10 @@ pub fn lay(conn: &Connection, lay: &Lay) -> Result<Laid, Refusal> {
     Ok(Laid { event_id, at: wall, cancel_if: lay.cancel.map(|c| c.as_str()) })
 }
 
-/// What the close-the-day check asks for; the tool it names is how the day's
-/// leftovers actually move.
-pub const CLOSE_DAY_PROMPT: &str = "It is the close of the day. In one or two lines say what is \
-     still pending and what got done, then ask whether to carry the rest to tomorrow. If they say \
-     yes, call plan_carry.";
+/// Whether a trigger is the close-the-day check, in whichever language it was laid.
+fn is_close_day(prompt: &str) -> bool {
+    [Lang::En, Lang::Ja].into_iter().any(|l| prompt == mt::close_day_prompt(l))
+}
 
 /// Puts the day's close-the-day check on `date`, replacing the one an earlier
 /// run left there so a date never holds two. Returns the event, or nothing when
@@ -372,7 +373,7 @@ pub fn lay_close_day(
             user_id,
             username,
             at: &at,
-            prompt: CLOSE_DAY_PROMPT,
+            prompt: mt::close_day_prompt(Lang::for_user(config_dir, username)),
             date,
             cancel: None,
             conversation_id: None,
@@ -516,14 +517,15 @@ pub fn situation(
     user_id: i64,
     ev: &Firing,
     tz: &jiff::tz::TimeZone,
+    l: Lang,
 ) -> String {
     let clock = |ts: &str| -> String {
         ts.parse::<jiff::Timestamp>().map_or_else(|_| ts.to_string(), |t| t.to_zoned(tz.clone()).strftime("%H:%M").to_string())
     };
     let mut s = format!("{}\n\n", ev.prompt);
     match ev.created_at.as_deref() {
-        Some(at) => { let _ = writeln!(s, "Laid at {}, meant for {}.", clock(at), ev.wall_time); },
-        None => { let _ = writeln!(s, "Meant for {}.", ev.wall_time); },
+        Some(at) => { let _ = writeln!(s, "{}", mt::laid_at(l, &clock(at), &ev.wall_time)); },
+        None => { let _ = writeln!(s, "{}", mt::meant_for(l, &ev.wall_time)); },
     }
     if let Some(id) = ev.work_session_id {
         let row: Option<(String, Option<i64>, String, String, String, i64)> = conn
@@ -537,24 +539,20 @@ pub fn situation(
             .ok()
             .flatten();
         if let Some((title, planned, started, mode, phase, round)) = row {
-            let _ = write!(s, "Work session: {title:?}, started {}", clock(&started));
+            s.push_str(&mt::work_session(l, &title, &clock(&started)));
             if let Some(min) = planned {
-                let _ = write!(s, ", planned {min} min");
+                s.push_str(&mt::planned_min(l, min));
             }
             if mode == "pomodoro" {
-                let _ = write!(s, ", in the {phase} of round {round}");
+                s.push_str(&mt::pomodoro_round(l, &phase, round));
             }
             let done = steps_done_since(conn, user_id, id, &started).unwrap_or(0);
-            let _ = writeln!(
-                s,
-                ", {done} step{} done since the last check.",
-                if done == 1 { "" } else { "s" }
-            );
+            let _ = writeln!(s, "{}", mt::steps_done_since(l, done));
         }
     }
     match last_user_message(conn, user_id).ok().flatten() {
-        Some(at) => { let _ = writeln!(s, "Last message from the user: {}.", clock(&at)); },
-        None => s.push_str("The user has not written anything yet.\n"),
+        Some(at) => { let _ = writeln!(s, "{}", mt::last_user_message(l, &clock(&at))); },
+        None => s.push_str(mt::user_silent(l)),
     }
     s
 }
@@ -602,6 +600,7 @@ fn last_user_message(conn: &Connection, user_id: i64) -> rusqlite::Result<Option
 fn thread_context(
     conn: &Connection,
     conversation_id: Option<i64>,
+    l: Lang,
 ) -> (Vec<crate::providers::Message>, Option<String>) {
     let Some(id) = conversation_id else {
         return (Vec::new(), None);
@@ -610,7 +609,7 @@ fn thread_context(
     let note = crate::talk::summary(conn, id)
         .ok()
         .flatten()
-        .map(|(summary, _)| crate::talk::summary_thread_note(&summary));
+        .map(|(summary, _)| mt::summary_thread_note(l, &summary));
     (history, note)
 }
 
@@ -657,16 +656,17 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
     let _permit = permit;
     let now = jiff::Timestamp::now();
     let tz = timezone(&state.config_dir, &fired.username);
+    let l = Lang::for_user(&state.config_dir, &fired.username);
     let (ev, opening, history, thread_note) = {
         let conn = state.db();
         let Ok(Some(ev)) = read(&conn, fired.event_id) else {
             return;
         };
-        let mut opening = situation(&conn, fired.user_id, &ev, &tz);
+        let mut opening = situation(&conn, fired.user_id, &ev, &tz, l);
         if ev.origin == crate::idle::ORIGIN {
-            opening.push_str(&crate::idle::context(&conn, fired.user_id, now).unwrap_or_default());
+            opening.push_str(&crate::idle::context(&conn, fired.user_id, l, now).unwrap_or_default());
         }
-        let (history, note) = thread_context(&conn, ev.conversation_id);
+        let (history, note) = thread_context(&conn, ev.conversation_id, l);
         (ev, opening, history, note)
     };
     let deps = crate::agent::SessionDeps {
@@ -771,7 +771,7 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
             checkin: ev.origin != crate::idle::ORIGIN,
             event_id: Some(ev.event_id),
             conversation_id,
-            actions: if ev.prompt == CLOSE_DAY_PROMPT {
+            actions: if is_close_day(&ev.prompt) {
                 vec![crate::channels::Action {
                     label: crate::text::action_carry_to_tomorrow(lang),
                     data: format!("carry:{}", fired.date),
@@ -1068,7 +1068,7 @@ mod tests {
             .unwrap();
         let laid = lay(&conn, &lay_at(&tmp, uid, "09:30")).unwrap();
         let ev = read(&conn, laid.event_id).unwrap().unwrap();
-        let text = situation(&conn, uid, &ev, &jiff::tz::TimeZone::UTC);
+        let text = situation(&conn, uid, &ev, &jiff::tz::TimeZone::UTC, Lang::En);
         assert!(text.starts_with("how did the essay go?"), "{text}");
         assert!(text.contains("Laid at 09:00, meant for 09:30."), "{text}");
         assert!(text.contains("\"read the chapter\", started 08:55, planned 60 min"), "{text}");

@@ -280,7 +280,7 @@ async fn share_info(
 
 async fn share_view(p: auth::SharePrincipal, State(state): State<AppState>) -> impl IntoResponse {
     let conn = state.db();
-    match crate::shares::render(&conn, &state.config_dir, p.owner_id, &p.owner_username, &p.share.scope, jiff::Timestamp::now()) {
+    match crate::shares::render(&conn, &state.config_dir, p.owner_id, &p.owner_username, &p.share.scope, crate::text::Lang::En, jiff::Timestamp::now()) {
         Ok(r) => Json(r.view).into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }

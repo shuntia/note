@@ -1,6 +1,7 @@
 use crate::agent::SessionDeps;
 use crate::providers::{ChatRequest, Message};
 use crate::tools::ToolError;
+use crate::model_text as mt;
 use anyhow::Result;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -110,7 +111,8 @@ pub fn run_tool(
     let hits = provider.search(query).map_err(|e| ToolError::internal(e.to_string()))?;
     if hits.is_empty() {
         log(deps, user_id, 0, "none");
-        return Ok(serde_json::json!({ "summary": "no results", "sources": [] }));
+        let l = crate::text::Lang::for_user(deps.config_dir, username);
+        return Ok(serde_json::json!({ "summary": mt::no_results(l), "sources": [] }));
     }
     if let Some(summary) = summarize(deps, username, background, &args, &hits) {
         log(deps, user_id, hits.len(), "ok");
@@ -130,12 +132,13 @@ fn summarize(
     args: &SearchArgs,
     hits: &[SearchHit],
 ) -> Option<String> {
-    let system = crate::prompts::load(deps.config_dir, username, "search").ok()?;
-    let mut prompt = format!("Query: {}\n", args.query.trim());
+    let l = crate::text::Lang::for_user(deps.config_dir, username);
+    let system = crate::prompts::load_in(deps.config_dir, username, "search", l).ok()?;
+    let mut prompt = format!("{}: {}\n", mt::search_query(l), args.query.trim());
     if let Some(q) = args.question.as_deref().map(str::trim).filter(|q| !q.is_empty()) {
-        let _ = writeln!(prompt, "Question: {q}");
+        let _ = writeln!(prompt, "{}: {q}", mt::search_question(l));
     }
-    prompt.push_str("\nResults:\n");
+    let _ = write!(prompt, "\n{}:\n", mt::search_results(l));
     for (i, h) in hits.iter().enumerate() {
         let _ = write!(prompt, "{}. {}\n{}\n{}\n\n", i + 1, h.title, h.url, h.snippet);
     }

@@ -140,7 +140,7 @@ fn run_stages(
         crate::tools::SessionKind::Nightly,
         now,
         &[],
-        &format!("Nightly run for {date}."),
+        &crate::model_text::nightly_opening(crate::text::Lang::for_user(deps.config_dir, username), date),
     );
     report.stage("session", at, outcome.as_ref().err());
     let content = match outcome {

@@ -275,7 +275,8 @@ impl CallManager {
             let Ok((system, tools)) = d.prompt(user_id, &username, &reason(Some(&msg)), conversation_id) else {
                 return;
             };
-            let messages = [Message::Assistant { text: msg.body.clone(), tool_calls: vec![] }, Message::User("[note] The phone is ringing.".into())];
+            let ringing = crate::model_text::phone_ringing(crate::text::Lang::for_user(&d.config_dir, &username));
+            let messages = [Message::Assistant { text: msg.body.clone(), tool_calls: vec![] }, Message::User(ringing.into())];
             let req = ChatRequest { system: &system, messages: &messages, tools: &tools, background: false };
             let opts = StreamOpts { first_token: d.settings.first_token };
             let _ = d.voice_llm.chat_stream(&req, &opts, &mut FirstDelta);

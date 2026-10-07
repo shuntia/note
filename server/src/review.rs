@@ -1,5 +1,7 @@
 use crate::agent::SessionDeps;
 use crate::tools::SessionKind;
+use crate::model_text as mt;
+use crate::text::Lang;
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
 use std::fmt::Write as _;
@@ -60,19 +62,19 @@ fn clip(text: &str) -> String {
     flat.chars().take(MAX_SUMMARY_CHARS - 1).chain(std::iter::once('…')).collect()
 }
 
-fn day_label(stamp: &str, tz: &jiff::tz::TimeZone) -> String {
+fn day_label(stamp: &str, tz: &jiff::tz::TimeZone, l: Lang) -> String {
     stamp
-        .parse::<jiff::Timestamp>().map_or_else(|_| "?".into(), |ts| ts.to_zoned(tz.clone()).strftime("%a").to_string())
+        .parse::<jiff::Timestamp>().map_or_else(|_| "?".into(), |ts| mt::weekday(l, ts.to_zoned(tz.clone()).weekday()).to_string())
 }
 
-fn section(title: &str, lines: &[String]) -> String {
+fn section(l: Lang, title: mt::ReviewSection, lines: &[String]) -> String {
     if lines.is_empty() {
         return String::new();
     }
-    format!("## {title}\n{}\n\n", lines.join("\n"))
+    format!("## {}\n{}\n\n", mt::review_section(l, title), lines.join("\n"))
 }
 
-fn tasks(conn: &Connection, user_id: i64, w: &Window, tz: &jiff::tz::TimeZone) -> Result<String> {
+fn tasks(conn: &Connection, user_id: i64, w: &Window, tz: &jiff::tz::TimeZone, l: Lang) -> Result<String> {
     let mut stmt = conn.prepare(
         "SELECT title, state, COALESCE(completed_at, updated_at)
          FROM tasks
@@ -86,13 +88,13 @@ fn tasks(conn: &Connection, user_id: i64, w: &Window, tz: &jiff::tz::TimeZone) -
             let title: String = r.get(0)?;
             let state: String = r.get(1)?;
             let at: String = r.get(2)?;
-            Ok(format!("- {} ({state}, {})", clip(&title), day_label(&at, tz)))
+            Ok(format!("- {} ({state}, {})", clip(&title), day_label(&at, tz, l)))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(section("Tasks", &lines))
+    Ok(section(l, mt::ReviewSection::Tasks, &lines))
 }
 
-fn sessions(conn: &Connection, user_id: i64, w: &Window, tz: &jiff::tz::TimeZone) -> Result<String> {
+fn sessions(conn: &Connection, user_id: i64, w: &Window, tz: &jiff::tz::TimeZone, l: Lang) -> Result<String> {
     let mut stmt = conn.prepare(
         "SELECT title, planned_min, started_at, ended_at, outcome, overrun_asked_at, paused_ms
          FROM work_sessions
@@ -108,24 +110,24 @@ fn sessions(conn: &Connection, user_id: i64, w: &Window, tz: &jiff::tz::TimeZone
             let outcome: Option<String> = r.get(4)?;
             let overrun: Option<String> = r.get(5)?;
             let paused_ms: i64 = r.get(6)?;
-            let mut line = format!("- {} ({})", clip(&title), day_label(&started, tz));
+            let mut line = format!("- {} ({})", clip(&title), day_label(&started, tz, l));
             if let Some(p) = planned {
-                let _ = write!(line, ", planned {p} min");
+                line.push_str(&mt::planned_min(l, p));
             }
             if let Some(min) = elapsed_min(&started, ended.as_deref(), paused_ms) {
-                let _ = write!(line, ", ran {min} min");
+                line.push_str(&mt::ran_min(l, min));
             }
             match outcome.as_deref() {
                 Some(o) => { let _ = write!(line, ", {o}"); },
-                None => line.push_str(", never ended"),
+                None => line.push_str(mt::never_ended(l)),
             }
             if overrun.is_some() {
-                line.push_str(", asked about overrun");
+                line.push_str(mt::asked_about_overrun(l));
             }
             Ok(line)
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(section("Sessions", &lines))
+    Ok(section(l, mt::ReviewSection::Sessions, &lines))
 }
 
 fn elapsed_min(started: &str, ended: Option<&str>, paused_ms: i64) -> Option<i64> {
@@ -135,7 +137,7 @@ fn elapsed_min(started: &str, ended: Option<&str>, paused_ms: i64) -> Option<i64
     Some((ms / 60_000).max(0))
 }
 
-fn triggers(conn: &Connection, user_id: i64, w: &Window) -> Result<String> {
+fn triggers(conn: &Connection, user_id: i64, w: &Window, l: Lang) -> Result<String> {
     let mut stmt = conn.prepare(
         "SELECT e.status, COUNT(*) FROM events e JOIN plans p ON p.id = e.plan_id
          WHERE p.user_id = ?1 AND p.date >= ?2 AND p.date < ?3 AND e.kind = ?4
@@ -160,27 +162,23 @@ fn triggers(conn: &Connection, user_id: i64, w: &Window) -> Result<String> {
         .unwrap_or(0)
     };
     Ok(section(
-        "Trigger points",
-        &[format!(
-            "{} — said {}, stayed quiet {}",
-            by_status.join(", "),
-            spoken("trigger_said"),
-            spoken("trigger_quiet"),
-        )],
+        l,
+        mt::ReviewSection::Triggers,
+        &[mt::triggers_line(l, &by_status.join(", "), spoken("trigger_said"), spoken("trigger_quiet"))],
     ))
 }
 
-fn nights(conn: &Connection, user_id: i64, w: &Window) -> Result<String> {
+fn nights(conn: &Connection, user_id: i64, w: &Window, l: Lang) -> Result<String> {
     let mut stmt = conn.prepare(
         "SELECT date, facts_written FROM harvests
          WHERE user_id = ?1 AND date >= ?2 AND date < ?3 ORDER BY date",
     )?;
     let lines = stmt
         .query_map((user_id, w.start.to_string(), w.end.to_string()), |r| {
-            Ok(format!("- {}: {} fact(s) kept", r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            Ok(mt::facts_kept(l, &r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(section("Nights", &lines))
+    Ok(section(l, mt::ReviewSection::Nights, &lines))
 }
 
 fn conversations(
@@ -188,6 +186,7 @@ fn conversations(
     user_id: i64,
     w: &Window,
     tz: &jiff::tz::TimeZone,
+    l: Lang,
 ) -> Result<String> {
     let mut stmt = conn.prepare(
         "SELECT title, summary, updated_at FROM conversations
@@ -200,10 +199,10 @@ fn conversations(
             let title: String = r.get(0)?;
             let summary: String = r.get(1)?;
             let at: String = r.get(2)?;
-            Ok(format!("- {} ({}): {}", clip(&title), day_label(&at, tz), clip(&summary)))
+            Ok(format!("- {} ({}): {}", clip(&title), day_label(&at, tz, l), clip(&summary)))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(section("Conversations", &lines))
+    Ok(section(l, mt::ReviewSection::Conversations, &lines))
 }
 
 fn days_remembered(
@@ -211,6 +210,7 @@ fn days_remembered(
     data_dir: &std::path::Path,
     username: &str,
     w: &Window,
+    l: Lang,
 ) -> Result<String> {
     let mut lines = Vec::new();
     for hit in crate::memory::list(conn, username, Some("episodic"), EPISODIC_SCAN)? {
@@ -222,7 +222,7 @@ fn days_remembered(
         lines.push(format!("- {}\n{}", f.summary, f.body.trim()));
     }
     lines.reverse();
-    Ok(section("The week as memory holds it", &lines))
+    Ok(section(l, mt::ReviewSection::Memory, &lines))
 }
 
 /// The week just ended, as the review session reads it: what finished and what
@@ -234,16 +234,17 @@ pub fn digest(
     user_id: i64,
     username: &str,
     tz: &jiff::tz::TimeZone,
+    l: Lang,
     week_start: jiff::civil::Date,
 ) -> Result<String> {
     let w = Window::of(week_start, tz)?;
     let parts = [
-        tasks(conn, user_id, &w, tz)?,
-        sessions(conn, user_id, &w, tz)?,
-        triggers(conn, user_id, &w)?,
-        nights(conn, user_id, &w)?,
-        conversations(conn, user_id, &w, tz)?,
-        days_remembered(conn, data_dir, username, &w)?,
+        tasks(conn, user_id, &w, tz, l)?,
+        sessions(conn, user_id, &w, tz, l)?,
+        triggers(conn, user_id, &w, l)?,
+        nights(conn, user_id, &w, l)?,
+        conversations(conn, user_id, &w, tz, l)?,
+        days_remembered(conn, data_dir, username, &w, l)?,
     ];
     let mut out = String::new();
     for part in parts {
@@ -268,6 +269,7 @@ pub fn run_for_user(
 ) -> Result<()> {
     let Some(week_start) = reviewed_week(date) else { return Ok(()) };
     let week = week_start.to_string();
+    let l = Lang::for_user(deps.config_dir, username);
     let digest = {
         let conn = crate::db_guard(deps.db);
         let done: i64 = conn.query_row(
@@ -278,7 +280,7 @@ pub fn run_for_user(
         if done > 0 {
             return Ok(());
         }
-        digest(&conn, deps.data_dir, user_id, username, tz, week_start)?
+        digest(&conn, deps.data_dir, user_id, username, tz, l, week_start)?
     };
     if digest.is_empty() {
         return Ok(());
@@ -298,7 +300,7 @@ pub fn run_for_user(
         share: None,
     };
     let sunday = week_start.checked_add(jiff::Span::new().days(6))?;
-    let opening = format!("The week of {week}, up to and including {sunday}.\n\n{digest}");
+    let opening = mt::review_opening(l, &week, sunday, &digest);
     let out = crate::agent::run_session(
         &deps,
         user_id,
@@ -509,7 +511,7 @@ mod tests {
             .unwrap();
 
         let out =
-            digest(&conn, tmp.path(), 1, "aki", &tokyo(), date("2026-09-14")).unwrap();
+            digest(&conn, tmp.path(), 1, "aki", &tokyo(), Lang::En, date("2026-09-14")).unwrap();
         assert!(out.contains("- the essay (done, Wed)"), "{out}");
         assert!(out.contains("- the recital (dropped, Thu)"), "{out}");
         assert!(!out.contains("next week"), "the week after is not this week's: {out}");

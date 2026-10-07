@@ -2,6 +2,8 @@ use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
+use crate::model_text as mt;
+use crate::text::Lang;
 use std::fmt::Write as _;
 
 /// The whole standing document is prepended to every system prompt, so its
@@ -175,16 +177,17 @@ const CAPS: [Caps; 7] = [
 /// stability — the standing doc changes rarely, the dynamic block every call.
 pub fn assemble(conn: &Connection, config_dir: &Path, user_id: i64, username: &str, now: jiff::Timestamp) -> Result<String> {
     let ucfg = crate::config::UserConfig::load(config_dir, username)?;
+    let l = Lang::for_user(config_dir, username);
     let (tz, tz_label) = match jiff::tz::TimeZone::get(&ucfg.timezone) {
         Ok(tz) => (tz, ucfg.timezone.clone()),
-        Err(_) => (jiff::tz::TimeZone::UTC, "UTC (configured timezone invalid)".into()),
+        Err(_) => (jiff::tz::TimeZone::UTC, mt::timezone_invalid(l).into()),
     };
     let local = now.to_zoned(tz.clone());
     let today = local.date();
     let tomorrow = today.tomorrow()?;
     let now_min = i64::from(local.hour()) * 60 + i64::from(local.minute());
     let standing = std::fs::read_to_string(standing_path(config_dir, username))
-        .unwrap_or_else(|_| "(no standing context yet)".into());
+        .unwrap_or_else(|_| mt::no_standing(l).into());
 
     let events = crate::plan::events_for(conn, user_id, today)?;
     let tasks = crate::tasks::list(conn, user_id)?;
@@ -220,11 +223,13 @@ pub fn assemble(conn: &Connection, config_dir: &Path, user_id: i64, username: &s
     let calendar = crate::calendar::occurrences(conn, user_id, today)?;
 
     let now_s =
-        now_section(&local, &tz_label, now, &events, now_min, &ucfg.nightly_time, quiet.as_ref());
+        now_section(l, &local, &tz_label, now, &events, now_min, &ucfg.nightly_time, quiet.as_ref());
     let plan_s = plan_section(
+        l,
         &events, &calendar, now_min, tomorrow, crate::plan::exists(conn, user_id, tomorrow)?,
     );
     let settings_s = settings_section(
+        l,
         &ucfg,
         &tz_label,
         ucfg.features(&category),
@@ -238,14 +243,14 @@ pub fn assemble(conn: &Connection, config_dir: &Path, user_id: i64, username: &s
     );
     let render = |caps: &Caps| {
         let mut s = String::with_capacity(2048);
-        s.push_str(&notes_section(notes.as_ref(), today, caps.notes));
+        s.push_str(&notes_section(l, notes.as_ref(), today, caps.notes));
         s.push_str(&now_s);
         s.push_str(&plan_s);
-        s.push_str(&tasks_section(&now_tasks, &later, done_today, caps.later, &tz, today, now));
-        s.push_str(&scratch_section(&scratch, caps.scratch));
-        s.push_str(&debrief_section(debrief.as_ref(), today, caps.debrief));
+        s.push_str(&tasks_section(l, &now_tasks, &later, done_today, caps.later, &tz, today, now));
+        s.push_str(&scratch_section(l, &scratch, caps.scratch));
+        s.push_str(&debrief_section(l, debrief.as_ref(), today, caps.debrief));
         s.push_str(&settings_s);
-        s.push_str(&activity_section(&activity, &tz, caps.activity));
+        s.push_str(&activity_section(l, &activity, &tz, caps.activity));
         s
     };
 
@@ -263,33 +268,16 @@ pub fn assemble(conn: &Connection, config_dir: &Path, user_id: i64, username: &s
         }
         block.truncate(cut);
     }
-    Ok(format!("# Standing context\n\n{}\n\n{block}", standing.trim()))
-}
-
-fn part_of_day(hour: i8) -> &'static str {
-    match hour {
-        5..=7 => "early morning",
-        8..=10 => "morning",
-        11..=13 => "midday",
-        14..=17 => "afternoon",
-        18..=21 => "evening",
-        _ => "night",
-    }
-}
-
-fn in_words(mins: i64) -> String {
-    if mins < 60 {
-        format!("{mins} min")
-    } else {
-        format!("{}h{:02}m", mins / 60, mins % 60)
-    }
+    Ok(format!("{}\n\n{}\n\n{block}", mt::standing_heading(l), standing.trim()))
 }
 
 fn end_of(e: &crate::plan::PlanEvent) -> &str {
     e.end_wall_time.as_deref().unwrap_or(&e.wall_time)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn now_section(
+    l: Lang,
     local: &jiff::Zoned,
     tz_label: &str,
     now: jiff::Timestamp,
@@ -298,17 +286,17 @@ fn now_section(
     nightly_time: &str,
     quiet: Option<&crate::calendar::QuietWindow>,
 ) -> String {
-    let mut s = String::from("# Now\n\n");
+    let mut s = String::from(mt::now_heading(l));
     let _ = writeln!(
         s,
         "{} {tz_label} {} | {} | {}",
-        local.strftime("%A %Y-%m-%d %H:%M"),
+        mt::now_stamp(l, local),
         local.strftime("UTC%:z"),
         now.strftime("%Y-%m-%dT%H:%MZ"),
-        part_of_day(local.hour()),
+        mt::part_of_day(l, local.hour()),
     );
     match events.first() {
-        None => s.push_str("Day's plan: none generated for today\n"),
+        None => s.push_str(mt::no_day_plan(l)),
         Some(first) => {
             let last = events.iter().map(end_of).max().unwrap_or(&first.wall_time);
             let left = events
@@ -317,17 +305,15 @@ fn now_section(
                 .count();
             let _ = writeln!(
                 s,
-                "Day's plan: {}-{last}; now {}, {left} event{} left",
-                first.wall_time,
-                local.strftime("%H:%M"),
-                if left == 1 { "" } else { "s" },
+                "{}",
+                mt::day_plan(l, &first.wall_time, last, &local.strftime("%H:%M").to_string(), left)
             );
         }
     }
     let until = (crate::templates::wall_minutes(nightly_time) - now_min).rem_euclid(24 * 60);
-    let _ = writeln!(s, "Nightly run {nightly_time}, in {}", in_words(until));
+    let _ = writeln!(s, "{}", mt::nightly_run_in(l, nightly_time, &mt::in_words(l, until)));
     if let Some(q) = quiet {
-        let _ = writeln!(s, "Quiet until {} ({})", q.end, q.title);
+        let _ = writeln!(s, "{}", mt::quiet_until(l, &q.end, &q.title));
     }
     s.push('\n');
     s
@@ -337,33 +323,34 @@ fn now_section(
 /// are never trimmed, so the list itself is bounded.
 const MAX_CALENDAR_LINES: usize = 12;
 
-fn calendar_lines(calendar: &[crate::calendar::Occurrence]) -> String {
+fn calendar_lines(l: Lang, calendar: &[crate::calendar::Occurrence]) -> String {
     if calendar.is_empty() {
         return String::new();
     }
-    let mut s = String::from("Calendar:\n");
+    let mut s = String::from(mt::calendar_label(l));
     for o in calendar.iter().take(MAX_CALENDAR_LINES) {
-        let marks = if o.quiet { format!("{}, quiet", o.kind) } else { o.kind.clone() };
+        let marks = if o.quiet { format!("{}, {}", o.kind, mt::quiet_mark(l)) } else { o.kind.clone() };
         let _ = writeln!(s, "- {}-{} {} [{marks}]", o.start, o.end, o.title);
     }
     if let Some(rest) = calendar.len().checked_sub(MAX_CALENDAR_LINES).filter(|n| *n > 0) {
-        let _ = writeln!(s, "- (+{rest} more)");
+        let _ = writeln!(s, "- {}", mt::more_in_parens(l, rest));
     }
     s.push('\n');
     s
 }
 
 fn plan_section(
+    l: Lang,
     events: &[crate::plan::PlanEvent],
     calendar: &[crate::calendar::Occurrence],
     now_min: i64,
     tomorrow: jiff::civil::Date,
     tomorrow_planned: bool,
 ) -> String {
-    let mut s = String::from("# Today's plan\n\n");
-    s.push_str(&calendar_lines(calendar));
+    let mut s = String::from(mt::plan_heading(l));
+    s.push_str(&calendar_lines(l, calendar));
     if events.is_empty() {
-        s.push_str("(no plan generated for today)\n");
+        s.push_str(mt::no_plan_today(l));
     }
     let start_of = |e: &crate::plan::PlanEvent| crate::templates::wall_minutes(&e.wall_time);
     let current = events
@@ -372,32 +359,33 @@ fn plan_section(
     let next = events.iter().position(|e| start_of(e) > now_min);
     for (i, e) in events.iter().enumerate() {
         let mark = if Some(i) == current {
-            " <- now".into()
+            mt::mark_now(l).into()
         } else if Some(i) == next {
-            format!(" <- next, in {}", in_words(start_of(e) - now_min))
+            mt::mark_next(l, &mt::in_words(l, start_of(e) - now_min))
         } else {
             String::new()
         };
         if e.entry == "block" {
             let _ = writeln!(
                 s,
-                "- {}-{} {} [{}] block (event_id {}){mark}",
+                "- {}-{} {} [{}] {} (event_id {}){mark}",
                 e.wall_time,
                 end_of(e),
                 e.kind,
                 e.status,
+                mt::block_word(l),
                 e.id,
             );
         } else {
             let _ = writeln!(
                 s,
-                "- {}-{} {} [{}] routine via {}{} (event_id {}){mark}",
+                "- {}-{} {} [{}] {}{} (event_id {}){mark}",
                 e.wall_time,
                 end_of(e),
                 e.kind,
                 e.status,
-                e.channel,
-                if e.alert { "" } else { " (silent)" },
+                mt::routine_via(l, &e.channel),
+                if e.alert { "" } else { mt::silent(l) },
                 e.id,
             );
         }
@@ -406,37 +394,31 @@ fn plan_section(
         let n = |status: &str| events.iter().filter(|e| e.status == status).count();
         let _ = writeln!(
             s,
-            "{} pending, {} fired, {} done, {} dropped, {} snoozed",
-            n("pending"), n("fired"), n("done"), n("dropped"), n("snoozed"),
+            "{}",
+            mt::status_counts(l, [n("pending"), n("fired"), n("done"), n("dropped"), n("snoozed")]),
         );
     }
-    let _ = write!(
-        s,
-        "Tomorrow's plan ({tomorrow}): {}\n\n",
-        if tomorrow_planned { "generated" } else { "not generated yet" },
-    );
+    s.push_str(&mt::tomorrow_plan(l, tomorrow, tomorrow_planned));
     s
 }
 
-fn duration(min: Option<u32>) -> String {
-    min.map(|d| format!(" {d}m")).unwrap_or_default()
+fn duration(l: Lang, min: Option<u32>) -> String {
+    min.map(|d| mt::minutes_short(l, d)).unwrap_or_default()
 }
 
 /// How far along a task is, and where the minutes behind that say it lands; a
 /// task nobody has started says nothing.
-fn progress(task: &crate::tasks::Task) -> String {
+fn progress(l: Lang, task: &crate::tasks::Task) -> String {
     if task.progress == 0 {
         return String::new();
     }
-    match task.remaining_min {
-        Some(left) => format!(" {}% ~{left}m left", task.progress),
-        None => format!(" {}%", task.progress),
-    }
+    mt::progress(l, task.progress, task.remaining_min.map(i64::from))
 }
 
 /// How a deadline reads next to a title: the near ones in words, the rest as
 /// the local day they fall on.
 fn due(
+    l: Lang,
     task: &crate::tasks::Task,
     tz: &jiff::tz::TimeZone,
     today: jiff::civil::Date,
@@ -446,13 +428,13 @@ fn due(
         return String::new();
     };
     if at < now {
-        return " overdue".into();
+        return mt::overdue(l).into();
     }
     let day = at.to_zoned(tz.clone()).date();
     match day.since(today).ok().map(|s| s.get_days()) {
-        Some(0) => " due today".into(),
-        Some(1) => " due tomorrow".into(),
-        _ => format!(" due {day}"),
+        Some(0) => mt::due_today(l).into(),
+        Some(1) => mt::due_tomorrow(l).into(),
+        _ => mt::due_on(l, day),
     }
 }
 
@@ -478,7 +460,9 @@ fn due_soon(tasks: &[&crate::tasks::TaskNode], now: jiff::Timestamp) -> (usize, 
 
 const DUE_SOON_DAYS: i64 = 3;
 
+#[allow(clippy::too_many_arguments)]
 fn tasks_section(
+    l: Lang,
     now_tasks: &[&crate::tasks::TaskNode],
     later: &[&crate::tasks::TaskNode],
     done_today: i64,
@@ -487,24 +471,24 @@ fn tasks_section(
     today: jiff::civil::Date,
     now: jiff::Timestamp,
 ) -> String {
-    let mut s = String::from("# Tasks\n\n");
+    let mut s = String::from(mt::tasks_heading(l));
     if now_tasks.is_empty() && later.is_empty() && done_today == 0 {
-        s.push_str("(no tasks)\n\n");
+        s.push_str(mt::no_tasks(l));
         return s;
     }
     if now_tasks.is_empty() {
-        s.push_str("Now: (none)\n");
+        s.push_str(mt::now_none(l));
     } else {
-        s.push_str("Now:\n");
+        s.push_str(mt::now_label(l));
         for n in now_tasks {
             let _ = writeln!(
                 s,
                 "- {} [{}]{}{}{} (task_id {})",
                 n.task.title,
                 n.task.state,
-                duration(n.task.duration_min),
-                progress(&n.task),
-                due(&n.task, tz, today, now),
+                duration(l, n.task.duration_min),
+                progress(l, &n.task),
+                due(l, &n.task, tz, today, now),
                 n.task.id,
             );
             for c in &n.children {
@@ -517,43 +501,40 @@ fn tasks_section(
                     s,
                     "  - [{mark}] {}{}{} (task_id {})",
                     c.title,
-                    duration(c.duration_min),
-                    progress(c),
+                    duration(l, c.duration_min),
+                    progress(l, c),
                     c.id,
                 );
             }
         }
     }
     if later.is_empty() {
-        s.push_str("Later: (none)\n");
+        s.push_str(mt::later_none(l));
     } else if cap == 0 {
-        let _ = writeln!(s, "Later: {} open (titles trimmed for size)", later.len());
+        let _ = writeln!(s, "{}", mt::later_trimmed(l, later.len()));
     } else {
-        let _ = writeln!(s, "Later ({} open):", later.len());
+        let _ = writeln!(s, "{}", mt::later_label(l, later.len()));
         for t in later.iter().take(cap) {
             let _ = writeln!(
                 s,
                 "- {}{}{}{} (task_id {})",
                 t.task.title,
-                duration(t.task.duration_min),
-                progress(&t.task),
-                due(&t.task, tz, today, now),
+                duration(l, t.task.duration_min),
+                progress(l, &t.task),
+                due(l, &t.task, tz, today, now),
                 t.task.id,
             );
         }
         if let Some(rest) = later.len().checked_sub(cap).filter(|r| *r > 0) {
-            let _ = writeln!(s, "- ... and {rest} more");
+            let _ = writeln!(s, "{}", mt::and_more(l, rest));
         }
     }
     let dated: Vec<_> = now_tasks.iter().chain(later.iter()).copied().collect();
     let (soon, overdue) = due_soon(&dated, now);
     if soon > 0 || overdue > 0 {
-        let _ = writeln!(
-            s,
-            "Due soon: {soon} in the next {DUE_SOON_DAYS} days, {overdue} overdue"
-        );
+        let _ = writeln!(s, "{}", mt::due_soon(l, soon, DUE_SOON_DAYS, overdue));
     }
-    let _ = write!(s, "Done today: {done_today}\n\n");
+    s.push_str(&mt::done_today(l, done_today));
     s
 }
 
@@ -575,18 +556,14 @@ fn days_since(date: &str, today: jiff::civil::Date) -> Option<i32> {
         .map(|span| span.get_days())
 }
 
-fn days_ago(date: &str, today: jiff::civil::Date) -> String {
-    match days_since(date, today) {
-        None => "date unreadable".into(),
-        Some(0) => "today".into(),
-        Some(1) => "yesterday".into(),
-        Some(n) => format!("{n} days ago"),
-    }
+fn days_ago(l: Lang, date: &str, today: jiff::civil::Date) -> String {
+    mt::days_ago(l, days_since(date, today))
 }
 
 /// What last night's run left for today's sessions, dated so the model can
 /// weigh it, and marked stale once it has outlived its day.
 fn notes_section(
+    l: Lang,
     notes: Option<&(String, String)>,
     today: jiff::civil::Date,
     keep: bool,
@@ -595,39 +572,35 @@ fn notes_section(
         return String::new();
     };
     let stale = days_since(date, today).is_some_and(|d| d > NIGHTLY_NOTES_FRESH_DAYS);
-    format!(
-        "# {}Notes from last night (written {date}, {})\n\n{body}\n\n",
-        if stale { "(stale) " } else { "" },
-        days_ago(date, today),
-    )
+    format!("{}\n\n{body}\n\n", mt::notes_heading(l, stale, date, &days_ago(l, date, today)))
 }
 
 /// Pinned lines first, then the newest of the rest, up to `cap`.
-fn scratch_section(lines: &[crate::notes::Note], cap: usize) -> String {
+fn scratch_section(l: Lang, lines: &[crate::notes::Note], cap: usize) -> String {
     if lines.is_empty() {
         return String::new();
     }
     let (pinned, rest): (Vec<_>, Vec<_>) = lines.iter().partition(|n| n.pinned);
-    let mut s = String::from("# Your scratchpad (note_* tools; the user does not see it)\n\n");
+    let mut s = String::from(mt::scratch_heading(l));
     for n in pinned.into_iter().chain(rest.into_iter().rev()).take(cap) {
-        let _ = writeln!(s, "- {}{}: {}", n.id, if n.pinned { " (pinned)" } else { "" }, n.text);
+        let _ = writeln!(s, "- {}{}: {}", n.id, if n.pinned { mt::pinned(l) } else { "" }, n.text);
     }
     s.push('\n');
     s
 }
 
-fn debrief_section(row: Option<&(String, String)>, today: jiff::civil::Date, cap: usize) -> String {
-    let mut s = String::from("# Latest debrief\n\n");
+fn debrief_section(l: Lang, row: Option<&(String, String)>, today: jiff::civil::Date, cap: usize) -> String {
+    let mut s = String::from(mt::debrief_heading(l));
     match row {
-        None => s.push_str("(no debrief yet)\n\n"),
+        None => s.push_str(mt::no_debrief(l)),
         Some((date, content)) if cap == 0 => {
-            let _ = write!(s, "{date} ({}): (trimmed for size)\n\n", days_ago(date, today));
+            let _ = write!(s, "{date} ({}): {}\n\n", days_ago(l, date, today), mt::trimmed(l));
         }
         Some((date, content)) => {
             let _ = write!(
                 s,
                 "{date} ({}): {}\n\n",
-                days_ago(date, today),
+                days_ago(l, date, today),
                 excerpt(content, cap),
             );
         }
@@ -636,6 +609,7 @@ fn debrief_section(row: Option<&(String, String)>, today: jiff::civil::Date, cap
 }
 
 fn settings_section(
+    l: Lang,
     cfg: &crate::config::UserConfig,
     tz_label: &str,
     features: crate::config::Features,
@@ -643,18 +617,10 @@ fn settings_section(
     triggers: (u32, u32),
     plan_factor: Option<crate::learn::Learned>,
 ) -> String {
-    let on = |b: bool| if b { "on" } else { "off" };
     let (spent, allowance) = triggers;
     let factor = plan_factor.map_or_else(
-        || "no plan factor yet".to_string(),
-        |f| {
-            format!(
-                "Plan factor: {:.1}× from {} session{}",
-                f.value,
-                f.sample,
-                if f.sample == 1 { "" } else { "s" }
-            )
-        },
+        || mt::no_plan_factor(l).to_string(),
+        |f| mt::plan_factor(l, f.value, f.sample),
     );
     let memory_facts: i64 = by_category.iter().sum();
     let split = crate::memory::CATEGORIES
@@ -663,33 +629,39 @@ fn settings_section(
         .map(|(c, n)| format!("{n} {c}"))
         .collect::<Vec<_>>()
         .join(", ");
-    format!(
-        "# Settings\n\n{} | {tz_label} | nightly_time {} | template {} | counter {} | nightly {} | checkins {}\n\
-         Memory: {memory_facts} fact{} ({split})\n\
-         {factor}\n\
-         Trigger points you may lay today: {spent} of {allowance} used\n\n",
-        cfg.display_name,
-        cfg.nightly_time,
-        cfg.template,
-        cfg.counter,
-        on(features.nightly),
-        on(features.checkins),
-        if memory_facts == 1 { "" } else { "s" },
+    mt::settings(
+        l,
+        &mt::SettingsLine {
+            name: &cfg.display_name,
+            tz: tz_label,
+            nightly_time: &cfg.nightly_time,
+            template: &cfg.template,
+            counter: &cfg.counter,
+            nightly: features.nightly,
+            checkins: features.checkins,
+            facts: memory_facts,
+            split: &split,
+            factor: &factor,
+            spent,
+            allowance,
+        },
     )
 }
 
 fn activity_section(
+    l: Lang,
     rows: &[(String, String, String)],
     tz: &jiff::tz::TimeZone,
     cap: usize,
 ) -> String {
-    let mut s = String::from("# Recent activity\n\n");
+    let mut s = String::from(mt::activity_heading(l));
     if cap == 0 {
-        s.push_str("(trimmed for size)\n");
+        s.push_str(mt::trimmed(l));
+        s.push('\n');
         return s;
     }
     if rows.is_empty() {
-        s.push_str("(none)\n");
+        s.push_str(mt::none_line(l));
     }
     for (ts, kind, detail) in rows.iter().take(cap) {
         let when = ts
