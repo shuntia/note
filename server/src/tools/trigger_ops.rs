@@ -56,9 +56,9 @@ pub struct BudgetArgs {
 pub struct SayArgs {
     /// One or two warm sentences, as the user will read them.
     pub text: String,
-    /// The ids of the notes these words are about, when a nudge names any.
+    /// The ids of the working notes these words are about, when a nudge names any.
     #[serde(default)]
-    pub notes: Vec<i64>,
+    pub notes: Vec<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -484,9 +484,10 @@ mod tests {
     #[test]
     fn say_carries_the_notes_it_names() {
         let (conn, tmp) = env();
+        let id = "00000000-0000-4000-8000-000000000003";
         let out = dispatch(&conn, &ctx(&tmp), SessionKind::Trigger, "say",
-            r#"{"text":"the bank closes at five","notes":[3]}"#).unwrap();
-        assert_eq!(out["notes"], serde_json::json!([3]));
+            &format!(r#"{{"text":"the bank closes at five","notes":["{id}"]}}"#)).unwrap();
+        assert_eq!(out["notes"], serde_json::json!([id]));
         let out = dispatch(&conn, &ctx(&tmp), SessionKind::Trigger, "say", r#"{"text":"hi"}"#)
             .unwrap();
         assert_eq!(out["notes"], serde_json::json!([]));

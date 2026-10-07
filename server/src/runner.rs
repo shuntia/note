@@ -347,7 +347,7 @@ pub fn sweep_once(state: &AppState) {
                 crate::log::ERROR_LOG_WINDOW_MINS,
             );
         };
-        if let Err(e) = crate::idle::check(&conn, &state.config_dir, now) {
+        if let Err(e) = crate::idle::check(&conn, &state.config_dir, &state.data_dir, now) {
             note(e);
         }
         let fired = fire_due(&conn, &state.config_dir, now).unwrap_or_else(|e| {

@@ -664,7 +664,7 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
         };
         let mut opening = situation(&conn, fired.user_id, &ev, &tz, l);
         if ev.origin == crate::idle::ORIGIN {
-            opening.push_str(&crate::idle::context(&conn, fired.user_id, l, now).unwrap_or_default());
+            opening.push_str(&crate::idle::context(&conn, &state.data_dir, fired.user_id, &fired.username, l, now).unwrap_or_default());
         }
         let (history, note) = thread_context(&conn, ev.conversation_id, l);
         (ev, opening, history, note)
@@ -748,11 +748,8 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
             now,
         );
         let _ = settle(&conn, ev.event_id, now);
-        if ev.origin == crate::idle::ORIGIN {
-            let named: Vec<i64> =
-                serde_json::from_value(result["notes"].clone()).unwrap_or_default();
-            let _ = crate::idle::stamp_nudged(&conn, fired.user_id, &named, now);
-        }
+        let named: Vec<String> = serde_json::from_value(result["notes"].clone()).unwrap_or_default();
+        let _ = crate::notes::nudged(&conn, &state.data_dir, &fired.username, &named, now);
         let _ = crate::log::record(
             &conn,
             Some(fired.user_id),

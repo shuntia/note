@@ -598,9 +598,9 @@ pub fn close_day_prompt(l: Lang) -> &'static str {
 
 pub fn idle_prompt(l: Lang) -> &'static str {
     l.of(
-        "The user has gone quiet while your scratchpad holds open lines. \
+        "The user has gone quiet while your working memory holds notes. \
          Decide whether one of them is worth raising now.",
-        "メモ帳に未完了の行が残ったまま、ユーザーからの反応が途絶えています。\
+        "作業メモが残ったまま、ユーザーからの反応が途絶えています。\
          どれかを今持ち出す価値があるか判断してください。",
     )
 }
@@ -658,10 +658,10 @@ pub fn quiet_for(l: Lang, min: i64) -> String {
     }
 }
 
-pub fn open_scratch_lines(l: Lang) -> &'static str {
+pub fn open_working_lines(l: Lang) -> &'static str {
     l.of(
-        "Open scratchpad lines (id: text, age, last raised):\n",
-        "未完了のメモ帳の行（id: 内容、経過、最後に触れた時）:\n",
+        "Working notes (id: title, age, last raised):\n",
+        "作業メモ（id: 内容、経過、最後に触れた時）:\n",
     )
 }
 
@@ -687,10 +687,10 @@ pub fn never_nudged(l: Lang) -> &'static str {
     l.of("never nudged", "声かけなし")
 }
 
-pub fn scratch_line(l: Lang, id: i64, text: &str, added: &str, nudge: &str) -> String {
+pub fn working_line(l: Lang, id: &str, title: &str, added: &str, nudge: &str) -> String {
     match l {
-        Lang::En => format!("- {id}: {text:?}, added {added} ago, {nudge}"),
-        Lang::Ja => format!("- {id}: {text:?}、{added}前に追加、{nudge}"),
+        Lang::En => format!("- {id}: {title:?}, added {added} ago, {nudge}"),
+        Lang::Ja => format!("- {id}: {title:?}、{added}前に追加、{nudge}"),
     }
 }
 

@@ -62,8 +62,10 @@ fn rows<T: rusqlite::types::FromSql>(w: &World, sql: &str) -> Vec<T> {
     out.collect::<rusqlite::Result<_>>().unwrap()
 }
 
-/// Quiet for half an hour with one open note; returns the note's id.
-fn gone_quiet(w: &World) -> i64 {
+const BANK: &str = "00000000-0000-4000-8000-0000000000b1";
+
+/// Quiet for half an hour with one active note, `BANK`.
+fn gone_quiet(w: &World) {
     let conn = w.state.db();
     let then = jiff::Timestamp::now() - jiff::Span::new().minutes(30);
     conn.execute(
@@ -71,19 +73,38 @@ fn gone_quiet(w: &World) -> i64 {
         [note_server::presence::stamp(then)],
     )
     .unwrap();
-    conn.execute(
-        "INSERT INTO notes (user_id, text, pinned, created_at) VALUES (1, 'call the bank', 0, ?1)",
-        [then.to_string()],
+    let at = note_server::notes::stamp(then);
+    note_server::memory::put(
+        &conn,
+        &w.state.data_dir,
+        "aki",
+        &note_server::memory::MemoryFile {
+            id: BANK.into(),
+            category: note_server::memory::NOTE.into(),
+            summary: "call the bank".into(),
+            body: String::new(),
+            supersedes: None,
+            until: None,
+            created: at.clone(),
+            archived: false,
+            source: None,
+            from: None,
+            touched_at: Some(at),
+            last_nudged_at: None,
+        },
     )
     .unwrap();
-    conn.last_insert_rowid()
+}
+
+fn last_nudged(w: &World) -> Option<String> {
+    note_server::notes::get(&w.state.data_dir, "aki", BANK).unwrap().unwrap().last_nudged_at
 }
 
 #[tokio::test]
 async fn a_quiet_user_with_an_open_note_is_nudged_about_it_once() {
-    let w = world(vec![call("c1", "say", r#"{"text":"the bank closes at five","notes":[1]}"#)])
+    let w = world(vec![call("c1", "say", &format!(r#"{{"text":"the bank closes at five","notes":["{BANK}"]}}"#))])
         .await;
-    assert_eq!(gone_quiet(&w), 1);
+    gone_quiet(&w);
 
     note_server::runner::sweep_once(&w.state);
 
@@ -93,8 +114,7 @@ async fn a_quiet_user_with_an_open_note_is_nudged_about_it_once() {
     assert!(seen[0].1.actions.is_empty(), "a nudge carries no event buttons");
     let origins: Vec<String> = rows(&w, "SELECT origin FROM events WHERE kind = 'trigger'");
     assert_eq!(origins, vec!["idle"]);
-    let nudged: Vec<Option<String>> = rows(&w, "SELECT last_nudged_at FROM notes WHERE id = 1");
-    assert!(nudged[0].is_some(), "the named note carries the nudge");
+    assert!(last_nudged(&w).is_some(), "the named note carries the nudge");
     let opening = format!("{:?}", w.llm.seen()[0].messages.last().unwrap());
     assert!(opening.contains("call the bank"), "{opening}");
     assert!(opening.contains("Nothing from the user for 30 min."), "{opening}");
@@ -115,8 +135,7 @@ async fn a_nudge_held_back_stays_held_until_another_stretch_of_quiet() {
     assert!(w.push.seen().is_empty());
     let statuses: Vec<String> = rows(&w, "SELECT status FROM events WHERE kind = 'trigger'");
     assert_eq!(statuses, vec!["done"]);
-    let nudged: Vec<Option<String>> = rows(&w, "SELECT last_nudged_at FROM notes WHERE id = 1");
-    assert!(nudged[0].is_none());
+    assert!(last_nudged(&w).is_none());
 }
 
 #[tokio::test]
@@ -126,7 +145,7 @@ async fn coming_back_before_the_nudge_fires_calls_it_off() {
     {
         let conn = w.state.db();
         let laid =
-            note_server::idle::check(&conn, &w.state.config_dir, jiff::Timestamp::now()).unwrap();
+            note_server::idle::check(&conn, &w.state.config_dir, &w.state.data_dir, jiff::Timestamp::now()).unwrap();
         assert_eq!(laid.len(), 1);
     }
     let res = w

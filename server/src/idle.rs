@@ -16,9 +16,9 @@ struct Seen {
     last_active: String,
 }
 
-/// Lays an idle trigger for every user who has gone quiet with open notes and
+/// Lays an idle trigger for every user who has gone quiet with active notes and
 /// returns the events laid. One user's failure is logged and skips only them.
-pub fn check(conn: &Connection, config_dir: &Path, now: jiff::Timestamp) -> Result<Vec<i64>> {
+pub fn check(conn: &Connection, config_dir: &Path, data_dir: &Path, now: jiff::Timestamp) -> Result<Vec<i64>> {
     let mut stmt = conn.prepare(
         "SELECT id, username, category, last_active_at FROM users
          WHERE disabled = 0 AND last_active_at IS NOT NULL",
@@ -36,7 +36,7 @@ pub fn check(conn: &Connection, config_dir: &Path, now: jiff::Timestamp) -> Resu
     drop(stmt);
     let mut laid = Vec::new();
     for user in seen {
-        match check_one(conn, config_dir, &user, now) {
+        match check_one(conn, config_dir, data_dir, &user, now) {
             Ok(Some(id)) => laid.push(id),
             Ok(None) => {}
             Err(e) => {
@@ -57,6 +57,7 @@ pub fn check(conn: &Connection, config_dir: &Path, now: jiff::Timestamp) -> Resu
 fn check_one(
     conn: &Connection,
     config_dir: &Path,
+    data_dir: &Path,
     user: &Seen,
     now: jiff::Timestamp,
 ) -> Result<Option<i64>> {
@@ -94,7 +95,7 @@ fn check_one(
     if !close.is_empty() && wall.as_str() >= close {
         return Ok(None);
     }
-    if open_notes(conn, user.user_id)? == 0 {
+    if crate::notes::active(data_dir, &user.username, now)?.is_empty() {
         return Ok(None);
     }
     let date = local.date();
@@ -147,14 +148,6 @@ fn idle_pending(conn: &Connection, user_id: i64) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-fn open_notes(conn: &Connection, user_id: i64) -> rusqlite::Result<i64> {
-    conn.query_row(
-        "SELECT COUNT(*) FROM notes WHERE user_id = ?1 AND done_at IS NULL AND pinned = 0",
-        [user_id],
-        |r| r.get(0),
-    )
-}
-
 fn ago(ts: &str, l: Lang, now: jiff::Timestamp) -> String {
     let Ok(t) = ts.parse::<jiff::Timestamp>() else {
         return ts.to_string();
@@ -163,54 +156,28 @@ fn ago(ts: &str, l: Lang, now: jiff::Timestamp) -> String {
 }
 
 /// What an idle trigger's session reads under its prompt: how long the user
-/// has been quiet, then each open unpinned note with its id, age and last nudge.
-pub fn context(conn: &Connection, user_id: i64, l: Lang, now: jiff::Timestamp) -> rusqlite::Result<String> {
+/// has been quiet, then each active note with its id, age and last nudge.
+pub fn context(
+    conn: &Connection,
+    data_dir: &Path,
+    user_id: i64,
+    username: &str,
+    l: Lang,
+    now: jiff::Timestamp,
+) -> Result<String> {
     let mut s = String::new();
     if let Some(at) = crate::presence::last_active(conn, user_id)? {
         let _ = writeln!(s, "{}", mt::quiet_for(l, (now.as_second() - at.as_second()).max(0) / 60));
     }
-    s.push_str(mt::open_scratch_lines(l));
-    let mut stmt = conn.prepare(
-        "SELECT id, text, created_at, last_nudged_at FROM notes
-         WHERE user_id = ?1 AND done_at IS NULL AND pinned = 0
-         ORDER BY created_at, id LIMIT 20",
-    )?;
-    let rows = stmt.query_map([user_id], |r| {
-        Ok((
-            r.get::<_, i64>(0)?,
-            r.get::<_, String>(1)?,
-            r.get::<_, String>(2)?,
-            r.get::<_, Option<String>>(3)?,
-        ))
-    })?;
-    for row in rows {
-        let (id, text, created, nudged) = row?;
-        let nudge = match nudged {
-            Some(t) => mt::nudged_ago(l, &ago(&t, l, now)),
+    s.push_str(mt::open_working_lines(l));
+    for n in crate::notes::active(data_dir, username, now)?.into_iter().take(20) {
+        let nudge = match &n.last_nudged_at {
+            Some(t) => mt::nudged_ago(l, &ago(t, l, now)),
             None => mt::never_nudged(l).to_string(),
         };
-        let _ = writeln!(s, "{}", mt::scratch_line(l, id, &text, &ago(&created, l, now), &nudge));
+        let _ = writeln!(s, "{}", mt::working_line(l, &n.id, &n.title, &ago(&n.created, l, now), &nudge));
     }
     Ok(s)
-}
-
-/// Marks the notes a nudge named; ids that are not this user's open notes are
-/// ignored. Returns how many were stamped.
-pub fn stamp_nudged(
-    conn: &Connection,
-    user_id: i64,
-    ids: &[i64],
-    now: jiff::Timestamp,
-) -> rusqlite::Result<usize> {
-    let mut n = 0;
-    for id in ids {
-        n += conn.execute(
-            "UPDATE notes SET last_nudged_at = ?1
-             WHERE id = ?2 AND user_id = ?3 AND done_at IS NULL",
-            (now.to_string(), id, user_id),
-        )?;
-    }
-    Ok(n)
 }
 
 #[cfg(test)]
@@ -240,14 +207,10 @@ mod tests {
         conn.execute("UPDATE users SET last_active_at = ?1 WHERE id = ?2", (ts, uid)).unwrap();
     }
 
-    fn note(conn: &Connection, uid: i64, text: &str, pinned: bool) -> i64 {
-        conn.execute(
-            "INSERT INTO notes (user_id, text, pinned, created_at)
-             VALUES (?1, ?2, ?3, '2026-09-30T08:00:00Z')",
-            (uid, text, i64::from(pinned)),
-        )
-        .unwrap();
-        conn.last_insert_rowid()
+    const MORNING: &str = "2026-09-30T08:00:00Z";
+
+    fn note(conn: &Connection, tmp: &tempfile::TempDir, title: &str, made: &str, until: Option<&str>) -> String {
+        crate::notes::add(conn, tmp.path(), "aki", title, None, until.map(str::to_owned), at(made)).unwrap().id
     }
 
     fn noon() -> jiff::Timestamp {
@@ -258,9 +221,9 @@ mod tests {
     fn twenty_quiet_minutes_with_an_open_note_lay_one_idle_trigger() {
         let (conn, tmp, uid) = env("");
         seen(&conn, uid, "2026-09-30T11:40:00Z");
-        note(&conn, uid, "call the bank", false);
+        note(&conn, &tmp, "call the bank", MORNING, None);
 
-        let laid = check(&conn, tmp.path(), noon()).unwrap();
+        let laid = check(&conn, tmp.path(), tmp.path(), noon()).unwrap();
         assert_eq!(laid.len(), 1);
         let row: (String, String, Option<String>, String, String, Option<i64>) = conn
             .query_row(
@@ -275,7 +238,7 @@ mod tests {
             ("trigger".into(), "idle".into(), Some("active".into()), "12:00".into(),
              "2026-09-30".into(), None)
         );
-        assert!(check(&conn, tmp.path(), at("2026-09-30T12:00:30Z")).unwrap().is_empty(),
+        assert!(check(&conn, tmp.path(), tmp.path(), at("2026-09-30T12:00:30Z")).unwrap().is_empty(),
             "one pending at a time");
     }
 
@@ -283,67 +246,65 @@ mod tests {
     fn short_of_the_threshold_nothing_is_laid() {
         let (conn, tmp, uid) = env("");
         seen(&conn, uid, "2026-09-30T11:41:00Z");
-        note(&conn, uid, "call the bank", false);
-        assert!(check(&conn, tmp.path(), noon()).unwrap().is_empty());
+        note(&conn, &tmp, "call the bank", MORNING, None);
+        assert!(check(&conn, tmp.path(), tmp.path(), noon()).unwrap().is_empty());
     }
 
     #[test]
     fn the_setting_moves_the_threshold_and_zero_turns_it_off() {
         let (conn, tmp, uid) = env("idle_nudge_min = 5\n");
         seen(&conn, uid, "2026-09-30T11:55:00Z");
-        note(&conn, uid, "call the bank", false);
-        assert_eq!(check(&conn, tmp.path(), noon()).unwrap().len(), 1);
+        note(&conn, &tmp, "call the bank", MORNING, None);
+        assert_eq!(check(&conn, tmp.path(), tmp.path(), noon()).unwrap().len(), 1);
 
         let (conn, tmp, uid) = env("idle_nudge_min = 0\n");
         seen(&conn, uid, "2026-09-30T08:00:00Z");
-        note(&conn, uid, "call the bank", false);
-        assert!(check(&conn, tmp.path(), noon()).unwrap().is_empty());
+        note(&conn, &tmp, "call the bank", MORNING, None);
+        assert!(check(&conn, tmp.path(), tmp.path(), noon()).unwrap().is_empty());
     }
 
     #[test]
-    fn a_pinned_or_done_note_or_a_running_session_keeps_it_quiet() {
+    fn a_note_outside_its_window_or_a_running_session_keeps_it_quiet() {
         let (conn, tmp, uid) = env("");
         seen(&conn, uid, "2026-09-30T11:00:00Z");
-        note(&conn, uid, "pinned", true);
-        let done = note(&conn, uid, "done", false);
-        conn.execute("UPDATE notes SET done_at = '2026-09-30T09:00:00Z' WHERE id = ?1", [done])
-            .unwrap();
-        assert!(check(&conn, tmp.path(), noon()).unwrap().is_empty());
+        note(&conn, &tmp, "ended", MORNING, Some("2026-09-30T11:00:00Z"));
+        crate::notes::add(&conn, tmp.path(), "aki", "later", Some("2026-09-30T15:00:00Z".into()), None, at(MORNING)).unwrap();
+        assert!(check(&conn, tmp.path(), tmp.path(), noon()).unwrap().is_empty());
 
-        note(&conn, uid, "open", false);
+        note(&conn, &tmp, "open", MORNING, None);
         conn.execute(
             "INSERT INTO work_sessions (user_id, title, planned_min, started_at)
              VALUES (?1, 'essay', 60, '2026-09-30T11:30:00Z')",
             [uid],
         )
         .unwrap();
-        assert!(check(&conn, tmp.path(), noon()).unwrap().is_empty());
+        assert!(check(&conn, tmp.path(), tmp.path(), noon()).unwrap().is_empty());
         conn.execute("UPDATE work_sessions SET ended_at = '2026-09-30T11:40:00Z'", []).unwrap();
-        assert_eq!(check(&conn, tmp.path(), noon()).unwrap().len(), 1);
+        assert_eq!(check(&conn, tmp.path(), tmp.path(), noon()).unwrap().len(), 1);
     }
 
     #[test]
     fn a_quiet_window_or_the_close_of_the_day_holds_it_back() {
         let (conn, tmp, uid) = env("");
         seen(&conn, uid, "2026-09-30T11:00:00Z");
-        note(&conn, uid, "call the bank", false);
+        note(&conn, &tmp, "call the bank", MORNING, None);
         crate::calendar::create(&conn, uid, crate::calendar::Fields {
             title: "school".into(), kind: "fixed".into(), quiet: Some(true),
             start_time: "11:30".into(), end_time: "12:30".into(),
             days: Some(crate::calendar::day_mask(&["wed"]).unwrap()), ..Default::default()
         })
         .unwrap();
-        assert!(check(&conn, tmp.path(), noon()).unwrap().is_empty());
+        assert!(check(&conn, tmp.path(), tmp.path(), noon()).unwrap().is_empty());
 
         let (conn, tmp, uid) = env("close_day_time = \"11:30\"\n");
         seen(&conn, uid, "2026-09-30T11:00:00Z");
-        note(&conn, uid, "call the bank", false);
-        assert!(check(&conn, tmp.path(), noon()).unwrap().is_empty());
+        note(&conn, &tmp, "call the bank", MORNING, None);
+        assert!(check(&conn, tmp.path(), tmp.path(), noon()).unwrap().is_empty());
 
         let (conn, tmp, uid) = env("close_day_time = \"\"\n");
         seen(&conn, uid, "2026-09-30T22:30:00Z");
-        note(&conn, uid, "call the bank", false);
-        assert_eq!(check(&conn, tmp.path(), at("2026-09-30T23:00:00Z")).unwrap().len(), 1,
+        note(&conn, &tmp, "call the bank", MORNING, None);
+        assert_eq!(check(&conn, tmp.path(), tmp.path(), at("2026-09-30T23:00:00Z")).unwrap().len(), 1,
             "a blank close of day is no cutoff");
     }
 
@@ -351,35 +312,35 @@ mod tests {
     fn a_spent_budget_lays_nothing() {
         let (conn, tmp, uid) = env("triggers_per_day = 1\n");
         seen(&conn, uid, "2026-09-30T11:00:00Z");
-        note(&conn, uid, "call the bank", false);
+        note(&conn, &tmp, "call the bank", MORNING, None);
         let date: jiff::civil::Date = "2026-09-30".parse().unwrap();
         let plan_id = crate::plan::ensure(&conn, tmp.path(), "aki", uid, date).unwrap();
         crate::triggers::insert(&conn, plan_id, "15:00", "ask", "agent", None, None, None,
             at("2026-09-30T08:00:00Z")).unwrap();
-        assert!(check(&conn, tmp.path(), noon()).unwrap().is_empty());
+        assert!(check(&conn, tmp.path(), tmp.path(), noon()).unwrap().is_empty());
     }
 
     #[test]
     fn the_idle_clock_restarts_at_the_last_idle_trigger() {
         let (conn, tmp, uid) = env("");
         seen(&conn, uid, "2026-09-30T11:40:00Z");
-        note(&conn, uid, "call the bank", false);
-        let first = check(&conn, tmp.path(), noon()).unwrap();
+        note(&conn, &tmp, "call the bank", MORNING, None);
+        let first = check(&conn, tmp.path(), tmp.path(), noon()).unwrap();
         conn.execute("UPDATE events SET status = 'done' WHERE id = ?1", [first[0]]).unwrap();
 
-        assert!(check(&conn, tmp.path(), at("2026-09-30T12:01:00Z")).unwrap().is_empty());
-        assert!(check(&conn, tmp.path(), at("2026-09-30T12:19:00Z")).unwrap().is_empty());
-        assert_eq!(check(&conn, tmp.path(), at("2026-09-30T12:20:00Z")).unwrap().len(), 1);
+        assert!(check(&conn, tmp.path(), tmp.path(), at("2026-09-30T12:01:00Z")).unwrap().is_empty());
+        assert!(check(&conn, tmp.path(), tmp.path(), at("2026-09-30T12:19:00Z")).unwrap().is_empty());
+        assert_eq!(check(&conn, tmp.path(), tmp.path(), at("2026-09-30T12:20:00Z")).unwrap().len(), 1);
     }
 
     #[test]
     fn a_user_not_seen_today_is_left_alone() {
         let (conn, tmp, uid) = env("");
-        note(&conn, uid, "call the bank", false);
-        assert!(check(&conn, tmp.path(), noon()).unwrap().is_empty(), "never seen");
+        note(&conn, &tmp, "call the bank", MORNING, None);
+        assert!(check(&conn, tmp.path(), tmp.path(), noon()).unwrap().is_empty(), "never seen");
         seen(&conn, uid, "2026-09-29T22:00:00Z");
-        assert!(check(&conn, tmp.path(), at("2026-09-30T00:30:00Z")).unwrap().is_empty());
-        assert!(check(&conn, tmp.path(), at("2026-09-30T09:00:00Z")).unwrap().is_empty());
+        assert!(check(&conn, tmp.path(), tmp.path(), at("2026-09-30T00:30:00Z")).unwrap().is_empty());
+        assert!(check(&conn, tmp.path(), tmp.path(), at("2026-09-30T09:00:00Z")).unwrap().is_empty());
     }
 
     #[test]
@@ -387,51 +348,23 @@ mod tests {
         let (conn, tmp, uid) = env("");
         crate::auth::set_category(&conn, "aki", "test").unwrap();
         seen(&conn, uid, "2026-09-30T11:00:00Z");
-        note(&conn, uid, "call the bank", false);
-        assert!(check(&conn, tmp.path(), noon()).unwrap().is_empty());
+        note(&conn, &tmp, "call the bank", MORNING, None);
+        assert!(check(&conn, tmp.path(), tmp.path(), noon()).unwrap().is_empty());
     }
 
     #[test]
-    fn the_idle_note_lists_open_notes_with_ages_and_last_nudges() {
-        let (conn, _tmp, uid) = env("");
+    fn the_idle_note_lists_active_notes_with_ages_and_last_nudges() {
+        let (conn, tmp, uid) = env("");
         seen(&conn, uid, "2026-09-30T11:40:00Z");
-        let bank = note(&conn, uid, "call the bank", false);
-        conn.execute("UPDATE notes SET last_nudged_at = '2026-09-30T11:00:00Z' WHERE id = ?1", [bank])
-            .unwrap();
-        let milk = note(&conn, uid, "milk", false);
-        conn.execute("UPDATE notes SET created_at = '2026-09-30T11:30:00Z' WHERE id = ?1", [milk])
-            .unwrap();
-        note(&conn, uid, "pinned thing", true);
+        let bank = note(&conn, &tmp, "call the bank", MORNING, None);
+        crate::notes::nudged(&conn, tmp.path(), "aki", std::slice::from_ref(&bank), at("2026-09-30T11:00:00Z")).unwrap();
+        let milk = note(&conn, &tmp, "milk", "2026-09-30T11:30:00Z", None);
+        note(&conn, &tmp, "past thing", MORNING, Some("2026-09-30T09:00:00Z"));
 
-        let text = context(&conn, uid, Lang::En, noon()).unwrap();
+        let text = context(&conn, tmp.path(), uid, "aki", Lang::En, noon()).unwrap();
         assert!(text.contains("Nothing from the user for 20 min."), "{text}");
-        assert!(text.contains(&format!("- {bank}: \"call the bank\", added 4 h ago, nudged 1 h ago")),
-            "{text}");
+        assert!(text.contains(&format!("- {bank}: \"call the bank\", added 4 h ago, nudged 1 h ago")), "{text}");
         assert!(text.contains(&format!("- {milk}: \"milk\", added 30 min ago, never nudged")), "{text}");
-        assert!(!text.contains("pinned thing"), "{text}");
-    }
-
-    #[test]
-    fn a_nudge_stamps_only_the_users_own_open_notes() {
-        let (conn, _tmp, uid) = env("");
-        let other = crate::auth::create_user(&conn, "bo", "p", false).unwrap();
-        let mine = note(&conn, uid, "mine", false);
-        let done = note(&conn, uid, "done", false);
-        conn.execute("UPDATE notes SET done_at = '2026-09-30T09:00:00Z' WHERE id = ?1", [done])
-            .unwrap();
-        let theirs = note(&conn, other, "theirs", false);
-
-        assert_eq!(stamp_nudged(&conn, uid, &[mine, done, theirs, 404], noon()).unwrap(), 1);
-        let stamped: Vec<(i64, Option<String>)> = {
-            let mut stmt = conn.prepare("SELECT id, last_nudged_at FROM notes ORDER BY id").unwrap();
-            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
-                .unwrap()
-                .collect::<rusqlite::Result<_>>()
-                .unwrap()
-        };
-        assert_eq!(
-            stamped,
-            vec![(mine, Some(noon().to_string())), (done, None), (theirs, None)]
-        );
+        assert!(!text.contains("past thing"), "{text}");
     }
 }
