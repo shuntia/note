@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use crate::text::Lang;
 use std::path::{Path, PathBuf};
 
 /// The prompts a user may override through the API. Every function here checks
@@ -18,14 +19,25 @@ fn override_path(config_dir: &Path, user: &str, name: &str) -> PathBuf {
     config_dir.join("users").join(user).join("prompts").join(format!("{name}.md"))
 }
 
-/// Per-user prompt override with shipped-default fallback, mirroring
-/// `Template::load`'s resolution order.
+/// `load_in` the user's own language.
 pub fn load(config_dir: &Path, user: &str, name: &str) -> Result<String> {
+    load_in(config_dir, user, name, Lang::for_user(config_dir, user))
+}
+
+/// The user's override, else the shipped default in `lang`, else the English one.
+pub fn load_in(config_dir: &Path, user: &str, name: &str, lang: Lang) -> Result<String> {
     checked(name)?;
     let user_path = override_path(config_dir, user, name);
-    let default_path = crate::config::defaults_dir(config_dir).join("prompts").join(format!("{name}.md"));
-    let path = if user_path.exists() { user_path } else { default_path };
+    let path = if user_path.exists() { user_path } else { default_path(config_dir, name, lang) };
     std::fs::read_to_string(&path).with_context(|| format!("reading prompt {name} ({})", path.display()))
+}
+
+/// English defaults sit in `prompts/`, every other language in `prompts/<code>/`.
+fn default_path(config_dir: &Path, name: &str, lang: Lang) -> PathBuf {
+    let dir = crate::config::defaults_dir(config_dir).join("prompts");
+    let file = format!("{name}.md");
+    let localised = dir.join(lang.code()).join(&file);
+    if lang != Lang::En && localised.exists() { localised } else { dir.join(file) }
 }
 
 pub fn custom(config_dir: &Path, user: &str, name: &str) -> bool {
@@ -88,51 +100,90 @@ mod tests {
         assert!(!tmp.path().join("users/aki/x.md").exists());
     }
 
+    fn shipped() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("config")
+    }
+
     /// The shipped defaults are what an un-overridden server loads, so every
-    /// editable name must resolve to a file in the repo's config tree.
+    /// editable name must resolve to a file in the repo's config tree, in
+    /// every language, naming the tools its session has.
     #[test]
     fn every_editable_prompt_ships_a_default() {
-        let config = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("config");
+        let config = shipped();
         assert!(EDITABLE.contains(&"import"));
+        for lang in [Lang::En, Lang::Ja] {
+            let load = |name| load_in(&config, "nobody", name, lang).unwrap();
+            for name in EDITABLE {
+                assert!(!load(name).trim().is_empty(), "{name} ({lang:?}) ships an empty prompt");
+            }
+            use crate::tools::{registry, SessionKind as K};
+            for (name, kind) in [
+                ("import", K::Import),
+                ("inbox", K::Inbox),
+                ("summarize", K::Summarize),
+                ("harvest", K::Harvest),
+                ("review", K::Review),
+            ] {
+                let text = load(name);
+                for tool in registry(kind) {
+                    assert!(text.contains(tool), "the {name} prompt ({lang:?}) never mentions {tool}");
+                }
+            }
+            let import = load("import");
+            for gone in ["task_update", "task_split"] {
+                assert!(!import.contains(gone), "the import prompt ({lang:?}) still calls for {gone}");
+            }
+            // the night's two halves: the episodic record is mechanical, the rest distilled
+            let harvest = load("harvest");
+            for kind in ["semantic", "procedural", "episodic", "supersede"] {
+                assert!(harvest.contains(kind), "the harvest prompt ({lang:?}) never names {kind}");
+            }
+            // the trigger prompt names the two ways that session can end
+            let trigger = load("trigger");
+            for name in ["say", "stay_quiet", "wait_until", "wait_for"] {
+                assert!(trigger.contains(name), "the trigger prompt ({lang:?}) never mentions {name}");
+            }
+        }
+    }
+
+    /// Every `{word}` the code fills in.
+    fn placeholders(text: &str) -> std::collections::BTreeSet<&str> {
+        text.split('{')
+            .skip(1)
+            .filter_map(|rest| rest.split_once('}').map(|(word, _)| word))
+            .filter(|w| !w.is_empty() && w.chars().all(|c| c.is_ascii_lowercase() || c == '_'))
+            .collect()
+    }
+
+    #[test]
+    fn every_translation_fills_the_same_placeholders() {
+        let dir = shipped().join("defaults/prompts");
         for name in EDITABLE {
-            let text = load(&config, "nobody", name).unwrap();
-            assert!(!text.trim().is_empty(), "{name} ships an empty prompt");
+            let en = std::fs::read_to_string(dir.join(format!("{name}.md"))).unwrap();
+            let ja = std::fs::read_to_string(dir.join("ja").join(format!("{name}.md")))
+                .unwrap_or_else(|_| panic!("{name} ships no Japanese default"));
+            assert_eq!(placeholders(&en), placeholders(&ja), "{name}");
         }
-        // the import prompt names the tools that session actually has
-        let import = load(&config, "nobody", "import").unwrap();
-        for name in crate::tools::registry(crate::tools::SessionKind::Import) {
-            assert!(import.contains(name), "the import prompt never mentions {name}");
-        }
-        for gone in ["task_update", "task_split"] {
-            assert!(!import.contains(gone), "the import prompt still calls for {gone}");
-        }
-        // the inbox prompt names the tools that session actually has
-        let inbox = load(&config, "nobody", "inbox").unwrap();
-        for name in crate::tools::registry(crate::tools::SessionKind::Inbox) {
-            assert!(inbox.contains(name), "the inbox prompt never mentions {name}");
-        }
-        let summarize = load(&config, "nobody", "summarize").unwrap();
-        for name in crate::tools::registry(crate::tools::SessionKind::Summarize) {
-            assert!(summarize.contains(name), "the summarize prompt never mentions {name}");
-        }
-        let harvest = load(&config, "nobody", "harvest").unwrap();
-        for name in crate::tools::registry(crate::tools::SessionKind::Harvest) {
-            assert!(harvest.contains(name), "the harvest prompt never mentions {name}");
-        }
-        // the night's two halves: the episodic record is mechanical, the rest distilled
-        for kind in ["semantic", "procedural", "episodic"] {
-            assert!(harvest.contains(kind), "the harvest prompt never names {kind} memory");
-        }
-        assert!(harvest.contains("supersede"), "the harvest prompt never says how a fact changes");
-        let review = load(&config, "nobody", "review").unwrap();
-        for name in crate::tools::registry(crate::tools::SessionKind::Review) {
-            assert!(review.contains(name), "the review prompt never mentions {name}");
-        }
-        // the trigger prompt names the two ways that session can end
-        let trigger = load(&config, "nobody", "trigger").unwrap();
-        for name in ["say", "stay_quiet", "wait_until", "wait_for"] {
-            assert!(trigger.contains(name), "the trigger prompt never mentions {name}");
-        }
+        let share = std::fs::read_to_string(dir.join("share.md")).unwrap();
+        assert_eq!(placeholders(&share).into_iter().collect::<Vec<_>>(), ["owner"]);
+    }
+
+    #[test]
+    fn a_japanese_reader_gets_the_japanese_default_until_they_override_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), "defaults/prompts/persona.md", "english persona");
+        write(tmp.path(), "defaults/prompts/ja/persona.md", "日本語のペルソナ");
+        write(tmp.path(), "defaults/prompts/planning.md", "english planning");
+        write(tmp.path(), "defaults/user.toml", "display_name = \"X\"\ntimezone = \"UTC\"\ntemplate = \"default\"\n");
+        write(tmp.path(), "users/aki/user.toml", "language = \"ja\"\n");
+        assert_eq!(load(tmp.path(), "aki", "persona").unwrap(), "日本語のペルソナ");
+        assert_eq!(load(tmp.path(), "bob", "persona").unwrap(), "english persona");
+        assert_eq!(load(tmp.path(), "aki", "planning").unwrap(), "english planning");
+        assert_eq!(load_in(tmp.path(), "aki", "persona", Lang::En).unwrap(), "english persona");
+        save(tmp.path(), "aki", "persona", "aki persona").unwrap();
+        assert_eq!(load(tmp.path(), "aki", "persona").unwrap(), "aki persona");
+        reset(tmp.path(), "aki", "persona").unwrap();
+        assert_eq!(load(tmp.path(), "aki", "persona").unwrap(), "日本語のペルソナ");
     }
 
     #[test]
