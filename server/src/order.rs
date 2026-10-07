@@ -1,4 +1,4 @@
-use crate::tasks::{self, QueueEntry, TaskNode};
+use crate::tasks::{self, QueueEntry};
 use rusqlite::Connection;
 use serde::Serialize;
 
@@ -73,22 +73,28 @@ pub fn set(
         if !seen.insert(id) {
             return Err(OrderError::Twice(id));
         }
-        let open = tasks::get(conn, user_id, id)?
-            .is_some_and(|t| matches!(t.state.as_str(), "open" | "in_progress"));
-        if !open {
+        let open = |t: &tasks::Task| matches!(t.state.as_str(), "open" | "in_progress");
+        let Some(held) = tasks::get(conn, user_id, id)?.filter(open) else {
             return Err(OrderError::NotFound(id));
+        };
+        if let Some(parent) = held.parent_id {
+            if !tasks::get(conn, user_id, parent)?.is_some_and(|p| open(&p)) {
+                return Err(OrderError::NotFound(id));
+            }
         }
     }
-    conn.execute(
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
         "DELETE FROM run_order WHERE user_id = ?1 AND date = ?2",
         (user_id, date.to_string()),
     )?;
     for (position, id) in task_ids.iter().enumerate() {
-        conn.execute(
+        tx.execute(
             "INSERT INTO run_order (user_id, date, position, task_id) VALUES (?1, ?2, ?3, ?4)",
             (user_id, date.to_string(), position as i64, id),
         )?;
     }
+    tx.commit()?;
     Ok(list(conn, user_id, date)?)
 }
 
@@ -122,32 +128,17 @@ pub fn candidates(
         let Some(held) = tasks::get(conn, user_id, item.task_id)? else {
             continue;
         };
-        let (mut top, step) = match held.parent_id {
-            Some(parent) => {
-                let Some(top) = tasks::get(conn, user_id, parent)? else {
-                    continue;
-                };
-                (top, Some(held))
-            }
-            None => (held, None),
-        };
-        if out.iter().any(|e| e.task.task.id == top.id) {
+        let top_id = held.parent_id.unwrap_or(held.id);
+        if out.iter().any(|e| e.task.task.id == top_id) {
             continue;
         }
-        top.pressing = tasks::pressing_at(&top.state, top.due_at.as_deref(), now);
-        let children = tasks::children_of(conn, top.id)?;
-        let step = step.or_else(|| children.iter().find(|c| c.state != "done").cloned());
-        let minutes = step
-            .as_ref()
-            .and_then(|s| s.duration_min)
-            .or(top.duration_min);
+        let Some((task, step)) = tasks::start_point(conn, user_id, held, now)? else {
+            continue;
+        };
         out.push(QueueEntry {
-            task: TaskNode {
-                task: top,
-                children,
-            },
+            planned_min: tasks::planned_minutes(&task.task, step.as_ref()),
+            task,
             step,
-            planned_min: minutes.map(|m| ((m + 2) / 5 * 5).max(5)),
             reason: "order",
             event_id: None,
         });
@@ -282,6 +273,28 @@ mod tests {
             Err(OrderError::TooMany)
         ));
         assert_eq!(ids(&conn, uid, day()).unwrap(), [a]);
+    }
+
+    #[test]
+    fn a_set_naming_an_open_step_of_a_closed_task_changes_nothing() {
+        let (conn, uid) = env();
+        let essay = task(&conn, uid, "essay", None);
+        let outline = task(&conn, uid, "outline", Some(essay));
+        close(&conn, essay, "dropped");
+        assert!(matches!(set(&conn, uid, day(), &[outline]), Err(OrderError::NotFound(id)) if id == outline));
+        assert!(ids(&conn, uid, day()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn two_steps_of_one_task_offer_it_once_from_the_first() {
+        let (conn, uid) = env();
+        let now: jiff::Timestamp = "2026-10-07T12:00:00Z".parse().unwrap();
+        let essay = task(&conn, uid, "essay", None);
+        let outline = task(&conn, uid, "outline", Some(essay));
+        let draft = task(&conn, uid, "draft", Some(essay));
+        set(&conn, uid, day(), &[draft, outline]).unwrap();
+        let got = candidates(&conn, uid, &jiff::tz::TimeZone::UTC, now, 5).unwrap();
+        assert_eq!(picked(&got), [(essay, Some(draft), "order")]);
     }
 
     #[test]

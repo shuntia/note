@@ -641,7 +641,7 @@ pub fn create(
     Ok(conn.query_row(&format!("SELECT {COLS} FROM {FROM} WHERE t.id = ?1"), [id], row_to_task)?)
 }
 
-pub(crate) fn children_of(conn: &Connection, parent_id: i64) -> rusqlite::Result<Vec<Task>> {
+fn children_of(conn: &Connection, parent_id: i64) -> rusqlite::Result<Vec<Task>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT {COLS} FROM {FROM} WHERE t.parent_id = ?1 AND t.state != 'dropped' ORDER BY t.id"
     ))?;
@@ -697,6 +697,39 @@ fn rank_key(
     (std::cmp::Reverse(is_now), urgency_rank, due.is_none(), due, created.to_owned(), id)
 }
 
+/// The open top-level task `held` belongs to, with its steps, and the step a
+/// round of it begins with: `held` itself when it is a step, else the first
+/// unfinished one. `None` when `held` or its task is closed or gone.
+pub(crate) fn start_point(
+    conn: &Connection,
+    user_id: i64,
+    held: Task,
+    now: jiff::Timestamp,
+) -> rusqlite::Result<Option<(TaskNode, Option<Task>)>> {
+    if !matches!(held.state.as_str(), "open" | "in_progress") {
+        return Ok(None);
+    }
+    let (mut top, step) = match held.parent_id {
+        Some(parent) => {
+            let Some(top) = get(conn, user_id, parent)? else { return Ok(None) };
+            (top, Some(held))
+        }
+        None => (held, None),
+    };
+    if !matches!(top.state.as_str(), "open" | "in_progress") {
+        return Ok(None);
+    }
+    top.pressing = pressing_at(&top.state, top.due_at.as_deref(), now);
+    let children = children_of(conn, top.id)?;
+    let step = step.or_else(|| children.iter().find(|c| c.state != "done").cloned());
+    Ok(Some((TaskNode { task: top, children }, step)))
+}
+
+/// The step's estimate, else the task's, rounded to whole five minutes.
+pub(crate) fn planned_minutes(task: &Task, step: Option<&Task>) -> Option<u32> {
+    step.and_then(|s| s.duration_min).or(task.duration_min).map(|m| ((m + 2) / 5 * 5).max(5))
+}
+
 /// The user's open top-level tasks in the order the planner lays them.
 pub fn queue(
     conn: &Connection,
@@ -728,7 +761,7 @@ pub fn queue(
         .take(limit)
         .map(|n| {
             let step = n.children.iter().find(|c| c.state != "done").cloned();
-            let minutes = step.as_ref().and_then(|s| s.duration_min).or(n.task.duration_min);
+            let planned_min = planned_minutes(&n.task, step.as_ref());
             let overdue = due_of(&n.task).is_some_and(|d| d < now);
             let reason = if n.task.is_now {
                 "now"
@@ -744,7 +777,7 @@ pub fn queue(
             QueueEntry {
                 task: n,
                 step,
-                planned_min: minutes.map(|m| ((m + 2) / 5 * 5).max(5)),
+                planned_min,
                 reason,
                 event_id: None,
             }
@@ -797,24 +830,9 @@ pub fn candidates(
         }
         let Some((from, to)) = span(wall, end) else { continue };
         let Some(held) = get(conn, user_id, *linked)? else { continue };
-        let (mut top, step) = match held.parent_id {
-            Some(parent) => {
-                if matches!(held.state.as_str(), "done" | "dropped") {
-                    continue;
-                }
-                let Some(top) = get(conn, user_id, parent)? else { continue };
-                (top, Some(held))
-            }
-            None => (held, None),
-        };
-        if !matches!(top.state.as_str(), "open" | "in_progress") {
-            continue;
-        }
-        top.pressing = pressing_at(&top.state, top.due_at.as_deref(), now);
-        let children = children_of(conn, top.id)?;
-        let step = step.or_else(|| children.iter().find(|c| c.state != "done").cloned());
+        let Some((task, step)) = start_point(conn, user_id, held, now)? else { continue };
         out.push(QueueEntry {
-            task: TaskNode { task: top, children },
+            task,
             step,
             planned_min: Some(u32::try_from((to - from).max(1)).unwrap_or(1)),
             reason: "scheduled",
