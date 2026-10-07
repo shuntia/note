@@ -769,6 +769,29 @@ const MIGRATIONS: &[&str] = &[
     DROP INDEX idx_notes_user;
     ALTER TABLE notes RENAME TO legacy_notes;
     ",
+    // v53
+    "
+    CREATE TABLE run_order (
+        user_id INTEGER NOT NULL REFERENCES users(id),
+        date TEXT NOT NULL,
+        position INTEGER NOT NULL,
+        task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        UNIQUE (user_id, date, task_id)
+    );
+    CREATE INDEX idx_run_order_day ON run_order(user_id, date, position);
+    UPDATE work_sessions SET event_id = NULL WHERE event_id IN
+        (SELECT id FROM events WHERE origin = 'auto' AND status = 'pending');
+    UPDATE events SET moved_to_event_id = NULL WHERE moved_to_event_id IN
+        (SELECT id FROM events WHERE origin = 'auto' AND status = 'pending');
+    DELETE FROM event_tasks WHERE event_id IN
+        (SELECT id FROM events WHERE origin = 'auto' AND status = 'pending');
+    DELETE FROM events WHERE origin = 'auto' AND status = 'pending';
+    ALTER TABLE events ADD COLUMN origin_next TEXT NOT NULL DEFAULT 'template'
+        CHECK (origin_next IN ('template','agent','auto','user','idle','lay_day'));
+    UPDATE events SET origin_next = origin;
+    ALTER TABLE events DROP COLUMN origin;
+    ALTER TABLE events RENAME COLUMN origin_next TO origin;
+    ",
 ];
 
 pub fn server_setting(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
@@ -2207,5 +2230,65 @@ mod tests {
         assert_eq!(tables, 0);
         assert_eq!(crate::notes::adopt_legacy(&conn, tmp.path()).unwrap(), 0, "a second start carries nothing");
         assert_eq!(crate::notes::all(tmp.path(), "aki").unwrap().len(), 2);
+    }
+
+    #[test]
+    fn v53_adds_the_run_order_and_clears_waiting_auto_blocks() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        apply_migrations(&conn, &MIGRATIONS[..52]).unwrap();
+        conn.execute_batch(
+            "INSERT INTO users (username, pass_hash, role) VALUES ('a','h','member');
+             INSERT INTO tasks (user_id, title, created_at, updated_at) VALUES (1, 't', 'x', 'x');
+             INSERT INTO tasks (user_id, title, created_at, updated_at) VALUES (1, 'u', 'x', 'x');
+             INSERT INTO plans (user_id, date, created_at) VALUES (1, '2026-10-07', 'x');
+             INSERT INTO events (plan_id, kind, wall_time, origin, status) VALUES
+                 (1, 'waiting', '10:00', 'auto', 'pending'),
+                 (1, 'finished', '09:00', 'auto', 'done'),
+                 (1, 'mine', '11:00', 'agent', 'pending');
+             INSERT INTO event_tasks (event_id, task_id) VALUES (1, 1), (2, 1);",
+        )
+        .unwrap();
+        apply_migrations(&conn, &MIGRATIONS[..53]).unwrap();
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(version, 53);
+        let kinds: Vec<String> = conn
+            .prepare("SELECT kind FROM events ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(kinds, ["finished", "mine"], "only a waiting auto block goes");
+        let links: i64 = conn.query_row("SELECT COUNT(*) FROM event_tasks", [], |r| r.get(0)).unwrap();
+        assert_eq!(links, 1);
+        conn.execute(
+            "INSERT INTO events (plan_id, kind, wall_time, origin) VALUES (1, 'trigger', '08:00', 'lay_day')",
+            [],
+        )
+        .unwrap();
+        assert!(conn
+            .execute("INSERT INTO events (plan_id, kind, wall_time, origin) VALUES (1, 'x', '08:00', 'nope')", [])
+            .is_err());
+
+        let row = |task: i64, pos: i64| {
+            conn.execute(
+                "INSERT INTO run_order (user_id, date, position, task_id) VALUES (1, '2026-10-07', ?1, ?2)",
+                (pos, task),
+            )
+        };
+        row(1, 0).unwrap();
+        row(2, 1).unwrap();
+        assert!(row(1, 2).is_err(), "a task is in a day's order once");
+        conn.execute(
+            "INSERT INTO run_order (user_id, date, position, task_id) VALUES (1, '2026-10-08', 0, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute("DELETE FROM tasks WHERE id = 1", []).unwrap_err();
+        conn.execute("DELETE FROM event_tasks", []).unwrap();
+        conn.execute("DELETE FROM tasks WHERE id = 1", []).unwrap();
+        let left: i64 = conn.query_row("SELECT COUNT(*) FROM run_order", [], |r| r.get(0)).unwrap();
+        assert_eq!(left, 1, "a deleted task leaves every order it was in");
     }
 }
