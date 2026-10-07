@@ -125,6 +125,13 @@ impl SeenLangs {
     }
 }
 
+pub fn fallback_debrief(l: Lang) -> String {
+    l.pick(
+        "(Plan generated from your template. The assistant was unavailable overnight.)",
+        "（テンプレートから作った計画です。夜のあいだアシスタントが使えませんでした。）",
+    )
+}
+
 pub fn action_done(l: Lang) -> String {
     l.pick("Done", "完了")
 }

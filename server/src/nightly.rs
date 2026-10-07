@@ -7,9 +7,6 @@ use std::path::Path;
 /// The run's last step: yesterday's notes stay in place when it never happens.
 const NOTES_TOOL: &str = "nightly_notes_write";
 
-const FALLBACK_DEBRIEF: &str =
-    "(Plan generated from your template. The assistant was unavailable overnight.)";
-
 /// The date this nightly run plans and debriefs. An early-morning
 /// `nightly_time` runs after midnight, so the current local date is the
 /// sleeper's coming day; from noon onward the run precedes sleep and targets
@@ -143,6 +140,7 @@ fn run_stages(
         &crate::model_text::nightly_opening(crate::text::Lang::for_user(deps.config_dir, username), date),
     );
     report.stage("session", at, outcome.as_ref().err());
+    let fallback = crate::text::fallback_debrief(crate::text::Lang::for_user(deps.config_dir, username));
     let content = match outcome {
         Ok(out) => {
             if !out.steps.iter().any(|s| s.name == NOTES_TOOL && !s.is_error) {
@@ -156,15 +154,15 @@ fn run_stages(
                     crate::log::ERROR_LOG_WINDOW_MINS,
                 );
             }
-            if out.reply.trim().is_empty() { FALLBACK_DEBRIEF.to_string() } else { out.reply }
+            if out.reply.trim().is_empty() { fallback.clone() } else { out.reply }
         }
         Err(e) => {
             let conn = crate::db_guard(deps.db);
             let _ = crate::log::record(&conn, Some(user_id), "nightly_fallback", &format!("{e:#}"));
-            FALLBACK_DEBRIEF.to_string()
+            fallback.clone()
         }
     };
-    report.debrief(content != FALLBACK_DEBRIEF);
+    report.debrief(content != fallback);
     let conn = crate::db_guard(deps.db);
     conn.execute(
         "INSERT OR IGNORE INTO debriefs (user_id, date, content, created_at) VALUES (?1, ?2, ?3, ?4)",
@@ -545,7 +543,7 @@ mod tests {
         let content: String = conn
             .query_row("SELECT content FROM debriefs WHERE user_id=1", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(content, FALLBACK_DEBRIEF);
+        assert_eq!(content, crate::text::fallback_debrief(crate::text::Lang::En));
         let logged: i64 = conn
             .query_row("SELECT COUNT(*) FROM event_log WHERE kind='nightly_fallback'", [], |r| {
                 r.get(0)
