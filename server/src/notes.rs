@@ -315,6 +315,48 @@ pub fn settle_leftovers(conn: &Connection, data_dir: &Path, user: &str, now: jif
     Ok(due.len())
 }
 
+/// Writes the rows schema v52 left in `legacy_notes` as working notes, one row
+/// at a time, then drops the table; returns how many became notes.
+pub fn adopt_legacy(conn: &Connection, data_dir: &Path) -> Result<usize> {
+    let exists: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'legacy_notes'",
+        [],
+        |r| r.get(0),
+    )?;
+    if exists == 0 {
+        return Ok(0);
+    }
+    let rows: Vec<(i64, String, String, String, Option<String>)> = {
+        let mut stmt = conn.prepare(
+            "SELECT n.id, u.username, n.text, n.created_at, n.last_nudged_at
+             FROM legacy_notes n JOIN users u ON u.id = n.user_id ORDER BY n.id",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+    let mut adopted = 0;
+    for (row_id, user, text, created, nudged) in rows {
+        let folded = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let title = folded.chars().take(MAX_TITLE_CHARS).collect::<String>().trim_end().to_string();
+        if !title.is_empty() {
+            let note = Note {
+                id: uuid::Uuid::new_v4().to_string(),
+                title,
+                from: None,
+                until: None,
+                touched_at: Some(created.clone()),
+                last_nudged_at: nudged,
+                created,
+            };
+            save(conn, data_dir, &user, &note)?;
+            adopted += 1;
+        }
+        conn.execute("DELETE FROM legacy_notes WHERE id = ?1", [row_id])?;
+    }
+    conn.execute_batch("DROP TABLE legacy_notes")?;
+    Ok(adopted)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

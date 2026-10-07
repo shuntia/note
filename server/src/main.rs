@@ -41,6 +41,7 @@ async fn main() -> anyhow::Result<()> {
 
     std::fs::create_dir_all(&cfg.data_dir)?;
     let conn = db::open(&cfg.data_dir.join("note.db"))?;
+    note_server::notes::adopt_legacy(&conn, &cfg.data_dir)?;
     memory::reindex_all(&conn, &cfg.data_dir)?;
 
     match args.get(1).map(String::as_str) {

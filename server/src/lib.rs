@@ -23,7 +23,6 @@ pub mod memory;
 pub mod model_text;
 pub mod net;
 pub mod nightly;
-pub mod legacy_notes;
 pub mod notes;
 pub mod plan;
 pub mod presence;

@@ -763,6 +763,12 @@ const MIGRATIONS: &[&str] = &[
     DROP TABLE memory_index;
     ALTER TABLE memory_index_v51 RENAME TO memory_index;
     ",
+    // v52
+    "
+    DELETE FROM notes WHERE done_at IS NOT NULL;
+    DROP INDEX idx_notes_user;
+    ALTER TABLE notes RENAME TO legacy_notes;
+    ",
 ];
 
 pub fn server_setting(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
@@ -1914,7 +1920,9 @@ mod tests {
     }
     #[test]
     fn notes_hold_one_line_of_text_and_a_pinned_flag() {
-        let conn = open_memory().unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        apply_migrations(&conn, &MIGRATIONS[..51]).unwrap();
         conn.execute("INSERT INTO users (username, pass_hash, role) VALUES ('a','h','member')", [])
             .unwrap();
         let insert = |text: &str, pinned: i64| {
@@ -2160,5 +2168,44 @@ mod tests {
                 [],
             )
             .is_err());
+    }
+
+    #[test]
+    fn v52_carries_open_notes_into_working_memory_and_drops_the_table() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        apply_migrations(&conn, &MIGRATIONS[..51]).unwrap();
+        conn.execute("INSERT INTO users (username, pass_hash, role) VALUES ('aki','h','member')", []).unwrap();
+        let long = format!("{} tail", "a".repeat(85));
+        for (text, pinned, done, nudged) in [
+            ("call the bank", 0, None, Some("2026-10-01T09:00:00Z")),
+            (long.as_str(), 1, None, None),
+            ("handled", 0, Some("2026-10-02T00:00:00Z"), None),
+        ] {
+            conn.execute(
+                "INSERT INTO notes (user_id, text, pinned, created_at, done_at, last_nudged_at)
+                 VALUES (1, ?1, ?2, '2026-10-01T08:00:00Z', ?3, ?4)",
+                rusqlite::params![text, pinned, done, nudged],
+            )
+            .unwrap();
+        }
+        apply_migrations(&conn, MIGRATIONS).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+
+        assert_eq!(crate::notes::adopt_legacy(&conn, tmp.path()).unwrap(), 2);
+        let mut notes = crate::notes::all(tmp.path(), "aki").unwrap();
+        notes.sort_by(|a, b| a.title.cmp(&b.title));
+        let titles: Vec<&str> = notes.iter().map(|n| n.title.as_str()).collect();
+        assert_eq!(titles, vec!["a".repeat(80).as_str(), "call the bank"]);
+        assert_eq!(notes[1].last_nudged_at.as_deref(), Some("2026-10-01T09:00:00Z"));
+        for n in &notes {
+            assert_eq!((n.created.as_str(), n.touched_at.as_deref()), ("2026-10-01T08:00:00Z", Some("2026-10-01T08:00:00Z")));
+        }
+        let tables: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sqlite_master WHERE name IN ('notes', 'legacy_notes')", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(tables, 0);
+        assert_eq!(crate::notes::adopt_legacy(&conn, tmp.path()).unwrap(), 0, "a second start carries nothing");
+        assert_eq!(crate::notes::all(tmp.path(), "aki").unwrap().len(), 2);
     }
 }
