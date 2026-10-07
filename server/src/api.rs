@@ -1888,7 +1888,13 @@ async fn voice_voices(user: CurrentUser, State(state): State<AppState>, headers:
         Ok(voices) => {
             let voices: Vec<_> = voices
                 .into_iter()
-                .map(|v| serde_json::json!({ "id": v.id, "label": v.label, "backend": v.backend, "slow": v.slow }))
+                .map(|v| {
+                    let mut voice = serde_json::json!({ "id": v.id, "label": v.label, "backend": v.backend, "slow": v.slow });
+                    if let Some(credit) = v.credit {
+                        voice["credit"] = credit.into();
+                    }
+                    voice
+                })
                 .collect();
             Json(serde_json::json!({ "voices": voices })).into_response()
         }

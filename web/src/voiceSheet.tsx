@@ -19,7 +19,8 @@ export function voiceGroups(voices: VoiceChoice[]): { backend: string; voices: V
   return groups
 }
 
-/** The first group, Kokoro's, goes unlabelled; each later one is headed by its model's label. */
+/** The first group, Kokoro's, goes unlabelled; each later one is headed by its model's label.
+ * The chosen voice's credit, which its licence asks for, sits quietly underneath. */
 export function VoiceGrid({
   voices,
   chosen,
@@ -31,6 +32,7 @@ export function VoiceGrid({
   playing: string | null
   onPick: (voice: string) => void
 }) {
+  const credit = voices.find((v) => v.id === chosen)?.credit
   return (
     <>
       {voiceGroups(voices).map((g, i) => (
@@ -39,6 +41,7 @@ export function VoiceGrid({
           <VoiceTiles voices={g.voices} label={i > 0 ? g.backend : t('voice.label')} chosen={chosen} playing={playing} onPick={onPick} />
         </section>
       ))}
+      {credit && <p className="voice-credit">{credit}</p>}
     </>
   )
 }

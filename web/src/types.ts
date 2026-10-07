@@ -232,7 +232,7 @@ export type Language = '' | 'en' | 'ja'
 
 export type RingFor = 'urgent' | 'checkins' | 'never'
 
-export type VoiceChoice = { id: string; label: string; backend?: string; slow?: boolean }
+export type VoiceChoice = { id: string; label: string; backend?: string; slow?: boolean; credit?: string }
 
 export type AlertPatch = { index: number; alert: boolean }
 

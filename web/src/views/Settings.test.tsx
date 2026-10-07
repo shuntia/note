@@ -58,3 +58,19 @@ test('the_voice_grid_groups_sidecar_voices_under_their_label_after_kokoros', () 
   expect(names).toEqual(['Heart', 'George', 'Alba'])
   expect(html.indexOf('Natural')).toBeLessThan(html.indexOf('Alba'))
 })
+
+test('the_voice_grid_credits_only_the_chosen_voice', () => {
+  const voices = [
+    { id: 'ja:ami', label: '小春音アミ', credit: 'あみたろの声素材工房' },
+    { id: 'ja:himari', label: '冥鳴ひまり', credit: 'VOICEVOX:冥鳴ひまり' },
+    { id: 'af_heart', label: 'Heart' },
+  ]
+  const credits = (chosen: string) =>
+    [
+      ...renderToStaticMarkup(
+        <VoiceGrid voices={voices} chosen={chosen} playing={null} onPick={() => undefined} />,
+      ).matchAll(/class="voice-credit">([^<]*)</g),
+    ].map((c) => c[1])
+  expect(credits('ja:himari')).toEqual(['VOICEVOX:冥鳴ひまり'])
+  expect(credits('af_heart')).toEqual([])
+})

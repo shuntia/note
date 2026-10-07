@@ -1088,7 +1088,7 @@ mod tests {
         let hi = text(Line::Hi, "en").len();
         let goodbye = text(Line::Goodbye, "en").len();
         let gate = Arc::new(Gated::default());
-        let voices = vec![crate::audio::engines::VoiceInfo { id: "v".into(), label: "V".into(), languages: Vec::new() }];
+        let voices = vec![crate::audio::engines::VoiceInfo { id: "v".into(), label: "V".into(), languages: Vec::new(), credit: None }];
         let side: Arc<dyn SpeechBackend> = Arc::new(ChunkedBackend::new("side", "Side", gate.clone(), voices));
         let tts: Arc<FakeTts> = Arc::default();
         let mut d = deps(Vec::new(), false, &tts);

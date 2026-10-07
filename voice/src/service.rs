@@ -915,6 +915,7 @@ fn voice_options(
             language: language.to_owned(),
             backend: backend.label().to_owned(),
             slow: backend.slow(),
+            credit: v.credit,
         })
         .collect()
 }
@@ -1083,7 +1084,7 @@ mod tests {
                     None if id == "kokoro" => (*v, vec!["en".to_owned()]),
                     None => (*v, Vec::new()),
                 };
-                VoiceInfo { id: v.into(), label: v.into(), languages }
+                VoiceInfo { id: v.into(), label: v.into(), languages, credit: None }
             })
             .collect();
         Arc::new(ChunkedBackend::new(id, label, tts.clone(), voices))

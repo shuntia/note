@@ -47,6 +47,8 @@ struct InfoVoice {
     /// The languages the voice speaks; absent for any.
     #[serde(default)]
     languages: Vec<String>,
+    #[serde(default)]
+    credit: Option<String>,
 }
 
 /// The configured sidecars, of which only those answering `/info` are offered.
@@ -129,7 +131,7 @@ async fn probe(http: &reqwest::Client, config: &SidecarConfig) -> anyhow::Result
         voices: info
             .voices
             .into_iter()
-            .map(|v| VoiceInfo { id: v.id, label: v.label, languages: v.languages })
+            .map(|v| VoiceInfo { id: v.id, label: v.label, languages: v.languages, credit: v.credit })
             .collect(),
         stream_url: format!("{ws}/stream"),
         rt: Handle::current(),
@@ -550,7 +552,7 @@ mod tests {
         }
         axum::Json(serde_json::json!({
             "id": "fake", "label": "Natural", "input": fake.input, "sample_rate": 24000, "slow": true,
-            "voices": [{ "id": "alba", "label": "Alba" }, { "id": "cosette", "label": "Cosette", "languages": ["ja"] }],
+            "voices": [{ "id": "alba", "label": "Alba" }, { "id": "cosette", "label": "Cosette", "languages": ["ja"], "credit": "VOICEVOX:冥鳴ひまり" }],
         }))
         .into_response()
     }
@@ -810,6 +812,43 @@ mod tests {
         assert_eq!((live[0].label(), live[0].slow()), ("Natural", true));
         assert_eq!(live[0].voices().iter().map(|v| v.id.as_str()).collect::<Vec<_>>(), ["alba", "cosette"]);
         assert_eq!(live[0].voices().iter().map(|v| v.languages.clone()).collect::<Vec<_>>(), [vec![], vec!["ja".to_string()]]);
+        assert_eq!(live[0].voices()[1].credit.as_deref(), Some("VOICEVOX:冥鳴ひまり"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs NOTE_VOICE_JA_SIDECAR=<url> of a running note-tts-ja"]
+    async fn the_japanese_sidecar_speaks_each_chunk_in_both_voices() {
+        let url = std::env::var("NOTE_VOICE_JA_SIDECAR").expect("NOTE_VOICE_JA_SIDECAR");
+        let ja = live(SidecarConfig { id: "ja".into(), url }).await;
+        assert!(matches!(ja.input(), TextInput::Chunks));
+        let voices = ja.voices();
+        assert_eq!(voices.iter().map(|v| v.id.as_str()).collect::<Vec<_>>(), ["ami", "himari"]);
+        assert!(voices.iter().all(|v| v.languages == ["ja"] && v.credit.is_some()));
+        let chunks = ["はい、", "GitHubのプルリクエストを確認しました。", "また明日、話しましょう。"];
+        for voice in ["ami", "himari"] {
+            let mut stream = ja.open(voice).unwrap();
+            let t0 = std::time::Instant::now();
+            for chunk in chunks {
+                stream.push(chunk).unwrap();
+            }
+            stream.finish().unwrap();
+            let mut pieces = Vec::new();
+            let mut first = None;
+            loop {
+                match stream.next(Duration::ZERO).expect("the sidecar keeps up") {
+                    Next::Audio(audio) => {
+                        first.get_or_insert(t0.elapsed());
+                        pieces.push(audio);
+                    }
+                    Next::Done => break,
+                    Next::Pending => tokio::time::sleep(Duration::from_millis(1)).await,
+                }
+            }
+            let seconds = pcm(&pieces).len() as f64 / 48_000.0;
+            eprintln!("{voice}: first audio after {:?}, {seconds:.1} s in all", first.unwrap());
+            assert_eq!(marked(&pieces).iter().sum::<u32>() as usize, chunks.concat().chars().count());
+            assert!(seconds > 3.0, "{voice}: {seconds} s");
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]

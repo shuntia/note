@@ -751,7 +751,7 @@ mod tests {
     }
 
     fn voices(ids: &[&str]) -> Vec<VoiceInfo> {
-        ids.iter().map(|id| VoiceInfo { id: (*id).into(), label: (*id).into(), languages: vec!["en".into()] }).collect()
+        ids.iter().map(|id| VoiceInfo { id: (*id).into(), label: (*id).into(), languages: vec!["en".into()], credit: None }).collect()
     }
 
     #[test]

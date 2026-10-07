@@ -136,6 +136,7 @@
 }
 .voice-group + .voice-group { margin-top: 1.25rem; }
 .voice-group-label { margin: 0 0 0.5rem 0.25rem; font-size: 0.8125rem; font-weight: 500; color: var(--quiet); }
+.voice-credit { margin: 0.75rem 0 0 0.25rem; font-size: 0.75rem; color: var(--quiet); }
 .voice-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(8.5rem, 1fr)); gap: 0.5rem; }
 .voice-tile { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; min-height: 3.25rem; padding: 0.625rem 1rem; border: 0; border-radius: 1rem; background: var(--earth); color: var(--ink); font: inherit; font-size: 1rem; text-align: left; cursor: pointer; transition: background-color 0.2s ease, color 0.2s ease; }
 .voice-tile[aria-pressed='true'] { background: var(--ink); color: var(--ivory); }

@@ -81,6 +81,9 @@ pub struct VoiceOption {
     /// Slow to start speaking.
     #[serde(default)]
     pub slow: bool,
+    /// The attribution its licence asks to be shown with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credit: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -281,6 +284,7 @@ mod tests {
                         language: "en".into(),
                         backend: "Kokoro".into(),
                         slow: false,
+                        credit: None,
                     },
                     VoiceOption {
                         id: "kyutai:alba".into(),
@@ -288,6 +292,7 @@ mod tests {
                         language: "en".into(),
                         backend: "Natural".into(),
                         slow: true,
+                        credit: Some("VOICEVOX:冥鳴ひまり".into()),
                     },
                 ],
             },

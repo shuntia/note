@@ -81,6 +81,8 @@ pub struct VoiceInfo {
     pub label: String,
     /// The languages it speaks; empty for any.
     pub languages: Vec<String>,
+    /// The attribution its licence asks to be shown with it.
+    pub credit: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, Default)]
@@ -489,7 +491,7 @@ impl SherpaTts {
         self.model
             .speakers
             .iter()
-            .map(|v| VoiceInfo { id: v.id.clone(), label: v.label.clone(), languages: vec![self.language.clone()] })
+            .map(|v| VoiceInfo { id: v.id.clone(), label: v.label.clone(), languages: vec![self.language.clone()], credit: None })
             .collect()
     }
 }

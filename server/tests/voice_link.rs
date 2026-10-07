@@ -287,6 +287,7 @@ fn offers_voices(r: &Rig) {
                     language: language.clone(),
                     backend: backend.into(),
                     slow: backend == "Natural",
+                    credit: (backend == "Natural").then(|| "VOICEVOX:冥鳴ひまり".into()),
                 })
                 .to_vec(),
         }),
@@ -346,6 +347,7 @@ async fn only_an_offered_voice_is_saved_and_a_ring_carries_it() {
         serde_json::json!({ "id": "bm_george", "label": "bm_george", "backend": "Kokoro", "slow": false })
     );
     assert_eq!(voices["voices"][2]["backend"], "Natural");
+    assert_eq!(voices["voices"][2]["credit"], "VOICEVOX:冥鳴ひまり");
     let (status, body) = call(&app, &cookie, "PUT", "/api/settings", r#"{"voice_voice":"kyutai:alba"}"#).await;
     assert_eq!((status, &body["voice_voice"]), (StatusCode::OK, &serde_json::json!("kyutai:alba")), "{body}");
     let (status, _) = call(&app, &cookie, "PUT", "/api/settings", r#"{"voice_voice":"kyutai:nope"}"#).await;
