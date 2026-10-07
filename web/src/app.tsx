@@ -22,6 +22,7 @@ import type { Me, SessionStart } from './types'
 import { Admin } from './views/Admin'
 import { Home } from './views/Home'
 import { Memory } from './views/Memory'
+import { Onboarding } from './views/Onboarding'
 import { Settings } from './views/Settings'
 import { Talk } from './views/Talk'
 import { Tasks } from './views/Tasks'
@@ -284,7 +285,7 @@ export function App() {
   }, [me])
 
   useEffect(() => {
-    if (!me) return
+    if (!me || me.onboarding) return
     let busy = false
     const check = async () => {
       if (busy) return
@@ -337,6 +338,17 @@ export function App() {
 
   if (me === undefined) return null
   if (me === null) return <Login onSignedIn={setMe} />
+  if (me.onboarding)
+    return (
+      <>
+        <Onboarding me={me} notify={notify} onDone={() => setMe({ ...me, onboarding: false })} />
+        {toast && (
+          <div className={`toast${toast.leaving ? ' leaving' : ''}`} role="status">
+            <span className="toast-msg">{toast.msg}</span>
+          </div>
+        )}
+      </>
+    )
 
   const views: ViewProps = {
     notify,

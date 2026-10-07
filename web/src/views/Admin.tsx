@@ -10,6 +10,8 @@ import type {
   AdminStatus,
   AdminUser,
   Conversation,
+  Invite,
+  InviteCreated,
   InspectUser,
   LogRow,
   Me,
@@ -241,6 +243,7 @@ export function Admin({ me, notify, onBack }: { me: Me; notify: Notify; onBack: 
 
       <StatusGroup expire={expire} />
       <UsersGroup me={me} notify={notify} expire={expire} />
+      <InvitesGroup notify={notify} expire={expire} />
       <LogGroup expire={expire} />
       <TracesGroup expire={expire} />
       {gate.inspect && <InspectGroup expire={expire} />}
@@ -635,6 +638,157 @@ function AddUser({ expire, onCreated }: { expire: Expire; onCreated: () => void 
       </div>
       <div className="set-acts">
         <button className="btn-haze small" disabled={busy || !username.trim() || !password}>
+          {t('admin.create')}
+        </button>
+        <Status save={save} />
+      </div>
+    </form>
+  )
+}
+
+const INVITE_DAYS = [1, 7, 30] as const
+
+function InvitesGroup({ notify, expire }: { notify: Notify; expire: Expire }) {
+  const [invites, setInvites] = useState<Invite[] | 'error' | undefined>(undefined)
+  const [open, setOpen] = useState(false)
+  const [fresh, setFresh] = useState<InviteCreated | null>(null)
+  const [arming, setArming] = useState<number | null>(null)
+
+  const load = () => {
+    admin
+      .invites()
+      .then(setInvites)
+      .catch((err) => {
+        if (!expire(err)) setInvites('error')
+      })
+  }
+  useEffect(load, [])
+
+  const revoke = async (id: number) => {
+    setArming(null)
+    try {
+      await admin.revokeInvite(id)
+      if (fresh?.id === id) setFresh(null)
+      load()
+    } catch (err) {
+      if (!expire(err)) notify(message(err, t('admin.workFailed')))
+    }
+  }
+
+  const copy = (url: string) =>
+    void navigator.clipboard?.writeText(url).then(
+      () => notify(t('admin.copied')),
+      () => {},
+    )
+
+  if (invites === undefined) return null
+
+  return (
+    <Group head={t('admin.head.invites')}>
+      {invites === 'error' && (
+        <p className="set-sub">
+          {t('admin.invitesFailed')}{' '}
+          <button className="set-link" onClick={load}>
+            {t('common.retry')}
+          </button>
+        </p>
+      )}
+      {fresh && (
+        <div className="set-row set-token-row">
+          <span className="set-row-body">
+            <code className="set-token-secret">{fresh.url}</code>
+            <span className="set-sub">{t('admin.inviteOnce')}</span>
+          </span>
+          <button className="btn-haze small" onClick={() => copy(fresh.url)}>
+            {t('admin.copy')}
+          </button>
+        </div>
+      )}
+      {invites !== 'error' &&
+        invites.map((i) => (
+          <div className="set-row set-token-row" key={i.id}>
+            <span className="set-row-body">
+              <span className="set-label">{i.username ?? t('admin.inviteAnyName')}</span>
+              <span className="set-sub">
+                {roleName(i.admin ? 'admin' : 'member')} ·{' '}
+                {t('admin.inviteUntil', { date: format.monthDay(new Date(i.expires_at)) })}
+              </span>
+            </span>
+            <button
+              type="button"
+              className="btn-haze small"
+              onClick={() => (arming === i.id ? void revoke(i.id) : setArming(i.id))}
+              onBlur={() => setArming((a) => (a === i.id ? null : a))}
+            >
+              {arming === i.id ? t('admin.revokeSure') : t('admin.revokeInvite')}
+            </button>
+          </div>
+        ))}
+      <FoldRow label={t('admin.newInvite')} open={open} onToggle={() => setOpen((o) => !o)}>
+        {open && (
+          <NewInvite
+            expire={expire}
+            onCreated={(made) => {
+              setFresh(made)
+              setOpen(false)
+              copy(made.url)
+              load()
+            }}
+          />
+        )}
+      </FoldRow>
+    </Group>
+  )
+}
+
+function NewInvite({ expire, onCreated }: { expire: Expire; onCreated: (made: InviteCreated) => void }) {
+  const [username, setUsername] = useState('')
+  const [isAdmin, setIsAdmin] = useState(false)
+  const [days, setDays] = useState<number>(7)
+  const [save, setSave] = useState<Save>(null)
+
+  const submit = async (e: FormEvent) => {
+    e.preventDefault()
+    setSave({ kind: 'busy' })
+    try {
+      const name = username.trim()
+      onCreated(await admin.createInvite({ admin: isAdmin, days, ...(name ? { username: name } : {}) }))
+    } catch (err) {
+      if (expire(err)) return
+      setSave({ kind: 'failed', message: message(err, t('admin.saveFailed')) })
+    }
+  }
+
+  return (
+    <form className="set-fold-body" onSubmit={(e) => void submit(e)}>
+      <input
+        placeholder={t('admin.inviteName')}
+        aria-label={t('admin.inviteName')}
+        autoComplete="off"
+        maxLength={64}
+        value={username}
+        onChange={(e) => setUsername(e.target.value)}
+      />
+      <div className="set-row admin-switch">
+        <span className="set-row-body">
+          <span className="set-label">{t('admin.admin')}</span>
+        </span>
+        <Switch label={t('admin.inviteIsAdmin')} on={isAdmin} onToggle={() => setIsAdmin((a) => !a)} />
+      </div>
+      <div className="set-row">
+        <span className="set-row-body">
+          <span className="set-label">{t('admin.inviteOpenFor')}</span>
+        </span>
+        <select aria-label={t('admin.inviteOpenFor')} value={days} onChange={(e) => setDays(Number(e.target.value))}>
+          {INVITE_DAYS.map((d) => (
+            <option key={d} value={d}>
+              {t('admin.inviteDays', { count: d })}
+            </option>
+          ))}
+        </select>
+      </div>
+      <div className="set-acts">
+        <button className="btn-haze small" disabled={save?.kind === 'busy'}>
           {t('admin.create')}
         </button>
         <Status save={save} />
