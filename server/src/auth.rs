@@ -285,6 +285,10 @@ impl CurrentUser {
         if !parts.method.is_safe() {
             let _ = crate::presence::touch(&conn, id, now);
         }
+        drop(conn);
+        if let Some(accept) = parts.headers.get(axum::http::header::ACCEPT_LANGUAGE).and_then(|v| v.to_str().ok()) {
+            state.seen_langs.note(&state.config_dir, id, &username, accept);
+        }
         Ok(CurrentUser {
             id,
             username,

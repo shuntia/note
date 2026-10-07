@@ -24,11 +24,28 @@ pub const TRIGGER_MAX_TURNS: usize = 6;
 pub const MAX_TURNS_REPLY: &str =
     "(I ran out of steps before finishing — ask again and I'll pick it up from here)";
 
-/// The sessions that run on their own instructions alone, with none of the
-/// user's standing context and a single call to make.
 const REPLY_IN_JAPANESE: &str =
     "The user reads Japanese: write every reply, note, title and summary in natural Japanese.";
+const SPEAK_JAPANESE: &str = "The user speaks Japanese: speak natural, conversational Japanese, whatever language \
+    the instructions above are written in. Short sentences, no markdown, no emoji, no lists. Say numbers, times \
+    and dates the way they are spoken in Japanese (七時半, 二十分くらい, 来週の金曜).";
+/// `system` with the line that asks for Japanese, where the user reads it.
+pub(crate) fn with_language_line(mut system: String, config_dir: &Path, username: &str) -> String {
+    if crate::text::Lang::for_user(config_dir, username) == crate::text::Lang::Ja {
+        system.push_str("\n\n");
+        system.push_str(REPLY_IN_JAPANESE);
+    }
+    system
+}
 
+/// Leads every call's prompt, ahead of everything else.
+pub(crate) const CALL_BRIEFLY: &str = "On this call, keep every spoken reply to one to three short sentences. \
+    Answer first. No lists, no markdown, no recaps of what was said. Ask at most one question at a time. \
+    Offer more detail only when asked.";
+const VISITOR_JAPANESE: &str = "The visitor reads Japanese: write every reply in natural Japanese.";
+
+/// The sessions that run on their own instructions alone, with none of the
+/// user's standing context and a single call to make.
 fn single_call(kind: SessionKind) -> bool {
     matches!(kind, SessionKind::Import | SessionKind::Inbox | SessionKind::Summarize)
 }
@@ -66,6 +83,8 @@ pub struct ShareSession {
     /// The owner's per-link instruction, appended under `# From {owner}`.
     pub brief: String,
     pub scope: crate::shares::ShareScope,
+    /// The visitor's language, from their browser.
+    pub visitor_lang: crate::text::Lang,
 }
 
 #[derive(Debug, Clone)]
@@ -169,7 +188,11 @@ pub(crate) fn system_prompt(
         SessionKind::Share => crate::prompts::load(deps.config_dir, username, "share")?,
         SessionKind::Call => {
             let display = crate::config::UserConfig::load(deps.config_dir, username).map_or_else(|_| username.to_string(), |c| c.display_name);
-            crate::prompts::load(deps.config_dir, username, "voice")?.replace("{name}", &display)
+            let voice = crate::prompts::load(deps.config_dir, username, "voice")?.replace("{name}", &display);
+            match crate::text::Lang::for_user(deps.config_dir, username) {
+                crate::text::Lang::Ja => format!("{CALL_BRIEFLY}\n{SPEAK_JAPANESE}\n\n{voice}"),
+                crate::text::Lang::En => format!("{CALL_BRIEFLY}\n\n{voice}"),
+            }
         }
         _ => crate::prompts::load(deps.config_dir, username, "persona")?,
     };
@@ -181,12 +204,13 @@ pub(crate) fn system_prompt(
         system.push_str("\n\n");
         system.push_str(&crate::prompts::load(deps.config_dir, username, "trigger")?);
     }
-    // A call's speech is English-only, and a visitor's language is not the user's.
-    if !matches!(kind, SessionKind::Call | SessionKind::Share)
-        && crate::text::Lang::for_user(deps.config_dir, username) == crate::text::Lang::Ja
-    {
+    let lang = match kind {
+        SessionKind::Share => deps.share.as_ref().map_or_else(crate::text::Lang::default, |s| s.visitor_lang),
+        _ => crate::text::Lang::for_user(deps.config_dir, username),
+    };
+    if lang == crate::text::Lang::Ja && kind != SessionKind::Call {
         system.push_str("\n\n");
-        system.push_str(REPLY_IN_JAPANESE);
+        system.push_str(if kind == SessionKind::Share { VISITOR_JAPANESE } else { REPLY_IN_JAPANESE });
     }
     if kind == SessionKind::Share {
         let share = deps.share.as_ref().ok_or_else(|| anyhow::anyhow!("a share session needs its link"))?;
@@ -608,6 +632,38 @@ mod tests {
         assert!(prompt(SessionKind::Talk).contains(REPLY_IN_JAPANESE));
         assert!(prompt(SessionKind::Nightly).contains(REPLY_IN_JAPANESE));
         assert!(prompt(SessionKind::Import).contains(REPLY_IN_JAPANESE));
+        std::fs::write(tmp.path().join("defaults/prompts/voice.md"), "on the phone with {name}").unwrap();
+        let call = prompt(SessionKind::Call);
+        assert!(call.starts_with(&format!("{CALL_BRIEFLY}\n{SPEAK_JAPANESE}\n\non the phone with X")), "{call}");
+        assert!(!call.contains(REPLY_IN_JAPANESE), "{call}");
+    }
+
+    #[test]
+    fn a_call_prompt_opens_by_asking_for_short_replies() {
+        let (db, tmp) = env();
+        std::fs::write(tmp.path().join("defaults/prompts/voice.md"), "on the phone with {name}").unwrap();
+        let llm = MockLLM::scripted(vec![]);
+        let call = system_prompt(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Call, now()).unwrap();
+        assert!(call.starts_with(&format!("{CALL_BRIEFLY}\n\non the phone with X")), "{call}");
+        assert!(!call.contains(SPEAK_JAPANESE));
+    }
+
+    #[test]
+    fn a_visitor_is_answered_in_their_own_language() {
+        let (db, tmp) = env();
+        std::fs::write(tmp.path().join("defaults/prompts/share.md"), "answer for {owner}").unwrap();
+        let llm = MockLLM::scripted(vec![]);
+        let prompt = |visitor_lang| {
+            let share = ShareSession { id: 1, thread_id: 1, brief: String::new(), scope: crate::shares::ShareScope::default(), visitor_lang };
+            let deps = SessionDeps { share: Some(share), ..deps(&db, &tmp, &llm) };
+            system_prompt(&deps, 1, "aki", SessionKind::Share, now()).unwrap()
+        };
+        assert!(prompt(crate::text::Lang::Ja).contains(VISITOR_JAPANESE));
+        let dir = tmp.path().join("users/aki");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("user.toml"), "language = \"ja\"\n").unwrap();
+        let english = prompt(crate::text::Lang::En);
+        assert!(!english.contains(VISITOR_JAPANESE) && !english.contains(REPLY_IN_JAPANESE), "{english}");
     }
 
     /// Every event as `kind:detail`, in the order the session emitted it.
@@ -1734,7 +1790,7 @@ mod tests {
             crate::tasks::create(&conn, 1, crate::tasks::NewTask { title: "lab report".into(), category: Some("school".into()), ..Default::default() }, "manual", crate::tasks::Actor::User).unwrap();
         }
         let llm = MockLLM::scripted(vec![ChatResponse { text: "Aki has a lab report.".into(), tool_calls: vec![] }]);
-        let share = ShareSession { id: 1, thread_id: 1, brief: "be warm".into(), scope: crate::shares::ShareScope::default() };
+        let share = ShareSession { id: 1, thread_id: 1, brief: "be warm".into(), scope: crate::shares::ShareScope::default(), visitor_lang: crate::text::Lang::En };
         let deps = SessionDeps { db: &db, config_dir: tmp.path(), data_dir: tmp.path(), llm: &llm, embeddings: None, search: None, task_scope: None, inbox_source: None, memory_source: None, token_id: None, thread_note: Some("SECRET NOTE".into()), share: Some(share) };
         let out = run_session(&deps, 1, "aki", SessionKind::Share, jiff::Timestamp::now(), &[], "what does aki have?").unwrap();
         assert_eq!(out.reply, "Aki has a lab report.");

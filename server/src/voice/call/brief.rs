@@ -98,7 +98,8 @@ mod tests {
         let reason = Reason::CheckIn { title: "Essay".into(), body: "How is the essay going?".into() };
         let brief = build(&deps, 1, "aki", &reason, Some(thread), now).unwrap();
 
-        assert!(brief.starts_with("You are Note, on a phone call with Aki."), "{brief}");
+        assert!(brief.starts_with(crate::agent::CALL_BRIEFLY), "{brief}");
+        assert!(brief.contains("\n\nYou are Note, on a phone call with Aki."), "{brief}");
         assert!(brief.contains("You called about: Essay. You opened with: How is the essay going?"));
         assert!(brief.contains("you: the essay is due friday"), "{brief}");
         let user_at = brief.find("you: the essay is due friday").expect(&brief);
@@ -146,7 +147,7 @@ mod tests {
             share: None,
         };
         let brief = build(&deps, 1, "aki", &Reason::UserCalled, Some(thread), now).unwrap();
-        assert!(brief.starts_with("call Aki"));
+        assert!(brief.starts_with(&format!("{}\n\ncall Aki", crate::agent::CALL_BRIEFLY)));
         assert!(brief.contains("write {name} on the form"), "the user's context is left as written");
         assert!(brief.ends_with("# Why this call\n\nThe user called you."), "{brief}");
     }

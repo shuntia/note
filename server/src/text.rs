@@ -48,17 +48,79 @@ impl Lang {
             .unwrap_or_default()
     }
 
-    /// For text sent with no request in hand: notifications and Matrix posts.
+    /// For text sent with no request in hand: auto follows the language of the
+    /// user's browser when it last called.
     pub fn for_user(config_dir: &Path, username: &str) -> Self {
         crate::config::UserConfig::load(config_dir, username)
-            .map(|c| Lang::resolve(c.language(), None))
+            .ok()
+            .and_then(|c| Lang::from_setting(c.language()))
+            .or_else(|| seen(config_dir, username))
             .unwrap_or_default()
+    }
+
+    /// For a request: the setting, then the request's `Accept-Language`, then
+    /// the browser last seen.
+    pub fn for_request(config_dir: &Path, username: &str, accept_language: Option<&str>) -> Self {
+        let setting = crate::config::UserConfig::load(config_dir, username)
+            .ok()
+            .and_then(|c| Lang::from_setting(c.language()));
+        setting
+            .or_else(|| accept_language.and_then(Lang::from_accept_language))
+            .or_else(|| seen(config_dir, username))
+            .unwrap_or_default()
+    }
+
+    /// The tag the voice side and the web know the language by.
+    pub fn code(self) -> &'static str {
+        match self {
+            Lang::En => "en",
+            Lang::Ja => "ja",
+        }
     }
 
     fn pick(self, en: &str, ja: &str) -> String {
         match self {
             Lang::En => en.to_string(),
             Lang::Ja => ja.to_string(),
+        }
+    }
+}
+
+fn seen_path(config_dir: &Path, username: &str) -> std::path::PathBuf {
+    config_dir.join("users").join(username).join("seen_language")
+}
+
+/// The language of the user's browser when it last called, if one was seen.
+pub fn seen(config_dir: &Path, username: &str) -> Option<Lang> {
+    let raw = std::fs::read_to_string(seen_path(config_dir, username)).ok()?;
+    Lang::from_setting(raw.trim())
+}
+
+pub fn remember_seen(config_dir: &Path, username: &str, lang: Lang) -> std::io::Result<()> {
+    let path = seen_path(config_dir, username);
+    std::fs::create_dir_all(path.parent().expect("a user's file always has a parent"))?;
+    crate::context::write_atomic(&path, lang.code())
+}
+
+/// The browser language each user was last seen with, so a request writes
+/// the file only when it changes.
+#[derive(Default)]
+pub struct SeenLangs(std::sync::Mutex<std::collections::HashMap<i64, Lang>>);
+
+impl SeenLangs {
+    /// Records the language of a signed-in request's `Accept-Language`; an
+    /// unspoken language counts as English.
+    pub fn note(&self, config_dir: &Path, user_id: i64, username: &str, accept_language: &str) {
+        if accept_language.trim().is_empty() {
+            return;
+        }
+        let lang = Lang::from_accept_language(accept_language).unwrap_or_default();
+        let mut seen_by = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if seen_by.get(&user_id) == Some(&lang) {
+            return;
+        }
+        if seen(config_dir, username) == Some(lang) || remember_seen(config_dir, username, lang).is_ok() {
+            seen_by.insert(user_id, lang);
         }
     }
 }
@@ -348,6 +410,38 @@ pub fn err_share_unavailable(l: Lang) -> String {
     l.pick("Note could not answer", "Noteが応答できませんでした")
 }
 
+pub fn call_title(l: Lang) -> String {
+    l.pick("Call", "通話")
+}
+
+/// Spoken when a reply failed; the caller is asked to repeat.
+pub fn call_apology(l: Lang) -> String {
+    l.pick(
+        "Sorry, I lost my train of thought. Could you say that again?",
+        "すみません、考えがまとまりませんでした。もう一度言ってもらえますか？",
+    )
+}
+
+/// Spoken before a call that keeps failing hangs up.
+pub fn call_bow_out(l: Lang) -> String {
+    l.pick(
+        "I'm having trouble thinking right now. I'll message you instead.",
+        "今うまく考えられないので、メッセージで連絡しますね。",
+    )
+}
+
+/// The model's cue when the user rang in with nothing queued.
+pub fn call_greet(l: Lang) -> String {
+    l.pick("the user called you; greet them briefly", "the user called you; greet them briefly in Japanese")
+}
+
+pub fn session_thread_title(l: Lang, task: &str) -> String {
+    match l {
+        Lang::En => format!("Session: {task}"),
+        Lang::Ja => format!("セッション：{task}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -361,6 +455,57 @@ mod tests {
         assert_eq!(Lang::resolve("", Some("fr, ja;q=0.3")), Lang::Ja);
         assert_eq!(Lang::resolve("", Some("ja;q=0")), Lang::En);
         assert_eq!(Lang::resolve("", None), Lang::En);
+    }
+
+    fn user_dir(tmp: &tempfile::TempDir, language: &str) {
+        std::fs::create_dir_all(tmp.path().join("defaults")).unwrap();
+        std::fs::write(
+            tmp.path().join("defaults/user.toml"),
+            "display_name = \"Aki\"\ntimezone = \"UTC\"\ntemplate = \"default\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(tmp.path().join("users/aki")).unwrap();
+        std::fs::write(tmp.path().join("users/aki/user.toml"), format!("language = \"{language}\"\n")).unwrap();
+    }
+
+    #[test]
+    fn auto_without_a_request_follows_the_browser_last_seen() {
+        let tmp = tempfile::tempdir().unwrap();
+        user_dir(&tmp, "");
+        assert_eq!(Lang::for_user(tmp.path(), "aki"), Lang::En);
+
+        let seen_by = SeenLangs::default();
+        seen_by.note(tmp.path(), 1, "aki", "ja-JP,ja;q=0.9,en;q=0.8");
+        assert_eq!(Lang::for_user(tmp.path(), "aki"), Lang::Ja);
+        assert_eq!(Lang::for_request(tmp.path(), "aki", None), Lang::Ja);
+        assert_eq!(Lang::for_request(tmp.path(), "aki", Some("en-US")), Lang::En);
+
+        seen_by.note(tmp.path(), 1, "aki", "fr-FR");
+        assert_eq!(Lang::for_user(tmp.path(), "aki"), Lang::En, "an unspoken language reads as English");
+        seen_by.note(tmp.path(), 1, "aki", "  ");
+        assert_eq!(seen(tmp.path(), "aki"), Some(Lang::En), "a blank header changes nothing");
+    }
+
+    #[test]
+    fn a_setting_outranks_the_browser_last_seen() {
+        let tmp = tempfile::tempdir().unwrap();
+        user_dir(&tmp, "en");
+        remember_seen(tmp.path(), "aki", Lang::Ja).unwrap();
+        assert_eq!(Lang::for_user(tmp.path(), "aki"), Lang::En);
+        assert_eq!(Lang::for_request(tmp.path(), "aki", Some("ja")), Lang::En);
+    }
+
+    #[test]
+    fn the_file_is_written_only_when_the_language_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        user_dir(&tmp, "");
+        let seen_by = SeenLangs::default();
+        seen_by.note(tmp.path(), 1, "aki", "ja");
+        std::fs::remove_file(tmp.path().join("users/aki/seen_language")).unwrap();
+        seen_by.note(tmp.path(), 1, "aki", "ja");
+        assert_eq!(seen(tmp.path(), "aki"), None, "a repeat of the cached language is not rewritten");
+        seen_by.note(tmp.path(), 1, "aki", "en");
+        assert_eq!(seen(tmp.path(), "aki"), Some(Lang::En));
     }
 
     #[test]

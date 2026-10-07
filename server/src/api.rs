@@ -1458,7 +1458,7 @@ fn settings_body(
         "voice_link": voice_link.map(|l| serde_json::json!({ "mxid": l.mxid, "state": l.state })),
         "ring_for": cfg.ring_for(),
         "voice_voice": cfg.voice_voice.clone().unwrap_or_default(),
-        "voice_cue": cfg.voice_profile().cue,
+        "voice_cue": cfg.voice_cue.unwrap_or(true),
         "matrix_enabled": state.matrix.is_some(),
         "matrix_send": cfg.matrix_send(),
         "matrix_ping": cfg.matrix_ping(),
@@ -1658,6 +1658,11 @@ async fn settings_put(
         }
         cfg.ring_for = Some(ring_for);
     }
+    if let Some(language) = req.language.as_deref().filter(|l| *l != cfg.language()) {
+        if req.voice_voice.is_none() && crate::text::LANGUAGES.contains(&language) {
+            cfg.voice_voice = None;
+        }
+    }
     if let Some(voice) = req.voice_voice {
         cfg.voice_voice = (!voice.is_empty()).then_some(voice);
     }
@@ -1781,15 +1786,9 @@ fn accept_language(headers: &HeaderMap) -> Option<&str> {
 }
 
 fn request_lang(state: &AppState, user: &CurrentUser, headers: &HeaderMap) -> Lang {
-    let setting = crate::config::UserConfig::load(&state.config_dir, &user.username)
-        .map(|c| c.language().to_string())
-        .unwrap_or_default();
-    Lang::resolve(&setting, accept_language(headers))
+    Lang::for_request(&state.config_dir, &user.username, accept_language(headers))
 }
 
-fn voice_language(state: &AppState, user: &CurrentUser) -> Option<String> {
-    crate::config::UserConfig::load(&state.config_dir, &user.username).ok().map(|cfg| cfg.voice_profile().language)
-}
 
 /// A voice side that cannot be reached is 503; one that refused says why, and
 /// the refusal is logged. A bad request is reported as `field` failing `requirement`.
@@ -1811,13 +1810,12 @@ fn voice_refused(
     }
 }
 
-const NO_VOICES: (&str, &str) = ("voice_language", "has no voices");
+const NO_VOICES: (&str, &str) = ("language", "has no voices");
 
 /// `Err` holds the response that refuses `voice`: not one the voice side offers, or no voice side to ask.
 async fn check_voice(state: &AppState, user: &CurrentUser, voice: &str, lang: Lang) -> Result<(), Box<axum::response::Response>> {
     let Some(calls) = state.voice.clone() else { return Err(Box::new(calls_not_set_up(lang))) };
-    let language = voice_language(state, user).ok_or_else(|| Box::new(StatusCode::INTERNAL_SERVER_ERROR.into_response()))?;
-    let voices = calls.voices(&language).await.map_err(|r| Box::new(voice_refused(state, user, lang, NO_VOICES, &r)))?;
+    let voices = calls.voices(lang.code()).await.map_err(|r| Box::new(voice_refused(state, user, lang, NO_VOICES, &r)))?;
     if voices.iter().any(|v| v.id == voice) {
         Ok(())
     } else {
@@ -1828,10 +1826,7 @@ async fn check_voice(state: &AppState, user: &CurrentUser, voice: &str, lang: La
 async fn voice_voices(user: CurrentUser, State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
     let lang = request_lang(&state, &user, &headers);
     let Some(voice) = state.voice.clone() else { return calls_not_set_up(lang) };
-    let Some(language) = voice_language(&state, &user) else {
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    };
-    match voice.voices(&language).await {
+    match voice.voices(lang.code()).await {
         Ok(voices) => {
             let voices: Vec<_> = voices
                 .into_iter()
@@ -1856,10 +1851,7 @@ async fn voice_preview(
 ) -> impl IntoResponse {
     let lang = request_lang(&state, &user, &headers);
     let Some(voice) = state.voice.clone() else { return calls_not_set_up(lang) };
-    let Some(language) = voice_language(&state, &user) else {
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    };
-    match voice.preview(&language, &q.voice).await {
+    match voice.preview(lang.code(), &q.voice).await {
         Ok(wav) => (
             [(header::CONTENT_TYPE, "audio/wav"), (header::CACHE_CONTROL, "private, max-age=86400")],
             wav,

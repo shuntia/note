@@ -351,10 +351,12 @@ impl NoteHandler {
         let username: Option<String> = crate::db_guard(&self.db)
             .query_row("SELECT username FROM users WHERE id = ?1", [user_id], |r| r.get(0))
             .ok();
-        username
-            .and_then(|u| crate::config::UserConfig::load(config_dir, &u).ok())
-            .map(|cfg| cfg.voice_profile())
-            .unwrap_or_default()
+        let Some(username) = username else { return VoiceProfile::default() };
+        let lang = crate::text::Lang::for_user(config_dir, &username);
+        crate::config::UserConfig::load(config_dir, &username).map_or_else(
+            |_| VoiceProfile { language: lang.code().into(), ..VoiceProfile::default() },
+            |cfg| cfg.voice_profile(lang),
+        )
     }
 
     /// Opens a call for the linked user calling in `room_id`, once per `key`,
@@ -402,14 +404,15 @@ impl NoteHandler {
             tx.commit().map_err(|e| failed(&e))?;
             (id, user_id)
         };
+        let voice = self.profile(user_id);
         let start = CallBody::Start {
             user_id,
             room_id: room_id.to_string(),
             mxid: mxid.to_string(),
-            title: "Call".into(),
+            title: crate::text::call_title(crate::text::Lang::from_setting(&voice.language).unwrap_or_default()),
             ring_secs: 0,
             ring_by_ms: ring_by.as_millisecond(),
-            voice: self.profile(user_id),
+            voice,
             direction: Direction::Inbound,
         };
         let sent = match self.to_voice.get() {

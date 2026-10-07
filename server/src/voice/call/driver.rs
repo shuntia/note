@@ -33,6 +33,8 @@ pub struct DriverDeps {
     pub call_id: String,
     pub user_id: i64,
     pub username: String,
+    /// The language of what the driver says itself.
+    pub lang: crate::text::Lang,
     pub conversation_id: i64,
     pub db: Arc<Mutex<Connection>>,
     pub llm: Arc<dyn LLMProvider>,
@@ -45,8 +47,6 @@ pub struct DriverDeps {
     pub clock: Arc<dyn Fn() -> Duration + Send + Sync>,
 }
 
-const APOLOGY: &str = "Sorry, I lost my train of thought. Could you say that again?";
-const BOW_OUT: &str = "I'm having trouble thinking right now. I'll message you instead.";
 const TICK: Duration = Duration::from_millis(50);
 const END_WAIT: Duration = Duration::from_secs(2);
 const DRAFT_WAIT: Duration = Duration::from_secs(3);
@@ -111,10 +111,10 @@ struct ReplyRecord {
 }
 
 impl ReplyRecord {
-    /// The clauses joined with spaces, cut with `…` where a barge-in stopped them.
+    /// The clauses as one line, cut with `…` where a barge-in stopped them.
     fn heard_text(&self) -> String {
         let Some(mut left) = self.heard_chars.map(|n| n as usize) else {
-            return self.clauses.join(" ");
+            return super::clauses::join(&self.clauses);
         };
         let mut heard: Vec<String> = Vec::new();
         for clause in &self.clauses {
@@ -127,9 +127,9 @@ impl ReplyRecord {
             if left > 0 {
                 heard.push(clause.chars().take(left).collect());
             }
-            return format!("{}…", heard.join(" "));
+            return format!("{}…", super::clauses::join(&heard));
         }
-        heard.join(" ")
+        super::clauses::join(&heard)
     }
 }
 
@@ -726,12 +726,12 @@ impl Driver {
             let line = if self.failed_turns >= 2 {
                 self.ending = true;
                 self.mark_bowed_out();
-                BOW_OUT
+                crate::text::call_bow_out(self.deps.lang)
             } else {
-                APOLOGY
+                crate::text::call_apology(self.deps.lang)
             };
             let reply = self.take_reply();
-            self.say(reply, &[line.to_string()], line, true);
+            self.say(reply, std::slice::from_ref(&line), &line, true);
         } else if end.error.is_none() || !silent {
             self.failed_turns = 0;
         }
@@ -911,7 +911,7 @@ fn normalize(text: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ");
     collapsed
-        .trim_end_matches(|c: char| c.is_ascii_punctuation() || c.is_whitespace())
+        .trim_end_matches(|c: char| c.is_ascii_punctuation() || c.is_whitespace() || "。、！？".contains(c))
         .to_string()
 }
 
@@ -933,6 +933,10 @@ fn tool_error(e: &ToolError) -> (String, bool) {
 
 #[cfg(test)]
 mod tests {
+    fn apology() -> String {
+        crate::text::call_apology(crate::text::Lang::En)
+    }
+
     use super::*;
     use crate::providers::mock::{MockLLM, StreamPiece};
     use crate::providers::ToolCall;
@@ -1043,6 +1047,7 @@ mod tests {
             call_id: "c1".into(),
             user_id: 1,
             username: "aki".into(),
+            lang: crate::text::Lang::En,
             conversation_id: conv,
             db: db.clone(),
             llm: llm.clone(),
@@ -1562,7 +1567,7 @@ mod tests {
         });
         h.expect(&[
             CallBody::SpeakDone { reply: 2 },
-            speak(3, 0, APOLOGY),
+            speak(3, 0, &apology()),
             CallBody::SpeakDone { reply: 3 },
             CallBody::Play { reply: 3 },
         ]);
@@ -1570,7 +1575,7 @@ mod tests {
         h.stop();
         assert_eq!(
             h.rows(),
-            vec![row("user", "hello?", None), row("assistant", APOLOGY, None)]
+            vec![row("user", "hello?", None), row("assistant", &apology(), None)]
         );
         assert_eq!(traces(&h), vec![0], "a turn with no clause has no round");
     }
@@ -1585,7 +1590,7 @@ mod tests {
         });
         h.expect(&[
             CallBody::SpeakDone { reply: 2 },
-            speak(3, 0, APOLOGY),
+            speak(3, 0, &apology()),
             CallBody::SpeakDone { reply: 3 },
             CallBody::Play { reply: 3 },
         ]);
@@ -1595,7 +1600,7 @@ mod tests {
         });
         h.expect(&[
             CallBody::SpeakDone { reply: 4 },
-            speak(5, 0, BOW_OUT),
+            speak(5, 0, &crate::text::call_bow_out(crate::text::Lang::En)),
             CallBody::SpeakDone { reply: 5 },
             CallBody::Play { reply: 5 },
             CallBody::HangUp,

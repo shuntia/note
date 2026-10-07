@@ -1029,7 +1029,7 @@ pub async fn run_turn(state: &crate::AppState, principal: &crate::auth::SharePri
             memory_source: None,
             token_id: None,
             thread_note: None,
-            share: Some(crate::agent::ShareSession { id: share.id, thread_id, brief: share.brief.clone(), scope: share.scope.clone() }),
+            share: Some(crate::agent::ShareSession { id: share.id, thread_id, brief: share.brief.clone(), scope: share.scope.clone(), visitor_lang }),
         };
         let past = history(&st.db(), thread_id, HISTORY_LIMIT)?;
         let question = append(&st.db(), thread_id, "user", &message, now)?;

@@ -471,3 +471,30 @@ async fn the_language_follows_the_browser_until_it_is_chosen() {
     let res = app.oneshot(put(&cookie, r#"{"language":""}"#)).await.unwrap();
     assert_eq!(json(res).await["language"], "");
 }
+
+#[tokio::test]
+async fn a_signed_in_request_leaves_its_browser_language_for_background_text() {
+    use note_server::text::Lang;
+    let (app, cookie, cfg) = common::app_with_logged_in_user().await;
+    assert_eq!(Lang::for_user(cfg.path(), "aki"), Lang::En);
+    let req = Request::get("/api/settings")
+        .header(header::COOKIE, &cookie)
+        .header(header::ACCEPT_LANGUAGE, "ja-JP,ja;q=0.9,en;q=0.8")
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(app.clone().oneshot(req).await.unwrap().status(), StatusCode::OK);
+    assert_eq!(Lang::for_user(cfg.path(), "aki"), Lang::Ja);
+
+    app.clone().oneshot(put(&cookie, r#"{"language":"en"}"#)).await.unwrap();
+    assert_eq!(Lang::for_user(cfg.path(), "aki"), Lang::En);
+}
+
+#[tokio::test]
+async fn a_new_language_starts_on_its_default_voice() {
+    let (app, cookie, cfg) = common::app_with_logged_in_user().await;
+    write(cfg.path(), "users/aki/user.toml", "voice_voice = \"bm_george\"\n");
+    let v = json(app.clone().oneshot(put(&cookie, r#"{"language":""}"#)).await.unwrap()).await;
+    assert_eq!(v["voice_voice"], "bm_george", "an unchanged language keeps the voice");
+    let v = json(app.oneshot(put(&cookie, r#"{"language":"ja"}"#)).await.unwrap()).await;
+    assert_eq!(v["voice_voice"], "");
+}

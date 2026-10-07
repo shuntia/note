@@ -361,8 +361,6 @@ pub struct UserConfig {
     /// Whether those posts notify in Matrix, rather than arriving silently.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub matrix_ping: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub voice_language: Option<String>,
     /// One of `text::LANGUAGES`; blank follows the browser.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
@@ -377,7 +375,6 @@ pub const RING_FOR_URGENT: &str = "urgent";
 pub const RING_FOR_CHECKINS: &str = "checkins";
 pub const RING_FOR_NEVER: &str = "never";
 pub const RING_FOR: &[&str] = &[RING_FOR_URGENT, RING_FOR_CHECKINS, RING_FOR_NEVER];
-pub const DEFAULT_VOICE_LANGUAGE: &str = "en";
 
 fn default_nightly_time() -> String {
     "03:00".into()
@@ -450,9 +447,10 @@ impl UserConfig {
         self.matrix_ping.unwrap_or(false)
     }
 
-    pub fn voice_profile(&self) -> note_voice_proto::VoiceProfile {
+    /// A call speaks the user's language, `lang`.
+    pub fn voice_profile(&self, lang: crate::text::Lang) -> note_voice_proto::VoiceProfile {
         note_voice_proto::VoiceProfile {
-            language: self.voice_language.clone().unwrap_or_else(|| DEFAULT_VOICE_LANGUAGE.into()),
+            language: lang.code().into(),
             voice: self.voice_voice.clone().unwrap_or_default(),
             cue: self.voice_cue.unwrap_or(true),
         }
@@ -573,15 +571,16 @@ mod tests {
     }
 
     #[test]
-    fn the_voice_profile_defaults_to_english_the_default_voice_and_cues() {
+    fn the_voice_profile_speaks_the_language_given_with_the_default_voice_and_cues() {
+        use crate::text::Lang;
         let tmp = tempfile::tempdir().unwrap();
         write(tmp.path(), "defaults/user.toml",
             "display_name = \"X\"\ntimezone = \"UTC\"\ntemplate = \"default\"\n");
-        let p = UserConfig::load(tmp.path(), "a").unwrap().voice_profile();
+        let p = UserConfig::load(tmp.path(), "a").unwrap().voice_profile(Lang::En);
         assert_eq!(p, note_voice_proto::VoiceProfile { language: "en".into(), voice: String::new(), cue: true });
         write(tmp.path(), "users/aki/user.toml", "voice_voice = \"bm_george\"\nvoice_cue = false\n");
-        let p = UserConfig::load(tmp.path(), "aki").unwrap().voice_profile();
-        assert_eq!((p.voice.as_str(), p.cue), ("bm_george", false));
+        let p = UserConfig::load(tmp.path(), "aki").unwrap().voice_profile(Lang::Ja);
+        assert_eq!((p.language.as_str(), p.voice.as_str(), p.cue), ("ja", "bm_george", false));
     }
 
     #[test]

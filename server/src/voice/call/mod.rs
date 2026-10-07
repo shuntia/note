@@ -22,7 +22,6 @@ use std::time::{Duration, Instant};
 
 const RESUMED_HISTORY: usize = 40;
 const RESTARTED: &str = "Note restarted; the call is still on";
-const GREET: &str = "the user called you; greet them briefly";
 
 /// Sends a frame of the named call to the voice side.
 pub type CallSender = Arc<dyn Fn(&str, CallBody) + Send + Sync>;
@@ -299,6 +298,7 @@ impl CallManager {
             )
             .optional()?;
         let Some((user_id, username, message)) = row else { return Ok(()) };
+        let lang = crate::text::Lang::for_user(&d.config_dir, &username);
         let msg = message.map(|m| serde_json::from_str::<OutboundMessage>(&m)).transpose()?;
         let existing = owned_conversation(&d.db, user_id, msg.as_ref().and_then(|m| m.conversation_id));
         let (system, tools) = d.prompt(user_id, &username, &reason(msg.as_ref()), existing)?;
@@ -308,7 +308,7 @@ impl CallManager {
             let now = jiff::Timestamp::now();
             let id = match existing {
                 Some(id) => id,
-                None => crate::talk::create(&tx, user_id, "Call", now)?,
+                None => crate::talk::create(&tx, user_id, &crate::text::call_title(lang), now)?,
             };
             tx.execute("UPDATE voice_calls SET conversation_id = ?2 WHERE id = ?1", (call_id, id))?;
             crate::talk::mark_via(&tx, id, crate::talk::Via::Voice, now)?;
@@ -324,7 +324,7 @@ impl CallManager {
                 conversation_id,
                 system,
                 tools,
-                initial: if msg.is_none() { vec![render::Item::System(GREET.into())] } else { Vec::new() },
+                initial: if msg.is_none() { vec![render::Item::System(crate::text::call_greet(lang))] } else { Vec::new() },
                 opening: msg.map(|m| driver::Opening { text: m.body, in_thread: existing.is_some() }),
                 history: Vec::new(),
             },
@@ -344,6 +344,7 @@ impl CallManager {
             call_id: live.call_id,
             user_id: live.user_id,
             username: live.username.clone(),
+            lang: crate::text::Lang::for_user(&d.config_dir, &live.username),
             conversation_id: live.conversation_id,
             db: d.db.clone(),
             llm: d.voice_llm.clone(),

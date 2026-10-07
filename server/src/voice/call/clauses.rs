@@ -53,18 +53,44 @@ impl Clauses {
                 self.scanned = i;
                 break;
             };
+            let end = i + c.len_utf8();
+            let long_enough = || self.buf[..end].trim_start().chars().count() >= comma_floor;
+            let after_stop = || self.buf[..i].chars().next_back().is_some_and(|p| FULL_STOPS.contains(&p));
+            let full_width_end = (FULL_STOPS.contains(&c) && !CLOSERS.contains(&next))
+                || (CLOSERS.contains(&c) && after_stop())
+                || (c == '、' && long_enough());
+            if full_width_end {
+                return Some((end, 0));
+            }
             if !next.is_whitespace() {
                 continue;
             }
-            let end = i + c.len_utf8();
-            let ends_clause = matches!(c, '.' | '!' | '?' | ';' | ':')
-                || (c == ',' && self.buf[..end].trim_start().chars().count() >= comma_floor);
+            let ends_clause = matches!(c, '.' | '!' | '?' | ';' | ':') || (c == ',' && long_enough());
             if ends_clause {
                 return Some((end, 0));
             }
         }
         None
     }
+}
+
+/// Japanese sentence ends, which no space follows.
+const FULL_STOPS: [char; 3] = ['。', '！', '？'];
+const CLOSERS: [char; 4] = ['」', '』', '）', ')'];
+
+/// Clauses as one line: a space between two that meet in ASCII, none where
+/// either side is Japanese.
+pub fn join(clauses: &[String]) -> String {
+    let mut out = String::new();
+    for clause in clauses {
+        let spaced = out.chars().next_back().is_some_and(|c| c.is_ascii())
+            && clause.chars().next().is_some_and(|c| c.is_ascii());
+        if spaced {
+            out.push(' ');
+        }
+        out.push_str(clause);
+    }
+    out
 }
 
 const FIRST_COMMA_FLOOR: usize = 8;
@@ -162,6 +188,27 @@ mod tests {
         assert_eq!(c.push(": fine"), vec!["It is 7.30:"]);
         assert_eq!(c.finish().as_deref(), Some("fine"));
         assert_eq!(c.finish(), None);
+    }
+
+    #[test]
+    fn japanese_cuts_at_its_full_stops_and_long_commas() {
+        assert_eq!(
+            all(&["はい、わかりました。金曜の朝に", "移しました！ほかに何かありますか？"]),
+            vec!["はい、わかりました。", "金曜の朝に移しました！", "ほかに何かありますか？"]
+        );
+        assert_eq!(all(&["「了解です。」と言いました。"]), vec!["「了解です。」", "と言いました。"]);
+        assert_eq!(
+            all(&["明日の会議の資料をまとめておいたので、あとで確認してください"]),
+            vec!["明日の会議の資料をまとめておいたので、", "あとで確認してください"]
+        );
+    }
+
+    #[test]
+    fn clauses_join_with_spaces_only_between_latin_text() {
+        let s = |v: &[&str]| v.iter().map(ToString::to_string).collect::<Vec<_>>();
+        assert_eq!(join(&s(&["Done.", "Anything else?"])), "Done. Anything else?");
+        assert_eq!(join(&s(&["はい。", "移しました。"])), "はい。移しました。");
+        assert_eq!(join(&s(&["OK.", "移しました。"])), "OK.移しました。");
     }
 
     #[test]

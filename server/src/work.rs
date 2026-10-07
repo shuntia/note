@@ -204,7 +204,7 @@ pub fn start(
     let tx = conn.unchecked_transaction()?;
     end(conn, config_dir, user_id, username, None, "stopped", now).map_err(StartError::Other)?;
     let conversation_id =
-        crate::talk::create(conn, user_id, &format!("Session: {title}"), now)
+        crate::talk::create(conn, user_id, &crate::text::session_thread_title(crate::text::Lang::for_user(config_dir, username), title), now)
             .map_err(StartError::Other)?;
     conn.execute(
         "INSERT INTO work_sessions

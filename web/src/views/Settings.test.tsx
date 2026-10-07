@@ -18,7 +18,7 @@ test('a_second_preview_replaces_the_first', () => {
   expect(make).toHaveBeenCalledTimes(1)
   expect(audio.pause).toHaveBeenCalledTimes(1)
   expect(audio.play).toHaveBeenCalledTimes(2)
-  expect(audio.src.endsWith('bm_george')).toBe(true)
+  expect(audio.src).toBe('/api/voice/preview?voice=bm_george&lang=en')
   preview.stop()
   expect(audio.pause).toHaveBeenCalledTimes(2)
 })

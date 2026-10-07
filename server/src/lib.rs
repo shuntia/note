@@ -162,6 +162,7 @@ pub struct AppState {
     pub public_base_url: String,
     /// Written by `POST /api/inbox/refresh`; `[inbox] refresh_signal`.
     pub inbox_refresh: Option<PathBuf>,
+    pub seen_langs: Arc<crate::text::SeenLangs>,
     pub started_at: jiff::Timestamp,
 }
 
@@ -209,6 +210,7 @@ impl AppState {
             )),
             public_base_url: "http://localhost:3271".into(),
             inbox_refresh: None,
+            seen_langs: Arc::default(),
             started_at: jiff::Timestamp::now(),
         }
     }
