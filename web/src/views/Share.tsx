@@ -95,7 +95,7 @@ export function SharePage({ token }: { token: string }) {
       if (err instanceof ApiError && err.status === 404) setInfo('ended')
       else if (err instanceof ApiError && err.status === 429)
         setError(
-          err.message.includes('limit') ? t('share.dailyLimit') : t('share.rateLimited'),
+          /limit|上限/.test(err.message) ? t('share.dailyLimit') : t('share.rateLimited'),
         )
       else setError(t('share.failed'))
     } finally {

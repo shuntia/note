@@ -90,7 +90,61 @@ pub fn router(state: AppState) -> Router {
         .nest("/api/security", crate::security::routes())
         .nest("/api/admin", crate::admin::routes())
         .merge(share_router(state.clone()))
+        .layer(axum::middleware::from_fn_with_state(state.clone(), localized_errors))
         .with_state(state)
+}
+
+const MAX_ERROR_BODY: usize = 64 * 1024;
+
+/// Puts a JSON error's `error` line into the reader's language: the signed-in
+/// user's, or on a share link the visitor's browser's.
+async fn localized_errors(
+    State(state): State<AppState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let accept = accept_language(req.headers()).map(str::to_string);
+    let session = (!req.uri().path().starts_with("/api/share/"))
+        .then(|| axum_extra::extract::CookieJar::from_headers(req.headers()).get("session").map(|c| c.value().to_string()))
+        .flatten();
+    let res = next.run(req).await;
+    let is_json = res
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .is_some_and(|v| v.as_bytes().starts_with(b"application/json"));
+    if !(res.status().is_client_error() || res.status().is_server_error()) || !is_json {
+        return res;
+    }
+    let username: Option<String> = session.and_then(|token| {
+        state
+            .db()
+            .query_row(
+                "SELECT u.username FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ?1",
+                [token],
+                |r| r.get(0),
+            )
+            .ok()
+    });
+    let lang = match &username {
+        Some(name) => Lang::for_request(&state.config_dir, name, accept.as_deref()),
+        None => Lang::resolve("", accept.as_deref()),
+    };
+    if lang == Lang::En {
+        return res;
+    }
+    let (mut parts, body) = res.into_parts();
+    let Ok(bytes) = axum::body::to_bytes(body, MAX_ERROR_BODY).await else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    let mut value: serde_json::Value = match serde_json::from_slice(&bytes) {
+        Ok(v) => v,
+        Err(_) => return axum::response::Response::from_parts(parts, axum::body::Body::from(bytes)),
+    };
+    if let Some(line) = value.get("error").and_then(|e| e.as_str()) {
+        value["error"] = serde_json::Value::String(text::error_line(lang, line));
+    }
+    parts.headers.remove(header::CONTENT_LENGTH);
+    axum::response::Response::from_parts(parts, axum::body::Body::from(value.to_string()))
 }
 
 /// Serves the built web client around the API: unknown non-API paths fall back
@@ -806,8 +860,10 @@ async fn task_agent(
     user: TaskPrincipal,
     State(state): State<AppState>,
     Path(id): Path<i64>,
+    headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
+    let lang = Lang::for_request(&state.config_dir, &user.username, accept_language(&headers));
     let req: BriefReq = if body.iter().all(u8::is_ascii_whitespace) {
         BriefReq::default()
     } else {
@@ -823,11 +879,11 @@ async fn task_agent(
         );
     }
     if daily_cap_reached(&state, user.id) {
-        return daily_cap_response(Lang::En);
+        return daily_cap_response(lang);
     }
     let permit = match state.talk_gate.try_enter(user.id) {
         Ok(p) => p,
-        Err(busy) => return session_busy_response(busy, Lang::En),
+        Err(busy) => return session_busy_response(busy, lang),
     };
     let token_id = match user.via {
         auth::Credential::Token(id) => Some(id),
@@ -990,8 +1046,10 @@ fn valid_source_id(id: &str) -> bool {
 async fn agent_inbox(
     user: TaskPrincipal,
     State(state): State<AppState>,
+    headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
+    let lang = Lang::for_request(&state.config_dir, &user.username, accept_language(&headers));
     let req: InboxReq = match serde_json::from_slice(&body) {
         Ok(r) => r,
         Err(_) => return brief_error(StatusCode::BAD_REQUEST, "malformed JSON body"),
@@ -1015,11 +1073,11 @@ async fn agent_inbox(
         );
     }
     if daily_cap_reached(&state, user.id) {
-        return daily_cap_response(Lang::En);
+        return daily_cap_response(lang);
     }
     let permit = match state.talk_gate.try_enter(user.id) {
         Ok(p) => p,
-        Err(busy) => return session_busy_response(busy, Lang::En),
+        Err(busy) => return session_busy_response(busy, lang),
     };
     let recorded = {
         let conn = state.db();

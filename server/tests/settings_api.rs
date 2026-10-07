@@ -463,7 +463,7 @@ async fn the_language_follows_the_browser_until_it_is_chosen() {
 
     let res = app.clone().oneshot(put(&cookie, r#"{"language":"fr"}"#)).await.unwrap();
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(json(res).await["error"], "language must be blank, en or ja");
+    assert_eq!(json(res).await["error"], "言語は空欄、en、ja のいずれかにしてください");
 
     let v = json(app.clone().oneshot(get(&cookie)).await.unwrap()).await;
     assert_eq!(v["language"], "ja");
@@ -497,4 +497,24 @@ async fn a_new_language_starts_on_its_default_voice() {
     assert_eq!(v["voice_voice"], "bm_george", "an unchanged language keeps the voice");
     let v = json(app.oneshot(put(&cookie, r#"{"language":"ja"}"#)).await.unwrap()).await;
     assert_eq!(v["voice_voice"], "");
+}
+
+#[tokio::test]
+async fn an_error_reads_in_the_language_of_its_reader() {
+    let (app, cookie, _cfg) = common::app_with_logged_in_user().await;
+    let bad = r#"{"nightly_time":"7:30"}"#;
+    let res = app.clone().oneshot(put(&cookie, bad)).await.unwrap();
+    assert_eq!(json(res).await["error"], "nightly_time must be a zero-padded 24-hour HH:MM");
+
+    let mut req = put(&cookie, bad);
+    req.headers_mut().insert(header::ACCEPT_LANGUAGE, "ja-JP,ja;q=0.9".parse().unwrap());
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(json(res).await["error"], "夜の処理の時刻は24時間表記のHH:MM（例 07:30）にしてください");
+
+    app.clone().oneshot(put(&cookie, r#"{"language":"en"}"#)).await.unwrap();
+    let mut req = put(&cookie, bad);
+    req.headers_mut().insert(header::ACCEPT_LANGUAGE, "ja".parse().unwrap());
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(json(res).await["error"], "nightly_time must be a zero-padded 24-hour HH:MM", "the setting outranks the browser");
 }

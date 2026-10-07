@@ -410,6 +410,14 @@ pub fn err_share_unavailable(l: Lang) -> String {
     l.pick("Note could not answer", "Noteが応答できませんでした")
 }
 
+/// A reply cut off by the session's step limit.
+pub fn max_turns_reply(l: Lang) -> String {
+    l.pick(
+        "(I ran out of steps before finishing — ask again and I'll pick it up from here)",
+        "（終わる前に手順が尽きました。もう一度聞いてもらえれば、ここから続けます）",
+    )
+}
+
 pub fn call_title(l: Lang) -> String {
     l.pick("Call", "通話")
 }
@@ -441,6 +449,242 @@ pub fn session_thread_title(l: Lang, task: &str) -> String {
         Lang::Ja => format!("セッション：{task}"),
     }
 }
+
+/// An error line some module wrote in English, in `l`. Lines with no
+/// Japanese here pass through as written.
+pub fn error_line(l: Lang, english: &str) -> String {
+    if l == Lang::En {
+        return english.to_string();
+    }
+    ERRORS_JA
+        .iter()
+        .find_map(|(pattern, ja)| {
+            let caught = captures(pattern, english)?;
+            let mut out = (*ja).to_string();
+            for (i, c) in caught.iter().enumerate() {
+                out = out.replace(&format!("{{{i}}}"), field_ja(c));
+            }
+            Some(out)
+        })
+        .unwrap_or_else(|| english.to_string())
+}
+
+/// The runs `{}` stands for when `line` fits `pattern`, matched leftmost.
+fn captures<'a>(pattern: &str, line: &'a str) -> Option<Vec<&'a str>> {
+    let literals: Vec<&str> = pattern.split("{}").collect();
+    let (first, rest) = literals.split_first()?;
+    let mut at = line.strip_prefix(first).map(|_| first.len())?;
+    let mut caught = Vec::new();
+    for (i, lit) in rest.iter().enumerate() {
+        let start = if i + 1 == rest.len() {
+            let end = line.len().checked_sub(lit.len())?;
+            (end >= at && line[end..] == **lit).then_some(end)?
+        } else if lit.is_empty() {
+            return None;
+        } else {
+            at + line[at..].find(lit)?
+        };
+        caught.push(&line[at..start]);
+        at = start + lit.len();
+    }
+    Some(caught)
+}
+
+fn field_ja(field: &str) -> &str {
+    FIELDS_JA.iter().find(|(en, _)| *en == field).map_or(field, |(_, ja)| ja)
+}
+
+const FIELDS_JA: &[(&str, &str)] = &[
+    ("alerts", "通知"),
+    ("before", "日時"),
+    ("brief", "指示"),
+    ("category", "カテゴリ"),
+    ("close_day_time", "一日の締めの時刻"),
+    ("content", "内容"),
+    ("context", "コンテキスト"),
+    ("counter", "カウンター"),
+    ("date", "日付"),
+    ("days", "曜日"),
+    ("description", "説明"),
+    ("display_name", "表示名"),
+    ("due_at", "期限"),
+    ("duration_min", "所要時間"),
+    ("end", "終了時刻"),
+    ("expires_at", "期限"),
+    ("external_id", "外部ID"),
+    ("from_date", "開始日"),
+    ("horizon_days", "公開する日数"),
+    ("idle_nudge_min", "放置時のお知らせ"),
+    ("kind", "種類"),
+    ("language", "言語"),
+    ("limit", "件数"),
+    ("message", "メッセージ"),
+    ("messages_per_day", "1日のメッセージ数"),
+    ("model", "モデル"),
+    ("morning_until", "朝の終わり"),
+    ("mxid", "Matrix ID"),
+    ("name", "名前"),
+    ("nightly_time", "夜の処理の時刻"),
+    ("notes", "メモ"),
+    ("notify", "通知"),
+    ("on_date", "日付"),
+    ("outcome", "結果"),
+    ("password", "パスワード"),
+    ("planned_min", "予定時間"),
+    ("pomodoro_break_min", "ポモドーロの休憩時間"),
+    ("pomodoro_work_min", "ポモドーロの作業時間"),
+    ("progress", "進捗"),
+    ("ring_for", "着信"),
+    ("role", "役割"),
+    ("source", "ソース"),
+    ("start", "開始時刻"),
+    ("state", "状態"),
+    ("step_count", "ステップ数"),
+    ("step_index", "ステップ番号"),
+    ("step_name", "ステップ名"),
+    ("template", "テンプレート"),
+    ("text", "テキスト"),
+    ("timezone", "タイムゾーン"),
+    ("title", "タイトル"),
+    ("triggers_per_day", "1日のトリガー数"),
+    ("until_date", "終了日"),
+    ("urgency", "緊急度"),
+    ("url", "URL"),
+    ("username", "ユーザー名"),
+    ("voice", "声"),
+    ("voice_voice", "声"),
+];
+
+/// English error lines and their Japanese, most specific first. `{}` in the
+/// English matches any run of text, put back as `{0}`, `{1}`… in order; a
+/// field name caught is given its Japanese label.
+const ERRORS_JA: &[(&str, &str)] = &[
+    ("the new password must be at least {} characters", "新しいパスワードは{0}文字以上にしてください"),
+    ("source_id must be 1 to {} characters of A-Za-z0-9:._-", "ソースIDは英数字と :._- で1〜{0}文字にしてください"),
+    ("text must be one line of 1..={} characters", "テキストは1行・{0}文字以内にしてください"),
+    ("duration_min must be a multiple of {}, from {} to {}", "所要時間は{0}分刻みで{1}〜{2}分にしてください"),
+    ("snooze minutes must be in 1..=1440, got {}", "スヌーズは1〜1440分にしてください（入力：{0}）"),
+    ("days must be a bitmask in 0..=127, Mon = 1 … Sun = 64", "曜日の指定が正しくありません"),
+    ("kind must be \"announcement\" or \"material\"", "種類は announcement か material にしてください"),
+    ("{} must be non-blank and at most {} characters", "{0}は空にせず{1}文字以内にしてください"),
+    ("{} must be non-blank and at most {} bytes", "{0}は空にせず{1}バイト以内にしてください"),
+    ("{} must be 1 to {} characters", "{0}は1〜{1}文字にしてください"),
+    ("{} must be 1..={} characters", "{0}は1〜{1}文字にしてください"),
+    ("{} must be 1 to {} bytes", "{0}は1〜{1}バイトにしてください"),
+    ("{} must be 1..={} bytes", "{0}は1〜{1}バイトにしてください"),
+    ("{} must be at most {} characters", "{0}は{1}文字以内にしてください"),
+    ("{} must be at most {} bytes", "{0}は{1}バイト以内にしてください"),
+    ("{} must be a zero-padded 24-hour HH:MM, or blank for no close of day", "{0}は24時間表記のHH:MM（例 21:30）か、締めなしなら空欄にしてください"),
+    ("{} must be a zero-padded 24-hour HH:MM", "{0}は24時間表記のHH:MM（例 07:30）にしてください"),
+    ("{} must be zero-padded HH:MM, got {}", "{0}はHH:MM（例 07:30）にしてください（入力：{1}）"),
+    ("{} must be YYYY-MM-DD, got {}", "{0}はYYYY-MM-DD形式にしてください（入力：{1}）"),
+    ("{} must be YYYY-MM-DD", "{0}はYYYY-MM-DD形式にしてください"),
+    ("{} must be an RFC 3339 instant, got {}", "{0}は日時（RFC 3339）にしてください（入力：{1}）"),
+    ("{} must be one of {}, got {}", "{0}は次のいずれかにしてください：{1}（入力：{2}）"),
+    ("{} must be one of {}", "{0}は次のいずれかにしてください：{1}"),
+    ("{} must be remaining or elapsed", "{0}は remaining か elapsed にしてください"),
+    ("{} must be urgent, checkins or never", "{0}は urgent、checkins、never のいずれかにしてください"),
+    ("{} must be blank, en or ja", "{0}は空欄、en、ja のいずれかにしてください"),
+    ("{} must be admin or member", "{0}は admin か member にしてください"),
+    ("{} must be done or stopped", "{0}は done か stopped にしてください"),
+    ("{} must look like @name:server", "{0}は @name:server の形にしてください"),
+    ("{} must not be negative", "{0}は0以上にしてください"),
+    ("{} must not be empty", "{0}を入力してください"),
+    ("{} must be a number", "{0}は数値にしてください"),
+    ("{} must be a timestamp", "{0}は日時にしてください"),
+    ("{} must be in the future", "{0}は未来の日時にしてください"),
+    ("{} must be a non-empty name without spaces", "{0}は空白を含まない名前にしてください"),
+    ("{} must be 0 to {}", "{0}は0〜{1}にしてください"),
+    ("{} must be 1 to {}", "{0}は1〜{1}にしてください"),
+    ("{} must be {} to {}", "{0}は{1}〜{2}にしてください"),
+    ("{} is not a known IANA timezone", "{0}が不明なタイムゾーンです"),
+    ("{} is not one of the available templates", "そのテンプレートはありません"),
+    ("{} is not one of the available voices", "その声は選べません"),
+    ("{} has no voices", "この言語で使える声がありません"),
+    ("Now already holds {} tasks", "「今」にはすでに{0}件のタスクがあります"),
+    ("external_id {} already belongs to task {}", "外部ID {0} はすでにタスク {1} に使われています"),
+    ("external_id {} already belongs to calendar entry {}", "外部ID {0} はすでに予定 {1} に使われています"),
+    ("external_id belongs to the path, not the body", "外部IDは本文ではなくパスに含めてください"),
+    ("a calendar holds at most {} entries", "カレンダーに入れられる予定は{0}件までです"),
+    ("no calendar entry {}", "予定 {0} はありません"),
+    ("no such calendar entry", "その予定はありません"),
+    ("an entry must end after it starts, got {}", "終わりは始まりより後にしてください（入力：{0}）"),
+    ("an entry with no days needs on_date, the one day it happens", "曜日を決めない予定には日付が必要です"),
+    ("a recurring entry has days or on_date, not both", "曜日か日付のどちらか一方を指定してください"),
+    ("an entry recurs on days or happens on one date, not both", "曜日か日付のどちらか一方を指定してください"),
+    ("from_date and until_date bound a recurring entry, not a one-off", "開始日と終了日は繰り返しの予定にだけ指定できます"),
+    ("from_date {} is after until_date {}", "開始日 {0} が終了日 {1} より後になっています"),
+    ("a step carries no due date of its own; the task it belongs to holds it", "ステップには期限を付けられません。親のタスクに付けてください"),
+    ("a step carries no category of its own; it reads the one on the task it belongs to", "ステップにはカテゴリを付けられません。親のタスクのものが使われます"),
+    ("a step belongs to no goal of its own; the task it belongs to holds one", "ステップは目標につなげられません。親のタスクにつなげてください"),
+    ("a task cannot be its own step", "タスクを自分自身のステップにはできません"),
+    ("steps are one level deep: a step cannot have steps of its own", "ステップは一段だけです。ステップの下にステップは作れません"),
+    ("steps are one level deep: a task with steps cannot become a step", "ステップは一段だけです。ステップのあるタスクはステップにできません"),
+    ("a step reads its parent's urgency", "ステップの緊急度は親のタスクに従います"),
+    ("a split needs {} to {} steps", "分けるには{0}〜{1}個のステップが必要です"),
+    ("this task already has steps", "このタスクにはすでにステップがあります"),
+    ("invalid state: {}", "状態が正しくありません：{0}"),
+    ("event already {}", "この予定はもう済んでいます"),
+    ("no goal {}", "目標 {0} はありません"),
+    ("no task {}", "タスク {0} はありません"),
+    ("no event {}", "予定 {0} はありません"),
+    ("at most {} categories", "カテゴリは{0}個までです"),
+    ("at most {} tokens per user", "トークンは1人{0}個までです"),
+    ("at most {} passkeys per user", "パスキーは1人{0}個までです"),
+    ("at most {} devices per account", "端末は1アカウント{0}台までです"),
+    ("memory {} is archived and immutable", "記憶 {0} はアーカイブ済みで変更できません"),
+    ("template {} has no events", "テンプレート {0} には予定がありません"),
+    ("template entry {} is not a table", "テンプレートの項目 {0} の形式が正しくありません"),
+    ("template {}: invalid {} {}", "テンプレート {0}：{1} の値 {2} が正しくありません"),
+    ("entry {} is a block, and blocks never ping","項目 {0} はブロックなので通知しません"),
+    ("task not found", "タスクが見つかりません"),
+    ("conversation not found", "会話が見つかりません"),
+    ("user not found", "ユーザーが見つかりません"),
+    ("memory not found", "記憶が見つかりません"),
+    ("trace not found", "トレースが見つかりません"),
+    ("no such passkey", "そのパスキーはありません"),
+    ("unknown category", "不明なカテゴリです"),
+    ("database error", "データベースのエラーです"),
+    ("unreadable user config", "ユーザー設定を読み込めません"),
+    ("malformed JSON body", "JSONの形式が正しくありません"),
+    ("a token cannot write source manual", "トークンからは手動のタスクを書き込めません"),
+    ("the user deleted this task; it is not recreated", "このタスクは削除されたため、作り直しません"),
+    ("the task could not be briefed", "タスクの説明を作れませんでした"),
+    ("only a top-level task can be briefed, not one of its steps", "説明を作れるのは親のタスクだけです"),
+    ("the item could not be read", "項目を読み取れませんでした"),
+    ("the assistant is unavailable; try again", "アシスタントが応答できません。もう一度どうぞ"),
+    ("the assistant reached no decision; try again", "アシスタントが判断できませんでした。もう一度どうぞ"),
+    ("a day that is over cannot be filled", "終わった日は埋められません"),
+    ("a day that is over cannot be carried", "終わった日は持ち越せません"),
+    ("that endpoint belongs to another account", "その通知先は別のアカウントのものです"),
+    ("endpoint must be an https:// URL with a plain host", "通知先は https:// のURLにしてください"),
+    ("endpoint must not point at this server", "通知先にこのサーバーは使えません"),
+    ("endpoint must not point into a private network", "通知先にプライベートネットワークは使えません"),
+    ("endpoint host does not resolve", "通知先のホストが見つかりません"),
+    ("too many open connections", "接続が多すぎます"),
+    ("the link was removed", "リンクは削除されました"),
+    ("share links are off, or the cap is reached", "共有リンクが無効か、上限に達しています"),
+    ("refresh is not configured", "更新は設定されていません"),
+    ("refresh is unavailable", "今は更新できません"),
+    ("that challenge has expired", "時間切れです。もう一度お試しください"),
+    ("that passkey could not be verified", "パスキーを確認できませんでした"),
+    ("that passkey is already registered", "そのパスキーはすでに登録されています"),
+    ("that code doesn't match", "コードが一致しません"),
+    ("wrong password or code", "パスワードかコードが違います"),
+    ("wrong password", "パスワードが違います"),
+    ("too many attempts", "試行回数が多すぎます。しばらくしてからどうぞ"),
+    ("too many sign-ins in flight; try again", "サインインが混み合っています。もう一度どうぞ"),
+    ("elevation required", "管理者の再認証が必要です"),
+    ("admin only", "管理者専用です"),
+    ("cross-site request refused", "別のサイトからのリクエストは受け付けません"),
+    ("no passkeys on this account", "このアカウントにはパスキーがありません"),
+    ("no second factor on this account and no admin secret on this server", "このアカウントには二段階認証がなく、サーバーにも管理者用の秘密がありません"),
+    ("username is taken", "そのユーザー名は使われています"),
+    ("you can't change your own role or disable yourself", "自分の役割の変更や無効化はできません"),
+    ("that would leave no enabled admin", "有効な管理者がいなくなってしまいます"),
+    ("you can't reset another admin's password", "ほかの管理者のパスワードはリセットできません"),
+    ("the configured chat provider has no model to change", "このチャットプロバイダーには変更できるモデルがありません"),
+];
 
 #[cfg(test)]
 mod tests {
@@ -506,6 +750,41 @@ mod tests {
         assert_eq!(seen(tmp.path(), "aki"), None, "a repeat of the cached language is not rewritten");
         seen_by.note(tmp.path(), 1, "aki", "en");
         assert_eq!(seen(tmp.path(), "aki"), Some(Lang::En));
+    }
+
+    #[test]
+    fn error_lines_read_in_japanese_with_their_fields_named() {
+        let ja = |line: &str| error_line(Lang::Ja, line);
+        assert_eq!(ja("Now already holds 3 tasks"), "「今」にはすでに3件のタスクがあります");
+        assert_eq!(ja("message must be non-blank and at most 16384 bytes"), "メッセージは空にせず16384バイト以内にしてください");
+        assert_eq!(ja("nightly_time must be a zero-padded 24-hour HH:MM"), "夜の処理の時刻は24時間表記のHH:MM（例 07:30）にしてください");
+        assert_eq!(ja("the new password must be at least 8 characters"), "新しいパスワードは8文字以上にしてください");
+        assert_eq!(ja("name must be 1 to 64 characters"), "名前は1〜64文字にしてください");
+        assert_eq!(ja("pomodoro_work_min must be 5 to 90"), "ポモドーロの作業時間は5〜90にしてください");
+        assert_eq!(ja("external_id x already belongs to task 4"), "外部ID x はすでにタスク 4 に使われています");
+        assert_eq!(ja("wrong password"), "パスワードが違います");
+        assert_eq!(ja("something new and unknown"), "something new and unknown");
+        assert_eq!(error_line(Lang::En, "wrong password"), "wrong password");
+    }
+
+    #[test]
+    fn every_error_pattern_is_reachable_and_fills_every_slot() {
+        for (i, (en, ja)) in ERRORS_JA.iter().enumerate() {
+            let slots = en.matches("{}").count();
+            let sample = en.replace("{}", "Z");
+            let line = error_line(Lang::Ja, &sample);
+            let first = ERRORS_JA.iter().position(|(p, _)| captures(p, &sample).is_some());
+            assert_eq!(first, Some(i), "{en:?} is shadowed by an earlier pattern");
+            assert!(!line.contains('{'), "{en:?} -> {line:?}");
+            assert!(ja.matches('{').count() <= slots, "{ja:?} names a slot {en:?} lacks");
+        }
+    }
+
+    #[test]
+    fn call_lines_are_spoken_in_the_call_language() {
+        assert_eq!(call_title(Lang::Ja), "通話");
+        assert!(call_apology(Lang::Ja).ends_with('？'));
+        assert!(call_bow_out(Lang::En).starts_with("I'm having trouble"));
     }
 
     #[test]
