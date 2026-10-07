@@ -641,7 +641,7 @@ pub fn create(
     Ok(conn.query_row(&format!("SELECT {COLS} FROM {FROM} WHERE t.id = ?1"), [id], row_to_task)?)
 }
 
-fn children_of(conn: &Connection, parent_id: i64) -> rusqlite::Result<Vec<Task>> {
+pub(crate) fn children_of(conn: &Connection, parent_id: i64) -> rusqlite::Result<Vec<Task>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT {COLS} FROM {FROM} WHERE t.parent_id = ?1 AND t.state != 'dropped' ORDER BY t.id"
     ))?;
