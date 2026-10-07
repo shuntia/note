@@ -1,4 +1,19 @@
-export type Me = { username: string; admin: boolean }
+// `onboarding` holds from joining by invite until the first-run flow is finished.
+export type Me = { username: string; admin: boolean; onboarding?: boolean }
+
+export type JoinInfo = { username: string | null; expires_at: string }
+
+export type Invite = {
+  id: number
+  admin: boolean
+  username: string | null
+  created_by: string | null
+  created_at: string
+  expires_at: string
+}
+
+// The only response that carries the link.
+export type InviteCreated = Invite & { token: string; url: string }
 
 export type MovedTo = { event_id: number; date: string; wall_time: string; kind: string }
 

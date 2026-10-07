@@ -96,7 +96,7 @@ impl LoginLimiter {
 
 /// Usernames become path segments under the config tree, so anything outside
 /// `[A-Za-z0-9_-]` (`..` and separators above all) is rejected at creation.
-fn validate_username(username: &str) -> Result<()> {
+pub fn validate_username(username: &str) -> Result<()> {
     if username.is_empty() {
         anyhow::bail!("username must not be empty");
     }
@@ -112,7 +112,7 @@ fn validate_username(username: &str) -> Result<()> {
     Ok(())
 }
 
-fn hash_password(password: &str) -> Result<String> {
+pub fn hash_password(password: &str) -> Result<String> {
     Ok(Argon2::default()
         .hash_password(password.as_bytes())
         .map_err(|e| anyhow::anyhow!(e))?
@@ -121,12 +121,27 @@ fn hash_password(password: &str) -> Result<String> {
 
 pub fn create_user(conn: &Connection, username: &str, password: &str, admin: bool) -> Result<i64> {
     validate_username(username)?;
-    let hash = hash_password(password)?;
+    insert_user(conn, username, &hash_password(password)?, admin)
+}
+
+/// `pass_hash` is already an argon2 PHC string; the username is validated.
+pub fn insert_user(conn: &Connection, username: &str, pass_hash: &str, admin: bool) -> Result<i64> {
+    validate_username(username)?;
     conn.execute(
         "INSERT INTO users (username, pass_hash, role) VALUES (?1, ?2, ?3)",
-        (username, hash, if admin { "admin" } else { "member" }),
+        (username, pass_hash, if admin { "admin" } else { "member" }),
     )?;
     Ok(conn.last_insert_rowid())
+}
+
+pub fn start_session(conn: &Connection, user_id: i64) -> Result<String> {
+    let token = uuid::Uuid::new_v4().to_string();
+    let expires = jiff::Timestamp::now() + jiff::Span::new().hours(SESSION_LIFETIME_HOURS);
+    conn.execute(
+        "INSERT INTO sessions (token, user_id, expires_at) VALUES (?1, ?2, ?3)",
+        (&token, user_id, expires.to_string()),
+    )?;
+    Ok(token)
 }
 
 pub fn category(conn: &Connection, username: &str) -> Result<Option<String>> {
@@ -206,14 +221,8 @@ pub fn login(db: &Mutex<Connection>, username: &str, password: &str) -> Result<O
         return Ok(None);
     }
     let (id, _, _) = row.expect("checked above");
-    let token = uuid::Uuid::new_v4().to_string();
-    let expires = jiff::Timestamp::now() + jiff::Span::new().hours(SESSION_LIFETIME_HOURS);
     let conn = crate::db_guard(db);
-    conn.execute(
-        "INSERT INTO sessions (token, user_id, expires_at) VALUES (?1, ?2, ?3)",
-        (&token, id, expires.to_string()),
-    )?;
-    Ok(Some(token))
+    Ok(Some(start_session(&conn, id)?))
 }
 
 pub fn session_cookie(token: &str, secure: bool) -> String {

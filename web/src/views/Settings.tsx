@@ -1656,7 +1656,13 @@ function TotpEnrol({
   )
 }
 
-function SecuritySection({ notify }: { notify: Notify }) {
+export function SecuritySection({
+  notify,
+  onState,
+}: {
+  notify: Notify
+  onState?: (s: SecurityState) => void
+}) {
   const [state, setState] = useState<SecurityState | 'error' | undefined>(undefined)
   const [ask, setAsk] = useState<Ask | null>(null)
   const [password, setPassword] = useState('')
@@ -1670,7 +1676,10 @@ function SecuritySection({ notify }: { notify: Notify }) {
   const load = () => {
     security
       .state()
-      .then(setState)
+      .then((s) => {
+        setState(s)
+        onState?.(s)
+      })
       .catch(() => setState('error'))
   }
   useEffect(load, [])

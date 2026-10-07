@@ -405,6 +405,35 @@ pub fn err_share_rate(l: Lang) -> String {
     )
 }
 
+pub fn err_invite_gone(l: Lang) -> String {
+    l.pick("this invite is no longer open", "この招待はもう使えません")
+}
+
+pub fn err_invite_rate(l: Lang) -> String {
+    l.pick(
+        "too many tries from this address; try again later",
+        "このアドレスからの試行が多すぎます。しばらくしてからどうぞ",
+    )
+}
+
+pub fn err_join_taken(l: Lang) -> String {
+    l.pick("that username is taken", "そのユーザー名は使われています")
+}
+
+pub fn err_join_username(l: Lang) -> String {
+    l.pick(
+        "a username is up to 64 letters, digits, - or _",
+        "ユーザー名は英数字と - _ で64文字まで",
+    )
+}
+
+pub fn err_join_password(l: Lang, min: usize) -> String {
+    match l {
+        Lang::En => format!("the password must be at least {min} characters"),
+        Lang::Ja => format!("パスワードは{min}文字以上にしてください"),
+    }
+}
+
 pub fn err_share_no_thread(l: Lang) -> String {
     l.pick("no such conversation", "その会話は見つかりません")
 }

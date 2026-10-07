@@ -18,6 +18,9 @@ import type {
   InboxItem,
   InboxPage,
   InspectUser,
+  Invite,
+  InviteCreated,
+  JoinInfo,
   Me,
   MemoryFact,
   MemoryHit,
@@ -195,6 +198,16 @@ export const api = {
   login: (username: string, password: string) =>
     request<void>('/api/login', { method: 'POST', body: JSON.stringify({ username, password }) }),
   logout: () => request<void>('/api/logout', { method: 'POST' }),
+  onboardingDone: () => request<void>('/api/onboarding/done', { method: 'POST' }),
+  join: {
+    info: (token: string) => request<JoinInfo>(`/api/join/${encodeURIComponent(token)}`),
+    // 404 once the invite is used, revoked or expired; 409 when the username is taken.
+    submit: (token: string, username: string, password: string) =>
+      request<void>(`/api/join/${encodeURIComponent(token)}`, {
+        method: 'POST',
+        body: JSON.stringify({ username, password }),
+      }),
+  },
   day: (date: string) => request<DayView>(`/api/day/${date}`),
   planRange: (from: string, to: string) =>
     request<{ days: Record<string, PlanEvent[]> }>(
@@ -449,6 +462,10 @@ export const admin = {
     id: number,
     patch: { role?: 'admin' | 'member'; disabled?: boolean; password?: string },
   ) => guarded<void>(`/users/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
+  invites: () => guarded<Invite[]>('/invites'),
+  createInvite: (fields: { admin: boolean; username?: string; days: number }) =>
+    guarded<InviteCreated>('/invites', { method: 'POST', body: JSON.stringify(fields) }),
+  revokeInvite: (id: number) => guarded<void>(`/invites/${id}`, { method: 'DELETE' }),
   revokeSessions: (id: number) =>
     guarded<{ revoked: number }>(`/users/${id}/revoke_sessions`, { method: 'POST' }),
   log: (params: { limit?: number; kind?: string; before_id?: number }) => {

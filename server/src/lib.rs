@@ -13,6 +13,7 @@ pub mod goals;
 pub mod harvest;
 pub mod idle;
 pub mod inbox;
+pub mod invites;
 pub mod learn;
 pub mod log;
 pub mod matrix;
@@ -159,6 +160,8 @@ pub struct AppState {
     pub share_distant_km: u32,
     /// Counts unknown-token lookups and message posts per client address.
     pub share_limiter: Arc<crate::auth::LoginLimiter>,
+    /// Counts unknown invite lookups and join attempts per client address.
+    pub join_limiter: Arc<crate::auth::LoginLimiter>,
     /// The origin a share URL is built on; `server.toml`'s `public_base_url`.
     pub public_base_url: String,
     /// Written by `POST /api/inbox/refresh`; `[inbox] refresh_signal`.
@@ -208,6 +211,9 @@ impl AppState {
             share_distant_km: limits.share_distant_km,
             share_limiter: Arc::new(crate::auth::LoginLimiter::with_limit(
                 crate::shares::ADDRESS_ATTEMPTS,
+            )),
+            join_limiter: Arc::new(crate::auth::LoginLimiter::with_limit(
+                crate::invites::ADDRESS_ATTEMPTS,
             )),
             public_base_url: "http://localhost:3271".into(),
             inbox_refresh: None,
