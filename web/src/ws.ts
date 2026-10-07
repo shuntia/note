@@ -1,4 +1,5 @@
 import { api } from './api'
+import type { FailureReason } from './types'
 
 // `conversation_id` is the thread a check-in opened; null on every other event.
 export type EventFrame = {
@@ -15,7 +16,7 @@ export type AgentEvent =
   | { kind: 'tool_call'; index: number; name: string; args: string }
   | { kind: 'tool_result'; index: number; name: string; result: string; is_error: boolean }
   | { kind: 'reply'; text: string }
-  | { kind: 'error'; message: string }
+  | { kind: 'error'; reason: FailureReason }
 
 // `seq` counts from zero within one session; `conversation_id` is null until a
 // brand-new conversation's reply hands the client its id.
