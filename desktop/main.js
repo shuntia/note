@@ -22,6 +22,62 @@ let tray = null
 let quitting = false
 let failures = 0
 
+const STRINGS = {
+  en: {
+    show: 'Show',
+    hide: 'Hide',
+    startAtLogin: 'Start at login',
+    reload: 'Reload',
+    forceReload: 'Force Reload',
+    quit: 'Quit',
+    file: 'File',
+    edit: 'Edit',
+    view: 'View',
+    window: 'Window',
+    close: 'Close',
+  },
+  ja: {
+    show: '表示',
+    hide: '隠す',
+    startAtLogin: 'ログイン時に起動',
+    reload: '再読み込み',
+    forceReload: '強制再読み込み',
+    quit: '終了',
+    file: 'ファイル',
+    edit: '編集',
+    view: '表示',
+    window: 'ウインドウ',
+    close: '閉じる',
+    undo: '取り消す',
+    redo: 'やり直す',
+    cut: '切り取り',
+    copy: 'コピー',
+    paste: '貼り付け',
+    selectAll: 'すべて選択',
+    toggleDevTools: '開発者ツール',
+    resetZoom: '実際のサイズ',
+    zoomIn: '拡大',
+    zoomOut: '縮小',
+    togglefullscreen: 'フルスクリーン',
+    minimize: '最小化',
+    zoom: 'ズーム',
+  },
+}
+
+// The page's own language once it has loaded (it follows the account's
+// setting), the system's before that.
+let lang = 'en'
+
+function pickLang(tag) {
+  const base = String(tag || '').toLowerCase().split('-')[0]
+  return base in STRINGS ? base : 'en'
+}
+
+const s = (key) => STRINGS[lang][key] ?? STRINGS.en[key]
+
+// A role item with the label for the current language, where Electron's own is English.
+const role = (name) => (STRINGS[lang][name] ? { role: name, label: STRINGS[lang][name] } : { role: name })
+
 const statePath = () => path.join(app.getPath('userData'), 'window-state.json')
 
 function readState() {
@@ -141,7 +197,7 @@ function showOffline() {
   const delay = Math.min(30, 2 ** Math.min(failures, 5))
   win
     .loadFile(path.join(__dirname, 'offline.html'), {
-      query: { target: appUrl.href, host: appUrl.host, delay: String(delay) },
+      query: { target: appUrl.href, host: appUrl.host, delay: String(delay), lang },
     })
     .catch(() => {})
 }
@@ -226,7 +282,19 @@ function createWindow(startHidden) {
     showOffline()
   })
   webContents.on('did-finish-load', () => {
-    if (sameOrigin(webContents.getURL())) failures = 0
+    if (!sameOrigin(webContents.getURL())) return
+    failures = 0
+    webContents
+      .executeJavaScript('document.documentElement.lang')
+      .then((tag) => {
+        const next = pickLang(tag)
+        if (next === lang) return
+        lang = next
+        writeState({ lang })
+        Menu.setApplicationMenu(appMenu())
+        refreshTray()
+      })
+      .catch(() => {})
   })
   webContents.session.setPermissionRequestHandler((wc, _permission, callback, details) => {
     callback(sameOrigin(details.requestingUrl || wc.getURL()))
@@ -240,9 +308,9 @@ function refreshTray() {
   const visible = win?.isVisible()
   tray.setContextMenu(
     Menu.buildFromTemplate([
-      { label: visible ? 'Hide' : 'Show', click: () => (visible ? win.hide() : showWindow()) },
+      { label: visible ? s('hide') : s('show'), click: () => (visible ? win.hide() : showWindow()) },
       {
-        label: 'Start at login',
+        label: s('startAtLogin'),
         type: 'checkbox',
         checked: autostartEnabled(),
         click: (item) => {
@@ -250,9 +318,9 @@ function refreshTray() {
           refreshTray()
         },
       },
-      { label: 'Reload', click: () => load(appUrl.href) },
+      { label: s('reload'), click: () => load(appUrl.href) },
       { type: 'separator' },
-      { label: 'Quit', click: () => app.quit() },
+      { label: s('quit'), click: () => app.quit() },
     ]),
   )
 }
@@ -267,26 +335,32 @@ function createTray() {
 
 function appMenu() {
   const view = [
-    { role: 'reload' },
-    { role: 'forceReload' },
-    ...(dev ? [{ role: 'toggleDevTools' }] : []),
+    { ...role('reload'), label: s('reload') },
+    { ...role('forceReload'), label: s('forceReload') },
+    ...(dev ? [role('toggleDevTools')] : []),
     { type: 'separator' },
-    { role: 'resetZoom' },
-    { role: 'zoomIn' },
-    { role: 'zoomIn', accelerator: 'CommandOrControl+=', visible: false },
-    { role: 'zoomOut' },
+    role('resetZoom'),
+    role('zoomIn'),
+    { ...role('zoomIn'), accelerator: 'CommandOrControl+=', visible: false },
+    role('zoomOut'),
     { type: 'separator' },
-    { role: 'togglefullscreen' },
+    role('togglefullscreen'),
   ]
+  const edit = ['undo', 'redo', null, 'cut', 'copy', 'paste', 'selectAll'].map((r) =>
+    r ? role(r) : { type: 'separator' },
+  )
   return Menu.buildFromTemplate([
     ...(process.platform === 'darwin' ? [{ role: 'appMenu' }] : []),
     {
-      label: 'File',
-      submenu: [{ role: 'close' }, { label: 'Quit', accelerator: 'CommandOrControl+Q', click: () => app.quit() }],
+      label: s('file'),
+      submenu: [
+        { role: 'close', label: s('close') },
+        { label: s('quit'), accelerator: 'CommandOrControl+Q', click: () => app.quit() },
+      ],
     },
-    { role: 'editMenu' },
-    { label: 'View', submenu: view },
-    { role: 'windowMenu' },
+    { label: s('edit'), submenu: edit },
+    { label: s('view'), submenu: view },
+    { label: s('window'), submenu: [role('minimize'), ...(process.platform === 'darwin' ? [role('zoom')] : []), { role: 'close', label: s('close') }] },
   ])
 }
 
@@ -306,6 +380,7 @@ if (!app.requestSingleInstanceLock()) {
     const startHidden =
       process.argv.includes('--hidden') ||
       (process.platform === 'darwin' && app.getLoginItemSettings().wasOpenedAtLogin)
+    lang = pickLang(readState().lang || app.getLocale())
     Menu.setApplicationMenu(appMenu())
     initAutostart()
     createWindow(startHidden)

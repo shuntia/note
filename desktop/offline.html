@@ -26,20 +26,26 @@
 <main>
   <div class="sun"></div>
   <p id="msg"></p>
-  <button id="retry">Retry</button>
+  <button id="retry"></button>
 </main>
 <script>
   const params = new URLSearchParams(location.search)
+  const ja = params.get('lang') === 'ja'
+  document.documentElement.lang = ja ? 'ja' : 'en'
   const target = params.get('target')
   let left = Number(params.get('delay')) || 5
   const msg = document.getElementById('msg')
   const go = () => { location.href = target }
   const tick = () => {
-    msg.textContent = `Can't reach ${params.get('host')}. Retrying in ${left}s`
+    msg.textContent = ja
+      ? `${params.get('host')} につながりません。${left}秒後にもう一度試します`
+      : `Can't reach ${params.get('host')}. Retrying in ${left}s`
     if (left-- <= 0) go()
     else setTimeout(tick, 1000)
   }
-  document.getElementById('retry').addEventListener('click', go)
+  const retry = document.getElementById('retry')
+  retry.textContent = ja ? 'もう一度' : 'Retry'
+  retry.addEventListener('click', go)
   addEventListener('online', go)
   tick()
 </script>
