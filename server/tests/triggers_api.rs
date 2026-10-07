@@ -71,11 +71,18 @@ async fn send(
     (status, serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null))
 }
 
-/// Brings every waiting trigger forward to the top of the day, so one sweep
-/// fires it whatever time the suite runs at.
+/// Brings every waiting trigger forward to the top of today, so one sweep
+/// fires it whatever time the suite runs at: an offset laid late in the day
+/// lands on tomorrow's plan, so the plan moves as well as the time.
 fn make_due(w: &World) {
     let conn = w.state.db.lock().unwrap();
-    conn.execute("UPDATE events SET wall_time = '00:00' WHERE kind = 'trigger'", []).unwrap();
+    let today = jiff::Timestamp::now().to_zoned(jiff::tz::TimeZone::UTC).date();
+    let plan = note_server::plan::ensure(&conn, &w.state.config_dir, "aki", 1, today).unwrap();
+    conn.execute(
+        "UPDATE events SET plan_id = ?1, wall_time = '00:00' WHERE kind = 'trigger'",
+        [plan],
+    )
+    .unwrap();
 }
 
 fn rows<T: rusqlite::types::FromSql>(w: &World, sql: &str) -> Vec<T> {
