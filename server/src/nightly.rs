@@ -77,6 +77,7 @@ fn run_stages(
 ) -> Result<()> {
     let tz = jiff::tz::TimeZone::get(&ucfg.timezone).unwrap_or(jiff::tz::TimeZone::UTC);
     let note = |kind: &str, e: &anyhow::Error| {
+        crate::failure::noted(e);
         let conn = crate::db_guard(deps.db);
         let _ = crate::log::record_throttled(
             &conn,
@@ -157,6 +158,7 @@ fn run_stages(
             if out.reply.trim().is_empty() { fallback.clone() } else { out.reply }
         }
         Err(e) => {
+            crate::failure::noted(&e);
             let conn = crate::db_guard(deps.db);
             let _ = crate::log::record(&conn, Some(user_id), "nightly_fallback", &format!("{e:#}"));
             fallback.clone()
@@ -310,7 +312,10 @@ pub fn spawn(state: crate::AppState) {
                         thread_note: None,
                         share: None,
                     };
-                    let r = run_for_user(&deps, user_id, &username, now);
+                    let (r, failures) = crate::failure::gather(|| run_for_user(&deps, user_id, &username, now));
+                    for failure in &failures {
+                        crate::failure::tell(&st, user_id, &username, failure, now);
+                    }
                     (r, username)
                 })
                 .await;

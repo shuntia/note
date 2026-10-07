@@ -9,6 +9,7 @@ pub mod config;
 pub mod context;
 pub mod day;
 pub mod db;
+pub mod failure;
 pub mod goals;
 pub mod harvest;
 pub mod idle;

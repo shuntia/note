@@ -51,6 +51,24 @@ pub struct StreamOpts {
 #[error("no first token within {0:?}")]
 pub struct FirstTokenTimeout(pub std::time::Duration);
 
+/// A provider's refusal, classified where its status and body are at hand.
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+pub struct ProviderError {
+    pub reason: crate::failure::Reason,
+    message: String,
+}
+
+impl ProviderError {
+    pub fn new(reason: crate::failure::Reason, message: impl Into<String>) -> Self {
+        Self { reason, message: message.into() }
+    }
+
+    pub fn status(code: u16, body: &str, message: impl Into<String>) -> Self {
+        Self::new(crate::failure::classify(Some(code), body), message)
+    }
+}
+
 pub trait LLMProvider: Send + Sync {
     fn chat(&self, req: &ChatRequest) -> Result<ChatResponse>;
 
@@ -190,11 +208,11 @@ impl ChatAgents {
         let agent = if background { &self.background } else { &self.interactive };
         let mut attempt = 0;
         loop {
-            let failure = match request(agent).send_json(body) {
+            let (reason, failure) = match request(agent).send_json(body) {
                 Ok(mut resp) if resp.status().is_success() => {
                     match resp.body_mut().read_json::<serde_json::Value>() {
                         Ok(v) => return Ok(v),
-                        Err(e) => format!("reading the response: {e}"),
+                        Err(e) => (crate::failure::Reason::ProviderDown, format!("reading the response: {e}")),
                     }
                 }
                 Ok(mut resp) => {
@@ -203,14 +221,15 @@ impl ChatAgents {
                         resp.body_mut().read_to_string().unwrap_or_default().chars().take(300).collect();
                     let failure = format!("status {code}: {head}");
                     if code != 429 && code < 500 {
-                        anyhow::bail!("{what} request failed: {failure}");
+                        return Err(ProviderError::status(code, &head, format!("{what} request failed: {failure}")).into());
                     }
-                    failure
+                    (crate::failure::classify(Some(code), &head), failure)
                 }
-                Err(e) => e.to_string(),
+                Err(e) => (crate::failure::transport(&e), e.to_string()),
             };
             let Some(delay) = self.retry_delays_ms.get(attempt) else {
-                anyhow::bail!("{what} request failed after {} attempts: {failure}", attempt + 1);
+                let message = format!("{what} request failed after {} attempts: {failure}", attempt + 1);
+                return Err(ProviderError::new(reason, message).into());
             };
             std::thread::sleep(std::time::Duration::from_millis(*delay));
             attempt += 1;
@@ -374,7 +393,9 @@ mod tests {
             ("400 Bad Request", r#"{"error":"context too long"}"#),
             ("200 OK", "{}"),
         ]);
-        let err = post(&base).unwrap_err().to_string();
+        let err = post(&base).unwrap_err();
+        assert_eq!(crate::failure::Reason::of(&err), crate::failure::Reason::ContextTooLong);
+        let err = err.to_string();
         assert!(err.contains("status 400") && err.contains("context too long"), "{err}");
         assert_eq!(rx.try_iter().count(), 1);
     }
@@ -382,7 +403,9 @@ mod tests {
     #[test]
     fn a_chat_call_gives_up_after_its_retries() {
         let (base, _rx) = crate::testhttp::serve(vec![("500 Oops", "{}"); 3]);
-        let err = post(&base).unwrap_err().to_string();
+        let err = post(&base).unwrap_err();
+        assert_eq!(crate::failure::Reason::of(&err), crate::failure::Reason::ProviderDown);
+        let err = err.to_string();
         assert!(err.contains("after 3 attempts") && err.contains("status 500"), "{err}");
     }
 

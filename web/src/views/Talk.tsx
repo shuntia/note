@@ -13,7 +13,7 @@ import { flushSync } from 'react-dom'
 import gsap from 'gsap'
 import { api, ApiError } from '../api'
 import type { ViewProps } from '../app'
-import { t } from '../i18n'
+import { t, type Key } from '../i18n'
 import { day } from '../i18n/format'
 import { Markdown } from '../markdown'
 import { reducedMotion } from '../motion'
@@ -23,7 +23,7 @@ import { batchReceipts, doing, receipt } from '../receipts'
 import { makeHold } from '../held'
 import type { FocusSession } from '../session'
 import { onAgentFrame, type AgentFrame } from '../ws'
-import type { Conversation, TalkMessage, TalkStep } from '../types'
+import type { Conversation, FailureReason, TalkMessage, TalkStep } from '../types'
 import '../styles/talk.css'
 
 type Item =
@@ -46,7 +46,7 @@ type Item =
       thinking?: string
     }
   | { kind: 'steps'; key: string; steps: ToolItem[] }
-  | { kind: 'system'; key: string; text: string; hint: string | null }
+  | { kind: 'system'; key: string; text: string; hint: string | null; detail?: string }
 
 type ToolItem = Extract<Item, { kind: 'tool' }> & { running?: boolean; finishedAt?: number }
 type AssistantItem = Extract<Item, { kind: 'assistant' }>
@@ -148,9 +148,21 @@ function pretty(raw: string): string {
   }
 }
 
+const FAILURE_KEYS: Record<FailureReason, Key> = {
+  model_unavailable: 'failure.modelUnavailable',
+  auth_invalid: 'failure.authInvalid',
+  out_of_credits: 'failure.outOfCredits',
+  rate_limited: 'failure.rateLimited',
+  provider_down: 'failure.providerDown',
+  context_too_long: 'failure.contextTooLong',
+  refused: 'failure.refused',
+  internal: 'failure.internal',
+}
+
 function errorText(err: unknown): string {
-  if (err instanceof ApiError) return err.message
-  return t('talk.unreachable')
+  if (!(err instanceof ApiError)) return t('talk.unreachable')
+  const key = err.reason && FAILURE_KEYS[err.reason]
+  return key ? t(key) : err.message
 }
 
 function shortDate(iso: string): string {
@@ -373,7 +385,14 @@ function turn(item: TurnItem): ReactNode {
     )
   return (
     <div key={item.key} className="turn system" role="alert">
-      <span>{item.text}</span>
+      {item.detail ? (
+        <details className="turn-why">
+          <summary>{item.text}</summary>
+          <code>{item.detail}</code>
+        </details>
+      ) : (
+        <span>{item.text}</span>
+      )}
       {item.hint && <span className="chat-hint">{item.hint}</span>}
     </div>
   )
@@ -722,6 +741,7 @@ export function Talk({
           key: nextKey(),
           text: errorText(err),
           hint: t('talk.backInComposer'),
+          detail: err instanceof ApiError ? err.detail : undefined,
         },
       ])
       setDraft(text)

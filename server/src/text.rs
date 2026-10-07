@@ -317,6 +317,80 @@ pub fn matrix_unreachable(l: Lang) -> String {
     l.pick("Couldn't reach Note right now.", "今はNoteにつながりません。")
 }
 
+/// Why a request failed, written: one short line with the fix where there is one.
+pub fn failure_reason(l: Lang, reason: crate::failure::Reason) -> String {
+    use crate::failure::Reason as R;
+    match reason {
+        R::ModelUnavailable => l.pick(
+            "The AI model isn't available. Check the model setting.",
+            "AIモデルが見つかりません。モデルの設定を確認してください。",
+        ),
+        R::AuthInvalid => l.pick(
+            "The AI service rejected the API key. Check the key.",
+            "AIサービスがAPIキーを受け付けません。キーを確認してください。",
+        ),
+        R::OutOfCredits => l.pick(
+            "The AI service is out of credits or over its spend limit.",
+            "AIサービスのクレジットが足りないか、利用上限に達しています。",
+        ),
+        R::RateLimited => l.pick(
+            "The AI service is getting too many requests. Try again in a minute.",
+            "AIサービスへのリクエストが多すぎます。少し待ってからもう一度どうぞ。",
+        ),
+        R::ProviderDown => l.pick(
+            "The AI service isn't responding. Try again shortly.",
+            "AIサービスが応答していません。しばらくしてからもう一度どうぞ。",
+        ),
+        R::ContextTooLong => l.pick(
+            "This conversation is too long for the model. Start a new one.",
+            "会話が長すぎてモデルが読み切れません。新しい会話を始めてください。",
+        ),
+        R::Refused => l.pick("The AI service declined this request.", "AIサービスがこのリクエストを断りました。"),
+        R::Internal => l.pick("Something went wrong inside Note.", "Noteの内部でエラーが起きました。"),
+    }
+}
+
+/// Why a reply failed, spoken in a call: one sentence.
+pub fn failure_spoken(l: Lang, reason: crate::failure::Reason) -> String {
+    use crate::failure::Reason as R;
+    match reason {
+        R::ModelUnavailable => l.pick(
+            "Sorry, the AI model isn't available right now; check the model setting.",
+            "すみません、AIモデルが見つかりません。設定を確認してください。",
+        ),
+        R::AuthInvalid => l.pick(
+            "Sorry, the AI service won't accept my key; check the API key.",
+            "すみません、AIサービスにキーが通りません。APIキーを確認してください。",
+        ),
+        R::OutOfCredits => l.pick(
+            "Sorry, the AI service has run out of credits.",
+            "すみません、AIサービスのクレジットが切れているみたいです。",
+        ),
+        R::RateLimited => l.pick(
+            "Sorry, the AI service is swamped; could you say that again in a moment?",
+            "すみません、AIサービスが混み合っています。少ししてからもう一度言ってもらえますか？",
+        ),
+        R::ProviderDown => l.pick(
+            "Sorry, the AI service isn't answering; could you say that again in a moment?",
+            "すみません、AIサービスから返事がありません。少ししてからもう一度言ってもらえますか？",
+        ),
+        R::ContextTooLong => l.pick(
+            "Sorry, this call has grown too long for me to follow; please call again.",
+            "すみません、話が長くなって追いきれなくなりました。かけ直してもらえますか？",
+        ),
+        R::Refused => l.pick(
+            "Sorry, the AI service won't answer that one.",
+            "すみません、その話にはAIサービスが答えてくれませんでした。",
+        ),
+        R::Internal => call_apology(l),
+    }
+}
+
+/// The title of a message telling the user that work in the background failed.
+pub fn failure_title(l: Lang) -> String {
+    l.pick("Note ran into a problem", "Noteで問題が起きました")
+}
+
 /// What a visitor on a share link is told once their message is filed.
 pub fn share_passed_on(l: Lang, owner: &str) -> String {
     match l {
@@ -392,10 +466,6 @@ pub fn err_at_capacity(l: Lang) -> String {
 
 pub fn err_reply_in_progress(l: Lang) -> String {
     l.pick("a reply is already in progress", "返信を作成中です")
-}
-
-pub fn err_assistant_unavailable(l: Lang) -> String {
-    l.pick("the assistant is unavailable; try again", "アシスタントが応答できません。もう一度どうぞ")
 }
 
 pub fn err_share_rate(l: Lang) -> String {
@@ -514,7 +584,7 @@ fn captures<'a>(pattern: &str, line: &'a str) -> Option<Vec<&'a str>> {
     for (i, lit) in rest.iter().enumerate() {
         let start = if i + 1 == rest.len() {
             let end = line.len().checked_sub(lit.len())?;
-            (end >= at && line[end..] == **lit).then_some(end)?
+            (end >= at && line.get(end..) == Some(*lit)).then_some(end)?
         } else if lit.is_empty() {
             return None;
         } else {
@@ -800,6 +870,7 @@ mod tests {
         assert_eq!(ja("external_id x already belongs to task 4"), "外部ID x はすでにタスク 4 に使われています");
         assert_eq!(ja("wrong password"), "パスワードが違います");
         assert_eq!(ja("something new and unknown"), "something new and unknown");
+        assert_eq!(ja("AIモデルが見つかりません。"), "AIモデルが見つかりません。", "a line already in Japanese passes through");
         assert_eq!(error_line(Lang::En, "wrong password"), "wrong password");
     }
 

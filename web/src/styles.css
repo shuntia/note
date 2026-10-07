@@ -709,6 +709,17 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
   font-size: 0.85rem;
 }
 .turn.system .chat-hint { color: var(--faint); }
+.turn-why summary { list-style: none; cursor: pointer; text-decoration: underline dotted; text-underline-offset: 3px; }
+.turn-why summary::-webkit-details-marker { display: none; }
+.turn-why code {
+  display: block;
+  margin-top: 4px;
+  max-width: 60ch;
+  color: var(--faint);
+  font-size: 0.75rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .turn.pending { align-self: flex-start; margin: 0; padding: 0 6px; font-size: 0.85rem; color: var(--faint); }
 /* the thinking line reads as muted text; the sweep only runs when motion is welcome */
 @media (prefers-reduced-motion: no-preference) {

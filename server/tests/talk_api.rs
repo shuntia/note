@@ -167,6 +167,61 @@ impl note_server::providers::LLMProvider for FailingLLM {
     }
 }
 
+/// The provider took the configured model down.
+struct RetiredModel;
+impl note_server::providers::LLMProvider for RetiredModel {
+    fn chat(
+        &self,
+        _: &note_server::providers::ChatRequest,
+    ) -> anyhow::Result<note_server::providers::ChatResponse> {
+        let body = r#"{"error":{"message":"No endpoints found for stealth/space-bunny-alpha.","code":404}}"#;
+        let message = format!("openai request failed: status 404: {body} at https://openrouter.ai/api/v1");
+        Err(note_server::providers::ProviderError::status(404, body, message).into())
+    }
+}
+
+async fn failed_talk(app: &axum::Router, cookie: &str, accept_language: &str) -> serde_json::Value {
+    let res = app
+        .clone()
+        .oneshot(
+            Request::post("/api/talk")
+                .header(header::COOKIE, cookie)
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::ACCEPT_LANGUAGE, accept_language)
+                .body(Body::from(r#"{"message":"hello"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_GATEWAY);
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    serde_json::from_slice(&body).unwrap()
+}
+
+#[tokio::test]
+async fn a_failed_turn_says_why_in_the_readers_language() {
+    let (app, admin, state, _cfg) =
+        common::app_with_logged_in_user_llm_and_state(Arc::new(RetiredModel)).await;
+    {
+        let conn = state.db.lock().unwrap();
+        note_server::auth::create_user(&conn, "bo", "pw", false).unwrap();
+    }
+    let member = common::login(&app, "bo", "pw").await;
+
+    let en = failed_talk(&app, &member, "en-US").await;
+    assert_eq!(en["reason"], "model_unavailable");
+    assert_eq!(en["error"], "The AI model isn't available. Check the model setting.");
+    assert!(en.get("detail").is_none(), "a member never sees the provider's words: {en}");
+
+    let ja = failed_talk(&app, &member, "ja-JP").await;
+    assert_eq!(ja["reason"], "model_unavailable");
+    assert_eq!(ja["error"], "AIモデルが見つかりません。モデルの設定を確認してください。");
+
+    let detail = failed_talk(&app, &admin, "en").await["detail"].as_str().unwrap().to_string();
+    assert!(detail.contains("No endpoints found for stealth/space-bunny-alpha."), "{detail}");
+    assert!(!detail.contains("openrouter.ai"), "URLs are masked: {detail}");
+}
+
 #[tokio::test]
 async fn provider_failure_is_bad_gateway_and_logged() {
     let (app, cookie, state, _cfg) =
@@ -184,7 +239,8 @@ async fn provider_failure_is_bad_gateway_and_logged() {
     assert_eq!(res.status(), StatusCode::BAD_GATEWAY);
     let body = res.into_body().collect().await.unwrap().to_bytes();
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert!(v["error"].as_str().unwrap().contains("unavailable"));
+    assert_eq!(v["reason"], "internal");
+    assert_eq!(v["error"], "Something went wrong inside Note.");
 
     let logged: i64 = {
         let conn = state.db.lock().unwrap();

@@ -386,6 +386,17 @@ export type AdminLog = { rows: LogRow[]; kinds: string[] }
 
 export type TraceOutcome = 'ok' | 'max_turns' | 'error'
 
+// Why the assistant could not finish a request; the server's `failure::Reason`.
+export type FailureReason =
+  | 'model_unavailable'
+  | 'auth_invalid'
+  | 'out_of_credits'
+  | 'rate_limited'
+  | 'provider_down'
+  | 'context_too_long'
+  | 'refused'
+  | 'internal'
+
 // `error` carries the failure only when `outcome` is 'error'.
 export type TraceRow = {
   id: number

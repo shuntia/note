@@ -298,6 +298,7 @@ pub fn run_for_user(
     let kept = match remember(deps, user_id, username, tz, &date, now) {
         Ok(lines) => lines,
         Err(e) => {
+            crate::failure::noted(&e);
             let conn = crate::db_guard(deps.db);
             let _ = crate::log::record_throttled(
                 &conn,
@@ -350,6 +351,7 @@ pub fn run_for_user(
                 out.steps.iter().filter(|s| s.name == "memory_write" && !s.is_error).count() as i64
             }
             Err(e) => {
+                crate::failure::noted(&e);
                 let conn = crate::db_guard(deps.db);
                 let _ = crate::log::record_throttled(
                     &conn,

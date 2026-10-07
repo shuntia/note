@@ -1,4 +1,5 @@
-use super::{ChatRequest, ChatResponse, EmbeddingsProvider, FirstTokenTimeout, LLMProvider, StreamOpts, StreamSink, ToolCall};
+use super::{ChatRequest, ChatResponse, EmbeddingsProvider, FirstTokenTimeout, LLMProvider, ProviderError, StreamOpts, StreamSink, ToolCall};
+use crate::failure::Reason;
 use anyhow::{Context, Result};
 use std::io::BufRead;
 use std::sync::mpsc;
@@ -102,7 +103,7 @@ impl OpenAILLM {
         if !resp.status().is_success() {
             let code = resp.status().as_u16();
             let head: String = resp.body_mut().read_to_string().unwrap_or_default().chars().take(300).collect();
-            anyhow::bail!("openai stream request failed: status {code}: {head}");
+            return Err(ProviderError::status(code, &head, format!("openai stream request failed: status {code}: {head}")).into());
         }
         read_stream(&spawn_line_reader(resp.into_body()), started, opts.first_token, STALL, sink)
     }
@@ -259,7 +260,9 @@ fn read_stream(
         let line = if heard {
             match lines.recv_timeout(stall) {
                 Ok(line) => line,
-                Err(mpsc::RecvTimeoutError::Timeout) => anyhow::bail!("openai stream stalled for {stall:?}"),
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    return Err(ProviderError::new(Reason::ProviderDown, format!("openai stream stalled for {stall:?}")).into());
+                }
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
         } else {
@@ -269,7 +272,7 @@ fn read_stream(
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
         };
-        let line = line.context("reading the openai stream")?;
+        let line = line.map_err(|e| ProviderError::new(Reason::ProviderDown, format!("reading the openai stream: {e}")))?;
         let Some(data) = line.strip_prefix("data:").map(str::trim) else { continue };
         if data == "[DONE]" {
             done = true;
@@ -278,7 +281,9 @@ fn read_stream(
         let event: serde_json::Value =
             serde_json::from_str(data).with_context(|| format!("openai stream event {data:?}"))?;
         if let Some(err) = event.get("error") {
-            anyhow::bail!("openai stream failed: {err}");
+            let code = err["code"].as_u64().and_then(|c| u16::try_from(c).ok());
+            let reason = crate::failure::classify(code, &err.to_string());
+            return Err(ProviderError::new(reason, format!("openai stream failed: {err}")).into());
         }
         let delta = &event["choices"][0]["delta"];
         let text = content_text(&delta["content"]);
@@ -311,7 +316,9 @@ fn read_stream(
             call.args.push_str(&tool_args(&piece["function"]["arguments"]));
         }
     }
-    anyhow::ensure!(done || heard, "openai stream ended before any reply");
+    if !(done || heard) {
+        return Err(ProviderError::new(Reason::ProviderDown, "openai stream ended before any reply").into());
+    }
     if let Some((_, call)) = pending {
         complete_call(call, &mut resp, sink);
     }

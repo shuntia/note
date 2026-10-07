@@ -1,6 +1,6 @@
 mod common;
 
-use note_server::providers::{mock::MockLLM, ChatResponse};
+use note_server::providers::{mock::MockLLM, ChatRequest, ChatResponse, LLMProvider, ProviderError};
 use note_server::{auth, db, AppState};
 use std::sync::Arc;
 
@@ -29,7 +29,7 @@ fn sync(next: &str, messages: &[(&str, &str, &str)]) -> String {
 }
 
 /// A Matrix-configured server with `aki` linked as `@aki:t` in `!dm:t`, its link in `link_state`.
-fn rig(llm: Arc<MockLLM>, link_state: &str) -> (AppState, common::Fake, tempfile::TempDir) {
+fn rig(llm: Arc<dyn LLMProvider>, link_state: &str) -> (AppState, common::Fake, tempfile::TempDir) {
     let fake = common::fake_http();
     fake.answer(WHOAMI);
     let cfg = common::config_dir();
@@ -98,6 +98,30 @@ async fn a_message_from_the_linked_account_is_answered_in_its_dm() {
         .query_row("SELECT via, matrix_at IS NOT NULL FROM conversations", [], |r| Ok((r.get(0)?, r.get(1)?)))
         .unwrap();
     assert_eq!((via.as_str(), stamped), ("matrix", true));
+}
+
+struct OutOfCredits;
+impl LLMProvider for OutOfCredits {
+    fn chat(&self, _: &ChatRequest) -> anyhow::Result<ChatResponse> {
+        let body = r#"{"error":{"message":"This request requires more credits, or fewer max_tokens.","code":402}}"#;
+        Err(ProviderError::status(402, body, format!("openai request failed: status 402: {body}")).into())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_turn_is_answered_with_its_reason() {
+    let (state, fake, _cfg) = rig(Arc::new(OutOfCredits), "linked");
+    caught_up(&state);
+    fake.answer(&sync("s1", &[("!dm:t", "@aki:t", "hello")]));
+    fake.answer(SENT);
+    let mut rooms = note_server::matrix::Rooms::default();
+    note_server::matrix::poll_once(&state, &mut rooms).await.unwrap();
+    fake.took();
+    let sent = fake.took();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(sent.split_once("\r\n\r\n").unwrap().1).unwrap(),
+        serde_json::json!({ "msgtype": "m.text", "body": "The AI service is out of credits or over its spend limit." })
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

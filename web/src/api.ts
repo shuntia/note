@@ -12,6 +12,7 @@ import type {
   Carried,
   Conversation,
   DayView,
+  FailureReason,
   FlattenResult,
   Goal,
   GoalState,
@@ -139,10 +140,14 @@ type TaskPatch = {
   goal_id?: number | null
 }
 
+// `reason` says why the assistant could not answer; `detail` is the provider's
+// own words, sent to admins only.
 export class ApiError extends Error {
   constructor(
     public status: number,
     message: string,
+    public reason?: FailureReason,
+    public detail?: string,
   ) {
     super(message)
   }
@@ -174,20 +179,20 @@ async function request<T>(path: string, init?: Options): Promise<T> {
   if (!res.ok) {
     if (res.status === 401 && path !== '/api/login' && !quiet401) onUnauthorized?.()
     let message = t('api.failed', { status: res.status })
+    let reason: FailureReason | undefined
+    let detail: string | undefined
     try {
       const body: unknown = await res.json()
-      if (
-        typeof body === 'object' &&
-        body !== null &&
-        'error' in body &&
-        typeof (body as { error: unknown }).error === 'string'
-      ) {
-        message = (body as { error: string }).error
+      if (typeof body === 'object' && body !== null) {
+        const fields = body as { error?: unknown; reason?: unknown; detail?: unknown }
+        if (typeof fields.error === 'string') message = fields.error
+        if (typeof fields.reason === 'string') reason = fields.reason as FailureReason
+        if (typeof fields.detail === 'string') detail = fields.detail
       }
     } catch {
       // no JSON body on this error
     }
-    throw new ApiError(res.status, message)
+    throw new ApiError(res.status, message, reason, detail)
   }
   const text = await res.text()
   return (text ? JSON.parse(text) : undefined) as T
