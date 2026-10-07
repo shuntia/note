@@ -215,34 +215,23 @@ const TABLE: Record<string, Receipt> = {
     failed: 'receipt.taskBulk.failed',
   },
 
-  note_add: {
-    doing: 'receipt.noteAdd.doing',
+  note_write: {
+    doing: 'receipt.noteWrite.doing',
     done: (a) => {
-      const text = str(a, 'text')
-      return text ? t('receipt.noteAdd.doneText', { text: clip(text) }) : t('receipt.noteAdd.done')
+      const title = str(a, 'title')
+      switch (str(a, 'op')) {
+        case 'add':
+          return title ? t('receipt.noteWrite.addedText', { text: clip(title) }) : t('receipt.noteWrite.added')
+        case 'update':
+          return title ? t('receipt.noteWrite.changed', { text: clip(title) }) : t('receipt.noteWrite.updated')
+        case 'remove':
+          return t('receipt.noteWrite.removed')
+        case 'keep':
+          return t('receipt.noteWrite.kept')
+      }
+      return t('receipt.noteWrite.updated')
     },
-    failed: 'receipt.noteAdd.failed',
-  },
-  note_update: {
-    doing: 'receipt.noteUpdate.doing',
-    done: (a) => {
-      const pinned = flag(a, 'pinned')
-      if (pinned === true) return t('receipt.noteUpdate.pinned')
-      if (pinned === false) return t('receipt.noteUpdate.unpinned')
-      const text = str(a, 'text')
-      return text ? t('receipt.noteUpdate.changed', { text: clip(text) }) : t('receipt.noteUpdate.done')
-    },
-    failed: 'receipt.noteUpdate.failed',
-  },
-  note_done: {
-    doing: 'receipt.noteDone.doing',
-    done: 'receipt.noteDone.done',
-    failed: 'receipt.noteDone.failed',
-  },
-  note_list: {
-    doing: 'receipt.noteList.doing',
-    done: 'receipt.noteList.done',
-    failed: 'receipt.noteList.failed',
+    failed: 'receipt.noteWrite.failed',
   },
 
   plan_tasks: {

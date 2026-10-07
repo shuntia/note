@@ -3,17 +3,16 @@ import { doing, receipt } from './receipts'
 
 describe('note receipts', () => {
   test('adding quotes the note', () => {
-    expect(doing('note_add', '{"text":"call the bank"}')).toBe('Adding a note')
-    expect(receipt('note_add', '{"text":"call the bank"}', false)).toBe('Noted “call the bank”')
+    expect(doing('note_write', '{"op":"add","title":"call the bank"}')).toBe('Writing a note')
+    expect(receipt('note_write', '{"op":"add","title":"call the bank"}', false)).toBe('Noted “call the bank”')
   })
   test('an update says what changed', () => {
-    expect(receipt('note_update', '{"note_id":1,"pinned":true}', false)).toBe('Pinned a note')
-    expect(receipt('note_update', '{"note_id":1,"pinned":false}', false)).toBe('Unpinned a note')
-    expect(receipt('note_update', '{"note_id":1,"text":"milk"}', false)).toBe('Changed a note to “milk”')
+    expect(receipt('note_write', '{"op":"update","id":"x","title":"milk"}', false)).toBe('Changed a note to “milk”')
+    expect(receipt('note_write', '{"op":"update","id":"x","until":""}', false)).toBe('Updated a note')
   })
-  test('done, list and failures read plainly', () => {
-    expect(receipt('note_done', '{"note_id":1}', false)).toBe('Checked off a note')
-    expect(receipt('note_list', '{}', false)).toBe('Read your notes')
-    expect(receipt('note_add', '{"text":""}', true)).toBe("Couldn't add that note")
+  test('keep, remove and failures read plainly', () => {
+    expect(receipt('note_write', '{"op":"keep","id":"x"}', false)).toBe('Kept a note')
+    expect(receipt('note_write', '{"op":"remove","id":"x"}', false)).toBe('Cleared a note')
+    expect(receipt('note_write', '{"op":"add","title":""}', true)).toBe("Couldn't change that note")
   })
 })

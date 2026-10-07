@@ -322,7 +322,7 @@ const TASK_WRITE: &[&str] = &["task_create", "task_update", "task_split", "task_
 const TASK_BULK: &[&str] = &["task_bulk_update"];
 const GOALS_WRITE: &[&str] = &["goal_create", "goal_update"];
 const GOALS_READ: &[&str] = &["goal_list"];
-const NOTES: &[&str] = &["note_add", "note_update", "note_done", "note_list"];
+const NOTES: &[&str] = &["note_write"];
 const PLAN_READ: &[&str] = &["plan_list"];
 const PLAN_LAY: &[&str] = &["plan_tasks", "plan_auto"];
 /// Moving the rest of a day to the next is the user's call, so it lives only
@@ -716,25 +716,15 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
              how to check a goal's remaining tasks against its date.",
             schema::<goal_ops::ListArgs>(),
         ),
-        "note_add" => (
-            "Add a line to your scratchpad: your own working context, one line each — something \
-             to raise later, a pattern you noticed, a loose end. The user never sees it; every \
-             session you run reads it. Anything the user has to do is a task instead.",
-            schema::<note_ops::AddArgs>(),
-        ),
-        "note_update" => (
-            "Reword a scratchpad line or pin it. Pinned lines stay at the top and are never \
-             raised when the user goes idle.",
-            schema::<note_ops::UpdateArgs>(),
-        ),
-        "note_done" => (
-            "Clear a scratchpad line once it no longer matters.",
-            schema::<note_ops::DoneArgs>(),
-        ),
-        "note_list" => (
-            "Read the whole scratchpad, pinned first, each line with when it was added and \
-             when it was last raised.",
-            schema::<note_ops::ListArgs>(),
+        "note_write" => (
+            "Your working memory: the notes every session and call reads, one short line each \
+             that makes sense on its own (at most 80 characters). op add writes one — give it \
+             from and until when it belongs to a stretch of time; update rewords it or moves its \
+             window (an empty from or until clears it); keep says it still matters; remove \
+             deletes it once it no longer does. Anything that needs more words is a \
+             memory_write, and the note may name that memory's id. The user never sees these; \
+             anything they have to do is a task.",
+            schema::<note_ops::WriteArgs>(),
         ),
         "plan_tasks" => (
             "Lay tasks out as consecutive blocks of time on one day's plan — this is how \
@@ -999,10 +989,7 @@ fn run(
         "goal_create" => goal_ops::create(conn, ctx, parse(raw)?),
         "goal_update" => goal_ops::update(conn, ctx, parse(raw)?),
         "goal_list" => goal_ops::list(conn, ctx, &parse(raw)?),
-        "note_add" => note_ops::add(conn, ctx, parse(raw)?),
-        "note_update" => note_ops::update(conn, ctx, parse(raw)?),
-        "note_done" => note_ops::done(conn, ctx, &parse(raw)?),
-        "note_list" => note_ops::list(conn, ctx, parse(raw)?),
+        "note_write" => note_ops::write(conn, ctx, &parse(raw)?),
         "plan_tasks" => plan_ops::plan_tasks(conn, ctx, &parse(raw)?),
         "plan_auto" => plan_ops::plan_auto(conn, ctx, parse(raw)?),
         "plan_carry" => plan_ops::plan_carry(conn, ctx, parse(raw)?),

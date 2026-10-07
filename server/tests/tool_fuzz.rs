@@ -33,7 +33,7 @@ fn setup() -> (rusqlite::Connection, tempfile::TempDir) {
 }
 
 fn snapshot(conn: &rusqlite::Connection) -> Vec<i64> {
-    ["users", "tasks", "plans", "events", "memory_index", "notes"]
+    ["users", "tasks", "plans", "events", "memory_index"]
         .iter()
         .map(|t| {
             conn.query_row(&format!("SELECT COUNT(*) FROM {t}"), [], |r| r.get(0)).unwrap()
@@ -89,8 +89,7 @@ fn arb_name() -> impl Strategy<Value = String> {
             Just("trigger_set".to_string()), Just("wait_until".to_string()),
             Just("wait_for".to_string()), Just("trigger_budget".to_string()),
             Just("say".to_string()), Just("stay_quiet".to_string()),
-            Just("note_add".to_string()), Just("note_update".to_string()),
-            Just("note_done".to_string()), Just("note_list".to_string()),
+            Just("note_write".to_string()),
         ],
         1 => "[a-z_]{1,20}",
         1 => ".*",
@@ -124,7 +123,7 @@ fn arb_args() -> impl Strategy<Value = String> {
         Just(r#"{"task_id":1,"event_id":2,"until":"+90min","prompt":"x"}"#.to_string()),
         Just(r#"{"extra":9223372036854775807,"reason":"x"}"#.to_string()),
         Just(r#"{"text":"anything at all"}"#.to_string()),
-        Just(r#"{"note_id":1,"pinned":true}"#.to_string()),
+        Just(r#"{"op":"keep","id":"00000000-0000-4000-8000-000000000001"}"#.to_string()),
         Just(format!(r#"{{"text":"{}"}}"#, "あ".repeat(201))),
         Just(format!(r#"{{"title":"{}"}}"#, "x".repeat(MAX_ARGS_BYTES))),
         Just(r#"{"title":"a real task"}"#.to_string()),
@@ -147,8 +146,7 @@ fn arb_call() -> impl Strategy<Value = (String, String)> {
             good("task_create", r#"{"title":"a quiet task","notify":"none"}"#),
             good("memory_write", r#"{"op":"add","category":"semantic","summary":"s","body":"b"}"#),
             good("memory_query", r#"{"query":"s"}"#),
-            good("note_add", r#"{"text":"buy stamps"}"#),
-            good("note_list", "{}"),
+            good("note_write", r#"{"op":"add","title":"buy stamps"}"#),
             good("schedule_snooze", r#"{"event_id":1,"minutes":10}"#),
             good("schedule_drop", r#"{"event_id":1}"#),
             good("schedule_slide", r#"{"event_id":2,"minutes":10}"#),

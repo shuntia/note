@@ -124,6 +124,12 @@ pub fn write(
         if !crate::memory::valid_id(&id) {
             return Err(ToolError::rejected("malformed memory id"));
         }
+        if crate::notes::get(ctx.data_dir, ctx.username, &id)
+            .map_err(|e| ToolError::internal(e.to_string()))?
+            .is_some()
+        {
+            return Err(ToolError::rejected("that id is a working note; use note_write"));
+        }
         Ok(id)
     };
     match args.op {
@@ -318,5 +324,17 @@ mod tests {
         let e = dispatch(&conn, &ctx(&tmp), SessionKind::Checkin, "memory_write",
             r#"{"op":"update","id":"00000000-0000-4000-8000-000000000000","summary":"s","body":"b"}"#).unwrap_err();
         assert_eq!(e.kind, "not_found");
+    }
+
+    #[test]
+    fn memory_write_leaves_working_notes_to_note_write() {
+        let (conn, tmp) = env();
+        let n = crate::notes::add(&conn, tmp.path(), "aki", "call the bank", None, None, jiff::Timestamp::now()).unwrap();
+        for op in ["update", "supersede"] {
+            let args = format!(r#"{{"op":"{op}","id":"{}","summary":"s","body":"b"}}"#, n.id);
+            let e = dispatch(&conn, &ctx(&tmp), SessionKind::Checkin, "memory_write", &args).unwrap_err();
+            assert_eq!(e.kind, "rejected", "{op}");
+        }
+        assert_eq!(crate::notes::get(tmp.path(), "aki", &n.id).unwrap().unwrap().title, "call the bank");
     }
 }
