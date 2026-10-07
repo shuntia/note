@@ -145,7 +145,7 @@ async fn opening(
                 Err(Some("model is still loading".into()))
             }
             Ok(Incoming::Open { voice }) => {
-                let id = voice.unwrap_or_else(|| VOICES[0].id.into());
+                let id = voice.filter(|v| !v.is_empty()).unwrap_or_else(|| VOICES[0].id.into());
                 VOICES
                     .iter()
                     .find(|v| v.id == id)
