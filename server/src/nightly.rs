@@ -2,6 +2,7 @@ use crate::agent::SessionDeps;
 use crate::config::{Features, UserConfig};
 use anyhow::Result;
 use rusqlite::Connection;
+use std::fmt::Write as _;
 use std::path::Path;
 
 /// The run's last step: yesterday's notes stay in place when it never happens.
@@ -50,9 +51,6 @@ pub fn run_for_user(
         }
         if let Err(e) = crate::memory::archive_expired(&conn, deps.data_dir, username, local.date()) {
             let _ = crate::log::record(&conn, Some(user_id), "memory_expire_error", &format!("{e:#}"));
-        }
-        if let Err(e) = crate::legacy_notes::purge_done(&conn, user_id, now) {
-            let _ = crate::log::record(&conn, Some(user_id), "notes_purge_error", &format!("{e:#}"));
         }
     }
     let mut report = Report::new(date);
@@ -130,6 +128,15 @@ fn run_stages(
     };
     report.stage("close_day", at, closed.as_ref().err().inspect(|e| note("close_day_error", e)));
 
+    let lang = crate::text::Lang::for_user(deps.config_dir, username);
+    let mut opening = crate::model_text::nightly_opening(lang, date);
+    let due = crate::notes::due_to_settle(deps.data_dir, username, now).unwrap_or_default();
+    if !due.is_empty() {
+        opening.push_str(crate::model_text::notes_to_settle(lang));
+        for n in &due {
+            let _ = writeln!(opening, "- {}: {}", n.id, n.title);
+        }
+    }
     let at = std::time::Instant::now();
     let outcome = crate::agent::run_session(
         deps,
@@ -138,10 +145,16 @@ fn run_stages(
         crate::tools::SessionKind::Nightly,
         now,
         &[],
-        &crate::model_text::nightly_opening(crate::text::Lang::for_user(deps.config_dir, username), date),
+        &opening,
     );
     report.stage("session", at, outcome.as_ref().err());
-    let fallback = crate::text::fallback_debrief(crate::text::Lang::for_user(deps.config_dir, username));
+    let at = std::time::Instant::now();
+    let settled = {
+        let conn = crate::db_guard(deps.db);
+        crate::notes::settle_leftovers(&conn, deps.data_dir, username, now)
+    };
+    report.stage("notes", at, settled.as_ref().err().inspect(|e| note("notes_settle_error", e)));
+    let fallback = crate::text::fallback_debrief(lang);
     let content = match outcome {
         Ok(out) => {
             if !out.steps.iter().any(|s| s.name == NOTES_TOOL && !s.is_error) {
@@ -586,7 +599,7 @@ mod tests {
         assert_eq!(
             without_timings(&line),
             "2026-08-31: harvest=ok, review=ok, learn=ok, plan=ok, allocate=ok, close_day=ok, \
-             session=ok, debrief=written"
+             session=ok, notes=ok, debrief=written"
         );
         assert_ne!(line, without_timings(&line), "every stage carries its own seconds");
     }
@@ -777,32 +790,91 @@ mod tests {
         );
         assert_eq!(missing_rows(&db.lock().unwrap()), 1);
     }
+
     #[test]
-    fn the_nightly_run_deletes_notes_done_over_a_week_ago() {
+    fn the_nightly_run_settles_due_notes_and_keeps_the_rest_word_for_word() {
         let (db, tmp) = env("UTC", "03:00");
-        let llm = MockLLM::scripted(vec![ChatResponse { text: "ok".into(), tool_calls: vec![] }]);
-        {
-            let conn = db.lock().unwrap();
-            for (text, done) in [
-                ("open", None),
-                ("done lately", Some("2026-08-24T04:00:00Z")),
-                ("done long ago", Some("2026-08-24T03:59:59Z")),
-            ] {
-                conn.execute(
-                    "INSERT INTO notes (user_id, text, created_at, done_at)
-                     VALUES (1, ?1, '2026-08-01T00:00:00Z', ?2)",
-                    (text, done),
-                )
-                .unwrap();
-            }
-        }
         let now: jiff::Timestamp = "2026-08-31T04:00:00Z".parse().unwrap();
+        let (ended, stale, left, fresh) = {
+            let conn = db.lock().unwrap();
+            let add = |title: &str, until: Option<&str>, made: &str| {
+                crate::notes::add(&conn, tmp.path(), "aki", title, None, until.map(str::to_owned), made.parse().unwrap())
+                    .unwrap()
+                    .id
+            };
+            (
+                add("dentist at three", Some("2026-08-30T07:00:00Z"), "2026-08-30T00:00:00Z"),
+                add("milk", None, "2026-08-27T00:00:00Z"),
+                add("asked about the essay twice", None, "2026-08-27T00:00:00Z"),
+                add("sat score lands friday", None, "2026-08-30T00:00:00Z"),
+            )
+        };
+        let llm = MockLLM::scripted(vec![
+            ChatResponse {
+                text: String::new(),
+                tool_calls: vec![
+                    ToolCall {
+                        id: "1".into(),
+                        name: "note_settle".into(),
+                        args: format!(r#"{{"id":"{ended}","outcome":"memory","summary":"saw the dentist on 2026-08-30"}}"#),
+                    },
+                    ToolCall {
+                        id: "2".into(),
+                        name: "note_settle".into(),
+                        args: format!(r#"{{"id":"{stale}","outcome":"drop"}}"#),
+                    },
+                ],
+            },
+            ChatResponse { text: "good morning".into(), tool_calls: vec![] },
+        ]);
         run_for_user(&deps(&db, &tmp, &llm), 1, "aki", now).unwrap();
 
+        let opening = format!("{:?}", llm.seen()[0].messages.last().unwrap());
+        for id in [&ended, &stale, &left] {
+            assert!(opening.contains(id.as_str()), "{opening}");
+        }
+        assert!(!opening.contains(fresh.as_str()), "{opening}");
+
+        let remaining: Vec<String> =
+            crate::notes::all(tmp.path(), "aki").unwrap().into_iter().map(|n| n.id).collect();
+        assert_eq!(remaining, vec![fresh]);
         let conn = db.lock().unwrap();
-        let mut stmt = conn.prepare("SELECT text FROM notes ORDER BY id").unwrap();
-        let left: Vec<String> =
-            stmt.query_map([], |r| r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
-        assert_eq!(left, ["open", "done lately"]);
+        let mut kept: Vec<(String, String)> = crate::memory::list(&conn, "aki", None, 10)
+            .unwrap()
+            .into_iter()
+            .map(|h| (h.category, h.summary))
+            .collect();
+        kept.sort();
+        assert_eq!(
+            kept,
+            vec![
+                ("episodic".to_string(), "saw the dentist on 2026-08-30".to_string()),
+                ("semantic".to_string(), "asked about the essay twice".to_string()),
+            ]
+        );
+        assert!(nightly_run_row(&conn).contains("notes=ok"));
+    }
+
+    #[test]
+    fn a_failed_session_still_keeps_due_notes_as_memories() {
+        struct Failing;
+        impl crate::providers::LLMProvider for Failing {
+            fn chat(
+                &self,
+                _: &crate::providers::ChatRequest,
+            ) -> anyhow::Result<crate::providers::ChatResponse> {
+                anyhow::bail!("down")
+            }
+        }
+        let (db, tmp) = env("UTC", "03:00");
+        {
+            let conn = db.lock().unwrap();
+            crate::notes::add(&conn, tmp.path(), "aki", "milk", None, None, "2026-08-27T00:00:00Z".parse().unwrap())
+                .unwrap();
+        }
+        run_for_user(&deps(&db, &tmp, &Failing), 1, "aki", "2026-08-31T04:00:00Z".parse().unwrap()).unwrap();
+        assert!(crate::notes::all(tmp.path(), "aki").unwrap().is_empty());
+        let conn = db.lock().unwrap();
+        assert_eq!(crate::memory::list(&conn, "aki", None, 10).unwrap()[0].summary, "milk");
     }
 }

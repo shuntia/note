@@ -323,6 +323,8 @@ const TASK_BULK: &[&str] = &["task_bulk_update"];
 const GOALS_WRITE: &[&str] = &["goal_create", "goal_update"];
 const GOALS_READ: &[&str] = &["goal_list"];
 const NOTES: &[&str] = &["note_write"];
+/// Settling working memory into long-term memory is the nightly run's job.
+const NOTE_SETTLE: &[&str] = &["note_settle"];
 const PLAN_READ: &[&str] = &["plan_list"];
 const PLAN_LAY: &[&str] = &["plan_tasks", "plan_auto"];
 /// Moving the rest of a day to the next is the user's call, so it lives only
@@ -364,6 +366,7 @@ const DOMAINS: &[&[&str]] = &[
     GOALS_WRITE,
     GOALS_READ,
     NOTES,
+    NOTE_SETTLE,
     PLAN_READ,
     PLAN_LAY,
     PLAN_CARRY,
@@ -460,6 +463,7 @@ const NIGHTLY: &[&str] = registry_of![
     GOALS_WRITE,
     GOALS_READ,
     NOTES,
+    NOTE_SETTLE,
     PLAN_READ,
     PLAN_LAY,
     SCHEDULE,
@@ -715,6 +719,14 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
              it, how many of those are done, and the unfinished one that falls due next. This is \
              how to check a goal's remaining tasks against its date.",
             schema::<goal_ops::ListArgs>(),
+        ),
+        "note_settle" => (
+            "Settle one working note the opening lists as due. outcome memory turns it into a \
+             long-term memory — episodic by default for a note with a time window, semantic \
+             otherwise; summary and body may rewrite it so it reads on its own later — and \
+             removes the note; outcome drop removes it. A due note you leave is kept as a memory \
+             word for word.",
+            schema::<note_ops::SettleArgs>(),
         ),
         "note_write" => (
             "Your working memory: the notes every session and call reads, one short line each \
@@ -989,6 +1001,7 @@ fn run(
         "goal_create" => goal_ops::create(conn, ctx, parse(raw)?),
         "goal_update" => goal_ops::update(conn, ctx, parse(raw)?),
         "goal_list" => goal_ops::list(conn, ctx, &parse(raw)?),
+        "note_settle" => note_ops::settle(conn, ctx, &parse(raw)?),
         "note_write" => note_ops::write(conn, ctx, &parse(raw)?),
         "plan_tasks" => plan_ops::plan_tasks(conn, ctx, &parse(raw)?),
         "plan_auto" => plan_ops::plan_auto(conn, ctx, parse(raw)?),
@@ -1797,5 +1810,17 @@ mod tests {
         let e = dispatch(&conn, &sctx, SessionKind::Share, "share_note", r#"{"text":"   "}"#).unwrap_err();
         assert_eq!(e.kind, "rejected");
         assert_eq!(crate::shares::messages(&conn, thread).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn note_settle_belongs_to_the_nightly_run_alone() {
+        assert!(registry(SessionKind::Nightly).contains(&"note_settle"));
+        for kind in KINDS.into_iter().filter(|k| *k != SessionKind::Nightly) {
+            assert!(!registry(kind).contains(&"note_settle"), "{kind:?} reaches note_settle");
+        }
+        let (conn, tmp) = env();
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "note_settle",
+            r#"{"id":"00000000-0000-4000-8000-000000000001","outcome":"drop"}"#).unwrap_err();
+        assert_eq!(e.kind, "forbidden");
     }
 }

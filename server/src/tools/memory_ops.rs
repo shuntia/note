@@ -3,7 +3,7 @@ use rusqlite::Connection;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-const MAX_SUMMARY: usize = 200;
+pub(super) const MAX_SUMMARY: usize = 200;
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -75,7 +75,7 @@ pub enum Category {
 }
 
 impl Category {
-    fn as_str(&self) -> &'static str {
+    pub(super) fn as_str(&self) -> &'static str {
         match self {
             Category::Semantic => "semantic",
             Category::Episodic => "episodic",

@@ -1,5 +1,5 @@
 use super::{ToolCtx, ToolError};
-use crate::notes::{Change, NoteError};
+use crate::notes::{Change, NoteError, Outcome};
 use rusqlite::Connection;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -95,6 +95,56 @@ pub fn write(conn: &Connection, ctx: &ToolCtx, args: &WriteArgs) -> Result<serde
             Ok(serde_json::json!({ "id": id, "kept": true }))
         }
     }
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SettleOutcome {
+    Memory,
+    Drop,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SettleArgs {
+    pub id: String,
+    pub outcome: SettleOutcome,
+    /// For memory: episodic by default for a note with a time window, semantic otherwise.
+    pub category: Option<super::memory_ops::Category>,
+    /// For memory: the fact's one line; the note's title when left out.
+    pub summary: Option<String>,
+    /// For memory: what the fact says beyond its summary.
+    pub body: Option<String>,
+}
+
+pub fn settle(conn: &Connection, ctx: &ToolCtx, args: &SettleArgs) -> Result<serde_json::Value, ToolError> {
+    if !crate::memory::valid_id(&args.id) {
+        return Err(ToolError::rejected("malformed note id"));
+    }
+    let outcome = match args.outcome {
+        SettleOutcome::Drop => {
+            if args.category.is_some() || args.summary.is_some() || args.body.is_some() {
+                return Err(ToolError::rejected("category, summary and body go with outcome memory"));
+            }
+            Outcome::Drop
+        }
+        SettleOutcome::Memory => {
+            let max = super::memory_ops::MAX_SUMMARY;
+            if args.summary.as_deref().is_some_and(|s| s.trim().is_empty() || s.len() > max) {
+                return Err(ToolError::rejected(format!("summary must be 1..={max} bytes")));
+            }
+            if let Some(body) = &args.body {
+                super::check_text("body", body)?;
+            }
+            Outcome::Memory {
+                category: args.category.as_ref().map(super::memory_ops::Category::as_str),
+                summary: args.summary.as_deref(),
+                body: args.body.as_deref(),
+            }
+        }
+    };
+    let memory_id = crate::notes::settle(conn, ctx.data_dir, ctx.username, &args.id, &outcome).map_err(note_error)?;
+    Ok(serde_json::json!({ "id": args.id, "memory_id": memory_id }))
 }
 
 #[cfg(test)]
@@ -198,5 +248,26 @@ mod tests {
         ] {
             assert!(!registry(kind).contains(&"note_write"), "note_write reached {kind:?}");
         }
+    }
+
+    #[test]
+    fn note_settle_keeps_or_drops_a_note_and_refuses_a_mixed_drop() {
+        let (conn, tmp) = env();
+        let nightly = |args: &str| dispatch(&conn, &ctx(&tmp, 1), SessionKind::Nightly, "note_settle", args);
+        let add = |title: &str| {
+            call(&conn, &tmp, &format!(r#"{{"op":"add","title":"{title}"}}"#))["id"].as_str().unwrap().to_string()
+        };
+        let kept = add("prefers short check-ins");
+        let out = nightly(&format!(r#"{{"id":"{kept}","outcome":"memory","category":"procedural"}}"#)).unwrap();
+        let f = crate::memory::read(tmp.path(), "aki", out["memory_id"].as_str().unwrap()).unwrap().unwrap();
+        assert_eq!((f.category.as_str(), f.summary.as_str()), ("procedural", "prefers short check-ins"));
+
+        let dropped = add("milk");
+        assert_eq!(nightly(&format!(r#"{{"id":"{dropped}","outcome":"drop","summary":"x"}}"#)).unwrap_err().kind, "rejected");
+        assert_eq!(nightly(&format!(r#"{{"id":"{dropped}","outcome":"memory","summary":" "}}"#)).unwrap_err().kind, "rejected");
+        assert!(nightly(&format!(r#"{{"id":"{dropped}","outcome":"drop"}}"#)).unwrap()["memory_id"].is_null());
+        assert!(crate::notes::all(tmp.path(), "aki").unwrap().is_empty());
+        assert_eq!(nightly(&format!(r#"{{"id":"{dropped}","outcome":"drop"}}"#)).unwrap_err().kind, "not_found");
+        assert_eq!(nightly(r#"{"id":"nope","outcome":"drop"}"#).unwrap_err().kind, "rejected");
     }
 }

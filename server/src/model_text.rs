@@ -461,6 +461,13 @@ pub fn title_assistant(l: Lang) -> &'static str {
 
 // --- background sessions' openings ---
 
+pub fn notes_to_settle(l: Lang) -> &'static str {
+    l.of(
+        "\n\nWorking notes due to settle tonight, each with note_settle (id: title):\n",
+        "\n\n今夜 note_settle で一つずつ片付ける作業メモ（id: 内容）:\n",
+    )
+}
+
 pub fn nightly_opening(l: Lang, date: jiff::civil::Date) -> String {
     match l {
         Lang::En => format!("Nightly run for {date}."),
@@ -842,10 +849,10 @@ mod tests {
     /// translation; every pair here must differ.
     #[test]
     fn every_fixed_line_has_its_own_japanese() {
-        let pairs: [fn(Lang) -> &'static str; 13] = [
+        let pairs: [fn(Lang) -> &'static str; 14] = [
             call_briefly, no_standing, standing_heading, now_heading, plan_heading, tasks_heading,
             working_memory_heading, coming_up, debrief_heading, activity_heading, close_day_prompt,
-            idle_prompt, share_shared,
+            idle_prompt, share_shared, notes_to_settle,
         ];
         for f in pairs {
             assert_ne!(f(Lang::En), f(Lang::Ja));
