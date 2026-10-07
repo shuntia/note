@@ -24,6 +24,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/tasks", get(tasks_list).post(tasks_create))
         .route("/api/tasks/queue", get(tasks_queue))
         .route("/api/tasks/candidates", get(tasks_candidates))
+        .route("/api/order", get(order_get).put(order_put))
         .route("/api/tasks/{id}", patch(tasks_update).delete(tasks_delete))
         .route(
             "/api/tasks/by-external/{external_id}",
@@ -557,8 +558,7 @@ async fn tasks_queue(
     }
 }
 
-/// Today's scheduled blocks as queue entries, or the queue itself when today
-/// holds none.
+/// What Now starts next: today's order, then the queue behind it.
 async fn tasks_candidates(
     user: CurrentUser,
     State(state): State<AppState>,
@@ -567,9 +567,7 @@ async fn tasks_candidates(
     let conn = state.db();
     let tz = user_zone(&state, &user.username);
     let limit = q.limit.unwrap_or(5).clamp(1, 20);
-    let now = jiff::Timestamp::now();
-    let listed = crate::tasks::candidates(&conn, user.id, &tz, now, limit)
-        .and_then(|c| if c.is_empty() { crate::tasks::queue(&conn, user.id, &tz, now, limit) } else { Ok(c) })
+    let listed = crate::order::candidates(&conn, user.id, &tz, jiff::Timestamp::now(), limit)
         .and_then(|mut q| {
             crate::tasks::stamp_schedule(&conn, user.id, &tz, q.iter_mut().map(|e| &mut e.task.task))?;
             Ok(q)
@@ -577,6 +575,54 @@ async fn tasks_candidates(
     match listed {
         Ok(q) => Json(q).into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OrderBody {
+    task_ids: Vec<i64>,
+}
+
+fn order_json(date: jiff::civil::Date, items: &[crate::order::Item]) -> serde_json::Value {
+    serde_json::json!({
+        "date": date.to_string(),
+        "task_ids": items.iter().map(|i| i.task_id).collect::<Vec<_>>(),
+    })
+}
+
+async fn order_get(user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
+    let today = jiff::Timestamp::now().to_zoned(user_zone(&state, &user.username)).date();
+    let conn = state.db();
+    match crate::order::list(&conn, user.id, today) {
+        Ok(items) => Json(order_json(today, &items)).into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+/// Replaces today's order with the one the user dragged into place.
+async fn order_put(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Json(body): Json<OrderBody>,
+) -> impl IntoResponse {
+    let today = jiff::Timestamp::now().to_zoned(user_zone(&state, &user.username)).date();
+    let set = {
+        let conn = state.db();
+        let set = crate::order::set(&conn, user.id, today, &body.task_ids);
+        if set.is_ok() {
+            let _ = crate::log::record(&conn, Some(user.id), "order_changed", &format!("{today}: by the user"));
+        }
+        set
+    };
+    match set {
+        Ok(items) => {
+            state.hub.broadcast_changed(user.id);
+            Json(order_json(today, &items)).into_response()
+        }
+        Err(crate::order::OrderError::Db(_)) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        Err(e) => (StatusCode::UNPROCESSABLE_ENTITY, Json(serde_json::json!({ "error": e.to_string() })))
+            .into_response(),
     }
 }
 
