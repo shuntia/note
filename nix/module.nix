@@ -26,10 +26,8 @@ let
     token_file = "/run/credentials/note-voice.service/matrix-bot.token";
     models_dir = "${voiceCfg.package.models}";
     cues_dir = "${voiceCfg.package.cues}";
-  } // lib.optionalAttrs (sidecars != [ ]) {
-    tts.sidecars = sidecars;
-  } // lib.optionalAttrs japaneseCfg.enable {
-    tts.base.ja = japaneseCfg.sidecarId;
+    tts = lib.optionalAttrs (sidecars != [ ]) { inherit sidecars; }
+      // lib.optionalAttrs japaneseCfg.enable { base.ja = japaneseCfg.sidecarId; };
   }));
   # A speech sidecar: one GPU-backed process on 127.0.0.1, its model cached in its state directory.
   sidecarService = { description, package, port, environment, stateDir }: {
