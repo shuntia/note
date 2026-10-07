@@ -258,8 +258,12 @@
           };
 
           ttsChatterbox = import ./nix/tts-chatterbox.nix { inherit pkgs lib pyproject-nix uv2nix pyproject-build-systems; };
+          ttsJa = import ./nix/tts-ja.nix {
+            inherit pkgs lib craneLib pyproject-nix uv2nix pyproject-build-systems;
+            sherpaGpu = voice.sherpa;
+          };
         in
-        { inherit web server voice voiceTests tests desktop ttsChatterbox; };
+        { inherit web server voice voiceTests tests desktop ttsChatterbox ttsJa; };
     in {
       nixosModules.default = import ./nix/module.nix self;
 
@@ -280,6 +284,7 @@
           desktop = b.desktop;
         } // lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == "x86_64-linux") {
           note-tts-chatterbox = b.ttsChatterbox;
+          note-tts-ja = b.ttsJa;
         });
 
       checks = forAllSystems (pkgs:

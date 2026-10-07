@@ -1,0 +1,29 @@
+[package]
+name = "note-tts-ja"
+version = "0.1.0"
+edition = "2021"
+license = "Unlicense"
+description = "Japanese speech sidecar for Note's voice calls: Style-Bert-VITS2 with VOICEVOX behind it"
+
+# Its own workspace: its onnxruntime binding never meets note-voice's.
+[workspace]
+
+[dependencies]
+anyhow = "1"
+axum = { version = "0.8", features = ["ws"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+hound = "3.5"
+kanalizer = { git = "https://github.com/VOICEVOX/kanalizer", rev = "a65240e586cbf3cbbb46ea413df0fe9128166a49" }
+libloading = "0.8"
+ndarray = "0.16"
+num_cpus = "1"
+ort = { version = "=2.0.0-rc.10", default-features = false, features = ["std", "ndarray", "load-dynamic", "cuda"] }
+regex = "1"
+sbv2_core = { version = "=0.2.0-alpha8", default-features = false, features = ["std", "dynamic"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "signal"] }
+unicode-normalization = "0.1"
+
+[profile.release]
+lto = "thin"

@@ -205,13 +205,13 @@ in
       };
     };
 
-    # The Japanese voice is a sidecar speaking the same protocol; `package` is filled in once the
-    # bake-off's engine is packaged. Until then enabling it only configures note-voice to expect it.
+    # The Japanese voice: Style-Bert-VITS2 on the GPU with VOICEVOX on the CPU behind it.
     tts.japanese = {
-      enable = lib.mkEnableOption "the Japanese speech sidecar for voice calls (needs an NVIDIA GPU)";
+      enable = lib.mkEnableOption "the Japanese speech sidecar for voice calls (best with an NVIDIA GPU)";
       package = lib.mkOption {
         type = lib.types.nullOr lib.types.package;
-        default = null;
+        default = self.packages.${pkgs.stdenv.hostPlatform.system}.note-tts-ja or null;
+        defaultText = lib.literalExpression "note.packages.\${system}.note-tts-ja";
         description = "The sidecar's package; null runs no service, so the voice stays down until one is set.";
       };
       sidecarId = lib.mkOption {
@@ -227,7 +227,8 @@ in
       environment = lib.mkOption {
         type = lib.types.attrsOf lib.types.str;
         default = { };
-        description = "Extra environment for the sidecar.";
+        example = { NOTE_TTS_DEVICE = "cpu"; NOTE_TTS_JA_SBV2 = "off"; };
+        description = "Extra environment: NOTE_TTS_DEVICE=cpu keeps it off the GPU; NOTE_TTS_JA_SBV2=off leaves both voices to VOICEVOX.";
       };
     };
   };
