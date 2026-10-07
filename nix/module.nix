@@ -15,16 +15,70 @@ let
   credDir = "/run/credentials/note.service";
   voiceCfg = cfg.voice;
   chatterboxCfg = cfg.tts.chatterbox;
+  japaneseCfg = cfg.tts.japanese;
   voiceSocket = "/run/note/voice.sock";
+  sidecars =
+    lib.optional chatterboxCfg.enable { id = "chatterbox"; url = "http://127.0.0.1:${toString chatterboxCfg.port}"; }
+    ++ lib.optional japaneseCfg.enable { id = japaneseCfg.sidecarId; url = "http://127.0.0.1:${toString japaneseCfg.port}"; };
   voiceToml = toml.generate "note-voice.toml" (lib.recursiveUpdate voiceCfg.settings ({
     socket = voiceSocket;
     state_dir = "/var/lib/note-voice";
     token_file = "/run/credentials/note-voice.service/matrix-bot.token";
     models_dir = "${voiceCfg.package.models}";
     cues_dir = "${voiceCfg.package.cues}";
-  } // lib.optionalAttrs chatterboxCfg.enable {
-    tts.sidecars = [{ id = "chatterbox"; url = "http://127.0.0.1:${toString chatterboxCfg.port}"; }];
+  } // lib.optionalAttrs (sidecars != [ ]) {
+    tts.sidecars = sidecars;
+  } // lib.optionalAttrs japaneseCfg.enable {
+    tts.base.ja = japaneseCfg.sidecarId;
   }));
+  # A speech sidecar: one GPU-backed process on 127.0.0.1, its model cached in its state directory.
+  sidecarService = { description, package, port, environment, stateDir }: {
+    inherit description;
+    wantedBy = [ "multi-user.target" ];
+    before = lib.optional voiceCfg.enable "note-voice.service";
+    # HOME holds the CUDA kernel cache.
+    environment = environment // {
+      NOTE_TTS_HOST = "127.0.0.1";
+      NOTE_TTS_PORT = toString port;
+      HOME = "/var/lib/${stateDir}";
+    };
+    unitConfig.StartLimitIntervalSec = 0;
+    serviceConfig = {
+      ExecStart = lib.getExe package;
+      DynamicUser = true;
+      StateDirectory = stateDir;
+      StateDirectoryMode = "0700";
+      Restart = "on-failure";
+      RestartSec = 5;
+      RestartSteps = 5;
+      RestartMaxDelaySec = 120;
+      UMask = "0077";
+      NoNewPrivileges = true;
+      PrivateTmp = true;
+      PrivateDevices = false;
+      DeviceAllow = [ "/dev/nvidia0 rw" "/dev/nvidiactl rw" "/dev/nvidia-uvm rw" "/dev/nvidia-uvm-tools rw" ];
+      SupplementaryGroups = [ "video" ];
+      ProtectSystem = "strict";
+      ProtectHome = true;
+      ProtectKernelTunables = true;
+      ProtectKernelModules = true;
+      ProtectKernelLogs = true;
+      ProtectControlGroups = true;
+      ProtectClock = true;
+      ProtectHostname = true;
+      ProtectProc = "invisible";
+      RestrictAddressFamilies = [ "AF_INET" "AF_INET6" "AF_UNIX" ];
+      RestrictNamespaces = true;
+      RestrictRealtime = true;
+      RestrictSUIDSGID = true;
+      LockPersonality = true;
+      # The CUDA runtime JIT-compiles kernels.
+      MemoryDenyWriteExecute = false;
+      SystemCallArchitectures = "native";
+      SystemCallFilter = [ "@system-service" "~@privileged" ];
+      CapabilityBoundingSet = "";
+    };
+  };
   serverToml = toml.generate "server.toml"
     (lib.recursiveUpdate cfg.settings (lib.optionalAttrs voiceCfg.enable { voice.socket = voiceSocket; }));
   env = {
@@ -150,6 +204,32 @@ in
         description = "Extra environment, e.g. generation parameters or NOTE_TTS_VOICES_DIR.";
       };
     };
+
+    # The Japanese voice is a sidecar speaking the same protocol; `package` is filled in once the
+    # bake-off's engine is packaged. Until then enabling it only configures note-voice to expect it.
+    tts.japanese = {
+      enable = lib.mkEnableOption "the Japanese speech sidecar for voice calls (needs an NVIDIA GPU)";
+      package = lib.mkOption {
+        type = lib.types.nullOr lib.types.package;
+        default = null;
+        description = "The sidecar's package; null runs no service, so the voice stays down until one is set.";
+      };
+      sidecarId = lib.mkOption {
+        type = lib.types.str;
+        default = "ja";
+        description = "Its id in note-voice.toml, which prefixes its voice ids.";
+      };
+      port = lib.mkOption {
+        type = lib.types.port;
+        default = 8891;
+        description = "Port on 127.0.0.1.";
+      };
+      environment = lib.mkOption {
+        type = lib.types.attrsOf lib.types.str;
+        default = { };
+        description = "Extra environment for the sidecar.";
+      };
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -267,53 +347,21 @@ in
       };
     };
 
-    systemd.services.note-tts-chatterbox = lib.mkIf chatterboxCfg.enable {
+    systemd.services.note-tts-chatterbox = lib.mkIf chatterboxCfg.enable (sidecarService {
       description = "Note speech sidecar (Chatterbox)";
-      wantedBy = [ "multi-user.target" ];
-      before = lib.optional voiceCfg.enable "note-voice.service";
-      # HOME holds the CUDA kernel cache.
-      environment = chatterboxCfg.environment // {
-        NOTE_TTS_HOST = "127.0.0.1";
-        NOTE_TTS_PORT = toString chatterboxCfg.port;
-        HOME = "/var/lib/note-tts-chatterbox";
-      };
-      unitConfig.StartLimitIntervalSec = 0;
-      serviceConfig = {
-        ExecStart = lib.getExe chatterboxCfg.package;
-        DynamicUser = true;
-        StateDirectory = "note-tts-chatterbox";
-        StateDirectoryMode = "0700";
-        Restart = "on-failure";
-        RestartSec = 5;
-        RestartSteps = 5;
-        RestartMaxDelaySec = 120;
-        UMask = "0077";
-        NoNewPrivileges = true;
-        PrivateTmp = true;
-        PrivateDevices = false;
-        DeviceAllow = [ "/dev/nvidia0 rw" "/dev/nvidiactl rw" "/dev/nvidia-uvm rw" "/dev/nvidia-uvm-tools rw" ];
-        SupplementaryGroups = [ "video" ];
-        ProtectSystem = "strict";
-        ProtectHome = true;
-        ProtectKernelTunables = true;
-        ProtectKernelModules = true;
-        ProtectKernelLogs = true;
-        ProtectControlGroups = true;
-        ProtectClock = true;
-        ProtectHostname = true;
-        ProtectProc = "invisible";
-        RestrictAddressFamilies = [ "AF_INET" "AF_INET6" "AF_UNIX" ];
-        RestrictNamespaces = true;
-        RestrictRealtime = true;
-        RestrictSUIDSGID = true;
-        LockPersonality = true;
-        # The CUDA runtime JIT-compiles kernels.
-        MemoryDenyWriteExecute = false;
-        SystemCallArchitectures = "native";
-        SystemCallFilter = [ "@system-service" "~@privileged" ];
-        CapabilityBoundingSet = "";
-      };
-    };
+      package = chatterboxCfg.package;
+      port = chatterboxCfg.port;
+      environment = chatterboxCfg.environment;
+      stateDir = "note-tts-chatterbox";
+    });
+
+    systemd.services.note-tts-ja = lib.mkIf (japaneseCfg.enable && japaneseCfg.package != null) (sidecarService {
+      description = "Note speech sidecar (Japanese)";
+      package = japaneseCfg.package;
+      port = japaneseCfg.port;
+      environment = japaneseCfg.environment;
+      stateDir = "note-tts-ja";
+    });
 
     networking.firewall.allowedTCPPorts = lib.mkIf cfg.openFirewall [
       (lib.toInt (lib.last (lib.splitString ":" cfg.settings.bind_addr)))
