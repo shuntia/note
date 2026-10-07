@@ -27,6 +27,8 @@ enum Out {
     Piece { reply: u64, clip: Clip },
     /// The reply's stream ended after `pushes` of its texts.
     Ended { reply: u64, pushes: u32 },
+    /// Neither the speaker nor the fallback could speak the reply.
+    Unspeakable { reply: u64 },
 }
 
 #[derive(Clone)]
@@ -82,6 +84,7 @@ pub struct SpeechQueue {
     playing: Vec<u64>,
     rx: mpsc::UnboundedReceiver<Out>,
     rendering: Arc<AtomicBool>,
+    unspeakable: Vec<u64>,
 }
 
 impl SpeechQueue {
@@ -116,7 +119,14 @@ impl SpeechQueue {
             playing: Vec::new(),
             rx,
             rendering: Arc::default(),
+            unspeakable: Vec::new(),
         }
+    }
+
+    /// Replies no backend could speak, each reported once; the call has no voice while this happens.
+    pub fn take_unspeakable(&mut self) -> Vec<u64> {
+        self.receive();
+        std::mem::take(&mut self.unspeakable)
     }
 
     fn send(&self, cmd: Cmd) {
@@ -301,6 +311,11 @@ impl SpeechQueue {
                         state.ended = true;
                     }
                 }
+                Out::Unspeakable { reply } => {
+                    if self.replies.get(&reply).is_some_and(|s| s.gate != Gate::Dropped) {
+                        self.unspeakable.push(reply);
+                    }
+                }
             }
         }
         self.note_rendering();
@@ -313,7 +328,9 @@ struct Active {
     reply: u64,
     stream: Box<dyn SpeechStream>,
     on_fallback: bool,
-    /// The text pushed, kept until the reply is on the fallback.
+    /// The fallback itself failed once and was reopened.
+    retried: bool,
+    /// The text pushed to the current stream.
     pushed: Vec<String>,
     /// Characters of `pushed` already covered by audio.
     covered: u32,
@@ -386,9 +403,7 @@ impl Worker {
                     },
                 };
                 let active = &mut self.streams[at];
-                if !active.on_fallback {
-                    active.pushed.push(text.clone());
-                }
+                active.pushed.push(text.clone());
                 if let Err(e) = active.stream.push(&text) {
                     self.fail(at, &e);
                 }
@@ -418,21 +433,37 @@ impl Worker {
             self.fallback.open("").map(|s| (s, true))
         });
         match opened {
-            Ok((stream, on_fallback)) => {
-                Some(Active { reply, stream, on_fallback, pushed: Vec::new(), covered: 0, finished: false, sent: 0 })
-            }
+            Ok((stream, on_fallback)) => Some(Active {
+                reply,
+                stream,
+                on_fallback,
+                retried: false,
+                pushed: Vec::new(),
+                covered: 0,
+                finished: false,
+                sent: 0,
+            }),
             Err(e) => {
                 eprintln!("voice: reply {reply} cannot be spoken: {e:#}");
+                let _ = self.tx.send(Out::Unspeakable { reply });
                 None
             }
         }
     }
 
-    /// Hands the text not yet covered by audio to the fallback, which speaks the rest of the reply.
+    /// Hands the text not yet covered by audio to the fallback, which speaks the rest of the reply. On
+    /// the fallback a live stream only loses the piece; a dead one is reopened once, and failing
+    /// again the reply is reported unspeakable.
     fn fail(&mut self, at: usize, err: &anyhow::Error) {
         let active = &mut self.streams[at];
         eprintln!("voice: speaking reply {} failed: {err:#}", active.reply);
-        if active.on_fallback {
+        if active.on_fallback && active.stream.alive() {
+            return;
+        }
+        if active.on_fallback && active.retried {
+            let reply = self.streams.remove(at).reply;
+            let _ = self.tx.send(Out::Unspeakable { reply });
+            self.ended(reply);
             return;
         }
         active.stream.cancel();
@@ -459,13 +490,15 @@ impl Worker {
         match resumed {
             Ok(stream) => {
                 active.stream = stream;
+                active.retried = active.on_fallback;
                 active.on_fallback = true;
-                active.pushed.clear();
+                active.pushed = rest;
                 active.covered = 0;
             }
             Err(e) => {
                 eprintln!("voice: reply {} cannot go on: {e:#}", active.reply);
                 let reply = self.streams.remove(at).reply;
+                let _ = self.tx.send(Out::Unspeakable { reply });
                 self.ended(reply);
             }
         }
@@ -504,9 +537,7 @@ impl Worker {
                 Ok(Next::Pending) => {}
                 Ok(Next::Audio(audio)) => {
                     let active = &mut self.streams[at];
-                    if !active.on_fallback {
-                        active.covered += audio.chars;
-                    }
+                    active.covered += audio.chars;
                     active.sent += audio.pcm.len() as u64;
                     let clip = Clip { reply: Some(reply), chars: audio.chars, pcm: audio.pcm };
                     let _ = self.tx.send(Out::Piece { reply, clip });

@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
 use super::engines::VoiceInfo;
-use super::tts::{resample, Audio, Chunker, Next, SpeechBackend, SpeechStream, TextInput};
+use super::tts::{is_cjk, resample, Audio, Chunker, Next, SpeechBackend, SpeechStream, TextInput};
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct SidecarConfig {
@@ -44,6 +44,9 @@ enum InfoInput {
 struct InfoVoice {
     id: String,
     label: String,
+    /// The languages the voice speaks; absent for any.
+    #[serde(default)]
+    languages: Vec<String>,
 }
 
 /// The configured sidecars, of which only those answering `/info` are offered.
@@ -85,8 +88,8 @@ impl Sidecars {
         *self.live.lock().expect("sidecars lock") = live;
     }
 
-    /// Probes now and every 30 s, so a sidecar started later is offered.
-    pub fn watch(self: &Arc<Self>) {
+    /// Probes now and every 30 s, so a sidecar started later is offered; `probed` runs after each probe.
+    pub fn watch(self: &Arc<Self>, probed: impl Fn() + Send + Sync + 'static) {
         if self.configs.is_empty() {
             return;
         }
@@ -94,6 +97,7 @@ impl Sidecars {
         tokio::spawn(async move {
             loop {
                 sidecars.probe().await;
+                probed();
                 tokio::time::sleep(PROBE_EVERY).await;
             }
         });
@@ -125,7 +129,7 @@ async fn probe(http: &reqwest::Client, config: &SidecarConfig) -> anyhow::Result
         voices: info
             .voices
             .into_iter()
-            .map(|v| VoiceInfo { id: v.id, label: v.label, language: String::new() })
+            .map(|v| VoiceInfo { id: v.id, label: v.label, languages: v.languages })
             .collect(),
         stream_url: format!("{ws}/stream"),
         rt: Handle::current(),
@@ -349,7 +353,7 @@ struct SidecarStream {
     /// s16le received and not yet passed on.
     pcm: Vec<u8>,
     rate: u32,
-    /// The text sent so far ends in whitespace, or none was sent.
+    /// The text sent so far ends in whitespace or CJK script, or none was sent.
     spaced: bool,
     end_sent: bool,
     ended: bool,
@@ -403,9 +407,11 @@ impl SidecarStream {
         Ok(None)
     }
 
-    fn check_silence(&self) -> anyhow::Result<()> {
+    /// A sidecar silent past its deadline is given up on: the stream ends.
+    fn check_silence(&mut self) -> anyhow::Result<()> {
         let limit = if self.heard_any { STALLED } else { FIRST_AUDIO };
         if self.owes() && self.owed_since.elapsed() > limit {
+            self.ended = true;
             anyhow::bail!("the sidecar sent nothing for {limit:?}");
         }
         Ok(())
@@ -422,8 +428,9 @@ impl SpeechStream for SidecarStream {
             self.last_push = Instant::now();
             return Ok(());
         }
-        let sent = if self.spaced || text.starts_with(char::is_whitespace) { text.to_owned() } else { format!(" {text}") };
-        self.spaced = text.ends_with(char::is_whitespace);
+        let unspaced = |c: char| c.is_whitespace() || is_cjk(c);
+        let sent = if self.spaced || text.starts_with(unspaced) { text.to_owned() } else { format!(" {text}") };
+        self.spaced = text.ends_with(unspaced);
         let msg_len = sent.chars().count() as u32;
         self.send_owed(Msg::Text(sent))?;
         self.marks.sent(msg_len, text.chars().count() as u32);
@@ -497,6 +504,10 @@ impl SpeechStream for SidecarStream {
             let _ = self.send(Msg::Cancel);
         }
     }
+
+    fn alive(&self) -> bool {
+        !self.ended && !self.cancelled
+    }
 }
 
 #[cfg(test)]
@@ -539,7 +550,7 @@ mod tests {
         }
         axum::Json(serde_json::json!({
             "id": "fake", "label": "Natural", "input": fake.input, "sample_rate": 24000, "slow": true,
-            "voices": [{ "id": "alba", "label": "Alba" }, { "id": "cosette", "label": "Cosette" }],
+            "voices": [{ "id": "alba", "label": "Alba" }, { "id": "cosette", "label": "Cosette", "languages": ["ja"] }],
         }))
         .into_response()
     }
@@ -798,6 +809,21 @@ mod tests {
         assert_eq!(live.iter().map(|s| s.id().to_owned()).collect::<Vec<_>>(), ["fake"]);
         assert_eq!((live[0].label(), live[0].slow()), ("Natural", true));
         assert_eq!(live[0].voices().iter().map(|v| v.id.as_str()).collect::<Vec<_>>(), ["alba", "cosette"]);
+        assert_eq!(live[0].voices().iter().map(|v| v.languages.clone()).collect::<Vec<_>>(), [vec![], vec!["ja".to_string()]]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn japanese_pushes_reach_an_incremental_sidecar_without_a_joining_space() {
+        let (fake, config) = fake("incremental").await;
+        let mut stream = live(config).await.open("cosette").unwrap();
+        stream.push("はい、").unwrap();
+        stream.push("明日にしたよ。").unwrap();
+        stream.push("Okay.").unwrap();
+        stream.finish().unwrap();
+        let pieces = all(&mut *stream).await;
+        assert_eq!(marked(&pieces), [3, 7, 5]);
+        let texts: Vec<_> = fake.seen("text").iter().map(|v| v["text"].as_str().unwrap().to_owned()).collect();
+        assert_eq!(texts, ["はい、", "明日にしたよ。", "Okay."]);
     }
 
     #[test]

@@ -57,12 +57,18 @@ fn rejects_since(e: &anyhow::Error) -> bool {
     })
 }
 
-const PREVIEW_TEXT: &str = "Hi, it's Note. This is how I sound.";
+/// English stands in for any language without its own wording.
+fn preview_text(language: &str) -> &'static str {
+    match language {
+        "ja" => "こんにちは、ノートです。こんな声だよ。",
+        _ => "Hi, it's Note. This is how I sound.",
+    }
+}
 
 type Slot = Arc<Mutex<Option<Arc<Vec<u8>>>>>;
 
 /// Voice samples as WAV, rendered once per language, offered voice and
-/// `PREVIEW_TEXT`, and kept in `dir` across restarts; a render in progress
+/// `preview_text`, and kept in `dir` across restarts; a render in progress
 /// holds its slot, so a second ask for it waits.
 #[derive(Default)]
 struct Previews {
@@ -71,16 +77,24 @@ struct Previews {
 }
 
 impl Previews {
-    /// `voice` empty is Kokoro's default; any other id no live backend offers is refused.
+    /// `voice` empty is the base voice's default; any other id no live backend offers is refused, as
+    /// is the default while `base` is down.
     fn get(
         &self,
-        kokoro: &Arc<dyn SpeechBackend>,
+        base: Option<&Arc<dyn SpeechBackend>>,
         sidecars: &[Arc<dyn SpeechBackend>],
         language: &str,
         voice: &str,
     ) -> Result<Arc<Vec<u8>>, Refusal> {
-        let speaker =
-            if voice.is_empty() { Some(Speaker::new(kokoro.clone(), "")) } else { find_speaker(voice, kokoro, sidecars) };
+        let speaker = match (voice.is_empty(), base) {
+            (true, Some(base)) => Some(Speaker::new(base.clone(), "")),
+            (true, None) => return Err(Refusal::new(RefusalCode::Failed, format!("the {language} voice is down"))),
+            (false, Some(base)) => find_speaker(voice, language, base, sidecars),
+            (false, None) => {
+                let mute: Arc<dyn SpeechBackend> = Arc::new(crate::audio::tts::Mute::new(language));
+                find_speaker(voice, language, &mute, sidecars)
+            }
+        };
         let Some(speaker) = speaker else {
             return Err(Refusal::new(RefusalCode::BadRequest, format!("no voice {voice:?}")));
         };
@@ -96,7 +110,7 @@ impl Previews {
         } else {
             let wav = speaker
                 .backend
-                .render(PREVIEW_TEXT, &speaker.voice)
+                .render(preview_text(language), &speaker.voice)
                 .and_then(|pcm| wav(&pcm, RATE))
                 .map_err(|e| Refusal::new(RefusalCode::Failed, format!("rendering the sample failed: {e:#}")))?;
             if let Some(file) = &file {
@@ -114,7 +128,7 @@ impl Previews {
 
 /// A name stable across builds: FNV-1a over the language, voice and text.
 fn preview_file(language: &str, voice: &str) -> String {
-    let hash = [language, voice, PREVIEW_TEXT].iter().flat_map(|part| part.bytes().chain([0])).fold(
+    let hash = [language, voice, preview_text(language)].iter().flat_map(|part| part.bytes().chain([0])).fold(
         0xcbf2_9ce4_8422_2325_u64,
         |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3),
     );
@@ -304,7 +318,9 @@ impl Service {
         if let Some(refusal) = self.no_models() {
             return Err(refusal);
         }
-        Ok(Reply::Voices { voices: voice_options(language, &self.backends.engines.tts(language), &self.sidecars.live()) })
+        let live = self.sidecars.live();
+        let base = self.backends.engines.tts(language).live(&live);
+        Ok(Reply::Voices { voices: voice_options(language, base.as_ref(), &live) })
     }
 
     async fn preview(self: Arc<Self>, language: String, voice: String) -> Result<Reply, Refusal> {
@@ -313,7 +329,9 @@ impl Service {
             return Err(refusal);
         }
         let wav = tokio::task::spawn_blocking(move || {
-            self.previews.get(&self.backends.engines.tts(&language), &self.sidecars.live(), &language, &voice)
+            let live = self.sidecars.live();
+            let base = self.backends.engines.tts(&language).live(&live);
+            self.previews.get(base.as_ref(), &live, &language, &voice)
         })
         .await
         .map_err(|e| Refusal::new(RefusalCode::Failed, format!("rendering the sample failed: {e}")))??;
@@ -375,6 +393,11 @@ impl Service {
         if self.backends.engines.languages().is_empty() {
             return self.fail_before_join(call_id, room_id, mxid, direction, "no voice models".into()).await;
         }
+        {
+            let mut st = lock(&self.state);
+            st.data.profiles.insert(mxid.to_string(), profile.clone());
+            let _ = st.save();
+        }
         let (svc, id) = (self.clone(), call_id.to_string());
         let writer = match CallWriter::spawn(move |body| {
             svc.send(&id, body);
@@ -432,7 +455,10 @@ impl Service {
         eprintln!("voice: call {call_id} ended: {end:?}");
         lock(&self.sessions).remove(call_id);
         clear_member(&self.matrix, room_id).await;
-        self.end(call_id);
+        match end.failure() {
+            Some(reason) => self.finish(call_id, Outcome::Failed { reason: reason.into() }),
+            None => self.end(call_id),
+        }
     }
 
     /// An inbound caller is still answered and told, rather than left ringing.
@@ -519,14 +545,16 @@ impl Service {
         }
         let url = &self.cfg.livekit_service_url;
         match self.backends.media.join(&self.matrix, url, room, mxid, INBOUND_JOIN_WAIT).await {
-            Ok(media) => say_and_leave(&*media, self.cant_reach_clips().await).await,
+            Ok(media) => say_and_leave(&*media, self.cant_reach_clips(mxid).await).await,
             Err(e) => eprintln!("voice: joining {mxid}'s call in {room} failed: {e:#}"),
         }
         clear_member(&self.matrix, room).await;
     }
 
-    async fn cant_reach_clips(&self) -> Vec<Vec<i16>> {
-        let profile = VoiceProfile::default();
+    /// The ready cue and `Line::CantReach` as `mxid` last heard them: in the language's base voice, or
+    /// its kept rendering while that voice is down.
+    async fn cant_reach_clips(&self, mxid: &str) -> Vec<Vec<i16>> {
+        let profile = lock(&self.state).data.profiles.get(mxid).cloned().unwrap_or_default();
         let mut clips = Vec::new();
         if profile.cue {
             clips.push(self.cues.ready.to_vec());
@@ -535,14 +563,19 @@ impl Service {
         let Some(language) = languages.iter().find(|l| **l == profile.language).or(languages.first()).cloned() else {
             return clips;
         };
-        let (engines, lines) = (self.backends.engines.clone(), self.lines.clone());
+        let (engines, lines, live) = (self.backends.engines.clone(), self.lines.clone(), self.sidecars.live());
         let line = tokio::task::spawn_blocking(move || {
-            let kokoro = engines.tts(&language);
-            lines.get(&Speaker::new(kokoro.clone(), ""), &*kokoro, &language, Line::CantReach)
+            let base = engines.tts(&language);
+            match base.live(&live) {
+                Some(backend) => lines.get(&Speaker::new(backend.clone(), ""), &*backend, &language, Line::CantReach),
+                None => lines
+                    .kept(base.id(), "", &language, Line::CantReach)
+                    .ok_or_else(|| anyhow::anyhow!("the {language} voice is down and never rendered it")),
+            }
         })
-            .await
-            .map_err(anyhow::Error::from)
-            .and_then(|r| r);
+        .await
+        .map_err(anyhow::Error::from)
+        .and_then(|r| r);
         match line {
             Ok(pcm) => clips.push(pcm.to_vec()),
             Err(e) => eprintln!("voice: rendering {:?} failed: {e:#}", Line::CantReach),
@@ -844,15 +877,16 @@ impl Handler for VoiceHandler {
     }
 }
 
-/// Renders each loaded language's call lines in its default voice, off the runtime.
-fn warm_lines(engines: &Arc<dyn SpeechEngines>, lines: &Arc<Lines>) {
-    let (engines, lines) = (engines.clone(), lines.clone());
+/// Renders each loaded language's call lines in its base voice's default, off the runtime, so they
+/// are kept for when that voice is down; a language whose base is down now is left for the next time.
+fn warm_lines(engines: &Arc<dyn SpeechEngines>, lines: &Arc<Lines>, sidecars: &[Arc<dyn SpeechBackend>]) {
+    let (engines, lines, sidecars) = (engines.clone(), lines.clone(), sidecars.to_vec());
     tokio::task::spawn_blocking(move || {
         for language in engines.languages() {
-            let kokoro = engines.tts(&language);
-            let speaker = Speaker::new(kokoro.clone(), "");
-            for line in [Line::LostNotes, Line::Goodbye, Line::CantReach, Line::Hi] {
-                if let Err(e) = lines.get(&speaker, &*kokoro, &language, line) {
+            let Some(base) = engines.tts(&language).live(&sidecars) else { continue };
+            let speaker = Speaker::new(base.clone(), "");
+            for line in crate::audio::lines::ALL {
+                if let Err(e) = lines.get(&speaker, &*base, &language, line) {
                     eprintln!("voice: rendering {line:?} in {language} failed: {e:#}");
                 }
             }
@@ -860,17 +894,25 @@ fn warm_lines(engines: &Arc<dyn SpeechEngines>, lines: &Arc<Lines>) {
     });
 }
 
-/// Kokoro's voices, then each live sidecar's as `<sidecar>:<voice>`.
-fn voice_options(language: &str, kokoro: &Arc<dyn SpeechBackend>, sidecars: &[Arc<dyn SpeechBackend>]) -> Vec<VoiceOption> {
-    let kokoro_voices = kokoro.voices().into_iter().map(|v| (kokoro, v.id.clone(), v));
-    let sidecar_voices =
-        sidecars.iter().flat_map(|b| b.voices().into_iter().map(move |v| (b, format!("{}:{}", b.id(), v.id), v)));
-    kokoro_voices
+/// The base voice's voices, then each other live sidecar's as `<sidecar>:<voice>`, keeping only
+/// those that speak `language`.
+fn voice_options(
+    language: &str,
+    base: Option<&Arc<dyn SpeechBackend>>,
+    sidecars: &[Arc<dyn SpeechBackend>],
+) -> Vec<VoiceOption> {
+    let base_voices = base.into_iter().flat_map(|b| b.voices().into_iter().map(move |v| (b, v.id.clone(), v)));
+    let sidecar_voices = sidecars
+        .iter()
+        .filter(|b| base.is_none_or(|base| base.id() != b.id()))
+        .flat_map(|b| b.voices().into_iter().map(move |v| (b, format!("{}:{}", b.id(), v.id), v)));
+    base_voices
         .chain(sidecar_voices)
+        .filter(|(_, _, v)| v.languages.is_empty() || v.languages.iter().any(|l| l == language))
         .map(|(backend, id, v)| VoiceOption {
             id,
             label: v.label,
-            language: if v.language.is_empty() { language.to_owned() } else { v.language },
+            language: language.to_owned(),
             backend: backend.label().to_owned(),
             slow: backend.slow(),
         })
@@ -898,10 +940,13 @@ pub async fn run_with(cfg: VoiceServiceConfig, peer_cfg: PeerConfig, backends: B
         eprintln!("voice: no voice models are loaded; answered calls will fail with \"no voice models\"");
     }
     let cues = Cues::load(&cfg.ready_cue(), &cfg.heard_cue());
-    let lines = Arc::new(Lines::default());
-    warm_lines(&backends.engines, &lines);
+    let lines = Arc::new(Lines::new(Some(cfg.state_dir.join("lines"))));
+    warm_lines(&backends.engines, &lines, &[]);
     let sidecars = Arc::new(Sidecars::new(cfg.tts.sidecars.clone()));
-    sidecars.watch();
+    {
+        let (engines, lines, sidecars) = (backends.engines.clone(), lines.clone(), sidecars.clone());
+        sidecars.clone().watch(move || warm_lines(&engines, &lines, &sidecars.live()));
+    }
     let token = std::fs::read_to_string(&cfg.token_file)
         .map_err(|e| anyhow::anyhow!("reading {}: {e}", cfg.token_file.display()))?;
     let matrix = Arc::new(Matrix::connect(&cfg.homeserver, &token).await?);
@@ -1028,9 +1073,19 @@ mod tests {
         }
     }
 
+    /// Voice ids may carry a language after '@' ("yui@ja"); Kokoro's speak English.
     fn backend(id: &str, label: &str, tts: &Arc<CountingTts>, ids: &[&str]) -> Arc<dyn SpeechBackend> {
-        let language = if id == "kokoro" { "en" } else { "" };
-        let voices = ids.iter().map(|v| VoiceInfo { id: (*v).into(), label: (*v).into(), language: language.into() }).collect();
+        let voices = ids
+            .iter()
+            .map(|v| {
+                let (v, languages) = match v.split_once('@') {
+                    Some((v, language)) => (v, vec![language.to_owned()]),
+                    None if id == "kokoro" => (*v, vec!["en".to_owned()]),
+                    None => (*v, Vec::new()),
+                };
+                VoiceInfo { id: v.into(), label: v.into(), languages }
+            })
+            .collect();
         Arc::new(ChunkedBackend::new(id, label, tts.clone(), voices))
     }
 
@@ -1043,7 +1098,7 @@ mod tests {
         let (tts, previews) = (Arc::new(CountingTts::default()), Previews::default());
         let sidecars = [backend("kyutai", "Natural", &tts, &["alba"])];
         for voice in ["a1", "kyutai:a1", "gone:alba", "kokoro:af_heart"] {
-            let refused = previews.get(&kokoro(&tts), &sidecars, "en", voice).unwrap_err();
+            let refused = previews.get(Some(&kokoro(&tts)), &sidecars, "en", voice).unwrap_err();
             assert_eq!(refused.code, RefusalCode::BadRequest, "{voice}");
         }
         assert_eq!(tts.0.load(Ordering::SeqCst), 0, "nothing is rendered");
@@ -1056,7 +1111,7 @@ mod tests {
         let asks: Vec<_> = (0..4)
             .map(|_| {
                 let (tts, previews) = (tts.clone(), previews.clone());
-                std::thread::spawn(move || previews.get(&kokoro(&tts), &[], "en", "af_heart").unwrap())
+                std::thread::spawn(move || previews.get(Some(&kokoro(&tts)), &[], "en", "af_heart").unwrap())
             })
             .collect();
         for ask in asks {
@@ -1069,22 +1124,35 @@ mod tests {
     fn a_preview_is_rendered_once_per_voice() {
         let (tts, previews) = (Arc::new(CountingTts::default()), Previews::default());
         let sidecars = [backend("kyutai", "Natural", &tts, &["alba"])];
-        let first = previews.get(&kokoro(&tts), &sidecars, "en", "af_heart").unwrap();
-        assert_eq!(previews.get(&kokoro(&tts), &sidecars, "en", "af_heart").unwrap(), first);
-        previews.get(&kokoro(&tts), &sidecars, "en", "bm_george").unwrap();
-        previews.get(&kokoro(&tts), &sidecars, "en", "kyutai:alba").unwrap();
+        let first = previews.get(Some(&kokoro(&tts)), &sidecars, "en", "af_heart").unwrap();
+        assert_eq!(previews.get(Some(&kokoro(&tts)), &sidecars, "en", "af_heart").unwrap(), first);
+        previews.get(Some(&kokoro(&tts)), &sidecars, "en", "bm_george").unwrap();
+        previews.get(Some(&kokoro(&tts)), &sidecars, "en", "kyutai:alba").unwrap();
         assert_eq!(tts.0.load(Ordering::SeqCst), 3);
-        assert_eq!(first.len(), 44 + PREVIEW_TEXT.len() * 2);
+        assert_eq!(first.len(), 44 + preview_text("en").len() * 2);
     }
 
     #[test]
     fn a_kept_preview_outlives_a_restart() {
         let (tts, dir) = (Arc::new(CountingTts::default()), tempfile::tempdir().unwrap());
         let previews = || Previews { dir: Some(dir.path().to_path_buf()), ..Previews::default() };
-        let first = previews().get(&kokoro(&tts), &[], "en", "af_heart").unwrap();
-        assert_eq!(previews().get(&kokoro(&tts), &[], "en", "af_heart").unwrap(), first);
-        previews().get(&kokoro(&tts), &[], "ja", "af_heart").unwrap();
+        let first = previews().get(Some(&kokoro(&tts)), &[], "en", "af_heart").unwrap();
+        assert_eq!(previews().get(Some(&kokoro(&tts)), &[], "en", "af_heart").unwrap(), first);
+        previews().get(Some(&kokoro(&tts)), &[], "ja", "").unwrap();
         assert_eq!(tts.0.load(Ordering::SeqCst), 2, "each language renders once");
+    }
+
+    #[test]
+    fn a_japanese_preview_speaks_japanese_through_a_live_sidecar_only() {
+        let (tts, previews) = (Arc::new(CountingTts::default()), Previews::default());
+        let ja = backend("ja", "Japanese", &tts, &["yui@ja"]);
+        let down = previews.get(None, &[], "ja", "").unwrap_err();
+        assert_eq!(down.code, RefusalCode::Failed);
+        assert_eq!(previews.get(None, &[], "ja", "ja:yui").unwrap_err().code, RefusalCode::BadRequest);
+        let live = std::slice::from_ref(&ja);
+        let sample = previews.get(Some(&ja), live, "ja", "").unwrap();
+        assert_eq!(sample.len(), 44 + preview_text("ja").len() * 2, "the Japanese wording");
+        assert_eq!(previews.get(None, live, "ja", "ja:yui").unwrap().len(), sample.len());
     }
 
     #[test]
@@ -1092,24 +1160,37 @@ mod tests {
         let tts = Arc::new(CountingTts::default());
         let sidecars = [backend("kyutai", "Natural", &tts, &["alba"])];
         let listed: Vec<(String, String, String)> =
-            voice_options("en", &kokoro(&tts), &sidecars).into_iter().map(|v| (v.id, v.backend, v.language)).collect();
+            voice_options("en", Some(&kokoro(&tts)), &sidecars).into_iter().map(|v| (v.id, v.backend, v.language)).collect();
         let expected = [("af_heart", "Kokoro"), ("bm_george", "Kokoro"), ("kyutai:alba", "Natural")]
             .map(|(id, backend)| (id.to_owned(), backend.to_owned(), "en".to_owned()));
         assert_eq!(listed, expected);
     }
 
     #[test]
+    fn the_voice_list_keeps_the_voices_that_speak_the_language() {
+        let tts = Arc::new(CountingTts::default());
+        let ja = backend("ja", "Japanese", &tts, &["yui@ja", "ren@ja"]);
+        let sidecars = [backend("chatterbox", "Best", &tts, &["alba", "sora@ja"]), ja.clone()];
+        let ids = |language: &str, base: Option<&Arc<dyn SpeechBackend>>| {
+            voice_options(language, base, &sidecars).into_iter().map(|v| v.id).collect::<Vec<_>>()
+        };
+        assert_eq!(ids("ja", Some(&ja)), ["yui", "ren", "chatterbox:alba", "chatterbox:sora"], "the base is listed bare");
+        assert_eq!(ids("ja", None), ["chatterbox:alba", "chatterbox:sora", "ja:yui", "ja:ren"], "the base voice is down");
+        assert_eq!(ids("en", Some(&kokoro(&tts))), ["af_heart", "bm_george", "chatterbox:alba"]);
+    }
+
+    #[test]
     #[ignore = "needs NOTE_VOICE_MODELS"]
     fn preview_is_a_wav_and_cached() {
         let dir = std::env::var_os("NOTE_VOICE_MODELS").unwrap();
-        let models = crate::config::models_from_dir(std::path::Path::new(&dir));
+        let models = crate::config::models_from_dir(std::path::Path::new(&dir), &crate::config::TtsConfig::default());
         let engines = Engines::load(&models, crate::audio::engines::Device::Auto).unwrap();
-        let tts = engines.tts("en");
+        let tts = engines.tts("en").live(&[]).unwrap();
         let previews = Previews::default();
-        let first = previews.get(&tts, &[], "en", "").unwrap();
+        let first = previews.get(Some(&tts), &[], "en", "").unwrap();
         let reader = hound::WavReader::new(std::io::Cursor::new(first.to_vec())).unwrap();
         assert_eq!((reader.spec().sample_rate, reader.spec().channels), (48_000, 1));
         assert!(reader.duration() > 48_000, "at least a second of speech");
-        assert!(Arc::ptr_eq(&previews.get(&tts, &[], "en", "").unwrap(), &first));
+        assert!(Arc::ptr_eq(&previews.get(Some(&tts), &[], "en", "").unwrap(), &first));
     }
 }

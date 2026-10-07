@@ -13,7 +13,7 @@ use crate::audio::engines::{SpeechEngines, SpeechToText, TurnDetector, Vad};
 use crate::audio::lines::{Line, Lines};
 use crate::audio::playout::{Clip, Playout};
 use crate::audio::speech::{Gate, SpeechQueue};
-use crate::audio::tts::{speaker, Speaker, SpeechBackend};
+use crate::audio::tts::{speaker, Mute, Speaker, SpeechBackend};
 use crate::audio::turn::{backchannels, Action, Input, TurnConfig, TurnMachine};
 use crate::media::{Gone, MediaIo};
 
@@ -122,7 +122,22 @@ pub enum SessionEnd {
     UserLeft,
     TimedOut,
     LinkLost,
+    /// The language's base voice was down as the call started.
+    VoiceDown,
+    /// A reply could not be spoken by any backend mid-call.
+    VoiceLost,
     MediaFailed(String),
+}
+
+impl SessionEnd {
+    /// Why Note should take over by message, for an end that leaves the user unanswered.
+    pub fn failure(&self) -> Option<&'static str> {
+        match self {
+            SessionEnd::VoiceDown => Some("the call's voice is down"),
+            SessionEnd::VoiceLost => Some("the call's voice was lost"),
+            _ => None,
+        }
+    }
 }
 
 enum Event {
@@ -210,7 +225,8 @@ struct Live<S> {
     heard_cue: Option<Arc<Vec<i16>>>,
     /// The lines rendered so far.
     lines: HashMap<Line, Option<Arc<Vec<i16>>>>,
-    goodbye_pending: bool,
+    /// The line the ending waits to say once rendered.
+    closing: Option<Line>,
     /// The line to fill with by `FILLER_AFTER` past the instant: "hi" from the start of an inbound
     /// call unless Note's words arrive, "one moment" from a Commit unless a reply is speaking.
     awaiting_reply: Option<(Instant, Line)>,
@@ -233,8 +249,10 @@ impl<S: Fn(CallBody)> Live<S> {
         };
         let vad = deps.engines.vad(&language)?;
         let stt = deps.engines.stt(&language)?;
-        let kokoro = deps.engines.tts(&language);
-        let speaker = speaker(&deps.profile.voice, &kokoro, &deps.sidecars);
+        let base = deps.engines.tts(&language);
+        let voice_up = base.live(&deps.sidecars);
+        let base: Arc<dyn SpeechBackend> = voice_up.clone().unwrap_or_else(|| Arc::new(Mute::new(base.id())));
+        let speaker = speaker(&deps.profile.voice, &language, &base, &deps.sidecars);
         let start = Instant::now();
         let (events_tx, events) = mpsc::unbounded_channel();
         let (stt_tx, stt_rx) = mpsc::unbounded_channel();
@@ -243,21 +261,25 @@ impl<S: Fn(CallBody)> Live<S> {
             stt: tokio::spawn(stt_worker(stt, stt_rx, events_tx.clone())),
             audio: tokio::spawn(audio_in(media.clone(), vad, stt_tx.clone(), events_tx.clone(), recent.clone(), start)),
         };
-        let speech = SpeechQueue::new(speaker.clone(), kokoro.clone());
-        let order: &'static [Line] = match deps.direction {
-            Direction::Inbound => &[Line::Hi, Line::OneMoment, Line::LostNotes, Line::Goodbye],
-            Direction::Outbound => &[Line::OneMoment, Line::LostNotes, Line::Goodbye],
+        let speech = SpeechQueue::new(speaker.clone(), base.clone());
+        let order: &'static [Line] = match (voice_up.is_some(), deps.direction) {
+            (false, _) => &[Line::NoVoice],
+            (true, Direction::Inbound) => &[Line::Hi, Line::OneMoment, Line::LostNotes, Line::Goodbye, Line::NoVoice],
+            (true, Direction::Outbound) => &[Line::OneMoment, Line::LostNotes, Line::Goodbye, Line::NoVoice],
         };
         {
             let (lines, rendering, language, events) =
                 (deps.lines.clone(), speech.rendering(), language.clone(), events_tx.clone());
             tokio::task::spawn_blocking(move || {
-                render_lines(&lines, &speaker, &kokoro, &language, order, &rendering, &events);
+                render_lines(&lines, &speaker, &base, &language, order, &rendering, &events);
             });
         }
         let mut playout = Playout::default();
         if deps.profile.cue {
             playout.push(Clip { reply: None, chars: 0, pcm: deps.cues.ready.to_vec() });
+        }
+        if voice_up.is_none() {
+            eprintln!("voice: the {language} voice is down; the call ends after its kept line");
         }
         let live = Live {
             send,
@@ -272,15 +294,15 @@ impl<S: Fn(CallBody)> Live<S> {
             events,
             heard_cue: deps.profile.cue.then(|| deps.cues.heard.clone()),
             lines: HashMap::new(),
-            goodbye_pending: false,
-            awaiting_reply: (deps.direction == Direction::Inbound).then_some((start, Line::Hi)),
+            closing: voice_up.is_none().then_some(Line::NoVoice),
+            awaiting_reply: (voice_up.is_some() && deps.direction == Direction::Inbound).then_some((start, Line::Hi)),
             drafted: None,
             start,
             playing: false,
             played_reply: false,
             link_down_since: None,
             lost_played: false,
-            ending: None,
+            ending: voice_up.is_none().then(|| Ending::new(SessionEnd::VoiceDown)),
         };
         Ok((live, tasks))
     }
@@ -337,6 +359,11 @@ impl<S: Fn(CallBody)> Live<S> {
             self.act(actions);
         }
         self.speech.pump(&mut self.playout);
+        for reply in self.speech.take_unspeakable() {
+            eprintln!("voice: reply {reply} cannot be spoken; ending the call");
+            self.speech.drop_reply(reply);
+            self.close_with(Line::NoVoice, SessionEnd::VoiceLost);
+        }
         if let Some(frame) = self.playout.next_frame() {
             if let Err(e) = self.media.send(&frame).await {
                 return Some(SessionEnd::MediaFailed(format!("{e:#}")));
@@ -377,11 +404,11 @@ impl<S: Fn(CallBody)> Live<S> {
                 self.play_line(line);
             }
         }
-        if self.goodbye_pending && self.lines.contains_key(&Line::Goodbye) {
-            self.goodbye_pending = false;
-            self.play_line(Line::Goodbye);
+        if let Some(line) = self.closing.filter(|line| self.lines.contains_key(line)) {
+            self.closing = None;
+            self.play_line(line);
         }
-        let drained = !self.goodbye_pending && self.playout.is_empty() && self.speech.is_idle();
+        let drained = self.closing.is_none() && self.playout.is_empty() && self.speech.is_idle();
         self.ending.as_mut()?.due(drained, Instant::now())
     }
 
@@ -507,37 +534,42 @@ impl<S: Fn(CallBody)> Live<S> {
 
     /// Cuts whatever is playing and ends the call once the goodbye line has played.
     fn say_goodbye(&mut self, end: SessionEnd) {
+        self.close_with(Line::Goodbye, end);
+    }
+
+    fn close_with(&mut self, line: Line, end: SessionEnd) {
         if self.ending.is_some() {
             return;
         }
         self.media.clear();
         self.speech.flush(&mut self.playout);
         self.playout.resume();
-        self.goodbye_pending = true;
+        self.closing = Some(line);
         self.ending = Some(Ending::new(end));
     }
 }
 
-/// Gives the call each line at once: in `speaker` if already rendered, else in Kokoro. A sidecar voice's
-/// lines are then rendered in it one by one, only while no reply is rendering, and replace Kokoro's.
+/// Gives the call each line at once: in `speaker` if already rendered, else in the base voice. A sidecar
+/// voice's lines are then rendered in it one by one, only while no reply is rendering, and replace the
+/// base's. A base that is down gives only what it rendered before.
 fn render_lines(
     lines: &Lines,
     speaker: &Speaker,
-    kokoro: &Arc<dyn SpeechBackend>,
+    base: &Arc<dyn SpeechBackend>,
     language: &str,
     order: &[Line],
     rendering: &AtomicBool,
     events: &mpsc::UnboundedSender<Event>,
 ) {
-    let on_kokoro = speaker.backend.id() == kokoro.id();
-    let quick = if on_kokoro { speaker.clone() } else { Speaker::new(kokoro.clone(), "") };
+    let on_base = speaker.backend.id() == base.id();
+    let quick = if on_base { speaker.clone() } else { Speaker::new(base.clone(), "") };
     let mut upgrades = Vec::new();
     for &line in order {
         let pcm = lines.cached(speaker, language, line).or_else(|| {
-            if !on_kokoro {
+            if !on_base {
                 upgrades.push(line);
             }
-            lines.get(&quick, &**kokoro, language, line).map_err(|e| eprintln!("voice: rendering {line:?} failed: {e:#}")).ok()
+            lines.get(&quick, &**base, language, line).map_err(|e| eprintln!("voice: rendering {line:?} failed: {e:#}")).ok()
         });
         if events.send(Event::Line { line, pcm }).is_err() {
             return;
@@ -561,7 +593,7 @@ fn render_lines(
                 }
                 Ok(None) => {}
                 Err(e) => {
-                    eprintln!("voice: rendering {line:?} in {} failed, keeping Kokoro's: {e:#}", speaker.backend.id());
+                    eprintln!("voice: rendering {line:?} in {} failed, keeping the base voice's: {e:#}", speaker.backend.id());
                     return;
                 }
             }
@@ -626,7 +658,7 @@ async fn stt_worker(
                 }
                 SttCmd::Finish { turn } => SttOut::Finished(Some((turn, stt.finish()))),
                 SttCmd::Reset => {
-                    stt.finish();
+                    stt.reset();
                     SttOut::Finished(None)
                 }
             };
@@ -663,9 +695,10 @@ async fn stt_worker(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::audio::tts::{ChunkedBackend, Renderer};
+    use crate::audio::engines::BaseVoice;
     use crate::audio::lines::text;
     use crate::audio::playout::FRAME;
+    use crate::audio::tts::{ChunkedBackend, Renderer};
     use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::sync::Notify;
 
@@ -754,11 +787,14 @@ mod tests {
         tts: Arc<FakeTts>,
         stt_panics: bool,
         blank_finish: bool,
+        /// The one language loaded, and the sidecar it speaks through if not Kokoro.
+        language: &'static str,
+        sidecar_base: Option<&'static str>,
     }
 
     impl SpeechEngines for FakeEngines {
         fn languages(&self) -> Vec<String> {
-            vec!["en".into()]
+            vec![self.language.into()]
         }
 
         fn vad(&self, _language: &str) -> anyhow::Result<Box<dyn Vad>> {
@@ -773,8 +809,11 @@ mod tests {
             Arc::new(FakeTurn(0.9))
         }
 
-        fn tts(&self, _language: &str) -> Arc<dyn SpeechBackend> {
-            Arc::new(ChunkedBackend::new("kokoro", "Kokoro", self.tts.clone(), Vec::new()))
+        fn tts(&self, _language: &str) -> BaseVoice {
+            match self.sidecar_base {
+                Some(id) => BaseVoice::Sidecar(id.into()),
+                None => BaseVoice::Kokoro(Arc::new(ChunkedBackend::new("kokoro", "Kokoro", self.tts.clone(), Vec::new()))),
+            }
         }
     }
 
@@ -867,9 +906,13 @@ mod tests {
         }
     }
 
+    fn engines(stt: Vec<(usize, &'static str)>, tts: &Arc<FakeTts>) -> FakeEngines {
+        FakeEngines { stt, tts: tts.clone(), stt_panics: false, blank_finish: false, language: "en", sidecar_base: None }
+    }
+
     fn deps(stt: Vec<(usize, &'static str)>, cue: bool, tts: &Arc<FakeTts>) -> SessionDeps {
         SessionDeps {
-            engines: Arc::new(FakeEngines { stt, tts: tts.clone(), stt_panics: false, blank_finish: false }),
+            engines: Arc::new(engines(stt, tts)),
             lines: Arc::new(Lines::default()),
             cues: Arc::new(Cues { ready: Arc::new(vec![READY; FRAME]), heard: Arc::new(vec![HEARD; FRAME]) }),
             profile: VoiceProfile { language: "en".into(), voice: String::new(), cue },
@@ -1045,7 +1088,7 @@ mod tests {
         let hi = text(Line::Hi, "en").len();
         let goodbye = text(Line::Goodbye, "en").len();
         let gate = Arc::new(Gated::default());
-        let voices = vec![crate::audio::engines::VoiceInfo { id: "v".into(), label: "V".into(), language: String::new() }];
+        let voices = vec![crate::audio::engines::VoiceInfo { id: "v".into(), label: "V".into(), languages: Vec::new() }];
         let side: Arc<dyn SpeechBackend> = Arc::new(ChunkedBackend::new("side", "Side", gate.clone(), voices));
         let tts: Arc<FakeTts> = Arc::default();
         let mut d = deps(Vec::new(), false, &tts);
@@ -1065,15 +1108,163 @@ mod tests {
         assert_eq!(c.probe.frames_of(goodbye), 0);
     }
 
+    /// Speaks each text as `text.len()` frames of `JA`, until told to fail.
+    #[derive(Default)]
+    struct Japanese {
+        fail: AtomicBool,
+        said: Mutex<Vec<String>>,
+    }
+
+    const JA: i16 = 9000;
+
+    impl Renderer for Japanese {
+        fn render(&self, text: &str, _voice: &str) -> anyhow::Result<Vec<i16>> {
+            if self.fail.load(Ordering::SeqCst) {
+                anyhow::bail!("the sidecar is gone");
+            }
+            self.said.lock().unwrap().push(text.into());
+            Ok(vec![JA; text.len() * FRAME])
+        }
+    }
+
+    /// Streams of a sidecar: one that errors is over, like a closed socket.
+    struct Sidecar(ChunkedBackend);
+
+    struct SidecarStream(Box<dyn crate::audio::tts::SpeechStream>, bool);
+
+    impl SpeechBackend for Sidecar {
+        fn id(&self) -> &str {
+            self.0.id()
+        }
+
+        fn label(&self) -> &str {
+            self.0.label()
+        }
+
+        fn input(&self) -> crate::audio::tts::TextInput {
+            self.0.input()
+        }
+
+        fn voices(&self) -> Vec<crate::audio::engines::VoiceInfo> {
+            self.0.voices()
+        }
+
+        fn open(&self, voice: &str) -> anyhow::Result<Box<dyn crate::audio::tts::SpeechStream>> {
+            Ok(Box::new(SidecarStream(self.0.open(voice)?, true)))
+        }
+    }
+
+    impl crate::audio::tts::SpeechStream for SidecarStream {
+        fn push(&mut self, text: &str) -> anyhow::Result<()> {
+            self.0.push(text)
+        }
+
+        fn finish(&mut self) -> anyhow::Result<()> {
+            self.0.finish()
+        }
+
+        fn next(&mut self, ahead: Duration) -> anyhow::Result<crate::audio::tts::Next> {
+            let next = self.0.next(ahead);
+            self.1 &= next.is_ok();
+            next
+        }
+
+        fn cancel(&mut self) {
+            self.0.cancel();
+        }
+
+        fn alive(&self) -> bool {
+            self.1
+        }
+    }
+
+    fn japanese_sidecar(japanese: &Arc<Japanese>) -> Arc<dyn SpeechBackend> {
+        Arc::new(Sidecar(ChunkedBackend::new("ja", "Japanese", japanese.clone(), Vec::new())))
+    }
+
+    fn japanese_deps(tts: &Arc<FakeTts>, lines: Arc<Lines>, sidecars: Vec<Arc<dyn SpeechBackend>>) -> SessionDeps {
+        let engines = Arc::new(FakeEngines { language: "ja", sidecar_base: Some("ja"), ..engines(Vec::new(), tts) });
+        let profile = VoiceProfile { language: "ja".into(), voice: String::new(), cue: false };
+        SessionDeps { engines, lines, sidecars, profile, direction: Direction::Inbound, ..deps(Vec::new(), false, tts) }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_japanese_call_speaks_through_its_sidecar_and_keeps_its_lines() {
+        let japanese = Arc::new(Japanese::default());
+        let ja = japanese_sidecar(&japanese);
+        let dir = tempfile::tempdir().unwrap();
+        let lines = Arc::new(Lines::new(Some(dir.path().to_path_buf())));
+        let tts: Arc<FakeTts> = Arc::default();
+        let c = call_with(japanese_deps(&tts, lines.clone(), vec![ja]), Vec::new(), tts);
+        c.frame(CallBody::Speak { reply: 1, idx: 0, text: "はい。".into() });
+        c.frame(CallBody::SpeakDone { reply: 1 });
+        c.frame(CallBody::Play { reply: 1 });
+        sleep_ms(3000).await;
+        assert_eq!(c.probe.frames_of(JA as usize), "はい。".len(), "the reply is in the sidecar's voice");
+        assert!(c.tts.said.lock().unwrap().is_empty(), "Kokoro says nothing on a Japanese call");
+        let said = japanese.said.lock().unwrap().concat();
+        for line in [Line::Hi, Line::OneMoment, Line::LostNotes, Line::Goodbye, Line::NoVoice] {
+            assert!(said.contains(text(line, "ja")), "{line:?} in {said:?}");
+            assert!(lines.kept("ja", "", "ja", line).is_some(), "{line:?} is kept");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_japanese_call_without_its_sidecar_says_the_kept_line_and_ends() {
+        let japanese = Arc::new(Japanese::default());
+        let ja = japanese_sidecar(&japanese);
+        let dir = tempfile::tempdir().unwrap();
+        let lines = Arc::new(Lines::new(Some(dir.path().to_path_buf())));
+        lines.get(&Speaker::new(ja.clone(), ""), &*ja, "ja", Line::NoVoice).unwrap();
+        let rendered = japanese.said.lock().unwrap().len();
+        let tts: Arc<FakeTts> = Arc::default();
+        let c = call_with(japanese_deps(&tts, lines.clone(), Vec::new()), Vec::new(), tts);
+        c.frame(CallBody::Speak { reply: 1, idx: 0, text: "はい。".into() });
+        c.frame(CallBody::SpeakDone { reply: 1 });
+        c.frame(CallBody::Play { reply: 1 });
+        let end = tokio::time::timeout(Duration::from_secs(10), c.end).await.unwrap().unwrap();
+        assert_eq!(end, SessionEnd::VoiceDown);
+        assert_eq!(c.probe.frames_of(JA as usize), text(Line::NoVoice, "ja").len(), "the kept line, nothing else");
+        assert_eq!(japanese.said.lock().unwrap().len(), rendered, "nothing was rendered during the call");
+        assert!(c.tts.said.lock().unwrap().is_empty());
+        assert_eq!(end.failure(), Some("the call's voice is down"));
+
+        let tts: Arc<FakeTts> = Arc::default();
+        let bare = call_with(japanese_deps(&tts, Arc::new(Lines::default()), Vec::new()), Vec::new(), tts);
+        let end = tokio::time::timeout(Duration::from_secs(10), bare.end).await.unwrap().unwrap();
+        assert_eq!(end, SessionEnd::VoiceDown, "with nothing kept the call still ends");
+        assert!(bare.probe.sent.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn losing_the_sidecar_mid_call_ends_the_call_after_the_kept_line() {
+        let japanese = Arc::new(Japanese::default());
+        let ja = japanese_sidecar(&japanese);
+        let lines = Arc::new(Lines::default());
+        let tts: Arc<FakeTts> = Arc::default();
+        let c = call_with(japanese_deps(&tts, lines.clone(), vec![ja]), Vec::new(), tts);
+        for _ in 0..1000 {
+            if lines.kept("ja", "", "ja", Line::NoVoice).is_some() {
+                break;
+            }
+            tokio::task::yield_now().await;
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        japanese.fail.store(true, Ordering::SeqCst);
+        c.frame(CallBody::Speak { reply: 1, idx: 0, text: "明日です。".into() });
+        c.frame(CallBody::SpeakDone { reply: 1 });
+        c.frame(CallBody::Play { reply: 1 });
+        let mut c = c;
+        let end = tokio::time::timeout(Duration::from_secs(10), &mut c.end).await.unwrap().unwrap();
+        assert_eq!(end, SessionEnd::VoiceLost);
+        assert!(c.probe.frames_of(JA as usize) >= text(Line::NoVoice, "ja").len(), "the kept line plays");
+        assert!(!c.log().contains(&CallBody::Played { reply: 1 }));
+    }
+
     #[tokio::test(start_paused = true)]
     async fn an_empty_commit_retracts_its_draft() {
         let tts: Arc<FakeTts> = Arc::default();
-        let engines = Arc::new(FakeEngines {
-            stt: vec![(2, "move"), (6, "move my run")],
-            tts: tts.clone(),
-            stt_panics: false,
-            blank_finish: true,
-        });
+        let engines = Arc::new(FakeEngines { blank_finish: true, ..engines(vec![(2, "move"), (6, "move my run")], &tts) });
         let c = call_with(
             SessionDeps { engines, ..deps(Vec::new(), false, &tts) },
             audio(&[(0.1, 1000), (0.0, 1000)]),
@@ -1196,7 +1387,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_crashed_recognizer_ends_the_call() {
         let tts: Arc<FakeTts> = Arc::default();
-        let engines = Arc::new(FakeEngines { stt: Vec::new(), tts: tts.clone(), stt_panics: true, blank_finish: false });
+        let engines = Arc::new(FakeEngines { stt_panics: true, ..engines(Vec::new(), &tts) });
         let c = call_with(SessionDeps { engines, ..deps(Vec::new(), false, &tts) }, audio(&[(0.1, 1000)]), tts);
         let end = tokio::time::timeout(Duration::from_secs(2), c.end).await.unwrap().unwrap();
         assert!(matches!(end, SessionEnd::MediaFailed(_)), "{end:?}");

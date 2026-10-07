@@ -5,4 +5,5 @@ pub mod lines;
 pub mod playout;
 pub mod sidecar;
 pub mod speech;
+pub mod stt;
 pub mod tts;

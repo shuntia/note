@@ -5,14 +5,16 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{anyhow, Context};
 use sherpa_onnx::{
-    GenerationConfig, OfflineTts, OfflineTtsConfig, OfflineTtsKokoroModelConfig, OfflineTtsModelConfig,
-    OnlineModelConfig, OnlineRecognizer, OnlineRecognizerConfig, OnlineStream, OnlineTransducerModelConfig,
-    SileroVadModelConfig, VadModelConfig, VoiceActivityDetector,
+    GenerationConfig, OfflineModelConfig, OfflineRecognizer, OfflineRecognizerConfig, OfflineTransducerModelConfig,
+    OfflineTts, OfflineTtsConfig, OfflineTtsKokoroModelConfig, OfflineTtsModelConfig, OnlineModelConfig,
+    OnlineRecognizer, OnlineRecognizerConfig, OnlineStream, OnlineTransducerModelConfig, SileroVadModelConfig,
+    VadModelConfig, VoiceActivityDetector,
 };
 
 use super::mel::{log_mel, MEL_BINS, MEL_FRAMES};
+use super::stt::{Decoder, OfflineStt};
 use super::tts::{ChunkedBackend, Renderer, SpeechBackend};
-use crate::config::{ModelSet, ModelsConfig};
+use crate::config::{KokoroModel, ModelSet, ModelsConfig, SttModel};
 
 pub trait Vad: Send {
     /// One 512-sample (32 ms) window at 16 kHz; returns true while speech is detected.
@@ -26,11 +28,40 @@ pub trait SpeechToText: Send {
     fn partial(&mut self) -> String;
     /// Ends the current turn: flushes, returns the final text, and starts a fresh stream.
     fn finish(&mut self) -> String;
+    /// Discards the current turn.
+    fn reset(&mut self) {
+        self.finish();
+    }
 }
 
 pub trait TurnDetector: Send + Sync {
     /// Probability in [0, 1] that the speaker has finished, over the last 8 s.
     fn complete(&self, samples_16k: &[f32]) -> f32;
+}
+
+/// A language's base voice: what its canned lines, previews and fallbacks speak in.
+#[derive(Clone)]
+pub enum BaseVoice {
+    Kokoro(Arc<dyn SpeechBackend>),
+    /// A sidecar by id, up or not.
+    Sidecar(String),
+}
+
+impl BaseVoice {
+    pub fn id(&self) -> &str {
+        match self {
+            BaseVoice::Kokoro(kokoro) => kokoro.id(),
+            BaseVoice::Sidecar(id) => id,
+        }
+    }
+
+    /// The backend, if it is up now.
+    pub fn live(&self, sidecars: &[Arc<dyn SpeechBackend>]) -> Option<Arc<dyn SpeechBackend>> {
+        match self {
+            BaseVoice::Kokoro(kokoro) => Some(kokoro.clone()),
+            BaseVoice::Sidecar(id) => sidecars.iter().find(|s| s.id() == id).cloned(),
+        }
+    }
 }
 
 /// The per-language engines a live call draws on.
@@ -40,15 +71,16 @@ pub trait SpeechEngines: Send + Sync {
     fn stt(&self, language: &str) -> anyhow::Result<Box<dyn SpeechToText>>;
     /// Panics when no language is loaded.
     fn turn(&self, language: &str) -> Arc<dyn TurnDetector>;
-    /// Kokoro in `language`. Panics when no language is loaded.
-    fn tts(&self, language: &str) -> Arc<dyn SpeechBackend>;
+    /// The base voice of `language`. Panics when no language is loaded.
+    fn tts(&self, language: &str) -> BaseVoice;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct VoiceInfo {
     pub id: String,
     pub label: String,
-    pub language: String,
+    /// The languages it speaks; empty for any.
+    pub languages: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, Default)]
@@ -63,11 +95,16 @@ pub enum Device {
 const SAMPLE_RATE: i32 = 16_000;
 const KOKORO_RATE: i32 = 24_000;
 
+enum Recognizer {
+    Online(Arc<OnlineRecognizer>),
+    Offline(Arc<OfflineRecognizer>),
+}
+
 struct Language {
     vad_model: String,
-    recognizer: Arc<OnlineRecognizer>,
+    recognizer: Recognizer,
     turn: Arc<OrtTurn>,
-    tts: Arc<ChunkedBackend>,
+    tts: BaseVoice,
 }
 
 pub struct Engines {
@@ -79,24 +116,23 @@ impl Engines {
         Engines { languages: BTreeMap::new() }
     }
 
+    /// Loads each set; a language that fails is logged and left out, and none loading is an error.
     pub fn load(models: &ModelsConfig, device: Device) -> anyhow::Result<Engines> {
         let mut languages = BTreeMap::new();
+        let mut failed = Vec::new();
         for (code, set) in models {
-            let kokoro =
-                SherpaTts::create(code, set, device, GpuAttempt::Try).with_context(|| format!("loading the {code} voice"))?;
-            kokoro.render("Hello.", "")?;
-            let voices = kokoro.voices();
-            let language = Language {
-                vad_model: path_str(&set.vad)?,
-                recognizer: Arc::new(recognizer(set).with_context(|| format!("loading the {code} recognizer"))?),
-                turn: Arc::new(OrtTurn::create(&set.turn).with_context(|| format!("loading the {code} turn model"))?),
-                tts: Arc::new(ChunkedBackend::new(KOKORO, "Kokoro", Arc::new(kokoro), voices)),
-            };
-            language
-                .turn
-                .run(&vec![0.0; SAMPLE_RATE as usize])
-                .with_context(|| format!("warming the {code} turn model"))?;
-            languages.insert(code.clone(), language);
+            match Language::load(code, set, device) {
+                Ok(language) => {
+                    languages.insert(code.clone(), language);
+                }
+                Err(e) => {
+                    eprintln!("voice: loading {code} failed: {e:#}");
+                    failed.push(code.as_str());
+                }
+            }
+        }
+        if languages.is_empty() && !failed.is_empty() {
+            anyhow::bail!("no language loaded ({})", failed.join(", "));
         }
         Ok(Engines { languages })
     }
@@ -110,20 +146,46 @@ impl Engines {
     }
 }
 
+impl Language {
+    fn load(code: &str, set: &ModelSet, device: Device) -> anyhow::Result<Language> {
+        let tts = match (&set.kokoro, &set.tts_sidecar) {
+            (Some(kokoro), _) => {
+                let kokoro = SherpaTts::create(code, kokoro, device, GpuAttempt::Try).context("loading the voice")?;
+                kokoro.render("Hello.", "")?;
+                let voices = kokoro.voices();
+                BaseVoice::Kokoro(Arc::new(ChunkedBackend::new(KOKORO, "Kokoro", Arc::new(kokoro), voices)))
+            }
+            (None, Some(sidecar)) => BaseVoice::Sidecar(sidecar.clone()),
+            (None, None) => anyhow::bail!("no base voice"),
+        };
+        let language = Language {
+            vad_model: path_str(&set.vad)?,
+            recognizer: recognizer(&set.stt).context("loading the recognizer")?,
+            turn: Arc::new(OrtTurn::create(&set.turn).context("loading the turn model")?),
+            tts,
+        };
+        language.turn.run(&vec![0.0; SAMPLE_RATE as usize]).context("warming the turn model")?;
+        Ok(language)
+    }
+}
+
 impl SpeechEngines for Engines {
     fn vad(&self, language: &str) -> anyhow::Result<Box<dyn Vad>> {
         Ok(Box::new(SherpaVad::create(&self.language(language)?.vad_model)?))
     }
 
     fn stt(&self, language: &str) -> anyhow::Result<Box<dyn SpeechToText>> {
-        Ok(Box::new(SherpaStt::new(self.language(language)?.recognizer.clone())))
+        Ok(match &self.language(language)?.recognizer {
+            Recognizer::Online(recognizer) => Box::new(SherpaStt::new(recognizer.clone())),
+            Recognizer::Offline(recognizer) => Box::new(OfflineStt::new(recognizer.clone())),
+        })
     }
 
     fn turn(&self, language: &str) -> Arc<dyn TurnDetector> {
         self.language(language).expect("no language loaded").turn.clone()
     }
 
-    fn tts(&self, language: &str) -> Arc<dyn SpeechBackend> {
+    fn tts(&self, language: &str) -> BaseVoice {
         self.language(language).expect("no language loaded").tts.clone()
     }
 
@@ -134,33 +196,69 @@ impl SpeechEngines for Engines {
 
 pub const KOKORO: &str = "kokoro";
 
-/// The Kokoro speaker id for `voice`, or the set's default for an unknown or empty one.
-pub fn resolve_sid(set: &ModelSet, voice: &str) -> i32 {
-    set.voices.iter().find(|v| v.id == voice).or(set.voices.first()).map_or(0, |v| v.sid)
+/// The Kokoro speaker id for `voice`, or the model's default for an unknown or empty one.
+pub fn resolve_sid(kokoro: &KokoroModel, voice: &str) -> i32 {
+    kokoro.speakers.iter().find(|v| v.id == voice).or(kokoro.speakers.first()).map_or(0, |v| v.sid)
 }
 
 fn path_str(p: &Path) -> anyhow::Result<String> {
     p.to_str().map(str::to_owned).ok_or_else(|| anyhow!("{} is not UTF-8", p.display()))
 }
 
-fn recognizer(set: &ModelSet) -> anyhow::Result<OnlineRecognizer> {
-    let config = OnlineRecognizerConfig {
-        model_config: OnlineModelConfig {
-            transducer: OnlineTransducerModelConfig {
-                encoder: Some(path_str(&set.stt_encoder)?),
-                decoder: Some(path_str(&set.stt_decoder)?),
-                joiner: Some(path_str(&set.stt_joiner)?),
-            },
-            tokens: Some(path_str(&set.stt_tokens)?),
-            num_threads: 4,
-            provider: Some("cpu".into()),
-            ..Default::default()
-        },
-        decoding_method: Some("greedy_search".into()),
-        enable_endpoint: false,
-        ..Default::default()
-    };
-    OnlineRecognizer::create(&config).ok_or_else(|| anyhow!("sherpa-onnx refused the recognizer config"))
+fn recognizer(stt: &SttModel) -> anyhow::Result<Recognizer> {
+    match stt {
+        SttModel::OnlineTransducer { encoder, decoder, joiner, tokens } => {
+            let config = OnlineRecognizerConfig {
+                model_config: OnlineModelConfig {
+                    transducer: OnlineTransducerModelConfig {
+                        encoder: Some(path_str(encoder)?),
+                        decoder: Some(path_str(decoder)?),
+                        joiner: Some(path_str(joiner)?),
+                    },
+                    tokens: Some(path_str(tokens)?),
+                    num_threads: 4,
+                    provider: Some("cpu".into()),
+                    ..Default::default()
+                },
+                decoding_method: Some("greedy_search".into()),
+                enable_endpoint: false,
+                ..Default::default()
+            };
+            let recognizer =
+                OnlineRecognizer::create(&config).ok_or_else(|| anyhow!("sherpa-onnx refused the recognizer config"))?;
+            Ok(Recognizer::Online(Arc::new(recognizer)))
+        }
+        SttModel::OfflineTransducer { encoder, decoder, joiner, tokens } => {
+            let config = OfflineRecognizerConfig {
+                model_config: OfflineModelConfig {
+                    transducer: OfflineTransducerModelConfig {
+                        encoder: Some(path_str(encoder)?),
+                        decoder: Some(path_str(decoder)?),
+                        joiner: Some(path_str(joiner)?),
+                    },
+                    tokens: Some(path_str(tokens)?),
+                    num_threads: 4,
+                    provider: Some("cpu".into()),
+                    model_type: Some("transducer".into()),
+                    ..Default::default()
+                },
+                decoding_method: Some("greedy_search".into()),
+                ..Default::default()
+            };
+            let recognizer =
+                OfflineRecognizer::create(&config).ok_or_else(|| anyhow!("sherpa-onnx refused the recognizer config"))?;
+            Ok(Recognizer::Offline(Arc::new(recognizer)))
+        }
+    }
+}
+
+impl Decoder for OfflineRecognizer {
+    fn decode(&self, samples_16k: &[f32]) -> String {
+        let stream = self.create_stream();
+        stream.accept_waveform(SAMPLE_RATE, samples_16k);
+        OfflineRecognizer::decode(self, &stream);
+        stream.get_result().map(|r| r.text).unwrap_or_default()
+    }
 }
 
 struct SherpaVad {
@@ -241,6 +339,10 @@ impl SpeechToText for SherpaStt {
         self.stream = self.recognizer.create_stream();
         text
     }
+
+    fn reset(&mut self) {
+        self.stream = self.recognizer.create_stream();
+    }
 }
 
 struct OrtTurn {
@@ -317,21 +419,21 @@ struct SherpaTts {
     tts: OfflineTts,
     #[cfg_attr(not(test), allow(dead_code))]
     provider: &'static str,
-    set: ModelSet,
+    model: KokoroModel,
     language: String,
 }
 
 impl SherpaTts {
-    fn create(language: &str, set: &ModelSet, device: Device, gpu: GpuAttempt) -> anyhow::Result<Self> {
+    fn create(language: &str, model: &KokoroModel, device: Device, gpu: GpuAttempt) -> anyhow::Result<Self> {
         let config = |provider: &str| -> anyhow::Result<OfflineTtsConfig> {
             Ok(OfflineTtsConfig {
                 model: OfflineTtsModelConfig {
                     kokoro: OfflineTtsKokoroModelConfig {
-                        model: Some(path_str(&set.tts_model)?),
-                        voices: Some(path_str(&set.tts_voices)?),
-                        tokens: Some(path_str(&set.tts_tokens)?),
-                        data_dir: Some(path_str(&set.tts_data_dir)?),
-                        lexicon: set.tts_lexicon.clone(),
+                        model: Some(path_str(&model.model)?),
+                        voices: Some(path_str(&model.voices)?),
+                        tokens: Some(path_str(&model.tokens)?),
+                        data_dir: Some(path_str(&model.data_dir)?),
+                        lexicon: model.lexicon.clone(),
                         ..Default::default()
                     },
                     num_threads: 2,
@@ -360,7 +462,7 @@ impl SherpaTts {
         if tts.sample_rate() != KOKORO_RATE {
             anyhow::bail!("expected {KOKORO_RATE} Hz from the TTS, got {}", tts.sample_rate());
         }
-        Ok(SherpaTts { tts, provider, set: set.clone(), language: language.into() })
+        Ok(SherpaTts { tts, provider, model: model.clone(), language: language.into() })
     }
 }
 
@@ -373,7 +475,7 @@ impl SherpaTts {
 
 impl SherpaTts {
     fn generate(&self, text: &str, voice: &str) -> anyhow::Result<Vec<f32>> {
-        let config = GenerationConfig { sid: resolve_sid(&self.set, voice), ..Default::default() };
+        let config = GenerationConfig { sid: resolve_sid(&self.model, voice), ..Default::default() };
         let audio = self
             .tts
             .generate_with_config::<fn(&[f32], f32) -> bool>(text, &config, None)
@@ -384,10 +486,10 @@ impl SherpaTts {
 
 impl SherpaTts {
     fn voices(&self) -> Vec<VoiceInfo> {
-        self.set
-            .voices
+        self.model
+            .speakers
             .iter()
-            .map(|v| VoiceInfo { id: v.id.clone(), label: v.label.clone(), language: self.language.clone() })
+            .map(|v| VoiceInfo { id: v.id.clone(), label: v.label.clone(), languages: vec![self.language.clone()] })
             .collect()
     }
 }
@@ -416,26 +518,31 @@ fn to_48k_i16(samples_24k: &[f32]) -> Vec<i16> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{models_from_dir, VoiceEntry};
+    use crate::config::{models_from_dir, TtsConfig, VoiceEntry};
 
     fn models() -> Option<ModelsConfig> {
-        std::env::var_os("NOTE_VOICE_MODELS").map(|d| models_from_dir(Path::new(&d)))
+        std::env::var_os("NOTE_VOICE_MODELS").map(|d| models_from_dir(Path::new(&d), &TtsConfig::default()))
     }
 
-    fn test_set() -> ModelSet {
-        let mut set = models_from_dir(Path::new("/nonexistent")).remove("en").unwrap();
-        set.voices = vec![
+    fn kokoro(e: &Engines, language: &str) -> Arc<dyn SpeechBackend> {
+        let BaseVoice::Kokoro(kokoro) = e.tts(language) else { panic!("{language} speaks through a sidecar") };
+        kokoro
+    }
+
+    fn test_model() -> KokoroModel {
+        let mut model = models_from_dir(Path::new("/nonexistent"), &TtsConfig::default()).remove("en").unwrap().kokoro.unwrap();
+        model.speakers = vec![
             VoiceEntry { id: "af_sarah".into(), sid: 3, label: "Sarah".into() },
             VoiceEntry { id: "bm_george".into(), sid: 9, label: "George".into() },
         ];
-        set
+        model
     }
 
     #[test]
     #[ignore = "needs NOTE_VOICE_MODELS"]
     fn tts_then_stt_round_trips_a_sentence() {
         let e = Engines::load(&models().unwrap(), Device::Auto).unwrap();
-        let pcm48 = e.tts("en").render("Move my run to tomorrow at seven.", "").unwrap();
+        let pcm48 = kokoro(&e, "en").render("Move my run to tomorrow at seven.", "").unwrap();
         let pcm16: Vec<f32> = pcm48.iter().step_by(3).map(|s| f32::from(*s) / 32768.0).collect();
         let mut stt = e.stt("en").unwrap();
         for c in pcm16.chunks(2560) {
@@ -446,10 +553,38 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "needs NOTE_VOICE_MODELS with the Japanese models"]
+    fn japanese_speech_is_recognized_offline() {
+        let dir = PathBuf::from(std::env::var_os("NOTE_VOICE_MODELS").unwrap());
+        let mut sets = models().unwrap();
+        sets.remove("en");
+        assert!(sets.contains_key("ja"), "no Japanese models under {}", dir.display());
+        let e = Engines::load(&sets, Device::Cpu).unwrap();
+        let wav = dir.join(crate::config::REAZON_DIR).join("test_wavs/2.wav");
+        let mut reader = hound::WavReader::open(&wav).unwrap();
+        assert_eq!(reader.spec().sample_rate, 16_000);
+        let pcm16: Vec<f32> = reader.samples::<i16>().map(|s| f32::from(s.unwrap()) / 32768.0).collect();
+        let mut stt = e.stt("ja").unwrap();
+        let mut partials = Vec::new();
+        for c in pcm16.chunks(2560) {
+            stt.accept(c);
+            let partial = stt.partial();
+            if partials.last() != Some(&partial) {
+                partials.push(partial);
+            }
+        }
+        let start = std::time::Instant::now();
+        let text = stt.finish();
+        println!("ja: {text:?} in {:.2?}, partials {partials:?}", start.elapsed());
+        assert!(text.contains("おじいさん"), "{text}");
+        assert!(partials.len() > 1, "{partials:?}");
+    }
+
+    #[test]
     #[ignore = "needs NOTE_VOICE_MODELS"]
     fn a_failed_cuda_engine_falls_back_to_cpu() {
         let mut m = models().unwrap();
-        let tts = SherpaTts::create("en", &m["en"], Device::Cuda, GpuAttempt::Fail).unwrap();
+        let tts = SherpaTts::create("en", m["en"].kokoro.as_ref().unwrap(), Device::Cuda, GpuAttempt::Fail).unwrap();
         assert_eq!(tts.provider(), "cpu");
         assert!(!tts.render("Hi.", "").unwrap().is_empty());
         m.clear();
@@ -460,7 +595,7 @@ mod tests {
     #[ignore = "needs NOTE_VOICE_MODELS"]
     fn smart_turn_scores_a_finished_sentence_above_a_cut_one() {
         let e = Engines::load(&models().unwrap(), Device::Cpu).unwrap();
-        let tts = e.tts("en");
+        let tts = kokoro(&e, "en");
         let down = |p: Vec<i16>| p.iter().step_by(3).map(|s| f32::from(*s) / 32768.0).collect::<Vec<f32>>();
         let done = down(tts.render("Can you move my run to tomorrow?", "").unwrap());
         let cut = down(tts.render("Can you move my", "").unwrap());
@@ -480,7 +615,7 @@ mod tests {
     fn kokoro_speaks_a_three_sentence_reply_in_two_or_three_chunks() {
         use super::super::tts::Next;
         let e = Engines::load(&models().unwrap(), Device::Auto).unwrap();
-        let mut stream = e.tts("en").open("").unwrap();
+        let mut stream = kokoro(&e, "en").open("").unwrap();
         for clause in REPLY {
             stream.push(clause).unwrap();
         }
@@ -596,7 +731,7 @@ mod tests {
         use std::time::Duration;
         for device in [Device::Auto, Device::Cpu] {
             let e = Engines::load(&models().unwrap(), device).unwrap();
-            let kokoro = e.tts("en");
+            let kokoro = kokoro(&e, "en");
             for apart in [Duration::ZERO, Duration::from_millis(150), Duration::from_millis(400)] {
                 for (name, backend) in [
                     ("per clause", Arc::new(PerClause(kokoro.clone())) as Arc<dyn super::super::tts::SpeechBackend>),
@@ -619,9 +754,27 @@ mod tests {
 
     #[test]
     fn an_unknown_voice_falls_back_to_the_language_default() {
-        let set = test_set();
-        assert_eq!(resolve_sid(&set, "bm_george"), 9);
-        assert_eq!(resolve_sid(&set, "nope"), set.voices[0].sid);
-        assert_eq!(resolve_sid(&set, ""), set.voices[0].sid);
+        let model = test_model();
+        assert_eq!(resolve_sid(&model, "bm_george"), 9);
+        assert_eq!(resolve_sid(&model, "nope"), model.speakers[0].sid);
+        assert_eq!(resolve_sid(&model, ""), model.speakers[0].sid);
+    }
+
+    #[test]
+    fn a_sidecar_base_voice_is_live_only_while_its_sidecar_answers() {
+        use super::super::tts::ChunkedBackend;
+        struct Silent;
+        impl Renderer for Silent {
+            fn render(&self, _text: &str, _voice: &str) -> anyhow::Result<Vec<i16>> {
+                Ok(Vec::new())
+            }
+        }
+        let ja: Arc<dyn SpeechBackend> = Arc::new(ChunkedBackend::new("ja", "Japanese", Arc::new(Silent), Vec::new()));
+        let base = BaseVoice::Sidecar("ja".into());
+        assert_eq!(base.id(), "ja");
+        assert!(base.live(&[]).is_none());
+        assert_eq!(base.live(std::slice::from_ref(&ja)).map(|b| b.id().to_owned()).as_deref(), Some("ja"));
+        let kokoro: Arc<dyn SpeechBackend> = Arc::new(ChunkedBackend::new(KOKORO, "Kokoro", Arc::new(Silent), Vec::new()));
+        assert!(BaseVoice::Kokoro(kokoro).live(&[]).is_some());
     }
 }

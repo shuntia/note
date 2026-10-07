@@ -26,6 +26,9 @@ pub struct State {
     pub links: BTreeMap<i64, LinkState>,
     pub calls: BTreeMap<String, CallState>,
     pub since: Option<String>,
+    /// Each linked account's profile as of its last call, for what is said when Note cannot be reached.
+    #[serde(default)]
+    pub profiles: BTreeMap<String, note_voice_proto::VoiceProfile>,
 }
 
 /// `state.json`, replaced atomically on every save.

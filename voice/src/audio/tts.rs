@@ -45,6 +45,10 @@ pub trait SpeechStream: Send {
     /// audio is queued to play before it. An error loses only the piece it was rendering.
     fn next(&mut self, ahead: Duration) -> anyhow::Result<Next>;
     fn cancel(&mut self);
+    /// After an error: whether the stream can still produce the pieces that follow.
+    fn alive(&self) -> bool {
+        true
+    }
 }
 
 /// 48 kHz mono s16 audio and how many characters of the pushed text it covers.
@@ -107,18 +111,61 @@ impl Speaker {
     }
 }
 
-/// `<backend>:<voice>` on a live backend that offers it, or a bare id Kokoro offers.
-pub fn find_speaker(id: &str, kokoro: &Arc<dyn SpeechBackend>, sidecars: &[Arc<dyn SpeechBackend>]) -> Option<Speaker> {
+/// `<backend>:<voice>` on a live backend that offers it for `language`, or a bare id the language's
+/// base voice offers.
+pub fn find_speaker(
+    id: &str,
+    language: &str,
+    base: &Arc<dyn SpeechBackend>,
+    sidecars: &[Arc<dyn SpeechBackend>],
+) -> Option<Speaker> {
     let (backend, voice) = match id.split_once(':') {
         Some((backend, voice)) => (sidecars.iter().find(|b| b.id() == backend)?, voice),
-        None => (kokoro, id),
+        None => (base, id),
     };
-    backend.voices().iter().any(|v| v.id == voice).then(|| Speaker::new(backend.clone(), voice))
+    backend
+        .voices()
+        .iter()
+        .any(|v| v.id == voice && (v.languages.is_empty() || v.languages.iter().any(|l| l == language)))
+        .then(|| Speaker::new(backend.clone(), voice))
 }
 
-/// `find_speaker`, else Kokoro's default voice.
-pub fn speaker(id: &str, kokoro: &Arc<dyn SpeechBackend>, sidecars: &[Arc<dyn SpeechBackend>]) -> Speaker {
-    find_speaker(id, kokoro, sidecars).unwrap_or_else(|| Speaker::new(kokoro.clone(), ""))
+/// `find_speaker`, else the base voice's default.
+pub fn speaker(id: &str, language: &str, base: &Arc<dyn SpeechBackend>, sidecars: &[Arc<dyn SpeechBackend>]) -> Speaker {
+    find_speaker(id, language, base, sidecars).unwrap_or_else(|| Speaker::new(base.clone(), ""))
+}
+
+/// Stands in for a base voice whose sidecar is down: every stream fails to open.
+pub struct Mute {
+    id: String,
+}
+
+impl Mute {
+    pub fn new(id: &str) -> Self {
+        Mute { id: id.into() }
+    }
+}
+
+impl SpeechBackend for Mute {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn label(&self) -> &str {
+        &self.id
+    }
+
+    fn input(&self) -> TextInput {
+        TextInput::Chunks
+    }
+
+    fn voices(&self) -> Vec<VoiceInfo> {
+        Vec::new()
+    }
+
+    fn open(&self, _voice: &str) -> anyhow::Result<Box<dyn SpeechStream>> {
+        Err(anyhow!("the {} voice is down", self.id))
+    }
 }
 
 /// Linear interpolation from `rate` to 48 kHz.
@@ -240,9 +287,38 @@ pub const STARVING: Duration = Duration::from_secs(1);
 /// A first chunk too short for its own rule renders once no text has come for this long.
 pub const FIRST_STALL: Duration = Duration::from_millis(250);
 const FIRST_WORDS: usize = 6;
-const MAX_CHARS: usize = 300;
+/// The weight of a chunk: a CJK character weighs two, anything else one.
+const MAX_WEIGHT: usize = 300;
 const MAX_SENTENCES: usize = 2;
 const ABBREVIATIONS: [&str; 11] = ["dr", "mr", "mrs", "ms", "st", "vs", "etc", "a.m", "p.m", "e.g", "i.e"];
+
+/// Japanese and Chinese script, their punctuation and full-width forms: text written without spaces.
+pub(crate) fn is_cjk(c: char) -> bool {
+    matches!(c, '\u{3000}'..='\u{30FF}' | '\u{3400}'..='\u{4DBF}' | '\u{4E00}'..='\u{9FFF}' | '\u{F900}'..='\u{FAFF}' | '\u{FF00}'..='\u{FFEF}')
+}
+
+fn ends_sentence(c: char) -> bool {
+    matches!(c, '.' | '?' | '!' | '…' | '。' | '！' | '？' | '‼' | '⁉' | '\n')
+}
+
+fn ends_clause(c: char) -> bool {
+    matches!(c, ',' | ';' | ':' | '—' | '–' | '、' | '，' | '；' | '：')
+}
+
+/// Spoken units: whitespace-separated words, and each CJK character on its own.
+fn units(text: &str) -> usize {
+    let cjk = text.chars().filter(|&c| is_cjk(c) && c.is_alphanumeric()).count();
+    let words = text.split(|c: char| c.is_whitespace() || is_cjk(c)).filter(|w| !w.is_empty()).count();
+    cjk + words
+}
+
+fn weight(c: char) -> usize {
+    if is_cjk(c) {
+        2
+    } else {
+        1
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Chunk {
@@ -276,8 +352,8 @@ impl Chunker {
         if self.finished || self.cancelled || text.is_empty() {
             return;
         }
-        let joins = self.buf.chars().next_back().is_some_and(|c| !c.is_whitespace())
-            && text.chars().next().is_some_and(|c| !c.is_whitespace());
+        let joins = self.buf.chars().next_back().is_some_and(|c| !c.is_whitespace() && !is_cjk(c))
+            && text.chars().next().is_some_and(|c| !c.is_whitespace() && !is_cjk(c));
         if joins {
             self.seps.push(self.buf.len());
             self.buf.push(' ');
@@ -320,7 +396,7 @@ impl Chunker {
     fn first_cut(&self, bounds: &[Boundary], idle: Duration) -> Option<usize> {
         bounds
             .iter()
-            .find(|b| self.buf[..b.end].split_whitespace().count() >= 2)
+            .find(|b| units(&self.buf[..b.end]) >= 2)
             .map(|b| b.end)
             .or_else(|| self.word_end(FIRST_WORDS))
             .or_else(|| self.finished.then_some(self.buf.len()))
@@ -339,11 +415,19 @@ impl Chunker {
             .or_else(|| bounds.last().filter(|_| ahead < STARVING).map(|b| b.end))
     }
 
-    /// Pulls `cut` back to at most two sentences and `MAX_CHARS`, at the latest boundary that fits.
+    /// Pulls `cut` back to at most two sentences and `MAX_WEIGHT`, at the latest boundary that fits.
     fn limit(&self, cut: usize, bounds: &[Boundary]) -> usize {
         let within = |b: &&Boundary| b.end < cut;
         let cut = bounds.iter().filter(within).filter(|b| b.sentence).nth(MAX_SENTENCES - 1).map_or(cut, |b| b.end);
-        let max = self.buf.char_indices().nth(MAX_CHARS).map_or(self.buf.len(), |(i, _)| i);
+        let mut weighed = 0;
+        let max = self
+            .buf
+            .char_indices()
+            .find(|&(_, c)| {
+                weighed += weight(c);
+                weighed > MAX_WEIGHT
+            })
+            .map_or(self.buf.len(), |(i, _)| i);
         if cut <= max {
             return cut;
         }
@@ -397,16 +481,17 @@ impl Chunker {
         let chars: Vec<(usize, char)> = self.buf.char_indices().collect();
         let mut out: Vec<Boundary> = Vec::new();
         for (k, &(i, c)) in chars.iter().enumerate() {
-            let sentence = matches!(c, '.' | '?' | '!' | '…');
-            if !(sentence || matches!(c, ',' | ';' | ':' | '—' | '–')) || (c == '.' && self.abbreviates(i)) {
+            let sentence = ends_sentence(c);
+            if !(sentence || ends_clause(c)) || (c == '.' && self.abbreviates(i)) {
                 continue;
             }
             let mut j = k + 1;
-            while chars.get(j).is_some_and(|&(_, c)| matches!(c, '"' | '\'' | '”' | '’' | ')' | ']')) {
+            while chars.get(j).is_some_and(|&(_, c)| matches!(c, '"' | '\'' | '”' | '’' | ')' | ']' | '」' | '』')) {
                 j += 1;
             }
             let end = chars.get(j).map_or(self.buf.len(), |&(i, _)| i);
-            if chars.get(j).is_none_or(|&(_, c)| c.is_whitespace()) || self.ends.contains(&end) {
+            let closes = is_cjk(c) || c == '\n' || chars.get(j).is_none_or(|&(_, n)| n.is_whitespace() || is_cjk(n));
+            if closes || self.ends.contains(&end) {
                 out.push(Boundary { end, sentence });
             }
         }
@@ -542,7 +627,7 @@ mod tests {
         c.push(&clause);
         c.finish();
         let chunks = drain(&mut c, PLENTY);
-        assert!(chunks.iter().all(|ch| ch.text.chars().count() <= MAX_CHARS), "{chunks:?}");
+        assert!(chunks.iter().all(|ch| ch.text.chars().count() <= MAX_WEIGHT), "{chunks:?}");
         assert!(chunks[1].text.ends_with(','), "split at a clause: {:?}", chunks[1].text);
         assert_eq!(chunks.iter().map(|ch| ch.chars).sum::<u32>(), clause.chars().count() as u32);
 
@@ -552,6 +637,64 @@ mod tests {
         c.finish();
         let chunks = drain(&mut c, PLENTY);
         assert_eq!(chunks.iter().map(|ch| ch.chars).collect::<Vec<_>>(), [300, 100]);
+    }
+
+    #[test]
+    fn japanese_sentences_end_at_their_own_marks_without_a_space() {
+        let mut c = Chunker::default();
+        c.push("はい。");
+        assert_eq!(c.next(PLENTY, NOW).unwrap().text, "はい。", "two characters make a first chunk");
+        c.push("明日です。今日は");
+        assert_eq!(c.next(PLENTY, NOW).unwrap().text, "明日です。");
+        assert_eq!(c.next(PLENTY, NOW), None, "the rest waits for its sentence to end");
+        c.push("どう？それでいい？じゃあね！");
+        assert_eq!(c.next(PLENTY, NOW).unwrap().text, "今日はどう？それでいい？", "two sentences at most, no space between pushes");
+        c.finish();
+        assert_eq!(texts(&drain(&mut c, PLENTY)), ["じゃあね！"]);
+    }
+
+    #[test]
+    fn a_japanese_first_chunk_cuts_at_a_comma_or_an_ellipsis() {
+        let mut c = Chunker::default();
+        c.push("うん、明日の朝七時に移動しておいたよ。");
+        assert_eq!(c.next(PLENTY, NOW).unwrap().text, "うん、");
+        assert_eq!(c.next(PLENTY, NOW).unwrap().text, "明日の朝七時に移動しておいたよ。");
+        let mut c = Chunker::default();
+        c.push("そうだね…じゃあ、金曜にしよう！");
+        assert_eq!(c.next(PLENTY, NOW).unwrap().text, "そうだね…");
+        let mut c = Chunker::default();
+        c.push("「はい」と言った。");
+        assert_eq!(c.next(PLENTY, NOW).unwrap().text, "「はい」と言った。");
+    }
+
+    #[test]
+    fn a_line_break_ends_a_sentence_and_english_abbreviations_do_not_apply_to_japanese() {
+        let mut c = Chunker::default();
+        c.push("一つ目\n二つ目です。三つ目");
+        assert_eq!(c.next(PLENTY, NOW).unwrap().text, "一つ目\n");
+        assert_eq!(c.next(PLENTY, NOW).unwrap().text, "二つ目です。");
+        let mut c = Chunker::default();
+        c.push("Sure.");
+        c.next(PLENTY, FIRST_STALL).unwrap();
+        c.push("Dr Smith は来ます。次は");
+        assert_eq!(c.next(PLENTY, NOW).unwrap().text, "Dr Smith は来ます。");
+    }
+
+    #[test]
+    fn a_japanese_chunk_weighs_two_per_character() {
+        let mut c = Chunker::default();
+        c.push(&"あ".repeat(400));
+        c.finish();
+        let chunks = drain(&mut c, PLENTY);
+        assert_eq!(chunks.iter().map(|ch| ch.chars).collect::<Vec<_>>(), [150, 150, 100]);
+        let clause = "明日の朝、".repeat(60);
+        let mut c = Chunker::default();
+        c.push(&clause);
+        c.finish();
+        let chunks = drain(&mut c, PLENTY);
+        assert!(chunks.iter().all(|ch| ch.text.chars().count() <= MAX_WEIGHT / 2), "{chunks:?}");
+        assert!(chunks[1].text.ends_with('、'), "split at a clause: {:?}", chunks[1].text);
+        assert_eq!(chunks.iter().map(|ch| ch.chars).sum::<u32>(), clause.chars().count() as u32);
     }
 
     #[test]
@@ -608,7 +751,7 @@ mod tests {
     }
 
     fn voices(ids: &[&str]) -> Vec<VoiceInfo> {
-        ids.iter().map(|id| VoiceInfo { id: (*id).into(), label: (*id).into(), language: "en".into() }).collect()
+        ids.iter().map(|id| VoiceInfo { id: (*id).into(), label: (*id).into(), languages: vec!["en".into()] }).collect()
     }
 
     #[test]
@@ -629,16 +772,26 @@ mod tests {
     #[test]
     fn a_voice_id_names_its_backend_and_a_bare_one_kokoro() {
         let kokoro: Arc<dyn SpeechBackend> = Arc::new(ChunkedBackend::new("kokoro", "Kokoro", Arc::new(Echo), voices(&["af_heart", "bm_george"])));
-        let side: Arc<dyn SpeechBackend> = Arc::new(ChunkedBackend::new("kyutai", "Natural", Arc::new(Echo), voices(&["alba"])));
-        let sidecars = [side];
-        let pick = |id: &str| {
-            let s = speaker(id, &kokoro, &sidecars);
+        let mut ja = voices(&["yui"]);
+        ja[0].languages = vec!["ja".into()];
+        let side: Arc<dyn SpeechBackend> = Arc::new(ChunkedBackend::new("kyutai", "Natural", Arc::new(Echo), {
+            let mut v = voices(&["alba"]);
+            v[0].languages.clear();
+            v
+        }));
+        let sidecars = [side, Arc::new(ChunkedBackend::new("ja", "Japanese", Arc::new(Echo), ja))];
+        let pick = |id: &str, language: &str| {
+            let s = speaker(id, language, &kokoro, &sidecars);
             (s.backend.id().to_owned(), s.voice)
         };
-        assert_eq!(pick("bm_george"), ("kokoro".into(), "bm_george".into()));
-        assert_eq!(pick("kyutai:alba"), ("kyutai".into(), "alba".into()));
-        assert_eq!(pick("kyutai:nope"), ("kokoro".into(), String::new()));
-        assert_eq!(pick("gone:alba"), ("kokoro".into(), String::new()));
-        assert!(find_speaker("nope", &kokoro, &sidecars).is_none());
+        assert_eq!(pick("bm_george", "en"), ("kokoro".into(), "bm_george".into()));
+        assert_eq!(pick("kyutai:alba", "en"), ("kyutai".into(), "alba".into()));
+        assert_eq!(pick("kyutai:alba", "ja"), ("kyutai".into(), "alba".into()), "a voice of no language speaks any");
+        assert_eq!(pick("ja:yui", "ja"), ("ja".into(), "yui".into()));
+        assert_eq!(pick("ja:yui", "en"), ("kokoro".into(), String::new()), "a Japanese voice does not speak English");
+        assert_eq!(pick("bm_george", "ja"), ("kokoro".into(), String::new()), "nor an English one Japanese");
+        assert_eq!(pick("kyutai:nope", "en"), ("kokoro".into(), String::new()));
+        assert_eq!(pick("gone:alba", "en"), ("kokoro".into(), String::new()));
+        assert!(find_speaker("nope", "en", &kokoro, &sidecars).is_none());
     }
 }

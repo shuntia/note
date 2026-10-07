@@ -52,9 +52,19 @@ pub enum Action {
 pub const BACKCHANNELS_EN: &[&str] =
     &["uh-huh", "uh huh", "mhm", "mm-hmm", "right", "okay", "ok", "yeah", "yep", "sure", "got it", "i see"];
 
-/// Only English has a list; every other language falls back to it.
-pub fn backchannels(_language: &str) -> &'static [&'static str] {
-    BACKCHANNELS_EN
+/// Aizuchi and fillers: what a listener says without taking the floor.
+pub const BACKCHANNELS_JA: &[&str] = &[
+    "はい", "ええ", "うん", "ん", "そう", "そうそう", "そうだね", "そうですね", "そうなんだ", "なるほど", "ああ", "あー",
+    "うーん", "ふーん", "ふむ", "へえ", "へー", "ほう", "おお", "おっけー", "オッケー", "おけ", "了解", "りょうかい",
+    "わかった", "わかりました", "えっと", "ええと", "あの", "あのー", "えー", "まあ", "ね",
+];
+
+/// English stands in for any language without its own list.
+pub fn backchannels(language: &str) -> &'static [&'static str] {
+    match language {
+        "ja" => BACKCHANNELS_JA,
+        _ => BACKCHANNELS_EN,
+    }
 }
 
 /// `quiet_since` is when the current run of non-speech VAD windows began; `scored_at` is when `ScoreTurn` was asked.
@@ -79,7 +89,7 @@ impl TurnMachine {
     pub fn new(cfg: TurnConfig, backchannels: &'static [&'static str]) -> Self {
         Self {
             cfg,
-            backchannels: backchannels.iter().map(|w| words(w)).collect(),
+            backchannels: backchannels.iter().map(|w| units(w)).collect(),
             turn: 1,
             state: State::Idle,
             partial: String::new(),
@@ -198,18 +208,45 @@ impl TurnMachine {
         action
     }
 
-    /// False for an empty partial, a backchannel, or the first whole words of one still streaming in ("uh" of "uh-huh").
+    /// False for an empty partial, a run of backchannels ("yeah okay", 「うんうん」), or one still streaming
+    /// in ("uh" of "uh-huh").
     fn has_real_words(&self) -> bool {
-        let said = words(&self.partial);
-        !said.is_empty() && !self.backchannels.iter().any(|b| b.starts_with(&said))
+        let said = units(&self.partial);
+        !said.is_empty() && !backchanneling(&said, &self.backchannels)
     }
 }
 
-/// Lowercased words with punctuation as separators, so "Uh-huh." and "uh-huh" both read as `["uh", "huh"]`.
-fn words(text: &str) -> Vec<String> {
+/// `said` is whole backchannels end to end, the last one possibly cut short.
+fn backchanneling(said: &[String], backchannels: &[Vec<String>]) -> bool {
+    let mut reached = vec![false; said.len() + 1];
+    reached[0] = true;
+    for at in 0..said.len() {
+        if !reached[at] {
+            continue;
+        }
+        for b in backchannels {
+            if said[at..].starts_with(b) {
+                reached[at + b.len()] = true;
+            } else if b.starts_with(&said[at..]) {
+                return true;
+            }
+        }
+    }
+    reached[said.len()]
+}
+
+/// Lowercased words with punctuation as separators, so "Uh-huh." and "uh-huh" both read as `["uh", "huh"]`;
+/// text written without spaces (Japanese) reads one character per unit.
+fn units(text: &str) -> Vec<String> {
     text.split(|c: char| !c.is_alphanumeric())
         .filter(|w| !w.is_empty())
-        .map(str::to_lowercase)
+        .flat_map(|w| {
+            if w.chars().any(super::tts::is_cjk) {
+                w.chars().map(String::from).collect::<Vec<_>>()
+            } else {
+                vec![w.to_lowercase()]
+            }
+        })
         .collect()
 }
 
@@ -341,6 +378,26 @@ mod tests {
         assert_eq!(m.tick(ms(2000)), vec![Action::FlushPlayout]);
         m.input(Input::Vad { at: ms(2100), speech: false });
         assert!(m.tick(ms(2300)).contains(&Action::Draft { turn: 1, text: "yeah".into() }));
+    }
+
+    fn real(language: &str, partial: &str) -> bool {
+        let mut m = TurnMachine::new(TurnConfig::default(), backchannels(language));
+        m.input(Input::Playing { playing: true });
+        m.input(Input::Vad { at: ms(0), speech: true });
+        m.input(Input::Partial { text: partial.into() }) == vec![Action::FlushPlayout]
+    }
+
+    #[test]
+    fn japanese_aizuchi_do_not_barge_in_and_real_words_do() {
+        for aizuchi in ["はい", "はい。", "うんうん", "ええ、そうですね", "なるほどなるほど", "あー、はいはい", "そう", "えっと"] {
+            assert!(!real("ja", aizuchi), "{aizuchi}");
+        }
+        for words in ["はい、明日の", "そうじゃなくて", "ちょっと待って", "うん違う", "違います"] {
+            assert!(real("ja", words), "{words}");
+        }
+        assert!(!real("en", "Yeah okay"), "a run of backchannels");
+        assert!(real("en", "okay so"));
+        assert!(real("ja", "okay so"), "an English remark on a Japanese call still counts");
     }
 
     #[test]

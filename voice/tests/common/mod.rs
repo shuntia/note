@@ -319,8 +319,13 @@ impl note_voice::audio::engines::SpeechEngines for SilentEngines {
         Arc::new(Deaf)
     }
 
-    fn tts(&self, _language: &str) -> Arc<dyn note_voice::audio::tts::SpeechBackend> {
-        Arc::new(note_voice::audio::tts::ChunkedBackend::new("kokoro", "Kokoro", Arc::new(Deaf), Vec::new()))
+    fn tts(&self, _language: &str) -> note_voice::audio::engines::BaseVoice {
+        note_voice::audio::engines::BaseVoice::Kokoro(Arc::new(note_voice::audio::tts::ChunkedBackend::new(
+            "kokoro",
+            "Kokoro",
+            Arc::new(Deaf),
+            Vec::new(),
+        )))
     }
 }
 
