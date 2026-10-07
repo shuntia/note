@@ -256,6 +256,22 @@ export function App() {
     }
   }, [mobile, tab, inSession])
 
+  // While the phone's keyboard is up for the chat composer, the bar steps aside.
+  const [typing, setTyping] = useState(false)
+  useEffect(() => {
+    if (!mobile) return
+    const composing = (el: EventTarget | null) => el instanceof HTMLTextAreaElement && el.closest('.chat-compose') !== null
+    const onIn = (e: FocusEvent) => setTyping(composing(e.target))
+    const onOut = (e: FocusEvent) => setTyping(composing(e.relatedTarget))
+    setTyping(composing(document.activeElement))
+    document.addEventListener('focusin', onIn)
+    document.addEventListener('focusout', onOut)
+    return () => {
+      document.removeEventListener('focusin', onIn)
+      document.removeEventListener('focusout', onOut)
+    }
+  }, [mobile])
+
   // Desktop rests the top bar and its jot for as long as a session runs.
   useEffect(() => {
     document.documentElement.classList.toggle('in-session', session !== null)
@@ -436,7 +452,7 @@ export function App() {
           {viewOf(l.tab)}
         </main>
       ))}
-      {mobile && <Rail kind="tabs" current={current} go={go} away={rested} />}
+      {mobile && <Rail kind="tabs" current={current} go={go} away={rested || typing} />}
       {mobile && <div className={`handle${rested ? ' on' : ''}`} aria-hidden="true" />}
       {toastNode}
     </div>

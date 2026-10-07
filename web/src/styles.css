@@ -951,7 +951,10 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 
 .chat-foot { flex: none; padding: 0.75rem 1rem 1.5rem; }
 .chat-foot .tellnote { width: 100%; }
-@media (max-width: 767.98px) { .chat-foot { padding-bottom: 84px; } }
+@media (max-width: 767.98px) {
+  .chat-foot { padding: 0.75rem max(1rem, env(safe-area-inset-right)) calc(84px + 0.75rem) max(1rem, env(safe-area-inset-left)); }
+  .shell:has(> .tabs.away) .chat-foot { padding-bottom: max(0.75rem, env(safe-area-inset-bottom)); }
+}
 @media (min-width: 768px) { .chat-foot { padding: 0.75rem 0 2.5rem; } }
 
 @media (prefers-reduced-motion: reduce) {

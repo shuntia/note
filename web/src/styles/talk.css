@@ -236,7 +236,11 @@
 .send-ghost.bubble { background: var(--ink); color: var(--ivory); border-radius: 1.125rem; }
 
 /* the composer: its arrow fills once there is something to send */
-.chat .tellnote button { transition: background-color 180ms ease, color 180ms ease; }
+/* the field and the arrow sit the same 6px in from the pill; a long draft grows the
+   pill into a rounded block with the arrow kept at its foot */
+.chat .tellnote { align-items: flex-end; padding: 0.375rem; border-radius: 1.5rem; }
+.chat .tellnote textarea { min-height: 2.25rem; padding: 0.4rem 0.625rem; }
+.chat .tellnote button { flex: none; transition: background-color 180ms ease, color 180ms ease; }
 .chat .tellnote.armed button:not(:disabled) { background: var(--ink); color: var(--ivory); }
 .chat .tellnote textarea::placeholder { transition: opacity 300ms ease; }
 .chat .tellnote textarea.flying::placeholder { opacity: 0; }
