@@ -519,7 +519,14 @@ pub fn live_files(conn: &Connection, data_dir: &Path, user: &str, category: &str
         match std::fs::read_to_string(&path).map_err(anyhow::Error::from).and_then(|raw| parse(&raw, false)) {
             Ok(f) => out.push(f),
             Err(e) => {
-                let _ = crate::log::record(conn, None, "memory_index_error", &format!("{}: {e}", path.display()));
+                let _ = crate::log::record_throttled(
+                    conn,
+                    None,
+                    "memory_index_error",
+                    &format!("{}: {e}", path.display()),
+                    jiff::Timestamp::now(),
+                    crate::log::ERROR_LOG_WINDOW_MINS,
+                );
             }
         }
     }
@@ -1084,10 +1091,16 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("broken.md"), "no front matter").unwrap();
         assert!(live_files(&conn, tmp.path(), "aki", NOTE).unwrap().is_empty());
-        let logged: String = conn
-            .query_row("SELECT detail FROM event_log WHERE kind = 'memory_index_error'", [], |r| r.get(0))
+        assert!(live_files(&conn, tmp.path(), "aki", NOTE).unwrap().is_empty());
+        let logged: Vec<String> = conn
+            .prepare("SELECT detail FROM event_log WHERE kind = 'memory_index_error'")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
             .unwrap();
-        assert!(logged.contains("broken.md"), "{logged}");
+        assert_eq!(logged.len(), 1, "a file read every turn is logged once per window: {logged:?}");
+        assert!(logged[0].contains("broken.md"), "{logged:?}");
     }
 
     #[test]
