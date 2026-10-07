@@ -643,7 +643,7 @@ fn settle(conn: &Connection, event_id: i64, now: jiff::Timestamp) -> rusqlite::R
 
 /// A fired trigger, off the runner's lock: a short session reads the situation
 /// and either says something or stays quiet. A session that never gets that far
-/// leaves the event alone and sends nothing — silence is the safe failure.
+/// leaves the event alone; its user hears only why, at most once a window.
 pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
     let Ok(permit) = state.talk_gate.try_enter(fired.user_id) else {
         let conn = state.db();
@@ -705,7 +705,10 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
     };
     let out = match outcome {
         Ok(out) => out,
-        Err(e) => return failed(format!("event {}: {e:#}", ev.event_id)),
+        Err(e) => {
+            crate::failure::tell(state, fired.user_id, &fired.username, &crate::failure::Failure::of(&e), now);
+            return failed(format!("event {}: {e:#}", ev.event_id));
+        }
     };
     let Some(step) = out.steps.iter().rev().find(|s| {
         !s.is_error && crate::tools::is_terminal(crate::tools::SessionKind::Trigger, &s.name)

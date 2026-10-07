@@ -500,7 +500,7 @@ pub enum TurnError {
     DailyCap,
     Busy(crate::TalkBusy),
     /// The session did not finish; nothing was persisted.
-    Unavailable,
+    Unavailable(crate::failure::Failure),
     Internal,
 }
 
@@ -643,7 +643,7 @@ pub async fn run_turn(
         Ok(Err(e)) => {
             let conn = state.db();
             let _ = crate::log::record(&conn, Some(user_id), "talk_error", &format!("{e:#}"));
-            Err(TurnError::Unavailable)
+            Err(TurnError::Unavailable(crate::failure::Failure::of(&e)))
         }
         Err(e) => {
             let conn = state.db();

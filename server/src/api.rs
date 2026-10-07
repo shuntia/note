@@ -1321,13 +1321,22 @@ async fn talk(
         )
             .into_response(),
         Err(E::Busy(busy)) => session_busy_response(busy, lang),
-        Err(E::Unavailable) => (
-            StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({ "error": text::err_assistant_unavailable(lang) })),
-        )
-            .into_response(),
+        Err(E::Unavailable(failure)) => failed_turn(lang, user.admin, &failure),
         Err(E::Internal) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
+}
+
+/// A turn the assistant could not finish: why, in the reader's language, and
+/// for an admin the provider's own words with URLs, paths and keys masked.
+fn failed_turn(lang: text::Lang, admin: bool, failure: &crate::failure::Failure) -> axum::response::Response {
+    let mut body = serde_json::json!({
+        "error": text::failure_reason(lang, failure.reason),
+        "reason": failure.reason,
+    });
+    if admin {
+        body["detail"] = serde_json::Value::String(crate::failure::redact(&failure.detail));
+    }
+    (StatusCode::BAD_GATEWAY, Json(body)).into_response()
 }
 
 const MAX_CONVERSATION_TITLE: usize = 120;

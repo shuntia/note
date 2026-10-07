@@ -26,12 +26,12 @@ pub enum TurnEvent {
         text: String,
         calls: Vec<ToolCall>,
         stopped: bool,
-        error: Option<String>,
+        error: Option<crate::failure::Failure>,
     },
 }
 
 /// Streams one round on its own thread; events go to `tx`; setting `stop` ends the stream at the next delta.
-/// A failure before any delta is retried once. Text pending before a tool call is spoken first.
+/// A failure before any delta is retried once, unless retrying cannot help. Text pending before a tool call is spoken first.
 /// `End.calls` holds only the calls sent as events.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn(
@@ -53,7 +53,8 @@ pub fn spawn(
         };
         let mut sink = TurnSink::new(spec.reply, &stop, &tx);
         let mut result = llm.chat_stream(&req, &opts, &mut sink);
-        if result.is_err() && !sink.any_delta && !stop.load(Ordering::SeqCst) {
+        let worth_retrying = result.as_ref().is_err_and(|e| !crate::failure::Reason::of(e).lasts());
+        if worth_retrying && !sink.any_delta && !stop.load(Ordering::SeqCst) {
             result = llm.chat_stream(&req, &opts, &mut sink);
         }
         let stopped = stop.load(Ordering::SeqCst);
@@ -67,7 +68,7 @@ pub fn spawn(
             text: sink.text,
             calls: sink.calls,
             stopped,
-            error: result.err().map(|e| format!("{e:#}")),
+            error: result.err().map(|e| crate::failure::Failure::of(&e)),
         });
     })
 }

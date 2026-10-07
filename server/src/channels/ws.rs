@@ -114,9 +114,7 @@ pub fn agent_frame(conversation_id: Option<i64>, seq: u64, event: &AgentEvent) -
             "result": clip(result), "is_error": is_error,
         }),
         AgentEvent::Reply { text } => serde_json::json!({"kind": "reply", "text": clip(text)}),
-        AgentEvent::Error { message } => {
-            serde_json::json!({"kind": "error", "message": clip(message)})
-        }
+        AgentEvent::Error { reason } => serde_json::json!({"kind": "error", "reason": reason}),
     };
     serde_json::json!({
         "type": "agent",

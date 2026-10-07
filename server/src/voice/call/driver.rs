@@ -3,11 +3,12 @@ use super::jobs::{JobDone, JobLimits, JobTable, ToolRunner};
 use super::queue::{Queue, WakeConfig};
 use super::render::{block, Item, JobOutcome};
 use super::turn::{self, TurnEvent, TurnSpec};
+use crate::failure::{Failure, Reason};
 use crate::providers::{LLMProvider, Message, StreamOpts, ToolCall};
 use crate::tools::{CancelJobArgs, SessionKind, ToolError};
 use note_voice_proto::CallBody;
 use rusqlite::Connection;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::JoinHandle;
@@ -136,7 +137,7 @@ impl ReplyRecord {
 struct TurnEnd {
     calls: Vec<ToolCall>,
     stopped: bool,
-    error: Option<String>,
+    error: Option<Failure>,
 }
 
 struct InFlight {
@@ -188,6 +189,8 @@ struct Driver {
     hang_up_reply: Option<u64>,
     /// Turns in a row that failed with nothing said or called.
     failed_turns: u32,
+    /// Failure reasons already spoken in this call.
+    told: HashSet<Reason>,
     trace: crate::trace::Builder,
     last_reply: String,
 }
@@ -243,6 +246,7 @@ impl Driver {
             ending: false,
             hang_up_reply: None,
             failed_turns: 0,
+            told: HashSet::new(),
             trace: crate::trace::Builder::new(SessionKind::Call, opening),
             last_reply: String::new(),
         }
@@ -453,7 +457,7 @@ impl Driver {
                 .as_ref()
                 .map(|f| f.emitted.clone())
                 .unwrap_or_default();
-            self.on_end(calls, false, Some("the turn stopped".into()));
+            self.on_end(calls, false, Some(Failure::internal("the turn stopped")));
         }
         self.try_start();
     }
@@ -652,7 +656,7 @@ impl Driver {
         }
     }
 
-    fn on_end(&mut self, calls: Vec<ToolCall>, stopped: bool, error: Option<String>) {
+    fn on_end(&mut self, calls: Vec<ToolCall>, stopped: bool, error: Option<Failure>) {
         let Some(f) = self.in_flight.as_mut() else {
             return;
         };
@@ -721,15 +725,9 @@ impl Driver {
             record.row = row;
         }
         let silent = !spoken_any && end.calls.is_empty();
-        if end.error.is_some() && silent && !end.stopped {
+        if let Some(failure) = end.error.as_ref().filter(|_| silent && !end.stopped) {
             self.failed_turns += 1;
-            let line = if self.failed_turns >= 2 {
-                self.ending = true;
-                self.mark_bowed_out();
-                crate::text::call_bow_out(self.deps.lang)
-            } else {
-                crate::text::call_apology(self.deps.lang)
-            };
+            let line = self.failure_line(failure.reason);
             let reply = self.take_reply();
             self.say(reply, std::slice::from_ref(&line), &line, true);
         } else if end.error.is_none() || !silent {
@@ -739,6 +737,25 @@ impl Driver {
             self.send(CallBody::HangUp);
         }
         self.try_start();
+    }
+
+    /// What a failed turn says: why, the first time a reason comes up. The
+    /// call ends at once on a fault that will not pass by itself, and with a
+    /// bow-out on the second failed turn in a row.
+    fn failure_line(&mut self, reason: Reason) -> String {
+        let fresh = self.told.insert(reason);
+        let ending = reason.lasts() || self.failed_turns >= 2;
+        if ending {
+            self.ending = true;
+            self.mark_bowed_out();
+        }
+        if fresh && (reason.lasts() || !ending) {
+            crate::text::failure_spoken(self.deps.lang, reason)
+        } else if ending {
+            crate::text::call_bow_out(self.deps.lang)
+        } else {
+            crate::text::call_apology(self.deps.lang)
+        }
     }
 
     fn on_job(&mut self, done: &JobDone) {
@@ -1006,7 +1023,7 @@ mod tests {
             text: text.into(),
             in_thread: false,
         });
-        start_with(rounds, tools, opening, seed, Duration::from_secs(5))
+        start_with(rounds, tools, opening, seed, Duration::from_secs(5), crate::text::Lang::En)
     }
 
     fn start_with(
@@ -1015,6 +1032,7 @@ mod tests {
         opening: Option<Opening>,
         seed: &str,
         job_timeout: Duration,
+        lang: crate::text::Lang,
     ) -> Harness {
         let conn = crate::db::open_memory().unwrap();
         conn.execute(
@@ -1047,7 +1065,7 @@ mod tests {
             call_id: "c1".into(),
             user_id: 1,
             username: "aki".into(),
-            lang: crate::text::Lang::En,
+            lang,
             conversation_id: conv,
             db: db.clone(),
             llm: llm.clone(),
@@ -1614,6 +1632,58 @@ mod tests {
         h.stop();
     }
 
+    const NO_ENDPOINTS: &str = r#"{"error":{"message":"No endpoints found for stealth/space-bunny-alpha.","code":404}}"#;
+
+    #[test]
+    fn a_missing_model_is_named_in_japanese_once_and_the_call_ends() {
+        let gone = || vec![StreamPiece::Status(404, NO_ENDPOINTS)];
+        let mut h = start_with(vec![gone(), gone()], &[], None, "", Duration::from_secs(5), crate::text::Lang::Ja);
+        h.frame(CallBody::Commit {
+            turn: 1,
+            text: "もしもし".into(),
+        });
+        let line = "すみません、AIモデルが見つかりません。設定を確認してください。";
+        assert_eq!(line, crate::text::failure_spoken(crate::text::Lang::Ja, Reason::ModelUnavailable));
+        h.expect(&[
+            CallBody::SpeakDone { reply: 2 },
+            speak(3, 0, line),
+            CallBody::SpeakDone { reply: 3 },
+            CallBody::Play { reply: 3 },
+            CallBody::HangUp,
+        ]);
+        assert_eq!(h.llm.seen().len(), 1, "a missing model is not asked again");
+        h.stop();
+        assert_eq!(h.rows(), vec![row("user", "もしもし", None), row("assistant", line, None)]);
+    }
+
+    #[test]
+    fn a_passing_fault_is_named_once_then_the_call_bows_out() {
+        let down = || vec![StreamPiece::Status(502, r#"{"error":{"message":"Provider returned error","code":502}}"#)];
+        let mut h = start(vec![down(), down(), down(), down()], &[], None, "");
+        h.frame(CallBody::Commit {
+            turn: 1,
+            text: "hello?".into(),
+        });
+        h.expect(&[
+            CallBody::SpeakDone { reply: 2 },
+            speak(3, 0, &crate::text::failure_spoken(crate::text::Lang::En, Reason::ProviderDown)),
+            CallBody::SpeakDone { reply: 3 },
+            CallBody::Play { reply: 3 },
+        ]);
+        h.frame(CallBody::Commit {
+            turn: 2,
+            text: "still there?".into(),
+        });
+        h.expect(&[
+            CallBody::SpeakDone { reply: 4 },
+            speak(5, 0, &crate::text::call_bow_out(crate::text::Lang::En)),
+            CallBody::SpeakDone { reply: 5 },
+            CallBody::Play { reply: 5 },
+            CallBody::HangUp,
+        ]);
+        h.stop();
+    }
+
     #[test]
     fn a_call_whose_args_are_not_an_object_is_stored_with_empty_args() {
         let mut h = start(
@@ -1766,7 +1836,7 @@ mod tests {
                 text: "Hi, it's Note.".into(),
                 in_thread,
             };
-            let mut h = start_with(vec![], &[], Some(opening), "", Duration::from_secs(5));
+            let mut h = start_with(vec![], &[], Some(opening), "", Duration::from_secs(5), crate::text::Lang::En);
             h.expect(&[
                 speak(1, 0, "Hi, it's Note."),
                 CallBody::SpeakDone { reply: 1 },
@@ -1996,6 +2066,7 @@ mod tests {
             None,
             "",
             Duration::from_millis(100),
+            crate::text::Lang::En,
         );
         h.frame(CallBody::Commit {
             turn: 1,

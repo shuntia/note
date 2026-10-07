@@ -128,7 +128,7 @@ pub enum AgentEvent<'a> {
     ToolCall { index: usize, name: &'a str, args: &'a str },
     ToolResult { index: usize, name: &'a str, result: &'a str, is_error: bool },
     Reply { text: &'a str },
-    Error { message: &'a str },
+    Error { reason: crate::failure::Reason },
 }
 
 /// Runs one agent session: chat, dispatch tool calls, feed results back, until
@@ -294,7 +294,7 @@ fn run_traced(
             }
             Err(e) => {
                 trace.round_failed(round.elapsed().as_millis() as u64, &format!("{e:#}"));
-                on_event(AgentEvent::Error { message: &e.to_string() });
+                on_event(AgentEvent::Error { reason: crate::failure::Reason::of(&e) });
                 return Err(e);
             }
         };
@@ -679,7 +679,7 @@ mod tests {
                 format!("result:{index}:{name}:{is_error}")
             }
             AgentEvent::Reply { text } => format!("reply:{text}"),
-            AgentEvent::Error { message } => format!("error:{message}"),
+            AgentEvent::Error { reason } => format!("error:{}", reason.code()),
         }
     }
 
@@ -835,7 +835,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("provider is down"));
-        assert_eq!(seen.into_inner(), vec!["error:provider is down"]);
+        assert_eq!(seen.into_inner(), vec!["error:internal"]);
     }
 
     #[test]

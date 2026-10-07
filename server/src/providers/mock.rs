@@ -10,6 +10,8 @@ pub enum StreamPiece {
     Call(ToolCall),
     Wait(Duration),
     Fail(&'static str),
+    /// A provider refusal with this status and body.
+    Status(u16, &'static str),
 }
 
 #[derive(Debug, Clone)]
@@ -106,6 +108,9 @@ impl LLMProvider for MockLLM {
                     true
                 }
                 StreamPiece::Fail(why) => anyhow::bail!("{why}"),
+                StreamPiece::Status(code, body) => {
+                    return Err(super::ProviderError::status(code, body, format!("status {code}: {body}")).into());
+                }
             };
             if !go_on {
                 break;

@@ -133,6 +133,9 @@ pub async fn receive(state: &AppState, rooms: &mut Rooms, message: &Message) {
             }
         }
         Err(TurnError::Blank) => {}
+        Err(TurnError::Unavailable(failure)) => {
+            say(state, &message.room_id, user_id, &crate::text::failure_reason(lang, failure.reason)).await;
+        }
         Err(_) => say(state, &message.room_id, user_id, &crate::text::matrix_unreachable(lang)).await,
     }
 }
