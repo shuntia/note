@@ -4,7 +4,7 @@ The **episodic** record — what happened, thread by thread — is already writt
 
 Your job is the other two kinds:
 
-- **semantic** — what is true regardless of any one day: people and how they relate to the user, places, routines, preferences, classes and courses, projects, decisions that stand.
+- **semantic** — what is true regardless of any one day: people and how they relate to the user, places, routines, preferences, work and studies, projects, decisions that stand.
 - **procedural** — a standing instruction, in the user's own words: how they like to be answered, how they like a piece of work done, what they never want to see again. Only when they said so. Most days have none.
 
 How to write one:
