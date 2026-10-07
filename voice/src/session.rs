@@ -126,6 +126,8 @@ pub enum SessionEnd {
     VoiceDown,
     /// A reply could not be spoken by any backend mid-call.
     VoiceLost,
+    /// Speech recognition stopped mid-call.
+    EarsLost,
     MediaFailed(String),
 }
 
@@ -135,6 +137,7 @@ impl SessionEnd {
         match self {
             SessionEnd::VoiceDown => Some("the call's voice is down"),
             SessionEnd::VoiceLost => Some("the call's voice was lost"),
+            SessionEnd::EarsLost => Some("the call's speech recognition stopped"),
             _ => None,
         }
     }
@@ -264,8 +267,8 @@ impl<S: Fn(CallBody)> Live<S> {
         let speech = SpeechQueue::new(speaker.clone(), base.clone());
         let order: &'static [Line] = match (voice_up.is_some(), deps.direction) {
             (false, _) => &[Line::NoVoice],
-            (true, Direction::Inbound) => &[Line::Hi, Line::OneMoment, Line::LostNotes, Line::Goodbye, Line::NoVoice],
-            (true, Direction::Outbound) => &[Line::OneMoment, Line::LostNotes, Line::Goodbye, Line::NoVoice],
+            (true, Direction::Inbound) => &[Line::Hi, Line::OneMoment, Line::LostNotes, Line::Goodbye, Line::NoVoice, Line::NoEars],
+            (true, Direction::Outbound) => &[Line::OneMoment, Line::LostNotes, Line::Goodbye, Line::NoVoice, Line::NoEars],
         };
         {
             let (lines, rendering, language, events) =
@@ -307,8 +310,8 @@ impl<S: Fn(CallBody)> Live<S> {
         Ok((live, tasks))
     }
 
-    /// Ends with `MediaFailed` if the STT worker stops or the audio-in task panics; audio-in running out of
-    /// audio is left to `left()`.
+    /// Ends with `MediaFailed` if the audio-in task panics, and says why before ending if the STT worker
+    /// stops; audio-in running out of audio is left to `left()`.
     async fn run(
         &mut self,
         mut inbox: mpsc::UnboundedReceiver<SessionIn>,
@@ -323,13 +326,18 @@ impl<S: Fn(CallBody)> Live<S> {
         tick.set_missed_tick_behavior(MissedTickBehavior::Burst);
         let mut inbox_open = true;
         let mut audio_running = true;
+        let mut stt_running = true;
         loop {
             tokio::select! {
                 gone = &mut left => return match gone {
                     Gone::Left => SessionEnd::UserLeft,
                     Gone::Failed(reason) => SessionEnd::MediaFailed(reason),
                 },
-                got = &mut tasks.stt => return task_died("speech recognition", got.err()),
+                got = &mut tasks.stt, if stt_running => {
+                    stt_running = false;
+                    eprintln!("voice: speech recognition stopped: {got:?}");
+                    self.close_with(Line::NoEars, SessionEnd::EarsLost);
+                }
                 got = &mut tasks.audio, if audio_running => match got {
                     Ok(()) => audio_running = false,
                     Err(e) => return task_died("the audio input", Some(e)),
@@ -1385,12 +1393,15 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_crashed_recognizer_ends_the_call() {
+    async fn a_crashed_recognizer_says_so_and_ends_the_call() {
         let tts: Arc<FakeTts> = Arc::default();
         let engines = Arc::new(FakeEngines { stt_panics: true, ..engines(Vec::new(), &tts) });
         let c = call_with(SessionDeps { engines, ..deps(Vec::new(), false, &tts) }, audio(&[(0.1, 1000)]), tts);
-        let end = tokio::time::timeout(Duration::from_secs(2), c.end).await.unwrap().unwrap();
-        assert!(matches!(end, SessionEnd::MediaFailed(_)), "{end:?}");
+        let end = tokio::time::timeout(Duration::from_secs(10), c.end).await.unwrap().unwrap();
+        assert_eq!(end, SessionEnd::EarsLost);
+        let line = text(Line::NoEars, "en");
+        assert_eq!(c.probe.frames_of(line.len()), line.len(), "the line plays out whole");
+        assert_eq!(end.failure(), Some("the call's speech recognition stopped"));
         assert!(c.probe.left_room.load(Ordering::SeqCst));
     }
 

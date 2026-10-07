@@ -14,9 +14,12 @@ pub enum Line {
     Hi,
     /// The call's voice is down: said from the kept rendering, then the call ends.
     NoVoice,
+    /// Speech recognition stopped mid-call: said, then the call ends.
+    NoEars,
 }
 
-pub const ALL: [Line; 6] = [Line::Hi, Line::OneMoment, Line::LostNotes, Line::Goodbye, Line::CantReach, Line::NoVoice];
+pub const ALL: [Line; 7] =
+    [Line::Hi, Line::OneMoment, Line::LostNotes, Line::Goodbye, Line::CantReach, Line::NoVoice, Line::NoEars];
 
 /// English stands in for any language without its own wording.
 pub fn text(line: Line, language: &str) -> &'static str {
@@ -27,12 +30,14 @@ pub fn text(line: Line, language: &str) -> &'static str {
         ("ja", Line::CantReach) => "いまメモにつながらないから、メッセージで送るね。",
         ("ja", Line::Hi) => "もしもし！",
         ("ja", Line::NoVoice) => "ごめん、いま声が出せないから、メッセージで送るね。",
+        ("ja", Line::NoEars) => "ごめん、いま声が聞き取れないから、いったん切るね。",
         (_, Line::OneMoment) => "One moment.",
         (_, Line::LostNotes) => "I lost my notes for a moment.",
         (_, Line::Goodbye) => "I'll message you instead. Bye for now.",
         (_, Line::CantReach) => "I can't reach your notes right now. I'll message you.",
         (_, Line::Hi) => "Hi!",
         (_, Line::NoVoice) => "I can't speak right now. I'll message you instead.",
+        (_, Line::NoEars) => "I can't make out what you're saying right now, so I'll hang up.",
     }
 }
 
@@ -171,6 +176,7 @@ mod tests {
         assert_eq!(text(Line::CantReach, "en"), "I can't reach your notes right now. I'll message you.");
         assert_eq!(text(Line::Hi, "en"), "Hi!");
         assert_eq!(text(Line::NoVoice, "en"), "I can't speak right now. I'll message you instead.");
+        assert_eq!(text(Line::NoEars, "en"), "I can't make out what you're saying right now, so I'll hang up.");
     }
 
     #[test]
