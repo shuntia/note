@@ -202,7 +202,7 @@ mod tests {
 
         assert_eq!(call(&conn, &tmp, &format!(r#"{{"op":"keep","id":"{id}"}}"#))["kept"], true);
         assert_eq!(call(&conn, &tmp, &format!(r#"{{"op":"remove","id":"{id}"}}"#))["removed"], true);
-        assert!(crate::notes::all(tmp.path(), "aki").unwrap().is_empty());
+        assert!(crate::notes::all(&conn, tmp.path(), "aki").unwrap().is_empty());
     }
 
     #[test]
@@ -266,7 +266,7 @@ mod tests {
         assert_eq!(nightly(&format!(r#"{{"id":"{dropped}","outcome":"drop","summary":"x"}}"#)).unwrap_err().kind, "rejected");
         assert_eq!(nightly(&format!(r#"{{"id":"{dropped}","outcome":"memory","summary":" "}}"#)).unwrap_err().kind, "rejected");
         assert!(nightly(&format!(r#"{{"id":"{dropped}","outcome":"drop"}}"#)).unwrap()["memory_id"].is_null());
-        assert!(crate::notes::all(tmp.path(), "aki").unwrap().is_empty());
+        assert!(crate::notes::all(&conn, tmp.path(), "aki").unwrap().is_empty());
         assert_eq!(nightly(&format!(r#"{{"id":"{dropped}","outcome":"drop"}}"#)).unwrap_err().kind, "not_found");
         assert_eq!(nightly(r#"{"id":"nope","outcome":"drop"}"#).unwrap_err().kind, "rejected");
     }

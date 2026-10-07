@@ -11,7 +11,8 @@ use std::fmt::Write as _;
 pub const MAX_STANDING_BYTES: usize = 64 * 1024;
 
 /// Everything after the standing document is rebuilt on every call, so it is a
-/// per-turn token cost rather than a per-edit one.
+/// per-turn token cost rather than a per-edit one. Working memory is rendered
+/// in full on top of it.
 pub const MAX_DYNAMIC_BYTES: usize = 6 * 1024;
 
 #[derive(Debug, Error)]
@@ -217,8 +218,8 @@ pub fn assemble(conn: &Connection, config_dir: &Path, data_dir: &Path, user_id: 
     let notes = read_nightly_notes(config_dir, username);
     let working_s = working_section(
         l,
-        &crate::notes::active(data_dir, username, now)?,
-        &crate::notes::upcoming(data_dir, username, now)?,
+        &crate::notes::active(conn, data_dir, username, now)?,
+        &crate::notes::upcoming(conn, data_dir, username, now)?,
         &tz,
     );
 
@@ -257,15 +258,16 @@ pub fn assemble(conn: &Connection, config_dir: &Path, data_dir: &Path, user_id: 
         s
     };
 
+    let budget = MAX_DYNAMIC_BYTES + working_s.len();
     let mut block = render(&CAPS[0]);
     for caps in &CAPS[1..] {
-        if block.len() <= MAX_DYNAMIC_BYTES {
+        if block.len() <= budget {
             break;
         }
         block = render(caps);
     }
-    if block.len() > MAX_DYNAMIC_BYTES {
-        let mut cut = MAX_DYNAMIC_BYTES;
+    if block.len() > budget {
+        let mut cut = budget;
         while !block.is_char_boundary(cut) {
             cut -= 1;
         }
@@ -917,6 +919,40 @@ mod tests {
                 format!("- {soon}: swim meet (2026-09-01 00:00)"),
             ]
         );
+    }
+
+    #[test]
+    fn working_memory_does_not_crowd_out_the_rest_of_the_block() {
+        let tmp = cfg_dir();
+        let (conn, uid) = user();
+        plan_today(&conn, uid, vec![routine("meds", "08:00")]);
+        for i in 0..10 {
+            task(&conn, uid, &format!("later-{i:03} {}", "t".repeat(60)), "open", Some(15), false, None, NOW);
+        }
+        conn.execute(
+            "INSERT INTO debriefs (user_id, date, content, created_at)
+             VALUES (?1, '2026-08-30', ?2, 't')",
+            (uid, "d".repeat(500)),
+        )
+        .unwrap();
+        for _ in 0..10 {
+            crate::log::record(&conn, Some(uid), "event_fired", &"e".repeat(100)).unwrap();
+        }
+        let now = now_ts();
+        let bare = dynamic(&assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now).unwrap()).to_string();
+
+        let made = crate::notes::stamp(now - jiff::SignedDuration::from_hours(1));
+        for i in 0..WORKING_MEMORY_CAP {
+            let title = format!("{i:02} {}", "n".repeat(crate::notes::MAX_TITLE_CHARS - 3));
+            crate::notes::add(&conn, tmp.path(), "aki", &title, None, None, made.parse().unwrap()).unwrap();
+        }
+        let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now).unwrap();
+        let block = dynamic(&out);
+        let start = block.find("# Working memory").expect(block);
+        let end = start + block[start..].find("\n\n# ").expect(block) + 2;
+        let rest = format!("{}{}", &block[..start], &block[end..]);
+        assert_eq!(block[start..end].lines().filter(|l| l.starts_with("- ")).count(), WORKING_MEMORY_CAP);
+        assert_eq!(rest, bare);
     }
 
     #[test]

@@ -69,11 +69,11 @@ impl Note {
         instant(self.from.as_deref()).is_some_and(|t| t > now && t <= horizon)
     }
 
-    /// Past its `until`, or three days since the latest of when it was touched,
-    /// written, or its window opened.
+    /// Past its `until`; or, with no `until`, three days since the latest of
+    /// when it was touched, written, or its window opened.
     pub fn is_due(&self, now: jiff::Timestamp) -> bool {
-        if instant(self.until.as_deref()).is_some_and(|t| t <= now) {
-            return true;
+        if let Some(until) = instant(self.until.as_deref()) {
+            return until <= now;
         }
         let last = [self.touched_at.as_deref(), self.from.as_deref(), Some(self.created.as_str())]
             .into_iter()
@@ -154,26 +154,26 @@ fn save(conn: &Connection, data_dir: &Path, user: &str, note: &Note) -> Result<(
 }
 
 /// Newest first.
-pub fn all(data_dir: &Path, user: &str) -> Result<Vec<Note>> {
-    let mut notes: Vec<Note> = memory::live_files(data_dir, user, NOTE)?.into_iter().map(Note::of).collect();
+pub fn all(conn: &Connection, data_dir: &Path, user: &str) -> Result<Vec<Note>> {
+    let mut notes: Vec<Note> = memory::live_files(conn, data_dir, user, NOTE)?.into_iter().map(Note::of).collect();
     notes.sort_by(|a, b| b.created.cmp(&a.created).then_with(|| a.id.cmp(&b.id)));
     Ok(notes)
 }
 
 /// Newest first.
-pub fn active(data_dir: &Path, user: &str, now: jiff::Timestamp) -> Result<Vec<Note>> {
-    Ok(all(data_dir, user)?.into_iter().filter(|n| n.is_active(now)).collect())
+pub fn active(conn: &Connection, data_dir: &Path, user: &str, now: jiff::Timestamp) -> Result<Vec<Note>> {
+    Ok(all(conn, data_dir, user)?.into_iter().filter(|n| n.is_active(now)).collect())
 }
 
 /// Notes whose window opens within the next twelve hours, soonest first.
-pub fn upcoming(data_dir: &Path, user: &str, now: jiff::Timestamp) -> Result<Vec<Note>> {
-    let mut notes: Vec<Note> = all(data_dir, user)?.into_iter().filter(|n| n.is_upcoming(now)).collect();
+pub fn upcoming(conn: &Connection, data_dir: &Path, user: &str, now: jiff::Timestamp) -> Result<Vec<Note>> {
+    let mut notes: Vec<Note> = all(conn, data_dir, user)?.into_iter().filter(|n| n.is_upcoming(now)).collect();
     notes.sort_by_key(|n| instant(n.from.as_deref()));
     Ok(notes)
 }
 
-pub fn due_to_settle(data_dir: &Path, user: &str, now: jiff::Timestamp) -> Result<Vec<Note>> {
-    Ok(all(data_dir, user)?.into_iter().filter(|n| n.is_due(now)).collect())
+pub fn due_to_settle(conn: &Connection, data_dir: &Path, user: &str, now: jiff::Timestamp) -> Result<Vec<Note>> {
+    Ok(all(conn, data_dir, user)?.into_iter().filter(|n| n.is_due(now)).collect())
 }
 
 /// `None` for an id that is not one of the user's live notes.
@@ -307,7 +307,7 @@ pub fn settle(
 
 /// Keeps every note still due as a memory, word for word; returns how many.
 pub fn settle_leftovers(conn: &Connection, data_dir: &Path, user: &str, now: jiff::Timestamp) -> Result<usize> {
-    let due = due_to_settle(data_dir, user, now)?;
+    let due = due_to_settle(conn, data_dir, user, now)?;
     let verbatim = Outcome::Memory { category: None, summary: None, body: None };
     for note in &due {
         settle(conn, data_dir, user, &note.id, &verbatim)?;
@@ -316,7 +316,8 @@ pub fn settle_leftovers(conn: &Connection, data_dir: &Path, user: &str, now: jif
 }
 
 /// Writes the rows schema v52 left in `legacy_notes` as working notes, one row
-/// at a time, then drops the table; returns how many became notes.
+/// at a time, then drops the table; returns how many became notes. A row whose
+/// title and creation time a live note already holds is not written again.
 pub fn adopt_legacy(conn: &Connection, data_dir: &Path) -> Result<usize> {
     let exists: i64 = conn.query_row(
         "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'legacy_notes'",
@@ -334,11 +335,19 @@ pub fn adopt_legacy(conn: &Connection, data_dir: &Path) -> Result<usize> {
         let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?;
         rows.collect::<rusqlite::Result<_>>()?
     };
+    let mut held: std::collections::HashMap<String, std::collections::HashSet<(String, String)>> =
+        std::collections::HashMap::new();
     let mut adopted = 0;
     for (row_id, user, text, created, nudged) in rows {
         let folded = text.split_whitespace().collect::<Vec<_>>().join(" ");
         let title = folded.chars().take(MAX_TITLE_CHARS).collect::<String>().trim_end().to_string();
-        if !title.is_empty() {
+        let held = match held.entry(user.clone()) {
+            std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+            std::collections::hash_map::Entry::Vacant(e) => {
+                e.insert(all(conn, data_dir, &user)?.into_iter().map(|n| (n.title, n.created)).collect())
+            }
+        };
+        if !title.is_empty() && held.insert((title.clone(), created.clone())) {
             let note = Note {
                 id: uuid::Uuid::new_v4().to_string(),
                 title,
@@ -409,8 +418,8 @@ mod tests {
         let soon = note(&conn, &tmp, "soon", (Some("2026-10-07T23:00:00Z"), None), "2026-10-07T00:00:03Z");
         note(&conn, &tmp, "later", (Some("2026-10-08T01:00:00Z"), None), "2026-10-07T00:00:04Z");
         let now = at("2026-10-07T12:00:00Z");
-        assert_eq!(ids(active(tmp.path(), "aki", now).unwrap()), vec![inside.id, open.id], "newest first");
-        assert_eq!(ids(upcoming(tmp.path(), "aki", now).unwrap()), vec![soon.id]);
+        assert_eq!(ids(active(&conn, tmp.path(), "aki", now).unwrap()), vec![inside.id, open.id], "newest first");
+        assert_eq!(ids(upcoming(&conn, tmp.path(), "aki", now).unwrap()), vec![soon.id]);
     }
 
     #[test]
@@ -471,7 +480,8 @@ mod tests {
         let stale = note(&conn, &tmp, "stale", (None, None), "2026-10-07T12:00:00Z");
         note(&conn, &tmp, "fresh", (None, None), "2026-10-07T12:00:01Z");
         note(&conn, &tmp, "waiting", (Some("2026-10-09T00:00:00Z"), None), "2026-10-01T00:00:00Z");
-        let mut due = ids(due_to_settle(tmp.path(), "aki", at("2026-10-10T12:00:00Z")).unwrap());
+        note(&conn, &tmp, "running", (None, Some("2026-10-17T12:00:00Z")), "2026-10-06T12:00:00Z");
+        let mut due = ids(due_to_settle(&conn, tmp.path(), "aki", at("2026-10-10T12:00:00Z")).unwrap());
         due.sort();
         let mut want = vec![ended.id, stale.id];
         want.sort();
@@ -508,7 +518,7 @@ mod tests {
         );
 
         assert_eq!(settle(&conn, tmp.path(), "aki", &gone.id, &Outcome::Drop).unwrap(), None);
-        assert!(all(tmp.path(), "aki").unwrap().is_empty(), "a settled note leaves working memory");
+        assert!(all(&conn, tmp.path(), "aki").unwrap().is_empty(), "a settled note leaves working memory");
         assert_eq!(crate::memory::live_count(&conn, "aki").unwrap(), 3);
         assert!(matches!(settle(&conn, tmp.path(), "aki", &gone.id, &Outcome::Drop), Err(NoteError::NotFound(_))));
     }
@@ -530,7 +540,7 @@ mod tests {
         touch(&conn, tmp.path(), "aki", std::slice::from_ref(&fresh.id), at("2026-10-09T00:00:00Z")).unwrap();
 
         assert_eq!(settle_leftovers(&conn, tmp.path(), "aki", at("2026-10-10T00:00:00Z")).unwrap(), 1);
-        assert_eq!(ids(all(tmp.path(), "aki").unwrap()), vec![fresh.id]);
+        assert_eq!(ids(all(&conn, tmp.path(), "aki").unwrap()), vec![fresh.id]);
         let kept = crate::memory::list(&conn, "aki", None, 10).unwrap();
         assert_eq!(kept.len(), 1);
         assert_eq!((kept[0].category.as_str(), kept[0].summary.as_str()), ("semantic", "asked about the essay twice"));

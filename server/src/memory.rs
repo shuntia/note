@@ -504,8 +504,9 @@ pub fn remove(conn: &Connection, data_dir: &Path, user: &str, id: &str) -> Resul
     Ok(true)
 }
 
-/// Every readable live file of one category, in no particular order.
-pub fn live_files(data_dir: &Path, user: &str, category: &str) -> Result<Vec<MemoryFile>> {
+/// Every readable live file of one category, in no particular order; the
+/// unreadable ones go to the event log.
+pub fn live_files(conn: &Connection, data_dir: &Path, user: &str, category: &str) -> Result<Vec<MemoryFile>> {
     let Ok(entries) = std::fs::read_dir(user_root(data_dir, user).join(category)) else {
         return Ok(Vec::new());
     };
@@ -515,8 +516,18 @@ pub fn live_files(data_dir: &Path, user: &str, category: &str) -> Result<Vec<Mem
         if path.extension().is_none_or(|e| e != "md") {
             continue;
         }
-        if let Ok(f) = std::fs::read_to_string(&path).map_err(anyhow::Error::from).and_then(|raw| parse(&raw, false)) {
-            out.push(f);
+        match std::fs::read_to_string(&path).map_err(anyhow::Error::from).and_then(|raw| parse(&raw, false)) {
+            Ok(f) => out.push(f),
+            Err(e) => {
+                let _ = crate::log::record_throttled(
+                    conn,
+                    None,
+                    "memory_index_error",
+                    &format!("{}: {e}", path.display()),
+                    jiff::Timestamp::now(),
+                    crate::log::ERROR_LOG_WINDOW_MINS,
+                );
+            }
         }
     }
     Ok(out)
@@ -1068,8 +1079,28 @@ mod tests {
             )
             .unwrap();
         assert_eq!(indexed, 1, "a reindex keeps the note in the index");
-        assert_eq!(live_files(tmp.path(), "aki", NOTE).unwrap().len(), 1);
-        assert!(live_files(tmp.path(), "nobody", NOTE).unwrap().is_empty());
+        assert_eq!(live_files(&conn, tmp.path(), "aki", NOTE).unwrap().len(), 1);
+        assert!(live_files(&conn, tmp.path(), "nobody", NOTE).unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_unreadable_live_file_is_logged_not_listed() {
+        let conn = crate::db::open_memory().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = user_root(tmp.path(), "aki").join(NOTE);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("broken.md"), "no front matter").unwrap();
+        assert!(live_files(&conn, tmp.path(), "aki", NOTE).unwrap().is_empty());
+        assert!(live_files(&conn, tmp.path(), "aki", NOTE).unwrap().is_empty());
+        let logged: Vec<String> = conn
+            .prepare("SELECT detail FROM event_log WHERE kind = 'memory_index_error'")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(logged.len(), 1, "a file read every turn is logged once per window: {logged:?}");
+        assert!(logged[0].contains("broken.md"), "{logged:?}");
     }
 
     #[test]
