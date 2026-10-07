@@ -430,7 +430,7 @@ function FactBody({
     <article className="memory-card" ref={cardRef}>
       <h2 className="memory-title">{displaySummary(fact)}</h2>
       <p className="memory-meta">
-        {t('memory.from', { date: shortDate(fact.created) })}
+        {fact.source === 'note' ? t('memory.builtIn') : t('memory.from', { date: shortDate(fact.created) })}
         {fact.archived && <span className="memory-flag">{t('memory.archived')}</span>}
       </p>
       {meta.length > 0 && (

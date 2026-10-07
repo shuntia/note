@@ -3,6 +3,7 @@ pub mod agent;
 pub mod allocate;
 pub mod api;
 pub mod auth;
+pub mod builtin_memory;
 pub mod calendar;
 pub mod channels;
 pub mod config;
@@ -225,6 +226,20 @@ impl AppState {
 
     pub fn db(&self) -> MutexGuard<'_, Connection> {
         db_guard(&self.db)
+    }
+
+    /// Embeds, off the async runtime, every live fact still missing a vector.
+    pub fn spawn_vector_backfill(&self) {
+        let Some(embeddings) = self.embeddings.clone() else { return };
+        let db = self.db.clone();
+        let data_dir = self.data_dir.clone();
+        tokio::task::spawn_blocking(move || {
+            match crate::memory::backfill_vectors(&db, &data_dir, embeddings.as_ref()) {
+                Ok(0) => {}
+                Ok(n) => eprintln!("memory: embedded {n} fact(s) that had no vector"),
+                Err(e) => eprintln!("memory: vector backfill failed: {e:#}"),
+            }
+        });
     }
 
     #[must_use]

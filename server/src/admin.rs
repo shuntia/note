@@ -649,11 +649,14 @@ async fn users_create(
     let (username, password, admin) = (req.username, req.password, req.admin);
     let result = tokio::task::spawn_blocking(move || {
         let conn = st.db();
-        auth::create_user(&conn, &username, &password, admin).map(|id| (id, username, admin))
+        let id = auth::create_user(&conn, &username, &password, admin)?;
+        crate::builtin_memory::seed_new_user(&conn, &st.data_dir, &st.config_dir, &username);
+        Ok::<_, anyhow::Error>((id, username, admin))
     })
     .await;
     match result {
         Ok(Ok((id, username, admin))) => {
+            state.spawn_vector_backfill();
             let role = if admin { "admin" } else { "member" };
             record(&state, actor.id, "admin_user_create", &format!("{username} ({role})"));
             (StatusCode::CREATED, Json(serde_json::json!({ "id": id }))).into_response()

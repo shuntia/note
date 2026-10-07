@@ -315,6 +315,7 @@ export type MemoryFact = {
   created: string
   archived: boolean
   supersedes: string | null
+  source?: string | null
 }
 
 export type InboxKind = 'announcement' | 'material'

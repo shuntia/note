@@ -269,6 +269,7 @@ export const ja: Dict = {
   "memory.aboutDraft": "「{summary}」について: ",
   "memory.all": "すべて",
   "memory.archived": "アーカイブ済み",
+  "memory.builtIn": "Note が自分について知っていること",
   "memory.empty": "まだ何もありません。",
   "memory.episodes": "出来事",
   "memory.facts": "事実",

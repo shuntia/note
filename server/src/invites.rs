@@ -291,17 +291,28 @@ async fn join(
     let Ok(slot) = state.login_slots.clone().try_acquire_owned() else {
         return (StatusCode::SERVICE_UNAVAILABLE, [(header::RETRY_AFTER, "2")]).into_response();
     };
+    let browser_lang = headers
+        .get(header::ACCEPT_LANGUAGE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(Lang::from_accept_language);
     let st = state.clone();
     let result = tokio::task::spawn_blocking(move || {
         let _slot = slot;
         let hash = crate::auth::hash_password(&req.password).map_err(|e| JoinError::Invalid(e.to_string()))?;
         let conn = st.db();
         let id = consume(&conn, &token, &username, &hash, jiff::Timestamp::now())?;
+        if let Some(seen) = browser_lang {
+            let _ = text::remember_seen(&st.config_dir, &username, seen);
+        }
+        crate::builtin_memory::seed_new_user(&conn, &st.data_dir, &st.config_dir, &username);
         let session = crate::auth::start_session(&conn, id).map_err(|e| JoinError::Invalid(e.to_string()))?;
         let _ = crate::log::record(&conn, Some(id), "invite_join", &username);
         Ok::<_, JoinError>(session)
     })
     .await;
+    if matches!(result, Ok(Ok(_))) {
+        state.spawn_vector_backfill();
+    }
     match result {
         Ok(Ok(session)) => (
             StatusCode::CREATED,

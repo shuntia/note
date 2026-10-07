@@ -51,7 +51,7 @@ pub fn read(
     match crate::memory::read(ctx.data_dir, ctx.username, &args.id) {
         Ok(Some(f)) => Ok(serde_json::json!({
             "id": f.id, "category": f.category, "summary": f.summary,
-            "body": f.body, "archived": f.archived,
+            "body": f.body, "archived": f.archived, "source": f.source,
         })),
         Ok(None) => Err(ToolError::not_found(format!("no memory {}", args.id))),
         Err(e) => Err(ToolError::internal(e.to_string())),

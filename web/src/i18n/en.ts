@@ -268,6 +268,7 @@ export const en = {
   "memory.aboutDraft": "About \"{summary}\": ",
   "memory.all": "All",
   "memory.archived": "archived",
+  "memory.builtIn": "What Note knows about itself",
   "memory.empty": "Nothing yet.",
   "memory.episodes": "Episodes",
   "memory.facts": "Facts",

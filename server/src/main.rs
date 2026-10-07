@@ -1,6 +1,6 @@
 use anyhow::Context;
 use note_server::{
-    admin, api, auth, channels, config::ServerConfig, db, memory, nightly, providers, runner,
+    admin, api, auth, builtin_memory, channels, config::ServerConfig, db, memory, nightly, providers, runner,
     search, security, summaries, totp, AppState,
 };
 use std::path::PathBuf;
@@ -59,6 +59,7 @@ async fn main() -> anyhow::Result<()> {
             }
             auth::create_user(&conn, name, pass, admin)?;
             auth::set_category(&conn, name, category)?;
+            builtin_memory::seed_new_user(&conn, &cfg.data_dir, &config_dir, name);
             println!("created {name} ({category})");
             return Ok(());
         }
@@ -97,6 +98,12 @@ async fn main() -> anyhow::Result<()> {
         }
         Some(other) => anyhow::bail!("unknown command {other:?}\n{USAGE}"),
         None => {}
+    }
+
+    match builtin_memory::seed_all(&conn, &cfg.data_dir, &config_dir) {
+        Ok(0) => {}
+        Ok(n) => eprintln!("memory: seeded {n} built-in fact(s)"),
+        Err(e) => eprintln!("memory: built-in seeding failed: {e:#}"),
     }
 
     let (secrets, warnings) = admin::AdminSecrets::load(&cfg.secrets_dir);
@@ -173,17 +180,7 @@ async fn main() -> anyhow::Result<()> {
             .with_context(|| format!("listening for the voice service on {}", v.socket.display()))?;
         voice.spawn_sweeper();
     }
-    if let Some(embeddings) = state.embeddings.clone() {
-        let db = state.db.clone();
-        let data_dir = state.data_dir.clone();
-        tokio::task::spawn_blocking(move || {
-            match memory::backfill_vectors(&db, &data_dir, embeddings.as_ref()) {
-                Ok(0) => {}
-                Ok(n) => eprintln!("memory: embedded {n} fact(s) that had no vector"),
-                Err(e) => eprintln!("memory: vector backfill failed: {e:#}"),
-            }
-        });
-    }
+    state.spawn_vector_backfill();
     runner::spawn(state.clone());
     note_server::matrix::spawn(state.clone());
     nightly::spawn(state.clone());

@@ -18,6 +18,9 @@ pub struct MemoryFile {
     pub until: Option<String>,
     pub created: String,
     pub archived: bool,
+    /// What wrote the fact when it was not the user's own sessions; `note` for
+    /// Note's built-in knowledge of itself.
+    pub source: Option<String>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -47,7 +50,7 @@ pub fn valid_id(id: &str) -> bool {
     id.len() == 36 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f' | b'-'))
 }
 
-fn user_root(data_dir: &Path, user: &str) -> PathBuf {
+pub(crate) fn user_root(data_dir: &Path, user: &str) -> PathBuf {
     data_dir.join("memory").join(user)
 }
 
@@ -61,6 +64,9 @@ fn render(f: &MemoryFile) -> String {
     }
     if let Some(u) = &f.until {
         let _ = writeln!(fm, "until: {u}");
+    }
+    if let Some(s) = &f.source {
+        let _ = writeln!(fm, "source: {s}");
     }
     format!("{fm}---\n\n{}\n", f.body)
 }
@@ -77,6 +83,7 @@ fn parse(raw: &str, archived: bool) -> Result<MemoryFile> {
         until: None,
         created: String::new(),
         archived,
+        source: None,
     };
     for line in fm.lines() {
         let Some((k, v)) = line.split_once(": ") else { continue };
@@ -87,6 +94,7 @@ fn parse(raw: &str, archived: bool) -> Result<MemoryFile> {
             "created" => f.created = v.into(),
             "supersedes" => f.supersedes = Some(v.into()),
             "until" => f.until = Some(v.into()),
+            "source" => f.source = Some(v.into()),
             _ => {}
         }
     }
@@ -130,7 +138,7 @@ fn index_insert(conn: &Connection, user: &str, f: &MemoryFile, path: &Path) -> r
     Ok(())
 }
 
-fn one_line(summary: &str) -> String {
+pub(crate) fn one_line(summary: &str) -> String {
     summary.replace(['\n', '\r'], " ").trim().to_string()
 }
 
@@ -267,6 +275,28 @@ pub fn add_until(
     fact: &Fact,
     vector: Option<&[f32]>,
 ) -> Result<String> {
+    write_new(conn, data_dir, user, fact, None, vector)
+}
+
+/// `add` for a fact Note writes on its own behalf, marked with `source`.
+pub fn add_sourced(
+    conn: &Connection,
+    data_dir: &Path,
+    user: &str,
+    fact: &Fact,
+    source: &str,
+) -> Result<String> {
+    write_new(conn, data_dir, user, fact, Some(source), None)
+}
+
+fn write_new(
+    conn: &Connection,
+    data_dir: &Path,
+    user: &str,
+    fact: &Fact,
+    source: Option<&str>,
+    vector: Option<&[f32]>,
+) -> Result<String> {
     let Fact { category, summary, body, until } = *fact;
     if !CATEGORIES.contains(&category) {
         bail!("invalid category: {category}");
@@ -280,6 +310,7 @@ pub fn add_until(
         until: until.map(str::to_owned),
         created: jiff::Timestamp::now().to_string(),
         archived: false,
+        source: source.map(str::to_owned),
     };
     let dir = user_root(data_dir, user).join(category);
     std::fs::create_dir_all(&dir)?;
@@ -335,6 +366,7 @@ pub fn update(
     let mut f = parse(&std::fs::read_to_string(&path)?, false)?;
     f.summary = one_line(summary);
     f.body = body.trim().into();
+    f.source = None;
     write_atomic(&path, &render(&f))?;
     index_insert(conn, user, &f, &path)?;
     store_vector(conn, user, &f.id, vector);
@@ -348,6 +380,19 @@ pub fn supersede(
     old_id: &str,
     summary: &str,
     body: &str,
+    vector: Option<&[f32]>,
+) -> Result<Option<String>, WriteError> {
+    supersede_sourced(conn, data_dir, user, old_id, (summary, body), None, vector)
+}
+
+/// `supersede` whose replacement carries `source`; the category is kept.
+pub fn supersede_sourced(
+    conn: &Connection,
+    data_dir: &Path,
+    user: &str,
+    old_id: &str,
+    (summary, body): (&str, &str),
+    source: Option<&str>,
     vector: Option<&[f32]>,
 ) -> Result<Option<String>, WriteError> {
     let Some((old_path, archived)) = locate(data_dir, user, old_id) else {
@@ -366,6 +411,7 @@ pub fn supersede(
         until: None,
         created: jiff::Timestamp::now().to_string(),
         archived: false,
+        source: source.map(str::to_owned),
     };
     let new_path = user_root(data_dir, user).join(&new.category).join(format!("{}.md", new.id));
     write_atomic(&new_path, &render(&new))?;

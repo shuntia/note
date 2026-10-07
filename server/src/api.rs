@@ -2172,6 +2172,7 @@ async fn memory_read(
             "supersedes": f.supersedes,
             "created": f.created,
             "archived": f.archived,
+            "source": f.source,
             "sources": memory_sources(&state, user.id, &id),
         }))
         .into_response(),
