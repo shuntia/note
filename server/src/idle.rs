@@ -95,7 +95,7 @@ fn check_one(
     if !close.is_empty() && wall.as_str() >= close {
         return Ok(None);
     }
-    if crate::notes::active(data_dir, &user.username, now)?.is_empty() {
+    if crate::notes::active(conn, data_dir, &user.username, now)?.is_empty() {
         return Ok(None);
     }
     let date = local.date();
@@ -170,7 +170,7 @@ pub fn context(
         let _ = writeln!(s, "{}", mt::quiet_for(l, (now.as_second() - at.as_second()).max(0) / 60));
     }
     s.push_str(mt::open_working_lines(l));
-    for n in crate::notes::active(data_dir, username, now)?.into_iter().take(20) {
+    for n in crate::notes::active(conn, data_dir, username, now)?.into_iter().take(20) {
         let nudge = match &n.last_nudged_at {
             Some(t) => mt::nudged_ago(l, &ago(t, l, now)),
             None => mt::never_nudged(l).to_string(),

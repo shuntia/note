@@ -1919,7 +1919,7 @@ mod tests {
         assert!(insert("s4", "material", Some("maybe")).is_err());
     }
     #[test]
-    fn notes_hold_one_line_of_text_and_a_pinned_flag() {
+    fn the_legacy_notes_table_at_v51_holds_what_adoption_reads() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
         apply_migrations(&conn, &MIGRATIONS[..51]).unwrap();
@@ -2191,9 +2191,12 @@ mod tests {
         }
         apply_migrations(&conn, MIGRATIONS).unwrap();
         let tmp = tempfile::tempdir().unwrap();
+        let written_before_a_crash = "a".repeat(80);
+        crate::notes::add(&conn, tmp.path(), "aki", &written_before_a_crash, None, None, "2026-10-01T08:00:00Z".parse().unwrap())
+            .unwrap();
 
-        assert_eq!(crate::notes::adopt_legacy(&conn, tmp.path()).unwrap(), 2);
-        let mut notes = crate::notes::all(tmp.path(), "aki").unwrap();
+        assert_eq!(crate::notes::adopt_legacy(&conn, tmp.path()).unwrap(), 1, "a row already written is not written twice");
+        let mut notes = crate::notes::all(&conn, tmp.path(), "aki").unwrap();
         notes.sort_by(|a, b| a.title.cmp(&b.title));
         let titles: Vec<&str> = notes.iter().map(|n| n.title.as_str()).collect();
         assert_eq!(titles, vec!["a".repeat(80).as_str(), "call the bank"]);
@@ -2206,6 +2209,6 @@ mod tests {
             .unwrap();
         assert_eq!(tables, 0);
         assert_eq!(crate::notes::adopt_legacy(&conn, tmp.path()).unwrap(), 0, "a second start carries nothing");
-        assert_eq!(crate::notes::all(tmp.path(), "aki").unwrap().len(), 2);
+        assert_eq!(crate::notes::all(&conn, tmp.path(), "aki").unwrap().len(), 2);
     }
 }

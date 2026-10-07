@@ -130,7 +130,10 @@ fn run_stages(
 
     let lang = crate::text::Lang::for_user(deps.config_dir, username);
     let mut opening = crate::model_text::nightly_opening(lang, date);
-    let due = crate::notes::due_to_settle(deps.data_dir, username, now).unwrap_or_default();
+    let due = {
+        let conn = crate::db_guard(deps.db);
+        crate::notes::due_to_settle(&conn, deps.data_dir, username, now).unwrap_or_default()
+    };
     if !due.is_empty() {
         opening.push_str(crate::model_text::notes_to_settle(lang));
         for n in &due {
@@ -835,10 +838,10 @@ mod tests {
         }
         assert!(!opening.contains(fresh.as_str()), "{opening}");
 
-        let remaining: Vec<String> =
-            crate::notes::all(tmp.path(), "aki").unwrap().into_iter().map(|n| n.id).collect();
-        assert_eq!(remaining, vec![fresh]);
         let conn = db.lock().unwrap();
+        let remaining: Vec<String> =
+            crate::notes::all(&conn, tmp.path(), "aki").unwrap().into_iter().map(|n| n.id).collect();
+        assert_eq!(remaining, vec![fresh]);
         let mut kept: Vec<(String, String)> = crate::memory::list(&conn, "aki", None, 10)
             .unwrap()
             .into_iter()
@@ -873,8 +876,8 @@ mod tests {
                 .unwrap();
         }
         run_for_user(&deps(&db, &tmp, &Failing), 1, "aki", "2026-08-31T04:00:00Z".parse().unwrap()).unwrap();
-        assert!(crate::notes::all(tmp.path(), "aki").unwrap().is_empty());
         let conn = db.lock().unwrap();
+        assert!(crate::notes::all(&conn, tmp.path(), "aki").unwrap().is_empty());
         assert_eq!(crate::memory::list(&conn, "aki", None, 10).unwrap()[0].summary, "milk");
     }
 }
