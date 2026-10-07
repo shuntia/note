@@ -127,8 +127,16 @@
             installPhase = "mkdir -p $out && cp -r lib $out/";
           };
 
+          # English: Nemotron streaming STT + Kokoro; Japanese: ReazonSpeech offline STT (its voice is a
+          # sidecar); Silero VAD and Smart Turn serve every language. Two Japanese test clips stay for the
+          # selfcheck.
           voiceModels = pkgs.runCommand "note-voice-models" { } ''
-            mkdir -p $out/nemotron $out/kokoro
+            mkdir -p $out/nemotron $out/kokoro $out/ja/reazonspeech
+            tar xjf ${pkgs.fetchurl {
+              url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-zipformer-ja-reazonspeech-2024-08-01.tar.bz2";
+              hash = "sha256-4JgdDV17RG1BAQgxtZCR6/V9Kqe3mYD2fKN69GC1hC0=";
+            }} -C $out/ja/reazonspeech --strip-components=1
+            rm -f $out/ja/reazonspeech/*-avg-1.onnx $out/ja/reazonspeech/test_wavs/{1,4,5}.wav
             tar xjf ${pkgs.fetchurl {
               url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemotron-speech-streaming-en-0.6b-160ms-int8-2026-04-25.tar.bz2";
               hash = "sha256-Cuc6Qc1RWZ3HysmsCD2dNd5T12LKRZI1Bf3kejdRgUs=";
