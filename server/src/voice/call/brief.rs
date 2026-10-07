@@ -98,8 +98,20 @@ mod tests {
             thread_note: None,
             share: None,
         };
+        let essay = {
+            let conn = db.lock().unwrap();
+            crate::notes::add(&conn, tmp.path(), "aki", "the essay is the one that matters", None, None,
+                now - jiff::SignedDuration::from_hours(1)).unwrap()
+        };
         let reason = Reason::CheckIn { title: "Essay".into(), body: "How is the essay going?".into() };
         let brief = build(&deps, 1, "aki", &reason, Some(thread), now, Lang::En).unwrap();
+        assert!(
+            brief.contains(&format!(
+                "# Working memory (note_write; the user does not see it)\n\n- {}: the essay is the one that matters",
+                essay.id
+            )),
+            "a call carries working memory: {brief}"
+        );
 
         assert!(brief.starts_with(crate::model_text::call_briefly(crate::text::Lang::En)), "{brief}");
         assert!(brief.contains("\n\nYou are Note, on a phone call with Aki."), "{brief}");

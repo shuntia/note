@@ -154,28 +154,29 @@ struct Caps {
     later: usize,
     debrief: usize,
     activity: usize,
-    scratch: usize,
     notes: bool,
 }
 
 /// Walked in order until the block fits: the Later list gives way first, then
-/// the debrief, then the activity tail and the scratchpad's oldest lines, and
-/// last night's notes only once all of those are gone. The real-time line, the Now list and the plan are never
-/// among them.
+/// the debrief, then the activity tail, and last night's notes only once all of
+/// those are gone. The real-time line, the Now list, the plan and working
+/// memory are never among them.
 const CAPS: [Caps; 7] = [
-    Caps { later: 10, debrief: 600, activity: 10, scratch: 12, notes: true },
-    Caps { later: 4, debrief: 600, activity: 10, scratch: 12, notes: true },
-    Caps { later: 0, debrief: 600, activity: 10, scratch: 12, notes: true },
-    Caps { later: 0, debrief: 200, activity: 10, scratch: 12, notes: true },
-    Caps { later: 0, debrief: 0, activity: 10, scratch: 12, notes: true },
-    Caps { later: 0, debrief: 0, activity: 3, scratch: 6, notes: true },
-    Caps { later: 0, debrief: 0, activity: 3, scratch: 6, notes: false },
+    Caps { later: 10, debrief: 600, activity: 10, notes: true },
+    Caps { later: 4, debrief: 600, activity: 10, notes: true },
+    Caps { later: 0, debrief: 600, activity: 10, notes: true },
+    Caps { later: 0, debrief: 200, activity: 10, notes: true },
+    Caps { later: 0, debrief: 0, activity: 10, notes: true },
+    Caps { later: 0, debrief: 0, activity: 3, notes: true },
+    Caps { later: 0, debrief: 0, activity: 3, notes: false },
 ];
+
+const WORKING_MEMORY_CAP: usize = 40;
 
 /// Renders the full injection context: the standing document verbatim, then a
 /// dynamic block from the DB. Ordered standing-first for prompt-cache
 /// stability — the standing doc changes rarely, the dynamic block every call.
-pub fn assemble(conn: &Connection, config_dir: &Path, user_id: i64, username: &str, now: jiff::Timestamp) -> Result<String> {
+pub fn assemble(conn: &Connection, config_dir: &Path, data_dir: &Path, user_id: i64, username: &str, now: jiff::Timestamp) -> Result<String> {
     let ucfg = crate::config::UserConfig::load(config_dir, username)?;
     let l = Lang::for_user(config_dir, username);
     let (tz, tz_label) = match jiff::tz::TimeZone::get(&ucfg.timezone) {
@@ -214,10 +215,12 @@ pub fn assemble(conn: &Connection, config_dir: &Path, user_id: i64, username: &s
     let debrief = latest_debrief(conn, user_id, today)?;
     let activity = recent_activity(conn, user_id)?;
     let notes = read_nightly_notes(config_dir, username);
-    let scratch: Vec<_> = crate::legacy_notes::list(conn, user_id, now)?
-        .into_iter()
-        .filter(|n| n.done_at.is_none())
-        .collect();
+    let working_s = working_section(
+        l,
+        &crate::notes::active(data_dir, username, now)?,
+        &crate::notes::upcoming(data_dir, username, now)?,
+        &tz,
+    );
 
     let quiet = crate::calendar::quiet_window(conn, user_id, &tz, now)?;
     let calendar = crate::calendar::occurrences(conn, user_id, today)?;
@@ -247,7 +250,7 @@ pub fn assemble(conn: &Connection, config_dir: &Path, user_id: i64, username: &s
         s.push_str(&now_s);
         s.push_str(&plan_s);
         s.push_str(&tasks_section(l, &now_tasks, &later, done_today, caps.later, &tz, today, now));
-        s.push_str(&scratch_section(l, &scratch, caps.scratch));
+        s.push_str(&working_s);
         s.push_str(&debrief_section(l, debrief.as_ref(), today, caps.debrief));
         s.push_str(&settings_s);
         s.push_str(&activity_section(l, &activity, &tz, caps.activity));
@@ -575,15 +578,33 @@ fn notes_section(
     format!("{}\n\n{body}\n\n", mt::notes_heading(l, stale, date, &days_ago(l, date, today)))
 }
 
-/// Pinned lines first, then the newest of the rest, up to `cap`.
-fn scratch_section(l: Lang, lines: &[crate::legacy_notes::Note], cap: usize) -> String {
-    if lines.is_empty() {
+fn working_section(
+    l: Lang,
+    active: &[crate::notes::Note],
+    coming: &[crate::notes::Note],
+    tz: &jiff::tz::TimeZone,
+) -> String {
+    if active.is_empty() && coming.is_empty() {
         return String::new();
     }
-    let (pinned, rest): (Vec<_>, Vec<_>) = lines.iter().partition(|n| n.pinned);
-    let mut s = String::from(mt::scratch_heading(l));
-    for n in pinned.into_iter().chain(rest.into_iter().rev()).take(cap) {
-        let _ = writeln!(s, "- {}{}: {}", n.id, if n.pinned { mt::pinned(l) } else { "" }, n.text);
+    let mut s = String::from(mt::working_memory_heading(l));
+    for n in active.iter().take(WORKING_MEMORY_CAP) {
+        let _ = writeln!(s, "- {}: {}", n.id, n.title);
+    }
+    if !coming.is_empty() {
+        if !active.is_empty() {
+            s.push('\n');
+        }
+        s.push_str(mt::coming_up(l));
+        for n in coming.iter().take(WORKING_MEMORY_CAP) {
+            let opens = n
+                .from
+                .as_deref()
+                .and_then(|f| f.parse::<jiff::Timestamp>().ok())
+                .map(|t| t.to_zoned(tz.clone()).strftime("%Y-%m-%d %H:%M").to_string())
+                .unwrap_or_default();
+            let _ = writeln!(s, "- {}: {} ({opens})", n.id, n.title);
+        }
     }
     s.push('\n');
     s
@@ -852,7 +873,7 @@ mod tests {
         let date: jiff::civil::Date = "2026-08-31".parse().unwrap();
         crate::plan::generate(&conn, uid, &tmpl, date).unwrap();
         crate::log::record(&conn, Some(uid), "event_fired", "event 1").unwrap();
-        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
         assert!(out.contains("hates mornings"), "{out}");
         assert!(out.contains("2026-08-31 21:00"), "{out}");
         assert!(out.contains("Asia/Tokyo"), "{out}");
@@ -861,29 +882,49 @@ mod tests {
     }
 
     #[test]
-    fn the_scratchpad_shows_open_lines_pinned_first_then_newest() {
+    fn working_memory_lists_active_notes_newest_first_and_what_is_coming_up() {
         let tmp = cfg_dir();
         let (conn, uid) = user();
-        let at = now_ts();
-        let add = |text: &str| crate::legacy_notes::create(&conn, uid, &crate::legacy_notes::NewNote { text: text.into() }, at).unwrap().id;
-        let old = add("asked about the essay twice");
-        let pin = add("prefers short check-ins");
-        let new = add("sat score lands friday");
-        let done = add("handled");
-        let set = |id: i64, patch: crate::legacy_notes::NotePatch| crate::legacy_notes::update(&conn, uid, id, &patch, at).unwrap();
-        set(pin, crate::legacy_notes::NotePatch { pinned: Some(true), ..Default::default() });
-        set(done, crate::legacy_notes::NotePatch { done: Some(true), ..Default::default() });
-        let out = assemble(&conn, tmp.path(), uid, "aki", at).unwrap();
-        let pad = &out[out.find("# Your scratchpad").expect(&out)..];
-        let lines: Vec<&str> = pad.lines().skip(2).take_while(|l| !l.is_empty()).collect();
+        let now = now_ts();
+        let hours = |h: i64| now + jiff::SignedDuration::from_hours(h);
+        let add = |title: &str, from: Option<jiff::Timestamp>, until: Option<jiff::Timestamp>, made: jiff::Timestamp| {
+            crate::notes::add(&conn, tmp.path(), "aki", title, from.map(crate::notes::stamp), until.map(crate::notes::stamp), made)
+                .unwrap()
+                .id
+        };
+        let old = add("asked about the essay twice", None, None, hours(-3));
+        let new = add("sat score lands friday", None, None, hours(-2));
+        let window = add("dentist until four", Some(hours(-1)), Some(hours(1)), hours(-4));
+        add("handled already", None, Some(hours(-1)), hours(-1));
+        let soon = add("swim meet", Some(hours(3)), None, hours(-1));
+        add("next week", Some(hours(30)), None, hours(-1));
+
+        let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now).unwrap();
+        let section = &out[out.find("# Working memory").expect(&out)..];
+        let lines: Vec<&str> = section
+            .lines()
+            .skip(2)
+            .take_while(|l| !l.starts_with('#'))
+            .filter(|l| !l.is_empty())
+            .collect();
         assert_eq!(
             lines,
             vec![
-                format!("- {pin} (pinned): prefers short check-ins"),
                 format!("- {new}: sat score lands friday"),
                 format!("- {old}: asked about the essay twice"),
+                format!("- {window}: dentist until four"),
+                "Coming up:".to_string(),
+                format!("- {soon}: swim meet (2026-09-01 00:00)"),
             ]
         );
+    }
+
+    #[test]
+    fn no_notes_leave_no_working_memory_heading() {
+        let tmp = cfg_dir();
+        let (conn, uid) = user();
+        let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
+        assert!(!out.contains("# Working memory"), "{out}");
     }
 
     fn commitment(conn: &rusqlite::Connection, uid: i64, title: &str, start: &str, end: &str,
@@ -902,7 +943,7 @@ mod tests {
         plan_today(&conn, uid, vec![routine("checkin_call", "09:00")]);
         commitment(&conn, uid, "swim practice", "20:00", "22:00", "fixed", true);
 
-        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
         assert!(out.contains("Quiet until 22:00 (swim practice)"), "{out}");
     }
 
@@ -913,7 +954,7 @@ mod tests {
         plan_today(&conn, uid, vec![routine("checkin_call", "09:00")]);
         commitment(&conn, uid, "commute", "20:00", "22:00", "busy", false);
 
-        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
         assert!(!out.contains("Quiet until"), "{out}");
     }
 
@@ -925,7 +966,7 @@ mod tests {
         commitment(&conn, uid, "school", "08:15", "15:30", "fixed", true);
         commitment(&conn, uid, "bin day", "07:00", "07:30", "note", false);
 
-        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
         let plan = out.find("# Today's plan").expect("a plan section");
         let calendar = out[plan..].find("Calendar:").expect("a calendar sub-line") + plan;
         let school = out[plan..].find("- 08:15-15:30 school [fixed, quiet]").expect("school") + plan;
@@ -943,7 +984,7 @@ mod tests {
             commitment(&conn, uid, &format!("class {i}"), &format!("{i:02}:00"),
                        &format!("{i:02}:30"), "fixed", true);
         }
-        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
         assert_eq!(out.matches("class ").count(), MAX_CALENDAR_LINES);
         assert!(out.contains("- (+3 more)"), "{out}");
     }
@@ -961,7 +1002,7 @@ mod tests {
                 kind: "meds".into(), time: "08:00".into(), days: vec!["mon".into()],
                 alert: Some(false), channel: "push".into(), ..Default::default() },
         ]);
-        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
         let block: i64 = conn
             .query_row("SELECT id FROM events WHERE kind = 'Work time'", [], |r| r.get(0))
             .unwrap();
@@ -976,7 +1017,7 @@ mod tests {
     fn invalid_tz_is_labeled_as_utc_fallback() {
         let tmp = cfg_dir_tz("Not/AZone");
         let (conn, uid) = user();
-        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
         assert!(out.contains("UTC (configured timezone invalid)"), "{out}");
         assert!(!out.contains("Not/AZone"), "{out}");
     }
@@ -985,7 +1026,7 @@ mod tests {
     fn assemble_without_standing_or_plan_still_works() {
         let tmp = cfg_dir();
         let (conn, uid) = user();
-        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
         assert!(out.contains("(no standing context yet)"), "{out}");
         assert!(out.contains("(no plan generated for today)"), "{out}");
         assert!(out.contains("(no tasks)"), "{out}");
@@ -997,13 +1038,13 @@ mod tests {
     fn the_now_line_names_weekday_offset_and_part_of_day() {
         let (conn, uid) = user();
         let tokyo = cfg_dir();
-        let out = assemble(&conn, tokyo.path(), uid, "aki", now_ts()).unwrap();
+        let out = assemble(&conn, tokyo.path(), tokyo.path(), uid, "aki", now_ts()).unwrap();
         assert!(out.contains("Monday 2026-08-31 21:00 Asia/Tokyo UTC+09:00"), "{out}");
         assert!(out.contains("2026-08-31T12:00Z"), "{out}");
         assert!(out.contains("evening"), "{out}");
 
         let ny = cfg_dir_tz("America/New_York");
-        let out = assemble(&conn, ny.path(), uid, "aki", now_ts()).unwrap();
+        let out = assemble(&conn, ny.path(), ny.path(), uid, "aki", now_ts()).unwrap();
         assert!(out.contains("Monday 2026-08-31 08:00 America/New_York UTC-04:00"), "{out}");
         assert!(out.contains("2026-08-31T12:00Z"), "{out}");
         assert!(out.contains("morning"), "{out}");
@@ -1014,7 +1055,7 @@ mod tests {
         let tmp = cfg_dir();
         let (conn, uid) = user();
         plan_today(&conn, uid, vec![routine("meds", "08:00"), routine("wind down", "21:30")]);
-        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
         assert!(out.contains("Day's plan: 08:00-21:45; now 21:00, 1 event left"), "{out}");
         assert!(out.contains("Nightly run 03:00, in 6h00m"), "{out}");
     }
@@ -1030,7 +1071,7 @@ mod tests {
                 channel: "push".into(), ..Default::default() },
             routine("wind down", "21:30"),
         ]);
-        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
         let id = |kind: &str| -> i64 {
             conn.query_row("SELECT id FROM events WHERE kind = ?1", [kind], |r| r.get(0)).unwrap()
         };
@@ -1061,7 +1102,7 @@ mod tests {
         for (kind, status) in [("a", "done"), ("b", "dropped"), ("c", "snoozed"), ("d", "fired")] {
             conn.execute("UPDATE events SET status = ?1 WHERE kind = ?2", (status, kind)).unwrap();
         }
-        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
         assert!(out.contains("1 pending, 1 fired, 1 done, 1 dropped, 1 snoozed"), "{out}");
         assert!(out.contains("- 07:00-07:15 a [done] routine via push"), "{out}");
         assert!(out.contains("- 08:00-08:15 b [dropped] routine via push"), "{out}");
@@ -1074,7 +1115,7 @@ mod tests {
         let t = task(&conn, uid, "Write the essay", "in_progress", Some(90), true, None, NOW);
         task(&conn, uid, "outline", "done", Some(30), false, Some(t), NOW);
         task(&conn, uid, "draft", "open", Some(60), false, Some(t), NOW);
-        let out = without_task_ids(&assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap());
+        let out = without_task_ids(&assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap());
         assert!(out.contains("Now:\n- Write the essay [in_progress] 90m\n"), "{out}");
         assert!(out.contains("  - [x] outline 30m\n"), "{out}");
         assert!(out.contains("  - [ ] draft 60m\n"), "{out}");
@@ -1110,7 +1151,7 @@ mod tests {
         dated(&conn, uid, "lab", false, "2026-09-01T10:00:00Z");
         task(&conn, uid, "loose", "open", None, false, None, NOW);
 
-        let out = without_task_ids(&assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap());
+        let out = without_task_ids(&assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap());
         assert!(out.contains("Now:\n- essay [open] due today\n"), "{out}");
         assert!(
             out.contains(
@@ -1128,7 +1169,7 @@ mod tests {
         let (conn, uid) = user();
         let now = task(&conn, uid, "essay", "open", None, true, None, NOW);
         let later = task(&conn, uid, "loose", "open", None, false, None, NOW);
-        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
         assert!(out.contains(&format!("- essay [open] (task_id {now})\n")), "{out}");
         assert!(out.contains(&format!("- loose (task_id {later})\n")), "{out}");
     }
@@ -1144,7 +1185,7 @@ mod tests {
             [started],
         )
         .unwrap();
-        let out = without_task_ids(&assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap());
+        let out = without_task_ids(&assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap());
         assert!(out.contains("- chapter 60m 40% ~60m left\n"), "{out}");
         assert!(out.contains("- untouched 15m\n"), "{out}");
     }
@@ -1154,7 +1195,7 @@ mod tests {
         let tmp = cfg_dir();
         let (conn, uid) = user();
         task(&conn, uid, "loose", "open", Some(15), false, None, NOW);
-        let out = without_task_ids(&assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap());
+        let out = without_task_ids(&assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap());
         assert!(out.contains("- loose 15m\n"), "{out}");
         assert!(!out.contains("Due soon"), "{out}");
     }
@@ -1166,7 +1207,7 @@ mod tests {
         for i in 1..=12 {
             task(&conn, uid, &format!("later-{i:02}"), "open", Some(15), false, None, NOW);
         }
-        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
         assert!(out.contains("Later (12 open):"), "{out}");
         assert!(out.contains("- later-12 15m"), "{out}");
         assert!(out.contains("- later-03 15m"), "{out}");
@@ -1183,7 +1224,7 @@ mod tests {
         task(&conn, uid, "a", "done", None, false, None, "2026-08-30T16:00:00Z");
         task(&conn, uid, "b", "done", None, false, None, "2026-08-31T02:00:00Z");
         task(&conn, uid, "c", "done", None, false, None, "2026-08-30T02:00:00Z");
-        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
         assert!(out.contains("Done today: 2"), "{out}");
     }
 
@@ -1198,7 +1239,7 @@ mod tests {
             (uid, &content),
         )
         .unwrap();
-        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
         assert!(out.contains("2026-08-30 (yesterday):"), "{out}");
         assert!(out.contains(&"d".repeat(600)), "{out}");
         assert!(!out.contains(&"d".repeat(601)), "{out}");
@@ -1209,13 +1250,13 @@ mod tests {
     fn tomorrows_plan_is_flagged_once_it_exists() {
         let tmp = cfg_dir();
         let (conn, uid) = user();
-        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
         assert!(out.contains("Tomorrow's plan (2026-09-01): not generated yet"), "{out}");
 
         let tmpl = crate::templates::Template { events: vec![routine("meds", "08:00")] };
         let date: jiff::civil::Date = "2026-09-01".parse().unwrap();
         crate::plan::generate(&conn, uid, &tmpl, date).unwrap();
-        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
         assert!(out.contains("Tomorrow's plan (2026-09-01): generated"), "{out}");
     }
 
@@ -1249,7 +1290,7 @@ mod tests {
             [uid],
         )
         .unwrap();
-        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
         let tail = &out[out.find("# Recent activity").unwrap()..];
         for kind in
             ["delivery_ok", "agent_session", "token_created", "admin_user_create", "delivery_degraded"]
@@ -1266,7 +1307,7 @@ mod tests {
     fn the_settings_line_names_what_shapes_advice() {
         let tmp = cfg_dir();
         let (conn, uid) = user();
-        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
         assert!(
             out.contains(
                 "X | Asia/Tokyo | nightly_time 03:00 | template default | counter remaining \
@@ -1295,7 +1336,7 @@ mod tests {
         for _ in 0..20 {
             crate::log::record(&conn, Some(uid), "event_fired", &"e".repeat(300)).unwrap();
         }
-        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
         let block = dynamic(&out);
         assert!(block.len() <= MAX_DYNAMIC_BYTES, "{} bytes", block.len());
         assert!(block.contains("Monday 2026-08-31 21:00"), "{block}");
@@ -1328,7 +1369,7 @@ mod tests {
             crate::log::record(&conn, Some(uid), "event_fired", "event 3 due 2026-08-31T03:00:00Z")
                 .unwrap();
         }
-        let block = dynamic(&assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap()).to_string();
+        let block = dynamic(&assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap()).to_string();
         assert!(block.len() <= 1600, "a typical day is {} bytes:\n{block}", block.len());
     }
 
@@ -1342,7 +1383,7 @@ mod tests {
         let (conn, uid) = user();
         edit_append(tmp.path(), "aki", "- prefers evening calls").unwrap();
         notes(&tmp, "2026-08-30", "the essay is the one that matters\nlow energy after 21:00");
-        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
         let standing = out.find("# Standing context").expect("a standing section");
         let header = out
             .find("# Notes from last night (written 2026-08-30, yesterday)")
@@ -1356,7 +1397,7 @@ mod tests {
     fn no_notes_file_means_no_notes_section() {
         let tmp = cfg_dir();
         let (conn, uid) = user();
-        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
         assert!(!out.contains("Notes from last night"), "{out}");
     }
 
@@ -1365,14 +1406,14 @@ mod tests {
         let tmp = cfg_dir();
         let (conn, uid) = user();
         notes(&tmp, "2026-08-28", "the essay is the one that matters");
-        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
         assert!(
             out.contains("# Notes from last night (written 2026-08-28, 3 days ago)"),
             "{out}"
         );
 
         notes(&tmp, "2026-08-27", "the essay is the one that matters");
-        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
         assert!(
             out.contains("# (stale) Notes from last night (written 2026-08-27, 4 days ago)"),
             "{out}"
@@ -1398,7 +1439,7 @@ mod tests {
         for _ in 0..20 {
             crate::log::record(&conn, Some(uid), "event_fired", &"e".repeat(700)).unwrap();
         }
-        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
         let block = dynamic(&out);
         assert!(block.len() <= MAX_DYNAMIC_BYTES, "{} bytes", block.len());
         assert!(block.contains("Later: 120 open (titles trimmed for size)"), "{block}");
@@ -1410,13 +1451,13 @@ mod tests {
     fn the_settings_section_counts_the_searchable_memory() {
         let tmp = cfg_dir();
         let (conn, uid) = user();
-        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
         assert!(out.contains("Memory: 0 facts"), "{out}");
 
         for summary in ["sister is called Rin", "hates phone calls"] {
             crate::memory::add(&conn, tmp.path(), "aki", "semantic", summary, "body", None).unwrap();
         }
-        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
         assert!(out.contains("Memory: 2 facts"), "{out}");
     }
 
@@ -1424,7 +1465,7 @@ mod tests {
     fn the_settings_section_says_how_long_the_work_really_runs() {
         let tmp = cfg_dir();
         let (conn, uid) = user();
-        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
         assert!(out.contains("no plan factor yet"), "{out}");
 
         conn.execute(
@@ -1433,7 +1474,7 @@ mod tests {
             [uid],
         )
         .unwrap();
-        let out = assemble(&conn, tmp.path(), uid, "aki", now_ts()).unwrap();
+        let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
         assert!(out.contains("Plan factor: 1.4× from 9 sessions"), "{out}");
     }
 }

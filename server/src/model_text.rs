@@ -342,15 +342,15 @@ pub fn notes_heading(l: Lang, stale: bool, date: &str, ago: &str) -> String {
     }
 }
 
-pub fn scratch_heading(l: Lang) -> &'static str {
+pub fn working_memory_heading(l: Lang) -> &'static str {
     l.of(
-        "# Your scratchpad (note_* tools; the user does not see it)\n\n",
-        "# あなたのメモ帳（note_* ツール。ユーザーには見えません）\n\n",
+        "# Working memory (note_write; the user does not see it)\n\n",
+        "# 作業メモ（note_write。ユーザーには見えません）\n\n",
     )
 }
 
-pub fn pinned(l: Lang) -> &'static str {
-    l.of(" (pinned)", "（固定）")
+pub fn coming_up(l: Lang) -> &'static str {
+    l.of("Coming up:\n", "これから:\n")
 }
 
 pub fn debrief_heading(l: Lang) -> &'static str {
@@ -842,10 +842,10 @@ mod tests {
     /// translation; every pair here must differ.
     #[test]
     fn every_fixed_line_has_its_own_japanese() {
-        let pairs: [fn(Lang) -> &'static str; 12] = [
+        let pairs: [fn(Lang) -> &'static str; 13] = [
             call_briefly, no_standing, standing_heading, now_heading, plan_heading, tasks_heading,
-            scratch_heading, debrief_heading, activity_heading, close_day_prompt, idle_prompt,
-            share_shared,
+            working_memory_heading, coming_up, debrief_heading, activity_heading, close_day_prompt,
+            idle_prompt, share_shared,
         ];
         for f in pairs {
             assert_ne!(f(Lang::En), f(Lang::Ja));

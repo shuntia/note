@@ -237,7 +237,7 @@ pub(crate) fn system_prompt_in(
         }
     } else if !single_call(kind) {
         let conn = crate::db_guard(deps.db);
-        let context = crate::context::assemble(&conn, deps.config_dir, user_id, username, now)?;
+        let context = crate::context::assemble(&conn, deps.config_dir, deps.data_dir, user_id, username, now)?;
         system.push_str("\n\n");
         system.push_str(&context);
         if let Some(note) = &deps.thread_note {
