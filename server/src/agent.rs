@@ -26,7 +26,8 @@ const REPLY_IN_JAPANESE: &str =
     "The user reads Japanese: write every reply, note, title and summary in natural Japanese.";
 const SPEAK_JAPANESE: &str = "The user speaks Japanese: speak natural, conversational Japanese, whatever language \
     the instructions above are written in. Short sentences, no markdown, no emoji, no lists. Say numbers, times \
-    and dates the way they are spoken in Japanese (七時半, 二十分くらい, 来週の金曜).";
+    and dates the way they are spoken in Japanese (七時半, 二十分くらい, 来週の金曜). Write foreign words and \
+    Latin-script names in katakana (ギットハブ, ズーム); digits are fine.";
 /// Whom a session writes for: the visitor on a share link, the user otherwise.
 fn session_lang(deps: &SessionDeps, username: &str, kind: SessionKind) -> crate::text::Lang {
     match kind {
