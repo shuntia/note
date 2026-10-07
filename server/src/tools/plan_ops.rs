@@ -290,46 +290,6 @@ pub fn plan_tasks(
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct PlanAutoArgs {
-    /// The day to fill, YYYY-MM-DD: today or one of the next 14 days. Omit for
-    /// today.
-    #[serde(default)]
-    pub date: Option<String>,
-}
-
-pub fn plan_auto(
-    conn: &Connection,
-    ctx: &ToolCtx,
-    args: PlanAutoArgs,
-) -> Result<serde_json::Value, ToolError> {
-    unscoped(ctx)?;
-    let today = today(ctx);
-    let date = match args.date {
-        Some(d) => d
-            .parse::<jiff::civil::Date>()
-            .map_err(|_| ToolError::rejected(format!("date must be YYYY-MM-DD, got {d:?}")))?,
-        None => today,
-    };
-    let horizon = today
-        .checked_add(jiff::Span::new().days(MAX_DAYS_AHEAD))
-        .map_err(internal)?;
-    if date < today || date > horizon {
-        return Err(ToolError::rejected(format!(
-            "date must be from {today} to {horizon}, got {date}"
-        )));
-    }
-    plan_row(conn, ctx, date)?;
-    let out = crate::allocate::run(conn, ctx.user_id, &timezone(ctx), date, jiff::Timestamp::now())
-        .map_err(internal)?;
-    Ok(serde_json::json!({
-        "plan_date": date.to_string(),
-        "placed": out.placed,
-        "cleared": out.cleared,
-    }))
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct PlanCarryArgs {
     /// The day whose leftovers move, YYYY-MM-DD. Omit for today.
     #[serde(default)]

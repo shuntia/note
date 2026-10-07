@@ -1,6 +1,5 @@
 pub mod admin;
 pub mod agent;
-pub mod allocate;
 pub mod api;
 pub mod auth;
 pub mod builtin_memory;

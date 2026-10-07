@@ -573,13 +573,6 @@ export type QueueEntry = {
 // How many blocks the close of the day sent to tomorrow.
 export type Carried = { moved: number }
 
-// What the allocator laid down, and how many waiting blocks it replaced.
-export type Allocation = {
-  plan_date: string
-  placed: { event_id: number; task_id: number; start: string; end: string }[]
-  cleared: number
-}
-
 export type ShareScope = {
   today: boolean
   tasks: boolean

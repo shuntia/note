@@ -112,15 +112,13 @@ fn run_stages(
     })();
     report.stage("plan", at, generated.as_ref().err());
     generated?;
-    let at = std::time::Instant::now();
-    let allocated = {
+    let laid = {
         let conn = crate::db_guard(deps.db);
-        if let Err(e) = crate::review::lay_event(&conn, user_id, date) {
-            note("review_error", &e);
-        }
-        crate::allocate::run(&conn, user_id, &tz, date, now)
+        crate::review::lay_event(&conn, user_id, date)
     };
-    report.stage("allocate", at, allocated.as_ref().err().inspect(|e| note("allocate_error", e)));
+    if let Err(e) = laid {
+        note("review_error", &e);
+    }
     let at = std::time::Instant::now();
     let closed = {
         let conn = crate::db_guard(deps.db);
@@ -598,7 +596,7 @@ mod tests {
         let line = nightly_run_row(&db.lock().unwrap());
         assert_eq!(
             without_timings(&line),
-            "2026-08-31: harvest=ok, review=ok, learn=ok, plan=ok, allocate=ok, close_day=ok, \
+            "2026-08-31: harvest=ok, review=ok, learn=ok, plan=ok, close_day=ok, \
              session=ok, notes=ok, debrief=written"
         );
         assert_ne!(line, without_timings(&line), "every stage carries its own seconds");

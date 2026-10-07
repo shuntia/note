@@ -687,6 +687,16 @@ pub struct QueueEntry {
     pub event_id: Option<i64>,
 }
 
+fn rank_key(
+    is_now: bool,
+    urgency_rank: u8,
+    due: Option<jiff::civil::Date>,
+    created: &str,
+    id: i64,
+) -> (std::cmp::Reverse<bool>, u8, bool, Option<jiff::civil::Date>, String, i64) {
+    (std::cmp::Reverse(is_now), urgency_rank, due.is_none(), due, created.to_owned(), id)
+}
+
 /// The user's open top-level tasks in the order the planner lays them.
 pub fn queue(
     conn: &Connection,
@@ -705,7 +715,7 @@ pub fn queue(
     }
     nodes.sort_by_cached_key(|n| {
         let due = due_of(&n.task).map(|t| t.to_zoned(tz.clone()).date());
-        crate::allocate::rank_key(
+        rank_key(
             n.task.is_now,
             urgency_rank(&n.task.urgency, n.task.pressing),
             due,

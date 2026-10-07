@@ -243,11 +243,6 @@ const TABLE: Record<string, Receipt> = {
     },
     failed: 'receipt.planTasks.failed',
   },
-  plan_auto: {
-    doing: 'receipt.planAuto.doing',
-    done: (a) => t('receipt.planAuto.done', { day: dayPhrase(str(a, 'date')) }),
-    failed: 'receipt.planAuto.failed',
-  },
   plan_carry: {
     doing: 'receipt.planCarry.doing',
     done: (a) => t('receipt.planCarry.done', { day: dayWord(str(a, 'date')) }),

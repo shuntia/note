@@ -353,12 +353,11 @@ async fn nothing_outside_the_scope_reaches_the_prompt_the_tools_or_the_view() {
     assert_eq!(status, StatusCode::CREATED);
     let (_, hidden) = owner(&app, &cookie, Method::POST, "/api/tasks", Some(r#"{"title":"HIDDEN-BLOCK task","category":"health","duration_min":30}"#)).await;
     let hidden_id = hidden["id"].as_i64().unwrap();
-    let (status, placed) = owner(&app, &cookie, Method::POST, &format!("/api/plan/{tomorrow}/allocate"), Some("{}")).await;
-    assert_eq!(status, StatusCode::OK, "{placed}");
+    common::lay_block(&state, cfg.path(), hidden_id, tomorrow, "10:00");
     {
         let conn = state.db();
         let blocks: i64 = conn.query_row("SELECT COUNT(*) FROM event_tasks WHERE task_id = ?1", [hidden_id], |r| r.get(0)).unwrap();
-        assert!(blocks > 0, "the hidden task has a block on the plan: {placed}");
+        assert!(blocks > 0, "the hidden task has a block on the plan");
     }
 
     let read_hidden = format!(r#"{{"task_id":{hidden_id}}}"#);

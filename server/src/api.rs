@@ -61,7 +61,6 @@ pub fn router(state: AppState) -> Router {
         .route("/api/memory/{id}", get(memory_read))
         .route("/api/plan/today", get(plan_today))
         .route("/api/plan/range", get(plan_range))
-        .route("/api/plan/{date}/allocate", post(plan_allocate))
         .route("/api/plan/{date}/carry", post(plan_carry))
         .route("/api/day/{date}", get(day_view))
         .route("/api/debrief", get(debrief))
@@ -2228,7 +2227,7 @@ async fn day_view(
     ) else {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
-    let free: Vec<serde_json::Value> = crate::allocate::free_windows(&occurrences)
+    let free: Vec<serde_json::Value> = crate::calendar::free_windows(&occurrences)
         .iter()
         .map(|w| serde_json::json!({ "start": w.start_wall(), "end": w.end_wall() }))
         .collect();
@@ -2299,43 +2298,6 @@ async fn plan_range(
         date = next;
     }
     Json(serde_json::json!({ "days": days })).into_response()
-}
-
-/// Lays the user's open tasks into that day's free time, replacing the
-/// automatic blocks an earlier run left that have not started.
-async fn plan_allocate(
-    user: CurrentUser,
-    State(state): State<AppState>,
-    Path(date): Path<String>,
-) -> impl IntoResponse {
-    let Ok(date) = date.parse::<jiff::civil::Date>() else {
-        return StatusCode::BAD_REQUEST.into_response();
-    };
-    let (tz, tmpl) = match day_context(&state, &user.username) {
-        Ok(c) => c,
-        Err(status) => return status.into_response(),
-    };
-    let now = jiff::Timestamp::now();
-    if date < now.to_zoned(tz.clone()).date() {
-        return (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            Json(serde_json::json!({ "error": "a day that is over cannot be filled" })),
-        )
-            .into_response();
-    }
-    let conn = state.db();
-    if crate::plan::generate(&conn, user.id, &tmpl, date).is_err() {
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    }
-    match crate::allocate::run(&conn, user.id, &tz, date, now) {
-        Ok(out) => Json(serde_json::json!({
-            "plan_date": date.to_string(),
-            "placed": out.placed,
-            "cleared": out.cleared,
-        }))
-        .into_response(),
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    }
 }
 
 /// Moves what is left of a day to tomorrow: the close-the-day ritual's own

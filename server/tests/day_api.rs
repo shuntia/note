@@ -205,58 +205,19 @@ async fn a_range_is_bounded_and_ordered() {
 }
 
 #[tokio::test]
-async fn allocate_fills_the_free_time_and_a_second_run_keeps_what_is_settled() {
+async fn the_server_no_longer_fills_free_time() {
     let (app, cookie, _cfg) = common::app_with_logged_in_user().await;
-    let date = ahead(2);
-    free_afternoon(&app, &cookie, date).await;
-    for title in ["read the chapter", "email the office"] {
-        let (status, _) =
-            call(&app, &cookie, Method::POST, "/api/tasks", Some(&format!(r#"{{"title":"{title}"}}"#)))
-                .await;
-        assert_eq!(status, StatusCode::OK);
-    }
-
-    let (status, out) =
-        call(&app, &cookie, Method::POST, &format!("/api/plan/{date}/allocate"), None).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(out["plan_date"], date.to_string());
-    assert_eq!(out["cleared"], 0);
-    let placed = out["placed"].as_array().unwrap();
-    assert_eq!(placed.len(), 2);
-    assert_eq!(placed[0]["start"], "16:00");
-    let kept = placed[0]["event_id"].as_i64().unwrap();
-
-    let (_, day) = call(&app, &cookie, Method::GET, &format!("/api/day/{date}"), None).await;
-    let block = day["events"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|e| e["id"] == kept)
-        .expect("the block is on the day");
-    assert_eq!(block["origin"], "auto");
-    assert_eq!(block["entry"], "block");
-    assert_eq!(block["task"]["title"], "read the chapter");
-    assert_eq!(block["task"]["state"], "open");
-
-    let (status, _) = call(&app, &cookie, Method::POST, &format!("/api/events/{kept}/done"), None).await;
-    assert_eq!(status, StatusCode::OK);
-    let (status, again) =
-        call(&app, &cookie, Method::POST, &format!("/api/plan/{date}/allocate"), None).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(again["cleared"], 1, "only the pending block is replaced");
-    let (_, day) = call(&app, &cookie, Method::GET, &format!("/api/day/{date}"), None).await;
-    assert!(
-        day["events"].as_array().unwrap().iter().any(|e| e["id"] == kept),
-        "a finished block is never cleared"
-    );
+    let (status, _) =
+        call(&app, &cookie, Method::POST, &format!("/api/plan/{}/allocate", ahead(2)), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
 async fn carrying_a_day_moves_its_blocks_and_leaves_the_routines() {
-    let (app, cookie, _cfg) = common::app_with_logged_in_user().await;
+    let (app, cookie, state, cfg) = common::app_with_logged_in_user_and_state().await;
     let date = ahead(2);
     free_afternoon(&app, &cookie, date).await;
-    let (status, _) = call(
+    let (status, task) = call(
         &app,
         &cookie,
         Method::POST,
@@ -265,7 +226,7 @@ async fn carrying_a_day_moves_its_blocks_and_leaves_the_routines() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    call(&app, &cookie, Method::POST, &format!("/api/plan/{date}/allocate"), None).await;
+    common::lay_block(&state, cfg.path(), task["id"].as_i64().unwrap(), date, "16:00");
 
     let (status, out) =
         call(&app, &cookie, Method::POST, &format!("/api/plan/{date}/carry"), None).await;
@@ -301,17 +262,6 @@ async fn a_day_that_is_over_cannot_be_carried() {
         call(&app, &cookie, Method::POST, &format!("/api/plan/{}/carry", ahead(-1)), None).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     let (status, _) = call(&app, &cookie, Method::POST, "/api/plan/not-a-date/carry", None).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-}
-
-#[tokio::test]
-async fn a_day_that_is_over_cannot_be_filled() {
-    let (app, cookie, _cfg) = common::app_with_logged_in_user().await;
-    let (status, _) =
-        call(&app, &cookie, Method::POST, &format!("/api/plan/{}/allocate", ahead(-1)), None).await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    let (status, _) =
-        call(&app, &cookie, Method::POST, "/api/plan/not-a-date/allocate", None).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 

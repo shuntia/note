@@ -644,6 +644,66 @@ fn window_at(
     })
 }
 
+const END_OF_DAY_MIN: u16 = 24 * 60;
+
+/// A half-open range of minutes from local midnight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Window {
+    pub start: u16,
+    pub end: u16,
+}
+
+fn clock(minutes: u16) -> String {
+    format!("{:02}:{:02}", minutes / 60, minutes % 60)
+}
+
+impl Window {
+    fn of(start: &str, end: &str) -> Self {
+        Window {
+            start: crate::templates::wall_minutes(start).clamp(0, i64::from(END_OF_DAY_MIN)) as u16,
+            end: crate::templates::wall_minutes(end).clamp(0, i64::from(END_OF_DAY_MIN)) as u16,
+        }
+    }
+    pub fn start_wall(&self) -> String {
+        clock(self.start)
+    }
+    pub fn end_wall(&self) -> String {
+        clock(self.end)
+    }
+}
+
+/// The free time a day actually offers: its `free` occurrences with the hard
+/// commitments cut out of them.
+pub fn free_windows(occurrences: &[Occurrence]) -> Vec<Window> {
+    let mut out: Vec<Window> = occurrences
+        .iter()
+        .filter(|o| o.kind == "free")
+        .map(|o| Window::of(&o.start, &o.end))
+        .filter(|w| w.start < w.end)
+        .collect();
+    for b in occurrences.iter().filter(|o| o.kind == "fixed").map(|o| Window::of(&o.start, &o.end)) {
+        if b.start >= b.end {
+            continue;
+        }
+        let mut next = Vec::with_capacity(out.len() + 1);
+        for w in out {
+            if b.end <= w.start || b.start >= w.end {
+                next.push(w);
+                continue;
+            }
+            if w.start < b.start {
+                next.push(Window { start: w.start, end: b.start });
+            }
+            if b.end < w.end {
+                next.push(Window { start: b.end, end: w.end });
+            }
+        }
+        out = next;
+    }
+    out.sort_by_key(|w| (w.start, w.end));
+    out
+}
+
 /// When the current quiet window ends, for a caller that only needs the
 /// instant.
 pub fn quiet_until(
@@ -1224,5 +1284,27 @@ mod tests {
         assert_eq!(day_names(127).len(), 7);
         assert!(day_names(0).is_empty());
         assert!(day_mask(&["moon"]).is_err());
+    }
+
+    #[test]
+    fn free_time_is_what_the_fixed_commitments_leave_of_it() {
+        let occ = |kind: &str, start: &str, end: &str| Occurrence {
+            entry_id: 0,
+            title: String::new(),
+            kind: kind.into(),
+            quiet: false,
+            start: start.into(),
+            end: end.into(),
+        };
+        let free = free_windows(&[
+            occ("free", "09:00", "17:00"),
+            occ("fixed", "10:00", "16:00"),
+            occ("busy", "09:00", "09:30"),
+        ]);
+        let walls: Vec<(String, String)> = free.iter().map(|w| (w.start_wall(), w.end_wall())).collect();
+        assert_eq!(
+            walls,
+            [("09:00".to_string(), "10:00".to_string()), ("16:00".to_string(), "17:00".to_string())]
+        );
     }
 }

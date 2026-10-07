@@ -247,3 +247,29 @@ async fn build_with(
     let cookie = login(&app, "aki", "pw").await;
     (app, cookie, state, cfg)
 }
+
+/// Lays one task as a block on `date` from `start`, the way a Talk session would.
+#[allow(dead_code)] // only the day and share suites lay blocks
+pub fn lay_block(state: &AppState, cfg: &std::path::Path, task_id: i64, date: jiff::civil::Date, start: &str) {
+    let conn = state.db();
+    let ctx = note_server::tools::ToolCtx {
+        config_dir: cfg,
+        data_dir: cfg,
+        user_id: 1,
+        username: "aki",
+        vectors: note_server::tools::PreparedVectors::default(),
+        task_scope: None,
+        inbox_source: None,
+        memory_source: None,
+        share: None,
+        share_thread: None,
+    };
+    note_server::tools::dispatch(
+        &conn,
+        &ctx,
+        note_server::tools::SessionKind::Talk,
+        "plan_tasks",
+        &format!(r#"{{"date":"{date}","task_ids":[{task_id}],"start":"{start}"}}"#),
+    )
+    .unwrap();
+}

@@ -6,7 +6,6 @@ import type {
   AdminTraces,
   AdminUser,
   AlertPatch,
-  Allocation,
   CalendarEntry,
   CalendarKind,
   Carried,
@@ -218,7 +217,6 @@ export const api = {
     request<{ days: Record<string, PlanEvent[]> }>(
       `/api/plan/range?${new URLSearchParams({ from, to }).toString()}`,
     ),
-  allocate: (date: string) => request<Allocation>(`/api/plan/${date}/allocate`, { method: 'POST' }),
   carry: (date: string) => request<Carried>(`/api/plan/${date}/carry`, { method: 'POST' }),
   eventAction: (id: number, action: 'done' | 'drop') =>
     request<void>(`/api/events/${id}/${action}`, { method: 'POST' }),

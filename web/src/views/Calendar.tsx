@@ -166,7 +166,6 @@ export function CalendarSection({
   const [grid, setGrid] = useState(false)
   const [sheet, setSheet] = useState<{ entry: CalendarEntry | null; date: string } | null>(null)
   const [blocks, setBlocks] = useState<Record<string, PlanEvent[]>>({})
-  const [filling, setFilling] = useState(false)
   const [, tick] = useState(0)
   const wide = useMedia('(min-width: 768px)')
   const tips = useTips()
@@ -212,26 +211,6 @@ export function CalendarSection({
       stale = true
     }
   }, [week[0], week[6], refresh])
-
-  const hasFree =
-    selected >= today &&
-    occurrencesOn(visible, selected).some((o) => o.entry.kind === 'free' && !o.skipped)
-  const fill = () => {
-    if (filling) return
-    setFilling(true)
-    api
-      .allocate(selected)
-      .then((out) => {
-        notify(
-          out.placed.length
-            ? t('calendar.laid', { count: out.placed.length })
-            : t('calendar.nothingToLay'),
-        )
-        onChanged()
-      })
-      .catch(() => notify(t('calendar.fillFailed')))
-      .finally(() => setFilling(false))
-  }
 
   const replace = (entry: CalendarEntry) =>
     setEntries((list) => (list ?? []).map((e) => (e.id === entry.id ? entry : e)))
@@ -352,11 +331,6 @@ export function CalendarSection({
             {month}
             {grid && <span className="cal-range tnum">{range}</span>}
             <ChevronRight />
-          </button>
-        )}
-        {hasFree && (
-          <button className="quiet cal-fill" disabled={filling} onClick={fill}>
-            {t('calendar.fill')}
           </button>
         )}
         <button

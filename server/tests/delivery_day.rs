@@ -150,19 +150,24 @@ fn delivery_reaches_the_user_through_the_ladder() {
         assert_eq!((wall.as_str(), flex.as_str(), origin.as_str()), ("18:00", "drop", "agent"));
     }
 
-    // --- the evening the user set aside now holds the open task.
+    // --- the evening the user set aside holds the open task, laid as plan_tasks lays it.
     {
         let conn = db.lock().unwrap();
-        let block: (String, String, String) = conn
-            .query_row(
-                "SELECT e.kind, e.wall_time, e.end_wall_time FROM events e
-                 JOIN event_tasks et ON et.event_id = e.id
-                 WHERE e.origin = 'auto'",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-            .unwrap();
-        assert_eq!(block, ("read the chapter".into(), "17:00".into(), "17:45".into()));
+        conn.execute(
+            "INSERT INTO events (plan_id, kind, wall_time, orig_wall_time, end_wall_time,
+                                 flexibility, slide_window_min, channel, alert, span_min, origin)
+             SELECT id, 'read the chapter', '17:00', '17:00', '17:45', 'drop', 0, 'push', 0, 45,
+                    'agent'
+             FROM plans WHERE user_id = ?1 AND date = '2026-08-31'",
+            [uid],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO event_tasks (event_id, task_id)
+             SELECT ?1, id FROM tasks WHERE title = 'read the chapter'",
+            [conn.last_insert_rowid()],
+        )
+        .unwrap();
     }
 
     // --- 07:31 JST: debrief event fires and reaches the connected client.

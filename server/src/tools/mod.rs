@@ -326,7 +326,7 @@ const NOTES: &[&str] = &["note_write"];
 /// Settling working memory into long-term memory is the nightly run's job.
 const NOTE_SETTLE: &[&str] = &["note_settle"];
 const PLAN_READ: &[&str] = &["plan_list"];
-const PLAN_LAY: &[&str] = &["plan_tasks", "plan_auto"];
+const PLAN_LAY: &[&str] = &["plan_tasks"];
 /// Moving the rest of a day to the next is the user's call, so it lives only
 /// where they are there to make it.
 const PLAN_CARRY: &[&str] = &["plan_carry"];
@@ -748,15 +748,6 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
              would overlap something already planned, or when they do not fit before end.",
             schema::<plan_ops::PlanTasksArgs>(),
         ),
-        "plan_auto" => (
-            "Lay the user's open tasks into a day's free time by itself — the free windows \
-             the user has set aside on the calendar, minus what the day already holds. \
-             Automatic blocks from an earlier run that have not started are replaced, and \
-             blocks the user has already finished or dropped are left alone. Use it after \
-             the day's free time changes; to place particular tasks at particular times, \
-             use plan_tasks instead.",
-            schema::<plan_ops::PlanAutoArgs>(),
-        ),
         "plan_carry" => (
             "Carry what is left of a day over to the next: every block still waiting on the \
              user moves to tomorrow's plan with its task, and the day's remaining check-ins \
@@ -781,10 +772,10 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
              built around — school, work, a class — and is quiet by default: while it runs, \
              deliveries are held and arrive when it ends. \"busy\" is softer (a commute, a \
              meal), \"note\" is informational and never quiet, and \"free\" is time the user \
-             has set aside for tasks — never quiet, and the only time open tasks are laid \
-             into. Use this when the user says they cannot be disturbed at certain times, or \
-             names something that happens every week: \"school weekdays 08:15-15:30\" is \
-             fixed and quiet. A one-off entry that has already ended is refused.",
+             has set aside for tasks — never quiet. Use this when the user says they cannot \
+             be disturbed at certain times, or names something that happens every week: \
+             \"school weekdays 08:15-15:30\" is fixed and quiet. A one-off entry that has \
+             already ended is refused.",
             schema::<calendar_ops::AddArgs>(),
         ),
         "calendar_update" => (
@@ -1004,7 +995,6 @@ fn run(
         "note_settle" => note_ops::settle(conn, ctx, &parse(raw)?),
         "note_write" => note_ops::write(conn, ctx, &parse(raw)?),
         "plan_tasks" => plan_ops::plan_tasks(conn, ctx, &parse(raw)?),
-        "plan_auto" => plan_ops::plan_auto(conn, ctx, parse(raw)?),
         "plan_carry" => plan_ops::plan_carry(conn, ctx, parse(raw)?),
         "plan_list" => plan_ops::plan_list(conn, ctx, parse(raw)?),
         "calendar_list" => calendar_ops::list(conn, ctx, &parse(raw)?),
@@ -1455,6 +1445,14 @@ mod tests {
                 .collect();
             assert_eq!(tools, held, "{kind:?} is out of domain order");
         }
+    }
+
+    #[test]
+    fn nothing_lays_tasks_into_free_time_by_itself() {
+        for kind in KINDS {
+            assert!(!registry(kind).contains(&"plan_auto"), "{kind:?}");
+        }
+        assert_eq!(PLAN_LAY, &["plan_tasks"]);
     }
 
     /// A tool that ends a session is reachable from that session and from no
