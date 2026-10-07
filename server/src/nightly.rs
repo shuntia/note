@@ -51,7 +51,7 @@ pub fn run_for_user(
         if let Err(e) = crate::memory::archive_expired(&conn, deps.data_dir, username, local.date()) {
             let _ = crate::log::record(&conn, Some(user_id), "memory_expire_error", &format!("{e:#}"));
         }
-        if let Err(e) = crate::notes::purge_done(&conn, user_id, now) {
+        if let Err(e) = crate::legacy_notes::purge_done(&conn, user_id, now) {
             let _ = crate::log::record(&conn, Some(user_id), "notes_purge_error", &format!("{e:#}"));
         }
     }

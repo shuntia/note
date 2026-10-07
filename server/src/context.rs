@@ -214,7 +214,7 @@ pub fn assemble(conn: &Connection, config_dir: &Path, user_id: i64, username: &s
     let debrief = latest_debrief(conn, user_id, today)?;
     let activity = recent_activity(conn, user_id)?;
     let notes = read_nightly_notes(config_dir, username);
-    let scratch: Vec<_> = crate::notes::list(conn, user_id, now)?
+    let scratch: Vec<_> = crate::legacy_notes::list(conn, user_id, now)?
         .into_iter()
         .filter(|n| n.done_at.is_none())
         .collect();
@@ -576,7 +576,7 @@ fn notes_section(
 }
 
 /// Pinned lines first, then the newest of the rest, up to `cap`.
-fn scratch_section(l: Lang, lines: &[crate::notes::Note], cap: usize) -> String {
+fn scratch_section(l: Lang, lines: &[crate::legacy_notes::Note], cap: usize) -> String {
     if lines.is_empty() {
         return String::new();
     }
@@ -865,14 +865,14 @@ mod tests {
         let tmp = cfg_dir();
         let (conn, uid) = user();
         let at = now_ts();
-        let add = |text: &str| crate::notes::create(&conn, uid, &crate::notes::NewNote { text: text.into() }, at).unwrap().id;
+        let add = |text: &str| crate::legacy_notes::create(&conn, uid, &crate::legacy_notes::NewNote { text: text.into() }, at).unwrap().id;
         let old = add("asked about the essay twice");
         let pin = add("prefers short check-ins");
         let new = add("sat score lands friday");
         let done = add("handled");
-        let set = |id: i64, patch: crate::notes::NotePatch| crate::notes::update(&conn, uid, id, &patch, at).unwrap();
-        set(pin, crate::notes::NotePatch { pinned: Some(true), ..Default::default() });
-        set(done, crate::notes::NotePatch { done: Some(true), ..Default::default() });
+        let set = |id: i64, patch: crate::legacy_notes::NotePatch| crate::legacy_notes::update(&conn, uid, id, &patch, at).unwrap();
+        set(pin, crate::legacy_notes::NotePatch { pinned: Some(true), ..Default::default() });
+        set(done, crate::legacy_notes::NotePatch { done: Some(true), ..Default::default() });
         let out = assemble(&conn, tmp.path(), uid, "aki", at).unwrap();
         let pad = &out[out.find("# Your scratchpad").expect(&out)..];
         let lines: Vec<&str> = pad.lines().skip(2).take_while(|l| !l.is_empty()).collect();

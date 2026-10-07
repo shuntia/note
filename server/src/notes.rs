@@ -1,34 +1,90 @@
-use crate::tasks::UpdateError;
-use rusqlite::{Connection, OptionalExtension};
-use serde::{Deserialize, Serialize};
+use crate::memory::{self, MemoryFile, NOTE};
+use anyhow::Result;
+use rusqlite::Connection;
+use std::path::Path;
 
-pub const MAX_CHARS: usize = 200;
-/// How long a done note stays for undo before the nightly run deletes it.
-pub const KEEP_DONE_DAYS: i64 = 7;
+pub const MAX_TITLE_CHARS: usize = 80;
+const UPCOMING_HOURS: i64 = 12;
+const STALE_DAYS: i64 = 3;
 
-/// `done_at` is `None` while the note is open.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+/// One line of Note's working memory; every instant is an RFC 3339 string.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Note {
-    pub id: i64,
-    pub text: String,
-    pub pinned: bool,
-    pub created_at: String,
-    pub done_at: Option<String>,
+    pub id: String,
+    pub title: String,
+    pub from: Option<String>,
+    pub until: Option<String>,
+    pub touched_at: Option<String>,
     pub last_nudged_at: Option<String>,
+    pub created: String,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct NewNote {
-    pub text: String,
+#[derive(Debug, thiserror::Error)]
+pub enum NoteError {
+    #[error("{0}")]
+    Invalid(String),
+    #[error("no note {0}")]
+    NotFound(String),
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
 }
 
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct NotePatch {
-    pub text: Option<String>,
-    pub pinned: Option<bool>,
-    pub done: Option<bool>,
+/// `Some(None)` clears a bound.
+#[derive(Default)]
+pub struct Change {
+    pub title: Option<String>,
+    pub from: Option<Option<String>>,
+    pub until: Option<Option<String>>,
+}
+
+pub enum Outcome<'a> {
+    Memory { category: Option<&'a str>, summary: Option<&'a str>, body: Option<&'a str> },
+    Drop,
+}
+
+fn instant(s: Option<&str>) -> Option<jiff::Timestamp> {
+    s.and_then(|s| s.parse().ok())
+}
+
+impl Note {
+    fn of(f: MemoryFile) -> Self {
+        Self {
+            id: f.id,
+            title: f.summary,
+            from: f.from,
+            until: f.until,
+            touched_at: f.touched_at,
+            last_nudged_at: f.last_nudged_at,
+            created: f.created,
+        }
+    }
+
+    pub fn is_active(&self, now: jiff::Timestamp) -> bool {
+        instant(self.from.as_deref()).is_none_or(|t| t <= now)
+            && instant(self.until.as_deref()).is_none_or(|t| t > now)
+    }
+
+    pub fn is_upcoming(&self, now: jiff::Timestamp) -> bool {
+        let horizon = now + jiff::SignedDuration::from_hours(UPCOMING_HOURS);
+        instant(self.from.as_deref()).is_some_and(|t| t > now && t <= horizon)
+    }
+
+    /// Past its `until`, or three days since the latest of when it was touched,
+    /// written, or its window opened.
+    pub fn is_due(&self, now: jiff::Timestamp) -> bool {
+        if instant(self.until.as_deref()).is_some_and(|t| t <= now) {
+            return true;
+        }
+        let last = [self.touched_at.as_deref(), self.from.as_deref(), Some(self.created.as_str())]
+            .into_iter()
+            .filter_map(instant)
+            .max();
+        last.is_some_and(|t| t <= now - jiff::SignedDuration::from_hours(STALE_DAYS * 24))
+    }
+
+    pub fn windowed(&self) -> bool {
+        self.from.is_some() || self.until.is_some()
+    }
 }
 
 /// Whole-second RFC 3339 UTC, so stamps compare correctly as text.
@@ -36,105 +92,227 @@ pub fn stamp(ts: jiff::Timestamp) -> String {
     jiff::Timestamp::from_second(ts.as_second()).expect("a whole second of a valid instant").to_string()
 }
 
-/// Folds every run of whitespace to one space; the rest must be 1 to
-/// `MAX_CHARS` characters.
-pub fn checked_text(raw: &str) -> Result<String, UpdateError> {
-    let text = raw.split_whitespace().collect::<Vec<_>>().join(" ");
-    let n = text.chars().count();
-    if n == 0 || n > MAX_CHARS {
-        return Err(UpdateError::Invalid(format!(
-            "text must be one line of 1..={MAX_CHARS} characters"
+pub fn checked_title(raw: &str) -> Result<String, NoteError> {
+    let title = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    let n = title.chars().count();
+    if n == 0 || n > MAX_TITLE_CHARS {
+        return Err(NoteError::Invalid(format!(
+            "title must be one line of 1..={MAX_TITLE_CHARS} characters"
         )));
     }
-    Ok(text)
+    Ok(title)
 }
 
-fn cutoff(now: jiff::Timestamp) -> String {
-    stamp(now - jiff::SignedDuration::from_hours(KEEP_DONE_DAYS * 24))
+/// An RFC 3339 instant, or a wall time or date in `tz`, as an RFC 3339 instant
+/// carrying `tz`'s offset.
+pub fn parse_when(raw: &str, tz: &jiff::tz::TimeZone) -> Result<String, NoteError> {
+    let raw = raw.trim();
+    let zoned = if let Ok(ts) = raw.parse::<jiff::Timestamp>() {
+        Ok(ts.to_zoned(tz.clone()))
+    } else if let Ok(dt) = raw.parse::<jiff::civil::DateTime>() {
+        dt.to_zoned(tz.clone())
+    } else if let Ok(d) = raw.parse::<jiff::civil::Date>() {
+        d.to_zoned(tz.clone())
+    } else {
+        return Err(NoteError::Invalid(format!(
+            "{raw:?} is not a time: use RFC 3339, YYYY-MM-DDTHH:MM or YYYY-MM-DD"
+        )));
+    };
+    let zoned = zoned.map_err(|e| NoteError::Invalid(e.to_string()))?;
+    Ok(zoned.strftime("%Y-%m-%dT%H:%M:%S%:z").to_string())
 }
 
-const COLS: &str = "id, text, pinned, created_at, done_at, last_nudged_at";
-
-fn row_to_note(r: &rusqlite::Row) -> rusqlite::Result<Note> {
-    Ok(Note {
-        id: r.get(0)?,
-        text: r.get(1)?,
-        pinned: r.get(2)?,
-        created_at: r.get(3)?,
-        done_at: r.get(4)?,
-        last_nudged_at: r.get(5)?,
-    })
+fn check_window(from: Option<&str>, until: Option<&str>) -> Result<(), NoteError> {
+    if let (Some(f), Some(u)) = (instant(from), instant(until)) {
+        if u <= f {
+            return Err(NoteError::Invalid("until must come after from".into()));
+        }
+    }
+    Ok(())
 }
 
-/// Open notes, pinned first and then in the order they were added, followed by
-/// the ones done within the last `KEEP_DONE_DAYS`.
-pub fn list(conn: &Connection, user_id: i64, now: jiff::Timestamp) -> rusqlite::Result<Vec<Note>> {
-    let mut stmt = conn.prepare(&format!(
-        "SELECT {COLS} FROM notes
-         WHERE user_id = ?1 AND (done_at IS NULL OR done_at >= ?2)
-         ORDER BY done_at IS NOT NULL, pinned DESC, id"
-    ))?;
-    let rows = stmt.query_map((user_id, cutoff(now)), row_to_note)?;
-    rows.collect()
-}
-
-pub fn get(conn: &Connection, user_id: i64, id: i64) -> rusqlite::Result<Option<Note>> {
-    conn.query_row(
-        &format!("SELECT {COLS} FROM notes WHERE id = ?1 AND user_id = ?2"),
-        (id, user_id),
-        row_to_note,
+fn save(conn: &Connection, data_dir: &Path, user: &str, note: &Note) -> Result<()> {
+    memory::put(
+        conn,
+        data_dir,
+        user,
+        &MemoryFile {
+            id: note.id.clone(),
+            category: NOTE.into(),
+            summary: note.title.clone(),
+            body: String::new(),
+            supersedes: None,
+            until: note.until.clone(),
+            created: note.created.clone(),
+            archived: false,
+            source: None,
+            from: note.from.clone(),
+            touched_at: note.touched_at.clone(),
+            last_nudged_at: note.last_nudged_at.clone(),
+        },
     )
-    .optional()
 }
 
-pub fn create(
+/// Newest first.
+pub fn all(data_dir: &Path, user: &str) -> Result<Vec<Note>> {
+    let mut notes: Vec<Note> = memory::live_files(data_dir, user, NOTE)?.into_iter().map(Note::of).collect();
+    notes.sort_by(|a, b| b.created.cmp(&a.created).then_with(|| a.id.cmp(&b.id)));
+    Ok(notes)
+}
+
+/// Newest first.
+pub fn active(data_dir: &Path, user: &str, now: jiff::Timestamp) -> Result<Vec<Note>> {
+    Ok(all(data_dir, user)?.into_iter().filter(|n| n.is_active(now)).collect())
+}
+
+/// Notes whose window opens within the next twelve hours, soonest first.
+pub fn upcoming(data_dir: &Path, user: &str, now: jiff::Timestamp) -> Result<Vec<Note>> {
+    let mut notes: Vec<Note> = all(data_dir, user)?.into_iter().filter(|n| n.is_upcoming(now)).collect();
+    notes.sort_by_key(|n| instant(n.from.as_deref()));
+    Ok(notes)
+}
+
+pub fn due_to_settle(data_dir: &Path, user: &str, now: jiff::Timestamp) -> Result<Vec<Note>> {
+    Ok(all(data_dir, user)?.into_iter().filter(|n| n.is_due(now)).collect())
+}
+
+/// `None` for an id that is not one of the user's live notes.
+pub fn get(data_dir: &Path, user: &str, id: &str) -> Result<Option<Note>> {
+    Ok(memory::read(data_dir, user, id)?
+        .filter(|f| f.category == NOTE && !f.archived)
+        .map(Note::of))
+}
+
+fn need(data_dir: &Path, user: &str, id: &str) -> Result<Note, NoteError> {
+    get(data_dir, user, id)?.ok_or_else(|| NoteError::NotFound(id.into()))
+}
+
+/// `from` and `until` are instants already read by `parse_when`.
+pub fn add(
     conn: &Connection,
-    user_id: i64,
-    new: &NewNote,
+    data_dir: &Path,
+    user: &str,
+    title: &str,
+    from: Option<String>,
+    until: Option<String>,
     now: jiff::Timestamp,
-) -> Result<Note, UpdateError> {
-    let text = checked_text(&new.text)?;
-    conn.execute(
-        "INSERT INTO notes (user_id, text, created_at) VALUES (?1, ?2, ?3)",
-        rusqlite::params![user_id, text, stamp(now)],
-    )?;
-    Ok(get(conn, user_id, conn.last_insert_rowid())?.expect("row was just created"))
+) -> Result<Note, NoteError> {
+    let title = checked_title(title)?;
+    check_window(from.as_deref(), until.as_deref())?;
+    let at = stamp(now);
+    let note = Note {
+        id: uuid::Uuid::new_v4().to_string(),
+        title,
+        from,
+        until,
+        touched_at: Some(at.clone()),
+        last_nudged_at: None,
+        created: at,
+    };
+    save(conn, data_dir, user, &note)?;
+    Ok(note)
 }
 
-/// `done: true` keeps an existing `done_at`; `done: false` clears it.
-/// `Ok(None)` when the note is not this user's.
 pub fn update(
     conn: &Connection,
-    user_id: i64,
-    id: i64,
-    patch: &NotePatch,
+    data_dir: &Path,
+    user: &str,
+    id: &str,
+    change: Change,
     now: jiff::Timestamp,
-) -> Result<Option<Note>, UpdateError> {
-    let text = patch.text.as_deref().map(checked_text).transpose()?;
-    let changed = conn.execute(
-        "UPDATE notes SET
-            text = COALESCE(?1, text),
-            pinned = COALESCE(?2, pinned),
-            done_at = CASE ?3 WHEN 1 THEN COALESCE(done_at, ?4) WHEN 0 THEN NULL ELSE done_at END
-         WHERE id = ?5 AND user_id = ?6",
-        rusqlite::params![text, patch.pinned, patch.done, stamp(now), id, user_id],
-    )?;
-    if changed == 0 {
-        return Ok(None);
+) -> Result<Note, NoteError> {
+    let mut note = need(data_dir, user, id)?;
+    if let Some(title) = change.title {
+        note.title = checked_title(&title)?;
     }
-    Ok(get(conn, user_id, id)?)
+    if let Some(from) = change.from {
+        note.from = from;
+    }
+    if let Some(until) = change.until {
+        note.until = until;
+    }
+    check_window(note.from.as_deref(), note.until.as_deref())?;
+    note.touched_at = Some(stamp(now));
+    save(conn, data_dir, user, &note)?;
+    Ok(note)
 }
 
-pub fn delete(conn: &Connection, user_id: i64, id: i64) -> rusqlite::Result<bool> {
-    Ok(conn.execute("DELETE FROM notes WHERE id = ?1 AND user_id = ?2", (id, user_id))? > 0)
+pub fn remove(conn: &Connection, data_dir: &Path, user: &str, id: &str) -> Result<(), NoteError> {
+    need(data_dir, user, id)?;
+    memory::remove(conn, data_dir, user, id)?;
+    Ok(())
 }
 
-/// Deletes this user's notes done more than `KEEP_DONE_DAYS` before `now`.
-pub fn purge_done(conn: &Connection, user_id: i64, now: jiff::Timestamp) -> rusqlite::Result<usize> {
-    conn.execute(
-        "DELETE FROM notes WHERE user_id = ?1 AND done_at IS NOT NULL AND done_at < ?2",
-        (user_id, cutoff(now)),
-    )
+/// Stamps `touched_at` on each of `ids` that is one of the user's notes;
+/// returns how many.
+pub fn touch(conn: &Connection, data_dir: &Path, user: &str, ids: &[String], now: jiff::Timestamp) -> Result<usize> {
+    stamp_each(conn, data_dir, user, ids, now, false)
+}
+
+/// `touch` that also records the nudge in `last_nudged_at`.
+pub fn nudged(conn: &Connection, data_dir: &Path, user: &str, ids: &[String], now: jiff::Timestamp) -> Result<usize> {
+    stamp_each(conn, data_dir, user, ids, now, true)
+}
+
+fn stamp_each(
+    conn: &Connection,
+    data_dir: &Path,
+    user: &str,
+    ids: &[String],
+    now: jiff::Timestamp,
+    nudge: bool,
+) -> Result<usize> {
+    let at = stamp(now);
+    let mut n = 0;
+    for id in ids {
+        let Some(mut note) = get(data_dir, user, id)? else { continue };
+        note.touched_at = Some(at.clone());
+        if nudge {
+            note.last_nudged_at = Some(at.clone());
+        }
+        save(conn, data_dir, user, &note)?;
+        n += 1;
+    }
+    Ok(n)
+}
+
+/// Takes a note out of working memory; returns the long-term memory it became.
+pub fn settle(
+    conn: &Connection,
+    data_dir: &Path,
+    user: &str,
+    id: &str,
+    outcome: &Outcome,
+) -> Result<Option<String>, NoteError> {
+    let note = need(data_dir, user, id)?;
+    let kept = match outcome {
+        Outcome::Drop => None,
+        Outcome::Memory { category, summary, body } => {
+            let category = category.unwrap_or(if note.windowed() { "episodic" } else { "semantic" });
+            if !memory::CATEGORIES.contains(&category) {
+                return Err(NoteError::Invalid(format!("category must be one of {:?}", memory::CATEGORIES)));
+            }
+            let fact = memory::Fact {
+                category,
+                summary: summary.unwrap_or(&note.title),
+                body: body.unwrap_or(""),
+                until: None,
+            };
+            Some(memory::add_until(conn, data_dir, user, &fact, None)?)
+        }
+    };
+    memory::remove(conn, data_dir, user, id)?;
+    Ok(kept)
+}
+
+/// Keeps every note still due as a memory, word for word; returns how many.
+pub fn settle_leftovers(conn: &Connection, data_dir: &Path, user: &str, now: jiff::Timestamp) -> Result<usize> {
+    let due = due_to_settle(data_dir, user, now)?;
+    let verbatim = Outcome::Memory { category: None, summary: None, body: None };
+    for note in &due {
+        settle(conn, data_dir, user, &note.id, &verbatim)?;
+    }
+    Ok(due.len())
 }
 
 #[cfg(test)]
@@ -145,21 +323,16 @@ mod tests {
         s.parse().unwrap()
     }
 
-    fn db() -> (Connection, i64, i64) {
-        let conn = crate::db::open_memory().unwrap();
-        let aki = crate::auth::create_user(&conn, "aki", "pw", false).unwrap();
-        let bo = crate::auth::create_user(&conn, "bo", "pw", false).unwrap();
-        (conn, aki, bo)
+    fn env() -> (Connection, tempfile::TempDir) {
+        (crate::db::open_memory().unwrap(), tempfile::tempdir().unwrap())
     }
 
-    fn add(conn: &Connection, uid: i64, text: &str, now: &str) -> Note {
-        create(conn, uid, &NewNote { text: text.into() }, at(now)).unwrap()
+    fn note(conn: &Connection, tmp: &tempfile::TempDir, title: &str, window: (Option<&str>, Option<&str>), made: &str) -> Note {
+        add(conn, tmp.path(), "aki", title, window.0.map(str::to_owned), window.1.map(str::to_owned), at(made)).unwrap()
     }
 
-    fn mark(conn: &Connection, uid: i64, id: i64, done: bool, now: &str) -> Note {
-        update(conn, uid, id, &NotePatch { done: Some(done), ..Default::default() }, at(now))
-            .unwrap()
-            .unwrap()
+    fn ids(notes: Vec<Note>) -> Vec<String> {
+        notes.into_iter().map(|n| n.id).collect()
     }
 
     #[test]
@@ -169,91 +342,155 @@ mod tests {
     }
 
     #[test]
-    fn text_is_one_line_of_at_most_200_characters() {
-        assert_eq!(checked_text("  call\n the   bank\t").unwrap(), "call the bank");
-        assert_eq!(checked_text(&"あ".repeat(200)).unwrap().chars().count(), 200);
-        assert!(checked_text(&"あ".repeat(201)).is_err());
-        assert!(checked_text(" \n\t ").is_err());
+    fn a_title_is_one_line_of_at_most_80_characters() {
+        assert_eq!(checked_title("  call\n the   bank\t").unwrap(), "call the bank");
+        assert_eq!(checked_title(&"あ".repeat(80)).unwrap().chars().count(), 80);
+        assert!(checked_title(&"あ".repeat(81)).is_err());
+        assert!(checked_title(" \n\t ").is_err());
     }
 
     #[test]
-    fn the_list_is_open_notes_pinned_first_then_the_last_weeks_done_ones() {
-        let (conn, aki, bo) = db();
-        let now = "2026-09-30T12:00:00Z";
-        let first = add(&conn, aki, "first", now).id;
-        let second = add(&conn, aki, "second", now).id;
-        let recent = add(&conn, aki, "recent", now).id;
-        let old = add(&conn, aki, "old", now).id;
-        add(&conn, bo, "theirs", now);
-        update(&conn, aki, second, &NotePatch { pinned: Some(true), ..Default::default() }, at(now))
-            .unwrap();
-        mark(&conn, aki, recent, true, "2026-09-23T12:00:00Z");
-        mark(&conn, aki, old, true, "2026-09-23T11:59:59Z");
-
-        let ids: Vec<i64> = list(&conn, aki, at(now)).unwrap().into_iter().map(|n| n.id).collect();
-        assert_eq!(ids, vec![second, first, recent]);
+    fn a_time_is_read_in_the_users_zone_and_kept_with_its_offset() {
+        let tokyo = jiff::tz::TimeZone::get("Asia/Tokyo").unwrap();
+        assert_eq!(parse_when("2026-10-07T06:00:00Z", &tokyo).unwrap(), "2026-10-07T15:00:00+09:00");
+        assert_eq!(parse_when("2026-10-07T15:00", &tokyo).unwrap(), "2026-10-07T15:00:00+09:00");
+        assert_eq!(parse_when("2026-10-08", &tokyo).unwrap(), "2026-10-08T00:00:00+09:00");
+        assert!(matches!(parse_when("friday", &tokyo), Err(NoteError::Invalid(_))));
     }
 
     #[test]
-    fn checking_off_twice_keeps_the_first_time_and_reopening_clears_it() {
-        let (conn, aki, _) = db();
-        let id = add(&conn, aki, "milk", "2026-09-30T09:00:00Z").id;
+    fn a_note_is_active_inside_its_window_and_upcoming_within_twelve_hours() {
+        let (conn, tmp) = env();
+        let open = note(&conn, &tmp, "standing", (None, None), "2026-10-07T00:00:00Z");
+        let inside = note(&conn, &tmp, "inside", (Some("2026-10-07T11:00:00Z"), Some("2026-10-07T13:00:00Z")), "2026-10-07T00:00:01Z");
+        note(&conn, &tmp, "ended", (None, Some("2026-10-07T12:00:00Z")), "2026-10-07T00:00:02Z");
+        let soon = note(&conn, &tmp, "soon", (Some("2026-10-07T23:00:00Z"), None), "2026-10-07T00:00:03Z");
+        note(&conn, &tmp, "later", (Some("2026-10-08T01:00:00Z"), None), "2026-10-07T00:00:04Z");
+        let now = at("2026-10-07T12:00:00Z");
+        assert_eq!(ids(active(tmp.path(), "aki", now).unwrap()), vec![inside.id, open.id], "newest first");
+        assert_eq!(ids(upcoming(tmp.path(), "aki", now).unwrap()), vec![soon.id]);
+    }
+
+    #[test]
+    fn a_window_must_close_after_it_opens() {
+        let (conn, tmp) = env();
+        let e = add(&conn, tmp.path(), "aki", "x", Some("2026-10-07T12:00:00Z".into()),
+            Some("2026-10-07T12:00:00Z".into()), at("2026-10-07T00:00:00Z")).unwrap_err();
+        assert!(matches!(e, NoteError::Invalid(_)));
+        let n = note(&conn, &tmp, "x", (Some("2026-10-07T12:00:00Z"), None), "2026-10-07T00:00:00Z");
+        let change = Change { until: Some(Some("2026-10-07T11:00:00Z".into())), ..Default::default() };
+        let e = update(&conn, tmp.path(), "aki", &n.id, change, at("2026-10-07T01:00:00Z")).unwrap_err();
+        assert!(matches!(e, NoteError::Invalid(_)));
+    }
+
+    #[test]
+    fn update_keep_and_a_nudge_stamp_touched_at_and_remove_deletes() {
+        let (conn, tmp) = env();
+        let n = note(&conn, &tmp, "call the bank", (None, Some("2026-10-07T17:00:00Z")), "2026-10-07T00:00:00Z");
+        assert_eq!(n.touched_at.as_deref(), Some("2026-10-07T00:00:00Z"));
+
+        let change = Change { title: Some("call the bank back".into()), until: Some(None), ..Default::default() };
+        let u = update(&conn, tmp.path(), "aki", &n.id, change, at("2026-10-07T01:00:00Z")).unwrap();
         assert_eq!(
-            mark(&conn, aki, id, true, "2026-09-30T10:00:00Z").done_at.as_deref(),
-            Some("2026-09-30T10:00:00Z")
+            (u.title.as_str(), u.until.as_deref(), u.touched_at.as_deref()),
+            ("call the bank back", None, Some("2026-10-07T01:00:00Z"))
         );
-        assert_eq!(
-            mark(&conn, aki, id, true, "2026-09-30T11:00:00Z").done_at.as_deref(),
-            Some("2026-09-30T10:00:00Z")
-        );
-        assert!(mark(&conn, aki, id, false, "2026-09-30T11:30:00Z").done_at.is_none());
 
-        let later = at("2026-09-30T12:00:00Z");
-        let n = update(&conn, aki, id, &NotePatch { text: Some("oat milk".into()), ..Default::default() }, later)
-            .unwrap()
-            .unwrap();
+        let missing = "00000000-0000-4000-8000-000000000404".to_string();
+        assert_eq!(touch(&conn, tmp.path(), "aki", &[n.id.clone(), missing], at("2026-10-07T02:00:00Z")).unwrap(), 1);
+        assert_eq!(get(tmp.path(), "aki", &n.id).unwrap().unwrap().touched_at.as_deref(), Some("2026-10-07T02:00:00Z"));
+
+        assert_eq!(nudged(&conn, tmp.path(), "aki", std::slice::from_ref(&n.id), at("2026-10-07T03:00:00Z")).unwrap(), 1);
+        let g = get(tmp.path(), "aki", &n.id).unwrap().unwrap();
         assert_eq!(
-            (n.text.as_str(), n.pinned, n.created_at.as_str()),
-            ("oat milk", false, "2026-09-30T09:00:00Z")
+            (g.touched_at.as_deref(), g.last_nudged_at.as_deref()),
+            (Some("2026-10-07T03:00:00Z"), Some("2026-10-07T03:00:00Z"))
         );
-        assert!(update(&conn, aki, id, &NotePatch { text: Some(" ".into()), ..Default::default() }, later)
-            .is_err());
+
+        remove(&conn, tmp.path(), "aki", &n.id).unwrap();
+        assert!(get(tmp.path(), "aki", &n.id).unwrap().is_none());
+        assert!(matches!(remove(&conn, tmp.path(), "aki", &n.id), Err(NoteError::NotFound(_))));
     }
 
     #[test]
-    fn another_users_note_is_out_of_reach() {
-        let (conn, aki, bo) = db();
-        let theirs = add(&conn, bo, "theirs", "2026-09-30T09:00:00Z").id;
-        let now = at("2026-09-30T10:00:00Z");
-        assert!(get(&conn, aki, theirs).unwrap().is_none());
-        assert!(update(&conn, aki, theirs, &NotePatch { done: Some(true), ..Default::default() }, now)
-            .unwrap()
-            .is_none());
-        assert!(!delete(&conn, aki, theirs).unwrap());
-        assert!(get(&conn, bo, theirs).unwrap().unwrap().done_at.is_none());
-        assert!(delete(&conn, bo, theirs).unwrap());
-        assert!(get(&conn, bo, theirs).unwrap().is_none());
+    fn a_long_term_memory_is_not_a_note() {
+        let (conn, tmp) = env();
+        let fact = crate::memory::add(&conn, tmp.path(), "aki", "semantic", "s", "b", None).unwrap();
+        assert!(get(tmp.path(), "aki", &fact).unwrap().is_none());
+        assert!(matches!(remove(&conn, tmp.path(), "aki", &fact), Err(NoteError::NotFound(_))));
+        assert_eq!(touch(&conn, tmp.path(), "aki", std::slice::from_ref(&fact), at("2026-10-07T00:00:00Z")).unwrap(), 0);
+        assert!(crate::memory::read(tmp.path(), "aki", &fact).unwrap().is_some());
     }
 
     #[test]
-    fn purging_drops_only_this_users_notes_done_over_a_week_ago() {
-        let (conn, aki, bo) = db();
-        let make = |uid: i64, text: &str, done: Option<&str>| {
-            let id = add(&conn, uid, text, "2026-09-01T00:00:00Z").id;
-            if let Some(ts) = done {
-                mark(&conn, uid, id, true, ts);
-            }
-            id
+    fn a_note_falls_due_past_its_until_or_three_days_untouched() {
+        let (conn, tmp) = env();
+        let ended = note(&conn, &tmp, "ended", (None, Some("2026-10-10T11:00:00Z")), "2026-10-10T00:00:00Z");
+        let stale = note(&conn, &tmp, "stale", (None, None), "2026-10-07T12:00:00Z");
+        note(&conn, &tmp, "fresh", (None, None), "2026-10-07T12:00:01Z");
+        note(&conn, &tmp, "waiting", (Some("2026-10-09T00:00:00Z"), None), "2026-10-01T00:00:00Z");
+        let mut due = ids(due_to_settle(tmp.path(), "aki", at("2026-10-10T12:00:00Z")).unwrap());
+        due.sort();
+        let mut want = vec![ended.id, stale.id];
+        want.sort();
+        assert_eq!(due, want, "a note written ahead counts from when its window opens");
+    }
+
+    #[test]
+    fn settling_writes_a_memory_of_the_right_kind_or_drops_the_note() {
+        let (conn, tmp) = env();
+        let made = "2026-10-07T00:00:00Z";
+        let windowed = note(&conn, &tmp, "dentist at three", (Some("2026-10-07T06:00:00Z"), Some("2026-10-07T07:00:00Z")), made);
+        let plain = note(&conn, &tmp, "prefers short check-ins", (None, None), made);
+        let rewritten = note(&conn, &tmp, "essay draft", (None, None), made);
+        let gone = note(&conn, &tmp, "milk", (None, None), made);
+        let verbatim = Outcome::Memory { category: None, summary: None, body: None };
+        let read = |id: &str| crate::memory::read(tmp.path(), "aki", id).unwrap().unwrap();
+
+        let id = settle(&conn, tmp.path(), "aki", &windowed.id, &verbatim).unwrap().unwrap();
+        assert_eq!((read(&id).category.as_str(), read(&id).summary.as_str()), ("episodic", "dentist at three"));
+
+        let id = settle(&conn, tmp.path(), "aki", &plain.id, &verbatim).unwrap().unwrap();
+        assert_eq!(read(&id).category, "semantic");
+
+        let own = Outcome::Memory {
+            category: Some("procedural"),
+            summary: Some("essay drafts start from an outline"),
+            body: Some("she writes faster from bullets"),
         };
-        let open = make(aki, "open", None);
-        let kept = make(aki, "kept", Some("2026-09-23T12:00:00Z"));
-        let gone = make(aki, "gone", Some("2026-09-23T11:59:59Z"));
-        let theirs = make(bo, "theirs", Some("2026-09-01T00:00:00Z"));
+        let id = settle(&conn, tmp.path(), "aki", &rewritten.id, &own).unwrap().unwrap();
+        let f = read(&id);
+        assert_eq!(
+            (f.category.as_str(), f.summary.as_str(), f.body.as_str()),
+            ("procedural", "essay drafts start from an outline", "she writes faster from bullets")
+        );
 
-        assert_eq!(purge_done(&conn, aki, at("2026-09-30T12:00:00Z")).unwrap(), 1);
-        assert!(get(&conn, aki, open).unwrap().is_some());
-        assert!(get(&conn, aki, kept).unwrap().is_some());
-        assert!(get(&conn, aki, gone).unwrap().is_none());
-        assert!(get(&conn, bo, theirs).unwrap().is_some());
+        assert_eq!(settle(&conn, tmp.path(), "aki", &gone.id, &Outcome::Drop).unwrap(), None);
+        assert!(all(tmp.path(), "aki").unwrap().is_empty(), "a settled note leaves working memory");
+        assert_eq!(crate::memory::live_count(&conn, "aki").unwrap(), 3);
+        assert!(matches!(settle(&conn, tmp.path(), "aki", &gone.id, &Outcome::Drop), Err(NoteError::NotFound(_))));
+    }
+
+    #[test]
+    fn a_bad_category_settles_nothing() {
+        let (conn, tmp) = env();
+        let n = note(&conn, &tmp, "x", (None, None), "2026-10-07T00:00:00Z");
+        let bad = Outcome::Memory { category: Some("note"), summary: None, body: None };
+        assert!(matches!(settle(&conn, tmp.path(), "aki", &n.id, &bad), Err(NoteError::Invalid(_))));
+        assert!(get(tmp.path(), "aki", &n.id).unwrap().is_some());
+    }
+
+    #[test]
+    fn leftovers_are_kept_word_for_word_and_touched_notes_stay() {
+        let (conn, tmp) = env();
+        note(&conn, &tmp, "asked about the essay twice", (None, None), "2026-10-01T00:00:00Z");
+        let fresh = note(&conn, &tmp, "sat score lands friday", (None, None), "2026-10-01T00:00:00Z");
+        touch(&conn, tmp.path(), "aki", std::slice::from_ref(&fresh.id), at("2026-10-09T00:00:00Z")).unwrap();
+
+        assert_eq!(settle_leftovers(&conn, tmp.path(), "aki", at("2026-10-10T00:00:00Z")).unwrap(), 1);
+        assert_eq!(ids(all(tmp.path(), "aki").unwrap()), vec![fresh.id]);
+        let kept = crate::memory::list(&conn, "aki", None, 10).unwrap();
+        assert_eq!(kept.len(), 1);
+        assert_eq!((kept[0].category.as_str(), kept[0].summary.as_str()), ("semantic", "asked about the essay twice"));
     }
 }
