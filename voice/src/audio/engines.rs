@@ -11,10 +11,11 @@ use sherpa_onnx::{
     VadModelConfig, VoiceActivityDetector,
 };
 
+use super::language::{LanguageId, Scores, WhisperLanguageId};
 use super::mel::{log_mel, MEL_BINS, MEL_FRAMES};
 use super::stt::{Decoder, OfflineStt};
 use super::tts::{ChunkedBackend, Renderer, SpeechBackend};
-use crate::config::{KokoroModel, ModelSet, ModelsConfig, SttModel};
+use crate::config::{KokoroModel, LanguageIdModel, ModelSet, ModelsConfig, SttModel};
 
 pub trait Vad: Send {
     /// One 512-sample (32 ms) window at 16 kHz; returns true while speech is detected.
@@ -73,6 +74,13 @@ pub trait SpeechEngines: Send + Sync {
     fn turn(&self, language: &str) -> Arc<dyn TurnDetector>;
     /// The base voice of `language`. Panics when no language is loaded.
     fn tts(&self, language: &str) -> BaseVoice;
+    fn identifies(&self) -> bool {
+        false
+    }
+    /// Tells the spoken language of a clip; `None` without an identifier loaded.
+    fn identify(&self, _samples_16k: &[f32]) -> Option<anyhow::Result<Scores>> {
+        None
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -111,11 +119,25 @@ struct Language {
 
 pub struct Engines {
     languages: BTreeMap<String, Language>,
+    identifier: Option<Arc<dyn LanguageId>>,
 }
 
 impl Engines {
     pub fn empty() -> Engines {
-        Engines { languages: BTreeMap::new() }
+        Engines { languages: BTreeMap::new(), identifier: None }
+    }
+
+    /// Loads the spoken language identifier; one that fails is logged and calls keep the user's language.
+    #[must_use]
+    pub fn with_identifier(mut self, model: Option<&LanguageIdModel>) -> Engines {
+        self.identifier = model.and_then(|m| match WhisperLanguageId::create(&m.encoder, &m.decoder) {
+            Ok(id) => Some(Arc::new(id) as Arc<dyn LanguageId>),
+            Err(e) => {
+                eprintln!("voice: loading the language identifier failed: {e:#}; calls keep the user's language");
+                None
+            }
+        });
+        self
     }
 
     /// Loads each set; a language that fails is logged and left out, and none loading is an error.
@@ -136,7 +158,7 @@ impl Engines {
         if languages.is_empty() && !failed.is_empty() {
             anyhow::bail!("no language loaded ({})", failed.join(", "));
         }
-        Ok(Engines { languages })
+        Ok(Engines { languages, identifier: None })
     }
 
     /// `language`, or the first loaded one when it is not loaded.
@@ -193,6 +215,14 @@ impl SpeechEngines for Engines {
 
     fn languages(&self) -> Vec<String> {
         self.languages.keys().cloned().collect()
+    }
+
+    fn identifies(&self) -> bool {
+        self.identifier.is_some()
+    }
+
+    fn identify(&self, samples_16k: &[f32]) -> Option<anyhow::Result<Scores>> {
+        Some(self.identifier.as_ref()?.identify(samples_16k))
     }
 }
 
@@ -354,7 +384,7 @@ struct OrtTurn {
 
 /// Binds ort to the onnxruntime sherpa-onnx already loaded, so the process holds one;
 /// `ORT_DYLIB_PATH` when none is loaded yet.
-fn init_ort() -> anyhow::Result<()> {
+pub(crate) fn init_ort() -> anyhow::Result<()> {
     static INIT: OnceLock<Result<(), String>> = OnceLock::new();
     INIT.get_or_init(|| {
         let path = loaded_onnxruntime()

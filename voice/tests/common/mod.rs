@@ -443,6 +443,7 @@ pub fn voice_config(dir: &std::path::Path, homeserver: String) -> VoiceServiceCo
         state_dir: dir.join("state"),
         models_dir: None,
         models: Default::default(),
+        language_id: None,
         device: Default::default(),
         cues_dir: None,
         ready_cue_file: None,

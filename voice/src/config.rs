@@ -18,6 +18,9 @@ pub struct VoiceServiceConfig {
     /// Per-language sets that replace the ones derived from `models_dir`.
     #[serde(default)]
     pub models: ModelsConfig,
+    /// Replaces the identifier found in `models_dir`.
+    #[serde(default)]
+    pub language_id: Option<LanguageIdModel>,
     #[serde(default)]
     pub device: Device,
     #[serde(default = "cues_dir_from_env")]
@@ -152,6 +155,21 @@ const KOKORO_EN_VOICES: [(&str, i32, &str); 28] = [
 ];
 
 pub const REAZON_DIR: &str = "ja/reazonspeech";
+pub const WHISPER_DIR: &str = "whisper-tiny";
+
+/// Whisper's encoder and decoder, as sherpa-onnx exports them, for telling a caller's language.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct LanguageIdModel {
+    pub encoder: PathBuf,
+    pub decoder: PathBuf,
+}
+
+/// The identifier laid out as `packages.note-voice-models`, when it is there.
+pub fn language_id_from_dir(dir: &Path) -> Option<LanguageIdModel> {
+    let whisper = dir.join(WHISPER_DIR);
+    let model = LanguageIdModel { encoder: whisper.join("tiny-encoder.int8.onnx"), decoder: whisper.join("tiny-decoder.int8.onnx") };
+    (model.encoder.is_file() && model.decoder.is_file()).then_some(model)
+}
 
 /// The sets laid out as `packages.note-voice-models`: "en" always, "ja" when its models are there,
 /// speaking through `tts.base_sidecar("ja")`.
@@ -245,6 +263,10 @@ impl VoiceServiceConfig {
         sets
     }
 
+    pub fn language_id(&self) -> Option<LanguageIdModel> {
+        self.language_id.clone().or_else(|| self.models_dir.as_deref().and_then(language_id_from_dir))
+    }
+
     /// The override, then the default in `cues_dir`, in the order to try them.
     pub fn ready_cue(&self) -> Vec<PathBuf> {
         self.cue(self.ready_cue_file.as_ref(), "ready.pcm")
@@ -314,6 +336,23 @@ mod tests {
         assert_eq!(ja.tts_sidecar.as_deref(), Some("ja-tts"));
         assert_eq!(ja.vad, sets["en"].vad);
         assert_eq!(models_from_dir(dir.path(), &TtsConfig::default())["ja"].tts_sidecar.as_deref(), Some("ja"));
+    }
+
+    #[test]
+    fn the_language_identifier_comes_from_the_models_dir_when_it_is_there() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg: VoiceServiceConfig = toml::from_str(BASE).unwrap();
+        cfg.models_dir = Some(dir.path().to_path_buf());
+        assert_eq!(cfg.language_id(), None);
+        let whisper = dir.path().join(WHISPER_DIR);
+        std::fs::create_dir_all(&whisper).unwrap();
+        for f in ["tiny-encoder.int8.onnx", "tiny-decoder.int8.onnx"] {
+            std::fs::write(whisper.join(f), "").unwrap();
+        }
+        assert_eq!(cfg.language_id().unwrap().encoder, whisper.join("tiny-encoder.int8.onnx"));
+        let own: VoiceServiceConfig =
+            toml::from_str(&format!("{BASE}\nlanguage_id = {{ encoder = \"/e\", decoder = \"/d\" }}")).unwrap();
+        assert_eq!(own.language_id(), Some(LanguageIdModel { encoder: "/e".into(), decoder: "/d".into() }));
     }
 
     #[test]

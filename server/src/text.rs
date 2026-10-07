@@ -544,11 +544,6 @@ pub fn call_bow_out(l: Lang) -> String {
     )
 }
 
-/// The model's cue when the user rang in with nothing queued.
-pub fn call_greet(l: Lang) -> String {
-    l.pick("the user called you; greet them briefly", "the user called you; greet them briefly in Japanese")
-}
-
 pub fn session_thread_title(l: Lang, task: &str) -> String {
     match l {
         Lang::En => format!("Session: {task}"),

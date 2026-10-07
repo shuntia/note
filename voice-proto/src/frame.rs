@@ -146,9 +146,20 @@ pub enum CallBody {
     /// Note → voice: discard reply `reply` unplayed.
     Drop { reply: u64 },
     /// Voice → Note: the user paused; `text` is the transcript so far of turn `turn`.
-    Draft { turn: u64, text: String },
-    /// Voice → Note: the turn is over.
-    Commit { turn: u64, text: String },
+    Draft {
+        turn: u64,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        language: Option<String>,
+    },
+    /// Voice → Note: the turn is over. `language` is the one the call settled on from the caller's
+    /// first words; a voice side that does not identify it leaves it out.
+    Commit {
+        turn: u64,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        language: Option<String>,
+    },
     /// Voice → Note: the user resumed speaking after a draft; the draft is void.
     Retract { turn: u64 },
     /// Voice → Note: floor changes.
@@ -228,8 +239,8 @@ mod tests {
             CallBody::SpeakDone { reply: 3 },
             CallBody::Play { reply: 3 },
             CallBody::Drop { reply: 3 },
-            CallBody::Draft { turn: 2, text: "move my".into() },
-            CallBody::Commit { turn: 2, text: "move my run".into() },
+            CallBody::Draft { turn: 2, text: "move my".into(), language: None },
+            CallBody::Commit { turn: 2, text: "move my run".into(), language: Some("ja".into()) },
             CallBody::Retract { turn: 2 },
             CallBody::Floor { floor: Floor::UserSpeaking },
             CallBody::BargeIn { reply: 3, heard_chars: 12 },
@@ -238,6 +249,17 @@ mod tests {
             let s = serde_json::to_string(&body).unwrap();
             assert_eq!(serde_json::from_str::<CallBody>(&s).unwrap(), body, "{s}");
         }
+    }
+
+    #[test]
+    fn a_turn_without_a_language_reads_and_writes_as_before() {
+        let raw = r#"{"k":"commit","turn":1,"text":"hi"}"#;
+        let body: CallBody = serde_json::from_str(raw).unwrap();
+        assert_eq!(body, CallBody::Commit { turn: 1, text: "hi".into(), language: None });
+        assert_eq!(serde_json::to_string(&body).unwrap(), raw);
+        let raw = r#"{"k":"draft","turn":1,"text":"hi","language":"ja"}"#;
+        let CallBody::Draft { language, .. } = serde_json::from_str(raw).unwrap() else { panic!() };
+        assert_eq!(language.as_deref(), Some("ja"));
     }
 
     #[test]

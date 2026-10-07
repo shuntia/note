@@ -1,4 +1,5 @@
-use crate::agent::{system_prompt, SessionDeps};
+use crate::agent::{system_prompt_in, SessionDeps};
+use crate::text::Lang;
 use crate::model_text as mt;
 use crate::providers::Message;
 use crate::tools::SessionKind;
@@ -12,8 +13,9 @@ pub enum Reason {
     UserCalled,
 }
 
-/// The call's fixed system prompt: the voice persona and the user's context,
-/// why the call is happening, and the tail of the thread it belongs to.
+/// The call's system prompt in `l`, the language the caller speaks: the voice
+/// persona and the user's context, why the call is happening, the tail of the
+/// thread it belongs to, and the language to answer in.
 pub fn build(
     deps: &SessionDeps,
     user_id: i64,
@@ -21,9 +23,9 @@ pub fn build(
     reason: &Reason,
     conversation_id: Option<i64>,
     now: jiff::Timestamp,
+    l: Lang,
 ) -> Result<String> {
-    let l = crate::text::Lang::for_user(deps.config_dir, username);
-    let mut brief = system_prompt(deps, user_id, username, SessionKind::Call, now)?;
+    let mut brief = system_prompt_in(deps, user_id, username, SessionKind::Call, now, l)?;
     brief.push_str(mt::why_this_call(l));
     match reason {
         Reason::CheckIn { title, body } => brief.push_str(&mt::called_about(l, title, body)),
@@ -46,6 +48,7 @@ pub fn build(
             }
         }
     }
+    let _ = write!(brief, "\n\n{}", mt::call_speaks_only(l));
     Ok(brief)
 }
 
@@ -96,7 +99,7 @@ mod tests {
             share: None,
         };
         let reason = Reason::CheckIn { title: "Essay".into(), body: "How is the essay going?".into() };
-        let brief = build(&deps, 1, "aki", &reason, Some(thread), now).unwrap();
+        let brief = build(&deps, 1, "aki", &reason, Some(thread), now, Lang::En).unwrap();
 
         assert!(brief.starts_with(crate::model_text::call_briefly(crate::text::Lang::En)), "{brief}");
         assert!(brief.contains("\n\nYou are Note, on a phone call with Aki."), "{brief}");
@@ -106,9 +109,10 @@ mod tests {
         let note_at = brief.find("Note: I'll check in thursday").expect(&brief);
         assert!(user_at < note_at, "{brief}");
         assert!(
-            brief.ends_with("# Earlier in this thread\n\nyou: the essay is due friday\nNote: I'll check in thursday"),
+            brief.contains("# Earlier in this thread\n\nyou: the essay is due friday\nNote: I'll check in thursday\n\n"),
             "a blank row renders no line: {brief}"
         );
+        assert!(brief.ends_with(crate::model_text::call_speaks_only(Lang::En)), "{brief}");
         assert!(!brief.contains("{name}"));
     }
 
@@ -146,9 +150,54 @@ mod tests {
             thread_note: None,
             share: None,
         };
-        let brief = build(&deps, 1, "aki", &Reason::UserCalled, Some(thread), now).unwrap();
+        let brief = build(&deps, 1, "aki", &Reason::UserCalled, Some(thread), now, Lang::En).unwrap();
         assert!(brief.starts_with(&format!("{}\n\ncall Aki", crate::model_text::call_briefly(crate::text::Lang::En))));
         assert!(brief.contains("write {name} on the form"), "the user's context is left as written");
-        assert!(brief.ends_with("# Why this call\n\nThe user called you."), "{brief}");
+        assert!(brief.contains("# Why this call\n\nThe user called you.\n\n"), "{brief}");
+        assert!(!brief.contains("Earlier in this thread"), "{brief}");
+    }
+
+    #[test]
+    fn a_caller_heard_in_japanese_gets_a_japanese_brief_whatever_their_setting() {
+        let conn = crate::db::open_memory().unwrap();
+        conn.execute("INSERT INTO users (username, pass_hash, role) VALUES ('aki', 'x', 'member')", [])
+            .unwrap();
+        let now: jiff::Timestamp = "2026-10-02T18:00:00Z".parse().unwrap();
+        let db = Mutex::new(conn);
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("defaults/prompts/ja")).unwrap();
+        std::fs::write(
+            tmp.path().join("defaults/user.toml"),
+            "display_name = \"Aki\"\ntimezone = \"UTC\"\ntemplate = \"default\"\nlanguage = \"en\"\n",
+        )
+        .unwrap();
+        std::fs::write(tmp.path().join("defaults/prompts/voice.md"), "call {name}").unwrap();
+        std::fs::write(tmp.path().join("defaults/prompts/ja/voice.md"), "{name}さんと通話中").unwrap();
+        let llm = MockLLM::scripted(vec![]);
+        let deps = SessionDeps {
+            db: &db,
+            config_dir: tmp.path(),
+            data_dir: tmp.path(),
+            llm: &llm,
+            embeddings: None,
+            search: None,
+            task_scope: None,
+            inbox_source: None,
+            memory_source: None,
+            token_id: None,
+            thread_note: None,
+            share: None,
+        };
+        let brief = build(&deps, 1, "aki", &Reason::UserCalled, None, now, Lang::Ja).unwrap();
+        assert!(brief.starts_with(crate::model_text::call_briefly(Lang::Ja)), "{brief}");
+        assert!(brief.contains(crate::model_text::SPEAK_JAPANESE), "{brief}");
+        assert!(brief.contains("Akiさんと通話中"), "the Japanese voice prompt: {brief}");
+        assert!(brief.contains(crate::model_text::user_called(Lang::Ja)), "{brief}");
+        assert!(brief.ends_with(crate::model_text::call_speaks_only(Lang::Ja)), "{brief}");
+        assert!(brief.contains("返事は日本語だけで"), "{brief}");
+
+        let brief = build(&deps, 1, "aki", &Reason::UserCalled, None, now, Lang::En).unwrap();
+        assert!(brief.ends_with("Reply only in English, whatever language the rest of these instructions, the notes or the thread are in."));
+        assert!(!brief.contains(crate::model_text::SPEAK_JAPANESE));
     }
 }
