@@ -324,6 +324,7 @@ pub fn gc_sessions(conn: &Connection, now: jiff::Timestamp) -> Result<()> {
 pub fn sweep_once(state: &AppState) {
     let now = jiff::Timestamp::now();
     state.login_limiter.sweep(now);
+    state.join_limiter.sweep(now);
     let (fired, started, flips) = {
         let conn = state.db();
         if let Err(e) = gc_sessions(&conn, now) {

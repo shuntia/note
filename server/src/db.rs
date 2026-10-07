@@ -730,6 +730,22 @@ const MIGRATIONS: &[&str] = &[
         next_batch TEXT NOT NULL
     );
     ",
+    // v50
+    "
+    CREATE TABLE invites (
+        id INTEGER PRIMARY KEY,
+        token_hash TEXT NOT NULL UNIQUE,
+        role TEXT NOT NULL CHECK (role IN ('admin','member')),
+        username TEXT,
+        created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        created_at TEXT NOT NULL,
+        expires_at INTEGER NOT NULL,
+        used_at TEXT,
+        used_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        revoked_at TEXT
+    );
+    ALTER TABLE users ADD COLUMN onboarding INTEGER NOT NULL DEFAULT 0 CHECK (onboarding IN (0, 1));
+    ",
 ];
 
 pub fn server_setting(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
@@ -2070,5 +2086,24 @@ mod tests {
                 .unwrap();
             assert_eq!(n, 0, "{gone} is gone");
         }
+    }
+
+    #[test]
+    fn v50_adds_invites_and_leaves_existing_accounts_out_of_onboarding() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        apply_migrations(&conn, &MIGRATIONS[..49]).unwrap();
+        conn.execute("INSERT INTO users (username, pass_hash, role) VALUES ('a','h','admin')", []).unwrap();
+        apply_migrations(&conn, MIGRATIONS).unwrap();
+        let onboarding: bool = conn.query_row("SELECT onboarding FROM users WHERE id = 1", [], |r| r.get(0)).unwrap();
+        assert!(!onboarding);
+        conn.execute(
+            "INSERT INTO invites (token_hash, role, created_by, created_at, expires_at) VALUES ('x', 'member', 1, 'now', 0)",
+            [],
+        )
+        .unwrap();
+        assert!(conn
+            .execute("INSERT INTO invites (token_hash, role, created_at, expires_at) VALUES ('y', 'owner', 'now', 0)", [])
+            .is_err());
     }
 }

@@ -5,7 +5,7 @@ use note_server::{
 };
 use std::path::PathBuf;
 
-const USAGE: &str = "usage: note-server [create-user <name> <password> [--admin] [--test] | set-category <name> <member|test> | totp-generate | totp-uri]";
+const USAGE: &str = "usage: note-server [create-user <name> <password> [--admin] [--test] | invite [--admin] [--name <username>] [--days <n>] | set-category <name> <member|test> | totp-generate | totp-uri]";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -60,6 +60,32 @@ async fn main() -> anyhow::Result<()> {
             auth::create_user(&conn, name, pass, admin)?;
             auth::set_category(&conn, name, category)?;
             println!("created {name} ({category})");
+            return Ok(());
+        }
+        Some("invite") => {
+            let mut admin = false;
+            let mut name = None;
+            let mut days = note_server::invites::DEFAULT_DAYS;
+            let mut rest = args[2.min(args.len())..].iter();
+            while let Some(flag) = rest.next() {
+                match flag.as_str() {
+                    "--admin" => admin = true,
+                    "--name" => name = Some(rest.next().context(USAGE)?.clone()),
+                    "--days" => days = rest.next().context(USAGE)?.parse().context("--days takes a number")?,
+                    other => anyhow::bail!("unknown flag {other:?}\n{USAGE}"),
+                }
+            }
+            let made = note_server::invites::create(
+                &conn,
+                None,
+                admin,
+                name.as_deref(),
+                days,
+                &cfg.public_base_url,
+                jiff::Timestamp::now(),
+            )?;
+            println!("{}", made.url);
+            eprintln!("single use, open until {}", made.invite.expires_at);
             return Ok(());
         }
         Some("set-category") => {

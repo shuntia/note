@@ -18,6 +18,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/logout", post(logout))
         .route("/api/password", post(password_change))
         .route("/api/me", get(me))
+        .route("/api/onboarding/done", post(onboarding_done))
         .route("/api/goals", get(goals_list).post(goals_create))
         .route("/api/goals/{id}", patch(goals_update).delete(goals_delete))
         .route("/api/notes", get(notes_list).post(notes_create))
@@ -90,6 +91,7 @@ pub fn router(state: AppState) -> Router {
         .nest("/api/security", crate::security::routes())
         .nest("/api/admin", crate::admin::routes())
         .merge(share_router(state.clone()))
+        .merge(crate::invites::routes())
         .layer(axum::middleware::from_fn_with_state(state.clone(), localized_errors))
         .with_state(state)
 }
@@ -159,19 +161,17 @@ pub fn router_with_web(state: AppState, web_dir: &std::path::Path) -> Router {
     let files = tower_http::services::ServeDir::new(web_dir)
         .fallback(tower_http::services::ServeFile::new(web_dir.join("index.html")));
     let shell = std::fs::read_to_string(web_dir.join("index.html")).unwrap_or_default();
-    let api = api.route(
-        "/s/{token}",
-        get(move || async move {
-            (
-                [
-                    (header::CACHE_CONTROL, "no-store"),
-                    (header::HeaderName::from_static("referrer-policy"), "no-referrer"),
-                    (header::HeaderName::from_static("x-robots-tag"), "noindex"),
-                ],
-                axum::response::Html(shell.clone()),
-            )
-        }),
-    );
+    let private_shell = get(move || async move {
+        (
+            [
+                (header::CACHE_CONTROL, "no-store"),
+                (header::HeaderName::from_static("referrer-policy"), "no-referrer"),
+                (header::HeaderName::from_static("x-robots-tag"), "noindex"),
+            ],
+            axum::response::Html(shell.clone()),
+        )
+    });
+    let api = api.route("/s/{token}", private_shell.clone()).route("/join/{token}", private_shell);
     // `{*rest}` needs at least one character, so the bare prefix forms are
     // registered separately or they would fall through to the SPA shell.
     api.route(
@@ -414,7 +414,18 @@ async fn me(user: CurrentUser, State(state): State<AppState>, headers: HeaderMap
     if let Some((lat, lon)) = crate::net::place(&headers).coords {
         let _ = state.db().execute("UPDATE users SET seen_lat = ?1, seen_lon = ?2 WHERE id = ?3", (lat, lon, user.id));
     }
-    Json(serde_json::json!({ "username": user.username, "admin": user.admin }))
+    let onboarding: bool = state
+        .db()
+        .query_row("SELECT onboarding FROM users WHERE id = ?1", [user.id], |r| r.get(0))
+        .unwrap_or(false);
+    Json(serde_json::json!({ "username": user.username, "admin": user.admin, "onboarding": onboarding }))
+}
+
+async fn onboarding_done(user: CurrentUser, State(state): State<AppState>) -> StatusCode {
+    match state.db().execute("UPDATE users SET onboarding = 0 WHERE id = ?1", [user.id]) {
+        Ok(_) => StatusCode::NO_CONTENT,
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    }
 }
 
 /// Short enough to type on a phone, long enough not to be guessed.

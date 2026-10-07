@@ -224,6 +224,8 @@ pub fn routes() -> Router<AppState> {
         .route("/users", get(users_list).post(users_create))
         .route("/users/{id}", patch(users_patch))
         .route("/users/{id}/revoke_sessions", post(users_revoke))
+        .route("/invites", get(invites_list).post(invites_create))
+        .route("/invites/{id}", axum::routing::delete(invites_revoke))
         .route("/providers/llm/model", axum::routing::put(llm_model_put))
         .route("/log", get(log_list))
         .route("/traces", get(traces_list))
@@ -661,6 +663,72 @@ async fn users_create(
             error(StatusCode::UNPROCESSABLE_ENTITY, &e.to_string())
         }
         _ => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn invites_list(_e: Elevated, State(state): State<AppState>) -> Response {
+    let conn = state.db();
+    match crate::invites::outstanding(&conn, jiff::Timestamp::now()) {
+        Ok(v) => Json(v).into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreateInviteReq {
+    #[serde(default)]
+    admin: bool,
+    #[serde(default)]
+    username: Option<String>,
+    #[serde(default)]
+    days: Option<u32>,
+}
+
+async fn invites_create(
+    Elevated { user: actor, .. }: Elevated,
+    State(state): State<AppState>,
+    Json(req): Json<CreateInviteReq>,
+) -> Response {
+    let made = {
+        let conn = state.db();
+        crate::invites::create(
+            &conn,
+            Some(actor.id),
+            req.admin,
+            req.username.as_deref(),
+            req.days.unwrap_or(crate::invites::DEFAULT_DAYS),
+            &state.public_base_url,
+            jiff::Timestamp::now(),
+        )
+    };
+    match made {
+        Ok(c) => {
+            let role = if c.invite.admin { "admin" } else { "member" };
+            record(&state, actor.id, "admin_invite_create", &format!("invite {} ({role})", c.invite.id));
+            (StatusCode::CREATED, Json(c)).into_response()
+        }
+        Err(crate::invites::InviteError::Invalid(m)) => error(StatusCode::UNPROCESSABLE_ENTITY, &m),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn invites_revoke(
+    Elevated { user: actor, .. }: Elevated,
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Response {
+    let revoked = {
+        let conn = state.db();
+        crate::invites::revoke(&conn, id, jiff::Timestamp::now())
+    };
+    match revoked {
+        Ok(true) => {
+            record(&state, actor.id, "admin_invite_revoke", &format!("invite {id}"));
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Ok(false) => error(StatusCode::NOT_FOUND, "invite not found"),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
 
