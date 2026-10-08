@@ -1,6 +1,6 @@
 'use strict'
 
-const { app, BrowserWindow, Menu, Tray, ipcMain, nativeImage, net, screen, shell } = require('electron')
+const { app, BrowserWindow, Menu, Tray, ipcMain, nativeImage, net, screen, shell, systemPreferences } = require('electron')
 const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
@@ -303,9 +303,16 @@ function createWindow(startHidden) {
       })
       .catch(() => {})
   })
-  webContents.session.setPermissionRequestHandler((wc, _permission, callback, details) => {
-    callback(sameOrigin(details.requestingUrl || wc.getURL()))
+  webContents.session.setPermissionRequestHandler((wc, permission, callback, details) => {
+    if (!sameOrigin(details.requestingUrl || wc.getURL())) return callback(false)
+    if (permission === 'media' && process.platform === 'darwin') {
+      systemPreferences.askForMediaAccess('microphone').then(callback, () => callback(false))
+      return
+    }
+    callback(true)
   })
+  webContents.session.setPermissionCheckHandler((wc, _permission, requestingOrigin) =>
+    sameOrigin(requestingOrigin || wc?.getURL() || ''))
 
   load(appUrl.href)
 }
