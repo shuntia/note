@@ -4,7 +4,7 @@ mod common;
 use common::*;
 use note_voice::audio::lines::{text, Line};
 use note_voice_proto::testkit::{eventually, fast};
-use note_voice_proto::{CallBody, Direction, Outcome, Reply, Request, Role, VoiceProfile};
+use note_voice_proto::{CallBody, Direction, Origin, Outcome, Reply, Request, Role, VoiceProfile};
 use serde_json::{json, Value};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -99,6 +99,7 @@ fn inbound_start() -> CallBody {
         ring_by_ms: 0,
         voice: VoiceProfile::default(),
         direction: Direction::Inbound,
+        origin: Origin::Matrix,
     }
 }
 
@@ -195,6 +196,7 @@ fn outbound_start() -> CallBody {
         ring_by_ms: now_ms() + 10_000,
         voice: VoiceProfile::default(),
         direction: Direction::Outbound,
+        origin: Origin::Matrix,
     }
 }
 

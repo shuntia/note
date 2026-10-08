@@ -2,7 +2,7 @@ mod common;
 
 use common::*;
 use note_voice_proto::testkit::{eventually, fast};
-use note_voice_proto::{CallBody, Direction, Outcome, Role, VoiceProfile};
+use note_voice_proto::{CallBody, Direction, Origin, Outcome, Role, VoiceProfile};
 
 struct Rig {
     dir: tempfile::TempDir,
@@ -45,6 +45,7 @@ fn start(ring_secs: u32, ring_by_ms: i64) -> CallBody {
         ring_by_ms,
         voice: VoiceProfile::default(),
         direction: Direction::Outbound,
+        origin: Origin::Matrix,
     }
 }
 

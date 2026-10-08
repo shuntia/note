@@ -4,7 +4,7 @@ pub mod outbox;
 
 use crate::channels::{Channel, OutboundMessage};
 use note_voice_proto::{
-    BoxFuture, CallBody, Dir, Direction, Handler, Outcome, Peer, PeerConfig, Refusal, RefusalCode, Reply,
+    BoxFuture, CallBody, Dir, Direction, Handler, Origin, Outcome, Peer, PeerConfig, Refusal, RefusalCode, Reply,
     Request, Role, VoiceOption, VoiceProfile,
 };
 use rusqlite::Connection;
@@ -193,6 +193,7 @@ impl Voice {
                 ring_by_ms: ring_by.as_millisecond(),
                 voice,
                 direction: Direction::Outbound,
+                origin: Origin::Matrix,
             },
         );
         if let Err(e) = sent {
@@ -414,6 +415,7 @@ impl NoteHandler {
             ring_by_ms: ring_by.as_millisecond(),
             voice,
             direction: Direction::Inbound,
+            origin: Origin::Matrix,
         };
         let sent = match self.to_voice.get() {
             Some(peer) => peer.send_call(&id, start).map_err(|e| failed(&e)),

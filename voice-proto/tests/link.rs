@@ -308,3 +308,31 @@ async fn a_cut_mid_apply_applies_each_seq_once() {
     eventually("all acknowledged after the cut", || v.pending_calls().is_empty()).await;
     assert_eq!(*r.slow.calls.lock().unwrap(), one_to(3));
 }
+
+#[tokio::test]
+async fn media_arrives_in_order_unjournaled_and_is_dropped_while_down() {
+    let r = rig().await;
+    for i in 0..50i16 {
+        assert!(r.note.peer.send_media("c1", Media::AudioIn { pcm: Pcm(vec![i; 320]) }));
+    }
+    let rec = r.voice.rec.clone();
+    eventually("50 media frames", || rec.media.lock().unwrap().len() == 50).await;
+    let firsts: Vec<i16> = r
+        .voice
+        .rec
+        .media
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(call, m)| match m {
+            Media::AudioIn { pcm } if call == "c1" => pcm.0[0],
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(firsts, (0..50).collect::<Vec<i16>>());
+    assert!(r.note.peer.pending_calls().is_empty(), "media is never journaled");
+    r.voice_task.abort();
+    let n = r.note.peer.clone();
+    eventually("link down", || !n.is_up()).await;
+    assert!(!r.note.peer.send_media("c1", Media::Flush), "nothing is held for later");
+}

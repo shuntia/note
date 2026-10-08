@@ -1,5 +1,5 @@
 use crate::codec::{read_frame, write_frame, CodecError};
-use crate::frame::{CallBody, Request, Reply, Refusal, Role, Frame, Dir, RefusalCode, PROTO_VERSION, valid_call_id};
+use crate::frame::{CallBody, Request, Reply, Refusal, Role, Frame, Dir, RefusalCode, PROTO_VERSION, valid_call_id, Media};
 use crate::stream::{classify, Arrival, Outbox};
 use std::collections::HashMap;
 use std::future::Future;
@@ -28,6 +28,8 @@ pub trait Handler: Send + Sync + 'static {
     /// Reports the link's level, not an edge: `true` repeats when a
     /// connection is replaced.
     fn link_changed(&self, _up: bool) {}
+    /// Called on the connection's read loop, so it hands off and never blocks.
+    fn media(&self, _call_id: &str, _body: Media) {}
 }
 
 #[derive(Debug, Clone)]
@@ -137,6 +139,14 @@ impl Peer {
             let _ = tx.send(Frame::Call { call_id: call_id.to_string(), dir: self.inner.out_dir, seq, body });
         }
         Ok(seq)
+    }
+
+    /// Sends now if the link is up; true when it was handed to the connection.
+    pub fn send_media(&self, call_id: &str, body: Media) -> bool {
+        let sh = crate::lock(&self.inner.shared);
+        sh.current.as_ref().is_some_and(|tx| {
+            tx.send(Frame::Media { call_id: call_id.to_string(), dir: self.inner.out_dir, body }).is_ok()
+        })
     }
 
     pub async fn request(&self, body: Request) -> Result<Reply, Refusal> {
@@ -340,6 +350,15 @@ impl Peer {
                 for (seq, body) in frames {
                     let _ = tx.send(Frame::Call { call_id: call_id.clone(), dir, seq, body });
                 }
+            }
+            Frame::Media { call_id, dir, body } => {
+                if dir == self.inner.out_dir {
+                    return Err(wrong_way("a media frame"));
+                }
+                if !valid_call_id(&call_id) {
+                    return Err(Disconnect::Protocol(format!("bad call id {call_id:?}")));
+                }
+                self.inner.handler.media(&call_id, body);
             }
         }
         Ok(())

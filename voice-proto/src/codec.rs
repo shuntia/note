@@ -76,6 +76,7 @@ mod tests {
                     ring_by_ms: 1_790_000_000_000,
                     voice: VoiceProfile::default(),
                     direction: Direction::Inbound,
+                    origin: Origin::Web,
                 },
             },
             Frame::Call { call_id: "c-1".into(), dir: Dir::ToVoice, seq: 2, body: CallBody::HangUp },
@@ -89,6 +90,10 @@ mod tests {
             Frame::Call { call_id: "c-1".into(), dir: Dir::ToNote, seq: 3, body: CallBody::Ended },
             Frame::Ack { call_id: "c-1".into(), dir: Dir::ToNote, seq: 3 },
             Frame::Resume { call_id: "c-1".into(), dir: Dir::ToVoice, after: 1 },
+            Frame::Media { call_id: "c-1".into(), dir: Dir::ToVoice, body: Media::AudioIn { pcm: Pcm(vec![1, -2, 3]) } },
+            Frame::Media { call_id: "c-1".into(), dir: Dir::ToNote, body: Media::AudioOut { pcm: Pcm(vec![9; 480]), rate: 48_000 } },
+            Frame::Media { call_id: "c-1".into(), dir: Dir::ToNote, body: Media::Flush },
+            Frame::Media { call_id: "c-1".into(), dir: Dir::ToNote, body: Media::State { state: LiveState::Thinking } },
         ]
     }
 

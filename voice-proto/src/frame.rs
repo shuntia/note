@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Bumped on any change to a frame's shape; both sides must agree exactly.
-pub const PROTO_VERSION: u32 = 3;
+pub const PROTO_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -31,6 +31,8 @@ pub enum Frame {
     Ack { call_id: String, dir: Dir, seq: u64 },
     /// Asks the sender to resend every frame of the call after `after`.
     Resume { call_id: String, dir: Dir, after: u64 },
+    /// Live audio and state of a web call: sent only on the live connection, never stored or resent.
+    Media { call_id: String, dir: Dir, body: Media },
 }
 
 /// Who placed the call.
@@ -40,6 +42,15 @@ pub enum Direction {
     #[default]
     Outbound,
     Inbound,
+}
+
+/// Where a call's audio flows: a Matrix room's `LiveKit` call, or a browser through Note.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Origin {
+    #[default]
+    Matrix,
+    Web,
 }
 
 /// Requests are idempotent: each carries the key of what it creates or
@@ -128,6 +139,8 @@ pub enum CallBody {
         voice: VoiceProfile,
         #[serde(default)]
         direction: Direction,
+        #[serde(default)]
+        origin: Origin,
     },
     /// Note → voice: end the call now, ringing or not.
     HangUp,
@@ -177,6 +190,62 @@ pub enum Floor {
     UserSpeaking,
     UserQuiet,
     Drained,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "k", rename_all = "snake_case")]
+pub enum Media {
+    /// Note → voice: the caller's audio, 16 kHz mono.
+    AudioIn { pcm: Pcm },
+    /// Voice → Note: Note's voice, mono at `rate`.
+    AudioOut { pcm: Pcm, rate: u32 },
+    /// Voice → Note: what the browser holds unplayed is void (barge-in).
+    Flush,
+    State { state: LiveState },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveState {
+    Listening,
+    Hearing,
+    Thinking,
+    Speaking,
+}
+
+impl LiveState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LiveState::Listening => "listening",
+            LiveState::Hearing => "hearing",
+            LiveState::Thinking => "thinking",
+            LiveState::Speaking => "speaking",
+        }
+    }
+}
+
+/// 16-bit samples, on the wire as base64 of their little-endian bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Pcm(pub Vec<i16>);
+
+impl Serialize for Pcm {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use base64::Engine as _;
+        let bytes: Vec<u8> = self.0.iter().flat_map(|v| v.to_le_bytes()).collect();
+        s.serialize_str(&base64::engine::general_purpose::STANDARD.encode(bytes))
+    }
+}
+
+impl<'de> Deserialize<'de> for Pcm {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use base64::Engine as _;
+        let text = String::deserialize(d)?;
+        let bytes = base64::engine::general_purpose::STANDARD.decode(text).map_err(serde::de::Error::custom)?;
+        if bytes.len() % 2 != 0 {
+            return Err(serde::de::Error::custom("pcm of an odd byte count"));
+        }
+        Ok(Pcm(bytes.as_chunks::<2>().0.iter().map(|&b| i16::from_le_bytes(b)).collect()))
+    }
 }
 
 /// `voice` empty means the language's default voice.
@@ -280,6 +349,7 @@ mod tests {
             ring_by_ms: 5,
             voice: VoiceProfile::default(),
             direction: Direction::Inbound,
+            origin: Origin::Matrix,
         };
         let s = serde_json::to_string(&body).unwrap();
         assert!(s.contains(r#""direction":"inbound""#), "{s}");
@@ -322,6 +392,65 @@ mod tests {
         ] {
             let s = serde_json::to_string(&reply).unwrap();
             assert_eq!(serde_json::from_str::<Reply>(&s).unwrap(), reply, "{s}");
+        }
+    }
+
+    #[test]
+    fn a_v3_start_reads_as_a_matrix_call() {
+        let raw = r#"{"k":"start","user_id":1,"room_id":"!r","mxid":"@a","title":"t","ring_secs":30,"ring_by_ms":5}"#;
+        let CallBody::Start { origin, .. } = serde_json::from_str(raw).unwrap() else { panic!() };
+        assert_eq!(origin, Origin::Matrix);
+    }
+
+    #[test]
+    fn a_web_start_round_trips() {
+        let body = CallBody::Start {
+            user_id: 1,
+            room_id: String::new(),
+            mxid: String::new(),
+            title: "Call".into(),
+            ring_secs: 0,
+            ring_by_ms: 5,
+            voice: VoiceProfile::default(),
+            direction: Direction::Inbound,
+            origin: Origin::Web,
+        };
+        let s = serde_json::to_string(&body).unwrap();
+        assert!(s.contains(r#""origin":"web""#), "{s}");
+        assert_eq!(serde_json::from_str::<CallBody>(&s).unwrap(), body);
+    }
+
+    #[test]
+    fn pcm_travels_as_base64_of_little_endian_samples() {
+        let f = Frame::Media {
+            call_id: "c-1".into(),
+            dir: Dir::ToNote,
+            body: Media::AudioOut { pcm: Pcm(vec![0, 1, -1, i16::MAX, i16::MIN]), rate: 48_000 },
+        };
+        let s = serde_json::to_string(&f).unwrap();
+        assert_eq!(
+            s,
+            r#"{"t":"media","call_id":"c-1","dir":"to_note","body":{"k":"audio_out","pcm":"AAABAP///38AgA==","rate":48000}}"#
+        );
+        assert_eq!(serde_json::from_str::<Frame>(&s).unwrap(), f);
+    }
+
+    #[test]
+    fn an_odd_pcm_payload_is_refused() {
+        let raw = r#"{"k":"audio_in","pcm":"AAAB"}"#;
+        assert!(serde_json::from_str::<Media>(raw).is_err());
+    }
+
+    #[test]
+    fn live_states_read_as_the_browser_names_them() {
+        for (state, name) in [
+            (LiveState::Listening, "listening"),
+            (LiveState::Hearing, "hearing"),
+            (LiveState::Thinking, "thinking"),
+            (LiveState::Speaking, "speaking"),
+        ] {
+            assert_eq!(serde_json::to_string(&state).unwrap(), format!("\"{name}\""));
+            assert_eq!(state.as_str(), name);
         }
     }
 }

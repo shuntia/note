@@ -1,5 +1,5 @@
 use crate::codec::{read_frame, write_frame};
-use crate::frame::{Role, Request, Reply, Refusal, CallBody, Frame};
+use crate::frame::{Role, Request, Reply, Refusal, CallBody, Frame, Media};
 use crate::peer::{BoxFuture, Handler, PeerConfig};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -39,6 +39,7 @@ pub struct Recording {
     pub seen: Mutex<Vec<(String, u64, CallBody)>>,
     pub requests: Mutex<Vec<Request>>,
     pub acks: Mutex<HashMap<String, u64>>,
+    pub media: Mutex<Vec<(String, Media)>>,
     answer: Mutex<Answer>,
 }
 
@@ -49,6 +50,7 @@ impl Default for Recording {
             seen: Mutex::default(),
             requests: Mutex::default(),
             acks: Mutex::default(),
+            media: Mutex::default(),
             answer: Mutex::new(Box::new(|_| Ok(Reply::Done))),
         }
     }
@@ -87,6 +89,10 @@ impl Handler for Recording {
 
     fn acked(&self, call_id: &str, upto: u64) {
         crate::lock(&self.acks).insert(call_id.to_string(), upto);
+    }
+
+    fn media(&self, call_id: &str, body: Media) {
+        crate::lock(&self.media).push((call_id.to_string(), body));
     }
 }
 
