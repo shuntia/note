@@ -57,13 +57,17 @@ impl Voice {
         let fallback: Ladder = Arc::new(OnceLock::new());
         let cell: Arc<OnceLock<Peer>> = Arc::default();
         let to_voice = cell.clone();
-        let calls = Arc::new(call::CallManager::new(Arc::new(move |call_id: &str, body| {
-            let Some(peer) = to_voice.get() else { return };
-            if let Err(e) = peer.send_call(call_id, body) {
-                eprintln!("voice: journaling a reply for {call_id} failed: {e}");
-            }
-        })));
         let web = Arc::new(web::Relays::default());
+        let relays = web.clone();
+        let calls = Arc::new(call::CallManager::new(
+            Arc::new(move |call_id: &str, body| {
+                let Some(peer) = to_voice.get() else { return };
+                if let Err(e) = peer.send_call(call_id, body) {
+                    eprintln!("voice: journaling a reply for {call_id} failed: {e}");
+                }
+            }),
+            Arc::new(move |call_id: &str, ok| relays.tool(call_id, ok)),
+        ));
         let handler = Arc::new(NoteHandler {
             db: db.clone(),
             fallback: fallback.clone(),

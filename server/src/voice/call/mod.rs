@@ -25,6 +25,8 @@ const RESTARTED: &str = "Note restarted; the call is still on";
 
 /// Sends a frame of the named call to the voice side.
 pub type CallSender = Arc<dyn Fn(&str, CallBody) + Send + Sync>;
+/// Told, per call, whether each tool it ran succeeded.
+pub type ToolSignal = Arc<dyn Fn(&str, bool) + Send + Sync>;
 
 /// Runs a call's tools as `user_id` in a `Call` session.
 pub struct CallRunner {
@@ -182,6 +184,7 @@ struct Live {
 pub struct CallManager {
     deps: OnceLock<CallDeps>,
     send: CallSender,
+    tool_done: ToolSignal,
     calls: Mutex<HashMap<String, mpsc::Sender<DriverIn>>>,
     /// Held from reading a call's state to registering its driver, and by
     /// `Ended` while it removes one.
@@ -191,8 +194,8 @@ pub struct CallManager {
 }
 
 impl CallManager {
-    pub fn new(send: CallSender) -> Self {
-        Self { deps: OnceLock::new(), send, calls: Mutex::default(), resuming: Mutex::new(()), dead: Mutex::default() }
+    pub fn new(send: CallSender, tool_done: ToolSignal) -> Self {
+        Self { deps: OnceLock::new(), send, tool_done, calls: Mutex::default(), resuming: Mutex::new(()), dead: Mutex::default() }
     }
 
     pub fn set_deps(&self, deps: CallDeps) {
@@ -352,7 +355,9 @@ impl CallManager {
         let (tx, rx) = mpsc::channel();
         self.calls().insert(live.call_id.clone(), tx.clone());
         let send = self.send.clone();
+        let tool_done = self.tool_done.clone();
         let id = live.call_id.clone();
+        let tool_id = id.clone();
         let started = Instant::now();
         let s = &d.settings;
         let rebrief: driver::Rebrief = {
@@ -388,6 +393,7 @@ impl CallManager {
                 ticker: true,
             },
             send: Arc::new(move |body| send(&id, body)),
+            tool_done: Arc::new(move |ok| tool_done(&tool_id, ok)),
             clock: Arc::new(move || started.elapsed()),
         };
         let (opening, history, initial) = (live.opening, live.history, live.initial);
@@ -564,7 +570,7 @@ mod tests {
     fn recording() -> (Arc<CallManager>, Arc<Mutex<Vec<CallBody>>>) {
         let sent: Arc<Mutex<Vec<CallBody>>> = Arc::default();
         let log = sent.clone();
-        let m = CallManager::new(Arc::new(move |_: &str, body| log.lock().unwrap().push(body)));
+        let m = CallManager::new(Arc::new(move |_: &str, body| log.lock().unwrap().push(body)), Arc::new(|_: &str, _| {}));
         (Arc::new(m), sent)
     }
 

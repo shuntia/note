@@ -98,3 +98,21 @@ export function shape(f: Form, tMs: number, lv: Levels, n = 160): Pt[] {
   }
   return pts
 }
+
+export type Blip = { echo: number; echoAlpha: number; dx: number }
+export const BLIP_DONE_MS = 700
+export const BLIP_FAILED_MS = 450
+
+// A tool that landed, `ageMs` after: a faint ring swells out when it worked, the circle trembles sideways when it
+// failed. Null once it has played out.
+export function blip(ok: boolean, ageMs: number): Blip | null {
+  if (!Number.isFinite(ageMs) || ageMs < 0) return null
+  if (ok) {
+    const p = ageMs / BLIP_DONE_MS
+    if (p >= 1) return null
+    return { echo: 1 + 0.3 * (1 - (1 - p) ** 3), echoAlpha: 0.5 * (1 - p) ** 2, dx: 0 }
+  }
+  const p = ageMs / BLIP_FAILED_MS
+  if (p >= 1) return null
+  return { echo: 0, echoAlpha: 0, dx: 0.035 * Math.sin(p * 3 * TWO_PI) * (1 - p) }
+}

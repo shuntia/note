@@ -59,6 +59,7 @@ pub enum WebOut {
     Flush,
     State(LiveState),
     Caption(String),
+    Tool { ok: bool },
     Ended { reason: &'static str, conversation_id: Option<i64> },
 }
 
@@ -184,6 +185,11 @@ impl Relays {
         if let Some(socket) = lock(&self.calls).remove(call_id) {
             socket.send(WebOut::Ended { reason, conversation_id });
         }
+    }
+
+    /// A tool the call ran landed; does nothing for a phone call.
+    pub fn tool(&self, call_id: &str, ok: bool) {
+        self.send(call_id, WebOut::Tool { ok });
     }
 
     pub fn media(&self, call_id: &str, body: Media) {
@@ -373,6 +379,7 @@ fn to_message(out: WebOut) -> Message {
         WebOut::Flush => json(serde_json::json!({ "type": "flush" })),
         WebOut::State(state) => json(serde_json::json!({ "type": "state", "state": state })),
         WebOut::Caption(text) => json(serde_json::json!({ "type": "caption", "text": text })),
+        WebOut::Tool { ok } => json(serde_json::json!({ "type": "tool", "ok": ok })),
         WebOut::Ended { reason, conversation_id } => {
             json(serde_json::json!({ "type": "ended", "reason": reason, "conversation_id": conversation_id }))
         }
@@ -428,10 +435,13 @@ mod tests {
         relays.media("a", Media::AudioIn { pcm: Pcm(vec![1; 320]) });
         relays.on_frame("a", &CallBody::Draft { turn: 1, text: "move my run".into(), language: None }, || None);
         relays.on_frame("a", &CallBody::Commit { turn: 1, text: "  ".into(), language: None }, || None);
+        relays.tool("a", false);
+        relays.tool("phone", true);
         assert_eq!(a.try_recv().unwrap(), WebOut::Audio(vec![3; 480]));
         assert_eq!(a.try_recv().unwrap(), WebOut::State(LiveState::Thinking));
         assert_eq!(a.try_recv().unwrap(), WebOut::Flush);
         assert_eq!(a.try_recv().unwrap(), WebOut::Caption("move my run".into()));
+        assert_eq!(a.try_recv().unwrap(), WebOut::Tool { ok: false });
         assert!(a.try_recv().is_err(), "the caller's own audio and a blank commit are not sent back");
         assert!(b.try_recv().is_err());
     }

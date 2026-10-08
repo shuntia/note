@@ -3,7 +3,7 @@ import { t } from '../i18n'
 import { reducedMotion } from '../motion'
 import { declineRing, onCallFrame } from '../ws'
 import { CallControl, type CallOpen, type CallShown, type Phase } from './control'
-import { ease, shape, smooth, stillForm, target, type Form, type Look, type Pt } from './form'
+import { blip, ease, shape, smooth, stillForm, target, type Form, type Look, type Pt } from './form'
 import { primeAudio, releaseAudioContext } from './prime'
 import { callUrl, CallSession, type AudioIo, type LiveState } from './session'
 import { Swipe } from './swipe'
@@ -73,13 +73,18 @@ export function CallView({
     )
   })
   const [shown, setShown] = useState<CallShown>(control.shown)
-  const { phase, live, muted, caption, shake } = shown
+  const { phase, live, muted, caption, tool, shake } = shown
   const canvas = useRef<HTMLCanvasElement>(null)
   const root = useRef<HTMLDivElement>(null)
   const [swipe] = useState(() => new Swipe())
   const look = lookOf(phase, live)
   const drawn = useRef({ look, muted })
   drawn.current = { look, muted }
+  const landed = useRef<{ ok: boolean; at: number } | null>(null)
+
+  useEffect(() => {
+    if (tool) landed.current = { ok: tool.ok, at: performance.now() }
+  }, [tool])
 
   const tap = () => {
     if (swipe.tap()) control.tap()
@@ -163,7 +168,18 @@ export function CallView({
       g.lineCap = 'butt'
       g.lineJoin = 'round'
       g.strokeStyle = color
-      drawForm(g, shape(form, still ? 0 : clock, { mic, out }), (size / 2) * 0.62, 1 - 0.45 * form.dim)
+      const scale = (size / 2) * 0.62
+      const base = 1 - 0.45 * form.dim
+      const b = still || !landed.current ? null : blip(landed.current.ok, now - landed.current.at)
+      if (b && b.echoAlpha > 0) {
+        g.globalAlpha = b.echoAlpha * base
+        g.beginPath()
+        g.arc(0, 0, b.echo * form.scale * scale, 0, Math.PI * 2)
+        g.stroke()
+        g.globalAlpha = 1
+      }
+      if (b) g.translate(b.dx * scale, 0)
+      drawForm(g, shape(form, still ? 0 : clock, { mic, out }), scale, base)
       frame = requestAnimationFrame(draw)
     }
     frame = requestAnimationFrame(draw)

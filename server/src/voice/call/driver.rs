@@ -49,6 +49,8 @@ pub struct DriverDeps {
     pub runner: Arc<dyn ToolRunner>,
     pub cfg: CallConfig,
     pub send: Arc<dyn Fn(CallBody) + Send + Sync>,
+    /// Told whether each tool the call ran succeeded, as it lands.
+    pub tool_done: Arc<dyn Fn(bool) + Send + Sync>,
     /// Monotonic time since the call started.
     pub clock: Arc<dyn Fn() -> Duration + Send + Sync>,
 }
@@ -798,6 +800,13 @@ impl Driver {
             .job_meta
             .get(&done.job)
             .is_some_and(|meta| !meta.written);
+        if settled {
+            match done.outcome {
+                JobOutcome::Done(_) => (self.deps.tool_done)(true),
+                JobOutcome::Error(_) | JobOutcome::TimedOut => (self.deps.tool_done)(false),
+                JobOutcome::Cancelled | JobOutcome::Interrupted => {}
+            }
+        }
         if settled && done.outcome != JobOutcome::Cancelled {
             self.queue.push(
                 Item::Job {
@@ -1011,7 +1020,7 @@ mod tests {
             self.keys.lock().unwrap().push(once.1.to_string());
             let (ms, result) = self.tools[name];
             std::thread::sleep(Duration::from_millis(ms));
-            (result.to_string(), false)
+            (result.to_string(), result.starts_with("error"))
         }
 
         fn is_network(&self, name: &str) -> bool {
@@ -1027,6 +1036,7 @@ mod tests {
         llm: Arc<MockLLM>,
         runner: Arc<FakeRunner>,
         db: Arc<Mutex<Connection>>,
+        tools_done: Arc<Mutex<Vec<bool>>>,
         driver: Option<JoinHandle<()>>,
     }
 
@@ -1094,6 +1104,8 @@ mod tests {
         let now_ms = Arc::new(AtomicU64::new(0));
         let (frame_tx, frames) = mpsc::channel();
         let clock_ms = now_ms.clone();
+        let tools_done: Arc<Mutex<Vec<bool>>> = Arc::default();
+        let done_log = tools_done.clone();
         let deps = DriverDeps {
             call_id: "c1".into(),
             user_id: 1,
@@ -1121,6 +1133,7 @@ mod tests {
             send: Arc::new(move |body| {
                 let _ = frame_tx.send(body);
             }),
+            tool_done: Arc::new(move |ok| done_log.lock().unwrap().push(ok)),
             clock: Arc::new(move || Duration::from_millis(clock_ms.load(Ordering::SeqCst))),
         };
         let (tx, rx) = mpsc::channel();
@@ -1134,6 +1147,7 @@ mod tests {
             llm,
             runner,
             db,
+            tools_done,
             driver: Some(driver),
         }
     }
@@ -1352,6 +1366,36 @@ mod tests {
             .find("[job 1 · web_search · done]")
             .expect("search result")..];
         assert!(!block.contains("[running]"), "{block}");
+        h.stop();
+    }
+
+    #[test]
+    fn each_landed_job_reports_whether_it_succeeded() {
+        let mut h = start(
+            vec![
+                vec![
+                    Calls(call("t1", "web_search", r#"{"q":"venue"}"#)),
+                    Calls(call("t2", "calendar_update", r#"{"id":4}"#)),
+                ],
+                vec![Text("")],
+                vec![Text("Found it.")],
+            ],
+            &[
+                ("web_search", 300, "error: no results"),
+                ("calendar_update", 10, r#"{"ok":true}"#),
+            ],
+            None,
+            "",
+        );
+        h.frame(CallBody::Commit {
+            turn: 1,
+            text: "find the venue and move my run".into(),
+            language: None,
+        });
+        h.expect(&[CallBody::SpeakDone { reply: 2 }]);
+        h.at(1000);
+        h.tick_until(&speak(4, 0, "Found it."));
+        assert_eq!(*h.tools_done.lock().unwrap(), [true, false]);
         h.stop();
     }
 

@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest'
-import { BREATH_MS, ease, shape, smooth, stillForm, target } from './form'
+import { BLIP_DONE_MS, BLIP_FAILED_MS, BREATH_MS, blip, ease, shape, smooth, stillForm, target } from './form'
 
 const radius = (p: { x: number; y: number }) => Math.hypot(p.x, p.y)
 const quiet = { mic: 0, out: 0 }
@@ -181,4 +181,21 @@ test('at 60 frames a second the circle unrolls into the line and curls back with
     }
     prev = next
   }
+})
+
+test('a tool that worked sends a fading ring outward, then nothing', () => {
+  const early = blip(true, 50)!
+  const late = blip(true, BLIP_DONE_MS * 0.8)!
+  expect(early.dx).toBe(0)
+  expect(late.echo).toBeGreaterThan(early.echo)
+  expect(late.echoAlpha).toBeLessThan(early.echoAlpha)
+  expect(blip(true, BLIP_DONE_MS)).toBeNull()
+})
+
+test('a tool that failed trembles the circle sideways and settles', () => {
+  const swings = [0.1, 0.25, 0.45].map((p) => blip(false, BLIP_FAILED_MS * p)!.dx)
+  expect(Math.max(...swings.map(Math.abs))).toBeGreaterThan(0.01)
+  expect(blip(false, 0)!.echoAlpha).toBe(0)
+  expect(blip(false, BLIP_FAILED_MS)).toBeNull()
+  expect(blip(false, -1)).toBeNull()
 })
