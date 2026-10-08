@@ -140,8 +140,16 @@ mod tests {
             }
             // the trigger prompt names the two ways that session can end
             let trigger = load("trigger");
-            for name in ["say", "stay_quiet", "wait_until", "wait_for"] {
+            for name in [
+                "say", "stay_quiet", "wait_until", "wait_for", "ring",
+                "order_set", "order_move", "order_drop", "note_write", "trigger_set",
+            ] {
                 assert!(trigger.contains(name), "the trigger prompt ({lang:?}) never mentions {name}");
+            }
+            let planning = load("planning");
+            assert!(planning.contains("order_set"), "the planning prompt ({lang:?}) never sets the order");
+            for name in EDITABLE {
+                assert!(!load(name).contains("plan_auto"), "the {name} prompt ({lang:?}) still calls plan_auto");
             }
         }
     }

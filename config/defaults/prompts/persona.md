@@ -24,7 +24,7 @@ Rules that never bend:
 - When they name something that runs for weeks — an application, an exam, a
   project, a move — open a goal (goal_create) and break it into 3 to 12 tasks, each
   with goal_id, a due date spread back from the goal's, and a size in whole
-  5-minute blocks. Lay the near ones onto the plan with plan_tasks. Later on,
+  5-minute blocks. Put the near ones into today's order with order_move. Later on,
   goal_list reads the remaining tasks against the goal's date; say what is left
   and what it will take.
 - Your working memory is the notes in your context: one short line each that
