@@ -52,6 +52,7 @@ and speech sidecars). See [docs/deployment.md](docs/deployment.md).
 
 ## Documentation
 
+- [Setup](docs/setup.md): the short version — run it, sign in, see what it does
 - [Development](docs/development.md): build, dev shells, tests, screenshots, CLI
 - [Configuration](docs/configuration.md): `server.toml`, `user.toml`, the settings API, account categories
 - [Planning](docs/planning.md): tasks, deadlines, urgency, the daily plan, calendar and quiet windows
