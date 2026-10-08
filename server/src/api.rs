@@ -2879,7 +2879,9 @@ async fn call_ws(
     Query(q): Query<CallQuery>,
     ws: axum::extract::ws::WebSocketUpgrade,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| crate::voice::web::serve(socket, state, user.id, q.conversation_id, q.ring))
+    ws.max_message_size(crate::voice::web::MAX_IN_BYTES)
+        .max_frame_size(crate::voice::web::MAX_IN_BYTES)
+        .on_upgrade(move |socket| crate::voice::web::serve(socket, state, user.id, q.conversation_id, q.ring))
 }
 
 /// A session opening a call socket from Note's own page.

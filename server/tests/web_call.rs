@@ -279,6 +279,38 @@ async fn a_closed_socket_hangs_up_at_once() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn an_oversized_frame_ends_the_socket_and_hangs_up() {
+    let r = rig().await;
+    let mut ws = open(r.addr, &r.cookie, "").await;
+    frame(&mut ws, "open").await;
+    let id = started(&r, 1).await;
+    ws.send(Message::Binary(pcm_bytes(7, 1601).into())).await.unwrap();
+    let rec = r.fake_rec.clone();
+    eventually("hung up", || rec.bodies(&id).contains(&CallBody::HangUp)).await;
+    assert!(audio_in(&r, &id).is_empty());
+    assert!(matches!(next(&mut ws).await, None | Some(Message::Close(_))));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tiny_frames_do_not_keep_a_silent_call_alive() {
+    let r = rig().await;
+    let mut ws = open(r.addr, &r.cookie, "").await;
+    frame(&mut ws, "open").await;
+    let id = started(&r, 1).await;
+    let (mut tx, _rx) = ws.split();
+    let rec = r.fake_rec.clone();
+    let hung_up = tokio::time::timeout(Duration::from_secs(8), async {
+        while !rec.bodies(&id).contains(&CallBody::HangUp) {
+            tx.send(Message::Binary(vec![1u8].into())).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    })
+    .await;
+    assert!(hung_up.is_ok(), "one-byte frames held the call open");
+    assert!(audio_in(&r, &id).is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_lost_voice_link_ends_the_browser_call() {
     let r = rig().await;
     let mut ws = open(r.addr, &r.cookie, "").await;

@@ -198,7 +198,9 @@ pub const SILENCE_LIMIT: Duration = Duration::from_secs(5);
 /// A voice link down this long ends the call for the browser.
 pub const LINK_LIMIT: Duration = Duration::from_secs(10);
 /// 100 ms of 16 kHz s16; anything larger is not a capture frame.
-const MAX_IN_BYTES: usize = 3200;
+pub(crate) const MAX_IN_BYTES: usize = 3200;
+/// A browser that takes longer than this to accept a frame is taken to be gone.
+const SEND_LIMIT: Duration = Duration::from_secs(5);
 
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -218,25 +220,33 @@ pub async fn serve(
     let Some(voice) = state.voice.clone().filter(|v| v.is_up()) else {
         return refuse(socket, "unavailable").await;
     };
-    let start = match ring {
+    let start = match &ring {
         Some(token) => {
-            let Some(start) = voice.answer_ring(&token, user_id) else {
+            let Some(start) = voice.answer_ring(token, user_id) else {
                 return refuse(socket, "missed").await;
             };
-            state.hub.send(user_id, &serde_json::json!({ "type": "ring_taken", "ring": token }).to_string());
             start
         }
         None => WebStart { thread: conversation_id, message: None },
     };
     match voice.start_web_call(user_id, start, jiff::Timestamp::now()) {
-        Ok(call) => relay(socket, &voice, call).await,
+        Ok(call) => {
+            if let Some(token) = ring {
+                state.hub.send(user_id, &serde_json::json!({ "type": "ring_taken", "ring": token }).to_string());
+            }
+            relay(socket, &voice, call).await;
+        }
         Err(refusal) => refuse(socket, refusal.reason()).await,
     }
 }
 
 async fn refuse(mut socket: WebSocket, reason: &'static str) {
-    let _ = socket.send(to_message(WebOut::Ended { reason, conversation_id: None })).await;
-    let _ = socket.send(Message::Close(None)).await;
+    send(&mut socket, to_message(WebOut::Ended { reason, conversation_id: None })).await;
+    send(&mut socket, Message::Close(None)).await;
+}
+
+async fn send(socket: &mut WebSocket, message: Message) -> bool {
+    matches!(tokio::time::timeout(SEND_LIMIT, socket.send(message)).await, Ok(Ok(())))
 }
 
 /// After the browser hangs up, Note's last words keep flowing until the voice side's `Ended`;
@@ -244,7 +254,7 @@ async fn refuse(mut socket: WebSocket, reason: &'static str) {
 async fn relay(mut socket: WebSocket, voice: &Voice, call: WebCall) {
     let WebCall { call_id, mut out } = call;
     let opened = serde_json::json!({ "type": "open", "rate": OUT_RATE }).to_string();
-    if socket.send(Message::Text(opened.into())).await.is_err() {
+    if !send(&mut socket, Message::Text(opened.into())).await {
         return voice.hang_up(&call_id);
     }
     let (mut muted, mut hung_up) = (false, false);
@@ -256,9 +266,9 @@ async fn relay(mut socket: WebSocket, voice: &Voice, call: WebCall) {
             got = out.recv() => {
                 let Some(o) = got else { break };
                 let ended = matches!(o, WebOut::Ended { .. });
-                let sent = socket.send(to_message(o)).await.is_ok();
+                let sent = send(&mut socket, to_message(o)).await;
                 if ended {
-                    let _ = socket.send(Message::Close(None)).await;
+                    send(&mut socket, Message::Close(None)).await;
                     return;
                 }
                 if !sent {
@@ -266,9 +276,9 @@ async fn relay(mut socket: WebSocket, voice: &Voice, call: WebCall) {
                 }
             }
             got = socket.recv() => match got {
-                Some(Ok(Message::Binary(bytes))) => {
+                Some(Ok(Message::Binary(bytes))) if (2..=MAX_IN_BYTES).contains(&bytes.len()) => {
                     heard = tokio::time::Instant::now();
-                    if bytes.len() <= MAX_IN_BYTES && !hung_up {
+                    if !hung_up {
                         voice.web_audio(&call_id, pcm_in(&bytes, muted));
                     }
                 }
@@ -291,8 +301,8 @@ async fn relay(mut socket: WebSocket, voice: &Voice, call: WebCall) {
                 if voice.is_up() {
                     down_since = None;
                 } else if down_since.get_or_insert_with(tokio::time::Instant::now).elapsed() >= LINK_LIMIT {
-                    let _ = socket.send(to_message(WebOut::Ended { reason: "unavailable", conversation_id: None })).await;
-                    let _ = socket.send(Message::Close(None)).await;
+                    send(&mut socket, to_message(WebOut::Ended { reason: "unavailable", conversation_id: None })).await;
+                    send(&mut socket, Message::Close(None)).await;
                     break;
                 }
             }
