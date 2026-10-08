@@ -14,21 +14,25 @@ permissions:
 
 jobs:
   build:
+    name: ${{ matrix.name }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - name: linux
+            os: ubuntu-latest
             target: --linux AppImage deb
             files: |
               desktop/dist/*.AppImage
               desktop/dist/*.deb
-          - os: macos-latest
+          - name: macos
+            os: macos-latest
             target: --mac dmg zip --x64 --arm64
             files: |
               desktop/dist/*.dmg
               desktop/dist/*.zip
-          - os: windows-latest
+          - name: windows
+            os: windows-latest
             target: --win nsis
             files: desktop/dist/*.exe
     runs-on: ${{ matrix.os }}
@@ -36,11 +40,11 @@ jobs:
       run:
         working-directory: desktop
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
         with:
           version: 12
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: pnpm
@@ -50,9 +54,9 @@ jobs:
       - run: pnpm exec electron-builder ${{ matrix.target }} --publish never
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: false
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
-          name: note-desktop-${{ runner.os }}
+          name: note-desktop-${{ matrix.name }}
           path: ${{ matrix.files }}
           if-no-files-found: error
 
@@ -63,10 +67,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: artifacts/*

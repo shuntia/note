@@ -86,6 +86,10 @@ address in. On NixOS or Home Manager use `programs.note-desktop` instead (see
 
 CI (`.github/workflows/desktop.yml`) builds Linux (AppImage, deb), macOS (dmg,
 zip; x64 and arm64) and Windows (nsis) on every change under `desktop/` and
-uploads them as run artifacts; a `v*` tag attaches them to a GitHub release.
-The builds are unsigned: macOS needs right-click → Open the first time, and
-Windows shows a SmartScreen prompt.
+uploads them as run artifacts (`note-desktop-linux`, `-macos`, `-windows`);
+a `v*` tag attaches them to a GitHub release. The builds are unsigned: macOS
+needs right-click → Open the first time, and Windows shows a SmartScreen
+prompt.
+
+The microphone is granted only to the Note server's own pages. On macOS the
+first call asks for microphone access.

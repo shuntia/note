@@ -24,6 +24,9 @@ packages: `note-voice` (with `note-voice-models` and `note-voice-cues`),
 `note-web`, `note-desktop`, and on x86_64-linux `note-tts-chatterbox` and
 `note-tts-ja`.
 
+GitHub Actions builds the desktop app for Linux, macOS and Windows
+(`.github/workflows/desktop.yml`; see [web.md](web.md#desktop)).
+
 ## First run
 
 1. Edit `config/server.toml` and `config/defaults/` to taste; the checked-in
