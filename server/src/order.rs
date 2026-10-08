@@ -65,6 +65,19 @@ pub fn set(
     date: jiff::civil::Date,
     task_ids: &[i64],
 ) -> Result<Vec<Item>, OrderError> {
+    let tx = conn.unchecked_transaction()?;
+    let items = replace(&tx, user_id, date, task_ids)?;
+    tx.commit()?;
+    Ok(items)
+}
+
+/// `set` for a caller already inside a transaction.
+pub fn replace(
+    conn: &Connection,
+    user_id: i64,
+    date: jiff::civil::Date,
+    task_ids: &[i64],
+) -> Result<Vec<Item>, OrderError> {
     if task_ids.len() > MAX_ITEMS {
         return Err(OrderError::TooMany);
     }
@@ -83,18 +96,16 @@ pub fn set(
             }
         }
     }
-    let tx = conn.unchecked_transaction()?;
-    tx.execute(
+    conn.execute(
         "DELETE FROM run_order WHERE user_id = ?1 AND date = ?2",
         (user_id, date.to_string()),
     )?;
     for (position, id) in task_ids.iter().enumerate() {
-        tx.execute(
+        conn.execute(
             "INSERT INTO run_order (user_id, date, position, task_id) VALUES (?1, ?2, ?3, ?4)",
             (user_id, date.to_string(), position as i64, id),
         )?;
     }
-    tx.commit()?;
     Ok(list(conn, user_id, date)?)
 }
 

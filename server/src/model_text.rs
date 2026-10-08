@@ -269,6 +269,14 @@ pub fn tasks_heading(l: Lang) -> &'static str {
     l.of("# Tasks\n\n", "# タスク\n\n")
 }
 
+pub fn order_heading(l: Lang) -> &'static str {
+    l.of("# Today's order\n\n", "# 今日の順番\n\n")
+}
+
+pub fn order_empty(l: Lang) -> &'static str {
+    l.of("(empty — Now falls back to the queue)\n\n", "（空 — 「今すぐ」はキューから選ぶ）\n\n")
+}
+
 pub fn no_tasks(l: Lang) -> &'static str {
     l.of("(no tasks)\n\n", "（タスクなし）\n\n")
 }

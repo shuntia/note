@@ -211,6 +211,7 @@ pub fn assemble(conn: &Connection, config_dir: &Path, data_dir: &Path, user_id: 
         today.to_zoned(tz.clone())?.timestamp(),
         tomorrow.to_zoned(tz.clone())?.timestamp(),
     )?;
+    let order = crate::order::list(conn, user_id, today)?;
     let category = crate::auth::category(conn, username)?
         .unwrap_or_else(|| crate::config::CATEGORY_MEMBER.into());
     let debrief = latest_debrief(conn, user_id, today)?;
@@ -251,6 +252,7 @@ pub fn assemble(conn: &Connection, config_dir: &Path, data_dir: &Path, user_id: 
         s.push_str(&now_s);
         s.push_str(&plan_s);
         s.push_str(&tasks_section(l, &now_tasks, &later, done_today, caps.later, &tz, today, now));
+        s.push_str(&order_section(l, &order));
         s.push_str(&working_s);
         s.push_str(&debrief_section(l, debrief.as_ref(), today, caps.debrief));
         s.push_str(&settings_s);
@@ -540,6 +542,23 @@ fn tasks_section(
         let _ = writeln!(s, "{}", mt::due_soon(l, soon, DUE_SOON_DAYS, overdue));
     }
     s.push_str(&mt::done_today(l, done_today));
+    s
+}
+
+fn order_section(l: Lang, items: &[crate::order::Item]) -> String {
+    let mut s = String::from(mt::order_heading(l));
+    if items.is_empty() {
+        s.push_str(mt::order_empty(l));
+        return s;
+    }
+    for (n, item) in items.iter().enumerate() {
+        let title = match &item.parent {
+            Some(parent) => format!("{parent} · {}", item.title),
+            None => item.title.clone(),
+        };
+        let _ = writeln!(s, "{}. {title} (task_id {})", n + 1, item.task_id);
+    }
+    s.push('\n');
     s
 }
 
@@ -1512,5 +1531,22 @@ mod tests {
         .unwrap();
         let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
         assert!(out.contains("Plan factor: 1.4× from 9 sessions"), "{out}");
+    }
+
+    #[test]
+    fn the_context_lists_todays_order_by_position() {
+        let tmp = cfg_dir();
+        let (conn, uid) = user();
+        let essay = task(&conn, uid, "essay", "open", None, false, None, "2026-08-30T00:00:00Z");
+        let outline = task(&conn, uid, "outline", "open", None, false, Some(essay), "2026-08-30T00:00:00Z");
+        let laundry = task(&conn, uid, "laundry", "open", None, false, None, "2026-08-30T00:00:00Z");
+        let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
+        assert!(out.contains("# Today's order\n\n(empty"), "{out}");
+        crate::order::set(&conn, uid, "2026-08-31".parse().unwrap(), &[outline, laundry]).unwrap();
+        let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
+        assert!(
+            out.contains(&format!("1. essay · outline (task_id {outline})\n2. laundry (task_id {laundry})")),
+            "{out}"
+        );
     }
 }

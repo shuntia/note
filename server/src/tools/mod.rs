@@ -5,6 +5,7 @@ pub mod harvest_ops;
 pub mod inbox_ops;
 pub mod memory_ops;
 pub mod note_ops;
+pub mod order_ops;
 pub mod outreach_ops;
 pub mod plan_ops;
 pub mod review_ops;
@@ -330,6 +331,7 @@ const PLAN_LAY: &[&str] = &["plan_tasks"];
 /// Moving the rest of a day to the next is the user's call, so it lives only
 /// where they are there to make it.
 const PLAN_CARRY: &[&str] = &["plan_carry"];
+const ORDER: &[&str] = &["order_set", "order_move", "order_drop"];
 const SCHEDULE: &[&str] =
     &["schedule_slide", "schedule_snooze", "schedule_drop", "schedule_reshape"];
 const SCHEDULE_INSERT: &[&str] = &["schedule_insert"];
@@ -370,6 +372,7 @@ const DOMAINS: &[&[&str]] = &[
     PLAN_READ,
     PLAN_LAY,
     PLAN_CARRY,
+    ORDER,
     SCHEDULE,
     SCHEDULE_INSERT,
     CALENDAR_READ,
@@ -425,6 +428,7 @@ const CHECKIN: &[&str] = registry_of![
     NOTES,
     PLAN_READ,
     PLAN_CARRY,
+    ORDER,
     SCHEDULE,
     CALENDAR_READ,
     TRIGGERS,
@@ -445,6 +449,7 @@ const TALK: &[&str] = registry_of![
     PLAN_READ,
     PLAN_LAY,
     PLAN_CARRY,
+    ORDER,
     SCHEDULE,
     CALENDAR_READ,
     CALENDAR_WRITE,
@@ -466,6 +471,7 @@ const NIGHTLY: &[&str] = registry_of![
     NOTE_SETTLE,
     PLAN_READ,
     PLAN_LAY,
+    ORDER,
     SCHEDULE,
     SCHEDULE_INSERT,
     CALENDAR_READ,
@@ -755,6 +761,24 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
              to tomorrow at the close of the day means; nothing already done or dropped moves.",
             schema::<plan_ops::PlanCarryArgs>(),
         ),
+        "order_set" => (
+            "Set the day's order: the tasks and steps to work through, first to last, \
+             replacing the whole list. Now starts the first open item and falls back to the \
+             queue once the order runs out; finished items leave it on their own. The nightly \
+             run sets the day it is planning, every other session today. The task of a running \
+             work session stays first.",
+            schema::<order_ops::SetArgs>(),
+        ),
+        "order_move" => (
+            "Put one task or step into today's order in front of before_task_id, or last when \
+             that is omitted, moving it if it is already there. A task added since the order was \
+             set is not in it until placed.",
+            schema::<order_ops::MoveArgs>(),
+        ),
+        "order_drop" => (
+            "Take one task or step out of today's order. The task itself is untouched.",
+            schema::<order_ops::DropArgs>(),
+        ),
         "plan_list" => (
             "Read one day's plan: every event with its event_id — the id the schedule tools \
              take — its times, status and flexibility, and for a block laid by plan_tasks the \
@@ -997,6 +1021,9 @@ fn run(
         "plan_tasks" => plan_ops::plan_tasks(conn, ctx, &parse(raw)?),
         "plan_carry" => plan_ops::plan_carry(conn, ctx, parse(raw)?),
         "plan_list" => plan_ops::plan_list(conn, ctx, parse(raw)?),
+        "order_set" => order_ops::set(conn, ctx, kind, &parse(raw)?),
+        "order_move" => order_ops::move_item(conn, ctx, kind, &parse(raw)?),
+        "order_drop" => order_ops::drop_item(conn, ctx, kind, &parse(raw)?),
         "calendar_list" => calendar_ops::list(conn, ctx, &parse(raw)?),
         "calendar_add" => calendar_ops::add(conn, ctx, parse(raw)?),
         "calendar_update" => calendar_ops::update(conn, ctx, parse(raw)?),

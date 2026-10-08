@@ -89,7 +89,7 @@ fn refused(e: Refusal) -> ToolError {
 
 /// The day a trigger laid in this session belongs to: the nightly run lays for
 /// the day it is planning, and every other session for the day it is in.
-fn target_date(ctx: &ToolCtx, kind: SessionKind, now: jiff::Timestamp) -> jiff::civil::Date {
+pub(crate) fn target_date(ctx: &ToolCtx, kind: SessionKind, now: jiff::Timestamp) -> jiff::civil::Date {
     let cfg = crate::config::UserConfig::load(ctx.config_dir, ctx.username).ok();
     let tz = cfg
         .as_ref()
