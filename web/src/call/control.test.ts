@@ -206,3 +206,17 @@ test('a ring that times out, is taken elsewhere or is answered is not declined',
   answered.control.end()
   for (const r of [timedOut, taken, answered]) expect(r.seen.declined).toEqual([])
 })
+
+test('a running tool shows as working and each landing is told apart from the last', async () => {
+  const { control, events, load } = rig(started)
+  control.mount()
+  await load()
+  events[0].tools(2, null)
+  expect(control.shown.working).toBe(true)
+  expect(control.shown.landed).toBeNull()
+  events[0].tools(1, true)
+  expect(control.shown.landed).toEqual({ ok: true, n: 1 })
+  events[0].tools(0, false)
+  expect(control.shown.working).toBe(false)
+  expect(control.shown.landed).toEqual({ ok: false, n: 2 })
+})

@@ -3,7 +3,7 @@ import { t } from '../i18n'
 import { reducedMotion } from '../motion'
 import { declineRing, onCallFrame } from '../ws'
 import { CallControl, type CallOpen, type CallShown, type Phase } from './control'
-import { blip, ease, shape, smooth, stillForm, target, type Form, type Look, type Pt } from './form'
+import { ease, mark, shape, smooth, stillForm, target, type Form, type Look, type Pt } from './form'
 import { primeAudio, releaseAudioContext } from './prime'
 import { callUrl, CallSession, type AudioIo, type LiveState } from './session'
 import { Swipe } from './swipe'
@@ -13,6 +13,8 @@ export type { CallOpen }
 
 const MAX_FRAME_MS = 100
 const ALPHA_STEPS = 64
+// Enough to keep the gear's teeth crisp.
+const POINTS = 360
 
 function lookOf(phase: Phase, live: LiveState): Look {
   if (phase === 'ringing') return 'ringing'
@@ -73,18 +75,18 @@ export function CallView({
     )
   })
   const [shown, setShown] = useState<CallShown>(control.shown)
-  const { phase, live, muted, caption, tool, shake } = shown
+  const { phase, live, muted, caption, working, landed, shake } = shown
   const canvas = useRef<HTMLCanvasElement>(null)
   const root = useRef<HTMLDivElement>(null)
   const [swipe] = useState(() => new Swipe())
   const look = lookOf(phase, live)
-  const drawn = useRef({ look, muted })
-  drawn.current = { look, muted }
-  const landed = useRef<{ ok: boolean; at: number } | null>(null)
+  const drawn = useRef({ look, muted, working })
+  drawn.current = { look, muted, working }
+  const lastLanded = useRef<{ ok: boolean; at: number } | null>(null)
 
   useEffect(() => {
-    if (tool) landed.current = { ok: tool.ok, at: performance.now() }
-  }, [tool])
+    if (landed) lastLanded.current = { ok: landed.ok, at: performance.now() }
+  }, [landed])
 
   const tap = () => {
     if (swipe.tap()) control.tap()
@@ -136,13 +138,16 @@ export function CallView({
     const g = el?.getContext('2d')
     if (!el || !g) return
     const still = reducedMotion()
-    let form: Form = target(drawn.current.look, drawn.current.muted)
+    let form: Form = target(drawn.current.look, drawn.current.muted, drawn.current.working)
     let mic = 0
     let out = 0
     let clock = 0
     let last = performance.now()
     const ink = () => getComputedStyle(el).getPropertyValue('--ink').trim() || 'currentColor'
+    const tone = (name: string) => getComputedStyle(el).getPropertyValue(name).trim() || color
     let color = ink()
+    let worked = tone('--call-worked')
+    let failed = tone('--call-failed')
     let colorAt = 0
     let frame = 0
     const draw = (now: number) => {
@@ -152,10 +157,12 @@ export function CallView({
       const lv = control.levels()
       mic = smooth(mic, Math.min(1, lv.mic * 4), dt)
       out = smooth(out, Math.min(1, lv.out * 4), dt)
-      const { look, muted } = drawn.current
-      form = still ? stillForm(look, muted) : ease(form, target(look, muted), dt)
+      const { look, muted, working } = drawn.current
+      form = still ? stillForm(look, muted, working) : ease(form, target(look, muted, working), dt)
       if (clock - colorAt > 1000) {
         color = ink()
+        worked = tone('--call-worked')
+        failed = tone('--call-failed')
         colorAt = clock
       }
       const dpr = window.devicePixelRatio || 1
@@ -170,16 +177,22 @@ export function CallView({
       g.strokeStyle = color
       const scale = (size / 2) * 0.62
       const base = 1 - 0.45 * form.dim
-      const b = still || !landed.current ? null : blip(landed.current.ok, now - landed.current.at)
-      if (b && b.echoAlpha > 0) {
-        g.globalAlpha = b.echoAlpha * base
-        g.beginPath()
-        g.arc(0, 0, b.echo * form.scale * scale, 0, Math.PI * 2)
-        g.stroke()
+      const m = lastLanded.current && mark(lastLanded.current.ok, now - lastLanded.current.at)
+      if (m && !still) g.translate(m.dx * scale, 0)
+      drawForm(g, shape(form, still ? 0 : clock, { mic, out }, POINTS), scale, base)
+      if (m) {
+        g.strokeStyle = lastLanded.current?.ok ? worked : failed
+        g.lineWidth = 3.2 * dpr
+        g.lineCap = 'round'
+        g.globalAlpha = m.alpha
+        for (const line of m.strokes) {
+          g.beginPath()
+          g.moveTo(line[0].x * scale, line[0].y * scale)
+          for (const p of line.slice(1)) g.lineTo(p.x * scale, p.y * scale)
+          g.stroke()
+        }
         g.globalAlpha = 1
       }
-      if (b) g.translate(b.dx * scale, 0)
-      drawForm(g, shape(form, still ? 0 : clock, { mic, out }), scale, base)
       frame = requestAnimationFrame(draw)
     }
     frame = requestAnimationFrame(draw)

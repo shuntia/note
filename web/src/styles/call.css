@@ -72,3 +72,4 @@
   .call-view.shake .call-circle { animation: none; }
   .call-view .call-caption { animation-name: call-caption; animation-timing-function: steps(1, end); }
 }
+.call-view { --call-worked: var(--sage); --call-failed: oklch(58% 0.2 27); }

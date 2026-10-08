@@ -59,7 +59,7 @@ pub enum WebOut {
     Flush,
     State(LiveState),
     Caption(String),
-    Tool { ok: bool },
+    Tools { running: usize, landed: Option<bool> },
     Ended { reason: &'static str, conversation_id: Option<i64> },
 }
 
@@ -187,9 +187,9 @@ impl Relays {
         }
     }
 
-    /// A tool the call ran landed; does nothing for a phone call.
-    pub fn tool(&self, call_id: &str, ok: bool) {
-        self.send(call_id, WebOut::Tool { ok });
+    /// A tool the call runs started or landed; does nothing for a phone call.
+    pub fn tools(&self, call_id: &str, running: usize, landed: Option<bool>) {
+        self.send(call_id, WebOut::Tools { running, landed });
     }
 
     pub fn media(&self, call_id: &str, body: Media) {
@@ -379,7 +379,9 @@ fn to_message(out: WebOut) -> Message {
         WebOut::Flush => json(serde_json::json!({ "type": "flush" })),
         WebOut::State(state) => json(serde_json::json!({ "type": "state", "state": state })),
         WebOut::Caption(text) => json(serde_json::json!({ "type": "caption", "text": text })),
-        WebOut::Tool { ok } => json(serde_json::json!({ "type": "tool", "ok": ok })),
+        WebOut::Tools { running, landed } => {
+            json(serde_json::json!({ "type": "tools", "running": running, "landed": landed }))
+        }
         WebOut::Ended { reason, conversation_id } => {
             json(serde_json::json!({ "type": "ended", "reason": reason, "conversation_id": conversation_id }))
         }
@@ -435,13 +437,13 @@ mod tests {
         relays.media("a", Media::AudioIn { pcm: Pcm(vec![1; 320]) });
         relays.on_frame("a", &CallBody::Draft { turn: 1, text: "move my run".into(), language: None }, || None);
         relays.on_frame("a", &CallBody::Commit { turn: 1, text: "  ".into(), language: None }, || None);
-        relays.tool("a", false);
-        relays.tool("phone", true);
+        relays.tools("a", 0, Some(false));
+        relays.tools("phone", 1, None);
         assert_eq!(a.try_recv().unwrap(), WebOut::Audio(vec![3; 480]));
         assert_eq!(a.try_recv().unwrap(), WebOut::State(LiveState::Thinking));
         assert_eq!(a.try_recv().unwrap(), WebOut::Flush);
         assert_eq!(a.try_recv().unwrap(), WebOut::Caption("move my run".into()));
-        assert_eq!(a.try_recv().unwrap(), WebOut::Tool { ok: false });
+        assert_eq!(a.try_recv().unwrap(), WebOut::Tools { running: 0, landed: Some(false) });
         assert!(a.try_recv().is_err(), "the caller's own audio and a blank commit are not sent back");
         assert!(b.try_recv().is_err());
     }

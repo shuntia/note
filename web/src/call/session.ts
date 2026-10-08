@@ -6,11 +6,11 @@ export type ServerFrame =
   | { type: 'open'; rate: number }
   | { type: 'state'; state: LiveState }
   | { type: 'caption'; text: string }
-  | { type: 'tool'; ok: boolean }
+  | { type: 'tools'; running: number; landed: boolean | null }
   | { type: 'flush' }
   | { type: 'ended'; reason: string; conversation_id: number | null }
 
-const KINDS = new Set(['open', 'state', 'caption', 'tool', 'flush', 'ended'])
+const KINDS = new Set(['open', 'state', 'caption', 'tools', 'flush', 'ended'])
 
 export function parseFrame(text: string): ServerFrame | null {
   try {
@@ -57,7 +57,8 @@ export type Ended = { reason: string; conversationId: number | null }
 export type CallEvents = {
   state(s: LiveState): void
   caption(text: string): void
-  tool(ok: boolean): void
+  // How many tools are running, and whether the one that just landed worked (null when none landed).
+  tools(running: number, landed: boolean | null): void
   ended(e: Ended): void
   micDenied(): void
 }
@@ -159,7 +160,7 @@ export class CallSession {
     if (f.type === 'open') this.rate = f.rate
     else if (f.type === 'state') this.on.state(f.state)
     else if (f.type === 'caption') this.on.caption(f.text)
-    else if (f.type === 'tool') this.on.tool(f.ok === true)
+    else if (f.type === 'tools') this.on.tools(Number(f.running) || 0, typeof f.landed === 'boolean' ? f.landed : null)
     else if (f.type === 'flush') this.audio.flush()
     else this.finish({ reason: f.reason, conversationId: f.conversation_id })
   }

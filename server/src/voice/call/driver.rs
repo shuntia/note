@@ -33,6 +33,8 @@ pub struct CallConfig {
 /// The call's system prompt written in a language.
 pub type Rebrief = Arc<dyn Fn(crate::text::Lang) -> anyhow::Result<String> + Send + Sync>;
 
+pub type ToolsShown = Arc<dyn Fn(usize, Option<bool>) + Send + Sync>;
+
 pub struct DriverDeps {
     pub call_id: String,
     pub user_id: i64,
@@ -49,8 +51,8 @@ pub struct DriverDeps {
     pub runner: Arc<dyn ToolRunner>,
     pub cfg: CallConfig,
     pub send: Arc<dyn Fn(CallBody) + Send + Sync>,
-    /// Told whether each tool the call ran succeeded, as it lands.
-    pub tool_done: Arc<dyn Fn(bool) + Send + Sync>,
+    /// Told how many tools are running whenever one starts or lands, with whether the one that landed worked.
+    pub tools_shown: ToolsShown,
     /// Monotonic time since the call started.
     pub clock: Arc<dyn Fn() -> Duration + Send + Sync>,
 }
@@ -676,6 +678,7 @@ impl Driver {
                     .and_then(|v| v["job"].as_u64())
                     .and_then(|job| u32::try_from(job).ok());
                 if let (false, Some(job)) = (is_error, job) {
+                    (self.deps.tools_shown)(self.jobs.running().len(), None);
                     self.job_meta.insert(
                         job,
                         JobMeta {
@@ -801,11 +804,12 @@ impl Driver {
             .get(&done.job)
             .is_some_and(|meta| !meta.written);
         if settled {
-            match done.outcome {
-                JobOutcome::Done(_) => (self.deps.tool_done)(true),
-                JobOutcome::Error(_) | JobOutcome::TimedOut => (self.deps.tool_done)(false),
-                JobOutcome::Cancelled | JobOutcome::Interrupted => {}
-            }
+            let landed = match done.outcome {
+                JobOutcome::Done(_) => Some(true),
+                JobOutcome::Error(_) | JobOutcome::TimedOut => Some(false),
+                JobOutcome::Cancelled | JobOutcome::Interrupted => None,
+            };
+            (self.deps.tools_shown)(self.jobs.running().len(), landed);
         }
         if settled && done.outcome != JobOutcome::Cancelled {
             self.queue.push(
@@ -1036,7 +1040,7 @@ mod tests {
         llm: Arc<MockLLM>,
         runner: Arc<FakeRunner>,
         db: Arc<Mutex<Connection>>,
-        tools_done: Arc<Mutex<Vec<bool>>>,
+        tools_shown: Arc<Mutex<Vec<(usize, Option<bool>)>>>,
         driver: Option<JoinHandle<()>>,
     }
 
@@ -1104,8 +1108,8 @@ mod tests {
         let now_ms = Arc::new(AtomicU64::new(0));
         let (frame_tx, frames) = mpsc::channel();
         let clock_ms = now_ms.clone();
-        let tools_done: Arc<Mutex<Vec<bool>>> = Arc::default();
-        let done_log = tools_done.clone();
+        let tools_shown: Arc<Mutex<Vec<(usize, Option<bool>)>>> = Arc::default();
+        let shown_log = tools_shown.clone();
         let deps = DriverDeps {
             call_id: "c1".into(),
             user_id: 1,
@@ -1133,7 +1137,7 @@ mod tests {
             send: Arc::new(move |body| {
                 let _ = frame_tx.send(body);
             }),
-            tool_done: Arc::new(move |ok| done_log.lock().unwrap().push(ok)),
+            tools_shown: Arc::new(move |running, landed| shown_log.lock().unwrap().push((running, landed))),
             clock: Arc::new(move || Duration::from_millis(clock_ms.load(Ordering::SeqCst))),
         };
         let (tx, rx) = mpsc::channel();
@@ -1147,7 +1151,7 @@ mod tests {
             llm,
             runner,
             db,
-            tools_done,
+            tools_shown,
             driver: Some(driver),
         }
     }
@@ -1370,7 +1374,7 @@ mod tests {
     }
 
     #[test]
-    fn each_landed_job_reports_whether_it_succeeded() {
+    fn each_job_shows_as_running_then_as_worked_or_failed() {
         let mut h = start(
             vec![
                 vec![
@@ -1395,7 +1399,10 @@ mod tests {
         h.expect(&[CallBody::SpeakDone { reply: 2 }]);
         h.at(1000);
         h.tick_until(&speak(4, 0, "Found it."));
-        assert_eq!(*h.tools_done.lock().unwrap(), [true, false]);
+        assert_eq!(
+            *h.tools_shown.lock().unwrap(),
+            [(1, None), (2, None), (1, Some(true)), (0, Some(false))]
+        );
         h.stop();
     }
 

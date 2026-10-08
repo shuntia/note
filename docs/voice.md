@@ -80,8 +80,9 @@ larger is refused at the socket), and `{"type":"mute","on":bool}` or
 `{"type":"hangup"}`. Server to browser: `{"type":"open","rate":48000}` first,
 then binary 48 kHz s16le audio, `{"type":"flush"}`, `{"type":"state","state"}`
 (`listening`, `hearing`, `thinking`, `speaking`), `{"type":"caption","text"}`
-for the caller's words, `{"type":"tool","ok":bool}` as each tool the call ran
-lands (a cancelled one sends nothing), and last `{"type":"ended","reason","conversation_id"}`
+for the caller's words, `{"type":"tools","running":n,"landed":bool|null}` whenever a tool the call
+runs starts or lands (`landed` says whether it worked; null for a start or a
+cancel), and last `{"type":"ended","reason","conversation_id"}`
 with `ended`, `failed`, `replaced`, `busy` (a Matrix call is open),
 `unavailable` (no voice service, or its link down for 10 s) or `missed` (the
 ring was gone). Five seconds with no audio from the browser hangs the call up;

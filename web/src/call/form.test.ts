@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest'
-import { BLIP_DONE_MS, BLIP_FAILED_MS, BREATH_MS, blip, ease, shape, smooth, stillForm, target } from './form'
+import { BREATH_MS, MARK_MS, ease, mark, shape, smooth, stillForm, target } from './form'
 
 const radius = (p: { x: number; y: number }) => Math.hypot(p.x, p.y)
 const quiet = { mic: 0, out: 0 }
@@ -183,19 +183,29 @@ test('at 60 frames a second the circle unrolls into the line and curls back with
   }
 })
 
-test('a tool that worked sends a fading ring outward, then nothing', () => {
-  const early = blip(true, 50)!
-  const late = blip(true, BLIP_DONE_MS * 0.8)!
-  expect(early.dx).toBe(0)
-  expect(late.echo).toBeGreaterThan(early.echo)
-  expect(late.echoAlpha).toBeLessThan(early.echoAlpha)
-  expect(blip(true, BLIP_DONE_MS)).toBeNull()
+test('while a tool runs the rim grows teeth that turn', () => {
+  const r = (t: number) => shape(target('listening', false, true), t, quiet).map(radius)
+  const at0 = r(0)
+  expect(Math.max(...at0) - Math.min(...at0)).toBeGreaterThan(0.08)
+  expect(r(400)[20]).not.toBeCloseTo(at0[20], 3)
+  expect(target('ending', false, true).gear).toBe(0)
 })
 
-test('a tool that failed trembles the circle sideways and settles', () => {
-  const swings = [0.1, 0.25, 0.45].map((p) => blip(false, BLIP_FAILED_MS * p)!.dx)
+test('a tool that worked writes a check mark on, holds it, then fades it', () => {
+  const start = mark(true, 10)!
+  const held = mark(true, 500)!
+  expect(start.strokes[0].length).toBe(2)
+  expect(held.strokes[0]).toHaveLength(3)
+  expect(held.alpha).toBe(1)
+  expect(mark(true, MARK_MS - 50)!.alpha).toBeLessThan(0.2)
+  expect(mark(true, MARK_MS)).toBeNull()
+  expect(held.dx).toBe(0)
+})
+
+test('a tool that failed writes an X stroke by stroke and trembles', () => {
+  expect(mark(false, 100)!.strokes).toHaveLength(1)
+  expect(mark(false, 500)!.strokes).toHaveLength(2)
+  const swings = [40, 110, 200].map((t) => mark(false, t)!.dx)
   expect(Math.max(...swings.map(Math.abs))).toBeGreaterThan(0.01)
-  expect(blip(false, 0)!.echoAlpha).toBe(0)
-  expect(blip(false, BLIP_FAILED_MS)).toBeNull()
-  expect(blip(false, -1)).toBeNull()
+  expect(mark(false, -1)).toBeNull()
 })

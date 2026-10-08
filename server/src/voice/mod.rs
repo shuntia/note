@@ -66,7 +66,7 @@ impl Voice {
                     eprintln!("voice: journaling a reply for {call_id} failed: {e}");
                 }
             }),
-            Arc::new(move |call_id: &str, ok| relays.tool(call_id, ok)),
+            Arc::new(move |call_id: &str, running, landed| relays.tools(call_id, running, landed)),
         ));
         let handler = Arc::new(NoteHandler {
             db: db.clone(),

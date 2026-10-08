@@ -78,14 +78,14 @@ function fakeAudio(over: Partial<AudioIo> = {}): FakeAudio {
 function rig(over: Partial<AudioIo> = {}) {
   const audio = fakeAudio(over)
   const sockets: FakeSocket[] = []
-  const seen = { states: [] as string[], captions: [] as string[], tools: [] as boolean[], ended: [] as Ended[], denied: 0 }
+  const seen = { states: [] as string[], captions: [] as string[], tools: [] as [number, boolean | null][], ended: [] as Ended[], denied: 0 }
   const s = new CallSession(
     'ws://h/api/call/ws',
     audio,
     {
       state: (x) => seen.states.push(x),
       caption: (x) => seen.captions.push(x),
-      tool: (ok) => seen.tools.push(ok),
+      tools: (running, landed) => seen.tools.push([running, landed]),
       ended: (e) => seen.ended.push(e),
       micDenied: () => {
         seen.denied++
@@ -135,13 +135,13 @@ test('server frames drive the state, captions, playback and flush', async () => 
   ws.text({ type: 'open', rate: 24000 })
   ws.text({ type: 'state', state: 'thinking' })
   ws.text({ type: 'caption', text: 'move my run' })
-  ws.text({ type: 'tool', ok: true })
-  ws.text({ type: 'tool', ok: false })
+  ws.text({ type: 'tools', running: 1, landed: null })
+  ws.text({ type: 'tools', running: 0, landed: false })
   ws.binary(Int16Array.from([7, 8]).buffer)
   ws.text({ type: 'flush' })
   expect(seen.states).toEqual(['thinking'])
   expect(seen.captions).toEqual(['move my run'])
-  expect(seen.tools).toEqual([true, false])
+  expect(seen.tools).toEqual([[1, null], [0, false]])
   expect(audio.played).toEqual([[[7, 8], 24000]])
   expect(audio.flushes).toBe(1)
 })

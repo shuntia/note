@@ -8,6 +8,7 @@ export type Form = {
   dim: number
   gap: number
   scale: number
+  gear: number
 }
 export type Levels = { mic: number; out: number }
 export type Pt = { x: number; y: number; a: number }
@@ -16,7 +17,7 @@ export const BREATH_MS = 4000
 const EASE_TAU_MS = 133
 const TWO_PI = Math.PI * 2
 
-const REST: Form = { breath: 0, ripple: 0, pulse: 0, ring: 0, write: 0, dim: 0, gap: 0, scale: 1 }
+const REST: Form = { breath: 0, ripple: 0, pulse: 0, ring: 0, write: 0, dim: 0, gap: 0, scale: 1, gear: 0 }
 const LOOKS: Record<Look, Partial<Form>> = {
   ringing: { ring: 1, breath: 0.5 },
   listening: { breath: 1 },
@@ -26,13 +27,14 @@ const LOOKS: Record<Look, Partial<Form>> = {
   ending: { scale: 0.6, dim: 1 },
 }
 
-export function target(look: Look, muted: boolean): Form {
-  const f = { ...REST, ...LOOKS[look] }
+// `working` while a tool runs: the rim grows teeth and turns.
+export function target(look: Look, muted: boolean, working = false): Form {
+  const f = { ...REST, ...LOOKS[look], gear: working && look !== 'ending' ? 1 : 0 }
   return muted && look !== 'ending' && look !== 'ringing' ? { ...f, dim: 0.5, gap: 1 } : f
 }
 
-export function stillForm(look: Look, muted: boolean): Form {
-  const f = target(look, muted)
+export function stillForm(look: Look, muted: boolean, working = false): Form {
+  const f = target(look, muted, working)
   return { ...f, breath: 0, ripple: 0, pulse: 0, ring: 0, write: 0, dim: look === 'thinking' ? Math.max(f.dim, 0.35) : f.dim }
 }
 
@@ -62,6 +64,10 @@ const NIB_RAD_PER_MS = TWO_PI / 1100
 const INKED_RAD = 2.6 * TWO_PI
 const NIB_X = (LOOP_ADVANCE * INKED_RAD) / 2
 
+const GEAR_TEETH = 8
+const GEAR_DEPTH = 0.16
+const GEAR_TURN_MS = 6000
+
 const smoothstep = (x: number, lo = 0, hi = 1) => {
   const c = Math.min(1, Math.max(0, (x - lo) / (hi - lo)))
   return c * c * (3 - 2 * c)
@@ -76,13 +82,15 @@ export function shape(f: Form, tMs: number, lv: Levels, n = 160): Pt[] {
   const r0 = f.scale * breath * (1 + 0.08 * f.pulse * lv.out) * (1 + 0.05 * f.ring * knock)
   const nib = tMs * NIB_RAD_PER_MS
   const baseline = 0.04 * Math.sin((TWO_PI * tMs) / 7000)
+  const turn = (TWO_PI * tMs) / GEAR_TURN_MS
   const pts: Pt[] = []
   for (let i = 0; i < n; i++) {
     const s = i / (n - 1)
     const th = -TWO_PI * (1 - s)
     const ripple =
       0.032 * f.ripple * lv.mic * (0.7 * Math.sin(9 * th - tMs / 160) + 0.3 * Math.sin(11 * th + tMs / 230))
-    const r = r0 + ripple
+    const tooth = smoothstep(Math.cos(GEAR_TEETH * (th - turn)), -0.2, 0.2)
+    const r = r0 + ripple + GEAR_DEPTH * f.gear * (tooth - 0.5)
     const behind = (1 - s) * INKED_RAD
     const u = nib - behind
     const sy = -LOOP_H * Math.cos(u)
@@ -99,20 +107,41 @@ export function shape(f: Form, tMs: number, lv: Levels, n = 160): Pt[] {
   return pts
 }
 
-export type Blip = { echo: number; echoAlpha: number; dx: number }
-export const BLIP_DONE_MS = 700
-export const BLIP_FAILED_MS = 450
+export const MARK_MS = 1100
+const MARK_DRAW_MS = 280
+const MARK_FADE_FROM_MS = 750
+const CHECK = [{ x: -0.36, y: 0.02 }, { x: -0.1, y: 0.28 }, { x: 0.38, y: -0.24 }]
+const CROSS = [
+  [{ x: -0.27, y: -0.27 }, { x: 0.27, y: 0.27 }],
+  [{ x: 0.27, y: -0.27 }, { x: -0.27, y: 0.27 }],
+]
 
-// A tool that landed, `ageMs` after: a faint ring swells out when it worked, the circle trembles sideways when it
-// failed. Null once it has played out.
-export function blip(ok: boolean, ageMs: number): Blip | null {
-  if (!Number.isFinite(ageMs) || ageMs < 0) return null
-  if (ok) {
-    const p = ageMs / BLIP_DONE_MS
-    if (p >= 1) return null
-    return { echo: 1 + 0.3 * (1 - (1 - p) ** 3), echoAlpha: 0.5 * (1 - p) ** 2, dx: 0 }
+export type Mark = { strokes: { x: number; y: number }[][]; alpha: number; dx: number }
+
+// Inks the polyline from its start up to `t` of its length.
+function inked(line: { x: number; y: number }[], t: number): { x: number; y: number }[] {
+  const lens = line.slice(1).map((p, i) => Math.hypot(p.x - line[i].x, p.y - line[i].y))
+  let left = Math.max(0, Math.min(1, t)) * lens.reduce((a, b) => a + b, 0)
+  const out = [line[0]]
+  for (let i = 0; i < lens.length && left > 0; i++) {
+    const k = Math.min(1, left / lens[i])
+    out.push({ x: line[i].x + (line[i + 1].x - line[i].x) * k, y: line[i].y + (line[i + 1].y - line[i].y) * k })
+    left -= lens[i]
   }
-  const p = ageMs / BLIP_FAILED_MS
-  if (p >= 1) return null
-  return { echo: 0, echoAlpha: 0, dx: 0.035 * Math.sin(p * 3 * TWO_PI) * (1 - p) }
+  return out
+}
+
+// What a tool that landed draws inside the circle `ageMs` after: a check mark when it worked, an X and a short
+// sideways tremor when it failed, each written on, held, then faded. Null once it has played out.
+export function mark(ok: boolean, ageMs: number): Mark | null {
+  if (!Number.isFinite(ageMs) || ageMs < 0 || ageMs >= MARK_MS) return null
+  const drawn = ageMs / MARK_DRAW_MS
+  const alpha = 1 - smoothstep(ageMs, MARK_FADE_FROM_MS, MARK_MS)
+  if (ok) return { strokes: [inked(CHECK, drawn)], alpha, dx: 0 }
+  const shake = Math.min(1, ageMs / 450)
+  return {
+    strokes: [inked(CROSS[0], drawn * 2), inked(CROSS[1], drawn * 2 - 1)].filter((l) => l.length > 1),
+    alpha,
+    dx: 0.035 * Math.sin(shake * 3 * TWO_PI) * (1 - shake),
+  }
 }

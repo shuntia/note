@@ -8,7 +8,8 @@ export type CallShown = {
   live: LiveState
   muted: boolean
   caption: { text: string; n: number } | null
-  tool: { ok: boolean; n: number } | null
+  working: boolean
+  landed: { ok: boolean; n: number } | null
   shake: boolean
 }
 
@@ -47,14 +48,14 @@ export class CallControl {
   private run: Run | null = null
   private timers: number[] = []
   private captions = 0
-  private tools = 0
+  private landings = 0
 
   constructor(
     private readonly call: CallOpen,
     private readonly deps: CallDeps,
     private readonly changed: (s: CallShown) => void,
   ) {
-    this.shown = { phase: call.ring ? 'ringing' : 'connecting', live: 'listening', muted: false, caption: null, tool: null, shake: false }
+    this.shown = { phase: call.ring ? 'ringing' : 'connecting', live: 'listening', muted: false, caption: null, working: false, landed: null, shake: false }
   }
 
   mount(): () => void {
@@ -127,7 +128,11 @@ export class CallControl {
     const line = this.deps.connect({
       state: (live) => this.set({ live, phase: this.shown.phase === 'connecting' ? 'live' : this.shown.phase }),
       caption: (text) => this.set({ caption: { text, n: ++this.captions } }),
-      tool: (ok) => this.set({ tool: { ok, n: ++this.tools } }),
+      tools: (running, landed) =>
+        this.set({
+          working: running > 0,
+          ...(landed === null ? {} : { landed: { ok: landed, n: ++this.landings } }),
+        }),
       ended: (e) => this.leave(e.conversationId, FAILED.has(e.reason)),
       micDenied: () => {
         this.deps.onMicBlocked()
