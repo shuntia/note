@@ -13,7 +13,7 @@ config/
   users/<username>/
     user.toml                 # per-user overrides, merged over defaults/user.toml
     templates/<name>.toml     # per-user templates
-    prompts/<name>.md         # per-user prompt overrides
+    about.md                  # what the user wrote about themselves (see agent.md)
     standing.md               # the standing context document (see agent.md)
     nightly_notes.md          # last night's brief to today's sessions
 ```

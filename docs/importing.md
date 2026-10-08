@@ -110,8 +110,7 @@ Ownership: the agent owns `description`, `duration_min` (written with
 in the description when the steps no longer fit. Call
 `POST /api/tasks/{id}/flatten` first to have steps regenerated.
 
-The prompt is `config/defaults/prompts/import.md`, editable per user over
-`/api/prompts/import`.
+The prompt is `config/defaults/prompts/import.md`.
 
 ## Reading an inbox item
 
@@ -171,5 +170,3 @@ Before writing, a decision archives every fact that source produced before and
 reports the count in `superseded`, so re-sending an edited item replaces what
 Note remembers, and a re-send deciding `nothing` or `task` clears it. The map
 is per user.
-
-The prompt is editable per user over `/api/prompts/inbox`.

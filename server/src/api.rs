@@ -54,10 +54,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/voice/voices", get(voice_voices))
         .route("/api/voice/preview", get(voice_preview))
         .route("/api/notify/test", post(notify_test))
-        .route(
-            "/api/prompts/{name}",
-            get(prompt_get).put(prompt_put).delete(prompt_delete),
-        )
+        .route("/api/about", get(about_get).put(about_put))
         .route("/api/memory", get(memory_list))
         .route("/api/memory/{id}", get(memory_read))
         .route("/api/plan/today", get(plan_today))
@@ -2007,75 +2004,33 @@ async fn notify_test(user: CurrentUser, State(state): State<AppState>, headers: 
     }
 }
 
-const MAX_PROMPT_BYTES: usize = 32 * 1024;
-
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct PromptPut {
+struct AboutPut {
     content: String,
 }
 
-/// The effective prompt plus whether it comes from the user's own override.
-fn prompt_body(state: &AppState, user: &str, name: &str) -> axum::response::Response {
-    match crate::prompts::load(&state.config_dir, user, name) {
-        Ok(content) => Json(serde_json::json!({
-            "name": name,
-            "content": content,
-            "custom": crate::prompts::custom(&state.config_dir, user, name),
-        }))
-        .into_response(),
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    }
+fn about_body(state: &AppState, user: &str) -> axum::response::Response {
+    Json(serde_json::json!({ "content": crate::prompts::about(&state.config_dir, user).unwrap_or_default() }))
+        .into_response()
 }
 
-/// A name outside `EDITABLE` is rejected before it can reach the filesystem, so
-/// no traversal or probe of an arbitrary path is possible through these routes.
-fn editable(name: &str) -> bool {
-    crate::prompts::EDITABLE.contains(&name)
+async fn about_get(user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
+    about_body(&state, &user.username)
 }
 
-async fn prompt_get(
+/// Blank content clears it.
+async fn about_put(
     user: CurrentUser,
     State(state): State<AppState>,
-    Path(name): Path<String>,
+    Json(req): Json<AboutPut>,
 ) -> impl IntoResponse {
-    if !editable(&name) {
-        return StatusCode::NOT_FOUND.into_response();
+    let max = crate::prompts::MAX_ABOUT_BYTES;
+    if req.content.len() > max {
+        return invalid_field("content", &format!("must be at most {max} bytes"));
     }
-    prompt_body(&state, &user.username, &name)
-}
-
-async fn prompt_put(
-    user: CurrentUser,
-    State(state): State<AppState>,
-    Path(name): Path<String>,
-    Json(req): Json<PromptPut>,
-) -> impl IntoResponse {
-    if !editable(&name) {
-        return StatusCode::NOT_FOUND.into_response();
-    }
-    if req.content.trim().is_empty() || req.content.len() > MAX_PROMPT_BYTES {
-        return invalid_field(
-            "content",
-            &format!("must be non-blank and at most {MAX_PROMPT_BYTES} bytes"),
-        );
-    }
-    match crate::prompts::save(&state.config_dir, &user.username, &name, &req.content) {
-        Ok(()) => prompt_body(&state, &user.username, &name),
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    }
-}
-
-async fn prompt_delete(
-    user: CurrentUser,
-    State(state): State<AppState>,
-    Path(name): Path<String>,
-) -> impl IntoResponse {
-    if !editable(&name) {
-        return StatusCode::NOT_FOUND.into_response();
-    }
-    match crate::prompts::reset(&state.config_dir, &user.username, &name) {
-        Ok(()) => prompt_body(&state, &user.username, &name),
+    match crate::prompts::save_about(&state.config_dir, &user.username, &req.content) {
+        Ok(()) => about_body(&state, &user.username),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }

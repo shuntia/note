@@ -447,7 +447,7 @@ pub fn generate_title(state: &AppState, user_id: i64, username: &str, conversati
     };
     let named = match exchange {
         Ok(None) => return,
-        Ok(Some(exchange)) => crate::prompts::load_in(&state.config_dir, username, "title", lang)
+        Ok(Some(exchange)) => crate::prompts::load_in(&state.config_dir, "title", lang)
             .map(|system| crate::agent::with_language_line(system, &state.config_dir, username))
             .and_then(|system| ask_for_title(state.llm.as_ref(), &system, &exchange))
             .and_then(|title| {

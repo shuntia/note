@@ -133,7 +133,7 @@ fn summarize(
     hits: &[SearchHit],
 ) -> Option<String> {
     let l = crate::text::Lang::for_user(deps.config_dir, username);
-    let system = crate::prompts::load_in(deps.config_dir, username, "search", l).ok()?;
+    let system = crate::prompts::load_in(deps.config_dir, "search", l).ok()?;
     let mut prompt = format!("{}: {}\n", mt::search_query(l), args.query.trim());
     if let Some(q) = args.question.as_deref().map(str::trim).filter(|q| !q.is_empty()) {
         let _ = writeln!(prompt, "{}: {q}", mt::search_question(l));

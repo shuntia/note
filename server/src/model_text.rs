@@ -46,6 +46,13 @@ pub fn call_speaks_only(l: Lang) -> &'static str {
     )
 }
 
+pub fn about_user(l: Lang) -> &'static str {
+    match l {
+        Lang::En => "# About the user, in their own words",
+        Lang::Ja => "# ユーザー自身が書いた、ユーザーのこと",
+    }
+}
+
 pub fn share_from(l: Lang, owner: &str) -> String {
     match l {
         Lang::En => format!("# From {owner}"),

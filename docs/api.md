@@ -10,7 +10,7 @@ Errors carry `{"error": …}`. `GET /healthz` answers `ok`.
 | Account | `POST /api/login`, `POST /api/logout`, `POST /api/password` (ends the account's other sessions), `GET /api/me` (also records where the user is, for share visits), `POST /api/onboarding/done`, `POST /api/presence` | [security.md](security.md) |
 | Invites | `GET/POST /api/join/{token}` (`server/src/invites.rs`) | [security.md](security.md#invites) |
 | Settings | `GET/PUT /api/settings` | [configuration.md](configuration.md#usertoml-and-the-settings-api) |
-| Prompts | `GET/PUT/DELETE /api/prompts/{name}` | [agent.md](agent.md#prompts) |
+| About you | `GET/PUT /api/about` | [agent.md](agent.md#prompts) |
 | Tasks | `GET/POST /api/tasks`, `PATCH/DELETE /api/tasks/{id}`, `POST /api/tasks/{id}/split`, `POST /api/tasks/{id}/flatten`, `GET /api/tasks/queue` (open tasks ranked), `GET /api/tasks/candidates` (today's run order, then the queue) | [planning.md](planning.md#tasks) |
 | Run order | `GET/PUT /api/order` | [planning.md](planning.md#run-order) |
 | Import | `PUT/DELETE /api/tasks/by-external/{external_id}`, `PUT/DELETE /api/calendar/by-external/{external_id}`, `POST /api/tasks/{id}/agent`, `POST /api/agent/inbox` | [importing.md](importing.md) |

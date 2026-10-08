@@ -190,7 +190,7 @@ pub(crate) fn system_prompt_in(
     // An import session briefs one task and an inbox session judges one item,
     // both on a caller's behalf: each gets its own instructions and none of the
     // user's standing context.
-    let load = |name| crate::prompts::load_in(deps.config_dir, username, name, lang);
+    let load = |name| crate::prompts::load_in(deps.config_dir, name, lang);
     let mut system = match kind {
         SessionKind::Import => load("import")?,
         SessionKind::Inbox => load("inbox")?,
@@ -216,6 +216,11 @@ pub(crate) fn system_prompt_in(
     if kind == SessionKind::Trigger {
         system.push_str("\n\n");
         system.push_str(&load("trigger")?);
+    }
+    if !matches!(kind, SessionKind::Import | SessionKind::Inbox | SessionKind::Summarize | SessionKind::Share) {
+        if let Some(about) = crate::prompts::about(deps.config_dir, username) {
+            let _ = write!(system, "\n\n{}\n\n{about}", mt::about_user(lang));
+        }
     }
     if lang == Lang::Ja && kind != SessionKind::Call {
         system.push_str("\n\n");
@@ -650,6 +655,25 @@ mod tests {
         let call = prompt(SessionKind::Call);
         assert!(call.starts_with(&format!("{}\n{SPEAK_JAPANESE}\n\non the phone with X", mt::call_briefly(Lang::Ja))), "{call}");
         assert!(!call.contains(REPLY_IN_JAPANESE), "{call}");
+    }
+
+    #[test]
+    fn what_the_user_wrote_about_themselves_follows_the_shipped_prompt() {
+        let (db, tmp) = env();
+        std::fs::write(tmp.path().join("defaults/prompts/voice.md"), "on the phone with {name}").unwrap();
+        std::fs::create_dir_all(tmp.path().join("users/aki/prompts")).unwrap();
+        std::fs::write(tmp.path().join("users/aki/prompts/persona.md"), "an old override").unwrap();
+        crate::prompts::save_about(tmp.path(), "aki", "I have ADHD.").unwrap();
+        let llm = MockLLM::scripted(vec![]);
+        let prompt = |kind| system_prompt(&deps(&db, &tmp, &llm), 1, "aki", kind, now()).unwrap();
+        let talk = prompt(SessionKind::Talk);
+        assert!(talk.starts_with(&format!("you are note, be kind\n\n{}\n\nI have ADHD.", mt::about_user(Lang::En))), "{talk}");
+        for kind in [SessionKind::Trigger, SessionKind::Nightly, SessionKind::Call] {
+            assert!(prompt(kind).contains("I have ADHD."), "{kind:?}");
+        }
+        for kind in [SessionKind::Import, SessionKind::Inbox] {
+            assert!(!prompt(kind).contains("I have ADHD."), "{kind:?}");
+        }
     }
 
     #[test]

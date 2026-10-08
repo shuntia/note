@@ -278,10 +278,7 @@ export type SettingsSaved = Pick<
   | 'language'
 > & { schedule: ScheduleRow[] }
 
-export type PromptName = 'persona' | 'planning' | 'share'
-
-// `content` is the effective prompt; `custom` marks it as the user's own override.
-export type PromptDoc = { name: PromptName; content: string; custom: boolean }
+export type AboutDoc = { content: string }
 
 export type Passkey = {
   id: number

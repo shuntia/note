@@ -25,8 +25,6 @@ import type {
   Language,
   Me,
   Passkey,
-  PromptDoc,
-  PromptName,
   RingFor,
   ScheduleRow,
   SecurityState,
@@ -1252,10 +1250,10 @@ export function Settings({
       </Group>
 
       <Group head={t('settings.advanced')}>
-        {/* The prompt editor stays mounted and renders nothing while closed, so an
-            unsaved draft survives a detour through another row. */}
-        <FoldRow label={t('settings.persona')} open={open === 'persona'} onToggle={fold('persona')}>
-          <PersonaSection active={open === 'persona'} notify={notify} />
+        {/* Stays mounted and renders nothing while closed, so an unsaved draft
+            survives a detour through another row. */}
+        <FoldRow label={t('settings.about')} open={open === 'about'} onToggle={fold('about')}>
+          <AboutSection active={open === 'about'} />
         </FoldRow>
         <FoldRow label={t('settings.security')} open={open === 'security'} onToggle={fold('security')}>
           {open === 'security' && <SecuritySection notify={notify} />}
@@ -1404,76 +1402,37 @@ function ScheduleList({
   )
 }
 
-const PROMPTS: { id: PromptName; key: Key }[] = [
-  { id: 'persona', key: 'settings.prompt.persona' },
-  { id: 'planning', key: 'settings.prompt.planning' },
-  { id: 'share', key: 'settings.prompt.share' },
-]
-
-const UNDO_MS = 5000
-
-function PersonaSection({ active, notify }: { active: boolean; notify: Notify }) {
-  const [name, setName] = useState<PromptName>('persona')
-  // Fetched body and unsaved text are both kept per prompt, so switching the picker
-  // holds on to a draft instead of discarding it.
-  const [docs, setDocs] = useState<Partial<Record<PromptName, PromptDoc | 'error'>>>({})
-  const [edits, setEdits] = useState<Partial<Record<PromptName, string>>>({})
+function AboutSection({ active }: { active: boolean }) {
+  const [saved, setSaved] = useState<string | 'error' | undefined>(undefined)
+  const [text, setText] = useState<string | undefined>(undefined)
   const [save, setSave] = useState<Save>(null)
-  const [resets, setResets] = useState(0)
-  const asked = useRef(new Set<PromptName>())
-  const editor = useRef<HTMLTextAreaElement>(null)
+  const asked = useRef(false)
 
-  const load = (which: PromptName) => {
-    asked.current.add(which)
-    setDocs((all) => ({ ...all, [which]: undefined }))
-    setSave(null)
+  const load = () => {
+    asked.current = true
+    setSaved(undefined)
     api
-      .promptGet(which)
-      .then((d) => setDocs((all) => ({ ...all, [which]: d })))
+      .aboutGet()
+      .then((d) => setSaved(d.content))
       .catch(() => {
-        asked.current.delete(which)
-        setDocs((all) => ({ ...all, [which]: 'error' }))
+        asked.current = false
+        setSaved('error')
       })
   }
 
   useEffect(() => {
-    if (active && !asked.current.has(name)) load(name)
-  }, [active, name])
-
-  // The reset button disables itself once the default lands, so focus goes to the
-  // field the reset rewrote instead of falling to the body.
-  useEffect(() => {
-    if (resets) editor.current?.focus()
-  }, [resets])
+    if (active && !asked.current) load()
+  }, [active])
 
   if (!active) return null
 
-  const doc = docs[name]
-  const picker = (
-    <select
-      aria-label={t('settings.prompt')}
-      value={name}
-      onChange={(e) => {
-        setSave(null)
-        setName(e.target.value as PromptName)
-      }}
-    >
-      {PROMPTS.map((p) => (
-        <option key={p.id} value={p.id}>
-          {t(p.key)}
-        </option>
-      ))}
-    </select>
-  )
-
-  if (doc === undefined || doc === 'error') {
+  if (saved === undefined || saved === 'error') {
     return (
       <div className="set-fold-body">
-        {picker}
-        {doc === 'error' && (
+        {saved === 'error' && (
           <p className="set-sub">
-            {t('settings.prompt.loadFailed')}{' '}
-            <button className="set-link" onClick={() => load(name)}>
+            {t('settings.about.loadFailed')}{' '}
+            <button className="set-link" onClick={load}>
               {t('common.retry')}
             </button>
           </p>
@@ -1482,89 +1441,45 @@ function PersonaSection({ active, notify }: { active: boolean; notify: Notify })
     )
   }
 
-  const text = edits[name] ?? doc.content
-  const blank = text.trim().length === 0
-  const dirty = text !== doc.content
+  const value = text ?? saved
+  const dirty = value !== saved
   const busy = save?.kind === 'busy'
-  const setText = (value: string) => setEdits((all) => ({ ...all, [name]: value }))
 
   const submit = async (e: FormEvent) => {
     e.preventDefault()
-    if (!dirty || blank) return
-    setSave({ row: 'prompt', kind: 'busy' })
+    if (!dirty) return
+    setSave({ row: 'about', kind: 'busy' })
     try {
-      const d = await api.promptPut(name, text)
-      setDocs((all) => ({ ...all, [name]: d }))
-      setSave({ row: 'prompt', kind: 'saved' })
+      const d = await api.aboutPut(value)
+      setSaved(d.content)
+      setText(undefined)
+      setSave({ row: 'about', kind: 'saved' })
     } catch (err) {
       setSave({
-        row: 'prompt',
+        row: 'about',
         kind: 'failed',
-        message:
-          err instanceof ApiError && err.status === 400
-            ? err.message
-            : t('settings.prompt.saveFailed'),
+        message: err instanceof ApiError && err.status === 400 ? err.message : t('settings.about.saveFailed'),
       })
-    }
-  }
-
-  const reset = async () => {
-    const previous = doc.content
-    setSave({ row: 'prompt', kind: 'busy' })
-    try {
-      const d = await api.promptReset(name)
-      setDocs((all) => ({ ...all, [name]: d }))
-      setEdits((all) => ({ ...all, [name]: undefined }))
-      setSave(null)
-      notify(t('settings.prompt.reset'), {
-        label: t('toast.undo'),
-        windowMs: UNDO_MS,
-        run: () => {
-          api
-            .promptPut(name, previous)
-            .then((back) => setDocs((all) => ({ ...all, [name]: back })))
-            .catch(() => notify(t('settings.prompt.undoFailed')))
-        },
-      })
-    } catch {
-      setSave({ row: 'prompt', kind: 'failed', message: t('settings.prompt.resetFailed') })
-    } finally {
-      setResets((n) => n + 1)
     }
   }
 
   return (
     <form className="set-fold-body" onSubmit={submit}>
       <fieldset className="set-prompt-rows" disabled={busy}>
-        {picker}
-        {doc.custom && <span className="set-badge">{t('settings.prompt.custom')}</span>}
         <textarea
-          ref={editor}
-          className="mono set-prompt"
-          aria-label={t('settings.prompt.editor', { name: t(PROMPTS.find((p) => p.id === name)?.key ?? 'settings.prompt.persona') })}
-          rows={14}
-          value={text}
+          className="set-prompt"
+          aria-label={t('settings.about')}
+          placeholder={t('settings.about.hint')}
+          rows={8}
+          value={value}
           onChange={(e) => setText(e.target.value)}
         />
       </fieldset>
       <div className="set-acts">
-        <button className="btn-haze small" disabled={!dirty || blank || busy}>
-          {busy ? t('settings.prompt.saving') : t('common.save')}
+        <button className="btn-haze small" disabled={!dirty || busy}>
+          {busy ? t('settings.about.saving') : t('common.save')}
         </button>
-        <button
-          type="button"
-          className="set-link"
-          disabled={(!doc.custom && !dirty) || busy}
-          onClick={() => void reset()}
-        >
-          {t('settings.prompt.reset')}
-        </button>
-        {blank && dirty && (
-          <span className="pane-status bad" role="alert">
-            {t('settings.prompt.empty')}
-          </span>
-        )}
-        {!dirty && <Status save={save} row="prompt" />}
+        {!dirty && <Status save={save} row="about" />}
       </div>
     </form>
   )

@@ -38,7 +38,7 @@ Views (`web/src/views/`):
 - **Memory**: every fact the agent saved (filter, search, open) and the inbox
   of imported items, with Refresh when `[inbox] refresh_signal` is set.
 - **Settings**: profile, language, day and template, check-ins, sessions,
-  connections (Matrix, calls, voice), Web Push, theme, prompts, API tokens,
+  connections (Matrix, calls, voice), Web Push, theme, About you, API tokens,
   share links, security, and the admin panel for admins.
 - **Onboarding**, **Join** (invite links), **Share** (the `/s/<token>` visitor
   chat), **Admin**.

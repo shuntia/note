@@ -2,33 +2,19 @@ use anyhow::{Context, Result};
 use crate::text::Lang;
 use std::path::{Path, PathBuf};
 
-/// The prompts a user may override through the API. Every function here checks
-/// a name against this list, so a caller-supplied name can never become a path
-/// of its own choosing.
-pub const EDITABLE: [&str; 12] = [
+/// The shipped prompts. They belong to the app and are never overridden; what a
+/// user adds goes in `about`.
+pub const NAMES: [&str; 12] = [
     "persona", "planning", "import", "inbox", "summarize", "harvest", "review", "trigger",
     "search", "title", "share", "voice",
 ];
 
-fn checked(name: &str) -> Result<()> {
-    anyhow::ensure!(EDITABLE.contains(&name), "unknown prompt {name:?}");
-    Ok(())
-}
+pub const MAX_ABOUT_BYTES: usize = 8 * 1024;
 
-fn override_path(config_dir: &Path, user: &str, name: &str) -> PathBuf {
-    config_dir.join("users").join(user).join("prompts").join(format!("{name}.md"))
-}
-
-/// `load_in` the user's own language.
-pub fn load(config_dir: &Path, user: &str, name: &str) -> Result<String> {
-    load_in(config_dir, user, name, Lang::for_user(config_dir, user))
-}
-
-/// The user's override, else the shipped default in `lang`, else the English one.
-pub fn load_in(config_dir: &Path, user: &str, name: &str, lang: Lang) -> Result<String> {
-    checked(name)?;
-    let user_path = override_path(config_dir, user, name);
-    let path = if user_path.exists() { user_path } else { default_path(config_dir, name, lang) };
+/// The shipped prompt in `lang`, else the English one.
+pub fn load_in(config_dir: &Path, name: &str, lang: Lang) -> Result<String> {
+    anyhow::ensure!(NAMES.contains(&name), "unknown prompt {name:?}");
+    let path = default_path(config_dir, name, lang);
     std::fs::read_to_string(&path).with_context(|| format!("reading prompt {name} ({})", path.display()))
 }
 
@@ -40,27 +26,29 @@ fn default_path(config_dir: &Path, name: &str, lang: Lang) -> PathBuf {
     if lang != Lang::En && localised.exists() { localised } else { dir.join(file) }
 }
 
-pub fn custom(config_dir: &Path, user: &str, name: &str) -> bool {
-    checked(name).is_ok() && override_path(config_dir, user, name).exists()
+fn about_path(config_dir: &Path, user: &str) -> PathBuf {
+    config_dir.join("users").join(user).join("about.md")
 }
 
-pub fn save(config_dir: &Path, user: &str, name: &str, content: &str) -> Result<()> {
-    checked(name)?;
-    let path = override_path(config_dir, user, name);
-    std::fs::create_dir_all(path.parent().expect("a prompt file always has a parent"))?;
-    crate::context::write_atomic(&path, content)?;
-    Ok(())
+/// What the user wrote about themselves, added after the shipped prompt.
+pub fn about(config_dir: &Path, user: &str) -> Option<String> {
+    let text = std::fs::read_to_string(about_path(config_dir, user)).ok()?;
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_string())
 }
 
-/// Drops the user's override so `load` falls back to the shipped default;
-/// having no override to drop is success, not an error.
-pub fn reset(config_dir: &Path, user: &str, name: &str) -> Result<()> {
-    checked(name)?;
-    match std::fs::remove_file(override_path(config_dir, user, name)) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e.into()),
+/// Blank text removes it; having nothing to remove is success.
+pub fn save_about(config_dir: &Path, user: &str, content: &str) -> Result<()> {
+    let path = about_path(config_dir, user);
+    if content.trim().is_empty() {
+        return match std::fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
+            _ => Ok(()),
+        };
     }
+    std::fs::create_dir_all(path.parent().expect("an about file always has a parent"))?;
+    crate::context::write_atomic(&path, content.trim())?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -74,46 +62,55 @@ mod tests {
     }
 
     #[test]
-    fn user_prompt_overrides_default() {
+    fn an_old_override_file_is_ignored() {
         let tmp = tempfile::tempdir().unwrap();
         write(tmp.path(), "defaults/prompts/persona.md", "default persona");
         write(tmp.path(), "users/aki/prompts/persona.md", "aki persona");
-        assert_eq!(load(tmp.path(), "aki", "persona").unwrap(), "aki persona");
-        assert_eq!(load(tmp.path(), "bob", "persona").unwrap(), "default persona");
-        let err = load(tmp.path(), "aki", "planning").unwrap_err().to_string();
+        assert_eq!(load_in(tmp.path(), "persona", Lang::En).unwrap(), "default persona");
+        let err = load_in(tmp.path(), "planning", Lang::En).unwrap_err().to_string();
         assert!(err.contains("planning"), "{err}");
+        for bad in ["../x", "../../etc/passwd", "persona.md", "", "secrets"] {
+            assert!(load_in(tmp.path(), bad, Lang::En).is_err(), "loaded {bad:?}");
+        }
     }
 
-    /// The allow-list lives here rather than in each caller, so forgetting it
-    /// upstream cannot turn a name into a path.
     #[test]
-    fn a_name_outside_the_allow_list_never_reaches_the_filesystem() {
+    fn about_is_saved_trimmed_and_blank_removes_it() {
         let tmp = tempfile::tempdir().unwrap();
-        write(tmp.path(), "defaults/prompts/persona.md", "default persona");
-        for bad in ["../x", "../../etc/passwd", "persona.md", "", "secrets"] {
-            assert!(save(tmp.path(), "aki", bad, "owned").is_err(), "saved {bad:?}");
-            assert!(load(tmp.path(), "aki", bad).is_err(), "loaded {bad:?}");
-            assert!(reset(tmp.path(), "aki", bad).is_err(), "reset {bad:?}");
-            assert!(!custom(tmp.path(), "aki", bad));
-        }
-        assert!(!tmp.path().join("users/aki/prompts").exists());
-        assert!(!tmp.path().join("users/aki/x.md").exists());
+        assert_eq!(about(tmp.path(), "aki"), None);
+        save_about(tmp.path(), "aki", "  I have ADHD.\n").unwrap();
+        assert_eq!(about(tmp.path(), "aki").as_deref(), Some("I have ADHD."));
+        assert_eq!(about(tmp.path(), "bob"), None);
+        save_about(tmp.path(), "aki", "   ").unwrap();
+        assert_eq!(about(tmp.path(), "aki"), None);
+        save_about(tmp.path(), "aki", "").unwrap();
+    }
+
+    #[test]
+    fn a_japanese_reader_gets_the_japanese_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), "defaults/prompts/persona.md", "english persona");
+        write(tmp.path(), "defaults/prompts/ja/persona.md", "日本語のペルソナ");
+        write(tmp.path(), "defaults/prompts/planning.md", "english planning");
+        assert_eq!(load_in(tmp.path(), "persona", Lang::Ja).unwrap(), "日本語のペルソナ");
+        assert_eq!(load_in(tmp.path(), "persona", Lang::En).unwrap(), "english persona");
+        assert_eq!(load_in(tmp.path(), "planning", Lang::Ja).unwrap(), "english planning");
     }
 
     fn shipped() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("config")
     }
 
-    /// The shipped defaults are what an un-overridden server loads, so every
+    /// The shipped defaults are what the server loads, so every
     /// editable name must resolve to a file in the repo's config tree, in
     /// every language, naming the tools its session has.
     #[test]
-    fn every_editable_prompt_ships_a_default() {
+    fn every_prompt_ships_a_default() {
         let config = shipped();
-        assert!(EDITABLE.contains(&"import"));
+        assert!(NAMES.contains(&"import"));
         for lang in [Lang::En, Lang::Ja] {
-            let load = |name| load_in(&config, "nobody", name, lang).unwrap();
-            for name in EDITABLE {
+            let load = |name| load_in(&config, name, lang).unwrap();
+            for name in NAMES {
                 assert!(!load(name).trim().is_empty(), "{name} ({lang:?}) ships an empty prompt");
             }
             use crate::tools::{registry, SessionKind as K};
@@ -148,7 +145,7 @@ mod tests {
             }
             let planning = load("planning");
             assert!(planning.contains("order_set"), "the planning prompt ({lang:?}) never sets the order");
-            for name in EDITABLE {
+            for name in NAMES {
                 assert!(!load(name).contains("plan_auto"), "the {name} prompt ({lang:?}) still calls plan_auto");
             }
         }
@@ -166,7 +163,7 @@ mod tests {
     #[test]
     fn every_translation_fills_the_same_placeholders() {
         let dir = shipped().join("defaults/prompts");
-        for name in EDITABLE {
+        for name in NAMES {
             let en = std::fs::read_to_string(dir.join(format!("{name}.md"))).unwrap();
             let ja = std::fs::read_to_string(dir.join("ja").join(format!("{name}.md")))
                 .unwrap_or_else(|_| panic!("{name} ships no Japanese default"));
@@ -174,42 +171,5 @@ mod tests {
         }
         let share = std::fs::read_to_string(dir.join("share.md")).unwrap();
         assert_eq!(placeholders(&share).into_iter().collect::<Vec<_>>(), ["owner"]);
-    }
-
-    #[test]
-    fn a_japanese_reader_gets_the_japanese_default_until_they_override_it() {
-        let tmp = tempfile::tempdir().unwrap();
-        write(tmp.path(), "defaults/prompts/persona.md", "english persona");
-        write(tmp.path(), "defaults/prompts/ja/persona.md", "日本語のペルソナ");
-        write(tmp.path(), "defaults/prompts/planning.md", "english planning");
-        write(tmp.path(), "defaults/user.toml", "display_name = \"X\"\ntimezone = \"UTC\"\ntemplate = \"default\"\n");
-        write(tmp.path(), "users/aki/user.toml", "language = \"ja\"\n");
-        assert_eq!(load(tmp.path(), "aki", "persona").unwrap(), "日本語のペルソナ");
-        assert_eq!(load(tmp.path(), "bob", "persona").unwrap(), "english persona");
-        assert_eq!(load(tmp.path(), "aki", "planning").unwrap(), "english planning");
-        assert_eq!(load_in(tmp.path(), "aki", "persona", Lang::En).unwrap(), "english persona");
-        save(tmp.path(), "aki", "persona", "aki persona").unwrap();
-        assert_eq!(load(tmp.path(), "aki", "persona").unwrap(), "aki persona");
-        reset(tmp.path(), "aki", "persona").unwrap();
-        assert_eq!(load(tmp.path(), "aki", "persona").unwrap(), "日本語のペルソナ");
-    }
-
-    #[test]
-    fn save_overrides_and_reset_restores_the_default() {
-        let tmp = tempfile::tempdir().unwrap();
-        write(tmp.path(), "defaults/prompts/persona.md", "default persona");
-        assert!(!custom(tmp.path(), "aki", "persona"));
-
-        save(tmp.path(), "aki", "persona", "aki persona").unwrap();
-        assert!(custom(tmp.path(), "aki", "persona"));
-        assert_eq!(load(tmp.path(), "aki", "persona").unwrap(), "aki persona");
-
-        save(tmp.path(), "aki", "persona", "aki again").unwrap();
-        assert_eq!(load(tmp.path(), "aki", "persona").unwrap(), "aki again");
-
-        reset(tmp.path(), "aki", "persona").unwrap();
-        assert!(!custom(tmp.path(), "aki", "persona"));
-        assert_eq!(load(tmp.path(), "aki", "persona").unwrap(), "default persona");
-        reset(tmp.path(), "aki", "persona").unwrap();
     }
 }

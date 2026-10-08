@@ -62,7 +62,7 @@ address people use. Without `providers` the server runs on the built-in mock.
 | `credentials` | name → path; readable by the service at `/run/credentials/note.service/<name>` (`config.services.note.credentialPath "<name>"`). An `admin_totp` entry installs the legacy admin seed |
 | `environmentFile` | extra environment, e.g. `ANTHROPIC_API_KEY` for a provider's `api_key_env` |
 | `openFirewall` | opens the `bind_addr` port |
-| `stateDir` | `/var/lib/note`: database, memory files, per-user settings and prompt overrides. The one directory to back up or, on an impermanent root, persist |
+| `stateDir` | `/var/lib/note`: database, memory files, per-user settings and "About you" text. The one directory to back up or, on an impermanent root, persist |
 | `package`, `user`, `group` | default: this flake's `note-server`, `note`, `note` |
 
 `overlays.default` adds `note-server` and `note-voice` to `pkgs`.

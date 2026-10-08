@@ -106,18 +106,21 @@ occurrence, with a work session open, or with no activity for 90 minutes.
 
 ## Prompts
 
-Agent behaviour lives in `config/defaults/prompts/*.md` (`ja/` for Japanese),
-overridable per user under `config/users/<user>/prompts/`. Changing tone or
-policy is a file edit, not a deploy. Over HTTP:
+Agent behaviour lives in `config/defaults/prompts/*.md` (`ja/` for Japanese)
+and belongs to the app: users cannot replace it, so every user gets each
+change. Changing policy is a file edit, not a deploy. `persona` drives chat,
+`import` task briefing, `inbox` item reading, `share` share-link sessions,
+`search` the web-search summarizer, `planning` the nightly run, `trigger`
+wake-ups, `voice` calls.
 
-- `GET /api/prompts/{name}` → `{name, content, custom}`, `content` being the
-  effective text.
-- `PUT /api/prompts/{name} {content}` writes the user's override.
-- `DELETE /api/prompts/{name}` goes back to the default.
+What a user writes about themselves (Settings → About you,
+`config/users/<user>/about.md`, at most 8 KiB) follows the shipped prompt
+under "About the user, in their own words" in every session but share, task
+briefing, inbox and summarize. Who they are and how Note should talk to them
+goes there.
 
-Any name without a prompt file is a `404`. `import` drives task briefing,
-`inbox` item reading, `share` share-link sessions, `search` the web-search
-summarizer, `planning` the nightly run, `trigger` wake-ups, `voice` calls.
+- `GET /api/about` → `{content}`, empty when there is none.
+- `PUT /api/about {content}` saves it trimmed; blank content clears it.
 
 ## Context
 
