@@ -1480,7 +1480,7 @@ dependencies = [
 [[package]]
 name = "kanalizer"
 version = "0.0.0"
-source = "git+https://github.com/VOICEVOX/kanalizer?rev=a65240e586cbf3cbbb46ea413df0fe9128166a49#a65240e586cbf3cbbb46ea413df0fe9128166a49"
+source = "git+https://github.com/VOICEVOX/kanalizer?rev=98758acdc6cb80611958ade58cb05191e2658462#98758acdc6cb80611958ade58cb05191e2658462"
 dependencies = [
  "anyhow",
  "brotli",
@@ -1520,6 +1520,16 @@ name = "libloading"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
+dependencies = [
+ "cfg-if",
+ "windows-link",
+]
+
+[[package]]
+name = "libloading"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "754ca22de805bb5744484a5b151a9e1a8e837d5dc232c2d7d8c2e3492edc8b60"
 dependencies = [
  "cfg-if",
  "windows-link",
@@ -1762,7 +1772,7 @@ dependencies = [
  "futures-util",
  "hound",
  "kanalizer",
- "libloading",
+ "libloading 0.9.0",
  "ndarray",
  "num_cpus",
  "ort",
@@ -1906,7 +1916,7 @@ version = "2.0.0-rc.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fa7e49bd669d32d7bc2a15ec540a527e7764aec722a45467814005725bcd721"
 dependencies = [
- "libloading",
+ "libloading 0.8.9",
  "ndarray",
  "ort-sys",
  "smallvec 2.0.0-alpha.10",
@@ -3420,18 +3430,18 @@ dependencies = [
 
 [[package]]
 name = "zerocopy"
-version = "0.8.60"
+version = "0.8.61"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6400fc4bb7426f6faac3fb07566122bb18622e3022bd2c36426a92ed489b1dbe"
+checksum = "879fb705ce98c32e41ebdb970fbe1204f8492423b314c6ab0354c3e7b5542866"
 dependencies = [
  "zerocopy-derive",
 ]
 
 [[package]]
 name = "zerocopy-derive"
-version = "0.8.60"
+version = "0.8.61"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "99c27cc7525bad4df59a45e073c45b2c2aa820efb588234cc23a547ec69a34db"
+checksum = "708882a28301d604fa039cc7727607a98d04c4b86dc76ec9cc683f805d709759"
 dependencies = [
  "proc-macro2",
  "quote",

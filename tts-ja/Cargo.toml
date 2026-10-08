@@ -13,8 +13,8 @@ anyhow = "1"
 axum = { version = "0.8", features = ["ws"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 hound = "3.5"
-kanalizer = { git = "https://github.com/VOICEVOX/kanalizer", rev = "a65240e586cbf3cbbb46ea413df0fe9128166a49" }
-libloading = "0.8"
+kanalizer = { git = "https://github.com/VOICEVOX/kanalizer", rev = "98758acdc6cb80611958ade58cb05191e2658462" }
+libloading = "0.9"
 ndarray = "0.16"
 num_cpus = "1"
 ort = { version = "=2.0.0-rc.10", default-features = false, features = ["std", "ndarray", "load-dynamic", "cuda"] }

@@ -62,7 +62,7 @@ downloaded at run time.
   made with it is credited `VOICEVOX:冥鳴ひまり`.
 - **OpenJTalk dictionary** `open_jtalk_dic_utf_8-1.11` (BSD-3-Clause), for
   VOICEVOX.
-- **kanalizer** @ `a65240e5` and its model `VOICEVOX/kanalizer-model` v5: MIT.
+- **kanalizer** @ `98758acd` and its model `VOICEVOX/kanalizer-model` v5: MIT.
 - **onnxruntime** with CUDA: note-voice's sherpa-onnx build, shared with it.
 
 The credits reach the web voice sheet through the `credit` field of `/info`,
