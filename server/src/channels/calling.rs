@@ -22,8 +22,12 @@ impl WebCalls for NoWebCalls {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("no linked Matrix account")]
+pub struct NoLinkedPhone;
+
 /// Rings the user's linked phone; the message follows down the ladder if the
-/// ring goes unanswered.
+/// ring goes unanswered. Fails with `NoLinkedPhone` when there is none to ring.
 pub trait PhoneRing {
     fn ring_phone(&self, user_id: i64, msg: &OutboundMessage) -> anyhow::Result<()>;
 }
@@ -62,13 +66,16 @@ pub fn ring_with(
     if let Some(phone) = phone {
         match phone.ring_phone(user_id, msg) {
             Ok(()) => return RingOutcome::Phone,
+            Err(e) if e.is::<NoLinkedPhone>() => {}
             Err(e) => {
+                let subject = msg.event_id.map_or_else(|| "test".to_string(), |id| format!("event {id}"));
                 let conn = crate::db_guard(db);
-                let _ = crate::log::record(&conn, Some(user_id), "ring_phone_error", &format!("{e:#}"));
+                let _ = crate::log::record(&conn, Some(user_id), "ring_phone_error", &format!("{subject}: {e:#}"));
             }
         }
     }
-    RingOutcome::Messaged(deliver_via(db, ladder, user_id, username, msg))
+    let rest: Vec<Arc<dyn Channel>> = ladder.iter().filter(|c| c.name() != "voice").cloned().collect();
+    RingOutcome::Messaged(deliver_via(db, &rest, user_id, username, msg))
 }
 
 /// Calls the user the best way open to them: the open web app, else the linked
@@ -116,14 +123,34 @@ mod tests {
         FakeWeb { live, answers, rang: StdMutex::default() }
     }
 
-    struct FakePhone(bool, StdMutex<usize>);
+    #[derive(Clone, Copy)]
+    enum Phone {
+        Answers,
+        Unlinked,
+        Fails,
+    }
+
+    struct FakePhone(Phone, StdMutex<usize>);
 
     impl PhoneRing for FakePhone {
         fn ring_phone(&self, _: i64, _: &OutboundMessage) -> anyhow::Result<()> {
             *self.1.lock().unwrap() += 1;
-            anyhow::ensure!(self.0, "no linked Matrix account");
-            Ok(())
+            match self.0 {
+                Phone::Answers => Ok(()),
+                Phone::Unlinked => Err(NoLinkedPhone.into()),
+                Phone::Fails => anyhow::bail!("the voice service is not connected"),
+            }
         }
+    }
+
+    fn phone(p: Phone) -> FakePhone {
+        FakePhone(p, StdMutex::default())
+    }
+
+    fn ring_errors(db: &Mutex<Connection>) -> Vec<String> {
+        let conn = db.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT detail FROM event_log WHERE kind = 'ring_phone_error'").unwrap();
+        stmt.query_map([], |r| r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap()
     }
 
     fn msg() -> OutboundMessage {
@@ -148,7 +175,7 @@ mod tests {
     #[test]
     fn an_open_web_app_takes_the_call() {
         let (db, push, ladder) = world();
-        let (web, phone) = (web(true, true), FakePhone(true, StdMutex::default()));
+        let (web, phone) = (web(true, true), phone(Phone::Answers));
         let out = ring_with(&db, &web, Some(&phone), &ladder, 1, "aki", &msg());
         assert_eq!(out, RingOutcome::Web);
         assert_eq!(*web.rang.lock().unwrap(), [(1, Some(7))]);
@@ -160,7 +187,7 @@ mod tests {
     fn without_a_web_app_the_phone_rings() {
         let (db, push, ladder) = world();
         for w in [web(false, true), web(true, false)] {
-            let phone = FakePhone(true, StdMutex::default());
+            let phone = phone(Phone::Answers);
             assert_eq!(ring_with(&db, &w, Some(&phone), &ladder, 1, "aki", &msg()), RingOutcome::Phone);
         }
         assert!(push.seen().is_empty());
@@ -169,16 +196,32 @@ mod tests {
     #[test]
     fn with_nothing_to_ring_the_message_goes_down_the_ladder() {
         let (db, push, ladder) = world();
-        let phone = FakePhone(false, StdMutex::default());
+        let phone = phone(Phone::Fails);
         assert_eq!(ring_with(&db, &NoWebCalls, Some(&phone), &ladder, 1, "aki", &msg()), RingOutcome::Messaged(Some("mock")));
         assert_eq!(ring_with(&db, &NoWebCalls, None, &ladder, 1, "aki", &msg()), RingOutcome::Messaged(Some("mock")));
         assert_eq!(push.seen().len(), 2);
-        let errors: i64 = db
-            .lock()
-            .unwrap()
-            .query_row("SELECT COUNT(*) FROM event_log WHERE kind = 'ring_phone_error'", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(errors, 1);
+        assert_eq!(ring_errors(&db), ["event 3: the voice service is not connected"]);
+    }
+
+    #[test]
+    fn a_user_without_a_linked_phone_is_messaged_quietly() {
+        let (db, push, ladder) = world();
+        let phone = phone(Phone::Unlinked);
+        assert_eq!(ring_with(&db, &NoWebCalls, Some(&phone), &ladder, 1, "aki", &msg()), RingOutcome::Messaged(Some("mock")));
+        assert_eq!(push.seen().len(), 1);
+        assert!(ring_errors(&db).is_empty());
+    }
+
+    #[test]
+    fn a_failed_phone_ring_is_not_retried_down_the_ladder() {
+        let (db, push, _) = world();
+        let voice = Arc::new(MockChannel::new("voice"));
+        let ladder: Vec<Arc<dyn Channel>> = vec![voice.clone(), push.clone()];
+        let phone = phone(Phone::Fails);
+        assert_eq!(ring_with(&db, &NoWebCalls, Some(&phone), &ladder, 1, "aki", &msg()), RingOutcome::Messaged(Some("mock")));
+        assert_eq!(*phone.1.lock().unwrap(), 1);
+        assert!(voice.seen().is_empty());
+        assert_eq!(push.seen().len(), 1);
     }
 
     #[test]

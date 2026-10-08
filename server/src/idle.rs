@@ -165,8 +165,11 @@ pub fn context(
     if let Some(at) = crate::presence::last_active(conn, user_id)? {
         let _ = writeln!(s, "{}", mt::quiet_for(l, (now.as_second() - at.as_second()).max(0) / 60));
     }
-    s.push_str(mt::open_working_lines(l));
-    for n in crate::notes::active(conn, data_dir, username, now)?.into_iter().take(20) {
+    let notes = crate::notes::active(conn, data_dir, username, now)?;
+    if !notes.is_empty() {
+        s.push_str(mt::open_working_lines(l));
+    }
+    for n in notes.into_iter().take(20) {
         let nudge = match &n.last_nudged_at {
             Some(t) => mt::nudged_ago(l, &ago(t, l, now)),
             None => mt::never_nudged(l).to_string(),
@@ -364,5 +367,13 @@ mod tests {
         assert!(text.contains(&format!("- {bank}: \"call the bank\", added 4 h ago, nudged 1 h ago")), "{text}");
         assert!(text.contains(&format!("- {milk}: \"milk\", added 30 min ago, never nudged")), "{text}");
         assert!(!text.contains("past thing"), "{text}");
+    }
+
+    #[test]
+    fn the_idle_note_has_no_working_header_without_active_notes() {
+        let (conn, tmp, uid) = env("");
+        seen(&conn, uid, "2026-09-30T11:40:00Z");
+        let text = context(&conn, tmp.path(), uid, "aki", Lang::En, noon()).unwrap();
+        assert!(!text.contains("Working notes"), "{text}");
     }
 }

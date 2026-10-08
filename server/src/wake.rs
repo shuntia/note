@@ -67,7 +67,7 @@ fn check_one(conn: &Connection, config_dir: &Path, user: &Seen, now: jiff::Times
         return Ok(None);
     }
     let date = local.date();
-    if laid_on(conn, user.user_id, date)? {
+    if laid_on(conn, user.user_id, date, now)? {
         return Ok(None);
     }
     let up_today = user
@@ -95,13 +95,28 @@ fn check_one(conn: &Connection, config_dir: &Path, user: &Seen, now: jiff::Times
     Ok(Some(id))
 }
 
-fn laid_on(conn: &Connection, user_id: i64, date: jiff::civil::Date) -> rusqlite::Result<bool> {
-    conn.query_row(
-        "SELECT EXISTS (SELECT 1 FROM events e JOIN plans p ON p.id = e.plan_id
-                        WHERE p.user_id = ?1 AND p.date = ?2 AND e.kind = ?3 AND e.origin = ?4)",
-        (user_id, date.to_string(), triggers::KIND, ORIGIN),
-        |r| r.get(0),
-    )
+/// Whether the day needs no `lay_day` trigger laid: one is waiting or decided, or
+/// one retry has already been laid. A `lay_day` fired before `now` whose session
+/// never decided leaves room for that one retry; one fired at `now` is still
+/// running in this sweep.
+fn laid_on(conn: &Connection, user_id: i64, date: jiff::civil::Date, now: jiff::Timestamp) -> rusqlite::Result<bool> {
+    let mut stmt = conn.prepare(
+        "SELECT e.status, e.fired_at, e.decided_at FROM events e JOIN plans p ON p.id = e.plan_id
+         WHERE p.user_id = ?1 AND p.date = ?2 AND e.kind = ?3 AND e.origin = ?4",
+    )?;
+    let rows: Vec<(String, Option<String>, Option<String>)> = stmt
+        .query_map((user_id, date.to_string(), triggers::KIND, ORIGIN), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let undecided = |(status, fired_at, decided_at): &(String, Option<String>, Option<String>)| {
+        status == "fired"
+            && decided_at.is_none()
+            && fired_at.as_deref().and_then(|t| t.parse::<jiff::Timestamp>().ok()).is_some_and(|t| t < now)
+    };
+    Ok(match rows.as_slice() {
+        [] => false,
+        [only] => !undecided(only),
+        _ => true,
+    })
 }
 
 pub const AWAY_MIN: i64 = 90;
@@ -196,6 +211,40 @@ mod tests {
         assert_eq!(laid(&conn), [("2026-10-07".into(), "07:11".into(), "lay_day".into())]);
         let date: jiff::civil::Date = "2026-10-07".parse().unwrap();
         assert_eq!(crate::triggers::spent(&conn, uid, date).unwrap(), 0, "it costs the day nothing");
+    }
+
+    fn fire(conn: &Connection, id: i64, ts: &str, decided: bool) {
+        conn.execute(
+            "UPDATE events SET status = ?1, fired_at = ?2, decided_at = ?3 WHERE id = ?4",
+            (if decided { "done" } else { "fired" }, ts, decided.then_some(ts), id),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn an_undecided_lay_day_is_laid_once_more_and_never_a_third_time() {
+        let (conn, tmp, uid) = env("");
+        seen(&conn, uid, "2026-10-07T07:10:00Z");
+        let first = check(&conn, tmp.path(), at("2026-10-07T07:11:00Z")).unwrap();
+        fire(&conn, first[0], "2026-10-07T07:11:30Z", false);
+        assert!(
+            check(&conn, tmp.path(), at("2026-10-07T07:11:30Z")).unwrap().is_empty(),
+            "a lay_day fired in this very sweep is still running"
+        );
+        let second = check(&conn, tmp.path(), at("2026-10-07T07:12:00Z")).unwrap();
+        assert_eq!(second.len(), 1);
+        fire(&conn, second[0], "2026-10-07T07:12:00Z", false);
+        assert!(check(&conn, tmp.path(), at("2026-10-07T07:13:00Z")).unwrap().is_empty());
+        assert_eq!(laid(&conn).len(), 2);
+    }
+
+    #[test]
+    fn a_decided_lay_day_is_not_laid_again() {
+        let (conn, tmp, uid) = env("");
+        seen(&conn, uid, "2026-10-07T07:10:00Z");
+        let first = check(&conn, tmp.path(), at("2026-10-07T07:11:00Z")).unwrap();
+        fire(&conn, first[0], "2026-10-07T07:11:00Z", true);
+        assert!(check(&conn, tmp.path(), at("2026-10-07T07:12:00Z")).unwrap().is_empty());
     }
 
     #[test]

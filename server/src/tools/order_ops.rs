@@ -49,15 +49,15 @@ pub(crate) fn held(conn: &Connection, user_id: i64) -> rusqlite::Result<Vec<i64>
     if let Some(parent) = crate::tasks::get(conn, user_id, id)?.and_then(|t| t.parent_id) {
         out.push(parent);
     }
-    let mut stmt = conn.prepare("SELECT id FROM tasks WHERE parent_id = ?1")?;
-    let steps = stmt.query_map([id], |r| r.get(0))?.collect::<rusqlite::Result<Vec<i64>>>()?;
+    let mut stmt = conn.prepare("SELECT id FROM tasks WHERE user_id = ?1 AND parent_id = ?2")?;
+    let steps = stmt.query_map([user_id, id], |r| r.get(0))?.collect::<rusqlite::Result<Vec<i64>>>()?;
     out.extend(steps);
     Ok(out)
 }
 
 /// Refuses a wake-up's edit of the task the user is working on right now.
 pub(crate) fn guard_running(conn: &Connection, ctx: &ToolCtx, name: &str, raw: &str) -> Result<(), ToolError> {
-    if !matches!(name, "task_update" | "task_split" | "task_delete" | "task_bulk_update") {
+    if !matches!(name, "task_update" | "task_split" | "task_bulk_update") {
         return Ok(());
     }
     let args: serde_json::Value = serde_json::from_str(raw).unwrap_or_default();
@@ -130,7 +130,6 @@ pub fn drop_item(conn: &Connection, ctx: &ToolCtx, kind: SessionKind, args: &Dro
     let after: Vec<i64> = before.iter().copied().filter(|&i| i != args.task_id).collect();
     write(conn, ctx, date, &before, &after)
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -279,7 +278,6 @@ mod tests {
         .unwrap();
         for (name, args) in [
             ("task_update", format!(r#"{{"task_id":{essay},"title":"x"}}"#)),
-            ("task_delete", format!(r#"{{"task_id":{essay}}}"#)),
             ("task_bulk_update", format!(r#"{{"task_ids":[{other},{essay}],"state":"dropped"}}"#)),
         ] {
             let e = dispatch(&conn, &ctx(&tmp), SessionKind::Trigger, name, &args).unwrap_err();

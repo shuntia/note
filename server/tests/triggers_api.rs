@@ -329,6 +329,36 @@ async fn the_first_wake_up_lays_the_rest_of_the_day_and_logs_it() {
     assert!(changes[0].contains("trigger_set"), "{}", changes[0]);
 }
 
+/// Answers its script, then fails every round after it.
+struct FailsAfter(MockLLM);
+
+impl note_server::providers::LLMProvider for FailsAfter {
+    fn chat(&self, req: &note_server::providers::ChatRequest) -> anyhow::Result<ChatResponse> {
+        let resp = self.0.chat(req)?;
+        anyhow::ensure!(!resp.tool_calls.is_empty(), "the provider is down");
+        Ok(resp)
+    }
+}
+
+#[tokio::test]
+async fn a_wake_up_that_fails_after_a_write_still_logs_the_write() {
+    let w = world(Vec::new()).await;
+    lay_plain(&w);
+    let llm = Arc::new(FailsAfter(MockLLM::scripted(vec![call(
+        "c1",
+        "trigger_set",
+        r#"{"at":"+60min","prompt":"see if the essay moved"}"#,
+    )])));
+    let state = w.state.clone().with_providers(llm, None);
+
+    note_server::runner::sweep_once(&state);
+
+    assert_eq!(logged(&w, "trigger_error").len(), 1);
+    let changes = logged(&w, "wake_change");
+    assert_eq!(changes.len(), 1, "{changes:?}");
+    assert!(changes[0].starts_with("event 1: trigger_set"), "{}", changes[0]);
+}
+
 struct LiveWeb(std::sync::Mutex<Vec<(i64, Option<i64>)>>);
 
 impl note_server::channels::WebCalls for LiveWeb {
@@ -367,6 +397,15 @@ async fn a_user_who_is_away_is_written_to_not_rung() {
     assert!(web.0.lock().unwrap().is_empty());
     assert_eq!(w.push.seen()[0].1.body, "the essay can wait till you're back");
     assert!(logged(&w, "trigger_rang").is_empty());
+    let refused: Vec<String> = w.llm.seen()[1]
+        .messages
+        .iter()
+        .filter_map(|m| match m {
+            note_server::providers::Message::ToolResult { content, .. } => Some(content.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(refused.iter().any(|r| r.contains(r#""kind":"busy""#)), "{refused:?}");
 }
 
 #[tokio::test]
@@ -383,5 +422,5 @@ async fn a_free_user_with_the_app_open_gets_the_call_there() {
     assert_eq!(rang.len(), 1);
     assert!(rang[0].1.is_some(), "the call joins the thread the words landed in");
     assert!(w.push.seen().is_empty(), "a call is not also a notification");
-    assert_eq!(logged(&w, "trigger_rang"), [format!("event 1: web")]);
+    assert_eq!(logged(&w, "trigger_rang"), ["event 1: web"]);
 }
