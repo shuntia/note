@@ -1,16 +1,18 @@
 pub mod call;
 pub mod links;
 pub mod outbox;
+pub mod web;
 
 use crate::channels::{Channel, OutboundMessage};
 use note_voice_proto::{
-    BoxFuture, CallBody, Dir, Direction, Handler, Origin, Outcome, Peer, PeerConfig, Refusal, RefusalCode, Reply,
-    Request, Role, VoiceOption, VoiceProfile,
+    BoxFuture, CallBody, Dir, Direction, Handler, Media, Origin, Outcome, Pcm, Peer, PeerConfig, Refusal, RefusalCode,
+    Reply, Request, Role, VoiceOption, VoiceProfile,
 };
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Instant;
 
 pub const RING_SECS: u32 = 30;
 pub const RING_BY_SECS: i64 = 10;
@@ -38,6 +40,7 @@ pub struct Voice {
     handler: Arc<NoteHandler>,
     fallback: Ladder,
     calls: Arc<call::CallManager>,
+    web: Arc<web::Relays>,
 }
 
 impl Voice {
@@ -60,6 +63,7 @@ impl Voice {
                 eprintln!("voice: journaling a reply for {call_id} failed: {e}");
             }
         })));
+        let web = Arc::new(web::Relays::default());
         let handler = Arc::new(NoteHandler {
             db: db.clone(),
             fallback: fallback.clone(),
@@ -67,10 +71,11 @@ impl Voice {
             conversation: calls.clone(),
             to_voice: cell.clone(),
             config_dir: Arc::default(),
+            web: web.clone(),
         });
         let peer = Peer::new(cfg, Dir::ToVoice, handler.clone(), outbox);
         let _ = cell.set(peer.clone());
-        Arc::new(Voice { db, peer, handler, fallback, calls })
+        Arc::new(Voice { db, peer, handler, fallback, calls, web })
     }
 
     /// What a live call needs to hold a conversation; until set, an answered
@@ -209,6 +214,132 @@ impl Voice {
         Ok(id)
     }
 
+    /// Opens a web call for `user_id`, replacing any web call they hold; a live phone call refuses it.
+    pub fn start_web_call(
+        &self,
+        user_id: i64,
+        start: web::WebStart,
+        now: jiff::Timestamp,
+    ) -> Result<web::WebCall, web::WebRefusal> {
+        use web::WebRefusal::{Busy, Unavailable};
+        if !self.is_up() {
+            return Err(Unavailable);
+        }
+        for old in self.web.replace(user_id) {
+            self.hang_up(&old);
+        }
+        let id = uuid::Uuid::new_v4().to_string();
+        let ring_by = now + jiff::SignedDuration::from_secs(RING_BY_SECS);
+        let direction = if start.message.is_some() { Direction::Outbound } else { Direction::Inbound };
+        let message = start.message.as_ref().map(serde_json::to_string).transpose().map_err(|_| Unavailable)?;
+        {
+            let conn = crate::db_guard(&self.db);
+            let busy: bool = conn
+                .query_row(
+                    "SELECT EXISTS (SELECT 1 FROM voice_calls WHERE user_id = ?1 AND state != 'ended' AND origin != 'web')",
+                    [user_id],
+                    |r| r.get(0),
+                )
+                .map_err(|_| Unavailable)?;
+            if busy {
+                return Err(Busy);
+            }
+            let thread = start.thread.filter(|thread| {
+                conn.query_row(
+                    "SELECT EXISTS (SELECT 1 FROM conversations WHERE id = ?1 AND user_id = ?2)",
+                    (thread, user_id),
+                    |r| r.get::<_, bool>(0),
+                )
+                .unwrap_or(false)
+            });
+            let dir = if direction == Direction::Outbound { "outbound" } else { "inbound" };
+            conn.execute(
+                "INSERT INTO voice_calls (id, user_id, direction, message, state, ring_by, created_at, origin, thread_id)
+                 VALUES (?1, ?2, ?3, ?4, 'starting', ?5, ?6, 'web', ?7)",
+                (&id, user_id, dir, message, ring_by.to_string(), now.to_string(), thread),
+            )
+            .map_err(|_| Unavailable)?;
+        }
+        let out = self.web.open(&id, user_id);
+        let voice = self.handler.profile(user_id);
+        let title = crate::text::call_title(crate::text::Lang::from_setting(&voice.language).unwrap_or_default());
+        let sent = self.peer.send_call(
+            &id,
+            CallBody::Start {
+                user_id,
+                room_id: String::new(),
+                mxid: String::new(),
+                title,
+                ring_secs: 0,
+                ring_by_ms: ring_by.as_millisecond(),
+                voice,
+                direction,
+                origin: Origin::Web,
+            },
+        );
+        if sent.is_err() {
+            self.web.forget(&id);
+            let _ = end_call(&crate::db_guard(&self.db), &id, "failed", None, now);
+            return Err(Unavailable);
+        }
+        if let Some(msg) = &start.message {
+            self.calls.warm_up(user_id, msg);
+        }
+        Ok(web::WebCall { call_id: id, out })
+    }
+
+    pub fn web_audio(&self, call_id: &str, pcm: Vec<i16>) -> bool {
+        self.peer.send_media(call_id, Media::AudioIn { pcm: Pcm(pcm) })
+    }
+
+    /// Asks the voice side to end the call; it plays out what Note is saying first.
+    pub fn hang_up(&self, call_id: &str) {
+        if let Err(e) = self.peer.send_call(call_id, CallBody::HangUp) {
+            eprintln!("voice: journaling a hang-up for {call_id} failed: {e}");
+        }
+    }
+
+    pub fn offer_ring(&self, user_id: i64, conversation_id: Option<i64>) -> String {
+        self.web.offer_ring_at(user_id, conversation_id, Instant::now())
+    }
+
+    /// The call an answered ring opens: in its thread, opening with Note's newest reply there.
+    pub fn answer_ring(&self, token: &str, user_id: i64) -> Option<web::WebStart> {
+        let thread = self.web.take_ring_at(token, user_id, Instant::now())?;
+        let message = thread.and_then(|conversation_id| self.ring_message(user_id, conversation_id));
+        Some(web::WebStart { thread, message })
+    }
+
+    fn ring_message(&self, user_id: i64, conversation_id: i64) -> Option<OutboundMessage> {
+        let text = {
+            let conn = crate::db_guard(&self.db);
+            let owned: bool = conn
+                .query_row(
+                    "SELECT EXISTS (SELECT 1 FROM conversations WHERE id = ?1 AND user_id = ?2)",
+                    (conversation_id, user_id),
+                    |r| r.get(0),
+                )
+                .ok()?;
+            if !owned {
+                return None;
+            }
+            match crate::talk::history(&conn, conversation_id, 1).ok()?.pop()? {
+                crate::providers::Message::Assistant { text, .. } if !text.trim().is_empty() => text,
+                _ => return None,
+            }
+        };
+        let voice = self.handler.profile(user_id);
+        Some(OutboundMessage {
+            title: crate::text::call_title(crate::text::Lang::from_setting(&voice.language).unwrap_or_default()),
+            body: text,
+            urgency: crate::channels::Urgency::Normal,
+            checkin: false,
+            event_id: None,
+            conversation_id: Some(conversation_id),
+            actions: Vec::new(),
+        })
+    }
+
     /// Fails every call the voice side never took up, never reported the end
     /// of, or that stayed live past `STALE_LIVE_SECS`, and returns how many.
     /// Does nothing until the fallback is set.
@@ -339,6 +470,7 @@ pub(crate) struct NoteHandler {
     conversation: Arc<dyn Conversation>,
     to_voice: Arc<OnceLock<Peer>>,
     config_dir: Arc<OnceLock<PathBuf>>,
+    web: Arc<web::Relays>,
 }
 
 impl NoteHandler {
@@ -556,10 +688,22 @@ impl Handler for NoteHandler {
         if live || (known && matches!(body, CallBody::Outcome { .. } | CallBody::Ended)) {
             self.conversation.on_frame(call_id, &body);
         }
+        if known {
+            self.web.on_frame(call_id, &body, || {
+                crate::db_guard(&self.db)
+                    .query_row("SELECT conversation_id FROM voice_calls WHERE id = ?1", [call_id], |r| r.get(0))
+                    .ok()
+                    .flatten()
+            });
+        }
         if let Some((user_id, message)) = ended {
             self.fall_through(call_id, user_id, message);
         }
         Ok(())
+    }
+
+    fn media(&self, call_id: &str, body: Media) {
+        self.web.media(call_id, body);
     }
 
     fn request(&self, body: Request) -> BoxFuture<Result<Reply, Refusal>> {
@@ -1237,5 +1381,14 @@ mod tests {
         assert!(links::ringable(&crate::db_guard(&voice.db), 1).unwrap().is_none());
         assert_eq!(join("!r:t").await, Ok(note_voice_proto::Reply::Done));
         assert!(links::ringable(&crate::db_guard(&voice.db), 1).unwrap().is_some());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_web_call_is_refused_while_the_voice_side_is_down() {
+        let (voice, _) = rig();
+        let start = web::WebStart { thread: None, message: None };
+        assert!(matches!(voice.start_web_call(1, start, jiff::Timestamp::now()), Err(web::WebRefusal::Unavailable)));
+        let calls: i64 = crate::db_guard(&voice.db).query_row("SELECT COUNT(*) FROM voice_calls", [], |r| r.get(0)).unwrap();
+        assert_eq!(calls, 0);
     }
 }
