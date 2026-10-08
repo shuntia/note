@@ -269,10 +269,10 @@ test('a call chimes once when it goes live and once when it ends', async () => {
   await load()
   events[0].state('listening')
   events[0].state('speaking')
-  expect(seen.chimes).toEqual(['connected'])
+  expect(seen.chimes).toEqual(['connect'])
   events[0].ended({ reason: 'hangup', conversationId: 4 })
   control.end()
-  expect(seen.chimes).toEqual(['connected', 'ended'])
+  expect(seen.chimes).toEqual(['connect', 'hangup'])
 })
 
 test('a call that fails ends on the failure tone', async () => {

@@ -3,7 +3,7 @@ import type { CallEvents, LiveState } from './session'
 
 export type CallOpen = { conversationId: number | null; ring: string | null; at: number }
 export type Phase = 'ringing' | 'connecting' | 'live' | 'hanging' | 'gone'
-export type Cue = 'connected' | 'ended' | 'failed'
+export type Cue = 'connect' | 'hangup' | 'failed'
 export type CallShown = {
   phase: Phase
   live: LiveState
@@ -136,7 +136,7 @@ export class CallControl {
     const line = this.deps.connect({
       state: (live) => {
         const connected = this.shown.phase === 'connecting'
-        if (connected) this.deps.chime('connected')
+        if (connected) this.deps.chime('connect')
         this.set({ live, phase: connected ? 'live' : this.shown.phase })
       },
       caption: (text) => this.set({ caption: { text, n: ++this.captions } }),
@@ -166,7 +166,7 @@ export class CallControl {
   private leave(conversationId: number | null, failed: boolean) {
     if (this.shown.phase === 'gone') return
     this.silence()
-    if (this.shown.phase !== 'ringing') this.deps.chime(failed ? 'failed' : 'ended')
+    if (this.shown.phase !== 'ringing') this.deps.chime(failed ? 'failed' : 'hangup')
     this.set({ phase: 'gone', shake: failed })
     this.deps.release()
     this.later(() => this.deps.onClose(conversationId), LEAVE_MS)
