@@ -251,7 +251,7 @@ mod tests {
             p,
             format!(
                 "display_name = \"X\"\ntimezone = \"{}\"\ntemplate = \"default\"\n\
-                 nightly_time = \"22:00\"\n",
+                 nightly_time = \"22:00\"\ntriggers_per_day = 4\n",
                 zone().iana_name().unwrap()
             ),
         )

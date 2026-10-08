@@ -91,13 +91,14 @@ async fn put_persists_to_disk_and_is_reflected_by_get() {
     let raw = std::fs::read_to_string(cfg.path().join("users/aki/user.toml")).unwrap();
     let on_disk: toml::Value = toml::from_str(&raw).unwrap();
     let table = on_disk.as_table().unwrap();
-    assert_eq!(table.len(), 6, "unexpected keys in {raw}");
+    assert_eq!(table.len(), 7, "unexpected keys in {raw}");
     assert_eq!(table["display_name"].as_str(), Some("X"));
     assert_eq!(table["timezone"].as_str(), Some("Asia/Tokyo"));
     assert_eq!(table["nightly_time"].as_str(), Some("22:30"));
     assert_eq!(table["template"].as_str(), Some("default"));
     assert_eq!(table["show_arc_between_sessions"].as_bool(), Some(true));
     assert_eq!(table["counter"].as_str(), Some("remaining"));
+    assert_eq!(table["day_start"].as_str(), Some(""));
 
     let v = json(app.oneshot(get(&cookie)).await.unwrap()).await;
     assert_eq!(v["timezone"], "Asia/Tokyo");

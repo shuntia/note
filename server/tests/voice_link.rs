@@ -44,7 +44,7 @@ async fn rig(linked: bool) -> Rig {
     std::fs::create_dir_all(dir.path().join("defaults")).unwrap();
     std::fs::write(
         dir.path().join("defaults/user.toml"),
-        "display_name = \"X\"\ntimezone = \"UTC\"\ntemplate = \"default\"\n",
+        "display_name = \"X\"\ntimezone = \"UTC\"\ntemplate = \"default\"\nday_start = \"\"\n",
     )
     .unwrap();
     let conn = db::open_memory().unwrap();

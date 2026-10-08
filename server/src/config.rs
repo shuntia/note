@@ -315,6 +315,10 @@ pub struct UserConfig {
     /// ritual off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub close_day_time: Option<String>,
+    /// When the day is laid if the user has not shown up by then, zero-padded
+    /// HH:MM; blank turns day-laying off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub day_start: Option<String>,
     /// Until when, zero-padded HH:MM, an open morning brings the letter to the face.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub morning_until: Option<String>,
@@ -366,7 +370,8 @@ pub struct UserConfig {
     pub language: Option<String>,
 }
 
-pub const DEFAULT_TRIGGERS_PER_DAY: u32 = 4;
+pub const DEFAULT_TRIGGERS_PER_DAY: u32 = 12;
+pub const DEFAULT_DAY_START: &str = "08:00";
 pub const DEFAULT_CLOSE_DAY_TIME: &str = "21:30";
 pub const DEFAULT_MORNING_UNTIL: &str = "11:00";
 pub const DEFAULT_POMODORO_WORK_MIN: u32 = 25;
@@ -402,6 +407,10 @@ impl UserConfig {
     /// Blank where the user has turned the close of the day off.
     pub fn close_day_time(&self) -> &str {
         self.close_day_time.as_deref().unwrap_or(DEFAULT_CLOSE_DAY_TIME)
+    }
+
+    pub fn day_start(&self) -> &str {
+        self.day_start.as_deref().unwrap_or(DEFAULT_DAY_START)
     }
 
     pub fn language(&self) -> &str {
@@ -730,6 +739,18 @@ mod tests {
 
         write(tmp.path(), "users/aki/user.toml", "timezone_auto = false\n");
         assert!(!UserConfig::load(tmp.path(), "aki").unwrap().timezone_auto());
+    }
+
+    #[test]
+    fn the_day_starts_at_eight_unless_set() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), "defaults/user.toml",
+            "display_name = \"X\"\ntimezone = \"UTC\"\ntemplate = \"default\"\n");
+        let cfg = UserConfig::load(tmp.path(), "aki").unwrap();
+        assert_eq!(cfg.day_start(), DEFAULT_DAY_START);
+        assert_eq!(cfg.triggers_per_day(), 12);
+        write(tmp.path(), "users/aki/user.toml", "day_start = \"\"\n");
+        assert_eq!(UserConfig::load(tmp.path(), "aki").unwrap().day_start(), "");
     }
 
     #[test]

@@ -247,6 +247,7 @@ async fn a_talk_session_raises_the_days_budget_once_the_user_has_agreed() {
         ChatResponse { text: "Raised today's check-in budget by 3.".into(), tool_calls: vec![] },
     ])
     .await;
+    std::fs::write(w.state.config_dir.join("users/aki/user.toml"), "triggers_per_day = 4\n").unwrap();
 
     let (status, reply) =
         post(&w, "/api/talk", r#"{"message":"push me harder today"}"#).await;
@@ -291,4 +292,39 @@ async fn a_trigger_a_session_could_not_decide_sends_nothing_and_stays_where_it_i
     assert!(w.push.seen().is_empty());
     assert_eq!(statuses(&w), vec!["fired"]);
     assert_eq!(logged(&w, "trigger_error").len(), 1);
+}
+
+/// Lays today's day-laying trigger as the sweep would have, ready to fire.
+fn lay_the_day(w: &World) {
+    std::fs::write(w.state.config_dir.join("users/aki/user.toml"), "day_start = \"00:00\"\n").unwrap();
+    let conn = w.state.db.lock().unwrap();
+    let noon = jiff::Timestamp::now()
+        .to_zoned(jiff::tz::TimeZone::UTC)
+        .date()
+        .at(12, 0, 0, 0)
+        .to_zoned(jiff::tz::TimeZone::UTC)
+        .unwrap()
+        .timestamp();
+    assert_eq!(note_server::wake::check(&conn, &w.state.config_dir, noon).unwrap().len(), 1);
+    conn.execute("UPDATE events SET wall_time = '00:00' WHERE origin = 'lay_day'", []).unwrap();
+}
+
+#[tokio::test]
+async fn the_first_wake_up_lays_the_rest_of_the_day_and_logs_it() {
+    let w = world(vec![
+        call("c1", "trigger_set", r#"{"at":"+60min","prompt":"after the essay block: is it moving?"}"#),
+        call("c2", "stay_quiet", r#"{"reason":"the day is laid"}"#),
+    ])
+    .await;
+    lay_the_day(&w);
+
+    note_server::runner::sweep_once(&w.state);
+
+    assert!(w.push.seen().is_empty(), "laying the day says nothing");
+    let wake_ups: Vec<String> = rows(&w, "SELECT origin FROM events WHERE kind = 'trigger' ORDER BY id");
+    assert_eq!(wake_ups, ["lay_day", "agent"]);
+    assert_eq!(statuses(&w)[0], "done");
+    let changes = logged(&w, "wake_change");
+    assert_eq!(changes.len(), 1);
+    assert!(changes[0].contains("trigger_set"), "{}", changes[0]);
 }

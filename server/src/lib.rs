@@ -47,6 +47,7 @@ pub mod totp;
 pub mod trace;
 pub mod triggers;
 pub mod voice;
+pub mod wake;
 pub mod work;
 
 use crate::providers::{EmbeddingsProvider, LLMProvider};

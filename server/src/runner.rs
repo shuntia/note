@@ -354,6 +354,9 @@ pub fn sweep_once(state: &AppState) {
             note(e);
             Vec::new()
         });
+        if let Err(e) = crate::wake::check(&conn, &state.config_dir, now) {
+            note(e);
+        }
         let started = block_starts(&conn, &state.config_dir, now).unwrap_or_else(|e| {
             note(e);
             Vec::new()

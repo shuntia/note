@@ -27,7 +27,7 @@ fn delivery_reaches_the_user_through_the_ladder() {
     };
     write(
         "defaults/user.toml",
-        "display_name = \"Aki\"\ntimezone = \"Asia/Tokyo\"\ntemplate = \"default\"\nnightly_time = \"03:00\"\n",
+        "display_name = \"Aki\"\ntimezone = \"Asia/Tokyo\"\ntemplate = \"default\"\nnightly_time = \"03:00\"\nday_start = \"\"\n",
     );
     write("defaults/prompts/persona.md", "you are note");
     write("defaults/prompts/planning.md", "plan the day");

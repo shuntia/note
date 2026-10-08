@@ -791,6 +791,7 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
         landed.ok()
     };
     state.hub.broadcast_changed(fired.user_id);
+    let own = ev.origin == crate::idle::ORIGIN || ev.origin == crate::wake::ORIGIN;
     crate::channels::deliver_via(
         &state.db,
         &state.channels,
@@ -800,7 +801,7 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
             title: "Note".into(),
             body: text,
             urgency: crate::channels::Urgency::Normal,
-            checkin: ev.origin != crate::idle::ORIGIN,
+            checkin: !own,
             event_id: Some(ev.event_id),
             conversation_id,
             actions: if is_close_day(&ev.prompt) {
@@ -808,7 +809,7 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
                     label: crate::text::action_carry_to_tomorrow(lang),
                     data: format!("carry:{}", fired.date),
                 }]
-            } else if ev.origin == crate::idle::ORIGIN {
+            } else if own {
                 Vec::new()
             } else {
                 crate::channels::event_actions(ev.event_id, lang)
@@ -827,7 +828,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let p = tmp.path().join("defaults/user.toml");
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-        std::fs::write(p, "display_name = \"X\"\ntimezone = \"UTC\"\ntemplate = \"default\"\n")
+        std::fs::write(p, "display_name = \"X\"\ntimezone = \"UTC\"\ntemplate = \"default\"\ntriggers_per_day = 4\n")
             .unwrap();
         (conn, tmp, uid)
     }

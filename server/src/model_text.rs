@@ -611,6 +611,19 @@ pub fn close_day_prompt(l: Lang) -> &'static str {
     )
 }
 
+pub fn lay_day_prompt(l: Lang) -> &'static str {
+    l.of(
+        "The user's day has begun. Lay the day: check today's order and set it if the night left \
+         it empty or wrong, then lay 4 to 8 wake-ups with trigger_set, each tied to a moment — \
+         just after a work session's planned end, before and after calendar events, midday, late \
+         afternoon. Then stay quiet unless something needs the user now.",
+        "ユーザーの一日が始まりました。一日を組んでください: 今日の順番を確かめ、夜のうちに空か\
+         ずれていれば決め、trigger_set で目覚めを4〜8個、それぞれある瞬間に結びつけて置く — \
+         作業セッションの予定の終わりの直後、カレンダーの予定の前後、昼、夕方。そのあと、今\
+         ユーザーに必要なことがなければ黙る。",
+    )
+}
+
 pub fn idle_prompt(l: Lang) -> &'static str {
     l.of(
         "The user has gone quiet while your working memory holds notes. \
