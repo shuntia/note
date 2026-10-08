@@ -328,3 +328,60 @@ async fn the_first_wake_up_lays_the_rest_of_the_day_and_logs_it() {
     assert_eq!(changes.len(), 1);
     assert!(changes[0].contains("trigger_set"), "{}", changes[0]);
 }
+
+struct LiveWeb(std::sync::Mutex<Vec<(i64, Option<i64>)>>);
+
+impl note_server::channels::WebCalls for LiveWeb {
+    fn has_live(&self, _: i64) -> bool {
+        true
+    }
+    fn ring(&self, user_id: i64, conversation_id: Option<i64>) -> bool {
+        self.0.lock().unwrap().push((user_id, conversation_id));
+        true
+    }
+}
+
+fn lay_plain(w: &World) {
+    let conn = w.state.db.lock().unwrap();
+    let today = jiff::Timestamp::now().to_zoned(jiff::tz::TimeZone::UTC).date();
+    let plan = note_server::plan::ensure(&conn, &w.state.config_dir, "aki", 1, today).unwrap();
+    note_server::triggers::insert(&conn, plan, "00:00", "see how the essay is going", "agent", None, None, None,
+        jiff::Timestamp::now()).unwrap();
+}
+
+#[tokio::test]
+async fn a_user_who_is_away_is_written_to_not_rung() {
+    let w = world(vec![
+        call("c1", "say", r#"{"text":"want to talk the essay through?","ring":true}"#),
+        call("c2", "say", r#"{"text":"the essay can wait till you're back"}"#),
+    ])
+    .await;
+    lay_plain(&w);
+    w.state.db.lock().unwrap()
+        .execute("UPDATE users SET last_active_at = '2000-01-01T00:00:00Z'", []).unwrap();
+    let web = Arc::new(LiveWeb(std::sync::Mutex::default()));
+    let state = w.state.clone().with_web_calls(web.clone());
+
+    note_server::runner::sweep_once(&state);
+
+    assert!(web.0.lock().unwrap().is_empty());
+    assert_eq!(w.push.seen()[0].1.body, "the essay can wait till you're back");
+    assert!(logged(&w, "trigger_rang").is_empty());
+}
+
+#[tokio::test]
+async fn a_free_user_with_the_app_open_gets_the_call_there() {
+    let w = world(vec![call("c1", "say", r#"{"text":"want to talk the essay through?","ring":true}"#)]).await;
+    lay_plain(&w);
+    note_server::presence::touch(&w.state.db.lock().unwrap(), 1, jiff::Timestamp::now()).unwrap();
+    let web = Arc::new(LiveWeb(std::sync::Mutex::default()));
+    let state = w.state.clone().with_web_calls(web.clone());
+
+    note_server::runner::sweep_once(&state);
+
+    let rang = web.0.lock().unwrap().clone();
+    assert_eq!(rang.len(), 1);
+    assert!(rang[0].1.is_some(), "the call joins the thread the words landed in");
+    assert!(w.push.seen().is_empty(), "a call is not also a notification");
+    assert_eq!(logged(&w, "trigger_rang"), [format!("event 1: web")]);
+}

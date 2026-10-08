@@ -792,30 +792,36 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
     };
     state.hub.broadcast_changed(fired.user_id);
     let own = ev.origin == crate::idle::ORIGIN || ev.origin == crate::wake::ORIGIN;
-    crate::channels::deliver_via(
-        &state.db,
-        &state.channels,
-        fired.user_id,
-        &fired.username,
-        &crate::channels::OutboundMessage {
-            title: "Note".into(),
-            body: text,
-            urgency: crate::channels::Urgency::Normal,
-            checkin: !own,
-            event_id: Some(ev.event_id),
-            conversation_id,
-            actions: if is_close_day(&ev.prompt) {
-                vec![crate::channels::Action {
-                    label: crate::text::action_carry_to_tomorrow(lang),
-                    data: format!("carry:{}", fired.date),
-                }]
-            } else if own {
-                Vec::new()
-            } else {
-                crate::channels::event_actions(ev.event_id, lang)
-            },
+    let msg = crate::channels::OutboundMessage {
+        title: "Note".into(),
+        body: text,
+        urgency: crate::channels::Urgency::Normal,
+        checkin: !own,
+        event_id: Some(ev.event_id),
+        conversation_id,
+        actions: if is_close_day(&ev.prompt) {
+            vec![crate::channels::Action {
+                label: crate::text::action_carry_to_tomorrow(lang),
+                data: format!("carry:{}", fired.date),
+            }]
+        } else if own {
+            Vec::new()
+        } else {
+            crate::channels::event_actions(ev.event_id, lang)
         },
-    );
+    };
+    if result["ring"].as_bool() == Some(true) {
+        let outcome = crate::channels::ring(state, fired.user_id, &fired.username, &msg);
+        let conn = state.db();
+        let _ = crate::log::record(
+            &conn,
+            Some(fired.user_id),
+            "trigger_rang",
+            &format!("event {}: {}", ev.event_id, outcome.as_str()),
+        );
+    } else {
+        crate::channels::deliver_via(&state.db, &state.channels, fired.user_id, &fired.username, &msg);
+    }
 }
 
 #[cfg(test)]

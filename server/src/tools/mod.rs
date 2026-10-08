@@ -88,6 +88,9 @@ impl ToolError {
     pub fn internal(m: impl Into<String>) -> Self {
         Self::of("internal")(m.into())
     }
+    pub fn busy(m: impl Into<String>) -> Self {
+        Self::of("busy")(m.into())
+    }
 }
 
 pub struct ToolCtx<'a> {
@@ -860,8 +863,11 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
             schema::<trigger_ops::BudgetArgs>(),
         ),
         "say" => (
-            "Say this to the user and end the trigger session. One or two warm sentences, \
-             no greeting ritual — it lands in the thread and as a notification.",
+            "Say this to the user and end the session. One or two warm sentences, no greeting \
+             ritual — it lands in the thread and as a notification. With ring set, Note calls \
+             instead: the open web app rings, else the linked phone. A ring is refused while the \
+             user seems busy — working, in a calendar event, in a quiet window, or away for 90 \
+             minutes; then say it without ring, or stay quiet.",
             schema::<trigger_ops::SayArgs>(),
         ),
         "stay_quiet" => (

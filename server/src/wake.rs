@@ -104,6 +104,52 @@ fn laid_on(conn: &Connection, user_id: i64, date: jiff::civil::Date) -> rusqlite
     )
 }
 
+pub const AWAY_MIN: i64 = 90;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Busy {
+    Quiet { title: String, until: String },
+    Event { title: String, until: String },
+    Working { title: String },
+    Away,
+}
+
+impl Busy {
+    pub fn reason(&self) -> String {
+        match self {
+            Busy::Quiet { title, until } => format!("a quiet window ({title}) runs until {until}"),
+            Busy::Event { title, until } => format!("{title} is on until {until}"),
+            Busy::Working { title } => format!("a work session on {title} is running"),
+            Busy::Away => format!("the user has not been active for {AWAY_MIN} minutes"),
+        }
+    }
+}
+
+/// Why now is not a moment to call, if it is not.
+pub fn seems_busy(
+    conn: &Connection,
+    user_id: i64,
+    tz: &jiff::tz::TimeZone,
+    now: jiff::Timestamp,
+) -> Result<Option<Busy>> {
+    if let Some(w) = crate::calendar::quiet_window(conn, user_id, tz, now)? {
+        return Ok(Some(Busy::Quiet { title: w.title, until: w.end }));
+    }
+    let local = now.to_zoned(tz.clone());
+    let at = wall(&local);
+    if let Some(o) = crate::calendar::occurrences(conn, user_id, local.date())?.into_iter().find(|o| {
+        matches!(o.kind.as_str(), "fixed" | "busy") && o.start.as_str() <= at.as_str() && at.as_str() < o.end.as_str()
+    }) {
+        return Ok(Some(Busy::Event { title: o.title, until: o.end }));
+    }
+    if let Some(s) = triggers::open_work_session(conn, user_id)? {
+        return Ok(Some(Busy::Working { title: s.title }));
+    }
+    let away = crate::presence::last_active(conn, user_id)?
+        .is_none_or(|t| now.as_second() - t.as_second() > AWAY_MIN * 60);
+    Ok(away.then_some(Busy::Away))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,5 +243,58 @@ mod tests {
         let fired = crate::runner::fire_due(&conn, tmp.path(), at("2026-10-07T09:00:00Z")).unwrap();
         assert_eq!(fired.len(), 1);
         assert_eq!(fired[0].kind, crate::triggers::KIND);
+    }
+
+    fn noon() -> jiff::Timestamp {
+        at("2026-10-07T12:00:00Z")
+    }
+
+    fn busy(conn: &Connection, uid: i64) -> Option<Busy> {
+        seems_busy(conn, uid, &jiff::tz::TimeZone::UTC, noon()).unwrap()
+    }
+
+    fn entry(conn: &Connection, uid: i64, kind: &str, quiet: bool) {
+        crate::calendar::create(conn, uid, crate::calendar::Fields {
+            title: "class".into(), kind: kind.into(), quiet: Some(quiet),
+            start_time: "11:00".into(), end_time: "13:00".into(),
+            days: Some(crate::calendar::day_mask(&["wed"]).unwrap()), ..Default::default()
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn a_user_here_with_nothing_on_is_free() {
+        let (conn, _tmp, uid) = env("");
+        seen(&conn, uid, "2026-10-07T11:00:00Z");
+        assert_eq!(busy(&conn, uid), None);
+        entry(&conn, uid, "free", false);
+        entry(&conn, uid, "note", false);
+        assert_eq!(busy(&conn, uid), None, "free time and notes are not commitments");
+    }
+
+    #[test]
+    fn a_user_never_seen_is_away() {
+        let (conn, _tmp, uid) = env("");
+        assert_eq!(busy(&conn, uid), Some(Busy::Away));
+        seen(&conn, uid, "2026-10-07T10:29:00Z");
+        assert_eq!(busy(&conn, uid), Some(Busy::Away), "91 minutes is away");
+        seen(&conn, uid, "2026-10-07T10:30:00Z");
+        assert_eq!(busy(&conn, uid), None);
+    }
+
+    #[test]
+    fn work_events_and_quiet_windows_each_make_the_user_busy() {
+        let (conn, _tmp, uid) = env("");
+        seen(&conn, uid, "2026-10-07T11:59:00Z");
+        conn.execute(
+            "INSERT INTO work_sessions (user_id, title, started_at) VALUES (?1, 'essay', '2026-10-07T11:30:00Z')",
+            [uid],
+        )
+        .unwrap();
+        assert_eq!(busy(&conn, uid), Some(Busy::Working { title: "essay".into() }));
+        entry(&conn, uid, "busy", false);
+        assert_eq!(busy(&conn, uid), Some(Busy::Event { title: "class".into(), until: "13:00".into() }));
+        entry(&conn, uid, "fixed", true);
+        assert!(matches!(busy(&conn, uid), Some(Busy::Quiet { .. })));
     }
 }
