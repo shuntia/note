@@ -302,18 +302,18 @@ impl CallManager {
         if self.is_live(call_id) {
             return Ok(());
         }
-        let row: Option<(i64, String, Option<String>)> = crate::db_guard(&d.db)
+        let row: Option<(i64, String, Option<String>, Option<i64>)> = crate::db_guard(&d.db)
             .query_row(
-                "SELECT c.user_id, u.username, c.message FROM voice_calls c JOIN users u ON u.id = c.user_id
+                "SELECT c.user_id, u.username, c.message, c.thread_id FROM voice_calls c JOIN users u ON u.id = c.user_id
                  WHERE c.id = ?1 AND c.state = 'answered' AND c.conversation_id IS NULL",
                 [call_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .optional()?;
-        let Some((user_id, username, message)) = row else { return Ok(()) };
+        let Some((user_id, username, message, thread_id)) = row else { return Ok(()) };
         let lang = crate::text::Lang::for_user(&d.config_dir, &username);
         let msg = message.map(|m| serde_json::from_str::<OutboundMessage>(&m)).transpose()?;
-        let existing = owned_conversation(&d.db, user_id, msg.as_ref().and_then(|m| m.conversation_id));
+        let existing = owned_conversation(&d.db, user_id, msg.as_ref().and_then(|m| m.conversation_id).or(thread_id));
         let (system, tools) = d.prompt(user_id, &username, &reason(msg.as_ref()), existing, lang)?;
         let conversation_id = {
             let conn = crate::db_guard(&d.db);
@@ -868,5 +868,36 @@ mod tests {
         assert_eq!(tasks, 1);
         assert!(!runner.is_network("task_create"));
         assert!(runner.is_network("web_search"));
+    }
+
+    #[test]
+    fn a_web_call_talks_in_the_thread_it_was_opened_from() {
+        let tmp = tempfile::tempdir().unwrap();
+        configured(tmp.path());
+        let (db, thread) = seeded();
+        crate::db_guard(&db)
+            .execute(
+                "INSERT INTO voice_calls (id, user_id, direction, state, ring_by, created_at, origin, thread_id)
+                 VALUES ('w1', 1, 'inbound', 'answered', 'x', 'x', 'web', ?1)",
+                [thread],
+            )
+            .unwrap();
+        let (m, _) = managed(&db, tmp.path(), Arc::new(crate::providers::mock::MockLLM::streamed(vec![])));
+        m.on_frame("w1", &CallBody::Outcome { outcome: Outcome::Answered });
+        wait_until("the call's thread", || {
+            crate::db_guard(&db)
+                .query_row("SELECT conversation_id IS NOT NULL FROM voice_calls WHERE id = 'w1'", [], |r| r.get(0))
+                .unwrap()
+        });
+        m.on_frame("w1", &CallBody::Ended);
+        let (conv, via): (i64, String) = crate::db_guard(&db)
+            .query_row(
+                "SELECT c.conversation_id, v.via FROM voice_calls c JOIN conversations v ON v.id = c.conversation_id
+                 WHERE c.id = 'w1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((conv, via.as_str()), (thread, "voice"));
     }
 }

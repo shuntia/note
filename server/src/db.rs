@@ -792,6 +792,11 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE events DROP COLUMN origin;
     ALTER TABLE events RENAME COLUMN origin_next TO origin;
     ",
+    // v54
+    "
+    ALTER TABLE voice_calls ADD COLUMN origin TEXT NOT NULL DEFAULT 'matrix' CHECK (origin IN ('matrix','web'));
+    ALTER TABLE voice_calls ADD COLUMN thread_id INTEGER REFERENCES conversations(id) ON DELETE SET NULL;
+    ",
 ];
 
 pub fn server_setting(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
@@ -2293,5 +2298,30 @@ mod tests {
         conn.execute("DELETE FROM tasks WHERE id = 1", []).unwrap();
         let left: i64 = conn.query_row("SELECT COUNT(*) FROM run_order", [], |r| r.get(0)).unwrap();
         assert_eq!(left, 1, "a deleted task leaves every order it was in");
+    }
+
+    #[test]
+    fn a_web_call_keeps_the_thread_it_was_opened_from() {
+        let conn = open_memory().unwrap();
+        conn.execute("INSERT INTO users (username, pass_hash, role) VALUES ('aki', 'x', 'member')", []).unwrap();
+        conn.execute(
+            "INSERT INTO voice_calls (id, user_id, direction, state, ring_by, created_at)
+             VALUES ('m', 1, 'outbound', 'starting', 'x', 'x')",
+            [],
+        )
+        .unwrap();
+        let origin: String = conn.query_row("SELECT origin FROM voice_calls WHERE id = 'm'", [], |r| r.get(0)).unwrap();
+        assert_eq!(origin, "matrix");
+        let thread = crate::talk::create(&conn, 1, "chat", jiff::Timestamp::now()).unwrap();
+        conn.execute(
+            "INSERT INTO voice_calls (id, user_id, direction, state, ring_by, created_at, origin, thread_id)
+             VALUES ('w', 1, 'inbound', 'starting', 'x', 'x', 'web', ?1)",
+            [thread],
+        )
+        .unwrap();
+        assert!(conn.execute("UPDATE voice_calls SET origin = 'phone' WHERE id = 'w'", []).is_err());
+        conn.execute("DELETE FROM conversations WHERE id = ?1", [thread]).unwrap();
+        let kept: Option<i64> = conn.query_row("SELECT thread_id FROM voice_calls WHERE id = 'w'", [], |r| r.get(0)).unwrap();
+        assert_eq!(kept, None);
     }
 }
