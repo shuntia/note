@@ -253,6 +253,21 @@ const TABLE: Record<string, Receipt> = {
     done: (a) => t('receipt.planList.done', { day: dayWord(str(a, 'date')) }),
     failed: 'receipt.planList.failed',
   },
+  order_set: {
+    doing: 'receipt.orderSet.doing',
+    done: (a) => t('receipt.orderSet.done', { count: size(a, 'task_ids') }),
+    failed: 'receipt.orderSet.failed',
+  },
+  order_move: {
+    doing: 'receipt.orderMove.doing',
+    done: 'receipt.orderMove.done',
+    failed: 'receipt.orderMove.failed',
+  },
+  order_drop: {
+    doing: 'receipt.orderDrop.doing',
+    done: 'receipt.orderDrop.done',
+    failed: 'receipt.orderDrop.failed',
+  },
 
   schedule_slide: {
     doing: 'receipt.scheduleSlide.doing',

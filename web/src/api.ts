@@ -30,6 +30,7 @@ import type {
   Passkey,
   PromptDoc,
   PromptName,
+  RunOrder,
   SecurityState,
   SessionStart,
   Settings,
@@ -355,8 +356,11 @@ export const api = {
       body: JSON.stringify({ outcome, ...(discard && { discard: true }) }),
     }),
   rounds: () => request<{ rounds: number }>('/api/sessions/today'),
-  // Today's blocks, current or next first; the priority queue when none are laid.
+  // Today's order, then the priority queue behind it.
   candidates: (limit = 5) => request<QueueEntry[]>(`/api/tasks/candidates?limit=${limit}`),
+  order: () => request<RunOrder>('/api/order'),
+  setOrder: (task_ids: number[]) =>
+    request<RunOrder>('/api/order', { method: 'PUT', body: JSON.stringify({ task_ids }) }),
   calendar: () => request<{ entries: CalendarEntry[] }>('/api/calendar'),
   addCalendarEntry: (fields: CalendarFields) =>
     request<CalendarEntry>('/api/calendar', { method: 'POST', body: JSON.stringify(fields) }),
