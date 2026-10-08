@@ -389,11 +389,11 @@ mod tests {
 
     #[test]
     fn the_user_is_matched_by_prefix_and_the_bot_never_is() {
-        let who = Who { user_prefix: "@shuntia:matrix.example.org:".into(), bot_prefix: "@note:matrix.example.org:".into() };
-        assert_eq!(classify("@shuntia:matrix.example.org:ALICEPHONE", &who), Match::User);
+        let who = Who { user_prefix: "@alice:matrix.example.org:".into(), bot_prefix: "@note:matrix.example.org:".into() };
+        assert_eq!(classify("@alice:matrix.example.org:ALICEPHONE", &who), Match::User);
         assert_eq!(classify("@note:matrix.example.org:BOTDEV", &who), Match::Bot);
         assert_eq!(classify("a1b2c3", &who), Match::Other);
-        assert_eq!(classify("@shuntia:matrix.example.org.evil:X", &who), Match::Other);
+        assert_eq!(classify("@alice:matrix.example.org.evil:X", &who), Match::Other);
         let same = Who { user_prefix: "@note:t:".into(), bot_prefix: "@note:t:".into() };
         assert_eq!(classify("@note:t:DEV", &same), Match::Bot);
     }
@@ -413,13 +413,13 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "needs NOTE_VOICE_LIVE=<bot json> and the live homeserver"]
+    #[ignore = "needs NOTE_VOICE_LIVE=<bot json>, NOTE_VOICE_HOMESERVER and NOTE_VOICE_RTC_FOCUS"]
     async fn the_bot_joins_and_publishes() {
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let creds: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(std::env::var("NOTE_VOICE_LIVE").unwrap()).unwrap()).unwrap();
-        let m = Matrix::connect("https://matrix.example.org", creds["access_token"].as_str().unwrap()).await.unwrap();
-        let (url, jwt) = m.livekit_jwt("https://matrix-rtc.example.org", "!note-voice-selftest").await.unwrap();
+        let m = Matrix::connect(&std::env::var("NOTE_VOICE_HOMESERVER").unwrap(), creds["access_token"].as_str().unwrap()).await.unwrap();
+        let (url, jwt) = m.livekit_jwt(&std::env::var("NOTE_VOICE_RTC_FOCUS").unwrap(), "!note-voice-selftest").await.unwrap();
         let who = Who { user_prefix: "@nobody:".into(), bot_prefix: format!("{}:", m.user_id) };
         let media = LiveKitMedia::join(&url, &jwt, &who, Duration::from_secs(2)).await.unwrap();
         assert_eq!(media.left().await, Gone::Failed("the caller never joined".into()));
