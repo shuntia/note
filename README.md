@@ -1,5 +1,7 @@
 # Note
 
+**This app is completely coded by an LLM and is intended to serve me specifically. Features are completely subject to change.**
+
 A self-hosted personal planning assistant. Note keeps your tasks, calendar and
 memory, plans each day overnight from a template, checks in through the day over
 the web app, Web Push, Matrix or a voice call, and talks it all through with an
@@ -68,4 +70,4 @@ and speech sidecars). See [docs/deployment.md](docs/deployment.md).
 
 ## License
 
-Released into the public domain under the [Unlicense](UNLICENSE).
+[MIT](LICENSE).

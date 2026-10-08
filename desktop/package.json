@@ -3,7 +3,7 @@
   "productName": "Note",
   "version": "0.1.0",
   "description": "Desktop wrapper for the Note daily planning app",
-  "license": "Unlicense",
+  "license": "MIT",
   "author": "shuntia <shuntia@shuntia.net>",
   "homepage": "https://github.com/shuntia/note",
   "private": true,

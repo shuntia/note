@@ -54,7 +54,7 @@
             '';
             meta = {
               description = "Web client for the Note daily planning server";
-              license = lib.licenses.unlicense;
+              license = lib.licenses.mit;
             };
           });
 
@@ -91,7 +91,7 @@
             passthru.web = web;
             meta = {
               description = "Self-hosted daily planning server";
-              license = lib.licenses.unlicense;
+              license = lib.licenses.mit;
               mainProgram = "note-server";
             };
           });
@@ -197,7 +197,7 @@
             passthru = { models = voiceModels; cues = voiceCues; inherit webrtc; sherpa = sherpaGpu; };
             meta = {
               description = "Voice calls for Note over Matrix and LiveKit";
-              license = lib.licenses.unlicense;
+              license = lib.licenses.mit;
               mainProgram = "note-voice";
               platforms = [ "x86_64-linux" ];
             };
@@ -260,7 +260,7 @@
             '';
             meta = {
               description = "Desktop wrapper for the Note daily planning app";
-              license = lib.licenses.unlicense;
+              license = lib.licenses.mit;
               mainProgram = "note-desktop";
             };
           }) { };

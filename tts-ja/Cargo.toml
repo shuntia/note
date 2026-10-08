@@ -2,7 +2,7 @@
 name = "note-tts-ja"
 version = "0.1.0"
 edition = "2021"
-license = "Unlicense"
+license = "MIT"
 description = "Japanese speech sidecar for Note's voice calls: Style-Bert-VITS2 with VOICEVOX behind it"
 
 # Its own workspace: its onnxruntime binding never meets note-voice's.
