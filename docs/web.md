@@ -91,10 +91,9 @@ CI (`.github/workflows/desktop.yml`) builds Linux (AppImage, deb), macOS (dmg,
 zip; x64 and arm64) and Windows (nsis) on every change under `desktop/` and
 uploads them as run artifacts (`note-desktop-linux`, `-macos`, `-windows`).
 A `v*` tag publishes them, with electron-updater's `latest*.yml` and
-blockmaps, as the GitHub release of that version. A daily schedule (or a
-manual run) publishes `v<package version>-nightly.<YYYYMMDD>` as a prerelease
-when `main` has moved since the last nightly, and deletes nightlies older than
-14 days. The builds are unsigned: macOS needs right-click → Open the first
+blockmaps, as the GitHub release of that version. Every push to `main`
+(or a manual run) publishes `v<package version>-nightly.<YYYYMMDDHHMM>` as a
+prerelease and deletes nightlies older than 14 days. The builds are unsigned: macOS needs right-click → Open the first
 time, and Windows shows a SmartScreen prompt.
 
 The Windows installer and the AppImage update themselves: they check GitHub

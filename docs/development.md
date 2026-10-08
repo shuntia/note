@@ -28,7 +28,7 @@ GitHub Actions builds the desktop app for Linux, macOS and Windows
 (`.github/workflows/desktop.yml`; see [web.md](web.md#desktop)). To release
 it, push a `vX.Y.Z` tag; the build takes its version from the tag. Then set
 `desktop/package.json`'s version past it, since nightlies are
-`<that version>-nightly.<date>` and must sort above the last release.
+`<that version>-nightly.<YYYYMMDDHHMM>` and must sort above the last release.
 
 ## First run
 

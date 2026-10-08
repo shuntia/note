@@ -4,11 +4,8 @@ on:
   push:
     branches: [main]
     tags: ['v*']
-    paths: ['desktop/**', '.github/workflows/desktop.yml']
   pull_request:
     paths: ['desktop/**', '.github/workflows/desktop.yml']
-  schedule:
-    - cron: '17 10 * * *'
   workflow_dispatch:
     inputs:
       nightly:
@@ -21,7 +18,7 @@ permissions:
 
 jobs:
   # The version to build and the release it goes to: stable for v* tags, nightly
-  # for the schedule and dispatch (skipped when main has not moved since the last one).
+  # for every push to main and for dispatch (skipped when main has not moved since the last one).
   plan:
     runs-on: ubuntu-latest
     outputs:
@@ -33,7 +30,7 @@ jobs:
       - id: plan
         env:
           GH_TOKEN: ${{ github.token }}
-          NIGHTLY: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.nightly) }}
+          NIGHTLY: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && inputs.nightly) }}
         run: |
           base=$(jq -r .version desktop/package.json)
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
@@ -47,7 +44,7 @@ jobs:
               echo "release=none" >> "$GITHUB_OUTPUT"
               echo "No commits since $last."
             else
-              echo "version=$base-nightly.$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+              echo "version=$base-nightly.$(date -u +%Y%m%d%H%M)" >> "$GITHUB_OUTPUT"
               echo "release=nightly" >> "$GITHUB_OUTPUT"
             fi
           else
@@ -127,9 +124,6 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
-      # A second nightly on the same day replaces the first.
-      - if: env.NIGHTLY == 'true'
-        run: gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes || true
       - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ env.TAG }}
