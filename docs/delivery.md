@@ -68,13 +68,19 @@ writing, whatever `ring_for` says:
 
 1. With `[voice]` up and a page of the app in view, every visible socket gets
    `{"type":"incoming","ring","conversation_id"}` and the app shows the call
-   view, ringing. Answering opens `/api/call/ws?ring=<token>`
+   view, ringing, with a soft repeating ringtone (a browser tab may block it
+   until the page has had a click). The desktop app always reports itself in
+   view, so it rings from the tray and brings its window up. Answering opens `/api/call/ws?ring=<token>`
    ([voice.md](voice.md#web-calls)) and every socket gets
    `{"type":"ring_taken","ring"}`; so does declining, which sends the message
    down the ladder at once. A ring unanswered after 30 s, or answered but
    unable to open its call, goes down the ladder too.
 2. Otherwise the linked phone rings over Matrix.
 3. Otherwise the message alone walks the ladder without the voice rung.
+
+An answered call chimes when it connects and plays a short falling tone when
+it ends, lower when it failed; a ring that is never answered stays quiet. The
+sounds are synthesized (`web/src/call/tones.ts`).
 
 Each ring logs `trigger_rang` with `web`, `phone`, `messaged` or
 `undelivered`.

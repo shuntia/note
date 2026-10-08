@@ -78,7 +78,7 @@ tray reopens that window; connecting reloads the app on the new server.
 cd desktop && pnpm install
 pnpm start          # the resolved address, or the first-run window
 pnpm dev            # --dev against http://localhost:5173
-pnpm test           # address resolution (node --test)
+pnpm test           # address resolution and update eligibility (node --test)
 pnpm dist -c.extraMetadata.noteUrl=https://note.example.com   # AppImage and deb
 ```
 
@@ -89,10 +89,23 @@ address in. On NixOS or Home Manager use `programs.note-desktop` instead (see
 
 CI (`.github/workflows/desktop.yml`) builds Linux (AppImage, deb), macOS (dmg,
 zip; x64 and arm64) and Windows (nsis) on every change under `desktop/` and
-uploads them as run artifacts (`note-desktop-linux`, `-macos`, `-windows`);
-a `v*` tag attaches them to a GitHub release. The builds are unsigned: macOS
-needs right-click → Open the first time, and Windows shows a SmartScreen
-prompt.
+uploads them as run artifacts (`note-desktop-linux`, `-macos`, `-windows`).
+A `v*` tag publishes them, with electron-updater's `latest*.yml` and
+blockmaps, as the GitHub release of that version. A daily schedule (or a
+manual run) publishes `v<package version>-nightly.<YYYYMMDD>` as a prerelease
+when `main` has moved since the last nightly, and deletes nightlies older than
+14 days. The builds are unsigned: macOS needs right-click → Open the first
+time, and Windows shows a SmartScreen prompt.
 
-The microphone is granted only to the Note server's own pages. On macOS the
-first call asks for microphone access.
+The Windows installer and the AppImage update themselves: they check GitHub
+at start and every 4 hours, download in the background, and offer "Restart to
+update" in the tray and File menu once ready ("Check for updates" checks now).
+"Nightly builds" there (saved in `config.json`) follows prereleases too. macOS
+and the deb get "Check for updates", which opens the releases page; dev runs
+and the Nix package never update.
+
+Closing the window hides it to the tray, where the app keeps its socket and
+timers running and is still rung: a ring shows, restores and focuses the
+window (flashing it, or bouncing the macOS dock icon) and the ringtone plays
+without a click. The microphone is granted only to the Note server's own
+pages. On macOS the first call asks for microphone access.
