@@ -435,7 +435,7 @@ mod tests {
     fn audio_flows_again_once_the_socket_catches_up() {
         let relays = Relays::default();
         let mut a = relays.open("a", 1);
-        for _ in 0..AUDIO_BACKLOG + 1 {
+        for _ in 0..=AUDIO_BACKLOG {
             relays.media("a", Media::AudioOut { pcm: Pcm(vec![3; 960]), rate: OUT_RATE });
         }
         while a.try_recv().is_ok() {}

@@ -218,7 +218,7 @@ impl Voice {
     pub fn start_web_call(
         &self,
         user_id: i64,
-        start: web::WebStart,
+        web::WebStart { thread, message: outbound }: web::WebStart,
         now: jiff::Timestamp,
     ) -> Result<web::WebCall, web::WebRefusal> {
         use web::WebRefusal::{Busy, Unavailable};
@@ -227,8 +227,8 @@ impl Voice {
         }
         let id = uuid::Uuid::new_v4().to_string();
         let ring_by = now + jiff::SignedDuration::from_secs(RING_BY_SECS);
-        let direction = if start.message.is_some() { Direction::Outbound } else { Direction::Inbound };
-        let message = start.message.as_ref().map(serde_json::to_string).transpose().map_err(|_| Unavailable)?;
+        let direction = if outbound.is_some() { Direction::Outbound } else { Direction::Inbound };
+        let message = outbound.as_ref().map(serde_json::to_string).transpose().map_err(|_| Unavailable)?;
         {
             let conn = crate::db_guard(&self.db);
             let busy: bool = conn
@@ -241,7 +241,7 @@ impl Voice {
             if busy {
                 return Err(Busy);
             }
-            let thread = start.thread.filter(|thread| {
+            let thread = thread.filter(|thread| {
                 conn.query_row(
                     "SELECT EXISTS (SELECT 1 FROM conversations WHERE id = ?1 AND user_id = ?2)",
                     (thread, user_id),
@@ -285,7 +285,7 @@ impl Voice {
             }
             return Err(Unavailable);
         }
-        if let Some(msg) = &start.message {
+        if let Some(msg) = &outbound {
             self.calls.warm_up(user_id, msg);
         }
         Ok(web::WebCall { call_id: id, out })
