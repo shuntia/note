@@ -19,14 +19,19 @@ Views (`web/src/views/`):
 
 - **Home**: one face on a gradient. In a focus session it is a gauge around
   the step's remaining time with pause and "Done with this step"; between
-  sessions it is the next routine, counted down over an arc. Swipe up, scroll
+  sessions it is the next routine, counted down over an arc. Now offers today's
+  run order first, then the queue (`GET /api/tasks/candidates`). Swipe up, scroll
   or ArrowDown raises **Today** under it: the next event with its actions
   (Start, Later, drop, move to tomorrow, silence), and the day drawn as a line.
   A phone opens on Home; a desktop opens on Today.
 - **Tasks**: quick-add, steps, durations, and a start that opens a session.
+  The soon list leads with today's run order; a long press lifts a row and
+  dragging it into, within or out of the order saves it (`PUT /api/order`).
+  Later is folded beneath.
 - **Calendar**: commitments and quiet windows.
 - **Chat** (`Talk.tsx`): persisted conversations, replies as sanitized
-  markdown, and one quiet line for what the agent did. While a reply is coming
+  markdown, and one quiet line for what the agent did. With the field empty
+  and a voice service configured, the send button is a mic that calls Note. While a reply is coming
   it reads "Note is thinking…" with the tool in flight; after, a header ("Note
   thought for 4 seconds") opens the reasoning and every call. A turn with
   neither reasoning nor tool calls has no header.
@@ -38,10 +43,20 @@ Views (`web/src/views/`):
 - **Onboarding**, **Join** (invite links), **Share** (the `/s/<token>` visitor
   chat), **Admin**.
 
+**The call view** (`web/src/call/`) takes the whole screen: one circle that
+breathes while listening, ripples with either voice, and writes while Note
+thinks, with the caller's words as captions. A tap mutes (or answers a ring), a
+downward swipe or Escape ends the call; Note's last words play out first.
+Capture and playback run in audio worklets (16 kHz up, jitter-buffered
+playback down) over `/api/call/ws` ([voice.md](voice.md#web-calls)). An
+`incoming` ring opens the view ringing in a visible tab
+([delivery.md](delivery.md#ringing)).
+
 The top bar on desktop holds the views and a quick-capture field (`N`); phones
 get a fixed tab bar; a running session takes the whole screen. Deliveries
 arrive live over the WebSocket while the app is open and as push notifications
-when not; `web/public/sw.js` renders them and focuses an open tab on click.
+when not; the socket also tells the server whether the page is in view.
+`web/public/sw.js` renders push notifications and focuses an open tab on click.
 
 ## Desktop
 

@@ -61,6 +61,9 @@ nix develop .#voice -c cargo test -p note-voice
 nix flake check                    # the packaged test suites and the NixOS VM test
 ```
 
+`cargo-nextest` is not in the dev shell: install it (`cargo install
+cargo-nextest`) or run `cargo test`.
+
 Use the `aitest` account for test data; no other account's data may be read or
 modified.
 
@@ -79,6 +82,19 @@ pnpm shot <today|tasks|chat|memory|settings> <WxH> <out.png> [--session] [--stag
 starts a throwaway server on port 3299 (`NOTE_PORT`), signs a scratch user in
 and writes the PNG. `--session` shoots with a focus session running;
 `--stage N` raises the home screen N steps first.
+
+Web call check: with `target/debug/note-server` built and the same `pnpm dev`
+running,
+
+```sh
+node scripts/call-check.mjs
+```
+
+starts a throwaway server with `[voice]` on a temporary socket, stands a fake
+voice side on it (`scripts/fake-voice.mjs`), and drives headless Chromium
+(`CHROMIUM`, default `chromium` on `PATH`) with a fake microphone: it signs in,
+calls from Chat, and checks the call reaches listening, carries audio, draws
+the circle and ends cleanly. It exits non-zero on the first failure.
 
 ## Inspection build
 

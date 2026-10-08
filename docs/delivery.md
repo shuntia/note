@@ -1,10 +1,11 @@
 # Delivery
 
-When an event fires, the server walks a ladder: a voice ring (with `[voice]`,
-a linked Matrix account and a message the user's `ring_for` covers), Matrix
-(with `[channels.matrix]`), connected WebSocket clients, then Web Push. The
-first channel that accepts wins; if none does, the day is plainer, never an
-error.
+When an event fires, the server walks a ladder: a voice ring of the linked
+phone (with `[voice]`, a linked Matrix account and a message the user's
+`ring_for` covers), connected WebSocket clients, then Web Push. The first
+channel that accepts wins; if none does, the day is plainer, never an error.
+Matrix (with `[channels.matrix]`) sits after the voice ring as a companion: it
+posts a copy when the user has `matrix_send` on and the walk goes on.
 
 Every outcome lands in `event_log` (readable at `GET /api/admin/log`):
 
@@ -30,6 +31,9 @@ receives one JSON frame per delivery:
 
 `conversation_id` is the thread a check-in opened, `null` otherwise; the web
 client switches to it, and push notifications deep-link to `/#/chat/<id>`.
+`{"type":"changed"}` tells the client the user's day changed under it (a
+wake-up's edit, a reordered day) so it refetches; `incoming` and `ring_taken`
+belong to [ringing](#ringing).
 
 A talk session in flight streams its progress to the same sockets:
 
@@ -44,10 +48,36 @@ new conversation's reply hands the client its id. `event.kind` is `thinking`
 `name`, `result`, `is_error`), `reply` (`text`) or `error` (`message`); every
 variable field is clipped to 4 KiB. Only `POST /api/talk` emits these.
 
-Inbound frames are drained and ignored. The server pings every 30 s and drops a
-connection silent for 90 s, so a half-open socket stops absorbing deliveries.
-An upgrade whose `Sec-Fetch-Site` names a foreign site is `403`; an account
-holds at most 8 sockets (a ninth is `429` before the upgrade).
+Inbound frames count as presence. A page reports whether it is in view with
+`{"type":"visible","on":bool}` and declines a ring with
+`{"type":"decline","ring"}`; anything else is ignored. The server pings every
+30 s and drops a connection silent for 90 s, so a half-open socket stops
+absorbing deliveries.
+
+An upgrade is `403` when `Sec-Fetch-Site` names another site, or when an
+`Origin` is sent that is neither one of Note's page origins (`public_base_url`'s,
+and the listening address's, with its loopback names when it listens on
+loopback or every address) nor the request's own `Host` over https (plain http
+only for a loopback host or the listening address). An account holds at most 8
+sockets (a ninth is `429` before the upgrade).
+
+## Ringing
+
+A wake-up's `say {ring: true}` ([agent.md](agent.md#wake-ups)) calls instead of
+writing, whatever `ring_for` says:
+
+1. With `[voice]` up and a page of the app in view, every visible socket gets
+   `{"type":"incoming","ring","conversation_id"}` and the app shows the call
+   view, ringing. Answering opens `/api/call/ws?ring=<token>`
+   ([voice.md](voice.md#web-calls)) and every socket gets
+   `{"type":"ring_taken","ring"}`; so does declining, which sends the message
+   down the ladder at once. A ring unanswered after 30 s, or answered but
+   unable to open its call, goes down the ladder too.
+2. Otherwise the linked phone rings over Matrix.
+3. Otherwise the message alone walks the ladder without the voice rung.
+
+Each ring logs `trigger_rang` with `web`, `phone`, `messaged` or
+`undelivered`.
 
 ## Check-ins are conversations
 

@@ -3,8 +3,9 @@
 **This app is completely coded by an LLM and is intended to serve me specifically. Features are completely subject to change.**
 
 A self-hosted personal planning assistant. Note keeps your tasks, calendar and
-memory, plans each day overnight from a template, checks in through the day over
-the web app, Web Push, Matrix or a voice call, and talks it all through with an
+memory, plans each day overnight from a template and sets the order to work
+through, wakes on its own through the day to tidy and check in over the web
+app, Web Push, Matrix or a voice call, and talks it all through with an
 LLM agent that acts through typed tools.
 
 ## Repository layout
@@ -57,13 +58,13 @@ and speech sidecars). See [docs/deployment.md](docs/deployment.md).
 - [Setup](docs/setup.md): the short version — run it, sign in, see what it does
 - [Development](docs/development.md): build, dev shells, tests, screenshots, CLI
 - [Configuration](docs/configuration.md): `server.toml`, `user.toml`, the settings API, account categories
-- [Planning](docs/planning.md): tasks, deadlines, urgency, the daily plan, calendar and quiet windows
-- [Agent](docs/agent.md): providers, sessions, context, memory, tools, prompts, the nightly run
-- [Delivery](docs/delivery.md): the delivery ladder, WebSocket, check-in threads, Web Push, Matrix
+- [Planning](docs/planning.md): tasks, deadlines, urgency, the run order, the daily plan, calendar and quiet windows
+- [Agent](docs/agent.md): providers, sessions, the nightly run, wake-ups, context, working notes, memory, tools, prompts
+- [Delivery](docs/delivery.md): the delivery ladder, WebSocket, ringing, check-in threads, Web Push, Matrix
 - [Importing](docs/importing.md): mirroring outside work in, briefing tasks, reading inbox items
 - [Share links](docs/share-links.md): letting someone chat with Note about a slice of your day
 - [Security](docs/security.md): sign-in limits, API tokens, the admin panel, passkeys and TOTP
-- [Voice](docs/voice.md): calls, the voice service, speech sidecars
+- [Voice](docs/voice.md): web and Matrix calls, the voice service, speech sidecars
 - [Web and desktop](docs/web.md): the PWA and the Electron shell
 - [API](docs/api.md): every HTTP route, with the ones not covered elsewhere
 - [Deployment](docs/deployment.md): the NixOS module, other hosts, upgrades

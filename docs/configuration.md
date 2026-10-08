@@ -87,17 +87,17 @@ category default.
 | `language` | blank, `en` or `ja`; changing it resets `voice_voice` unless one is sent too |
 | `template` | one of `templates` |
 | `nightly_time` | zero-padded 24-hour `HH:MM` (default `03:00`) |
-| `close_day_time` | `HH:MM`, or blank for no close of day |
+| `close_day_time` | `HH:MM` (default `21:30`), or blank for no close of day |
 | `morning_until` | `HH:MM` |
 | `show_arc_between_sessions` | bool: whether the wait between sessions draws its arc |
 | `counter` | `remaining` or `elapsed` |
 | `nightly_enabled`, `checkins_enabled` | bool; default from the category |
-| `triggers_per_day` | 0 to 20 check-ins Note may start on its own |
+| `triggers_per_day` | 0 to 20 wake-ups Note may lay for itself a day (default 12) |
 | `pomodoro_enabled` | bool |
 | `pomodoro_work_min` | 5 to 120 |
 | `pomodoro_break_min` | 1 to 60 |
 | `session_end_notify` | bool |
-| `idle_nudge_min` | 0 to 240 |
+| `idle_nudge_min` | 0 to 240 minutes quiet before an idle wake-up (default 20; 0 is off) |
 | `ring_for` | `urgent`, `checkins` or `never` |
 | `voice_voice` | a call voice id; blank for the language default |
 | `voice_cue` | bool (default true) |
@@ -105,6 +105,10 @@ category default.
 | `alerts` | `[{index, alert}]`: which of the template's routines ping |
 
 `category` is read-only here; it belongs to the account.
+
+`day_start` is set in `user.toml` only: the `HH:MM` (default `08:00`) at which
+the day's `lay_day` wake-up is laid if the user has not been active since
+05:00; blank turns day-laying off ([agent.md](agent.md#wake-ups)).
 
 ## Account categories
 

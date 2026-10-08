@@ -21,7 +21,8 @@ place in Now, and up to one level of steps. Every task also carries:
 
 `POST /api/tasks` takes `title` and any of `description`, `notes`,
 `duration_min`, `parent_id`, `is_now`, `state`, `due_at`, `url`,
-`external_id`, `source` and `urgency`; an unknown field is a `422`. `PATCH
+`external_id`, `source`, `notify`, `progress`, `category`, `goal_id` and
+`urgency`; an unknown field is a `422`. `PATCH
 /api/tasks/{id}` takes the same, with explicit `null` clearing `due_at`,
 `duration_min`, `parent_id` and `external_id`. A bad `due_at` is `422`; an
 `external_id` another task holds is `409`. Every listing returns `due_at`,
@@ -32,8 +33,30 @@ place in Now, and up to one level of steps. Every task also carries:
 tombstone ([importing.md](importing.md)). `POST /api/tasks/{id}/split` and
 `POST /api/tasks/{id}/flatten` add and clear steps.
 
-When Note fills free time, tasks in Now go first, then high, then pressing,
-then normal, then low, nearest due date first within each.
+The queue (`GET /api/tasks/queue?limit=`, 1 to 20, default 5) ranks open
+top-level tasks: Now first, then high, then pressing, then normal, then low,
+nearest due date first within each, then oldest.
+
+## Run order
+
+Each day has a run order: up to 30 tasks or steps to work through, first to
+last, stored per local date in `run_order` (schema v53, which also removed
+unstarted automatic blocks). The nightly run sets the day it
+plans; the day's `lay_day` wake-up ([agent.md](agent.md#wake-ups)) checks it
+and sets it if the night left it empty or wrong; any session with the order
+tools may change it. A finished, dropped or deleted item, or a step whose task
+is, leaves the order on its own. The task of a running work session stays
+first.
+
+Now starts the order's first open item and falls back to the queue once the
+order runs out: `GET /api/tasks/candidates?limit=` answers that list, one entry
+per task. On the Tasks view, today's order heads the soon list and a long press
+drags a row into or out of it.
+
+- `GET /api/order` → `{date, task_ids}` for today.
+- `PUT /api/order {task_ids}` replaces today's order and answers the same
+  shape; an unknown, closed or repeated id, or more than 30, is `422`. It logs
+  `order_changed`.
 
 Deadlines in the agent's context: each Now and Later line ends with `due
 today`, `due tomorrow`, `overdue` or `due <local date>`; the Later list leads
@@ -66,7 +89,9 @@ Event routes beside the plan reads (`GET /api/plan/today`,
 
 `GET /api/plan/today?calendar=1` answers `{"events": […], "calendar": […]}`
 instead of the bare event array, so a client draws the day and its
-commitments from one call.
+commitments from one call. `POST /api/plan/{date}/carry` moves what is left of
+a day to the next. Tasks are never laid into the day on their own: blocks come
+from `plan_tasks` or the user.
 
 ## Calendar
 
@@ -78,8 +103,9 @@ either a weekday set or a single date:
 - `busy`: a commute, a meal. Shows on the day and may be quiet, never blocks
   scheduling.
 - `note`: informational (bin day, a birthday), never quiet.
+- `free`: time the user has set aside for tasks, never quiet.
 
-`quiet` defaults on and is forced off for a `note`. A recurring entry carries
+`quiet` defaults on and is forced off for a `note` or `free`. A recurring entry carries
 `days` as a bitmask (Mon = 1 … Sun = 64) and optional `from_date`/`until_date`;
 a one-off entry carries `on_date`. Any occurrence can be skipped by date
 without touching the entry. Times are in the user's timezone; a calendar holds
