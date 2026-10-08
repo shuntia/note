@@ -924,7 +924,7 @@ mod tests {
             &crate::triggers::Lay {
                 config_dir: tmp.path(), user_id: uid, username: "aki", at: "22:00",
                 prompt: "how did the essay go?", date, cancel: None, conversation_id: None,
-                work_session_id: None, system: false, now,
+                work_session_id: None, system: false, past_session: false, now,
             },
         )
         .unwrap();

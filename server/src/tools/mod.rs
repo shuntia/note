@@ -482,8 +482,28 @@ const NIGHTLY: &[&str] = registry_of![
     SEARCH,
     BATCH,
 ];
-const TRIGGER: &[&str] =
-    registry_of![MEMORY_READ, TASK_READ, NOTES, PLAN_READ, PLAN_CARRY, TRIGGERS, BATCH, SPEAK];
+const TRIGGER: &[&str] = registry_of![
+    MEMORY_READ,
+    MEMORY_WRITE,
+    TASK_READ,
+    TASK_WRITE,
+    TASK_BULK,
+    NOTES,
+    PLAN_READ,
+    PLAN_CARRY,
+    ORDER,
+    SCHEDULE,
+    TRIGGERS,
+    BATCH,
+    SPEAK,
+];
+
+/// Whether a successful call of this tool changed the user's day or Note's memory.
+pub fn writes(name: &str) -> bool {
+    [TASK_WRITE, TASK_BULK, NOTES, ORDER, SCHEDULE, MEMORY_WRITE, TRIGGERS]
+        .iter()
+        .any(|d| d.contains(&name))
+}
 const IMPORT: &[&str] = registry_of![BRIEF];
 const INBOX: &[&str] = registry_of![MEMORY_READ, DECIDE];
 const SUMMARIZE: &[&str] = registry_of![SUMMARY];
@@ -988,6 +1008,9 @@ fn run(
     name: &str,
     raw: &str,
 ) -> Result<serde_json::Value, ToolError> {
+    if kind == SessionKind::Trigger {
+        order_ops::guard_running(conn, ctx, name, raw)?;
+    }
     match name {
         "task_create" => task_ops::create(conn, ctx, parse(raw)?),
         "task_update" => task_ops::update(conn, ctx, parse(raw)?),
@@ -1847,5 +1870,24 @@ mod tests {
         let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "note_settle",
             r#"{"id":"00000000-0000-4000-8000-000000000001","outcome":"drop"}"#).unwrap_err();
         assert_eq!(e.kind, "forbidden");
+    }
+
+    #[test]
+    fn a_wake_up_tends_the_day_but_never_the_calendar() {
+        let t = registry(SessionKind::Trigger);
+        for name in [
+            "memory_write", "task_update", "task_split", "task_bulk_update", "note_write",
+            "order_set", "order_move", "order_drop", "schedule_reshape", "schedule_drop", "trigger_set",
+        ] {
+            assert!(t.contains(&name), "{name}");
+        }
+        for name in [
+            "calendar_add", "calendar_update", "calendar_remove", "calendar_skip",
+            "schedule_insert", "trigger_budget", "notify_send", "goal_create",
+        ] {
+            assert!(!t.contains(&name), "{name}");
+        }
+        assert!(writes("order_move") && writes("task_update") && writes("trigger_set"));
+        assert!(!writes("task_list") && !writes("say") && !writes("plan_list"));
     }
 }

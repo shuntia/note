@@ -125,6 +125,7 @@ fn lay(
             conversation_id: thread,
             work_session_id: None,
             system: false,
+            past_session: kind == SessionKind::Trigger,
             now,
         },
     )

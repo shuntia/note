@@ -230,6 +230,9 @@ pub struct Lay<'a> {
     /// agent chose: it is the day's furniture, so it is exempt from the budget
     /// and from the lead time, and never belongs to an open session.
     pub system: bool,
+    /// Set for a wake-up: a check past the open work session's end is laid for
+    /// the day instead of refused.
+    pub past_session: bool,
     pub now: jiff::Timestamp,
 }
 
@@ -270,8 +273,10 @@ pub fn lay(conn: &Connection, lay: &Lay) -> Result<Laid, Refusal> {
     let (date, target) = resolve(lay.at, lay, &local)?;
     let wall = format!("{:02}:{:02}", target / 60, target % 60);
 
-    let session = open_work_session(conn, lay.user_id).map_err(internal)?;
     let lead = lead_minutes(date, target, &local);
+    let session = open_work_session(conn, lay.user_id).map_err(internal)?.filter(|s| {
+        !(lay.past_session && overrun_lead(s, lay.now).is_some_and(|limit| lead > limit))
+    });
     if lead < 0 {
         return Err(Refusal::Past { at: wall });
     }
@@ -379,6 +384,7 @@ pub fn lay_close_day(
             conversation_id: None,
             work_session_id: None,
             system: true,
+            past_session: false,
             now,
         },
     );
@@ -633,6 +639,25 @@ fn record_said(
     }
 }
 
+const MAX_CHANGE_CHARS: usize = 300;
+
+/// One activity row per change a wake-up made, so the user can see what Note
+/// did on its own.
+pub fn log_changes(
+    conn: &Connection,
+    user_id: i64,
+    event_id: i64,
+    steps: &[crate::agent::SessionStep],
+) -> Result<usize> {
+    let mut n = 0;
+    for s in steps.iter().filter(|s| !s.is_error && crate::tools::writes(&s.name)) {
+        let args: String = s.args.chars().take(MAX_CHANGE_CHARS).collect();
+        crate::log::record(conn, Some(user_id), "wake_change", &format!("event {event_id}: {} {args}", s.name))?;
+        n += 1;
+    }
+    Ok(n)
+}
+
 fn settle(conn: &Connection, event_id: i64, now: jiff::Timestamp) -> rusqlite::Result<usize> {
     conn.execute(
         "UPDATE events SET status = 'done', decided_at = ?1 WHERE id = ?2",
@@ -710,6 +735,13 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
             return failed(format!("event {}: {e:#}", ev.event_id));
         }
     };
+    let changed = {
+        let conn = state.db();
+        log_changes(&conn, fired.user_id, ev.event_id, &out.steps).unwrap_or(0)
+    };
+    if changed > 0 {
+        state.hub.broadcast_changed(fired.user_id);
+    }
     let Some(step) = out.steps.iter().rev().find(|s| {
         !s.is_error && crate::tools::is_terminal(crate::tools::SessionKind::Trigger, &s.name)
     }) else {
@@ -820,6 +852,7 @@ mod tests {
             conversation_id: None,
             work_session_id: None,
             system: false,
+            past_session: false,
             now: at("2026-09-17T09:00:00Z"),
         }
     }
@@ -1100,5 +1133,43 @@ mod tests {
 
         crate::presence::touch(&conn, uid, at("2026-09-17T09:00:00.900Z")).unwrap();
         assert!(cancelled(&conn, uid, &ev).unwrap(), "a stamp in the same second still counts");
+    }
+
+    #[test]
+    fn a_wake_up_past_the_sessions_end_is_laid_for_the_day() {
+        let (conn, tmp, uid) = env();
+        conn.execute(
+            "INSERT INTO work_sessions (user_id, title, planned_min, started_at)
+             VALUES (?1, 'read the chapter', 60, '2026-09-17T08:55:00Z')",
+            [uid],
+        )
+        .unwrap();
+        let session_of = |id: i64| -> Option<i64> {
+            conn.query_row("SELECT work_session_id FROM events WHERE id = ?1", [id], |r| r.get(0)).unwrap()
+        };
+        let later = lay(&conn, &Lay { past_session: true, ..lay_at(&tmp, uid, "15:00") }).unwrap();
+        assert_eq!(session_of(later.event_id), None);
+        assert_eq!(spent(&conn, uid, date()).unwrap(), 1, "a day wake-up spends the day's budget");
+        let inside = lay(&conn, &Lay { past_session: true, ..lay_at(&tmp, uid, "09:30") }).unwrap();
+        assert_eq!(session_of(inside.event_id), Some(1), "inside the session it is the session's");
+        assert!(lay(&conn, &lay_at(&tmp, uid, "15:00")).is_err(), "outside a wake-up it is still refused");
+    }
+
+    #[test]
+    fn every_change_a_wake_up_made_is_logged() {
+        let (conn, _tmp, uid) = env();
+        let step = |name: &str, is_error: bool| crate::agent::SessionStep {
+            name: name.into(),
+            args: r#"{"task_id":3}"#.into(),
+            result: "{}".into(),
+            is_error,
+            thinking: None,
+        };
+        let steps = [step("task_read", false), step("order_move", false), step("task_update", true), step("stay_quiet", false)];
+        assert_eq!(log_changes(&conn, uid, 9, &steps).unwrap(), 1);
+        let detail: String = conn
+            .query_row("SELECT detail FROM event_log WHERE kind = 'wake_change'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(detail, r#"event 9: order_move {"task_id":3}"#);
     }
 }

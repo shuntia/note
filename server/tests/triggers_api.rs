@@ -216,6 +216,7 @@ async fn a_trigger_whose_reason_settled_itself_is_cancelled_before_any_session_r
                 conversation_id: None,
                 work_session_id: None,
                 system: false,
+                past_session: false,
                 now: jiff::Timestamp::now(),
             },
         )

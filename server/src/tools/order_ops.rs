@@ -55,6 +55,25 @@ pub(crate) fn held(conn: &Connection, user_id: i64) -> rusqlite::Result<Vec<i64>
     Ok(out)
 }
 
+/// Refuses a wake-up's edit of the task the user is working on right now.
+pub(crate) fn guard_running(conn: &Connection, ctx: &ToolCtx, name: &str, raw: &str) -> Result<(), ToolError> {
+    if !matches!(name, "task_update" | "task_split" | "task_delete" | "task_bulk_update") {
+        return Ok(());
+    }
+    let args: serde_json::Value = serde_json::from_str(raw).unwrap_or_default();
+    let mut named: Vec<i64> = args["task_id"].as_i64().into_iter().collect();
+    if let Some(ids) = args["task_ids"].as_array() {
+        named.extend(ids.iter().filter_map(serde_json::Value::as_i64));
+    }
+    let held = held(conn, ctx.user_id).map_err(internal)?;
+    match named.into_iter().find(|id| held.contains(id)) {
+        Some(id) => Err(ToolError::rejected(format!(
+            "task {id} is in the work session running now; leave it until the session ends"
+        ))),
+        None => Ok(()),
+    }
+}
+
 fn write(
     conn: &Connection,
     ctx: &ToolCtx,
@@ -246,5 +265,29 @@ mod tests {
         for kind in [SessionKind::Share, SessionKind::Import, SessionKind::Call] {
             assert!(!registry(kind).contains(&"order_set"), "{kind:?}");
         }
+    }
+
+    #[test]
+    fn a_wake_up_leaves_the_running_task_alone() {
+        let (conn, tmp) = env();
+        let essay = task(&conn, &tmp, "essay");
+        let other = task(&conn, &tmp, "laundry");
+        conn.execute(
+            "INSERT INTO work_sessions (user_id, task_id, title, started_at) VALUES (1, ?1, 'essay', '2026-10-07T09:00:00Z')",
+            [essay],
+        )
+        .unwrap();
+        for (name, args) in [
+            ("task_update", format!(r#"{{"task_id":{essay},"title":"x"}}"#)),
+            ("task_delete", format!(r#"{{"task_id":{essay}}}"#)),
+            ("task_bulk_update", format!(r#"{{"task_ids":[{other},{essay}],"state":"dropped"}}"#)),
+        ] {
+            let e = dispatch(&conn, &ctx(&tmp), SessionKind::Trigger, name, &args).unwrap_err();
+            assert_eq!(e.kind, "rejected", "{name}");
+        }
+        dispatch(&conn, &ctx(&tmp), SessionKind::Trigger, "task_update",
+            &format!(r#"{{"task_id":{other},"title":"wash"}}"#)).unwrap();
+        dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_update",
+            &format!(r#"{{"task_id":{essay},"title":"the essay"}}"#)).unwrap();
     }
 }

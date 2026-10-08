@@ -20,7 +20,7 @@ pub const HARVEST_MAX_TURNS: usize = 8;
 pub const REVIEW_MAX_TURNS: usize = 8;
 /// A trigger session looks around and then speaks or does not: room to read the
 /// situation, never room to hold a conversation with itself.
-pub const TRIGGER_MAX_TURNS: usize = 6;
+pub const TRIGGER_MAX_TURNS: usize = 10;
 
 use crate::model_text::{self as mt, REPLY_IN_JAPANESE, SPEAK_JAPANESE, VISITOR_JAPANESE};
 use crate::text::Lang;
@@ -1030,7 +1030,7 @@ mod tests {
         assert!(seen[0].system.contains("following up on your own plan"));
         assert!(seen[0].system.contains("# Today's plan"));
         assert!(seen[0].tool_names.contains(&"stay_quiet".to_string()));
-        assert!(!seen[0].tool_names.contains(&"task_create".to_string()));
+        assert!(!seen[0].tool_names.contains(&"calendar_add".to_string()));
     }
 
     #[test]
