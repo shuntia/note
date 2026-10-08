@@ -52,6 +52,14 @@ export function onCallFrame(fn: (frame: CallFrame) => void): () => void {
 }
 
 export const visibilityFrame = (hidden: boolean) => JSON.stringify({ type: 'visible', on: !hidden })
+export const declineFrame = (ring: string) => JSON.stringify({ type: 'decline', ring })
+
+let shell: WebSocket | null = null
+
+// Tells the server the user turned Note's ring down, so its message is sent on now.
+export function declineRing(ring: string) {
+  if (shell?.readyState === WebSocket.OPEN) shell.send(declineFrame(ring))
+}
 
 // Handshakes that close without ever opening, this many in a row, read as a
 // dead session rather than a flaky network.
@@ -78,6 +86,7 @@ export function connectEvents(
     if (closed) return
     const proto = location.protocol === 'https:' ? 'wss' : 'ws'
     socket = new WebSocket(`${proto}://${location.host}/api/ws`)
+    shell = socket
     let opened = false
     socket.onopen = () => {
       opened = true
@@ -117,5 +126,6 @@ export function connectEvents(
     document.removeEventListener('visibilitychange', report)
     window.clearTimeout(timer)
     socket?.close()
+    if (shell === socket) shell = null
   }
 }

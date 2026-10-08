@@ -1,6 +1,12 @@
 import { t } from '../i18n'
 
-// Send while there is text, a call to Note while there is none; a press keeps the field focused so the tab bar stays down.
+// The call takes focus off the field first, so focus coming back after the call raises no keyboard.
+export function pressCall(button: { focus(): void }, onCall: () => void) {
+  button.focus()
+  onCall()
+}
+
+// Send while there is text, a call to Note while there is none; a send keeps the field focused so the tab bar stays down.
 export function ComposeButton({
   draft,
   busy,
@@ -21,7 +27,7 @@ export function ComposeButton({
       aria-label={send ? t('talk.send') : micBlocked ? t('talk.micBlocked') : t('talk.call')}
       disabled={send ? busy || !draft.trim() : busy || micBlocked}
       onMouseDown={(e) => e.preventDefault()}
-      onClick={send ? undefined : onCall}
+      onClick={send || !onCall ? undefined : (e) => pressCall(e.currentTarget, onCall)}
     >
       <svg className="face-send" viewBox="0 0 24 24" aria-hidden="true">
         <path d="M5 12h14" />

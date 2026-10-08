@@ -1,16 +1,16 @@
 import { useEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from 'react'
 import { t } from '../i18n'
 import { reducedMotion } from '../motion'
-import { onCallFrame } from '../ws'
+import { declineRing, onCallFrame } from '../ws'
 import { CallControl, type CallOpen, type CallShown, type Phase } from './control'
 import { ease, shape, smooth, stillForm, target, type Form, type Look, type Pt } from './form'
 import { primeAudio, releaseAudioContext } from './prime'
 import { callUrl, CallSession, type AudioIo, type LiveState } from './session'
+import { Swipe } from './swipe'
 import '../styles/call.css'
 
 export type { CallOpen }
 
-const SWIPE_PX = 80
 const MAX_FRAME_MS = 100
 const ALPHA_STEPS = 64
 
@@ -63,6 +63,7 @@ export function CallView({
         connect: (events) => new CallSession(callUrl(location, call), audio(), events),
         prime: primeAudio,
         release: releaseAudioContext,
+        decline: declineRing,
         onClose: (id) => props.current.onClose(id),
         onMicBlocked: () => props.current.onMicBlocked(),
         later: (fn, ms) => window.setTimeout(fn, ms),
@@ -75,31 +76,19 @@ export function CallView({
   const { phase, live, muted, caption, shake } = shown
   const canvas = useRef<HTMLCanvasElement>(null)
   const root = useRef<HTMLDivElement>(null)
-  const swipeFrom = useRef<number | null>(null)
-  const swiped = useRef(false)
+  const [swipe] = useState(() => new Swipe())
   const look = lookOf(phase, live)
   const drawn = useRef({ look, muted })
   drawn.current = { look, muted }
 
   const tap = () => {
-    if (swiped.current) {
-      swiped.current = false
-      return
-    }
-    control.tap()
+    if (swipe.tap()) control.tap()
   }
 
-  const down = (e: PointerEvent) => {
-    swiped.current = false
-    swipeFrom.current = e.clientY
-  }
+  const down = (e: PointerEvent) => swipe.down(e.clientY)
   const up = (e: PointerEvent) => {
-    const from = swipeFrom.current
-    swipeFrom.current = null
-    if (from !== null && e.clientY - from > SWIPE_PX) {
-      swiped.current = true
-      control.end()
-    }
+    if (swipe.up(e.clientY)) control.end()
+    window.setTimeout(() => swipe.settle(), 0)
   }
 
   const key = (e: KeyboardEvent) => {
@@ -195,6 +184,7 @@ export function CallView({
       aria-label={t('talk.call')}
       onPointerDown={down}
       onPointerUp={up}
+      onPointerCancel={() => swipe.settle()}
       onKeyDown={key}
     >
       <button className="call-close" aria-label={t('call.end')} onClick={() => control.end()}>

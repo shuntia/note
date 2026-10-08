@@ -52,7 +52,7 @@ voice = fakeVoice(socket)
 await waitFor('the voice link', () => voice.state.up)
 
 browser = await chromium.launch({
-  executablePath: process.env.CHROMIUM ?? '/etc/profiles/per-user/user/bin/chromium',
+  executablePath: process.env.CHROMIUM ?? execFileSync('sh', ['-c', 'command -v chromium']).toString().trim(),
   args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream', '--autoplay-policy=no-user-gesture-required'],
 })
 const context = await browser.newContext({ viewport: { width: 1280, height: 800 } })

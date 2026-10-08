@@ -24,6 +24,7 @@ export type CallDeps = {
   connect(events: CallEvents): CallLine
   prime(): void
   release(): void
+  decline(ring: string): void
   onClose(conversationId: number | null): void
   onMicBlocked(): void
   later(fn: () => void, ms: number): number
@@ -88,9 +89,14 @@ export class CallControl {
 
   end() {
     const p = this.shown.phase
+    if (p === 'ringing' && this.call.ring) this.deps.decline(this.call.ring)
     if (p === 'ringing' || p === 'connecting') {
       this.stop()
       return this.leave(null, false)
+    }
+    if (p === 'hanging') {
+      this.stop()
+      return this.leave(this.call.conversationId, false)
     }
     if (p !== 'live') return
     this.set({ phase: 'hanging' })

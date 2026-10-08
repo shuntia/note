@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest'
-import { CallControl, LEAVE_MS, RING_MS, type CallDeps, type CallLine, type CallOpen } from './control'
+import { CallControl, HANG_UP_WAIT_MS, LEAVE_MS, RING_MS, type CallDeps, type CallLine, type CallOpen } from './control'
 import { CallSession, type AudioIo, type CallEvents, type SocketLike } from './session'
 
 class Socket implements SocketLike {
@@ -25,7 +25,7 @@ function rig(call: CallOpen, connect?: (events: CallEvents) => CallLine) {
   const loads: (() => void)[] = []
   const timers = new Map<number, { fn: () => void; ms: number }>()
   let ids = 0
-  const seen = { connects: 0, closes: 0, releases: 0, primes: 0, closed: [] as (number | null)[], blocked: 0 }
+  const seen = { connects: 0, closes: 0, hangUps: 0, releases: 0, primes: 0, closed: [] as (number | null)[], blocked: 0, declined: [] as string[] }
   const events: CallEvents[] = []
   const deps: CallDeps = {
     load: () => new Promise<void>((r) => loads.push(r)),
@@ -36,7 +36,9 @@ function rig(call: CallOpen, connect?: (events: CallEvents) => CallLine) {
       return {
         start: async () => {},
         setMuted: () => {},
-        hangUp: () => {},
+        hangUp: () => {
+          seen.hangUps++
+        },
         close: () => {
           seen.closes++
         },
@@ -49,6 +51,7 @@ function rig(call: CallOpen, connect?: (events: CallEvents) => CallLine) {
     release: () => {
       seen.releases++
     },
+    decline: (ring) => seen.declined.push(ring),
     onClose: (id) => seen.closed.push(id),
     onMicBlocked: () => {
       seen.blocked++
@@ -112,6 +115,7 @@ test('mounting twice, as StrictMode does, leaves exactly one live call', async (
   await load()
   expect(seen.connects).toBe(1)
   expect(seen.closes).toBe(0)
+  expect(seen.releases).toBe(0)
 })
 
 test('the call ends once: the audio context is released a single time and the view closes after its fade', async () => {
@@ -157,4 +161,48 @@ test('answering primes audio in the tap and connects', async () => {
   expect(control.shown.phase).toBe('connecting')
   await load()
   expect(seen.connects).toBe(1)
+})
+
+test('a second end while hanging up closes the call at once', async () => {
+  const { control, seen, events, fire, load } = rig(started)
+  control.mount()
+  await load()
+  events[0].state('listening')
+  control.end()
+  expect(control.shown.phase).toBe('hanging')
+  expect(seen.hangUps).toBe(1)
+  control.end()
+  expect(control.shown.phase).toBe('gone')
+  expect(seen.closes).toBe(1)
+  expect(seen.releases).toBe(1)
+  expect(seen.hangUps).toBe(1)
+  fire(LEAVE_MS)
+  expect(seen.closed).toEqual([4])
+  fire(HANG_UP_WAIT_MS)
+  expect(seen.closed).toEqual([4])
+  expect(seen.releases).toBe(1)
+})
+
+test('ending a ringing call declines the ring, once', () => {
+  const { control, seen } = rig(ringing)
+  control.mount()
+  control.end()
+  control.end()
+  expect(seen.declined).toEqual(['r1'])
+  expect(control.shown.phase).toBe('gone')
+})
+
+test('a ring that times out, is taken elsewhere or is answered is not declined', async () => {
+  const timedOut = rig(ringing)
+  timedOut.control.mount()
+  timedOut.fire(RING_MS)
+  const taken = rig(ringing)
+  taken.control.mount()
+  taken.control.ringTaken('r1')
+  const answered = rig(ringing)
+  answered.control.mount()
+  answered.control.tap()
+  await answered.load()
+  answered.control.end()
+  for (const r of [timedOut, taken, answered]) expect(r.seen.declined).toEqual([])
 })

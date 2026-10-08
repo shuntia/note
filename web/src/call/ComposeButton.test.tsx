@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from 'react-dom/server'
 import { expect, test } from 'vitest'
-import { ComposeButton } from './ComposeButton'
+import { ComposeButton, pressCall } from './ComposeButton'
 
 const call = () => {}
 
@@ -33,4 +33,10 @@ test('the mic waits while a reply is still coming', () => {
   const html = renderToStaticMarkup(<ComposeButton draft="" busy micBlocked={false} onCall={call} />)
   expect(html).toContain('aria-label="Call Note"')
   expect(html).toContain('disabled=""')
+})
+
+test('a call takes focus off the field before the call view opens', () => {
+  const order: string[] = []
+  pressCall({ focus: () => order.push('focus') }, () => order.push('call'))
+  expect(order).toEqual(['focus', 'call'])
 })
