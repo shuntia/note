@@ -27,3 +27,17 @@ struct_excessive_bools = "allow"
 option_option = "allow"
 # Exact float comparisons appear only in tests, on values computed exactly.
 float_cmp = "allow"
+
+# Password hashing in an unoptimized build makes every login in the test suite take seconds.
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3
+[profile.dev.package.digest]
+opt-level = 3
+[profile.dev.package.block-buffer]
+opt-level = 3
+[profile.dev.package.hybrid-array]
+opt-level = 3
+[profile.dev.package.crypto-common]
+opt-level = 3
