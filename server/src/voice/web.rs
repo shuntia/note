@@ -1,5 +1,8 @@
+use super::Voice;
 use crate::channels::OutboundMessage;
+use axum::extract::ws::{Message, WebSocket};
 use note_voice_proto::{CallBody, LiveState, Media, Outcome};
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -187,6 +190,133 @@ impl Relays {
         let conversation_id = ring.conversation_id;
         rings.remove(token);
         Some(conversation_id)
+    }
+}
+
+/// A browser that sends no audio this long is taken to be gone.
+pub const SILENCE_LIMIT: Duration = Duration::from_secs(5);
+/// A voice link down this long ends the call for the browser.
+pub const LINK_LIMIT: Duration = Duration::from_secs(10);
+/// 100 ms of 16 kHz s16; anything larger is not a capture frame.
+const MAX_IN_BYTES: usize = 3200;
+
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum Control {
+    Mute { on: bool },
+    Hangup,
+}
+
+/// Opens the call the socket asked for and relays it until it ends.
+pub async fn serve(
+    socket: WebSocket,
+    state: crate::AppState,
+    user_id: i64,
+    conversation_id: Option<i64>,
+    ring: Option<String>,
+) {
+    let Some(voice) = state.voice.clone().filter(|v| v.is_up()) else {
+        return refuse(socket, "unavailable").await;
+    };
+    let start = match ring {
+        Some(token) => {
+            let Some(start) = voice.answer_ring(&token, user_id) else {
+                return refuse(socket, "missed").await;
+            };
+            state.hub.send(user_id, &serde_json::json!({ "type": "ring_taken", "ring": token }).to_string());
+            start
+        }
+        None => WebStart { thread: conversation_id, message: None },
+    };
+    match voice.start_web_call(user_id, start, jiff::Timestamp::now()) {
+        Ok(call) => relay(socket, &voice, call).await,
+        Err(refusal) => refuse(socket, refusal.reason()).await,
+    }
+}
+
+async fn refuse(mut socket: WebSocket, reason: &'static str) {
+    let _ = socket.send(to_message(WebOut::Ended { reason, conversation_id: None })).await;
+    let _ = socket.send(Message::Close(None)).await;
+}
+
+/// After the browser hangs up, Note's last words keep flowing until the voice side's `Ended`;
+/// a browser that goes away hangs the call up and leaves its relay to that `Ended`.
+async fn relay(mut socket: WebSocket, voice: &Voice, call: WebCall) {
+    let WebCall { call_id, mut out } = call;
+    let opened = serde_json::json!({ "type": "open", "rate": OUT_RATE }).to_string();
+    if socket.send(Message::Text(opened.into())).await.is_err() {
+        return voice.hang_up(&call_id);
+    }
+    let (mut muted, mut hung_up) = (false, false);
+    let mut heard = tokio::time::Instant::now();
+    let mut down_since: Option<tokio::time::Instant> = None;
+    let mut watch = tokio::time::interval(Duration::from_millis(500));
+    loop {
+        tokio::select! {
+            got = out.recv() => {
+                let Some(o) = got else { break };
+                let ended = matches!(o, WebOut::Ended { .. });
+                let sent = socket.send(to_message(o)).await.is_ok();
+                if ended {
+                    let _ = socket.send(Message::Close(None)).await;
+                    return;
+                }
+                if !sent {
+                    break;
+                }
+            }
+            got = socket.recv() => match got {
+                Some(Ok(Message::Binary(bytes))) => {
+                    heard = tokio::time::Instant::now();
+                    if bytes.len() <= MAX_IN_BYTES && !hung_up {
+                        voice.web_audio(&call_id, pcm_in(&bytes, muted));
+                    }
+                }
+                Some(Ok(Message::Text(text))) => match serde_json::from_str::<Control>(text.as_str()) {
+                    Ok(Control::Mute { on }) => muted = on,
+                    Ok(Control::Hangup) if !hung_up => {
+                        hung_up = true;
+                        voice.hang_up(&call_id);
+                    }
+                    _ => {}
+                },
+                Some(Ok(Message::Close(_)) | Err(_)) | None => break,
+                Some(Ok(_)) => {}
+            },
+            _ = watch.tick() => {
+                if !hung_up && heard.elapsed() >= SILENCE_LIMIT {
+                    hung_up = true;
+                    voice.hang_up(&call_id);
+                }
+                if voice.is_up() {
+                    down_since = None;
+                } else if down_since.get_or_insert_with(tokio::time::Instant::now).elapsed() >= LINK_LIMIT {
+                    let _ = socket.send(to_message(WebOut::Ended { reason: "unavailable", conversation_id: None })).await;
+                    let _ = socket.send(Message::Close(None)).await;
+                    break;
+                }
+            }
+        }
+    }
+    if !hung_up {
+        voice.hang_up(&call_id);
+    }
+}
+
+fn pcm_in(bytes: &[u8], muted: bool) -> Vec<i16> {
+    bytes.as_chunks::<2>().0.iter().map(|&b| if muted { 0 } else { i16::from_le_bytes(b) }).collect()
+}
+
+fn to_message(out: WebOut) -> Message {
+    let json = |v: serde_json::Value| Message::Text(v.to_string().into());
+    match out {
+        WebOut::Audio(pcm) => Message::Binary(pcm.iter().flat_map(|s| s.to_le_bytes()).collect::<Vec<u8>>().into()),
+        WebOut::Flush => json(serde_json::json!({ "type": "flush" })),
+        WebOut::State(state) => json(serde_json::json!({ "type": "state", "state": state })),
+        WebOut::Caption(text) => json(serde_json::json!({ "type": "caption", "text": text })),
+        WebOut::Ended { reason, conversation_id } => {
+            json(serde_json::json!({ "type": "ended", "reason": reason, "conversation_id": conversation_id }))
+        }
     }
 }
 

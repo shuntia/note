@@ -81,6 +81,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/sessions/{id}/step", post(work_session_step))
         .route("/api/sessions/{id}/skip_break", post(work_session_skip_break))
         .route("/api/ws", get(ws_connect))
+        .route("/api/call/ws", get(call_ws))
         .route("/api/push/subscribe", post(push_subscribe))
         .route("/api/push/unsubscribe", post(push_unsubscribe))
         .route("/api/push/vapid_public_key", get(vapid_public_key))
@@ -416,7 +417,7 @@ async fn me(user: CurrentUser, State(state): State<AppState>, headers: HeaderMap
         .db()
         .query_row("SELECT onboarding FROM users WHERE id = ?1", [user.id], |r| r.get(0))
         .unwrap_or(false);
-    Json(serde_json::json!({ "username": user.username, "admin": user.admin, "onboarding": onboarding }))
+    Json(serde_json::json!({ "username": user.username, "admin": user.admin, "onboarding": onboarding, "voice": state.voice.is_some() }))
 }
 
 async fn onboarding_done(user: CurrentUser, State(state): State<AppState>) -> StatusCode {
@@ -2864,6 +2865,42 @@ async fn ws_connect(
     ws: axum::extract::ws::WebSocketUpgrade,
 ) -> impl IntoResponse {
     ws.on_upgrade(move |socket| ws_pump(socket, state.hub.clone(), state.db.clone(), user.id))
+}
+
+#[derive(Deserialize)]
+struct CallQuery {
+    conversation_id: Option<i64>,
+    ring: Option<String>,
+}
+
+async fn call_ws(
+    CallAdmission(user): CallAdmission,
+    State(state): State<AppState>,
+    Query(q): Query<CallQuery>,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| crate::voice::web::serve(socket, state, user.id, q.conversation_id, q.ring))
+}
+
+/// A session opening a call socket from Note's own page.
+struct CallAdmission(CurrentUser);
+
+impl axum::extract::FromRequestParts<AppState> for CallAdmission {
+    type Rejection = axum::response::Response;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        if !crate::net::fetch_site_ok(&parts.headers) {
+            return Err((StatusCode::FORBIDDEN, Json(serde_json::json!({ "error": "cross-site request refused" })))
+                .into_response());
+        }
+        let user = CurrentUser::from_request_parts(parts, state)
+            .await
+            .map_err(axum::response::IntoResponse::into_response)?;
+        Ok(CallAdmission(user))
+    }
 }
 
 /// A session allowed to open a socket: not started by a foreign page, and not
