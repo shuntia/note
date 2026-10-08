@@ -7,14 +7,58 @@ on:
     paths: ['desktop/**', '.github/workflows/desktop.yml']
   pull_request:
     paths: ['desktop/**', '.github/workflows/desktop.yml']
+  schedule:
+    - cron: '17 10 * * *'
   workflow_dispatch:
+    inputs:
+      nightly:
+        description: Publish a nightly prerelease
+        type: boolean
+        default: true
 
 permissions:
   contents: read
 
 jobs:
+  # The version to build and the release it goes to: stable for v* tags, nightly
+  # for the schedule and dispatch (skipped when main has not moved since the last one).
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      release: ${{ steps.plan.outputs.release }}
+      skip: ${{ steps.plan.outputs.skip }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NIGHTLY: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.nightly) }}
+        run: |
+          base=$(jq -r .version desktop/package.json)
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+            echo "release=stable" >> "$GITHUB_OUTPUT"
+          elif [[ "$NIGHTLY" == true ]]; then
+            last=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName,isPrerelease \
+              --jq '[.[] | select(.isPrerelease and (.tagName | contains("-nightly.")))][0].tagName // empty')
+            if [[ -n "$last" && "$(gh api "repos/$GITHUB_REPOSITORY/commits/$last" --jq .sha)" == "$GITHUB_SHA" ]]; then
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              echo "release=none" >> "$GITHUB_OUTPUT"
+              echo "No commits since $last."
+            else
+              echo "version=$base-nightly.$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+              echo "release=nightly" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "version=$base" >> "$GITHUB_OUTPUT"
+            echo "release=none" >> "$GITHUB_OUTPUT"
+          fi
+
   build:
     name: ${{ matrix.name }}
+    needs: plan
+    if: needs.plan.outputs.skip != 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -25,20 +69,27 @@ jobs:
             files: |
               desktop/dist/*.AppImage
               desktop/dist/*.deb
+              desktop/dist/latest-linux.yml
           - name: macos
             os: macos-latest
             target: --mac dmg zip --x64 --arm64
             files: |
               desktop/dist/*.dmg
               desktop/dist/*.zip
+              desktop/dist/*.blockmap
+              desktop/dist/latest-mac.yml
           - name: windows
             os: windows-latest
             target: --win nsis
-            files: desktop/dist/*.exe
+            files: |
+              desktop/dist/*.exe
+              desktop/dist/*.blockmap
+              desktop/dist/latest.yml
     runs-on: ${{ matrix.os }}
     defaults:
       run:
         working-directory: desktop
+        shell: bash
     steps:
       - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v6
@@ -51,6 +102,7 @@ jobs:
           cache-dependency-path: desktop/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
       - run: pnpm test
+      - run: npm pkg set version=${{ needs.plan.outputs.version }}
       - run: pnpm exec electron-builder ${{ matrix.target }} --publish never
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: false
@@ -61,16 +113,33 @@ jobs:
           if-no-files-found: error
 
   release:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    if: needs.plan.outputs.release != 'none'
+    needs: [plan, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: v${{ needs.plan.outputs.version }}
+      NIGHTLY: ${{ needs.plan.outputs.release == 'nightly' }}
     steps:
       - uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
+      # A second nightly on the same day replaces the first.
+      - if: env.NIGHTLY == 'true'
+        run: gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes || true
       - uses: softprops/action-gh-release@v3
         with:
+          tag_name: ${{ env.TAG }}
+          target_commitish: ${{ github.sha }}
+          name: ${{ env.TAG }}
+          prerelease: ${{ env.NIGHTLY == 'true' }}
           files: artifacts/*
+      - if: env.NIGHTLY == 'true'
+        run: |
+          cutoff=$(date -u -d '14 days ago' +%s)
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 200 --json tagName,isPrerelease,createdAt \
+            --jq ".[] | select(.isPrerelease and (.tagName | contains(\"-nightly.\")) and ((.createdAt | fromdateiso8601) < $cutoff)) | .tagName" |
+            while read -r tag; do gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes; done

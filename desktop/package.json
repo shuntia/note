@@ -15,6 +15,9 @@
     "test": "node --test",
     "dist": "electron-builder --linux AppImage deb"
   },
+  "dependencies": {
+    "electron-updater": "^6.8.9"
+  },
   "devDependencies": {
     "electron": "44.6.0",
     "electron-builder": "^26.15.3"
@@ -22,8 +25,9 @@
   "build": {
     "appId": "net.shuntia.note",
     "productName": "Note",
-    "files": ["main.js", "server-url.js", "setup.html", "setup-preload.js", "offline.html", "icons/**"],
+    "files": ["main.js", "preload.js", "server-url.js", "updates.js", "setup.html", "setup-preload.js", "offline.html", "icons/**"],
     "directories": { "output": "dist" },
+    "publish": { "provider": "github", "owner": "shuntia", "repo": "note" },
     "linux": {
       "target": ["AppImage", "deb"],
       "icon": "icons",
@@ -40,6 +44,7 @@
       "entitlementsInherit": "entitlements.mac.plist",
       "extendInfo": { "NSMicrophoneUsageDescription": "Note listens while you are on a call with it." }
     },
-    "win": { "target": ["nsis"], "icon": "icons/256x256.png" }
+    "win": { "target": ["nsis"], "icon": "icons/256x256.png" },
+    "nsis": { "artifactName": "${productName}-Setup-${version}.${ext}" }
   }
 }

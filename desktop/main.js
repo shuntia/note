@@ -5,6 +5,7 @@ const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
 const { normalizeServerUrl, resolveServerUrl } = require('./server-url')
+const { CHECK_EVERY_MS, RELEASES_URL, updateMode } = require('./updates')
 
 const BAKED_URL = require('./package.json').noteUrl
 const ICONS = path.join(__dirname, 'icons')
@@ -18,6 +19,8 @@ let setupWin = null
 let tray = null
 let quitting = false
 let failures = 0
+let updater = null
+let updateReady = false
 
 const STRINGS = {
   en: {
@@ -33,6 +36,9 @@ const STRINGS = {
     window: 'Window',
     close: 'Close',
     changeServer: 'Change server…',
+    nightly: 'Nightly builds',
+    checkUpdates: 'Check for updates',
+    restartToUpdate: 'Restart to update',
   },
   ja: {
     show: '表示',
@@ -47,6 +53,9 @@ const STRINGS = {
     window: 'ウインドウ',
     close: '閉じる',
     changeServer: 'サーバーを変更…',
+    nightly: 'ナイトリービルド',
+    checkUpdates: 'アップデートを確認',
+    restartToUpdate: '再起動してアップデート',
     undo: '取り消す',
     redo: 'やり直す',
     cut: '切り取り',
@@ -243,6 +252,9 @@ function createWindow(startHidden) {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      preload: path.join(__dirname, 'preload.js'),
+      backgroundThrottling: false,
+      autoplayPolicy: 'no-user-gesture-required',
       devTools: dev,
     },
   })
@@ -270,6 +282,7 @@ function createWindow(startHidden) {
     win.hide()
     refreshTray()
   })
+  win.on('focus', () => win.flashFrame(false))
   win.on('show', refreshTray)
   win.on('hide', refreshTray)
 
@@ -395,6 +408,67 @@ ipcMain.handle('setup:connect', async (event, address) => {
   return { ok: true }
 })
 
+ipcMain.on('desktop:ring', (event) => {
+  if (!win || event.sender !== win.webContents || !sameOrigin(event.senderFrame?.url ?? '')) return
+  showWindow()
+  if (process.platform === 'darwin') app.dock?.bounce('critical')
+  else win.flashFrame(true)
+})
+
+const updates = updateMode({ platform: process.platform, packaged: app.isPackaged, dev, env: process.env })
+const nightlyOn = () => readJson(configPath()).nightly === true
+
+function startUpdates() {
+  if (updates !== 'self') return
+  try {
+    updater = require('electron-updater').autoUpdater
+  } catch {
+    return
+  }
+  updater.autoDownload = true
+  updater.autoInstallOnAppQuit = true
+  updater.allowPrerelease = nightlyOn()
+  updater.on('error', () => {})
+  updater.on('update-downloaded', () => {
+    updateReady = true
+    Menu.setApplicationMenu(appMenu())
+    refreshTray()
+  })
+  checkUpdates()
+  setInterval(checkUpdates, CHECK_EVERY_MS)
+}
+
+function checkUpdates() {
+  if (updates === 'page') shell.openExternal(RELEASES_URL)
+  else updater?.checkForUpdates().catch(() => {})
+}
+
+function setNightly(on) {
+  patchJson(configPath(), { nightly: on })
+  if (updater) updater.allowPrerelease = on
+  checkUpdates()
+  Menu.setApplicationMenu(appMenu())
+  refreshTray()
+}
+
+function installUpdate() {
+  quitting = true
+  updater?.quitAndInstall()
+}
+
+// Shared by the tray and the File menu; empty where this build does not update itself or point anywhere.
+function updateItems() {
+  if (!updates) return []
+  return [
+    ...(updateReady ? [{ label: s('restartToUpdate'), click: installUpdate }] : []),
+    { label: s('checkUpdates'), click: checkUpdates },
+    ...(updates === 'self'
+      ? [{ label: s('nightly'), type: 'checkbox', checked: nightlyOn(), click: (item) => setNightly(item.checked) }]
+      : []),
+    { type: 'separator' },
+  ]
+}
+
 function refreshTray() {
   if (!tray) return
   const visible = win?.isVisible()
@@ -413,6 +487,7 @@ function refreshTray() {
       },
       { label: s('reload'), enabled: Boolean(appUrl), click: () => load(appUrl.href) },
       { type: 'separator' },
+      ...updateItems(),
       { label: s('quit'), click: () => app.quit() },
     ]),
   )
@@ -449,6 +524,7 @@ function appMenu() {
       submenu: [
         { label: s('changeServer'), click: openSetup },
         { type: 'separator' },
+        ...updateItems(),
         { role: 'close', label: s('close') },
         { label: s('quit'), accelerator: 'CommandOrControl+Q', click: () => app.quit() },
       ],
@@ -486,6 +562,7 @@ if (!app.requestSingleInstanceLock()) {
     if (server) appUrl = new URL(server.url)
     initAutostart()
     createTray()
+    startUpdates()
     if (appUrl) {
       createWindow(startHidden)
     } else if (!startHidden) {
