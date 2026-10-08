@@ -173,3 +173,4 @@
 .sky-ticks { display: flex; justify-content: space-between; font-size: 0.72rem; color: var(--faint); padding: 0.25rem 0.125rem 0; font-variant-numeric: tabular-nums; }
 .set-note { margin: 0; font-size: 0.85rem; color: var(--quiet); line-height: 1.45; }
 .set-note .link { font: inherit; font-weight: 700; color: var(--sun-ink); background: none; border: 0; padding: 0; cursor: pointer; }
+.set-debug { width: 100%; max-height: 60vh; overflow: auto; margin: 0; padding: 0.875rem 1.125rem; border-radius: 1.125rem; background: var(--haze-strong); color: var(--ink); font-size: 0.72rem; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }

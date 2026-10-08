@@ -108,3 +108,29 @@ async fn about_is_per_user() {
     let v = json(app.oneshot(get("/api/about", &bo)).await.unwrap()).await;
     assert_eq!(v["content"], "");
 }
+
+#[tokio::test]
+async fn the_debug_prompt_is_the_one_a_session_would_start_with() {
+    use tower::ServiceExt;
+    let (app, cookie, _cfg) = common::app_with_logged_in_user().await;
+    app.clone()
+        .oneshot(put("/api/about", &cookie, r#"{"content":"I have ADHD."}"#.to_string()))
+        .await
+        .unwrap();
+
+    let res = app.clone().oneshot(get("/api/debug/prompt?kind=talk", &cookie)).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let v = json(res).await;
+    let prompt = v["prompt"].as_str().unwrap();
+    assert!(prompt.starts_with("you are note"), "{prompt}");
+    assert!(prompt.contains("I have ADHD."), "{prompt}");
+    assert!(v["tools"].as_array().unwrap().iter().any(|t| t == "trigger_set"));
+
+    let res = app.clone().oneshot(get("/api/debug/prompt?kind=share", &cookie)).await.unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let res = app
+        .oneshot(Request::get("/api/debug/prompt?kind=talk").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}

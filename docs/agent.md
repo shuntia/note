@@ -121,6 +121,9 @@ goes there.
 
 - `GET /api/about` → `{content}`, empty when there is none.
 - `PUT /api/about {content}` saves it trimmed; blank content clears it.
+- `GET /api/debug/prompt?kind=talk|trigger|nightly|call` → `{prompt, tools}`:
+  the system prompt and tool names a session of that kind would start with
+  now (Settings → Debug).
 
 ## Context
 

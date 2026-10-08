@@ -55,6 +55,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/voice/preview", get(voice_preview))
         .route("/api/notify/test", post(notify_test))
         .route("/api/about", get(about_get).put(about_put))
+        .route("/api/debug/prompt", get(debug_prompt))
         .route("/api/memory", get(memory_list))
         .route("/api/memory/{id}", get(memory_read))
         .route("/api/plan/today", get(plan_today))
@@ -2032,6 +2033,54 @@ async fn about_put(
     match crate::prompts::save_about(&state.config_dir, &user.username, &req.content) {
         Ok(()) => about_body(&state, &user.username),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct DebugPromptQuery {
+    kind: String,
+}
+
+/// The system prompt and tool names a session of `kind` would start with now.
+async fn debug_prompt(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Query(q): Query<DebugPromptQuery>,
+) -> impl IntoResponse {
+    use crate::tools::SessionKind as K;
+    let kind = match q.kind.as_str() {
+        "talk" => K::Talk,
+        "trigger" => K::Trigger,
+        "nightly" => K::Nightly,
+        "call" => K::Call,
+        _ => return invalid_field("kind", "must be talk, trigger, nightly or call"),
+    };
+    let built = tokio::task::spawn_blocking(move || {
+        let deps = crate::agent::SessionDeps {
+            db: &state.db,
+            config_dir: &state.config_dir,
+            data_dir: &state.data_dir,
+            llm: state.llm.as_ref(),
+            embeddings: None,
+            search: state.search.as_deref(),
+            task_scope: None,
+            inbox_source: None,
+            memory_source: None,
+            token_id: None,
+            thread_note: None,
+            share: None,
+        };
+        let prompt = crate::agent::system_prompt(&deps, user.id, &user.username, kind, jiff::Timestamp::now())?;
+        let mut tools: Vec<&str> = crate::tools::registry(kind).to_vec();
+        if state.search.is_none() {
+            tools.retain(|t| *t != "web_search");
+        }
+        anyhow::Ok(serde_json::json!({ "prompt": prompt, "tools": tools }))
+    })
+    .await;
+    match built {
+        Ok(Ok(v)) => Json(v).into_response(),
+        _ => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
 

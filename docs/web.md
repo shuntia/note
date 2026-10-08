@@ -39,7 +39,7 @@ Views (`web/src/views/`):
   of imported items, with Refresh when `[inbox] refresh_signal` is set.
 - **Settings**: profile, language, day and template, check-ins, sessions,
   connections (Matrix, calls, voice), Web Push, theme, About you, API tokens,
-  share links, security, and the admin panel for admins.
+  share links, security, Debug (the prompt a session starts with), and the admin panel for admins.
 - **Onboarding**, **Join** (invite links), **Share** (the `/s/<token>` visitor
   chat), **Admin**.
 

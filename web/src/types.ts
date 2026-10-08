@@ -280,6 +280,10 @@ export type SettingsSaved = Pick<
 
 export type AboutDoc = { content: string }
 
+export type PromptKind = 'talk' | 'trigger' | 'nightly' | 'call'
+
+export type BuiltPrompt = { prompt: string; tools: string[] }
+
 export type Passkey = {
   id: number
   name: string

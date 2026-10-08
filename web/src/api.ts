@@ -29,6 +29,8 @@ import type {
   QueueEntry,
   Passkey,
   AboutDoc,
+  BuiltPrompt,
+  PromptKind,
   RunOrder,
   SecurityState,
   SessionStart,
@@ -292,6 +294,7 @@ export const api = {
     return request<SettingsSaved>('/api/settings', { method: 'PUT', body: JSON.stringify(body) })
   },
   aboutGet: () => request<AboutDoc>('/api/about'),
+  debugPrompt: (kind: PromptKind) => request<BuiltPrompt>(`/api/debug/prompt?kind=${kind}`),
   // Blank content clears it.
   aboutPut: (content: string) =>
     request<AboutDoc>('/api/about', { method: 'PUT', body: JSON.stringify({ content }) }),

@@ -22,6 +22,8 @@ import {
   type ThemeChoice,
 } from '../theme'
 import type {
+  BuiltPrompt,
+  PromptKind,
   Language,
   Me,
   Passkey,
@@ -1264,6 +1266,9 @@ export function Settings({
         <FoldRow label={t('settings.shares')} open={open === 'shares'} onToggle={fold('shares')}>
           {open === 'shares' && <SharesSection notify={notify} />}
         </FoldRow>
+        <FoldRow label={t('settings.debug')} open={open === 'debug'} onToggle={fold('debug')}>
+          {open === 'debug' && <DebugSection />}
+        </FoldRow>
       </Group>
 
       {me.admin && (
@@ -1482,6 +1487,58 @@ function AboutSection({ active }: { active: boolean }) {
         {!dirty && <Status save={save} row="about" />}
       </div>
     </form>
+  )
+}
+
+const PROMPT_KINDS: { id: PromptKind; key: Key }[] = [
+  { id: 'talk', key: 'settings.debug.talk' },
+  { id: 'trigger', key: 'settings.debug.trigger' },
+  { id: 'nightly', key: 'settings.debug.nightly' },
+  { id: 'call', key: 'settings.debug.call' },
+]
+
+function DebugSection() {
+  const [kind, setKind] = useState<PromptKind>('talk')
+  const [built, setBuilt] = useState<BuiltPrompt | 'error' | undefined>(undefined)
+  const [asks, setAsks] = useState(0)
+
+  useEffect(() => {
+    let live = true
+    setBuilt(undefined)
+    api
+      .debugPrompt(kind)
+      .then((b) => live && setBuilt(b))
+      .catch(() => live && setBuilt('error'))
+    return () => {
+      live = false
+    }
+  }, [kind, asks])
+
+  return (
+    <div className="set-fold-body">
+      <div className="set-acts">
+        <select aria-label={t('settings.debug.session')} value={kind} onChange={(e) => setKind(e.target.value as PromptKind)}>
+          {PROMPT_KINDS.map((k) => (
+            <option key={k.id} value={k.id}>
+              {t(k.key)}
+            </option>
+          ))}
+        </select>
+        <button className="set-link" onClick={() => setAsks((n) => n + 1)}>
+          {t('settings.debug.refresh')}
+        </button>
+      </div>
+      {built === 'error' && <p className="set-sub">{t('settings.debug.failed')}</p>}
+      {built && built !== 'error' && (
+        <>
+          <p className="set-sub">
+            {t('settings.debug.size', { chars: built.prompt.length.toLocaleString(), tools: String(built.tools.length) })}
+          </p>
+          <pre className="mono set-debug">{built.prompt}</pre>
+          <p className="set-sub mono">{built.tools.join(' · ')}</p>
+        </>
+      )}
+    </div>
   )
 }
 

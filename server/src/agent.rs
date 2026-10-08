@@ -168,7 +168,7 @@ pub fn run_session_watched(
 
 /// The system prompt a session of `kind` runs on: its own instructions, then
 /// the context its kind is allowed to see.
-pub(crate) fn system_prompt(
+pub fn system_prompt(
     deps: &SessionDeps,
     user_id: i64,
     username: &str,
