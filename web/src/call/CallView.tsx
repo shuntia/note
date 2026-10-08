@@ -103,7 +103,6 @@ export function CallView({
   }
 
   const key = (e: KeyboardEvent) => {
-    if (e.key === 'Escape') return control.end()
     if (e.key !== 'Tab' || !root.current) return
     const stops = [...root.current.querySelectorAll('button')]
     const at = stops.indexOf(document.activeElement as HTMLButtonElement)
@@ -113,6 +112,13 @@ export function CallView({
   }
 
   useEffect(() => control.mount(), [control])
+  useEffect(() => {
+    const escape = (e: globalThis.KeyboardEvent) => {
+      if (e.key === 'Escape') control.end()
+    }
+    window.addEventListener('keydown', escape)
+    return () => window.removeEventListener('keydown', escape)
+  }, [control])
   useEffect(() => () => control.dispose(), [control])
   useEffect(
     () =>

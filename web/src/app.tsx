@@ -10,6 +10,8 @@ import {
 } from 'react'
 import { flushSync } from 'react-dom'
 import { api, ApiError, setOnUnauthorized } from './api'
+import { CallView, type CallOpen } from './call/CallView'
+import { primeAudio } from './call/prime'
 import { trailing } from './coalesce'
 import { Jot } from './jot'
 import { glide, lift, viewIn, viewOut } from './motion-gsap'
@@ -26,7 +28,7 @@ import { Onboarding } from './views/Onboarding'
 import { Settings } from './views/Settings'
 import { Talk } from './views/Talk'
 import { Tasks } from './views/Tasks'
-import { connectEvents } from './ws'
+import { connectEvents, onCallFrame } from './ws'
 import { deviceZone, zoneChange } from './zone'
 import './styles/shell.css'
 import { adoptLanguage, t, type Key } from './i18n'
@@ -167,6 +169,31 @@ export function App() {
     },
     [go],
   )
+
+  const [call, setCall] = useState<CallOpen | null>(null)
+  const [micBlocked, setMicBlocked] = useState(false)
+  const startCall = useCallback((conversationId: number | null) => {
+    primeAudio()
+    setCall({ conversationId, ring: null, at: Date.now() })
+  }, [])
+  // The thread the call talked in opens with its transcript.
+  const endCall = useCallback(
+    (conversationId: number | null) => {
+      setCall(null)
+      if (conversationId !== null) openConversation(conversationId)
+      else onChanged()
+    },
+    [openConversation, onChanged],
+  )
+  const blockMic = useCallback(() => setMicBlocked(true), [])
+
+  useEffect(() => {
+    if (!me?.voice) return
+    return onCallFrame((f) => {
+      if (f.type !== 'incoming' || document.hidden) return
+      setCall((c) => c ?? { conversationId: f.conversation_id, ring: f.ring, at: Date.now() })
+    })
+  }, [me])
 
   // `#/chat/<id>` in the address bar, at load or from a notification, and the
   // same route handed over by the service worker when a tab is already open.
@@ -421,6 +448,8 @@ export function App() {
           onOpened={() => setTalkOpen(null)}
           session={session}
           goHome={() => go('today')}
+          onCall={me.voice ? startCall : undefined}
+          micBlocked={micBlocked}
         />
       )
     if (of === 'memory') return <Memory {...views} />
@@ -470,6 +499,7 @@ export function App() {
       {mobile && <Rail kind="tabs" current={current} go={go} away={rested || typing} />}
       {mobile && <div className={`handle${rested ? ' on' : ''}`} aria-hidden="true" />}
       {toastNode}
+      {call && <CallView key={call.at} call={call} onClose={endCall} onMicBlocked={blockMic} />}
     </div>
   )
 }

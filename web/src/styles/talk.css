@@ -242,6 +242,10 @@
 .chat .tellnote textarea { min-height: 2.25rem; padding: 0.4rem 0.625rem; }
 .chat .tellnote button { flex: none; transition: background-color 180ms ease, color 180ms ease; }
 .chat .tellnote.armed button:not(:disabled) { background: var(--ink); color: var(--ivory); }
+/* send and the mic share one button, each face turning out as the other turns in */
+.compose-button svg { grid-area: 1 / 1; transition: opacity 150ms ease, transform 150ms ease; }
+.compose-button[data-face='send'] .face-mic { opacity: 0; transform: rotate(-60deg) scale(0.6); }
+.compose-button[data-face='mic'] .face-send { opacity: 0; transform: rotate(60deg) scale(0.6); }
 .chat .tellnote textarea::placeholder { transition: opacity 300ms ease; }
 .chat .tellnote textarea.flying::placeholder { opacity: 0; }
 
@@ -256,7 +260,7 @@
 @media (prefers-reduced-motion: reduce) {
   .pulse-arc, .pulse-fill, .send-ghost, .chat .activity.live,
   .chat .tellnote button, .chat .tellnote textarea::placeholder,
-  .chat .chat-row .chat-more-wrap { transition: none; }
+  .chat .chat-row .chat-more-wrap, .compose-button svg { transition: none; }
   .chat .activity.live.held { opacity: 1; }
   .chat .reply.fresh { animation: none; }
 }

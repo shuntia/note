@@ -11,6 +11,7 @@ import {
 } from 'react'
 import { flushSync } from 'react-dom'
 import gsap from 'gsap'
+import { ComposeButton } from '../call/ComposeButton'
 import { api, ApiError } from '../api'
 import type { ViewProps } from '../app'
 import { t, type Key } from '../i18n'
@@ -450,6 +451,8 @@ export function Talk({
   onOpened,
   session = null,
   goHome,
+  onCall,
+  micBlocked = false,
 }: ViewProps & {
   prefill?: string | null
   onPrefilled?: () => void
@@ -458,6 +461,8 @@ export function Talk({
   onOpened?: () => void
   session?: FocusSession | null
   goHome?: () => void
+  onCall?: (conversationId: number | null) => void
+  micBlocked?: boolean
 }) {
   const [conversations, setConversations] = useState<Conversation[]>([])
   const [listState, setListState] = useState<Load>('loading')
@@ -1008,12 +1013,12 @@ export function Talk({
                 onChange={(e) => setDraft(e.target.value)}
                 onKeyDown={onKeyDown}
               />
-              <button type="submit" aria-label={t('talk.send')} disabled={busy || !draft.trim()}>
-                <svg viewBox="0 0 24 24" aria-hidden="true">
-                  <path d="M5 12h14" />
-                  <path d="M13 6l6 6-6 6" />
-                </svg>
-              </button>
+              <ComposeButton
+                draft={draft}
+                busy={busy}
+                micBlocked={micBlocked}
+                onCall={onCall && (() => onCall(current))}
+              />
             </form>
           </div>
         </div>

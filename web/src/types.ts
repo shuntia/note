@@ -1,5 +1,5 @@
 // `onboarding` holds from joining by invite until the first-run flow is finished.
-export type Me = { username: string; admin: boolean; onboarding?: boolean }
+export type Me = { username: string; admin: boolean; onboarding?: boolean; voice?: boolean }
 
 export type JoinInfo = { username: string | null; expires_at: string }
 
