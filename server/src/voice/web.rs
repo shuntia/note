@@ -1,7 +1,8 @@
 use crate::channels::OutboundMessage;
 use note_voice_proto::{CallBody, LiveState, Media, Outcome};
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
@@ -9,6 +10,8 @@ use tokio::sync::mpsc;
 pub const OUT_RATE: u32 = 48_000;
 /// How long a ring offered to the open app can be answered.
 pub const RING_FOR: Duration = Duration::from_secs(30);
+/// Audio frames a call's socket may hold unsent before further audio is dropped; control always gets through.
+pub const AUDIO_BACKLOG: usize = 50;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum WebOut {
@@ -42,7 +45,51 @@ pub struct WebStart {
 
 pub struct WebCall {
     pub call_id: String,
-    pub out: mpsc::UnboundedReceiver<WebOut>,
+    pub out: WebRx,
+}
+
+/// What a web call sends its browser, in order.
+pub struct WebRx {
+    rx: mpsc::UnboundedReceiver<WebOut>,
+    audio: Arc<AtomicUsize>,
+}
+
+impl WebRx {
+    pub async fn recv(&mut self) -> Option<WebOut> {
+        let out = self.rx.recv().await;
+        self.took(out.as_ref());
+        out
+    }
+
+    pub fn try_recv(&mut self) -> Result<WebOut, mpsc::error::TryRecvError> {
+        let out = self.rx.try_recv();
+        self.took(out.as_ref().ok());
+        out
+    }
+
+    fn took(&self, out: Option<&WebOut>) {
+        if let Some(WebOut::Audio(_)) = out {
+            self.audio.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+}
+
+struct Socket {
+    user_id: i64,
+    tx: mpsc::UnboundedSender<WebOut>,
+    audio: Arc<AtomicUsize>,
+}
+
+impl Socket {
+    fn send(&self, out: WebOut) {
+        if let WebOut::Audio(_) = out {
+            if self.audio.load(Ordering::Relaxed) >= AUDIO_BACKLOG {
+                return;
+            }
+            self.audio.fetch_add(1, Ordering::Relaxed);
+        }
+        let _ = self.tx.send(out);
+    }
 }
 
 struct Ring {
@@ -54,7 +101,7 @@ struct Ring {
 /// Each live web call's browser socket by call id, and the rings offered to open apps.
 #[derive(Default)]
 pub struct Relays {
-    calls: Mutex<HashMap<String, (i64, mpsc::UnboundedSender<WebOut>)>>,
+    calls: Mutex<HashMap<String, Socket>>,
     rings: Mutex<HashMap<String, Ring>>,
 }
 
@@ -63,19 +110,20 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 impl Relays {
-    pub fn open(&self, call_id: &str, user_id: i64) -> mpsc::UnboundedReceiver<WebOut> {
+    pub fn open(&self, call_id: &str, user_id: i64) -> WebRx {
         let (tx, rx) = mpsc::unbounded_channel();
-        lock(&self.calls).insert(call_id.to_string(), (user_id, tx));
-        rx
+        let audio = Arc::new(AtomicUsize::new(0));
+        lock(&self.calls).insert(call_id.to_string(), Socket { user_id, tx, audio: audio.clone() });
+        WebRx { rx, audio }
     }
 
     /// Tells each of the user's open web calls it was replaced and forgets it; returns their ids.
     pub fn replace(&self, user_id: i64) -> Vec<String> {
         let mut calls = lock(&self.calls);
-        let ids: Vec<String> = calls.iter().filter(|(_, (u, _))| *u == user_id).map(|(id, _)| id.clone()).collect();
+        let ids: Vec<String> = calls.iter().filter(|(_, s)| s.user_id == user_id).map(|(id, _)| id.clone()).collect();
         for id in &ids {
-            if let Some((_, tx)) = calls.remove(id) {
-                let _ = tx.send(WebOut::Ended { reason: "replaced", conversation_id: None });
+            if let Some(socket) = calls.remove(id) {
+                socket.send(WebOut::Ended { reason: "replaced", conversation_id: None });
             }
         }
         ids
@@ -90,14 +138,15 @@ impl Relays {
     }
 
     fn send(&self, call_id: &str, out: WebOut) {
-        if let Some((_, tx)) = lock(&self.calls).get(call_id) {
-            let _ = tx.send(out);
+        if let Some(socket) = lock(&self.calls).get(call_id) {
+            socket.send(out);
         }
     }
 
-    fn end(&self, call_id: &str, reason: &'static str, conversation_id: Option<i64>) {
-        if let Some((_, tx)) = lock(&self.calls).remove(call_id) {
-            let _ = tx.send(WebOut::Ended { reason, conversation_id });
+    /// Closes the call's socket with `reason`; does nothing once it is closed.
+    pub fn end(&self, call_id: &str, reason: &'static str, conversation_id: Option<i64>) {
+        if let Some(socket) = lock(&self.calls).remove(call_id) {
+            socket.send(WebOut::Ended { reason, conversation_id });
         }
     }
 
@@ -193,6 +242,37 @@ mod tests {
         assert_eq!(a.try_recv().unwrap(), WebOut::Ended { reason: "replaced", conversation_id: None });
         assert!(b.try_recv().is_err());
         assert!(relays.is_web("b") && !relays.is_web("a"));
+    }
+
+    #[test]
+    fn a_backed_up_socket_drops_audio_but_never_control() {
+        let relays = Relays::default();
+        let mut a = relays.open("a", 1);
+        for _ in 0..AUDIO_BACKLOG + 5 {
+            relays.media("a", Media::AudioOut { pcm: Pcm(vec![3; 960]), rate: OUT_RATE });
+        }
+        relays.media("a", Media::Flush);
+        relays.media("a", Media::State { state: LiveState::Listening });
+        relays.on_frame("a", &CallBody::Ended, || Some(2));
+        for _ in 0..AUDIO_BACKLOG {
+            assert_eq!(a.try_recv().unwrap(), WebOut::Audio(vec![3; 960]));
+        }
+        assert_eq!(a.try_recv().unwrap(), WebOut::Flush);
+        assert_eq!(a.try_recv().unwrap(), WebOut::State(LiveState::Listening));
+        assert_eq!(a.try_recv().unwrap(), WebOut::Ended { reason: "ended", conversation_id: Some(2) });
+        assert!(a.try_recv().is_err());
+    }
+
+    #[test]
+    fn audio_flows_again_once_the_socket_catches_up() {
+        let relays = Relays::default();
+        let mut a = relays.open("a", 1);
+        for _ in 0..AUDIO_BACKLOG + 1 {
+            relays.media("a", Media::AudioOut { pcm: Pcm(vec![3; 960]), rate: OUT_RATE });
+        }
+        while a.try_recv().is_ok() {}
+        relays.media("a", Media::AudioOut { pcm: Pcm(vec![4; 960]), rate: OUT_RATE });
+        assert_eq!(a.try_recv().unwrap(), WebOut::Audio(vec![4; 960]));
     }
 
     #[test]

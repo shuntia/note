@@ -225,9 +225,6 @@ impl Voice {
         if !self.is_up() {
             return Err(Unavailable);
         }
-        for old in self.web.replace(user_id) {
-            self.hang_up(&old);
-        }
         let id = uuid::Uuid::new_v4().to_string();
         let ring_by = now + jiff::SignedDuration::from_secs(RING_BY_SECS);
         let direction = if start.message.is_some() { Direction::Outbound } else { Direction::Inbound };
@@ -260,6 +257,9 @@ impl Voice {
             )
             .map_err(|_| Unavailable)?;
         }
+        for old in self.web.replace(user_id) {
+            self.hang_up(&old);
+        }
         let out = self.web.open(&id, user_id);
         let voice = self.handler.profile(user_id);
         let title = crate::text::call_title(crate::text::Lang::from_setting(&voice.language).unwrap_or_default());
@@ -279,7 +279,10 @@ impl Voice {
         );
         if sent.is_err() {
             self.web.forget(&id);
-            let _ = end_call(&crate::db_guard(&self.db), &id, "failed", None, now);
+            let ended = end_call(&crate::db_guard(&self.db), &id, "failed", None, now).ok().flatten();
+            if let Some((user_id, message)) = ended {
+                self.handler.fall_through(&id, user_id, message);
+            }
             return Err(Unavailable);
         }
         if let Some(msg) = &start.message {
@@ -414,6 +417,9 @@ impl Voice {
                     eprintln!("voice: journaling a hang-up for {id} failed: {e}");
                 }
                 self.handler.conversation.on_frame(&id, &CallBody::Ended);
+                if self.web.is_web(&id) {
+                    self.web.end(&id, "failed", call_conversation(&self.db, &id));
+                }
                 self.handler.fall_through(&id, user_id, message);
             }
         }
@@ -450,6 +456,13 @@ fn held_conversation(conn: &Connection, call_id: &str, now: jiff::Timestamp) -> 
         (call_id, now.to_string()),
     )?;
     Ok(n > 0)
+}
+
+fn call_conversation(db: &Mutex<Connection>, call_id: &str) -> Option<i64> {
+    crate::db_guard(db)
+        .query_row("SELECT conversation_id FROM voice_calls WHERE id = ?1", [call_id], |r| r.get(0))
+        .ok()
+        .flatten()
 }
 
 fn state(conn: &Connection, call_id: &str) -> Result<Option<String>, String> {
@@ -689,12 +702,7 @@ impl Handler for NoteHandler {
             self.conversation.on_frame(call_id, &body);
         }
         if known {
-            self.web.on_frame(call_id, &body, || {
-                crate::db_guard(&self.db)
-                    .query_row("SELECT conversation_id FROM voice_calls WHERE id = ?1", [call_id], |r| r.get(0))
-                    .ok()
-                    .flatten()
-            });
+            self.web.on_frame(call_id, &body, || call_conversation(&self.db, call_id));
         }
         if let Some((user_id, message)) = ended {
             self.fall_through(call_id, user_id, message);
@@ -1390,5 +1398,124 @@ mod tests {
         assert!(matches!(voice.start_web_call(1, start, jiff::Timestamp::now()), Err(web::WebRefusal::Unavailable)));
         let calls: i64 = crate::db_guard(&voice.db).query_row("SELECT COUNT(*) FROM voice_calls", [], |r| r.get(0)).unwrap();
         assert_eq!(calls, 0);
+    }
+
+    struct Up {
+        _dir: tempfile::TempDir,
+        dialer: tokio::task::JoinHandle<()>,
+        listener: tokio::task::JoinHandle<()>,
+    }
+
+    impl Drop for Up {
+        fn drop(&mut self) {
+            self.dialer.abort();
+            self.listener.abort();
+        }
+    }
+
+    async fn up(voice: &Arc<Voice>) -> Up {
+        use note_voice_proto::testkit::{eventually, fast, Recording};
+        use note_voice_proto::{Dir, MemOutbox, Peer, Role};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("voice.sock");
+        let listener = voice.listen(&path).unwrap();
+        let far = Peer::new(fast(Role::Voice), Dir::ToNote, Arc::new(Recording::default()), Box::new(MemOutbox::default()));
+        let dialer = tokio::spawn(note_voice_proto::dial_forever(far, path));
+        eventually("the link is up", || voice.is_up()).await;
+        Up { _dir: dir, dialer, listener }
+    }
+
+    fn web_row(voice: &Voice, id: &str) -> (String, String, Option<String>, Option<i64>) {
+        crate::db_guard(&voice.db)
+            .query_row("SELECT origin, direction, message, thread_id FROM voice_calls WHERE id = ?1", [id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })
+            .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_web_call_opens_in_the_callers_own_thread_and_waits_for_them() {
+        let (voice, _) = rig();
+        let _up = up(&voice).await;
+        let (mine, theirs) = {
+            let conn = crate::db_guard(&voice.db);
+            conn.execute("INSERT INTO users (username, pass_hash, role) VALUES ('aitest', 'x', 'member')", []).unwrap();
+            let now = jiff::Timestamp::now();
+            (crate::talk::create(&conn, 1, "a", now).unwrap(), crate::talk::create(&conn, 2, "b", now).unwrap())
+        };
+        let now = jiff::Timestamp::now();
+        let call = voice.start_web_call(1, web::WebStart { thread: Some(mine), message: None }, now).unwrap();
+        assert_eq!(web_row(&voice, &call.call_id), ("web".into(), "inbound".into(), None, Some(mine)));
+        assert!(matches!(
+            frames(&voice, &call.call_id).as_slice(),
+            [CallBody::Start { user_id: 1, origin: Origin::Web, direction: Direction::Inbound, ring_secs: 0, .. }]
+        ));
+        let other = voice.start_web_call(1, web::WebStart { thread: Some(theirs), message: None }, now).unwrap();
+        assert_eq!(web_row(&voice, &other.call_id).3, None, "another user's thread is not opened");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_answered_ring_is_notes_call_and_replaces_the_open_one() {
+        let (voice, _) = rig();
+        let _up = up(&voice).await;
+        let now = jiff::Timestamp::now();
+        let mut first = voice.start_web_call(1, web::WebStart { thread: None, message: None }, now).unwrap();
+        let second = voice.start_web_call(1, web::WebStart { thread: None, message: Some(msg()) }, now).unwrap();
+        let (origin, direction, message, _) = web_row(&voice, &second.call_id);
+        assert_eq!((origin.as_str(), direction.as_str()), ("web", "outbound"));
+        assert_eq!(serde_json::from_str::<OutboundMessage>(&message.unwrap()).unwrap().body, msg().body);
+        assert_eq!(first.out.try_recv().unwrap(), web::WebOut::Ended { reason: "replaced", conversation_id: None });
+        assert!(frames(&voice, &first.call_id).contains(&CallBody::HangUp));
+        assert!(voice.web.is_web(&second.call_id) && !voice.web.is_web(&first.call_id));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_web_call_is_busy_while_a_phone_call_is_up_and_keeps_the_open_one() {
+        let (voice, _) = rig();
+        let _up = up(&voice).await;
+        let now = jiff::Timestamp::now();
+        let mut open = voice.start_web_call(1, web::WebStart { thread: None, message: None }, now).unwrap();
+        voice.start_call(1, &link(), &msg(), now).unwrap_err();
+        crate::db_guard(&voice.db).execute("UPDATE voice_calls SET origin = 'matrix' WHERE id = ?1", [&open.call_id]).unwrap();
+        let refused = voice.start_web_call(1, web::WebStart { thread: None, message: None }, now);
+        assert!(matches!(refused, Err(web::WebRefusal::Busy)));
+        assert!(open.out.try_recv().is_err(), "a refused call replaces nothing");
+        assert!(voice.web.is_web(&open.call_id));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_web_calls_frames_reach_its_socket_and_others_are_ignored() {
+        let (voice, _) = rig();
+        let _up = up(&voice).await;
+        let conv = crate::talk::create(&crate::db_guard(&voice.db), 1, "a", jiff::Timestamp::now()).unwrap();
+        let mut call = voice.start_web_call(1, web::WebStart { thread: None, message: None }, jiff::Timestamp::now()).unwrap();
+        let mut ghost = voice.web.open("ghost", 1);
+        let id = call.call_id.clone();
+        crate::db_guard(&voice.db).execute("UPDATE voice_calls SET conversation_id = ?2 WHERE id = ?1", (&id, conv)).unwrap();
+        let h = voice.handler.clone();
+        h.apply("ghost", 1, CallBody::Draft { turn: 1, text: "hi".into(), language: None }).unwrap();
+        h.apply("ghost", 2, CallBody::Ended).unwrap();
+        h.apply(&id, 1, CallBody::Draft { turn: 1, text: "hi".into(), language: None }).unwrap();
+        h.apply(&id, 2, CallBody::Ended).unwrap();
+        assert!(ghost.try_recv().is_err(), "a call id with no row is not routed");
+        assert_eq!(call.out.try_recv().unwrap(), web::WebOut::Caption("hi".into()));
+        assert_eq!(call.out.try_recv().unwrap(), web::WebOut::Ended { reason: "ended", conversation_id: Some(conv) });
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stale_web_call_is_failed_on_its_socket() {
+        let (voice, _) = rig();
+        let then = jiff::Timestamp::now() - jiff::SignedDuration::from_secs(120);
+        crate::db_guard(&voice.db)
+            .execute(
+                "INSERT INTO voice_calls (id, user_id, direction, state, ring_by, created_at, origin)
+                 VALUES ('w', 1, 'inbound', 'starting', ?1, ?1, 'web')",
+                [then.to_string()],
+            )
+            .unwrap();
+        let mut out = voice.web.open("w", 1);
+        assert_eq!(voice.sweep(jiff::Timestamp::now()), 1);
+        assert_eq!(out.try_recv().unwrap(), web::WebOut::Ended { reason: "failed", conversation_id: None });
+        assert!(!voice.web.is_web("w"));
     }
 }
