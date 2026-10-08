@@ -141,6 +141,9 @@ pub struct AppState {
     pub call_settings: crate::voice::call::CallSettings,
     pub hub: Arc<crate::channels::ws::ClientHub>,
     pub channels: Vec<Arc<dyn crate::channels::Channel>>,
+    /// Where a call Note places reaches an open web app; `NoWebCalls` until
+    /// the web call is wired.
+    pub web_calls: Arc<dyn crate::channels::WebCalls>,
     pub secure_cookies: bool,
     pub login_limiter: Arc<crate::auth::LoginLimiter>,
     /// Bounds concurrent password hashes; see `auth::MAX_CONCURRENT_LOGINS`.
@@ -195,6 +198,7 @@ impl AppState {
             call_settings: crate::voice::call::CallSettings::default(),
             hub,
             channels: vec![ws],
+            web_calls: Arc::new(crate::channels::NoWebCalls),
             secure_cookies: false,
             login_limiter: Arc::new(crate::auth::LoginLimiter::new()),
             login_slots: Arc::new(tokio::sync::Semaphore::new(
@@ -241,6 +245,12 @@ impl AppState {
                 Err(e) => eprintln!("memory: vector backfill failed: {e:#}"),
             }
         });
+    }
+
+    #[must_use]
+    pub fn with_web_calls(mut self, calls: Arc<dyn crate::channels::WebCalls>) -> Self {
+        self.web_calls = calls;
+        self
     }
 
     #[must_use]

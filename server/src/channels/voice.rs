@@ -38,6 +38,24 @@ impl Channel for VoiceChannel {
     fn deliver(&self, user_id: i64, username: &str, msg: &OutboundMessage) -> anyhow::Result<()> {
         let cfg = crate::config::UserConfig::load(&self.config_dir, username)?;
         anyhow::ensure!(rings_for(cfg.ring_for(), msg), "not a message this user is rung for");
+        use super::calling::PhoneRing;
+        VoicePhone::new(self.voice.clone(), self.db.clone()).ring_phone(user_id, msg)
+    }
+}
+
+pub struct VoicePhone {
+    voice: Arc<Voice>,
+    db: Arc<Mutex<Connection>>,
+}
+
+impl VoicePhone {
+    pub fn new(voice: Arc<Voice>, db: Arc<Mutex<Connection>>) -> Self {
+        Self { voice, db }
+    }
+}
+
+impl super::calling::PhoneRing for VoicePhone {
+    fn ring_phone(&self, user_id: i64, msg: &OutboundMessage) -> anyhow::Result<()> {
         let link = {
             let conn = crate::db_guard(&self.db);
             links::ringable(&conn, user_id)?
