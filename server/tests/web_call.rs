@@ -74,6 +74,32 @@ async fn open(addr: std::net::SocketAddr, cookie: &str, query: &str) -> Ws {
     tokio_tungstenite::connect_async(req).await.unwrap().0
 }
 
+/// The socket at `path`, opened with `origin` when given; the refusal's status when the handshake is refused.
+async fn open_from(addr: std::net::SocketAddr, cookie: &str, path: &str, origin: Option<&str>) -> Result<Ws, u16> {
+    let mut req = format!("ws://{addr}{path}").into_client_request().unwrap();
+    req.headers_mut().insert("cookie", cookie.parse().unwrap());
+    if let Some(origin) = origin {
+        req.headers_mut().insert("origin", origin.parse().unwrap());
+    }
+    match tokio_tungstenite::connect_async(req).await {
+        Ok((ws, _)) => Ok(ws),
+        Err(tokio_tungstenite::tungstenite::Error::Http(res)) => Err(res.status().as_u16()),
+        Err(e) => panic!("{e}"),
+    }
+}
+
+fn rung(conversation_id: Option<i64>) -> note_server::channels::OutboundMessage {
+    note_server::channels::OutboundMessage {
+        title: "Note".into(),
+        body: "Your essay is due at five.".into(),
+        urgency: note_server::channels::Urgency::Normal,
+        checkin: false,
+        event_id: Some(8),
+        conversation_id,
+        actions: Vec::new(),
+    }
+}
+
 async fn next(ws: &mut Ws) -> Option<Message> {
     loop {
         match tokio::time::timeout(Duration::from_secs(15), ws.next()).await.expect("a frame in time") {
@@ -370,10 +396,10 @@ async fn a_ring_reaches_only_a_visible_app_and_its_answer_speaks_the_thread() {
     };
     let (conn_id, mut rx) = r.state.hub.register(1).unwrap();
     assert!(!r.state.web_calls.has_live(1));
-    assert!(!r.state.web_calls.ring(1, Some(thread)), "no app in view");
+    assert!(!r.state.web_calls.ring(1, &rung(Some(thread))), "no app in view");
     r.state.hub.set_visible(1, conn_id, true);
     assert!(r.state.web_calls.has_live(1));
-    assert!(r.state.web_calls.ring(1, Some(thread)));
+    assert!(r.state.web_calls.ring(1, &rung(Some(thread))));
     let incoming: Value = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
     assert_eq!((incoming["type"].as_str(), incoming["conversation_id"].as_i64()), (Some("incoming"), Some(thread)));
     let token = incoming["ring"].as_str().unwrap().to_string();
@@ -395,4 +421,51 @@ async fn a_ring_reaches_only_a_visible_app_and_its_answer_speaks_the_thread() {
 
     let mut again = open(r.addr, &r.cookie, &format!("?ring={token}")).await;
     assert_eq!(frame(&mut again, "ended").await["reason"], "missed");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_foreign_page_cannot_open_either_socket() {
+    let r = rig().await;
+    for path in ["/api/ws", "/api/call/ws"] {
+        assert_eq!(open_from(r.addr, &r.cookie, path, Some("https://evil.example")).await.err(), Some(403), "{path}");
+        assert_eq!(open_from(r.addr, &r.cookie, path, Some("null")).await.err(), Some(403), "{path}");
+    }
+    let mut events = open_from(r.addr, &r.cookie, "/api/ws", Some("http://localhost:3271")).await.unwrap();
+    events.close(None).await.unwrap();
+    let mut call = open_from(r.addr, &r.cookie, "/api/call/ws", Some("http://localhost:3271")).await.unwrap();
+    frame(&mut call, "open").await;
+    let mut bare = open_from(r.addr, &r.cookie, "/api/ws", None).await.unwrap();
+    bare.close(None).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_user_holding_two_call_sockets_is_refused_a_third() {
+    let r = rig().await;
+    let _held = (r.state.call_sockets.take(1).unwrap(), r.state.call_sockets.take(1).unwrap());
+    assert_eq!(open_from(r.addr, &r.cookie, "/api/call/ws", None).await.err(), Some(429));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_declined_ring_sends_its_message_on_at_once_and_stops_ringing() {
+    let r = rig().await;
+    let mut app = open_from(r.addr, &r.cookie, "/api/ws", None).await.unwrap();
+    app.send(Message::Text(r#"{"type":"visible","on":true}"#.into())).await.unwrap();
+    eventually("the app in view", || r.state.web_calls.has_live(1)).await;
+    assert!(r.state.web_calls.ring(1, &rung(None)));
+    let token = frame(&mut app, "incoming").await["ring"].as_str().unwrap().to_string();
+    app.send(Message::Text(serde_json::json!({ "type": "decline", "ring": token }).to_string().into())).await.unwrap();
+    let (mut taken, mut delivered) = (None, None);
+    while taken.is_none() || delivered.is_none() {
+        let Some(Message::Text(t)) = next(&mut app).await else { panic!("the app socket closed") };
+        let v: Value = serde_json::from_str(t.as_str()).unwrap();
+        match v["type"].as_str() {
+            Some("ring_taken") => taken = Some(v["ring"].clone()),
+            Some("event") => delivered = Some(v["body"].clone()),
+            _ => {}
+        }
+    }
+    assert_eq!(taken.unwrap(), token.as_str(), "other pages stop ringing");
+    assert_eq!(delivered.unwrap(), "Your essay is due at five.");
+    let mut late = open(r.addr, &r.cookie, &format!("?ring={token}")).await;
+    assert_eq!(frame(&mut late, "ended").await["reason"], "missed", "a declined ring cannot be answered");
 }

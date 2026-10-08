@@ -154,6 +154,7 @@ async fn main() -> anyhow::Result<()> {
         .with_passkeys(passkeys)
         .with_limits(&cfg.limits)
         .with_public_base_url(&cfg.public_base_url)
+        .with_bind_addr(&cfg.bind_addr)
         .with_idle_summary_min(cfg.idle_summary_min())
         .with_inbox_refresh(cfg.inbox.refresh_signal.clone());
     state.secure_cookies = cfg.public_base_url.starts_with("https://");

@@ -2857,14 +2857,14 @@ async fn vapid_public_key(_user: CurrentUser, State(state): State<AppState>) -> 
     }
 }
 
-/// Bridges hub messages to the socket; inbound frames are drained and ignored
-/// (delivery is one-way in v1), and either side closing tears the bridge down.
+/// Bridges hub messages to the socket; inbound frames report the page's
+/// visibility and declined rings, and either side closing tears the bridge down.
 async fn ws_connect(
     WsAdmission(user): WsAdmission,
     State(state): State<AppState>,
     ws: axum::extract::ws::WebSocketUpgrade,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| ws_pump(socket, state.hub.clone(), state.db.clone(), user.id))
+    ws.on_upgrade(move |socket| ws_pump(socket, state, user.id))
 }
 
 #[derive(Deserialize)]
@@ -2874,18 +2874,28 @@ struct CallQuery {
 }
 
 async fn call_ws(
-    CallAdmission(user): CallAdmission,
+    CallAdmission(user, slot): CallAdmission,
     State(state): State<AppState>,
     Query(q): Query<CallQuery>,
     ws: axum::extract::ws::WebSocketUpgrade,
 ) -> impl IntoResponse {
     ws.max_message_size(crate::voice::web::MAX_IN_BYTES)
         .max_frame_size(crate::voice::web::MAX_IN_BYTES)
-        .on_upgrade(move |socket| crate::voice::web::serve(socket, state, user.id, q.conversation_id, q.ring))
+        .on_upgrade(move |socket| async move {
+            crate::voice::web::serve(socket, state, user.id, q.conversation_id, q.ring).await;
+            drop(slot);
+        })
 }
 
-/// A session opening a call socket from Note's own page.
-struct CallAdmission(CurrentUser);
+fn refused_origin(headers: &axum::http::HeaderMap, state: &AppState) -> Option<axum::response::Response> {
+    if crate::net::fetch_site_ok(headers) && crate::net::origin_ok(headers, &state.page_origins()) {
+        return None;
+    }
+    Some((StatusCode::FORBIDDEN, Json(serde_json::json!({ "error": "cross-site request refused" }))).into_response())
+}
+
+/// A session opening a call socket from Note's own page, within its cap of call sockets.
+struct CallAdmission(CurrentUser, crate::voice::web::SocketSlot);
 
 impl axum::extract::FromRequestParts<AppState> for CallAdmission {
     type Rejection = axum::response::Response;
@@ -2894,14 +2904,17 @@ impl axum::extract::FromRequestParts<AppState> for CallAdmission {
         parts: &mut axum::http::request::Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        if !crate::net::fetch_site_ok(&parts.headers) {
-            return Err((StatusCode::FORBIDDEN, Json(serde_json::json!({ "error": "cross-site request refused" })))
-                .into_response());
+        if let Some(refused) = refused_origin(&parts.headers, state) {
+            return Err(refused);
         }
         let user = CurrentUser::from_request_parts(parts, state)
             .await
             .map_err(axum::response::IntoResponse::into_response)?;
-        Ok(CallAdmission(user))
+        let Some(slot) = state.call_sockets.take(user.id) else {
+            return Err((StatusCode::TOO_MANY_REQUESTS, Json(serde_json::json!({ "error": "too many open calls" })))
+                .into_response());
+        };
+        Ok(CallAdmission(user, slot))
     }
 }
 
@@ -2917,12 +2930,8 @@ impl axum::extract::FromRequestParts<AppState> for WsAdmission {
         parts: &mut axum::http::request::Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        if !crate::net::fetch_site_ok(&parts.headers) {
-            return Err((
-                StatusCode::FORBIDDEN,
-                Json(serde_json::json!({ "error": "cross-site request refused" })),
-            )
-                .into_response());
+        if let Some(refused) = refused_origin(&parts.headers, state) {
+            return Err(refused);
         }
         let user = CurrentUser::from_request_parts(parts, state)
             .await
@@ -2946,13 +2955,9 @@ const WS_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
 /// would stay registered and keep absorbing deliveries. Pings force the peer to
 /// speak; going `WS_IDLE_TIMEOUT` without any inbound frame tears the bridge
 /// down so the dispatcher's ladder can fall through to another channel.
-async fn ws_pump(
-    mut socket: axum::extract::ws::WebSocket,
-    hub: std::sync::Arc<crate::channels::ws::ClientHub>,
-    db: std::sync::Arc<std::sync::Mutex<rusqlite::Connection>>,
-    user_id: i64,
-) {
+async fn ws_pump(mut socket: axum::extract::ws::WebSocket, state: AppState, user_id: i64) {
     use axum::extract::ws::Message;
+    let (hub, db) = (&state.hub, &state.db);
 
     let Some((conn_id, mut rx)) = hub.register(user_id) else {
         return;
@@ -2982,8 +2987,13 @@ async fn ws_pump(
                         None => crate::channels::ws::is_presence(&msg),
                     };
                     if present {
-                        let conn = crate::db_guard(&db);
+                        let conn = crate::db_guard(db);
                         let _ = crate::presence::touch(&conn, user_id, jiff::Timestamp::now());
+                    }
+                    if let (Some(ring), Some(voice)) = (crate::channels::ws::declined_ring(&msg), &state.voice) {
+                        if voice.decline_ring(&ring, user_id) {
+                            hub.send(user_id, &serde_json::json!({ "type": "ring_taken", "ring": ring }).to_string());
+                        }
                     }
                 }
                 _ => break,

@@ -96,6 +96,40 @@ pub fn fetch_site_ok(headers: &axum::http::HeaderMap) -> bool {
     }
 }
 
+/// A browser's `Origin` must be one of `allowed`; a non-browser client sends none.
+pub fn origin_ok(headers: &axum::http::HeaderMap, allowed: &[String]) -> bool {
+    match headers.get(axum::http::header::ORIGIN) {
+        None => true,
+        Some(v) => v.to_str().is_ok_and(|o| {
+            let o = o.trim_end_matches('/').to_ascii_lowercase();
+            allowed.contains(&o)
+        }),
+    }
+}
+
+/// The origins Note's own pages are served from: `public_base_url`'s, and the
+/// listening address's (with its loopback names when it listens on loopback or
+/// on every address).
+pub fn page_origins(public_base_url: &str, bind_addr: Option<&str>) -> Vec<String> {
+    let mut out = Vec::new();
+    let base = public_base_url.to_ascii_lowercase();
+    if let Some((scheme, rest)) = base.split_once("://") {
+        let host = rest.split(['/', '?', '#']).next().unwrap_or_default();
+        out.push(format!("{scheme}://{host}"));
+    }
+    if let Some(addr) = bind_addr.and_then(|a| a.parse::<std::net::SocketAddr>().ok()) {
+        let port = addr.port();
+        if addr.ip().is_loopback() || addr.ip().is_unspecified() {
+            out.extend([format!("http://127.0.0.1:{port}"), format!("http://localhost:{port}"), format!("http://[::1]:{port}")]);
+        } else if port == 80 {
+            out.push(format!("http://{}", std::net::SocketAddr::new(addr.ip(), 0).to_string().trim_end_matches(":0")));
+        } else {
+            out.push(format!("http://{addr}"));
+        }
+    }
+    out
+}
+
 /// The address a per-client limiter keys on: Cloudflare's header behind the
 /// tunnel, the first forwarded hop otherwise, and one shared bucket when the
 /// request came straight to the socket.
@@ -204,6 +238,31 @@ mod tests {
             h.insert("sec-fetch-site", bad.parse().unwrap());
             assert!(!fetch_site_ok(&h), "{bad}");
         }
+    }
+
+    #[test]
+    fn an_origin_must_be_one_of_notes_own() {
+        let allowed = page_origins("https://Note.example.net/", Some("127.0.0.1:3271"));
+        let mut h = axum::http::HeaderMap::new();
+        assert!(origin_ok(&h, &allowed), "no Origin: a non-browser client");
+        for ok in ["https://note.example.net", "http://localhost:3271", "http://127.0.0.1:3271"] {
+            h.insert("origin", ok.parse().unwrap());
+            assert!(origin_ok(&h, &allowed), "{ok}");
+        }
+        for bad in ["https://evil.example", "http://note.example.net", "https://note.example.net.evil.example", "null"] {
+            h.insert("origin", bad.parse().unwrap());
+            assert!(!origin_ok(&h, &allowed), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_bind_on_a_named_address_allows_that_address_alone() {
+        assert_eq!(
+            page_origins("https://n.example/app", Some("192.168.1.4:8080")),
+            ["https://n.example", "http://192.168.1.4:8080"]
+        );
+        assert_eq!(page_origins("https://n.example", Some("[fd00::4]:80")), ["https://n.example", "http://[fd00::4]"]);
+        assert_eq!(page_origins("https://n.example", None), ["https://n.example"]);
     }
 
     #[test]

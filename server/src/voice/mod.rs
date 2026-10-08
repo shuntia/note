@@ -257,10 +257,10 @@ impl Voice {
             )
             .map_err(|_| Unavailable)?;
         }
-        for old in self.web.replace(user_id) {
+        let (out, replaced) = self.web.take_over(&id, user_id);
+        for old in replaced {
             self.hang_up(&old);
         }
-        let out = self.web.open(&id, user_id);
         let voice = self.handler.profile(user_id);
         let title = crate::text::call_title(crate::text::Lang::from_setting(&voice.language).unwrap_or_default());
         let sent = self.peer.send_call(
@@ -302,8 +302,42 @@ impl Voice {
         }
     }
 
-    pub fn offer_ring(&self, user_id: i64, conversation_id: Option<i64>) -> String {
-        self.web.offer_ring_at(user_id, conversation_id, Instant::now())
+    pub fn offer_ring(&self, user_id: i64, msg: &OutboundMessage) -> String {
+        self.web.offer_ring_at(user_id, msg, Instant::now())
+    }
+
+    pub fn withdraw_ring(&self, token: &str) {
+        self.web.withdraw_ring(token);
+    }
+
+    /// Sends a declined ring's message down the ladder; false when the ring was not the user's or is gone.
+    pub fn decline_ring(&self, token: &str, user_id: i64) -> bool {
+        let Some(msg) = self.web.decline_ring(token, user_id) else { return false };
+        self.deliver(user_id, msg);
+        true
+    }
+
+    /// Sends each ring that ran out unanswered down the ladder, and returns how many.
+    pub fn expire_rings(&self, now: Instant) -> usize {
+        let gone = self.web.expired_rings_at(now);
+        let n = gone.len();
+        for (user_id, msg) in gone {
+            self.deliver(user_id, msg);
+        }
+        n
+    }
+
+    fn deliver(&self, user_id: i64, msg: OutboundMessage) {
+        let db = self.db.clone();
+        let ladder = self.fallback.get().cloned().unwrap_or_default();
+        call::spawn_blocking(move || {
+            let username: Option<String> = crate::db_guard(&db)
+                .query_row("SELECT username FROM users WHERE id = ?1", [user_id], |r| r.get(0))
+                .ok();
+            if let Some(username) = username {
+                crate::channels::deliver_via(&db, &ladder, user_id, &username, &msg);
+            }
+        });
     }
 
     /// The call an answered ring opens: in its thread, opening with Note's newest reply there.
@@ -344,12 +378,14 @@ impl Voice {
     }
 
     /// Fails every call the voice side never took up, never reported the end
-    /// of, or that stayed live past `STALE_LIVE_SECS`, and returns how many.
-    /// Does nothing until the fallback is set.
+    /// of, or that stayed live past `STALE_LIVE_SECS`, and returns how many;
+    /// web rings that ran out go down the ladder. Does nothing until the
+    /// fallback is set.
     pub fn sweep(&self, now: jiff::Timestamp) -> usize {
         if self.fallback.get().is_none() {
             return 0;
         }
+        self.expire_rings(Instant::now());
         let stale = self.stale_calls(now);
         self.fail_stale(stale, now)
     }
@@ -1489,7 +1525,7 @@ mod tests {
         let _up = up(&voice).await;
         let conv = crate::talk::create(&crate::db_guard(&voice.db), 1, "a", jiff::Timestamp::now()).unwrap();
         let mut call = voice.start_web_call(1, web::WebStart { thread: None, message: None }, jiff::Timestamp::now()).unwrap();
-        let mut ghost = voice.web.open("ghost", 1);
+        let mut ghost = voice.web.take_over("ghost", 2).0;
         let id = call.call_id.clone();
         crate::db_guard(&voice.db).execute("UPDATE voice_calls SET conversation_id = ?2 WHERE id = ?1", (&id, conv)).unwrap();
         let h = voice.handler.clone();
@@ -1513,9 +1549,57 @@ mod tests {
                 [then.to_string()],
             )
             .unwrap();
-        let mut out = voice.web.open("w", 1);
+        let mut out = voice.web.take_over("w", 1).0;
         assert_eq!(voice.sweep(jiff::Timestamp::now()), 1);
         assert_eq!(out.try_recv().unwrap(), web::WebOut::Ended { reason: "failed", conversation_id: None });
         assert!(!voice.web.is_web("w"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_ring_that_runs_out_sends_its_message_down_the_ladder_once() {
+        let (voice, mock) = rig();
+        let long_ago = Instant::now().checked_sub(web::RING_FOR * 2).unwrap();
+        voice.web.offer_ring_at(1, &msg(), long_ago);
+        voice.sweep(jiff::Timestamp::now());
+        voice.sweep(jiff::Timestamp::now());
+        settle().await;
+        let seen = mock.seen();
+        assert_eq!(seen.len(), 1);
+        assert_eq!((seen[0].1.body.as_str(), seen[0].1.event_id), ("how is the essay going?", Some(4)));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_declined_ring_sends_its_message_at_once() {
+        let (voice, mock) = rig();
+        let token = voice.offer_ring(1, &msg());
+        assert!(!voice.decline_ring(&token, 2), "not another user's to decline");
+        assert!(voice.decline_ring(&token, 1));
+        assert!(!voice.decline_ring(&token, 1));
+        settle().await;
+        assert_eq!(mock.seen().len(), 1);
+        assert_eq!(voice.expire_rings(Instant::now() + web::RING_FOR * 2), 0);
+        settle().await;
+        assert_eq!(mock.seen().len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_answered_ring_never_sends_its_message() {
+        let (voice, mock) = rig();
+        let token = voice.offer_ring(1, &msg());
+        assert!(voice.answer_ring(&token, 1).is_some());
+        assert!(!voice.decline_ring(&token, 1));
+        assert_eq!(voice.expire_rings(Instant::now() + web::RING_FOR * 2), 0);
+        settle().await;
+        assert!(mock.seen().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_withdrawn_ring_never_sends_its_message() {
+        let (voice, mock) = rig();
+        let token = voice.offer_ring(1, &msg());
+        voice.withdraw_ring(&token);
+        assert_eq!(voice.expire_rings(Instant::now() + web::RING_FOR * 2), 0);
+        settle().await;
+        assert!(mock.seen().is_empty());
     }
 }

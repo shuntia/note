@@ -124,6 +124,16 @@ pub fn visibility(msg: &axum::extract::ws::Message) -> Option<bool> {
     v["on"].as_bool()
 }
 
+/// The ring token of a page's `{"type":"decline","ring":…}`.
+pub fn declined_ring(msg: &axum::extract::ws::Message) -> Option<String> {
+    let axum::extract::ws::Message::Text(text) = msg else { return None };
+    let v: serde_json::Value = serde_json::from_str(text.as_str()).ok()?;
+    if v["type"] != "decline" {
+        return None;
+    }
+    v["ring"].as_str().map(str::to_string)
+}
+
 /// Cap on one agent frame's variable text, so a large tool payload cannot
 /// flood a socket; what is left ends in an ellipsis.
 pub const MAX_FRAME_TEXT: usize = 4 * 1024;
@@ -370,5 +380,13 @@ mod tests {
         assert_eq!(visibility(&Message::Text(r#"{"type":"visible","on":false}"#.into())), Some(false));
         assert_eq!(visibility(&Message::Text(r#"{"type":"hello"}"#.into())), None);
         assert_eq!(visibility(&Message::Text("not json".into())), None);
+    }
+
+    #[test]
+    fn a_decline_names_its_ring() {
+        use axum::extract::ws::Message;
+        assert_eq!(declined_ring(&Message::Text(r#"{"type":"decline","ring":"r1"}"#.into())).as_deref(), Some("r1"));
+        assert_eq!(declined_ring(&Message::Text(r#"{"type":"decline"}"#.into())), None);
+        assert_eq!(declined_ring(&Message::Text(r#"{"type":"visible","on":true}"#.into())), None);
     }
 }

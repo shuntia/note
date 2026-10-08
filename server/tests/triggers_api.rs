@@ -365,8 +365,8 @@ impl note_server::channels::WebCalls for LiveWeb {
     fn has_live(&self, _: i64) -> bool {
         true
     }
-    fn ring(&self, user_id: i64, conversation_id: Option<i64>) -> bool {
-        self.0.lock().unwrap().push((user_id, conversation_id));
+    fn ring(&self, user_id: i64, msg: &note_server::channels::OutboundMessage) -> bool {
+        self.0.lock().unwrap().push((user_id, msg.conversation_id));
         true
     }
 }

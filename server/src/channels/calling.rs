@@ -6,9 +6,10 @@ use std::sync::{Arc, Mutex};
 pub trait WebCalls: Send + Sync {
     /// Whether the user has the web app open and visible, able to take a call now.
     fn has_live(&self, user_id: i64) -> bool;
-    /// Rings that web app; the call joins `conversation_id`, or a new thread
-    /// when it is `None`. `false` when it could not be rung.
-    fn ring(&self, user_id: i64, conversation_id: Option<i64>) -> bool;
+    /// Rings that web app; the call joins the message's conversation, or a new
+    /// thread when it has none. `false` when it could not be rung; once rung,
+    /// the ringer owns the message's delivery if the ring goes unanswered.
+    fn ring(&self, user_id: i64, msg: &OutboundMessage) -> bool;
 }
 
 pub struct NoWebCalls;
@@ -17,7 +18,7 @@ impl WebCalls for NoWebCalls {
     fn has_live(&self, _: i64) -> bool {
         false
     }
-    fn ring(&self, _: i64, _: Option<i64>) -> bool {
+    fn ring(&self, _: i64, _: &OutboundMessage) -> bool {
         false
     }
 }
@@ -60,7 +61,7 @@ pub fn ring_with(
     username: &str,
     msg: &OutboundMessage,
 ) -> RingOutcome {
-    if web.has_live(user_id) && web.ring(user_id, msg.conversation_id) {
+    if web.has_live(user_id) && web.ring(user_id, msg) {
         return RingOutcome::Web;
     }
     if let Some(phone) = phone {
@@ -113,8 +114,8 @@ mod tests {
         fn has_live(&self, _: i64) -> bool {
             self.live
         }
-        fn ring(&self, user_id: i64, conversation_id: Option<i64>) -> bool {
-            self.rang.lock().unwrap().push((user_id, conversation_id));
+        fn ring(&self, user_id: i64, msg: &OutboundMessage) -> bool {
+            self.rang.lock().unwrap().push((user_id, msg.conversation_id));
             self.answers
         }
     }

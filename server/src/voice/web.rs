@@ -16,6 +16,43 @@ pub const RING_FOR: Duration = Duration::from_secs(30);
 /// Audio frames a call's socket may hold unsent before further audio is dropped; control always gets through.
 pub const AUDIO_BACKLOG: usize = 50;
 
+/// Call sockets one user may hold open at once; a replacing call needs the second.
+pub const CALL_SOCKETS_PER_USER: usize = 2;
+
+/// How many call sockets each user holds open.
+#[derive(Default)]
+pub struct SocketSlots(Mutex<HashMap<i64, usize>>);
+
+/// One user's hold on a call socket, given back on drop.
+pub struct SocketSlot {
+    slots: Arc<SocketSlots>,
+    user_id: i64,
+}
+
+impl SocketSlots {
+    pub fn take(self: &Arc<Self>, user_id: i64) -> Option<SocketSlot> {
+        let mut held = lock(&self.0);
+        let n = held.entry(user_id).or_default();
+        if *n >= CALL_SOCKETS_PER_USER {
+            return None;
+        }
+        *n += 1;
+        Some(SocketSlot { slots: self.clone(), user_id })
+    }
+}
+
+impl Drop for SocketSlot {
+    fn drop(&mut self) {
+        let mut held = lock(&self.slots.0);
+        if let Some(n) = held.get_mut(&self.user_id) {
+            *n -= 1;
+            if *n == 0 {
+                held.remove(&self.user_id);
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum WebOut {
     Audio(Vec<i16>),
@@ -97,7 +134,7 @@ impl Socket {
 
 struct Ring {
     user_id: i64,
-    conversation_id: Option<i64>,
+    message: OutboundMessage,
     until: Instant,
 }
 
@@ -113,15 +150,8 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 impl Relays {
-    pub fn open(&self, call_id: &str, user_id: i64) -> WebRx {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let audio = Arc::new(AtomicUsize::new(0));
-        lock(&self.calls).insert(call_id.to_string(), Socket { user_id, tx, audio: audio.clone() });
-        WebRx { rx, audio }
-    }
-
-    /// Tells each of the user's open web calls it was replaced and forgets it; returns their ids.
-    pub fn replace(&self, user_id: i64) -> Vec<String> {
+    /// Opens the user's one web call socket, closing any they held as replaced; returns their ids.
+    pub fn take_over(&self, call_id: &str, user_id: i64) -> (WebRx, Vec<String>) {
         let mut calls = lock(&self.calls);
         let ids: Vec<String> = calls.iter().filter(|(_, s)| s.user_id == user_id).map(|(id, _)| id.clone()).collect();
         for id in &ids {
@@ -129,7 +159,10 @@ impl Relays {
                 socket.send(WebOut::Ended { reason: "replaced", conversation_id: None });
             }
         }
-        ids
+        let (tx, rx) = mpsc::unbounded_channel();
+        let audio = Arc::new(AtomicUsize::new(0));
+        calls.insert(call_id.to_string(), Socket { user_id, tx, audio: audio.clone() });
+        (WebRx { rx, audio }, ids)
     }
 
     pub fn is_web(&self, call_id: &str) -> bool {
@@ -175,21 +208,36 @@ impl Relays {
         }
     }
 
-    pub fn offer_ring_at(&self, user_id: i64, conversation_id: Option<i64>, now: Instant) -> String {
+    pub fn offer_ring_at(&self, user_id: i64, message: &OutboundMessage, now: Instant) -> String {
         let token = uuid::Uuid::new_v4().to_string();
-        let mut rings = lock(&self.rings);
-        rings.retain(|_, r| r.until >= now);
-        rings.insert(token.clone(), Ring { user_id, conversation_id, until: now + RING_FOR });
+        lock(&self.rings).insert(token.clone(), Ring { user_id, message: message.clone(), until: now + RING_FOR });
         token
     }
 
     /// The thread the ring was about, for its own user, once, while it lasts.
     pub fn take_ring_at(&self, token: &str, user_id: i64, now: Instant) -> Option<Option<i64>> {
         let mut rings = lock(&self.rings);
-        let ring = rings.get(token).filter(|r| r.user_id == user_id && r.until >= now)?;
-        let conversation_id = ring.conversation_id;
-        rings.remove(token);
-        Some(conversation_id)
+        rings.get(token).filter(|r| r.user_id == user_id && r.until >= now)?;
+        rings.remove(token).map(|r| r.message.conversation_id)
+    }
+
+    /// The message of the user's own ring, which no longer rings.
+    pub fn decline_ring(&self, token: &str, user_id: i64) -> Option<OutboundMessage> {
+        let mut rings = lock(&self.rings);
+        rings.get(token).filter(|r| r.user_id == user_id)?;
+        rings.remove(token).map(|r| r.message)
+    }
+
+    /// Forgets a ring no app was shown.
+    pub fn withdraw_ring(&self, token: &str) {
+        lock(&self.rings).remove(token);
+    }
+
+    /// Each ring past its time, with its user, forgotten as it is returned.
+    pub fn expired_rings_at(&self, now: Instant) -> Vec<(i64, OutboundMessage)> {
+        let mut rings = lock(&self.rings);
+        let gone: Vec<String> = rings.iter().filter(|(_, r)| r.until < now).map(|(t, _)| t.clone()).collect();
+        gone.iter().filter_map(|t| rings.remove(t)).map(|r| (r.user_id, r.message)).collect()
     }
 }
 
@@ -347,14 +395,19 @@ impl crate::channels::WebCalls for WebRinger {
         self.voice.is_up() && self.hub.has_visible(user_id)
     }
 
-    /// True when a page in view took the ring; it then opens the call view, ringing.
-    fn ring(&self, user_id: i64, conversation_id: Option<i64>) -> bool {
+    /// True when a page in view took the ring; it then opens the call view, ringing, and the
+    /// message goes down the ladder if the ring is declined or runs out.
+    fn ring(&self, user_id: i64, msg: &OutboundMessage) -> bool {
         if !self.has_live(user_id) {
             return false;
         }
-        let token = self.voice.offer_ring(user_id, conversation_id);
-        let frame = serde_json::json!({ "type": "incoming", "ring": token, "conversation_id": conversation_id });
-        self.hub.send_visible(user_id, &frame.to_string()) > 0
+        let token = self.voice.offer_ring(user_id, msg);
+        let frame = serde_json::json!({ "type": "incoming", "ring": token, "conversation_id": msg.conversation_id });
+        if self.hub.send_visible(user_id, &frame.to_string()) > 0 {
+            return true;
+        }
+        self.voice.withdraw_ring(&token);
+        false
     }
 }
 
@@ -366,8 +419,8 @@ mod tests {
     #[test]
     fn media_and_the_callers_words_reach_only_their_calls_socket() {
         let relays = Relays::default();
-        let mut a = relays.open("a", 1);
-        let mut b = relays.open("b", 2);
+        let mut a = relays.take_over("a", 1).0;
+        let mut b = relays.take_over("b", 2).0;
         relays.media("a", Media::AudioOut { pcm: Pcm(vec![3; 480]), rate: OUT_RATE });
         relays.media("a", Media::State { state: LiveState::Thinking });
         relays.media("a", Media::Flush);
@@ -385,7 +438,7 @@ mod tests {
     #[test]
     fn the_end_of_a_call_closes_its_socket_once_with_its_thread() {
         let relays = Relays::default();
-        let mut a = relays.open("a", 1);
+        let mut a = relays.take_over("a", 1).0;
         relays.on_frame("a", &CallBody::Ended, || Some(9));
         relays.on_frame("a", &CallBody::Ended, || panic!("asked for the thread twice"));
         assert_eq!(a.try_recv().unwrap(), WebOut::Ended { reason: "ended", conversation_id: Some(9) });
@@ -396,7 +449,7 @@ mod tests {
     #[test]
     fn a_failed_call_ends_as_failed() {
         let relays = Relays::default();
-        let mut a = relays.open("a", 1);
+        let mut a = relays.take_over("a", 1).0;
         relays.on_frame("a", &CallBody::Outcome { outcome: Outcome::Failed { reason: "late".into() } }, || None);
         assert_eq!(a.try_recv().unwrap(), WebOut::Ended { reason: "failed", conversation_id: None });
     }
@@ -404,18 +457,50 @@ mod tests {
     #[test]
     fn a_new_call_replaces_only_that_users_open_calls() {
         let relays = Relays::default();
-        let mut a = relays.open("a", 1);
-        let mut b = relays.open("b", 2);
-        assert_eq!(relays.replace(1), vec!["a".to_string()]);
+        let mut a = relays.take_over("a", 1).0;
+        let mut b = relays.take_over("b", 2).0;
+        let (_c, replaced) = relays.take_over("c", 1);
+        assert_eq!(replaced, vec!["a".to_string()]);
         assert_eq!(a.try_recv().unwrap(), WebOut::Ended { reason: "replaced", conversation_id: None });
         assert!(b.try_recv().is_err());
-        assert!(relays.is_web("b") && !relays.is_web("a"));
+        assert!(relays.is_web("b") && relays.is_web("c") && !relays.is_web("a"));
+    }
+
+    #[test]
+    fn a_user_holds_at_most_two_call_sockets() {
+        let slots = Arc::new(SocketSlots::default());
+        let a = slots.take(1).unwrap();
+        let _b = slots.take(1).unwrap();
+        assert!(slots.take(1).is_none());
+        assert!(slots.take(2).is_some(), "another user's sockets are their own");
+        drop(a);
+        assert!(slots.take(1).is_some());
+    }
+
+    #[test]
+    fn opens_racing_for_one_user_leave_one_socket() {
+        let relays = Arc::new(Relays::default());
+        for round in 0..200 {
+            let opened: Vec<String> = (0..4).map(|n| format!("{round}-{n}")).collect();
+            let threads: Vec<_> = opened
+                .iter()
+                .cloned()
+                .map(|id| {
+                    let relays = relays.clone();
+                    std::thread::spawn(move || drop(relays.take_over(&id, 1)))
+                })
+                .collect();
+            for t in threads {
+                t.join().unwrap();
+            }
+            assert_eq!(opened.iter().filter(|id| relays.is_web(id)).count(), 1, "round {round}");
+        }
     }
 
     #[test]
     fn a_backed_up_socket_drops_audio_but_never_control() {
         let relays = Relays::default();
-        let mut a = relays.open("a", 1);
+        let mut a = relays.take_over("a", 1).0;
         for _ in 0..AUDIO_BACKLOG + 5 {
             relays.media("a", Media::AudioOut { pcm: Pcm(vec![3; 960]), rate: OUT_RATE });
         }
@@ -434,7 +519,7 @@ mod tests {
     #[test]
     fn audio_flows_again_once_the_socket_catches_up() {
         let relays = Relays::default();
-        let mut a = relays.open("a", 1);
+        let mut a = relays.take_over("a", 1).0;
         for _ in 0..=AUDIO_BACKLOG {
             relays.media("a", Media::AudioOut { pcm: Pcm(vec![3; 960]), rate: OUT_RATE });
         }
@@ -443,15 +528,51 @@ mod tests {
         assert_eq!(a.try_recv().unwrap(), WebOut::Audio(vec![4; 960]));
     }
 
+    fn ring_msg(conversation_id: Option<i64>) -> OutboundMessage {
+        OutboundMessage {
+            title: "Note".into(),
+            body: "got a minute?".into(),
+            urgency: crate::channels::Urgency::Normal,
+            checkin: false,
+            event_id: Some(3),
+            conversation_id,
+            actions: Vec::new(),
+        }
+    }
+
     #[test]
     fn a_ring_is_answered_once_by_its_user_while_it_lasts() {
         let relays = Relays::default();
         let at = Instant::now();
-        let token = relays.offer_ring_at(1, Some(4), at);
+        let token = relays.offer_ring_at(1, &ring_msg(Some(4)), at);
         assert_eq!(relays.take_ring_at(&token, 2, at), None, "another user's ring");
         assert_eq!(relays.take_ring_at(&token, 1, at), Some(Some(4)));
         assert_eq!(relays.take_ring_at(&token, 1, at), None, "answered once");
-        let late = relays.offer_ring_at(1, None, at);
+        assert!(relays.expired_rings_at(at + RING_FOR * 2).is_empty(), "an answered ring never runs out");
+        let late = relays.offer_ring_at(1, &ring_msg(None), at);
         assert_eq!(relays.take_ring_at(&late, 1, at + RING_FOR + Duration::from_secs(1)), None);
+    }
+
+    #[test]
+    fn a_ring_runs_out_once_with_its_message() {
+        let relays = Relays::default();
+        let at = Instant::now();
+        relays.offer_ring_at(1, &ring_msg(Some(4)), at);
+        assert!(relays.expired_rings_at(at + RING_FOR).is_empty(), "still ringing");
+        let gone = relays.expired_rings_at(at + RING_FOR + Duration::from_secs(1));
+        assert_eq!(gone, vec![(1, ring_msg(Some(4)))]);
+        assert!(relays.expired_rings_at(at + RING_FOR * 2).is_empty());
+    }
+
+    #[test]
+    fn only_its_user_declines_a_ring_and_only_once() {
+        let relays = Relays::default();
+        let at = Instant::now();
+        let token = relays.offer_ring_at(1, &ring_msg(Some(4)), at);
+        assert_eq!(relays.decline_ring(&token, 2), None);
+        assert_eq!(relays.decline_ring(&token, 1), Some(ring_msg(Some(4))));
+        assert_eq!(relays.decline_ring(&token, 1), None);
+        assert_eq!(relays.take_ring_at(&token, 1, at), None, "a declined ring cannot be answered");
+        assert!(relays.expired_rings_at(at + RING_FOR * 2).is_empty());
     }
 }

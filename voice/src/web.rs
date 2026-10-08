@@ -10,7 +10,7 @@ pub const OUT_RATE: u32 = 48_000;
 /// Outbound frames held ahead of real time, as `LiveKit`'s source holds 100 ms.
 const AHEAD: usize = 10;
 const FRAME_TIME: Duration = Duration::from_millis(10);
-
+/// May run under `WebMedia`'s queue lock: must not block or call back into `WebMedia`.
 /// Runs under `WebMedia`'s queue lock on a runtime worker: it must not block or call back into `WebMedia`.
 pub type Emit = Arc<dyn Fn(Media) + Send + Sync>;
 

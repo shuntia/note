@@ -170,6 +170,9 @@ pub struct AppState {
     pub join_limiter: Arc<crate::auth::LoginLimiter>,
     /// The origin a share URL is built on; `server.toml`'s `public_base_url`.
     pub public_base_url: String,
+    /// `server.toml`'s `bind_addr`; its origin may open sockets alongside `public_base_url`'s.
+    pub bind_addr: Option<String>,
+    pub call_sockets: Arc<crate::voice::web::SocketSlots>,
     /// Written by `POST /api/inbox/refresh`; `[inbox] refresh_signal`.
     pub inbox_refresh: Option<PathBuf>,
     pub seen_langs: Arc<crate::text::SeenLangs>,
@@ -223,6 +226,8 @@ impl AppState {
                 crate::invites::ADDRESS_ATTEMPTS,
             )),
             public_base_url: "http://localhost:3271".into(),
+            bind_addr: None,
+            call_sockets: Arc::default(),
             inbox_refresh: None,
             seen_langs: Arc::default(),
             started_at: jiff::Timestamp::now(),
@@ -279,6 +284,16 @@ impl AppState {
     pub fn with_public_base_url(mut self, url: &str) -> Self {
         self.public_base_url = url.trim_end_matches('/').to_string();
         self
+    }
+
+    #[must_use]
+    pub fn with_bind_addr(mut self, addr: &str) -> Self {
+        self.bind_addr = Some(addr.to_string());
+        self
+    }
+
+    pub fn page_origins(&self) -> Vec<String> {
+        crate::net::page_origins(&self.public_base_url, self.bind_addr.as_deref())
     }
 
     #[must_use]

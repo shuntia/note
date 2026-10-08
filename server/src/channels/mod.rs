@@ -44,7 +44,7 @@ impl Urgency {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OutboundMessage {
     pub title: String,
     pub body: String,
