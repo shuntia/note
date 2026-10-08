@@ -5,7 +5,7 @@
   "description": "Desktop wrapper for the Note daily planning app",
   "license": "Unlicense",
   "author": "shuntia <shuntia@shuntia.net>",
-  "homepage": "https://note.example.com",
+  "homepage": "https://github.com/shuntia/note",
   "private": true,
   "main": "main.js",
   "desktopName": "note-desktop.desktop",

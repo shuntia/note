@@ -223,7 +223,7 @@
 
           # Loads the live site, so only the shell's own files ship; nixpkgs'
           # electron stands in for the npm binary, which cannot run on NixOS.
-          desktop = pkgs.stdenv.mkDerivation {
+          desktop = lib.makeOverridable ({ url ? null }: pkgs.stdenv.mkDerivation {
             pname = "note-desktop";
             version = (lib.importJSON ./desktop/package.json).version;
             src = lib.fileset.toSource {
@@ -251,7 +251,8 @@
               done
               makeWrapper ${pkgs.electron}/bin/electron $out/bin/note-desktop \
                 --add-flags $out/share/note-desktop \
-                --set NOTE_DESKTOP_EXEC $out/bin/note-desktop
+                --set NOTE_DESKTOP_EXEC $out/bin/note-desktop \
+                ${lib.optionalString (url != null) "--set-default NOTE_URL ${lib.escapeShellArg url}"}
               runHook postInstall
             '';
             meta = {
@@ -259,7 +260,7 @@
               license = lib.licenses.unlicense;
               mainProgram = "note-desktop";
             };
-          };
+          }) { };
 
           ttsChatterbox = import ./nix/tts-chatterbox.nix { inherit pkgs lib pyproject-nix uv2nix pyproject-build-systems; };
           ttsJa = import ./nix/tts-ja.nix {

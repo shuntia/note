@@ -5,7 +5,7 @@ const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
 
-const DEFAULT_URL = 'https://note.example.com'
+const DEFAULT_URL = require('./package.json').noteUrl || 'http://127.0.0.1:3271'
 const ICONS = path.join(__dirname, 'icons')
 
 function argValue(name) {
