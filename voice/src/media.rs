@@ -6,6 +6,7 @@ use livekit::webrtc::audio_frame::AudioFrame;
 use livekit::webrtc::audio_source::native::NativeAudioSource;
 use livekit::webrtc::audio_source::{AudioSourceOptions, RtcAudioSource};
 use livekit::webrtc::audio_stream::native::NativeAudioStream;
+use note_voice_proto::LiveState;
 use std::borrow::Cow;
 use std::time::Duration;
 use tokio::sync::{mpsc, watch, Mutex};
@@ -31,6 +32,8 @@ pub trait MediaIo: Send + Sync {
     /// Resolves when the user leaves, the room disconnects, or the user never joins.
     async fn left(&self) -> Gone;
     async fn leave(&self);
+    /// What the call is doing, for a caller who can see it; called on each change.
+    fn show(&self, _state: LiveState) {}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use note_voice_proto::{CallBody, Direction, Floor, VoiceProfile};
+use note_voice_proto::{CallBody, Direction, Floor, LiveState, VoiceProfile};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, MissedTickBehavior};
@@ -270,6 +270,11 @@ struct Live<S> {
     link_down_since: Option<Instant>,
     lost_played: bool,
     ending: Option<Ending>,
+    /// The caller is speaking.
+    hearing: bool,
+    /// A turn is committed and Note's reply has not started playing.
+    thinking: bool,
+    shown: Option<LiveState>,
 }
 
 impl<S: Fn(CallBody)> Live<S> {
@@ -356,6 +361,9 @@ impl<S: Fn(CallBody)> Live<S> {
             link_down_since: None,
             lost_played: false,
             ending: voice_up.is_none().then(|| Ending::new(SessionEnd::VoiceDown)),
+            hearing: false,
+            thinking: false,
+            shown: None,
         };
         Ok((live, tasks))
     }
@@ -467,6 +475,14 @@ impl<S: Fn(CallBody)> Live<S> {
             self.closing = None;
             self.play_line(line);
         }
+        if self.playout.playing_reply() {
+            self.thinking = false;
+        }
+        let state = shown(self.playout.is_playing(), self.hearing, self.thinking);
+        if self.shown != Some(state) {
+            self.shown = Some(state);
+            self.media.show(state);
+        }
         let drained = self.closing.is_none() && self.playout.is_empty() && self.speech.is_idle();
         self.ending.as_mut()?.due(drained, Instant::now())
     }
@@ -544,6 +560,14 @@ impl<S: Fn(CallBody)> Live<S> {
                     self.playout.resume();
                 }
                 Action::Floor(floor) => {
+                    match floor {
+                        Floor::UserSpeaking => {
+                            self.hearing = true;
+                            self.thinking = false;
+                        }
+                        Floor::UserQuiet => self.hearing = false,
+                        Floor::Drained => {}
+                    }
                     if floor == Floor::UserQuiet {
                         let _ = self.stt.send(SttCmd::Pause);
                     }
@@ -594,6 +618,7 @@ impl<S: Fn(CallBody)> Live<S> {
                     }
                 } else {
                     (self.send)(CallBody::Commit { turn, text, language: Some(self.language.clone()) });
+                    self.thinking = true;
                     self.awaiting_reply = Some(Instant::now());
                     if let Some(cue) = &self.heard_cue {
                         self.playout.push_front(Clip { reply: None, chars: 0, pcm: cue.to_vec() });
@@ -721,6 +746,19 @@ fn task_died(what: &str, err: Option<tokio::task::JoinError>) -> SessionEnd {
     };
     eprintln!("voice: {reason}");
     SessionEnd::MediaFailed(reason)
+}
+
+/// Note's voice wins, then the caller's, then a reply on its way; a cue during that wait is not Note speaking.
+fn shown(playing: bool, hearing: bool, thinking: bool) -> LiveState {
+    if playing && !thinking {
+        LiveState::Speaking
+    } else if hearing {
+        LiveState::Hearing
+    } else if thinking {
+        LiveState::Thinking
+    } else {
+        LiveState::Listening
+    }
 }
 
 /// Splits the user's audio into VAD windows and STT chunks, and keeps the last 8 s for Smart Turn.
@@ -1128,6 +1166,7 @@ mod tests {
         sent_at: Arc<Mutex<Vec<std::time::Instant>>>,
         gone: Arc<Notify>,
         left_room: Arc<AtomicBool>,
+        shown: Arc<Mutex<Vec<LiveState>>>,
     }
 
     impl Probe {
@@ -1170,6 +1209,10 @@ mod tests {
 
         async fn leave(&self) {
             self.probe.left_room.store(true, Ordering::SeqCst);
+        }
+
+        fn show(&self, state: LiveState) {
+            self.probe.shown.lock().unwrap().push(state);
         }
     }
 
@@ -2068,5 +2111,32 @@ mod tests {
             median(&mut lag_with),
             median(&mut lag_without)
         );
+    }
+
+    #[test]
+    fn notes_voice_wins_then_the_callers_then_a_reply_on_its_way() {
+        assert_eq!(shown(true, true, false), LiveState::Speaking);
+        assert_eq!(shown(true, false, true), LiveState::Thinking, "a cue while the reply is coming");
+        assert_eq!(shown(false, true, true), LiveState::Hearing);
+        assert_eq!(shown(false, false, true), LiveState::Thinking);
+        assert_eq!(shown(false, false, false), LiveState::Listening);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_caller_sees_listening_hearing_thinking_and_speaking_in_turn() {
+        let c = call(audio(&[(0.1, 1000), (0.0, 1000)]), vec![(2, "move"), (4, "move my"), (6, "move my run")], false);
+        until_committed(&c).await;
+        c.frame(CallBody::Speak { reply: 2, idx: 0, text: "ok".into() });
+        c.frame(CallBody::SpeakDone { reply: 2 });
+        c.frame(CallBody::Play { reply: 2 });
+        c.synthesized("ok").await;
+        sleep_ms(1000).await;
+        let shown = c.probe.shown.lock().unwrap().clone();
+        let first = |s: LiveState| shown.iter().position(|&x| x == s).unwrap_or_else(|| panic!("{s:?} never shown: {shown:?}"));
+        assert_eq!(shown[0], LiveState::Listening, "{shown:?}");
+        assert!(first(LiveState::Hearing) < first(LiveState::Thinking), "{shown:?}");
+        assert!(first(LiveState::Thinking) < first(LiveState::Speaking), "{shown:?}");
+        assert_eq!(shown.last(), Some(&LiveState::Listening), "{shown:?}");
+        assert!(shown.windows(2).all(|w| w[0] != w[1]), "only changes are shown: {shown:?}");
     }
 }

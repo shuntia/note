@@ -101,6 +101,11 @@ impl Playout {
         !self.paused && !self.queue.is_empty()
     }
 
+    /// Not paused, with a reply's clip at the front: Note's words, not a cue or a line.
+    pub fn playing_reply(&self) -> bool {
+        !self.paused && self.queue.front().is_some_and(|c| c.reply.is_some())
+    }
+
     /// Replies whose every clip has finished playing since the last call.
     pub fn take_finished(&mut self) -> Vec<u64> {
         std::mem::take(&mut self.finished)
@@ -199,5 +204,18 @@ mod tests {
         p.remove(1);
         assert_eq!(p.next_frame().unwrap()[0], 2);
         assert!(p.next_frame().is_none());
+    }
+
+    #[test]
+    fn only_a_reply_at_the_front_counts_as_note_speaking() {
+        let mut p = Playout::default();
+        assert!(!p.playing_reply());
+        p.push(Clip { reply: None, chars: 0, pcm: vec![9; FRAME] });
+        p.push(Clip { reply: Some(1), chars: 2, pcm: vec![1; FRAME] });
+        assert!(!p.playing_reply(), "the cue plays first");
+        p.next_frame().unwrap();
+        assert!(p.playing_reply());
+        p.pause();
+        assert!(!p.playing_reply());
     }
 }
