@@ -1,13 +1,21 @@
 let primed: AudioContext | null = null
 
+const live = () => (primed && primed.state !== 'closed' ? primed : null)
+
 // Called inside the tap that opens or answers a call, so the browser lets the context play.
 export function primeAudio(): void {
-  if (!primed || primed.state === 'closed') primed = new AudioContext({ latencyHint: 'interactive' })
+  primed = live() ?? new AudioContext({ latencyHint: 'interactive' })
   void primed.resume().catch(() => {})
 }
 
+// The same context until releaseAudioContext, so a remounted call view keeps the gesture-unlocked one.
 export function takeAudioContext(): AudioContext {
-  const ctx = primed && primed.state !== 'closed' ? primed : new AudioContext({ latencyHint: 'interactive' })
+  primed = live() ?? new AudioContext({ latencyHint: 'interactive' })
+  return primed
+}
+
+export function releaseAudioContext(): void {
+  const ctx = primed
   primed = null
-  return ctx
+  void ctx?.close().catch(() => {})
 }

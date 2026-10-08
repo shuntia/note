@@ -3,10 +3,12 @@ import { CallSession, callUrl, parseFrame, type AudioIo, type Ended, type Socket
 
 class FakeSocket implements SocketLike {
   binaryType: BinaryType = 'blob'
-  readyState = 1
+  static startState = 1
+  readyState = FakeSocket.startState
   sent: (string | ArrayBufferView)[] = []
   onmessage: SocketLike['onmessage'] = null
   onclose: SocketLike['onclose'] = null
+  onopen: SocketLike['onopen'] = null
   constructor(readonly url: string) {}
   send(data: string | ArrayBufferView) {
     this.sent.push(data)
@@ -14,6 +16,10 @@ class FakeSocket implements SocketLike {
   close() {
     this.readyState = 3
     this.onclose?.()
+  }
+  opened() {
+    this.readyState = 1
+    this.onopen?.()
   }
   text(v: object) {
     this.onmessage?.({ data: JSON.stringify(v) })
@@ -157,6 +163,66 @@ test('hanging up stops the mic but lets Note finish before the call ends', async
   } finally {
     vi.useRealTimers()
   }
+})
+
+test('a closed session releases the audio even when the pending mic then fails', async () => {
+  let fail!: (e: unknown) => void
+  const { s, sockets, audio, seen } = rig({ startMic: () => new Promise<void>((_, j) => (fail = j)) })
+  const started = s.start()
+  s.close()
+  const closes = audio.closes
+  fail(new Error('closed'))
+  await started
+  expect(audio.closes).toBeGreaterThan(closes)
+  expect(sockets).toHaveLength(0)
+  expect(seen.ended).toEqual([])
+})
+
+test('hanging up while the mic is pending ends the call and opens no socket', async () => {
+  let release!: () => void
+  const { s, sockets, audio, seen } = rig({ startMic: () => new Promise<void>((r) => (release = r)) })
+  const started = s.start()
+  s.hangUp()
+  release()
+  await started
+  expect(sockets).toHaveLength(0)
+  expect(audio.micStops).toBeGreaterThanOrEqual(1)
+  expect(audio.closes).toBeGreaterThanOrEqual(1)
+  expect(seen.ended).toEqual([{ reason: 'ended', conversationId: null }])
+})
+
+test('hanging up while the socket connects ends the call', async () => {
+  FakeSocket.startState = 0
+  try {
+    const { s, sockets, audio, seen } = rig()
+    await s.start()
+    s.hangUp()
+    expect(sockets[0].readyState).toBe(3)
+    expect(audio.micStops).toBeGreaterThanOrEqual(1)
+    expect(seen.ended).toEqual([{ reason: 'ended', conversationId: null }])
+  } finally {
+    FakeSocket.startState = 1
+  }
+})
+
+test('a mute set before the socket opens is sent when it opens', async () => {
+  FakeSocket.startState = 0
+  try {
+    const { s, sockets } = rig()
+    await s.start()
+    s.setMuted(true)
+    sockets[0].opened()
+    expect(sockets[0].controls()).toEqual([{ type: 'mute', on: true }])
+  } finally {
+    FakeSocket.startState = 1
+  }
+})
+
+test('a mic that cannot be read ends the call as failed', async () => {
+  const { s, seen } = rig({ startMic: () => Promise.reject(new DOMException('busy', 'NotReadableError')) })
+  await s.start()
+  expect(seen.denied).toBe(0)
+  expect(seen.ended).toEqual([{ reason: 'failed', conversationId: null }])
 })
 
 test('a denied mic opens no socket', async () => {

@@ -38,6 +38,7 @@ export type SocketLike = {
   close(): void
   onmessage: ((e: { data: unknown }) => void) | null
   onclose: (() => void) | null
+  onopen: (() => void) | null
 }
 
 export type AudioIo = {
@@ -63,7 +64,7 @@ const DRAIN_WAIT_MS = 1000
 const OPEN = 1
 
 const isMicRefusal = (e: unknown) =>
-  e instanceof DOMException && ['NotAllowedError', 'NotFoundError', 'NotReadableError', 'SecurityError'].includes(e.name)
+  e instanceof DOMException && (e.name === 'NotAllowedError' || e.name === 'SecurityError')
 
 export class CallSession {
   private socket: SocketLike | null = null
@@ -83,7 +84,10 @@ export class CallSession {
     try {
       await this.audio.startMic((pcm) => this.sendAudio(pcm))
     } catch (e) {
-      if (this.done) return
+      if (this.done) {
+        this.audio.close()
+        return
+      }
       if (isMicRefusal(e)) {
         this.done = true
         this.audio.close()
@@ -99,6 +103,7 @@ export class CallSession {
     }
     const ws = this.open(this.url)
     ws.binaryType = 'arraybuffer'
+    ws.onopen = () => this.control({ type: 'mute', on: this.muted })
     ws.onmessage = (e) => this.receive(e.data)
     ws.onclose = () => this.finish({ reason: 'dropped', conversationId: null })
     this.socket = ws
@@ -109,8 +114,12 @@ export class CallSession {
     this.control({ type: 'mute', on })
   }
 
-  // Note's speech keeps playing until the server's `ended`.
+  // Once connected, Note's speech keeps playing until the server's `ended`; before that the call just ends.
   hangUp() {
+    if (this.socket?.readyState !== OPEN) {
+      this.finish({ reason: 'ended', conversationId: null })
+      return
+    }
     this.audio.stopMic()
     this.control({ type: 'hangup' })
   }

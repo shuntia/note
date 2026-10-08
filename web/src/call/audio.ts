@@ -9,6 +9,8 @@ const REPORT_LAG_MS = 100
 export function webAudio(): AudioIo {
   const ctx = takeAudioContext()
   let stream: MediaStream | null = null
+  let source: MediaStreamAudioSourceNode | null = null
+  let closed = false
   let capture: AudioWorkletNode | null = null
   let playback: AudioWorkletNode | null = null
   let mic = 0
@@ -18,17 +20,28 @@ export function webAudio(): AudioIo {
   const stopMic = () => {
     stream?.getTracks().forEach((track) => track.stop())
     stream = null
+    source?.disconnect()
+    source = null
     capture?.disconnect()
     capture = null
     mic = 0
   }
   return {
     async startMic(onFrame) {
+      const ensureOpen = () => {
+        if (closed) {
+          stopMic()
+          throw new Error('closed')
+        }
+      }
       stream = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 },
       })
+      ensureOpen()
       await Promise.all([ctx.audioWorklet.addModule(captureUrl), ctx.audioWorklet.addModule(playbackUrl)])
+      ensureOpen()
       await ctx.resume()
+      ensureOpen()
       playback = new AudioWorkletNode(ctx, 'note-playback', { numberOfInputs: 0, outputChannelCount: [1] })
       playback.port.onmessage = (e: MessageEvent<{ level: number; buffered: number }>) => {
         out = e.data.level
@@ -40,7 +53,8 @@ export function webAudio(): AudioIo {
         mic = rms16(e.data)
         onFrame(e.data)
       }
-      ctx.createMediaStreamSource(stream).connect(capture)
+      source = ctx.createMediaStreamSource(stream)
+      source.connect(capture)
     },
     stopMic,
     play(pcm, rate) {
@@ -53,10 +67,10 @@ export function webAudio(): AudioIo {
     levels: () => ({ mic, out }),
     drained: () => buffered === 0 && performance.now() - lastPlay > REPORT_LAG_MS,
     close() {
+      closed = true
       stopMic()
       playback?.disconnect()
       playback = null
-      void ctx.close().catch(() => {})
     },
   }
 }
