@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest'
-import { dropped, landing, withOrder } from './order'
+import { dropped, gapAt, landing, withOrder } from './order'
 import type { TaskNode } from './types'
 
 const node = (id: number, steps: number[] = []) =>
@@ -47,19 +47,42 @@ describe('dropped', () => {
   })
 })
 
-describe('landing', () => {
-  const boxes = [0, 40, 80].map((top) => ({ top, height: 40 }))
+describe('gapAt', () => {
+  const slots = [
+    { top: 0, height: 40 },
+    { top: 40, height: 40 },
+    { top: 86, height: 1, edge: true },
+    { top: 93, height: 40 },
+  ]
 
-  test('a release lands before the first row whose middle lies below it', () => {
-    expect(landing(30, 50, boxes, 60)).toEqual({ to: 1, into: true })
+  test('the gap opens before the first slot whose middle lies below the pointer', () => {
+    expect(gapAt(50, slots)).toEqual({ at: 1, to: 1, into: true })
   })
-  test('past the last row it lands at the end, below the edge', () => {
-    expect(landing(30, 200, boxes, 60)).toEqual({ to: 3, into: false })
+  test('a pointer just under the edge opens the gap beneath it', () => {
+    expect(gapAt(90, slots)).toEqual({ at: 3, to: 2, into: false })
+  })
+  test('a pointer just over the edge keeps the gap inside the order', () => {
+    expect(gapAt(84, slots)).toEqual({ at: 2, to: 2, into: true })
+  })
+  test('past the last slot the gap opens at the end', () => {
+    expect(gapAt(500, slots)).toEqual({ at: 4, to: 3, into: false })
   })
   test('without an edge nothing joins the order', () => {
-    expect(landing(30, 10, boxes, null)).toEqual({ to: 0, into: false })
+    expect(gapAt(10, [{ top: 0, height: 40 }]).into).toBe(false)
+  })
+})
+
+describe('landing', () => {
+  const slots = [
+    { top: 0, height: 40 },
+    { top: 46, height: 1, edge: true },
+  ]
+
+  test('a release away from the lift lands where the middle of the row is', () => {
+    expect(landing(-90, 100, slots)).toEqual({ to: 0, into: true })
+    expect(landing(30, 30, slots)).toEqual({ to: 1, into: false })
   })
   test('a release where the row was lifted lands nowhere', () => {
-    expect(landing(30, 34, boxes, 60)).toBeNull()
+    expect(landing(4, 100, slots)).toBeNull()
   })
 })

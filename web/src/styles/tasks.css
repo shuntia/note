@@ -481,17 +481,26 @@
   .task-row, .task-steps, .task-step, .task-item .task-more { transition: none !important; }
 }
 
-/* the order's rows lift on a long press; the hairline is where the order ends */
+/* the order's rows lift on a long press and the others part around a gap; the
+   hairline is where the order ends */
 .task-group.soon [data-drag] { -webkit-touch-callout: none; user-select: none; }
-.task-item[data-lifted] {
-  z-index: 2;
-  background: var(--ivory);
-  box-shadow: 0 8px 22px rgb(0 0 0 / 0.14);
-  transition: box-shadow 160ms ease;
+.task-item[data-lifted] { z-index: 2; }
+.task-item[data-lifted]::before {
+  content: '';
+  position: absolute;
+  inset: -0.25rem -0.5rem;
+  z-index: -1;
+  border-radius: var(--radius);
+  background: var(--haze-strong);
+  box-shadow: 0 0.75rem 1.75rem -0.5rem rgb(0 0 0 / 0.12);
 }
+.task-item[data-lifted][data-settling] { transition: transform 180ms ease; }
 .order-edge { border: 0; height: 1px; margin: 6px 0; background: var(--line); }
-.order-edge.bare { opacity: 0; transition: opacity 160ms ease; }
+.order-edge.bare { opacity: 0; transition: opacity 180ms ease; }
 [data-dragging] .order-edge.bare { opacity: 1; }
+[data-dragging] [data-drag]:not([data-lifted]) { transition: transform 180ms ease; }
+[data-dragging] .order-edge { transition: transform 180ms ease, opacity 180ms ease; }
 @media (prefers-reduced-motion: reduce) {
-  .task-item[data-lifted], .order-edge.bare { transition: none; }
+  [data-dragging] [data-drag]:not([data-lifted]), [data-dragging] .order-edge,
+  .task-item[data-lifted][data-settling], .order-edge.bare { transition: none; }
 }
