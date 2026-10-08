@@ -8,3 +8,4 @@ pub mod outgoing;
 pub mod service;
 pub mod session;
 pub mod state;
+pub mod web;

@@ -17,7 +17,7 @@ use crate::matrix::Matrix;
 const IN_RATE: i32 = 16_000;
 const IN_FRAME: usize = 160;
 const OUT_RATE: u32 = 48_000;
-const OUT_FRAME: usize = 480;
+pub const OUT_FRAME: usize = 480;
 const CONNECT_WAIT: Duration = Duration::from_secs(10);
 
 #[async_trait::async_trait]
@@ -373,13 +373,13 @@ async fn read(track: RemoteAudioTrack, frames: mpsc::Sender<Vec<f32>>) {
 }
 
 #[derive(Default)]
-struct Rechunker {
+pub(crate) struct Rechunker {
     pending: Vec<f32>,
 }
 
 impl Rechunker {
     /// Returns every whole 10 ms frame now available; a remainder waits for the next push.
-    fn push(&mut self, samples: &[i16]) -> Vec<Vec<f32>> {
+    pub(crate) fn push(&mut self, samples: &[i16]) -> Vec<Vec<f32>> {
         self.pending.extend(samples.iter().map(|&s| f32::from(s) / 32768.0));
         let whole = self.pending.len() / IN_FRAME * IN_FRAME;
         self.pending.drain(..whole).collect::<Vec<_>>().chunks(IN_FRAME).map(<[f32]>::to_vec).collect()
