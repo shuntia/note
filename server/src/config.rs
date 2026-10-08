@@ -501,6 +501,11 @@ impl UserConfig {
             cfg.close_day_time()
         );
         anyhow::ensure!(
+            cfg.day_start().is_empty() || crate::templates::valid_time(cfg.day_start()),
+            "invalid day_start {:?}",
+            cfg.day_start()
+        );
+        anyhow::ensure!(
             crate::templates::valid_time(cfg.morning_until()),
             "invalid morning_until {:?}",
             cfg.morning_until()
@@ -751,6 +756,8 @@ mod tests {
         assert_eq!(cfg.triggers_per_day(), 12);
         write(tmp.path(), "users/aki/user.toml", "day_start = \"\"\n");
         assert_eq!(UserConfig::load(tmp.path(), "aki").unwrap().day_start(), "");
+        write(tmp.path(), "users/aki/user.toml", "day_start = \"8:00\"\n");
+        assert!(UserConfig::load(tmp.path(), "aki").is_err());
     }
 
     #[test]

@@ -166,6 +166,7 @@ mod tests {
         seen(&conn, uid, "2026-10-07T00:30:00Z");
         assert!(check(&conn, tmp.path(), at("2026-10-07T00:31:00Z")).unwrap().is_empty());
         assert!(check(&conn, tmp.path(), at("2026-10-07T04:59:00Z")).unwrap().is_empty());
+        assert!(check(&conn, tmp.path(), at("2026-10-07T06:00:00Z")).unwrap().is_empty());
         seen(&conn, uid, "2026-10-07T05:00:00Z");
         assert_eq!(check(&conn, tmp.path(), at("2026-10-07T05:00:00Z")).unwrap().len(), 1);
     }
