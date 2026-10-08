@@ -70,7 +70,8 @@ export function Overflow({
   title?: string
   subtitle?: string
   // A selector for the row this menu belongs to: a right-click anywhere on it, or a
-  // still press held half a second, opens the menu where the pointer is.
+  // still press held half a second, opens the menu where the pointer is — unless
+  // that press has lifted the row to drag it.
   row?: string
   trigger?: boolean
   ref?: Ref<OverflowHandle>
@@ -129,6 +130,7 @@ export function Overflow({
       from = { x: e.clientX, y: e.clientY }
       timer = window.setTimeout(() => {
         from = null
+        if (el.closest('[data-lifted]')) return
         forget()
         addEventListener('click', swallow, { capture: true, once: true })
         held = window.setTimeout(() => removeEventListener('click', swallow, true), 600)

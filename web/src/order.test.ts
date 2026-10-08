@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest'
-import { dropped, withOrder } from './order'
+import { dropped, landing, withOrder } from './order'
 import type { TaskNode } from './types'
 
 const node = (id: number, steps: number[] = []) =>
@@ -44,5 +44,22 @@ describe('dropped', () => {
   })
   test('with an empty order a row dropped above the edge starts one', () => {
     expect(dropped([], rows, 0, 2, 0, true)).toEqual([3])
+  })
+})
+
+describe('landing', () => {
+  const boxes = [0, 40, 80].map((top) => ({ top, height: 40 }))
+
+  test('a release lands before the first row whose middle lies below it', () => {
+    expect(landing(30, 50, boxes, 60)).toEqual({ to: 1, into: true })
+  })
+  test('past the last row it lands at the end, below the edge', () => {
+    expect(landing(30, 200, boxes, 60)).toEqual({ to: 3, into: false })
+  })
+  test('without an edge nothing joins the order', () => {
+    expect(landing(30, 10, boxes, null)).toEqual({ to: 0, into: false })
+  })
+  test('a release where the row was lifted lands nowhere', () => {
+    expect(landing(30, 34, boxes, 60)).toBeNull()
   })
 })

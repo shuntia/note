@@ -11,6 +11,7 @@ import {
 } from 'react'
 import { api, ApiError } from '../api'
 import { latest } from '../coalesce'
+import { dropped, useLiftDrag, withOrder, type Drop } from '../order'
 import type { ViewProps } from '../app'
 import { collapse, flip, settle } from '../motion-gsap'
 import { reducedMotion } from '../motion'
@@ -217,12 +218,28 @@ const searchWords = (title: string) => {
 const shownBy = (filter: string | null, words: string[]) => (n: TaskNode) =>
   (filter === null || n.category === filter) && matches(n, words)
 
-// The live rows in the order they are drawn, before any leaving row is put back.
-function shownGroups(nodes: TaskNode[], filter: string | null, title: string, sort: SortKey) {
+// The live rows in the order they are drawn, before any leaving row is put back:
+// today's order heads Soon, pulling in any ordered task Later would hold.
+function shownGroups(
+  nodes: TaskNode[],
+  filter: string | null,
+  title: string,
+  sort: SortKey,
+  order: number[],
+) {
   const visible = shownBy(filter, searchWords(title))
   const g = groups(nodes)
-  const order = COMPARE[sort]
-  return { soon: g.soon.filter(visible).sort(order), later: g.later.filter(visible).sort(order) }
+  const sorted = COMPARE[sort]
+  const lifted = withOrder(
+    g.soon.filter(visible).sort(sorted),
+    nodes.filter((n) => isLive(n) && visible(n)),
+    order,
+  )
+  return {
+    soon: lifted.rows,
+    ordered: lifted.ordered,
+    later: g.later.filter((n) => visible(n) && !lifted.rows.includes(n)).sort(sorted),
+  }
 }
 
 function withTask(nodes: TaskNode[], t: Task): TaskNode[] {
@@ -357,13 +374,16 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
   const [filter, setFilter] = useState<string | null>(null)
   const [sort, setSort] = useState<SortKey>(storedSort)
   const [goalDraft, setGoalDraft] = useState<{ title: string; due: string } | null>(null)
+  const [runOrder, setRunOrder] = useState<number[]>([])
+  const dropRef = useRef<((d: Drop) => void) | null>(null)
+  useLiftDrag(dropRef)
   const seeded = useRef(false)
   const unfinished = useRef(new Map<number, number>())
   const root = useRef<HTMLDivElement>(null)
   const { mark } = useRowMotion(root, leaving.length > 0)
   const shown = useMemo(
-    () => (nodes ? shownGroups(nodes, filter, title, sort) : null),
-    [nodes, filter, title, sort],
+    () => (nodes ? shownGroups(nodes, filter, title, sort, runOrder) : null),
+    [nodes, filter, title, sort, runOrder],
   )
 
   const loadGoals = useCallback(() => {
@@ -376,6 +396,10 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
   const newest = useState(() => latest<TaskNode[]>())[0]
   const load = useCallback(() => {
     loadGoals()
+    api
+      .order()
+      .then((o) => setRunOrder(o.task_ids))
+      .catch(() => setRunOrder([]))
     newest(api.tasks())
       .then((ts) => {
         if (!ts) return
@@ -777,8 +801,32 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
   const doneToday = g.doneToday.filter((n) => !leaving.some((l) => l.id === n.id))
   const nothingFound = search !== '' && soon.length === 0 && later.length === 0
   const laterOpen = showLater || search !== ''
+  const orderedIds = new Set((shown?.soon ?? []).slice(0, shown?.ordered ?? 0).map((n) => n.id))
+  const edgeAt = soon.findIndex((p) => !orderedIds.has(p.node.id))
+  const head = edgeAt === -1 ? soon : soon.slice(0, edgeAt)
+  const rest = edgeAt === -1 ? [] : soon.slice(edgeAt)
+  const canDrag = filter === null && search === '' && leaving.length === 0
+  const dragRows = [
+    ...head,
+    ...(sort === 'category' ? byCategory(rest, categories).flatMap(([, rows]) => rows) : rest),
+  ].map((p) => p.node)
+  dropRef.current = canDrag
+    ? ({ from, to, into }) => {
+        const next = dropped(runOrder, dragRows, head.length, from, to, into)
+        if (next.length === runOrder.length && next.every((id, i) => id === runOrder[i])) return
+        mark()
+        setRunOrder(next)
+        api
+          .setOrder(next)
+          .then((o) => setRunOrder(o.task_ids))
+          .catch(() => {
+            notify(t('tasks.updateFailed'))
+            load()
+          })
+      }
+    : null
 
-  const row = (p: Placed, group: Exclude<Group, 'done'>, scope = '') => (
+  const row = (p: Placed, group: Exclude<Group, 'done'>, scope = '', drag = false) => (
     <Row
       key={p.node.id}
       node={p.node}
@@ -790,19 +838,20 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
       stepsOpen={openSteps.has(p.node.id)}
       categories={categories}
       goals={goals}
+      drag={drag}
     />
   )
 
-  const list = (ps: Placed[], group: Exclude<Group, 'done'>) =>
+  const list = (ps: Placed[], group: Exclude<Group, 'done'>, drag = false) =>
     sort === 'category' ? (
       byCategory(ps, categories).map(([head, rows]) => (
         <div key={head} className="task-cat">
           <h4 className="task-sub-head">{head}</h4>
-          <div className="task-list">{rows.map((p) => row(p, group))}</div>
+          <div className="task-list">{rows.map((p) => row(p, group, '', drag))}</div>
         </div>
       ))
     ) : (
-      <div className="task-list">{ps.map((p) => row(p, group))}</div>
+      <div className="task-list">{ps.map((p) => row(p, group, '', drag))}</div>
     )
 
   return (
@@ -918,7 +967,20 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
           </div>
         </section>
       )}
-      {soon.length > 0 && <section className="task-group soon">{list(soon, 'soon')}</section>}
+      {soon.length > 0 && (
+        <section className="task-group soon" data-drag-list>
+          {head.length > 0 && (
+            <div className="task-list">{head.map((p) => row(p, 'soon', '', canDrag))}</div>
+          )}
+          {(head.length > 0 || canDrag) && (
+            <hr
+              className={head.length > 0 ? 'order-edge' : 'order-edge bare'}
+              aria-hidden="true"
+            />
+          )}
+          {rest.length > 0 && list(rest, 'soon', canDrag)}
+        </section>
+      )}
       {later.length > 0 && (
         <section className="task-group later">
           <button
@@ -1298,6 +1360,7 @@ function Row({
   stepsOpen,
   categories,
   goals,
+  drag = false,
 }: {
   node: TaskNode
   group: Group
@@ -1309,6 +1372,7 @@ function Row({
   stepsOpen: boolean
   categories: string[]
   goals: Goal[]
+  drag?: boolean
 }) {
   const item = useRef<HTMLDivElement>(null)
   const [reviving, setReviving] = useState(false)
@@ -1410,6 +1474,7 @@ function Row({
       data-row={`${leaving ? 'x' : 't'}${scope}${node.id}`}
       data-leaving={leaving ?? undefined}
       data-finished={finished || undefined}
+      data-drag={drag || undefined}
     >
       <div className="task-row">
         <Tick

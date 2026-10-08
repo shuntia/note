@@ -480,3 +480,18 @@
   .task-bar-fill, .task-bar, .task-thumb, .task-prog,
   .task-row, .task-steps, .task-step, .task-item .task-more { transition: none !important; }
 }
+
+/* the order's rows lift on a long press; the hairline is where the order ends */
+.task-group.soon [data-drag] { -webkit-touch-callout: none; user-select: none; }
+.task-item[data-lifted] {
+  z-index: 2;
+  background: var(--ivory);
+  box-shadow: 0 8px 22px rgb(0 0 0 / 0.14);
+  transition: box-shadow 160ms ease;
+}
+.order-edge { border: 0; height: 1px; margin: 6px 0; background: var(--line); }
+.order-edge.bare { opacity: 0; transition: opacity 160ms ease; }
+[data-dragging] .order-edge.bare { opacity: 1; }
+@media (prefers-reduced-motion: reduce) {
+  .task-item[data-lifted], .order-edge.bare { transition: none; }
+}
