@@ -45,19 +45,26 @@ when not; `web/public/sw.js` renders them and focuses an open tab on click.
 
 ## Desktop
 
-`desktop/` is an Electron shell around the deployed web app (its URL comes
-from `--url=`, then `NOTE_URL`, then the `noteUrl` baked into an installer
-build, then `http://127.0.0.1:3271`): its own
-window, a tray icon that shows or hides it, a "Start at login" option, English
-or Japanese menus, and `offline.html` when the server cannot be reached.
+`desktop/` is an Electron shell around the deployed web app: its own window,
+a tray icon that shows or hides it, a "Start at login" option, English or
+Japanese menus, and `offline.html` when the server cannot be reached.
+
+The server address is the first of `--url=`, `NOTE_URL`, the address saved
+in the app (`config.json` in its user data directory) and the `noteUrl` baked
+into the build. With none, a small window asks for it ("Server address",
+Connect); it takes an http(s) address that answers `GET /api/me` (a 401
+counts) or its root, and saves it. "Change server…" in the File menu and the
+tray reopens that window; connecting reloads the app on the new server.
 
 ```sh
 cd desktop && pnpm install
-pnpm start          # against the default URL
+pnpm start          # the resolved address, or the first-run window
 pnpm dev            # --dev against http://localhost:5173
+pnpm test           # address resolution (node --test)
 pnpm dist -c.extraMetadata.noteUrl=https://note.example.com   # AppImage and deb
 ```
 
 `nix build .#note-desktop` builds it with the flake;
-`note-desktop.override { url = "https://note.example.com"; }` sets its
-default URL.
+`note-desktop.override { url = "https://note.example.com"; }` bakes the
+address in. On NixOS or Home Manager use `programs.note-desktop` instead (see
+[deployment.md](deployment.md#desktop-app)).

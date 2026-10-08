@@ -1,23 +1,20 @@
 'use strict'
 
-const { app, BrowserWindow, Menu, Tray, nativeImage, screen, shell } = require('electron')
+const { app, BrowserWindow, Menu, Tray, ipcMain, nativeImage, net, screen, shell } = require('electron')
 const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
+const { normalizeServerUrl, resolveServerUrl } = require('./server-url')
 
-const DEFAULT_URL = require('./package.json').noteUrl || 'http://127.0.0.1:3271'
+const BAKED_URL = require('./package.json').noteUrl
 const ICONS = path.join(__dirname, 'icons')
-
-function argValue(name) {
-  const prefix = `--${name}=`
-  const hit = process.argv.find((a) => a.startsWith(prefix))
-  return hit ? hit.slice(prefix.length) : undefined
-}
-
-const appUrl = new URL(argValue('url') || process.env.NOTE_URL || DEFAULT_URL)
+const BACKGROUND = '#f0e8de'
 const dev = process.argv.includes('--dev')
 
+let server = null
+let appUrl = null
 let win = null
+let setupWin = null
 let tray = null
 let quitting = false
 let failures = 0
@@ -35,6 +32,7 @@ const STRINGS = {
     view: 'View',
     window: 'Window',
     close: 'Close',
+    changeServer: 'Change server…',
   },
   ja: {
     show: '表示',
@@ -48,6 +46,7 @@ const STRINGS = {
     view: '表示',
     window: 'ウインドウ',
     close: '閉じる',
+    changeServer: 'サーバーを変更…',
     undo: '取り消す',
     redo: 'やり直す',
     cut: '切り取り',
@@ -79,22 +78,26 @@ const s = (key) => STRINGS[lang][key] ?? STRINGS.en[key]
 const role = (name) => (STRINGS[lang][name] ? { role: name, label: STRINGS[lang][name] } : { role: name })
 
 const statePath = () => path.join(app.getPath('userData'), 'window-state.json')
+const configPath = () => path.join(app.getPath('userData'), 'config.json')
 
-function readState() {
+function readJson(file) {
   try {
-    return JSON.parse(fs.readFileSync(statePath(), 'utf8'))
+    return JSON.parse(fs.readFileSync(file, 'utf8'))
   } catch {
     return {}
   }
 }
 
-function writeState(patch) {
-  const next = { ...readState(), ...patch }
+function patchJson(file, patch) {
+  const next = { ...readJson(file), ...patch }
   try {
-    fs.mkdirSync(path.dirname(statePath()), { recursive: true })
-    fs.writeFileSync(statePath(), JSON.stringify(next))
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    fs.writeFileSync(file, JSON.stringify(next))
   } catch {}
 }
+
+const readState = () => readJson(statePath())
+const writeState = (patch) => patchJson(statePath(), patch)
 
 function visibleBounds(bounds) {
   if (!bounds) return undefined
@@ -133,7 +136,7 @@ function launchCommand() {
 }
 
 function autostartEntry() {
-  const extra = appUrl.href === new URL(DEFAULT_URL).href ? [] : [`--url=${appUrl.href}`]
+  const extra = server && (server.source === 'arg' || server.source === 'env') ? [`--url=${server.url}`] : []
   const exec = [...launchCommand(), '--hidden', ...extra].map(desktopExecQuote).join(' ')
   return [
     '[Desktop Entry]',
@@ -176,6 +179,7 @@ function initAutostart() {
 }
 
 const sameOrigin = (url) => {
+  if (!appUrl) return false
   try {
     return new URL(url).origin === appUrl.origin
   } catch {
@@ -203,7 +207,10 @@ function showOffline() {
 }
 
 function showWindow() {
-  if (!win) return
+  if (!win) {
+    openSetup()
+    return
+  }
   if (win.isMinimized()) win.restore()
   win.show()
   win.focus()
@@ -211,7 +218,7 @@ function showWindow() {
 }
 
 function toggleWindow() {
-  if (win?.isVisible()) {
+  if (win?.isVisible() && !setupWin) {
     win.hide()
     refreshTray()
   } else {
@@ -229,7 +236,7 @@ function createWindow(startHidden) {
     minHeight: 480,
     show: false,
     autoHideMenuBar: true,
-    backgroundColor: '#f0e8de',
+    backgroundColor: BACKGROUND,
     icon: path.join(ICONS, '512x512.png'),
     title: 'Note',
     webPreferences: {
@@ -303,12 +310,91 @@ function createWindow(startHidden) {
   load(appUrl.href)
 }
 
+function openSetup() {
+  if (setupWin) {
+    setupWin.show()
+    setupWin.focus()
+    return
+  }
+  const parent = win?.isVisible() ? win : undefined
+  setupWin = new BrowserWindow({
+    width: 420,
+    height: 220,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    show: false,
+    parent,
+    modal: Boolean(parent),
+    backgroundColor: BACKGROUND,
+    icon: path.join(ICONS, '512x512.png'),
+    title: 'Note',
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      preload: path.join(__dirname, 'setup-preload.js'),
+      devTools: dev,
+    },
+  })
+  setupWin.setMenu(null)
+  setupWin.once('ready-to-show', () => setupWin.show())
+  setupWin.on('closed', () => {
+    setupWin = null
+    if (!appUrl) app.quit()
+  })
+  setupWin.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  setupWin.webContents.on('will-navigate', (event) => event.preventDefault())
+  setupWin.loadFile(path.join(__dirname, 'setup.html'), { query: { lang, current: appUrl?.href ?? '' } }).catch(() => {})
+}
+
+// Any answer from /api/me (signed out is a 401) or a successful root counts as a Note server.
+async function reachable(base) {
+  for (const [route, accept] of [
+    ['api/me', (res) => res.ok || res.status === 401],
+    ['', (res) => res.ok],
+  ]) {
+    try {
+      const res = await net.fetch(new URL(route, base).href, { signal: AbortSignal.timeout(8000), cache: 'no-store' })
+      if (accept(res)) return true
+    } catch {}
+  }
+  return false
+}
+
+function useServer(url) {
+  patchJson(configPath(), { serverUrl: url })
+  server = { url, source: 'saved' }
+  appUrl = new URL(url)
+  if (process.platform === 'linux' && autostartEnabled()) setAutostart(true)
+  setupWin?.close()
+  if (win) {
+    failures = 0
+    load(appUrl.href)
+    showWindow()
+  } else {
+    createWindow(false)
+  }
+  refreshTray()
+}
+
+ipcMain.handle('setup:connect', async (event, address) => {
+  if (!setupWin || event.sender !== setupWin.webContents) return { ok: false, reason: 'unreachable' }
+  const url = normalizeServerUrl(address)
+  if (!url) return { ok: false, reason: 'invalid' }
+  if (!(await reachable(url))) return { ok: false, reason: 'unreachable' }
+  useServer(url)
+  return { ok: true }
+})
+
 function refreshTray() {
   if (!tray) return
   const visible = win?.isVisible()
   tray.setContextMenu(
     Menu.buildFromTemplate([
       { label: visible ? s('hide') : s('show'), click: () => (visible ? win.hide() : showWindow()) },
+      { label: s('changeServer'), click: openSetup },
       {
         label: s('startAtLogin'),
         type: 'checkbox',
@@ -318,7 +404,7 @@ function refreshTray() {
           refreshTray()
         },
       },
-      { label: s('reload'), click: () => load(appUrl.href) },
+      { label: s('reload'), enabled: Boolean(appUrl), click: () => load(appUrl.href) },
       { type: 'separator' },
       { label: s('quit'), click: () => app.quit() },
     ]),
@@ -354,6 +440,8 @@ function appMenu() {
     {
       label: s('file'),
       submenu: [
+        { label: s('changeServer'), click: openSetup },
+        { type: 'separator' },
         { role: 'close', label: s('close') },
         { label: s('quit'), accelerator: 'CommandOrControl+Q', click: () => app.quit() },
       ],
@@ -382,8 +470,19 @@ if (!app.requestSingleInstanceLock()) {
       (process.platform === 'darwin' && app.getLoginItemSettings().wasOpenedAtLogin)
     lang = pickLang(readState().lang || app.getLocale())
     Menu.setApplicationMenu(appMenu())
+    server = resolveServerUrl({
+      argv: process.argv,
+      env: process.env,
+      saved: readJson(configPath()).serverUrl,
+      baked: BAKED_URL,
+    })
+    if (server) appUrl = new URL(server.url)
     initAutostart()
-    createWindow(startHidden)
     createTray()
+    if (appUrl) {
+      createWindow(startHidden)
+    } else if (!startHidden) {
+      openSetup()
+    }
   })
 }
