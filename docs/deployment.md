@@ -2,8 +2,8 @@
 
 ## NixOS
 
-The flake exports `nixosModules.default`, which runs the server as its own
-`note` user with every secret handed over through systemd `LoadCredential`, so
+The flake exports `nixosModules.note` (also `nixosModules.default`), which
+runs the server as its own `note` user with every secret handed over through systemd `LoadCredential`, so
 none reaches the Nix store.
 
 ```nix
@@ -47,12 +47,18 @@ services.note = {
 };
 ```
 
-Only `enable` and `settings.public_base_url` are required; without `providers`
-the server runs on the built-in mock.
+Minimal, for a server reached on the host itself:
+
+```nix
+services.note.enable = true;    # http://127.0.0.1:3271, mock provider
+```
+
+`settings.public_base_url` defaults to `http://<bind_addr>`; set it to the
+address people use. Without `providers` the server runs on the built-in mock.
 
 | Option | |
 |---|---|
-| `settings` | `server.toml` as Nix; `bind_addr` defaults to `127.0.0.1:3271`, `data_dir` to `/var/lib/note/data`, `secrets_dir` to the credentials directory |
+| `settings` | `server.toml` as Nix; `bind_addr` defaults to `127.0.0.1:3271`, `public_base_url` to `http://<bind_addr>`, `data_dir` to `/var/lib/note/data`, `secrets_dir` to the credentials directory |
 | `credentials` | name → path; readable by the service at `/run/credentials/note.service/<name>` (`config.services.note.credentialPath "<name>"`). An `admin_totp` entry installs the legacy admin seed |
 | `environmentFile` | extra environment, e.g. `ANTHROPIC_API_KEY` for a provider's `api_key_env` |
 | `openFirewall` | opens the `bind_addr` port |
@@ -90,6 +96,32 @@ sidecar list are filled in, and the server gets `[voice] socket =
 `NOTE_TTS_TEMPERATURE`, `NOTE_TTS_VOICES_DIR`; Japanese: `NOTE_TTS_DEVICE=cpu`,
 `NOTE_TTS_JA_SBV2=off`); the Japanese one also takes `sidecarId` (default
 `ja`). See [voice.md](voice.md).
+
+### Desktop app
+
+`nixosModules.note-desktop` (and `homeManagerModules.note-desktop`) install the
+desktop app:
+
+| Option | |
+|---|---|
+| `programs.note-desktop.enable` | install `note-desktop` |
+| `programs.note-desktop.url` | the server it opens until the user picks another; null (the default) asks on first run. On NixOS, when `services.note` is enabled on the same host, it defaults to `services.note.settings.public_base_url` |
+| `programs.note-desktop.package` | default: this flake's `note-desktop` |
+
+A desktop that also runs the server needs only:
+
+```nix
+imports = [ note.nixosModules.note note.nixosModules.note-desktop ];
+services.note = { enable = true; settings.public_base_url = "https://note.example.com"; };
+programs.note-desktop.enable = true;
+```
+
+A desktop that uses a server elsewhere:
+
+```nix
+imports = [ note.nixosModules.note-desktop ];
+programs.note-desktop = { enable = true; url = "https://note.example.com"; };
+```
 
 ### Upgrades
 

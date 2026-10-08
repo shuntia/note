@@ -5,13 +5,14 @@
   "description": "Desktop wrapper for the Note daily planning app",
   "license": "Unlicense",
   "author": "shuntia <shuntia@shuntia.net>",
-  "homepage": "https://note.example.com",
+  "homepage": "https://github.com/shuntia/note",
   "private": true,
   "main": "main.js",
   "desktopName": "note-desktop.desktop",
   "scripts": {
     "start": "electron .",
     "dev": "electron . --dev --url=http://localhost:5173",
+    "test": "node --test",
     "dist": "electron-builder --linux AppImage deb"
   },
   "devDependencies": {
@@ -21,7 +22,7 @@
   "build": {
     "appId": "net.shuntia.note",
     "productName": "Note",
-    "files": ["main.js", "offline.html", "icons/**"],
+    "files": ["main.js", "server-url.js", "setup.html", "setup-preload.js", "offline.html", "icons/**"],
     "directories": { "output": "dist" },
     "linux": {
       "target": ["AppImage", "deb"],

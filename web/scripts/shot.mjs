@@ -5,7 +5,7 @@
 import { chromium } from 'playwright-core'
 import { spawn, execFileSync } from 'node:child_process'
 import { mkdtempSync, writeFileSync, cpSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { tmpdir, userInfo } from 'node:os'
 import { join, resolve } from 'node:path'
 
 // playwright only instruments service-worker traffic behind this flag; without it a
@@ -40,7 +40,7 @@ process.on('SIGINT', () => {
 })
 await new Promise((r) => setTimeout(r, 800))
 
-const browser = await chromium.launch({ executablePath: process.env.CHROMIUM ?? '/etc/profiles/per-user/user/bin/chromium' })
+const browser = await chromium.launch({ executablePath: process.env.CHROMIUM ?? `/etc/profiles/per-user/${userInfo().username}/bin/chromium` })
 const page = await browser.newPage({ viewport: { width, height }, deviceScaleFactor: 1 })
 const external = new Set()
 const noteExternal = (req) => {

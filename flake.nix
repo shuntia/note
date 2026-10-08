@@ -223,12 +223,14 @@
 
           # Loads the live site, so only the shell's own files ship; nixpkgs'
           # electron stands in for the npm binary, which cannot run on NixOS.
-          desktop = pkgs.stdenv.mkDerivation {
+          # `url` becomes package.json's noteUrl: the address used until the
+          # user picks another in the app.
+          desktop = lib.makeOverridable ({ url ? null }: pkgs.stdenv.mkDerivation {
             pname = "note-desktop";
             version = (lib.importJSON ./desktop/package.json).version;
             src = lib.fileset.toSource {
               root = ./desktop;
-              fileset = lib.fileset.unions [ ./desktop/main.js ./desktop/offline.html ./desktop/package.json ./desktop/icons ];
+              fileset = lib.fileset.unions [ ./desktop/main.js ./desktop/server-url.js ./desktop/setup.html ./desktop/setup-preload.js ./desktop/offline.html ./desktop/package.json ./desktop/icons ];
             };
             nativeBuildInputs = with pkgs; [ makeWrapper copyDesktopItems ];
             desktopItems = [
@@ -244,7 +246,9 @@
             installPhase = ''
               runHook preInstall
               mkdir -p $out/share/note-desktop
-              cp -r main.js offline.html package.json icons $out/share/note-desktop/
+              cp -r main.js server-url.js setup.html setup-preload.js offline.html icons $out/share/note-desktop/
+              ${pkgs.jq}/bin/jq ${if url == null then "." else "--arg url ${lib.escapeShellArg url} '.noteUrl = $url'"} \
+                package.json > $out/share/note-desktop/package.json
               for f in icons/*x*.png; do
                 size=$(basename $f .png)
                 install -Dm644 $f $out/share/icons/hicolor/$size/apps/note-desktop.png
@@ -259,7 +263,7 @@
               license = lib.licenses.unlicense;
               mainProgram = "note-desktop";
             };
-          };
+          }) { };
 
           ttsChatterbox = import ./nix/tts-chatterbox.nix { inherit pkgs lib pyproject-nix uv2nix pyproject-build-systems; };
           ttsJa = import ./nix/tts-ja.nix {
@@ -269,7 +273,12 @@
         in
         { inherit web server voice voiceTests tests desktop ttsChatterbox ttsJa; };
     in {
-      nixosModules.default = import ./nix/module.nix self;
+      nixosModules = {
+        default = self.nixosModules.note;
+        note = import ./nix/module.nix self;
+        note-desktop = import ./nix/desktop.nix self;
+      };
+      homeManagerModules.note-desktop = import ./nix/desktop-home.nix self;
 
       overlays.default = final: prev: {
         note-server = (build final).server;
