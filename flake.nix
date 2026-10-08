@@ -3,7 +3,7 @@
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
   # The web build's dependency hash depends on pnpm, so it keeps its own
   # nixpkgs, pinned by rev, which a host's `follows` cannot move.
-  inputs.nixpkgs-web.url = "github:NixOS/nixpkgs/a7868a727837f3c09cee2ce0ca671c76b1589fed";
+  inputs.nixpkgs-web.url = "github:NixOS/nixpkgs/151fa4e8ddfdd8dd25d945ad94ed54a13de9f6e4";
   inputs.crane.url = "github:ipetkov/crane";
   inputs.pyproject-nix = {
     url = "github:pyproject-nix/pyproject.nix";
@@ -40,7 +40,7 @@
             pnpmDeps = webPkgs.fetchPnpmDeps {
               inherit (finalAttrs) pname version src;
               fetcherVersion = 4;
-              hash = "sha256-VQy9T5tjyNdDRn+sa6ZgRFnW8Y3RLLbSwqJQbDdDmmw=";
+              hash = "sha256-4Io/KbppI7PhW42tBqVed1fo+/VyO5DN0KrHcfc5fK0=";
             };
             buildPhase = ''
               runHook preBuild
