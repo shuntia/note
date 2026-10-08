@@ -178,20 +178,17 @@ export function CallView({
       const scale = (size / 2) * 0.62
       const base = 1 - 0.45 * form.dim
       const m = lastLanded.current && mark(lastLanded.current.ok, now - lastLanded.current.at)
-      if (m && !still) g.translate(m.dx * scale, 0)
       drawForm(g, shape(form, still ? 0 : clock, { mic, out }, POINTS), scale, base)
       if (m) {
         g.strokeStyle = lastLanded.current?.ok ? worked : failed
         g.lineWidth = 3.2 * dpr
         g.lineCap = 'round'
-        g.globalAlpha = m.alpha
         for (const line of m.strokes) {
           g.beginPath()
           g.moveTo(line[0].x * scale, line[0].y * scale)
           for (const p of line.slice(1)) g.lineTo(p.x * scale, p.y * scale)
           g.stroke()
         }
-        g.globalAlpha = 1
       }
       frame = requestAnimationFrame(draw)
     }

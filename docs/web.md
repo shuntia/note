@@ -47,7 +47,8 @@ Views (`web/src/views/`):
 breathes while listening, ripples with either voice, and writes while Note
 thinks, with the caller's words as captions. While Note runs a tool the rim grows
 teeth and turns like a gear; when it lands, a check mark is written inside the
-circle, or a red X with a tremor when it failed. A tap mutes (or answers a ring), a
+circle, or a red X stroke by stroke when it failed, and erased from where it
+began. A tap mutes (or answers a ring), a
 downward swipe or Escape ends the call; Note's last words play out first.
 Capture and playback run in audio worklets (16 kHz up, jitter-buffered
 playback down) over `/api/call/ws` ([voice.md](voice.md#web-calls)). An

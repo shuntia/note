@@ -152,7 +152,10 @@
     --sage 400ms ease, --rose 400ms ease;
 }
 
-* { box-sizing: border-box; }
+* { box-sizing: border-box; scrollbar-width: none; }
+::-webkit-scrollbar { display: none; }
+/* nothing is laid out wider than the window; a stray pixel must not scroll it sideways */
+html, body { overflow-x: clip; }
 
 /* every rem in the sheets below is this unit, so type and layout grow together */
 :root { font-size: calc(16 * var(--u)); }

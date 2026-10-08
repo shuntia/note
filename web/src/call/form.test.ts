@@ -191,21 +191,30 @@ test('while a tool runs the rim grows teeth that turn', () => {
   expect(target('ending', false, true).gear).toBe(0)
 })
 
-test('a tool that worked writes a check mark on, holds it, then fades it', () => {
-  const start = mark(true, 10)!
-  const held = mark(true, 500)!
-  expect(start.strokes[0].length).toBe(2)
-  expect(held.strokes[0]).toHaveLength(3)
-  expect(held.alpha).toBe(1)
-  expect(mark(true, MARK_MS - 50)!.alpha).toBeLessThan(0.2)
+const ends = (m: { strokes: { x: number; y: number }[][] } | null) =>
+  (m?.strokes ?? []).map((l) => [l[0], l[l.length - 1]])
+
+test('a tool that worked writes a check mark on, then erases it from where it began', () => {
+  const writing = mark(true, 200)!.strokes[0]
+  const whole = mark(true, 520)!.strokes[0]
+  const erasing = mark(true, 800)!.strokes[0]
+  expect(writing[0]).toEqual(whole[0])
+  expect(whole).toHaveLength(3)
+  expect(erasing[erasing.length - 1]).toEqual(whole[whole.length - 1])
+  expect(erasing[0]).not.toEqual(whole[0])
   expect(mark(true, MARK_MS)).toBeNull()
-  expect(held.dx).toBe(0)
 })
 
-test('a tool that failed writes an X stroke by stroke and trembles', () => {
-  expect(mark(false, 100)!.strokes).toHaveLength(1)
-  expect(mark(false, 500)!.strokes).toHaveLength(2)
-  const swings = [40, 110, 200].map((t) => mark(false, t)!.dx)
-  expect(Math.max(...swings.map(Math.abs))).toBeGreaterThan(0.01)
+test('a tool that failed writes an X stroke by stroke and erases the strokes in the same order', () => {
+  expect(mark(false, 150)!.strokes).toHaveLength(1)
+  const both = ends(mark(false, 620))
+  expect(both).toHaveLength(2)
+  const firstGoing = ends(mark(false, 780))
+  expect(firstGoing[0][1]).toEqual(both[0][1])
+  expect(firstGoing[0][0]).not.toEqual(both[0][0])
+  expect(firstGoing[1]).toEqual(both[1])
+  const second = ends(mark(false, 1000))
+  expect(second).toHaveLength(1)
+  expect(second[0][1]).toEqual(both[1][1])
   expect(mark(false, -1)).toBeNull()
 })

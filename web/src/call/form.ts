@@ -107,41 +107,62 @@ export function shape(f: Form, tMs: number, lv: Levels, n = 160): Pt[] {
   return pts
 }
 
-export const MARK_MS = 1100
-const MARK_DRAW_MS = 280
-const MARK_FADE_FROM_MS = 750
 const CHECK = [{ x: -0.36, y: 0.02 }, { x: -0.1, y: 0.28 }, { x: 0.38, y: -0.24 }]
 const CROSS = [
   [{ x: -0.27, y: -0.27 }, { x: 0.27, y: 0.27 }],
   [{ x: 0.27, y: -0.27 }, { x: -0.27, y: 0.27 }],
 ]
+// Each stroke as [draw from, draw to, erase from, erase to] in ms: written on, then erased from where it began,
+// the way the arc sweeps.
+const CHECK_TIMES = [[0, 500, 550, 1050]]
+const CROSS_TIMES = [
+  [0, 300, 650, 900],
+  [300, 600, 900, 1150],
+]
+export const MARK_MS = 1150
 
-export type Mark = { strokes: { x: number; y: number }[][]; alpha: number; dx: number }
+export type Mark = { strokes: { x: number; y: number }[][] }
 
-// Inks the polyline from its start up to `t` of its length.
-function inked(line: { x: number; y: number }[], t: number): { x: number; y: number }[] {
+const inOut = (x: number) => (x < 0.5 ? 2 * x * x : 1 - (-2 * x + 2) ** 2 / 2)
+const progress = (t: number, from: number, to: number) => inOut(Math.min(1, Math.max(0, (t - from) / (to - from))))
+
+// The polyline between `from` and `to` of its length.
+function span(line: { x: number; y: number }[], from: number, to: number): { x: number; y: number }[] {
   const lens = line.slice(1).map((p, i) => Math.hypot(p.x - line[i].x, p.y - line[i].y))
-  let left = Math.max(0, Math.min(1, t)) * lens.reduce((a, b) => a + b, 0)
-  const out = [line[0]]
-  for (let i = 0; i < lens.length && left > 0; i++) {
-    const k = Math.min(1, left / lens[i])
-    out.push({ x: line[i].x + (line[i + 1].x - line[i].x) * k, y: line[i].y + (line[i + 1].y - line[i].y) * k })
-    left -= lens[i]
+  const total = lens.reduce((a, b) => a + b, 0)
+  const at = (d: number) => {
+    for (let i = 0; i < lens.length; i++) {
+      if (d <= lens[i] || i === lens.length - 1) {
+        const k = lens[i] ? Math.min(1, d / lens[i]) : 0
+        return { x: line[i].x + (line[i + 1].x - line[i].x) * k, y: line[i].y + (line[i + 1].y - line[i].y) * k }
+      }
+      d -= lens[i]
+    }
+    return line[line.length - 1]
   }
+  const a = from * total
+  const b = to * total
+  const out = [at(a)]
+  let walked = 0
+  for (let i = 0; i < lens.length; i++) {
+    walked += lens[i]
+    if (walked > a && walked < b) out.push(line[i + 1])
+  }
+  out.push(at(b))
   return out
 }
 
-// What a tool that landed draws inside the circle `ageMs` after: a check mark when it worked, an X and a short
-// sideways tremor when it failed, each written on, held, then faded. Null once it has played out.
+// What a tool that landed draws inside the circle `ageMs` after: a check mark when it worked, an X when it failed.
+// Null once it has been erased.
 export function mark(ok: boolean, ageMs: number): Mark | null {
   if (!Number.isFinite(ageMs) || ageMs < 0 || ageMs >= MARK_MS) return null
-  const drawn = ageMs / MARK_DRAW_MS
-  const alpha = 1 - smoothstep(ageMs, MARK_FADE_FROM_MS, MARK_MS)
-  if (ok) return { strokes: [inked(CHECK, drawn)], alpha, dx: 0 }
-  const shake = Math.min(1, ageMs / 450)
-  return {
-    strokes: [inked(CROSS[0], drawn * 2), inked(CROSS[1], drawn * 2 - 1)].filter((l) => l.length > 1),
-    alpha,
-    dx: 0.035 * Math.sin(shake * 3 * TWO_PI) * (1 - shake),
-  }
+  const lines = ok ? [CHECK] : CROSS
+  const times = ok ? CHECK_TIMES : CROSS_TIMES
+  const strokes = lines.flatMap((line, i) => {
+    const [d0, d1, e0, e1] = times[i]
+    const to = progress(ageMs, d0, d1)
+    const from = progress(ageMs, e0, e1)
+    return to - from > 1e-3 ? [span(line, from, to)] : []
+  })
+  return { strokes }
 }
