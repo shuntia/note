@@ -441,6 +441,7 @@ impl<S: Fn(CallBody)> Live<S> {
         for reply in self.speech.take_finished(&mut self.playout) {
             (self.send)(CallBody::Played { reply });
             self.played_reply = true;
+            self.thinking = false;
         }
         if self.played_reply && self.playout.is_empty() && self.speech.is_idle() {
             (self.send)(CallBody::Floor { floor: Floor::Drained });
@@ -475,7 +476,7 @@ impl<S: Fn(CallBody)> Live<S> {
             self.closing = None;
             self.play_line(line);
         }
-        if self.playout.playing_reply() {
+        if self.playout.playing_reply() || self.ending.is_some() {
             self.thinking = false;
         }
         let state = shown(self.playout.is_playing(), self.hearing, self.thinking);
@@ -2138,5 +2139,30 @@ mod tests {
         assert!(first(LiveState::Thinking) < first(LiveState::Speaking), "{shown:?}");
         assert_eq!(shown.last(), Some(&LiveState::Listening), "{shown:?}");
         assert!(shown.windows(2).all(|w| w[0] != w[1]), "only changes are shown: {shown:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_silent_reply_ends_the_thinking() {
+        let c = call(audio(&[(0.1, 1000), (0.0, 1000)]), vec![(2, "move"), (4, "move my"), (6, "move my run")], false);
+        until_committed(&c).await;
+        sleep_ms(100).await;
+        assert_eq!(c.probe.shown.lock().unwrap().last(), Some(&LiveState::Thinking));
+        c.frame(CallBody::SpeakDone { reply: 2 });
+        c.frame(CallBody::Play { reply: 2 });
+        sleep_ms(500).await;
+        let shown = c.probe.shown.lock().unwrap().clone();
+        assert_eq!(shown.last(), Some(&LiveState::Listening), "{shown:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_closing_line_while_thinking_shows_note_speaking() {
+        let c = call(audio(&[(0.1, 1000), (0.0, 1000)]), vec![(2, "move"), (4, "move my"), (6, "move my run")], false);
+        until_committed(&c).await;
+        c.inbox.send(SessionIn::LinkUp(false)).unwrap();
+        let end = tokio::time::timeout(Duration::from_secs(20), c.end).await.unwrap().unwrap();
+        assert_eq!(end, SessionEnd::LinkLost);
+        let shown = c.probe.shown.lock().unwrap().clone();
+        let thinking = shown.iter().position(|&s| s == LiveState::Thinking).expect("thinking shown");
+        assert!(shown[thinking..].contains(&LiveState::Speaking), "the goodbye is Note speaking: {shown:?}");
     }
 }
