@@ -21,7 +21,7 @@ LLM agent that acts through typed tools.
 | `desktop/` | the Electron desktop shell around the web app |
 | `config/` | `server.toml` and the shipped `defaults/` (user settings, templates, prompts, built-in memory) |
 | `nix/` | the NixOS module, its VM test, and the speech-sidecar packages |
-| `docs/` | reference documentation (below); `docs/superpowers/` holds design specs and plans |
+| `docs/` | reference documentation (below) |
 
 ## Quick start
 

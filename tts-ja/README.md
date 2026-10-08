@@ -1,7 +1,7 @@
 # note-tts-ja
 
-Note's Japanese speech sidecar: a Rust binary speaking the sidecar protocol of
-`docs/superpowers/specs/2026-10-03-streaming-speech-design.md` on
+Note's Japanese speech sidecar: a Rust binary speaking the sidecar protocol
+(`GET /info`, `GET /stream`) on
 `127.0.0.1:8891` (`services.note.tts.japanese`). It serves two voices, both
 `"languages": ["ja"]`, at 48 kHz in whole chunks:
 
