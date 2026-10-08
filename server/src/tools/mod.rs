@@ -322,7 +322,9 @@ const MEMORY_READ: &[&str] = &["memory_query", "memory_read"];
 const MEMORY_WRITE: &[&str] = &["memory_write"];
 const CONTEXT: &[&str] = &["context_edit"];
 const TASK_READ: &[&str] = &["task_list", "task_search", "task_read"];
-const TASK_WRITE: &[&str] = &["task_create", "task_update", "task_split", "task_delete"];
+const TASK_TEND: &[&str] = &["task_create", "task_update", "task_split"];
+/// A permanent delete, kept from wake-ups, which drop a task through its state instead.
+const TASK_DELETE: &[&str] = &["task_delete"];
 const TASK_BULK: &[&str] = &["task_bulk_update"];
 const GOALS_WRITE: &[&str] = &["goal_create", "goal_update"];
 const GOALS_READ: &[&str] = &["goal_list"];
@@ -366,7 +368,8 @@ const DOMAINS: &[&[&str]] = &[
     MEMORY_WRITE,
     CONTEXT,
     TASK_READ,
-    TASK_WRITE,
+    TASK_TEND,
+    TASK_DELETE,
     TASK_BULK,
     GOALS_WRITE,
     GOALS_READ,
@@ -425,7 +428,8 @@ const CHECKIN: &[&str] = registry_of![
     MEMORY_READ,
     MEMORY_WRITE,
     TASK_READ,
-    TASK_WRITE,
+    TASK_TEND,
+    TASK_DELETE,
     GOALS_WRITE,
     GOALS_READ,
     NOTES,
@@ -444,7 +448,8 @@ const TALK: &[&str] = registry_of![
     MEMORY_WRITE,
     CONTEXT,
     TASK_READ,
-    TASK_WRITE,
+    TASK_TEND,
+    TASK_DELETE,
     TASK_BULK,
     GOALS_WRITE,
     GOALS_READ,
@@ -466,7 +471,8 @@ const NIGHTLY: &[&str] = registry_of![
     MEMORY_WRITE,
     CONTEXT,
     TASK_READ,
-    TASK_WRITE,
+    TASK_TEND,
+    TASK_DELETE,
     TASK_BULK,
     GOALS_WRITE,
     GOALS_READ,
@@ -489,7 +495,7 @@ const TRIGGER: &[&str] = registry_of![
     MEMORY_READ,
     MEMORY_WRITE,
     TASK_READ,
-    TASK_WRITE,
+    TASK_TEND,
     TASK_BULK,
     NOTES,
     PLAN_READ,
@@ -503,7 +509,7 @@ const TRIGGER: &[&str] = registry_of![
 
 /// Whether a successful call of this tool changed the user's day or Note's memory.
 pub fn writes(name: &str) -> bool {
-    [TASK_WRITE, TASK_BULK, NOTES, ORDER, SCHEDULE, MEMORY_WRITE, TRIGGERS]
+    [TASK_TEND, TASK_DELETE, TASK_BULK, NOTES, ORDER, SCHEDULE, MEMORY_WRITE, TRIGGERS]
         .iter()
         .any(|d| d.contains(&name))
 }
@@ -518,7 +524,8 @@ const CALL: &[&str] = registry_of![
     MEMORY_READ,
     MEMORY_WRITE,
     TASK_READ,
-    TASK_WRITE,
+    TASK_TEND,
+    TASK_DELETE,
     GOALS_WRITE,
     GOALS_READ,
     NOTES,
@@ -793,13 +800,15 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
             schema::<order_ops::SetArgs>(),
         ),
         "order_move" => (
-            "Put one task or step into today's order in front of before_task_id, or last when \
+            "Put one task or step into the day's order in front of before_task_id, or last when \
              that is omitted, moving it if it is already there. A task added since the order was \
-             set is not in it until placed.",
+             set is not in it until placed. The nightly run acts on the day it is planning, every \
+             other session on today.",
             schema::<order_ops::MoveArgs>(),
         ),
         "order_drop" => (
-            "Take one task or step out of today's order. The task itself is untouched.",
+            "Take one task or step out of the day's order. The task itself is untouched. The \
+             nightly run acts on the day it is planning, every other session on today.",
             schema::<order_ops::DropArgs>(),
         ),
         "plan_list" => (
@@ -1889,7 +1898,7 @@ mod tests {
         }
         for name in [
             "calendar_add", "calendar_update", "calendar_remove", "calendar_skip",
-            "schedule_insert", "trigger_budget", "notify_send", "goal_create",
+            "schedule_insert", "trigger_budget", "notify_send", "goal_create", "task_delete",
         ] {
             assert!(!t.contains(&name), "{name}");
         }

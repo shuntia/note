@@ -14,6 +14,8 @@ pub const MAX_STANDING_BYTES: usize = 64 * 1024;
 /// per-turn token cost rather than a per-edit one. Working memory is rendered
 /// in full on top of it.
 pub const MAX_DYNAMIC_BYTES: usize = 6 * 1024;
+const ORDER_SHOWN: usize = 12;
+const ORDER_TITLE_CHARS: usize = 80;
 
 #[derive(Debug, Error)]
 pub enum EditError {
@@ -551,12 +553,15 @@ fn order_section(l: Lang, items: &[crate::order::Item]) -> String {
         s.push_str(mt::order_empty(l));
         return s;
     }
-    for (n, item) in items.iter().enumerate() {
+    for (n, item) in items.iter().take(ORDER_SHOWN).enumerate() {
         let title = match &item.parent {
             Some(parent) => format!("{parent} · {}", item.title),
             None => item.title.clone(),
         };
-        let _ = writeln!(s, "{}. {title} (task_id {})", n + 1, item.task_id);
+        let _ = writeln!(s, "{}. {} (task_id {})", n + 1, excerpt(&title, ORDER_TITLE_CHARS), item.task_id);
+    }
+    if items.len() > ORDER_SHOWN {
+        let _ = writeln!(s, "{}", mt::and_more(l, items.len() - ORDER_SHOWN));
     }
     s.push('\n');
     s
@@ -1548,5 +1553,24 @@ mod tests {
             out.contains(&format!("1. essay · outline (task_id {outline})\n2. laundry (task_id {laundry})")),
             "{out}"
         );
+    }
+
+    #[test]
+    fn a_long_order_is_capped_and_leaves_room_for_what_follows() {
+        let tmp = cfg_dir();
+        let (conn, uid) = user();
+        let ids: Vec<i64> = (0..30)
+            .map(|i| task(&conn, uid, &format!("item-{i:02} {}", "o".repeat(300)), "open", None, false, None, NOW))
+            .collect();
+        crate::order::set(&conn, uid, "2026-08-31".parse().unwrap(), &ids).unwrap();
+        let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
+        let block = dynamic(&out);
+        assert!(block.len() <= MAX_DYNAMIC_BYTES, "{} bytes", block.len());
+        let order = block.split("# Today's order\n\n").nth(1).unwrap().split("\n\n").next().unwrap();
+        assert!(order.contains("12. item-11 "), "{order}");
+        assert!(!order.contains("item-12 "), "{order}");
+        assert!(order.ends_with("- ... and 18 more"), "{order}");
+        assert!(!order.contains(&"o".repeat(120)), "{order}");
+        assert!(block.contains("no plan factor yet"), "{block}");
     }
 }

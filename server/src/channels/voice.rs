@@ -1,6 +1,5 @@
 use super::{Channel, OutboundMessage, Urgency};
 use crate::voice::{links, Voice};
-use anyhow::Context;
 use rusqlite::Connection;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -60,7 +59,7 @@ impl super::calling::PhoneRing for VoicePhone {
             let conn = crate::db_guard(&self.db);
             links::ringable(&conn, user_id)?
         }
-        .context("no linked Matrix account")?;
+        .ok_or(super::calling::NoLinkedPhone)?;
         anyhow::ensure!(self.voice.is_up(), "the voice service is not connected");
         self.voice.start_call(user_id, &link, msg, jiff::Timestamp::now())?;
         Ok(())

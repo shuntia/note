@@ -687,6 +687,8 @@ pub struct QueueEntry {
     pub event_id: Option<i64>,
 }
 
+/// Orders by what the user is on now, then urgency, then dated before undated and
+/// soonest due first, then oldest created, then id.
 fn rank_key(
     is_now: bool,
     urgency_rank: u8,

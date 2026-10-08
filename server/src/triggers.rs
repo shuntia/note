@@ -641,21 +641,15 @@ fn record_said(
 
 const MAX_CHANGE_CHARS: usize = 300;
 
-/// One activity row per change a wake-up made, so the user can see what Note
-/// did on its own.
-pub fn log_changes(
-    conn: &Connection,
-    user_id: i64,
-    event_id: i64,
-    steps: &[crate::agent::SessionStep],
-) -> Result<usize> {
-    let mut n = 0;
-    for s in steps.iter().filter(|s| !s.is_error && crate::tools::writes(&s.name)) {
-        let args: String = s.args.chars().take(MAX_CHANGE_CHARS).collect();
-        crate::log::record(conn, Some(user_id), "wake_change", &format!("event {event_id}: {} {args}", s.name))?;
-        n += 1;
+/// The activity row for one step a wake-up took, so the user can see what Note
+/// did on its own; `false` when the step changed nothing.
+pub fn log_change(conn: &Connection, user_id: i64, event_id: i64, name: &str, args: &str, is_error: bool) -> Result<bool> {
+    if is_error || !crate::tools::writes(name) {
+        return Ok(false);
     }
-    Ok(n)
+    let args: String = args.chars().take(MAX_CHANGE_CHARS).collect();
+    crate::log::record(conn, Some(user_id), "wake_change", &format!("event {event_id}: {name} {args}"))?;
+    Ok(true)
 }
 
 fn settle(conn: &Connection, event_id: i64, now: jiff::Timestamp) -> rusqlite::Result<usize> {
@@ -708,7 +702,19 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
         thread_note,
         share: None,
     };
-    let outcome = crate::agent::run_session(
+    let call_args = std::cell::RefCell::new(String::new());
+    let changed = std::cell::Cell::new(false);
+    let log_writes = |event: crate::agent::AgentEvent| match event {
+        crate::agent::AgentEvent::ToolCall { args, .. } => *call_args.borrow_mut() = args.to_string(),
+        crate::agent::AgentEvent::ToolResult { name, is_error, .. } => {
+            let conn = state.db();
+            if log_change(&conn, fired.user_id, ev.event_id, name, &call_args.borrow(), is_error).unwrap_or(false) {
+                changed.set(true);
+            }
+        }
+        _ => {}
+    };
+    let outcome = crate::agent::run_session_watched(
         &deps,
         fired.user_id,
         &fired.username,
@@ -716,7 +722,11 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
         now,
         &history,
         &opening,
+        &log_writes,
     );
+    if changed.get() {
+        state.hub.broadcast_changed(fired.user_id);
+    }
     let failed = |detail: String| {
         let conn = state.db();
         let _ = crate::log::record_throttled(
@@ -735,13 +745,6 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
             return failed(format!("event {}: {e:#}", ev.event_id));
         }
     };
-    let changed = {
-        let conn = state.db();
-        log_changes(&conn, fired.user_id, ev.event_id, &out.steps).unwrap_or(0)
-    };
-    if changed > 0 {
-        state.hub.broadcast_changed(fired.user_id);
-    }
     let Some(step) = out.steps.iter().rev().find(|s| {
         !s.is_error && crate::tools::is_terminal(crate::tools::SessionKind::Trigger, &s.name)
     }) else {
@@ -1173,7 +1176,11 @@ mod tests {
             thinking: None,
         };
         let steps = [step("task_read", false), step("order_move", false), step("task_update", true), step("stay_quiet", false)];
-        assert_eq!(log_changes(&conn, uid, 9, &steps).unwrap(), 1);
+        let logged = steps
+            .iter()
+            .filter(|s| log_change(&conn, uid, 9, &s.name, &s.args, s.is_error).unwrap())
+            .count();
+        assert_eq!(logged, 1);
         let detail: String = conn
             .query_row("SELECT detail FROM event_log WHERE kind = 'wake_change'", [], |r| r.get(0))
             .unwrap();
