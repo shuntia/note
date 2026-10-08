@@ -106,6 +106,11 @@ and the Nix package never update.
 Closing the window hides it to the tray, where the app keeps its socket and
 timers running and is still rung: a ring shows, restores and focuses the
 window (flashing it, or bouncing the macOS dock icon) and the ringtone plays
-without a click. Each notice that reaches the open app plays a short sound.
+without a click. Each notice that reaches the app plays a short sound and,
+when the window is not in front, shows as a system notification; a click on it
+brings the window up. Web Push does not work in Electron, so Settings → This
+computer takes its place: notifications, receiving calls (off: this computer is
+never rung), start at login, nightly builds (where the app updates itself) and
+the server address.
 The microphone is granted only to the Note server's own
 pages. On macOS the first call asks for microphone access.

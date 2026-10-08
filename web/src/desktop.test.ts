@@ -1,5 +1,5 @@
 import { afterEach, expect, test, vi } from 'vitest'
-import { ringable } from './desktop'
+import { ringable, setCallsOn } from './desktop'
 
 afterEach(() => vi.unstubAllGlobals())
 
@@ -17,5 +17,16 @@ test('a browser tab is rung only while in view', () => {
 
 test('the desktop app is rung from the tray', () => {
   page(true, { ring: () => {} })
+  expect(ringable()).toBe(true)
+})
+
+test('the desktop app with its calls turned off is never rung', () => {
+  const kept = new Map<string, string>()
+  vi.stubGlobal('localStorage', { getItem: (k: string) => kept.get(k) ?? null, setItem: (k: string, v: string) => kept.set(k, v) })
+  page(false, { ring: () => {} })
+  vi.stubGlobal('window', { noteDesktop: { ring: () => {} }, dispatchEvent: () => true })
+  setCallsOn(false)
+  expect(ringable()).toBe(false)
+  setCallsOn(true)
   expect(ringable()).toBe(true)
 })

@@ -14,7 +14,7 @@ import { CallView, type CallOpen } from './call/CallView'
 import { primeAudio } from './call/prime'
 import { trailing } from './coalesce'
 import { notice } from './call/tones'
-import { desktop, ringable } from './desktop'
+import { desktop, noticesOn, ringable, systemNotice } from './desktop'
 import { Jot } from './jot'
 import { glide, lift, viewIn, viewOut } from './motion-gsap'
 import { reducedMotion } from './motion'
@@ -373,7 +373,10 @@ export function App() {
   useEffect(() => {
     if (!me) return
     return connectEvents((ev) => {
-      if (desktop()) notice()
+      if (desktop() && noticesOn()) {
+        notice()
+        systemNotice(ev.title, ev.body)
+      }
       // A check-in (it carries its event) or an urgent ask has its question waiting in
       // the thread, so the thread is the notice; a session's notices are toasts over
       // whatever is open.

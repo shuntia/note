@@ -10,6 +10,7 @@ import { disablePush, enablePush, pushState } from '../push'
 import { eventLabel } from '../receipts'
 import type { CounterMode } from '../session'
 import { paletteAt, solarAltitude, sunTimes } from '../sky'
+import { callsOn, desktop, noticesOn, setCallsOn, setNoticesOn, type ShellSettings } from '../desktop'
 import '../styles/settings.css'
 import {
   applyTheme,
@@ -1271,6 +1272,8 @@ export function Settings({
         </FoldRow>
       </Group>
 
+      {desktop() && <ComputerGroup />}
+
       {me.admin && (
         <Group head={t('settings.admin')}>
           <button className="set-row set-open" onClick={openAdmin}>
@@ -2302,7 +2305,82 @@ function SharesSection({ notify }: { notify: Notify }) {
   )
 }
 
+function ToggleRow({ label, on, onToggle }: { label: string; on: boolean; onToggle: () => void }) {
+  return (
+    <div className="set-row">
+      <span className="set-row-body">
+        <span className="set-label">{label}</span>
+      </span>
+      <Switch label={label} on={on} onToggle={onToggle} />
+    </div>
+  )
+}
+
+// The desktop app's own switches: what this computer does, kept by the shell or this window.
+function ComputerGroup() {
+  const shell = desktop()!
+  const [notices, setNotices] = useState(noticesOn)
+  const [calls, setCalls] = useState(callsOn)
+  const [settings, setSettings] = useState<ShellSettings | null>(null)
+
+  useEffect(() => {
+    shell.settings?.().then(setSettings).catch(() => {})
+  }, [shell])
+
+  const flip = (key: keyof ShellSettings, on: boolean) => {
+    setSettings((s) => (s ? { ...s, [key]: on } : s))
+    shell.set?.(key, on).then((s) => s && setSettings(s)).catch(() => {})
+  }
+
+  return (
+    <Group head={t('settings.computer')}>
+      <ToggleRow
+        label={t('settings.desktopNotices')}
+        on={notices}
+        onToggle={() => {
+          setNotices(!notices)
+          void setNoticesOn(!notices)
+        }}
+      />
+      <ToggleRow
+        label={t('settings.computer.calls')}
+        on={calls}
+        onToggle={() => {
+          setCalls(!calls)
+          setCallsOn(!calls)
+        }}
+      />
+      {settings && (
+        <ToggleRow
+          label={t('settings.computer.startAtLogin')}
+          on={settings.startAtLogin}
+          onToggle={() => flip('startAtLogin', !settings.startAtLogin)}
+        />
+      )}
+      {settings && settings.nightly !== null && (
+        <ToggleRow label={t('settings.computer.nightly')} on={settings.nightly} onToggle={() => flip('nightly', !settings.nightly)} />
+      )}
+      {shell.changeServer && (
+        <button className="set-row set-open" onClick={() => shell.changeServer?.()}>
+          <span className="set-row-body">
+            <span className="set-label">{t('settings.computer.server')}</span>
+            <span className="set-sub">{location.host}</span>
+          </span>
+          <svg className="set-chev" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M9 6l6 6-6 6" />
+          </svg>
+        </button>
+      )}
+    </Group>
+  )
+}
+
 function PushRow({ notify }: { notify: Notify }) {
+  if (desktop()) return null
+  return <BrowserPushRow notify={notify} />
+}
+
+function BrowserPushRow({ notify }: { notify: Notify }) {
   const [state, setState] = useState<'unsupported' | 'off' | 'on' | 'busy'>('busy')
 
   useEffect(() => {

@@ -1,5 +1,5 @@
 import { api } from './api'
-import { ringable } from './desktop'
+import { RINGABLE_CHANGED, ringable } from './desktop'
 import type { FailureReason } from './types'
 
 // `conversation_id` is the thread a check-in opened; null on every other event.
@@ -83,6 +83,7 @@ export function connectEvents(
     if (socket?.readyState === WebSocket.OPEN) socket.send(visibilityFrame(ringable()))
   }
   document.addEventListener('visibilitychange', report)
+  window.addEventListener(RINGABLE_CHANGED, report)
   const open = () => {
     if (closed) return
     const proto = location.protocol === 'https:' ? 'wss' : 'ws'
@@ -125,6 +126,7 @@ export function connectEvents(
   return () => {
     closed = true
     document.removeEventListener('visibilitychange', report)
+    window.removeEventListener(RINGABLE_CHANGED, report)
     window.clearTimeout(timer)
     socket?.close()
     if (shell === socket) shell = null

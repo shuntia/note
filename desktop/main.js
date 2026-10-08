@@ -408,8 +408,33 @@ ipcMain.handle('setup:connect', async (event, address) => {
   return { ok: true }
 })
 
+// Only the main window's own page on the server may drive the shell.
+const fromApp = (event) => Boolean(win) && event.sender === win.webContents && sameOrigin(event.senderFrame?.url ?? '')
+
+// `nightly` is null where the app does not update itself.
+const shellSettings = () => ({ startAtLogin: autostartEnabled(), nightly: updates === 'self' ? nightlyOn() : null })
+
+ipcMain.on('desktop:show', (event) => {
+  if (fromApp(event)) showWindow()
+})
+
+ipcMain.handle('desktop:settings', (event) => (fromApp(event) ? shellSettings() : null))
+
+ipcMain.handle('desktop:set', (event, key, on) => {
+  if (!fromApp(event) || typeof on !== 'boolean') return null
+  if (key === 'startAtLogin') {
+    setAutostart(on)
+    refreshTray()
+  } else if (key === 'nightly' && updates === 'self') setNightly(on)
+  return shellSettings()
+})
+
+ipcMain.on('desktop:changeServer', (event) => {
+  if (fromApp(event)) openSetup()
+})
+
 ipcMain.on('desktop:ring', (event) => {
-  if (!win || event.sender !== win.webContents || !sameOrigin(event.senderFrame?.url ?? '')) return
+  if (!fromApp(event)) return
   showWindow()
   if (process.platform === 'darwin') app.dock?.bounce('critical')
   else win.flashFrame(true)
@@ -538,6 +563,8 @@ function appMenu() {
 if (!app.requestSingleInstanceLock()) {
   app.quit()
 } else {
+  // Windows shows an app's notifications only under the id its installer gave the shortcut.
+  if (process.platform === 'win32') app.setAppUserModelId('net.shuntia.note')
   app.on('second-instance', (_e, argv) => {
     if (!argv.includes('--hidden')) showWindow()
   })
