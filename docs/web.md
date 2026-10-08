@@ -83,3 +83,9 @@ pnpm dist -c.extraMetadata.noteUrl=https://note.example.com   # AppImage and deb
 `note-desktop.override { url = "https://note.example.com"; }` bakes the
 address in. On NixOS or Home Manager use `programs.note-desktop` instead (see
 [deployment.md](deployment.md#desktop-app)).
+
+CI (`.github/workflows/desktop.yml`) builds Linux (AppImage, deb), macOS (dmg,
+zip; x64 and arm64) and Windows (nsis) on every change under `desktop/` and
+uploads them as run artifacts; a `v*` tag attaches them to a GitHub release.
+The builds are unsigned: macOS needs right-click → Open the first time, and
+Windows shows a SmartScreen prompt.
