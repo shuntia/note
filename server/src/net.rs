@@ -96,9 +96,10 @@ pub fn fetch_site_ok(headers: &axum::http::HeaderMap) -> bool {
     }
 }
 
-/// A browser's `Origin` must be one of `allowed` or name the host the request
-/// was sent to; a non-browser client sends none.
-pub fn origin_ok(headers: &axum::http::HeaderMap, allowed: &[String]) -> bool {
+/// A browser's `Origin` must be one of `allowed`, or name the host the request
+/// was sent to over https (plain http only on loopback or the listening
+/// address); a non-browser client sends none.
+pub fn origin_ok(headers: &axum::http::HeaderMap, allowed: &[String], bind_addr: Option<&str>) -> bool {
     let Some(origin) = headers.get(axum::http::header::ORIGIN) else { return true };
     let Ok(origin) = origin.to_str() else { return false };
     let origin = origin.trim_end_matches('/').to_ascii_lowercase();
@@ -107,8 +108,29 @@ pub fn origin_ok(headers: &axum::http::HeaderMap, allowed: &[String]) -> bool {
     }
     let host = headers.get(axum::http::header::HOST).and_then(|h| h.to_str().ok()).map(str::to_ascii_lowercase);
     match (origin.split_once("://"), host) {
-        (Some(("http" | "https", authority)), Some(host)) => authority == host,
+        (Some(("https", authority)), Some(host)) => authority == host,
+        (Some(("http", authority)), Some(host)) => authority == host && plain_http_host(&host, bind_addr),
         _ => false,
+    }
+}
+
+/// A loopback host, or an address Note listens on at its port.
+fn plain_http_host(host: &str, bind_addr: Option<&str>) -> bool {
+    let (name, port) = match host.rsplit_once(':') {
+        Some((name, port)) if !port.contains(']') => (name, port.parse::<u16>().ok()),
+        _ => (host, Some(80)),
+    };
+    let ip = if name == "localhost" {
+        IpAddr::V4(Ipv4Addr::LOCALHOST)
+    } else {
+        match name.trim_start_matches('[').trim_end_matches(']').parse::<IpAddr>() {
+            Ok(ip) => ip,
+            Err(_) => return false,
+        }
+    };
+    match bind_addr.and_then(|b| b.parse::<std::net::SocketAddr>().ok()) {
+        None => ip.is_loopback(),
+        Some(bind) => port == Some(bind.port()) && (ip.is_loopback() || bind.ip().is_unspecified() || ip == bind.ip()),
     }
 }
 
@@ -249,30 +271,36 @@ mod tests {
     fn an_origin_must_be_one_of_notes_own() {
         let allowed = page_origins("https://Note.example.net/", Some("127.0.0.1:3271"));
         let mut h = axum::http::HeaderMap::new();
-        assert!(origin_ok(&h, &allowed), "no Origin: a non-browser client");
+        assert!(origin_ok(&h, &allowed, None), "no Origin: a non-browser client");
         for ok in ["https://note.example.net", "http://localhost:3271", "http://127.0.0.1:3271"] {
             h.insert("origin", ok.parse().unwrap());
-            assert!(origin_ok(&h, &allowed), "{ok}");
+            assert!(origin_ok(&h, &allowed, None), "{ok}");
         }
         for bad in ["https://evil.example", "http://note.example.net", "https://note.example.net.evil.example", "null"] {
             h.insert("origin", bad.parse().unwrap());
-            assert!(!origin_ok(&h, &allowed), "{bad}");
+            assert!(!origin_ok(&h, &allowed, None), "{bad}");
         }
     }
 
     #[test]
     fn an_origin_naming_the_requested_host_is_same_origin() {
         let allowed = page_origins("https://note.example.net", Some("0.0.0.0:3271"));
-        let mut h = axum::http::HeaderMap::new();
-        h.insert("host", "100.64.0.9:3271".parse().unwrap());
-        h.insert("origin", "http://100.64.0.9:3271".parse().unwrap());
-        assert!(origin_ok(&h, &allowed));
-        h.insert("host", "laptop.tail.ts.net".parse().unwrap());
-        h.insert("origin", "https://laptop.tail.ts.net".parse().unwrap());
-        assert!(origin_ok(&h, &allowed));
+        let bind = Some("0.0.0.0:3271");
+        let same = |host: &str, origin: &str, bind: Option<&str>| {
+            let mut h = axum::http::HeaderMap::new();
+            h.insert("host", host.parse().unwrap());
+            h.insert("origin", origin.parse().unwrap());
+            origin_ok(&h, &allowed, bind)
+        };
+        assert!(same("laptop.tail.ts.net", "https://laptop.tail.ts.net", bind));
+        assert!(same("192.168.1.4:3271", "http://192.168.1.4:3271", bind), "an address Note listens on");
+        assert!(same("localhost:5173", "http://localhost:5173", None), "loopback");
+        assert!(!same("192.168.1.4:3271", "http://192.168.1.4:3271", Some("127.0.0.1:3271")), "not listened on");
+        assert!(!same("192.168.1.4:8080", "http://192.168.1.4:8080", bind), "another port");
+        assert!(!same("note.example.net", "http://note.example.net", bind), "the public host over http");
+        assert!(!same("laptop.tail.ts.net", "http://laptop.tail.ts.net", bind), "a name over http");
         for bad in ["https://evil.example", "https://laptop.tail.ts.net:444", "null", "file://laptop.tail.ts.net"] {
-            h.insert("origin", bad.parse().unwrap());
-            assert!(!origin_ok(&h, &allowed), "{bad}");
+            assert!(!same("laptop.tail.ts.net", bad, bind), "{bad}");
         }
     }
 

@@ -221,11 +221,11 @@ impl Voice {
         start: web::WebStart,
         now: jiff::Timestamp,
     ) -> Result<web::WebCall, web::WebRefusal> {
-        self.open_web_call(user_id, start, now).map_err(|(refusal, _)| refusal)
+        self.open_web_call(user_id, start, now, true)
     }
 
     /// Opens the call an answered ring asks for; `None` when the ring is not the user's or is gone.
-    /// A call that cannot open sends the ring's message down the ladder, once.
+    /// A call that cannot open sends the ring's own message down the ladder, once.
     pub fn answer_ring(
         &self,
         token: &str,
@@ -235,27 +235,25 @@ impl Voice {
         let rung = self.web.take_ring_at(token, user_id, Instant::now())?;
         let thread = rung.conversation_id;
         let message = thread.and_then(|conversation_id| self.ring_message(user_id, conversation_id));
-        Some(self.open_web_call(user_id, web::WebStart { thread, message }, now).map_err(|(refusal, sent_on)| {
-            if !sent_on {
-                self.deliver(user_id, rung);
-            }
-            refusal
+        Some(self.open_web_call(user_id, web::WebStart { thread, message }, now, false).inspect_err(|_| {
+            self.deliver(user_id, rung);
         }))
     }
 
-    /// On refusal, also whether the call's own message already went down the ladder.
+    /// `send_on`: whether a call recorded but never sent delivers its own message.
     fn open_web_call(
         &self,
         user_id: i64,
         web::WebStart { thread, message: outbound }: web::WebStart,
         now: jiff::Timestamp,
-    ) -> Result<web::WebCall, (web::WebRefusal, bool)> {
+        send_on: bool,
+    ) -> Result<web::WebCall, web::WebRefusal> {
         use web::WebRefusal::{Busy, Unavailable};
-        fn unavailable<E>(_: E) -> (web::WebRefusal, bool) {
-            (Unavailable, false)
+        fn unavailable<E>(_: E) -> web::WebRefusal {
+            Unavailable
         }
         if !self.is_up() {
-            return Err((Unavailable, false));
+            return Err(Unavailable);
         }
         let id = uuid::Uuid::new_v4().to_string();
         let ring_by = now + jiff::SignedDuration::from_secs(RING_BY_SECS);
@@ -271,7 +269,7 @@ impl Voice {
                 )
                 .map_err(unavailable)?;
             if busy {
-                return Err((Busy, false));
+                return Err(Busy);
             }
             let thread = thread.filter(|thread| {
                 conn.query_row(
@@ -311,12 +309,16 @@ impl Voice {
         );
         if sent.is_err() {
             self.web.forget(&id);
-            let ended = end_call(&crate::db_guard(&self.db), &id, "failed", None, now).ok().flatten();
-            let sent_on = ended.as_ref().is_some_and(|(_, message)| message.is_some());
-            if let Some((user_id, message)) = ended {
+            let conn = crate::db_guard(&self.db);
+            let ended = end_call(&conn, &id, "failed", None, now).ok().flatten();
+            if !send_on {
+                let _ = conn.execute("UPDATE voice_calls SET fell_through_at = ?2 WHERE id = ?1", (&id, now.to_string()));
+            }
+            drop(conn);
+            if let Some((user_id, message)) = ended.filter(|_| send_on) {
                 self.handler.fall_through(&id, user_id, message);
             }
-            return Err((Unavailable, sent_on));
+            return Err(Unavailable);
         }
         if let Some(msg) = &outbound {
             self.calls.warm_up(user_id, msg);
@@ -1642,7 +1644,7 @@ mod tests {
         settle().await;
         let seen = mock.seen();
         assert_eq!(seen.len(), 1);
-        assert_eq!(seen[0].1.event_id, Some(4));
+        assert_eq!(seen[0].1, msg());
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1679,7 +1681,8 @@ mod tests {
                 }
                 id
             };
-            let rung = OutboundMessage { conversation_id: Some(thread), ..msg() };
+            let action = crate::channels::Action { label: "Later".into(), data: "later".into() };
+            let rung = OutboundMessage { conversation_id: Some(thread), actions: vec![action], ..msg() };
             let token = voice.offer_ring(1, &rung);
             let refused = voice.answer_ring(&token, 1, jiff::Timestamp::now()).unwrap();
             assert!(matches!(refused, Err(web::WebRefusal::Unavailable)));
@@ -1687,7 +1690,9 @@ mod tests {
             voice.sweep(jiff::Timestamp::now());
             voice.redrive();
             settle().await;
-            assert_eq!(mock.seen().len(), 1, "spoken: {spoken}");
+            let seen = mock.seen();
+            assert_eq!(seen.len(), 1, "spoken: {spoken}");
+            assert_eq!(seen[0].1, rung, "the ring's own message, spoken: {spoken}");
         }
     }
 }

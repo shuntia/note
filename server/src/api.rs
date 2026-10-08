@@ -2888,7 +2888,7 @@ async fn call_ws(
 }
 
 fn refused_origin(headers: &axum::http::HeaderMap, state: &AppState) -> Option<axum::response::Response> {
-    if crate::net::fetch_site_ok(headers) && crate::net::origin_ok(headers, &state.page_origins()) {
+    if crate::net::fetch_site_ok(headers) && crate::net::origin_ok(headers, &state.page_origins(), state.bind_addr.as_deref()) {
         return None;
     }
     Some((StatusCode::FORBIDDEN, Json(serde_json::json!({ "error": "cross-site request refused" }))).into_response())
