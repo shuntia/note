@@ -71,3 +71,50 @@ test('reduced motion holds a still circle, dimmed while Note thinks', () => {
   expect(still.dim).toBeGreaterThan(0)
   for (const p of shape(still, 0, { mic: 1, out: 1 })) expect(radius(p)).toBeCloseTo(1, 6)
 })
+
+test('the mute gap fades in and turns with the rim without any point flickering', () => {
+  let f = target('listening', false)
+  let prev = shape(f, 0, quiet)
+  for (let t = 16; t <= 3000; t += 16) {
+    f = ease(f, target('listening', true), 16)
+    const next = shape(f, t, quiet)
+    for (let i = 0; i < next.length; i++) expect(Math.abs(next[i].a - prev[i].a)).toBeLessThan(0.15)
+    prev = next
+  }
+})
+
+test('easing ignores a backwards, zero or broken frame time and settles on a huge one', () => {
+  const from = target('listening', false)
+  const to = target('thinking', false)
+  expect(ease(from, to, -50)).toEqual(from)
+  expect(ease(from, to, 0)).toEqual(from)
+  expect(ease(from, to, NaN)).toEqual(from)
+  expect(ease(from, to, Infinity)).toEqual(from)
+  expect(ease(from, to, 1e9)).toEqual(to)
+})
+
+test('smoothing ignores a backwards, zero or broken frame time and a broken level', () => {
+  expect(smooth(0.5, 1, -50)).toBe(0.5)
+  expect(smooth(0.5, 1, 0)).toBe(0.5)
+  expect(smooth(0.5, 1, NaN)).toBe(0.5)
+  expect(smooth(0.5, 1, 1e9)).toBe(1)
+  expect(smooth(0.5, NaN, 1e9)).toBe(0)
+  expect(Number.isFinite(smooth(0.5, Infinity, 16))).toBe(true)
+})
+
+test('easing and smoothing do not depend on the frame rate', () => {
+  const run = (steps: number, dt: number) => {
+    let f = target('listening', false)
+    let lv = 0
+    for (let i = 0; i < steps; i++) {
+      f = ease(f, target('thinking', false), dt)
+      lv = smooth(lv, 1, dt)
+    }
+    return { f, lv }
+  }
+  const a = run(25, 16)
+  for (const b of [run(50, 8), run(400, 1)]) {
+    expect(Math.abs(b.lv - a.lv)).toBeLessThan(1e-9)
+    for (const key of Object.keys(a.f) as (keyof typeof a.f)[]) expect(Math.abs(b.f[key] - a.f[key])).toBeLessThan(1e-9)
+  }
+})

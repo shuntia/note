@@ -37,13 +37,17 @@ export function stillForm(look: Look, muted: boolean): Form {
 }
 
 export function ease(cur: Form, to: Form, dtMs: number): Form {
+  if (!Number.isFinite(dtMs) || dtMs <= 0) return cur
   const k = 1 - Math.exp(-dtMs / EASE_TAU_MS)
   const out = { ...cur }
   for (const key of Object.keys(to) as (keyof Form)[]) out[key] = cur[key] + (to[key] - cur[key]) * k
   return out
 }
 
+// A non-finite level counts as silence.
 export function smooth(prev: number, raw: number, dtMs: number): number {
+  if (!Number.isFinite(dtMs) || dtMs <= 0) return prev
+  if (!Number.isFinite(raw)) raw = 0
   const tau = raw > prev ? 30 : 220
   return prev + (raw - prev) * (1 - Math.exp(-dtMs / tau))
 }
@@ -53,8 +57,8 @@ function scribble(a: number): [number, number] {
   return [0.62 * Math.sin(a) + 0.22 * Math.sin(2.3 * a + 1.1), 0.42 * Math.sin(1.6 * a) + 0.2 * Math.cos(3.7 * a)]
 }
 
-const smoothstep = (x: number) => {
-  const c = Math.min(1, Math.max(0, x))
+const smoothstep = (x: number, lo = 0, hi = 1) => {
+  const c = Math.min(1, Math.max(0, (x - lo) / (hi - lo)))
   return c * c * (3 - 2 * c)
 }
 
@@ -79,7 +83,7 @@ export function shape(f: Form, tMs: number, lv: Levels, n = 160): Pt[] {
     pts.push({
       x: r * Math.cos(th) * (1 - w) + sx * w,
       y: r * Math.sin(th) * (1 - w) + sy * w,
-      a: fromTop < 0.06 * f.gap ? 0 : ink,
+      a: ink * (1 - f.gap * (1 - smoothstep(fromTop, 0.02, 0.07))),
     })
   }
   return pts
