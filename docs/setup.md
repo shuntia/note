@@ -35,7 +35,7 @@ Go to the address in a browser and sign in. On a phone, add it to the home scree
 - **Talk to it.** Tell Note a task, a plan, a deadline, a mood. It writes things down itself.
 - **Call it.** With an empty message box, the send button is a mic. Tap it and talk.
 - **Let it plan.** Each night Note sets the order you'll do things in tomorrow. Now starts the first one. Long-press a task to drag it somewhere else in the order.
-- **Let it watch the day.** Note wakes itself a few times a day to tidy tasks and reshuffle the order. It speaks up only when it needs you, and calls only when you look free.
+- **Let it watch the day.** Note wakes itself a few times a day to tidy tasks and reshuffle the order. Each time it messages you, calls you, or stays quiet. It calls on its own only when you look free; ask it to call you at three and it will.
 - **Leave it alone.** It keeps its own short notes and remembers what matters. You don't manage either.
 
 ## Optional

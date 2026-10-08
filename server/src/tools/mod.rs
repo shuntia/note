@@ -851,9 +851,10 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
         ),
         "trigger_set" => (
             "Lay a trigger point: a moment later today when you will look at the situation \
-             again and either say something or stay quiet. prompt is the note to yourself \
-             about what you are following up on. This is how you reach out on your own \
-             terms rather than waiting to be asked. at least 10 minutes ahead.",
+             again and then message the user, call them, or stay quiet. prompt is the note \
+             to yourself about what you are following up on; when the user asks you to call \
+             them, say so in it and the wake-up will ring. This is how you reach out on your \
+             own terms rather than waiting to be asked. at least 10 minutes ahead.",
             schema::<trigger_ops::SetArgs>(),
         ),
         "wait_until" => (
@@ -876,7 +877,8 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
              ritual — it lands in the thread and as a notification. With ring set, Note calls \
              instead: the open web app rings, else the linked phone. A ring is refused while the \
              user seems busy — working, in a calendar event, in a quiet window, or away for 90 \
-             minutes; then say it without ring, or stay quiet.",
+             minutes; then say it without ring, or stay quiet. Set asked too when the user \
+             asked to be called now, and the ring goes through anyway.",
             schema::<trigger_ops::SayArgs>(),
         ),
         "stay_quiet" => (

@@ -63,6 +63,10 @@ pub struct SayArgs {
     /// help more than a message.
     #[serde(default)]
     pub ring: bool,
+    /// The user asked to be called at this moment: the ring goes through even
+    /// when they seem busy.
+    #[serde(default)]
+    pub asked: bool,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -215,7 +219,7 @@ pub fn say(conn: &Connection, ctx: &ToolCtx, args: &SayArgs) -> Result<serde_jso
     if text.is_empty() || text.len() > triggers::MAX_SAY_BYTES {
         return Err(ToolError::rejected(format!("text must be 1 to {} bytes", triggers::MAX_SAY_BYTES)));
     }
-    if args.ring {
+    if args.ring && !args.asked {
         let tz = triggers::timezone(ctx.config_dir, ctx.username);
         let busy = crate::wake::seems_busy(conn, ctx.user_id, &tz, jiff::Timestamp::now())
             .map_err(|e| ToolError::internal(e.to_string()))?;
@@ -516,5 +520,13 @@ mod tests {
         assert_eq!(out["ring"], true);
         let out = dispatch(&conn, &ctx(&tmp), SessionKind::Trigger, "say", r#"{"text":"hi"}"#).unwrap();
         assert_eq!(out["ring"], false);
+    }
+
+    #[test]
+    fn a_ring_the_user_asked_for_goes_through_while_they_seem_busy() {
+        let (conn, tmp) = env();
+        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Trigger, "say",
+            r#"{"text":"it's three, as you asked","ring":true,"asked":true}"#).unwrap();
+        assert_eq!(out["ring"], true);
     }
 }

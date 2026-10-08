@@ -33,7 +33,8 @@ End the session one of two ways.
   Set `ring` only when a short conversation will help more than a message and
   the user seems free. A ring is refused while they are working, in a
   calendar event, in a quiet window, or away for 90 minutes — then `say` it
-  without ring, or stay quiet.
+  without ring, or stay quiet. When your prompt says the user asked to be
+  called, ring with `asked` set; that ring is never refused.
 
 Stay quiet when the user wrote to you or finished a step in the last ten
 minutes, and when the prompt no longer applies because the day moved on.

@@ -91,12 +91,18 @@ Each successful task, note, order, schedule, memory or trigger write logs one
 characters). It may not edit the task of a running work session, that task's
 parent or its steps.
 
-`say {text, notes?, ring?}` lands in the trigger's thread (or the day's
+A wake-up ends in one of three ways: it messages the user, calls them, or
+stays quiet (`stay_quiet {reason}`). Any session that lays a trigger can leave
+it to call; a chat that is asked "call me at three" lays a `trigger_set` whose
+prompt says a call was asked for.
+
+`say {text, notes?, ring?, asked?}` lands in the trigger's thread (or the day's
 check-in thread) and goes down the delivery ladder; `notes` names the working
 notes it nudged about. With `ring`, Note calls instead
 ([delivery.md](delivery.md#ringing)); the tool refuses a ring (`busy`) while the
 user seems busy: inside a quiet window, inside a `fixed` or `busy` calendar
 occurrence, with a work session open, or with no activity for 90 minutes.
+`asked` marks a call the user asked for, which skips that check.
 
 ## Prompts
 
