@@ -96,14 +96,19 @@ pub fn fetch_site_ok(headers: &axum::http::HeaderMap) -> bool {
     }
 }
 
-/// A browser's `Origin` must be one of `allowed`; a non-browser client sends none.
+/// A browser's `Origin` must be one of `allowed` or name the host the request
+/// was sent to; a non-browser client sends none.
 pub fn origin_ok(headers: &axum::http::HeaderMap, allowed: &[String]) -> bool {
-    match headers.get(axum::http::header::ORIGIN) {
-        None => true,
-        Some(v) => v.to_str().is_ok_and(|o| {
-            let o = o.trim_end_matches('/').to_ascii_lowercase();
-            allowed.contains(&o)
-        }),
+    let Some(origin) = headers.get(axum::http::header::ORIGIN) else { return true };
+    let Ok(origin) = origin.to_str() else { return false };
+    let origin = origin.trim_end_matches('/').to_ascii_lowercase();
+    if allowed.contains(&origin) {
+        return true;
+    }
+    let host = headers.get(axum::http::header::HOST).and_then(|h| h.to_str().ok()).map(str::to_ascii_lowercase);
+    match (origin.split_once("://"), host) {
+        (Some(("http" | "https", authority)), Some(host)) => authority == host,
+        _ => false,
     }
 }
 
@@ -250,6 +255,22 @@ mod tests {
             assert!(origin_ok(&h, &allowed), "{ok}");
         }
         for bad in ["https://evil.example", "http://note.example.net", "https://note.example.net.evil.example", "null"] {
+            h.insert("origin", bad.parse().unwrap());
+            assert!(!origin_ok(&h, &allowed), "{bad}");
+        }
+    }
+
+    #[test]
+    fn an_origin_naming_the_requested_host_is_same_origin() {
+        let allowed = page_origins("https://note.example.net", Some("0.0.0.0:3271"));
+        let mut h = axum::http::HeaderMap::new();
+        h.insert("host", "100.64.0.9:3271".parse().unwrap());
+        h.insert("origin", "http://100.64.0.9:3271".parse().unwrap());
+        assert!(origin_ok(&h, &allowed));
+        h.insert("host", "laptop.tail.ts.net".parse().unwrap());
+        h.insert("origin", "https://laptop.tail.ts.net".parse().unwrap());
+        assert!(origin_ok(&h, &allowed));
+        for bad in ["https://evil.example", "https://laptop.tail.ts.net:444", "null", "file://laptop.tail.ts.net"] {
             h.insert("origin", bad.parse().unwrap());
             assert!(!origin_ok(&h, &allowed), "{bad}");
         }

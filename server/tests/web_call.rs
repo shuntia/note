@@ -439,6 +439,17 @@ async fn a_foreign_page_cannot_open_either_socket() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_page_served_from_another_address_of_this_server_opens_its_sockets() {
+    let r = rig().await;
+    let own = format!("http://{}", r.addr);
+    for path in ["/api/ws", "/api/call/ws"] {
+        let mut ws = open_from(r.addr, &r.cookie, path, Some(&own)).await.unwrap();
+        ws.close(None).await.unwrap();
+        assert_eq!(open_from(r.addr, &r.cookie, path, Some("http://evil.example")).await.err(), Some(403), "{path}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_user_holding_two_call_sockets_is_refused_a_third() {
     let r = rig().await;
     let _held = (r.state.call_sockets.take(1).unwrap(), r.state.call_sockets.take(1).unwrap());

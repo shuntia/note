@@ -214,11 +214,11 @@ impl Relays {
         token
     }
 
-    /// The thread the ring was about, for its own user, once, while it lasts.
-    pub fn take_ring_at(&self, token: &str, user_id: i64, now: Instant) -> Option<Option<i64>> {
+    /// The ring's message, for its own user, once, while it lasts.
+    pub fn take_ring_at(&self, token: &str, user_id: i64, now: Instant) -> Option<OutboundMessage> {
         let mut rings = lock(&self.rings);
         rings.get(token).filter(|r| r.user_id == user_id && r.until >= now)?;
-        rings.remove(token).map(|r| r.message.conversation_id)
+        rings.remove(token).map(|r| r.message)
     }
 
     /// The message of the user's own ring, which no longer rings.
@@ -268,16 +268,17 @@ pub async fn serve(
     let Some(voice) = state.voice.clone().filter(|v| v.is_up()) else {
         return refuse(socket, "unavailable").await;
     };
-    let start = match &ring {
+    let now = jiff::Timestamp::now();
+    let opened = match &ring {
         Some(token) => {
-            let Some(start) = voice.answer_ring(token, user_id) else {
+            let Some(opened) = voice.answer_ring(token, user_id, now) else {
                 return refuse(socket, "missed").await;
             };
-            start
+            opened
         }
-        None => WebStart { thread: conversation_id, message: None },
+        None => voice.start_web_call(user_id, WebStart { thread: conversation_id, message: None }, now),
     };
-    match voice.start_web_call(user_id, start, jiff::Timestamp::now()) {
+    match opened {
         Ok(call) => {
             if let Some(token) = ring {
                 state.hub.send(user_id, &serde_json::json!({ "type": "ring_taken", "ring": token }).to_string());
@@ -546,7 +547,7 @@ mod tests {
         let at = Instant::now();
         let token = relays.offer_ring_at(1, &ring_msg(Some(4)), at);
         assert_eq!(relays.take_ring_at(&token, 2, at), None, "another user's ring");
-        assert_eq!(relays.take_ring_at(&token, 1, at), Some(Some(4)));
+        assert_eq!(relays.take_ring_at(&token, 1, at), Some(ring_msg(Some(4))));
         assert_eq!(relays.take_ring_at(&token, 1, at), None, "answered once");
         assert!(relays.expired_rings_at(at + RING_FOR * 2).is_empty(), "an answered ring never runs out");
         let late = relays.offer_ring_at(1, &ring_msg(None), at);
