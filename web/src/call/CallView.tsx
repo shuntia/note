@@ -1,25 +1,18 @@
-import { useCallback, useEffect, useRef, useState, type PointerEvent } from 'react'
+import { useEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from 'react'
 import { t } from '../i18n'
 import { reducedMotion } from '../motion'
 import { onCallFrame } from '../ws'
+import { CallControl, type CallOpen, type CallShown, type Phase } from './control'
 import { ease, shape, smooth, stillForm, target, type Form, type Look, type Pt } from './form'
 import { primeAudio, releaseAudioContext } from './prime'
-import { callUrl, CallSession, type LiveState } from './session'
+import { callUrl, CallSession, type AudioIo, type LiveState } from './session'
 import '../styles/call.css'
 
-export type CallOpen = { conversationId: number | null; ring: string | null; at: number }
-
-type Phase = 'ringing' | 'connecting' | 'live' | 'hanging' | 'gone'
-type Run = { alive: boolean; session: CallSession | null }
+export type { CallOpen }
 
 const SWIPE_PX = 80
-const LEAVE_MS = 450
-const RING_MS = 30_000
-// Past the voice side's longest drain, so Note's last words always finish first.
-const HANG_UP_WAIT_MS = 62_000
 const MAX_FRAME_MS = 100
 const ALPHA_STEPS = 64
-const FAILED = new Set(['unavailable', 'busy', 'failed', 'missed'])
 
 function lookOf(phase: Phase, live: LiveState): Look {
   if (phase === 'ringing') return 'ringing'
@@ -57,102 +50,43 @@ export function CallView({
   onClose: (conversationId: number | null) => void
   onMicBlocked: () => void
 }) {
-  const [phase, setPhase] = useState<Phase>(call.ring ? 'ringing' : 'connecting')
-  const [live, setLive] = useState<LiveState>('listening')
-  const [muted, setMuted] = useState(false)
-  const [caption, setCaption] = useState<{ text: string; at: number } | null>(null)
-  const [shake, setShake] = useState(false)
-  const run = useRef<Run | null>(null)
-  const timers = useRef<number[]>([])
+  const props = useRef({ onClose, onMicBlocked })
+  props.current = { onClose, onMicBlocked }
+  const [control] = useState(() => {
+    let audio: () => AudioIo
+    return new CallControl(
+      call,
+      {
+        load: async () => {
+          audio = (await import('./audio')).webAudio
+        },
+        connect: (events) => new CallSession(callUrl(location, call), audio(), events),
+        prime: primeAudio,
+        release: releaseAudioContext,
+        onClose: (id) => props.current.onClose(id),
+        onMicBlocked: () => props.current.onMicBlocked(),
+        later: (fn, ms) => window.setTimeout(fn, ms),
+        cancel: (id) => window.clearTimeout(id),
+      },
+      (next) => setShown(next),
+    )
+  })
+  const [shown, setShown] = useState<CallShown>(control.shown)
+  const { phase, live, muted, caption, shake } = shown
   const canvas = useRef<HTMLCanvasElement>(null)
   const root = useRef<HTMLDivElement>(null)
   const swipeFrom = useRef<number | null>(null)
   const swiped = useRef(false)
-  const phaseRef = useRef(phase)
-  phaseRef.current = phase
   const look = lookOf(phase, live)
   const drawn = useRef({ look, muted })
   drawn.current = { look, muted }
-
-  const later = useCallback((fn: () => void, ms: number) => {
-    timers.current.push(window.setTimeout(fn, ms))
-  }, [])
-
-  const stop = useCallback(() => {
-    const r = run.current
-    if (!r) return
-    r.alive = false
-    r.session?.close()
-  }, [])
-
-  // The call's one true end: the audio context primed by the opening tap goes with it.
-  const leave = useCallback(
-    (conversationId: number | null, failed: boolean) => {
-      if (phaseRef.current === 'gone') return
-      phaseRef.current = 'gone'
-      setPhase('gone')
-      setShake(failed)
-      releaseAudioContext()
-      later(() => onClose(conversationId), LEAVE_MS)
-    },
-    [later, onClose],
-  )
-
-  const begin = useCallback(async () => {
-    const token: Run = { alive: true, session: null }
-    run.current = token
-    const { webAudio } = await import('./audio')
-    if (!token.alive) return
-    const s = new CallSession(callUrl(location, call), webAudio(), {
-      state: (state) => {
-        setLive(state)
-        setPhase((p) => (p === 'connecting' ? 'live' : p))
-      },
-      caption: (text) => setCaption({ text, at: Date.now() }),
-      ended: (e) => leave(e.conversationId, FAILED.has(e.reason)),
-      micDenied: () => {
-        onMicBlocked()
-        leave(null, true)
-      },
-    })
-    token.session = s
-    await s.start()
-  }, [call, leave, onMicBlocked])
-
-  const end = useCallback(() => {
-    const p = phaseRef.current
-    if (p === 'ringing' || p === 'connecting') {
-      stop()
-      return leave(null, false)
-    }
-    if (p !== 'live') return
-    phaseRef.current = 'hanging'
-    setPhase('hanging')
-    run.current?.session?.hangUp()
-    later(() => {
-      stop()
-      leave(call.conversationId, false)
-    }, HANG_UP_WAIT_MS)
-  }, [call.conversationId, later, leave, stop])
-
-  const answer = () => {
-    primeAudio()
-    phaseRef.current = 'connecting'
-    setPhase('connecting')
-    void begin()
-  }
 
   const tap = () => {
     if (swiped.current) {
       swiped.current = false
       return
     }
-    const p = phaseRef.current
-    if (p === 'ringing') return answer()
-    if (p !== 'live' && p !== 'connecting') return
-    const on = !muted
-    setMuted(on)
-    run.current?.session?.setMuted(on)
+    control.tap()
   }
 
   const down = (e: PointerEvent) => {
@@ -164,45 +98,34 @@ export function CallView({
     swipeFrom.current = null
     if (from !== null && e.clientY - from > SWIPE_PX) {
       swiped.current = true
-      end()
+      control.end()
     }
   }
 
-  useEffect(() => {
-    if (call.ring) {
-      const timer = window.setTimeout(() => {
-        if (phaseRef.current === 'ringing') leave(null, false)
-      }, RING_MS)
-      return () => {
-        window.clearTimeout(timer)
-        stop()
-      }
-    }
-    void begin()
-    return stop
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  const key = (e: KeyboardEvent) => {
+    if (e.key === 'Escape') return control.end()
+    if (e.key !== 'Tab' || !root.current) return
+    const stops = [...root.current.querySelectorAll('button')]
+    const at = stops.indexOf(document.activeElement as HTMLButtonElement)
+    const step = e.shiftKey ? stops.length - 1 : 1
+    e.preventDefault()
+    stops[at < 0 ? (e.shiftKey ? stops.length - 1 : 0) : (at + step) % stops.length]?.focus()
+  }
 
-  useEffect(() => () => timers.current.forEach((id) => window.clearTimeout(id)), [])
-
+  useEffect(() => control.mount(), [control])
+  useEffect(() => () => control.dispose(), [control])
   useEffect(
     () =>
       onCallFrame((f) => {
-        if (f.type === 'ring_taken' && f.ring === call.ring && phaseRef.current === 'ringing') leave(null, false)
+        if (f.type === 'ring_taken') control.ringTaken(f.ring)
       }),
-    [call.ring, leave],
+    [control],
   )
 
-  useEffect(() => root.current?.focus(), [])
-
-  const endRef = useRef(end)
-  endRef.current = end
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') endRef.current()
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    root.current?.focus()
+    return () => opener?.focus()
   }, [])
 
   useEffect(() => {
@@ -223,7 +146,7 @@ export function CallView({
       const dt = Math.max(0, Math.min(MAX_FRAME_MS, now - last))
       last = now
       clock += dt
-      const lv = run.current?.session?.levels() ?? { mic: 0, out: 0 }
+      const lv = control.levels()
       mic = smooth(mic, Math.min(1, lv.mic * 4), dt)
       out = smooth(out, Math.min(1, lv.out * 4), dt)
       const { look, muted } = drawn.current
@@ -249,22 +172,23 @@ export function CallView({
     return () => cancelAnimationFrame(frame)
   }, [])
 
-  const shown = phase === 'live' || phase === 'hanging' ? live : phase
+  const state = phase === 'live' || phase === 'hanging' ? live : phase
 
   return (
     <div
       ref={root}
       tabIndex={-1}
       className={`call-view${shake ? ' shake' : ''}${phase === 'gone' ? ' gone' : ''}`}
-      data-state={shown}
+      data-state={state}
       data-muted={muted}
       role="dialog"
       aria-modal="true"
       aria-label={t('talk.call')}
       onPointerDown={down}
       onPointerUp={up}
+      onKeyDown={key}
     >
-      <button className="call-close" aria-label={t('call.end')} onClick={end}>
+      <button className="call-close" aria-label={t('call.end')} onClick={() => control.end()}>
         <svg viewBox="0 0 24 24" aria-hidden="true">
           <path d="M6 6l12 12" />
           <path d="M18 6L6 18" />
@@ -278,11 +202,13 @@ export function CallView({
       >
         <canvas ref={canvas} aria-hidden="true" />
       </button>
-      {caption && (
-        <p key={caption.at} className="call-caption" aria-live="polite">
-          {caption.text}
-        </p>
-      )}
+      <div className="call-captions" aria-live="polite">
+        {caption && (
+          <p key={caption.n} className="call-caption">
+            {caption.text}
+          </p>
+        )}
+      </div>
     </div>
   )
 }

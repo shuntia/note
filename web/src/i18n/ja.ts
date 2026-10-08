@@ -780,7 +780,7 @@ export const ja: Dict = {
   "talk.rename": "名前を変更",
   "talk.renameTitle": "このチャットの名前を変更",
   "talk.send": "送信",
-  "talk.call": "ノートに電話",
+  "talk.call": "Note に電話",
   "talk.micBlocked": "マイクが使えません",
   "call.end": "通話を終了",
   "call.mute": "ミュート",
