@@ -1,4 +1,5 @@
 import { api } from './api'
+import { ringable } from './desktop'
 import type { FailureReason } from './types'
 
 // `conversation_id` is the thread a check-in opened; null on every other event.
@@ -51,7 +52,7 @@ export function onCallFrame(fn: (frame: CallFrame) => void): () => void {
   }
 }
 
-export const visibilityFrame = (hidden: boolean) => JSON.stringify({ type: 'visible', on: !hidden })
+export const visibilityFrame = (on: boolean) => JSON.stringify({ type: 'visible', on })
 export const declineFrame = (ring: string) => JSON.stringify({ type: 'decline', ring })
 
 let shell: WebSocket | null = null
@@ -79,7 +80,7 @@ export function connectEvents(
   let deadHandshakes = 0
   let sessionChecked = false
   const report = () => {
-    if (socket?.readyState === WebSocket.OPEN) socket.send(visibilityFrame(document.hidden))
+    if (socket?.readyState === WebSocket.OPEN) socket.send(visibilityFrame(ringable()))
   }
   document.addEventListener('visibilitychange', report)
   const open = () => {

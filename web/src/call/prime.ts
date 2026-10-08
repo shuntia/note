@@ -14,8 +14,12 @@ export function takeAudioContext(): AudioContext {
   return primed
 }
 
-export function releaseAudioContext(): void {
+// `lingerMs` lets a sound already scheduled on the context finish before it closes; the next take gets a fresh one at once.
+export function releaseAudioContext(lingerMs = 0): void {
   const ctx = primed
   primed = null
-  void ctx?.close().catch(() => {})
+  if (!ctx) return
+  const close = () => void ctx.close().catch(() => {})
+  if (lingerMs > 0) setTimeout(close, lingerMs)
+  else close()
 }

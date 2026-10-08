@@ -5,6 +5,7 @@ import { declineRing, onCallFrame } from '../ws'
 import { CallControl, type CallOpen, type CallShown, type Phase } from './control'
 import { ease, mark, shape, smooth, stillForm, target, type Form, type Look, type Pt } from './form'
 import { primeAudio, releaseAudioContext } from './prime'
+import { chime, CUE_TAIL_MS, ringtone } from './tones'
 import { callUrl, CallSession, type AudioIo, type LiveState } from './session'
 import { Swipe } from './swipe'
 import '../styles/call.css'
@@ -64,7 +65,9 @@ export function CallView({
         },
         connect: (events) => new CallSession(callUrl(location, call), audio(), events),
         prime: primeAudio,
-        release: releaseAudioContext,
+        release: () => releaseAudioContext(CUE_TAIL_MS),
+        ring: ringtone,
+        chime,
         decline: declineRing,
         onClose: (id) => props.current.onClose(id),
         onMicBlocked: () => props.current.onMicBlocked(),

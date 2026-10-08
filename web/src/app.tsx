@@ -13,6 +13,7 @@ import { api, ApiError, setOnUnauthorized } from './api'
 import { CallView, type CallOpen } from './call/CallView'
 import { primeAudio } from './call/prime'
 import { trailing } from './coalesce'
+import { desktop, ringable } from './desktop'
 import { Jot } from './jot'
 import { glide, lift, viewIn, viewOut } from './motion-gsap'
 import { reducedMotion } from './motion'
@@ -190,7 +191,8 @@ export function App() {
   useEffect(() => {
     if (!me?.voice) return
     return onCallFrame((f) => {
-      if (f.type !== 'incoming' || document.hidden) return
+      if (f.type !== 'incoming' || !ringable()) return
+      desktop()?.ring()
       setCall((c) => c ?? { conversationId: f.conversation_id, ring: f.ring, at: Date.now() })
     })
   }, [me])

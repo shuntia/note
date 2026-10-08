@@ -19,9 +19,9 @@ test('a call the user starts opens connecting and unmuted', () => {
   expect(html).toContain('aria-pressed="false"')
 })
 
-test('a page tells the server whether it is in view', () => {
-  expect(JSON.parse(visibilityFrame(false))).toEqual({ type: 'visible', on: true })
-  expect(JSON.parse(visibilityFrame(true))).toEqual({ type: 'visible', on: false })
+test('a page tells the server whether it can be rung', () => {
+  expect(JSON.parse(visibilityFrame(true))).toEqual({ type: 'visible', on: true })
+  expect(JSON.parse(visibilityFrame(false))).toEqual({ type: 'visible', on: false })
 })
 
 test('a declined ring names its ring to the server', () => {

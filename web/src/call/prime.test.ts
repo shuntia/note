@@ -44,6 +44,17 @@ test('priming again reuses the live context', () => {
   expect(FakeContext.made).toBe(1)
 })
 
+test('a lingering release hands out a fresh context at once and closes the old one later', () => {
+  vi.useFakeTimers()
+  const first = takeAudioContext()
+  releaseAudioContext(500)
+  expect(first.state).not.toBe('closed')
+  expect(takeAudioContext()).not.toBe(first)
+  vi.advanceTimersByTime(500)
+  expect(first.state).toBe('closed')
+  vi.useRealTimers()
+})
+
 test('a closed context is replaced', () => {
   const ctx = takeAudioContext()
   void ctx.close()

@@ -3,6 +3,7 @@ import type { CallEvents, LiveState } from './session'
 
 export type CallOpen = { conversationId: number | null; ring: string | null; at: number }
 export type Phase = 'ringing' | 'connecting' | 'live' | 'hanging' | 'gone'
+export type Cue = 'connected' | 'ended' | 'failed'
 export type CallShown = {
   phase: Phase
   live: LiveState
@@ -26,6 +27,9 @@ export type CallDeps = {
   connect(events: CallEvents): CallLine
   prime(): void
   release(): void
+  // Starts the ringtone; the returned function stops it.
+  ring(): () => void
+  chime(cue: Cue): void
   decline(ring: string): void
   onClose(conversationId: number | null): void
   onMicBlocked(): void
@@ -42,13 +46,14 @@ const FAILED = new Set(['unavailable', 'busy', 'failed', 'missed'])
 type Run = { alive: boolean; line: CallLine | null }
 
 // The call view's behaviour without the DOM: `mount` may run twice (StrictMode) and only one line survives;
-// `leave` is the call's one true end and releases the primed audio context.
+// `leave` is the call's one true end: it sounds the end of a call that was answered and releases the primed audio context.
 export class CallControl {
   shown: CallShown
   private run: Run | null = null
   private timers: number[] = []
   private captions = 0
   private landings = 0
+  private ringtone: (() => void) | null = null
 
   constructor(
     private readonly call: CallOpen,
@@ -60,11 +65,13 @@ export class CallControl {
 
   mount(): () => void {
     if (this.call.ring) {
+      this.ringtone = this.deps.ring()
       const ring = this.deps.later(() => {
         if (this.shown.phase === 'ringing') this.leave(null, false)
       }, RING_MS)
       return () => {
         this.deps.cancel(ring)
+        this.silence()
         this.stop()
       }
     }
@@ -115,6 +122,7 @@ export class CallControl {
   }
 
   private answer() {
+    this.silence()
     this.deps.prime()
     this.set({ phase: 'connecting' })
     void this.begin()
@@ -126,7 +134,11 @@ export class CallControl {
     await this.deps.load()
     if (!token.alive) return
     const line = this.deps.connect({
-      state: (live) => this.set({ live, phase: this.shown.phase === 'connecting' ? 'live' : this.shown.phase }),
+      state: (live) => {
+        const connected = this.shown.phase === 'connecting'
+        if (connected) this.deps.chime('connected')
+        this.set({ live, phase: connected ? 'live' : this.shown.phase })
+      },
       caption: (text) => this.set({ caption: { text, n: ++this.captions } }),
       tools: (running, landed) =>
         this.set({
@@ -153,9 +165,16 @@ export class CallControl {
 
   private leave(conversationId: number | null, failed: boolean) {
     if (this.shown.phase === 'gone') return
+    this.silence()
+    if (this.shown.phase !== 'ringing') this.deps.chime(failed ? 'failed' : 'ended')
     this.set({ phase: 'gone', shake: failed })
     this.deps.release()
     this.later(() => this.deps.onClose(conversationId), LEAVE_MS)
+  }
+
+  private silence() {
+    this.ringtone?.()
+    this.ringtone = null
   }
 
   private later(fn: () => void, ms: number) {
