@@ -11,7 +11,7 @@ import {
 } from 'react'
 import { api, ApiError } from '../api'
 import { latest } from '../coalesce'
-import { dropped, useLiftDrag, withOrder, type Drop } from '../order'
+import { dropped, useLiftDrag, withOrder, type DropTo } from '../order'
 import type { ViewProps } from '../app'
 import { collapse, flip, settle } from '../motion-gsap'
 import { reducedMotion } from '../motion'
@@ -321,7 +321,7 @@ function useRowMotion(root: RefObject<HTMLDivElement | null>, busy: boolean) {
   }, [read])
 
   useLayoutEffect(() => {
-    if (busy) return
+    if (busy || root.current?.querySelector('[data-dragging]')) return
     const { at, els } = read()
     const was = tops.current
     tops.current = at
@@ -375,7 +375,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
   const [sort, setSort] = useState<SortKey>(storedSort)
   const [goalDraft, setGoalDraft] = useState<{ title: string; due: string } | null>(null)
   const [runOrder, setRunOrder] = useState<number[]>([])
-  const dropRef = useRef<((d: Drop) => void) | null>(null)
+  const dropRef = useRef<DropTo | null>(null)
   useLiftDrag(dropRef)
   const seeded = useRef(false)
   const unfinished = useRef(new Map<number, number>())
@@ -811,9 +811,11 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
     ...(sort === 'category' ? byCategory(rest, categories).flatMap(([, rows]) => rows) : rest),
   ].map((p) => p.node)
   dropRef.current = canDrag
-    ? ({ from, to, into }) => {
+    ? ({ from, to, into }, commit) => {
         const next = dropped(runOrder, dragRows, head.length, from, to, into)
-        if (next.length === runOrder.length && next.every((id, i) => id === runOrder[i])) return
+        const same = next.length === runOrder.length && next.every((id, i) => id === runOrder[i])
+        if (same) return false
+        if (!commit) return true
         mark()
         setRunOrder(next)
         api
@@ -823,6 +825,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
             notify(t('tasks.updateFailed'))
             load()
           })
+        return true
       }
     : null
 

@@ -491,7 +491,9 @@
   inset: -0.25rem -0.5rem;
   z-index: -1;
   border-radius: var(--radius);
-  background: var(--haze-strong);
+  background: color-mix(in oklch, var(--ivory) 96%, transparent);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
   box-shadow: 0 0.75rem 1.75rem -0.5rem rgb(0 0 0 / 0.12);
 }
 .task-item[data-lifted][data-settling] { transition: transform 180ms ease; }
