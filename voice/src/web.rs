@@ -11,6 +11,7 @@ pub const OUT_RATE: u32 = 48_000;
 const AHEAD: usize = 10;
 const FRAME_TIME: Duration = Duration::from_millis(10);
 
+/// Runs under `WebMedia`'s queue lock on a runtime worker: it must not block or call back into `WebMedia`.
 pub type Emit = Arc<dyn Fn(Media) + Send + Sync>;
 
 fn lock<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {

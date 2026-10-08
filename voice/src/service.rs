@@ -6,13 +6,13 @@ use crate::calls::{clear_member, ring_once, Ring};
 use crate::config::VoiceServiceConfig;
 use crate::inbound::{say_and_leave, Detect, Detector};
 use crate::matrix::{HomeserverError, Matrix, RoomEvent};
-use crate::media::{LiveKitJoin, MediaJoin};
+use crate::media::{LiveKitJoin, MediaIo, MediaJoin};
 use crate::outgoing::CallWriter;
 use crate::session::{run_session, Cues, SessionDeps, SessionEnd, SessionIn};
 use crate::state::{CallState, LinkState, StateFile};
 use note_voice_proto::{
-    dial_forever, AppliedFile, BoxFuture, CallBody, Dir, Direction, FileOutbox, Handler, Outcome, Peer, PeerConfig,
-    Refusal, RefusalCode, Reply, Request, Role, VoiceOption, VoiceProfile,
+    dial_forever, AppliedFile, BoxFuture, CallBody, Dir, Direction, FileOutbox, Handler, Media, Origin, Outcome, Peer,
+    PeerConfig, Refusal, RefusalCode, Reply, Request, Role, VoiceOption, VoiceProfile,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -253,6 +253,7 @@ struct Service {
     events: broadcast::Sender<RoomEvent>,
     hang_ups: Mutex<HashMap<String, watch::Sender<bool>>>,
     sessions: Mutex<HashMap<String, mpsc::UnboundedSender<SessionIn>>>,
+    web_feeds: Mutex<HashMap<String, crate::web::WebFeed>>,
     backends: Backends,
     sidecars: Arc<Sidecars>,
     lines: Arc<Lines>,
@@ -261,6 +262,12 @@ struct Service {
     answering: Arc<Answering>,
     previews: Previews,
     peer: OnceLock<Peer>,
+}
+
+/// A session's writer and inbox, open before its media so a `HangUp` that arrives meanwhile is kept.
+struct Opened {
+    writer: CallWriter,
+    inbox: mpsc::UnboundedReceiver<SessionIn>,
 }
 
 impl Service {
@@ -398,24 +405,13 @@ impl Service {
             st.data.profiles.insert(mxid.to_string(), profile.clone());
             let _ = st.save();
         }
-        let (svc, id) = (self.clone(), call_id.to_string());
-        let writer = match CallWriter::spawn(move |body| {
-            svc.send(&id, body);
-        }) {
-            Ok(writer) => writer,
+        let opened = match self.open_session(call_id) {
+            Ok(opened) => opened,
             Err(e) => {
                 let reason = format!("starting the frame writer: {e}");
                 return self.fail_before_join(call_id, room_id, mxid, direction, reason).await;
             }
         };
-        let (tx, inbox) = mpsc::unbounded_channel();
-        {
-            let mut sessions = lock(&self.sessions);
-            if !self.peer().is_up() {
-                let _ = tx.send(SessionIn::LinkUp(false));
-            }
-            sessions.insert(call_id.to_string(), tx);
-        }
         let join = async {
             self.matrix.put_member(room_id, LIVE_MEMBER_MS, &self.cfg.livekit_service_url).await?;
             let wait = match direction {
@@ -437,6 +433,33 @@ impl Service {
                 return self.finish(call_id, Outcome::Failed { reason });
             }
         };
+        let end = self.run_answered(call_id, opened, media, profile, direction).await;
+        clear_member(&self.matrix, room_id).await;
+        self.conclude(call_id, &end);
+    }
+
+    fn open_session(self: &Arc<Self>, call_id: &str) -> std::io::Result<Opened> {
+        let (svc, id) = (self.clone(), call_id.to_string());
+        let writer = CallWriter::spawn(move |body| {
+            svc.send(&id, body);
+        })?;
+        let (tx, inbox) = mpsc::unbounded_channel();
+        let mut sessions = lock(&self.sessions);
+        if !self.peer().is_up() {
+            let _ = tx.send(SessionIn::LinkUp(false));
+        }
+        sessions.insert(call_id.to_string(), tx);
+        Ok(Opened { writer, inbox })
+    }
+
+    async fn run_answered(
+        self: &Arc<Self>,
+        call_id: &str,
+        opened: Opened,
+        media: Box<dyn MediaIo>,
+        profile: VoiceProfile,
+        direction: Direction,
+    ) -> SessionEnd {
         self.send(call_id, CallBody::Outcome { outcome: Outcome::Answered });
         self.set_live(call_id);
         let deps = SessionDeps {
@@ -449,16 +472,48 @@ impl Service {
             max_len: MAX_CALL,
             link_grace: LINK_GRACE,
         };
+        let Opened { writer, inbox } = opened;
         let session = tokio::spawn(run_session(deps, media, inbox, writer.sender()));
         let end = session.await.unwrap_or_else(|e| SessionEnd::MediaFailed(format!("the session failed: {e}")));
         writer.close().await;
         eprintln!("voice: call {call_id} ended: {end:?}");
         lock(&self.sessions).remove(call_id);
-        clear_member(&self.matrix, room_id).await;
+        end
+    }
+
+    fn conclude(&self, call_id: &str, end: &SessionEnd) {
         match end.failure() {
             Some(reason) => self.finish(call_id, Outcome::Failed { reason: reason.into() }),
             None => self.end(call_id),
         }
+    }
+
+    /// A web call has no ring and no room: its session runs at once on the audio Note relays.
+    fn begin_web(self: &Arc<Self>, call_id: &str, profile: VoiceProfile, direction: Direction) {
+        match lock(&self.hang_ups).entry(call_id.to_string()) {
+            std::collections::hash_map::Entry::Occupied(_) => return,
+            std::collections::hash_map::Entry::Vacant(v) => {
+                v.insert(watch::channel(false).0);
+            }
+        }
+        if self.backends.engines.languages().is_empty() {
+            return self.finish(call_id, Outcome::Failed { reason: "no voice models".into() });
+        }
+        let opened = match self.open_session(call_id) {
+            Ok(opened) => opened,
+            Err(e) => return self.finish(call_id, Outcome::Failed { reason: format!("starting the frame writer: {e}") }),
+        };
+        let (svc, id) = (self.clone(), call_id.to_string());
+        let (media, feed) = crate::web::web_media(Arc::new(move |body| {
+            svc.peer().send_media(&id, body);
+        }));
+        lock(&self.web_feeds).insert(call_id.to_string(), feed);
+        let (svc, call_id) = (self.clone(), call_id.to_string());
+        tokio::spawn(async move {
+            let end = svc.run_answered(&call_id, opened, Box::new(media), profile, direction).await;
+            svc.conclude(&call_id, &end);
+            lock(&svc.web_feeds).remove(&call_id);
+        });
     }
 
     /// An inbound caller is still answered and told, rather than left ringing.
@@ -614,7 +669,9 @@ impl Service {
             .map(|(id, c)| (id.clone(), c.room_id.clone()))
             .collect();
         for (call_id, room_id) in open {
-            clear_member(&self.matrix, &room_id).await;
+            if !room_id.is_empty() {
+                clear_member(&self.matrix, &room_id).await;
+            }
             self.finish(&call_id, Outcome::Failed { reason: "the voice service restarted".into() });
         }
     }
@@ -797,8 +854,8 @@ impl Handler for VoiceHandler {
     fn apply(&self, call_id: &str, seq: u64, body: CallBody) -> Result<(), String> {
         let svc = self.svc().clone();
         match body {
-            CallBody::Start { room_id, mxid, ring_secs, ring_by_ms, voice, direction, .. } => {
-                let room_busy = direction == Direction::Outbound && svc.busy(&room_id);
+            CallBody::Start { room_id, mxid, ring_secs, ring_by_ms, voice, direction, origin, .. } => {
+                let room_busy = origin == Origin::Matrix && direction == Direction::Outbound && svc.busy(&room_id);
                 {
                     let mut st = lock(&svc.state);
                     if st.data.calls.contains_key(call_id) {
@@ -812,7 +869,13 @@ impl Handler for VoiceHandler {
                     st.save().map_err(|e| e.to_string())?;
                 }
                 svc.applied.set_applied(call_id, seq).map_err(|e| e.to_string())?;
-                if direction == Direction::Inbound {
+                if origin == Origin::Web {
+                    if now_ms() > ring_by_ms {
+                        svc.finish(call_id, Outcome::Failed { reason: "late".into() });
+                    } else {
+                        svc.begin_web(call_id, voice, direction);
+                    }
+                } else if direction == Direction::Inbound {
                     svc.begin_answer(call_id, &room_id, voice);
                 } else if room_busy {
                     svc.finish(call_id, Outcome::Failed { reason: "a call is already up in this room".into() });
@@ -859,6 +922,14 @@ impl Handler for VoiceHandler {
                 Request::Preview { language, voice } => svc.preview(language, voice).await,
             }
         })
+    }
+
+    fn media(&self, call_id: &str, body: Media) {
+        if let Media::AudioIn { pcm } = body {
+            if let Some(feed) = lock(&self.svc().web_feeds).get(call_id) {
+                feed.push(&pcm.0);
+            }
+        }
     }
 
     fn link_changed(&self, up: bool) {
@@ -969,6 +1040,7 @@ pub async fn run_with(cfg: VoiceServiceConfig, peer_cfg: PeerConfig, backends: B
         events: broadcast::channel(256).0,
         hang_ups: Mutex::new(HashMap::new()),
         sessions: Mutex::new(HashMap::new()),
+        web_feeds: Mutex::new(HashMap::new()),
         backends,
         sidecars,
         lines,

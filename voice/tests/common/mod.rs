@@ -11,6 +11,8 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
+pub static HEARD_SAMPLES: AtomicUsize = AtomicUsize::new(0);
+
 #[derive(Default)]
 pub struct Hs {
     pub created: Vec<Value>,
@@ -232,6 +234,10 @@ impl Handler for HeldNote {
     fn acked(&self, call_id: &str, upto: u64) {
         self.rec.acked(call_id, upto);
     }
+
+    fn media(&self, call_id: &str, body: note_voice_proto::Media) {
+        self.rec.media(call_id, body);
+    }
 }
 
 pub struct FakeNote {
@@ -271,7 +277,8 @@ pub struct SilentEngines {
 struct Deaf;
 
 impl note_voice::audio::engines::Vad for Deaf {
-    fn push(&mut self, _window: &[f32]) -> bool {
+    fn push(&mut self, window: &[f32]) -> bool {
+        HEARD_SAMPLES.fetch_add(window.len(), Ordering::SeqCst);
         false
     }
 
