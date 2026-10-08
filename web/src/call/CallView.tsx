@@ -114,10 +114,13 @@ export function CallView({
   useEffect(() => control.mount(), [control])
   useEffect(() => {
     const escape = (e: globalThis.KeyboardEvent) => {
-      if (e.key === 'Escape') control.end()
+      if (e.key !== 'Escape') return
+      e.preventDefault()
+      e.stopPropagation()
+      control.end()
     }
-    window.addEventListener('keydown', escape)
-    return () => window.removeEventListener('keydown', escape)
+    window.addEventListener('keydown', escape, true)
+    return () => window.removeEventListener('keydown', escape, true)
   }, [control])
   useEffect(() => () => control.dispose(), [control])
   useEffect(

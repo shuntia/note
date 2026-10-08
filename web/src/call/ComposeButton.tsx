@@ -1,8 +1,6 @@
 import { t } from '../i18n'
 
-// The composer's one button: send while there is text, a call to Note while there is none.
-// Both faces stay drawn so the button morphs between them rather than swapping. A press keeps the
-// field focused: blurring it brings the phone's tab bar back and moves the button out from under the tap.
+// Send while there is text, a call to Note while there is none; a press keeps the field focused so the tab bar stays down.
 export function ComposeButton({
   draft,
   busy,
@@ -21,7 +19,7 @@ export function ComposeButton({
       className="compose-button"
       data-face={send ? 'send' : 'mic'}
       aria-label={send ? t('talk.send') : micBlocked ? t('talk.micBlocked') : t('talk.call')}
-      disabled={send ? busy || !draft.trim() : micBlocked}
+      disabled={send ? busy || !draft.trim() : busy || micBlocked}
       onMouseDown={(e) => e.preventDefault()}
       onClick={send ? undefined : onCall}
     >

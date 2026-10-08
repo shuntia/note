@@ -28,3 +28,9 @@ test('a blocked mic is struck through and cannot be pressed', () => {
   expect(html).toContain('disabled=""')
   expect(html).toContain('d="M4 4l16 16"')
 })
+
+test('the mic waits while a reply is still coming', () => {
+  const html = renderToStaticMarkup(<ComposeButton draft="" busy micBlocked={false} onCall={call} />)
+  expect(html).toContain('aria-label="Call Note"')
+  expect(html).toContain('disabled=""')
+})
