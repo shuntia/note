@@ -1,0 +1,60 @@
+# Web and desktop
+
+## The PWA
+
+`web/` is an installable PWA: React + Vite + TypeScript, UI in English and
+Japanese (`web/src/i18n/`). Runtime dependencies (React, React DOM, marked,
+DOMPurify, gsap, qrcode) are bundled; the client makes no external requests.
+
+```sh
+cd web && pnpm install && pnpm build
+```
+
+The server serves the build from `web_dir` (default `web/dist`, resolved
+against the working directory) with an SPA fallback; without a build the API
+still runs. Unknown `/api/*` paths stay `404`. Development, tests and
+screenshots: [development.md](development.md#web-development).
+
+Views (`web/src/views/`):
+
+- **Home**: one face on a gradient. In a focus session it is a gauge around
+  the step's remaining time with pause and "Done with this step"; between
+  sessions it is the next routine, counted down over an arc. Swipe up, scroll
+  or ArrowDown raises **Today** under it: the next event with its actions
+  (Start, Later, drop, move to tomorrow, silence), and the day drawn as a line.
+  A phone opens on Home; a desktop opens on Today.
+- **Tasks**: quick-add, steps, durations, and a start that opens a session.
+- **Calendar**: commitments and quiet windows.
+- **Chat** (`Talk.tsx`): persisted conversations, replies as sanitized
+  markdown, and one quiet line for what the agent did. While a reply is coming
+  it reads "Note is thinking…" with the tool in flight; after, a header ("Note
+  thought for 4 seconds") opens the reasoning and every call. A turn with
+  neither reasoning nor tool calls has no header.
+- **Memory**: every fact the agent saved (filter, search, open) and the inbox
+  of imported items, with Refresh when `[inbox] refresh_signal` is set.
+- **Settings**: profile, language, day and template, check-ins, sessions,
+  connections (Matrix, calls, voice), Web Push, theme, prompts, API tokens,
+  share links, security, and the admin panel for admins.
+- **Onboarding**, **Join** (invite links), **Share** (the `/s/<token>` visitor
+  chat), **Admin**.
+
+The top bar on desktop holds the views and a quick-capture field (`N`); phones
+get a fixed tab bar; a running session takes the whole screen. Deliveries
+arrive live over the WebSocket while the app is open and as push notifications
+when not; `web/public/sw.js` renders them and focuses an open tab on click.
+
+## Desktop
+
+`desktop/` is an Electron shell around the deployed web app (default URL
+`https://note.example.com`, overridden by `--url=` or `NOTE_URL`): its own
+window, a tray icon that shows or hides it, a "Start at login" option, English
+or Japanese menus, and `offline.html` when the server cannot be reached.
+
+```sh
+cd desktop && pnpm install
+pnpm start          # against the default URL
+pnpm dev            # --dev against http://localhost:5173
+pnpm dist           # AppImage and deb via electron-builder
+```
+
+`nix build .#note-desktop` builds it with the flake.
