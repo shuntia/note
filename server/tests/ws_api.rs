@@ -108,3 +108,21 @@ fn with_webpush_appends_below_ws_and_sets_the_vapid_key() {
     assert_eq!(state.channels[1].name(), "webpush");
     assert_eq!(state.vapid_public_key.as_deref(), Some(key.as_str()));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_page_reports_whether_it_is_in_view() {
+    use futures_util::SinkExt;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let (app, cookie, state, _cfg) = common::app_with_logged_in_user_and_state().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let mut req = format!("ws://{addr}/api/ws").into_client_request().unwrap();
+    req.headers_mut().insert("cookie", cookie.parse().unwrap());
+    let (mut ws, _) = tokio_tungstenite::connect_async(req).await.unwrap();
+    ws.send(tokio_tungstenite::tungstenite::Message::Text(r#"{"type":"visible","on":true}"#.into())).await.unwrap();
+    let hub = state.hub.clone();
+    note_voice_proto::testkit::eventually("in view", || hub.has_visible(1)).await;
+    ws.send(tokio_tungstenite::tungstenite::Message::Text(r#"{"type":"visible","on":false}"#.into())).await.unwrap();
+    note_voice_proto::testkit::eventually("hidden", || !hub.has_visible(1)).await;
+}

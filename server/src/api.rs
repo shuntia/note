@@ -2974,7 +2974,14 @@ async fn ws_pump(
                 Some(Ok(Message::Close(_))) => break,
                 Some(Ok(msg)) => {
                     last_inbound = tokio::time::Instant::now();
-                    if crate::channels::ws::is_presence(&msg) {
+                    let present = match crate::channels::ws::visibility(&msg) {
+                        Some(on) => {
+                            hub.set_visible(user_id, conn_id, on);
+                            on
+                        }
+                        None => crate::channels::ws::is_presence(&msg),
+                    };
+                    if present {
                         let conn = crate::db_guard(&db);
                         let _ = crate::presence::touch(&conn, user_id, jiff::Timestamp::now());
                     }

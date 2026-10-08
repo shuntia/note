@@ -362,6 +362,7 @@ impl AppState {
         });
         let ch = crate::channels::voice::VoiceChannel::new(voice.clone(), self.db.clone(), self.config_dir.clone());
         self.channels.insert(0, Arc::new(ch));
+        self.web_calls = Arc::new(crate::voice::web::WebRinger::new(self.hub.clone(), voice.clone()));
         self.voice = Some(voice);
         self
     }

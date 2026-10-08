@@ -330,6 +330,34 @@ fn to_message(out: WebOut) -> Message {
     }
 }
 
+/// Rings the user's app when a page of it is in view and the voice side is up.
+pub struct WebRinger {
+    hub: std::sync::Arc<crate::channels::ws::ClientHub>,
+    voice: std::sync::Arc<Voice>,
+}
+
+impl WebRinger {
+    pub fn new(hub: std::sync::Arc<crate::channels::ws::ClientHub>, voice: std::sync::Arc<Voice>) -> Self {
+        Self { hub, voice }
+    }
+}
+
+impl crate::channels::WebCalls for WebRinger {
+    fn has_live(&self, user_id: i64) -> bool {
+        self.voice.is_up() && self.hub.has_visible(user_id)
+    }
+
+    /// True when a page in view took the ring; it then opens the call view, ringing.
+    fn ring(&self, user_id: i64, conversation_id: Option<i64>) -> bool {
+        if !self.has_live(user_id) {
+            return false;
+        }
+        let token = self.voice.offer_ring(user_id, conversation_id);
+        let frame = serde_json::json!({ "type": "incoming", "ring": token, "conversation_id": conversation_id });
+        self.hub.send_visible(user_id, &frame.to_string()) > 0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -358,3 +358,41 @@ async fn me_says_whether_calls_are_on() {
     let body = http_body_util::BodyExt::collect(res.into_body()).await.unwrap().to_bytes();
     assert_eq!(serde_json::from_slice::<Value>(&body).unwrap()["voice"], true);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_ring_reaches_only_a_visible_app_and_its_answer_speaks_the_thread() {
+    let r = rig().await;
+    let thread = {
+        let conn = r.state.db();
+        let id = note_server::talk::create(&conn, 1, "chat", jiff::Timestamp::now()).unwrap();
+        note_server::talk::append_text(&conn, id, "assistant", "Your essay is due at five.", jiff::Timestamp::now()).unwrap();
+        id
+    };
+    let (conn_id, mut rx) = r.state.hub.register(1).unwrap();
+    assert!(!r.state.web_calls.has_live(1));
+    assert!(!r.state.web_calls.ring(1, Some(thread)), "no app in view");
+    r.state.hub.set_visible(1, conn_id, true);
+    assert!(r.state.web_calls.has_live(1));
+    assert!(r.state.web_calls.ring(1, Some(thread)));
+    let incoming: Value = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
+    assert_eq!((incoming["type"].as_str(), incoming["conversation_id"].as_i64()), (Some("incoming"), Some(thread)));
+    let token = incoming["ring"].as_str().unwrap().to_string();
+
+    let mut ws = open(r.addr, &r.cookie, &format!("?ring={token}")).await;
+    frame(&mut ws, "open").await;
+    let id = started(&r, 1).await;
+    let CallBody::Start { direction, .. } = starts(&r)[0].1.clone() else { unreachable!() };
+    assert_eq!(direction, Direction::Outbound, "Note's call speaks first");
+    let (message, thread_id): (String, i64) = r
+        .state
+        .db()
+        .query_row("SELECT message, thread_id FROM voice_calls WHERE id = ?1", [&id], |x| Ok((x.get(0)?, x.get(1)?)))
+        .unwrap();
+    assert!(message.contains("Your essay is due at five."), "{message}");
+    assert_eq!(thread_id, thread);
+    let taken: Value = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
+    assert_eq!((taken["type"].as_str(), taken["ring"].as_str()), (Some("ring_taken"), Some(token.as_str())));
+
+    let mut again = open(r.addr, &r.cookie, &format!("?ring={token}")).await;
+    assert_eq!(frame(&mut again, "ended").await["reason"], "missed");
+}
