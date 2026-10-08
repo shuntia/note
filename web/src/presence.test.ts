@@ -1,9 +1,9 @@
-import { afterEach, beforeEach, expect, test, vi } from 'vitest'
+import { afterEach, beforeEach, expect, type Mock, test, vi } from 'vitest'
 import { PRESENCE_EVERY_MS, startPresence } from './presence'
 
 let target: EventTarget
 let visible: boolean
-let ping: ReturnType<typeof vi.fn>
+let ping: Mock<() => void>
 let stop: () => void
 
 beforeEach(() => {
