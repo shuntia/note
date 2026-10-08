@@ -1,0 +1,72 @@
+.call-view {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  background: var(--sky);
+  touch-action: none;
+  animation: call-in 400ms ease both;
+  outline: none;
+}
+.call-view .call-circle {
+  width: min(72vw, 360px);
+  aspect-ratio: 1;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+}
+.call-view .call-circle:focus-visible { outline: 2px solid var(--line); outline-offset: 6px; }
+.call-view canvas { display: block; width: 100%; height: 100%; }
+.call-view .call-close {
+  position: absolute;
+  top: max(16px, env(safe-area-inset-top));
+  right: 16px;
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--quiet);
+  cursor: pointer;
+}
+.call-view .call-close svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; }
+.call-view .call-caption {
+  position: absolute;
+  left: 16px;
+  right: 16px;
+  bottom: max(15vh, 96px);
+  margin: 0;
+  text-align: center;
+  color: var(--faint);
+  font-size: 0.95rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  animation: call-caption 3s ease forwards;
+}
+.call-view.gone { animation: call-out 450ms ease forwards; }
+.call-view.shake .call-circle { animation: call-shake 450ms ease; }
+
+@keyframes call-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes call-out { to { opacity: 0; } }
+@keyframes call-caption { 0% { opacity: 0; } 10%, 75% { opacity: 0.8; } 100% { opacity: 0; } }
+@keyframes call-shake {
+  0%, 100% { transform: none; }
+  20% { transform: translateX(-10px); }
+  40% { transform: translateX(8px); }
+  60% { transform: translateX(-5px); }
+  80% { transform: translateX(3px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .call-view { animation: none; }
+  .call-view.gone { animation-duration: 150ms; }
+  .call-view.shake .call-circle { animation: none; }
+  .call-view .call-caption { animation-name: call-caption; animation-timing-function: steps(1, end); }
+}

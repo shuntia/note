@@ -37,6 +37,22 @@ export function onAgentFrame(fn: (frame: AgentFrame) => void): () => void {
   }
 }
 
+export type CallFrame =
+  | { type: 'incoming'; ring: string; conversation_id: number | null }
+  | { type: 'ring_taken'; ring: string }
+
+const callListeners = new Set<(frame: CallFrame) => void>()
+
+// Note ringing this app, and word that another tab took the ring.
+export function onCallFrame(fn: (frame: CallFrame) => void): () => void {
+  callListeners.add(fn)
+  return () => {
+    callListeners.delete(fn)
+  }
+}
+
+export const visibilityFrame = (hidden: boolean) => JSON.stringify({ type: 'visible', on: !hidden })
+
 // Handshakes that close without ever opening, this many in a row, read as a
 // dead session rather than a flaky network.
 const DEAD_HANDSHAKE_STREAK = 3
@@ -54,6 +70,10 @@ export function connectEvents(
   let timer = 0
   let deadHandshakes = 0
   let sessionChecked = false
+  const report = () => {
+    if (socket?.readyState === WebSocket.OPEN) socket.send(visibilityFrame(document.hidden))
+  }
+  document.addEventListener('visibilitychange', report)
   const open = () => {
     if (closed) return
     const proto = location.protocol === 'https:' ? 'wss' : 'ws'
@@ -64,6 +84,7 @@ export function connectEvents(
       retry = 1000
       deadHandshakes = 0
       sessionChecked = false
+      report()
     }
     socket.onmessage = (m) => {
       try {
@@ -73,6 +94,7 @@ export function connectEvents(
         if (kind === 'event') onEvent(frame as EventFrame)
         if (kind === 'changed') onChanged()
         if (kind === 'agent') for (const fn of agentListeners) fn(frame as AgentFrame)
+        if (kind === 'incoming' || kind === 'ring_taken') for (const fn of callListeners) fn(frame as CallFrame)
       } catch {
         // non-JSON frame; ignore
       }
@@ -92,6 +114,7 @@ export function connectEvents(
   open()
   return () => {
     closed = true
+    document.removeEventListener('visibilitychange', report)
     window.clearTimeout(timer)
     socket?.close()
   }
