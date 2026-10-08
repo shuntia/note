@@ -52,38 +52,48 @@ export function smooth(prev: number, raw: number, dtMs: number): number {
   return prev + (raw - prev) * (1 - Math.exp(-dtMs / tau))
 }
 
-// A looping, handwriting-like path through the centre; `a` is how far the nib has travelled.
-function scribble(a: number): [number, number] {
-  return [0.62 * Math.sin(a) + 0.22 * Math.sin(2.3 * a + 1.1), 0.42 * Math.sin(1.6 * a) + 0.2 * Math.cos(3.7 * a)]
-}
+// Slanted cursive loops (a prolate trochoid): advance per radian, loop half-width and half-height, slant,
+// nib speed, and how many loops stay inked.
+const LOOP_ADVANCE = 0.085
+const LOOP_W = 0.27
+const LOOP_H = 0.26
+const SLANT = 0.2
+const NIB_RAD_PER_MS = TWO_PI / 1100
+const INKED_RAD = 2.6 * TWO_PI
+const NIB_X = (LOOP_ADVANCE * INKED_RAD) / 2
 
 const smoothstep = (x: number, lo = 0, hi = 1) => {
   const c = Math.min(1, Math.max(0, (x - lo) / (hi - lo)))
   return c * c * (3 - 2 * c)
 }
 
-// The whole circle in every state: writing pulls each point from the rim onto the stroke behind the nib,
-// nib end first, so the rim unspools into the stroke and curls back the same way.
+// The whole circle in every state. The rim runs from its right-hand point all the way round, nib end last;
+// writing peels each point off the rim onto the cursive line, nib end first, so the rim opens at the right and
+// unrolls into the line, and curls back the same way. The nib loops in place while the line slides left under it.
 export function shape(f: Form, tMs: number, lv: Levels, n = 160): Pt[] {
   const breath = 1 + 0.02 * f.breath * Math.sin((TWO_PI * tMs) / BREATH_MS)
   const knock = Math.pow(Math.max(0, Math.sin((TWO_PI * tMs) / 1200)), 4)
   const r0 = f.scale * breath * (1 + 0.08 * f.pulse * lv.out) * (1 + 0.05 * f.ring * knock)
-  const turn = tMs / 9000
-  const nib = tMs / 650
+  const nib = tMs * NIB_RAD_PER_MS
+  const baseline = 0.04 * Math.sin((TWO_PI * tMs) / 7000)
   const pts: Pt[] = []
   for (let i = 0; i < n; i++) {
     const s = i / (n - 1)
-    const th = TWO_PI * s + turn - Math.PI / 2
-    const ripple = 0.06 * f.ripple * lv.mic * Math.sin(6 * th + tMs / 90) * (0.6 + 0.4 * Math.sin(3 * th - tMs / 140))
+    const th = -TWO_PI * (1 - s)
+    const ripple =
+      0.032 * f.ripple * lv.mic * (0.7 * Math.sin(9 * th - tMs / 160) + 0.3 * Math.sin(11 * th + tMs / 230))
     const r = r0 + ripple
-    const [sx, sy] = scribble(nib - (1 - s) * 5.2)
-    const w = smoothstep(f.write * 1.6 - (1 - s) * 0.6)
-    const ink = 1 - f.write * Math.pow(1 - s, 1.5)
+    const behind = (1 - s) * INKED_RAD
+    const u = nib - behind
+    const sy = -LOOP_H * Math.cos(u)
+    const sx = NIB_X - LOOP_ADVANCE * behind - LOOP_W * Math.sin(u) - SLANT * sy
+    const w = smoothstep(f.write * 1.3 - (1 - s) * 0.3)
     const fromTop = Math.abs(Math.atan2(Math.sin(th + Math.PI / 2), Math.cos(th + Math.PI / 2)))
+    const open = 1 - f.gap * (1 - w) * (1 - smoothstep(fromTop, 0.07, 0.19))
     pts.push({
       x: r * Math.cos(th) * (1 - w) + sx * w,
-      y: r * Math.sin(th) * (1 - w) + sy * w,
-      a: ink * (1 - f.gap * (1 - smoothstep(fromTop, 0.02, 0.07))),
+      y: r * Math.sin(th) * (1 - w) + (sy + baseline) * w,
+      a: ((1 - w) + w * smoothstep(s, 0, 0.55)) * open,
     })
   }
   return pts

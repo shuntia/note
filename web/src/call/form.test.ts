@@ -52,12 +52,16 @@ test('a state is reached within about 400 ms', () => {
   expect(f.write).toBeGreaterThan(0.94)
 })
 
-test('muted opens a hairline gap at the top of the rim and dims the circle', () => {
+test('muted opens a gap of about fifteen degrees at the top of the rim and dims the circle', () => {
   const f = target('listening', true)
   expect(f.dim).toBeGreaterThan(0)
   const gap = shape(f, 0, quiet).filter((p) => p.a === 0)
   expect(gap.length).toBeGreaterThan(0)
   for (const p of gap) expect(p.y).toBeLessThan(-0.95)
+  const half = shape(f, 0, quiet, 720).filter((p) => p.a < 0.5)
+  const arc = (half.length * 360) / 719
+  expect(arc).toBeGreaterThan(13)
+  expect(arc).toBeLessThan(17)
 })
 
 test('levels rise fast and fall slowly', () => {
@@ -116,5 +120,65 @@ test('easing and smoothing do not depend on the frame rate', () => {
   for (const b of [run(50, 8), run(400, 1)]) {
     expect(Math.abs(b.lv - a.lv)).toBeLessThan(1e-9)
     for (const key of Object.keys(a.f) as (keyof typeof a.f)[]) expect(Math.abs(b.f[key] - a.f[key])).toBeLessThan(1e-9)
+  }
+})
+
+const settled = (look: 'thinking' | 'hearing') => {
+  let f = target('listening', false)
+  for (let i = 0; i < 200; i++) f = ease(f, target(look, false), 16)
+  return f
+}
+
+test('the voice shimmers the rim in fine travelling ripples and it stays a circle', () => {
+  const r = shape(settled('hearing'), 777, { mic: 1, out: 0 }, 720).map(radius)
+  const mean = r.reduce((x, y) => x + y, 0) / r.length
+  expect(Math.max(...r.map((x) => Math.abs(x - mean)))).toBeLessThanOrEqual(0.04 * mean + 1e-9)
+  let crossings = 0
+  for (let i = 1; i < r.length; i++) if (Math.sign(r[i] - mean) !== Math.sign(r[i - 1] - mean)) crossings++
+  expect(crossings).toBeGreaterThanOrEqual(14)
+})
+
+test('the written line keeps within the width of the circle, its nib in the right third', () => {
+  const f = settled('thinking')
+  for (let t = 0; t < 20_000; t += 137) {
+    const pts = shape(f, t, quiet)
+    for (const p of pts) if (p.a > 0.01) expect(Math.abs(p.x)).toBeLessThanOrEqual(1)
+    expect(pts[pts.length - 1].x).toBeGreaterThan(0.33)
+  }
+})
+
+test('the ink fades smoothly from the nib to the tail with no break', () => {
+  const pts = shape(settled('thinking'), 4321, quiet)
+  for (let i = 1; i < pts.length; i++) {
+    expect(Math.abs(pts[i].a - pts[i - 1].a)).toBeLessThan(0.05)
+    expect(pts[i].a).toBeGreaterThanOrEqual(pts[i - 1].a)
+  }
+})
+
+test('the line is written loop after loop, sliding left without ever jumping back', () => {
+  const f = settled('thinking')
+  let prev = shape(f, 0, quiet)
+  let nibUp = 0
+  for (let t = 16; t <= 12_000; t += 16) {
+    const next = shape(f, t, quiet)
+    const moved = Math.max(...next.map((p, i) => Math.hypot(p.x - prev[i].x, p.y - prev[i].y)))
+    expect(moved).toBeLessThan(0.05)
+    if (next[next.length - 1].y < -0.15 && prev[prev.length - 1].y >= -0.15) nibUp++
+    prev = next
+  }
+  expect(nibUp).toBeGreaterThanOrEqual(10)
+})
+
+test('at 60 frames a second the circle unrolls into the line and curls back without a pop', () => {
+  let f = target('listening', false)
+  let prev = shape(f, 0, quiet)
+  for (let t = 16; t <= 2400; t += 16) {
+    f = ease(f, target(t < 1200 ? 'thinking' : 'speaking', false), 16)
+    const next = shape(f, t, { mic: 0, out: 0.5 })
+    for (let i = 0; i < next.length; i++) {
+      expect(Math.hypot(next[i].x - prev[i].x, next[i].y - prev[i].y)).toBeLessThan(0.35)
+      expect(Math.abs(next[i].a - prev[i].a)).toBeLessThan(0.3)
+    }
+    prev = next
   }
 })
