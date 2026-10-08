@@ -141,7 +141,7 @@ craneLib.buildPackage (args // {
   passthru = { inherit ami sbv2Models voicevox convertEnv; };
   meta = {
     description = "Japanese speech sidecar for Note's voice calls";
-    license = lib.licenses.unlicense;
+    license = lib.licenses.mit;
     mainProgram = "note-tts-ja";
     platforms = [ "x86_64-linux" ];
   };

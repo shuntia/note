@@ -1616,7 +1616,7 @@ mod tests {
             .unwrap();
         assert!(external.is_none(), "an entry the user made carries no outside name");
 
-        entry(1, "Club meeting", "gcal:c_8f3a:t:busy").unwrap();
+        entry(1, "club meeting", "gcal:c_8f3a:t:busy").unwrap();
         assert!(
             entry(1, "again", "gcal:c_8f3a:t:busy").is_err(),
             "one external id belongs to one entry per user"

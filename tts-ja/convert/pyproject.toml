@@ -2,7 +2,7 @@
 name = "note-tts-ja-convert"
 version = "0.1.0"
 description = "Build-time export of a Style-Bert-VITS2 JP-Extra model to ONNX"
-license = "Unlicense"
+license = "MIT"
 requires-python = "==3.11.*"
 dependencies = [
     "numpy<2",

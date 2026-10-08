@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
+<title>Note</title>
+<style>
+  :root { color-scheme: light dark; --bg: #f0e8de; --fg: #1e2a32; --dim: #6b7780; --sun: #e8871e; --err: #b4431f; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #1e2a32; --fg: #eaf0f4; --dim: #8a9aa5; --err: #f08a6a; } }
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: grid; place-items: center; background: var(--bg); color: var(--fg);
+    font: 15px/1.5 system-ui, sans-serif;
+  }
+  form { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; width: min(320px, 100vw - 48px); }
+  .sun { width: 22px; height: 22px; border-radius: 50%; background: var(--sun); justify-self: center; margin-bottom: 6px; }
+  form[aria-busy="true"] .sun { animation: breathe 1.6s ease-in-out infinite; }
+  @keyframes breathe { 50% { opacity: .35; transform: scale(.85); } }
+  label { color: var(--dim); font-size: 13px; }
+  .row { display: flex; gap: 8px; }
+  input {
+    flex: 1; min-width: 0; font: inherit; color: var(--fg); background: transparent;
+    border: 1px solid var(--dim); border-radius: 999px; padding: 4px 14px; outline: none;
+  }
+  input:focus { border-color: var(--sun); }
+  input[aria-invalid="true"] { border-color: var(--err); }
+  button {
+    font: inherit; color: var(--fg); background: none; cursor: pointer;
+    border: 1px solid var(--dim); border-radius: 999px; padding: 4px 16px;
+  }
+  button:disabled { opacity: .5; cursor: default; }
+  #error { margin: 0; min-height: 1.5em; color: var(--err); font-size: 13px; }
+</style>
+</head>
+<body>
+<form id="form" novalidate>
+  <div class="sun"></div>
+  <label for="address" id="label"></label>
+  <div class="row">
+    <input id="address" type="url" placeholder="https://note.example.com" autocomplete="url" spellcheck="false" autofocus>
+    <button id="connect" type="submit"></button>
+  </div>
+  <p id="error" role="alert"></p>
+</form>
+<script>
+  const params = new URLSearchParams(location.search)
+  const ja = params.get('lang') === 'ja'
+  document.documentElement.lang = ja ? 'ja' : 'en'
+  const text = ja
+    ? { label: 'サーバーのアドレス', connect: '接続', invalid: 'http:// か https:// のアドレスを入れてください', unreachable: 'このサーバーにつながりません' }
+    : { label: 'Server address', connect: 'Connect', invalid: 'Enter an http:// or https:// address', unreachable: "Can't reach that server" }
+  const form = document.getElementById('form')
+  const input = document.getElementById('address')
+  const button = document.getElementById('connect')
+  const error = document.getElementById('error')
+  document.getElementById('label').textContent = text.label
+  button.textContent = text.connect
+  input.value = params.get('current') || ''
+  input.select()
+
+  const fail = (message) => {
+    error.textContent = message
+    input.setAttribute('aria-invalid', 'true')
+    input.focus()
+  }
+  input.addEventListener('input', () => {
+    error.textContent = ''
+    input.removeAttribute('aria-invalid')
+  })
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault()
+    form.setAttribute('aria-busy', 'true')
+    button.disabled = true
+    try {
+      const result = await window.noteSetup.connect(input.value)
+      if (!result.ok) fail(text[result.reason] || text.unreachable)
+    } catch {
+      fail(text.unreachable)
+    } finally {
+      form.removeAttribute('aria-busy')
+      button.disabled = false
+    }
+  })
+</script>
+</body>
+</html>

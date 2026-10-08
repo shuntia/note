@@ -2,7 +2,7 @@
 name = "note-voice-proto"
 version = "0.1.0"
 edition = "2021"
-license = "Unlicense"
+license = "MIT"
 
 [dependencies]
 base64 = "0.23"

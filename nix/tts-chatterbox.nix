@@ -87,7 +87,7 @@ pkgs.runCommand "note-tts-chatterbox-${(lib.importTOML ../tts-sidecar/pyproject.
     passthru = { inherit env model voices; };
     meta = {
       description = "Chatterbox TTS sidecar for Note's voice calls";
-      license = lib.licenses.unlicense;
+      license = lib.licenses.mit;
       mainProgram = "note-tts-chatterbox";
       platforms = [ "x86_64-linux" ];
     };

@@ -101,10 +101,19 @@ in
       type = lib.types.package;
       default = self.packages.${pkgs.stdenv.hostPlatform.system}.note-server;
       defaultText = lib.literalExpression "note.packages.\${system}.note-server";
+      description = "The server package.";
     };
 
-    user = lib.mkOption { type = lib.types.str; default = "note"; };
-    group = lib.mkOption { type = lib.types.str; default = "note"; };
+    user = lib.mkOption {
+      type = lib.types.str;
+      default = "note";
+      description = "Account the server runs as; the default one is created.";
+    };
+    group = lib.mkOption {
+      type = lib.types.str;
+      default = "note";
+      description = "Group of the service accounts; the default one is created.";
+    };
 
     stateDir = lib.mkOption {
       type = lib.types.path;
@@ -132,19 +141,41 @@ in
       type = lib.types.functionTo lib.types.str;
       readOnly = true;
       default = name: "${credDir}/${name}";
+      defaultText = lib.literalExpression ''name: "${credDir}/''${name}"'';
+      description = "Where the service reads the credential `name`; for use in `settings`.";
     };
 
     settings = lib.mkOption {
       type = lib.types.submodule {
         freeformType = toml.type;
         options = {
-          bind_addr = lib.mkOption { type = lib.types.str; default = "127.0.0.1:3271"; };
+          bind_addr = lib.mkOption {
+            type = lib.types.str;
+            default = "127.0.0.1:3271";
+            description = "Address and port the server listens on.";
+          };
           public_base_url = lib.mkOption {
             type = lib.types.str;
+            default = "http://${cfg.settings.bind_addr}";
+            defaultText = lib.literalExpression ''"http://''${config.services.note.settings.bind_addr}"'';
             example = "https://note.example.com";
+            description = ''
+              The address people reach the server at. https turns on Secure
+              cookies and passkeys; share and invite links are built from it,
+              and programs.note-desktop defaults to it.
+            '';
           };
-          data_dir = lib.mkOption { type = lib.types.str; default = "${cfg.stateDir}/data"; };
-          secrets_dir = lib.mkOption { type = lib.types.str; default = credDir; };
+          data_dir = lib.mkOption {
+            type = lib.types.str;
+            default = "${cfg.stateDir}/data";
+            defaultText = lib.literalExpression ''"''${config.services.note.stateDir}/data"'';
+            description = "The SQLite database and memory files.";
+          };
+          secrets_dir = lib.mkOption {
+            type = lib.types.str;
+            default = credDir;
+            description = "Holds the legacy admin_totp seed; defaults to the credentials directory.";
+          };
         };
       };
       default = { };
@@ -157,7 +188,11 @@ in
       description = "Extra environment (e.g. ANTHROPIC_API_KEY for a provider's api_key_env).";
     };
 
-    openFirewall = lib.mkOption { type = lib.types.bool; default = false; };
+    openFirewall = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = "Open the port of `settings.bind_addr` in the firewall.";
+    };
 
     voice = {
       enable = lib.mkEnableOption "the voice service that rings a linked Matrix account";
@@ -165,13 +200,22 @@ in
         type = lib.types.package;
         default = self.packages.${pkgs.stdenv.hostPlatform.system}.note-voice;
         defaultText = lib.literalExpression "note.packages.\${system}.note-voice";
+        description = "The voice service package.";
       };
       settings = lib.mkOption {
         type = lib.types.submodule {
           freeformType = toml.type;
           options = {
-            homeserver = lib.mkOption { type = lib.types.str; example = "https://matrix.example.com"; };
-            livekit_service_url = lib.mkOption { type = lib.types.str; };
+            homeserver = lib.mkOption {
+              type = lib.types.str;
+              example = "https://matrix.example.com";
+              description = "The bot account's Matrix homeserver.";
+            };
+            livekit_service_url = lib.mkOption {
+              type = lib.types.str;
+              example = "https://matrix-rtc.example.com";
+              description = "The MatrixRTC (lk-jwt-service) URL that hands out LiveKit tokens.";
+            };
           };
         };
         default = { };
@@ -189,6 +233,7 @@ in
         type = lib.types.package;
         default = self.packages.${pkgs.stdenv.hostPlatform.system}.note-tts-chatterbox;
         defaultText = lib.literalExpression "note.packages.\${system}.note-tts-chatterbox";
+        description = "The Chatterbox sidecar package.";
       };
       port = lib.mkOption {
         type = lib.types.port;

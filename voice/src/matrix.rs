@@ -335,42 +335,42 @@ mod tests {
         let body = json!({ "rooms": { "join": { "!r:t": { "timeline": { "events": [
             {
                 "type": MEMBER_TYPE,
-                "state_key": "_@shuntia:matrix.example.org_ALICEPHONE_m.call",
-                "sender": "@shuntia:matrix.example.org",
+                "state_key": "_@alice:matrix.example.org_ALICEPHONE_m.call",
+                "sender": "@alice:matrix.example.org",
                 "event_id": "$m1",
                 "origin_server_ts": 1_700_000_000_000_i64,
                 "content": { "application": "m.call", "call_id": "", "device_id": "ALICEPHONE", "scope": "m.room" },
             },
             {
                 "type": "org.matrix.msc4075.rtc.notification",
-                "sender": "@shuntia:matrix.example.org",
+                "sender": "@alice:matrix.example.org",
                 "event_id": "$n1",
                 "origin_server_ts": 1_700_000_000_100_i64,
                 "content": { "notification_type": "ring", "m.mentions": { "user_ids": ["@note:t"] } },
             },
             {
                 "type": NOTIFICATION_TYPE,
-                "sender": "@shuntia:matrix.example.org",
+                "sender": "@alice:matrix.example.org",
                 "event_id": "$n2",
                 "content": { "notification_type": "ring", "m.mentions": { "user_ids": ["@someone:t"] } },
             },
             {
                 "type": NOTIFICATION_TYPE,
-                "sender": "@shuntia:matrix.example.org",
+                "sender": "@alice:matrix.example.org",
                 "event_id": "$n3",
                 "origin_server_ts": 1_700_000_000_150_i64,
                 "content": { "notification_type": "ring", "m.mentions": { "user_ids": [], "room": true } },
             },
             {
                 "type": MEMBER_TYPE,
-                "state_key": "_@shuntia:matrix.example.org_ALICEPHONE_m.call",
-                "sender": "@shuntia:matrix.example.org",
+                "state_key": "_@alice:matrix.example.org_ALICEPHONE_m.call",
+                "sender": "@alice:matrix.example.org",
                 "event_id": "$m2",
                 "origin_server_ts": 1_700_000_000_200_i64,
                 "content": {},
             },
         ] } } } } });
-        let user = "@shuntia:matrix.example.org".to_string();
+        let user = "@alice:matrix.example.org".to_string();
         assert_eq!(
             parse_sync(&body, "@note:t"),
             vec![
