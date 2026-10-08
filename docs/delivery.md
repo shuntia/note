@@ -78,9 +78,9 @@ writing, whatever `ring_for` says:
 2. Otherwise the linked phone rings over Matrix.
 3. Otherwise the message alone walks the ladder without the voice rung.
 
-An answered call chimes when it connects and plays a short falling tone when
-it ends, lower when it failed; a ring that is never answered stays quiet. The
-sounds are synthesized (`web/src/call/tones.ts`).
+An answered call sounds when it connects and when it ends; a failed call and a
+ring that is never answered stay quiet. The sound files and their licences are
+in `web/src/sounds/` (`CREDITS.md`).
 
 Each ring logs `trigger_rang` with `web`, `phone`, `messaged` or
 `undelivered`.

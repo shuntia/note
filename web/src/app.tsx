@@ -13,6 +13,7 @@ import { api, ApiError, setOnUnauthorized } from './api'
 import { CallView, type CallOpen } from './call/CallView'
 import { primeAudio } from './call/prime'
 import { trailing } from './coalesce'
+import { notice } from './call/tones'
 import { desktop, ringable } from './desktop'
 import { Jot } from './jot'
 import { glide, lift, viewIn, viewOut } from './motion-gsap'
@@ -372,6 +373,7 @@ export function App() {
   useEffect(() => {
     if (!me) return
     return connectEvents((ev) => {
+      if (desktop()) notice()
       // A check-in (it carries its event) or an urgent ask has its question waiting in
       // the thread, so the thread is the notice; a session's notices are toasts over
       // whatever is open.

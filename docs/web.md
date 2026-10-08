@@ -107,5 +107,6 @@ and the Nix package never update.
 Closing the window hides it to the tray, where the app keeps its socket and
 timers running and is still rung: a ring shows, restores and focuses the
 window (flashing it, or bouncing the macOS dock icon) and the ringtone plays
-without a click. The microphone is granted only to the Note server's own
+without a click. Each notice that reaches the open app plays a short sound.
+The microphone is granted only to the Note server's own
 pages. On macOS the first call asks for microphone access.
