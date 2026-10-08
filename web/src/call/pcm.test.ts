@@ -8,7 +8,7 @@ test('20 ms at 48 kHz becomes one 320-sample frame at 16 kHz', () => {
   const frames = new Downsampler(48_000).push(new Float32Array(960).fill(0.5))
   expect(frames).toHaveLength(1)
   expect(frames[0]).toHaveLength(CAPTURE_FRAME)
-  expect(frames[0].every((v) => v === 16384)).toBe(true)
+  expect(frames[0].subarray(16).every((v) => Math.abs(v - 16384) <= 1)).toBe(true)
 })
 
 test('the mic in 128-sample blocks gives the same frames as one push', () => {
@@ -34,7 +34,65 @@ test('a voice-band tone keeps its level, and loud input clips instead of wrappin
   expect(level).toBeGreaterThan((0.5 / Math.SQRT2) * 0.9)
   expect(level).toBeLessThan((0.5 / Math.SQRT2) * 1.05)
   const loud = new Downsampler(48_000).push(new Float32Array(960).fill(1.5))
-  expect(loud[0].every((v) => v === 32767)).toBe(true)
+  expect(loud[0].subarray(16).every((v) => v === 32767)).toBe(true)
+})
+
+const chunked = (d: Downsampler, input: Float32Array) => {
+  const frames: Int16Array[] = []
+  for (let i = 0; i < input.length; i += 128) frames.push(...d.push(input.subarray(i, i + 128)))
+  return Int16Array.from(frames.flatMap((f) => [...f]))
+}
+
+// Least-squares fit of a sine at `hz` plus offset; returns signal-to-residual in dB.
+const snrDb = (x: Int16Array, rate: number, hz: number) => {
+  const w = (2 * Math.PI * hz) / rate
+  let ss = 0, sc = 0, cc = 0, s1 = 0, c1 = 0, xs = 0, xc = 0, x1 = 0
+  const n = x.length
+  for (let i = 0; i < n; i++) {
+    const s = Math.sin(w * i), c = Math.cos(w * i), v = x[i]
+    ss += s * s; sc += s * c; cc += c * c; s1 += s; c1 += c; xs += v * s; xc += v * c; x1 += v
+  }
+  const m = [[ss, sc, s1], [sc, cc, c1], [s1, c1, n]]
+  const r = [xs, xc, x1]
+  for (let k = 0; k < 3; k++)
+    for (let j = k + 1; j < 3; j++) {
+      const f = m[j][k] / m[k][k]
+      for (let l = k; l < 3; l++) m[j][l] -= f * m[k][l]
+      r[j] -= f * r[k]
+    }
+  const c = [0, 0, 0]
+  for (let k = 2; k >= 0; k--) c[k] = (r[k] - m[k].slice(k + 1).reduce((a, v, j) => a + v * c[k + 1 + j], 0)) / m[k][k]
+  let sig = 0, res = 0
+  for (let i = 0; i < n; i++) {
+    const fit = c[0] * Math.sin(w * i) + c[1] * Math.cos(w * i)
+    sig += fit * fit
+    res += (x[i] - fit - c[2]) ** 2
+  }
+  return 10 * Math.log10(sig / res)
+}
+
+test('a 1 kHz tone comes through clean from 44.1 and 48 kHz', () => {
+  for (const rate of [44_100, 48_000]) {
+    const out = chunked(new Downsampler(rate), sine(rate / 2, rate, 1000))
+    expect(snrDb(out.subarray(CAPTURE_FRAME), 16_000, 1000)).toBeGreaterThan(40)
+  }
+})
+
+test('content above the 16 kHz band is filtered out before decimation', () => {
+  const tone = chunked(new Downsampler(48_000), sine(24_000, 48_000, 12_000))
+  const ref = chunked(new Downsampler(48_000), sine(24_000, 48_000, 1000))
+  const db = 20 * Math.log10(rms16(ref.subarray(CAPTURE_FRAME)) / rms16(tone.subarray(CAPTURE_FRAME)))
+  expect(db).toBeGreaterThanOrEqual(20)
+})
+
+test('a 96 kHz context yields 16 kHz frames', () => {
+  expect(chunked(new Downsampler(96_000), sine(9600, 96_000, 300))).toHaveLength(5 * CAPTURE_FRAME)
+})
+
+test('a 44.1 kHz mic in 128-sample blocks gives the same frames as one push', () => {
+  const input = sine(8820, 44_100, 700)
+  const whole = Int16Array.from(new Downsampler(44_100).push(input).flatMap((f) => [...f]))
+  expect([...chunked(new Downsampler(44_100), input)]).toEqual([...whole])
 })
 
 test('playback at the context rate is a plain conversion', () => {
@@ -96,4 +154,14 @@ test('running dry pads with silence and waits to fill again', () => {
   expect(out[40]).toBe(0)
   j.push(new Float32Array(128).fill(0.5), 0)
   expect(j.pull(out, 10)).toBe(0)
+})
+
+test('a backlog past three times the target drops the oldest audio down to the target', () => {
+  const j = new JitterBuffer(5760, 1920)
+  const out = new Float32Array(128)
+  j.push(new Float32Array(12_000).fill(0.1), 0)
+  expect(j.buffered).toBe(12_000)
+  j.push(new Float32Array(6000).fill(0.9), 0)
+  expect(j.buffered).toBe(5760)
+  expect(j.pull(out, 0)).toBeCloseTo(0.9)
 })

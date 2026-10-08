@@ -3,40 +3,72 @@ export const CAPTURE_FRAME = 320
 
 const toS16 = (v: number) => Math.max(-32768, Math.min(32767, Math.round(v * 32767)))
 
-// Box-filters and decimates the mic to 16 kHz, handing back each whole 20 ms frame.
+const CUTOFF = 7_200
+
+function lowPass(rate: number): Float64Array {
+  const n = Math.max(32, 2 * Math.round(rate / 3000))
+  const fc = CUTOFF / rate
+  const mid = (n - 1) / 2
+  const taps = Float64Array.from({ length: n }, (_, i) => {
+    const t = i - mid
+    const sinc = Math.sin(2 * Math.PI * fc * t) / (Math.PI * t)
+    const w = (2 * Math.PI * i) / (n - 1)
+    return sinc * (0.42 - 0.5 * Math.cos(w) + 0.08 * Math.cos(2 * w))
+  })
+  const sum = taps.reduce((a, v) => a + v, 0)
+  return taps.map((v) => v / sum)
+}
+
+// Low-passes the mic below 8 kHz, reads it at 16 kHz with linear interpolation, and hands back each whole 20 ms frame.
 export class Downsampler {
-  private buf: number[] = []
-  private pos: number
+  private readonly taps: Float64Array
+  private readonly history: Float64Array
+  private head = 0
+  private filtered: number[] = []
+  private origin = 0
+  private k = 0
   private out = new Int16Array(CAPTURE_FRAME)
   private n = 0
-  private readonly ratio: number
 
-  constructor(inRate: number) {
-    this.ratio = inRate / CAPTURE_RATE
-    this.pos = this.ratio / 2
+  constructor(private readonly inRate: number) {
+    this.taps = lowPass(inRate)
+    this.history = new Float64Array(this.taps.length)
   }
 
   push(input: Float32Array): Int16Array[] {
-    for (let i = 0; i < input.length; i++) this.buf.push(input[i])
-    const half = this.ratio / 2
+    const taps = this.taps
+    const len = taps.length
+    for (let i = 0; i < input.length; i++) {
+      this.history[this.head] = input[i]
+      let y = 0
+      for (let j = 0, h = this.head; j < len; j++) {
+        y += taps[j] * this.history[h]
+        h = h === 0 ? len - 1 : h - 1
+      }
+      this.head = this.head + 1 === len ? 0 : this.head + 1
+      this.filtered.push(y)
+    }
     const frames: Int16Array[] = []
-    while (this.pos + half <= this.buf.length) {
-      const lo = Math.max(0, Math.floor(this.pos - half))
-      const hi = Math.min(this.buf.length, Math.ceil(this.pos + half))
-      let sum = 0
-      for (let i = lo; i < hi; i++) sum += this.buf[i]
-      this.out[this.n++] = toS16(sum / (hi - lo))
+    for (;;) {
+      const pos = this.origin + (this.k * this.inRate) / CAPTURE_RATE
+      const i = Math.floor(pos)
+      if (i + 1 >= this.filtered.length) break
+      const f = pos - i
+      this.out[this.n++] = toS16(this.filtered[i] * (1 - f) + this.filtered[i + 1] * f)
       if (this.n === CAPTURE_FRAME) {
         frames.push(this.out)
         this.out = new Int16Array(CAPTURE_FRAME)
         this.n = 0
       }
-      this.pos += this.ratio
+      if (++this.k === CAPTURE_RATE) {
+        this.k = 0
+        this.origin += this.inRate
+      }
     }
-    const drop = Math.max(0, Math.floor(this.pos - half))
+    const drop = Math.min(this.filtered.length, Math.floor(this.origin + (this.k * this.inRate) / CAPTURE_RATE))
     if (drop > 0) {
-      this.buf.splice(0, drop)
-      this.pos -= drop
+      this.filtered.splice(0, drop)
+      this.origin -= drop
     }
     return frames
   }
@@ -92,7 +124,22 @@ export class JitterBuffer {
     this.chunks.push(x)
     this.size += x.length
     this.lastPush = now
+    if (this.size > 3 * this.target) this.discard(this.size - this.target)
     if (this.size >= this.target) this.primed = true
+  }
+
+  private discard(count: number) {
+    while (count > 0) {
+      const c = this.chunks[0]
+      const n = Math.min(count, c.length - this.offset)
+      count -= n
+      this.size -= n
+      this.offset += n
+      if (this.offset === c.length) {
+        this.chunks.shift()
+        this.offset = 0
+      }
+    }
   }
 
   pull(out: Float32Array, now: number): number {
