@@ -16,9 +16,9 @@ struct Seen {
     last_active: String,
 }
 
-/// Lays an idle trigger for every user who has gone quiet with active notes and
+/// Lays an idle trigger for every user who has gone quiet and
 /// returns the events laid. One user's failure is logged and skips only them.
-pub fn check(conn: &Connection, config_dir: &Path, data_dir: &Path, now: jiff::Timestamp) -> Result<Vec<i64>> {
+pub fn check(conn: &Connection, config_dir: &Path, now: jiff::Timestamp) -> Result<Vec<i64>> {
     let mut stmt = conn.prepare(
         "SELECT id, username, category, last_active_at FROM users
          WHERE disabled = 0 AND last_active_at IS NOT NULL",
@@ -36,7 +36,7 @@ pub fn check(conn: &Connection, config_dir: &Path, data_dir: &Path, now: jiff::T
     drop(stmt);
     let mut laid = Vec::new();
     for user in seen {
-        match check_one(conn, config_dir, data_dir, &user, now) {
+        match check_one(conn, config_dir, &user, now) {
             Ok(Some(id)) => laid.push(id),
             Ok(None) => {}
             Err(e) => {
@@ -57,7 +57,6 @@ pub fn check(conn: &Connection, config_dir: &Path, data_dir: &Path, now: jiff::T
 fn check_one(
     conn: &Connection,
     config_dir: &Path,
-    data_dir: &Path,
     user: &Seen,
     now: jiff::Timestamp,
 ) -> Result<Option<i64>> {
@@ -93,9 +92,6 @@ fn check_one(
     let wall = format!("{:02}:{:02}", local.hour(), local.minute());
     let close = cfg.close_day_time();
     if !close.is_empty() && wall.as_str() >= close {
-        return Ok(None);
-    }
-    if crate::notes::active(conn, data_dir, &user.username, now)?.is_empty() {
         return Ok(None);
     }
     let date = local.date();
@@ -223,7 +219,7 @@ mod tests {
         seen(&conn, uid, "2026-09-30T11:40:00Z");
         note(&conn, &tmp, "call the bank", MORNING, None);
 
-        let laid = check(&conn, tmp.path(), tmp.path(), noon()).unwrap();
+        let laid = check(&conn, tmp.path(), noon()).unwrap();
         assert_eq!(laid.len(), 1);
         let row: (String, String, Option<String>, String, String, Option<i64>) = conn
             .query_row(
@@ -238,8 +234,15 @@ mod tests {
             ("trigger".into(), "idle".into(), Some("active".into()), "12:00".into(),
              "2026-09-30".into(), None)
         );
-        assert!(check(&conn, tmp.path(), tmp.path(), at("2026-09-30T12:00:30Z")).unwrap().is_empty(),
+        assert!(check(&conn, tmp.path(), at("2026-09-30T12:00:30Z")).unwrap().is_empty(),
             "one pending at a time");
+    }
+
+    #[test]
+    fn twenty_quiet_minutes_lay_an_idle_trigger_with_no_note_at_all() {
+        let (conn, tmp, uid) = env("");
+        seen(&conn, uid, "2026-09-30T11:40:00Z");
+        assert_eq!(check(&conn, tmp.path(), noon()).unwrap().len(), 1);
     }
 
     #[test]
@@ -247,7 +250,7 @@ mod tests {
         let (conn, tmp, uid) = env("");
         seen(&conn, uid, "2026-09-30T11:41:00Z");
         note(&conn, &tmp, "call the bank", MORNING, None);
-        assert!(check(&conn, tmp.path(), tmp.path(), noon()).unwrap().is_empty());
+        assert!(check(&conn, tmp.path(), noon()).unwrap().is_empty());
     }
 
     #[test]
@@ -255,32 +258,27 @@ mod tests {
         let (conn, tmp, uid) = env("idle_nudge_min = 5\n");
         seen(&conn, uid, "2026-09-30T11:55:00Z");
         note(&conn, &tmp, "call the bank", MORNING, None);
-        assert_eq!(check(&conn, tmp.path(), tmp.path(), noon()).unwrap().len(), 1);
+        assert_eq!(check(&conn, tmp.path(), noon()).unwrap().len(), 1);
 
         let (conn, tmp, uid) = env("idle_nudge_min = 0\n");
         seen(&conn, uid, "2026-09-30T08:00:00Z");
         note(&conn, &tmp, "call the bank", MORNING, None);
-        assert!(check(&conn, tmp.path(), tmp.path(), noon()).unwrap().is_empty());
+        assert!(check(&conn, tmp.path(), noon()).unwrap().is_empty());
     }
 
     #[test]
-    fn a_note_outside_its_window_or_a_running_session_keeps_it_quiet() {
+    fn a_running_session_keeps_it_quiet() {
         let (conn, tmp, uid) = env("");
         seen(&conn, uid, "2026-09-30T11:00:00Z");
-        note(&conn, &tmp, "ended", MORNING, Some("2026-09-30T11:00:00Z"));
-        crate::notes::add(&conn, tmp.path(), "aki", "later", Some("2026-09-30T15:00:00Z".into()), None, at(MORNING)).unwrap();
-        assert!(check(&conn, tmp.path(), tmp.path(), noon()).unwrap().is_empty());
-
-        note(&conn, &tmp, "open", MORNING, None);
         conn.execute(
             "INSERT INTO work_sessions (user_id, title, planned_min, started_at)
              VALUES (?1, 'essay', 60, '2026-09-30T11:30:00Z')",
             [uid],
         )
         .unwrap();
-        assert!(check(&conn, tmp.path(), tmp.path(), noon()).unwrap().is_empty());
+        assert!(check(&conn, tmp.path(), noon()).unwrap().is_empty());
         conn.execute("UPDATE work_sessions SET ended_at = '2026-09-30T11:40:00Z'", []).unwrap();
-        assert_eq!(check(&conn, tmp.path(), tmp.path(), noon()).unwrap().len(), 1);
+        assert_eq!(check(&conn, tmp.path(), noon()).unwrap().len(), 1);
     }
 
     #[test]
@@ -294,17 +292,17 @@ mod tests {
             days: Some(crate::calendar::day_mask(&["wed"]).unwrap()), ..Default::default()
         })
         .unwrap();
-        assert!(check(&conn, tmp.path(), tmp.path(), noon()).unwrap().is_empty());
+        assert!(check(&conn, tmp.path(), noon()).unwrap().is_empty());
 
         let (conn, tmp, uid) = env("close_day_time = \"11:30\"\n");
         seen(&conn, uid, "2026-09-30T11:00:00Z");
         note(&conn, &tmp, "call the bank", MORNING, None);
-        assert!(check(&conn, tmp.path(), tmp.path(), noon()).unwrap().is_empty());
+        assert!(check(&conn, tmp.path(), noon()).unwrap().is_empty());
 
         let (conn, tmp, uid) = env("close_day_time = \"\"\n");
         seen(&conn, uid, "2026-09-30T22:30:00Z");
         note(&conn, &tmp, "call the bank", MORNING, None);
-        assert_eq!(check(&conn, tmp.path(), tmp.path(), at("2026-09-30T23:00:00Z")).unwrap().len(), 1,
+        assert_eq!(check(&conn, tmp.path(), at("2026-09-30T23:00:00Z")).unwrap().len(), 1,
             "a blank close of day is no cutoff");
     }
 
@@ -317,7 +315,7 @@ mod tests {
         let plan_id = crate::plan::ensure(&conn, tmp.path(), "aki", uid, date).unwrap();
         crate::triggers::insert(&conn, plan_id, "15:00", "ask", "agent", None, None, None,
             at("2026-09-30T08:00:00Z")).unwrap();
-        assert!(check(&conn, tmp.path(), tmp.path(), noon()).unwrap().is_empty());
+        assert!(check(&conn, tmp.path(), noon()).unwrap().is_empty());
     }
 
     #[test]
@@ -325,22 +323,22 @@ mod tests {
         let (conn, tmp, uid) = env("");
         seen(&conn, uid, "2026-09-30T11:40:00Z");
         note(&conn, &tmp, "call the bank", MORNING, None);
-        let first = check(&conn, tmp.path(), tmp.path(), noon()).unwrap();
+        let first = check(&conn, tmp.path(), noon()).unwrap();
         conn.execute("UPDATE events SET status = 'done' WHERE id = ?1", [first[0]]).unwrap();
 
-        assert!(check(&conn, tmp.path(), tmp.path(), at("2026-09-30T12:01:00Z")).unwrap().is_empty());
-        assert!(check(&conn, tmp.path(), tmp.path(), at("2026-09-30T12:19:00Z")).unwrap().is_empty());
-        assert_eq!(check(&conn, tmp.path(), tmp.path(), at("2026-09-30T12:20:00Z")).unwrap().len(), 1);
+        assert!(check(&conn, tmp.path(), at("2026-09-30T12:01:00Z")).unwrap().is_empty());
+        assert!(check(&conn, tmp.path(), at("2026-09-30T12:19:00Z")).unwrap().is_empty());
+        assert_eq!(check(&conn, tmp.path(), at("2026-09-30T12:20:00Z")).unwrap().len(), 1);
     }
 
     #[test]
     fn a_user_not_seen_today_is_left_alone() {
         let (conn, tmp, uid) = env("");
         note(&conn, &tmp, "call the bank", MORNING, None);
-        assert!(check(&conn, tmp.path(), tmp.path(), noon()).unwrap().is_empty(), "never seen");
+        assert!(check(&conn, tmp.path(), noon()).unwrap().is_empty(), "never seen");
         seen(&conn, uid, "2026-09-29T22:00:00Z");
-        assert!(check(&conn, tmp.path(), tmp.path(), at("2026-09-30T00:30:00Z")).unwrap().is_empty());
-        assert!(check(&conn, tmp.path(), tmp.path(), at("2026-09-30T09:00:00Z")).unwrap().is_empty());
+        assert!(check(&conn, tmp.path(), at("2026-09-30T00:30:00Z")).unwrap().is_empty());
+        assert!(check(&conn, tmp.path(), at("2026-09-30T09:00:00Z")).unwrap().is_empty());
     }
 
     #[test]
@@ -349,7 +347,7 @@ mod tests {
         crate::auth::set_category(&conn, "aki", "test").unwrap();
         seen(&conn, uid, "2026-09-30T11:00:00Z");
         note(&conn, &tmp, "call the bank", MORNING, None);
-        assert!(check(&conn, tmp.path(), tmp.path(), noon()).unwrap().is_empty());
+        assert!(check(&conn, tmp.path(), noon()).unwrap().is_empty());
     }
 
     #[test]

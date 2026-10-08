@@ -626,10 +626,10 @@ pub fn lay_day_prompt(l: Lang) -> &'static str {
 
 pub fn idle_prompt(l: Lang) -> &'static str {
     l.of(
-        "The user has gone quiet while your working memory holds notes. \
-         Decide whether one of them is worth raising now.",
-        "作業メモが残ったまま、ユーザーからの反応が途絶えています。\
-         どれかを今持ち出す価値があるか判断してください。",
+        "The user has gone quiet. Decide whether anything — a note, the next item in the order — \
+         is worth raising now.",
+        "ユーザーからの反応が途絶えています。メモや順番の次のものなど、今持ち出す価値のあるものが\
+         あるか判断してください。",
     )
 }
 

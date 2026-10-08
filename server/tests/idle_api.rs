@@ -145,7 +145,7 @@ async fn coming_back_before_the_nudge_fires_calls_it_off() {
     {
         let conn = w.state.db();
         let laid =
-            note_server::idle::check(&conn, &w.state.config_dir, &w.state.data_dir, jiff::Timestamp::now()).unwrap();
+            note_server::idle::check(&conn, &w.state.config_dir, jiff::Timestamp::now()).unwrap();
         assert_eq!(laid.len(), 1);
     }
     let res = w
