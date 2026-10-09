@@ -137,6 +137,21 @@ struct Ring {
     user_id: i64,
     message: OutboundMessage,
     until: Instant,
+    phone: Option<String>,
+}
+
+/// A ring taken off the open app: its message, and the phone call that rang alongside it.
+#[derive(Debug, PartialEq)]
+pub struct Rung {
+    pub user_id: i64,
+    pub message: OutboundMessage,
+    pub phone: Option<String>,
+}
+
+impl From<Ring> for Rung {
+    fn from(r: Ring) -> Self {
+        Rung { user_id: r.user_id, message: r.message, phone: r.phone }
+    }
 }
 
 /// Each live web call's browser socket by call id, and the rings offered to open apps.
@@ -214,24 +229,25 @@ impl Relays {
         }
     }
 
-    pub fn offer_ring_at(&self, user_id: i64, message: &OutboundMessage, now: Instant) -> String {
+    pub fn offer_ring_at(&self, user_id: i64, message: &OutboundMessage, phone: Option<&str>, now: Instant) -> String {
         let token = uuid::Uuid::new_v4().to_string();
-        lock(&self.rings).insert(token.clone(), Ring { user_id, message: message.clone(), until: now + RING_FOR });
+        let ring = Ring { user_id, message: message.clone(), until: now + RING_FOR, phone: phone.map(str::to_string) };
+        lock(&self.rings).insert(token.clone(), ring);
         token
     }
 
-    /// The ring's message, for its own user, once, while it lasts.
-    pub fn take_ring_at(&self, token: &str, user_id: i64, now: Instant) -> Option<OutboundMessage> {
+    /// The ring, for its own user, once, while it lasts.
+    pub fn take_ring_at(&self, token: &str, user_id: i64, now: Instant) -> Option<Rung> {
         let mut rings = lock(&self.rings);
         rings.get(token).filter(|r| r.user_id == user_id && r.until >= now)?;
-        rings.remove(token).map(|r| r.message)
+        rings.remove(token).map(Rung::from)
     }
 
-    /// The message of the user's own ring, which no longer rings.
-    pub fn decline_ring(&self, token: &str, user_id: i64) -> Option<OutboundMessage> {
+    /// The user's own ring, which no longer rings.
+    pub fn decline_ring(&self, token: &str, user_id: i64) -> Option<Rung> {
         let mut rings = lock(&self.rings);
         rings.get(token).filter(|r| r.user_id == user_id)?;
-        rings.remove(token).map(|r| r.message)
+        rings.remove(token).map(Rung::from)
     }
 
     /// Forgets a ring no app was shown.
@@ -239,11 +255,19 @@ impl Relays {
         lock(&self.rings).remove(token);
     }
 
-    /// Each ring past its time, with its user, forgotten as it is returned.
-    pub fn expired_rings_at(&self, now: Instant) -> Vec<(i64, OutboundMessage)> {
+    /// Forgets the rings offered alongside a phone call that was answered; returns each one's user and token.
+    pub fn withdraw_rings_for(&self, phone: &str) -> Vec<(i64, String)> {
+        let mut rings = lock(&self.rings);
+        let gone: Vec<String> =
+            rings.iter().filter(|(_, r)| r.phone.as_deref() == Some(phone)).map(|(t, _)| t.clone()).collect();
+        gone.into_iter().filter_map(|t| rings.remove(&t).map(|r| (r.user_id, t))).collect()
+    }
+
+    /// Each ring past its time, forgotten as it is returned.
+    pub fn expired_rings_at(&self, now: Instant) -> Vec<Rung> {
         let mut rings = lock(&self.rings);
         let gone: Vec<String> = rings.iter().filter(|(_, r)| r.until < now).map(|(t, _)| t.clone()).collect();
-        gone.iter().filter_map(|t| rings.remove(t)).map(|r| (r.user_id, r.message)).collect()
+        gone.iter().filter_map(|t| rings.remove(t)).map(Rung::from).collect()
     }
 }
 
@@ -405,13 +429,14 @@ impl crate::channels::WebCalls for WebRinger {
         self.voice.is_up() && self.hub.has_visible(user_id)
     }
 
-    /// True when a page in view took the ring; it then opens the call view, ringing, and the
-    /// message goes down the ladder if the ring is declined or runs out.
-    fn ring(&self, user_id: i64, msg: &OutboundMessage) -> bool {
+    /// True when a page in view took the ring; it then opens the call view, ringing. Alone, its
+    /// message goes down the ladder if the ring is declined or runs out; alongside a phone call,
+    /// the phone call delivers it.
+    fn ring(&self, user_id: i64, msg: &OutboundMessage, phone: Option<&str>) -> bool {
         if !self.has_live(user_id) {
             return false;
         }
-        let token = self.voice.offer_ring(user_id, msg);
+        let token = self.voice.offer_ring(user_id, msg, phone);
         let frame = serde_json::json!({ "type": "incoming", "ring": token, "conversation_id": msg.conversation_id });
         if self.hub.send_visible(user_id, &frame.to_string()) > 0 {
             return true;
@@ -557,12 +582,12 @@ mod tests {
     fn a_ring_is_answered_once_by_its_user_while_it_lasts() {
         let relays = Relays::default();
         let at = Instant::now();
-        let token = relays.offer_ring_at(1, &ring_msg(Some(4)), at);
+        let token = relays.offer_ring_at(1, &ring_msg(Some(4)), None, at);
         assert_eq!(relays.take_ring_at(&token, 2, at), None, "another user's ring");
-        assert_eq!(relays.take_ring_at(&token, 1, at), Some(ring_msg(Some(4))));
+        assert_eq!(relays.take_ring_at(&token, 1, at).map(|r| r.message), Some(ring_msg(Some(4))));
         assert_eq!(relays.take_ring_at(&token, 1, at), None, "answered once");
         assert!(relays.expired_rings_at(at + RING_FOR * 2).is_empty(), "an answered ring never runs out");
-        let late = relays.offer_ring_at(1, &ring_msg(None), at);
+        let late = relays.offer_ring_at(1, &ring_msg(None), None, at);
         assert_eq!(relays.take_ring_at(&late, 1, at + RING_FOR + Duration::from_secs(1)), None);
     }
 
@@ -570,10 +595,10 @@ mod tests {
     fn a_ring_runs_out_once_with_its_message() {
         let relays = Relays::default();
         let at = Instant::now();
-        relays.offer_ring_at(1, &ring_msg(Some(4)), at);
+        relays.offer_ring_at(1, &ring_msg(Some(4)), None, at);
         assert!(relays.expired_rings_at(at + RING_FOR).is_empty(), "still ringing");
         let gone = relays.expired_rings_at(at + RING_FOR + Duration::from_secs(1));
-        assert_eq!(gone, vec![(1, ring_msg(Some(4)))]);
+        assert_eq!(gone, vec![Rung { user_id: 1, message: ring_msg(Some(4)), phone: None }]);
         assert!(relays.expired_rings_at(at + RING_FOR * 2).is_empty());
     }
 
@@ -581,11 +606,23 @@ mod tests {
     fn only_its_user_declines_a_ring_and_only_once() {
         let relays = Relays::default();
         let at = Instant::now();
-        let token = relays.offer_ring_at(1, &ring_msg(Some(4)), at);
+        let token = relays.offer_ring_at(1, &ring_msg(Some(4)), None, at);
         assert_eq!(relays.decline_ring(&token, 2), None);
-        assert_eq!(relays.decline_ring(&token, 1), Some(ring_msg(Some(4))));
+        assert_eq!(relays.decline_ring(&token, 1).map(|r| r.message), Some(ring_msg(Some(4))));
         assert_eq!(relays.decline_ring(&token, 1), None);
         assert_eq!(relays.take_ring_at(&token, 1, at), None, "a declined ring cannot be answered");
         assert!(relays.expired_rings_at(at + RING_FOR * 2).is_empty());
+    }
+
+    #[test]
+    fn an_answered_phone_withdraws_only_the_rings_beside_it() {
+        let relays = Relays::default();
+        let at = Instant::now();
+        let beside = relays.offer_ring_at(1, &ring_msg(Some(4)), Some("call-1"), at);
+        let alone = relays.offer_ring_at(1, &ring_msg(Some(5)), None, at);
+        assert_eq!(relays.withdraw_rings_for("call-1"), vec![(1, beside.clone())]);
+        assert_eq!(relays.take_ring_at(&beside, 1, at), None);
+        assert_eq!(relays.take_ring_at(&alone, 1, at).map(|r| r.phone), Some(None));
+        assert!(relays.withdraw_rings_for("call-1").is_empty());
     }
 }

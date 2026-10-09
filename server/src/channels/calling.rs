@@ -7,9 +7,11 @@ pub trait WebCalls: Send + Sync {
     /// Whether the user has the web app open and visible, able to take a call now.
     fn has_live(&self, user_id: i64) -> bool;
     /// Rings that web app; the call joins the message's conversation, or a new
-    /// thread when it has none. `false` when it could not be rung; once rung,
-    /// the ringer owns the message's delivery if the ring goes unanswered.
-    fn ring(&self, user_id: i64, msg: &OutboundMessage) -> bool;
+    /// thread when it has none. `false` when it could not be rung. `phone` is the
+    /// phone call ringing alongside: whichever is answered first stands the other
+    /// down, and that call owns the message's delivery. Without one, the ringer
+    /// owns it if the ring goes unanswered.
+    fn ring(&self, user_id: i64, msg: &OutboundMessage, phone: Option<&str>) -> bool;
 }
 
 pub struct NoWebCalls;
@@ -18,7 +20,7 @@ impl WebCalls for NoWebCalls {
     fn has_live(&self, _: i64) -> bool {
         false
     }
-    fn ring(&self, _: i64, _: &OutboundMessage) -> bool {
+    fn ring(&self, _: i64, _: &OutboundMessage, _: Option<&str>) -> bool {
         false
     }
 }
@@ -27,16 +29,19 @@ impl WebCalls for NoWebCalls {
 #[error("no linked Matrix account")]
 pub struct NoLinkedPhone;
 
-/// Rings the user's linked phone; the message follows down the ladder if the
-/// ring goes unanswered. Fails with `NoLinkedPhone` when there is none to ring.
+/// Rings the user's linked phone and returns the call's id; the message follows
+/// down the ladder if the ring goes unanswered. Fails with `NoLinkedPhone` when
+/// there is none to ring.
 pub trait PhoneRing {
-    fn ring_phone(&self, user_id: i64, msg: &OutboundMessage) -> anyhow::Result<()>;
+    fn ring_phone(&self, user_id: i64, msg: &OutboundMessage) -> anyhow::Result<String>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RingOutcome {
     Web,
     Phone,
+    /// The web app and the phone both ring; the first answered takes the call.
+    Both,
     /// Nothing could ring: the channel that carried the message instead, if any.
     Messaged(Option<&'static str>),
 }
@@ -46,6 +51,7 @@ impl RingOutcome {
         match self {
             RingOutcome::Web => "web",
             RingOutcome::Phone => "phone",
+            RingOutcome::Both => "web+phone",
             RingOutcome::Messaged(Some(_)) => "messaged",
             RingOutcome::Messaged(None) => "undelivered",
         }
@@ -61,26 +67,29 @@ pub fn ring_with(
     username: &str,
     msg: &OutboundMessage,
 ) -> RingOutcome {
-    if web.has_live(user_id) && web.ring(user_id, msg) {
-        return RingOutcome::Web;
-    }
-    if let Some(phone) = phone {
-        match phone.ring_phone(user_id, msg) {
-            Ok(()) => return RingOutcome::Phone,
-            Err(e) if e.is::<NoLinkedPhone>() => {}
-            Err(e) => {
-                let subject = msg.event_id.map_or_else(|| "test".to_string(), |id| format!("event {id}"));
-                let conn = crate::db_guard(db);
-                let _ = crate::log::record(&conn, Some(user_id), "ring_phone_error", &format!("{subject}: {e:#}"));
-            }
+    let phone_call = phone.and_then(|phone| match phone.ring_phone(user_id, msg) {
+        Ok(call_id) => Some(call_id),
+        Err(e) if e.is::<NoLinkedPhone>() => None,
+        Err(e) => {
+            let subject = msg.event_id.map_or_else(|| "test".to_string(), |id| format!("event {id}"));
+            let conn = crate::db_guard(db);
+            let _ = crate::log::record(&conn, Some(user_id), "ring_phone_error", &format!("{subject}: {e:#}"));
+            None
         }
+    });
+    let web_rang = web.has_live(user_id) && web.ring(user_id, msg, phone_call.as_deref());
+    match (web_rang, phone_call.is_some()) {
+        (true, true) => return RingOutcome::Both,
+        (true, false) => return RingOutcome::Web,
+        (false, true) => return RingOutcome::Phone,
+        (false, false) => {}
     }
     let rest: Vec<Arc<dyn Channel>> = ladder.iter().filter(|c| c.name() != "voice").cloned().collect();
     RingOutcome::Messaged(deliver_via(db, &rest, user_id, username, msg))
 }
 
-/// Calls the user the best way open to them: the open web app, else the linked
-/// phone, else the message alone down the ladder.
+/// Calls the user every way open to them at once — the open web app and the
+/// linked phone — else sends the message alone down the ladder.
 pub fn ring(state: &crate::AppState, user_id: i64, username: &str, msg: &OutboundMessage) -> RingOutcome {
     let phone = state
         .voice
@@ -104,18 +113,21 @@ mod tests {
     use crate::channels::Urgency;
     use std::sync::Mutex as StdMutex;
 
+    /// Each ring's user, conversation and the phone call beside it.
+    type Rang = (i64, Option<i64>, Option<String>);
+
     struct FakeWeb {
         live: bool,
         answers: bool,
-        rang: StdMutex<Vec<(i64, Option<i64>)>>,
+        rang: StdMutex<Vec<Rang>>,
     }
 
     impl WebCalls for FakeWeb {
         fn has_live(&self, _: i64) -> bool {
             self.live
         }
-        fn ring(&self, user_id: i64, msg: &OutboundMessage) -> bool {
-            self.rang.lock().unwrap().push((user_id, msg.conversation_id));
+        fn ring(&self, user_id: i64, msg: &OutboundMessage, phone: Option<&str>) -> bool {
+            self.rang.lock().unwrap().push((user_id, msg.conversation_id, phone.map(str::to_string)));
             self.answers
         }
     }
@@ -134,10 +146,10 @@ mod tests {
     struct FakePhone(Phone, StdMutex<usize>);
 
     impl PhoneRing for FakePhone {
-        fn ring_phone(&self, _: i64, _: &OutboundMessage) -> anyhow::Result<()> {
+        fn ring_phone(&self, _: i64, _: &OutboundMessage) -> anyhow::Result<String> {
             *self.1.lock().unwrap() += 1;
             match self.0 {
-                Phone::Answers => Ok(()),
+                Phone::Answers => Ok("call-1".into()),
                 Phone::Unlinked => Err(NoLinkedPhone.into()),
                 Phone::Fails => anyhow::bail!("the voice service is not connected"),
             }
@@ -174,13 +186,25 @@ mod tests {
     }
 
     #[test]
-    fn an_open_web_app_takes_the_call() {
+    fn the_web_app_and_the_phone_ring_together() {
         let (db, push, ladder) = world();
         let (web, phone) = (web(true, true), phone(Phone::Answers));
         let out = ring_with(&db, &web, Some(&phone), &ladder, 1, "aki", &msg());
-        assert_eq!(out, RingOutcome::Web);
-        assert_eq!(*web.rang.lock().unwrap(), [(1, Some(7))]);
-        assert_eq!(*phone.1.lock().unwrap(), 0);
+        assert_eq!(out, RingOutcome::Both);
+        assert_eq!(*web.rang.lock().unwrap(), [(1, Some(7), Some("call-1".to_string()))]);
+        assert_eq!(*phone.1.lock().unwrap(), 1);
+        assert!(push.seen().is_empty());
+    }
+
+    #[test]
+    fn an_open_web_app_rings_alone_without_a_phone() {
+        let (db, push, ladder) = world();
+        for phone in [phone(Phone::Unlinked), phone(Phone::Fails)] {
+            let web = web(true, true);
+            assert_eq!(ring_with(&db, &web, Some(&phone), &ladder, 1, "aki", &msg()), RingOutcome::Web);
+            assert_eq!(*web.rang.lock().unwrap(), [(1, Some(7), None)]);
+        }
+        assert_eq!(ring_with(&db, &web(true, true), None, &ladder, 1, "aki", &msg()), RingOutcome::Web);
         assert!(push.seen().is_empty());
     }
 

@@ -66,23 +66,31 @@ sockets (a ninth is `429` before the upgrade).
 A wake-up's `say {ring: true}` ([agent.md](agent.md#wake-ups)) calls instead of
 writing, whatever `ring_for` says:
 
-1. With `[voice]` up and a page of the app in view, every visible socket gets
-   `{"type":"incoming","ring","conversation_id"}` and the app shows the call
-   view, ringing, with a soft repeating ringtone (a browser tab may block it
-   until the page has had a click). The desktop app always reports itself in
-   view, so it rings from the tray and brings its window up. Answering opens `/api/call/ws?ring=<token>`
-   ([voice.md](voice.md#web-calls)) and every socket gets
-   `{"type":"ring_taken","ring"}`; so does declining, which sends the message
-   down the ladder at once. A ring unanswered after 30 s, or answered but
-   unable to open its call, goes down the ladder too.
-2. Otherwise the linked phone rings over Matrix.
-3. Otherwise the message alone walks the ladder without the voice rung.
+The open app and the linked phone ring together; whichever is answered first
+takes the call and the other stops.
+
+- With `[voice]` up and a page of the app in view, every visible socket gets
+  `{"type":"incoming","ring","conversation_id"}` and the app shows the call
+  view, ringing, with a soft repeating ringtone (a browser tab may block it
+  until the page has had a click). The desktop app always reports itself in
+  view, so it rings from the tray and brings its window up. Answering opens
+  `/api/call/ws?ring=<token>` ([voice.md](voice.md#web-calls)), hangs up the
+  phone if it is still ringing, and every socket gets
+  `{"type":"ring_taken","ring"}`.
+- With a linked phone, it rings over Matrix at the same time. Answering it
+  sends every socket `{"type":"ring_taken","ring"}` for the app's ring.
+- Declining in the app hangs up the phone and sends the message down the
+  ladder at once. When neither is answered, the message goes down the ladder
+  once both have given up: after the phone's ring when it rang, else after the
+  app's 30 s. A ring answered but unable to open its call goes down the ladder
+  too.
+- With neither, the message alone walks the ladder without the voice rung.
 
 An answered call sounds when it connects and when it ends; a failed call and a
 ring that is never answered stay quiet. The sound files and their licences are
 in `web/src/sounds/` (`CREDITS.md`).
 
-Each ring logs `trigger_rang` with `web`, `phone`, `messaged` or
+Each ring logs `trigger_rang` with `web+phone`, `web`, `phone`, `messaged` or
 `undelivered`.
 
 ## Check-ins are conversations

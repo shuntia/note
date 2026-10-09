@@ -396,10 +396,10 @@ async fn a_ring_reaches_only_a_visible_app_and_its_answer_speaks_the_thread() {
     };
     let (conn_id, mut rx) = r.state.hub.register(1).unwrap();
     assert!(!r.state.web_calls.has_live(1));
-    assert!(!r.state.web_calls.ring(1, &rung(Some(thread))), "no app in view");
+    assert!(!r.state.web_calls.ring(1, &rung(Some(thread)), None), "no app in view");
     r.state.hub.set_visible(1, conn_id, true);
     assert!(r.state.web_calls.has_live(1));
-    assert!(r.state.web_calls.ring(1, &rung(Some(thread))));
+    assert!(r.state.web_calls.ring(1, &rung(Some(thread)), None));
     let incoming: Value = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
     assert_eq!((incoming["type"].as_str(), incoming["conversation_id"].as_i64()), (Some("incoming"), Some(thread)));
     let token = incoming["ring"].as_str().unwrap().to_string();
@@ -462,7 +462,7 @@ async fn a_declined_ring_sends_its_message_on_at_once_and_stops_ringing() {
     let mut app = open_from(r.addr, &r.cookie, "/api/ws", None).await.unwrap();
     app.send(Message::Text(r#"{"type":"visible","on":true}"#.into())).await.unwrap();
     eventually("the app in view", || r.state.web_calls.has_live(1)).await;
-    assert!(r.state.web_calls.ring(1, &rung(None)));
+    assert!(r.state.web_calls.ring(1, &rung(None), None));
     let token = frame(&mut app, "incoming").await["ring"].as_str().unwrap().to_string();
     app.send(Message::Text(serde_json::json!({ "type": "decline", "ring": token }).to_string().into())).await.unwrap();
     let (mut taken, mut delivered) = (None, None);

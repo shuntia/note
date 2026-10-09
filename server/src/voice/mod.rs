@@ -21,6 +21,8 @@ pub const STALE_RING_SECS: i64 = 90;
 pub const STALE_LIVE_SECS: i64 = 40 * 60;
 
 type Ladder = Arc<OnceLock<Vec<Arc<dyn Channel>>>>;
+/// Tells a user's open pages that the ring with this token was taken elsewhere.
+pub type RingTaken = Arc<dyn Fn(i64, &str) + Send + Sync>;
 
 /// What Note says on a call. `on_frame` sees every frame of a live call, and
 /// every `Outcome` and `Ended`, after it is stored; it is never called while
@@ -76,6 +78,7 @@ impl Voice {
             to_voice: cell.clone(),
             config_dir: Arc::default(),
             web: web.clone(),
+            ring_taken: Arc::default(),
         });
         let peer = Peer::new(cfg, Dir::ToVoice, handler.clone(), outbox);
         let _ = cell.set(peer.clone());
@@ -93,6 +96,10 @@ impl Voice {
     /// channel itself is never among them.
     pub fn set_fallback(&self, ladder: Vec<Arc<dyn Channel>>) {
         let _ = self.fallback.set(ladder);
+    }
+
+    pub fn set_ring_taken(&self, notice: RingTaken) {
+        let _ = self.handler.ring_taken.set(notice);
     }
 
     pub fn is_up(&self) -> bool {
@@ -229,6 +236,7 @@ impl Voice {
     }
 
     /// Opens the call an answered ring asks for; `None` when the ring is not the user's or is gone.
+    /// The phone ringing beside it stops, or refuses this as busy when it was answered first.
     /// A call that cannot open sends the ring's own message down the ladder, once.
     pub fn answer_ring(
         &self,
@@ -237,11 +245,31 @@ impl Voice {
         now: jiff::Timestamp,
     ) -> Option<Result<web::WebCall, web::WebRefusal>> {
         let rung = self.web.take_ring_at(token, user_id, Instant::now())?;
-        let thread = rung.conversation_id;
+        if rung.phone.as_deref().is_some_and(|phone| !self.stand_down_phone(phone, now)) {
+            return Some(Err(web::WebRefusal::Busy));
+        }
+        let thread = rung.message.conversation_id;
         let message = thread.and_then(|conversation_id| self.ring_message(user_id, conversation_id));
         Some(self.open_web_call(user_id, web::WebStart { thread, message }, now, false).inspect_err(|_| {
-            self.deliver(user_id, rung);
+            self.deliver(user_id, rung.message.clone());
         }))
+    }
+
+    /// Ends a phone call still ringing beside a web ring the user answered, owing nothing;
+    /// false when the phone was answered first.
+    fn stand_down_phone(&self, call_id: &str, now: jiff::Timestamp) -> bool {
+        let (stood_down, answered) = {
+            let conn = crate::db_guard(&self.db);
+            let stood_down = end_unanswered(&conn, call_id, "elsewhere", now).ok().flatten().is_some();
+            if stood_down {
+                let _ = conn.execute("UPDATE voice_calls SET fell_through_at = ?2 WHERE id = ?1", (call_id, now.to_string()));
+            }
+            (stood_down, state(&conn, call_id).ok().flatten().as_deref() == Some("answered"))
+        };
+        if stood_down {
+            self.hang_up(call_id);
+        }
+        !answered
     }
 
     /// `send_on`: whether a call recorded but never sent delivers its own message.
@@ -341,27 +369,37 @@ impl Voice {
         }
     }
 
-    pub fn offer_ring(&self, user_id: i64, msg: &OutboundMessage) -> String {
-        self.web.offer_ring_at(user_id, msg, Instant::now())
+    pub fn offer_ring(&self, user_id: i64, msg: &OutboundMessage, phone: Option<&str>) -> String {
+        self.web.offer_ring_at(user_id, msg, phone, Instant::now())
     }
 
     pub fn withdraw_ring(&self, token: &str) {
         self.web.withdraw_ring(token);
     }
 
-    /// Sends a declined ring's message down the ladder; false when the ring was not the user's or is gone.
+    /// Sends a declined ring's message down the ladder, hanging up the phone ringing beside it;
+    /// false when the ring was not the user's or is gone.
     pub fn decline_ring(&self, token: &str, user_id: i64) -> bool {
-        let Some(msg) = self.web.decline_ring(token, user_id) else { return false };
-        self.deliver(user_id, msg);
+        let Some(rung) = self.web.decline_ring(token, user_id) else { return false };
+        let Some(phone) = rung.phone else {
+            self.deliver(user_id, rung.message);
+            return true;
+        };
+        let ended = end_unanswered(&crate::db_guard(&self.db), &phone, "declined", jiff::Timestamp::now()).ok().flatten();
+        if let Some((user_id, message)) = ended {
+            self.hang_up(&phone);
+            self.handler.fall_through(&phone, user_id, message);
+        }
         true
     }
 
-    /// Sends each ring that ran out unanswered down the ladder, and returns how many.
+    /// Sends each ring that ran out unanswered down the ladder, and returns how many ran out.
+    /// A ring beside a phone call leaves the message to that call.
     pub fn expire_rings(&self, now: Instant) -> usize {
         let gone = self.web.expired_rings_at(now);
         let n = gone.len();
-        for (user_id, msg) in gone {
-            self.deliver(user_id, msg);
+        for rung in gone.into_iter().filter(|r| r.phone.is_none()) {
+            self.deliver(rung.user_id, rung.message);
         }
         n
     }
@@ -495,6 +533,24 @@ impl Voice {
     }
 }
 
+/// Moves a call nobody has answered yet to `ended`, returning its user and stored message.
+fn end_unanswered(
+    conn: &Connection,
+    call_id: &str,
+    outcome: &str,
+    now: jiff::Timestamp,
+) -> rusqlite::Result<Option<(i64, Option<String>)>> {
+    use rusqlite::OptionalExtension;
+    conn.query_row(
+        "UPDATE voice_calls SET state = 'ended', outcome = ?2, ended_at = ?3
+         WHERE id = ?1 AND state IN ('starting', 'ringing')
+         RETURNING user_id, message",
+        (call_id, outcome, now.to_string()),
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .optional()
+}
+
 /// Moves the call to `ended` unless it already is (or, given `only_from`,
 /// unless it is in that state), returning its user and stored message only
 /// for the move that did it.
@@ -552,6 +608,7 @@ pub(crate) struct NoteHandler {
     to_voice: Arc<OnceLock<Peer>>,
     config_dir: Arc<OnceLock<PathBuf>>,
     web: Arc<web::Relays>,
+    ring_taken: Arc<OnceLock<RingTaken>>,
 }
 
 impl NoteHandler {
@@ -708,7 +765,7 @@ impl Handler for NoteHandler {
             return Err("the fallback ladder is not set yet".into());
         }
         let now = jiff::Timestamp::now();
-        let (ended, live, known) = {
+        let (ended, live, known, answered_now) = {
             let conn = crate::db_guard(&self.db);
             let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
             let known = tx
@@ -716,6 +773,7 @@ impl Handler for NoteHandler {
                 .map_err(|e| e.to_string())?
                 > 0;
             let mut ended = None;
+            let mut answered_now = false;
             if known {
                 match &body {
                     CallBody::Ringing => {
@@ -726,11 +784,13 @@ impl Handler for NoteHandler {
                         .map_err(|e| e.to_string())?;
                     }
                     CallBody::Outcome { outcome: Outcome::Answered } => {
-                        tx.execute(
-                            "UPDATE voice_calls SET state = 'answered' WHERE id = ?1 AND state IN ('starting', 'ringing')",
-                            [call_id],
-                        )
-                        .map_err(|e| e.to_string())?;
+                        answered_now = tx
+                            .execute(
+                                "UPDATE voice_calls SET state = 'answered' WHERE id = ?1 AND state IN ('starting', 'ringing')",
+                                [call_id],
+                            )
+                            .map_err(|e| e.to_string())?
+                            > 0;
                     }
                     CallBody::Outcome { outcome } => {
                         ended = end_call(&tx, call_id, outcome.as_str(), None, now).map_err(|e| e.to_string())?;
@@ -764,8 +824,15 @@ impl Handler for NoteHandler {
             }
             let live = known && state(&tx, call_id)?.as_deref() == Some("answered");
             tx.commit().map_err(|e| e.to_string())?;
-            (ended, live, known)
+            (ended, live, known, answered_now)
         };
+        if answered_now {
+            for (user_id, token) in self.web.withdraw_rings_for(call_id) {
+                if let Some(notice) = self.ring_taken.get() {
+                    notice(user_id, &token);
+                }
+            }
+        }
         if live || (known && matches!(body, CallBody::Outcome { .. } | CallBody::Ended)) {
             self.conversation.on_frame(call_id, &body);
         }
@@ -1591,7 +1658,7 @@ mod tests {
     async fn a_ring_that_runs_out_sends_its_message_down_the_ladder_once() {
         let (voice, mock) = rig();
         let long_ago = Instant::now().checked_sub(web::RING_FOR * 2).unwrap();
-        voice.web.offer_ring_at(1, &msg(), long_ago);
+        voice.web.offer_ring_at(1, &msg(), None, long_ago);
         voice.sweep(jiff::Timestamp::now());
         voice.sweep(jiff::Timestamp::now());
         settle().await;
@@ -1603,7 +1670,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_declined_ring_sends_its_message_at_once() {
         let (voice, mock) = rig();
-        let token = voice.offer_ring(1, &msg());
+        let token = voice.offer_ring(1, &msg(), None);
         assert!(!voice.decline_ring(&token, 2), "not another user's to decline");
         assert!(voice.decline_ring(&token, 1));
         assert!(!voice.decline_ring(&token, 1));
@@ -1618,7 +1685,7 @@ mod tests {
     async fn an_answered_ring_never_sends_its_message() {
         let (voice, mock) = rig();
         let _up = up(&voice).await;
-        let token = voice.offer_ring(1, &msg());
+        let token = voice.offer_ring(1, &msg(), None);
         assert!(voice.answer_ring(&token, 1, jiff::Timestamp::now()).unwrap().is_ok());
         assert!(!voice.decline_ring(&token, 1));
         assert_eq!(voice.expire_rings(Instant::now() + web::RING_FOR * 2), 0);
@@ -1629,7 +1696,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_withdrawn_ring_never_sends_its_message() {
         let (voice, mock) = rig();
-        let token = voice.offer_ring(1, &msg());
+        let token = voice.offer_ring(1, &msg(), None);
         voice.withdraw_ring(&token);
         assert_eq!(voice.expire_rings(Instant::now() + web::RING_FOR * 2), 0);
         settle().await;
@@ -1639,7 +1706,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn an_answered_ring_that_cannot_open_sends_its_message_on_once() {
         let (voice, mock) = rig();
-        let token = voice.offer_ring(1, &msg());
+        let token = voice.offer_ring(1, &msg(), None);
         let refused = voice.answer_ring(&token, 1, jiff::Timestamp::now()).unwrap();
         assert!(matches!(refused, Err(web::WebRefusal::Unavailable)), "the voice side is down");
         settle().await;
@@ -1656,7 +1723,7 @@ mod tests {
         let (voice, mock) = rig();
         let _up = up(&voice).await;
         voice.start_call(1, &link(), &msg(), jiff::Timestamp::now()).unwrap();
-        let token = voice.offer_ring(1, &msg());
+        let token = voice.offer_ring(1, &msg(), None);
         assert!(matches!(voice.answer_ring(&token, 1, jiff::Timestamp::now()).unwrap(), Err(web::WebRefusal::Busy)));
         settle().await;
         assert_eq!(mock.seen().len(), 1);
@@ -1687,7 +1754,7 @@ mod tests {
             };
             let action = crate::channels::Action { label: "Later".into(), data: "later".into() };
             let rung = OutboundMessage { conversation_id: Some(thread), actions: vec![action], ..msg() };
-            let token = voice.offer_ring(1, &rung);
+            let token = voice.offer_ring(1, &rung, None);
             let refused = voice.answer_ring(&token, 1, jiff::Timestamp::now()).unwrap();
             assert!(matches!(refused, Err(web::WebRefusal::Unavailable)));
             settle().await;
@@ -1698,5 +1765,87 @@ mod tests {
             assert_eq!(seen.len(), 1, "spoken: {spoken}");
             assert_eq!(seen[0].1, rung, "the ring's own message, spoken: {spoken}");
         }
+    }
+
+    fn call_row(voice: &Voice, id: &str) -> (String, Option<String>, bool) {
+        crate::db_guard(&voice.db)
+            .query_row("SELECT state, outcome, fell_through_at IS NOT NULL FROM voice_calls WHERE id = ?1", [id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_web_answer_stands_the_phone_down_owing_nothing() {
+        let (voice, mock) = rig();
+        let _up = up(&voice).await;
+        let phone = voice.start_call(1, &link(), &msg(), jiff::Timestamp::now()).unwrap();
+        voice.handler.apply(&phone, 1, CallBody::Ringing).unwrap();
+        let token = voice.offer_ring(1, &msg(), Some(&phone));
+        assert!(voice.answer_ring(&token, 1, jiff::Timestamp::now()).unwrap().is_ok());
+        assert_eq!(call_row(&voice, &phone), ("ended".into(), Some("elsewhere".into()), true));
+        voice.handler.apply(&phone, 2, CallBody::Outcome { outcome: Outcome::Missed }).unwrap();
+        voice.handler.apply(&phone, 3, CallBody::Ended).unwrap();
+        voice.redrive();
+        settle().await;
+        assert!(mock.seen().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_phone_answer_withdraws_the_web_ring_and_tells_the_pages() {
+        let (voice, mock) = rig();
+        let told: Arc<Mutex<Vec<(i64, String)>>> = Arc::default();
+        let seen = told.clone();
+        voice.set_ring_taken(Arc::new(move |user_id, token| seen.lock().unwrap().push((user_id, token.to_string()))));
+        let phone = voice.start_call(1, &link(), &msg(), jiff::Timestamp::now()).unwrap();
+        let token = voice.offer_ring(1, &msg(), Some(&phone));
+        voice.handler.apply(&phone, 1, CallBody::Ringing).unwrap();
+        voice.handler.apply(&phone, 2, CallBody::Outcome { outcome: Outcome::Answered }).unwrap();
+        assert_eq!(*told.lock().unwrap(), [(1, token.clone())]);
+        assert!(voice.answer_ring(&token, 1, jiff::Timestamp::now()).is_none());
+        settle().await;
+        assert!(mock.seen().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_web_answer_after_the_phone_took_the_call_is_busy() {
+        let (voice, mock) = rig();
+        let phone = voice.start_call(1, &link(), &msg(), jiff::Timestamp::now()).unwrap();
+        let token = voice.offer_ring(1, &msg(), Some(&phone));
+        crate::db_guard(&voice.db).execute("UPDATE voice_calls SET state = 'answered' WHERE id = ?1", [&phone]).unwrap();
+        assert!(matches!(voice.answer_ring(&token, 1, jiff::Timestamp::now()).unwrap(), Err(web::WebRefusal::Busy)));
+        assert_eq!(call_row(&voice, &phone).0, "answered");
+        settle().await;
+        assert!(mock.seen().is_empty(), "the phone call speaks the message");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rings_nobody_answers_deliver_the_message_once() {
+        let (voice, mock) = rig();
+        let phone = voice.start_call(1, &link(), &msg(), jiff::Timestamp::now()).unwrap();
+        voice.offer_ring(1, &msg(), Some(&phone));
+        assert_eq!(voice.expire_rings(Instant::now() + web::RING_FOR * 2), 1);
+        settle().await;
+        assert!(mock.seen().is_empty(), "the phone is still ringing");
+        voice.handler.apply(&phone, 1, CallBody::Ringing).unwrap();
+        voice.handler.apply(&phone, 2, CallBody::Outcome { outcome: Outcome::Missed }).unwrap();
+        settle().await;
+        assert_eq!(mock.seen().len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_web_decline_hangs_up_the_phone_and_delivers_once() {
+        let (voice, mock) = rig();
+        let phone = voice.start_call(1, &link(), &msg(), jiff::Timestamp::now()).unwrap();
+        voice.handler.apply(&phone, 1, CallBody::Ringing).unwrap();
+        let token = voice.offer_ring(1, &msg(), Some(&phone));
+        assert!(voice.decline_ring(&token, 1));
+        assert_eq!(call_row(&voice, &phone).1.as_deref(), Some("declined"));
+        voice.handler.apply(&phone, 2, CallBody::Outcome { outcome: Outcome::Missed }).unwrap();
+        voice.handler.apply(&phone, 3, CallBody::Ended).unwrap();
+        settle().await;
+        voice.redrive();
+        settle().await;
+        assert_eq!(mock.seen().len(), 1);
     }
 }

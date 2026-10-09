@@ -38,7 +38,7 @@ impl Channel for VoiceChannel {
         let cfg = crate::config::UserConfig::load(&self.config_dir, username)?;
         anyhow::ensure!(rings_for(cfg.ring_for(), msg), "not a message this user is rung for");
         use super::calling::PhoneRing;
-        VoicePhone::new(self.voice.clone(), self.db.clone()).ring_phone(user_id, msg)
+        VoicePhone::new(self.voice.clone(), self.db.clone()).ring_phone(user_id, msg).map(drop)
     }
 }
 
@@ -54,15 +54,14 @@ impl VoicePhone {
 }
 
 impl super::calling::PhoneRing for VoicePhone {
-    fn ring_phone(&self, user_id: i64, msg: &OutboundMessage) -> anyhow::Result<()> {
+    fn ring_phone(&self, user_id: i64, msg: &OutboundMessage) -> anyhow::Result<String> {
         let link = {
             let conn = crate::db_guard(&self.db);
             links::ringable(&conn, user_id)?
         }
         .ok_or(super::calling::NoLinkedPhone)?;
         anyhow::ensure!(self.voice.is_up(), "the voice service is not connected");
-        self.voice.start_call(user_id, &link, msg, jiff::Timestamp::now())?;
-        Ok(())
+        self.voice.start_call(user_id, &link, msg, jiff::Timestamp::now())
     }
 }
 

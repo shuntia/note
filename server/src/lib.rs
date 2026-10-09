@@ -377,6 +377,10 @@ impl AppState {
         });
         let ch = crate::channels::voice::VoiceChannel::new(voice.clone(), self.db.clone(), self.config_dir.clone());
         self.channels.insert(0, Arc::new(ch));
+        let hub = self.hub.clone();
+        voice.set_ring_taken(Arc::new(move |user_id, token| {
+            hub.send(user_id, &serde_json::json!({ "type": "ring_taken", "ring": token }).to_string());
+        }));
         self.web_calls = Arc::new(crate::voice::web::WebRinger::new(self.hub.clone(), voice.clone()));
         self.voice = Some(voice);
         self

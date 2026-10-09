@@ -875,9 +875,10 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
         "say" => (
             "Say this to the user and end the session. One or two warm sentences, no greeting \
              ritual — it lands in the thread and as a notification. With ring set, Note calls \
-             instead: the open web app rings, else the linked phone. A ring is refused while the \
-             user seems busy — working, in a calendar event, in a quiet window, or away for 90 \
-             minutes; then say it without ring, or stay quiet. Set asked too when the user \
+             instead: the open web app and the linked phone ring together, and whichever is \
+             answered first takes the call. A ring is refused while the user seems busy — \
+             working, in a calendar event, in a quiet window, or away for 90 minutes; then say \
+             it without ring, or stay quiet. Set asked too when the user \
              asked to be called now, and the ring goes through anyway.",
             schema::<trigger_ops::SayArgs>(),
         ),
