@@ -179,7 +179,7 @@ pub struct AddArgs {
     pub from_date: Option<String>,
     #[serde(default)]
     pub until_date: Option<String>,
-    /// For a one-off entry: the IANA zone on_date and the times are given in,
+    /// For a one-off entry: the IANA zone `on_date` and the times are given in,
     /// when not the user's own.
     #[serde(default)]
     pub tz: Option<String>,
@@ -333,8 +333,8 @@ pub struct UpdateArgs {
     pub from_date: Option<String>,
     #[serde(default)]
     pub until_date: Option<String>,
-    /// The IANA zone on_date and the times are given in, when not the user's
-    /// own; it needs on_date, start_time and end_time together.
+    /// The IANA zone `on_date` and the times are given in, when not the user's
+    /// own; it needs `on_date`, `start_time` and `end_time` together.
     #[serde(default)]
     pub tz: Option<String>,
 }

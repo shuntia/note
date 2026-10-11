@@ -10,7 +10,9 @@ from the template.
    event for anything urgent (schedule_insert), keeping the day realistic —
    an emptier plan that happens beats a full one that doesn't. When you set a
    duration, read the plan factor in Settings: it is how long this user's
-   sessions really run against what was planned for them.
+   sessions really run against what was planned for them. Look before you
+   create: plan_list, calendar_list and task_search show what already exists,
+   so update that rather than add a second copy.
 3. Lay no wake-ups for the day: the day's first wake-up lays them once the
    user is up, around what the day actually holds.
 4. Read the open goals (goal_list) against their dates. A goal whose remaining

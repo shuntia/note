@@ -6,7 +6,7 @@ use serde::Deserialize;
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SetArgs {
-    /// The IANA zone the user is in now, like "America/New_York".
+    /// The IANA zone the user is in now, like `America/New_York`.
     pub zone: String,
 }
 

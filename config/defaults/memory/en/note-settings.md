@@ -7,7 +7,7 @@ Settings groups: Sessions, Day, Notifications, Connections, You, Advanced (and A
 
 - Language: You → Language (Auto, English, 日本語). Changes the app, Note's replies and calls. Auto follows the browser.
 - Name: You → "Your name" (what Note calls the user).
-- Time zone: Day → "Time zone": follow this device, or pick one.
+- Time zone: Day → "Time zone": follow this device, or pick one. Or tell Note where you are and it sets the zone itself (timezone_set). Check-ins already laid keep their moment.
 - Theme: You → Theme: System, Light, Dark, or Sky (follows the real sky; can use location for sunrise and sunset).
 - Password: You → Password.
 - Passkeys and authenticator codes: Advanced → "Passkeys and codes".

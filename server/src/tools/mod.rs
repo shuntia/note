@@ -655,7 +655,9 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
              user groups their list; reuse a category they already have rather than coining a \
              near-copy. goal_id hangs the task from one of their goals. notify says how the \
              block holding this task announces itself when it starts: none is silent, chat \
-             writes a line in the day's thread, notify sends a notification (the default).",
+             writes a line in the day's thread, notify sends a notification (the default). \
+             An open task with the same title is refused with its id: update that one, or \
+             pass also when this really is a second task.",
             schema::<task_ops::CreateArgs>(),
         ),
         "task_update" => (
@@ -824,7 +826,8 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
              that makes sense on its own (at most 80 characters). op add writes one — give it \
              from and until when it belongs to a stretch of time; update rewords it or moves its \
              window (an empty from or until clears it); keep says it still matters; remove \
-             deletes it once it no longer does. Anything that needs more words is a \
+             deletes it once it no longer does. An add whose title an existing note already \
+             reads is refused with that note's id. Anything that needs more words is a \
              memory_write, and the note may name that memory's id. The user never sees these; \
              anything they have to do is a task.",
             schema::<note_ops::WriteArgs>(),
@@ -886,7 +889,8 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
              has set aside for tasks — never quiet. Use this when the user says they cannot \
              be disturbed at certain times, or names something that happens every week: \
              \"school weekdays 08:15-15:30\" is fixed and quiet. A one-off entry that has \
-             already ended is refused.",
+             already ended is refused, and so is one whose title matches an entry overlapping \
+             it on a shared day — change that one, or pass also.",
             schema::<calendar_ops::AddArgs>(),
         ),
         "calendar_update" => (

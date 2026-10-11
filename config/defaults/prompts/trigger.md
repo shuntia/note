@@ -19,6 +19,8 @@ is needed, send them as one `batch`.
   entries are not yours to change.
 - Keep your notes current with note_write; a fact that will matter for weeks
   goes to memory_write.
+- Look before you create: plan_list shows the triggers already waiting and
+  task_search the tasks, so update or replace those rather than add twins.
 
 Everything you change is logged; you will see it in your recent activity.
 Change what clearly helps and leave the rest.
