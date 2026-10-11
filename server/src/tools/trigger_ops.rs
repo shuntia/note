@@ -7,25 +7,49 @@ use serde::Deserialize;
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SetArgs {
-    /// When it should fire: zero-padded `HH:MM`, or `+Nmin` from now.
+    /// When it should fire: zero-padded `HH:MM` on `date`, or `+Nmin` from now.
     pub at: String,
     /// What you will be following up on, in your own words.
     pub prompt: String,
     /// The conversation to say it in. Omit for the day's check-in thread.
     #[serde(default)]
     pub thread: Option<i64>,
+    /// The day `at` falls on, YYYY-MM-DD: today (the default) up to 7 days ahead.
+    #[serde(default)]
+    pub date: Option<String>,
+    /// The IANA zone `at` and `date` are read in, when not the user's own.
+    #[serde(default)]
+    pub tz: Option<String>,
+    /// A pending trigger this one takes the place of; it is dropped.
+    #[serde(default)]
+    pub replace: Option<i64>,
+    /// Lay it even though another trigger sits within 20 minutes of it.
+    #[serde(default)]
+    pub also: bool,
 }
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WaitUntilArgs {
-    /// Zero-padded `HH:MM`, or `+Nmin` from now.
+    /// Zero-padded `HH:MM` on `date`, or `+Nmin` from now.
     pub at: String,
     pub prompt: String,
     /// The conversation whose reply calls the follow-up off. Omit for the day's
     /// check-in thread, which then cannot call it off.
     #[serde(default)]
     pub thread: Option<i64>,
+    /// The day `at` falls on, YYYY-MM-DD: today (the default) up to 7 days ahead.
+    #[serde(default)]
+    pub date: Option<String>,
+    /// The IANA zone `at` and `date` are read in, when not the user's own.
+    #[serde(default)]
+    pub tz: Option<String>,
+    /// A pending trigger this one takes the place of; it is dropped.
+    #[serde(default)]
+    pub replace: Option<i64>,
+    /// Lay it even though another trigger sits within 20 minutes of it.
+    #[serde(default)]
+    pub also: bool,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -37,18 +61,33 @@ pub struct WaitForArgs {
     /// The plan event whose decision calls the follow-up off.
     #[serde(default)]
     pub event_id: Option<i64>,
-    /// How long to wait: zero-padded `HH:MM`, or `+Nmin` from now.
+    /// How long to wait: zero-padded `HH:MM` on `date`, or `+Nmin` from now.
     pub until: String,
     pub prompt: String,
+    /// The day `until` falls on, YYYY-MM-DD: today (the default) up to 7 days ahead.
+    #[serde(default)]
+    pub date: Option<String>,
+    /// The IANA zone `until` and `date` are read in, when not the user's own.
+    #[serde(default)]
+    pub tz: Option<String>,
+    /// A pending trigger this one takes the place of; it is dropped.
+    #[serde(default)]
+    pub replace: Option<i64>,
+    /// Lay it even though another trigger sits within 20 minutes of it.
+    #[serde(default)]
+    pub also: bool,
 }
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BudgetArgs {
-    /// How many more check-ins today, 1 to 10.
+    /// How many more check-ins that day, 1 to 10.
     pub extra: u32,
     /// What the user agreed to, in one line.
     pub reason: String,
+    /// The day to raise, YYYY-MM-DD. Omit for today.
+    #[serde(default)]
+    pub date: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -78,16 +117,16 @@ pub struct QuietArgs {
 
 fn refused(e: Refusal) -> ToolError {
     match e {
-        Refusal::CapReached { allowance, spent } => ToolError::cap_reached(format!(
-            "{spent} of today's {allowance} check-ins are laid; ask the user, and call \
-             trigger_budget after they agree"
+        Refusal::CapReached { date, allowance, spent } => ToolError::cap_reached(format!(
+            "{spent} of {date}'s {allowance} check-ins are laid; ask the user, and call \
+             trigger_budget for that date after they agree"
         )),
         Refusal::TooSoon { minutes } => ToolError::too_soon(format!(
             "a trigger point must be at least {} minutes ahead, and that one is {minutes}",
             triggers::MIN_LEAD_MIN
         )),
         Refusal::Past { at } => {
-            ToolError::past(format!("{at} has gone by; lay it later today"))
+            ToolError::past(format!("{at} has gone by; pick a time still ahead, or a later date"))
         }
         Refusal::NotFound(m) => ToolError::not_found(m),
         Refusal::Rejected(m) => ToolError::rejected(m),
@@ -110,36 +149,149 @@ pub(crate) fn target_date(ctx: &ToolCtx, kind: SessionKind, now: jiff::Timestamp
     }
 }
 
+/// The IANA zone a tool's wall times are given in, when the model names one.
+pub(crate) fn zone_arg(tz: Option<&str>) -> Result<Option<jiff::tz::TimeZone>, ToolError> {
+    tz.map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(|t| {
+            jiff::tz::TimeZone::get(t).map_err(|_| {
+                ToolError::rejected(format!("tz must be an IANA zone name like America/New_York, got {t:?}"))
+            })
+        })
+        .transpose()
+}
+
+/// A day the model named for a trigger, refused once gone by in `zone` or more
+/// than `MAX_DAYS_AHEAD` days off.
+fn checked_day(raw: &str, zone: &jiff::tz::TimeZone, now: jiff::Timestamp) -> Result<jiff::civil::Date, ToolError> {
+    let date: jiff::civil::Date = raw
+        .trim()
+        .parse()
+        .map_err(|_| ToolError::rejected(format!("date must be YYYY-MM-DD, got {raw:?}")))?;
+    let today = now.to_zoned(zone.clone()).date();
+    if date < today {
+        return Err(ToolError::past(format!("{date} has gone by; today is {today}")));
+    }
+    let ahead = i64::from((date - today).get_days());
+    if ahead > triggers::MAX_DAYS_AHEAD {
+        return Err(ToolError::rejected(format!(
+            "{date} is {ahead} days off; a trigger reaches at most {} days ahead",
+            triggers::MAX_DAYS_AHEAD
+        )));
+    }
+    Ok(date)
+}
+
+struct Aim<'a> {
+    at: &'a str,
+    date: Option<&'a str>,
+    tz: Option<&'a str>,
+    replace: Option<i64>,
+    also: bool,
+}
+
+/// The plan date and wall time a trigger is laid with, restated in the user's
+/// own zone when the model aimed it in another.
+fn placed(
+    ctx: &ToolCtx,
+    kind: SessionKind,
+    aim: &Aim,
+    now: jiff::Timestamp,
+) -> Result<(jiff::civil::Date, String), ToolError> {
+    let zone = zone_arg(aim.tz)?;
+    if aim.at.starts_with('+') {
+        if aim.date.is_some() || zone.is_some() {
+            return Err(ToolError::rejected("date and tz go with an HH:MM time, not a +Nmin offset"));
+        }
+        return Ok((target_date(ctx, kind, now), aim.at.to_string()));
+    }
+    let user = triggers::timezone(ctx.config_dir, ctx.username);
+    let date = match (aim.date, &zone) {
+        (Some(raw), _) => checked_day(raw, zone.as_ref().unwrap_or(&user), now)?,
+        (None, Some(there)) if kind != SessionKind::Nightly => now.to_zoned(there.clone()).date(),
+        (None, _) => target_date(ctx, kind, now),
+    };
+    let Some(there) = zone else {
+        return Ok((date, aim.at.to_string()));
+    };
+    crate::zone::translate(date, aim.at, &there, &user).ok_or_else(|| {
+        ToolError::rejected(format!("at must be zero-padded HH:MM or +Nmin, got {:?}", aim.at))
+    })
+}
+
+fn drop_replaced(conn: &Connection, ctx: &ToolCtx, id: i64, now: jiff::Timestamp) -> Result<(), ToolError> {
+    let internal = |e: rusqlite::Error| ToolError::internal(e.to_string());
+    let n = conn
+        .execute(
+            "UPDATE events SET status = 'dropped', decided_at = ?1
+             WHERE id = ?2 AND kind = ?3 AND status IN ('pending', 'snoozed')
+               AND plan_id IN (SELECT id FROM plans WHERE user_id = ?4)",
+            (now.to_string(), id, triggers::KIND, ctx.user_id),
+        )
+        .map_err(internal)?;
+    if n == 0 {
+        return Err(ToolError::not_found(format!(
+            "no pending trigger {id} for this user; plan_list shows a day's triggers"
+        )));
+    }
+    crate::log::record(conn, Some(ctx.user_id), "trigger_replaced", &format!("event {id}"))
+        .map_err(|e| ToolError::internal(e.to_string()))
+}
+
+/// Lays the trigger unless one already waits within `NEAR_MIN` minutes of it,
+/// which the model is shown instead, so a follow-up is not laid twice.
 fn lay(
     conn: &Connection,
     ctx: &ToolCtx,
     kind: SessionKind,
-    at: &str,
+    aim: &Aim,
     prompt: &str,
     cancel: Option<Cancel>,
     thread: Option<i64>,
 ) -> Result<serde_json::Value, ToolError> {
     let now = jiff::Timestamp::now();
-    let laid = triggers::lay(
-        conn,
-        &Lay {
-            config_dir: ctx.config_dir,
-            user_id: ctx.user_id,
-            username: ctx.username,
-            at,
-            prompt,
-            date: target_date(ctx, kind, now),
-            cancel,
-            conversation_id: thread,
-            work_session_id: None,
-            system: false,
-            past_session: kind == SessionKind::Trigger,
-            now,
-        },
-    )
-    .map_err(refused)?;
+    let (date, at) = placed(ctx, kind, aim, now)?;
+    if let Some(id) = aim.replace {
+        drop_replaced(conn, ctx, id, now)?;
+    }
+    let lay = Lay {
+        config_dir: ctx.config_dir,
+        user_id: ctx.user_id,
+        username: ctx.username,
+        at: &at,
+        prompt,
+        date,
+        cancel,
+        conversation_id: thread,
+        work_session_id: None,
+        system: false,
+        past_session: kind == SessionKind::Trigger,
+        now,
+    };
+    if !aim.also {
+        let target = triggers::aimed_at(&lay).map_err(refused)?;
+        let tz = triggers::timezone(ctx.config_dir, ctx.username);
+        let near = triggers::near(conn, ctx.user_id, &tz, target)
+            .map_err(|e| ToolError::internal(e.to_string()))?;
+        if let Some(n) = near {
+            return Err(ToolError::duplicate(format!(
+                "trigger {} is already laid for {} {} ({:?}); drop it with schedule_drop, pass \
+                 replace: {} to lay this one in its place, or also: true when both are wanted",
+                n.event_id, n.date, n.at, n.prompt, n.event_id
+            )));
+        }
+    }
+    let laid = triggers::lay(conn, &lay).map_err(refused)?;
+    let date = conn
+        .query_row(
+            "SELECT p.date FROM events e JOIN plans p ON p.id = e.plan_id WHERE e.id = ?1",
+            [laid.event_id],
+            |r| r.get::<_, String>(0),
+        )
+        .map_err(|e| ToolError::internal(e.to_string()))?;
     Ok(serde_json::json!({
         "event_id": laid.event_id,
+        "date": date,
         "at": laid.at,
         "cancel_if": laid.cancel_if,
     }))
@@ -151,7 +303,14 @@ pub fn set(
     kind: SessionKind,
     args: &SetArgs,
 ) -> Result<serde_json::Value, ToolError> {
-    lay(conn, ctx, kind, &args.at, &args.prompt, None, args.thread)
+    let aim = Aim {
+        at: &args.at,
+        date: args.date.as_deref(),
+        tz: args.tz.as_deref(),
+        replace: args.replace,
+        also: args.also,
+    };
+    lay(conn, ctx, kind, &aim, &args.prompt, None, args.thread)
 }
 
 pub fn wait_until(
@@ -160,7 +319,14 @@ pub fn wait_until(
     kind: SessionKind,
     args: &WaitUntilArgs,
 ) -> Result<serde_json::Value, ToolError> {
-    lay(conn, ctx, kind, &args.at, &args.prompt, Some(Cancel::Replied), args.thread)
+    let aim = Aim {
+        at: &args.at,
+        date: args.date.as_deref(),
+        tz: args.tz.as_deref(),
+        replace: args.replace,
+        also: args.also,
+    };
+    lay(conn, ctx, kind, &aim, &args.prompt, Some(Cancel::Replied), args.thread)
 }
 
 pub fn wait_for(
@@ -174,10 +340,17 @@ pub fn wait_for(
         (None, Some(id)) => Cancel::EventDecided(id),
         _ => return Err(ToolError::rejected("name exactly one of task_id or event_id")),
     };
-    lay(conn, ctx, kind, &args.until, &args.prompt, Some(cancel), None)
+    let aim = Aim {
+        at: &args.until,
+        date: args.date.as_deref(),
+        tz: args.tz.as_deref(),
+        replace: args.replace,
+        also: args.also,
+    };
+    lay(conn, ctx, kind, &aim, &args.prompt, Some(cancel), None)
 }
 
-/// Raises today's allowance after the user has agreed to it; the receipt says
+/// Raises a day's allowance after the user has agreed to it; the receipt says
 /// so in the words the user would use.
 pub fn budget(
     conn: &Connection,
@@ -196,13 +369,17 @@ pub fn budget(
     }
     super::check_text("reason", reason)?;
     let internal = |e: rusqlite::Error| ToolError::internal(e.to_string());
-    let date = target_date(ctx, SessionKind::Talk, jiff::Timestamp::now());
+    let now = jiff::Timestamp::now();
+    let date = match args.date.as_deref() {
+        Some(raw) => checked_day(raw, &triggers::timezone(ctx.config_dir, ctx.username), now)?,
+        None => target_date(ctx, SessionKind::Talk, now),
+    };
     let extra = triggers::add_extra(conn, ctx.user_id, date, args.extra).map_err(internal)?;
     crate::log::record(
         conn,
         Some(ctx.user_id),
         "trigger_budget",
-        &format!("+{} today ({reason})", args.extra),
+        &format!("+{} on {date} ({reason})", args.extra),
     )
     .map_err(|e| ToolError::internal(e.to_string()))?;
     let allowance = triggers::allowance(conn, ctx.config_dir, ctx.username, ctx.user_id, date)
@@ -251,6 +428,10 @@ mod tests {
     use crate::tools::{dispatch, PreparedVectors, SessionKind, ToolCtx};
 
     fn env() -> (rusqlite::Connection, tempfile::TempDir) {
+        env_in(zone().iana_name().unwrap())
+    }
+
+    fn env_in(timezone: &str) -> (rusqlite::Connection, tempfile::TempDir) {
         let conn = crate::db::open_memory().unwrap();
         conn.execute(
             "INSERT INTO users (username, pass_hash, role) VALUES ('aki', 'x', 'member')",
@@ -263,9 +444,8 @@ mod tests {
         std::fs::write(
             p,
             format!(
-                "display_name = \"X\"\ntimezone = \"{}\"\ntemplate = \"default\"\n\
-                 nightly_time = \"22:00\"\ntriggers_per_day = 4\n",
-                zone().iana_name().unwrap()
+                "display_name = \"X\"\ntimezone = \"{timezone}\"\ntemplate = \"default\"\n\
+                 nightly_time = \"22:00\"\ntriggers_per_day = 4\n"
             ),
         )
         .unwrap();
@@ -348,7 +528,7 @@ mod tests {
             &ctx(&tmp),
             SessionKind::Talk,
             "wait_for",
-            &format!(r#"{{"task_id":1,"until":"{}","prompt":"still on the essay?"}}"#, soon()),
+            r#"{"task_id":1,"until":"+150min","prompt":"still on the essay?"}"#,
         )
         .unwrap();
         assert_eq!(out["cancel_if"], "task_done");
@@ -377,9 +557,9 @@ mod tests {
             )
         };
         for n in 1..=4 {
-            lay(&format!("+{}min", 60 + n * 10)).unwrap();
+            lay(&format!("+{}min", 60 + n * 30)).unwrap();
         }
-        let e = lay("+120min").unwrap_err();
+        let e = lay("+240min").unwrap_err();
         assert_eq!(e.kind, "cap_reached");
         assert!(e.message.contains("trigger_budget"), "{}", e.message);
 
@@ -394,7 +574,7 @@ mod tests {
         assert_eq!(out["extra"], 2);
         assert_eq!(out["allowance"], 6);
         assert_eq!(out["spent"], 4);
-        lay("+120min").unwrap();
+        lay("+240min").unwrap();
 
         let e = dispatch(
             &conn,
@@ -449,7 +629,7 @@ mod tests {
         dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "trigger_set",
             &format!(r#"{{"at":"{}","prompt":"ask about the essay"}}"#, soon())).unwrap();
         dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "wait_until",
-            &format!(r#"{{"at":"{}","prompt":"did they answer?"}}"#, soon())).unwrap();
+            r#"{"at":"+150min","prompt":"did they answer?"}"#).unwrap();
         let out = dispatch(&conn, &ctx(&tmp), SessionKind::Trigger, "plan_list", "{}").unwrap();
         let rows = out["events"].as_array().unwrap();
         assert_eq!(rows.len(), 2);
@@ -528,5 +708,99 @@ mod tests {
         let out = dispatch(&conn, &ctx(&tmp), SessionKind::Trigger, "say",
             r#"{"text":"it's three, as you asked","ring":true,"asked":true}"#).unwrap();
         assert_eq!(out["ring"], true);
+    }
+
+    fn day_in(zone: &str, days: i64) -> jiff::civil::Date {
+        let tz = jiff::tz::TimeZone::get(zone).unwrap();
+        jiff::Timestamp::now().to_zoned(tz).date().checked_add(jiff::Span::new().days(days)).unwrap()
+    }
+
+    fn placed(conn: &rusqlite::Connection, id: i64) -> (String, String) {
+        conn.query_row(
+            "SELECT p.date, e.wall_time FROM events e JOIN plans p ON p.id = e.plan_id WHERE e.id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap()
+    }
+
+    /// A call asked for tomorrow at eleven lands on tomorrow's plan and spends
+    /// tomorrow's allowance, not today's.
+    #[test]
+    fn a_trigger_for_a_later_day_lands_there_and_spends_that_days_budget() {
+        let (conn, tmp) = env_in("America/Los_Angeles");
+        let tomorrow = day_in("America/Los_Angeles", 1);
+        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "trigger_set",
+            &format!(r#"{{"at":"11:00","date":"{tomorrow}","prompt":"they asked for a call"}}"#)).unwrap();
+        let id = out["event_id"].as_i64().unwrap();
+        assert_eq!(placed(&conn, id), (tomorrow.to_string(), "11:00".into()));
+        assert_eq!(out["date"], tomorrow.to_string());
+        assert_eq!(crate::triggers::spent(&conn, 1, tomorrow).unwrap(), 1);
+        assert_eq!(crate::triggers::spent(&conn, 1, day_in("America/Los_Angeles", 0)).unwrap(), 0);
+    }
+
+    #[test]
+    fn a_date_gone_by_too_far_off_or_beside_an_offset_is_refused() {
+        let (conn, tmp) = env_in("America/Los_Angeles");
+        let set = |date: jiff::civil::Date, at: &str| {
+            dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "trigger_set",
+                &format!(r#"{{"at":"{at}","date":"{date}","prompt":"x"}}"#)).unwrap_err()
+        };
+        assert_eq!(set(day_in("America/Los_Angeles", -1), "11:00").kind, "past");
+        assert_eq!(set(day_in("America/Los_Angeles", 8), "11:00").kind, "rejected");
+        assert_eq!(set(day_in("America/Los_Angeles", 2), "+90min").kind, "rejected");
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "trigger_set",
+            r#"{"at":"11:00","tz":"Mars/Olympus","prompt":"x"}"#).unwrap_err();
+        assert_eq!(e.kind, "rejected");
+        let events: i64 = conn.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0)).unwrap();
+        assert_eq!(events, 0);
+    }
+
+    /// Eleven in New York is eight where the account lives.
+    #[test]
+    fn a_time_given_in_another_zone_is_stored_in_the_users_own() {
+        let (conn, tmp) = env_in("America/Los_Angeles");
+        let there = day_in("America/New_York", 2);
+        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "wait_until",
+            &format!(r#"{{"at":"11:00","date":"{there}","tz":"America/New_York","prompt":"x"}}"#)).unwrap();
+        assert_eq!(placed(&conn, out["event_id"].as_i64().unwrap()), (there.to_string(), "08:00".into()));
+        assert_eq!(out["at"], "08:00");
+    }
+
+    #[test]
+    fn a_second_trigger_beside_a_pending_one_is_shown_the_first() {
+        let (conn, tmp) = env();
+        let set = |args: &str| dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "trigger_set", args);
+        let first = set(r#"{"at":"+90min","prompt":"ask about the essay"}"#).unwrap()["event_id"]
+            .as_i64()
+            .unwrap();
+        let e = set(r#"{"at":"+105min","prompt":"essay?"}"#).unwrap_err();
+        assert_eq!(e.kind, "duplicate");
+        assert!(e.message.contains(&format!("replace: {first}")), "{}", e.message);
+        assert!(e.message.contains("ask about the essay"), "{}", e.message);
+        set(r#"{"at":"+120min","prompt":"a separate thing"}"#).unwrap();
+
+        set(r#"{"at":"+75min","prompt":"both wanted","also":true}"#).unwrap();
+        let replaced = set(&format!(r#"{{"at":"+95min","prompt":"essay, sharper","replace":{first},"also":true}}"#))
+            .unwrap();
+        let status: String = conn
+            .query_row("SELECT status FROM events WHERE id = ?1", [first], |r| r.get(0))
+            .unwrap();
+        assert_eq!(status, "dropped");
+        assert!(replaced["event_id"].as_i64().unwrap() > first);
+        let e = set(r#"{"at":"+300min","prompt":"x","replace":999}"#).unwrap_err();
+        assert_eq!(e.kind, "not_found");
+    }
+
+    #[test]
+    fn the_budget_raises_the_day_it_names() {
+        let (conn, tmp) = env_in("America/Los_Angeles");
+        let tomorrow = day_in("America/Los_Angeles", 1);
+        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "trigger_budget",
+            &format!(r#"{{"extra":2,"reason":"a long day tomorrow","date":"{tomorrow}"}}"#)).unwrap();
+        assert_eq!(out["allowance"], 6);
+        let today = crate::triggers::allowance(&conn, tmp.path(), "aki", 1, day_in("America/Los_Angeles", 0))
+            .unwrap();
+        assert_eq!(today, 4);
     }
 }

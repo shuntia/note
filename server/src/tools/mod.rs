@@ -91,6 +91,10 @@ impl ToolError {
     pub fn busy(m: impl Into<String>) -> Self {
         Self::of("busy")(m.into())
     }
+    /// Something like it already exists; the message names it and the way past.
+    pub fn duplicate(m: impl Into<String>) -> Self {
+        Self::of("duplicate")(m.into())
+    }
 }
 
 pub struct ToolCtx<'a> {
@@ -850,26 +854,32 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
             schema::<calendar_ops::SkipArgs>(),
         ),
         "trigger_set" => (
-            "Lay a trigger point: a moment later today when you will look at the situation \
-             again and then message the user, call them, or stay quiet. prompt is the note \
-             to yourself about what you are following up on; when the user asks you to call \
-             them, say so in it and the wake-up will ring. This is how you reach out on your \
-             own terms rather than waiting to be asked. at least 10 minutes ahead.",
+            "Lay a trigger point: a moment when you will look at the situation again and then \
+             message the user, call them, or stay quiet. prompt is the note to yourself about \
+             what you are following up on; when the user asks you to call them, say so in it \
+             and the wake-up will ring. This is how you reach out on your own terms rather than \
+             waiting to be asked. At least 10 minutes ahead; date lays it on a later day, up to \
+             7 days ahead, and spends that day's allowance. tz reads at and date in another \
+             IANA zone — the one the user named the time in. Check plan_list first: a trigger \
+             within 20 minutes of a pending one is refused with that one named; reword it with \
+             replace set to its id, or pass also when both are wanted.",
             schema::<trigger_ops::SetArgs>(),
         ),
         "wait_until" => (
             "Lay a trigger point that calls itself off if the user writes back in the \
-             thread before it fires — the way to leave a question open without nagging.",
+             thread before it fires — the way to leave a question open without nagging. \
+             date, tz, replace and also work as in trigger_set.",
             schema::<trigger_ops::WaitUntilArgs>(),
         ),
         "wait_for" => (
             "Lay a trigger point that calls itself off if the task is finished or dropped, \
-             or the plan event is settled, before it fires. Name exactly one of them.",
+             or the plan event is settled, before it fires. Name exactly one of them. date, \
+             tz, replace and also work as in trigger_set.",
             schema::<trigger_ops::WaitForArgs>(),
         ),
         "trigger_budget" => (
-            "Raise today's check-in budget, after the user has agreed to it — never \
-             before. reason is what they agreed to.",
+            "Raise a day's check-in budget — today's, or the date given — after the user has \
+             agreed to it, never before. reason is what they agreed to.",
             schema::<trigger_ops::BudgetArgs>(),
         ),
         "say" => (
