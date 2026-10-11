@@ -72,6 +72,8 @@ pub struct SessionDeps<'a> {
     pub thread_note: Option<String>,
     /// Set on a visitor's session: the link whose scope its tools are held to.
     pub share: Option<ShareSession>,
+    /// How the session reaches the user by phone; without one, `call_user` refuses.
+    pub caller: Option<&'a dyn crate::channels::calling::Caller>,
 }
 
 /// The link a share session answers for.
@@ -288,7 +290,7 @@ fn run_traced(
         _ => MAX_TURNS,
     };
     let background = is_background(kind);
-    let env = CallEnv { deps, user_id, username, kind };
+    let env = CallEnv { deps, user_id, username, kind, calls: Default::default() };
     let started = std::time::Instant::now();
 
     while turns < max_turns {
@@ -347,7 +349,7 @@ fn run_traced(
             tool_calls += 1;
             let (content, is_error) =
                 env.step(&call.name, &call.args, &mut steps, &mut thinking, trace, on_event);
-            if !is_error && tools::is_terminal(kind, &call.name) {
+            if !is_error && tools::ends(kind, &call.name, &content) {
                 on_event(AgentEvent::Reply { text: &content });
                 trace.ok(&content);
                 finish(deps, user_id, kind, turns, tool_calls, log_kind(kind, "agent_session"))?;
@@ -446,11 +448,68 @@ struct CallEnv<'a> {
     user_id: i64,
     username: &'a str,
     kind: SessionKind,
+    calls: std::cell::RefCell<tools::call_ops::Calls>,
 }
 
 impl CallEnv<'_> {
     fn run(&self, name: &str, args: &str) -> (String, bool) {
-        run_tool(self.deps, self.user_id, self.username, self.kind, name, args, None)
+        if name != "call_user" {
+            return run_tool(self.deps, self.user_id, self.username, self.kind, name, args, None);
+        }
+        match self.call_user(args) {
+            Ok(v) => (v.to_string(), false),
+            Err(e) => (error_json(&e), true),
+        }
+    }
+
+    /// Both halves of `call_user`. A wake-up's confirmed call is left for its
+    /// firing path to ring; every other session rings here.
+    fn call_user(&self, raw: &str) -> Result<serde_json::Value, ToolError> {
+        use tools::call_ops;
+        if !tools::registry(self.kind).contains(&"call_user") {
+            return Err(ToolError::forbidden("tool call_user is not available in this session type"));
+        }
+        if raw.len() > tools::MAX_ARGS_BYTES {
+            return Err(ToolError::rejected(format!("arguments exceed {} bytes", tools::MAX_ARGS_BYTES)));
+        }
+        let args: call_ops::CallArgs =
+            serde_json::from_str(raw).map_err(|e| ToolError::invalid_args(e.to_string()))?;
+        let Some(caller) = self.deps.caller else {
+            return Err(ToolError::rejected("this session cannot place calls"));
+        };
+        let now = std::time::Instant::now();
+        if args.token.is_none() {
+            let reach = caller.reach(self.user_id);
+            let situation = {
+                let conn = crate::db_guard(self.deps.db);
+                call_ops::situation(&conn, self.deps.config_dir, self.username, self.user_id, reach, jiff::Timestamp::now())?
+            };
+            let lang = Lang::for_user(self.deps.config_dir, self.username);
+            return call_ops::check(&mut self.calls.borrow_mut(), &args, &situation, lang, now);
+        }
+        let confirmed = call_ops::confirm(&mut self.calls.borrow_mut(), &args, now)?;
+        if self.kind == SessionKind::Trigger {
+            return Ok(confirmed.decided());
+        }
+        let outcome = caller.ring(self.user_id, self.username, &confirmed.opening, &confirmed.reason);
+        let subject = format!("{:?}", self.kind).to_lowercase();
+        let _ = crate::log::record(
+            &crate::db_guard(self.deps.db),
+            Some(self.user_id),
+            "call_user_rang",
+            &confirmed.log_line(&subject, outcome.as_str()),
+        );
+        let rang = !matches!(outcome, crate::channels::calling::RingOutcome::Messaged(_));
+        Ok(serde_json::json!({
+            "rang": rang,
+            "via": outcome.as_str(),
+            "opening": confirmed.opening,
+            "note": if rang {
+                "ringing now; the call opens with your line, so do not repeat it here"
+            } else {
+                "nothing could ring; your opening went to the user as a message"
+            },
+        }))
     }
 
     /// `run` as a session step: its own index, its own pair of events, its own
@@ -523,6 +582,8 @@ fn run_batch(
     for sub in args.calls {
         let refused = if sub.tool == "batch" {
             Some(ToolError::rejected("a batch cannot hold another batch"))
+        } else if sub.tool == "call_user" {
+            Some(ToolError::rejected("call_user must be called on its own"))
         } else if tools::is_terminal(env.kind, &sub.tool) {
             Some(ToolError::rejected(format!(
                 "{} ends the session and must be called on its own",
@@ -624,7 +685,7 @@ mod tests {
     ) -> SessionDeps<'a> {
         SessionDeps { db, config_dir: tmp.path(), data_dir: tmp.path(), llm, embeddings: None,
             search: None, task_scope: None, inbox_source: None, memory_source: None, token_id: None, thread_note: None,
-            share: None }
+            share: None, caller: None }
     }
 
     fn now() -> jiff::Timestamp {
@@ -856,6 +917,7 @@ mod tests {
             token_id: None,
             thread_note: None,
             share: None,
+            caller: None,
         };
         let err = run_session_watched(
             &deps,
@@ -1812,6 +1874,7 @@ mod tests {
             token_id: None,
             thread_note: None,
             share: None,
+            caller: None,
         };
         assert!(run_session(&d, 1, "aki", SessionKind::Talk, now(), &[], "hi").is_err());
     }
@@ -1829,7 +1892,7 @@ mod tests {
         }
         let llm = MockLLM::scripted(vec![ChatResponse { text: "Aki has a lab report.".into(), tool_calls: vec![] }]);
         let share = ShareSession { id: 1, thread_id: 1, brief: "be warm".into(), scope: crate::shares::ShareScope::default(), visitor_lang: crate::text::Lang::En };
-        let deps = SessionDeps { db: &db, config_dir: tmp.path(), data_dir: tmp.path(), llm: &llm, embeddings: None, search: None, task_scope: None, inbox_source: None, memory_source: None, token_id: None, thread_note: Some("SECRET NOTE".into()), share: Some(share) };
+        let deps = SessionDeps { db: &db, config_dir: tmp.path(), data_dir: tmp.path(), llm: &llm, embeddings: None, search: None, task_scope: None, inbox_source: None, memory_source: None, token_id: None, thread_note: Some("SECRET NOTE".into()), share: Some(share), caller: None };
         let out = run_session(&deps, 1, "aki", SessionKind::Share, jiff::Timestamp::now(), &[], "what does aki have?").unwrap();
         assert_eq!(out.reply, "Aki has a lab report.");
         let seen = llm.seen();
@@ -1870,5 +1933,99 @@ mod tests {
         let tasks: i64 =
             db.lock().unwrap().query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0)).unwrap();
         assert_eq!(tasks, 1);
+    }
+
+    struct FakeCaller(std::cell::RefCell<Vec<(String, String)>>);
+
+    impl crate::channels::calling::Caller for FakeCaller {
+        fn reach(&self, _: i64) -> crate::channels::calling::Reach {
+            crate::channels::calling::Reach { web: true, phone: false }
+        }
+        fn ring(&self, _: i64, _: &str, opening: &str, reason: &str) -> crate::channels::calling::RingOutcome {
+            self.0.borrow_mut().push((opening.into(), reason.into()));
+            crate::channels::calling::RingOutcome::Web
+        }
+    }
+
+    fn calling(args: &[&str]) -> MockLLM {
+        let mut script: Vec<ChatResponse> = args
+            .iter()
+            .enumerate()
+            .map(|(i, a)| ChatResponse {
+                text: String::new(),
+                tool_calls: vec![ToolCall { id: format!("c{i}"), name: "call_user".into(), args: a.to_string() }],
+            })
+            .collect();
+        script.push(ChatResponse { text: "ringing you".into(), tool_calls: vec![] });
+        MockLLM::scripted(script)
+    }
+
+    fn present(db: &Mutex<rusqlite::Connection>) {
+        crate::presence::touch(&db.lock().unwrap(), 1, jiff::Timestamp::now()).unwrap();
+    }
+
+    #[test]
+    fn a_chat_rings_on_the_confirming_call_and_never_on_the_check() {
+        let (db, tmp) = env();
+        present(&db);
+        let llm = calling(&[r#"{"reason":"the essay"}"#, r#"{"token":"$token","opening":"Got a minute?"}"#]);
+        let caller = FakeCaller(Default::default());
+        let deps = SessionDeps { caller: Some(&caller), ..deps(&db, &tmp, &llm) };
+        let out = run_session(&deps, 1, "aki", SessionKind::Talk, now(), &[], "call me").unwrap();
+        assert_eq!(out.reply, "ringing you");
+        assert!(out.steps[0].result.contains("token"), "{}", out.steps[0].result);
+        let rang: serde_json::Value = serde_json::from_str(&out.steps[1].result).unwrap();
+        assert_eq!((rang["rang"].as_bool(), rang["via"].as_str()), (Some(true), Some("web")));
+        assert_eq!(*caller.0.borrow(), [("Got a minute?".to_string(), "the essay".to_string())]);
+        let logged: String = db
+            .lock()
+            .unwrap()
+            .query_row("SELECT detail FROM event_log WHERE kind = 'call_user_rang'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(logged, "talk: web: the essay");
+    }
+
+    #[test]
+    fn a_token_is_good_only_in_the_session_that_checked() {
+        let (db, tmp) = env();
+        present(&db);
+        let caller = FakeCaller(Default::default());
+        let llm = calling(&[r#"{"reason":"the essay"}"#]);
+        let first = run_session(&SessionDeps { caller: Some(&caller), ..deps(&db, &tmp, &llm) }, 1, "aki",
+            SessionKind::Talk, now(), &[], "call me").unwrap();
+        let token: serde_json::Value = serde_json::from_str(&first.steps[0].result).unwrap();
+        let confirm = serde_json::json!({ "token": token["token"], "opening": "hi" }).to_string();
+        let llm = calling(&[&confirm]);
+        let second = run_session(&SessionDeps { caller: Some(&caller), ..deps(&db, &tmp, &llm) }, 1, "aki",
+            SessionKind::Talk, now(), &[], "now").unwrap();
+        assert!(second.steps[0].is_error && second.steps[0].result.contains("not issued in this session"));
+        assert!(caller.0.borrow().is_empty());
+    }
+
+    #[test]
+    fn nothing_rings_without_a_caller_or_from_inside_a_batch() {
+        let (db, tmp) = env();
+        present(&db);
+        let llm = calling(&[r#"{"reason":"the essay"}"#]);
+        let out = run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, now(), &[], "call me").unwrap();
+        assert!(out.steps[0].is_error && out.steps[0].result.contains("cannot place calls"));
+
+        let caller = FakeCaller(Default::default());
+        let llm = MockLLM::scripted(vec![ChatResponse {
+            text: String::new(),
+            tool_calls: vec![ToolCall {
+                id: "b".into(),
+                name: "batch".into(),
+                args: r#"{"calls":[{"tool":"call_user","args":{"reason":"x"}}]}"#.into(),
+            }],
+        }]);
+        let deps = SessionDeps { caller: Some(&caller), ..deps(&db, &tmp, &llm) };
+        let out = run_session(&deps, 1, "aki", SessionKind::Talk, now(), &[], "call me").unwrap();
+        assert!(out.steps.is_empty(), "the batch ran nothing");
+        let results: Vec<_> = llm.seen()[1].messages.iter().filter_map(|m| match m {
+            Message::ToolResult { content, .. } => Some(content.clone()),
+            _ => None,
+        }).collect();
+        assert!(results[0].contains("call_user must be called on its own"), "{results:?}");
     }
 }

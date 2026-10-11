@@ -106,6 +106,52 @@ pub fn ring(state: &crate::AppState, user_id: i64, username: &str, msg: &Outboun
     )
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Reach {
+    /// The web app is open and visible.
+    pub web: bool,
+    /// A linked phone and a voice side up to ring it.
+    pub phone: bool,
+}
+
+/// What a session needs to call its user.
+pub trait Caller {
+    fn reach(&self, user_id: i64) -> Reach;
+    /// Lands `opening` in the day's check-in thread, then rings with it.
+    fn ring(&self, user_id: i64, username: &str, opening: &str, reason: &str) -> RingOutcome;
+}
+
+impl Caller for crate::AppState {
+    fn reach(&self, user_id: i64) -> Reach {
+        let phone = self.voice.as_ref().is_some_and(|v| v.is_up())
+            && crate::voice::links::ringable(&self.db(), user_id).ok().flatten().is_some();
+        Reach { web: self.web_calls.has_live(user_id), phone }
+    }
+
+    fn ring(&self, user_id: i64, username: &str, opening: &str, reason: &str) -> RingOutcome {
+        let now = jiff::Timestamp::now();
+        let lang = crate::text::Lang::for_user(&self.config_dir, username);
+        let local = now.to_zoned(crate::triggers::timezone(&self.config_dir, username));
+        let wall = format!("{:02}:{:02}", local.hour(), local.minute());
+        let thread = {
+            let conn = self.db();
+            crate::talk::checkin_thread(&conn, user_id, &local.date().to_string(), &wall, opening, lang, now).ok()
+        };
+        self.hub.broadcast_changed(user_id);
+        let msg = OutboundMessage {
+            title: "Note".into(),
+            reason: Some(reason.to_string()),
+            body: opening.to_string(),
+            urgency: super::Urgency::Normal,
+            checkin: false,
+            event_id: None,
+            conversation_id: thread,
+            actions: Vec::new(),
+        };
+        ring(self, user_id, username, &msg)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -169,6 +215,7 @@ mod tests {
     fn msg() -> OutboundMessage {
         OutboundMessage {
             title: "Note".into(),
+            reason: None,
             body: "got a minute?".into(),
             urgency: Urgency::Normal,
             checkin: false,

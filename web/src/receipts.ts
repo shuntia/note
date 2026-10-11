@@ -419,6 +419,15 @@ const TABLE: Record<string, Receipt> = {
     },
     failed: 'receipt.say.failed',
   },
+  call_user: {
+    doing: (a) => t(str(a, 'token') ? 'receipt.callUser.doing' : 'receipt.callUser.checking'),
+    done: (a) => {
+      if (!str(a, 'token')) return t('receipt.callUser.checked')
+      const opening = str(a, 'opening')
+      return opening ? t('receipt.callUser.doneText', { text: clip(opening) }) : t('receipt.callUser.done')
+    },
+    failed: 'receipt.callUser.failed',
+  },
   stay_quiet: {
     doing: 'receipt.stayQuiet.doing',
     done: 'receipt.stayQuiet.done',

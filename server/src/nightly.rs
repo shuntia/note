@@ -325,6 +325,7 @@ pub fn spawn(state: crate::AppState) {
                         token_id: None,
                         thread_note: None,
                         share: None,
+                        caller: Some(&st),
                     };
                     let (r, failures) = crate::failure::gather(|| run_for_user(&deps, user_id, &username, now));
                     for failure in &failures {
@@ -408,6 +409,7 @@ mod tests {
             token_id: None,
             thread_note: None,
             share: None,
+            caller: None,
         }
     }
 

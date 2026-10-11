@@ -216,6 +216,7 @@ mod tests {
     fn msg() -> OutboundMessage {
         OutboundMessage {
             title: "Check-in".into(),
+            reason: None,
             body: "at 09:00".into(),
             urgency: Urgency::High,
             checkin: false,

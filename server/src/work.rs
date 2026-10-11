@@ -705,6 +705,7 @@ fn advance(
             )?;
             notify.then(|| crate::channels::OutboundMessage {
                 title: text::break_title(lang),
+                reason: None,
                 body: text::break_body(lang, session.break_min.unwrap_or_default(), session.round, &session.title),
                 urgency: crate::channels::Urgency::Normal,
                 checkin: false,
@@ -724,6 +725,7 @@ fn advance(
         )?;
         notify.then(|| crate::channels::OutboundMessage {
             title: text::round_title(lang, round),
+            reason: None,
             body: text::round_body(lang, &session.title),
             urgency: crate::channels::Urgency::Normal,
             checkin: false,
@@ -765,6 +767,7 @@ pub fn planned_end(conn: &Connection, config_dir: &Path, now: jiff::Timestamp) -
         )?;
         let message = wants_end_notice(config_dir, &username).then(|| crate::channels::OutboundMessage {
             title: session.title.clone(),
+            reason: None,
             body: text::times_up(Lang::for_user(config_dir, &username)),
             urgency: crate::channels::Urgency::Normal,
             checkin: false,
@@ -839,6 +842,7 @@ pub fn overrun(conn: &Connection, config_dir: &Path, now: jiff::Timestamp) -> Re
             username,
             message: Some(crate::channels::OutboundMessage {
                 title,
+                reason: None,
                 body,
                 urgency: crate::channels::Urgency::High,
                 checkin: false,

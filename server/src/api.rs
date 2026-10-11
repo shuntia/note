@@ -941,6 +941,7 @@ async fn task_agent(
             token_id,
             thread_note: None,
             share: None,
+            caller: None,
         };
         let session = crate::agent::run_session(
             &deps,
@@ -1124,6 +1125,7 @@ async fn agent_inbox(
             token_id,
             thread_note: None,
             share: None,
+            caller: None,
         };
         crate::agent::run_session(
             &deps,
@@ -1980,6 +1982,7 @@ async fn voice_test(user: CurrentUser, State(state): State<AppState>, headers: H
     }
     let msg = crate::channels::OutboundMessage {
         title: text::test_call_title(lang),
+        reason: None,
         body: text::test_call_body(lang),
         urgency: crate::channels::Urgency::High,
         checkin: false,
@@ -2002,6 +2005,7 @@ async fn notify_test(user: CurrentUser, State(state): State<AppState>, headers: 
     let lang = request_lang(&state, &user, &headers);
     let msg = crate::channels::OutboundMessage {
         title: "Note".into(),
+        reason: None,
         body: text::test_notification(lang),
         urgency: crate::channels::Urgency::Normal,
         checkin: false,
@@ -2090,6 +2094,7 @@ async fn debug_prompt(
             token_id: None,
             thread_note: None,
             share: None,
+            caller: None,
         };
         let prompt = crate::agent::system_prompt(&deps, user.id, &user.username, kind, jiff::Timestamp::now())?;
         let mut tools: Vec<&str> = crate::tools::registry(kind).to_vec();

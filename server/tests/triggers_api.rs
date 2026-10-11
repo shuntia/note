@@ -359,14 +359,17 @@ async fn a_wake_up_that_fails_after_a_write_still_logs_the_write() {
     assert!(changes[0].starts_with("event 1: trigger_set"), "{}", changes[0]);
 }
 
-struct LiveWeb(std::sync::Mutex<Vec<(i64, Option<i64>)>>);
+/// Each ring's user, conversation and reason.
+type Rang = (i64, Option<i64>, Option<String>);
+
+struct LiveWeb(std::sync::Mutex<Vec<Rang>>);
 
 impl note_server::channels::WebCalls for LiveWeb {
     fn has_live(&self, _: i64) -> bool {
         true
     }
     fn ring(&self, user_id: i64, msg: &note_server::channels::OutboundMessage, _: Option<&str>) -> bool {
-        self.0.lock().unwrap().push((user_id, msg.conversation_id));
+        self.0.lock().unwrap().push((user_id, msg.conversation_id, msg.reason.clone()));
         true
     }
 }
@@ -379,10 +382,24 @@ fn lay_plain(w: &World) {
         jiff::Timestamp::now()).unwrap();
 }
 
+fn tool_results(w: &World, round: usize) -> Vec<String> {
+    w.llm.seen()[round]
+        .messages
+        .iter()
+        .filter_map(|m| match m {
+            note_server::providers::Message::ToolResult { content, .. } => Some(content.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+const CHECK: &str = r#"{"reason":"talk the essay through"}"#;
+const CONFIRM: &str = r#"{"token":"$token","opening":"Want to talk the essay through?"}"#;
+
 #[tokio::test]
 async fn a_user_who_is_away_is_written_to_not_rung() {
     let w = world(vec![
-        call("c1", "say", r#"{"text":"want to talk the essay through?","ring":true}"#),
+        call("c1", "call_user", CHECK),
         call("c2", "say", r#"{"text":"the essay can wait till you're back"}"#),
     ])
     .await;
@@ -397,20 +414,13 @@ async fn a_user_who_is_away_is_written_to_not_rung() {
     assert!(web.0.lock().unwrap().is_empty());
     assert_eq!(w.push.seen()[0].1.body, "the essay can wait till you're back");
     assert!(logged(&w, "trigger_rang").is_empty());
-    let refused: Vec<String> = w.llm.seen()[1]
-        .messages
-        .iter()
-        .filter_map(|m| match m {
-            note_server::providers::Message::ToolResult { content, .. } => Some(content.clone()),
-            _ => None,
-        })
-        .collect();
+    let refused = tool_results(&w, 1);
     assert!(refused.iter().any(|r| r.contains(r#""kind":"busy""#)), "{refused:?}");
 }
 
 #[tokio::test]
 async fn a_free_user_with_the_app_open_gets_the_call_there() {
-    let w = world(vec![call("c1", "say", r#"{"text":"want to talk the essay through?","ring":true}"#)]).await;
+    let w = world(vec![call("c1", "call_user", CHECK), call("c2", "call_user", CONFIRM)]).await;
     lay_plain(&w);
     note_server::presence::touch(&w.state.db.lock().unwrap(), 1, jiff::Timestamp::now()).unwrap();
     let web = Arc::new(LiveWeb(std::sync::Mutex::default()));
@@ -421,6 +431,82 @@ async fn a_free_user_with_the_app_open_gets_the_call_there() {
     let rang = web.0.lock().unwrap().clone();
     assert_eq!(rang.len(), 1);
     assert!(rang[0].1.is_some(), "the call joins the thread the words landed in");
+    assert_eq!(rang[0].2.as_deref(), Some("talk the essay through"), "the call knows why it rang");
     assert!(w.push.seen().is_empty(), "a call is not also a notification");
-    assert_eq!(logged(&w, "trigger_rang"), ["event 1: web"]);
+    assert_eq!(logged(&w, "trigger_rang"), ["event 1: web: talk the essay through"]);
+    assert_eq!(logged(&w, "trigger_said"), ["event 1: Want to talk the essay through?"]);
+    assert_eq!(statuses(&w), ["done"]);
+    let checked = tool_results(&w, 1);
+    assert!(checked[0].contains("enough information to inform the user"), "{checked:?}");
+}
+
+#[tokio::test]
+async fn a_check_alone_rings_nothing_and_leaves_the_session_open() {
+    let w = world(vec![
+        call("c1", "call_user", CHECK),
+        call("c2", "stay_quiet", r#"{"reason":"a message will do"}"#),
+    ])
+    .await;
+    lay_plain(&w);
+    note_server::presence::touch(&w.state.db.lock().unwrap(), 1, jiff::Timestamp::now()).unwrap();
+    let web = Arc::new(LiveWeb(std::sync::Mutex::default()));
+    let state = w.state.clone().with_web_calls(web.clone());
+
+    note_server::runner::sweep_once(&state);
+
+    assert!(web.0.lock().unwrap().is_empty());
+    assert_eq!(w.llm.seen().len(), 2, "the check did not end the session");
+    assert_eq!(logged(&w, "trigger_quiet"), ["event 1: a message will do"]);
+}
+
+#[tokio::test]
+async fn a_call_the_user_asked_for_rings_while_they_are_away_and_logs_their_words() {
+    let w = world(vec![
+        call("c1", "call_user", r#"{"reason":"the 11:00 call","asked":true,"quote":"call me at 11 tomorrow"}"#),
+        call("c2", "call_user", r#"{"token":"$token","opening":"It's eleven, as you asked."}"#),
+    ])
+    .await;
+    lay_plain(&w);
+    w.state.db.lock().unwrap()
+        .execute("UPDATE users SET last_active_at = '2000-01-01T00:00:00Z'", []).unwrap();
+    let web = Arc::new(LiveWeb(std::sync::Mutex::default()));
+    let state = w.state.clone().with_web_calls(web.clone());
+
+    note_server::runner::sweep_once(&state);
+
+    assert_eq!(web.0.lock().unwrap().len(), 1);
+    assert_eq!(
+        logged(&w, "trigger_rang"),
+        ["event 1: web: the 11:00 call; asked: \"call me at 11 tomorrow\""]
+    );
+}
+
+#[tokio::test]
+async fn a_chat_rings_now_and_opens_in_the_check_in_thread() {
+    let w = world(vec![
+        call("c1", "call_user", r#"{"reason":"they asked for a call now","asked":true,"quote":"call me now"}"#),
+        call("c2", "call_user", r#"{"token":"$token","opening":"Hi, you wanted a call?"}"#),
+        ChatResponse { text: "Ringing you now.".into(), tool_calls: vec![] },
+    ])
+    .await;
+    let web = Arc::new(LiveWeb(std::sync::Mutex::default()));
+    let app = api::router(w.state.clone().with_web_calls(web.clone()));
+    let req = Request::post("/api/talk")
+        .header(header::COOKIE, &w.cookie)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"message":"call me now"}"#))
+        .unwrap();
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let rang = web.0.lock().unwrap().clone();
+    assert_eq!(rang.len(), 1);
+    assert_eq!(rang[0].2.as_deref(), Some("they asked for a call now"));
+    let thread = rang[0].1.expect("the opening lands in a thread");
+    let opening: Vec<String> = rows(
+        &w,
+        &format!("SELECT content FROM talk_messages WHERE conversation_id = {thread} AND role = 'assistant'"),
+    );
+    assert_eq!(opening, ["Hi, you wanted a call?"]);
+    assert_eq!(logged(&w, "call_user_rang"), ["talk: web: they asked for a call now; asked: \"call me now\""]);
 }

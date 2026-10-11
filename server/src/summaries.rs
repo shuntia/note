@@ -200,6 +200,7 @@ pub fn spawn(state: crate::AppState) {
                         token_id: None,
                         thread_note: None,
                         share: None,
+                        caller: None,
                     };
                     let r = run_for_conversation(&deps, &candidate, now);
                     (r, candidate)
@@ -297,6 +298,7 @@ mod tests {
             token_id: None,
             thread_note: None,
             share: None,
+            caller: None,
         }
     }
 

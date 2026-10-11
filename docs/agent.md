@@ -96,13 +96,24 @@ stays quiet (`stay_quiet {reason}`). Any session that lays a trigger can leave
 it to call; a chat that is asked "call me at three" lays a `trigger_set` whose
 prompt says a call was asked for.
 
-`say {text, notes?, ring?, asked?}` lands in the trigger's thread (or the day's
-check-in thread) and goes down the delivery ladder; `notes` names the working
-notes it nudged about. With `ring`, Note calls instead
-([delivery.md](delivery.md#ringing)); the tool refuses a ring (`busy`) while the
-user seems busy: inside a quiet window, inside a `fixed` or `busy` calendar
-occurrence, with a work session open, or with no activity for 90 minutes.
-`asked` marks a call the user asked for, which skips that check.
+`say {text, notes?}` lands in the trigger's thread (or the day's check-in
+thread) and goes down the delivery ladder; `notes` names the working notes it
+nudged about.
+
+`call_user` rings the user ([delivery.md](delivery.md#ringing)) from every
+session but a voice call, a share link and the single-call kinds (import,
+inbox, summarize). It takes two calls in one session. The first,
+`{reason, asked?, quote?}`, rings nothing: it refuses (`busy`) when nothing can
+ring, a call is live, or the user seems busy (inside a quiet window, inside a
+`fixed` or `busy` calendar occurrence, with a work session open, with no
+activity for 90 minutes) or set `ring_for = "never"`. Otherwise it returns a
+token valid for five minutes, a checklist to answer, and how to write a spoken
+opening. `asked` with the user's words in `quote` lets it through the busy and
+`ring_for` checks, never the others. The second, `{token, opening}`, rings. A
+wake-up's second call ends it and its firing path rings, writing the opening
+to the trigger's thread and `trigger_rang`. Any other session writes the
+opening to the day's check-in thread and logs `call_user_rang`. The call's
+prompt is told the reason and the opening.
 
 ## Prompts
 

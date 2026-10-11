@@ -62,6 +62,7 @@ mod tests {
         let ch = MockChannel::new("mock");
         let m = OutboundMessage {
             title: "t".into(),
+            reason: None,
             body: "b".into(),
             urgency: Urgency::Low,
             checkin: false,

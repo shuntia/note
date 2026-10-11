@@ -37,6 +37,17 @@ pub fn call_briefly(l: Lang) -> &'static str {
     )
 }
 
+/// How the opening line of a call Note places is written: it is spoken the moment the user picks up.
+pub fn call_opening_style(l: Lang) -> &'static str {
+    l.of(
+        "The opening is spoken aloud the moment they pick up: one or two short sentences, the way \
+         you would say it on the phone, that tell them why you are calling. No lists, no markdown, \
+         no ids or links.",
+        "最初のひとことは、ユーザーが出た瞬間に読み上げられます。電話で話すように短い文で一、二文、\
+         なぜ電話したのかが伝わるように。箇条書き、マークダウン、ID やリンクは入れません。",
+    )
+}
+
 /// Closes every call's prompt: the language the caller was heard speaking, over their setting.
 pub fn call_speaks_only(l: Lang) -> &'static str {
     l.of(

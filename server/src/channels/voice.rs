@@ -73,6 +73,7 @@ mod tests {
     fn msg(urgency: Urgency) -> OutboundMessage {
         OutboundMessage {
             title: "t".into(),
+            reason: None,
             body: "b".into(),
             urgency,
             checkin: false,

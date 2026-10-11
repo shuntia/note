@@ -298,6 +298,7 @@ pub fn run_for_user(
         token_id: deps.token_id,
         thread_note: None,
         share: None,
+        caller: deps.caller,
     };
     let sunday = week_start.checked_add(jiff::Span::new().days(6))?;
     let opening = mt::review_opening(l, &week, sunday, &digest);
@@ -431,6 +432,7 @@ mod tests {
             token_id: None,
             thread_note: None,
             share: None,
+            caller: None,
         }
     }
 

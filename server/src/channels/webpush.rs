@@ -187,6 +187,7 @@ v5mC8db8ZSK9ruR2mEgvMEvePYwohpr98g==
     fn msg() -> OutboundMessage {
         OutboundMessage {
             title: "Nudge".into(),
+            reason: None,
             body: "stretch break".into(),
             urgency: Urgency::Normal,
             checkin: false,

@@ -569,6 +569,7 @@ mod tests {
     fn ring_msg(conversation_id: Option<i64>) -> OutboundMessage {
         OutboundMessage {
             title: "Note".into(),
+            reason: None,
             body: "got a minute?".into(),
             urgency: crate::channels::Urgency::Normal,
             checkin: false,

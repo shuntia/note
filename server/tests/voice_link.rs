@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 fn urgent() -> OutboundMessage {
     OutboundMessage {
         title: "Check-in".into(),
+        reason: None,
         body: "how is the essay going?".into(),
         urgency: Urgency::High,
         checkin: false,

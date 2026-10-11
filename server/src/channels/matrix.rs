@@ -321,6 +321,7 @@ mod tests {
     fn checkin() -> OutboundMessage {
         OutboundMessage {
             title: "Check-in".into(),
+            reason: None,
             body: "How is it going?".into(),
             urgency: crate::channels::Urgency::High,
             checkin: true,

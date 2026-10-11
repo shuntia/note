@@ -14,7 +14,8 @@ from the template.
    create: plan_list, calendar_list and task_search show what already exists,
    so update that rather than add a second copy.
 3. Lay no wake-ups for the day: the day's first wake-up lays them once the
-   user is up, around what the day actually holds.
+   user is up, around what the day actually holds. Only something that cannot
+   wait for the morning is worth `call_user`; the user is likely asleep.
 4. Read the open goals (goal_list) against their dates. A goal whose remaining
    tasks no longer fit before its due date needs the near ones put early in the
    order; a goal short of tasks needs them written now — 3 to 12 per goal,
