@@ -91,6 +91,7 @@ async fn open_from(addr: std::net::SocketAddr, cookie: &str, path: &str, origin:
 fn rung(conversation_id: Option<i64>) -> note_server::channels::OutboundMessage {
     note_server::channels::OutboundMessage {
         title: "Note".into(),
+        reason: None,
         body: "Your essay is due at five.".into(),
         urgency: note_server::channels::Urgency::Normal,
         checkin: false,

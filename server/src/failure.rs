@@ -183,6 +183,7 @@ pub fn tell(state: &crate::AppState, user_id: i64, username: &str, failure: &Fai
     let lang = crate::text::Lang::for_user(&state.config_dir, username);
     let msg = crate::channels::OutboundMessage {
         title: crate::text::failure_title(lang),
+        reason: None,
         body: crate::text::failure_reason(lang, failure.reason),
         urgency: crate::channels::Urgency::Low,
         checkin: false,

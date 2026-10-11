@@ -1,4 +1,5 @@
 pub mod calendar_ops;
+pub mod call_ops;
 pub mod context_ops;
 pub mod goal_ops;
 pub mod harvest_ops;
@@ -347,6 +348,8 @@ const TRIGGERS: &[&str] = &["trigger_set", "wait_until", "wait_for"];
 /// Raising the day's budget needs the user's agreement first.
 const TRIGGER_BUDGET: &[&str] = &["trigger_budget"];
 const OUTREACH: &[&str] = &["notify_send"];
+/// Ringing the user, which a voice call cannot do to itself.
+const CALL_USER: &[&str] = &["call_user"];
 const NIGHTLY_NOTES: &[&str] = &["nightly_notes_write"];
 const SEARCH: &[&str] = &["web_search"];
 const BATCH: &[&str] = &["batch"];
@@ -386,6 +389,7 @@ const DOMAINS: &[&[&str]] = &[
     TRIGGERS,
     TRIGGER_BUDGET,
     OUTREACH,
+    CALL_USER,
     NIGHTLY_NOTES,
     SEARCH,
     BATCH,
@@ -440,6 +444,7 @@ const CHECKIN: &[&str] = registry_of![
     CALENDAR_READ,
     TRIGGERS,
     TRIGGER_BUDGET,
+    CALL_USER,
     SEARCH,
     BATCH,
 ];
@@ -463,6 +468,7 @@ const TALK: &[&str] = registry_of![
     CALENDAR_WRITE,
     TRIGGERS,
     TRIGGER_BUDGET,
+    CALL_USER,
     SEARCH,
     BATCH,
 ];
@@ -487,6 +493,7 @@ const NIGHTLY: &[&str] = registry_of![
     CALENDAR_WRITE,
     TRIGGERS,
     OUTREACH,
+    CALL_USER,
     NIGHTLY_NOTES,
     SEARCH,
     BATCH,
@@ -503,6 +510,7 @@ const TRIGGER: &[&str] = registry_of![
     ORDER,
     SCHEDULE,
     TRIGGERS,
+    CALL_USER,
     BATCH,
     SPEAK,
 ];
@@ -516,8 +524,8 @@ pub fn writes(name: &str) -> bool {
 const IMPORT: &[&str] = registry_of![BRIEF];
 const INBOX: &[&str] = registry_of![MEMORY_READ, DECIDE];
 const SUMMARIZE: &[&str] = registry_of![SUMMARY];
-const HARVEST: &[&str] = registry_of![MEMORY_READ, MEMORY_WRITE, BATCH, HARVEST_DONE];
-const REVIEW: &[&str] = registry_of![MEMORY_READ, MEMORY_WRITE, BATCH, REVIEW_WRITE];
+const HARVEST: &[&str] = registry_of![MEMORY_READ, MEMORY_WRITE, CALL_USER, BATCH, HARVEST_DONE];
+const REVIEW: &[&str] = registry_of![MEMORY_READ, MEMORY_WRITE, CALL_USER, BATCH, REVIEW_WRITE];
 const SHARE: &[&str] =
     registry_of![TASK_READ, GOALS_READ, PLAN_READ, CALENDAR_READ, SHARE_NOTE];
 const CALL: &[&str] = registry_of![
@@ -546,10 +554,16 @@ pub fn is_terminal(kind: SessionKind, name: &str) -> bool {
         SessionKind::Summarize => name == "summary_write",
         SessionKind::Harvest => name == "harvest_done",
         SessionKind::Review => name == "review_write",
-        SessionKind::Trigger => name == "say" || name == "stay_quiet",
+        SessionKind::Trigger => matches!(name, "say" | "stay_quiet" | "call_user"),
         SessionKind::Share => name == "share_note",
         _ => false,
     }
+}
+
+/// Whether a successful step ended its session: a terminal tool's, except a
+/// `call_user` check, which only asks.
+pub fn ends(kind: SessionKind, name: &str, result: &str) -> bool {
+    is_terminal(kind, name) && (name != "call_user" || call_ops::is_confirmed(result))
 }
 
 pub fn registry(kind: SessionKind) -> &'static [&'static str] {
@@ -852,8 +866,8 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
         "trigger_set" => (
             "Lay a trigger point: a moment later today when you will look at the situation \
              again and then message the user, call them, or stay quiet. prompt is the note \
-             to yourself about what you are following up on; when the user asks you to call \
-             them, say so in it and the wake-up will ring. This is how you reach out on your \
+             to yourself about what you are following up on; when the user asks to be called, \
+             say so in the prompt; at the trigger, use call_user. This is how you reach out on your \
              own terms rather than waiting to be asked. at least 10 minutes ahead.",
             schema::<trigger_ops::SetArgs>(),
         ),
@@ -874,13 +888,20 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
         ),
         "say" => (
             "Say this to the user and end the session. One or two warm sentences, no greeting \
-             ritual — it lands in the thread and as a notification. With ring set, Note calls \
-             instead: the open web app and the linked phone ring together, and whichever is \
-             answered first takes the call. A ring is refused while the user seems busy — \
-             working, in a calendar event, in a quiet window, or away for 90 minutes; then say \
-             it without ring, or stay quiet. Set asked too when the user \
-             asked to be called now, and the ring goes through anyway.",
+             ritual — it lands in the thread and as a notification. To call instead, use call_user.",
             schema::<trigger_ops::SayArgs>(),
+        ),
+        "call_user" => (
+            "Call the user: the open web app and the linked phone ring together, and whichever is \
+             answered first takes the call. Two calls, never one. First with reason (and asked \
+             plus quote only when the user asked to be called): it rings nothing, says whether a \
+             call is allowed now, and hands back a token and the questions to answer before you \
+             ring. Then, only if you still mean to, again with that token and opening — the first \
+             thing you say when they pick up. A call is refused while the user seems busy — \
+             working, in a calendar event, in a quiet window, or away for 90 minutes — unless \
+             they asked for it; then write to them instead. In a wake-up, the second call ends \
+             the session.",
+            schema::<call_ops::CallArgs>(),
         ),
         "stay_quiet" => (
             "Say nothing and end the trigger session: the right move when the user is \
@@ -1074,13 +1095,13 @@ fn run(
         "wait_until" => trigger_ops::wait_until(conn, ctx, kind, &parse(raw)?),
         "wait_for" => trigger_ops::wait_for(conn, ctx, kind, &parse(raw)?),
         "trigger_budget" => trigger_ops::budget(conn, ctx, &parse(raw)?),
-        "say" => trigger_ops::say(conn, ctx, &parse(raw)?),
+        "say" => trigger_ops::say(&parse(raw)?),
         "stay_quiet" => trigger_ops::stay_quiet(conn, ctx, &parse(raw)?),
         "share_note" => share_ops::note(conn, ctx, &parse(raw)?),
         // These run in the session around this dispatch: one reaches the
-        // network, one expands into calls of its own, and the call's own job
-        // control acts on the call itself.
-        "web_search" | "batch" | "cancel_job" | "hang_up" => {
+        // network, one expands into calls of its own, one keeps its tokens in
+        // the session, and the call's own job control acts on the call itself.
+        "web_search" | "batch" | "cancel_job" | "hang_up" | "call_user" => {
             Err(ToolError::rejected(format!("{name} is run by the session, not dispatched")))
         }
         _ => unreachable!("registry guarantees a known name"),
@@ -1739,6 +1760,28 @@ mod tests {
         assert!(!call.contains(&"batch"));
         let talk = registry(SessionKind::Talk);
         assert!(!talk.contains(&"cancel_job") && !talk.contains(&"hang_up"));
+    }
+
+    #[test]
+    fn every_session_that_acts_for_the_user_can_call_them_but_a_call_and_a_visitor_cannot() {
+        for kind in KINDS {
+            let offered = registry(kind).contains(&"call_user");
+            let single = matches!(kind, SessionKind::Import | SessionKind::Inbox | SessionKind::Summarize);
+            let apart = matches!(kind, SessionKind::Call | SessionKind::Share);
+            assert_eq!(offered, !single && !apart, "{kind:?}");
+            assert_eq!(is_terminal(kind, "call_user"), kind == SessionKind::Trigger, "{kind:?}");
+        }
+        assert!(!writes("call_user"));
+        let (conn, tmp) = env();
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "call_user", "{}").unwrap_err();
+        assert_eq!(e.kind, "rejected", "the session runs it");
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Call, "call_user", "{}").unwrap_err();
+        assert_eq!(e.kind, "forbidden");
+        let check = r#"{"allowed":true,"token":"t"}"#;
+        assert!(!ends(SessionKind::Trigger, "call_user", check), "a check asks and goes on");
+        assert!(ends(SessionKind::Trigger, "call_user", r#"{"said":"hi","ring":true}"#));
+        assert!(!ends(SessionKind::Talk, "call_user", r#"{"said":"hi"}"#));
+        assert!(ends(SessionKind::Trigger, "say", "{}"));
     }
 
     #[test]

@@ -11,4 +11,6 @@ Then write the letter with exactly one `review_write` call, 1 to 4000 bytes of p
 
 Before that call, write exactly one `memory_write` with op "add", category "episodic": summary "Week of <the Monday's date>: <one line>", body five to ten lines of what the week held. It stands above the nights' per-conversation entries as the one a later session finds when it asks how the week went.
 
+Only something that cannot wait for the morning is worth `call_user`; the user is likely asleep.
+
 `review_write` ends the session, so nothing comes after it. Write in the language of the conversations.

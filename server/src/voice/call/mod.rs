@@ -55,6 +55,7 @@ impl jobs::ToolRunner for CallRunner {
             token_id: None,
             thread_note: None,
             share: None,
+            caller: None,
         };
         agent::run_tool(&deps, self.user_id, &self.username, SessionKind::Call, name, args, Some(once))
     }
@@ -132,6 +133,7 @@ impl CallDeps {
             token_id: None,
             thread_note: None,
             share: None,
+            caller: None,
         }
     }
 
@@ -477,7 +479,7 @@ impl Conversation for CallManager {
 
 fn reason(msg: Option<&OutboundMessage>) -> brief::Reason {
     match msg {
-        Some(m) => brief::Reason::CheckIn { title: m.title.clone(), body: m.body.clone() },
+        Some(m) => brief::Reason::CheckIn { title: m.reason.clone().unwrap_or_else(|| m.title.clone()), body: m.body.clone() },
         None => brief::Reason::UserCalled,
     }
 }
@@ -681,6 +683,18 @@ mod tests {
             assert!(Instant::now() < deadline, "timed out waiting for {what}");
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    #[test]
+    fn a_call_note_placed_is_told_why_and_how_it_opened() {
+        let mut msg: OutboundMessage = serde_json::from_str(&check_in(None)).unwrap();
+        let about = |m: &OutboundMessage| match reason(Some(m)) {
+            brief::Reason::CheckIn { title, body } => (title, body),
+            brief::Reason::UserCalled => unreachable!(),
+        };
+        assert_eq!(about(&msg), ("Essay".into(), "How is the essay going?".into()));
+        msg.reason = Some("they asked to be called at 11".into());
+        assert_eq!(about(&msg), ("they asked to be called at 11".into(), "How is the essay going?".into()));
     }
 
     #[test]

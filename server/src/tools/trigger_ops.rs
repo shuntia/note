@@ -59,14 +59,6 @@ pub struct SayArgs {
     /// The ids of the working notes these words are about, when a nudge names any.
     #[serde(default)]
     pub notes: Vec<String>,
-    /// Call the user instead of writing: only when a short conversation will
-    /// help more than a message.
-    #[serde(default)]
-    pub ring: bool,
-    /// The user asked to be called at this moment: the ring goes through even
-    /// when they seem busy.
-    #[serde(default)]
-    pub asked: bool,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -212,25 +204,13 @@ pub fn budget(
 }
 
 /// The trigger session's terminal word. The firing path is what delivers it and
-/// writes it to the thread, so the tool only vets the text and whether a ring
-/// is welcome now.
-pub fn say(conn: &Connection, ctx: &ToolCtx, args: &SayArgs) -> Result<serde_json::Value, ToolError> {
+/// writes it to the thread, so the tool only vets the text.
+pub fn say(args: &SayArgs) -> Result<serde_json::Value, ToolError> {
     let text = args.text.trim();
     if text.is_empty() || text.len() > triggers::MAX_SAY_BYTES {
         return Err(ToolError::rejected(format!("text must be 1 to {} bytes", triggers::MAX_SAY_BYTES)));
     }
-    if args.ring && !args.asked {
-        let tz = triggers::timezone(ctx.config_dir, ctx.username);
-        let busy = crate::wake::seems_busy(conn, ctx.user_id, &tz, jiff::Timestamp::now())
-            .map_err(|e| ToolError::internal(e.to_string()))?;
-        if let Some(busy) = busy {
-            return Err(ToolError::busy(format!(
-                "not a moment to call: {}; say it without ring, or stay quiet",
-                busy.reason()
-            )));
-        }
-    }
-    Ok(serde_json::json!({ "said": text, "notes": args.notes, "ring": args.ring }))
+    Ok(serde_json::json!({ "said": text, "notes": args.notes }))
 }
 
 pub fn stay_quiet(
@@ -508,25 +488,11 @@ mod tests {
     }
 
     #[test]
-    fn a_ring_is_refused_while_the_user_seems_busy() {
+    fn say_only_writes() {
         let (conn, tmp) = env();
-        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Trigger, "say",
-            r#"{"text":"got a minute?","ring":true}"#).unwrap_err();
-        assert_eq!(e.kind, "busy");
-        assert!(e.message.contains("90 minutes"), "{}", e.message);
-        crate::presence::touch(&conn, 1, jiff::Timestamp::now()).unwrap();
-        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Trigger, "say",
-            r#"{"text":"got a minute?","ring":true}"#).unwrap();
-        assert_eq!(out["ring"], true);
-        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Trigger, "say", r#"{"text":"hi"}"#).unwrap();
-        assert_eq!(out["ring"], false);
-    }
-
-    #[test]
-    fn a_ring_the_user_asked_for_goes_through_while_they_seem_busy() {
-        let (conn, tmp) = env();
-        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Trigger, "say",
-            r#"{"text":"it's three, as you asked","ring":true,"asked":true}"#).unwrap();
-        assert_eq!(out["ring"], true);
+        for args in [r#"{"text":"got a minute?","ring":true}"#, r#"{"text":"got a minute?","asked":true}"#] {
+            let e = dispatch(&conn, &ctx(&tmp), SessionKind::Trigger, "say", args).unwrap_err();
+            assert_eq!(e.kind, "invalid_args", "{args}");
+        }
     }
 }

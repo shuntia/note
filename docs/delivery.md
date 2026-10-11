@@ -63,8 +63,8 @@ sockets (a ninth is `429` before the upgrade).
 
 ## Ringing
 
-A wake-up's `say {ring: true}` ([agent.md](agent.md#wake-ups)) calls instead of
-writing, whatever `ring_for` says:
+A confirmed `call_user` ([agent.md](agent.md#wake-ups)) calls instead of
+writing:
 
 The open app and the linked phone ring together; whichever is answered first
 takes the call and the other stops.

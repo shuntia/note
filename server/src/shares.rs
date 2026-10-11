@@ -1034,6 +1034,7 @@ pub async fn run_turn(state: &crate::AppState, principal: &crate::auth::SharePri
             token_id: None,
             thread_note: None,
             share: Some(crate::agent::ShareSession { id: share.id, thread_id, brief: share.brief.clone(), scope: share.scope.clone(), visitor_lang }),
+            caller: None,
         };
         let past = history(&st.db(), thread_id, HISTORY_LIMIT)?;
         let question = append(&st.db(), thread_id, "user", &message, now)?;
@@ -1077,6 +1078,7 @@ pub async fn run_turn(state: &crate::AppState, principal: &crate::auth::SharePri
         for text in &noted {
             let msg = crate::channels::OutboundMessage {
                 title: crate::text::share_note_from(crate::text::Lang::for_user(&st.config_dir, &owner), &share.name),
+                reason: None,
                 body: text.clone(),
                 urgency: crate::channels::Urgency::Normal,
                 checkin: false,

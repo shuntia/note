@@ -337,6 +337,7 @@ pub fn run_for_user(
             token_id: deps.token_id,
             thread_note: None,
             share: None,
+            caller: deps.caller,
         };
         match crate::agent::run_session(
             &deps,
@@ -432,6 +433,7 @@ mod tests {
             token_id: None,
             thread_note: None,
             share: None,
+            caller: None,
         }
     }
 

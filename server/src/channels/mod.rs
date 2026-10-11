@@ -47,6 +47,9 @@ impl Urgency {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OutboundMessage {
     pub title: String,
+    /// Why Note is calling, for the call's own prompt when this message rings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
     pub body: String,
     pub urgency: Urgency,
     /// Note asking how the user is doing, as a fired check-in or one of its own trigger points.
@@ -140,6 +143,7 @@ pub fn render(conn: &Connection, ev: &crate::runner::FiredEvent, lang: Lang) -> 
         if is_checkin(&ev.kind) { event_actions(ev.event_id, lang) } else { Vec::new() };
     OutboundMessage {
         title,
+        reason: None,
         body,
         urgency,
         checkin: is_checkin(&ev.kind),
@@ -280,6 +284,7 @@ pub fn deliver_block_start(
         &start.username,
         &OutboundMessage {
             title: text::starting_now(lang),
+            reason: None,
             body: text::block_start_body(lang, &start.task, &start.end_wall_time),
             urgency: Urgency::Normal,
             checkin: false,
@@ -415,6 +420,7 @@ mod tests {
     fn plain(body: &str) -> OutboundMessage {
         OutboundMessage {
             title: "Note".into(),
+            reason: None,
             body: body.into(),
             urgency: Urgency::Normal,
             checkin: false,
@@ -492,6 +498,7 @@ mod tests {
         let ladder: Vec<Arc<dyn Channel>> = vec![ws, webpush.clone()];
         let msg = OutboundMessage {
             title: "Note".into(),
+            reason: None,
             body: "Test notification".into(),
             urgency: Urgency::Normal,
             checkin: false,

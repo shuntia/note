@@ -249,7 +249,9 @@ impl Voice {
             return Some(Err(web::WebRefusal::Busy));
         }
         let thread = rung.message.conversation_id;
-        let message = thread.and_then(|conversation_id| self.ring_message(user_id, conversation_id));
+        let message = thread
+            .and_then(|conversation_id| self.ring_message(user_id, conversation_id))
+            .map(|m| OutboundMessage { reason: rung.message.reason.clone(), ..m });
         Some(self.open_web_call(user_id, web::WebStart { thread, message }, now, false).inspect_err(|_| {
             self.deliver(user_id, rung.message.clone());
         }))
@@ -438,6 +440,7 @@ impl Voice {
         let voice = self.handler.profile(user_id);
         Some(OutboundMessage {
             title: crate::text::call_title(crate::text::Lang::from_setting(&voice.language).unwrap_or_default()),
+            reason: None,
             body: text,
             urgency: crate::channels::Urgency::Normal,
             checkin: false,
@@ -879,6 +882,7 @@ mod tests {
     fn msg() -> OutboundMessage {
         OutboundMessage {
             title: "Check-in".into(),
+            reason: None,
             body: "how is the essay going?".into(),
             urgency: Urgency::High,
             checkin: false,

@@ -75,12 +75,26 @@ impl LLMProvider for MockLLM {
         self.streams
     }
 
+    /// A scripted call's `$token` is filled from the latest tool result's
+    /// `token`, as a model copies the one `call_user` handed back.
     fn chat(&self, req: &ChatRequest) -> Result<ChatResponse> {
         self.record(req);
-        Ok(self.script.lock().unwrap().pop_front().unwrap_or(ChatResponse {
+        let mut resp = self.script.lock().unwrap().pop_front().unwrap_or(ChatResponse {
             text: "(mock: no scripted response)".into(),
             tool_calls: vec![],
-        }))
+        });
+        let token = req.messages.iter().rev().find_map(|m| match m {
+            Message::ToolResult { content, .. } => serde_json::from_str::<serde_json::Value>(content)
+                .ok()
+                .and_then(|v| v["token"].as_str().map(str::to_string)),
+            _ => None,
+        });
+        if let Some(token) = token {
+            for call in &mut resp.tool_calls {
+                call.args = call.args.replace("$token", &token);
+            }
+        }
+        Ok(resp)
     }
 
     fn chat_with_reasoning(&self, req: &ChatRequest) -> Result<(ChatResponse, String)> {

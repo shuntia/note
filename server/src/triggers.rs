@@ -701,6 +701,7 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
         token_id: None,
         thread_note,
         share: None,
+        caller: Some(state),
     };
     let call_args = std::cell::RefCell::new(String::new());
     let changed = std::cell::Cell::new(false);
@@ -746,7 +747,7 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
         }
     };
     let Some(step) = out.steps.iter().rev().find(|s| {
-        !s.is_error && crate::tools::is_terminal(crate::tools::SessionKind::Trigger, &s.name)
+        !s.is_error && crate::tools::ends(crate::tools::SessionKind::Trigger, &s.name, &s.result)
     }) else {
         return failed(format!("event {}: the session never decided", ev.event_id));
     };
@@ -771,6 +772,7 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
     let Some(text) = result["said"].as_str().map(str::to_string) else {
         return failed(format!("event {}: the session said nothing readable", ev.event_id));
     };
+    let call = (step.name == "call_user").then(|| crate::tools::call_ops::Confirmed::from_decided(&result)).flatten();
     let lang = crate::text::Lang::for_user(&state.config_dir, &fired.username);
     let conversation_id = {
         let conn = state.db();
@@ -797,6 +799,7 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
     let own = ev.origin == crate::idle::ORIGIN || ev.origin == crate::wake::ORIGIN;
     let msg = crate::channels::OutboundMessage {
         title: "Note".into(),
+        reason: call.as_ref().map(|c| c.reason.clone()),
         body: text,
         urgency: crate::channels::Urgency::Normal,
         checkin: !own,
@@ -813,14 +816,14 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
             crate::channels::event_actions(ev.event_id, lang)
         },
     };
-    if result["ring"].as_bool() == Some(true) {
+    if let Some(call) = call {
         let outcome = crate::channels::ring(state, fired.user_id, &fired.username, &msg);
         let conn = state.db();
         let _ = crate::log::record(
             &conn,
             Some(fired.user_id),
             "trigger_rang",
-            &format!("event {}: {}", ev.event_id, outcome.as_str()),
+            &call.log_line(&format!("event {}", ev.event_id), outcome.as_str()),
         );
     } else {
         crate::channels::deliver_via(&state.db, &state.channels, fired.user_id, &fired.username, &msg);
