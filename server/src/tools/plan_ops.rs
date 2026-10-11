@@ -27,6 +27,9 @@ pub struct PlanTasksArgs {
     /// Minutes of air between one block and the next. Default 5.
     #[serde(default)]
     pub gap_min: Option<u32>,
+    /// The IANA zone date, start and end are given in, when not the user's own.
+    #[serde(default)]
+    pub tz: Option<String>,
 }
 
 struct Planned {
@@ -163,9 +166,13 @@ pub fn plan_tasks(
     args: &PlanTasksArgs,
 ) -> Result<serde_json::Value, ToolError> {
     unscoped(ctx)?;
-    let date: jiff::civil::Date = args.date.parse().map_err(|_| {
+    let given: jiff::civil::Date = args.date.parse().map_err(|_| {
         ToolError::rejected(format!("date must be YYYY-MM-DD, got {:?}", args.date))
     })?;
+    let mut walls = vec![args.start.as_str()];
+    walls.extend(args.end.as_deref());
+    let (date, walls) = super::in_user_zone(ctx, args.tz.as_deref(), given, &walls)?;
+    let (start, end) = (&walls[0], walls.get(1));
     let today = today(ctx);
     let horizon = today
         .checked_add(jiff::Span::new().days(MAX_DAYS_AHEAD))
@@ -175,14 +182,13 @@ pub fn plan_tasks(
             "date must be from {today} to {horizon}, got {date}"
         )));
     }
-    if !crate::templates::valid_time(&args.start) {
+    if !crate::templates::valid_time(start) {
         return Err(ToolError::rejected(format!(
-            "start must be zero-padded HH:MM, got {:?}",
-            args.start
+            "start must be zero-padded HH:MM, got {start:?}"
         )));
     }
-    let first = crate::templates::wall_minutes(&args.start);
-    let ceiling = match &args.end {
+    let first = crate::templates::wall_minutes(start);
+    let ceiling = match end {
         None => None,
         Some(end) if !crate::templates::valid_time(end) => {
             return Err(ToolError::rejected(format!(
@@ -193,8 +199,7 @@ pub fn plan_tasks(
             let last = crate::templates::wall_minutes(end);
             if last <= first {
                 return Err(ToolError::rejected(format!(
-                    "end must be after start, got {}-{end}",
-                    args.start
+                    "end must be after start, got {start}-{end}"
                 )));
             }
             Some(last)
@@ -538,6 +543,22 @@ mod tests {
         let (conn, tmp) = env();
         let e = call(&conn, &tmp, "plan_carry", r#"{"date":"the 31st"}"#).unwrap_err();
         assert_eq!(e.kind, "rejected");
+    }
+
+    #[test]
+    fn plan_tasks_given_in_another_zone_lays_on_the_users_clock() {
+        let (conn, tmp) = env();
+        let id = task(&conn, &tmp, r#"{"title":"call dentist"}"#);
+        let date = today().checked_add(jiff::Span::new().days(3)).unwrap();
+        let out = call(&conn, &tmp, "plan_tasks",
+            &format!(r#"{{"date":"{date}","task_ids":[{id}],"start":"18:00","end":"20:00","tz":"Asia/Tokyo"}}"#))
+            .unwrap();
+        assert_eq!(out["plan_date"], date.to_string());
+        assert_eq!(out["events"][0]["start"], "09:00");
+        let e = call(&conn, &tmp, "plan_tasks",
+            &format!(r#"{{"date":"{date}","task_ids":[{id}],"start":"08:00","end":"10:00","tz":"Asia/Tokyo"}}"#))
+            .unwrap_err();
+        assert_eq!(e.kind, "rejected", "08:00-10:00 in Tokyo crosses midnight in UTC");
     }
 
     #[test]

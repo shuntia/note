@@ -15,6 +15,7 @@ pub mod summary_ops;
 pub mod task_ops;
 pub mod task_query;
 pub mod trigger_ops;
+pub mod zone_ops;
 
 use rusqlite::Connection;
 use serde::Serialize;
@@ -322,6 +323,49 @@ pub(crate) fn has_gone_by(ctx: &ToolCtx, date: jiff::civil::Date, wall: &str) ->
     crate::triggers::lead_minutes(date, crate::templates::wall_minutes(wall), &local) < 0
 }
 
+/// A date and the `HH:MM` times on it, given in the zone `tz` names, restated
+/// in the user's own zone; they must all land on one date there. Without `tz`
+/// they are returned as given.
+pub(crate) fn in_user_zone(
+    ctx: &ToolCtx,
+    tz: Option<&str>,
+    date: jiff::civil::Date,
+    walls: &[&str],
+) -> Result<(jiff::civil::Date, Vec<String>), ToolError> {
+    let Some(there) = trigger_ops::zone_arg(tz)? else {
+        return Ok((date, walls.iter().map(|w| (*w).to_string()).collect()));
+    };
+    let user = crate::triggers::timezone(ctx.config_dir, ctx.username);
+    let mut out = Vec::with_capacity(walls.len());
+    let mut day = None;
+    for wall in walls {
+        let (d, w) = crate::zone::translate(date, wall, &there, &user)
+            .ok_or_else(|| ToolError::rejected(format!("times must be zero-padded HH:MM, got {wall:?}")))?;
+        if day.is_some_and(|first| first != d) {
+            return Err(ToolError::rejected(format!(
+                "{date} {} in {tz} crosses midnight in the user's own zone; split it at midnight there",
+                walls.join("-"),
+                tz = tz.unwrap_or_default()
+            )));
+        }
+        day = Some(d);
+        out.push(w);
+    }
+    Ok((day.unwrap_or(date), out))
+}
+
+/// Same title, to the eye: case, punctuation and spacing aside.
+pub(crate) fn same_title(a: &str, b: &str) -> bool {
+    fn words(s: &str) -> Vec<String> {
+        s.split(|c: char| !c.is_alphanumeric())
+            .filter(|w| !w.is_empty())
+            .map(str::to_lowercase)
+            .collect()
+    }
+    let (a, b) = (words(a), words(b));
+    !a.is_empty() && a == b
+}
+
 const MEMORY_READ: &[&str] = &["memory_query", "memory_read"];
 const MEMORY_WRITE: &[&str] = &["memory_write"];
 const CONTEXT: &[&str] = &["context_edit"];
@@ -350,6 +394,9 @@ const CALENDAR_WRITE: &[&str] =
 const TRIGGERS: &[&str] = &["trigger_set", "wait_until", "wait_for"];
 /// Raising the day's budget needs the user's agreement first.
 const TRIGGER_BUDGET: &[&str] = &["trigger_budget"];
+/// Moving the account to another zone follows what the user says, so it lives
+/// where they speak.
+const TIMEZONE: &[&str] = &["timezone_set"];
 const OUTREACH: &[&str] = &["notify_send"];
 const NIGHTLY_NOTES: &[&str] = &["nightly_notes_write"];
 const SEARCH: &[&str] = &["web_search"];
@@ -389,6 +436,7 @@ const DOMAINS: &[&[&str]] = &[
     CALENDAR_WRITE,
     TRIGGERS,
     TRIGGER_BUDGET,
+    TIMEZONE,
     OUTREACH,
     NIGHTLY_NOTES,
     SEARCH,
@@ -444,6 +492,7 @@ const CHECKIN: &[&str] = registry_of![
     CALENDAR_READ,
     TRIGGERS,
     TRIGGER_BUDGET,
+    TIMEZONE,
     SEARCH,
     BATCH,
 ];
@@ -467,6 +516,7 @@ const TALK: &[&str] = registry_of![
     CALENDAR_WRITE,
     TRIGGERS,
     TRIGGER_BUDGET,
+    TIMEZONE,
     SEARCH,
     BATCH,
 ];
@@ -537,6 +587,7 @@ const CALL: &[&str] = registry_of![
     SCHEDULE,
     CALENDAR_READ,
     CALENDAR_WRITE,
+    TIMEZONE,
     SEARCH,
     CALL_ONLY,
 ];
@@ -882,6 +933,13 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
              agreed to it, never before. reason is what they agreed to.",
             schema::<trigger_ops::BudgetArgs>(),
         ),
+        "timezone_set" => (
+            "Set the user's time zone when they tell you where they are — travelling, moved, \
+             or the clock you show is off. zone is an IANA name (\"America/New_York\", \
+             \"Asia/Tokyo\"). Every pending trigger and block keeps the moment it was laid \
+             for; the day's routine follows the new clock.",
+            schema::<zone_ops::SetArgs>(),
+        ),
         "say" => (
             "Say this to the user and end the session. One or two warm sentences, no greeting \
              ritual — it lands in the thread and as a notification. With ring set, Note calls \
@@ -1083,6 +1141,7 @@ fn run(
         "wait_until" => trigger_ops::wait_until(conn, ctx, kind, &parse(raw)?),
         "wait_for" => trigger_ops::wait_for(conn, ctx, kind, &parse(raw)?),
         "trigger_budget" => trigger_ops::budget(conn, ctx, &parse(raw)?),
+        "timezone_set" => zone_ops::set(conn, ctx, &parse(raw)?),
         "say" => trigger_ops::say(conn, ctx, &parse(raw)?),
         "stay_quiet" => trigger_ops::stay_quiet(conn, ctx, &parse(raw)?),
         "share_note" => share_ops::note(conn, ctx, &parse(raw)?),
@@ -1124,6 +1183,28 @@ mod tests {
         let out = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_update",
             &format!(r#"{{"task_id":{id},"state":"done"}}"#)).unwrap();
         assert_eq!(out["state"], "done");
+    }
+
+    #[test]
+    fn titles_match_whatever_their_case_punctuation_and_spacing() {
+        assert!(same_title("Call the dentist!", "call  the dentist"));
+        assert!(same_title("レポート提出", "レポート提出。"));
+        assert!(!same_title("call the dentist", "call the dentist back"));
+        assert!(!same_title("...", "!!"));
+    }
+
+    #[test]
+    fn an_open_task_of_the_same_name_is_shown_rather_than_made_again() {
+        let (conn, tmp) = env();
+        let create = |args: &str| dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_create", args);
+        let first = create(r#"{"title":"Call the dentist"}"#).unwrap()["task_id"].as_i64().unwrap();
+        let e = create(r#"{"title":"call the dentist."}"#).unwrap_err();
+        assert_eq!(e.kind, "duplicate");
+        assert!(e.message.contains(&format!("task {first}")), "{}", e.message);
+        create(r#"{"title":"call the dentist","also":true}"#).unwrap();
+
+        conn.execute("UPDATE tasks SET state = 'done'", []).unwrap();
+        create(r#"{"title":"call the dentist"}"#).unwrap();
     }
 
     #[test]
@@ -1433,15 +1514,16 @@ mod tests {
         assert_eq!(v.content.unwrap(), direct[0]);
     }
 
-    /// Checkin ⊆ Talk ⊆ Nightly but for `trigger_budget` and `plan_carry`,
-    /// which live where the user is there to agree to them; a harvest reads
+    /// Checkin ⊆ Talk ⊆ Nightly but for `trigger_budget`, `plan_carry` and
+    /// `timezone_set`, which live where the user is there to agree to them or
+    /// say where they are; a harvest reads
     /// memory with the nightly's own tools plus the one that ends it; Import,
     /// Inbox, Summarize and Harvest share nothing with an import session.
     #[test]
     fn session_surfaces_nest_and_import_stands_apart() {
         let is_subset = |a: &[&str], b: &[&str]| a.iter().all(|t| b.contains(t));
         assert!(is_subset(registry(SessionKind::Checkin), registry(SessionKind::Talk)));
-        let asks_the_user = |t: &str| t == "trigger_budget" || t == "plan_carry";
+        let asks_the_user = |t: &str| matches!(t, "trigger_budget" | "plan_carry" | "timezone_set");
         assert!(registry(SessionKind::Talk)
             .iter()
             .filter(|t| !asks_the_user(t))
@@ -1767,7 +1849,7 @@ mod tests {
         let again = once("2:0", r#"{"title":"essay"}"#).unwrap();
         assert_eq!(first, again);
         assert_eq!(tasks(), 1);
-        once("2:1", r#"{"title":"essay"}"#).unwrap();
+        once("2:1", r#"{"title":"essay","also":true}"#).unwrap();
         assert_eq!(tasks(), 2);
         once("3:0", r#"{"title":""}"#).unwrap_err();
         let recorded: i64 = conn

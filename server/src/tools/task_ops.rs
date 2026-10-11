@@ -120,6 +120,30 @@ pub struct CreateArgs {
     /// low, normal (default) or high. High goes first when the day is laid.
     #[serde(default)]
     pub urgency: Option<String>,
+    /// Create it even though an open task with the same title exists.
+    #[serde(default)]
+    pub also: bool,
+}
+
+/// An open top-level task already carrying this title.
+fn open_namesake(conn: &Connection, user_id: i64, title: &str) -> Result<Option<(i64, String)>, ToolError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, title FROM tasks
+             WHERE user_id = ?1 AND parent_id IS NULL AND state IN ('open', 'in_progress')
+             ORDER BY id",
+        )
+        .map_err(|e| ToolError::internal(e.to_string()))?;
+    let rows = stmt
+        .query_map([user_id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+        .map_err(|e| ToolError::internal(e.to_string()))?;
+    for row in rows {
+        let (id, existing) = row.map_err(|e| ToolError::internal(e.to_string()))?;
+        if super::same_title(&existing, title) {
+            return Ok(Some((id, existing)));
+        }
+    }
+    Ok(None)
 }
 
 pub fn create(
@@ -129,6 +153,14 @@ pub fn create(
 ) -> Result<serde_json::Value, ToolError> {
     let title = checked_title(&args.title)?;
     check_text("description", &args.description)?;
+    if !args.also {
+        if let Some((id, existing)) = open_namesake(conn, ctx.user_id, title)? {
+            return Err(ToolError::duplicate(format!(
+                "task {id} {existing:?} is already open; update it with task_update, or pass \
+                 also: true when this is a separate task"
+            )));
+        }
+    }
     let due_at = args.due_at.as_deref().map(|raw| checked_due(ctx, raw)).transpose()?.flatten();
     let task = crate::tasks::create(
         conn,
