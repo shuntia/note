@@ -447,11 +447,13 @@ impl<S: Fn(CallBody)> Live<S> {
             (self.send)(CallBody::Floor { floor: Floor::Drained });
             self.played_reply = false;
         }
-        let playing = !self.playout.is_empty();
+        let playing = !self.playout.is_empty() || self.speech.speaking();
         if playing != self.playing {
             self.playing = playing;
-            let actions = self.turn.input(Input::Playing { playing });
-            self.act(actions);
+            if self.ending.is_none() {
+                let actions = self.turn.input(Input::Playing { at: self.now(), playing });
+                self.act(actions);
+            }
         }
         if let Some(since) = self.link_down_since {
             if !self.lost_played && self.lines.contains_key(&Line::LostNotes) && since.elapsed() >= LOST_NOTICE {
@@ -1890,6 +1892,52 @@ mod tests {
         assert_eq!(c.probe.frames_of(4), 0, "a late clause of the cut reply is ignored");
         assert!(!c.log().contains(&CallBody::Played { reply: 3 }));
         assert!(c.log().contains(&CallBody::Commit { turn: 1, text: "wait actually".into(), language: Some("en".into()) }));
+    }
+
+    fn barge_of(c: &Call, reply: u64) -> Option<u32> {
+        c.log().into_iter().find_map(|b| match b {
+            CallBody::BargeIn { reply: r, heard_chars } if r == reply => Some(heard_chars),
+            _ => None,
+        })
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_clause_arriving_after_the_caller_spoke_up_in_a_gap_stays_unplayed() {
+        let c = call(audio(&[(0.0, 500), (0.1, 1500), (0.0, 1000)]), vec![(2, "wait actually")], false);
+        c.frame(CallBody::Speak { reply: 3, idx: 0, text: "xx".into() });
+        c.frame(CallBody::Play { reply: 3 });
+        c.synthesized("xx").await;
+        sleep_ms(1200).await;
+        assert_eq!(c.probe.frames_of(2), 2, "the first clause played out before the caller spoke");
+        assert_eq!(barge_of(&c, 3), Some(2), "{:?}", c.log());
+        c.frame(CallBody::Speak { reply: 3, idx: 1, text: "y".repeat(100) });
+        c.frame(CallBody::SpeakDone { reply: 3 });
+        sleep_ms(3000).await;
+        assert!(!c.tts.said.lock().unwrap().iter().any(|t| t.starts_with('y')), "a late clause of the cut reply is not synthesized");
+        assert_eq!(c.probe.frames_of(100), 0);
+        assert!(!c.log().contains(&CallBody::Played { reply: 3 }));
+        assert!(c.log().contains(&CallBody::Commit { turn: 1, text: "wait actually".into(), language: Some("en".into()) }));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_reply_starting_while_the_caller_is_talking_is_cut_by_their_words() {
+        let c = call(audio(&[(0.1, 2000), (0.0, 1000)]), vec![(2, "hold on a second")], false);
+        sleep_ms(200).await;
+        c.frame(CallBody::Speak { reply: 5, idx: 0, text: "z".repeat(200) });
+        c.frame(CallBody::SpeakDone { reply: 5 });
+        c.frame(CallBody::Play { reply: 5 });
+        c.synthesized(&"z".repeat(200)).await;
+        sleep_ms(2500).await;
+        assert!(barge_of(&c, 5).is_some(), "{:?}", c.log());
+        assert!(c.probe.frames_of(200) < 10, "{} frames of the reply got out", c.probe.frames_of(200));
+        assert!(c.log().contains(&CallBody::Commit { turn: 1, text: "hold on a second".into(), language: Some("en".into()) }));
+        c.frame(CallBody::Speak { reply: 6, idx: 0, text: "ok".into() });
+        c.frame(CallBody::SpeakDone { reply: 6 });
+        c.frame(CallBody::Play { reply: 6 });
+        c.synthesized("ok").await;
+        sleep_ms(500).await;
+        assert_eq!(c.probe.frames_of(2), 2, "the next reply plays whole");
+        assert!(c.log().contains(&CallBody::Played { reply: 6 }));
     }
 
     #[tokio::test(start_paused = true)]

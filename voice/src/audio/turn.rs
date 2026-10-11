@@ -7,6 +7,8 @@ pub struct TurnConfig {
     pub incomplete_cap: Duration,
     pub complete_threshold: f32,
     pub barge_window: Duration,
+    /// Quiet this long before a wordless barge resumes playout: a short remark's partial lands late.
+    pub barge_settle: Duration,
     pub barge_limit: Duration,
 }
 
@@ -17,6 +19,7 @@ impl Default for TurnConfig {
             incomplete_cap: Duration::from_millis(1200),
             complete_threshold: 0.5,
             barge_window: Duration::from_millis(600),
+            barge_settle: Duration::from_millis(300),
             barge_limit: Duration::from_secs(2),
         }
     }
@@ -30,8 +33,8 @@ pub enum Input {
     Partial { text: String },
     /// Smart Turn's answer for the request the machine made.
     TurnScore { at: Duration, p: f32 },
-    /// Whether Note's audio is playing right now.
-    Playing { playing: bool },
+    /// Whether Note is speaking: audio queued, or a reply told to play with words still to come.
+    Playing { at: Duration, playing: bool },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -116,7 +119,10 @@ impl TurnMachine {
                 match self.state {
                     State::Barging { quiet_since, .. } if self.has_real_words() => {
                         self.state = State::Speaking { quiet_since };
-                        vec![Action::FlushPlayout]
+                        vec![self.flush()]
+                    }
+                    State::Speaking { .. } | State::Paused { .. } if self.playing && self.has_real_words() => {
+                        vec![self.flush()]
                     }
                     _ => Vec::new(),
                 }
@@ -127,9 +133,13 @@ impl TurnMachine {
                 }
                 _ => Vec::new(),
             },
-            Input::Playing { playing } => {
+            Input::Playing { at, playing } => {
                 self.playing = playing;
-                Vec::new()
+                if playing {
+                    self.spoken_over(at)
+                } else {
+                    Vec::new()
+                }
             }
         }
     }
@@ -157,13 +167,15 @@ impl TurnMachine {
             }
             State::Barging { since, quiet_since } => {
                 let elapsed = now.saturating_sub(since);
-                if elapsed >= self.cfg.barge_window && quiet_since.is_some() && !self.has_real_words() {
+                let settled = quiet_since.is_some_and(|q| now.saturating_sub(q) >= self.cfg.barge_settle);
+                let blind_talk = self.blind && quiet_since.is_none() && elapsed >= self.cfg.barge_window;
+                if elapsed >= self.cfg.barge_window && settled && !self.has_real_words() {
                     self.state = State::Idle;
                     self.partial.clear();
                     vec![Action::Floor(Floor::UserQuiet), Action::ResumePlayout]
-                } else if elapsed >= self.cfg.barge_limit {
+                } else if elapsed >= self.cfg.barge_limit || blind_talk {
                     self.state = State::Speaking { quiet_since };
-                    vec![Action::FlushPlayout]
+                    vec![self.flush()]
                 } else {
                     Vec::new()
                 }
@@ -210,6 +222,33 @@ impl TurnMachine {
             }
             _ => Vec::new(),
         }
+    }
+
+    /// Note started speaking while the caller holds the floor: their words cut it at once; otherwise it
+    /// waits as for a barge, any draft withdrawn, until words or a backchannel decide.
+    fn spoken_over(&mut self, at: Duration) -> Vec<Action> {
+        match self.state {
+            State::Speaking { .. } | State::Paused { .. } if self.has_real_words() => vec![self.flush()],
+            State::Speaking { quiet_since } => {
+                self.state = State::Barging { since: at, quiet_since };
+                vec![Action::PausePlayout]
+            }
+            State::Paused { drafted, .. } => {
+                self.state = State::Barging { since: at, quiet_since: Some(at) };
+                let mut out = Vec::new();
+                if drafted {
+                    out.push(Action::Retract { turn: self.turn });
+                }
+                out.extend([Action::Floor(Floor::UserSpeaking), Action::PausePlayout]);
+                out
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn flush(&mut self) -> Action {
+        self.playing = false;
+        Action::FlushPlayout
     }
 
     fn commit(&mut self) -> Action {
@@ -340,7 +379,7 @@ mod tests {
     #[test]
     fn a_backchannel_resumes_where_it_paused() {
         let mut m = TurnMachine::new(TurnConfig::default(), BACKCHANNELS_EN);
-        m.input(Input::Playing { playing: true });
+        m.input(Input::Playing { at: ms(0), playing: true });
         assert_eq!(
             m.input(Input::Vad { at: ms(0), speech: true }),
             vec![Action::Floor(Floor::UserSpeaking), Action::PausePlayout]
@@ -358,7 +397,7 @@ mod tests {
     #[test]
     fn real_words_over_playout_flush_it() {
         let mut m = TurnMachine::new(TurnConfig::default(), BACKCHANNELS_EN);
-        m.input(Input::Playing { playing: true });
+        m.input(Input::Playing { at: ms(0), playing: true });
         m.input(Input::Vad { at: ms(0), speech: true });
         assert_eq!(m.input(Input::Partial { text: "wait, actually".into() }), vec![Action::FlushPlayout]);
     }
@@ -366,7 +405,7 @@ mod tests {
     #[test]
     fn a_streaming_backchannel_does_not_flush() {
         let mut m = TurnMachine::new(TurnConfig::default(), BACKCHANNELS_EN);
-        m.input(Input::Playing { playing: true });
+        m.input(Input::Playing { at: ms(0), playing: true });
         m.input(Input::Vad { at: ms(0), speech: true });
         assert!(m.input(Input::Partial { text: "Uh".into() }).is_empty());
         assert!(m.input(Input::Partial { text: "Uh-huh.".into() }).is_empty());
@@ -382,7 +421,7 @@ mod tests {
     #[test]
     fn a_backchannel_still_spoken_at_the_window_waits_for_the_pause() {
         let mut m = TurnMachine::new(TurnConfig::default(), BACKCHANNELS_EN);
-        m.input(Input::Playing { playing: true });
+        m.input(Input::Playing { at: ms(0), playing: true });
         m.input(Input::Vad { at: ms(0), speech: true });
         m.input(Input::Partial { text: "uh-huh".into() });
         for t in (10..=900).step_by(10) {
@@ -390,13 +429,112 @@ mod tests {
             assert!(m.tick(ms(t)).is_empty(), "still talking at {t} ms");
         }
         m.input(Input::Vad { at: ms(910), speech: false });
-        assert_eq!(m.tick(ms(910)), vec![Action::Floor(Floor::UserQuiet), Action::ResumePlayout]);
+        assert!(m.tick(ms(1200)).is_empty(), "the pause has to settle");
+        assert_eq!(m.tick(ms(1210)), vec![Action::Floor(Floor::UserQuiet), Action::ResumePlayout]);
+    }
+
+    #[test]
+    fn a_partial_landing_after_a_short_remark_still_cuts_playout() {
+        let mut m = TurnMachine::new(TurnConfig::default(), BACKCHANNELS_EN);
+        m.input(Input::Playing { at: ms(0), playing: true });
+        m.input(Input::Vad { at: ms(0), speech: true });
+        m.input(Input::Vad { at: ms(450), speech: false });
+        assert!(m.tick(ms(600)).is_empty(), "no words yet, but the quiet has not settled");
+        assert_eq!(m.input(Input::Partial { text: "no stop".into() }), vec![Action::FlushPlayout]);
+    }
+
+    #[test]
+    fn without_partials_talk_past_the_window_cuts_playout() {
+        let mut m = TurnMachine::new(TurnConfig::default(), BACKCHANNELS_EN);
+        m.set_blind(true);
+        m.input(Input::Playing { at: ms(0), playing: true });
+        m.input(Input::Vad { at: ms(0), speech: true });
+        for t in (10..600).step_by(10) {
+            m.input(Input::Vad { at: ms(t), speech: true });
+            assert!(m.tick(ms(t)).is_empty(), "still deciding at {t} ms");
+        }
+        assert_eq!(m.tick(ms(600)), vec![Action::FlushPlayout]);
+
+        let mut m = TurnMachine::new(TurnConfig::default(), BACKCHANNELS_EN);
+        m.set_blind(true);
+        m.input(Input::Playing { at: ms(0), playing: true });
+        m.input(Input::Vad { at: ms(0), speech: true });
+        m.input(Input::Vad { at: ms(200), speech: false });
+        let mut all = Vec::new();
+        for t in (210..=700).step_by(10) {
+            all.extend(m.tick(ms(t)));
+        }
+        assert!(all.contains(&Action::ResumePlayout), "a short sound without words resumes");
+        assert!(!all.contains(&Action::FlushPlayout));
+    }
+
+    #[test]
+    fn a_reply_starting_while_the_caller_speaks_waits_and_their_words_cut_it() {
+        let mut m = TurnMachine::new(TurnConfig::default(), BACKCHANNELS_EN);
+        assert_eq!(m.input(Input::Vad { at: ms(0), speech: true }), vec![Action::Floor(Floor::UserSpeaking)]);
+        assert_eq!(m.input(Input::Playing { at: ms(300), playing: true }), vec![Action::PausePlayout]);
+        m.input(Input::Vad { at: ms(400), speech: true });
+        assert_eq!(m.input(Input::Partial { text: "stop that".into() }), vec![Action::FlushPlayout]);
+        m.input(Input::Vad { at: ms(1000), speech: false });
+        assert!(m.tick(ms(1200)).contains(&Action::Draft { turn: 1, text: "stop that".into() }), "the turn goes on");
+    }
+
+    #[test]
+    fn a_reply_starting_over_words_already_heard_is_cut_at_once() {
+        let mut m = TurnMachine::new(TurnConfig::default(), BACKCHANNELS_EN);
+        m.input(Input::Vad { at: ms(0), speech: true });
+        m.input(Input::Partial { text: "wait actually".into() });
+        assert_eq!(m.input(Input::Playing { at: ms(500), playing: true }), vec![Action::FlushPlayout]);
+        m.input(Input::Vad { at: ms(800), speech: false });
+        assert!(m.tick(ms(1000)).contains(&Action::Draft { turn: 1, text: "wait actually".into() }));
+    }
+
+    #[test]
+    fn a_reply_starting_while_the_caller_keeps_talking_without_words_is_cut_at_the_limit() {
+        let mut m = TurnMachine::new(TurnConfig::default(), BACKCHANNELS_EN);
+        m.input(Input::Vad { at: ms(0), speech: true });
+        m.input(Input::Playing { at: ms(300), playing: true });
+        for t in (310..2300).step_by(10) {
+            m.input(Input::Vad { at: ms(t), speech: true });
+            assert!(m.tick(ms(t)).is_empty(), "still deciding at {t} ms");
+        }
+        assert_eq!(m.tick(ms(2300)), vec![Action::FlushPlayout]);
+    }
+
+    #[test]
+    fn a_reply_starting_in_the_pause_after_a_draft_withdraws_it_and_the_words_decide() {
+        let mut m = TurnMachine::new(TurnConfig::default(), BACKCHANNELS_EN);
+        m.input(Input::Vad { at: ms(0), speech: true });
+        m.input(Input::Partial { text: "yeah".into() });
+        m.input(Input::Vad { at: ms(500), speech: false });
+        assert!(m.tick(ms(700)).contains(&Action::Draft { turn: 1, text: "yeah".into() }));
+        assert_eq!(
+            m.input(Input::Playing { at: ms(800), playing: true }),
+            vec![Action::Retract { turn: 1 }, Action::Floor(Floor::UserSpeaking), Action::PausePlayout]
+        );
+        let mut all = Vec::new();
+        for t in (810..=1400).step_by(10) {
+            all.extend(m.tick(ms(t)));
+        }
+        assert_eq!(all, vec![Action::Floor(Floor::UserQuiet), Action::ResumePlayout], "a backchannel lets it play");
+
+        let mut m = TurnMachine::new(TurnConfig::default(), BACKCHANNELS_EN);
+        m.input(Input::Vad { at: ms(0), speech: true });
+        m.input(Input::Partial { text: "move my run".into() });
+        m.input(Input::Vad { at: ms(500), speech: false });
+        m.tick(ms(700));
+        assert_eq!(m.input(Input::Playing { at: ms(800), playing: true }), vec![Action::FlushPlayout]);
+        assert_eq!(
+            m.input(Input::TurnScore { at: ms(810), p: 0.9 }),
+            vec![Action::Commit { turn: 1, text_hint: "move my run".into() }],
+            "the draft stands"
+        );
     }
 
     #[test]
     fn talking_over_playout_for_two_seconds_flushes_it() {
         let mut m = TurnMachine::new(TurnConfig::default(), BACKCHANNELS_EN);
-        m.input(Input::Playing { playing: true });
+        m.input(Input::Playing { at: ms(0), playing: true });
         m.input(Input::Vad { at: ms(0), speech: true });
         m.input(Input::Partial { text: "yeah".into() });
         for t in (10..2000).step_by(10) {
@@ -410,7 +548,7 @@ mod tests {
 
     fn real(language: &str, partial: &str) -> bool {
         let mut m = TurnMachine::new(TurnConfig::default(), backchannels(language));
-        m.input(Input::Playing { playing: true });
+        m.input(Input::Playing { at: ms(0), playing: true });
         m.input(Input::Vad { at: ms(0), speech: true });
         m.input(Input::Partial { text: partial.into() }) == vec![Action::FlushPlayout]
     }
@@ -461,13 +599,13 @@ mod tests {
     #[test]
     fn a_discarded_barge_frees_the_floor_and_keeps_the_turn_number() {
         let mut m = TurnMachine::new(TurnConfig::default(), BACKCHANNELS_EN);
-        m.input(Input::Playing { playing: true });
+        m.input(Input::Playing { at: ms(0), playing: true });
         m.input(Input::Vad { at: ms(0), speech: true });
         m.input(Input::Partial { text: "mhm".into() });
         m.input(Input::Vad { at: ms(200), speech: false });
         assert!(m.tick(ms(590)).is_empty());
         assert_eq!(m.tick(ms(600)), vec![Action::Floor(Floor::UserQuiet), Action::ResumePlayout]);
-        m.input(Input::Playing { playing: false });
+        m.input(Input::Playing { at: ms(1000), playing: false });
         m.input(Input::Vad { at: ms(1000), speech: true });
         m.input(Input::Partial { text: "move my run".into() });
         m.input(Input::Vad { at: ms(1500), speech: false });
@@ -477,7 +615,7 @@ mod tests {
     #[test]
     fn noise_with_no_words_resumes_playout() {
         let mut m = TurnMachine::new(TurnConfig::default(), BACKCHANNELS_EN);
-        m.input(Input::Playing { playing: true });
+        m.input(Input::Playing { at: ms(0), playing: true });
         m.input(Input::Vad { at: ms(0), speech: true });
         m.input(Input::Vad { at: ms(150), speech: false });
         let mut all = Vec::new();

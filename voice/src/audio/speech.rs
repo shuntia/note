@@ -259,6 +259,11 @@ impl SpeechQueue {
         self.replies.get(&reply).is_some_and(|s| s.gate == Gate::Playing && s.spoken)
     }
 
+    /// A reply told to play has words and is not played out: Note is speaking, even between its pieces.
+    pub fn speaking(&self) -> bool {
+        self.playing.iter().any(|&r| self.is_speaking(r))
+    }
+
     pub fn gate(&self, reply: u64) -> Gate {
         self.replies.get(&reply).map_or(Gate::Held, |s| s.gate)
     }
