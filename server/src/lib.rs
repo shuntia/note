@@ -49,6 +49,7 @@ pub mod triggers;
 pub mod voice;
 pub mod wake;
 pub mod work;
+pub mod zone;
 
 use crate::providers::{EmbeddingsProvider, LLMProvider};
 use crate::search::SearchProvider;

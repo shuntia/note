@@ -15,6 +15,7 @@ pub mod summary_ops;
 pub mod task_ops;
 pub mod task_query;
 pub mod trigger_ops;
+pub mod zone_ops;
 
 use rusqlite::Connection;
 use serde::Serialize;
@@ -90,6 +91,10 @@ impl ToolError {
     }
     pub fn busy(m: impl Into<String>) -> Self {
         Self::of("busy")(m.into())
+    }
+    /// Something like it already exists; the message names it and the way past.
+    pub fn duplicate(m: impl Into<String>) -> Self {
+        Self::of("duplicate")(m.into())
     }
 }
 
@@ -318,6 +323,49 @@ pub(crate) fn has_gone_by(ctx: &ToolCtx, date: jiff::civil::Date, wall: &str) ->
     crate::triggers::lead_minutes(date, crate::templates::wall_minutes(wall), &local) < 0
 }
 
+/// A date and the `HH:MM` times on it, given in the zone `tz` names, restated
+/// in the user's own zone; they must all land on one date there. Without `tz`
+/// they are returned as given.
+pub(crate) fn in_user_zone(
+    ctx: &ToolCtx,
+    tz: Option<&str>,
+    date: jiff::civil::Date,
+    walls: &[&str],
+) -> Result<(jiff::civil::Date, Vec<String>), ToolError> {
+    let Some(there) = trigger_ops::zone_arg(tz)? else {
+        return Ok((date, walls.iter().map(|w| (*w).to_string()).collect()));
+    };
+    let user = crate::triggers::timezone(ctx.config_dir, ctx.username);
+    let mut out = Vec::with_capacity(walls.len());
+    let mut day = None;
+    for wall in walls {
+        let (d, w) = crate::zone::translate(date, wall, &there, &user)
+            .ok_or_else(|| ToolError::rejected(format!("times must be zero-padded HH:MM, got {wall:?}")))?;
+        if day.is_some_and(|first| first != d) {
+            return Err(ToolError::rejected(format!(
+                "{date} {} in {tz} crosses midnight in the user's own zone; split it at midnight there",
+                walls.join("-"),
+                tz = tz.unwrap_or_default()
+            )));
+        }
+        day = Some(d);
+        out.push(w);
+    }
+    Ok((day.unwrap_or(date), out))
+}
+
+/// Same title, to the eye: case, punctuation and spacing aside.
+pub(crate) fn same_title(a: &str, b: &str) -> bool {
+    fn words(s: &str) -> Vec<String> {
+        s.split(|c: char| !c.is_alphanumeric())
+            .filter(|w| !w.is_empty())
+            .map(str::to_lowercase)
+            .collect()
+    }
+    let (a, b) = (words(a), words(b));
+    !a.is_empty() && a == b
+}
+
 const MEMORY_READ: &[&str] = &["memory_query", "memory_read"];
 const MEMORY_WRITE: &[&str] = &["memory_write"];
 const CONTEXT: &[&str] = &["context_edit"];
@@ -346,6 +394,9 @@ const CALENDAR_WRITE: &[&str] =
 const TRIGGERS: &[&str] = &["trigger_set", "wait_until", "wait_for"];
 /// Raising the day's budget needs the user's agreement first.
 const TRIGGER_BUDGET: &[&str] = &["trigger_budget"];
+/// Moving the account to another zone follows what the user says, so it lives
+/// where they speak.
+const TIMEZONE: &[&str] = &["timezone_set"];
 const OUTREACH: &[&str] = &["notify_send"];
 const NIGHTLY_NOTES: &[&str] = &["nightly_notes_write"];
 const SEARCH: &[&str] = &["web_search"];
@@ -385,6 +436,7 @@ const DOMAINS: &[&[&str]] = &[
     CALENDAR_WRITE,
     TRIGGERS,
     TRIGGER_BUDGET,
+    TIMEZONE,
     OUTREACH,
     NIGHTLY_NOTES,
     SEARCH,
@@ -440,6 +492,7 @@ const CHECKIN: &[&str] = registry_of![
     CALENDAR_READ,
     TRIGGERS,
     TRIGGER_BUDGET,
+    TIMEZONE,
     SEARCH,
     BATCH,
 ];
@@ -463,6 +516,7 @@ const TALK: &[&str] = registry_of![
     CALENDAR_WRITE,
     TRIGGERS,
     TRIGGER_BUDGET,
+    TIMEZONE,
     SEARCH,
     BATCH,
 ];
@@ -533,6 +587,7 @@ const CALL: &[&str] = registry_of![
     SCHEDULE,
     CALENDAR_READ,
     CALENDAR_WRITE,
+    TIMEZONE,
     SEARCH,
     CALL_ONLY,
 ];
@@ -600,7 +655,9 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
              user groups their list; reuse a category they already have rather than coining a \
              near-copy. goal_id hangs the task from one of their goals. notify says how the \
              block holding this task announces itself when it starts: none is silent, chat \
-             writes a line in the day's thread, notify sends a notification (the default).",
+             writes a line in the day's thread, notify sends a notification (the default). \
+             An open task with the same title is refused with its id: update that one, or \
+             pass also when this really is a second task.",
             schema::<task_ops::CreateArgs>(),
         ),
         "task_update" => (
@@ -769,7 +826,8 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
              that makes sense on its own (at most 80 characters). op add writes one — give it \
              from and until when it belongs to a stretch of time; update rewords it or moves its \
              window (an empty from or until clears it); keep says it still matters; remove \
-             deletes it once it no longer does. Anything that needs more words is a \
+             deletes it once it no longer does. An add whose title an existing note already \
+             reads is refused with that note's id. Anything that needs more words is a \
              memory_write, and the note may name that memory's id. The user never sees these; \
              anything they have to do is a task.",
             schema::<note_ops::WriteArgs>(),
@@ -831,7 +889,8 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
              has set aside for tasks — never quiet. Use this when the user says they cannot \
              be disturbed at certain times, or names something that happens every week: \
              \"school weekdays 08:15-15:30\" is fixed and quiet. A one-off entry that has \
-             already ended is refused.",
+             already ended is refused, and so is one whose title matches an entry overlapping \
+             it on a shared day — change that one, or pass also.",
             schema::<calendar_ops::AddArgs>(),
         ),
         "calendar_update" => (
@@ -850,27 +909,40 @@ fn describe(name: &str) -> (&'static str, serde_json::Value) {
             schema::<calendar_ops::SkipArgs>(),
         ),
         "trigger_set" => (
-            "Lay a trigger point: a moment later today when you will look at the situation \
-             again and then message the user, call them, or stay quiet. prompt is the note \
-             to yourself about what you are following up on; when the user asks you to call \
-             them, say so in it and the wake-up will ring. This is how you reach out on your \
-             own terms rather than waiting to be asked. at least 10 minutes ahead.",
+            "Lay a trigger point: a moment when you will look at the situation again and then \
+             message the user, call them, or stay quiet. prompt is the note to yourself about \
+             what you are following up on; when the user asks you to call them, say so in it \
+             and the wake-up will ring. This is how you reach out on your own terms rather than \
+             waiting to be asked. At least 10 minutes ahead; date lays it on a later day, up to \
+             7 days ahead, and spends that day's allowance. tz reads at and date in another \
+             IANA zone — the one the user named the time in. Check plan_list first: a trigger \
+             within 20 minutes of a pending one is refused with that one named; reword it with \
+             replace set to its id, or pass also when both are wanted.",
             schema::<trigger_ops::SetArgs>(),
         ),
         "wait_until" => (
             "Lay a trigger point that calls itself off if the user writes back in the \
-             thread before it fires — the way to leave a question open without nagging.",
+             thread before it fires — the way to leave a question open without nagging. \
+             date, tz, replace and also work as in trigger_set.",
             schema::<trigger_ops::WaitUntilArgs>(),
         ),
         "wait_for" => (
             "Lay a trigger point that calls itself off if the task is finished or dropped, \
-             or the plan event is settled, before it fires. Name exactly one of them.",
+             or the plan event is settled, before it fires. Name exactly one of them. date, \
+             tz, replace and also work as in trigger_set.",
             schema::<trigger_ops::WaitForArgs>(),
         ),
         "trigger_budget" => (
-            "Raise today's check-in budget, after the user has agreed to it — never \
-             before. reason is what they agreed to.",
+            "Raise a day's check-in budget — today's, or the date given — after the user has \
+             agreed to it, never before. reason is what they agreed to.",
             schema::<trigger_ops::BudgetArgs>(),
+        ),
+        "timezone_set" => (
+            "Set the user's time zone when they tell you where they are — travelling, moved, \
+             or the clock you show is off. zone is an IANA name (\"America/New_York\", \
+             \"Asia/Tokyo\"). Every pending trigger and block keeps the moment it was laid \
+             for; the day's routine follows the new clock.",
+            schema::<zone_ops::SetArgs>(),
         ),
         "say" => (
             "Say this to the user and end the session. One or two warm sentences, no greeting \
@@ -1074,6 +1146,7 @@ fn run(
         "wait_until" => trigger_ops::wait_until(conn, ctx, kind, &parse(raw)?),
         "wait_for" => trigger_ops::wait_for(conn, ctx, kind, &parse(raw)?),
         "trigger_budget" => trigger_ops::budget(conn, ctx, &parse(raw)?),
+        "timezone_set" => zone_ops::set(conn, ctx, &parse(raw)?),
         "say" => trigger_ops::say(conn, ctx, &parse(raw)?),
         "stay_quiet" => trigger_ops::stay_quiet(conn, ctx, &parse(raw)?),
         "share_note" => share_ops::note(conn, ctx, &parse(raw)?),
@@ -1115,6 +1188,28 @@ mod tests {
         let out = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_update",
             &format!(r#"{{"task_id":{id},"state":"done"}}"#)).unwrap();
         assert_eq!(out["state"], "done");
+    }
+
+    #[test]
+    fn titles_match_whatever_their_case_punctuation_and_spacing() {
+        assert!(same_title("Call the dentist!", "call  the dentist"));
+        assert!(same_title("レポート提出", "レポート提出。"));
+        assert!(!same_title("call the dentist", "call the dentist back"));
+        assert!(!same_title("...", "!!"));
+    }
+
+    #[test]
+    fn an_open_task_of_the_same_name_is_shown_rather_than_made_again() {
+        let (conn, tmp) = env();
+        let create = |args: &str| dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_create", args);
+        let first = create(r#"{"title":"Call the dentist"}"#).unwrap()["task_id"].as_i64().unwrap();
+        let e = create(r#"{"title":"call the dentist."}"#).unwrap_err();
+        assert_eq!(e.kind, "duplicate");
+        assert!(e.message.contains(&format!("task {first}")), "{}", e.message);
+        create(r#"{"title":"call the dentist","also":true}"#).unwrap();
+
+        conn.execute("UPDATE tasks SET state = 'done'", []).unwrap();
+        create(r#"{"title":"call the dentist"}"#).unwrap();
     }
 
     #[test]
@@ -1424,15 +1519,16 @@ mod tests {
         assert_eq!(v.content.unwrap(), direct[0]);
     }
 
-    /// Checkin ⊆ Talk ⊆ Nightly but for `trigger_budget` and `plan_carry`,
-    /// which live where the user is there to agree to them; a harvest reads
+    /// Checkin ⊆ Talk ⊆ Nightly but for `trigger_budget`, `plan_carry` and
+    /// `timezone_set`, which live where the user is there to agree to them or
+    /// say where they are; a harvest reads
     /// memory with the nightly's own tools plus the one that ends it; Import,
     /// Inbox, Summarize and Harvest share nothing with an import session.
     #[test]
     fn session_surfaces_nest_and_import_stands_apart() {
         let is_subset = |a: &[&str], b: &[&str]| a.iter().all(|t| b.contains(t));
         assert!(is_subset(registry(SessionKind::Checkin), registry(SessionKind::Talk)));
-        let asks_the_user = |t: &str| t == "trigger_budget" || t == "plan_carry";
+        let asks_the_user = |t: &str| matches!(t, "trigger_budget" | "plan_carry" | "timezone_set");
         assert!(registry(SessionKind::Talk)
             .iter()
             .filter(|t| !asks_the_user(t))
@@ -1758,7 +1854,7 @@ mod tests {
         let again = once("2:0", r#"{"title":"essay"}"#).unwrap();
         assert_eq!(first, again);
         assert_eq!(tasks(), 1);
-        once("2:1", r#"{"title":"essay"}"#).unwrap();
+        once("2:1", r#"{"title":"essay","also":true}"#).unwrap();
         assert_eq!(tasks(), 2);
         once("3:0", r#"{"title":""}"#).unwrap_err();
         let recorded: i64 = conn

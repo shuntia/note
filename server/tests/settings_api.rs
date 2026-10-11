@@ -519,3 +519,48 @@ async fn an_error_reads_in_the_language_of_its_reader() {
     let res = app.oneshot(req).await.unwrap();
     assert_eq!(json(res).await["error"], "nightly_time must be a zero-padded 24-hour HH:MM", "the setting outranks the browser");
 }
+
+/// Following the user to another zone keeps every check Note laid at the
+/// instant it was laid for; the template's own rows keep their clock time.
+#[tokio::test]
+async fn a_zone_change_keeps_pending_checks_at_their_instant() {
+    let (app, cookie, state, _cfg) = common::app_with_logged_in_user_and_state().await;
+    let day = jiff::Timestamp::now()
+        .to_zoned(jiff::tz::TimeZone::UTC)
+        .date()
+        .checked_add(jiff::Span::new().days(2))
+        .unwrap()
+        .to_string();
+    let (agent, template) = {
+        let conn = state.db();
+        let uid: i64 = conn
+            .query_row("SELECT id FROM users WHERE username = 'aki'", [], |r| r.get(0))
+            .unwrap();
+        conn.execute("INSERT INTO plans (user_id, date, created_at) VALUES (?1, ?2, 'x')", (uid, &day))
+            .unwrap();
+        let plan = conn.last_insert_rowid();
+        let add = |wall: &str, origin: &str| {
+            conn.execute(
+                "INSERT INTO events (plan_id, kind, wall_time, orig_wall_time, origin)
+                 VALUES (?1, 'trigger', ?2, ?2, ?3)",
+                (plan, wall, origin),
+            )
+            .unwrap();
+            conn.last_insert_rowid()
+        };
+        (add("11:00", "agent"), add("21:30", "template"))
+    };
+    let res = app.oneshot(put(&cookie, r#"{"timezone":"Asia/Tokyo"}"#)).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let conn = state.db();
+    let placed = |id: i64| -> (String, String) {
+        conn.query_row(
+            "SELECT p.date, e.wall_time FROM events e JOIN plans p ON p.id = e.plan_id WHERE e.id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap()
+    };
+    assert_eq!(placed(agent), (day.clone(), "20:00".to_string()));
+    assert_eq!(placed(template), (day, "21:30".to_string()));
+}

@@ -179,6 +179,13 @@ pub struct AddArgs {
     pub from_date: Option<String>,
     #[serde(default)]
     pub until_date: Option<String>,
+    /// For a one-off entry: the IANA zone `on_date` and the times are given in,
+    /// when not the user's own.
+    #[serde(default)]
+    pub tz: Option<String>,
+    /// Add it even though an entry with the same title already overlaps it.
+    #[serde(default)]
+    pub also: bool,
 }
 
 /// A one-off entry whose end is behind the user's clock is a lay in the past.
@@ -198,10 +205,93 @@ fn check_past(ctx: &ToolCtx, args: &AddArgs, days: i64) -> Result<(), ToolError>
     Ok(())
 }
 
-pub fn add(conn: &Connection, ctx: &ToolCtx, args: AddArgs) -> Result<serde_json::Value, ToolError> {
+/// A one-off entry's date and times given in `tz`, restated in the user's own
+/// zone. A repeating entry keeps the user's clock, so it takes no `tz`.
+fn one_off_in_user_zone(
+    ctx: &ToolCtx,
+    tz: Option<&str>,
+    on_date: Option<&str>,
+    start: Option<&str>,
+    end: Option<&str>,
+    repeating: bool,
+) -> Result<Option<(String, String, String)>, ToolError> {
+    if tz.is_none_or(|t| t.trim().is_empty()) {
+        return Ok(None);
+    }
+    let (Some(on_date), Some(start), Some(end), false) = (on_date, start, end, repeating) else {
+        return Err(ToolError::rejected(
+            "tz goes with a one-off entry: give on_date, start_time and end_time together, and no days",
+        ));
+    };
+    let date: jiff::civil::Date = on_date
+        .parse()
+        .map_err(|_| ToolError::rejected(format!("on_date must be YYYY-MM-DD, got {on_date:?}")))?;
+    let (date, walls) = super::in_user_zone(ctx, tz, date, &[start, end])?;
+    Ok(Some((date.to_string(), walls[0].clone(), walls[1].clone())))
+}
+
+/// An entry already on the calendar under the same title whose time overlaps
+/// on a day both reach.
+fn same_entry(
+    conn: &Connection,
+    ctx: &ToolCtx,
+    title: &str,
+    start: &str,
+    end: &str,
+    days: i64,
+    on_date: Option<&str>,
+) -> Result<Option<calendar::Entry>, ToolError> {
+    let weekday_bit = |d: &str| -> i64 {
+        d.parse::<jiff::civil::Date>()
+            .map_or(0, |d| 1 << (d.weekday().to_monday_zero_offset()))
+    };
+    let entries = calendar::list(conn, ctx.user_id).map_err(|e| ToolError::internal(e.to_string()))?;
+    Ok(entries.into_iter().find(|e| {
+        let shared_day = match (days, e.days) {
+            (0, 0) => on_date.is_some() && e.on_date.as_deref() == on_date,
+            (0, theirs) => on_date.is_some_and(|d| theirs & weekday_bit(d) != 0),
+            (ours, 0) => e.on_date.as_deref().is_some_and(|d| ours & weekday_bit(d) != 0),
+            (ours, theirs) => ours & theirs != 0,
+        };
+        shared_day
+            && super::same_title(&e.title, title)
+            && e.start_time.as_str() < end
+            && start < e.end_time.as_str()
+    }))
+}
+
+pub fn add(conn: &Connection, ctx: &ToolCtx, mut args: AddArgs) -> Result<serde_json::Value, ToolError> {
     unscoped(ctx)?;
     super::check_text("title", &args.title)?;
+    if let Some((on_date, start, end)) = one_off_in_user_zone(
+        ctx,
+        args.tz.as_deref(),
+        args.on_date.as_deref(),
+        Some(&args.start_time),
+        Some(&args.end_time),
+        args.days.is_some(),
+    )? {
+        (args.on_date, args.start_time, args.end_time) = (Some(on_date), start, end);
+    }
     let days = args.days.as_deref().map_or(0, mask);
+    if !args.also {
+        let found = same_entry(
+            conn,
+            ctx,
+            &args.title,
+            &args.start_time,
+            &args.end_time,
+            days,
+            args.on_date.as_deref(),
+        )?;
+        if let Some(e) = found {
+            return Err(ToolError::duplicate(format!(
+                "calendar entry {} {:?} already covers {}-{}; change it with calendar_update, or pass \
+                 also: true when this is a second one",
+                e.id, e.title, e.start_time, e.end_time
+            )));
+        }
+    }
     check_past(ctx, &args, days)?;
     let fields = calendar::Fields {
         title: args.title,
@@ -243,16 +333,30 @@ pub struct UpdateArgs {
     pub from_date: Option<String>,
     #[serde(default)]
     pub until_date: Option<String>,
+    /// The IANA zone `on_date` and the times are given in, when not the user's
+    /// own; it needs `on_date`, `start_time` and `end_time` together.
+    #[serde(default)]
+    pub tz: Option<String>,
 }
 
 pub fn update(
     conn: &Connection,
     ctx: &ToolCtx,
-    args: UpdateArgs,
+    mut args: UpdateArgs,
 ) -> Result<serde_json::Value, ToolError> {
     unscoped(ctx)?;
     if let Some(title) = &args.title {
         super::check_text("title", title)?;
+    }
+    if let Some((on_date, start, end)) = one_off_in_user_zone(
+        ctx,
+        args.tz.as_deref(),
+        args.on_date.as_deref(),
+        args.start_time.as_deref(),
+        args.end_time.as_deref(),
+        args.days.is_some(),
+    )? {
+        (args.on_date, args.start_time, args.end_time) = (Some(on_date), Some(start), Some(end));
     }
     let patch = calendar::Patch {
         title: args.title,
@@ -539,5 +643,58 @@ mod tests {
         }
         let description = schema["description"].as_str().unwrap();
         assert!(description.contains("held"), "{description}");
+    }
+
+    #[test]
+    fn the_same_commitment_twice_is_shown_the_first() {
+        let (conn, tmp) = env();
+        let add = |args: &str| dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "calendar_add", args);
+        let first = add(SCHOOL).unwrap()["entry_id"].as_i64().unwrap();
+        let e = add(r#"{"title":"School","kind":"fixed","start_time":"09:00","end_time":"12:00",
+            "days":["fri","sat"]}"#).unwrap_err();
+        assert_eq!(e.kind, "duplicate");
+        assert!(e.message.contains(&format!("calendar entry {first}")), "{}", e.message);
+        // a Friday one-off of the same name, inside school hours
+        let e = add(r#"{"title":"school","kind":"busy","start_time":"10:00","end_time":"11:00",
+            "on_date":"2099-01-02"}"#).unwrap_err();
+        assert_eq!(e.kind, "duplicate");
+        add(r#"{"title":"school","kind":"fixed","start_time":"16:00","end_time":"17:00",
+            "days":["mon"]}"#).unwrap();
+        add(r#"{"title":"school","kind":"fixed","start_time":"09:00","end_time":"12:00",
+            "days":["sat"]}"#).unwrap();
+        add(r#"{"title":"school","kind":"fixed","start_time":"09:00","end_time":"12:00",
+            "days":["mon"],"also":true}"#).unwrap();
+    }
+
+    /// Two in the afternoon in Tokyo is one in the morning in London (UTC+1
+    /// on 2099-07-01).
+    #[test]
+    fn a_one_off_given_in_another_zone_lands_on_the_users_clock() {
+        let (conn, tmp) = env();
+        std::fs::write(
+            tmp.path().join("defaults/user.toml"),
+            "display_name = \"X\"\ntimezone = \"Europe/London\"\ntemplate = \"default\"\n",
+        )
+        .unwrap();
+        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "calendar_add",
+            r#"{"title":"call","kind":"busy","start_time":"14:00","end_time":"15:00",
+                "on_date":"2099-07-02","tz":"Asia/Tokyo"}"#).unwrap();
+        assert_eq!(
+            (out["on_date"].as_str(), out["start_time"].as_str(), out["end_time"].as_str()),
+            (Some("2099-07-02"), Some("06:00"), Some("07:00"))
+        );
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "calendar_add",
+            r#"{"title":"late","kind":"busy","start_time":"07:30","end_time":"09:00",
+                "on_date":"2099-07-02","tz":"Asia/Tokyo"}"#).unwrap_err();
+        assert_eq!(e.kind, "rejected", "it crosses midnight in London");
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "calendar_add",
+            r#"{"title":"gym","kind":"busy","start_time":"14:00","end_time":"15:00",
+                "days":["mon"],"tz":"Asia/Tokyo"}"#).unwrap_err();
+        assert_eq!(e.kind, "rejected", "a repeating entry keeps the user's clock");
+        let id = out["entry_id"].as_i64().unwrap();
+        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "calendar_update",
+            &format!(r#"{{"entry_id":{id},"start_time":"20:00","end_time":"21:00",
+                "on_date":"2099-07-02","tz":"Asia/Tokyo"}}"#)).unwrap();
+        assert_eq!(out["start_time"], "12:00");
     }
 }

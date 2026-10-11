@@ -238,6 +238,9 @@ pub struct InsertArgs {
     #[serde(default)]
     pub slide_window_min: i64,
     pub channel: Channel,
+    /// The IANA zone date and time are given in, when not the user's own.
+    #[serde(default)]
+    pub tz: Option<String>,
 }
 
 /// Adds an event to an already-generated day plan; creating the plan itself
@@ -253,13 +256,12 @@ pub fn insert(conn: &Connection, ctx: &ToolCtx, args: &InsertArgs) -> Result<ser
     if !(0..=720).contains(&args.slide_window_min) {
         return Err(ToolError::rejected("slide_window_min must be in 0..=720"));
     }
-    let date: jiff::civil::Date = args.date.parse()
+    let given: jiff::civil::Date = args.date.parse()
         .map_err(|_| ToolError::rejected(format!("date must be YYYY-MM-DD, got {:?}", args.date)))?;
-    if super::has_gone_by(ctx, date, &args.time) {
-        return Err(ToolError::past(format!(
-            "{date} {} has gone by; insert it later in the day",
-            args.time
-        )));
+    let (date, time) = super::in_user_zone(ctx, args.tz.as_deref(), given, &[&args.time])?;
+    let time = &time[0];
+    if super::has_gone_by(ctx, date, time) {
+        return Err(ToolError::past(format!("{date} {time} has gone by; insert it later in the day")));
     }
     let plan_id: Option<i64> = conn
         .query_row(
@@ -272,11 +274,11 @@ pub fn insert(conn: &Connection, ctx: &ToolCtx, args: &InsertArgs) -> Result<ser
     let Some(plan_id) = plan_id else {
         return Err(ToolError::rejected(format!("no plan exists for {date}; generate it first")));
     };
-    check_calendar(conn, ctx.user_id, date, &args.time, &args.time)?;
+    check_calendar(conn, ctx.user_id, date, time, time)?;
     conn.execute(
         "INSERT INTO events (plan_id, kind, wall_time, orig_wall_time, flexibility, slide_window_min, channel, origin)
          VALUES (?1, ?2, ?3, ?3, ?4, ?5, ?6, 'agent')",
-        (plan_id, kind, &args.time, args.flexibility.as_str(), args.slide_window_min, args.channel.as_str()),
+        (plan_id, kind, time, args.flexibility.as_str(), args.slide_window_min, args.channel.as_str()),
     )
     .map_err(|e| ToolError::internal(e.to_string()))?;
     Ok(serde_json::json!({ "event_id": conn.last_insert_rowid() }))
@@ -628,5 +630,19 @@ mod tests {
         dispatch(&conn, &ctx(&tmp), SessionKind::Nightly, "schedule_insert",
             &format!(r#"{{"date":"{today}","kind":"nudge","time":"13:00","flexibility":"drop","channel":"push"}}"#),
         ).unwrap();
+    }
+
+    #[test]
+    fn an_insert_given_in_another_zone_lands_on_the_users_clock() {
+        let (conn, tmp) = env();
+        let at = jiff::Timestamp::now() + jiff::SignedDuration::from_hours(4);
+        let (utc_date, utc_time) = crate::zone::civil(at, &jiff::tz::TimeZone::UTC);
+        let (date, time) = crate::zone::civil(at, &zone());
+        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Nightly, "schedule_insert",
+            &format!(r#"{{"date":"{utc_date}","kind":"nudge","time":"{utc_time}","flexibility":"drop",
+                "channel":"push","tz":"UTC"}}"#)).unwrap();
+        let id = out["event_id"].as_i64().unwrap();
+        let ev = crate::plan::events_for(&conn, 1, date).unwrap().into_iter().find(|e| e.id == id).unwrap();
+        assert_eq!(ev.wall_time, time);
     }
 }

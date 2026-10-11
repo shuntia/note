@@ -1621,6 +1621,7 @@ async fn settings_put(
     let Ok(mut cfg) = crate::config::UserConfig::load(&state.config_dir, &user.username) else {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
+    let old_timezone = cfg.timezone.clone();
     if let Some(name) = req.display_name {
         let name = name.trim();
         if name.is_empty() || name.chars().count() > MAX_DISPLAY_NAME {
@@ -1763,8 +1764,28 @@ async fn settings_put(
         }
     }
     let schedule = schedule_rows(&state, &user.username, &cfg.template);
-    match cfg.save(&state.config_dir, &user.username) {
+    let saved = (|| -> anyhow::Result<()> {
+        let tx = conn.unchecked_transaction()?;
+        if cfg.timezone != old_timezone {
+            crate::zone::rezone(
+                &tx,
+                &state.config_dir,
+                &user.username,
+                user.id,
+                &old_timezone,
+                &cfg.timezone,
+                jiff::Timestamp::now(),
+            )?;
+        }
+        cfg.save(&state.config_dir, &user.username)?;
+        tx.commit()?;
+        Ok(())
+    })();
+    match saved {
         Ok(()) => {
+            if cfg.timezone != old_timezone {
+                state.hub.broadcast_changed(user.id);
+            }
             let voice_link = crate::voice::links::get(&conn, user.id).unwrap_or(None);
             Json(settings_body(&state, &cfg, &user, &schedule, voice_link)).into_response()
         }
