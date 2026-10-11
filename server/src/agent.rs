@@ -20,7 +20,7 @@ pub const HARVEST_MAX_TURNS: usize = 8;
 pub const REVIEW_MAX_TURNS: usize = 8;
 /// A trigger session looks around and then speaks or does not: room to read the
 /// situation, never room to hold a conversation with itself.
-pub const TRIGGER_MAX_TURNS: usize = 10;
+pub const TRIGGER_MAX_TURNS: usize = 14;
 
 use crate::model_text::{self as mt, REPLY_IN_JAPANESE, SPEAK_JAPANESE, VISITOR_JAPANESE};
 use crate::text::Lang;
