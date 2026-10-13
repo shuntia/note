@@ -481,7 +481,11 @@ pub fn delete_by_external(
 }
 
 pub fn delete(conn: &Connection, user_id: i64, id: i64) -> rusqlite::Result<bool> {
-    conn.execute("DELETE FROM calendar_exceptions WHERE entry_id = ?1", [id])?;
+    conn.execute(
+        "DELETE FROM calendar_exceptions WHERE entry_id = ?1
+           AND entry_id IN (SELECT id FROM calendar_entries WHERE user_id = ?2)",
+        (id, user_id),
+    )?;
     let n = conn.execute(
         "DELETE FROM calendar_entries WHERE id = ?1 AND user_id = ?2",
         (id, user_id),
@@ -1125,6 +1129,15 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM calendar_exceptions", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn deleting_another_users_entry_leaves_their_skips() {
+        let conn = env();
+        let e = school(&conn);
+        skip(&conn, 1, e.id, "2026-09-15").unwrap();
+        assert!(!delete(&conn, 2, e.id).unwrap());
+        assert_eq!(get(&conn, 1, e.id).unwrap().unwrap().exceptions, vec!["2026-09-15".to_string()]);
     }
 
     fn at(s: &str) -> jiff::Timestamp {
