@@ -150,6 +150,7 @@ pub struct AppState {
     /// Bounds concurrent password hashes; see `auth::MAX_CONCURRENT_LOGINS`.
     pub login_slots: Arc<tokio::sync::Semaphore>,
     pub talk_gate: Arc<TalkGate>,
+    pub live_turns: Arc<crate::talk::LiveTurns>,
     pub admin_limiter: Arc<crate::auth::LoginLimiter>,
     /// Caps password re-checks on the enrolment routes.
     pub security_limiter: Arc<crate::auth::LoginLimiter>,
@@ -209,6 +210,7 @@ impl AppState {
                 crate::auth::MAX_CONCURRENT_LOGINS,
             )),
             talk_gate: Arc::new(TalkGate::new()),
+            live_turns: Arc::default(),
             admin_limiter: Arc::new(crate::auth::LoginLimiter::new()),
             security_limiter: Arc::new(crate::auth::LoginLimiter::new()),
             admin_secrets: Arc::new(crate::admin::AdminSecrets::default()),

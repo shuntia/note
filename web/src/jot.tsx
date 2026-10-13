@@ -11,7 +11,7 @@ import { api } from './api'
 import { Markdown } from './markdown'
 import { fold, settle, unfold } from './motion-gsap'
 import { doing } from './receipts'
-import { onAgentFrame, type AgentFrame } from './ws'
+import { claims, onAgentFrame, type AgentFrame } from './ws'
 import { t } from './i18n'
 
 const DRAFT_KEY = 'note.captureDraft'
@@ -161,8 +161,7 @@ export function Jot({
     () =>
       onAgentFrame((frame) => {
         const sent = inFlight.current
-        if (!sent) return
-        if (frame.conversation_id !== null && frame.conversation_id !== sent.conversation) return
+        if (!sent || frame.type !== 'agent' || !claims(sent, frame)) return
         setLive((prev) => applyFrame(prev, frame))
       }),
     [],

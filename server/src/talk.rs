@@ -13,8 +13,8 @@ const MAX_TITLE_WORDS: usize = 8;
 const TITLE_EXCHANGE_CHARS: usize = 1500;
 const MAX_REASONING_BYTES: usize = 32 * 1024;
 pub const MAX_MESSAGE: usize = 16 * 1024;
-// History windows stay user-first/assistant-last: each success appends exactly
-// one user and one assistant row, and errors persist nothing.
+// History windows stay user-first/assistant-last: a turn writes its user row as it
+// starts and its assistant row as it ends, and a failed turn takes its rows back.
 pub const HISTORY_LIMIT: usize = 32;
 
 pub fn create(conn: &Connection, user_id: i64, title: &str, now: jiff::Timestamp) -> Result<i64> {
@@ -471,6 +471,66 @@ pub fn generate_title(state: &AppState, user_id: i64, username: &str, conversati
     }
 }
 
+/// Each user's turn in flight: its thread and every agent frame sent so far, so a
+/// client that opens the thread mid-turn can catch up.
+#[derive(Default)]
+pub struct LiveTurns(std::sync::Mutex<std::collections::HashMap<i64, LiveTurn>>);
+
+struct LiveTurn {
+    conversation_id: i64,
+    frames: Vec<String>,
+}
+
+impl LiveTurns {
+    fn begin(&self, user_id: i64, conversation_id: i64) {
+        self.lock().insert(user_id, LiveTurn { conversation_id, frames: Vec::new() });
+    }
+
+    fn record(&self, user_id: i64, frame: &str) {
+        if let Some(turn) = self.lock().get_mut(&user_id) {
+            turn.frames.push(frame.to_string());
+        }
+    }
+
+    fn end(&self, user_id: i64) {
+        self.lock().remove(&user_id);
+    }
+
+    /// `{"conversation_id": …, "frames": [...]}` for the user's turn in flight, or `null`.
+    pub fn snapshot_json(&self, user_id: i64) -> String {
+        match self.lock().get(&user_id) {
+            Some(turn) => format!(
+                r#"{{"conversation_id":{},"frames":[{}]}}"#,
+                turn.conversation_id,
+                turn.frames.join(",")
+            ),
+            None => "null".to_string(),
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, std::collections::HashMap<i64, LiveTurn>> {
+        self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// Ends the live turn when the turn's work is over, however it ended, and tells
+/// the user's clients to read the thread again.
+struct LiveGuard<'a> {
+    state: &'a AppState,
+    user_id: i64,
+    conversation_id: i64,
+}
+
+impl Drop for LiveGuard<'_> {
+    fn drop(&mut self) {
+        self.state.live_turns.end(self.user_id);
+        self.state.hub.send(
+            self.user_id,
+            &serde_json::json!({"type": "talk_done", "conversation_id": self.conversation_id}).to_string(),
+        );
+    }
+}
+
 pub struct Turn {
     pub conversation_id: i64,
     pub reply: String,
@@ -485,15 +545,16 @@ pub enum TurnError {
     NotFound,
     DailyCap,
     Busy(crate::TalkBusy),
-    /// The session did not finish; nothing was persisted.
+    /// The session did not finish; nothing it began stays persisted.
     Unavailable(crate::failure::Failure),
     Internal,
 }
 
 /// One turn of a conversation, wherever the user spoke from: the same session,
 /// the same thread notes, the same rows in the same order. `conversation` is
-/// `None` to open a thread, titled from the message. A session that fails
-/// persists nothing, as on the web.
+/// `None` to open a thread, titled from the message. The thread and the user's
+/// message are written before the session runs, so the turn shows wherever the
+/// thread is opened; a session that fails takes both back.
 pub async fn run_turn(
     state: &AppState,
     user_id: i64,
@@ -559,21 +620,32 @@ pub async fn run_turn(
             caller: Some(&st),
         };
         let now = jiff::Timestamp::now();
-        let past = match conversation {
-            Some(id) => {
-                let conn = st.db();
-                history(&conn, id, HISTORY_LIMIT)?
-            }
-            None => Vec::new(),
+        let (past, conv_id, user_row) = {
+            let conn = st.db();
+            let past = match conversation {
+                Some(id) => history(&conn, id, HISTORY_LIMIT)?,
+                None => Vec::new(),
+            };
+            let conv_id = match conversation {
+                Some(id) => id,
+                None => create(&conn, user_id, &title_from(&said), now)?,
+            };
+            append_text(&conn, conv_id, "user", &said, now)?;
+            let user_row = conn.last_insert_rowid();
+            touch(&conn, conv_id, now)?;
+            (past, conv_id, user_row)
         };
-        // A brand-new conversation has no id yet, so its frames carry null
-        // until the reply hands the client one.
+        st.live_turns.begin(user_id, conv_id);
+        let _live = LiveGuard { state: &st, user_id, conversation_id: conv_id };
+        st.hub.broadcast_changed(user_id);
         let seq = std::cell::Cell::new(0u64);
         let on_event = |ev: AgentEvent| {
             let n = seq.replace(seq.get() + 1);
-            st.hub.send(user_id, &crate::channels::ws::agent_frame(conversation, n, &ev));
+            let frame = crate::channels::ws::agent_frame(Some(conv_id), n, &ev);
+            st.live_turns.record(user_id, &frame);
+            st.hub.send(user_id, &frame);
         };
-        let out = crate::agent::run_session_watched(
+        let out = match crate::agent::run_session_watched(
             &deps,
             user_id,
             &session_user,
@@ -582,18 +654,27 @@ pub async fn run_turn(
             &past,
             &said,
             &on_event,
-        )?;
+        ) {
+            Ok(out) => out,
+            Err(e) => {
+                let conn = st.db();
+                let undone = if conversation.is_some() {
+                    conn.execute("DELETE FROM talk_messages WHERE id = ?1", [user_row])
+                } else {
+                    conn.execute("DELETE FROM conversations WHERE id = ?1", [conv_id])
+                };
+                if let Err(undo) = undone {
+                    let _ = crate::log::record(&conn, Some(user_id), "talk_error", &format!("undoing the turn: {undo:#}"));
+                }
+                return Err(e);
+            }
+        };
         let reply = if out.reply.trim().is_empty() {
             crate::text::empty_reply(crate::text::Lang::for_user(&st.config_dir, &session_user))
         } else {
             out.reply.clone()
         };
         let conn = st.db();
-        let conv_id = match conversation {
-            Some(id) => id,
-            None => create(&conn, user_id, &title_from(&said), now)?,
-        };
-        append_text(&conn, conv_id, "user", &said, now)?;
         for s in &out.steps {
             append_tool(
                 &conn,

@@ -1,3 +1,5 @@
+import type { AgentFrame } from './ws'
+
 // `onboarding` holds from joining by invite until the first-run flow is finished.
 export type Me = { username: string; admin: boolean; onboarding?: boolean; voice?: boolean }
 
@@ -176,6 +178,9 @@ export type TalkMessage = {
   reasoning: string | null
   thought_ms: number | null
 }
+
+// The user's turn in flight and every agent frame it has sent.
+export type LiveTurn = { conversation_id: number; frames: AgentFrame[] }
 
 export type TalkReply = {
   conversation_id: number

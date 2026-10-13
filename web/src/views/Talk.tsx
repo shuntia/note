@@ -23,7 +23,7 @@ import { Pulse } from '../pulse'
 import { batchReceipts, doing, receipt } from '../receipts'
 import { makeHold } from '../held'
 import type { FocusSession } from '../session'
-import { onAgentFrame, type AgentFrame } from '../ws'
+import { claims, onAgentFrame, type AgentFrame } from '../ws'
 import type { Conversation, FailureReason, TalkMessage, TalkStep } from '../types'
 import '../styles/talk.css'
 
@@ -474,6 +474,8 @@ export function Talk({
   // era of the send in flight, so its pending row belongs to the conversation that sent it
   const [pending, setPending] = useState<number | null>(null)
   const [live, setLive] = useState<Live>(EMPTY_LIVE)
+  // the open thread while a turn sent from elsewhere is still being answered
+  const [watch, setWatch] = useState<number | null>(null)
   const [flying, setFlying] = useState(false)
   const [sideOpen, setSideOpen] = useState(false)
   const column = useColumn()
@@ -491,9 +493,13 @@ export function Talk({
   // bumped whenever the open conversation changes, so a late reply never lands in the wrong pane
   const era = useRef(0)
   const listed = useRef(false)
-  const busy = pending === era.current
+  const busy = pending === era.current || (watch !== null && watch === current)
   // the send in flight, for the frames arriving on the shell's socket
   const inFlight = useRef<{ conversation: number | null } | null>(null)
+  const watching = useRef<number | null>(null)
+  // frames for the thread being opened, held until its live turn has been read
+  const early = useRef<AgentFrame[] | null>(null)
+  const doneEarly = useRef(false)
   // set while a sent bubble is on its way, so nothing else moves the pane
   const flight = useRef(false)
 
@@ -507,20 +513,52 @@ export function Talk({
     }
   }, [])
 
-  const loadMessages = useCallback(async (id: number) => {
-    wanted.current = id
-    setMsgState('loading')
-    try {
-      const rows = await api.conversationMessages(id)
-      if (wanted.current !== id) return
-      jump.current = true
-      setItems(rows.map(fromMessage))
-      setMsgState('ready')
-    } catch {
-      if (wanted.current !== id) return
-      setMsgState('error')
-    }
+  const unwatch = useCallback(() => {
+    watching.current = null
+    early.current = null
+    setWatch(null)
   }, [])
+
+  // `quiet` reloads in place, without the loading line; a turn still in flight there is picked up live.
+  const loadMessages = useCallback(
+    async (id: number, quiet = false) => {
+      wanted.current = id
+      if (!quiet) setMsgState('loading')
+      const owned = inFlight.current !== null
+      if (!owned) {
+        watching.current = id
+        early.current = []
+        doneEarly.current = false
+      }
+      try {
+        const [rows, turn] = await Promise.all([
+          api.conversationMessages(id),
+          owned ? null : api.talkLive().catch(() => null),
+        ])
+        if (wanted.current !== id) return
+        jump.current = !quiet
+        setItems(rows.map(fromMessage))
+        setMsgState('ready')
+        if (owned) return
+        const held = early.current ?? []
+        const done = doneEarly.current
+        early.current = null
+        if (turn?.conversation_id === id && !done) {
+          const frames = [...turn.frames, ...held].sort((a, b) => a.seq - b.seq)
+          setLive(frames.reduce(applyFrame, EMPTY_LIVE))
+          setWatch(id)
+        } else {
+          unwatch()
+          if (done) void loadMessages(id, true)
+        }
+      } catch {
+        if (wanted.current !== id) return
+        unwatch()
+        setMsgState('error')
+      }
+    },
+    [unwatch],
+  )
 
   useEffect(() => {
     void loadList(listed.current)
@@ -532,11 +570,25 @@ export function Talk({
     () =>
       onAgentFrame((frame) => {
         const sent = inFlight.current
-        if (!sent) return
-        if (frame.conversation_id !== null && frame.conversation_id !== sent.conversation) return
-        setLive((prev) => applyFrame(prev, frame))
+        if (sent) {
+          if (frame.type === 'agent' && claims(sent, frame)) setLive((prev) => applyFrame(prev, frame))
+          return
+        }
+        const id = watching.current
+        if (id === null || frame.conversation_id !== id) return
+        if (early.current) {
+          if (frame.type === 'agent') early.current.push(frame)
+          else doneEarly.current = true
+          return
+        }
+        if (frame.type === 'agent') {
+          setLive((prev) => applyFrame(prev, frame))
+          return
+        }
+        unwatch()
+        void loadMessages(id, true)
       }),
-    [],
+    [loadMessages, unwatch],
   )
 
   // A receipt on the status line expires on the clock alone, with no frame to redraw it.
@@ -621,6 +673,8 @@ export function Talk({
     if (id === current) return
     stick.current = true
     era.current++
+    inFlight.current = null
+    unwatch()
     setItems([])
     setCurrent(id)
     void loadMessages(id)
@@ -644,6 +698,8 @@ export function Talk({
     setSideNotice(null)
     stick.current = true
     era.current++
+    inFlight.current = null
+    unwatch()
     wanted.current = null
     setCurrent(null)
     setItems([])
@@ -666,7 +722,8 @@ export function Talk({
     const mine: Item = { kind: 'user', key: nextKey(), text }
     const sentIn = era.current
     stick.current = true
-    inFlight.current = { conversation: current }
+    const sent = { conversation: current }
+    inFlight.current = sent
 
     const el = input.current
     const paneEl = pane.current
@@ -753,7 +810,7 @@ export function Talk({
       setDraft(text)
       input.current?.focus()
     } finally {
-      inFlight.current = null
+      if (inFlight.current === sent) inFlight.current = null
       setPending((p) => (p === sentIn ? null : p))
     }
   }
@@ -800,6 +857,8 @@ export function Talk({
     const wasOpen = current === c.id
     if (wasOpen) {
       era.current++
+      inFlight.current = null
+      unwatch()
       wanted.current = null
       setCurrent(null)
       setItems([])

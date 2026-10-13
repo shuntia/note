@@ -13,6 +13,7 @@ import type {
   DayView,
   FailureReason,
   FlattenResult,
+  LiveTurn,
   Goal,
   GoalState,
   InboxItem,
@@ -273,6 +274,7 @@ export const api = {
   deleteConversation: (id: number) =>
     request<void>(`/api/conversations/${id}`, { method: 'DELETE' }),
   conversationMessages: (id: number) => request<TalkMessage[]>(`/api/conversations/${id}/messages`),
+  talkLive: () => request<LiveTurn | null>('/api/talk/live'),
   talk: (message: string, conversationId?: number) =>
     request<TalkReply>('/api/talk', {
       method: 'POST',

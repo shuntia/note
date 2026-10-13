@@ -19,23 +19,31 @@ export type AgentEvent =
   | { kind: 'reply'; text: string }
   | { kind: 'error'; reason: FailureReason }
 
-// `seq` counts from zero within one session; `conversation_id` is null until a
-// brand-new conversation's reply hands the client its id.
+// `seq` counts from zero within one session.
 export type AgentFrame = {
   type: 'agent'
-  conversation_id: number | null
+  conversation_id: number
   seq: number
   event: AgentEvent
 }
 
-const agentListeners = new Set<(frame: AgentFrame) => void>()
+// A turn's work is over and its thread holds the outcome.
+export type TalkDoneFrame = { type: 'talk_done'; conversation_id: number }
+
+const agentListeners = new Set<(frame: AgentFrame | TalkDoneFrame) => void>()
 
 // Subscribes to the live agent frames of the one socket the shell already holds.
-export function onAgentFrame(fn: (frame: AgentFrame) => void): () => void {
+export function onAgentFrame(fn: (frame: AgentFrame | TalkDoneFrame) => void): () => void {
   agentListeners.add(fn)
   return () => {
     agentListeners.delete(fn)
   }
+}
+
+// Whether `frame` belongs to the send in flight; a send that opened a thread takes the first id it sees.
+export function claims(sent: { conversation: number | null }, frame: AgentFrame | TalkDoneFrame): boolean {
+  sent.conversation ??= frame.conversation_id
+  return frame.conversation_id === sent.conversation
 }
 
 export type CallFrame =
@@ -104,7 +112,7 @@ export function connectEvents(
         const kind = (frame as { type?: unknown }).type
         if (kind === 'event') onEvent(frame as EventFrame)
         if (kind === 'changed') onChanged()
-        if (kind === 'agent') for (const fn of agentListeners) fn(frame as AgentFrame)
+        if (kind === 'agent' || kind === 'talk_done') for (const fn of agentListeners) fn(frame as AgentFrame)
         if (kind === 'incoming' || kind === 'ring_taken') for (const fn of callListeners) fn(frame as CallFrame)
       } catch {
         // non-JSON frame; ignore

@@ -41,6 +41,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/shares/{id}/threads", get(shares_threads))
         .route("/api/shares/{id}/visits", get(shares_visits))
         .route("/api/talk", post(talk))
+        .route("/api/talk/live", get(talk_live))
         .route("/api/conversations", get(conversations_list))
         .route(
             "/api/conversations/{id}",
@@ -1332,6 +1333,13 @@ async fn talk(
         Err(E::Unavailable(failure)) => failed_turn(lang, user.admin, &failure),
         Err(E::Internal) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
+}
+
+async fn talk_live(user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
+    (
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        state.live_turns.snapshot_json(user.id),
+    )
 }
 
 /// A turn the assistant could not finish: why, in the reader's language, and
