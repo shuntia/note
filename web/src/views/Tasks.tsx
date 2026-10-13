@@ -1,5 +1,7 @@
 import {
+  memo,
   useCallback,
+  useDeferredValue,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -16,7 +18,9 @@ import type { ViewProps } from '../app'
 import { collapse, flip, settle } from '../motion-gsap'
 import { reducedMotion } from '../motion'
 import { Overflow, useMenuSheet, type OverflowItem } from '../overflow'
+import { useStableCallback, useStableMethods } from '../stable'
 import { Tick } from '../tick'
+import { urgencyRank } from '../urgent'
 import '../styles/tasks.css'
 import type { Goal, NewStep, Task, TaskNode, TaskNotify, TaskState, TaskUpdate, TaskUrgency } from '../types'
 import { t, type Key } from '../i18n'
@@ -381,9 +385,11 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
   const unfinished = useRef(new Map<number, number>())
   const root = useRef<HTMLDivElement>(null)
   const { mark } = useRowMotion(root, leaving.length > 0)
+  // The list follows the box a beat behind, so typing never waits on the rows.
+  const query = useDeferredValue(title)
   const shown = useMemo(
-    () => (nodes ? shownGroups(nodes, filter, title, sort, runOrder) : null),
-    [nodes, filter, title, sort, runOrder],
+    () => (nodes ? shownGroups(nodes, filter, query, sort, runOrder) : null),
+    [nodes, filter, query, sort, runOrder],
   )
 
   const loadGoals = useCallback(() => {
@@ -759,6 +765,60 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
     })
   }
 
+  const actions = useStableMethods<RowActions>({
+    setCategory,
+    setUrgency,
+    setGoal,
+    setProgress,
+    complete,
+    reopen,
+    reopenStep,
+    moveToNow: (node) =>
+      nodes && groups(nodes).now.length >= NOW_CAP ? notify(t('tasks.nowFull')) : setNow(node, true),
+    moveToLater: (node) => setNow(node, false),
+    drop,
+    mergeSteps,
+    startFocus,
+    announce,
+    toggleSteps,
+  })
+  const onToggleGoal = useStableCallback(toggleGoal)
+  const onEditGoal = useStableCallback(editGoal)
+  const onCloseGoal = useStableCallback(closeGoal)
+  const categories = useMemo(() => (nodes ? categoriesOf(nodes) : []), [nodes])
+
+  // A goal's rows are drawn here so an unchanged goal keeps the very same children.
+  const goalRows = useMemo(() => {
+    const rows = new Map<number, ReactNode>()
+    if (!nodes) return rows
+    const visible = shownBy(filter, searchWords(query))
+    for (const goal of goals)
+      rows.set(
+        goal.id,
+        nodes
+          .filter(
+            (n) =>
+              n.goal_id === goal.id && visible(n) && (isLive(n) || leaving.some((l) => l.id === n.id)),
+          )
+          .sort(bySchedule)
+          .map((n) => (
+            <Row
+              key={n.id}
+              node={n}
+              group="soon"
+              scope="g"
+              actions={actions}
+              leaving={leaving.find((l) => l.id === n.id)?.state ?? null}
+              onGone={gone}
+              stepsOpen={openSteps.has(n.id)}
+              categories={categories}
+              goals={goals}
+            />
+          )),
+      )
+    return rows
+  }, [nodes, goals, filter, query, leaving, openSteps, categories, actions, gone])
+
   if (failed)
     return (
       <div className="tasks">
@@ -773,26 +833,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
   if (nodes === null) return null
 
   const g = groups(nodes)
-  const actions: RowActions = {
-    setCategory,
-    setUrgency,
-    setGoal,
-    setProgress,
-    complete,
-    reopen,
-    reopenStep,
-    moveToNow: (node) => (g.now.length >= NOW_CAP ? notify(t('tasks.nowFull')) : setNow(node, true)),
-    moveToLater: (node) => setNow(node, false),
-    drop,
-    mergeSteps,
-    startFocus,
-    announce,
-    toggleSteps,
-  }
-
-  const search = title.trim().toLowerCase()
-  const categories = categoriesOf(nodes)
-  const visible = shownBy(filter, searchWords(title))
+  const search = query.trim().toLowerCase()
 
   const soon = placed(shown?.soon ?? [], nodes, leaving, 'soon')
   const later = placed(shown?.later ?? [], nodes, leaving, 'later')
@@ -936,7 +977,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
           ))}
         </div>
       )}
-      {nothingFound && <p className="task-empty task-hint">{t('tasks.addHint', { title: title.trim() })}</p>}
+      {nothingFound && <p className="task-empty task-hint">{t('tasks.addHint', { title: query.trim() })}</p>}
       {goals.length > 0 && (
         <section className="task-group goals">
           <h3 className="task-group-head">{t('goals.head')}</h3>
@@ -946,25 +987,11 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
                 key={goal.id}
                 goal={goal}
                 open={openGoals.has(goal.id)}
-                onToggle={() => toggleGoal(goal.id)}
-                onEdit={(patch) => editGoal(goal, patch)}
-                onClose={(state) => closeGoal(goal, state)}
+                onToggle={onToggleGoal}
+                onEdit={onEditGoal}
+                onClose={onCloseGoal}
               >
-                {nodes
-                  .filter(
-                    (n) =>
-                      n.goal_id === goal.id &&
-                      visible(n) &&
-                      (isLive(n) || leaving.some((l) => l.id === n.id)),
-                  )
-                  .sort(bySchedule)
-                  .map((n) =>
-                    row(
-                      { node: n, leaving: leaving.find((l) => l.id === n.id)?.state ?? null },
-                      'soon',
-                      'g',
-                    ),
-                  )}
+                {goalRows.get(goal.id)}
               </GoalRow>
             ))}
           </div>
@@ -1061,22 +1088,6 @@ function Due({ task }: { task: Task }) {
   const now = new Date()
   if (due.getTime() < now.getTime()) return <span className="meta warn">{t('due.overdue')}</span>
   return <span className={urgent ? 'meta sun' : 'meta'}>{dueLabel(due, now)}</span>
-}
-
-const URGENCY_RANK: Record<TaskUrgency, number> = { high: 0, normal: 2, low: 3 }
-
-// 0 high, 1 pressing, 2 normal, 3 low: the order Later reads by default.
-export function urgencyRank(task: Pick<Task, 'urgency' | 'pressing'>): number {
-  if (task.urgency === 'high') return 0
-  if (task.pressing) return 1
-  return URGENCY_RANK[task.urgency]
-}
-
-// The word sits in sun-ink after the title; overdue keeps rose through `Due`.
-export function Urgent({ task }: { task: Pick<Task, 'urgency' | 'pressing' | 'due_at'> }) {
-  const overdue = task.due_at !== null && new Date(task.due_at).getTime() < Date.now()
-  if (task.urgency !== 'high' && !(task.pressing && !overdue)) return null
-  return <span className="meta sun">{t('tasks.urgent')}</span>
 }
 
 // A date input speaks in calendar days; a deadline is the end of one.
@@ -1236,7 +1247,7 @@ function Progress({
 
 type GoalEdit = 'title' | 'due' | null
 
-function GoalRow({
+const GoalRow = memo(function GoalRow({
   goal,
   open,
   onToggle,
@@ -1246,9 +1257,9 @@ function GoalRow({
 }: {
   goal: Goal
   open: boolean
-  onToggle: () => void
-  onEdit: (patch: { title?: string; due_at?: string | null }) => void
-  onClose: (state: 'done' | 'dropped') => void
+  onToggle: (id: number) => void
+  onEdit: (goal: Goal, patch: { title?: string; due_at?: string | null }) => void
+  onClose: (goal: Goal, state: 'done' | 'dropped') => void
   children: ReactNode
 }) {
   const [editing, setEditing] = useState<GoalEdit>(null)
@@ -1263,9 +1274,9 @@ function GoalRow({
     e.preventDefault()
     if (editing === 'title') {
       const text = draft.trim()
-      if (text !== '' && text !== goal.title) onEdit({ title: text })
+      if (text !== '' && text !== goal.title) onEdit(goal, { title: text })
     } else if (editing === 'due') {
-      onEdit({ due_at: draft === '' ? null : endOfDay(draft) })
+      onEdit(goal, { due_at: draft === '' ? null : endOfDay(draft) })
     }
     setEditing(null)
   }
@@ -1273,8 +1284,8 @@ function GoalRow({
   const items: OverflowItem[] = [
     { label: t('goals.rename'), run: () => start('title') },
     { label: t('goals.setDue'), run: () => start('due') },
-    { label: t('goals.markDone'), run: () => onClose('done') },
-    { label: t('menu.drop'), kind: 'danger', run: () => onClose('dropped') },
+    { label: t('goals.markDone'), run: () => onClose(goal, 'done') },
+    { label: t('menu.drop'), kind: 'danger', run: () => onClose(goal, 'dropped') },
   ]
 
   return (
@@ -1284,7 +1295,7 @@ function GoalRow({
           className="goal-chev"
           aria-expanded={open}
           aria-label={t('goals.tasksOf', { title: goal.title })}
-          onClick={onToggle}
+          onClick={() => onToggle(goal.id)}
         >
           <svg viewBox="0 0 24 24" aria-hidden="true">
             <path d="M9 6l6 6-6 6" />
@@ -1346,14 +1357,14 @@ function GoalRow({
       {open && <div className="goal-tasks">{children}</div>}
     </div>
   )
-}
+})
 
 // Finishing a row plays out in the stylesheet — the bar fills, the row greys,
 // the bar fades — and the row folds away once that has been seen.
 const FINISH_HOLD_S = 1.15
 const REVIVE_MS = 420
 
-function Row({
+const Row = memo(function Row({
   node,
   group,
   scope = '',
@@ -1590,4 +1601,4 @@ function Row({
       )}
     </div>
   )
-}
+})

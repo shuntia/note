@@ -2,6 +2,7 @@ import { gsap } from 'gsap'
 import { ScrollTrigger } from 'gsap/ScrollTrigger'
 import {
   Fragment,
+  memo,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -16,7 +17,7 @@ import { api, ApiError } from '../api'
 import { hintShown, hintUsed, railX, sessionFor, slotAfter, withoutCategory, workTime } from '../circle'
 import { latest } from '../coalesce'
 import type { ToastAction } from '../app'
-import { DayLine, minutesOf } from '../dayline'
+import { DayLine as DayLineView, minutesOf } from '../dayline'
 import { eventFacts, nextUp } from '../events'
 import * as fx from '../fx'
 import { arcPath, Circle, Gauge, STROKE, VB, type ArcLine } from '../gauge'
@@ -40,13 +41,18 @@ import {
   quickStop,
   type FocusSession,
 } from '../session'
+import { useSameArray, useStableCallback } from '../stable'
 import { Tick } from '../tick'
 import type { DayView, PlanEvent, QueueEntry, QueueReason, SessionPhase, SessionStart, Task, TaskNode, TaskNotify } from '../types'
+import { Urgent } from '../urgent'
 import { capped } from '../wave'
-import { CalendarSection } from './Calendar'
-import { Urgent } from './Tasks'
+import { CalendarSection as CalendarView } from './Calendar'
 import '../styles/home-motion.css'
 import { t, type Key } from '../i18n'
+
+// Home redraws every second for its clock; these redraw only when what they show changes.
+const DayLine = memo(DayLineView)
+const CalendarSection = memo(CalendarView)
 
 const LATER_MINUTES = [5, 10, 15, 30, 60]
 const laterLabel = (m: number) => (m < 60 ? t('time.minutes', { n: m }) : t('time.hours', { n: m / 60 }))
@@ -331,12 +337,14 @@ export function Home({
 
   // A trigger is Note's own moment to look again, never the user's, so it stays off
   // the day entirely. The beat is a dependency because the holds live outside React state.
-  const visible = useMemo(
-    () =>
-      (events ?? []).filter(
-        (ev) => ev.kind !== 'trigger' && ev.id !== dropHold.held() && ev.id !== doneHold.held()?.event_id,
-      ),
-    [events, beat],
+  const visible = useSameArray(
+    useMemo(
+      () =>
+        (events ?? []).filter(
+          (ev) => ev.kind !== 'trigger' && ev.id !== dropHold.held() && ev.id !== doneHold.held()?.event_id,
+        ),
+      [events, beat],
+    ),
   )
   const now = nowMinutes()
   const next = nextUp(visible, now)
@@ -1155,6 +1163,11 @@ export function Home({
     ]
   }
 
+  // Takes a new identity only when what the menus offer changes, so the calendar
+  // redraws then and not on the clock.
+  const latestBlockItems = useStableCallback(blockMenuItems)
+  const blockItems = useCallback((ev: PlanEvent) => latestBlockItems(ev), [latestBlockItems, pending])
+
   // ── the two faces ────────────────────────────────────────────
   const startHint = !settling && hintShown('start')
 
@@ -1722,7 +1735,7 @@ export function Home({
             refresh={refresh}
             onChanged={onChanged}
             day={day}
-            blockItems={blockMenuItems}
+            blockItems={blockItems}
           />
         </section>
       </section>
