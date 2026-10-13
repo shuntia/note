@@ -51,9 +51,12 @@ impl Lang {
     /// For text sent with no request in hand: auto follows the language of the
     /// user's browser when it last called.
     pub fn for_user(config_dir: &Path, username: &str) -> Self {
-        crate::config::UserConfig::load(config_dir, username)
-            .ok()
-            .and_then(|c| Lang::from_setting(c.language()))
+        Lang::from_config(crate::config::UserConfig::load(config_dir, username).ok().as_ref(), config_dir, username)
+    }
+
+    /// `for_user` with the user's config already loaded.
+    pub fn from_config(cfg: Option<&crate::config::UserConfig>, config_dir: &Path, username: &str) -> Self {
+        cfg.and_then(|c| Lang::from_setting(c.language()))
             .or_else(|| seen(config_dir, username))
             .unwrap_or_default()
     }

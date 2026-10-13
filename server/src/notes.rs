@@ -167,9 +167,24 @@ pub fn active(conn: &Connection, data_dir: &Path, user: &str, now: jiff::Timesta
 
 /// Notes whose window opens within the next twelve hours, soonest first.
 pub fn upcoming(conn: &Connection, data_dir: &Path, user: &str, now: jiff::Timestamp) -> Result<Vec<Note>> {
-    let mut notes: Vec<Note> = all(conn, data_dir, user)?.into_iter().filter(|n| n.is_upcoming(now)).collect();
+    Ok(upcoming_of(all(conn, data_dir, user)?, now))
+}
+
+/// `active` and `upcoming` from one read of the notes.
+pub fn active_and_upcoming(
+    conn: &Connection,
+    data_dir: &Path,
+    user: &str,
+    now: jiff::Timestamp,
+) -> Result<(Vec<Note>, Vec<Note>)> {
+    let (active, rest): (Vec<Note>, Vec<Note>) = all(conn, data_dir, user)?.into_iter().partition(|n| n.is_active(now));
+    Ok((active, upcoming_of(rest, now)))
+}
+
+fn upcoming_of(notes: Vec<Note>, now: jiff::Timestamp) -> Vec<Note> {
+    let mut notes: Vec<Note> = notes.into_iter().filter(|n| n.is_upcoming(now)).collect();
     notes.sort_by_key(|n| instant(n.from.as_deref()));
-    Ok(notes)
+    notes
 }
 
 pub fn due_to_settle(conn: &Connection, data_dir: &Path, user: &str, now: jiff::Timestamp) -> Result<Vec<Note>> {

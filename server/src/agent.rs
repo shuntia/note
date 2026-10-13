@@ -26,10 +26,15 @@ use crate::model_text::{self as mt, REPLY_IN_JAPANESE, SPEAK_JAPANESE, VISITOR_J
 use crate::text::Lang;
 
 /// Whom a session writes for: the visitor on a share link, the user otherwise.
-fn session_lang(deps: &SessionDeps, username: &str, kind: SessionKind) -> Lang {
+fn session_lang(
+    deps: &SessionDeps,
+    username: &str,
+    kind: SessionKind,
+    ucfg: Option<&crate::config::UserConfig>,
+) -> Lang {
     match kind {
         SessionKind::Share => deps.share.as_ref().map_or_else(Lang::default, |s| s.visitor_lang),
-        _ => Lang::for_user(deps.config_dir, username),
+        _ => Lang::from_config(ucfg, deps.config_dir, username),
     }
 }
 
@@ -42,11 +47,81 @@ pub(crate) fn with_language_line(mut system: String, config_dir: &Path, username
     system
 }
 
+/// What a session sees of its user after its own instructions.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Context {
+    /// Nothing: an import, inbox or summary session runs on its instructions
+    /// alone and makes a single call.
+    None,
+    /// The slice of the owner's day the visitor's link lets them see.
+    Share,
+    /// The standing document and today's dynamic block.
+    Assembled,
+}
 
-/// The sessions that run on their own instructions alone, with none of the
-/// user's standing context and a single call to make.
-fn single_call(kind: SessionKind) -> bool {
-    matches!(kind, SessionKind::Import | SessionKind::Inbox | SessionKind::Summarize)
+/// Everything about a session that follows from its kind alone.
+#[derive(Clone, Copy, Debug)]
+struct SessionProfile {
+    /// The shipped prompt it opens with; a call wraps its own around it.
+    prompt: &'static str,
+    /// A second shipped prompt, appended after the first.
+    then: Option<&'static str>,
+    /// Whether what the user wrote about themselves follows the prompts.
+    about: bool,
+    /// The line that asks a Japanese reader's session for Japanese; a call
+    /// carries its own in its opening.
+    japanese: Option<&'static str>,
+    context: Context,
+    max_turns: usize,
+    /// Whether a session that runs out of turns without a word says so.
+    max_turns_reply: bool,
+    /// Whether no caller is waiting on it.
+    background: bool,
+    /// A share session logs under its own kinds, so it never counts against
+    /// the owner's session budget or shows in their activity.
+    log_session: &'static str,
+    log_max_turns: &'static str,
+}
+
+const fn profile(kind: SessionKind) -> SessionProfile {
+    let base = SessionProfile {
+        prompt: "persona",
+        then: None,
+        about: true,
+        japanese: Some(REPLY_IN_JAPANESE),
+        context: Context::Assembled,
+        max_turns: MAX_TURNS,
+        max_turns_reply: false,
+        background: true,
+        log_session: "agent_session",
+        log_max_turns: "agent_max_turns",
+    };
+    let single_call =
+        SessionProfile { about: false, context: Context::None, max_turns: IMPORT_MAX_TURNS, ..base };
+    match kind {
+        SessionKind::Import => SessionProfile { prompt: "import", background: false, ..single_call },
+        SessionKind::Inbox => SessionProfile { prompt: "inbox", background: false, ..single_call },
+        SessionKind::Summarize => SessionProfile { prompt: "summarize", ..single_call },
+        SessionKind::Harvest => SessionProfile { prompt: "harvest", max_turns: HARVEST_MAX_TURNS, ..base },
+        SessionKind::Review => SessionProfile { prompt: "review", max_turns: REVIEW_MAX_TURNS, ..base },
+        SessionKind::Share => SessionProfile {
+            prompt: "share",
+            about: false,
+            japanese: Some(VISITOR_JAPANESE),
+            context: Context::Share,
+            max_turns: tools::SHARE_MAX_TURNS,
+            max_turns_reply: true,
+            background: false,
+            log_session: "share_session",
+            log_max_turns: "share_max_turns",
+            ..base
+        },
+        SessionKind::Call => SessionProfile { prompt: "voice", japanese: None, ..base },
+        SessionKind::Nightly => SessionProfile { then: Some("planning"), ..base },
+        SessionKind::Trigger => SessionProfile { then: Some("trigger"), max_turns: TRIGGER_MAX_TURNS, ..base },
+        SessionKind::Talk => SessionProfile { max_turns_reply: true, background: false, ..base },
+        SessionKind::Checkin => SessionProfile { max_turns_reply: true, ..base },
+    }
 }
 
 pub struct SessionDeps<'a> {
@@ -168,6 +243,14 @@ pub fn run_session_watched(
     result
 }
 
+/// The user's config, read once for the whole session, and the language the
+/// session writes in.
+fn reader(deps: &SessionDeps, username: &str, kind: SessionKind) -> (Result<crate::config::UserConfig>, Lang) {
+    let ucfg = crate::config::UserConfig::load(deps.config_dir, username);
+    let lang = session_lang(deps, username, kind, ucfg.as_ref().ok());
+    (ucfg, lang)
+}
+
 /// The system prompt a session of `kind` runs on: its own instructions, then
 /// the context its kind is allowed to see.
 pub fn system_prompt(
@@ -177,7 +260,8 @@ pub fn system_prompt(
     kind: SessionKind,
     now: jiff::Timestamp,
 ) -> Result<String> {
-    system_prompt_in(deps, user_id, username, kind, now, session_lang(deps, username, kind))
+    let (ucfg, lang) = reader(deps, username, kind);
+    build_system_prompt(deps, user_id, username, kind, now, lang, ucfg)
 }
 
 /// `system_prompt` in `lang`, whatever the reader's setting.
@@ -189,67 +273,80 @@ pub(crate) fn system_prompt_in(
     now: jiff::Timestamp,
     lang: Lang,
 ) -> Result<String> {
-    // An import session briefs one task and an inbox session judges one item,
-    // both on a caller's behalf: each gets its own instructions and none of the
-    // user's standing context.
+    let ucfg = crate::config::UserConfig::load(deps.config_dir, username);
+    build_system_prompt(deps, user_id, username, kind, now, lang, ucfg)
+}
+
+fn display_name(ucfg: &Result<crate::config::UserConfig>, username: &str) -> String {
+    ucfg.as_ref().map_or_else(|_| username.to_string(), |c| c.display_name.clone())
+}
+
+/// The user's files are read before the DB lock is taken, and the lock is held
+/// only while the context is rendered from the DB.
+fn build_system_prompt(
+    deps: &SessionDeps,
+    user_id: i64,
+    username: &str,
+    kind: SessionKind,
+    now: jiff::Timestamp,
+    lang: Lang,
+    ucfg: Result<crate::config::UserConfig>,
+) -> Result<String> {
+    let p = profile(kind);
     let load = |name| crate::prompts::load_in(deps.config_dir, name, lang);
-    let mut system = match kind {
-        SessionKind::Import => load("import")?,
-        SessionKind::Inbox => load("inbox")?,
-        SessionKind::Summarize => load("summarize")?,
-        SessionKind::Harvest => load("harvest")?,
-        SessionKind::Review => load("review")?,
-        SessionKind::Share => load("share")?,
-        SessionKind::Call => {
-            let display = crate::config::UserConfig::load(deps.config_dir, username).map_or_else(|_| username.to_string(), |c| c.display_name);
-            let voice = load("voice")?.replace("{name}", &display);
-            let briefly = mt::call_briefly(lang);
-            match lang {
-                Lang::Ja => format!("{briefly}\n{SPEAK_JAPANESE}\n\n{voice}"),
-                Lang::En => format!("{briefly}\n\n{voice}"),
-            }
-        }
-        _ => load("persona")?,
-    };
-    if kind == SessionKind::Nightly {
-        system.push_str("\n\n");
-        system.push_str(&load("planning")?);
+    let mut system = load(p.prompt)?;
+    if kind == SessionKind::Call {
+        let voice = system.replace("{name}", &display_name(&ucfg, username));
+        let briefly = mt::call_briefly(lang);
+        system = match lang {
+            Lang::Ja => format!("{briefly}\n{SPEAK_JAPANESE}\n\n{voice}"),
+            Lang::En => format!("{briefly}\n\n{voice}"),
+        };
     }
-    if kind == SessionKind::Trigger {
+    if let Some(then) = p.then {
         system.push_str("\n\n");
-        system.push_str(&load("trigger")?);
+        system.push_str(&load(then)?);
     }
-    if !matches!(kind, SessionKind::Import | SessionKind::Inbox | SessionKind::Summarize | SessionKind::Share) {
+    if p.about {
         if let Some(about) = crate::prompts::about(deps.config_dir, username) {
             let _ = write!(system, "\n\n{}\n\n{about}", mt::about_user(lang));
         }
     }
-    if lang == Lang::Ja && kind != SessionKind::Call {
+    if let (Lang::Ja, Some(line)) = (lang, p.japanese) {
         system.push_str("\n\n");
-        system.push_str(if kind == SessionKind::Share { VISITOR_JAPANESE } else { REPLY_IN_JAPANESE });
+        system.push_str(line);
     }
-    if kind == SessionKind::Share {
-        let share = deps.share.as_ref().ok_or_else(|| anyhow::anyhow!("a share session needs its link"))?;
-        let conn = crate::db_guard(deps.db);
-        let display = crate::config::UserConfig::load(deps.config_dir, username).map_or_else(|_| username.to_string(), |c| c.display_name);
-        system = system.replace("{owner}", &display);
-        if !share.brief.trim().is_empty() {
-            let _ = write!(system, "\n\n{}\n\n{}", mt::share_from(lang, &display), share.brief.trim());
-        }
-        let rendered = crate::shares::render(&conn, deps.config_dir, user_id, username, &share.scope, lang, now)?;
-        system.push_str("\n\n");
-        system.push_str(&rendered.text);
-        if share.scope.notes {
-            let _ = write!(system, "\n\n{}", mt::share_note_line(lang, &display));
-        }
-    } else if !single_call(kind) {
-        let conn = crate::db_guard(deps.db);
-        let context = crate::context::assemble(&conn, deps.config_dir, deps.data_dir, user_id, username, now)?;
-        system.push_str("\n\n");
-        system.push_str(&context);
-        if let Some(note) = &deps.thread_note {
+    match p.context {
+        Context::None => {}
+        Context::Share => {
+            let share = deps.share.as_ref().ok_or_else(|| anyhow::anyhow!("a share session needs its link"))?;
+            let display = display_name(&ucfg, username);
+            system = system.replace("{owner}", &display);
+            if !share.brief.trim().is_empty() {
+                let _ = write!(system, "\n\n{}\n\n{}", mt::share_from(lang, &display), share.brief.trim());
+            }
+            let rendered = {
+                let conn = crate::db_guard(deps.db);
+                crate::shares::render(&conn, deps.config_dir, user_id, username, &share.scope, lang, now)?
+            };
             system.push_str("\n\n");
-            system.push_str(note);
+            system.push_str(&rendered.text);
+            if share.scope.notes {
+                let _ = write!(system, "\n\n{}", mt::share_note_line(lang, &display));
+            }
+        }
+        Context::Assembled => {
+            let sources = crate::context::Sources::load(deps.config_dir, username, ucfg?);
+            let context = {
+                let conn = crate::db_guard(deps.db);
+                crate::context::assemble_from(&conn, &sources, deps.data_dir, user_id, username, now)?
+            };
+            system.push_str("\n\n");
+            system.push_str(&context);
+            if let Some(note) = &deps.thread_note {
+                system.push_str("\n\n");
+                system.push_str(note);
+            }
         }
     }
     Ok(system)
@@ -267,7 +364,9 @@ fn run_traced(
     on_event: &dyn Fn(AgentEvent),
     trace: &mut crate::trace::Builder,
 ) -> Result<SessionOutcome> {
-    let system = system_prompt(deps, user_id, username, kind, now)?;
+    let (ucfg, lang) = reader(deps, username, kind);
+    let system = build_system_prompt(deps, user_id, username, kind, now, lang, ucfg)?;
+    let profile = profile(kind);
     let mut schemas = match (kind, &deps.share) {
         (SessionKind::Share, Some(s)) => tools::share_schemas(&s.scope),
         _ => tools::schemas(kind),
@@ -281,15 +380,8 @@ fn run_traced(
     let mut tool_calls = 0;
     let mut steps = Vec::new();
     let mut last_text = String::new();
-    let max_turns = match kind {
-        _ if single_call(kind) => IMPORT_MAX_TURNS,
-        SessionKind::Harvest => HARVEST_MAX_TURNS,
-        SessionKind::Review => REVIEW_MAX_TURNS,
-        SessionKind::Trigger => TRIGGER_MAX_TURNS,
-        SessionKind::Share => tools::SHARE_MAX_TURNS,
-        _ => MAX_TURNS,
-    };
-    let background = is_background(kind);
+    let max_turns = profile.max_turns;
+    let background = profile.background;
     let env = CallEnv { deps, user_id, username, kind, calls: Default::default() };
     let started = std::time::Instant::now();
 
@@ -319,7 +411,7 @@ fn run_traced(
         if resp.tool_calls.is_empty() {
             on_event(AgentEvent::Reply { text: &last_text });
             trace.ok(&last_text);
-            finish(deps, user_id, kind, turns, tool_calls, log_kind(kind, "agent_session"))?;
+            finish(deps, user_id, kind, turns, tool_calls, profile.log_session)?;
             let thought_ms = started.elapsed().as_millis() as u64;
             return Ok(SessionOutcome {
                 reply: last_text,
@@ -352,7 +444,7 @@ fn run_traced(
             if !is_error && tools::ends(kind, &call.name, &content) {
                 on_event(AgentEvent::Reply { text: &content });
                 trace.ok(&content);
-                finish(deps, user_id, kind, turns, tool_calls, log_kind(kind, "agent_session"))?;
+                finish(deps, user_id, kind, turns, tool_calls, profile.log_session)?;
                 let thought_ms = started.elapsed().as_millis() as u64;
                 return Ok(SessionOutcome {
                     reply: content,
@@ -366,14 +458,12 @@ fn run_traced(
             messages.push(Message::ToolResult { call_id: call.id, content, is_error });
         }
     }
-    if last_text.trim().is_empty()
-        && matches!(kind, SessionKind::Talk | SessionKind::Checkin | SessionKind::Share)
-    {
-        last_text = crate::text::max_turns_reply(session_lang(deps, username, kind));
+    if last_text.trim().is_empty() && profile.max_turns_reply {
+        last_text = crate::text::max_turns_reply(lang);
     }
     on_event(AgentEvent::Reply { text: &last_text });
     trace.max_turns(&last_text);
-    finish(deps, user_id, kind, turns, tool_calls, log_kind(kind, "agent_max_turns"))?;
+    finish(deps, user_id, kind, turns, tool_calls, profile.log_max_turns)?;
     let thought_ms = started.elapsed().as_millis() as u64;
     Ok(SessionOutcome {
         reply: last_text,
@@ -387,10 +477,7 @@ fn run_traced(
 
 /// Talk, import, inbox and share sessions answer a caller who is waiting on them.
 fn is_background(kind: SessionKind) -> bool {
-    !matches!(
-        kind,
-        SessionKind::Talk | SessionKind::Import | SessionKind::Inbox | SessionKind::Share
-    )
+    profile(kind).background
 }
 
 /// Runs one tool call as the model made it and returns its result text and
@@ -633,16 +720,6 @@ fn finish(
     }
     let conn = crate::db_guard(deps.db);
     crate::log::record(&conn, Some(user_id), log_kind, &detail)
-}
-
-/// A share session logs under its own kinds, so it never counts against the
-/// owner's session budget or shows in their activity.
-fn log_kind(kind: SessionKind, base: &'static str) -> &'static str {
-    match (kind, base) {
-        (SessionKind::Share, "agent_session") => "share_session",
-        (SessionKind::Share, _) => "share_max_turns",
-        _ => base,
-    }
 }
 
 #[cfg(test)]
