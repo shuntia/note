@@ -499,7 +499,8 @@ pub fn visit_counts(conn: &Connection, share_id: i64, distant_km: u32) -> rusqli
     )
 }
 
-/// The last `limit` user and assistant turns, oldest first; notes stay out.
+/// The last `limit` user and assistant turns that fit in `HISTORY_BYTES`,
+/// oldest first; notes stay out.
 pub fn history(
     conn: &Connection,
     thread_id: i64,
@@ -508,19 +509,24 @@ pub fn history(
     let mut stmt = conn.prepare(
         "SELECT role, content FROM share_messages WHERE thread_id = ?1 AND role IN ('user','assistant') ORDER BY id DESC LIMIT ?2",
     )?;
-    let mut out: Vec<crate::providers::Message> = stmt
-        .query_map((thread_id, limit as i64), |r| {
-            let role: String = r.get(0)?;
-            let content: String = r.get(1)?;
-            Ok(match role.as_str() {
-                "user" => crate::providers::Message::User(content),
-                _ => crate::providers::Message::Assistant {
-                    text: content,
-                    tool_calls: vec![],
-                },
-            })
-        })?
+    let rows: Vec<(String, String)> = stmt
+        .query_map((thread_id, limit as i64), |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?;
+    let mut bytes = 0;
+    let mut out: Vec<crate::providers::Message> = rows
+        .into_iter()
+        .take_while(|(_, content)| {
+            bytes += content.len();
+            bytes <= HISTORY_BYTES
+        })
+        .map(|(role, content)| match role.as_str() {
+            "user" => crate::providers::Message::User(content),
+            _ => crate::providers::Message::Assistant {
+                text: content,
+                tool_calls: vec![],
+            },
+        })
+        .collect();
     out.reverse();
     Ok(out)
 }
@@ -964,7 +970,8 @@ pub fn goal_next_task(
 }
 
 const HISTORY_LIMIT: usize = 40;
-pub const MAX_MESSAGE: usize = crate::talk::MAX_MESSAGE;
+const HISTORY_BYTES: usize = 24 * 1024;
+pub const MAX_MESSAGE: usize = 2 * 1024;
 
 /// The visitor's thread key, placed on the request by the share middleware.
 #[derive(Debug, Clone)]
@@ -990,6 +997,30 @@ pub enum TurnError {
     Internal,
 }
 
+struct Admitted {
+    thread_id: i64,
+    past: Vec<crate::providers::Message>,
+    question: i64,
+}
+
+/// Checks the link's daily cap and stores the question in one transaction, so
+/// parallel sends cannot pass the cap together.
+fn admit(conn: &mut Connection, share_id: i64, per_day: u32, visitor_key: &str, thread: Option<i64>, message: &str, now: jiff::Timestamp) -> Result<Admitted, TurnError> {
+    let internal = |_| TurnError::Internal;
+    let tx = conn.transaction().map_err(internal)?;
+    if messages_today(&tx, share_id, now - jiff::Span::new().hours(24)).map_err(internal)? >= per_day {
+        return Err(TurnError::Cap);
+    }
+    let thread_id = match thread {
+        Some(id) => thread_of(&tx, share_id, visitor_key, id).map_err(internal)?.ok_or(TurnError::NoThread)?,
+        None => new_thread(&tx, share_id, visitor_key, now).map_err(internal)?,
+    };
+    let past = history(&tx, thread_id, HISTORY_LIMIT).map_err(internal)?;
+    let question = append(&tx, thread_id, "user", message, now).map_err(internal)?;
+    tx.commit().map_err(internal)?;
+    Ok(Admitted { thread_id, past, question })
+}
+
 /// Continues `thread` when given, and otherwise starts a new one.
 pub async fn run_turn(state: &crate::AppState, principal: &crate::auth::SharePrincipal, visitor_key: &str, thread: Option<i64>, message: &str, visitor_lang: crate::text::Lang) -> Result<VisitorTurn, TurnError> {
     let message = message.trim().to_string();
@@ -998,23 +1029,8 @@ pub async fn run_turn(state: &crate::AppState, principal: &crate::auth::SharePri
     }
     let share = principal.share.clone();
     let now = jiff::Timestamp::now();
-    {
-        let conn = state.db();
-        let used = messages_today(&conn, share.id, now - jiff::Span::new().hours(24)).map_err(|_| TurnError::Internal)?;
-        if used >= share.scope.messages_per_day {
-            return Err(TurnError::Cap);
-        }
-    }
-    if let Some(id) = thread {
-        if thread_of(&state.db(), share.id, visitor_key, id).map_err(|_| TurnError::Internal)?.is_none() {
-            return Err(TurnError::NoThread);
-        }
-    }
-    let permit = state.talk_gate.try_enter_global().map_err(|_| TurnError::Busy)?;
-    let thread_id = match thread {
-        Some(id) => id,
-        None => new_thread(&state.db(), share.id, visitor_key, now).map_err(|_| TurnError::Internal)?,
-    };
+    let permit = state.share_gate.try_enter(principal.owner_id).map_err(|_| TurnError::Busy)?;
+    let Admitted { thread_id, past, question } = admit(&mut state.db(), share.id, share.scope.messages_per_day, visitor_key, thread, &message, now)?;
     let started = thread.is_none();
     let st = state.clone();
     let owner_id = principal.owner_id;
@@ -1036,8 +1052,6 @@ pub async fn run_turn(state: &crate::AppState, principal: &crate::auth::SharePri
             share: Some(crate::agent::ShareSession { id: share.id, thread_id, brief: share.brief.clone(), scope: share.scope.clone(), visitor_lang }),
             caller: None,
         };
-        let past = history(&st.db(), thread_id, HISTORY_LIMIT)?;
-        let question = append(&st.db(), thread_id, "user", &message, now)?;
         let answered = (|| {
             let out = crate::agent::run_session(&deps, owner_id, &owner, crate::tools::SessionKind::Share, now, &past, &message)?;
             let noted: Vec<String> = out
@@ -1335,6 +1349,35 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM share_messages", [], |r| r.get(0))
             .unwrap();
         assert_eq!(left, 0, "revocation cascades");
+    }
+
+    #[test]
+    fn admission_counts_the_cap_and_stores_the_question_together() {
+        let mut conn = conn();
+        let s = create(&conn, 1, &new("Mom"), now(), &Limits::default()).unwrap();
+        let first = admit(&mut conn, s.id, 2, "v1", None, "hi", now()).ok().unwrap();
+        assert!(first.past.is_empty());
+        let second = admit(&mut conn, s.id, 2, "v1", Some(first.thread_id), "again", now()).ok().unwrap();
+        assert_eq!(second.thread_id, first.thread_id);
+        assert_eq!(second.past.len(), 1);
+        assert!(matches!(admit(&mut conn, s.id, 2, "v2", None, "me too", now()), Err(TurnError::Cap)));
+        assert!(matches!(admit(&mut conn, s.id, 9, "v2", Some(first.thread_id), "mine?", now()), Err(TurnError::NoThread)));
+        let stored: i64 = conn.query_row("SELECT COUNT(*) FROM share_messages", [], |r| r.get(0)).unwrap();
+        let threads: i64 = conn.query_row("SELECT COUNT(*) FROM share_threads", [], |r| r.get(0)).unwrap();
+        assert_eq!((stored, threads), (2, 1), "a refused send stores nothing");
+    }
+
+    #[test]
+    fn history_replays_only_the_newest_turns_that_fit_the_byte_budget() {
+        let conn = conn();
+        let s = create(&conn, 1, &new("Mom"), now(), &Limits::default()).unwrap();
+        let t = new_thread(&conn, s.id, "v1", now()).unwrap();
+        for i in 0..20 {
+            append(&conn, t, "user", &format!("{i:02}{}", "x".repeat(MAX_MESSAGE - 2)), now()).unwrap();
+        }
+        let h = history(&conn, t, HISTORY_LIMIT).unwrap();
+        assert_eq!(h.len(), HISTORY_BYTES / MAX_MESSAGE);
+        assert!(matches!(h.last(), Some(crate::providers::Message::User(m)) if m.starts_with("19")));
     }
 
     #[test]

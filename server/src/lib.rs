@@ -59,6 +59,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 pub const MAX_CONCURRENT_TALKS: usize = 4;
+pub const MAX_CONCURRENT_SHARE_TALKS: usize = 2;
 
 #[derive(Debug, Clone, Copy)]
 pub enum TalkBusy {
@@ -94,16 +95,14 @@ impl Default for TalkGate {
 
 impl TalkGate {
     pub fn new() -> Self {
-        Self {
-            semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_TALKS)),
-            active: Mutex::new(HashSet::new()),
-        }
+        Self::with_capacity(MAX_CONCURRENT_TALKS)
     }
 
-    /// The server-wide slot alone, for a caller that is not one of the users
-    /// the per-user rule protects.
-    pub fn try_enter_global(&self) -> Result<tokio::sync::OwnedSemaphorePermit, TalkBusy> {
-        self.semaphore.clone().try_acquire_owned().map_err(|_| TalkBusy::Full)
+    pub fn with_capacity(slots: usize) -> Self {
+        Self {
+            semaphore: Arc::new(tokio::sync::Semaphore::new(slots)),
+            active: Mutex::new(HashSet::new()),
+        }
     }
 
     pub fn try_enter(self: &Arc<Self>, user_id: i64) -> Result<TalkPermit, TalkBusy> {
@@ -150,6 +149,8 @@ pub struct AppState {
     /// Bounds concurrent password hashes; see `auth::MAX_CONCURRENT_LOGINS`.
     pub login_slots: Arc<tokio::sync::Semaphore>,
     pub talk_gate: Arc<TalkGate>,
+    /// Share visitors' turns, one per owner, apart from the members' slots.
+    pub share_gate: Arc<TalkGate>,
     pub live_turns: Arc<crate::talk::LiveTurns>,
     pub admin_limiter: Arc<crate::auth::LoginLimiter>,
     /// Caps password re-checks on the enrolment routes.
@@ -210,6 +211,7 @@ impl AppState {
                 crate::auth::MAX_CONCURRENT_LOGINS,
             )),
             talk_gate: Arc::new(TalkGate::new()),
+            share_gate: Arc::new(TalkGate::with_capacity(MAX_CONCURRENT_SHARE_TALKS)),
             live_turns: Arc::default(),
             admin_limiter: Arc::new(crate::auth::LoginLimiter::new()),
             security_limiter: Arc::new(crate::auth::LoginLimiter::new()),

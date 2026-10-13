@@ -295,6 +295,35 @@ async fn the_link_cap_is_429_and_the_owners_budget_and_activity_stay_untouched()
     assert_eq!(list[0]["messages_today"], 2);
 }
 
+#[tokio::test]
+async fn visitors_have_their_own_slot_per_owner_and_never_take_a_members() {
+    let llm = scripted(vec![say("ok")]);
+    let (app, cookie, state, _cfg) = common::app_with_logged_in_user_llm_and_state(llm).await;
+    let token = token_of(&mint(&app, &cookie, "Mom", "{}").await);
+    let path = format!("/api/share/{token}/messages");
+    let members: Vec<_> = (10..10 + note_server::MAX_CONCURRENT_TALKS as i64).map(|id| state.talk_gate.try_enter(id).unwrap()).collect();
+    let res = visitor(&app, Method::POST, &path, Some(r#"{"message":"hi"}"#), None).await;
+    assert_eq!(res.status(), StatusCode::OK, "every member slot is taken, the visitor's is not");
+    drop(members);
+    let held = state.share_gate.try_enter(1).unwrap();
+    let res = visitor(&app, Method::POST, &path, Some(r#"{"message":"hi"}"#), None).await;
+    assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE, "one visitor turn per owner at a time");
+    assert!(state.talk_gate.try_enter(1).is_ok(), "the owner still talks");
+    drop(held);
+}
+
+#[tokio::test]
+async fn a_visitor_message_over_2_kib_is_refused() {
+    let (app, cookie, state, _cfg) = common::app_with_logged_in_user_and_state().await;
+    let token = token_of(&mint(&app, &cookie, "Mom", "{}").await);
+    let big = serde_json::json!({ "message": "a".repeat(2 * 1024 + 1) }).to_string();
+    let (status, body) = read(visitor(&app, Method::POST, &format!("/api/share/{token}/messages"), Some(&big), None).await).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["error"].as_str().unwrap().contains("2048"));
+    let n: i64 = state.db().query_row("SELECT COUNT(*) FROM share_messages", [], |r| r.get(0)).unwrap();
+    assert_eq!(n, 0);
+}
+
 fn calls(list: &[(&str, &str)]) -> ChatResponse {
     ChatResponse {
         text: String::new(),

@@ -329,7 +329,7 @@ async fn share_send(
     match crate::shares::run_turn(&state, &p, &key.0, req.thread, &req.message, lang).await {
         Ok(t) => Json(serde_json::json!({ "thread": t.thread, "reply": t.reply, "note": t.note })).into_response(),
         Err(E::NoThread) => (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": text::err_share_no_thread(lang) }))).into_response(),
-        Err(E::Blank) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "message must be non-blank and at most 16384 bytes" }))).into_response(),
+        Err(E::Blank) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "message must be non-blank and at most 2048 bytes" }))).into_response(),
         Err(E::Cap) => (StatusCode::TOO_MANY_REQUESTS, Json(serde_json::json!({ "error": text::err_share_cap(lang) }))).into_response(),
         Err(E::Busy) => session_busy_response(crate::TalkBusy::Full, lang),
         Err(E::Unavailable) => (StatusCode::BAD_GATEWAY, Json(serde_json::json!({ "error": text::err_share_unavailable(lang) }))).into_response(),
