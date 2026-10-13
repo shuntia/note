@@ -344,6 +344,10 @@ fn now_section(
             );
         }
     }
+    if let Some(next) = events.iter().find(|e| crate::templates::wall_minutes(&e.wall_time) > now_min) {
+        let after = mt::in_words(l, crate::templates::wall_minutes(&next.wall_time) - now_min);
+        let _ = writeln!(s, "{}", mt::next_in(l, &next.wall_time, &next.kind, &after));
+    }
     let until = (crate::templates::wall_minutes(nightly_time) - now_min).rem_euclid(24 * 60);
     let _ = writeln!(s, "{}", mt::nightly_run_in(l, nightly_time, &mt::in_words(l, until)));
     if let Some(q) = quiet {
@@ -394,7 +398,7 @@ fn plan_section(
         let mark = if Some(i) == current {
             mt::mark_now(l).into()
         } else if Some(i) == next {
-            mt::mark_next(l, &mt::in_words(l, start_of(e) - now_min))
+            mt::mark_next(l).into()
         } else {
             String::new()
         };
@@ -1168,11 +1172,12 @@ mod tests {
         );
         assert!(
             out.contains(&format!(
-                "- 21:30-21:45 wind down [pending] routine via push (event_id {}) <- next, in 30 min",
+                "- 21:30-21:45 wind down [pending] routine via push (event_id {}) <- next",
                 id("wind down")
             )),
             "{out}"
         );
+        assert!(out.contains("Next: 21:30 wind down, in 30 min"), "{out}");
     }
 
     #[test]

@@ -202,10 +202,14 @@ pub fn mark_now(l: Lang) -> &'static str {
     l.of(" <- now", " <- 今")
 }
 
-pub fn mark_next(l: Lang, after: &str) -> String {
+pub fn mark_next(l: Lang) -> &'static str {
+    l.of(" <- next", " <- 次")
+}
+
+pub fn next_in(l: Lang, at: &str, kind: &str, after: &str) -> String {
     match l {
-        Lang::En => format!(" <- next, in {after}"),
-        Lang::Ja => format!(" <- 次、あと{after}"),
+        Lang::En => format!("Next: {at} {kind}, in {after}"),
+        Lang::Ja => format!("次: {at} {kind}（あと{after}）"),
     }
 }
 
