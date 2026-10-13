@@ -336,3 +336,61 @@ async fn media_arrives_in_order_unjournaled_and_is_dropped_while_down() {
     eventually("link down", || !n.is_up()).await;
     assert!(!r.note.peer.send_media("c1", Media::Flush), "nothing is held for later");
 }
+
+/// An outbox whose every ack takes as long as a slow database write, counting
+/// the acks written.
+struct SlowAcks {
+    inner: Arc<Mutex<MemOutbox>>,
+    written: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl Outbox for SlowAcks {
+    fn append(&mut self, call_id: &str, body: &CallBody) -> std::io::Result<u64> {
+        self.inner.append(call_id, body)
+    }
+    fn unacked(&self, call_id: &str, after: u64) -> std::io::Result<Vec<(u64, CallBody)>> {
+        self.inner.unacked(call_id, after)
+    }
+    fn ack(&mut self, call_id: &str, upto: u64) -> std::io::Result<()> {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        self.written.fetch_add(1, SeqCst);
+        self.inner.ack(call_id, upto)
+    }
+    fn pending_calls(&self) -> std::io::Result<Vec<String>> {
+        self.inner.pending_calls()
+    }
+    fn forget(&mut self, call_id: &str) -> std::io::Result<()> {
+        self.inner.forget(call_id)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn slow_ack_writes_hold_up_no_media_and_coalesce() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("note.sock");
+    let note = side(Role::Note, Dir::ToVoice, Arc::default(), Arc::default());
+    let written = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let voice_rec: Arc<Recording> = Arc::default();
+    let outbox = SlowAcks { inner: Arc::default(), written: written.clone() };
+    let voice = Peer::new(fast(Role::Voice), Dir::ToNote, voice_rec.clone(), Box::new(outbox));
+    tokio::spawn(listen_forever(note.peer.clone(), UnixListener::bind(&path).unwrap()));
+    tokio::spawn(dial_forever(voice.clone(), path));
+    let (n, v) = (note.peer.clone(), voice.clone());
+    eventually("both sides up", || n.is_up() && v.is_up()).await;
+
+    for _ in 0..10 {
+        voice.send_call("c1", CallBody::Ringing).unwrap();
+    }
+    let rec = note.rec.clone();
+    eventually("10 applied", || rec.seqs("c1").len() == 10).await;
+    let sent = std::time::Instant::now();
+    assert!(note.peer.send_media("c1", Media::Flush));
+    let r = voice_rec.clone();
+    eventually("the media frame", || !r.media.lock().unwrap().is_empty()).await;
+    assert!(sent.elapsed() < std::time::Duration::from_millis(150), "media waited {:?} on ack writes", sent.elapsed());
+
+    eventually("all acknowledged", || v.pending_calls().is_empty()).await;
+    assert!(written.load(SeqCst) < 10, "{} ack writes for 10 frames", written.load(SeqCst));
+    assert_eq!(voice_rec.acks.lock().unwrap().get("c1"), Some(&10));
+    assert!(voice.is_up());
+}
