@@ -1877,6 +1877,57 @@ mod tests {
         }
     }
 
+    /// Every distinct tool schema once, then each surface as the names it
+    /// sends in order.
+    fn schema_snapshot() -> String {
+        let mut surfaces: Vec<(String, Vec<serde_json::Value>)> = Vec::new();
+        for kind in KINDS {
+            surfaces.push((format!("{kind:?}"), schemas(kind).to_vec()));
+            surfaces.push((
+                format!("{kind:?} without search"),
+                schemas(kind).iter().filter(|s| s["name"] != "web_search").cloned().collect(),
+            ));
+        }
+        surfaces.extend((0..16u8).map(|bits| {
+            let scope = crate::shares::ShareScope {
+                tasks: bits & 1 != 0,
+                today: bits & 2 != 0,
+                goals: bits & 4 != 0,
+                notes: bits & 8 != 0,
+                ..Default::default()
+            };
+            (format!("Share {bits:04b}"), share_schemas(&scope).to_vec())
+        }));
+        let mut tools: Vec<String> = Vec::new();
+        let mut out = String::new();
+        for (label, schemas) in &surfaces {
+            let names: Vec<&str> = schemas.iter().map(|s| s["name"].as_str().unwrap()).collect();
+            out += &format!("{label}\t{}\n", names.join(","));
+            for s in schemas {
+                let line = format!("tool\t{}\n", serde_json::to_string(s).unwrap());
+                if !tools.contains(&line) {
+                    tools.push(line);
+                }
+            }
+        }
+        tools.concat() + &out
+    }
+
+    /// The schemas each session sends its provider, byte for byte and in order.
+    #[test]
+    fn tool_schemas_match_the_snapshot() {
+        let snapshot = schema_snapshot();
+        if std::env::var_os("NOTE_WRITE_SCHEMA_SNAPSHOT").is_some() {
+            std::fs::write(concat!(env!("CARGO_MANIFEST_DIR"), "/src/tools/schemas.snapshot"), &snapshot)
+                .unwrap();
+        }
+        let expected = include_str!("schemas.snapshot");
+        for (got, want) in snapshot.lines().zip(expected.lines()) {
+            assert_eq!(got, want);
+        }
+        assert_eq!(snapshot.lines().count(), expected.lines().count());
+    }
+
     #[test]
     fn schemas_cover_the_registry_and_are_objects() {
         for kind in [
