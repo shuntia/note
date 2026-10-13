@@ -835,7 +835,7 @@ pub fn open_memory() -> Result<Connection> {
 }
 
 fn init(conn: &Connection) -> Result<()> {
-    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;")?;
     conn.set_prepared_statement_cache_capacity(64);
     apply_migrations(conn, MIGRATIONS)
 }
@@ -862,6 +862,15 @@ fn apply_migrations(conn: &Connection, migrations: &[&str]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_file_database_writes_ahead_and_syncs_at_checkpoints() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = open(&dir.path().join("note.db")).unwrap();
+        let mode: String = conn.query_row("PRAGMA journal_mode", [], |r| r.get(0)).unwrap();
+        let sync: i64 = conn.query_row("PRAGMA synchronous", [], |r| r.get(0)).unwrap();
+        assert_eq!((mode.as_str(), sync), ("wal", 1));
+    }
 
     #[test]
     fn migrations_apply_and_are_idempotent() {
