@@ -274,14 +274,17 @@ impl CurrentUser {
             .to_string();
         let conn = state.db();
         let row: Option<(i64, String, String, String, bool, String)> = conn
-            .query_row(
+            .prepare_cached(
                 "SELECT u.id, u.username, u.role, s.expires_at, u.disabled, u.category
                  FROM sessions s JOIN users u ON u.id = s.user_id
                  WHERE s.token = ?1",
-                [&token],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
             )
-            .optional()
+            .and_then(|mut stmt| {
+                stmt.query_row([&token], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+                })
+                .optional()
+            })
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         let Some((id, username, role, expires_at, disabled, category)) = row else {
             return Err(StatusCode::UNAUTHORIZED);

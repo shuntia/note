@@ -835,6 +835,7 @@ pub fn open_memory() -> Result<Connection> {
 
 fn init(conn: &Connection) -> Result<()> {
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+    conn.set_prepared_statement_cache_capacity(64);
     apply_migrations(conn, MIGRATIONS)
 }
 

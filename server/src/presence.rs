@@ -15,11 +15,12 @@ pub fn stamp(at: jiff::Timestamp) -> String {
 /// every `EVERY_SECS`.
 pub fn touch(conn: &Connection, user_id: i64, now: jiff::Timestamp) -> rusqlite::Result<bool> {
     let cutoff = stamp(now - jiff::Span::new().seconds(EVERY_SECS));
-    let n = conn.execute(
-        "UPDATE users SET last_active_at = ?1
-         WHERE id = ?2 AND (last_active_at IS NULL OR last_active_at <= ?3)",
-        (stamp(now), user_id, cutoff),
-    )?;
+    let n = conn
+        .prepare_cached(
+            "UPDATE users SET last_active_at = ?1
+             WHERE id = ?2 AND (last_active_at IS NULL OR last_active_at <= ?3)",
+        )?
+        .execute((stamp(now), user_id, cutoff))?;
     Ok(n > 0)
 }
 

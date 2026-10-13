@@ -821,7 +821,7 @@ fn schedule(
     tz: &jiff::tz::TimeZone,
     today: jiff::civil::Date,
 ) -> rusqlite::Result<std::collections::HashMap<i64, String>> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare_cached(
         "SELECT COALESCE(t.parent_id, t.id), p.date, e.wall_time
          FROM events e
          JOIN plans p ON p.id = e.plan_id
