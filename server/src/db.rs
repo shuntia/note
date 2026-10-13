@@ -797,6 +797,14 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE voice_calls ADD COLUMN origin TEXT NOT NULL DEFAULT 'matrix' CHECK (origin IN ('matrix','web'));
     ALTER TABLE voice_calls ADD COLUMN thread_id INTEGER REFERENCES conversations(id) ON DELETE SET NULL;
     ",
+    // v55
+    "
+    CREATE INDEX idx_events_plan ON events(plan_id, wall_time);
+    CREATE INDEX idx_events_status ON events(status);
+    CREATE INDEX idx_event_tasks_task ON event_tasks(task_id);
+    CREATE INDEX idx_tasks_user_parent ON tasks(user_id, parent_id, id);
+    CREATE INDEX idx_event_log_kind_user ON event_log(kind, user_id, ts);
+    ",
 ];
 
 pub fn server_setting(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
@@ -2324,4 +2332,82 @@ mod tests {
         let kept: Option<i64> = conn.query_row("SELECT thread_id FROM voice_calls WHERE id = 'w'", [], |r| r.get(0)).unwrap();
         assert_eq!(kept, None);
     }
+
+    fn query_plan(conn: &Connection, sql: &str) -> String {
+        let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        let unbound = std::iter::repeat_n(rusqlite::types::Null, stmt.parameter_count());
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(unbound), |r| r.get::<_, String>(3))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        rows.join("\n")
+    }
+
+    #[test]
+    fn v55_indexes_serve_the_hot_reads() {
+        let conn = open_memory().unwrap();
+        let cases = [
+            (
+                "SELECT e.id FROM events e JOIN plans p ON p.id = e.plan_id
+                 WHERE p.user_id = ?1 AND p.date = ?2 ORDER BY e.wall_time",
+                "idx_events_plan",
+                "SCAN e",
+            ),
+            (
+                "SELECT e.id FROM events e JOIN plans p ON p.id = e.plan_id JOIN users u ON u.id = p.user_id
+                 WHERE e.status IN ('pending','snoozed') AND e.alert = 1",
+                "idx_events_status",
+                "SCAN e",
+            ),
+            (
+                "SELECT e.id FROM events e JOIN plans p ON p.id = e.plan_id JOIN users u ON u.id = p.user_id
+                 JOIN event_tasks et ON et.event_id = e.id JOIN tasks t ON t.id = et.task_id
+                 WHERE e.status = 'pending' AND e.end_wall_time IS NOT NULL AND t.notify != 'none'",
+                "idx_events_status",
+                "SCAN",
+            ),
+            (
+                "SELECT event_id, task_id FROM event_tasks
+                 WHERE task_id = ?1 OR task_id IN (SELECT id FROM tasks WHERE parent_id = ?1)",
+                "idx_event_tasks_task",
+                "SCAN",
+            ),
+            (
+                "SELECT t.id FROM tasks t
+                 WHERE t.user_id = ?1 AND t.state != 'dropped' AND t.parent_id IS NULL ORDER BY t.id",
+                "idx_tasks_user_parent",
+                "SCAN",
+            ),
+            (
+                "SELECT t.id FROM tasks t JOIN tasks p ON p.id = t.parent_id
+                 WHERE p.user_id = ?1 AND p.parent_id IS NULL AND p.state != 'dropped'
+                   AND t.state != 'dropped'",
+                "idx_tasks_user_parent",
+                "SCAN",
+            ),
+            (
+                "SELECT COUNT(*) FROM event_log WHERE user_id = ?1 AND kind = 'agent_session' AND ts > ?2",
+                "idx_event_log_kind_user (kind=? AND user_id=? AND ts>?)",
+                "SCAN",
+            ),
+            (
+                "SELECT ts FROM event_log WHERE user_id IS ?1 AND kind = ?2 AND detail = ?3
+                 ORDER BY id DESC LIMIT 1",
+                "idx_event_log_kind_user (kind=? AND user_id=?)",
+                "SCAN",
+            ),
+        ];
+        for (sql, index, absent) in cases {
+            let plan = query_plan(&conn, sql);
+            assert!(plan.contains(index), "{sql}\n{plan}");
+            assert!(!plan.contains(absent), "{sql}\n{plan}");
+        }
+        let recent = query_plan(
+            &conn,
+            "SELECT ts FROM event_log WHERE user_id = ?1 AND kind NOT IN ('x') ORDER BY id DESC LIMIT 10",
+        );
+        assert!(!recent.contains("TEMP B-TREE"), "{recent}");
+    }
+
 }
