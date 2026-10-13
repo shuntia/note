@@ -159,6 +159,7 @@ pub fn router_with_web(state: AppState, web_dir: &std::path::Path) -> Router {
     let files = tower_http::services::ServeDir::new(web_dir)
         .fallback(tower_http::services::ServeFile::new(web_dir.join("index.html")));
     let shell = std::fs::read_to_string(web_dir.join("index.html")).unwrap_or_default();
+    let scripts: std::sync::Arc<str> = crate::csp::script_hashes(&shell).into();
     let private_shell = get(move || async move {
         (
             [
@@ -185,6 +186,15 @@ pub fn router_with_web(state: AppState, web_dir: &std::path::Path) -> Router {
             .layer(axum::middleware::map_response(hashed_asset_headers)),
     )
     .fallback_service(Router::new().fallback_service(files).layer(axum::middleware::from_fn(always_revalidate)))
+    .layer(axum::middleware::from_fn(move |req: axum::extract::Request, next: axum::middleware::Next| {
+        let scripts = scripts.clone();
+        async move {
+            let host = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).map(str::to_string);
+            let mut res = next.run(req).await;
+            crate::csp::harden(&mut res, &scripts, host.as_deref());
+            res
+        }
+    }))
 }
 
 /// The shell and the unhashed files beside it change on every deploy while

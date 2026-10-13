@@ -3,17 +3,31 @@ import { marked } from 'marked'
 import { useEffect, useMemo, useRef, type MouseEvent } from 'react'
 import { t } from './i18n'
 
+// Model output carries text from the web and from strangers, so nothing in it may load on its own.
+const PURIFY = {
+  USE_PROFILES: { html: true },
+  FORBID_TAGS: [
+    'img', 'picture', 'source', 'video', 'audio', 'track', 'iframe', 'frame', 'object', 'embed',
+    'form', 'button', 'textarea', 'select', 'option', 'style', 'link', 'meta', 'base',
+  ],
+  FORBID_ATTR: ['style', 'srcset', 'background', 'poster', 'action', 'formaction', 'ping'],
+}
+
 DOMPurify.addHook('afterSanitizeAttributes', (node) => {
   if (node.tagName === 'A') {
     node.setAttribute('target', '_blank')
-    node.setAttribute('rel', 'noreferrer')
+    node.setAttribute('rel', 'noopener noreferrer')
+  }
+  if (node.tagName === 'INPUT') {
+    node.setAttribute('type', 'checkbox')
+    node.setAttribute('disabled', '')
   }
 })
 
 // Wrapping happens on the sanitized markup, before React owns the subtree.
 function render(text: string): string {
   const holder = document.createElement('div')
-  holder.innerHTML = DOMPurify.sanitize(marked(text, { gfm: true, breaks: true, async: false }))
+  holder.innerHTML = DOMPurify.sanitize(marked(text, { gfm: true, breaks: true, async: false }), PURIFY)
   for (const pre of holder.querySelectorAll('pre')) {
     const wrap = document.createElement('div')
     wrap.className = 'code-block'

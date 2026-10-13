@@ -69,6 +69,36 @@ async fn serves_the_web_build_with_spa_fallback() {
 }
 
 #[tokio::test]
+async fn pages_carry_the_csp_and_every_response_is_nosniff() {
+    let cfg = common::config_dir();
+    let web = tempfile::tempdir().unwrap();
+    std::fs::write(web.path().join("index.html"), "<title>Note</title><script>boot()</script>").unwrap();
+    std::fs::create_dir(web.path().join("assets")).unwrap();
+    std::fs::write(web.path().join("assets/app.js"), "console.log(1)").unwrap();
+    let app = api::router_with_web(state(&cfg), web.path());
+
+    for path in ["/", "/today", "/s/share_abc", "/join/join_abc"] {
+        let req = Request::get(path).header("host", "note.example").body(Body::empty()).unwrap();
+        let res = app.clone().oneshot(req).await.unwrap();
+        let csp = res.headers()["content-security-policy"].to_str().unwrap();
+        assert!(csp.contains("script-src 'self' 'sha256-"), "{path}: {csp}");
+        assert!(csp.contains("connect-src 'self' wss://note.example"), "{path}: {csp}");
+        assert!(csp.contains("frame-ancestors 'none'"), "{path}: {csp}");
+        assert_eq!(res.headers()["x-content-type-options"], "nosniff", "{path}");
+    }
+    let res = app.clone().oneshot(Request::get("/").body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(res.headers()["referrer-policy"], "same-origin");
+    let res = app.clone().oneshot(Request::get("/s/share_abc").body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(res.headers()["referrer-policy"], "no-referrer", "a share keeps its stricter policy");
+
+    for path in ["/assets/app.js", "/api/me"] {
+        let res = app.clone().oneshot(Request::get(path).body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(res.headers()["x-content-type-options"], "nosniff", "{path}");
+        assert!(!res.headers().contains_key("content-security-policy"), "{path}");
+    }
+}
+
+#[tokio::test]
 async fn missing_web_dir_leaves_the_api_router_untouched() {
     let cfg = common::config_dir();
     let app = api::router_with_web(state(&cfg), std::path::Path::new("/nonexistent/web"));

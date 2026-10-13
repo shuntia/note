@@ -7,6 +7,7 @@ pub mod calendar;
 pub mod channels;
 pub mod config;
 pub mod context;
+pub mod csp;
 pub mod day;
 pub mod db;
 pub mod failure;
