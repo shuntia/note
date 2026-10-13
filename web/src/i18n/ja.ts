@@ -655,6 +655,8 @@ export const ja: Dict = {
   "settings.security.remove": "削除",
   "settings.security.startTotp": "認証アプリを設定",
   "settings.security.sub": "管理パネルで本人確認を求められたときに使います。",
+  "settings.security.useCodeInstead": "コードを使う",
+  "settings.security.usePasskeyInstead": "パスキーを使う",
   "settings.sessions": "セッション",
   "settings.share.activity": "アクティビティ",
   "settings.share.allowNotes": "メモを許可",

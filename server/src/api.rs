@@ -90,8 +90,40 @@ pub fn router(state: AppState) -> Router {
         .nest("/api/admin", crate::admin::routes())
         .merge(share_router(state.clone()))
         .merge(crate::invites::routes())
+        .layer(axum::middleware::from_fn_with_state(state.clone(), same_site_writes))
         .layer(axum::middleware::from_fn_with_state(state.clone(), localized_errors))
         .with_state(state)
+}
+
+/// The session cookie rides along on a cross-site form post too, so a write it
+/// authenticates must come from Note's own page. A bearer token is never sent
+/// by a browser on its own, so a request carrying one is left alone.
+async fn same_site_writes(
+    State(state): State<AppState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let h = req.headers();
+    let cookie_write = !req.method().is_safe()
+        && !h.contains_key(header::AUTHORIZATION)
+        && axum_extra::extract::CookieJar::from_headers(h).get("session").is_some();
+    if cookie_write && !crate::net::write_provenance_ok(h, &state.page_origins(), state.bind_addr.as_deref()) {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({ "error": "cross-site request refused" }))).into_response();
+    }
+    next.run(req).await
+}
+
+/// A body a cookie carried must say it is JSON, which a cross-site form cannot.
+fn json_declared(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(';').next())
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case("application/json"))
+}
+
+fn json_required() -> axum::response::Response {
+    (StatusCode::UNSUPPORTED_MEDIA_TYPE, Json(serde_json::json!({ "error": "the body must be JSON" }))).into_response()
 }
 
 const MAX_ERROR_BODY: usize = 64 * 1024;
@@ -353,11 +385,16 @@ struct LoginReq {
     password: String,
 }
 
-/// Admission first, then the hash, then the limiter: the semaphore bounds what
-/// an unauthenticated flood can spend, and counting an attempt only once a
-/// verification has failed means guessing traffic against a username can never
-/// lock its owner out.
-async fn login(State(state): State<AppState>, Json(req): Json<LoginReq>) -> impl IntoResponse {
+/// A locked client address or username is refused before any slot is taken or
+/// any hash run, so a lockout holds against the right password too; then the
+/// semaphore bounds what an unauthenticated flood can spend. A failure counts
+/// against both the username and the address; a success clears the username's.
+async fn login(State(state): State<AppState>, headers: HeaderMap, Json(req): Json<LoginReq>) -> impl IntoResponse {
+    let client = crate::net::client_key(&headers);
+    let now = jiff::Timestamp::now();
+    if let Some(wait) = state.login_clients.locked(&client, now).or_else(|| state.login_limiter.locked(&req.username, now)) {
+        return locked_out(wait);
+    }
     let Ok(slot) = state.login_slots.clone().try_acquire_owned() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -388,14 +425,23 @@ async fn login(State(state): State<AppState>, Json(req): Json<LoginReq>) -> impl
                 .into_response()
         }
         Ok(Ok(None)) => {
-            if !state.login_limiter.try_attempt(&req.username, jiff::Timestamp::now()) {
-                return StatusCode::TOO_MANY_REQUESTS.into_response();
-            }
+            let now = jiff::Timestamp::now();
+            state.login_limiter.fail(&req.username, now);
+            state.login_clients.fail(&client, now);
             StatusCode::UNAUTHORIZED.into_response()
         }
         Ok(Err(e)) => log_login_error(&state, &e.to_string()),
         Err(e) => log_login_error(&state, &format!("login task failed: {e}")),
     }
+}
+
+fn locked_out(wait_secs: i64) -> axum::response::Response {
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        [(header::RETRY_AFTER, wait_secs.to_string())],
+        Json(serde_json::json!({ "error": "too many attempts" })),
+    )
+        .into_response()
 }
 
 fn log_login_error(state: &AppState, detail: &str) -> axum::response::Response {
@@ -880,6 +926,9 @@ async fn task_agent(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
+    if user.via == auth::Credential::Session && !json_declared(&headers) {
+        return json_required();
+    }
     let lang = Lang::for_request(&state.config_dir, &user.username, accept_language(&headers));
     let req: BriefReq = if body.iter().all(u8::is_ascii_whitespace) {
         BriefReq::default()
@@ -1067,6 +1116,9 @@ async fn agent_inbox(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
+    if user.via == auth::Credential::Session && !json_declared(&headers) {
+        return json_required();
+    }
     let lang = Lang::for_request(&state.config_dir, &user.username, accept_language(&headers));
     let req: InboxReq = match serde_json::from_slice(&body) {
         Ok(r) => r,
@@ -3123,8 +3175,12 @@ async fn calendar_list(user: TaskPrincipal, State(state): State<AppState>) -> im
 async fn calendar_create(
     user: CurrentUser,
     State(state): State<AppState>,
+    headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
+    if !json_declared(&headers) {
+        return json_required();
+    }
     let fields = match calendar_body::<crate::calendar::Fields>(&body) {
         Ok(f) => f,
         Err((status, why)) => return calendar_error(status, &why),
@@ -3216,8 +3272,12 @@ async fn calendar_skip(
     user: CurrentUser,
     State(state): State<AppState>,
     Path(id): Path<i64>,
+    headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
+    if !json_declared(&headers) {
+        return json_required();
+    }
     let req = match calendar_body::<SkipReq>(&body) {
         Ok(r) => r,
         Err((status, why)) => return calendar_error(status, &why),

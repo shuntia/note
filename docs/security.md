@@ -5,11 +5,25 @@
 - `POST /api/login {username, password}` sets an HttpOnly, SameSite=Lax session
   cookie valid 30 days (`Secure` when `public_base_url` is `https://`).
   `POST /api/logout` deletes the session row and clears the cookie.
-- Four password verifications run at once server-wide; a login arriving while
-  all four are busy is `503` with `Retry-After: 2`.
-- Failed sign-ins count against 10 per username per 15 minutes; the eleventh is
-  `429`. The counter is consulted only after a verification fails, so the
-  right password always signs in. A success clears it.
+- Four password verifications run at once server-wide for sign-ins and joins;
+  a login arriving while all four are busy is `503` with `Retry-After: 2`.
+  Signed-in re-checks (elevation, password change, factor changes) hash in a
+  separate pool of two.
+- The tenth failed sign-in for a username locks it for 30 seconds, and each
+  further failure doubles the lock, up to 15 minutes. The thirtieth failure from
+  one client address (`CF-Connecting-IP`, else the first `X-Forwarded-For` hop)
+  locks that address the same way, across usernames and for joins too. A locked
+  username or address is `429` with `Retry-After` before any password is
+  hashed, the right one included. A success clears the username's failures;
+  fewer than the limit lapse after 15 minutes, a lock's after a day.
+- Writes (`POST`, `PUT`, `PATCH`, `DELETE`) carrying the session cookie must come
+  from Note's own page: `Sec-Fetch-Site` `same-origin` or `none`, or an `Origin`
+  that is one of Note's. Anything else is `403`
+  `{"error": "cross-site request refused"}`; a request with no label and no
+  `Origin` is not a browser's and passes. A request with an `Authorization`
+  header is exempt. On the cookie, `POST /api/calendar`,
+  `POST /api/calendar/{id}/skip`, `POST /api/tasks/{id}/agent` and
+  `POST /api/agent/inbox` also need `Content-Type: application/json` (`415`).
 - `POST /api/talk` runs one session per user (`409` for a second) and four
   server-wide (`503`, `Retry-After: 5`). `POST /api/tasks/{id}/agent` and
   `POST /api/agent/inbox` share the gate: `429` per user, `503` server-wide.
@@ -55,22 +69,32 @@ TOTP secrets are stored as base32 in `users.totp_secret`, unencrypted: the
 database file is the trust boundary (it already holds the session table and
 argon2 hashes). Back it up accordingly.
 
-Routes, on the session cookie. Asking for a challenge and dropping a factor
-re-check the password; finishing a registration rides on that challenge.
+Routes, on the session cookie. Asking for a registration challenge, starting an
+authenticator and dropping a factor re-check the password; finishing a
+registration rides on that challenge. The first factor needs only the password.
+Once the account holds one, these also need proof from a factor it holds: a
+current `code` from its app, or an `assertion` answering
+`POST /api/security/challenge`. A live admin grant on the same session stands in
+for the proof (not for the password). Without proof the answer is `401`
+`{"error": …, "factor_required": true}`.
 
 | Route | Body | Effect |
 |---|---|---|
 | `GET /api/security` | — | `{passkeys: [{id, name, created_at, last_used_at}], totp: {enabled, pending}, webauthn_available}` |
-| `POST /api/security/passkeys/challenge` | `{password}` | creation options; `503` where passkeys can't run, `409` at the cap |
+| `POST /api/security/challenge` | — | WebAuthn request options for proving a change; `409` with no passkeys, `503` where passkeys can't run |
+| `POST /api/security/passkeys/challenge` | `{password, code?, assertion?}` | creation options; `503` where passkeys can't run, `409` at the cap |
 | `POST /api/security/passkeys` | `{name, credential}` | the row; `422` bad name or challenge, `409` cap or duplicate credential |
 | `PATCH /api/security/passkeys/{id}` | `{name}` | the renamed row; `422`, `404` |
-| `DELETE /api/security/passkeys/{id}` | `{password}` | `204`; `404` |
-| `POST /api/security/totp/start` | `{password}` | `{secret_base32, otpauth_uri, issuer, account}`, the only response carrying the secret |
+| `DELETE /api/security/passkeys/{id}` | `{password, code?, assertion?}` | `204`; `404` |
+| `POST /api/security/totp/start` | `{password, code?, assertion?}` | `{secret_base32, otpauth_uri, issuer, account}`, the only response carrying the secret |
 | `POST /api/security/totp/confirm` | `{code}` | `204`; `401` on mismatch |
-| `DELETE /api/security/totp` | `{password}` | `204`, clearing secret and pending |
+| `DELETE /api/security/totp` | `{password, code?, assertion?}` | `204`, clearing secret and pending |
 
-A wrong password is `401`; ten in 15 minutes are `429`. Changes log
-`passkey_added`, `passkey_removed`, `totp_enrolled`, `totp_removed`.
+A wrong password, code or assertion is `401`; ten attempts in 15 minutes are
+`429`. A code or assertion is spent only when the password is right. Changes
+log `passkey_added`, `passkey_removed`, `totp_enrolled`, `totp_removed`, and
+each one is sent to the account holder through their notification channels.
+An account that loses every factor it holds cannot change them on its own.
 
 The relying party is the host of `public_base_url`, named "Note". When browsers
 see a different origin:
@@ -97,7 +121,7 @@ Every `/api/admin/*` route needs, in order:
    `gate`, `elevate` and `drop` are `401` without it;
 3. same-origin provenance: a foreign `Sec-Fetch-Site` is `403`.
 
-Elevation is limited like logins (10 per username per 15 minutes); codes and
+Elevation is limited to 10 attempts per username per 15 minutes; codes and
 assertions are single-use; admin responses are `Cache-Control: no-store`.
 
 `[admin] require_second_factor = false` (alias `require_totp`) makes elevation

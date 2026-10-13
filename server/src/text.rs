@@ -394,6 +394,31 @@ pub fn failure_title(l: Lang) -> String {
     l.pick("Note ran into a problem", "Noteで問題が起きました")
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum FactorChange {
+    PasskeyAdded,
+    PasskeyRemoved,
+    TotpEnrolled,
+    TotpRemoved,
+}
+
+pub fn factor_changed_title(l: Lang) -> String {
+    l.pick("Sign-in security changed", "サインインの設定が変わりました")
+}
+
+pub fn factor_changed(l: Lang, c: FactorChange) -> String {
+    let (en, ja) = match c {
+        FactorChange::PasskeyAdded => ("A passkey was added to your account.", "アカウントにパスキーが追加されました。"),
+        FactorChange::PasskeyRemoved => ("A passkey was removed from your account.", "アカウントからパスキーが削除されました。"),
+        FactorChange::TotpEnrolled => ("An authenticator app was set up on your account.", "アカウントに認証アプリが設定されました。"),
+        FactorChange::TotpRemoved => ("The authenticator app was removed from your account.", "アカウントから認証アプリが削除されました。"),
+    };
+    match l {
+        Lang::En => format!("{en} If this wasn't you, change your password."),
+        Lang::Ja => format!("{ja}心当たりがなければパスワードを変更してください。"),
+    }
+}
+
 /// What a visitor on a share link is told once their message is filed.
 pub fn share_passed_on(l: Lang, owner: &str) -> String {
     match l {
@@ -777,6 +802,8 @@ const ERRORS_JA: &[(&str, &str)] = &[
     ("wrong password or code", "パスワードかコードが違います"),
     ("wrong password", "パスワードが違います"),
     ("too many attempts", "試行回数が多すぎます。しばらくしてからどうぞ"),
+    ("confirm with a passkey or a code from your app", "パスキーか認証アプリのコードで確認してください"),
+    ("the body must be JSON", "本文はJSONにしてください"),
     ("too many sign-ins in flight; try again", "サインインが混み合っています。もう一度どうぞ"),
     ("elevation required", "管理者の再認証が必要です"),
     ("admin only", "管理者専用です"),

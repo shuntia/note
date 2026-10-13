@@ -654,6 +654,8 @@ export const en = {
   "settings.security.remove": "Remove",
   "settings.security.startTotp": "Set up authenticator",
   "settings.security.sub": "Used when the admin panel asks you to confirm it's you.",
+  "settings.security.useCodeInstead": "Use a code instead",
+  "settings.security.usePasskeyInstead": "Use a passkey instead",
   "settings.sessions": "Sessions",
   "settings.share.activity": "Activity",
   "settings.share.allowNotes": "Allow notes",

@@ -324,6 +324,7 @@ pub fn gc_sessions(conn: &Connection, now: jiff::Timestamp) -> Result<()> {
 pub fn sweep_once(state: &AppState) {
     let now = jiff::Timestamp::now();
     state.login_limiter.sweep(now);
+    state.login_clients.sweep(now);
     state.join_limiter.sweep(now);
     let (fired, started, flips) = {
         let conn = state.db();
@@ -705,12 +706,14 @@ mod tests {
         let state = AppState::new(conn, tmp.path().into(), tmp.path().into());
         state
             .login_limiter
-            .try_attempt("aki", "2020-01-01T00:00:00Z".parse().unwrap());
-        state.login_limiter.try_attempt("now", jiff::Timestamp::now());
+            .fail("aki", "2020-01-01T00:00:00Z".parse().unwrap());
+        state.login_limiter.fail("now", jiff::Timestamp::now());
+        state.login_clients.fail("203.0.113.9", "2020-01-01T00:00:00Z".parse().unwrap());
 
         sweep_once(&state);
 
         assert_eq!(state.login_limiter.tracked(), 1);
+        assert_eq!(state.login_clients.tracked(), 0);
     }
 
     #[test]

@@ -58,13 +58,24 @@ async fn enrol_passkey(
     cookie: &str,
     name: &str,
 ) -> (WebauthnAuthenticator<SoftPasskey>, serde_json::Value) {
+    enrol_passkey_with(app, cookie, name, password("pw")).await
+}
+
+/// `enrol_passkey` with the step-up body an account that already holds a
+/// factor must send.
+async fn enrol_passkey_with(
+    app: &axum::Router,
+    cookie: &str,
+    name: &str,
+    step_up: serde_json::Value,
+) -> (WebauthnAuthenticator<SoftPasskey>, serde_json::Value) {
     let mut soft = authenticator();
     let (status, challenge) = call(
         app,
         cookie,
         Method::POST,
         "/api/security/passkeys/challenge",
-        Some(password("pw")),
+        Some(step_up),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{challenge}");
@@ -89,14 +100,16 @@ async fn assertion(
     cookie: &str,
     soft: &mut WebauthnAuthenticator<SoftPasskey>,
 ) -> serde_json::Value {
-    let (status, challenge) = call(
-        app,
-        cookie,
-        Method::POST,
-        "/api/admin/elevate/challenge",
-        None,
-    )
-    .await;
+    assertion_from(app, cookie, soft, "/api/admin/elevate/challenge").await
+}
+
+async fn assertion_from(
+    app: &axum::Router,
+    cookie: &str,
+    soft: &mut WebauthnAuthenticator<SoftPasskey>,
+    challenge_path: &str,
+) -> serde_json::Value {
+    let (status, challenge) = call(app, cookie, Method::POST, challenge_path, None).await;
     assert_eq!(status, StatusCode::OK, "{challenge}");
     let rcr: RequestChallengeResponse = serde_json::from_value(challenge).unwrap();
     let signed = soft
@@ -179,7 +192,7 @@ async fn every_mutating_call_re_checks_the_password() {
 #[tokio::test]
 async fn a_passkey_is_registered_renamed_and_removed() {
     let (app, cookie, state, _cfg) = common::app_with_passkeys().await;
-    let (_, info) = enrol_passkey(&app, &cookie, "  laptop  ").await;
+    let (mut soft, info) = enrol_passkey(&app, &cookie, "  laptop  ").await;
     assert_eq!(info["name"], "laptop");
     assert!(info["last_used_at"].is_null());
     let id = info["id"].as_i64().unwrap();
@@ -227,7 +240,17 @@ async fn a_passkey_is_registered_renamed_and_removed() {
         Some(password("pw")),
     )
     .await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "the last factor needs its own proof to go");
+    let signed = assertion_from(&app, &cookie, &mut soft, "/api/security/challenge").await;
+    let (status, v) = call(
+        &app,
+        &cookie,
+        Method::DELETE,
+        &format!("/api/security/passkeys/{id}"),
+        Some(serde_json::json!({ "password": "pw", "assertion": signed })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{v}");
     let (_, v) = call(&app, &cookie, Method::GET, "/api/security", None).await;
     assert!(v["passkeys"].as_array().unwrap().is_empty());
 
@@ -380,12 +403,16 @@ async fn a_member_enrols_an_authenticator_app() {
     let (_, mine) = call(&app, &admin_cookie, Method::GET, "/api/security", None).await;
     assert_eq!(mine["totp"]["enabled"], false);
 
+    let (status, v) = call(&app, &bo, Method::DELETE, "/api/security/totp", Some(password("pw"))).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(v["factor_required"], true);
+    let next = totp::code(&seed, totp::step_at(jiff::Timestamp::now()) + 1);
     let (status, _) = call(
         &app,
         &bo,
         Method::DELETE,
         "/api/security/totp",
-        Some(password("pw")),
+        Some(serde_json::json!({ "password": "pw", "code": next })),
     )
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
@@ -411,7 +438,7 @@ async fn the_gate_reports_what_this_admin_has_enrolled() {
     assert_eq!(v["second_factor"], "none");
     assert_eq!(v["require_second_factor"], !note_server::admin::INSPECT);
 
-    enrol_totp(&app, &cookie).await;
+    let seed = enrol_totp(&app, &cookie).await;
     let v = gate(&app, &cookie).await;
     assert_eq!(
         v["methods"],
@@ -421,7 +448,8 @@ async fn the_gate_reports_what_this_admin_has_enrolled() {
     assert_eq!(v["require_second_factor"], true);
     assert_eq!(v["totp"], "required");
 
-    enrol_passkey(&app, &cookie, "phone").await;
+    let code = totp::code(&seed, totp::step_at(jiff::Timestamp::now()) + 1);
+    enrol_passkey_with(&app, &cookie, "phone", serde_json::json!({ "password": "pw", "code": code })).await;
     let v = gate(&app, &cookie).await;
     assert_eq!(
         v["methods"],
@@ -659,8 +687,15 @@ async fn a_challenge_needs_a_passkey_and_the_admin_role() {
 #[tokio::test]
 async fn removing_a_passkey_leaves_it_unable_to_elevate() {
     let (app, cookie, _state, _cfg) = common::app_with_passkeys().await;
-    enrol_totp(&app, &cookie).await;
-    let (mut soft, info) = enrol_passkey(&app, &cookie, "phone").await;
+    let step = totp::step_at(jiff::Timestamp::now());
+    let seed = enrol_totp_at(&app, &cookie, step - 1).await;
+    let (mut soft, info) = enrol_passkey_with(
+        &app,
+        &cookie,
+        "phone",
+        serde_json::json!({ "password": "pw", "code": totp::code(&seed, step) }),
+    )
+    .await;
     let signed = assertion(&app, &cookie, &mut soft).await;
     let id = info["id"].as_i64().unwrap();
     let (status, _) = call(
@@ -668,7 +703,7 @@ async fn removing_a_passkey_leaves_it_unable_to_elevate() {
         &cookie,
         Method::DELETE,
         &format!("/api/security/passkeys/{id}"),
-        Some(password("pw")),
+        Some(serde_json::json!({ "password": "pw", "code": totp::code(&seed, step + 1) })),
     )
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
@@ -705,4 +740,87 @@ async fn the_enrolment_routes_need_a_session() {
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn once_a_factor_is_held_changing_factors_needs_proof_from_one() {
+    let (app, cookie, state, _cfg) = common::app_with_passkeys().await;
+    let step = totp::step_at(jiff::Timestamp::now());
+    let seed = enrol_totp_at(&app, &cookie, step - 1).await;
+
+    for (method, path) in [
+        (Method::POST, "/api/security/passkeys/challenge"),
+        (Method::POST, "/api/security/totp/start"),
+        (Method::DELETE, "/api/security/totp"),
+    ] {
+        let (status, v) = call(&app, &cookie, method.clone(), path, Some(password("pw"))).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{path}: {v}");
+        assert_eq!(v["factor_required"], true, "{path}");
+        let wrong = serde_json::json!({ "password": "pw", "code": "000000" });
+        let (status, _) = call(&app, &cookie, method, path, Some(wrong)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{path}");
+    }
+    let right = serde_json::json!({ "password": "nope", "code": totp::code(&seed, step) });
+    let (status, v) = call(&app, &cookie, Method::DELETE, "/api/security/totp", Some(right)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "the password is still checked: {v}");
+    assert_eq!(v["error"], "wrong password");
+
+    let right = serde_json::json!({ "password": "pw", "code": totp::code(&seed, step) });
+    let (status, _) = call(&app, &cookie, Method::DELETE, "/api/security/totp", Some(right)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "a code the wrong password never spent still works");
+    let (_, v) = call(&app, &cookie, Method::GET, "/api/security", None).await;
+    assert_eq!(v["totp"]["enabled"], false);
+
+    let logged = kinds(&state);
+    assert!(logged.contains(&"totp_enrolled".to_string()), "{logged:?}");
+    assert!(logged.contains(&"totp_removed".to_string()), "{logged:?}");
+    let mut told = false;
+    for _ in 0..50 {
+        if kinds(&state).iter().filter(|k| k.starts_with("delivery_")).count() >= 2 {
+            told = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(told, "each change goes out to the user: {:?}", kinds(&state));
+}
+
+#[tokio::test]
+async fn a_spent_code_cannot_prove_a_second_change() {
+    let (app, cookie, _state, _cfg) = common::app_with_passkeys().await;
+    let step = totp::step_at(jiff::Timestamp::now());
+    let seed = enrol_totp_at(&app, &cookie, step - 1).await;
+    let body = serde_json::json!({ "password": "pw", "code": totp::code(&seed, step) });
+    let (status, _) = call(&app, &cookie, Method::POST, "/api/security/totp/start", Some(body.clone())).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, v) = call(&app, &cookie, Method::DELETE, "/api/security/totp", Some(body)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{v}");
+    assert_eq!(v["error"], "that code doesn't match");
+}
+
+#[tokio::test]
+async fn a_passkey_assertion_proves_a_factor_change() {
+    let (app, cookie, _state, _cfg) = common::app_with_passkeys().await;
+    let (mut soft, _) = enrol_passkey(&app, &cookie, "phone").await;
+    let (status, _) = call(&app, &cookie, Method::POST, "/api/security/totp/start", Some(password("pw"))).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let signed = assertion_from(&app, &cookie, &mut soft, "/api/security/challenge").await;
+    let body = serde_json::json!({ "password": "pw", "assertion": signed });
+    let (status, v) = call(&app, &cookie, Method::POST, "/api/security/totp/start", Some(body.clone())).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let (status, _) = call(&app, &cookie, Method::POST, "/api/security/totp/start", Some(body)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "an assertion is single use");
+}
+
+#[tokio::test]
+async fn a_live_admin_grant_stands_in_for_the_factor() {
+    let (app, cookie, _state, _cfg) = common::app_with_passkeys().await;
+    let step = totp::step_at(jiff::Timestamp::now());
+    let seed = enrol_totp_at(&app, &cookie, step - 1).await;
+    let (status, v) = elevate(&app, &cookie, serde_json::json!({ "password": "pw", "code": totp::code(&seed, step) })).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let (status, _) = call(&app, &cookie, Method::DELETE, "/api/security/totp", Some(password("wrong"))).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "the grant never stands in for the password");
+    let (status, v) = call(&app, &cookie, Method::DELETE, "/api/security/totp", Some(password("pw"))).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{v}");
 }

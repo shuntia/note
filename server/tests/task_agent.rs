@@ -202,6 +202,7 @@ async fn a_session_that_changes_nothing_reports_unchanged() {
         .oneshot(
             Request::post("/api/tasks/1/agent")
                 .header(header::COOKIE, &cookie)
+                .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::empty())
                 .unwrap(),
         )
