@@ -772,14 +772,15 @@ async fn talk_returns_timing_and_the_transcript_keeps_the_trace() {
     assert_eq!(rows[2]["thought_ms"], v["thought_ms"]);
 }
 
-/// Answers once `open` is sent to, so a test can look at a turn mid-flight.
-struct GatedLLM(std::sync::Mutex<std::sync::mpsc::Receiver<()>>);
+/// Answers once `open` is sent to, so a test can look at a turn mid-flight; `fails` makes the answer an error.
+struct GatedLLM(std::sync::Mutex<std::sync::mpsc::Receiver<()>>, bool);
 impl note_server::providers::LLMProvider for GatedLLM {
     fn chat(
         &self,
         _: &note_server::providers::ChatRequest,
     ) -> anyhow::Result<note_server::providers::ChatResponse> {
         self.0.lock().unwrap().recv()?;
+        anyhow::ensure!(!self.1, "provider down");
         Ok(ChatResponse { text: "on it".into(), tool_calls: vec![] })
     }
 }
@@ -798,7 +799,7 @@ async fn get_json(app: &axum::Router, cookie: &str, uri: &str) -> serde_json::Va
 #[tokio::test(flavor = "multi_thread")]
 async fn a_turn_in_flight_shows_in_its_thread_to_its_user_alone() {
     let (open, gate) = std::sync::mpsc::channel();
-    let llm = Arc::new(GatedLLM(std::sync::Mutex::new(gate)));
+    let llm = Arc::new(GatedLLM(std::sync::Mutex::new(gate), false));
     let (app, cookie, state, _cfg) = common::app_with_logged_in_user_llm_and_state(llm).await;
     {
         let conn = state.db.lock().unwrap();
@@ -878,4 +879,67 @@ async fn a_failed_turn_in_a_thread_takes_back_only_its_own_message() {
         .collect::<Result<_, _>>()
         .unwrap();
     assert_eq!(kept, ["hi", "hello"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_turn_whose_thread_was_deleted_and_its_id_reused_leaves_the_new_owner_alone() {
+    for fails in [false, true] {
+        let (open, gate) = std::sync::mpsc::channel();
+        let llm = Arc::new(GatedLLM(std::sync::Mutex::new(gate), fails));
+        let (app, cookie, state, _cfg) = common::app_with_logged_in_user_llm_and_state(llm).await;
+        let sending = {
+            let (app, cookie) = (app.clone(), cookie.clone());
+            tokio::spawn(async move {
+                app.oneshot(
+                    Request::post("/api/talk")
+                        .header(header::COOKIE, &cookie)
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(r#"{"message":"hi"}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            })
+        };
+        let mut live = serde_json::Value::Null;
+        for _ in 0..200 {
+            live = get_json(&app, &cookie, "/api/talk/live").await;
+            if !live.is_null() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let id = live["conversation_id"].as_i64().expect("the turn is live");
+        let res = app
+            .clone()
+            .oneshot(
+                Request::delete(format!("/api/conversations/{id}"))
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(res.status().is_success(), "{}", res.status());
+        let theirs = {
+            let conn = state.db.lock().unwrap();
+            note_server::auth::create_user(&conn, "bo", "pw", false).unwrap();
+            let bo: i64 = conn.query_row("SELECT id FROM users WHERE username = 'bo'", [], |r| r.get(0)).unwrap();
+            let theirs = note_server::talk::create(&conn, bo, "bo's chat", jiff::Timestamp::now()).unwrap();
+            note_server::talk::append_text(&conn, theirs, "user", "mine", jiff::Timestamp::now()).unwrap();
+            theirs
+        };
+        assert_eq!(theirs, id, "the deleted id is reused");
+        open.send(()).unwrap();
+        sending.await.unwrap();
+        let conn = state.db.lock().unwrap();
+        let kept: Vec<String> = conn
+            .prepare("SELECT content FROM talk_messages WHERE conversation_id = ?1 ORDER BY id")
+            .unwrap()
+            .query_map([theirs], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(kept, ["mine"], "fails: {fails}");
+    }
 }

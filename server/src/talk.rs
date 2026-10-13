@@ -659,9 +659,13 @@ pub async fn run_turn(
             Err(e) => {
                 let conn = st.db();
                 let undone = if conversation.is_some() {
-                    conn.execute("DELETE FROM talk_messages WHERE id = ?1", [user_row])
+                    conn.execute(
+                        "DELETE FROM talk_messages WHERE id = ?1 AND conversation_id IN
+                            (SELECT id FROM conversations WHERE id = ?2 AND user_id = ?3)",
+                        (user_row, conv_id, user_id),
+                    )
                 } else {
-                    conn.execute("DELETE FROM conversations WHERE id = ?1", [conv_id])
+                    conn.execute("DELETE FROM conversations WHERE id = ?1 AND user_id = ?2", (conv_id, user_id))
                 };
                 if let Err(undo) = undone {
                     let _ = crate::log::record(&conn, Some(user_id), "talk_error", &format!("undoing the turn: {undo:#}"));
@@ -675,6 +679,7 @@ pub async fn run_turn(
             out.reply.clone()
         };
         let conn = st.db();
+        anyhow::ensure!(owned(&conn, user_id, conv_id)?, "the conversation was deleted mid-turn");
         for s in &out.steps {
             append_tool(
                 &conn,
