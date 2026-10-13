@@ -132,6 +132,11 @@ pub fn allowance(
     user_id: i64,
     date: jiff::civil::Date,
 ) -> rusqlite::Result<u32> {
+    allowance_over(conn, allowance_of(config_dir, username), user_id, date)
+}
+
+/// `allowance` over a daily allowance already read from the user's config.
+pub fn allowance_over(conn: &Connection, per_day: u32, user_id: i64, date: jiff::civil::Date) -> rusqlite::Result<u32> {
     let extra: i64 = conn
         .query_row(
             "SELECT extra FROM trigger_budgets WHERE user_id = ?1 AND date = ?2",
@@ -140,7 +145,7 @@ pub fn allowance(
         )
         .optional()?
         .unwrap_or(0);
-    Ok(allowance_of(config_dir, username).saturating_add(extra.max(0) as u32))
+    Ok(per_day.saturating_add(extra.max(0) as u32))
 }
 
 /// Triggers the agent laid, or idleness laid, for that day out of its own

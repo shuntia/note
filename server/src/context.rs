@@ -176,12 +176,44 @@ const CAPS: [Caps; 7] = [
 
 const WORKING_MEMORY_CAP: usize = 40;
 
+/// The user's files `assemble` renders from, read without the DB lock.
+pub struct Sources {
+    ucfg: crate::config::UserConfig,
+    lang: Lang,
+    standing: String,
+    nightly_notes: Option<(String, String)>,
+}
+
+impl Sources {
+    pub fn load(config_dir: &Path, username: &str, ucfg: crate::config::UserConfig) -> Self {
+        let lang = Lang::from_config(Some(&ucfg), config_dir, username);
+        let standing = std::fs::read_to_string(standing_path(config_dir, username))
+            .unwrap_or_else(|_| mt::no_standing(lang).into());
+        let nightly_notes = read_nightly_notes(config_dir, username);
+        Self { ucfg, lang, standing, nightly_notes }
+    }
+}
+
 /// Renders the full injection context: the standing document verbatim, then a
 /// dynamic block from the DB. Ordered standing-first for prompt-cache
-/// stability — the standing doc changes rarely, the dynamic block every call.
+/// stability — the standing doc changes rarely, the dynamic block every call,
+/// and the clock, which changes every minute, closes the block.
 pub fn assemble(conn: &Connection, config_dir: &Path, data_dir: &Path, user_id: i64, username: &str, now: jiff::Timestamp) -> Result<String> {
-    let ucfg = crate::config::UserConfig::load(config_dir, username)?;
-    let l = Lang::for_user(config_dir, username);
+    let sources = Sources::load(config_dir, username, crate::config::UserConfig::load(config_dir, username)?);
+    assemble_from(conn, &sources, data_dir, user_id, username, now)
+}
+
+/// `assemble` with the user's files already read.
+pub fn assemble_from(
+    conn: &Connection,
+    sources: &Sources,
+    data_dir: &Path,
+    user_id: i64,
+    username: &str,
+    now: jiff::Timestamp,
+) -> Result<String> {
+    let Sources { ucfg, lang: l, standing, nightly_notes: notes } = sources;
+    let l = *l;
     let (tz, tz_label) = match jiff::tz::TimeZone::get(&ucfg.timezone) {
         Ok(tz) => (tz, ucfg.timezone.clone()),
         Err(_) => (jiff::tz::TimeZone::UTC, mt::timezone_invalid(l).into()),
@@ -190,8 +222,6 @@ pub fn assemble(conn: &Connection, config_dir: &Path, data_dir: &Path, user_id: 
     let today = local.date();
     let tomorrow = today.tomorrow()?;
     let now_min = i64::from(local.hour()) * 60 + i64::from(local.minute());
-    let standing = std::fs::read_to_string(standing_path(config_dir, username))
-        .unwrap_or_else(|_| mt::no_standing(l).into());
 
     let events = crate::plan::events_for(conn, user_id, today)?;
     let tasks = crate::tasks::list(conn, user_id)?;
@@ -218,13 +248,8 @@ pub fn assemble(conn: &Connection, config_dir: &Path, data_dir: &Path, user_id: 
         .unwrap_or_else(|| crate::config::CATEGORY_MEMBER.into());
     let debrief = latest_debrief(conn, user_id, today)?;
     let activity = recent_activity(conn, user_id)?;
-    let notes = read_nightly_notes(config_dir, username);
-    let working_s = working_section(
-        l,
-        &crate::notes::active(conn, data_dir, username, now)?,
-        &crate::notes::upcoming(conn, data_dir, username, now)?,
-        &tz,
-    );
+    let (active_notes, upcoming_notes) = crate::notes::active_and_upcoming(conn, data_dir, username, now)?;
+    let working_s = working_section(l, &active_notes, &upcoming_notes, &tz);
 
     let quiet = crate::calendar::quiet_window(conn, user_id, &tz, now)?;
     let calendar = crate::calendar::occurrences(conn, user_id, today)?;
@@ -237,13 +262,13 @@ pub fn assemble(conn: &Connection, config_dir: &Path, data_dir: &Path, user_id: 
     );
     let settings_s = settings_section(
         l,
-        &ucfg,
+        ucfg,
         &tz_label,
         ucfg.features(&category),
         crate::memory::live_count_by_category(conn, username).unwrap_or_default(),
         (
             crate::triggers::spent(conn, user_id, today).unwrap_or(0),
-            crate::triggers::allowance(conn, config_dir, username, user_id, today)
+            crate::triggers::allowance_over(conn, ucfg.triggers_per_day(), user_id, today)
                 .unwrap_or_else(|_| ucfg.triggers_per_day()),
         ),
         crate::learn::plan_factor(conn, user_id).unwrap_or(None),
@@ -251,7 +276,6 @@ pub fn assemble(conn: &Connection, config_dir: &Path, data_dir: &Path, user_id: 
     let render = |caps: &Caps| {
         let mut s = String::with_capacity(2048);
         s.push_str(&notes_section(l, notes.as_ref(), today, caps.notes));
-        s.push_str(&now_s);
         s.push_str(&plan_s);
         s.push_str(&tasks_section(l, &now_tasks, &later, done_today, caps.later, &tz, today, now));
         s.push_str(&order_section(l, &order));
@@ -262,7 +286,7 @@ pub fn assemble(conn: &Connection, config_dir: &Path, data_dir: &Path, user_id: 
         s
     };
 
-    let budget = MAX_DYNAMIC_BYTES + working_s.len();
+    let budget = MAX_DYNAMIC_BYTES + working_s.len() - now_s.len();
     let mut block = render(&CAPS[0]);
     for caps in &CAPS[1..] {
         if block.len() <= budget {
@@ -277,6 +301,7 @@ pub fn assemble(conn: &Connection, config_dir: &Path, data_dir: &Path, user_id: 
         }
         block.truncate(cut);
     }
+    block.push_str(&now_s);
     Ok(format!("{}\n\n{}\n\n{block}", mt::standing_heading(l), standing.trim()))
 }
 
@@ -295,7 +320,7 @@ fn now_section(
     nightly_time: &str,
     quiet: Option<&crate::calendar::QuietWindow>,
 ) -> String {
-    let mut s = String::from(mt::now_heading(l));
+    let mut s = format!("\n{}", mt::now_heading(l));
     let _ = writeln!(
         s,
         "{} {tz_label} {} | {} | {}",
@@ -324,7 +349,6 @@ fn now_section(
     if let Some(q) = quiet {
         let _ = writeln!(s, "{}", mt::quiet_until(l, &q.end, &q.title));
     }
-    s.push('\n');
     s
 }
 
@@ -784,7 +808,7 @@ mod tests {
 
     /// The part rebuilt on every call, which is what the size ceiling covers.
     fn dynamic(out: &str) -> &str {
-        let start = ["# Notes from last night", "# (stale) Notes from last night", "# Now"]
+        let start = ["# Notes from last night", "# (stale) Notes from last night", "# Today's plan"]
             .iter()
             .filter_map(|h| out.find(h))
             .min()
@@ -1451,6 +1475,18 @@ mod tests {
         let now = out.find("# Now").expect("a Now section");
         assert!(standing < header && header < now, "{out}");
         assert!(out.contains("low energy after 21:00"), "{out}");
+    }
+
+    #[test]
+    fn the_clock_closes_the_block_so_everything_before_it_stays_cacheable() {
+        let tmp = cfg_dir();
+        let (conn, uid) = user();
+        let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
+        let activity = out.find("# Recent activity").expect("an activity section");
+        let now = out.find("# Now").expect("a Now section");
+        assert!(activity < now, "{out}");
+        assert!(!out[now + 1..].contains("\n# "), "{out}");
+        assert!(out.contains("\n\n# Now\n\nMonday 2026-08-31 21:00"), "{out}");
     }
 
     #[test]
