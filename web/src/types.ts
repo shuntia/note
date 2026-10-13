@@ -1,3 +1,4 @@
+import type { WritableSetting } from './api'
 import type { AgentFrame } from './ws'
 
 // `onboarding` holds from joining by invite until the first-run flow is finished.
@@ -256,32 +257,7 @@ export type VoiceChoice = { id: string; label: string; backend?: string; slow?: 
 
 export type AlertPatch = { index: number; alert: boolean }
 
-export type SettingsSaved = Pick<
-  Settings,
-  | 'display_name'
-  | 'timezone'
-  | 'timezone_auto'
-  | 'nightly_time'
-  | 'close_day_time'
-  | 'morning_until'
-  | 'template'
-  | 'show_arc_between_sessions'
-  | 'counter'
-  | 'nightly_enabled'
-  | 'checkins_enabled'
-  | 'triggers_per_day'
-  | 'pomodoro_enabled'
-  | 'pomodoro_work_min'
-  | 'pomodoro_break_min'
-  | 'session_end_notify'
-  | 'idle_nudge_min'
-  | 'ring_for'
-  | 'voice_voice'
-  | 'voice_cue'
-  | 'matrix_send'
-  | 'matrix_ping'
-  | 'language'
-> & { schedule: ScheduleRow[] }
+export type SettingsSaved = Pick<Settings, WritableSetting> & { schedule: ScheduleRow[] }
 
 export type AboutDoc = { content: string }
 

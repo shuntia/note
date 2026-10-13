@@ -68,7 +68,7 @@ import type {
   RequestChallenge,
 } from './webauthn'
 
-const WRITABLE_SETTINGS = [
+export const WRITABLE_SETTINGS = [
   'display_name',
   'timezone',
   'timezone_auto',
@@ -94,7 +94,9 @@ const WRITABLE_SETTINGS = [
   'language',
 ] as const
 
-type SettingsPatch = Partial<Pick<Settings, (typeof WRITABLE_SETTINGS)[number]>>
+export type WritableSetting = (typeof WRITABLE_SETTINGS)[number]
+
+export type SettingsPatch = Partial<Pick<Settings, WritableSetting>>
 
 type NewTaskOpts = {
   duration_min?: number
