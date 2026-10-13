@@ -634,7 +634,7 @@ mod tests {
     #[test]
     fn the_add_schema_offers_day_names_and_kinds() {
         let schema = schemas(SessionKind::Talk)
-            .into_iter()
+            .iter()
             .find(|s| s["name"] == "calendar_add")
             .unwrap();
         let text = schema["input_schema"].to_string();
