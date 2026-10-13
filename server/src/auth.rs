@@ -20,8 +20,86 @@ pub const WINDOW_MINS: i64 = 15;
 /// thread, so admission is bounded before the hash rather than by username.
 pub const MAX_CONCURRENT_LOGINS: usize = 4;
 
-/// Per-username fixed-window counter of *failed* attempts, consulted only after
-/// a verification has already failed, so a correct password is never refused.
+/// The pool signed-in password re-checks (elevation, password change, factor
+/// changes) hash in, apart from the one sign-ins and joins contend for.
+pub const MAX_CONCURRENT_RECHECKS: usize = 2;
+
+/// The failed sign-in that locks an account.
+pub const ACCOUNT_FAILURES: u32 = MAX_ATTEMPTS;
+/// The failed sign-in that locks a client address; higher than an account's
+/// because a household or an office shares one address.
+pub const CLIENT_FAILURES: u32 = 30;
+pub const BACKOFF_BASE_SECS: i64 = 30;
+pub const BACKOFF_CAP_SECS: i64 = WINDOW_MINS * 60;
+/// How long a locked key's failures are remembered after its last one.
+const BACKOFF_MEMORY_SECS: i64 = 24 * 3600;
+
+struct Strike {
+    failures: u32,
+    last: i64,
+    until: i64,
+}
+
+impl Strike {
+    fn forgotten(&self, now: i64, limit: u32) -> bool {
+        let memory = if self.failures >= limit { BACKOFF_MEMORY_SECS } else { WINDOW_MINS * 60 };
+        now >= self.until && now - self.last > memory
+    }
+}
+
+/// Per-key failure count with an exponential lockout: the failure that reaches
+/// `limit` locks the key for `BACKOFF_BASE_SECS`, and each further one doubles
+/// that up to `BACKOFF_CAP_SECS`. A locked key is refused before any password
+/// is hashed, whether or not the password would have been right.
+pub struct Backoff {
+    strikes: Mutex<HashMap<String, Strike>>,
+    limit: u32,
+}
+
+impl Backoff {
+    pub fn new(limit: u32) -> Self {
+        Self { strikes: Mutex::new(HashMap::new()), limit }
+    }
+
+    /// Seconds left on the key's lockout; `None` when it may try.
+    pub fn locked(&self, key: &str, now: jiff::Timestamp) -> Option<i64> {
+        let now = now.as_second();
+        let strikes = self.strikes.lock().unwrap();
+        strikes.get(limiter_key(key)).map(|e| e.until - now).filter(|left| *left > 0)
+    }
+
+    pub fn fail(&self, key: &str, now: jiff::Timestamp) {
+        let now = now.as_second();
+        let mut strikes = self.strikes.lock().unwrap();
+        let fresh = Strike { failures: 0, last: now, until: 0 };
+        let e = strikes.entry(limiter_key(key).to_string()).or_insert(fresh);
+        if e.forgotten(now, self.limit) {
+            *e = Strike { failures: 0, last: now, until: 0 };
+        }
+        e.failures += 1;
+        e.last = now;
+        if e.failures >= self.limit {
+            let doublings = (e.failures - self.limit).min(16);
+            e.until = now + (BACKOFF_BASE_SECS << doublings).min(BACKOFF_CAP_SECS);
+        }
+    }
+
+    pub fn clear(&self, key: &str) {
+        self.strikes.lock().unwrap().remove(limiter_key(key));
+    }
+
+    pub fn sweep(&self, now: jiff::Timestamp) {
+        let (now, limit) = (now.as_second(), self.limit);
+        self.strikes.lock().unwrap().retain(|_, e| !e.forgotten(now, limit));
+    }
+
+    #[cfg(test)]
+    pub fn tracked(&self) -> usize {
+        self.strikes.lock().unwrap().len()
+    }
+}
+
+/// Per-key fixed-window counter of attempts.
 pub struct LoginLimiter {
     attempts: Mutex<HashMap<String, (u32, jiff::Timestamp)>>,
     max: u32,
@@ -525,6 +603,50 @@ mod tests {
         assert_eq!(lim.tracked(), 1);
         lim.sweep(later + jiff::Span::new().minutes(WINDOW_MINS + 1));
         assert_eq!(lim.tracked(), 0);
+    }
+
+    fn at(secs: i64) -> jiff::Timestamp {
+        t0() + jiff::Span::new().seconds(secs)
+    }
+
+    #[test]
+    fn backoff_locks_at_the_limit_and_doubles_up_to_the_cap() {
+        let b = Backoff::new(3);
+        b.fail("aki", t0());
+        b.fail("aki", t0());
+        assert_eq!(b.locked("aki", t0()), None);
+        b.fail("aki", t0());
+        assert_eq!(b.locked("aki", t0()), Some(BACKOFF_BASE_SECS));
+        assert_eq!(b.locked("aki", at(BACKOFF_BASE_SECS)), None);
+        assert_eq!(b.locked("other", t0()), None);
+        b.fail("aki", at(BACKOFF_BASE_SECS));
+        assert_eq!(b.locked("aki", at(BACKOFF_BASE_SECS)), Some(2 * BACKOFF_BASE_SECS));
+        for _ in 0..40 {
+            b.fail("aki", at(BACKOFF_BASE_SECS));
+        }
+        assert_eq!(b.locked("aki", at(BACKOFF_BASE_SECS)), Some(BACKOFF_CAP_SECS));
+        b.clear("aki");
+        assert_eq!(b.locked("aki", at(BACKOFF_BASE_SECS)), None);
+    }
+
+    #[test]
+    fn backoff_forgets_a_few_failures_after_the_window_and_a_lockout_after_a_day() {
+        let window = WINDOW_MINS * 60;
+        let b = Backoff::new(3);
+        b.fail("few", t0());
+        b.fail("few", t0());
+        b.fail("few", at(window + 1));
+        assert_eq!(b.locked("few", at(window + 1)), None, "the earlier two lapsed");
+
+        for _ in 0..3 {
+            b.fail("locked", t0());
+        }
+        b.sweep(at(window + 1));
+        assert_eq!(b.tracked(), 2);
+        b.fail("locked", at(window + 1));
+        assert_eq!(b.locked("locked", at(window + 1)), Some(2 * BACKOFF_BASE_SECS));
+        b.sweep(at(window + 2 + BACKOFF_MEMORY_SECS));
+        assert_eq!(b.tracked(), 0);
     }
 
     #[test]

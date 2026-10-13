@@ -146,9 +146,15 @@ pub struct AppState {
     /// the web call is wired.
     pub web_calls: Arc<dyn crate::channels::WebCalls>,
     pub secure_cookies: bool,
-    pub login_limiter: Arc<crate::auth::LoginLimiter>,
+    /// Failed sign-ins per username.
+    pub login_limiter: Arc<crate::auth::Backoff>,
+    /// Failed sign-ins per client address; consulted before a sign-in or a
+    /// join takes a slot.
+    pub login_clients: Arc<crate::auth::Backoff>,
     /// Bounds concurrent password hashes; see `auth::MAX_CONCURRENT_LOGINS`.
     pub login_slots: Arc<tokio::sync::Semaphore>,
+    /// See `auth::MAX_CONCURRENT_RECHECKS`.
+    pub recheck_slots: Arc<tokio::sync::Semaphore>,
     pub talk_gate: Arc<TalkGate>,
     pub live_turns: Arc<crate::talk::LiveTurns>,
     pub admin_limiter: Arc<crate::auth::LoginLimiter>,
@@ -205,9 +211,13 @@ impl AppState {
             channels: vec![ws],
             web_calls: Arc::new(crate::channels::NoWebCalls),
             secure_cookies: false,
-            login_limiter: Arc::new(crate::auth::LoginLimiter::new()),
+            login_limiter: Arc::new(crate::auth::Backoff::new(crate::auth::ACCOUNT_FAILURES)),
+            login_clients: Arc::new(crate::auth::Backoff::new(crate::auth::CLIENT_FAILURES)),
             login_slots: Arc::new(tokio::sync::Semaphore::new(
                 crate::auth::MAX_CONCURRENT_LOGINS,
+            )),
+            recheck_slots: Arc::new(tokio::sync::Semaphore::new(
+                crate::auth::MAX_CONCURRENT_RECHECKS,
             )),
             talk_gate: Arc::new(TalkGate::new()),
             live_turns: Arc::default(),

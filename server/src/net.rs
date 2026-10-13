@@ -96,6 +96,20 @@ pub fn fetch_site_ok(headers: &axum::http::HeaderMap) -> bool {
     }
 }
 
+/// Provenance for a write a browser could be tricked into sending with its
+/// cookie: the browser's own label when it names Note's page, else an `Origin`
+/// `origin_ok` accepts. A request carrying neither is not from a browser.
+pub fn write_provenance_ok(headers: &axum::http::HeaderMap, allowed: &[String], bind_addr: Option<&str>) -> bool {
+    let site = headers.get("sec-fetch-site").and_then(|v| v.to_str().ok());
+    if matches!(site, Some("same-origin" | "none")) {
+        return true;
+    }
+    if headers.contains_key(axum::http::header::ORIGIN) {
+        return origin_ok(headers, allowed, bind_addr);
+    }
+    site.is_none()
+}
+
 /// A browser's `Origin` must be one of `allowed`, or name the host the request
 /// was sent to over https (plain http only on loopback or the listening
 /// address); a non-browser client sends none.
@@ -265,6 +279,28 @@ mod tests {
             h.insert("sec-fetch-site", bad.parse().unwrap());
             assert!(!fetch_site_ok(&h), "{bad}");
         }
+    }
+
+    #[test]
+    fn a_write_needs_a_same_origin_label_or_a_known_origin() {
+        let allowed = page_origins("https://note.example.net", None);
+        let headers = |pairs: &[(&'static str, &str)]| {
+            let mut h = axum::http::HeaderMap::new();
+            for (k, v) in pairs {
+                h.insert(*k, v.parse().unwrap());
+            }
+            h
+        };
+        let ok = |pairs: &[(&'static str, &str)]| write_provenance_ok(&headers(pairs), &allowed, None);
+        assert!(ok(&[]), "no browser, no label");
+        assert!(ok(&[("sec-fetch-site", "same-origin")]));
+        assert!(ok(&[("sec-fetch-site", "none")]));
+        assert!(ok(&[("origin", "https://note.example.net")]));
+        assert!(ok(&[("sec-fetch-site", "same-site"), ("origin", "https://note.example.net")]));
+        assert!(!ok(&[("sec-fetch-site", "cross-site")]));
+        assert!(!ok(&[("origin", "https://evil.example")]));
+        assert!(!ok(&[("origin", "null")]));
+        assert!(!ok(&[("sec-fetch-site", "cross-site"), ("origin", "https://evil.example")]));
     }
 
     #[test]

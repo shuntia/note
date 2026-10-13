@@ -1,10 +1,10 @@
 import QRCode from 'qrcode'
 import { useEffect, useRef, useState, type FormEvent } from 'react'
-import { ApiError, security } from '../../api'
+import { ApiError, security, type FactorProof } from '../../api'
 import { useLoad } from '../../hooks'
 import { t, type Key } from '../../i18n'
 import type { Passkey, SecurityState, TotpEnrolment } from '../../types'
-import { createCredential, webauthnSupported, type RegistrationJSON } from '../../webauthn'
+import { createCredential, signChallenge, webauthnSupported, type RegistrationJSON } from '../../webauthn'
 import { dayOf, type Notify } from './common'
 
 const passkeyLine = (k: Passkey) =>
@@ -108,6 +108,8 @@ export function SecuritySection({
   )
   const [ask, setAsk] = useState<Ask | null>(null)
   const [password, setPassword] = useState('')
+  const [code, setCode] = useState('')
+  const [useCode, setUseCode] = useState(false)
   const [naming, setNaming] = useState<{ credential: RegistrationJSON; name: string } | null>(null)
   const [enrol, setEnrol] = useState<TotpEnrolment | null>(null)
   const [rename, setRename] = useState<{ id: number; name: string } | null>(null)
@@ -117,6 +119,11 @@ export function SecuritySection({
 
   const loaded = state !== undefined && state !== 'error' ? state : null
   const canPasskey = !!loaded?.webauthn_available && webauthnSupported()
+  // Once a factor is held, changing any of them is proved with one already held.
+  const holdsPasskey = (loaded?.passkeys.length ?? 0) > 0
+  const holdsTotp = !!loaded?.totp.enabled
+  const proveWithPasskey = holdsPasskey && canPasskey && !(useCode && holdsTotp)
+  const proveWithCode = holdsTotp && !proveWithPasskey
 
   const fail = (err: unknown, fallback: string) =>
     notify(err instanceof ApiError && err.status < 500 && err.message ? err.message : fallback)
@@ -124,7 +131,13 @@ export function SecuritySection({
   const open = (kind: Ask) => {
     setAsk(kind)
     setPassword('')
+    setCode('')
     setArming(null)
+  }
+
+  const proof = async (): Promise<FactorProof> => {
+    if (proveWithPasskey) return { assertion: await signChallenge(await security.challenge()) }
+    return proveWithCode ? { code } : {}
   }
 
   const answer = async (e: FormEvent) => {
@@ -133,22 +146,23 @@ export function SecuritySection({
     setBusy(true)
     try {
       if (ask.kind === 'add-passkey') {
-        const challenge = await security.passkeyChallenge(password)
+        const challenge = await security.passkeyChallenge(password, await proof())
         setAsk(null)
         setNaming({ credential: await createCredential(challenge), name: '' })
       } else if (ask.kind === 'drop-passkey') {
-        await security.removePasskey(ask.id, password)
+        await security.removePasskey(ask.id, password, await proof())
         setAsk(null)
         load()
       } else if (ask.kind === 'start-totp') {
-        setEnrol(await security.totpStart(password))
+        setEnrol(await security.totpStart(password, await proof()))
         setAsk(null)
       } else {
-        await security.totpRemove(password)
+        await security.totpRemove(password, await proof())
         setAsk(null)
         load()
       }
       setPassword('')
+      setCode('')
     } catch (err) {
       fail(err, t('settings.notThrough'))
     } finally {
@@ -304,9 +318,30 @@ export function SecuritySection({
             value={password}
             onChange={(e) => setPassword(e.target.value)}
           />
-          <button type="submit" className="btn-haze small" disabled={busy || !password}>
+          {proveWithCode && (
+            <input
+              aria-label={t('settings.security.code')}
+              placeholder={t('settings.security.code')}
+              inputMode="numeric"
+              autoComplete="one-time-code"
+              pattern="\d{6}"
+              maxLength={6}
+              value={code}
+              onChange={(e) => setCode(e.target.value)}
+            />
+          )}
+          <button
+            type="submit"
+            className="btn-haze small"
+            disabled={busy || !password || (proveWithCode && code.length !== 6)}
+          >
             {t(ASK_LABEL[ask.kind].action)}
           </button>
+          {holdsPasskey && canPasskey && holdsTotp && (
+            <button type="button" className="set-link" onClick={() => setUseCode((c) => !c)}>
+              {useCode ? t('settings.security.usePasskeyInstead') : t('settings.security.useCodeInstead')}
+            </button>
+          )}
           <button type="button" className="set-link" onClick={() => setAsk(null)}>
             {t('common.cancel')}
           </button>

@@ -1,4 +1,5 @@
 use crate::auth::{self, CurrentUser};
+use crate::text::FactorChange;
 use crate::AppState;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -472,6 +473,7 @@ pub fn claim_step(conn: &Connection, user_id: i64, step: i64) -> rusqlite::Resul
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/", get(overview))
+        .route("/challenge", post(factor_challenge))
         .route("/passkeys", post(passkey_finish))
         .route("/passkeys/challenge", post(passkey_challenge))
         .route(
@@ -487,24 +489,88 @@ fn error(status: StatusCode, message: &str) -> Response {
     (status, Json(serde_json::json!({ "error": message }))).into_response()
 }
 
+const FACTOR_REQUIRED: &str = "confirm with a passkey or a code from your app";
+const PASSKEY_UNVERIFIED: &str = "that passkey could not be verified";
+
+/// The account password, plus — once the account holds a second factor — a
+/// current code from its app or an assertion answering `POST /challenge`.
 #[derive(Deserialize)]
-struct PasswordReq {
+struct StepUpReq {
     password: String,
+    #[serde(default)]
+    code: Option<String>,
+    #[serde(default)]
+    assertion: Option<serde_json::Value>,
 }
 
-/// The sudo check every mutating call pays: a stolen session cannot add or drop
-/// a factor without the account password. Attempts are limited like a login.
-/// A `Some` is the response the route must answer with.
+enum Proof {
+    Code(String),
+    Assertion(Box<PublicKeyCredential>),
+}
+
+enum Checked {
+    Passed,
+    WrongPassword,
+    WrongCode,
+    WrongPasskey,
+}
+
+/// The sudo check a signed-in password change pays: a stolen session cannot
+/// change anything behind it without the account password. Attempts are
+/// limited like a login. A `Some` is the response the route must answer with.
 pub(crate) async fn password_refused(
     state: &AppState,
     user: &CurrentUser,
     password: String,
 ) -> Option<Response> {
+    recheck(state, user, password, None).await
+}
+
+/// Adding or removing a factor pays the password check and, once the account
+/// holds a factor, proof from one it holds, so a leaked password alone cannot
+/// swap the factors out. A live admin grant on this session stands in for the
+/// proof, since it was itself given for one. The first factor needs only the
+/// password.
+async fn factor_change_refused(state: &AppState, user: &CurrentUser, req: StepUpReq) -> Option<Response> {
+    let needs_proof = {
+        let conn = state.db();
+        let held = user_factors(&conn, user.id).map(|(passkey, totp)| passkey || totp);
+        let granted = crate::admin::session_granted(&conn, user, jiff::Timestamp::now().as_second());
+        match (held, granted) {
+            (Ok(held), Ok(granted)) => held && !granted,
+            _ => return Some(StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+        }
+    };
+    if !needs_proof {
+        return recheck(state, user, req.password, None).await;
+    }
+    let proof = match (req.assertion, req.code.filter(|c| !c.trim().is_empty())) {
+        (Some(raw), _) => match serde_json::from_value(raw) {
+            Ok(cred) => Proof::Assertion(Box::new(cred)),
+            Err(_) => return Some(error(StatusCode::UNAUTHORIZED, PASSKEY_UNVERIFIED)),
+        },
+        (None, Some(code)) => Proof::Code(code),
+        (None, None) => {
+            return Some(
+                (
+                    StatusCode::UNAUTHORIZED,
+                    Json(serde_json::json!({ "error": FACTOR_REQUIRED, "factor_required": true })),
+                )
+                    .into_response(),
+            )
+        }
+    };
+    recheck(state, user, req.password, Some(proof)).await
+}
+
+/// Verifies the password with no lock held, then spends the proof (a code's
+/// time step, an assertion's sign counter) only once the password is right.
+async fn recheck(state: &AppState, user: &CurrentUser, password: String, proof: Option<Proof>) -> Option<Response> {
     let now = jiff::Timestamp::now();
     if !state.security_limiter.try_attempt(&user.username, now) {
         return Some(error(StatusCode::TOO_MANY_REQUESTS, "too many attempts"));
     }
-    let Ok(slot) = state.login_slots.clone().try_acquire_owned() else {
+    let Ok(slot) = state.recheck_slots.clone().try_acquire_owned() else {
         return Some(
             (
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -515,23 +581,84 @@ pub(crate) async fn password_refused(
         );
     };
     let st = state.clone();
-    let id = user.id;
-    let verified = tokio::task::spawn_blocking(move || {
+    let u = user.clone();
+    let checked = tokio::task::spawn_blocking(move || -> anyhow::Result<Checked> {
         let _slot = slot;
-        let hash = {
-            let conn = st.db();
-            auth::stored_hash(&conn, id)
-        };
-        hash.map(|h| auth::verify_against(&password, h.as_deref()))
+        let hash = auth::stored_hash(&st.db(), u.id)?;
+        if !auth::verify_against(&password, hash.as_deref()) {
+            return Ok(Checked::WrongPassword);
+        }
+        match proof {
+            None => Ok(Checked::Passed),
+            Some(Proof::Code(code)) => {
+                let conn = st.db();
+                let step = totp_seed(&conn, u.id)?.and_then(|seed| crate::totp::verify(&seed, &code, now));
+                match step {
+                    Some(step) if claim_step(&conn, u.id, step)? => Ok(Checked::Passed),
+                    _ => Ok(Checked::WrongCode),
+                }
+            }
+            Some(Proof::Assertion(cred)) => {
+                let Ok(result) = st.passkeys.finish_authentication(&u.session_token, &cred, now.as_second()) else {
+                    return Ok(Checked::WrongPasskey);
+                };
+                if record_use(&st.db(), u.id, &result, now)? {
+                    Ok(Checked::Passed)
+                } else {
+                    Ok(Checked::WrongPasskey)
+                }
+            }
+        }
     })
     .await;
-    match verified {
-        Ok(Ok(true)) => {
+    match checked {
+        Ok(Ok(Checked::Passed)) => {
             state.security_limiter.clear(&user.username);
             None
         }
-        Ok(Ok(false)) => Some(error(StatusCode::UNAUTHORIZED, "wrong password")),
+        Ok(Ok(Checked::WrongPassword)) => Some(error(StatusCode::UNAUTHORIZED, "wrong password")),
+        Ok(Ok(Checked::WrongCode)) => Some(error(StatusCode::UNAUTHORIZED, "that code doesn't match")),
+        Ok(Ok(Checked::WrongPasskey)) => Some(error(StatusCode::UNAUTHORIZED, PASSKEY_UNVERIFIED)),
         _ => Some(StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+    }
+}
+
+/// Logs a factor change and tells the account holder through their channels,
+/// off the request's path.
+fn factor_changed(state: &AppState, conn: &Connection, user: &CurrentUser, kind: &str, detail: &str, change: FactorChange) {
+    let _ = crate::log::record(conn, Some(user.id), kind, detail);
+    let st = state.clone();
+    let (id, username) = (user.id, user.username.clone());
+    tokio::task::spawn_blocking(move || {
+        let lang = crate::text::Lang::for_user(&st.config_dir, &username);
+        let msg = crate::channels::OutboundMessage {
+            title: crate::text::factor_changed_title(lang),
+            reason: None,
+            body: crate::text::factor_changed(lang, change),
+            urgency: crate::channels::Urgency::Normal,
+            checkin: false,
+            event_id: None,
+            conversation_id: None,
+            actions: Vec::new(),
+        };
+        crate::channels::deliver_via(&st.db, &st.channels, id, &username, &msg);
+    });
+}
+
+/// The passkeys this account can assert with, to prove a factor change.
+async fn factor_challenge(user: CurrentUser, State(state): State<AppState>) -> Response {
+    if !state.passkeys.available() {
+        return error(StatusCode::SERVICE_UNAVAILABLE, &PasskeyError::Unavailable.to_string());
+    }
+    let Ok(keys) = credentials(&state.db(), user.id) else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    if keys.is_empty() {
+        return error(StatusCode::CONFLICT, "no passkeys on this account");
+    }
+    match state.passkeys.start_authentication(&user.session_token, &keys, jiff::Timestamp::now().as_second()) {
+        Ok(challenge) => Json(challenge).into_response(),
+        Err(e) => error(StatusCode::UNPROCESSABLE_ENTITY, &e.to_string()),
     }
 }
 
@@ -553,7 +680,7 @@ async fn overview(user: CurrentUser, State(state): State<AppState>) -> Response 
 async fn passkey_challenge(
     user: CurrentUser,
     State(state): State<AppState>,
-    Json(req): Json<PasswordReq>,
+    Json(req): Json<StepUpReq>,
 ) -> Response {
     if !state.passkeys.available() {
         return error(
@@ -561,18 +688,19 @@ async fn passkey_challenge(
             &PasskeyError::Unavailable.to_string(),
         );
     }
-    if let Some(refused) = password_refused(&state, &user, req.password).await {
+    let held = count(&state.db(), user.id);
+    match held {
+        Ok(held) if held as usize >= MAX_PASSKEYS => {
+            return error(StatusCode::CONFLICT, &SaveError::TooMany.to_string())
+        }
+        Ok(_) => {}
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+    if let Some(refused) = factor_change_refused(&state, &user, req).await {
         return refused;
     }
-    let existing = {
-        let conn = state.db();
-        match (count(&conn, user.id), credentials(&conn, user.id)) {
-            (Ok(held), _) if held as usize >= MAX_PASSKEYS => {
-                return error(StatusCode::CONFLICT, &SaveError::TooMany.to_string())
-            }
-            (Ok(_), Ok(keys)) => keys,
-            _ => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-        }
+    let Ok(existing) = credentials(&state.db(), user.id) else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
     let now = jiff::Timestamp::now().as_second();
     match state.passkeys.start_registration(
@@ -610,11 +738,13 @@ async fn passkey_finish(
     let conn = state.db();
     match add(&conn, user.id, &req.name, &key) {
         Ok(info) => {
-            let _ = crate::log::record(
+            factor_changed(
+                &state,
                 &conn,
-                Some(user.id),
+                &user,
                 "passkey_added",
                 &format!("passkey {} {:?}", info.id, info.name),
+                FactorChange::PasskeyAdded,
             );
             Json(info).into_response()
         }
@@ -650,19 +780,21 @@ async fn passkey_delete(
     user: CurrentUser,
     State(state): State<AppState>,
     Path(id): Path<i64>,
-    Json(req): Json<PasswordReq>,
+    Json(req): Json<StepUpReq>,
 ) -> Response {
-    if let Some(refused) = password_refused(&state, &user, req.password).await {
+    if let Some(refused) = factor_change_refused(&state, &user, req).await {
         return refused;
     }
     let conn = state.db();
     match remove(&conn, user.id, id) {
         Ok(Some(info)) => {
-            let _ = crate::log::record(
+            factor_changed(
+                &state,
                 &conn,
-                Some(user.id),
+                &user,
                 "passkey_removed",
                 &format!("passkey {} {:?}", info.id, info.name),
+                FactorChange::PasskeyRemoved,
             );
             StatusCode::NO_CONTENT.into_response()
         }
@@ -674,9 +806,9 @@ async fn passkey_delete(
 async fn totp_start_route(
     user: CurrentUser,
     State(state): State<AppState>,
-    Json(req): Json<PasswordReq>,
+    Json(req): Json<StepUpReq>,
 ) -> Response {
-    if let Some(refused) = password_refused(&state, &user, req.password).await {
+    if let Some(refused) = factor_change_refused(&state, &user, req).await {
         return refused;
     }
     let conn = state.db();
@@ -705,7 +837,7 @@ async fn totp_confirm_route(
     let conn = state.db();
     match totp_confirm(&conn, user.id, &req.code, jiff::Timestamp::now()) {
         Ok(true) => {
-            let _ = crate::log::record(&conn, Some(user.id), "totp_enrolled", &user.username);
+            factor_changed(&state, &conn, &user, "totp_enrolled", &user.username, FactorChange::TotpEnrolled);
             StatusCode::NO_CONTENT.into_response()
         }
         Ok(false) => error(StatusCode::UNAUTHORIZED, "that code doesn't match"),
@@ -716,15 +848,15 @@ async fn totp_confirm_route(
 async fn totp_delete(
     user: CurrentUser,
     State(state): State<AppState>,
-    Json(req): Json<PasswordReq>,
+    Json(req): Json<StepUpReq>,
 ) -> Response {
-    if let Some(refused) = password_refused(&state, &user, req.password).await {
+    if let Some(refused) = factor_change_refused(&state, &user, req).await {
         return refused;
     }
     let conn = state.db();
     match totp_remove(&conn, user.id) {
         Ok(()) => {
-            let _ = crate::log::record(&conn, Some(user.id), "totp_removed", &user.username);
+            factor_changed(&state, &conn, &user, "totp_removed", &user.username, FactorChange::TotpRemoved);
             StatusCode::NO_CONTENT.into_response()
         }
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),

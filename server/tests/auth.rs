@@ -148,30 +148,88 @@ async fn wrong_password_is_401_and_me_without_cookie_is_401() {
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 }
 
+fn sign_in(username: &str, password: &str, client: &str) -> Request<Body> {
+    Request::post("/api/login")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("cf-connecting-ip", client)
+        .body(Body::from(format!(r#"{{"username":"{username}","password":"{password}"}}"#)))
+        .unwrap()
+}
+
 #[tokio::test]
-async fn correct_password_succeeds_while_the_username_is_rate_limited() {
+async fn a_locked_username_refuses_even_the_right_password_without_hashing() {
+    let (state, _tmp) = state_with_user();
+    let app = api::router(state.clone());
+    for _ in 0..auth::ACCOUNT_FAILURES {
+        let res = app.clone().oneshot(sign_in("aki", "wrong", "198.51.100.1")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+    let held: Vec<_> = (0..auth::MAX_CONCURRENT_LOGINS)
+        .map(|_| state.login_slots.clone().try_acquire_owned().unwrap())
+        .collect();
+    let res = app.clone().oneshot(sign_in("aki", "hunter2", "198.51.100.2")).await.unwrap();
+    assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS, "refused before a slot is even asked for");
+    let wait: i64 = res.headers()[header::RETRY_AFTER].to_str().unwrap().parse().unwrap();
+    assert!((1..=auth::BACKOFF_BASE_SECS).contains(&wait));
+    assert!(!res.headers().contains_key(header::SET_COOKIE));
+    drop(held);
+
+    state.login_limiter.clear("aki");
+    let res = app.oneshot(sign_in("aki", "hunter2", "198.51.100.2")).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_successful_sign_in_forgets_the_usernames_failures() {
     let (state, _tmp) = state_with_user();
     let app = api::router(state);
-    let wrong = || {
-        Request::post("/api/login")
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(r#"{"username":"aki","password":"wrong"}"#))
-            .unwrap()
-    };
-    for _ in 0..11 {
-        app.clone().oneshot(wrong()).await.unwrap();
+    for _ in 0..auth::ACCOUNT_FAILURES - 1 {
+        app.clone().oneshot(sign_in("aki", "wrong", "198.51.100.1")).await.unwrap();
     }
+    let res = app.clone().oneshot(sign_in("aki", "hunter2", "198.51.100.1")).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    for _ in 0..auth::ACCOUNT_FAILURES - 1 {
+        let res = app.clone().oneshot(sign_in("aki", "wrong", "198.51.100.1")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+}
+
+#[tokio::test]
+async fn a_signed_in_password_recheck_does_not_wait_on_sign_in_slots() {
+    let (state, _tmp) = state_with_user();
+    let app = api::router(state.clone());
+    let res = app.clone().oneshot(sign_in("aki", "hunter2", "198.51.100.1")).await.unwrap();
+    let cookie = res.headers()[header::SET_COOKIE].to_str().unwrap().split(';').next().unwrap().to_string();
+    let held: Vec<_> = (0..auth::MAX_CONCURRENT_LOGINS)
+        .map(|_| state.login_slots.clone().try_acquire_owned().unwrap())
+        .collect();
     let res = app
         .oneshot(
-            Request::post("/api/login")
+            Request::post("/api/password")
+                .header(header::COOKIE, &cookie)
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"username":"aki","password":"hunter2"}"#))
+                .body(Body::from(r#"{"current":"hunter2","new":"correct horse"}"#))
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(res.status(), StatusCode::OK);
-    assert!(res.headers().contains_key(header::SET_COOKIE));
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    drop(held);
+}
+
+#[tokio::test]
+async fn one_address_guessing_across_usernames_is_locked_out_alone() {
+    let (state, _tmp) = state_with_user();
+    let app = api::router(state);
+    for i in 0..auth::CLIENT_FAILURES {
+        let res = app.clone().oneshot(sign_in(&format!("guess{i}"), "wrong", "203.0.113.7")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+    let res = app.clone().oneshot(sign_in("aki", "hunter2", "203.0.113.7")).await.unwrap();
+    assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(res.headers().contains_key(header::RETRY_AFTER));
+    let res = app.oneshot(sign_in("aki", "hunter2", "203.0.113.8")).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK, "another address is unaffected");
 }
 
 #[tokio::test]

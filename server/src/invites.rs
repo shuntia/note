@@ -285,7 +285,8 @@ async fn join(
     if req.password.chars().count() < MIN_PASSWORD_LEN {
         return refuse(StatusCode::UNPROCESSABLE_ENTITY, &text::err_join_password(lang, MIN_PASSWORD_LEN));
     }
-    if !state.join_limiter.try_attempt(&key, jiff::Timestamp::now()) {
+    let now = jiff::Timestamp::now();
+    if state.login_clients.locked(&key, now).is_some() || !state.join_limiter.try_attempt(&key, now) {
         return refuse(StatusCode::TOO_MANY_REQUESTS, &text::err_invite_rate(lang));
     }
     let Ok(slot) = state.login_slots.clone().try_acquire_owned() else {

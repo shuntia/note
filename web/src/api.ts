@@ -400,14 +400,19 @@ export const api = {
 
 const SECURITY = '/api/security'
 
+// Proof from a factor the account already holds, which adding or dropping
+// another needs once there is one.
+export type FactorProof = { code: string } | { assertion: AssertionJSON } | Record<string, never>
+
 // Every mutating call carries the account password: adding or dropping a second
 // factor asks for it again, whatever the session already proved.
 export const security = {
   state: () => request<SecurityState>(SECURITY),
-  passkeyChallenge: (password: string) =>
+  challenge: () => request<RequestChallenge>(`${SECURITY}/challenge`, { method: 'POST' }),
+  passkeyChallenge: (password: string, proof: FactorProof = {}) =>
     request<CreationChallenge>(`${SECURITY}/passkeys/challenge`, {
       method: 'POST',
-      body: JSON.stringify({ password }),
+      body: JSON.stringify({ password, ...proof }),
     }),
   addPasskey: (name: string, credential: RegistrationJSON) =>
     request<Passkey>(`${SECURITY}/passkeys`, {
@@ -419,20 +424,20 @@ export const security = {
       method: 'PATCH',
       body: JSON.stringify({ name }),
     }),
-  removePasskey: (id: number, password: string) =>
+  removePasskey: (id: number, password: string, proof: FactorProof = {}) =>
     request<void>(`${SECURITY}/passkeys/${id}`, {
       method: 'DELETE',
-      body: JSON.stringify({ password }),
+      body: JSON.stringify({ password, ...proof }),
     }),
-  totpStart: (password: string) =>
+  totpStart: (password: string, proof: FactorProof = {}) =>
     request<TotpEnrolment>(`${SECURITY}/totp/start`, {
       method: 'POST',
-      body: JSON.stringify({ password }),
+      body: JSON.stringify({ password, ...proof }),
     }),
   totpConfirm: (code: string) =>
     request<void>(`${SECURITY}/totp/confirm`, { method: 'POST', body: JSON.stringify({ code }) }),
-  totpRemove: (password: string) =>
-    request<void>(`${SECURITY}/totp`, { method: 'DELETE', body: JSON.stringify({ password }) }),
+  totpRemove: (password: string, proof: FactorProof = {}) =>
+    request<void>(`${SECURITY}/totp`, { method: 'DELETE', body: JSON.stringify({ password, ...proof }) }),
 }
 
 const ADMIN = '/api/admin'

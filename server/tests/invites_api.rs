@@ -113,6 +113,18 @@ async fn a_used_invite_is_refused() {
 }
 
 #[tokio::test]
+async fn an_address_locked_out_of_sign_in_cannot_join_either() {
+    let (app, cookies, state, _cfg) = elevated().await;
+    let token = token_of(&invite(&app, &cookies, "{}").await);
+    for _ in 0..note_server::auth::CLIENT_FAILURES {
+        state.login_clients.fail("local", jiff::Timestamp::now());
+    }
+    assert_eq!(join(&app, &token, "mika").await.status(), StatusCode::TOO_MANY_REQUESTS);
+    state.login_clients.clear("local");
+    assert_eq!(join(&app, &token, "mika").await.status(), StatusCode::CREATED, "the invite was not spent");
+}
+
+#[tokio::test]
 async fn an_expired_invite_is_refused() {
     let (app, cookies, state, _cfg) = elevated().await;
     let token = token_of(&invite(&app, &cookies, "{}").await);
