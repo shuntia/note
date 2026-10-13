@@ -23,7 +23,7 @@ export function ComposeButton({
     <button
       type={send ? 'submit' : 'button'}
       className="compose-button"
-      data-face={send ? 'send' : 'mic'}
+      data-face={send ? 'send' : 'call'}
       aria-label={send ? t('talk.send') : micBlocked ? t('talk.micBlocked') : t('talk.call')}
       disabled={send ? busy || !draft.trim() : busy || micBlocked}
       onMouseDown={(e) => e.preventDefault()}
@@ -34,10 +34,8 @@ export function ComposeButton({
         <path d="M13 6l6 6-6 6" />
       </svg>
       {onCall && (
-        <svg className="face-mic" viewBox="0 0 24 24" aria-hidden="true">
-          <rect x="9" y="3" width="6" height="11" rx="3" />
-          <path d="M5 11a7 7 0 0 0 14 0" />
-          <path d="M12 18v3" />
+        <svg className="face-call" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M4 10.5v3M8 7.5v9M12 4v16M16 8.5v7M20 10.5v3" />
           {micBlocked && <path d="M4 4l16 16" />}
         </svg>
       )}

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from 'react'
+import { useEffect, useId, useRef, useState, type KeyboardEvent, type PointerEvent } from 'react'
 import { t } from '../i18n'
 import { reducedMotion } from '../motion'
 import { declineRing, onCallFrame } from '../ws'
@@ -200,6 +200,8 @@ export function CallView({
   }, [])
 
   const state = phase === 'live' || phase === 'hanging' ? live : phase
+  const silenced = muted && phase !== 'ringing' && phase !== 'gone'
+  const gap = useId()
 
   return (
     <div
@@ -229,6 +231,17 @@ export function CallView({
         onClick={tap}
       >
         <canvas ref={canvas} aria-hidden="true" />
+        <svg className={`call-mute${silenced ? ' on' : ''}`} viewBox="0 0 48 48" aria-hidden="true">
+          <mask id={gap} maskUnits="userSpaceOnUse">
+            <rect width="48" height="48" fill="white" />
+            <path className="call-mute-gap" d="M12 12l24 24" pathLength="1" />
+          </mask>
+          <g mask={`url(#${gap})`}>
+            <rect x="19" y="8" width="10" height="20" rx="5" />
+            <path d="M13 23a11 11 0 0 0 22 0M24 34v6" />
+          </g>
+          <path className="call-mute-slash" d="M12 12l24 24" pathLength="1" />
+        </svg>
       </button>
       <div className="call-captions" aria-live="polite">
         {caption && (
