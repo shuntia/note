@@ -2,6 +2,7 @@ pub mod brief;
 pub mod clauses;
 pub mod driver;
 pub mod jobs;
+pub mod log;
 pub mod queue;
 pub mod render;
 pub mod turn;

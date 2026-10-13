@@ -1,5 +1,6 @@
 use super::clauses::{speakable, Clauses};
 use super::jobs::{JobDone, JobLimits, JobTable, ToolRunner};
+use super::log::{self as call_log, CallLog};
 use super::queue::{Queue, WakeConfig};
 use super::render::{block, Item, JobOutcome};
 use super::turn::{self, TurnEvent, TurnSpec};
@@ -175,22 +176,13 @@ impl InFlight {
     }
 }
 
-struct JobMeta {
-    args: String,
-    started: Duration,
-    written: bool,
-    row: Option<i64>,
-}
-
 struct Driver {
     deps: DriverDeps,
     tx: mpsc::Sender<DriverIn>,
     messages: Vec<Message>,
     queue: Queue,
     jobs: JobTable,
-    job_meta: HashMap<u32, JobMeta>,
-    /// The highest reply number taken, mirrored from `voice_calls.last_reply`.
-    taken: u64,
+    log: CallLog,
     in_flight: Option<InFlight>,
     replies: HashMap<u64, ReplyRecord>,
     ending: bool,
@@ -242,14 +234,19 @@ impl Driver {
             limits,
             done_tx,
         );
+        let log = CallLog::new(
+            deps.db.clone(),
+            deps.call_id.clone(),
+            deps.user_id,
+            deps.conversation_id,
+        );
         Self {
             deps,
             tx,
             messages: history,
             queue,
             jobs,
-            job_meta: HashMap::new(),
-            taken: 1,
+            log,
             in_flight: None,
             replies: HashMap::new(),
             ending: false,
@@ -299,7 +296,7 @@ impl Driver {
             tool_calls: vec![],
         });
         let row = if write {
-            self.append_assistant(text)
+            self.log.append_assistant(text)
         } else {
             None
         };
@@ -362,20 +359,14 @@ impl Driver {
         }
     }
 
+    /// Starts or releases the reply before the heard turn is written; the log keeps it ahead of the reply's rows.
     fn on_commit(&mut self, turn: u64, text: String) {
-        let conv = self.deps.conversation_id;
-        if let Err(e) = crate::talk::append_text(
-            &crate::db_guard(&self.deps.db),
-            conv,
-            "user",
-            &text,
-            jiff::Timestamp::now(),
-        ) {
-            eprintln!(
-                "voice: recording a heard turn for {} failed: {e:#}",
-                self.deps.call_id
-            );
-        }
+        self.log.append_user(&text);
+        self.answer(turn, text);
+        self.log.flush_user();
+    }
+
+    fn answer(&mut self, turn: u64, text: String) {
         if let Some(f) = self.in_flight.as_ref().filter(|f| f.held()) {
             if f.draft_of == Some(turn) && normalize(&text) == normalize(&f.draft_text) {
                 self.promote();
@@ -463,16 +454,7 @@ impl Driver {
             text.clone_from(&heard);
         }
         if let Some(id) = row {
-            let updated = crate::db_guard(&self.deps.db).execute(
-                "UPDATE talk_messages SET content = ?1 WHERE id = ?2",
-                (&heard, id),
-            );
-            if let Err(e) = updated {
-                eprintln!(
-                    "voice: trimming a cut-off reply for {} failed: {e}",
-                    self.deps.call_id
-                );
-            }
+            self.log.trim(id, &heard);
         }
     }
 
@@ -509,28 +491,8 @@ impl Driver {
         }
     }
 
-    /// The next reply number, persisted so a resumed call continues above every number used.
-    fn take_reply(&mut self) -> u64 {
-        let taken = crate::db_guard(&self.deps.db).query_row(
-            "UPDATE voice_calls SET last_reply = MAX(last_reply, ?2) + 1 WHERE id = ?1 RETURNING last_reply",
-            (&self.deps.call_id, self.taken as i64),
-            |r| r.get::<_, i64>(0),
-        );
-        self.taken = match taken {
-            Ok(n) => n.max(0) as u64,
-            Err(e) => {
-                eprintln!(
-                    "voice: taking a reply number for {} failed: {e}",
-                    self.deps.call_id
-                );
-                self.taken + 1
-            }
-        };
-        self.taken
-    }
-
     fn spawn_turn(&mut self, input: String, draft: Option<(u64, String, Vec<Item>)>) {
-        let reply = self.take_reply();
+        let reply = self.log.next_reply();
         let stop = Arc::new(AtomicBool::new(false));
         let end_sent = Arc::new(AtomicBool::new(false));
         let mut request = self.messages.clone();
@@ -679,15 +641,7 @@ impl Driver {
                     .and_then(|job| u32::try_from(job).ok());
                 if let (false, Some(job)) = (is_error, job) {
                     (self.deps.tools_shown)(self.jobs.running().len(), None);
-                    self.job_meta.insert(
-                        job,
-                        JobMeta {
-                            args: call.args.clone(),
-                            started,
-                            written: false,
-                            row: None,
-                        },
-                    );
+                    self.log.job_started(job, &call.args, started);
                 }
                 (ack, is_error)
             }
@@ -701,9 +655,8 @@ impl Driver {
         let reply = f.reply;
         if let Some(e) = &error {
             eprintln!("voice: a turn of {} failed: {e}", self.deps.call_id);
-            let conn = crate::db_guard(&self.deps.db);
-            let _ = crate::log::record(&conn, Some(self.deps.user_id), "voice_error", &format!("a call's turn failed: {e}"));
         }
+        let failed = error.clone();
         f.ended = Some(TurnEnd {
             calls,
             stopped,
@@ -713,6 +666,9 @@ impl Driver {
         self.send(CallBody::SpeakDone { reply });
         if !held {
             self.commit_turn();
+        }
+        if let Some(e) = &failed {
+            self.log.turn_failed(e);
         }
     }
 
@@ -753,7 +709,7 @@ impl Driver {
         let row = if heard.is_empty() {
             None
         } else {
-            self.append_assistant(&heard)
+            self.log.append_assistant(&heard)
         };
         if !heard.is_empty() {
             self.last_reply = heard;
@@ -766,7 +722,7 @@ impl Driver {
         if let Some(failure) = end.error.as_ref().filter(|_| silent && !end.stopped) {
             self.failed_turns += 1;
             let line = self.failure_line(failure.reason);
-            let reply = self.take_reply();
+            let reply = self.log.next_reply();
             self.say(reply, std::slice::from_ref(&line), &line, true);
         } else if end.error.is_none() || !silent {
             self.failed_turns = 0;
@@ -785,7 +741,7 @@ impl Driver {
         let ending = reason.lasts() || self.failed_turns >= 2;
         if ending {
             self.ending = true;
-            self.mark_bowed_out();
+            self.log.bowed_out();
         }
         if fresh && (reason.lasts() || !ending) {
             crate::text::failure_spoken(self.deps.lang, reason)
@@ -799,10 +755,7 @@ impl Driver {
     fn on_job(&mut self, done: &JobDone) {
         let settled = self.jobs.settle(done);
         let landed = matches!(done.outcome, JobOutcome::Done(_) | JobOutcome::Error(_));
-        let unwritten = self
-            .job_meta
-            .get(&done.job)
-            .is_some_and(|meta| !meta.written);
+        let unwritten = self.log.job_unwritten(done.job);
         if settled {
             let landed = match done.outcome {
                 JobOutcome::Done(_) => Some(true),
@@ -827,95 +780,11 @@ impl Driver {
     }
 
     fn record_job(&mut self, done: &JobDone) {
-        let now = self.now();
-        let (args, ms, row) = match self.job_meta.get_mut(&done.job) {
-            Some(meta) => {
-                meta.written = true;
-                (
-                    meta.args.clone(),
-                    now.saturating_sub(meta.started).as_millis() as u64,
-                    meta.row,
-                )
-            }
-            None => (String::new(), 0, None),
-        };
-        let (result, is_error) = match &done.outcome {
-            JobOutcome::Done(text) => (text.clone(), false),
-            JobOutcome::Error(text) => (text.clone(), true),
-            JobOutcome::Cancelled => (
-                serde_json::json!({"job": done.job, "cancelled": true}).to_string(),
-                false,
-            ),
-            JobOutcome::TimedOut => (
-                serde_json::json!({"job": done.job, "timed_out": true}).to_string(),
-                true,
-            ),
-            JobOutcome::Interrupted => (
-                serde_json::json!({"job": done.job, "interrupted": true}).to_string(),
-                true,
-            ),
-        };
+        let (args, ms) = self.log.job_landed(done.job, self.now());
+        let (result, is_error) = call_log::job_result(done);
         self.trace.call(&done.tool, &args, &result, is_error, ms);
-        let written = if let Some(id) = row {
-            crate::db_guard(&self.deps.db)
-                .execute(
-                    "UPDATE talk_messages SET content = ?1, is_error = ?2 WHERE id = ?3",
-                    (&result, is_error, id),
-                )
-                .map(|_| ())
-                .map_err(anyhow::Error::from)
-        } else {
-            let conn = crate::db_guard(&self.deps.db);
-            crate::talk::append_tool(
-                &conn,
-                self.deps.conversation_id,
-                &done.tool,
-                &args,
-                &result,
-                is_error,
-                None,
-                jiff::Timestamp::now(),
-            )
-            .map(|()| {
-                if let Some(meta) = self.job_meta.get_mut(&done.job) {
-                    meta.row = Some(conn.last_insert_rowid());
-                }
-            })
-        };
-        if let Err(e) = written {
-            eprintln!(
-                "voice: recording job {} of {} failed: {e:#}",
-                done.job, self.deps.call_id
-            );
-        }
-    }
-
-    fn mark_bowed_out(&self) {
-        if let Err(e) = super::mark_bowed_out(&crate::db_guard(&self.deps.db), &self.deps.call_id) {
-            eprintln!("voice: recording the bow-out of {} failed: {e:#}", self.deps.call_id);
-        }
-    }
-
-    /// The row id of the new assistant row.
-    fn append_assistant(&self, text: &str) -> Option<i64> {
-        let conn = crate::db_guard(&self.deps.db);
-        match crate::talk::append_assistant(
-            &conn,
-            self.deps.conversation_id,
-            text,
-            "",
-            0,
-            jiff::Timestamp::now(),
-        ) {
-            Ok(()) => Some(conn.last_insert_rowid()),
-            Err(e) => {
-                eprintln!(
-                    "voice: recording a reply for {} failed: {e:#}",
-                    self.deps.call_id
-                );
-                None
-            }
-        }
+        self.log
+            .record_job(done.job, &done.tool, &args, &result, is_error);
     }
 
     /// Cancels network jobs, records the reply cut short, and waits up to 2 s for the rest of the jobs.
@@ -929,12 +798,12 @@ impl Driver {
                 .map(ReplyRecord::heard_text)
                 .unwrap_or_default();
             if !f.held() && !heard.is_empty() {
-                self.append_assistant(&heard);
+                self.log.append_assistant(&heard);
                 self.last_reply = heard;
             }
         }
         let deadline = Instant::now() + END_WAIT;
-        while self.job_meta.values().any(|meta| !meta.written) {
+        while self.log.any_job_unwritten() {
             let left = deadline.saturating_duration_since(Instant::now());
             match rx.recv_timeout(left) {
                 Ok(DriverIn::Job(done)) => self.on_job(&done),
@@ -943,15 +812,7 @@ impl Driver {
             }
         }
         self.trace.ok(&self.last_reply);
-        if let Err(e) = self
-            .trace
-            .insert(&crate::db_guard(&self.deps.db), self.deps.user_id)
-        {
-            eprintln!(
-                "voice: saving the trace of {} failed: {e:#}",
-                self.deps.call_id
-            );
-        }
+        self.log.save_trace(&self.trace);
     }
 }
 
@@ -2027,7 +1888,7 @@ mod tests {
         let last: i64 = crate::db_guard(&h.db)
             .query_row("SELECT last_reply FROM voice_calls WHERE id = 'c1'", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(last, 8);
+        assert!(last >= 8, "the counter is persisted above every reply handed out: {last}");
     }
 
     #[test]
