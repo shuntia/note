@@ -7,7 +7,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 use super::playout::{Clip, Playout};
-use super::tts::{Next, Speaker, SpeechBackend, SpeechStream, RATE};
+use super::tts::{Next, Speaker, SpeechBackend, SpeechStream, Wake, RATE};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Gate {
@@ -22,6 +22,8 @@ enum Cmd {
     Finish { reply: u64 },
     Cancel { reply: u64 },
     Voice { speaker: Speaker, fallback: Arc<dyn SpeechBackend> },
+    /// A stream has something new for `next`.
+    Wake,
 }
 
 enum Out {
@@ -92,7 +94,16 @@ impl SpeechQueue {
     /// Starts one worker thread that drives each reply's stream on `speaker`, in reply order, one
     /// render at a time. A reply whose stream fails goes on in `fallback`'s default voice.
     pub fn new(speaker: Speaker, fallback: Arc<dyn SpeechBackend>) -> Self {
+        Self::polling(speaker, fallback, POLL)
+    }
+
+    /// `poll` is how often the worker looks at streams that have not woken it.
+    fn polling(speaker: Speaker, fallback: Arc<dyn SpeechBackend>, poll: Duration) -> Self {
         let (cmds, queued) = std::sync::mpsc::channel::<Cmd>();
+        let waker = cmds.clone();
+        let wake: Wake = Arc::new(move || {
+            let _ = waker.send(Cmd::Wake);
+        });
         let (tx, rx) = mpsc::unbounded_channel();
         let dropped = Arc::new(Mutex::new(HashSet::new()));
         let shared = Arc::new(Shared::default());
@@ -105,6 +116,8 @@ impl SpeechQueue {
             applied: 0,
             pushes: HashMap::new(),
             tx,
+            wake,
+            poll,
         };
         std::thread::Builder::new()
             .name("note-voice-tts".into())
@@ -225,6 +238,17 @@ impl SpeechQueue {
         self.note_rendering();
     }
 
+    /// Resolves once the worker has handed over something new, and takes it in; never, once the worker is gone.
+    pub async fn arrival(&mut self) {
+        match self.rx.recv().await {
+            Some(out) => {
+                self.take(out);
+                self.note_rendering();
+            }
+            None => std::future::pending().await,
+        }
+    }
+
     /// Moves the audio of playing replies, in play order, into the playout.
     pub fn pump(&mut self, playout: &mut Playout) {
         self.receive();
@@ -310,26 +334,30 @@ impl SpeechQueue {
 
     fn receive(&mut self) {
         while let Ok(out) = self.rx.try_recv() {
-            match out {
-                Out::Piece { reply, clip } => {
-                    if let Some(state) = self.replies.get_mut(&reply).filter(|s| s.gate != Gate::Dropped) {
-                        state.received += clip.pcm.len() as u64;
-                        state.ready.push_back(clip);
-                    }
+            self.take(out);
+        }
+        self.note_rendering();
+    }
+
+    fn take(&mut self, out: Out) {
+        match out {
+            Out::Piece { reply, clip } => {
+                if let Some(state) = self.replies.get_mut(&reply).filter(|s| s.gate != Gate::Dropped) {
+                    state.received += clip.pcm.len() as u64;
+                    state.ready.push_back(clip);
                 }
-                Out::Ended { reply, pushes } => {
-                    if let Some(state) = self.replies.get_mut(&reply).filter(|s| pushes >= s.pushes) {
-                        state.ended = true;
-                    }
+            }
+            Out::Ended { reply, pushes } => {
+                if let Some(state) = self.replies.get_mut(&reply).filter(|s| pushes >= s.pushes) {
+                    state.ended = true;
                 }
-                Out::Unspeakable { reply } => {
-                    if self.replies.get(&reply).is_some_and(|s| s.gate != Gate::Dropped) {
-                        self.unspeakable.push(reply);
-                    }
+            }
+            Out::Unspeakable { reply } => {
+                if self.replies.get(&reply).is_some_and(|s| s.gate != Gate::Dropped) {
+                    self.unspeakable.push(reply);
                 }
             }
         }
-        self.note_rendering();
     }
 }
 
@@ -360,6 +388,8 @@ struct Worker {
     /// Texts pushed per reply, across its streams.
     pushes: HashMap<u64, u32>,
     tx: mpsc::UnboundedSender<Out>,
+    wake: Wake,
+    poll: Duration,
 }
 
 impl Worker {
@@ -376,15 +406,17 @@ impl Worker {
                     Err(TryRecvError::Disconnected) => return,
                 }
             } else {
-                match cmds.recv_timeout(POLL) {
+                match cmds.recv_timeout(self.poll) {
                     Ok(cmd) => Some(cmd),
                     Err(RecvTimeoutError::Timeout) => None,
                     Err(RecvTimeoutError::Disconnected) => return,
                 }
             };
             for cmd in first.into_iter().chain(std::iter::from_fn(|| cmds.try_recv().ok())) {
-                self.apply(cmd);
-                self.applied += 1;
+                if !matches!(cmd, Cmd::Wake) {
+                    self.apply(cmd);
+                    self.applied += 1;
+                }
             }
             if self.tx.is_closed() {
                 return;
@@ -438,6 +470,7 @@ impl Worker {
                 self.speaker = speaker;
                 self.fallback = fallback;
             }
+            Cmd::Wake => {}
         }
     }
 
@@ -448,16 +481,19 @@ impl Worker {
             self.fallback.open("").map(|s| (s, true))
         });
         match opened {
-            Ok((stream, on_fallback)) => Some(Active {
-                reply,
-                stream,
-                on_fallback,
-                retried: false,
-                pushed: Vec::new(),
-                covered: 0,
-                finished: false,
-                sent: 0,
-            }),
+            Ok((mut stream, on_fallback)) => {
+                stream.wake_with(self.wake.clone());
+                Some(Active {
+                    reply,
+                    stream,
+                    on_fallback,
+                    retried: false,
+                    pushed: Vec::new(),
+                    covered: 0,
+                    finished: false,
+                    sent: 0,
+                })
+            }
             Err(e) => {
                 eprintln!("voice: reply {reply} cannot be spoken: {e:#}");
                 let _ = self.tx.send(Out::Unspeakable { reply });
@@ -494,6 +530,7 @@ impl Worker {
             }
         }
         let resumed = self.fallback.open("").and_then(|mut stream| {
+            stream.wake_with(self.wake.clone());
             for text in &rest {
                 stream.push(text)?;
             }
@@ -682,6 +719,83 @@ mod tests {
 
     fn drain(p: &mut Playout) -> Vec<i16> {
         std::iter::from_fn(|| p.next_frame()).map(|f| f[0]).collect()
+    }
+
+    /// One stream, whose single piece arrives from outside through `deliver`.
+    #[derive(Default)]
+    struct Remote {
+        wake: Mutex<Option<Wake>>,
+        arrived: AtomicBool,
+    }
+
+    impl Remote {
+        fn deliver(&self) {
+            self.arrived.store(true, Ordering::SeqCst);
+            (self.wake.lock().unwrap().as_ref().expect("the stream was opened"))();
+        }
+    }
+
+    struct RemoteStream {
+        remote: Arc<Remote>,
+        taken: bool,
+    }
+
+    impl SpeechBackend for Arc<Remote> {
+        fn id(&self) -> &'static str {
+            "remote"
+        }
+
+        fn label(&self) -> &'static str {
+            "Remote"
+        }
+
+        fn input(&self) -> TextInput {
+            TextInput::Incremental
+        }
+
+        fn voices(&self) -> Vec<VoiceInfo> {
+            Vec::new()
+        }
+
+        fn open(&self, _voice: &str) -> anyhow::Result<Box<dyn SpeechStream>> {
+            Ok(Box::new(RemoteStream { remote: self.clone(), taken: false }))
+        }
+    }
+
+    impl SpeechStream for RemoteStream {
+        fn push(&mut self, _text: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn finish(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn next(&mut self, _ahead: Duration) -> anyhow::Result<Next> {
+            if self.taken || !self.remote.arrived.load(Ordering::SeqCst) {
+                return Ok(Next::Pending);
+            }
+            self.taken = true;
+            Ok(Next::Audio(Audio { pcm: vec![1; FRAME], chars: 2 }))
+        }
+
+        fn cancel(&mut self) {}
+
+        fn wake_with(&mut self, wake: Wake) {
+            *self.remote.wake.lock().unwrap() = Some(wake);
+        }
+    }
+
+    #[tokio::test]
+    async fn audio_arriving_on_a_pending_stream_is_taken_at_once_not_at_the_next_poll() {
+        let remote = Arc::new(Remote::default());
+        let backend: Arc<dyn SpeechBackend> = Arc::new(remote.clone());
+        let mut q = SpeechQueue::polling(Speaker::new(backend.clone(), ""), backend, Duration::from_secs(3600));
+        q.speak(1, 0, "hi".into());
+        q.play(1);
+        settle(&mut q).await;
+        remote.deliver();
+        tokio::time::timeout(Duration::from_secs(5), until_pieces(&mut q, 1, 1)).await.expect("the piece waited for a poll");
     }
 
     #[tokio::test]

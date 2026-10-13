@@ -10,6 +10,8 @@ pub const OUT_RATE: u32 = 48_000;
 /// Outbound frames held ahead of real time, as `LiveKit`'s source holds 100 ms.
 const AHEAD: usize = 10;
 const FRAME_TIME: Duration = Duration::from_millis(10);
+/// A pacer that has sent nothing for longer than this sends all it holds at once.
+const IDLE: Duration = Duration::from_millis(20);
 
 /// May run under `WebMedia`'s queue lock: must not block or call back into `WebMedia`.
 pub type Emit = Arc<dyn Fn(Media) + Send + Sync>;
@@ -24,7 +26,8 @@ struct Outbound {
 }
 
 /// A web call's media: the caller's audio comes in through its `WebFeed`, Note's voice leaves
-/// through `emit` one 10 ms frame every 10 ms.
+/// through `emit` one 10 ms frame every 10 ms, except that what is queued after a silence leaves at
+/// once to fill the browser's jitter buffer.
 pub struct WebMedia {
     frames: Mutex<mpsc::Receiver<Vec<f32>>>,
     out: Arc<Outbound>,
@@ -61,13 +64,21 @@ pub fn web_media(emit: Emit) -> (WebMedia, WebFeed) {
 async fn pace(out: Arc<Outbound>, emit: Emit) {
     let mut tick = tokio::time::interval(FRAME_TIME);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Burst);
+    let mut last: Option<tokio::time::Instant> = None;
     loop {
         tick.tick().await;
+        let now = tokio::time::Instant::now();
         let mut queue = lock(&out.queue);
-        if let Some(frame) = queue.pop_front() {
-            emit(Media::AudioOut { pcm: Pcm(frame.to_vec()), rate: OUT_RATE });
-            out.space.notify_waiters();
+        let idle = last.is_none_or(|at| now.duration_since(at) > IDLE);
+        let n = if idle { queue.len() } else { queue.len().min(1) };
+        if n == 0 {
+            continue;
         }
+        for frame in queue.drain(..n) {
+            emit(Media::AudioOut { pcm: Pcm(frame.to_vec()), rate: OUT_RATE });
+        }
+        last = Some(now);
+        out.space.notify_waiters();
     }
 }
 
@@ -95,6 +106,10 @@ impl MediaIo for WebMedia {
             }
             space.await;
         }
+    }
+
+    fn room(&self) -> usize {
+        AHEAD.saturating_sub(lock(&self.out.queue).len())
     }
 
     fn clear(&self) {
@@ -165,7 +180,7 @@ mod tests {
         };
         tokio::time::sleep(Duration::from_millis(105)).await;
         let early = firsts_out(&log).len();
-        assert!((9..=12).contains(&early), "{early} frames left in 105 ms");
+        assert!((AHEAD + 9..=AHEAD + 12).contains(&early), "{early} frames left in 105 ms");
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert!(sender.is_finished());
         assert_eq!(firsts_out(&log), (0..30).collect::<Vec<i16>>());
@@ -186,6 +201,27 @@ mod tests {
         assert!(firsts_out(&log).is_empty());
         media.send(&[0; OUT_FRAME]).await.unwrap();
         assert!(!firsts_out(&log).is_empty(), "the frame past the buffer waited for one to leave");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn what_is_queued_after_a_silence_leaves_at_once_then_one_frame_a_tick() {
+        let (emit, log) = recording();
+        let (media, _feed) = web_media(emit);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(media.room(), AHEAD);
+        for i in 0..AHEAD as i16 {
+            media.send(&[i; OUT_FRAME]).await.unwrap();
+        }
+        assert_eq!(media.room(), 0);
+        tokio::time::sleep(FRAME_TIME).await;
+        assert_eq!(firsts_out(&log), (0..AHEAD as i16).collect::<Vec<_>>(), "the whole lead left in one tick");
+        for i in 0..3 {
+            media.send(&[100 + i; OUT_FRAME]).await.unwrap();
+        }
+        tokio::time::sleep(FRAME_TIME).await;
+        assert_eq!(firsts_out(&log).len(), AHEAD + 1, "a stream already flowing leaves in real time");
+        tokio::time::sleep(FRAME_TIME * 2).await;
+        assert_eq!(firsts_out(&log).len(), AHEAD + 3);
     }
 
     #[tokio::test(start_paused = true)]

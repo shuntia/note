@@ -16,10 +16,14 @@ enum Line {
 struct Journal {
     last: u64,
     frames: BTreeMap<u64, CallBody>,
+    file: Option<std::fs::File>,
+    len: u64,
 }
 
-/// One append-only file per call, `<call_id>.out.ndjson`, synced on every
-/// write.
+/// One append-only file per call, `<call_id>.out.ndjson`. Every frame is
+/// synced before it is sent: a frame lost to an OS crash after Note applied
+/// it would hand its seq to a later frame, which Note would then drop as a
+/// duplicate. Acks are not synced: a lost one only resends frames Note drops.
 pub struct FileOutbox {
     dir: PathBuf,
     calls: HashMap<String, Journal>,
@@ -81,22 +85,31 @@ impl FileOutbox {
         self.dir.join(format!("{call_id}.out.ndjson"))
     }
 
-    /// Appends `line` durably; a failed write is cut back off the file so the
-    /// next line starts clean.
-    fn write_line(&self, call_id: &str, line: &Line) -> io::Result<()> {
-        let path = self.path(call_id);
+    /// Appends `line`, durably if `sync`; a failed write is cut back off the
+    /// file so the next line starts clean.
+    fn write_line(&mut self, call_id: &str, line: &Line, sync: bool) -> io::Result<()> {
         let mut bytes = serde_json::to_vec(line)?;
         bytes.push(b'\n');
-        let mut f = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)?;
-        let len = f.metadata()?.len();
-        if let Err(e) = f.write_all(&bytes).and_then(|()| f.sync_data()) {
-            let _ = f.set_len(len);
+        let created = !self.calls.contains_key(call_id);
+        if self.calls.get(call_id).is_none_or(|j| j.file.is_none()) {
+            let file = std::fs::OpenOptions::new().create(true).append(true).open(self.path(call_id))?;
+            let len = file.metadata()?.len();
+            let j = self.calls.entry(call_id.to_string()).or_default();
+            j.file = Some(file);
+            j.len = len;
+        }
+        let j = self.calls.get_mut(call_id).expect("opened above");
+        let f = j.file.as_mut().expect("opened above");
+        let written = f.write_all(&bytes).and_then(|()| if sync { f.sync_data() } else { Ok(()) });
+        if let Err(e) = written {
+            let _ = f.set_len(j.len);
+            if created {
+                self.calls.remove(call_id);
+            }
             return Err(e);
         }
-        if !self.calls.contains_key(call_id) {
+        j.len += bytes.len() as u64;
+        if created {
             std::fs::File::open(&self.dir)?.sync_all()?;
         }
         Ok(())
@@ -115,6 +128,7 @@ impl Outbox for FileOutbox {
                 seq,
                 body: body.clone(),
             },
+            true,
         )?;
         let j = self.calls.entry(call_id.to_string()).or_default();
         j.last = seq;
@@ -139,7 +153,7 @@ impl Outbox for FileOutbox {
         if !self.calls.contains_key(call_id) {
             return Ok(());
         }
-        self.write_line(call_id, &Line::Ack { ack: upto })?;
+        self.write_line(call_id, &Line::Ack { ack: upto }, false)?;
         if let Some(j) = self.calls.get_mut(call_id) {
             j.frames.retain(|s, _| *s > upto);
         }
@@ -170,7 +184,8 @@ impl Outbox for FileOutbox {
 }
 
 /// The last applied seq of each call Note sent, `<call_id>.in`, replaced
-/// atomically.
+/// atomically but not synced: one lost to an OS crash only has Note resend
+/// frames, and a resent `Start` is recognised by the call's saved state.
 pub struct AppliedFile {
     dir: PathBuf,
 }
@@ -202,11 +217,8 @@ impl AppliedFile {
         }
         std::fs::create_dir_all(&self.dir)?;
         let tmp = self.dir.join(format!("{call_id}.in.tmp"));
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(seq.to_string().as_bytes())?;
-        f.sync_data()?;
-        std::fs::rename(&tmp, self.path(call_id))?;
-        std::fs::File::open(&self.dir)?.sync_all()
+        std::fs::write(&tmp, seq.to_string())?;
+        std::fs::rename(&tmp, self.path(call_id))
     }
 
     pub fn forget(&self, call_id: &str) -> io::Result<()> {
@@ -259,6 +271,26 @@ mod tests {
         assert_eq!(o.unacked("c1", 0).unwrap(), vec![(2, CallBody::Ended)]);
         assert_eq!(o.pending_calls().unwrap(), vec!["c1".to_string()]);
         assert_eq!(o.append("c1", &CallBody::Ringing).unwrap(), 3);
+    }
+
+    #[test]
+    fn a_lost_ack_resends_only_frames_the_receiver_drops_as_duplicates() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("c1.out.ndjson");
+        let before_ack = {
+            let mut o = FileOutbox::open(dir.path()).unwrap();
+            o.append("c1", &CallBody::Ringing).unwrap();
+            o.append("c1", &CallBody::Ended).unwrap();
+            let len = std::fs::metadata(&path).unwrap().len();
+            o.ack("c1", 2).unwrap();
+            len
+        };
+        std::fs::OpenOptions::new().write(true).open(&path).unwrap().set_len(before_ack).unwrap();
+        let o = FileOutbox::open(dir.path()).unwrap();
+        let resent = o.unacked("c1", 0).unwrap();
+        assert_eq!(resent.len(), 2);
+        let applied = 2;
+        assert!(resent.iter().all(|(seq, _)| crate::stream::classify(applied, *seq) == crate::stream::Arrival::Duplicate));
     }
 
     #[test]

@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{mpsc, oneshot, watch, Notify};
 
 pub type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 
@@ -77,6 +77,9 @@ struct Inner {
     /// Held across `applied` and `apply`, so an apply still running for a
     /// dropped connection commits before the next connection checks its seq.
     apply_gate: Mutex<()>,
+    /// The highest seq each call's arrived acks cover, not yet written to the outbox.
+    acks: Mutex<HashMap<String, u64>>,
+    acks_arrived: Notify,
     next_request: AtomicU64,
     generation: AtomicU64,
     up: watch::Sender<bool>,
@@ -105,6 +108,8 @@ impl Peer {
                 shared: Mutex::new(Shared { outbox, current: None }),
                 pending: Mutex::new(HashMap::new()),
                 apply_gate: Mutex::new(()),
+                acks: Mutex::new(HashMap::new()),
+                acks_arrived: Notify::new(),
                 next_request: AtomicU64::new(0),
                 generation: AtomicU64::new(0),
                 up: watch::channel(false).0,
@@ -229,13 +234,14 @@ impl Peer {
         })));
 
         let (calls_tx, calls_rx) = mpsc::unbounded_channel::<Arriving>();
-        let (failed_tx, failed_rx) = oneshot::channel::<Disconnect>();
+        let (failed_tx, failed_rx) = mpsc::unbounded_channel::<Disconnect>();
         let _applier = AbortOnDrop(Some(tokio::spawn(apply_in_order(
             self.inner.clone(),
             calls_rx,
             tx.clone(),
-            failed_tx,
+            failed_tx.clone(),
         ))));
+        let _acker = AbortOnDrop(Some(tokio::spawn(write_acks(self.inner.clone(), failed_tx))));
 
         let conn = Conn { tx, calls: calls_tx };
         self.run(&mut in_rx, failed_rx, &conn).await
@@ -262,7 +268,7 @@ impl Peer {
     async fn run(
         &self,
         incoming: &mut mpsc::UnboundedReceiver<Result<Option<Frame>, CodecError>>,
-        mut failed: oneshot::Receiver<Disconnect>,
+        mut failed: mpsc::UnboundedReceiver<Disconnect>,
         conn: &Conn,
     ) -> Disconnect {
         let mut tick = tokio::time::interval(self.inner.cfg.heartbeat);
@@ -277,8 +283,8 @@ impl Peer {
                     sent += 1;
                     let _ = conn.tx.send(Frame::Ping { n: sent });
                 }
-                d = &mut failed => {
-                    return d.unwrap_or_else(|_| Disconnect::Protocol("the applier stopped".into()));
+                d = failed.recv() => {
+                    return d.unwrap_or_else(|| Disconnect::Protocol("the applier stopped".into()));
                 }
                 got = incoming.recv() => match got {
                     None | Some(Ok(None)) => return Disconnect::Eof,
@@ -332,11 +338,11 @@ impl Peer {
                 if dir != self.inner.out_dir {
                     return Err(wrong_way("an ack"));
                 }
-                crate::lock(&self.inner.shared)
-                    .outbox
-                    .ack(&call_id, seq)
-                    .map_err(|e| Disconnect::Protocol(format!("outbox: {e}")))?;
-                self.inner.handler.acked(&call_id, seq);
+                let mut acks = crate::lock(&self.inner.acks);
+                let upto = acks.entry(call_id).or_default();
+                *upto = (*upto).max(seq);
+                drop(acks);
+                self.inner.acks_arrived.notify_one();
             }
             Frame::Resume { call_id, dir, after } => {
                 if dir != self.inner.out_dir {
@@ -383,7 +389,7 @@ async fn apply_in_order(
     inner: Arc<Inner>,
     mut calls: mpsc::UnboundedReceiver<Arriving>,
     tx: mpsc::UnboundedSender<Frame>,
-    failed: oneshot::Sender<Disconnect>,
+    failed: mpsc::UnboundedSender<Disconnect>,
 ) {
     while let Some(Arriving { call_id, dir, seq, body }) = calls.recv().await {
         let inner = inner.clone();
@@ -412,6 +418,33 @@ async fn apply_in_order(
                 let _ = failed.send(Disconnect::Protocol(e.to_string()));
                 return;
             }
+        }
+    }
+}
+
+/// Writes arrived acks to the outbox off the run loop, each call's acks
+/// coalesced to the highest seq since the last write. Acks lost to a drop are
+/// harmless: the frames are resent and dropped as duplicates.
+async fn write_acks(inner: Arc<Inner>, failed: mpsc::UnboundedSender<Disconnect>) {
+    loop {
+        inner.acks_arrived.notified().await;
+        let acks: Vec<(String, u64)> = std::mem::take(&mut *crate::lock(&inner.acks)).into_iter().collect();
+        if acks.is_empty() {
+            continue;
+        }
+        let inner = inner.clone();
+        let written = tokio::task::spawn_blocking(move || {
+            for (call_id, upto) in acks {
+                crate::lock(&inner.shared).outbox.ack(&call_id, upto).map_err(|e| format!("outbox: {e}"))?;
+                inner.handler.acked(&call_id, upto);
+            }
+            Ok::<(), String>(())
+        })
+        .await
+        .unwrap_or_else(|e| Err(e.to_string()));
+        if let Err(e) = written {
+            let _ = failed.send(Disconnect::Protocol(e));
+            return;
         }
     }
 }

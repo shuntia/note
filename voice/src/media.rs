@@ -27,6 +27,10 @@ pub trait MediaIo: Send + Sync {
     async fn recv(&self) -> Option<Vec<f32>>;
     /// Queues one 10 ms frame at 48 kHz mono; waits while the outbound buffer is full.
     async fn send(&self, frame: &[i16; OUT_FRAME]) -> Result<()>;
+    /// Frames `send` would queue now without waiting; 0 for a path that should not run ahead of real time.
+    fn room(&self) -> usize {
+        0
+    }
     /// Drops audio queued in the outbound buffer (barge-in).
     fn clear(&self);
     /// Resolves when the user leaves, the room disconnects, or the user never joins.

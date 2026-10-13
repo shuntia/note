@@ -1,6 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc::TryRecvError;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::anyhow;
@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
 use super::engines::VoiceInfo;
-use super::tts::{is_cjk, resample, Audio, Chunker, Next, SpeechBackend, SpeechStream, TextInput};
+use super::tts::{is_cjk, resample, Audio, Chunker, Next, SpeechBackend, SpeechStream, TextInput, Wake};
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct SidecarConfig {
@@ -173,10 +173,13 @@ impl SpeechBackend for Sidecar {
     fn open(&self, voice: &str) -> anyhow::Result<Box<dyn SpeechStream>> {
         let (out, out_rx) = mpsc::unbounded_channel();
         let (events_tx, events) = std::sync::mpsc::channel();
+        let wake = Arc::new(OnceLock::new());
+        let events_tx = Events { tx: events_tx, wake: wake.clone() };
         self.rt.spawn(converse(self.stream_url.clone(), voice.to_owned(), out_rx, events_tx));
         Ok(Box::new(SidecarStream {
             out,
             events,
+            wake,
             chunker: (self.input == TextInput::Chunks).then(Chunker::default),
             in_flight: None,
             last_push: Instant::now(),
@@ -227,11 +230,27 @@ enum FromSidecar {
     Other,
 }
 
+/// Hands each event to the stream and wakes whoever reads it.
+struct Events {
+    tx: std::sync::mpsc::Sender<Event>,
+    wake: Arc<OnceLock<Wake>>,
+}
+
+impl Events {
+    fn send(&self, event: Event) -> Result<(), std::sync::mpsc::SendError<Event>> {
+        self.tx.send(event)?;
+        if let Some(wake) = self.wake.get() {
+            wake();
+        }
+        Ok(())
+    }
+}
+
 async fn converse(
     url: String,
     voice: String,
     mut out: mpsc::UnboundedReceiver<Msg>,
-    events: std::sync::mpsc::Sender<Event>,
+    events: Events,
 ) {
     if let Err(e) = talk(&url, &voice, &mut out, &events).await {
         let _ = events.send(Event::Failed(format!("{e:#}")));
@@ -242,7 +261,7 @@ async fn talk(
     url: &str,
     voice: &str,
     out: &mut mpsc::UnboundedReceiver<Msg>,
-    events: &std::sync::mpsc::Sender<Event>,
+    events: &Events,
 ) -> anyhow::Result<()> {
     let (ws, _) = tokio::time::timeout(CONNECT_TIMEOUT, tokio_tungstenite::connect_async(url))
         .await
@@ -346,6 +365,7 @@ const STALLED: Duration = Duration::from_secs(3);
 struct SidecarStream {
     out: mpsc::UnboundedSender<Msg>,
     events: std::sync::mpsc::Receiver<Event>,
+    wake: Arc<OnceLock<Wake>>,
     /// Set for a sidecar that takes whole chunks.
     chunker: Option<Chunker>,
     /// The pushed characters of the chunk sent and not yet marked.
@@ -509,6 +529,10 @@ impl SpeechStream for SidecarStream {
 
     fn alive(&self) -> bool {
         !self.ended && !self.cancelled
+    }
+
+    fn wake_with(&mut self, wake: Wake) {
+        let _ = self.wake.set(wake);
     }
 }
 
