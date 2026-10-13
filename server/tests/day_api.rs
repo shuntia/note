@@ -205,6 +205,28 @@ async fn a_range_is_bounded_and_ordered() {
 }
 
 #[tokio::test]
+async fn day_routes_answer_only_within_a_year_of_today() {
+    let (app, cookie, state, _cfg) = common::app_with_logged_in_user_and_state().await;
+    for (path, why) in [
+        (format!("/api/day/{}", ahead(367)), "a day too far ahead"),
+        (format!("/api/day/{}", ahead(-367)), "a day too far back"),
+        (format!("/api/plan/today?date={}", ahead(367)), "a plan too far ahead"),
+        (format!("/api/plan/today?date={}", ahead(-367)), "a plan too far back"),
+        (format!("/api/plan/range?from={}&to={}", ahead(360), ahead(367)), "a range running past the year"),
+        ("/api/day/9999-12-31".to_string(), "the end of time"),
+    ] {
+        let (status, _) = call(&app, &cookie, Method::GET, &path, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{why}");
+    }
+    let plans: i64 = state.db().query_row("SELECT COUNT(*) FROM plans", [], |r| r.get(0)).unwrap();
+    assert_eq!(plans, 0, "nothing was generated");
+    for path in [format!("/api/day/{}", ahead(360)), format!("/api/plan/today?date={}", ahead(-360))] {
+        let (status, _) = call(&app, &cookie, Method::GET, &path, None).await;
+        assert_eq!(status, StatusCode::OK, "{path}");
+    }
+}
+
+#[tokio::test]
 async fn the_server_no_longer_fills_free_time() {
     let (app, cookie, _cfg) = common::app_with_logged_in_user().await;
     let (status, _) =

@@ -12,7 +12,7 @@ async fn today_generates_and_returns_events() {
     let res = app
         .clone()
         .oneshot(
-            Request::get("/api/plan/today?date=2026-08-31")
+            Request::get(format!("/api/plan/today?date={}", common::recent("2026-08-31")))
                 .header(header::COOKIE, &cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -75,7 +75,7 @@ async fn shift_moves_the_event_and_drop_marks_it_dropped() {
     let (app, cookie, _cfg) = common::app_with_logged_in_user().await;
     app.clone()
         .oneshot(
-            Request::get("/api/plan/today?date=2026-08-31")
+            Request::get(format!("/api/plan/today?date={}", common::recent("2026-08-31")))
                 .header(header::COOKIE, &cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -110,7 +110,7 @@ async fn shift_moves_the_event_and_drop_marks_it_dropped() {
 
     let res = app
         .oneshot(
-            Request::get("/api/plan/today?date=2026-08-31")
+            Request::get(format!("/api/plan/today?date={}", common::recent("2026-08-31")))
                 .header(header::COOKIE, &cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -132,7 +132,7 @@ async fn shift_outside_the_slide_window_is_400() {
     let (app, cookie, _cfg) = common::app_with_logged_in_user().await;
     app.clone()
         .oneshot(
-            Request::get("/api/plan/today?date=2026-08-31")
+            Request::get(format!("/api/plan/today?date={}", common::recent("2026-08-31")))
                 .header(header::COOKIE, &cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -167,7 +167,7 @@ async fn snooze_pushes_the_event_and_rejects_out_of_range_minutes() {
     let (app, cookie, _cfg) = common::app_with_logged_in_user().await;
     app.clone()
         .oneshot(
-            Request::get("/api/plan/today?date=2026-08-31")
+            Request::get(format!("/api/plan/today?date={}", common::recent("2026-08-31")))
                 .header(header::COOKIE, &cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -198,7 +198,7 @@ async fn snooze_pushes_the_event_and_rejects_out_of_range_minutes() {
 
     let res = app
         .oneshot(
-            Request::get("/api/plan/today?date=2026-08-31")
+            Request::get(format!("/api/plan/today?date={}", common::recent("2026-08-31")))
                 .header(header::COOKIE, &cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -217,7 +217,7 @@ async fn snooze_on_a_decided_event_is_conflict() {
     let res = app
         .clone()
         .oneshot(
-            Request::get("/api/plan/today?date=2026-08-31")
+            Request::get(format!("/api/plan/today?date={}", common::recent("2026-08-31")))
                 .header(header::COOKIE, &cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -392,7 +392,7 @@ async fn other_users_event_is_404() {
 
     app.clone()
         .oneshot(
-            Request::get("/api/plan/today?date=2026-08-31")
+            Request::get(format!("/api/plan/today?date={}", common::recent("2026-08-31")))
                 .header(header::COOKIE, &owner)
                 .body(Body::empty())
                 .unwrap(),
@@ -451,7 +451,7 @@ async fn every_event_reports_a_span() {
     .unwrap();
     let res = app
         .oneshot(
-            Request::get("/api/plan/today?date=2026-09-01")
+            Request::get(format!("/api/plan/today?date={}", common::recent("2026-09-01")))
                 .header(header::COOKIE, &cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -473,7 +473,7 @@ async fn an_event_can_be_silenced_for_the_day() {
         let res = app
             .clone()
             .oneshot(
-                Request::get("/api/plan/today?date=2026-08-31")
+                Request::get(format!("/api/plan/today?date={}", common::recent("2026-08-31")))
                     .header(header::COOKIE, cookie)
                     .body(Body::empty())
                     .unwrap(),
@@ -518,7 +518,7 @@ async fn an_event_can_be_silenced_for_the_day() {
 #[tokio::test]
 async fn an_event_moves_to_tomorrow() {
     let (app, cookie, _cfg) = common::app_with_logged_in_user().await;
-    let fetch = |date: &'static str, cookie: String| {
+    let fetch = |date: String, cookie: String| {
         let app = app.clone();
         async move {
             let res = app
@@ -534,7 +534,7 @@ async fn an_event_moves_to_tomorrow() {
             serde_json::from_slice::<serde_json::Value>(&body).unwrap()
         }
     };
-    let today = fetch("2026-08-31", cookie.clone()).await;
+    let today = fetch(common::recent("2026-08-31"), cookie.clone()).await;
     let id = today[0]["id"].as_i64().unwrap();
     let res = app
         .clone()
@@ -549,12 +549,12 @@ async fn an_event_moves_to_tomorrow() {
     assert_eq!(res.status(), StatusCode::OK);
     let body = res.into_body().collect().await.unwrap().to_bytes();
     let moved: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(moved["date"], "2026-09-01");
+    assert_eq!(moved["date"], common::recent("2026-09-01"));
 
-    let today = fetch("2026-08-31", cookie.clone()).await;
+    let today = fetch(common::recent("2026-08-31"), cookie.clone()).await;
     assert_eq!(today[0]["status"], "dropped");
-    assert_eq!(today[0]["moved_to"]["date"], "2026-09-01");
-    let tomorrow = fetch("2026-09-01", cookie.clone()).await;
+    assert_eq!(today[0]["moved_to"]["date"], common::recent("2026-09-01"));
+    let tomorrow = fetch(common::recent("2026-09-01"), cookie.clone()).await;
     let landing: Vec<_> = tomorrow
         .as_array()
         .unwrap()

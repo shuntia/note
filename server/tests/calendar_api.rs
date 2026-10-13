@@ -299,7 +299,7 @@ async fn the_day_plan_can_carry_the_calendar_beside_its_events() {
     school(&app, &cookie).await;
 
     let (status, plain) =
-        call(&app, &cookie, Method::GET, "/api/plan/today?date=2026-09-18", None).await;
+        call(&app, &cookie, Method::GET, &format!("/api/plan/today?date={}", common::recent("2026-09-18")), None).await;
     assert_eq!(status, StatusCode::OK);
     assert!(plain.is_array(), "the existing shape is untouched");
 
@@ -307,7 +307,7 @@ async fn the_day_plan_can_carry_the_calendar_beside_its_events() {
         &app,
         &cookie,
         Method::GET,
-        "/api/plan/today?date=2026-09-18&calendar=1",
+        &format!("/api/plan/today?date={}&calendar=1", common::recent("2026-09-18")),
         None,
     )
     .await;

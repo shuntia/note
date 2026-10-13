@@ -2250,8 +2250,8 @@ async fn plan_today(
     };
     let date = match q.date {
         Some(d) => match d.parse::<jiff::civil::Date>() {
-            Ok(d) => d,
-            Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+            Ok(d) if within_a_year(d) => d,
+            _ => return StatusCode::BAD_REQUEST.into_response(),
         },
         None => match jiff::tz::TimeZone::get(&ucfg.timezone) {
             Ok(tz) => jiff::Timestamp::now().to_zoned(tz).date(),
@@ -2287,6 +2287,13 @@ fn truthy(value: Option<&str>) -> bool {
 
 const MAX_RANGE_DAYS: i32 = 14;
 
+/// Day routes generate and store plans, so they answer only for a year either side of today.
+fn within_a_year(date: jiff::civil::Date) -> bool {
+    let today = jiff::Timestamp::now().to_zoned(jiff::tz::TimeZone::UTC).date();
+    let year = jiff::Span::new().years(1);
+    matches!((today.checked_sub(year), today.checked_add(year)), (Ok(first), Ok(last)) if (first..=last).contains(&date))
+}
+
 /// The user's timezone and template, the two things every day-shaped read needs.
 fn day_context(
     state: &AppState,
@@ -2307,7 +2314,7 @@ async fn day_view(
     State(state): State<AppState>,
     Path(date): Path<String>,
 ) -> impl IntoResponse {
-    let Ok(date) = date.parse::<jiff::civil::Date>() else {
+    let Some(date) = date.parse::<jiff::civil::Date>().ok().filter(|d| within_a_year(*d)) else {
         return StatusCode::BAD_REQUEST.into_response();
     };
     let (tz, tmpl) = match day_context(&state, &user.username) {
@@ -2376,7 +2383,7 @@ async fn plan_range(
         return StatusCode::BAD_REQUEST.into_response();
     };
     let span = (to - from).get_days();
-    if !(0..MAX_RANGE_DAYS).contains(&span) {
+    if !(0..MAX_RANGE_DAYS).contains(&span) || !within_a_year(from) || !within_a_year(to) {
         return StatusCode::BAD_REQUEST.into_response();
     }
     let conn = state.db();

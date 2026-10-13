@@ -248,6 +248,18 @@ async fn build_with(
     (app, cookie, state, cfg)
 }
 
+/// A fixture date moved forward by whole weeks so that every fixture up to
+/// 2026-09-25 stays in the recent past: day routes answer only within a year
+/// of today, and the weekday is kept.
+#[allow(dead_code)] // only the plan and calendar suites pin day dates
+pub fn recent(date: &str) -> String {
+    let anchor: jiff::civil::Date = "2026-09-25".parse().unwrap();
+    let today = jiff::Timestamp::now().to_zoned(jiff::tz::TimeZone::UTC).date();
+    let weeks = ((today - anchor).get_days() / 7).max(0);
+    let date: jiff::civil::Date = date.parse().unwrap();
+    date.checked_add(jiff::Span::new().weeks(weeks)).unwrap().to_string()
+}
+
 /// Lays one task as a block on `date` from `start`, the way a Talk session would.
 #[allow(dead_code)] // only the day and share suites lay blocks
 pub fn lay_block(state: &AppState, cfg: &std::path::Path, task_id: i64, date: jiff::civil::Date, start: &str) {
