@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Template {
     pub events: Vec<TemplateEvent>,
 }
@@ -17,7 +17,7 @@ pub enum Entry {
     Block,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Clone, Deserialize)]
 pub struct TemplateEvent {
     pub kind: String,
     pub time: String,
@@ -210,8 +210,11 @@ pub fn set_alerts(
         .map_err(anyhow::Error::from)?;
     crate::context::write_atomic(&out, &toml::to_string(&doc).map_err(anyhow::Error::from)?)
         .map_err(anyhow::Error::from)?;
+    TEMPLATES.forget(&out);
     Ok(())
 }
+
+static TEMPLATES: crate::config::FileCache<Template> = crate::config::FileCache::new();
 
 impl Template {
     pub fn rows(&self) -> Vec<ScheduleRow> {
@@ -238,11 +241,13 @@ impl Template {
     /// `config_dir/defaults/templates/` when no override exists.
     pub fn load(config_dir: &Path, user: &str, name: &str) -> Result<Self> {
         let path = effective_path(config_dir, user, name);
-        let raw = std::fs::read_to_string(&path)
-            .with_context(|| format!("reading template {}", path.display()))?;
-        let template: Template = toml::from_str(&raw)?;
-        template.validate(&path)?;
-        Ok(template)
+        TEMPLATES
+            .read(&path, |raw| {
+                let template: Template = toml::from_str(raw)?;
+                template.validate(&path)?;
+                Ok(template)
+            })
+            .with_context(|| format!("reading template {}", path.display()))?
     }
 
     /// Rejects event fields the rest of the pipeline cannot act on: an

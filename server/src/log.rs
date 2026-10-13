@@ -4,10 +4,8 @@ use rusqlite::{Connection, OptionalExtension};
 pub const ERROR_LOG_WINDOW_MINS: i64 = 60;
 
 pub fn record(conn: &Connection, user_id: Option<i64>, kind: &str, detail: &str) -> Result<()> {
-    conn.execute(
-        "INSERT INTO event_log (ts, user_id, kind, detail) VALUES (?1, ?2, ?3, ?4)",
-        (jiff::Timestamp::now().to_string(), user_id, kind, detail),
-    )?;
+    conn.prepare_cached("INSERT INTO event_log (ts, user_id, kind, detail) VALUES (?1, ?2, ?3, ?4)")?
+        .execute((jiff::Timestamp::now().to_string(), user_id, kind, detail))?;
     Ok(())
 }
 

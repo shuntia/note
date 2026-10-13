@@ -523,8 +523,8 @@ fn user_zone(state: &AppState, username: &str) -> jiff::tz::TimeZone {
 }
 
 async fn tasks_list(user: TaskPrincipal, State(state): State<AppState>) -> impl IntoResponse {
-    let conn = state.db();
     let tz = user_zone(&state, &user.username);
+    let conn = state.db();
     let listed = crate::tasks::list(&conn, user.id).and_then(|mut ts| {
         crate::tasks::stamp_schedule(&conn, user.id, &tz, ts.iter_mut().map(|n| &mut n.task))?;
         Ok(ts)
@@ -545,8 +545,8 @@ async fn tasks_queue(
     State(state): State<AppState>,
     Query(q): Query<QueueQuery>,
 ) -> impl IntoResponse {
-    let conn = state.db();
     let tz = user_zone(&state, &user.username);
+    let conn = state.db();
     let limit = q.limit.unwrap_or(5).clamp(1, 20);
     let listed = crate::tasks::queue(&conn, user.id, &tz, jiff::Timestamp::now(), limit).and_then(|mut q| {
         crate::tasks::stamp_schedule(&conn, user.id, &tz, q.iter_mut().map(|e| &mut e.task.task))?;
@@ -564,8 +564,8 @@ async fn tasks_candidates(
     State(state): State<AppState>,
     Query(q): Query<QueueQuery>,
 ) -> impl IntoResponse {
-    let conn = state.db();
     let tz = user_zone(&state, &user.username);
+    let conn = state.db();
     let limit = q.limit.unwrap_or(5).clamp(1, 20);
     let listed = crate::order::candidates(&conn, user.id, &tz, jiff::Timestamp::now(), limit)
         .and_then(|mut q| {
@@ -647,9 +647,9 @@ async fn tasks_create(
         )
             .into_response();
     }
+    let tz = user_zone(&state, &user.username);
     let conn = state.db();
     let source = default_source(&user.via);
-    let tz = user_zone(&state, &user.username);
     match crate::tasks::create(&conn, user.id, req, source, crate::tasks::Actor::User) {
         Ok(mut t) => {
             let _ = crate::tasks::stamp_schedule(&conn, user.id, &tz, std::iter::once(&mut t));
@@ -665,8 +665,8 @@ async fn tasks_update(
     Path(id): Path<i64>,
     Json(patch): Json<crate::tasks::TaskPatch>,
 ) -> impl IntoResponse {
-    let conn = state.db();
     let tz = user_zone(&state, &user.username);
+    let conn = state.db();
     match crate::tasks::update(&conn, user.id, id, &patch) {
         Ok(Some(mut t)) => {
             let _ = crate::tasks::stamp_schedule(
@@ -1590,11 +1590,6 @@ async fn settings_get(user: CurrentUser, State(state): State<AppState>) -> impl 
     let Ok(cfg) = crate::config::UserConfig::load(&state.config_dir, &user.username) else {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
-    let mut zones: Vec<String> = jiff::tz::db()
-        .available()
-        .map(|n| n.as_str().to_string())
-        .collect();
-    zones.sort_unstable();
     let templates = crate::templates::available(&state.config_dir, &user.username);
     let schedule = schedule_rows(&state, &user.username, &cfg.template);
     let voice_link = {
@@ -1603,9 +1598,18 @@ async fn settings_get(user: CurrentUser, State(state): State<AppState>) -> impl 
     };
     let mut body = settings_body(&state, &cfg, &user, &schedule, voice_link);
     body["templates"] = serde_json::json!(templates);
-    body["timezones"] = serde_json::json!(zones);
+    body["timezones"] = serde_json::json!(*ZONES);
     Json(body).into_response()
 }
+
+static ZONES: std::sync::LazyLock<Vec<String>> = std::sync::LazyLock::new(|| {
+    let mut zones: Vec<String> = jiff::tz::db()
+        .available()
+        .map(|n| n.as_str().to_string())
+        .collect();
+    zones.sort_unstable();
+    zones
+});
 
 /// Merges the supplied subset into the effective values and rewrites the user's
 /// file, rejecting the first invalid field without touching disk. Bell toggles

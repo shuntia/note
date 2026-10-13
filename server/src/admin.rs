@@ -1133,6 +1133,7 @@ mod inspect {
         let path = config_path(&state, &username);
         let written = std::fs::create_dir_all(path.parent().expect("user.toml has a parent"))
             .and_then(|_| crate::context::write_atomic(&path, &req.toml));
+        crate::config::forget_cached(&path);
         if written.is_err() {
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }

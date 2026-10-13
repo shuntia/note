@@ -522,7 +522,7 @@ pub fn occurrences(
     user_id: i64,
     date: jiff::civil::Date,
 ) -> rusqlite::Result<Vec<Occurrence>> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare_cached(
         "SELECT id, title, kind, quiet, start_time, end_time
          FROM calendar_entries e
          WHERE user_id = ?1

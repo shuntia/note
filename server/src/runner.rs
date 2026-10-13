@@ -139,7 +139,7 @@ pub fn fire_due(
     config_dir: &Path,
     now: jiff::Timestamp,
 ) -> Result<Vec<FiredEvent>> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare_cached(
         "SELECT e.id, p.user_id, u.username, u.category, p.date, e.wall_time, e.kind,
                 e.channel, e.message
          FROM events e
@@ -241,7 +241,7 @@ pub fn block_starts(
     config_dir: &Path,
     now: jiff::Timestamp,
 ) -> Result<Vec<BlockStart>> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare_cached(
         "SELECT e.id, p.user_id, u.username, u.category, p.date, e.wall_time,
                 e.end_wall_time, t.title, t.notify
          FROM events e

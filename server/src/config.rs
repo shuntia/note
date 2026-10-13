@@ -474,19 +474,22 @@ impl UserConfig {
     }
 
     pub fn load(config_dir: &Path, user: &str) -> anyhow::Result<Self> {
-        let raw = std::fs::read_to_string(config_dir.join("users").join(user).join("user.toml")).ok();
-        Self::from_overlay(config_dir, raw.as_deref())
+        let defaults = defaults_toml(config_dir)?;
+        let own = TOML_FILES.read(&user_toml(config_dir, user), parse_toml).ok().transpose()?;
+        Self::from_values(defaults, own)
     }
 
     /// The effective config for a user file with this content (`None` for no
     /// file), validated the same way `load` validates the file on disk.
     pub fn from_overlay(config_dir: &Path, raw: Option<&str>) -> anyhow::Result<Self> {
-        let defaults: toml::Value = toml::from_str(
-            &std::fs::read_to_string(defaults_dir(config_dir).join("user.toml"))
-                .context("reading defaults/user.toml")?,
-        )?;
-        let merged = match raw {
-            Some(raw) => overlay(defaults, toml::from_str(raw)?),
+        let defaults = defaults_toml(config_dir)?;
+        let own = raw.map(toml::from_str::<toml::Value>).transpose()?;
+        Self::from_values(defaults, own)
+    }
+
+    fn from_values(defaults: toml::Value, own: Option<toml::Value>) -> anyhow::Result<Self> {
+        let merged = match own {
+            Some(own) => overlay(defaults, own),
             None => defaults,
         };
         let cfg: UserConfig = merged.try_into()?;
@@ -521,10 +524,77 @@ impl UserConfig {
     /// Writes every field to the user's own file, so a later edit of
     /// `defaults/user.toml` cannot move settings the user has already chosen.
     pub fn save(&self, config_dir: &Path, user: &str) -> anyhow::Result<()> {
-        let path = config_dir.join("users").join(user).join("user.toml");
+        let path = user_toml(config_dir, user);
         std::fs::create_dir_all(path.parent().expect("user.toml always has a parent"))?;
         crate::context::write_atomic(&path, &toml::to_string(self)?)?;
+        forget_cached(&path);
         Ok(())
+    }
+}
+
+fn user_toml(config_dir: &Path, user: &str) -> PathBuf {
+    config_dir.join("users").join(user).join("user.toml")
+}
+
+fn defaults_toml(config_dir: &Path) -> anyhow::Result<toml::Value> {
+    TOML_FILES
+        .read(&defaults_dir(config_dir).join("user.toml"), parse_toml)
+        .context("reading defaults/user.toml")?
+}
+
+fn parse_toml(raw: &str) -> anyhow::Result<toml::Value> {
+    Ok(toml::from_str(raw)?)
+}
+
+static TOML_FILES: FileCache<toml::Value> = FileCache::new();
+
+/// Drops the parsed copy of a user or defaults `user.toml` after writing it.
+pub(crate) fn forget_cached(path: &Path) {
+    TOML_FILES.forget(path);
+}
+
+type Stamp = (std::time::SystemTime, u64, u64);
+
+/// Parsed files keyed by path, each kept while the file's modification time,
+/// length and inode stay as they were when it was read.
+pub(crate) struct FileCache<T> {
+    entries: std::sync::Mutex<std::collections::BTreeMap<PathBuf, (Stamp, T)>>,
+}
+
+impl<T: Clone> FileCache<T> {
+    pub(crate) const fn new() -> Self {
+        Self { entries: std::sync::Mutex::new(std::collections::BTreeMap::new()) }
+    }
+
+    /// The kept copy while the file is unchanged, else `parse` run on its text.
+    /// The outer error is the file failing to read; a parse failure is
+    /// returned inside and keeps nothing.
+    pub(crate) fn read(
+        &self,
+        path: &Path,
+        parse: impl FnOnce(&str) -> anyhow::Result<T>,
+    ) -> std::io::Result<anyhow::Result<T>> {
+        use std::os::unix::fs::MetadataExt;
+        let meta = std::fs::metadata(path)?;
+        let stamp = (meta.modified()?, meta.len(), meta.ino());
+        if let Some((kept, value)) = self.lock().get(path) {
+            if *kept == stamp {
+                return Ok(Ok(value.clone()));
+            }
+        }
+        let parsed = parse(&std::fs::read_to_string(path)?);
+        if let Ok(value) = &parsed {
+            self.lock().insert(path.to_path_buf(), (stamp, value.clone()));
+        }
+        Ok(parsed)
+    }
+
+    pub(crate) fn forget(&self, path: &Path) {
+        self.lock().remove(path);
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, std::collections::BTreeMap<PathBuf, (Stamp, T)>> {
+        self.entries.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -572,6 +642,36 @@ mod tests {
             "display_name = \"Someone\"\ntimezone = \"UTC\"\ntemplate = \"default\"\n");
         let cfg = UserConfig::load(tmp.path(), "nobody").unwrap();
         assert_eq!(cfg.timezone, "UTC");
+    }
+
+    #[test]
+    fn an_edit_on_disk_is_read_on_the_next_load() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), "defaults/user.toml",
+            "display_name = \"Someone\"\ntimezone = \"UTC\"\ntemplate = \"default\"\n");
+        write(tmp.path(), "users/aitest/user.toml", "timezone = \"Asia/Tokyo\"\n");
+        assert_eq!(UserConfig::load(tmp.path(), "aitest").unwrap().timezone, "Asia/Tokyo");
+        write(tmp.path(), "users/aitest/user.toml", "timezone = \"Europe/Berlin\"\n");
+        assert_eq!(UserConfig::load(tmp.path(), "aitest").unwrap().timezone, "Europe/Berlin");
+        write(tmp.path(), "users/aitest/user.toml", "timezone = [\n");
+        assert!(UserConfig::load(tmp.path(), "aitest").is_err());
+        std::fs::remove_file(tmp.path().join("users/aitest/user.toml")).unwrap();
+        assert_eq!(UserConfig::load(tmp.path(), "aitest").unwrap().timezone, "UTC");
+        write(tmp.path(), "defaults/user.toml",
+            "display_name = \"Someone\"\ntimezone = \"America/Chicago\"\ntemplate = \"default\"\n");
+        assert_eq!(UserConfig::load(tmp.path(), "aitest").unwrap().timezone, "America/Chicago");
+    }
+
+    #[test]
+    fn a_save_is_read_back_at_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), "defaults/user.toml",
+            "display_name = \"Someone\"\ntimezone = \"UTC\"\ntemplate = \"default\"\n");
+        write(tmp.path(), "users/aitest/user.toml", "timezone = \"Asia/Tokyo\"\n");
+        let mut cfg = UserConfig::load(tmp.path(), "aitest").unwrap();
+        cfg.timezone = "Asia/Seoul".into();
+        cfg.save(tmp.path(), "aitest").unwrap();
+        assert_eq!(UserConfig::load(tmp.path(), "aitest").unwrap().timezone, "Asia/Seoul");
     }
 
     #[test]

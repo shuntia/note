@@ -203,7 +203,7 @@ pub fn exists(conn: &Connection, user_id: i64, date: jiff::civil::Date) -> rusql
 }
 
 pub fn events_for(conn: &Connection, user_id: i64, date: jiff::civil::Date) -> Result<Vec<PlanEvent>> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare_cached(
         "SELECT e.id, e.kind, e.wall_time, e.end_wall_time, e.status, e.flexibility,
                 e.slide_window_min, e.channel, e.alert,
                 m.id, mp.date, m.wall_time, m.kind, e.span_min,
