@@ -25,7 +25,6 @@ pub struct VoiceServiceConfig {
     pub device: Device,
     #[serde(default = "cues_dir_from_env")]
     pub cues_dir: Option<PathBuf>,
-    pub ready_cue_file: Option<PathBuf>,
     pub heard_cue_file: Option<PathBuf>,
     #[serde(default)]
     pub tts: TtsConfig,
@@ -268,16 +267,8 @@ impl VoiceServiceConfig {
     }
 
     /// The override, then the default in `cues_dir`, in the order to try them.
-    pub fn ready_cue(&self) -> Vec<PathBuf> {
-        self.cue(self.ready_cue_file.as_ref(), "ready.pcm")
-    }
-
     pub fn heard_cue(&self) -> Vec<PathBuf> {
-        self.cue(self.heard_cue_file.as_ref(), "heard.pcm")
-    }
-
-    fn cue(&self, file: Option<&PathBuf>, name: &str) -> Vec<PathBuf> {
-        file.cloned().into_iter().chain(self.cues_dir.as_ref().map(|d| d.join(name))).collect()
+        self.heard_cue_file.iter().cloned().chain(self.cues_dir.as_ref().map(|d| d.join("heard.pcm"))).collect()
     }
 }
 
@@ -313,7 +304,6 @@ mod tests {
         assert_eq!(sets["en"].kokoro.as_ref().unwrap().speakers[0].id, "af_heart");
         assert!(matches!(sets["en"].stt, SttModel::OnlineTransducer { .. }));
         assert!(!sets.contains_key("ja"), "no Japanese models under /m");
-        assert_eq!(cfg.ready_cue(), vec![PathBuf::from("/c/ready.pcm")]);
         assert_eq!(cfg.heard_cue(), vec![PathBuf::from("/h.pcm"), PathBuf::from("/c/heard.pcm")]);
         assert_eq!(cfg.tts.sidecars, [SidecarConfig { id: "kyutai".into(), url: "http://127.0.0.1:8890".into() }]);
         assert!(cfg.check().is_ok());

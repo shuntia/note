@@ -453,7 +453,6 @@ pub fn voice_config(dir: &std::path::Path, homeserver: String) -> VoiceServiceCo
         language_id: None,
         device: Default::default(),
         cues_dir: None,
-        ready_cue_file: None,
         heard_cue_file: None,
         tts: Default::default(),
     }

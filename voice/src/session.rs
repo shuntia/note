@@ -47,15 +47,14 @@ const NO_ONE_AFTER: Duration = Duration::from_secs(20);
 
 /// 48 kHz mono audio for the call's cues; an empty one plays nothing.
 pub struct Cues {
-    pub ready: Arc<Vec<i16>>,
     pub heard: Arc<Vec<i16>>,
 }
 
 impl Cues {
     /// Each cue is the first of its candidates that reads: WAV at any rate, or raw 48 kHz mono s16le.
     /// A cue none of whose files read is logged and left silent.
-    pub fn load(ready: &[PathBuf], heard: &[PathBuf]) -> Cues {
-        Cues { ready: Arc::new(first_cue(ready)), heard: Arc::new(first_cue(heard)) }
+    pub fn load(heard: &[PathBuf]) -> Cues {
+        Cues { heard: Arc::new(first_cue(heard)) }
     }
 }
 
@@ -324,10 +323,7 @@ impl<S: Fn(CallBody)> Live<S> {
                 render_lines(&lines, &speaker, &base, &language, order, &rendering, &events);
             });
         }
-        let mut playout = Playout::default();
-        if deps.profile.cue {
-            playout.push(Clip { reply: None, chars: 0, pcm: deps.cues.ready.to_vec() });
-        }
+        let playout = Playout::default();
         if voice_up.is_none() {
             eprintln!("voice: the {language} voice is down; the call ends after its kept line");
         }
@@ -1223,7 +1219,6 @@ mod tests {
         parts.iter().flat_map(|&(level, ms)| (0..ms / 10).map(move |_| vec![level; 160])).collect()
     }
 
-    const READY: i16 = 1000;
     const HEARD: i16 = 2000;
 
     struct Call {
@@ -1264,7 +1259,7 @@ mod tests {
         SessionDeps {
             engines: Arc::new(engines(stt, tts)),
             lines: Arc::new(Lines::default()),
-            cues: Arc::new(Cues { ready: Arc::new(vec![READY; FRAME]), heard: Arc::new(vec![HEARD; FRAME]) }),
+            cues: Arc::new(Cues { heard: Arc::new(vec![HEARD; FRAME]) }),
             profile: VoiceProfile { language: "en".into(), voice: String::new(), cue },
             sidecars: Vec::new(),
             direction: Direction::Outbound,
@@ -1306,7 +1301,6 @@ mod tests {
         assert_eq!(log[1], CallBody::Floor { floor: Floor::UserQuiet });
         assert!(matches!(&log[2], CallBody::Draft { turn: 1, .. }), "{log:?}");
         assert_eq!(log[3], CallBody::Commit { turn: 1, text: "move my run".into(), language: Some("en".into()) });
-        assert_eq!(c.probe.frames_of(READY as usize), 1, "the ready cue plays once");
         assert_eq!(c.probe.frames_of(HEARD as usize), 1, "the heard cue follows the commit");
     }
 
@@ -2067,27 +2061,22 @@ mod tests {
     #[test]
     fn a_wav_cue_is_mixed_down_and_resampled_to_48k() {
         let dir = tempfile::tempdir().unwrap();
-        let wav = dir.path().join("ready.wav");
+        let wav = dir.path().join("heard.wav");
         let spec = hound::WavSpec { channels: 2, sample_rate: 24_000, bits_per_sample: 16, sample_format: hound::SampleFormat::Int };
         write_wav(&wav, spec, &[1000, 3000, 4000, 6000]);
-        let cues = Cues::load(&[wav], &[]);
-        assert_eq!(*cues.ready, vec![2000, 3500, 5000, 5000]);
-        assert!(cues.heard.is_empty());
+        let cues = Cues::load(&[wav]);
+        assert_eq!(*cues.heard, vec![2000, 3500, 5000, 5000]);
     }
 
     #[test]
     fn an_ogg_or_unreadable_override_falls_back_to_the_default_cue() {
         let dir = tempfile::tempdir().unwrap();
-        let ogg = dir.path().join("ready.ogg");
+        let ogg = dir.path().join("heard.ogg");
         std::fs::write(&ogg, b"OggS").unwrap();
-        let pcm = dir.path().join("ready.pcm");
+        let pcm = dir.path().join("heard.pcm");
         std::fs::write(&pcm, [0x10, 0x00, 0x20, 0x00]).unwrap();
-        let wav = dir.path().join("heard.wav");
-        let spec = hound::WavSpec { channels: 1, sample_rate: 48_000, bits_per_sample: 16, sample_format: hound::SampleFormat::Int };
-        write_wav(&wav, spec, &[7, 8, 9]);
-        let cues = Cues::load(&[ogg, pcm.clone()], &[dir.path().join("missing.wav"), wav]);
-        assert_eq!(*cues.ready, vec![0x10, 0x20]);
-        assert_eq!(*cues.heard, vec![7, 8, 9]);
+        let cues = Cues::load(&[ogg, dir.path().join("missing.wav"), pcm]);
+        assert_eq!(*cues.heard, vec![0x10, 0x20]);
     }
 
     /// Plays clips of `NOTE_VOICE_LID_CLIPS` (16 kHz WAVs named `en-…`/`ja-…`) into calls on the real

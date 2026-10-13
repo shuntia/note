@@ -13,7 +13,6 @@ const ROOM: &str = "!r:t";
 const USER: &str = "@aki:t";
 const USER_KEY: &str = "_@aki:t_PHONE_m.call";
 const BOT_KEY: &str = "_@note:t_DEV_m.call";
-const READY: i16 = 0x2010;
 
 struct Rig {
     _dir: tempfile::TempDir,
@@ -28,7 +27,7 @@ impl Rig {
     }
 }
 
-/// The service with `@aki:t` linked in `!r:t`, a 100 ms ready cue of `READY`, and Note up if `with_note`.
+/// The service with `@aki:t` linked in `!r:t`, and Note up if `with_note`.
 async fn rig(with_note: bool) -> Rig {
     rig_with(with_note, true).await
 }
@@ -36,10 +35,7 @@ async fn rig(with_note: bool) -> Rig {
 async fn rig_with(with_note: bool, models: bool) -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let (base, hs) = homeserver().await;
-    let mut cfg = voice_config(dir.path(), base);
-    let cue = dir.path().join("ready.pcm");
-    std::fs::write(&cue, READY.to_le_bytes().repeat(4800)).unwrap();
-    cfg.ready_cue_file = Some(cue);
+    let cfg = voice_config(dir.path(), base);
     std::fs::create_dir_all(&cfg.state_dir).unwrap();
     let state = json!({
         "links": { "1": { "mxid": USER, "room_id": ROOM, "reported": true } },
@@ -153,8 +149,7 @@ async fn an_incoming_call_with_note_down_says_it_cant_reach() {
     eventually("the bot leaves the call", || media.left.load(Ordering::SeqCst)).await;
     assert_eq!(r.media.joins.load(Ordering::SeqCst), 1);
     let sent = r.media.sent.lock().unwrap().clone();
-    assert_eq!(sent.iter().filter(|&&s| s == READY).count(), 10, "the ready cue plays");
-    assert_eq!(sent.last(), Some(&spoken_marker(text(Line::CantReach, "en"))), "then the line, last");
+    assert_eq!(sent.last(), Some(&spoken_marker(text(Line::CantReach, "en"))), "the line, last");
     eventually("the membership is cleared", || bot_memberships(&r) == vec![true, false]).await;
 }
 
@@ -231,6 +226,6 @@ async fn an_incoming_call_with_no_voice_models_is_answered_and_hung_up() {
     let media = r.media.clone();
     eventually("the bot leaves the call", || media.left.load(Ordering::SeqCst)).await;
     assert_eq!(r.media.joins.load(Ordering::SeqCst), 1, "the caller is answered, not left ringing");
-    assert_eq!(*r.media.sent.lock().unwrap(), vec![READY; 10], "the ready cue alone");
+    assert!(r.media.sent.lock().unwrap().is_empty(), "nothing is played");
     eventually("the membership is cleared", || bot_memberships(&r) == vec![true, false]).await;
 }

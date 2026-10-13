@@ -165,7 +165,6 @@
           voiceCues = pkgs.runCommand "note-voice-cues" { nativeBuildInputs = [ pkgs.ffmpeg-headless ]; } ''
             mkdir -p $out
             y=${pkgs.yaru-theme}/share/sounds/Yaru/stereo
-            ffmpeg -v error -i $y/message-new-instant.oga -ac 1 -ar 48000 -f s16le $out/ready.pcm
             ffmpeg -v error -i $y/message.oga -ac 1 -ar 48000 -f s16le $out/heard.pcm
           '';
 

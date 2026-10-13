@@ -589,7 +589,7 @@ impl Service {
         }
     }
 
-    /// Answers, plays the ready cue and `Line::CantReach`, and leaves; Note hears nothing of it.
+    /// Answers, plays `Line::CantReach`, and leaves; Note hears nothing of it.
     async fn cant_reach(&self, room: &str, mxid: &str, device: Option<&str>) {
         if !self.still_calling(room, mxid, device).await {
             return eprintln!("voice: {mxid}'s call in {room} ended before it was answered");
@@ -606,14 +606,11 @@ impl Service {
         clear_member(&self.matrix, room).await;
     }
 
-    /// The ready cue and `Line::CantReach` as `mxid` last heard them: in the language's base voice, or
-    /// its kept rendering while that voice is down.
+    /// `Line::CantReach` as `mxid` last heard it: in the language's base voice, or its kept rendering
+    /// while that voice is down.
     async fn cant_reach_clips(&self, mxid: &str) -> Vec<Vec<i16>> {
         let profile = lock(&self.state).data.profiles.get(mxid).cloned().unwrap_or_default();
         let mut clips = Vec::new();
-        if profile.cue {
-            clips.push(self.cues.ready.to_vec());
-        }
         let languages = self.backends.engines.languages();
         let Some(language) = languages.iter().find(|l| **l == profile.language).or(languages.first()).cloned() else {
             return clips;
@@ -1014,7 +1011,7 @@ pub async fn run_with(cfg: VoiceServiceConfig, peer_cfg: PeerConfig, backends: B
     if backends.engines.languages().is_empty() {
         eprintln!("voice: no voice models are loaded; answered calls will fail with \"no voice models\"");
     }
-    let cues = Cues::load(&cfg.ready_cue(), &cfg.heard_cue());
+    let cues = Cues::load(&cfg.heard_cue());
     let lines = Arc::new(Lines::new(Some(cfg.state_dir.join("lines"))));
     warm_lines(&backends.engines, &lines, &[]);
     let sidecars = Arc::new(Sidecars::new(cfg.tts.sidecars.clone()));
