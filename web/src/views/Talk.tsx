@@ -254,8 +254,8 @@ function liveLabel(steps: ToolItem[], now: number): string {
 
 // One quiet line; the reasoning and the calls stay a chevron away, each round's
 // thinking above the calls it led to and `reasoning` — the round that answered —
-// last. `held` keeps a live line in the layout but out of sight until the sent
-// bubble has landed.
+// last. A live trace with thinking to show stands open until the reply replaces it.
+// `held` keeps a live line in the layout but out of sight until the sent bubble has landed.
 function Trace({
   label,
   reasoning,
@@ -269,13 +269,14 @@ function Trace({
   live?: boolean
   held?: boolean
 }) {
-  const [open, setOpen] = useState(false)
+  const [chosen, setChosen] = useState<boolean | null>(null)
+  const open = chosen ?? (live && (!!reasoning || steps.some((s) => s.thinking)))
   const state = [live ? 'live' : '', held ? 'held' : '', open ? 'open' : '']
     .filter(Boolean)
     .join(' ')
   return (
     <div className={`activity ${state}`.trim()}>
-      <button className="activity-head" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
+      <button className="activity-head" aria-expanded={open} onClick={() => setChosen(!open)}>
         <span className="activity-status" aria-live={live ? 'polite' : undefined}>
           {label}
         </span>
@@ -288,11 +289,11 @@ function Trace({
           <div className="receipts">
             {steps.map((step) => (
               <Fragment key={step.key}>
-                {step.thinking && <pre className="activity-think">{step.thinking}</pre>}
+                {step.thinking && <p className="activity-think">{step.thinking}</p>}
                 <Receipt item={step} />
               </Fragment>
             ))}
-            {reasoning && <pre className="activity-think">{reasoning}</pre>}
+            {reasoning && <p className="activity-think">{reasoning}</p>}
           </div>
         </div>
       )}
