@@ -1,4 +1,5 @@
 import {
+  Suspense,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -10,11 +11,13 @@ import {
 } from 'react'
 import { flushSync } from 'react-dom'
 import { api, ApiError, setOnUnauthorized } from './api'
-import { CallView, type CallOpen } from './call/CallView'
+import type { CallOpen } from './call/CallView'
 import { primeAudio } from './call/prime'
+import { chunk, whenIdle } from './chunk'
 import { trailing } from './coalesce'
 import { notice } from './call/tones'
 import { desktop, noticesOn, ringable, systemNotice } from './desktop'
+import { takeMe } from './early'
 import { Jot } from './jot'
 import { glide, lift, viewIn, viewOut } from './motion-gsap'
 import { reducedMotion } from './motion'
@@ -22,21 +25,47 @@ import { NavIcon } from './navicon'
 import { prefsFrom, writePrefs } from './prefs'
 import { startPresence } from './presence'
 import { readSession, stillEnding, writeSession, type FocusSession } from './session'
-import type { Me, SessionStart } from './types'
-import { Admin } from './views/Admin'
+import { notify, Toaster, type ToastAction } from './toast'
+import type { Me, SessionStart, Settings as SettingsData } from './types'
 import { Home } from './views/Home'
-import { Memory } from './views/Memory'
-import { Onboarding } from './views/Onboarding'
-import { Settings } from './views/Settings'
-import { Talk } from './views/Talk'
-import { Tasks } from './views/Tasks'
 import { connectEvents, onCallFrame } from './ws'
 import { deviceZone, zoneChange } from './zone'
 import './styles/shell.css'
 import { adoptLanguage, t, type Key } from './i18n'
 
+export type { ToastAction }
+
+const Admin = chunk(() => import('./views/Admin').then((m) => m.Admin))
+const Memory = chunk(() => import('./views/Memory').then((m) => m.Memory))
+const Onboarding = chunk(() => import('./views/Onboarding').then((m) => m.Onboarding))
+const Settings = chunk(() => import('./views/Settings').then((m) => m.Settings))
+const Talk = chunk(() => import('./views/Talk').then((m) => m.Talk))
+const Tasks = chunk(() => import('./views/Tasks').then((m) => m.Tasks))
+const CallView = chunk(() => import('./call/CallView').then((m) => m.CallView))
+
 // `admin` is reached from Settings only, so it never joins NAV.
 type Tab = 'today' | 'tasks' | 'chat' | 'memory' | 'settings' | 'admin'
+
+const CHUNKS: Partial<Record<Tab, { preload: () => Promise<unknown>; ready: () => boolean }>> = {
+  tasks: Tasks,
+  chat: Talk,
+  memory: Memory,
+  settings: Settings,
+  admin: Admin,
+}
+
+// Both of the shell's reads of the settings on sign-in ride on one request.
+let settingsInFlight: Promise<SettingsData> | null = null
+function sharedSettings(): Promise<SettingsData> {
+  if (settingsInFlight) return settingsInFlight
+  const request = api.settings()
+  settingsInFlight = request
+  const clear = () => {
+    if (settingsInFlight === request) settingsInFlight = null
+  }
+  request.then(clear, clear)
+  return request
+}
 
 // The deep link a push notification carries; the id of the thread it names.
 function conversationOf(url: string): number | null {
@@ -44,9 +73,6 @@ function conversationOf(url: string): number | null {
   const match = /^#\/chat\/(\d+)$/.exec(hash)
   return match ? Number(match[1]) : null
 }
-
-// `windowMs` is the undo window the action holds open; the toast must outlast it.
-export type ToastAction = { label: string; run: () => void; windowMs?: number }
 
 // `refresh` is a counter views key on or depend on to refetch; `onChanged` bumps it.
 export type ViewProps = {
@@ -62,8 +88,6 @@ export type ViewProps = {
 }
 
 type NavTab = Exclude<Tab, 'admin'>
-
-const TOAST_LEAVE_MS = 200
 
 // On a phone Today sits in the middle of the bar, under the thumb.
 const PHONE_ORDER: NavTab[] = ['tasks', 'chat', 'today', 'memory', 'settings']
@@ -87,7 +111,6 @@ export function App() {
   const [leaving, setLeaving] = useState<Layer | null>(null)
   // true from the moment a turn starts until the arriving layer has settled
   const [turning, setTurning] = useState(false)
-  const [toast, setToast] = useState<{ msg: string; action?: ToastAction; leaving?: boolean } | null>(null)
   const [refresh, setRefresh] = useState(0)
   const [talkPrefill, setTalkPrefill] = useState<string | null>(null)
   // A thread to land on, with a nonce so the same thread can be asked for twice.
@@ -101,10 +124,11 @@ export function App() {
   here.current = layer
   const layerEls = useRef(new Map<number, HTMLElement>())
   const turn = useRef(0)
+  const asked = useRef(0)
 
-  // Every way into a view goes through here: the outgoing one is held where it is
-  // while the arriving one takes the layout, and the page starts at the top again.
-  const go = useCallback((next: Tab) => {
+  // The outgoing view is held where it is while the arriving one takes the layout,
+  // and the page starts at the top again.
+  const turnTo = useCallback((next: Tab) => {
     const from = here.current
     if (next === from.tab) return
     const id = turn.current + 1
@@ -131,6 +155,18 @@ export function App() {
     setLayer({ id, tab: next })
   }, [])
 
+  // Every way into a view goes through here. A view whose code has not arrived yet
+  // is waited for, so no turn shows an empty layer; only the latest ask turns.
+  const go = useCallback((next: Tab) => {
+    const ask = ++asked.current
+    const code = CHUNKS[next]
+    if (!code || code.ready()) return turnTo(next)
+    code.preload().then(
+      () => ask === asked.current && turnTo(next),
+      () => navigator.onLine && location.reload(),
+    )
+  }, [turnTo])
+
   useLayoutEffect(() => {
     if (!leaving) return
     const id = turn.current
@@ -138,21 +174,6 @@ export function App() {
     viewOut(layerEls.current.get(leaving.id), () => mine() && setLeaving(null))
     viewIn(layerEls.current.get(layer.id), () => mine() && setTurning(false))
   }, [leaving, layer])
-
-  const toastTimer = useRef(0)
-  const dismissToast = useCallback(() => {
-    window.clearTimeout(toastTimer.current)
-    setToast((t) => t && { ...t, leaving: true })
-    toastTimer.current = window.setTimeout(() => setToast(null), TOAST_LEAVE_MS)
-  }, [])
-  const notify = useCallback(
-    (msg: string, action?: ToastAction) => {
-      setToast({ msg, action })
-      window.clearTimeout(toastTimer.current)
-      toastTimer.current = window.setTimeout(dismissToast, action ? (action.windowMs ?? 5000) : 4000)
-    },
-    [dismissToast],
-  )
 
   const onChanged = useMemo(() => trailing(() => setRefresh((n) => n + 1), 80), [])
 
@@ -191,6 +212,7 @@ export function App() {
 
   useEffect(() => {
     if (!me?.voice) return
+    CallView.preload().catch(() => {})
     return onCallFrame((f) => {
       if (f.type !== 'incoming' || !ringable()) return
       desktop()?.ring()
@@ -263,45 +285,9 @@ export function App() {
         notify(t('session.startFailed'))
       }
     },
-    [go, notify, putSession],
+    [go, putSession],
   )
-
-  // The phone's bar rests on Today once the hand has been still a while; any touch
-  // anywhere brings it back. In a session Today's own idle takes the bar away instead.
-  const [rested, setRested] = useState(false)
-  const inSession = session !== null
-  useEffect(() => {
-    setRested(false)
-    if (!mobile || tab !== 'today' || inSession) return
-    let timer = 0
-    const wake = () => {
-      setRested(false)
-      window.clearTimeout(timer)
-      timer = window.setTimeout(() => setRested(true), 4000)
-    }
-    wake()
-    document.addEventListener('pointerdown', wake)
-    return () => {
-      window.clearTimeout(timer)
-      document.removeEventListener('pointerdown', wake)
-    }
-  }, [mobile, tab, inSession])
-
-  // While the phone's keyboard is up for the chat composer, the bar steps aside.
-  const [typing, setTyping] = useState(false)
-  useEffect(() => {
-    if (!mobile) return
-    const composing = (el: EventTarget | null) => el instanceof HTMLTextAreaElement && el.closest('.chat-compose') !== null
-    const onIn = (e: FocusEvent) => setTyping(composing(e.target))
-    const onOut = (e: FocusEvent) => setTyping(composing(e.relatedTarget))
-    setTyping(composing(document.activeElement))
-    document.addEventListener('focusin', onIn)
-    document.addEventListener('focusout', onOut)
-    return () => {
-      document.removeEventListener('focusin', onIn)
-      document.removeEventListener('focusout', onOut)
-    }
-  }, [mobile])
+  const openNow = useCallback((fields: SessionStart) => void startSession(fields), [startSession])
 
   // Desktop rests the top bar and its jot for as long as a session runs.
   useEffect(() => {
@@ -313,16 +299,21 @@ export function App() {
   }, [])
 
   useEffect(() => {
-    api
-      .me()
+    takeMe()
       .then(setMe)
       .catch(() => setMe(null))
   }, [])
 
   useEffect(() => {
     if (!me) return
-    api
-      .settings()
+    return whenIdle(() => {
+      for (const code of [Tasks, Talk, Memory, Settings, Admin]) code.preload().catch(() => {})
+    })
+  }, [me])
+
+  useEffect(() => {
+    if (!me) return
+    sharedSettings()
       .then((s) => {
         writePrefs(prefsFrom(s))
         if (adoptLanguage(s.language)) location.reload()
@@ -337,7 +328,7 @@ export function App() {
       if (busy) return
       busy = true
       try {
-        const change = zoneChange(await api.settings(), deviceZone())
+        const change = zoneChange(await sharedSettings(), deviceZone())
         if (!change) return
         await api.saveSettings({ timezone: change.to })
         onChanged()
@@ -358,7 +349,7 @@ export function App() {
     void check()
     window.addEventListener('focus', check)
     return () => window.removeEventListener('focus', check)
-  }, [me, notify, onChanged])
+  }, [me, onChanged])
 
   useEffect(() => {
     if (!me) return
@@ -384,19 +375,17 @@ export function App() {
       else notify(ev.body ? `${ev.title} — ${ev.body}` : ev.title)
       onChanged()
     }, onChanged)
-  }, [me, notify, onChanged, openConversation])
+  }, [me, onChanged, openConversation])
 
   if (me === undefined) return null
   if (me === null) return <Login onSignedIn={setMe} />
   if (me.onboarding)
     return (
       <>
-        <Onboarding me={me} notify={notify} onDone={() => setMe({ ...me, onboarding: false })} />
-        {toast && (
-          <div className={`toast${toast.leaving ? ' leaving' : ''}`} role="status">
-            <span className="toast-msg">{toast.msg}</span>
-          </div>
-        )}
+        <Suspense fallback={null}>
+          <Onboarding.View me={me} notify={notify} onDone={() => setMe({ ...me, onboarding: false })} />
+        </Suspense>
+        <Toaster actions={false} />
       </>
     )
 
@@ -406,25 +395,8 @@ export function App() {
     onChanged,
     openTalk,
     openConversation,
-    openNow: (fields: SessionStart) => void startSession(fields),
+    openNow,
   }
-
-  const toastNode = toast && (
-    <div className={`toast${mobile ? ' above-tabs' : ''}${toast.leaving ? ' leaving' : ''}`} role="status">
-      <span className="toast-msg">{toast.msg}</span>
-      {toast.action && (
-        <button
-          className="toast-action"
-          onClick={() => {
-            toast.action?.run()
-            dismissToast()
-          }}
-        >
-          {toast.action.label}
-        </button>
-      )}
-    </div>
-  )
 
   const current: NavTab = tab === 'admin' ? 'settings' : tab
 
@@ -437,17 +409,17 @@ export function App() {
           notify={notify}
           onChanged={onChanged}
           refresh={refresh}
-          openNow={views.openNow}
+          openNow={openNow}
           openTalk={openTalk}
           openConversation={openConversation}
           mobile={mobile}
           armed={!turning}
         />
       )
-    if (of === 'tasks') return <Tasks {...views} />
+    if (of === 'tasks') return <Tasks.View {...views} />
     if (of === 'chat')
       return (
-        <Talk
+        <Talk.View
           {...views}
           prefill={talkPrefill}
           onPrefilled={() => setTalkPrefill(null)}
@@ -459,17 +431,17 @@ export function App() {
           micBlocked={micBlocked}
         />
       )
-    if (of === 'memory') return <Memory {...views} />
+    if (of === 'memory') return <Memory.View {...views} />
     if (of === 'settings')
       return (
-        <Settings
+        <Settings.View
           me={me}
           {...views}
           onSignedOut={() => setMe(null)}
           openAdmin={() => go('admin')}
         />
       )
-    return <Admin me={me} notify={notify} onBack={() => go('settings')} />
+    return <Admin.View me={me} notify={notify} onBack={() => go('settings')} />
   }
 
   const layers = leaving ? [leaving, layer] : [layer]
@@ -500,14 +472,71 @@ export function App() {
             .join(' ')}
           aria-hidden={l === leaving || undefined}
         >
-          {viewOf(l.tab)}
+          <Suspense fallback={null}>{viewOf(l.tab)}</Suspense>
         </main>
       ))}
-      {mobile && <Rail kind="tabs" current={current} go={go} away={rested || typing} />}
-      {mobile && <div className={`handle${rested ? ' on' : ''}`} aria-hidden="true" />}
-      {toastNode}
-      {call && <CallView key={call.at} call={call} onClose={endCall} onMicBlocked={blockMic} />}
+      {mobile && <PhoneBar current={current} go={go} tab={tab} inSession={session !== null} />}
+      <Toaster aboveTabs={mobile} />
+      {call && (
+        <Suspense fallback={null}>
+          <CallView.View key={call.at} call={call} onClose={endCall} onMicBlocked={blockMic} />
+        </Suspense>
+      )}
     </div>
+  )
+}
+
+function PhoneBar({
+  current,
+  go,
+  tab,
+  inSession,
+}: {
+  current: NavTab
+  go: (t: NavTab) => void
+  tab: Tab
+  inSession: boolean
+}) {
+  // The phone's bar rests on Today once the hand has been still a while; any touch
+  // anywhere brings it back. In a session Today's own idle takes the bar away instead.
+  const [rested, setRested] = useState(false)
+  useEffect(() => {
+    setRested(false)
+    if (tab !== 'today' || inSession) return
+    let timer = 0
+    const wake = () => {
+      setRested(false)
+      window.clearTimeout(timer)
+      timer = window.setTimeout(() => setRested(true), 4000)
+    }
+    wake()
+    document.addEventListener('pointerdown', wake)
+    return () => {
+      window.clearTimeout(timer)
+      document.removeEventListener('pointerdown', wake)
+    }
+  }, [tab, inSession])
+
+  // While the phone's keyboard is up for the chat composer, the bar steps aside.
+  const [typing, setTyping] = useState(false)
+  useEffect(() => {
+    const composing = (el: EventTarget | null) => el instanceof HTMLTextAreaElement && el.closest('.chat-compose') !== null
+    const onIn = (e: FocusEvent) => setTyping(composing(e.target))
+    const onOut = (e: FocusEvent) => setTyping(composing(e.relatedTarget))
+    setTyping(composing(document.activeElement))
+    document.addEventListener('focusin', onIn)
+    document.addEventListener('focusout', onOut)
+    return () => {
+      document.removeEventListener('focusin', onIn)
+      document.removeEventListener('focusout', onOut)
+    }
+  }, [])
+
+  return (
+    <>
+      <Rail kind="tabs" current={current} go={go} away={rested || typing} />
+      <div className={`handle${rested ? ' on' : ''}`} aria-hidden="true" />
+    </>
   )
 }
 
