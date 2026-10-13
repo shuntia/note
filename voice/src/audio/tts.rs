@@ -38,6 +38,8 @@ pub enum Next {
     Done,
 }
 
+pub type Wake = Arc<dyn Fn() + Send + Sync>;
+
 pub trait SpeechStream: Send {
     fn push(&mut self, text: &str) -> anyhow::Result<()>;
     fn finish(&mut self) -> anyhow::Result<()>;
@@ -49,6 +51,8 @@ pub trait SpeechStream: Send {
     fn alive(&self) -> bool {
         true
     }
+    /// A stream whose audio arrives from elsewhere calls `wake` as it does, so `next` is asked again.
+    fn wake_with(&mut self, _wake: Wake) {}
 }
 
 /// 48 kHz mono s16 audio and how many characters of the pushed text it covers.
