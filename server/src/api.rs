@@ -2916,7 +2916,7 @@ async fn ws_connect(
     State(state): State<AppState>,
     ws: axum::extract::ws::WebSocketUpgrade,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| ws_pump(socket, state, user.id))
+    ws.max_message_size(WS_MAX_IN).max_frame_size(WS_MAX_IN).on_upgrade(move |socket| ws_pump(socket, state, user.id))
 }
 
 #[derive(Deserialize)]
@@ -3001,9 +3001,12 @@ impl axum::extract::FromRequestParts<AppState> for WsAdmission {
 
 const WS_PING_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
 const WS_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+const WS_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const WS_MAX_IN: usize = 4 * 1024;
+const WS_PRESENCE_EVERY: std::time::Duration = std::time::Duration::from_secs(crate::presence::EVERY_SECS as u64);
 
-/// Half-open connections (NAT drop, lid close) never produce a FIN, and an
-/// unbounded sender only fails once its receiver is dropped, so a silent socket
+/// Half-open connections (NAT drop, lid close) never produce a FIN, and a
+/// queued sender only fails once its receiver is dropped, so a silent socket
 /// would stay registered and keep absorbing deliveries. Pings force the peer to
 /// speak; going `WS_IDLE_TIMEOUT` without any inbound frame tears the bridge
 /// down so the dispatcher's ladder can fall through to another channel.
@@ -3017,11 +3020,12 @@ async fn ws_pump(mut socket: axum::extract::ws::WebSocket, state: AppState, user
     let mut ping = tokio::time::interval(WS_PING_EVERY);
     ping.tick().await;
     let mut last_inbound = tokio::time::Instant::now();
+    let mut last_presence: Option<tokio::time::Instant> = None;
     loop {
         tokio::select! {
             out = rx.recv() => match out {
                 Some(text) => {
-                    if socket.send(Message::Text(text.into())).await.is_err() {
+                    if !matches!(tokio::time::timeout(WS_SEND_TIMEOUT, socket.send(Message::Text(text.into()))).await, Ok(Ok(()))) {
                         break;
                     }
                 }
@@ -3038,7 +3042,8 @@ async fn ws_pump(mut socket: axum::extract::ws::WebSocket, state: AppState, user
                         }
                         None => crate::channels::ws::is_presence(&msg),
                     };
-                    if present {
+                    if present && last_presence.is_none_or(|at| at.elapsed() >= WS_PRESENCE_EVERY) {
+                        last_presence = Some(tokio::time::Instant::now());
                         let conn = crate::db_guard(db);
                         let _ = crate::presence::touch(&conn, user_id, jiff::Timestamp::now());
                     }
@@ -3052,7 +3057,7 @@ async fn ws_pump(mut socket: axum::extract::ws::WebSocket, state: AppState, user
             },
             _ = ping.tick() => {
                 if last_inbound.elapsed() > WS_IDLE_TIMEOUT
-                    || socket.send(Message::Ping(Vec::new().into())).await.is_err()
+                    || !matches!(tokio::time::timeout(WS_SEND_TIMEOUT, socket.send(Message::Ping(Vec::new().into()))).await, Ok(Ok(())))
                 {
                     break;
                 }

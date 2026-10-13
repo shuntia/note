@@ -126,3 +126,26 @@ async fn a_page_reports_whether_it_is_in_view() {
     ws.send(tokio_tungstenite::tungstenite::Message::Text(r#"{"type":"visible","on":false}"#.into())).await.unwrap();
     note_voice_proto::testkit::eventually("hidden", || !hub.has_visible(1)).await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_frame_over_4_kib_closes_the_socket() {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let (app, cookie, state, _cfg) = common::app_with_logged_in_user_and_state().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let mut req = format!("ws://{addr}/api/ws").into_client_request().unwrap();
+    req.headers_mut().insert("cookie", cookie.parse().unwrap());
+    let (mut ws, _) = tokio_tungstenite::connect_async(req).await.unwrap();
+    let hub = state.hub.clone();
+    ws.send(tokio_tungstenite::tungstenite::Message::Text(r#"{"type":"visible","on":true}"#.into())).await.unwrap();
+    note_voice_proto::testkit::eventually("in view", || hub.has_visible(1)).await;
+    let _ = ws.send(tokio_tungstenite::tungstenite::Message::Text("x".repeat(4 * 1024 + 1).into())).await;
+    let closed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while let Some(Ok(_)) = ws.next().await {}
+    })
+    .await;
+    assert!(closed.is_ok(), "the server hung up");
+    note_voice_proto::testkit::eventually("unregistered", || !hub.has_visible(1)).await;
+}

@@ -3,11 +3,11 @@ use crate::agent::AgentEvent;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{channel, Receiver, Sender};
 
 struct Conn {
     id: u64,
-    tx: UnboundedSender<String>,
+    tx: Sender<String>,
     /// The page last said it is in view.
     visible: bool,
 }
@@ -15,8 +15,11 @@ struct Conn {
 type Conns = HashMap<i64, Vec<Conn>>;
 
 /// Sockets one account may hold at once. Every delivery fans out to all of
-/// them, and each pins a task plus an unbounded queue.
+/// them, and each pins a task plus a queue.
 pub const MAX_PER_USER: usize = 8;
+
+/// Frames a socket may fall behind by before the hub drops it.
+pub const QUEUE: usize = 256;
 
 #[derive(Default)]
 pub struct ClientHub {
@@ -30,14 +33,14 @@ impl ClientHub {
     }
 
     /// `None` once the user already holds `MAX_PER_USER` sockets.
-    pub fn register(&self, user_id: i64) -> Option<(u64, UnboundedReceiver<String>)> {
+    pub fn register(&self, user_id: i64) -> Option<(u64, Receiver<String>)> {
         let mut conns = self.conns.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let held = conns.entry(user_id).or_default();
         if held.len() >= MAX_PER_USER {
             return None;
         }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let (tx, rx) = unbounded_channel();
+        let (tx, rx) = channel(QUEUE);
         held.push(Conn { id, tx, visible: false });
         Some((id, rx))
     }
@@ -60,14 +63,14 @@ impl ClientHub {
         }
     }
 
-    /// Sends to every live connection of `user_id`, pruning closed ones, and
-    /// returns how many actually received it.
+    /// Sends to every live connection of `user_id`, dropping closed ones and
+    /// ones `QUEUE` frames behind, and returns how many actually received it.
     pub fn send(&self, user_id: i64, text: &str) -> usize {
         let mut conns = self.conns.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(v) = conns.get_mut(&user_id) else {
             return 0;
         };
-        v.retain(|c| c.tx.send(text.to_string()).is_ok());
+        v.retain(|c| c.tx.try_send(text.to_string()).is_ok());
         let n = v.len();
         if v.is_empty() {
             conns.remove(&user_id);
@@ -92,10 +95,23 @@ impl ClientHub {
 
     /// Sends to the user's sockets whose page is in view; returns how many took it.
     pub fn send_visible(&self, user_id: i64, text: &str) -> usize {
-        let conns = self.conns.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        conns
-            .get(&user_id)
-            .map_or(0, |v| v.iter().filter(|c| c.visible && c.tx.send(text.to_string()).is_ok()).count())
+        let mut conns = self.conns.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(v) = conns.get_mut(&user_id) else {
+            return 0;
+        };
+        let mut took = 0;
+        v.retain(|c| {
+            if !c.visible {
+                return true;
+            }
+            let sent = c.tx.try_send(text.to_string()).is_ok();
+            took += usize::from(sent);
+            sent
+        });
+        if v.is_empty() {
+            conns.remove(&user_id);
+        }
+        took
     }
 }
 
@@ -239,6 +255,23 @@ mod tests {
         hub.send(1, "x");
         assert!(!hub.at_capacity(1));
         assert!(hub.register(1).is_some());
+    }
+
+    #[test]
+    fn a_socket_that_falls_a_queue_behind_is_dropped() {
+        let hub = ClientHub::new();
+        let (_slow, mut slow_rx) = hub.register(1).unwrap();
+        let (_live, mut live_rx) = hub.register(1).unwrap();
+        for _ in 0..QUEUE {
+            assert_eq!(hub.send(1, "x"), 2);
+            live_rx.try_recv().unwrap();
+        }
+        assert_eq!(hub.send(1, "x"), 1, "the slow socket is over its queue");
+        for _ in 0..QUEUE {
+            slow_rx.try_recv().unwrap();
+        }
+        assert!(matches!(slow_rx.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)));
+        assert_eq!(live_rx.try_recv().unwrap(), "x");
     }
 
     #[test]
