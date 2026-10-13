@@ -91,11 +91,7 @@ impl WebPushChannel {
             valid_subject(&subject),
             "vapid subject must be a mailto: or https:// URL, got {subject:?}"
         );
-        let agent = ureq::Agent::config_builder()
-            .timeout_connect(Some(std::time::Duration::from_secs(5)))
-            .timeout_global(Some(std::time::Duration::from_secs(15)))
-            .build()
-            .into();
+        let agent = crate::net::public_agent(std::time::Duration::from_secs(5), std::time::Duration::from_secs(15));
         Ok(Self {
             db,
             vapid_pem,
@@ -109,7 +105,11 @@ impl WebPushChannel {
         for (k, v) in &built.headers {
             req = req.header(k, v);
         }
-        req.send(&built.body[..]).map(|_| ())
+        let res = req.send(&built.body[..])?;
+        match res.status().as_u16() {
+            200..=299 => Ok(()),
+            code => Err(ureq::Error::StatusCode(code)),
+        }
     }
 }
 
@@ -250,6 +250,42 @@ v5mC8db8ZSK9ruR2mEgvMEvePYwohpr98g==
         assert!(
             WebPushChannel::new(db, TEST_PEM.to_vec(), "https://example.com/contact".into()).is_ok()
         );
+    }
+
+    fn redirecting_server() -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut s, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 8192];
+            let _ = s.read(&mut buf);
+            let _ = s.write_all(b"HTTP/1.1 307 Temporary Redirect\r\nLocation: http://127.0.0.1:1/\r\nContent-Length: 0\r\n\r\n");
+        });
+        format!("http://{addr}/send/abc")
+    }
+
+    #[test]
+    fn a_redirect_is_a_failed_delivery_not_followed() {
+        let db = Arc::new(Mutex::new(crate::db::open_memory().unwrap()));
+        let mut ch = WebPushChannel::new(db, TEST_PEM.to_vec(), "mailto:admin@example.com".into()).unwrap();
+        ch.agent = ureq::Agent::config_builder().max_redirects(0).build().into();
+        let built = BuiltPush { endpoint: redirecting_server(), headers: Vec::new(), body: b"x".to_vec() };
+        assert!(matches!(ch.send(&built), Err(ureq::Error::StatusCode(307))));
+    }
+
+    #[test]
+    fn delivery_refuses_plain_http_and_private_addresses() {
+        let db = Arc::new(Mutex::new(crate::db::open_memory().unwrap()));
+        let ch = WebPushChannel::new(db, TEST_PEM.to_vec(), "mailto:admin@example.com".into()).unwrap();
+        let built = |endpoint: &str| BuiltPush { endpoint: endpoint.into(), headers: Vec::new(), body: b"x".to_vec() };
+        assert!(matches!(ch.send(&built("http://203.0.113.9/send")), Err(ureq::Error::RequireHttpsOnly(_))));
+        for private in ["https://127.0.0.1:9/send", "https://localhost:9/send", "https://[::1]:9/send", "https://10.0.0.1:9/send"] {
+            match ch.send(&built(private)) {
+                Err(ureq::Error::BadUri(why)) => assert!(why.contains("private network"), "{private}: {why}"),
+                other => panic!("{private}: {other:?}"),
+            }
+        }
     }
 
     #[test]

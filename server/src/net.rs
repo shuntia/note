@@ -12,19 +12,61 @@ fn blocked_v4(ip: Ipv4Addr) -> bool {
         || ip.is_broadcast()
         || ip.is_multicast()
         || a == 0
+        || a >= 240
         || (a == 100 && (64..128).contains(&b))
+        || (a == 198 && (b & 0xfe) == 18)
 }
 
 fn blocked_v6(ip: Ipv6Addr) -> bool {
     if let Some(v4) = ip.to_ipv4_mapped() {
         return blocked_v4(v4);
     }
-    let first = ip.segments()[0];
+    let s = ip.segments();
     ip.is_loopback()
         || ip.is_unspecified()
         || ip.is_multicast()
-        || (first & 0xfe00) == 0xfc00
-        || (first & 0xffc0) == 0xfe80
+        || (s[0] & 0xfe00) == 0xfc00
+        || (s[0] & 0xffc0) == 0xfe80
+        || (s[0] & 0xffc0) == 0xfec0
+        || s[0] == 0x2002
+        || (s[0] == 0x64 && s[1] == 0xff9b && s[2..6] == [0, 0, 0, 0])
+}
+
+/// Resolves like ureq's default but hands the connector only addresses outside
+/// the blocked ranges, so what is checked is what gets connected to.
+#[derive(Debug, Default)]
+pub struct PublicResolver(ureq::unversioned::resolver::DefaultResolver);
+
+impl ureq::unversioned::resolver::Resolver for PublicResolver {
+    fn resolve(
+        &self,
+        uri: &ureq::http::Uri,
+        config: &ureq::config::Config,
+        timeout: ureq::unversioned::transport::NextTimeout,
+    ) -> Result<ureq::unversioned::resolver::ResolvedSocketAddrs, ureq::Error> {
+        let found = self.0.resolve(uri, config, timeout)?;
+        let mut out = self.empty();
+        for addr in found.iter().filter(|a| !blocked_ip(a.ip())) {
+            out.push(*addr);
+        }
+        if out.is_empty() {
+            return Err(ureq::Error::BadUri("host resolves into a private network".into()));
+        }
+        Ok(out)
+    }
+}
+
+/// An agent for URLs a user supplied: https only, no redirects, no proxy, and
+/// only public addresses.
+pub fn public_agent(connect: std::time::Duration, global: std::time::Duration) -> ureq::Agent {
+    let config = ureq::Agent::config_builder()
+        .https_only(true)
+        .max_redirects(0)
+        .proxy(None)
+        .timeout_connect(Some(connect))
+        .timeout_global(Some(global))
+        .build();
+    ureq::Agent::with_parts(config, ureq::unversioned::transport::DefaultConnector::new(), PublicResolver::default())
 }
 
 pub fn blocked_ip(ip: IpAddr) -> bool {
@@ -239,6 +281,26 @@ mod tests {
             "https://push.example@10.0.0.1/send",
         ] {
             assert!(push_endpoint_ok(bad).is_err(), "accepted {bad}");
+        }
+    }
+
+    #[test]
+    fn benchmark_reserved_and_tunnel_ranges_are_refused() {
+        for bad in [
+            "198.18.0.1",
+            "198.19.255.255",
+            "240.0.0.1",
+            "254.1.2.3",
+            "64:ff9b::a00:1",
+            "64:ff9b::808:808",
+            "2002:a00:1::1",
+            "fec0::1",
+            "feff::1",
+        ] {
+            assert!(blocked_ip(bad.parse().unwrap()), "allowed {bad}");
+        }
+        for ok in ["198.17.255.255", "198.20.0.1", "223.255.255.1", "2001:db8::1", "64:ff9b:1::1", "2003::1"] {
+            assert!(!blocked_ip(ok.parse().unwrap()), "refused {ok}");
         }
     }
 
