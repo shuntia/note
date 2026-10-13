@@ -2409,5 +2409,4 @@ mod tests {
         );
         assert!(!recent.contains("TEMP B-TREE"), "{recent}");
     }
-
 }

@@ -642,7 +642,7 @@ pub fn create(
 }
 
 fn children_of(conn: &Connection, parent_id: i64) -> rusqlite::Result<Vec<Task>> {
-    let mut stmt = conn.prepare(&format!(
+    let mut stmt = conn.prepare_cached(&format!(
         "SELECT {COLS} FROM {FROM} WHERE t.parent_id = ?1 AND t.state != 'dropped' ORDER BY t.id"
     ))?;
     let rows = stmt.query_map([parent_id], row_to_task)?;
@@ -659,19 +659,46 @@ pub fn get(conn: &Connection, user_id: i64, task_id: i64) -> rusqlite::Result<Op
 }
 
 pub fn list(conn: &Connection, user_id: i64) -> rusqlite::Result<Vec<TaskNode>> {
-    let mut stmt = conn.prepare(&format!(
+    tops_with_steps(conn, user_id, "t.state != 'dropped'")
+}
+
+/// The user's open and in-progress top-level tasks with their steps.
+fn list_open(conn: &Connection, user_id: i64) -> rusqlite::Result<Vec<TaskNode>> {
+    tops_with_steps(conn, user_id, "t.state IN ('open','in_progress')")
+}
+
+/// Top-level tasks matching `top_filter` (a condition on `t`), each with its
+/// undropped steps, both in id order.
+fn tops_with_steps(
+    conn: &Connection,
+    user_id: i64,
+    top_filter: &str,
+) -> rusqlite::Result<Vec<TaskNode>> {
+    let mut stmt = conn.prepare_cached(&format!(
         "SELECT {COLS} FROM {FROM}
-         WHERE t.user_id = ?1 AND t.state != 'dropped' AND t.parent_id IS NULL ORDER BY t.id"
+         WHERE t.user_id = ?1 AND {top_filter} AND t.parent_id IS NULL ORDER BY t.id"
     ))?;
     let parents: Vec<Task> =
         stmt.query_map([user_id], row_to_task)?.collect::<rusqlite::Result<_>>()?;
-    parents
+    let mut stmt = conn.prepare_cached(&format!(
+        "SELECT {COLS} FROM {FROM}
+         WHERE t.parent_id IN (SELECT t.id FROM tasks t
+                               WHERE t.user_id = ?1 AND {top_filter} AND t.parent_id IS NULL)
+           AND t.state != 'dropped'
+         ORDER BY t.id"
+    ))?;
+    let mut steps: std::collections::HashMap<i64, Vec<Task>> = std::collections::HashMap::new();
+    for step in stmt.query_map([user_id], row_to_task)? {
+        let step = step?;
+        steps.entry(step.parent_id.expect("selected by its parent")).or_default().push(step);
+    }
+    Ok(parents
         .into_iter()
         .map(|task| {
-            let children = children_of(conn, task.id)?;
-            Ok(TaskNode { task, children })
+            let children = steps.remove(&task.id).unwrap_or_default();
+            TaskNode { task, children }
         })
-        .collect()
+        .collect())
 }
 
 /// One open task as the next thing to start: the step it would begin with, the
@@ -740,10 +767,7 @@ pub fn queue(
     now: jiff::Timestamp,
     limit: usize,
 ) -> rusqlite::Result<Vec<QueueEntry>> {
-    let mut nodes: Vec<TaskNode> = list(conn, user_id)?
-        .into_iter()
-        .filter(|n| matches!(n.task.state.as_str(), "open" | "in_progress"))
-        .collect();
+    let mut nodes = list_open(conn, user_id)?;
     let due_of = |t: &Task| t.due_at.as_deref().and_then(|d| d.parse::<jiff::Timestamp>().ok());
     for n in &mut nodes {
         n.task.pressing = pressing_at(&n.task.state, n.task.due_at.as_deref(), now);
@@ -1383,6 +1407,33 @@ mod tests {
 
     fn count(conn: &Connection, sql: &str) -> i64 {
         conn.query_row(sql, [], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn list_hangs_each_undropped_step_under_its_task_in_id_order() {
+        let (conn, uid) = db_with_user();
+        let other = crate::auth::create_user(&conn, "aitest", "pw", false).unwrap();
+        let a = task(&conn, uid, "a", None);
+        let b = task(&conn, uid, "b", None);
+        let b1 = task(&conn, uid, "b1", Some(b));
+        let a1 = task(&conn, uid, "a1", Some(a));
+        let a2 = task(&conn, uid, "a2", Some(a));
+        let c = task(&conn, uid, "c", None);
+        task(&conn, uid, "c1", Some(c));
+        let a3 = task(&conn, uid, "a3", Some(a));
+        let d = task(&conn, uid, "d", None);
+        let d1 = task(&conn, uid, "d1", Some(d));
+        task(&conn, other, "elsewhere", None);
+        conn.execute("UPDATE tasks SET state = 'dropped' WHERE id IN (?1, ?2)", [a2, c]).unwrap();
+        conn.execute("UPDATE tasks SET state = 'done' WHERE id = ?1", [d]).unwrap();
+        let shape = |nodes: Vec<TaskNode>| -> Vec<(i64, Vec<i64>)> {
+            nodes.into_iter().map(|n| (n.task.id, n.children.iter().map(|c| c.id).collect())).collect()
+        };
+        assert_eq!(
+            shape(list(&conn, uid).unwrap()),
+            vec![(a, vec![a1, a3]), (b, vec![b1]), (d, vec![d1])]
+        );
+        assert_eq!(shape(list_open(&conn, uid).unwrap()), vec![(a, vec![a1, a3]), (b, vec![b1])]);
     }
 
     #[test]
