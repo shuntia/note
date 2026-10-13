@@ -1,6 +1,5 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -9,16 +8,17 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, MissedTickBehavior};
 
-use crate::audio::engines::{SpeechEngines, SpeechToText, TurnDetector, Vad};
-use crate::audio::language::{confident, Choice, MIN_SECONDS};
-use crate::audio::lines::{Line, Lines};
+use crate::audio::ears::{stt_worker, Ears, SttCmd};
+use crate::audio::engines::{SpeechEngines, TurnDetector, Vad};
+use crate::audio::language::Choice;
+use crate::audio::lines::{render_lines, Line, Lines};
 use crate::audio::playout::{Clip, Playout};
 use crate::audio::speech::SpeechQueue;
-use crate::audio::tts::{speaker, Mute, Speaker, SpeechBackend};
+use crate::audio::tts::{speaker, Mute, SpeechBackend};
 use crate::audio::turn::{backchannels, Action, Input, TurnConfig, TurnMachine};
 use crate::media::{Gone, MediaIo};
 
-const RATE: usize = 16_000;
+pub(crate) const RATE: usize = 16_000;
 const VAD_WINDOW: usize = 512;
 const STT_CHUNK: usize = RATE * 160 / 1000;
 const TURN_SPAN: usize = RATE * 8;
@@ -33,15 +33,6 @@ const DRAIN_LIMIT: Duration = Duration::from_secs(60);
 /// What the media path still holds once playout is empty, played out before leaving.
 const DRAIN_TAIL: Duration = Duration::from_millis(500);
 const FILLER_AFTER: Duration = Duration::from_millis(1500);
-/// The voiced audio the caller's language is first judged from, unless their first turn ends sooner.
-const ID_SPAN: usize = RATE * 5 / 2;
-/// A turn with less voiced audio than this does not count toward `ID_TURNS`.
-const ID_MIN: usize = RATE * 3 / 10;
-/// The voiced audio that has the language judged at a pause, ahead of the turn's end.
-const ID_AT_PAUSE: usize = RATE;
-/// Turns, and voiced audio, heard without a confident language before the call keeps the user's.
-const ID_TURNS: u32 = 3;
-const ID_CAP: usize = RATE * 8;
 /// An inbound caller silent this long from the start is asked if they are there.
 const HELLO_AFTER: Duration = Duration::from_secs(8);
 /// Silent this long after that, the call ends.
@@ -160,7 +151,7 @@ impl SessionEnd {
     }
 }
 
-enum Event {
+pub(crate) enum Event {
     Vad { at: Duration, speech: bool },
     Partial(String),
     Score { at: Duration, p: f32 },
@@ -169,20 +160,6 @@ enum Event {
     Language(Choice),
     /// `pcm` is None for a line that failed to render.
     Line { language: String, line: Line, pcm: Option<Arc<Vec<i16>>> },
-}
-
-enum SttCmd {
-    /// `voiced`: the VAD heard speech in the chunk.
-    Accept { samples: Vec<f32>, voiced: bool },
-    Finish { turn: u64 },
-    /// The caller paused.
-    Pause,
-    Reset,
-}
-
-enum SttOut {
-    Partial(Option<Choice>, String),
-    Finished(Option<Choice>, Option<(u64, String)>),
 }
 
 /// Runs one answered call until it ends. Outgoing frames go through `send` (journaled by the caller).
@@ -733,58 +710,6 @@ impl<S: Fn(CallBody)> Live<S> {
 /// The lines a call needs once the caller has spoken.
 const SPOKEN_TO: &[Line] = &[Line::OneMoment, Line::LostNotes, Line::Goodbye, Line::NoVoice, Line::NoEars];
 
-/// Gives the call each line at once: in `speaker` if already rendered, else in the base voice. A sidecar
-/// voice's lines are then rendered in it one by one, only while no reply is rendering, and replace the
-/// base's. A base that is down gives only what it rendered before.
-fn render_lines(
-    lines: &Lines,
-    speaker: &Speaker,
-    base: &Arc<dyn SpeechBackend>,
-    language: &str,
-    order: &[Line],
-    rendering: &AtomicBool,
-    events: &mpsc::UnboundedSender<Event>,
-) {
-    let on_base = speaker.backend.id() == base.id();
-    let quick = if on_base { speaker.clone() } else { Speaker::new(base.clone(), "") };
-    let mut upgrades = Vec::new();
-    for &line in order {
-        let pcm = lines.cached(speaker, language, line).or_else(|| {
-            if !on_base {
-                upgrades.push(line);
-            }
-            lines.get(&quick, &**base, language, line).map_err(|e| eprintln!("voice: rendering {line:?} failed: {e:#}")).ok()
-        });
-        if events.send(Event::Line { language: language.to_owned(), line, pcm }).is_err() {
-            return;
-        }
-    }
-    let busy = || rendering.load(Ordering::SeqCst) || events.is_closed();
-    for line in upgrades {
-        loop {
-            while busy() {
-                if events.is_closed() {
-                    return;
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            match lines.upgrade(speaker, language, line, &busy) {
-                Ok(Some(pcm)) => {
-                    if events.send(Event::Line { language: language.to_owned(), line, pcm: Some(pcm) }).is_err() {
-                        return;
-                    }
-                    break;
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    eprintln!("voice: rendering {line:?} in {} failed, keeping the base voice's: {e:#}", speaker.backend.id());
-                    return;
-                }
-            }
-        }
-    }
-}
-
 fn task_died(what: &str, err: Option<tokio::task::JoinError>) -> SessionEnd {
     let reason = match err {
         Some(e) => format!("{what} failed: {e}"),
@@ -840,224 +765,14 @@ async fn audio_in(
     }
 }
 
-/// The call's recognizers. Until the caller's language is settled, every language the call can
-/// speak listens at once with no partials shown, and the voiced audio of each turn is kept. It is
-/// judged at `ID_SPAN`, at a pause with `ID_AT_PAUSE` heard, and at the end of each turn, over all
-/// the voiced audio so far; the recognizer of a confident language, which heard the whole turn,
-/// carries on alone. A turn that ends unsettled is heard in the fallback language and the language
-/// stays open, until `ID_TURNS` such turns or `ID_CAP` of voiced audio settle it on the fallback.
-struct Ears {
-    engines: Arc<dyn SpeechEngines>,
-    speakable: Vec<String>,
-    fallback: String,
-    listening: Vec<(String, Box<dyn SpeechToText>)>,
-    voiced: Vec<f32>,
-    /// Where the current turn's voiced audio starts in `voiced`.
-    turn_from: usize,
-    /// The voiced audio the last judgement saw.
-    judged: usize,
-    /// Turns that ended unsettled.
-    turns: u32,
-    chosen: Option<Box<dyn SpeechToText>>,
-}
-
-impl Ears {
-    /// Settled on `fallback` from the start when there is nothing to choose between.
-    fn new(engines: Arc<dyn SpeechEngines>, speakable: &[String], fallback: &str) -> anyhow::Result<Ears> {
-        let choosing = engines.identifies() && speakable.len() > 1 && speakable.iter().any(|l| l == fallback);
-        let mut ears = Ears {
-            speakable: speakable.to_vec(),
-            fallback: fallback.to_owned(),
-            listening: Vec::new(),
-            voiced: Vec::new(),
-            turn_from: 0,
-            judged: 0,
-            turns: 0,
-            chosen: None,
-            engines,
-        };
-        if choosing {
-            for language in speakable {
-                ears.listening.push((language.clone(), ears.engines.stt(language)?));
-            }
-        } else {
-            ears.chosen = Some(ears.engines.stt(fallback)?);
-        }
-        Ok(ears)
-    }
-
-    fn accept(&mut self, samples: &[f32], voiced: bool) -> Option<Choice> {
-        if let Some(stt) = &mut self.chosen {
-            stt.accept(samples);
-            return None;
-        }
-        for (_, stt) in &mut self.listening {
-            stt.accept(samples);
-        }
-        if voiced {
-            let room = ID_CAP.saturating_sub(self.voiced.len());
-            self.voiced.extend_from_slice(&samples[..samples.len().min(room)]);
-        }
-        if self.voiced.len() >= ID_CAP {
-            return self.judge().or_else(|| Some(self.give_up()));
-        }
-        (self.voiced.len() >= ID_SPAN && self.judged < ID_SPAN).then(|| self.judge()).flatten()
-    }
-
-    fn partial(&mut self) -> String {
-        self.chosen.as_mut().map(|stt| stt.partial()).unwrap_or_default()
-    }
-
-    fn pause(&mut self) -> Option<Choice> {
-        let fresh = self.voiced.len() >= ID_AT_PAUSE && self.voiced.len() >= self.judged + ID_AT_PAUSE / 2;
-        (self.chosen.is_none() && fresh).then(|| self.judge()).flatten()
-    }
-
-    fn finish(&mut self) -> (Option<Choice>, String) {
-        let mut settled = None;
-        if self.chosen.is_none() {
-            settled = self.judge();
-            if settled.is_none() && self.voiced.len() - self.turn_from >= ID_MIN {
-                self.turns += 1;
-                if self.turns >= ID_TURNS {
-                    settled = Some(self.give_up());
-                }
-            }
-        }
-        if let Some(stt) = &mut self.chosen {
-            return (settled, stt.finish());
-        }
-        let mut text = String::new();
-        for (language, stt) in &mut self.listening {
-            let heard = stt.finish();
-            if *language == self.fallback {
-                text = heard;
-            }
-        }
-        self.turn_from = self.voiced.len();
-        (None, text)
-    }
-
-    /// Forgets the current turn, its voiced audio with it.
-    fn reset(&mut self) {
-        if let Some(stt) = &mut self.chosen {
-            stt.reset();
-            return;
-        }
-        for (_, stt) in &mut self.listening {
-            stt.reset();
-        }
-        self.voiced.truncate(self.turn_from);
-        self.judged = self.judged.min(self.turn_from);
-    }
-
-    /// Settles on the language of the voiced audio so far, if it is confident.
-    fn judge(&mut self) -> Option<Choice> {
-        let seconds = self.voiced.len() as f32 / RATE as f32;
-        if self.voiced.len() == self.judged || seconds < MIN_SECONDS {
-            return None;
-        }
-        self.judged = self.voiced.len();
-        let started = std::time::Instant::now();
-        let scores = match self.engines.identify(&self.voiced)? {
-            Ok(scores) => scores,
-            Err(e) => {
-                eprintln!("voice: identifying the caller's language failed: {e:#}");
-                return None;
-            }
-        };
-        let took = started.elapsed();
-        let language = confident(&scores, seconds, &self.speakable);
-        let top: Vec<String> = scores.iter().take(3).map(|(l, p)| format!("{l} {p:.2}")).collect();
-        eprintln!("voice: over {seconds:.1} s voiced the caller sounds like {top:?} (judged in {took:.0?}); {language:?}");
-        Some(self.settle(Choice { language: language?, identified: true }))
-    }
-
-    fn give_up(&mut self) -> Choice {
-        eprintln!("voice: the caller's language stays unclear; the call speaks {}", self.fallback);
-        self.settle(Choice { language: self.fallback.clone(), identified: false })
-    }
-
-    fn settle(&mut self, choice: Choice) -> Choice {
-        let at = self.listening.iter().position(|(l, _)| *l == choice.language).expect("the choice is speakable");
-        self.chosen = Some(self.listening.swap_remove(at).1);
-        self.listening.clear();
-        self.voiced = Vec::new();
-        choice
-    }
-}
-
-/// Owns the call's recognizers; each step runs on the blocking pool, in order. Reports the language
-/// once settled, then partial changes, and an empty partial once a finish or reset clears the stream.
-async fn stt_worker(
-    mut ears: Ears,
-    mut cmds: mpsc::UnboundedReceiver<SttCmd>,
-    events: mpsc::UnboundedSender<Event>,
-) {
-    let mut last = String::new();
-    while let Some(cmd) = cmds.recv().await {
-        let step = tokio::task::spawn_blocking(move || {
-            let out = match cmd {
-                SttCmd::Accept { samples, voiced } => {
-                    let settled = ears.accept(&samples, voiced);
-                    SttOut::Partial(settled, ears.partial())
-                }
-                SttCmd::Finish { turn } => {
-                    let (settled, text) = ears.finish();
-                    SttOut::Finished(settled, Some((turn, text)))
-                }
-                SttCmd::Pause => {
-                    let settled = ears.pause();
-                    SttOut::Partial(settled, ears.partial())
-                }
-                SttCmd::Reset => {
-                    ears.reset();
-                    SttOut::Finished(None, None)
-                }
-            };
-            (ears, out)
-        });
-        let (back, out) = match step.await {
-            Ok(done) => done,
-            Err(e) => {
-                eprintln!("voice: an STT step failed: {e}");
-                return;
-            }
-        };
-        ears = back;
-        match out {
-            SttOut::Partial(settled, partial) => {
-                if let Some(choice) = settled {
-                    let _ = events.send(Event::Language(choice));
-                }
-                if partial != last {
-                    last.clone_from(&partial);
-                    let _ = events.send(Event::Partial(partial));
-                }
-            }
-            SttOut::Finished(settled, finished) => {
-                if let Some(choice) = settled {
-                    let _ = events.send(Event::Language(choice));
-                }
-                if let Some((turn, text)) = finished {
-                    let _ = events.send(Event::Finished { turn, text });
-                }
-                if !last.is_empty() {
-                    last.clear();
-                    let _ = events.send(Event::Partial(String::new()));
-                }
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::audio::engines::BaseVoice;
+    use crate::audio::ears::{ID_CAP, ID_MIN, ID_SPAN};
+    use crate::audio::engines::{BaseVoice, SpeechToText};
     use crate::audio::lines::text;
     use crate::audio::playout::FRAME;
-    use crate::audio::tts::{ChunkedBackend, Renderer};
+    use crate::audio::tts::{ChunkedBackend, Renderer, Speaker};
     use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::sync::Notify;
 

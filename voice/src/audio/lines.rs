@@ -1,9 +1,13 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use tokio::sync::mpsc;
+
 use super::tts::{render_within, Speaker, SpeechBackend};
+use crate::session::Event;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Line {
@@ -159,6 +163,59 @@ const UPGRADE_LIMIT: Duration = Duration::from_secs(5);
 
 fn key(backend: &dyn SpeechBackend, voice: &str, language: &str, line: Line) -> Key {
     (language.to_owned(), backend.id().to_owned(), voice.to_owned(), line)
+}
+
+
+/// Gives the call each line at once: in `speaker` if already rendered, else in the base voice. A sidecar
+/// voice's lines are then rendered in it one by one, only while no reply is rendering, and replace the
+/// base's. A base that is down gives only what it rendered before.
+pub(crate) fn render_lines(
+    lines: &Lines,
+    speaker: &Speaker,
+    base: &Arc<dyn SpeechBackend>,
+    language: &str,
+    order: &[Line],
+    rendering: &AtomicBool,
+    events: &mpsc::UnboundedSender<Event>,
+) {
+    let on_base = speaker.backend.id() == base.id();
+    let quick = if on_base { speaker.clone() } else { Speaker::new(base.clone(), "") };
+    let mut upgrades = Vec::new();
+    for &line in order {
+        let pcm = lines.cached(speaker, language, line).or_else(|| {
+            if !on_base {
+                upgrades.push(line);
+            }
+            lines.get(&quick, &**base, language, line).map_err(|e| eprintln!("voice: rendering {line:?} failed: {e:#}")).ok()
+        });
+        if events.send(Event::Line { language: language.to_owned(), line, pcm }).is_err() {
+            return;
+        }
+    }
+    let busy = || rendering.load(Ordering::SeqCst) || events.is_closed();
+    for line in upgrades {
+        loop {
+            while busy() {
+                if events.is_closed() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            match lines.upgrade(speaker, language, line, &busy) {
+                Ok(Some(pcm)) => {
+                    if events.send(Event::Line { language: language.to_owned(), line, pcm: Some(pcm) }).is_err() {
+                        return;
+                    }
+                    break;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    eprintln!("voice: rendering {line:?} in {} failed, keeping the base voice's: {e:#}", speaker.backend.id());
+                    return;
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
