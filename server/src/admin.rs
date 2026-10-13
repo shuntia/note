@@ -198,15 +198,6 @@ fn live_grant(conn: &Connection, user: &CurrentUser, token: &str, now: i64) -> r
         .map(|(_, expires)| expires))
 }
 
-/// Whether this session holds a live grant, whichever cookie path carried it.
-pub fn session_granted(conn: &Connection, user: &CurrentUser, now: i64) -> rusqlite::Result<bool> {
-    conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM admin_grants WHERE user_id = ?1 AND session_token = ?2 AND expires_at > ?3)",
-        (user.id, &user.session_token, now),
-        |r| r.get(0),
-    )
-}
-
 impl FromRequestParts<AppState> for Elevated {
     type Rejection = Response;
 

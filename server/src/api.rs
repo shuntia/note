@@ -96,8 +96,7 @@ pub fn router(state: AppState) -> Router {
 }
 
 /// The session cookie rides along on a cross-site form post too, so a write it
-/// authenticates must come from Note's own page. A bearer token is never sent
-/// by a browser on its own, so a request carrying one is left alone.
+/// authenticates must come from Note's own page.
 async fn same_site_writes(
     State(state): State<AppState>,
     req: axum::extract::Request,
@@ -105,7 +104,6 @@ async fn same_site_writes(
 ) -> axum::response::Response {
     let h = req.headers();
     let cookie_write = !req.method().is_safe()
-        && !h.contains_key(header::AUTHORIZATION)
         && axum_extra::extract::CookieJar::from_headers(h).get("session").is_some();
     if cookie_write && !crate::net::write_provenance_ok(h, &state.page_origins(), state.bind_addr.as_deref()) {
         return (StatusCode::FORBIDDEN, Json(serde_json::json!({ "error": "cross-site request refused" }))).into_response();

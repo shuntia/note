@@ -31,7 +31,7 @@ pub const ACCOUNT_FAILURES: u32 = MAX_ATTEMPTS;
 pub const CLIENT_FAILURES: u32 = 30;
 pub const BACKOFF_BASE_SECS: i64 = 30;
 pub const BACKOFF_CAP_SECS: i64 = WINDOW_MINS * 60;
-/// How long a locked key's failures are remembered after its last one.
+/// How long a key's failures are remembered after its last one.
 const BACKOFF_MEMORY_SECS: i64 = 24 * 3600;
 
 struct Strike {
@@ -41,9 +41,8 @@ struct Strike {
 }
 
 impl Strike {
-    fn forgotten(&self, now: i64, limit: u32) -> bool {
-        let memory = if self.failures >= limit { BACKOFF_MEMORY_SECS } else { WINDOW_MINS * 60 };
-        now >= self.until && now - self.last > memory
+    fn forgotten(&self, now: i64) -> bool {
+        now >= self.until && now - self.last > BACKOFF_MEMORY_SECS
     }
 }
 
@@ -73,7 +72,7 @@ impl Backoff {
         let mut strikes = self.strikes.lock().unwrap();
         let fresh = Strike { failures: 0, last: now, until: 0 };
         let e = strikes.entry(limiter_key(key).to_string()).or_insert(fresh);
-        if e.forgotten(now, self.limit) {
+        if e.forgotten(now) {
             *e = Strike { failures: 0, last: now, until: 0 };
         }
         e.failures += 1;
@@ -89,8 +88,8 @@ impl Backoff {
     }
 
     pub fn sweep(&self, now: jiff::Timestamp) {
-        let (now, limit) = (now.as_second(), self.limit);
-        self.strikes.lock().unwrap().retain(|_, e| !e.forgotten(now, limit));
+        let now = now.as_second();
+        self.strikes.lock().unwrap().retain(|_, e| !e.forgotten(now));
     }
 
     #[cfg(test)]
@@ -630,19 +629,21 @@ mod tests {
     }
 
     #[test]
-    fn backoff_forgets_a_few_failures_after_the_window_and_a_lockout_after_a_day() {
+    fn backoff_remembers_failures_for_a_day_whether_or_not_they_locked() {
         let window = WINDOW_MINS * 60;
         let b = Backoff::new(3);
         b.fail("few", t0());
         b.fail("few", t0());
         b.fail("few", at(window + 1));
-        assert_eq!(b.locked("few", at(window + 1)), None, "the earlier two lapsed");
+        assert_eq!(b.locked("few", at(window + 1)), Some(BACKOFF_BASE_SECS), "a pause between guesses resets nothing");
+        b.sweep(at(window + 2 + BACKOFF_MEMORY_SECS));
+        assert_eq!(b.tracked(), 0);
 
         for _ in 0..3 {
             b.fail("locked", t0());
         }
         b.sweep(at(window + 1));
-        assert_eq!(b.tracked(), 2);
+        assert_eq!(b.tracked(), 1);
         b.fail("locked", at(window + 1));
         assert_eq!(b.locked("locked", at(window + 1)), Some(2 * BACKOFF_BASE_SECS));
         b.sweep(at(window + 2 + BACKOFF_MEMORY_SECS));

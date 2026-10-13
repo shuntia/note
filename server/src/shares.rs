@@ -1035,6 +1035,7 @@ pub async fn run_turn(state: &crate::AppState, principal: &crate::auth::SharePri
     let st = state.clone();
     let owner_id = principal.owner_id;
     let owner = principal.owner_username.clone();
+    let visitor = visitor_key.to_string();
     let result = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let deps = crate::agent::SessionDeps {
@@ -1073,18 +1074,23 @@ pub async fn run_turn(state: &crate::AppState, principal: &crate::auth::SharePri
             } else {
                 out.reply.clone()
             };
-            append(&st.db(), thread_id, "assistant", &reply, jiff::Timestamp::now())?;
+            let conn = st.db();
+            anyhow::ensure!(thread_of(&conn, share.id, &visitor, thread_id)?.is_some(), "the thread went away mid-turn");
+            append(&conn, thread_id, "assistant", &reply, jiff::Timestamp::now())?;
             Ok::<_, anyhow::Error>((reply, noted))
         })();
         let (reply, noted) = match answered {
             Ok(done) => done,
             Err(e) => {
-                let _ = st.db().execute("DELETE FROM share_messages WHERE id = ?1", [question]);
-                if started {
-                    let _ = st.db().execute(
-                        "DELETE FROM share_threads WHERE id = ?1 AND NOT EXISTS (SELECT 1 FROM share_messages WHERE thread_id = ?1)",
-                        [thread_id],
-                    );
+                let conn = st.db();
+                if thread_of(&conn, share.id, &visitor, thread_id).ok().flatten().is_some() {
+                    let _ = conn.execute("DELETE FROM share_messages WHERE id = ?1 AND thread_id = ?2", (question, thread_id));
+                    if started {
+                        let _ = conn.execute(
+                            "DELETE FROM share_threads WHERE id = ?1 AND NOT EXISTS (SELECT 1 FROM share_messages WHERE thread_id = ?1)",
+                            [thread_id],
+                        );
+                    }
                 }
                 return Err(e);
             }

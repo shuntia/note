@@ -622,6 +622,9 @@ pub async fn run_turn(
         let now = jiff::Timestamp::now();
         let (past, conv_id, user_row) = {
             let conn = st.db();
+            if let Some(id) = conversation {
+                anyhow::ensure!(owned(&conn, user_id, id)?, "the conversation was deleted before the turn began");
+            }
             let past = match conversation {
                 Some(id) => history(&conn, id, HISTORY_LIMIT)?,
                 None => Vec::new(),

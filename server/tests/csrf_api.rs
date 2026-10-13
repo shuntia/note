@@ -86,8 +86,8 @@ async fn a_bearer_token_writes_from_anywhere() {
     };
     let (status, v) = send(&app, bearer(), TASK).await;
     assert_eq!(status, StatusCode::OK, "{v}");
-    let (status, v) = send(&app, bearer().header(header::COOKIE, &cookie), TASK).await;
-    assert_eq!(status, StatusCode::OK, "a bearer header is never a browser's own doing: {v}");
+    let (status, _) = send(&app, bearer().header(header::COOKIE, &cookie), TASK).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "a session cookie alongside a bearer header still needs the page's own origin");
 }
 
 #[tokio::test]

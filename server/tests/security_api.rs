@@ -813,14 +813,13 @@ async fn a_passkey_assertion_proves_a_factor_change() {
 }
 
 #[tokio::test]
-async fn a_live_admin_grant_stands_in_for_the_factor() {
+async fn a_live_admin_grant_never_stands_in_for_the_factor() {
     let (app, cookie, _state, _cfg) = common::app_with_passkeys().await;
     let step = totp::step_at(jiff::Timestamp::now());
     let seed = enrol_totp_at(&app, &cookie, step - 1).await;
     let (status, v) = elevate(&app, &cookie, serde_json::json!({ "password": "pw", "code": totp::code(&seed, step) })).await;
     assert_eq!(status, StatusCode::OK, "{v}");
-    let (status, _) = call(&app, &cookie, Method::DELETE, "/api/security/totp", Some(password("wrong"))).await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED, "the grant never stands in for the password");
     let (status, v) = call(&app, &cookie, Method::DELETE, "/api/security/totp", Some(password("pw"))).await;
-    assert_eq!(status, StatusCode::NO_CONTENT, "{v}");
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{v}");
+    assert_eq!(v["factor_required"], true, "{v}");
 }

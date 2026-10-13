@@ -534,11 +534,9 @@ pub(crate) async fn password_refused(
 async fn factor_change_refused(state: &AppState, user: &CurrentUser, req: StepUpReq) -> Option<Response> {
     let needs_proof = {
         let conn = state.db();
-        let held = user_factors(&conn, user.id).map(|(passkey, totp)| passkey || totp);
-        let granted = crate::admin::session_granted(&conn, user, jiff::Timestamp::now().as_second());
-        match (held, granted) {
-            (Ok(held), Ok(granted)) => held && !granted,
-            _ => return Some(StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+        match user_factors(&conn, user.id) {
+            Ok((passkey, totp)) => passkey || totp,
+            Err(_) => return Some(StatusCode::INTERNAL_SERVER_ERROR.into_response()),
         }
     };
     if !needs_proof {

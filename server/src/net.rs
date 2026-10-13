@@ -29,7 +29,9 @@ fn blocked_v6(ip: Ipv6Addr) -> bool {
         || (s[0] & 0xffc0) == 0xfe80
         || (s[0] & 0xffc0) == 0xfec0
         || s[0] == 0x2002
-        || (s[0] == 0x64 && s[1] == 0xff9b && s[2..6] == [0, 0, 0, 0])
+        || (s[0] == 0x64 && s[1] == 0xff9b && (s[2..6] == [0, 0, 0, 0] || s[2] == 1))
+        || s[..6] == [0; 6]
+        || (s[0] == 0x2001 && s[1] == 0)
 }
 
 /// Resolves like ureq's default but hands the connector only addresses outside
@@ -225,7 +227,14 @@ pub fn client_key(headers: &axum::http::HeaderMap) -> String {
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty())
     };
-    pick("cf-connecting-ip").or_else(|| pick("x-forwarded-for")).unwrap_or_else(|| "local".to_string())
+    let ip = pick("cf-connecting-ip").or_else(|| pick("x-forwarded-for"));
+    match ip.as_deref().map(str::parse::<IpAddr>) {
+        Some(Ok(IpAddr::V6(v6))) if v6.to_ipv4_mapped().is_none() => {
+            let s = v6.segments();
+            format!("{:x}:{:x}:{:x}:{:x}::/64", s[0], s[1], s[2], s[3])
+        }
+        _ => ip.unwrap_or_else(|| "local".to_string()),
+    }
 }
 
 /// Where Cloudflare's visitor location headers place a request; every field is
@@ -310,10 +319,13 @@ mod tests {
             "2002:a00:1::1",
             "fec0::1",
             "feff::1",
+            "64:ff9b:1::1",
+            "::7f00:1",
+            "2001:0:4136:e378::1",
         ] {
             assert!(blocked_ip(bad.parse().unwrap()), "allowed {bad}");
         }
-        for ok in ["198.17.255.255", "198.20.0.1", "223.255.255.1", "2001:db8::1", "64:ff9b:1::1", "2003::1"] {
+        for ok in ["198.17.255.255", "198.20.0.1", "223.255.255.1", "2001:db8::1", "64:ff9b:2::1", "2003::1"] {
             assert!(!blocked_ip(ok.parse().unwrap()), "refused {ok}");
         }
     }
@@ -420,6 +432,8 @@ mod tests {
         assert_eq!(client_key(&h), "10.0.0.7");
         h.insert("cf-connecting-ip", "203.0.113.9".parse().unwrap());
         assert_eq!(client_key(&h), "203.0.113.9");
+        h.insert("cf-connecting-ip", "2001:db8:1:2:aaaa::1".parse().unwrap());
+        assert_eq!(client_key(&h), "2001:db8:1:2::/64");
     }
 
     #[test]

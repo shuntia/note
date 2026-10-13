@@ -11,6 +11,7 @@ const PURIFY = {
     'form', 'button', 'textarea', 'select', 'option', 'style', 'link', 'meta', 'base',
   ],
   FORBID_ATTR: ['style', 'srcset', 'background', 'poster', 'action', 'formaction', 'ping'],
+  SANITIZE_NAMED_PROPS: true,
 }
 
 DOMPurify.addHook('afterSanitizeAttributes', (node) => {
