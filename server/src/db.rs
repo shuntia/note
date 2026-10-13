@@ -804,6 +804,7 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX idx_event_tasks_task ON event_tasks(task_id);
     CREATE INDEX idx_tasks_user_parent ON tasks(user_id, parent_id, id);
     CREATE INDEX idx_event_log_kind_user ON event_log(kind, user_id, ts);
+    CREATE INDEX idx_event_log_repeat ON event_log(kind, user_id, detail);
     ",
 ];
 
@@ -2395,8 +2396,8 @@ mod tests {
             (
                 "SELECT ts FROM event_log WHERE user_id IS ?1 AND kind = ?2 AND detail = ?3
                  ORDER BY id DESC LIMIT 1",
-                "idx_event_log_kind_user (kind=? AND user_id=?)",
-                "SCAN",
+                "idx_event_log_repeat (kind=? AND user_id=? AND detail=?)",
+                "TEMP B-TREE",
             ),
         ];
         for (sql, index, absent) in cases {
