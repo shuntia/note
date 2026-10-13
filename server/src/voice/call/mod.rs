@@ -61,7 +61,7 @@ impl jobs::ToolRunner for CallRunner {
     }
 
     fn is_network(&self, name: &str) -> bool {
-        name == "web_search"
+        crate::tools::is_network(name)
     }
 }
 
@@ -156,12 +156,9 @@ impl CallDeps {
         reason: &brief::Reason,
         thread_tail: Option<i64>,
         lang: crate::text::Lang,
-    ) -> anyhow::Result<(String, Vec<serde_json::Value>)> {
+    ) -> anyhow::Result<(String, &'static [serde_json::Value])> {
         let system = brief::build(&self.session(), user_id, username, reason, thread_tail, jiff::Timestamp::now(), lang)?;
-        let mut tools = crate::tools::schemas(SessionKind::Call);
-        if self.search.is_none() {
-            tools.retain(|s| s["name"] != "web_search");
-        }
+        let tools = crate::tools::offered_schemas(SessionKind::Call, self.search.is_some());
         Ok((system, tools))
     }
 }
@@ -175,7 +172,7 @@ struct Live {
     reason: brief::Reason,
     thread_tail: Option<i64>,
     system: String,
-    tools: Vec<serde_json::Value>,
+    tools: &'static [serde_json::Value],
     opening: Option<driver::Opening>,
     history: Vec<Message>,
     initial: Vec<render::Item>,
@@ -293,7 +290,7 @@ impl CallManager {
             };
             let ringing = crate::model_text::phone_ringing(lang);
             let messages = [Message::Assistant { text: msg.body.clone(), tool_calls: vec![] }, Message::User(ringing.into())];
-            let req = ChatRequest { system: &system, messages: &messages, tools: &tools, background: false };
+            let req = ChatRequest { system: &system, messages: &messages, tools, background: false };
             let opts = StreamOpts { first_token: d.settings.first_token };
             let _ = d.voice_llm.chat_stream(&req, &opts, &mut FirstDelta);
         });
@@ -377,7 +374,7 @@ impl CallManager {
             llm: d.voice_llm.clone(),
             system: Arc::new(live.system),
             rebrief,
-            tools: Arc::new(live.tools),
+            tools: Arc::new(live.tools.to_vec()),
             runner: Arc::new(CallRunner {
                 db: d.db.clone(),
                 config_dir: d.config_dir.clone(),

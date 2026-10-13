@@ -1028,7 +1028,7 @@ mod tests {
         }
 
         fn is_network(&self, name: &str) -> bool {
-            name == "web_search"
+            crate::tools::is_network(name)
         }
     }
 

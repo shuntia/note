@@ -268,13 +268,10 @@ fn run_traced(
     trace: &mut crate::trace::Builder,
 ) -> Result<SessionOutcome> {
     let system = system_prompt(deps, user_id, username, kind, now)?;
-    let mut schemas = match (kind, &deps.share) {
-        (SessionKind::Share, Some(s)) => tools::share_schemas(&s.scope),
-        _ => tools::schemas(kind),
+    let schemas: std::borrow::Cow<[serde_json::Value]> = match (kind, &deps.share) {
+        (SessionKind::Share, Some(s)) => tools::share_schemas(&s.scope).into(),
+        _ => tools::offered_schemas(kind, deps.search.is_some()).into(),
     };
-    if deps.search.is_none() {
-        schemas.retain(|s| s["name"] != "web_search");
-    }
     let mut messages = history.to_vec();
     messages.push(Message::User(opening.to_string()));
     let mut turns = 0;
@@ -407,12 +404,12 @@ pub(crate) fn run_tool(
     args: &str,
     once: Option<(&str, &str)>,
 ) -> (String, bool) {
-    let result = match name {
-        "web_search" if !tools::registry(kind).contains(&name) => Err(ToolError::forbidden(
-            format!("tool {name} is not available in this session type"),
-        )),
-        "web_search" => crate::search::run_tool(deps, user_id, username, is_background(kind), args),
-        _ => {
+    let result = match tools::network(name) {
+        Some(_) if !tools::registry(kind).contains(&name) => Err(ToolError::forbidden(format!(
+            "tool {name} is not available in this session type"
+        ))),
+        Some(network) => network(deps, user_id, username, is_background(kind), args),
+        None => {
             let vectors = tools::prepare(deps.embeddings, name, args);
             let conn = crate::db_guard(deps.db);
             let ctx = ToolCtx {
