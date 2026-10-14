@@ -80,8 +80,14 @@ fn check_one(
         Some(laid) if laid > last => laid,
         _ => last,
     };
-    if now.as_second() - since.as_second() < threshold * 60 {
+    let outcomes = outcomes_since(conn, user.user_id, last)?;
+    if now.as_second() - since.as_second() < threshold * 60 * backoff(&outcomes) {
         return Ok(None);
+    }
+    if let Some(spoke) = outcomes.iter().find_map(|o| o.spoke_at) {
+        if now.as_second() - spoke.as_second() < SPOKE_HOLD_MIN * 60 && !changed_since(conn, user.user_id, spoke)? {
+            return Ok(None);
+        }
     }
     if idle_pending(conn, user.user_id)? {
         return Ok(None);
@@ -118,6 +124,63 @@ fn check_one(
         &format!("event {id} at {date} {wall}: idle"),
     )?;
     Ok(Some(id))
+}
+
+/// How long after an idle nudge that spoke another is not worth a session
+/// while nothing has changed; the trigger prompt's "nudged about in the last hour".
+const SPOKE_HOLD_MIN: i64 = 60;
+/// The idle wait doubles per quiet ending in a row, up to this many times.
+const MAX_BACKOFF_STEPS: u32 = 2;
+
+/// One idle check's ending; `spoke_at` is set when its session said or rang.
+struct Outcome {
+    quiet: bool,
+    spoke_at: Option<jiff::Timestamp>,
+}
+
+/// The idle checks laid after `since`, newest first, with how each ended.
+fn outcomes_since(conn: &Connection, user_id: i64, since: jiff::Timestamp) -> rusqlite::Result<Vec<Outcome>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT e.decided_at,
+                (SELECT l.kind FROM event_log l
+                  WHERE l.user_id = p.user_id AND l.kind IN ('trigger_said', 'trigger_quiet')
+                    AND l.detail LIKE 'event ' || e.id || ':%' LIMIT 1)
+         FROM events e JOIN plans p ON p.id = e.plan_id
+         WHERE p.user_id = ?1 AND e.kind = ?2 AND e.origin = ?3 AND e.created_at > ?4
+         ORDER BY e.created_at DESC LIMIT 10",
+    )?;
+    let rows = stmt.query_map((user_id, triggers::KIND, ORIGIN, since.to_string()), |r| {
+        let decided: Option<String> = r.get(0)?;
+        let ending: Option<String> = r.get(1)?;
+        Ok(Outcome {
+            quiet: ending.as_deref() == Some("trigger_quiet"),
+            spoke_at: (ending.as_deref() == Some("trigger_said"))
+                .then(|| decided.and_then(|d| d.parse().ok()))
+                .flatten(),
+        })
+    })?;
+    rows.collect()
+}
+
+/// 1, 2 or 4: how many idle waits to let pass after this many quiet endings in a row.
+fn backoff(outcomes: &[Outcome]) -> i64 {
+    let quiet = outcomes.iter().take_while(|o| o.quiet).count();
+    1 << u32::try_from(quiet).unwrap_or(u32::MAX).min(MAX_BACKOFF_STEPS)
+}
+
+/// Whether the user's day moved since `at`: a message, a task change, or a plan
+/// event other than an idle check firing or being settled.
+fn changed_since(conn: &Connection, user_id: i64, at: jiff::Timestamp) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM tasks WHERE user_id = ?1 AND updated_at > ?2)
+             OR EXISTS (SELECT 1 FROM talk_messages m JOIN conversations c ON c.id = m.conversation_id
+                        WHERE c.user_id = ?1 AND m.role = 'user' AND m.created_at > ?2)
+             OR EXISTS (SELECT 1 FROM events e JOIN plans p ON p.id = e.plan_id
+                        WHERE p.user_id = ?1 AND e.origin != ?3
+                          AND (e.fired_at > ?2 OR e.decided_at > ?2 OR e.created_at > ?2))",
+        (user_id, at.to_string(), ORIGIN),
+        |r| r.get(0),
+    )
 }
 
 fn last_idle_laid(conn: &Connection, user_id: i64) -> rusqlite::Result<Option<jiff::Timestamp>> {
@@ -332,6 +395,54 @@ mod tests {
         assert!(check(&conn, tmp.path(), at("2026-09-30T12:01:00Z")).unwrap().is_empty());
         assert!(check(&conn, tmp.path(), at("2026-09-30T12:19:00Z")).unwrap().is_empty());
         assert_eq!(check(&conn, tmp.path(), at("2026-09-30T12:20:00Z")).unwrap().len(), 1);
+    }
+
+    fn ended(conn: &Connection, uid: i64, id: i64, kind: &str, ts: &str) {
+        conn.execute("UPDATE events SET status = 'done', decided_at = ?1 WHERE id = ?2", (ts, id)).unwrap();
+        crate::log::record(conn, Some(uid), kind, &format!("event {id}: x")).unwrap();
+    }
+
+    fn lays(conn: &Connection, tmp: &tempfile::TempDir, ts: &str) -> Option<i64> {
+        check(conn, tmp.path(), at(ts)).unwrap().first().copied()
+    }
+
+    #[test]
+    fn quiet_endings_in_a_row_stretch_the_wait_until_the_user_returns() {
+        let (conn, tmp, uid) = env("");
+        seen(&conn, uid, "2026-09-30T11:40:00Z");
+        let first = lays(&conn, &tmp, "2026-09-30T12:00:00Z").unwrap();
+        ended(&conn, uid, first, "trigger_quiet", "2026-09-30T12:01:00Z");
+        assert!(lays(&conn, &tmp, "2026-09-30T12:39:00Z").is_none(), "40 minutes after one quiet ending");
+        let second = lays(&conn, &tmp, "2026-09-30T12:40:00Z").unwrap();
+        ended(&conn, uid, second, "trigger_quiet", "2026-09-30T12:41:00Z");
+        assert!(lays(&conn, &tmp, "2026-09-30T13:59:00Z").is_none(), "80 after two");
+        let third = lays(&conn, &tmp, "2026-09-30T14:00:00Z").unwrap();
+        ended(&conn, uid, third, "trigger_quiet", "2026-09-30T14:01:00Z");
+        assert!(lays(&conn, &tmp, "2026-09-30T15:19:00Z").is_none());
+        let fourth = lays(&conn, &tmp, "2026-09-30T15:20:00Z").unwrap();
+        ended(&conn, uid, fourth, "trigger_quiet", "2026-09-30T15:21:00Z");
+
+        seen(&conn, uid, "2026-09-30T15:30:00Z");
+        assert!(lays(&conn, &tmp, "2026-09-30T15:50:00Z").is_some(), "activity resets the wait");
+    }
+
+    #[test]
+    fn within_an_hour_of_a_nudge_that_spoke_only_a_change_reopens_it() {
+        let (conn, tmp, uid) = env("");
+        seen(&conn, uid, "2026-09-30T11:40:00Z");
+        let first = lays(&conn, &tmp, "2026-09-30T12:00:00Z").unwrap();
+        ended(&conn, uid, first, "trigger_said", "2026-09-30T12:01:00Z");
+        assert!(lays(&conn, &tmp, "2026-09-30T12:30:00Z").is_none(), "nothing moved since it spoke");
+        let thread = crate::talk::create(&conn, uid, "chat", at("2026-09-30T08:00:00Z")).unwrap();
+        crate::talk::append_text(&conn, thread, "user", "later", at("2026-09-30T12:10:00Z")).unwrap();
+        assert!(lays(&conn, &tmp, "2026-09-30T12:30:00Z").is_some(), "a message since is a change");
+
+        let (conn, tmp, uid) = env("");
+        seen(&conn, uid, "2026-09-30T11:40:00Z");
+        let first = lays(&conn, &tmp, "2026-09-30T12:00:00Z").unwrap();
+        ended(&conn, uid, first, "trigger_said", "2026-09-30T12:01:00Z");
+        assert!(lays(&conn, &tmp, "2026-09-30T13:00:00Z").is_none());
+        assert!(lays(&conn, &tmp, "2026-09-30T13:01:00Z").is_some(), "an hour on, it may speak again");
     }
 
     #[test]

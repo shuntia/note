@@ -79,7 +79,10 @@ check-ins on):
   session and dropped ones do not count.
 - Idle: after `idle_nudge_min` (default 20; 0 is off) minutes without a sign of
   the user on a day they were active, outside a work session, quiet window and
-  `close_day_time`, within budget. Its opening says how long the user has been
+  `close_day_time`, within budget. Each idle check that ends quiet doubles the
+  wait for the next (20, 40, then 80 minutes) until the user is seen again, and
+  none is laid within an hour of one that spoke while nothing has changed since
+  (no message, task change or plan event). Its opening says how long the user has been
   quiet and lists active working notes, if any, with each one's age and last
   nudge.
 
