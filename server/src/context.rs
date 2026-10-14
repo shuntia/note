@@ -16,6 +16,8 @@ pub const MAX_STANDING_BYTES: usize = 64 * 1024;
 pub const MAX_DYNAMIC_BYTES: usize = 6 * 1024;
 const ORDER_SHOWN: usize = 12;
 const ORDER_TITLE_CHARS: usize = 80;
+const TRIGGERS_LISTED: usize = 8;
+const TRIGGER_PROMPT_CHARS: usize = 100;
 
 #[derive(Debug, Error)]
 pub enum EditError {
@@ -275,10 +277,11 @@ pub fn assemble_from(
 
     let nightly_time = ucfg.features(&category).nightly.then_some(ucfg.nightly_time.as_str());
     let now_s = now_section(l, &local, &tz_label, now, &events, now_min, nightly_time, quiet.as_ref());
-    let plan_s = plan_section(
+    let mut plan_s = plan_section(
         l,
         &events, &calendar, now_min, tomorrow, crate::plan::exists(conn, user_id, tomorrow)?,
     );
+    plan_s.push_str(&triggers_ahead(l, conn, user_id, tomorrow)?);
     let settings_s = mt::settings(
         l,
         &ucfg.display_name,
@@ -395,6 +398,31 @@ fn calendar_lines(l: Lang, calendar: &[crate::calendar::Occurrence]) -> String {
     }
     s.push('\n');
     s
+}
+
+/// Tomorrow's pending triggers one by one; any later only as a count and the
+/// next one's moment, however many are laid.
+fn triggers_ahead(l: Lang, conn: &Connection, user_id: i64, tomorrow: jiff::civil::Date) -> Result<String> {
+    let (listed, more_tomorrow) =
+        crate::triggers::waiting(conn, user_id, tomorrow, Some(tomorrow), TRIGGERS_LISTED)?;
+    let (next, more_later) = crate::triggers::waiting(conn, user_id, tomorrow.tomorrow()?, None, 1)?;
+    let mut s = String::new();
+    if !listed.is_empty() {
+        s.push_str(mt::triggers_tomorrow(l));
+        for w in &listed {
+            let _ = writeln!(s, "- {} (event_id {}) {}", w.at, w.event_id, excerpt(&w.prompt, TRIGGER_PROMPT_CHARS));
+        }
+        if more_tomorrow > 0 {
+            let _ = writeln!(s, "{}", mt::and_more(l, more_tomorrow));
+        }
+    }
+    if let Some(first) = next.first() {
+        let _ = writeln!(s, "{}", mt::triggers_later(l, 1 + more_later, &first.date, &first.at));
+    }
+    if !s.is_empty() {
+        s.push('\n');
+    }
+    Ok(s)
 }
 
 /// A trigger that has fired or been decided only adds to the count line.
@@ -1218,6 +1246,28 @@ mod tests {
         assert!(out.contains("- 22:00-22:15 trigger [pending]"), "{out}");
         assert!(out.contains("- 06:00-06:15 meds [done]"), "{out}");
         assert!(out.contains("1 pending, 0 fired, 2 done, 1 dropped, 0 snoozed"), "{out}");
+    }
+
+    #[test]
+    fn tomorrows_triggers_are_listed_and_later_ones_only_counted() {
+        let tmp = cfg_dir();
+        let (conn, uid) = user();
+        let lay = |date: &str, at: &str, prompt: &str| {
+            let plan = crate::plan::holding(&conn, tmp.path(), "aki", uid, date.parse().unwrap(),
+                "2026-08-31".parse().unwrap()).unwrap();
+            crate::triggers::insert(&conn, plan, at, prompt, "agent", None, None, None, now_ts()).unwrap();
+        };
+        for n in 0..10 {
+            lay("2026-09-01", &format!("1{n}:00"), &format!("tomorrow {n}"));
+        }
+        lay("2027-02-01", "09:00", "passport");
+        lay("2026-12-24", "18:30", "gifts");
+        let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
+        assert!(out.contains("Triggers tomorrow:\n- 10:00 (event_id 1) tomorrow 0"), "{out}");
+        assert!(out.contains("tomorrow 7") && !out.contains("tomorrow 8"), "{out}");
+        assert!(out.contains("- ... and 2 more"), "{out}");
+        assert!(out.contains("Later triggers: 2, the next on 2026-12-24 at 18:30"), "{out}");
+        assert!(!out.contains("passport") && !out.contains("gifts"), "{out}");
     }
 
     #[test]

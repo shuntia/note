@@ -233,6 +233,7 @@ mod tests {
         OutboundMessage {
             title: "Check-in".into(),
             reason: None,
+            brief: None,
             body: "at 09:00".into(),
             urgency: Urgency::High,
             checkin: false,

@@ -1099,6 +1099,7 @@ pub async fn run_turn(state: &crate::AppState, principal: &crate::auth::SharePri
             let msg = crate::channels::OutboundMessage {
                 title: crate::text::share_note_from(crate::text::Lang::for_user(&st.config_dir, &owner), &share.name),
                 reason: None,
+                brief: None,
                 body: text.clone(),
                 urgency: crate::channels::Urgency::Normal,
                 checkin: false,

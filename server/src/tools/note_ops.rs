@@ -254,7 +254,7 @@ mod tests {
 
     #[test]
     fn note_write_sits_where_the_user_a_check_in_a_trigger_or_a_call_can_reach_it() {
-        for kind in [SessionKind::Talk, SessionKind::Checkin, SessionKind::Trigger, SessionKind::Nightly, SessionKind::Call] {
+        for kind in [SessionKind::Talk, SessionKind::Trigger, SessionKind::Nightly, SessionKind::Call] {
             assert!(registry(kind).contains(&"note_write"), "note_write missing from {kind:?}");
         }
         for kind in [

@@ -261,13 +261,15 @@ mod tests {
     #[test]
     fn the_goal_tools_sit_where_the_user_can_be_asked_and_nowhere_else() {
         for name in ["goal_create", "goal_update", "goal_list"] {
-            for kind in [SessionKind::Talk, SessionKind::Checkin, SessionKind::Nightly] {
+            for kind in [SessionKind::Talk, SessionKind::Nightly] {
                 assert!(registry(kind).contains(&name), "{name} missing from {kind:?}");
             }
-            for kind in [SessionKind::Import, SessionKind::Inbox, SessionKind::Trigger] {
+            for kind in [SessionKind::Import, SessionKind::Inbox] {
                 assert!(!registry(kind).contains(&name), "{name} reached {kind:?}");
             }
         }
+        assert!(registry(SessionKind::Trigger).contains(&"goal_list"));
+        assert!(!registry(SessionKind::Trigger).contains(&"goal_create"), "a wake-up reads goals only");
         let (conn, tmp) = env();
         let e = dispatch(&conn, &ctx(&tmp, Some(1)), SessionKind::Talk, "goal_list", "{}")
             .unwrap_err();

@@ -59,6 +59,7 @@ import type {
   TokenCreated,
   TotpEnrolment,
   TraceDetail,
+  TriggerLogEntry,
   WorkSession,
 } from './types'
 import type {
@@ -86,6 +87,7 @@ export const WRITABLE_SETTINGS = [
   'pomodoro_break_min',
   'session_end_notify',
   'overrun_wakes',
+  'show_triggers',
   'idle_nudge_min',
   'ring_for',
   'voice_voice',
@@ -268,6 +270,7 @@ export const api = {
     request<TokenCreated>('/api/tokens', { method: 'POST', body: JSON.stringify({ name }) }),
   revokeToken: (id: number) => request<void>(`/api/tokens/${id}`, { method: 'DELETE' }),
   conversations: () => request<Conversation[]>('/api/conversations'),
+  triggerLog: () => request<{ events: TriggerLogEntry[] }>('/api/triggers').then((r) => r.events),
   renameConversation: (id: number, title: string) =>
     request<void>(`/api/conversations/${id}`, {
       method: 'PATCH',

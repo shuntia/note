@@ -14,7 +14,7 @@ pub struct SetArgs {
     /// The conversation to say it in. Omit for the day's check-in thread.
     #[serde(default)]
     pub thread: Option<i64>,
-    /// The day `at` falls on, YYYY-MM-DD: today (the default) up to 7 days ahead.
+    /// The day `at` falls on, YYYY-MM-DD: today (the default) or any later day.
     #[serde(default)]
     pub date: Option<String>,
     /// The IANA zone `at` and `date` are read in, when not the user's own.
@@ -80,10 +80,6 @@ fn refused(e: Refusal) -> ToolError {
             "{spent} of {date}'s {allowance} check-ins are laid; ask the user, and call \
              trigger_budget for that date after they agree"
         )),
-        Refusal::TooSoon { minutes } => ToolError::too_soon(format!(
-            "a trigger point must be at least {} minutes ahead, and that one is {minutes}",
-            triggers::MIN_LEAD_MIN
-        )),
         Refusal::Past { at } => {
             ToolError::past(format!("{at} has gone by; pick a time still ahead, or a later date"))
         }
@@ -120,8 +116,7 @@ pub(crate) fn zone_arg(tz: Option<&str>) -> Result<Option<jiff::tz::TimeZone>, T
         .transpose()
 }
 
-/// A day the model named for a trigger, refused once gone by in `zone` or more
-/// than `MAX_DAYS_AHEAD` days off.
+/// A day the model named for a trigger, refused once gone by in `zone`.
 fn checked_day(raw: &str, zone: &jiff::tz::TimeZone, now: jiff::Timestamp) -> Result<jiff::civil::Date, ToolError> {
     let date: jiff::civil::Date = raw
         .trim()
@@ -130,13 +125,6 @@ fn checked_day(raw: &str, zone: &jiff::tz::TimeZone, now: jiff::Timestamp) -> Re
     let today = now.to_zoned(zone.clone()).date();
     if date < today {
         return Err(ToolError::past(format!("{date} has gone by; today is {today}")));
-    }
-    let ahead = i64::from((date - today).get_days());
-    if ahead > triggers::MAX_DAYS_AHEAD {
-        return Err(ToolError::rejected(format!(
-            "{date} is {ahead} days off; a trigger reaches at most {} days ahead",
-            triggers::MAX_DAYS_AHEAD
-        )));
     }
     Ok(date)
 }
@@ -224,7 +212,6 @@ fn lay(
         conversation_id: thread,
         work_session_id: None,
         system: false,
-        past_session: kind == SessionKind::Trigger,
         now,
     };
     if !aim.also {
@@ -307,6 +294,13 @@ pub fn budget(
         Some(raw) => checked_day(raw, &triggers::timezone(ctx.config_dir, ctx.username), now)?,
         None => target_date(ctx, SessionKind::Talk, now),
     };
+    let base = triggers::allowance_of(ctx.config_dir, ctx.username);
+    let raised = triggers::allowance_over(conn, base, ctx.user_id, date).map_err(internal)? - base;
+    if raised + args.extra > base {
+        return Err(ToolError::cap_reached(format!(
+            "{date} is already raised by {raised}; a day reaches at most twice its {base} check-ins"
+        )));
+    }
     let extra = triggers::add_extra(conn, ctx.user_id, date, args.extra).map_err(internal)?;
     crate::log::record(
         conn,
@@ -429,7 +423,7 @@ mod tests {
         let out = dispatch(
             &conn,
             &ctx(&tmp),
-            SessionKind::Checkin,
+            SessionKind::Talk,
             "trigger_set",
             &format!(r#"{{"at":"{}","prompt":"did they answer?","cancel_on":"reply"}}"#, soon()),
         )
@@ -514,11 +508,8 @@ mod tests {
     }
 
     #[test]
-    fn a_trigger_too_close_or_loosely_written_is_named_as_such() {
+    fn a_trigger_loosely_written_is_named_as_such() {
         let (conn, tmp) = env();
-        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "trigger_set",
-            r#"{"at":"+2min","prompt":"now"}"#).unwrap_err();
-        assert_eq!(e.kind, "too_soon");
         let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "trigger_set",
             r#"{"at":"9:00","prompt":"loose"}"#).unwrap_err();
         assert_eq!(e.kind, "rejected");
@@ -596,7 +587,7 @@ mod tests {
         let e = dispatch(&conn, &ctx(&tmp), SessionKind::Trigger, "say", &big).unwrap_err();
         assert_eq!(e.kind, "rejected");
 
-        for kind in [SessionKind::Talk, SessionKind::Checkin, SessionKind::Nightly] {
+        for kind in [SessionKind::Talk, SessionKind::Nightly] {
             let e = dispatch(&conn, &ctx(&tmp), kind, "say", r#"{"text":"hi"}"#).unwrap_err();
             assert_eq!(e.kind, "unknown_tool", "{kind:?} can speak out of turn");
         }
@@ -652,20 +643,55 @@ mod tests {
     }
 
     #[test]
-    fn a_date_gone_by_too_far_off_or_beside_an_offset_is_refused() {
+    fn a_date_gone_by_or_beside_an_offset_is_refused() {
         let (conn, tmp) = env_in("America/Los_Angeles");
         let set = |date: jiff::civil::Date, at: &str| {
             dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "trigger_set",
                 &format!(r#"{{"at":"{at}","date":"{date}","prompt":"x"}}"#)).unwrap_err()
         };
         assert_eq!(set(day_in("America/Los_Angeles", -1), "11:00").kind, "past");
-        assert_eq!(set(day_in("America/Los_Angeles", 8), "11:00").kind, "rejected");
         assert_eq!(set(day_in("America/Los_Angeles", 2), "+90min").kind, "rejected");
         let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "trigger_set",
             r#"{"at":"11:00","tz":"Mars/Olympus","prompt":"x"}"#).unwrap_err();
         assert_eq!(e.kind, "rejected");
         let events: i64 = conn.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0)).unwrap();
         assert_eq!(events, 0);
+    }
+
+    /// A day half a year off holds only the trigger until that day is planned,
+    /// which then brings the template in force at the time, and a move of zone
+    /// carries it like any other.
+    #[test]
+    fn a_trigger_half_a_year_off_waits_on_a_bare_day() {
+        let (conn, tmp) = env_in("America/Los_Angeles");
+        std::fs::create_dir_all(tmp.path().join("defaults/templates")).unwrap();
+        std::fs::write(
+            tmp.path().join("defaults/templates/default.toml"),
+            "[[events]]\nkind = \"meds\"\ntime = \"08:00\"\ndays = [\"mon\",\"tue\",\"wed\",\"thu\",\"fri\",\"sat\",\"sun\"]\nflexibility = \"fixed\"\nchannel = \"push\"\n",
+        )
+        .unwrap();
+        let far = day_in("America/Los_Angeles", 180);
+        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "trigger_set",
+            &format!(r#"{{"at":"11:00","date":"{far}","prompt":"renew the passport"}}"#)).unwrap();
+        let id = out["event_id"].as_i64().unwrap();
+        let kinds = |conn: &rusqlite::Connection| -> Vec<String> {
+            crate::plan::events_for(conn, 1, far).unwrap().into_iter().map(|e| e.kind).collect()
+        };
+        assert_eq!(kinds(&conn), ["trigger"]);
+        assert!(!crate::plan::exists(&conn, 1, far).unwrap());
+        let today = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "plan_list", "{}").unwrap();
+        assert_eq!(today["later_trigger_days"], serde_json::json!([{ "date": far.to_string(), "triggers": 1 }]));
+
+        crate::zone::rezone(&conn, tmp.path(), "aki", 1, "America/Los_Angeles", "America/New_York",
+            jiff::Timestamp::now()).unwrap();
+        assert_eq!(placed(&conn, id), (far.to_string(), "14:00".into()));
+
+        let tmpl = crate::templates::Template::load(tmp.path(), "aki", "default").unwrap();
+        crate::plan::generate(&conn, 1, &tmpl, far).unwrap();
+        assert_eq!(kinds(&conn), ["meds", "trigger"]);
+        assert!(crate::plan::exists(&conn, 1, far).unwrap());
+        crate::plan::generate(&conn, 1, &tmpl, far).unwrap();
+        assert_eq!(kinds(&conn).len(), 2, "a planned day is generated once");
     }
 
     /// Eleven in New York is eight where the account lives.
@@ -702,6 +728,17 @@ mod tests {
         assert!(replaced["event_id"].as_i64().unwrap() > first);
         let e = set(r#"{"at":"+300min","prompt":"x","replace":999}"#).unwrap_err();
         assert_eq!(e.kind, "not_found");
+    }
+
+    #[test]
+    fn a_day_is_raised_to_at_most_twice_its_allowance() {
+        let (conn, tmp) = env();
+        let raise = |n: u32| dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "trigger_budget",
+            &format!(r#"{{"extra":{n},"reason":"they asked"}}"#));
+        raise(3).unwrap();
+        assert_eq!(raise(2).unwrap_err().kind, "cap_reached");
+        assert_eq!(raise(1).unwrap()["allowance"], 8);
+        assert_eq!(raise(1).unwrap_err().kind, "cap_reached");
     }
 
     #[test]

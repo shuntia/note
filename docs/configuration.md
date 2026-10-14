@@ -97,6 +97,7 @@ category default.
 | `pomodoro_work_min` | 5 to 120 |
 | `pomodoro_break_min` | 1 to 60 |
 | `session_end_notify` | bool |
+| `show_triggers` | bool; Chat lists a read-only Triggers thread (default off) |
 | `idle_nudge_min` | 0 to 240 minutes quiet before an idle wake-up (default 20; 0 is off) |
 | `ring_for` | `urgent`, `checkins` or `never` |
 | `voice_voice` | a call voice id; blank for the language default |

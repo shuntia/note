@@ -632,6 +632,7 @@ fn factor_changed(state: &AppState, conn: &Connection, user: &CurrentUser, kind:
         let msg = crate::channels::OutboundMessage {
             title: crate::text::factor_changed_title(lang),
             reason: None,
+            brief: None,
             body: crate::text::factor_changed(lang, change),
             urgency: crate::channels::Urgency::Normal,
             checkin: false,

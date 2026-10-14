@@ -7,14 +7,10 @@ use std::fmt::Write as _;
 
 /// The event kind a trigger point carries on the day's plan.
 pub const KIND: &str = "trigger";
-/// How far ahead a trigger must be laid, so it is never a nudge about now.
-pub const MIN_LEAD_MIN: i64 = 10;
 /// How far past a work session's planned end its own checks may still reach.
 pub const OVERRUN_MIN: i64 = 15;
 /// The furthest ahead a `+Nmin` offset may reach; a later day is named by date.
 pub const MAX_OFFSET_MIN: i64 = 24 * 60;
-/// How many days past today a trigger's date may name.
-pub const MAX_DAYS_AHEAD: i64 = 7;
 /// Two pending triggers closer than this are one follow-up laid twice.
 pub const NEAR_MIN: i64 = 20;
 pub const MAX_PROMPT_BYTES: usize = 1000;
@@ -28,7 +24,6 @@ pub const MAX_EXTRA: u32 = 10;
 #[derive(Debug)]
 pub enum Refusal {
     CapReached { date: jiff::civil::Date, allowance: u32, spent: u32 },
-    TooSoon { minutes: i64 },
     Past { at: String },
     NotFound(String),
     Rejected(String),
@@ -119,7 +114,7 @@ pub(crate) fn midday_zone() -> jiff::tz::TimeZone {
     jiff::tz::TimeZone::get(&format!("Etc/GMT{:+}", hour - 12)).unwrap()
 }
 
-fn allowance_of(config_dir: &Path, username: &str) -> u32 {
+pub fn allowance_of(config_dir: &Path, username: &str) -> u32 {
     crate::config::UserConfig::load(config_dir, username)
         .map_or(crate::config::DEFAULT_TRIGGERS_PER_DAY, |c| c.triggers_per_day())
 }
@@ -231,16 +226,12 @@ pub struct Lay<'a> {
     pub cancel: Option<Cancel>,
     pub conversation_id: Option<i64>,
     /// The session this check belongs to, named by the server for a session
-    /// that is already closed. It carries the session's exemptions: no lead
-    /// time, and no call on the day's budget.
+    /// that is already closed; it costs the day's budget nothing.
     pub work_session_id: Option<i64>,
     /// A check the server lays for a ritual of its own rather than one the
     /// agent chose: it is the day's furniture, so it is exempt from the budget
-    /// and from the lead time, and never belongs to an open session.
+    /// and never belongs to an open session.
     pub system: bool,
-    /// Set for a wake-up: a check past the open work session's end is laid for
-    /// the day instead of refused.
-    pub past_session: bool,
     pub now: jiff::Timestamp,
 }
 
@@ -316,9 +307,9 @@ pub fn near(
     Ok(best.map(|(_, n)| n))
 }
 
-/// Lays one trigger point, refusing on the day's budget, on a time already gone
-/// and on a time too close to be anything but a nudge about now. A trigger laid
-/// while a work session runs belongs to that session and never counts.
+/// Lays one trigger point, refusing on the day's budget and on a time already
+/// gone. A trigger laid for today within an open work session's reach belongs
+/// to that session and never counts; one beyond it is the day's.
 pub fn lay(conn: &Connection, lay: &Lay) -> Result<Laid, Refusal> {
     let prompt = lay.prompt.trim();
     if prompt.is_empty() || prompt.len() > MAX_PROMPT_BYTES {
@@ -332,37 +323,18 @@ pub fn lay(conn: &Connection, lay: &Lay) -> Result<Laid, Refusal> {
     let wall = format!("{:02}:{:02}", target / 60, target % 60);
 
     let lead = lead_minutes(date, target, &local);
-    let for_the_day = lay.past_session || date > local.date();
-    let session = open_work_session(conn, lay.user_id).map_err(internal)?.filter(|s| {
-        !(for_the_day && overrun_lead(s, lay.now).is_some_and(|limit| lead > limit))
-    });
     if lead < 0 {
         return Err(Refusal::Past { at: wall });
     }
-    if lay.work_session_id.is_none() && !lay.system && lead < MIN_LEAD_MIN {
-        return Err(Refusal::TooSoon { minutes: lead });
-    }
-    match (&lay.work_session_id, &session) {
-        (Some(_), _) => {}
-        _ if lay.system => {}
-        (None, Some(s)) => {
-            if let Some(limit) = overrun_lead(s, lay.now) {
-                if lead > limit {
-                    return Err(Refusal::Rejected(format!(
-                        "{wall} is more than {OVERRUN_MIN} min past the end of the work session \
-                         on {:?}",
-                        s.title
-                    )));
-                }
-            }
-        }
-        (None, None) => {
-            let allowance = allowance(conn, lay.config_dir, lay.username, lay.user_id, date)
-                .map_err(internal)?;
-            let spent = spent(conn, lay.user_id, date).map_err(internal)?;
-            if spent >= allowance {
-                return Err(Refusal::CapReached { date, allowance, spent });
-            }
+    let session = open_work_session(conn, lay.user_id).map_err(internal)?.filter(|s| {
+        date == local.date() && overrun_lead(s, lay.now).is_none_or(|limit| lead <= limit)
+    });
+    if lay.work_session_id.is_none() && !lay.system && session.is_none() {
+        let allowance = allowance(conn, lay.config_dir, lay.username, lay.user_id, date)
+            .map_err(internal)?;
+        let spent = spent(conn, lay.user_id, date).map_err(internal)?;
+        if spent >= allowance {
+            return Err(Refusal::CapReached { date, allowance, spent });
         }
     }
     if let Some(id) = lay.conversation_id {
@@ -381,7 +353,7 @@ pub fn lay(conn: &Connection, lay: &Lay) -> Result<Laid, Refusal> {
         }
     }
 
-    let plan_id = crate::plan::ensure(conn, lay.config_dir, lay.username, lay.user_id, date)
+    let plan_id = crate::plan::holding(conn, lay.config_dir, lay.username, lay.user_id, date, local.date())
         .map_err(internal)?;
     let event_id = insert(
         conn,
@@ -403,6 +375,136 @@ pub fn lay(conn: &Connection, lay: &Lay) -> Result<Laid, Refusal> {
     )
     .map_err(internal)?;
     Ok(Laid { event_id, at: wall, cancel_if: lay.cancel.map(|c| c.as_str()) })
+}
+
+/// A pending trigger as the model is shown it.
+#[derive(Debug)]
+pub struct Waiting {
+    pub event_id: i64,
+    pub date: String,
+    pub at: String,
+    pub prompt: String,
+}
+
+/// Up to `limit` pending triggers dated `from` through `to`, soonest first, and
+/// how many more there are past those in that span.
+pub fn waiting(
+    conn: &Connection,
+    user_id: i64,
+    from: jiff::civil::Date,
+    to: Option<jiff::civil::Date>,
+    limit: usize,
+) -> rusqlite::Result<(Vec<Waiting>, usize)> {
+    let to = to.map_or_else(|| "9999-12-31".to_string(), |d| d.to_string());
+    let mut stmt = conn.prepare_cached(
+        "SELECT e.id, p.date, e.wall_time, COALESCE(e.prompt, '') FROM events e JOIN plans p ON p.id = e.plan_id
+         WHERE p.user_id = ?1 AND e.kind = ?2 AND e.status IN ('pending', 'snoozed')
+           AND p.date BETWEEN ?3 AND ?4
+         ORDER BY p.date, e.wall_time, e.id",
+    )?;
+    let mut shown = Vec::new();
+    let mut more = 0;
+    let rows = stmt.query_map((user_id, KIND, from.to_string(), to), |r| {
+        Ok(Waiting { event_id: r.get(0)?, date: r.get(1)?, at: r.get(2)?, prompt: r.get(3)? })
+    })?;
+    for row in rows {
+        let row = row?;
+        if shown.len() < limit {
+            shown.push(row);
+        } else {
+            more += 1;
+        }
+    }
+    Ok((shown, more))
+}
+
+/// How many upcoming and how many settled triggers the log shows, and how far
+/// back the settled ones reach.
+const LOG_UPCOMING: usize = 50;
+const LOG_PAST: usize = 100;
+const LOG_DAYS: i64 = 7;
+
+/// `(id, date, at, status, prompt, origin)`.
+type LogRow = (i64, String, String, String, String, String);
+
+/// The user's trigger log for the chat's read-only thread, oldest first: the
+/// settled ones of the last week, then those still waiting. Each carries what
+/// Note meant to look at and, once settled, how it ended.
+pub fn log(conn: &Connection, user_id: i64, today: jiff::civil::Date) -> rusqlite::Result<Vec<serde_json::Value>> {
+    let since = today.checked_sub(jiff::Span::new().days(LOG_DAYS)).unwrap_or(today);
+    let rows = |sql: &str, limit: usize| -> rusqlite::Result<Vec<LogRow>> {
+        let mut stmt = conn.prepare(sql)?;
+        let out = stmt
+            .query_map((user_id, KIND, since.to_string(), limit as i64), |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get::<_, Option<String>>(4)?.unwrap_or_default(), r.get(5)?))
+            })?
+            .collect();
+        out
+    };
+    let mut past = rows(
+        "SELECT e.id, p.date, e.wall_time, e.status, e.prompt, e.origin FROM events e JOIN plans p ON p.id = e.plan_id
+         WHERE p.user_id = ?1 AND e.kind = ?2 AND e.status NOT IN ('pending', 'snoozed') AND p.date >= ?3
+         ORDER BY p.date DESC, e.wall_time DESC, e.id DESC LIMIT ?4",
+        LOG_PAST,
+    )?;
+    past.reverse();
+    let upcoming = rows(
+        "SELECT e.id, p.date, e.wall_time, e.status, e.prompt, e.origin FROM events e JOIN plans p ON p.id = e.plan_id
+         WHERE p.user_id = ?1 AND e.kind = ?2 AND e.status IN ('pending', 'snoozed') AND p.date >= ?3
+         ORDER BY p.date, e.wall_time, e.id LIMIT ?4",
+        LOG_UPCOMING,
+    )?;
+    let endings = endings(conn, user_id, since)?;
+    Ok(past
+        .into_iter()
+        .chain(upcoming)
+        .map(|(id, date, at, status, prompt, origin)| {
+            let (outcome, text) = endings.get(&id).cloned().map_or((None, None), |(o, t)| (Some(o), t));
+            serde_json::json!({
+                "event_id": id, "date": date, "at": at, "status": status, "prompt": prompt,
+                "origin": origin, "outcome": outcome, "text": text,
+            })
+        })
+        .collect())
+}
+
+/// How each trigger since `since` ended, from the log rows its firing wrote:
+/// `said`, `rang`, `quiet`, `cancelled` or `replaced`, with the words or reason.
+fn endings(
+    conn: &Connection,
+    user_id: i64,
+    since: jiff::civil::Date,
+) -> rusqlite::Result<std::collections::HashMap<i64, (&'static str, Option<String>)>> {
+    let mut stmt = conn.prepare(
+        "SELECT kind, detail FROM event_log WHERE user_id = ?1 AND ts >= ?2
+           AND kind IN ('trigger_said', 'trigger_rang', 'trigger_quiet', 'trigger_cancelled', 'trigger_replaced')
+         ORDER BY id",
+    )?;
+    let mut out: std::collections::HashMap<i64, (&'static str, Option<String>)> = std::collections::HashMap::new();
+    let rows = stmt.query_map((user_id, since.to_string()), |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+    for row in rows {
+        let (kind, detail) = row?;
+        let Some(rest) = detail.strip_prefix("event ") else { continue };
+        let digits = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+        let Ok(id) = rest[..digits].parse::<i64>() else { continue };
+        let tail = rest[digits..].trim_start_matches(':').trim();
+        let tail = tail.trim_start_matches('(').trim_end_matches(')');
+        let outcome = match kind.as_str() {
+            "trigger_said" => "said",
+            "trigger_rang" => "rang",
+            "trigger_quiet" => "quiet",
+            "trigger_cancelled" => "cancelled",
+            _ => "replaced",
+        };
+        if outcome == "rang" {
+            if let Some((_, said)) = out.get(&id) {
+                out.insert(id, ("rang", said.clone()));
+            }
+            continue;
+        }
+        out.insert(id, (outcome, (!tail.is_empty()).then(|| tail.to_string())));
+    }
+    Ok(out)
 }
 
 /// Whether a trigger is the close-the-day check, in whichever language it was laid.
@@ -443,7 +545,6 @@ pub fn lay_close_day(
             conversation_id: None,
             work_session_id: None,
             system: true,
-            past_session: false,
             now,
         },
     );
@@ -718,6 +819,22 @@ fn settle(conn: &Connection, event_id: i64, now: jiff::Timestamp) -> rusqlite::R
     )
 }
 
+/// The tool a trigger session ended on and its result: its last terminal step,
+/// else its closing text, taken as `say`.
+fn decision(out: &crate::agent::SessionOutcome) -> Option<(String, serde_json::Value)> {
+    let ended = out.steps.iter().rev().find(|s| {
+        !s.is_error && crate::tools::ends(crate::tools::SessionKind::Trigger, &s.name, &s.result)
+    });
+    if let Some(step) = ended {
+        return Some((step.name.clone(), serde_json::from_str(&step.result).unwrap_or_default()));
+    }
+    let text = out.reply.trim();
+    (!text.is_empty()).then(|| {
+        let said = crate::talk::clip(text, MAX_SAY_BYTES);
+        ("say".to_string(), serde_json::json!({ "said": said, "notes": [] }))
+    })
+}
+
 /// A fired trigger, off the runner's lock: a short session reads the situation
 /// and either says something or stays quiet. A session that never gets that far
 /// leaves the event alone; its user hears only why, at most once a window.
@@ -733,6 +850,13 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
     };
     let _permit = permit;
     let now = jiff::Timestamp::now();
+    if crate::api::background_capped(state, fired.user_id, "wake-up") {
+        let _ = state.db().execute(
+            "UPDATE events SET status = 'dropped', decided_at = ?1 WHERE id = ?2",
+            (now.to_string(), fired.event_id),
+        );
+        return;
+    }
     let tz = timezone(&state.config_dir, &fired.username);
     let l = Lang::for_user(&state.config_dir, &fired.username);
     let (ev, opening, history, thread_note) = {
@@ -805,13 +929,10 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
             return failed(format!("event {}: {e:#}", ev.event_id));
         }
     };
-    let Some(step) = out.steps.iter().rev().find(|s| {
-        !s.is_error && crate::tools::ends(crate::tools::SessionKind::Trigger, &s.name, &s.result)
-    }) else {
+    let Some((name, result)) = decision(&out) else {
         return failed(format!("event {}: the session never decided", ev.event_id));
     };
-    let result: serde_json::Value = serde_json::from_str(&step.result).unwrap_or_default();
-    if step.name == "stay_quiet" {
+    if name == "stay_quiet" {
         let conn = state.db();
         let _ = settle(&conn, ev.event_id, now);
         let _ = crate::log::record(
@@ -831,7 +952,7 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
     let Some(text) = result["said"].as_str().map(str::to_string) else {
         return failed(format!("event {}: the session said nothing readable", ev.event_id));
     };
-    let call = (step.name == "call_user").then(|| crate::tools::call_ops::Confirmed::from_decided(&result)).flatten();
+    let call = (name == "call_user").then(|| crate::tools::call_ops::Confirmed::from_decided(&result)).flatten();
     let lang = crate::text::Lang::for_user(&state.config_dir, &fired.username);
     let conversation_id = {
         let conn = state.db();
@@ -859,6 +980,7 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
     let msg = crate::channels::OutboundMessage {
         title: "Note".into(),
         reason: call.as_ref().map(|c| c.reason.clone()),
+        brief: call.as_ref().map(|c| c.brief.clone()),
         body: text,
         urgency: crate::channels::Urgency::Normal,
         checkin: !own,
@@ -924,13 +1046,12 @@ mod tests {
             conversation_id: None,
             work_session_id: None,
             system: false,
-            past_session: false,
             now: at("2026-09-17T09:00:00Z"),
         }
     }
 
     #[test]
-    fn a_system_trigger_stands_outside_the_budget_and_the_lead_time() {
+    fn a_system_trigger_stands_outside_the_budget() {
         let (conn, tmp, uid) = env();
         for hour in 10..14 {
             lay(&conn, &lay_at(&tmp, uid, &format!("{hour}:00"))).unwrap();
@@ -939,10 +1060,6 @@ mod tests {
         assert!(matches!(
             lay(&conn, &lay_at(&tmp, uid, "15:00")),
             Err(Refusal::CapReached { .. })
-        ));
-        assert!(matches!(
-            lay(&conn, &lay_at(&tmp, uid, "09:05")),
-            Err(Refusal::TooSoon { .. })
         ));
 
         let system = Lay { system: true, ..lay_at(&tmp, uid, "09:05") };
@@ -1092,13 +1209,11 @@ mod tests {
     }
 
     #[test]
-    fn a_time_gone_by_or_too_close_is_refused() {
+    fn a_time_gone_by_is_refused_and_one_close_is_laid() {
         let (conn, tmp, uid) = env();
         let e = lay(&conn, &lay_at(&tmp, uid, "08:00")).unwrap_err();
         assert!(matches!(e, Refusal::Past { .. }), "got {e:?}");
-        let e = lay(&conn, &lay_at(&tmp, uid, "09:05")).unwrap_err();
-        assert!(matches!(e, Refusal::TooSoon { minutes: 5 }), "got {e:?}");
-        lay(&conn, &lay_at(&tmp, uid, "09:10")).unwrap();
+        lay(&conn, &lay_at(&tmp, uid, "09:01")).unwrap();
         assert_eq!(spent(&conn, uid, date()).unwrap(), 1);
     }
 
@@ -1122,7 +1237,7 @@ mod tests {
     }
 
     #[test]
-    fn a_work_session_check_never_counts_and_stops_at_the_planned_end() {
+    fn a_work_session_check_never_counts_until_past_the_planned_end() {
         let (conn, tmp, uid) = env();
         conn.execute(
             "INSERT INTO work_sessions (user_id, title, planned_min, started_at)
@@ -1130,14 +1245,12 @@ mod tests {
             [uid],
         )
         .unwrap();
-        for hour in 11..16 {
-            lay(&conn, &lay_at(&tmp, uid, &format!("{hour}:00"))).unwrap_err();
-        }
         // 08:55 + 60 + 15 = 10:10 is the last minute its own checks may reach
-        lay(&conn, &lay_at(&tmp, uid, "10:11")).unwrap_err();
         lay(&conn, &lay_at(&tmp, uid, "10:10")).unwrap();
         lay(&conn, &lay_at(&tmp, uid, "09:30")).unwrap();
         assert_eq!(spent(&conn, uid, date()).unwrap(), 0, "the session's checks are its own");
+        lay(&conn, &lay_at(&tmp, uid, "10:11")).unwrap();
+        assert_eq!(spent(&conn, uid, date()).unwrap(), 1, "past its reach the day pays");
         let held: i64 = conn
             .query_row("SELECT COUNT(*) FROM events WHERE work_session_id = 1", [], |r| r.get(0))
             .unwrap();
@@ -1245,7 +1358,7 @@ mod tests {
     }
 
     #[test]
-    fn a_wake_up_past_the_sessions_end_is_laid_for_the_day() {
+    fn a_check_past_the_sessions_end_is_laid_for_the_day() {
         let (conn, tmp, uid) = env();
         conn.execute(
             "INSERT INTO work_sessions (user_id, title, planned_min, started_at)
@@ -1256,12 +1369,53 @@ mod tests {
         let session_of = |id: i64| -> Option<i64> {
             conn.query_row("SELECT work_session_id FROM events WHERE id = ?1", [id], |r| r.get(0)).unwrap()
         };
-        let later = lay(&conn, &Lay { past_session: true, ..lay_at(&tmp, uid, "15:00") }).unwrap();
+        let later = lay(&conn, &lay_at(&tmp, uid, "15:00")).unwrap();
         assert_eq!(session_of(later.event_id), None);
-        assert_eq!(spent(&conn, uid, date()).unwrap(), 1, "a day wake-up spends the day's budget");
-        let inside = lay(&conn, &Lay { past_session: true, ..lay_at(&tmp, uid, "09:30") }).unwrap();
+        assert_eq!(spent(&conn, uid, date()).unwrap(), 1, "past the session it spends the day's budget");
+        let inside = lay(&conn, &lay_at(&tmp, uid, "09:30")).unwrap();
         assert_eq!(session_of(inside.event_id), Some(1), "inside the session it is the session's");
-        assert!(lay(&conn, &lay_at(&tmp, uid, "15:00")).is_err(), "outside a wake-up it is still refused");
+    }
+
+    #[test]
+    fn a_trigger_months_ahead_is_laid_on_its_own_day() {
+        let (conn, tmp, uid) = env();
+        let far: jiff::civil::Date = "2027-03-02".parse().unwrap();
+        let laid = lay(&conn, &Lay { date: far, ..lay_at(&tmp, uid, "09:15") }).unwrap();
+        let day: String = conn
+            .query_row(
+                "SELECT p.date FROM plans p JOIN events e ON e.plan_id = p.id WHERE e.id = ?1",
+                [laid.event_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(day, "2027-03-02");
+        assert_eq!(spent(&conn, uid, far).unwrap(), 1);
+    }
+
+    fn outcome(reply: &str, steps: Vec<crate::agent::SessionStep>) -> crate::agent::SessionOutcome {
+        crate::agent::SessionOutcome {
+            reply: reply.into(),
+            turns: 1,
+            tool_calls: steps.len(),
+            steps,
+            reasoning: String::new(),
+            thought_ms: 0,
+        }
+    }
+
+    fn step(name: &str, result: &str) -> crate::agent::SessionStep {
+        crate::agent::SessionStep { name: name.into(), args: "{}".into(), result: result.into(), is_error: false, thinking: None }
+    }
+
+    #[test]
+    fn a_session_ending_in_plain_text_says_it() {
+        let (name, result) = decision(&outcome("  Back on the essay?  ", vec![step("task_list", "{}")])).unwrap();
+        assert_eq!((name.as_str(), result["said"].as_str()), ("say", Some("Back on the essay?")));
+        let (_, long) = decision(&outcome(&"あ".repeat(1000), Vec::new())).unwrap();
+        assert!(long["said"].as_str().unwrap().len() <= MAX_SAY_BYTES);
+        let (name, _) = decision(&outcome("x", vec![step("stay_quiet", r#"{"quiet":true,"reason":"r"}"#)])).unwrap();
+        assert_eq!(name, "stay_quiet", "a terminal step outranks the text");
+        assert!(decision(&outcome("  ", vec![step("task_list", "{}")])).is_none());
     }
 
     #[test]

@@ -455,7 +455,10 @@ const BASELINE: &str = "
 
 /// Steps after the baseline, in order: entry `i` takes the schema to
 /// `BASELINE_VERSION + i + 1`.
-const MIGRATIONS: &[&str] = &["DROP TABLE harvests; DROP TABLE reviews;"];
+const MIGRATIONS: &[&str] = &[
+    "DROP TABLE harvests; DROP TABLE reviews;",
+    "ALTER TABLE plans ADD COLUMN bare INTEGER NOT NULL DEFAULT 0;",
+];
 
 pub fn server_setting(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
     use rusqlite::OptionalExtension;

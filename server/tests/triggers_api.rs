@@ -216,7 +216,6 @@ async fn a_trigger_whose_reason_settled_itself_is_cancelled_before_any_session_r
                 conversation_id: None,
                 work_session_id: None,
                 system: false,
-                past_session: false,
                 now: jiff::Timestamp::now(),
             },
         )
@@ -283,7 +282,7 @@ async fn the_allowance_is_a_setting_the_user_owns() {
 
 #[tokio::test]
 async fn a_trigger_a_session_could_not_decide_sends_nothing_and_stays_where_it_is() {
-    let w = world(vec![ChatResponse { text: "thinking out loud".into(), tool_calls: vec![] }]).await;
+    let w = world(vec![ChatResponse { text: String::new(), tool_calls: vec![] }]).await;
     start_session(&w).await;
     make_due(&w);
 
@@ -394,7 +393,7 @@ fn tool_results(w: &World, round: usize) -> Vec<String> {
 }
 
 const CHECK: &str = r#"{"reason":"talk the essay through"}"#;
-const CONFIRM: &str = r#"{"token":"$token","opening":"Want to talk the essay through?"}"#;
+const CONFIRM: &str = r#"{"token":"$token","opening":"Want to talk the essay through?","brief":"essay due friday; intro done"}"#;
 
 #[tokio::test]
 async fn a_user_who_is_away_is_written_to_not_rung() {
@@ -437,7 +436,7 @@ async fn a_free_user_with_the_app_open_gets_the_call_there() {
     assert_eq!(logged(&w, "trigger_said"), ["event 1: Want to talk the essay through?"]);
     assert_eq!(statuses(&w), ["done"]);
     let checked = tool_results(&w, 1);
-    assert!(checked[0].contains("enough information to inform the user"), "{checked:?}");
+    assert!(checked[0].contains("anticipate what it will cover"), "{checked:?}");
 }
 
 #[tokio::test]
@@ -463,10 +462,17 @@ async fn a_check_alone_rings_nothing_and_leaves_the_session_open() {
 async fn a_call_the_user_asked_for_rings_while_they_are_away_and_logs_their_words() {
     let w = world(vec![
         call("c1", "call_user", r#"{"reason":"the 11:00 call","asked":true,"quote":"call me at 11 tomorrow"}"#),
-        call("c2", "call_user", r#"{"token":"$token","opening":"It's eleven, as you asked."}"#),
+        call("c2", "call_user", r#"{"token":"$token","opening":"It's eleven, as you asked.","brief":"the 11:00 bus"}"#),
     ])
     .await;
     lay_plain(&w);
+    {
+        let conn = w.state.db.lock().unwrap();
+        let now = jiff::Timestamp::now() - jiff::SignedDuration::from_hours(1);
+        let thread = note_server::talk::create(&conn, 1, "chat", now).unwrap();
+        note_server::talk::append_text(&conn, thread, "user", "Call me at 11 tomorrow, please", now).unwrap();
+        conn.execute("UPDATE events SET conversation_id = ?1 WHERE kind = 'trigger'", [thread]).unwrap();
+    }
     w.state.db.lock().unwrap()
         .execute("UPDATE users SET last_active_at = '2000-01-01T00:00:00Z'", []).unwrap();
     let web = Arc::new(LiveWeb(std::sync::Mutex::default()));
@@ -485,7 +491,7 @@ async fn a_call_the_user_asked_for_rings_while_they_are_away_and_logs_their_word
 async fn a_chat_rings_now_and_opens_in_the_check_in_thread() {
     let w = world(vec![
         call("c1", "call_user", r#"{"reason":"they asked for a call now","asked":true,"quote":"call me now"}"#),
-        call("c2", "call_user", r#"{"token":"$token","opening":"Hi, you wanted a call?"}"#),
+        call("c2", "call_user", r#"{"token":"$token","opening":"Hi, you wanted a call?","brief":"nothing pressing"}"#),
         ChatResponse { text: "Ringing you now.".into(), tool_calls: vec![] },
     ])
     .await;
@@ -509,4 +515,64 @@ async fn a_chat_rings_now_and_opens_in_the_check_in_thread() {
     );
     assert_eq!(opening, ["Hi, you wanted a call?"]);
     assert_eq!(logged(&w, "call_user_rang"), ["talk: web: they asked for a call now; asked: \"call me now\""]);
+}
+
+#[tokio::test]
+async fn the_trigger_log_shows_the_owners_triggers_and_how_they_ended() {
+    let w = world(vec![call("c1", "say", r#"{"text":"how is the chapter going?"}"#)]).await;
+    start_session(&w).await;
+    make_due(&w);
+    note_server::runner::sweep_once(&w.state);
+    lay_plain(&w);
+
+    let (status, body) = get(&w, "/api/triggers").await;
+    assert_eq!(status, StatusCode::OK);
+    let events = body["events"].as_array().unwrap();
+    assert_eq!(events.len(), 2, "{body}");
+    assert_eq!((events[0]["outcome"].as_str(), events[0]["text"].as_str()), (Some("said"), Some("how is the chapter going?")));
+    assert_eq!(events[1]["status"], "pending");
+    assert_eq!(events[1]["prompt"], "see how the essay is going");
+    assert!(events[1]["outcome"].is_null());
+
+    auth::create_user(&w.state.db.lock().unwrap(), "bo", "pw", false).unwrap();
+    let theirs = common::login(&w.app, "bo", "pw").await;
+    let req = Request::get("/api/triggers").header(header::COOKIE, &theirs).body(Body::empty()).unwrap();
+    let res = w.app.clone().oneshot(req).await.unwrap();
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let other: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(other["events"], serde_json::json!([]), "another account sees none of them");
+
+    let res = w.app.clone().oneshot(Request::get("/api/triggers").body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn a_wake_up_that_ends_in_plain_text_still_speaks() {
+    let w = world(vec![ChatResponse { text: "Back to the chapter?".into(), tool_calls: vec![] }]).await;
+    start_session(&w).await;
+    make_due(&w);
+
+    note_server::runner::sweep_once(&w.state);
+
+    let seen = w.push.seen();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].1.body, "Back to the chapter?");
+    assert_eq!(statuses(&w), vec!["done"]);
+    assert_eq!(logged(&w, "trigger_said").len(), 1);
+}
+
+#[tokio::test]
+async fn past_the_daily_session_cap_a_wake_up_is_dropped_unrun() {
+    let mut w = world(vec![call("c1", "say", r#"{"text":"never sent"}"#)]).await;
+    start_session(&w).await;
+    make_due(&w);
+    w.state.agent_sessions_per_day = 1;
+    note_server::log::record(&w.state.db.lock().unwrap(), Some(1), "agent_session", "earlier").unwrap();
+
+    note_server::runner::sweep_once(&w.state);
+
+    assert!(w.push.seen().is_empty());
+    assert_eq!(statuses(&w), vec!["dropped"]);
+    assert_eq!(logged(&w, "session_capped"), vec!["wake-up"]);
+    assert!(logged(&w, "trigger_said").is_empty());
 }

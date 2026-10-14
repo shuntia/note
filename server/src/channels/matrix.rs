@@ -322,6 +322,7 @@ mod tests {
         OutboundMessage {
             title: "Check-in".into(),
             reason: None,
+            brief: None,
             body: "How is it going?".into(),
             urgency: crate::channels::Urgency::High,
             checkin: true,

@@ -74,6 +74,7 @@ mod tests {
         OutboundMessage {
             title: "t".into(),
             reason: None,
+            brief: None,
             body: "b".into(),
             urgency,
             checkin: false,

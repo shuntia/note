@@ -473,7 +473,11 @@ impl Conversation for CallManager {
 
 fn reason(msg: Option<&OutboundMessage>) -> brief::Reason {
     match msg {
-        Some(m) => brief::Reason::CheckIn { title: m.reason.clone().unwrap_or_else(|| m.title.clone()), body: m.body.clone() },
+        Some(m) => brief::Reason::CheckIn {
+            title: m.reason.clone().unwrap_or_else(|| m.title.clone()),
+            body: m.body.clone(),
+            brief: m.brief.clone(),
+        },
         None => brief::Reason::UserCalled,
     }
 }
@@ -683,7 +687,7 @@ mod tests {
     fn a_call_note_placed_is_told_why_and_how_it_opened() {
         let mut msg: OutboundMessage = serde_json::from_str(&check_in(None)).unwrap();
         let about = |m: &OutboundMessage| match reason(Some(m)) {
-            brief::Reason::CheckIn { title, body } => (title, body),
+            brief::Reason::CheckIn { title, body, .. } => (title, body),
             brief::Reason::UserCalled => unreachable!(),
         };
         assert_eq!(about(&msg), ("Essay".into(), "How is the essay going?".into()));

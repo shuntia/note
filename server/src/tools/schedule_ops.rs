@@ -421,17 +421,17 @@ mod tests {
     #[test]
     fn slide_snooze_and_window_rejection() {
         let (conn, tmp) = env();
-        dispatch(&conn, &ctx(&tmp), SessionKind::Checkin, "schedule_move",
+        dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "schedule_move",
             r#"{"event_id":1,"minutes":30}"#).unwrap();
-        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Checkin, "schedule_move",
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "schedule_move",
             r#"{"event_id":1,"minutes":45}"#).unwrap_err();
         assert_eq!(e.kind, "rejected"); // cumulative 75 > window 60
-        dispatch(&conn, &ctx(&tmp), SessionKind::Checkin, "schedule_move",
+        dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "schedule_move",
             r#"{"event_id":1,"minutes":15,"snooze":true}"#).unwrap();
-        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Checkin, "schedule_move",
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "schedule_move",
             r#"{"event_id":1,"minutes":0,"snooze":true}"#).unwrap_err();
         assert_eq!(e.kind, "rejected");
-        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Checkin, "schedule_move",
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "schedule_move",
             r#"{"event_id":99,"minutes":5}"#).unwrap_err();
         assert_eq!(e.kind, "not_found");
     }
@@ -440,10 +440,10 @@ mod tests {
     fn snooze_on_a_decided_event_is_rejected_not_missing() {
         let (conn, tmp) = env();
         conn.execute("UPDATE events SET status='done' WHERE id=1", []).unwrap();
-        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Checkin, "schedule_move",
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "schedule_move",
             r#"{"event_id":1,"minutes":10,"snooze":true}"#).unwrap_err();
         assert_eq!(e.kind, "rejected");
-        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Checkin, "schedule_move",
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "schedule_move",
             r#"{"event_id":99,"minutes":10,"snooze":true}"#).unwrap_err();
         assert_eq!(e.kind, "not_found");
     }
@@ -452,11 +452,11 @@ mod tests {
     fn drop_only_applies_to_droppable_events() {
         let (conn, tmp) = env();
         // event 1 is flexibility=slide → agent cannot drop it
-        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Checkin, "schedule_drop",
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "schedule_drop",
             r#"{"event_id":1}"#).unwrap_err();
         assert_eq!(e.kind, "rejected");
         // event 2 is flexibility=drop
-        dispatch(&conn, &ctx(&tmp), SessionKind::Checkin, "schedule_drop",
+        dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "schedule_drop",
             r#"{"event_id":2}"#).unwrap();
         let status: String = conn
             .query_row("SELECT status FROM events WHERE id=2", [], |r| r.get(0)).unwrap();
@@ -467,7 +467,7 @@ mod tests {
     fn drop_leaves_a_user_decision_alone() {
         let (conn, tmp) = env();
         conn.execute("UPDATE events SET status='done' WHERE id=2", []).unwrap();
-        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Checkin, "schedule_drop",
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "schedule_drop",
             r#"{"event_id":2}"#).unwrap_err();
         assert_eq!(e.kind, "rejected");
         let status: String = conn
@@ -500,7 +500,7 @@ mod tests {
             r#"{"event_id":2,"moved_to_event_id":2}"#,
             r#"{"event_id":2,"moved_to_event_id":9999}"#,
         ] {
-            let e = dispatch(&conn, &ctx(&tmp), SessionKind::Checkin, "schedule_drop", raw)
+            let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "schedule_drop", raw)
                 .unwrap_err();
             assert_eq!(e.kind, "rejected", "{raw}");
         }
@@ -598,7 +598,7 @@ mod tests {
         let (conn, tmp) = env();
         let today = today();
         let ok = format!(r#"{{"date":"{today}","kind":"nudge","time":"16:30","flexibility":"drop","channel":"push"}}"#);
-        for kind in [SessionKind::Checkin, SessionKind::Talk] {
+        for kind in [SessionKind::Trigger, SessionKind::Talk] {
             let e = dispatch(&conn, &ctx(&tmp), kind, "schedule_insert", &ok).unwrap_err();
             assert_eq!(e.kind, "forbidden");
         }

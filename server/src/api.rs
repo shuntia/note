@@ -43,6 +43,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/talk", post(talk))
         .route("/api/talk/live", get(talk_live))
         .route("/api/conversations", get(conversations_list))
+        .route("/api/triggers", get(triggers_log))
         .route(
             "/api/conversations/{id}",
             patch(conversation_rename).delete(conversation_delete),
@@ -844,6 +845,23 @@ pub(crate) fn daily_cap_reached(state: &AppState, user_id: i64) -> bool {
     crate::log::agent_sessions_since(&conn, user_id, since).unwrap_or(0) >= cap
 }
 
+/// `daily_cap_reached` for a session nobody waits on, logged once a window
+/// under `session_capped` with what was skipped.
+pub(crate) fn background_capped(state: &AppState, user_id: i64, what: &str) -> bool {
+    if !daily_cap_reached(state, user_id) {
+        return false;
+    }
+    let _ = crate::log::record_throttled(
+        &state.db(),
+        Some(user_id),
+        "session_capped",
+        what,
+        jiff::Timestamp::now(),
+        crate::log::ERROR_LOG_WINDOW_MINS,
+    );
+    true
+}
+
 fn daily_cap_response(lang: Lang) -> axum::response::Response {
     (
         StatusCode::TOO_MANY_REQUESTS,
@@ -1445,6 +1463,15 @@ fn conversation_not_found() -> axum::response::Response {
         .into_response()
 }
 
+async fn triggers_log(user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
+    let tz = crate::triggers::timezone(&state.config_dir, &user.username);
+    let today = jiff::Timestamp::now().to_zoned(tz).date();
+    match crate::triggers::log(&state.db(), user.id, today) {
+        Ok(events) => Json(serde_json::json!({ "events": events })).into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
 async fn conversations_list(user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
     let conn = state.db();
     let Ok(mut stmt) = conn.prepare(
@@ -1569,6 +1596,7 @@ struct SettingsPatch {
     pomodoro_break_min: Option<u32>,
     session_end_notify: Option<bool>,
     overrun_wakes: Option<bool>,
+    show_triggers: Option<bool>,
     idle_nudge_min: Option<u32>,
     ring_for: Option<String>,
     voice_voice: Option<String>,
@@ -1616,6 +1644,7 @@ fn settings_body(
         "pomodoro_break_min": cfg.pomodoro_break_min(),
         "session_end_notify": cfg.session_end_notify(),
         "overrun_wakes": cfg.overrun_wakes(),
+        "show_triggers": cfg.show_triggers(),
         "idle_nudge_min": cfg.idle_nudge_min(),
         "voice_enabled": state.voice.is_some(),
         "voice_link": voice_link.map(|l| serde_json::json!({ "mxid": l.mxid, "state": l.state })),
@@ -1792,6 +1821,9 @@ async fn settings_put(
     }
     if let Some(on) = req.session_end_notify {
         cfg.session_end_notify = Some(on);
+    }
+    if let Some(on) = req.show_triggers {
+        cfg.show_triggers = Some(on);
     }
     if let Some(on) = req.overrun_wakes {
         cfg.overrun_wakes = Some(on);
@@ -2078,6 +2110,7 @@ async fn voice_test(user: CurrentUser, State(state): State<AppState>, headers: H
     let msg = crate::channels::OutboundMessage {
         title: text::test_call_title(lang),
         reason: None,
+        brief: None,
         body: text::test_call_body(lang),
         urgency: crate::channels::Urgency::High,
         checkin: false,
@@ -2101,6 +2134,7 @@ async fn notify_test(user: CurrentUser, State(state): State<AppState>, headers: 
     let msg = crate::channels::OutboundMessage {
         title: "Note".into(),
         reason: None,
+        brief: None,
         body: text::test_notification(lang),
         urgency: crate::channels::Urgency::Normal,
         checkin: false,

@@ -178,7 +178,9 @@ pub fn spawn(state: crate::AppState) {
                 }
             };
             for candidate in candidates {
-                if backed_off(&failures, candidate.conversation_id, now) {
+                if backed_off(&failures, candidate.conversation_id, now)
+                    || crate::api::background_capped(&state, candidate.user_id, "summary")
+                {
                     continue;
                 }
                 // A user already in a session keeps it; the conversation is

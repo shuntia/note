@@ -24,7 +24,8 @@ import { batchReceipts, doing, receipt } from '../receipts'
 import { makeHold } from '../held'
 import type { FocusSession } from '../session'
 import { claims, onAgentFrame, type AgentFrame } from '../ws'
-import type { Conversation, FailureReason, TalkMessage, TalkStep } from '../types'
+import type { Conversation, FailureReason, TalkMessage, TalkStep, TriggerLogEntry } from '../types'
+import { TriggerLog } from './TriggerLog'
 import '../styles/talk.css'
 
 type Item =
@@ -476,6 +477,10 @@ export function Talk({
   const [listOpen, setListOpen] = useState(readListOpen)
   const [renaming, setRenaming] = useState<Rename | null>(null)
   const [sideNotice, setSideNotice] = useState<string | null>(null)
+  const [showTriggers, setShowTriggers] = useState(false)
+  // the read-only Triggers thread is open in place of a conversation
+  const [onTriggers, setOnTriggers] = useState(false)
+  const [triggerLog, setTriggerLog] = useState<TriggerLogEntry[]>([])
   const [, tick] = useState(0)
 
   const pane = useRef<HTMLDivElement>(null)
@@ -558,6 +563,28 @@ export function Talk({
     void loadList(listed.current)
     listed.current = true
   }, [refresh, loadList])
+
+  const loadTriggers = useCallback(async (quiet = false) => {
+    if (!quiet) setMsgState('loading')
+    try {
+      setTriggerLog(await api.triggerLog())
+      setMsgState('ready')
+    } catch {
+      if (!quiet) setMsgState('error')
+    }
+  }, [])
+
+  useEffect(() => {
+    api.settings().then(
+      (s) => setShowTriggers(s.show_triggers),
+      () => undefined,
+    )
+  }, [refresh])
+
+  useEffect(() => {
+    if (onTriggers) void loadTriggers(true)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refresh])
 
   // A brand-new conversation's frames carry no id, so they belong to whatever send is open.
   useEffect(
@@ -664,7 +691,8 @@ export function Talk({
   const show = (id: number) => {
     setSideOpen(false)
     setSideNotice(null)
-    if (id === current) return
+    if (id === current && !onTriggers) return
+    setOnTriggers(false)
     stick.current = true
     era.current++
     inFlight.current = null
@@ -687,9 +715,24 @@ export function Talk({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open?.at])
 
+  const openTriggers = () => {
+    setSideOpen(false)
+    setSideNotice(null)
+    stick.current = true
+    era.current++
+    inFlight.current = null
+    unwatch()
+    wanted.current = null
+    setCurrent(null)
+    setItems([])
+    setOnTriggers(true)
+    void loadTriggers()
+  }
+
   const startNew = () => {
     setSideOpen(false)
     setSideNotice(null)
+    setOnTriggers(false)
     stick.current = true
     era.current++
     inFlight.current = null
@@ -712,7 +755,7 @@ export function Talk({
   const send = async () => {
     const text = draft.trim()
     // a send while history is still loading would be wiped by the load's setItems
-    if (!text || busy || msgState === 'loading') return
+    if (!text || busy || onTriggers || msgState === 'loading') return
     const mine: Item = { kind: 'user', key: nextKey(), text }
     const sentIn = era.current
     stick.current = true
@@ -928,10 +971,17 @@ export function Talk({
               </button>
             </p>
           )}
-          {listState === 'ready' && visible.length === 0 && (
+          {listState === 'ready' && visible.length === 0 && !showTriggers && (
             <p className="chat-side-note muted">{t('talk.noChats')}</p>
           )}
           <ul className="chat-list">
+            {showTriggers && (
+              <li className="chat-row chat-row-triggers" data-active={onTriggers}>
+                <button className="chat-open" aria-current={onTriggers} onClick={openTriggers}>
+                  <span className="chat-name">{t('talk.triggers')}</span>
+                </button>
+              </li>
+            )}
             {visible.map((c) => (
               <li key={c.id} className="chat-row" data-active={c.id === current}>
                 {renaming?.id === c.id && renaming.at === 'list' ? (
@@ -995,7 +1045,9 @@ export function Talk({
             <span className="chat-chats-label">{t('talk.chats')}</span>
           </button>
           <h1 className="chat-title">
-            {here && renaming?.id === here.id && renaming.at === 'head' ? (
+            {onTriggers ? (
+              <span className="chat-retitle plain">{t('talk.triggers')}</span>
+            ) : here && renaming?.id === here.id && renaming.at === 'head' ? (
               renameInput('head', here.id)
             ) : here ? (
               <button
@@ -1020,21 +1072,25 @@ export function Talk({
         <div className="chat-pane" ref={pane} onScroll={onScroll}>
           <div className="chat-stream">
             {msgState === 'loading' && <p className="muted">{t('talk.loadingChat')}</p>}
-            {msgState === 'ready' && current === null && items.length === 0 && (
+            {msgState === 'ready' && current === null && !onTriggers && items.length === 0 && (
               <p className="chat-empty">{t('talk.empty')}</p>
             )}
             {msgState === 'error' && (
               <p className="turn system">
-                {t('talk.messagesFailed')}{' '}
+                {onTriggers ? t('talk.triggers.failed') : t('talk.messagesFailed')}{' '}
                 <button
                   className="chat-link"
-                  onClick={() => current !== null && void loadMessages(current)}
+                  onClick={() =>
+                    onTriggers ? void loadTriggers() : current !== null && void loadMessages(current)
+                  }
                 >
                   {t('talk.tryAgain')}
                 </button>
               </p>
             )}
+            {msgState === 'ready' && onTriggers && <TriggerLog entries={triggerLog} />}
             {msgState === 'ready' &&
+              !onTriggers &&
               grouped(items).map((item) => {
                 if (item.kind === 'assistant') return assistantTurn(item)
                 if (item.kind === 'steps')
@@ -1061,17 +1117,18 @@ export function Talk({
               <textarea
                 ref={input}
                 rows={1}
-                placeholder={t('talk.tellNote')}
+                placeholder={onTriggers ? t('talk.triggers.readOnly') : t('talk.tellNote')}
                 aria-label={t('talk.tellNote')}
                 value={draft}
+                disabled={onTriggers}
                 onChange={(e) => setDraft(e.target.value)}
                 onKeyDown={onKeyDown}
               />
               <ComposeButton
                 draft={draft}
-                busy={busy}
+                busy={busy || onTriggers}
                 micBlocked={micBlocked}
-                onCall={onCall && (() => onCall(current))}
+                onCall={onTriggers ? undefined : onCall && (() => onCall(current))}
               />
             </form>
           </div>

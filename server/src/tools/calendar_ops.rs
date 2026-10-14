@@ -594,16 +594,16 @@ mod tests {
     }
 
     #[test]
-    fn a_checkin_reads_the_calendar_and_changes_nothing() {
+    fn a_wake_up_reads_the_calendar_and_changes_nothing() {
         assert_eq!(
-            registry(SessionKind::Checkin).iter().filter(|t| t.starts_with("calendar_")).count(),
+            registry(SessionKind::Trigger).iter().filter(|t| t.starts_with("calendar_")).count(),
             1
         );
         let (conn, tmp) = env();
-        dispatch(&conn, &ctx(&tmp), SessionKind::Checkin, "calendar_list", "{}").unwrap();
+        dispatch(&conn, &ctx(&tmp), SessionKind::Trigger, "calendar_list", "{}").unwrap();
         for name in ["calendar_add", "calendar_update", "calendar_remove", "calendar_skip"] {
-            let e = dispatch(&conn, &ctx(&tmp), SessionKind::Checkin, name, SCHOOL).unwrap_err();
-            assert_eq!(e.kind, "forbidden", "{name} is reachable from a check-in");
+            let e = dispatch(&conn, &ctx(&tmp), SessionKind::Trigger, name, SCHOOL).unwrap_err();
+            assert_eq!(e.kind, "forbidden", "{name} is reachable from a wake-up");
         }
     }
 

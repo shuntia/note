@@ -89,6 +89,7 @@ impl Category {
 pub struct WriteArgs {
     pub op: WriteOp,
     pub id: Option<String>,
+    /// Semantic when an add leaves it out.
     pub category: Option<Category>,
     pub summary: String,
     pub body: String,
@@ -134,10 +135,7 @@ pub fn write(
     };
     match args.op {
         WriteOp::Add => {
-            let cat = args
-                .category
-                .as_ref()
-                .ok_or_else(|| ToolError::rejected("add requires a category"))?;
+            let cat = args.category.as_ref().unwrap_or(&Category::Semantic);
             let id = crate::memory::add_until(conn, ctx.data_dir, ctx.username, &crate::memory::Fact { category: cat.as_str(), summary: &args.summary, body: &args.body, until: args.until.as_deref() }, ctx.vectors.content.as_deref())
             .map_err(|e| ToolError::internal(e.to_string()))?;
             record_source(conn, ctx, &id)?;
@@ -223,25 +221,25 @@ mod tests {
     #[test]
     fn write_query_read_supersede_flow() {
         let (conn, tmp) = env();
-        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Checkin, "memory_write",
+        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "memory_write",
             r#"{"op":"add","category":"semantic","summary":"tea preference","body":"green, no sugar"}"#).unwrap();
         let id = out["id"].as_str().unwrap().to_string();
 
-        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Checkin, "memory_query",
+        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "memory_query",
             r#"{"query":"tea"}"#).unwrap();
         assert_eq!(out["results"][0]["id"], id.as_str());
 
-        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Checkin, "memory_read",
+        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "memory_read",
             &format!(r#"{{"id":"{id}"}}"#)).unwrap();
         assert_eq!(out["body"], "green, no sugar");
 
-        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Checkin, "memory_write",
+        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "memory_write",
             &format!(r#"{{"op":"supersede","id":"{id}","summary":"tea preference","body":"switched to coffee"}}"#)).unwrap();
         let new_id = out["id"].as_str().unwrap();
         assert_ne!(new_id, id);
 
         // superseding an archived fact is a typed rejection
-        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Checkin, "memory_write",
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "memory_write",
             &format!(r#"{{"op":"supersede","id":"{id}","summary":"x","body":"y"}}"#)).unwrap_err();
         assert_eq!(e.kind, "rejected");
     }
@@ -270,7 +268,7 @@ mod tests {
         want.sort();
         assert_eq!(ids, want);
 
-        dispatch(&conn, &ctx(&tmp), SessionKind::Checkin, "memory_write",
+        dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "memory_write",
             r#"{"op":"add","category":"semantic","summary":"likes tea","body":"green"}"#).unwrap();
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM memory_sources", [], |r| r.get(0))
@@ -309,19 +307,20 @@ mod tests {
     #[test]
     fn malformed_ids_categories_and_op_combos_are_typed() {
         let (conn, tmp) = env();
-        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Checkin, "memory_read",
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "memory_read",
             r#"{"id":"../../../etc/passwd"}"#).unwrap_err();
         assert_eq!(e.kind, "rejected");
-        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Checkin, "memory_write",
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "memory_write",
             r#"{"op":"add","category":"../../evil","summary":"s","body":"b"}"#).unwrap_err();
         assert_eq!(e.kind, "invalid_args");
-        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Checkin, "memory_write",
-            r#"{"op":"add","summary":"s","body":"b"}"#).unwrap_err();
-        assert_eq!(e.kind, "rejected"); // add without category
-        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Checkin, "memory_write",
+        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "memory_write",
+            r#"{"op":"add","summary":"s","body":"b"}"#).unwrap();
+        let fact = crate::memory::read(tmp.path(), "aki", out["id"].as_str().unwrap()).unwrap().unwrap();
+        assert_eq!(fact.category, "semantic", "an add without a category is semantic");
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "memory_write",
             r#"{"op":"update","summary":"s","body":"b"}"#).unwrap_err();
         assert_eq!(e.kind, "rejected"); // update without id
-        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Checkin, "memory_write",
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "memory_write",
             r#"{"op":"update","id":"00000000-0000-4000-8000-000000000000","summary":"s","body":"b"}"#).unwrap_err();
         assert_eq!(e.kind, "not_found");
     }
@@ -332,7 +331,7 @@ mod tests {
         let n = crate::notes::add(&conn, tmp.path(), "aki", "call the bank", None, None, jiff::Timestamp::now()).unwrap();
         for op in ["update", "supersede"] {
             let args = format!(r#"{{"op":"{op}","id":"{}","summary":"s","body":"b"}}"#, n.id);
-            let e = dispatch(&conn, &ctx(&tmp), SessionKind::Checkin, "memory_write", &args).unwrap_err();
+            let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "memory_write", &args).unwrap_err();
             assert_eq!(e.kind, "rejected", "{op}");
         }
         assert_eq!(crate::notes::get(tmp.path(), "aki", &n.id).unwrap().unwrap().title, "call the bank");

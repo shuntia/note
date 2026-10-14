@@ -188,6 +188,7 @@ v5mC8db8ZSK9ruR2mEgvMEvePYwohpr98g==
         OutboundMessage {
             title: "Nudge".into(),
             reason: None,
+            brief: None,
             body: "stretch break".into(),
             urgency: Urgency::Normal,
             checkin: false,

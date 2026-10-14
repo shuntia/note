@@ -232,6 +232,8 @@ export type Settings = {
   session_end_notify: boolean
   // Whether a session run far past its plan wakes Note to answer it in its own words.
   overrun_wakes: boolean
+  // Whether Chat lists the read-only Triggers thread.
+  show_triggers: boolean
   // Minutes quiet before Note may nudge about open notes; 0 is off.
   idle_nudge_min: number
   // Whether this server can ring a phone; the Calls row hides without it.
@@ -593,3 +595,17 @@ export type SharePatch = Partial<NewShare>
 export type ShareThread = { id: number; created_at: string; updated_at: string; messages: ShareMessage[] }
 export type ShareTurn = { thread: number; reply: string; note: boolean }
 export type ShareVisit = { city: string | null; country: string | null; km: number | null; distant: boolean; at: string }
+
+// One of Note's trigger points as Chat's read-only Triggers thread shows it. `date`
+// and `at` are where the user lives; `text` is what Note said, or why it stayed
+// quiet or was called off.
+export type TriggerLogEntry = {
+  event_id: number
+  date: string
+  at: string
+  status: 'pending' | 'snoozed' | 'fired' | 'done' | 'dropped'
+  prompt: string
+  origin: string
+  outcome: 'said' | 'rang' | 'quiet' | 'cancelled' | 'replaced' | null
+  text: string | null
+}

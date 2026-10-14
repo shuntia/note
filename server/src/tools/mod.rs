@@ -24,7 +24,6 @@ use std::sync::OnceLock;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SessionKind {
     Nightly,
-    Checkin,
     Talk,
     /// One imported task, briefed by the agent on its importer's behalf.
     Import,
@@ -77,9 +76,6 @@ impl ToolError {
     /// The day's own trigger budget is used up; the message names the way out.
     pub fn cap_reached(m: impl Into<String>) -> Self {
         Self::of("cap_reached")(m.into())
-    }
-    pub fn too_soon(m: impl Into<String>) -> Self {
-        Self::of("too_soon")(m.into())
     }
     pub fn past(m: impl Into<String>) -> Self {
         Self::of("past")(m.into())
@@ -366,7 +362,6 @@ const MEMORY_WRITE: &[&str] = &["memory_write"];
 const CONTEXT: &[&str] = &["context_edit"];
 const TASK_READ: &[&str] = &["task_list", "task_search", "task_read"];
 const TASK_TEND: &[&str] = &["task_create", "task_update", "task_split"];
-/// A permanent delete, kept from wake-ups, which drop a task through its state instead.
 const TASK_DELETE: &[&str] = &["task_delete"];
 const TASK_BULK: &[&str] = &["task_bulk_update"];
 const GOALS_WRITE: &[&str] = &["goal_create", "goal_update"];
@@ -469,27 +464,6 @@ macro_rules! registry_of {
     };
 }
 
-const CHECKIN: &[&str] = registry_of![
-    MEMORY_READ,
-    MEMORY_WRITE,
-    TASK_READ,
-    TASK_TEND,
-    TASK_DELETE,
-    GOALS_WRITE,
-    GOALS_READ,
-    NOTES,
-    PLAN_READ,
-    PLAN_CARRY,
-    ORDER,
-    SCHEDULE,
-    CALENDAR_READ,
-    TRIGGERS,
-    TRIGGER_BUDGET,
-    TIMEZONE,
-    CALL_USER,
-    SEARCH,
-    BATCH,
-];
 const TALK: &[&str] = registry_of![
     MEMORY_READ,
     MEMORY_WRITE,
@@ -545,14 +519,19 @@ const TRIGGER: &[&str] = registry_of![
     MEMORY_WRITE,
     TASK_READ,
     TASK_TEND,
+    TASK_DELETE,
     TASK_BULK,
+    GOALS_READ,
     NOTES,
     PLAN_READ,
+    PLAN_LAY,
     PLAN_CARRY,
     ORDER,
     SCHEDULE,
+    CALENDAR_READ,
     TRIGGERS,
     CALL_USER,
+    SEARCH,
     BATCH,
     SPEAK,
 ];
@@ -573,10 +552,14 @@ const CALL: &[&str] = registry_of![
     TASK_READ,
     TASK_TEND,
     TASK_DELETE,
+    TASK_BULK,
     GOALS_WRITE,
     GOALS_READ,
     NOTES,
     PLAN_READ,
+    PLAN_LAY,
+    PLAN_CARRY,
+    ORDER,
     SCHEDULE,
     CALENDAR_READ,
     CALENDAR_WRITE,
@@ -601,7 +584,6 @@ pub fn ends(kind: SessionKind, name: &str, result: &str) -> bool {
 pub fn registry(kind: SessionKind) -> &'static [&'static str] {
     match kind {
         SessionKind::Nightly => NIGHTLY,
-        SessionKind::Checkin => CHECKIN,
         SessionKind::Talk => TALK,
         SessionKind::Import => IMPORT,
         SessionKind::Inbox => INBOX,
@@ -887,7 +869,8 @@ const TOOLS: &[ToolSpec] = tools![
     "plan_list": plan_ops::PlanListArgs => run!(plan_ops::plan_list), share = Some(|s| s.today);
         "Read one day's plan (default today; the context lists only today's): every event \
          with its event_id — the id the schedule tools take — times, status, flexibility, \
-         and for a plan_tasks block the task_id it holds.",
+         for a plan_tasks block the task_id it holds; later_trigger_days names the next days \
+         holding triggers.",
     "calendar_list": calendar_ops::ListArgs => run!(&calendar_ops::list), share = Some(|s| s.today);
         "Read the user's calendar of fixed commitments, with quiet windows marked and the \
          free time set aside for tasks.",
@@ -911,8 +894,8 @@ const TOOLS: &[ToolSpec] = tools![
     "trigger_set": trigger_ops::SetArgs => run!(kind &trigger_ops::set), writes = true;
         "Lay a trigger point: a moment to look again, then message the user, call them, or \
          stay quiet. prompt is your note on what you are following up; when the user asked to \
-         be called, say so in it and use call_user when it fires. At least 10 minutes ahead; \
-         date lays it on a later day, up to 7 days ahead, spending that day's allowance; tz \
+         be called, say so in it, lay it in the thread they asked in, and use call_user when \
+         it fires. date lays it on any later day, spending that day's allowance; tz \
          reads at and date in the IANA zone the user named the time in. Check plan_list \
          first: a trigger within 20 minutes of a pending one is refused with that one named — \
          reword it with replace set to its id, or pass also when both are wanted. cancel_on \
@@ -930,13 +913,14 @@ const TOOLS: &[ToolSpec] = tools![
          ritual. It lands in the thread and as a notification. To call instead, use call_user.",
     "call_user": call_ops::CallArgs => Exec::Session, terminal_in = &[SessionKind::Trigger];
         "Call the user: the open web app and the linked phone ring together; whichever answers \
-         first takes the call. Always two calls. First with reason (plus asked and quote only \
-         when the user asked to be called): it rings nothing, says whether a call is allowed \
-         now, and returns a token and the questions to answer before ringing. Then, only if \
-         you still mean to, again with that token and opening — your first words when they \
-         pick up. Refused while the user seems busy — working, in a calendar event, in a quiet \
-         window, or away for 90 minutes — unless they asked; then write to them instead. In a \
-         wake-up, the second call ends the session.",
+         first takes the call. Always two calls. First with reason (plus asked and quote, the \
+         user's own words, only when they asked to be called): it rings nothing, says whether \
+         a call is allowed now, and returns a token and what to prepare. Then, only if you \
+         still mean to, again with that token, opening — your first words when they pick up — \
+         and brief, what the call needs to know. Refused while the user seems busy — working, \
+         in a calendar event, in a quiet window, or away for 90 minutes — unless they asked; \
+         never rings when their settings say never. In a wake-up, the second call ends the \
+         session.",
     "stay_quiet": trigger_ops::QuietArgs => run!(&trigger_ops::stay_quiet), terminal_in = &[SessionKind::Trigger];
         "Say nothing and end the trigger session: right when the user is already on it, what \
          you would say is on their screen, or the prompt no longer applies.",
@@ -1105,9 +1089,36 @@ fn run(
         order_ops::guard_running(conn, ctx, name, raw)?;
     }
     match find(name).map(|(_, t)| t.exec) {
-        Some(Exec::Dispatch(handler)) => handler(conn, ctx, kind, raw),
+        Some(Exec::Dispatch(handler)) => handler(conn, ctx, kind, raw).map_err(|e| hinted(name, e)),
         _ => Err(ToolError::rejected(format!("{name} is run by the session, not dispatched"))),
     }
+}
+
+/// `(tool prefix, unknown field, the tool that takes it)` for the fields a
+/// model most often hands the wrong tool.
+const ELSEWHERE: &[(&str, &str, &str)] = &[
+    ("task_", "event_id", "schedule_move or schedule_drop"),
+    ("task_update", "task_ids", "task_bulk_update"),
+    ("task_", "date", "plan_tasks"),
+    ("task_", "start", "plan_tasks"),
+    ("task_", "scheduled_at", "plan_tasks"),
+    ("note_write", "category", "memory_write"),
+    ("schedule_", "prompt", "trigger_set"),
+];
+
+/// An unknown-field error, with the tool that takes that field where one
+/// obviously does.
+fn hinted(tool: &str, mut e: ToolError) -> ToolError {
+    if e.kind != "invalid_args" {
+        return e;
+    }
+    let Some(field) = e.message.strip_prefix("unknown field `").and_then(|m| m.split('`').next()) else {
+        return e;
+    };
+    if let Some((_, _, other)) = ELSEWHERE.iter().find(|(t, f, _)| tool.starts_with(t) && *f == field) {
+        e.message = format!("{}; {field} belongs to {other}", e.message);
+    }
+    e
 }
 
 #[cfg(test)]
@@ -1469,15 +1480,13 @@ mod tests {
         assert_eq!(v.content.unwrap(), direct[0]);
     }
 
-    /// Checkin ⊆ Talk ⊆ Nightly but for `trigger_budget`, `plan_carry` and
+    /// Talk ⊆ Nightly but for `trigger_budget`, `plan_carry` and
     /// `timezone_set`, which live where the user is there to agree to them or
     /// say where they are; a review reads memory with the nightly's own tools
     /// plus the one that ends it; Summarize and Review share nothing with an
     /// import session.
     #[test]
     fn session_surfaces_nest_and_import_stands_apart() {
-        let is_subset = |a: &[&str], b: &[&str]| a.iter().all(|t| b.contains(t));
-        assert!(is_subset(registry(SessionKind::Checkin), registry(SessionKind::Talk)));
         let asks_the_user = |t: &str| matches!(t, "trigger_budget" | "plan_carry" | "timezone_set");
         assert!(registry(SessionKind::Talk)
             .iter()
@@ -1506,9 +1515,8 @@ mod tests {
         }
     }
 
-    const KINDS: [SessionKind; 10] = [
+    const KINDS: [SessionKind; 9] = [
         SessionKind::Nightly,
-        SessionKind::Checkin,
         SessionKind::Talk,
         SessionKind::Import,
         SessionKind::Inbox,
@@ -1617,7 +1625,6 @@ mod tests {
         assert!(registry(SessionKind::Nightly).contains(&"nightly_notes_write"));
         for kind in [
             SessionKind::Talk,
-            SessionKind::Checkin,
             SessionKind::Import,
             SessionKind::Inbox,
             SessionKind::Summarize,
@@ -1630,11 +1637,24 @@ mod tests {
             );
         }
         let (conn, tmp) = env();
-        for kind in [SessionKind::Talk, SessionKind::Checkin] {
+        for kind in [SessionKind::Talk, SessionKind::Trigger] {
             let e = dispatch(&conn, &ctx(&tmp), kind, "nightly_notes_write", r#"{"text":"x"}"#)
                 .unwrap_err();
             assert_eq!(e.kind, "forbidden");
         }
+    }
+
+    #[test]
+    fn a_field_handed_the_wrong_tool_names_the_right_one() {
+        let (conn, tmp) = env();
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_update", r#"{"task_id":1,"event_id":4}"#)
+            .unwrap_err();
+        assert_eq!(e.kind, "invalid_args");
+        assert!(e.message.starts_with("unknown field `event_id`"), "{}", e.message);
+        assert!(e.message.ends_with("; event_id belongs to schedule_move or schedule_drop"), "{}", e.message);
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_update", r#"{"task_id":1,"colour":"red"}"#)
+            .unwrap_err();
+        assert!(!e.message.contains("belongs to"), "{}", e.message);
     }
 
     #[test]
@@ -1917,7 +1937,6 @@ mod tests {
     fn schemas_cover_the_registry_and_are_objects() {
         for kind in [
             SessionKind::Nightly,
-            SessionKind::Checkin,
             SessionKind::Talk,
             SessionKind::Import,
             SessionKind::Inbox,
@@ -2026,17 +2045,18 @@ mod tests {
     }
 
     #[test]
-    fn a_wake_up_tends_the_day_but_never_the_calendar() {
+    fn a_wake_up_tends_the_day_and_reads_but_never_writes_the_calendar() {
         let t = registry(SessionKind::Trigger);
         for name in [
             "memory_write", "task_update", "task_split", "task_bulk_update", "note_write",
             "order_set", "order_move", "order_drop", "schedule_move", "schedule_drop", "trigger_set",
+            "task_delete", "plan_tasks", "calendar_list", "goal_list", "web_search",
         ] {
             assert!(t.contains(&name), "{name}");
         }
         for name in [
             "calendar_add", "calendar_update", "calendar_remove", "calendar_skip",
-            "schedule_insert", "trigger_budget", "goal_create", "task_delete",
+            "schedule_insert", "trigger_budget", "goal_create",
         ] {
             assert!(!t.contains(&name), "{name}");
         }

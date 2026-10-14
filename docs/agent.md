@@ -32,7 +32,7 @@ the provider is down.
 
 ## Sessions
 
-Session kinds: talk (`POST /api/talk`), check-in, trigger (a wake-up, below),
+Session kinds: talk (`POST /api/talk`), trigger (a wake-up, below),
 nightly, review, summarize, task briefing and inbox reading
 ([importing.md](importing.md)), share-link visitor
 ([share-links.md](share-links.md)), and voice calls ([voice.md](voice.md)).
@@ -49,6 +49,12 @@ the WebSocket ([delivery.md](delivery.md#websocket)).
 Conversations: `GET /api/conversations`, `PATCH/DELETE /api/conversations/{id}`,
 and `GET /api/conversations/{id}/messages` (user, assistant and tool rows in
 order; each carries `reasoning`, and the assistant row `thought_ms`).
+
+`GET /api/triggers` is the signed-in user's trigger log, oldest first: up to
+100 settled in the last 7 days, then up to 50 still waiting, each
+`{event_id, date, at, status, prompt, origin, outcome, text}` with `outcome`
+one of `said`, `rang`, `quiet`, `cancelled`, `replaced` or null. With
+`show_triggers` on, Chat lists it as a read-only thread.
 
 ## Nightly run
 
@@ -73,18 +79,28 @@ check-ins on):
   `close_day_time`. Its session checks the order, sets it if the night left it
   empty or wrong, and lays 4 to 8 wake-ups with `trigger_set`. An undecided one
   is retried once.
-- `trigger_set`, from any session that has it.
-  These come out of `triggers_per_day` (default 12, 0 to 20); `trigger_budget`
-  raises one day's allowance once the user agrees. Triggers inside a work
-  session and dropped ones do not count.
+- `trigger_set`, from any session that has it, for any time still ahead on any
+  later day; a far day's plan waits bare (the trigger alone) until that day is
+  generated from the template in force then. These come out of the day's
+  `triggers_per_day` (default 12, 0 to 20); `trigger_budget` raises one day's
+  allowance, to at most twice it, once the user agrees. Triggers laid today
+  within a work session's planned length plus 15 minutes, and dropped ones, do
+  not count. A wake-up that ends in plain text instead of a tool says that
+  text. The context lists today's and tomorrow's pending triggers; later ones
+  only as a count and the next one's moment.
 - Idle: after `idle_nudge_min` (default 20; 0 is off) minutes without a sign of
   the user on a day they were active, outside a work session, quiet window and
-  `close_day_time`, within budget. Its opening says how long the user has been
+  `close_day_time`, within budget. Each idle check that ends quiet doubles the
+  wait for the next (20, 40, then 80 minutes) until the user is seen again, and
+  none is laid within an hour of one that spoke while nothing has changed since
+  (no message, task change or plan event). Its opening says how long the user has been
   quiet and lists active working notes, if any, with each one's age and last
   nudge.
 
 A wake-up tends tasks, the order, the schedule, working notes and memory
-([tools](#tools)), but cannot delete a task, read goals or touch the calendar.
+([tools](#tools)), lays tasks on the plan, reads goals and the calendar, searches
+the web where search is configured, and deletes a task the user no longer
+wants, but never writes goals or the calendar.
 Each successful task, note, order, schedule, memory or trigger write logs one
 `wake_change` row (`event <id>: <tool> <args>`, args clipped to 300
 characters). It may not edit the task of a running work session, that task's
@@ -106,13 +122,18 @@ inbox, summarize). It takes two calls in one session. The first,
 ring, a call is live, or the user seems busy (inside a quiet window, inside a
 `fixed` or `busy` calendar occurrence, with a work session open, with no
 activity for 90 minutes) or set `ring_for = "never"`. Otherwise it returns a
-token valid for five minutes, a checklist to answer, and how to write a spoken
-opening. `asked` with the user's words in `quote` lets it through the busy and
-`ring_for` checks, never the others. The second, `{token, opening}`, rings. A
-wake-up's second call ends it and its firing path rings, writing the opening
-to the trigger's thread and `trigger_rang`. Any other session writes the
-opening to the day's check-in thread and logs `call_user_rang`. The call's
-prompt is told the reason and the opening.
+token valid for five minutes, an instruction to prepare (anticipate what the
+call will cover and fetch it now, in one round), and how to write a spoken
+opening. `asked` with the user's words in `quote` lets it through the busy
+check only, and only when the quote is part of a message the user wrote that
+the session holds (a chat's own turns, or the thread a wake-up was laid in);
+nothing gets past `ring_for = "never"`. The second, `{token, opening, brief}`,
+rings; `brief` (at most 1536 bytes) is what the session gathered, in short
+plain lines. A wake-up's second call ends it and its firing path rings,
+writing the opening to the trigger's thread and `trigger_rang`. Any other
+session writes the opening to the day's check-in thread and logs
+`call_user_rang`. The call's prompt is told the reason, the opening and the
+brief.
 
 ## Prompts
 
@@ -222,29 +243,28 @@ leave partial state.
 
 | Tools | Offered to |
 |---|---|
-| `memory_query`, `memory_read` | check-in, talk, nightly, trigger, call, inbox |
-| `memory_write` | check-in, talk, nightly, trigger, call, review |
+| `memory_query`, `memory_read` | talk, nightly, trigger, call, inbox |
+| `memory_write` | talk, nightly, trigger, call, review |
 | `context_edit` | talk, nightly |
-| `task_list`, `task_search`, `task_read` | check-in, talk, nightly, trigger, call, share |
-| `task_create`, `task_update`, `task_split` | check-in, talk, nightly, trigger, call |
-| `task_delete` | check-in, talk, nightly, call |
-| `task_bulk_update` | talk, nightly, trigger |
-| `goal_create`, `goal_update` | check-in, talk, nightly, call |
-| `goal_list` | check-in, talk, nightly, call, share |
-| `note_write` | check-in, talk, nightly, trigger, call |
+| `task_list`, `task_search`, `task_read` | talk, nightly, trigger, call, share |
+| `task_create`, `task_update`, `task_split` | talk, nightly, trigger, call |
+| `task_delete`, `task_bulk_update` | talk, nightly, trigger, call |
+| `goal_create`, `goal_update` | talk, nightly, call |
+| `goal_list` | talk, nightly, trigger, call, share |
+| `note_write` | talk, nightly, trigger, call |
 | `note_settle` | nightly |
-| `plan_list` | check-in, talk, nightly, trigger, call, share |
-| `plan_tasks` | talk, nightly |
-| `plan_carry` | check-in, talk, trigger |
-| `order_set`, `order_move`, `order_drop` | check-in, talk, nightly, trigger |
-| `schedule_move`, `schedule_drop` | check-in, talk, nightly, trigger, call |
+| `plan_list` | talk, nightly, trigger, call, share |
+| `plan_tasks` | talk, nightly, trigger, call |
+| `plan_carry` | talk, trigger, call |
+| `order_set`, `order_move`, `order_drop` | talk, nightly, trigger, call |
+| `schedule_move`, `schedule_drop` | talk, nightly, trigger, call |
 | `schedule_insert`, `nightly_notes_write` | nightly |
-| `calendar_list` | check-in, talk, nightly, call, share |
+| `calendar_list` | talk, nightly, trigger, call, share |
 | `calendar_add`, `calendar_update`, `calendar_remove`, `calendar_skip` | talk, nightly, call |
-| `trigger_set` | check-in, talk, nightly, trigger |
-| `trigger_budget` | check-in, talk |
-| `web_search` | check-in, talk, nightly, call (with `[search]`) |
-| `batch` | check-in, talk, nightly, trigger |
+| `trigger_set` | talk, nightly, trigger, call |
+| `trigger_budget` | talk |
+| `web_search` | talk, nightly, trigger, call (with `[search]`) |
+| `batch` | talk, nightly, trigger |
 | `say`, `stay_quiet` | trigger |
 | `cancel_job`, `hang_up` | call |
 | `task_brief` / `inbox_decide` / `summary_write` / `review_write` / `share_note` | import / inbox / summarize / review / share, each ending its session on success |
@@ -281,7 +301,7 @@ session-ending tool is refused. The model gets back
 ## Web search
 
 `[search]` names a SearXNG instance and turns on `web_search` for talk,
-check-in, nightly and call sessions; without it no session is offered the tool. A
+wake-up, nightly and call sessions; without it no session is offered the tool. A
 call runs the search, then one tool-less model call on the `search` prompt that
 answers the caller's `question` from the hits alone, citing them by number. The
 session sees `{summary, sources}`, or the top five hits raw when the summarizer

@@ -247,6 +247,17 @@ pub fn status_counts(l: Lang, n: [usize; 5]) -> String {
     }
 }
 
+pub fn triggers_tomorrow(l: Lang) -> &'static str {
+    l.of("Triggers tomorrow:\n", "明日のトリガー:\n")
+}
+
+pub fn triggers_later(l: Lang, n: usize, date: &str, at: &str) -> String {
+    match l {
+        Lang::En => format!("Later triggers: {n}, the next on {date} at {at} (plan_list that day to see them)"),
+        Lang::Ja => format!("それ以降のトリガー: {n}件、次は{date} {at}（その日を plan_list で確認）"),
+    }
+}
+
 pub fn tomorrow_plan(l: Lang, tomorrow: jiff::civil::Date, generated: bool) -> String {
     match l {
         Lang::En => format!(
@@ -717,6 +728,13 @@ pub fn working_line(l: Lang, id: &str, title: &str, added: &str, nudge: &str) ->
 
 pub fn why_this_call(l: Lang) -> &'static str {
     l.of("\n\n# Why this call\n\n", "\n\n# この通話の理由\n\n")
+}
+
+pub fn call_brief_heading(l: Lang) -> &'static str {
+    l.of(
+        "What you gathered before ringing; talk from it rather than looking things up:",
+        "かける前に集めたこと。調べ直さず、これをもとに話す:",
+    )
 }
 
 pub fn called_about(l: Lang, title: &str, body: &str) -> String {

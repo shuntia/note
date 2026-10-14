@@ -298,6 +298,9 @@ pub fn spawn(state: crate::AppState) {
                 }
             };
             for (user_id, username) in users {
+                if crate::api::background_capped(&state, user_id, "nightly") {
+                    continue;
+                }
                 let st = state.clone();
                 let result = tokio::task::spawn_blocking(move || {
                     let deps = SessionDeps {

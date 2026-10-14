@@ -145,8 +145,8 @@ mod tests {
         let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "context_edit",
             r#"{"find":"nope","replace":"y"}"#).unwrap_err();
         assert_eq!(e.kind, "rejected");
-        // context_edit is not on the check-in surface
-        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Checkin, "context_edit",
+        // context_edit is not on the wake-up surface
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Trigger, "context_edit",
             r#"{"append":"x"}"#).unwrap_err();
         assert_eq!(e.kind, "forbidden");
     }
