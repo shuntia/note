@@ -133,11 +133,11 @@ pub struct BatchCall {
     pub args: serde_json::Value,
 }
 
-/// Reads a batch sub-call's arguments the way the tool's own schema would have
-/// shaped them: the batch schema cannot carry each tool's types, so a model
-/// writes `"42"` for an id or sends the whole object as a JSON string. Only
+/// Reads a call's arguments the way the tool's own schema shapes them: a model
+/// writes `"42"` for an id, or sends the whole object as a JSON string, most
+/// of all inside a batch, whose schema cannot carry each tool's types. Only
 /// strings that parse cleanly into the declared type are changed.
-pub fn coerce_batch_args(tool: &str, args: serde_json::Value) -> serde_json::Value {
+pub fn coerce_args(tool: &str, args: serde_json::Value) -> serde_json::Value {
     let mut args = match args {
         serde_json::Value::String(s) => match serde_json::from_str(&s) {
             Ok(v @ serde_json::Value::Object(_)) => v,
