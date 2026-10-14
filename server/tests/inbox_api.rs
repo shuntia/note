@@ -277,6 +277,8 @@ async fn re_sending_a_source_archives_the_facts_it_wrote_before() {
     ]));
     let (app, cookie, state, cfg) = common::app_with_logged_in_user_llm_and_state(llm).await;
     let body = r#"{"source_id":"lms:post:77","kind":"announcement","context":"x"}"#;
+    let edited = r#"{"source_id":"lms:post:77","kind":"announcement","context":"x, edited"}"#;
+    let edited_again = r#"{"source_id":"lms:post:77","kind":"announcement","context":"x, edited again"}"#;
 
     let (_, first) = post_inbox(&app, cookie_auth(&cookie), body).await;
     let old: Vec<String> = first["memory_ids"]
@@ -286,7 +288,7 @@ async fn re_sending_a_source_archives_the_facts_it_wrote_before() {
         .map(|i| i.as_str().unwrap().to_string())
         .collect();
 
-    let (status, second) = post_inbox(&app, cookie_auth(&cookie), body).await;
+    let (status, second) = post_inbox(&app, cookie_auth(&cookie), edited).await;
     assert_eq!(status, StatusCode::OK, "{second}");
     let new = second["memory_ids"][0].as_str().unwrap().to_string();
     assert_eq!(second["memory_ids"].as_array().unwrap().len(), 1);
@@ -307,7 +309,7 @@ async fn re_sending_a_source_archives_the_facts_it_wrote_before() {
     assert_eq!(source_rows(&state), 1);
 
     // a re-send that decides nothing still clears what the source held
-    let (status, third) = post_inbox(&app, cookie_auth(&cookie), body).await;
+    let (status, third) = post_inbox(&app, cookie_auth(&cookie), edited_again).await;
     assert_eq!(status, StatusCode::OK, "{third}");
     assert_eq!(third["outcome"], "nothing");
     assert!(memory_items(&app, &cookie).await.is_empty());
@@ -592,4 +594,89 @@ async fn a_failed_re_send_leaves_the_item_undecided_and_its_facts_in_place() {
     assert_eq!(row["reason"], serde_json::Value::Null);
     assert_eq!(source_rows(&state), 2);
     assert_eq!(live_files(&cfg, "aki"), 2);
+}
+
+#[tokio::test]
+async fn an_identical_re_send_answers_from_the_stored_decision_without_a_session() {
+    let llm = Arc::new(MockLLM::scripted(vec![decide("c1", REMEMBER_TWO)]));
+    let (app, cookie, state, _cfg) =
+        common::app_with_logged_in_user_llm_and_state(llm.clone()).await;
+    let body = r#"{"source_id":"lms:post:77","kind":"announcement","context":"Quiz Friday"}"#;
+    let (status, first) = post_inbox(&app, cookie_auth(&cookie), body).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    let decided = inbox_row(&state, "lms:post:77").unwrap();
+
+    let (status, again) = post_inbox(&app, cookie_auth(&cookie), body).await;
+    assert_eq!(status, StatusCode::OK, "{again}");
+    assert_eq!(llm.seen().len(), 1, "an unchanged item costs no model call");
+    assert_eq!(again["outcome"], "remembered");
+    assert_eq!(again["reason"], first["reason"]);
+    let mut want: Vec<&str> =
+        first["memory_ids"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+    want.sort_unstable();
+    let got: Vec<&str> =
+        again["memory_ids"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+    assert_eq!(got, want);
+    assert_eq!(again["steps"], serde_json::json!([]));
+    assert_eq!(inbox_row(&state, "lms:post:77").unwrap(), decided);
+
+    // a different kind is a different item and is judged again
+    let (status, _) = post_inbox(
+        &app,
+        cookie_auth(&cookie),
+        r#"{"source_id":"lms:post:77","kind":"material","context":"Quiz Friday"}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(llm.seen().len(), 2);
+}
+
+#[tokio::test]
+async fn an_undecided_item_is_judged_again_even_when_unchanged() {
+    let llm = Arc::new(MockLLM::scripted(vec![
+        ChatResponse { text: "I am not sure".into(), tool_calls: vec![] },
+        decide("c2", r#"{"source_id":"lms:post:77","outcome":"nothing","reason":"nothing durable"}"#),
+    ]));
+    let (app, cookie, _state, _cfg) =
+        common::app_with_logged_in_user_llm_and_state(llm.clone()).await;
+    let body = r#"{"source_id":"lms:post:77","kind":"announcement","context":"Quiz Friday"}"#;
+    assert_eq!(post_inbox(&app, cookie_auth(&cookie), body).await.0, StatusCode::BAD_GATEWAY);
+    let (status, v) = post_inbox(&app, cookie_auth(&cookie), body).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["outcome"], "nothing");
+    assert_eq!(llm.seen().len(), 2);
+}
+
+#[tokio::test]
+async fn the_opening_carries_related_facts_from_other_sources_but_not_its_own() {
+    let other = r#"{"source_id":"lms:post:1","outcome":"remembered","reason":"the PSAT date",
+        "facts":[{"summary":"PSAT on Wednesday","body":"School: the PSAT is on 2026-10-07, per the post \"PSAT\"."}]}"#;
+    let own = r#"{"source_id":"lms:post:2","outcome":"remembered","reason":"the PSAT room",
+        "facts":[{"summary":"PSAT room","body":"School: the PSAT is in the gym."}]}"#;
+    let llm = Arc::new(MockLLM::scripted(vec![
+        decide("c1", other),
+        decide("c2", own),
+        decide("c3", r#"{"source_id":"lms:post:2","outcome":"nothing","reason":"already held"}"#),
+    ]));
+    let (app, cookie, _state, _cfg) =
+        common::app_with_logged_in_user_llm_and_state(llm.clone()).await;
+    post_inbox(&app, cookie_auth(&cookie), r#"{"source_id":"lms:post:1","kind":"announcement","context":"PSAT"}"#).await;
+    post_inbox(&app, cookie_auth(&cookie), r#"{"source_id":"lms:post:2","kind":"announcement","context":"PSAT room"}"#).await;
+    let (status, v) = post_inbox(
+        &app,
+        cookie_auth(&cookie),
+        r#"{"source_id":"lms:post:2","kind":"announcement","context":"PSAT day\nBring a pencil."}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+
+    let seen = llm.seen();
+    let opening = match &seen[2].messages[0] {
+        note_server::providers::Message::User(t) => t.clone(),
+        other => panic!("expected the item as the opening message, got {other:?}"),
+    };
+    assert!(opening.starts_with("Source: lms:post:2\nKind: announcement\nMemory already holds"), "{opening}");
+    assert!(opening.contains("- PSAT on Wednesday: School: the PSAT is on 2026-10-07"), "{opening}");
+    assert!(!opening.contains("PSAT room"), "{opening}");
+    assert!(opening.ends_with("\n\nPSAT day\nBring a pencil."), "{opening}");
 }
