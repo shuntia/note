@@ -294,6 +294,13 @@ pub fn budget(
         Some(raw) => checked_day(raw, &triggers::timezone(ctx.config_dir, ctx.username), now)?,
         None => target_date(ctx, SessionKind::Talk, now),
     };
+    let base = triggers::allowance_of(ctx.config_dir, ctx.username);
+    let raised = triggers::allowance_over(conn, base, ctx.user_id, date).map_err(internal)? - base;
+    if raised + args.extra > base {
+        return Err(ToolError::cap_reached(format!(
+            "{date} is already raised by {raised}; a day reaches at most twice its {base} check-ins"
+        )));
+    }
     let extra = triggers::add_extra(conn, ctx.user_id, date, args.extra).map_err(internal)?;
     crate::log::record(
         conn,
@@ -721,6 +728,17 @@ mod tests {
         assert!(replaced["event_id"].as_i64().unwrap() > first);
         let e = set(r#"{"at":"+300min","prompt":"x","replace":999}"#).unwrap_err();
         assert_eq!(e.kind, "not_found");
+    }
+
+    #[test]
+    fn a_day_is_raised_to_at_most_twice_its_allowance() {
+        let (conn, tmp) = env();
+        let raise = |n: u32| dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "trigger_budget",
+            &format!(r#"{{"extra":{n},"reason":"they asked"}}"#));
+        raise(3).unwrap();
+        assert_eq!(raise(2).unwrap_err().kind, "cap_reached");
+        assert_eq!(raise(1).unwrap()["allowance"], 8);
+        assert_eq!(raise(1).unwrap_err().kind, "cap_reached");
     }
 
     #[test]

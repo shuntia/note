@@ -844,6 +844,23 @@ pub(crate) fn daily_cap_reached(state: &AppState, user_id: i64) -> bool {
     crate::log::agent_sessions_since(&conn, user_id, since).unwrap_or(0) >= cap
 }
 
+/// `daily_cap_reached` for a session nobody waits on, logged once a window
+/// under `session_capped` with what was skipped.
+pub(crate) fn background_capped(state: &AppState, user_id: i64, what: &str) -> bool {
+    if !daily_cap_reached(state, user_id) {
+        return false;
+    }
+    let _ = crate::log::record_throttled(
+        &state.db(),
+        Some(user_id),
+        "session_capped",
+        what,
+        jiff::Timestamp::now(),
+        crate::log::ERROR_LOG_WINDOW_MINS,
+    );
+    true
+}
+
 fn daily_cap_response(lang: Lang) -> axum::response::Response {
     (
         StatusCode::TOO_MANY_REQUESTS,

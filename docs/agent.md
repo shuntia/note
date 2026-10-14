@@ -73,10 +73,15 @@ check-ins on):
   `close_day_time`. Its session checks the order, sets it if the night left it
   empty or wrong, and lays 4 to 8 wake-ups with `trigger_set`. An undecided one
   is retried once.
-- `trigger_set`, from any session that has it.
-  These come out of `triggers_per_day` (default 12, 0 to 20); `trigger_budget`
-  raises one day's allowance once the user agrees. Triggers inside a work
-  session and dropped ones do not count.
+- `trigger_set`, from any session that has it, for any time still ahead on any
+  later day; a far day's plan waits bare (the trigger alone) until that day is
+  generated from the template in force then. These come out of the day's
+  `triggers_per_day` (default 12, 0 to 20); `trigger_budget` raises one day's
+  allowance, to at most twice it, once the user agrees. Triggers laid today
+  within a work session's planned length plus 15 minutes, and dropped ones, do
+  not count. A wake-up that ends in plain text instead of a tool says that
+  text. The context lists today's and tomorrow's pending triggers; later ones
+  only as a count and the next one's moment.
 - Idle: after `idle_nudge_min` (default 20; 0 is off) minutes without a sign of
   the user on a day they were active, outside a work session, quiet window and
   `close_day_time`, within budget. Each idle check that ends quiet doubles the

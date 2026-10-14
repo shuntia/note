@@ -114,7 +114,7 @@ pub(crate) fn midday_zone() -> jiff::tz::TimeZone {
     jiff::tz::TimeZone::get(&format!("Etc/GMT{:+}", hour - 12)).unwrap()
 }
 
-fn allowance_of(config_dir: &Path, username: &str) -> u32 {
+pub fn allowance_of(config_dir: &Path, username: &str) -> u32 {
     crate::config::UserConfig::load(config_dir, username)
         .map_or(crate::config::DEFAULT_TRIGGERS_PER_DAY, |c| c.triggers_per_day())
 }
@@ -761,6 +761,13 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
     };
     let _permit = permit;
     let now = jiff::Timestamp::now();
+    if crate::api::background_capped(state, fired.user_id, "wake-up") {
+        let _ = state.db().execute(
+            "UPDATE events SET status = 'dropped', decided_at = ?1 WHERE id = ?2",
+            (now.to_string(), fired.event_id),
+        );
+        return;
+    }
     let tz = timezone(&state.config_dir, &fired.username);
     let l = Lang::for_user(&state.config_dir, &fired.username);
     let (ev, opening, history, thread_note) = {

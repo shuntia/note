@@ -31,7 +31,9 @@
   sessions per account in any 24 hours; beyond it every agent route answers
   `429` `{"error": "daily session limit reached"}`. The count comes from the
   `agent_session` rows in `event_log`; a token-started session names it
-  (`token=<id>`).
+  (`token=<id>`). Past it the background sessions (wake-ups, the nightly run,
+  thread summaries) do not run either: a due wake-up is dropped unrun, and each
+  skip logs one `session_capped` row per window.
 
 ## API tokens
 
