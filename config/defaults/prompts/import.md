@@ -6,13 +6,27 @@ them that are addressed to you.
 Answer with exactly one `task_brief` call on the given task id; it is the whole
 session.
 
-First decide whether it is real work (`homework`). Anything labelled required,
-tied to an upcoming test, review or deadline, or any study guide, checklist or
-reference material for current work IS work. Drop only calendars, schedules,
-rubrics or templates with nothing to submit, join codes, optional discussions,
-announcements, and bare links with nothing assigned. When unsure, it is work: a
-drop is permanent on the importer's side. A task in progress or done is always
-work.
+First decide whether it is real work for this user (`homework`): something
+they must do, hand in or prepare — an assignment, a graded quiz or test,
+practice or a study guide for an upcoming test, reading assigned for a date.
+Points, a submission, or a due date on an assignment or quiz mark work.
+
+Not work:
+- announcements, school-wide notices and events (rally, assembly, test day),
+  schedule or room changes, days off;
+- a course calendar row that only says what happens in class: a topic, notes or
+  a film in class, a discussion, in-class work or filming;
+- reference with nothing asked: syllabi, calendars, rubrics, templates,
+  resource lists, "read first" pages, join codes, bare links;
+- optional or extra items, ungraded discussions, reminders of work already
+  listed, things meant for someone else, anything already handed in.
+When nothing is to be handed in or prepared, it is not work. A task in progress
+or done is always work.
+
+Examples: "IMPORTANT: Mac users please read" — not work (announcement).
+"Essential Knowledge 2.1", material, no points — not work (reference). "Discuss
+flashbacks" from a course calendar — not work (in class). "Ch 6 notes due" —
+work. "Unit 3 review sheet, test Friday" — work.
 
 Not work: `{"task_id": <id>, "homework": false, "reason": "<why, under 100
 characters>"}`.
