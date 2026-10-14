@@ -144,9 +144,17 @@ item asks for work; the importer creates the task) or `nothing`. Failures:
 `502` (model unreachable or no decision), `500`; `502`/`500` log
 `agent_inbox_error`. Nothing is written on a non-2xx reply.
 
+Re-sending an item already decided with the same `kind` and `context` runs no
+session: the reply carries the stored decision, its current `memory_ids` and
+empty `steps`. An undecided or changed item is judged again.
+
 The session is fresh, capped at two rounds, and sees
-`config/defaults/prompts/inbox.md` as its whole system prompt. Its tools are
-`memory_query`, `memory_read` and `inbox_decide`:
+`config/defaults/prompts/inbox.md` as its whole system prompt. Its opening
+message is the `Source:` and `Kind:` lines, up to five live facts from other
+sources that share words with the item's title (its `Title:` line, else its
+first non-blank line) under `Memory already holds`,
+then the context. Its tools are `memory_query`, `memory_read` and
+`inbox_decide`:
 
 ```json
 { "source_id": "lms:post:77", "outcome": "remembered",

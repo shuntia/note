@@ -51,9 +51,14 @@ pub fn stamp(ts: jiff::Timestamp) -> String {
     format!("{ts:.6}")
 }
 
-/// The first non-blank line of the context, or the source id when it has none.
+/// What a `Title:` line names, else the first non-blank line of the context,
+/// else the source id.
 pub fn title_of(context: &str, source_id: &str) -> String {
-    let line = context.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or(source_id);
+    let lines = || context.lines().map(str::trim);
+    let line = lines()
+        .find_map(|l| l.strip_prefix("Title:").map(str::trim).filter(|t| !t.is_empty()))
+        .or_else(|| lines().find(|l| !l.is_empty()))
+        .unwrap_or(source_id);
     line.chars().take(MAX_TITLE_CHARS).collect::<String>().trim_end().to_string()
 }
 
@@ -82,6 +87,92 @@ pub fn upsert(
         (user_id, source_id, kind, title_of(context, source_id), context, stamp(now)),
         |r| r.get(0),
     )
+}
+
+#[derive(Debug, PartialEq)]
+pub struct Decided {
+    pub outcome: String,
+    pub reason: String,
+    pub memory_ids: Vec<String>,
+}
+
+/// The decision an identical re-send would only repeat: the stored one, when
+/// the row holds this exact kind and body and was decided.
+pub fn decided_unchanged(
+    conn: &Connection,
+    user_id: i64,
+    source_id: &str,
+    kind: &str,
+    context: &str,
+) -> rusqlite::Result<Option<Decided>> {
+    let row = conn
+        .query_row(
+            "SELECT outcome, reason FROM inbox_items
+             WHERE user_id = ?1 AND source_id = ?2 AND kind = ?3 AND body = ?4
+               AND outcome IS NOT NULL",
+            (user_id, source_id, kind, context),
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+        )
+        .optional()?;
+    let Some((outcome, reason)) = row else {
+        return Ok(None);
+    };
+    let memory_ids = conn
+        .prepare(
+            "SELECT memory_id FROM memory_sources WHERE user_id = ?1 AND source_id = ?2
+             ORDER BY memory_id",
+        )?
+        .query_map((user_id, source_id), |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(Some(Decided { outcome, reason: reason.unwrap_or_default(), memory_ids }))
+}
+
+const MAX_RELATED: i64 = 5;
+const MAX_RELATED_BODY_CHARS: usize = 300;
+
+/// Live facts other sources hold that share words with the item's title, one
+/// line each, so the session can decide without searching memory first. The
+/// source's own facts are left out: its decision supersedes them.
+pub fn related_facts(
+    conn: &Connection,
+    data_dir: &Path,
+    username: &str,
+    user_id: i64,
+    source_id: &str,
+    title: &str,
+) -> anyhow::Result<Vec<String>> {
+    let own: std::collections::HashSet<String> = conn
+        .prepare("SELECT memory_id FROM memory_sources WHERE user_id = ?1 AND source_id = ?2")?
+        .query_map((user_id, source_id), |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut lines = Vec::new();
+    for hit in crate::memory::query(conn, username, title, MAX_RELATED + own.len() as i64, None)? {
+        if own.contains(&hit.id) || lines.len() as i64 >= MAX_RELATED {
+            continue;
+        }
+        let body = crate::memory::read(data_dir, username, &hit.id)?
+            .map(|f| f.body.split_whitespace().collect::<Vec<_>>().join(" "))
+            .unwrap_or_default();
+        let body: String = body.chars().take(MAX_RELATED_BODY_CHARS).collect();
+        lines.push(format!("- {}: {body}", hit.summary));
+    }
+    Ok(lines)
+}
+
+/// The session's opening message: the item, with what memory already holds
+/// about it between its header and its text.
+pub fn opening(source_id: &str, kind: &str, related: &[String], context: &str) -> String {
+    let mut m = format!("Source: {source_id}\nKind: {kind}\n");
+    if !related.is_empty() {
+        m.push_str("Memory already holds (no need to query or read these):\n");
+        for line in related {
+            m.push_str(line);
+            m.push('\n');
+        }
+    }
+    m.push('\n');
+    m.push_str(context);
+    m
 }
 
 pub fn record_decision(
@@ -323,6 +414,8 @@ mod tests {
         assert_eq!(title_of("  \n\n  Quiz Friday  \nLate work loses 10%", "s1"), "Quiz Friday");
         assert_eq!(title_of("", "lms:post:1"), "lms:post:1");
         assert_eq!(title_of(" \n\t\n ", "lms:post:1"), "lms:post:1");
+        assert_eq!(title_of("Course: Film\nKind: announcement\nTitle:  PSAT/SAT day \n", "s1"), "PSAT/SAT day");
+        assert_eq!(title_of("Course: Film\nTitle:\n", "s1"), "Course: Film");
         let long = "é".repeat(300);
         let t = title_of(&long, "s1");
         assert_eq!(t.chars().count(), 200);

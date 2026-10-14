@@ -1128,6 +1128,27 @@ async fn agent_inbox(
             &format!("context must be at most {MAX_BRIEF_CONTEXT} bytes"),
         );
     }
+    let unchanged = {
+        let conn = state.db();
+        crate::inbox::decided_unchanged(&conn, user.id, &req.source_id, &req.kind, &req.context)
+    };
+    match unchanged {
+        Ok(Some(d)) => {
+            return Json(serde_json::json!({
+                "source_id": req.source_id,
+                "outcome": d.outcome,
+                "reason": d.reason,
+                "memory_ids": d.memory_ids,
+                "steps": [],
+            }))
+            .into_response();
+        }
+        Ok(None) => {}
+        Err(e) => {
+            log_inbox_error(&state, user.id, &format!("{}: reading the item failed: {e}", req.source_id));
+            return brief_error(StatusCode::INTERNAL_SERVER_ERROR, "the item could not be read");
+        }
+    }
     if daily_cap_reached(&state, user.id) {
         return daily_cap_response(lang);
     }
@@ -1155,12 +1176,22 @@ async fn agent_inbox(
         auth::Credential::Session => None,
     };
     let source_id = req.source_id.clone();
-    let opening = format!("Source: {}\nKind: {}\n\n{}", req.source_id, req.kind, req.context);
     let err_state = state.clone();
     let result = tokio::task::spawn_blocking(move || {
         // held here, not in the handler future, so a cancelled request still
         // holds the slot until the session it orphaned actually finishes
         let _permit = permit;
+        let related = {
+            let conn = state.db();
+            let title = crate::inbox::title_of(&req.context, &req.source_id);
+            crate::inbox::related_facts(&conn, &state.data_dir, &user.username, user.id, &req.source_id, &title)
+                .unwrap_or_else(|e| {
+                    let _ = crate::log::record(&conn, Some(user.id), "agent_inbox_error",
+                        &format!("{}: related facts: {e}", req.source_id));
+                    Vec::new()
+                })
+        };
+        let opening = crate::inbox::opening(&req.source_id, &req.kind, &related, &req.context);
         let deps = crate::agent::SessionDeps {
             db: &state.db,
             config_dir: &state.config_dir,
