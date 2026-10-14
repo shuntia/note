@@ -165,12 +165,8 @@ pub fn active(conn: &Connection, data_dir: &Path, user: &str, now: jiff::Timesta
     Ok(all(conn, data_dir, user)?.into_iter().filter(|n| n.is_active(now)).collect())
 }
 
-/// Notes whose window opens within the next twelve hours, soonest first.
-pub fn upcoming(conn: &Connection, data_dir: &Path, user: &str, now: jiff::Timestamp) -> Result<Vec<Note>> {
-    Ok(upcoming_of(all(conn, data_dir, user)?, now))
-}
-
-/// `active` and `upcoming` from one read of the notes.
+/// `active`, and the notes whose window opens within the next twelve hours,
+/// soonest first, from one read of the notes.
 pub fn active_and_upcoming(
     conn: &Connection,
     data_dir: &Path,
@@ -382,8 +378,10 @@ mod tests {
         let soon = note(&conn, &tmp, "soon", (Some("2026-10-07T23:00:00Z"), None), "2026-10-07T00:00:03Z");
         note(&conn, &tmp, "later", (Some("2026-10-08T01:00:00Z"), None), "2026-10-07T00:00:04Z");
         let now = at("2026-10-07T12:00:00Z");
-        assert_eq!(ids(active(&conn, tmp.path(), "aki", now).unwrap()), vec![inside.id, open.id], "newest first");
-        assert_eq!(ids(upcoming(&conn, tmp.path(), "aki", now).unwrap()), vec![soon.id]);
+        assert_eq!(ids(active(&conn, tmp.path(), "aki", now).unwrap()), vec![inside.id.clone(), open.id.clone()], "newest first");
+        let (active, upcoming) = active_and_upcoming(&conn, tmp.path(), "aki", now).unwrap();
+        assert_eq!(ids(active), vec![inside.id, open.id]);
+        assert_eq!(ids(upcoming), vec![soon.id]);
     }
 
     #[test]
@@ -483,7 +481,7 @@ mod tests {
 
         assert_eq!(settle(&conn, tmp.path(), "aki", &gone.id, &Outcome::Drop).unwrap(), None);
         assert!(all(&conn, tmp.path(), "aki").unwrap().is_empty(), "a settled note leaves working memory");
-        assert_eq!(crate::memory::live_count(&conn, "aki").unwrap(), 3);
+        assert_eq!(crate::memory::live_count_by_category(&conn, "aki").unwrap().iter().sum::<i64>(), 3);
         assert!(matches!(settle(&conn, tmp.path(), "aki", &gone.id, &Outcome::Drop), Err(NoteError::NotFound(_))));
     }
 
