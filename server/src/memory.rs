@@ -392,7 +392,12 @@ pub fn update(
     f.source = None;
     write_atomic(&path, &render(&f))?;
     index_insert(conn, user, &f, &path)?;
-    store_vector(conn, user, &f.id, vector);
+    match vector {
+        Some(_) => store_vector(conn, user, &f.id, vector),
+        None => {
+            conn.execute("DELETE FROM memory_vectors WHERE user = ?1 AND id = ?2", (user, &f.id))?;
+        }
+    }
     Ok(Some(()))
 }
 
@@ -502,6 +507,36 @@ pub fn remove(conn: &Connection, data_dir: &Path, user: &str, id: &str) -> Resul
     conn.execute("DELETE FROM memory_fts WHERE user = ?1 AND id = ?2", (user, id))?;
     conn.execute("DELETE FROM memory_vectors WHERE user = ?1 AND id = ?2", (user, id))?;
     Ok(true)
+}
+
+/// Deletes a live fact at the user's word, with the archived versions it
+/// superseded, so nothing of it is left to read back. Returns the ids removed,
+/// or `None` for an unknown, archived or working-note id.
+pub fn forget(conn: &Connection, data_dir: &Path, user: &str, id: &str) -> Result<Option<Vec<String>>> {
+    let Some((path, false)) = locate(data_dir, user, id) else {
+        return Ok(None);
+    };
+    let f = parse(&std::fs::read_to_string(&path)?, false)?;
+    if f.category == NOTE {
+        return Ok(None);
+    }
+    let mut chain = vec![(f.id, path)];
+    let mut next = f.supersedes;
+    while let Some(old) = next.take() {
+        let Some((old_path, true)) = locate(data_dir, user, &old) else { break };
+        if chain.iter().any(|(seen, _)| *seen == old) {
+            break;
+        }
+        next = parse(&std::fs::read_to_string(&old_path)?, true)?.supersedes;
+        chain.push((old, old_path));
+    }
+    for (id, path) in &chain {
+        std::fs::remove_file(path)?;
+        for table in ["memory_index", "memory_fts", "memory_vectors"] {
+            conn.execute(&format!("DELETE FROM {table} WHERE user = ?1 AND id = ?2"), (user, id))?;
+        }
+    }
+    Ok(Some(chain.into_iter().map(|(id, _)| id).collect()))
 }
 
 /// Every readable live file of one category, in no particular order; the
@@ -1140,6 +1175,57 @@ mod tests {
         archive(&conn, tmp.path(), "aki", &old).unwrap();
         assert!(!remove(&conn, tmp.path(), "aki", &old).unwrap());
         assert!(read(tmp.path(), "aki", &old).unwrap().is_some());
+    }
+
+    #[test]
+    fn forget_takes_the_fact_and_every_version_it_superseded() {
+        use crate::providers::EmbeddingsProvider;
+        let (conn, tmp) = env();
+        let v = crate::providers::mock::MockEmbeddings.embed(&[&embed_text("s", "b")]).unwrap();
+        let first = add(&conn, tmp.path(), "aki", "semantic", "s", "b", Some(&v[0])).unwrap();
+        let second = supersede(&conn, tmp.path(), "aki", &first, "s2", "b2", None).unwrap().unwrap();
+        let live = supersede(&conn, tmp.path(), "aki", &second, "s3", "b3", Some(&v[0])).unwrap().unwrap();
+        let other = add(&conn, tmp.path(), "aki", "semantic", "keep", "b3", None).unwrap();
+
+        assert!(forget(&conn, tmp.path(), "aki", &second).unwrap().is_none(), "an archived id is not forgotten alone");
+        let gone = forget(&conn, tmp.path(), "aki", &live).unwrap().unwrap();
+        assert_eq!(gone, vec![live.clone(), second.clone(), first.clone()]);
+        for id in [&first, &second, &live] {
+            assert!(read(tmp.path(), "aki", id).unwrap().is_none());
+        }
+        let rows: i64 = conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM memory_index) + (SELECT COUNT(*) FROM memory_fts)
+                      + (SELECT COUNT(*) FROM memory_vectors)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 2, "only the untouched fact's index and search rows remain");
+        assert_eq!(query(&conn, "aki", "b3", 10, None).unwrap()[0].id, other);
+        assert!(forget(&conn, tmp.path(), "aki", &live).unwrap().is_none());
+        put(&conn, tmp.path(), "aki", &a_note(NOTE_ID)).unwrap();
+        assert!(forget(&conn, tmp.path(), "aki", NOTE_ID).unwrap().is_none(), "a working note is not a memory");
+    }
+
+    #[test]
+    fn an_update_without_a_vector_drops_the_stale_one_for_the_backfill() {
+        use crate::providers::EmbeddingsProvider;
+        let (conn, tmp) = env();
+        let e = crate::providers::mock::MockEmbeddings;
+        let v = e.embed(&[&embed_text("s", "b")]).unwrap();
+        let id = add(&conn, tmp.path(), "aki", "semantic", "s", "b", Some(&v[0])).unwrap();
+        let vectors = || -> i64 {
+            conn.query_row("SELECT COUNT(*) FROM memory_vectors WHERE id = ?1", [&id], |r| r.get(0)).unwrap()
+        };
+        update(&conn, tmp.path(), "aki", &id, "s", "changed", None).unwrap().unwrap();
+        assert_eq!(vectors(), 0);
+        let db = std::sync::Mutex::new(conn);
+        assert_eq!(backfill_vectors(&db, tmp.path(), &e).unwrap(), 1);
+        let conn = db.into_inner().unwrap();
+        let stored: Vec<u8> =
+            conn.query_row("SELECT vector FROM memory_vectors WHERE id = ?1", [&id], |r| r.get(0)).unwrap();
+        assert_eq!(blob_to_vec(&stored), e.embed(&[&embed_text("s", "changed")]).unwrap()[0]);
     }
 
     #[test]

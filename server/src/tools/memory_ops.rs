@@ -3,7 +3,7 @@ use rusqlite::Connection;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-pub(super) const MAX_SUMMARY: usize = 200;
+pub(crate) const MAX_SUMMARY: usize = 200;
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
