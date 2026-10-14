@@ -155,6 +155,7 @@ const OPERATIONAL_LOG_KINDS: &[&str] = &[
     "agent_session",
     "delivery_degraded",
     "delivery_ok",
+    "llm_usage",
     "login_error",
     "memory_embed_error",
     "memory_expired",

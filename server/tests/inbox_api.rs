@@ -678,5 +678,5 @@ async fn the_opening_carries_related_facts_from_other_sources_but_not_its_own() 
     assert!(opening.starts_with("Source: lms:post:2\nKind: announcement\nMemory already holds"), "{opening}");
     assert!(opening.contains("- PSAT on Wednesday: School: the PSAT is on 2026-10-07"), "{opening}");
     assert!(!opening.contains("PSAT room"), "{opening}");
-    assert!(opening.ends_with("\n\nPSAT day\nBring a pencil."), "{opening}");
+    assert!(opening.ends_with("\n\n<item>\nPSAT day\nBring a pencil.\n</item>"), "{opening}");
 }
