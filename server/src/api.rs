@@ -22,8 +22,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/goals", get(goals_list).post(goals_create))
         .route("/api/goals/{id}", patch(goals_update).delete(goals_delete))
         .route("/api/tasks", get(tasks_list).post(tasks_create))
-        .route("/api/tasks/queue", get(tasks_queue))
-        .route("/api/tasks/candidates", get(tasks_candidates))
+        .route("/api/tasks/queue", get(task_queue::<false>))
+        .route("/api/tasks/candidates", get(task_queue::<true>))
         .route("/api/order", get(order_get).put(order_put))
         .route("/api/tasks/{id}", patch(tasks_update).delete(tasks_delete))
         .route(
@@ -594,38 +594,29 @@ struct QueueQuery {
     limit: Option<usize>,
 }
 
-async fn tasks_queue(
+type QueueSource = fn(
+    &rusqlite::Connection,
+    i64,
+    &jiff::tz::TimeZone,
+    jiff::Timestamp,
+    usize,
+) -> rusqlite::Result<Vec<crate::tasks::QueueEntry>>;
+
+/// The queue, or with `order::candidates` what Now starts next: today's order,
+/// then the queue behind it.
+async fn task_queue<const CANDIDATES: bool>(
     user: CurrentUser,
     State(state): State<AppState>,
     Query(q): Query<QueueQuery>,
 ) -> impl IntoResponse {
+    let source: QueueSource = if CANDIDATES { crate::order::candidates } else { crate::tasks::queue };
     let tz = user_zone(&state, &user.username);
     let conn = state.db();
     let limit = q.limit.unwrap_or(5).clamp(1, 20);
-    let listed = crate::tasks::queue(&conn, user.id, &tz, jiff::Timestamp::now(), limit).and_then(|mut q| {
+    let listed = source(&conn, user.id, &tz, jiff::Timestamp::now(), limit).and_then(|mut q| {
         crate::tasks::stamp_schedule(&conn, user.id, &tz, q.iter_mut().map(|e| &mut e.task.task))?;
         Ok(q)
     });
-    match listed {
-        Ok(q) => Json(q).into_response(),
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    }
-}
-
-/// What Now starts next: today's order, then the queue behind it.
-async fn tasks_candidates(
-    user: CurrentUser,
-    State(state): State<AppState>,
-    Query(q): Query<QueueQuery>,
-) -> impl IntoResponse {
-    let tz = user_zone(&state, &user.username);
-    let conn = state.db();
-    let limit = q.limit.unwrap_or(5).clamp(1, 20);
-    let listed = crate::order::candidates(&conn, user.id, &tz, jiff::Timestamp::now(), limit)
-        .and_then(|mut q| {
-            crate::tasks::stamp_schedule(&conn, user.id, &tz, q.iter_mut().map(|e| &mut e.task.task))?;
-            Ok(q)
-        });
     match listed {
         Ok(q) => Json(q).into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
