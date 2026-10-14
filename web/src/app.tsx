@@ -95,7 +95,7 @@ const PHONE_ORDER: NavTab[] = ['tasks', 'chat', 'today', 'memory', 'settings']
 
 const NAV: { id: NavTab; label: Key }[] = [
   { id: 'today', label: 'nav.today' },
-  { id: 'tasks', label: 'nav.notes' },
+  { id: 'tasks', label: 'nav.tasks' },
   { id: 'chat', label: 'nav.chat' },
   { id: 'memory', label: 'nav.memory' },
   { id: 'settings', label: 'nav.settings' },
