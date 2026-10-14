@@ -160,7 +160,7 @@ pub fn append_assistant(
 }
 
 /// At most `limit` bytes, cut on a char boundary and marked with an ellipsis.
-fn clip(text: &str, limit: usize) -> String {
+pub(crate) fn clip(text: &str, limit: usize) -> String {
     if text.len() <= limit {
         return text.to_string();
     }

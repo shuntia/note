@@ -730,6 +730,22 @@ fn settle(conn: &Connection, event_id: i64, now: jiff::Timestamp) -> rusqlite::R
     )
 }
 
+/// The tool a trigger session ended on and its result: its last terminal step,
+/// else its closing text, taken as `say`.
+fn decision(out: &crate::agent::SessionOutcome) -> Option<(String, serde_json::Value)> {
+    let ended = out.steps.iter().rev().find(|s| {
+        !s.is_error && crate::tools::ends(crate::tools::SessionKind::Trigger, &s.name, &s.result)
+    });
+    if let Some(step) = ended {
+        return Some((step.name.clone(), serde_json::from_str(&step.result).unwrap_or_default()));
+    }
+    let text = out.reply.trim();
+    (!text.is_empty()).then(|| {
+        let said = crate::talk::clip(text, MAX_SAY_BYTES);
+        ("say".to_string(), serde_json::json!({ "said": said, "notes": [] }))
+    })
+}
+
 /// A fired trigger, off the runner's lock: a short session reads the situation
 /// and either says something or stays quiet. A session that never gets that far
 /// leaves the event alone; its user hears only why, at most once a window.
@@ -817,13 +833,10 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
             return failed(format!("event {}: {e:#}", ev.event_id));
         }
     };
-    let Some(step) = out.steps.iter().rev().find(|s| {
-        !s.is_error && crate::tools::ends(crate::tools::SessionKind::Trigger, &s.name, &s.result)
-    }) else {
+    let Some((name, result)) = decision(&out) else {
         return failed(format!("event {}: the session never decided", ev.event_id));
     };
-    let result: serde_json::Value = serde_json::from_str(&step.result).unwrap_or_default();
-    if step.name == "stay_quiet" {
+    if name == "stay_quiet" {
         let conn = state.db();
         let _ = settle(&conn, ev.event_id, now);
         let _ = crate::log::record(
@@ -843,7 +856,7 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
     let Some(text) = result["said"].as_str().map(str::to_string) else {
         return failed(format!("event {}: the session said nothing readable", ev.event_id));
     };
-    let call = (step.name == "call_user").then(|| crate::tools::call_ops::Confirmed::from_decided(&result)).flatten();
+    let call = (name == "call_user").then(|| crate::tools::call_ops::Confirmed::from_decided(&result)).flatten();
     let lang = crate::text::Lang::for_user(&state.config_dir, &fired.username);
     let conversation_id = {
         let conn = state.db();
@@ -1280,6 +1293,32 @@ mod tests {
             .unwrap();
         assert_eq!(day, "2027-03-02");
         assert_eq!(spent(&conn, uid, far).unwrap(), 1);
+    }
+
+    fn outcome(reply: &str, steps: Vec<crate::agent::SessionStep>) -> crate::agent::SessionOutcome {
+        crate::agent::SessionOutcome {
+            reply: reply.into(),
+            turns: 1,
+            tool_calls: steps.len(),
+            steps,
+            reasoning: String::new(),
+            thought_ms: 0,
+        }
+    }
+
+    fn step(name: &str, result: &str) -> crate::agent::SessionStep {
+        crate::agent::SessionStep { name: name.into(), args: "{}".into(), result: result.into(), is_error: false, thinking: None }
+    }
+
+    #[test]
+    fn a_session_ending_in_plain_text_says_it() {
+        let (name, result) = decision(&outcome("  Back on the essay?  ", vec![step("task_list", "{}")])).unwrap();
+        assert_eq!((name.as_str(), result["said"].as_str()), ("say", Some("Back on the essay?")));
+        let (_, long) = decision(&outcome(&"あ".repeat(1000), Vec::new())).unwrap();
+        assert!(long["said"].as_str().unwrap().len() <= MAX_SAY_BYTES);
+        let (name, _) = decision(&outcome("x", vec![step("stay_quiet", r#"{"quiet":true,"reason":"r"}"#)])).unwrap();
+        assert_eq!(name, "stay_quiet", "a terminal step outranks the text");
+        assert!(decision(&outcome("  ", vec![step("task_list", "{}")])).is_none());
     }
 
     #[test]
