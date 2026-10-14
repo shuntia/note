@@ -27,6 +27,7 @@ pub enum TurnEvent {
         calls: Vec<ToolCall>,
         stopped: bool,
         error: Option<crate::failure::Failure>,
+        usage: crate::usage::Usage,
     },
 }
 
@@ -45,11 +46,14 @@ pub fn spawn(
     tx: impl Fn(TurnEvent) + Send + 'static,
 ) -> JoinHandle<()> {
     std::thread::spawn(move || {
+        let _meter = crate::usage::Meter::open();
         let req = ChatRequest {
             system: &system,
             messages: &messages,
             tools: &tools,
             background: false,
+            plain: false,
+            must_call: None,
         };
         let mut sink = TurnSink::new(spec.reply, &stop, &tx);
         let mut result = llm.chat_stream(&req, &opts, &mut sink);
@@ -69,6 +73,7 @@ pub fn spawn(
             calls: sink.calls,
             stopped,
             error: result.err().map(|e| crate::failure::Failure::of(&e)),
+            usage: crate::usage::take(),
         });
     })
 }
@@ -228,6 +233,7 @@ mod tests {
             calls,
             stopped,
             error,
+            ..
         } = &events[3]
         else {
             unreachable!()
@@ -236,6 +242,20 @@ mod tests {
             (*reply, text.as_str(), calls.len(), *stopped, error),
             (7, "Let me check, one sec.", 1, false, &None)
         );
+    }
+
+    #[test]
+    fn the_end_carries_what_every_attempt_spent() {
+        let spent = crate::usage::Usage { calls: 1, prompt: 7000, ..Default::default() };
+        let llm = Arc::new(
+            MockLLM::streamed(vec![vec![StreamPiece::Fail("stalled")], vec![StreamPiece::Text("Hi.")]])
+                .with_usage(spent),
+        );
+        let (rx, handle) = start(llm, Arc::new(AtomicBool::new(false)));
+        let events = until_end(&rx);
+        handle.join().unwrap();
+        let Some(TurnEvent::End { usage, .. }) = events.last() else { unreachable!() };
+        assert_eq!((usage.calls, usage.prompt), (2, 14000));
     }
 
     #[test]

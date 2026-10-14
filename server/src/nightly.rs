@@ -523,7 +523,10 @@ mod tests {
 
         let (week, strategy) = crate::context::read_strategy(tmp.path(), "aki").unwrap();
         assert_eq!((week.as_str(), strategy.as_str()), ("2026-09-14", "Essay first."));
-        assert!(llm.seen()[1].system.contains("Essay first."), "the planning session reads it");
+        assert!(
+            llm.seen()[1].messages.iter().any(|m| matches!(m, crate::providers::Message::User(t) if t.contains("Essay first."))),
+            "the planning session reads it"
+        );
         let conn = db.lock().unwrap();
         let laid: i64 = conn
             .query_row("SELECT COUNT(*) FROM events WHERE kind = 'review'", [], |r| r.get(0))

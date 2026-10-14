@@ -62,6 +62,11 @@ pub fn body(model: &str, req: &ChatRequest) -> serde_json::Value {
     if !req.tools.is_empty() {
         v["tools"] = serde_json::Value::from(req.tools);
     }
+    match req.must_call {
+        Some(super::MustCall::Any) => v["tool_choice"] = serde_json::json!({"type": "any"}),
+        Some(super::MustCall::Tool(name)) => v["tool_choice"] = serde_json::json!({"type": "tool", "name": name}),
+        None => {}
+    }
     v
 }
 
@@ -93,6 +98,7 @@ impl LLMProvider for AnthropicLLM {
                 .header("anthropic-version", "2023-06-01")
                 .header("content-type", "application/json")
         })?;
+        crate::usage::record(crate::usage::Usage::anthropic_call(&resp["usage"]));
         parse(&resp)
     }
 
@@ -127,7 +133,7 @@ mod tests {
     fn body_maps_roles_tools_and_merges_tool_results() {
         let tools = vec![serde_json::json!({"name":"memory_query","description":"d","input_schema":{"type":"object"}})];
         let msgs = req_fixture();
-        let b = body("claude-sonnet-5", &ChatRequest { system: "be kind", messages: &msgs, tools: &tools, background: false });
+        let b = body("claude-sonnet-5", &ChatRequest { system: "be kind", messages: &msgs, tools: &tools, background: false, plain: false, must_call: None });
         assert_eq!(b["system"], "be kind");
         assert_eq!(b["max_tokens"], 4096);
         assert_eq!(b["tools"][0]["name"], "memory_query");
@@ -142,7 +148,7 @@ mod tests {
     #[test]
     fn body_omits_tools_key_when_empty() {
         let msgs = vec![Message::User("hi".into())];
-        let b = body("claude-sonnet-5", &ChatRequest { system: "", messages: &msgs, tools: &[], background: false });
+        let b = body("claude-sonnet-5", &ChatRequest { system: "", messages: &msgs, tools: &[], background: false, plain: false, must_call: None });
         assert!(b.get("tools").is_none());
     }
 

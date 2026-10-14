@@ -148,6 +148,7 @@ struct TurnEnd {
     calls: Vec<ToolCall>,
     stopped: bool,
     error: Option<Failure>,
+    usage: crate::usage::Usage,
 }
 
 struct InFlight {
@@ -428,6 +429,9 @@ impl Driver {
             return;
         };
         f.stop.store(true, Ordering::SeqCst);
+        if let Some(end) = &f.ended {
+            self.trace.spent(end.usage);
+        }
         self.send(CallBody::Drop { reply: f.reply });
         self.queue.give_back(f.snapshot);
         self.replies.remove(&f.reply);
@@ -476,7 +480,7 @@ impl Driver {
                 .as_ref()
                 .map(|f| f.emitted.clone())
                 .unwrap_or_default();
-            self.on_end(calls, false, Some(Failure::internal("the turn stopped")));
+            self.on_end(calls, false, Some(Failure::internal("the turn stopped")), crate::usage::Usage::default());
         }
         self.try_start();
     }
@@ -550,6 +554,9 @@ impl Driver {
             | TurnEvent::End { reply, .. } => *reply,
         };
         if self.in_flight.as_ref().is_none_or(|f| f.reply != reply) {
+            if let TurnEvent::End { usage, .. } = event {
+                self.trace.spent(usage);
+            }
             return;
         }
         match event {
@@ -559,8 +566,9 @@ impl Driver {
                 calls,
                 stopped,
                 error,
+                usage,
                 ..
-            } => self.on_end(calls, stopped, error),
+            } => self.on_end(calls, stopped, error, usage),
         }
     }
 
@@ -648,7 +656,7 @@ impl Driver {
         }
     }
 
-    fn on_end(&mut self, calls: Vec<ToolCall>, stopped: bool, error: Option<Failure>) {
+    fn on_end(&mut self, calls: Vec<ToolCall>, stopped: bool, error: Option<Failure>, usage: crate::usage::Usage) {
         let Some(f) = self.in_flight.as_mut() else {
             return;
         };
@@ -661,6 +669,7 @@ impl Driver {
             calls,
             stopped,
             error,
+            usage,
         });
         let held = f.held();
         self.send(CallBody::SpeakDone { reply });
@@ -677,9 +686,11 @@ impl Driver {
             return;
         };
         let Some(end) = f.ended else { return };
-        if let Some(first) = f.first_clause {
-            self.trace
-                .round(first.saturating_sub(f.since).as_millis() as u64);
+        match f.first_clause {
+            Some(first) => self
+                .trace
+                .round(first.saturating_sub(f.since).as_millis() as u64, end.usage),
+            None => self.trace.spent(end.usage),
         }
         push_user(&mut self.messages, f.input);
         let (spoken_any, heard) = match self.replies.get(&f.reply) {
@@ -792,6 +803,9 @@ impl Driver {
         self.jobs.end();
         if let Some(f) = self.in_flight.take() {
             f.stop.store(true, Ordering::SeqCst);
+            if let Some(end) = &f.ended {
+                self.trace.spent(end.usage);
+            }
             let heard = self
                 .replies
                 .get(&f.reply)

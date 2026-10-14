@@ -1,4 +1,5 @@
 use crate::tools::SessionKind;
+use crate::usage::Usage;
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -26,6 +27,8 @@ pub struct Round {
     pub ms: u64,
     pub error: Option<String>,
     pub calls: Vec<Call>,
+    #[serde(default, skip_serializing_if = "Usage::is_zero")]
+    pub usage: Usage,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -33,6 +36,9 @@ struct Detail {
     opening: String,
     reply: String,
     rounds: Vec<Round>,
+    /// Every provider call of the session, its rounds' and any made outside them.
+    #[serde(default)]
+    usage: Usage,
 }
 
 /// Cuts `s` to `MAX_FIELD_BYTES` on a char boundary, marking what was dropped.
@@ -67,6 +73,7 @@ pub struct Builder {
     rounds: Vec<Round>,
     turns: usize,
     tool_calls: usize,
+    usage: Usage,
 }
 
 impl Builder {
@@ -82,18 +89,25 @@ impl Builder {
             rounds: Vec::new(),
             turns: 0,
             tool_calls: 0,
+            usage: Usage::default(),
         }
     }
 
     /// Opens a round the provider answered; the calls recorded next are its own.
-    pub fn round(&mut self, ms: u64) {
+    pub fn round(&mut self, ms: u64, usage: Usage) {
         self.turns += 1;
-        self.rounds.push(Round { ms, error: None, calls: Vec::new() });
+        self.usage.add(usage);
+        self.rounds.push(Round { ms, error: None, calls: Vec::new(), usage });
     }
 
     /// The round the session died in: it holds no calls and ends the trace.
     pub fn round_failed(&mut self, ms: u64, error: &str) {
-        self.rounds.push(Round { ms, error: Some(error.to_string()), calls: Vec::new() });
+        self.rounds.push(Round { ms, error: Some(error.to_string()), calls: Vec::new(), usage: Usage::default() });
+    }
+
+    /// Provider calls made outside any round the trace keeps.
+    pub fn spent(&mut self, usage: Usage) {
+        self.usage.add(usage);
     }
 
     pub fn call(&mut self, name: &str, args: &str, result: &str, is_error: bool, ms: u64) {
@@ -109,7 +123,7 @@ impl Builder {
         };
         match self.rounds.last_mut() {
             Some(round) => round.calls.push(call),
-            None => self.rounds.push(Round { ms: 0, error: None, calls: vec![call] }),
+            None => self.rounds.push(Round { ms: 0, error: None, calls: vec![call], usage: Usage::default() }),
         }
     }
 
@@ -128,13 +142,15 @@ impl Builder {
         self.error = Some(error.to_string());
     }
 
-    /// Writes the row and prunes the user's oldest traces.
+    /// Writes the row, logs what the session spent and prunes the user's oldest traces.
     pub fn insert(&self, conn: &Connection, user_id: i64) -> Result<()> {
         let detail = serde_json::to_string(&Detail {
             opening: self.opening.clone(),
             reply: self.reply.clone(),
             rounds: self.rounds.clone(),
+            usage: self.usage,
         })?;
+        crate::usage::log(conn, user_id, &self.kind, &self.usage)?;
         conn.execute(
             "INSERT INTO agent_traces
                  (ts, user_id, kind, outcome, turns, tool_calls, duration_ms, error, detail)
@@ -249,10 +265,11 @@ pub fn detail(conn: &Connection, id: i64, full: bool) -> rusqlite::Result<Option
                     call
                 })
                 .collect();
-            serde_json::json!({ "ms": round.ms, "error": round.error, "calls": calls })
+            serde_json::json!({ "ms": round.ms, "error": round.error, "calls": calls, "usage": round.usage })
         })
         .collect();
     out["rounds"] = rounds.into();
+    out["usage"] = serde_json::to_value(detail.usage).unwrap_or_default();
     out["full"] = full.into();
     if full {
         out["opening"] = detail.opening.into();
@@ -313,10 +330,10 @@ mod tests {
     fn a_detail_without_full_carries_the_shape_and_none_of_the_words() {
         let conn = conn();
         let mut b = Builder::new(SessionKind::Talk, "add buy milk");
-        b.round(120);
+        b.round(120, Usage::default());
         b.call("task_create", r#"{"title":"buy milk"}"#, r#"{"task_id":1}"#, false, 4);
         b.call("task_update", "{}", r#"{"kind":"not_found","message":"no task 9"}"#, true, 2);
-        b.round(80);
+        b.round(80, Usage::default());
         b.ok("added");
         b.insert(&conn, 1).unwrap();
 
@@ -343,7 +360,7 @@ mod tests {
     fn a_failing_round_ends_the_trace_and_keeps_what_ran() {
         let conn = conn();
         let mut b = Builder::new(SessionKind::Nightly, "night");
-        b.round(10);
+        b.round(10, Usage::default());
         b.call("memory_query", "{}", "[]", false, 1);
         b.round_failed(4_000, "timed out reading response");
         b.failed("nightly session: timed out reading response");

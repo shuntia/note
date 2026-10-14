@@ -16,6 +16,11 @@ pub const MAX_MESSAGE: usize = 16 * 1024;
 // History windows stay user-first/assistant-last: a turn writes its user row as it
 // starts and its assistant row as it ends, and a failed turn takes its rows back.
 pub const HISTORY_LIMIT: usize = 32;
+/// A talk turn's window starts on a multiple of this, so it holds between
+/// `HISTORY_LIMIT` and `HISTORY_LIMIT + HISTORY_STEP - 1` turns and its first
+/// rows stay put for `HISTORY_STEP` turns: the provider's prompt cache serves
+/// them instead of billing the replay again. Even, so a window opens on a user row.
+pub const HISTORY_STEP: usize = 16;
 
 pub fn create(conn: &Connection, user_id: i64, title: &str, now: jiff::Timestamp) -> Result<i64> {
     conn.execute(
@@ -271,8 +276,19 @@ pub fn history_after(
     Ok(msgs)
 }
 
-/// How many turns `history` has to choose from: past `HISTORY_LIMIT` the
-/// window drops the oldest ones, and only the summary still carries them.
+/// The first of `turns` text turns a talk turn's window replays.
+pub fn window_start(turns: usize) -> usize {
+    turns.saturating_sub(HISTORY_LIMIT) / HISTORY_STEP * HISTORY_STEP
+}
+
+/// A talk turn's history: the text turns from `window_start` on, oldest-first.
+pub fn talk_history(conn: &Connection, conversation_id: i64) -> Result<Vec<Message>> {
+    let turns = text_turns(conn, conversation_id)?;
+    history(conn, conversation_id, turns - window_start(turns))
+}
+
+/// How many turns `history` has to choose from: past the window the oldest
+/// ones are dropped, and only the summary still carries them.
 pub fn text_turns(conn: &Connection, conversation_id: i64) -> Result<usize> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM talk_messages
@@ -385,7 +401,7 @@ fn opening_exchange(conn: &Connection, conversation_id: i64, l: Lang) -> Result<
 /// One tool-less call that names the thread.
 fn ask_for_title(llm: &dyn LLMProvider, system: &str, exchange: &str) -> Result<String> {
     let messages = [Message::User(exchange.to_string())];
-    let req = ChatRequest { system, messages: &messages, tools: &[], background: true };
+    let req = ChatRequest { system, messages: &messages, tools: &[], background: true, plain: true, must_call: None };
     let reply = llm.chat(&req)?.text;
     normalize_title(&reply)
         .ok_or_else(|| anyhow::anyhow!("not a title: {:?}", clip_chars(&reply, 80)))
@@ -438,7 +454,9 @@ pub fn generate_title(state: &AppState, user_id: i64, username: &str, conversati
         Ok(None) => return,
         Ok(Some(exchange)) => crate::prompts::load_in(&state.config_dir, "title", lang)
             .map(|system| crate::agent::with_language_line(system, &state.config_dir, username))
-            .and_then(|system| ask_for_title(state.llm.as_ref(), &system, &exchange))
+            .and_then(|system| {
+                crate::usage::metered(&state.db, user_id, "Title", || ask_for_title(state.llm.as_ref(), &system, &exchange))
+            })
             .and_then(|title| {
                 let conn = state.db();
                 set_title_if_draft(&conn, conversation_id, &title)
@@ -574,7 +592,7 @@ pub async fn run_turn(
             Ok(None) => {}
             Err(_) => return Err(TurnError::Internal),
         }
-        if text_turns(&conn, id).unwrap_or(0) > HISTORY_LIMIT {
+        if window_start(text_turns(&conn, id).unwrap_or(0)) > 0 {
             if let Ok(Some((summary, _))) = summary(&conn, id) {
                 notes.push(mt::summary_thread_note(lang, &summary));
             }
@@ -615,7 +633,7 @@ pub async fn run_turn(
                 anyhow::ensure!(owned(&conn, user_id, id)?, "the conversation was deleted before the turn began");
             }
             let past = match conversation {
-                Some(id) => history(&conn, id, HISTORY_LIMIT)?,
+                Some(id) => talk_history(&conn, id)?,
                 None => Vec::new(),
             };
             let conv_id = match conversation {
@@ -737,6 +755,18 @@ mod tests {
 
     fn now() -> jiff::Timestamp {
         jiff::Timestamp::now()
+    }
+
+    #[test]
+    fn the_window_start_moves_only_every_step() {
+        assert_eq!(window_start(0), 0);
+        assert_eq!(window_start(HISTORY_LIMIT + HISTORY_STEP - 1), 0);
+        assert_eq!(window_start(HISTORY_LIMIT + HISTORY_STEP), HISTORY_STEP);
+        assert_eq!(window_start(HISTORY_LIMIT + 2 * HISTORY_STEP - 1), HISTORY_STEP);
+        for turns in 0..200 {
+            let kept = turns - window_start(turns);
+            assert!(kept == turns || (HISTORY_LIMIT..HISTORY_LIMIT + HISTORY_STEP).contains(&kept), "{turns}");
+        }
     }
 
     #[test]

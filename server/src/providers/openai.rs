@@ -15,7 +15,11 @@ pub struct OpenAILLM {
     reasoning_off: bool,
     /// Models that refused the off switch; they are asked for the least reasoning instead.
     reasoning_mandatory: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// Models that refused a forced tool; they are asked without one from then on.
+    choice_refused: std::sync::Mutex<std::collections::HashSet<String>>,
     extra: serde_json::Map<String, serde_json::Value>,
+    /// `OpenRouter` takes `usage.include`, which a strict OpenAI-compatible server would refuse.
+    openrouter: bool,
 }
 
 impl OpenAILLM {
@@ -34,7 +38,9 @@ impl OpenAILLM {
             reasoning: reasoning.map(String::from),
             reasoning_off: false,
             reasoning_mandatory: std::sync::Mutex::default(),
+            choice_refused: std::sync::Mutex::default(),
             extra: serde_json::Map::new(),
+            openrouter: base_url.contains("openrouter.ai"),
         }
     }
 
@@ -58,10 +64,25 @@ impl OpenAILLM {
         format!("{}/chat/completions", self.base_url)
     }
 
+    /// Whether `req` goes out with reasoning switched off.
+    fn off(&self, req: &ChatRequest) -> bool {
+        self.reasoning_off || (req.plain && self.reasoning.is_some())
+    }
+
     fn request_body(&self, req: &ChatRequest) -> serde_json::Value {
         let model = self.model.get();
-        let mut v = body(&model, req, self.reasoning.as_deref());
-        if self.reasoning_off {
+        let effort = if req.plain { None } else { self.reasoning.as_deref() };
+        let mut v = body(&model, req, effort);
+        if self.openrouter {
+            v["usage"] = serde_json::json!({"include": true});
+        }
+        if let Some(must) = req.must_call.filter(|_| !lock(&self.choice_refused).contains(&model)) {
+            v["tool_choice"] = match must {
+                super::MustCall::Any => "required".into(),
+                super::MustCall::Tool(name) => serde_json::json!({"type": "function", "function": {"name": name}}),
+            };
+        }
+        if self.off(req) {
             v["reasoning"] = if self.mandatory(&model) {
                 serde_json::json!({"effort": "low", "exclude": true})
             } else {
@@ -75,22 +96,27 @@ impl OpenAILLM {
     }
 
     fn mandatory(&self, model: &str) -> bool {
-        self.reasoning_mandatory.lock().unwrap_or_else(std::sync::PoisonError::into_inner).contains(model)
+        lock(&self.reasoning_mandatory).contains(model)
     }
 
-    /// True when `error` is a refusal of the off switch, which is remembered for the model.
-    fn refused_off(&self, error: &str) -> bool {
+    /// True when `error` refused something `req` asked for that the model can
+    /// do without: the off switch or a forced tool. The refusal is remembered
+    /// for the model, so the call is worth sending again.
+    fn refused(&self, req: &ChatRequest, error: &str) -> bool {
         let model = self.model.get();
-        if !self.reasoning_off || self.mandatory(&model) || !error.contains("Reasoning is mandatory") {
-            return false;
+        if self.off(req) && !self.mandatory(&model) && error.contains("Reasoning is mandatory") {
+            return lock(&self.reasoning_mandatory).insert(model);
         }
-        self.reasoning_mandatory.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(model);
-        true
+        if req.must_call.is_some() && error.contains("status 400") && error.contains("tool_choice") {
+            return lock(&self.choice_refused).insert(model);
+        }
+        false
     }
 
     fn stream_once(&self, req: &ChatRequest, opts: &StreamOpts, sink: &mut dyn StreamSink) -> Result<ChatResponse> {
         let mut body = self.request_body(req);
         body["stream"] = serde_json::Value::Bool(true);
+        body["stream_options"] = serde_json::json!({"include_usage": true});
         let agent = self.agents.stream_agent(req.background, opts.first_token);
         let started = Instant::now();
         let mut resp = match self.authorized(agent.post(&self.url())).send_json(&body) {
@@ -113,10 +139,23 @@ impl OpenAILLM {
     }
 
     fn post(&self, req: &ChatRequest) -> Result<serde_json::Value> {
+        match self.post_once(req) {
+            Err(e) if self.refused(req, &format!("{e:#}")) => self.post_once(req),
+            result => result,
+        }
+    }
+
+    fn post_once(&self, req: &ChatRequest) -> Result<serde_json::Value> {
         let url = self.url();
         let body = self.request_body(req);
-        self.agents.post_json(req.background, "openai", &body, |agent| self.authorized(agent.post(&url)))
+        let v = self.agents.post_json(req.background, "openai", &body, |agent| self.authorized(agent.post(&url)))?;
+        crate::usage::record(crate::usage::Usage::openai_call(&v["usage"]));
+        Ok(v)
     }
+}
+
+fn lock<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 pub struct OpenAIEmbeddings {
@@ -244,7 +283,9 @@ const STALL: Duration = Duration::from_secs(8);
 
 /// Reads the lines of a streamed chat completion into `sink`. Tool calls
 /// arrive in pieces keyed by `index`; one is complete once a piece with
-/// another index or another `id` begins, or the stream ends.
+/// another index or another `id` begins, or the stream ends. The usage the
+/// stream ends on is recorded; a stream stopped early records a call of
+/// unknown size.
 fn read_stream(
     lines: &mpsc::Receiver<std::io::Result<String>>,
     started: Instant,
@@ -253,6 +294,7 @@ fn read_stream(
     sink: &mut dyn StreamSink,
 ) -> Result<ChatResponse> {
     let mut resp = ChatResponse::default();
+    let mut usage = serde_json::Value::Null;
     let mut pending: Option<(u64, ToolCall)> = None;
     let mut heard = false;
     let mut done = false;
@@ -278,12 +320,15 @@ fn read_stream(
             done = true;
             break;
         }
-        let event: serde_json::Value =
+        let mut event: serde_json::Value =
             serde_json::from_str(data).with_context(|| format!("openai stream event {data:?}"))?;
         if let Some(err) = event.get("error") {
             let code = err["code"].as_u64().and_then(|c| u16::try_from(c).ok());
             let reason = crate::failure::classify(code, &err.to_string());
             return Err(ProviderError::new(reason, format!("openai stream failed: {err}")).into());
+        }
+        if event["usage"].is_object() {
+            usage = event["usage"].take();
         }
         let delta = &event["choices"][0]["delta"];
         let text = content_text(&delta["content"]);
@@ -291,6 +336,7 @@ fn read_stream(
             heard = true;
             resp.text.push_str(&text);
             if !sink.text(&text) {
+                crate::usage::record(crate::usage::Usage::openai_call(&usage));
                 return Ok(resp);
             }
         }
@@ -303,6 +349,7 @@ fn read_stream(
             };
             if let Some((_, finished)) = pending.take_if(another) {
                 if !complete_call(finished, &mut resp, sink) {
+                    crate::usage::record(crate::usage::Usage::openai_call(&usage));
                     return Ok(resp);
                 }
             }
@@ -322,6 +369,7 @@ fn read_stream(
     if let Some((_, call)) = pending {
         complete_call(call, &mut resp, sink);
     }
+    crate::usage::record(crate::usage::Usage::openai_call(&usage));
     Ok(resp)
 }
 
@@ -382,7 +430,7 @@ impl LLMProvider for OpenAILLM {
 
     fn chat_stream(&self, req: &ChatRequest, opts: &StreamOpts, sink: &mut dyn StreamSink) -> Result<ChatResponse> {
         match self.stream_once(req, opts, sink) {
-            Err(e) if self.refused_off(&format!("{e:#}")) => self.stream_once(req, opts, sink),
+            Err(e) if self.refused(req, &format!("{e:#}")) => self.stream_once(req, opts, sink),
             result => result,
         }
     }
@@ -426,7 +474,7 @@ mod tests {
             Message::ToolResult { call_id: "c1".into(), content: "{\"task_id\":1}".into(), is_error: false },
             Message::ToolResult { call_id: "c2".into(), content: "{\"kind\":\"rejected\"}".into(), is_error: true },
         ];
-        let b = body("gpt-x", &ChatRequest { system: "sys", messages: &msgs, tools: &tools, background: false }, None);
+        let b = body("gpt-x", &ChatRequest { system: "sys", messages: &msgs, tools: &tools, background: false, plain: false, must_call: None }, None);
         let m = b["messages"].as_array().unwrap();
         assert_eq!(m[0]["role"], "system");
         assert_eq!(m[2]["tool_calls"][0]["function"]["name"], "task_create");
@@ -438,7 +486,7 @@ mod tests {
     #[test]
     fn body_omits_tools_key_when_empty() {
         let msgs = vec![Message::User("hi".into())];
-        let b = body("gpt-x", &ChatRequest { system: "sys", messages: &msgs, tools: &[], background: false }, None);
+        let b = body("gpt-x", &ChatRequest { system: "sys", messages: &msgs, tools: &[], background: false, plain: false, must_call: None }, None);
         assert!(b.get("tools").is_none());
         assert!(b.get("reasoning").is_none());
     }
@@ -446,7 +494,7 @@ mod tests {
     #[test]
     fn body_carries_the_reasoning_effort_only_when_configured() {
         let msgs = vec![Message::User("hi".into())];
-        let req = ChatRequest { system: "sys", messages: &msgs, tools: &[], background: false };
+        let req = ChatRequest { system: "sys", messages: &msgs, tools: &[], background: false, plain: false, must_call: None };
         assert!(body("gpt-x", &req, None).get("reasoning").is_none());
         assert_eq!(body("gpt-x", &req, Some("high"))["reasoning"]["effort"], "high");
     }
@@ -560,7 +608,7 @@ mod tests {
 
     fn req() -> ChatRequest<'static> {
         static MSGS: std::sync::LazyLock<Vec<Message>> = std::sync::LazyLock::new(|| vec![Message::User("hi".into())]);
-        ChatRequest { system: "sys", messages: &MSGS, tools: &[], background: false }
+        ChatRequest { system: "sys", messages: &MSGS, tools: &[], background: false, plain: false, must_call: None }
     }
 
     fn opts(first_token: Duration) -> StreamOpts {
@@ -581,6 +629,54 @@ mod tests {
         assert_eq!(sink.order, vec!["text", "text", "call:c1", "call:c2"], "c1 completes when index 1 begins");
         assert_eq!(resp.text, "On it, looking now.");
         assert_eq!(resp.tool_calls.len(), 2);
+    }
+
+    #[test]
+    fn usage_is_asked_for_and_recorded_streamed_or_not() {
+        const USAGE: &str = r#"{"prompt_tokens":900,"completion_tokens":12,"cost":0.0004,"prompt_tokens_details":{"cached_tokens":800}}"#;
+        let streamed: &'static str = Box::leak(
+            format!("data: {{\"choices\":[{{\"delta\":{{\"content\":\"hi\"}}}}]}}\n\ndata: {{\"choices\":[],\"usage\":{USAGE}}}\n\ndata: [DONE]\n\n")
+                .into_boxed_str(),
+        );
+        let (base, rx) = crate::testhttp::serve_stream(Duration::ZERO, vec![(Duration::ZERO, streamed)]);
+        let llm = OpenAILLM::new(&base, "m", "", ChatAgents::new(30, 30), None);
+        let meter = crate::usage::Meter::open();
+        llm.chat_stream(&req(), &opts(Duration::from_secs(5)), &mut Collect::default()).unwrap();
+        let sent = crate::testhttp::body_json(&rx.recv().unwrap());
+        assert_eq!(sent["stream_options"]["include_usage"], true);
+        assert!(sent.get("usage").is_none(), "only OpenRouter is sent its own usage switch");
+        let u = crate::usage::take();
+        assert_eq!((u.calls, u.prompt, u.cached, u.completion), (1, 900, 800, 12));
+
+        let reply: &'static str = Box::leak(format!(r#"{{"choices":[{{"message":{{"content":"hi"}}}}],"usage":{USAGE}}}"#).into_boxed_str());
+        let (base, rx) = crate::testhttp::serve(vec![("200 OK", reply)]);
+        let mut llm = OpenAILLM::new(&base, "m", "", ChatAgents::new(30, 30), None);
+        llm.openrouter = true;
+        llm.chat(&req()).unwrap();
+        assert_eq!(crate::testhttp::body_json(&rx.recv().unwrap())["usage"]["include"], true);
+        assert!((crate::usage::take().cost - 0.0004).abs() < 1e-12);
+        drop(meter);
+    }
+
+    #[test]
+    fn a_plain_call_switches_reasoning_off_and_a_forced_tool_is_dropped_once_refused() {
+        const REFUSED: &str = r#"{"error":{"message":"tool_choice is not supported","code":400}}"#;
+        const REPLY: &str = r#"{"choices":[{"message":{"content":"ok"}}]}"#;
+        let (base, rx) = crate::testhttp::serve(vec![("200 OK", REPLY), ("400 Bad Request", REFUSED), ("200 OK", REPLY), ("200 OK", REPLY)]);
+        let llm = OpenAILLM::new(&base, "m", "", ChatAgents::new(30, 30), Some("low"));
+        let msgs = vec![Message::User("hi".into())];
+        let plain = ChatRequest { system: "s", messages: &msgs, tools: &[], background: true, plain: true, must_call: None };
+        llm.chat(&plain).unwrap();
+        let sent = crate::testhttp::body_json(&rx.recv().unwrap());
+        assert_eq!(sent["reasoning"], serde_json::json!({"enabled": false}));
+        let forced = ChatRequest { must_call: Some(crate::providers::MustCall::Tool("summary_write")), plain: false, ..plain };
+        llm.chat(&forced).unwrap();
+        let first = crate::testhttp::body_json(&rx.recv().unwrap());
+        assert_eq!(first["tool_choice"]["function"]["name"], "summary_write");
+        assert_eq!(first["reasoning"]["effort"], "low");
+        assert!(crate::testhttp::body_json(&rx.recv().unwrap()).get("tool_choice").is_none(), "sent again without it");
+        llm.chat(&forced).unwrap();
+        assert!(crate::testhttp::body_json(&rx.recv().unwrap()).get("tool_choice").is_none(), "and never again");
     }
 
     #[test]

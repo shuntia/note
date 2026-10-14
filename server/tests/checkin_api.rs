@@ -118,12 +118,13 @@ async fn a_reply_continues_the_thread_and_the_session_knows_it_was_a_checkin() {
 
     let seen = llm.seen();
     assert_eq!(seen.len(), 1);
-    assert!(seen[0].system.contains("# This conversation"), "{}", seen[0].system);
-    assert!(seen[0].system.contains("check-in on 2026-09-17"), "{}", seen[0].system);
-    assert!(seen[0].system.contains("# Today's plan"), "the standing context still comes first");
-    assert_eq!(seen[0].n_messages, 3, "both questions precede the reply");
+    let Message::User(context) = &seen[0].messages[2] else { panic!("{:?}", seen[0].messages) };
+    assert!(context.contains("# This conversation"), "{context}");
+    assert!(context.contains("check-in on 2026-09-17"), "{context}");
+    assert!(context.find("# Today's plan") < context.find("# This conversation"), "the standing context still comes first");
+    assert_eq!(seen[0].n_messages, 4, "both questions precede the context and the reply");
     assert!(matches!(&seen[0].messages[0], Message::Assistant { text, .. } if text.contains("09:00")));
-    assert!(matches!(&seen[0].messages[2], Message::User(t) if t == "went fine, finished the essay"));
+    assert!(matches!(&seen[0].messages[3], Message::User(t) if t == "went fine, finished the essay"));
 
     let rows = json(get(&app, &format!("/api/conversations/{id}/messages"), &cookie).await).await;
     let roles: Vec<&str> = rows.as_array().unwrap().iter().map(|r| r["role"].as_str().unwrap()).collect();
@@ -141,6 +142,6 @@ async fn a_thread_the_user_started_carries_no_checkin_note() {
     let id = first["conversation_id"].as_i64().unwrap();
     talk(&app, &cookie, serde_json::json!({ "message": "again", "conversation_id": id })).await;
     for chat in llm.seen() {
-        assert!(!chat.system.contains("# This conversation"), "{}", chat.system);
+        assert!(!format!("{:?}", chat.messages).contains("# This conversation"), "{:?}", chat.messages);
     }
 }

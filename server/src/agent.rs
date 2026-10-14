@@ -1,4 +1,4 @@
-use crate::providers::{ChatRequest, EmbeddingsProvider, LLMProvider, Message};
+use crate::providers::{ChatRequest, EmbeddingsProvider, LLMProvider, Message, MustCall};
 use crate::search::SearchProvider;
 use crate::tools::{self, SessionKind, ToolCtx, ToolError};
 use anyhow::Result;
@@ -72,6 +72,11 @@ struct SessionProfile {
     max_turns: usize,
     /// Whether a session that runs out of turns without a word says so.
     max_turns_reply: bool,
+    /// Whether the session exists to call its one terminal tool: every round
+    /// must call a tool, and the last one that one.
+    decides: bool,
+    /// See `ChatRequest::plain`.
+    plain: bool,
     /// Whether no caller is waiting on it.
     background: bool,
     /// A share session logs under its own kinds, so it never counts against
@@ -89,16 +94,18 @@ const fn profile(kind: SessionKind) -> SessionProfile {
         context: Context::Assembled,
         max_turns: MAX_TURNS,
         max_turns_reply: false,
+        decides: false,
+        plain: false,
         background: true,
         log_session: "agent_session",
         log_max_turns: "agent_max_turns",
     };
     let single_call =
-        SessionProfile { about: false, context: Context::None, max_turns: IMPORT_MAX_TURNS, ..base };
+        SessionProfile { about: false, context: Context::None, max_turns: IMPORT_MAX_TURNS, decides: true, ..base };
     match kind {
         SessionKind::Import => SessionProfile { prompt: "import", background: false, ..single_call },
         SessionKind::Inbox => SessionProfile { prompt: "inbox", background: false, ..single_call },
-        SessionKind::Summarize => SessionProfile { prompt: "summarize", ..single_call },
+        SessionKind::Summarize => SessionProfile { prompt: "summarize", plain: true, ..single_call },
         SessionKind::Review => SessionProfile { prompt: "review", max_turns: REVIEW_MAX_TURNS, ..base },
         SessionKind::Share => SessionProfile {
             prompt: "share",
@@ -230,11 +237,14 @@ pub fn run_session_watched(
     on_event: &dyn Fn(AgentEvent),
 ) -> Result<SessionOutcome> {
     let mut trace = crate::trace::Builder::new(kind, opening);
+    let meter = crate::usage::Meter::open();
     let result =
         run_traced(deps, user_id, username, kind, now, history, opening, on_event, &mut trace);
     if let Err(e) = &result {
         trace.failed(&format!("{e:#}"));
     }
+    trace.spent(crate::usage::take());
+    drop(meter);
     let _ = trace.insert(&crate::db_guard(deps.db), user_id);
     result
 }
@@ -247,8 +257,8 @@ fn reader(deps: &SessionDeps, username: &str, kind: SessionKind) -> (Result<crat
     (ucfg, lang)
 }
 
-/// The system prompt a session of `kind` runs on: its own instructions, then
-/// the context its kind is allowed to see.
+/// Everything a session of `kind` is told before the conversation: its own
+/// instructions, then the context its kind is allowed to see.
 pub fn system_prompt(
     deps: &SessionDeps,
     user_id: i64,
@@ -257,7 +267,7 @@ pub fn system_prompt(
     now: jiff::Timestamp,
 ) -> Result<String> {
     let (ucfg, lang) = reader(deps, username, kind);
-    build_system_prompt(deps, user_id, username, kind, now, lang, ucfg)
+    build_prompt(deps, user_id, username, kind, now, lang, ucfg).map(Prompt::joined)
 }
 
 /// `system_prompt` in `lang`, whatever the reader's setting.
@@ -270,16 +280,41 @@ pub(crate) fn system_prompt_in(
     lang: Lang,
 ) -> Result<String> {
     let ucfg = crate::config::UserConfig::load(deps.config_dir, username);
-    build_system_prompt(deps, user_id, username, kind, now, lang, ucfg)
+    build_prompt(deps, user_id, username, kind, now, lang, ucfg).map(Prompt::joined)
 }
 
 fn display_name(ucfg: &Result<crate::config::UserConfig>, username: &str) -> String {
     ucfg.as_ref().map_or_else(|_| username.to_string(), |c| c.display_name.clone())
 }
 
+/// A session's instructions, apart from the context that changes from one
+/// session to the next. The context rides in the opening message, so the
+/// system prompt, the tools after it and a thread's history stay one prefix
+/// the provider serves from its cache.
+struct Prompt {
+    system: String,
+    context: Option<String>,
+}
+
+impl Prompt {
+    fn joined(self) -> String {
+        match self.context {
+            Some(context) => format!("{}\n\n{context}", self.system),
+            None => self.system,
+        }
+    }
+
+    /// The messages that open the session after its history: the context,
+    /// when its kind sees one, then `opening` on its own.
+    fn opening(&self, opening: &str) -> Vec<Message> {
+        let context = self.context.as_ref().map(|c| Message::User(format!("<context>\n{c}\n</context>")));
+        context.into_iter().chain([Message::User(opening.to_string())]).collect()
+    }
+}
+
 /// The user's files are read before the DB lock is taken, and the lock is held
 /// only while the context is rendered from the DB.
-fn build_system_prompt(
+fn build_prompt(
     deps: &SessionDeps,
     user_id: i64,
     username: &str,
@@ -287,7 +322,7 @@ fn build_system_prompt(
     now: jiff::Timestamp,
     lang: Lang,
     ucfg: Result<crate::config::UserConfig>,
-) -> Result<String> {
+) -> Result<Prompt> {
     let p = profile(kind);
     let load = |name| crate::prompts::load_in(deps.config_dir, name, lang);
     let mut system = load(p.prompt)?;
@@ -312,6 +347,7 @@ fn build_system_prompt(
         system.push_str("\n\n");
         system.push_str(line);
     }
+    let mut context = None;
     match p.context {
         Context::None => {}
         Context::Share => {
@@ -333,19 +369,18 @@ fn build_system_prompt(
         }
         Context::Assembled => {
             let sources = crate::context::Sources::load(deps.config_dir, username, ucfg?);
-            let context = {
+            let mut assembled = {
                 let conn = crate::db_guard(deps.db);
                 crate::context::assemble_from(&conn, &sources, deps.data_dir, user_id, username, now)?
             };
-            system.push_str("\n\n");
-            system.push_str(&context);
             if let Some(note) = &deps.thread_note {
-                system.push_str("\n\n");
-                system.push_str(note);
+                assembled.push_str("\n\n");
+                assembled.push_str(note);
             }
+            context = Some(assembled);
         }
     }
-    Ok(system)
+    Ok(Prompt { system, context })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -361,14 +396,15 @@ fn run_traced(
     trace: &mut crate::trace::Builder,
 ) -> Result<SessionOutcome> {
     let (ucfg, lang) = reader(deps, username, kind);
-    let system = build_system_prompt(deps, user_id, username, kind, now, lang, ucfg)?;
+    let prompt = build_prompt(deps, user_id, username, kind, now, lang, ucfg)?;
+    let system = &prompt.system;
     let profile = profile(kind);
     let schemas: std::borrow::Cow<[serde_json::Value]> = match (kind, &deps.share) {
         (SessionKind::Share, Some(s)) => tools::share_schemas(&s.scope).into(),
         _ => tools::offered_schemas(kind, deps.search.is_some()).into(),
     };
     let mut messages = history.to_vec();
-    messages.push(Message::User(opening.to_string()));
+    messages.extend(prompt.opening(opening));
     let mut turns = 0;
     let mut tool_calls = 0;
     let mut steps = Vec::new();
@@ -378,12 +414,17 @@ fn run_traced(
     let env = CallEnv { deps, user_id, username, kind, calls: Default::default() };
     let started = std::time::Instant::now();
 
+    let terminal = profile.decides.then(|| terminal_tool(kind)).flatten();
     while turns < max_turns {
-        let req = ChatRequest { system: &system, messages: &messages, tools: &schemas, background };
+        let must_call = terminal.map(|name| {
+            if turns + 1 == max_turns || schemas.len() == 1 { MustCall::Tool(name) } else { MustCall::Any }
+        });
+        let req = ChatRequest { system, messages: &messages, tools: &schemas, background, plain: profile.plain, must_call };
+        trace.spent(crate::usage::take());
         let round = std::time::Instant::now();
         let (resp, thinking) = match deps.llm.chat_with_reasoning(&req) {
             Ok(v) => {
-                trace.round(round.elapsed().as_millis() as u64);
+                trace.round(round.elapsed().as_millis() as u64, crate::usage::take());
                 v
             }
             Err(e) => {
@@ -467,6 +508,13 @@ fn run_traced(
         reasoning: String::new(),
         thought_ms,
     })
+}
+
+/// The one tool that ends a session of `kind`, if it has exactly one.
+fn terminal_tool(kind: SessionKind) -> Option<&'static str> {
+    let mut ending = tools::registry(kind).iter().copied().filter(|name| tools::is_terminal(kind, name));
+    let only = ending.next()?;
+    ending.next().is_none().then_some(only)
 }
 
 /// Talk, import, inbox and share sessions answer a caller who is waiting on them.
@@ -1055,15 +1103,16 @@ mod tests {
             .query_row("SELECT title FROM tasks WHERE user_id = 1", [], |r| r.get(0))
             .unwrap();
         assert_eq!(title, "buy milk");
-        // the model saw persona + context and the talk tool surface
+        // the model saw the persona, then the context ahead of the opening, and the talk tool surface
         let seen = llm.seen();
         assert!(seen[0].system.contains("you are note"));
-        assert!(seen[0].system.contains("# Today's plan"));
+        assert!(!seen[0].system.contains("# Today's plan"), "the system prompt holds nothing that changes between sessions");
+        assert!(matches!(&seen[0].messages[0], Message::User(t) if t.starts_with("<context>") && t.contains("# Today's plan")));
         assert!(seen[0].tool_names.contains(&"context_edit".to_string()));
         assert!(!seen[0].tool_names.contains(&"schedule_insert".to_string()));
         // second turn carried the tool result back
-        assert_eq!(seen[1].n_messages, 3);
-        match &seen[1].messages[2] {
+        assert_eq!(seen[1].n_messages, 4);
+        match &seen[1].messages[3] {
             Message::ToolResult { call_id, content, is_error } => {
                 assert_eq!(call_id, "c1");
                 assert!(!is_error);
@@ -1095,7 +1144,7 @@ mod tests {
         assert_eq!(out.steps.len(), 1);
         assert!(out.steps[0].is_error);
         assert!(out.steps[0].result.contains("forbidden"), "{}", out.steps[0].result);
-        match &llm.seen()[1].messages[2] {
+        match &llm.seen()[1].messages[3] {
             Message::ToolResult { content, is_error, .. } => {
                 assert!(is_error);
                 assert!(content.contains("forbidden"), "{content}");
@@ -1115,12 +1164,13 @@ mod tests {
         run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, now(), &history, "follow up")
             .unwrap();
         let seen = llm.seen();
-        assert_eq!(seen[0].n_messages, 3);
+        assert_eq!(seen[0].n_messages, 4);
         assert!(matches!(&seen[0].messages[0], Message::User(t) if t == "earlier question"));
         assert!(
             matches!(&seen[0].messages[1], Message::Assistant { text, .. } if text == "earlier answer")
         );
-        assert!(matches!(&seen[0].messages[2], Message::User(t) if t == "follow up"));
+        assert!(matches!(&seen[0].messages[2], Message::User(t) if t.starts_with("<context>")));
+        assert!(matches!(&seen[0].messages[3], Message::User(t) if t == "follow up"));
     }
 
     #[test]
@@ -1196,7 +1246,7 @@ mod tests {
         let seen = llm.seen();
         assert!(seen[0].system.contains("you are note"));
         assert!(seen[0].system.contains("following up on your own plan"));
-        assert!(seen[0].system.contains("# Today's plan"));
+        assert!(matches!(&seen[0].messages[0], Message::User(t) if t.contains("# Today's plan")));
         assert!(seen[0].tool_names.contains(&"stay_quiet".to_string()));
         assert!(!seen[0].tool_names.contains(&"calendar_add".to_string()));
     }
@@ -1762,6 +1812,55 @@ mod tests {
 
     fn rounds(detail: &serde_json::Value) -> &Vec<serde_json::Value> {
         detail["rounds"].as_array().unwrap()
+    }
+
+    #[test]
+    fn a_session_records_what_each_round_spent_and_logs_the_total() {
+        let (db, tmp) = env();
+        let spent = crate::usage::Usage { calls: 1, prompt: 5000, cached: 4000, completion: 30, reasoning: 0, cost: 0.001 };
+        let llm = MockLLM::scripted(vec![
+            ChatResponse {
+                text: String::new(),
+                tool_calls: vec![ToolCall { id: "c1".into(), name: "task_list".into(), args: "{}".into() }],
+            },
+            ChatResponse { text: "done".into(), tool_calls: vec![] },
+        ])
+        .with_usage(spent);
+        run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Trigger, now(), &[], "look").unwrap();
+        let (_, _, _, _, detail) = trace_row(&db);
+        assert_eq!(rounds(&detail)[0]["usage"]["prompt"], 5000);
+        assert_eq!(detail["usage"]["calls"], 2);
+        assert_eq!(detail["usage"]["cached"], 8000);
+        let summary = crate::usage::summary(&db.lock().unwrap(), Some(1), 1, jiff::Timestamp::now()).unwrap();
+        assert_eq!(summary["by_kind"][0]["kind"], "Trigger");
+        assert_eq!(summary["by_kind"][0]["usage"]["completion"], 60);
+    }
+
+    #[test]
+    fn a_deciding_session_must_decide_on_its_last_round_and_a_summary_thinks_plain() {
+        let (db, tmp) = env();
+        let llm = MockLLM::empty();
+        let _ = run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Inbox, now(), &[], "item");
+        assert_eq!(llm.seen()[0].must_call.as_deref(), Some("*"), "any tool: memory first, or the decision");
+        let llm = MockLLM::scripted(vec![
+            ChatResponse {
+                text: String::new(),
+                tool_calls: vec![ToolCall { id: "c1".into(), name: "memory_query".into(), args: r#"{"query":"x"}"#.into() }],
+            },
+        ]);
+        let _ = run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Inbox, now(), &[], "item");
+        let seen = llm.seen();
+        assert_eq!(seen.len(), IMPORT_MAX_TURNS);
+        assert_eq!(seen[1].must_call.as_deref(), Some("inbox_decide"), "the last round decides");
+        assert!(!seen[0].plain);
+        let llm = MockLLM::empty();
+        std::fs::write(tmp.path().join("defaults/prompts/summarize.md"), "summarise it").unwrap();
+        let _ = run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Summarize, now(), &[], "rows");
+        assert_eq!(llm.seen()[0].must_call.as_deref(), Some("summary_write"), "its only tool, from the first round");
+        assert!(llm.seen()[0].plain);
+        let llm = MockLLM::empty();
+        let _ = run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, now(), &[], "hi");
+        assert_eq!(llm.seen()[0].must_call, None);
     }
 
     #[test]

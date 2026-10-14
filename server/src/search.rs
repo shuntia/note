@@ -143,7 +143,7 @@ fn summarize(
         let _ = write!(prompt, "{}. {}\n{}\n{}\n\n", i + 1, h.title, h.url, h.snippet);
     }
     let messages = [Message::User(prompt)];
-    let req = ChatRequest { system: &system, messages: &messages, tools: &[], background };
+    let req = ChatRequest { system: &system, messages: &messages, tools: &[], background, plain: true, must_call: None };
     let text = deps.llm.chat(&req).ok()?.text;
     let text = text.trim();
     (!text.is_empty()).then(|| text.to_string())
