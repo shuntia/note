@@ -2,7 +2,7 @@ use crate::{
     config::{Features, UserConfig},
     AppState,
 };
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rusqlite::Connection;
 use std::collections::HashMap;
 use std::path::Path;
@@ -36,8 +36,7 @@ pub struct FiredEvent {
 /// both parses can fail. DST gaps resolve forward to the next valid instant.
 fn due_at(tz: &jiff::tz::TimeZone, c: &Candidate) -> Result<jiff::Timestamp> {
     let date: jiff::civil::Date = c.date.parse()?;
-    let time: jiff::civil::Time = format!("{}:00", c.wall_time).parse()?;
-    Ok(tz.to_ambiguous_zoned(date.to_datetime(time)).compatible()?.timestamp())
+    crate::zone::instant(tz, date, &c.wall_time).context("the wall time is not HH:MM")
 }
 
 #[derive(Clone)]

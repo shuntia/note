@@ -36,7 +36,7 @@ pub fn run_for_user(
     now: jiff::Timestamp,
 ) -> Result<()> {
     let ucfg = UserConfig::load(deps.config_dir, username)?;
-    let tz = jiff::tz::TimeZone::get(&ucfg.timezone).unwrap_or(jiff::tz::TimeZone::UTC);
+    let tz = crate::zone::named(&ucfg.timezone);
     let local = now.to_zoned(tz);
     let date = plan_date(&local, &ucfg.nightly_time);
     {
@@ -73,7 +73,7 @@ fn run_stages(
     now: jiff::Timestamp,
     report: &mut Report,
 ) -> Result<()> {
-    let tz = jiff::tz::TimeZone::get(&ucfg.timezone).unwrap_or(jiff::tz::TimeZone::UTC);
+    let tz = crate::zone::named(&ucfg.timezone);
     let note = |kind: &str, e: &anyhow::Error| {
         crate::failure::noted(e);
         let conn = crate::db_guard(deps.db);
@@ -250,7 +250,7 @@ pub fn due(
         if !ucfg.features(&category).nightly {
             continue;
         }
-        let tz = jiff::tz::TimeZone::get(&ucfg.timezone).unwrap_or(jiff::tz::TimeZone::UTC);
+        let tz = crate::zone::named(&ucfg.timezone);
         let local = now.to_zoned(tz);
         let Ok(due_time) = format!("{}:00", ucfg.nightly_time).parse::<jiff::civil::Time>() else {
             let _ = crate::log::record_throttled(

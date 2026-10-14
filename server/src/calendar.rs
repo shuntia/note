@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -637,14 +637,10 @@ fn window_at(
     title: &str,
     end: &str,
 ) -> Result<QuietWindow> {
-    let time: jiff::civil::Time = format!("{end}:00").parse()?;
     Ok(QuietWindow {
         title: title.to_string(),
         end: end.to_string(),
-        until: tz
-            .to_ambiguous_zoned(date.to_datetime(time))
-            .compatible()?
-            .timestamp(),
+        until: crate::zone::instant(tz, date, end).context("the end is not HH:MM")?,
     })
 }
 

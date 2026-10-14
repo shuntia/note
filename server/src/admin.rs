@@ -1053,10 +1053,7 @@ mod inspect {
         };
         let path = config_path(&state, &username);
         let config_toml = std::fs::read_to_string(&path).unwrap_or_default();
-        let tz = crate::config::UserConfig::load(&state.config_dir, &username)
-            .ok()
-            .and_then(|c| jiff::tz::TimeZone::get(&c.timezone).ok())
-            .unwrap_or(jiff::tz::TimeZone::UTC);
+        let tz = crate::triggers::timezone(&state.config_dir, &username);
         let today = jiff::Timestamp::now().to_zoned(tz).date();
         let result = (|| -> anyhow::Result<serde_json::Value> {
             let tasks = crate::tasks::list(&conn, id)?;

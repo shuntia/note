@@ -47,10 +47,7 @@ fn in_scope(
 /// The timezone the user's days are measured in; a bare day means the end of
 /// one of those.
 pub(super) fn user_tz(ctx: &ToolCtx) -> jiff::tz::TimeZone {
-    crate::config::UserConfig::load(ctx.config_dir, ctx.username)
-        .ok()
-        .and_then(|c| jiff::tz::TimeZone::get(&c.timezone).ok())
-        .unwrap_or(jiff::tz::TimeZone::UTC)
+    crate::triggers::timezone(ctx.config_dir, ctx.username)
 }
 
 /// An instant stays one; a bare `YYYY-MM-DD` becomes the end of that day where

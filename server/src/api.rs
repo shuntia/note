@@ -961,10 +961,7 @@ async fn task_agent(
                 "only a top-level task can be briefed, not one of its steps",
             );
         }
-        let tz = crate::config::UserConfig::load(&state.config_dir, &user.username)
-            .ok()
-            .and_then(|c| jiff::tz::TimeZone::get(&c.timezone).ok())
-            .unwrap_or(jiff::tz::TimeZone::UTC);
+        let tz = user_zone(&state, &user.username);
         match crate::tasks::snapshot(&conn, user.id, id) {
             Ok(snap) => (brief_message(&node, &req.context, &tz), snap),
             Err(e) => return failed(e.to_string()),
@@ -2342,7 +2339,7 @@ fn day_context(
 ) -> Result<(jiff::tz::TimeZone, crate::templates::Template), StatusCode> {
     let ucfg = crate::config::UserConfig::load(&state.config_dir, username)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let tz = jiff::tz::TimeZone::get(&ucfg.timezone).unwrap_or(jiff::tz::TimeZone::UTC);
+    let tz = crate::zone::named(&ucfg.timezone);
     let tmpl = crate::templates::Template::load(&state.config_dir, username, &ucfg.template)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok((tz, tmpl))
@@ -3303,7 +3300,7 @@ async fn calendar_day(
     let Ok(ucfg) = crate::config::UserConfig::load(&state.config_dir, &user.username) else {
         return calendar_error(StatusCode::INTERNAL_SERVER_ERROR, "unreadable user config");
     };
-    let tz = jiff::tz::TimeZone::get(&ucfg.timezone).unwrap_or(jiff::tz::TimeZone::UTC);
+    let tz = crate::zone::named(&ucfg.timezone);
     let now = jiff::Timestamp::now();
     let conn = state.db();
     let Ok(occurrences) = crate::calendar::occurrences(&conn, user.id, date) else {

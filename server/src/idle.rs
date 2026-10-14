@@ -70,7 +70,7 @@ fn check_one(
     if triggers::open_work_session(conn, user.user_id)?.is_some() {
         return Ok(None);
     }
-    let tz = jiff::tz::TimeZone::get(&cfg.timezone).unwrap_or(jiff::tz::TimeZone::UTC);
+    let tz = crate::zone::named(&cfg.timezone);
     let local = now.to_zoned(tz.clone());
     let last: jiff::Timestamp = user.last_active.parse()?;
     if last.to_zoned(tz.clone()).date() != local.date() {
