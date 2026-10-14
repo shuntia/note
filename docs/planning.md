@@ -40,8 +40,7 @@ nearest due date first within each, then oldest.
 ## Run order
 
 Each day has a run order: up to 30 tasks or steps to work through, first to
-last, stored per local date in `run_order` (schema v53, which also removed
-unstarted automatic blocks). The nightly run sets the day it
+last, stored per local date in `run_order`. The nightly run sets the day it
 plans; the day's `lay_day` wake-up ([agent.md](agent.md#wake-ups)) checks it
 and sets it if the night left it empty or wrong; any session with the order
 tools may change it. A finished, dropped or deleted item, or a step whose task

@@ -189,10 +189,6 @@ last kept, written or opened. The nightly run lists due notes; `note_settle
 (`memory`; episodic for a windowed note, semantic otherwise) or drops it, and
 every due note left afterwards is kept as a fact word for word.
 
-Schema v51 lets the memory index hold `note`; v52 drops finished rows of the
-old `notes` table and keeps the rest as `legacy_notes`, which the server writes
-out as working notes at startup and then drops.
-
 ## Memory
 
 Per-user long-term memory lives under

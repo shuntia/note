@@ -132,7 +132,8 @@ nix flake update note
 sudo nixos-rebuild switch --flake .#<host>
 ```
 
-Database migrations run when the service restarts.
+Database migrations run when the service restarts. A new database starts from
+the schema v55 baseline; one older than v55 is refused at startup.
 
 ## Behind Cloudflare
 
