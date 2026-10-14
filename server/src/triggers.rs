@@ -18,6 +18,9 @@ pub const MAX_SAY_BYTES: usize = 1200;
 /// How much of the thread a firing trigger reads.
 pub const HISTORY_TURNS: usize = 12;
 pub const MAX_EXTRA: u32 = 10;
+/// Pending triggers the model may hold across all days, so a far horizon
+/// cannot fill without end.
+pub const MAX_PENDING: i64 = 200;
 /// Session-tied triggers a work session may hold, its own checks included,
 /// before the model's next one there is charged to the day's budget.
 pub const MAX_FREE_PER_SESSION: i64 = 8;
@@ -337,6 +340,12 @@ pub fn lay(conn: &Connection, lay: &Lay) -> Result<Laid, Refusal> {
         _ => None,
     };
     if lay.work_session_id.is_none() && !lay.system && session.is_none() {
+        if pending_laid(conn, lay.user_id, local.date()).map_err(internal)? >= MAX_PENDING {
+            return Err(Refusal::Rejected(format!(
+                "{MAX_PENDING} triggers already wait; drop some (schedule_drop) or lay this one \
+                 with replace before adding more"
+            )));
+        }
         let allowance = allowance(conn, lay.config_dir, lay.username, lay.user_id, date)
             .map_err(internal)?;
         let spent = spent(conn, lay.user_id, date).map_err(internal)?;
@@ -382,6 +391,17 @@ pub fn lay(conn: &Connection, lay: &Lay) -> Result<Laid, Refusal> {
     )
     .map_err(internal)?;
     Ok(Laid { event_id, at: wall, cancel_if: lay.cancel.map(|c| c.as_str()) })
+}
+
+/// The model's own triggers still waiting from `today` on.
+fn pending_laid(conn: &Connection, user_id: i64, today: jiff::civil::Date) -> rusqlite::Result<i64> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM events e JOIN plans p ON p.id = e.plan_id
+         WHERE p.user_id = ?1 AND p.date >= ?2 AND e.kind = ?3 AND e.origin = 'agent'
+           AND e.work_session_id IS NULL AND e.status IN ('pending', 'snoozed')",
+        (user_id, today.to_string(), KIND),
+        |r| r.get(0),
+    )
 }
 
 /// Every trigger ever tied to this work session, whatever became of it.
@@ -1370,6 +1390,24 @@ mod tests {
         assert!(text.contains("0 steps done since the last check"), "{text}");
         assert!(text.contains("Last message from the user: 08:40."), "{text}");
     }
+    #[test]
+    fn the_model_holds_at_most_max_pending_triggers_across_days() {
+        let (conn, tmp, uid) = env();
+        let far: jiff::civil::Date = "2027-03-01".parse().unwrap();
+        let plan_id = crate::plan::ensure(&conn, tmp.path(), "aki", uid, far).unwrap();
+        for _ in 0..MAX_PENDING {
+            insert(&conn, plan_id, "09:00", "later", "agent", None, None, None, at("2026-09-17T09:00:00Z"))
+                .unwrap();
+        }
+        let e = lay(&conn, &lay_at(&tmp, uid, "11:00")).unwrap_err();
+        assert!(matches!(&e, Refusal::Rejected(m) if m.contains("drop some")), "{e:?}");
+        let mut system = lay_at(&tmp, uid, "11:00");
+        system.system = true;
+        lay(&conn, &system).unwrap();
+        conn.execute("UPDATE events SET status = 'dropped' WHERE id = 1", []).unwrap();
+        lay(&conn, &lay_at(&tmp, uid, "11:00")).unwrap();
+    }
+
     #[test]
     fn an_idle_trigger_spends_the_days_budget() {
         let (conn, tmp, uid) = env();

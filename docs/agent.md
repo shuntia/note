@@ -86,8 +86,9 @@ check-ins on):
   allowance, to at most twice it, once the user agrees. Triggers laid today
   within a work session's planned length plus 15 minutes (any time today when
   it named none) belong to the session and do not count until it holds 8,
-  its own checks included; dropped ones never count. A wake-up that ends in plain text instead of a tool says that
-  text. The context lists today's and tomorrow's pending triggers; later ones
+  its own checks included; dropped ones never count. At most 200 of these
+  wait at once across all days. A wake-up that ends in plain text instead of
+  a tool says that text. The context lists today's and tomorrow's pending triggers; later ones
   only as a count and the next one's moment.
 - Idle: after `idle_nudge_min` (default 20; 0 is off) minutes without a sign of
   the user on a day they were active, outside a work session, quiet window and
