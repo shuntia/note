@@ -293,7 +293,6 @@
           note-voice-cues = b.voice.cues;
           note-web = b.web;
           note-desktop = b.desktop;
-          desktop = b.desktop;
         } // lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == "x86_64-linux") {
           note-tts-chatterbox = b.ttsChatterbox;
           note-tts-ja = b.ttsJa;
