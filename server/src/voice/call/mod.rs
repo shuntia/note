@@ -293,7 +293,7 @@ impl CallManager {
             let messages = [Message::Assistant { text: msg.body.clone(), tool_calls: vec![] }, Message::User(ringing.into())];
             let req = ChatRequest { system: &system, messages: &messages, tools, background: false };
             let opts = StreamOpts { first_token: d.settings.first_token };
-            let _ = d.voice_llm.chat_stream(&req, &opts, &mut FirstDelta);
+            crate::usage::metered(&d.db, user_id, "CallWarmUp", || d.voice_llm.chat_stream(&req, &opts, &mut FirstDelta).ok());
         });
     }
 

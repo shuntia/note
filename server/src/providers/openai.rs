@@ -16,6 +16,8 @@ pub struct OpenAILLM {
     /// Models that refused the off switch; they are asked for the least reasoning instead.
     reasoning_mandatory: std::sync::Mutex<std::collections::HashSet<String>>,
     extra: serde_json::Map<String, serde_json::Value>,
+    /// `OpenRouter` takes `usage.include`, which a strict OpenAI-compatible server would refuse.
+    openrouter: bool,
 }
 
 impl OpenAILLM {
@@ -35,6 +37,7 @@ impl OpenAILLM {
             reasoning_off: false,
             reasoning_mandatory: std::sync::Mutex::default(),
             extra: serde_json::Map::new(),
+            openrouter: base_url.contains("openrouter.ai"),
         }
     }
 
@@ -61,6 +64,9 @@ impl OpenAILLM {
     fn request_body(&self, req: &ChatRequest) -> serde_json::Value {
         let model = self.model.get();
         let mut v = body(&model, req, self.reasoning.as_deref());
+        if self.openrouter {
+            v["usage"] = serde_json::json!({"include": true});
+        }
         if self.reasoning_off {
             v["reasoning"] = if self.mandatory(&model) {
                 serde_json::json!({"effort": "low", "exclude": true})
@@ -91,6 +97,7 @@ impl OpenAILLM {
     fn stream_once(&self, req: &ChatRequest, opts: &StreamOpts, sink: &mut dyn StreamSink) -> Result<ChatResponse> {
         let mut body = self.request_body(req);
         body["stream"] = serde_json::Value::Bool(true);
+        body["stream_options"] = serde_json::json!({"include_usage": true});
         let agent = self.agents.stream_agent(req.background, opts.first_token);
         let started = Instant::now();
         let mut resp = match self.authorized(agent.post(&self.url())).send_json(&body) {
@@ -115,7 +122,9 @@ impl OpenAILLM {
     fn post(&self, req: &ChatRequest) -> Result<serde_json::Value> {
         let url = self.url();
         let body = self.request_body(req);
-        self.agents.post_json(req.background, "openai", &body, |agent| self.authorized(agent.post(&url)))
+        let v = self.agents.post_json(req.background, "openai", &body, |agent| self.authorized(agent.post(&url)))?;
+        crate::usage::record(crate::usage::Usage::openai_call(&v["usage"]));
+        Ok(v)
     }
 }
 
@@ -244,7 +253,9 @@ const STALL: Duration = Duration::from_secs(8);
 
 /// Reads the lines of a streamed chat completion into `sink`. Tool calls
 /// arrive in pieces keyed by `index`; one is complete once a piece with
-/// another index or another `id` begins, or the stream ends.
+/// another index or another `id` begins, or the stream ends. The usage the
+/// stream ends on is recorded; a stream stopped early records a call of
+/// unknown size.
 fn read_stream(
     lines: &mpsc::Receiver<std::io::Result<String>>,
     started: Instant,
@@ -253,6 +264,7 @@ fn read_stream(
     sink: &mut dyn StreamSink,
 ) -> Result<ChatResponse> {
     let mut resp = ChatResponse::default();
+    let mut usage = serde_json::Value::Null;
     let mut pending: Option<(u64, ToolCall)> = None;
     let mut heard = false;
     let mut done = false;
@@ -278,12 +290,15 @@ fn read_stream(
             done = true;
             break;
         }
-        let event: serde_json::Value =
+        let mut event: serde_json::Value =
             serde_json::from_str(data).with_context(|| format!("openai stream event {data:?}"))?;
         if let Some(err) = event.get("error") {
             let code = err["code"].as_u64().and_then(|c| u16::try_from(c).ok());
             let reason = crate::failure::classify(code, &err.to_string());
             return Err(ProviderError::new(reason, format!("openai stream failed: {err}")).into());
+        }
+        if event["usage"].is_object() {
+            usage = event["usage"].take();
         }
         let delta = &event["choices"][0]["delta"];
         let text = content_text(&delta["content"]);
@@ -291,6 +306,7 @@ fn read_stream(
             heard = true;
             resp.text.push_str(&text);
             if !sink.text(&text) {
+                crate::usage::record(crate::usage::Usage::openai_call(&usage));
                 return Ok(resp);
             }
         }
@@ -303,6 +319,7 @@ fn read_stream(
             };
             if let Some((_, finished)) = pending.take_if(another) {
                 if !complete_call(finished, &mut resp, sink) {
+                    crate::usage::record(crate::usage::Usage::openai_call(&usage));
                     return Ok(resp);
                 }
             }
@@ -322,6 +339,7 @@ fn read_stream(
     if let Some((_, call)) = pending {
         complete_call(call, &mut resp, sink);
     }
+    crate::usage::record(crate::usage::Usage::openai_call(&usage));
     Ok(resp)
 }
 
@@ -581,6 +599,33 @@ mod tests {
         assert_eq!(sink.order, vec!["text", "text", "call:c1", "call:c2"], "c1 completes when index 1 begins");
         assert_eq!(resp.text, "On it, looking now.");
         assert_eq!(resp.tool_calls.len(), 2);
+    }
+
+    #[test]
+    fn usage_is_asked_for_and_recorded_streamed_or_not() {
+        const USAGE: &str = r#"{"prompt_tokens":900,"completion_tokens":12,"cost":0.0004,"prompt_tokens_details":{"cached_tokens":800}}"#;
+        let streamed: &'static str = Box::leak(
+            format!("data: {{\"choices\":[{{\"delta\":{{\"content\":\"hi\"}}}}]}}\n\ndata: {{\"choices\":[],\"usage\":{USAGE}}}\n\ndata: [DONE]\n\n")
+                .into_boxed_str(),
+        );
+        let (base, rx) = crate::testhttp::serve_stream(Duration::ZERO, vec![(Duration::ZERO, streamed)]);
+        let llm = OpenAILLM::new(&base, "m", "", ChatAgents::new(30, 30), None);
+        let meter = crate::usage::Meter::open();
+        llm.chat_stream(&req(), &opts(Duration::from_secs(5)), &mut Collect::default()).unwrap();
+        let sent = crate::testhttp::body_json(&rx.recv().unwrap());
+        assert_eq!(sent["stream_options"]["include_usage"], true);
+        assert!(sent.get("usage").is_none(), "only OpenRouter is sent its own usage switch");
+        let u = crate::usage::take();
+        assert_eq!((u.calls, u.prompt, u.cached, u.completion), (1, 900, 800, 12));
+
+        let reply: &'static str = Box::leak(format!(r#"{{"choices":[{{"message":{{"content":"hi"}}}}],"usage":{USAGE}}}"#).into_boxed_str());
+        let (base, rx) = crate::testhttp::serve(vec![("200 OK", reply)]);
+        let mut llm = OpenAILLM::new(&base, "m", "", ChatAgents::new(30, 30), None);
+        llm.openrouter = true;
+        llm.chat(&req()).unwrap();
+        assert_eq!(crate::testhttp::body_json(&rx.recv().unwrap())["usage"]["include"], true);
+        assert!((crate::usage::take().cost - 0.0004).abs() < 1e-12);
+        drop(meter);
     }
 
     #[test]

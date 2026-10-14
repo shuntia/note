@@ -78,6 +78,7 @@ async fn members_get_403_on_every_admin_route() {
         (Method::GET, "/api/admin/log", None),
         (Method::GET, "/api/admin/traces", None),
         (Method::GET, "/api/admin/traces/1", None),
+        (Method::GET, "/api/admin/usage", None),
         (Method::PUT, "/api/admin/providers/llm/model", Some(r#"{"model":"x/y"}"#)),
     ] {
         let res = app.clone().oneshot(req(m.clone(), p, &kid, body)).await.unwrap();
@@ -97,7 +98,7 @@ async fn admin_without_a_grant_sees_the_gate_and_nothing_else() {
     assert_eq!(v["elevated"], false);
     assert_eq!(v["totp"], "required");
     assert_eq!(v["inspect"], cfg!(feature = "dev-inspect"));
-    for p in ["/api/admin/status", "/api/admin/users", "/api/admin/log", "/api/admin/traces"] {
+    for p in ["/api/admin/status", "/api/admin/users", "/api/admin/log", "/api/admin/traces", "/api/admin/usage"] {
         let res = app.clone().oneshot(req(Method::GET, p, &session, None)).await.unwrap();
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED, "{p}");
     }
@@ -287,25 +288,26 @@ async fn user_management_round_trip() {
 /// Seeds one trace and returns nothing: the ids are 1, 2, 3 in the order laid.
 fn seed_traces(state: &AppState) {
     use note_server::tools::SessionKind;
+    use note_server::usage::Usage;
     let conn = state.db.lock().unwrap();
     auth::create_user(&conn, "kid", "pw", false).unwrap();
 
     let mut talk = note_server::trace::Builder::new(SessionKind::Talk, "add buy milk");
-    talk.round(120);
+    talk.round(120, Usage { calls: 1, prompt: 9000, cached: 8000, completion: 40, reasoning: 0, cost: 0.002 });
     talk.call("task_create", r#"{"title":"buy milk"}"#, r#"{"task_id":1}"#, false, 4);
     talk.call("task_update", "{}", r#"{"kind":"not_found","message":"no task"}"#, true, 2);
-    talk.round(60);
+    talk.round(60, Usage::default());
     talk.ok("added buy milk!");
     talk.insert(&conn, 1).unwrap();
 
     let mut night = note_server::trace::Builder::new(SessionKind::Nightly, "Nightly run.");
-    night.round(200);
+    night.round(200, Usage::default());
     night.round_failed(88_000, "timed out reading response");
     night.failed("nightly session: timed out reading response");
     night.insert(&conn, 1).unwrap();
 
     let mut kid = note_server::trace::Builder::new(SessionKind::Talk, "hello");
-    kid.round(10);
+    kid.round(10, Usage::default());
     kid.ok("hi");
     kid.insert(&conn, 2).unwrap();
 }
@@ -377,6 +379,9 @@ async fn a_trace_detail_holds_the_rounds_and_only_a_dev_build_sees_the_words() {
         }
     }
 
+    assert_eq!(rounds[0]["usage"]["cached"], 8000);
+    assert_eq!(v["usage"]["prompt"], 9000);
+
     let res = app.clone().oneshot(req(Method::GET, "/api/admin/traces/2", &cookies, None)).await.unwrap();
     let v = json(res).await;
     let rounds = v["rounds"].as_array().unwrap();
@@ -386,6 +391,19 @@ async fn a_trace_detail_holds_the_rounds_and_only_a_dev_build_sees_the_words() {
 
     let res = app.oneshot(req(Method::GET, "/api/admin/traces/99", &cookies, None)).await.unwrap();
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn usage_sums_what_each_kind_spent() {
+    let (app, _session, cookies, state, _cfg) = elevated_app().await;
+    seed_traces(&state);
+    let res = app.oneshot(req(Method::GET, "/api/admin/usage?days=7", &cookies, None)).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let v = json(res).await;
+    assert_eq!(v["total"]["calls"], 1, "sessions with no provider usage leave no row");
+    assert_eq!(v["by_kind"][0]["kind"], "Talk");
+    assert_eq!(v["by_kind"][0]["usage"]["prompt"], 9000);
+    assert_eq!(v["by_day"].as_array().unwrap().len(), 1);
 }
 
 #[cfg(not(feature = "dev-inspect"))]

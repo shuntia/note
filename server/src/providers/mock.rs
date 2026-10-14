@@ -29,6 +29,7 @@ pub struct MockLLM {
     rounds: Mutex<VecDeque<Vec<StreamPiece>>>,
     seen: Mutex<Vec<RecordedChat>>,
     streams: bool,
+    usage: Option<crate::usage::Usage>,
 }
 
 impl MockLLM {
@@ -52,11 +53,21 @@ impl MockLLM {
         self
     }
 
+    /// Every call reports `usage` to the open meter.
+    #[must_use]
+    pub fn with_usage(mut self, usage: crate::usage::Usage) -> Self {
+        self.usage = Some(usage);
+        self
+    }
+
     pub fn seen(&self) -> Vec<RecordedChat> {
         self.seen.lock().unwrap().clone()
     }
 
     fn record(&self, req: &ChatRequest) {
+        if let Some(usage) = self.usage {
+            crate::usage::record(usage);
+        }
         self.seen.lock().unwrap().push(RecordedChat {
             system: req.system.to_string(),
             n_messages: req.messages.len(),

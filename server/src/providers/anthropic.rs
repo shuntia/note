@@ -93,6 +93,7 @@ impl LLMProvider for AnthropicLLM {
                 .header("anthropic-version", "2023-06-01")
                 .header("content-type", "application/json")
         })?;
+        crate::usage::record(crate::usage::Usage::anthropic_call(&resp["usage"]));
         parse(&resp)
     }
 

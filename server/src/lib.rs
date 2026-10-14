@@ -47,6 +47,7 @@ pub mod tools;
 pub mod totp;
 pub mod trace;
 pub mod triggers;
+pub mod usage;
 pub mod voice;
 pub mod wake;
 pub mod work;

@@ -234,11 +234,14 @@ pub fn run_session_watched(
     on_event: &dyn Fn(AgentEvent),
 ) -> Result<SessionOutcome> {
     let mut trace = crate::trace::Builder::new(kind, opening);
+    let meter = crate::usage::Meter::open();
     let result =
         run_traced(deps, user_id, username, kind, now, history, opening, on_event, &mut trace);
     if let Err(e) = &result {
         trace.failed(&format!("{e:#}"));
     }
+    trace.spent(crate::usage::take());
+    drop(meter);
     let _ = trace.insert(&crate::db_guard(deps.db), user_id);
     result
 }
@@ -384,10 +387,11 @@ fn run_traced(
 
     while turns < max_turns {
         let req = ChatRequest { system: &system, messages: &messages, tools: &schemas, background };
+        trace.spent(crate::usage::take());
         let round = std::time::Instant::now();
         let (resp, thinking) = match deps.llm.chat_with_reasoning(&req) {
             Ok(v) => {
-                trace.round(round.elapsed().as_millis() as u64);
+                trace.round(round.elapsed().as_millis() as u64, crate::usage::take());
                 v
             }
             Err(e) => {
@@ -1735,6 +1739,28 @@ mod tests {
 
     fn rounds(detail: &serde_json::Value) -> &Vec<serde_json::Value> {
         detail["rounds"].as_array().unwrap()
+    }
+
+    #[test]
+    fn a_session_records_what_each_round_spent_and_logs_the_total() {
+        let (db, tmp) = env();
+        let spent = crate::usage::Usage { calls: 1, prompt: 5000, cached: 4000, completion: 30, reasoning: 0, cost: 0.001 };
+        let llm = MockLLM::scripted(vec![
+            ChatResponse {
+                text: String::new(),
+                tool_calls: vec![ToolCall { id: "c1".into(), name: "task_list".into(), args: "{}".into() }],
+            },
+            ChatResponse { text: "done".into(), tool_calls: vec![] },
+        ])
+        .with_usage(spent);
+        run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Trigger, now(), &[], "look").unwrap();
+        let (_, _, _, _, detail) = trace_row(&db);
+        assert_eq!(rounds(&detail)[0]["usage"]["prompt"], 5000);
+        assert_eq!(detail["usage"]["calls"], 2);
+        assert_eq!(detail["usage"]["cached"], 8000);
+        let summary = crate::usage::summary(&db.lock().unwrap(), Some(1), 1, jiff::Timestamp::now()).unwrap();
+        assert_eq!(summary["by_kind"][0]["kind"], "Trigger");
+        assert_eq!(summary["by_kind"][0]["usage"]["completion"], 60);
     }
 
     #[test]

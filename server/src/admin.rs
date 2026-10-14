@@ -229,7 +229,8 @@ pub fn routes() -> Router<AppState> {
         .route("/providers/llm/model", axum::routing::put(llm_model_put))
         .route("/log", get(log_list))
         .route("/traces", get(traces_list))
-        .route("/traces/{id}", get(traces_detail));
+        .route("/traces/{id}", get(traces_detail))
+        .route("/usage", get(usage_summary));
     #[cfg(feature = "dev-inspect")]
     let r = r.merge(inspect::routes());
     r.layer(axum::middleware::from_fn(no_store))
@@ -1014,6 +1015,24 @@ async fn traces_detail(_e: Elevated, State(state): State<AppState>, Path(id): Pa
     match crate::trace::detail(&conn, id, INSPECT) {
         Ok(Some(v)) => Json(v).into_response(),
         Ok(None) => error(StatusCode::NOT_FOUND, "trace not found"),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct UsageQuery {
+    #[serde(default)]
+    days: Option<u32>,
+    #[serde(default)]
+    user_id: Option<i64>,
+}
+
+/// Tokens and cost per session kind and UTC day.
+async fn usage_summary(_e: Elevated, State(state): State<AppState>, Query(q): Query<UsageQuery>) -> Response {
+    let days = q.days.unwrap_or(7).clamp(1, 366);
+    let conn = state.db();
+    match crate::usage::summary(&conn, q.user_id, days, jiff::Timestamp::now()) {
+        Ok(v) => Json(v).into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }

@@ -449,7 +449,9 @@ pub fn generate_title(state: &AppState, user_id: i64, username: &str, conversati
         Ok(None) => return,
         Ok(Some(exchange)) => crate::prompts::load_in(&state.config_dir, "title", lang)
             .map(|system| crate::agent::with_language_line(system, &state.config_dir, username))
-            .and_then(|system| ask_for_title(state.llm.as_ref(), &system, &exchange))
+            .and_then(|system| {
+                crate::usage::metered(&state.db, user_id, "Title", || ask_for_title(state.llm.as_ref(), &system, &exchange))
+            })
             .and_then(|title| {
                 let conn = state.db();
                 set_title_if_draft(&conn, conversation_id, &title)
