@@ -3,7 +3,7 @@ use rusqlite::Connection;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-pub const MAX_TEXT: usize = 4000;
+pub const MAX_TEXT: usize = crate::context::MAX_STRATEGY_BYTES;
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -11,7 +11,7 @@ pub struct WriteArgs {
     pub text: String,
 }
 
-/// Validates the week's letter and hands it back; the caller owns the week it
+/// Validates the strategy and hands it back; the caller owns the week it
 /// belongs to and stores it once the session ends.
 pub fn write(
     conn: &Connection,
@@ -56,7 +56,7 @@ mod tests {
     }
 
     #[test]
-    fn the_week_is_one_letter_between_one_and_four_thousand_bytes() {
+    fn the_strategy_is_one_text_of_bounded_length() {
         let (conn, tmp) = env();
         let out = dispatch(&conn, &ctx(&tmp), SessionKind::Review, "review_write",
             r#"{"text":"  You finished the essay.  "}"#).unwrap();

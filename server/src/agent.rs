@@ -15,9 +15,9 @@ pub const IMPORT_MAX_TURNS: usize = 2;
 /// A harvest reads one digest: enough rounds to search memory before each
 /// write and still finish.
 pub const HARVEST_MAX_TURNS: usize = 8;
-/// A review reads one week: enough rounds to search memory before each write
-/// and still finish.
-pub const REVIEW_MAX_TURNS: usize = 8;
+/// A review writes its two calls in one round; the second round is there only
+/// to fix a refused write.
+pub const REVIEW_MAX_TURNS: usize = 2;
 /// A trigger session looks around and then speaks or does not: room to read the
 /// situation, never room to hold a conversation with itself.
 pub const TRIGGER_MAX_TURNS: usize = 14;
@@ -1525,7 +1525,7 @@ mod tests {
 
     #[test]
     fn the_sessions_that_answer_one_call_are_never_offered_a_batch() {
-        for kind in [SessionKind::Import, SessionKind::Inbox, SessionKind::Summarize] {
+        for kind in [SessionKind::Import, SessionKind::Inbox, SessionKind::Summarize, SessionKind::Review] {
             assert!(!tools::registry(kind).contains(&"batch"), "{kind:?} is offered a batch");
         }
         for kind in [
@@ -1533,7 +1533,6 @@ mod tests {
             SessionKind::Checkin,
             SessionKind::Nightly,
             SessionKind::Harvest,
-            SessionKind::Review,
             SessionKind::Trigger,
         ] {
             assert!(tools::registry(kind).contains(&"batch"), "{kind:?} has no batch");

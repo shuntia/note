@@ -38,8 +38,8 @@ pub enum SessionKind {
     Harvest,
     /// One trigger point, fired: read the situation, then speak or stay quiet.
     Trigger,
-    /// The week just ended, read once for the letter that stands beside Monday's
-    /// debrief.
+    /// The weeks just past, read once a week for the standing strategy every
+    /// session sees.
     Review,
     /// A visitor on a share link: a read-only slice of one user's day, tasks
     /// and goals, and nothing else.
@@ -570,7 +570,7 @@ const IMPORT: &[&str] = registry_of![BRIEF];
 const INBOX: &[&str] = registry_of![MEMORY_READ, DECIDE];
 const SUMMARIZE: &[&str] = registry_of![SUMMARY];
 const HARVEST: &[&str] = registry_of![MEMORY_READ, MEMORY_WRITE, CALL_USER, BATCH, HARVEST_DONE];
-const REVIEW: &[&str] = registry_of![MEMORY_READ, MEMORY_WRITE, CALL_USER, BATCH, REVIEW_WRITE];
+const REVIEW: &[&str] = registry_of![MEMORY_WRITE, REVIEW_WRITE];
 const SHARE: &[&str] =
     registry_of![TASK_READ, GOALS_READ, PLAN_READ, CALENDAR_READ, SHARE_NOTE];
 const CALL: &[&str] = registry_of![
@@ -813,8 +813,8 @@ const TOOLS: &[ToolSpec] = tools![
         "End the harvest, naming how many facts you wrote and, in note, what you left out and \
          why. Call it once, last.",
     "review_write": review_ops::WriteArgs => run!(&review_ops::write), terminal_in = &[SessionKind::Review];
-        "Write the week's letter, in a single call that ends the session: 1 to 4000 bytes of \
-         plain text, addressed to the user.",
+        "Write the whole new strategy, which replaces the old one and ends the session: 1 to \
+         1500 bytes of plain lines that every session reads.",
     "context_edit": context_ops::EditArgs => run!(context_ops::edit);
         "Edit the standing context document: replace a unique snippet or append a line.",
     "schedule_move": schedule_ops::MoveArgs => run!(schedule_ops::move_event), writes = true;
@@ -1801,7 +1801,10 @@ mod tests {
     fn every_session_that_acts_for_the_user_can_call_them_but_a_call_and_a_visitor_cannot() {
         for kind in KINDS {
             let offered = registry(kind).contains(&"call_user");
-            let single = matches!(kind, SessionKind::Import | SessionKind::Inbox | SessionKind::Summarize);
+            let single = matches!(
+                kind,
+                SessionKind::Import | SessionKind::Inbox | SessionKind::Summarize | SessionKind::Review
+            );
             let apart = matches!(kind, SessionKind::Call | SessionKind::Share);
             assert_eq!(offered, !single && !apart, "{kind:?}");
             assert_eq!(is_terminal(kind, "call_user"), kind == SessionKind::Trigger, "{kind:?}");

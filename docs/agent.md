@@ -53,7 +53,7 @@ order; each carries `reasoning`, and the assistant row `thought_ms`).
 ## Nightly run
 
 At each user's `nightly_time` (default 03:00, their timezone) the server
-harvests the day's conversations into memory, writes the weekly review on
+harvests the day's conversations into memory, rewrites the standing strategy on
 Mondays, generates the day's plan from the template, and runs the nightly
 session: it adjusts the plan, sets the day's run order
 ([planning.md](planning.md#run-order)), settles due working notes, writes the
@@ -227,7 +227,7 @@ leave partial state.
 
 | Tools | Offered to |
 |---|---|
-| `memory_query`, `memory_read` | check-in, talk, nightly, trigger, call, inbox, harvest, review |
+| `memory_query`, `memory_read` | check-in, talk, nightly, trigger, call, inbox, harvest |
 | `memory_write` | check-in, talk, nightly, trigger, call, harvest, review |
 | `context_edit` | talk, nightly |
 | `task_list`, `task_search`, `task_read` | check-in, talk, nightly, trigger, call, share |
@@ -249,7 +249,7 @@ leave partial state.
 | `trigger_set` | check-in, talk, nightly, trigger |
 | `trigger_budget` | check-in, talk |
 | `web_search` | check-in, talk, nightly, call (with `[search]`) |
-| `batch` | check-in, talk, nightly, trigger, harvest, review |
+| `batch` | check-in, talk, nightly, trigger, harvest |
 | `say`, `stay_quiet` | trigger |
 | `cancel_job`, `hang_up` | call |
 | `task_brief` / `inbox_decide` / `summary_write` / `harvest_done` / `review_write` / `share_note` | import / inbox / summarize / harvest / review / share, each ending its session on success |

@@ -3,18 +3,18 @@ use crate::tools::SessionKind;
 use crate::model_text as mt;
 use crate::text::Lang;
 use anyhow::Result;
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::Connection;
 use std::fmt::Write as _;
 
-/// The plan event the week's letter is delivered on.
-pub const EVENT_KIND: &str = "review";
-/// How long after the morning debrief "Your week" lands.
-const AFTER_DEBRIEF_MIN: i64 = 1;
 const MAX_DIGEST_BYTES: usize = 32 * 1024;
 const MAX_ROWS: i64 = 60;
 const MAX_SUMMARY_CHARS: usize = 400;
 /// Newest episodic facts scanned for ones the week created.
 const EPISODIC_SCAN: usize = 40;
+/// How far back the long view reaches, the reviewed week included.
+const HORIZON_WEEKS: i64 = 8;
+const MAX_AREAS: usize = 12;
+const MAX_GOALS: i64 = 20;
 
 /// The Monday on or before `date`.
 pub fn monday_of(date: jiff::civil::Date) -> jiff::civil::Date {
@@ -30,8 +30,8 @@ pub fn reviewed_week(date: jiff::civil::Date) -> Option<jiff::civil::Date> {
         .flatten()
 }
 
-/// The half-open stretch of instants a week covers, in the user's own zone, so
-/// rows stamped in UTC can be compared as the strings they are stored as.
+/// The half-open stretch of instants from `start` to `end`, in the user's own
+/// zone, so rows stamped in UTC can be compared as the strings they are stored as.
 struct Window {
     start: jiff::civil::Date,
     end: jiff::civil::Date,
@@ -40,13 +40,12 @@ struct Window {
 }
 
 impl Window {
-    fn of(week_start: jiff::civil::Date, tz: &jiff::tz::TimeZone) -> Result<Self> {
-        let end = week_start.checked_add(jiff::Span::new().days(7))?;
+    fn between(start: jiff::civil::Date, end: jiff::civil::Date, tz: &jiff::tz::TimeZone) -> Result<Self> {
         let at = |d: jiff::civil::Date| -> Result<String> {
             let dt = d.to_datetime(jiff::civil::Time::midnight());
             Ok(tz.to_ambiguous_zoned(dt).compatible()?.timestamp().to_string())
         };
-        Ok(Self { start: week_start, end, from: at(week_start)?, to: at(end)? })
+        Ok(Self { start, end, from: at(start)?, to: at(end)? })
     }
 
     fn holds_date(&self, date: &str) -> bool {
@@ -62,9 +61,12 @@ fn clip(text: &str) -> String {
     flat.chars().take(MAX_SUMMARY_CHARS - 1).chain(std::iter::once('…')).collect()
 }
 
+fn local_date(stamp: &str, tz: &jiff::tz::TimeZone) -> Option<jiff::civil::Date> {
+    stamp.parse::<jiff::Timestamp>().ok().map(|ts| ts.to_zoned(tz.clone()).date())
+}
+
 fn day_label(stamp: &str, tz: &jiff::tz::TimeZone, l: Lang) -> String {
-    stamp
-        .parse::<jiff::Timestamp>().map_or_else(|_| "?".into(), |ts| mt::weekday(l, ts.to_zoned(tz.clone()).weekday()).to_string())
+    local_date(stamp, tz).map_or_else(|| "?".into(), |d| mt::weekday(l, d.weekday()).to_string())
 }
 
 fn section(l: Lang, title: mt::ReviewSection, lines: &[String]) -> String {
@@ -168,19 +170,6 @@ fn triggers(conn: &Connection, user_id: i64, w: &Window, l: Lang) -> Result<Stri
     ))
 }
 
-fn nights(conn: &Connection, user_id: i64, w: &Window, l: Lang) -> Result<String> {
-    let mut stmt = conn.prepare(
-        "SELECT date, facts_written FROM harvests
-         WHERE user_id = ?1 AND date >= ?2 AND date < ?3 ORDER BY date",
-    )?;
-    let lines = stmt
-        .query_map((user_id, w.start.to_string(), w.end.to_string()), |r| {
-            Ok(mt::facts_kept(l, &r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(section(l, mt::ReviewSection::Nights, &lines))
-}
-
 fn conversations(
     conn: &Connection,
     user_id: i64,
@@ -225,9 +214,109 @@ fn days_remembered(
     Ok(section(l, mt::ReviewSection::Memory, &lines))
 }
 
-/// The week just ended, as the review session reads it: what finished and what
-/// was let go, the sessions behind it, the nudges, the nights' reading and the
-/// episodic entries the harvest already kept.
+/// Every goal still open and every one settled inside the long view, soonest
+/// deadline first, with how far its tasks have got.
+fn goals(conn: &Connection, user_id: i64, long: &Window, tz: &jiff::tz::TimeZone, l: Lang) -> Result<String> {
+    let mut stmt = conn.prepare(
+        "SELECT g.title, g.state, g.due_at,
+                (SELECT COUNT(*) FROM tasks t WHERE t.goal_id = g.id AND t.state != 'dropped'),
+                (SELECT COUNT(*) FROM tasks t WHERE t.goal_id = g.id AND t.state = 'done')
+         FROM goals g
+         WHERE g.user_id = ?1 AND (g.state = 'open' OR g.updated_at >= ?2)
+         ORDER BY g.due_at IS NULL, g.due_at LIMIT ?3",
+    )?;
+    let lines = stmt
+        .query_map((user_id, &long.from, MAX_GOALS), |r| {
+            let title: String = r.get(0)?;
+            let state: String = r.get(1)?;
+            let due: Option<String> = r.get(2)?;
+            let due = due.as_deref().and_then(|d| local_date(d, tz)).map(|d| d.to_string());
+            Ok(mt::goal_line(l, &clip(&title), &state, due.as_deref(), r.get(4)?, r.get(3)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(section(l, mt::ReviewSection::Goals, &lines))
+}
+
+/// What a goal or category is called in the long view; work under neither
+/// shares one unnamed line.
+const AREA_OF: &str = "COALESCE(g.title, NULLIF(COALESCE(pt.category, t.category), ''), '')";
+
+/// Each week of the long view in a line, and the time it held by goal or
+/// category across all of it.
+fn long_view(conn: &Connection, user_id: i64, long: &Window, tz: &jiff::tz::TimeZone, l: Lang) -> Result<String> {
+    #[derive(Default)]
+    struct Tally {
+        done: i64,
+        dropped: i64,
+        minutes: i64,
+    }
+    let week_of = |stamp: &str| local_date(stamp, tz).map(monday_of);
+    let mut weeks: std::collections::BTreeMap<jiff::civil::Date, Tally> = std::collections::BTreeMap::new();
+    let mut areas: std::collections::BTreeMap<String, Tally> = std::collections::BTreeMap::new();
+
+    let mut stmt = conn.prepare(&format!(
+        "SELECT t.state, COALESCE(t.completed_at, t.updated_at), {AREA_OF}
+         FROM tasks t LEFT JOIN tasks pt ON pt.id = t.parent_id
+              LEFT JOIN goals g ON g.id = t.goal_id
+         WHERE t.user_id = ?1 AND t.parent_id IS NULL
+           AND ((t.state = 'done' AND t.completed_at >= ?2 AND t.completed_at < ?3)
+                OR (t.state = 'dropped' AND t.updated_at >= ?2 AND t.updated_at < ?3))"
+    ))?;
+    let rows = stmt.query_map((user_id, &long.from, &long.to), |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+    })?;
+    for row in rows {
+        let (state, at, area) = row?;
+        let Some(week) = week_of(&at) else { continue };
+        let tally = weeks.entry(week).or_default();
+        if state == "done" {
+            tally.done += 1;
+            areas.entry(area).or_default().done += 1;
+        } else {
+            tally.dropped += 1;
+        }
+    }
+
+    let mut stmt = conn.prepare(&format!(
+        "SELECT ws.started_at, ws.ended_at, ws.paused_ms, {AREA_OF}
+         FROM work_sessions ws LEFT JOIN tasks t ON t.id = ws.task_id
+              LEFT JOIN tasks pt ON pt.id = t.parent_id
+              LEFT JOIN goals g ON g.id = COALESCE(pt.goal_id, t.goal_id)
+         WHERE ws.user_id = ?1 AND ws.started_at >= ?2 AND ws.started_at < ?3"
+    ))?;
+    let rows = stmt.query_map((user_id, &long.from, &long.to), |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, i64>(2)?, r.get::<_, String>(3)?))
+    })?;
+    for row in rows {
+        let (started, ended, paused_ms, area) = row?;
+        let (Some(week), Some(minutes)) = (week_of(&started), elapsed_min(&started, ended.as_deref(), paused_ms)) else {
+            continue;
+        };
+        weeks.entry(week).or_default().minutes += minutes;
+        areas.entry(area).or_default().minutes += minutes;
+    }
+
+    let week_lines: Vec<String> = weeks
+        .iter()
+        .map(|(week, t)| mt::week_line(l, *week, t.done, t.dropped, t.minutes))
+        .collect();
+    let mut by_time: Vec<(String, Tally)> = areas.into_iter().collect();
+    by_time.sort_by_key(|(_, t)| std::cmp::Reverse((t.minutes, t.done)));
+    let area_lines: Vec<String> = by_time
+        .iter()
+        .take(MAX_AREAS)
+        .map(|(area, t)| {
+            let name = if area.is_empty() { mt::unfiled(l).to_string() } else { clip(area) };
+            mt::area_line(l, &name, t.minutes, t.done)
+        })
+        .collect();
+    Ok(section(l, mt::ReviewSection::Weeks, &week_lines) + &section(l, mt::ReviewSection::Areas, &area_lines))
+}
+
+/// What the review session reads: the goals and the last eight weeks for the
+/// long view, then the week just ended in detail — what finished and what was
+/// let go, the sessions behind it, the nudges, the conversations and the
+/// episodic entries already kept.
 pub fn digest(
     conn: &Connection,
     data_dir: &std::path::Path,
@@ -237,12 +326,15 @@ pub fn digest(
     l: Lang,
     week_start: jiff::civil::Date,
 ) -> Result<String> {
-    let w = Window::of(week_start, tz)?;
+    let end = week_start.checked_add(jiff::Span::new().days(7))?;
+    let w = Window::between(week_start, end, tz)?;
+    let long = Window::between(week_start.checked_sub(jiff::Span::new().days(7 * (HORIZON_WEEKS - 1)))?, end, tz)?;
     let parts = [
+        goals(conn, user_id, &long, tz, l)?,
+        long_view(conn, user_id, &long, tz, l)?,
         tasks(conn, user_id, &w, tz, l)?,
         sessions(conn, user_id, &w, tz, l)?,
         triggers(conn, user_id, &w, l)?,
-        nights(conn, user_id, &w, l)?,
         conversations(conn, user_id, &w, tz, l)?,
         days_remembered(conn, data_dir, username, &w, l)?,
     ];
@@ -256,9 +348,9 @@ pub fn digest(
     Ok(out.trim_end().to_string())
 }
 
-/// One week's letter, written on the Monday nightly after the harvest: the
-/// `reviews` row is the record and the idempotency marker, so a week is read
-/// once however many times the sweep comes round.
+/// The Monday nightly rewrites the standing strategy every session reads; the
+/// strategy's own date is the idempotency marker, so a week is read once
+/// however many times the sweep comes round.
 pub fn run_for_user(
     deps: &SessionDeps,
     user_id: i64,
@@ -269,17 +361,12 @@ pub fn run_for_user(
 ) -> Result<()> {
     let Some(week_start) = reviewed_week(date) else { return Ok(()) };
     let week = week_start.to_string();
+    if crate::context::read_strategy(deps.config_dir, username).is_some_and(|(written, _)| written == week) {
+        return Ok(());
+    }
     let l = Lang::for_user(deps.config_dir, username);
     let digest = {
         let conn = crate::db_guard(deps.db);
-        let done: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM reviews WHERE user_id = ?1 AND week_start = ?2",
-            (user_id, &week),
-            |r| r.get(0),
-        )?;
-        if done > 0 {
-            return Ok(());
-        }
         digest(&conn, deps.data_dir, user_id, username, tz, l, week_start)?
     };
     if digest.is_empty() {
@@ -318,61 +405,9 @@ pub fn run_for_user(
         .find(|s| s.name == "review_write" && !s.is_error)
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s.result).ok())
         .and_then(|v| v["text"].as_str().map(str::to_string))
-        .ok_or_else(|| anyhow::anyhow!("the session wrote no review"))?;
-    let conn = crate::db_guard(deps.db);
-    conn.execute(
-        "INSERT OR IGNORE INTO reviews (user_id, week_start, content, created_at)
-         VALUES (?1, ?2, ?3, ?4)",
-        (user_id, &week, &text, now.to_string()),
-    )?;
+        .ok_or_else(|| anyhow::anyhow!("the session wrote no strategy"))?;
+    crate::context::write_strategy(deps.config_dir, username, &text, week_start)?;
     Ok(())
-}
-
-/// Puts "Your week" on the day's plan, a minute behind the debrief it stands
-/// beside. Nothing is laid on a day with no review to deliver, no debrief to
-/// follow, or a review event already there.
-pub fn lay_event(conn: &Connection, user_id: i64, date: jiff::civil::Date) -> Result<Option<i64>> {
-    let Some(week_start) = reviewed_week(date) else { return Ok(None) };
-    let has: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM reviews WHERE user_id = ?1 AND week_start = ?2",
-        (user_id, week_start.to_string()),
-        |r| r.get(0),
-    )?;
-    if has == 0 {
-        return Ok(None);
-    }
-    let row: Option<(i64, String, String)> = conn
-        .query_row(
-            "SELECT e.plan_id, e.wall_time, e.channel FROM events e
-             JOIN plans p ON p.id = e.plan_id
-             WHERE p.user_id = ?1 AND p.date = ?2 AND e.kind = 'debrief'
-             ORDER BY e.wall_time LIMIT 1",
-            (user_id, date.to_string()),
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .optional()?;
-    let Some((plan_id, debrief_at, channel)) = row else { return Ok(None) };
-    let already: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM events WHERE plan_id = ?1 AND kind = ?2",
-        (plan_id, EVENT_KIND),
-        |r| r.get(0),
-    )?;
-    if already > 0 {
-        return Ok(None);
-    }
-    let Some(wall) = minutes_after(&debrief_at, AFTER_DEBRIEF_MIN) else { return Ok(None) };
-    conn.execute(
-        "INSERT INTO events (plan_id, kind, wall_time, orig_wall_time, flexibility,
-                             slide_window_min, channel, origin, created_at)
-         VALUES (?1, ?2, ?3, ?3, 'drop', 0, ?4, 'template', ?5)",
-        (plan_id, EVENT_KIND, &wall, &channel, jiff::Timestamp::now().to_string()),
-    )?;
-    Ok(Some(conn.last_insert_rowid()))
-}
-
-fn minutes_after(wall: &str, minutes: i64) -> Option<String> {
-    let time: jiff::civil::Time = format!("{wall}:00").parse().ok()?;
-    Some(time.wrapping_add(jiff::Span::new().minutes(minutes)).strftime("%H:%M").to_string())
 }
 
 #[cfg(test)]
@@ -438,15 +473,21 @@ mod tests {
 
     fn a_week_of_work(conn: &Connection) {
         conn.execute(
-            "INSERT INTO tasks (id, user_id, title, state, created_at, updated_at, completed_at)
-             VALUES (1, 1, 'the essay', 'done', '2026-09-14T00:00:00Z', '2026-09-16T04:00:00Z',
+            "INSERT INTO goals (id, user_id, title, due_at, state, created_at, updated_at)
+             VALUES (4, 1, 'apply to colleges', '2026-11-01T07:00:00Z', 'open', 'x', 'x')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tasks (id, user_id, title, state, goal_id, created_at, updated_at, completed_at)
+             VALUES (1, 1, 'the essay', 'done', 4, '2026-09-14T00:00:00Z', '2026-09-16T04:00:00Z',
                      '2026-09-16T04:00:00Z')",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO tasks (id, user_id, title, state, created_at, updated_at)
-             VALUES (2, 1, 'the recital', 'dropped', '2026-09-14T00:00:00Z', '2026-09-17T04:00:00Z')",
+            "INSERT INTO tasks (id, user_id, title, state, goal_id, created_at, updated_at)
+             VALUES (2, 1, 'the recital', 'dropped', NULL, '2026-09-14T00:00:00Z', '2026-09-17T04:00:00Z')",
             [],
         )
         .unwrap();
@@ -458,16 +499,24 @@ mod tests {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO work_sessions (user_id, title, planned_min, started_at, ended_at, outcome,
+            "INSERT INTO tasks (id, user_id, title, state, category, created_at, updated_at, completed_at)
+             VALUES (5, 1, 'problem set', 'done', 'AP Micro', '2026-08-30T00:00:00Z', '2026-09-02T04:00:00Z',
+                     '2026-09-02T04:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO work_sessions (user_id, task_id, title, planned_min, started_at, ended_at, outcome,
                                         overrun_asked_at, phase_started_at)
-             VALUES (1, 'essay draft', 50, '2026-09-16T01:00:00Z', '2026-09-16T02:00:00Z', 'done',
+             VALUES (1, 1, 'essay draft', 50, '2026-09-16T01:00:00Z', '2026-09-16T02:00:00Z', 'done',
                      '2026-09-16T01:50:00Z', '2026-09-16T01:00:00Z')",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO harvests (user_id, date, facts_written, created_at)
-             VALUES (1, '2026-09-16', 3, '2026-09-15T18:00:00Z')",
+            "INSERT INTO work_sessions (user_id, task_id, title, started_at, ended_at, outcome, phase_started_at)
+             VALUES (1, 5, 'problem set', '2026-09-02T01:00:00Z', '2026-09-02T01:30:00Z', 'done',
+                     '2026-09-02T01:00:00Z')",
             [],
         )
         .unwrap();
@@ -498,7 +547,7 @@ mod tests {
     }
 
     #[test]
-    fn the_digest_holds_the_week_that_ended_and_nothing_either_side_of_it() {
+    fn the_digest_holds_the_goals_the_long_view_and_the_week_that_ended() {
         let (db, tmp) = env();
         let conn = db.lock().unwrap();
         a_week_of_work(&conn);
@@ -514,12 +563,16 @@ mod tests {
 
         let out =
             digest(&conn, tmp.path(), 1, "aki", &tokyo(), Lang::En, date("2026-09-14")).unwrap();
+        assert!(out.contains("- apply to colleges (open, due 2026-11-01): 1 of 1 tasks done"), "{out}");
+        assert!(out.contains("- week of 2026-08-31: 1 done, 0 dropped, 30 min in work sessions"), "{out}");
+        assert!(out.contains("- week of 2026-09-14: 1 done, 1 dropped, 60 min in work sessions"), "{out}");
+        assert!(out.contains("- apply to colleges: 60 min in work sessions, 1 done"), "{out}");
+        assert!(out.contains("- AP Micro: 30 min in work sessions, 1 done"), "{out}");
         assert!(out.contains("- the essay (done, Wed)"), "{out}");
         assert!(out.contains("- the recital (dropped, Thu)"), "{out}");
         assert!(!out.contains("next week"), "the week after is not this week's: {out}");
         assert!(out.contains("planned 50 min, ran 60 min, done, asked about overrun"), "{out}");
         assert!(out.contains("1 done — said 1, stayed quiet 0"), "{out}");
-        assert!(out.contains("- 2026-09-16: 3 fact(s) kept"), "{out}");
         assert!(out.contains("Aki and Mira settled the weekend."), "{out}");
         assert!(out.contains("2026-09-16 · the essay: Aki sent the draft"), "{out}");
         assert!(out.len() <= MAX_DIGEST_BYTES);
@@ -546,28 +599,22 @@ mod tests {
     }
 
     fn scripted_review() -> MockLLM {
-        MockLLM::scripted(vec![
-            ChatResponse {
-                text: String::new(),
-                tool_calls: vec![ToolCall {
-                    id: "1".into(),
-                    name: "memory_write".into(),
-                    args: r#"{"op":"add","category":"episodic","summary":"Week of 2026-09-14: the essay landed","body":"one long draft and a dropped recital"}"#.into(),
-                }],
-            },
-            ChatResponse {
-                text: String::new(),
-                tool_calls: vec![ToolCall {
-                    id: "2".into(),
-                    name: "review_write".into(),
-                    args: r#"{"text":"You finished the essay and let the recital go."}"#.into(),
-                }],
-            },
-        ])
+        let call = |id: &str, name: &str, args: &str| ToolCall { id: id.into(), name: name.into(), args: args.into() };
+        MockLLM::scripted(vec![ChatResponse {
+            text: String::new(),
+            tool_calls: vec![
+                call(
+                    "1",
+                    "memory_write",
+                    r#"{"op":"add","category":"episodic","summary":"Week of 2026-09-14: the essay landed","body":"one long draft and a dropped recital"}"#,
+                ),
+                call("2", "review_write", r#"{"text":"Colleges: essay sent; mornings hold the deep work."}"#),
+            ],
+        }])
     }
 
     #[test]
-    fn a_monday_writes_the_week_once_and_remembers_it() {
+    fn a_monday_rewrites_the_strategy_once_in_one_model_call_and_remembers_the_week() {
         let (db, tmp) = env();
         {
             let conn = db.lock().unwrap();
@@ -576,16 +623,12 @@ mod tests {
         let llm = scripted_review();
         let now = at("2026-09-20T18:00:00Z");
         run_for_user(&deps(&db, &tmp, &llm), 1, "aki", &tokyo(), date("2026-09-21"), now).unwrap();
+        assert_eq!(llm.seen().len(), 1);
 
+        let (week, strategy) = crate::context::read_strategy(tmp.path(), "aki").unwrap();
+        assert_eq!(week, "2026-09-14");
+        assert_eq!(strategy, "Colleges: essay sent; mornings hold the deep work.");
         let conn = db.lock().unwrap();
-        let content: String = conn
-            .query_row(
-                "SELECT content FROM reviews WHERE user_id = 1 AND week_start = '2026-09-14'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(content, "You finished the essay and let the recital go.");
         let episodic: String = conn
             .query_row(
                 "SELECT summary FROM memory_index WHERE user = 'aki' AND category = 'episodic'",
@@ -601,72 +644,11 @@ mod tests {
         drop(conn);
 
         run_for_user(&deps(&db, &tmp, &llm), 1, "aki", &tokyo(), date("2026-09-21"), now).unwrap();
-        assert_eq!(llm.seen().len(), 2, "the same week is never read twice");
+        assert_eq!(llm.seen().len(), 1, "the same week is never read twice");
     }
 
     #[test]
-    fn the_week_lands_a_minute_behind_the_debrief_and_only_once() {
-        let (db, tmp) = env();
-        {
-            let conn = db.lock().unwrap();
-            a_week_of_work(&conn);
-        }
-        let llm = scripted_review();
-        run_for_user(
-            &deps(&db, &tmp, &llm),
-            1,
-            "aki",
-            &tokyo(),
-            date("2026-09-21"),
-            at("2026-09-20T18:00:00Z"),
-        )
-        .unwrap();
-        let conn = db.lock().unwrap();
-        conn.execute(
-            "INSERT INTO plans (id, user_id, date, created_at) VALUES (7, 1, '2026-09-21', 'x')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO events (plan_id, kind, wall_time, orig_wall_time, channel)
-             VALUES (7, 'debrief', '07:30', '07:30', 'push')",
-            [],
-        )
-        .unwrap();
-
-        assert!(lay_event(&conn, 1, date("2026-09-21")).unwrap().is_some());
-        let (wall, flex, origin): (String, String, String) = conn
-            .query_row(
-                "SELECT wall_time, flexibility, origin FROM events WHERE kind = 'review'",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-            .unwrap();
-        assert_eq!((wall.as_str(), flex.as_str(), origin.as_str()), ("07:31", "drop", "template"));
-        assert!(lay_event(&conn, 1, date("2026-09-21")).unwrap().is_none());
-    }
-
-    #[test]
-    fn a_week_with_no_review_lays_nothing() {
-        let (db, tmp) = env();
-        let conn = db.lock().unwrap();
-        conn.execute(
-            "INSERT INTO plans (id, user_id, date, created_at) VALUES (7, 1, '2026-09-21', 'x')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO events (plan_id, kind, wall_time, orig_wall_time, channel)
-             VALUES (7, 'debrief', '07:30', '07:30', 'push')",
-            [],
-        )
-        .unwrap();
-        assert!(lay_event(&conn, 1, date("2026-09-21")).unwrap().is_none());
-        let _ = tmp;
-    }
-
-    #[test]
-    fn an_empty_week_costs_no_session() {
+    fn an_empty_stretch_costs_no_session() {
         let (db, tmp) = env();
         let llm = MockLLM::scripted(vec![]);
         run_for_user(
@@ -679,8 +661,6 @@ mod tests {
         )
         .unwrap();
         assert!(llm.seen().is_empty());
-        let conn = db.lock().unwrap();
-        let rows: i64 = conn.query_row("SELECT COUNT(*) FROM reviews", [], |r| r.get(0)).unwrap();
-        assert_eq!(rows, 0);
+        assert!(crate::context::read_strategy(tmp.path(), "aki").is_none());
     }
 }

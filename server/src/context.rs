@@ -64,15 +64,36 @@ pub fn write_nightly_notes(
     text: &str,
     date: jiff::civil::Date,
 ) -> std::io::Result<()> {
-    let path = nightly_notes_path(config_dir, user);
-    std::fs::create_dir_all(path.parent().expect("nightly_notes.md always has a parent"))?;
-    write_atomic(&path, &format!("<!-- written {date} -->\n{}\n", text.trim()))
+    write_dated(&nightly_notes_path(config_dir, user), text, date)
 }
 
-/// The notes as (written date, body); a file without a readable marker keeps
+/// The long-term strategy sits in the stable part of every context, so it is
+/// kept short.
+pub const MAX_STRATEGY_BYTES: usize = 1500;
+
+fn strategy_path(config_dir: &Path, user: &str) -> PathBuf {
+    config_dir.join("users").join(user).join("strategy.md")
+}
+
+/// Replaces the strategy, dated by the Monday of the week it was written after.
+pub fn write_strategy(config_dir: &Path, user: &str, text: &str, week: jiff::civil::Date) -> std::io::Result<()> {
+    write_dated(&strategy_path(config_dir, user), text, week)
+}
+
+/// The strategy as (week, body).
+pub fn read_strategy(config_dir: &Path, user: &str) -> Option<(String, String)> {
+    read_dated(&strategy_path(config_dir, user))
+}
+
+fn write_dated(path: &Path, text: &str, date: jiff::civil::Date) -> std::io::Result<()> {
+    std::fs::create_dir_all(path.parent().expect("a user file always has a parent"))?;
+    write_atomic(path, &format!("<!-- written {date} -->\n{}\n", text.trim()))
+}
+
+/// The file as (written date, body); a file without a readable marker keeps
 /// its whole text and an empty date, which renders as an unknown age.
-fn read_nightly_notes(config_dir: &Path, user: &str) -> Option<(String, String)> {
-    let raw = std::fs::read_to_string(nightly_notes_path(config_dir, user)).ok()?;
+fn read_dated(path: &Path) -> Option<(String, String)> {
+    let raw = std::fs::read_to_string(path).ok()?;
     let (head, rest) = raw.split_once('\n').unwrap_or((raw.as_str(), ""));
     let dated = head
         .trim()
@@ -182,6 +203,7 @@ pub struct Sources {
     lang: Lang,
     standing: String,
     nightly_notes: Option<(String, String)>,
+    strategy: Option<(String, String)>,
 }
 
 impl Sources {
@@ -189,15 +211,17 @@ impl Sources {
         let lang = Lang::from_config(Some(&ucfg), config_dir, username);
         let standing = std::fs::read_to_string(standing_path(config_dir, username))
             .unwrap_or_else(|_| mt::no_standing(lang).into());
-        let nightly_notes = read_nightly_notes(config_dir, username);
-        Self { ucfg, lang, standing, nightly_notes }
+        let nightly_notes = read_dated(&nightly_notes_path(config_dir, username));
+        let strategy = read_strategy(config_dir, username);
+        Self { ucfg, lang, standing, nightly_notes, strategy }
     }
 }
 
-/// Renders the full injection context: the standing document verbatim, then a
-/// dynamic block from the DB. Ordered standing-first for prompt-cache
-/// stability — the standing doc changes rarely, the dynamic block every call,
-/// and the clock, which changes every minute, closes the block.
+/// Renders the full injection context: the standing document verbatim, the
+/// weekly strategy, then a dynamic block from the DB. Ordered for prompt-cache
+/// stability — the standing doc changes rarely, the strategy weekly, the
+/// dynamic block every call, and the clock, which changes every minute, closes
+/// the block.
 pub fn assemble(conn: &Connection, config_dir: &Path, data_dir: &Path, user_id: i64, username: &str, now: jiff::Timestamp) -> Result<String> {
     let sources = Sources::load(config_dir, username, crate::config::UserConfig::load(config_dir, username)?);
     assemble_from(conn, &sources, data_dir, user_id, username, now)
@@ -212,7 +236,7 @@ pub fn assemble_from(
     username: &str,
     now: jiff::Timestamp,
 ) -> Result<String> {
-    let Sources { ucfg, lang: l, standing, nightly_notes: notes } = sources;
+    let Sources { ucfg, lang: l, standing, nightly_notes: notes, strategy } = sources;
     let l = *l;
     let (tz, tz_label) = match jiff::tz::TimeZone::get(&ucfg.timezone) {
         Ok(tz) => (tz, ucfg.timezone.clone()),
@@ -298,7 +322,11 @@ pub fn assemble_from(
         block.truncate(cut);
     }
     block.push_str(&now_s);
-    Ok(format!("{}\n\n{}\n\n{block}", mt::standing_heading(l), standing.trim()))
+    let strategy = strategy
+        .as_ref()
+        .map(|(week, body)| format!("{}\n\n{body}\n\n", mt::strategy_heading(l, week)))
+        .unwrap_or_default();
+    Ok(format!("{}\n\n{}\n\n{strategy}{block}", mt::standing_heading(l), standing.trim()))
 }
 
 fn end_of(e: &crate::plan::PlanEvent) -> &str {
@@ -1496,6 +1524,25 @@ mod tests {
         let now = out.find("# Now").expect("a Now section");
         assert!(standing < header && header < now, "{out}");
         assert!(out.contains("low energy after 21:00"), "{out}");
+    }
+
+    #[test]
+    fn the_strategy_sits_between_the_standing_document_and_last_nights_notes() {
+        let tmp = cfg_dir();
+        let (conn, uid) = user();
+        edit_append(tmp.path(), "aki", "- prefers evening calls").unwrap();
+        notes(&tmp, "2026-08-30", "the essay is the one that matters");
+        let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
+        assert!(!out.contains("# Strategy"), "{out}");
+
+        write_strategy(tmp.path(), "aki", "Essay first; mornings hold the deep work.", "2026-08-24".parse().unwrap()).unwrap();
+        let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
+        let standing = out.find("# Standing context").unwrap();
+        let strategy = out
+            .find("# Strategy (after the week of 2026-08-24)\n\nEssay first; mornings hold the deep work.\n")
+            .unwrap_or_else(|| panic!("{out}"));
+        let notes = out.find("# Notes from last night").unwrap();
+        assert!(standing < strategy && strategy < notes, "{out}");
     }
 
     #[test]

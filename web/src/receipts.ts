@@ -443,15 +443,6 @@ const TABLE: Record<string, Receipt> = {
     },
     failed: 'receipt.summaryWrite.failed',
   },
-  harvest_done: {
-    doing: 'receipt.harvest.doing',
-    done: (a) => {
-      const count = num(a, 'written') ?? 0
-      const note = str(a, 'note')
-      return note ? t('receipt.harvest.doneNote', { count, note: clip(note) }) : t('receipt.harvest.done', { count })
-    },
-    failed: 'receipt.harvest.failed',
-  },
   review_write: {
     doing: 'receipt.reviewWrite.doing',
     done: 'receipt.reviewWrite.done',

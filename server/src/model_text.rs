@@ -96,6 +96,13 @@ pub fn standing_heading(l: Lang) -> &'static str {
     l.of("# Standing context", "# 常設コンテキスト")
 }
 
+pub fn strategy_heading(l: Lang, week: &str) -> String {
+    match l {
+        Lang::En => format!("# Strategy (after the week of {week})"),
+        Lang::Ja => format!("# 戦略（{week}の週のあと）"),
+    }
+}
+
 pub fn part_of_day(l: Lang, hour: i8) -> &'static str {
     match hour {
         5..=7 => l.of("early morning", "早朝"),
@@ -531,7 +538,9 @@ pub fn review_section(l: Lang, section: ReviewSection) -> &'static str {
         ReviewSection::Tasks => l.of("Tasks", "タスク"),
         ReviewSection::Sessions => l.of("Sessions", "作業セッション"),
         ReviewSection::Triggers => l.of("Trigger points", "トリガーポイント"),
-        ReviewSection::Nights => l.of("Nights", "夜ごとの記録"),
+        ReviewSection::Goals => l.of("Goals", "目標"),
+        ReviewSection::Weeks => l.of("The last eight weeks", "この八週間"),
+        ReviewSection::Areas => l.of("Where the time went, eight weeks", "時間の行き先（八週間）"),
         ReviewSection::Conversations => l.of("Conversations", "会話"),
         ReviewSection::Memory => l.of("The week as memory holds it", "記憶に残る一週間"),
     }
@@ -542,7 +551,9 @@ pub enum ReviewSection {
     Tasks,
     Sessions,
     Triggers,
-    Nights,
+    Goals,
+    Weeks,
+    Areas,
     Conversations,
     Memory,
 }
@@ -576,11 +587,32 @@ pub fn triggers_line(l: Lang, by_status: &str, said: i64, quiet: i64) -> String 
     }
 }
 
-pub fn facts_kept(l: Lang, date: &str, n: i64) -> String {
-    match l {
-        Lang::En => format!("- {date}: {n} fact(s) kept"),
-        Lang::Ja => format!("- {date}: {n}件を記憶"),
+pub fn goal_line(l: Lang, title: &str, state: &str, due: Option<&str>, done: i64, total: i64) -> String {
+    match (l, due) {
+        (Lang::En, Some(d)) => format!("- {title} ({state}, due {d}): {done} of {total} tasks done"),
+        (Lang::En, None) => format!("- {title} ({state}): {done} of {total} tasks done"),
+        (Lang::Ja, Some(d)) => format!("- {title}（{state}、期日 {d}）: タスク{total}件中{done}件完了"),
+        (Lang::Ja, None) => format!("- {title}（{state}）: タスク{total}件中{done}件完了"),
     }
+}
+
+pub fn week_line(l: Lang, week: jiff::civil::Date, done: i64, dropped: i64, minutes: i64) -> String {
+    match l {
+        Lang::En => format!("- week of {week}: {done} done, {dropped} dropped, {minutes} min in work sessions"),
+        Lang::Ja => format!("- {week}の週: 完了{done}、手放し{dropped}、作業セッション{minutes}分"),
+    }
+}
+
+pub fn area_line(l: Lang, area: &str, minutes: i64, done: i64) -> String {
+    match l {
+        Lang::En => format!("- {area}: {minutes} min in work sessions, {done} done"),
+        Lang::Ja => format!("- {area}: 作業セッション{minutes}分、完了{done}"),
+    }
+}
+
+/// Work under no goal and no category.
+pub fn unfiled(l: Lang) -> &'static str {
+    l.of("(no goal or category)", "（目標・カテゴリーなし）")
 }
 
 // --- trigger sessions ---

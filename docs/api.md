@@ -19,7 +19,7 @@ Errors carry `{"error": …}`. `GET /healthz` answers `ok`.
 | Goals | `GET/POST /api/goals`, `PATCH/DELETE /api/goals/{id}` | |
 | Plan | `GET /api/plan/today[?calendar=1]`, `GET /api/plan/range` (existing plans across a span; never generates one), `GET /api/day/{date}` (plan, calendar, free time, and what already happened), `POST /api/plan/{date}/carry` (moves what is left of a day to tomorrow) | [planning.md](planning.md#the-daily-plan) |
 | Events | `POST /api/events/{id}/{shift,snooze,done,drop,alert,move_tomorrow}` | [planning.md](planning.md#the-daily-plan) |
-| Letters | `GET /api/debrief[?date]` (the nightly debrief), `GET /api/review[?week]` (the weekly letter, written by the Monday nightly) | |
+| Letters | `GET /api/debrief[?date]` (the nightly debrief) | |
 | Work sessions | `POST /api/sessions`, `GET /api/sessions/open`, `GET /api/sessions/today`, `POST /api/sessions/{id}/{end,pause,resume,step,skip_break}` | |
 | Calendar | `GET/POST /api/calendar`, `PATCH/DELETE /api/calendar/{id}`, `POST /api/calendar/{id}/skip`, `DELETE /api/calendar/{id}/skip/{date}`, `GET /api/calendar/day/{date}` | [planning.md](planning.md#calendar-api) |
 | Agent | `POST /api/talk`, `GET /api/conversations`, `PATCH/DELETE /api/conversations/{id}`, `GET /api/conversations/{id}/messages` | [agent.md](agent.md#sessions) |

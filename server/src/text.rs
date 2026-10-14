@@ -198,14 +198,6 @@ pub fn no_debrief(l: Lang) -> String {
     l.pick("(no debrief yet)", "（まだ朝の手紙はありません）")
 }
 
-pub fn your_week(l: Lang) -> String {
-    l.pick("Your week", "この一週間")
-}
-
-pub fn no_week(l: Lang) -> String {
-    l.pick("(no week yet)", "（まだ週のふりかえりはありません）")
-}
-
 /// The body of a fired event of a kind with nothing more specific to say.
 pub fn scheduled_for(l: Lang, at: &str) -> String {
     match l {
