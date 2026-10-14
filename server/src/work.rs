@@ -336,9 +336,11 @@ pub fn end(
     if let Some(session) = open(conn, user_id)? {
         catch_up(conn, config_dir, &session, now)?;
     }
-    close(conn, config_dir, user_id, username, id, outcome, now)
+    close(conn, config_dir, user_id, username, id, outcome, false, now)
 }
 
+/// `overran` closes a session Note stopped for running far past its plan, and
+/// its farewell says so.
 #[allow(clippy::too_many_arguments)]
 fn close(
     conn: &Connection,
@@ -347,6 +349,7 @@ fn close(
     username: &str,
     id: Option<i64>,
     outcome: &str,
+    overran: bool,
     now: jiff::Timestamp,
 ) -> Result<Option<i64>> {
     let Some(session) = open(conn, user_id)? else {
@@ -377,7 +380,7 @@ fn close(
                 if dropped == 1 { "" } else { "s" }, session.id),
         )?;
     }
-    lay_farewell(conn, config_dir, user_id, username, &session, outcome, now)?;
+    lay_farewell(conn, config_dir, user_id, username, &session, outcome, overran, now)?;
     crate::log::record(
         conn,
         Some(user_id),
@@ -455,8 +458,8 @@ fn book_minutes(conn: &Connection, task_id: i64, minutes: i64) -> rusqlite::Resu
     Ok(())
 }
 
-/// The one check that outlives the session, laid into its own thread. A refusal
-/// is recorded rather than raised: the session is over either way.
+/// The one check that outlives the session, laid into its own thread.
+#[allow(clippy::too_many_arguments)]
 fn lay_farewell(
     conn: &Connection,
     config_dir: &Path,
@@ -464,14 +467,40 @@ fn lay_farewell(
     username: &str,
     session: &Session,
     outcome: &str,
+    overran: bool,
     now: jiff::Timestamp,
 ) -> Result<()> {
     let elapsed = session.elapsed_ms(now) / 60_000;
-    let prompt = format!(
-        "The session on {} just ended ({outcome}, {elapsed} min, round {}): ask how it went in \
-         one line, name what is left, and offer the next step.",
-        session.title, session.round
-    );
+    let prompt = match session.planned_min.filter(|_| overran) {
+        Some(planned) => format!(
+            "Note stopped the session on {} after {elapsed} min, far past its planned {planned} \
+             min (round {}): say in one line that it was stopped, ask how it went, name what is \
+             left, and offer the next step.",
+            session.title, session.round
+        ),
+        None => format!(
+            "The session on {} just ended ({outcome}, {elapsed} min, round {}): ask how it went in \
+             one line, name what is left, and offer the next step.",
+            session.title, session.round
+        ),
+    };
+    lay_session_wake(conn, config_dir, user_id, username, session, &prompt, "farewell", now)
+}
+
+/// Wakes the agent now in the session's own thread: tied to the session, so it
+/// never counts against the day's budget. A refusal is recorded rather than
+/// raised, since nothing waits on it.
+#[allow(clippy::too_many_arguments)]
+fn lay_session_wake(
+    conn: &Connection,
+    config_dir: &Path,
+    user_id: i64,
+    username: &str,
+    session: &Session,
+    prompt: &str,
+    what: &str,
+    now: jiff::Timestamp,
+) -> Result<()> {
     let laid = crate::triggers::lay(
         conn,
         &crate::triggers::Lay {
@@ -479,7 +508,7 @@ fn lay_farewell(
             user_id,
             username,
             at: "+0min",
-            prompt: &prompt,
+            prompt,
             date: now.to_zoned(crate::triggers::timezone(config_dir, username)).date(),
             cancel: None,
             conversation_id: session.conversation_id,
@@ -494,7 +523,7 @@ fn lay_farewell(
             conn,
             Some(user_id),
             "trigger_error",
-            &format!("session {}: the farewell was refused ({refusal:?})", session.id),
+            &format!("session {}: the {what} was refused ({refusal:?})", session.id),
         )?;
     }
     Ok(())
@@ -687,7 +716,7 @@ fn advance(
             if !auto_close {
                 return Ok(None);
             }
-            close(conn, config_dir, user_id, username, Some(session.id), "stopped", now)?;
+            close(conn, config_dir, user_id, username, Some(session.id), "stopped", false, now)?;
             crate::log::record(
                 conn,
                 Some(user_id),
@@ -788,7 +817,8 @@ pub const OVERRUN_END_PCT: i64 = 300;
 /// Looks after every open session that has run past its plan: at
 /// `OVERRUN_ASK_PCT` it asks once, in plain words; at `OVERRUN_END_PCT` it ends
 /// the session and says so. Each line lands in the session's thread and goes out
-/// through the ladder. A paused session is not running.
+/// through the ladder. Where the user has `overrun_wakes` on, the agent is woken
+/// to say each in its own words instead. A paused session is not running.
 pub fn overrun(conn: &Connection, config_dir: &Path, now: jiff::Timestamp) -> Result<Vec<Flip>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT {COLS_W}, w.user_id, u.username, w.overrun_asked_at FROM work_sessions w
@@ -807,7 +837,15 @@ pub fn overrun(conn: &Connection, config_dir: &Path, now: jiff::Timestamp) -> Re
         let past = |pct: i64| elapsed_ms >= planned * 60_000 * pct / 100;
         let elapsed = elapsed_ms / 60_000;
         let lang = Lang::for_user(config_dir, &username);
+        let wakes = crate::config::UserConfig::load(config_dir, &username).is_ok_and(|c| c.overrun_wakes());
         let (title, body, kind) = if past(OVERRUN_END_PCT) {
+            if wakes {
+                catch_up(conn, config_dir, &session, now)?;
+                close(conn, config_dir, user_id, &username, Some(session.id), "stopped", true, now)?;
+                log_overrun(conn, user_id, "session_force_ended", &session, elapsed)?;
+                asks.push(Flip { user_id, username, message: None });
+                continue;
+            }
             end(conn, config_dir, user_id, &username, Some(session.id), "stopped", now)?;
             (
                 text::overrun_ended_title(lang),
@@ -820,6 +858,17 @@ pub fn overrun(conn: &Connection, config_dir: &Path, now: jiff::Timestamp) -> Re
                 "UPDATE work_sessions SET overrun_asked_at = ?1 WHERE id = ?2",
                 (now.to_string(), session.id),
             )?;
+            if wakes {
+                let prompt = format!(
+                    "The session on {} has run {elapsed} min against its planned {planned}: ask in \
+                     one line whether it is done or they want to keep going. Note stops it at {} min.",
+                    session.title,
+                    planned * OVERRUN_END_PCT / 100
+                );
+                lay_session_wake(conn, config_dir, user_id, &username, &session, &prompt, "overrun wake", now)?;
+                log_overrun(conn, user_id, "session_overrun", &session, elapsed)?;
+                continue;
+            }
             (
                 text::overrun_ask_title(lang),
                 text::overrun_ask_body(lang, &session.title, elapsed, planned, extra),
@@ -831,12 +880,7 @@ pub fn overrun(conn: &Connection, config_dir: &Path, now: jiff::Timestamp) -> Re
         if let Some(thread) = session.conversation_id {
             crate::talk::append_assistant(conn, thread, &text::titled(lang, &title, &body), "", 0, now)?;
         }
-        crate::log::record(
-            conn,
-            Some(user_id),
-            kind,
-            &format!("session {} at {elapsed} of {planned} min", session.id),
-        )?;
+        log_overrun(conn, user_id, kind, &session, elapsed)?;
         asks.push(Flip {
             user_id,
             username,
@@ -853,6 +897,15 @@ pub fn overrun(conn: &Connection, config_dir: &Path, now: jiff::Timestamp) -> Re
         });
     }
     Ok(asks)
+}
+
+fn log_overrun(conn: &Connection, user_id: i64, kind: &str, session: &Session, elapsed: i64) -> Result<()> {
+    crate::log::record(
+        conn,
+        Some(user_id),
+        kind,
+        &format!("session {} at {elapsed} of {} min", session.id, session.planned_min.unwrap_or_default()),
+    )
 }
 
 #[cfg(test)]
@@ -1413,6 +1466,7 @@ mod tests {
             )
             .unwrap();
         assert!(thread.starts_with("Are you OK?"));
+        assert!(!checks(&conn).iter().any(|(_, _, _, prompt)| prompt.contains("has run")), "no wake is laid");
         assert!(overrun(&conn, tmp.path(), at("2026-09-17T09:45:00Z")).unwrap().is_empty(), "asked once");
 
         let ended = overrun(&conn, tmp.path(), at("2026-09-17T10:00:00Z")).unwrap();
@@ -1425,6 +1479,54 @@ mod tests {
             checks(&conn).iter().any(|(_, _, status, prompt)| status == "pending" && prompt.contains("just ended")),
             "the farewell is laid"
         );
+        assert!(overrun(&conn, tmp.path(), at("2026-09-17T11:00:00Z")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn with_overrun_wakes_on_the_agent_answers_once_per_threshold_and_is_told_of_the_stop() {
+        let (conn, tmp, uid) = env_with("overrun_wakes = true\n");
+        let session = start_one(&conn, &tmp, uid, Some(20));
+        let said = || -> i64 {
+            conn.query_row(
+                "SELECT COUNT(*) FROM talk_messages WHERE conversation_id = ?1",
+                [session.conversation_id.unwrap()],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        let before = said();
+        let wakes = |conn: &Connection| -> Vec<String> {
+            checks(conn)
+                .into_iter()
+                .filter(|(sid, _, _, prompt)| *sid == session.id && prompt.contains("has run"))
+                .map(|(_, _, status, prompt)| format!("{status}: {prompt}"))
+                .collect()
+        };
+
+        assert!(overrun(&conn, tmp.path(), at("2026-09-17T09:31:00Z")).unwrap().is_empty(), "nothing canned goes out");
+        let laid = wakes(&conn);
+        assert_eq!(laid.len(), 1, "{laid:?}");
+        assert!(laid[0].starts_with("pending: "), "{laid:?}");
+        assert!(laid[0].contains("31 min against its planned 20") && laid[0].contains("stops it at 60 min"), "{laid:?}");
+        assert_eq!(said(), before, "the thread waits for the agent's own words");
+        assert_eq!(crate::triggers::spent(&conn, uid, "2026-09-17".parse().unwrap()).unwrap(), 0, "the session's wake is not the day's");
+
+        assert!(overrun(&conn, tmp.path(), at("2026-09-17T09:45:00Z")).unwrap().is_empty());
+        assert_eq!(wakes(&conn).len(), 1, "one wake for the threshold, however many ticks pass");
+        conn.execute("UPDATE events SET status = 'fired' WHERE prompt LIKE '%has run%'", []).unwrap();
+
+        let ended = overrun(&conn, tmp.path(), at("2026-09-17T10:00:00Z")).unwrap();
+        assert_eq!(ended.len(), 1);
+        assert!(ended[0].message.is_none(), "the stop is the agent's to tell");
+        assert!(open(&conn, uid).unwrap().is_none(), "the session ends regardless");
+        let farewells: Vec<String> = checks(&conn)
+            .into_iter()
+            .filter(|(sid, _, status, _)| *sid == session.id && status == "pending")
+            .map(|(_, _, _, prompt)| prompt)
+            .collect();
+        assert_eq!(farewells.len(), 1, "{farewells:?}");
+        assert!(farewells[0].contains("Note stopped the session") && farewells[0].contains("planned 20"), "{farewells:?}");
+        assert_eq!(said(), before);
         assert!(overrun(&conn, tmp.path(), at("2026-09-17T11:00:00Z")).unwrap().is_empty());
     }
 

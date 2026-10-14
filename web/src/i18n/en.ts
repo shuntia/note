@@ -599,6 +599,7 @@ export const en = {
   "settings.notifications": "Notifications",
   "settings.notifyEnd": "Notify when a session ends",
   "settings.off": "Off",
+  "settings.overrunWakes": "Note answers a session that runs long",
   "settings.password": "Password",
   "settings.password.change": "Change password",
   "settings.password.changed": "Changed",

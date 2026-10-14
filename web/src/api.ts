@@ -85,6 +85,7 @@ export const WRITABLE_SETTINGS = [
   'pomodoro_work_min',
   'pomodoro_break_min',
   'session_end_notify',
+  'overrun_wakes',
   'idle_nudge_min',
   'ring_for',
   'voice_voice',

@@ -397,6 +397,7 @@ export function Settings({
               )}
             </FoldRow>
             <ToggleSetting field="session_end_notify" label={t('settings.notifyEnd')} />
+            <ToggleSetting field="overrun_wakes" label={t('settings.overrunWakes')} />
             <FoldRow
               label={t('settings.counter')}
               value={counterLabel}

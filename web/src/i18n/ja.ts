@@ -600,6 +600,7 @@ export const ja: Dict = {
   "settings.notifications": "通知",
   "settings.notifyEnd": "セッション終了時に通知",
   "settings.off": "オフ",
+  "settings.overrunWakes": "長引いたセッションに Note が自分で応える",
   "settings.password": "パスワード",
   "settings.password.change": "パスワードを変更",
   "settings.password.changed": "変更しました",

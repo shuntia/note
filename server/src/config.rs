@@ -346,6 +346,10 @@ pub struct UserConfig {
     /// is announced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_end_notify: Option<bool>,
+    /// Whether a session running far past its plan wakes the agent to answer
+    /// it, instead of the canned ask and stop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overrun_wakes: Option<bool>,
     /// Minutes without a sign of the user before Note may nudge about open
     /// notes; 0 turns idle nudges off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -438,6 +442,10 @@ impl UserConfig {
 
     pub fn session_end_notify(&self) -> bool {
         self.session_end_notify.unwrap_or(true)
+    }
+
+    pub fn overrun_wakes(&self) -> bool {
+        self.overrun_wakes.unwrap_or(false)
     }
 
     pub fn idle_nudge_min(&self) -> u32 {

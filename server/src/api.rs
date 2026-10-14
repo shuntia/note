@@ -1550,6 +1550,7 @@ struct SettingsPatch {
     pomodoro_work_min: Option<u32>,
     pomodoro_break_min: Option<u32>,
     session_end_notify: Option<bool>,
+    overrun_wakes: Option<bool>,
     idle_nudge_min: Option<u32>,
     ring_for: Option<String>,
     voice_voice: Option<String>,
@@ -1596,6 +1597,7 @@ fn settings_body(
         "pomodoro_work_min": cfg.pomodoro_work_min(),
         "pomodoro_break_min": cfg.pomodoro_break_min(),
         "session_end_notify": cfg.session_end_notify(),
+        "overrun_wakes": cfg.overrun_wakes(),
         "idle_nudge_min": cfg.idle_nudge_min(),
         "voice_enabled": state.voice.is_some(),
         "voice_link": voice_link.map(|l| serde_json::json!({ "mxid": l.mxid, "state": l.state })),
@@ -1772,6 +1774,9 @@ async fn settings_put(
     }
     if let Some(on) = req.session_end_notify {
         cfg.session_end_notify = Some(on);
+    }
+    if let Some(on) = req.overrun_wakes {
+        cfg.overrun_wakes = Some(on);
     }
     if let Some(n) = req.pomodoro_work_min {
         if !POMODORO_WORK_MIN.contains(&n) {
