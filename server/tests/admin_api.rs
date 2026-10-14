@@ -95,7 +95,7 @@ async fn admin_without_a_grant_sees_the_gate_and_nothing_else() {
     assert_eq!(res.headers()[header::CACHE_CONTROL], "no-store");
     let v = json(res).await;
     assert_eq!(v["elevated"], false);
-    assert_eq!(v["totp"], "required");
+    assert_eq!((&v["require_second_factor"], &v["second_factor"]), (&true.into(), &"totp".into()));
     assert_eq!(v["inspect"], cfg!(feature = "dev-inspect"));
     for p in ["/api/admin/status", "/api/admin/users", "/api/admin/log", "/api/admin/traces"] {
         let res = app.clone().oneshot(req(Method::GET, p, &session, None)).await.unwrap();
@@ -209,7 +209,8 @@ async fn elevation_attempts_are_rate_limited() {
 async fn a_release_server_without_a_seed_refuses_elevation() {
     let (app, session, _state, _cfg) = common::app_with_logged_in_user_and_state().await;
     let res = app.clone().oneshot(req(Method::GET, "/api/admin/gate", &session, None)).await.unwrap();
-    assert_eq!(json(res).await["totp"], "missing");
+    let v = json(res).await;
+    assert_eq!((&v["require_second_factor"], &v["second_factor"]), (&true.into(), &"none".into()));
     let res = app.oneshot(req(Method::POST, "/api/admin/elevate", &session, Some(r#"{"password":"pw"}"#))).await.unwrap();
     assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
@@ -219,7 +220,7 @@ async fn a_release_server_without_a_seed_refuses_elevation() {
 async fn a_dev_server_without_a_seed_elevates_on_the_password_alone() {
     let (app, session, _state, _cfg) = common::app_with_logged_in_user_and_state().await;
     let res = app.clone().oneshot(req(Method::GET, "/api/admin/gate", &session, None)).await.unwrap();
-    assert_eq!(json(res).await["totp"], "password_only");
+    assert_eq!(json(res).await["require_second_factor"], false);
     let res = app.clone().oneshot(req(Method::POST, "/api/admin/elevate", &session, Some(r#"{"password":"nope"}"#))).await.unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
     let res = app.oneshot(req(Method::POST, "/api/admin/elevate", &session, Some(r#"{"password":"pw"}"#))).await.unwrap();
@@ -455,7 +456,7 @@ async fn inspection_reads_and_edits_user_data() {
 async fn password_only_elevation_skips_the_code_and_still_checks_the_password() {
     let (app, session, state, _cfg) = common::app_with_password_only_admin().await;
     let res = app.clone().oneshot(req(Method::GET, "/api/admin/gate", &session, None)).await.unwrap();
-    assert_eq!(json(res).await["totp"], "password_only");
+    assert_eq!(json(res).await["require_second_factor"], false);
 
     let res = app.clone().oneshot(req(Method::POST, "/api/admin/elevate", &session, Some(r#"{"password":"nope"}"#))).await.unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
@@ -486,7 +487,8 @@ async fn password_only_elevation_is_rate_limited() {
 async fn requiring_totp_still_rejects_a_password_without_a_code() {
     let (app, session, _state, _cfg) = common::app_with_admin_seed(SEED.to_vec()).await;
     let res = app.clone().oneshot(req(Method::GET, "/api/admin/gate", &session, None)).await.unwrap();
-    assert_eq!(json(res).await["totp"], "required");
+    let v = json(res).await;
+    assert_eq!((&v["require_second_factor"], &v["second_factor"]), (&true.into(), &"totp".into()));
     let res = app.oneshot(req(Method::POST, "/api/admin/elevate", &session, Some(r#"{"password":"pw"}"#))).await.unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 }

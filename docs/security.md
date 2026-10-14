@@ -137,16 +137,17 @@ with `note-server totp-generate`; `note-server totp-uri` prints the URI of the
 installed seed.
 
 With no seed and nothing enrolled, a release build keeps that admin out: the
-gate reports `totp: "missing"` and elevation is `503` (enrolment needs no
-elevation, so Settings is the way in). Startup logs `admin_locked`. A
-`dev-inspect` build lets such an account elevate on the password
+gate reports `second_factor: "none"` with `require_second_factor` and
+elevation is `503` (enrolment needs no elevation, so Settings is the way
+in). Startup logs `admin_locked`. A `dev-inspect` build lets such an account
+elevate on the password
 ([development.md](development.md#inspection-build)).
 
 ### Admin routes
 
 | Route | Needs | Effect |
 |---|---|---|
-| `GET /api/admin/gate` | role | `{elevated, expires_at?, second_factor, methods: {passkey, totp}, require_second_factor, totp, inspect}`; `second_factor` is what to ask for (`passkey`, `totp`, `none`), `methods` what the admin holds, `totp` the legacy report (`required`, `password_only`, `missing`) |
+| `GET /api/admin/gate` | role | `{elevated, expires_at?, second_factor, methods: {passkey, totp}, require_second_factor, inspect}`; `second_factor` is what to ask for (`passkey`, `totp`, `none`), `methods` what the admin holds |
 | `POST /api/admin/elevate/challenge` | role | WebAuthn request options; `409` with no passkeys, `503` where passkeys can't run |
 | `POST /api/admin/elevate {password, code?, assertion?}` | role | sets the grant cookie |
 | `POST /api/admin/drop` | role | ends the grant |

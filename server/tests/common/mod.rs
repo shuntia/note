@@ -168,9 +168,16 @@ pub async fn app_with_logged_in_user_and_state() -> (axum::Router, String, AppSt
     build(None).await
 }
 
+#[allow(dead_code)] // only the admin and security suites install a TOTP seed
+fn seeded(seed: Vec<u8>) -> AdminSecrets {
+    let mut secrets = AdminSecrets::default();
+    secrets.totp_seed = Some(seed);
+    secrets
+}
+
 #[allow(dead_code)] // only the admin suite installs a TOTP seed
 pub async fn app_with_admin_seed(seed: Vec<u8>) -> (axum::Router, String, AppState, TempDir) {
-    build_with(None, Some(AdminSecrets::with_seed(seed)), None).await
+    build_with(None, Some(seeded(seed)), None).await
 }
 
 #[allow(dead_code)] // only the admin suite swaps the model
@@ -178,7 +185,7 @@ pub async fn app_with_admin_seed_and_llm(
     seed: Vec<u8>,
     llm: Arc<dyn LLMProvider>,
 ) -> (axum::Router, String, AppState, TempDir) {
-    build_with(Some(llm), Some(AdminSecrets::with_seed(seed)), None).await
+    build_with(Some(llm), Some(seeded(seed)), None).await
 }
 
 #[allow(dead_code)] // only the admin suite elevates on the password alone
@@ -213,7 +220,7 @@ pub async fn app_with_seed_and_passkeys(
 ) -> (axum::Router, String, AppState, TempDir) {
     build_with(
         None,
-        Some(AdminSecrets::with_seed(seed)),
+        Some(seeded(seed)),
         Some(PasskeyService::build(ORIGIN, None, None).0),
     )
     .await
