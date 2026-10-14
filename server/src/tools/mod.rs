@@ -1103,9 +1103,36 @@ fn run(
         order_ops::guard_running(conn, ctx, name, raw)?;
     }
     match find(name).map(|(_, t)| t.exec) {
-        Some(Exec::Dispatch(handler)) => handler(conn, ctx, kind, raw),
+        Some(Exec::Dispatch(handler)) => handler(conn, ctx, kind, raw).map_err(|e| hinted(name, e)),
         _ => Err(ToolError::rejected(format!("{name} is run by the session, not dispatched"))),
     }
+}
+
+/// `(tool prefix, unknown field, the tool that takes it)` for the fields a
+/// model most often hands the wrong tool.
+const ELSEWHERE: &[(&str, &str, &str)] = &[
+    ("task_", "event_id", "schedule_move or schedule_drop"),
+    ("task_update", "task_ids", "task_bulk_update"),
+    ("task_", "date", "plan_tasks"),
+    ("task_", "start", "plan_tasks"),
+    ("task_", "scheduled_at", "plan_tasks"),
+    ("note_write", "category", "memory_write"),
+    ("schedule_", "prompt", "trigger_set"),
+];
+
+/// An unknown-field error, with the tool that takes that field where one
+/// obviously does.
+fn hinted(tool: &str, mut e: ToolError) -> ToolError {
+    if e.kind != "invalid_args" {
+        return e;
+    }
+    let Some(field) = e.message.strip_prefix("unknown field `").and_then(|m| m.split('`').next()) else {
+        return e;
+    };
+    if let Some((_, _, other)) = ELSEWHERE.iter().find(|(t, f, _)| tool.starts_with(t) && *f == field) {
+        e.message.push_str(&format!("; {field} belongs to {other}"));
+    }
+    e
 }
 
 #[cfg(test)]
@@ -1633,6 +1660,19 @@ mod tests {
                 .unwrap_err();
             assert_eq!(e.kind, "forbidden");
         }
+    }
+
+    #[test]
+    fn a_field_handed_the_wrong_tool_names_the_right_one() {
+        let (conn, tmp) = env();
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_update", r#"{"task_id":1,"event_id":4}"#)
+            .unwrap_err();
+        assert_eq!(e.kind, "invalid_args");
+        assert!(e.message.starts_with("unknown field `event_id`"), "{}", e.message);
+        assert!(e.message.ends_with("; event_id belongs to schedule_move or schedule_drop"), "{}", e.message);
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_update", r#"{"task_id":1,"colour":"red"}"#)
+            .unwrap_err();
+        assert!(!e.message.contains("belongs to"), "{}", e.message);
     }
 
     #[test]

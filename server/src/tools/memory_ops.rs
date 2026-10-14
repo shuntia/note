@@ -89,6 +89,7 @@ impl Category {
 pub struct WriteArgs {
     pub op: WriteOp,
     pub id: Option<String>,
+    /// Semantic when an add leaves it out.
     pub category: Option<Category>,
     pub summary: String,
     pub body: String,
@@ -134,10 +135,7 @@ pub fn write(
     };
     match args.op {
         WriteOp::Add => {
-            let cat = args
-                .category
-                .as_ref()
-                .ok_or_else(|| ToolError::rejected("add requires a category"))?;
+            let cat = args.category.as_ref().unwrap_or(&Category::Semantic);
             let id = crate::memory::add_until(conn, ctx.data_dir, ctx.username, &crate::memory::Fact { category: cat.as_str(), summary: &args.summary, body: &args.body, until: args.until.as_deref() }, ctx.vectors.content.as_deref())
             .map_err(|e| ToolError::internal(e.to_string()))?;
             record_source(conn, ctx, &id)?;
@@ -315,9 +313,10 @@ mod tests {
         let e = dispatch(&conn, &ctx(&tmp), SessionKind::Checkin, "memory_write",
             r#"{"op":"add","category":"../../evil","summary":"s","body":"b"}"#).unwrap_err();
         assert_eq!(e.kind, "invalid_args");
-        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Checkin, "memory_write",
-            r#"{"op":"add","summary":"s","body":"b"}"#).unwrap_err();
-        assert_eq!(e.kind, "rejected"); // add without category
+        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "memory_write",
+            r#"{"op":"add","summary":"s","body":"b"}"#).unwrap();
+        let fact = crate::memory::read(tmp.path(), "aki", out["id"].as_str().unwrap()).unwrap().unwrap();
+        assert_eq!(fact.category, "semantic", "an add without a category is semantic");
         let e = dispatch(&conn, &ctx(&tmp), SessionKind::Checkin, "memory_write",
             r#"{"op":"update","summary":"s","body":"b"}"#).unwrap_err();
         assert_eq!(e.kind, "rejected"); // update without id
