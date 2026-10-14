@@ -36,8 +36,8 @@ the prompt no longer applies. Saying nothing is a good outcome.
 ## Wake-ups
 
 You may lay the next wake-up with trigger_set before ending, tied to a moment,
-not a clock tick: `wait_until` when a reply would settle it, `wait_for` when a
-task or event would. Never one that just repeats this check minutes later.
+not a clock tick, with `cancel_on` set to whatever would settle it (a reply, a
+task, an event). Never one that just repeats this check minutes later.
 
 When the day's first wake-up asks you to lay the day, do as its opening says,
 giving each wake-up a prompt that says what you will look at then.

@@ -125,7 +125,7 @@ The calendar also shapes planning:
   can slide, is left out if it can be dropped, and stays if it is `fixed`.
   Either adjustment writes `plan_adjusted`. A moved routine's `orig_wall_time`
   is where the day put it, so its slide window measures from there.
-- `schedule_slide`, `schedule_reshape` and `schedule_insert` refuse a target
+- `schedule_move` and `schedule_insert` refuse a target
   inside a `fixed` occurrence: `10:00 is inside school 08:15-15:30`.
 - The session context's `# Now` gains `Quiet until HH:MM (<title>)` during a
   window, and `# Today's plan` lists the day's occurrences under `Calendar:`

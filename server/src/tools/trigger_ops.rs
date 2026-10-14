@@ -26,56 +26,23 @@ pub struct SetArgs {
     /// Lay it even though another trigger sits within 20 minutes of it.
     #[serde(default)]
     pub also: bool,
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct WaitUntilArgs {
-    /// Zero-padded `HH:MM` on `date`, or `+Nmin` from now.
-    pub at: String,
-    pub prompt: String,
-    /// The conversation whose reply calls the follow-up off. Omit for the day's
-    /// check-in thread, which then cannot call it off.
+    /// What calls it off before it fires: reply, the user writing back in
+    /// `thread` (the day's check-in thread cannot); task, `task_id` finished or
+    /// dropped; event, `event_id` settled.
     #[serde(default)]
-    pub thread: Option<i64>,
-    /// The day `at` falls on, YYYY-MM-DD: today (the default) up to 7 days ahead.
-    #[serde(default)]
-    pub date: Option<String>,
-    /// The IANA zone `at` and `date` are read in, when not the user's own.
-    #[serde(default)]
-    pub tz: Option<String>,
-    /// A pending trigger this one takes the place of; it is dropped.
-    #[serde(default)]
-    pub replace: Option<i64>,
-    /// Lay it even though another trigger sits within 20 minutes of it.
-    #[serde(default)]
-    pub also: bool,
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct WaitForArgs {
-    /// The task whose finish calls the follow-up off.
+    pub cancel_on: Option<CancelOn>,
     #[serde(default)]
     pub task_id: Option<i64>,
-    /// The plan event whose decision calls the follow-up off.
     #[serde(default)]
     pub event_id: Option<i64>,
-    /// How long to wait: zero-padded `HH:MM` on `date`, or `+Nmin` from now.
-    pub until: String,
-    pub prompt: String,
-    /// The day `until` falls on, YYYY-MM-DD: today (the default) up to 7 days ahead.
-    #[serde(default)]
-    pub date: Option<String>,
-    /// The IANA zone `until` and `date` are read in, when not the user's own.
-    #[serde(default)]
-    pub tz: Option<String>,
-    /// A pending trigger this one takes the place of; it is dropped.
-    #[serde(default)]
-    pub replace: Option<i64>,
-    /// Lay it even though another trigger sits within 20 minutes of it.
-    #[serde(default)]
-    pub also: bool,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CancelOn {
+    Reply,
+    Task,
+    Event,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -302,44 +269,18 @@ pub fn set(
         replace: args.replace,
         also: args.also,
     };
-    lay(conn, ctx, kind, &aim, &args.prompt, None, args.thread)
-}
-
-pub fn wait_until(
-    conn: &Connection,
-    ctx: &ToolCtx,
-    kind: SessionKind,
-    args: &WaitUntilArgs,
-) -> Result<serde_json::Value, ToolError> {
-    let aim = Aim {
-        at: &args.at,
-        date: args.date.as_deref(),
-        tz: args.tz.as_deref(),
-        replace: args.replace,
-        also: args.also,
+    let cancel = match (&args.cancel_on, args.task_id, args.event_id) {
+        (None, None, None) => None,
+        (Some(CancelOn::Reply), None, None) => Some(Cancel::Replied),
+        (Some(CancelOn::Task), Some(id), None) => Some(Cancel::TaskDone(id)),
+        (Some(CancelOn::Event), None, Some(id)) => Some(Cancel::EventDecided(id)),
+        _ => {
+            return Err(ToolError::rejected(
+                "task_id goes with cancel_on task, event_id with cancel_on event, and reply takes neither",
+            ))
+        }
     };
-    lay(conn, ctx, kind, &aim, &args.prompt, Some(Cancel::Replied), args.thread)
-}
-
-pub fn wait_for(
-    conn: &Connection,
-    ctx: &ToolCtx,
-    kind: SessionKind,
-    args: &WaitForArgs,
-) -> Result<serde_json::Value, ToolError> {
-    let cancel = match (args.task_id, args.event_id) {
-        (Some(id), None) => Cancel::TaskDone(id),
-        (None, Some(id)) => Cancel::EventDecided(id),
-        _ => return Err(ToolError::rejected("name exactly one of task_id or event_id")),
-    };
-    let aim = Aim {
-        at: &args.until,
-        date: args.date.as_deref(),
-        tz: args.tz.as_deref(),
-        replace: args.replace,
-        also: args.also,
-    };
-    lay(conn, ctx, kind, &aim, &args.prompt, Some(cancel), None)
+    lay(conn, ctx, kind, &aim, &args.prompt, cancel, args.thread)
 }
 
 /// Raises a day's allowance after the user has agreed to it; the receipt says
@@ -483,14 +424,14 @@ mod tests {
     }
 
     #[test]
-    fn the_two_waits_carry_their_own_cancel_rules() {
+    fn cancel_on_carries_its_own_cancel_rule() {
         let (conn, tmp) = env();
         let out = dispatch(
             &conn,
             &ctx(&tmp),
             SessionKind::Checkin,
-            "wait_until",
-            &format!(r#"{{"at":"{}","prompt":"did they answer?"}}"#, soon()),
+            "trigger_set",
+            &format!(r#"{{"at":"{}","prompt":"did they answer?","cancel_on":"reply"}}"#, soon()),
         )
         .unwrap();
         assert_eq!(out["cancel_if"], "replied");
@@ -507,8 +448,8 @@ mod tests {
             &conn,
             &ctx(&tmp),
             SessionKind::Talk,
-            "wait_for",
-            r#"{"task_id":1,"until":"+150min","prompt":"still on the essay?"}"#,
+            "trigger_set",
+            r#"{"task_id":1,"cancel_on":"task","at":"+150min","prompt":"still on the essay?"}"#,
         )
         .unwrap();
         assert_eq!(out["cancel_if"], "task_done");
@@ -517,11 +458,16 @@ mod tests {
             &conn,
             &ctx(&tmp),
             SessionKind::Talk,
-            "wait_for",
-            &format!(r#"{{"task_id":1,"event_id":2,"until":"{}","prompt":"x"}}"#, soon()),
+            "trigger_set",
+            &format!(r#"{{"task_id":1,"event_id":2,"cancel_on":"task","at":"{}","prompt":"x"}}"#, soon()),
         )
         .unwrap_err();
         assert_eq!(e.kind, "rejected");
+        for raw in [r#""task_id":1"#, r#""cancel_on":"event""#, r#""cancel_on":"reply","task_id":1"#] {
+            let args = format!(r#"{{{raw},"at":"{}","prompt":"x"}}"#, soon());
+            let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "trigger_set", &args).unwrap_err();
+            assert_eq!(e.kind, "rejected", "{args}");
+        }
     }
 
     #[test]
@@ -608,8 +554,8 @@ mod tests {
         let (conn, tmp) = env();
         dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "trigger_set",
             &format!(r#"{{"at":"{}","prompt":"ask about the essay"}}"#, soon())).unwrap();
-        dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "wait_until",
-            r#"{"at":"+150min","prompt":"did they answer?"}"#).unwrap();
+        dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "trigger_set",
+            r#"{"at":"+150min","prompt":"did they answer?","cancel_on":"reply"}"#).unwrap();
         let out = dispatch(&conn, &ctx(&tmp), SessionKind::Trigger, "plan_list", "{}").unwrap();
         let rows = out["events"].as_array().unwrap();
         assert_eq!(rows.len(), 2);
@@ -727,7 +673,7 @@ mod tests {
     fn a_time_given_in_another_zone_is_stored_in_the_users_own() {
         let (conn, tmp) = env_in("America/Los_Angeles");
         let there = day_in("America/New_York", 2);
-        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "wait_until",
+        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "trigger_set",
             &format!(r#"{{"at":"11:00","date":"{there}","tz":"America/New_York","prompt":"x"}}"#)).unwrap();
         assert_eq!(placed(&conn, out["event_id"].as_i64().unwrap()), (there.to_string(), "08:00".into()));
         assert_eq!(out["at"], "08:00");

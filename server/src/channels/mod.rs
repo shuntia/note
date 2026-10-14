@@ -104,7 +104,7 @@ pub trait Channel: Send + Sync {
 }
 
 /// Pure rendering of a fired event into a user-facing message; a non-empty
-/// per-event `message` (set by `notify_send`) overrides the generic body.
+/// per-event `message` overrides the generic body.
 pub fn render(conn: &Connection, ev: &crate::runner::FiredEvent, lang: Lang) -> OutboundMessage {
     let (title, mut body, urgency) = if is_checkin(&ev.kind) {
         (text::checkin_title(lang), text::checkin_body(lang, &ev.wall_time), Urgency::High)

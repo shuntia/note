@@ -173,7 +173,7 @@ async fn a_trigger_that_stays_quiet_sends_nothing_and_settles() {
 #[tokio::test]
 async fn a_firing_trigger_may_leave_one_follow_up_behind_inside_its_work_session() {
     let w = world(vec![
-        call("c1", "wait_until", r#"{"at":"+30min","prompt":"still on the chapter?"}"#),
+        call("c1", "trigger_set", r#"{"at":"+30min","prompt":"still on the chapter?","cancel_on":"reply"}"#),
         call("c2", "say", r#"{"text":"half an hour in — how far did you get?"}"#),
     ])
     .await;

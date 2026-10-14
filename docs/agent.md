@@ -74,7 +74,7 @@ check-ins on):
   `close_day_time`. Its session checks the order, sets it if the night left it
   empty or wrong, and lays 4 to 8 wake-ups with `trigger_set`. An undecided one
   is retried once.
-- `trigger_set`, `wait_until` and `wait_for`, from any session that has them.
+- `trigger_set`, from any session that has it.
   These come out of `triggers_per_day` (default 12, 0 to 20); `trigger_budget`
   raises one day's allowance once the user agrees. Triggers inside a work
   session and dropped ones do not count.
@@ -242,11 +242,11 @@ leave partial state.
 | `plan_tasks` | talk, nightly |
 | `plan_carry` | check-in, talk, trigger |
 | `order_set`, `order_move`, `order_drop` | check-in, talk, nightly, trigger |
-| `schedule_slide`, `schedule_snooze`, `schedule_drop`, `schedule_reshape` | check-in, talk, nightly, trigger, call |
-| `schedule_insert`, `notify_send`, `nightly_notes_write` | nightly |
+| `schedule_move`, `schedule_drop` | check-in, talk, nightly, trigger, call |
+| `schedule_insert`, `nightly_notes_write` | nightly |
 | `calendar_list` | check-in, talk, nightly, call, share |
 | `calendar_add`, `calendar_update`, `calendar_remove`, `calendar_skip` | talk, nightly, call |
-| `trigger_set`, `wait_until`, `wait_for` | check-in, talk, nightly, trigger |
+| `trigger_set` | check-in, talk, nightly, trigger |
 | `trigger_budget` | check-in, talk |
 | `web_search` | check-in, talk, nightly, call (with `[search]`) |
 | `batch` | check-in, talk, nightly, trigger, harvest, review |

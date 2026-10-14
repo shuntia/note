@@ -7,7 +7,6 @@ pub mod inbox_ops;
 pub mod memory_ops;
 pub mod note_ops;
 pub mod order_ops;
-pub mod outreach_ops;
 pub mod plan_ops;
 pub mod review_ops;
 pub mod schedule_ops;
@@ -384,19 +383,17 @@ const PLAN_LAY: &[&str] = &["plan_tasks"];
 /// where they are there to make it.
 const PLAN_CARRY: &[&str] = &["plan_carry"];
 const ORDER: &[&str] = &["order_set", "order_move", "order_drop"];
-const SCHEDULE: &[&str] =
-    &["schedule_slide", "schedule_snooze", "schedule_drop", "schedule_reshape"];
+const SCHEDULE: &[&str] = &["schedule_move", "schedule_drop"];
 const SCHEDULE_INSERT: &[&str] = &["schedule_insert"];
 const CALENDAR_READ: &[&str] = &["calendar_list"];
 const CALENDAR_WRITE: &[&str] =
     &["calendar_add", "calendar_update", "calendar_remove", "calendar_skip"];
-const TRIGGERS: &[&str] = &["trigger_set", "wait_until", "wait_for"];
+const TRIGGERS: &[&str] = &["trigger_set"];
 /// Raising the day's budget needs the user's agreement first.
 const TRIGGER_BUDGET: &[&str] = &["trigger_budget"];
 /// Moving the account to another zone follows what the user says, so it lives
 /// where they speak.
 const TIMEZONE: &[&str] = &["timezone_set"];
-const OUTREACH: &[&str] = &["notify_send"];
 /// Ringing the user, which a voice call cannot do to itself.
 const CALL_USER: &[&str] = &["call_user"];
 const NIGHTLY_NOTES: &[&str] = &["nightly_notes_write"];
@@ -438,7 +435,6 @@ const DOMAINS: &[&[&str]] = &[
     TRIGGERS,
     TRIGGER_BUDGET,
     TIMEZONE,
-    OUTREACH,
     CALL_USER,
     NIGHTLY_NOTES,
     SEARCH,
@@ -544,7 +540,6 @@ const NIGHTLY: &[&str] = registry_of![
     CALENDAR_READ,
     CALENDAR_WRITE,
     TRIGGERS,
-    OUTREACH,
     CALL_USER,
     NIGHTLY_NOTES,
     SEARCH,
@@ -822,20 +817,14 @@ const TOOLS: &[ToolSpec] = tools![
          plain text, addressed to the user.",
     "context_edit": context_ops::EditArgs => run!(context_ops::edit);
         "Edit the standing context document: replace a unique snippet or append a line.",
-    "schedule_slide": schedule_ops::SlideArgs => run!(&schedule_ops::slide), writes = true;
-        "Slide a plan event by N minutes (negative = earlier), within its slide window.",
-    "schedule_snooze": schedule_ops::SnoozeArgs => run!(&schedule_ops::snooze), writes = true;
-        "Postpone a plan event's delivery by N minutes without changing the schedule intent.",
+    "schedule_move": schedule_ops::MoveArgs => run!(schedule_ops::move_event), writes = true;
+        "Move a plan event. A routine takes minutes; a block (it has a start and an end, and \
+         never notifies) takes a new start, end or both.",
     "schedule_drop": schedule_ops::DropArgs => run!(&schedule_ops::drop_event), writes = true;
         "Drop a droppable plan event for today. If it is moving rather than going away, add \
          the replacement first and name it in moved_to_event_id.",
-    "schedule_reshape": schedule_ops::ReshapeArgs => run!(schedule_ops::reshape), writes = true;
-        "Move or resize a block on the day's plan. Only blocks have a start and an end, and \
-         they never notify the user.",
     "schedule_insert": schedule_ops::InsertArgs => run!(&schedule_ops::insert);
         "Insert a new event into an existing day plan. A time that has gone by is refused.",
-    "notify_send": outreach_ops::SendArgs => run!(&outreach_ops::send);
-        "Send the user a nudge with this text (delivered within a minute).",
     "nightly_notes_write": context_ops::NightlyNotesArgs => run!(&context_ops::nightly_notes_write);
         "Replace last night's brief for tomorrow's sessions: 5-12 plain lines, no markdown \
          headers, nothing that will read as stale. Every session tomorrow reads it; write it \
@@ -936,15 +925,9 @@ const TOOLS: &[ToolSpec] = tools![
          date lays it on a later day, up to 7 days ahead, spending that day's allowance; tz \
          reads at and date in the IANA zone the user named the time in. Check plan_list \
          first: a trigger within 20 minutes of a pending one is refused with that one named — \
-         reword it with replace set to its id, or pass also when both are wanted.",
-    "wait_until": trigger_ops::WaitUntilArgs => run!(kind &trigger_ops::wait_until), writes = true;
-        "Lay a trigger point that calls itself off if the user writes back in the thread \
-         before it fires — to leave a question open without nagging. date, tz, replace and \
-         also work as in trigger_set.",
-    "wait_for": trigger_ops::WaitForArgs => run!(kind &trigger_ops::wait_for), writes = true;
-        "Lay a trigger point that calls itself off if the task is finished or dropped, or the \
-         plan event settled, before it fires. Name exactly one of them. date, tz, replace and \
-         also work as in trigger_set.",
+         reword it with replace set to its id, or pass also when both are wanted. cancel_on \
+         leaves a question open without nagging: a reply, a finished task or a settled event \
+         calls it off.",
     "trigger_budget": trigger_ops::BudgetArgs => run!(&trigger_ops::budget);
         "Raise a day's check-in budget (today, or date) after the user has agreed to it, \
          never before. reason is what they agreed to.",
@@ -1979,7 +1962,7 @@ mod tests {
                 "{name} has no place on the share surface"
             );
         }
-        for gone in ["memory_query", "memory_read", "memory_write", "context_edit", "task_create", "task_update", "web_search", "batch", "trigger_set", "notify_send"] {
+        for gone in ["memory_query", "memory_read", "memory_write", "context_edit", "task_create", "task_update", "web_search", "batch", "trigger_set"] {
             assert!(!r.contains(&gone), "{gone} leaked into the share registry");
         }
         assert!(is_terminal(SessionKind::Share, "share_note"));
@@ -2063,13 +2046,13 @@ mod tests {
         let t = registry(SessionKind::Trigger);
         for name in [
             "memory_write", "task_update", "task_split", "task_bulk_update", "note_write",
-            "order_set", "order_move", "order_drop", "schedule_reshape", "schedule_drop", "trigger_set",
+            "order_set", "order_move", "order_drop", "schedule_move", "schedule_drop", "trigger_set",
         ] {
             assert!(t.contains(&name), "{name}");
         }
         for name in [
             "calendar_add", "calendar_update", "calendar_remove", "calendar_skip",
-            "schedule_insert", "trigger_budget", "notify_send", "goal_create", "task_delete",
+            "schedule_insert", "trigger_budget", "goal_create", "task_delete",
         ] {
             assert!(!t.contains(&name), "{name}");
         }

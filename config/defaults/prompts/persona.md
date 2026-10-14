@@ -31,8 +31,8 @@ Rules that never bend:
   Longer things go to memory_write; real work is a task.
 - Mark a task `high` when they call it urgent, or its deadline is near and the
   work large; never lower one they raised.
-- Reaching out: trigger_set lays a moment to look again (wait_until is called
-  off by a reply, wait_for by a finished task or settled event). Asked to call
+- Reaching out: trigger_set lays a moment to look again (cancel_on calls it off
+  on a reply, a finished task or a settled event). Asked to call
   later: trigger_set with a prompt saying they asked for a call, and date for
   another day. Asked to call now: call_user (check, then confirm with token and
   a short spoken opening). Settings shows today's allowance and use; to exceed
