@@ -3,6 +3,19 @@ import { api, ApiError } from './api'
 
 afterEach(() => vi.unstubAllGlobals())
 
+test('a memory edit patches the fact and forgetting deletes it', async () => {
+  const fetch = vi.fn(async () => new Response(null, { status: 204 }))
+  vi.stubGlobal('fetch', fetch)
+  await api.memoryEdit('a-b', { summary: 'likes oolong', body: '' })
+  await api.memoryForget('a-b')
+  const calls = fetch.mock.calls as unknown as [string, RequestInit][]
+  expect(calls.map(([path, init]) => [path, init.method])).toEqual([
+    ['/api/memory/a-b', 'PATCH'],
+    ['/api/memory/a-b', 'DELETE'],
+  ])
+  expect(JSON.parse(calls[0][1].body as string)).toEqual({ summary: 'likes oolong', body: '' })
+})
+
 test('the Matrix switches travel with a settings save', async () => {
   const fetch = vi.fn(async () => new Response('{}', { status: 200 }))
   vi.stubGlobal('fetch', fetch)
