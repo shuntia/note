@@ -22,9 +22,10 @@ import { eventFacts, nextUp } from '../events'
 import * as fx from '../fx'
 import { arcPath, Circle, Gauge, STROKE, VB, type ArcLine } from '../gauge'
 import { makeHold } from '../held'
+import { useMedia } from '../hooks'
 import { Jot } from '../jot'
 import { clampStops, clearTimeline, scrollReveal, scrollToY, scrub, travel, type Timeline, type Trigger } from '../homeMotion'
-import { reducedMotion } from '../motion'
+import { REDUCED_MOTION, reducedMotion } from '../motion'
 import { rise } from '../motion-gsap'
 import { NowCounter } from '../nowcounter'
 import { Overflow, type OverflowItem } from '../overflow'
@@ -187,17 +188,6 @@ function Atoms({ text }: { text: string }) {
   )
 }
 
-function useMotion(): boolean {
-  const [on, setOn] = useState(() => !reducedMotion())
-  useEffect(() => {
-    const mq = window.matchMedia('(prefers-reduced-motion: reduce)')
-    const sync = () => setOn(!mq.matches)
-    mq.addEventListener('change', sync)
-    return () => mq.removeEventListener('change', sync)
-  }, [])
-  return on
-}
-
 // After two idle seconds the desktop dims its top bar and a session keeps only its
 // timer and its words (the CSS reads `html.idle`); any sign of a hand brings
 // everything back, over WAKE_MS while `html.waking` is set.
@@ -273,7 +263,7 @@ export function Home({
   const shown = session ?? landing
   const inSession = shown !== null
   const prefs = readPrefs()
-  const motion = useMotion()
+  const motion = !useMedia(REDUCED_MOTION)
   useIdle(!mobile || inSession)
 
   const newest = useState(() => latest<DayView>())[0]

@@ -15,6 +15,7 @@ import type { ViewProps } from '../app'
 import { minutesOf } from '../dayline'
 import { useEscape } from '../escape'
 import { makeHold } from '../held'
+import { useMedia } from '../hooks'
 import { t, type Key } from '../i18n'
 import { month as monthName, weekday } from '../i18n/format'
 import { reducedMotion } from '../motion'
@@ -136,17 +137,6 @@ function BlockMenu({ event, items }: { event: PlanEvent; items: OverflowItem[] }
 
 const bandClass = (o: Occurrence, base: string) =>
   [base, o.entry.kind, o.once ? 'once' : '', o.skipped ? 'skipped' : ''].filter(Boolean).join(' ')
-
-function useMedia(query: string): boolean {
-  const [matches, setMatches] = useState(() => window.matchMedia(query).matches)
-  useEffect(() => {
-    const mq = window.matchMedia(query)
-    const on = () => setMatches(mq.matches)
-    mq.addEventListener('change', on)
-    return () => mq.removeEventListener('change', on)
-  }, [query])
-  return matches
-}
 
 export function CalendarSection({
   notify,

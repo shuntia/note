@@ -19,6 +19,7 @@ import { notice } from './call/tones'
 import { desktop, noticesOn, ringable, systemNotice } from './desktop'
 import { takeMe } from './early'
 import { Jot } from './jot'
+import { useMedia } from './hooks'
 import { glide, lift, viewIn, viewOut } from './motion-gsap'
 import { reducedMotion } from './motion'
 import { NavIcon } from './navicon'
@@ -589,17 +590,6 @@ function Rail({
           ))}
     </nav>
   )
-}
-
-function useMedia(query: string): boolean {
-  const [matches, setMatches] = useState(() => window.matchMedia(query).matches)
-  useEffect(() => {
-    const mq = window.matchMedia(query)
-    const on = () => setMatches(mq.matches)
-    mq.addEventListener('change', on)
-    return () => mq.removeEventListener('change', on)
-  }, [query])
-  return matches
 }
 
 function Login({ onSignedIn }: { onSignedIn: (me: Me) => void }) {

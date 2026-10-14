@@ -15,7 +15,7 @@ import { ComposeButton } from '../call/ComposeButton'
 import { api, ApiError } from '../api'
 import type { ViewProps } from '../app'
 import { t, type Key } from '../i18n'
-import { day } from '../i18n/format'
+import { isoDay } from '../i18n/format'
 import { Markdown } from '../markdown'
 import { reducedMotion } from '../motion'
 import { Overflow } from '../overflow'
@@ -164,12 +164,6 @@ function errorText(err: unknown): string {
   if (!(err instanceof ApiError)) return t('talk.unreachable')
   const key = err.reason && FAILURE_KEYS[err.reason]
   return key ? t(key) : err.message
-}
-
-function shortDate(iso: string): string {
-  const at = new Date(iso)
-  if (Number.isNaN(at.getTime())) return ''
-  return day(at)
 }
 
 const Mark = ({ isError, running }: { isError: boolean; running?: boolean }) => (
@@ -963,7 +957,7 @@ export function Talk({
                         <path d="M19 4h2v16h-2" />
                       </svg>
                     )}
-                    {shortDate(c.updated_at)}
+                    {isoDay(c.updated_at)}
                   </span>
                   <Overflow
                     className="chat-more-wrap"

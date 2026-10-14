@@ -24,6 +24,12 @@ export function day(at: Date, now: Date = new Date()): string {
   })
 }
 
+/** day() of an ISO stamp; empty when it does not parse. */
+export function isoDay(iso: string): string {
+  const at = new Date(iso)
+  return Number.isNaN(at.getTime()) ? '' : day(at)
+}
+
 /** "a, b and c" in the locale's own way of listing. */
 export function list(items: string[]): string {
   return new Intl.ListFormat(activeLocale(), { type: 'conjunction' }).format(items)

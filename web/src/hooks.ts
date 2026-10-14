@@ -37,6 +37,17 @@ export function useLoad<T>(fn: () => Promise<T>, deps: DependencyList, opts: Loa
   return [value, load, setValue] as const
 }
 
+export function useMedia(query: string): boolean {
+  const [matches, setMatches] = useState(() => window.matchMedia(query).matches)
+  useEffect(() => {
+    const mq = window.matchMedia(query)
+    const on = () => setMatches(mq.matches)
+    mq.addEventListener('change', on)
+    return () => mq.removeEventListener('change', on)
+  }, [query])
+  return matches
+}
+
 export type Save = { row?: string; kind: 'busy' | 'saved' | 'failed'; message?: string } | null
 
 /**

@@ -65,17 +65,12 @@ const unwrap = (value: string) =>
     .replace(/^"(.*)"$/s, '$1')
     .trim()
 
-function shortDate(iso: string): string {
-  const at = new Date(iso)
-  return Number.isNaN(at.getTime()) ? '' : format.day(at)
-}
-
 // Day boundaries, not elapsed hours: something saved at 00:30 still reads "today".
 function factDate(iso: string): string {
   const at = new Date(iso)
   if (Number.isNaN(at.getTime())) return ''
   const midnight = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
-  return midnight(at) === midnight(new Date()) ? t('memory.today') : shortDate(iso)
+  return midnight(at) === midnight(new Date()) ? t('memory.today') : format.isoDay(iso)
 }
 
 // The list endpoint has no dates, so the order settles as the rows read theirs back;
@@ -430,7 +425,7 @@ function FactBody({
     <article className="memory-card" ref={cardRef}>
       <h2 className="memory-title">{displaySummary(fact)}</h2>
       <p className="memory-meta">
-        {fact.source === 'note' ? t('memory.builtIn') : t('memory.from', { date: shortDate(fact.created) })}
+        {fact.source === 'note' ? t('memory.builtIn') : t('memory.from', { date: format.isoDay(fact.created) })}
         {fact.archived && <span className="memory-flag">{t('memory.archived')}</span>}
       </p>
       {meta.length > 0 && (
