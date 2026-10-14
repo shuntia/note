@@ -179,8 +179,6 @@ pub enum CallBody {
     Floor { floor: Floor },
     /// Voice → Note: the user cut reply `reply` off; `heard_chars` of its text were played.
     BargeIn { reply: u64, heard_chars: u32 },
-    /// Voice → Note: reply `reply` played through to its end.
-    Played { reply: u64 },
 }
 
 /// `UserQuiet`: VAD sees silence after speech. `Drained`: the playout queue emptied.
@@ -313,7 +311,6 @@ mod tests {
             CallBody::Retract { turn: 2 },
             CallBody::Floor { floor: Floor::UserSpeaking },
             CallBody::BargeIn { reply: 3, heard_chars: 12 },
-            CallBody::Played { reply: 3 },
         ] {
             let s = serde_json::to_string(&body).unwrap();
             assert_eq!(serde_json::from_str::<CallBody>(&s).unwrap(), body, "{s}");

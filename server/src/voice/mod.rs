@@ -821,8 +821,7 @@ impl Handler for NoteHandler {
                     | CallBody::Commit { .. }
                     | CallBody::Retract { .. }
                     | CallBody::Floor { .. }
-                    | CallBody::BargeIn { .. }
-                    | CallBody::Played { .. } => {}
+                    | CallBody::BargeIn { .. } => {}
                 }
             }
             let live = known && state(&tx, call_id)?.as_deref() == Some("answered");

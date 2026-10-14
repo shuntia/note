@@ -3,7 +3,7 @@ mod common;
 
 use common::*;
 use note_voice_proto::testkit::{eventually, fast};
-use note_voice_proto::{CallBody, Direction, LiveState, Media, Origin, Outcome, Pcm, Role, VoiceProfile};
+use note_voice_proto::{CallBody, Direction, Floor, LiveState, Media, Origin, Outcome, Pcm, Role, VoiceProfile};
 use std::sync::atomic::Ordering;
 
 struct Rig {
@@ -64,7 +64,7 @@ async fn a_web_call_answers_at_once_hears_the_caller_and_speaks_through_media() 
         media_of(&r, "w-1").iter().any(|m| matches!(m, Media::AudioOut { pcm, rate: 48_000 } if pcm.0.first() == Some(&spoken_marker("hi"))))
     })
     .await;
-    eventually("played", || rec.bodies("w-1").contains(&CallBody::Played { reply: 1 })).await;
+    eventually("drained", || rec.bodies("w-1").contains(&CallBody::Floor { floor: Floor::Drained })).await;
 
     r.note.peer.send_call("w-1", CallBody::HangUp).unwrap();
     eventually("ended", || rec.bodies("w-1").contains(&CallBody::Ended)).await;

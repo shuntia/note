@@ -465,8 +465,7 @@ impl<S: Fn(CallBody)> Live<S> {
         if let Err(e) = self.send_audio().await {
             return Some(SessionEnd::MediaFailed(format!("{e:#}")));
         }
-        for reply in self.speech.take_finished(&mut self.playout) {
-            (self.send)(CallBody::Played { reply });
+        if !self.speech.take_finished(&mut self.playout).is_empty() {
             self.played_reply = true;
             self.thinking = false;
         }
@@ -1558,7 +1557,6 @@ mod tests {
         let end = tokio::time::timeout(Duration::from_secs(10), &mut c.end).await.unwrap().unwrap();
         assert_eq!(end, SessionEnd::VoiceLost);
         assert!(c.probe.frames_of(JA as usize) >= text(Line::NoVoice, "ja").len(), "the kept line plays");
-        assert!(!c.log().contains(&CallBody::Played { reply: 1 }));
     }
 
     #[tokio::test(start_paused = true)]
@@ -1580,7 +1578,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn speak_play_reaches_the_media_and_reports_played() {
+    async fn speak_play_reaches_the_media_and_reports_the_drained_floor() {
         let c = call(Vec::new(), Vec::new(), true);
         c.frame(CallBody::Speak { reply: 7, idx: 0, text: "hi".into() });
         c.frame(CallBody::SpeakDone { reply: 7 });
@@ -1588,7 +1586,7 @@ mod tests {
         c.synthesized("hi").await;
         sleep_ms(500).await;
         assert_eq!(c.probe.frames_of(2), 2);
-        assert_eq!(c.log(), vec![CallBody::Played { reply: 7 }, CallBody::Floor { floor: Floor::Drained }]);
+        assert_eq!(c.log(), vec![CallBody::Floor { floor: Floor::Drained }]);
     }
 
     /// Lets the TTS thread and the session run while the paused clock stands still.
@@ -1670,7 +1668,6 @@ mod tests {
         sleep_ms(5000).await;
         assert_eq!(c.probe.sent.lock().unwrap().len(), frames, "playout stopped");
         assert_eq!(c.log().len(), sent);
-        assert!(!c.log().contains(&CallBody::Played { reply: 1 }));
     }
 
     #[tokio::test(start_paused = true)]
@@ -1717,7 +1714,6 @@ mod tests {
         assert!(!c.tts.said.lock().unwrap().iter().any(|t| t == "more"), "a dropped reply is not synthesized");
         assert_eq!(c.probe.frames_of(300), played, "the cut reply stays silent");
         assert_eq!(c.probe.frames_of(4), 0, "a late clause of the cut reply is ignored");
-        assert!(!c.log().contains(&CallBody::Played { reply: 3 }));
         assert!(c.log().contains(&CallBody::Commit { turn: 1, text: "wait actually".into(), language: Some("en".into()) }));
     }
 
@@ -1742,7 +1738,6 @@ mod tests {
         sleep_ms(3000).await;
         assert!(!c.tts.said.lock().unwrap().iter().any(|t| t.starts_with('y')), "a late clause of the cut reply is not synthesized");
         assert_eq!(c.probe.frames_of(100), 0);
-        assert!(!c.log().contains(&CallBody::Played { reply: 3 }));
         assert!(c.log().contains(&CallBody::Commit { turn: 1, text: "wait actually".into(), language: Some("en".into()) }));
     }
 
@@ -1764,7 +1759,6 @@ mod tests {
         c.synthesized("ok").await;
         sleep_ms(500).await;
         assert_eq!(c.probe.frames_of(2), 2, "the next reply plays whole");
-        assert!(c.log().contains(&CallBody::Played { reply: 6 }));
     }
 
     #[tokio::test(start_paused = true)]
@@ -1827,7 +1821,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_slow_journal_neither_gaps_the_playout_nor_reorders_frames() {
+    async fn a_slow_journal_does_not_gap_the_playout() {
         use crate::outgoing::CallWriter;
         use note_voice_proto::{testkit::Recording, Dir, MemOutbox, Outbox, Peer, PeerConfig, Role};
 
@@ -1866,8 +1860,7 @@ mod tests {
             send(CallBody::Play { reply });
         }
 
-        let mut expected: Vec<CallBody> = (1..=8).map(|reply| CallBody::Played { reply }).collect();
-        expected.push(CallBody::Floor { floor: Floor::Drained });
+        let expected = vec![CallBody::Floor { floor: Floor::Drained }];
         let journaled = || journal.unacked("c1", 0).unwrap().into_iter().map(|(_, b)| b).collect::<Vec<_>>();
         for _ in 0..300 {
             if journaled().len() >= expected.len() {
@@ -1875,7 +1868,7 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        assert_eq!(journaled(), expected, "every frame is journaled, in order");
+        assert_eq!(journaled(), expected);
 
         let at = probe.sent_at.lock().unwrap().clone();
         assert_eq!(at.len(), 36, "every frame of every reply played");

@@ -10,6 +10,14 @@ use std::path::{Path, PathBuf};
 enum Line {
     Frame { seq: u64, body: CallBody },
     Ack { ack: u64 },
+    Retired { seq: u64, body: Retired },
+}
+
+/// Frames earlier builds journaled that this one no longer sends.
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "k", rename_all = "snake_case")]
+enum Retired {
+    Played { reply: u64 },
 }
 
 #[derive(Default)]
@@ -64,6 +72,12 @@ impl FileOutbox {
                         j.frames.insert(seq, body);
                     }
                     Ok(Line::Ack { ack }) => j.frames.retain(|s, _| *s > ack),
+                    // Keeps the seq so Note sees no gap; Note ignores a ringing frame once the
+                    // call is past ringing, which a retired frame always is.
+                    Ok(Line::Retired { seq, .. }) => {
+                        j.last = j.last.max(seq);
+                        j.frames.insert(seq, CallBody::Ringing);
+                    }
                     Err(_) => break,
                 }
                 good += line.len();
@@ -271,6 +285,23 @@ mod tests {
         assert_eq!(o.unacked("c1", 0).unwrap(), vec![(2, CallBody::Ended)]);
         assert_eq!(o.pending_calls().unwrap(), vec!["c1".to_string()]);
         assert_eq!(o.append("c1", &CallBody::Ringing).unwrap(), 3);
+    }
+
+    #[test]
+    fn a_retired_frame_from_an_earlier_build_replays_without_a_gap() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("c1.out.ndjson"),
+            concat!(
+                r#"{"seq":1,"body":{"k":"played","reply":3}}"#,
+                "\n",
+                r#"{"seq":2,"body":{"k":"ended"}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let o = FileOutbox::open(dir.path()).unwrap();
+        assert_eq!(o.unacked("c1", 0).unwrap(), vec![(1, CallBody::Ringing), (2, CallBody::Ended)]);
     }
 
     #[test]

@@ -47,15 +47,15 @@ mod tests {
         let log = written.clone();
         let writer = CallWriter::spawn(move |body| {
             std::thread::sleep(Duration::from_millis(20));
-            if let CallBody::Played { reply } = body {
-                log.lock().unwrap().push(reply);
+            if let CallBody::Retract { turn } = body {
+                log.lock().unwrap().push(turn);
             }
         })
         .unwrap();
         let send = writer.sender();
         let started = Instant::now();
-        for reply in 1..=10 {
-            send(CallBody::Played { reply });
+        for turn in 1..=10 {
+            send(CallBody::Retract { turn });
         }
         assert!(started.elapsed() < Duration::from_millis(20), "handing over waited on the writes");
         drop(send);

@@ -900,8 +900,7 @@ impl Handler for VoiceHandler {
             | CallBody::Commit { .. }
             | CallBody::Retract { .. }
             | CallBody::Floor { .. }
-            | CallBody::BargeIn { .. }
-            | CallBody::Played { .. } => svc.applied.set_applied(call_id, seq).map_err(|e| e.to_string())?,
+            | CallBody::BargeIn { .. } => svc.applied.set_applied(call_id, seq).map_err(|e| e.to_string())?,
         }
         Ok(())
     }
