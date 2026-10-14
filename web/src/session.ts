@@ -101,8 +101,3 @@ export function phaseLengthSec(s: FocusSession): number | null {
   const min = s.phase === 'break' ? s.break_min : s.work_min
   return min === null ? null : min * 60
 }
-
-export function phaseRemainingSec(s: FocusSession): number {
-  const length = phaseLengthSec(s)
-  return length === null ? 0 : Math.max(0, length - phaseElapsedSec(s))
-}

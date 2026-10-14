@@ -255,7 +255,6 @@ export const api = {
     request<Goal>('/api/goals', { method: 'POST', body: JSON.stringify(fields) }),
   patchGoal: (id: number, patch: GoalPatch) =>
     request<Goal>(`/api/goals/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
-  deleteGoal: (id: number) => request<void>(`/api/goals/${id}`, { method: 'DELETE' }),
   // 401 when `current` is wrong, 422 when the new one is too short.
   changePassword: (current: string, next: string) =>
     request<void>('/api/password', {

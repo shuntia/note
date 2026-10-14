@@ -24,19 +24,9 @@ export function day(at: Date, now: Date = new Date()): string {
   })
 }
 
-/** Sep 30, 2026. */
-export function fullDay(at: Date): string {
-  return at.toLocaleDateString(activeLocale(), { month: 'short', day: 'numeric', year: 'numeric' })
-}
-
 /** "a, b and c" in the locale's own way of listing. */
 export function list(items: string[]): string {
   return new Intl.ListFormat(activeLocale(), { type: 'conjunction' }).format(items)
-}
-
-/** Wednesday, September 30. */
-export function longDay(at: Date): string {
-  return at.toLocaleDateString(activeLocale(), { weekday: 'long', month: 'long', day: 'numeric' })
 }
 
 /** September 30. */
