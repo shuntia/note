@@ -116,7 +116,6 @@ const fn profile(kind: SessionKind) -> SessionProfile {
         SessionKind::Nightly => SessionProfile { then: Some("planning"), ..base },
         SessionKind::Trigger => SessionProfile { then: Some("trigger"), max_turns: TRIGGER_MAX_TURNS, ..base },
         SessionKind::Talk => SessionProfile { max_turns_reply: true, background: false, ..base },
-        SessionKind::Checkin => SessionProfile { max_turns_reply: true, ..base },
     }
 }
 
@@ -1536,7 +1535,6 @@ mod tests {
         }
         for kind in [
             SessionKind::Talk,
-            SessionKind::Checkin,
             SessionKind::Nightly,
             SessionKind::Trigger,
         ] {
@@ -1740,10 +1738,7 @@ mod tests {
             "check",
         )
         .unwrap();
-        assert!(
-            !llm.seen()[0].tool_names.contains(&"web_search".to_string()),
-            "a trigger session searches the user's own world, not the web"
-        );
+        assert!(llm.seen()[0].tool_names.contains(&"web_search".to_string()), "a wake-up may search too");
     }
 
     /// The one trace the session left, as (outcome, turns, `tool_calls`, error, detail).

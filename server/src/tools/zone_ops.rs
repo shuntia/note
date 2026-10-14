@@ -103,7 +103,7 @@ mod tests {
 
     #[test]
     fn only_a_session_the_user_speaks_in_can_move_their_zone() {
-        for kind in [SessionKind::Talk, SessionKind::Checkin, SessionKind::Call] {
+        for kind in [SessionKind::Talk, SessionKind::Call] {
             assert!(registry(kind).contains(&"timezone_set"), "{kind:?}");
         }
         for kind in [SessionKind::Nightly, SessionKind::Trigger, SessionKind::Share, SessionKind::Review] {

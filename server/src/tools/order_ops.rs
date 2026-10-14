@@ -57,7 +57,7 @@ pub(crate) fn held(conn: &Connection, user_id: i64) -> rusqlite::Result<Vec<i64>
 
 /// Refuses a wake-up's edit of the task the user is working on right now.
 pub(crate) fn guard_running(conn: &Connection, ctx: &ToolCtx, name: &str, raw: &str) -> Result<(), ToolError> {
-    if !matches!(name, "task_update" | "task_split" | "task_bulk_update") {
+    if !matches!(name, "task_update" | "task_split" | "task_bulk_update" | "task_delete") {
         return Ok(());
     }
     let args: serde_json::Value = serde_json::from_str(raw).unwrap_or_default();
@@ -256,12 +256,12 @@ mod tests {
 
     #[test]
     fn the_order_tools_reach_the_sessions_that_plan() {
-        for kind in [SessionKind::Talk, SessionKind::Checkin, SessionKind::Nightly] {
+        for kind in [SessionKind::Talk, SessionKind::Nightly, SessionKind::Trigger, SessionKind::Call] {
             for name in ["order_set", "order_move", "order_drop"] {
                 assert!(registry(kind).contains(&name), "{kind:?} {name}");
             }
         }
-        for kind in [SessionKind::Share, SessionKind::Import, SessionKind::Call] {
+        for kind in [SessionKind::Share, SessionKind::Import] {
             assert!(!registry(kind).contains(&"order_set"), "{kind:?}");
         }
     }

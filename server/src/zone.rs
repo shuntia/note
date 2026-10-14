@@ -172,7 +172,7 @@ mod tests {
         rezoned(&conn, &tmp, uid, "2026-10-11T16:00:00Z");
         assert_eq!(row(&conn, id).0, "2026-10-12");
         assert_eq!(row(&conn, id).1, "01:30");
-        assert!(crate::plan::exists(&conn, uid, "2026-10-12".parse().unwrap()).unwrap());
+        assert!(!crate::plan::exists(&conn, uid, "2026-10-12".parse().unwrap()).unwrap(), "a later day waits bare");
     }
 
     #[test]

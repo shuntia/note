@@ -423,7 +423,7 @@ mod tests {
         let out = dispatch(
             &conn,
             &ctx(&tmp),
-            SessionKind::Checkin,
+            SessionKind::Talk,
             "trigger_set",
             &format!(r#"{{"at":"{}","prompt":"did they answer?","cancel_on":"reply"}}"#, soon()),
         )
@@ -587,7 +587,7 @@ mod tests {
         let e = dispatch(&conn, &ctx(&tmp), SessionKind::Trigger, "say", &big).unwrap_err();
         assert_eq!(e.kind, "rejected");
 
-        for kind in [SessionKind::Talk, SessionKind::Checkin, SessionKind::Nightly] {
+        for kind in [SessionKind::Talk, SessionKind::Nightly] {
             let e = dispatch(&conn, &ctx(&tmp), kind, "say", r#"{"text":"hi"}"#).unwrap_err();
             assert_eq!(e.kind, "unknown_tool", "{kind:?} can speak out of turn");
         }

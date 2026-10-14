@@ -24,7 +24,6 @@ use std::sync::OnceLock;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SessionKind {
     Nightly,
-    Checkin,
     Talk,
     /// One imported task, briefed by the agent on its importer's behalf.
     Import,
@@ -363,7 +362,6 @@ const MEMORY_WRITE: &[&str] = &["memory_write"];
 const CONTEXT: &[&str] = &["context_edit"];
 const TASK_READ: &[&str] = &["task_list", "task_search", "task_read"];
 const TASK_TEND: &[&str] = &["task_create", "task_update", "task_split"];
-/// A permanent delete, kept from wake-ups, which drop a task through its state instead.
 const TASK_DELETE: &[&str] = &["task_delete"];
 const TASK_BULK: &[&str] = &["task_bulk_update"];
 const GOALS_WRITE: &[&str] = &["goal_create", "goal_update"];
@@ -466,27 +464,6 @@ macro_rules! registry_of {
     };
 }
 
-const CHECKIN: &[&str] = registry_of![
-    MEMORY_READ,
-    MEMORY_WRITE,
-    TASK_READ,
-    TASK_TEND,
-    TASK_DELETE,
-    GOALS_WRITE,
-    GOALS_READ,
-    NOTES,
-    PLAN_READ,
-    PLAN_CARRY,
-    ORDER,
-    SCHEDULE,
-    CALENDAR_READ,
-    TRIGGERS,
-    TRIGGER_BUDGET,
-    TIMEZONE,
-    CALL_USER,
-    SEARCH,
-    BATCH,
-];
 const TALK: &[&str] = registry_of![
     MEMORY_READ,
     MEMORY_WRITE,
@@ -542,14 +519,19 @@ const TRIGGER: &[&str] = registry_of![
     MEMORY_WRITE,
     TASK_READ,
     TASK_TEND,
+    TASK_DELETE,
     TASK_BULK,
+    GOALS_READ,
     NOTES,
     PLAN_READ,
+    PLAN_LAY,
     PLAN_CARRY,
     ORDER,
     SCHEDULE,
+    CALENDAR_READ,
     TRIGGERS,
     CALL_USER,
+    SEARCH,
     BATCH,
     SPEAK,
 ];
@@ -570,10 +552,14 @@ const CALL: &[&str] = registry_of![
     TASK_READ,
     TASK_TEND,
     TASK_DELETE,
+    TASK_BULK,
     GOALS_WRITE,
     GOALS_READ,
     NOTES,
     PLAN_READ,
+    PLAN_LAY,
+    PLAN_CARRY,
+    ORDER,
     SCHEDULE,
     CALENDAR_READ,
     CALENDAR_WRITE,
@@ -598,7 +584,6 @@ pub fn ends(kind: SessionKind, name: &str, result: &str) -> bool {
 pub fn registry(kind: SessionKind) -> &'static [&'static str] {
     match kind {
         SessionKind::Nightly => NIGHTLY,
-        SessionKind::Checkin => CHECKIN,
         SessionKind::Talk => TALK,
         SessionKind::Import => IMPORT,
         SessionKind::Inbox => INBOX,
@@ -1495,15 +1480,13 @@ mod tests {
         assert_eq!(v.content.unwrap(), direct[0]);
     }
 
-    /// Checkin ⊆ Talk ⊆ Nightly but for `trigger_budget`, `plan_carry` and
+    /// Talk ⊆ Nightly but for `trigger_budget`, `plan_carry` and
     /// `timezone_set`, which live where the user is there to agree to them or
     /// say where they are; a review reads memory with the nightly's own tools
     /// plus the one that ends it; Summarize and Review share nothing with an
     /// import session.
     #[test]
     fn session_surfaces_nest_and_import_stands_apart() {
-        let is_subset = |a: &[&str], b: &[&str]| a.iter().all(|t| b.contains(t));
-        assert!(is_subset(registry(SessionKind::Checkin), registry(SessionKind::Talk)));
         let asks_the_user = |t: &str| matches!(t, "trigger_budget" | "plan_carry" | "timezone_set");
         assert!(registry(SessionKind::Talk)
             .iter()
@@ -1532,9 +1515,8 @@ mod tests {
         }
     }
 
-    const KINDS: [SessionKind; 10] = [
+    const KINDS: [SessionKind; 9] = [
         SessionKind::Nightly,
-        SessionKind::Checkin,
         SessionKind::Talk,
         SessionKind::Import,
         SessionKind::Inbox,
@@ -1643,7 +1625,6 @@ mod tests {
         assert!(registry(SessionKind::Nightly).contains(&"nightly_notes_write"));
         for kind in [
             SessionKind::Talk,
-            SessionKind::Checkin,
             SessionKind::Import,
             SessionKind::Inbox,
             SessionKind::Summarize,
@@ -1656,7 +1637,7 @@ mod tests {
             );
         }
         let (conn, tmp) = env();
-        for kind in [SessionKind::Talk, SessionKind::Checkin] {
+        for kind in [SessionKind::Talk, SessionKind::Trigger] {
             let e = dispatch(&conn, &ctx(&tmp), kind, "nightly_notes_write", r#"{"text":"x"}"#)
                 .unwrap_err();
             assert_eq!(e.kind, "forbidden");
@@ -1956,7 +1937,6 @@ mod tests {
     fn schemas_cover_the_registry_and_are_objects() {
         for kind in [
             SessionKind::Nightly,
-            SessionKind::Checkin,
             SessionKind::Talk,
             SessionKind::Import,
             SessionKind::Inbox,
@@ -2065,17 +2045,18 @@ mod tests {
     }
 
     #[test]
-    fn a_wake_up_tends_the_day_but_never_the_calendar() {
+    fn a_wake_up_tends_the_day_and_reads_but_never_writes_the_calendar() {
         let t = registry(SessionKind::Trigger);
         for name in [
             "memory_write", "task_update", "task_split", "task_bulk_update", "note_write",
             "order_set", "order_move", "order_drop", "schedule_move", "schedule_drop", "trigger_set",
+            "task_delete", "plan_tasks", "calendar_list", "goal_list", "web_search",
         ] {
             assert!(t.contains(&name), "{name}");
         }
         for name in [
             "calendar_add", "calendar_update", "calendar_remove", "calendar_skip",
-            "schedule_insert", "trigger_budget", "goal_create", "task_delete",
+            "schedule_insert", "trigger_budget", "goal_create",
         ] {
             assert!(!t.contains(&name), "{name}");
         }

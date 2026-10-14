@@ -859,11 +859,11 @@ mod tests {
     }
 
     #[test]
-    fn plan_tasks_reaches_talk_and_nightly_only() {
-        for kind in [SessionKind::Talk, SessionKind::Nightly] {
+    fn plan_tasks_reaches_the_sessions_that_tend_the_day() {
+        for kind in [SessionKind::Talk, SessionKind::Nightly, SessionKind::Trigger, SessionKind::Call] {
             assert!(registry(kind).contains(&"plan_tasks"), "{kind:?}");
         }
-        for kind in [SessionKind::Checkin, SessionKind::Import] {
+        for kind in [SessionKind::Share, SessionKind::Import] {
             assert!(!registry(kind).contains(&"plan_tasks"), "{kind:?}");
         }
         let (conn, tmp) = env();
@@ -871,7 +871,7 @@ mod tests {
         let e = dispatch(
             &conn,
             &ctx(&tmp, None),
-            SessionKind::Checkin,
+            SessionKind::Import,
             "plan_tasks",
             &format!(r#"{{"date":"{}","task_ids":[{id}],"start":"09:00"}}"#, tomorrow()),
         )
@@ -922,7 +922,7 @@ mod tests {
         assert_eq!(empty["date"], today().to_string());
         assert!(empty["events"].as_array().unwrap().is_empty());
 
-        for kind in [SessionKind::Talk, SessionKind::Checkin, SessionKind::Nightly] {
+        for kind in [SessionKind::Talk, SessionKind::Nightly] {
             assert!(registry(kind).contains(&"plan_list"), "{kind:?}");
         }
     }

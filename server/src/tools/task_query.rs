@@ -1093,13 +1093,12 @@ mod tests {
     #[test]
     fn the_survey_tools_sit_in_the_right_registries() {
         for name in ["task_list", "task_search", "task_read"] {
-            for kind in [SessionKind::Checkin, SessionKind::Talk, SessionKind::Nightly] {
+            for kind in [SessionKind::Talk, SessionKind::Nightly] {
                 assert!(registry(kind).contains(&name), "{name} missing from {kind:?}");
             }
         }
-        assert!(!registry(SessionKind::Checkin).contains(&"task_bulk_update"));
-        for kind in [SessionKind::Talk, SessionKind::Nightly] {
-            assert!(registry(kind).contains(&"task_bulk_update"));
+        for kind in [SessionKind::Talk, SessionKind::Nightly, SessionKind::Trigger, SessionKind::Call] {
+            assert!(registry(kind).contains(&"task_bulk_update"), "{kind:?}");
         }
         for name in ["task_list", "task_search", "task_read", "task_bulk_update"] {
             assert!(!registry(SessionKind::Import).contains(&name), "{name} reached import");
@@ -1109,7 +1108,7 @@ mod tests {
         let e = dispatch(
             &conn,
             &ctx(&tmp, None),
-            SessionKind::Checkin,
+            SessionKind::Share,
             "task_bulk_update",
             r#"{"task_ids":[1],"state":"done"}"#,
         )

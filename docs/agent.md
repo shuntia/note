@@ -32,7 +32,7 @@ the provider is down.
 
 ## Sessions
 
-Session kinds: talk (`POST /api/talk`), check-in, trigger (a wake-up, below),
+Session kinds: talk (`POST /api/talk`), trigger (a wake-up, below),
 nightly, review, summarize, task briefing and inbox reading
 ([importing.md](importing.md)), share-link visitor
 ([share-links.md](share-links.md)), and voice calls ([voice.md](voice.md)).
@@ -92,7 +92,9 @@ check-ins on):
   nudge.
 
 A wake-up tends tasks, the order, the schedule, working notes and memory
-([tools](#tools)), but cannot delete a task, read goals or touch the calendar.
+([tools](#tools)), lays tasks on the plan, reads goals and the calendar, searches
+the web where search is configured, and deletes a task the user no longer
+wants, but never writes goals or the calendar.
 Each successful task, note, order, schedule, memory or trigger write logs one
 `wake_change` row (`event <id>: <tool> <args>`, args clipped to 300
 characters). It may not edit the task of a running work session, that task's
@@ -235,29 +237,28 @@ leave partial state.
 
 | Tools | Offered to |
 |---|---|
-| `memory_query`, `memory_read` | check-in, talk, nightly, trigger, call, inbox |
-| `memory_write` | check-in, talk, nightly, trigger, call, review |
+| `memory_query`, `memory_read` | talk, nightly, trigger, call, inbox |
+| `memory_write` | talk, nightly, trigger, call, review |
 | `context_edit` | talk, nightly |
-| `task_list`, `task_search`, `task_read` | check-in, talk, nightly, trigger, call, share |
-| `task_create`, `task_update`, `task_split` | check-in, talk, nightly, trigger, call |
-| `task_delete` | check-in, talk, nightly, call |
-| `task_bulk_update` | talk, nightly, trigger |
-| `goal_create`, `goal_update` | check-in, talk, nightly, call |
-| `goal_list` | check-in, talk, nightly, call, share |
-| `note_write` | check-in, talk, nightly, trigger, call |
+| `task_list`, `task_search`, `task_read` | talk, nightly, trigger, call, share |
+| `task_create`, `task_update`, `task_split` | talk, nightly, trigger, call |
+| `task_delete`, `task_bulk_update` | talk, nightly, trigger, call |
+| `goal_create`, `goal_update` | talk, nightly, call |
+| `goal_list` | talk, nightly, trigger, call, share |
+| `note_write` | talk, nightly, trigger, call |
 | `note_settle` | nightly |
-| `plan_list` | check-in, talk, nightly, trigger, call, share |
-| `plan_tasks` | talk, nightly |
-| `plan_carry` | check-in, talk, trigger |
-| `order_set`, `order_move`, `order_drop` | check-in, talk, nightly, trigger |
-| `schedule_move`, `schedule_drop` | check-in, talk, nightly, trigger, call |
+| `plan_list` | talk, nightly, trigger, call, share |
+| `plan_tasks` | talk, nightly, trigger, call |
+| `plan_carry` | talk, trigger, call |
+| `order_set`, `order_move`, `order_drop` | talk, nightly, trigger, call |
+| `schedule_move`, `schedule_drop` | talk, nightly, trigger, call |
 | `schedule_insert`, `nightly_notes_write` | nightly |
-| `calendar_list` | check-in, talk, nightly, call, share |
+| `calendar_list` | talk, nightly, trigger, call, share |
 | `calendar_add`, `calendar_update`, `calendar_remove`, `calendar_skip` | talk, nightly, call |
-| `trigger_set` | check-in, talk, nightly, trigger |
-| `trigger_budget` | check-in, talk |
-| `web_search` | check-in, talk, nightly, call (with `[search]`) |
-| `batch` | check-in, talk, nightly, trigger |
+| `trigger_set` | talk, nightly, trigger, call |
+| `trigger_budget` | talk |
+| `web_search` | talk, nightly, trigger, call (with `[search]`) |
+| `batch` | talk, nightly, trigger |
 | `say`, `stay_quiet` | trigger |
 | `cancel_job`, `hang_up` | call |
 | `task_brief` / `inbox_decide` / `summary_write` / `review_write` / `share_note` | import / inbox / summarize / review / share, each ending its session on success |
@@ -294,7 +295,7 @@ session-ending tool is refused. The model gets back
 ## Web search
 
 `[search]` names a SearXNG instance and turns on `web_search` for talk,
-check-in, nightly and call sessions; without it no session is offered the tool. A
+wake-up, nightly and call sessions; without it no session is offered the tool. A
 call runs the search, then one tool-less model call on the `search` prompt that
 answers the caller's `question` from the hits alone, citing them by number. The
 session sees `{summary, sources}`, or the top five hits raw when the summarizer
