@@ -499,11 +499,12 @@ async fn second_post_with_the_conversation_id_replays_history() {
     assert_eq!(v["reply"], "still here");
 
     let seen = llm.seen();
-    assert_eq!(seen[0].n_messages, 1);
-    assert_eq!(seen[1].n_messages, 3);
+    assert_eq!(seen[0].n_messages, 2);
+    assert_eq!(seen[1].n_messages, 4);
     assert!(matches!(&seen[1].messages[0], Message::User(t) if t == "hi there"));
     assert!(matches!(&seen[1].messages[1], Message::Assistant { text, .. } if text == "hello aki"));
-    assert!(matches!(&seen[1].messages[2], Message::User(t) if t == "you there?"));
+    assert!(matches!(&seen[1].messages[2], Message::User(t) if t.starts_with("<context>")));
+    assert!(matches!(&seen[1].messages[3], Message::User(t) if t == "you there?"));
 }
 
 #[tokio::test]
@@ -519,7 +520,7 @@ async fn a_thread_longer_than_the_window_carries_its_summary_into_the_prompt() {
     let id = {
         let conn = state.db();
         let id = talk::create(&conn, 1, "the essay", at).unwrap();
-        for i in 0..40 {
+        for i in 0..50 {
             talk::append_text(&conn, id, "user", &format!("turn {i}"), at).unwrap();
         }
         talk::store_summary(&conn, id, "Aki worked through the essay outline.", 10, at).unwrap();
@@ -540,11 +541,11 @@ async fn a_thread_longer_than_the_window_carries_its_summary_into_the_prompt() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
-    let system = &llm.seen()[0].system;
-    assert!(
-        system.contains("Earlier in this conversation: Aki worked through the essay outline."),
-        "{system}"
-    );
+    let seen = &llm.seen()[0];
+    assert_eq!(seen.n_messages, 34 + 2, "the window starts on a step: turns 16 to 49");
+    assert!(matches!(&seen.messages[0], note_server::providers::Message::User(t) if t == "turn 16"));
+    let note_server::providers::Message::User(context) = &seen.messages[34] else { panic!("{:?}", seen.messages) };
+    assert!(context.contains("Earlier in this conversation: Aki worked through the essay outline."), "{context}");
 }
 
 #[tokio::test]
@@ -579,7 +580,7 @@ async fn a_short_thread_needs_no_summary_in_the_prompt() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
-    assert!(!llm.seen()[0].system.contains("Earlier in this conversation"));
+    assert!(!format!("{:?}", llm.seen()[0].messages).contains("Earlier in this conversation"));
 }
 
 #[tokio::test]

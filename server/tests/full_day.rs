@@ -110,7 +110,14 @@ fn a_full_simulated_day() {
         assert!(debrief.contains("checkin at nine"));
     }
     // the agent planned against the simulated day, not the wall clock
-    let nightly_system = &nightly_llm.seen()[0].system;
+    let nightly_system = nightly_llm.seen()[0]
+        .messages
+        .iter()
+        .find_map(|m| match m {
+            note_server::providers::Message::User(t) if t.starts_with("<context>") => Some(t.clone()),
+            _ => None,
+        })
+        .expect("the nightly session reads its context");
     let header = now.to_zoned(tokyo.clone()).strftime("%A %Y-%m-%d %H:%M Asia/Tokyo UTC+09:00").to_string();
     assert!(nightly_system.contains(&header), "{nightly_system}");
     let plan_section = nightly_system.split("# Today's plan").nth(1).unwrap();

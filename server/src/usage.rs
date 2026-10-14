@@ -72,11 +72,13 @@ pub fn record(usage: Usage) {
 
 /// What this thread's open meter counted since it opened or was last taken from.
 pub fn take() -> Usage {
-    OPEN.with(|open| open.get().map(|total| {
-        open.set(Some(Usage::default()));
-        total
-    }))
-    .unwrap_or_default()
+    OPEN.with(|open| {
+        let total = open.get();
+        if total.is_some() {
+            open.set(Some(Usage::default()));
+        }
+        total.unwrap_or_default()
+    })
 }
 
 /// Counts every provider call made on this thread while it lives. A meter
