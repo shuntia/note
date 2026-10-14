@@ -78,17 +78,27 @@ fn weekday_key(date: jiff::civil::Date) -> &'static str {
 }
 
 /// Creates the plan for `user_id`/`date` from `template`'s events matching that
-/// weekday. Returns the existing plan id without inserting events again if a
-/// plan for that (user, date) already exists.
+/// weekday. An existing plan is returned as it is, unless it is a bare one laid
+/// early for a far-off trigger, which the template fills now.
 pub fn generate(conn: &Connection, user_id: i64, template: &Template, date: jiff::civil::Date) -> Result<i64> {
-    let existing: Option<i64> = conn
+    let existing: Option<(i64, bool)> = conn
         .query_row(
-            "SELECT id FROM plans WHERE user_id = ?1 AND date = ?2",
-            (user_id, date.to_string()), |r| r.get(0),
+            "SELECT id, bare FROM plans WHERE user_id = ?1 AND date = ?2",
+            (user_id, date.to_string()), |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
-    if let Some(id) = existing {
-        return Ok(id);
+    match existing {
+        Some((id, false)) => return Ok(id),
+        Some((id, true)) => {
+            let tx = conn.is_autocommit().then(|| conn.unchecked_transaction()).transpose()?;
+            fill(conn, user_id, id, template, date)?;
+            conn.execute("UPDATE plans SET bare = 0 WHERE id = ?1", [id])?;
+            if let Some(tx) = tx {
+                tx.commit()?;
+            }
+            return Ok(id);
+        }
+        None => {}
     }
     // Plan creation and its events insert as one unit: a failure partway through
     // (e.g. an invalid flexibility value from a hand-edited template) must roll
@@ -103,6 +113,14 @@ pub fn generate(conn: &Connection, user_id: i64, template: &Template, date: jiff
         (user_id, date.to_string(), jiff::Timestamp::now().to_string()),
     )?;
     let plan_id = conn.last_insert_rowid();
+    fill(conn, user_id, plan_id, template, date)?;
+    if let Some(tx) = tx {
+        tx.commit()?;
+    }
+    Ok(plan_id)
+}
+
+fn fill(conn: &Connection, user_id: i64, plan_id: i64, template: &Template, date: jiff::civil::Date) -> Result<()> {
     let day = weekday_key(date);
     let today: Vec<&crate::templates::TemplateEvent> =
         template.events.iter().filter(|e| e.days.iter().any(|d| d == day)).collect();
@@ -117,10 +135,38 @@ pub fn generate(conn: &Connection, user_id: i64, template: &Template, date: jiff
             ),
         )?;
     }
-    if let Some(tx) = tx {
-        tx.commit()?;
+    Ok(())
+}
+
+/// The plan an event laid ahead of its day hangs from: today's in full, a later
+/// day's bare until that day is generated for real, so the template it gets is
+/// the one in force then.
+pub fn holding(
+    conn: &Connection,
+    config_dir: &std::path::Path,
+    username: &str,
+    user_id: i64,
+    date: jiff::civil::Date,
+    today: jiff::civil::Date,
+) -> Result<i64> {
+    if date > today {
+        Ok(bare(conn, user_id, date)?)
+    } else {
+        ensure(conn, config_dir, username, user_id, date)
     }
-    Ok(plan_id)
+}
+
+fn bare(conn: &Connection, user_id: i64, date: jiff::civil::Date) -> rusqlite::Result<i64> {
+    conn.execute(
+        "INSERT INTO plans (user_id, date, created_at, bare) VALUES (?1, ?2, ?3, 1)
+         ON CONFLICT (user_id, date) DO NOTHING",
+        (user_id, date.to_string(), jiff::Timestamp::now().to_string()),
+    )?;
+    conn.query_row(
+        "SELECT id FROM plans WHERE user_id = ?1 AND date = ?2",
+        (user_id, date.to_string()),
+        |r| r.get(0),
+    )
 }
 
 /// Where today's template entries start once the user's fixed commitments are
@@ -175,7 +221,7 @@ pub fn ensure(
 ) -> Result<i64> {
     let existing: Option<i64> = conn
         .query_row(
-            "SELECT id FROM plans WHERE user_id = ?1 AND date = ?2",
+            "SELECT id FROM plans WHERE user_id = ?1 AND date = ?2 AND bare = 0",
             (user_id, date.to_string()),
             |r| r.get(0),
         )
@@ -190,11 +236,11 @@ pub fn ensure(
     generate(conn, user_id, &template, date)
 }
 
-/// Whether that day has a plan at all, without reading its events.
+/// Whether that day has been planned, without reading its events.
 pub fn exists(conn: &Connection, user_id: i64, date: jiff::civil::Date) -> rusqlite::Result<bool> {
     Ok(conn
         .query_row(
-            "SELECT 1 FROM plans WHERE user_id = ?1 AND date = ?2",
+            "SELECT 1 FROM plans WHERE user_id = ?1 AND date = ?2 AND bare = 0",
             (user_id, date.to_string()),
             |_| Ok(()),
         )
@@ -924,7 +970,7 @@ mod tests {
             &crate::triggers::Lay {
                 config_dir: tmp.path(), user_id: uid, username: "aki", at: "22:00",
                 prompt: "how did the essay go?", date, cancel: None, conversation_id: None,
-                work_session_id: None, system: false, past_session: false, now,
+                work_session_id: None, system: false, now,
             },
         )
         .unwrap();

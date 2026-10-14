@@ -514,7 +514,6 @@ fn lay_session_wake(
             conversation_id: session.conversation_id,
             work_session_id: Some(session.id),
             system: false,
-            past_session: false,
             now,
         },
     );
@@ -1171,7 +1170,6 @@ mod tests {
                 conversation_id: None,
                 work_session_id: None,
                 system: false,
-                past_session: false,
                 now: at("2026-09-17T09:00:00Z"),
             },
         )

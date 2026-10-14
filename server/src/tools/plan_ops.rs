@@ -61,7 +61,7 @@ fn today(ctx: &ToolCtx) -> jiff::civil::Date {
 fn plan_row(conn: &Connection, ctx: &ToolCtx, date: jiff::civil::Date) -> Result<i64, ToolError> {
     let existing: Option<i64> = conn
         .query_row(
-            "SELECT id FROM plans WHERE user_id = ?1 AND date = ?2",
+            "SELECT id FROM plans WHERE user_id = ?1 AND date = ?2 AND bare = 0",
             (ctx.user_id, date.to_string()),
             |r| r.get(0),
         )

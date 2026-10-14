@@ -7,14 +7,10 @@ use std::fmt::Write as _;
 
 /// The event kind a trigger point carries on the day's plan.
 pub const KIND: &str = "trigger";
-/// How far ahead a trigger must be laid, so it is never a nudge about now.
-pub const MIN_LEAD_MIN: i64 = 10;
 /// How far past a work session's planned end its own checks may still reach.
 pub const OVERRUN_MIN: i64 = 15;
 /// The furthest ahead a `+Nmin` offset may reach; a later day is named by date.
 pub const MAX_OFFSET_MIN: i64 = 24 * 60;
-/// How many days past today a trigger's date may name.
-pub const MAX_DAYS_AHEAD: i64 = 7;
 /// Two pending triggers closer than this are one follow-up laid twice.
 pub const NEAR_MIN: i64 = 20;
 pub const MAX_PROMPT_BYTES: usize = 1000;
@@ -28,7 +24,6 @@ pub const MAX_EXTRA: u32 = 10;
 #[derive(Debug)]
 pub enum Refusal {
     CapReached { date: jiff::civil::Date, allowance: u32, spent: u32 },
-    TooSoon { minutes: i64 },
     Past { at: String },
     NotFound(String),
     Rejected(String),
@@ -231,16 +226,12 @@ pub struct Lay<'a> {
     pub cancel: Option<Cancel>,
     pub conversation_id: Option<i64>,
     /// The session this check belongs to, named by the server for a session
-    /// that is already closed. It carries the session's exemptions: no lead
-    /// time, and no call on the day's budget.
+    /// that is already closed; it costs the day's budget nothing.
     pub work_session_id: Option<i64>,
     /// A check the server lays for a ritual of its own rather than one the
     /// agent chose: it is the day's furniture, so it is exempt from the budget
-    /// and from the lead time, and never belongs to an open session.
+    /// and never belongs to an open session.
     pub system: bool,
-    /// Set for a wake-up: a check past the open work session's end is laid for
-    /// the day instead of refused.
-    pub past_session: bool,
     pub now: jiff::Timestamp,
 }
 
@@ -316,9 +307,9 @@ pub fn near(
     Ok(best.map(|(_, n)| n))
 }
 
-/// Lays one trigger point, refusing on the day's budget, on a time already gone
-/// and on a time too close to be anything but a nudge about now. A trigger laid
-/// while a work session runs belongs to that session and never counts.
+/// Lays one trigger point, refusing on the day's budget and on a time already
+/// gone. A trigger laid for today within an open work session's reach belongs
+/// to that session and never counts; one beyond it is the day's.
 pub fn lay(conn: &Connection, lay: &Lay) -> Result<Laid, Refusal> {
     let prompt = lay.prompt.trim();
     if prompt.is_empty() || prompt.len() > MAX_PROMPT_BYTES {
@@ -332,37 +323,18 @@ pub fn lay(conn: &Connection, lay: &Lay) -> Result<Laid, Refusal> {
     let wall = format!("{:02}:{:02}", target / 60, target % 60);
 
     let lead = lead_minutes(date, target, &local);
-    let for_the_day = lay.past_session || date > local.date();
-    let session = open_work_session(conn, lay.user_id).map_err(internal)?.filter(|s| {
-        !(for_the_day && overrun_lead(s, lay.now).is_some_and(|limit| lead > limit))
-    });
     if lead < 0 {
         return Err(Refusal::Past { at: wall });
     }
-    if lay.work_session_id.is_none() && !lay.system && lead < MIN_LEAD_MIN {
-        return Err(Refusal::TooSoon { minutes: lead });
-    }
-    match (&lay.work_session_id, &session) {
-        (Some(_), _) => {}
-        _ if lay.system => {}
-        (None, Some(s)) => {
-            if let Some(limit) = overrun_lead(s, lay.now) {
-                if lead > limit {
-                    return Err(Refusal::Rejected(format!(
-                        "{wall} is more than {OVERRUN_MIN} min past the end of the work session \
-                         on {:?}",
-                        s.title
-                    )));
-                }
-            }
-        }
-        (None, None) => {
-            let allowance = allowance(conn, lay.config_dir, lay.username, lay.user_id, date)
-                .map_err(internal)?;
-            let spent = spent(conn, lay.user_id, date).map_err(internal)?;
-            if spent >= allowance {
-                return Err(Refusal::CapReached { date, allowance, spent });
-            }
+    let session = open_work_session(conn, lay.user_id).map_err(internal)?.filter(|s| {
+        date == local.date() && overrun_lead(s, lay.now).is_none_or(|limit| lead <= limit)
+    });
+    if lay.work_session_id.is_none() && !lay.system && session.is_none() {
+        let allowance = allowance(conn, lay.config_dir, lay.username, lay.user_id, date)
+            .map_err(internal)?;
+        let spent = spent(conn, lay.user_id, date).map_err(internal)?;
+        if spent >= allowance {
+            return Err(Refusal::CapReached { date, allowance, spent });
         }
     }
     if let Some(id) = lay.conversation_id {
@@ -381,7 +353,7 @@ pub fn lay(conn: &Connection, lay: &Lay) -> Result<Laid, Refusal> {
         }
     }
 
-    let plan_id = crate::plan::ensure(conn, lay.config_dir, lay.username, lay.user_id, date)
+    let plan_id = crate::plan::holding(conn, lay.config_dir, lay.username, lay.user_id, date, local.date())
         .map_err(internal)?;
     let event_id = insert(
         conn,
@@ -443,7 +415,6 @@ pub fn lay_close_day(
             conversation_id: None,
             work_session_id: None,
             system: true,
-            past_session: false,
             now,
         },
     );
@@ -924,13 +895,12 @@ mod tests {
             conversation_id: None,
             work_session_id: None,
             system: false,
-            past_session: false,
             now: at("2026-09-17T09:00:00Z"),
         }
     }
 
     #[test]
-    fn a_system_trigger_stands_outside_the_budget_and_the_lead_time() {
+    fn a_system_trigger_stands_outside_the_budget() {
         let (conn, tmp, uid) = env();
         for hour in 10..14 {
             lay(&conn, &lay_at(&tmp, uid, &format!("{hour}:00"))).unwrap();
@@ -939,10 +909,6 @@ mod tests {
         assert!(matches!(
             lay(&conn, &lay_at(&tmp, uid, "15:00")),
             Err(Refusal::CapReached { .. })
-        ));
-        assert!(matches!(
-            lay(&conn, &lay_at(&tmp, uid, "09:05")),
-            Err(Refusal::TooSoon { .. })
         ));
 
         let system = Lay { system: true, ..lay_at(&tmp, uid, "09:05") };
@@ -1092,13 +1058,11 @@ mod tests {
     }
 
     #[test]
-    fn a_time_gone_by_or_too_close_is_refused() {
+    fn a_time_gone_by_is_refused_and_one_close_is_laid() {
         let (conn, tmp, uid) = env();
         let e = lay(&conn, &lay_at(&tmp, uid, "08:00")).unwrap_err();
         assert!(matches!(e, Refusal::Past { .. }), "got {e:?}");
-        let e = lay(&conn, &lay_at(&tmp, uid, "09:05")).unwrap_err();
-        assert!(matches!(e, Refusal::TooSoon { minutes: 5 }), "got {e:?}");
-        lay(&conn, &lay_at(&tmp, uid, "09:10")).unwrap();
+        lay(&conn, &lay_at(&tmp, uid, "09:01")).unwrap();
         assert_eq!(spent(&conn, uid, date()).unwrap(), 1);
     }
 
@@ -1122,7 +1086,7 @@ mod tests {
     }
 
     #[test]
-    fn a_work_session_check_never_counts_and_stops_at_the_planned_end() {
+    fn a_work_session_check_never_counts_until_past_the_planned_end() {
         let (conn, tmp, uid) = env();
         conn.execute(
             "INSERT INTO work_sessions (user_id, title, planned_min, started_at)
@@ -1130,14 +1094,12 @@ mod tests {
             [uid],
         )
         .unwrap();
-        for hour in 11..16 {
-            lay(&conn, &lay_at(&tmp, uid, &format!("{hour}:00"))).unwrap_err();
-        }
         // 08:55 + 60 + 15 = 10:10 is the last minute its own checks may reach
-        lay(&conn, &lay_at(&tmp, uid, "10:11")).unwrap_err();
         lay(&conn, &lay_at(&tmp, uid, "10:10")).unwrap();
         lay(&conn, &lay_at(&tmp, uid, "09:30")).unwrap();
         assert_eq!(spent(&conn, uid, date()).unwrap(), 0, "the session's checks are its own");
+        lay(&conn, &lay_at(&tmp, uid, "10:11")).unwrap();
+        assert_eq!(spent(&conn, uid, date()).unwrap(), 1, "past its reach the day pays");
         let held: i64 = conn
             .query_row("SELECT COUNT(*) FROM events WHERE work_session_id = 1", [], |r| r.get(0))
             .unwrap();
@@ -1245,7 +1207,7 @@ mod tests {
     }
 
     #[test]
-    fn a_wake_up_past_the_sessions_end_is_laid_for_the_day() {
+    fn a_check_past_the_sessions_end_is_laid_for_the_day() {
         let (conn, tmp, uid) = env();
         conn.execute(
             "INSERT INTO work_sessions (user_id, title, planned_min, started_at)
@@ -1256,12 +1218,27 @@ mod tests {
         let session_of = |id: i64| -> Option<i64> {
             conn.query_row("SELECT work_session_id FROM events WHERE id = ?1", [id], |r| r.get(0)).unwrap()
         };
-        let later = lay(&conn, &Lay { past_session: true, ..lay_at(&tmp, uid, "15:00") }).unwrap();
+        let later = lay(&conn, &lay_at(&tmp, uid, "15:00")).unwrap();
         assert_eq!(session_of(later.event_id), None);
-        assert_eq!(spent(&conn, uid, date()).unwrap(), 1, "a day wake-up spends the day's budget");
-        let inside = lay(&conn, &Lay { past_session: true, ..lay_at(&tmp, uid, "09:30") }).unwrap();
+        assert_eq!(spent(&conn, uid, date()).unwrap(), 1, "past the session it spends the day's budget");
+        let inside = lay(&conn, &lay_at(&tmp, uid, "09:30")).unwrap();
         assert_eq!(session_of(inside.event_id), Some(1), "inside the session it is the session's");
-        assert!(lay(&conn, &lay_at(&tmp, uid, "15:00")).is_err(), "outside a wake-up it is still refused");
+    }
+
+    #[test]
+    fn a_trigger_months_ahead_is_laid_on_its_own_day() {
+        let (conn, tmp, uid) = env();
+        let far: jiff::civil::Date = "2027-03-02".parse().unwrap();
+        let laid = lay(&conn, &Lay { date: far, ..lay_at(&tmp, uid, "09:15") }).unwrap();
+        let day: String = conn
+            .query_row(
+                "SELECT p.date FROM plans p JOIN events e ON e.plan_id = p.id WHERE e.id = ?1",
+                [laid.event_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(day, "2027-03-02");
+        assert_eq!(spent(&conn, uid, far).unwrap(), 1);
     }
 
     #[test]

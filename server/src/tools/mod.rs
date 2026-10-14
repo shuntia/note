@@ -78,9 +78,6 @@ impl ToolError {
     pub fn cap_reached(m: impl Into<String>) -> Self {
         Self::of("cap_reached")(m.into())
     }
-    pub fn too_soon(m: impl Into<String>) -> Self {
-        Self::of("too_soon")(m.into())
-    }
     pub fn past(m: impl Into<String>) -> Self {
         Self::of("past")(m.into())
     }

@@ -90,7 +90,7 @@ pub fn rezone(
             let (end_date, end_wall) = civil(at, &new);
             if end_date > date { "23:59".to_string() } else { end_wall }
         });
-        let plan_id = crate::plan::ensure(conn, config_dir, username, user_id, date)?;
+        let plan_id = crate::plan::holding(conn, config_dir, username, user_id, date, now.to_zoned(new.clone()).date())?;
         conn.execute(
             "UPDATE events SET plan_id = ?1, wall_time = ?2, orig_wall_time = ?3, end_wall_time = ?4
              WHERE id = ?5",
