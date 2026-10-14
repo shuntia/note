@@ -84,8 +84,9 @@ check-ins on):
   generated from the template in force then. These come out of the day's
   `triggers_per_day` (default 12, 0 to 20); `trigger_budget` raises one day's
   allowance, to at most twice it, once the user agrees. Triggers laid today
-  within a work session's planned length plus 15 minutes, and dropped ones, do
-  not count. A wake-up that ends in plain text instead of a tool says that
+  within a work session's planned length plus 15 minutes (any time today when
+  it named none) belong to the session and do not count until it holds 8,
+  its own checks included; dropped ones never count. A wake-up that ends in plain text instead of a tool says that
   text. The context lists today's and tomorrow's pending triggers; later ones
   only as a count and the next one's moment.
 - Idle: after `idle_nudge_min` (default 20; 0 is off) minutes without a sign of

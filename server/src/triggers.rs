@@ -18,6 +18,9 @@ pub const MAX_SAY_BYTES: usize = 1200;
 /// How much of the thread a firing trigger reads.
 pub const HISTORY_TURNS: usize = 12;
 pub const MAX_EXTRA: u32 = 10;
+/// Session-tied triggers a work session may hold, its own checks included,
+/// before the model's next one there is charged to the day's budget.
+pub const MAX_FREE_PER_SESSION: i64 = 8;
 
 /// Why a trigger was not laid. `CapReached` names the way out, because the
 /// model's next move is to ask the user rather than to try again.
@@ -78,8 +81,8 @@ pub struct WorkSession {
 }
 
 /// The user's session in progress, if one is open. A trigger laid while one
-/// runs belongs to it: accountability is the point, so those checks are
-/// uncapped and end with the session.
+/// runs belongs to it: accountability is the point, so those checks stay off
+/// the day's budget up to `MAX_FREE_PER_SESSION` and end with the session.
 pub fn open_work_session(conn: &Connection, user_id: i64) -> rusqlite::Result<Option<WorkSession>> {
     conn.query_row(
         "SELECT id, title, planned_min, started_at FROM work_sessions
@@ -309,7 +312,8 @@ pub fn near(
 
 /// Lays one trigger point, refusing on the day's budget and on a time already
 /// gone. A trigger laid for today within an open work session's reach belongs
-/// to that session and never counts; one beyond it is the day's.
+/// to that session and never counts, until the session holds
+/// `MAX_FREE_PER_SESSION`; one beyond either is the day's.
 pub fn lay(conn: &Connection, lay: &Lay) -> Result<Laid, Refusal> {
     let prompt = lay.prompt.trim();
     if prompt.is_empty() || prompt.len() > MAX_PROMPT_BYTES {
@@ -326,9 +330,12 @@ pub fn lay(conn: &Connection, lay: &Lay) -> Result<Laid, Refusal> {
     if lead < 0 {
         return Err(Refusal::Past { at: wall });
     }
-    let session = open_work_session(conn, lay.user_id).map_err(internal)?.filter(|s| {
+    let session = match open_work_session(conn, lay.user_id).map_err(internal)?.filter(|s| {
         date == local.date() && overrun_lead(s, lay.now).is_none_or(|limit| lead <= limit)
-    });
+    }) {
+        Some(s) if session_held(conn, s.id).map_err(internal)? < MAX_FREE_PER_SESSION => Some(s),
+        _ => None,
+    };
     if lay.work_session_id.is_none() && !lay.system && session.is_none() {
         let allowance = allowance(conn, lay.config_dir, lay.username, lay.user_id, date)
             .map_err(internal)?;
@@ -375,6 +382,15 @@ pub fn lay(conn: &Connection, lay: &Lay) -> Result<Laid, Refusal> {
     )
     .map_err(internal)?;
     Ok(Laid { event_id, at: wall, cancel_if: lay.cancel.map(|c| c.as_str()) })
+}
+
+/// Every trigger ever tied to this work session, whatever became of it.
+fn session_held(conn: &Connection, session_id: i64) -> rusqlite::Result<i64> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM events WHERE kind = ?1 AND work_session_id = ?2",
+        (KIND, session_id),
+        |r| r.get(0),
+    )
 }
 
 /// A pending trigger as the model is shown it.
@@ -1255,6 +1271,30 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM events WHERE work_session_id = 1", [], |r| r.get(0))
             .unwrap();
         assert_eq!(held, 2);
+    }
+
+    #[test]
+    fn a_loop_of_immediate_lays_in_a_session_stops_being_free_at_the_cap() {
+        let (conn, tmp, uid) = env();
+        conn.execute(
+            "INSERT INTO work_sessions (user_id, title, started_at)
+             VALUES (?1, 'read the chapter', '2026-09-17T08:55:00Z')",
+            [uid],
+        )
+        .unwrap();
+        for _ in 0..MAX_FREE_PER_SESSION {
+            let laid = lay(&conn, &lay_at(&tmp, uid, "+0min")).unwrap();
+            conn.execute("UPDATE events SET status = 'done' WHERE id = ?1", [laid.event_id]).unwrap();
+        }
+        assert_eq!(spent(&conn, uid, date()).unwrap(), 0);
+        for n in 1..=4 {
+            lay(&conn, &lay_at(&tmp, uid, "+0min")).unwrap();
+            assert_eq!(spent(&conn, uid, date()).unwrap(), n);
+        }
+        assert!(matches!(
+            lay(&conn, &lay_at(&tmp, uid, "+0min")).unwrap_err(),
+            Refusal::CapReached { .. }
+        ));
     }
 
     #[test]
