@@ -377,6 +377,47 @@ pub fn lay(conn: &Connection, lay: &Lay) -> Result<Laid, Refusal> {
     Ok(Laid { event_id, at: wall, cancel_if: lay.cancel.map(|c| c.as_str()) })
 }
 
+/// A pending trigger as the model is shown it.
+#[derive(Debug)]
+pub struct Waiting {
+    pub event_id: i64,
+    pub date: String,
+    pub at: String,
+    pub prompt: String,
+}
+
+/// Up to `limit` pending triggers dated `from` through `to`, soonest first, and
+/// how many more there are past those in that span.
+pub fn waiting(
+    conn: &Connection,
+    user_id: i64,
+    from: jiff::civil::Date,
+    to: Option<jiff::civil::Date>,
+    limit: usize,
+) -> rusqlite::Result<(Vec<Waiting>, usize)> {
+    let to = to.map_or_else(|| "9999-12-31".to_string(), |d| d.to_string());
+    let mut stmt = conn.prepare_cached(
+        "SELECT e.id, p.date, e.wall_time, COALESCE(e.prompt, '') FROM events e JOIN plans p ON p.id = e.plan_id
+         WHERE p.user_id = ?1 AND e.kind = ?2 AND e.status IN ('pending', 'snoozed')
+           AND p.date BETWEEN ?3 AND ?4
+         ORDER BY p.date, e.wall_time, e.id",
+    )?;
+    let mut shown = Vec::new();
+    let mut more = 0;
+    let rows = stmt.query_map((user_id, KIND, from.to_string(), to), |r| {
+        Ok(Waiting { event_id: r.get(0)?, date: r.get(1)?, at: r.get(2)?, prompt: r.get(3)? })
+    })?;
+    for row in rows {
+        let row = row?;
+        if shown.len() < limit {
+            shown.push(row);
+        } else {
+            more += 1;
+        }
+    }
+    Ok((shown, more))
+}
+
 /// Whether a trigger is the close-the-day check, in whichever language it was laid.
 fn is_close_day(prompt: &str) -> bool {
     [Lang::En, Lang::Ja].into_iter().any(|l| prompt == mt::close_day_prompt(l))

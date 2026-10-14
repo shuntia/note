@@ -884,7 +884,8 @@ const TOOLS: &[ToolSpec] = tools![
     "plan_list": plan_ops::PlanListArgs => run!(plan_ops::plan_list), share = Some(|s| s.today);
         "Read one day's plan (default today; the context lists only today's): every event \
          with its event_id — the id the schedule tools take — times, status, flexibility, \
-         and for a plan_tasks block the task_id it holds.",
+         for a plan_tasks block the task_id it holds; later_trigger_days names the next days \
+         holding triggers.",
     "calendar_list": calendar_ops::ListArgs => run!(&calendar_ops::list), share = Some(|s| s.today);
         "Read the user's calendar of fixed commitments, with quiet windows marked and the \
          free time set aside for tasks.",

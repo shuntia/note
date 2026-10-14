@@ -11,6 +11,8 @@ const DEFAULT_GAP_MIN: u32 = 5;
 const MAX_GAP_MIN: u32 = 120;
 const MAX_KIND_CHARS: usize = 60;
 const END_OF_DAY_MIN: i64 = 23 * 60 + 59;
+const LISTED_TRIGGERS: usize = 20;
+const LATER_TRIGGER_DAYS: i64 = 5;
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -348,9 +350,17 @@ pub fn plan_list(conn: &Connection, ctx: &ToolCtx, args: PlanListArgs) -> Result
         }
     }
     let mut events = Vec::new();
+    let (mut triggers, mut triggers_not_shown) = (0, 0);
     for e in crate::plan::events_for(conn, ctx.user_id, date).map_err(internal)? {
         if ctx.share.is_some() && e.kind == crate::triggers::KIND {
             continue;
+        }
+        if e.kind == crate::triggers::KIND {
+            triggers += 1;
+            if triggers > LISTED_TRIGGERS {
+                triggers_not_shown += 1;
+                continue;
+            }
         }
         let hidden = ctx.share.as_ref().is_some_and(|scope| {
             e.task.as_ref().is_some_and(|t| !scope.allows_category(&t.category))
@@ -390,7 +400,31 @@ pub fn plan_list(conn: &Connection, ctx: &ToolCtx, args: PlanListArgs) -> Result
         }
         events.push(row);
     }
-    Ok(serde_json::json!({ "date": date.to_string(), "events": events }))
+    let mut out = serde_json::json!({ "date": date.to_string(), "events": events });
+    if triggers_not_shown > 0 {
+        out["triggers_not_shown"] = serde_json::json!(triggers_not_shown);
+    }
+    if ctx.share.is_none() {
+        let later = later_trigger_days(conn, ctx.user_id, date).map_err(internal)?;
+        if !later.is_empty() {
+            out["later_trigger_days"] = serde_json::json!(later);
+        }
+    }
+    Ok(out)
+}
+
+/// The next few days past `date` that hold a pending trigger, with how many.
+fn later_trigger_days(conn: &Connection, user_id: i64, date: jiff::civil::Date) -> rusqlite::Result<Vec<serde_json::Value>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT p.date, COUNT(*) FROM events e JOIN plans p ON p.id = e.plan_id
+         WHERE p.user_id = ?1 AND e.kind = ?2 AND e.status IN ('pending', 'snoozed') AND p.date > ?3
+         GROUP BY p.date ORDER BY p.date LIMIT ?4",
+    )?;
+    let days = stmt.query_map((user_id, crate::triggers::KIND, date.to_string(), LATER_TRIGGER_DAYS), |r| {
+        Ok(serde_json::json!({ "date": r.get::<_, String>(0)?, "triggers": r.get::<_, i64>(1)? }))
+    })?
+    .collect();
+    days
 }
 
 #[cfg(test)]

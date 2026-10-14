@@ -672,6 +672,8 @@ mod tests {
         };
         assert_eq!(kinds(&conn), ["trigger"]);
         assert!(!crate::plan::exists(&conn, 1, far).unwrap());
+        let today = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "plan_list", "{}").unwrap();
+        assert_eq!(today["later_trigger_days"], serde_json::json!([{ "date": far.to_string(), "triggers": 1 }]));
 
         crate::zone::rezone(&conn, tmp.path(), "aki", 1, "America/Los_Angeles", "America/New_York",
             jiff::Timestamp::now()).unwrap();

@@ -247,6 +247,17 @@ pub fn status_counts(l: Lang, n: [usize; 5]) -> String {
     }
 }
 
+pub fn triggers_tomorrow(l: Lang) -> &'static str {
+    l.of("Triggers tomorrow:\n", "明日のトリガー:\n")
+}
+
+pub fn triggers_later(l: Lang, n: usize, date: &str, at: &str) -> String {
+    match l {
+        Lang::En => format!("Later triggers: {n}, the next on {date} at {at} (plan_list that day to see them)"),
+        Lang::Ja => format!("それ以降のトリガー: {n}件、次は{date} {at}（その日を plan_list で確認）"),
+    }
+}
+
 pub fn tomorrow_plan(l: Lang, tomorrow: jiff::civil::Date, generated: bool) -> String {
     match l {
         Lang::En => format!(
