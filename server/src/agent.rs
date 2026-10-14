@@ -1,4 +1,4 @@
-use crate::providers::{ChatRequest, EmbeddingsProvider, LLMProvider, Message};
+use crate::providers::{ChatRequest, EmbeddingsProvider, LLMProvider, Message, MustCall};
 use crate::search::SearchProvider;
 use crate::tools::{self, SessionKind, ToolCtx, ToolError};
 use anyhow::Result;
@@ -75,6 +75,11 @@ struct SessionProfile {
     max_turns: usize,
     /// Whether a session that runs out of turns without a word says so.
     max_turns_reply: bool,
+    /// Whether the session exists to call its one terminal tool: every round
+    /// must call a tool, and the last one that one.
+    decides: bool,
+    /// See `ChatRequest::plain`.
+    plain: bool,
     /// Whether no caller is waiting on it.
     background: bool,
     /// A share session logs under its own kinds, so it never counts against
@@ -92,16 +97,18 @@ const fn profile(kind: SessionKind) -> SessionProfile {
         context: Context::Assembled,
         max_turns: MAX_TURNS,
         max_turns_reply: false,
+        decides: false,
+        plain: false,
         background: true,
         log_session: "agent_session",
         log_max_turns: "agent_max_turns",
     };
     let single_call =
-        SessionProfile { about: false, context: Context::None, max_turns: IMPORT_MAX_TURNS, ..base };
+        SessionProfile { about: false, context: Context::None, max_turns: IMPORT_MAX_TURNS, decides: true, ..base };
     match kind {
         SessionKind::Import => SessionProfile { prompt: "import", background: false, ..single_call },
         SessionKind::Inbox => SessionProfile { prompt: "inbox", background: false, ..single_call },
-        SessionKind::Summarize => SessionProfile { prompt: "summarize", ..single_call },
+        SessionKind::Summarize => SessionProfile { prompt: "summarize", plain: true, ..single_call },
         SessionKind::Harvest => SessionProfile { prompt: "harvest", max_turns: HARVEST_MAX_TURNS, ..base },
         SessionKind::Review => SessionProfile { prompt: "review", max_turns: REVIEW_MAX_TURNS, ..base },
         SessionKind::Share => SessionProfile {
@@ -411,8 +418,12 @@ fn run_traced(
     let env = CallEnv { deps, user_id, username, kind, calls: Default::default() };
     let started = std::time::Instant::now();
 
+    let terminal = profile.decides.then(|| terminal_tool(kind)).flatten();
     while turns < max_turns {
-        let req = ChatRequest { system, messages: &messages, tools: &schemas, background };
+        let must_call = terminal.map(|name| {
+            if turns + 1 == max_turns || schemas.len() == 1 { MustCall::Tool(name) } else { MustCall::Any }
+        });
+        let req = ChatRequest { system, messages: &messages, tools: &schemas, background, plain: profile.plain, must_call };
         trace.spent(crate::usage::take());
         let round = std::time::Instant::now();
         let (resp, thinking) = match deps.llm.chat_with_reasoning(&req) {
@@ -500,6 +511,13 @@ fn run_traced(
         reasoning: String::new(),
         thought_ms,
     })
+}
+
+/// The one tool that ends a session of `kind`, if it has exactly one.
+fn terminal_tool(kind: SessionKind) -> Option<&'static str> {
+    let mut ending = tools::registry(kind).iter().copied().filter(|name| tools::is_terminal(kind, name));
+    let only = ending.next()?;
+    ending.next().is_none().then_some(only)
 }
 
 /// Talk, import, inbox and share sessions answer a caller who is waiting on them.
@@ -1789,6 +1807,33 @@ mod tests {
         let summary = crate::usage::summary(&db.lock().unwrap(), Some(1), 1, jiff::Timestamp::now()).unwrap();
         assert_eq!(summary["by_kind"][0]["kind"], "Trigger");
         assert_eq!(summary["by_kind"][0]["usage"]["completion"], 60);
+    }
+
+    #[test]
+    fn a_deciding_session_must_decide_on_its_last_round_and_a_summary_thinks_plain() {
+        let (db, tmp) = env();
+        let llm = MockLLM::empty();
+        let _ = run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Inbox, now(), &[], "item");
+        assert_eq!(llm.seen()[0].must_call.as_deref(), Some("*"), "any tool: memory first, or the decision");
+        let llm = MockLLM::scripted(vec![
+            ChatResponse {
+                text: String::new(),
+                tool_calls: vec![ToolCall { id: "c1".into(), name: "memory_query".into(), args: r#"{"query":"x"}"#.into() }],
+            },
+        ]);
+        let _ = run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Inbox, now(), &[], "item");
+        let seen = llm.seen();
+        assert_eq!(seen.len(), IMPORT_MAX_TURNS);
+        assert_eq!(seen[1].must_call.as_deref(), Some("inbox_decide"), "the last round decides");
+        assert!(!seen[0].plain);
+        let llm = MockLLM::empty();
+        std::fs::write(tmp.path().join("defaults/prompts/summarize.md"), "summarise it").unwrap();
+        let _ = run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Summarize, now(), &[], "rows");
+        assert_eq!(llm.seen()[0].must_call.as_deref(), Some("summary_write"), "its only tool, from the first round");
+        assert!(llm.seen()[0].plain);
+        let llm = MockLLM::empty();
+        let _ = run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, now(), &[], "hi");
+        assert_eq!(llm.seen()[0].must_call, None);
     }
 
     #[test]

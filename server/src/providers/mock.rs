@@ -20,6 +20,8 @@ pub struct RecordedChat {
     pub n_messages: usize,
     pub messages: Vec<Message>,
     pub tool_names: Vec<String>,
+    pub plain: bool,
+    pub must_call: Option<String>,
 }
 
 #[derive(Default)]
@@ -77,6 +79,11 @@ impl MockLLM {
                 .iter()
                 .filter_map(|t| t["name"].as_str().map(String::from))
                 .collect(),
+            plain: req.plain,
+            must_call: req.must_call.map(|m| match m {
+                super::MustCall::Any => "*".to_string(),
+                super::MustCall::Tool(name) => name.to_string(),
+            }),
         });
     }
 }
@@ -197,7 +204,7 @@ mod tests {
                 tool_calls: vec![ToolCall { id: "c1".into(), name: "task_create".into(), args: "{}".into() }],
             },
         ]);
-        let req = ChatRequest { system: "sys", messages: &[Message::User("hi".into())], tools: &[], background: false };
+        let req = ChatRequest { system: "sys", messages: &[Message::User("hi".into())], tools: &[], background: false, plain: false, must_call: None };
         assert_eq!(llm.chat(&req).unwrap().text, "one");
         assert_eq!(llm.chat(&req).unwrap().tool_calls[0].name, "task_create");
         assert!(llm.chat(&req).unwrap().text.contains("no scripted response"));
@@ -229,7 +236,7 @@ mod tests {
             vec![StreamPiece::Call(call), StreamPiece::Wait(Duration::from_millis(1)), StreamPiece::Text("a"), StreamPiece::Text("b")],
             vec![StreamPiece::Text("partial"), StreamPiece::Fail("dropped")],
         ]);
-        let req = ChatRequest { system: "sys", messages: &[Message::User("hi".into())], tools: &[], background: false };
+        let req = ChatRequest { system: "sys", messages: &[Message::User("hi".into())], tools: &[], background: false, plain: false, must_call: None };
         let opts = crate::providers::StreamOpts { first_token: Duration::from_secs(1) };
         let mut sink = Collect::default();
         let resp = llm.chat_stream(&req, &opts, &mut sink).unwrap();
@@ -243,7 +250,7 @@ mod tests {
     #[test]
     fn null_llm_replies_blank_and_stays_stateless() {
         let llm = NullLLM;
-        let req = ChatRequest { system: "sys", messages: &[Message::User("hi".into())], tools: &[], background: false };
+        let req = ChatRequest { system: "sys", messages: &[Message::User("hi".into())], tools: &[], background: false, plain: false, must_call: None };
         for _ in 0..3 {
             let r = llm.chat(&req).unwrap();
             assert!(r.text.is_empty());

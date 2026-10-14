@@ -27,6 +27,17 @@ pub struct ChatRequest<'a> {
     /// Nobody is waiting on the reply, so the call may take the provider's
     /// longer `background_timeout_secs`.
     pub background: bool,
+    /// Asks for no reasoning whatever effort the provider is configured with:
+    /// the call condenses text and thinking first buys nothing.
+    pub plain: bool,
+    pub must_call: Option<MustCall<'a>>,
+}
+
+/// What the reply has to call instead of answering in text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MustCall<'a> {
+    Any,
+    Tool(&'a str),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -413,7 +424,7 @@ mod tests {
     fn build_defaults_to_null_llm_and_no_embeddings() {
         let cfg = crate::config::ProvidersConfig::default();
         let (llm, emb) = build(&cfg).unwrap();
-        let req = ChatRequest { system: "", messages: &[], tools: &[], background: false };
+        let req = ChatRequest { system: "", messages: &[], tools: &[], background: false, plain: false, must_call: None };
         let resp = llm.chat(&req).unwrap();
         assert!(resp.text.is_empty());
         assert_eq!(llm.chat_with_reasoning(&req).unwrap().1, "");
@@ -484,7 +495,7 @@ mod tests {
     fn a_call_switches_reasoning_off_unless_told_not_to() {
         let reply = r#"{"choices":[{"message":{"content":"hi"}}]}"#;
         let main: Arc<dyn LLMProvider> = Arc::new(mock::NullLLM);
-        let req = ChatRequest { system: "s", messages: &[], tools: &[], background: false };
+        let req = ChatRequest { system: "s", messages: &[], tools: &[], background: false, plain: false, must_call: None };
         let sent = |toml: &str| {
             let (base, rx) = crate::testhttp::serve(vec![("200 OK", reply)]);
             let mut p = file_key_config(std::path::PathBuf::new());

@@ -412,7 +412,7 @@ fn opening_exchange(conn: &Connection, conversation_id: i64, l: Lang) -> Result<
 /// One tool-less call that names the thread.
 fn ask_for_title(llm: &dyn LLMProvider, system: &str, exchange: &str) -> Result<String> {
     let messages = [Message::User(exchange.to_string())];
-    let req = ChatRequest { system, messages: &messages, tools: &[], background: true };
+    let req = ChatRequest { system, messages: &messages, tools: &[], background: true, plain: true, must_call: None };
     let reply = llm.chat(&req)?.text;
     normalize_title(&reply)
         .ok_or_else(|| anyhow::anyhow!("not a title: {:?}", clip_chars(&reply, 80)))
