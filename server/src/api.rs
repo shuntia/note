@@ -2239,7 +2239,7 @@ async fn memory_list(
 
 /// A fact of another user is indistinguishable from one that does not exist:
 /// the id is only ever looked up under the caller's own memory root.
-/// What wrote this fact on the user's behalf — an inbox item, a harvest —
+/// What wrote this fact on the user's behalf — an inbox item —
 /// empty for one the user's own sessions wrote.
 fn memory_sources(state: &AppState, user_id: i64, memory_id: &str) -> Vec<String> {
     let conn = state.db();

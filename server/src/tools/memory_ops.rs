@@ -249,16 +249,16 @@ mod tests {
     #[test]
     fn a_sourced_session_records_where_each_fact_came_from() {
         let (conn, tmp) = env();
-        let sourced = ToolCtx { memory_source: Some("harvest:2026-09-17".into()), ..ctx(&tmp) };
-        let out = dispatch(&conn, &sourced, SessionKind::Harvest, "memory_write",
+        let sourced = ToolCtx { memory_source: Some("inbox:canvas-17".into()), ..ctx(&tmp) };
+        let out = dispatch(&conn, &sourced, SessionKind::Nightly, "memory_write",
             r#"{"op":"add","category":"semantic","summary":"runs on tuesdays","body":"with mira"}"#).unwrap();
         let id = out["id"].as_str().unwrap().to_string();
-        let out = dispatch(&conn, &sourced, SessionKind::Harvest, "memory_write",
+        let out = dispatch(&conn, &sourced, SessionKind::Nightly, "memory_write",
             &format!(r#"{{"op":"supersede","id":"{id}","summary":"runs on thursdays","body":"alone"}}"#)).unwrap();
         let new_id = out["id"].as_str().unwrap().to_string();
 
         let mut stmt = conn
-            .prepare("SELECT memory_id FROM memory_sources WHERE source_id = 'harvest:2026-09-17' ORDER BY memory_id")
+            .prepare("SELECT memory_id FROM memory_sources WHERE source_id = 'inbox:canvas-17' ORDER BY memory_id")
             .unwrap();
         let mut ids: Vec<String> = stmt
             .query_map([], |r| r.get(0))
@@ -281,14 +281,14 @@ mod tests {
     #[test]
     fn an_added_fact_can_carry_the_date_it_stops_mattering() {
         let (conn, tmp) = env();
-        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Harvest, "memory_write",
+        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Nightly, "memory_write",
             r#"{"op":"add","category":"episodic","summary":"Day 2026-09-17: the essay went in","body":"an hour of drafting","until":"2026-12-16"}"#).unwrap();
         let id = out["id"].as_str().unwrap();
         let f = crate::memory::read(tmp.path(), "aki", id).unwrap().unwrap();
         assert_eq!(f.until.as_deref(), Some("2026-12-16"));
         assert_eq!(f.category, "episodic");
 
-        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Harvest, "memory_write",
+        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Nightly, "memory_write",
             r#"{"op":"add","category":"semantic","summary":"mira lives next door","body":"since september"}"#).unwrap();
         assert!(crate::memory::read(tmp.path(), "aki", out["id"].as_str().unwrap())
             .unwrap()
@@ -300,7 +300,7 @@ mod tests {
             let args = format!(
                 r#"{{"op":"add","category":"episodic","summary":"s","body":"b","until":"{bad}"}}"#
             );
-            let e = dispatch(&conn, &ctx(&tmp), SessionKind::Harvest, "memory_write", &args)
+            let e = dispatch(&conn, &ctx(&tmp), SessionKind::Nightly, "memory_write", &args)
                 .unwrap_err();
             assert_eq!(e.kind, "rejected", "{bad}");
         }

@@ -34,7 +34,6 @@ pub fn config_dir() -> TempDir {
         "You read one item from a school system and decide what to remember.",
     );
     write("defaults/prompts/summarize.md", "summarise the conversation");
-    write("defaults/prompts/harvest.md", "keep what will still matter");
     write("defaults/prompts/review.md", "read the week");
     write("defaults/prompts/trigger.md", "say one thing or stay_quiet");
     write("defaults/prompts/share.md", "you answer for {owner}; stay inside the slice");

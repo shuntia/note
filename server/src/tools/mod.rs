@@ -2,7 +2,6 @@ pub mod calendar_ops;
 pub mod call_ops;
 pub mod context_ops;
 pub mod goal_ops;
-pub mod harvest_ops;
 pub mod inbox_ops;
 pub mod memory_ops;
 pub mod note_ops;
@@ -35,8 +34,6 @@ pub enum SessionKind {
     Inbox,
     /// One idle conversation, condensed into the summary it carries from then on.
     Summarize,
-    /// The day's conversations, read once for the facts worth keeping.
-    Harvest,
     /// One trigger point, fired: read the situation, then speak or stay quiet.
     Trigger,
     /// The week just ended, read once for the letter that stands beside Monday's
@@ -409,7 +406,6 @@ const BATCH: &[&str] = &["batch"];
 const BRIEF: &[&str] = &["task_brief"];
 const DECIDE: &[&str] = &["inbox_decide"];
 const SUMMARY: &[&str] = &["summary_write"];
-const HARVEST_DONE: &[&str] = &["harvest_done"];
 const REVIEW_WRITE: &[&str] = &["review_write"];
 const SPEAK: &[&str] = &["say", "stay_quiet"];
 const SHARE_NOTE: &[&str] = &["share_note"];
@@ -450,7 +446,6 @@ const DOMAINS: &[&[&str]] = &[
     BRIEF,
     DECIDE,
     SUMMARY,
-    HARVEST_DONE,
     REVIEW_WRITE,
     SPEAK,
     SHARE_NOTE,
@@ -578,7 +573,6 @@ pub fn writes(name: &str) -> bool {
 const IMPORT: &[&str] = registry_of![BRIEF];
 const INBOX: &[&str] = registry_of![MEMORY_READ, DECIDE];
 const SUMMARIZE: &[&str] = registry_of![SUMMARY];
-const HARVEST: &[&str] = registry_of![MEMORY_READ, MEMORY_WRITE, CALL_USER, BATCH, HARVEST_DONE];
 const REVIEW: &[&str] = registry_of![MEMORY_READ, MEMORY_WRITE, CALL_USER, BATCH, REVIEW_WRITE];
 const SHARE: &[&str] =
     registry_of![TASK_READ, GOALS_READ, PLAN_READ, CALENDAR_READ, SHARE_NOTE];
@@ -621,7 +615,6 @@ pub fn registry(kind: SessionKind) -> &'static [&'static str] {
         SessionKind::Import => IMPORT,
         SessionKind::Inbox => INBOX,
         SessionKind::Summarize => SUMMARIZE,
-        SessionKind::Harvest => HARVEST,
         SessionKind::Review => REVIEW,
         SessionKind::Trigger => TRIGGER,
         SessionKind::Share => SHARE,
@@ -771,9 +764,6 @@ const TOOLS: &[ToolSpec] = tools![
     "summary_write": summary_ops::WriteArgs => run!(&summary_ops::write), terminal_in = &[SessionKind::Summarize];
         "Write this conversation's summary, in a single call that ends the session: 1 to 1200 \
          bytes of plain text, no markdown headers.",
-    "harvest_done": harvest_ops::DoneArgs => run!(&harvest_ops::done), terminal_in = &[SessionKind::Harvest];
-        "End the harvest, naming how many facts you wrote and, in note, what you left out and \
-         why. Call it once, last.",
     "review_write": review_ops::WriteArgs => run!(&review_ops::write), terminal_in = &[SessionKind::Review];
         "Write the week's letter, in a single call that ends the session: 1 to 4000 bytes of \
          plain text, addressed to the user.",
@@ -1455,9 +1445,9 @@ mod tests {
 
     /// Checkin ⊆ Talk ⊆ Nightly but for `trigger_budget`, `plan_carry` and
     /// `timezone_set`, which live where the user is there to agree to them or
-    /// say where they are; a harvest reads
-    /// memory with the nightly's own tools plus the one that ends it; Import,
-    /// Inbox, Summarize and Harvest share nothing with an import session.
+    /// say where they are; a review reads memory with the nightly's own tools
+    /// plus the one that ends it; Summarize and Review share nothing with an
+    /// import session.
     #[test]
     fn session_surfaces_nest_and_import_stands_apart() {
         let is_subset = |a: &[&str], b: &[&str]| a.iter().all(|t| b.contains(t));
@@ -1475,10 +1465,6 @@ mod tests {
             .iter()
             .filter(|t| !is_terminal(SessionKind::Trigger, t) && !asks_the_user(t))
             .all(|t| registry(SessionKind::Nightly).contains(t)));
-        assert!(registry(SessionKind::Harvest)
-            .iter()
-            .filter(|t| !is_terminal(SessionKind::Harvest, t))
-            .all(|t| registry(SessionKind::Nightly).contains(t)));
         assert!(registry(SessionKind::Review)
             .iter()
             .filter(|t| !is_terminal(SessionKind::Review, t))
@@ -1486,7 +1472,7 @@ mod tests {
         assert!(registry(SessionKind::Import)
             .iter()
             .all(|t| !registry(SessionKind::Nightly).contains(t)));
-        for kind in [SessionKind::Summarize, SessionKind::Harvest, SessionKind::Review] {
+        for kind in [SessionKind::Summarize, SessionKind::Review] {
             assert!(
                 registry(kind).iter().all(|t| !registry(SessionKind::Import).contains(t)),
                 "{kind:?} shares a tool with an import session"
@@ -1494,14 +1480,13 @@ mod tests {
         }
     }
 
-    const KINDS: [SessionKind; 11] = [
+    const KINDS: [SessionKind; 10] = [
         SessionKind::Nightly,
         SessionKind::Checkin,
         SessionKind::Talk,
         SessionKind::Import,
         SessionKind::Inbox,
         SessionKind::Summarize,
-        SessionKind::Harvest,
         SessionKind::Review,
         SessionKind::Trigger,
         SessionKind::Share,
@@ -1557,11 +1542,10 @@ mod tests {
     /// other.
     #[test]
     fn every_terminal_tool_is_offered_by_its_own_kind_alone() {
-        let terminals: [(SessionKind, &[&str]); 7] = [
+        let terminals: [(SessionKind, &[&str]); 6] = [
             (SessionKind::Import, BRIEF),
             (SessionKind::Inbox, DECIDE),
             (SessionKind::Summarize, SUMMARY),
-            (SessionKind::Harvest, HARVEST_DONE),
             (SessionKind::Review, REVIEW_WRITE),
             (SessionKind::Trigger, SPEAK),
             (SessionKind::Share, SHARE_NOTE),
@@ -1584,10 +1568,9 @@ mod tests {
     fn a_summary_writes_nothing_but_its_own_line() {
         assert_eq!(registry(SessionKind::Summarize), &["summary_write"]);
         assert!(is_terminal(SessionKind::Summarize, "summary_write"));
-        assert!(is_terminal(SessionKind::Harvest, "harvest_done"));
         assert!(is_terminal(SessionKind::Review, "review_write"));
         let (conn, tmp) = env();
-        for kind in [SessionKind::Talk, SessionKind::Nightly, SessionKind::Harvest] {
+        for kind in [SessionKind::Talk, SessionKind::Nightly, SessionKind::Review] {
             let e = dispatch(&conn, &ctx(&tmp), kind, "summary_write", r#"{"summary":"x"}"#)
                 .unwrap_err();
             assert_eq!(e.kind, "unknown_tool", "{kind:?}");
@@ -1612,7 +1595,6 @@ mod tests {
             SessionKind::Import,
             SessionKind::Inbox,
             SessionKind::Summarize,
-            SessionKind::Harvest,
             SessionKind::Review,
             SessionKind::Trigger,
         ] {
@@ -1911,7 +1893,6 @@ mod tests {
             SessionKind::Import,
             SessionKind::Inbox,
             SessionKind::Summarize,
-            SessionKind::Harvest,
             SessionKind::Review,
             SessionKind::Trigger,
             SessionKind::Share,

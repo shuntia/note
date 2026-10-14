@@ -4,9 +4,9 @@ use std::path::{Path, PathBuf};
 
 /// The shipped prompts. They belong to the app and are never overridden; what a
 /// user adds goes in `about`.
-pub const NAMES: [&str; 12] = [
-    "persona", "planning", "import", "inbox", "summarize", "harvest", "review", "trigger",
-    "search", "title", "share", "voice",
+pub const NAMES: [&str; 11] = [
+    "persona", "planning", "import", "inbox", "summarize", "review", "trigger", "search",
+    "title", "share", "voice",
 ];
 
 pub const MAX_ABOUT_BYTES: usize = 8 * 1024;
@@ -118,7 +118,6 @@ mod tests {
                 ("import", K::Import),
                 ("inbox", K::Inbox),
                 ("summarize", K::Summarize),
-                ("harvest", K::Harvest),
                 ("review", K::Review),
             ] {
                 let text = load(name);
@@ -129,11 +128,6 @@ mod tests {
             let import = load("import");
             for gone in ["task_update", "task_split"] {
                 assert!(!import.contains(gone), "the import prompt ({lang:?}) still calls for {gone}");
-            }
-            // the night's two halves: the episodic record is mechanical, the rest distilled
-            let harvest = load("harvest");
-            for kind in ["semantic", "procedural", "episodic", "supersede"] {
-                assert!(harvest.contains(kind), "the harvest prompt ({lang:?}) never names {kind}");
             }
             // the trigger prompt names the three ways that session can end
             let trigger = load("trigger");

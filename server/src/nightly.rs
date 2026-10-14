@@ -86,11 +86,6 @@ fn run_stages(
             crate::log::ERROR_LOG_WINDOW_MINS,
         );
     };
-    // The day's conversations become memory before the plan is built, so the
-    // planning session already counts what they left behind.
-    let at = std::time::Instant::now();
-    let harvested = crate::harvest::run_for_user(deps, user_id, username, &tz, date, now);
-    report.stage("harvest", at, harvested.as_ref().err().inspect(|e| note("harvest_error", e)));
     // Monday's run looks back before it looks forward, so the planning session
     // already has the week's letter in memory.
     let at = std::time::Instant::now();
@@ -386,7 +381,6 @@ mod tests {
         );
         write("defaults/prompts/persona.md", "persona");
         write("defaults/prompts/planning.md", "planning");
-        write("defaults/prompts/harvest.md", "harvest");
         write("defaults/prompts/review.md", "read the week");
         (Mutex::new(conn), tmp)
     }
@@ -601,7 +595,7 @@ mod tests {
         let line = nightly_run_row(&db.lock().unwrap());
         assert_eq!(
             without_timings(&line),
-            "2026-08-31: harvest=ok, review=ok, learn=ok, plan=ok, close_day=ok, \
+            "2026-08-31: review=ok, learn=ok, plan=ok, close_day=ok, \
              session=ok, notes=ok, debrief=written"
         );
         assert_ne!(line, without_timings(&line), "every stage carries its own seconds");

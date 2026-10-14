@@ -266,7 +266,6 @@ mod tests {
             SessionKind::Import,
             SessionKind::Inbox,
             SessionKind::Summarize,
-            SessionKind::Harvest,
             SessionKind::Review,
             SessionKind::Share,
         ] {

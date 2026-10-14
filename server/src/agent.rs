@@ -12,9 +12,6 @@ pub const MAX_TURNS: usize = 16;
 /// summary one line: the call, plus a single retry when the first one is
 /// rejected.
 pub const IMPORT_MAX_TURNS: usize = 2;
-/// A harvest reads one digest: enough rounds to search memory before each
-/// write and still finish.
-pub const HARVEST_MAX_TURNS: usize = 8;
 /// A review reads one week: enough rounds to search memory before each write
 /// and still finish.
 pub const REVIEW_MAX_TURNS: usize = 8;
@@ -102,7 +99,6 @@ const fn profile(kind: SessionKind) -> SessionProfile {
         SessionKind::Import => SessionProfile { prompt: "import", background: false, ..single_call },
         SessionKind::Inbox => SessionProfile { prompt: "inbox", background: false, ..single_call },
         SessionKind::Summarize => SessionProfile { prompt: "summarize", ..single_call },
-        SessionKind::Harvest => SessionProfile { prompt: "harvest", max_turns: HARVEST_MAX_TURNS, ..base },
         SessionKind::Review => SessionProfile { prompt: "review", max_turns: REVIEW_MAX_TURNS, ..base },
         SessionKind::Share => SessionProfile {
             prompt: "share",
@@ -1499,7 +1495,6 @@ mod tests {
             SessionKind::Talk,
             SessionKind::Checkin,
             SessionKind::Nightly,
-            SessionKind::Harvest,
             SessionKind::Review,
             SessionKind::Trigger,
         ] {
