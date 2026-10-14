@@ -847,11 +847,8 @@ fn schedule(
 }
 
 fn local_start(tz: &jiff::tz::TimeZone, date: &str, wall: &str) -> Option<String> {
-    let date: jiff::civil::Date = date.parse().ok()?;
-    let (h, m) = wall.split_once(':')?;
-    let time = jiff::civil::Time::new(h.parse().ok()?, m.parse().ok()?, 0, 0).ok()?;
-    let zoned = tz.to_ambiguous_zoned(date.to_datetime(time)).compatible().ok()?;
-    Some(zoned.strftime("%Y-%m-%dT%H:%M:%S%:z").to_string())
+    let at = crate::zone::instant(tz, date.parse().ok()?, wall)?;
+    Some(at.to_zoned(tz.clone()).strftime("%Y-%m-%dT%H:%M:%S%:z").to_string())
 }
 
 /// Fills `scheduled_at` on each of the top-level tasks given.

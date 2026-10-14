@@ -446,7 +446,6 @@ async fn the_gate_reports_what_this_admin_has_enrolled() {
     );
     assert_eq!(v["second_factor"], "totp");
     assert_eq!(v["require_second_factor"], true);
-    assert_eq!(v["totp"], "required");
 
     let code = totp::code(&seed, totp::step_at(jiff::Timestamp::now()) + 1);
     enrol_passkey_with(&app, &cookie, "phone", serde_json::json!({ "password": "pw", "code": code })).await;
@@ -643,12 +642,13 @@ async fn a_per_user_secret_takes_over_from_the_shared_seed() {
 async fn an_account_with_no_factor_cannot_elevate_on_a_release_build() {
     let (app, cookie, _state, _cfg) = common::app_with_passkeys().await;
     let v = gate(&app, &cookie).await;
+    assert_eq!(v["second_factor"], "none");
     let (status, body) = elevate(&app, &cookie, serde_json::json!({ "password": "pw" })).await;
     if note_server::admin::INSPECT {
-        assert_eq!(v["totp"], "password_only");
+        assert_eq!(v["require_second_factor"], false);
         assert_eq!(status, StatusCode::OK, "{body}");
     } else {
-        assert_eq!(v["totp"], "missing");
+        assert_eq!(v["require_second_factor"], true);
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
         assert!(body["error"].is_string());
     }
@@ -721,7 +721,6 @@ async fn a_password_only_server_ignores_enrolled_factors() {
     let (app, cookie, _state, _cfg) = common::app_with_password_only_admin().await;
     let v = gate(&app, &cookie).await;
     assert_eq!(v["require_second_factor"], false);
-    assert_eq!(v["totp"], "password_only");
     let (status, v) = elevate(&app, &cookie, serde_json::json!({ "password": "pw" })).await;
     assert_eq!(status, StatusCode::OK, "{v}");
 }

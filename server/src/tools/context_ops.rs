@@ -72,7 +72,7 @@ pub fn nightly_notes_write(
     }
     let ucfg = crate::config::UserConfig::load(ctx.config_dir, ctx.username)
         .map_err(|e| ToolError::internal(e.to_string()))?;
-    let tz = jiff::tz::TimeZone::get(&ucfg.timezone).unwrap_or(jiff::tz::TimeZone::UTC);
+    let tz = crate::zone::named(&ucfg.timezone);
     let date = jiff::Timestamp::now().to_zoned(tz).date();
     crate::context::write_nightly_notes(ctx.config_dir, ctx.username, text, date)
         .map_err(|e| ToolError::internal(e.to_string()))?;

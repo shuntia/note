@@ -83,7 +83,7 @@ fn ratios(conn: &Connection, user_id: i64, now: jiff::Timestamp) -> rusqlite::Re
 }
 
 /// Turns the sessions that ended into what the planner should assume; the
-/// nightly runs it once the day's harvest is in.
+/// nightly runs it before it plans.
 pub fn run_for_user(conn: &Connection, user_id: i64, now: jiff::Timestamp) -> Result<()> {
     let mut ratios = ratios(conn, user_id, now)?;
     if ratios.len() < MIN_SAMPLE {

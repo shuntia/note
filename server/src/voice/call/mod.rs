@@ -202,10 +202,6 @@ impl CallManager {
         let _ = self.deps.set(deps);
     }
 
-    pub fn is_ready(&self) -> bool {
-        self.deps.get().is_some()
-    }
-
     pub fn is_live(&self, call_id: &str) -> bool {
         self.calls().contains_key(call_id)
     }

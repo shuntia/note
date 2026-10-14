@@ -292,8 +292,10 @@ mod tests {
 
         assert_eq!(seed_all(&conn, data.path(), config.path()).unwrap(), 2 * per_user);
         assert_eq!(seed_all(&conn, data.path(), config.path()).unwrap(), 0);
-        assert_eq!(memory::live_count(&conn, "aki").unwrap() as usize, per_user);
-        assert_eq!(memory::live_count(&conn, "bo").unwrap() as usize, per_user);
+        for user in ["aki", "bo"] {
+            let live: i64 = memory::live_count_by_category(&conn, user).unwrap().iter().sum();
+            assert_eq!(live as usize, per_user);
+        }
     }
 
     #[test]

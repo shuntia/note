@@ -89,7 +89,7 @@ ring was gone). Five seconds with no audio from the browser hangs the call up;
 after a hang-up Note's last words still play out before `ended`. Audio backed
 up past 50 frames is dropped; control frames always go through.
 
-Calls are recorded in `voice_calls` with `origin` and `thread_id` (schema v54).
+Calls are recorded in `voice_calls` with `origin` and `thread_id`.
 `web/scripts/call-check.mjs` checks the whole path headless
 ([development.md](development.md#web-development)).
 

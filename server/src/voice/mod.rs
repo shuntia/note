@@ -1244,8 +1244,10 @@ mod tests {
             thread(&t.voice, conv),
             vec![row("assistant", "how is the essay going?"), row("user", "thanks"), row("assistant", "Glad to hear it.")]
         );
-        let via = crate::talk::via_of(&crate::db_guard(&t.voice.db), conv).unwrap();
-        assert_eq!(via, crate::talk::Via::Voice);
+        let via: String = crate::db_guard(&t.voice.db)
+            .query_row("SELECT via FROM conversations WHERE id = ?1", [conv], |r| r.get(0))
+            .unwrap();
+        assert_eq!(via, crate::talk::Via::Voice.as_str());
     }
 
     #[tokio::test(flavor = "multi_thread")]

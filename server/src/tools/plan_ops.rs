@@ -47,10 +47,7 @@ fn wall(minutes: i64) -> String {
 }
 
 fn timezone(ctx: &ToolCtx) -> jiff::tz::TimeZone {
-    crate::config::UserConfig::load(ctx.config_dir, ctx.username)
-        .ok()
-        .and_then(|c| jiff::tz::TimeZone::get(&c.timezone).ok())
-        .unwrap_or(jiff::tz::TimeZone::UTC)
+    crate::triggers::timezone(ctx.config_dir, ctx.username)
 }
 
 /// The day the user is living in, which is what "today or later" is measured

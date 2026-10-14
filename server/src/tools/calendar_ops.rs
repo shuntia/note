@@ -94,10 +94,7 @@ fn row(e: &calendar::Entry) -> serde_json::Value {
 }
 
 fn today(ctx: &ToolCtx) -> jiff::civil::Date {
-    let tz = crate::config::UserConfig::load(ctx.config_dir, ctx.username)
-        .ok()
-        .and_then(|c| jiff::tz::TimeZone::get(&c.timezone).ok())
-        .unwrap_or(jiff::tz::TimeZone::UTC);
+    let tz = crate::triggers::timezone(ctx.config_dir, ctx.username);
     jiff::Timestamp::now().to_zoned(tz).date()
 }
 

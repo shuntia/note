@@ -30,10 +30,6 @@ impl Default for AdminSecrets {
 }
 
 impl AdminSecrets {
-    pub fn with_seed(seed: Vec<u8>) -> Self {
-        Self { totp_seed: Some(seed), ..Self::default() }
-    }
-
     /// `false` is the operator's opt-out: elevation re-asks for the account
     /// password alone and no second factor is consulted.
     #[must_use]
@@ -301,7 +297,6 @@ async fn gate(AdminUser(user): AdminUser, State(state): State<AppState>, headers
         "second_factor": methods.preferred(),
         "methods": { "passkey": methods.passkey, "totp": methods.totp },
         "require_second_factor": mode != TotpMode::PasswordOnly,
-        "totp": mode,
         "inspect": INSPECT,
     }))
     .into_response()
@@ -1058,10 +1053,7 @@ mod inspect {
         };
         let path = config_path(&state, &username);
         let config_toml = std::fs::read_to_string(&path).unwrap_or_default();
-        let tz = crate::config::UserConfig::load(&state.config_dir, &username)
-            .ok()
-            .and_then(|c| jiff::tz::TimeZone::get(&c.timezone).ok())
-            .unwrap_or(jiff::tz::TimeZone::UTC);
+        let tz = crate::triggers::timezone(&state.config_dir, &username);
         let today = jiff::Timestamp::now().to_zoned(tz).date();
         let result = (|| -> anyhow::Result<serde_json::Value> {
             let tasks = crate::tasks::list(&conn, id)?;
@@ -1328,16 +1320,20 @@ mod tests {
         assert!(warnings.is_empty());
     }
 
+    fn seeded() -> AdminSecrets {
+        AdminSecrets { totp_seed: Some(vec![1; 20]), ..AdminSecrets::default() }
+    }
+
     #[test]
     fn totp_mode_follows_seed_and_build() {
-        assert_eq!(AdminSecrets::with_seed(vec![1; 20]).totp_mode(), TotpMode::Required);
+        assert_eq!(seeded().totp_mode(), TotpMode::Required);
         let expected = if INSPECT { TotpMode::PasswordOnly } else { TotpMode::Missing };
         assert_eq!(AdminSecrets::default().totp_mode(), expected);
     }
 
     #[test]
     fn opting_out_of_a_second_factor_ignores_every_factor() {
-        let opted_out = AdminSecrets::with_seed(vec![1; 20]).require_second_factor(false);
+        let opted_out = seeded().require_second_factor(false);
         assert_eq!(opted_out.totp_mode(), TotpMode::PasswordOnly);
         assert_eq!(opted_out.mode_with_factor(true), TotpMode::PasswordOnly);
         assert_eq!(

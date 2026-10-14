@@ -198,12 +198,6 @@ impl Sources {
 /// dynamic block from the DB. Ordered standing-first for prompt-cache
 /// stability — the standing doc changes rarely, the dynamic block every call,
 /// and the clock, which changes every minute, closes the block.
-pub fn assemble(conn: &Connection, config_dir: &Path, data_dir: &Path, user_id: i64, username: &str, now: jiff::Timestamp) -> Result<String> {
-    let sources = Sources::load(config_dir, username, crate::config::UserConfig::load(config_dir, username)?);
-    assemble_from(conn, &sources, data_dir, user_id, username, now)
-}
-
-/// `assemble` with the user's files already read.
 pub fn assemble_from(
     conn: &Connection,
     sources: &Sources,
@@ -783,6 +777,11 @@ mod tests {
 
     /// Monday; 21:00 in Asia/Tokyo, 08:00 in `America/New_York`.
     const NOW: &str = "2026-08-31T12:00:00Z";
+
+    fn assemble(conn: &Connection, config_dir: &Path, data_dir: &Path, user_id: i64, username: &str, now: jiff::Timestamp) -> Result<String> {
+        let sources = Sources::load(config_dir, username, crate::config::UserConfig::load(config_dir, username)?);
+        assemble_from(conn, &sources, data_dir, user_id, username, now)
+    }
 
     fn now_ts() -> jiff::Timestamp {
         NOW.parse().unwrap()

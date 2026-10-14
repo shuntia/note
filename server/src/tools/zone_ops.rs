@@ -106,7 +106,7 @@ mod tests {
         for kind in [SessionKind::Talk, SessionKind::Checkin, SessionKind::Call] {
             assert!(registry(kind).contains(&"timezone_set"), "{kind:?}");
         }
-        for kind in [SessionKind::Nightly, SessionKind::Trigger, SessionKind::Share, SessionKind::Harvest] {
+        for kind in [SessionKind::Nightly, SessionKind::Trigger, SessionKind::Share, SessionKind::Review] {
             assert!(!registry(kind).contains(&"timezone_set"), "{kind:?}");
         }
     }

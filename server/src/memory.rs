@@ -653,18 +653,8 @@ pub fn query(
     ids.into_iter().map(|(id, _)| hit_for(conn, user, &id, &lexical)).collect()
 }
 
-/// How many live facts a user holds. The situational block says so, so a
-/// session knows before searching whether there is anything to find.
-pub fn live_count(conn: &Connection, user: &str) -> Result<i64> {
-    Ok(conn.query_row(
-        "SELECT COUNT(*) FROM memory_index WHERE user = ?1 AND archived = 0 AND category != 'note'",
-        [user],
-        |r| r.get(0),
-    )?)
-}
-
-/// The same count split by category, in `CATEGORIES` order, for a surface that
-/// says what kind of memory a user is carrying.
+/// How many live facts a user holds, by category in `CATEGORIES` order, for a
+/// surface that says what kind of memory a user is carrying.
 pub fn live_count_by_category(conn: &Connection, user: &str) -> Result<[i64; CATEGORIES.len()]> {
     let mut stmt = conn.prepare(
         "SELECT category, COUNT(*) FROM memory_index
@@ -1114,7 +1104,7 @@ mod tests {
         let listed: Vec<String> =
             list(&conn, "aki", None, 50).unwrap().into_iter().map(|h| h.id).collect();
         assert_eq!(listed, vec![fact]);
-        assert_eq!(live_count(&conn, "aki").unwrap(), 1);
+        assert_eq!(live_count_by_category(&conn, "aki").unwrap().iter().sum::<i64>(), 1);
         assert_eq!(archive_expired(&conn, tmp.path(), "aki", "2026-12-01".parse().unwrap()).unwrap(), 0);
         assert!(!read(tmp.path(), "aki", NOTE_ID).unwrap().unwrap().archived);
     }

@@ -165,12 +165,8 @@ pub fn active(conn: &Connection, data_dir: &Path, user: &str, now: jiff::Timesta
     Ok(all(conn, data_dir, user)?.into_iter().filter(|n| n.is_active(now)).collect())
 }
 
-/// Notes whose window opens within the next twelve hours, soonest first.
-pub fn upcoming(conn: &Connection, data_dir: &Path, user: &str, now: jiff::Timestamp) -> Result<Vec<Note>> {
-    Ok(upcoming_of(all(conn, data_dir, user)?, now))
-}
-
-/// `active` and `upcoming` from one read of the notes.
+/// `active`, and the notes whose window opens within the next twelve hours,
+/// soonest first, from one read of the notes.
 pub fn active_and_upcoming(
     conn: &Connection,
     data_dir: &Path,
@@ -330,57 +326,6 @@ pub fn settle_leftovers(conn: &Connection, data_dir: &Path, user: &str, now: jif
     Ok(due.len())
 }
 
-/// Writes the rows schema v52 left in `legacy_notes` as working notes, one row
-/// at a time, then drops the table; returns how many became notes. A row whose
-/// title and creation time a live note already holds is not written again.
-pub fn adopt_legacy(conn: &Connection, data_dir: &Path) -> Result<usize> {
-    let exists: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'legacy_notes'",
-        [],
-        |r| r.get(0),
-    )?;
-    if exists == 0 {
-        return Ok(0);
-    }
-    let rows: Vec<(i64, String, String, String, Option<String>)> = {
-        let mut stmt = conn.prepare(
-            "SELECT n.id, u.username, n.text, n.created_at, n.last_nudged_at
-             FROM legacy_notes n JOIN users u ON u.id = n.user_id ORDER BY n.id",
-        )?;
-        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?;
-        rows.collect::<rusqlite::Result<_>>()?
-    };
-    let mut held: std::collections::HashMap<String, std::collections::HashSet<(String, String)>> =
-        std::collections::HashMap::new();
-    let mut adopted = 0;
-    for (row_id, user, text, created, nudged) in rows {
-        let folded = text.split_whitespace().collect::<Vec<_>>().join(" ");
-        let title = folded.chars().take(MAX_TITLE_CHARS).collect::<String>().trim_end().to_string();
-        let held = match held.entry(user.clone()) {
-            std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
-            std::collections::hash_map::Entry::Vacant(e) => {
-                e.insert(all(conn, data_dir, &user)?.into_iter().map(|n| (n.title, n.created)).collect())
-            }
-        };
-        if !title.is_empty() && held.insert((title.clone(), created.clone())) {
-            let note = Note {
-                id: uuid::Uuid::new_v4().to_string(),
-                title,
-                from: None,
-                until: None,
-                touched_at: Some(created.clone()),
-                last_nudged_at: nudged,
-                created,
-            };
-            save(conn, data_dir, &user, &note)?;
-            adopted += 1;
-        }
-        conn.execute("DELETE FROM legacy_notes WHERE id = ?1", [row_id])?;
-    }
-    conn.execute_batch("DROP TABLE legacy_notes")?;
-    Ok(adopted)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -433,8 +378,10 @@ mod tests {
         let soon = note(&conn, &tmp, "soon", (Some("2026-10-07T23:00:00Z"), None), "2026-10-07T00:00:03Z");
         note(&conn, &tmp, "later", (Some("2026-10-08T01:00:00Z"), None), "2026-10-07T00:00:04Z");
         let now = at("2026-10-07T12:00:00Z");
-        assert_eq!(ids(active(&conn, tmp.path(), "aki", now).unwrap()), vec![inside.id, open.id], "newest first");
-        assert_eq!(ids(upcoming(&conn, tmp.path(), "aki", now).unwrap()), vec![soon.id]);
+        assert_eq!(ids(active(&conn, tmp.path(), "aki", now).unwrap()), vec![inside.id.clone(), open.id.clone()], "newest first");
+        let (active, upcoming) = active_and_upcoming(&conn, tmp.path(), "aki", now).unwrap();
+        assert_eq!(ids(active), vec![inside.id, open.id]);
+        assert_eq!(ids(upcoming), vec![soon.id]);
     }
 
     #[test]
@@ -534,7 +481,7 @@ mod tests {
 
         assert_eq!(settle(&conn, tmp.path(), "aki", &gone.id, &Outcome::Drop).unwrap(), None);
         assert!(all(&conn, tmp.path(), "aki").unwrap().is_empty(), "a settled note leaves working memory");
-        assert_eq!(crate::memory::live_count(&conn, "aki").unwrap(), 3);
+        assert_eq!(crate::memory::live_count_by_category(&conn, "aki").unwrap().iter().sum::<i64>(), 3);
         assert!(matches!(settle(&conn, tmp.path(), "aki", &gone.id, &Outcome::Drop), Err(NoteError::NotFound(_))));
     }
 

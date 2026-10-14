@@ -59,7 +59,7 @@ fn check_one(conn: &Connection, config_dir: &Path, user: &Seen, now: jiff::Times
     if start.is_empty() || !cfg.features(&user.category).checkins {
         return Ok(None);
     }
-    let tz = jiff::tz::TimeZone::get(&cfg.timezone).unwrap_or(jiff::tz::TimeZone::UTC);
+    let tz = crate::zone::named(&cfg.timezone);
     let local = now.to_zoned(tz.clone());
     let at = wall(&local);
     let close = cfg.close_day_time();

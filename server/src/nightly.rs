@@ -36,7 +36,7 @@ pub fn run_for_user(
     now: jiff::Timestamp,
 ) -> Result<()> {
     let ucfg = UserConfig::load(deps.config_dir, username)?;
-    let tz = jiff::tz::TimeZone::get(&ucfg.timezone).unwrap_or(jiff::tz::TimeZone::UTC);
+    let tz = crate::zone::named(&ucfg.timezone);
     let local = now.to_zoned(tz);
     let date = plan_date(&local, &ucfg.nightly_time);
     {
@@ -73,7 +73,7 @@ fn run_stages(
     now: jiff::Timestamp,
     report: &mut Report,
 ) -> Result<()> {
-    let tz = jiff::tz::TimeZone::get(&ucfg.timezone).unwrap_or(jiff::tz::TimeZone::UTC);
+    let tz = crate::zone::named(&ucfg.timezone);
     let note = |kind: &str, e: &anyhow::Error| {
         crate::failure::noted(e);
         let conn = crate::db_guard(deps.db);
@@ -86,11 +86,6 @@ fn run_stages(
             crate::log::ERROR_LOG_WINDOW_MINS,
         );
     };
-    // The day's conversations become memory before the plan is built, so the
-    // planning session already counts what they left behind.
-    let at = std::time::Instant::now();
-    let harvested = crate::harvest::run_for_user(deps, user_id, username, &tz, date, now);
-    report.stage("harvest", at, harvested.as_ref().err().inspect(|e| note("harvest_error", e)));
     // Monday's run looks back before it looks forward, so the planning session
     // already has the week's letter in memory.
     let at = std::time::Instant::now();
@@ -255,7 +250,7 @@ pub fn due(
         if !ucfg.features(&category).nightly {
             continue;
         }
-        let tz = jiff::tz::TimeZone::get(&ucfg.timezone).unwrap_or(jiff::tz::TimeZone::UTC);
+        let tz = crate::zone::named(&ucfg.timezone);
         let local = now.to_zoned(tz);
         let Ok(due_time) = format!("{}:00", ucfg.nightly_time).parse::<jiff::civil::Time>() else {
             let _ = crate::log::record_throttled(
@@ -386,7 +381,6 @@ mod tests {
         );
         write("defaults/prompts/persona.md", "persona");
         write("defaults/prompts/planning.md", "planning");
-        write("defaults/prompts/harvest.md", "harvest");
         write("defaults/prompts/review.md", "read the week");
         (Mutex::new(conn), tmp)
     }
@@ -601,7 +595,7 @@ mod tests {
         let line = nightly_run_row(&db.lock().unwrap());
         assert_eq!(
             without_timings(&line),
-            "2026-08-31: harvest=ok, review=ok, learn=ok, plan=ok, close_day=ok, \
+            "2026-08-31: review=ok, learn=ok, plan=ok, close_day=ok, \
              session=ok, notes=ok, debrief=written"
         );
         assert_ne!(line, without_timings(&line), "every stage carries its own seconds");

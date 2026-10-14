@@ -329,14 +329,12 @@ export type LogRow = {
   detail: string
 }
 
-// `totp` is the former shape of this report, kept for one release.
 export type AdminGate = {
   elevated: boolean
   expires_at?: string
   second_factor: 'passkey' | 'totp' | 'none'
   methods: { passkey: boolean; totp: boolean }
   require_second_factor: boolean
-  totp: 'required' | 'password_only' | 'missing'
   inspect: boolean
 }
 

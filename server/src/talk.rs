@@ -61,17 +61,6 @@ impl Via {
     }
 }
 
-pub fn via_of(conn: &Connection, id: i64) -> Result<Via> {
-    let via: Option<String> = conn
-        .query_row("SELECT via FROM conversations WHERE id = ?1", [id], |r| r.get(0))
-        .optional()?;
-    Ok(match via.as_deref() {
-        Some("matrix") => Via::Matrix,
-        Some("voice") => Via::Voice,
-        _ => Via::Web,
-    })
-}
-
 /// A turn from Matrix also stamps the thread, so the next message from the DM
 /// lands back in it.
 pub fn mark_via(conn: &Connection, id: i64, via: Via, now: jiff::Timestamp) -> Result<()> {

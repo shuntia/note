@@ -22,8 +22,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/goals", get(goals_list).post(goals_create))
         .route("/api/goals/{id}", patch(goals_update).delete(goals_delete))
         .route("/api/tasks", get(tasks_list).post(tasks_create))
-        .route("/api/tasks/queue", get(tasks_queue))
-        .route("/api/tasks/candidates", get(tasks_candidates))
+        .route("/api/tasks/queue", get(task_queue::<false>))
+        .route("/api/tasks/candidates", get(task_queue::<true>))
         .route("/api/order", get(order_get).put(order_put))
         .route("/api/tasks/{id}", patch(tasks_update).delete(tasks_delete))
         .route(
@@ -594,38 +594,29 @@ struct QueueQuery {
     limit: Option<usize>,
 }
 
-async fn tasks_queue(
+type QueueSource = fn(
+    &rusqlite::Connection,
+    i64,
+    &jiff::tz::TimeZone,
+    jiff::Timestamp,
+    usize,
+) -> rusqlite::Result<Vec<crate::tasks::QueueEntry>>;
+
+/// The queue, or with `order::candidates` what Now starts next: today's order,
+/// then the queue behind it.
+async fn task_queue<const CANDIDATES: bool>(
     user: CurrentUser,
     State(state): State<AppState>,
     Query(q): Query<QueueQuery>,
 ) -> impl IntoResponse {
+    let source: QueueSource = if CANDIDATES { crate::order::candidates } else { crate::tasks::queue };
     let tz = user_zone(&state, &user.username);
     let conn = state.db();
     let limit = q.limit.unwrap_or(5).clamp(1, 20);
-    let listed = crate::tasks::queue(&conn, user.id, &tz, jiff::Timestamp::now(), limit).and_then(|mut q| {
+    let listed = source(&conn, user.id, &tz, jiff::Timestamp::now(), limit).and_then(|mut q| {
         crate::tasks::stamp_schedule(&conn, user.id, &tz, q.iter_mut().map(|e| &mut e.task.task))?;
         Ok(q)
     });
-    match listed {
-        Ok(q) => Json(q).into_response(),
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    }
-}
-
-/// What Now starts next: today's order, then the queue behind it.
-async fn tasks_candidates(
-    user: CurrentUser,
-    State(state): State<AppState>,
-    Query(q): Query<QueueQuery>,
-) -> impl IntoResponse {
-    let tz = user_zone(&state, &user.username);
-    let conn = state.db();
-    let limit = q.limit.unwrap_or(5).clamp(1, 20);
-    let listed = crate::order::candidates(&conn, user.id, &tz, jiff::Timestamp::now(), limit)
-        .and_then(|mut q| {
-            crate::tasks::stamp_schedule(&conn, user.id, &tz, q.iter_mut().map(|e| &mut e.task.task))?;
-            Ok(q)
-        });
     match listed {
         Ok(q) => Json(q).into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
@@ -970,10 +961,7 @@ async fn task_agent(
                 "only a top-level task can be briefed, not one of its steps",
             );
         }
-        let tz = crate::config::UserConfig::load(&state.config_dir, &user.username)
-            .ok()
-            .and_then(|c| jiff::tz::TimeZone::get(&c.timezone).ok())
-            .unwrap_or(jiff::tz::TimeZone::UTC);
+        let tz = user_zone(&state, &user.username);
         match crate::tasks::snapshot(&conn, user.id, id) {
             Ok(snap) => (brief_message(&node, &req.context, &tz), snap),
             Err(e) => return failed(e.to_string()),
@@ -2239,7 +2227,7 @@ async fn memory_list(
 
 /// A fact of another user is indistinguishable from one that does not exist:
 /// the id is only ever looked up under the caller's own memory root.
-/// What wrote this fact on the user's behalf — an inbox item, a harvest —
+/// What wrote this fact on the user's behalf — an inbox item —
 /// empty for one the user's own sessions wrote.
 fn memory_sources(state: &AppState, user_id: i64, memory_id: &str) -> Vec<String> {
     let conn = state.db();
@@ -2351,7 +2339,7 @@ fn day_context(
 ) -> Result<(jiff::tz::TimeZone, crate::templates::Template), StatusCode> {
     let ucfg = crate::config::UserConfig::load(&state.config_dir, username)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let tz = jiff::tz::TimeZone::get(&ucfg.timezone).unwrap_or(jiff::tz::TimeZone::UTC);
+    let tz = crate::zone::named(&ucfg.timezone);
     let tmpl = crate::templates::Template::load(&state.config_dir, username, &ucfg.template)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok((tz, tmpl))
@@ -3312,7 +3300,7 @@ async fn calendar_day(
     let Ok(ucfg) = crate::config::UserConfig::load(&state.config_dir, &user.username) else {
         return calendar_error(StatusCode::INTERNAL_SERVER_ERROR, "unreadable user config");
     };
-    let tz = jiff::tz::TimeZone::get(&ucfg.timezone).unwrap_or(jiff::tz::TimeZone::UTC);
+    let tz = crate::zone::named(&ucfg.timezone);
     let now = jiff::Timestamp::now();
     let conn = state.db();
     let Ok(occurrences) = crate::calendar::occurrences(&conn, user.id, date) else {

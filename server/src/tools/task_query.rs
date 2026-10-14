@@ -232,10 +232,7 @@ fn day_start(ctx: &ToolCtx, field: &str, day: &str) -> Result<String, ToolError>
     let day: jiff::civil::Date = day
         .parse()
         .map_err(|_| ToolError::rejected(format!("{field} must be YYYY-MM-DD, got {day:?}")))?;
-    let tz = crate::config::UserConfig::load(ctx.config_dir, ctx.username)
-        .ok()
-        .and_then(|c| jiff::tz::TimeZone::get(&c.timezone).ok())
-        .unwrap_or(jiff::tz::TimeZone::UTC);
+    let tz = crate::triggers::timezone(ctx.config_dir, ctx.username);
     Ok(day.to_zoned(tz).map_err(internal)?.timestamp().to_string())
 }
 
