@@ -97,11 +97,26 @@ fn normalised(text: &str) -> String {
         .join(" ")
 }
 
+const MIN_QUOTE_CHARS: usize = 8;
+const MIN_QUOTE_WORDS: usize = 3;
+
 /// Whether `quote` is words the user really wrote: part of one of `heard`, the
-/// messages this session holds from the user.
+/// messages this session holds from the user. Spaced text must match whole
+/// words, at least `MIN_QUOTE_WORDS` of them; unspaced text (Japanese) is a
+/// plain substring. Either way it holds at least `MIN_QUOTE_CHARS` characters.
 fn heard_from_user(quote: &str, heard: &[String]) -> bool {
     let quote = normalised(quote);
-    !quote.is_empty() && heard.iter().any(|h| normalised(h).contains(&quote))
+    if quote.chars().count() < MIN_QUOTE_CHARS {
+        return false;
+    }
+    if quote.contains(' ') && quote.chars().any(|c| c.is_ascii_alphanumeric()) {
+        if quote.split(' ').count() < MIN_QUOTE_WORDS {
+            return false;
+        }
+        let quote = format!(" {quote} ");
+        return heard.iter().any(|h| format!(" {} ", normalised(h)).contains(&quote));
+    }
+    heard.iter().any(|h| normalised(h).contains(&quote))
 }
 
 /// The first `call_user` call: never rings. Refuses as busy when no call may
@@ -397,18 +412,31 @@ mod tests {
     }
 
     #[test]
+    fn a_quote_must_be_whole_words_and_long_enough() {
+        let heard = vec!["Can you CALL me at 11, please?".to_string(), "あとで電話してください。".to_string()];
+        for short in ["a", "the", "call me", "all me at 1", "can you"] {
+            assert!(!heard_from_user(short, &heard), "{short}");
+        }
+        assert!(heard_from_user("call me at 11", &heard));
+        assert!(heard_from_user("you call me", &heard));
+        assert!(heard_from_user("電話してください", &heard));
+        assert!(!heard_from_user("電話して", &heard), "too short");
+        assert!(!heard_from_user("今すぐ電話してください", &heard));
+    }
+
+    #[test]
     fn ring_for_never_holds_even_an_asked_call() {
         let never = Situation { ring_for: "never".into(), ..free() };
         let mut calls = Calls::default();
         assert_eq!(checked(&mut calls, &never, r#"{"reason":"x"}"#).unwrap_err().kind, "busy");
-        let e = checked(&mut calls, &never, r#"{"reason":"x","asked":true,"quote":"ring me"}"#).unwrap_err();
+        let e = checked(&mut calls, &never, r#"{"reason":"x","asked":true,"quote":"call me at 11"}"#).unwrap_err();
         assert_eq!(e.kind, "busy");
         assert!(!e.message.contains("unless"), "{}", e.message);
     }
 
     #[test]
     fn nothing_to_ring_or_a_live_call_refuses_even_an_asked_call() {
-        let asked = r#"{"reason":"x","asked":true,"quote":"call me"}"#;
+        let asked = r#"{"reason":"x","asked":true,"quote":"call me at 11"}"#;
         for s in [
             Situation { reach: Reach::default(), ..free() },
             Situation { live_call: true, ..free() },
