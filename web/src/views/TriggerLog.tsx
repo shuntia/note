@@ -26,7 +26,7 @@ function ending(e: TriggerLogEntry, shape: Shape) {
       </>
     )
   if (shape === 'quiet') return why(t('talk.triggers.quiet'))
-  if (e.outcome === 'cancelled') return why(t('talk.triggers.cancelled'))
+  if (e.outcome === 'cancelled') return <p className="trig-end">{t('talk.triggers.cancelled')}</p>
   if (shape === 'off' && e.status === 'dropped') return why(t('talk.triggers.dropped'))
   return null
 }

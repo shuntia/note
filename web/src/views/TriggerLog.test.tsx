@@ -28,7 +28,8 @@ test('each_trigger_reads_as_its_moment_its_prompt_and_how_it_ended', () => {
   expect(out).toContain('see how the essay is going')
   expect(out).toContain('How is the essay?')
   expect(out).toContain('they just answered')
-  expect(out).toContain('task_done')
+  expect(out).toContain('trig-end')
+  expect(out).not.toContain('task_done')
   expect(out).toContain('09:30')
 })
 

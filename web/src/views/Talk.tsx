@@ -971,7 +971,7 @@ export function Talk({
               </button>
             </p>
           )}
-          {listState === 'ready' && visible.length === 0 && (
+          {listState === 'ready' && visible.length === 0 && !showTriggers && (
             <p className="chat-side-note muted">{t('talk.noChats')}</p>
           )}
           <ul className="chat-list">
