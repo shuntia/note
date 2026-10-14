@@ -1116,7 +1116,7 @@ fn hinted(tool: &str, mut e: ToolError) -> ToolError {
         return e;
     };
     if let Some((_, _, other)) = ELSEWHERE.iter().find(|(t, f, _)| tool.starts_with(t) && *f == field) {
-        e.message.push_str(&format!("; {field} belongs to {other}"));
+        e.message = format!("{}; {field} belongs to {other}", e.message);
     }
     e
 }

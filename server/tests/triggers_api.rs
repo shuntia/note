@@ -518,6 +518,35 @@ async fn a_chat_rings_now_and_opens_in_the_check_in_thread() {
 }
 
 #[tokio::test]
+async fn the_trigger_log_shows_the_owners_triggers_and_how_they_ended() {
+    let w = world(vec![call("c1", "say", r#"{"text":"how is the chapter going?"}"#)]).await;
+    start_session(&w).await;
+    make_due(&w);
+    note_server::runner::sweep_once(&w.state);
+    lay_plain(&w);
+
+    let (status, body) = get(&w, "/api/triggers").await;
+    assert_eq!(status, StatusCode::OK);
+    let events = body["events"].as_array().unwrap();
+    assert_eq!(events.len(), 2, "{body}");
+    assert_eq!((events[0]["outcome"].as_str(), events[0]["text"].as_str()), (Some("said"), Some("how is the chapter going?")));
+    assert_eq!(events[1]["status"], "pending");
+    assert_eq!(events[1]["prompt"], "see how the essay is going");
+    assert!(events[1]["outcome"].is_null());
+
+    auth::create_user(&w.state.db.lock().unwrap(), "bo", "pw", false).unwrap();
+    let theirs = common::login(&w.app, "bo", "pw").await;
+    let req = Request::get("/api/triggers").header(header::COOKIE, &theirs).body(Body::empty()).unwrap();
+    let res = w.app.clone().oneshot(req).await.unwrap();
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let other: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(other["events"], serde_json::json!([]), "another account sees none of them");
+
+    let res = w.app.clone().oneshot(Request::get("/api/triggers").body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn a_wake_up_that_ends_in_plain_text_still_speaks() {
     let w = world(vec![ChatResponse { text: "Back to the chapter?".into(), tool_calls: vec![] }]).await;
     start_session(&w).await;

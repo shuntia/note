@@ -50,6 +50,12 @@ Conversations: `GET /api/conversations`, `PATCH/DELETE /api/conversations/{id}`,
 and `GET /api/conversations/{id}/messages` (user, assistant and tool rows in
 order; each carries `reasoning`, and the assistant row `thought_ms`).
 
+`GET /api/triggers` is the signed-in user's trigger log, oldest first: up to
+100 settled in the last 7 days, then up to 50 still waiting, each
+`{event_id, date, at, status, prompt, origin, outcome, text}` with `outcome`
+one of `said`, `rang`, `quiet`, `cancelled`, `replaced` or null. With
+`show_triggers` on, Chat lists it as a read-only thread.
+
 ## Nightly run
 
 At each user's `nightly_time` (default 03:00, their timezone) the server

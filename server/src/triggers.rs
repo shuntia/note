@@ -418,6 +418,95 @@ pub fn waiting(
     Ok((shown, more))
 }
 
+/// How many upcoming and how many settled triggers the log shows, and how far
+/// back the settled ones reach.
+const LOG_UPCOMING: usize = 50;
+const LOG_PAST: usize = 100;
+const LOG_DAYS: i64 = 7;
+
+/// `(id, date, at, status, prompt, origin)`.
+type LogRow = (i64, String, String, String, String, String);
+
+/// The user's trigger log for the chat's read-only thread, oldest first: the
+/// settled ones of the last week, then those still waiting. Each carries what
+/// Note meant to look at and, once settled, how it ended.
+pub fn log(conn: &Connection, user_id: i64, today: jiff::civil::Date) -> rusqlite::Result<Vec<serde_json::Value>> {
+    let since = today.checked_sub(jiff::Span::new().days(LOG_DAYS)).unwrap_or(today);
+    let rows = |sql: &str, limit: usize| -> rusqlite::Result<Vec<LogRow>> {
+        let mut stmt = conn.prepare(sql)?;
+        let out = stmt
+            .query_map((user_id, KIND, since.to_string(), limit as i64), |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get::<_, Option<String>>(4)?.unwrap_or_default(), r.get(5)?))
+            })?
+            .collect();
+        out
+    };
+    let mut past = rows(
+        "SELECT e.id, p.date, e.wall_time, e.status, e.prompt, e.origin FROM events e JOIN plans p ON p.id = e.plan_id
+         WHERE p.user_id = ?1 AND e.kind = ?2 AND e.status NOT IN ('pending', 'snoozed') AND p.date >= ?3
+         ORDER BY p.date DESC, e.wall_time DESC, e.id DESC LIMIT ?4",
+        LOG_PAST,
+    )?;
+    past.reverse();
+    let upcoming = rows(
+        "SELECT e.id, p.date, e.wall_time, e.status, e.prompt, e.origin FROM events e JOIN plans p ON p.id = e.plan_id
+         WHERE p.user_id = ?1 AND e.kind = ?2 AND e.status IN ('pending', 'snoozed') AND p.date >= ?3
+         ORDER BY p.date, e.wall_time, e.id LIMIT ?4",
+        LOG_UPCOMING,
+    )?;
+    let endings = endings(conn, user_id, since)?;
+    Ok(past
+        .into_iter()
+        .chain(upcoming)
+        .map(|(id, date, at, status, prompt, origin)| {
+            let (outcome, text) = endings.get(&id).cloned().map_or((None, None), |(o, t)| (Some(o), t));
+            serde_json::json!({
+                "event_id": id, "date": date, "at": at, "status": status, "prompt": prompt,
+                "origin": origin, "outcome": outcome, "text": text,
+            })
+        })
+        .collect())
+}
+
+/// How each trigger since `since` ended, from the log rows its firing wrote:
+/// `said`, `rang`, `quiet`, `cancelled` or `replaced`, with the words or reason.
+fn endings(
+    conn: &Connection,
+    user_id: i64,
+    since: jiff::civil::Date,
+) -> rusqlite::Result<std::collections::HashMap<i64, (&'static str, Option<String>)>> {
+    let mut stmt = conn.prepare(
+        "SELECT kind, detail FROM event_log WHERE user_id = ?1 AND ts >= ?2
+           AND kind IN ('trigger_said', 'trigger_rang', 'trigger_quiet', 'trigger_cancelled', 'trigger_replaced')
+         ORDER BY id",
+    )?;
+    let mut out: std::collections::HashMap<i64, (&'static str, Option<String>)> = std::collections::HashMap::new();
+    let rows = stmt.query_map((user_id, since.to_string()), |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+    for row in rows {
+        let (kind, detail) = row?;
+        let Some(rest) = detail.strip_prefix("event ") else { continue };
+        let digits = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+        let Ok(id) = rest[..digits].parse::<i64>() else { continue };
+        let tail = rest[digits..].trim_start_matches(':').trim();
+        let tail = tail.trim_start_matches('(').trim_end_matches(')');
+        let outcome = match kind.as_str() {
+            "trigger_said" => "said",
+            "trigger_rang" => "rang",
+            "trigger_quiet" => "quiet",
+            "trigger_cancelled" => "cancelled",
+            _ => "replaced",
+        };
+        if outcome == "rang" {
+            if let Some((_, said)) = out.get(&id) {
+                out.insert(id, ("rang", said.clone()));
+            }
+            continue;
+        }
+        out.insert(id, (outcome, (!tail.is_empty()).then(|| tail.to_string())));
+    }
+    Ok(out)
+}
+
 /// Whether a trigger is the close-the-day check, in whichever language it was laid.
 fn is_close_day(prompt: &str) -> bool {
     [Lang::En, Lang::Ja].into_iter().any(|l| prompt == mt::close_day_prompt(l))

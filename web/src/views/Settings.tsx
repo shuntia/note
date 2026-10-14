@@ -593,6 +593,7 @@ export function Settings({
               )}
             </FoldRow>
           )}
+          <ToggleSetting field="show_triggers" label={t('settings.showTriggers')} />
           {loaded && (
             <FoldRow
               label={t('settings.idle')}

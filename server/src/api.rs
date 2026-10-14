@@ -43,6 +43,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/talk", post(talk))
         .route("/api/talk/live", get(talk_live))
         .route("/api/conversations", get(conversations_list))
+        .route("/api/triggers", get(triggers_log))
         .route(
             "/api/conversations/{id}",
             patch(conversation_rename).delete(conversation_delete),
@@ -1462,6 +1463,15 @@ fn conversation_not_found() -> axum::response::Response {
         .into_response()
 }
 
+async fn triggers_log(user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
+    let tz = crate::triggers::timezone(&state.config_dir, &user.username);
+    let today = jiff::Timestamp::now().to_zoned(tz).date();
+    match crate::triggers::log(&state.db(), user.id, today) {
+        Ok(events) => Json(serde_json::json!({ "events": events })).into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
 async fn conversations_list(user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
     let conn = state.db();
     let Ok(mut stmt) = conn.prepare(
@@ -1586,6 +1596,7 @@ struct SettingsPatch {
     pomodoro_break_min: Option<u32>,
     session_end_notify: Option<bool>,
     overrun_wakes: Option<bool>,
+    show_triggers: Option<bool>,
     idle_nudge_min: Option<u32>,
     ring_for: Option<String>,
     voice_voice: Option<String>,
@@ -1633,6 +1644,7 @@ fn settings_body(
         "pomodoro_break_min": cfg.pomodoro_break_min(),
         "session_end_notify": cfg.session_end_notify(),
         "overrun_wakes": cfg.overrun_wakes(),
+        "show_triggers": cfg.show_triggers(),
         "idle_nudge_min": cfg.idle_nudge_min(),
         "voice_enabled": state.voice.is_some(),
         "voice_link": voice_link.map(|l| serde_json::json!({ "mxid": l.mxid, "state": l.state })),
@@ -1809,6 +1821,9 @@ async fn settings_put(
     }
     if let Some(on) = req.session_end_notify {
         cfg.session_end_notify = Some(on);
+    }
+    if let Some(on) = req.show_triggers {
+        cfg.show_triggers = Some(on);
     }
     if let Some(on) = req.overrun_wakes {
         cfg.overrun_wakes = Some(on);
