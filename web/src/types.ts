@@ -230,6 +230,8 @@ export type Settings = {
   pomodoro_break_min: number
   // Gates the pomodoro phase messages and the "Time's up." at a session's planned end.
   session_end_notify: boolean
+  // Whether a session run far past its plan wakes Note to answer it in its own words.
+  overrun_wakes: boolean
   // Minutes quiet before Note may nudge about open notes; 0 is off.
   idle_nudge_min: number
   // Whether this server can ring a phone; the Calls row hides without it.

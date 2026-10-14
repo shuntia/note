@@ -136,6 +136,54 @@
   cursor: pointer;
 }
 .memory-more:hover { color: var(--ink); }
+.memory-title[data-editable], .memory-text[data-editable] { cursor: text; }
+.memory-title[data-editable]:focus-visible { outline: 2px solid var(--ring); outline-offset: 4px; border-radius: 6px; }
+.memory-text { display: flex; flex-direction: column; gap: 0.875rem; }
+.memory-text:empty { display: none; }
+.memory-editor { display: contents; }
+.memory-edit {
+  display: block;
+  width: 100%;
+  margin: 0 -0.5rem;
+  padding: 0.25rem 0.5rem;
+  box-sizing: content-box;
+  border: 0;
+  border-radius: 0.5rem;
+  background: var(--haze);
+  color: var(--ink);
+  resize: none;
+  overflow: hidden;
+  field-sizing: content;
+  transition: background 180ms ease;
+}
+.memory-edit:focus { outline: none; background: var(--earth); }
+.memory-edit-body { font: inherit; font-size: 0.9375rem; line-height: 1.55; color: var(--quiet); min-height: 3lh; }
+.memory-forget {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  margin-left: auto;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  color: var(--faint);
+  cursor: pointer;
+  transition: color 180ms ease, background 180ms ease;
+}
+.memory-forget:hover { color: var(--ink); background: var(--haze); }
+.memory-forget:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+.memory-forget svg {
+  width: 1.125rem;
+  height: 1.125rem;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
 
 /* inbox: the Memory list's rows and card, with a chip for the kind and one for what Note decided */
 .inbox-bar { display: flex; align-items: center; gap: 0.375rem; margin: -0.75rem 0.875rem -0.5rem; }

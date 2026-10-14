@@ -85,6 +85,7 @@ export const WRITABLE_SETTINGS = [
   'pomodoro_work_min',
   'pomodoro_break_min',
   'session_end_notify',
+  'overrun_wakes',
   'idle_nudge_min',
   'ring_for',
   'voice_voice',
@@ -310,6 +311,13 @@ export const api = {
     return request<{ items: MemoryHit[] }>(`/api/memory${query ? `?${query}` : ''}`)
   },
   memoryRead: (id: string) => request<MemoryFact>(`/api/memory/${encodeURIComponent(id)}`),
+  memoryEdit: (id: string, patch: { summary?: string; body?: string }) =>
+    request<Pick<MemoryFact, 'id' | 'category' | 'summary' | 'body' | 'created'>>(
+      `/api/memory/${encodeURIComponent(id)}`,
+      { method: 'PATCH', body: JSON.stringify(patch) },
+    ),
+  memoryForget: (id: string) =>
+    request<void>(`/api/memory/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   inboxList: (params: { before?: string; limit?: number } = {}) => {
     const search = new URLSearchParams()
     if (params.before) search.set('before', params.before)

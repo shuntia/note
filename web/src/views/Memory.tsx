@@ -4,10 +4,15 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  type FocusEvent,
+  type KeyboardEvent,
+  type MouseEvent,
+  type ReactNode,
   type RefObject,
 } from 'react'
 import { api } from '../api'
 import type { ViewProps } from '../app'
+import { makeHold } from '../held'
 import { Markdown } from '../markdown'
 import { flip, popOut, rise, settle } from '../motion-gsap'
 import { Overflow } from '../overflow'
@@ -21,7 +26,11 @@ import * as format from '../i18n/format'
 const SINGLE_PANE = '(max-width: 1087.98px)'
 const AUTO_OPEN_AFTER = 8
 
+// Forgetting has no server-side reversal, so the request waits out the undo window.
+const forgetHold = makeHold<string>()
+
 type Filter = '' | 'semantic' | 'episodic' | 'inbox'
+type Field = 'summary' | 'body'
 
 const FILTERS: { id: Filter; label: Key }[] = [
   { id: '', label: 'memory.all' },
@@ -87,7 +96,7 @@ function newestFirst(items: MemoryHit[], saved: (id: string) => MemoryFact | und
     .map((row) => row.m)
 }
 
-// Facts never change once written, so reads are cached for the session; the list
+// Reads are cached for the session and an edit made here writes through; the list
 // endpoint carries summaries only, so a row's date has to be read back one fact
 // at a time.
 const factCache = new Map<string, MemoryFact>()
@@ -136,7 +145,7 @@ function useListMotion(list: RefObject<HTMLUListElement | null>, sig: string) {
   })
 }
 
-export function Memory({ notify, refresh, openTalk }: ViewProps) {
+export function Memory({ notify, refresh, onChanged, openTalk }: ViewProps) {
   const [draft, setDraft] = useState('')
   const [query, setQuery] = useState('')
   const [filter, setFilter] = useState<Filter>('')
@@ -144,6 +153,8 @@ export function Memory({ notify, refresh, openTalk }: ViewProps) {
   const [listFailed, setListFailed] = useState(false)
   const [selected, setSelected] = useState<string | null>(null)
   const [fact, setFact] = useState<MemoryFact | null>(null)
+  const [editing, setEditing] = useState<Field | null>(null)
+  const [, tick] = useState(0)
 
   const facts = useFacts()
   const inbox = useInbox(refresh, notify)
@@ -184,6 +195,7 @@ export function Memory({ notify, refresh, openTalk }: ViewProps) {
     (id: string) => {
       setSelected(id)
       setFact(null)
+      setEditing(null)
       const era = ++factEra.current
       api
         .memoryRead(id)
@@ -200,15 +212,66 @@ export function Memory({ notify, refresh, openTalk }: ViewProps) {
     [notify],
   )
 
+  const save = (id: string, patch: { summary: string; body: string }) => {
+    const before = factCache.get(id)
+    const put = (f: MemoryFact) => {
+      factCache.set(id, f)
+      setFact((shown) => (shown?.id === id ? f : shown))
+      setItems((list) => list?.map((m) => (m.id === id ? { ...m, summary: f.summary } : m)) ?? null)
+    }
+    if (before) put({ ...before, ...patch, source: null })
+    api.memoryEdit(id, patch).then(
+      (f) => {
+        const now = factCache.get(id)
+        if (now) put({ ...now, ...f })
+        onChanged()
+      },
+      () => {
+        if (before) put(before)
+        notify(t('memory.editFailed'))
+      },
+    )
+  }
+
+  const forget = (hit: MemoryHit) => {
+    forgetHold.start(hit.id, () => {
+      api.memoryForget(hit.id).then(
+        () => {
+          factCache.delete(hit.id)
+          load()
+          onChanged()
+        },
+        () => {
+          notify(t('memory.forgetFailed'))
+          load()
+        },
+      )
+    })
+    if (selected === hit.id) {
+      setSelected(null)
+      setFact(null)
+    }
+    tick((n) => n + 1)
+    notify(t('memory.forgotten'), {
+      label: t('toast.undo'),
+      run: () => {
+        if (forgetHold.cancel(hit.id)) tick((n) => n + 1)
+      },
+    })
+  }
+
+  const live = items?.filter((m) => m.id !== forgetHold.held()) ?? null
+
   // Side by side, the reading pane is never left empty: it opens the newest fact
   // once the rows on screen have read back their dates.
-  const head = items?.slice(0, AUTO_OPEN_AFTER) ?? []
+  const head = live?.slice(0, AUTO_OPEN_AFTER) ?? []
   const dated = head.length > 0 && head.every((m) => facts.get(m.id) !== undefined)
+  const newest = dated && live ? newestFirst(live, (id) => factCache.get(id))[0].id : null
   useEffect(() => {
-    if (filter === 'inbox' || selected !== null || !items || !dated) return
+    if (filter === 'inbox' || selected !== null || newest === null) return
     if (window.matchMedia(SINGLE_PANE).matches) return
-    openFact(newestFirst(items, (id) => factCache.get(id))[0].id)
-  }, [filter, items, dated, selected, openFact])
+    openFact(newest)
+  }, [filter, newest, selected, openFact])
 
   useEffect(() => {
     if (!onInbox || inboxSelected !== null || !inboxPage?.items.length) return
@@ -226,10 +289,12 @@ export function Memory({ notify, refresh, openTalk }: ViewProps) {
   }, [shown])
 
   // Where the detail replaces the list it rises like a sheet; beside it, it settles.
+  // An edit keeps the card where it is.
+  const factId = fact?.id ?? null
   useLayoutEffect(() => {
-    if (fact === null && inboxItem === null) return
+    if (factId === null && inboxItem === null) return
     rise(card.current, window.matchMedia(SINGLE_PANE).matches ? 28 : 14)
-  }, [fact, inboxItem])
+  }, [factId, inboxItem])
 
   const closeDetail = () =>
     popOut(card.current, () => (onInbox ? closeItem() : setSelected(null)), true)
@@ -241,7 +306,7 @@ export function Memory({ notify, refresh, openTalk }: ViewProps) {
   }
 
   const filters = inboxPage?.items.length ? FILTERS : FILTERS.filter((f) => f.id !== 'inbox')
-  const count = items?.length ?? 0
+  const count = live?.length ?? 0
 
   return (
     <div className="memory" data-pane={shown === null ? 'list' : 'detail'}>
@@ -304,17 +369,22 @@ export function Memory({ notify, refresh, openTalk }: ViewProps) {
               {t('common.retry')}
             </button>
           </p>
-        ) : items === null ? null : count === 0 ? (
+        ) : live === null ? null : count === 0 ? (
           <p className="memory-empty">{query ? t('memory.noMatch') : t('memory.empty')}</p>
         ) : (
           <ul className="memory-list" ref={list}>
-            {newestFirst(items, facts.get).map((m) => (
+            {newestFirst(live, facts.get).map((m) => (
               <MemoryRow
                 key={m.id}
                 hit={m}
                 saved={facts.get(m.id)?.created}
                 selected={selected === m.id}
                 onOpen={openFact}
+                onEdit={(id) => {
+                  if (selected !== id) openFact(id)
+                  setEditing('summary')
+                }}
+                onForget={forget}
                 onSeen={facts.want}
                 openTalk={openTalk}
               />
@@ -336,7 +406,17 @@ export function Memory({ notify, refresh, openTalk }: ViewProps) {
               <InboxCard item={inboxItem} cardRef={card} onMemory={openMemory} />
             )
           : selected !== null &&
-            fact !== null && <FactBody fact={fact} openTalk={openTalk} cardRef={card} />}
+            fact !== null && (
+              <FactBody
+                fact={fact}
+                editing={editing}
+                onEdit={setEditing}
+                onSave={(patch) => save(fact.id, patch)}
+                onForget={() => forget(fact)}
+                openTalk={openTalk}
+                cardRef={card}
+              />
+            )}
       </div>
     </div>
   )
@@ -347,6 +427,8 @@ function MemoryRow({
   saved,
   selected,
   onOpen,
+  onEdit,
+  onForget,
   onSeen,
   openTalk,
 }: {
@@ -354,6 +436,8 @@ function MemoryRow({
   saved: string | undefined
   selected: boolean
   onOpen: (id: string) => void
+  onEdit: (id: string) => void
+  onForget: (hit: MemoryHit) => void
   onSeen: (id: string) => void
   openTalk: (draft: string) => void
 }) {
@@ -395,6 +479,8 @@ function MemoryRow({
           { label: t('menu.open'), run: () => onOpen(hit.id) },
           { label: t('memory.tellMore'), run: () => openTalk(t('memory.aboutDraft', { summary: hit.summary })) },
           { label: t('memory.wrong'), run: () => openTalk(t('memory.wrongDraft', { summary: hit.summary })) },
+          { label: t('menu.edit'), run: () => onEdit(hit.id) },
+          { label: t('memory.forget'), kind: 'danger', run: () => onForget(hit) },
         ]}
       />
     </li>
@@ -411,45 +497,88 @@ function Glyph({ category }: { category: string }) {
   )
 }
 
-function FactBody({
+export function FactBody({
   fact,
+  editing,
+  onEdit,
+  onSave,
+  onForget,
   openTalk,
   cardRef,
 }: {
   fact: MemoryFact
+  editing: Field | null
+  onEdit: (field: Field | null) => void
+  onSave: (patch: { summary: string; body: string }) => void
+  onForget: () => void
   openTalk: (draft: string) => void
   cardRef: RefObject<HTMLElement | null>
 }) {
   const { meta, rest } = frontMatter(fact.body)
+  const editable = !fact.archived
+  const edit = (field: Field) => (e: MouseEvent) => {
+    if (!editable || (e.target as Element).closest('a, button')) return
+    onEdit(field)
+  }
+  const origin = (
+    <p className="memory-meta">
+      {fact.source === 'note' ? t('memory.builtIn') : t('memory.from', { date: format.isoDay(fact.created) })}
+      {fact.archived && <span className="memory-flag">{t('memory.archived')}</span>}
+    </p>
+  )
   return (
     <article className="memory-card" ref={cardRef}>
-      <h2 className="memory-title">{displaySummary(fact)}</h2>
-      <p className="memory-meta">
-        {fact.source === 'note' ? t('memory.builtIn') : t('memory.from', { date: format.isoDay(fact.created) })}
-        {fact.archived && <span className="memory-flag">{t('memory.archived')}</span>}
-      </p>
-      {meta.length > 0 && (
-        <div className="memory-facts">
-          {meta.flatMap(([key, value]) =>
-            key === 'tags'
-              ? unwrap(value)
-                  .split(',')
-                  .map((tag) => tag.trim())
-                  .filter(Boolean)
-                  .map((tag) => (
-                    <span className="meta" key={`tag:${tag}`}>
-                      {tag}
-                    </span>
-                  ))
-              : [
-                  <span className="meta" key={key}>
-                    {key} {unwrap(value)}
-                  </span>,
-                ],
-          )}
-        </div>
+      {editing !== null && editable ? (
+        <FactEditor
+          fact={fact}
+          focus={editing}
+          onDone={(patch) => {
+            onEdit(null)
+            if (patch) onSave(patch)
+          }}
+        >
+          {origin}
+        </FactEditor>
+      ) : (
+        <>
+          <h2
+            className="memory-title"
+            data-editable={editable || undefined}
+            tabIndex={editable ? 0 : undefined}
+            onClick={edit('summary')}
+            onKeyDown={(e) => {
+              if (editable && e.key === 'Enter') onEdit('summary')
+            }}
+          >
+            {displaySummary(fact)}
+          </h2>
+          {origin}
+          <div className="memory-text" data-editable={editable || undefined} onClick={edit('body')}>
+            {meta.length > 0 && (
+              <div className="memory-facts">
+                {meta.flatMap(([key, value]) =>
+                  key === 'tags'
+                    ? unwrap(value)
+                        .split(',')
+                        .map((tag) => tag.trim())
+                        .filter(Boolean)
+                        .map((tag) => (
+                          <span className="meta" key={`tag:${tag}`}>
+                            {tag}
+                          </span>
+                        ))
+                    : [
+                        <span className="meta" key={key}>
+                          {key} {unwrap(value)}
+                        </span>,
+                      ],
+                )}
+              </div>
+            )}
+            {rest.trim() !== '' && rest.trim() !== fact.summary.trim() && <Markdown text={rest} />}
+          </div>
+        </>
       )}
-      {rest.trim() !== '' && rest.trim() !== fact.summary.trim() && <Markdown text={rest} />}
       <div className="memory-acts">
         <button
           className="btn-haze"
@@ -460,7 +589,98 @@ function FactBody({
         <button className="memory-more" onClick={() => openTalk(t('memory.aboutDraft', { summary: fact.summary }))}>
           {t('memory.tellMore')}
         </button>
+        {editable && (
+          <button className="memory-forget" aria-label={t('memory.forget')} title={t('memory.forget')} onClick={onForget}>
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M5 7h14M10 7V5h4v2M7 7l1 12h8l1-12" />
+            </svg>
+          </button>
+        )}
       </div>
     </article>
+  )
+}
+
+// Grows with its text where the browser cannot size a field to its content.
+function fit(el: HTMLTextAreaElement | null) {
+  if (!el || (typeof CSS !== 'undefined' && CSS.supports?.('field-sizing', 'content'))) return
+  el.style.height = 'auto'
+  el.style.height = `${el.scrollHeight}px`
+}
+
+// Both fields stay open together; the edit is kept once focus leaves them both,
+// and Escape lets it go.
+function FactEditor({
+  fact,
+  focus,
+  onDone,
+  children,
+}: {
+  fact: MemoryFact
+  focus: Field
+  onDone: (patch: { summary: string; body: string } | null) => void
+  children: ReactNode
+}) {
+  const [summary, setSummary] = useState(fact.summary)
+  const [body, setBody] = useState(fact.body)
+  const pair = useRef<HTMLDivElement>(null)
+  const done = useRef(false)
+
+  useLayoutEffect(() => {
+    const fields = pair.current?.querySelectorAll('textarea')
+    fields?.forEach(fit)
+    const el = fields?.[focus === 'summary' ? 0 : 1]
+    el?.focus()
+    el?.setSelectionRange(el.value.length, el.value.length)
+  }, [focus])
+
+  const finish = (keep: boolean) => {
+    if (done.current) return
+    done.current = true
+    const next = { summary: summary.replace(/\s+/g, ' ').trim(), body: body.trim() }
+    const changed = next.summary !== fact.summary || next.body !== fact.body
+    onDone(keep && next.summary !== '' && changed ? next : null)
+  }
+  const keys = (field: Field) => (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === 'Escape') {
+      e.preventDefault()
+      finish(false)
+    } else if (e.key === 'Enter' && (field === 'summary' || e.metaKey || e.ctrlKey)) {
+      e.preventDefault()
+      finish(true)
+    }
+  }
+  const leave = (e: FocusEvent) => {
+    if (!pair.current?.contains(e.relatedTarget as Node | null)) finish(true)
+  }
+
+  return (
+    <div className="memory-editor" ref={pair}>
+      <textarea
+        className="memory-title memory-edit"
+        rows={1}
+        value={summary}
+        aria-label={t('memory.summary')}
+        onChange={(e) => {
+          setSummary(e.target.value)
+          fit(e.target)
+        }}
+        onKeyDown={keys('summary')}
+        onBlur={leave}
+      />
+      {children}
+      <textarea
+        className="memory-edit memory-edit-body"
+        rows={2}
+        value={body}
+        aria-label={t('memory.details')}
+        onChange={(e) => {
+          setBody(e.target.value)
+          fit(e.target)
+        }}
+        onKeyDown={keys('body')}
+        onBlur={leave}
+      />
+    </div>
   )
 }

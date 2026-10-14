@@ -58,7 +58,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/about", get(about_get).put(about_put))
         .route("/api/debug/prompt", get(debug_prompt))
         .route("/api/memory", get(memory_list))
-        .route("/api/memory/{id}", get(memory_read))
+        .route("/api/memory/{id}", get(memory_read).patch(memory_edit).delete(memory_forget))
         .route("/api/plan/today", get(plan_today))
         .route("/api/plan/range", get(plan_range))
         .route("/api/plan/{date}/carry", post(plan_carry))
@@ -1569,6 +1569,7 @@ struct SettingsPatch {
     pomodoro_work_min: Option<u32>,
     pomodoro_break_min: Option<u32>,
     session_end_notify: Option<bool>,
+    overrun_wakes: Option<bool>,
     idle_nudge_min: Option<u32>,
     ring_for: Option<String>,
     voice_voice: Option<String>,
@@ -1615,6 +1616,7 @@ fn settings_body(
         "pomodoro_work_min": cfg.pomodoro_work_min(),
         "pomodoro_break_min": cfg.pomodoro_break_min(),
         "session_end_notify": cfg.session_end_notify(),
+        "overrun_wakes": cfg.overrun_wakes(),
         "idle_nudge_min": cfg.idle_nudge_min(),
         "voice_enabled": state.voice.is_some(),
         "voice_link": voice_link.map(|l| serde_json::json!({ "mxid": l.mxid, "state": l.state })),
@@ -1791,6 +1793,9 @@ async fn settings_put(
     }
     if let Some(on) = req.session_end_notify {
         cfg.session_end_notify = Some(on);
+    }
+    if let Some(on) = req.overrun_wakes {
+        cfg.overrun_wakes = Some(on);
     }
     if let Some(n) = req.pomodoro_work_min {
         if !POMODORO_WORK_MIN.contains(&n) {
@@ -2294,6 +2299,101 @@ async fn memory_read(
             "sources": memory_sources(&state, user.id, &id),
         }))
         .into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MemoryEdit {
+    summary: Option<String>,
+    body: Option<String>,
+}
+
+/// Rewrites a live fact in place, the way the model's own update does; the
+/// vector is embedded before the lock is taken, and a failed embedding leaves
+/// the fact without one for the backfill rather than with the old meaning.
+async fn memory_edit(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<MemoryEdit>,
+) -> impl IntoResponse {
+    if !crate::memory::valid_id(&id) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let max = crate::tools::memory_ops::MAX_SUMMARY;
+    if req.summary.as_ref().is_some_and(|s| s.trim().is_empty() || s.len() > max) {
+        return invalid_field("summary", &format!("must be 1 to {max} bytes"));
+    }
+    if req.body.as_ref().is_some_and(|b| b.len() > crate::tools::MAX_TEXT_BYTES) {
+        return invalid_field("body", &format!("must be at most {} bytes", crate::tools::MAX_TEXT_BYTES));
+    }
+    let result = tokio::task::spawn_blocking(move || {
+        let current = match crate::memory::read(&state.data_dir, &user.username, &id)? {
+            Some(f) if f.category != crate::memory::NOTE => f,
+            _ => return Ok(None),
+        };
+        if current.archived {
+            return Err(crate::memory::WriteError::Archived(id));
+        }
+        let summary = req.summary.unwrap_or(current.summary);
+        let body = req.body.unwrap_or(current.body);
+        let text = crate::memory::embed_text(&summary, &body);
+        let vector = state.embeddings.as_ref().and_then(|e| match e.embed(&[&text]) {
+            Ok(mut v) => v.pop(),
+            Err(err) => {
+                let _ = crate::log::record(&state.db(), Some(user.id), "memory_embed_error", &format!("edit: {err}"));
+                None
+            }
+        });
+        let conn = state.db();
+        crate::memory::update(&conn, &state.data_dir, &user.username, &id, &summary, &body, vector.as_deref())?;
+        Ok(crate::memory::read(&state.data_dir, &user.username, &id)?)
+    })
+    .await;
+    match result {
+        Ok(Ok(Some(f))) => Json(serde_json::json!({
+            "id": f.id,
+            "category": f.category,
+            "summary": f.summary,
+            "body": f.body,
+            "created": f.created,
+        }))
+        .into_response(),
+        Ok(Ok(None)) => StatusCode::NOT_FOUND.into_response(),
+        Ok(Err(crate::memory::WriteError::Archived(_))) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": "an archived memory cannot be edited" })),
+        )
+            .into_response(),
+        _ => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+/// Forgets a live fact and the versions it replaced, with what recorded where
+/// they came from.
+async fn memory_forget(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    if !crate::memory::valid_id(&id) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let conn = state.db();
+    let gone = crate::memory::forget(&conn, &state.data_dir, &user.username, &id).and_then(|gone| {
+        for mid in gone.iter().flatten() {
+            conn.execute(
+                "DELETE FROM memory_sources WHERE user_id = ?1 AND memory_id = ?2",
+                (user.id, mid),
+            )?;
+        }
+        Ok(gone)
+    });
+    match gone {
+        Ok(Some(_)) => StatusCode::NO_CONTENT.into_response(),
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }

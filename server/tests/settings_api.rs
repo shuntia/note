@@ -418,6 +418,17 @@ async fn the_session_end_notice_is_on_until_turned_off() {
 }
 
 #[tokio::test]
+async fn an_overrun_wakes_the_agent_only_once_turned_on() {
+    let (app, cookie, _cfg) = common::app_with_logged_in_user().await;
+    let v = json(app.clone().oneshot(get(&cookie)).await.unwrap()).await;
+    assert_eq!(v["overrun_wakes"], false);
+    let saved = json(app.clone().oneshot(put(&cookie, r#"{"overrun_wakes":true}"#)).await.unwrap()).await;
+    assert_eq!(saved["overrun_wakes"], true);
+    let v = json(app.oneshot(get(&cookie)).await.unwrap()).await;
+    assert_eq!(v["overrun_wakes"], true);
+}
+
+#[tokio::test]
 async fn idle_nudges_are_a_setting_that_zero_turns_off() {
     let (app, cookie, _cfg) = common::app_with_logged_in_user().await;
     let v = json(app.clone().oneshot(get(&cookie)).await.unwrap()).await;
