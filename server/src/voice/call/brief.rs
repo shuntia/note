@@ -9,7 +9,7 @@ use std::fmt::Write as _;
 const THREAD_TAIL: usize = 20;
 
 pub enum Reason {
-    CheckIn { title: String, body: String },
+    CheckIn { title: String, body: String, brief: Option<String> },
     UserCalled,
 }
 
@@ -28,7 +28,13 @@ pub fn build(
     let mut brief = system_prompt_in(deps, user_id, username, SessionKind::Call, now, l)?;
     brief.push_str(mt::why_this_call(l));
     match reason {
-        Reason::CheckIn { title, body } => brief.push_str(&mt::called_about(l, title, body)),
+        Reason::CheckIn { title, body, brief: gathered } => {
+            brief.push_str(&mt::called_about(l, title, body));
+            if let Some(gathered) = gathered.as_deref().filter(|g| !g.trim().is_empty()) {
+                let gathered = crate::talk::clip(gathered.trim(), crate::tools::call_ops::MAX_BRIEF_BYTES);
+                let _ = write!(brief, "\n\n{}\n{gathered}", mt::call_brief_heading(l));
+            }
+        }
         Reason::UserCalled => brief.push_str(mt::user_called(l)),
     }
     let thread = match conversation_id {
@@ -104,7 +110,11 @@ mod tests {
             crate::notes::add(&conn, tmp.path(), "aki", "the essay is the one that matters", None, None,
                 now - jiff::SignedDuration::from_hours(1)).unwrap()
         };
-        let reason = Reason::CheckIn { title: "Essay".into(), body: "How is the essay going?".into() };
+        let reason = Reason::CheckIn {
+            title: "Essay".into(),
+            body: "How is the essay going?".into(),
+            brief: Some("intro and methods done; results left; due friday".into()),
+        };
         let brief = build(&deps, 1, "aki", &reason, Some(thread), now, Lang::En).unwrap();
         assert!(
             brief.contains(&format!(
@@ -117,6 +127,10 @@ mod tests {
         assert!(brief.starts_with(crate::model_text::call_briefly(crate::text::Lang::En)), "{brief}");
         assert!(brief.contains("\n\nYou are Note, on a phone call with Aki."), "{brief}");
         assert!(brief.contains("You called about: Essay. You opened with: How is the essay going?"));
+        assert!(
+            brief.contains("talk from it rather than looking things up:\nintro and methods done; results left; due friday"),
+            "the call carries what its ringer gathered: {brief}"
+        );
         assert!(brief.contains("you: the essay is due friday"), "{brief}");
         let user_at = brief.find("you: the essay is due friday").expect(&brief);
         let note_at = brief.find("Note: I'll check in thursday").expect(&brief);

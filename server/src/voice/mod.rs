@@ -441,6 +441,7 @@ impl Voice {
         Some(OutboundMessage {
             title: crate::text::call_title(crate::text::Lang::from_setting(&voice.language).unwrap_or_default()),
             reason: None,
+            brief: None,
             body: text,
             urgency: crate::channels::Urgency::Normal,
             checkin: false,
@@ -882,6 +883,7 @@ mod tests {
         OutboundMessage {
             title: "Check-in".into(),
             reason: None,
+            brief: None,
             body: "how is the essay going?".into(),
             urgency: Urgency::High,
             checkin: false,

@@ -50,6 +50,9 @@ pub struct OutboundMessage {
     /// Why Note is calling, for the call's own prompt when this message rings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// What the session that rang gathered for the call to talk from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brief: Option<String>,
     pub body: String,
     pub urgency: Urgency,
     /// Note asking how the user is doing, as a fired check-in or one of its own trigger points.
@@ -128,6 +131,7 @@ pub fn render(conn: &Connection, ev: &crate::runner::FiredEvent, lang: Lang) -> 
     OutboundMessage {
         title,
         reason: None,
+        brief: None,
         body,
         urgency,
         checkin: is_checkin(&ev.kind),
@@ -269,6 +273,7 @@ pub fn deliver_block_start(
         &OutboundMessage {
             title: text::starting_now(lang),
             reason: None,
+            brief: None,
             body: text::block_start_body(lang, &start.task, &start.end_wall_time),
             urgency: Urgency::Normal,
             checkin: false,
@@ -383,6 +388,7 @@ mod tests {
         OutboundMessage {
             title: "Note".into(),
             reason: None,
+            brief: None,
             body: body.into(),
             urgency: Urgency::Normal,
             checkin: false,
@@ -461,6 +467,7 @@ mod tests {
         let msg = OutboundMessage {
             title: "Note".into(),
             reason: None,
+            brief: None,
             body: "Test notification".into(),
             urgency: Urgency::Normal,
             checkin: false,

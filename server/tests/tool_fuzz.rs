@@ -182,7 +182,7 @@ proptest! {
             share: None,
             share_thread: None,
         };
-        let kind = [SessionKind::Nightly, SessionKind::Checkin, SessionKind::Talk][kind_idx];
+        let kind = [SessionKind::Nightly, SessionKind::Trigger, SessionKind::Talk][kind_idx];
         let before_counts = snapshot(&conn);
         let before_events = event_state(&conn);
         let before_files = memory_files(&data);

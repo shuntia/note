@@ -29,7 +29,13 @@ pub struct CallArgs {
     /// Second call: the first thing you say when they pick up.
     #[serde(default)]
     pub opening: Option<String>,
+    /// Second call: what the call needs to know, in short plain lines — facts,
+    /// ids, times, what to settle — so it can talk without looking things up.
+    #[serde(default)]
+    pub brief: Option<String>,
 }
+
+pub const MAX_BRIEF_BYTES: usize = 1536;
 
 struct Pending {
     token: String,
@@ -72,27 +78,46 @@ pub fn situation(
     Ok(Situation { busy, reach, ring_for, live_call })
 }
 
-const BEFORE_YOU_RING: [&str; 3] = [
-    "Do you really want to interrupt the user with a call, rather than a message they read when they can?",
-    "Is it allowed: did the user ask for this call, or is a short conversation right now clearly worth more than a message?",
-    "Do you have enough information to inform the user — why you are calling and what you will say first?",
-];
+const PREPARE: &str = "Prepare the call before it rings: anticipate what it will cover — the reason, \
+    the likely follow-ups, the tasks, events, goals and people involved — and fetch that now, in one \
+    round (memory_query or memory_read, task_read or task_search, calendar_list, plan_list). Judge \
+    from what comes back whether you could hold the conversation without looking anything up; if \
+    not, gather more, or write to the user instead.";
 
 fn trimmed(field: Option<&String>) -> &str {
     field.map_or("", |s| s.trim())
 }
 
+fn normalised(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_alphanumeric() { c.to_lowercase().next().unwrap_or(c) } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Whether `quote` is words the user really wrote: part of one of `heard`, the
+/// messages this session holds from the user.
+fn heard_from_user(quote: &str, heard: &[String]) -> bool {
+    let quote = normalised(quote);
+    !quote.is_empty() && heard.iter().any(|h| normalised(h).contains(&quote))
+}
+
 /// The first `call_user` call: never rings. Refuses as busy when no call may
-/// ring now, else issues this session a token for the second call.
+/// ring now, else issues this session a token for the second call. `heard`
+/// holds what the user wrote that this session has in front of it; an `asked`
+/// whose quote is not among it is refused.
 pub fn check(
     calls: &mut Calls,
     args: &CallArgs,
     s: &Situation,
+    heard: &[String],
     lang: Lang,
     now: Instant,
 ) -> Result<serde_json::Value, ToolError> {
-    if args.opening.is_some() {
-        return Err(ToolError::rejected("opening goes on the second call, with the token"));
+    if args.opening.is_some() || args.brief.is_some() {
+        return Err(ToolError::rejected("opening and brief go on the second call, with the token"));
     }
     let reason = trimmed(args.reason.as_ref());
     if reason.is_empty() {
@@ -107,6 +132,11 @@ pub fn check(
         (false, false) => return Err(ToolError::rejected("quote goes with asked")),
     };
     check_text("quote", quote)?;
+    if asked.is_some() && !heard_from_user(quote, heard) {
+        return Err(ToolError::rejected(
+            "quote must be the user's own words from a message in front of you; without them the call is not one they asked for",
+        ));
+    }
 
     let mut cannot = Vec::new();
     if !s.reach.web && !s.reach.phone {
@@ -115,12 +145,12 @@ pub fn check(
     if s.live_call {
         cannot.push("a call is already live".to_string());
     }
+    if s.ring_for == crate::config::RING_FOR_NEVER {
+        cannot.push("the user's settings say never to ring".to_string());
+    }
     let mut unwelcome = Vec::new();
     if let Some(busy) = &s.busy {
         unwelcome.push(busy.reason());
-    }
-    if s.ring_for == crate::config::RING_FOR_NEVER {
-        unwelcome.push("the user's settings say never to ring".to_string());
     }
     if !cannot.is_empty() || (asked.is_none() && !unwelcome.is_empty()) {
         let bypass = cannot.is_empty();
@@ -143,10 +173,12 @@ pub fn check(
         "token": token,
         "expires_in_min": TOKEN_TTL.as_secs() / 60,
         "would_ring": rings,
-        "before_you_ring": BEFORE_YOU_RING,
+        "prepare": PREPARE,
         "opening_style": crate::model_text::call_opening_style(lang),
-        "next": "Answer each question to yourself. Only if every answer is yes, call call_user again \
-                 with this token and your opening line; otherwise write to the user instead.",
+        "next": format!(
+            "Then call call_user again with this token, your opening line, and brief: what the call \
+             needs to know from what you gathered, in short plain lines (at most {MAX_BRIEF_BYTES} bytes)."
+        ),
     });
     if !unwelcome.is_empty() {
         out["overriding"] = serde_json::json!(unwelcome);
@@ -158,6 +190,8 @@ pub fn check(
 pub struct Confirmed {
     pub opening: String,
     pub reason: String,
+    /// What the session gathered for the call to talk from.
+    pub brief: String,
     /// The user's words asking for the call, when the call overrode their seeming busy.
     pub asked: Option<String>,
 }
@@ -165,13 +199,16 @@ pub struct Confirmed {
 impl Confirmed {
     /// The result a trigger session ends on; its firing path rings.
     pub fn decided(&self) -> serde_json::Value {
-        serde_json::json!({ "said": self.opening, "ring": true, "reason": self.reason, "asked": self.asked })
+        serde_json::json!({
+            "said": self.opening, "ring": true, "reason": self.reason, "brief": self.brief, "asked": self.asked,
+        })
     }
 
     pub fn from_decided(v: &serde_json::Value) -> Option<Self> {
         Some(Self {
             opening: v["said"].as_str()?.to_string(),
             reason: v["reason"].as_str()?.to_string(),
+            brief: v["brief"].as_str().unwrap_or_default().to_string(),
             asked: v["asked"].as_str().map(str::to_string),
         })
     }
@@ -214,8 +251,14 @@ pub fn confirm(calls: &mut Calls, args: &CallArgs, now: Instant) -> Result<Confi
             crate::triggers::MAX_SAY_BYTES
         )));
     }
+    let brief = trimmed(args.brief.as_ref());
+    if brief.is_empty() || brief.len() > MAX_BRIEF_BYTES {
+        return Err(ToolError::rejected(format!(
+            "brief must be 1 to {MAX_BRIEF_BYTES} bytes: what you gathered, in short plain lines"
+        )));
+    }
     let pending = calls.0.remove(at);
-    Ok(Confirmed { opening: opening.to_string(), reason: pending.reason, asked: pending.asked })
+    Ok(Confirmed { opening: opening.to_string(), reason: pending.reason, brief: brief.to_string(), asked: pending.asked })
 }
 
 #[cfg(test)]
@@ -231,8 +274,12 @@ mod tests {
         serde_json::from_str(json).unwrap()
     }
 
+    fn heard() -> Vec<String> {
+        vec!["Can you CALL me at 11, please?".into(), "ring me".into()]
+    }
+
     fn checked(calls: &mut Calls, s: &Situation, json: &str) -> Result<serde_json::Value, ToolError> {
-        check(calls, &args(json), s, Lang::En, Instant::now())
+        check(calls, &args(json), s, &heard(), Lang::En, Instant::now())
     }
 
     fn token(out: &serde_json::Value) -> String {
@@ -240,22 +287,50 @@ mod tests {
     }
 
     fn confirmed(calls: &mut Calls, token: &str, at: Instant) -> Result<Confirmed, ToolError> {
-        let json = serde_json::json!({ "token": token, "opening": "It's eleven — time to head out." });
+        let json = serde_json::json!({
+            "token": token, "opening": "It's eleven — time to head out.", "brief": "bus 11:20 from Elm St",
+        });
         confirm(calls, &args(&json.to_string()), at)
     }
 
     #[test]
-    fn the_check_never_rings_and_asks_before_it_hands_a_token() {
+    fn the_check_never_rings_and_asks_for_preparation_before_it_hands_a_token() {
         let mut calls = Calls::default();
         let out = checked(&mut calls, &free(), r#"{"reason":"the 11:00 they asked to be called for"}"#).unwrap();
         assert_eq!(out["allowed"], true);
         assert_eq!(out["would_ring"], serde_json::json!(["the web app"]));
-        let questions = out["before_you_ring"].to_string();
-        assert!(questions.contains("rather than a message"), "{questions}");
-        assert!(questions.contains("allowed"), "{questions}");
-        assert!(questions.contains("enough information to inform the user"), "{questions}");
+        let prepare = out["prepare"].as_str().unwrap();
+        assert!(prepare.contains("anticipate") && prepare.contains("task_read"), "{prepare}");
+        assert!(out["next"].as_str().unwrap().contains("brief"), "{out}");
         assert_eq!(out["opening_style"], crate::model_text::call_opening_style(Lang::En));
         assert!(out.get("said").is_none() && !is_confirmed(&out.to_string()));
+    }
+
+    #[test]
+    fn the_second_call_carries_a_capped_brief() {
+        let mut calls = Calls::default();
+        let t = token(&checked(&mut calls, &free(), r#"{"reason":"x"}"#).unwrap());
+        for brief in [serde_json::json!(null), serde_json::json!("  "), serde_json::json!("x".repeat(MAX_BRIEF_BYTES + 1))] {
+            let json = serde_json::json!({ "token": t, "opening": "hi", "brief": brief }).to_string();
+            assert_eq!(confirm(&mut calls, &args(&json), Instant::now()).unwrap_err().kind, "rejected", "{json}");
+        }
+        let c = confirmed(&mut calls, &t, Instant::now()).unwrap();
+        assert_eq!(c.brief, "bus 11:20 from Elm St");
+        assert_eq!(Confirmed::from_decided(&c.decided()).unwrap().brief, c.brief);
+        let early = r#"{"reason":"x","brief":"b"}"#;
+        assert_eq!(checked(&mut calls, &free(), early).unwrap_err().kind, "rejected");
+    }
+
+    #[test]
+    fn asked_holds_only_with_words_the_user_really_wrote() {
+        let busy = Situation { busy: Some(Busy::Working { title: "essay".into() }), ..free() };
+        let mut calls = Calls::default();
+        let invented = r#"{"reason":"x","asked":true,"quote":"please call me now"}"#;
+        assert_eq!(checked(&mut calls, &busy, invented).unwrap_err().kind, "rejected");
+        let theirs = r#"{"reason":"x","asked":true,"quote":"call me at 11"}"#;
+        checked(&mut calls, &busy, theirs).unwrap();
+        let none = check(&mut calls, &args(theirs), &busy, &[], Lang::En, Instant::now()).unwrap_err();
+        assert_eq!(none.kind, "rejected", "nothing the user wrote is in front of the session");
     }
 
     #[test]
@@ -266,6 +341,7 @@ mod tests {
         assert_eq!(c, Confirmed {
             opening: "It's eleven — time to head out.".into(),
             reason: "the 11:00 call".into(),
+            brief: "bus 11:20 from Elm St".into(),
             asked: None,
         });
         assert!(is_confirmed(&c.decided().to_string()));
@@ -287,7 +363,7 @@ mod tests {
     fn a_bad_opening_keeps_the_token_for_another_try() {
         let mut calls = Calls::default();
         let t = token(&checked(&mut calls, &free(), r#"{"reason":"x"}"#).unwrap());
-        let blank = serde_json::json!({ "token": t, "opening": "  " }).to_string();
+        let blank = serde_json::json!({ "token": t, "opening": "  ", "brief": "b" }).to_string();
         assert_eq!(confirm(&mut calls, &args(&blank), Instant::now()).unwrap_err().kind, "rejected");
         confirmed(&mut calls, &t, Instant::now()).unwrap();
     }
@@ -321,11 +397,13 @@ mod tests {
     }
 
     #[test]
-    fn ring_for_never_is_an_override_too() {
+    fn ring_for_never_holds_even_an_asked_call() {
         let never = Situation { ring_for: "never".into(), ..free() };
         let mut calls = Calls::default();
         assert_eq!(checked(&mut calls, &never, r#"{"reason":"x"}"#).unwrap_err().kind, "busy");
-        checked(&mut calls, &never, r#"{"reason":"x","asked":true,"quote":"ring me"}"#).unwrap();
+        let e = checked(&mut calls, &never, r#"{"reason":"x","asked":true,"quote":"ring me"}"#).unwrap_err();
+        assert_eq!(e.kind, "busy");
+        assert!(!e.message.contains("unless"), "{}", e.message);
     }
 
     #[test]

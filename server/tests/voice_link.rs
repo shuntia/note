@@ -16,6 +16,7 @@ fn urgent() -> OutboundMessage {
     OutboundMessage {
         title: "Check-in".into(),
         reason: None,
+        brief: None,
         body: "how is the essay going?".into(),
         urgency: Urgency::High,
         checkin: false,

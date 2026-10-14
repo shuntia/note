@@ -730,6 +730,13 @@ pub fn why_this_call(l: Lang) -> &'static str {
     l.of("\n\n# Why this call\n\n", "\n\n# この通話の理由\n\n")
 }
 
+pub fn call_brief_heading(l: Lang) -> &'static str {
+    l.of(
+        "What you gathered before ringing; talk from it rather than looking things up:",
+        "かける前に集めたこと。調べ直さず、これをもとに話す:",
+    )
+}
+
 pub fn called_about(l: Lang, title: &str, body: &str) -> String {
     match l {
         Lang::En => format!("You called about: {title}. You opened with: {body}"),

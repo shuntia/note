@@ -109,13 +109,18 @@ inbox, summarize). It takes two calls in one session. The first,
 ring, a call is live, or the user seems busy (inside a quiet window, inside a
 `fixed` or `busy` calendar occurrence, with a work session open, with no
 activity for 90 minutes) or set `ring_for = "never"`. Otherwise it returns a
-token valid for five minutes, a checklist to answer, and how to write a spoken
-opening. `asked` with the user's words in `quote` lets it through the busy and
-`ring_for` checks, never the others. The second, `{token, opening}`, rings. A
-wake-up's second call ends it and its firing path rings, writing the opening
-to the trigger's thread and `trigger_rang`. Any other session writes the
-opening to the day's check-in thread and logs `call_user_rang`. The call's
-prompt is told the reason and the opening.
+token valid for five minutes, an instruction to prepare (anticipate what the
+call will cover and fetch it now, in one round), and how to write a spoken
+opening. `asked` with the user's words in `quote` lets it through the busy
+check only, and only when the quote is part of a message the user wrote that
+the session holds (a chat's own turns, or the thread a wake-up was laid in);
+nothing gets past `ring_for = "never"`. The second, `{token, opening, brief}`,
+rings; `brief` (at most 1536 bytes) is what the session gathered, in short
+plain lines. A wake-up's second call ends it and its firing path rings,
+writing the opening to the trigger's thread and `trigger_rang`. Any other
+session writes the opening to the day's check-in thread and logs
+`call_user_rang`. The call's prompt is told the reason, the opening and the
+brief.
 
 ## Prompts
 

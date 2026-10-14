@@ -884,6 +884,7 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
     let msg = crate::channels::OutboundMessage {
         title: "Note".into(),
         reason: call.as_ref().map(|c| c.reason.clone()),
+        brief: call.as_ref().map(|c| c.brief.clone()),
         body: text,
         urgency: crate::channels::Urgency::Normal,
         checkin: !own,

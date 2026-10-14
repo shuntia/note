@@ -63,6 +63,7 @@ mod tests {
         let m = OutboundMessage {
             title: "t".into(),
             reason: None,
+            brief: None,
             body: "b".into(),
             urgency: Urgency::Low,
             checkin: false,

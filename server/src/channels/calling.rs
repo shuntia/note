@@ -118,7 +118,7 @@ pub struct Reach {
 pub trait Caller {
     fn reach(&self, user_id: i64) -> Reach;
     /// Lands `opening` in the day's check-in thread, then rings with it.
-    fn ring(&self, user_id: i64, username: &str, opening: &str, reason: &str) -> RingOutcome;
+    fn ring(&self, user_id: i64, username: &str, call: &crate::tools::call_ops::Confirmed) -> RingOutcome;
 }
 
 impl Caller for crate::AppState {
@@ -128,20 +128,21 @@ impl Caller for crate::AppState {
         Reach { web: self.web_calls.has_live(user_id), phone }
     }
 
-    fn ring(&self, user_id: i64, username: &str, opening: &str, reason: &str) -> RingOutcome {
+    fn ring(&self, user_id: i64, username: &str, call: &crate::tools::call_ops::Confirmed) -> RingOutcome {
         let now = jiff::Timestamp::now();
         let lang = crate::text::Lang::for_user(&self.config_dir, username);
         let local = now.to_zoned(crate::triggers::timezone(&self.config_dir, username));
         let wall = format!("{:02}:{:02}", local.hour(), local.minute());
         let thread = {
             let conn = self.db();
-            crate::talk::checkin_thread(&conn, user_id, &local.date().to_string(), &wall, opening, lang, now).ok()
+            crate::talk::checkin_thread(&conn, user_id, &local.date().to_string(), &wall, &call.opening, lang, now).ok()
         };
         self.hub.broadcast_changed(user_id);
         let msg = OutboundMessage {
             title: "Note".into(),
-            reason: Some(reason.to_string()),
-            body: opening.to_string(),
+            reason: Some(call.reason.clone()),
+            brief: Some(call.brief.clone()),
+            body: call.opening.clone(),
             urgency: super::Urgency::Normal,
             checkin: false,
             event_id: None,
@@ -216,6 +217,7 @@ mod tests {
         OutboundMessage {
             title: "Note".into(),
             reason: None,
+            brief: None,
             body: "got a minute?".into(),
             urgency: Urgency::Normal,
             checkin: false,

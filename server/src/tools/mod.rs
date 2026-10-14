@@ -909,8 +909,8 @@ const TOOLS: &[ToolSpec] = tools![
     "trigger_set": trigger_ops::SetArgs => run!(kind &trigger_ops::set), writes = true;
         "Lay a trigger point: a moment to look again, then message the user, call them, or \
          stay quiet. prompt is your note on what you are following up; when the user asked to \
-         be called, say so in it and use call_user when it fires. At least 10 minutes ahead; \
-         date lays it on a later day, up to 7 days ahead, spending that day's allowance; tz \
+         be called, say so in it, lay it in the thread they asked in, and use call_user when \
+         it fires. date lays it on any later day, spending that day's allowance; tz \
          reads at and date in the IANA zone the user named the time in. Check plan_list \
          first: a trigger within 20 minutes of a pending one is refused with that one named — \
          reword it with replace set to its id, or pass also when both are wanted. cancel_on \
@@ -928,13 +928,14 @@ const TOOLS: &[ToolSpec] = tools![
          ritual. It lands in the thread and as a notification. To call instead, use call_user.",
     "call_user": call_ops::CallArgs => Exec::Session, terminal_in = &[SessionKind::Trigger];
         "Call the user: the open web app and the linked phone ring together; whichever answers \
-         first takes the call. Always two calls. First with reason (plus asked and quote only \
-         when the user asked to be called): it rings nothing, says whether a call is allowed \
-         now, and returns a token and the questions to answer before ringing. Then, only if \
-         you still mean to, again with that token and opening — your first words when they \
-         pick up. Refused while the user seems busy — working, in a calendar event, in a quiet \
-         window, or away for 90 minutes — unless they asked; then write to them instead. In a \
-         wake-up, the second call ends the session.",
+         first takes the call. Always two calls. First with reason (plus asked and quote, the \
+         user's own words, only when they asked to be called): it rings nothing, says whether \
+         a call is allowed now, and returns a token and what to prepare. Then, only if you \
+         still mean to, again with that token, opening — your first words when they pick up — \
+         and brief, what the call needs to know. Refused while the user seems busy — working, \
+         in a calendar event, in a quiet window, or away for 90 minutes — unless they asked; \
+         never rings when their settings say never. In a wake-up, the second call ends the \
+         session.",
     "stay_quiet": trigger_ops::QuietArgs => run!(&trigger_ops::stay_quiet), terminal_in = &[SessionKind::Trigger];
         "Say nothing and end the trigger session: right when the user is already on it, what \
          you would say is on their screen, or the prompt no longer applies.",

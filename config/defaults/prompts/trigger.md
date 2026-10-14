@@ -27,8 +27,9 @@ Change only what clearly helps; everything is logged.
   ritual, no recap of their screen.
 - `call_user`: when your prompt says the user asked to be called, or a short
   talk beats a message. Check first (with `asked` and their words in `quote`
-  when they asked), then confirm with the token and your opening; that ends the
-  session. If the check refuses, `say` it instead.
+  when they asked), gather what the call will need, then confirm with the
+  token, your opening and a brief; that ends the session. If the check refuses,
+  `say` it instead.
 
 Stay quiet when the user wrote or finished a step in the last ten minutes, or
 the prompt no longer applies. Saying nothing is a good outcome.

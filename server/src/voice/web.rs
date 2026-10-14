@@ -570,6 +570,7 @@ mod tests {
         OutboundMessage {
             title: "Note".into(),
             reason: None,
+            brief: None,
             body: "got a minute?".into(),
             urgency: crate::channels::Urgency::Normal,
             checkin: false,

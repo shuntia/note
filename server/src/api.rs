@@ -2078,6 +2078,7 @@ async fn voice_test(user: CurrentUser, State(state): State<AppState>, headers: H
     let msg = crate::channels::OutboundMessage {
         title: text::test_call_title(lang),
         reason: None,
+        brief: None,
         body: text::test_call_body(lang),
         urgency: crate::channels::Urgency::High,
         checkin: false,
@@ -2101,6 +2102,7 @@ async fn notify_test(user: CurrentUser, State(state): State<AppState>, headers: 
     let msg = crate::channels::OutboundMessage {
         title: "Note".into(),
         reason: None,
+        brief: None,
         body: text::test_notification(lang),
         urgency: crate::channels::Urgency::Normal,
         checkin: false,
