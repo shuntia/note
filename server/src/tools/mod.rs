@@ -147,21 +147,17 @@ pub fn coerce_batch_args(tool: &str, args: serde_json::Value) -> serde_json::Val
         v => v,
     };
     let Some((index, _)) = find(tool) else { return args };
-    let root = &tool_schema(index)["input_schema"];
-    coerce(&mut args, root, root);
+    coerce(&mut args, &tool_schema(index)["input_schema"]);
     args
 }
 
-fn coerce(value: &mut serde_json::Value, schema: &serde_json::Value, root: &serde_json::Value) {
+fn coerce(value: &mut serde_json::Value, schema: &serde_json::Value) {
     use serde_json::Value;
-    if let Some(name) = schema["$ref"].as_str().and_then(|r| r.strip_prefix("#/$defs/")) {
-        return coerce(value, &root["$defs"][name], root);
-    }
     if let Some(branch) = schema["anyOf"]
         .as_array()
         .and_then(|bs| bs.iter().find(|b| b["type"] != "null"))
     {
-        return coerce(value, branch, root);
+        return coerce(value, branch);
     }
     let types: Vec<&str> = match &schema["type"] {
         Value::String(t) => vec![t.as_str()],
@@ -183,12 +179,12 @@ fn coerce(value: &mut serde_json::Value, schema: &serde_json::Value, root: &serd
         }
         Value::Object(map) => {
             for (k, v) in map.iter_mut() {
-                coerce(v, &schema["properties"][k], root);
+                coerce(v, &schema["properties"][k]);
             }
         }
         Value::Array(items) => {
             for v in items {
-                coerce(v, &schema["items"], root);
+                coerce(v, &schema["items"]);
             }
         }
         _ => {}
@@ -730,8 +726,55 @@ macro_rules! tools {
     };
 }
 
+/// The arguments' schema without what no provider reads: `$schema`, type
+/// titles, numeric widths and null defaults, with each `$ref` written out in
+/// place.
 fn schema<T: schemars::JsonSchema>() -> serde_json::Value {
-    serde_json::to_value(schemars::schema_for!(T)).expect("schema serializes")
+    let mut v = serde_json::to_value(schemars::schema_for!(T)).expect("schema serializes");
+    let defs = v.as_object_mut().and_then(|o| o.remove("$defs")).unwrap_or_default();
+    lean(&mut v, &defs);
+    v
+}
+
+fn lean(v: &mut serde_json::Value, defs: &serde_json::Value) {
+    use serde_json::Value;
+    match v {
+        Value::Object(o) => {
+            let target = o.get("$ref").and_then(Value::as_str).and_then(|r| r.strip_prefix("#/$defs/"));
+            if let Some(Value::Object(def)) = target.map(|name| defs[name].clone()) {
+                o.remove("$ref");
+                for (k, x) in def {
+                    o.entry(k).or_insert(x);
+                }
+            }
+            o.remove("$schema");
+            o.remove("title");
+            if o.get("default").is_some_and(Value::is_null) {
+                o.remove("default");
+            }
+            let numeric = |t: &Value| matches!(t.as_str(), Some("integer" | "number"));
+            let is_numeric = o.get("type").is_some_and(|t| match t {
+                Value::Array(ts) => ts.iter().any(numeric),
+                t => numeric(t),
+            });
+            if is_numeric {
+                o.remove("format");
+            }
+            for (k, child) in o.iter_mut() {
+                match k.as_str() {
+                    "properties" => {
+                        if let Value::Object(props) = child {
+                            props.values_mut().for_each(|p| lean(p, defs));
+                        }
+                    }
+                    "enum" | "default" | "required" => {}
+                    _ => lean(child, defs),
+                }
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(|x| lean(x, defs)),
+        _ => {}
+    }
 }
 
 const TOOLS: &[ToolSpec] = tools![
