@@ -99,8 +99,8 @@ check-ins on):
 
 A wake-up tends tasks, the order, the schedule, working notes and memory
 ([tools](#tools)), lays tasks on the plan, reads goals and the calendar, searches
-the web where search is configured, and deletes a task the user no longer
-wants, but never writes goals or the calendar.
+the web where search is configured, and drops a task the user no longer
+wants, but never deletes a task or writes goals or the calendar.
 Each successful task, note, order, schedule, memory or trigger write logs one
 `wake_change` row (`event <id>: <tool> <args>`, args clipped to 300
 characters). It may not edit the task of a running work session, that task's
@@ -248,7 +248,8 @@ leave partial state.
 | `context_edit` | talk, nightly |
 | `task_list`, `task_search`, `task_read` | talk, nightly, trigger, call, share |
 | `task_create`, `task_update`, `task_split` | talk, nightly, trigger, call |
-| `task_delete`, `task_bulk_update` | talk, nightly, trigger, call |
+| `task_delete` | talk, nightly, call |
+| `task_bulk_update` | talk, nightly, trigger, call |
 | `goal_create`, `goal_update` | talk, nightly, call |
 | `goal_list` | talk, nightly, trigger, call, share |
 | `note_write` | talk, nightly, trigger, call |

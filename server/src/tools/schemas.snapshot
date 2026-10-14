@@ -57,8 +57,8 @@ Summarize	summary_write
 Summarize without search	summary_write
 Review	memory_write,review_write
 Review without search	memory_write,review_write
-Trigger	memory_query,memory_read,memory_write,task_list,task_search,task_read,task_create,task_update,task_split,task_delete,task_bulk_update,goal_list,note_write,plan_list,plan_tasks,plan_carry,order_set,order_move,order_drop,schedule_move,schedule_drop,calendar_list,trigger_set,call_user,web_search,batch,say,stay_quiet
-Trigger without search	memory_query,memory_read,memory_write,task_list,task_search,task_read,task_create,task_update,task_split,task_delete,task_bulk_update,goal_list,note_write,plan_list,plan_tasks,plan_carry,order_set,order_move,order_drop,schedule_move,schedule_drop,calendar_list,trigger_set,call_user,batch,say,stay_quiet
+Trigger	memory_query,memory_read,memory_write,task_list,task_search,task_read,task_create,task_update,task_split,task_bulk_update,goal_list,note_write,plan_list,plan_tasks,plan_carry,order_set,order_move,order_drop,schedule_move,schedule_drop,calendar_list,trigger_set,call_user,web_search,batch,say,stay_quiet
+Trigger without search	memory_query,memory_read,memory_write,task_list,task_search,task_read,task_create,task_update,task_split,task_bulk_update,goal_list,note_write,plan_list,plan_tasks,plan_carry,order_set,order_move,order_drop,schedule_move,schedule_drop,calendar_list,trigger_set,call_user,batch,say,stay_quiet
 Share	task_list,task_search,task_read,goal_list,plan_list,calendar_list,share_note
 Share without search	task_list,task_search,task_read,goal_list,plan_list,calendar_list,share_note
 Call	memory_query,memory_read,memory_write,task_list,task_search,task_read,task_create,task_update,task_split,task_delete,task_bulk_update,goal_create,goal_update,goal_list,note_write,plan_list,plan_tasks,plan_carry,order_set,order_move,order_drop,schedule_move,schedule_drop,calendar_list,calendar_add,calendar_update,calendar_remove,calendar_skip,trigger_set,timezone_set,web_search,cancel_job,hang_up

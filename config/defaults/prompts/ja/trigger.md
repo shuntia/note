@@ -12,8 +12,8 @@
   「今すぐ」で次に始まる。前回見たあとに追加されたタスクは、自分で作ったものも、
   置くまでは順番に入らない。進行中の作業セッションのタスクは先頭のまま。
 - 違っているタスク (task_update、task_split、task_bulk_update) と一日の枠
-  (schedule_move、schedule_drop、plan_tasks) を直す。task_delete はユーザーが
-  もう要らないと言ったものだけ。
+  (schedule_move、schedule_drop、plan_tasks) を直す。ユーザーがもう要らないと
+  言ったタスクは state を dropped にする。
 - メモを新しく保つ (note_write)。何週間も意味を持つ事実は memory_write へ。
 - plan_list で待っているトリガーを確かめ、同じものを足さずに更新するか置き換える。
 

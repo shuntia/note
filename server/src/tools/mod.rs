@@ -362,6 +362,7 @@ const MEMORY_WRITE: &[&str] = &["memory_write"];
 const CONTEXT: &[&str] = &["context_edit"];
 const TASK_READ: &[&str] = &["task_list", "task_search", "task_read"];
 const TASK_TEND: &[&str] = &["task_create", "task_update", "task_split"];
+/// A permanent delete, kept from wake-ups, which drop a task through its state instead.
 const TASK_DELETE: &[&str] = &["task_delete"];
 const TASK_BULK: &[&str] = &["task_bulk_update"];
 const GOALS_WRITE: &[&str] = &["goal_create", "goal_update"];
@@ -519,7 +520,6 @@ const TRIGGER: &[&str] = registry_of![
     MEMORY_WRITE,
     TASK_READ,
     TASK_TEND,
-    TASK_DELETE,
     TASK_BULK,
     GOALS_READ,
     NOTES,
@@ -814,7 +814,7 @@ const TOOLS: &[ToolSpec] = tools![
         "Read one task in full: description, notes, its next block's start (scheduled_at), \
          the link and id it was imported under, its steps with their states and durations, \
          and every other field. The list tools carry titles only.",
-    "task_bulk_update": task_query::BulkUpdateArgs => run!(&task_query::bulk_update), writes = true;
+    "task_bulk_update": task_query::BulkUpdateArgs => run!(kind &task_query::bulk_update), writes = true;
         "Apply one change to up to 50 tasks: set exactly one of state, is_now, category, \
          goal_id, urgency or delete. All or nothing: an id that is not the user's rejects the \
          whole call. Now holds at most 3, and the tasks it pushes out come back in \
@@ -2050,13 +2050,13 @@ mod tests {
         for name in [
             "memory_write", "task_update", "task_split", "task_bulk_update", "note_write",
             "order_set", "order_move", "order_drop", "schedule_move", "schedule_drop", "trigger_set",
-            "task_delete", "plan_tasks", "calendar_list", "goal_list", "web_search",
+            "plan_tasks", "calendar_list", "goal_list", "web_search",
         ] {
             assert!(t.contains(&name), "{name}");
         }
         for name in [
             "calendar_add", "calendar_update", "calendar_remove", "calendar_skip",
-            "schedule_insert", "trigger_budget", "goal_create",
+            "schedule_insert", "trigger_budget", "goal_create", "task_delete",
         ] {
             assert!(!t.contains(&name), "{name}");
         }

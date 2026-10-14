@@ -1,4 +1,4 @@
-use super::{ToolCtx, ToolError};
+use super::{SessionKind, ToolCtx, ToolError};
 use rusqlite::types::Value as SqlValue;
 use rusqlite::Connection;
 use schemars::JsonSchema;
@@ -498,9 +498,15 @@ pub struct BulkUpdateArgs {
 pub fn bulk_update(
     conn: &Connection,
     ctx: &ToolCtx,
+    kind: SessionKind,
     args: &BulkUpdateArgs,
 ) -> Result<serde_json::Value, ToolError> {
     unscoped(ctx)?;
+    if kind == SessionKind::Trigger && args.delete.is_some() {
+        return Err(ToolError::forbidden(
+            "a wake-up never deletes tasks; set state dropped instead",
+        ));
+    }
     if args.task_ids.is_empty() || args.task_ids.len() > MAX_BATCH {
         return Err(ToolError::rejected(format!("task_ids must hold 1 to {MAX_BATCH} ids")));
     }
@@ -994,6 +1000,22 @@ mod tests {
         let left: i64 = conn.query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0)).unwrap();
         assert_eq!(left, 1);
         assert!(crate::tasks::get(&conn, 1, keep).unwrap().is_some());
+    }
+
+    #[test]
+    fn a_wake_up_drops_tasks_but_never_deletes_them() {
+        let (conn, tmp) = env();
+        let a = task(&conn, &tmp, r#"{"title":"a"}"#);
+        let e = dispatch(&conn, &ctx(&tmp, None), SessionKind::Trigger, "task_bulk_update",
+            &format!(r#"{{"task_ids":[{a}],"delete":true}}"#)).unwrap_err();
+        assert_eq!(e.kind, "forbidden");
+        assert!(crate::tasks::get(&conn, 1, a).unwrap().is_some());
+        let e = dispatch(&conn, &ctx(&tmp, None), SessionKind::Trigger, "task_delete",
+            &format!(r#"{{"task_id":{a}}}"#)).unwrap_err();
+        assert_eq!(e.kind, "forbidden");
+        dispatch(&conn, &ctx(&tmp, None), SessionKind::Trigger, "task_bulk_update",
+            &format!(r#"{{"task_ids":[{a}],"state":"dropped"}}"#)).unwrap();
+        assert_eq!(crate::tasks::get(&conn, 1, a).unwrap().unwrap().state, "dropped");
     }
 
     #[test]
