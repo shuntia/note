@@ -12,9 +12,9 @@ pub const MAX_TURNS: usize = 16;
 /// summary one line: the call, plus a single retry when the first one is
 /// rejected.
 pub const IMPORT_MAX_TURNS: usize = 2;
-/// A review reads one week: enough rounds to search memory before each write
-/// and still finish.
-pub const REVIEW_MAX_TURNS: usize = 8;
+/// A review writes its two calls in one round; the second round is there only
+/// to fix a refused write.
+pub const REVIEW_MAX_TURNS: usize = 2;
 /// A trigger session looks around and then speaks or does not: room to read the
 /// situation, never room to hold a conversation with itself.
 pub const TRIGGER_MAX_TURNS: usize = 14;
@@ -432,8 +432,9 @@ fn run_traced(
                 continue;
             }
             tool_calls += 1;
+            let args = coerced(kind, &call.name, &call.args);
             let (content, is_error) =
-                env.step(&call.name, &call.args, &mut steps, &mut thinking, trace, on_event);
+                env.step(&call.name, &args, &mut steps, &mut thinking, trace, on_event);
             if !is_error && tools::ends(kind, &call.name, &content) {
                 on_event(AgentEvent::Reply { text: &content });
                 trace.ok(&content);
@@ -625,6 +626,17 @@ fn error_json(e: &ToolError) -> String {
     serde_json::to_string(e).unwrap_or_else(|_| r#"{"kind":"internal"}"#.into())
 }
 
+/// A bare call's arguments read the way a batched call's are; unchanged when
+/// nothing needed reading differently.
+fn coerced(kind: SessionKind, name: &str, raw: &str) -> String {
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(raw) else { return raw.to_string() };
+    if !tools::registry(kind).contains(&name) {
+        return raw.to_string();
+    }
+    let read = tools::coerce_args(name, parsed.clone());
+    if read == parsed { raw.to_string() } else { read.to_string() }
+}
+
 /// Runs a `batch` call's sub-calls in order, each its own step, and returns the
 /// single tool result the model gets back. `is_error` is set only when the
 /// batch arguments themselves are unusable: a sub-call that fails or is refused
@@ -680,7 +692,7 @@ fn run_batch(
         let sub_args = match sub.args {
             serde_json::Value::Null => "{}".to_string(),
             v if tools::registry(env.kind).contains(&sub.tool.as_str()) => {
-                tools::coerce_batch_args(&sub.tool, v).to_string()
+                tools::coerce_args(&sub.tool, v).to_string()
             }
             v => v.to_string(),
         };
@@ -1413,6 +1425,27 @@ mod tests {
     }
 
     #[test]
+    fn bare_calls_in_one_round_read_quoted_numbers_like_batched_ones() {
+        let (db, tmp) = env();
+        let call = |id: &str, name: &str, args: &str| ToolCall { id: id.into(), name: name.into(), args: args.into() };
+        let llm = MockLLM::scripted(vec![
+            ChatResponse {
+                text: String::new(),
+                tool_calls: vec![
+                    call("1", "task_create", r#"{"title":"buy milk"}"#),
+                    call("2", "task_update", r#"{"task_id":"1","duration_min":"30"}"#),
+                ],
+            },
+            ChatResponse { text: "done".into(), tool_calls: vec![] },
+        ]);
+        run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, now(), &[], "milk").unwrap();
+        let conn = db.lock().unwrap();
+        let minutes: i64 =
+            conn.query_row("SELECT duration_min FROM tasks WHERE id = 1", [], |r| r.get(0)).unwrap();
+        assert_eq!(minutes, 30);
+    }
+
+    #[test]
     fn a_batch_refuses_a_nested_batch_and_a_tool_that_would_end_the_session() {
         let (db, tmp) = env();
         let llm = MockLLM::scripted(vec![
@@ -1488,14 +1521,13 @@ mod tests {
 
     #[test]
     fn the_sessions_that_answer_one_call_are_never_offered_a_batch() {
-        for kind in [SessionKind::Import, SessionKind::Inbox, SessionKind::Summarize] {
+        for kind in [SessionKind::Import, SessionKind::Inbox, SessionKind::Summarize, SessionKind::Review] {
             assert!(!tools::registry(kind).contains(&"batch"), "{kind:?} is offered a batch");
         }
         for kind in [
             SessionKind::Talk,
             SessionKind::Checkin,
             SessionKind::Nightly,
-            SessionKind::Review,
             SessionKind::Trigger,
         ] {
             assert!(tools::registry(kind).contains(&"batch"), "{kind:?} has no batch");

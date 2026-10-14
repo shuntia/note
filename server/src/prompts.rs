@@ -132,7 +132,7 @@ mod tests {
             // the trigger prompt names the three ways that session can end
             let trigger = load("trigger");
             for name in [
-                "say", "stay_quiet", "call_user", "wait_until", "wait_for",
+                "say", "stay_quiet", "call_user", "cancel_on",
                 "order_set", "order_move", "order_drop", "note_write", "trigger_set",
             ] {
                 assert!(trigger.contains(name), "the trigger prompt ({lang:?}) never mentions {name}");

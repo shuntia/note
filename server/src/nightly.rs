@@ -87,7 +87,7 @@ fn run_stages(
         );
     };
     // Monday's run looks back before it looks forward, so the planning session
-    // already has the week's letter in memory.
+    // already reads the new strategy.
     let at = std::time::Instant::now();
     let reviewed = crate::review::run_for_user(deps, user_id, username, &tz, date, now);
     report.stage("review", at, reviewed.as_ref().err().inspect(|e| note("review_error", e)));
@@ -107,13 +107,6 @@ fn run_stages(
     })();
     report.stage("plan", at, generated.as_ref().err());
     generated?;
-    let laid = {
-        let conn = crate::db_guard(deps.db);
-        crate::review::lay_event(&conn, user_id, date)
-    };
-    if let Err(e) = laid {
-        note("review_error", &e);
-    }
     let at = std::time::Instant::now();
     let closed = {
         let conn = crate::db_guard(deps.db);
@@ -130,7 +123,7 @@ fn run_stages(
     if !due.is_empty() {
         opening.push_str(crate::model_text::notes_to_settle(lang));
         for n in &due {
-            let _ = writeln!(opening, "- {}: {}", n.id, n.title);
+            let _ = writeln!(opening, "- {}: {}", crate::notes::short(&n.id), n.title);
         }
     }
     let at = std::time::Instant::now();
@@ -498,7 +491,7 @@ mod tests {
     }
 
     #[test]
-    fn a_monday_run_writes_the_week_and_lays_it_beside_the_debrief() {
+    fn a_monday_run_rewrites_the_strategy_the_planning_session_then_reads() {
         let (db, tmp) = env("UTC", "03:00");
         std::fs::write(
             tmp.path().join("defaults/templates/default.toml"),
@@ -520,7 +513,7 @@ mod tests {
                 tool_calls: vec![ToolCall {
                     id: "1".into(),
                     name: "review_write".into(),
-                    args: r#"{"text":"You finished the essay."}"#.into(),
+                    args: r#"{"text":"Essay first."}"#.into(),
                 }],
             },
             ChatResponse { text: "good morning".into(), tool_calls: vec![] },
@@ -528,24 +521,14 @@ mod tests {
         let now: jiff::Timestamp = "2026-09-21T04:00:00Z".parse().unwrap();
         run_for_user(&deps(&db, &tmp, &llm), 1, "aki", now).unwrap();
 
+        let (week, strategy) = crate::context::read_strategy(tmp.path(), "aki").unwrap();
+        assert_eq!((week.as_str(), strategy.as_str()), ("2026-09-14", "Essay first."));
+        assert!(llm.seen()[1].system.contains("Essay first."), "the planning session reads it");
         let conn = db.lock().unwrap();
-        let content: String = conn
-            .query_row(
-                "SELECT content FROM reviews WHERE user_id = 1 AND week_start = '2026-09-14'",
-                [],
-                |r| r.get(0),
-            )
+        let laid: i64 = conn
+            .query_row("SELECT COUNT(*) FROM events WHERE kind = 'review'", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(content, "You finished the essay.");
-        let (kind, wall): (String, String) = conn
-            .query_row(
-                "SELECT e.kind, e.wall_time FROM events e JOIN plans p ON p.id = e.plan_id
-                 WHERE p.date = '2026-09-21' AND e.kind = 'review'",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!((kind.as_str(), wall.as_str()), ("review", "07:31"));
+        assert_eq!(laid, 0, "nothing is delivered to the user");
     }
 
     #[test]
@@ -828,9 +811,9 @@ mod tests {
 
         let opening = format!("{:?}", llm.seen()[0].messages.last().unwrap());
         for id in [&ended, &stale, &left] {
-            assert!(opening.contains(id.as_str()), "{opening}");
+            assert!(opening.contains(crate::notes::short(id)), "{opening}");
         }
-        assert!(!opening.contains(fresh.as_str()), "{opening}");
+        assert!(!opening.contains(crate::notes::short(&fresh)), "{opening}");
 
         let conn = db.lock().unwrap();
         let remaining: Vec<String> =

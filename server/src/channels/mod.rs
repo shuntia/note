@@ -104,7 +104,7 @@ pub trait Channel: Send + Sync {
 }
 
 /// Pure rendering of a fired event into a user-facing message; a non-empty
-/// per-event `message` (set by `notify_send`) overrides the generic body.
+/// per-event `message` overrides the generic body.
 pub fn render(conn: &Connection, ev: &crate::runner::FiredEvent, lang: Lang) -> OutboundMessage {
     let (title, mut body, urgency) = if is_checkin(&ev.kind) {
         (text::checkin_title(lang), text::checkin_body(lang, &ev.wall_time), Urgency::High)
@@ -117,22 +117,6 @@ pub fn render(conn: &Connection, ev: &crate::runner::FiredEvent, lang: Lang) -> 
             )
             .unwrap_or_else(|_| text::no_debrief(lang));
         (text::good_morning(lang), content, Urgency::Normal)
-    } else if ev.kind == crate::review::EVENT_KIND {
-        let week = ev
-            .date
-            .parse::<jiff::civil::Date>()
-            .ok()
-            .and_then(crate::review::reviewed_week)
-            .map(|d| d.to_string())
-            .unwrap_or_default();
-        let content: String = conn
-            .query_row(
-                "SELECT content FROM reviews WHERE user_id = ?1 AND week_start = ?2",
-                (ev.user_id, &week),
-                |r| r.get(0),
-            )
-            .unwrap_or_else(|_| text::no_week(lang));
-        (text::your_week(lang), content, Urgency::Low)
     } else {
         (ev.kind.clone(), text::scheduled_for(lang, &ev.wall_time), Urgency::Normal)
     };
@@ -393,28 +377,6 @@ mod tests {
         .unwrap();
         let m = render(&conn, &ev("debrief", "push", ""), Lang::En);
         assert_eq!(m.body, "(no debrief yet)");
-    }
-
-    #[test]
-    fn render_reads_the_week_the_monday_looks_back_on() {
-        let (db, _uid) = env();
-        let conn = db.lock().unwrap();
-        conn.execute(
-            "INSERT INTO reviews (user_id, week_start, content, created_at)
-             VALUES (1, '2026-09-14', 'You finished the essay.', 'now')",
-            [],
-        )
-        .unwrap();
-        let mut monday = ev("review", "push", "");
-        monday.date = "2026-09-21".into();
-        let m = render(&conn, &monday, Lang::En);
-        assert_eq!(m.title, "Your week");
-        assert_eq!(m.body, "You finished the essay.");
-        assert_eq!(m.urgency, Urgency::Low);
-
-        let mut other = ev("review", "push", "");
-        other.date = "2026-09-28".into();
-        assert_eq!(render(&conn, &other, Lang::En).body, "(no week yet)");
     }
 
     fn plain(body: &str) -> OutboundMessage {

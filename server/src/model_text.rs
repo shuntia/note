@@ -96,6 +96,13 @@ pub fn standing_heading(l: Lang) -> &'static str {
     l.of("# Standing context", "# 常設コンテキスト")
 }
 
+pub fn strategy_heading(l: Lang, week: &str) -> String {
+    match l {
+        Lang::En => format!("# Strategy (after the week of {week})"),
+        Lang::Ja => format!("# 戦略（{week}の週のあと）"),
+    }
+}
+
 pub fn part_of_day(l: Lang, hour: i8) -> &'static str {
     match hour {
         5..=7 => l.of("early morning", "早朝"),
@@ -387,60 +394,22 @@ pub fn debrief_heading(l: Lang) -> &'static str {
     l.of("# Latest debrief\n\n", "# 最新の朝の手紙\n\n")
 }
 
-pub fn no_debrief(l: Lang) -> &'static str {
-    l.of("(no debrief yet)\n\n", "（朝の手紙はまだありません）\n\n")
-}
-
-pub fn trimmed(l: Lang) -> &'static str {
-    l.of("(trimmed for size)", "（長さのため省略）")
-}
-
-pub fn on_off(l: Lang, on: bool) -> &'static str {
-    if on { l.of("on", "オン") } else { l.of("off", "オフ") }
-}
-
-pub fn no_plan_factor(l: Lang) -> &'static str {
-    l.of("no plan factor yet", "計画係数はまだありません")
-}
-
 pub fn plan_factor(l: Lang, value: f64, sample: i64) -> String {
     match l {
-        Lang::En => format!("Plan factor: {value:.1}× from {sample} session{}", plural(sample)),
-        Lang::Ja => format!("計画係数: {value:.1}×（{sample}セッションから）"),
+        Lang::En => format!("Plan factor: {value:.1}× from {sample} session{}\n", plural(sample)),
+        Lang::Ja => format!("計画係数: {value:.1}×（{sample}セッションから）\n"),
     }
 }
 
-pub struct SettingsLine<'a> {
-    pub name: &'a str,
-    pub tz: &'a str,
-    pub nightly_time: &'a str,
-    pub template: &'a str,
-    pub counter: &'a str,
-    pub nightly: bool,
-    pub checkins: bool,
-    pub facts: i64,
-    pub split: &'a str,
-    pub factor: &'a str,
-    pub spent: u32,
-    pub allowance: u32,
-}
-
-pub fn settings(l: Lang, s: &SettingsLine) -> String {
-    let (nightly, checkins) = (on_off(l, s.nightly), on_off(l, s.checkins));
-    let SettingsLine { name, tz, nightly_time, template, counter, facts, split, factor, spent, allowance, .. } = s;
+/// The plan factor appears once there is one.
+pub fn settings(l: Lang, name: &str, factor: Option<(f64, i64)>, spent: u32, allowance: u32) -> String {
+    let factor = factor.map(|(value, sample)| plan_factor(l, value, sample)).unwrap_or_default();
     match l {
         Lang::En => format!(
-            "# Settings\n\n{name} | {tz} | nightly_time {nightly_time} | template {template} | counter {counter} | nightly {nightly} | checkins {checkins}\n\
-             Memory: {facts} fact{} ({split})\n\
-             {factor}\n\
-             Trigger points you may lay today: {spent} of {allowance} used\n\n",
-            plural(*facts),
+            "# Settings\n\nUser: {name}\n{factor}Trigger points you may lay today: {spent} of {allowance} used\n\n"
         ),
         Lang::Ja => format!(
-            "# 設定\n\n{name} | {tz} | nightly_time {nightly_time} | template {template} | counter {counter} | nightly {nightly} | checkins {checkins}\n\
-             記憶: {facts}件（{split}）\n\
-             {factor}\n\
-             今日置けるトリガーポイント: {allowance}件中{spent}件使用済み\n\n",
+            "# 設定\n\nユーザー: {name}\n{factor}今日置けるトリガーポイント: {allowance}件中{spent}件使用済み\n\n"
         ),
     }
 }
@@ -537,31 +506,6 @@ pub fn no_results(l: Lang) -> &'static str {
     l.of("no results", "結果なし")
 }
 
-// --- the harvest digest ---
-
-pub fn harvest_kind(l: Lang, checkin: Option<&str>) -> String {
-    match (l, checkin) {
-        (Lang::En, Some(d)) => format!("checkin {d}"),
-        (Lang::Ja, Some(d)) => format!("チェックイン {d}"),
-        (_, None) => l.of("talk", "会話").into(),
-    }
-}
-
-pub fn harvest_thread(l: Lang, title: &str, kind: &str, when: &str, body: &str) -> String {
-    match l {
-        Lang::En => format!("## {title} ({kind}, last active {when})\n{body}\n\n"),
-        Lang::Ja => format!("## {title}（{kind}、最終 {when}）\n{body}\n\n"),
-    }
-}
-
-pub fn speaker(l: Lang, user: bool) -> &'static str {
-    if user { l.of("user", "ユーザー") } else { l.of("note", "Note") }
-}
-
-pub fn tonights_episodic(l: Lang) -> &'static str {
-    l.of("## Tonight's episodic entries", "## 今夜のエピソード記録")
-}
-
 // --- the week's digest ---
 
 pub fn review_section(l: Lang, section: ReviewSection) -> &'static str {
@@ -569,7 +513,9 @@ pub fn review_section(l: Lang, section: ReviewSection) -> &'static str {
         ReviewSection::Tasks => l.of("Tasks", "タスク"),
         ReviewSection::Sessions => l.of("Sessions", "作業セッション"),
         ReviewSection::Triggers => l.of("Trigger points", "トリガーポイント"),
-        ReviewSection::Nights => l.of("Nights", "夜ごとの記録"),
+        ReviewSection::Goals => l.of("Goals", "目標"),
+        ReviewSection::Weeks => l.of("The last eight weeks", "この八週間"),
+        ReviewSection::Areas => l.of("Where the time went, eight weeks", "時間の行き先（八週間）"),
         ReviewSection::Conversations => l.of("Conversations", "会話"),
         ReviewSection::Memory => l.of("The week as memory holds it", "記憶に残る一週間"),
     }
@@ -580,7 +526,9 @@ pub enum ReviewSection {
     Tasks,
     Sessions,
     Triggers,
-    Nights,
+    Goals,
+    Weeks,
+    Areas,
     Conversations,
     Memory,
 }
@@ -614,11 +562,32 @@ pub fn triggers_line(l: Lang, by_status: &str, said: i64, quiet: i64) -> String 
     }
 }
 
-pub fn facts_kept(l: Lang, date: &str, n: i64) -> String {
-    match l {
-        Lang::En => format!("- {date}: {n} fact(s) kept"),
-        Lang::Ja => format!("- {date}: {n}件を記憶"),
+pub fn goal_line(l: Lang, title: &str, state: &str, due: Option<&str>, done: i64, total: i64) -> String {
+    match (l, due) {
+        (Lang::En, Some(d)) => format!("- {title} ({state}, due {d}): {done} of {total} tasks done"),
+        (Lang::En, None) => format!("- {title} ({state}): {done} of {total} tasks done"),
+        (Lang::Ja, Some(d)) => format!("- {title}（{state}、期日 {d}）: タスク{total}件中{done}件完了"),
+        (Lang::Ja, None) => format!("- {title}（{state}）: タスク{total}件中{done}件完了"),
     }
+}
+
+pub fn week_line(l: Lang, week: jiff::civil::Date, done: i64, dropped: i64, minutes: i64) -> String {
+    match l {
+        Lang::En => format!("- week of {week}: {done} done, {dropped} dropped, {minutes} min in work sessions"),
+        Lang::Ja => format!("- {week}の週: 完了{done}、手放し{dropped}、作業セッション{minutes}分"),
+    }
+}
+
+pub fn area_line(l: Lang, area: &str, minutes: i64, done: i64) -> String {
+    match l {
+        Lang::En => format!("- {area}: {minutes} min in work sessions, {done} done"),
+        Lang::Ja => format!("- {area}: 作業セッション{minutes}分、完了{done}"),
+    }
+}
+
+/// Work under no goal and no category.
+pub fn unfiled(l: Lang) -> &'static str {
+    l.of("(no goal or category)", "（目標・カテゴリーなし）")
 }
 
 // --- trigger sessions ---

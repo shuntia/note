@@ -218,7 +218,7 @@ pub fn plan_tasks(
     let clashing = already_planned(conn, ctx, date, &tasks)?;
     if !clashing.is_empty() {
         return Err(ToolError::rejected(format!(
-            "already on the plan for {date}: {}; move it with schedule_reshape, or drop it first",
+            "already on the plan for {date}: {}; move it with schedule_move, or drop it first",
             clashing.join(", ")
         )));
     }

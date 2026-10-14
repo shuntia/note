@@ -6,7 +6,6 @@ pub mod inbox_ops;
 pub mod memory_ops;
 pub mod note_ops;
 pub mod order_ops;
-pub mod outreach_ops;
 pub mod plan_ops;
 pub mod review_ops;
 pub mod schedule_ops;
@@ -36,8 +35,8 @@ pub enum SessionKind {
     Summarize,
     /// One trigger point, fired: read the situation, then speak or stay quiet.
     Trigger,
-    /// The week just ended, read once for the letter that stands beside Monday's
-    /// debrief.
+    /// The weeks just past, read once a week for the standing strategy every
+    /// session sees.
     Review,
     /// A visitor on a share link: a read-only slice of one user's day, tasks
     /// and goals, and nothing else.
@@ -131,11 +130,11 @@ pub struct BatchCall {
     pub args: serde_json::Value,
 }
 
-/// Reads a batch sub-call's arguments the way the tool's own schema would have
-/// shaped them: the batch schema cannot carry each tool's types, so a model
-/// writes `"42"` for an id or sends the whole object as a JSON string. Only
+/// Reads a call's arguments the way the tool's own schema shapes them: a model
+/// writes `"42"` for an id, or sends the whole object as a JSON string, most
+/// of all inside a batch, whose schema cannot carry each tool's types. Only
 /// strings that parse cleanly into the declared type are changed.
-pub fn coerce_batch_args(tool: &str, args: serde_json::Value) -> serde_json::Value {
+pub fn coerce_args(tool: &str, args: serde_json::Value) -> serde_json::Value {
     let mut args = match args {
         serde_json::Value::String(s) => match serde_json::from_str(&s) {
             Ok(v @ serde_json::Value::Object(_)) => v,
@@ -144,21 +143,17 @@ pub fn coerce_batch_args(tool: &str, args: serde_json::Value) -> serde_json::Val
         v => v,
     };
     let Some((index, _)) = find(tool) else { return args };
-    let root = &tool_schema(index)["input_schema"];
-    coerce(&mut args, root, root);
+    coerce(&mut args, &tool_schema(index)["input_schema"]);
     args
 }
 
-fn coerce(value: &mut serde_json::Value, schema: &serde_json::Value, root: &serde_json::Value) {
+fn coerce(value: &mut serde_json::Value, schema: &serde_json::Value) {
     use serde_json::Value;
-    if let Some(name) = schema["$ref"].as_str().and_then(|r| r.strip_prefix("#/$defs/")) {
-        return coerce(value, &root["$defs"][name], root);
-    }
     if let Some(branch) = schema["anyOf"]
         .as_array()
         .and_then(|bs| bs.iter().find(|b| b["type"] != "null"))
     {
-        return coerce(value, branch, root);
+        return coerce(value, branch);
     }
     let types: Vec<&str> = match &schema["type"] {
         Value::String(t) => vec![t.as_str()],
@@ -180,12 +175,12 @@ fn coerce(value: &mut serde_json::Value, schema: &serde_json::Value, root: &serd
         }
         Value::Object(map) => {
             for (k, v) in map.iter_mut() {
-                coerce(v, &schema["properties"][k], root);
+                coerce(v, &schema["properties"][k]);
             }
         }
         Value::Array(items) => {
             for v in items {
-                coerce(v, &schema["items"], root);
+                coerce(v, &schema["items"]);
             }
         }
         _ => {}
@@ -385,19 +380,17 @@ const PLAN_LAY: &[&str] = &["plan_tasks"];
 /// where they are there to make it.
 const PLAN_CARRY: &[&str] = &["plan_carry"];
 const ORDER: &[&str] = &["order_set", "order_move", "order_drop"];
-const SCHEDULE: &[&str] =
-    &["schedule_slide", "schedule_snooze", "schedule_drop", "schedule_reshape"];
+const SCHEDULE: &[&str] = &["schedule_move", "schedule_drop"];
 const SCHEDULE_INSERT: &[&str] = &["schedule_insert"];
 const CALENDAR_READ: &[&str] = &["calendar_list"];
 const CALENDAR_WRITE: &[&str] =
     &["calendar_add", "calendar_update", "calendar_remove", "calendar_skip"];
-const TRIGGERS: &[&str] = &["trigger_set", "wait_until", "wait_for"];
+const TRIGGERS: &[&str] = &["trigger_set"];
 /// Raising the day's budget needs the user's agreement first.
 const TRIGGER_BUDGET: &[&str] = &["trigger_budget"];
 /// Moving the account to another zone follows what the user says, so it lives
 /// where they speak.
 const TIMEZONE: &[&str] = &["timezone_set"];
-const OUTREACH: &[&str] = &["notify_send"];
 /// Ringing the user, which a voice call cannot do to itself.
 const CALL_USER: &[&str] = &["call_user"];
 const NIGHTLY_NOTES: &[&str] = &["nightly_notes_write"];
@@ -438,7 +431,6 @@ const DOMAINS: &[&[&str]] = &[
     TRIGGERS,
     TRIGGER_BUDGET,
     TIMEZONE,
-    OUTREACH,
     CALL_USER,
     NIGHTLY_NOTES,
     SEARCH,
@@ -543,7 +535,6 @@ const NIGHTLY: &[&str] = registry_of![
     CALENDAR_READ,
     CALENDAR_WRITE,
     TRIGGERS,
-    OUTREACH,
     CALL_USER,
     NIGHTLY_NOTES,
     SEARCH,
@@ -573,7 +564,7 @@ pub fn writes(name: &str) -> bool {
 const IMPORT: &[&str] = registry_of![BRIEF];
 const INBOX: &[&str] = registry_of![MEMORY_READ, DECIDE];
 const SUMMARIZE: &[&str] = registry_of![SUMMARY];
-const REVIEW: &[&str] = registry_of![MEMORY_READ, MEMORY_WRITE, CALL_USER, BATCH, REVIEW_WRITE];
+const REVIEW: &[&str] = registry_of![MEMORY_WRITE, REVIEW_WRITE];
 const SHARE: &[&str] =
     registry_of![TASK_READ, GOALS_READ, PLAN_READ, CALENDAR_READ, SHARE_NOTE];
 const CALL: &[&str] = registry_of![
@@ -723,8 +714,55 @@ macro_rules! tools {
     };
 }
 
+/// The arguments' schema without what no provider reads: `$schema`, type
+/// titles, numeric widths and null defaults, with each `$ref` written out in
+/// place.
 fn schema<T: schemars::JsonSchema>() -> serde_json::Value {
-    serde_json::to_value(schemars::schema_for!(T)).expect("schema serializes")
+    let mut v = serde_json::to_value(schemars::schema_for!(T)).expect("schema serializes");
+    let defs = v.as_object_mut().and_then(|o| o.remove("$defs")).unwrap_or_default();
+    lean(&mut v, &defs);
+    v
+}
+
+fn lean(v: &mut serde_json::Value, defs: &serde_json::Value) {
+    use serde_json::Value;
+    match v {
+        Value::Object(o) => {
+            let target = o.get("$ref").and_then(Value::as_str).and_then(|r| r.strip_prefix("#/$defs/"));
+            if let Some(Value::Object(def)) = target.map(|name| defs[name].clone()) {
+                o.remove("$ref");
+                for (k, x) in def {
+                    o.entry(k).or_insert(x);
+                }
+            }
+            o.remove("$schema");
+            o.remove("title");
+            if o.get("default").is_some_and(Value::is_null) {
+                o.remove("default");
+            }
+            let numeric = |t: &Value| matches!(t.as_str(), Some("integer" | "number"));
+            let is_numeric = o.get("type").is_some_and(|t| match t {
+                Value::Array(ts) => ts.iter().any(numeric),
+                t => numeric(t),
+            });
+            if is_numeric {
+                o.remove("format");
+            }
+            for (k, child) in o.iter_mut() {
+                match k.as_str() {
+                    "properties" => {
+                        if let Value::Object(props) = child {
+                            props.values_mut().for_each(|p| lean(p, defs));
+                        }
+                    }
+                    "enum" | "default" | "required" => {}
+                    _ => lean(child, defs),
+                }
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(|x| lean(x, defs)),
+        _ => {}
+    }
 }
 
 const TOOLS: &[ToolSpec] = tools![
@@ -765,24 +803,18 @@ const TOOLS: &[ToolSpec] = tools![
         "Write this conversation's summary, in a single call that ends the session: 1 to 1200 \
          bytes of plain text, no markdown headers.",
     "review_write": review_ops::WriteArgs => run!(&review_ops::write), terminal_in = &[SessionKind::Review];
-        "Write the week's letter, in a single call that ends the session: 1 to 4000 bytes of \
-         plain text, addressed to the user.",
+        "Write the whole new strategy, which replaces the old one and ends the session: 1 to \
+         1500 bytes of plain lines that every session reads.",
     "context_edit": context_ops::EditArgs => run!(context_ops::edit);
         "Edit the standing context document: replace a unique snippet or append a line.",
-    "schedule_slide": schedule_ops::SlideArgs => run!(&schedule_ops::slide), writes = true;
-        "Slide a plan event by N minutes (negative = earlier), within its slide window.",
-    "schedule_snooze": schedule_ops::SnoozeArgs => run!(&schedule_ops::snooze), writes = true;
-        "Postpone a plan event's delivery by N minutes without changing the schedule intent.",
+    "schedule_move": schedule_ops::MoveArgs => run!(schedule_ops::move_event), writes = true;
+        "Move a plan event. A routine takes minutes; a block (it has a start and an end, and \
+         never notifies) takes a new start, end or both.",
     "schedule_drop": schedule_ops::DropArgs => run!(&schedule_ops::drop_event), writes = true;
         "Drop a droppable plan event for today. If it is moving rather than going away, add \
          the replacement first and name it in moved_to_event_id.",
-    "schedule_reshape": schedule_ops::ReshapeArgs => run!(schedule_ops::reshape), writes = true;
-        "Move or resize a block on the day's plan. Only blocks have a start and an end, and \
-         they never notify the user.",
     "schedule_insert": schedule_ops::InsertArgs => run!(&schedule_ops::insert);
         "Insert a new event into an existing day plan. A time that has gone by is refused.",
-    "notify_send": outreach_ops::SendArgs => run!(&outreach_ops::send);
-        "Send the user a nudge with this text (delivered within a minute).",
     "nightly_notes_write": context_ops::NightlyNotesArgs => run!(&context_ops::nightly_notes_write);
         "Replace last night's brief for tomorrow's sessions: 5-12 plain lines, no markdown \
          headers, nothing that will read as stale. Every session tomorrow reads it; write it \
@@ -883,15 +915,9 @@ const TOOLS: &[ToolSpec] = tools![
          date lays it on a later day, up to 7 days ahead, spending that day's allowance; tz \
          reads at and date in the IANA zone the user named the time in. Check plan_list \
          first: a trigger within 20 minutes of a pending one is refused with that one named — \
-         reword it with replace set to its id, or pass also when both are wanted.",
-    "wait_until": trigger_ops::WaitUntilArgs => run!(kind &trigger_ops::wait_until), writes = true;
-        "Lay a trigger point that calls itself off if the user writes back in the thread \
-         before it fires — to leave a question open without nagging. date, tz, replace and \
-         also work as in trigger_set.",
-    "wait_for": trigger_ops::WaitForArgs => run!(kind &trigger_ops::wait_for), writes = true;
-        "Lay a trigger point that calls itself off if the task is finished or dropped, or the \
-         plan event settled, before it fires. Name exactly one of them. date, tz, replace and \
-         also work as in trigger_set.",
+         reword it with replace set to its id, or pass also when both are wanted. cancel_on \
+         leaves a question open without nagging: a reply, a finished task or a settled event \
+         calls it off.",
     "trigger_budget": trigger_ops::BudgetArgs => run!(&trigger_ops::budget);
         "Raise a day's check-in budget (today, or date) after the user has agreed to it, \
          never before. reason is what they agreed to.",
@@ -1757,7 +1783,10 @@ mod tests {
     fn every_session_that_acts_for_the_user_can_call_them_but_a_call_and_a_visitor_cannot() {
         for kind in KINDS {
             let offered = registry(kind).contains(&"call_user");
-            let single = matches!(kind, SessionKind::Import | SessionKind::Inbox | SessionKind::Summarize);
+            let single = matches!(
+                kind,
+                SessionKind::Import | SessionKind::Inbox | SessionKind::Summarize | SessionKind::Review
+            );
             let apart = matches!(kind, SessionKind::Call | SessionKind::Share);
             assert_eq!(offered, !single && !apart, "{kind:?}");
             assert_eq!(is_terminal(kind, "call_user"), kind == SessionKind::Trigger, "{kind:?}");
@@ -1917,7 +1946,7 @@ mod tests {
                 "{name} has no place on the share surface"
             );
         }
-        for gone in ["memory_query", "memory_read", "memory_write", "context_edit", "task_create", "task_update", "web_search", "batch", "trigger_set", "notify_send"] {
+        for gone in ["memory_query", "memory_read", "memory_write", "context_edit", "task_create", "task_update", "web_search", "batch", "trigger_set"] {
             assert!(!r.contains(&gone), "{gone} leaked into the share registry");
         }
         assert!(is_terminal(SessionKind::Share, "share_note"));
@@ -2001,13 +2030,13 @@ mod tests {
         let t = registry(SessionKind::Trigger);
         for name in [
             "memory_write", "task_update", "task_split", "task_bulk_update", "note_write",
-            "order_set", "order_move", "order_drop", "schedule_reshape", "schedule_drop", "trigger_set",
+            "order_set", "order_move", "order_drop", "schedule_move", "schedule_drop", "trigger_set",
         ] {
             assert!(t.contains(&name), "{name}");
         }
         for name in [
             "calendar_add", "calendar_update", "calendar_remove", "calendar_skip",
-            "schedule_insert", "trigger_budget", "notify_send", "goal_create", "task_delete",
+            "schedule_insert", "trigger_budget", "goal_create", "task_delete",
         ] {
             assert!(!t.contains(&name), "{name}");
         }

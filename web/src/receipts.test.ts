@@ -25,3 +25,16 @@ describe('order receipts', () => {
     expect(receipt('order_set', '{"task_ids":[]}', true)).toBe("Couldn't set the order")
   })
 })
+
+describe('schedule receipts', () => {
+  test('one move tool reads as a slide, a snooze or a reshape', () => {
+    expect(receipt('schedule_move', '{"event_id":1,"minutes":-30}', false)).toBe('Moved an event 30 min earlier')
+    expect(receipt('schedule_move', '{"event_id":1,"minutes":15,"snooze":true}', false)).toBe('Put an event off for 15 min')
+    expect(receipt('schedule_move', '{"event_id":3,"start":"10:00","end":"11:00"}', false)).toBe('Reshaped a block to 10:00–11:00')
+    expect(receipt('schedule_move', '{"event_id":3,"end":"11:00"}', true)).toBe("Couldn't move that event")
+  })
+  test('retired tools in older traces still read', () => {
+    expect(receipt('schedule_snooze', '{"event_id":1,"minutes":15}', false)).toBe('Put an event off for 15 min')
+    expect(receipt('wait_for', '{"until":"+30min"}', false)).toBe('Set a check-in in 30 min')
+  })
+})

@@ -174,7 +174,7 @@ pub fn context(
             Some(t) => mt::nudged_ago(l, &ago(t, l, now)),
             None => mt::never_nudged(l).to_string(),
         };
-        let _ = writeln!(s, "{}", mt::working_line(l, &n.id, &n.title, &ago(&n.created, l, now), &nudge));
+        let _ = writeln!(s, "{}", mt::working_line(l, crate::notes::short(&n.id), &n.title, &ago(&n.created, l, now), &nudge));
     }
     Ok(s)
 }
@@ -364,8 +364,8 @@ mod tests {
 
         let text = context(&conn, tmp.path(), uid, "aki", Lang::En, noon()).unwrap();
         assert!(text.contains("Nothing from the user for 20 min."), "{text}");
-        assert!(text.contains(&format!("- {bank}: \"call the bank\", added 4 h ago, nudged 1 h ago")), "{text}");
-        assert!(text.contains(&format!("- {milk}: \"milk\", added 30 min ago, never nudged")), "{text}");
+        assert!(text.contains(&format!("- {}: \"call the bank\", added 4 h ago, nudged 1 h ago", &bank[..8])), "{text}");
+        assert!(text.contains(&format!("- {}: \"milk\", added 30 min ago, never nudged", &milk[..8])), "{text}");
         assert!(!text.contains("past thing"), "{text}");
     }
 

@@ -81,7 +81,7 @@ type Line = Key | ((a: Args) => string)
 
 type Receipt = { doing: Line; done: Line; failed: Key }
 
-// Every tool the server offers, by domain, in the order the registries list them.
+// Every tool the server offers or once offered, by domain, so older traces still read.
 const TABLE: Record<string, Receipt> = {
   memory_query: {
     doing: (a) => {
@@ -443,15 +443,6 @@ const TABLE: Record<string, Receipt> = {
     },
     failed: 'receipt.summaryWrite.failed',
   },
-  harvest_done: {
-    doing: 'receipt.harvest.doing',
-    done: (a) => {
-      const count = num(a, 'written') ?? 0
-      const note = str(a, 'note')
-      return note ? t('receipt.harvest.doneNote', { count, note: clip(note) }) : t('receipt.harvest.done', { count })
-    },
-    failed: 'receipt.harvest.failed',
-  },
   review_write: {
     doing: 'receipt.reviewWrite.doing',
     done: 'receipt.reviewWrite.done',
@@ -506,6 +497,15 @@ function parse(raw: string): Args {
 }
 
 const say = (line: Line, a: Args) => (typeof line === 'string' ? t(line) : line(a))
+
+// schedule_move took over slide, snooze and reshape, whose rows still read older traces.
+const moveAs = (a: Args): Receipt =>
+  TABLE[str(a, 'start') || str(a, 'end') ? 'schedule_reshape' : flag(a, 'snooze') ? 'schedule_snooze' : 'schedule_slide']
+TABLE.schedule_move = {
+  doing: (a) => say(moveAs(a).doing, a),
+  done: (a) => say(moveAs(a).done, a),
+  failed: 'receipt.scheduleSlide.failed',
+}
 
 // The sentence for a call still in flight.
 export function doing(name: string, args: string): string {

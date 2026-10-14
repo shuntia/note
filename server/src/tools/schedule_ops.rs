@@ -5,9 +5,34 @@ use serde::Deserialize;
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct SlideArgs {
+pub struct MoveArgs {
     pub event_id: i64,
-    pub minutes: i64,
+    /// A routine's shift in minutes, negative for earlier, within its slide window.
+    #[serde(default)]
+    pub minutes: Option<i64>,
+    /// With minutes: hold back only the delivery, 1 to 1440 minutes; the planned time stays.
+    #[serde(default)]
+    pub snooze: bool,
+    /// A block's new start, zero-padded HH:MM.
+    #[serde(default)]
+    pub start: Option<String>,
+    /// A block's new end, zero-padded HH:MM.
+    #[serde(default)]
+    pub end: Option<String>,
+}
+
+pub fn move_event(conn: &Connection, ctx: &ToolCtx, args: MoveArgs) -> Result<serde_json::Value, ToolError> {
+    let reshaping = args.start.is_some() || args.end.is_some();
+    match args.minutes {
+        Some(_) if reshaping => Err(ToolError::rejected(
+            "give minutes for a routine, or start and end for a block, not both",
+        )),
+        Some(minutes) if args.snooze => snooze(conn, ctx, args.event_id, minutes),
+        Some(minutes) => slide(conn, ctx, args.event_id, minutes),
+        None if args.snooze => Err(ToolError::rejected("snooze needs minutes")),
+        None if reshaping => reshape(conn, ctx, args.event_id, args.start, args.end),
+        None => Err(ToolError::rejected("give minutes for a routine, or a new start, end or both for a block")),
+    }
 }
 
 /// The plan date and current wall time of an owned event; the pair every
@@ -45,13 +70,13 @@ fn check_calendar(
 }
 
 /// Why an owned event refused a slide or snooze, so the model is pointed at
-/// the tool that can do it rather than told the event does not exist.
+/// the fields that can move it rather than told the event does not exist.
 fn refusal(conn: &Connection, user_id: i64, event_id: i64, verb: &str) -> ToolError {
     match crate::plan::event_gate(conn, user_id, event_id) {
         Ok(Some((flex, _))) => {
             if crate::plan::block_shape(conn, user_id, event_id).ok().flatten().is_some() {
                 ToolError::rejected(format!(
-                    "event {event_id} is a block, which cannot {verb}; move or resize it with schedule_reshape"
+                    "event {event_id} is a block, which cannot {verb}; move or resize it with start and end"
                 ))
             } else {
                 ToolError::rejected(format!("event {event_id} has flexibility '{flex}' and cannot {verb}"))
@@ -62,14 +87,14 @@ fn refusal(conn: &Connection, user_id: i64, event_id: i64, verb: &str) -> ToolEr
     }
 }
 
-pub fn slide(conn: &Connection, ctx: &ToolCtx, args: &SlideArgs) -> Result<serde_json::Value, ToolError> {
-    if let Some((date, wall)) = event_day(conn, ctx.user_id, args.event_id) {
-        let target = crate::templates::wall_add(&wall, args.minutes);
+fn slide(conn: &Connection, ctx: &ToolCtx, event_id: i64, minutes: i64) -> Result<serde_json::Value, ToolError> {
+    if let Some((date, wall)) = event_day(conn, ctx.user_id, event_id) {
+        let target = crate::templates::wall_add(&wall, minutes);
         check_calendar(conn, ctx.user_id, date, &target, &target)?;
     }
-    match crate::plan::shift(conn, ctx.user_id, args.event_id, args.minutes) {
+    match crate::plan::shift(conn, ctx.user_id, event_id, minutes) {
         Ok(Some(())) => Ok(serde_json::json!({ "ok": true })),
-        Ok(None) => Err(refusal(conn, ctx.user_id, args.event_id, "slide")),
+        Ok(None) => Err(refusal(conn, ctx.user_id, event_id, "slide")),
         Err(e @ (crate::plan::ShiftError::OutOfWindow { .. } | crate::plan::ShiftError::Decided { .. })) => {
             Err(ToolError::rejected(e.to_string()))
         }
@@ -77,42 +102,26 @@ pub fn slide(conn: &Connection, ctx: &ToolCtx, args: &SlideArgs) -> Result<serde
     }
 }
 
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct SnoozeArgs {
-    pub event_id: i64,
-    pub minutes: i64,
-}
-
-pub fn snooze(conn: &Connection, ctx: &ToolCtx, args: &SnoozeArgs) -> Result<serde_json::Value, ToolError> {
-    if !(1..=1440).contains(&args.minutes) {
+fn snooze(conn: &Connection, ctx: &ToolCtx, event_id: i64, minutes: i64) -> Result<serde_json::Value, ToolError> {
+    if !(1..=1440).contains(&minutes) {
         return Err(ToolError::rejected("snooze minutes must be in 1..=1440"));
     }
-    match crate::plan::snooze(conn, ctx.user_id, args.event_id, args.minutes) {
+    match crate::plan::snooze(conn, ctx.user_id, event_id, minutes) {
         Ok(Some(())) => Ok(serde_json::json!({ "ok": true })),
-        Ok(None) => Err(refusal(conn, ctx.user_id, args.event_id, "be snoozed")),
+        Ok(None) => Err(refusal(conn, ctx.user_id, event_id, "be snoozed")),
         Err(e @ crate::plan::ShiftError::Decided { .. }) => Err(ToolError::rejected(e.to_string())),
         Err(e) => Err(ToolError::internal(e.to_string())),
     }
 }
 
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ReshapeArgs {
-    pub event_id: i64,
-    /// New start, zero-padded HH:MM. Omit to keep the current one.
-    #[serde(default)]
-    pub start: Option<String>,
-    /// New end, zero-padded HH:MM. Omit to keep the current one.
-    #[serde(default)]
-    pub end: Option<String>,
-}
-
-pub fn reshape(conn: &Connection, ctx: &ToolCtx, args: ReshapeArgs) -> Result<serde_json::Value, ToolError> {
-    if args.start.is_none() && args.end.is_none() {
-        return Err(ToolError::rejected("give a new start, a new end, or both"));
-    }
-    for (field, value) in [("start", &args.start), ("end", &args.end)] {
+fn reshape(
+    conn: &Connection,
+    ctx: &ToolCtx,
+    event_id: i64,
+    start: Option<String>,
+    end: Option<String>,
+) -> Result<serde_json::Value, ToolError> {
+    for (field, value) in [("start", &start), ("end", &end)] {
         if let Some(v) = value {
             if !crate::templates::valid_time(v) {
                 return Err(ToolError::rejected(format!(
@@ -121,24 +130,24 @@ pub fn reshape(conn: &Connection, ctx: &ToolCtx, args: ReshapeArgs) -> Result<se
             }
         }
     }
-    let shape = crate::plan::block_shape(conn, ctx.user_id, args.event_id)
+    let shape = crate::plan::block_shape(conn, ctx.user_id, event_id)
         .map_err(|e| ToolError::internal(e.to_string()))?;
     let Some((cur_start, cur_end, _)) = shape else {
         return Err(ToolError::not_found(format!(
-            "no block {} for this user; only blocks have a start and an end, and plan_list shows which events are blocks", args.event_id
+            "no block {event_id} for this user; only blocks have a start and an end, and plan_list shows which events are blocks"
         )));
     };
-    let start = args.start.unwrap_or(cur_start);
-    let end = args.end.unwrap_or(cur_end);
+    let start = start.unwrap_or(cur_start);
+    let end = end.unwrap_or(cur_end);
     if end <= start {
         return Err(ToolError::rejected(format!("a block must end after it starts, got {start}-{end}")));
     }
-    if let Some((date, _)) = event_day(conn, ctx.user_id, args.event_id) {
+    if let Some((date, _)) = event_day(conn, ctx.user_id, event_id) {
         check_calendar(conn, ctx.user_id, date, &start, &end)?;
     }
-    match crate::plan::reshape(conn, ctx.user_id, args.event_id, &start, &end) {
+    match crate::plan::reshape(conn, ctx.user_id, event_id, &start, &end) {
         Ok(Some(())) => Ok(serde_json::json!({ "start": start, "end": end })),
-        Ok(None) => Err(ToolError::not_found(format!("no block {}", args.event_id))),
+        Ok(None) => Err(ToolError::not_found(format!("no block {event_id}"))),
         Err(e @ crate::plan::ShiftError::Decided { .. }) => Err(ToolError::rejected(e.to_string())),
         Err(e) => Err(ToolError::internal(e.to_string())),
     }
@@ -365,7 +374,7 @@ mod tests {
     fn a_slide_into_a_fixed_commitment_is_refused_by_name() {
         let (conn, tmp) = env();
         school(&conn);
-        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "schedule_slide",
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "schedule_move",
             r#"{"event_id":1,"minutes":30}"#).unwrap_err();
         assert_eq!(e.kind, "rejected");
         assert_eq!(e.message, "09:30 is inside school 09:30-15:30");
@@ -373,7 +382,7 @@ mod tests {
             .query_row("SELECT wall_time FROM events WHERE id = 1", [], |r| r.get(0)).unwrap();
         assert_eq!(wall, "09:00", "a refused slide leaves the event alone");
 
-        dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "schedule_slide",
+        dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "schedule_move",
             r#"{"event_id":1,"minutes":-30}"#).unwrap();
     }
 
@@ -399,12 +408,12 @@ mod tests {
         let block: i64 = conn
             .query_row("SELECT id FROM events WHERE end_wall_time IS NOT NULL", [], |r| r.get(0))
             .unwrap();
-        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "schedule_reshape",
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "schedule_move",
             &format!(r#"{{"event_id":{block},"start":"13:00","end":"14:00"}}"#)).unwrap_err();
         assert_eq!(e.kind, "rejected");
         assert!(e.message.contains("inside school 09:30-15:30"), "{}", e.message);
 
-        dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "schedule_reshape",
+        dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "schedule_move",
             &format!(r#"{{"event_id":{block},"start":"07:00","end":"09:30"}}"#)).unwrap();
     }
 
@@ -412,17 +421,17 @@ mod tests {
     #[test]
     fn slide_snooze_and_window_rejection() {
         let (conn, tmp) = env();
-        dispatch(&conn, &ctx(&tmp), SessionKind::Checkin, "schedule_slide",
+        dispatch(&conn, &ctx(&tmp), SessionKind::Checkin, "schedule_move",
             r#"{"event_id":1,"minutes":30}"#).unwrap();
-        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Checkin, "schedule_slide",
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Checkin, "schedule_move",
             r#"{"event_id":1,"minutes":45}"#).unwrap_err();
         assert_eq!(e.kind, "rejected"); // cumulative 75 > window 60
-        dispatch(&conn, &ctx(&tmp), SessionKind::Checkin, "schedule_snooze",
-            r#"{"event_id":1,"minutes":15}"#).unwrap();
-        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Checkin, "schedule_snooze",
-            r#"{"event_id":1,"minutes":0}"#).unwrap_err();
+        dispatch(&conn, &ctx(&tmp), SessionKind::Checkin, "schedule_move",
+            r#"{"event_id":1,"minutes":15,"snooze":true}"#).unwrap();
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Checkin, "schedule_move",
+            r#"{"event_id":1,"minutes":0,"snooze":true}"#).unwrap_err();
         assert_eq!(e.kind, "rejected");
-        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Checkin, "schedule_slide",
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Checkin, "schedule_move",
             r#"{"event_id":99,"minutes":5}"#).unwrap_err();
         assert_eq!(e.kind, "not_found");
     }
@@ -431,11 +440,11 @@ mod tests {
     fn snooze_on_a_decided_event_is_rejected_not_missing() {
         let (conn, tmp) = env();
         conn.execute("UPDATE events SET status='done' WHERE id=1", []).unwrap();
-        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Checkin, "schedule_snooze",
-            r#"{"event_id":1,"minutes":10}"#).unwrap_err();
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Checkin, "schedule_move",
+            r#"{"event_id":1,"minutes":10,"snooze":true}"#).unwrap_err();
         assert_eq!(e.kind, "rejected");
-        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Checkin, "schedule_snooze",
-            r#"{"event_id":99,"minutes":10}"#).unwrap_err();
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Checkin, "schedule_move",
+            r#"{"event_id":99,"minutes":10,"snooze":true}"#).unwrap_err();
         assert_eq!(e.kind, "not_found");
     }
 
@@ -503,7 +512,7 @@ mod tests {
     #[test]
     fn the_agent_reshapes_a_block_but_not_a_routine() {
         let (conn, tmp) = env();
-        dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "schedule_reshape",
+        dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "schedule_move",
             r#"{"event_id":3,"start":"10:00","end":"13:00"}"#).unwrap();
         let shape = |id: i64| -> (String, String) {
             conn.query_row("SELECT wall_time, end_wall_time FROM events WHERE id=?1", [id], |r| {
@@ -513,21 +522,23 @@ mod tests {
         };
         assert_eq!(shape(3), ("10:00".to_string(), "13:00".to_string()));
 
-        dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "schedule_reshape",
+        dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "schedule_move",
             r#"{"event_id":3,"end":"14:00"}"#).unwrap();
         assert_eq!(shape(3), ("10:00".to_string(), "14:00".to_string()));
 
-        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "schedule_reshape",
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "schedule_move",
             r#"{"event_id":1,"start":"10:00","end":"11:00"}"#).unwrap_err();
         assert_eq!(e.kind, "not_found", "a routine has no shape to change");
 
         for (raw, why) in [
             (r#"{"event_id":3}"#, "nothing to change"),
+            (r#"{"event_id":3,"minutes":5,"start":"10:30"}"#, "minutes and a shape"),
+            (r#"{"event_id":3,"snooze":true,"end":"15:00"}"#, "snooze without minutes"),
             (r#"{"event_id":3,"start":"9:00"}"#, "unpadded start"),
             (r#"{"event_id":3,"start":"15:00","end":"14:00"}"#, "end before start"),
             (r#"{"event_id":3,"start":"15:00"}"#, "start past the stored end"),
         ] {
-            let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "schedule_reshape", raw)
+            let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "schedule_move", raw)
                 .unwrap_err();
             assert_eq!(e.kind, "rejected", "{why}");
         }
@@ -537,15 +548,12 @@ mod tests {
     #[test]
     fn a_block_moves_only_by_reshaping() {
         let (conn, tmp) = env();
-        for (tool, raw) in [
-            ("schedule_slide", r#"{"event_id":3,"minutes":30}"#),
-            ("schedule_snooze", r#"{"event_id":3,"minutes":30}"#),
-        ] {
-            let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, tool, raw).unwrap_err();
-            assert_eq!(e.kind, "rejected", "{tool} moved a block");
-            assert!(e.message.contains("schedule_reshape"), "{tool}: {}", e.message);
+        for raw in [r#"{"event_id":3,"minutes":30}"#, r#"{"event_id":3,"minutes":30,"snooze":true}"#] {
+            let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "schedule_move", raw).unwrap_err();
+            assert_eq!(e.kind, "rejected", "{raw} moved a block");
+            assert!(e.message.contains("start and end"), "{raw}: {}", e.message);
         }
-        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "schedule_slide",
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "schedule_move",
             r#"{"event_id":999,"minutes":5}"#).unwrap_err();
         assert_eq!(e.kind, "not_found");
         let (start, end): (String, String) = conn
@@ -560,7 +568,7 @@ mod tests {
     fn a_decided_block_is_left_alone() {
         let (conn, tmp) = env();
         conn.execute("UPDATE events SET status='done' WHERE id=3", []).unwrap();
-        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "schedule_reshape",
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "schedule_move",
             r#"{"event_id":3,"start":"10:00"}"#).unwrap_err();
         assert_eq!(e.kind, "rejected");
     }
@@ -569,9 +577,9 @@ mod tests {
     fn no_schedule_tool_accepts_an_alert_flag() {
         let (conn, tmp) = env();
         for (tool, raw) in [
-            ("schedule_reshape", r#"{"event_id":3,"start":"10:00","alert":false}"#.to_string()),
-            ("schedule_slide", r#"{"event_id":1,"minutes":5,"alert":false}"#.to_string()),
-            ("schedule_snooze", r#"{"event_id":1,"minutes":5,"alert":false}"#.to_string()),
+            ("schedule_move", r#"{"event_id":3,"start":"10:00","alert":false}"#.to_string()),
+            ("schedule_move", r#"{"event_id":1,"minutes":5,"alert":false}"#.to_string()),
+            ("schedule_move", r#"{"event_id":1,"minutes":5,"snooze":true,"alert":false}"#.to_string()),
             ("schedule_drop", r#"{"event_id":2,"alert":false}"#.to_string()),
             ("schedule_insert", format!(r#"{{"date":"{}","kind":"nudge","time":"16:00","flexibility":"drop","channel":"push","alert":false}}"#, today())),
         ] {
