@@ -387,60 +387,22 @@ pub fn debrief_heading(l: Lang) -> &'static str {
     l.of("# Latest debrief\n\n", "# 最新の朝の手紙\n\n")
 }
 
-pub fn no_debrief(l: Lang) -> &'static str {
-    l.of("(no debrief yet)\n\n", "（朝の手紙はまだありません）\n\n")
-}
-
-pub fn trimmed(l: Lang) -> &'static str {
-    l.of("(trimmed for size)", "（長さのため省略）")
-}
-
-pub fn on_off(l: Lang, on: bool) -> &'static str {
-    if on { l.of("on", "オン") } else { l.of("off", "オフ") }
-}
-
-pub fn no_plan_factor(l: Lang) -> &'static str {
-    l.of("no plan factor yet", "計画係数はまだありません")
-}
-
 pub fn plan_factor(l: Lang, value: f64, sample: i64) -> String {
     match l {
-        Lang::En => format!("Plan factor: {value:.1}× from {sample} session{}", plural(sample)),
-        Lang::Ja => format!("計画係数: {value:.1}×（{sample}セッションから）"),
+        Lang::En => format!("Plan factor: {value:.1}× from {sample} session{}\n", plural(sample)),
+        Lang::Ja => format!("計画係数: {value:.1}×（{sample}セッションから）\n"),
     }
 }
 
-pub struct SettingsLine<'a> {
-    pub name: &'a str,
-    pub tz: &'a str,
-    pub nightly_time: &'a str,
-    pub template: &'a str,
-    pub counter: &'a str,
-    pub nightly: bool,
-    pub checkins: bool,
-    pub facts: i64,
-    pub split: &'a str,
-    pub factor: &'a str,
-    pub spent: u32,
-    pub allowance: u32,
-}
-
-pub fn settings(l: Lang, s: &SettingsLine) -> String {
-    let (nightly, checkins) = (on_off(l, s.nightly), on_off(l, s.checkins));
-    let SettingsLine { name, tz, nightly_time, template, counter, facts, split, factor, spent, allowance, .. } = s;
+/// The plan factor appears once there is one.
+pub fn settings(l: Lang, name: &str, factor: Option<(f64, i64)>, spent: u32, allowance: u32) -> String {
+    let factor = factor.map(|(value, sample)| plan_factor(l, value, sample)).unwrap_or_default();
     match l {
         Lang::En => format!(
-            "# Settings\n\n{name} | {tz} | nightly_time {nightly_time} | template {template} | counter {counter} | nightly {nightly} | checkins {checkins}\n\
-             Memory: {facts} fact{} ({split})\n\
-             {factor}\n\
-             Trigger points you may lay today: {spent} of {allowance} used\n\n",
-            plural(*facts),
+            "# Settings\n\nUser: {name}\n{factor}Trigger points you may lay today: {spent} of {allowance} used\n\n"
         ),
         Lang::Ja => format!(
-            "# 設定\n\n{name} | {tz} | nightly_time {nightly_time} | template {template} | counter {counter} | nightly {nightly} | checkins {checkins}\n\
-             記憶: {facts}件（{split}）\n\
-             {factor}\n\
-             今日置けるトリガーポイント: {allowance}件中{spent}件使用済み\n\n",
+            "# 設定\n\nユーザー: {name}\n{factor}今日置けるトリガーポイント: {allowance}件中{spent}件使用済み\n\n"
         ),
     }
 }

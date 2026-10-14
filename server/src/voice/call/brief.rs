@@ -109,7 +109,7 @@ mod tests {
         assert!(
             brief.contains(&format!(
                 "# Working memory (note_write; the user does not see it)\n\n- {}: the essay is the one that matters",
-                essay.id
+                crate::notes::short(&essay.id)
             )),
             "a call carries working memory: {brief}"
         );

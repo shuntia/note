@@ -58,7 +58,7 @@ fn when(
 }
 
 fn shown(n: &crate::notes::Note) -> serde_json::Value {
-    serde_json::json!({ "id": n.id, "title": n.title, "from": n.from, "until": n.until })
+    serde_json::json!({ "id": crate::notes::short(&n.id), "title": n.title, "from": n.from, "until": n.until })
 }
 
 pub fn write(conn: &Connection, ctx: &ToolCtx, args: &WriteArgs) -> Result<serde_json::Value, ToolError> {
@@ -69,12 +69,9 @@ pub fn write(conn: &Connection, ctx: &ToolCtx, args: &WriteArgs) -> Result<serde
     let from = when(args.from.as_deref(), &there, &tz)?;
     let until = when(args.until.as_deref(), &there, &tz)?;
     let (data_dir, user) = (ctx.data_dir, ctx.username);
-    let id = || -> Result<&str, ToolError> {
+    let id = || -> Result<String, ToolError> {
         let id = args.id.as_deref().ok_or_else(|| ToolError::rejected("this op needs the note's id"))?;
-        if !crate::memory::valid_id(id) {
-            return Err(ToolError::rejected("malformed note id"));
-        }
-        Ok(id)
+        crate::notes::resolve(conn, data_dir, user, id).map_err(note_error)
     };
     match args.op {
         WriteOp::Add => {
@@ -88,7 +85,7 @@ pub fn write(conn: &Connection, ctx: &ToolCtx, args: &WriteArgs) -> Result<serde
                     return Err(ToolError::duplicate(format!(
                         "note {} already reads {:?}; keep or update it, or pass also: true when this is \
                          a second one",
-                        n.id, n.title
+                        crate::notes::short(&n.id), n.title
                     )));
                 }
             }
@@ -101,22 +98,22 @@ pub fn write(conn: &Connection, ctx: &ToolCtx, args: &WriteArgs) -> Result<serde
                 return Err(ToolError::rejected("set title, from or until"));
             }
             let change = Change { title: args.title.clone(), from, until };
-            let n = crate::notes::update(conn, data_dir, user, id()?, change, now).map_err(note_error)?;
+            let n = crate::notes::update(conn, data_dir, user, &id()?, change, now).map_err(note_error)?;
             Ok(shown(&n))
         }
         WriteOp::Remove => {
             let id = id()?;
-            crate::notes::remove(conn, data_dir, user, id).map_err(note_error)?;
-            Ok(serde_json::json!({ "id": id, "removed": true }))
+            crate::notes::remove(conn, data_dir, user, &id).map_err(note_error)?;
+            Ok(serde_json::json!({ "id": crate::notes::short(&id), "removed": true }))
         }
         WriteOp::Keep => {
             let id = id()?;
-            let kept = crate::notes::touch(conn, data_dir, user, &[id.to_owned()], now)
+            let kept = crate::notes::touch(conn, data_dir, user, std::slice::from_ref(&id), now)
                 .map_err(|e| ToolError::internal(e.to_string()))?;
             if kept == 0 {
-                return Err(ToolError::not_found(format!("no note {id}")));
+                return Err(ToolError::not_found(format!("no note {}", crate::notes::short(&id))));
             }
-            Ok(serde_json::json!({ "id": id, "kept": true }))
+            Ok(serde_json::json!({ "id": crate::notes::short(&id), "kept": true }))
         }
     }
 }
@@ -142,9 +139,7 @@ pub struct SettleArgs {
 }
 
 pub fn settle(conn: &Connection, ctx: &ToolCtx, args: &SettleArgs) -> Result<serde_json::Value, ToolError> {
-    if !crate::memory::valid_id(&args.id) {
-        return Err(ToolError::rejected("malformed note id"));
-    }
+    let id = crate::notes::resolve(conn, ctx.data_dir, ctx.username, &args.id).map_err(note_error)?;
     let outcome = match args.outcome {
         SettleOutcome::Drop => {
             if args.category.is_some() || args.summary.is_some() || args.body.is_some() {
@@ -167,8 +162,8 @@ pub fn settle(conn: &Connection, ctx: &ToolCtx, args: &SettleArgs) -> Result<ser
             }
         }
     };
-    let memory_id = crate::notes::settle(conn, ctx.data_dir, ctx.username, &args.id, &outcome).map_err(note_error)?;
-    Ok(serde_json::json!({ "id": args.id, "memory_id": memory_id }))
+    let memory_id = crate::notes::settle(conn, ctx.data_dir, ctx.username, &id, &outcome).map_err(note_error)?;
+    Ok(serde_json::json!({ "id": crate::notes::short(&id), "memory_id": memory_id }))
 }
 
 #[cfg(test)]

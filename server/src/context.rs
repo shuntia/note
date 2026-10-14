@@ -254,25 +254,21 @@ pub fn assemble_from(
     let quiet = crate::calendar::quiet_window(conn, user_id, &tz, now)?;
     let calendar = crate::calendar::occurrences(conn, user_id, today)?;
 
-    let now_s =
-        now_section(l, &local, &tz_label, now, &events, now_min, &ucfg.nightly_time, quiet.as_ref());
+    let nightly_time = ucfg.features(&category).nightly.then_some(ucfg.nightly_time.as_str());
+    let now_s = now_section(l, &local, &tz_label, now, &events, now_min, nightly_time, quiet.as_ref());
     let plan_s = plan_section(
         l,
         &events, &calendar, now_min, tomorrow, crate::plan::exists(conn, user_id, tomorrow)?,
     );
-    let settings_s = settings_section(
+    let settings_s = mt::settings(
         l,
-        ucfg,
-        &tz_label,
-        ucfg.features(&category),
-        crate::memory::live_count_by_category(conn, username).unwrap_or_default(),
-        (
-            crate::triggers::spent(conn, user_id, today).unwrap_or(0),
-            crate::triggers::allowance_over(conn, ucfg.triggers_per_day(), user_id, today)
-                .unwrap_or_else(|_| ucfg.triggers_per_day()),
-        ),
-        crate::learn::plan_factor(conn, user_id).unwrap_or(None),
+        &ucfg.display_name,
+        crate::learn::plan_factor(conn, user_id).unwrap_or(None).map(|f| (f.value, f.sample)),
+        crate::triggers::spent(conn, user_id, today).unwrap_or(0),
+        crate::triggers::allowance_over(conn, ucfg.triggers_per_day(), user_id, today)
+            .unwrap_or_else(|_| ucfg.triggers_per_day()),
     );
+    let activity = without_restated(activity, !order.is_empty());
     let render = |caps: &Caps| {
         let mut s = String::with_capacity(2048);
         s.push_str(&notes_section(l, notes.as_ref(), today, caps.notes));
@@ -317,7 +313,7 @@ fn now_section(
     now: jiff::Timestamp,
     events: &[crate::plan::PlanEvent],
     now_min: i64,
-    nightly_time: &str,
+    nightly_time: Option<&str>,
     quiet: Option<&crate::calendar::QuietWindow>,
 ) -> String {
     let mut s = format!("\n{}", mt::now_heading(l));
@@ -348,8 +344,10 @@ fn now_section(
         let after = mt::in_words(l, crate::templates::wall_minutes(&next.wall_time) - now_min);
         let _ = writeln!(s, "{}", mt::next_in(l, &next.wall_time, &next.kind, &after));
     }
-    let until = (crate::templates::wall_minutes(nightly_time) - now_min).rem_euclid(24 * 60);
-    let _ = writeln!(s, "{}", mt::nightly_run_in(l, nightly_time, &mt::in_words(l, until)));
+    if let Some(at) = nightly_time {
+        let until = (crate::templates::wall_minutes(at) - now_min).rem_euclid(24 * 60);
+        let _ = writeln!(s, "{}", mt::nightly_run_in(l, at, &mt::in_words(l, until)));
+    }
     if let Some(q) = quiet {
         let _ = writeln!(s, "{}", mt::quiet_until(l, &q.end, &q.title));
     }
@@ -376,6 +374,11 @@ fn calendar_lines(l: Lang, calendar: &[crate::calendar::Occurrence]) -> String {
     s
 }
 
+/// A trigger that has fired or been decided only adds to the count line.
+fn settled_trigger(e: &crate::plan::PlanEvent) -> bool {
+    e.kind == crate::triggers::KIND && !matches!(e.status.as_str(), "pending" | "snoozed")
+}
+
 fn plan_section(
     l: Lang,
     events: &[crate::plan::PlanEvent],
@@ -390,11 +393,12 @@ fn plan_section(
         s.push_str(mt::no_plan_today(l));
     }
     let start_of = |e: &crate::plan::PlanEvent| crate::templates::wall_minutes(&e.wall_time);
-    let current = events
+    let shown: Vec<&crate::plan::PlanEvent> = events.iter().filter(|e| !settled_trigger(e)).collect();
+    let current = shown
         .iter()
         .position(|e| start_of(e) <= now_min && now_min < crate::templates::wall_minutes(end_of(e)));
-    let next = events.iter().position(|e| start_of(e) > now_min);
-    for (i, e) in events.iter().enumerate() {
+    let next = shown.iter().position(|e| start_of(e) > now_min);
+    for (i, e) in shown.iter().enumerate() {
         let mark = if Some(i) == current {
             mt::mark_now(l).into()
         } else if Some(i) == next {
@@ -643,7 +647,7 @@ fn working_section(
     }
     let mut s = String::from(mt::working_memory_heading(l));
     for n in active.iter().take(WORKING_MEMORY_CAP) {
-        let _ = writeln!(s, "- {}: {}", n.id, n.title);
+        let _ = writeln!(s, "- {}: {}", crate::notes::short(&n.id), n.title);
     }
     if !coming.is_empty() {
         if !active.is_empty() {
@@ -657,70 +661,48 @@ fn working_section(
                 .and_then(|f| f.parse::<jiff::Timestamp>().ok())
                 .map(|t| t.to_zoned(tz.clone()).strftime("%Y-%m-%d %H:%M").to_string())
                 .unwrap_or_default();
-            let _ = writeln!(s, "- {}: {} ({opens})", n.id, n.title);
+            let _ = writeln!(s, "- {}: {} ({opens})", crate::notes::short(&n.id), n.title);
         }
     }
     s.push('\n');
     s
 }
 
+/// Nothing at all when there is no debrief or no room for it.
 fn debrief_section(l: Lang, row: Option<&(String, String)>, today: jiff::civil::Date, cap: usize) -> String {
-    let mut s = String::from(mt::debrief_heading(l));
     match row {
-        None => s.push_str(mt::no_debrief(l)),
-        Some((date, content)) if cap == 0 => {
-            let _ = write!(s, "{date} ({}): {}\n\n", days_ago(l, date, today), mt::trimmed(l));
-        }
-        Some((date, content)) => {
-            let _ = write!(
-                s,
-                "{date} ({}): {}\n\n",
-                days_ago(l, date, today),
-                excerpt(content, cap),
-            );
-        }
+        Some((date, content)) if cap > 0 => format!(
+            "{}{date} ({}): {}\n\n",
+            mt::debrief_heading(l),
+            days_ago(l, date, today),
+            excerpt(content, cap),
+        ),
+        _ => String::new(),
     }
-    s
 }
 
-fn settings_section(
-    l: Lang,
-    cfg: &crate::config::UserConfig,
-    tz_label: &str,
-    features: crate::config::Features,
-    by_category: [i64; crate::memory::CATEGORIES.len()],
-    triggers: (u32, u32),
-    plan_factor: Option<crate::learn::Learned>,
-) -> String {
-    let (spent, allowance) = triggers;
-    let factor = plan_factor.map_or_else(
-        || mt::no_plan_factor(l).to_string(),
-        |f| mt::plan_factor(l, f.value, f.sample),
-    );
-    let memory_facts: i64 = by_category.iter().sum();
-    let split = crate::memory::CATEGORIES
+/// Drops rows another section already shows: wake-up changes, which the order
+/// and plan carry; order changes, while the order is shown; and a trigger's
+/// firing, once what it said or why it stayed quiet is there.
+fn without_restated(rows: Vec<(String, String, String)>, order_shown: bool) -> Vec<(String, String, String)> {
+    let event_of = |detail: &str| -> Option<String> {
+        let rest = detail.strip_prefix("event ")?;
+        let id = &rest[..rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len())];
+        (!id.is_empty()).then(|| id.to_string())
+    };
+    let answered: Vec<String> = rows
         .iter()
-        .zip(by_category)
-        .map(|(c, n)| format!("{n} {c}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    mt::settings(
-        l,
-        &mt::SettingsLine {
-            name: &cfg.display_name,
-            tz: tz_label,
-            nightly_time: &cfg.nightly_time,
-            template: &cfg.template,
-            counter: &cfg.counter,
-            nightly: features.nightly,
-            checkins: features.checkins,
-            facts: memory_facts,
-            split: &split,
-            factor: &factor,
-            spent,
-            allowance,
-        },
-    )
+        .filter(|(_, kind, _)| kind == "trigger_said" || kind == "trigger_quiet")
+        .filter_map(|(_, _, detail)| event_of(detail))
+        .collect();
+    rows.into_iter()
+        .filter(|(_, kind, detail)| match kind.as_str() {
+            "wake_change" => false,
+            "order_changed" => !order_shown,
+            "event_fired" => !event_of(detail).is_some_and(|id| answered.contains(&id)),
+            _ => true,
+        })
+        .collect()
 }
 
 fn activity_section(
@@ -730,11 +712,6 @@ fn activity_section(
     cap: usize,
 ) -> String {
     let mut s = String::from(mt::activity_heading(l));
-    if cap == 0 {
-        s.push_str(mt::trimmed(l));
-        s.push('\n');
-        return s;
-    }
     if rows.is_empty() {
         s.push_str(mt::none_line(l));
     }
@@ -769,7 +746,7 @@ fn recent_activity(conn: &Connection, user_id: i64) -> Result<Vec<(String, Strin
          WHERE user_id = ?1 AND kind NOT IN ({denied})
                AND kind NOT LIKE 'admin\\_%' ESCAPE '\\'
                AND kind NOT LIKE 'share\\_%' ESCAPE '\\'
-         ORDER BY id DESC LIMIT 10"
+         ORDER BY id DESC LIMIT 30"
     ))?;
     let rows: Vec<(String, String, String)> = stmt
         .query_map([user_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
@@ -964,11 +941,11 @@ mod tests {
         assert_eq!(
             lines,
             vec![
-                format!("- {new}: sat score lands friday"),
-                format!("- {old}: asked about the essay twice"),
-                format!("- {window}: dentist until four"),
+                format!("- {}: sat score lands friday", &new[..8]),
+                format!("- {}: asked about the essay twice", &old[..8]),
+                format!("- {}: dentist until four", &window[..8]),
                 "Coming up:".to_string(),
-                format!("- {soon}: swim meet (2026-09-01 00:00)"),
+                format!("- {}: swim meet (2026-09-01 00:00)", &soon[..8]),
             ]
         );
     }
@@ -1118,7 +1095,7 @@ mod tests {
         assert!(out.contains("(no standing context yet)"), "{out}");
         assert!(out.contains("(no plan generated for today)"), "{out}");
         assert!(out.contains("(no tasks)"), "{out}");
-        assert!(out.contains("(no debrief yet)"), "{out}");
+        assert!(!out.contains("# Latest debrief"), "{out}");
         assert!(out.contains("Day's plan: none generated for today"), "{out}");
     }
 
@@ -1195,6 +1172,47 @@ mod tests {
         assert!(out.contains("1 pending, 1 fired, 1 done, 1 dropped, 1 snoozed"), "{out}");
         assert!(out.contains("- 07:00-07:15 a [done] routine via push"), "{out}");
         assert!(out.contains("- 08:00-08:15 b [dropped] routine via push"), "{out}");
+    }
+
+    #[test]
+    fn only_waiting_triggers_are_listed_and_the_rest_are_counted() {
+        let tmp = cfg_dir();
+        let (conn, uid) = user();
+        plan_today(&conn, uid, vec![
+            routine("trigger", "07:00"), routine("trigger", "08:00"), routine("trigger", "22:00"),
+            routine("meds", "06:00"),
+        ]);
+        conn.execute("UPDATE events SET status = 'done' WHERE wall_time IN ('07:00', '06:00')", []).unwrap();
+        conn.execute("UPDATE events SET status = 'dropped' WHERE wall_time = '08:00'", []).unwrap();
+        let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
+        assert!(!out.contains("- 07:00-07:15 trigger"), "{out}");
+        assert!(!out.contains("- 08:00-08:15 trigger"), "{out}");
+        assert!(out.contains("- 22:00-22:15 trigger [pending]"), "{out}");
+        assert!(out.contains("- 06:00-06:15 meds [done]"), "{out}");
+        assert!(out.contains("1 pending, 0 fired, 2 done, 1 dropped, 0 snoozed"), "{out}");
+    }
+
+    #[test]
+    fn activity_leaves_out_what_the_order_and_the_triggers_already_say() {
+        let tmp = cfg_dir();
+        let (conn, uid) = user();
+        let t = task(&conn, uid, "essay", "open", None, false, None, NOW);
+        crate::order::set(&conn, uid, "2026-08-31".parse().unwrap(), &[t]).unwrap();
+        for (kind, detail) in [
+            ("wake_change", "event 4: order_drop {\"task_id\":9}"),
+            ("order_changed", "2026-08-31: 3"),
+            ("event_fired", "event 4 due 2026-08-31T11:00:00Z"),
+            ("trigger_said", "event 4: how is the essay going?"),
+            ("event_fired", "event 5 due 2026-08-31T11:30:00Z"),
+            ("talk_error", "x"),
+        ] {
+            crate::log::record(&conn, Some(uid), kind, detail).unwrap();
+        }
+        let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
+        let tail = &out[out.find("# Recent activity").unwrap()..];
+        assert!(!tail.contains("wake_change") && !tail.contains("order_changed"), "{tail}");
+        assert!(!tail.contains("event 4 due"), "{tail}");
+        assert!(tail.contains("event 5 due") && tail.contains("trigger_said") && tail.contains("talk_error"), "{tail}");
     }
 
     #[test]
@@ -1393,17 +1411,15 @@ mod tests {
     }
 
     #[test]
-    fn the_settings_line_names_what_shapes_advice() {
+    fn the_settings_name_the_user_and_the_days_allowance() {
         let tmp = cfg_dir();
         let (conn, uid) = user();
         let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
         assert!(
-            out.contains(
-                "X | Asia/Tokyo | nightly_time 03:00 | template default | counter remaining \
-                 | nightly on | checkins on"
-            ),
+            out.contains("# Settings\n\nUser: X\nTrigger points you may lay today: 0 of 12 used\n"),
             "{out}"
         );
+        assert!(!out.contains("template default"), "{out}");
     }
 
     #[test]
@@ -1544,22 +1560,8 @@ mod tests {
         let block = dynamic(&out);
         assert!(block.len() <= MAX_DYNAMIC_BYTES, "{} bytes", block.len());
         assert!(block.contains("Later: 120 open (titles trimmed for size)"), "{block}");
-        assert!(block.contains("(trimmed for size)"), "{block}");
+        assert!(!block.contains("# Latest debrief"), "{block}");
         assert!(block.contains("low energy after 21:00"), "{block}");
-    }
-
-    #[test]
-    fn the_settings_section_counts_the_searchable_memory() {
-        let tmp = cfg_dir();
-        let (conn, uid) = user();
-        let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
-        assert!(out.contains("Memory: 0 facts"), "{out}");
-
-        for summary in ["sister is called Rin", "hates phone calls"] {
-            crate::memory::add(&conn, tmp.path(), "aki", "semantic", summary, "body", None).unwrap();
-        }
-        let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
-        assert!(out.contains("Memory: 2 facts"), "{out}");
     }
 
     #[test]
@@ -1567,7 +1569,7 @@ mod tests {
         let tmp = cfg_dir();
         let (conn, uid) = user();
         let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
-        assert!(out.contains("no plan factor yet"), "{out}");
+        assert!(!out.contains("Plan factor"), "{out}");
 
         conn.execute(
             "INSERT INTO learning (user_id, key, value, sample, computed_at)
@@ -1612,6 +1614,6 @@ mod tests {
         assert!(!order.contains("item-12 "), "{order}");
         assert!(order.ends_with("- ... and 18 more"), "{order}");
         assert!(!order.contains(&"o".repeat(120)), "{order}");
-        assert!(block.contains("no plan factor yet"), "{block}");
+        assert!(block.contains("Trigger points you may lay today"), "{block}");
     }
 }

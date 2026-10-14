@@ -135,7 +135,7 @@ fn run_stages(
     if !due.is_empty() {
         opening.push_str(crate::model_text::notes_to_settle(lang));
         for n in &due {
-            let _ = writeln!(opening, "- {}: {}", n.id, n.title);
+            let _ = writeln!(opening, "- {}: {}", crate::notes::short(&n.id), n.title);
         }
     }
     let at = std::time::Instant::now();
@@ -834,9 +834,9 @@ mod tests {
 
         let opening = format!("{:?}", llm.seen()[0].messages.last().unwrap());
         for id in [&ended, &stale, &left] {
-            assert!(opening.contains(id.as_str()), "{opening}");
+            assert!(opening.contains(crate::notes::short(id)), "{opening}");
         }
-        assert!(!opening.contains(fresh.as_str()), "{opening}");
+        assert!(!opening.contains(crate::notes::short(&fresh)), "{opening}");
 
         let conn = db.lock().unwrap();
         let remaining: Vec<String> =

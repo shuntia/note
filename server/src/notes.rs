@@ -198,6 +198,33 @@ pub fn get(data_dir: &Path, user: &str, id: &str) -> Result<Option<Note>> {
         .map(Note::of))
 }
 
+/// How many leading characters of a note's id the model is shown and may give back.
+pub const SHORT_ID: usize = 8;
+
+pub fn short(id: &str) -> &str {
+    id.get(..SHORT_ID).unwrap_or(id)
+}
+
+/// The full id of the one live note `id` names: a whole id, or a prefix of at
+/// least `SHORT_ID` characters that matches exactly one note.
+pub fn resolve(conn: &Connection, data_dir: &Path, user: &str, id: &str) -> Result<String, NoteError> {
+    if memory::valid_id(id) {
+        return Ok(id.to_string());
+    }
+    let well_formed = id.len() >= SHORT_ID
+        && id.len() < 36
+        && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f' | b'-'));
+    if !well_formed {
+        return Err(NoteError::Invalid("malformed note id".into()));
+    }
+    let mut hits = all(conn, data_dir, user)?.into_iter().filter(|n| n.id.starts_with(id));
+    match (hits.next(), hits.next()) {
+        (Some(n), None) => Ok(n.id),
+        (None, _) => Err(NoteError::NotFound(id.into())),
+        (Some(_), Some(_)) => Err(NoteError::Invalid(format!("note id {id} matches more than one note; give more of it"))),
+    }
+}
+
 fn need(data_dir: &Path, user: &str, id: &str) -> Result<Note, NoteError> {
     get(data_dir, user, id)?.ok_or_else(|| NoteError::NotFound(id.into()))
 }
@@ -280,7 +307,8 @@ fn stamp_each(
     let at = stamp(now);
     let mut n = 0;
     for id in ids {
-        let Some(mut note) = get(data_dir, user, id)? else { continue };
+        let Ok(id) = resolve(conn, data_dir, user, id) else { continue };
+        let Some(mut note) = get(data_dir, user, &id)? else { continue };
         note.touched_at = Some(at.clone());
         if nudge {
             note.last_nudged_at = Some(at.clone());
@@ -559,5 +587,20 @@ mod tests {
         let kept = crate::memory::list(&conn, "aki", None, 10).unwrap();
         assert_eq!(kept.len(), 1);
         assert_eq!((kept[0].category.as_str(), kept[0].summary.as_str()), ("semantic", "asked about the essay twice"));
+    }
+
+    #[test]
+    fn a_short_id_names_one_note_and_an_ambiguous_one_names_none() {
+        let (conn, tmp) = env();
+        let mut twin = note(&conn, &tmp, "first", (None, None), "2026-10-07T00:00:00Z");
+        let solo = note(&conn, &tmp, "solo", (None, None), "2026-10-07T00:00:00Z");
+        assert_eq!(resolve(&conn, tmp.path(), "aki", short(&solo.id)).unwrap(), solo.id);
+        assert_eq!(resolve(&conn, tmp.path(), "aki", &solo.id).unwrap(), solo.id);
+
+        twin.id = format!("{}{}", short(&solo.id), &twin.id[SHORT_ID..]);
+        save(&conn, tmp.path(), "aki", &twin).unwrap();
+        assert!(matches!(resolve(&conn, tmp.path(), "aki", short(&solo.id)), Err(NoteError::Invalid(_))));
+        assert!(matches!(resolve(&conn, tmp.path(), "aki", "abc"), Err(NoteError::Invalid(_))));
+        assert!(matches!(resolve(&conn, tmp.path(), "aki", "00000000"), Err(NoteError::NotFound(_))));
     }
 }
