@@ -93,14 +93,6 @@
   text-underline-offset: 2px;
   cursor: pointer;
 }
-.set-badge {
-  align-self: flex-start;
-  border-radius: 999px;
-  padding: 1px 9px;
-  font-size: 0.68rem;
-  color: var(--sun-ink);
-  background: color-mix(in srgb, var(--sun-ink) 13%, transparent);
-}
 .set-prompt-rows { width: 100%; min-width: 0; margin: 0; padding: 0; border: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 0.625rem; }
 .set-prompt { resize: vertical; font-size: 0.8rem; line-height: 1.6; }
 .set-acts { display: flex; align-items: center; gap: 0.875rem; flex-wrap: wrap; }

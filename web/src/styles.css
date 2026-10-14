@@ -662,20 +662,6 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 
 .chat-main { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 0; }
 .chat-compose { display: flex; align-items: center; gap: 0.5rem; max-width: max(42.5rem, 34vw); margin: 0 auto; }
-.chat-toggle {
-  flex: none;
-  width: 2.75rem;
-  height: 2.75rem;
-  border: 0;
-  border-radius: 50%;
-  background: none;
-  color: var(--quiet);
-  font: inherit;
-  font-size: 1.3rem;
-  line-height: 1;
-  cursor: pointer;
-}
-.chat-toggle:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
 .chat-pane { flex: 1; min-height: 0; overflow-y: auto; padding: 3.5rem 1rem 0; }
 /* the rail is on the chat itself from here up, so the pane adds none of its own */
 @media (min-width: 768px) { .chat-pane { padding: 2.875rem 0 0; } }
@@ -1153,7 +1139,6 @@ textarea.mono { font-family: var(--mono); }
 .gauge-sub, .slot-sub { font-size: calc(12 * var(--u)); color: var(--faint); font-variant-numeric: tabular-nums; }
 /* the task a step belongs to, under its name */
 .gauge-of { font-size: calc(12.5 * var(--u)); color: var(--faint); line-height: 1.3; }
-.gauge-eyebrow { font-family: var(--display); font-size: calc(13.5 * var(--u)); font-weight: 500; letter-spacing: 0; text-transform: none; color: var(--sun-ink); margin-bottom: calc(6 * var(--u)); }
 
 .dayline { position: relative; height: 0; width: 100%; }
 .dl-line { position: absolute; left: 0; right: 0; top: 0; height: 1px; background: var(--line); }
@@ -1215,7 +1200,6 @@ textarea.mono { font-family: var(--mono); }
 /* the counter carries its own size; on a face the centre sets it */
 .gauge-num .now-counter { font-size: inherit; letter-spacing: inherit; }
 .home-head { display: flex; flex-direction: column; gap: 0.125rem; min-width: 0; flex: 1; }
-.home-head .gauge-eyebrow { margin-bottom: 0; }
 .home-head-name { font-family: var(--display); font-weight: 500; font-size: 1.0625rem; letter-spacing: -0.015em; color: var(--ink); }
 .home-sheet { display: flex; flex-direction: column; align-items: center; gap: 1.375rem; width: min(21.375rem, 88vw); margin-top: 2.5rem; }
 .home-today .jot-wrap { box-sizing: border-box; }
