@@ -54,7 +54,7 @@ socket = "/run/note/voice.sock"
 ```
 
 The call prompt is `prompts/voice.md`. Per-user settings: `ring_for`
-(`urgent`, `checkins`, `never`), `voice_voice`, `voice_cue` (the ready sound),
+(`urgent`, `checkins`, `never`), `voice_voice`, `voice_cue` (the heard sound),
 `language`.
 
 Routes (session cookie):
@@ -107,7 +107,7 @@ Configured by `note-voice.toml` (path in `NOTE_VOICE_CONFIG`, default
 | `models_dir` | speech models; default `NOTE_VOICE_MODELS` |
 | `models`, `language_id` | per-language model sets / language identifier replacing those found in `models_dir` |
 | `device` | `auto` (default), `cuda` or `cpu` |
-| `cues_dir`, `ready_cue_file`, `heard_cue_file` | call sounds; default `NOTE_VOICE_CUES` |
+| `cues_dir`, `heard_cue_file` | call sounds; default `NOTE_VOICE_CUES` |
 | `tts.sidecars` | `[{id, url}]`; an id prefixes its voice ids, so it is unique and has no `:` |
 | `tts.base` | language → sidecar id that is that language's base voice when no Kokoro covers it |
 
