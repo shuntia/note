@@ -254,6 +254,8 @@ export function Home({
   armed: boolean
 }) {
   const [day, setDay] = useState<DayView | null>(null)
+  // the queue's first task, for when the plan has nothing left; undefined until read
+  const [upNext, setUpNext] = useState<QueueEntry | null | undefined>(undefined)
   const [beat, tick] = useState(0)
   const [pending, setPending] = useState(false)
   const [left, setLeft] = useState(leftToday)
@@ -274,6 +276,10 @@ export function Home({
       .catch(() =>
         setDay({ date, events: [], calendar: [], free: [], quiet_now: null, history: [] }),
       )
+    api.candidates(1).then(
+      (items) => setUpNext(items[0] ?? null),
+      () => setUpNext(null),
+    )
   }, [newest])
   useEffect(load, [load, refresh])
   const events = day?.events ?? null
@@ -1316,8 +1322,14 @@ export function Home({
             <div className="today-bar" aria-hidden="true"><span className="today-bar-fill" style={{ width: `${waitFracAt(next)() * 100}%` }} /></div>
           </div>
         </>
+      ) : upNext ? (
+        <>
+          <div className="today-eyebrow">{t('face.next')}</div>
+          <h1 className="today-title">{upNext.step?.title ?? upNext.task.title}</h1>
+          {upNext.step && <p className="today-of">{upNext.task.title}</p>}
+        </>
       ) : (
-        events && <h1 className="today-title">{t('today.empty')}</h1>
+        events && upNext === null && <h1 className="today-title">{t('today.empty')}</h1>
       )}
     </section>
   )
