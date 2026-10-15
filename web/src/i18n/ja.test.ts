@@ -31,7 +31,7 @@ test('no Japanese string is empty', () => {
 test('t speaks Japanese once the locale is ja', () => {
   setLocale('ja')
   try {
-    expect(t('closeDay.open', { count: 3 })).toBe('まだ3個のブロックが残っています。')
+    expect(t('closeDay.open', { count: 3 })).toBe('未完了のブロック：3件')
     expect(fill(ja['tasks.stepsDone'], { done: 1, count: 4 })).toBe('4ステップ中1完了')
   } finally {
     setLocale('en')

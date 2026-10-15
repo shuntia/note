@@ -330,20 +330,20 @@ pub fn now_label(l: Lang) -> &'static str {
 }
 
 pub fn later_none(l: Lang) -> &'static str {
-    l.of("Later: (none)\n", "あとで: （なし）\n")
+    l.of("Later: (none)\n", "後で: （なし）\n")
 }
 
 pub fn later_trimmed(l: Lang, open: usize) -> String {
     match l {
         Lang::En => format!("Later: {open} open (titles trimmed for size)"),
-        Lang::Ja => format!("あとで: 未完了{open}件（長さのため件名は省略）"),
+        Lang::Ja => format!("後で: 未完了{open}件（長さのため件名は省略）"),
     }
 }
 
 pub fn later_label(l: Lang, open: usize) -> String {
     match l {
         Lang::En => format!("Later ({open} open):"),
-        Lang::Ja => format!("あとで（未完了{open}件）:"),
+        Lang::Ja => format!("後で（未完了{open}件）:"),
     }
 }
 

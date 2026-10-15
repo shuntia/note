@@ -131,7 +131,7 @@ impl SeenLangs {
 pub fn fallback_debrief(l: Lang) -> String {
     l.pick(
         "(Plan generated from your template. The assistant was unavailable overnight.)",
-        "（テンプレートから作った計画です。夜のあいだアシスタントが使えませんでした。）",
+        "テンプレートから作成した計画です。夜間にアシスタントを利用できませんでした。",
     )
 }
 
@@ -140,11 +140,11 @@ pub fn action_done(l: Lang) -> String {
 }
 
 pub fn action_snooze_15(l: Lang) -> String {
-    l.pick("Snooze 15", "15分後に")
+    l.pick("Snooze 15", "15分スヌーズ")
 }
 
 pub fn action_drop(l: Lang) -> String {
-    l.pick("Drop", "やめる")
+    l.pick("Drop", "中止")
 }
 
 pub fn action_start_session(l: Lang) -> String {
@@ -152,7 +152,7 @@ pub fn action_start_session(l: Lang) -> String {
 }
 
 pub fn action_carry_to_tomorrow(l: Lang) -> String {
-    l.pick("Carry to tomorrow", "明日に回す")
+    l.pick("Carry to tomorrow", "明日に延期")
 }
 
 pub fn checkin_title(l: Lang) -> String {
@@ -195,7 +195,7 @@ pub fn good_morning(l: Lang) -> String {
 }
 
 pub fn no_debrief(l: Lang) -> String {
-    l.pick("(no debrief yet)", "（まだ朝の手紙はありません）")
+    l.pick("(no debrief yet)", "朝の手紙はまだありません。")
 }
 
 /// The body of a fired event of a kind with nothing more specific to say.
@@ -207,7 +207,7 @@ pub fn scheduled_for(l: Lang, at: &str) -> String {
 }
 
 pub fn starting_now(l: Lang) -> String {
-    l.pick("Starting now", "開始の時間")
+    l.pick("Starting now", "開始時刻")
 }
 
 pub fn block_start_body(l: Lang, task: &str, until: &str) -> String {
@@ -221,7 +221,7 @@ pub fn block_start_body(l: Lang, task: &str, until: &str) -> String {
 pub fn block_start_line(l: Lang, task: &str, until: &str) -> String {
     match l {
         Lang::En => format!("Starting now: {task}, until {until}."),
-        Lang::Ja => format!("開始の時間です：{task}、{until}まで。"),
+        Lang::Ja => format!("開始時刻：{task}、{until}まで。"),
     }
 }
 
@@ -265,8 +265,8 @@ pub fn overrun_ended_body(l: Lang, task: &str, elapsed: i64, planned: i64) -> St
              Start it again when you are ready."
         ),
         Lang::Ja => format!(
-            "{task}は予定{planned}分のところ{elapsed}分続いたので、ここで終えます。\
-             準備ができたらまた始めてください。"
+            "{task}は予定{planned}分に対し{elapsed}分経過したため、終了しました。\
+             再開する場合は改めて開始してください。"
         ),
     }
 }
@@ -309,7 +309,7 @@ pub fn matrix_busy(l: Lang) -> String {
 }
 
 pub fn matrix_unreachable(l: Lang) -> String {
-    l.pick("Couldn't reach Note right now.", "今はNoteにつながりません。")
+    l.pick("Couldn't reach Note right now.", "Note に接続できません。")
 }
 
 /// Why a request failed, written: one short line with the fix where there is one.
@@ -322,26 +322,26 @@ pub fn failure_reason(l: Lang, reason: crate::failure::Reason) -> String {
         ),
         R::AuthInvalid => l.pick(
             "The AI service rejected the API key. Check the key.",
-            "AIサービスがAPIキーを受け付けません。キーを確認してください。",
+            "APIキーが拒否されました。キーを確認してください。",
         ),
         R::OutOfCredits => l.pick(
             "The AI service is out of credits or over its spend limit.",
-            "AIサービスのクレジットが足りないか、利用上限に達しています。",
+            "AIサービスのクレジット不足、または利用上限に到達しています。",
         ),
         R::RateLimited => l.pick(
             "The AI service is getting too many requests. Try again in a minute.",
-            "AIサービスへのリクエストが多すぎます。少し待ってからもう一度どうぞ。",
+            "AIサービスのリクエスト上限に達しました。時間をおいて再試行してください。",
         ),
         R::ProviderDown => l.pick(
             "The AI service isn't responding. Try again shortly.",
-            "AIサービスが応答していません。しばらくしてからもう一度どうぞ。",
+            "AIサービスが応答しません。時間をおいて再試行してください。",
         ),
         R::ContextTooLong => l.pick(
             "This conversation is too long for the model. Start a new one.",
-            "会話が長すぎてモデルが読み切れません。新しい会話を始めてください。",
+            "会話が長すぎます。新規会話を開始してください。",
         ),
-        R::Refused => l.pick("The AI service declined this request.", "AIサービスがこのリクエストを断りました。"),
-        R::Internal => l.pick("Something went wrong inside Note.", "Noteの内部でエラーが起きました。"),
+        R::Refused => l.pick("The AI service declined this request.", "AIサービスがリクエストを拒否しました。"),
+        R::Internal => l.pick("Something went wrong inside Note.", "Note 内部でエラーが発生しました。"),
     }
 }
 
@@ -359,7 +359,7 @@ pub fn failure_spoken(l: Lang, reason: crate::failure::Reason) -> String {
         ),
         R::OutOfCredits => l.pick(
             "Sorry, the AI service has run out of credits.",
-            "すみません、AIサービスのクレジットが切れているみたいです。",
+            "すみません、AIサービスのクレジットが切れています。",
         ),
         R::RateLimited => l.pick(
             "Sorry, the AI service is swamped; could you say that again in a moment?",
@@ -383,7 +383,7 @@ pub fn failure_spoken(l: Lang, reason: crate::failure::Reason) -> String {
 
 /// The title of a message telling the user that work in the background failed.
 pub fn failure_title(l: Lang) -> String {
-    l.pick("Note ran into a problem", "Noteで問題が起きました")
+    l.pick("Note ran into a problem", "Note でエラーが発生しました")
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -395,7 +395,7 @@ pub enum FactorChange {
 }
 
 pub fn factor_changed_title(l: Lang) -> String {
-    l.pick("Sign-in security changed", "サインインの設定が変わりました")
+    l.pick("Sign-in security changed", "サインイン設定が変更されました")
 }
 
 pub fn factor_changed(l: Lang, c: FactorChange) -> String {
@@ -407,7 +407,7 @@ pub fn factor_changed(l: Lang, c: FactorChange) -> String {
     };
     match l {
         Lang::En => format!("{en} If this wasn't you, change your password."),
-        Lang::Ja => format!("{ja}心当たりがなければパスワードを変更してください。"),
+        Lang::Ja => format!("{ja}身に覚えがない場合はパスワードを変更してください。"),
     }
 }
 
@@ -415,7 +415,7 @@ pub fn factor_changed(l: Lang, c: FactorChange) -> String {
 pub fn share_passed_on(l: Lang, owner: &str) -> String {
     match l {
         Lang::En => format!("Passed on to {owner}."),
-        Lang::Ja => format!("{owner}さんに伝えました。"),
+        Lang::Ja => format!("{owner}さんに送信しました。"),
     }
 }
 
@@ -429,7 +429,7 @@ pub fn share_note_from(l: Lang, share: &str) -> String {
 pub fn empty_reply(l: Lang) -> String {
     l.pick(
         "(the assistant is not configured on this server)",
-        "（このサーバーではアシスタントが設定されていません）",
+        "このサーバーにはアシスタントが設定されていません。",
     )
 }
 
@@ -446,25 +446,25 @@ pub fn test_notification(l: Lang) -> String {
 }
 
 pub fn err_no_channel(l: Lang) -> String {
-    l.pick("no channel could reach you", "どの方法でも届きませんでした")
+    l.pick("no channel could reach you", "すべての経路で送信に失敗しました")
 }
 
 pub fn err_calls_not_set_up(l: Lang) -> String {
-    l.pick("calls are not set up on this server", "このサーバーでは通話が使えません")
+    l.pick("calls are not set up on this server", "このサーバーは通話に非対応です")
 }
 
 pub fn err_link_matrix_first(l: Lang) -> String {
-    l.pick("link a Matrix account first", "先にMatrixアカウントをリンクしてください")
+    l.pick("link a Matrix account first", "先に Matrix アカウントを連携してください")
 }
 
 pub fn err_call_service_disconnected(l: Lang) -> String {
-    l.pick("the call service isn't connected", "通話サービスにつながっていません")
+    l.pick("the call service isn't connected", "通話サービスに未接続です")
 }
 
 pub fn err_call_service_unreachable(l: Lang) -> String {
     l.pick(
         "The call service isn't reachable right now. Try again in a minute.",
-        "今は通話サービスにつながりません。少ししてからもう一度どうぞ。",
+        "通話サービスに接続できません。時間をおいて再試行してください。",
     )
 }
 
@@ -481,7 +481,7 @@ pub fn err_session_in_progress(l: Lang) -> String {
 }
 
 pub fn err_at_capacity(l: Lang) -> String {
-    l.pick("the server is at capacity", "サーバーが混み合っています")
+    l.pick("the server is at capacity", "サーバーが混雑しています")
 }
 
 pub fn err_reply_in_progress(l: Lang) -> String {
@@ -491,23 +491,23 @@ pub fn err_reply_in_progress(l: Lang) -> String {
 pub fn err_share_rate(l: Lang) -> String {
     l.pick(
         "too many messages from this address; try again later",
-        "このアドレスからのメッセージが多すぎます。しばらくしてからどうぞ",
+        "このアドレスからのメッセージが上限を超えました。時間をおいて再試行してください",
     )
 }
 
 pub fn err_invite_gone(l: Lang) -> String {
-    l.pick("this invite is no longer open", "この招待はもう使えません")
+    l.pick("this invite is no longer open", "この招待は無効です")
 }
 
 pub fn err_invite_rate(l: Lang) -> String {
     l.pick(
         "too many tries from this address; try again later",
-        "このアドレスからの試行が多すぎます。しばらくしてからどうぞ",
+        "このアドレスからの試行が上限を超えました。時間をおいて再試行してください",
     )
 }
 
 pub fn err_join_taken(l: Lang) -> String {
-    l.pick("that username is taken", "そのユーザー名は使われています")
+    l.pick("that username is taken", "このユーザー名は使用済みです")
 }
 
 pub fn err_join_username(l: Lang) -> String {
@@ -525,7 +525,7 @@ pub fn err_join_password(l: Lang, min: usize) -> String {
 }
 
 pub fn err_share_no_thread(l: Lang) -> String {
-    l.pick("no such conversation", "その会話は見つかりません")
+    l.pick("no such conversation", "その会話は存在しません")
 }
 
 pub fn err_share_cap(l: Lang) -> String {
@@ -533,14 +533,14 @@ pub fn err_share_cap(l: Lang) -> String {
 }
 
 pub fn err_share_unavailable(l: Lang) -> String {
-    l.pick("Note could not answer", "Noteが応答できませんでした")
+    l.pick("Note could not answer", "Note の応答に失敗しました")
 }
 
 /// A reply cut off by the session's step limit.
 pub fn max_turns_reply(l: Lang) -> String {
     l.pick(
         "(I ran out of steps before finishing — ask again and I'll pick it up from here)",
-        "（終わる前に手順が尽きました。もう一度聞いてもらえれば、ここから続けます）",
+        "ステップ上限に達したため中断しました。再度送信すると続きから再開します。",
     )
 }
 
@@ -806,7 +806,7 @@ const ERRORS_JA: &[(&str, &str)] = &[
     ("cross-site request refused", "別のサイトからのリクエストは受け付けません"),
     ("no passkeys on this account", "このアカウントにはパスキーがありません"),
     ("no second factor on this account and no admin secret on this server", "このアカウントには二段階認証がなく、サーバーにも管理者用の秘密がありません"),
-    ("username is taken", "そのユーザー名は使われています"),
+    ("username is taken", "このユーザー名は使用済みです"),
     ("you can't change your own role or disable yourself", "自分の役割の変更や無効化はできません"),
     ("that would leave no enabled admin", "有効な管理者がいなくなってしまいます"),
     ("you can't reset another admin's password", "ほかの管理者のパスワードはリセットできません"),
