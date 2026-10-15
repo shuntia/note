@@ -280,6 +280,11 @@ export const api = {
     request<void>(`/api/conversations/${id}`, { method: 'DELETE' }),
   conversationMessages: (id: number) => request<TalkMessage[]>(`/api/conversations/${id}/messages`),
   talkLive: () => request<LiveTurn | null>('/api/talk/live'),
+  stopTalk: (conversationId: number) =>
+    request<void>('/api/talk/stop', {
+      method: 'POST',
+      body: JSON.stringify({ conversation_id: conversationId }),
+    }),
   talk: (message: string, conversationId?: number) =>
     request<TalkReply>('/api/talk', {
       method: 'POST',

@@ -42,6 +42,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/shares/{id}/visits", get(shares_visits))
         .route("/api/talk", post(talk))
         .route("/api/talk/live", get(talk_live))
+        .route("/api/talk/stop", post(talk_stop))
         .route("/api/conversations", get(conversations_list))
         .route("/api/triggers", get(triggers_log))
         .route(
@@ -1436,6 +1437,24 @@ async fn talk_live(user: CurrentUser, State(state): State<AppState>) -> impl Int
         [(axum::http::header::CONTENT_TYPE, "application/json")],
         state.live_turns.snapshot_json(user.id),
     )
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TalkStopReq {
+    conversation_id: i64,
+}
+
+async fn talk_stop(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Json(req): Json<TalkStopReq>,
+) -> StatusCode {
+    if state.live_turns.stop(user.id, req.conversation_id) {
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::NOT_FOUND
+    }
 }
 
 /// A turn the assistant could not finish: why, in the reader's language, and

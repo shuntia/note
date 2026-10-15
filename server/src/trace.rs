@@ -137,6 +137,11 @@ impl Builder {
         self.reply = clip(reply);
     }
 
+    pub fn stopped(&mut self, reply: &str) {
+        self.outcome = "stopped";
+        self.reply = clip(reply);
+    }
+
     pub fn failed(&mut self, error: &str) {
         self.outcome = "error";
         self.error = Some(error.to_string());

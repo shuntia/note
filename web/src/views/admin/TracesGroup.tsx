@@ -7,7 +7,7 @@ import type { TraceCall, TraceRow } from '../../types'
 import { Group } from '../../ui/rows'
 import { LOG_PAGE, stamp, type Expire } from './common'
 
-const OUTCOMES = ['ok', 'max_turns', 'error'] as const
+const OUTCOMES = ['ok', 'max_turns', 'stopped', 'error'] as const
 
 const unit = (n: number, name: string, digits = 0) =>
   format.number(n, {

@@ -544,6 +544,10 @@ pub fn max_turns_reply(l: Lang) -> String {
     )
 }
 
+pub fn stopped_reply(l: Lang) -> String {
+    l.pick("(Stopped)", "停止しました。")
+}
+
 pub fn call_title(l: Lang) -> String {
     l.pick("Call", "通話")
 }

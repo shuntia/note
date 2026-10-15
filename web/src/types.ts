@@ -369,7 +369,7 @@ export type AdminUser = {
 
 export type AdminLog = { rows: LogRow[]; kinds: string[] }
 
-export type TraceOutcome = 'ok' | 'max_turns' | 'error'
+export type TraceOutcome = 'ok' | 'max_turns' | 'stopped' | 'error'
 
 // Why the assistant could not finish a request; the server's `failure::Reason`.
 export type FailureReason =

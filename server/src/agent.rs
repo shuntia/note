@@ -5,6 +5,7 @@ use anyhow::Result;
 use rusqlite::Connection;
 use std::path::Path;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::fmt::Write as _;
 
 pub const MAX_TURNS: usize = 16;
@@ -235,10 +236,28 @@ pub fn run_session_watched(
     opening: &str,
     on_event: &dyn Fn(AgentEvent),
 ) -> Result<SessionOutcome> {
+    run_session_stoppable(deps, user_id, username, kind, now, history, opening, on_event, None)
+}
+
+/// `run_session_watched` that ends early once `stop` is set: before its next
+/// provider call or tool call, keeping every step already taken. A provider
+/// call in flight is waited out.
+#[allow(clippy::too_many_arguments)]
+pub fn run_session_stoppable(
+    deps: &SessionDeps,
+    user_id: i64,
+    username: &str,
+    kind: SessionKind,
+    now: jiff::Timestamp,
+    history: &[Message],
+    opening: &str,
+    on_event: &dyn Fn(AgentEvent),
+    stop: Option<&AtomicBool>,
+) -> Result<SessionOutcome> {
     let mut trace = crate::trace::Builder::new(kind, opening);
     let meter = crate::usage::Meter::open();
     let result =
-        run_traced(deps, user_id, username, kind, now, history, opening, on_event, &mut trace);
+        run_traced(deps, user_id, username, kind, now, history, opening, on_event, stop, &mut trace);
     if let Err(e) = &result {
         trace.failed(&format!("{e:#}"));
     }
@@ -410,6 +429,7 @@ fn run_traced(
     history: &[Message],
     opening: &str,
     on_event: &dyn Fn(AgentEvent),
+    stop: Option<&AtomicBool>,
     trace: &mut crate::trace::Builder,
 ) -> Result<SessionOutcome> {
     let (ucfg, lang) = reader(deps, username, kind);
@@ -440,7 +460,11 @@ fn run_traced(
     let started = std::time::Instant::now();
 
     let terminal = profile.decides.then(|| terminal_tool(kind)).flatten();
-    while turns < max_turns {
+    let stopped = || stop.is_some_and(|s| s.load(Ordering::Relaxed));
+    'rounds: while turns < max_turns {
+        if stopped() {
+            break;
+        }
         let must_call = terminal.map(|name| {
             if turns + 1 == max_turns || schemas.len() == 1 { MustCall::Tool(name) } else { MustCall::Any }
         });
@@ -484,6 +508,9 @@ fn run_traced(
         let calls = resp.tool_calls.clone();
         messages.push(Message::Assistant { text: last_text.clone(), tool_calls: resp.tool_calls });
         for call in calls {
+            if stopped() {
+                break 'rounds;
+            }
             if call.name == "batch" {
                 let (content, is_error) = run_batch(
                     &env,
@@ -518,12 +545,19 @@ fn run_traced(
             messages.push(Message::ToolResult { call_id: call.id, content, is_error });
         }
     }
-    if last_text.trim().is_empty() && profile.max_turns_reply {
-        last_text = crate::text::max_turns_reply(lang);
+    if stopped() {
+        last_text = crate::text::stopped_reply(lang);
+        on_event(AgentEvent::Reply { text: &last_text });
+        trace.stopped(&last_text);
+        finish(deps, user_id, kind, turns, tool_calls, profile.log_session)?;
+    } else {
+        if last_text.trim().is_empty() && profile.max_turns_reply {
+            last_text = crate::text::max_turns_reply(lang);
+        }
+        on_event(AgentEvent::Reply { text: &last_text });
+        trace.max_turns(&last_text);
+        finish(deps, user_id, kind, turns, tool_calls, profile.log_max_turns)?;
     }
-    on_event(AgentEvent::Reply { text: &last_text });
-    trace.max_turns(&last_text);
-    finish(deps, user_id, kind, turns, tool_calls, profile.log_max_turns)?;
     let thought_ms = started.elapsed().as_millis() as u64;
     Ok(SessionOutcome {
         reply: last_text,
@@ -1244,6 +1278,48 @@ mod tests {
             )
             .unwrap();
         assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn a_stopped_session_keeps_its_steps_and_makes_no_further_call() {
+        let (db, tmp) = env();
+        let resp = ChatResponse {
+            text: "looping".into(),
+            tool_calls: vec![ToolCall {
+                id: "c".into(),
+                name: "memory_query".into(),
+                args: r#"{"query":"x"}"#.into(),
+            }],
+        };
+        let llm = MockLLM::scripted(vec![resp; MAX_TURNS]);
+        let stop = AtomicBool::new(false);
+        let on_event = |ev: AgentEvent| {
+            if let AgentEvent::ToolResult { index: 1, .. } = ev {
+                stop.store(true, Ordering::Relaxed);
+            }
+        };
+        let out = run_session_stoppable(
+            &deps(&db, &tmp, &llm),
+            1,
+            "aki",
+            SessionKind::Talk,
+            now(),
+            &[],
+            "hi",
+            &on_event,
+            Some(&stop),
+        )
+        .unwrap();
+        assert_eq!(out.turns, 2);
+        assert_eq!(out.steps.len(), 2);
+        assert_eq!(llm.seen().len(), 2);
+        assert_eq!(out.reply, crate::text::stopped_reply(Lang::En));
+        let outcome: String = db
+            .lock()
+            .unwrap()
+            .query_row("SELECT outcome FROM agent_traces", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(outcome, "stopped");
     }
 
     #[test]

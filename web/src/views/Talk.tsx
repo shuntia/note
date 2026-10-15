@@ -495,6 +495,7 @@ export function Talk({
   const busy = pending === era.current || (watch !== null && watch === current)
   // the send in flight, for the frames arriving on the shell's socket
   const inFlight = useRef<{ conversation: number | null } | null>(null)
+  const liveId = busy ? (inFlight.current?.conversation ?? watch) : null
   const watching = useRef<number | null>(null)
   // frames for the thread being opened, held until its live turn has been read
   const early = useRef<AgentFrame[] | null>(null)
@@ -914,6 +915,15 @@ export function Talk({
     })
   }
 
+  const stop = async (id: number) => {
+    setSideNotice(null)
+    try {
+      await api.stopTalk(id)
+    } catch (err) {
+      if (!(err instanceof ApiError && err.status === 404)) setSideNotice(errorText(err))
+    }
+  }
+
   const toggleList = () => {
     if (!column) {
       setSideOpen((v) => !v)
@@ -1014,6 +1024,7 @@ export function Talk({
                     row=".chat-row"
                     label={t('talk.moreFor', { title: c.title })}
                     items={[
+                      ...(c.id === liveId ? [{ label: t('talk.stop'), run: () => void stop(c.id) }] : []),
                       {
                         label: t('talk.rename'),
                         run: () => setRenaming({ id: c.id, value: c.title, at: 'list' }),

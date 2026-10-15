@@ -802,6 +802,7 @@ export const en = {
   "call.unmute": "Unmute",
   "call.answer": "Answer",
   "talk.steps": "Note's steps",
+  "talk.stop": "Stop",
   "talk.tellNote": "Tell Note",
   "talk.thinking": "Note is thinking…",
   "talk.thinkingWith": "Note is thinking… · {step}",

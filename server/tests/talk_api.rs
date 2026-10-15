@@ -944,3 +944,87 @@ async fn a_turn_whose_thread_was_deleted_and_its_id_reused_leaves_the_new_owner_
         assert_eq!(kept, ["mine"], "fails: {fails}");
     }
 }
+
+/// Asks for another tool call every round, each round once `open` is sent to.
+struct LoopingLLM(std::sync::Mutex<std::sync::mpsc::Receiver<()>>);
+impl note_server::providers::LLMProvider for LoopingLLM {
+    fn chat(
+        &self,
+        _: &note_server::providers::ChatRequest,
+    ) -> anyhow::Result<note_server::providers::ChatResponse> {
+        self.0.lock().unwrap().recv()?;
+        Ok(ChatResponse {
+            text: String::new(),
+            tool_calls: vec![ToolCall {
+                id: "c".into(),
+                name: "memory_query".into(),
+                args: r#"{"query":"x"}"#.into(),
+            }],
+        })
+    }
+}
+
+async fn stop_status(app: &axum::Router, cookie: &str, conversation_id: i64) -> StatusCode {
+    app.clone()
+        .oneshot(
+            Request::post("/api/talk/stop")
+                .header(header::COOKIE, cookie)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::json!({ "conversation_id": conversation_id }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .status()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_looping_turn_stops_when_its_user_asks_and_keeps_the_thread() {
+    let (open, gate) = std::sync::mpsc::channel();
+    let llm = Arc::new(LoopingLLM(std::sync::Mutex::new(gate)));
+    let (app, cookie, state, _cfg) = common::app_with_logged_in_user_llm_and_state(llm).await;
+    {
+        let conn = state.db.lock().unwrap();
+        note_server::auth::create_user(&conn, "bo", "pw", false).unwrap();
+    }
+    let bo = common::login(&app, "bo", "pw").await;
+    let sending = {
+        let (app, cookie) = (app.clone(), cookie.clone());
+        tokio::spawn(async move {
+            app.oneshot(
+                Request::post("/api/talk")
+                    .header(header::COOKIE, &cookie)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"message":"loop"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        })
+    };
+    let mut live = serde_json::Value::Null;
+    for _ in 0..200 {
+        live = get_json(&app, &cookie, "/api/talk/live").await;
+        if !live.is_null() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let id = live["conversation_id"].as_i64().expect("the turn is live");
+    open.send(()).unwrap();
+    assert_eq!(stop_status(&app, &bo, id).await, StatusCode::NOT_FOUND);
+    assert_eq!(stop_status(&app, &cookie, id + 1).await, StatusCode::NOT_FOUND);
+    assert_eq!(stop_status(&app, &cookie, id).await, StatusCode::NO_CONTENT);
+    open.send(()).unwrap();
+
+    let res = sending.await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["reply"], "(Stopped)");
+    assert_eq!(stop_status(&app, &cookie, id).await, StatusCode::NOT_FOUND);
+    let rows = get_json(&app, &cookie, &format!("/api/conversations/{id}/messages")).await;
+    let roles: Vec<_> = rows.as_array().unwrap().iter().map(|r| r["role"].clone()).collect();
+    assert_eq!(roles.first().unwrap(), "user");
+    assert_eq!(roles.last().unwrap(), "assistant");
+}

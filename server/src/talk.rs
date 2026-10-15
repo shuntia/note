@@ -486,11 +486,23 @@ pub struct LiveTurns(std::sync::Mutex<std::collections::HashMap<i64, LiveTurn>>)
 struct LiveTurn {
     conversation_id: i64,
     frames: Vec<String>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl LiveTurns {
-    fn begin(&self, user_id: i64, conversation_id: i64) {
-        self.lock().insert(user_id, LiveTurn { conversation_id, frames: Vec::new() });
+    fn begin(&self, user_id: i64, conversation_id: i64, stop: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+        self.lock().insert(user_id, LiveTurn { conversation_id, frames: Vec::new(), stop });
+    }
+
+    /// Asks the user's turn in `conversation_id` to stop; false when no turn runs there.
+    pub fn stop(&self, user_id: i64, conversation_id: i64) -> bool {
+        match self.lock().get(&user_id) {
+            Some(turn) if turn.conversation_id == conversation_id => {
+                turn.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                true
+            }
+            _ => false,
+        }
     }
 
     fn record(&self, user_id: i64, frame: &str) {
@@ -645,7 +657,8 @@ pub async fn run_turn(
             touch(&conn, conv_id, now)?;
             (past, conv_id, user_row)
         };
-        st.live_turns.begin(user_id, conv_id);
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        st.live_turns.begin(user_id, conv_id, stop.clone());
         let _live = LiveGuard { state: &st, user_id, conversation_id: conv_id };
         st.hub.broadcast_changed(user_id);
         let seq = std::cell::Cell::new(0u64);
@@ -655,7 +668,7 @@ pub async fn run_turn(
             st.live_turns.record(user_id, &frame);
             st.hub.send(user_id, &frame);
         };
-        let out = match crate::agent::run_session_watched(
+        let out = match crate::agent::run_session_stoppable(
             &deps,
             user_id,
             &session_user,
@@ -664,6 +677,7 @@ pub async fn run_turn(
             &past,
             &said,
             &on_event,
+            Some(&stop),
         ) {
             Ok(out) => out,
             Err(e) => {
