@@ -246,11 +246,10 @@ pub fn assemble_from(
 
     let events = crate::plan::events_for(conn, user_id, today)?;
     let tasks = crate::tasks::list(conn, user_id)?;
-    let (now_tasks, later): (Vec<_>, Vec<_>) = tasks.iter().partition(|t| t.task.is_now);
-    let mut later: Vec<_> = later
-        .into_iter()
+    let (now_tasks, mut later): (Vec<_>, Vec<_>) = tasks
+        .iter()
         .filter(|t| t.task.state == "open" || t.task.state == "in_progress")
-        .collect();
+        .partition(|t| t.task.is_now);
     // the nearest deadline first, then the newest of what carries none
     later.sort_by(|a, b| match (&a.task.due_at, &b.task.due_at) {
         (Some(x), Some(y)) => x.cmp(y),
@@ -394,7 +393,7 @@ fn calendar_lines(l: Lang, calendar: &[crate::calendar::Occurrence]) -> String {
         let _ = writeln!(s, "- {}-{} {} [{marks}]", o.start, o.end, o.title);
     }
     if let Some(rest) = calendar.len().checked_sub(MAX_CALENDAR_LINES).filter(|n| *n > 0) {
-        let _ = writeln!(s, "- {}", mt::more_in_parens(l, rest));
+        let _ = writeln!(s, "- {}", mt::more_calendar(l, rest));
     }
     s.push('\n');
     s
@@ -522,13 +521,25 @@ fn due(
     if at < now {
         return mt::overdue(l).into();
     }
-    let day = at.to_zoned(tz.clone()).date();
-    match day.since(today).ok().map(|s| s.get_days()) {
-        Some(0) => mt::due_today(l).into(),
-        Some(1) => mt::due_tomorrow(l).into(),
-        _ => mt::due_on(l, day),
+    let local = at.to_zoned(tz.clone());
+    let clock = local.strftime("%H:%M").to_string();
+    match local.date().since(today).ok().map(|s| s.get_days()) {
+        Some(0) => mt::due_today(l, &clock),
+        Some(1) => mt::due_tomorrow(l, &clock),
+        _ => mt::due_on(l, local.date()),
     }
 }
+
+/// Overdue, or due before the end of tomorrow: work due tomorrow may be due at
+/// a class in the morning, so it is listed however short the Later list runs.
+fn pressing(task: &crate::tasks::Task, tz: &jiff::tz::TimeZone, today: jiff::civil::Date) -> bool {
+    let Some(at) = task.due_at.as_deref().and_then(|d| d.parse::<jiff::Timestamp>().ok()) else {
+        return false;
+    };
+    at.to_zoned(tz.clone()).date() <= today.tomorrow().unwrap_or(today)
+}
+
+const PRESSING_CAP: usize = 20;
 
 /// Tasks with a deadline inside the next three days, and tasks already past
 /// theirs.
@@ -564,8 +575,9 @@ fn tasks_section(
     now: jiff::Timestamp,
 ) -> String {
     let mut s = String::from(mt::tasks_heading(l));
-    if now_tasks.is_empty() && later.is_empty() && done_today == 0 {
+    if now_tasks.is_empty() && later.is_empty() {
         s.push_str(mt::no_tasks(l));
+        s.push_str(&mt::finished_not_listed(l, done_today));
         return s;
     }
     if now_tasks.is_empty() {
@@ -583,12 +595,8 @@ fn tasks_section(
                 due(l, &n.task, tz, today, now),
                 n.task.id,
             );
-            for c in &n.children {
-                let mark = match c.state.as_str() {
-                    "done" => 'x',
-                    "in_progress" => '~',
-                    _ => ' ',
-                };
+            for c in n.children.iter().filter(|c| c.state != "done") {
+                let mark = if c.state == "in_progress" { '~' } else { ' ' };
                 let _ = writeln!(
                     s,
                     "  - [{mark}] {}{}{} (task_id {})",
@@ -602,9 +610,9 @@ fn tasks_section(
     }
     if later.is_empty() {
         s.push_str(mt::later_none(l));
-    } else if cap == 0 {
-        let _ = writeln!(s, "{}", mt::later_trimmed(l, later.len()));
     } else {
+        let urgent = later.iter().take_while(|t| pressing(&t.task, tz, today)).count();
+        let cap = cap.max(urgent.min(PRESSING_CAP));
         let _ = writeln!(s, "{}", mt::later_label(l, later.len()));
         for t in later.iter().take(cap) {
             let _ = writeln!(
@@ -626,7 +634,7 @@ fn tasks_section(
     if soon > 0 || overdue > 0 {
         let _ = writeln!(s, "{}", mt::due_soon(l, soon, DUE_SOON_DAYS, overdue));
     }
-    s.push_str(&mt::done_today(l, done_today));
+    s.push_str(&mt::finished_not_listed(l, done_today));
     s
 }
 
@@ -723,7 +731,7 @@ fn working_section(
 fn debrief_section(l: Lang, row: Option<&(String, String)>, today: jiff::civil::Date, cap: usize) -> String {
     match row {
         Some((date, content)) if cap > 0 => format!(
-            "{}{date} ({}): {}\n\n",
+            "{}{date}, {}: {}\n\n",
             mt::debrief_heading(l),
             days_ago(l, date, today),
             excerpt(content, cap),
@@ -1065,7 +1073,7 @@ mod tests {
         commitment(&conn, uid, "swim practice", "20:00", "22:00", "fixed", true);
 
         let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
-        assert!(out.contains("Quiet until 22:00 (swim practice)"), "{out}");
+        assert!(out.contains("Quiet until 22:00: swim practice"), "{out}");
     }
 
     #[test]
@@ -1107,7 +1115,7 @@ mod tests {
         }
         let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
         assert_eq!(out.matches("class ").count(), MAX_CALENDAR_LINES);
-        assert!(out.contains("- (+3 more)"), "{out}");
+        assert!(out.contains("- +3 more\n"), "{out}");
     }
 
     #[test]
@@ -1131,7 +1139,7 @@ mod tests {
             out.contains(&format!("- 09:30-12:30 Work time [pending] block (event_id {block})")),
             "{out}"
         );
-        assert!(out.contains("- 08:00-08:15 meds [pending] routine via push (silent)"), "{out}");
+        assert!(out.contains("- 08:00-08:15 meds [pending] routine via push, silent"), "{out}");
     }
 
     #[test]
@@ -1139,7 +1147,7 @@ mod tests {
         let tmp = cfg_dir_tz("Not/AZone");
         let (conn, uid) = user();
         let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
-        assert!(out.contains("UTC (configured timezone invalid)"), "{out}");
+        assert!(out.contains("UTC, the configured timezone is invalid"), "{out}");
         assert!(!out.contains("Not/AZone"), "{out}");
     }
 
@@ -1148,9 +1156,9 @@ mod tests {
         let tmp = cfg_dir();
         let (conn, uid) = user();
         let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
-        assert!(out.contains("(no standing context yet)"), "{out}");
-        assert!(out.contains("(no plan generated for today)"), "{out}");
-        assert!(out.contains("(no tasks)"), "{out}");
+        assert!(out.contains("# Standing context\n\nNone yet."), "{out}");
+        assert!(out.contains("No plan generated for today."), "{out}");
+        assert!(out.contains("None open."), "{out}");
         assert!(!out.contains("# Latest debrief"), "{out}");
         assert!(out.contains("Day's plan: none generated for today"), "{out}");
     }
@@ -1302,7 +1310,7 @@ mod tests {
         task(&conn, uid, "draft", "open", Some(60), false, Some(t), NOW);
         let out = without_task_ids(&assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap());
         assert!(out.contains("Now:\n- Write the essay [in_progress] 90m\n"), "{out}");
-        assert!(out.contains("  - [x] outline 30m\n"), "{out}");
+        assert!(!out.contains("outline"), "{out}");
         assert!(out.contains("  - [ ] draft 60m\n"), "{out}");
         assert!(!out.contains("description"), "{out}");
     }
@@ -1337,10 +1345,10 @@ mod tests {
         task(&conn, uid, "loose", "open", None, false, None, NOW);
 
         let out = without_task_ids(&assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap());
-        assert!(out.contains("Now:\n- essay [open] due today\n"), "{out}");
+        assert!(out.contains("Now:\n- essay [open] due today 23:00\n"), "{out}");
         assert!(
             out.contains(
-                "Later (4 open):\n- quiz overdue\n- lab due tomorrow\n\
+                "Later: 4 open\n- quiz overdue\n- lab due tomorrow 19:00\n\
                  - reading due 2026-09-05\n- loose\n"
             ),
             "{out}"
@@ -1393,12 +1401,12 @@ mod tests {
             task(&conn, uid, &format!("later-{i:02}"), "open", Some(15), false, None, NOW);
         }
         let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
-        assert!(out.contains("Later (12 open):"), "{out}");
+        assert!(out.contains("Later: 12 open\n"), "{out}");
         assert!(out.contains("- later-12 15m"), "{out}");
         assert!(out.contains("- later-03 15m"), "{out}");
         assert!(!out.contains("later-02"), "{out}");
         assert!(out.contains("and 2 more"), "{out}");
-        assert!(out.contains("Now: (none)"), "{out}");
+        assert!(out.contains("Now: none"), "{out}");
     }
 
     #[test]
@@ -1425,7 +1433,7 @@ mod tests {
         )
         .unwrap();
         let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
-        assert!(out.contains("2026-08-30 (yesterday):"), "{out}");
+        assert!(out.contains("2026-08-30, yesterday:"), "{out}");
         assert!(out.contains(&"d".repeat(600)), "{out}");
         assert!(!out.contains(&"d".repeat(601)), "{out}");
         assert!(!out.contains("NEEDLE"), "{out}");
@@ -1436,13 +1444,13 @@ mod tests {
         let tmp = cfg_dir();
         let (conn, uid) = user();
         let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
-        assert!(out.contains("Tomorrow's plan (2026-09-01): not generated yet"), "{out}");
+        assert!(out.contains("Tomorrow's plan, 2026-09-01: not generated yet"), "{out}");
 
         let tmpl = crate::templates::Template { events: vec![routine("meds", "08:00")] };
         let date: jiff::civil::Date = "2026-09-01".parse().unwrap();
         crate::plan::generate(&conn, uid, &tmpl, date).unwrap();
         let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
-        assert!(out.contains("Tomorrow's plan (2026-09-01): generated"), "{out}");
+        assert!(out.contains("Tomorrow's plan, 2026-09-01: generated"), "{out}");
     }
 
     #[test]
@@ -1569,7 +1577,7 @@ mod tests {
         let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
         let standing = out.find("# Standing context").expect("a standing section");
         let header = out
-            .find("# Notes from last night (written 2026-08-30, yesterday)")
+            .find("# Notes from last night 2026-08-30, yesterday")
             .unwrap_or_else(|| panic!("{out}"));
         let now = out.find("# Now").expect("a Now section");
         assert!(standing < header && header < now, "{out}");
@@ -1589,7 +1597,7 @@ mod tests {
         let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
         let standing = out.find("# Standing context").unwrap();
         let strategy = out
-            .find("# Strategy (after the week of 2026-08-24)\n\nEssay first; mornings hold the deep work.\n")
+            .find("# Strategy, after the week of 2026-08-24\n\nEssay first; mornings hold the deep work.\n")
             .unwrap_or_else(|| panic!("{out}"));
         let notes = out.find("# Notes from last night").unwrap();
         assert!(standing < strategy && strategy < notes, "{out}");
@@ -1622,14 +1630,14 @@ mod tests {
         notes(&tmp, "2026-08-28", "the essay is the one that matters");
         let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
         assert!(
-            out.contains("# Notes from last night (written 2026-08-28, 3 days ago)"),
+            out.contains("# Notes from last night 2026-08-28, 3 days ago"),
             "{out}"
         );
 
         notes(&tmp, "2026-08-27", "the essay is the one that matters");
         let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
         assert!(
-            out.contains("# (stale) Notes from last night (written 2026-08-27, 4 days ago)"),
+            out.contains("# Stale nightly notes 2026-08-27, 4 days ago"),
             "{out}"
         );
         assert!(out.contains("the essay is the one that matters"), "{out}");
@@ -1656,7 +1664,7 @@ mod tests {
         let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
         let block = dynamic(&out);
         assert!(block.len() <= MAX_DYNAMIC_BYTES, "{} bytes", block.len());
-        assert!(block.contains("Later: 120 open (titles trimmed for size)"), "{block}");
+        assert!(block.contains("Later: 120 open\n"), "{block}");
         assert!(!block.contains("# Latest debrief"), "{block}");
         assert!(block.contains("low energy after 21:00"), "{block}");
     }
@@ -1686,7 +1694,7 @@ mod tests {
         let outline = task(&conn, uid, "outline", "open", None, false, Some(essay), "2026-08-30T00:00:00Z");
         let laundry = task(&conn, uid, "laundry", "open", None, false, None, "2026-08-30T00:00:00Z");
         let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
-        assert!(out.contains("# Today's order\n\n(empty"), "{out}");
+        assert!(out.contains("# Today's order\n\nEmpty."), "{out}");
         crate::order::set(&conn, uid, "2026-08-31".parse().unwrap(), &[outline, laundry]).unwrap();
         let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
         assert!(

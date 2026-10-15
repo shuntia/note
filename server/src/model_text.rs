@@ -85,11 +85,11 @@ pub fn share_note_line(l: Lang, owner: &str) -> String {
 // --- the context block ---
 
 pub fn timezone_invalid(l: Lang) -> &'static str {
-    l.of("UTC (configured timezone invalid)", "UTC（設定のタイムゾーンが無効）")
+    l.of("UTC, the configured timezone is invalid", "UTC、設定のタイムゾーンが無効")
 }
 
 pub fn no_standing(l: Lang) -> &'static str {
-    l.of("(no standing context yet)", "（常設コンテキストはまだありません）")
+    l.of("None yet.", "まだありません。")
 }
 
 pub fn standing_heading(l: Lang) -> &'static str {
@@ -98,8 +98,8 @@ pub fn standing_heading(l: Lang) -> &'static str {
 
 pub fn strategy_heading(l: Lang, week: &str) -> String {
     match l {
-        Lang::En => format!("# Strategy (after the week of {week})"),
-        Lang::Ja => format!("# 戦略（{week}の週のあと）"),
+        Lang::En => format!("# Strategy, after the week of {week}"),
+        Lang::Ja => format!("# 戦略、{week}の週のあと"),
     }
 }
 
@@ -171,14 +171,14 @@ pub fn day_plan(l: Lang, first: &str, last: &str, now: &str, left: usize) -> Str
 pub fn nightly_run_in(l: Lang, at: &str, until: &str) -> String {
     match l {
         Lang::En => format!("Nightly run {at}, in {until}"),
-        Lang::Ja => format!("夜の処理 {at}（あと{until}）"),
+        Lang::Ja => format!("夜の処理 {at}、あと{until}"),
     }
 }
 
 pub fn quiet_until(l: Lang, end: &str, title: &str) -> String {
     match l {
-        Lang::En => format!("Quiet until {end} ({title})"),
-        Lang::Ja => format!("{end}まで静かに（{title}）"),
+        Lang::En => format!("Quiet until {end}: {title}"),
+        Lang::Ja => format!("{end}まで静かに: {title}"),
     }
 }
 
@@ -190,10 +190,10 @@ pub fn quiet_mark(l: Lang) -> &'static str {
     l.of("quiet", "静か")
 }
 
-pub fn more_in_parens(l: Lang, rest: usize) -> String {
+pub fn more_calendar(l: Lang, rest: usize) -> String {
     match l {
-        Lang::En => format!("(+{rest} more)"),
-        Lang::Ja => format!("（ほか{rest}件）"),
+        Lang::En => format!("+{rest} more"),
+        Lang::Ja => format!("ほか{rest}件"),
     }
 }
 
@@ -202,7 +202,7 @@ pub fn plan_heading(l: Lang) -> &'static str {
 }
 
 pub fn no_plan_today(l: Lang) -> &'static str {
-    l.of("(no plan generated for today)\n", "（今日の予定はまだ作られていません）\n")
+    l.of("No plan generated for today.\n", "今日の予定はまだ作られていません。\n")
 }
 
 pub fn mark_now(l: Lang) -> &'static str {
@@ -216,7 +216,7 @@ pub fn mark_next(l: Lang) -> &'static str {
 pub fn next_in(l: Lang, at: &str, kind: &str, after: &str) -> String {
     match l {
         Lang::En => format!("Next: {at} {kind}, in {after}"),
-        Lang::Ja => format!("次: {at} {kind}（あと{after}）"),
+        Lang::Ja => format!("次: {at} {kind}、あと{after}"),
     }
 }
 
@@ -227,12 +227,12 @@ pub fn block_word(l: Lang) -> &'static str {
 pub fn routine_via(l: Lang, channel: &str) -> String {
     match l {
         Lang::En => format!("routine via {channel}"),
-        Lang::Ja => format!("ルーティン（{channel}）"),
+        Lang::Ja => format!("ルーティン {channel}"),
     }
 }
 
 pub fn silent(l: Lang) -> &'static str {
-    l.of(" (silent)", "（無音）")
+    l.of(", silent", "、無音")
 }
 
 pub fn status_counts(l: Lang, n: [usize; 5]) -> String {
@@ -253,19 +253,19 @@ pub fn triggers_tomorrow(l: Lang) -> &'static str {
 
 pub fn triggers_later(l: Lang, n: usize, date: &str, at: &str) -> String {
     match l {
-        Lang::En => format!("Later triggers: {n}, the next on {date} at {at} (plan_list that day to see them)"),
-        Lang::Ja => format!("それ以降のトリガー: {n}件、次は{date} {at}（その日を plan_list で確認）"),
+        Lang::En => format!("Later triggers: {n}, the next on {date} at {at}"),
+        Lang::Ja => format!("それ以降のトリガー: {n}件、次は{date} {at}"),
     }
 }
 
 pub fn tomorrow_plan(l: Lang, tomorrow: jiff::civil::Date, generated: bool) -> String {
     match l {
         Lang::En => format!(
-            "Tomorrow's plan ({tomorrow}): {}\n\n",
+            "Tomorrow's plan, {tomorrow}: {}\n\n",
             if generated { "generated" } else { "not generated yet" }
         ),
         Lang::Ja => format!(
-            "明日の予定（{tomorrow}）: {}\n\n",
+            "明日の予定、{tomorrow}: {}\n\n",
             if generated { "作成済み" } else { "未作成" }
         ),
     }
@@ -290,12 +290,18 @@ pub fn overdue(l: Lang) -> &'static str {
     l.of(" overdue", " 期限切れ")
 }
 
-pub fn due_today(l: Lang) -> &'static str {
-    l.of(" due today", " 今日まで")
+pub fn due_today(l: Lang, at: &str) -> String {
+    match l {
+        Lang::En => format!(" due today {at}"),
+        Lang::Ja => format!(" 今日{at}まで"),
+    }
 }
 
-pub fn due_tomorrow(l: Lang) -> &'static str {
-    l.of(" due tomorrow", " 明日まで")
+pub fn due_tomorrow(l: Lang, at: &str) -> String {
+    match l {
+        Lang::En => format!(" due tomorrow {at}"),
+        Lang::Ja => format!(" 明日{at}まで"),
+    }
 }
 
 pub fn due_on(l: Lang, day: jiff::civil::Date) -> String {
@@ -314,15 +320,15 @@ pub fn order_heading(l: Lang) -> &'static str {
 }
 
 pub fn order_empty(l: Lang) -> &'static str {
-    l.of("(empty — Now falls back to the queue)\n\n", "（空 — 「今すぐ」はキューから選ぶ）\n\n")
+    l.of("Empty.\n\n", "空。\n\n")
 }
 
 pub fn no_tasks(l: Lang) -> &'static str {
-    l.of("(no tasks)\n\n", "（タスクなし）\n\n")
+    l.of("None open.\n\n", "未完了なし。\n\n")
 }
 
 pub fn now_none(l: Lang) -> &'static str {
-    l.of("Now: (none)\n", "今すぐ: （なし）\n")
+    l.of("Now: none\n", "今すぐ: なし\n")
 }
 
 pub fn now_label(l: Lang) -> &'static str {
@@ -330,20 +336,13 @@ pub fn now_label(l: Lang) -> &'static str {
 }
 
 pub fn later_none(l: Lang) -> &'static str {
-    l.of("Later: (none)\n", "後で: （なし）\n")
-}
-
-pub fn later_trimmed(l: Lang, open: usize) -> String {
-    match l {
-        Lang::En => format!("Later: {open} open (titles trimmed for size)"),
-        Lang::Ja => format!("後で: 未完了{open}件（長さのため件名は省略）"),
-    }
+    l.of("Later: none\n", "後で: なし\n")
 }
 
 pub fn later_label(l: Lang, open: usize) -> String {
     match l {
-        Lang::En => format!("Later ({open} open):"),
-        Lang::Ja => format!("後で（未完了{open}件）:"),
+        Lang::En => format!("Later: {open} open"),
+        Lang::Ja => format!("後で: 未完了{open}件"),
     }
 }
 
@@ -361,10 +360,10 @@ pub fn due_soon(l: Lang, soon: usize, days: i64, overdue: usize) -> String {
     }
 }
 
-pub fn done_today(l: Lang, n: i64) -> String {
+pub fn finished_not_listed(l: Lang, done_today: i64) -> String {
     match l {
-        Lang::En => format!("Done today: {n}\n\n"),
-        Lang::Ja => format!("今日の完了: {n}件\n\n"),
+        Lang::En => format!("Finished tasks are not listed. Done today: {done_today}\n\n"),
+        Lang::Ja => format!("完了したタスクは載せていません。今日の完了: {done_today}件\n\n"),
     }
 }
 
@@ -383,18 +382,15 @@ pub fn days_ago(l: Lang, days: Option<i32>) -> String {
 pub fn notes_heading(l: Lang, stale: bool, date: &str, ago: &str) -> String {
     match l {
         Lang::En => format!(
-            "# {}Notes from last night (written {date}, {ago})",
-            if stale { "(stale) " } else { "" }
+            "# {} {date}, {ago}",
+            if stale { "Stale nightly notes" } else { "Notes from last night" }
         ),
-        Lang::Ja => format!("# {}昨夜のメモ（{date}、{ago}に作成）", if stale { "（古い）" } else { "" }),
+        Lang::Ja => format!("# {} {date}、{ago}", if stale { "古い夜のメモ" } else { "昨夜のメモ" }),
     }
 }
 
 pub fn working_memory_heading(l: Lang) -> &'static str {
-    l.of(
-        "# Working memory (note_write; the user does not see it)\n\n",
-        "# 作業メモ（note_write。ユーザーには見えません）\n\n",
-    )
+    l.of("# Working memory\n\n", "# 作業メモ\n\n")
 }
 
 pub fn coming_up(l: Lang) -> &'static str {
@@ -408,7 +404,7 @@ pub fn debrief_heading(l: Lang) -> &'static str {
 pub fn plan_factor(l: Lang, value: f64, sample: i64) -> String {
     match l {
         Lang::En => format!("Plan factor: {value:.1}× from {sample} session{}\n", plural(sample)),
-        Lang::Ja => format!("計画係数: {value:.1}×（{sample}セッションから）\n"),
+        Lang::Ja => format!("計画係数: {value:.1}×、{sample}セッションから\n"),
     }
 }
 
@@ -430,7 +426,7 @@ pub fn activity_heading(l: Lang) -> &'static str {
 }
 
 pub fn none_line(l: Lang) -> &'static str {
-    l.of("(none)\n", "（なし）\n")
+    l.of("None.\n", "なし。\n")
 }
 
 // --- a thread's own context ---
