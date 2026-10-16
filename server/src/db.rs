@@ -458,6 +458,8 @@ const BASELINE: &str = "
 const MIGRATIONS: &[&str] = &[
     "DROP TABLE harvests; DROP TABLE reviews;",
     "ALTER TABLE plans ADD COLUMN bare INTEGER NOT NULL DEFAULT 0;",
+    "ALTER TABLE tasks ADD COLUMN due_on TEXT CHECK (due_on IS NULL OR due_at IS NOT NULL);
+     ALTER TABLE goals ADD COLUMN due_on TEXT CHECK (due_on IS NULL OR due_at IS NOT NULL);",
 ];
 
 pub fn server_setting(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {

@@ -57,6 +57,11 @@ async fn a_goal_is_made_listed_patched_and_deleted() {
     assert_eq!(patched["title"], "get in early");
     assert!(patched["due_at"].is_null());
 
+    let (_, patched) =
+        call(&app, &cookie, Method::PATCH, &format!("/api/goals/{id}"), Some(r#"{"due_on":"2026-11-01"}"#)).await;
+    assert_eq!(patched["due_on"], "2026-11-01");
+    assert_eq!(patched["due_at"], "2026-11-01T23:59:00Z");
+
     let (status, _) =
         call(&app, &cookie, Method::DELETE, &format!("/api/goals/{id}"), None).await;
     assert_eq!(status, StatusCode::NO_CONTENT);

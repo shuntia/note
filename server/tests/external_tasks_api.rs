@@ -117,6 +117,22 @@ async fn an_upsert_creates_once_and_updates_after() {
 }
 
 #[tokio::test]
+async fn an_upsert_moves_between_a_whole_day_and_a_moment() {
+    let (app, _cookie, token, _theirs, _cfg) = importer().await;
+    let put = async |body: &str| with_bearer(&app, &token, Method::PUT, CANVAS, Some(body)).await;
+    let (status, made) = put(r#"{"title":"Biology ch.4","due_on":"2026-09-19"}"#).await;
+    assert_eq!(status, StatusCode::CREATED, "{made}");
+    assert_eq!(made["due_on"], "2026-09-19");
+
+    let (_, again) = put(r#"{"title":"Biology ch.4","due_at":"2026-09-19T08:00:00Z"}"#).await;
+    assert_eq!(again["due_at"], "2026-09-19T08:00:00Z");
+    assert!(again["due_on"].is_null());
+
+    let (_, again) = put(r#"{"title":"Biology ch.4"}"#).await;
+    assert_eq!(again["due_at"], "2026-09-19T08:00:00Z", "an absent due is left alone");
+}
+
+#[tokio::test]
 async fn an_upsert_leaves_the_agents_work_and_the_users_decision_alone() {
     let (app, cookie, token, _theirs, _cfg) = importer().await;
     let (_, made) =

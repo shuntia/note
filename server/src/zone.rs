@@ -45,8 +45,9 @@ struct Pending {
 /// furniture so it fires at the same instant under `to` as it would have under
 /// `from`, moving it to the plan of the date it now falls on. Template events
 /// keep their civil time, and anything already due is left for the runner. A
-/// block the move would carry past midnight ends at 23:59. Returns how many
-/// events moved.
+/// block the move would carry past midnight ends at 23:59. Whole-day dues stay
+/// on their day and end where it ends under `to`. Returns how many events
+/// moved.
 pub fn rezone(
     conn: &Connection,
     config_dir: &Path,
@@ -98,6 +99,7 @@ pub fn rezone(
         )?;
         moved += 1;
     }
+    crate::due::rezone(conn, user_id, &new)?;
     crate::log::record(
         conn,
         Some(user_id),
@@ -209,5 +211,35 @@ mod tests {
         let (date, wall) = translate("2026-10-12".parse().unwrap(), "11:00", &tokyo, &la).unwrap();
         assert_eq!((date.to_string(), wall.as_str()), ("2026-10-11".into(), "19:00"));
         assert!(translate("2026-10-12".parse().unwrap(), "9:00", &tokyo, &la).is_none());
+    }
+
+    #[test]
+    fn a_whole_day_stays_on_its_day_and_a_moment_keeps_its_instant() {
+        let (conn, tmp, uid) = env();
+        let la = named("America/Los_Angeles");
+        let new = |due: &str, day: bool| {
+            let t = crate::tasks::create(
+                &conn,
+                uid,
+                crate::tasks::NewTask {
+                    title: due.into(),
+                    due_at: (!day).then(|| Some(due.to_owned())),
+                    due_on: day.then(|| Some(due.to_owned())),
+                    zone: Some(la.clone()),
+                    ..Default::default()
+                },
+                "manual",
+                crate::tasks::Actor::User,
+            )
+            .unwrap();
+            t.id
+        };
+        let day = new("2026-10-20", true);
+        let moment = new("2026-10-20T16:00:00Z", false);
+        rezoned(&conn, &tmp, uid, "2026-10-11T16:00:00Z");
+        let get = |id| crate::tasks::get(&conn, uid, id).unwrap().unwrap();
+        assert_eq!(get(day).due_at.as_deref(), Some("2026-10-21T03:59:00Z"), "23:59 EDT");
+        assert_eq!(get(day).due_on.as_deref(), Some("2026-10-20"));
+        assert_eq!(get(moment).due_at.as_deref(), Some("2026-10-20T16:00:00Z"));
     }
 }

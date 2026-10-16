@@ -634,6 +634,9 @@ struct TaskRow {
     title: String,
     state: String,
     due_at: Option<String>,
+    due_on: Option<String>,
+    /// The due as the owner's clock reads it.
+    due_label: Option<String>,
     urgency: String,
     pressing: bool,
     overdue: bool,
@@ -657,7 +660,7 @@ pub fn render(
 ) -> anyhow::Result<Rendered> {
     use crate::model_text as mt;
     let tz = crate::triggers::timezone(config_dir, owner_username);
-    let today = now.to_zoned(tz).date();
+    let today = now.to_zoned(tz.clone()).date();
     let mut view = serde_json::Map::new();
     let mut sections: Vec<String> = Vec::new();
 
@@ -728,6 +731,8 @@ pub fn render(
                 title: t.title.clone(),
                 state: t.state.clone(),
                 due_at: t.due_at.clone(),
+                due_on: t.due_on.clone(),
+                due_label: t.due_at.as_deref().and_then(|d| crate::due::local_label(d, t.due_on.as_deref(), &tz)),
                 urgency: t.urgency.clone(),
                 pressing,
                 overdue: t
@@ -758,7 +763,7 @@ pub fn render(
                     .map(|t| {
                         let mut v = serde_json::json!({
                             "id": t.id, "title": t.title, "state": t.state, "due_at": t.due_at,
-                            "urgency": t.urgency, "pressing": t.pressing, "steps": t.steps,
+                            "due_on": t.due_on, "urgency": t.urgency, "pressing": t.pressing, "steps": t.steps,
                             "done_steps": t.done_steps, "category": t.category,
                         });
                         if scope.goals {
@@ -784,11 +789,16 @@ pub fn render(
                 continue;
             }
             if rows.len() < GOAL_ROWS_MAX {
-                let due = g.due_at.as_deref().map(|d| mt::share_goal_due(l, day_of(d))).unwrap_or_default();
+                let due = g
+                    .due_at
+                    .as_deref()
+                    .and_then(|d| crate::due::local_label(d, g.due_on.as_deref(), &tz))
+                    .map(|d| mt::share_goal_due(l, &d))
+                    .unwrap_or_default();
                 let _ = writeln!(goals_text, "{}", mt::share_goal(l, &g.title, done, total, &due));
             }
             rows.push(serde_json::json!({
-                "id": g.id, "title": g.title, "due_at": g.due_at, "tasks": total, "done_tasks": done,
+                "id": g.id, "title": g.title, "due_at": g.due_at, "due_on": g.due_on, "tasks": total, "done_tasks": done,
             }));
         }
         if rows.is_empty() {
@@ -912,8 +922,8 @@ fn task_line(l: crate::text::Lang, t: &TaskRow, scope: &ShareScope) -> String {
     } else if t.pressing {
         s.push_str(if t.overdue { mt::share_mark_overdue(l) } else { mt::share_mark_due_soon(l) });
     }
-    if let Some(d) = &t.due_at {
-        s.push_str(&mt::share_goal_due(l, day_of(d)));
+    if let Some(d) = &t.due_label {
+        s.push_str(&mt::share_goal_due(l, d));
     }
     if t.steps > 0 {
         s.push_str(&mt::share_steps(l, t.done_steps, t.steps));

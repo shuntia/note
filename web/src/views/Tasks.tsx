@@ -21,6 +21,7 @@ import { Overflow, useMenuSheet, type OverflowItem } from '../overflow'
 import { useStableCallback, useStableMethods } from '../stable'
 import { Tick } from '../tick'
 import { urgencyRank } from '../urgent'
+import { dueBody, dueDraft, dueParts, goalDated, type DueBody } from '../due'
 import '../styles/tasks.css'
 import type { Goal, NewStep, Task, TaskNode, TaskNotify, TaskState, TaskUpdate, TaskUrgency } from '../types'
 import { t, type Key } from '../i18n'
@@ -351,6 +352,7 @@ const PROGRESS_SETTLE_MS = 400
 type RowActions = {
   setCategory: (node: TaskNode, category: string) => void
   setUrgency: (node: TaskNode, urgency: TaskUrgency) => void
+  setDue: (node: TaskNode, due: DueBody) => void
   setGoal: (node: TaskNode, goal_id: number | null) => void
   setProgress: (task: Task, progress: number) => void
   complete: (node: TaskNode, step?: Task) => void
@@ -377,7 +379,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
   const [openGoals, setOpenGoals] = useState<Set<number>>(new Set())
   const [filter, setFilter] = useState<string | null>(null)
   const [sort, setSort] = useState<SortKey>(storedSort)
-  const [goalDraft, setGoalDraft] = useState<{ title: string; due: string } | null>(null)
+  const [goalDraft, setGoalDraft] = useState<{ title: string; due: string; time: string } | null>(null)
   const [runOrder, setRunOrder] = useState<number[]>([])
   const dropRef = useRef<DropTo | null>(null)
   useLiftDrag(dropRef)
@@ -430,6 +432,8 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
         category?: string
         urgency?: TaskUrgency
         goal_id?: number | null
+        due_at?: string | null
+        due_on?: string | null
       },
     ) => {
       try {
@@ -555,6 +559,8 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
     void patch(node.id, { category })
   }
 
+  const setDue = (node: TaskNode, due: DueBody) => void patch(node.id, due)
+
   const setUrgency = (node: TaskNode, urgency: TaskUrgency) => {
     setNodes((ns) =>
       ns
@@ -599,12 +605,14 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
       return next
     })
 
-  const editGoal = (goal: Goal, patch: { title?: string; due_at?: string | null }) => {
-    setGoals((gs) => gs.map((g) => (g.id === goal.id ? { ...g, ...patch } : g)))
-    api.patchGoal(goal.id, patch).catch(() => {
-      notify(t('goals.updateFailed'))
-      loadGoals()
-    })
+  const editGoal = (goal: Goal, patch: { title?: string } | DueBody) => {
+    api
+      .patchGoal(goal.id, patch)
+      .then((g) => setGoals((gs) => gs.map((x) => (x.id === g.id ? g : x))))
+      .catch(() => {
+        notify(t('goals.updateFailed'))
+        loadGoals()
+      })
   }
 
   const closeGoal = (goal: Goal, state: 'done' | 'dropped') => {
@@ -632,9 +640,11 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
     const draft = goalDraft
     const text = draft?.title.trim()
     if (!draft || !text) return
+    const due = dueBody(draft.due, draft.time)
+    if (due === null) return
     setGoalDraft(null)
     api
-      .addGoal({ title: text, due_at: draft.due === '' ? null : endOfDay(draft.due) })
+      .addGoal({ title: text, ...due })
       .then((g) => {
         setGoals((gs) => [...gs, g])
         setOpenGoals((open) => new Set(open).add(g.id))
@@ -718,6 +728,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
       is_now,
       updated_at: new Date().toISOString(),
       due_at: null,
+      due_on: null,
       external_id: null,
       url: '',
       notify: 'notify',
@@ -768,6 +779,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
   const actions = useStableMethods<RowActions>({
     setCategory,
     setUrgency,
+    setDue,
     setGoal,
     setProgress,
     complete,
@@ -921,7 +933,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
               className="task-add-more"
               label={t('tasks.moreWays')}
               items={[
-                { label: t('goals.new'), run: () => setGoalDraft({ title: '', due: '' }) },
+                { label: t('goals.new'), run: () => setGoalDraft({ title: '', due: '', time: '' }) },
                 {
                   label: t('tasks.order'),
                   children: SORTS.map((o) => ({
@@ -951,6 +963,14 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
               aria-label={t('goals.due')}
               onChange={(e) => setGoalDraft({ ...goalDraft, due: e.target.value })}
             />
+            {goalDraft.due !== '' && (
+              <input
+                type="time"
+                value={goalDraft.time}
+                aria-label={t('due.time')}
+                onChange={(e) => setGoalDraft({ ...goalDraft, time: e.target.value })}
+              />
+            )}
             <button type="submit" disabled={!goalDraft.title.trim()}>
               {t('common.save')}
             </button>
@@ -1071,44 +1091,56 @@ const daysUntil = (due: Date, now: Date) =>
       DAY_MS,
   )
 
-function dueLabel(due: Date, now: Date): string {
-  const days = daysUntil(due, now)
-  if (days === 0) return t('due.today')
-  if (days === 1) return t('due.tomorrow')
-  return t('due.on', { day: days < 7 ? format.weekday(due) : format.day(due, due) })
+function dueLabel(day: Date, at: Date | null, now: Date): string {
+  const days = daysUntil(day, now)
+  const time = at === null ? null : format.clock(at)
+  if (days === 0) return time === null ? t('due.today') : t('due.todayAt', { time })
+  if (days === 1) return time === null ? t('due.tomorrow') : t('due.tomorrowAt', { time })
+  const name = days < 7 ? format.weekday(day) : format.day(day, day)
+  return time === null ? t('due.on', { day: name }) : t('due.onAt', { day: name, time })
 }
 
 // Urgency is the date's colour; an urgent task with no date keeps a dot of it.
 function Due({ task }: { task: Task }) {
   const urgent = task.urgency === 'high' || task.pressing
-  if (task.due_at === null)
+  const due = dueParts(task)
+  if (due === null || task.due_at === null)
     return urgent ? <span className="task-dot" role="img" aria-label={t('tasks.urgent')} /> : null
-  const due = new Date(task.due_at)
-  if (Number.isNaN(due.getTime())) return null
   const now = new Date()
-  if (due.getTime() < now.getTime()) return <span className="meta warn">{t('due.overdue')}</span>
-  return <span className={urgent ? 'meta sun' : 'meta'}>{dueLabel(due, now)}</span>
-}
-
-// A date input speaks in calendar days; a deadline is the end of one.
-function endOfDay(date: string): string | null {
-  const [y, m, d] = date.split('-').map(Number)
-  if (!y || !m || !d) return null
-  return new Date(y, m - 1, d, 23, 59).toISOString()
-}
-
-function dateValue(iso: string | null): string {
-  if (iso === null) return ''
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return ''
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+  if (new Date(task.due_at).getTime() < now.getTime())
+    return <span className="meta warn">{t('due.overdue')}</span>
+  return <span className={urgent ? 'meta sun' : 'meta'}>{dueLabel(due.day, due.at, now)}</span>
 }
 
 function goalDue(goal: Goal): string | null {
-  if (goal.due_at === null) return null
-  const due = new Date(goal.due_at)
-  return Number.isNaN(due.getTime()) ? null : format.day(due, due)
+  const due = dueParts(goalDated(goal))
+  if (due === null) return null
+  const day = format.day(due.day, due.day)
+  return due.at === null ? day : `${day} ${format.clock(due.at)}`
+}
+
+// A date and an optional time; an empty time is the whole day.
+function DueFields({
+  date,
+  time,
+  label,
+  onDate,
+  onTime,
+}: {
+  date: string
+  time: string
+  label: string
+  onDate: (v: string) => void
+  onTime: (v: string) => void
+}) {
+  return (
+    <>
+      <input type="date" value={date} aria-label={label} autoFocus onChange={(e) => onDate(e.target.value)} />
+      {date !== '' && (
+        <input type="time" value={time} aria-label={t('due.time')} onChange={(e) => onTime(e.target.value)} />
+      )}
+    </>
+  )
 }
 
 const PROGRESS_STEP = 5
@@ -1258,16 +1290,19 @@ const GoalRow = memo(function GoalRow({
   goal: Goal
   open: boolean
   onToggle: (id: number) => void
-  onEdit: (goal: Goal, patch: { title?: string; due_at?: string | null }) => void
+  onEdit: (goal: Goal, patch: { title?: string } | DueBody) => void
   onClose: (goal: Goal, state: 'done' | 'dropped') => void
   children: ReactNode
 }) {
   const [editing, setEditing] = useState<GoalEdit>(null)
   const [draft, setDraft] = useState('')
+  const [time, setTime] = useState('')
   const pct = goal.tasks === 0 ? 0 : Math.round((goal.done_tasks / goal.tasks) * 100)
 
   const start = (what: Exclude<GoalEdit, null>) => {
-    setDraft(what === 'title' ? goal.title : dateValue(goal.due_at))
+    const due = dueDraft(goalDated(goal))
+    setDraft(what === 'title' ? goal.title : due.date)
+    setTime(due.time)
     setEditing(what)
   }
   const keep = (e: FormEvent) => {
@@ -1276,7 +1311,8 @@ const GoalRow = memo(function GoalRow({
       const text = draft.trim()
       if (text !== '' && text !== goal.title) onEdit(goal, { title: text })
     } else if (editing === 'due') {
-      onEdit(goal, { due_at: draft === '' ? null : endOfDay(draft) })
+      const due = dueBody(draft, time)
+      if (due !== null) onEdit(goal, due)
     }
     setEditing(null)
   }
@@ -1340,12 +1376,12 @@ const GoalRow = memo(function GoalRow({
               onChange={(e) => setDraft(e.target.value)}
             />
           ) : (
-            <input
-              type="date"
-              value={draft}
-              aria-label={t('goals.dueFor', { title: goal.title })}
-              autoFocus
-              onChange={(e) => setDraft(e.target.value)}
+            <DueFields
+              date={draft}
+              time={time}
+              label={t('goals.dueFor', { title: goal.title })}
+              onDate={setDraft}
+              onTime={setTime}
             />
           )}
           <button type="submit">{t('common.save')}</button>
@@ -1391,6 +1427,7 @@ const Row = memo(function Row({
   const item = useRef<HTMLDivElement>(null)
   const [reviving, setReviving] = useState(false)
   const [naming, setNaming] = useState<string | null>(null)
+  const [dating, setDating] = useState<{ date: string; time: string } | null>(null)
   const sheet = useMenuSheet()
   const done = group === 'done'
   const finished = (done && !reviving) || leaving === 'done'
@@ -1455,6 +1492,7 @@ const Row = memo(function Row({
           { label: t('announce.none'), run: () => actions.setGoal(node, null), checked: node.goal_id === null },
         ],
       },
+      { label: t('goals.setDue'), run: () => setDating(dueDraft(node)) },
       {
         label: t('tasks.sort.urgency'),
         children: (['low', 'normal', 'high'] as const).map((u) => ({
@@ -1568,6 +1606,29 @@ const Row = memo(function Row({
           />
           <button type="submit">{t('common.save')}</button>
           <button type="button" onClick={() => setNaming(null)}>
+            {t('common.cancel')}
+          </button>
+        </form>
+      )}
+      {dating !== null && (
+        <form
+          className="task-inline"
+          onSubmit={(e) => {
+            e.preventDefault()
+            const due = dueBody(dating.date, dating.time)
+            if (due !== null) actions.setDue(node, due)
+            setDating(null)
+          }}
+        >
+          <DueFields
+            date={dating.date}
+            time={dating.time}
+            label={t('goals.dueFor', { title: node.title })}
+            onDate={(date) => setDating({ ...dating, date })}
+            onTime={(time) => setDating({ ...dating, time })}
+          />
+          <button type="submit">{t('common.save')}</button>
+          <button type="button" onClick={() => setDating(null)}>
             {t('common.cancel')}
           </button>
         </form>

@@ -9,6 +9,7 @@ pub mod config;
 pub mod context;
 pub mod csp;
 pub mod day;
+pub mod due;
 pub mod db;
 pub mod failure;
 pub mod goals;

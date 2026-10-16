@@ -106,6 +106,7 @@ type NewTaskOpts = {
   parent_id?: number
   is_now?: boolean
   due_at?: string | null
+  due_on?: string | null
   url?: string
   notify?: TaskNotify
   progress?: number
@@ -113,13 +114,14 @@ type NewTaskOpts = {
   goal_id?: number
 }
 
-type NewGoal = { title: string; description?: string; due_at?: string | null }
+type NewGoal = { title: string; description?: string; due_at?: string | null; due_on?: string | null }
 
 type GoalPatch = {
   title?: string
   description?: string
   state?: GoalState
   due_at?: string | null
+  due_on?: string | null
 }
 
 // A calendar entry recurs on `days` or happens once on `on_date`, never both.
@@ -138,6 +140,7 @@ type TaskPatch = {
   is_now?: boolean
   notes?: string
   due_at?: string | null
+  due_on?: string | null
   url?: string
   notify?: TaskNotify
   progress?: number

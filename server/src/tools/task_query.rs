@@ -279,7 +279,7 @@ pub fn list(conn: &Connection, ctx: &ToolCtx, args: &ListArgs) -> Result<serde_j
             "SELECT id, title, state, is_now, duration_min, created_at, updated_at, due_at,
                     (SELECT COUNT(*) FROM tasks s WHERE s.parent_id = tasks.id AND s.state != 'dropped'),
                     (SELECT COUNT(*) FROM tasks s WHERE s.parent_id = tasks.id AND s.state = 'done'),
-                    progress, actual_min, category, goal_id, urgency
+                    progress, actual_min, category, goal_id, urgency, due_on
              FROM tasks WHERE {wheres}
              ORDER BY {order} LIMIT {limit}"
         ))
@@ -301,6 +301,7 @@ pub fn list(conn: &Connection, ctx: &ToolCtx, args: &ListArgs) -> Result<serde_j
                 "created_at": r.get::<_, String>(5)?,
                 "updated_at": r.get::<_, String>(6)?,
                 "due_at": due_at,
+                "due_on": r.get::<_, Option<String>>(15)?,
                 "steps": r.get::<_, i64>(8)?,
                 "done_steps": r.get::<_, i64>(9)?,
                 "progress": progress,
@@ -365,7 +366,7 @@ pub fn search(conn: &Connection, ctx: &ToolCtx, args: &SearchArgs) -> Result<ser
 
     let mut stmt = conn
         .prepare(&format!(
-            "SELECT id, title, state, is_now, duration_min, due_at
+            "SELECT id, title, state, is_now, duration_min, due_at, due_on
              FROM tasks
              WHERE user_id = ? AND parent_id IS NULL AND state != 'dropped'{finished} AND ({text_match}){shared}
              ORDER BY CASE WHEN {title_match} THEN 0 ELSE 1 END,
@@ -383,6 +384,7 @@ pub fn search(conn: &Connection, ctx: &ToolCtx, args: &SearchArgs) -> Result<ser
                 "is_now": r.get::<_, bool>(3)?,
                 "duration_min": r.get::<_, Option<i64>>(4)?,
                 "due_at": r.get::<_, Option<String>>(5)?,
+                "due_on": r.get::<_, Option<String>>(6)?,
             }))
         })
         .and_then(|rows| rows.collect::<rusqlite::Result<Vec<_>>>())

@@ -537,8 +537,9 @@ async fn goals_list(user: CurrentUser, State(state): State<AppState>) -> impl In
 async fn goals_create(
     user: CurrentUser,
     State(state): State<AppState>,
-    Json(req): Json<crate::goals::NewGoal>,
+    Json(mut req): Json<crate::goals::NewGoal>,
 ) -> impl IntoResponse {
+    req.zone = Some(user_zone(&state, &user.username));
     let conn = state.db();
     match crate::goals::create(&conn, user.id, req) {
         Ok(g) => (StatusCode::CREATED, Json(g)).into_response(),
@@ -550,8 +551,9 @@ async fn goals_update(
     user: CurrentUser,
     State(state): State<AppState>,
     Path(id): Path<i64>,
-    Json(patch): Json<crate::goals::GoalPatch>,
+    Json(mut patch): Json<crate::goals::GoalPatch>,
 ) -> impl IntoResponse {
+    patch.zone = Some(user_zone(&state, &user.username));
     let conn = state.db();
     match crate::goals::update(&conn, user.id, id, &patch) {
         Ok(Some(g)) => Json(g).into_response(),
@@ -684,7 +686,7 @@ fn default_source(via: &auth::Credential) -> &'static str {
 async fn tasks_create(
     user: TaskPrincipal,
     State(state): State<AppState>,
-    Json(req): Json<crate::tasks::NewTask>,
+    Json(mut req): Json<crate::tasks::NewTask>,
 ) -> impl IntoResponse {
     if matches!(user.via, auth::Credential::Token(_)) && req.source.as_deref() == Some("manual") {
         return (
@@ -694,6 +696,7 @@ async fn tasks_create(
             .into_response();
     }
     let tz = user_zone(&state, &user.username);
+    req.zone = Some(tz.clone());
     let conn = state.db();
     let source = default_source(&user.via);
     match crate::tasks::create(&conn, user.id, req, source, crate::tasks::Actor::User) {
@@ -709,9 +712,10 @@ async fn tasks_update(
     user: TaskPrincipal,
     State(state): State<AppState>,
     Path(id): Path<i64>,
-    Json(patch): Json<crate::tasks::TaskPatch>,
+    Json(mut patch): Json<crate::tasks::TaskPatch>,
 ) -> impl IntoResponse {
     let tz = user_zone(&state, &user.username);
+    patch.zone = Some(tz.clone());
     let conn = state.db();
     match crate::tasks::update(&conn, user.id, id, &patch) {
         Ok(Some(mut t)) => {
@@ -769,7 +773,7 @@ async fn task_upsert(
     user: TaskPrincipal,
     State(state): State<AppState>,
     Path(external_id): Path<String>,
-    Json(req): Json<crate::tasks::NewTask>,
+    Json(mut req): Json<crate::tasks::NewTask>,
 ) -> impl IntoResponse {
     if req.external_id.as_deref().is_some_and(|id| id != external_id) {
         return (
@@ -778,6 +782,7 @@ async fn task_upsert(
         )
             .into_response();
     }
+    req.zone = Some(user_zone(&state, &user.username));
     let conn = state.db();
     match crate::tasks::upsert(&conn, user.id, &external_id, req) {
         Ok(crate::tasks::Upsert::Created(n)) => (StatusCode::CREATED, Json(n)).into_response(),
@@ -902,12 +907,8 @@ fn brief_message(node: &crate::tasks::TaskNode, context: &str, tz: &jiff::tz::Ti
         "Task id: {}\nTitle: {}\nState: {}\nDescription: {}\nNotes: {}\n",
         t.id, t.title, t.state, t.description, t.notes
     );
-    if let Some(at) = t.due_at.as_deref().and_then(|d| d.parse::<jiff::Timestamp>().ok()) {
-        let _ = writeln!(
-            m,
-            "Due: {}",
-            at.to_zoned(tz.clone()).strftime("%Y-%m-%d %H:%M")
-        );
+    if let Some(due) = t.due_at.as_deref().and_then(|d| crate::due::local_label(d, t.due_on.as_deref(), tz)) {
+        let _ = writeln!(m, "Due: {due}");
     }
     if !node.children.is_empty() {
         m.push_str("Steps:\n");

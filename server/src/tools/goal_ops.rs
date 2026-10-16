@@ -1,4 +1,4 @@
-use super::task_ops::{checked_due, task_error};
+use super::task_ops::{checked_due, task_error, user_tz};
 use super::{check_text, ToolCtx, ToolError};
 use crate::goals::{GoalPatch, NewGoal};
 use rusqlite::Connection;
@@ -13,8 +13,9 @@ pub struct CreateArgs {
     /// What it involves and why it matters, for your own later reference.
     #[serde(default)]
     pub description: Option<String>,
-    /// When the goal has to be reached: an RFC 3339 instant, or a bare
-    /// YYYY-MM-DD day, which means the end of that day where the user lives.
+    /// When the goal has to be reached: YYYY-MM-DD when only the day is known,
+    /// YYYY-MM-DDTHH:MM for a set time where the user lives, or an RFC 3339
+    /// instant.
     #[serde(default)]
     pub due_at: Option<String>,
 }
@@ -28,14 +29,22 @@ pub fn create(
     if let Some(d) = &args.description {
         check_text("description", d)?;
     }
-    let due_at = args.due_at.as_deref().map(|raw| checked_due(ctx, raw)).transpose()?.flatten();
+    let due = args.due_at.as_deref().map(|raw| checked_due(ctx, raw)).transpose()?.unwrap_or_default();
     let goal = crate::goals::create(
         conn,
         ctx.user_id,
-        NewGoal { title: args.title, description: args.description, due_at: due_at.map(Some) },
+        NewGoal {
+            title: args.title,
+            description: args.description,
+            due_at: due.due_at,
+            due_on: due.due_on,
+            zone: Some(user_tz(ctx)),
+        },
     )
     .map_err(task_error)?;
-    Ok(serde_json::json!({ "goal_id": goal.id, "title": goal.title, "due_at": goal.due_at }))
+    Ok(serde_json::json!({
+        "goal_id": goal.id, "title": goal.title, "due_at": goal.due_at, "due_on": goal.due_on,
+    }))
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -46,8 +55,8 @@ pub struct UpdateArgs {
     pub description: Option<String>,
     /// One of open, done, dropped.
     pub state: Option<String>,
-    /// An RFC 3339 instant, or a bare YYYY-MM-DD day, which means the end of
-    /// that day where the user lives. An empty string clears it.
+    /// YYYY-MM-DD when only the day is known, YYYY-MM-DDTHH:MM for a set time
+    /// where the user lives, or an RFC 3339 instant. An empty string clears it.
     pub due_at: Option<String>,
 }
 
@@ -60,15 +69,14 @@ pub fn update(
     if let Some(d) = &args.description {
         check_text("description", d)?;
     }
-    let due_at = match &args.due_at {
-        Some(raw) => Some(checked_due(ctx, raw)?),
-        None => None,
-    };
+    let due = args.due_at.as_deref().map(|raw| checked_due(ctx, raw)).transpose()?.unwrap_or_default();
     let patch = GoalPatch {
         title: args.title,
         description: args.description,
         state: args.state,
-        due_at,
+        due_at: due.due_at,
+        due_on: due.due_on,
+        zone: Some(user_tz(ctx)),
     };
     match crate::goals::update(conn, ctx.user_id, args.goal_id, &patch) {
         Ok(Some(g)) => Ok(serde_json::json!({
@@ -76,6 +84,7 @@ pub fn update(
             "title": g.title,
             "state": g.state,
             "due_at": g.due_at,
+            "due_on": g.due_on,
         })),
         Ok(None) => Err(ToolError::not_found(format!("no goal {}", args.goal_id))),
         Err(e) => Err(task_error(e)),

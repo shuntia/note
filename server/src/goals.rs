@@ -15,8 +15,9 @@ pub struct Goal {
     pub id: i64,
     pub title: String,
     pub description: String,
-    /// RFC 3339 UTC, like a task's.
+    /// The deadline and, for a whole day, the day; read as a task's are.
     pub due_at: Option<String>,
+    pub due_on: Option<String>,
     pub state: String,
     pub created_at: String,
     pub updated_at: String,
@@ -27,6 +28,7 @@ pub struct Goal {
     pub next_task_id: Option<i64>,
     pub next_task_title: Option<String>,
     pub next_due_at: Option<String>,
+    pub next_due_on: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -37,6 +39,10 @@ pub struct NewGoal {
     pub description: Option<String>,
     #[serde(default, deserialize_with = "crate::tasks::present")]
     pub due_at: Option<Option<String>>,
+    #[serde(default, deserialize_with = "crate::tasks::present")]
+    pub due_on: Option<Option<String>>,
+    #[serde(skip)]
+    pub zone: Option<jiff::tz::TimeZone>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -47,6 +53,10 @@ pub struct GoalPatch {
     pub state: Option<String>,
     #[serde(default, deserialize_with = "crate::tasks::present")]
     pub due_at: Option<Option<String>>,
+    #[serde(default, deserialize_with = "crate::tasks::present")]
+    pub due_on: Option<Option<String>>,
+    #[serde(skip)]
+    pub zone: Option<jiff::tz::TimeZone>,
 }
 
 fn now() -> String {
@@ -70,12 +80,6 @@ fn checked_description(raw: &str) -> Result<(), UpdateError> {
     Ok(())
 }
 
-fn checked_due(raw: &str) -> Result<String, UpdateError> {
-    raw.parse::<jiff::Timestamp>().map(|t| t.to_string()).map_err(|_| {
-        UpdateError::Invalid(format!("due_at must be an RFC 3339 instant, got {raw:?}"))
-    })
-}
-
 fn checked_state(raw: &str) -> Result<String, UpdateError> {
     if !STATES.contains(&raw) {
         return Err(UpdateError::Invalid(format!("state must be one of {}", STATES.join(", "))));
@@ -86,7 +90,7 @@ fn checked_state(raw: &str) -> Result<String, UpdateError> {
 const COLS: &str = "g.id, g.title, g.description, g.due_at, g.state, g.created_at, g.updated_at,
     (SELECT COUNT(*) FROM tasks t WHERE t.goal_id = g.id AND t.state != 'dropped'),
     (SELECT COUNT(*) FROM tasks t WHERE t.goal_id = g.id AND t.state = 'done'),
-    n.id, n.title, n.due_at";
+    n.id, n.title, n.due_at, g.due_on, n.due_on";
 
 /// The goal's own row, joined to the unfinished task of its whose deadline
 /// comes first.
@@ -109,6 +113,8 @@ fn row_to_goal(r: &rusqlite::Row) -> rusqlite::Result<Goal> {
         next_task_id: r.get(9)?,
         next_task_title: r.get(10)?,
         next_due_at: r.get(11)?,
+        due_on: r.get(12)?,
+        next_due_on: r.get(13)?,
     })
 }
 
@@ -144,11 +150,17 @@ pub fn create(conn: &Connection, user_id: i64, new: NewGoal) -> Result<Goal, Upd
     let title = checked_title(&new.title)?;
     let description = new.description.unwrap_or_default();
     checked_description(&description)?;
-    let due_at = new.due_at.flatten().as_deref().map(checked_due).transpose()?;
+    let (due_at, due_on) = match crate::due::from_wire(&new.due_at, &new.due_on)?.flatten() {
+        Some(due) => {
+            let (at, on) = due.columns(new.zone.as_ref())?;
+            (Some(at), on)
+        }
+        None => (None, None),
+    };
     conn.execute(
-        "INSERT INTO goals (user_id, title, description, due_at, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
-        rusqlite::params![user_id, &title, &description, due_at, now()],
+        "INSERT INTO goals (user_id, title, description, due_at, due_on, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+        rusqlite::params![user_id, &title, &description, due_at, due_on, now()],
     )?;
     let id = conn.last_insert_rowid();
     Ok(get(conn, user_id, id)?.expect("row was just created"))
@@ -166,9 +178,13 @@ pub fn update(
         checked_description(d)?;
     }
     let state = patch.state.as_deref().map(checked_state).transpose()?;
-    let due_at = match &patch.due_at {
-        Some(Some(raw)) => Some(Some(checked_due(raw)?)),
-        other => other.as_ref().map(|_| None),
+    let due = match crate::due::from_wire(&patch.due_at, &patch.due_on)? {
+        Some(Some(due)) => Some(Some(due.columns(patch.zone.as_ref())?)),
+        other => other.map(|_| None),
+    };
+    let (due_at, due_on) = match &due {
+        Some(Some((at, on))) => (Some(at.clone()), on.clone()),
+        _ => (None, None),
     };
     if get(conn, user_id, goal_id)?.is_none() {
         return Ok(None);
@@ -178,18 +194,11 @@ pub fn update(
             title = COALESCE(?1, title),
             description = COALESCE(?2, description),
             state = COALESCE(?3, state),
-            due_at = COALESCE(?4, CASE WHEN ?5 THEN NULL ELSE due_at END),
+            due_at = CASE WHEN ?5 THEN ?4 ELSE due_at END,
+            due_on = CASE WHEN ?5 THEN ?8 ELSE due_on END,
             updated_at = ?6
          WHERE id = ?7",
-        rusqlite::params![
-            &title,
-            &patch.description,
-            &state,
-            due_at.clone().flatten(),
-            due_at.is_some(),
-            now(),
-            goal_id,
-        ],
+        rusqlite::params![&title, &patch.description, &state, due_at, due.is_some(), now(), goal_id, due_on],
     )?;
     get(conn, user_id, goal_id).map_err(UpdateError::from)
 }
@@ -311,6 +320,7 @@ mod tests {
                 title: "apply".into(),
                 description: Some("the whole application".into()),
                 due_at: Some(Some("2026-11-01T12:00:00Z".into())),
+                ..Default::default()
             },
         )
         .unwrap();

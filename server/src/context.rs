@@ -522,11 +522,12 @@ fn due(
         return mt::overdue(l).into();
     }
     let local = at.to_zoned(tz.clone());
-    let clock = local.strftime("%H:%M").to_string();
-    match local.date().since(today).ok().map(|s| s.get_days()) {
-        Some(0) => mt::due_today(l, &clock),
-        Some(1) => mt::due_tomorrow(l, &clock),
-        _ => mt::due_on(l, local.date()),
+    let day = task.due_on.as_deref().and_then(|d| d.parse().ok()).unwrap_or(local.date());
+    let clock = task.due_on.is_none().then(|| local.strftime("%H:%M").to_string());
+    match day.since(today).ok().map(|s| s.get_days()) {
+        Some(0) => mt::due_today(l, clock.as_deref()),
+        Some(1) => mt::due_tomorrow(l, clock.as_deref()),
+        _ => mt::due_on(l, day, clock.as_deref()),
     }
 }
 
@@ -1342,18 +1343,20 @@ mod tests {
         dated(&conn, uid, "reading", false, "2026-09-05T10:00:00Z");
         dated(&conn, uid, "quiz", false, "2026-08-30T14:00:00Z");
         dated(&conn, uid, "lab", false, "2026-09-01T10:00:00Z");
+        let form = dated(&conn, uid, "form", false, "2026-09-01T14:59:00Z");
+        conn.execute("UPDATE tasks SET due_on = '2026-09-01' WHERE id = ?1", [form]).unwrap();
         task(&conn, uid, "loose", "open", None, false, None, NOW);
 
         let out = without_task_ids(&assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap());
         assert!(out.contains("Now:\n- essay [open] due today 23:00\n"), "{out}");
         assert!(
             out.contains(
-                "Later: 4 open\n- quiz overdue\n- lab due tomorrow 19:00\n\
-                 - reading due 2026-09-05\n- loose\n"
+                "Later: 5 open\n- quiz overdue\n- lab due tomorrow 19:00\n\
+                 - form due tomorrow\n- reading due 2026-09-05 19:00\n- loose\n"
             ),
             "{out}"
         );
-        assert!(out.contains("Due soon: 2 in the next 3 days, 1 overdue"), "{out}");
+        assert!(out.contains("Due soon: 3 in the next 3 days, 1 overdue"), "{out}");
     }
 
     #[test]

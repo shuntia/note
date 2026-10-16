@@ -78,8 +78,12 @@ pub struct Task {
     pub parent_id: Option<i64>,
     pub is_now: bool,
     pub updated_at: String,
-    /// RFC 3339 UTC, like `updated_at`; only a top-level task carries one.
+    /// The deadline, RFC 3339 UTC like `updated_at`; only a top-level task
+    /// carries one.
     pub due_at: Option<String>,
+    /// The `YYYY-MM-DD` day when the task is due some time that day rather
+    /// than at a set moment; `due_at` is then the end of it.
+    pub due_on: Option<String>,
     /// The importer's own id for this task, opaque here and unique per user.
     pub external_id: Option<String>,
     pub url: String,
@@ -160,6 +164,8 @@ pub struct NewTask {
     pub state: Option<String>,
     #[serde(default, deserialize_with = "present")]
     pub due_at: Option<Option<String>>,
+    #[serde(default, deserialize_with = "present")]
+    pub due_on: Option<Option<String>>,
     #[serde(default)]
     pub url: Option<String>,
     #[serde(default)]
@@ -178,6 +184,9 @@ pub struct NewTask {
     pub goal_id: Option<i64>,
     #[serde(default)]
     pub urgency: Option<String>,
+    /// The user's zone, which places the end of a `due_on` day.
+    #[serde(skip)]
+    pub zone: Option<jiff::tz::TimeZone>,
 }
 
 /// `Option<Option<T>>` fields separate "absent, leave alone" (`None`) from
@@ -196,6 +205,8 @@ pub struct TaskPatch {
     pub is_now: Option<bool>,
     #[serde(default, deserialize_with = "present")]
     pub due_at: Option<Option<String>>,
+    #[serde(default, deserialize_with = "present")]
+    pub due_on: Option<Option<String>>,
     pub url: Option<String>,
     #[serde(default, deserialize_with = "present")]
     pub external_id: Option<Option<String>>,
@@ -207,6 +218,8 @@ pub struct TaskPatch {
     pub urgency: Option<String>,
     #[serde(skip)]
     pub actor: Actor,
+    #[serde(skip)]
+    pub zone: Option<jiff::tz::TimeZone>,
 }
 
 pub(crate) fn present<'de, D, T>(d: D) -> Result<Option<Option<T>>, D::Error>
@@ -255,6 +268,7 @@ fn row_to_task(r: &rusqlite::Row) -> rusqlite::Result<Task> {
         expected_min,
         remaining_min,
         created_at: r.get(21)?,
+        due_on: r.get(22)?,
     })
 }
 
@@ -262,7 +276,7 @@ const COLS: &str = "t.id, t.title, t.description, t.state, t.source, t.notes, t.
                     t.duration_source, t.parent_id, t.is_now, t.updated_at, t.due_at, \
                     t.external_id, t.url, t.notify, t.actual_min, t.progress, \
                     COALESCE(p.category, t.category), t.goal_id, g.title, \
-                    COALESCE(p.urgency, t.urgency), t.created_at";
+                    COALESCE(p.urgency, t.urgency), t.created_at, t.due_on";
 
 /// A step reports the category of the task it belongs to, and a task its goal's
 /// title, so one read carries what a row needs to draw itself.
@@ -305,14 +319,6 @@ fn checked_progress(value: u32) -> Result<u32, UpdateError> {
         return Err(UpdateError::Invalid(format!("progress must be 0 to {MAX_PROGRESS}")));
     }
     Ok(value)
-}
-
-/// A due date is stored the way `updated_at` is, so parsing and ordering are
-/// the same everywhere: RFC 3339, normalised to UTC.
-fn checked_due(raw: &str) -> Result<String, UpdateError> {
-    raw.parse::<jiff::Timestamp>()
-        .map(|t| t.to_string())
-        .map_err(|_| UpdateError::Invalid(format!("due_at must be an RFC 3339 instant, got {raw:?}")))
 }
 
 fn checked_notify(raw: &str) -> Result<String, UpdateError> {
@@ -562,7 +568,13 @@ pub fn create(
     let notes = new.notes.unwrap_or_default();
     checked_text("description", &description)?;
     checked_text("notes", &notes)?;
-    let due_at = new.due_at.flatten().as_deref().map(checked_due).transpose()?;
+    let (due_at, due_on) = match crate::due::from_wire(&new.due_at, &new.due_on)?.flatten() {
+        Some(due) => {
+            let (at, on) = due.columns(new.zone.as_ref())?;
+            (Some(at), on)
+        }
+        None => (None, None),
+    };
     checked_due_placement(new.parent_id, due_at.as_deref())?;
     let category = new.category.as_deref().map(checked_category).transpose()?;
     let urgency = new.urgency.as_deref().map(checked_urgency).transpose()?;
@@ -605,12 +617,12 @@ pub fn create(
         "INSERT INTO tasks
             (user_id, title, description, notes, source, state, parent_id, duration_min,
              duration_source, is_now, due_at, url, external_id, notify, created_at, updated_at,
-             completed_at, progress, category, goal_id, urgency)
+             completed_at, progress, category, goal_id, urgency, due_on)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
                  COALESCE(?15, 'notify'), ?14, ?14,
                  CASE WHEN ?6 = 'done' THEN ?14 END,
                  CASE WHEN ?6 = 'done' THEN 100 ELSE ?16 END,
-                 COALESCE(?17, ''), ?18, ?19)",
+                 COALESCE(?17, ''), ?18, ?19, ?20)",
         rusqlite::params![
             user_id,
             &title,
@@ -631,6 +643,7 @@ pub fn create(
             category,
             new.goal_id,
             urgency.unwrap_or_else(|| "normal".to_string()),
+            due_on,
         ],
     )?;
     let id = conn.last_insert_rowid();
@@ -1105,8 +1118,10 @@ pub fn upsert(
         title: Some(new.title),
         notes: new.notes,
         due_at: new.due_at,
+        due_on: new.due_on,
         url: new.url,
         state,
+        zone: new.zone,
         ..Default::default()
     };
     update(conn, user_id, id, &patch)?;
@@ -1253,9 +1268,9 @@ pub fn update(
     if let Some(n) = &patch.notes {
         checked_text("notes", n)?;
     }
-    let due_at = match &patch.due_at {
-        Some(Some(raw)) => Some(Some(checked_due(raw)?)),
-        other => other.as_ref().map(|_| None),
+    let due = match crate::due::from_wire(&patch.due_at, &patch.due_on)? {
+        Some(Some(due)) => Some(Some(due.columns(patch.zone.as_ref())?)),
+        other => other.map(|_| None),
     };
     let url = match &patch.url {
         Some(u) => Some(checked_url(u)?),
@@ -1287,7 +1302,11 @@ pub fn update(
     if parent_id.is_some() && urgency.is_some() {
         return Err(UpdateError::InvalidHierarchy("a step reads its parent's urgency".into()));
     }
-    let due_at = due_at.unwrap_or(before.due_at);
+    let (due_at, due_on) = match due {
+        Some(Some((at, on))) => (Some(at), on),
+        Some(None) => (None, None),
+        None => (before.due_at, before.due_on),
+    };
     checked_due_placement(parent_id, due_at.as_deref())?;
     checked_step_placement(parent_id, category.as_deref(), patch.goal_id.flatten())?;
     // becoming a step is giving up a category, an urgency and a goal, as it is leaving Now
@@ -1339,6 +1358,7 @@ pub fn update(
             category = COALESCE(?16, category),
             goal_id = ?17,
             urgency = COALESCE(?18, urgency),
+            due_on = ?19,
             updated_at = ?12,
             completed_at = CASE WHEN COALESCE(?3, state) = 'done'
                 THEN COALESCE(completed_at, ?12) END
@@ -1362,6 +1382,7 @@ pub fn update(
             category,
             goal_id,
             urgency,
+            due_on,
         ],
     )?;
     if patch.state.is_some() {

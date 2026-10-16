@@ -77,8 +77,11 @@ export type Task = {
   parent_id: number | null
   is_now: boolean
   updated_at: string
-  // RFC 3339 UTC, like updated_at; steps never carry one.
+  // The deadline, RFC 3339 UTC like updated_at; steps never carry one.
   due_at: string | null
+  // YYYY-MM-DD when it is due some time that day rather than at a set moment;
+  // due_at is then the end of it.
+  due_on: string | null
   external_id: string | null
   url: string
   notify: TaskNotify
@@ -114,6 +117,7 @@ export type Goal = {
   title: string
   description: string
   due_at: string | null
+  due_on: string | null
   state: GoalState
   created_at: string
   updated_at: string
@@ -122,6 +126,7 @@ export type Goal = {
   next_task_id: number | null
   next_task_title: string | null
   next_due_at: string | null
+  next_due_on: string | null
 }
 
 export type Token = {

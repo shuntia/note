@@ -50,26 +50,26 @@ pub(super) fn user_tz(ctx: &ToolCtx) -> jiff::tz::TimeZone {
     crate::triggers::timezone(ctx.config_dir, ctx.username)
 }
 
-/// An instant stays one; a bare `YYYY-MM-DD` becomes the end of that day where
-/// the user lives; an empty string clears the date.
-pub(super) fn checked_due(ctx: &ToolCtx, raw: &str) -> Result<Option<String>, ToolError> {
-    let raw = raw.trim();
-    if raw.is_empty() {
-        return Ok(None);
+/// A typed due as the wire pair `due_at` / `due_on`.
+#[derive(Default)]
+pub(super) struct WireDue {
+    pub due_at: Option<Option<String>>,
+    pub due_on: Option<Option<String>>,
+}
+
+/// A bare `YYYY-MM-DD` is a whole day, a date with a time is that moment where
+/// the user lives, an RFC 3339 instant is itself, and an empty string clears.
+pub(super) fn checked_due(ctx: &ToolCtx, raw: &str) -> Result<WireDue, ToolError> {
+    if raw.trim().is_empty() {
+        return Ok(WireDue { due_at: Some(None), due_on: Some(None) });
     }
-    if let Ok(ts) = raw.parse::<jiff::Timestamp>() {
-        return Ok(Some(ts.to_string()));
+    match crate::due::parse_loose(raw, &user_tz(ctx)) {
+        Some(crate::due::Due::Day(d)) => Ok(WireDue { due_on: Some(Some(d.to_string())), ..Default::default() }),
+        Some(crate::due::Due::At(t)) => Ok(WireDue { due_at: Some(Some(t.to_string())), ..Default::default() }),
+        None => Err(ToolError::rejected(format!(
+            "due_at must be YYYY-MM-DD, YYYY-MM-DDTHH:MM or an RFC 3339 instant, got {raw:?}"
+        ))),
     }
-    let day: jiff::civil::Date = raw
-        .parse()
-        .map_err(|_| ToolError::rejected(format!(
-            "due_at must be an RFC 3339 instant or a YYYY-MM-DD day, got {raw:?}"
-        )))?;
-    let end = day
-        .at(23, 59, 0, 0)
-        .to_zoned(user_tz(ctx))
-        .map_err(|e| ToolError::internal(e.to_string()))?;
-    Ok(Some(end.timestamp().to_string()))
 }
 
 pub(super) fn task_error(e: UpdateError) -> ToolError {
@@ -96,8 +96,9 @@ pub struct CreateArgs {
     /// Put the task straight in Now, the user's short list of at most 3.
     #[serde(default)]
     pub is_now: bool,
-    /// When it is due: an RFC 3339 instant, or a bare YYYY-MM-DD day, which
-    /// means the end of that day where the user lives.
+    /// When it is due: YYYY-MM-DD when only the day is known,
+    /// YYYY-MM-DDTHH:MM for a set time where the user lives, or an RFC 3339
+    /// instant.
     #[serde(default)]
     pub due_at: Option<String>,
     /// How the block holding this task announces itself when it starts: none,
@@ -158,7 +159,7 @@ pub fn create(
             )));
         }
     }
-    let due_at = args.due_at.as_deref().map(|raw| checked_due(ctx, raw)).transpose()?.flatten();
+    let due = args.due_at.as_deref().map(|raw| checked_due(ctx, raw)).transpose()?.unwrap_or_default();
     let task = crate::tasks::create(
         conn,
         ctx.user_id,
@@ -166,7 +167,9 @@ pub fn create(
             title: title.to_owned(),
             duration_min: args.duration_min,
             is_now: args.is_now,
-            due_at: due_at.map(Some),
+            due_at: due.due_at,
+            due_on: due.due_on,
+            zone: Some(user_tz(ctx)),
             notify: args.notify,
             progress: args.progress,
             category: args.category,
@@ -206,8 +209,9 @@ pub struct UpdateArgs {
     pub duration_min: Option<u32>,
     /// True moves the task into Now, false moves it back to Later.
     pub is_now: Option<bool>,
-    /// When it is due: an RFC 3339 instant, or a bare YYYY-MM-DD day, which
-    /// means the end of that day where the user lives. An empty string clears it.
+    /// When it is due: YYYY-MM-DD when only the day is known,
+    /// YYYY-MM-DDTHH:MM for a set time where the user lives, or an RFC 3339
+    /// instant. An empty string clears it.
     pub due_at: Option<String>,
     /// How the block holding this task announces itself when it starts: none,
     /// chat, or notify.
@@ -264,10 +268,7 @@ pub fn update(
     if let Some(n) = &args.notes {
         check_text("notes", n)?;
     }
-    let due_at = match &args.due_at {
-        Some(raw) => Some(checked_due(ctx, raw)?),
-        None => None,
-    };
+    let due = args.due_at.as_deref().map(|raw| checked_due(ctx, raw)).transpose()?.unwrap_or_default();
     let patch = TaskPatch {
         title,
         description: args.description,
@@ -275,7 +276,9 @@ pub fn update(
         notes: args.notes,
         duration_min: args.duration_min.map(Some),
         is_now: args.is_now,
-        due_at,
+        due_at: due.due_at,
+        due_on: due.due_on,
+        zone: Some(user_tz(ctx)),
         notify: args.notify,
         progress: args.progress,
         category: args.category,
@@ -551,8 +554,12 @@ mod tests {
         crate::tasks::get(conn, 1, id).unwrap().unwrap().due_at
     }
 
+    fn day_of(conn: &rusqlite::Connection, id: i64) -> Option<String> {
+        crate::tasks::get(conn, 1, id).unwrap().unwrap().due_on
+    }
+
     #[test]
-    fn a_due_date_is_an_instant_or_the_end_of_a_day_where_the_user_lives() {
+    fn a_due_is_a_whole_day_or_a_moment_where_the_user_lives() {
         let (conn, _tmp) = env();
         let tmp = tz_dir("Asia/Tokyo");
         let call = |args: &str| {
@@ -563,6 +570,7 @@ mod tests {
             .as_i64()
             .unwrap();
         assert_eq!(due_of(&conn, id).as_deref(), Some("2026-09-19T14:59:00Z"));
+        assert_eq!(day_of(&conn, id), None);
 
         let bare = call(r#"{"title":"worksheet","due_at":"2026-09-19"}"#).unwrap()["task_id"]
             .as_i64()
@@ -572,6 +580,18 @@ mod tests {
             Some("2026-09-19T14:59:00Z"),
             "a bare day is the end of that day in Tokyo"
         );
+        assert_eq!(day_of(&conn, bare).as_deref(), Some("2026-09-19"));
+
+        dispatch(
+            &conn,
+            &ctx(&tmp, None),
+            SessionKind::Talk,
+            "task_update",
+            &format!(r#"{{"task_id":{bare},"due_at":"2026-09-19T17:30"}}"#),
+        )
+        .unwrap();
+        assert_eq!(due_of(&conn, bare).as_deref(), Some("2026-09-19T08:30:00Z"), "a wall time is Tokyo's");
+        assert_eq!(day_of(&conn, bare), None, "a time replaces the whole day");
 
         dispatch(
             &conn,
@@ -582,6 +602,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(due_of(&conn, bare).as_deref(), Some("2026-09-20T14:59:00Z"));
+        assert_eq!(day_of(&conn, bare).as_deref(), Some("2026-09-20"));
 
         dispatch(
             &conn,
@@ -592,6 +613,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(due_of(&conn, bare), None, "an empty string clears it");
+        assert_eq!(day_of(&conn, bare), None);
 
         assert_eq!(call(r#"{"title":"x","due_at":"friday"}"#).unwrap_err().kind, "rejected");
     }

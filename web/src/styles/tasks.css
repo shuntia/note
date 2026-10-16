@@ -75,7 +75,7 @@
   font: inherit;
   font-size: 0.875rem;
 }
-.task-inline input[type='date'] { flex: none; font-variant-numeric: tabular-nums; }
+.task-inline input:is([type='date'], [type='time']) { flex: none; font-variant-numeric: tabular-nums; }
 .task-inline button {
   border: 0;
   border-radius: 999px;

@@ -290,24 +290,31 @@ pub fn overdue(l: Lang) -> &'static str {
     l.of(" overdue", " 期限切れ")
 }
 
-pub fn due_today(l: Lang, at: &str) -> String {
-    match l {
-        Lang::En => format!(" due today {at}"),
-        Lang::Ja => format!(" 今日{at}まで"),
+/// `at` is the clock time, absent when the task is due some time that day.
+pub fn due_today(l: Lang, at: Option<&str>) -> String {
+    match (l, at) {
+        (Lang::En, Some(at)) => format!(" due today {at}"),
+        (Lang::En, None) => " due today".into(),
+        (Lang::Ja, Some(at)) => format!(" 今日{at}まで"),
+        (Lang::Ja, None) => " 今日中".into(),
     }
 }
 
-pub fn due_tomorrow(l: Lang, at: &str) -> String {
-    match l {
-        Lang::En => format!(" due tomorrow {at}"),
-        Lang::Ja => format!(" 明日{at}まで"),
+pub fn due_tomorrow(l: Lang, at: Option<&str>) -> String {
+    match (l, at) {
+        (Lang::En, Some(at)) => format!(" due tomorrow {at}"),
+        (Lang::En, None) => " due tomorrow".into(),
+        (Lang::Ja, Some(at)) => format!(" 明日{at}まで"),
+        (Lang::Ja, None) => " 明日中".into(),
     }
 }
 
-pub fn due_on(l: Lang, day: jiff::civil::Date) -> String {
-    match l {
-        Lang::En => format!(" due {day}"),
-        Lang::Ja => format!(" {day}まで"),
+pub fn due_on(l: Lang, day: jiff::civil::Date, at: Option<&str>) -> String {
+    match (l, at) {
+        (Lang::En, Some(at)) => format!(" due {day} {at}"),
+        (Lang::En, None) => format!(" due {day}"),
+        (Lang::Ja, Some(at)) => format!(" {day} {at}まで"),
+        (Lang::Ja, None) => format!(" {day}まで"),
     }
 }
 

@@ -6,9 +6,13 @@ A task is a title, a description, notes, a state (`open`, `in_progress`,
 `done`, `dropped`), an optional duration in whole 5-minute blocks, an optional
 place in Now, and up to one level of steps. Every task also carries:
 
-- `due_at`: when the work is due, RFC 3339, stored in UTC, or `null`. A
-  deadline, not a time to work; the plan is where work is scheduled. Steps
-  never carry one (`422`).
+- `due_at` / `due_on`: when the work is due. A deadline, not a time to work;
+  the plan is where work is scheduled. A body names one of them: `due_at`, an
+  RFC 3339 moment, or `due_on`, a `YYYY-MM-DD` day with no set time, read in
+  the user's zone. Naming both is `422`, and either replaces the other. A
+  reply always carries `due_at` as the deadline in UTC (for a day, its 23:59
+  local, restated when the user's zone changes) and `due_on` only for a day.
+  Steps never carry one (`422`).
 - `external_id`: the id the creating system knows it by
   (`canvas:assignment:12345`), opaque, at most 200 bytes, unique per user.
 - `actual_min`: minutes really worked, summed as sessions end, or `null`. A
@@ -20,12 +24,13 @@ place in Now, and up to one level of steps. Every task also carries:
 - `pressing`: true when a live task is overdue or due within 48 hours.
 
 `POST /api/tasks` takes `title` and any of `description`, `notes`,
-`duration_min`, `parent_id`, `is_now`, `state`, `due_at`, `url`,
+`duration_min`, `parent_id`, `is_now`, `state`, `due_at`, `due_on`, `url`,
 `external_id`, `source`, `notify`, `progress`, `category`, `goal_id` and
 `urgency`; an unknown field is a `422`. `PATCH
-/api/tasks/{id}` takes the same, with explicit `null` clearing `due_at`,
-`duration_min`, `parent_id` and `external_id`. A bad `due_at` is `422`; an
-`external_id` another task holds is `409`. Every listing returns `due_at`,
+/api/tasks/{id}` takes the same, with explicit `null` clearing the due date
+(either key), `duration_min`, `parent_id` and `external_id`. A bad due date is
+`422`; an `external_id` another task holds is `409`. Every listing returns
+`due_at`, `due_on`,
 `external_id`, `url` and `source` on tasks and steps.
 
 `DELETE /api/tasks/{id}` removes the task, its steps and their event links

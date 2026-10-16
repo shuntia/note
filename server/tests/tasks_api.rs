@@ -636,6 +636,37 @@ async fn due_at_is_set_cleared_and_validated() {
 }
 
 #[tokio::test]
+async fn a_due_is_a_whole_day_or_a_moment_never_both() {
+    let (app, cookie, _tmp) = app_with_user().await;
+    let (status, t) =
+        post(&app, &cookie, "/api/tasks", r#"{"title":"essay","due_on":"2026-09-19"}"#).await;
+    assert_eq!(status, StatusCode::OK, "{t}");
+    assert_eq!(t["due_on"], "2026-09-19");
+    assert_eq!(t["due_at"], "2026-09-19T23:59:00Z", "the deadline is the end of the day in UTC");
+
+    let (_, t) = patch_task(&app, &cookie, 1, r#"{"due_at":"2026-09-19T15:00:00Z"}"#).await;
+    assert_eq!(t["due_at"], "2026-09-19T15:00:00Z");
+    assert!(t["due_on"].is_null(), "a moment replaces the whole day");
+
+    let (_, t) = patch_task(&app, &cookie, 1, r#"{"due_on":"2026-09-20"}"#).await;
+    assert_eq!(t["due_on"], "2026-09-20");
+    assert_eq!(t["due_at"], "2026-09-20T23:59:00Z");
+
+    let (_, t) = patch_task(&app, &cookie, 1, r#"{"due_on":null}"#).await;
+    assert!(t["due_on"].is_null() && t["due_at"].is_null());
+
+    let both = r#""due_at":"2026-09-19T15:00:00Z","due_on":"2026-09-19""#;
+    let (status, _) = patch_task(&app, &cookie, 1, &format!("{{{both}}}")).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let (status, _) = post(&app, &cookie, "/api/tasks", &format!(r#"{{"title":"x",{both}}}"#)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    for bad in ["\"friday\"", "\"2026-09-19T15:00:00Z\"", "\"2026-02-30\""] {
+        let (status, _) = patch_task(&app, &cookie, 1, &format!(r#"{{"due_on":{bad}}}"#)).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "accepted {bad}");
+    }
+}
+
+#[tokio::test]
 async fn a_step_never_carries_a_due_date_of_its_own() {
     let (app, cookie, _tmp) = app_with_user().await;
     post(&app, &cookie, "/api/tasks", r#"{"title":"essay"}"#).await;

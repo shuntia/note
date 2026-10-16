@@ -17,7 +17,8 @@ curl -X PUT http://localhost:3271/api/tasks/by-external/canvas:assignment:12345 
 ```
 
 The body is a task without its `external_id`, which the path carries (a body
-naming a different one is `422`). The reply is the task with its steps:
+naming a different one is `422`). A due date with no known time goes as
+`"due_on":"2026-09-19"` instead of `due_at`. The reply is the task with its steps:
 
 - `201`: no such task existed; this call made it, `source` `import`.
 - `200`: it existed. The importer owns the title, notes, due date and link,

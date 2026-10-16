@@ -281,8 +281,8 @@ Details:
   matches every word against titles, then the rest of the text. `task_read`
   shows one task as `GET /api/tasks` renders it, plus `url`, `external_id`,
   `source` and when it was added.
-- `task_create`/`task_update` take `due_at` as RFC 3339 or bare `YYYY-MM-DD`
-  (end of that local day); an empty string clears it.
+- `task_create`/`task_update` take `due_at` as `YYYY-MM-DD` (a whole day),
+  `YYYY-MM-DDTHH:MM` (that local time) or RFC 3339; an empty string clears it.
 - `task_bulk_update` sets a state, moves Now or deletes across up to 50 tasks,
   all or nothing. `task_delete` matches `DELETE /api/tasks/{id}`.
 - `plan_tasks` lays up to 10 tasks out as consecutive silent blocks on a day's
