@@ -488,7 +488,7 @@ fn run_traced(
         calls: Default::default(),
         heard,
         reads: Default::default(),
-        writes: Default::default(),
+        acted: Default::default(),
     };
     let mut lookups = 0;
     let started = std::time::Instant::now();
@@ -559,7 +559,7 @@ fn run_traced(
         }
         let calls = resp.tool_calls.clone();
         messages.push(Message::Assistant { text: last_text.clone(), tool_calls: resp.tool_calls });
-        let wrote = env.writes.get();
+        let acted = env.acted.get();
         for call in calls {
             if stopped() {
                 break 'rounds;
@@ -597,7 +597,7 @@ fn run_traced(
             }
             messages.push(Message::ToolResult { call_id: call.id, content, is_error });
         }
-        lookups = if env.writes.get() == wrote { lookups + 1 } else { 0 };
+        lookups = if env.acted.get() == acted { lookups + 1 } else { 0 };
         if lookups > 0 && lookups % LOOKUP_ROUNDS == 0 {
             note_on_last_result(&mut messages, &mt::lookups_nudge(lang, lookups));
         }
@@ -773,36 +773,39 @@ struct CallEnv<'a> {
     calls: std::cell::RefCell<tools::call_ops::Calls>,
     /// What the user wrote that the session holds, against which an asked call is checked.
     heard: Vec<String>,
-    /// Each read since the last write, by tool and arguments, with its result.
-    reads: std::cell::RefCell<std::collections::HashMap<String, (String, bool)>>,
-    /// Successful writes so far.
-    writes: std::cell::Cell<usize>,
+    /// Each read since the last other call, by tool and arguments, with its result.
+    reads: std::cell::RefCell<std::collections::HashMap<String, String>>,
+    /// Successful calls so far that were not reads.
+    acted: std::cell::Cell<usize>,
 }
 
 impl CallEnv<'_> {
-    /// Runs one call; a read already made since the last write is answered
+    /// Runs one call; a read already made since the last other call is answered
     /// from its earlier result instead of running again.
     fn run(&self, name: &str, args: &str) -> (String, bool) {
-        if name == "call_user" {
-            return match self.call_user(args) {
+        let read = tools::reads(name).then(|| read_key(name, args));
+        if let Some(content) = read.as_ref().and_then(|k| self.reads.borrow().get(k).cloned()) {
+            return (mt::repeated_call(self.lang, &content), false);
+        }
+        let (content, is_error) = if name == "call_user" {
+            match self.call_user(args) {
                 Ok(v) => (v.to_string(), false),
                 Err(e) => (error_json(&e), true),
-            };
-        }
-        let read = (!tools::writes(name) && name != "batch").then(|| read_key(name, args));
-        if let Some((content, is_error)) = read.as_ref().and_then(|k| self.reads.borrow().get(k).cloned()) {
-            return (mt::repeated_call(self.lang, &content), is_error);
-        }
-        let (content, is_error) = run_tool(self.deps, self.user_id, self.username, self.kind, name, args, None);
+            }
+        } else {
+            run_tool(self.deps, self.user_id, self.username, self.kind, name, args, None)
+        };
         match read {
-            Some(key) => {
-                self.reads.borrow_mut().insert(key, (content.clone(), is_error));
+            Some(key) if !is_error => {
+                self.reads.borrow_mut().insert(key, content.clone());
             }
-            None if !is_error => {
-                self.writes.set(self.writes.get() + 1);
+            Some(_) => {}
+            None => {
                 self.reads.borrow_mut().clear();
+                if !is_error {
+                    self.acted.set(self.acted.get() + 1);
+                }
             }
-            None => {}
         }
         (content, is_error)
     }
@@ -1588,6 +1591,10 @@ mod tests {
             call("b", "task_list", "{ }"),
             call("c", "task_create", r#"{"title":"milk"}"#),
             call("d", "task_list", "{}"),
+            call("e", "goal_create", r#"{"title":"move"}"#),
+            call("f", "task_list", "{}"),
+            call("g", "memory_read", r#"{"id":"missing"}"#),
+            call("h", "memory_read", r#"{"id":"missing"}"#),
             ChatResponse { text: "done".into(), tool_calls: vec![] },
         ]);
         run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, now(), &[], "hi").unwrap();
@@ -1598,6 +1605,8 @@ mod tests {
         assert!(last_result(&seen[2]).starts_with(repeated), "{}", last_result(&seen[2]));
         assert!(!last_result(&seen[4]).contains(repeated), "a write in between makes the read fresh");
         assert!(last_result(&seen[4]).contains("milk"));
+        assert!(!last_result(&seen[6]).contains(repeated), "any call that is not a read makes reads fresh");
+        assert!(!last_result(&seen[8]).contains(repeated), "a failed read runs again");
     }
 
     #[test]

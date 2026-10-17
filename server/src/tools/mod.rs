@@ -540,6 +540,11 @@ const TRIGGER: &[&str] = registry_of![
 pub fn writes(name: &str) -> bool {
     find(name).is_some_and(|(_, t)| t.writes)
 }
+
+/// Whether this tool only looks things up.
+pub fn reads(name: &str) -> bool {
+    find(name).is_some_and(|(_, t)| t.reads)
+}
 const IMPORT: &[&str] = registry_of![BRIEF];
 const INBOX: &[&str] = registry_of![MEMORY_READ, DECIDE];
 const SUMMARIZE: &[&str] = registry_of![SUMMARY];
@@ -644,6 +649,8 @@ struct ToolSpec {
     exec: Exec,
     embed: Embed,
     writes: bool,
+    /// Whether it only looks: the same call returns the same until something else is called.
+    reads: bool,
     terminal_in: &'static [SessionKind],
     /// The link switch that leaves it on in a share session.
     share: Option<fn(&crate::shares::ShareScope) -> bool>,
@@ -663,6 +670,7 @@ impl ToolSpec {
             exec,
             embed: Embed::Nothing,
             writes: false,
+            reads: false,
             terminal_in: &[],
             share: None,
         }
@@ -774,9 +782,9 @@ const TOOLS: &[ToolSpec] = tools![
          \"remembered\" writes 1 to 10 durable facts, \"task\" leaves it to the importer to \
          make a task, \"nothing\" records that it held nothing durable. Facts already written \
          for this source are archived and replaced.",
-    "memory_query": memory_ops::QueryArgs => run!(&memory_ops::query), embed = Embed::Query;
+    "memory_query": memory_ops::QueryArgs => run!(&memory_ops::query), embed = Embed::Query, reads = true;
         "Search the user's long-term memory; returns ids and summaries.",
-    "memory_read": memory_ops::ReadArgs => run!(&memory_ops::read);
+    "memory_read": memory_ops::ReadArgs => run!(&memory_ops::read), reads = true;
         "Read one memory in full by id.",
     "memory_write": memory_ops::WriteArgs => run!(&memory_ops::write), writes = true, embed = Embed::Content;
         "Add, update, or supersede a memory; superseding archives the old fact. On an add, \
@@ -801,16 +809,16 @@ const TOOLS: &[ToolSpec] = tools![
         "Replace last night's brief for tomorrow's sessions: 5-12 plain lines, no markdown \
          headers, nothing that will read as stale. Every session tomorrow reads it; write it \
          for yourself, not the user.",
-    "task_list": task_query::ListArgs => run!(&task_query::list), share = Some(|s| s.tasks);
+    "task_list": task_query::ListArgs => run!(&task_query::list), share = Some(|s| s.tasks), reads = true;
         "Survey the user's top-level tasks, newest first, each with due date, category, \
          urgency, whether it is pressing (due within two days or overdue), and its steps done \
          of total. The arguments filter and sort. total counts every match, which can be more \
          than one page.",
-    "task_search": task_query::SearchArgs => run!(&task_query::search), share = Some(|s| s.tasks);
+    "task_search": task_query::SearchArgs => run!(&task_query::search), share = Some(|s| s.tasks), reads = true;
         "Find tasks by their words — how to turn a task the user names in passing into an id. \
          Every word must match; title matches first, then description or notes, live before \
          finished. Top-level tasks only, at most 20, dropped ones left out.",
-    "task_read": task_query::ReadArgs => run!(&task_query::read), share = Some(|s| s.tasks);
+    "task_read": task_query::ReadArgs => run!(&task_query::read), share = Some(|s| s.tasks), reads = true;
         "Read one task in full: description, notes, its next block's start (scheduled_at), \
          the link and id it was imported under, its steps with their states and durations, \
          and every other field. The list tools carry titles only.",
@@ -826,7 +834,7 @@ const TOOLS: &[ToolSpec] = tools![
     "goal_update": goal_ops::UpdateArgs => run!(goal_ops::update);
         "Change a goal's title, description, due date or state: done when reached, dropped \
          when let go.",
-    "goal_list": goal_ops::ListArgs => run!(&goal_ops::list), share = Some(|s| s.goals);
+    "goal_list": goal_ops::ListArgs => run!(&goal_ops::list), share = Some(|s| s.goals), reads = true;
         "Read the user's goals, soonest deadline first, each with its task count, how many \
          are done, and the next unfinished one due — how to check what is left against a \
          goal's date.",
@@ -866,12 +874,12 @@ const TOOLS: &[ToolSpec] = tools![
     "order_drop": order_ops::DropArgs => run!(kind &order_ops::drop_item), writes = true;
         "Take one task or step out of the day's order; the task itself is untouched. The \
          nightly run acts on the day it is planning, every other session on today.",
-    "plan_list": plan_ops::PlanListArgs => run!(plan_ops::plan_list), share = Some(|s| s.today);
+    "plan_list": plan_ops::PlanListArgs => run!(plan_ops::plan_list), share = Some(|s| s.today), reads = true;
         "Read one day's plan (default today; the context lists only today's): every event \
          with its event_id — the id the schedule tools take — times, status, flexibility, \
          for a plan_tasks block the task_id it holds; later_trigger_days names the next days \
          holding triggers.",
-    "calendar_list": calendar_ops::ListArgs => run!(&calendar_ops::list), share = Some(|s| s.today);
+    "calendar_list": calendar_ops::ListArgs => run!(&calendar_ops::list), share = Some(|s| s.today), reads = true;
         "Read the user's calendar of fixed commitments, with quiet windows marked and the \
          free time set aside for tasks.",
     "calendar_add": calendar_ops::AddArgs => run!(calendar_ops::add);
@@ -924,7 +932,7 @@ const TOOLS: &[ToolSpec] = tools![
     "stay_quiet": trigger_ops::QuietArgs => run!(&trigger_ops::stay_quiet), terminal_in = &[SessionKind::Trigger];
         "Say nothing and end the trigger session: right when the user is already on it, what \
          you would say is on their screen, or the prompt no longer applies.",
-    "web_search": crate::search::SearchArgs => Exec::Network(crate::search::run_tool);
+    "web_search": crate::search::SearchArgs => Exec::Network(crate::search::run_tool), reads = true;
         "Search the web and get back a short summary of the results with their sources. For \
          anything current or outside what you hold: a fact you are unsure of, a page the user \
          asks about, anything after your training. query is what you would type into a search \

@@ -121,7 +121,7 @@ pub async fn receive(state: &AppState, rooms: &mut Rooms, message: &Message) {
         let cutoff = now - jiff::Span::new().minutes(i64::from(state.idle_summary_min));
         thread_for(&conn, user_id, cutoff).unwrap_or(None)
     };
-    match crate::talk::run_turn(state, user_id, &username, conversation, text, Via::Matrix).await {
+    match crate::talk::run_turn(state, user_id, &username, conversation, text, Via::Matrix, None).await {
         Ok(turn) => {
             rooms.busy.remove(&user_id);
             say(state, &message.room_id, user_id, &turn.reply).await;

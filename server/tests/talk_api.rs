@@ -1053,6 +1053,7 @@ async fn a_turn_outlasting_the_hold_answers_pending_and_ends_on_the_socket() {
             serde_json::from_slice(&res.into_body().collect().await.unwrap().to_bytes()).unwrap();
         assert_eq!(body["pending"], true);
         let id = body["conversation_id"].as_i64().unwrap();
+        let turn = body["turn"].as_i64().unwrap();
 
         open.send(()).unwrap();
         let done = loop {
@@ -1066,6 +1067,7 @@ async fn a_turn_outlasting_the_hold_answers_pending_and_ends_on_the_socket() {
             }
         };
         assert_eq!(done["conversation_id"], id);
+        assert_eq!(done["turn"], turn);
         let rows = state
             .db
             .lock()

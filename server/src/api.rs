@@ -1382,22 +1382,24 @@ async fn talk(
 ) -> impl IntoResponse {
     use crate::talk::TurnError as E;
     let lang = request_lang(&state, &user, &headers);
+    let (started, start) = tokio::sync::oneshot::channel();
     let mut task = tokio::spawn({
         let (state, username) = (state.clone(), user.username.clone());
         async move {
-            crate::talk::run_turn(&state, user.id, &username, req.conversation_id, &req.message, crate::talk::Via::Web)
+            let message = req.message;
+            crate::talk::run_turn(&state, user.id, &username, req.conversation_id, &message, crate::talk::Via::Web, Some(started))
                 .await
         }
     });
     let turn = match tokio::time::timeout(state.talk_hold, &mut task).await {
         Ok(Ok(turn)) => turn,
         Ok(Err(_)) => Err(E::Internal),
-        Err(_) => match state.live_turns.conversation(user.id) {
-            Some(id) => {
-                return (StatusCode::ACCEPTED, Json(serde_json::json!({ "conversation_id": id, "pending": true })))
-                    .into_response();
+        Err(_) => match start.await {
+            Ok(s) => {
+                let body = serde_json::json!({ "conversation_id": s.conversation_id, "turn": s.turn, "pending": true });
+                return (StatusCode::ACCEPTED, Json(body)).into_response();
             }
-            None => task.await.unwrap_or(Err(E::Internal)),
+            Err(_) => task.await.unwrap_or(Err(E::Internal)),
         },
     };
     match turn {

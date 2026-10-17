@@ -29,10 +29,12 @@ export type AgentFrame = {
   event: AgentEvent
 }
 
-// A turn's work is over and its thread holds the outcome, or `failure` says why it holds none.
+// A turn's work is over and its thread holds the outcome, or `failure` says why it holds none;
+// `turn` is the id of the message row it answered.
 export type TalkDoneFrame = {
   type: 'talk_done'
   conversation_id: number
+  turn: number
   failure?: { reason: FailureReason; error: string }
 }
 

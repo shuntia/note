@@ -35,8 +35,8 @@ test('a pending turn ends on the socket and reads its reply from the thread', as
     'fetch',
     vi.fn(async (path: string) => {
       if (path === '/api/talk') {
-        queueMicrotask(() => listeners.forEach((fn) => fn({ type: 'talk_done', conversation_id: 7 })))
-        return json({ conversation_id: 7, pending: true }, 202)
+        queueMicrotask(() => listeners.forEach((fn) => fn({ type: 'talk_done', conversation_id: 7, turn: 3 })))
+        return json({ conversation_id: 7, turn: 3, pending: true }, 202)
       }
       return json([
         row(1, 'user', 'earlier'),
@@ -62,13 +62,48 @@ test('a pending turn that failed throws what the socket said', async () => {
     vi.fn(async () => {
       queueMicrotask(() =>
         listeners.forEach((fn) =>
-          fn({ type: 'talk_done', conversation_id: 7, failure: { reason: 'provider_down', error: 'down' } }),
+          fn({ type: 'talk_done', conversation_id: 7, turn: 3, failure: { reason: 'provider_down', error: 'down' } }),
         ),
       )
-      return json({ conversation_id: 7, pending: true }, 202)
+      return json({ conversation_id: 7, turn: 3, pending: true }, 202)
     }),
   )
   const err: unknown = await talkTurn('a long job').catch((e: unknown) => e)
   expect(err).toBeInstanceOf(ApiError)
   expect(err).toMatchObject({ status: 502, message: 'down', reason: 'provider_down' })
+})
+
+test('a turn taken back is a failure, never the reply before it', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (path: string) => {
+      if (path === '/api/talk') {
+        queueMicrotask(() => listeners.forEach((fn) => fn({ type: 'talk_done', conversation_id: 7, turn: 3 })))
+        return json({ conversation_id: 7, turn: 3, pending: true }, 202)
+      }
+      return json([row(1, 'user', 'earlier'), row(2, 'assistant', 'old reply')])
+    }),
+  )
+  const err: unknown = await talkTurn('a long job').catch((e: unknown) => e)
+  expect(err).toBeInstanceOf(ApiError)
+  expect(err).toMatchObject({ reason: 'internal' })
+})
+
+test('the end of another turn in the same thread is not this one', async () => {
+  let release = () => {}
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (path: string) => {
+      if (path === '/api/talk') {
+        queueMicrotask(() => listeners.forEach((fn) => fn({ type: 'talk_done', conversation_id: 7, turn: 1 })))
+        release = () => listeners.forEach((fn) => fn({ type: 'talk_done', conversation_id: 7, turn: 3 }))
+        return json({ conversation_id: 7, turn: 3, pending: true }, 202)
+      }
+      return json([row(1, 'user', 'earlier'), row(2, 'assistant', 'old'), row(3, 'user', 'job'), row(4, 'assistant', 'new')])
+    }),
+  )
+  const reply = talkTurn('job')
+  await new Promise((r) => setTimeout(r, 20))
+  release()
+  expect((await reply).reply).toBe('new')
 })

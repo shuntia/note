@@ -197,7 +197,8 @@ export type TalkReply = {
 }
 
 // A turn still going when the request stopped waiting; it ends on the socket.
-export type TalkPending = { conversation_id: number; pending: true }
+// `turn` is the id of the message row it answers.
+export type TalkPending = { conversation_id: number; turn: number; pending: true }
 
 // One entry of the day's template, in template order; `index` addresses it in a write.
 export type ScheduleRow = {

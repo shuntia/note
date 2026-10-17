@@ -164,7 +164,7 @@ async fn a_web_turn_in_a_matrix_thread_posts_nothing_to_matrix() {
     fake.took();
     let id: i64 = state.db().query_row("SELECT id FROM conversations", [], |r| r.get(0)).unwrap();
     fake.answer(SENT);
-    note_server::talk::run_turn(&state, 1, "aki", Some(id), "and from the web", note_server::talk::Via::Web)
+    note_server::talk::run_turn(&state, 1, "aki", Some(id), "and from the web", note_server::talk::Via::Web, None)
         .await
         .unwrap();
     assert!(fake.silent(), "a web turn stays on the web");

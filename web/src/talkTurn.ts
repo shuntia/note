@@ -1,6 +1,6 @@
 import { api, ApiError } from './api'
 import { t } from './i18n'
-import type { FailureReason, TalkMessage, TalkReply } from './types'
+import type { TalkMessage, TalkReply } from './types'
 import { onAgentFrame, type TalkDoneFrame } from './ws'
 
 // How often a turn left pending is looked in on, in case its socket frame never comes.
@@ -13,44 +13,47 @@ export async function talkTurn(message: string, conversationId?: number): Promis
   let heard: (() => void) | null = null
   const off = onAgentFrame((frame) => {
     if (frame.type !== 'talk_done') return
-    ended.set(frame.conversation_id, frame)
+    ended.set(frame.turn, frame)
     heard?.()
   })
   try {
     const answer = await api.talk(message, conversationId)
     if (!('pending' in answer)) return answer
-    const id = answer.conversation_id
+    const { conversation_id: id, turn } = answer
     for (;;) {
-      const done = ended.get(id)
+      const done = ended.get(turn)
       if (done?.failure) throw new ApiError(502, done.failure.error, done.failure.reason)
       if (done) break
       await new Promise<void>((resolve) => {
         heard = resolve
-        window.setTimeout(resolve, POLL_MS)
+        setTimeout(resolve, POLL_MS)
       })
       heard = null
-      if (!ended.has(id)) {
+      if (!ended.has(turn)) {
         const live = await api.talkLive().catch(() => undefined)
         if (live === null || (live && live.conversation_id !== id)) break
       }
     }
-    return replyOf(id, await api.conversationMessages(id))
+    return replyOf(id, turn, await api.conversationMessages(id))
   } finally {
     off()
   }
 }
 
-// The turn's reply as the thread holds it: the calls and the answer after its last user row.
-function replyOf(id: number, rows: TalkMessage[]): TalkReply {
-  const after = rows.slice(rows.map((r) => r.role).lastIndexOf('user') + 1)
-  const answer = after.find((r) => r.role === 'assistant')
-  if (!answer) throw new ApiError(502, t('talk.unreachable'), 'internal' satisfies FailureReason)
+// The turn's reply as the thread holds it: the calls and the answer after the row it answers.
+function replyOf(id: number, turn: number, rows: TalkMessage[]): TalkReply {
+  const at = rows.findIndex((r) => r.id === turn)
+  const after = at < 0 ? [] : rows.slice(at + 1)
+  const end = after.findIndex((r) => r.role === 'assistant')
+  if (end < 0) throw new ApiError(502, t('talk.unreachable'), 'internal')
+  const answer = after[end]
   return {
     conversation_id: id,
     reply: answer.content,
     reasoning: answer.reasoning ?? '',
     thought_ms: answer.thought_ms ?? 0,
     steps: after
+      .slice(0, end)
       .filter((r) => r.role === 'tool')
       .map((r) => ({
         name: r.tool_name ?? 'tool',

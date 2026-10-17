@@ -486,12 +486,35 @@ pub struct LiveTurns(std::sync::Mutex<std::collections::HashMap<i64, LiveTurn>>)
 struct LiveTurn {
     conversation_id: i64,
     frames: Vec<String>,
+    /// The run of streamed pieces since the last other frame, kept as one.
+    run: Option<Run>,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+struct Run {
+    thinking: bool,
+    text: String,
+    seq: u64,
+}
+
+impl LiveTurn {
+    fn run_frame(&self, run: &Run) -> String {
+        let text = &run.text;
+        let event = if run.thinking { AgentEvent::ThinkingDelta { text } } else { AgentEvent::ReplyDelta { text } };
+        crate::channels::ws::agent_frame(Some(self.conversation_id), run.seq, &event)
+    }
+
+    fn close_run(&mut self) {
+        if let Some(run) = self.run.take() {
+            let frame = self.run_frame(&run);
+            self.frames.push(frame);
+        }
+    }
 }
 
 impl LiveTurns {
     fn begin(&self, user_id: i64, conversation_id: i64, stop: std::sync::Arc<std::sync::atomic::AtomicBool>) {
-        self.lock().insert(user_id, LiveTurn { conversation_id, frames: Vec::new(), stop });
+        self.lock().insert(user_id, LiveTurn { conversation_id, frames: Vec::new(), run: None, stop });
     }
 
     /// Asks the user's turn in `conversation_id` to stop; false when no turn runs there.
@@ -505,15 +528,29 @@ impl LiveTurns {
         }
     }
 
-    /// The thread of the user's turn in flight.
-    pub fn conversation(&self, user_id: i64) -> Option<i64> {
-        self.lock().get(&user_id).map(|turn| turn.conversation_id)
-    }
-
-    fn record(&self, user_id: i64, frame: &str) {
-        if let Some(turn) = self.lock().get_mut(&user_id) {
-            turn.frames.push(frame.to_string());
+    /// Keeps `event` for a client that opens the thread later; a streamed piece
+    /// joins the run before it, up to what one frame carries.
+    fn record(&self, user_id: i64, seq: u64, event: &AgentEvent, frame: &str) {
+        let mut turns = self.lock();
+        let Some(turn) = turns.get_mut(&user_id) else { return };
+        let (thinking, text) = match *event {
+            AgentEvent::ThinkingDelta { text } => (true, text),
+            AgentEvent::ReplyDelta { text } => (false, text),
+            _ => {
+                turn.close_run();
+                turn.frames.push(frame.to_string());
+                return;
+            }
+        };
+        let joins = turn.run.as_ref().is_some_and(|r| {
+            r.thinking == thinking && r.text.len() + text.len() <= crate::channels::ws::MAX_FRAME_TEXT
+        });
+        if !joins {
+            turn.close_run();
         }
+        let run = turn.run.get_or_insert_with(|| Run { thinking, text: String::new(), seq });
+        run.text.push_str(text);
+        run.seq = seq;
     }
 
     fn end(&self, user_id: i64) {
@@ -523,11 +560,14 @@ impl LiveTurns {
     /// `{"conversation_id": …, "frames": [...]}` for the user's turn in flight, or `null`.
     pub fn snapshot_json(&self, user_id: i64) -> String {
         match self.lock().get(&user_id) {
-            Some(turn) => format!(
-                r#"{{"conversation_id":{},"frames":[{}]}}"#,
-                turn.conversation_id,
-                turn.frames.join(",")
-            ),
+            Some(turn) => {
+                let tail = turn.run.as_ref().map(|run| turn.run_frame(run));
+                format!(
+                    r#"{{"conversation_id":{},"frames":[{}]}}"#,
+                    turn.conversation_id,
+                    turn.frames.iter().chain(&tail).map(String::as_str).collect::<Vec<_>>().join(",")
+                )
+            }
             None => "null".to_string(),
         }
     }
@@ -543,6 +583,7 @@ struct LiveGuard<'a> {
     state: &'a AppState,
     user_id: i64,
     conversation_id: i64,
+    turn: i64,
     lang: Lang,
     /// Why the turn failed, for a client no longer waiting on its request.
     failure: Option<crate::failure::Reason>,
@@ -551,7 +592,8 @@ struct LiveGuard<'a> {
 impl Drop for LiveGuard<'_> {
     fn drop(&mut self) {
         self.state.live_turns.end(self.user_id);
-        let mut done = serde_json::json!({"type": "talk_done", "conversation_id": self.conversation_id});
+        let mut done =
+            serde_json::json!({"type": "talk_done", "conversation_id": self.conversation_id, "turn": self.turn});
         if let Some(reason) = self.failure {
             done["failure"] = serde_json::json!({"reason": reason, "error": crate::text::failure_reason(self.lang, reason)});
         }
@@ -565,6 +607,12 @@ pub struct Turn {
     pub steps: Vec<SessionStep>,
     pub reasoning: String,
     pub thought_ms: u64,
+}
+
+/// A turn under way: its thread, and the row of the message it answers.
+pub struct Started {
+    pub conversation_id: i64,
+    pub turn: i64,
 }
 
 #[derive(Debug)]
@@ -590,6 +638,7 @@ pub async fn run_turn(
     conversation: Option<i64>,
     message: &str,
     via: Via,
+    started: Option<tokio::sync::oneshot::Sender<Started>>,
 ) -> Result<Turn, TurnError> {
     let message = message.trim().to_string();
     if message.is_empty() || message.len() > MAX_MESSAGE {
@@ -669,14 +718,18 @@ pub async fn run_turn(
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         st.live_turns.begin(user_id, conv_id, stop.clone());
         let lang = Lang::for_user(&st.config_dir, &session_user);
-        let mut live = LiveGuard { state: &st, user_id, conversation_id: conv_id, lang, failure: None };
+        let mut live =
+            LiveGuard { state: &st, user_id, conversation_id: conv_id, turn: user_row, lang, failure: None };
+        if let Some(started) = started {
+            let _ = started.send(Started { conversation_id: conv_id, turn: user_row });
+        }
         let outcome = (|| {
             st.hub.broadcast_changed(user_id);
             let seq = std::cell::Cell::new(0u64);
             let on_event = |ev: AgentEvent| {
                 let n = seq.replace(seq.get() + 1);
                 let frame = crate::channels::ws::agent_frame(Some(conv_id), n, &ev);
-                st.live_turns.record(user_id, &frame);
+                st.live_turns.record(user_id, n, &ev, &frame);
                 st.hub.send(user_id, &frame);
             };
             let out = match crate::agent::run_session_stoppable(
@@ -785,6 +838,29 @@ mod tests {
 
     fn now() -> jiff::Timestamp {
         jiff::Timestamp::now()
+    }
+
+    #[test]
+    fn streamed_pieces_are_kept_as_runs() {
+        let live = LiveTurns::default();
+        live.begin(1, 9, std::sync::Arc::default());
+        let mut seq = 0;
+        let mut record = |ev: AgentEvent| {
+            live.record(1, seq, &ev, &crate::channels::ws::agent_frame(Some(9), seq, &ev));
+            seq += 1;
+        };
+        record(AgentEvent::ThinkingDelta { text: "a " });
+        record(AgentEvent::ThinkingDelta { text: "plan" });
+        record(AgentEvent::ToolCall { index: 0, name: "task_list", args: "{}" });
+        record(AgentEvent::ReplyDelta { text: "Do" });
+        record(AgentEvent::ReplyDelta { text: "ne" });
+        let snap: serde_json::Value = serde_json::from_str(&live.snapshot_json(1)).unwrap();
+        let frames: Vec<_> =
+            snap["frames"].as_array().unwrap().iter().map(|f| (f["seq"].as_u64().unwrap(), f["event"].clone())).collect();
+        assert_eq!(frames.len(), 3);
+        assert_eq!(frames[0], (1, serde_json::json!({"kind": "thinking_delta", "text": "a plan"})));
+        assert_eq!(frames[1].0, 2);
+        assert_eq!(frames[2], (4, serde_json::json!({"kind": "reply_delta", "text": "Done"})));
     }
 
     #[test]
