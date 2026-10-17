@@ -505,6 +505,11 @@ impl LiveTurns {
         }
     }
 
+    /// The thread of the user's turn in flight.
+    pub fn conversation(&self, user_id: i64) -> Option<i64> {
+        self.lock().get(&user_id).map(|turn| turn.conversation_id)
+    }
+
     fn record(&self, user_id: i64, frame: &str) {
         if let Some(turn) = self.lock().get_mut(&user_id) {
             turn.frames.push(frame.to_string());
@@ -533,20 +538,24 @@ impl LiveTurns {
 }
 
 /// Ends the live turn when the turn's work is over, however it ended, and tells
-/// the user's clients to read the thread again.
+/// the user's clients to read the thread again, or why the turn failed.
 struct LiveGuard<'a> {
     state: &'a AppState,
     user_id: i64,
     conversation_id: i64,
+    lang: Lang,
+    /// Why the turn failed, for a client no longer waiting on its request.
+    failure: Option<crate::failure::Reason>,
 }
 
 impl Drop for LiveGuard<'_> {
     fn drop(&mut self) {
         self.state.live_turns.end(self.user_id);
-        self.state.hub.send(
-            self.user_id,
-            &serde_json::json!({"type": "talk_done", "conversation_id": self.conversation_id}).to_string(),
-        );
+        let mut done = serde_json::json!({"type": "talk_done", "conversation_id": self.conversation_id});
+        if let Some(reason) = self.failure {
+            done["failure"] = serde_json::json!({"reason": reason, "error": crate::text::failure_reason(self.lang, reason)});
+        }
+        self.state.hub.send(self.user_id, &done.to_string());
     }
 }
 
@@ -659,73 +668,80 @@ pub async fn run_turn(
         };
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         st.live_turns.begin(user_id, conv_id, stop.clone());
-        let _live = LiveGuard { state: &st, user_id, conversation_id: conv_id };
-        st.hub.broadcast_changed(user_id);
-        let seq = std::cell::Cell::new(0u64);
-        let on_event = |ev: AgentEvent| {
-            let n = seq.replace(seq.get() + 1);
-            let frame = crate::channels::ws::agent_frame(Some(conv_id), n, &ev);
-            st.live_turns.record(user_id, &frame);
-            st.hub.send(user_id, &frame);
-        };
-        let out = match crate::agent::run_session_stoppable(
-            &deps,
-            user_id,
-            &session_user,
-            crate::tools::SessionKind::Talk,
-            now,
-            &past,
-            &said,
-            &on_event,
-            Some(&stop),
-        ) {
-            Ok(out) => out,
-            Err(e) => {
-                let conn = st.db();
-                let undone = if conversation.is_some() {
-                    conn.execute(
-                        "DELETE FROM talk_messages WHERE id = ?1 AND conversation_id IN
-                            (SELECT id FROM conversations WHERE id = ?2 AND user_id = ?3)",
-                        (user_row, conv_id, user_id),
-                    )
-                } else {
-                    conn.execute("DELETE FROM conversations WHERE id = ?1 AND user_id = ?2", (conv_id, user_id))
-                };
-                if let Err(undo) = undone {
-                    let _ = crate::log::record(&conn, Some(user_id), "talk_error", &format!("undoing the turn: {undo:#}"));
-                }
-                return Err(e);
-            }
-        };
-        let reply = if out.reply.trim().is_empty() {
-            crate::text::empty_reply(crate::text::Lang::for_user(&st.config_dir, &session_user))
-        } else {
-            out.reply.clone()
-        };
-        let conn = st.db();
-        anyhow::ensure!(owned(&conn, user_id, conv_id)?, "the conversation was deleted mid-turn");
-        for s in &out.steps {
-            append_tool(
-                &conn,
-                conv_id,
-                &s.name,
-                &s.args,
-                &s.result,
-                s.is_error,
-                s.thinking.as_deref(),
+        let lang = Lang::for_user(&st.config_dir, &session_user);
+        let mut live = LiveGuard { state: &st, user_id, conversation_id: conv_id, lang, failure: None };
+        let outcome = (|| {
+            st.hub.broadcast_changed(user_id);
+            let seq = std::cell::Cell::new(0u64);
+            let on_event = |ev: AgentEvent| {
+                let n = seq.replace(seq.get() + 1);
+                let frame = crate::channels::ws::agent_frame(Some(conv_id), n, &ev);
+                st.live_turns.record(user_id, &frame);
+                st.hub.send(user_id, &frame);
+            };
+            let out = match crate::agent::run_session_stoppable(
+                &deps,
+                user_id,
+                &session_user,
+                crate::tools::SessionKind::Talk,
                 now,
-            )?;
+                &past,
+                &said,
+                &on_event,
+                Some(&stop),
+            ) {
+                Ok(out) => out,
+                Err(e) => {
+                    let conn = st.db();
+                    let undone = if conversation.is_some() {
+                        conn.execute(
+                            "DELETE FROM talk_messages WHERE id = ?1 AND conversation_id IN
+                                (SELECT id FROM conversations WHERE id = ?2 AND user_id = ?3)",
+                            (user_row, conv_id, user_id),
+                        )
+                    } else {
+                        conn.execute("DELETE FROM conversations WHERE id = ?1 AND user_id = ?2", (conv_id, user_id))
+                    };
+                    if let Err(undo) = undone {
+                        let _ = crate::log::record(&conn, Some(user_id), "talk_error", &format!("undoing the turn: {undo:#}"));
+                    }
+                    return Err(e);
+                }
+            };
+            let reply = if out.reply.trim().is_empty() {
+                crate::text::empty_reply(crate::text::Lang::for_user(&st.config_dir, &session_user))
+            } else {
+                out.reply.clone()
+            };
+            let conn = st.db();
+            anyhow::ensure!(owned(&conn, user_id, conv_id)?, "the conversation was deleted mid-turn");
+            for s in &out.steps {
+                append_tool(
+                    &conn,
+                    conv_id,
+                    &s.name,
+                    &s.args,
+                    &s.result,
+                    s.is_error,
+                    s.thinking.as_deref(),
+                    now,
+                )?;
+            }
+            append_assistant(&conn, conv_id, &reply, &out.reasoning, out.thought_ms, now)?;
+            touch(&conn, conv_id, now)?;
+            mark_via(&conn, conv_id, via, now)?;
+            Ok::<_, anyhow::Error>(Turn {
+                conversation_id: conv_id,
+                reply,
+                steps: out.steps,
+                reasoning: out.reasoning,
+                thought_ms: out.thought_ms,
+            })
+        })();
+        if let Err(e) = &outcome {
+            live.failure = Some(crate::failure::Failure::of(e).reason);
         }
-        append_assistant(&conn, conv_id, &reply, &out.reasoning, out.thought_ms, now)?;
-        touch(&conn, conv_id, now)?;
-        mark_via(&conn, conv_id, via, now)?;
-        Ok::<_, anyhow::Error>(Turn {
-            conversation_id: conv_id,
-            reply,
-            steps: out.steps,
-            reasoning: out.reasoning,
-            thought_ms: out.thought_ms,
-        })
+        outcome
     })
     .await;
     match result {

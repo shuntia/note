@@ -80,6 +80,7 @@ impl OpenAILLM {
             v["tool_choice"] = match must {
                 super::MustCall::Any => "required".into(),
                 super::MustCall::Tool(name) => serde_json::json!({"type": "function", "function": {"name": name}}),
+                super::MustCall::Nothing => "none".into(),
             };
         }
         if self.off(req) {

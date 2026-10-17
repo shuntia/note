@@ -29,8 +29,12 @@ export type AgentFrame = {
   event: AgentEvent
 }
 
-// A turn's work is over and its thread holds the outcome.
-export type TalkDoneFrame = { type: 'talk_done'; conversation_id: number }
+// A turn's work is over and its thread holds the outcome, or `failure` says why it holds none.
+export type TalkDoneFrame = {
+  type: 'talk_done'
+  conversation_id: number
+  failure?: { reason: FailureReason; error: string }
+}
 
 const agentListeners = new Set<(frame: AgentFrame | TalkDoneFrame) => void>()
 

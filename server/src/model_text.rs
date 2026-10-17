@@ -874,6 +874,48 @@ pub fn share_goal_of(l: Lang, goal: &str) -> String {
     }
 }
 
+/// Stands in for a read the session already made, with nothing written since.
+pub fn repeated_call(l: Lang, earlier: &str) -> String {
+    match l {
+        Lang::En => format!(
+            "You already made this exact call this turn and nothing has changed since. Its result \
+             is below; use it instead of calling again.\n\n{earlier}"
+        ),
+        Lang::Ja => format!(
+            "このターンで同じ呼び出しを既に行っており、その後の変更はありません。結果は以下のとおりです。\
+             再度呼び出さずにこれを使ってください。\n\n{earlier}"
+        ),
+    }
+}
+
+/// Follows a run of rounds that only looked things up.
+pub fn lookups_nudge(l: Lang, rounds: usize) -> String {
+    match l {
+        Lang::En => format!(
+            "(Note to self: {rounds} rounds of lookups in a row and nothing done yet. Act on what you \
+             have, or answer and say what is still missing.)"
+        ),
+        Lang::Ja => format!(
+            "（メモ: 調べるだけのラウンドが{rounds}回続いています。手元の情報で行動するか、\
+             足りないものを伝えて回答してください。）"
+        ),
+    }
+}
+
+/// Precedes the round that must answer in text.
+pub fn last_round(l: Lang) -> &'static str {
+    match l {
+        Lang::En => {
+            "(Note to self: no steps left this turn. Answer now in plain text: what you did, and what \
+             is still left if anything, so the user can say \"continue\".)"
+        }
+        Lang::Ja => {
+            "（メモ: このターンのステップは残っていません。今すぐ文章で回答してください。\
+             行ったことと、残っていることがあればそれを伝え、ユーザーが「続けて」と言えるようにしてください。）"
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

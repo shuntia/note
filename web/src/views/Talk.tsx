@@ -18,6 +18,7 @@ import { t, type Key } from '../i18n'
 import { isoDay } from '../i18n/format'
 import { Markdown } from '../markdown'
 import { reducedMotion } from '../motion'
+import { talkTurn } from '../talkTurn'
 import { Overflow } from '../overflow'
 import { Pulse } from '../pulse'
 import { batchReceipts, doing, receipt } from '../receipts'
@@ -823,7 +824,7 @@ export function Talk({
     }
 
     try {
-      const reply = await api.talk(text, current ?? undefined)
+      const reply = await talkTurn(text, current ?? undefined)
       void loadList(true)
       if (era.current !== sentIn) return
       setItems((prev) => [

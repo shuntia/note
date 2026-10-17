@@ -1028,3 +1028,56 @@ async fn a_looping_turn_stops_when_its_user_asks_and_keeps_the_thread() {
     assert_eq!(roles.first().unwrap(), "user");
     assert_eq!(roles.last().unwrap(), "assistant");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_turn_outlasting_the_hold_answers_pending_and_ends_on_the_socket() {
+    for fails in [false, true] {
+        let (open, gate) = std::sync::mpsc::channel();
+        let llm = Arc::new(GatedLLM(std::sync::Mutex::new(gate), fails));
+        let (app, cookie, state, _cfg) =
+            common::app_with_talk_hold(llm, std::time::Duration::from_millis(100)).await;
+        let (_, mut frames) = state.hub.register(1).unwrap();
+        let res = app
+            .clone()
+            .oneshot(
+                Request::post("/api/talk")
+                    .header(header::COOKIE, &cookie)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"message":"a long job"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::ACCEPTED);
+        let body: serde_json::Value =
+            serde_json::from_slice(&res.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        assert_eq!(body["pending"], true);
+        let id = body["conversation_id"].as_i64().unwrap();
+
+        open.send(()).unwrap();
+        let done = loop {
+            let frame = tokio::time::timeout(std::time::Duration::from_secs(5), frames.recv())
+                .await
+                .expect("talk_done arrives")
+                .unwrap();
+            let frame: serde_json::Value = serde_json::from_str(&frame).unwrap();
+            if frame["type"] == "talk_done" {
+                break frame;
+            }
+        };
+        assert_eq!(done["conversation_id"], id);
+        let rows = state
+            .db
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM talk_messages WHERE conversation_id = ?1", [id], |r| r.get::<_, i64>(0))
+            .unwrap();
+        if fails {
+            assert!(done["failure"]["error"].as_str().is_some_and(|e| !e.is_empty()), "{done}");
+            assert_eq!(rows, 0, "a failed turn takes its message back");
+        } else {
+            assert!(done.get("failure").is_none(), "{done}");
+            assert_eq!(rows, 2);
+        }
+    }
+}

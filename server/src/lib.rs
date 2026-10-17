@@ -157,6 +157,9 @@ pub struct AppState {
     /// See `auth::MAX_CONCURRENT_RECHECKS`.
     pub recheck_slots: Arc<tokio::sync::Semaphore>,
     pub talk_gate: Arc<TalkGate>,
+    /// How long `POST /api/talk` waits on a turn before answering that it is
+    /// still going, kept under the 100 s a proxy in front allows a response.
+    pub talk_hold: std::time::Duration,
     /// Share visitors' turns, one per owner, apart from the members' slots.
     pub share_gate: Arc<TalkGate>,
     pub live_turns: Arc<crate::talk::LiveTurns>,
@@ -223,6 +226,7 @@ impl AppState {
                 crate::auth::MAX_CONCURRENT_RECHECKS,
             )),
             talk_gate: Arc::new(TalkGate::new()),
+            talk_hold: std::time::Duration::from_secs(45),
             share_gate: Arc::new(TalkGate::with_capacity(MAX_CONCURRENT_SHARE_TALKS)),
             live_turns: Arc::default(),
             admin_limiter: Arc::new(crate::auth::LoginLimiter::new()),

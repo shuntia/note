@@ -163,6 +163,18 @@ pub async fn app_with_logged_in_user_llm_and_state(
     build(Some(llm)).await
 }
 
+#[allow(dead_code)] // only the talk suite shortens how long a request waits on its turn
+pub async fn app_with_talk_hold(
+    llm: Arc<dyn LLMProvider>,
+    hold: std::time::Duration,
+) -> (axum::Router, String, AppState, TempDir) {
+    let (_, _, mut state, cfg) = build(Some(llm)).await;
+    state.talk_hold = hold;
+    let app = api::router(state.clone());
+    let cookie = login(&app, "aki", "pw").await;
+    (app, cookie, state, cfg)
+}
+
 #[allow(dead_code)] // every test binary compiles this module; only the talk suite reaches into the state
 pub async fn app_with_logged_in_user_and_state() -> (axum::Router, String, AppState, TempDir) {
     build(None).await

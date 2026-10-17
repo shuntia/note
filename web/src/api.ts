@@ -47,6 +47,7 @@ import type {
   ShareTurn,
   SqlResult,
   TalkMessage,
+  TalkPending,
   TalkReply,
   Task,
   TaskNode,
@@ -289,7 +290,7 @@ export const api = {
       body: JSON.stringify({ conversation_id: conversationId }),
     }),
   talk: (message: string, conversationId?: number) =>
-    request<TalkReply>('/api/talk', {
+    request<TalkReply | TalkPending>('/api/talk', {
       method: 'POST',
       body: JSON.stringify(
         conversationId === undefined ? { message } : { message, conversation_id: conversationId },

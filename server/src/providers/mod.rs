@@ -33,11 +33,13 @@ pub struct ChatRequest<'a> {
     pub must_call: Option<MustCall<'a>>,
 }
 
-/// What the reply has to call instead of answering in text.
+/// What the reply has to call instead of answering in text, or `Nothing` for
+/// a reply that must answer in text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MustCall<'a> {
     Any,
     Tool(&'a str),
+    Nothing,
 }
 
 #[derive(Debug, Clone, Default)]

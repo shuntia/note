@@ -84,6 +84,7 @@ impl MockLLM {
             must_call: req.must_call.map(|m| match m {
                 super::MustCall::Any => "*".to_string(),
                 super::MustCall::Tool(name) => name.to_string(),
+                super::MustCall::Nothing => "-".to_string(),
             }),
         });
     }

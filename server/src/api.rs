@@ -1382,15 +1382,24 @@ async fn talk(
 ) -> impl IntoResponse {
     use crate::talk::TurnError as E;
     let lang = request_lang(&state, &user, &headers);
-    let turn = crate::talk::run_turn(
-        &state,
-        user.id,
-        &user.username,
-        req.conversation_id,
-        &req.message,
-        crate::talk::Via::Web,
-    )
-    .await;
+    let mut task = tokio::spawn({
+        let (state, username) = (state.clone(), user.username.clone());
+        async move {
+            crate::talk::run_turn(&state, user.id, &username, req.conversation_id, &req.message, crate::talk::Via::Web)
+                .await
+        }
+    });
+    let turn = match tokio::time::timeout(state.talk_hold, &mut task).await {
+        Ok(Ok(turn)) => turn,
+        Ok(Err(_)) => Err(E::Internal),
+        Err(_) => match state.live_turns.conversation(user.id) {
+            Some(id) => {
+                return (StatusCode::ACCEPTED, Json(serde_json::json!({ "conversation_id": id, "pending": true })))
+                    .into_response();
+            }
+            None => task.await.unwrap_or(Err(E::Internal)),
+        },
+    };
     match turn {
         Ok(turn) => {
             let steps: Vec<_> = turn

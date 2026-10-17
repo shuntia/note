@@ -65,6 +65,7 @@ pub fn body(model: &str, req: &ChatRequest) -> serde_json::Value {
     match req.must_call {
         Some(super::MustCall::Any) => v["tool_choice"] = serde_json::json!({"type": "any"}),
         Some(super::MustCall::Tool(name)) => v["tool_choice"] = serde_json::json!({"type": "tool", "name": name}),
+        Some(super::MustCall::Nothing) => v["tool_choice"] = serde_json::json!({"type": "none"}),
         None => {}
     }
     v

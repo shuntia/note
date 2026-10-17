@@ -19,6 +19,12 @@ pub const REVIEW_MAX_TURNS: usize = 2;
 /// A trigger session looks around and then speaks or does not: room to read the
 /// situation, never room to hold a conversation with itself.
 pub const TRIGGER_MAX_TURNS: usize = 14;
+/// Talk has room for long jobs; its time budget and loop guards keep that room
+/// from being spent going round in circles.
+pub const TALK_MAX_TURNS: usize = 24;
+const TALK_BUDGET: std::time::Duration = std::time::Duration::from_secs(240);
+/// Rounds in a row that write nothing before the session is told to act.
+const LOOKUP_ROUNDS: usize = 4;
 
 use crate::model_text::{self as mt, REPLY_IN_JAPANESE, SPEAK_JAPANESE, VISITOR_JAPANESE};
 use crate::text::Lang;
@@ -82,6 +88,8 @@ struct SessionProfile {
     background: bool,
     /// Whether someone watches it think and reply as the words arrive.
     streams: bool,
+    /// How long it may start new rounds; past it, the next round must answer.
+    budget: Option<std::time::Duration>,
     /// A share session logs under its own kinds, so it never counts against
     /// the owner's session budget or shows in their activity.
     log_session: &'static str,
@@ -101,6 +109,7 @@ const fn profile(kind: SessionKind) -> SessionProfile {
         plain: false,
         background: true,
         streams: false,
+        budget: None,
         log_session: "agent_session",
         log_max_turns: "agent_max_turns",
     };
@@ -126,7 +135,14 @@ const fn profile(kind: SessionKind) -> SessionProfile {
         SessionKind::Call => SessionProfile { prompt: "voice", japanese: None, ..base },
         SessionKind::Nightly => SessionProfile { then: Some("planning"), ..base },
         SessionKind::Trigger => SessionProfile { then: Some("trigger"), max_turns: TRIGGER_MAX_TURNS, ..base },
-        SessionKind::Talk => SessionProfile { max_turns_reply: true, background: false, streams: true, ..base },
+        SessionKind::Talk => SessionProfile {
+            max_turns: TALK_MAX_TURNS,
+            max_turns_reply: true,
+            background: false,
+            streams: true,
+            budget: Some(TALK_BUDGET),
+            ..base
+        },
     }
 }
 
@@ -463,7 +479,18 @@ fn run_traced(
         })
         .chain((kind == SessionKind::Talk).then(|| opening.to_string()))
         .collect();
-    let env = CallEnv { deps, user_id, username, kind, calls: Default::default(), heard };
+    let env = CallEnv {
+        deps,
+        user_id,
+        username,
+        kind,
+        lang,
+        calls: Default::default(),
+        heard,
+        reads: Default::default(),
+        writes: Default::default(),
+    };
+    let mut lookups = 0;
     let started = std::time::Instant::now();
 
     let terminal = profile.decides.then(|| terminal_tool(kind)).flatten();
@@ -472,9 +499,19 @@ fn run_traced(
         if stopped() {
             break;
         }
-        let must_call = terminal.map(|name| {
-            if turns + 1 == max_turns || schemas.len() == 1 { MustCall::Tool(name) } else { MustCall::Any }
-        });
+        let last = profile.max_turns_reply
+            && terminal.is_none()
+            && (turns + 1 == max_turns || profile.budget.is_some_and(|b| started.elapsed() >= b));
+        if last {
+            note_on_last_result(&mut messages, mt::last_round(lang));
+        }
+        let must_call = if last {
+            Some(MustCall::Nothing)
+        } else {
+            terminal.map(|name| {
+                if turns + 1 == max_turns || schemas.len() == 1 { MustCall::Tool(name) } else { MustCall::Any }
+            })
+        };
         let req = ChatRequest { system, messages: &messages, tools: &schemas, background, plain: profile.plain, must_call };
         trace.spent(crate::usage::take());
         let round = std::time::Instant::now();
@@ -517,8 +554,12 @@ fn run_traced(
                 thought_ms,
             });
         }
+        if last {
+            break;
+        }
         let calls = resp.tool_calls.clone();
         messages.push(Message::Assistant { text: last_text.clone(), tool_calls: resp.tool_calls });
+        let wrote = env.writes.get();
         for call in calls {
             if stopped() {
                 break 'rounds;
@@ -555,6 +596,10 @@ fn run_traced(
                 });
             }
             messages.push(Message::ToolResult { call_id: call.id, content, is_error });
+        }
+        lookups = if env.writes.get() == wrote { lookups + 1 } else { 0 };
+        if lookups > 0 && lookups % LOOKUP_ROUNDS == 0 {
+            note_on_last_result(&mut messages, &mt::lookups_nudge(lang, lookups));
         }
     }
     if stopped() {
@@ -648,6 +693,15 @@ impl crate::providers::StreamSink for LiveSink<'_> {
     }
 }
 
+/// Appends `note` to the tool result the next round reads last, where the
+/// model takes it as part of what it just learned.
+fn note_on_last_result(messages: &mut [Message], note: &str) {
+    if let Some(Message::ToolResult { content, .. }) = messages.last_mut() {
+        content.push_str("\n\n");
+        content.push_str(note);
+    }
+}
+
 /// The one tool that ends a session of `kind`, if it has exactly one.
 fn terminal_tool(kind: SessionKind) -> Option<&'static str> {
     let mut ending = tools::registry(kind).iter().copied().filter(|name| tools::is_terminal(kind, name));
@@ -715,20 +769,42 @@ struct CallEnv<'a> {
     user_id: i64,
     username: &'a str,
     kind: SessionKind,
+    lang: Lang,
     calls: std::cell::RefCell<tools::call_ops::Calls>,
     /// What the user wrote that the session holds, against which an asked call is checked.
     heard: Vec<String>,
+    /// Each read since the last write, by tool and arguments, with its result.
+    reads: std::cell::RefCell<std::collections::HashMap<String, (String, bool)>>,
+    /// Successful writes so far.
+    writes: std::cell::Cell<usize>,
 }
 
 impl CallEnv<'_> {
+    /// Runs one call; a read already made since the last write is answered
+    /// from its earlier result instead of running again.
     fn run(&self, name: &str, args: &str) -> (String, bool) {
-        if name != "call_user" {
-            return run_tool(self.deps, self.user_id, self.username, self.kind, name, args, None);
+        if name == "call_user" {
+            return match self.call_user(args) {
+                Ok(v) => (v.to_string(), false),
+                Err(e) => (error_json(&e), true),
+            };
         }
-        match self.call_user(args) {
-            Ok(v) => (v.to_string(), false),
-            Err(e) => (error_json(&e), true),
+        let read = (!tools::writes(name) && name != "batch").then(|| read_key(name, args));
+        if let Some((content, is_error)) = read.as_ref().and_then(|k| self.reads.borrow().get(k).cloned()) {
+            return (mt::repeated_call(self.lang, &content), is_error);
         }
+        let (content, is_error) = run_tool(self.deps, self.user_id, self.username, self.kind, name, args, None);
+        match read {
+            Some(key) => {
+                self.reads.borrow_mut().insert(key, (content.clone(), is_error));
+            }
+            None if !is_error => {
+                self.writes.set(self.writes.get() + 1);
+                self.reads.borrow_mut().clear();
+            }
+            None => {}
+        }
+        (content, is_error)
     }
 
     /// Both halves of `call_user`. A wake-up's confirmed call is left for its
@@ -808,6 +884,12 @@ impl CallEnv<'_> {
         });
         (content, is_error)
     }
+}
+
+/// A call's identity regardless of how its arguments were spaced or ordered.
+fn read_key(name: &str, args: &str) -> String {
+    let args = serde_json::from_str::<serde_json::Value>(args).map_or_else(|_| args.to_string(), |v| v.to_string());
+    format!("{name}\0{args}")
 }
 
 fn error_json(e: &ToolError) -> String {
@@ -1415,7 +1497,7 @@ mod tests {
     #[test]
     fn turn_cap_ends_the_session_and_logs() {
         let (db, tmp) = env();
-        // every response asks for another tool call — the loop must stop at MAX_TURNS
+        // every response asks for another tool call — the loop must stop at the cap
         let resp = ChatResponse {
             text: "looping".into(),
             tool_calls: vec![ToolCall {
@@ -1424,12 +1506,15 @@ mod tests {
                 args: r#"{"query":"x"}"#.into(),
             }],
         };
-        let llm = MockLLM::scripted(vec![resp; MAX_TURNS + 4]);
+        let llm = MockLLM::scripted(vec![resp; TALK_MAX_TURNS + 4]);
         let out =
             run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, now(), &[], "hi")
                 .unwrap();
-        assert_eq!(out.turns, MAX_TURNS);
-        assert_eq!(out.steps.len(), MAX_TURNS);
+        assert_eq!(out.turns, TALK_MAX_TURNS);
+        assert_eq!(out.steps.len(), TALK_MAX_TURNS - 1, "the last round must answer, so its calls never run");
+        let seen = llm.seen();
+        assert_eq!(seen.last().unwrap().must_call.as_deref(), Some("-"));
+        assert!(seen[..seen.len() - 1].iter().all(|r| r.must_call.is_none()));
         let n: i64 = db
             .lock()
             .unwrap()
@@ -1484,6 +1569,70 @@ mod tests {
         assert_eq!(outcome, "stopped");
     }
 
+    fn last_result(seen: &crate::providers::mock::RecordedChat) -> String {
+        match seen.messages.last() {
+            Some(Message::ToolResult { content, .. }) => content.clone(),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_read_made_again_with_nothing_written_is_answered_from_before() {
+        let (db, tmp) = env();
+        let call = |id: &str, name: &str, args: &str| ChatResponse {
+            text: String::new(),
+            tool_calls: vec![ToolCall { id: id.into(), name: name.into(), args: args.into() }],
+        };
+        let llm = MockLLM::scripted(vec![
+            call("a", "task_list", "{}"),
+            call("b", "task_list", "{ }"),
+            call("c", "task_create", r#"{"title":"milk"}"#),
+            call("d", "task_list", "{}"),
+            ChatResponse { text: "done".into(), tool_calls: vec![] },
+        ]);
+        run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, now(), &[], "hi").unwrap();
+        let seen = llm.seen();
+        let repeated = mt::repeated_call(Lang::En, "");
+        let repeated = repeated.trim();
+        assert!(!last_result(&seen[1]).contains(repeated));
+        assert!(last_result(&seen[2]).starts_with(repeated), "{}", last_result(&seen[2]));
+        assert!(!last_result(&seen[4]).contains(repeated), "a write in between makes the read fresh");
+        assert!(last_result(&seen[4]).contains("milk"));
+    }
+
+    #[test]
+    fn rounds_that_only_look_things_up_are_told_to_act() {
+        let (db, tmp) = env();
+        let lookup = |n: usize| ChatResponse {
+            text: String::new(),
+            tool_calls: vec![ToolCall { id: format!("c{n}"), name: "memory_query".into(), args: format!(r#"{{"query":"q{n}"}}"#) }],
+        };
+        let mut script: Vec<_> = (0..LOOKUP_ROUNDS).map(lookup).collect();
+        script.push(ChatResponse { text: "ok".into(), tool_calls: vec![] });
+        let llm = MockLLM::scripted(script);
+        run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, now(), &[], "hi").unwrap();
+        let seen = llm.seen();
+        let nudge = mt::lookups_nudge(Lang::En, LOOKUP_ROUNDS);
+        assert!(!last_result(&seen[LOOKUP_ROUNDS - 1]).contains(&nudge));
+        assert!(last_result(&seen[LOOKUP_ROUNDS]).ends_with(&nudge));
+    }
+
+    #[test]
+    fn the_last_round_is_told_to_answer_in_text() {
+        let (db, tmp) = env();
+        let lookup = |n: usize| ChatResponse {
+            text: String::new(),
+            tool_calls: vec![ToolCall { id: format!("c{n}"), name: "task_create".into(), args: format!(r#"{{"title":"t{n}"}}"#) }],
+        };
+        let mut script: Vec<_> = (0..TALK_MAX_TURNS - 1).map(lookup).collect();
+        script.push(ChatResponse { text: "made them; more left".into(), tool_calls: vec![] });
+        let llm = MockLLM::scripted(script);
+        let out = run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, now(), &[], "hi").unwrap();
+        assert_eq!(out.reply, "made them; more left");
+        let seen = llm.seen();
+        assert!(last_result(seen.last().unwrap()).ends_with(mt::last_round(Lang::En)));
+    }
+
     #[test]
     fn a_turn_cap_with_no_text_says_it_ran_out_of_steps() {
         let (db, tmp) = env();
@@ -1495,7 +1644,7 @@ mod tests {
                 args: r#"{"query":"x"}"#.into(),
             }],
         };
-        let llm = MockLLM::scripted(vec![resp.clone(); MAX_TURNS]);
+        let llm = MockLLM::scripted(vec![resp.clone(); TALK_MAX_TURNS]);
         let out =
             run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, now(), &[], "hi")
                 .unwrap();
@@ -2191,14 +2340,14 @@ mod tests {
                 args: r#"{"query":"x"}"#.into(),
             }],
         };
-        let llm = MockLLM::scripted(vec![resp; MAX_TURNS + 2]);
+        let llm = MockLLM::scripted(vec![resp; TALK_MAX_TURNS + 2]);
         run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, now(), &[], "hi").unwrap();
 
         let (outcome, turns, tool_calls, _, detail) = trace_row(&db);
         assert_eq!(outcome, "max_turns");
-        assert_eq!(turns, MAX_TURNS as i64);
-        assert_eq!(tool_calls, MAX_TURNS as i64);
-        assert_eq!(rounds(&detail).len(), MAX_TURNS);
+        assert_eq!(turns, TALK_MAX_TURNS as i64);
+        assert_eq!(tool_calls, TALK_MAX_TURNS as i64 - 1);
+        assert_eq!(rounds(&detail).len(), TALK_MAX_TURNS);
         assert_eq!(detail["reply"], "looping");
     }
 

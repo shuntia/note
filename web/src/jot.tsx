@@ -7,10 +7,10 @@ import {
   type FormEvent,
   type MouseEvent,
 } from 'react'
-import { api } from './api'
 import { Markdown } from './markdown'
 import { fold, settle, unfold } from './motion-gsap'
 import { doing } from './receipts'
+import { talkTurn } from './talkTurn'
 import { claims, onAgentFrame, type AgentFrame } from './ws'
 import { t } from './i18n'
 
@@ -184,7 +184,7 @@ export function Jot({
     inFlight.current = { conversation: thread }
     setLines((prev) => [...prev, { kind: 'said', key: nextKey(), text: message }])
     try {
-      const answer = await api.talk(message, thread ?? undefined)
+      const answer = await talkTurn(message, thread ?? undefined)
       if (era.current !== sentIn) return
       setConversation(answer.conversation_id)
       setLines((prev) => [...prev, { kind: 'reply', key: nextKey(), text: answer.reply }])
