@@ -6,6 +6,7 @@ use std::time::Duration;
 
 #[derive(Debug, Clone)]
 pub enum StreamPiece {
+    Thought(&'static str),
     Text(&'static str),
     Call(ToolCall),
     Wait(Duration),
@@ -126,6 +127,7 @@ impl LLMProvider for MockLLM {
         let mut resp = ChatResponse::default();
         for piece in round {
             let go_on = match piece {
+                StreamPiece::Thought(t) => sink.reasoning(t),
                 StreamPiece::Text(t) => {
                     resp.text.push_str(t);
                     sink.text(t)
@@ -237,7 +239,7 @@ mod tests {
             vec![StreamPiece::Text("partial"), StreamPiece::Fail("dropped")],
         ]);
         let req = ChatRequest { system: "sys", messages: &[Message::User("hi".into())], tools: &[], background: false, plain: false, must_call: None };
-        let opts = crate::providers::StreamOpts { first_token: Duration::from_secs(1) };
+        let opts = crate::providers::StreamOpts::spoken(Duration::from_secs(1));
         let mut sink = Collect::default();
         let resp = llm.chat_stream(&req, &opts, &mut sink).unwrap();
         assert_eq!(sink.0, vec!["c1", "a"]);

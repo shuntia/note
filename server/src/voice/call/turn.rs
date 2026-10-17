@@ -176,9 +176,7 @@ mod tests {
                 reply: 7,
                 draft: false,
             },
-            StreamOpts {
-                first_token: Duration::from_secs(1),
-            },
+            StreamOpts::spoken(Duration::from_secs(1)),
             stop,
             move |e| {
                 let _ = tx.send(e);

@@ -51,11 +51,25 @@ pub trait StreamSink {
     fn text(&mut self, delta: &str) -> bool;
     /// A tool call whose arguments are complete. Returning false stops the stream.
     fn tool_call(&mut self, call: &ToolCall) -> bool;
+    /// A piece of the model's reasoning, when reasoning is on and shown.
+    /// Returning false stops the stream.
+    fn reasoning(&mut self, _delta: &str) -> bool {
+        true
+    }
 }
 
 pub struct StreamOpts {
-    /// Fails the call if no text or tool call has arrived by then.
+    /// Fails the call if no reasoning, text or tool call has arrived by then.
     pub first_token: std::time::Duration,
+    /// Fails the call once nothing has arrived for this long after the first piece.
+    pub stall: std::time::Duration,
+}
+
+impl StreamOpts {
+    /// A voice call's deadlines, where eight silent seconds mean a dead line.
+    pub fn spoken(first_token: std::time::Duration) -> Self {
+        Self { first_token, stall: std::time::Duration::from_secs(8) }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -86,7 +100,10 @@ pub trait LLMProvider: Send + Sync {
     /// Streams one round. The returned response holds everything that arrived,
     /// also when the sink stopped the stream early.
     fn chat_stream(&self, req: &ChatRequest, _opts: &StreamOpts, sink: &mut dyn StreamSink) -> Result<ChatResponse> {
-        let resp = self.chat(req)?;
+        let (resp, reasoning) = self.chat_with_reasoning(req)?;
+        if !reasoning.trim().is_empty() && !sink.reasoning(&reasoning) {
+            return Ok(resp);
+        }
         if !resp.text.is_empty() && !sink.text(&resp.text) {
             return Ok(resp);
         }
@@ -159,7 +176,7 @@ pub(crate) fn http_agent(timeout_secs: u64) -> ureq::Agent {
 }
 
 /// Waits before the second and third attempt of a chat call.
-const RETRY_DELAYS_MS: [u64; 2] = [1_500, 4_000];
+pub(crate) const RETRY_DELAYS_MS: [u64; 2] = [1_500, 4_000];
 
 /// The interactive and the background agent of one chat provider.
 pub struct ChatAgents {

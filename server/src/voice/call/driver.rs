@@ -511,9 +511,7 @@ impl Driver {
                 reply,
                 draft: draft.is_some(),
             },
-            StreamOpts {
-                first_token: self.deps.cfg.first_token,
-            },
+            StreamOpts::spoken(self.deps.cfg.first_token),
             stop.clone(),
             move |event| {
                 if matches!(event, TurnEvent::End { .. }) {

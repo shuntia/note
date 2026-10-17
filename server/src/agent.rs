@@ -80,6 +80,8 @@ struct SessionProfile {
     plain: bool,
     /// Whether no caller is waiting on it.
     background: bool,
+    /// Whether someone watches it think and reply as the words arrive.
+    streams: bool,
     /// A share session logs under its own kinds, so it never counts against
     /// the owner's session budget or shows in their activity.
     log_session: &'static str,
@@ -98,6 +100,7 @@ const fn profile(kind: SessionKind) -> SessionProfile {
         decides: false,
         plain: false,
         background: true,
+        streams: false,
         log_session: "agent_session",
         log_max_turns: "agent_max_turns",
     };
@@ -123,7 +126,7 @@ const fn profile(kind: SessionKind) -> SessionProfile {
         SessionKind::Call => SessionProfile { prompt: "voice", japanese: None, ..base },
         SessionKind::Nightly => SessionProfile { then: Some("planning"), ..base },
         SessionKind::Trigger => SessionProfile { then: Some("trigger"), max_turns: TRIGGER_MAX_TURNS, ..base },
-        SessionKind::Talk => SessionProfile { max_turns_reply: true, background: false, ..base },
+        SessionKind::Talk => SessionProfile { max_turns_reply: true, background: false, streams: true, ..base },
     }
 }
 
@@ -197,6 +200,10 @@ pub struct SessionOutcome {
 #[derive(Debug, Clone, Copy)]
 pub enum AgentEvent<'a> {
     Thinking { text: &'a str },
+    /// A piece of a streamed round's reasoning; such a round sends no `Thinking`.
+    ThinkingDelta { text: &'a str },
+    /// A piece of a streamed round's text, which a tool call may follow.
+    ReplyDelta { text: &'a str },
     ToolCall { index: usize, name: &'a str, args: &'a str },
     ToolResult { index: usize, name: &'a str, result: &'a str, is_error: bool },
     Reply { text: &'a str },
@@ -240,8 +247,8 @@ pub fn run_session_watched(
 }
 
 /// `run_session_watched` that ends early once `stop` is set: before its next
-/// provider call or tool call, keeping every step already taken. A provider
-/// call in flight is waited out.
+/// provider call or tool call, keeping every step already taken. A streamed
+/// provider call is cut off; any other in flight is waited out.
 #[allow(clippy::too_many_arguments)]
 pub fn run_session_stoppable(
     deps: &SessionDeps,
@@ -471,7 +478,7 @@ fn run_traced(
         let req = ChatRequest { system, messages: &messages, tools: &schemas, background, plain: profile.plain, must_call };
         trace.spent(crate::usage::take());
         let round = std::time::Instant::now();
-        let (resp, thinking) = match deps.llm.chat_with_reasoning(&req) {
+        let (resp, thinking, streamed) = match chat_round(deps.llm, &req, profile.streams, on_event, stop) {
             Ok(v) => {
                 trace.round(round.elapsed().as_millis() as u64, crate::usage::take());
                 v
@@ -483,10 +490,15 @@ fn run_traced(
             }
         };
         turns += 1;
+        if streamed && stopped() {
+            break;
+        }
         let mut thinking = match thinking.trim() {
             "" => None,
             text => {
-                on_event(AgentEvent::Thinking { text });
+                if !streamed {
+                    on_event(AgentEvent::Thinking { text });
+                }
                 Some(text.to_string())
             }
         };
@@ -567,6 +579,73 @@ fn run_traced(
         reasoning: String::new(),
         thought_ms,
     })
+}
+
+const LIVE_STREAM: crate::providers::StreamOpts = crate::providers::StreamOpts {
+    first_token: std::time::Duration::from_secs(45),
+    stall: std::time::Duration::from_secs(20),
+};
+
+/// One provider round: the reply, its reasoning, and whether it was streamed.
+/// A streamed round hands its reasoning and text to `on_event` piece by piece
+/// and is tried again only while none has gone out.
+fn chat_round(
+    llm: &dyn LLMProvider,
+    req: &ChatRequest,
+    stream: bool,
+    on_event: &dyn Fn(AgentEvent),
+    stop: Option<&AtomicBool>,
+) -> Result<(crate::providers::ChatResponse, String, bool)> {
+    if !(stream && llm.streams()) {
+        let (resp, thinking) = llm.chat_with_reasoning(req)?;
+        return Ok((resp, thinking, false));
+    }
+    let mut delays = crate::providers::RETRY_DELAYS_MS.iter();
+    loop {
+        let mut sink = LiveSink { on_event, stop, reasoning: String::new(), sent: false };
+        match llm.chat_stream(req, &LIVE_STREAM, &mut sink) {
+            Ok(resp) => return Ok((resp, sink.reasoning, true)),
+            Err(e) => {
+                let again = !sink.sent && !sink.stopped() && !crate::failure::Reason::of(&e).lasts();
+                match delays.next().filter(|_| again) {
+                    Some(ms) => std::thread::sleep(std::time::Duration::from_millis(*ms)),
+                    None => return Err(e),
+                }
+            }
+        }
+    }
+}
+
+struct LiveSink<'a> {
+    on_event: &'a dyn Fn(AgentEvent),
+    stop: Option<&'a AtomicBool>,
+    reasoning: String,
+    sent: bool,
+}
+
+impl LiveSink<'_> {
+    fn stopped(&self) -> bool {
+        self.stop.is_some_and(|s| s.load(Ordering::Relaxed))
+    }
+}
+
+impl crate::providers::StreamSink for LiveSink<'_> {
+    fn reasoning(&mut self, delta: &str) -> bool {
+        self.sent = true;
+        self.reasoning.push_str(delta);
+        (self.on_event)(AgentEvent::ThinkingDelta { text: delta });
+        !self.stopped()
+    }
+
+    fn text(&mut self, delta: &str) -> bool {
+        self.sent = true;
+        (self.on_event)(AgentEvent::ReplyDelta { text: delta });
+        !self.stopped()
+    }
+
+    fn tool_call(&mut self, _call: &crate::providers::ToolCall) -> bool {
+        !self.stopped()
+    }
 }
 
 /// The one tool that ends a session of `kind`, if it has exactly one.
@@ -976,6 +1055,8 @@ mod tests {
     fn trace(ev: AgentEvent) -> String {
         match ev {
             AgentEvent::Thinking { text } => format!("thinking:{text}"),
+            AgentEvent::ThinkingDelta { text } => format!("thinking~{text}"),
+            AgentEvent::ReplyDelta { text } => format!("reply~{text}"),
             AgentEvent::ToolCall { index, name, .. } => format!("call:{index}:{name}"),
             AgentEvent::ToolResult { index, name, is_error, .. } => {
                 format!("result:{index}:{name}:{is_error}")
@@ -1030,6 +1111,87 @@ mod tests {
         assert_eq!(out.steps[0].thinking.as_deref(), Some("a task, then a lookup"));
         assert_eq!(out.steps[1].thinking, None, "one round's thinking rides on its first call");
         assert_eq!(out.reasoning, "", "no round answered in text with thinking of its own");
+    }
+
+    #[test]
+    fn a_streamed_talk_round_hands_over_its_reasoning_and_text_piece_by_piece() {
+        use crate::providers::mock::StreamPiece::{Call, Text, Thought};
+        let (db, tmp) = env();
+        let call = ToolCall { id: "c1".into(), name: "task_create".into(), args: r#"{"title":"buy milk"}"#.into() };
+        let llm = MockLLM::streamed(vec![
+            vec![Thought("a task, "), Thought("then done"), Call(call)],
+            vec![Thought("say so"), Text("Added "), Text("it.")],
+        ]);
+        let seen = std::cell::RefCell::new(Vec::new());
+        let out = run_session_watched(
+            &deps(&db, &tmp, &llm),
+            1,
+            "aki",
+            SessionKind::Talk,
+            now(),
+            &[],
+            "add buy milk",
+            &|ev| seen.borrow_mut().push(trace(ev)),
+        )
+        .unwrap();
+        assert_eq!(
+            seen.into_inner(),
+            vec![
+                "thinking~a task, ",
+                "thinking~then done",
+                "call:0:task_create",
+                "result:0:task_create:false",
+                "thinking~say so",
+                "reply~Added ",
+                "reply~it.",
+                "reply:Added it.",
+            ]
+        );
+        assert_eq!(out.steps[0].thinking.as_deref(), Some("a task, then done"));
+        assert_eq!(out.reasoning, "say so");
+    }
+
+    #[test]
+    fn a_stop_cuts_a_streamed_round_short() {
+        use crate::providers::mock::StreamPiece::{Text, Thought};
+        let (db, tmp) = env();
+        let llm = MockLLM::streamed(vec![vec![Thought("hm"), Text("Half "), Text("a reply")]]);
+        let stop = AtomicBool::new(false);
+        let seen = std::cell::RefCell::new(Vec::new());
+        let on_event = |ev: AgentEvent| {
+            if let AgentEvent::ReplyDelta { .. } = ev {
+                stop.store(true, Ordering::Relaxed);
+            }
+            seen.borrow_mut().push(trace(ev));
+        };
+        let out = run_session_stoppable(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, now(), &[], "hi", &on_event, Some(&stop))
+            .unwrap();
+        let stopped = crate::text::stopped_reply(Lang::En);
+        assert_eq!(seen.into_inner(), vec!["thinking~hm".to_string(), "reply~Half ".into(), format!("reply:{stopped}")]);
+        assert_eq!(out.reply, stopped);
+    }
+
+    #[test]
+    fn a_streamed_round_is_tried_again_only_while_nothing_has_gone_out() {
+        use crate::providers::mock::StreamPiece::{Fail, Text};
+        let (db, tmp) = env();
+        let llm = MockLLM::streamed(vec![vec![Fail("reset")], vec![Text("hi")]]);
+        let out = run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, now(), &[], "hi").unwrap();
+        assert_eq!((out.reply.as_str(), llm.seen().len()), ("hi", 2));
+
+        let llm = MockLLM::streamed(vec![vec![Text("hal"), Fail("reset")], vec![Text("hi")]]);
+        let err = run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, now(), &[], "hi").unwrap_err();
+        assert!(format!("{err:#}").contains("reset"), "{err:#}");
+        assert_eq!(llm.seen().len(), 1);
+    }
+
+    #[test]
+    fn only_talk_streams() {
+        use crate::providers::mock::StreamPiece::Text;
+        let (db, tmp) = env();
+        let llm = MockLLM::streamed(vec![vec![Text("streamed")]]);
+        let out = run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Trigger, now(), &[], "hi").unwrap();
+        assert!(out.reply.contains("no scripted response"), "{}", out.reply);
     }
 
     #[test]

@@ -3,7 +3,7 @@ use crate::failure::Reason;
 use anyhow::{Context, Result};
 use std::io::BufRead;
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 pub struct OpenAILLM {
     agents: super::ChatAgents,
@@ -131,7 +131,8 @@ impl OpenAILLM {
             let head: String = resp.body_mut().read_to_string().unwrap_or_default().chars().take(300).collect();
             return Err(ProviderError::status(code, &head, format!("openai stream request failed: status {code}: {head}")).into());
         }
-        read_stream(&spawn_line_reader(resp.into_body()), started, opts.first_token, STALL, sink)
+        let reasoning = self.reasoning.is_some() && !self.off(req);
+        read_stream(&spawn_line_reader(resp.into_body()), started, opts, reasoning, sink)
     }
 
     fn authorized(&self, request: ureq::RequestBuilder<ureq::typestate::WithBody>) -> ureq::RequestBuilder<ureq::typestate::WithBody> {
@@ -278,10 +279,8 @@ pub fn parse(v: &serde_json::Value) -> Result<ChatResponse> {
     Ok(ChatResponse { text, tool_calls })
 }
 
-/// No line for this long after the first delta fails the stream.
-const STALL: Duration = Duration::from_secs(8);
-
-/// Reads the lines of a streamed chat completion into `sink`. Tool calls
+/// Reads the lines of a streamed chat completion into `sink`, reasoning too
+/// when `reasoning` is set. Tool calls
 /// arrive in pieces keyed by `index`; one is complete once a piece with
 /// another index or another `id` begins, or the stream ends. The usage the
 /// stream ends on is recorded; a stream stopped early records a call of
@@ -289,8 +288,8 @@ const STALL: Duration = Duration::from_secs(8);
 fn read_stream(
     lines: &mpsc::Receiver<std::io::Result<String>>,
     started: Instant,
-    first_token: Duration,
-    stall: Duration,
+    opts: &StreamOpts,
+    reasoning: bool,
     sink: &mut dyn StreamSink,
 ) -> Result<ChatResponse> {
     let mut resp = ChatResponse::default();
@@ -300,17 +299,17 @@ fn read_stream(
     let mut done = false;
     loop {
         let line = if heard {
-            match lines.recv_timeout(stall) {
+            match lines.recv_timeout(opts.stall) {
                 Ok(line) => line,
                 Err(mpsc::RecvTimeoutError::Timeout) => {
-                    return Err(ProviderError::new(Reason::ProviderDown, format!("openai stream stalled for {stall:?}")).into());
+                    return Err(ProviderError::new(Reason::ProviderDown, format!("openai stream stalled for {:?}", opts.stall)).into());
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
         } else {
-            match lines.recv_timeout(first_token.saturating_sub(started.elapsed())) {
+            match lines.recv_timeout(opts.first_token.saturating_sub(started.elapsed())) {
                 Ok(line) => line,
-                Err(mpsc::RecvTimeoutError::Timeout) => return Err(FirstTokenTimeout(first_token).into()),
+                Err(mpsc::RecvTimeoutError::Timeout) => return Err(FirstTokenTimeout(opts.first_token).into()),
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
         };
@@ -331,6 +330,14 @@ fn read_stream(
             usage = event["usage"].take();
         }
         let delta = &event["choices"][0]["delta"];
+        let thought = ["reasoning", "reasoning_content"].iter().map(|k| content_text(&delta[k])).find(|t| !t.is_empty());
+        if let Some(thought) = thought {
+            heard = true;
+            if reasoning && !sink.reasoning(&thought) {
+                crate::usage::record(crate::usage::Usage::openai_call(&usage));
+                return Ok(resp);
+            }
+        }
         let text = content_text(&delta["content"]);
         if !text.is_empty() {
             heard = true;
@@ -612,7 +619,7 @@ mod tests {
     }
 
     fn opts(first_token: Duration) -> StreamOpts {
-        StreamOpts { first_token }
+        StreamOpts::spoken(first_token)
     }
 
     #[test]
@@ -780,13 +787,69 @@ mod tests {
         );
     }
 
+    #[derive(Default)]
+    struct Thoughts(String, String);
+
+    impl StreamSink for Thoughts {
+        fn text(&mut self, delta: &str) -> bool {
+            self.1.push_str(delta);
+            true
+        }
+
+        fn tool_call(&mut self, _call: &ToolCall) -> bool {
+            true
+        }
+
+        fn reasoning(&mut self, delta: &str) -> bool {
+            self.0.push_str(delta);
+            true
+        }
+    }
+
+    const THOUGHTS: &str = concat!(
+        "data: {\"choices\":[{\"delta\":{\"reasoning\":\"short \",\"reasoning_details\":[{\"text\":\"short \"}]}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"think\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+
+    #[test]
+    fn reasoning_streams_only_when_it_is_on_for_the_call() {
+        let llm = OpenAILLM::new(&stub_sse(THOUGHTS), "m", "", ChatAgents::new(30, 30), Some("low"));
+        let mut sink = Thoughts::default();
+        llm.chat_stream(&req(), &opts(Duration::from_secs(5)), &mut sink).unwrap();
+        assert_eq!((sink.0.as_str(), sink.1.as_str()), ("short think", "hi"));
+
+        let llm = OpenAILLM::new(&stub_sse(THOUGHTS), "m", "", ChatAgents::new(30, 30), Some("low"));
+        let msgs = vec![Message::User("hi".into())];
+        let plain = ChatRequest { system: "s", messages: &msgs, tools: &[], background: false, plain: true, must_call: None };
+        let mut sink = Thoughts::default();
+        llm.chat_stream(&plain, &opts(Duration::from_secs(5)), &mut sink).unwrap();
+        assert_eq!((sink.0.as_str(), sink.1.as_str()), ("", "hi"));
+    }
+
+    #[test]
+    fn reasoning_holds_off_the_first_token_deadline() {
+        let (tx, rx) = mpsc::channel();
+        tx.send(Ok("data: {\"choices\":[{\"delta\":{\"reasoning\":\"hm\"}}]}".to_string())).unwrap();
+        let opts = StreamOpts { first_token: Duration::from_millis(50), stall: Duration::from_millis(400) };
+        let feed = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            tx.send(Ok("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}".to_string())).unwrap();
+        });
+        let resp = read_stream(&rx, Instant::now(), &opts, true, &mut Thoughts::default()).unwrap();
+        assert_eq!(resp.text, "hi");
+        feed.join().unwrap();
+    }
+
     #[test]
     fn silence_after_the_first_delta_fails_the_stream() {
         let (tx, rx) = mpsc::channel();
         tx.send(Ok("data: {\"choices\":[{\"delta\":{\"content\":\"On it\"}}]}".to_string())).unwrap();
         let mut sink = Collect::default();
         let started = Instant::now();
-        let err = read_stream(&rx, started, Duration::from_secs(5), Duration::from_millis(100), &mut sink).unwrap_err();
+        let opts = StreamOpts { first_token: Duration::from_secs(5), stall: Duration::from_millis(100) };
+        let err = read_stream(&rx, started, &opts, false, &mut sink).unwrap_err();
         assert!(err.to_string().contains("stalled"), "{err:#}");
         assert_eq!(sink.text, "On it");
         assert!(started.elapsed() < Duration::from_secs(2));

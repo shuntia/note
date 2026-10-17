@@ -14,6 +14,8 @@ export type EventFrame = {
 
 export type AgentEvent =
   | { kind: 'thinking'; text: string }
+  | { kind: 'thinking_delta'; text: string }
+  | { kind: 'reply_delta'; text: string }
   | { kind: 'tool_call'; index: number; name: string; args: string }
   | { kind: 'tool_result'; index: number; name: string; result: string; is_error: boolean }
   | { kind: 'reply'; text: string }

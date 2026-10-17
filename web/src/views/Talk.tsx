@@ -57,10 +57,11 @@ type TurnItem = Extract<Item, { kind: 'user' | 'system' }>
 type Shown = AssistantItem | StepsItem | TurnItem
 
 // One session's progress as the live frames describe it; `seq` is the last one
-// applied and `reasoning` the thinking no call has followed yet.
-type Live = { seq: number; reasoning: string; steps: ToolItem[] }
+// applied, `reasoning` the thinking no call has followed yet and `text` the
+// reply streaming in, dropped when a call follows it instead.
+type Live = { seq: number; reasoning: string; text: string; steps: ToolItem[] }
 
-const EMPTY_LIVE: Live = { seq: -1, reasoning: '', steps: [] }
+const EMPTY_LIVE: Live = { seq: -1, reasoning: '', text: '', steps: [] }
 
 function applyFrame(prev: Live, frame: AgentFrame): Live {
   if (frame.seq <= prev.seq) return prev
@@ -68,6 +69,8 @@ function applyFrame(prev: Live, frame: AgentFrame): Live {
   const ev = frame.event
   if (ev.kind === 'thinking')
     return { ...at, reasoning: [at.reasoning, ev.text].filter(Boolean).join('\n\n') }
+  if (ev.kind === 'thinking_delta') return { ...at, reasoning: at.reasoning + ev.text }
+  if (ev.kind === 'reply_delta') return { ...at, text: at.text + ev.text }
   if (ev.kind !== 'tool_call' && ev.kind !== 'tool_result') return at
   const steps = at.steps.slice()
   const before = steps[ev.index]
@@ -84,7 +87,7 @@ function applyFrame(prev: Live, frame: AgentFrame): Live {
     running: call,
     finishedAt: call ? undefined : Date.now(),
   }
-  return { ...at, reasoning: opening ? '' : at.reasoning, steps }
+  return { ...at, reasoning: opening ? '' : at.reasoning, text: opening ? '' : at.text, steps }
 }
 
 type Load = 'loading' | 'ready' | 'error'
@@ -249,7 +252,7 @@ function liveLabel(steps: ToolItem[], now: number): string {
 
 // One quiet line; the reasoning and the calls stay a chevron away, each round's
 // thinking above the calls it led to and `reasoning` — the round that answered —
-// last. A live trace with thinking to show stands open until the reply replaces it.
+// last. A live trace with thinking to show stands open until the reply starts.
 // `held` keeps a live line in the layout but out of sight until the sent bubble has landed.
 function Trace({
   label,
@@ -257,15 +260,17 @@ function Trace({
   steps,
   live = false,
   held = false,
+  replying = false,
 }: {
   label: string
   reasoning: string
   steps: ToolItem[]
   live?: boolean
   held?: boolean
+  replying?: boolean
 }) {
   const [chosen, setChosen] = useState<boolean | null>(null)
-  const open = chosen ?? (live && (!!reasoning || steps.some((s) => s.thinking)))
+  const open = chosen ?? (live && !replying && (!!reasoning || steps.some((s) => s.thinking)))
   const state = [live ? 'live' : '', held ? 'held' : '', open ? 'open' : '']
     .filter(Boolean)
     .join(' ')
@@ -469,6 +474,9 @@ export function Talk({
   // era of the send in flight, so its pending row belongs to the conversation that sent it
   const [pending, setPending] = useState<number | null>(null)
   const [live, setLive] = useState<Live>(EMPTY_LIVE)
+  // a reply already read as it streamed in lands without easing in again
+  const streamed = useRef(false)
+  streamed.current = live.text !== ''
   // the open thread while a turn sent from elsewhere is still being answered
   const [watch, setWatch] = useState<number | null>(null)
   const [flying, setFlying] = useState(false)
@@ -822,7 +830,7 @@ export function Talk({
         ...prev,
         {
           kind: 'assistant',
-          key: nextKey(),
+          key: streamed.current ? `seen-${nextKey()}` : nextKey(),
           text: reply.reply,
           reasoning: reply.reasoning,
           thoughtMs: reply.thought_ms,
@@ -1111,13 +1119,21 @@ export function Talk({
                 return turn(item)
               })}
             {busy && (
-              <Trace
-                live
-                held={flying}
-                label={liveLabel(live.steps, Date.now())}
-                reasoning={live.reasoning}
-                steps={live.steps}
-              />
+              <div className="reply">
+                <Trace
+                  live
+                  held={flying}
+                  replying={!!live.text}
+                  label={liveLabel(live.steps, Date.now())}
+                  reasoning={live.reasoning}
+                  steps={live.steps}
+                />
+                {live.text && (
+                  <div className="turn assistant">
+                    <Markdown text={live.text} />
+                  </div>
+                )}
+              </div>
             )}
           </div>
         </div>

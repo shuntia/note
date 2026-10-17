@@ -179,6 +179,8 @@ pub fn agent_frame(conversation_id: Option<i64>, seq: u64, event: &AgentEvent) -
             "kind": "tool_result", "index": index, "name": name,
             "result": clip(result), "is_error": is_error,
         }),
+        AgentEvent::ThinkingDelta { text } => serde_json::json!({"kind": "thinking_delta", "text": clip(text)}),
+        AgentEvent::ReplyDelta { text } => serde_json::json!({"kind": "reply_delta", "text": clip(text)}),
         AgentEvent::Reply { text } => serde_json::json!({"kind": "reply", "text": clip(text)}),
         AgentEvent::Error { reason } => serde_json::json!({"kind": "error", "reason": reason}),
     };
