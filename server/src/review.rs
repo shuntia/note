@@ -170,6 +170,11 @@ fn triggers(conn: &Connection, user_id: i64, w: &Window, l: Lang) -> Result<Stri
     ))
 }
 
+fn nudges(conn: &Connection, user_id: i64, w: &Window, l: Lang) -> Result<String> {
+    let lines = crate::follow_up::review_lines(conn, user_id, &w.from, &w.to, l)?;
+    Ok(section(l, mt::ReviewSection::Nudges, &lines))
+}
+
 fn conversations(
     conn: &Connection,
     user_id: i64,
@@ -335,6 +340,7 @@ pub fn digest(
         tasks(conn, user_id, &w, tz, l)?,
         sessions(conn, user_id, &w, tz, l)?,
         triggers(conn, user_id, &w, l)?,
+        nudges(conn, user_id, &w, l)?,
         conversations(conn, user_id, &w, tz, l)?,
         days_remembered(conn, data_dir, username, &w, l)?,
     ];
@@ -544,6 +550,12 @@ mod tests {
             [],
         )
         .unwrap();
+        conn.execute(
+            "INSERT INTO outreach (user_id, event_id, origin, via, at, window_until, wait_min, level, outcome)
+             VALUES (1, 1, 'agent', 'message', '2026-09-16T02:00:00Z', '2026-09-16T02:15:00Z', 15, 0, 'acted')",
+            [],
+        )
+        .unwrap();
     }
 
     #[test]
@@ -573,6 +585,7 @@ mod tests {
         assert!(!out.contains("next week"), "the week after is not this week's: {out}");
         assert!(out.contains("planned 50 min, ran 60 min, done, asked about overrun"), "{out}");
         assert!(out.contains("1 done — said 1, stayed quiet 0"), "{out}");
+        assert!(out.contains("## How the nudges landed\n- messages that waited for an answer: 1 — 1 acted"), "{out}");
         assert!(out.contains("Aki and Mira settled the weekend."), "{out}");
         assert!(out.contains("2026-09-16 · the essay: Aki sent the draft"), "{out}");
         assert!(out.len() <= MAX_DIGEST_BYTES);

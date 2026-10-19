@@ -1112,6 +1112,7 @@ fn resumed(
         let conn = state.db();
         let ended = wait_ended(&conn, fired.user_id, ev.event_id).ok().flatten();
         let replies = written_since(&conn, fired.user_id, ev.created_at.as_deref().unwrap_or_default()).unwrap_or_default();
+        let _ = crate::follow_up::wait_over(&conn, ev.event_id, ended, now);
         (ended, replies)
     };
     let changed = picture(state, fired.user_id, &fired.username, now)
@@ -1130,20 +1131,14 @@ fn not_about(context: &str, event_id: i64) -> String {
     context.lines().filter(|l| !marks.iter().any(|m| l.contains(m.as_str()))).collect::<Vec<_>>().join("\n")
 }
 
-/// The tool a trigger session ended on and its result: its last terminal step,
-/// else its closing text, taken as `say`.
+/// The tool a trigger session ended on and its result: its last terminal step.
+/// Text it closed on is never the decision; it may be narration.
 fn decision(out: &crate::agent::SessionOutcome) -> Option<(String, serde_json::Value)> {
-    let ended = out.steps.iter().rev().find(|s| {
-        !s.is_error && crate::tools::ends(crate::tools::SessionKind::Trigger, &s.name, &s.result)
-    });
-    if let Some(step) = ended {
-        return Some((step.name.clone(), serde_json::from_str(&step.result).unwrap_or_default()));
-    }
-    let text = out.reply.trim();
-    (!text.is_empty()).then(|| {
-        let said = crate::talk::clip(text, MAX_SAY_BYTES);
-        ("say".to_string(), serde_json::json!({ "said": said, "notes": [] }))
-    })
+    out.steps
+        .iter()
+        .rev()
+        .find(|s| !s.is_error && crate::tools::ends(crate::tools::SessionKind::Trigger, &s.name, &s.result))
+        .map(|step| (step.name.clone(), serde_json::from_str(&step.result).unwrap_or_default()))
 }
 
 /// The prompts of the triggers folded into this firing, in the order laid.
@@ -1189,7 +1184,7 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
     }
     let tz = timezone(&state.config_dir, &fired.username);
     let l = Lang::for_user(&state.config_dir, &fired.username);
-    let (ev, opening, history, thread_note, parked, also) = {
+    let (ev, opening, history, thread_note, parked, also, linked) = {
         let conn = state.db();
         let Ok(Some(ev)) = read(&conn, fired.event_id) else {
             return;
@@ -1214,8 +1209,10 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
         if ev.origin == crate::idle::ORIGIN {
             opening.push_str(&crate::idle::context(&conn, &state.data_dir, fired.user_id, &fired.username, &tz, l, now).unwrap_or_default());
         }
+        opening.push_str(&crate::follow_up::summary(&conn, fired.user_id, &tz, l, now).unwrap_or_default());
+        let linked = crate::follow_up::tasks_of_events(&conn, &all).unwrap_or_default();
         let (history, note) = thread_context(&conn, ev.conversation_id, l);
-        (ev, opening, history, note, parked, also)
+        (ev, opening, history, note, parked, also, linked)
     };
     let resumed = parked.map(|p| resumed(state, fired, &ev, p, now));
     let deps = crate::agent::SessionDeps {
@@ -1307,6 +1304,8 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
     let call = (name == "call_user").then(|| crate::tools::call_ops::Confirmed::from_decided(&result)).flatten();
     let lang = crate::text::Lang::for_user(&state.config_dir, &fired.username);
     let waits = result["await_min"].as_u64().zip(out.paused.as_ref());
+    let named: Vec<i64> = serde_json::from_value(result["task_ids"].clone()).unwrap_or_default();
+    let about = if named.is_empty() { linked } else { named };
     let parked_at = jiff::Timestamp::now();
     let mut parks = None;
     settle_all("done");
@@ -1358,7 +1357,11 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
     if own && !close_day {
         msg.actions.clear();
     }
-    if let Some(call) = call {
+    let via_of = |o: &crate::channels::RingOutcome| match o {
+        crate::channels::RingOutcome::Messaged(_) | crate::channels::RingOutcome::Held(_) => crate::follow_up::Via::Message,
+        _ => crate::follow_up::Via::Call,
+    };
+    let via = if let Some(call) = call {
         msg.reason = Some(call.reason.clone());
         msg.brief = Some(call.brief.clone());
         let outcome = crate::channels::ring(state, fired.user_id, &fired.username, &msg);
@@ -1369,6 +1372,7 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
             "trigger_rang",
             &call.log_line(&format!("event {}", ev.event_id), outcome.as_str()),
         );
+        via_of(&outcome)
     } else if fired.channel == crate::channels::RING_CHANNEL {
         msg.reason = Some(ev.prompt.clone());
         let outcome = crate::channels::calling::ring_if_free(state, fired.user_id, &fired.username, &msg);
@@ -1377,8 +1381,25 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
             let detail = format!("event {}: {}: laid to ring", ev.event_id, outcome.as_str());
             let _ = crate::log::record(&conn, Some(fired.user_id), "trigger_rang", &detail);
         }
+        via_of(&outcome)
     } else {
         crate::channels::deliver_via(&state.db, &state.channels, fired.user_id, &fired.username, &msg);
+        crate::follow_up::Via::Message
+    };
+    let sent = crate::follow_up::Sent {
+        user_id: fired.user_id,
+        event_id: ev.event_id,
+        wait_event_id: parks,
+        origin: &ev.origin,
+        via,
+        tasks: &about,
+        wait_min: parks.and(waits).and_then(|(min, _)| u32::try_from(min).ok()),
+        at: jiff::Timestamp::now(),
+    };
+    let conn = state.db();
+    if let Err(e) = crate::follow_up::record(&conn, &sent) {
+        let detail = format!("event {}: recording the outreach: {e:#}", ev.event_id);
+        let _ = crate::log::record_throttled(&conn, Some(fired.user_id), "trigger_error", &detail, now, crate::log::ERROR_LOG_WINDOW_MINS);
     }
 }
 
@@ -2033,14 +2054,13 @@ mod tests {
     }
 
     #[test]
-    fn a_session_ending_in_plain_text_says_it() {
-        let (name, result) = decision(&outcome("  Back on the essay?  ", vec![step("task_list", "{}")])).unwrap();
-        assert_eq!((name.as_str(), result["said"].as_str()), ("say", Some("Back on the essay?")));
-        let (_, long) = decision(&outcome(&"あ".repeat(1000), Vec::new())).unwrap();
-        assert!(long["said"].as_str().unwrap().len() <= MAX_SAY_BYTES);
+    fn only_a_terminal_step_decides_and_closing_text_never_does() {
+        assert!(decision(&outcome("  Back on the essay?  ", vec![step("task_list", "{}")])).is_none());
+        assert!(decision(&outcome("Let me look at the plan", Vec::new())).is_none());
         let (name, _) = decision(&outcome("x", vec![step("stay_quiet", r#"{"quiet":true,"reason":"r"}"#)])).unwrap();
-        assert_eq!(name, "stay_quiet", "a terminal step outranks the text");
-        assert!(decision(&outcome("  ", vec![step("task_list", "{}")])).is_none());
+        assert_eq!(name, "stay_quiet");
+        let check = step("call_user", r#"{"token":"t","allowed":true}"#);
+        assert!(decision(&outcome("", vec![check])).is_none(), "a call check decides nothing");
     }
 
     #[test]

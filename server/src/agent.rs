@@ -82,6 +82,9 @@ struct SessionProfile {
     /// Whether the session exists to call its one terminal tool: every round
     /// must call a tool, and the last one that one.
     decides: bool,
+    /// Whether its last round, and the round after one that answered in text,
+    /// is offered only the tools that end it and must call one.
+    must_end: bool,
     /// See `ChatRequest::plain`.
     plain: bool,
     /// Whether no caller is waiting on it.
@@ -106,6 +109,7 @@ const fn profile(kind: SessionKind) -> SessionProfile {
         max_turns: MAX_TURNS,
         max_turns_reply: false,
         decides: false,
+        must_end: false,
         plain: false,
         background: true,
         streams: false,
@@ -134,7 +138,9 @@ const fn profile(kind: SessionKind) -> SessionProfile {
         },
         SessionKind::Call => SessionProfile { prompt: "voice", japanese: None, ..base },
         SessionKind::Nightly => SessionProfile { then: Some("planning"), ..base },
-        SessionKind::Trigger => SessionProfile { then: Some("trigger"), max_turns: TRIGGER_MAX_TURNS, ..base },
+        SessionKind::Trigger => {
+            SessionProfile { then: Some("trigger"), max_turns: TRIGGER_MAX_TURNS, must_end: true, ..base }
+        }
         SessionKind::Talk => SessionProfile {
             max_turns: TALK_MAX_TURNS,
             max_turns_reply: true,
@@ -588,10 +594,22 @@ fn run_traced(
 
     let terminal = profile.decides.then(|| terminal_tool(kind)).flatten();
     let stopped = || stop.is_some_and(|s| s.load(Ordering::Relaxed));
+    let mut deciding = false;
     'rounds: while turns < max_turns {
         if stopped() {
             break;
         }
+        if profile.must_end && !deciding && turns + 1 == max_turns {
+            deciding = true;
+            note_on_last_result(&mut messages, mt::must_decide(lang));
+        }
+        let ending;
+        let offered: &[serde_json::Value] = if deciding {
+            ending = ending_schemas(kind, &schemas, env.calls.borrow().held(std::time::Instant::now()));
+            &ending
+        } else {
+            &schemas
+        };
         let last = profile.max_turns_reply
             && terminal.is_none()
             && (turns + 1 == max_turns || profile.budget.is_some_and(|b| started.elapsed() >= b));
@@ -600,12 +618,14 @@ fn run_traced(
         }
         let must_call = if last {
             Some(MustCall::Nothing)
+        } else if deciding {
+            Some(MustCall::Any)
         } else {
             terminal.map(|name| {
                 if turns + 1 == max_turns || schemas.len() == 1 { MustCall::Tool(name) } else { MustCall::Any }
             })
         };
-        let req = ChatRequest { system, messages: &messages, tools: &schemas, background, plain: profile.plain, must_call };
+        let req = ChatRequest { system, messages: &messages, tools: offered, background, plain: profile.plain, must_call };
         trace.spent(crate::usage::take());
         let round = std::time::Instant::now();
         let (resp, thinking, streamed) = match chat_round(deps.llm, &req, profile.streams, on_event, stop) {
@@ -633,6 +653,11 @@ fn run_traced(
             }
         };
         last_text = resp.text;
+        if resp.tool_calls.is_empty() && profile.must_end && !deciding && turns < max_turns {
+            deciding = true;
+            ask_to_decide(&mut messages, std::mem::take(&mut last_text), mt::must_decide(lang));
+            continue;
+        }
         if resp.tool_calls.is_empty() {
             on_event(AgentEvent::Reply { text: &last_text });
             trace.ok(&last_text);
@@ -801,6 +826,37 @@ fn note_on_last_result(messages: &mut [Message], note: &str) {
         content.push_str("\n\n");
         content.push_str(note);
     }
+}
+
+/// Hands a round that answered in `text` back to the model with `note`; an
+/// empty answer leaves no turn of its own, so the note joins the last message.
+fn ask_to_decide(messages: &mut Vec<Message>, text: String, note: &str) {
+    if !text.trim().is_empty() {
+        messages.push(Message::Assistant { text, tool_calls: Vec::new() });
+        messages.push(Message::User(note.to_string()));
+        return;
+    }
+    match messages.last_mut() {
+        Some(Message::User(t)) => {
+            t.push_str("\n\n");
+            t.push_str(note);
+        }
+        Some(Message::ToolResult { .. }) => note_on_last_result(messages, note),
+        _ => messages.push(Message::User(note.to_string())),
+    }
+}
+
+/// The tools that end a session of `kind`; `call_user` only while a check's
+/// token is held, since a check alone would end nothing.
+fn ending_schemas(kind: SessionKind, schemas: &[serde_json::Value], token_held: bool) -> Vec<serde_json::Value> {
+    schemas
+        .iter()
+        .filter(|s| {
+            let name = s["name"].as_str().unwrap_or_default();
+            tools::is_terminal(kind, name) && (name != "call_user" || token_held)
+        })
+        .cloned()
+        .collect()
 }
 
 /// The one tool that ends a session of `kind`, if it has exactly one.
@@ -1789,6 +1845,44 @@ mod tests {
         assert!(matches!(&seen[0].messages[0], Message::User(t) if t.contains("# Today's plan")));
         assert!(seen[0].tool_names.contains(&"stay_quiet".to_string()));
         assert!(!seen[0].tool_names.contains(&"calendar_add".to_string()));
+        assert_eq!(seen[0].must_call, None);
+        let last = seen.last().unwrap();
+        assert_eq!(last.tool_names, ["say", "stay_quiet"], "the last round is offered only its endings");
+        assert_eq!(last.must_call.as_deref(), Some("*"));
+        assert!(last_result(last).ends_with(mt::must_decide(Lang::En)));
+        assert!(out.reply.is_empty(), "nothing it said in passing stands for a decision");
+    }
+
+    #[test]
+    fn a_trigger_holding_a_call_token_may_still_confirm_on_its_last_round() {
+        let (db, tmp) = env();
+        let caller = FakeCaller(Default::default());
+        let lookup = |n: usize| ChatResponse {
+            text: String::new(),
+            tool_calls: vec![ToolCall { id: format!("l{n}"), name: "memory_query".into(), args: r#"{"query":"x"}"#.into() }],
+        };
+        let mut script = vec![ChatResponse {
+            text: String::new(),
+            tool_calls: vec![ToolCall { id: "c".into(), name: "call_user".into(), args: r#"{"reason":"the essay"}"#.into() }],
+        }];
+        script.extend((1..TRIGGER_MAX_TURNS).map(lookup));
+        let llm = MockLLM::scripted(script);
+        run_session(&SessionDeps { caller: Some(&caller), ..deps(&db, &tmp, &llm) }, 1, "aki", SessionKind::Trigger, now(), &[], "check")
+            .unwrap();
+        assert_eq!(llm.seen().last().unwrap().tool_names, ["call_user", "say", "stay_quiet"]);
+    }
+
+    #[test]
+    fn talk_keeps_every_tool_on_its_last_round() {
+        let (db, tmp) = env();
+        let lookup = |n: usize| ChatResponse {
+            text: String::new(),
+            tool_calls: vec![ToolCall { id: format!("l{n}"), name: "memory_query".into(), args: r#"{"query":"x"}"#.into() }],
+        };
+        let llm = MockLLM::scripted((0..TALK_MAX_TURNS).map(lookup).collect());
+        run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, now(), &[], "hi").unwrap();
+        let seen = llm.seen();
+        assert_eq!(seen.last().unwrap().tool_names, seen[0].tool_names);
     }
 
     #[test]
@@ -2359,7 +2453,10 @@ mod tests {
                 text: String::new(),
                 tool_calls: vec![ToolCall { id: "c1".into(), name: "task_list".into(), args: "{}".into() }],
             },
-            ChatResponse { text: "done".into(), tool_calls: vec![] },
+            ChatResponse {
+                text: String::new(),
+                tool_calls: vec![ToolCall { id: "c2".into(), name: "stay_quiet".into(), args: r#"{"reason":"all fine"}"#.into() }],
+            },
         ])
         .with_usage(spent);
         run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Trigger, now(), &[], "look").unwrap();
@@ -2715,6 +2812,7 @@ mod tests {
             reason: "the essay".into(),
             brief: "essay due fri, 2 of 5 sections".into(),
             asked: None,
+            task_ids: Vec::new(),
         }]);
         let logged: String = db
             .lock()

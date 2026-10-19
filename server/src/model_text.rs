@@ -533,6 +533,7 @@ pub fn review_section(l: Lang, section: ReviewSection) -> &'static str {
         ReviewSection::Areas => l.of("Where the time went, eight weeks", "時間の行き先（八週間）"),
         ReviewSection::Conversations => l.of("Conversations", "会話"),
         ReviewSection::Memory => l.of("The week as memory holds it", "記憶に残る一週間"),
+        ReviewSection::Nudges => l.of("How the nudges landed", "声かけの結果"),
     }
 }
 
@@ -546,6 +547,95 @@ pub enum ReviewSection {
     Areas,
     Conversations,
     Memory,
+    Nudges,
+}
+
+/// One way of grouping the week's outreach.
+#[derive(Clone, Copy)]
+pub enum NudgeKind {
+    Message,
+    MessageWaited,
+    Call,
+    Idle,
+    Planned,
+    /// The level it went out at; 2 stands for 2 or more.
+    Level(u8),
+}
+
+pub fn nudge_tally(l: Lang, kind: NudgeKind, total: usize, tally: &[(crate::follow_up::Landed, usize)]) -> String {
+    let label = match (kind, l) {
+        (NudgeKind::Message, _) => l.of("messages", "メッセージ").to_string(),
+        (NudgeKind::MessageWaited, _) => l.of("messages that waited for an answer", "返事を待ったメッセージ").to_string(),
+        (NudgeKind::Call, _) => l.of("calls", "電話").to_string(),
+        (NudgeKind::Idle, _) => l.of("after the user went quiet", "ユーザーが静かになったあと").to_string(),
+        (NudgeKind::Planned, _) => l.of("planned wake-ups", "予定した目覚め").to_string(),
+        (NudgeKind::Level(n), Lang::En) if n >= 2 => format!("sent at level {n} or more"),
+        (NudgeKind::Level(n), Lang::En) => format!("sent at level {n}"),
+        (NudgeKind::Level(n), Lang::Ja) if n >= 2 => format!("レベル{n}以上で送ったもの"),
+        (NudgeKind::Level(n), Lang::Ja) => format!("レベル{n}で送ったもの"),
+    };
+    let parts: Vec<String> = tally
+        .iter()
+        .map(|(landed, n)| match l {
+            Lang::En => format!("{n} {}", nudge_landed(l, Some(*landed))),
+            Lang::Ja => format!("{}{n}件", nudge_landed(l, Some(*landed))),
+        })
+        .collect();
+    let sep = l.of(", ", "、");
+    match (l, parts.is_empty()) {
+        (Lang::En, true) => format!("- {label}: {total}"),
+        (Lang::En, false) => format!("- {label}: {total} — {}", parts.join(sep)),
+        (Lang::Ja, true) => format!("- {label}: {total}件"),
+        (Lang::Ja, false) => format!("- {label}: {total}件 — {}", parts.join(sep)),
+    }
+}
+
+// --- the outreach a wake-up reads ---
+
+pub fn nudges_header(l: Lang) -> &'static str {
+    l.of(
+        "Recent nudges and how they landed (level: unanswered in a row since the user last answered or acted on it):",
+        "最近の声かけと結果（レベル: ユーザーが最後に答えるか動いてから続けて反応がなかった回数）:",
+    )
+}
+
+pub fn nudge_task(l: Lang, id: i64, title: &str) -> String {
+    match l {
+        Lang::En => format!("task {id} {title}"),
+        Lang::Ja => format!("タスク{id} {title}"),
+    }
+}
+
+pub fn nudge_no_task(l: Lang) -> &'static str {
+    l.of("no task", "タスクなし")
+}
+
+pub fn nudge_via(l: Lang, via: crate::follow_up::Via) -> &'static str {
+    match via {
+        crate::follow_up::Via::Message => l.of("msg", "メッセージ"),
+        crate::follow_up::Via::Call => l.of("call", "電話"),
+    }
+}
+
+pub fn nudge_landed(l: Lang, landed: Option<crate::follow_up::Landed>) -> &'static str {
+    use crate::follow_up::Landed as L;
+    match landed {
+        None => l.of("waiting", "返事待ち"),
+        Some(L::Answered) => l.of("answered", "返信あり"),
+        Some(L::Acted) => l.of("acted", "行動あり"),
+        Some(L::Ignored) => l.of("ignored", "反応なし"),
+        Some(L::Missed) => l.of("missed", "不在"),
+        Some(L::Declined) => l.of("declined", "拒否"),
+    }
+}
+
+pub fn nudge_line(l: Lang, name: &str, entries: &str, level: usize, acted: Option<&str>) -> String {
+    match (l, acted) {
+        (Lang::En, None) => format!("- {name}: {entries} — level {level}"),
+        (Lang::En, Some(at)) => format!("- {name}: {entries} — level {level}, acted {at}"),
+        (Lang::Ja, None) => format!("- {name}: {entries} — レベル{level}"),
+        (Lang::Ja, Some(at)) => format!("- {name}: {entries} — レベル{level}、{at}に行動"),
+    }
 }
 
 pub fn planned_min(l: Lang, min: i64) -> String {
@@ -937,6 +1027,20 @@ pub fn lookups_nudge(l: Lang, rounds: usize) -> String {
             "（メモ: 調べるだけのラウンドが{rounds}回続いています。手元の情報で行動するか、\
              足りないものを伝えて回答してください。）"
         ),
+    }
+}
+
+/// Precedes a wake-up's round that may only end the session.
+pub fn must_decide(l: Lang) -> &'static str {
+    match l {
+        Lang::En => {
+            "(Note to self: this is your last round, and only a tool call ends it. Decide now: say, \
+             stay_quiet, or call_user's confirming call if you hold a token. Text alone reaches nobody.)"
+        }
+        Lang::Ja => {
+            "（メモ: これが最後のラウンドで、ツールを呼ぶことでしか終われません。今決めてください: \
+             say、stay_quiet、またはトークンがあれば call_user の確定。文章だけでは誰にも届きません。）"
+        }
     }
 }
 

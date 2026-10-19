@@ -486,6 +486,28 @@ const MIGRATIONS: &[&str] = &[
          expires_at TEXT NOT NULL
      );
      CREATE INDEX idx_message_actions_batch ON message_actions(batch);",
+    "CREATE TABLE outreach (
+         id INTEGER PRIMARY KEY,
+         user_id INTEGER NOT NULL REFERENCES users(id),
+         event_id INTEGER,
+         wait_event_id INTEGER,
+         origin TEXT NOT NULL,
+         via TEXT NOT NULL CHECK (via IN ('message','call')),
+         at TEXT NOT NULL,
+         window_until TEXT NOT NULL,
+         wait_min INTEGER,
+         level INTEGER NOT NULL DEFAULT 0,
+         outcome TEXT CHECK (outcome IS NULL OR outcome IN ('answered','acted','ignored','missed','declined')),
+         outcome_at TEXT
+     );
+     CREATE INDEX idx_outreach_user ON outreach(user_id, at);
+     CREATE INDEX idx_outreach_wait ON outreach(wait_event_id) WHERE wait_event_id IS NOT NULL;
+     CREATE TABLE outreach_tasks (
+         outreach_id INTEGER NOT NULL REFERENCES outreach(id) ON DELETE CASCADE,
+         task_id INTEGER NOT NULL,
+         PRIMARY KEY (outreach_id, task_id)
+     );
+     CREATE INDEX idx_outreach_tasks_task ON outreach_tasks(task_id);",
 ];
 
 pub fn server_setting(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
@@ -603,7 +625,7 @@ mod tests {
     fn v61_holds_outages_and_message_actions_per_user() {
         let conn = open_memory().unwrap();
         let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(v, 61);
+        assert!(v >= 61);
         conn.execute_batch(
             "INSERT INTO users (username, pass_hash, role) VALUES ('aitest','h','member');
              INSERT INTO outages (user_id, code, since) VALUES (1, 'provider_down', 'x');
@@ -615,6 +637,32 @@ mod tests {
         let left: i64 = conn
             .query_row("SELECT (SELECT COUNT(*) FROM outages) + (SELECT COUNT(*) FROM message_actions)", [], |r| r.get(0))
             .unwrap();
+        assert_eq!(left, 0);
+    }
+
+    #[test]
+    fn v62_records_outreach_that_outlives_its_event_and_task() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        apply_migrations(&conn, BASELINE, &MIGRATIONS[..5]).unwrap();
+        apply_migrations(&conn, BASELINE, MIGRATIONS).unwrap();
+        conn.execute_batch(
+            "INSERT INTO users (username, pass_hash, role) VALUES ('aitest','h','member');
+             INSERT INTO plans (user_id, date, created_at) VALUES (1, '2026-10-18', 'x');
+             INSERT INTO events (plan_id, kind, wall_time) VALUES (1, 'trigger', '09:00');
+             INSERT INTO tasks (user_id, title, created_at, updated_at) VALUES (1, 'essay', 'x', 'x');
+             INSERT INTO outreach (user_id, event_id, origin, via, at, window_until) VALUES (1, 1, 'agent', 'call', 'a', 'b');
+             INSERT INTO outreach_tasks (outreach_id, task_id) VALUES (1, 1);
+             DELETE FROM events; DELETE FROM tasks;",
+        )
+        .unwrap();
+        let bad = conn.execute(
+            "INSERT INTO outreach (user_id, origin, via, at, window_until) VALUES (1, 'agent', 'fax', 'a', 'b')",
+            [],
+        );
+        assert!(bad.is_err());
+        conn.execute("DELETE FROM outreach", []).unwrap();
+        let left: i64 = conn.query_row("SELECT COUNT(*) FROM outreach_tasks", [], |r| r.get(0)).unwrap();
         assert_eq!(left, 0);
     }
 
