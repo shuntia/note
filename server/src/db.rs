@@ -469,6 +469,8 @@ const MIGRATIONS: &[&str] = &[
          event_id INTEGER PRIMARY KEY REFERENCES events(id) ON DELETE CASCADE,
          session TEXT NOT NULL
      );",
+    "ALTER TABLE events ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0;
+     ALTER TABLE paused_sessions ADD COLUMN context TEXT NOT NULL DEFAULT '';",
 ];
 
 pub fn server_setting(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {

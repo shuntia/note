@@ -4,8 +4,9 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use rusqlite::Connection;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::Mutex;
 
 struct Candidate {
     event_id: i64,
@@ -17,9 +18,10 @@ struct Candidate {
     kind: String,
     channel: String,
     message: String,
+    origin: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct FiredEvent {
     pub event_id: i64,
     pub user_id: i64,
@@ -29,6 +31,44 @@ pub struct FiredEvent {
     pub date: String,
     pub channel: String,
     pub message: String,
+    /// Triggers of the same user due in the same sweep, answered by this
+    /// one's session and settled with it.
+    pub folded: Vec<i64>,
+}
+
+/// The users whose wake-ups are running on a thread of their own; the sweep
+/// fires and retries nothing more for them until theirs end.
+#[derive(Default)]
+pub struct Wakes {
+    running: Mutex<HashSet<i64>>,
+}
+
+impl Wakes {
+    pub fn running(&self) -> HashSet<i64> {
+        self.lock().clone()
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashSet<i64>> {
+        self.running.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// A user's claim on `Wakes`, given back however the thread holding it ends.
+struct Claim {
+    wakes: std::sync::Arc<Wakes>,
+    user_id: i64,
+}
+
+impl Claim {
+    fn take(wakes: &std::sync::Arc<Wakes>, user_id: i64) -> Option<Self> {
+        wakes.lock().insert(user_id).then(|| Self { wakes: wakes.clone(), user_id })
+    }
+}
+
+impl Drop for Claim {
+    fn drop(&mut self) {
+        self.wakes.lock().remove(&self.user_id);
+    }
 }
 
 /// Resolves the candidate's stored wall time to an instant in `tz`. `date` and
@@ -127,24 +167,38 @@ fn cancel_settled_trigger(
     Ok(true)
 }
 
+pub fn fire_due(
+    conn: &Connection,
+    config_dir: &Path,
+    now: jiff::Timestamp,
+) -> Result<Vec<FiredEvent>> {
+    fire_due_except(conn, config_dir, now, &HashSet::new())
+}
+
 /// Fires every pending or snoozed event whose wall time, resolved in its user's
 /// timezone on the plan date, has arrived by `now`. A candidate that cannot be
 /// resolved is logged as `runner_error` and skipped, so one unusable row cannot
 /// stall the sweep for every other user. `alert = 0` leaves an event out of the
 /// sweep entirely: the schema forces it on every block, and the user chooses it
 /// per routine.
-pub fn fire_due(
+///
+/// Triggers fire at most one session per user per sweep, and none for a user
+/// in `running`. One more than `LATE_MIN` late is dropped; the rest due
+/// alongside the first fold into it, except a resumed wait, which waits its turn.
+pub fn fire_due_except<S: std::hash::BuildHasher>(
     conn: &Connection,
     config_dir: &Path,
     now: jiff::Timestamp,
+    running: &HashSet<i64, S>,
 ) -> Result<Vec<FiredEvent>> {
     let mut stmt = conn.prepare_cached(
         "SELECT e.id, p.user_id, u.username, u.category, p.date, e.wall_time, e.kind,
-                e.channel, e.message
+                e.channel, e.message, e.origin
          FROM events e
          JOIN plans p ON p.id = e.plan_id
          JOIN users u ON u.id = p.user_id
-         WHERE e.status IN ('pending','snoozed') AND e.alert = 1",
+         WHERE e.status IN ('pending','snoozed') AND e.alert = 1
+         ORDER BY p.date, e.wall_time, e.id",
     )?;
     let candidates: Vec<Candidate> = stmt
         .query_map([], |r| {
@@ -158,13 +212,21 @@ pub fn fire_due(
                 kind: r.get(6)?,
                 channel: r.get(7)?,
                 message: r.get(8)?,
+                origin: r.get(9)?,
             })
         })?
         .collect::<rusqlite::Result<_>>()?;
+    drop(stmt);
 
-    let mut fired = Vec::new();
+    let mut fired: Vec<FiredEvent> = Vec::new();
+    // each user's trigger firing this sweep, and whether it resumes a wait
+    let mut lead: HashMap<i64, (usize, bool)> = HashMap::new();
     let mut tz_cache = HashMap::new();
     for c in candidates {
+        let trigger = c.kind == crate::triggers::KIND;
+        if trigger && running.contains(&c.user_id) {
+            continue;
+        }
         let rt = user_runtime(conn, config_dir, &c, &mut tz_cache, now)?;
         if !rt.features.checkins {
             continue;
@@ -186,35 +248,56 @@ pub fn fire_due(
                 continue;
             }
         };
-        let answered = || c.kind == crate::triggers::KIND && crate::triggers::answered(conn, c.user_id, c.event_id).unwrap_or(false);
-        if due <= now || answered() {
-            if defer_while_quiet(conn, &c, &rt.tz, now)? {
+        let ended = || trigger && crate::triggers::wait_ended(conn, c.user_id, c.event_id).ok().flatten().is_some();
+        if due > now && !ended() {
+            continue;
+        }
+        if trigger && now.duration_since(due) > jiff::SignedDuration::from_mins(crate::triggers::LATE_MIN) {
+            crate::triggers::drop_stale(conn, c.user_id, c.event_id, due, now)?;
+            continue;
+        }
+        if defer_while_quiet(conn, &c, &rt.tz, now)? {
+            continue;
+        }
+        if trigger && cancel_settled_trigger(conn, &c, now)? {
+            continue;
+        }
+        let resumes = c.origin == crate::triggers::AWAIT_ORIGIN;
+        let into = if trigger { lead.get(&c.user_id).copied() } else { None };
+        if let Some((_, lead_resumes)) = into {
+            if resumes || lead_resumes {
                 continue;
             }
-            if c.kind == crate::triggers::KIND && cancel_settled_trigger(conn, &c, now)? {
-                continue;
-            }
-            conn.execute(
-                "UPDATE events SET status='fired', fired_at=?1 WHERE id=?2",
-                (now.to_string(), c.event_id),
-            )?;
+        }
+        conn.execute(
+            "UPDATE events SET status='fired', fired_at=?1 WHERE id=?2",
+            (now.to_string(), c.event_id),
+        )?;
+        if let Some((i, _)) = into {
             crate::log::record(
                 conn,
                 Some(c.user_id),
-                "event_fired",
-                &format!("event {} due {}", c.event_id, due),
+                "trigger_folded",
+                &format!("event {}: folded into event {}", c.event_id, fired[i].event_id),
             )?;
-            fired.push(FiredEvent {
-                event_id: c.event_id,
-                user_id: c.user_id,
-                username: c.username.clone(),
-                kind: c.kind.clone(),
-                wall_time: c.wall_time.clone(),
-                date: c.date.clone(),
-                channel: c.channel.clone(),
-                message: c.message.clone(),
-            });
+            fired[i].folded.push(c.event_id);
+            continue;
         }
+        crate::log::record(conn, Some(c.user_id), "event_fired", &format!("event {} due {}", c.event_id, due))?;
+        if trigger {
+            lead.insert(c.user_id, (fired.len(), resumes));
+        }
+        fired.push(FiredEvent {
+            event_id: c.event_id,
+            user_id: c.user_id,
+            username: c.username.clone(),
+            kind: c.kind.clone(),
+            wall_time: c.wall_time.clone(),
+            date: c.date.clone(),
+            channel: c.channel.clone(),
+            message: c.message.clone(),
+            folded: Vec::new(),
+        });
     }
     Ok(fired)
 }
@@ -264,6 +347,7 @@ pub fn block_starts(
                     kind: String::new(),
                     channel: String::new(),
                     message: String::new(),
+                    origin: String::new(),
                 },
                 r.get(6)?,
                 r.get(7)?,
@@ -318,10 +402,18 @@ pub fn gc_sessions(conn: &Connection, now: jiff::Timestamp) -> Result<()> {
     Ok(())
 }
 
-/// One sweep: session GC and firing under a single lock, then delivery with the
-/// lock released. Blocking throughout, so async callers must wrap it in
-/// `spawn_blocking`.
+/// `sweep`, then waits for the wake-ups it started.
 pub fn sweep_once(state: &AppState) {
+    for wake in sweep(state) {
+        let _ = wake.join();
+    }
+}
+
+/// One sweep: session GC and firing under a single lock, then delivery with the
+/// lock released. Each user's triggers run on a thread of their own, one after
+/// another, so a session never holds up the sweep; the threads are returned.
+/// Blocking throughout, so async callers must wrap it in `spawn_blocking`.
+pub fn sweep(state: &AppState) -> Vec<std::thread::JoinHandle<()>> {
     let now = jiff::Timestamp::now();
     state.login_limiter.sweep(now);
     state.login_clients.sweep(now);
@@ -348,10 +440,15 @@ pub fn sweep_once(state: &AppState) {
                 crate::log::ERROR_LOG_WINDOW_MINS,
             );
         };
+        let running = state.wakes.running();
+        let after = jiff::SignedDuration::from_mins(crate::triggers::RETRY_AFTER_MIN);
+        if let Err(e) = crate::triggers::reclaim(&conn, now, after, &running) {
+            note(e);
+        }
         if let Err(e) = crate::idle::check(&conn, &state.config_dir, now) {
             note(e);
         }
-        let fired = fire_due(&conn, &state.config_dir, now).unwrap_or_else(|e| {
+        let fired = fire_due_except(&conn, &state.config_dir, now, &running).unwrap_or_else(|e| {
             note(e);
             Vec::new()
         });
@@ -400,24 +497,60 @@ pub fn sweep_once(state: &AppState) {
         }
         state.hub.broadcast_changed(flip.user_id);
     }
-    for ev in &fired {
-        // A trigger has nothing canned to deliver: it runs a session first, and
-        // that session decides whether anything is sent at all.
+    // A trigger has nothing canned to deliver: it runs a session first, and
+    // that session decides whether anything is sent at all.
+    let mut wakes: HashMap<i64, Vec<FiredEvent>> = HashMap::new();
+    for ev in fired {
         if ev.kind == crate::triggers::KIND {
-            crate::triggers::fire(state, ev);
+            wakes.entry(ev.user_id).or_default().push(ev);
         } else {
             crate::channels::deliver_event(
                 &state.db,
                 &state.channels,
-                ev,
+                &ev,
                 crate::text::Lang::for_user(&state.config_dir, &ev.username),
             );
         }
     }
+    wakes.into_iter().filter_map(|(user_id, evs)| wake(state, user_id, evs)).collect()
+}
+
+/// Runs one user's fired triggers in order on a thread of its own, inside the
+/// caller's runtime when there is one. Nothing is started for a user whose
+/// wake-ups already run; their events go back to wait for the next sweep.
+fn wake(state: &AppState, user_id: i64, evs: Vec<FiredEvent>) -> Option<std::thread::JoinHandle<()>> {
+    let Some(claim) = Claim::take(&state.wakes, user_id) else {
+        let conn = state.db();
+        for ev in &evs {
+            let _ = conn.execute(
+                "UPDATE events SET status = 'pending', fired_at = NULL WHERE id = ?1 AND status = 'fired'",
+                [ev.event_id],
+            );
+        }
+        return None;
+    };
+    let runtime = tokio::runtime::Handle::try_current().ok();
+    let st = state.clone();
+    let run = move || {
+        let _claim = claim;
+        let _inside = runtime.as_ref().map(tokio::runtime::Handle::enter);
+        for ev in &evs {
+            crate::triggers::fire(&st, ev);
+        }
+    };
+    std::thread::Builder::new().name(format!("wake-{user_id}")).spawn(run).ok()
 }
 
 pub fn spawn(state: AppState) {
     tokio::spawn(async move {
+        let st = state.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            let conn = st.db();
+            if let Err(e) = crate::triggers::reclaim(&conn, jiff::Timestamp::now(), jiff::SignedDuration::ZERO, &HashSet::new()) {
+                let _ = crate::log::record(&conn, None, "runner_error", &format!("reclaiming wake-ups: {e:#}"));
+            }
+        })
+        .await;
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
@@ -425,7 +558,7 @@ pub fn spawn(state: AppState) {
             // The whole sweep runs on the blocking pool: no DB guard is ever
             // live across the `await`, which would make the task non-Send.
             let st = state.clone();
-            let _ = tokio::task::spawn_blocking(move || sweep_once(&st)).await;
+            let _ = tokio::task::spawn_blocking(move || drop(sweep(&st))).await;
         }
     });
 }
@@ -643,6 +776,43 @@ mod tests {
 
         let ended: jiff::Timestamp = "2026-09-15T15:30:00Z".parse().unwrap();
         assert_eq!(fire_due(&conn, tmp.path(), ended).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn triggers_held_by_a_quiet_window_land_as_one_at_its_end() {
+        let (conn, tmp, uid) = setup("UTC");
+        school(&conn, uid);
+        let date: jiff::civil::Date = "2026-09-15".parse().unwrap();
+        let plan = crate::plan::ensure(&conn, tmp.path(), "aki", uid, date).unwrap();
+        let laid = at("2026-09-15T07:00:00Z");
+        let ids: Vec<i64> = ["09:00", "11:00", "14:00"]
+            .iter()
+            .map(|t| crate::triggers::insert(&conn, plan, t, &format!("check at {t}"), "agent", None, None, None, laid).unwrap())
+            .collect();
+        for ts in ["2026-09-15T09:00:00Z", "2026-09-15T11:00:00Z", "2026-09-15T14:00:00Z"] {
+            assert!(fire_due(&conn, tmp.path(), at(ts)).unwrap().is_empty());
+        }
+
+        let fired = fire_due(&conn, tmp.path(), at("2026-09-15T15:30:00Z")).unwrap();
+        assert_eq!(fired.len(), 1, "one session for the user, not three at once");
+        assert_eq!((fired[0].event_id, fired[0].folded.clone()), (ids[0], ids[1..].to_vec()));
+    }
+
+    #[test]
+    fn a_running_wake_up_keeps_its_users_triggers_waiting_and_nobody_elses() {
+        let (conn, tmp, uid) = setup("UTC");
+        let other = crate::auth::create_user(&conn, "rin", "p", false).unwrap();
+        for user in [uid, other] {
+            let plan = crate::plan::ensure(&conn, tmp.path(), "aki", user, "2026-09-15".parse().unwrap()).unwrap();
+            crate::triggers::insert(&conn, plan, "10:00", "check", "agent", None, None, None, at("2026-09-15T07:00:00Z")).unwrap();
+        }
+        let fired = fire_due_except(&conn, tmp.path(), at("2026-09-15T10:00:00Z"), &[uid].into()).unwrap();
+        assert_eq!(fired.iter().map(|f| f.user_id).collect::<Vec<_>>(), [other]);
+        assert_eq!(fire_due(&conn, tmp.path(), at("2026-09-15T10:00:30Z")).unwrap().len(), 1, "theirs fires once free");
+    }
+
+    fn at(ts: &str) -> jiff::Timestamp {
+        ts.parse().unwrap()
     }
 
     #[test]

@@ -926,8 +926,10 @@ const TOOLS: &[ToolSpec] = tools![
         "Say this to the user and end the session: one or two warm sentences, no greeting \
          ritual. It lands in the thread and as a notification. To call instead, use call_user. \
          With await_min the session waits instead of ending: the message goes out now, and \
-         the result comes back \"Timed out\" or \"User responded before timeout\" with what \
-         they wrote, as soon as they write anywhere; you go on from there in the same thread.",
+         the result comes back \"Timed out\", \"User responded before timeout\" with what \
+         they wrote, as soon as they write anywhere, or \"User acted before timeout\" once they \
+         finish or change a task or start or end a work session; ended_by says which, and \
+         changed lists what moved in the context since. You go on from there in the same thread.",
     "call_user": call_ops::CallArgs => Exec::Session, terminal_in = &[SessionKind::Trigger];
         "Call the user: the open web app and the linked phone ring together; whichever answers \
          first takes the call. Always two calls. First with reason (plus asked and quote, the \

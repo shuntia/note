@@ -71,7 +71,7 @@ pub struct SayArgs {
     #[serde(default)]
     pub notes: Vec<String>,
     /// Wait up to this many minutes, 5 to 120, for an answer; this session
-    /// then goes on, told whether the user answered.
+    /// then goes on, told whether the user answered or acted.
     #[serde(default)]
     pub await_min: Option<u32>,
 }

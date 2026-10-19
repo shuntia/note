@@ -26,6 +26,17 @@ pub const AWAIT_ORIGIN: &str = "await_reply";
 pub const MAX_AWAITS_PER_DAY: i64 = 6;
 pub const TIMED_OUT: &str = "Timed out";
 pub const RESPONDED: &str = "User responded before timeout";
+pub const ACTED: &str = "User acted before timeout";
+/// How long a fired trigger whose session never decided waits before it is
+/// tried again, and how many tries it gets in all.
+pub const RETRY_AFTER_MIN: i64 = 10;
+pub const MAX_ATTEMPTS: i64 = 3;
+/// How late a trigger may still fire; one later than this no longer applies.
+pub const LATE_MIN: i64 = 90;
+/// Longer than any wake-up session runs: a trigger fired before this and still
+/// undecided is not running.
+pub const SESSION_MAX_MIN: i64 = 30;
+const MAX_DELTA_BYTES: usize = 4000;
 /// Pending triggers the model may hold across all days, so a far horizon
 /// cannot fill without end.
 pub const MAX_PENDING: i64 = 200;
@@ -880,16 +891,66 @@ pub fn log_change(conn: &Connection, user_id: i64, event_id: i64, name: &str, ar
     Ok(true)
 }
 
-fn settle(conn: &Connection, event_id: i64, now: jiff::Timestamp) -> rusqlite::Result<usize> {
+/// Ends `event_id` as `status`, taking the session it parked with it.
+fn close(conn: &Connection, event_id: i64, status: &str, now: jiff::Timestamp) -> rusqlite::Result<()> {
     conn.execute(
-        "UPDATE events SET status = 'done', decided_at = ?1 WHERE id = ?2",
-        (now.to_string(), event_id),
-    )
+        "UPDATE events SET status = ?1, decided_at = ?2 WHERE id = ?3",
+        (status, now.to_string(), event_id),
+    )?;
+    conn.execute("DELETE FROM paused_sessions WHERE event_id = ?1", [event_id])?;
+    Ok(())
+}
+
+/// Drops a trigger that came due more than `LATE_MIN` ago, unfired.
+pub fn drop_stale(
+    conn: &Connection,
+    user_id: i64,
+    event_id: i64,
+    due: jiff::Timestamp,
+    now: jiff::Timestamp,
+) -> Result<()> {
+    close(conn, event_id, "dropped", now)?;
+    let late = now.duration_since(due).as_mins();
+    crate::log::record(conn, Some(user_id), "trigger_stale", &format!("event {event_id}: {late} min late, dropped"))?;
+    Ok(())
+}
+
+/// Takes back every trigger left fired for at least `after` whose user has no
+/// wake-up `running`: a session that failed, never decided, or died with the
+/// process. Each goes back to wait for the next sweep until `MAX_ATTEMPTS`
+/// tries are spent, and is dropped then.
+pub fn reclaim<S: std::hash::BuildHasher>(
+    conn: &Connection,
+    now: jiff::Timestamp,
+    after: jiff::SignedDuration,
+    running: &std::collections::HashSet<i64, S>,
+) -> Result<()> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT e.id, p.user_id, e.attempts FROM events e JOIN plans p ON p.id = e.plan_id
+         WHERE e.kind = ?1 AND e.status = 'fired' AND (e.fired_at IS NULL OR e.fired_at <= ?2)",
+    )?;
+    let stuck: Vec<(i64, i64, i64)> = stmt
+        .query_map((KIND, (now - after).to_string()), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    drop(stmt);
+    for (id, user_id, attempts) in stuck.into_iter().filter(|(_, u, _)| !running.contains(u)) {
+        if attempts + 1 >= MAX_ATTEMPTS {
+            close(conn, id, "dropped", now)?;
+            crate::log::record(conn, Some(user_id), "trigger_given_up", &format!("event {id}: undecided after {MAX_ATTEMPTS} tries"))?;
+        } else {
+            conn.execute(
+                "UPDATE events SET status = 'pending', fired_at = NULL, attempts = attempts + 1 WHERE id = ?1",
+                [id],
+            )?;
+            crate::log::record(conn, Some(user_id), "trigger_retry", &format!("event {id}: try {}", attempts + 2))?;
+        }
+    }
+    Ok(())
 }
 
 /// Parks a session whose `say` waits `min` minutes for an answer: an event in
-/// `thread` resumes it at the end of the wait, or as soon as the user writes.
-/// `None` once the day holds `MAX_AWAITS_PER_DAY`.
+/// `thread` resumes it at the end of the wait, or as soon as the user writes or
+/// moves (`wait_ended`). `None` once the day holds `MAX_AWAITS_PER_DAY`.
 #[allow(clippy::too_many_arguments)]
 pub fn pause(
     conn: &Connection,
@@ -922,13 +983,23 @@ pub fn pause(
     Ok(Some(id))
 }
 
-/// Takes the session `event_id` resumes, if it parked one.
-fn take_paused(conn: &Connection, event_id: i64) -> Result<Option<crate::agent::Paused>> {
-    let raw: Option<String> = conn
-        .query_row("SELECT session FROM paused_sessions WHERE event_id = ?1", [event_id], |r| r.get(0))
+/// A parked session and the context as it stood once it parked, so the resumed
+/// session is told only what moved since.
+struct Parked {
+    paused: crate::agent::Paused,
+    context: String,
+}
+
+/// The session `event_id` resumes, if it parked one. It stays parked until the
+/// resumed session decides, so a resume that fails is tried again.
+fn parked(conn: &Connection, event_id: i64) -> Result<Option<Parked>> {
+    let raw: Option<(String, String)> = conn
+        .query_row("SELECT session, context FROM paused_sessions WHERE event_id = ?1", [event_id], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
         .optional()?;
-    conn.execute("DELETE FROM paused_sessions WHERE event_id = ?1", [event_id])?;
-    Ok(raw.map(|r| serde_json::from_str(&r)).transpose()?)
+    raw.map(|(session, context)| Ok(Parked { paused: serde_json::from_str(&session)?, context }))
+        .transpose()
 }
 
 /// What the user wrote anywhere after `since`, oldest first.
@@ -941,30 +1012,114 @@ fn written_since(conn: &Connection, user_id: i64, since: &str) -> rusqlite::Resu
     rows
 }
 
-/// Whether the user has written since a waiting `say` parked, which ends the
-/// wait early.
-pub fn answered(conn: &Connection, user_id: i64, event_id: i64) -> rusqlite::Result<bool> {
+/// What ended a waiting `say` before its time ran out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitEnd {
+    Reply,
+    TaskDone,
+    WorkStarted,
+    WorkEnded,
+    TaskChanged,
+}
+
+impl WaitEnd {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WaitEnd::Reply => "reply",
+            WaitEnd::TaskDone => "task_done",
+            WaitEnd::WorkStarted => "work_started",
+            WaitEnd::WorkEnded => "work_ended",
+            WaitEnd::TaskChanged => "task_changed",
+        }
+    }
+}
+
+/// Whether a waiting `say` should resume early, and why: the user wrote,
+/// finished a task, started or ended a work session, or changed a task since
+/// it parked. `None` for an event that is not a wait still undecided.
+pub fn wait_ended(conn: &Connection, user_id: i64, event_id: i64) -> rusqlite::Result<Option<WaitEnd>> {
     let since: Option<String> = conn
         .query_row(
-            "SELECT created_at FROM events WHERE id = ?1 AND origin = ?2 AND status IN ('pending', 'snoozed')",
+            "SELECT created_at FROM events WHERE id = ?1 AND origin = ?2 AND status IN ('pending', 'snoozed', 'fired')",
             (event_id, AWAIT_ORIGIN),
             |r| r.get(0),
         )
         .optional()?
         .flatten();
-    Ok(match since {
-        Some(since) => last_user_message(conn, user_id)?.is_some_and(|at| at > since),
-        None => false,
-    })
+    let Some(since) = since else { return Ok(None) };
+    if last_user_message(conn, user_id)?.is_some_and(|at| at > since) {
+        return Ok(Some(WaitEnd::Reply));
+    }
+    let any = |sql: &str| conn.query_row(sql, (user_id, &since), |r| r.get::<_, bool>(0));
+    let checks = [
+        (WaitEnd::TaskDone, "SELECT EXISTS (SELECT 1 FROM tasks WHERE user_id = ?1 AND state = 'done' AND completed_at > ?2)"),
+        (WaitEnd::WorkStarted, "SELECT EXISTS (SELECT 1 FROM work_sessions WHERE user_id = ?1 AND started_at > ?2)"),
+        (WaitEnd::WorkEnded, "SELECT EXISTS (SELECT 1 FROM work_sessions WHERE user_id = ?1 AND ended_at > ?2)"),
+        (WaitEnd::TaskChanged, "SELECT EXISTS (SELECT 1 FROM tasks WHERE user_id = ?1 AND updated_at > ?2)"),
+    ];
+    for (end, sql) in checks {
+        if any(sql)? {
+            return Ok(Some(end));
+        }
+    }
+    Ok(None)
 }
 
-/// The waiting `say`'s result once the session resumes, and what the user wrote.
-fn wait_result(replies: &[String]) -> String {
-    if replies.is_empty() {
-        serde_json::json!({ "result": TIMED_OUT }).to_string()
-    } else {
-        serde_json::json!({ "result": RESPONDED, "replies": replies }).to_string()
+/// The waiting `say`'s result once the session resumes: what ended the wait,
+/// what the user wrote, and what moved in the context since it began.
+fn wait_result(ended: Option<WaitEnd>, replies: &[String], changed: &str) -> String {
+    let result = match ended {
+        None => TIMED_OUT,
+        Some(WaitEnd::Reply) => RESPONDED,
+        Some(_) => ACTED,
+    };
+    let mut out = serde_json::json!({ "result": result, "ended_by": ended.map_or("timeout", WaitEnd::as_str) });
+    if !replies.is_empty() {
+        out["replies"] = replies.into();
     }
+    if !changed.is_empty() {
+        out["changed"] = changed.into();
+    }
+    out.to_string()
+}
+
+/// The context a wake-up session reads, rendered as of `now`.
+fn picture(state: &crate::AppState, user_id: i64, username: &str, now: jiff::Timestamp) -> Option<String> {
+    let ucfg = crate::config::UserConfig::load(&state.config_dir, username).ok()?;
+    let sources = crate::context::Sources::load(&state.config_dir, username, ucfg);
+    let conn = state.db();
+    crate::context::assemble_from(&conn, &sources, &state.data_dir, user_id, username, now).ok()
+}
+
+/// The messages a parked session resumes from, its wait answered with what
+/// ended it, the user's words and what moved in the context; and those words.
+fn resumed(
+    state: &crate::AppState,
+    fired: &crate::runner::FiredEvent,
+    ev: &Firing,
+    parked: Parked,
+    now: jiff::Timestamp,
+) -> (Vec<crate::providers::Message>, Vec<String>) {
+    let (ended, replies) = {
+        let conn = state.db();
+        let ended = wait_ended(&conn, fired.user_id, ev.event_id).ok().flatten();
+        let replies = written_since(&conn, fired.user_id, ev.created_at.as_deref().unwrap_or_default()).unwrap_or_default();
+        (ended, replies)
+    };
+    let changed = picture(state, fired.user_id, &fired.username, now)
+        .map(|fresh| {
+            let (was, is) = (not_about(&parked.context, ev.event_id), not_about(&fresh, ev.event_id));
+            crate::context::delta(&was, &is, MAX_DELTA_BYTES)
+        })
+        .unwrap_or_default();
+    (parked.paused.answered(&wait_result(ended, &replies, &changed)), replies)
+}
+
+/// `context` without the lines about the wait's own event, whose firing is
+/// no news to the session it resumes.
+fn not_about(context: &str, event_id: i64) -> String {
+    let marks = [format!("event_id {event_id})"), format!("event {event_id} "), format!("event {event_id}:")];
+    context.lines().filter(|l| !marks.iter().any(|m| l.contains(m.as_str()))).collect::<Vec<_>>().join("\n")
 }
 
 /// The tool a trigger session ended on and its result: its last terminal step,
@@ -983,58 +1138,71 @@ fn decision(out: &crate::agent::SessionOutcome) -> Option<(String, serde_json::V
     })
 }
 
+/// The prompts of the triggers folded into this firing, in the order laid.
+fn folded_prompts(conn: &Connection, folded: &[i64]) -> Vec<String> {
+    folded
+        .iter()
+        .filter_map(|id| read(conn, *id).ok().flatten())
+        .map(|ev| ev.prompt)
+        .collect()
+}
+
 /// A fired trigger, off the runner's lock: a short session reads the situation
-/// and either says something or stays quiet. A session that never gets that far
-/// leaves the event alone; its user hears only why, at most once a window.
+/// and either says something or stays quiet, for it and every trigger folded
+/// into it. A session that never gets that far leaves them fired for `reclaim`
+/// to try again; its user hears only why, at most once a window.
 pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
+    let all: Vec<i64> = std::iter::once(fired.event_id).chain(fired.folded.iter().copied()).collect();
     let Ok(permit) = state.talk_gate.try_enter(fired.user_id) else {
         let conn = state.db();
-        let _ = conn.execute(
-            "UPDATE events SET status = 'pending', fired_at = NULL
-             WHERE id = ?1 AND status = 'fired'",
-            [fired.event_id],
-        );
+        for id in &all {
+            let _ = conn.execute(
+                "UPDATE events SET status = 'pending', fired_at = NULL
+                 WHERE id = ?1 AND status = 'fired'",
+                [id],
+            );
+        }
         return;
     };
     let _permit = permit;
     let now = jiff::Timestamp::now();
+    let settle_all = |status: &str| {
+        let conn = state.db();
+        for id in &all {
+            let _ = close(&conn, *id, status, now);
+        }
+    };
     if crate::api::background_capped(state, fired.user_id, "wake-up") {
-        let _ = state.db().execute(
-            "UPDATE events SET status = 'dropped', decided_at = ?1 WHERE id = ?2",
-            (now.to_string(), fired.event_id),
-        );
-        return;
+        return settle_all("dropped");
     }
     let tz = timezone(&state.config_dir, &fired.username);
     let l = Lang::for_user(&state.config_dir, &fired.username);
-    let (ev, opening, history, thread_note, resumed) = {
+    let (ev, opening, history, thread_note, parked, also) = {
         let conn = state.db();
         let Ok(Some(ev)) = read(&conn, fired.event_id) else {
             return;
         };
-        let resumed = if ev.origin == AWAIT_ORIGIN {
-            match take_paused(&conn, ev.event_id) {
-                Ok(paused) => paused.map(|p| {
-                    let replies = written_since(&conn, fired.user_id, ev.created_at.as_deref().unwrap_or_default()).unwrap_or_default();
-                    let messages = p.answered(&wait_result(&replies));
-                    (messages, replies)
-                }),
-                Err(e) => {
-                    let detail = format!("event {}: the paused session is unreadable: {e:#}", ev.event_id);
-                    let _ = crate::log::record(&conn, Some(fired.user_id), "trigger_error", &detail);
-                    None
-                }
-            }
+        let parked = if ev.origin == AWAIT_ORIGIN {
+            parked(&conn, ev.event_id).unwrap_or_else(|e| {
+                let detail = format!("event {}: the paused session is unreadable: {e:#}", ev.event_id);
+                let _ = crate::log::record(&conn, Some(fired.user_id), "trigger_error", &detail);
+                None
+            })
         } else {
             None
         };
         let mut opening = situation(&conn, fired.user_id, &ev, &tz, l);
+        let also = folded_prompts(&conn, &fired.folded);
+        if !also.is_empty() {
+            opening.push_str(&mt::also_due(l, &also));
+        }
         if ev.origin == crate::idle::ORIGIN {
             opening.push_str(&crate::idle::context(&conn, &state.data_dir, fired.user_id, &fired.username, &tz, l, now).unwrap_or_default());
         }
         let (history, note) = thread_context(&conn, ev.conversation_id, l);
-        (ev, opening, history, note, resumed)
+        (ev, opening, history, note, parked, also)
     };
+    let resumed = parked.map(|p| resumed(state, fired, &ev, p, now));
     let deps = crate::agent::SessionDeps {
         db: &state.db,
         config_dir: &state.config_dir,
@@ -1102,8 +1270,8 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
         return failed(format!("event {}: the session never decided", ev.event_id));
     };
     if name == "stay_quiet" {
+        settle_all("done");
         let conn = state.db();
-        let _ = settle(&conn, ev.event_id, now);
         let _ = crate::log::record(
             &conn,
             Some(fired.user_id),
@@ -1123,6 +1291,10 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
     };
     let call = (name == "call_user").then(|| crate::tools::call_ops::Confirmed::from_decided(&result)).flatten();
     let lang = crate::text::Lang::for_user(&state.config_dir, &fired.username);
+    let waits = result["await_min"].as_u64().zip(out.paused.as_ref());
+    let parked_at = jiff::Timestamp::now();
+    let mut parks = None;
+    settle_all("done");
     let conversation_id = {
         let conn = state.db();
         let landed = record_said(
@@ -1133,11 +1305,11 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
             &text,
             now,
         );
-        let _ = settle(&conn, ev.event_id, now);
-        if let (Ok(thread), Some(min), Some(paused)) = (&landed, result["await_min"].as_u64(), &out.paused) {
+        if let (Ok(thread), Some((min, paused))) = (&landed, waits) {
             let min = u32::try_from(min).unwrap_or(*AWAIT_MIN.end());
-            match pause(&conn, &state.config_dir, fired, *thread, &text, min, paused, now) {
+            match pause(&conn, &state.config_dir, fired, *thread, &text, min, paused, parked_at) {
                 Ok(Some(id)) => {
+                    parks = Some(id);
                     let _ = crate::log::record(&conn, Some(fired.user_id), "trigger_laid", &format!("event {id}: waits {min} min for an answer"));
                 }
                 Ok(None) => {
@@ -1159,6 +1331,10 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
         );
         landed.ok()
     };
+    if let Some(id) = parks {
+        let snapshot = picture(state, fired.user_id, &fired.username, parked_at).unwrap_or_default();
+        let _ = state.db().execute("UPDATE paused_sessions SET context = ?1 WHERE event_id = ?2", (snapshot, id));
+    }
     state.hub.broadcast_changed(fired.user_id);
     let own = ev.origin == crate::idle::ORIGIN || ev.origin == crate::wake::ORIGIN;
     let msg = crate::channels::OutboundMessage {
@@ -1170,7 +1346,7 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
         checkin: !own,
         event_id: Some(ev.event_id),
         conversation_id,
-        actions: if is_close_day(&ev.prompt) {
+        actions: if is_close_day(&ev.prompt) || also.iter().any(|p| is_close_day(p)) {
             vec![crate::channels::Action {
                 label: crate::text::action_carry_to_tomorrow(lang),
                 data: format!("carry:{}", fired.date),
@@ -1476,7 +1652,7 @@ mod tests {
         let checkin = crate::talk::create(&conn, uid, "check-in", at("2026-09-17T08:00:00Z")).unwrap();
         let fired = crate::runner::FiredEvent {
             event_id: 0, user_id: uid, username: "aki".into(), kind: KIND.into(),
-            wall_time: "09:00".into(), date: "2026-09-17".into(), channel: "push".into(), message: String::new(),
+            wall_time: "09:00".into(), date: "2026-09-17".into(), channel: "push".into(), ..Default::default()
         };
         let paused = crate::agent::Paused { messages: vec![], call_id: "c1".into(), skipped: vec!["c2".into()] };
         let now = at("2026-09-17T09:00:00Z");
@@ -1485,23 +1661,106 @@ mod tests {
         assert_eq!((ev.wall_time.as_str(), ev.conversation_id, ev.origin.as_str()), ("09:15", Some(checkin), AWAIT_ORIGIN));
         assert_eq!(spent(&conn, uid, date()).unwrap(), 0, "a wait is off the budget");
 
-        assert!(!answered(&conn, uid, id).unwrap());
+        assert_eq!(wait_ended(&conn, uid, id).unwrap(), None);
         let other = crate::talk::create(&conn, uid, "chat", now).unwrap();
         crate::talk::append_text(&conn, other, "user", "on it", at("2026-09-17T09:05:00Z")).unwrap();
-        assert!(answered(&conn, uid, id).unwrap(), "an answer in any thread ends the wait");
+        assert_eq!(wait_ended(&conn, uid, id).unwrap(), Some(WaitEnd::Reply), "an answer in any thread ends the wait");
         assert_eq!(written_since(&conn, uid, ev.created_at.as_deref().unwrap()).unwrap(), ["on it"]);
 
-        let back = take_paused(&conn, id).unwrap().unwrap();
-        assert_eq!(take_paused(&conn, id).unwrap().map(|p| p.call_id), None, "a session resumes once");
-        let messages = back.answered(&wait_result(&[]));
+        let back = parked(&conn, id).unwrap().unwrap();
+        assert!(parked(&conn, id).unwrap().is_some(), "it stays parked until the resumed session decides");
+        let messages = back.paused.answered(&wait_result(None, &[], ""));
         assert!(matches!(&messages[0], crate::providers::Message::ToolResult { call_id, content, is_error: false }
             if call_id == "c1" && content.contains("Timed out")));
         assert!(matches!(&messages[1], crate::providers::Message::ToolResult { call_id, is_error: true, .. } if call_id == "c2"));
+        close(&conn, id, "done", now).unwrap();
+        assert!(parked(&conn, id).unwrap().is_none(), "a session resumes once");
 
         for _ in 1..MAX_AWAITS_PER_DAY {
             pause(&conn, tmp.path(), &fired, checkin, "x", 15, &paused, now).unwrap().unwrap();
         }
         assert_eq!(pause(&conn, tmp.path(), &fired, checkin, "x", 15, &paused, now).unwrap(), None);
+    }
+
+    fn waiting_for(conn: &Connection, tmp: &tempfile::TempDir, uid: i64) -> i64 {
+        let checkin = crate::talk::create(conn, uid, "check-in", at("2026-09-17T08:00:00Z")).unwrap();
+        let fired = crate::runner::FiredEvent { user_id: uid, username: "aki".into(), kind: KIND.into(), ..Default::default() };
+        let paused = crate::agent::Paused { messages: vec![], call_id: "c1".into(), skipped: vec![] };
+        pause(conn, tmp.path(), &fired, checkin, "start the essay", 15, &paused, at("2026-09-17T09:00:00Z")).unwrap().unwrap()
+    }
+
+    #[test]
+    fn the_users_own_move_ends_a_wait_and_says_which() {
+        let (conn, tmp, uid) = env();
+        let task = crate::tasks::create(&conn, uid, crate::tasks::NewTask { title: "essay".into(), ..Default::default() },
+            "manual", crate::tasks::Actor::User).unwrap().id;
+        conn.execute("UPDATE tasks SET created_at = '2026-09-17T08:00:00Z', updated_at = '2026-09-17T08:00:00Z'", []).unwrap();
+        let id = waiting_for(&conn, &tmp, uid);
+        assert_eq!(wait_ended(&conn, uid, id).unwrap(), None, "what the session itself did before parking is not news");
+
+        conn.execute("UPDATE tasks SET updated_at = '2026-09-17T09:03:00Z' WHERE id = ?1", [task]).unwrap();
+        assert_eq!(wait_ended(&conn, uid, id).unwrap(), Some(WaitEnd::TaskChanged));
+        conn.execute(
+            "INSERT INTO work_sessions (user_id, title, started_at) VALUES (?1, 'essay', '2026-09-17T09:04:00Z')",
+            [uid],
+        )
+        .unwrap();
+        assert_eq!(wait_ended(&conn, uid, id).unwrap(), Some(WaitEnd::WorkStarted));
+        conn.execute("UPDATE tasks SET state = 'done', completed_at = '2026-09-17T09:05:00Z' WHERE id = ?1", [task]).unwrap();
+        assert_eq!(wait_ended(&conn, uid, id).unwrap(), Some(WaitEnd::TaskDone), "a finished task outranks the rest");
+
+        let result: serde_json::Value =
+            serde_json::from_str(&wait_result(Some(WaitEnd::TaskDone), &[], "# Tasks\n+ - essay (done)\n")).unwrap();
+        assert_eq!(
+            result,
+            serde_json::json!({ "result": ACTED, "ended_by": "task_done", "changed": "# Tasks\n+ - essay (done)\n" })
+        );
+    }
+
+    fn fired_trigger(conn: &Connection, tmp: &tempfile::TempDir, uid: i64, fired_at: &str) -> i64 {
+        let plan_id = crate::plan::ensure(conn, tmp.path(), "aki", uid, date()).unwrap();
+        let id = insert(conn, plan_id, "09:00", "see how it went", "agent", None, None, None, at("2026-09-17T08:00:00Z")).unwrap();
+        conn.execute("UPDATE events SET status = 'fired', fired_at = ?1 WHERE id = ?2", (fired_at, id)).unwrap();
+        id
+    }
+
+    fn status_of(conn: &Connection, id: i64) -> (String, i64) {
+        conn.query_row("SELECT status, attempts FROM events WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?))).unwrap()
+    }
+
+    #[test]
+    fn an_undecided_trigger_is_tried_again_until_its_tries_run_out() {
+        let (conn, tmp, uid) = env();
+        let id = fired_trigger(&conn, &tmp, uid, "2026-09-17T09:00:00Z");
+        let after = jiff::SignedDuration::from_mins(RETRY_AFTER_MIN);
+        let none = std::collections::HashSet::new();
+
+        reclaim(&conn, at("2026-09-17T09:05:00Z"), after, &none).unwrap();
+        assert_eq!(status_of(&conn, id), ("fired".into(), 0), "too soon: it may still be running");
+        reclaim(&conn, at("2026-09-17T09:30:00Z"), after, &[uid].into()).unwrap();
+        assert_eq!(status_of(&conn, id), ("fired".into(), 0), "its user's wake-up is still running");
+
+        for tries in 1..MAX_ATTEMPTS {
+            reclaim(&conn, at("2026-09-17T09:30:00Z"), after, &none).unwrap();
+            assert_eq!(status_of(&conn, id), ("pending".into(), tries));
+            conn.execute("UPDATE events SET status = 'fired', fired_at = '2026-09-17T09:10:00Z' WHERE id = ?1", [id]).unwrap();
+        }
+        reclaim(&conn, at("2026-09-17T09:30:00Z"), after, &none).unwrap();
+        assert_eq!(status_of(&conn, id).0, "dropped");
+        let given_up: i64 = conn
+            .query_row("SELECT COUNT(*) FROM event_log WHERE kind = 'trigger_given_up'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(given_up, 1);
+    }
+
+    #[test]
+    fn at_boot_every_fired_trigger_is_taken_back_and_a_parked_session_kept() {
+        let (conn, tmp, uid) = env();
+        let id = waiting_for(&conn, &tmp, uid);
+        conn.execute("UPDATE events SET status = 'fired', fired_at = '2026-09-17T09:15:00Z' WHERE id = ?1", [id]).unwrap();
+        reclaim(&conn, at("2026-09-17T09:15:00Z"), jiff::SignedDuration::ZERO, &std::collections::HashSet::new()).unwrap();
+        assert_eq!(status_of(&conn, id), ("pending".into(), 1));
+        assert!(parked(&conn, id).unwrap().is_some(), "the resume is tried again, not lost");
     }
 
     #[test]
