@@ -369,11 +369,6 @@ pub fn say(args: &SayArgs) -> Result<serde_json::Value, ToolError> {
     Ok(out)
 }
 
-/// Whether a successful `name` result is a `say` that waits for an answer.
-pub fn waits(name: &str, result: &str) -> bool {
-    name == "say" && serde_json::from_str::<serde_json::Value>(result).is_ok_and(|v| v["await_min"].is_u64())
-}
-
 pub fn stay_quiet(
     _conn: &Connection,
     _ctx: &ToolCtx,
@@ -673,8 +668,6 @@ mod tests {
         let out = dispatch(&conn, &ctx(&tmp), SessionKind::Trigger, "say",
             r#"{"text":"start the essay now","await_min":15}"#).unwrap();
         assert_eq!(out["await_min"].as_u64(), Some(15));
-        assert!(super::waits("say", &out.to_string()));
-        assert!(!super::waits("say", r#"{"said":"hi","notes":[]}"#));
         for args in [r#"{"text":"hi","await_min":2}"#, r#"{"text":"hi","await_min":500}"#] {
             let e = dispatch(&conn, &ctx(&tmp), SessionKind::Trigger, "say", args).unwrap_err();
             assert_eq!(e.kind, "rejected", "{args}");

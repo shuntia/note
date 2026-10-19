@@ -577,6 +577,7 @@ mod tests {
             event_id: Some(3),
             conversation_id,
             actions: Vec::new(),
+            wait: None,
         }
     }
 

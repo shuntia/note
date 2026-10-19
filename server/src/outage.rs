@@ -128,6 +128,7 @@ pub fn tell_pending(state: &crate::AppState, user_id: i64, username: &str, now: 
             event_id: None,
             conversation_id: None,
             actions: Vec::new(),
+            wait: None,
         };
         crate::channels::deliver_via(&state.db, &state.channels, user_id, username, &msg);
     }

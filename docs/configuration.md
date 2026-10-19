@@ -88,6 +88,7 @@ category default.
 | `template` | one of `templates` |
 | `nightly_time` | zero-padded 24-hour `HH:MM` (default `03:00`) |
 | `close_day_time` | `HH:MM` (default `21:30`), or blank for no close of day |
+| `calls_until` | `HH:MM` (default `23:00`) until which Note may call, from `day_start` on; blank for midnight. The close of the day can always call ([delivery.md](delivery.md#ringing)) |
 | `morning_until` | `HH:MM` |
 | `show_arc_between_sessions` | bool: whether the wait between sessions draws its arc |
 | `counter` | `remaining` or `elapsed` |

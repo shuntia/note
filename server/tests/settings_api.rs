@@ -210,6 +210,7 @@ async fn invalid_fields_are_rejected_by_name() {
         (r#"{"nightly_time":"24:00"}"#, "nightly_time"),
         (r#"{"close_day_time":"9:30"}"#, "close_day_time"),
         (r#"{"close_day_time":"21:60"}"#, "close_day_time"),
+        (r#"{"calls_until":"11pm"}"#, "calls_until"),
         (r#"{"template":"nope"}"#, "template"),
     ];
     for (body, field) in cases {
@@ -237,6 +238,17 @@ async fn the_close_of_the_day_defaults_to_an_evening_and_blank_turns_it_off() {
     assert_eq!(v["close_day_time"], "");
     let v = json(app.oneshot(get(&cookie)).await.unwrap()).await;
     assert_eq!(v["close_day_time"], "");
+}
+
+#[tokio::test]
+async fn calls_run_until_eleven_and_blank_runs_them_to_midnight() {
+    let (app, cookie, _cfg) = common::app_with_logged_in_user().await;
+    let v = json(app.clone().oneshot(get(&cookie)).await.unwrap()).await;
+    assert_eq!(v["calls_until"], "23:00");
+    let v = json(app.clone().oneshot(put(&cookie, r#"{"calls_until":"22:00"}"#)).await.unwrap()).await;
+    assert_eq!(v["calls_until"], "22:00");
+    let v = json(app.clone().oneshot(put(&cookie, r#"{"calls_until":""}"#)).await.unwrap()).await;
+    assert_eq!(v["calls_until"], "");
 }
 
 #[tokio::test]

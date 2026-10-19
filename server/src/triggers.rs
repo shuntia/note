@@ -27,6 +27,16 @@ pub const MAX_AWAITS_PER_DAY: i64 = 6;
 pub const TIMED_OUT: &str = "Timed out";
 pub const RESPONDED: &str = "User responded before timeout";
 pub const ACTED: &str = "User acted before timeout";
+/// How long a wake-up parked on a call waits to hear how it went: past the
+/// ring and the longest a live call may run.
+pub const CALL_WAIT_MIN: u32 = 45;
+/// How long a wake-up whose call the gate held waits for an answer to the
+/// message that went instead, when its `say` named no wait of its own.
+pub const HELD_WAIT_MIN: u32 = 20;
+/// A parked call not yet answered, missed, declined or failed.
+const RINGING: &str = "ringing";
+const MAX_CALL_LINES: usize = 12;
+const MAX_CALL_LINE_BYTES: usize = 240;
 /// How long a fired trigger whose session never decided waits before it is
 /// tried again, and how many tries it gets in all.
 pub const RETRY_AFTER_MIN: i64 = 10;
@@ -953,9 +963,10 @@ pub fn reclaim<S: std::hash::BuildHasher>(
     Ok(())
 }
 
-/// Parks a session whose `say` waits `min` minutes for an answer: an event in
-/// `thread` resumes it at the end of the wait, or as soon as the user writes or
-/// moves (`wait_ended`). `None` once the day holds `MAX_AWAITS_PER_DAY`.
+/// Parks a session for up to `min` minutes: an event in `thread` resumes it at
+/// the end of the wait, or as soon as `wait_ended` says so. A `say` waits for
+/// the user to write or move; a `call` for the call's outcome alone
+/// (`call_settled`). `None` once the day holds `MAX_AWAITS_PER_DAY`.
 #[allow(clippy::too_many_arguments)]
 pub fn pause(
     conn: &Connection,
@@ -964,6 +975,7 @@ pub fn pause(
     thread: i64,
     said: &str,
     min: u32,
+    call: bool,
     paused: &crate::agent::Paused,
     now: jiff::Timestamp,
 ) -> Result<Option<i64>> {
@@ -979,16 +991,73 @@ pub fn pause(
         return Ok(None);
     }
     let plan_id = crate::plan::ensure(conn, config_dir, &fired.username, fired.user_id, date)?;
-    let prompt = mt::await_prompt(Lang::for_user(config_dir, &fired.username), said);
+    let l = Lang::for_user(config_dir, &fired.username);
+    let prompt = if call { mt::call_await_prompt(l, said) } else { mt::await_prompt(l, said) };
     let wall = local.strftime("%H:%M").to_string();
     let tx = conn.unchecked_transaction()?;
     let id = insert(&tx, plan_id, &wall, &prompt, AWAIT_ORIGIN, None, Some(thread), None, now)?;
-    tx.execute("INSERT INTO paused_sessions (event_id, session) VALUES (?1, ?2)", (id, serde_json::to_string(paused)?))?;
+    tx.execute(
+        "INSERT INTO paused_sessions (event_id, session, call) VALUES (?1, ?2, ?3)",
+        (id, serde_json::to_string(paused)?, call.then_some(RINGING)),
+    )?;
     if fired.channel == crate::channels::RING_CHANNEL {
         set_ring(&tx, id)?;
     }
     tx.commit()?;
     Ok(Some(id))
+}
+
+/// Hands a call's outcome to the wake-up parked on it, which resumes at the
+/// next sweep, or, for a call the gate held, waits on as a message would.
+/// Only the first outcome counts; `false` for one that came too late.
+pub fn call_settled(conn: &Connection, wait_id: i64, outcome: &crate::channels::calling::CallOutcome) -> Result<bool> {
+    let n = conn.execute(
+        "UPDATE paused_sessions SET call = ?2 WHERE event_id = ?1 AND call = ?3",
+        (wait_id, serde_json::to_string(outcome)?, RINGING),
+    )?;
+    Ok(n > 0)
+}
+
+/// Where the call a session parked on stands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CallWait {
+    Ringing,
+    Known(crate::channels::calling::CallOutcome),
+}
+
+impl CallWait {
+    /// Whether its outcome ends the wait: any but a held call, which went as a
+    /// message and waits for an answer like one.
+    fn ended(&self) -> bool {
+        matches!(self, CallWait::Known(o) if !matches!(o, crate::channels::calling::CallOutcome::Held { .. }))
+    }
+}
+
+/// The call `event_id` waits on, if it parked on one.
+fn call_wait(conn: &Connection, event_id: i64) -> rusqlite::Result<Option<CallWait>> {
+    let raw: Option<String> = conn
+        .query_row("SELECT call FROM paused_sessions WHERE event_id = ?1", [event_id], |r| r.get(0))
+        .optional()?
+        .flatten();
+    Ok(raw.map(|raw| serde_json::from_str(&raw).map_or(CallWait::Ringing, CallWait::Known)))
+}
+
+/// The last lines said on call `call_id`, oldest first, each marked by who said it.
+fn said_on_call(conn: &Connection, call_id: &str) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT m.role, m.content FROM talk_messages m JOIN voice_calls c ON c.conversation_id = m.conversation_id
+         WHERE c.id = ?1 AND m.created_at >= c.created_at AND m.role IN ('user', 'assistant') AND m.content != ''
+         ORDER BY m.created_at DESC, m.id DESC LIMIT ?2",
+    )?;
+    let mut lines: Vec<String> = stmt
+        .query_map((call_id, MAX_CALL_LINES as i64), |r| {
+            let (role, content): (String, String) = (r.get(0)?, r.get(1)?);
+            let who = if role == "user" { "user" } else { "you" };
+            Ok(format!("{who}: {}", crate::talk::clip(content.trim(), MAX_CALL_LINE_BYTES)))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    lines.reverse();
+    Ok(lines)
 }
 
 /// A parked session and the context as it stood once it parked, so the resumed
@@ -1020,7 +1089,7 @@ fn written_since(conn: &Connection, user_id: i64, since: &str) -> rusqlite::Resu
     rows
 }
 
-/// What ended a waiting `say` before its time ran out.
+/// What ended a wait before its time ran out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WaitEnd {
     Reply,
@@ -1028,6 +1097,7 @@ pub enum WaitEnd {
     WorkStarted,
     WorkEnded,
     TaskChanged,
+    Call,
 }
 
 impl WaitEnd {
@@ -1038,13 +1108,16 @@ impl WaitEnd {
             WaitEnd::WorkStarted => "work_started",
             WaitEnd::WorkEnded => "work_ended",
             WaitEnd::TaskChanged => "task_changed",
+            WaitEnd::Call => "call",
         }
     }
 }
 
-/// Whether a waiting `say` should resume early, and why: the user wrote,
-/// finished a task, started or ended a work session, or changed a task since
-/// it parked. `None` for an event that is not a wait still undecided.
+/// Whether a wait should resume early, and why: the call it parked on came to
+/// an outcome, or, waiting on a message, the user wrote, finished a task,
+/// started or ended a work session, or changed a task since it parked. A call
+/// still under way ends it for nothing else. `None` for an event that is not
+/// a wait still undecided.
 pub fn wait_ended(conn: &Connection, user_id: i64, event_id: i64) -> rusqlite::Result<Option<WaitEnd>> {
     let since: Option<String> = conn
         .query_row(
@@ -1055,6 +1128,11 @@ pub fn wait_ended(conn: &Connection, user_id: i64, event_id: i64) -> rusqlite::R
         .optional()?
         .flatten();
     let Some(since) = since else { return Ok(None) };
+    match call_wait(conn, event_id)? {
+        Some(call) if call.ended() => return Ok(Some(WaitEnd::Call)),
+        Some(CallWait::Ringing) => return Ok(None),
+        _ => {}
+    }
     if last_user_message(conn, user_id)?.is_some_and(|at| at > since) {
         return Ok(Some(WaitEnd::Reply));
     }
@@ -1073,16 +1151,33 @@ pub fn wait_ended(conn: &Connection, user_id: i64, event_id: i64) -> rusqlite::R
     Ok(None)
 }
 
-/// The waiting `say`'s result once the session resumes: what ended the wait,
-/// what the user wrote, and what moved in the context since it began.
-fn wait_result(ended: Option<WaitEnd>, replies: &[String], changed: &str) -> String {
-    let result = match ended {
-        None => TIMED_OUT,
-        Some(WaitEnd::Reply) => RESPONDED,
-        Some(_) => ACTED,
+/// The wait's result once the session resumes: how the call it parked on went
+/// and what was said on it, or what ended a message's wait and what the user
+/// wrote; and what moved in the context since it began.
+fn wait_result(ended: Option<WaitEnd>, call: Option<&CallWait>, on_call: &[String], replies: &[String], changed: &str) -> String {
+    use crate::channels::calling::CallOutcome;
+    let known = match call {
+        Some(CallWait::Known(o)) => Some(o),
+        _ => None,
+    };
+    let result = match (ended, known) {
+        (Some(WaitEnd::Call), Some(o)) => o.as_str(),
+        (None | Some(WaitEnd::Call), _) => TIMED_OUT,
+        (Some(WaitEnd::Reply), _) => RESPONDED,
+        (Some(_), _) => ACTED,
     };
     let mut out = serde_json::json!({ "result": result, "ended_by": ended.map_or("timeout", WaitEnd::as_str) });
-    if !replies.is_empty() {
+    match known {
+        Some(CallOutcome::Failed { reason }) => out["reason"] = reason.as_str().into(),
+        Some(CallOutcome::Held { reason }) => out["call"] = format!("Held: {reason}").into(),
+        Some(CallOutcome::Answered { .. }) if !on_call.is_empty() => out["on_the_call"] = on_call.into(),
+        _ => {}
+    }
+    if call == Some(&CallWait::Ringing) {
+        out["call"] = "no word of how the call went came back".into();
+    }
+    let answered = matches!(known, Some(CallOutcome::Answered { .. }));
+    if !replies.is_empty() && !answered {
         out["replies"] = replies.into();
     }
     if !changed.is_empty() {
@@ -1108,12 +1203,21 @@ fn resumed(
     parked: Parked,
     now: jiff::Timestamp,
 ) -> (Vec<crate::providers::Message>, Vec<String>) {
-    let (ended, replies) = {
+    let (ended, call, on_call, replies) = {
         let conn = state.db();
         let ended = wait_ended(&conn, fired.user_id, ev.event_id).ok().flatten();
+        let call = call_wait(&conn, ev.event_id).ok().flatten();
+        let on_call = match &call {
+            Some(CallWait::Known(crate::channels::calling::CallOutcome::Answered { call_id })) => {
+                said_on_call(&conn, call_id).unwrap_or_default()
+            }
+            _ => Vec::new(),
+        };
         let replies = written_since(&conn, fired.user_id, ev.created_at.as_deref().unwrap_or_default()).unwrap_or_default();
-        let _ = crate::follow_up::wait_over(&conn, ev.event_id, ended, now);
-        (ended, replies)
+        if ended != Some(WaitEnd::Call) {
+            let _ = crate::follow_up::wait_over(&conn, ev.event_id, ended, now);
+        }
+        (ended, call, on_call, replies)
     };
     let changed = picture(state, fired.user_id, &fired.username, now)
         .map(|fresh| {
@@ -1121,7 +1225,7 @@ fn resumed(
             crate::context::delta(&was, &is, MAX_DELTA_BYTES)
         })
         .unwrap_or_default();
-    (parked.paused.answered(&wait_result(ended, &replies, &changed)), replies)
+    (parked.paused.answered(&wait_result(ended, call.as_ref(), &on_call, &replies, &changed)), replies)
 }
 
 /// `context` without the lines about the wait's own event, whose firing is
@@ -1303,9 +1407,20 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
     };
     let call = (name == "call_user").then(|| crate::tools::call_ops::Confirmed::from_decided(&result)).flatten();
     let lang = crate::text::Lang::for_user(&state.config_dir, &fired.username);
-    let waits = result["await_min"].as_u64().zip(out.paused.as_ref());
     let named: Vec<i64> = serde_json::from_value(result["task_ids"].clone()).unwrap_or_default();
     let about = if named.is_empty() { linked } else { named };
+    let laid_to_ring = call.is_none() && fired.channel == crate::channels::RING_CHANNEL;
+    let held = laid_to_ring.then(|| crate::channels::calling::held(state, fired.user_id, &fired.username)).flatten();
+    let rings = call.is_some() || (laid_to_ring && held.is_none());
+    let asked = result["await_min"].as_u64().map(|min| u32::try_from(min).unwrap_or(*AWAIT_MIN.end()));
+    let wait_min = if rings {
+        Some(CALL_WAIT_MIN)
+    } else if held.is_some() {
+        Some(asked.unwrap_or(HELD_WAIT_MIN))
+    } else {
+        asked
+    };
+    let waits = wait_min.zip(out.paused.as_ref());
     let parked_at = jiff::Timestamp::now();
     let mut parks = None;
     settle_all("done");
@@ -1320,11 +1435,11 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
             now,
         );
         if let (Ok(thread), Some((min, paused))) = (&landed, waits) {
-            let min = u32::try_from(min).unwrap_or(*AWAIT_MIN.end());
-            match pause(&conn, &state.config_dir, fired, *thread, &text, min, paused, parked_at) {
+            match pause(&conn, &state.config_dir, fired, *thread, &text, min, rings || held.is_some(), paused, parked_at) {
                 Ok(Some(id)) => {
                     parks = Some(id);
-                    let _ = crate::log::record(&conn, Some(fired.user_id), "trigger_laid", &format!("event {id}: waits {min} min for an answer"));
+                    let what = if rings { "waits on the call".to_string() } else { format!("waits {min} min for an answer") };
+                    let _ = crate::log::record(&conn, Some(fired.user_id), "trigger_laid", &format!("event {id}: {what}"));
                 }
                 Ok(None) => {
                     let _ = crate::log::record(&conn, Some(fired.user_id), "trigger_quiet", &format!("event {}: the day's waits are spent", ev.event_id));
@@ -1364,6 +1479,7 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
     let via = if let Some(call) = call {
         msg.reason = Some(call.reason.clone());
         msg.brief = Some(call.brief.clone());
+        msg.wait = parks;
         let outcome = crate::channels::ring(state, fired.user_id, &fired.username, &msg);
         let conn = state.db();
         let _ = crate::log::record(
@@ -1372,14 +1488,20 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
             "trigger_rang",
             &call.log_line(&format!("event {}", ev.event_id), outcome.as_str()),
         );
+        rang_nothing(&conn, fired.user_id, &msg, outcome);
         via_of(&outcome)
-    } else if fired.channel == crate::channels::RING_CHANNEL {
+    } else if laid_to_ring {
         msg.reason = Some(ev.prompt.clone());
-        let outcome = crate::channels::calling::ring_if_free(state, fired.user_id, &fired.username, &msg);
-        if !matches!(outcome, crate::channels::RingOutcome::Held(_)) {
-            let conn = state.db();
+        msg.wait = parks;
+        let outcome = crate::channels::calling::ring_unless(state, fired.user_id, &fired.username, &msg, held.as_deref());
+        let conn = state.db();
+        if let Some(reason) = held {
+            let held = crate::channels::calling::CallOutcome::Held { reason };
+            let _ = crate::channels::calling::outcome_known(&conn, fired.user_id, &msg, &held);
+        } else {
             let detail = format!("event {}: {}: laid to ring", ev.event_id, outcome.as_str());
             let _ = crate::log::record(&conn, Some(fired.user_id), "trigger_rang", &detail);
+            rang_nothing(&conn, fired.user_id, &msg, outcome);
         }
         via_of(&outcome)
     } else {
@@ -1393,7 +1515,7 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
         origin: &ev.origin,
         via,
         tasks: &about,
-        wait_min: parks.and(waits).and_then(|(min, _)| u32::try_from(min).ok()),
+        wait_min: parks.and(waits).map(|(min, _)| min),
         at: jiff::Timestamp::now(),
     };
     let conn = state.db();
@@ -1401,6 +1523,18 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
         let detail = format!("event {}: recording the outreach: {e:#}", ev.event_id);
         let _ = crate::log::record_throttled(&conn, Some(fired.user_id), "trigger_error", &detail, now, crate::log::ERROR_LOG_WINDOW_MINS);
     }
+}
+
+/// A call that rang nothing has its outcome at once: it failed, and its words
+/// went on as a message if any channel took them.
+fn rang_nothing(conn: &Connection, user_id: i64, msg: &crate::channels::OutboundMessage, outcome: crate::channels::RingOutcome) {
+    let crate::channels::RingOutcome::Messaged(via) = outcome else { return };
+    let reason = match via {
+        Some(_) => "nothing could ring; the words went as a message",
+        None => "nothing could ring, and no channel took the words either",
+    };
+    let failed = crate::channels::calling::CallOutcome::Failed { reason: reason.into() };
+    let _ = crate::channels::calling::outcome_known(conn, user_id, msg, &failed);
 }
 
 /// What a trigger's words go out as: the close of the day offers to carry
@@ -1431,6 +1565,7 @@ fn said_message(
         event_id: Some(ev.event_id),
         conversation_id,
         actions,
+        wait: None,
     }
 }
 
@@ -1753,7 +1888,7 @@ mod tests {
         };
         let paused = crate::agent::Paused { messages: vec![], call_id: "c1".into(), skipped: vec!["c2".into()] };
         let now = at("2026-09-17T09:00:00Z");
-        let id = pause(&conn, tmp.path(), &fired, checkin, "start the essay", 15, &paused, now).unwrap().unwrap();
+        let id = pause(&conn, tmp.path(), &fired, checkin, "start the essay", 15, false, &paused, now).unwrap().unwrap();
         let ev = read(&conn, id).unwrap().unwrap();
         assert_eq!((ev.wall_time.as_str(), ev.conversation_id, ev.origin.as_str()), ("09:15", Some(checkin), AWAIT_ORIGIN));
         assert_eq!(spent(&conn, uid, date()).unwrap(), 0, "a wait is off the budget");
@@ -1766,7 +1901,7 @@ mod tests {
 
         let back = parked(&conn, id).unwrap().unwrap();
         assert!(parked(&conn, id).unwrap().is_some(), "it stays parked until the resumed session decides");
-        let messages = back.paused.answered(&wait_result(None, &[], ""));
+        let messages = back.paused.answered(&wait_result(None, None, &[], &[], ""));
         assert!(matches!(&messages[0], crate::providers::Message::ToolResult { call_id, content, is_error: false }
             if call_id == "c1" && content.contains("Timed out")));
         assert!(matches!(&messages[1], crate::providers::Message::ToolResult { call_id, is_error: true, .. } if call_id == "c2"));
@@ -1774,16 +1909,16 @@ mod tests {
         assert!(parked(&conn, id).unwrap().is_none(), "a session resumes once");
 
         for _ in 1..MAX_AWAITS_PER_DAY {
-            pause(&conn, tmp.path(), &fired, checkin, "x", 15, &paused, now).unwrap().unwrap();
+            pause(&conn, tmp.path(), &fired, checkin, "x", 15, false, &paused, now).unwrap().unwrap();
         }
-        assert_eq!(pause(&conn, tmp.path(), &fired, checkin, "x", 15, &paused, now).unwrap(), None);
+        assert_eq!(pause(&conn, tmp.path(), &fired, checkin, "x", 15, false, &paused, now).unwrap(), None);
     }
 
     fn waiting_for(conn: &Connection, tmp: &tempfile::TempDir, uid: i64) -> i64 {
         let checkin = crate::talk::create(conn, uid, "check-in", at("2026-09-17T08:00:00Z")).unwrap();
         let fired = crate::runner::FiredEvent { user_id: uid, username: "aki".into(), kind: KIND.into(), ..Default::default() };
         let paused = crate::agent::Paused { messages: vec![], call_id: "c1".into(), skipped: vec![] };
-        pause(conn, tmp.path(), &fired, checkin, "start the essay", 15, &paused, at("2026-09-17T09:00:00Z")).unwrap().unwrap()
+        pause(conn, tmp.path(), &fired, checkin, "start the essay", 15, false, &paused, at("2026-09-17T09:00:00Z")).unwrap().unwrap()
     }
 
     #[test]
@@ -1807,7 +1942,7 @@ mod tests {
         assert_eq!(wait_ended(&conn, uid, id).unwrap(), Some(WaitEnd::TaskDone), "a finished task outranks the rest");
 
         let result: serde_json::Value =
-            serde_json::from_str(&wait_result(Some(WaitEnd::TaskDone), &[], "# Tasks\n+ - essay (done)\n")).unwrap();
+            serde_json::from_str(&wait_result(Some(WaitEnd::TaskDone), None, &[], &[], "# Tasks\n+ - essay (done)\n")).unwrap();
         assert_eq!(
             result,
             serde_json::json!({ "result": ACTED, "ended_by": "task_done", "changed": "# Tasks\n+ - essay (done)\n" })

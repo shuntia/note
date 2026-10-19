@@ -1622,6 +1622,7 @@ struct SettingsPatch {
     timezone_auto: Option<bool>,
     nightly_time: Option<String>,
     close_day_time: Option<String>,
+    calls_until: Option<String>,
     morning_until: Option<String>,
     template: Option<String>,
     show_arc_between_sessions: Option<bool>,
@@ -1669,6 +1670,7 @@ fn settings_body(
         "timezone_auto": cfg.timezone_auto(),
         "nightly_time": cfg.nightly_time,
         "close_day_time": cfg.close_day_time(),
+        "calls_until": cfg.calls_until(),
         "morning_until": cfg.morning_until(),
         "template": cfg.template,
         "show_arc_between_sessions": cfg.show_arc_between_sessions,
@@ -1814,6 +1816,13 @@ async fn settings_put(
             );
         }
         cfg.close_day_time = Some(time.to_string());
+    }
+    if let Some(time) = req.calls_until {
+        let time = time.trim();
+        if !time.is_empty() && !crate::templates::valid_time(time) {
+            return invalid_field("calls_until", "must be a zero-padded 24-hour HH:MM, or blank for calls until midnight");
+        }
+        cfg.calls_until = Some(time.to_string());
     }
     if let Some(time) = req.morning_until {
         if !crate::templates::valid_time(&time) {
@@ -2155,6 +2164,7 @@ async fn voice_test(user: CurrentUser, State(state): State<AppState>, headers: H
         event_id: None,
         conversation_id: None,
         actions: Vec::new(),
+        wait: None,
     };
     match voice.start_call(user.id, &link, &msg, jiff::Timestamp::now()) {
         Ok(call_id) => {
@@ -2179,6 +2189,7 @@ async fn notify_test(user: CurrentUser, State(state): State<AppState>, headers: 
         event_id: None,
         conversation_id: None,
         actions: Vec::new(),
+        wait: None,
     };
     let db = state.db.clone();
     let ladder = state.channels.clone();

@@ -76,10 +76,11 @@ pub fn situation(
     let internal = |e: &dyn std::fmt::Display| ToolError::internal(e.to_string());
     let tz = crate::triggers::timezone(config_dir, username);
     let cfg = crate::config::UserConfig::load(config_dir, username).ok();
-    let day = cfg.as_ref().map_or((crate::config::DEFAULT_DAY_START, crate::config::DEFAULT_CLOSE_DAY_TIME), |c| {
-        (c.day_start(), c.close_day_time())
-    });
-    let busy = crate::wake::seems_busy(conn, user_id, &tz, day, now).map_err(|e| internal(&e))?;
+    let (start, until) = cfg.as_ref().map_or_else(
+        || (crate::config::DEFAULT_DAY_START.to_string(), crate::config::DEFAULT_CALLS_UNTIL.to_string()),
+        crate::wake::call_hours,
+    );
+    let busy = crate::wake::seems_busy(conn, user_id, &tz, (&start, &until), now).map_err(|e| internal(&e))?;
     let ring_for = cfg.as_ref().map_or(crate::config::RING_FOR_ALLOWED, |c| c.ring_for()).to_string();
     let live_call = conn
         .query_row(
@@ -505,9 +506,12 @@ mod tests {
             [],
         )
         .unwrap();
-        let late: jiff::Timestamp = "2026-10-07T23:00:00Z".parse().unwrap();
+        let evening: jiff::Timestamp = "2026-10-07T22:00:00Z".parse().unwrap();
+        let s = situation(&conn, tmp.path(), "aki", 1, Reach::default(), evening).unwrap();
+        assert_eq!((s.busy, s.live_call), (None, true), "past the close of the day, before calls_until");
+        let late: jiff::Timestamp = "2026-10-07T23:30:00Z".parse().unwrap();
         let s = situation(&conn, tmp.path(), "aki", 1, Reach::default(), late).unwrap();
-        let night = Busy::Night { start: "08:00".into(), end: "21:30".into() };
+        let night = Busy::Night { start: "08:00".into(), end: "23:00".into() };
         assert_eq!((s.busy, s.live_call), (Some(night), true));
     }
 }

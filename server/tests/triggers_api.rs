@@ -479,7 +479,7 @@ async fn a_user_outside_their_day_is_written_to_not_rung() {
     ])
     .await;
     lay_plain(&w);
-    std::fs::write(w.state.config_dir.join("users/aki/user.toml"), "close_day_time = \"00:00\"\n").unwrap();
+    std::fs::write(w.state.config_dir.join("users/aki/user.toml"), "day_start = \"23:59\"\nclose_day_time = \"00:00\"\ncalls_until = \"00:00\"\n").unwrap();
     let web = Arc::new(LiveWeb(std::sync::Mutex::default()));
     let state = w.state.clone().with_web_calls(web.clone());
 
@@ -510,9 +510,144 @@ async fn a_free_user_with_the_app_open_gets_the_call_there() {
     assert_eq!(logged(&w, "trigger_rang"), ["event 1: web: talk the essay through"]);
     assert_eq!(logged(&w, "trigger_said"), ["event 1: Want to talk the essay through?"]);
     assert_eq!(rows::<String>(&w, "SELECT via FROM outreach"), ["call"]);
-    assert_eq!(statuses(&w), ["done"]);
+    assert_eq!(statuses(&w), ["done", "pending"], "the session waits on the call");
+    assert_eq!(rows::<String>(&w, "SELECT call FROM paused_sessions"), ["ringing"]);
+    assert_eq!(logged(&w, "trigger_laid"), ["event 2: waits on the call"]);
     let checked = tool_results(&w, 1);
     assert!(checked[0].contains("anticipate what it will cover"), "{checked:?}");
+}
+
+/// Rings the open web app and keeps each message it rang with.
+struct KeptWeb(std::sync::Mutex<Vec<note_server::channels::OutboundMessage>>);
+
+impl note_server::channels::WebCalls for KeptWeb {
+    fn has_live(&self, _: i64) -> bool {
+        true
+    }
+    fn ring(&self, _: i64, msg: &note_server::channels::OutboundMessage, _: Option<&str>) -> bool {
+        self.0.lock().unwrap().push(msg.clone());
+        true
+    }
+}
+
+/// Lets a wake-up's confirmed call ring a free user's open app, and returns
+/// the state that rings it and the message it rang with.
+fn rung_call(w: &World) -> (AppState, note_server::channels::OutboundMessage) {
+    lay_plain(w);
+    std::fs::write(w.state.config_dir.join("users/aki/user.toml"), "day_start = \"\"\ncalls_until = \"\"\n").unwrap();
+    let web = Arc::new(KeptWeb(std::sync::Mutex::default()));
+    let state = w.state.clone().with_web_calls(web.clone());
+    note_server::runner::sweep_once(&state);
+    let rung = web.0.lock().unwrap().pop().expect("the call rang");
+    (state, rung)
+}
+
+fn call_went(w: &World, msg: &note_server::channels::OutboundMessage, outcome: &note_server::channels::calling::CallOutcome) {
+    let conn = w.state.db.lock().unwrap();
+    note_server::channels::calling::outcome_known(&conn, 1, msg, outcome).unwrap();
+}
+
+#[tokio::test]
+async fn a_missed_call_resumes_its_session_with_missed() {
+    let w = world(vec![
+        call("c1", "call_user", CHECK),
+        call("c2", "call_user", CONFIRM),
+        call("c3", "say", r#"{"text":"missed you; the intro is due at five","await_min":20}"#),
+    ])
+    .await;
+    let (state, rung) = rung_call(&w);
+    assert_eq!(rung.wait, Some(2));
+    {
+        let conn = w.state.db.lock().unwrap();
+        let chat = note_server::talk::create(&conn, 1, "chat", jiff::Timestamp::now()).unwrap();
+        note_server::talk::append_text(&conn, chat, "user", "on the bus", jiff::Timestamp::now()).unwrap();
+    }
+    note_server::runner::sweep_once(&state);
+    assert_eq!(w.llm.seen().len(), 2, "while the call is out, nothing but its outcome resumes it");
+
+    call_went(&w, &rung, &note_server::channels::calling::CallOutcome::Missed);
+    note_server::runner::sweep_once(&state);
+
+    let result = wait_results(&w, 2);
+    assert_eq!((result["result"].as_str(), result["ended_by"].as_str()), (Some("Missed"), Some("call")));
+    assert_eq!(result["replies"], serde_json::json!(["on the bus"]));
+    assert_eq!(w.push.seen().last().unwrap().1.body, "missed you; the intro is due at five");
+    assert_eq!(rows::<Option<String>>(&w, "SELECT outcome FROM outreach ORDER BY id")[0].as_deref(), Some("missed"));
+    assert_eq!(logged(&w, "call_outcome"), ["event 1: Missed"]);
+}
+
+#[tokio::test]
+async fn an_answered_call_resumes_its_session_with_what_was_said() {
+    let w = world(vec![
+        call("c1", "call_user", CHECK),
+        call("c2", "call_user", CONFIRM),
+        call("c3", "stay_quiet", r#"{"reason":"settled on the call"}"#),
+    ])
+    .await;
+    let (state, rung) = rung_call(&w);
+    let thread = rung.conversation_id.unwrap();
+    {
+        let conn = w.state.db.lock().unwrap();
+        let t = jiff::Timestamp::now();
+        conn.execute(
+            "INSERT INTO voice_calls (id, user_id, direction, state, outcome, ring_by, created_at, conversation_id)
+             VALUES ('c1', 1, 'outbound', 'ended', 'answered', 'x', ?1, ?2)",
+            (t.to_string(), thread),
+        )
+        .unwrap();
+        note_server::talk::append_text(&conn, thread, "user", "I'll start the intro at eight", t).unwrap();
+        note_server::talk::append_text(&conn, thread, "assistant", "Good, eight it is.", t).unwrap();
+    }
+    call_went(&w, &rung, &note_server::channels::calling::CallOutcome::Answered { call_id: "c1".into() });
+    note_server::runner::sweep_once(&state);
+
+    let result = wait_results(&w, 2);
+    assert_eq!(result["result"], "Answered");
+    assert_eq!(result["on_the_call"], serde_json::json!(["user: I'll start the intro at eight", "you: Good, eight it is."]));
+    assert!(result.get("replies").is_none(), "the call's own words are not told twice");
+    assert_eq!(statuses(&w), ["done", "done"]);
+    assert_eq!(rows::<Option<String>>(&w, "SELECT outcome FROM outreach ORDER BY id")[0].as_deref(), Some("answered"));
+}
+
+#[tokio::test]
+async fn a_failed_call_resumes_its_session_with_why() {
+    let w = world(vec![
+        call("c1", "call_user", CHECK),
+        call("c2", "call_user", CONFIRM),
+        call("c3", "stay_quiet", r#"{"reason":"the opening went as a message"}"#),
+    ])
+    .await;
+    let (state, rung) = rung_call(&w);
+    let failed = note_server::channels::calling::CallOutcome::Failed { reason: "the call went quiet while ringing".into() };
+    call_went(&w, &rung, &failed);
+    note_server::runner::sweep_once(&state);
+    let result = wait_results(&w, 2);
+    assert_eq!((result["result"].as_str(), result["reason"].as_str()), (Some("Failed"), Some("the call went quiet while ringing")));
+    assert_eq!(rows::<Option<String>>(&w, "SELECT outcome FROM outreach ORDER BY id")[0], None,
+        "the words went as a message, so its window settles it");
+}
+
+#[tokio::test]
+async fn a_ring_the_gate_holds_goes_as_a_message_and_waits_for_an_answer() {
+    let w = world(vec![
+        call("c1", "say", r#"{"text":"the essay, when you're back"}"#),
+        call("c2", "stay_quiet", r#"{"reason":"later"}"#),
+    ])
+    .await;
+    lay_to_ring(&w, "day_start = \"23:59\"\nclose_day_time = \"00:00\"\ncalls_until = \"00:00\"\n");
+    let state = w.state.clone().with_web_calls(Arc::new(LiveWeb(std::sync::Mutex::default())));
+    note_server::runner::sweep_once(&state);
+    assert_eq!(w.push.seen()[0].1.body, "the essay, when you're back");
+    assert_eq!(statuses(&w), ["done", "pending"]);
+    note_server::runner::sweep_once(&state);
+    assert_eq!(w.llm.seen().len(), 1, "a held call waits like a message, not for an outcome");
+
+    make_due(&w);
+    note_server::runner::sweep_once(&state);
+    let result = wait_results(&w, 1);
+    assert_eq!(result["result"], "Timed out");
+    let held = result["call"].as_str().unwrap();
+    assert!(held.starts_with("Held: it is outside the hours the user takes calls"), "{result}");
 }
 
 #[tokio::test]
@@ -827,7 +962,7 @@ async fn a_trigger_laid_to_ring_rings_a_free_user_with_its_words() {
 #[tokio::test]
 async fn a_trigger_laid_to_ring_writes_to_a_busy_user_through_the_same_gate_as_call_user() {
     let w = world(vec![call("c1", "say", r#"{"text":"the essay, when you're back"}"#)]).await;
-    lay_to_ring(&w, "close_day_time = \"00:00\"\n");
+    lay_to_ring(&w, "day_start = \"23:59\"\nclose_day_time = \"00:00\"\ncalls_until = \"00:00\"\n");
     let web = Arc::new(LiveWeb(std::sync::Mutex::default()));
     let state = w.state.clone().with_web_calls(web.clone());
 
@@ -836,7 +971,7 @@ async fn a_trigger_laid_to_ring_writes_to_a_busy_user_through_the_same_gate_as_c
     assert!(web.0.lock().unwrap().is_empty());
     assert_eq!(w.push.seen()[0].1.body, "the essay, when you're back");
     let held = logged(&w, "ring_held");
-    assert!(held.len() == 1 && held[0].contains("outside the user's day"), "{held:?}");
+    assert!(held.len() == 1 && held[0].contains("outside the hours the user takes calls"), "{held:?}");
     assert!(logged(&w, "trigger_rang").is_empty());
 }
 

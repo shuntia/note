@@ -65,6 +65,9 @@ pub struct OutboundMessage {
     /// One answer the user can give without typing. Only the channels that
     /// carry buttons look at these; the rest deliver the text alone.
     pub actions: Vec<Action>,
+    /// The parked wake-up a call with this message resumes once its outcome is known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait: Option<i64>,
 }
 
 /// A button on a message. `data` travels back verbatim when it is pressed.
@@ -148,6 +151,7 @@ pub fn render(conn: &Connection, ev: &crate::runner::FiredEvent, lang: Lang) -> 
         event_id: Some(ev.event_id),
         conversation_id: None,
         actions,
+        wait: None,
     }
 }
 
@@ -311,6 +315,7 @@ pub fn deliver_block_start(
                 label: text::action_start_session(lang),
                 data: format!("block:start:{}", start.event_id),
             }],
+            wait: None,
         },
     );
     hub.broadcast_changed(start.user_id);
@@ -424,6 +429,7 @@ mod tests {
             event_id: None,
             conversation_id: None,
             actions: Vec::new(),
+            wait: None,
         }
     }
 
@@ -506,6 +512,7 @@ mod tests {
             event_id: None,
             conversation_id: None,
             actions: Vec::new(),
+            wait: None,
         };
         assert_eq!(deliver_via(&db, &ladder, 1, "aki", &msg), Some("webpush"));
         assert_eq!(webpush.seen().len(), 1);

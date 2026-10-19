@@ -99,6 +99,7 @@ fn rung(conversation_id: Option<i64>) -> note_server::channels::OutboundMessage 
         event_id: Some(8),
         conversation_id,
         actions: Vec::new(),
+        wait: None,
     }
 }
 

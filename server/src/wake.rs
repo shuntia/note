@@ -120,18 +120,42 @@ impl Busy {
             Busy::Quiet { title, until } => format!("a quiet window ({title}) runs until {until}"),
             Busy::Event { title, until } => format!("{title} is on until {until}"),
             Busy::Working { title } => format!("a work session on {title} is running"),
-            Busy::Night { start, end } => format!("it is outside the user's day ({start} to {end})"),
+            Busy::Night { start, end } => format!("it is outside the hours the user takes calls ({start} to {end})"),
         }
     }
 }
 
-/// Why now is not a moment to call, if it is not. `day` is the user's
-/// `day_start` and `close_day_time`; either may be blank.
+/// How long after `close_day_time` a call still counts as inside the day, so
+/// the close of the day and the wait it lays may ring.
+pub const CLOSE_DAY_CALLS_MIN: u32 = 30;
+
+/// The wall times a call may ring between: `day_start` to `calls_until`, held
+/// open until `CLOSE_DAY_CALLS_MIN` past the close of the day. A blank end
+/// reads as midnight.
+pub fn call_hours(cfg: &crate::config::UserConfig) -> (String, String) {
+    let start = if cfg.day_start().is_empty() { "00:00" } else { cfg.day_start() };
+    let mut until = if cfg.calls_until().is_empty() { "24:00".to_string() } else { cfg.calls_until().to_string() };
+    if let Some(close) = minutes(cfg.close_day_time()) {
+        let held = (close + CLOSE_DAY_CALLS_MIN).min(24 * 60);
+        let held = format!("{:02}:{:02}", held / 60, held % 60);
+        if held > until {
+            until = held;
+        }
+    }
+    (start.to_string(), until)
+}
+
+fn minutes(hhmm: &str) -> Option<u32> {
+    let (h, m) = hhmm.split_once(':')?;
+    Some(h.parse::<u32>().ok()? * 60 + m.parse::<u32>().ok()?)
+}
+
+/// Why now is not a moment to call, if it is not. `hours` is `call_hours`.
 pub fn seems_busy(
     conn: &Connection,
     user_id: i64,
     tz: &jiff::tz::TimeZone,
-    day: (&str, &str),
+    hours: (&str, &str),
     now: jiff::Timestamp,
 ) -> Result<Option<Busy>> {
     if let Some(w) = crate::calendar::quiet_window(conn, user_id, tz, now)? {
@@ -147,9 +171,8 @@ pub fn seems_busy(
     if let Some(s) = triggers::working(conn, user_id)? {
         return Ok(Some(Busy::Working { title: s.title }));
     }
-    let night = at.as_str() < day.0 || (!day.1.is_empty() && at.as_str() >= day.1);
-    let start = if day.0.is_empty() { "00:00" } else { day.0 };
-    let end = if day.1.is_empty() { "24:00" } else { day.1 };
+    let (start, end) = hours;
+    let night = at.as_str() < start || at.as_str() >= end;
     Ok(night.then(|| Busy::Night { start: start.into(), end: end.into() }))
 }
 
@@ -280,7 +303,7 @@ mod tests {
     }
 
     fn busy(conn: &Connection, uid: i64) -> Option<Busy> {
-        seems_busy(conn, uid, &jiff::tz::TimeZone::UTC, ("08:00", "21:30"), noon()).unwrap()
+        seems_busy(conn, uid, &jiff::tz::TimeZone::UTC, ("08:00", "23:00"), noon()).unwrap()
     }
 
     fn entry(conn: &Connection, uid: i64, kind: &str, quiet: bool) {
@@ -308,10 +331,37 @@ mod tests {
         assert_eq!(busy(&conn, uid), None, "being away is when a call reaches them");
         let at = |day| seems_busy(&conn, uid, &jiff::tz::TimeZone::UTC, day, noon()).unwrap();
         let night = |start: &str, end: &str| Some(Busy::Night { start: start.into(), end: end.into() });
-        assert_eq!(at(("12:01", "21:30")), night("12:01", "21:30"));
+        assert_eq!(at(("12:01", "23:00")), night("12:01", "23:00"));
         assert_eq!(at(("08:00", "12:00")), night("08:00", "12:00"));
-        assert_eq!(at(("", "")), None);
-        assert_eq!(at(("13:00", "")), night("13:00", "24:00"));
+        assert_eq!(at(("00:00", "24:00")), None);
+    }
+
+    fn hours(extra: &str) -> (String, String) {
+        let (_conn, tmp, _uid) = env(extra);
+        call_hours(&crate::config::UserConfig::load(tmp.path(), "aki").unwrap())
+    }
+
+    #[test]
+    fn calls_run_from_the_start_of_the_day_to_calls_until() {
+        assert_eq!(hours(""), ("08:00".into(), "23:00".into()));
+        assert_eq!(hours("calls_until = \"20:00\"\nday_start = \"07:00\"\n"), ("07:00".into(), "22:00".into()),
+            "the close of the day is inside the day");
+        assert_eq!(hours("calls_until = \"20:00\"\nclose_day_time = \"\"\n"), ("08:00".into(), "20:00".into()));
+        assert_eq!(hours("calls_until = \"\"\nday_start = \"\"\n"), ("00:00".into(), "24:00".into()));
+        assert_eq!(hours("close_day_time = \"23:50\"\n"), ("08:00".into(), "24:00".into()));
+    }
+
+    #[test]
+    fn a_ring_at_ten_passes_after_the_close_of_the_day_and_one_at_half_eleven_is_held() {
+        let (conn, tmp, uid) = env("");
+        let cfg = crate::config::UserConfig::load(tmp.path(), "aki").unwrap();
+        assert_eq!(cfg.close_day_time(), "21:30");
+        let (start, end) = call_hours(&cfg);
+        let at = |ts| seems_busy(&conn, uid, &jiff::tz::TimeZone::UTC, (&start, &end), at(ts)).unwrap();
+        assert_eq!(at("2026-10-07T21:30:00Z"), None, "the close of the day can call");
+        assert_eq!(at("2026-10-07T22:00:00Z"), None);
+        assert_eq!(at("2026-10-07T23:30:00Z"), Some(Busy::Night { start: "08:00".into(), end: "23:00".into() }));
+        assert!(matches!(at("2026-10-07T07:30:00Z"), Some(Busy::Night { .. })), "nor before the day starts");
     }
 
     #[test]

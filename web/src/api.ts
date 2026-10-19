@@ -77,6 +77,7 @@ export const WRITABLE_SETTINGS = [
   'timezone_auto',
   'nightly_time',
   'close_day_time',
+  'calls_until',
   'morning_until',
   'template',
   'show_arc_between_sessions',

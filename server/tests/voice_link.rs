@@ -23,6 +23,7 @@ fn urgent() -> OutboundMessage {
         event_id: Some(1),
         conversation_id: None,
         actions: Vec::new(),
+        wait: None,
     }
 }
 
