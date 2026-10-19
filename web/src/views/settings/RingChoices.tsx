@@ -2,8 +2,7 @@ import { t, type Key } from '../../i18n'
 import type { RingFor } from '../../types'
 
 export const RING_CHOICES: { id: RingFor; key: Key }[] = [
-  { id: 'urgent', key: 'settings.ring.urgent' },
-  { id: 'checkins', key: 'settings.ring.checkins' },
+  { id: 'allowed', key: 'settings.ring.allowed' },
   { id: 'never', key: 'settings.ring.never' },
 ]
 

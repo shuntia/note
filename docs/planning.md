@@ -80,7 +80,9 @@ The nightly run generates each day from the user's template
 
 Snoozing is separate: any undecided event can be snoozed ("not now"), which
 re-fires it later and is not bounded by the slide window. Silent routines
-(`alert = 0`) and blocks never deliver.
+(`alert = 0`) and blocks never deliver. A routine's `channel` is `push` (the
+ladder) or `call`: ring through the [gate](delivery.md#ringing), writing
+instead while the user is busy.
 
 Event routes beside the plan reads (`GET /api/plan/today`,
 `GET /api/plan/range`, `GET /api/day/{date}`):

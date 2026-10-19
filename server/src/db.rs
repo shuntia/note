@@ -469,6 +469,22 @@ const MIGRATIONS: &[&str] = &[
          event_id INTEGER PRIMARY KEY REFERENCES events(id) ON DELETE CASCADE,
          session TEXT NOT NULL
      );",
+    "",
+    "CREATE TABLE outages (
+         user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+         code TEXT NOT NULL,
+         since TEXT NOT NULL,
+         told_at TEXT,
+         PRIMARY KEY (user_id, code)
+     );
+     CREATE TABLE message_actions (
+         key TEXT PRIMARY KEY,
+         batch TEXT NOT NULL,
+         user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+         data TEXT NOT NULL,
+         expires_at TEXT NOT NULL
+     );
+     CREATE INDEX idx_message_actions_batch ON message_actions(batch);",
 ];
 
 pub fn server_setting(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
@@ -580,6 +596,25 @@ mod tests {
         add("await_reply").unwrap();
         assert!(add("nope").is_err());
         conn.execute("INSERT INTO paused_sessions (event_id, session) VALUES (2, '{}')", []).unwrap();
+    }
+
+    #[test]
+    fn v61_holds_outages_and_message_actions_per_user() {
+        let conn = open_memory().unwrap();
+        let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, 61);
+        conn.execute_batch(
+            "INSERT INTO users (username, pass_hash, role) VALUES ('aitest','h','member');
+             INSERT INTO outages (user_id, code, since) VALUES (1, 'provider_down', 'x');
+             INSERT INTO message_actions (key, batch, user_id, data, expires_at) VALUES ('k', 'b', 1, 'ev:done:1', 'x');",
+        )
+        .unwrap();
+        assert!(conn.execute("INSERT INTO outages (user_id, code, since) VALUES (1, 'provider_down', 'y')", []).is_err());
+        conn.execute("DELETE FROM users", []).unwrap();
+        let left: i64 = conn
+            .query_row("SELECT (SELECT COUNT(*) FROM outages) + (SELECT COUNT(*) FROM message_actions)", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 0);
     }
 
     #[test]

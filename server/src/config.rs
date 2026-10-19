@@ -358,7 +358,7 @@ pub struct UserConfig {
     /// notes; 0 turns idle nudges off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_nudge_min: Option<u32>,
-    /// Which messages ring the linked phone: one of `RING_FOR`.
+    /// Whether Note may ring at all: one of `RING_FOR`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ring_for: Option<String>,
     /// The call voice's id; absent means the language's default voice.
@@ -384,10 +384,9 @@ pub const DEFAULT_CLOSE_DAY_TIME: &str = "21:30";
 pub const DEFAULT_MORNING_UNTIL: &str = "11:00";
 pub const DEFAULT_POMODORO_WORK_MIN: u32 = 25;
 pub const DEFAULT_POMODORO_BREAK_MIN: u32 = 5;
-pub const RING_FOR_URGENT: &str = "urgent";
-pub const RING_FOR_CHECKINS: &str = "checkins";
+pub const RING_FOR_ALLOWED: &str = "allowed";
 pub const RING_FOR_NEVER: &str = "never";
-pub const RING_FOR: &[&str] = &[RING_FOR_URGENT, RING_FOR_CHECKINS, RING_FOR_NEVER];
+pub const RING_FOR: &[&str] = &[RING_FOR_ALLOWED, RING_FOR_NEVER];
 
 fn default_nightly_time() -> String {
     "03:00".into()
@@ -460,8 +459,12 @@ impl UserConfig {
         self.idle_nudge_min.unwrap_or(DEFAULT_IDLE_NUDGE_MIN)
     }
 
+    /// Any value but `never`, including the retired `urgent` and `checkins`, allows calls.
     pub fn ring_for(&self) -> &str {
-        self.ring_for.as_deref().unwrap_or(RING_FOR_URGENT)
+        match self.ring_for.as_deref() {
+            Some(RING_FOR_NEVER) => RING_FOR_NEVER,
+            _ => RING_FOR_ALLOWED,
+        }
     }
 
     pub fn matrix_send(&self) -> bool {

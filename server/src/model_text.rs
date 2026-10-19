@@ -693,6 +693,13 @@ pub fn user_silent(l: Lang) -> &'static str {
     l.of("The user has not written anything yet.\n", "ユーザーはまだ何も書いていません。\n")
 }
 
+pub fn laid_to_ring(l: Lang) -> &'static str {
+    l.of(
+        "Laid to ring: what you say opens a call when the user is free for one, else it goes as a message.\n",
+        "着信の指定あり: 話せる状態なら、言うことが通話の最初のひとことになる。そうでなければメッセージで届く。\n",
+    )
+}
+
 pub fn quiet_for(l: Lang, min: i64) -> String {
     match l {
         Lang::En => format!("Nothing from the user for {min} min."),

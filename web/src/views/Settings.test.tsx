@@ -23,11 +23,11 @@ test('a_second_preview_replaces_the_first', () => {
   expect(audio.pause).toHaveBeenCalledTimes(2)
 })
 
-test('ring_for_offers_three_choices', () => {
-  const html = renderToStaticMarkup(<RingChoices value="checkins" onPick={() => undefined} />)
+test('ring_for_allows_calls_or_never', () => {
+  const html = renderToStaticMarkup(<RingChoices value="never" onPick={() => undefined} />)
   const buttons = [...html.matchAll(/<button[^>]*aria-pressed="(true|false)"[^>]*>([^<]*)<\/button>/g)]
-  expect(buttons.map((b) => b[2])).toEqual(['Pressing', 'Check-ins', 'Never'])
-  expect(buttons.map((b) => b[1])).toEqual(['false', 'true', 'false'])
+  expect(buttons.map((b) => b[2])).toEqual(['Allowed', 'Never'])
+  expect(buttons.map((b) => b[1])).toEqual(['false', 'true'])
 })
 
 test('the_voice_grid_marks_the_chosen_and_the_playing_voice', () => {

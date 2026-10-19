@@ -44,6 +44,8 @@ pub enum RingOutcome {
     Both,
     /// Nothing could ring: the channel that carried the message instead, if any.
     Messaged(Option<&'static str>),
+    /// The gate on calls held it: the channel that carried the message instead, if any.
+    Held(Option<&'static str>),
 }
 
 impl RingOutcome {
@@ -54,6 +56,7 @@ impl RingOutcome {
             RingOutcome::Both => "web+phone",
             RingOutcome::Messaged(Some(_)) => "messaged",
             RingOutcome::Messaged(None) => "undelivered",
+            RingOutcome::Held(_) => "held",
         }
     }
 }
@@ -67,13 +70,18 @@ pub fn ring_with(
     username: &str,
     msg: &OutboundMessage,
 ) -> RingOutcome {
+    let voice = crate::outage::Outage::Voice;
     let phone_call = phone.and_then(|phone| match phone.ring_phone(user_id, msg) {
-        Ok(call_id) => Some(call_id),
-        Err(e) if e.is::<NoLinkedPhone>() => None,
+        Ok(call_id) => {
+            let _ = crate::outage::clear(&crate::db_guard(db), user_id, voice);
+            Some(call_id)
+        }
+        Err(e) if e.is::<NoLinkedPhone>() || e.is::<crate::voice::RingBusy>() => None,
         Err(e) => {
             let subject = msg.event_id.map_or_else(|| "test".to_string(), |id| format!("event {id}"));
             let conn = crate::db_guard(db);
             let _ = crate::log::record(&conn, Some(user_id), "ring_phone_error", &format!("{subject}: {e:#}"));
+            let _ = crate::outage::raise(&conn, user_id, voice, jiff::Timestamp::now());
             None
         }
     });
@@ -84,8 +92,7 @@ pub fn ring_with(
         (false, true) => return RingOutcome::Phone,
         (false, false) => {}
     }
-    let rest: Vec<Arc<dyn Channel>> = ladder.iter().filter(|c| c.name() != "voice").cloned().collect();
-    RingOutcome::Messaged(deliver_via(db, &rest, user_id, username, msg))
+    RingOutcome::Messaged(deliver_via(db, ladder, user_id, username, msg))
 }
 
 /// Calls the user every way open to them at once — the open web app and the
@@ -104,6 +111,33 @@ pub fn ring(state: &crate::AppState, user_id: i64, username: &str, msg: &Outboun
         username,
         msg,
     )
+}
+
+/// Rings for something laid to ring if the gate on calls, the one `call_user`
+/// passes, is open now; otherwise the message goes down the ladder and
+/// `ring_held` logs why.
+pub fn ring_if_free(state: &crate::AppState, user_id: i64, username: &str, msg: &OutboundMessage) -> RingOutcome {
+    let reach = Caller::reach(state, user_id);
+    let now = jiff::Timestamp::now();
+    let held = {
+        let conn = state.db();
+        match crate::tools::call_ops::situation(&conn, &state.config_dir, username, user_id, reach, now) {
+            Ok(s) => {
+                let gate = crate::tools::call_ops::gate(&s);
+                (!gate.open(false)).then(|| [gate.cannot, gate.unwelcome].concat().join("; "))
+            }
+            Err(e) => Some(e.message),
+        }
+    };
+    let Some(why) = held else {
+        return ring(state, user_id, username, msg);
+    };
+    let subject = msg.event_id.map_or_else(|| "test".to_string(), |id| format!("event {id}"));
+    {
+        let conn = state.db();
+        let _ = crate::log::record(&conn, Some(user_id), "ring_held", &format!("{subject}: {why}"));
+    }
+    RingOutcome::Held(deliver_via(&state.db, &state.channels, user_id, username, msg))
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -229,6 +263,7 @@ mod tests {
 
     fn world() -> (Mutex<Connection>, Arc<MockChannel>, Vec<Arc<dyn Channel>>) {
         let conn = crate::db::open_memory().unwrap();
+        crate::auth::create_user(&conn, "aitest", "p", false).unwrap();
         let push = Arc::new(MockChannel::new("mock"));
         let ladder: Vec<Arc<dyn Channel>> = vec![push.clone()];
         (Mutex::new(conn), push, ladder)
@@ -275,6 +310,9 @@ mod tests {
         assert_eq!(ring_with(&db, &NoWebCalls, None, &ladder, 1, "aki", &msg()), RingOutcome::Messaged(Some("mock")));
         assert_eq!(push.seen().len(), 2);
         assert_eq!(ring_errors(&db), ["event 3: the voice service is not connected"]);
+        let conn = db.lock().unwrap();
+        let standing = crate::outage::standing(&conn, 1, false, jiff::Timestamp::now()).unwrap();
+        assert_eq!(standing.iter().map(|(o, _)| *o).collect::<Vec<_>>(), [crate::outage::Outage::Voice]);
     }
 
     #[test]
@@ -284,18 +322,6 @@ mod tests {
         assert_eq!(ring_with(&db, &NoWebCalls, Some(&phone), &ladder, 1, "aki", &msg()), RingOutcome::Messaged(Some("mock")));
         assert_eq!(push.seen().len(), 1);
         assert!(ring_errors(&db).is_empty());
-    }
-
-    #[test]
-    fn a_failed_phone_ring_is_not_retried_down_the_ladder() {
-        let (db, push, _) = world();
-        let voice = Arc::new(MockChannel::new("voice"));
-        let ladder: Vec<Arc<dyn Channel>> = vec![voice.clone(), push.clone()];
-        let phone = phone(Phone::Fails);
-        assert_eq!(ring_with(&db, &NoWebCalls, Some(&phone), &ladder, 1, "aki", &msg()), RingOutcome::Messaged(Some("mock")));
-        assert_eq!(*phone.1.lock().unwrap(), 1);
-        assert!(voice.seen().is_empty());
-        assert_eq!(push.seen().len(), 1);
     }
 
     #[test]

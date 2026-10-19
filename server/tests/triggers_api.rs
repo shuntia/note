@@ -123,11 +123,8 @@ async fn a_trigger_that_speaks_lands_in_the_thread_and_on_a_channel() {
     let event_id = seen[0].1.event_id.expect("the words name the trigger they came from");
     assert_eq!(
         seen[0].1.actions.iter().map(|a| a.data.as_str()).collect::<Vec<_>>(),
-        vec![
-            format!("ev:done:{event_id}"),
-            format!("ev:snooze:{event_id}:15"),
-            format!("ev:drop:{event_id}"),
-        ]
+        vec![format!("ev:snooze:{event_id}:15")],
+        "a trigger that spoke has settled; it can only be asked again"
     );
     let thread = seen[0].1.conversation_id.expect("the words land in a thread");
 
@@ -608,17 +605,125 @@ async fn a_wake_up_that_ends_in_plain_text_still_speaks() {
 }
 
 #[tokio::test]
-async fn past_the_daily_session_cap_a_wake_up_is_dropped_unrun() {
+async fn past_the_daily_session_cap_a_wake_up_goes_out_as_a_reminder_and_says_why_once() {
     let mut w = world(vec![call("c1", "say", r#"{"text":"never sent"}"#)]).await;
-    start_session(&w).await;
-    make_due(&w);
+    lay_plain(&w);
     w.state.agent_sessions_per_day = 1;
+    w.app = api::router(w.state.clone());
     note_server::log::record(&w.state.db.lock().unwrap(), Some(1), "agent_session", "earlier").unwrap();
 
     note_server::runner::sweep_once(&w.state);
 
-    assert!(w.push.seen().is_empty());
-    assert_eq!(statuses(&w), vec!["dropped"]);
+    assert!(w.llm.seen().is_empty(), "nothing thinks past the cap");
+    let bodies: Vec<String> = w.push.seen().into_iter().map(|(_, m)| m.body).collect();
+    assert_eq!(
+        bodies,
+        [
+            note_server::text::outage(note_server::text::Lang::En, note_server::outage::Outage::DailyCap),
+            "Reminder: see how the essay is going".to_string(),
+        ]
+    );
+    assert_eq!(statuses(&w), vec!["done"]);
     assert_eq!(logged(&w, "session_capped"), vec!["wake-up"]);
-    assert!(logged(&w, "trigger_said").is_empty());
+    assert_eq!(logged(&w, "trigger_said").len(), 1);
+    let (status, body) = get(&w, "/api/outages").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["outages"][0]["code"], "daily_cap");
+
+    lay_plain(&w);
+    note_server::runner::sweep_once(&w.state);
+    assert_eq!(w.push.seen().len(), 3, "the cap is told once; the next reminder goes out alone");
+
+    w.state.agent_sessions_per_day = 0;
+    w.app = api::router(w.state.clone());
+    let (_, body) = get(&w, "/api/outages").await;
+    assert_eq!(body["outages"], serde_json::json!([]), "the banner leaves with the cap");
+}
+
+#[tokio::test]
+async fn a_wait_resumed_past_the_cap_settles_and_leaves_nothing_parked() {
+    let mut w = world(vec![call("c1", "say", WAIT)]).await;
+    lay_plain(&w);
+    note_server::runner::sweep_once(&w.state);
+    assert_eq!(rows::<i64>(&w, "SELECT event_id FROM paused_sessions"), [2]);
+    w.state.agent_sessions_per_day = 1;
+    make_due(&w);
+
+    note_server::runner::sweep_once(&w.state);
+
+    assert_eq!(statuses(&w), ["done", "dropped"]);
+    assert!(rows::<i64>(&w, "SELECT event_id FROM paused_sessions").is_empty());
+    assert_eq!(w.llm.seen().len(), 1);
+}
+
+#[tokio::test]
+async fn a_failing_ai_service_is_told_once_and_shown_until_a_session_gets_through() {
+    let w = world(Vec::new()).await;
+    lay_plain(&w);
+    let down = Arc::new(Down);
+    note_server::runner::sweep_once(&w.state.clone().with_providers(down.clone(), None));
+    lay_plain(&w);
+    make_due(&w);
+    note_server::runner::sweep_once(&w.state.clone().with_providers(down, None));
+
+    let down_line = note_server::text::failure_reason(note_server::text::Lang::En, note_server::failure::Reason::ProviderDown);
+    let bodies: Vec<String> = w.push.seen().into_iter().map(|(_, m)| m.body).collect();
+    assert_eq!(bodies, [down_line]);
+    let (_, body) = get(&w, "/api/outages").await;
+    assert_eq!(body["outages"][0]["code"], "provider_down");
+
+    let up = Arc::new(MockLLM::scripted(vec![call("c1", "stay_quiet", r#"{"reason":"fine"}"#)]));
+    w.state.db.lock().unwrap().execute("UPDATE events SET status = 'pending', fired_at = NULL", []).unwrap();
+    note_server::runner::sweep_once(&w.state.clone().with_providers(up, None));
+    let (_, body) = get(&w, "/api/outages").await;
+    assert_eq!(body["outages"], serde_json::json!([]));
+}
+
+/// An AI service that is not answering.
+struct Down;
+
+impl note_server::providers::LLMProvider for Down {
+    fn chat(&self, _: &note_server::providers::ChatRequest) -> anyhow::Result<ChatResponse> {
+        Err(note_server::providers::ProviderError::new(note_server::failure::Reason::ProviderDown, "status 503").into())
+    }
+}
+
+fn lay_to_ring(w: &World, user_toml: &str) {
+    lay_plain(w);
+    note_server::triggers::set_ring(&w.state.db.lock().unwrap(), 1).unwrap();
+    std::fs::write(w.state.config_dir.join("users/aki/user.toml"), user_toml).unwrap();
+}
+
+#[tokio::test]
+async fn a_trigger_laid_to_ring_rings_a_free_user_with_its_words() {
+    let w = world(vec![call("c1", "say", r#"{"text":"ready to talk the essay through?"}"#)]).await;
+    lay_to_ring(&w, "day_start = \"\"\nclose_day_time = \"\"\n");
+    let web = Arc::new(LiveWeb(std::sync::Mutex::default()));
+    let state = w.state.clone().with_web_calls(web.clone());
+
+    note_server::runner::sweep_once(&state);
+
+    let opening = format!("{:?}", w.llm.seen()[0].messages.last().unwrap());
+    assert!(opening.contains("Laid to ring"), "{opening}");
+    let rang = web.0.lock().unwrap().clone();
+    assert_eq!(rang.len(), 1);
+    assert_eq!(rang[0].2.as_deref(), Some("see how the essay is going"), "the call knows why it rang");
+    assert!(w.push.seen().is_empty());
+    assert_eq!(logged(&w, "trigger_rang"), ["event 1: web: laid to ring"]);
+}
+
+#[tokio::test]
+async fn a_trigger_laid_to_ring_writes_to_a_busy_user_through_the_same_gate_as_call_user() {
+    let w = world(vec![call("c1", "say", r#"{"text":"the essay, when you're back"}"#)]).await;
+    lay_to_ring(&w, "close_day_time = \"00:00\"\n");
+    let web = Arc::new(LiveWeb(std::sync::Mutex::default()));
+    let state = w.state.clone().with_web_calls(web.clone());
+
+    note_server::runner::sweep_once(&state);
+
+    assert!(web.0.lock().unwrap().is_empty());
+    assert_eq!(w.push.seen()[0].1.body, "the essay, when you're back");
+    let held = logged(&w, "ring_held");
+    assert!(held.len() == 1 && held[0].contains("outside the user's day"), "{held:?}");
+    assert!(logged(&w, "trigger_rang").is_empty());
 }

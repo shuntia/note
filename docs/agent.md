@@ -110,20 +110,23 @@ parent or its steps.
 
 A wake-up ends in one of three ways: it messages the user, calls them, or
 stays quiet (`stay_quiet {reason}`). Any session that lays a trigger can leave
-it to call; a chat that is asked "call me at three" lays a `trigger_set` whose
-prompt says a call was asked for.
+it to call; a chat that is asked "call me at three" lays a
+`trigger_set {ring: true}` whose prompt says a call was asked for.
 
 `say {text, notes?}` lands in the trigger's thread (or the day's check-in
 thread) and goes down the delivery ladder; `notes` names the working notes it
-nudged about.
+nudged about. On a trigger laid with `ring: true` (its opening says so), `say`
+rings instead when the [gate](delivery.md#ringing) lets a call through, and is
+sent as a message when it does not; a wait it lays rings the same way.
 
 `call_user` rings the user ([delivery.md](delivery.md#ringing)) from every
 session but a voice call, a share link and the single-call kinds (import,
 inbox, summarize). It takes two calls in one session. The first,
 `{reason, asked?, quote?}`, rings nothing: it refuses (`busy`) when nothing can
 ring, a call is live, or the user seems busy (inside a quiet window, inside a
-`fixed` or `busy` calendar occurrence, with a work session open, with no
-activity for 90 minutes) or set `ring_for = "never"`. Otherwise it returns a
+`fixed` or `busy` calendar occurrence, with a work session open, or outside
+their day) or set `ring_for = "never"`: the same [gate](delivery.md#ringing)
+a trigger laid to ring passes. Otherwise it returns a
 token valid for five minutes, an instruction to prepare (anticipate what the
 call will cover and fetch it now, in one round), and how to write a spoken
 opening. `asked` with the user's words in `quote` lets it through the busy

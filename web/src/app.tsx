@@ -23,6 +23,7 @@ import { useMedia } from './hooks'
 import { glide, lift, viewIn, viewOut } from './motion-gsap'
 import { reducedMotion } from './motion'
 import { NavIcon } from './navicon'
+import { OutageBanner } from './outages'
 import { prefsFrom, writePrefs } from './prefs'
 import { startPresence } from './presence'
 import { readSession, stillEnding, writeSession, type FocusSession } from './session'
@@ -456,6 +457,7 @@ export function App() {
           <Jot openTalk={openTalk} openConversation={openConversation} tab={tab} />
         </header>
       )}
+      <OutageBanner refresh={refresh} />
       {layers.map((l) => (
         <main
           key={l.id}

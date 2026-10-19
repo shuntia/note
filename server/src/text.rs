@@ -155,6 +155,31 @@ pub fn action_carry_to_tomorrow(l: Lang) -> String {
     l.pick("Carry to tomorrow", "明日に延期")
 }
 
+/// What a pressed button did, in a word or two.
+pub fn action_receipt(l: Lang, done: crate::actions::Done) -> String {
+    use crate::actions::Done as D;
+    match (l, done) {
+        (Lang::En, D::Done) => "Done.".into(),
+        (Lang::Ja, D::Done) => "完了".into(),
+        (Lang::En, D::Snoozed(min)) => format!("Snoozed {min} min."),
+        (Lang::Ja, D::Snoozed(min)) => format!("{min}分スヌーズ"),
+        (Lang::En, D::Dropped) => "Dropped.".into(),
+        (Lang::Ja, D::Dropped) => "中止".into(),
+        (Lang::En, D::Carried(n)) => format!("Moved {n} to tomorrow."),
+        (Lang::Ja, D::Carried(n)) => format!("{n}件を明日に延期"),
+        (Lang::En, D::Started) => "Session started.".into(),
+        (Lang::Ja, D::Started) => "セッション開始".into(),
+    }
+}
+
+pub fn action_settled(l: Lang) -> String {
+    l.pick("Already settled.", "処理済み")
+}
+
+pub fn action_failed(l: Lang) -> String {
+    l.pick("That didn't go through.", "処理に失敗しました。")
+}
+
 pub fn checkin_title(l: Lang) -> String {
     l.pick("Check-in", "チェックイン")
 }
@@ -382,6 +407,39 @@ pub fn failure_spoken(l: Lang, reason: crate::failure::Reason) -> String {
 }
 
 /// The title of a message telling the user that work in the background failed.
+/// A standing outage, as the message that tells of it says it.
+pub fn outage(l: Lang, outage: crate::outage::Outage) -> String {
+    use crate::outage::Outage as O;
+    match outage {
+        O::Ai(reason) => failure_reason(l, reason),
+        O::DailyCap => l.pick(
+            "Today's AI sessions are used up. Wake-ups go out as plain reminders until the limit resets.",
+            "本日のAIセッション上限に到達しました。上限の回復まで、目覚めは定型の通知になります。",
+        ),
+        O::Matrix => l.pick(
+            "Matrix isn't reachable. Messages still reach you here.",
+            "Matrixに接続できません。通知はこのアプリに届きます。",
+        ),
+        O::Voice => l.pick(
+            "The call service isn't reachable. Note writes instead of calling.",
+            "通話サービスに接続できません。電話の代わりにメッセージを送ります。",
+        ),
+    }
+}
+
+/// A wake-up that could not think, delivered as what it was laid to look at.
+pub fn capped_reminder(l: Lang, prompt: &str) -> String {
+    match l {
+        Lang::En => format!("Reminder: {prompt}"),
+        Lang::Ja => format!("リマインダー：{prompt}"),
+    }
+}
+
+/// The close of the day, when no session could write it.
+pub fn capped_close_day(l: Lang) -> String {
+    l.pick("The day is closing. Carry what's left to tomorrow?", "一日の終わりです。残りは明日に延期しますか？")
+}
+
 pub fn failure_title(l: Lang) -> String {
     l.pick("Note ran into a problem", "Note でエラーが発生しました")
 }

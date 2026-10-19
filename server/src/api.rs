@@ -72,6 +72,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/events/{id}/drop", post(event_drop))
         .route("/api/events/{id}/alert", post(event_alert))
         .route("/api/events/{id}/move_tomorrow", post(event_move_tomorrow))
+        .route("/api/actions", post(action_press))
+        .route("/api/outages", get(outages_get))
         .route("/api/sessions", post(work_session_start))
         .route("/api/sessions/open", get(work_session_open))
         .route("/api/sessions/today", get(work_session_today))
@@ -840,15 +842,20 @@ fn brief_error(status: StatusCode, message: &str) -> axum::response::Response {
 
 /// The per-user daily spend ceiling both agent routes sit behind. Sessions are
 /// counted from the `agent_session` rows they already write, so the ceiling
-/// needs no state of its own.
+/// needs no state of its own; reaching it stands as an outage for the banner.
 pub(crate) fn daily_cap_reached(state: &AppState, user_id: i64) -> bool {
     let cap = state.agent_sessions_per_day;
     if cap == 0 {
         return false;
     }
-    let since = jiff::Timestamp::now() - jiff::Span::new().hours(24);
+    let now = jiff::Timestamp::now();
+    let since = now - jiff::Span::new().hours(24);
     let conn = state.db();
-    crate::log::agent_sessions_since(&conn, user_id, since).unwrap_or(0) >= cap
+    let reached = crate::log::agent_sessions_since(&conn, user_id, since).unwrap_or(0) >= cap;
+    if reached {
+        let _ = crate::outage::raise(&conn, user_id, crate::outage::Outage::DailyCap, now);
+    }
+    reached
 }
 
 /// `daily_cap_reached` for a session nobody waits on, logged once a window
@@ -1888,7 +1895,7 @@ async fn settings_put(
     }
     if let Some(ring_for) = req.ring_for {
         if !crate::config::RING_FOR.contains(&ring_for.as_str()) {
-            return invalid_field("ring_for", "must be urgent, checkins or never");
+            return invalid_field("ring_for", "must be allowed or never");
         }
         cfg.ring_for = Some(ring_for);
     }
@@ -2121,7 +2128,7 @@ async fn voice_preview(
     }
 }
 
-/// Rings the linked phone now, whatever `ring_for` says.
+/// Rings the linked phone now, whatever the gate on calls would say.
 async fn voice_test(user: CurrentUser, State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
     let lang = request_lang(&state, &user, &headers);
     let conflict = |msg: String| {
@@ -2770,6 +2777,58 @@ async fn event_drop(
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
     event_set(&state, &user, id, "dropped")
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ActionPress {
+    key: String,
+}
+
+/// A notification's button, pressed. The key it carries is the credential, so
+/// a service worker can press it with no session behind it.
+async fn action_press(State(state): State<AppState>, Json(req): Json<ActionPress>) -> impl IntoResponse {
+    if !crate::actions::is_push_key(&req.key) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let now = jiff::Timestamp::now();
+    let conn = state.db();
+    let Ok(Some((user_id, data))) = crate::actions::take(&conn, &req.key, now) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Ok(username) = conn.query_row("SELECT username FROM users WHERE id = ?1", [user_id], |r| r.get::<_, String>(0))
+    else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let done = crate::actions::perform(&conn, &state.config_dir, user_id, &username, &data, now);
+    drop(conn);
+    use crate::actions::Refused;
+    match done {
+        Ok(_) => {
+            state.hub.broadcast_changed(user_id);
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(Refused::Unknown | Refused::NotFound) => StatusCode::NOT_FOUND.into_response(),
+        Err(Refused::Settled) => StatusCode::CONFLICT.into_response(),
+        Err(Refused::Invalid(m)) => {
+            (StatusCode::UNPROCESSABLE_ENTITY, Json(serde_json::json!({ "error": m }))).into_response()
+        }
+        Err(Refused::Internal(_)) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+/// What stands against the user now, for the app's banner.
+async fn outages_get(user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
+    let capped = daily_cap_reached(&state, user.id);
+    let conn = state.db();
+    match crate::outage::standing(&conn, user.id, capped, jiff::Timestamp::now()) {
+        Ok(list) => {
+            let list: Vec<serde_json::Value> =
+                list.into_iter().map(|(o, since)| serde_json::json!({ "code": o.code(), "since": since })).collect();
+            Json(serde_json::json!({ "outages": list })).into_response()
+        }
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
 }
 
 #[derive(Deserialize)]

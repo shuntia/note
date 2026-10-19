@@ -394,19 +394,19 @@ pub fn sweep_once(state: &AppState) {
         state.hub.broadcast_changed(flip.user_id);
     }
     for ev in &fired {
+        let lang = crate::text::Lang::for_user(&state.config_dir, &ev.username);
         // A trigger has nothing canned to deliver: it runs a session first, and
         // that session decides whether anything is sent at all.
         if ev.kind == crate::triggers::KIND {
             crate::triggers::fire(state, ev);
+        } else if ev.channel == crate::channels::RING_CHANNEL {
+            let msg = crate::channels::prepare_event(&state.db, ev, lang);
+            crate::channels::calling::ring_if_free(state, ev.user_id, &ev.username, &msg);
         } else {
-            crate::channels::deliver_event(
-                &state.db,
-                &state.channels,
-                ev,
-                crate::text::Lang::for_user(&state.config_dir, &ev.username),
-            );
+            crate::channels::deliver_event(&state.db, &state.channels, ev, lang);
         }
     }
+    crate::outage::tell_all_pending(state, now);
 }
 
 pub fn spawn(state: AppState) {
@@ -734,6 +734,25 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM event_log WHERE kind='delivery_ok'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn a_routine_laid_to_ring_goes_through_the_call_gate_and_writes_when_it_holds() {
+        let (conn, tmp, uid) = setup("UTC");
+        let date: jiff::civil::Date = "2020-01-01".parse().unwrap();
+        crate::plan::generate(&conn, uid, &one_event_template("00:00"), date).unwrap();
+        conn.execute("UPDATE events SET channel = 'call'", []).unwrap();
+        let mock = std::sync::Arc::new(crate::channels::mock::MockChannel::new("mock"));
+        let ladder: Vec<std::sync::Arc<dyn crate::channels::Channel>> = vec![mock.clone()];
+        let state = AppState::new(conn, tmp.path().into(), tmp.path().into()).with_channels(ladder);
+
+        sweep_once(&state);
+
+        assert_eq!(mock.seen().len(), 1, "nothing can ring, so the message goes instead");
+        let conn = state.db.lock().unwrap();
+        let held: String =
+            conn.query_row("SELECT detail FROM event_log WHERE kind = 'ring_held'", [], |r| r.get(0)).unwrap();
+        assert!(held.contains("nothing can ring"), "{held}");
     }
 
     #[test]

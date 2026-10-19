@@ -99,7 +99,7 @@ category default.
 | `session_end_notify` | bool |
 | `show_triggers` | bool; Chat lists a read-only Triggers thread (default off) |
 | `idle_nudge_min` | 0 to 240 minutes quiet before an idle wake-up (default 20; 0 is off) |
-| `ring_for` | `urgent`, `checkins` or `never` |
+| `ring_for` | `allowed` or `never`: whether Note may call at all ([delivery.md](delivery.md#ringing)) |
 | `voice_voice` | a call voice id; blank for the language default |
 | `voice_cue` | bool (default true) |
 | `matrix_send`, `matrix_ping` | bool |

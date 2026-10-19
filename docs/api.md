@@ -24,7 +24,7 @@ Errors carry `{"error": …}`. `GET /healthz` answers `ok`.
 | Calendar | `GET/POST /api/calendar`, `PATCH/DELETE /api/calendar/{id}`, `POST /api/calendar/{id}/skip`, `DELETE /api/calendar/{id}/skip/{date}`, `GET /api/calendar/day/{date}` | [planning.md](planning.md#calendar-api) |
 | Agent | `POST /api/talk`, `GET /api/conversations`, `PATCH/DELETE /api/conversations/{id}`, `GET /api/conversations/{id}/messages`, `GET /api/triggers` | [agent.md](agent.md#sessions) |
 | Memory | `GET /api/memory`, `GET /api/memory/{id}` | [agent.md](agent.md#memory) |
-| Delivery | `GET /api/ws`, `GET /api/push/vapid_public_key`, `POST /api/push/subscribe`, `POST /api/push/unsubscribe`, `POST /api/notify/test` | [delivery.md](delivery.md) |
+| Delivery | `GET /api/ws`, `GET /api/push/vapid_public_key`, `POST /api/push/subscribe`, `POST /api/push/unsubscribe`, `POST /api/notify/test`, `POST /api/actions` (a button's key alone, no session), `GET /api/outages` | [delivery.md](delivery.md) |
 | Voice | `POST/DELETE /api/voice/link`, `POST /api/voice/test`, `GET /api/voice/voices`, `GET /api/voice/preview`, `GET /api/call/ws` (a web call) | [voice.md](voice.md#server-side) |
 | Tokens | `GET/POST /api/tokens`, `DELETE /api/tokens/{id}` | [security.md](security.md#api-tokens) |
 | Share links | `/api/shares…` (owner), `/api/share/{token}…` (visitor) | [share-links.md](share-links.md) |

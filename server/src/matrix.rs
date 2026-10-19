@@ -1,4 +1,4 @@
-use crate::channels::matrix::{Kind, Message, SYNC_SECS};
+use crate::channels::matrix::{Kind, Message, Reaction, SYNC_SECS};
 use crate::talk::{TurnError, Via};
 use crate::AppState;
 use anyhow::Result;
@@ -87,6 +87,9 @@ pub async fn poll_once(state: &AppState, rooms: &mut Rooms) -> Result<()> {
         for message in &batch.messages {
             receive(state, rooms, message).await;
         }
+        for reaction in &batch.reactions {
+            pressed(state, reaction).await;
+        }
     }
     let conn = state.db();
     set_cursor(&conn, &batch.next_batch)
@@ -140,12 +143,52 @@ pub async fn receive(state: &AppState, rooms: &mut Rooms, message: &Message) {
     }
 }
 
+/// A reaction from the linked account in its DM presses the button it names,
+/// and a short notice says what was done.
+pub async fn pressed(state: &AppState, reaction: &Reaction) {
+    let now = jiff::Timestamp::now();
+    let done = {
+        let conn = state.db();
+        let Some((user_id, username)) = linked_account(&conn, &reaction.room_id, &reaction.sender) else { return };
+        let key = crate::channels::matrix::reaction_key(&reaction.event_id, &reaction.key);
+        let Ok(Some((owner, data))) = crate::actions::take(&conn, &key, now) else { return };
+        if owner != user_id {
+            return;
+        }
+        let done = crate::actions::perform(&conn, &state.config_dir, user_id, &username, &data, now);
+        (user_id, username, done)
+    };
+    let (user_id, username, done) = done;
+    let lang = crate::text::Lang::for_user(&state.config_dir, &username);
+    let line = match done {
+        Ok(done) => {
+            state.hub.broadcast_changed(user_id);
+            crate::text::action_receipt(lang, done)
+        }
+        Err(crate::actions::Refused::Settled) => crate::text::action_settled(lang),
+        Err(_) => crate::text::action_failed(lang),
+    };
+    say_as(state, &reaction.room_id, user_id, &line, Kind::Notice).await;
+}
+
+/// The user a Matrix sender in a room is linked as, with their username.
+fn linked_account(conn: &Connection, room_id: &str, sender: &str) -> Option<(i64, String)> {
+    let user_id = crate::voice::links::linked_user(conn, room_id, sender).ok().flatten()?;
+    conn.query_row("SELECT username FROM users WHERE id = ?1", [user_id], |r| r.get::<_, String>(0))
+        .ok()
+        .map(|username| (user_id, username))
+}
+
 /// A send that fails is logged, never retried.
 async fn say(state: &AppState, room_id: &str, user_id: i64, text: &str) {
+    say_as(state, room_id, user_id, text, Kind::Text).await;
+}
+
+async fn say_as(state: &AppState, room_id: &str, user_id: i64, text: &str, kind: Kind) {
     let Some(ch) = state.matrix.clone() else { return };
     let (room_id, text, db) = (room_id.to_string(), text.to_string(), state.db.clone());
     let _ = tokio::task::spawn_blocking(move || {
-        if let Err(e) = ch.send(&room_id, &text, Kind::Text) {
+        if let Err(e) = ch.send(&room_id, &text, kind) {
             let conn = crate::db_guard(&db);
             let _ = crate::log::record(&conn, Some(user_id), "matrix_send_error", &e.to_string());
         }
@@ -198,5 +241,42 @@ mod tests {
         assert_eq!(thread_for(&conn, 1, cutoff).unwrap(), Some(2));
         assert_eq!(thread_for(&conn, 2, cutoff).unwrap(), None, "another account's thread");
         assert_eq!(thread_for(&conn, 1, now - jiff::Span::new().minutes(5)).unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn a_reaction_from_the_linked_account_presses_its_button_once() {
+        let conn = env();
+        conn.execute(
+            "INSERT INTO matrix_links (user_id, mxid, room_id, state, created_at) VALUES (1, '@aki:t', '!dm:t', 'linked', 'x')",
+            [],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO plans (user_id, date, created_at) VALUES (1, '2026-10-18', 'x')", []).unwrap();
+        conn.execute(
+            "INSERT INTO events (plan_id, kind, wall_time, orig_wall_time, status) VALUES (1, 'checkin', '09:00', '09:00', 'fired')",
+            [],
+        )
+        .unwrap();
+        let key = crate::channels::matrix::reaction_key("$m", "✅");
+        let done = crate::channels::Action { label: "Done".into(), data: "ev:done:1".into() };
+        crate::actions::keep(&conn, 1, "$m", &[key], &[done], jiff::Timestamp::now()).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState::new(conn, tmp.path().into(), tmp.path().into());
+        let reaction = |sender: &str| Reaction {
+            room_id: "!dm:t".into(),
+            sender: sender.into(),
+            event_id: "$m".into(),
+            key: "✅\u{fe0f}".into(),
+        };
+        let status = |state: &AppState| -> String {
+            state.db().query_row("SELECT status FROM events WHERE id = 1", [], |r| r.get(0)).unwrap()
+        };
+
+        pressed(&state, &reaction("@bo:t")).await;
+        assert_eq!(status(&state), "fired", "a stranger in the room presses nothing");
+        pressed(&state, &reaction("@aki:t")).await;
+        assert_eq!(status(&state), "done");
+        let left: i64 = state.db().query_row("SELECT COUNT(*) FROM message_actions", [], |r| r.get(0)).unwrap();
+        assert_eq!(left, 0);
     }
 }

@@ -70,7 +70,7 @@ pub fn situation(
         (c.day_start(), c.close_day_time())
     });
     let busy = crate::wake::seems_busy(conn, user_id, &tz, day, now).map_err(|e| internal(&e))?;
-    let ring_for = cfg.as_ref().map_or(crate::config::RING_FOR_URGENT, |c| c.ring_for()).to_string();
+    let ring_for = cfg.as_ref().map_or(crate::config::RING_FOR_ALLOWED, |c| c.ring_for()).to_string();
     let live_call = conn
         .query_row(
             "SELECT EXISTS (SELECT 1 FROM voice_calls WHERE user_id = ?1 AND state != 'ended')",
@@ -79,6 +79,34 @@ pub fn situation(
         )
         .map_err(|e| internal(&e))?;
     Ok(Situation { busy, reach, ring_for, live_call })
+}
+
+/// What stands between this moment and a call: `cannot` is what nothing
+/// overrides, `unwelcome` what the user's own asking for the call does.
+pub struct Gate {
+    pub cannot: Vec<String>,
+    pub unwelcome: Vec<String>,
+}
+
+impl Gate {
+    pub fn open(&self, asked: bool) -> bool {
+        self.cannot.is_empty() && (asked || self.unwelcome.is_empty())
+    }
+}
+
+/// The one gate every call passes, `call_user` and a trigger laid to ring alike.
+pub fn gate(s: &Situation) -> Gate {
+    let mut cannot = Vec::new();
+    if !s.reach.web && !s.reach.phone {
+        cannot.push("nothing can ring: the web app is not open and no phone is linked".to_string());
+    }
+    if s.live_call {
+        cannot.push("a call is already live".to_string());
+    }
+    if s.ring_for == crate::config::RING_FOR_NEVER {
+        cannot.push("the user's settings say never to ring".to_string());
+    }
+    Gate { cannot, unwelcome: s.busy.iter().map(crate::wake::Busy::reason).collect() }
 }
 
 const PREPARE: &str = "Prepare the call before it rings: anticipate what it will cover — the reason, \
@@ -156,30 +184,18 @@ pub fn check(
         ));
     }
 
-    let mut cannot = Vec::new();
-    if !s.reach.web && !s.reach.phone {
-        cannot.push("nothing can ring: the web app is not open and no phone is linked".to_string());
-    }
-    if s.live_call {
-        cannot.push("a call is already live".to_string());
-    }
-    if s.ring_for == crate::config::RING_FOR_NEVER {
-        cannot.push("the user's settings say never to ring".to_string());
-    }
-    let mut unwelcome = Vec::new();
-    if let Some(busy) = &s.busy {
-        unwelcome.push(busy.reason());
-    }
-    if !cannot.is_empty() || (asked.is_none() && !unwelcome.is_empty()) {
-        let bypass = cannot.is_empty();
-        let mut why = cannot;
-        why.extend(unwelcome);
+    let gate = gate(s);
+    if !gate.open(asked.is_some()) {
+        let bypass = gate.cannot.is_empty();
+        let mut why = gate.cannot;
+        why.extend(gate.unwelcome.iter().cloned());
         let mut message = format!("not a moment to call: {}; write to the user instead", why.join("; "));
         if bypass {
             message.push_str(", unless they asked to be called: then check again with asked and their words in quote");
         }
         return Err(ToolError::busy(message));
     }
+    let unwelcome = gate.unwelcome;
 
     let token = uuid::Uuid::new_v4().simple().to_string();
     calls.0.retain(|p| now.duration_since(p.issued) < TOKEN_TTL);
@@ -285,7 +301,7 @@ mod tests {
     use crate::wake::Busy;
 
     fn free() -> Situation {
-        Situation { busy: None, reach: Reach { web: true, phone: false }, ring_for: "urgent".into(), live_call: false }
+        Situation { busy: None, reach: Reach { web: true, phone: false }, ring_for: "allowed".into(), live_call: false }
     }
 
     fn args(json: &str) -> CallArgs {

@@ -36,6 +36,10 @@ Change only what clearly helps; everything is logged.
   confirm with the token, your opening and a brief; that ends the session. If the check refuses,
   `say` it instead.
 
+When the opening says the trigger was laid to ring, `say` is the call: your
+words open it when the same check lets a call through, else they go as a
+message. Write them to be spoken.
+
 Stay quiet when the user wrote or finished a step in the last ten minutes, or
 the prompt no longer applies.
 
@@ -54,7 +58,9 @@ moment for it has passed.
 
 You may lay the next wake-up with trigger_set before ending, tied to a moment,
 not a clock tick, with `cancel_on` set to whatever would settle it (a reply, a
-task, an event). Never one that just repeats this check minutes later.
+task, an event). Never one that just repeats this check minutes later. Set
+`ring: true` only when that moment needs a call: the user asked for one, or a
+message already went unanswered.
 
 When the day's first wake-up asks you to lay the day, do as its opening says,
 giving each wake-up a prompt that says what you will look at then.

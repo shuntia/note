@@ -227,6 +227,11 @@ pub fn insert(
     Ok(conn.last_insert_rowid())
 }
 
+/// Marks a laid trigger to ring when it fires.
+pub fn set_ring(conn: &Connection, event_id: i64) -> rusqlite::Result<usize> {
+    conn.execute("UPDATE events SET channel = ?1 WHERE id = ?2", (crate::channels::RING_CHANNEL, event_id))
+}
+
 pub struct Lay<'a> {
     pub config_dir: &'a Path,
     pub user_id: i64,
@@ -894,6 +899,9 @@ pub fn pause(
     let tx = conn.unchecked_transaction()?;
     let id = insert(&tx, plan_id, &wall, &prompt, AWAIT_ORIGIN, None, Some(thread), None, now)?;
     tx.execute("INSERT INTO paused_sessions (event_id, session) VALUES (?1, ?2)", (id, serde_json::to_string(paused)?))?;
+    if fired.channel == crate::channels::RING_CHANNEL {
+        set_ring(&tx, id)?;
+    }
     tx.commit()?;
     Ok(Some(id))
 }
@@ -975,11 +983,8 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
     let _permit = permit;
     let now = jiff::Timestamp::now();
     if crate::api::background_capped(state, fired.user_id, "wake-up") {
-        let _ = state.db().execute(
-            "UPDATE events SET status = 'dropped', decided_at = ?1 WHERE id = ?2",
-            (now.to_string(), fired.event_id),
-        );
-        return;
+        crate::outage::tell_pending(state, fired.user_id, &fired.username, now);
+        return fire_capped(state, fired, now);
     }
     let tz = timezone(&state.config_dir, &fired.username);
     let l = Lang::for_user(&state.config_dir, &fired.username);
@@ -1005,6 +1010,9 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
             None
         };
         let mut opening = situation(&conn, fired.user_id, &ev, &tz, l);
+        if fired.channel == crate::channels::RING_CHANNEL {
+            opening.push_str(mt::laid_to_ring(l));
+        }
         if ev.origin == crate::idle::ORIGIN {
             opening.push_str(&crate::idle::context(&conn, &state.data_dir, fired.user_id, &fired.username, l, now).unwrap_or_default());
         }
@@ -1137,27 +1145,14 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
     };
     state.hub.broadcast_changed(fired.user_id);
     let own = ev.origin == crate::idle::ORIGIN || ev.origin == crate::wake::ORIGIN;
-    let msg = crate::channels::OutboundMessage {
-        title: "Note".into(),
-        reason: call.as_ref().map(|c| c.reason.clone()),
-        brief: call.as_ref().map(|c| c.brief.clone()),
-        body: text,
-        urgency: crate::channels::Urgency::Normal,
-        checkin: !own,
-        event_id: Some(ev.event_id),
-        conversation_id,
-        actions: if is_close_day(&ev.prompt) {
-            vec![crate::channels::Action {
-                label: crate::text::action_carry_to_tomorrow(lang),
-                data: format!("carry:{}", fired.date),
-            }]
-        } else if own {
-            Vec::new()
-        } else {
-            crate::channels::event_actions(ev.event_id, lang)
-        },
-    };
+    let mut msg = said_message(fired, &ev, text, conversation_id, lang);
+    msg.checkin = !own;
+    if own {
+        msg.actions.clear();
+    }
     if let Some(call) = call {
+        msg.reason = Some(call.reason.clone());
+        msg.brief = Some(call.brief.clone());
         let outcome = crate::channels::ring(state, fired.user_id, &fired.username, &msg);
         let conn = state.db();
         let _ = crate::log::record(
@@ -1166,9 +1161,81 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
             "trigger_rang",
             &call.log_line(&format!("event {}", ev.event_id), outcome.as_str()),
         );
+    } else if fired.channel == crate::channels::RING_CHANNEL {
+        msg.reason = Some(ev.prompt.clone());
+        let outcome = crate::channels::calling::ring_if_free(state, fired.user_id, &fired.username, &msg);
+        if !matches!(outcome, crate::channels::RingOutcome::Held(_)) {
+            let conn = state.db();
+            let detail = format!("event {}: {}: laid to ring", ev.event_id, outcome.as_str());
+            let _ = crate::log::record(&conn, Some(fired.user_id), "trigger_rang", &detail);
+        }
     } else {
         crate::channels::deliver_via(&state.db, &state.channels, fired.user_id, &fired.username, &msg);
     }
+}
+
+/// What a trigger's words go out as: the close of the day offers to carry
+/// what is left, any other check one tap to ask again later.
+fn said_message(
+    fired: &crate::runner::FiredEvent,
+    ev: &Firing,
+    body: String,
+    conversation_id: Option<i64>,
+    lang: Lang,
+) -> crate::channels::OutboundMessage {
+    let actions = if is_close_day(&ev.prompt) {
+        vec![crate::channels::Action {
+            label: crate::text::action_carry_to_tomorrow(lang),
+            data: format!("carry:{}", fired.date),
+        }]
+    } else {
+        crate::channels::trigger_actions(ev.event_id, lang)
+    };
+    crate::channels::OutboundMessage {
+        title: "Note".into(),
+        reason: None,
+        brief: None,
+        body,
+        urgency: crate::channels::Urgency::Normal,
+        checkin: true,
+        event_id: Some(ev.event_id),
+        conversation_id,
+        actions,
+    }
+}
+
+/// A wake-up past the day's cap on AI sessions, which cannot think: one the
+/// user laid or the server keeps goes out as a plain reminder of what it was
+/// laid for, and one Note laid for its own looking (idleness, laying the day,
+/// a wait for an answer) settles without a word, its parked session with it.
+fn fire_capped(state: &crate::AppState, fired: &crate::runner::FiredEvent, now: jiff::Timestamp) {
+    let lang = Lang::for_user(&state.config_dir, &fired.username);
+    let conn = state.db();
+    let Ok(Some(ev)) = read(&conn, fired.event_id) else {
+        return;
+    };
+    let silent = [crate::idle::ORIGIN, crate::wake::ORIGIN, AWAIT_ORIGIN].contains(&ev.origin.as_str());
+    if silent {
+        let _ = conn.execute("DELETE FROM paused_sessions WHERE event_id = ?1", [ev.event_id]);
+        let _ = conn.execute(
+            "UPDATE events SET status = 'dropped', decided_at = ?1 WHERE id = ?2",
+            (now.to_string(), ev.event_id),
+        );
+        let _ = crate::log::record(&conn, Some(fired.user_id), "trigger_quiet", &format!("event {}: the day's AI sessions are spent", ev.event_id));
+        return;
+    }
+    let text = if is_close_day(&ev.prompt) {
+        crate::text::capped_close_day(lang)
+    } else {
+        crate::text::capped_reminder(lang, &ev.prompt)
+    };
+    let landed = record_said(&conn, fired, lang, ev.conversation_id, &text, now).ok();
+    let _ = settle(&conn, ev.event_id, now);
+    let _ = crate::log::record(&conn, Some(fired.user_id), "trigger_said", &format!("event {}: {text}", ev.event_id));
+    drop(conn);
+    state.hub.broadcast_changed(fired.user_id);
+    let msg = said_message(fired, &ev, text, landed, lang);
+    crate::channels::deliver_via(&state.db, &state.channels, fired.user_id, &fired.username, &msg);
 }
 
 #[cfg(test)]

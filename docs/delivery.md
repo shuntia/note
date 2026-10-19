@@ -1,11 +1,10 @@
 # Delivery
 
-When an event fires, the server walks a ladder: a voice ring of the linked
-phone (with `[voice]`, a linked Matrix account and a message the user's
-`ring_for` covers), connected WebSocket clients, then Web Push. The first
-channel that accepts wins; if none does, the day is plainer, never an error.
-Matrix (with `[channels.matrix]`) sits after the voice ring as a companion: it
-posts a copy when the user has `matrix_send` on and the walk goes on.
+When an event fires, the server walks a ladder: connected WebSocket clients,
+then Web Push. The first channel that accepts wins; if none does, the day is
+plainer, never an error. Matrix (with `[channels.matrix]`) sits first as a
+companion: it posts a copy when the user has `matrix_send` on and the walk goes
+on. The ladder never rings; only [a call](#ringing) does.
 
 Every outcome lands in `event_log` (readable at `GET /api/admin/log`):
 
@@ -63,8 +62,17 @@ sockets (a ninth is `429` before the upgrade).
 
 ## Ringing
 
-A confirmed `call_user` ([agent.md](agent.md#wake-ups)) calls instead of
-writing:
+Three things ring, all through one gate (`call_ops::gate`): a confirmed
+`call_user` ([agent.md](agent.md#wake-ups)), a trigger laid with
+`trigger_set {ring: true}` once its session `say`s, and a template routine with
+`channel = "call"`. The gate holds a call when nothing can ring, a call is
+live, the user's `ring_for` is `never`, or the user seems busy (a quiet window,
+a `fixed` or `busy` calendar occurrence, an open work session, or outside
+`day_start` to `close_day_time`). Only `call_user` with the user's own words
+asking for the call gets past the busy part. A held ring sends the message
+down the ladder and logs `ring_held` with why.
+
+When the gate lets it through, Note calls instead of writing:
 
 The open app and the linked phone ring together; whichever is answered first
 takes the call and the other stops.
@@ -90,8 +98,8 @@ An answered call sounds when it connects and when it ends; a failed call and a
 ring that is never answered stay quiet. The sound files and their licences are
 in `web/src/sounds/` (`CREDITS.md`).
 
-Each ring logs `trigger_rang` with `web+phone`, `web`, `phone`, `messaged` or
-`undelivered`.
+Each ring a wake-up makes logs `trigger_rang` with `web+phone`, `web`, `phone`,
+`messaged` or `undelivered`.
 
 ## Check-ins are conversations
 
@@ -138,9 +146,48 @@ Routes, all cookie-authenticated:
 
 Payloads are `aes128gcm`-encrypted and VAPID-signed; the plaintext is
 `{"title", "body"}` plus `conversation_id` and `url` (`/#/chat/<id>`) when the
-event opened a thread. `web/public/sw.js` shows the notification and focuses or
+event opened a thread, and `actions` (`[{action, title}]`) when the message
+carries buttons. `web/public/sw.js` shows the notification and focuses or
 opens the app on click. Endpoints the push service reports gone (404/410) are
 pruned.
+
+## Buttons
+
+A message can carry buttons: a check-in's Done, Snooze 15 and Drop
+(`ev:done|snooze|drop:<event>`), a spoken trigger's Snooze 15, the close of the
+day's Carry to tomorrow (`carry:<date>`), and a block's Start session
+(`block:start:<event>`). Each delivery keeps its buttons in `message_actions`
+under keys of its own for 36 hours; pressing one spends them all.
+
+- Web Push: each button's `action` is a random 128-bit key. The service worker
+  posts `POST /api/actions {key}`, with no session needed: the key is the
+  credential. `204` when done, `404` for a key spent, expired or never given,
+  `409` when the thing has already settled. A failed press opens the app.
+- Matrix: the bot posts a legend line (`✅ Done · 💤 Snooze 15 · ✖ Drop`) and
+  reacts to its own message with each emoji; the linked account tapping one
+  presses it, and the bot answers with a short notice.
+
+Snooze counts from now, not from the event's own time. Snoozing a trigger that
+spoke asks it again. Starting a block opens a work session on its task for the
+block's length.
+
+## Outages
+
+When something Note leans on fails for a user, it stands as an outage in
+`outages` until it clears: the AI service failing a session (model gone, key
+refused, out of credits, rate limited, unreachable) until a later session gets
+through; the day's `agent_sessions_per_day` reached, until it lifts; Matrix
+refusing a post, until one gets through; the voice service failing a ring,
+until one starts. Each new outage is told once, down the ladder, by the next
+sweep (at most once per reason in 6 hours). `GET /api/outages` →
+`{"outages": [{"code", "since"}]}` feeds the app's banner, which stays until the
+list is empty.
+
+Past the day's cap a wake-up runs no session: one laid by the user or by Note
+for later (`agent`, `template`) goes out as `Reminder: <its prompt>` (the close
+of the day as a canned line with its carry button), and Note's own looking
+(idle, laying the day, a resumed wait and its parked session) settles without a
+word.
 
 ## Matrix
 
