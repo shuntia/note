@@ -68,9 +68,12 @@ Three things ring, all through one gate (`call_ops::gate`): a confirmed
 `channel = "call"`. The gate holds a call when nothing can ring, a call is
 live, the user's `ring_for` is `never`, or the user seems busy (a quiet window,
 a `fixed` or `busy` calendar occurrence, an open work session, or outside
-`day_start` to `close_day_time`). Only `call_user` with the user's own words
-asking for the call gets past the busy part. A held ring sends the message
-down the ladder and logs `ring_held` with why.
+the hours the user takes calls). Those hours run from `day_start` to
+`calls_until` (default `23:00`; blank runs them to midnight), and always reach
+30 minutes past `close_day_time`, so the close of the day and the wait it lays
+can call. Only `call_user` with the user's own words asking for the call gets
+past the busy part. A held ring sends the message down the ladder and logs
+`ring_held` with why.
 
 When the gate lets it through, Note calls instead of writing:
 
@@ -93,6 +96,14 @@ takes the call and the other stops.
   app's 30 s. A ring answered but unable to open its call goes down the ladder
   too.
 - With neither, the message alone walks the ladder without the voice rung.
+
+Every outcome of a call Note placed lands once in
+`calling::outcome_known`, which logs `call_outcome` (`event <id>: Answered`,
+`Missed`, `Declined`, `Failed: <why>` or `Held: <why>`) and hands it to the
+wake-up parked on the call, if any ([agent.md](agent.md#wake-ups)). A phone
+call reports it from the voice side's outcome, its end, or the sweep that
+fails it stale; the app's ring when it is declined, runs out, or cannot open;
+and a ring with nothing to ring at once, as `Failed`.
 
 An answered call sounds when it connects and when it ends; a failed call and a
 ring that is never answered stay quiet. The sound files and their licences are

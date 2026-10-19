@@ -113,22 +113,29 @@ pub fn ring(state: &crate::AppState, user_id: i64, username: &str, msg: &Outboun
     )
 }
 
-/// Rings for something laid to ring if the gate on calls, the one `call_user`
-/// passes, is open now; otherwise the message goes down the ladder and
-/// `ring_held` logs why.
-pub fn ring_if_free(state: &crate::AppState, user_id: i64, username: &str, msg: &OutboundMessage) -> RingOutcome {
+/// Why the gate on calls, the one `call_user` passes, holds a ring now; `None`
+/// while it is open.
+pub fn held(state: &crate::AppState, user_id: i64, username: &str) -> Option<String> {
     let reach = Caller::reach(state, user_id);
-    let now = jiff::Timestamp::now();
-    let held = {
-        let conn = state.db();
-        match crate::tools::call_ops::situation(&conn, &state.config_dir, username, user_id, reach, now) {
-            Ok(s) => {
-                let gate = crate::tools::call_ops::gate(&s);
-                (!gate.open(false)).then(|| [gate.cannot, gate.unwelcome].concat().join("; "))
-            }
-            Err(e) => Some(e.message),
+    let conn = state.db();
+    match crate::tools::call_ops::situation(&conn, &state.config_dir, username, user_id, reach, jiff::Timestamp::now()) {
+        Ok(s) => {
+            let gate = crate::tools::call_ops::gate(&s);
+            (!gate.open(false)).then(|| [gate.cannot, gate.unwelcome].concat().join("; "))
         }
-    };
+        Err(e) => Some(e.message),
+    }
+}
+
+/// Rings for something laid to ring unless `held` gives why not; then the
+/// message goes down the ladder and `ring_held` logs why.
+pub fn ring_unless(
+    state: &crate::AppState,
+    user_id: i64,
+    username: &str,
+    msg: &OutboundMessage,
+    held: Option<&str>,
+) -> RingOutcome {
     let Some(why) = held else {
         return ring(state, user_id, username, msg);
     };
@@ -138,6 +145,73 @@ pub fn ring_if_free(state: &crate::AppState, user_id: i64, username: &str, msg: 
         let _ = crate::log::record(&conn, Some(user_id), "ring_held", &format!("{subject}: {why}"));
     }
     RingOutcome::Held(deliver_via(&state.db, &state.channels, user_id, username, msg))
+}
+
+/// `ring_unless` the gate on calls holds it now.
+pub fn ring_if_free(state: &crate::AppState, user_id: i64, username: &str, msg: &OutboundMessage) -> RingOutcome {
+    ring_unless(state, user_id, username, msg, held(state, user_id, username).as_deref())
+}
+
+/// How a call Note placed went.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "result")]
+pub enum CallOutcome {
+    /// Picked up; what was said is in the call's own conversation.
+    Answered { call_id: String },
+    /// Rang out unanswered.
+    Missed,
+    Declined,
+    /// Rang nothing, or broke off before anyone answered; the message went on as text.
+    Failed { reason: String },
+    /// The gate on calls held it; the message went as text.
+    Held { reason: String },
+}
+
+impl CallOutcome {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CallOutcome::Answered { .. } => "Answered",
+            CallOutcome::Missed => "Missed",
+            CallOutcome::Declined => "Declined",
+            CallOutcome::Failed { .. } => "Failed",
+            CallOutcome::Held { .. } => "Held",
+        }
+    }
+}
+
+/// Where the outcome of every call Note placed lands, once per call, as soon
+/// as it is known: logged as `call_outcome`, settled on the follow-up record of
+/// the wake-up that rang, and handed to the wake-up parked on it, if any.
+pub fn outcome_known(conn: &Connection, user_id: i64, msg: &OutboundMessage, outcome: &CallOutcome) -> anyhow::Result<()> {
+    use crate::follow_up::CallEnd;
+    let subject = msg.event_id.map_or_else(|| "call".to_string(), |id| format!("event {id}"));
+    let detail = match outcome {
+        CallOutcome::Failed { reason } | CallOutcome::Held { reason } => format!("{subject}: {}: {reason}", outcome.as_str()),
+        _ => format!("{subject}: {}", outcome.as_str()),
+    };
+    crate::log::record(conn, Some(user_id), "call_outcome", &detail)?;
+    let end = match outcome {
+        CallOutcome::Answered { .. } => Some(CallEnd::Answered),
+        CallOutcome::Missed => Some(CallEnd::Missed),
+        CallOutcome::Declined => Some(CallEnd::Declined),
+        CallOutcome::Failed { .. } | CallOutcome::Held { .. } => None,
+    };
+    if let (Some(end), Some(event_id)) = (end, msg.event_id) {
+        crate::follow_up::call_ended_for(conn, user_id, event_id, end, jiff::Timestamp::now())?;
+    }
+    if let Some(wait) = msg.wait {
+        crate::triggers::call_settled(conn, wait, outcome)?;
+    }
+    Ok(())
+}
+
+/// `outcome_known` for a call whose message was stored as JSON; a call that
+/// carried none was not Note's to place, and has nothing to report.
+pub fn stored_outcome(conn: &Connection, user_id: i64, message: Option<&str>, outcome: &CallOutcome) {
+    let Some(msg) = message.and_then(|m| serde_json::from_str::<OutboundMessage>(m).ok()) else { return };
+    if let Err(e) = outcome_known(conn, user_id, &msg, outcome) {
+        let _ = crate::log::record(conn, Some(user_id), "voice_error", &format!("a call's outcome was not recorded: {e:#}"));
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -182,6 +256,7 @@ impl Caller for crate::AppState {
             event_id: None,
             conversation_id: thread,
             actions: Vec::new(),
+            wait: None,
         };
         ring(self, user_id, username, &msg)
     }
@@ -258,6 +333,7 @@ mod tests {
             event_id: Some(3),
             conversation_id: Some(7),
             actions: Vec::new(),
+            wait: None,
         }
     }
 

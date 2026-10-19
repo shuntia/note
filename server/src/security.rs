@@ -639,6 +639,7 @@ fn factor_changed(state: &AppState, conn: &Connection, user: &CurrentUser, kind:
             event_id: None,
             conversation_id: None,
             actions: Vec::new(),
+            wait: None,
         };
         crate::channels::deliver_via(&st.db, &st.channels, id, &username, &msg);
     });

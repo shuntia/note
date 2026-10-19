@@ -508,6 +508,7 @@ const MIGRATIONS: &[&str] = &[
          PRIMARY KEY (outreach_id, task_id)
      );
      CREATE INDEX idx_outreach_tasks_task ON outreach_tasks(task_id);",
+    "ALTER TABLE paused_sessions ADD COLUMN call TEXT;",
 ];
 
 pub fn server_setting(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
@@ -622,10 +623,22 @@ mod tests {
     }
 
     #[test]
-    fn v61_holds_outages_and_message_actions_per_user() {
+    fn v63_lets_a_parked_session_wait_on_a_call() {
         let conn = open_memory().unwrap();
         let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert!(v >= 61);
+        assert_eq!(v, 63);
+        conn.execute_batch(
+            "INSERT INTO users (username, pass_hash, role) VALUES ('aitest','h','member');
+             INSERT INTO plans (user_id, date, created_at) VALUES (1, '2026-10-18', 'x');
+             INSERT INTO events (plan_id, kind, wall_time, origin) VALUES (1, 'trigger', '09:00', 'await_reply');
+             INSERT INTO paused_sessions (event_id, session, call) VALUES (1, '{}', 'ringing');",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn v61_holds_outages_and_message_actions_per_user() {
+        let conn = open_memory().unwrap();
         conn.execute_batch(
             "INSERT INTO users (username, pass_hash, role) VALUES ('aitest','h','member');
              INSERT INTO outages (user_id, code, since) VALUES (1, 'provider_down', 'x');

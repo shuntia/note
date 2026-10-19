@@ -3,6 +3,7 @@ pub mod links;
 pub mod outbox;
 pub mod web;
 
+use crate::channels::calling::{outcome_known, stored_outcome, CallOutcome};
 use crate::channels::{Channel, OutboundMessage};
 use note_voice_proto::{
     BoxFuture, CallBody, Dir, Direction, Handler, Media, Origin, Outcome, Pcm, Peer, PeerConfig, Refusal, RefusalCode,
@@ -251,8 +252,10 @@ impl Voice {
         let thread = rung.message.conversation_id;
         let message = thread
             .and_then(|conversation_id| self.ring_message(user_id, conversation_id))
-            .map(|m| OutboundMessage { reason: rung.message.reason.clone(), ..m });
+            .map(|m| OutboundMessage { reason: rung.message.reason.clone(), event_id: rung.message.event_id, wait: rung.message.wait, ..m });
         Some(self.open_web_call(user_id, web::WebStart { thread, message }, now, false).inspect_err(|_| {
+            let failed = CallOutcome::Failed { reason: "the answered call could not open".into() };
+            let _ = outcome_known(&crate::db_guard(&self.db), user_id, &rung.message, &failed);
             self.deliver(user_id, rung.message.clone());
         }))
     }
@@ -384,10 +387,18 @@ impl Voice {
     pub fn decline_ring(&self, token: &str, user_id: i64) -> bool {
         let Some(rung) = self.web.decline_ring(token, user_id) else { return false };
         let Some(phone) = rung.phone else {
+            let _ = outcome_known(&crate::db_guard(&self.db), user_id, &rung.message, &CallOutcome::Declined);
             self.deliver(user_id, rung.message);
             return true;
         };
-        let ended = end_unanswered(&crate::db_guard(&self.db), &phone, "declined", jiff::Timestamp::now()).ok().flatten();
+        let ended = {
+            let conn = crate::db_guard(&self.db);
+            let ended = end_unanswered(&conn, &phone, "declined", jiff::Timestamp::now()).ok().flatten();
+            if let Some((user_id, message)) = &ended {
+                stored_outcome(&conn, *user_id, message.as_deref(), &CallOutcome::Declined);
+            }
+            ended
+        };
         if let Some((user_id, message)) = ended {
             self.hang_up(&phone);
             self.handler.fall_through(&phone, user_id, message);
@@ -401,6 +412,7 @@ impl Voice {
         let gone = self.web.expired_rings_at(now);
         let n = gone.len();
         for rung in gone.into_iter().filter(|r| r.phone.is_none()) {
+            let _ = outcome_known(&crate::db_guard(&self.db), rung.user_id, &rung.message, &CallOutcome::Missed);
             self.deliver(rung.user_id, rung.message);
         }
         n
@@ -448,6 +460,7 @@ impl Voice {
             event_id: None,
             conversation_id: Some(conversation_id),
             actions: Vec::new(),
+            wait: None,
         })
     }
 
@@ -519,7 +532,16 @@ impl Voice {
         for (id, state) in stale {
             let ended = {
                 let conn = crate::db_guard(&self.db);
-                end_call(&conn, &id, "failed", Some(&state), now).ok().flatten()
+                let ended = end_call(&conn, &id, "failed", Some(&state), now).ok().flatten();
+                if let Some((user_id, message)) = &ended {
+                    let outcome = if state == "answered" {
+                        CallOutcome::Answered { call_id: id.clone() }
+                    } else {
+                        CallOutcome::Failed { reason: format!("the call went quiet while {state}") }
+                    };
+                    stored_outcome(&conn, *user_id, message.as_deref(), &outcome);
+                }
+                ended
             };
             if let Some((user_id, message)) = ended {
                 failed += 1;
@@ -798,14 +820,31 @@ impl Handler for NoteHandler {
                     }
                     CallBody::Outcome { outcome } => {
                         ended = end_call(&tx, call_id, outcome.as_str(), None, now).map_err(|e| e.to_string())?;
-                        if let (Some((user_id, _)), Outcome::Failed { reason }) = (&ended, outcome) {
-                            let _ = crate::log::record(&tx, Some(*user_id), "voice_call_failed", reason);
+                        if let Some((user_id, message)) = &ended {
+                            if let Outcome::Failed { reason } = outcome {
+                                let _ = crate::log::record(&tx, Some(*user_id), "voice_call_failed", reason);
+                            }
+                            let known = match outcome {
+                                Outcome::Answered => CallOutcome::Answered { call_id: call_id.to_string() },
+                                Outcome::Declined => CallOutcome::Declined,
+                                Outcome::Missed => CallOutcome::Missed,
+                                Outcome::Failed { reason } => CallOutcome::Failed { reason: reason.clone() },
+                            };
+                            stored_outcome(&tx, *user_id, message.as_deref(), &known);
                         }
                     }
                     CallBody::Ended => {
                         let answered = state(&tx, call_id)?.as_deref() == Some("answered");
                         let outcome = if answered { "answered" } else { "failed" };
                         ended = end_call(&tx, call_id, outcome, None, now).map_err(|e| e.to_string())?;
+                        if let Some((user_id, message)) = &ended {
+                            let known = if answered {
+                                CallOutcome::Answered { call_id: call_id.to_string() }
+                            } else {
+                                CallOutcome::Failed { reason: "the call ended before it was answered".into() }
+                            };
+                            stored_outcome(&tx, *user_id, message.as_deref(), &known);
+                        }
                         if answered && ended.is_some() && held_conversation(&tx, call_id, now).map_err(|e| e.to_string())? {
                             ended = None;
                         }
@@ -890,6 +929,7 @@ mod tests {
             event_id: Some(4),
             conversation_id: Some(9),
             actions: Vec::new(),
+            wait: None,
         }
     }
 
@@ -1858,5 +1898,82 @@ mod tests {
         voice.redrive();
         settle().await;
         assert_eq!(mock.seen().len(), 1);
+    }
+
+    /// A wake-up parked on a call, and the message that call carries.
+    fn parked_on_call(voice: &Voice) -> OutboundMessage {
+        let conn = crate::db_guard(&voice.db);
+        conn.execute_batch(
+            "INSERT INTO plans (user_id, date, created_at) VALUES (1, '2026-10-18', 'x');
+             INSERT INTO events (plan_id, kind, wall_time, origin) VALUES (1, 'trigger', '09:45', 'await_reply');
+             INSERT INTO paused_sessions (event_id, session, call) VALUES (1, '{}', 'ringing');",
+        )
+        .unwrap();
+        OutboundMessage { wait: Some(1), ..msg() }
+    }
+
+    fn waited_on(voice: &Voice) -> serde_json::Value {
+        let raw: String = crate::db_guard(&voice.db)
+            .query_row("SELECT call FROM paused_sessions WHERE event_id = 1", [], |r| r.get(0))
+            .unwrap();
+        serde_json::from_str(&raw).unwrap_or(serde_json::Value::String(raw))
+    }
+
+    fn outcomes(voice: &Voice) -> Vec<String> {
+        let conn = crate::db_guard(&voice.db);
+        let mut stmt = conn.prepare("SELECT detail FROM event_log WHERE kind = 'call_outcome' ORDER BY id").unwrap();
+        stmt.query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_missed_call_tells_the_wake_up_parked_on_it_once() {
+        let (voice, _mock) = rig();
+        let rung = parked_on_call(&voice);
+        let id = voice.start_call(1, &link(), &rung, jiff::Timestamp::now()).unwrap();
+        voice.handler.apply(&id, 1, CallBody::Ringing).unwrap();
+        assert_eq!(waited_on(&voice), "ringing");
+        voice.handler.apply(&id, 2, CallBody::Outcome { outcome: Outcome::Missed }).unwrap();
+        voice.handler.apply(&id, 3, CallBody::Ended).unwrap();
+        assert_eq!(waited_on(&voice), serde_json::json!({ "result": "Missed" }));
+        assert_eq!(outcomes(&voice), ["event 4: Missed"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_answered_call_tells_the_wake_up_once_it_ends() {
+        let (voice, _mock) = rig();
+        let rung = parked_on_call(&voice);
+        let id = voice.start_call(1, &link(), &rung, jiff::Timestamp::now()).unwrap();
+        voice.handler.apply(&id, 1, CallBody::Outcome { outcome: Outcome::Answered }).unwrap();
+        assert_eq!(waited_on(&voice), "ringing", "a live call has not ended yet");
+        voice.handler.apply(&id, 2, CallBody::Ended).unwrap();
+        assert_eq!(waited_on(&voice), serde_json::json!({ "result": "Answered", "call_id": id }));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_web_ring_declined_or_run_out_tells_the_wake_up() {
+        let (voice, _mock) = rig();
+        let rung = parked_on_call(&voice);
+        let token = voice.offer_ring(1, &rung, None);
+        assert!(voice.decline_ring(&token, 1));
+        assert_eq!(waited_on(&voice), serde_json::json!({ "result": "Declined" }));
+
+        let (voice, _mock) = rig();
+        let rung = parked_on_call(&voice);
+        voice.web.offer_ring_at(1, &rung, None, Instant::now().checked_sub(web::RING_FOR * 2).unwrap());
+        voice.sweep(jiff::Timestamp::now());
+        assert_eq!(waited_on(&voice), serde_json::json!({ "result": "Missed" }));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_call_nobody_reports_on_tells_the_wake_up_it_failed() {
+        let (voice, _mock) = rig();
+        let rung = parked_on_call(&voice);
+        let id = voice.start_call(1, &link(), &rung, jiff::Timestamp::now()).unwrap();
+        voice.sweep(jiff::Timestamp::now() + jiff::SignedDuration::from_mins(5));
+        let seen = waited_on(&voice);
+        assert_eq!(seen["result"], "Failed", "{seen}");
+        assert!(crate::db_guard(&voice.db)
+            .query_row("SELECT state = 'ended' FROM voice_calls WHERE id = ?1", [&id], |r| r.get::<_, bool>(0))
+            .unwrap());
     }
 }

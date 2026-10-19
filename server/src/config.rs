@@ -320,6 +320,10 @@ pub struct UserConfig {
     /// HH:MM; blank turns day-laying off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub day_start: Option<String>,
+    /// Until when, zero-padded HH:MM, Note may ring from `day_start` on; blank
+    /// lets calls run to midnight.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calls_until: Option<String>,
     /// Until when, zero-padded HH:MM, an open morning brings the letter to the face.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub morning_until: Option<String>,
@@ -381,6 +385,7 @@ pub struct UserConfig {
 pub const DEFAULT_TRIGGERS_PER_DAY: u32 = 12;
 pub const DEFAULT_DAY_START: &str = "08:00";
 pub const DEFAULT_CLOSE_DAY_TIME: &str = "21:30";
+pub const DEFAULT_CALLS_UNTIL: &str = "23:00";
 pub const DEFAULT_MORNING_UNTIL: &str = "11:00";
 pub const DEFAULT_POMODORO_WORK_MIN: u32 = 25;
 pub const DEFAULT_POMODORO_BREAK_MIN: u32 = 5;
@@ -418,6 +423,11 @@ impl UserConfig {
 
     pub fn day_start(&self) -> &str {
         self.day_start.as_deref().unwrap_or(DEFAULT_DAY_START)
+    }
+
+    /// Blank where the user lets calls run to midnight.
+    pub fn calls_until(&self) -> &str {
+        self.calls_until.as_deref().unwrap_or(DEFAULT_CALLS_UNTIL)
     }
 
     pub fn language(&self) -> &str {
@@ -526,6 +536,11 @@ impl UserConfig {
             cfg.day_start().is_empty() || crate::templates::valid_time(cfg.day_start()),
             "invalid day_start {:?}",
             cfg.day_start()
+        );
+        anyhow::ensure!(
+            cfg.calls_until().is_empty() || crate::templates::valid_time(cfg.calls_until()),
+            "invalid calls_until {:?}",
+            cfg.calls_until()
         );
         anyhow::ensure!(
             crate::templates::valid_time(cfg.morning_until()),
@@ -876,6 +891,18 @@ mod tests {
         write(tmp.path(), "users/aki/user.toml", "day_start = \"\"\n");
         assert_eq!(UserConfig::load(tmp.path(), "aki").unwrap().day_start(), "");
         write(tmp.path(), "users/aki/user.toml", "day_start = \"8:00\"\n");
+        assert!(UserConfig::load(tmp.path(), "aki").is_err());
+    }
+
+    #[test]
+    fn calls_run_until_eleven_unless_set() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), "defaults/user.toml",
+            "display_name = \"X\"\ntimezone = \"UTC\"\ntemplate = \"default\"\n");
+        assert_eq!(UserConfig::load(tmp.path(), "aki").unwrap().calls_until(), DEFAULT_CALLS_UNTIL);
+        write(tmp.path(), "users/aki/user.toml", "calls_until = \"\"\n");
+        assert_eq!(UserConfig::load(tmp.path(), "aki").unwrap().calls_until(), "");
+        write(tmp.path(), "users/aki/user.toml", "calls_until = \"9pm\"\n");
         assert!(UserConfig::load(tmp.path(), "aki").is_err());
     }
 

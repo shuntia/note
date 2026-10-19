@@ -929,7 +929,10 @@ const TOOLS: &[ToolSpec] = tools![
          the result comes back \"Timed out\", \"User responded before timeout\" with what \
          they wrote, as soon as they write anywhere, or \"User acted before timeout\" once they \
          finish or change a task or start or end a work session; ended_by says which, and \
-         changed lists what moved in the context since. You go on from there in the same thread.",
+         changed lists what moved in the context since. You go on from there in the same thread. \
+         In a wake-up laid to ring, say is the call and waits on it as call_user does; when \
+         calls are held then, the words go as a message and the session waits for an answer \
+         (await_min, else 20 minutes), its result carrying call: \"Held: <why>\".",
     "call_user": call_ops::CallArgs => Exec::Session, terminal_in = &[SessionKind::Trigger];
         "Call the user: the open web app and the linked phone ring together; whichever answers \
          first takes the call. Always two calls. First with reason (plus asked and quote, the \
@@ -937,10 +940,13 @@ const TOOLS: &[ToolSpec] = tools![
          a call is allowed now, and returns a token and what to prepare. Then, only if you \
          still mean to, again with that token, opening — your first words when they pick up — \
          and brief, what the call needs to know. Refused while the user is busy — working, in a \
-         calendar event, in a quiet window, or outside their day — unless they asked; being \
+         calendar event, in a quiet window, or outside the hours they take calls — unless they asked; being \
          away from the app is no bar, since a call is what reaches them then; \
-         never rings when their settings say never. In a wake-up, the second call ends the \
-         session.",
+         never rings when their settings say never. In a wake-up, the second call rings and \
+         the session waits to hear how it went: the result comes back \"Answered\" with \
+         on_the_call, the last lines said on it, \"Missed\", \"Declined\", or \"Failed\" with \
+         reason (the opening then went as a message), and changed as for say's wait. You go \
+         on from there in the same thread.",
     "work_end": work_ops::EndArgs => run!(&work_ops::end), writes = true;
         "End the user's open work session when it has plainly been left: paused for long, or \
          they said they were done or stopped. Its own checks are dropped and its minutes \

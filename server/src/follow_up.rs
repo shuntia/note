@@ -12,9 +12,6 @@ const MAX_ENTRIES: usize = 4;
 const MAX_SUMMARY_BYTES: usize = 1200;
 const MAX_TASKS_PER_NUDGE: usize = 10;
 const MAX_TITLE_CHARS: usize = 40;
-/// How far from a call's outreach its ring is looked for.
-const RING_BEFORE_SECS: i64 = 60;
-const RING_AFTER_SECS: i64 = 300;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Via {
@@ -193,6 +190,20 @@ pub fn call_ended(conn: &Connection, outreach_id: i64, end: CallEnd, now: jiff::
     set(conn, outreach_id, end.landed(), now)
 }
 
+/// `call_ended` for the call outreach wake-up event `event_id` made, if one is
+/// recorded and still open.
+pub fn call_ended_for(conn: &Connection, user_id: i64, event_id: i64, end: CallEnd, now: jiff::Timestamp) -> rusqlite::Result<()> {
+    let open: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM outreach WHERE user_id = ?1 AND event_id = ?2 AND via = 'call' AND outcome IS NULL
+             ORDER BY id DESC LIMIT 1",
+            (user_id, event_id),
+            |r| r.get(0),
+        )
+        .optional()?;
+    open.map_or(Ok(()), |id| call_ended(conn, id, end, now))
+}
+
 fn tasks_of(conn: &Connection, outreach_id: i64) -> rusqlite::Result<Vec<i64>> {
     let mut stmt = conn.prepare_cached("SELECT task_id FROM outreach_tasks WHERE outreach_id = ?1 ORDER BY task_id")?;
     let rows = stmt.query_map([outreach_id], |r| r.get(0))?.collect();
@@ -239,17 +250,16 @@ fn answered(conn: &Connection, user_id: i64, from: &str, until: &str) -> rusqlit
     )
 }
 
-/// How the rings placed around `at` ended, once one has: picked up anywhere,
-/// else declined, else missed. `None` while one still rings or none says.
-fn ring_ended(conn: &Connection, user_id: i64, at: jiff::Timestamp) -> rusqlite::Result<Option<CallEnd>> {
+/// How the calls wake-up event `event_id` placed ended, once one has: picked
+/// up anywhere, else declined, else missed. `None` while one still rings or
+/// none says.
+fn ring_ended(conn: &Connection, user_id: i64, event_id: i64) -> rusqlite::Result<Option<CallEnd>> {
     let mut stmt = conn.prepare_cached(
         "SELECT state, COALESCE(outcome, '') FROM voice_calls
-         WHERE user_id = ?1 AND direction = 'outbound' AND created_at >= ?2 AND created_at <= ?3",
+         WHERE user_id = ?1 AND direction = 'outbound' AND json_extract(message, '$.event_id') = ?2",
     )?;
-    let from = (at - jiff::SignedDuration::from_secs(RING_BEFORE_SECS)).to_string();
-    let to = (at + jiff::SignedDuration::from_secs(RING_AFTER_SECS)).to_string();
     let rings: Vec<(String, String)> =
-        stmt.query_map((user_id, from, to), |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
+        stmt.query_map((user_id, event_id), |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
     if rings.iter().any(|(state, outcome)| state == "answered" || outcome == "answered") {
         return Ok(Some(CallEnd::Answered));
     }
@@ -270,15 +280,15 @@ fn ring_ended(conn: &Connection, user_id: i64, at: jiff::Timestamp) -> rusqlite:
 /// its window, and one whose window ran out with neither as ignored.
 pub fn settle(conn: &Connection, user_id: i64, now: jiff::Timestamp) -> rusqlite::Result<()> {
     let mut stmt = conn.prepare_cached(
-        "SELECT id, via, at, window_until FROM outreach WHERE user_id = ?1 AND outcome IS NULL ORDER BY id",
+        "SELECT id, via, at, window_until, event_id FROM outreach WHERE user_id = ?1 AND outcome IS NULL ORDER BY id",
     )?;
-    let open: Vec<(i64, String, String, String)> = stmt
-        .query_map([user_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+    let open: Vec<(i64, String, String, String, Option<i64>)> = stmt
+        .query_map([user_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
         .collect::<rusqlite::Result<_>>()?;
     drop(stmt);
-    for (id, via, at, until) in open {
+    for (id, via, at, until, event_id) in open {
         if Via::parse(&via) == Via::Call {
-            if let Some(end) = at.parse().ok().map(|t| ring_ended(conn, user_id, t)).transpose()?.flatten() {
+            if let Some(end) = event_id.map(|e| ring_ended(conn, user_id, e)).transpose()?.flatten() {
                 set(conn, id, end.landed(), now)?;
                 continue;
             }
@@ -631,13 +641,16 @@ mod tests {
         let (conn, uid) = env();
         let id = sent(&conn, uid, Via::Call, &[], "2026-10-18T15:00:00Z");
         conn.execute(
-            "INSERT INTO voice_calls (id, user_id, direction, state, outcome, ring_by, created_at)
-             VALUES ('c1', ?1, 'outbound', 'ended', 'missed', 'x', '2026-10-18T15:00:01Z')",
+            "INSERT INTO voice_calls (id, user_id, direction, state, outcome, ring_by, created_at, message)
+             VALUES ('c0', ?1, 'outbound', 'ended', 'answered', 'x', '2026-10-18T15:00:01Z', '{\"event_id\":9}'),
+                    ('c1', ?1, 'outbound', 'ended', 'missed', 'x', '2026-10-18T15:00:01Z', '{\"event_id\":1}')",
             [uid],
         )
         .unwrap();
         settle(&conn, uid, at("2026-10-18T15:02:00Z")).unwrap();
-        assert_eq!(outcome(&conn, id).as_deref(), Some("missed"));
+        assert_eq!(outcome(&conn, id).as_deref(), Some("missed"), "only its own event's calls count");
+        call_ended_for(&conn, uid, 1, CallEnd::Answered, at("2026-10-18T15:02:30Z")).unwrap();
+        assert_eq!(outcome(&conn, id).as_deref(), Some("missed"), "a settled outreach stays settled");
         call_ended(&conn, id, CallEnd::Declined, at("2026-10-18T15:03:00Z")).unwrap();
         assert_eq!(outcome(&conn, id).as_deref(), Some("declined"));
         assert_eq!(level(&conn, uid, None, at("2026-10-18T15:04:00Z")).unwrap(), 1);

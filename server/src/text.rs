@@ -677,6 +677,7 @@ const FIELDS_JA: &[(&str, &str)] = &[
     ("alerts", "通知"),
     ("before", "日時"),
     ("brief", "指示"),
+    ("calls_until", "通話の終了時刻"),
     ("category", "カテゴリ"),
     ("close_day_time", "一日の締めの時刻"),
     ("content", "内容"),

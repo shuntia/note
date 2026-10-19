@@ -200,6 +200,7 @@ pub fn tell(state: &crate::AppState, user_id: i64, username: &str, failure: &Fai
         event_id: None,
         conversation_id: None,
         actions: Vec::new(),
+        wait: None,
     };
     crate::channels::deliver_via(&state.db, &state.channels, user_id, username, &msg);
 }

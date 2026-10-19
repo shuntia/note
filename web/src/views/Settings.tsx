@@ -32,6 +32,7 @@ const EDITABLE = [
   'timezone',
   'nightly_time',
   'close_day_time',
+  'calls_until',
   'morning_until',
   'template',
   'triggers_per_day',
@@ -74,6 +75,7 @@ function draftOf(s: UserSettings): Draft {
     timezone: s.timezone,
     nightly_time: s.nightly_time,
     close_day_time: s.close_day_time,
+    calls_until: s.calls_until,
     morning_until: s.morning_until,
     template: s.template,
     triggers_per_day: s.triggers_per_day,
@@ -505,6 +507,26 @@ export function Settings({
                     {...commitOn('close_day')}
                   />
                   <Status save={save} row="close_day" />
+                </div>
+              )}
+            </FoldRow>
+            <FoldRow
+              label={t('settings.callsUntil')}
+              value={loaded.draft.calls_until || t('settings.callsUntil.midnight')}
+              open={open === 'calls_until'}
+              onToggle={fold('calls_until')}
+            >
+              {open === 'calls_until' && (
+                <div className="set-fold-body">
+                  <span className="set-sub">{t('settings.callsUntil.sub')}</span>
+                  <input
+                    type="time"
+                    aria-label={t('settings.callsUntil')}
+                    value={loaded.draft.calls_until}
+                    onChange={(e) => edit('calls_until', e.target.value)}
+                    {...commitOn('calls_until')}
+                  />
+                  <Status save={save} row="calls_until" />
                 </div>
               )}
             </FoldRow>

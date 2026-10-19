@@ -210,6 +210,7 @@ v5mC8db8ZSK9ruR2mEgvMEvePYwohpr98g==
             event_id: Some(3),
             conversation_id: None,
             actions: Vec::new(),
+            wait: None,
         }
     }
 

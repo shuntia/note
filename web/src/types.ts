@@ -221,6 +221,8 @@ export type Settings = {
   nightly_time: string
   // When the close-the-day card appears; '' where the user turned it off.
   close_day_time: string
+  // Until when Note may call, HH:MM; '' runs calls to midnight.
+  calls_until: string
   // Until when an open morning brings the letter to the face, HH:MM.
   morning_until: string
   template: string

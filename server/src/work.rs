@@ -768,6 +768,7 @@ fn advance(
                 event_id: None,
                 conversation_id: session.conversation_id,
                 actions: Vec::new(),
+                wait: None,
             })
         }
     } else {
@@ -789,6 +790,7 @@ fn advance(
             event_id: None,
             conversation_id: session.conversation_id,
             actions: Vec::new(),
+            wait: None,
         })
     };
     Ok(Some(Flip { user_id, username: username.to_string(), message }))
@@ -832,6 +834,7 @@ pub fn planned_end(conn: &Connection, config_dir: &Path, now: jiff::Timestamp) -
             event_id: None,
             conversation_id: session.conversation_id,
             actions: Vec::new(),
+            wait: None,
         });
         flips.push(Flip { user_id, username, message });
     }
@@ -923,6 +926,7 @@ pub fn overrun(conn: &Connection, config_dir: &Path, now: jiff::Timestamp) -> Re
                 event_id: None,
                 conversation_id: session.conversation_id,
                 actions: Vec::new(),
+                wait: None,
             }),
         });
     }

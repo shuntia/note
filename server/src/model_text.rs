@@ -716,6 +716,13 @@ pub fn await_prompt(l: Lang, said: &str) -> String {
     }
 }
 
+pub fn call_await_prompt(l: Lang, said: &str) -> String {
+    match l {
+        Lang::En => format!("Waiting to hear how the call went: \"{said}\""),
+        Lang::Ja => format!("「{said}」の通話の結果を待っている"),
+    }
+}
+
 /// The prompts of other wake-ups due at the same moment, which this session
 /// answers too, so the user hears one message rather than several.
 pub fn also_due(l: Lang, prompts: &[String]) -> String {
@@ -803,8 +810,8 @@ pub fn user_silent(l: Lang) -> &'static str {
 
 pub fn laid_to_ring(l: Lang) -> &'static str {
     l.of(
-        "Laid to ring: what you say opens a call when the user is free for one, else it goes as a message.\n",
-        "着信の指定あり: 話せる状態なら、言うことが通話の最初のひとことになる。そうでなければメッセージで届く。\n",
+        "Laid to ring: what you say opens a call when the user is free for one, else it goes as a message. Either way this session waits to hear how it went.\n",
+        "着信の指定あり: 話せる状態なら、言うことが通話の最初のひとことになる。そうでなければメッセージで届く。どちらの場合も、このセッションは結果を待って続く。\n",
     )
 }
 

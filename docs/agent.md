@@ -115,9 +115,16 @@ it to call; a chat that is asked "call me at three" lays a
 
 `say {text, notes?}` lands in the trigger's thread (or the day's check-in
 thread) and goes down the delivery ladder; `notes` names the working notes it
-nudged about. On a trigger laid with `ring: true` (its opening says so), `say`
-rings instead when the [gate](delivery.md#ringing) lets a call through, and is
-sent as a message when it does not; a wait it lays rings the same way.
+nudged about. With `await_min` (5 to 120) the session parks instead of
+ending (`paused_sessions`, on an `await_reply` event in the same thread) and
+resumes with `Timed out`, `User responded before timeout` (as soon as the user
+writes anywhere) or `User acted before timeout` (a task finished or changed, a
+work session started or ended), and `changed`, what moved in the context since.
+A day holds at most 6 such waits. On a trigger laid with `ring: true` (its
+opening says so), `say` rings instead when the [gate](delivery.md#ringing)
+lets a call through, and waits on the call as a confirmed `call_user` does.
+When the gate holds it, it is sent as a message and waits for an answer
+(`await_min`, else 20 minutes), its result carrying `call: "Held: <why>"`.
 
 `call_user` rings the user ([delivery.md](delivery.md#ringing)) from every
 session but a voice call, a share link and the single-call kinds (import,
@@ -125,7 +132,7 @@ inbox, summarize). It takes two calls in one session. The first,
 `{reason, asked?, quote?}`, rings nothing: it refuses (`busy`) when nothing can
 ring, a call is live, or the user seems busy (inside a quiet window, inside a
 `fixed` or `busy` calendar occurrence, with a work session open, or outside
-their day) or set `ring_for = "never"`: the same [gate](delivery.md#ringing)
+the hours they take calls) or set `ring_for = "never"`: the same [gate](delivery.md#ringing)
 a trigger laid to ring passes. Otherwise it returns a
 token valid for five minutes, an instruction to prepare (anticipate what the
 call will cover and fetch it now, in one round), and how to write a spoken
@@ -134,8 +141,13 @@ check only, and only when the quote is part of a message the user wrote that
 the session holds (a chat's own turns, or the thread a wake-up was laid in);
 nothing gets past `ring_for = "never"`. The second, `{token, opening, brief}`,
 rings; `brief` (at most 1536 bytes) is what the session gathered, in short
-plain lines. A wake-up's second call ends it and its firing path rings,
-writing the opening to the trigger's thread and `trigger_rang`. Any other
+plain lines. A wake-up's second call parks it and its firing path rings,
+writing the opening to the trigger's thread and `trigger_rang`. The session
+waits for nothing but the call's outcome (or 45 minutes, past the longest live
+call) and resumes with `Answered` and `on_the_call` (the last 12 lines said on
+it), `Missed`, `Declined`, or `Failed` with `reason` when nothing could ring,
+plus `changed`. The wait counts against the day's 6; past them the call rings
+and the session ends. Any other
 session writes the opening to the day's check-in thread and logs
 `call_user_rang`. The call's prompt is told the reason, the opening and the
 brief.

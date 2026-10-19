@@ -215,13 +215,13 @@ pub struct SessionOutcome {
     pub reasoning: String,
     /// Wall clock from the first provider call to the reply, in milliseconds.
     pub thought_ms: u64,
-    /// Set when a wake-up's `say` waits for an answer: the session resumes
-    /// from here once the user writes or the wait runs out.
+    /// Where a wake-up ended on its terminal step, for its firing path to park
+    /// it when it waits on an answer or a call.
     pub paused: Option<Paused>,
 }
 
-/// A session stopped at a waiting `say`: everything up to its round, the id of
-/// that call, and the ids of the calls after it in the round, never run.
+/// A session stopped at its terminal step: everything up to its round, the id
+/// of that call, and the ids of the calls after it in the round, never run.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Paused {
     pub messages: Vec<Message>,
@@ -235,7 +235,7 @@ impl Paused {
         let mut messages = self.messages;
         messages.push(Message::ToolResult { call_id: self.call_id, content: result.to_string(), is_error: false });
         for call_id in self.skipped {
-            let content = r#"{"kind":"skipped","message":"not run: the session waited at say"}"#.to_string();
+            let content = r#"{"kind":"skipped","message":"not run: the session paused before it"}"#.to_string();
             messages.push(Message::ToolResult { call_id, content, is_error: true });
         }
         messages
@@ -705,7 +705,7 @@ fn run_traced(
                 trace.ok(&content);
                 finish(deps, user_id, kind, turns, tool_calls, profile.log_session)?;
                 let thought_ms = started.elapsed().as_millis() as u64;
-                let paused = (kind == SessionKind::Trigger && tools::trigger_ops::waits(&call.name, &content)).then(|| Paused {
+                let paused = (kind == SessionKind::Trigger).then(|| Paused {
                     messages: messages.clone(),
                     call_id: call.id.clone(),
                     skipped: calls[i + 1..].iter().map(|c| c.id.clone()).collect(),
