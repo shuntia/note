@@ -54,15 +54,16 @@ socket = "/run/note/voice.sock"
 ```
 
 The call prompt is `prompts/voice.md`. Per-user settings: `ring_for`
-(`urgent`, `checkins`, `never`), `voice_voice`, `voice_cue` (the heard sound),
-`language`.
+(`allowed` or `never`; the retired `urgent` and `checkins` read as `allowed`),
+`voice_voice`, `voice_cue` (the heard sound), `language`. Nothing rings on its
+own: see [ringing](delivery.md#ringing) for what does.
 
 Routes (session cookie):
 
 - `POST /api/voice/link` starts or restarts the link: the voice service invites
   the Matrix account to a fresh DM, and the link turns `linked` when the invite
   is accepted. `DELETE /api/voice/link` unlinks.
-- `POST /api/voice/test` rings the linked phone now, whatever `ring_for` says.
+- `POST /api/voice/test` rings the linked phone now, whatever the gate would say.
 - `GET /api/call/ws` opens a web call ([below](#web-calls)).
 - `GET /api/voice/voices` lists the call voices, with each sidecar voice's
   `credit`; `GET /api/voice/preview` plays a sample.

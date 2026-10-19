@@ -5,7 +5,7 @@ use axum::http::{header, Request as HttpRequest, StatusCode};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 use note_server::channels::mock::MockChannel;
-use note_server::channels::{deliver_via, OutboundMessage, Urgency};
+use note_server::channels::{deliver_via, OutboundMessage, RingOutcome, Urgency};
 use note_server::voice::{links, Voice};
 use note_server::{auth, db, AppState};
 use note_voice_proto::testkit::{eventually, fast, Recording};
@@ -75,6 +75,10 @@ fn deliver(r: &Rig, msg: &OutboundMessage) -> Option<&'static str> {
     deliver_via(&r.state.db, &r.state.channels, 1, "aki", msg)
 }
 
+fn ring(r: &Rig, msg: &OutboundMessage) -> RingOutcome {
+    note_server::channels::ring(&r.state, 1, "aki", msg)
+}
+
 fn started_call(r: &Rig) -> String {
     let seen = r.fake_rec.seen.lock().unwrap();
     let (id, _, body) = seen.first().expect("a Start frame").clone();
@@ -83,10 +87,9 @@ fn started_call(r: &Rig) -> String {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn an_urgent_message_rings_then_falls_through_on_missed() {
+async fn a_rung_message_falls_through_on_missed() {
     let r = rig(true).await;
-    assert_eq!(r.state.channels[0].name(), "voice");
-    assert_eq!(tokio::task::block_in_place(|| deliver(&r, &urgent())), Some("voice"));
+    assert_eq!(tokio::task::block_in_place(|| ring(&r, &urgent())), RingOutcome::Phone);
     let rec = r.fake_rec.clone();
     eventually("Start reaches the voice side", || !rec.seen.lock().unwrap().is_empty()).await;
     let id = started_call(&r);
@@ -101,11 +104,14 @@ async fn an_urgent_message_rings_then_falls_through_on_missed() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_normal_message_is_not_rung() {
+async fn the_ladder_never_rings_however_urgent_the_message() {
     let r = rig(true).await;
-    let mut m = urgent();
-    m.urgency = Urgency::Normal;
-    assert_eq!(tokio::task::block_in_place(|| deliver(&r, &m)), Some("push"));
+    assert!(r.state.channels.iter().all(|c| c.name() != "voice"));
+    for urgency in [Urgency::High, Urgency::Normal] {
+        let m = OutboundMessage { urgency, checkin: true, ..urgent() };
+        assert_eq!(tokio::task::block_in_place(|| deliver(&r, &m)), Some("push"));
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     assert!(r.fake_rec.seen.lock().unwrap().is_empty());
 }
 
@@ -116,7 +122,7 @@ async fn invited_but_not_joined_is_not_rung() {
         let conn = r.state.db();
         links::begin(&conn, 1, "@aki:t", jiff::Timestamp::now()).unwrap();
     }
-    assert_eq!(tokio::task::block_in_place(|| deliver(&r, &urgent())), Some("push"));
+    assert_eq!(tokio::task::block_in_place(|| ring(&r, &urgent())), RingOutcome::Messaged(Some("push")));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -125,7 +131,7 @@ async fn down_link_falls_through_at_once() {
     r.listen.abort();
     let v = r.voice.clone();
     eventually("Note sees the link down", || !v.is_up()).await;
-    assert_eq!(tokio::task::block_in_place(|| deliver(&r, &urgent())), Some("push"));
+    assert_eq!(tokio::task::block_in_place(|| ring(&r, &urgent())), RingOutcome::Messaged(Some("push")));
     let open: i64 = r.state.db().query_row("SELECT COUNT(*) FROM voice_calls", [], |x| x.get(0)).unwrap();
     assert_eq!(open, 0, "no call is recorded when the link is down");
 }
@@ -133,7 +139,7 @@ async fn down_link_falls_through_at_once() {
 #[tokio::test(flavor = "multi_thread")]
 async fn note_restart_mid_ring_applies_the_outcome_once() {
     let r = rig(true).await;
-    tokio::task::block_in_place(|| deliver(&r, &urgent()));
+    tokio::task::block_in_place(|| ring(&r, &urgent()));
     let rec = r.fake_rec.clone();
     eventually("Start arrives", || !rec.seen.lock().unwrap().is_empty()).await;
     let id = started_call(&r);
@@ -205,7 +211,7 @@ async fn linking_opens_a_dm_and_settings_show_it() {
     let (_, s) = call(&app, &cookie, "GET", "/api/settings", "").await;
     assert_eq!(s["voice_enabled"], true);
     assert_eq!(s["voice_link"]["mxid"], "@aki:t");
-    assert_eq!(s["ring_for"], "urgent");
+    assert_eq!(s["ring_for"], "allowed");
 
     let (status, _) = call(&app, &cookie, "PUT", "/api/settings", r#"{"ring_for":"never"}"#).await;
     assert_eq!(status, StatusCode::OK);
@@ -322,13 +328,18 @@ async fn matrix_switches_save_without_a_matrix_channel() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn ring_for_checkins_is_saved() {
-    let (app, cookie, _r) = api_rig().await;
-    let (status, body) = call(&app, &cookie, "PUT", "/api/settings", r#"{"ring_for":"checkins"}"#).await;
+async fn ring_for_is_allowed_or_never_and_a_retired_value_reads_allowed() {
+    let (app, cookie, r) = api_rig().await;
+    let (status, body) = call(&app, &cookie, "PUT", "/api/settings", r#"{"ring_for":"never"}"#).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["ring_for"], "checkins");
+    assert_eq!(body["ring_for"], "never");
+    let (status, _) = call(&app, &cookie, "PUT", "/api/settings", r#"{"ring_for":"checkins"}"#).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let mine = r.dir.path().join("users/aki/user.toml");
+    let saved = std::fs::read_to_string(&mine).unwrap().replace("ring_for = \"never\"", "ring_for = \"checkins\"");
+    std::fs::write(&mine, saved).unwrap();
     let (_, s) = call(&app, &cookie, "GET", "/api/settings", "").await;
-    assert_eq!(s["ring_for"], "checkins");
+    assert_eq!(s["ring_for"], "allowed");
 }
 
 #[tokio::test(flavor = "multi_thread")]

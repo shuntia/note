@@ -12,13 +12,22 @@ pub struct BuiltPush {
     pub body: Vec<u8>,
 }
 
-/// What the service worker decrypts: the notification's text, plus the app
-/// route to open when it is clicked.
-pub fn payload_json(msg: &OutboundMessage) -> String {
+/// What the service worker decrypts: the notification's text, the app route
+/// to open when it is clicked, and its buttons, each named by the key
+/// `keys` holds for it, which pressing it posts back.
+pub fn payload_json(msg: &OutboundMessage, keys: &[String]) -> String {
     let mut payload = serde_json::json!({ "title": msg.title, "body": msg.body });
     if let Some(id) = msg.conversation_id {
         payload["conversation_id"] = serde_json::json!(id);
         payload["url"] = serde_json::json!(super::conversation_path(id));
+    }
+    let actions: Vec<serde_json::Value> = keys
+        .iter()
+        .zip(&msg.actions)
+        .map(|(key, a)| serde_json::json!({ "action": key, "title": a.label }))
+        .collect();
+    if !actions.is_empty() {
+        payload["actions"] = serde_json::json!(actions);
     }
     payload.to_string()
 }
@@ -30,6 +39,7 @@ pub fn build_push(
     vapid_pem: &[u8],
     subject: &str,
     msg: &OutboundMessage,
+    keys: &[String],
 ) -> Result<BuiltPush> {
     let info = web_push::SubscriptionInfo::new(&sub.endpoint, &sub.p256dh, &sub.auth);
     let mut sig = web_push::VapidSignatureBuilder::from_pem(vapid_pem, &info)
@@ -37,7 +47,7 @@ pub fn build_push(
     sig.add_claim("sub", subject);
     let signature = sig.build().map_err(|e| anyhow::anyhow!("vapid sign: {e}"))?;
 
-    let payload = payload_json(msg);
+    let payload = payload_json(msg, keys);
     let mut b = WebPushMessageBuilder::new(&info);
     b.set_payload(web_push::ContentEncoding::Aes128Gcm, payload.as_bytes());
     b.set_vapid_signature(signature);
@@ -128,11 +138,16 @@ impl Channel for WebPushChannel {
         if subs.is_empty() {
             anyhow::bail!("no push subscriptions");
         }
+        let keys: Vec<String> = msg.actions.iter().map(|_| crate::actions::push_key()).collect();
+        if !keys.is_empty() {
+            let conn = crate::db_guard(&self.db);
+            crate::actions::keep(&conn, user_id, &crate::actions::push_key(), &keys, &msg.actions, jiff::Timestamp::now())?;
+        }
         let mut delivered = 0usize;
         let mut gone: Vec<String> = Vec::new();
         let mut last_err = String::new();
         for sub in &subs {
-            match build_push(sub, &self.vapid_pem, &self.subject, msg) {
+            match build_push(sub, &self.vapid_pem, &self.subject, msg, &keys) {
                 Err(e) => last_err = e.to_string(),
                 Ok(built) => match self.send(&built) {
                     Ok(()) => delivered += 1,
@@ -200,19 +215,36 @@ v5mC8db8ZSK9ruR2mEgvMEvePYwohpr98g==
 
     #[test]
     fn the_payload_carries_the_thread_route_only_when_there_is_one() {
-        let plain: serde_json::Value = serde_json::from_str(&payload_json(&msg())).unwrap();
+        let plain: serde_json::Value = serde_json::from_str(&payload_json(&msg(), &[])).unwrap();
         assert_eq!(plain, serde_json::json!({ "title": "Nudge", "body": "stretch break" }));
 
         let mut checkin = msg();
         checkin.conversation_id = Some(42);
-        let v: serde_json::Value = serde_json::from_str(&payload_json(&checkin)).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&payload_json(&checkin, &[])).unwrap();
         assert_eq!(v["conversation_id"], 42);
         assert_eq!(v["url"], "/#/chat/42");
     }
 
     #[test]
+    fn each_button_rides_under_its_own_key() {
+        let mut m = msg();
+        m.actions = crate::channels::event_actions(3, crate::text::Lang::En);
+        let keys = vec!["k1".to_string(), "k2".to_string(), "k3".to_string()];
+        let v: serde_json::Value = serde_json::from_str(&payload_json(&m, &keys)).unwrap();
+        assert_eq!(
+            v["actions"],
+            serde_json::json!([
+                { "action": "k1", "title": "Done" },
+                { "action": "k2", "title": "Snooze 15" },
+                { "action": "k3", "title": "Drop" },
+            ])
+        );
+        assert!(!v.to_string().contains("ev:"), "the action data stays on the server");
+    }
+
+    #[test]
     fn build_push_encrypts_and_signs() {
-        let built = build_push(&sub(), TEST_PEM, "mailto:admin@example.com", &msg()).unwrap();
+        let built = build_push(&sub(), TEST_PEM, "mailto:admin@example.com", &msg(), &[]).unwrap();
         assert_eq!(built.endpoint, "https://push.example.net/send/abc");
         let get = |name: &str| {
             built
@@ -292,6 +324,6 @@ v5mC8db8ZSK9ruR2mEgvMEvePYwohpr98g==
     #[test]
     fn bad_pem_is_an_error() {
         assert!(public_key_b64(b"not a pem").is_err());
-        assert!(build_push(&sub(), b"not a pem", "mailto:x@y", &msg()).is_err());
+        assert!(build_push(&sub(), b"not a pem", "mailto:x@y", &msg(), &[]).is_err());
     }
 }

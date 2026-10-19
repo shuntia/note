@@ -76,6 +76,10 @@ pub struct Action {
 
 pub const MAX_ACTION_DATA: usize = 64;
 
+/// The event channel of something laid to ring: it rings through
+/// `calling::ring_if_free` instead of walking the ladder.
+pub const RING_CHANNEL: &str = "call";
+
 /// What can be said about an event that has just asked for something.
 pub fn event_actions(event_id: i64, lang: Lang) -> Vec<Action> {
     vec![
@@ -83,6 +87,12 @@ pub fn event_actions(event_id: i64, lang: Lang) -> Vec<Action> {
         Action { label: text::action_snooze_15(lang), data: format!("ev:snooze:{event_id}:15") },
         Action { label: text::action_drop(lang), data: format!("ev:drop:{event_id}") },
     ]
+}
+
+/// What can be said about a trigger that has spoken: it has settled, so only
+/// asking again later is left.
+pub fn trigger_actions(event_id: i64, lang: Lang) -> Vec<Action> {
+    vec![Action { label: text::action_snooze_15(lang), data: format!("ev:snooze:{event_id}:15") }]
 }
 
 /// The web client's route for a conversation, relative to the app's origin.
@@ -180,14 +190,26 @@ pub fn deliver_via(
     let mut errors: Vec<String> = Vec::new();
     for ch in ladder {
         if ch.companion() {
-            if let Err(e) = ch.deliver(user_id, username, msg) {
-                let conn = crate::db_guard(db);
-                let _ = crate::log::record(
-                    &conn,
-                    Some(user_id),
-                    &format!("{}_send_error", ch.name()),
-                    &format!("{subject}: {e}"),
-                );
+            let sent = ch.deliver(user_id, username, msg);
+            let conn = crate::db_guard(db);
+            let outage = (ch.name() == "matrix").then_some(crate::outage::Outage::Matrix);
+            match sent {
+                Ok(()) => {
+                    if let Some(o) = outage {
+                        let _ = crate::outage::clear(&conn, user_id, o);
+                    }
+                }
+                Err(e) => {
+                    let _ = crate::log::record(
+                        &conn,
+                        Some(user_id),
+                        &format!("{}_send_error", ch.name()),
+                        &format!("{subject}: {e}"),
+                    );
+                    if let Some(o) = outage {
+                        let _ = crate::outage::raise(&conn, user_id, o, jiff::Timestamp::now());
+                    }
+                }
             }
             continue;
         }
@@ -215,20 +237,26 @@ pub fn deliver_via(
     None
 }
 
-/// Renders a fired event, opens its check-in thread where it has one, and
-/// walks the ladder with the result.
+/// Renders a fired event and opens its check-in thread where it has one. A
+/// call it rings with is told the event's title as its reason.
+pub fn prepare_event(db: &Mutex<Connection>, ev: &crate::runner::FiredEvent, lang: Lang) -> OutboundMessage {
+    let conn = crate::db_guard(db);
+    let mut msg = render(&conn, ev, lang);
+    open_checkin_thread(&conn, ev, lang, &mut msg);
+    if ev.channel == RING_CHANNEL {
+        msg.reason = Some(msg.title.clone());
+    }
+    msg
+}
+
+/// `prepare_event`, then a walk down the ladder with the result.
 pub fn deliver_event(
     db: &Mutex<Connection>,
     ladder: &[Arc<dyn Channel>],
     ev: &crate::runner::FiredEvent,
     lang: Lang,
 ) {
-    let msg = {
-        let conn = crate::db_guard(db);
-        let mut msg = render(&conn, ev, lang);
-        open_checkin_thread(&conn, ev, lang, &mut msg);
-        msg
-    };
+    let msg = prepare_event(db, ev, lang);
     deliver_via(db, ladder, ev.user_id, &ev.username, &msg);
 }
 
@@ -426,18 +454,21 @@ mod tests {
     }
 
     #[test]
-    fn a_rung_message_posts_to_matrix_once() {
+    fn a_failing_matrix_stands_as_an_outage_until_a_post_gets_through() {
         let (db, _uid) = env();
-        let voice = Arc::new(MockChannel::new("voice"));
         let matrix = Arc::new(MockChannel::new("matrix"));
         matrix.set_companion(true);
-        let push = Arc::new(MockChannel::new("webpush"));
-        let ladder: Vec<Arc<dyn Channel>> = vec![voice, matrix.clone(), push.clone()];
-        deliver_via(&db, &ladder, 1, "aki", &plain("ring"));
-        assert!(matrix.seen().is_empty(), "the ring holds the message");
-        let fallback: Vec<Arc<dyn Channel>> = vec![matrix.clone(), push];
-        deliver_via(&db, &fallback, 1, "aki", &plain("ring"));
-        assert_eq!(matrix.seen().len(), 1);
+        matrix.set_fail(true);
+        let ladder: Vec<Arc<dyn Channel>> = vec![matrix.clone()];
+        let standing = |db: &Mutex<rusqlite::Connection>| {
+            let conn = db.lock().unwrap();
+            crate::outage::standing(&conn, 1, false, jiff::Timestamp::now()).unwrap().len()
+        };
+        deliver_via(&db, &ladder, 1, "aki", &plain("hi"));
+        assert_eq!(standing(&db), 1);
+        matrix.set_fail(false);
+        deliver_via(&db, &ladder, 1, "aki", &plain("hi"));
+        assert_eq!(standing(&db), 0);
     }
 
     #[test]

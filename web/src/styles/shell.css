@@ -12,3 +12,7 @@
 .nav-glide { position: absolute; left: 0; z-index: 0; pointer-events: none; }
 .topnav .nav-glide { top: 0; bottom: 0; border-radius: 999px; background: var(--haze-strong); }
 .tabs .nav-glide { top: 8px; bottom: 18px; border-radius: 16px; background: var(--track); }
+
+/* ── what is failing outside Note, over every view until it clears ── */
+.outage { margin: 0.5rem auto 0; padding: 0.45rem 1rem; max-width: min(40rem, calc(100% - 2rem)); border-radius: 999px; background: var(--haze-strong); color: var(--rose); font-size: 0.85rem; line-height: 1.35; text-align: center; }
+.outage p { margin: 0; }

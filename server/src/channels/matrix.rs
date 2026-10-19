@@ -17,10 +17,33 @@ pub struct Message {
     pub text: String,
 }
 
+/// Someone's reaction to an event in a joined room.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Reaction {
+    pub room_id: String,
+    pub sender: String,
+    pub event_id: String,
+    pub key: String,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Batch {
     pub next_batch: String,
     pub messages: Vec<Message>,
+    pub reactions: Vec<Reaction>,
+}
+
+/// The reaction a button is pressed with.
+pub fn emoji(data: &str) -> Option<&'static str> {
+    const BY_PREFIX: [(&str, &str); 5] =
+        [("ev:done:", "✅"), ("ev:snooze:", "💤"), ("ev:drop:", "✖"), ("carry:", "➡"), ("block:start:", "▶")];
+    BY_PREFIX.iter().find(|(p, _)| data.starts_with(p)).map(|(_, e)| *e)
+}
+
+/// The key a reaction presses: clients send an emoji with or without its
+/// variation selector, and either presses the same button.
+pub fn reaction_key(event_id: &str, emoji: &str) -> String {
+    format!("mx:{event_id}:{}", emoji.replace('\u{fe0f}', ""))
 }
 
 /// `Notice` is the msgtype Matrix clients do not notify for by default.
@@ -111,7 +134,7 @@ impl MatrixChannel {
                 "state": { "types": [] },
                 "ephemeral": { "not_types": ["*"] },
                 "account_data": { "not_types": ["*"] },
-                "timeline": { "types": ["m.room.message"], "limit": 50 },
+                "timeline": { "types": ["m.room.message", "m.reaction"], "limit": 50 },
             },
         })
         .to_string();
@@ -124,19 +147,86 @@ impl MatrixChannel {
         Ok(Batch {
             next_batch: body["next_batch"].as_str().context("sync without next_batch")?.to_string(),
             messages: parse_sync(&body, bot),
+            reactions: parse_reactions(&body, bot),
         })
     }
 
-    pub fn send(&self, room_id: &str, text: &str, kind: Kind) -> Result<()> {
+    /// Posts `content` as an event of `kind` and returns the event's id.
+    fn put_event(&self, room_id: &str, kind: &str, content: &Value) -> Result<String> {
         let txn = uuid::Uuid::new_v4().simple().to_string();
-        let url = format!("{}/_matrix/client/v3/rooms/{}/send/m.room.message/{txn}", self.base, enc(room_id));
-        self.agent
+        let url = format!("{}/_matrix/client/v3/rooms/{}/send/{kind}/{txn}", self.base, enc(room_id));
+        let mut res = self
+            .agent
             .put(&url)
             .header("Authorization", format!("Bearer {}", self.token))
-            .send_json(serde_json::json!({ "msgtype": kind.msgtype(), "body": text }))
+            .send_json(content)
             .map_err(|e| anyhow::anyhow!(super::describe_http_error(&e)))?;
+        let sent: Value = res.body_mut().read_json().unwrap_or_default();
+        Ok(sent["event_id"].as_str().unwrap_or_default().to_string())
+    }
+
+    pub fn send(&self, room_id: &str, text: &str, kind: Kind) -> Result<String> {
+        self.put_event(room_id, "m.room.message", &serde_json::json!({ "msgtype": kind.msgtype(), "body": text }))
+    }
+
+    pub fn react(&self, room_id: &str, event_id: &str, key: &str) -> Result<String> {
+        let content = serde_json::json!({ "m.relates_to": { "rel_type": "m.annotation", "event_id": event_id, "key": key } });
+        self.put_event(room_id, "m.reaction", &content)
+    }
+
+    /// Puts each button under the posted message as the bot's own reaction, so
+    /// the user presses one by tapping it. A reaction that will not post costs
+    /// only its button.
+    fn offer(&self, user_id: i64, room_id: &str, event_id: &str, actions: &[super::Action]) -> Result<()> {
+        let offered: Vec<(&super::Action, &str)> =
+            actions.iter().filter_map(|a| emoji(&a.data).map(|e| (a, e))).collect();
+        if event_id.is_empty() || offered.is_empty() {
+            return Ok(());
+        }
+        let keys: Vec<String> = offered.iter().map(|(_, e)| reaction_key(event_id, e)).collect();
+        let kept: Vec<super::Action> = offered.iter().map(|(a, _)| (*a).clone()).collect();
+        {
+            let conn = crate::db_guard(&self.db);
+            crate::actions::keep(&conn, user_id, event_id, &keys, &kept, jiff::Timestamp::now())?;
+        }
+        for (_, e) in &offered {
+            if self.react(room_id, event_id, e).is_err() {
+                break;
+            }
+        }
         Ok(())
     }
+}
+
+/// The legend under a message that carries buttons: each reaction and what it does.
+fn legend(actions: &[super::Action]) -> Option<String> {
+    let parts: Vec<String> =
+        actions.iter().filter_map(|a| emoji(&a.data).map(|e| format!("{e} {}", a.label))).collect();
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
+/// Reactions in joined rooms from anyone but the bot.
+fn parse_reactions(body: &Value, bot: &str) -> Vec<Reaction> {
+    let Some(rooms) = body["rooms"]["join"].as_object() else { return Vec::new() };
+    let mut out = Vec::new();
+    for (room, data) in rooms {
+        for ev in data["timeline"]["events"].as_array().into_iter().flatten() {
+            let sender = ev["sender"].as_str().unwrap_or_default();
+            let rel = &ev["content"]["m.relates_to"];
+            if ev["type"] != "m.reaction" || sender == bot || rel["rel_type"] != "m.annotation" {
+                continue;
+            }
+            if let (Some(event_id), Some(key)) = (rel["event_id"].as_str(), rel["key"].as_str()) {
+                out.push(Reaction {
+                    room_id: room.clone(),
+                    sender: sender.to_string(),
+                    event_id: event_id.to_string(),
+                    key: key.to_string(),
+                });
+            }
+        }
+    }
+    out
 }
 
 /// Text messages in joined rooms from anyone but the bot; an edit is not a new message.
@@ -179,10 +269,17 @@ impl Channel for MatrixChannel {
             crate::voice::links::ringable(&conn, user_id)?
         };
         let Some(room_id) = link.and_then(|l| l.room_id) else { return Ok(()) };
-        let text =
+        let mut text =
             if msg.title.trim().is_empty() { msg.body.clone() } else { format!("{}\n{}", msg.title, msg.body) };
+        if let Some(legend) = legend(&msg.actions) {
+            text = format!("{text}\n{legend}");
+        }
         let kind = if cfg.matrix_ping() { Kind::Text } else { Kind::Notice };
-        self.send(&room_id, &text, kind)?;
+        let event_id = self.send(&room_id, &text, kind)?;
+        if let Err(e) = self.offer(user_id, &room_id, &event_id, &msg.actions) {
+            let conn = crate::db_guard(&self.db);
+            let _ = crate::log::record(&conn, Some(user_id), "matrix_send_error", &format!("offering buttons: {e}"));
+        }
         if let Some(id) = msg.conversation_id {
             let conn = crate::db_guard(&self.db);
             let _ = crate::talk::stamp_matrix(&conn, id, jiff::Timestamp::now());
@@ -352,7 +449,7 @@ mod tests {
         let (ch, tmp) = channel(&base);
         took(&rx);
         linked(&ch, &tmp, "matrix_send = true\n");
-        ch.deliver(1, "aki", &checkin()).unwrap();
+        ch.deliver(1, "aki", &OutboundMessage { actions: Vec::new(), ..checkin() }).unwrap();
         assert_eq!(
             body_json(&took(&rx)),
             serde_json::json!({ "msgtype": "m.notice", "body": "Check-in\nHow is it going?" })
@@ -361,6 +458,45 @@ mod tests {
             .query_row("SELECT matrix_at IS NOT NULL FROM conversations WHERE id = 1", [], |r| r.get(0))
             .unwrap();
         assert!(stamped);
+    }
+
+    #[test]
+    fn buttons_are_offered_as_the_bots_own_reactions_and_kept_by_them() {
+        let (base, rx) = serve(vec![("200 OK", WHOAMI), ("200 OK", SENT), ("200 OK", SENT), ("200 OK", SENT), ("200 OK", SENT)]);
+        let (ch, tmp) = channel(&base);
+        took(&rx);
+        linked(&ch, &tmp, "matrix_send = true\n");
+        ch.deliver(1, "aki", &checkin()).unwrap();
+        assert_eq!(body_json(&took(&rx))["body"], "Check-in\nHow is it going?\n✅ Done · 💤 Snooze 15 · ✖ Drop");
+        let mut keys = Vec::new();
+        for _ in 0..3 {
+            let raw = took(&rx);
+            assert!(raw.contains("/send/m.reaction/"), "{raw}");
+            let rel = body_json(&raw)["m.relates_to"].clone();
+            assert_eq!((rel["rel_type"].as_str(), rel["event_id"].as_str()), (Some("m.annotation"), Some("$1")));
+            keys.push(rel["key"].as_str().unwrap().to_string());
+        }
+        assert_eq!(keys, ["✅", "💤", "✖"]);
+        let conn = crate::db_guard(&ch.db);
+        let now = jiff::Timestamp::now();
+        let pressed = crate::actions::take(&conn, &reaction_key("$1", "✖\u{fe0f}"), now).unwrap();
+        assert_eq!(pressed, Some((1, "ev:drop:1".to_string())));
+        assert_eq!(crate::actions::take(&conn, &reaction_key("$1", "✅"), now).unwrap(), None, "one press per message");
+    }
+
+    #[test]
+    fn parse_reads_reactions_from_others_only() {
+        let body = timeline(&serde_json::json!([
+            { "type": "m.reaction", "sender": "@aki:t", "content": {
+                "m.relates_to": { "rel_type": "m.annotation", "event_id": "$1", "key": "✅" } } },
+            { "type": "m.reaction", "sender": "@note:t", "content": {
+                "m.relates_to": { "rel_type": "m.annotation", "event_id": "$1", "key": "✅" } } },
+            { "type": "m.room.message", "sender": "@aki:t", "content": { "msgtype": "m.text", "body": "hi" } },
+        ]));
+        assert_eq!(
+            parse_reactions(&body, "@note:t"),
+            vec![Reaction { room_id: "!dm:t".into(), sender: "@aki:t".into(), event_id: "$1".into(), key: "✅".into() }]
+        );
     }
 
     #[test]

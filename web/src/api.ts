@@ -26,6 +26,7 @@ import type {
   MemoryFact,
   MemoryHit,
   NewStep,
+  Outage,
   PlanEvent,
   QueueEntry,
   Passkey,
@@ -355,6 +356,7 @@ export const api = {
   voiceVoices: () => request<{ voices: VoiceChoice[] }>('/api/voice/voices'),
   notifyTest: () => request<{ via: string }>('/api/notify/test', { method: 'POST' }),
   openWorkSession: () => request<WorkSession | null>('/api/sessions/open'),
+  outages: () => request<{ outages: Outage[] }>('/api/outages'),
   // Opening one ends whatever was still running, farewell and all.
   startWorkSession: (fields: SessionStart) =>
     request<WorkSession>('/api/sessions', { method: 'POST', body: JSON.stringify(fields) }),

@@ -161,21 +161,30 @@ fn is_key(word: &str) -> bool {
     PREFIXES.iter().any(|p| word.starts_with(p) && word.len() >= p.len() + 12)
 }
 
-/// Background work that failed tells its user once per reason in this window.
-pub const NOTICE_WINDOW_MINS: i64 = 6 * 60;
-
 /// Tells the user why work they were not watching failed, unless the same
-/// reason was told within `NOTICE_WINDOW_MINS`. A fault inside Note is left to
-/// the admin's log. The message walks the delivery ladder: the open web app,
-/// else a push, with a copy to Matrix.
+/// reason was told within `outage::NOTICE_WINDOW_MINS`. A failure of the AI
+/// service itself stands as an outage until a later session gets through. A
+/// fault inside Note is left to the admin's log. The message walks the
+/// delivery ladder: the open web app, else a push, with a copy to Matrix.
 pub fn tell(state: &crate::AppState, user_id: i64, username: &str, failure: &Failure, now: jiff::Timestamp) {
     if failure.reason == Reason::Internal {
         return;
     }
+    if let Some(outage) = crate::outage::Outage::of_failure(failure.reason) {
+        let _ = crate::outage::raise(&state.db(), user_id, outage, now);
+        return crate::outage::tell_pending(state, user_id, username, now);
+    }
     let fresh = {
         let conn = state.db();
-        crate::log::record_throttled(&conn, Some(user_id), "failure_notice", failure.reason.code(), now, NOTICE_WINDOW_MINS)
-            .unwrap_or(false)
+        crate::log::record_throttled(
+            &conn,
+            Some(user_id),
+            "failure_notice",
+            failure.reason.code(),
+            now,
+            crate::outage::NOTICE_WINDOW_MINS,
+        )
+        .unwrap_or(false)
     };
     if !fresh {
         return;
@@ -282,13 +291,15 @@ mod tests {
         let gone = Failure { reason: Reason::ModelUnavailable, detail: "status 404".into() };
         let t0: jiff::Timestamp = "2026-10-06T03:00:00Z".parse().unwrap();
         tell(&state, 1, "aki", &gone, t0);
+        crate::outage::clear_ai(&state.db(), 1).unwrap();
         tell(&state, 1, "aki", &gone, t0 + jiff::Span::new().hours(1));
         tell(&state, 1, "aki", &Failure::internal("database is locked"), t0);
-        tell(&state, 1, "aki", &Failure { reason: Reason::RateLimited, detail: "429".into() }, t0);
+        tell(&state, 1, "aki", &Failure { reason: Reason::Refused, detail: "flagged".into() }, t0);
+        crate::outage::clear_ai(&state.db(), 1).unwrap();
         tell(&state, 1, "aki", &gone, t0 + jiff::Span::new().hours(7));
         let bodies: Vec<String> = ch.seen().into_iter().map(|(_, m)| m.body).collect();
         let en = |r| crate::text::failure_reason(crate::text::Lang::En, r);
-        assert_eq!(bodies, vec![en(Reason::ModelUnavailable), en(Reason::RateLimited), en(Reason::ModelUnavailable)]);
+        assert_eq!(bodies, vec![en(Reason::ModelUnavailable), en(Reason::Refused), en(Reason::ModelUnavailable)]);
     }
 
     #[test]

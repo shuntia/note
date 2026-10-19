@@ -40,6 +40,10 @@ pub struct SetArgs {
     /// like a reminder.
     #[serde(default)]
     pub session_check: bool,
+    /// Ring when it fires: what you then say opens a call if the user is free
+    /// for one (the check `call_user` makes), else it goes as a message.
+    #[serde(default)]
+    pub ring: bool,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -206,6 +210,7 @@ fn lay(
     cancel: Option<Cancel>,
     thread: Option<i64>,
     session_check: bool,
+    ring: bool,
 ) -> Result<serde_json::Value, ToolError> {
     let now = jiff::Timestamp::now();
     let (date, at) = placed(ctx, kind, aim, now)?;
@@ -240,6 +245,9 @@ fn lay(
         }
     }
     let laid = triggers::lay(conn, &lay).map_err(refused)?;
+    if ring {
+        triggers::set_ring(conn, laid.event_id).map_err(|e| ToolError::internal(e.to_string()))?;
+    }
     let (date, work_session): (String, Option<i64>) = conn
         .query_row(
             "SELECT p.date, e.work_session_id FROM events e JOIN plans p ON p.id = e.plan_id WHERE e.id = ?1",
@@ -255,6 +263,9 @@ fn lay(
     });
     if session_check {
         out["work_session"] = work_session.into();
+    }
+    if ring {
+        out["ring"] = serde_json::json!(true);
     }
     Ok(out)
 }
@@ -283,7 +294,7 @@ pub fn set(
             ))
         }
     };
-    lay(conn, ctx, kind, &aim, &args.prompt, cancel, args.thread, args.session_check)
+    lay(conn, ctx, kind, &aim, &args.prompt, cancel, args.thread, args.session_check, args.ring)
 }
 
 /// Raises a day's allowance after the user has agreed to it; the receipt says
@@ -447,6 +458,20 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM event_log WHERE kind='trigger_laid'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(logged, 1);
+    }
+
+    #[test]
+    fn a_trigger_is_laid_to_ring_only_when_asked() {
+        let (conn, tmp) = env();
+        for (args, channel) in [(r#","ring":true"#, "call"), ("", "push")] {
+            let json = format!(r#"{{"at":"{}","prompt":"call about the essay","also":true{args}}}"#, soon());
+            let out = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "trigger_set", &json).unwrap();
+            assert_eq!(out["ring"].as_bool(), (channel == "call").then_some(true), "{out}");
+            let laid: String = conn
+                .query_row("SELECT channel FROM events WHERE id = ?1", [out["event_id"].as_i64().unwrap()], |r| r.get(0))
+                .unwrap();
+            assert_eq!(laid, channel);
+        }
     }
 
     #[test]

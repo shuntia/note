@@ -1,3 +1,4 @@
+pub mod actions;
 pub mod admin;
 pub mod agent;
 pub mod api;
@@ -25,6 +26,7 @@ pub mod net;
 pub mod nightly;
 pub mod notes;
 pub mod order;
+pub mod outage;
 pub mod plan;
 pub mod presence;
 pub mod prompts;
@@ -382,8 +384,7 @@ impl AppState {
         self
     }
 
-    /// Right after the voice channel in the ladder, which `with_voice` makes
-    /// true by inserting itself at the front afterwards.
+    /// First in the ladder, as a companion.
     #[must_use]
     pub fn with_matrix(mut self, ch: crate::channels::matrix::MatrixChannel) -> Self {
         let ch = Arc::new(ch);
@@ -415,8 +416,6 @@ impl AppState {
             search: self.search.clone(),
             settings: self.call_settings.clone(),
         });
-        let ch = crate::channels::voice::VoiceChannel::new(voice.clone(), self.db.clone(), self.config_dir.clone());
-        self.channels.insert(0, Arc::new(ch));
         let hub = self.hub.clone();
         voice.set_ring_taken(Arc::new(move |user_id, token| {
             hub.send(user_id, &serde_json::json!({ "type": "ring_taken", "ring": token }).to_string());

@@ -351,8 +351,27 @@ fn traced(
     }
     trace.spent(crate::usage::take());
     drop(meter);
-    let _ = trace.insert(&crate::db_guard(deps.db), user_id);
+    let conn = crate::db_guard(deps.db);
+    let _ = trace.insert(&conn, user_id);
+    if kind != SessionKind::Call {
+        note_outage(&conn, user_id, &result, now);
+    }
     result
+}
+
+/// A session that reached the AI service clears what stood against it; one the
+/// service failed raises that failure as an outage for its user to hear of.
+fn note_outage(conn: &Connection, user_id: i64, result: &Result<SessionOutcome>, now: jiff::Timestamp) {
+    match result {
+        Ok(_) => {
+            let _ = crate::outage::clear_ai(conn, user_id);
+        }
+        Err(e) => {
+            if let Some(outage) = crate::outage::Outage::of_failure(crate::failure::Reason::of(e)) {
+                let _ = crate::outage::raise(conn, user_id, outage, now);
+            }
+        }
+    }
 }
 
 /// The user's config, read once for the whole session, and the language the
@@ -929,7 +948,7 @@ impl CallEnv<'_> {
             "call_user_rang",
             &confirmed.log_line(&subject, outcome.as_str()),
         );
-        let rang = !matches!(outcome, crate::channels::calling::RingOutcome::Messaged(_));
+        let rang = !matches!(outcome, crate::channels::calling::RingOutcome::Messaged(_) | crate::channels::calling::RingOutcome::Held(_));
         Ok(serde_json::json!({
             "rang": rang,
             "via": outcome.as_str(),

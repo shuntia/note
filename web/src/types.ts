@@ -264,7 +264,7 @@ export type Settings = {
 
 export type Language = '' | 'en' | 'ja'
 
-export type RingFor = 'urgent' | 'checkins' | 'never'
+export type RingFor = 'allowed' | 'never'
 
 export type VoiceChoice = { id: string; label: string; backend?: string; slow?: boolean; credit?: string }
 
@@ -390,6 +390,10 @@ export type FailureReason =
   | 'context_too_long'
   | 'refused'
   | 'internal'
+
+// Something Note leans on that is failing for this user, and since when; the
+// server's `outage::Outage` codes.
+export type Outage = { code: FailureReason | 'daily_cap' | 'matrix_down' | 'voice_down'; since: string }
 
 // `error` carries the failure only when `outcome` is 'error'.
 export type TraceRow = {
