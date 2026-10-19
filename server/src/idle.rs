@@ -67,15 +67,14 @@ fn check_one(
     if threshold == 0 || !cfg.features(&user.category).checkins {
         return Ok(None);
     }
-    if triggers::open_work_session(conn, user.user_id)?.is_some() {
+    if triggers::working(conn, user.user_id)?.is_some() {
         return Ok(None);
     }
     let tz = crate::zone::named(&cfg.timezone);
     let local = now.to_zoned(tz.clone());
-    let last: jiff::Timestamp = user.last_active.parse()?;
-    if last.to_zoned(tz.clone()).date() != local.date() {
+    let Some(last) = quiet_since(&cfg, &tz, &local, user.last_active.parse()?) else {
         return Ok(None);
-    }
+    };
     let since = match last_idle_laid(conn, user.user_id)? {
         Some(laid) if laid > last => laid,
         _ => last,
@@ -124,6 +123,38 @@ fn check_one(
         &format!("event {id} at {date} {wall}: idle"),
     )?;
     Ok(Some(id))
+}
+
+/// How long past `day_start` a user who has not shown up yet counts as having
+/// gone quiet from.
+pub const NO_SHOW_GRACE_MIN: i64 = 30;
+
+/// Whether `last` falls on today's date at or after `wake::EARLIEST`.
+fn here_today(tz: &jiff::tz::TimeZone, last: jiff::Timestamp, now: jiff::Timestamp) -> bool {
+    let seen = last.to_zoned(tz.clone());
+    let wall = format!("{:02}:{:02}", seen.hour(), seen.minute());
+    seen.date() == now.to_zoned(tz.clone()).date() && wall.as_str() >= crate::wake::EARLIEST
+}
+
+/// When the user's quiet began: their last activity when it was today, or for
+/// a day they have not shown up to, `day_start` plus `NO_SHOW_GRACE_MIN`.
+/// Activity before `wake::EARLIEST` is the night before's. `None` with no
+/// `day_start` to count a no-show from.
+fn quiet_since(
+    cfg: &crate::config::UserConfig,
+    tz: &jiff::tz::TimeZone,
+    local: &jiff::Zoned,
+    last: jiff::Timestamp,
+) -> Option<jiff::Timestamp> {
+    if here_today(tz, last, local.timestamp()) {
+        return Some(last);
+    }
+    let start = cfg.day_start();
+    if start.is_empty() {
+        return None;
+    }
+    let begun = crate::zone::instant(tz, local.date(), start)?;
+    Some(begun + jiff::Span::new().minutes(NO_SHOW_GRACE_MIN))
 }
 
 /// How long after an idle nudge that spoke another is not worth a session
@@ -215,18 +246,24 @@ fn ago(ts: &str, l: Lang, now: jiff::Timestamp) -> String {
 }
 
 /// What an idle trigger's session reads under its prompt: how long the user
-/// has been quiet, then each active note with its id, age and last nudge.
+/// has been quiet, or that they have not been in today, then each active note
+/// with its id, age and last nudge.
 pub fn context(
     conn: &Connection,
     data_dir: &Path,
     user_id: i64,
     username: &str,
+    tz: &jiff::tz::TimeZone,
     l: Lang,
     now: jiff::Timestamp,
 ) -> Result<String> {
     let mut s = String::new();
     if let Some(at) = crate::presence::last_active(conn, user_id)? {
-        let _ = writeln!(s, "{}", mt::quiet_for(l, (now.as_second() - at.as_second()).max(0) / 60));
+        if here_today(tz, at, now) {
+            let _ = writeln!(s, "{}", mt::quiet_for(l, (now.as_second() - at.as_second()).max(0) / 60));
+        } else {
+            let _ = writeln!(s, "{}", mt::not_in_today(l));
+        }
     }
     let notes = crate::notes::active(conn, data_dir, username, now)?;
     if !notes.is_empty() {
@@ -348,6 +385,19 @@ mod tests {
     }
 
     #[test]
+    fn a_paused_session_does_not_keep_it_quiet() {
+        let (conn, tmp, uid) = env("");
+        seen(&conn, uid, "2026-09-30T11:00:00Z");
+        conn.execute(
+            "INSERT INTO work_sessions (user_id, title, started_at, paused_at)
+             VALUES (?1, 'essay', '2026-09-30T10:30:00Z', '2026-09-30T11:00:00Z')",
+            [uid],
+        )
+        .unwrap();
+        assert_eq!(check(&conn, tmp.path(), noon()).unwrap().len(), 1);
+    }
+
+    #[test]
     fn a_quiet_window_or_the_close_of_the_day_holds_it_back() {
         let (conn, tmp, uid) = env("");
         seen(&conn, uid, "2026-09-30T11:00:00Z");
@@ -446,13 +496,35 @@ mod tests {
     }
 
     #[test]
-    fn a_user_not_seen_today_is_left_alone() {
-        let (conn, tmp, uid) = env("");
+    fn a_user_who_never_used_note_is_left_alone() {
+        let (conn, tmp, _uid) = env("");
         note(&conn, &tmp, "call the bank", MORNING, None);
-        assert!(check(&conn, tmp.path(), noon()).unwrap().is_empty(), "never seen");
+        assert!(check(&conn, tmp.path(), noon()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_user_not_seen_today_has_gone_quiet_since_the_start_of_their_day() {
+        let (conn, tmp, uid) = env("");
         seen(&conn, uid, "2026-09-29T22:00:00Z");
         assert!(check(&conn, tmp.path(), at("2026-09-30T00:30:00Z")).unwrap().is_empty());
-        assert!(check(&conn, tmp.path(), at("2026-09-30T09:00:00Z")).unwrap().is_empty());
+        // 08:00 start, 30 minutes' grace, then the usual 20 of quiet
+        assert!(check(&conn, tmp.path(), at("2026-09-30T08:49:00Z")).unwrap().is_empty());
+        assert_eq!(check(&conn, tmp.path(), at("2026-09-30T08:50:00Z")).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn activity_in_the_small_hours_belongs_to_the_night_before() {
+        let (conn, tmp, uid) = env("");
+        seen(&conn, uid, "2026-09-30T01:30:00Z");
+        assert!(check(&conn, tmp.path(), at("2026-09-30T02:00:00Z")).unwrap().is_empty());
+        assert_eq!(check(&conn, tmp.path(), at("2026-09-30T08:50:00Z")).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_blank_day_start_leaves_a_no_show_alone() {
+        let (conn, tmp, uid) = env("day_start = \"\"\n");
+        seen(&conn, uid, "2026-09-29T22:00:00Z");
+        assert!(check(&conn, tmp.path(), noon()).unwrap().is_empty());
     }
 
     #[test]
@@ -473,7 +545,7 @@ mod tests {
         let milk = note(&conn, &tmp, "milk", "2026-09-30T11:30:00Z", None);
         note(&conn, &tmp, "past thing", MORNING, Some("2026-09-30T09:00:00Z"));
 
-        let text = context(&conn, tmp.path(), uid, "aki", Lang::En, noon()).unwrap();
+        let text = context(&conn, tmp.path(), uid, "aki", &jiff::tz::TimeZone::UTC, Lang::En, noon()).unwrap();
         assert!(text.contains("Nothing from the user for 20 min."), "{text}");
         assert!(text.contains(&format!("- {}: \"call the bank\", added 4 h ago, nudged 1 h ago", &bank[..8])), "{text}");
         assert!(text.contains(&format!("- {}: \"milk\", added 30 min ago, never nudged", &milk[..8])), "{text}");
@@ -481,10 +553,18 @@ mod tests {
     }
 
     #[test]
+    fn the_idle_note_says_when_the_user_has_not_been_in_today() {
+        let (conn, tmp, uid) = env("");
+        seen(&conn, uid, "2026-09-29T22:00:00Z");
+        let text = context(&conn, tmp.path(), uid, "aki", &jiff::tz::TimeZone::UTC, Lang::En, noon()).unwrap();
+        assert!(text.starts_with("The user has not been in today."), "{text}");
+    }
+
+    #[test]
     fn the_idle_note_has_no_working_header_without_active_notes() {
         let (conn, tmp, uid) = env("");
         seen(&conn, uid, "2026-09-30T11:40:00Z");
-        let text = context(&conn, tmp.path(), uid, "aki", Lang::En, noon()).unwrap();
+        let text = context(&conn, tmp.path(), uid, "aki", &jiff::tz::TimeZone::UTC, Lang::En, noon()).unwrap();
         assert!(!text.contains("Working notes"), "{text}");
     }
 }

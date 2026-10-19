@@ -35,6 +35,11 @@ pub struct SetArgs {
     pub task_id: Option<i64>,
     #[serde(default)]
     pub event_id: Option<i64>,
+    /// A check on how the open work session is going: free, and dropped when
+    /// the session ends. Leave it off for anything meant to stand on its own,
+    /// like a reminder.
+    #[serde(default)]
+    pub session_check: bool,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -191,6 +196,7 @@ fn drop_replaced(conn: &Connection, ctx: &ToolCtx, id: i64, now: jiff::Timestamp
 
 /// Lays the trigger unless one already waits within `NEAR_MIN` minutes of it,
 /// which the model is shown instead, so a follow-up is not laid twice.
+#[allow(clippy::too_many_arguments)]
 fn lay(
     conn: &Connection,
     ctx: &ToolCtx,
@@ -199,6 +205,7 @@ fn lay(
     prompt: &str,
     cancel: Option<Cancel>,
     thread: Option<i64>,
+    session_check: bool,
 ) -> Result<serde_json::Value, ToolError> {
     let now = jiff::Timestamp::now();
     let (date, at) = placed(ctx, kind, aim, now)?;
@@ -215,6 +222,7 @@ fn lay(
         cancel,
         conversation_id: thread,
         work_session_id: None,
+        session_check,
         system: false,
         now,
     };
@@ -232,19 +240,23 @@ fn lay(
         }
     }
     let laid = triggers::lay(conn, &lay).map_err(refused)?;
-    let date = conn
+    let (date, work_session): (String, Option<i64>) = conn
         .query_row(
-            "SELECT p.date FROM events e JOIN plans p ON p.id = e.plan_id WHERE e.id = ?1",
+            "SELECT p.date, e.work_session_id FROM events e JOIN plans p ON p.id = e.plan_id WHERE e.id = ?1",
             [laid.event_id],
-            |r| r.get::<_, String>(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .map_err(|e| ToolError::internal(e.to_string()))?;
-    Ok(serde_json::json!({
+    let mut out = serde_json::json!({
         "event_id": laid.event_id,
         "date": date,
         "at": laid.at,
         "cancel_if": laid.cancel_if,
-    }))
+    });
+    if session_check {
+        out["work_session"] = work_session.into();
+    }
+    Ok(out)
 }
 
 pub fn set(
@@ -271,7 +283,7 @@ pub fn set(
             ))
         }
     };
-    lay(conn, ctx, kind, &aim, &args.prompt, cancel, args.thread)
+    lay(conn, ctx, kind, &aim, &args.prompt, cancel, args.thread, args.session_check)
 }
 
 /// Raises a day's allowance after the user has agreed to it; the receipt says

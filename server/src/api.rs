@@ -3232,6 +3232,9 @@ async fn ws_pump(mut socket: axum::extract::ws::WebSocket, state: AppState, user
                 Some(Ok(Message::Close(_))) => break,
                 Some(Ok(msg)) => {
                     last_inbound = tokio::time::Instant::now();
+                    if let Some(shown) = crate::channels::ws::window_shown(&msg) {
+                        hub.set_shown(user_id, conn_id, shown);
+                    }
                     let present = match crate::channels::ws::visibility(&msg) {
                         Some(on) => {
                             hub.set_visible(user_id, conn_id, on);

@@ -332,15 +332,39 @@ pub fn end(
     outcome: &str,
     now: jiff::Timestamp,
 ) -> Result<Option<i64>> {
+    end_with(conn, config_dir, user_id, username, id, outcome, Farewell::Ask, now)
+}
+
+/// What Note says once a session closes.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Farewell {
+    /// A wake-up in the session's thread asks how it went.
+    Ask,
+    /// The same, saying Note stopped it far past its plan.
+    Overran,
+    /// Nothing: whoever closed it is already speaking.
+    None,
+}
+
+/// `end`, with the farewell chosen by the caller.
+#[allow(clippy::too_many_arguments)]
+pub fn end_with(
+    conn: &Connection,
+    config_dir: &Path,
+    user_id: i64,
+    username: &str,
+    id: Option<i64>,
+    outcome: &str,
+    farewell: Farewell,
+    now: jiff::Timestamp,
+) -> Result<Option<i64>> {
     anyhow::ensure!(outcome == "done" || outcome == "stopped", "invalid outcome: {outcome}");
     if let Some(session) = open(conn, user_id)? {
         catch_up(conn, config_dir, &session, now)?;
     }
-    close(conn, config_dir, user_id, username, id, outcome, false, now)
+    close(conn, config_dir, user_id, username, id, outcome, farewell, now)
 }
 
-/// `overran` closes a session Note stopped for running far past its plan, and
-/// its farewell says so.
 #[allow(clippy::too_many_arguments)]
 fn close(
     conn: &Connection,
@@ -349,7 +373,7 @@ fn close(
     username: &str,
     id: Option<i64>,
     outcome: &str,
-    overran: bool,
+    farewell: Farewell,
     now: jiff::Timestamp,
 ) -> Result<Option<i64>> {
     let Some(session) = open(conn, user_id)? else {
@@ -380,7 +404,9 @@ fn close(
                 if dropped == 1 { "" } else { "s" }, session.id),
         )?;
     }
-    lay_farewell(conn, config_dir, user_id, username, &session, outcome, overran, now)?;
+    if farewell != Farewell::None {
+        lay_farewell(conn, config_dir, user_id, username, &session, outcome, farewell == Farewell::Overran, now)?;
+    }
     crate::log::record(
         conn,
         Some(user_id),
@@ -513,6 +539,7 @@ fn lay_session_wake(
             cancel: None,
             conversation_id: session.conversation_id,
             work_session_id: Some(session.id),
+            session_check: false,
             system: false,
             now,
         },
@@ -715,7 +742,7 @@ fn advance(
             if !auto_close {
                 return Ok(None);
             }
-            close(conn, config_dir, user_id, username, Some(session.id), "stopped", false, now)?;
+            close(conn, config_dir, user_id, username, Some(session.id), "stopped", Farewell::Ask, now)?;
             crate::log::record(
                 conn,
                 Some(user_id),
@@ -843,7 +870,7 @@ pub fn overrun(conn: &Connection, config_dir: &Path, now: jiff::Timestamp) -> Re
         let (title, body, kind) = if past(OVERRUN_END_PCT) {
             if wakes {
                 catch_up(conn, config_dir, &session, now)?;
-                close(conn, config_dir, user_id, &username, Some(session.id), "stopped", true, now)?;
+                close(conn, config_dir, user_id, &username, Some(session.id), "stopped", Farewell::Overran, now)?;
                 log_overrun(conn, user_id, "session_force_ended", &session, elapsed)?;
                 asks.push(Flip { user_id, username, message: None });
                 continue;
@@ -909,6 +936,63 @@ fn log_overrun(conn: &Connection, user_id: i64, kind: &str, session: &Session, e
         kind,
         &format!("session {} at {elapsed} of {} min", session.id, session.planned_min.unwrap_or_default()),
     )
+}
+
+/// How long every client of the user may be gone before a session they left
+/// unattended is closed: long enough for a reload or a dropped connection.
+pub const GONE_GRACE_MIN: i64 = 5;
+/// The longest a pause holds a session open.
+pub const MAX_PAUSE_MIN: i64 = 120;
+/// The longest any session stays open by the wall clock, whatever its plan.
+pub const MAX_OPEN_MIN: i64 = MAX_PLANNED_MIN + 4 * 60;
+
+/// Stops every session nobody is keeping: one paused past `MAX_PAUSE_MIN`,
+/// one open past `MAX_OPEN_MIN`, and one paused, open-ended or past its plan
+/// once the user has had no client open for `GONE_GRACE_MIN`, closed as of
+/// the moment they were last there, or its plan's end when that is later.
+/// `gone_since` answers since when a user has had no client open, `None`
+/// while one is.
+pub fn close_abandoned(
+    conn: &Connection,
+    config_dir: &Path,
+    gone_since: &dyn Fn(i64) -> Option<jiff::Timestamp>,
+    now: jiff::Timestamp,
+) -> Result<Vec<Flip>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {COLS_W}, w.user_id, u.username FROM work_sessions w
+         JOIN users u ON u.id = w.user_id WHERE w.ended_at IS NULL"
+    ))?;
+    let open: Vec<(Session, i64, String)> = stmt
+        .query_map([], |r| Ok((row_to_session(r)?, r.get(20)?, r.get(21)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(stmt);
+
+    let mut closed = Vec::new();
+    for (session, user_id, username) in open {
+        let (why, at) = if session.paused_for_ms(now) >= MAX_PAUSE_MIN * 60_000 {
+            ("paused too long", now)
+        } else if since(&session.started_at, now) >= MAX_OPEN_MIN * 60_000 {
+            ("open too long", now)
+        } else {
+            let Some(left) = gone_since(user_id) else { continue };
+            let unattended = session.paused_at.is_some()
+                || session.planned_min.is_none_or(|min| session.elapsed_ms(now) >= min * 60_000);
+            let started = session.started_at.parse::<jiff::Timestamp>().unwrap_or(now);
+            let last = crate::presence::last_active(conn, user_id)?
+                .map_or(left.max(started), |seen| seen.max(left).max(started));
+            if !unattended || now.as_second() - last.as_second() < GONE_GRACE_MIN * 60 {
+                continue;
+            }
+            let plan_end = session.planned_min.filter(|_| session.paused_at.is_none()).map(|min| {
+                now - jiff::SignedDuration::from_millis(session.elapsed_ms(now) - min * 60_000)
+            });
+            ("every client gone", plan_end.map_or(last, |end| end.max(last)))
+        };
+        end(conn, config_dir, user_id, &username, Some(session.id), "stopped", at)?;
+        crate::log::record(conn, Some(user_id), "work_session_abandoned", &format!("session {}: {why}", session.id))?;
+        closed.push(Flip { user_id, username, message: None });
+    }
+    Ok(closed)
 }
 
 #[cfg(test)]
@@ -1173,6 +1257,7 @@ mod tests {
                 cancel: None,
                 conversation_id: None,
                 work_session_id: None,
+                session_check: true,
                 system: false,
                 now: at("2026-09-17T09:00:00Z"),
             },
@@ -1187,6 +1272,110 @@ mod tests {
         assert!(rows[1..3].iter().all(|r| r.2 == "dropped"));
         assert!(open(&conn, uid).unwrap().is_none());
         assert_eq!(end_one(&conn, &tmp, uid, None, "done", "2026-09-17T09:36:00Z"), None);
+    }
+
+    fn abandon(conn: &Connection, tmp: &tempfile::TempDir, gone: Option<&str>, now: &str) -> usize {
+        let gone = gone.map(at);
+        close_abandoned(conn, tmp.path(), &|_| gone, at(now)).unwrap().len()
+    }
+
+    fn ending(conn: &Connection, id: i64) -> (Option<String>, Option<String>) {
+        conn.query_row("SELECT ended_at, outcome FROM work_sessions WHERE id = ?1", [id], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn an_open_ended_session_closes_once_the_app_has_been_closed_a_while() {
+        let (conn, tmp, uid) = env();
+        let session = start_one(&conn, &tmp, uid, None);
+        crate::presence::touch(&conn, uid, at("2026-09-17T09:20:00Z")).unwrap();
+        assert_eq!(abandon(&conn, &tmp, None, "2026-09-17T12:00:00Z"), 0, "an open app keeps it");
+        assert_eq!(abandon(&conn, &tmp, Some("2026-09-17T09:30:00Z"), "2026-09-17T09:34:59Z"), 0,
+            "a reload is not leaving");
+        assert_eq!(abandon(&conn, &tmp, Some("2026-09-17T09:30:00Z"), "2026-09-17T09:35:00Z"), 1);
+        assert_eq!(ending(&conn, session.id),
+            (Some("2026-09-17T09:30:00Z".into()), Some("stopped".into())), "closed as of leaving");
+        assert!(open(&conn, uid).unwrap().is_none());
+    }
+
+    #[test]
+    fn activity_after_the_app_closed_holds_the_session_open() {
+        let (conn, tmp, uid) = env();
+        start_one(&conn, &tmp, uid, None);
+        crate::presence::touch(&conn, uid, at("2026-09-17T09:40:00Z")).unwrap();
+        assert_eq!(abandon(&conn, &tmp, Some("2026-09-17T09:30:00Z"), "2026-09-17T09:44:00Z"), 0);
+        assert_eq!(abandon(&conn, &tmp, Some("2026-09-17T09:30:00Z"), "2026-09-17T09:45:00Z"), 1);
+    }
+
+    #[test]
+    fn a_planned_session_outlasts_a_closed_app_until_its_plan_runs_out() {
+        let (conn, tmp, uid) = env();
+        let session = start_one(&conn, &tmp, uid, Some(60));
+        assert_eq!(abandon(&conn, &tmp, Some("2026-09-17T09:05:00Z"), "2026-09-17T09:59:00Z"), 0);
+        assert_eq!(abandon(&conn, &tmp, Some("2026-09-17T09:05:00Z"), "2026-09-17T10:00:30Z"), 1);
+        assert_eq!(ending(&conn, session.id).0.as_deref(), Some("2026-09-17T10:00:00Z"),
+            "the plan is taken as worked");
+    }
+
+    #[test]
+    fn a_paused_session_closes_with_the_app_or_after_a_long_pause() {
+        let (conn, tmp, uid) = env();
+        let session = start_one(&conn, &tmp, uid, Some(60));
+        pause(&conn, tmp.path(), uid, session.id, at("2026-09-17T09:10:00Z")).unwrap();
+        assert_eq!(abandon(&conn, &tmp, Some("2026-09-17T09:12:00Z"), "2026-09-17T09:17:00Z"), 1,
+            "paused, it is not kept by its plan");
+
+        let (conn, tmp, uid) = env();
+        let session = start_one(&conn, &tmp, uid, Some(60));
+        pause(&conn, tmp.path(), uid, session.id, at("2026-09-17T09:10:00Z")).unwrap();
+        assert_eq!(abandon(&conn, &tmp, None, "2026-09-17T11:09:00Z"), 0);
+        assert_eq!(abandon(&conn, &tmp, None, "2026-09-17T11:10:00Z"), 1, "two hours paused");
+        assert_eq!(ending(&conn, session.id).0.as_deref(), Some("2026-09-17T11:10:00Z"));
+    }
+
+    #[test]
+    fn no_session_stays_open_past_the_hard_cap_even_with_the_app_open() {
+        let (conn, tmp, uid) = env();
+        start_one(&conn, &tmp, uid, None);
+        assert_eq!(abandon(&conn, &tmp, None, "2026-09-18T00:59:00Z"), 0);
+        assert_eq!(abandon(&conn, &tmp, None, "2026-09-18T01:00:00Z"), 1, "sixteen hours");
+        let kinds: i64 = conn
+            .query_row("SELECT COUNT(*) FROM event_log WHERE kind = 'work_session_abandoned'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(kinds, 1);
+    }
+
+    #[test]
+    fn a_reminder_laid_in_an_open_ended_session_outlives_it() {
+        let (conn, tmp, uid) = env();
+        let session = start_one(&conn, &tmp, uid, None);
+        let laid = crate::triggers::lay(
+            &conn,
+            &crate::triggers::Lay {
+                config_dir: tmp.path(),
+                user_id: uid,
+                username: "aki",
+                at: "18:00",
+                prompt: "remind them to submit",
+                date: "2026-09-17".parse().unwrap(),
+                cancel: None,
+                conversation_id: None,
+                work_session_id: None,
+                session_check: false,
+                system: false,
+                now: at("2026-09-17T09:10:00Z"),
+            },
+        )
+        .unwrap();
+        end_one(&conn, &tmp, uid, Some(session.id), "done", "2026-09-17T15:00:00Z").unwrap();
+        let (tied, status): (Option<i64>, String) = conn
+            .query_row("SELECT work_session_id, status FROM events WHERE id = ?1", [laid.event_id], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!((tied, status.as_str()), (None, "pending"));
     }
 
     #[test]

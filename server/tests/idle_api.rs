@@ -171,3 +171,30 @@ async fn coming_back_before_the_nudge_fires_calls_it_off() {
         rows(&w, "SELECT detail FROM event_log WHERE kind = 'trigger_cancelled'");
     assert!(why[0].contains("active"), "{}", why[0]);
 }
+
+#[tokio::test]
+async fn a_user_who_never_opened_the_app_today_is_nudged_all_the_same() {
+    let w = world(vec![call("c1", "say", r#"{"text":"the essay is still waiting"}"#)]).await;
+    std::fs::write(
+        w.state.config_dir.join("users/aki/user.toml"),
+        format!("timezone = \"{}\"\nday_start = \"08:00\"\n", midday_zone()),
+    )
+    .unwrap();
+    {
+        let conn = w.state.db();
+        let yesterday = jiff::Timestamp::now() - jiff::Span::new().hours(24);
+        conn.execute(
+            "UPDATE users SET last_active_at = ?1 WHERE id = 1",
+            [note_server::presence::stamp(yesterday)],
+        )
+        .unwrap();
+    }
+
+    note_server::runner::sweep_once(&w.state);
+
+    let seen = w.push.seen();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].1.body, "the essay is still waiting");
+    let opening = format!("{:?}", w.llm.seen()[0].messages.last().unwrap());
+    assert!(opening.contains("The user has not been in today."), "{opening}");
+}

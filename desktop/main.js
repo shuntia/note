@@ -283,8 +283,12 @@ function createWindow(startHidden) {
     refreshTray()
   })
   win.on('focus', () => win.flashFrame(false))
-  win.on('show', refreshTray)
-  win.on('hide', refreshTray)
+  const tellShown = () => {
+    refreshTray()
+    if (!win.isDestroyed()) win.webContents.send('desktop:shown', win.isVisible())
+  }
+  win.on('show', tellShown)
+  win.on('hide', tellShown)
 
   const { webContents } = win
   webContents.setWindowOpenHandler(({ url }) => {
@@ -419,6 +423,8 @@ ipcMain.on('desktop:show', (event) => {
 })
 
 ipcMain.handle('desktop:settings', (event) => (fromApp(event) ? shellSettings() : null))
+
+ipcMain.handle('desktop:shown', (event) => (fromApp(event) ? win.isVisible() : null))
 
 ipcMain.handle('desktop:set', (event, key, on) => {
   if (!fromApp(event) || typeof on !== 'boolean') return null

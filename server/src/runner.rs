@@ -370,6 +370,13 @@ pub fn sweep_once(state: &AppState) {
             note(e);
             Vec::new()
         }));
+        flips.extend(
+            crate::work::close_abandoned(&conn, &state.config_dir, &|id| state.hub.gone_since(id), now)
+                .unwrap_or_else(|e| {
+                    note(e);
+                    Vec::new()
+                }),
+        );
         (fired, started, flips)
     };
     for start in &started {

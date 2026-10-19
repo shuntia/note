@@ -173,7 +173,7 @@ async fn a_trigger_that_stays_quiet_sends_nothing_and_settles() {
 #[tokio::test]
 async fn a_firing_trigger_may_leave_one_follow_up_behind_inside_its_work_session() {
     let w = world(vec![
-        call("c1", "trigger_set", r#"{"at":"+30min","prompt":"still on the chapter?","cancel_on":"reply"}"#),
+        call("c1", "trigger_set", r#"{"at":"+30min","prompt":"still on the chapter?","cancel_on":"reply","session_check":true}"#),
         call("c2", "say", r#"{"text":"half an hour in — how far did you get?"}"#),
     ])
     .await;
@@ -196,6 +196,25 @@ async fn a_firing_trigger_may_leave_one_follow_up_behind_inside_its_work_session
 }
 
 #[tokio::test]
+async fn a_reminder_laid_inside_a_work_session_stays_on_the_day() {
+    let w = world(vec![
+        call("c1", "trigger_set", r#"{"at":"+90min","prompt":"remind them to hand it in","cancel_on":"reply"}"#),
+        call("c2", "say", r#"{"text":"half an hour in — how far did you get?"}"#),
+    ])
+    .await;
+    start_session(&w).await;
+    make_due(&w);
+
+    note_server::runner::sweep_once(&w.state);
+
+    let laid: Vec<Option<i64>> = rows(
+        &w,
+        "SELECT work_session_id FROM events WHERE kind = 'trigger' AND cancel_if = 'replied'",
+    );
+    assert_eq!(laid, vec![None], "only a session check belongs to the session");
+}
+
+#[tokio::test]
 async fn a_trigger_whose_reason_settled_itself_is_cancelled_before_any_session_runs() {
     let w = world(vec![call("c1", "say", r#"{"text":"never sent"}"#)]).await;
     let (status, task) = post(&w, "/api/tasks", r#"{"title":"the chapter"}"#).await;
@@ -215,6 +234,7 @@ async fn a_trigger_whose_reason_settled_itself_is_cancelled_before_any_session_r
                 cancel: Some(note_server::triggers::Cancel::TaskDone(task_id)),
                 conversation_id: None,
                 work_session_id: None,
+                session_check: false,
                 system: false,
                 now: jiff::Timestamp::now(),
             },
