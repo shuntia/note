@@ -315,6 +315,7 @@ mod tests {
             date: "2026-08-31".into(),
             channel: channel.into(),
             message: message.into(),
+            folded: Vec::new(),
         }
     }
 

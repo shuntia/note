@@ -75,17 +75,20 @@ pub enum TalkBusy {
 pub struct TalkGate {
     semaphore: Arc<tokio::sync::Semaphore>,
     active: Mutex<HashSet<i64>>,
+    freed: tokio::sync::Notify,
 }
 
 pub struct TalkPermit {
     gate: Arc<TalkGate>,
     user_id: i64,
-    _permit: tokio::sync::OwnedSemaphorePermit,
+    permit: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
 impl Drop for TalkPermit {
     fn drop(&mut self) {
         self.gate.active.lock().unwrap().remove(&self.user_id);
+        drop(self.permit.take());
+        self.gate.freed.notify_waiters();
     }
 }
 
@@ -104,6 +107,7 @@ impl TalkGate {
         Self {
             semaphore: Arc::new(tokio::sync::Semaphore::new(slots)),
             active: Mutex::new(HashSet::new()),
+            freed: tokio::sync::Notify::new(),
         }
     }
 
@@ -111,9 +115,22 @@ impl TalkGate {
         if !self.active.lock().unwrap().insert(user_id) {
             return Err(TalkBusy::UserBusy);
         }
-        if let Ok(permit) = self.semaphore.clone().try_acquire_owned() { Ok(TalkPermit { gate: self.clone(), user_id, _permit: permit }) } else {
+        if let Ok(permit) = self.semaphore.clone().try_acquire_owned() { Ok(TalkPermit { gate: self.clone(), user_id, permit: Some(permit) }) } else {
             self.active.lock().unwrap().remove(&user_id);
             Err(TalkBusy::Full)
+        }
+    }
+
+    /// `try_enter` that waits its turn instead of refusing.
+    pub async fn enter(self: &Arc<Self>, user_id: i64) -> TalkPermit {
+        loop {
+            let freed = self.freed.notified();
+            tokio::pin!(freed);
+            freed.as_mut().enable();
+            if let Ok(permit) = self.try_enter(user_id) {
+                return permit;
+            }
+            freed.await;
         }
     }
 }
@@ -157,6 +174,7 @@ pub struct AppState {
     /// See `auth::MAX_CONCURRENT_RECHECKS`.
     pub recheck_slots: Arc<tokio::sync::Semaphore>,
     pub talk_gate: Arc<TalkGate>,
+    pub wakes: Arc<crate::runner::Wakes>,
     /// How long `POST /api/talk` waits on a turn before answering that it is
     /// still going, kept under the 100 s a proxy in front allows a response.
     pub talk_hold: std::time::Duration,
@@ -226,6 +244,7 @@ impl AppState {
                 crate::auth::MAX_CONCURRENT_RECHECKS,
             )),
             talk_gate: Arc::new(TalkGate::new()),
+            wakes: Arc::default(),
             talk_hold: std::time::Duration::from_secs(45),
             share_gate: Arc::new(TalkGate::with_capacity(MAX_CONCURRENT_SHARE_TALKS)),
             live_turns: Arc::default(),
@@ -452,5 +471,20 @@ mod tests {
         assert!(matches!(gate.try_enter(5), Err(TalkBusy::Full)));
         drop(p1);
         let _p5 = gate.try_enter(1).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_turn_that_waits_gets_the_gate_once_it_frees() {
+        let gate = Arc::new(TalkGate::with_capacity(1));
+        let held = gate.try_enter(1).unwrap();
+        let waiting = tokio::spawn({
+            let gate = gate.clone();
+            async move { gate.enter(2).await.user_id }
+        });
+        tokio::task::yield_now().await;
+        assert!(!waiting.is_finished(), "the only slot is taken");
+        drop(held);
+        let entered = tokio::time::timeout(std::time::Duration::from_secs(5), waiting).await.unwrap().unwrap();
+        assert_eq!(entered, 2);
     }
 }

@@ -2,6 +2,7 @@
 //! speaks. Tool names, JSON keys and stored enum values stay as they are.
 
 use crate::text::Lang;
+use std::fmt::Write as _;
 
 impl Lang {
     const fn of(self, en: &'static str, ja: &'static str) -> &'static str {
@@ -623,6 +624,16 @@ pub fn await_prompt(l: Lang, said: &str) -> String {
         Lang::En => format!("Waiting for an answer to: \"{said}\""),
         Lang::Ja => format!("「{said}」への返事を待っている"),
     }
+}
+
+/// The prompts of other wake-ups due at the same moment, which this session
+/// answers too, so the user hears one message rather than several.
+pub fn also_due(l: Lang, prompts: &[String]) -> String {
+    let mut s = l.of("\nAlso due now; one ending answers them all:\n", "\n同じ時刻に重なった目覚め。一つの終わり方でまとめて答える:\n").to_string();
+    for p in prompts {
+        let _ = writeln!(s, "- {p}");
+    }
+    s
 }
 
 pub fn lay_day_prompt(l: Lang) -> &'static str {

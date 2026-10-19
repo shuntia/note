@@ -3,7 +3,9 @@ use crate::talk::{TurnError, Via};
 use crate::AppState;
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 const MIN_BACKOFF_SECS: u64 = 5;
 const MAX_BACKOFF_SECS: u64 = 60;
@@ -39,7 +41,46 @@ pub fn thread_for(conn: &Connection, user_id: i64, cutoff: jiff::Timestamp) -> R
 #[derive(Default)]
 pub struct Rooms {
     fresh: HashSet<i64>,
-    busy: HashSet<i64>,
+    queues: HashMap<i64, Queue>,
+}
+
+/// A message that found Note busy with the same user, answered once it is free.
+struct Queued {
+    room_id: String,
+    username: String,
+    text: String,
+    fresh: bool,
+}
+
+/// A user's messages waiting their turn, answered one at a time in the order
+/// sent; `waiting` counts those not yet answered.
+struct Queue {
+    tx: tokio::sync::mpsc::UnboundedSender<Queued>,
+    waiting: Arc<AtomicUsize>,
+}
+
+impl Queue {
+    fn start(state: &AppState, user_id: i64) -> Self {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Queued>();
+        let waiting = Arc::new(AtomicUsize::new(0));
+        let (state, left) = (state.clone(), waiting.clone());
+        tokio::spawn(async move {
+            while let Some(q) = rx.recv().await {
+                let conversation = if q.fresh { None } else { recent_thread(&state, user_id) };
+                let lang = crate::text::Lang::for_user(&state.config_dir, &q.username);
+                let done = crate::talk::run_turn_when_free(&state, user_id, &q.username, conversation, &q.text, Via::Matrix).await;
+                answer(&state, &q.room_id, user_id, lang, done).await;
+                left.fetch_sub(1, Ordering::SeqCst);
+            }
+        });
+        Self { tx, waiting }
+    }
+}
+
+/// The thread a message continues now; see `thread_for`.
+fn recent_thread(state: &AppState, user_id: i64) -> Option<i64> {
+    let cutoff = jiff::Timestamp::now() - jiff::Span::new().minutes(i64::from(state.idle_summary_min));
+    thread_for(&state.db(), user_id, cutoff).unwrap_or(None)
 }
 
 pub fn spawn(state: AppState) {
@@ -95,7 +136,6 @@ pub async fn poll_once(state: &AppState, rooms: &mut Rooms) -> Result<()> {
 /// One message from the linked account in its DM, answered there. Anything
 /// else is ignored.
 pub async fn receive(state: &AppState, rooms: &mut Rooms, message: &Message) {
-    let now = jiff::Timestamp::now();
     let linked = {
         let conn = state.db();
         crate::voice::links::linked_user(&conn, &message.room_id, &message.sender)
@@ -114,29 +154,38 @@ pub async fn receive(state: &AppState, rooms: &mut Rooms, message: &Message) {
         rooms.fresh.insert(user_id);
         return say(state, &message.room_id, user_id, &crate::text::matrix_fresh(lang)).await;
     }
-    let conversation = if rooms.fresh.remove(&user_id) {
-        None
-    } else {
-        let conn = state.db();
-        let cutoff = now - jiff::Span::new().minutes(i64::from(state.idle_summary_min));
-        thread_for(&conn, user_id, cutoff).unwrap_or(None)
-    };
-    match crate::talk::run_turn(state, user_id, &username, conversation, text, Via::Matrix, None).await {
-        Ok(turn) => {
-            rooms.busy.remove(&user_id);
-            say(state, &message.room_id, user_id, &turn.reply).await;
+    let fresh = rooms.fresh.remove(&user_id);
+    let queue = rooms.queues.entry(user_id).or_insert_with(|| Queue::start(state, user_id));
+    if queue.waiting.load(Ordering::SeqCst) == 0 {
+        let conversation = if fresh { None } else { recent_thread(state, user_id) };
+        match crate::talk::run_turn(state, user_id, &username, conversation, text, Via::Matrix, None).await {
+            Err(TurnError::Busy(_)) => {}
+            done => return answer(state, &message.room_id, user_id, lang, done).await,
         }
-        Err(TurnError::DailyCap) => say(state, &message.room_id, user_id, &crate::text::matrix_capped(lang)).await,
-        Err(TurnError::Busy(_)) => {
-            if rooms.busy.insert(user_id) {
-                say(state, &message.room_id, user_id, &crate::text::matrix_busy(lang)).await;
-            }
-        }
+    }
+    queue.waiting.fetch_add(1, Ordering::SeqCst);
+    let queued = Queued { room_id: message.room_id.clone(), username, text: text.to_string(), fresh };
+    if queue.tx.send(queued).is_err() {
+        queue.waiting.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Writes a turn's reply, or why there is none, back to the DM.
+async fn answer(
+    state: &AppState,
+    room_id: &str,
+    user_id: i64,
+    lang: crate::text::Lang,
+    done: Result<crate::talk::Turn, TurnError>,
+) {
+    match done {
+        Ok(turn) => say(state, room_id, user_id, &turn.reply).await,
+        Err(TurnError::DailyCap) => say(state, room_id, user_id, &crate::text::matrix_capped(lang)).await,
         Err(TurnError::Blank) => {}
         Err(TurnError::Unavailable(failure)) => {
-            say(state, &message.room_id, user_id, &crate::text::failure_reason(lang, failure.reason)).await;
+            say(state, room_id, user_id, &crate::text::failure_reason(lang, failure.reason)).await;
         }
-        Err(_) => say(state, &message.room_id, user_id, &crate::text::matrix_unreachable(lang)).await,
+        Err(_) => say(state, room_id, user_id, &crate::text::matrix_unreachable(lang)).await,
     }
 }
 

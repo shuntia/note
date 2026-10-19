@@ -71,16 +71,22 @@ async fn send(
     (status, serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null))
 }
 
-/// Brings every waiting trigger forward to the top of today, so one sweep
-/// fires it whatever time the suite runs at: an offset laid late in the day
-/// lands on tomorrow's plan, so the plan moves as well as the time.
+/// This minute in UTC, the users' zone here: a trigger laid for it is due and
+/// not yet late.
+fn this_minute() -> String {
+    jiff::Timestamp::now().to_zoned(jiff::tz::TimeZone::UTC).strftime("%H:%M").to_string()
+}
+
+/// Brings every waiting trigger forward to this minute, so one sweep fires it
+/// whatever time the suite runs at: an offset laid late in the day lands on
+/// tomorrow's plan, so the plan moves as well as the time.
 fn make_due(w: &World) {
     let conn = w.state.db.lock().unwrap();
     let today = jiff::Timestamp::now().to_zoned(jiff::tz::TimeZone::UTC).date();
     let plan = note_server::plan::ensure(&conn, &w.state.config_dir, "aki", 1, today).unwrap();
     conn.execute(
-        "UPDATE events SET plan_id = ?1, wall_time = '00:00' WHERE kind = 'trigger'",
-        [plan],
+        "UPDATE events SET plan_id = ?1, wall_time = ?2 WHERE kind = 'trigger'",
+        (plan, this_minute()),
     )
     .unwrap();
 }
@@ -305,7 +311,7 @@ fn lay_the_day(w: &World) {
         .unwrap()
         .timestamp();
     assert_eq!(note_server::wake::check(&conn, &w.state.config_dir, noon).unwrap().len(), 1);
-    conn.execute("UPDATE events SET wall_time = '00:00' WHERE origin = 'lay_day'", []).unwrap();
+    conn.execute("UPDATE events SET wall_time = ?1 WHERE origin = 'lay_day'", [this_minute()]).unwrap();
 }
 
 #[tokio::test]
@@ -377,7 +383,7 @@ fn lay_plain(w: &World) {
     let conn = w.state.db.lock().unwrap();
     let today = jiff::Timestamp::now().to_zoned(jiff::tz::TimeZone::UTC).date();
     let plan = note_server::plan::ensure(&conn, &w.state.config_dir, "aki", 1, today).unwrap();
-    note_server::triggers::insert(&conn, plan, "00:00", "see how the essay is going", "agent", None, None, None,
+    note_server::triggers::insert(&conn, plan, &this_minute(), "see how the essay is going", "agent", None, None, None,
         jiff::Timestamp::now()).unwrap();
 }
 
@@ -411,7 +417,10 @@ async fn a_waiting_say_resumes_its_session_when_the_wait_runs_out() {
 
     make_due(&w);
     note_server::runner::sweep_once(&w.state);
-    assert_eq!(wait_results(&w, 1), serde_json::json!({ "result": "Timed out" }));
+    let result = wait_results(&w, 1);
+    assert_eq!((result["result"].as_str(), result["ended_by"].as_str()), (Some("Timed out"), Some("timeout")));
+    let changed = result["changed"].as_str().unwrap_or_default();
+    assert!(!changed.contains("event_id 2)") && !changed.contains("event 2 "), "the wait's own firing is no news: {changed}");
     assert_eq!(statuses(&w), ["done", "done"]);
     assert!(rows::<i64>(&w, "SELECT event_id FROM paused_sessions").is_empty());
     assert_eq!(logged(&w, "trigger_quiet"), ["event 2: next wake-up calls"]);
@@ -430,10 +439,10 @@ async fn an_answer_ends_the_wait_and_the_session_goes_on_in_the_same_thread() {
     }
 
     note_server::runner::sweep_once(&w.state);
-    assert_eq!(
-        wait_results(&w, 1),
-        serde_json::json!({ "result": "User responded before timeout", "replies": ["ok starting"] })
-    );
+    let result = wait_results(&w, 1);
+    assert_eq!(result["result"], "User responded before timeout");
+    assert_eq!(result["ended_by"], "reply");
+    assert_eq!(result["replies"], serde_json::json!(["ok starting"]));
     let seen = w.push.seen();
     assert_eq!(seen[1].1.body, "good, the intro first");
     assert_eq!(seen[1].1.conversation_id, Some(thread), "the session goes on where it spoke");
@@ -621,4 +630,175 @@ async fn past_the_daily_session_cap_a_wake_up_is_dropped_unrun() {
     assert_eq!(statuses(&w), vec!["dropped"]);
     assert_eq!(logged(&w, "session_capped"), vec!["wake-up"]);
     assert!(logged(&w, "trigger_said").is_empty());
+}
+
+#[tokio::test]
+async fn finishing_the_task_ends_the_wait_and_the_session_hears_what_moved() {
+    let w = world(vec![call("c1", "say", WAIT), call("c2", "stay_quiet", r#"{"reason":"the essay is done"}"#)]).await;
+    let (status, task) = post(&w, "/api/tasks", r#"{"title":"the essay"}"#).await;
+    assert_eq!(status, StatusCode::OK, "{task}");
+    lay_plain(&w);
+    note_server::runner::sweep_once(&w.state);
+    assert_eq!(statuses(&w), ["done", "pending"]);
+
+    let (status, _) =
+        send(&w, Request::patch(format!("/api/tasks/{}", task["id"])), r#"{"state":"done"}"#).await;
+    assert_eq!(status, StatusCode::OK);
+    note_server::runner::sweep_once(&w.state);
+
+    let result = wait_results(&w, 1);
+    assert_eq!((result["result"].as_str(), result["ended_by"].as_str()), (Some("User acted before timeout"), Some("task_done")));
+    let changed = result["changed"].as_str().unwrap();
+    assert!(changed.contains("the essay"), "{changed}");
+    assert_eq!(statuses(&w), ["done", "done"]);
+}
+
+#[tokio::test]
+async fn a_resume_that_fails_keeps_its_session_parked_for_the_next_try() {
+    let w = world(vec![call("c1", "say", WAIT)]).await;
+    lay_plain(&w);
+    note_server::runner::sweep_once(&w.state);
+    make_due(&w);
+    let down = Arc::new(FailsAfter(MockLLM::scripted(Vec::new())));
+    note_server::runner::sweep_once(&w.state.clone().with_providers(down, None));
+
+    assert_eq!(statuses(&w), ["done", "fired"]);
+    assert_eq!(rows::<i64>(&w, "SELECT event_id FROM paused_sessions"), [2], "the parked session is still there");
+    w.state.db.lock().unwrap().execute("UPDATE events SET fired_at = '2000-01-01T00:00:00Z' WHERE id = 2", []).unwrap();
+    note_server::runner::sweep_once(&w.state);
+    assert_eq!(logged(&w, "trigger_retry"), ["event 2: try 2"]);
+}
+
+#[tokio::test]
+async fn triggers_due_together_fold_into_one_session_and_one_message() {
+    let w = world(vec![call("c1", "say", r#"{"text":"two things: the essay, and the call"}"#)]).await;
+    lay_plain(&w);
+    {
+        let conn = w.state.db.lock().unwrap();
+        let today = jiff::Timestamp::now().to_zoned(jiff::tz::TimeZone::UTC).date();
+        let plan = note_server::plan::ensure(&conn, &w.state.config_dir, "aki", 1, today).unwrap();
+        note_server::triggers::insert(&conn, plan, &this_minute(), "remind them to call the dentist", "agent", None, None, None,
+            jiff::Timestamp::now()).unwrap();
+    }
+    note_server::runner::sweep_once(&w.state);
+
+    assert_eq!(w.llm.seen().len(), 1, "one session for both");
+    let opening = format!("{:?}", w.llm.seen()[0].messages.last().unwrap());
+    assert!(opening.contains("see how the essay is going") && opening.contains("remind them to call the dentist"), "{opening}");
+    assert_eq!(w.push.seen().len(), 1, "one message for both");
+    assert_eq!(statuses(&w), ["done", "done"]);
+    assert_eq!(logged(&w, "trigger_folded"), ["event 2: folded into event 1"]);
+}
+
+#[tokio::test]
+async fn a_trigger_long_past_its_moment_is_dropped_unrun() {
+    let w = world(vec![call("c1", "say", r#"{"text":"never sent"}"#)]).await;
+    {
+        let conn = w.state.db.lock().unwrap();
+        let yesterday = jiff::Timestamp::now().to_zoned(jiff::tz::TimeZone::UTC).date().yesterday().unwrap();
+        let plan = note_server::plan::ensure(&conn, &w.state.config_dir, "aki", 1, yesterday).unwrap();
+        note_server::triggers::insert(&conn, plan, "09:00", "see how the essay is going", "agent", None, None, None,
+            jiff::Timestamp::now()).unwrap();
+    }
+    note_server::runner::sweep_once(&w.state);
+
+    assert!(w.llm.seen().is_empty());
+    assert!(w.push.seen().is_empty());
+    assert_eq!(statuses(&w), ["dropped"]);
+    assert_eq!(logged(&w, "trigger_stale").len(), 1);
+}
+
+/// Holds every round until let go, so a session can be caught mid-run.
+struct Held {
+    inner: MockLLM,
+    go: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    asked: std::sync::atomic::AtomicUsize,
+}
+
+impl Held {
+    fn new(script: Vec<ChatResponse>) -> (Arc<Self>, std::sync::mpsc::Sender<()>) {
+        let (go, held) = std::sync::mpsc::channel();
+        (Arc::new(Self { inner: MockLLM::scripted(script), go: held.into(), asked: Default::default() }), go)
+    }
+
+    /// Waits until a session is inside its first round, its gate held.
+    async fn first_round(&self) {
+        while self.asked.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    }
+}
+
+impl note_server::providers::LLMProvider for Held {
+    fn chat(&self, req: &note_server::providers::ChatRequest) -> anyhow::Result<ChatResponse> {
+        self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let _ = self.go.lock().unwrap().recv_timeout(std::time::Duration::from_secs(10));
+        self.inner.chat(req)
+    }
+}
+
+#[tokio::test]
+async fn a_running_wake_up_never_holds_up_the_sweep() {
+    let w = world(Vec::new()).await;
+    lay_plain(&w);
+    let (llm, go) = Held::new(vec![call("c1", "say", r#"{"text":"late but here"}"#)]);
+    let state = w.state.clone().with_providers(llm, None);
+
+    let wakes = note_server::runner::sweep(&state);
+    assert_eq!(wakes.len(), 1);
+    assert!(state.wakes.running().contains(&1));
+    assert_eq!(statuses(&w), ["fired"]);
+    assert!(note_server::runner::sweep(&state).is_empty(), "the user's wake-up is still running");
+    assert!(w.push.seen().is_empty());
+
+    go.send(()).unwrap();
+    for wake in wakes {
+        wake.join().unwrap();
+    }
+    assert_eq!(w.push.seen()[0].1.body, "late but here");
+    assert!(state.wakes.running().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reply_sent_while_the_waiting_session_finishes_still_answers_the_wait() {
+    let w = world(Vec::new()).await;
+    lay_plain(&w);
+    let script = vec![
+        call("c1", "say", WAIT),
+        ChatResponse { text: "go for it".into(), tool_calls: vec![] },
+        call("c2", "stay_quiet", r#"{"reason":"they started"}"#),
+    ];
+    let (llm, go) = Held::new(script);
+    let state = w.state.clone().with_providers(llm.clone(), None);
+
+    let wakes = note_server::runner::sweep(&state);
+    llm.first_round().await;
+    let busy = note_server::talk::run_turn(&state, 1, "aki", None, "ok starting", note_server::talk::Via::Matrix, None).await;
+    assert!(matches!(busy, Err(note_server::talk::TurnError::Busy(_))), "the wake-up holds the gate");
+    let reply = tokio::spawn({
+        let state = state.clone();
+        async move {
+            note_server::talk::run_turn_when_free(&state, 1, "aki", None, "ok starting", note_server::talk::Via::Matrix).await
+        }
+    });
+    for _ in 0..3 {
+        go.send(()).unwrap();
+    }
+    tokio::task::spawn_blocking(move || wakes.into_iter().for_each(|h| h.join().unwrap())).await.unwrap();
+    assert_eq!(reply.await.unwrap().unwrap().reply, "go for it", "the reply waited its turn and was answered");
+
+    note_server::runner::sweep_once(&state);
+    let resumed = llm.inner.seen();
+    let wait = resumed[2]
+        .messages
+        .iter()
+        .rev()
+        .find_map(|m| match m {
+            note_server::providers::Message::ToolResult { content, .. } => serde_json::from_str::<serde_json::Value>(content).ok(),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(wait["ended_by"], "reply");
+    assert_eq!(wait["replies"], serde_json::json!(["ok starting"]));
+    assert_eq!(statuses(&w), ["done", "done"]);
 }

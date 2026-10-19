@@ -89,7 +89,7 @@ fn check_one(
             return Ok(None);
         }
     }
-    if idle_pending(conn, user.user_id)? {
+    if idle_pending(conn, user.user_id, now)? {
         return Ok(None);
     }
     if crate::calendar::quiet_window(conn, user.user_id, &tz, now)?.is_some() {
@@ -196,12 +196,15 @@ fn last_idle_laid(conn: &Connection, user_id: i64) -> rusqlite::Result<Option<ji
     Ok(raw.and_then(|s| s.parse().ok()))
 }
 
-fn idle_pending(conn: &Connection, user_id: i64) -> rusqlite::Result<bool> {
+/// Whether an idle check is waiting or still running; one fired longer ago than
+/// a session runs is not.
+fn idle_pending(conn: &Connection, user_id: i64, now: jiff::Timestamp) -> rusqlite::Result<bool> {
+    let running_since = (now - jiff::SignedDuration::from_mins(triggers::SESSION_MAX_MIN)).to_string();
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM events e JOIN plans p ON p.id = e.plan_id
          WHERE p.user_id = ?1 AND e.kind = ?2 AND e.origin = ?3
-           AND e.status IN ('pending', 'snoozed', 'fired')",
-        (user_id, triggers::KIND, ORIGIN),
+           AND (e.status IN ('pending', 'snoozed') OR (e.status = 'fired' AND e.fired_at > ?4))",
+        (user_id, triggers::KIND, ORIGIN, running_since),
         |r| r.get(0),
     )?;
     Ok(n > 0)
@@ -395,6 +398,17 @@ mod tests {
         assert!(check(&conn, tmp.path(), at("2026-09-30T12:01:00Z")).unwrap().is_empty());
         assert!(check(&conn, tmp.path(), at("2026-09-30T12:19:00Z")).unwrap().is_empty());
         assert_eq!(check(&conn, tmp.path(), at("2026-09-30T12:20:00Z")).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn an_idle_check_stuck_fired_holds_nothing_back_once_it_could_not_be_running() {
+        let (conn, tmp, uid) = env("");
+        seen(&conn, uid, "2026-09-30T11:40:00Z");
+        let first = check(&conn, tmp.path(), noon()).unwrap();
+        conn.execute("UPDATE events SET status = 'fired', fired_at = '2026-09-30T12:00:00Z' WHERE id = ?1", [first[0]])
+            .unwrap();
+        assert!(check(&conn, tmp.path(), at("2026-09-30T12:25:00Z")).unwrap().is_empty(), "it may still be running");
+        assert_eq!(check(&conn, tmp.path(), at("2026-09-30T12:31:00Z")).unwrap().len(), 1);
     }
 
     fn ended(conn: &Connection, uid: i64, id: i64, kind: &str, ts: &str) {

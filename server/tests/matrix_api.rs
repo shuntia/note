@@ -169,3 +169,28 @@ async fn a_web_turn_in_a_matrix_thread_posts_nothing_to_matrix() {
         .unwrap();
     assert!(fake.silent(), "a web turn stays on the web");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_sent_while_note_is_busy_waits_its_turn_and_is_answered() {
+    let (state, fake, _cfg) = rig(says(&["first back", "second back"]), "linked");
+    caught_up(&state);
+    let wake_up = state.talk_gate.try_enter(1).unwrap();
+    fake.answer(&sync("s1", &[("!dm:t", "@aki:t", "first"), ("!dm:t", "@aki:t", "second")]));
+    fake.answer(SENT);
+    fake.answer(SENT);
+    let mut rooms = note_server::matrix::Rooms::default();
+    note_server::matrix::poll_once(&state, &mut rooms).await.unwrap();
+    fake.took();
+    assert!(fake.silent(), "nothing is answered, and nothing is said about it, while the gate is held");
+
+    drop(wake_up);
+    let body = |raw: String| {
+        serde_json::from_str::<serde_json::Value>(raw.split_once("\r\n\r\n").unwrap().1).unwrap()["body"].clone()
+    };
+    let (a, b) = tokio::task::spawn_blocking(move || (body(fake.took()), body(fake.took()))).await.unwrap();
+    assert_eq!((a, b), ("first back".into(), "second back".into()), "both are answered, in the order sent");
+    let conn = state.db();
+    let mut stmt = conn.prepare("SELECT content FROM talk_messages WHERE role = 'user' ORDER BY id").unwrap();
+    let said: Vec<String> = stmt.query_map([], |r| r.get(0)).unwrap().collect::<Result<_, _>>().unwrap();
+    assert_eq!(said, ["first", "second"]);
+}

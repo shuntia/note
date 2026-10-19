@@ -173,6 +173,7 @@ const OPERATIONAL_LOG_KINDS: &[&str] = &[
     "token_revoked",
     "totp_enrolled",
     "totp_removed",
+    "trigger_retry",
 ];
 
 /// How much of the material that can be shortened survives.
@@ -814,9 +815,69 @@ fn recent_activity(conn: &Connection, user_id: i64) -> Result<Vec<(String, Strin
     Ok(rows)
 }
 
+/// `text` split at its `# ` headings: each heading with the lines under it.
+fn sections(text: &str) -> Vec<(&str, Vec<&str>)> {
+    let mut out: Vec<(&str, Vec<&str>)> = vec![("", Vec::new())];
+    for line in text.lines().map(str::trim_end).filter(|l| !l.is_empty()) {
+        if line.starts_with("# ") {
+            out.push((line, Vec::new()));
+        } else if let Some((_, lines)) = out.last_mut() {
+            lines.push(line);
+        }
+    }
+    out
+}
+
+/// What moved between two renderings of the context, by section: `+ ` for a
+/// line that is new, `- ` for one gone. Empty when nothing moved; cut to at
+/// most `max` bytes on a line boundary.
+pub fn delta(old: &str, new: &str, max: usize) -> String {
+    let (before, after) = (sections(old), sections(new));
+    let lines_of = |all: &[(&str, Vec<&str>)], heading: &str| -> Vec<String> {
+        all.iter().filter(|(h, _)| *h == heading).flat_map(|(_, l)| l.iter().map(ToString::to_string)).collect()
+    };
+    let mut headings: Vec<&str> = Vec::new();
+    for (h, _) in after.iter().chain(&before) {
+        if !headings.contains(h) {
+            headings.push(h);
+        }
+    }
+    let mut out = String::new();
+    for heading in headings {
+        let (was, is) = (lines_of(&before, heading), lines_of(&after, heading));
+        let added = is.iter().filter(|l| !was.contains(l)).map(|l| format!("+ {l}"));
+        let gone = was.iter().filter(|l| !is.contains(l)).map(|l| format!("- {l}"));
+        let moved: Vec<String> = added.chain(gone).collect();
+        if moved.is_empty() {
+            continue;
+        }
+        let block = format!("{}{}\n", if heading.is_empty() { String::new() } else { format!("{heading}\n") }, moved.join("\n"));
+        for line in block.lines() {
+            if out.len() + line.len() + 1 > max {
+                return out;
+            }
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_delta_names_what_moved_under_each_heading() {
+        let old = "# Now\n\n09:00\n\n# Tasks\n\n- essay (open)\n- read (open)\n\n# Gone\n\nx\n";
+        let new = "# Now\n\n09:20\n\n# Tasks\n\n- essay (done)\n- read (open)\n- call mum (open)\n";
+        assert_eq!(
+            delta(old, new, 4000),
+            "# Now\n+ 09:20\n- 09:00\n# Tasks\n+ - essay (done)\n+ - call mum (open)\n- - essay (open)\n# Gone\n- x\n"
+        );
+        assert_eq!(delta(new, new, 4000), "", "nothing moved");
+        assert_eq!(delta(old, new, 20), "# Now\n+ 09:20\n", "cut on a line");
+    }
 
     /// Monday; 21:00 in Asia/Tokyo, 08:00 in `America/New_York`.
     const NOW: &str = "2026-08-31T12:00:00Z";

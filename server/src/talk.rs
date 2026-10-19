@@ -640,6 +640,33 @@ pub async fn run_turn(
     via: Via,
     started: Option<tokio::sync::oneshot::Sender<Started>>,
 ) -> Result<Turn, TurnError> {
+    turn(state, user_id, username, conversation, message, via, started, false).await
+}
+
+/// `run_turn` that waits for the user's other session, or a free slot, rather
+/// than refusing with `Busy`.
+pub async fn run_turn_when_free(
+    state: &AppState,
+    user_id: i64,
+    username: &str,
+    conversation: Option<i64>,
+    message: &str,
+    via: Via,
+) -> Result<Turn, TurnError> {
+    turn(state, user_id, username, conversation, message, via, None, true).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn turn(
+    state: &AppState,
+    user_id: i64,
+    username: &str,
+    conversation: Option<i64>,
+    message: &str,
+    via: Via,
+    started: Option<tokio::sync::oneshot::Sender<Started>>,
+    wait: bool,
+) -> Result<Turn, TurnError> {
     let message = message.trim().to_string();
     if message.is_empty() || message.len() > MAX_MESSAGE {
         return Err(TurnError::Blank);
@@ -672,7 +699,11 @@ pub async fn run_turn(
     if crate::api::daily_cap_reached(state, user_id) {
         return Err(TurnError::DailyCap);
     }
-    let permit = state.talk_gate.try_enter(user_id).map_err(TurnError::Busy)?;
+    let permit = if wait {
+        state.talk_gate.enter(user_id).await
+    } else {
+        state.talk_gate.try_enter(user_id).map_err(TurnError::Busy)?
+    };
 
     let st = state.clone();
     let session_user = username.to_string();
