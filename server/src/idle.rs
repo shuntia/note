@@ -169,13 +169,15 @@ struct Outcome {
     spoke_at: Option<jiff::Timestamp>,
 }
 
-/// The idle checks laid after `since`, newest first, with how each ended.
+/// The idle checks laid after `since`, newest first, with how each ended; a
+/// check that spoke counts as spoken whatever else it logged.
 fn outcomes_since(conn: &Connection, user_id: i64, since: jiff::Timestamp) -> rusqlite::Result<Vec<Outcome>> {
     let mut stmt = conn.prepare_cached(
         "SELECT e.decided_at,
                 (SELECT l.kind FROM event_log l
                   WHERE l.user_id = p.user_id AND l.kind IN ('trigger_said', 'trigger_quiet')
-                    AND l.detail LIKE 'event ' || e.id || ':%' LIMIT 1)
+                    AND l.detail LIKE 'event ' || e.id || ':%'
+                  ORDER BY l.kind = 'trigger_said' DESC, l.id LIMIT 1)
          FROM events e JOIN plans p ON p.id = e.plan_id
          WHERE p.user_id = ?1 AND e.kind = ?2 AND e.origin = ?3 AND e.created_at > ?4
          ORDER BY e.created_at DESC LIMIT 10",
@@ -507,6 +509,17 @@ mod tests {
         ended(&conn, uid, first, "trigger_said", "2026-09-30T12:01:00Z");
         assert!(lays(&conn, &tmp, "2026-09-30T13:00:00Z").is_none());
         assert!(lays(&conn, &tmp, "2026-09-30T13:01:00Z").is_some(), "an hour on, it may speak again");
+    }
+
+    #[test]
+    fn a_nudge_that_spoke_counts_as_spoken_whatever_it_logged_after() {
+        let (conn, tmp, uid) = env("");
+        seen(&conn, uid, "2026-09-30T11:40:00Z");
+        let first = lays(&conn, &tmp, "2026-09-30T12:00:00Z").unwrap();
+        ended(&conn, uid, first, "trigger_quiet", "2026-09-30T12:01:00Z");
+        crate::log::record(&conn, Some(uid), "trigger_said", &format!("event {first}: back to the essay?")).unwrap();
+        let outcomes = outcomes_since(&conn, uid, at("2026-09-30T11:40:00Z")).unwrap();
+        assert!(!outcomes[0].quiet && outcomes[0].spoke_at.is_some());
     }
 
     #[test]

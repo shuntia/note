@@ -12,6 +12,7 @@ pub mod day;
 pub mod due;
 pub mod db;
 pub mod failure;
+pub mod follow_up;
 pub mod goals;
 pub mod idle;
 pub mod inbox;

@@ -33,6 +33,9 @@ pub struct CallArgs {
     /// ids, times, what to settle — so it can talk without looking things up.
     #[serde(default)]
     pub brief: Option<String>,
+    /// Second call: the tasks the call pushes on, by id; omit to take the wake-up's own.
+    #[serde(default)]
+    pub task_ids: Vec<i64>,
 }
 
 pub const MAX_BRIEF_BYTES: usize = 1536;
@@ -47,6 +50,13 @@ struct Pending {
 /// The tokens one session's checks issued; they die with the session.
 #[derive(Default)]
 pub struct Calls(Vec<Pending>);
+
+impl Calls {
+    /// Whether a token is still good for the confirming call.
+    pub fn held(&self, now: Instant) -> bool {
+        self.0.iter().any(|p| now.duration_since(p.issued) < TOKEN_TTL)
+    }
+}
 
 pub struct Situation {
     pub busy: Option<crate::wake::Busy>,
@@ -212,6 +222,7 @@ pub struct Confirmed {
     pub brief: String,
     /// The user's words asking for the call, when the call overrode their seeming busy.
     pub asked: Option<String>,
+    pub task_ids: Vec<i64>,
 }
 
 impl Confirmed {
@@ -219,6 +230,7 @@ impl Confirmed {
     pub fn decided(&self) -> serde_json::Value {
         serde_json::json!({
             "said": self.opening, "ring": true, "reason": self.reason, "brief": self.brief, "asked": self.asked,
+            "task_ids": self.task_ids,
         })
     }
 
@@ -228,6 +240,7 @@ impl Confirmed {
             reason: v["reason"].as_str()?.to_string(),
             brief: v["brief"].as_str().unwrap_or_default().to_string(),
             asked: v["asked"].as_str().map(str::to_string),
+            task_ids: serde_json::from_value(v["task_ids"].clone()).unwrap_or_default(),
         })
     }
 
@@ -276,7 +289,13 @@ pub fn confirm(calls: &mut Calls, args: &CallArgs, now: Instant) -> Result<Confi
         )));
     }
     let pending = calls.0.remove(at);
-    Ok(Confirmed { opening: opening.to_string(), reason: pending.reason, brief: brief.to_string(), asked: pending.asked })
+    Ok(Confirmed {
+        opening: opening.to_string(),
+        reason: pending.reason,
+        brief: brief.to_string(),
+        asked: pending.asked,
+        task_ids: args.task_ids.clone(),
+    })
 }
 
 #[cfg(test)]
@@ -306,7 +325,7 @@ mod tests {
 
     fn confirmed(calls: &mut Calls, token: &str, at: Instant) -> Result<Confirmed, ToolError> {
         let json = serde_json::json!({
-            "token": token, "opening": "It's eleven — time to head out.", "brief": "bus 11:20 from Elm St",
+            "token": token, "opening": "It's eleven — time to head out.", "brief": "bus 11:20 from Elm St", "task_ids": [3],
         });
         confirm(calls, &args(&json.to_string()), at)
     }
@@ -361,6 +380,7 @@ mod tests {
             reason: "the 11:00 call".into(),
             brief: "bus 11:20 from Elm St".into(),
             asked: None,
+            task_ids: vec![3],
         });
         assert!(is_confirmed(&c.decided().to_string()));
         assert_eq!(Confirmed::from_decided(&c.decided()).as_ref(), Some(&c));

@@ -74,6 +74,9 @@ pub struct SayArgs {
     /// then goes on, told whether the user answered or acted.
     #[serde(default)]
     pub await_min: Option<u32>,
+    /// The tasks these words push on, by id; omit to take the wake-up's own.
+    #[serde(default)]
+    pub task_ids: Vec<i64>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -339,6 +342,9 @@ pub fn say(args: &SayArgs) -> Result<serde_json::Value, ToolError> {
         return Err(ToolError::rejected(format!("text must be 1 to {} bytes", triggers::MAX_SAY_BYTES)));
     }
     let mut out = serde_json::json!({ "said": text, "notes": args.notes });
+    if !args.task_ids.is_empty() {
+        out["task_ids"] = serde_json::json!(args.task_ids);
+    }
     if let Some(min) = args.await_min {
         if !triggers::AWAIT_MIN.contains(&min) {
             return Err(ToolError::rejected(format!(

@@ -444,6 +444,7 @@ async fn a_waiting_say_resumes_its_session_when_the_wait_runs_out() {
     assert_eq!(statuses(&w), ["done", "done"]);
     assert!(rows::<i64>(&w, "SELECT event_id FROM paused_sessions").is_empty());
     assert_eq!(logged(&w, "trigger_quiet"), ["event 2: next wake-up calls"]);
+    assert_eq!(rows::<String>(&w, "SELECT outcome FROM outreach"), ["ignored"], "the wait ran out unanswered");
 }
 
 #[tokio::test]
@@ -466,6 +467,8 @@ async fn an_answer_ends_the_wait_and_the_session_goes_on_in_the_same_thread() {
     let seen = w.push.seen();
     assert_eq!(seen[1].1.body, "good, the intro first");
     assert_eq!(seen[1].1.conversation_id, Some(thread), "the session goes on where it spoke");
+    assert_eq!(rows::<Option<String>>(&w, "SELECT outcome FROM outreach ORDER BY id"), [Some("answered".to_string()), None]);
+    assert_eq!(rows::<Option<i64>>(&w, "SELECT wait_min FROM outreach ORDER BY id"), [Some(15), None]);
 }
 
 const CHECK: &str = r#"{"reason":"talk the essay through"}"#;
@@ -509,6 +512,7 @@ async fn a_free_user_with_the_app_open_gets_the_call_there() {
     assert!(w.push.seen().is_empty(), "a call is not also a notification");
     assert_eq!(logged(&w, "trigger_rang"), ["event 1: web: talk the essay through"]);
     assert_eq!(logged(&w, "trigger_said"), ["event 1: Want to talk the essay through?"]);
+    assert_eq!(rows::<String>(&w, "SELECT via FROM outreach"), ["call"]);
     assert_eq!(statuses(&w), ["done"]);
     let checked = tool_results(&w, 1);
     assert!(checked[0].contains("anticipate what it will cover"), "{checked:?}");
@@ -622,8 +626,12 @@ async fn the_trigger_log_shows_the_owners_triggers_and_how_they_ended() {
 }
 
 #[tokio::test]
-async fn a_wake_up_that_ends_in_plain_text_still_speaks() {
-    let w = world(vec![ChatResponse { text: "Back to the chapter?".into(), tool_calls: vec![] }]).await;
+async fn a_wake_up_that_answers_in_text_is_made_to_decide_and_its_narration_never_goes_out() {
+    let w = world(vec![
+        ChatResponse { text: "Let me look at the plan first.".into(), tool_calls: vec![] },
+        call("c1", "say", r#"{"text":"Back to the chapter?"}"#),
+    ])
+    .await;
     start_session(&w).await;
     make_due(&w);
 
@@ -633,7 +641,82 @@ async fn a_wake_up_that_ends_in_plain_text_still_speaks() {
     assert_eq!(seen.len(), 1);
     assert_eq!(seen[0].1.body, "Back to the chapter?");
     assert_eq!(statuses(&w), vec!["done"]);
-    assert_eq!(logged(&w, "trigger_said").len(), 1);
+    let rounds = w.llm.seen();
+    assert_eq!(rounds[1].tool_names, ["say", "stay_quiet"], "only an ending is offered, and no call without a token");
+    assert_eq!(rounds[1].must_call.as_deref(), Some("*"));
+}
+
+#[tokio::test]
+async fn a_wake_up_that_never_decides_sends_nothing_and_is_left_for_another_try() {
+    let w = world(vec![
+        ChatResponse { text: "Let me look at the plan first.".into(), tool_calls: vec![] },
+        ChatResponse { text: "Checking the order now.".into(), tool_calls: vec![] },
+    ])
+    .await;
+    start_session(&w).await;
+    make_due(&w);
+
+    note_server::runner::sweep_once(&w.state);
+
+    assert!(w.push.seen().is_empty());
+    assert!(logged(&w, "trigger_said").is_empty());
+    assert_eq!(statuses(&w), vec!["fired"]);
+    assert_eq!(logged(&w, "trigger_error").len(), 1);
+    assert_eq!(rows::<i64>(&w, "SELECT COUNT(*) FROM outreach"), [0]);
+}
+
+/// Moves every outreach back by `min` minutes, window and all.
+fn age_outreach(w: &World, min: i64) {
+    let conn = w.state.db.lock().unwrap();
+    let mut stmt = conn.prepare("SELECT id, at, window_until FROM outreach").unwrap();
+    let all: Vec<(i64, String, String)> =
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+    let back = |t: &str| (t.parse::<jiff::Timestamp>().unwrap() - jiff::SignedDuration::from_mins(min)).to_string();
+    for (id, at, until) in all {
+        conn.execute("UPDATE outreach SET at = ?1, window_until = ?2 WHERE id = ?3", (back(&at), back(&until), id)).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn an_ignored_nudge_raises_the_level_the_next_wake_up_reads_and_acting_resets_it() {
+    let w = world(vec![
+        call("c1", "say", r#"{"text":"start the essay?","task_ids":[1]}"#),
+        call("c2", "say", r#"{"text":"just the first paragraph, now?"}"#),
+        call("c3", "stay_quiet", r#"{"reason":"they are on it"}"#),
+    ])
+    .await;
+    let (status, task) = post(&w, "/api/tasks", r#"{"title":"the essay"}"#).await;
+    assert_eq!((status, task["id"].as_i64()), (StatusCode::OK, Some(1)), "{task}");
+    lay_plain(&w);
+    note_server::runner::sweep_once(&w.state);
+    let first: Vec<(String, i64)> = {
+        let conn = w.state.db.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT o.via, ot.task_id FROM outreach o JOIN outreach_tasks ot ON ot.outreach_id = o.id").unwrap();
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().collect::<rusqlite::Result<_>>().unwrap()
+    };
+    assert_eq!(first, [("message".to_string(), 1)]);
+
+    age_outreach(&w, 60);
+    {
+        let conn = w.state.db.lock().unwrap();
+        let today = jiff::Timestamp::now().to_zoned(jiff::tz::TimeZone::UTC).date();
+        let plan = note_server::plan::ensure(&conn, &w.state.config_dir, "aki", 1, today).unwrap();
+        let next = note_server::triggers::insert(&conn, plan, &this_minute(), "the essay again", "agent", None, None, None, jiff::Timestamp::now()).unwrap();
+        conn.execute("INSERT INTO event_tasks (event_id, task_id) VALUES (?1, 1)", [next]).unwrap();
+    }
+    note_server::runner::sweep_once(&w.state);
+    let opening = format!("{:?}", w.llm.seen()[1].messages.last().unwrap());
+    assert!(opening.contains("msg ignored — level 1"), "{opening}");
+    assert!(opening.contains("task 1 the essay"), "{opening}");
+    assert_eq!(rows::<i64>(&w, "SELECT level FROM outreach ORDER BY id"), [0, 1]);
+    assert_eq!(rows::<i64>(&w, "SELECT task_id FROM outreach_tasks ORDER BY outreach_id"), [1, 1], "the second took its trigger's task");
+
+    let (status, _) = post(&w, "/api/sessions", r#"{"title":"the essay","task_id":1}"#).await;
+    assert_eq!(status, StatusCode::OK);
+    lay_plain(&w);
+    note_server::runner::sweep_once(&w.state);
+    let opening = format!("{:?}", w.llm.seen()[2].messages.last().unwrap());
+    assert!(opening.contains("— level 0, acted"), "{opening}");
 }
 
 #[tokio::test]
