@@ -65,9 +65,12 @@ pub fn situation(
 ) -> Result<Situation, ToolError> {
     let internal = |e: &dyn std::fmt::Display| ToolError::internal(e.to_string());
     let tz = crate::triggers::timezone(config_dir, username);
-    let busy = crate::wake::seems_busy(conn, user_id, &tz, now).map_err(|e| internal(&e))?;
-    let ring_for = crate::config::UserConfig::load(config_dir, username)
-        .map_or_else(|_| crate::config::RING_FOR_URGENT.to_string(), |c| c.ring_for().to_string());
+    let cfg = crate::config::UserConfig::load(config_dir, username).ok();
+    let day = cfg.as_ref().map_or((crate::config::DEFAULT_DAY_START, crate::config::DEFAULT_CLOSE_DAY_TIME), |c| {
+        (c.day_start(), c.close_day_time())
+    });
+    let busy = crate::wake::seems_busy(conn, user_id, &tz, day, now).map_err(|e| internal(&e))?;
+    let ring_for = cfg.as_ref().map_or(crate::config::RING_FOR_URGENT, |c| c.ring_for()).to_string();
     let live_call = conn
         .query_row(
             "SELECT EXISTS (SELECT 1 FROM voice_calls WHERE user_id = ?1 AND state != 'ended')",
@@ -456,8 +459,7 @@ mod tests {
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::fs::write(p, "display_name = \"X\"\ntimezone = \"UTC\"\ntemplate = \"default\"\nring_for = \"never\"\n")
             .unwrap();
-        let now = jiff::Timestamp::now();
-        crate::presence::touch(&conn, 1, now).unwrap();
+        let now: jiff::Timestamp = "2026-10-07T12:00:00Z".parse().unwrap();
         let s = situation(&conn, tmp.path(), "aki", 1, Reach::default(), now).unwrap();
         assert_eq!((s.busy, s.ring_for.as_str(), s.live_call), (None, "never", false));
 
@@ -467,8 +469,9 @@ mod tests {
             [],
         )
         .unwrap();
-        conn.execute("UPDATE users SET last_active_at = '2000-01-01T00:00:00Z'", []).unwrap();
-        let s = situation(&conn, tmp.path(), "aki", 1, Reach::default(), now).unwrap();
-        assert_eq!((s.busy, s.live_call), (Some(Busy::Away), true));
+        let late: jiff::Timestamp = "2026-10-07T23:00:00Z".parse().unwrap();
+        let s = situation(&conn, tmp.path(), "aki", 1, Reach::default(), late).unwrap();
+        let night = Busy::Night { start: "08:00".into(), end: "21:30".into() };
+        assert_eq!((s.busy, s.live_call), (Some(night), true));
     }
 }

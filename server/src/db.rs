@@ -460,6 +460,15 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE plans ADD COLUMN bare INTEGER NOT NULL DEFAULT 0;",
     "ALTER TABLE tasks ADD COLUMN due_on TEXT CHECK (due_on IS NULL OR due_at IS NOT NULL);
      ALTER TABLE goals ADD COLUMN due_on TEXT CHECK (due_on IS NULL OR due_at IS NOT NULL);",
+    "ALTER TABLE events ADD COLUMN origin_next TEXT NOT NULL DEFAULT 'template'
+         CHECK (origin_next IN ('template','agent','auto','user','idle','lay_day','await_reply'));
+     UPDATE events SET origin_next = origin;
+     ALTER TABLE events DROP COLUMN origin;
+     ALTER TABLE events RENAME COLUMN origin_next TO origin;
+     CREATE TABLE paused_sessions (
+         event_id INTEGER PRIMARY KEY REFERENCES events(id) ON DELETE CASCADE,
+         session TEXT NOT NULL
+     );",
 ];
 
 pub fn server_setting(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
@@ -549,6 +558,28 @@ mod tests {
             [],
         )
         .unwrap();
+    }
+
+    #[test]
+    fn v59_lets_an_event_await_a_reply_and_keeps_its_origins() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        apply_migrations(&conn, BASELINE, &MIGRATIONS[..3]).unwrap();
+        conn.execute_batch(
+            "INSERT INTO users (username, pass_hash, role) VALUES ('a','h','member');
+             INSERT INTO plans (user_id, date, created_at) VALUES (1, '2026-10-18', 'x');
+             INSERT INTO events (plan_id, kind, wall_time, origin) VALUES (1, 'trigger', '09:00', 'idle');",
+        )
+        .unwrap();
+        apply_migrations(&conn, BASELINE, MIGRATIONS).unwrap();
+        let origin: String = conn.query_row("SELECT origin FROM events", [], |r| r.get(0)).unwrap();
+        assert_eq!(origin, "idle");
+        let add = |origin: &str| {
+            conn.execute("INSERT INTO events (plan_id, kind, wall_time, origin) VALUES (1, 'trigger', '10:00', ?1)", [origin])
+        };
+        add("await_reply").unwrap();
+        assert!(add("nope").is_err());
+        conn.execute("INSERT INTO paused_sessions (event_id, session) VALUES (2, '{}')", []).unwrap();
     }
 
     #[test]

@@ -65,6 +65,10 @@ pub struct SayArgs {
     /// The ids of the working notes these words are about, when a nudge names any.
     #[serde(default)]
     pub notes: Vec<String>,
+    /// Wait up to this many minutes, 5 to 120, for an answer; this session
+    /// then goes on, told whether the user answered.
+    #[serde(default)]
+    pub await_min: Option<u32>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -322,7 +326,23 @@ pub fn say(args: &SayArgs) -> Result<serde_json::Value, ToolError> {
     if text.is_empty() || text.len() > triggers::MAX_SAY_BYTES {
         return Err(ToolError::rejected(format!("text must be 1 to {} bytes", triggers::MAX_SAY_BYTES)));
     }
-    Ok(serde_json::json!({ "said": text, "notes": args.notes }))
+    let mut out = serde_json::json!({ "said": text, "notes": args.notes });
+    if let Some(min) = args.await_min {
+        if !triggers::AWAIT_MIN.contains(&min) {
+            return Err(ToolError::rejected(format!(
+                "await_min must be {} to {}",
+                triggers::AWAIT_MIN.start(),
+                triggers::AWAIT_MIN.end()
+            )));
+        }
+        out["await_min"] = min.into();
+    }
+    Ok(out)
+}
+
+/// Whether a successful `name` result is a `say` that waits for an answer.
+pub fn waits(name: &str, result: &str) -> bool {
+    name == "say" && serde_json::from_str::<serde_json::Value>(result).is_ok_and(|v| v["await_min"].is_u64())
 }
 
 pub fn stay_quiet(
@@ -602,6 +622,20 @@ mod tests {
         let out = dispatch(&conn, &ctx(&tmp), SessionKind::Trigger, "say", r#"{"text":"hi"}"#)
             .unwrap();
         assert_eq!(out["notes"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn say_can_wait_for_an_answer() {
+        let (conn, tmp) = env();
+        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Trigger, "say",
+            r#"{"text":"start the essay now","await_min":15}"#).unwrap();
+        assert_eq!(out["await_min"].as_u64(), Some(15));
+        assert!(super::waits("say", &out.to_string()));
+        assert!(!super::waits("say", r#"{"said":"hi","notes":[]}"#));
+        for args in [r#"{"text":"hi","await_min":2}"#, r#"{"text":"hi","await_min":500}"#] {
+            let e = dispatch(&conn, &ctx(&tmp), SessionKind::Trigger, "say", args).unwrap_err();
+            assert_eq!(e.kind, "rejected", "{args}");
+        }
     }
 
     #[test]

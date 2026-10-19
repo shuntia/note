@@ -918,15 +918,19 @@ const TOOLS: &[ToolSpec] = tools![
          for; the day's routine follows the new clock.",
     "say": trigger_ops::SayArgs => run!(only &trigger_ops::say), terminal_in = &[SessionKind::Trigger];
         "Say this to the user and end the session: one or two warm sentences, no greeting \
-         ritual. It lands in the thread and as a notification. To call instead, use call_user.",
+         ritual. It lands in the thread and as a notification. To call instead, use call_user. \
+         With await_min the session waits instead of ending: the message goes out now, and \
+         the result comes back \"Timed out\" or \"User responded before timeout\" with what \
+         they wrote, as soon as they write anywhere; you go on from there in the same thread.",
     "call_user": call_ops::CallArgs => Exec::Session, terminal_in = &[SessionKind::Trigger];
         "Call the user: the open web app and the linked phone ring together; whichever answers \
          first takes the call. Always two calls. First with reason (plus asked and quote, the \
          user's own words, only when they asked to be called): it rings nothing, says whether \
          a call is allowed now, and returns a token and what to prepare. Then, only if you \
          still mean to, again with that token, opening — your first words when they pick up — \
-         and brief, what the call needs to know. Refused while the user seems busy — working, \
-         in a calendar event, in a quiet window, or away for 90 minutes — unless they asked; \
+         and brief, what the call needs to know. Refused while the user is busy — working, in a \
+         calendar event, in a quiet window, or outside their day — unless they asked; being \
+         away from the app is no bar, since a call is what reaches them then; \
          never rings when their settings say never. In a wake-up, the second call ends the \
          session.",
     "stay_quiet": trigger_ops::QuietArgs => run!(&trigger_ops::stay_quiet), terminal_in = &[SessionKind::Trigger];

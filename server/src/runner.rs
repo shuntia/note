@@ -186,7 +186,8 @@ pub fn fire_due(
                 continue;
             }
         };
-        if due <= now {
+        let answered = || c.kind == crate::triggers::KIND && crate::triggers::answered(conn, c.user_id, c.event_id).unwrap_or(false);
+        if due <= now || answered() {
             if defer_while_quiet(conn, &c, &rt.tz, now)? {
                 continue;
             }

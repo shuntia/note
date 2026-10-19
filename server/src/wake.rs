@@ -119,14 +119,12 @@ fn laid_on(conn: &Connection, user_id: i64, date: jiff::civil::Date, now: jiff::
     })
 }
 
-pub const AWAY_MIN: i64 = 90;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Busy {
     Quiet { title: String, until: String },
     Event { title: String, until: String },
     Working { title: String },
-    Away,
+    Night { start: String, end: String },
 }
 
 impl Busy {
@@ -135,16 +133,18 @@ impl Busy {
             Busy::Quiet { title, until } => format!("a quiet window ({title}) runs until {until}"),
             Busy::Event { title, until } => format!("{title} is on until {until}"),
             Busy::Working { title } => format!("a work session on {title} is running"),
-            Busy::Away => format!("the user has not been active for {AWAY_MIN} minutes"),
+            Busy::Night { start, end } => format!("it is outside the user's day ({start} to {end})"),
         }
     }
 }
 
-/// Why now is not a moment to call, if it is not.
+/// Why now is not a moment to call, if it is not. `day` is the user's
+/// `day_start` and `close_day_time`; either may be blank.
 pub fn seems_busy(
     conn: &Connection,
     user_id: i64,
     tz: &jiff::tz::TimeZone,
+    day: (&str, &str),
     now: jiff::Timestamp,
 ) -> Result<Option<Busy>> {
     if let Some(w) = crate::calendar::quiet_window(conn, user_id, tz, now)? {
@@ -160,9 +160,10 @@ pub fn seems_busy(
     if let Some(s) = triggers::open_work_session(conn, user_id)? {
         return Ok(Some(Busy::Working { title: s.title }));
     }
-    let away = crate::presence::last_active(conn, user_id)?
-        .is_none_or(|t| now.as_second() - t.as_second() > AWAY_MIN * 60);
-    Ok(away.then_some(Busy::Away))
+    let night = at.as_str() < day.0 || (!day.1.is_empty() && at.as_str() >= day.1);
+    let start = if day.0.is_empty() { "00:00" } else { day.0 };
+    let end = if day.1.is_empty() { "24:00" } else { day.1 };
+    Ok(night.then(|| Busy::Night { start: start.into(), end: end.into() }))
 }
 
 #[cfg(test)]
@@ -299,7 +300,7 @@ mod tests {
     }
 
     fn busy(conn: &Connection, uid: i64) -> Option<Busy> {
-        seems_busy(conn, uid, &jiff::tz::TimeZone::UTC, noon()).unwrap()
+        seems_busy(conn, uid, &jiff::tz::TimeZone::UTC, ("08:00", "21:30"), noon()).unwrap()
     }
 
     fn entry(conn: &Connection, uid: i64, kind: &str, quiet: bool) {
@@ -322,13 +323,15 @@ mod tests {
     }
 
     #[test]
-    fn a_user_never_seen_is_away() {
+    fn a_user_away_from_the_app_is_free_but_not_outside_their_day() {
         let (conn, _tmp, uid) = env("");
-        assert_eq!(busy(&conn, uid), Some(Busy::Away));
-        seen(&conn, uid, "2026-10-07T10:29:00Z");
-        assert_eq!(busy(&conn, uid), Some(Busy::Away), "91 minutes is away");
-        seen(&conn, uid, "2026-10-07T10:30:00Z");
-        assert_eq!(busy(&conn, uid), None);
+        assert_eq!(busy(&conn, uid), None, "being away is when a call reaches them");
+        let at = |day| seems_busy(&conn, uid, &jiff::tz::TimeZone::UTC, day, noon()).unwrap();
+        let night = |start: &str, end: &str| Some(Busy::Night { start: start.into(), end: end.into() });
+        assert_eq!(at(("12:01", "21:30")), night("12:01", "21:30"));
+        assert_eq!(at(("08:00", "12:00")), night("08:00", "12:00"));
+        assert_eq!(at(("", "")), None);
+        assert_eq!(at(("13:00", "")), night("13:00", "24:00"));
     }
 
     #[test]

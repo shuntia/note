@@ -616,6 +616,15 @@ pub fn close_day_prompt(l: Lang) -> &'static str {
     )
 }
 
+/// What a waiting `say`'s event shows in the plan; its session resumes from
+/// where it paused rather than from this.
+pub fn await_prompt(l: Lang, said: &str) -> String {
+    match l {
+        Lang::En => format!("Waiting for an answer to: \"{said}\""),
+        Lang::Ja => format!("「{said}」への返事を待っている"),
+    }
+}
+
 pub fn lay_day_prompt(l: Lang) -> &'static str {
     l.of(
         "The user's day has begun. Lay the day: check today's order and set it if the night left \

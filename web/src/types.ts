@@ -21,7 +21,7 @@ export type InviteCreated = Invite & { token: string; url: string }
 export type MovedTo = { event_id: number; date: string; wall_time: string; kind: string }
 
 // Where the event came from: the template, the agent, the allocator, or a user edit.
-export type EventOrigin = 'template' | 'agent' | 'auto' | 'user' | 'idle' | 'lay_day'
+export type EventOrigin = 'template' | 'agent' | 'auto' | 'user' | 'idle' | 'lay_day' | 'await_reply'
 
 export type TaskUrgency = 'low' | 'normal' | 'high'
 

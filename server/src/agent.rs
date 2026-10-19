@@ -209,6 +209,39 @@ pub struct SessionOutcome {
     pub reasoning: String,
     /// Wall clock from the first provider call to the reply, in milliseconds.
     pub thought_ms: u64,
+    /// Set when a wake-up's `say` waits for an answer: the session resumes
+    /// from here once the user writes or the wait runs out.
+    pub paused: Option<Paused>,
+}
+
+/// A session stopped at a waiting `say`: everything up to its round, the id of
+/// that call, and the ids of the calls after it in the round, never run.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Paused {
+    pub messages: Vec<Message>,
+    pub call_id: String,
+    pub skipped: Vec<String>,
+}
+
+impl Paused {
+    /// The messages to resume from, with `result` answering the waiting call.
+    pub fn answered(self, result: &str) -> Vec<Message> {
+        let mut messages = self.messages;
+        messages.push(Message::ToolResult { call_id: self.call_id, content: result.to_string(), is_error: false });
+        for call_id in self.skipped {
+            let content = r#"{"kind":"skipped","message":"not run: the session waited at say"}"#.to_string();
+            messages.push(Message::ToolResult { call_id, content, is_error: true });
+        }
+        messages
+    }
+}
+
+/// Where a session begins: fresh, after `history` with `opening`, or resumed
+/// from a paused wake-up's `messages`; `heard` is what the user wrote since.
+#[derive(Clone, Copy)]
+enum Start<'a> {
+    Fresh { history: &'a [Message], opening: &'a str },
+    Resumed { messages: &'a [Message], heard: &'a [String] },
 }
 
 /// One step of a session as it happens, for a caller that shows progress while
@@ -277,10 +310,42 @@ pub fn run_session_stoppable(
     on_event: &dyn Fn(AgentEvent),
     stop: Option<&AtomicBool>,
 ) -> Result<SessionOutcome> {
-    let mut trace = crate::trace::Builder::new(kind, opening);
+    traced(deps, user_id, username, kind, now, Start::Fresh { history, opening }, on_event, stop)
+}
+
+/// Picks a paused wake-up back up from `messages`, which end on the answer to
+/// its waiting `say`; `heard` is what the user wrote while it waited.
+pub fn resume_session(
+    deps: &SessionDeps,
+    user_id: i64,
+    username: &str,
+    now: jiff::Timestamp,
+    messages: &[Message],
+    heard: &[String],
+    on_event: &dyn Fn(AgentEvent),
+) -> Result<SessionOutcome> {
+    let start = Start::Resumed { messages, heard };
+    traced(deps, user_id, username, SessionKind::Trigger, now, start, on_event, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn traced(
+    deps: &SessionDeps,
+    user_id: i64,
+    username: &str,
+    kind: SessionKind,
+    now: jiff::Timestamp,
+    start: Start,
+    on_event: &dyn Fn(AgentEvent),
+    stop: Option<&AtomicBool>,
+) -> Result<SessionOutcome> {
+    let label = match start {
+        Start::Fresh { opening, .. } => opening,
+        Start::Resumed { .. } => "resumed after waiting for an answer",
+    };
+    let mut trace = crate::trace::Builder::new(kind, label);
     let meter = crate::usage::Meter::open();
-    let result =
-        run_traced(deps, user_id, username, kind, now, history, opening, on_event, stop, &mut trace);
+    let result = run_traced(deps, user_id, username, kind, now, start, on_event, stop, &mut trace);
     if let Err(e) = &result {
         trace.failed(&format!("{e:#}"));
     }
@@ -449,8 +514,7 @@ fn run_traced(
     username: &str,
     kind: SessionKind,
     now: jiff::Timestamp,
-    history: &[Message],
-    opening: &str,
+    start: Start,
     on_event: &dyn Fn(AgentEvent),
     stop: Option<&AtomicBool>,
     trace: &mut crate::trace::Builder,
@@ -463,22 +527,32 @@ fn run_traced(
         (SessionKind::Share, Some(s)) => tools::share_schemas(&s.scope).into(),
         _ => tools::offered_schemas(kind, deps.search.is_some()).into(),
     };
-    let mut messages = history.to_vec();
-    messages.extend(prompt.opening(opening));
+    let mut messages = match start {
+        Start::Fresh { history, opening } => {
+            let mut m = history.to_vec();
+            m.extend(prompt.opening(opening));
+            m
+        }
+        Start::Resumed { messages, .. } => messages.to_vec(),
+    };
     let mut turns = 0;
     let mut tool_calls = 0;
     let mut steps = Vec::new();
     let mut last_text = String::new();
     let max_turns = profile.max_turns;
     let background = profile.background;
-    let heard = history
-        .iter()
-        .filter_map(|m| match m {
-            Message::User(text) => Some(text.clone()),
-            _ => None,
-        })
-        .chain((kind == SessionKind::Talk).then(|| opening.to_string()))
-        .collect();
+    let said_by_user = |m: &Message| match m {
+        Message::User(text) => Some(text.clone()),
+        _ => None,
+    };
+    let heard = match start {
+        Start::Fresh { history, opening } => history
+            .iter()
+            .filter_map(said_by_user)
+            .chain((kind == SessionKind::Talk).then(|| opening.to_string()))
+            .collect(),
+        Start::Resumed { messages, heard } => messages.iter().filter_map(said_by_user).chain(heard.iter().cloned()).collect(),
+    };
     let env = CallEnv {
         deps,
         user_id,
@@ -552,6 +626,7 @@ fn run_traced(
                 steps,
                 reasoning: thinking.unwrap_or_default(),
                 thought_ms,
+                paused: None,
             });
         }
         if last {
@@ -560,7 +635,7 @@ fn run_traced(
         let calls = resp.tool_calls.clone();
         messages.push(Message::Assistant { text: last_text.clone(), tool_calls: resp.tool_calls });
         let acted = env.acted.get();
-        for call in calls {
+        for (i, call) in calls.iter().cloned().enumerate() {
             if stopped() {
                 break 'rounds;
             }
@@ -586,6 +661,11 @@ fn run_traced(
                 trace.ok(&content);
                 finish(deps, user_id, kind, turns, tool_calls, profile.log_session)?;
                 let thought_ms = started.elapsed().as_millis() as u64;
+                let paused = (kind == SessionKind::Trigger && tools::trigger_ops::waits(&call.name, &content)).then(|| Paused {
+                    messages: messages.clone(),
+                    call_id: call.id.clone(),
+                    skipped: calls[i + 1..].iter().map(|c| c.id.clone()).collect(),
+                });
                 return Ok(SessionOutcome {
                     reply: content,
                     turns,
@@ -593,6 +673,7 @@ fn run_traced(
                     steps,
                     reasoning: String::new(),
                     thought_ms,
+                    paused,
                 });
             }
             messages.push(Message::ToolResult { call_id: call.id, content, is_error });
@@ -623,6 +704,7 @@ fn run_traced(
         steps,
         reasoning: String::new(),
         thought_ms,
+        paused: None,
     })
 }
 
@@ -1038,7 +1120,7 @@ mod tests {
         };
         write(
             "defaults/user.toml",
-            "display_name = \"X\"\ntimezone = \"UTC\"\ntemplate = \"default\"\n",
+            "display_name = \"X\"\ntimezone = \"UTC\"\ntemplate = \"default\"\nday_start = \"\"\nclose_day_time = \"\"\n",
         );
         write("defaults/prompts/persona.md", "you are note, be kind");
         write("defaults/prompts/planning.md", "plan the day");
@@ -2595,14 +2677,9 @@ mod tests {
         MockLLM::scripted(script)
     }
 
-    fn present(db: &Mutex<rusqlite::Connection>) {
-        crate::presence::touch(&db.lock().unwrap(), 1, jiff::Timestamp::now()).unwrap();
-    }
-
     #[test]
     fn a_chat_rings_on_the_confirming_call_and_never_on_the_check() {
         let (db, tmp) = env();
-        present(&db);
         let llm = calling(&[
             r#"{"reason":"the essay"}"#,
             r#"{"token":"$token","opening":"Got a minute?","brief":"essay due fri, 2 of 5 sections"}"#,
@@ -2648,7 +2725,6 @@ mod tests {
     #[test]
     fn a_token_is_good_only_in_the_session_that_checked() {
         let (db, tmp) = env();
-        present(&db);
         let caller = FakeCaller(Default::default());
         let llm = calling(&[r#"{"reason":"the essay"}"#]);
         let first = run_session(&SessionDeps { caller: Some(&caller), ..deps(&db, &tmp, &llm) }, 1, "aki",
@@ -2665,7 +2741,6 @@ mod tests {
     #[test]
     fn nothing_rings_without_a_caller_or_from_inside_a_batch() {
         let (db, tmp) = env();
-        present(&db);
         let llm = calling(&[r#"{"reason":"the essay"}"#]);
         let out = run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, now(), &[], "call me").unwrap();
         assert!(out.steps[0].is_error && out.steps[0].result.contains("cannot place calls"));

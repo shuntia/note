@@ -18,6 +18,14 @@ pub const MAX_SAY_BYTES: usize = 1200;
 /// How much of the thread a firing trigger reads.
 pub const HISTORY_TURNS: usize = 12;
 pub const MAX_EXTRA: u32 = 10;
+/// How long `say` may wait for an answer before its follow-up fires.
+pub const AWAIT_MIN: std::ops::RangeInclusive<u32> = 5..=120;
+/// The origin of the event a waiting `say` resumes on; off the day's budget.
+pub const AWAIT_ORIGIN: &str = "await_reply";
+/// Waits a day holds, so a chain of them ends.
+pub const MAX_AWAITS_PER_DAY: i64 = 6;
+pub const TIMED_OUT: &str = "Timed out";
+pub const RESPONDED: &str = "User responded before timeout";
 /// Pending triggers the model may hold across all days, so a far horizon
 /// cannot fill without end.
 pub const MAX_PENDING: i64 = 200;
@@ -855,6 +863,86 @@ fn settle(conn: &Connection, event_id: i64, now: jiff::Timestamp) -> rusqlite::R
     )
 }
 
+/// Parks a session whose `say` waits `min` minutes for an answer: an event in
+/// `thread` resumes it at the end of the wait, or as soon as the user writes.
+/// `None` once the day holds `MAX_AWAITS_PER_DAY`.
+#[allow(clippy::too_many_arguments)]
+pub fn pause(
+    conn: &Connection,
+    config_dir: &std::path::Path,
+    fired: &crate::runner::FiredEvent,
+    thread: i64,
+    said: &str,
+    min: u32,
+    paused: &crate::agent::Paused,
+    now: jiff::Timestamp,
+) -> Result<Option<i64>> {
+    let local = (now + jiff::SignedDuration::from_mins(i64::from(min))).to_zoned(timezone(config_dir, &fired.username));
+    let date = local.date();
+    let held: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM events e JOIN plans p ON p.id = e.plan_id
+         WHERE p.user_id = ?1 AND p.date = ?2 AND e.kind = ?3 AND e.origin = ?4",
+        (fired.user_id, date.to_string(), KIND, AWAIT_ORIGIN),
+        |r| r.get(0),
+    )?;
+    if held >= MAX_AWAITS_PER_DAY {
+        return Ok(None);
+    }
+    let plan_id = crate::plan::ensure(conn, config_dir, &fired.username, fired.user_id, date)?;
+    let prompt = mt::await_prompt(Lang::for_user(config_dir, &fired.username), said);
+    let wall = local.strftime("%H:%M").to_string();
+    let tx = conn.unchecked_transaction()?;
+    let id = insert(&tx, plan_id, &wall, &prompt, AWAIT_ORIGIN, None, Some(thread), None, now)?;
+    tx.execute("INSERT INTO paused_sessions (event_id, session) VALUES (?1, ?2)", (id, serde_json::to_string(paused)?))?;
+    tx.commit()?;
+    Ok(Some(id))
+}
+
+/// Takes the session `event_id` resumes, if it parked one.
+fn take_paused(conn: &Connection, event_id: i64) -> Result<Option<crate::agent::Paused>> {
+    let raw: Option<String> = conn
+        .query_row("SELECT session FROM paused_sessions WHERE event_id = ?1", [event_id], |r| r.get(0))
+        .optional()?;
+    conn.execute("DELETE FROM paused_sessions WHERE event_id = ?1", [event_id])?;
+    Ok(raw.map(|r| serde_json::from_str(&r)).transpose()?)
+}
+
+/// What the user wrote anywhere after `since`, oldest first.
+fn written_since(conn: &Connection, user_id: i64, since: &str) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT m.content FROM talk_messages m JOIN conversations c ON c.id = m.conversation_id
+         WHERE c.user_id = ?1 AND m.role = 'user' AND m.created_at > ?2 ORDER BY m.created_at, m.id",
+    )?;
+    let rows = stmt.query_map((user_id, since), |r| r.get(0))?.collect();
+    rows
+}
+
+/// Whether the user has written since a waiting `say` parked, which ends the
+/// wait early.
+pub fn answered(conn: &Connection, user_id: i64, event_id: i64) -> rusqlite::Result<bool> {
+    let since: Option<String> = conn
+        .query_row(
+            "SELECT created_at FROM events WHERE id = ?1 AND origin = ?2 AND status IN ('pending', 'snoozed')",
+            (event_id, AWAIT_ORIGIN),
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten();
+    Ok(match since {
+        Some(since) => last_user_message(conn, user_id)?.is_some_and(|at| at > since),
+        None => false,
+    })
+}
+
+/// The waiting `say`'s result once the session resumes, and what the user wrote.
+fn wait_result(replies: &[String]) -> String {
+    if replies.is_empty() {
+        serde_json::json!({ "result": TIMED_OUT }).to_string()
+    } else {
+        serde_json::json!({ "result": RESPONDED, "replies": replies }).to_string()
+    }
+}
+
 /// The tool a trigger session ended on and its result: its last terminal step,
 /// else its closing text, taken as `say`.
 fn decision(out: &crate::agent::SessionOutcome) -> Option<(String, serde_json::Value)> {
@@ -895,17 +983,33 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
     }
     let tz = timezone(&state.config_dir, &fired.username);
     let l = Lang::for_user(&state.config_dir, &fired.username);
-    let (ev, opening, history, thread_note) = {
+    let (ev, opening, history, thread_note, resumed) = {
         let conn = state.db();
         let Ok(Some(ev)) = read(&conn, fired.event_id) else {
             return;
+        };
+        let resumed = if ev.origin == AWAIT_ORIGIN {
+            match take_paused(&conn, ev.event_id) {
+                Ok(paused) => paused.map(|p| {
+                    let replies = written_since(&conn, fired.user_id, ev.created_at.as_deref().unwrap_or_default()).unwrap_or_default();
+                    let messages = p.answered(&wait_result(&replies));
+                    (messages, replies)
+                }),
+                Err(e) => {
+                    let detail = format!("event {}: the paused session is unreadable: {e:#}", ev.event_id);
+                    let _ = crate::log::record(&conn, Some(fired.user_id), "trigger_error", &detail);
+                    None
+                }
+            }
+        } else {
+            None
         };
         let mut opening = situation(&conn, fired.user_id, &ev, &tz, l);
         if ev.origin == crate::idle::ORIGIN {
             opening.push_str(&crate::idle::context(&conn, &state.data_dir, fired.user_id, &fired.username, l, now).unwrap_or_default());
         }
         let (history, note) = thread_context(&conn, ev.conversation_id, l);
-        (ev, opening, history, note)
+        (ev, opening, history, note, resumed)
     };
     let deps = crate::agent::SessionDeps {
         db: &state.db,
@@ -934,16 +1038,21 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
         }
         _ => {}
     };
-    let outcome = crate::agent::run_session_watched(
-        &deps,
-        fired.user_id,
-        &fired.username,
-        crate::tools::SessionKind::Trigger,
-        now,
-        &history,
-        &opening,
-        &log_writes,
-    );
+    let outcome = match &resumed {
+        Some((messages, replies)) => {
+            crate::agent::resume_session(&deps, fired.user_id, &fired.username, now, messages, replies, &log_writes)
+        }
+        None => crate::agent::run_session_watched(
+            &deps,
+            fired.user_id,
+            &fired.username,
+            crate::tools::SessionKind::Trigger,
+            now,
+            &history,
+            &opening,
+            &log_writes,
+        ),
+    };
     if changed.get() {
         state.hub.broadcast_changed(fired.user_id);
     }
@@ -1001,6 +1110,21 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
             now,
         );
         let _ = settle(&conn, ev.event_id, now);
+        if let (Ok(thread), Some(min), Some(paused)) = (&landed, result["await_min"].as_u64(), &out.paused) {
+            let min = u32::try_from(min).unwrap_or(*AWAIT_MIN.end());
+            match pause(&conn, &state.config_dir, fired, *thread, &text, min, paused, now) {
+                Ok(Some(id)) => {
+                    let _ = crate::log::record(&conn, Some(fired.user_id), "trigger_laid", &format!("event {id}: waits {min} min for an answer"));
+                }
+                Ok(None) => {
+                    let _ = crate::log::record(&conn, Some(fired.user_id), "trigger_quiet", &format!("event {}: the day's waits are spent", ev.event_id));
+                }
+                Err(e) => {
+                    let detail = format!("event {}: pausing: {e:#}", ev.event_id);
+                    let _ = crate::log::record_throttled(&conn, Some(fired.user_id), "trigger_error", &detail, now, crate::log::ERROR_LOG_WINDOW_MINS);
+                }
+            }
+        }
         let named: Vec<String> = serde_json::from_value(result["notes"].clone()).unwrap_or_default();
         let _ = crate::notes::nudged(&conn, &state.data_dir, &fired.username, &named, now);
         let _ = crate::log::record(
@@ -1318,6 +1442,40 @@ mod tests {
     }
 
     #[test]
+    fn a_pause_parks_the_session_until_the_day_holds_enough() {
+        let (conn, tmp, uid) = env();
+        let checkin = crate::talk::create(&conn, uid, "check-in", at("2026-09-17T08:00:00Z")).unwrap();
+        let fired = crate::runner::FiredEvent {
+            event_id: 0, user_id: uid, username: "aki".into(), kind: KIND.into(),
+            wall_time: "09:00".into(), date: "2026-09-17".into(), channel: "push".into(), message: String::new(),
+        };
+        let paused = crate::agent::Paused { messages: vec![], call_id: "c1".into(), skipped: vec!["c2".into()] };
+        let now = at("2026-09-17T09:00:00Z");
+        let id = pause(&conn, tmp.path(), &fired, checkin, "start the essay", 15, &paused, now).unwrap().unwrap();
+        let ev = read(&conn, id).unwrap().unwrap();
+        assert_eq!((ev.wall_time.as_str(), ev.conversation_id, ev.origin.as_str()), ("09:15", Some(checkin), AWAIT_ORIGIN));
+        assert_eq!(spent(&conn, uid, date()).unwrap(), 0, "a wait is off the budget");
+
+        assert!(!answered(&conn, uid, id).unwrap());
+        let other = crate::talk::create(&conn, uid, "chat", now).unwrap();
+        crate::talk::append_text(&conn, other, "user", "on it", at("2026-09-17T09:05:00Z")).unwrap();
+        assert!(answered(&conn, uid, id).unwrap(), "an answer in any thread ends the wait");
+        assert_eq!(written_since(&conn, uid, ev.created_at.as_deref().unwrap()).unwrap(), ["on it"]);
+
+        let back = take_paused(&conn, id).unwrap().unwrap();
+        assert_eq!(take_paused(&conn, id).unwrap().map(|p| p.call_id), None, "a session resumes once");
+        let messages = back.answered(&wait_result(&[]));
+        assert!(matches!(&messages[0], crate::providers::Message::ToolResult { call_id, content, is_error: false }
+            if call_id == "c1" && content.contains("Timed out")));
+        assert!(matches!(&messages[1], crate::providers::Message::ToolResult { call_id, is_error: true, .. } if call_id == "c2"));
+
+        for _ in 1..MAX_AWAITS_PER_DAY {
+            pause(&conn, tmp.path(), &fired, checkin, "x", 15, &paused, now).unwrap().unwrap();
+        }
+        assert_eq!(pause(&conn, tmp.path(), &fired, checkin, "x", 15, &paused, now).unwrap(), None);
+    }
+
+    #[test]
     fn a_reply_after_the_trigger_was_laid_cancels_it() {
         let (conn, tmp, uid) = env();
         let thread = crate::talk::create(&conn, uid, "chat", at("2026-09-17T08:00:00Z")).unwrap();
@@ -1478,6 +1636,7 @@ mod tests {
             steps,
             reasoning: String::new(),
             thought_ms: 0,
+            paused: None,
         }
     }
 

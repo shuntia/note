@@ -392,19 +392,65 @@ fn tool_results(w: &World, round: usize) -> Vec<String> {
         .collect()
 }
 
+fn wait_results(w: &World, round: usize) -> serde_json::Value {
+    let results = tool_results(w, round);
+    serde_json::from_str(results.last().expect("the resumed round answers the waiting say")).unwrap()
+}
+
+const WAIT: &str = r#"{"text":"start the essay now?","await_min":15}"#;
+
+#[tokio::test]
+async fn a_waiting_say_resumes_its_session_when_the_wait_runs_out() {
+    let w = world(vec![call("c1", "say", WAIT), call("c2", "stay_quiet", r#"{"reason":"next wake-up calls"}"#)]).await;
+    lay_plain(&w);
+    note_server::runner::sweep_once(&w.state);
+    assert_eq!(w.push.seen()[0].1.body, "start the essay now?");
+    assert_eq!(statuses(&w), ["done", "pending"]);
+    note_server::runner::sweep_once(&w.state);
+    assert_eq!(w.llm.seen().len(), 1, "nothing resumes before the wait is over");
+
+    make_due(&w);
+    note_server::runner::sweep_once(&w.state);
+    assert_eq!(wait_results(&w, 1), serde_json::json!({ "result": "Timed out" }));
+    assert_eq!(statuses(&w), ["done", "done"]);
+    assert!(rows::<i64>(&w, "SELECT event_id FROM paused_sessions").is_empty());
+    assert_eq!(logged(&w, "trigger_quiet"), ["event 2: next wake-up calls"]);
+}
+
+#[tokio::test]
+async fn an_answer_ends_the_wait_and_the_session_goes_on_in_the_same_thread() {
+    let w = world(vec![call("c1", "say", WAIT), call("c2", "say", r#"{"text":"good, the intro first"}"#)]).await;
+    lay_plain(&w);
+    note_server::runner::sweep_once(&w.state);
+    let thread = w.push.seen()[0].1.conversation_id.unwrap();
+    {
+        let conn = w.state.db.lock().unwrap();
+        let chat = note_server::talk::create(&conn, 1, "chat", jiff::Timestamp::now()).unwrap();
+        note_server::talk::append_text(&conn, chat, "user", "ok starting", jiff::Timestamp::now()).unwrap();
+    }
+
+    note_server::runner::sweep_once(&w.state);
+    assert_eq!(
+        wait_results(&w, 1),
+        serde_json::json!({ "result": "User responded before timeout", "replies": ["ok starting"] })
+    );
+    let seen = w.push.seen();
+    assert_eq!(seen[1].1.body, "good, the intro first");
+    assert_eq!(seen[1].1.conversation_id, Some(thread), "the session goes on where it spoke");
+}
+
 const CHECK: &str = r#"{"reason":"talk the essay through"}"#;
 const CONFIRM: &str = r#"{"token":"$token","opening":"Want to talk the essay through?","brief":"essay due friday; intro done"}"#;
 
 #[tokio::test]
-async fn a_user_who_is_away_is_written_to_not_rung() {
+async fn a_user_outside_their_day_is_written_to_not_rung() {
     let w = world(vec![
         call("c1", "call_user", CHECK),
         call("c2", "say", r#"{"text":"the essay can wait till you're back"}"#),
     ])
     .await;
     lay_plain(&w);
-    w.state.db.lock().unwrap()
-        .execute("UPDATE users SET last_active_at = '2000-01-01T00:00:00Z'", []).unwrap();
+    std::fs::write(w.state.config_dir.join("users/aki/user.toml"), "close_day_time = \"00:00\"\n").unwrap();
     let web = Arc::new(LiveWeb(std::sync::Mutex::default()));
     let state = w.state.clone().with_web_calls(web.clone());
 
@@ -421,7 +467,7 @@ async fn a_user_who_is_away_is_written_to_not_rung() {
 async fn a_free_user_with_the_app_open_gets_the_call_there() {
     let w = world(vec![call("c1", "call_user", CHECK), call("c2", "call_user", CONFIRM)]).await;
     lay_plain(&w);
-    note_server::presence::touch(&w.state.db.lock().unwrap(), 1, jiff::Timestamp::now()).unwrap();
+    std::fs::write(w.state.config_dir.join("users/aki/user.toml"), "day_start = \"\"\nclose_day_time = \"\"\n").unwrap();
     let web = Arc::new(LiveWeb(std::sync::Mutex::default()));
     let state = w.state.clone().with_web_calls(web.clone());
 
