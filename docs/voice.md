@@ -45,7 +45,7 @@ browser  <── /api/call/ws ──>  note-server  <── unix socket (voice-p
 socket = "/run/note/voice.sock"
 # model = "…"                # chat model for calls; default: the server's own
 # provider_sort = "latency"  # OpenRouter provider.sort for call requests
-# reasoning_off = true       # sends reasoning: {enabled: false}; false for a model that refuses it
+# reasoning = "low"          # low, medium, high, or off (reasoning: {enabled: false})
 # first_token_ms = 8000
 # max_jobs = 8
 # job_timeout_secs = 60

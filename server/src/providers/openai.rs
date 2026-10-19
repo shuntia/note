@@ -54,6 +54,12 @@ impl OpenAILLM {
     }
 
     #[must_use]
+    pub fn with_effort(mut self, effort: &str) -> Self {
+        self.reasoning = Some(effort.into());
+        self
+    }
+
+    #[must_use]
     pub fn without_reasoning(mut self) -> Self {
         self.reasoning = None;
         self.reasoning_off = true;

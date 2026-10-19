@@ -5,14 +5,14 @@ pub mod openai;
 use anyhow::{Context, Result};
 use std::sync::Arc;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ToolCall {
     pub id: String,
     pub name: String,
     pub args: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum Message {
     User(String),
     Assistant { text: String, tool_calls: Vec<ToolCall> },
@@ -331,7 +331,7 @@ pub fn build(cfg: &crate::config::ProvidersConfig) -> Result<Providers> {
 }
 
 /// A call's reply model: for an `openai` provider, `[voice] model` (else the
-/// main model) with reasoning off unless `[voice] reasoning_off = false`, and
+/// main model) at `[voice] reasoning` effort, and
 /// `OpenRouter`'s `provider.sort`; any other
 /// provider speaks on `main` as is.
 pub fn build_voice(
@@ -349,11 +349,13 @@ pub fn build_voice(
         &model,
         &key,
         ChatAgents::new(p.timeout_secs, p.background_timeout_secs),
-        reasoning_effort(p)?,
+        None,
     );
-    if voice.reasoning_off {
-        llm = llm.without_reasoning();
-    }
+    llm = match voice.reasoning.as_str() {
+        "off" => llm.without_reasoning(),
+        e @ ("low" | "medium" | "high") => llm.with_effort(e),
+        other => anyhow::bail!("unknown voice reasoning effort: {other}"),
+    };
     if let Some(sort) = &voice.provider_sort {
         llm = llm.with_extra(serde_json::json!({"provider": {"sort": sort}}));
     }
@@ -511,7 +513,7 @@ mod tests {
     }
 
     #[test]
-    fn a_call_switches_reasoning_off_unless_told_not_to() {
+    fn a_call_reasons_low_unless_told_otherwise() {
         let reply = r#"{"choices":[{"message":{"content":"hi"}}]}"#;
         let main: Arc<dyn LLMProvider> = Arc::new(mock::NullLLM);
         let req = ChatRequest { system: "s", messages: &[], tools: &[], background: false, plain: false, must_call: None };
@@ -524,10 +526,13 @@ mod tests {
             build_voice(&cfg, &voice, &main).unwrap().chat(&req).unwrap();
             crate::testhttp::body_json(&rx.recv().unwrap())
         };
-        let on = sent("socket = \"/run/v.sock\"");
-        assert_eq!(on["reasoning"], serde_json::json!({"enabled": false}));
-        let off = sent("socket = \"/run/v.sock\"\nreasoning_off = false");
-        assert!(off.get("reasoning").is_none(), "{off}");
+        let low = sent("socket = \"/run/v.sock\"");
+        assert_eq!(low["reasoning"], serde_json::json!({"effort": "low"}));
+        let off = sent("socket = \"/run/v.sock\"\nreasoning = \"off\"");
+        assert_eq!(off["reasoning"], serde_json::json!({"enabled": false}));
+        let junk: crate::config::VoiceConfig = toml::from_str("socket = \"/run/v.sock\"\nreasoning = \"max\"").unwrap();
+        let cfg = crate::config::ProvidersConfig { llm: Some(file_key_config(std::path::PathBuf::new())), embeddings: None };
+        assert!(build_voice(&cfg, &junk, &main).is_err());
     }
 
     #[test]

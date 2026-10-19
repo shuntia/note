@@ -51,13 +51,14 @@ pub struct VoiceConfig {
     pub max_jobs: usize,
     #[serde(default = "default_first_token_ms")]
     pub first_token_ms: u64,
-    /// Sends `reasoning: {enabled: false}`; false for a model that refuses it.
-    #[serde(default = "default_reasoning_off")]
-    pub reasoning_off: bool,
+    /// Reasoning effort on a call: "low" (the default), "medium", "high", or
+    /// "off" for `reasoning: {enabled: false}`.
+    #[serde(default = "default_voice_reasoning")]
+    pub reasoning: String,
 }
 
-fn default_reasoning_off() -> bool {
-    true
+fn default_voice_reasoning() -> String {
+    "low".into()
 }
 
 #[allow(clippy::unnecessary_wraps)]
@@ -713,11 +714,11 @@ mod tests {
     }
 
     #[test]
-    fn voice_reasoning_is_off_by_default() {
+    fn voice_reasoning_is_low_by_default() {
         let v: VoiceConfig = toml::from_str("socket = \"/run/v.sock\"").unwrap();
-        assert!(v.reasoning_off);
-        let v: VoiceConfig = toml::from_str("socket = \"/run/v.sock\"\nreasoning_off = false").unwrap();
-        assert!(!v.reasoning_off);
+        assert_eq!(v.reasoning, "low");
+        let v: VoiceConfig = toml::from_str("socket = \"/run/v.sock\"\nreasoning = \"off\"").unwrap();
+        assert_eq!(v.reasoning, "off");
     }
 
     #[test]
