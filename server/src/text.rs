@@ -329,6 +329,10 @@ pub fn matrix_capped(l: Lang) -> String {
     l.pick("You've used today's sessions.", "今日のセッションは使い切りました。")
 }
 
+pub fn matrix_queue_full(l: Lang) -> String {
+    l.pick("Still answering your earlier messages; send this again after.", "前のメッセージに返信中です。後でもう一度送ってください。")
+}
+
 pub fn matrix_unreachable(l: Lang) -> String {
     l.pick("Couldn't reach Note right now.", "Note に接続できません。")
 }

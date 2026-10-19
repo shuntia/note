@@ -418,6 +418,7 @@ pub fn sweep(state: &AppState) -> Vec<std::thread::JoinHandle<()>> {
     state.login_limiter.sweep(now);
     state.login_clients.sweep(now);
     state.join_limiter.sweep(now);
+    state.action_limiter.sweep(now);
     let (fired, started, flips) = {
         let conn = state.db();
         if let Err(e) = gc_sessions(&conn, now) {

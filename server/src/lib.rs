@@ -203,6 +203,8 @@ pub struct AppState {
     pub share_limiter: Arc<crate::auth::LoginLimiter>,
     /// Counts unknown invite lookups and join attempts per client address.
     pub join_limiter: Arc<crate::auth::LoginLimiter>,
+    /// Counts notification button presses per client address.
+    pub action_limiter: Arc<crate::auth::LoginLimiter>,
     /// The origin a share URL is built on; `server.toml`'s `public_base_url`.
     pub public_base_url: String,
     /// `server.toml`'s `bind_addr`; its origin may open sockets alongside `public_base_url`'s.
@@ -268,6 +270,7 @@ impl AppState {
             join_limiter: Arc::new(crate::auth::LoginLimiter::with_limit(
                 crate::invites::ADDRESS_ATTEMPTS,
             )),
+            action_limiter: Arc::new(crate::auth::LoginLimiter::with_limit(crate::actions::ADDRESS_PRESSES)),
             public_base_url: "http://localhost:3271".into(),
             bind_addr: None,
             call_sockets: Arc::default(),

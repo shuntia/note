@@ -52,6 +52,9 @@ struct Queued {
     fresh: bool,
 }
 
+/// Messages past this many waiting are refused, not queued.
+const MAX_QUEUED: usize = 10;
+
 /// A user's messages waiting their turn, answered one at a time in the order
 /// sent; `waiting` counts those not yet answered.
 struct Queue {
@@ -166,6 +169,9 @@ pub async fn receive(state: &AppState, rooms: &mut Rooms, message: &Message) {
             done => return answer(state, &message.room_id, user_id, lang, done).await,
         }
     }
+    if queue.waiting.load(Ordering::SeqCst) >= MAX_QUEUED {
+        return say(state, &message.room_id, user_id, &crate::text::matrix_queue_full(lang)).await;
+    }
     queue.waiting.fetch_add(1, Ordering::SeqCst);
     let queued = Queued { room_id: message.room_id.clone(), username, text: text.to_string(), fresh };
     if queue.tx.send(queued).is_err() {
@@ -200,10 +206,7 @@ pub async fn pressed(state: &AppState, reaction: &Reaction) {
         let conn = state.db();
         let Some((user_id, username)) = linked_account(&conn, &reaction.room_id, &reaction.sender) else { return };
         let key = crate::channels::matrix::reaction_key(&reaction.event_id, &reaction.key);
-        let Ok(Some((owner, data))) = crate::actions::take(&conn, &key, now) else { return };
-        if owner != user_id {
-            return;
-        }
+        let Ok(Some((_, data))) = crate::actions::take(&conn, &key, Some(user_id), now) else { return };
         let done = crate::actions::perform(&conn, &state.config_dir, user_id, &username, &data, now);
         (user_id, username, done)
     };

@@ -2798,13 +2798,16 @@ struct ActionPress {
 
 /// A notification's button, pressed. The key it carries is the credential, so
 /// a service worker can press it with no session behind it.
-async fn action_press(State(state): State<AppState>, Json(req): Json<ActionPress>) -> impl IntoResponse {
+async fn action_press(State(state): State<AppState>, headers: HeaderMap, Json(req): Json<ActionPress>) -> impl IntoResponse {
+    let now = jiff::Timestamp::now();
+    if !state.action_limiter.try_attempt(&crate::net::client_key(&headers), now) {
+        return StatusCode::TOO_MANY_REQUESTS.into_response();
+    }
     if !crate::actions::is_push_key(&req.key) {
         return StatusCode::NOT_FOUND.into_response();
     }
-    let now = jiff::Timestamp::now();
     let conn = state.db();
-    let Ok(Some((user_id, data))) = crate::actions::take(&conn, &req.key, now) else {
+    let Ok(Some((user_id, data))) = crate::actions::take(&conn, &req.key, None, now) else {
         return StatusCode::NOT_FOUND.into_response();
     };
     let Ok(username) = conn.query_row("SELECT username FROM users WHERE id = ?1", [user_id], |r| r.get::<_, String>(0))

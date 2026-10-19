@@ -13,6 +13,8 @@ pub fn push_key() -> String {
     uuid::Uuid::new_v4().simple().to_string()
 }
 
+pub const ADDRESS_PRESSES: u32 = 60;
+
 pub fn is_push_key(key: &str) -> bool {
     key.len() == 32 && key.bytes().all(|b| b.is_ascii_hexdigit())
 }
@@ -40,11 +42,13 @@ pub fn keep(
 
 /// The user and the button `key` names, spending its delivery's buttons; none
 /// once spent or past its time.
-pub fn take(conn: &Connection, key: &str, now: jiff::Timestamp) -> rusqlite::Result<Option<(i64, String)>> {
+/// With `by`, only a key that user owns is taken; anyone else's stays pressable.
+pub fn take(conn: &Connection, key: &str, by: Option<i64>, now: jiff::Timestamp) -> rusqlite::Result<Option<(i64, String)>> {
     let row: Option<(String, i64, String)> = conn
         .query_row(
-            "SELECT batch, user_id, data FROM message_actions WHERE key = ?1 AND expires_at > ?2",
-            (key, now.to_string()),
+            "SELECT batch, user_id, data FROM message_actions
+             WHERE key = ?1 AND expires_at > ?2 AND (?3 IS NULL OR user_id = ?3)",
+            (key, now.to_string(), by),
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()?;
@@ -254,10 +258,20 @@ mod tests {
         let keys = vec![push_key(), push_key()];
         keep(&conn, uid, "b1", &keys, &actions(&["ev:done:1", "ev:drop:1"]), now).unwrap();
         keep(&conn, uid, "b2", &[push_key()], &actions(&["ev:done:2"]), now).unwrap();
-        assert_eq!(take(&conn, &keys[1], now).unwrap(), Some((uid, "ev:drop:1".into())));
-        assert_eq!(take(&conn, &keys[0], now).unwrap(), None);
+        assert_eq!(take(&conn, &keys[1], None, now).unwrap(), Some((uid, "ev:drop:1".into())));
+        assert_eq!(take(&conn, &keys[0], None, now).unwrap(), None);
         let left: i64 = conn.query_row("SELECT COUNT(*) FROM message_actions", [], |r| r.get(0)).unwrap();
         assert_eq!(left, 1, "another delivery keeps its buttons");
+    }
+
+    #[test]
+    fn a_press_by_someone_else_leaves_the_buttons_standing() {
+        let (conn, _tmp, uid) = env();
+        let now = at("2026-10-18T09:00:00Z");
+        let key = push_key();
+        keep(&conn, uid, "b", std::slice::from_ref(&key), &actions(&["ev:done:1"]), now).unwrap();
+        assert_eq!(take(&conn, &key, Some(uid + 1), now).unwrap(), None);
+        assert_eq!(take(&conn, &key, Some(uid), now).unwrap(), Some((uid, "ev:done:1".into())));
     }
 
     #[test]
@@ -267,7 +281,7 @@ mod tests {
         let key = push_key();
         assert!(is_push_key(&key) && !is_push_key("mx:$ev:✅"));
         keep(&conn, uid, "b", std::slice::from_ref(&key), &actions(&["ev:done:1"]), now).unwrap();
-        assert_eq!(take(&conn, &key, now + jiff::Span::new().hours(TTL_HOURS)).unwrap(), None);
+        assert_eq!(take(&conn, &key, None, now + jiff::Span::new().hours(TTL_HOURS)).unwrap(), None);
     }
 
     #[test]

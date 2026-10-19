@@ -480,9 +480,9 @@ mod tests {
         assert_eq!(keys, ["✅", "💤", "✖"]);
         let conn = crate::db_guard(&ch.db);
         let now = jiff::Timestamp::now();
-        let pressed = crate::actions::take(&conn, &reaction_key("$1", "✖\u{fe0f}"), now).unwrap();
+        let pressed = crate::actions::take(&conn, &reaction_key("$1", "✖\u{fe0f}"), None, now).unwrap();
         assert_eq!(pressed, Some((1, "ev:drop:1".to_string())));
-        assert_eq!(crate::actions::take(&conn, &reaction_key("$1", "✅"), now).unwrap(), None, "one press per message");
+        assert_eq!(crate::actions::take(&conn, &reaction_key("$1", "✅"), None, now).unwrap(), None, "one press per message");
     }
 
     #[test]
