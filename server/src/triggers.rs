@@ -89,14 +89,16 @@ pub struct WorkSession {
     pub title: String,
     pub planned_min: Option<i64>,
     pub started_at: String,
+    pub paused: bool,
 }
 
-/// The user's session in progress, if one is open. A trigger laid while one
-/// runs belongs to it: accountability is the point, so those checks stay off
-/// the day's budget up to `MAX_FREE_PER_SESSION` and end with the session.
+/// The user's session, if one is open, paused or not. A session check laid
+/// while one is open belongs to it: accountability is the point, so those
+/// checks stay off the day's budget up to `MAX_FREE_PER_SESSION` and end with
+/// the session.
 pub fn open_work_session(conn: &Connection, user_id: i64) -> rusqlite::Result<Option<WorkSession>> {
     conn.query_row(
-        "SELECT id, title, planned_min, started_at FROM work_sessions
+        "SELECT id, title, planned_min, started_at, paused_at IS NOT NULL FROM work_sessions
          WHERE user_id = ?1 AND ended_at IS NULL ORDER BY id DESC LIMIT 1",
         [user_id],
         |r| {
@@ -105,10 +107,16 @@ pub fn open_work_session(conn: &Connection, user_id: i64) -> rusqlite::Result<Op
                 title: r.get(1)?,
                 planned_min: r.get(2)?,
                 started_at: r.get(3)?,
+                paused: r.get(4)?,
             })
         },
     )
     .optional()
+}
+
+/// The user's session while its clock runs; a paused one is not work.
+pub fn working(conn: &Connection, user_id: i64) -> rusqlite::Result<Option<WorkSession>> {
+    Ok(open_work_session(conn, user_id)?.filter(|s| !s.paused))
 }
 
 pub fn timezone(config_dir: &Path, username: &str) -> jiff::tz::TimeZone {
@@ -242,6 +250,10 @@ pub struct Lay<'a> {
     /// The session this check belongs to, named by the server for a session
     /// that is already closed; it costs the day's budget nothing.
     pub work_session_id: Option<i64>,
+    /// A check on how the open work session is going: within the session's
+    /// reach it is the session's, off the day's budget and dropped when the
+    /// session ends. Anything else stays on the day whatever is open.
+    pub session_check: bool,
     /// A check the server lays for a ritual of its own rather than one the
     /// agent chose: it is the day's furniture, so it is exempt from the budget
     /// and never belongs to an open session.
@@ -322,8 +334,8 @@ pub fn near(
 }
 
 /// Lays one trigger point, refusing on the day's budget and on a time already
-/// gone. A trigger laid for today within an open work session's reach belongs
-/// to that session and never counts, until the session holds
+/// gone. A session check laid for today within an open work session's reach
+/// belongs to that session and never counts, until the session holds
 /// `MAX_FREE_PER_SESSION`; one beyond either is the day's.
 pub fn lay(conn: &Connection, lay: &Lay) -> Result<Laid, Refusal> {
     let prompt = lay.prompt.trim();
@@ -341,7 +353,11 @@ pub fn lay(conn: &Connection, lay: &Lay) -> Result<Laid, Refusal> {
     if lead < 0 {
         return Err(Refusal::Past { at: wall });
     }
-    let session = match open_work_session(conn, lay.user_id).map_err(internal)?.filter(|s| {
+    let open = if lay.session_check { open_work_session(conn, lay.user_id).map_err(internal)? } else { None };
+    if lay.session_check && open.is_none() {
+        return Err(Refusal::Rejected("no work session is open; lay it without session_check".into()));
+    }
+    let session = match open.filter(|s| {
         date == local.date() && overrun_lead(s, lay.now).is_none_or(|limit| lead <= limit)
     }) {
         Some(s) if session_held(conn, s.id).map_err(internal)? < MAX_FREE_PER_SESSION => Some(s),
@@ -588,6 +604,7 @@ pub fn lay_close_day(
             cancel: None,
             conversation_id: None,
             work_session_id: None,
+            session_check: false,
             system: true,
             now,
         },
@@ -720,8 +737,8 @@ pub fn cancel(conn: &Connection, user_id: i64, ev: &Firing, now: jiff::Timestamp
 }
 
 /// What the session is looking at, under the prompt it was laid with: when it
-/// was laid, when it was meant for, the work session it belongs to, and how
-/// long since the user last said anything.
+/// was laid, when it was meant for, the work session it belongs to or else the
+/// one open, and how long since the user last said anything.
 pub fn situation(
     conn: &Connection,
     user_id: i64,
@@ -737,24 +754,31 @@ pub fn situation(
         Some(at) => { let _ = writeln!(s, "{}", mt::laid_at(l, &clock(at), &ev.wall_time)); },
         None => { let _ = writeln!(s, "{}", mt::meant_for(l, &ev.wall_time)); },
     }
-    if let Some(id) = ev.work_session_id {
-        let row: Option<(String, Option<i64>, String, String, String, i64)> = conn
+    let session_id = ev
+        .work_session_id
+        .or_else(|| open_work_session(conn, user_id).ok().flatten().map(|w| w.id));
+    if let Some(id) = session_id {
+        type Row = (String, Option<i64>, String, String, String, i64, Option<String>);
+        let row: Option<Row> = conn
             .query_row(
-                "SELECT title, planned_min, started_at, mode, phase, round
+                "SELECT title, planned_min, started_at, mode, phase, round, paused_at
                  FROM work_sessions WHERE id = ?1",
                 [id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
             )
             .optional()
             .ok()
             .flatten();
-        if let Some((title, planned, started, mode, phase, round)) = row {
+        if let Some((title, planned, started, mode, phase, round, paused)) = row {
             s.push_str(&mt::work_session(l, &title, &clock(&started)));
             if let Some(min) = planned {
                 s.push_str(&mt::planned_min(l, min));
             }
             if mode == "pomodoro" {
                 s.push_str(&mt::pomodoro_round(l, &phase, round));
+            }
+            if let Some(at) = paused {
+                s.push_str(&mt::paused_since(l, &clock(&at)));
             }
             let done = steps_done_since(conn, user_id, id, &started).unwrap_or(0);
             let _ = writeln!(s, "{}", mt::steps_done_since(l, done));
@@ -1006,7 +1030,7 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
         };
         let mut opening = situation(&conn, fired.user_id, &ev, &tz, l);
         if ev.origin == crate::idle::ORIGIN {
-            opening.push_str(&crate::idle::context(&conn, &state.data_dir, fired.user_id, &fired.username, l, now).unwrap_or_default());
+            opening.push_str(&crate::idle::context(&conn, &state.data_dir, fired.user_id, &fired.username, &tz, l, now).unwrap_or_default());
         }
         let (history, note) = thread_context(&conn, ev.conversation_id, l);
         (ev, opening, history, note, resumed)
@@ -1205,9 +1229,14 @@ mod tests {
             cancel: None,
             conversation_id: None,
             work_session_id: None,
+            session_check: false,
             system: false,
             now: at("2026-09-17T09:00:00Z"),
         }
+    }
+
+    fn check_at<'a>(tmp: &'a tempfile::TempDir, uid: i64, when: &'a str) -> Lay<'a> {
+        Lay { session_check: true, ..lay_at(tmp, uid, when) }
     }
 
     #[test]
@@ -1344,7 +1373,7 @@ mod tests {
         )
         .unwrap();
         let tomorrow = date().tomorrow().unwrap();
-        let laid = lay(&conn, &Lay { date: tomorrow, ..lay_at(&tmp, uid, "11:00") }).unwrap();
+        let laid = lay(&conn, &Lay { date: tomorrow, ..check_at(&tmp, uid, "11:00") }).unwrap();
         let session: Option<i64> = conn
             .query_row("SELECT work_session_id FROM events WHERE id = ?1", [laid.event_id], |r| r.get(0))
             .unwrap();
@@ -1406,10 +1435,10 @@ mod tests {
         )
         .unwrap();
         // 08:55 + 60 + 15 = 10:10 is the last minute its own checks may reach
-        lay(&conn, &lay_at(&tmp, uid, "10:10")).unwrap();
-        lay(&conn, &lay_at(&tmp, uid, "09:30")).unwrap();
+        lay(&conn, &check_at(&tmp, uid, "10:10")).unwrap();
+        lay(&conn, &check_at(&tmp, uid, "09:30")).unwrap();
         assert_eq!(spent(&conn, uid, date()).unwrap(), 0, "the session's checks are its own");
-        lay(&conn, &lay_at(&tmp, uid, "10:11")).unwrap();
+        lay(&conn, &check_at(&tmp, uid, "10:11")).unwrap();
         assert_eq!(spent(&conn, uid, date()).unwrap(), 1, "past its reach the day pays");
         let held: i64 = conn
             .query_row("SELECT COUNT(*) FROM events WHERE work_session_id = 1", [], |r| r.get(0))
@@ -1427,16 +1456,16 @@ mod tests {
         )
         .unwrap();
         for _ in 0..MAX_FREE_PER_SESSION {
-            let laid = lay(&conn, &lay_at(&tmp, uid, "+0min")).unwrap();
+            let laid = lay(&conn, &check_at(&tmp, uid, "+0min")).unwrap();
             conn.execute("UPDATE events SET status = 'done' WHERE id = ?1", [laid.event_id]).unwrap();
         }
         assert_eq!(spent(&conn, uid, date()).unwrap(), 0);
         for n in 1..=4 {
-            lay(&conn, &lay_at(&tmp, uid, "+0min")).unwrap();
+            lay(&conn, &check_at(&tmp, uid, "+0min")).unwrap();
             assert_eq!(spent(&conn, uid, date()).unwrap(), n);
         }
         assert!(matches!(
-            lay(&conn, &lay_at(&tmp, uid, "+0min")).unwrap_err(),
+            lay(&conn, &check_at(&tmp, uid, "+0min")).unwrap_err(),
             Refusal::CapReached { .. }
         ));
     }
@@ -1539,7 +1568,7 @@ mod tests {
         let thread = crate::talk::create(&conn, uid, "chat", at("2026-09-17T08:00:00Z")).unwrap();
         crate::talk::append_text(&conn, thread, "user", "on it", at("2026-09-17T08:40:00Z"))
             .unwrap();
-        let laid = lay(&conn, &lay_at(&tmp, uid, "09:30")).unwrap();
+        let laid = lay(&conn, &check_at(&tmp, uid, "09:30")).unwrap();
         let ev = read(&conn, laid.event_id).unwrap().unwrap();
         let text = situation(&conn, uid, &ev, &jiff::tz::TimeZone::UTC, Lang::En);
         assert!(text.starts_with("how did the essay go?"), "{text}");
@@ -1548,6 +1577,30 @@ mod tests {
         assert!(text.contains("0 steps done since the last check"), "{text}");
         assert!(text.contains("Last message from the user: 08:40."), "{text}");
     }
+
+    #[test]
+    fn any_wakeup_sees_the_open_session_and_its_pause() {
+        let (conn, tmp, uid) = env();
+        conn.execute(
+            "INSERT INTO work_sessions (user_id, title, started_at, paused_at)
+             VALUES (?1, 'read the chapter', '2026-09-17T08:00:00Z', '2026-09-17T08:20:00Z')",
+            [uid],
+        )
+        .unwrap();
+        let laid = lay(&conn, &lay_at(&tmp, uid, "09:30")).unwrap();
+        let ev = read(&conn, laid.event_id).unwrap().unwrap();
+        assert_eq!(ev.work_session_id, None);
+        let text = situation(&conn, uid, &ev, &jiff::tz::TimeZone::UTC, Lang::En);
+        assert!(text.contains("\"read the chapter\", started 08:00, paused since 08:20"), "{text}");
+    }
+
+    #[test]
+    fn a_session_check_needs_an_open_session() {
+        let (conn, tmp, uid) = env();
+        let e = lay(&conn, &check_at(&tmp, uid, "09:30")).unwrap_err();
+        assert!(matches!(&e, Refusal::Rejected(m) if m.contains("no work session")), "{e:?}");
+    }
+
     #[test]
     fn the_model_holds_at_most_max_pending_triggers_across_days() {
         let (conn, tmp, uid) = env();
@@ -1605,10 +1658,10 @@ mod tests {
         let session_of = |id: i64| -> Option<i64> {
             conn.query_row("SELECT work_session_id FROM events WHERE id = ?1", [id], |r| r.get(0)).unwrap()
         };
-        let later = lay(&conn, &lay_at(&tmp, uid, "15:00")).unwrap();
+        let later = lay(&conn, &check_at(&tmp, uid, "15:00")).unwrap();
         assert_eq!(session_of(later.event_id), None);
         assert_eq!(spent(&conn, uid, date()).unwrap(), 1, "past the session it spends the day's budget");
-        let inside = lay(&conn, &lay_at(&tmp, uid, "09:30")).unwrap();
+        let inside = lay(&conn, &check_at(&tmp, uid, "09:30")).unwrap();
         assert_eq!(session_of(inside.event_id), Some(1), "inside the session it is the session's");
     }
 

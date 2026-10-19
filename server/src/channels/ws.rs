@@ -10,6 +10,9 @@ struct Conn {
     tx: Sender<String>,
     /// The page last said it is in view.
     visible: bool,
+    /// False once the desktop app's window has gone to the tray: closed, to
+    /// the user, though its socket stays.
+    shown: bool,
 }
 
 type Conns = HashMap<i64, Vec<Conn>>;
@@ -21,15 +24,54 @@ pub const MAX_PER_USER: usize = 8;
 /// Frames a socket may fall behind by before the hub drops it.
 pub const QUEUE: usize = 256;
 
-#[derive(Default)]
 pub struct ClientHub {
     next_id: AtomicU64,
     conns: Mutex<Conns>,
+    /// Since when each user has had no shown socket; taken while `conns` is held.
+    left: Mutex<HashMap<i64, jiff::Timestamp>>,
+    born: jiff::Timestamp,
+}
+
+impl Default for ClientHub {
+    fn default() -> Self {
+        Self {
+            next_id: AtomicU64::default(),
+            conns: Mutex::default(),
+            left: Mutex::default(),
+            born: jiff::Timestamp::now(),
+        }
+    }
 }
 
 impl ClientHub {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Since when `user_id` has had the app closed: no socket, or only a
+    /// desktop window in the tray. Counts from the hub's start for one not
+    /// seen since; `None` while the app is open.
+    pub fn gone_since(&self, user_id: i64) -> Option<jiff::Timestamp> {
+        let conns = self.conns.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if conns.get(&user_id).is_some_and(|v| v.iter().any(|c| c.shown)) {
+            return None;
+        }
+        let left = self.left.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        Some(left.get(&user_id).copied().unwrap_or(self.born))
+    }
+
+    /// Drops `user_id`'s entry once it holds no socket, and stamps the moment
+    /// their last shown socket went.
+    fn settle(&self, conns: &mut Conns, user_id: i64) {
+        if conns.get(&user_id).is_some_and(Vec::is_empty) {
+            conns.remove(&user_id);
+        }
+        let mut left = self.left.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if conns.get(&user_id).is_some_and(|v| v.iter().any(|c| c.shown)) {
+            left.remove(&user_id);
+        } else {
+            left.entry(user_id).or_insert_with(jiff::Timestamp::now);
+        }
     }
 
     /// `None` once the user already holds `MAX_PER_USER` sockets.
@@ -41,7 +83,8 @@ impl ClientHub {
         }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = channel(QUEUE);
-        held.push(Conn { id, tx, visible: false });
+        held.push(Conn { id, tx, visible: false, shown: true });
+        self.settle(&mut conns, user_id);
         Some((id, rx))
     }
 
@@ -57,10 +100,8 @@ impl ClientHub {
         let mut conns = self.conns.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(v) = conns.get_mut(&user_id) {
             v.retain(|c| c.id != conn_id);
-            if v.is_empty() {
-                conns.remove(&user_id);
-            }
         }
+        self.settle(&mut conns, user_id);
     }
 
     /// Sends to every live connection of `user_id`, dropping closed ones and
@@ -72,9 +113,7 @@ impl ClientHub {
         };
         v.retain(|c| c.tx.try_send(text.to_string()).is_ok());
         let n = v.len();
-        if v.is_empty() {
-            conns.remove(&user_id);
-        }
+        self.settle(&mut conns, user_id);
         n
     }
 
@@ -83,6 +122,14 @@ impl ClientHub {
         if let Some(c) = conns.get_mut(&user_id).and_then(|v| v.iter_mut().find(|c| c.id == conn_id)) {
             c.visible = visible;
         }
+    }
+
+    pub fn set_shown(&self, user_id: i64, conn_id: u64, shown: bool) {
+        let mut conns = self.conns.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(c) = conns.get_mut(&user_id).and_then(|v| v.iter_mut().find(|c| c.id == conn_id)) {
+            c.shown = shown;
+        }
+        self.settle(&mut conns, user_id);
     }
 
     pub fn has_visible(&self, user_id: i64) -> bool {
@@ -108,9 +155,7 @@ impl ClientHub {
             took += usize::from(sent);
             sent
         });
-        if v.is_empty() {
-            conns.remove(&user_id);
-        }
+        self.settle(&mut conns, user_id);
         took
     }
 }
@@ -138,6 +183,16 @@ pub fn visibility(msg: &axum::extract::ws::Message) -> Option<bool> {
         return None;
     }
     v["on"].as_bool()
+}
+
+/// `Some(shown)` for the desktop app's `{"type":"window","shown":…}` report.
+pub fn window_shown(msg: &axum::extract::ws::Message) -> Option<bool> {
+    let axum::extract::ws::Message::Text(text) = msg else { return None };
+    let v: serde_json::Value = serde_json::from_str(text.as_str()).ok()?;
+    if v["type"] != "window" {
+        return None;
+    }
+    v["shown"].as_bool()
 }
 
 /// The ring token of a page's `{"type":"decline","ring":…}`.
@@ -290,6 +345,29 @@ mod tests {
     }
 
     #[test]
+    fn a_user_is_gone_from_the_moment_their_last_socket_closes() {
+        let hub = ClientHub::new();
+        assert!(hub.gone_since(1).is_some_and(|t| t <= jiff::Timestamp::now()), "unseen since the start");
+        let (a, _rx_a) = hub.register(1).unwrap();
+        let (b, _rx_b) = hub.register(1).unwrap();
+        assert_eq!(hub.gone_since(1), None);
+        hub.unregister(1, a);
+        assert_eq!(hub.gone_since(1), None, "one socket still open");
+        let before = jiff::Timestamp::now();
+        hub.unregister(1, b);
+        assert!(hub.gone_since(1).is_some_and(|t| t >= before));
+        let (c, _rx_c) = hub.register(1).unwrap();
+        assert_eq!(hub.gone_since(1), None, "a reload is back");
+
+        let before = jiff::Timestamp::now();
+        hub.set_shown(1, c, false);
+        let tray = hub.gone_since(1);
+        assert!(tray.is_some_and(|t| t >= before), "a window in the tray is closed");
+        hub.unregister(1, c);
+        assert_eq!(hub.gone_since(1), tray, "gone from when it went to the tray");
+    }
+
+    #[test]
     fn unregister_drops_only_that_connection() {
         let hub = ClientHub::new();
         let (id1, mut rx1) = hub.register(1).unwrap();
@@ -417,6 +495,8 @@ mod tests {
         assert_eq!(visibility(&Message::Text(r#"{"type":"visible","on":false}"#.into())), Some(false));
         assert_eq!(visibility(&Message::Text(r#"{"type":"hello"}"#.into())), None);
         assert_eq!(visibility(&Message::Text("not json".into())), None);
+        assert_eq!(window_shown(&Message::Text(r#"{"type":"window","shown":false}"#.into())), Some(false));
+        assert_eq!(window_shown(&Message::Text(r#"{"type":"visible","on":false}"#.into())), None);
     }
 
     #[test]

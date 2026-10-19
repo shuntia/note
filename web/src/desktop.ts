@@ -7,6 +7,8 @@ export type NoteDesktop = {
   settings?(): Promise<ShellSettings | null>
   set?(key: keyof ShellSettings, on: boolean): Promise<ShellSettings | null>
   changeServer?(): void
+  shown?(): Promise<boolean | null>
+  onShown?(fn: (shown: boolean) => void): () => void
 }
 
 export const desktop = (): NoteDesktop | undefined =>

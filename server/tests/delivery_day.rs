@@ -135,6 +135,7 @@ fn delivery_reaches_the_user_through_the_ladder() {
                 cancel: None,
                 conversation_id: None,
                 work_session_id: None,
+                session_check: false,
                 system: false,
                 now: nightly_now,
             },

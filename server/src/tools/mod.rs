@@ -14,6 +14,7 @@ pub mod summary_ops;
 pub mod task_ops;
 pub mod task_query;
 pub mod trigger_ops;
+pub mod work_ops;
 pub mod zone_ops;
 
 use rusqlite::Connection;
@@ -396,6 +397,9 @@ const BRIEF: &[&str] = &["task_brief"];
 const DECIDE: &[&str] = &["inbox_decide"];
 const SUMMARY: &[&str] = &["summary_write"];
 const REVIEW_WRITE: &[&str] = &["review_write"];
+/// Ending the user's work session for them, which a wake-up does when the
+/// session has plainly been left.
+const WORK_END: &[&str] = &["work_end"];
 const SPEAK: &[&str] = &["say", "stay_quiet"];
 const SHARE_NOTE: &[&str] = &["share_note"];
 /// A call's own job control, run by the call rather than dispatched.
@@ -435,6 +439,7 @@ const DOMAINS: &[&[&str]] = &[
     DECIDE,
     SUMMARY,
     REVIEW_WRITE,
+    WORK_END,
     SPEAK,
     SHARE_NOTE,
     CALL_ONLY,
@@ -533,6 +538,7 @@ const TRIGGER: &[&str] = registry_of![
     CALL_USER,
     SEARCH,
     BATCH,
+    WORK_END,
     SPEAK,
 ];
 
@@ -933,6 +939,10 @@ const TOOLS: &[ToolSpec] = tools![
          away from the app is no bar, since a call is what reaches them then; \
          never rings when their settings say never. In a wake-up, the second call ends the \
          session.",
+    "work_end": work_ops::EndArgs => run!(&work_ops::end), writes = true;
+        "End the user's open work session when it has plainly been left: paused for long, or \
+         they said they were done or stopped. Its own checks are dropped and its minutes \
+         booked; no farewell follows, so say what needs saying yourself.",
     "stay_quiet": trigger_ops::QuietArgs => run!(&trigger_ops::stay_quiet), terminal_in = &[SessionKind::Trigger];
         "Say nothing and end the trigger session: right when the user is already on it, what \
          you would say is on their screen, or the prompt no longer applies.",
@@ -1494,12 +1504,14 @@ mod tests {
 
     /// Talk ⊆ Nightly but for `trigger_budget`, `plan_carry` and
     /// `timezone_set`, which live where the user is there to agree to them or
-    /// say where they are; a review reads memory with the nightly's own tools
-    /// plus the one that ends it; Summarize and Review share nothing with an
-    /// import session.
+    /// say where they are; a wake-up's tools are the nightly's but for
+    /// `work_end`; a review reads memory with the nightly's own tools plus the
+    /// one that ends it; Summarize and Review share nothing with an import
+    /// session.
     #[test]
     fn session_surfaces_nest_and_import_stands_apart() {
         let asks_the_user = |t: &str| matches!(t, "trigger_budget" | "plan_carry" | "timezone_set");
+        let wakeup_only = |t: &str| t == "work_end";
         assert!(registry(SessionKind::Talk)
             .iter()
             .filter(|t| !asks_the_user(t))
@@ -1510,7 +1522,7 @@ mod tests {
         );
         assert!(registry(SessionKind::Trigger)
             .iter()
-            .filter(|t| !is_terminal(SessionKind::Trigger, t) && !asks_the_user(t))
+            .filter(|t| !is_terminal(SessionKind::Trigger, t) && !asks_the_user(t) && !wakeup_only(t))
             .all(|t| registry(SessionKind::Nightly).contains(t)));
         assert!(registry(SessionKind::Review)
             .iter()

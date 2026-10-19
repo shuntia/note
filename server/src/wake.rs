@@ -157,7 +157,7 @@ pub fn seems_busy(
     }) {
         return Ok(Some(Busy::Event { title: o.title, until: o.end }));
     }
-    if let Some(s) = triggers::open_work_session(conn, user_id)? {
+    if let Some(s) = triggers::working(conn, user_id)? {
         return Ok(Some(Busy::Working { title: s.title }));
     }
     let night = at.as_str() < day.0 || (!day.1.is_empty() && at.as_str() >= day.1);
@@ -348,5 +348,17 @@ mod tests {
         assert_eq!(busy(&conn, uid), Some(Busy::Event { title: "class".into(), until: "13:00".into() }));
         entry(&conn, uid, "fixed", true);
         assert!(matches!(busy(&conn, uid), Some(Busy::Quiet { .. })));
+    }
+
+    #[test]
+    fn a_paused_session_is_not_work() {
+        let (conn, _tmp, uid) = env("");
+        conn.execute(
+            "INSERT INTO work_sessions (user_id, title, started_at, paused_at)
+             VALUES (?1, 'essay', '2026-10-07T11:00:00Z', '2026-10-07T11:10:00Z')",
+            [uid],
+        )
+        .unwrap();
+        assert_eq!(busy(&conn, uid), None);
     }
 }

@@ -675,6 +675,13 @@ pub fn pomodoro_round(l: Lang, phase: &str, round: i64) -> String {
     }
 }
 
+pub fn paused_since(l: Lang, at: &str) -> String {
+    match l {
+        Lang::En => format!(", paused since {at}"),
+        Lang::Ja => format!("、{at}から一時停止中"),
+    }
+}
+
 pub fn steps_done_since(l: Lang, done: i64) -> String {
     match l {
         Lang::En => format!(", {done} step{} done since the last check.", plural(done)),
@@ -698,6 +705,10 @@ pub fn quiet_for(l: Lang, min: i64) -> String {
         Lang::En => format!("Nothing from the user for {min} min."),
         Lang::Ja => format!("ユーザーから{min}分間反応がありません。"),
     }
+}
+
+pub fn not_in_today(l: Lang) -> &'static str {
+    l.of("The user has not been in today.", "ユーザーは今日まだ一度も来ていません。")
 }
 
 pub fn open_working_lines(l: Lang) -> &'static str {

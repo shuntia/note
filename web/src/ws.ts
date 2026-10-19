@@ -1,5 +1,5 @@
 import { api } from './api'
-import { RINGABLE_CHANGED, ringable } from './desktop'
+import { RINGABLE_CHANGED, desktop, ringable } from './desktop'
 import type { FailureReason } from './types'
 
 // `conversation_id` is the thread a check-in opened; null on every other event.
@@ -70,6 +70,8 @@ export function onCallFrame(fn: (frame: CallFrame) => void): () => void {
 
 export const visibilityFrame = (on: boolean) => JSON.stringify({ type: 'visible', on })
 export const declineFrame = (ring: string) => JSON.stringify({ type: 'decline', ring })
+// The desktop window going to the tray, or coming back: the server reads the tray as the app closed.
+export const windowFrame = (shown: boolean) => JSON.stringify({ type: 'window', shown })
 
 let shell: WebSocket | null = null
 
@@ -98,8 +100,13 @@ export function connectEvents(
   const report = () => {
     if (socket?.readyState === WebSocket.OPEN) socket.send(visibilityFrame(ringable()))
   }
+  const reportShown = (shown: boolean) => {
+    if (socket?.readyState === WebSocket.OPEN) socket.send(windowFrame(shown))
+  }
   document.addEventListener('visibilitychange', report)
   window.addEventListener(RINGABLE_CHANGED, report)
+  const native = desktop()
+  const stopShown = native?.onShown?.(reportShown)
   const open = () => {
     if (closed) return
     const proto = location.protocol === 'https:' ? 'wss' : 'ws'
@@ -112,6 +119,9 @@ export function connectEvents(
       deadHandshakes = 0
       sessionChecked = false
       report()
+      void native?.shown?.().then((on) => {
+        if (on !== null) reportShown(on)
+      })
     }
     socket.onmessage = (m) => {
       try {
@@ -143,6 +153,7 @@ export function connectEvents(
     closed = true
     document.removeEventListener('visibilitychange', report)
     window.removeEventListener(RINGABLE_CHANGED, report)
+    stopShown?.()
     window.clearTimeout(timer)
     socket?.close()
     if (shell === socket) shell = null
