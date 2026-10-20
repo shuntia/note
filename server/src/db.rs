@@ -587,8 +587,30 @@ pub fn set_server_setting(conn: &Connection, key: &str, value: &str) -> rusqlite
 
 pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
+    back_up_before_migrating(&conn, path);
     init(&conn)?;
     Ok(conn)
+}
+
+/// A database about to be migrated is first copied whole to
+/// `backups/note-pre-v<latest>-<unix secs>.db` beside it. A copy that cannot be
+/// written is reported and the migration goes on: each step is atomic anyway.
+fn back_up_before_migrating(conn: &Connection, path: &Path) {
+    let latest = BASELINE_VERSION + MIGRATIONS.len();
+    let version = conn.query_row::<i64, _, _>("PRAGMA user_version", [], |r| r.get(0)).unwrap_or(0);
+    if !usize::try_from(version).is_ok_and(|v| (BASELINE_VERSION..latest).contains(&v)) {
+        return;
+    }
+    let dir = path.parent().unwrap_or_else(|| Path::new(".")).join("backups");
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let target = dir.join(format!("note-pre-v{latest}-{secs}.db"));
+    let copied = std::fs::create_dir_all(&dir)
+        .map_err(anyhow::Error::from)
+        .and_then(|()| Ok(conn.execute("VACUUM INTO ?1", [target.to_string_lossy()])?));
+    match copied {
+        Ok(_) => eprintln!("db: copied v{version} to {} before migrating to v{latest}", target.display()),
+        Err(e) => eprintln!("db: could not copy v{version} before migrating: {e:#}"),
+    }
 }
 
 pub fn open_memory() -> Result<Connection> {
@@ -637,6 +659,28 @@ fn apply_migrations(conn: &Connection, baseline: &str, migrations: &[&str]) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_database_behind_is_copied_whole_before_it_migrates() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("note.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            apply_migrations(&conn, BASELINE, &MIGRATIONS[..MIGRATIONS.len() - 1]).unwrap();
+            conn.execute("INSERT INTO users (username, pass_hash, role) VALUES ('aki', 'x', 'member')", []).unwrap();
+        }
+        open(&path).unwrap();
+        let copies: Vec<_> = std::fs::read_dir(tmp.path().join("backups")).unwrap().map(|e| e.unwrap().path()).collect();
+        assert_eq!(copies.len(), 1);
+        let copy = Connection::open(&copies[0]).unwrap();
+        let v: i64 = copy.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(v as usize, BASELINE_VERSION + MIGRATIONS.len() - 1, "the copy is the old version");
+        let n: i64 = copy.query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 1);
+
+        open(&path).unwrap();
+        assert_eq!(std::fs::read_dir(tmp.path().join("backups")).unwrap().count(), 1, "an up-to-date database is not copied again");
+    }
 
     #[test]
     fn a_file_database_writes_ahead_and_syncs_at_checkpoints() {
