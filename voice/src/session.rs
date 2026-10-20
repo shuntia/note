@@ -33,6 +33,19 @@ const DRAIN_LIMIT: Duration = Duration::from_secs(60);
 /// What the media path still holds once playout is empty, played out before leaving.
 const DRAIN_TAIL: Duration = Duration::from_millis(500);
 const FILLER_AFTER: Duration = Duration::from_millis(1500);
+/// How long Note's voice waits on the caller's audio path: Element X's path from the room to the
+/// caller's ear is not up the moment its microphone is.
+#[derive(Clone, Copy, Debug)]
+pub struct MicSettle {
+    /// Past the caller's first audio.
+    pub after: Duration,
+    /// From the start, for a caller whose audio never arrives.
+    pub cap: Duration,
+}
+
+impl MicSettle {
+    pub const CALL: MicSettle = MicSettle { after: Duration::from_millis(500), cap: Duration::from_secs(3) };
+}
 /// An inbound caller silent this long from the start is asked if they are there.
 const HELLO_AFTER: Duration = Duration::from_secs(8);
 /// Silent this long after that, the call ends.
@@ -115,6 +128,7 @@ pub struct SessionDeps {
     pub direction: Direction,
     pub max_len: Duration,
     pub link_grace: Duration,
+    pub mic_settle: MicSettle,
 }
 
 pub enum SessionIn {
@@ -225,6 +239,9 @@ struct Live<S> {
     /// The caller has made a sound, or Note has started to speak.
     broken_silence: bool,
     hello_at: Option<Instant>,
+    mic_settle: MicSettle,
+    /// When the caller's first audio arrived.
+    mic_at: Option<Instant>,
     media: Arc<dyn MediaIo>,
     playout: Playout,
     speech: SpeechQueue,
@@ -318,6 +335,8 @@ impl<S: Fn(CallBody)> Live<S> {
             direction: deps.direction,
             broken_silence: false,
             hello_at: None,
+            mic_settle: deps.mic_settle,
+            mic_at: None,
             media,
             playout,
             speech,
@@ -430,6 +449,9 @@ impl<S: Fn(CallBody)> Live<S> {
     /// Sends the next frame; after a silence, also as many more as the ticks it missed, up to `LEAD` in
     /// all and as many as the media has room for.
     async fn send_audio(&mut self) -> anyhow::Result<()> {
+        if !self.mic_settled() {
+            return Ok(());
+        }
         let Some(frame) = self.playout.next_frame() else { return Ok(()) };
         let now = Instant::now();
         let missed = self.sent_at.map_or(LEAD, |at| {
@@ -445,6 +467,11 @@ impl<S: Fn(CallBody)> Live<S> {
             ending.stalled_by = Instant::now() + DRAIN_CAP;
         }
         Ok(())
+    }
+
+    fn mic_settled(&self) -> bool {
+        let MicSettle { after, cap } = self.mic_settle;
+        self.mic_at.is_some_and(|at| at.elapsed() >= after) || self.start.elapsed() >= cap
     }
 
     fn now(&self) -> Duration {
@@ -613,6 +640,9 @@ impl<S: Fn(CallBody)> Live<S> {
     }
 
     fn event(&mut self, ev: Event) {
+        if matches!(ev, Event::Vad { .. }) && self.mic_at.is_none() {
+            self.mic_at = Some(Instant::now());
+        }
         let input = match ev {
             Event::Line { language, line, pcm } => {
                 if language == self.language {
@@ -1032,6 +1062,7 @@ mod tests {
             direction: Direction::Outbound,
             max_len: Duration::from_mins(30),
             link_grace: Duration::from_secs(10),
+            mic_settle: MicSettle { after: Duration::ZERO, cap: Duration::ZERO },
         }
     }
 
@@ -1160,6 +1191,36 @@ mod tests {
         sleep_ms(30_000).await;
         assert!(c.probe.sent.lock().unwrap().is_empty(), "an outbound call waits on Note's words");
         assert!(!c.end.is_finished());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn note_speaks_only_once_the_callers_audio_has_settled() {
+        let opening = |c: &Call| {
+            c.frame(CallBody::Speak { reply: 1, idx: 0, text: "ok".into() });
+            c.frame(CallBody::SpeakDone { reply: 1 });
+            c.frame(CallBody::Play { reply: 1 });
+        };
+        let said = "ok".len();
+        let settling = |script| {
+            let tts: Arc<FakeTts> = Arc::default();
+            call_with(SessionDeps { mic_settle: MicSettle::CALL, ..deps(Vec::new(), false, &tts) }, script, tts)
+        };
+
+        let c = settling(audio(&[(0.0, 5000)]));
+        opening(&c);
+        c.synthesized("ok").await;
+        sleep_ms(400).await;
+        assert_eq!(c.probe.frames_of(said), 0, "not within half a second of the first audio");
+        sleep_ms(400).await;
+        assert!(c.probe.frames_of(said) > 0, "spoken once the audio has settled");
+
+        let c = settling(Vec::new());
+        opening(&c);
+        c.synthesized("ok").await;
+        sleep_ms(2900).await;
+        assert_eq!(c.probe.frames_of(said), 0, "a caller with no audio yet is waited on");
+        sleep_ms(300).await;
+        assert!(c.probe.frames_of(said) > 0, "but not past three seconds");
     }
 
     #[tokio::test(start_paused = true)]

@@ -8,7 +8,7 @@ use crate::inbound::{say_and_leave, Detect, Detector};
 use crate::matrix::{HomeserverError, Matrix, RoomEvent};
 use crate::media::{LiveKitJoin, MediaIo, MediaJoin};
 use crate::outgoing::CallWriter;
-use crate::session::{run_session, Cues, SessionDeps, SessionEnd, SessionIn};
+use crate::session::{run_session, Cues, MicSettle, SessionDeps, SessionEnd, SessionIn};
 use crate::state::{CallState, LinkState, StateFile};
 use note_voice_proto::{
     dial_forever, AppliedFile, BoxFuture, CallBody, Dir, Direction, FileOutbox, Handler, Media, Origin, Outcome, Peer,
@@ -471,6 +471,7 @@ impl Service {
             direction,
             max_len: MAX_CALL,
             link_grace: LINK_GRACE,
+            mic_settle: MicSettle::CALL,
         };
         let Opened { writer, inbox } = opened;
         let session = tokio::spawn(run_session(deps, media, inbox, writer.sender()));
