@@ -948,12 +948,23 @@ fn listed(conn: &Connection, user_id: i64, ids: &[i64]) -> String {
     labeled(conn, user_id, ids).unwrap_or_else(|_| ids.iter().map(i64::to_string).collect::<Vec<_>>().join(", "))
 }
 
-/// `16 (Unit 1 › Lesson 2)` for each id that sits under a root, the bare id otherwise.
+/// `16 (Unit 1 › Lesson 2)` for a part, `14 (Visual Arts)` for a root under a
+/// category or goal, the bare id otherwise.
 pub(super) fn labeled(conn: &Connection, user_id: i64, ids: &[i64]) -> Result<String, ToolError> {
     let mut out = Vec::with_capacity(ids.len());
     for id in ids {
         let path = super::task_query::path_of(conn, user_id, *id)?;
-        out.push(if path.len() > 1 { format!("{id} ({})", path.join(" › ")) } else { id.to_string() });
+        let owner = || {
+            tasks::get(conn, user_id, *id)
+                .ok()
+                .flatten()
+                .and_then(|t| Some(t.category).filter(|c| !c.is_empty()).or(t.goal_title))
+        };
+        out.push(match (path.len() > 1, owner()) {
+            (true, _) => format!("{id} ({})", path.join(" › ")),
+            (false, Some(o)) => format!("{id} ({o})"),
+            (false, None) => id.to_string(),
+        });
     }
     Ok(out.join(", "))
 }
@@ -1567,6 +1578,10 @@ mod tests {
         let out = talk(&conn, &tmp, "task_save", json!({"tasks": [{"id": "Lesson 2", "state": "done"}]}));
         let why = out["refused"][0]["why"].as_str().unwrap();
         assert!(why.contains(&format!("{a} (Course › Unit 1 › Lesson 2), {b} (Course › Unit 2 › Lesson 2)")), "{why}");
+        let arts = saved(&talk(&conn, &tmp, "task_save", json!({"tasks": [{"title": "Unit 1", "category": "Art"}]})), "0");
+        let music = saved(&talk(&conn, &tmp, "task_save", json!({"tasks": [{"title": "Unit 1", "category": "Music"}]})), "0");
+        let out = talk(&conn, &tmp, "task_remove", json!({"ids": ["Unit 1"]}));
+        assert!(out["refused"][0]["why"].as_str().unwrap().contains(&format!("{arts} (Art), {music} (Music)")), "{out}");
     }
 
     #[test]
