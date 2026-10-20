@@ -895,7 +895,7 @@ pub fn done_between(
     )
 }
 
-pub const MAX_STEPS: usize = 50;
+pub const MAX_STEPS: usize = 200;
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]

@@ -9,7 +9,7 @@ const MAX_LIMIT: u32 = 200;
 const MAX_KEYWORD_CHARS: usize = 200;
 const MAX_QUERY_CHARS: usize = 200;
 const SEARCH_HITS: usize = 20;
-const MAX_BATCH: usize = 50;
+const MAX_BATCH: usize = 200;
 const MAX_AGE_DAYS: u32 = 3650;
 
 /// These tools survey or move the whole list, so a session pinned to one task
@@ -473,7 +473,7 @@ fn stamp(task: &mut serde_json::Value, added: &std::collections::HashMap<i64, St
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BulkUpdateArgs {
-    /// 1 to 50 task ids. Every one must be the user's own, or nothing happens.
+    /// Up to 200 task ids; a repeated one counts once.
     pub task_ids: Vec<i64>,
     /// One of open, `in_progress`, done, dropped, for all of them.
     #[serde(default)]
@@ -495,8 +495,9 @@ pub struct BulkUpdateArgs {
     pub delete: Option<bool>,
 }
 
-/// One change across a batch of tasks: either every id takes it, or the call is
-/// rejected and nothing moves.
+/// The same change across a batch of tasks. Ids that are not the user's (or are
+/// already gone) are skipped and reported; a repeated id counts once; delete
+/// takes the place of any other change in the call.
 pub fn bulk_update(
     conn: &Connection,
     ctx: &ToolCtx,
@@ -504,53 +505,62 @@ pub fn bulk_update(
     args: &BulkUpdateArgs,
 ) -> Result<serde_json::Value, ToolError> {
     unscoped(ctx)?;
-    if kind == SessionKind::Trigger && args.delete.is_some() {
+    let delete = args.delete == Some(true);
+    if kind == SessionKind::Trigger && delete {
         return Err(ToolError::forbidden(
             "a wake-up never deletes tasks; set state dropped instead",
         ));
     }
-    if args.task_ids.is_empty() || args.task_ids.len() > MAX_BATCH {
-        return Err(ToolError::rejected(format!("task_ids must hold 1 to {MAX_BATCH} ids")));
-    }
     let mut seen = std::collections::HashSet::new();
-    if let Some(dup) = args.task_ids.iter().find(|id| !seen.insert(**id)) {
-        return Err(ToolError::rejected(format!("task_ids names {dup} twice")));
+    let ids: Vec<i64> = args.task_ids.iter().copied().filter(|id| seen.insert(*id)).collect();
+    if ids.len() > MAX_BATCH {
+        return Err(ToolError::rejected(format!(
+            "task_ids holds {} ids; at most {MAX_BATCH} per call, so split it",
+            ids.len()
+        )));
     }
-    let changes = [
-        args.state.is_some(),
-        args.is_now.is_some(),
-        args.category.is_some(),
-        args.goal_id.is_some(),
-        args.urgency.is_some(),
-        args.delete.is_some(),
-    ]
-    .iter()
-    .filter(|c| **c)
-    .count();
-    if changes != 1 {
+    let changes = args.state.is_some()
+        || args.is_now.is_some()
+        || args.category.is_some()
+        || args.goal_id.is_some()
+        || args.urgency.is_some();
+    if !delete && !changes {
         return Err(ToolError::rejected(
-            "set exactly one of state, is_now, category, goal_id, urgency or delete",
+            "nothing to change: give state, is_now, category, goal_id, urgency or delete: true",
         ));
     }
-    if args.delete == Some(false) {
-        return Err(ToolError::rejected("delete only takes true; there is no undelete"));
+    let mut ignored = Vec::new();
+    if delete && changes {
+        ignored.push("every change but delete: the tasks are deleted");
     }
-    for id in &args.task_ids {
-        if crate::tasks::get(conn, ctx.user_id, *id).map_err(internal)?.is_none() {
-            return Err(ToolError::not_found(format!("no task {id}; nothing was changed")));
+    let mut skipped = Vec::new();
+    let mut present = Vec::new();
+    for id in ids {
+        if crate::tasks::get(conn, ctx.user_id, id).map_err(internal)?.is_some() {
+            present.push(id);
+        } else {
+            skipped.push(id);
         }
     }
+    let mut out = serde_json::json!({});
+    if !skipped.is_empty() {
+        out["skipped"] = serde_json::json!({ "ids": skipped, "why": "no such task of this user, or already deleted" });
+    }
+    if !ignored.is_empty() {
+        out["ignored"] = ignored.into();
+    }
 
-    if args.delete == Some(true) {
-        for id in &args.task_ids {
+    if delete {
+        for id in &present {
             // a step deleted with its parent earlier in the batch is already gone
             crate::tasks::delete_within(conn, ctx.user_id, *id).map_err(internal)?;
         }
-        return Ok(serde_json::json!({ "deleted": args.task_ids }));
+        out["deleted"] = present.into();
+        return Ok(out);
     }
 
     let mut demoted = Vec::new();
-    for id in &args.task_ids {
+    for id in &present {
         let patch = crate::tasks::TaskPatch {
             state: args.state.clone(),
             is_now: args.is_now,
@@ -562,22 +572,24 @@ pub fn bulk_update(
         };
         match crate::tasks::update(conn, ctx.user_id, *id, &patch) {
             Ok(Some(t)) => demoted.extend(t.demoted_from_now),
-            Ok(None) => return Err(ToolError::not_found(format!("no task {id}"))),
+            Ok(None) => {}
             Err(e) => return Err(task_error(e)),
         }
     }
     demoted.sort_unstable();
     demoted.dedup();
-    let mut out = Vec::new();
+    let mut left_now = Vec::new();
     for id in demoted {
         let still_now: bool = conn
             .query_row("SELECT is_now FROM tasks WHERE id = ?1", [id], |r| r.get(0))
             .map_err(internal)?;
         if !still_now {
-            out.push(id);
+            left_now.push(id);
         }
     }
-    Ok(serde_json::json!({ "updated": args.task_ids, "demoted_from_now": out }))
+    out["updated"] = present.into();
+    out["demoted_from_now"] = left_now.into();
+    Ok(out)
 }
 
 fn task_error(e: crate::tasks::UpdateError) -> ToolError {
@@ -1021,62 +1033,47 @@ mod tests {
     }
 
     #[test]
-    fn task_bulk_update_needs_exactly_one_change_and_a_sane_batch() {
+    fn task_bulk_update_refuses_only_what_says_nothing_or_overflows() {
         let (conn, tmp) = env();
         let a = task(&conn, &tmp, r#"{"title":"a"}"#);
-        let fifty_one = (0..51).map(|_| a.to_string()).collect::<Vec<_>>().join(",");
+        let over = (0..201).map(|n| (n + 1000).to_string()).collect::<Vec<_>>().join(",");
         for (args, why) in [
             (format!(r#"{{"task_ids":[{a}]}}"#), "nothing to change"),
-            (format!(r#"{{"task_ids":[{a}],"state":"done","is_now":true}}"#), "two changes"),
-            (format!(r#"{{"task_ids":[{a}],"delete":false}}"#), "delete only takes true"),
-            (r#"{"task_ids":[],"state":"done"}"#.into(), "no tasks"),
-            (format!(r#"{{"task_ids":[{fifty_one}],"state":"done"}}"#), "past the batch cap"),
-            (format!(r#"{{"task_ids":[{a},{a}],"state":"done"}}"#), "the same id twice"),
+            (format!(r#"{{"task_ids":[{a}],"delete":false}}"#), "delete false changes nothing"),
+            (format!(r#"{{"task_ids":[{over}],"state":"done"}}"#), "past the batch cap"),
             (format!(r#"{{"task_ids":[{a}],"state":"exploded"}}"#), "not a state"),
         ] {
-            assert_eq!(
-                call(&conn, &tmp, "task_bulk_update", &args).unwrap_err().kind,
-                "rejected",
-                "{why}"
-            );
+            assert_eq!(call(&conn, &tmp, "task_bulk_update", &args).unwrap_err().kind, "rejected", "{why}");
         }
         assert_eq!(crate::tasks::get(&conn, 1, a).unwrap().unwrap().state, "open");
+
+        let out = call(&conn, &tmp, "task_bulk_update", &format!(r#"{{"task_ids":[{a},{a}],"state":"done","urgency":"high"}}"#)).unwrap();
+        assert_eq!(out["updated"], serde_json::json!([a]), "a repeated id counts once and both changes land");
+        let t = crate::tasks::get(&conn, 1, a).unwrap().unwrap();
+        assert_eq!((t.state.as_str(), t.urgency.as_str()), ("done", "high"));
+        assert_eq!(call(&conn, &tmp, "task_bulk_update", r#"{"task_ids":[],"state":"done"}"#).unwrap()["updated"], serde_json::json!([]));
     }
 
     #[test]
-    fn one_bad_id_rejects_the_whole_batch() {
+    fn ids_that_are_gone_or_someone_elses_are_skipped_and_the_rest_land() {
         let (conn, tmp) = env();
-        conn.execute(
-            "INSERT INTO users (username, pass_hash, role) VALUES ('rin', 'x', 'member')",
-            [],
-        )
-        .unwrap();
+        conn.execute("INSERT INTO users (username, pass_hash, role) VALUES ('rin', 'x', 'member')", []).unwrap();
         let mut theirs = ctx(&tmp, None);
         theirs.user_id = 2;
         theirs.username = "rin";
-        let foreign =
-            dispatch(&conn, &theirs, SessionKind::Talk, "task_create", r#"{"title":"theirs"}"#)
-                .unwrap()["task_id"]
-                .as_i64()
-                .unwrap();
-        let mine = task(&conn, &tmp, r#"{"title":"mine"}"#);
+        let foreign = dispatch(&conn, &theirs, SessionKind::Talk, "task_create", r#"{"title":"theirs"}"#).unwrap()["task_id"].as_i64().unwrap();
+        let done = task(&conn, &tmp, r#"{"title":"mine"}"#);
+        let out = call(&conn, &tmp, "task_bulk_update", &format!(r#"{{"task_ids":[{done},{foreign},9999],"state":"done"}}"#)).unwrap();
+        assert_eq!(out["updated"], serde_json::json!([done]));
+        assert_eq!(out["skipped"]["ids"], serde_json::json!([foreign, 9999]));
+        assert_eq!(crate::tasks::get(&conn, 1, done).unwrap().unwrap().state, "done");
 
-        for other in [foreign, 9999] {
-            for change in [r#""state":"done""#, r#""delete":true"#] {
-                let e = call(
-                    &conn,
-                    &tmp,
-                    "task_bulk_update",
-                    &format!(r#"{{"task_ids":[{mine},{other}],{change}}}"#),
-                )
-                .unwrap_err();
-                assert_eq!(e.kind, "not_found", "{other} {change}");
-                assert!(e.message.contains(&other.to_string()), "the id is named: {}", e.message);
-            }
-        }
-        let mine_now = crate::tasks::get(&conn, 1, mine).unwrap().unwrap();
-        assert_eq!(mine_now.state, "open", "a rejected batch changes nothing");
-        assert!(crate::tasks::get(&conn, 2, foreign).unwrap().is_some());
+        let gone = task(&conn, &tmp, r#"{"title":"old flat"}"#);
+        let out = call(&conn, &tmp, "task_bulk_update", &format!(r#"{{"task_ids":[{gone},{foreign}],"delete":true,"state":"dropped"}}"#)).unwrap();
+        assert_eq!(out["deleted"], serde_json::json!([gone]));
+        assert!(out["ignored"].is_array(), "delete takes the place of the other change");
+        assert!(crate::tasks::get(&conn, 1, gone).unwrap().is_none());
+        assert!(crate::tasks::get(&conn, 2, foreign).unwrap().is_some(), "someone else's task is never touched");
     }
 
     #[test]

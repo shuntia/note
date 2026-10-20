@@ -774,7 +774,7 @@ const TOOLS: &[ToolSpec] = tools![
          category or goal of their own.",
     "task_split": task_ops::SplitArgs => run!(task_ops::split), writes = true;
         "Add steps to an existing task, after any it already has, each in whole 5-minute \
-         blocks; a task holds up to 50. Not a way to create new tasks.",
+         blocks; a task holds up to 200. Not a way to create new tasks.",
     "task_brief": task_ops::BriefArgs => run!(task_ops::brief), terminal_in = &[SessionKind::Import];
         "Brief this one imported assignment, in a single call that ends the session. homework \
          false drops it, with reason saying why; true writes description, duration_min, \
@@ -829,10 +829,10 @@ const TOOLS: &[ToolSpec] = tools![
          the link and id it was imported under, its steps with their states and durations, \
          and every other field. The list tools carry titles only.",
     "task_bulk_update": task_query::BulkUpdateArgs => run!(kind &task_query::bulk_update), writes = true;
-        "Apply one change to up to 50 tasks: set exactly one of state, is_now, category, \
-         goal_id, urgency or delete. All or nothing: an id that is not the user's rejects the \
-         whole call. Now holds at most 3, and the tasks it pushes out come back in \
-         demoted_from_now; steps are never in Now.",
+        "Apply the same change to up to 200 tasks: any of state, is_now, category, goal_id \
+         and urgency, or delete: true, which deletes them with their steps. Ids that are \
+         gone are skipped and listed in skipped. Now holds at most 3, and the tasks it \
+         pushes out come back in demoted_from_now; steps are never in Now.",
     "goal_create": goal_ops::CreateArgs => run!(goal_ops::create);
         "Open a goal: something that takes weeks rather than an afternoon — an application, an \
          exam, a project. Then break it into tasks with task_create, each with goal_id and a \
