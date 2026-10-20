@@ -158,6 +158,34 @@ fn open_goals(conn: &Connection, user_id: i64) -> Result<Vec<(i64, String)>, Too
         .collect())
 }
 
+fn open_roots(conn: &Connection, user_id: i64, goal: i64) -> Result<Vec<(i64, String)>, ToolError> {
+    let mut stmt = conn
+        .prepare_cached(
+            "SELECT id, title FROM tasks WHERE user_id = ?1 AND goal_id = ?2 AND parent_id IS NULL
+             AND state IN ('open','in_progress') ORDER BY due_at IS NULL, due_at, id",
+        )
+        .map_err(internal)?;
+    let rows = stmt
+        .query_map((user_id, goal), |r| Ok((r.get(0)?, r.get(1)?)))
+        .and_then(|rows| rows.collect::<rusqlite::Result<_>>())
+        .map_err(internal)?;
+    Ok(rows)
+}
+
+/// A goal finished or dropped takes its open tasks the same way.
+fn close_work(conn: &Connection, ctx: &ToolCtx, goal: &crate::goals::Goal, env: &mut Envelope) -> Result<(), ToolError> {
+    let why = if goal.state == "done" { "its goal was finished" } else { "its goal was dropped" };
+    for (id, title) in open_roots(conn, ctx.user_id, goal.id)? {
+        let patch = crate::tasks::TaskPatch { state: Some(goal.state.clone()), actor: crate::tasks::Actor::Agent, ..Default::default() };
+        match crate::tasks::update(conn, ctx.user_id, id, &patch) {
+            Ok(_) => env.adjusted.push(json!({ "id": id, "title": title, "field": "state", "to": goal.state, "why": why })),
+            Err(crate::tasks::UpdateError::Db(e)) => return Err(internal(e)),
+            Err(e) => env.warn(format!("task {id} stayed open: {e}")),
+        }
+    }
+    Ok(())
+}
+
 /// `goal_save`: goals made or changed, each with its task nodes hung from it.
 pub fn save(conn: &Connection, ctx: &ToolCtx, kind: SessionKind, raw: &str) -> Result<Value, ToolError> {
     super::task_query::unscoped(ctx)?;
@@ -240,6 +268,7 @@ pub fn save(conn: &Connection, ctx: &ToolCtx, kind: SessionKind, raw: &str) -> R
             Some(Some(When::Day(d))) => (None, Some(Some(d.to_string()))),
             Some(Some(When::At(t))) => (Some(Some(t.to_string())), None),
         };
+        let state_only = state.is_some() && description.is_none() && due.is_none() && tasks.is_empty();
         let mut matched = false;
         let id = match target {
             Some(Target::Id(id)) => {
@@ -262,8 +291,15 @@ pub fn save(conn: &Connection, ctx: &ToolCtx, kind: SessionKind, raw: &str) -> R
             None => match (&title, new) {
                 (Some(t), false) => {
                     let want = loose::fold(t);
-                    let hits: Vec<i64> = open_goals(conn, ctx.user_id)?.into_iter().filter(|(_, x)| loose::fold(x) == want).map(|(id, _)| id).collect();
+                    let open = open_goals(conn, ctx.user_id)?;
+                    let hits: Vec<i64> = open.iter().filter(|(_, x)| loose::fold(x) == want).map(|(id, _)| *id).collect();
                     match hits.as_slice() {
+                        [] if state_only => {
+                            let near: Vec<String> = loose::nearest(t, &open, 3).iter().map(|(id, x)| format!("{x:?} ({id})")).collect();
+                            let near = if near.is_empty() { String::new() } else { format!("; nearest: {}", near.join(", ")) };
+                            env.refused(&r, format!("no open goal is titled {t:?}{near}; give its id, or new: true to make it"));
+                            continue;
+                        }
                         [] => None,
                         [one] => {
                             matched = true;
@@ -278,9 +314,11 @@ pub fn save(conn: &Connection, ctx: &ToolCtx, kind: SessionKind, raw: &str) -> R
                 _ => None,
             },
         };
+        let mut was = None;
         let saved = if let Some(id) = id {
             {
                 let before = crate::goals::get(conn, ctx.user_id, id).map_err(internal)?;
+                was = before.as_ref().map(|b| b.state.clone());
                 let patch = GoalPatch { title, description, state: state.map(str::to_string), due_at, due_on, zone: Some(tz.clone()) };
                 let changed = before.is_none_or(|b| {
                     patch.title.as_ref().is_some_and(|t| *t != b.title)
@@ -334,6 +372,9 @@ pub fn save(conn: &Connection, ctx: &ToolCtx, kind: SessionKind, raw: &str) -> R
         if matched {
             row["matched"] = "title".into();
         }
+        if matches!(goal.state.as_str(), "done" | "dropped") && was.as_deref().is_some_and(|w| w != goal.state) {
+            close_work(conn, ctx, &goal, &mut saver.env)?;
+        }
         if !tasks.is_empty() {
             let items = tasks.into_iter().enumerate().map(|(j, v)| (r.child(j), v)).collect();
             saver.set_goal(Some(goal.id), op == "created");
@@ -344,7 +385,7 @@ pub fn save(conn: &Connection, ctx: &ToolCtx, kind: SessionKind, raw: &str) -> R
     Ok(saver.env.into_value())
 }
 
-/// `goal_remove`: the goals go, their tasks stay.
+/// `goal_remove`: the goals go, their tasks stay, named in a warning.
 pub fn remove(conn: &Connection, ctx: &ToolCtx, raw: &str) -> Result<Value, ToolError> {
     super::task_query::unscoped(ctx)?;
     let mut o = Obj::new(loose::args(raw)?);
@@ -377,8 +418,18 @@ pub fn remove(conn: &Connection, ctx: &ToolCtx, raw: &str) -> Result<Value, Tool
             env.refused(&r, format!("no goal {id}"));
             continue;
         };
+        let left = open_roots(conn, ctx.user_id, id)?;
         if crate::goals::delete_within(conn, ctx.user_id, id).map_err(internal)? {
             env.removed(id, &goal.title);
+            if !left.is_empty() {
+                let names: Vec<String> = left.iter().take(8).map(|(id, t)| format!("{t:?} ({id})")).collect();
+                let more = if left.len() > 8 { format!(" and {} more", left.len() - 8) } else { String::new() };
+                env.warn(format!(
+                    "the open tasks of {:?} stay, under no goal: {}{more}; drop them with task_save if they go too",
+                    goal.title,
+                    names.join(", ")
+                ));
+            }
         }
     }
     Ok(env.into_value())
@@ -468,6 +519,36 @@ mod tests {
         assert_eq!(saved(&again, "0.0"), saved(&arts, "0.0"), "a retry lands on the course's own units");
         assert_eq!(again["saved"][1]["matched"], "title");
         assert!(again.get("adjusted").is_none(), "{again}");
+    }
+
+    #[test]
+    fn dropping_a_goal_drops_its_open_work_and_a_loose_title_is_never_a_new_goal() {
+        let (conn, tmp) = env("UTC");
+        let out = talk(&conn, &tmp, "goal_save", json!({"goals": [{"title": "AP Chemistry final", "tasks": [
+            {"title": "Unit 4", "children": ["Read", "Problem set"]}, {"title": "Unit 5", "state": "done"}]}]}));
+        let (goal, unit4, unit5) = (saved(&out, "0"), saved(&out, "0.0"), saved(&out, "0.1"));
+        let out = talk(&conn, &tmp, "goal_save", json!({"goals": [{"title": "chemistry", "state": "dropped"}]}));
+        assert_eq!(out["ok"], false);
+        let why = out["refused"][0]["why"].as_str().unwrap();
+        assert!(why.contains(&format!("\"AP Chemistry final\" ({goal})")), "{why}");
+        assert_eq!(crate::goals::list(&conn, 1, Some("any")).unwrap().len(), 1, "no goal was made");
+        let out = talk(&conn, &tmp, "goal_save", json!({"goals": [{"id": goal, "state": "dropped"}]}));
+        assert_eq!(out["adjusted"].as_array().unwrap().len(), 1, "{out}");
+        assert_eq!(out["adjusted"][0]["id"], unit4);
+        assert_eq!(out["adjusted"][0]["why"], "its goal was dropped");
+        assert_eq!(task(&conn, unit4).state, "dropped");
+        assert_eq!(task(&conn, unit5).state, "done", "finished work stays finished");
+        let node = crate::tasks::node(&conn, 1, unit4).unwrap().unwrap();
+        assert!(node.children.iter().all(|c| c.task.state == "dropped"));
+    }
+
+    #[test]
+    fn removing_a_goal_names_the_open_tasks_it_leaves() {
+        let (conn, tmp) = env("UTC");
+        let out = talk(&conn, &tmp, "goal_save", json!({"goals": [{"title": "Visual Arts", "tasks": ["Unit 1", "Unit 2"]}]}));
+        let out = talk(&conn, &tmp, "goal_remove", json!({"ids": [saved(&out, "0")]}));
+        let warning = out["warnings"][0].as_str().unwrap();
+        assert!(warning.contains("\"Unit 1\"") && warning.contains("\"Unit 2\""), "{warning}");
     }
 
     #[test]
