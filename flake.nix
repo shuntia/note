@@ -229,7 +229,7 @@
             version = (lib.importJSON ./desktop/package.json).version;
             src = lib.fileset.toSource {
               root = ./desktop;
-              fileset = lib.fileset.unions [ ./desktop/main.js ./desktop/preload.js ./desktop/server-url.js ./desktop/updates.js ./desktop/setup.html ./desktop/setup-preload.js ./desktop/offline.html ./desktop/package.json ./desktop/icons ];
+              fileset = lib.fileset.unions [ ./desktop/main.js ./desktop/preload.js ./desktop/server-url.js ./desktop/updates.js ./desktop/setup.html ./desktop/setup-preload.js ./desktop/offline.html ./desktop/widget.html ./desktop/widget-preload.js ./desktop/package.json ./desktop/icons ];
             };
             nativeBuildInputs = with pkgs; [ makeWrapper copyDesktopItems ];
             desktopItems = [
@@ -245,7 +245,7 @@
             installPhase = ''
               runHook preInstall
               mkdir -p $out/share/note-desktop
-              cp -r main.js preload.js server-url.js updates.js setup.html setup-preload.js offline.html icons $out/share/note-desktop/
+              cp -r main.js preload.js server-url.js updates.js setup.html setup-preload.js offline.html widget.html widget-preload.js icons $out/share/note-desktop/
               ${pkgs.jq}/bin/jq ${if url == null then "." else "--arg url ${lib.escapeShellArg url} '.noteUrl = $url'"} \
                 package.json > $out/share/note-desktop/package.json
               for f in icons/*x*.png; do

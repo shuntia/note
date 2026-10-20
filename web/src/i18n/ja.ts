@@ -536,6 +536,7 @@ export const ja: Dict = {
   "session.stepDone": "ステップ完了",
   "session.stop": "停止",
   "session.stopped": "停止しました",
+  "session.widget": "タイマーを前面に表示",
   "session.workTime": "作業時間",
   "settings.about": "あなたについて",
   "settings.about.hint": "あなたについて、Note の話し方の希望。すべての会話で参照されます。",

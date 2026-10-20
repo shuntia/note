@@ -535,6 +535,7 @@ export const en = {
   "session.stepDone": "Done with this step",
   "session.stop": "Stop",
   "session.stopped": "Stopped",
+  "session.widget": "Float the timer",
   "session.workTime": "Work time",
   "settings.about": "About you",
   "settings.about.hint": "Who you are and how Note should talk to you. Note reads this in every conversation.",

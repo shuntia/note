@@ -24,9 +24,9 @@ import { glide, lift, viewIn, viewOut } from './motion-gsap'
 import { reducedMotion } from './motion'
 import { NavIcon } from './navicon'
 import { OutageBanner } from './outages'
-import { prefsFrom, writePrefs } from './prefs'
+import { prefsFrom, readPrefs, writePrefs } from './prefs'
 import { startPresence } from './presence'
-import { readSession, stillEnding, writeSession, type FocusSession } from './session'
+import { readSession, stillEnding, widgetClock, writeSession, type FocusSession } from './session'
 import { notify, Toaster, type ToastAction } from './toast'
 import type { Me, SessionStart, Settings as SettingsData } from './types'
 import { Home } from './views/Home'
@@ -291,6 +291,10 @@ export function App() {
   )
   const openNow = useCallback((fields: SessionStart) => void startSession(fields), [startSession])
 
+  useEffect(() => {
+    desktop()?.widgetClock?.(session ? widgetClock(session, readPrefs().counter) : null)
+  }, [session])
+
   // Desktop rests the top bar and its jot for as long as a session runs.
   useEffect(() => {
     document.documentElement.classList.toggle('in-session', session !== null)
@@ -480,6 +484,14 @@ export function App() {
       ))}
       {mobile && <PhoneBar current={current} go={go} tab={tab} inSession={session !== null} />}
       <Toaster aboveTabs={mobile} />
+      {session && tab === 'today' && desktop()?.widget && (
+        <button className="btn-round widget-pop" aria-label={t('session.widget')} onClick={() => desktop()?.widget?.()}>
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="4" y="5" width="16" height="14" rx="2.5" opacity="0.35" />
+            <rect x="11" y="12" width="7" height="5" rx="1.4" />
+          </svg>
+        </button>
+      )}
       {call && (
         <Suspense fallback={null}>
           <CallView.View key={call.at} call={call} onClose={endCall} onMicBlocked={blockMic} />

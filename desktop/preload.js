@@ -8,6 +8,8 @@ contextBridge.exposeInMainWorld('noteDesktop', {
   settings: () => ipcRenderer.invoke('desktop:settings'),
   set: (key, on) => ipcRenderer.invoke('desktop:set', key, on),
   changeServer: () => ipcRenderer.send('desktop:changeServer'),
+  widget: () => ipcRenderer.send('desktop:widget'),
+  widgetClock: (clock) => ipcRenderer.send('desktop:widgetClock', clock),
   shown: () => ipcRenderer.invoke('desktop:shown'),
   onShown: (fn) => {
     const listener = (_event, shown) => fn(shown === true)

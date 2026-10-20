@@ -25,7 +25,7 @@
   "build": {
     "appId": "net.shuntia.note",
     "productName": "Note",
-    "files": ["main.js", "preload.js", "server-url.js", "updates.js", "setup.html", "setup-preload.js", "offline.html", "icons/**"],
+    "files": ["main.js", "preload.js", "server-url.js", "updates.js", "setup.html", "setup-preload.js", "offline.html", "widget.html", "widget-preload.js", "icons/**"],
     "directories": { "output": "dist" },
     "publish": { "provider": "github", "owner": "shuntia", "repo": "note" },
     "linux": {

@@ -1,5 +1,7 @@
 // What the Electron shell's preload exposes; absent in a browser.
 // Absent from builds older than the method.
+import type { WidgetClock } from './session'
+
 export type ShellSettings = { startAtLogin: boolean; nightly: boolean | null }
 export type NoteDesktop = {
   ring(): void
@@ -7,6 +9,8 @@ export type NoteDesktop = {
   settings?(): Promise<ShellSettings | null>
   set?(key: keyof ShellSettings, on: boolean): Promise<ShellSettings | null>
   changeServer?(): void
+  widget?(): void
+  widgetClock?(clock: WidgetClock | null): void
   shown?(): Promise<boolean | null>
   onShown?(fn: (shown: boolean) => void): () => void
 }

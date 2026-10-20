@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
+<title>Note</title>
+<style>
+  :root { --fg: #f0e8de; --pill: rgba(30, 42, 50, 0.42); --rest: #8fc1a9; --over: #e8871e; }
+  html, body { height: 100%; margin: 0; background: transparent; overflow: hidden; }
+  body { display: grid; place-items: center; font: 600 22px/1 system-ui, sans-serif; user-select: none; -webkit-app-region: drag; }
+  .pill {
+    position: relative; display: flex; align-items: center; gap: 8px; padding: 8px 16px; border-radius: 999px;
+    background: var(--pill); color: var(--fg); font-variant-numeric: tabular-nums; letter-spacing: 0.02em;
+    opacity: 0.5; transition: opacity 300ms ease;
+  }
+  body:hover .pill { opacity: 0.92; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--fg); opacity: 0.7; }
+  .rest .dot { background: var(--rest); opacity: 1; }
+  .over #time { color: var(--over); }
+  .paused #time { opacity: 0.55; }
+  button {
+    -webkit-app-region: no-drag; position: absolute; top: -4px; right: -4px; width: 16px; height: 16px; padding: 0;
+    border: 0; border-radius: 50%; background: var(--pill); color: var(--fg); font: 11px/16px system-ui; cursor: pointer;
+    opacity: 0; transition: opacity 200ms ease;
+  }
+  body:hover button { opacity: 1; }
+</style>
+</head>
+<body>
+<div class="pill" id="pill"><i class="dot"></i><span id="time"></span><button id="close" aria-label="Close">×</button></div>
+<script>
+  const pill = document.getElementById('pill')
+  const time = document.getElementById('time')
+  let clock = null
+
+  const fmt = (sec) => `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`
+
+  function paint() {
+    if (!clock) return
+    const elapsed = Math.max(0, Math.floor(((clock.pausedAt ?? Date.now()) - clock.start) / 1000))
+    const { total } = clock
+    const over = !clock.pomodoro && total !== null && elapsed > total
+    let shown = elapsed
+    if (total !== null && clock.pomodoro) shown = Math.max(0, total - elapsed)
+    else if (over) shown = elapsed - total
+    else if (total !== null && clock.prefer === 'remaining') shown = total - elapsed
+    time.textContent = fmt(shown)
+    pill.className = ['pill', clock.onBreak && 'rest', over && 'over', clock.pausedAt !== null && 'paused'].filter(Boolean).join(' ')
+  }
+
+  window.noteWidget.onClock((next) => {
+    clock = next
+    paint()
+  })
+  setInterval(paint, 250)
+  document.getElementById('close').addEventListener('click', () => window.noteWidget.close())
+  document.body.addEventListener('dblclick', () => window.noteWidget.show())
+</script>
+</body>
+</html>

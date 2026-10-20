@@ -16,6 +16,8 @@ let server = null
 let appUrl = null
 let win = null
 let setupWin = null
+let widgetWin = null
+let widgetClock = null
 let tray = null
 let quitting = false
 let failures = 0
@@ -334,6 +336,61 @@ function createWindow(startHidden) {
   load(appUrl.href)
 }
 
+const WIDGET_SIZE = { width: 180, height: 64 }
+
+function widgetPosition() {
+  const saved = readState().widget
+  if (saved && visibleBounds({ ...saved, ...WIDGET_SIZE })?.x !== undefined) return saved
+  const area = screen.getPrimaryDisplay().workArea
+  return { x: area.x + area.width - WIDGET_SIZE.width - 24, y: area.y + area.height - WIDGET_SIZE.height - 24 }
+}
+
+// The session clock floating over everything else, open only while a session runs.
+function openWidget() {
+  if (widgetWin) return
+  widgetWin = new BrowserWindow({
+    ...WIDGET_SIZE,
+    ...widgetPosition(),
+    show: false,
+    frame: false,
+    transparent: true,
+    hasShadow: false,
+    resizable: false,
+    maximizable: false,
+    minimizable: false,
+    fullscreenable: false,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    title: 'Note',
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      preload: path.join(__dirname, 'widget-preload.js'),
+      devTools: dev,
+    },
+  })
+  widgetWin.setAlwaysOnTop(true, 'floating')
+  widgetWin.setVisibleOnAllWorkspaces(true)
+  widgetWin.on('moved', () => {
+    if (!widgetWin || widgetWin.isDestroyed()) return
+    const { x, y } = widgetWin.getBounds()
+    writeState({ widget: { x, y } })
+  })
+  widgetWin.on('closed', () => {
+    widgetWin = null
+  })
+  widgetWin.webContents.on('will-navigate', (event) => event.preventDefault())
+  widgetWin.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  widgetWin.webContents.on('did-finish-load', () => widgetWin?.webContents.send('widget:clock', widgetClock))
+  widgetWin.once('ready-to-show', () => widgetWin?.showInactive())
+  widgetWin.loadFile(path.join(__dirname, 'widget.html')).catch(() => {})
+}
+
+function closeWidget() {
+  if (widgetWin && !widgetWin.isDestroyed()) widgetWin.close()
+}
+
 function openSetup() {
   if (setupWin) {
     setupWin.show()
@@ -433,6 +490,30 @@ ipcMain.handle('desktop:set', (event, key, on) => {
     refreshTray()
   } else if (key === 'nightly' && updates === 'self') setNightly(on)
   return shellSettings()
+})
+
+ipcMain.on('desktop:widget', (event) => {
+  if (!fromApp(event)) return
+  if (widgetWin) closeWidget()
+  else if (widgetClock) openWidget()
+})
+
+// The clock is plain numbers and flags; null means the session ended, which closes the widget.
+ipcMain.on('desktop:widgetClock', (event, clock) => {
+  if (!fromApp(event)) return
+  widgetClock = clock && typeof clock === 'object' ? clock : null
+  if (!widgetClock) closeWidget()
+  else widgetWin?.webContents.send('widget:clock', widgetClock)
+})
+
+const fromWidget = (event) => Boolean(widgetWin) && event.sender === widgetWin.webContents
+
+ipcMain.on('widget:close', (event) => {
+  if (fromWidget(event)) closeWidget()
+})
+
+ipcMain.on('widget:show', (event) => {
+  if (fromWidget(event)) showWindow()
 })
 
 ipcMain.on('desktop:changeServer', (event) => {

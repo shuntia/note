@@ -101,3 +101,25 @@ export function phaseLengthSec(s: FocusSession): number | null {
   const min = s.phase === 'break' ? s.break_min : s.work_min
   return min === null ? null : min * 60
 }
+
+// What the desktop's floating widget needs to keep the session's time on its own.
+export type WidgetClock = {
+  start: number
+  total: number | null
+  pomodoro: boolean
+  onBreak: boolean
+  prefer: CounterMode
+  pausedAt: number | null
+}
+
+export function widgetClock(s: FocusSession, prefer: CounterMode): WidgetClock {
+  const pomodoro = s.mode === 'pomodoro'
+  return {
+    start: pomodoro ? phaseStart(s) : effectiveStart(s),
+    total: pomodoro ? phaseLengthSec(s) : plannedSec(s),
+    pomodoro,
+    onBreak: pomodoro && s.phase === 'break',
+    prefer,
+    pausedAt: pausedAt(s),
+  }
+}
