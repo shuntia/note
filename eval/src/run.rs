@@ -82,7 +82,7 @@ pub fn run(env: &Env, case: &Case, model: &Model, repeat: u32) -> (RunResult, bo
             repeat,
             status: status.to_string(),
             success: status == "ok" && a.is_some_and(|a| a.verdict.pass),
-            failures: a.map(|a| a.verdict.failures.clone()).unwrap_or_default(),
+            failures: a.filter(|_| status != "unavailable").map(|a| a.verdict.failures.clone()).unwrap_or_default(),
             score: a.map(|a| a.score.clone()).unwrap_or_default(),
             wall_secs: started.elapsed().as_secs(),
             waited_secs: waited.as_secs(),
