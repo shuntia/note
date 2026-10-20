@@ -238,6 +238,7 @@ pub fn save(conn: &Connection, ctx: &ToolCtx, kind: SessionKind, raw: &str) -> R
             Some(Some(When::Day(d))) => (None, Some(Some(d.to_string()))),
             Some(Some(When::At(t))) => (Some(Some(t.to_string())), None),
         };
+        let mut matched = false;
         let id = match target {
             Some(Target::Id(id)) => {
                 if crate::goals::get(conn, ctx.user_id, id).map_err(internal)?.is_none() {
@@ -263,7 +264,7 @@ pub fn save(conn: &Connection, ctx: &ToolCtx, kind: SessionKind, raw: &str) -> R
                     match hits.as_slice() {
                         [] => None,
                         [one] => {
-                            env.adjusted(Some(&r), "id", (*one).into(), format!("open goal {one} has this title, so it was updated; new: true makes another"));
+                            matched = true;
                             Some(*one)
                         }
                         many => {
@@ -326,12 +327,16 @@ pub fn save(conn: &Connection, ctx: &ToolCtx, kind: SessionKind, raw: &str) -> R
             }
         };
         let Some((goal, op)) = saved else { continue };
-        saver.env.saved(&r, goal.id, &goal.title, op)["kind"] = "goal".into();
+        let row = saver.env.saved(&r, goal.id, &goal.title, op);
+        row["kind"] = "goal".into();
+        if matched {
+            row["matched"] = "title".into();
+        }
         if !tasks.is_empty() {
             let items = tasks.into_iter().enumerate().map(|(j, v)| (r.child(j), v)).collect();
-            saver.set_goal(Some(goal.id));
+            saver.set_goal(Some(goal.id), op == "created");
             saver.save(items)?;
-            saver.set_goal(None);
+            saver.set_goal(None, false);
         }
     }
     Ok(saver.env.into_value())
@@ -445,6 +450,22 @@ mod tests {
         assert_eq!(again["saved"][0]["op"], "unchanged");
         assert_eq!(saved(&again, "0.0"), roots[0], "the same course sent twice updates, not doubles");
         assert_eq!(task(&conn, saved(&again, "0.0.0")).state, "done");
+    }
+
+    #[test]
+    fn a_second_course_with_the_same_unit_names_keeps_its_own_tasks() {
+        let (conn, tmp) = env("UTC");
+        let course = |title: &str| json!({"goals": [{"title": title, "tasks": [
+            {"title": "Unit 1", "children": ["Lesson 1", "Lesson 2"]}, {"title": "Unit 2", "children": ["Lesson 1"]}]}]});
+        let arts = talk(&conn, &tmp, "goal_save", course("Visual Arts"));
+        let music = talk(&conn, &tmp, "goal_save", course("Music Theory"));
+        assert!(music["saved"].as_array().unwrap().iter().all(|s| s["op"] == "created"), "{music}");
+        assert_ne!(saved(&music, "0.0"), saved(&arts, "0.0"));
+        assert_eq!(task(&conn, saved(&arts, "0.0")).goal_id, Some(saved(&arts, "0")));
+        let again = talk(&conn, &tmp, "goal_save", course("Visual Arts"));
+        assert_eq!(saved(&again, "0.0"), saved(&arts, "0.0"), "a retry lands on the course's own units");
+        assert_eq!(again["saved"][1]["matched"], "title");
+        assert!(again.get("adjusted").is_none(), "{again}");
     }
 
     #[test]

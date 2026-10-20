@@ -54,6 +54,8 @@ struct Node {
     goal_id: Option<Option<i64>>,
     url: Option<String>,
     new: bool,
+    /// Landed on an open task by its title rather than by an id.
+    matched: bool,
     children: Vec<Value>,
 }
 
@@ -74,8 +76,9 @@ pub(super) struct Saver<'a> {
     count: usize,
     /// The running work session's leaf and everything above it, for a wake-up.
     held: Vec<i64>,
-    /// The goal `goal_save` hangs its roots from.
+    /// The goal `goal_save` hangs its roots from, and whether this call made it.
     goal: Option<i64>,
+    fresh_goal: bool,
 }
 
 /// A node built for creation, with the refs of everything under it in the
@@ -100,11 +103,13 @@ impl<'a> Saver<'a> {
             count: 0,
             held,
             goal: None,
+            fresh_goal: false,
         })
     }
 
-    pub fn set_goal(&mut self, goal: Option<i64>) {
+    pub fn set_goal(&mut self, goal: Option<i64>, fresh: bool) {
         self.goal = goal;
+        self.fresh_goal = fresh;
     }
 
     pub fn save(&mut self, items: Vec<(Ref, Value)>) -> Result<(), ToolError> {
@@ -328,6 +333,44 @@ impl<'a> Saver<'a> {
         Ok(rows)
     }
 
+    /// The open tasks a create titled `title` lands on instead: siblings under
+    /// `under`, or roots of the same goal and category.
+    fn same_title(&self, title: &str, under: Option<i64>, category: Option<&str>) -> Result<Vec<i64>, ToolError> {
+        let want = loose::fold(title);
+        if under.is_some() {
+            return Ok(self.open_under(under, false)?.into_iter().filter(|(_, t)| loose::fold(t) == want).map(|(id, _)| id).collect());
+        }
+        if self.fresh_goal {
+            return Ok(Vec::new());
+        }
+        let mut stmt = self
+            .conn
+            .prepare_cached(
+                "SELECT id, title, goal_id, category FROM tasks
+                 WHERE user_id = ?1 AND state IN ('open','in_progress') AND parent_id IS NULL ORDER BY id",
+            )
+            .map_err(internal)?;
+        let roots: Vec<(i64, String, Option<i64>, String)> = stmt
+            .query_map([self.ctx.user_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .and_then(|rows| rows.collect::<rusqlite::Result<_>>())
+            .map_err(internal)?;
+        let category = category.map(loose::fold).filter(|c| !c.is_empty());
+        Ok(roots
+            .into_iter()
+            .filter(|(_, t, goal, cat)| {
+                loose::fold(t) == want
+                    && self.goal.is_none_or(|g| *goal == Some(g))
+                    && (cat.is_empty() || category.as_ref().is_none_or(|c| loose::fold(cat) == *c))
+            })
+            .map(|(id, ..)| id)
+            .collect())
+    }
+
+    /// `ids` as a refusal lists them, each with its path from its root.
+    fn labeled(&self, ids: &[i64]) -> Result<String, ToolError> {
+        labeled(self.conn, self.ctx.user_id, ids)
+    }
+
     fn resolve(&mut self, r: &Ref, t: &Target, under: Option<i64>, anywhere: bool) -> Result<Option<i64>, ToolError> {
         match t {
             Target::Id(id) => {
@@ -396,34 +439,18 @@ impl<'a> Saver<'a> {
                     }
                 }
                 None => match (&node.title, node.new) {
-                    (Some(title), false) => {
-                        let open = self.open_under(under.flatten(), false)?;
-                        let want = loose::fold(title);
-                        let hits: Vec<i64> = open.iter().filter(|(_, t)| loose::fold(t) == want).map(|(id, _)| *id).collect();
-                        match hits.as_slice() {
-                            [] => None,
-                            [one] => {
-                                self.env.adjusted(
-                                    Some(&r),
-                                    "id",
-                                    (*one).into(),
-                                    format!("open task {one} under the same parent has this title, so it was updated; new: true makes another"),
-                                );
-                                Some(*one)
-                            }
-                            many => {
-                                self.env.refused(
-                                    &r,
-                                    format!(
-                                        "{} open tasks are titled {title:?}: {}; give the id, or new: true",
-                                        many.len(),
-                                        many.iter().map(i64::to_string).collect::<Vec<_>>().join(", ")
-                                    ),
-                                );
-                                continue;
-                            }
+                    (Some(title), false) => match self.same_title(title, under.flatten(), node.category.as_deref())?.as_slice() {
+                        [] => None,
+                        [one] => {
+                            node.matched = true;
+                            Some(*one)
                         }
-                    }
+                        many => {
+                            let listed = self.labeled(many)?;
+                            self.env.refused(&r, format!("{} open tasks are titled {title:?}: {listed}; give the id, or new: true", many.len()));
+                            continue;
+                        }
+                    },
                     _ => None,
                 },
             };
@@ -474,7 +501,7 @@ impl<'a> Saver<'a> {
     fn demoted(&mut self, ids: Vec<i64>) -> Result<(), ToolError> {
         for id in ids {
             let title = tasks::get(self.conn, self.ctx.user_id, id).map_err(internal)?.map(|t| t.title).unwrap_or_default();
-            let mut v = json!({ "id": id, "title": title, "field": "now", "to": false, "why": "Now holds at most 3; the newest one left" });
+            let mut v = json!({ "id": id, "title": title, "field": "now", "to": false, "why": "Now holds at most 3; this one came out of Now" });
             if let Some(r) = self.refs.get(&id) {
                 v["ref"] = r.0.clone().into();
             }
@@ -605,7 +632,10 @@ impl<'a> Saver<'a> {
         match tasks::update(self.conn, self.ctx.user_id, id, &p) {
             Ok(Some(u)) => {
                 self.refs.insert(id, r.clone());
-                self.env.saved(&r, id, &u.task.title, op);
+                let row = self.env.saved(&r, id, &u.task.title, op);
+                if n.matched {
+                    row["matched"] = "title".into();
+                }
                 self.report(u.adjusted);
                 self.demoted(u.demoted_from_now)?;
             }
@@ -828,6 +858,16 @@ fn clone_new(n: &NewTask) -> NewTask {
         children: n.children.iter().map(clone_new).collect(),
         zone: n.zone.clone(),
     }
+}
+
+/// `16 (Unit 1 › Lesson 2)` for each id that sits under a root, the bare id otherwise.
+pub(super) fn labeled(conn: &Connection, user_id: i64, ids: &[i64]) -> Result<String, ToolError> {
+    let mut out = Vec::with_capacity(ids.len());
+    for id in ids {
+        let path = super::task_query::path_of(conn, user_id, *id)?;
+        out.push(if path.len() > 1 { format!("{id} ({})", path.join(" › ")) } else { id.to_string() });
+    }
+    Ok(out.join(", "))
 }
 
 fn ancestors(conn: &Connection, id: i64) -> rusqlite::Result<Vec<i64>> {
@@ -1240,7 +1280,8 @@ mod tests {
         let out = talk(&conn, &tmp, "task_save", json!({"tasks": [{"title": "call the  dentist", "minutes": 10}]}));
         assert_eq!(saved(&out, "0"), first);
         assert_eq!(out["saved"][0]["op"], "updated");
-        assert!(field(&out, "adjusted", "0", "id").is_some());
+        assert_eq!(out["saved"][0]["matched"], "title");
+        assert!(out.get("adjusted").is_none(), "{out}");
         let out = talk(&conn, &tmp, "task_save", json!({"tasks": [{"title": "Call the dentist", "new": true}]}));
         assert_ne!(saved(&out, "0"), first);
         let out = talk(&conn, &tmp, "task_save", json!({"tasks": [{"title": "Call the dentist"}]}));
@@ -1248,6 +1289,17 @@ mod tests {
         conn.execute("UPDATE tasks SET state = 'done'", []).unwrap();
         let out = talk(&conn, &tmp, "task_save", json!({"tasks": [{"title": "Call the dentist"}]}));
         assert_eq!(out["saved"][0]["op"], "created", "a finished one is not matched");
+    }
+
+    #[test]
+    fn a_title_in_another_category_is_a_new_task() {
+        let (conn, tmp) = env("UTC");
+        let math = saved(&talk(&conn, &tmp, "task_save", json!({"tasks": [{"title": "Homework 3.2", "category": "Math"}]})), "0");
+        let out = talk(&conn, &tmp, "task_save", json!({"tasks": [{"title": "homework 3.2", "category": "Physics"}]}));
+        assert_eq!(out["saved"][0]["op"], "created", "{out}");
+        assert_eq!(task(&conn, math).category, "Math");
+        let out = talk(&conn, &tmp, "task_save", json!({"tasks": [{"title": "Homework 3.2", "category": "math"}]}));
+        assert_eq!(saved(&out, "0"), math);
     }
 
     #[test]
