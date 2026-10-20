@@ -21,8 +21,10 @@ pub const REVIEW_MAX_TURNS: usize = 2;
 pub const TRIGGER_MAX_TURNS: usize = 14;
 /// Talk has room for long jobs; its time budget and loop guards keep that room
 /// from being spent going round in circles.
-pub const TALK_MAX_TURNS: usize = 24;
-const TALK_BUDGET: std::time::Duration = std::time::Duration::from_secs(240);
+pub const TALK_MAX_TURNS: usize = 40;
+/// Long turns answer the client as pending and finish over the socket, so this
+/// bounds cost, not anyone's wait.
+const TALK_BUDGET: std::time::Duration = std::time::Duration::from_mins(10);
 /// Rounds in a row that write nothing before the session is told to act.
 const LOOKUP_ROUNDS: usize = 4;
 
@@ -624,7 +626,9 @@ fn run_traced(
     let terminal = profile.decides.then(|| terminal_tool(kind)).flatten();
     let stopped = || stop.is_some_and(|s| s.load(Ordering::Relaxed));
     let mut deciding = false;
-    'rounds: while turns < max_turns {
+    let mut asked_for_words = false;
+    let mut reasoned = false;
+    'rounds: while turns < max_turns + usize::from(asked_for_words) {
         if stopped() {
             break;
         }
@@ -639,10 +643,11 @@ fn run_traced(
         } else {
             &schemas
         };
-        let last = profile.max_turns_reply
-            && terminal.is_none()
-            && (turns + 1 == max_turns || profile.budget.is_some_and(|b| started.elapsed() >= b));
-        if last {
+        let last = asked_for_words
+            || profile.max_turns_reply
+                && terminal.is_none()
+                && (turns + 1 == max_turns || profile.budget.is_some_and(|b| started.elapsed() >= b));
+        if last && !asked_for_words {
             note_on_last_result(&mut messages, mt::last_round(lang));
         }
         let must_call = if last {
@@ -659,7 +664,7 @@ fn run_traced(
             messages: &messages,
             tools: offered,
             background,
-            plain: profile.plain,
+            plain: profile.plain || asked_for_words,
             must_call,
             model: pick.model.as_deref(),
             effort: pick.effort,
@@ -690,7 +695,17 @@ fn run_traced(
                 Some(text.to_string())
             }
         };
+        reasoned |= thinking.is_some();
         last_text = resp.text;
+        let wordless = resp.tool_calls.is_empty() && last_text.trim().is_empty();
+        if wordless && profile.max_turns_reply && terminal.is_none() && !asked_for_words {
+            asked_for_words = true;
+            ask_to_decide(&mut messages, String::new(), mt::write_the_reply(lang));
+            continue;
+        }
+        if wordless && asked_for_words && (reasoned || !steps.is_empty()) {
+            last_text = crate::text::unwritten_reply(lang, changed_anything(&steps));
+        }
         if resp.tool_calls.is_empty() && profile.must_end && !deciding && turns < max_turns {
             deciding = true;
             ask_to_decide(&mut messages, std::mem::take(&mut last_text), mt::must_decide(lang));
@@ -855,6 +870,10 @@ impl crate::providers::StreamSink for LiveSink<'_> {
     fn tool_call(&mut self, _call: &crate::providers::ToolCall) -> bool {
         !self.stopped()
     }
+}
+
+pub(crate) fn changed_anything(steps: &[SessionStep]) -> bool {
+    steps.iter().any(|s| !s.is_error && !tools::reads(&s.name))
 }
 
 /// Appends `note` to the tool result the next round reads last, where the
@@ -1848,6 +1867,71 @@ mod tests {
         assert_eq!(out.reply, "made them; more left");
         let seen = llm.seen();
         assert!(last_result(seen.last().unwrap()).ends_with(mt::last_round(Lang::En)));
+    }
+
+    #[test]
+    fn talk_has_minutes_before_it_must_answer() {
+        assert!(TALK_BUDGET >= std::time::Duration::from_mins(8));
+        assert_eq!(profile(SessionKind::Talk).budget, Some(TALK_BUDGET));
+    }
+
+    fn create_call(id: &str) -> ChatResponse {
+        ChatResponse {
+            text: String::new(),
+            tool_calls: vec![ToolCall { id: id.into(), name: "task_create".into(), args: format!(r#"{{"title":"t{id}"}}"#) }],
+        }
+    }
+
+    fn wordless() -> ChatResponse {
+        ChatResponse { text: String::new(), tool_calls: vec![] }
+    }
+
+    #[test]
+    fn a_round_with_no_words_is_asked_once_more_for_plain_text() {
+        let (db, tmp) = env();
+        let llm = MockLLM::scripted(vec![
+            create_call("a"),
+            wordless(),
+            ChatResponse { text: "made it".into(), tool_calls: vec![] },
+        ])
+        .thinking(vec!["", "recreate the exam task", ""]);
+        let out = run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, now(), &[], "put it in").unwrap();
+        assert_eq!(out.reply, "made it");
+        let seen = llm.seen();
+        assert_eq!(seen.len(), 3);
+        assert!(!seen[1].plain);
+        assert!(seen[2].plain);
+        assert_eq!(seen[2].must_call.as_deref(), Some("-"));
+        assert!(last_result(&seen[2]).ends_with(mt::write_the_reply(Lang::En)));
+    }
+
+    #[test]
+    fn a_last_round_with_no_words_still_gets_its_retry() {
+        let (db, tmp) = env();
+        let mut script: Vec<_> = (0..TALK_MAX_TURNS - 1).map(|n| create_call(&n.to_string())).collect();
+        script.push(wordless());
+        script.push(ChatResponse { text: "done most".into(), tool_calls: vec![] });
+        let llm = MockLLM::scripted(script);
+        let out = run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, now(), &[], "hi").unwrap();
+        assert_eq!(out.reply, "done most");
+        assert_eq!(out.turns, TALK_MAX_TURNS + 1);
+    }
+
+    #[test]
+    fn no_words_twice_says_so_and_points_at_what_went_through() {
+        let (db, tmp) = env();
+        let llm = MockLLM::scripted(vec![create_call("a"), create_call("b"), wordless(), wordless()]);
+        let out = run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, now(), &[], "hi").unwrap();
+        assert_eq!(out.reply, crate::text::unwritten_reply(Lang::En, true));
+        assert_eq!(llm.seen().len(), 4);
+    }
+
+    #[test]
+    fn a_model_that_never_answers_leaves_the_reply_blank() {
+        let (db, tmp) = env();
+        let llm = MockLLM::scripted(vec![wordless(), wordless()]);
+        let out = run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, now(), &[], "hi").unwrap();
+        assert_eq!(out.reply, "", "with nothing done and no thought, the caller says no assistant answered");
     }
 
     #[test]

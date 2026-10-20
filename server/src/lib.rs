@@ -355,6 +355,11 @@ impl AppState {
         self
     }
 
+    /// Whether a real model answers: no LLM, or the `mock` kind, replies blank.
+    pub fn has_assistant(&self) -> bool {
+        self.providers_info.llm.as_ref().is_some_and(|p| p.kind != "mock")
+    }
+
     #[must_use]
     pub fn with_providers_info(mut self, info: crate::admin::ProvidersInfo) -> Self {
         self.providers_info = info;

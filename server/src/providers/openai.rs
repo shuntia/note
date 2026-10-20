@@ -925,7 +925,7 @@ mod tests {
 
     #[test]
     fn an_effort_is_rounded_to_the_nearest_one_the_model_takes() {
-        let caps = |e: &[&str]| ReasoningCaps { mandatory: false, efforts: e.iter().map(|s| s.to_string()).collect() };
+        let caps = |e: &[&str]| ReasoningCaps { mandatory: false, efforts: e.iter().map(ToString::to_string).collect() };
         let deepseek = caps(&["max", "high", "low", "none"]);
         assert_eq!(deepseek.nearest("medium"), "high", "a tie goes up");
         assert_eq!(deepseek.nearest("low"), "low");

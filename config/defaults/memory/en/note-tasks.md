@@ -11,6 +11,6 @@ Due date: "due Friday" sets a deadline. It is when it must be done, not when to 
 
 Urgency: low, normal or high. Say "this is urgent" and Note marks it high; it never lowers one the user raised. Overdue or due within two days counts as pressing.
 
-Breaking down: "break this into steps" splits a task into 2 to 5 steps, each with its own length. A work session then walks through them.
+Breaking down: "break this into steps" splits a task into steps, each with its own length; more can be added later. A work session then walks through them.
 
 The Notes tab groups tasks into Now (at most 3), Soon (urgent, or due or scheduled within 7 days), a folded Later, Done today, and Goals. A row's menu has Done, Drop, Edit, Move to Now / Later, Start, and how it announces itself (None, Chat, Notify). Done and Drop can be undone. "Delete it" removes a task for good.

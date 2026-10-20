@@ -4,7 +4,7 @@ use rusqlite::{Connection, OptionalExtension};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-const MAX_TASKS: usize = 10;
+const MAX_TASKS: usize = 30;
 const MAX_DAYS_AHEAD: i64 = 14;
 const DEFAULT_BLOCK_MIN: i64 = 25;
 const DEFAULT_GAP_MIN: u32 = 5;
@@ -19,7 +19,7 @@ const LATER_TRIGGER_DAYS: i64 = 5;
 pub struct PlanTasksArgs {
     /// The day to lay them out on, YYYY-MM-DD: today or one of the next 14 days.
     pub date: String,
-    /// 1 to 10 task ids, laid out in the order given.
+    /// 1 to 30 task ids, laid out in the order given.
     pub task_ids: Vec<i64>,
     /// When the first block starts, zero-padded HH:MM.
     pub start: String,
@@ -796,7 +796,7 @@ mod tests {
         let date = tomorrow();
         let yesterday = today().yesterday().unwrap();
         let far = today().checked_add(jiff::Span::new().days(15)).unwrap();
-        let eleven = (0..11).map(|_| id.to_string()).collect::<Vec<_>>().join(",");
+        let too_many = (0..=super::MAX_TASKS).map(|_| id.to_string()).collect::<Vec<_>>().join(",");
 
         for (args, why) in [
             (format!(r#"{{"date":"{yesterday}","task_ids":[{id}],"start":"09:00"}}"#), "the past"),
@@ -808,7 +808,7 @@ mod tests {
                 "end before start",
             ),
             (format!(r#"{{"date":"{date}","task_ids":[],"start":"09:00"}}"#), "no tasks"),
-            (format!(r#"{{"date":"{date}","task_ids":[{eleven}],"start":"09:00"}}"#), "too many"),
+            (format!(r#"{{"date":"{date}","task_ids":[{too_many}],"start":"09:00"}}"#), "too many"),
             (
                 format!(r#"{{"date":"{date}","task_ids":[{id},{id}],"start":"09:00"}}"#),
                 "the same task twice",

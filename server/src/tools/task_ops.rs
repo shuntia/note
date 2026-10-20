@@ -121,6 +121,9 @@ pub struct CreateArgs {
     /// Create it even though an open task with the same title exists.
     #[serde(default)]
     pub also: bool,
+    /// Its steps, in order, each with a duration in whole 5-minute blocks.
+    #[serde(default)]
+    pub steps: Vec<Step>,
 }
 
 /// An open top-level task already carrying this title.
@@ -159,6 +162,9 @@ pub fn create(
             )));
         }
     }
+    for s in &args.steps {
+        checked_title(&s.title)?;
+    }
     let due = args.due_at.as_deref().map(|raw| checked_due(ctx, raw)).transpose()?.unwrap_or_default();
     let task = crate::tasks::create(
         conn,
@@ -193,7 +199,16 @@ pub fn create(
         )
         .map_err(task_error)?;
     }
-    Ok(serde_json::json!({ "task_id": task.id }))
+    if args.steps.is_empty() {
+        return Ok(serde_json::json!({ "task_id": task.id }));
+    }
+    let node = crate::tasks::split(conn, ctx.user_id, task.id, args.steps, Actor::Agent)
+        .map_err(task_error)?
+        .ok_or_else(|| ToolError::internal(format!("task {} vanished", task.id)))?;
+    Ok(serde_json::json!({
+        "task_id": task.id,
+        "step_ids": node.children.iter().map(|c| c.id).collect::<Vec<_>>(),
+    }))
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -324,7 +339,8 @@ pub fn delete(
 #[serde(deny_unknown_fields)]
 pub struct SplitArgs {
     pub task_id: i64,
-    /// 2 to 5 steps, each with a duration in whole 5-minute blocks.
+    /// Steps to add after any it already has, each with a duration in whole
+    /// 5-minute blocks.
     pub steps: Vec<Step>,
 }
 
@@ -863,13 +879,13 @@ mod tests {
     }
 
     #[test]
-    fn steps_are_two_to_five_short_titles_in_five_minute_blocks() {
+    fn steps_are_short_titles_in_five_minute_blocks() {
         let (conn, tmp) = env();
         let one = r#"{"title":"only","duration_min":5}"#;
         let long = format!(r#"{{"title":"{}","duration_min":5}}"#, "x".repeat(101));
         for steps in [
-            one.to_string(),
-            [one; 6].join(","),
+            String::new(),
+            [one; crate::tasks::MAX_STEPS + 1].join(","),
             format!("{one},{long}"),
             format!(r#"{one},{{"title":"odd","duration_min":7}}"#),
         ] {
@@ -879,6 +895,48 @@ mod tests {
         assert!(crate::tasks::node(&conn, 1, 1).unwrap().unwrap().children.is_empty());
     }
 
+    fn steps_json(n: usize) -> String {
+        (0..n).map(|i| format!(r#"{{"title":"lesson {i}","duration_min":10}}"#)).collect::<Vec<_>>().join(",")
+    }
+
+    #[test]
+    fn a_task_is_created_with_its_steps_in_one_call() {
+        let (conn, tmp) = env();
+        let args = format!(r#"{{"title":"Unit 1","due_at":"2026-11-02","steps":[{}]}}"#, steps_json(11));
+        let out = dispatch(&conn, &ctx(&tmp, None), SessionKind::Talk, "task_create", &args).unwrap();
+        let id = out["task_id"].as_i64().unwrap();
+        assert_eq!(out["step_ids"].as_array().unwrap().len(), 11);
+        let node = crate::tasks::node(&conn, 1, id).unwrap().unwrap();
+        assert_eq!(node.children.len(), 11);
+        assert_eq!(node.children[10].title, "lesson 10");
+        assert_eq!(node.task.duration_min, Some(110));
+    }
+
+    #[test]
+    fn a_task_with_a_bad_step_is_not_created() {
+        let (conn, tmp) = env();
+        let args = r#"{"title":"Unit 2","steps":[{"title":"odd","duration_min":7}]}"#;
+        assert!(dispatch(&conn, &ctx(&tmp, None), SessionKind::Talk, "task_create", args).is_err());
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM tasks WHERE title = 'Unit 2'", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn a_split_appends_after_the_steps_a_task_has() {
+        let (conn, tmp) = env();
+        let split = |n: usize| {
+            let args = format!(r#"{{"task_id":1,"steps":[{}]}}"#, steps_json(n));
+            dispatch(&conn, &ctx(&tmp, None), SessionKind::Talk, "task_split", &args)
+        };
+        split(4).unwrap();
+        let out = split(7).unwrap();
+        assert_eq!(out["step_ids"].as_array().unwrap().len(), 11);
+        assert_eq!(out["duration_min"], 110);
+        let e = split(crate::tasks::MAX_STEPS - 10).unwrap_err();
+        assert_eq!(e.kind, "rejected");
+        assert_eq!(crate::tasks::node(&conn, 1, 1).unwrap().unwrap().children.len(), 11);
+    }
+
     #[test]
     fn a_failing_split_leaves_the_description_alone() {
         let (conn, tmp) = env();
@@ -886,7 +944,7 @@ mod tests {
             &conn,
             &tmp,
             r#"{"task_id":1,"homework":true,"description":"half a brief",
-                "steps":[{"title":"only one","duration_min":5}]}"#,
+                "steps":[{"title":"odd","duration_min":7}]}"#,
         )
         .unwrap_err();
         assert_eq!(e.kind, "rejected");

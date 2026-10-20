@@ -265,24 +265,21 @@ async fn split_creates_steps_and_totals_the_parent_duration() {
     assert_eq!(node["children"][2]["duration_min"], 10);
 
     let two = r#"{"steps":[{"title":"a","duration_min":5},{"title":"b","duration_min":5}]}"#;
-    let (status, _) = post(&app, &cookie, "/api/tasks/1/split", two).await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "a task with steps cannot be re-split");
+    let (status, node) = post(&app, &cookie, "/api/tasks/1/split", two).await;
+    assert_eq!(status, StatusCode::OK, "a second split appends");
+    assert_eq!(node["children"].as_array().unwrap().len(), 5);
+    assert_eq!(node["children"][4]["title"], "b");
+    assert_eq!(node["duration_min"], 30);
     let (status, _) = post(&app, &cookie, "/api/tasks/2/split", two).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "a step cannot be split");
 
     post(&app, &cookie, "/api/tasks", r#"{"title":"other"}"#).await;
-    let (status, _) = post(
-        &app,
-        &cookie,
-        "/api/tasks/5/split",
-        r#"{"steps":[{"title":"only","duration_min":5}]}"#,
-    )
-    .await;
+    let (status, _) = post(&app, &cookie, "/api/tasks/7/split", r#"{"steps":[]}"#).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     let (status, _) = post(
         &app,
         &cookie,
-        "/api/tasks/5/split",
+        "/api/tasks/7/split",
         r#"{"steps":[{"title":"a","duration_min":5},{"title":"b","duration_min":7}]}"#,
     )
     .await;

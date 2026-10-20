@@ -14,8 +14,8 @@ template.
    cannot wait for the morning is worth `call_user`; the user is likely asleep.
 4. Check open goals (goal_list) against their dates. If the remaining tasks no
    longer fit, put the near ones early in the order; a goal short of tasks gets
-   them now — 3 to 12, each with goal_id, a due date spread back from the
-   goal's, and a size in whole 5-minute blocks. Anything the user named that
+   them now — one per milestone, each with goal_id, a due date spread back from
+   the goal's, and a size in whole 5-minute blocks. Anything the user named that
    runs for weeks without a goal gets one (goal_create).
 5. Draft the morning debrief: two or three warm sentences — yesterday in one
    line (no guilt), today's shape in one or two.

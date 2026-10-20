@@ -1073,6 +1073,20 @@ pub fn last_round(l: Lang) -> &'static str {
     }
 }
 
+/// Follows a round that ended with neither a call nor a word.
+pub fn write_the_reply(l: Lang) -> &'static str {
+    match l {
+        Lang::En => {
+            "(Note to self: that round wrote no reply. Write it now in plain text: what you did, and \
+             what is still left if anything.)"
+        }
+        Lang::Ja => {
+            "（メモ: 今のラウンドには返信がありません。今すぐ文章で、行ったことと、残っていることが\
+             あればそれを書いてください。）"
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

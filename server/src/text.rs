@@ -602,6 +602,17 @@ pub fn max_turns_reply(l: Lang) -> String {
     )
 }
 
+/// A reply the model never wrote, with the changes that went through, by tool.
+/// The changes themselves show above the reply as their receipts.
+pub fn unwritten_reply(l: Lang, changed: bool) -> String {
+    match (l, changed) {
+        (Lang::En, false) => "(I stopped before writing a reply and changed nothing. Ask again.)".into(),
+        (Lang::En, true) => "(I stopped before writing a reply. The changes above went through.)".into(),
+        (Lang::Ja, false) => "返信を書く前に中断しました。変更はありません。再度送信してください。".into(),
+        (Lang::Ja, true) => "返信を書く前に中断しました。上の変更は反映済みです。".into(),
+    }
+}
+
 pub fn stopped_reply(l: Lang) -> String {
     l.pick("(Stopped)", "停止しました。")
 }
@@ -805,8 +816,8 @@ const ERRORS_JA: &[(&str, &str)] = &[
     ("steps are one level deep: a step cannot have steps of its own", "ステップは一段だけです。ステップの下にステップは作れません"),
     ("steps are one level deep: a task with steps cannot become a step", "ステップは一段だけです。ステップのあるタスクはステップにできません"),
     ("a step reads its parent's urgency", "ステップの緊急度は親のタスクに従います"),
-    ("a split needs {} to {} steps", "分けるには{0}〜{1}個のステップが必要です"),
-    ("this task already has steps", "このタスクにはすでにステップがあります"),
+    ("a split needs at least one step", "分けるには1個以上のステップが必要です"),
+    ("a task holds at most {} steps; it has {}", "ステップは1つのタスクに{0}個までです。今は{1}個あります"),
     ("invalid state: {}", "状態が正しくありません：{0}"),
     ("event already {}", "この予定はもう済んでいます"),
     ("no goal {}", "目標 {0} はありません"),

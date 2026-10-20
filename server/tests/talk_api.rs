@@ -272,8 +272,8 @@ async fn oversized_message_is_bad_request_with_body() {
 
 #[tokio::test]
 async fn blank_reply_is_replaced_with_the_canned_line_and_persisted_as_such() {
-    let llm =
-        Arc::new(MockLLM::scripted(vec![ChatResponse { text: "   ".into(), tool_calls: vec![] }]));
+    let blank = ChatResponse { text: "   ".into(), tool_calls: vec![] };
+    let llm = Arc::new(MockLLM::scripted(vec![blank.clone(), blank]));
     let (app, cookie, state, _cfg) = common::app_with_logged_in_user_llm_and_state(llm).await;
     let res = app
         .oneshot(

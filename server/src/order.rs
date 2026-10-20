@@ -2,7 +2,7 @@ use crate::tasks::{self, QueueEntry};
 use rusqlite::Connection;
 use serde::Serialize;
 
-pub const MAX_ITEMS: usize = 30;
+pub const MAX_ITEMS: usize = 60;
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct Item {

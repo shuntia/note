@@ -1080,6 +1080,8 @@ pub async fn run_turn(state: &crate::AppState, principal: &crate::auth::SharePri
             let reply = if !noted.is_empty() {
                 let display = crate::config::UserConfig::load(&st.config_dir, &owner).map_or_else(|_| owner.clone(), |c| c.display_name);
                 crate::text::share_passed_on(visitor_lang, &display)
+            } else if out.reply.trim().is_empty() && st.has_assistant() {
+                crate::text::unwritten_reply(visitor_lang, false)
             } else if out.reply.trim().is_empty() {
                 crate::text::empty_reply(visitor_lang)
             } else {

@@ -810,7 +810,12 @@ async fn turn(
                 }
             };
             let reply = if out.reply.trim().is_empty() {
-                crate::text::empty_reply(crate::text::Lang::for_user(&st.config_dir, &session_user))
+                let lang = crate::text::Lang::for_user(&st.config_dir, &session_user);
+                if st.has_assistant() {
+                    crate::text::unwritten_reply(lang, crate::agent::changed_anything(&out.steps))
+                } else {
+                    crate::text::empty_reply(lang)
+                }
             } else {
                 out.reply.clone()
             };

@@ -895,8 +895,7 @@ pub fn done_between(
     )
 }
 
-pub const MIN_STEPS: usize = 2;
-pub const MAX_STEPS: usize = 5;
+pub const MAX_STEPS: usize = 50;
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -970,9 +969,8 @@ pub fn node(conn: &Connection, user_id: i64, task_id: i64) -> Result<Option<Task
     Ok(Some(TaskNode { task, children }))
 }
 
-/// Refuses a task that already has steps, so a re-split can never silently
-/// discard work the user has already ticked off; the parent's duration becomes
-/// the total of its steps.
+/// Appends `steps` after any the task already has; the parent's duration
+/// becomes the total of all its steps.
 pub fn split(
     conn: &Connection,
     user_id: i64,
@@ -980,10 +978,8 @@ pub fn split(
     steps: Vec<Step>,
     actor: Actor,
 ) -> Result<Option<TaskNode>, UpdateError> {
-    if !(MIN_STEPS..=MAX_STEPS).contains(&steps.len()) {
-        return Err(UpdateError::InvalidHierarchy(format!(
-            "a split needs {MIN_STEPS} to {MAX_STEPS} steps"
-        )));
+    if steps.is_empty() {
+        return Err(UpdateError::InvalidHierarchy("a split needs at least one step".into()));
     }
     let Some(parent) = get(conn, user_id, task_id)? else { return Ok(None) };
     if parent.parent_id.is_some() {
@@ -991,10 +987,14 @@ pub fn split(
             "steps are one level deep: a step cannot have steps of its own".into(),
         ));
     }
-    if has_children(conn, task_id)? {
-        return Err(UpdateError::InvalidHierarchy("this task already has steps".into()));
+    let existing = children_of(conn, task_id)?;
+    if existing.len() + steps.len() > MAX_STEPS {
+        return Err(UpdateError::InvalidHierarchy(format!(
+            "a task holds at most {MAX_STEPS} steps; it has {}",
+            existing.len()
+        )));
     }
-    let mut total: u32 = 0;
+    let mut total: u32 = existing.iter().filter_map(|c| c.duration_min).sum();
     for s in &steps {
         total += checked_duration(s.duration_min)?;
     }
