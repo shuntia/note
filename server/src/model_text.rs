@@ -354,6 +354,10 @@ pub fn later_label(l: Lang, open: usize) -> String {
     }
 }
 
+pub fn next_label(l: Lang) -> &'static str {
+    l.of("next", "次")
+}
+
 pub fn and_more(l: Lang, rest: usize) -> String {
     match l {
         Lang::En => format!("- ... and {rest} more"),

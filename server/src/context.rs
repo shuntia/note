@@ -543,13 +543,25 @@ fn pressing(task: &crate::tasks::Task, tz: &jiff::tz::TimeZone, today: jiff::civ
 
 const PRESSING_CAP: usize = 20;
 
-/// Tasks with a deadline inside the next three days, and tasks already past
-/// theirs.
+/// The soonest open part due before its root is.
+fn next_part_due(root: &crate::tasks::TaskNode) -> Option<&crate::tasks::Task> {
+    root.walk()
+        .into_iter()
+        .skip(1)
+        .filter(|t| matches!(t.state.as_str(), "open" | "in_progress") && t.due_at.is_some())
+        .min_by(|a, b| a.due_at.cmp(&b.due_at))
+        .filter(|n| root.task.due_at.as_ref().is_none_or(|own| n.due_at.as_ref().is_some_and(|d| d < own)))
+}
+
+/// Open nodes, parts included, with a deadline inside the next three days,
+/// and those already past theirs.
 fn due_soon(tasks: &[&crate::tasks::TaskNode], now: jiff::Timestamp) -> (usize, usize) {
     let horizon = now + jiff::Span::new().hours(24 * DUE_SOON_DAYS);
     let dates = tasks
         .iter()
-        .filter_map(|t| t.task.due_at.as_deref())
+        .flat_map(|t| t.walk())
+        .filter(|t| matches!(t.state.as_str(), "open" | "in_progress"))
+        .filter_map(|t| t.due_at.as_deref())
         .filter_map(|d| d.parse::<jiff::Timestamp>().ok());
     let mut soon = 0;
     let mut overdue = 0;
@@ -607,9 +619,16 @@ fn tasks_section(
         let cap = cap.max(urgent.min(PRESSING_CAP));
         let _ = writeln!(s, "{}", mt::later_label(l, later.len()));
         for t in later.iter().take(cap) {
+            let mut tail = String::new();
+            if let Some(owner) = Some(&t.task.category).filter(|c| !c.is_empty()).or(t.task.goal_title.as_ref()) {
+                let _ = write!(tail, " · {owner}");
+            }
+            if let Some(next) = next_part_due(t) {
+                let _ = write!(tail, " · {}: {}{}", mt::next_label(l), next.title, due(l, next, tz, today, now));
+            }
             let _ = writeln!(
                 s,
-                "- {}{}{}{} (task_id {})",
+                "- {}{}{}{}{tail} (task_id {})",
                 t.task.title,
                 duration(l, t.task.duration_min),
                 progress(l, &t.task),
@@ -1425,6 +1444,28 @@ mod tests {
             "{out}"
         );
         assert!(out.contains("Due soon: 3 in the next 3 days, 1 overdue"), "{out}");
+    }
+
+    #[test]
+    fn a_later_row_names_its_course_and_its_soonest_part_due() {
+        let tmp = cfg_dir();
+        let (conn, uid) = user();
+        let child = |title: &str, due: Option<&str>| crate::tasks::NewTask {
+            title: title.into(),
+            due_at: due.map(|d| Some(d.to_string())),
+            ..Default::default()
+        };
+        let unit = crate::tasks::NewTask {
+            title: "Unit 4".into(),
+            category: Some("AP Chem".into()),
+            due_at: Some(Some("2026-09-20T10:00:00Z".into())),
+            children: vec![child("Read", None), child("Problem set 4", Some("2026-09-01T10:00:00Z"))],
+            ..Default::default()
+        };
+        crate::tasks::create_group(&conn, uid, None, vec![unit], "manual", crate::tasks::Actor::User).unwrap();
+        let out = without_task_ids(&assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap());
+        assert!(out.contains("- Unit 4 due 2026-09-20 19:00 · AP Chem · next: Problem set 4 due tomorrow 19:00\n"), "{out}");
+        assert!(out.contains("Due soon: 1 in the next 3 days, 0 overdue"), "{out}");
     }
 
     #[test]
