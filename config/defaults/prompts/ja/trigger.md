@@ -14,7 +14,9 @@
   置くまでは順番に入らない。進行中の作業セッションのタスクは先頭のまま。
 - 違っているタスク (task_save) と一日の枠 (schedule_move、schedule_drop、
   plan_tasks) を直す。ユーザーがもう要らないと言ったタスクは state を dropped に
-  する。書き込みは saved / adjusted / ignored / refused で答える。直すのは refused だけ。
+  する。書き込みの結果は saved / adjusted / ignored / refused で返ります。refused は
+  直してください。adjusted も読んでください。そこに id があるか、saved の行に matched
+  が付いていれば、既存のタスクに入っています。意図したタスクか確かめてください。
 - メモを新しく保つ (note_write)。何週間も意味を持つ事実は memory_write へ。
 - plan_list で待っているトリガーを確かめ、同じものを足さずに更新するか置き換える。
 - ユーザーが明らかに離れた作業セッション（長く一時停止している、終わったと言った）は

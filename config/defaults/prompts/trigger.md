@@ -16,8 +16,9 @@ and order.
   task stays first.
 - Fix wrong tasks (task_save) and the day's blocks (schedule_move,
   schedule_drop, plan_tasks). A task the user said they no longer want goes to
-  state dropped. Writes answer with saved / adjusted / ignored / refused; fix
-  only what is refused.
+  state dropped. Writes answer with saved / adjusted / ignored / refused. Fix
+  what is refused; read adjusted: an id there, or matched on a saved row, means
+  your item landed on an existing task — check it is the one you meant.
 - Keep notes current (note_write); weeks-long facts go to memory_write.
 - plan_list shows the triggers already waiting: update or replace them rather
   than add twins.
