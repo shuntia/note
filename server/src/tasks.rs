@@ -1089,6 +1089,60 @@ pub fn create_reported(
     })
 }
 
+/// Several sibling subtrees under `parent_id` (roots when `None`), built
+/// together so a sized parent shares its size among every unsized part at
+/// once. Returns every node made, in pre-order, and what the write adjusted.
+pub fn create_group(
+    conn: &Connection,
+    user_id: i64,
+    parent_id: Option<i64>,
+    news: Vec<NewTask>,
+    source: &str,
+    actor: Actor,
+) -> Result<(Vec<i64>, Vec<Adjusted>), UpdateError> {
+    atomically(conn, || {
+        let mut adjusted = Vec::new();
+        let first: i64 = conn.query_row("SELECT COALESCE(MAX(id), 0) FROM tasks", [], |r| r.get(0))?;
+        let mut tops = Vec::new();
+        for mut new in news {
+            new.parent_id = parent_id;
+            tops.push(insert_tree(conn, user_id, new, source, actor, &mut adjusted)?);
+        }
+        for id in &tops {
+            refresh_subtree(conn, *id, actor, &mut adjusted)?;
+        }
+        refresh_up(conn, parent_id, actor, &mut adjusted)?;
+        let mut keep = 0;
+        for id in &tops {
+            clamp_dues(conn, *id, &mut adjusted)?;
+            let mut stmt = conn.prepare_cached(&format!("{SUBTREE} SELECT id FROM tasks WHERE id IN sub AND is_now = 1"))?;
+            let held: Vec<i64> = stmt.query_map([id], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+            drop(stmt);
+            for h in held.into_iter().rev() {
+                let still: bool = conn.query_row("SELECT is_now FROM tasks WHERE id = ?1", [h], |r| r.get(0))?;
+                if still {
+                    take_now_place(conn, h, &mut adjusted)?;
+                    keep = h;
+                }
+            }
+        }
+        for id in trim_now(conn, user_id, keep)? {
+            adjusted.push(Adjusted {
+                id,
+                title: title_of(conn, id)?,
+                field: "is_now",
+                to: Some(false.into()),
+                why: "Now holds at most 3; the newest one left",
+                by: None,
+                by_title: None,
+            });
+        }
+        let mut stmt = conn.prepare_cached("SELECT id FROM tasks WHERE user_id = ?1 AND id > ?2 ORDER BY id")?;
+        let made: Vec<i64> = stmt.query_map((user_id, first), |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+        Ok((made, adjusted))
+    })
+}
+
 /// Inserts `new` and its children, leaving sizes, states and dues to be
 /// settled once the whole subtree stands.
 fn insert_tree(

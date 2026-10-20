@@ -206,7 +206,14 @@ pub fn update(
 /// Removes the goal; the tasks that hung from it stay, without one.
 pub fn delete(conn: &Connection, user_id: i64, goal_id: i64) -> rusqlite::Result<bool> {
     let tx = conn.unchecked_transaction()?;
-    let mine: bool = tx.query_row(
+    let gone = delete_within(&tx, user_id, goal_id)?;
+    tx.commit()?;
+    Ok(gone)
+}
+
+/// The deletion itself, for callers that already hold a transaction.
+pub fn delete_within(conn: &Connection, user_id: i64, goal_id: i64) -> rusqlite::Result<bool> {
+    let mine: bool = conn.query_row(
         "SELECT EXISTS (SELECT 1 FROM goals WHERE id = ?1 AND user_id = ?2)",
         (goal_id, user_id),
         |r| r.get(0),
@@ -214,9 +221,8 @@ pub fn delete(conn: &Connection, user_id: i64, goal_id: i64) -> rusqlite::Result
     if !mine {
         return Ok(false);
     }
-    tx.execute("UPDATE tasks SET goal_id = NULL WHERE goal_id = ?1", [goal_id])?;
-    tx.execute("DELETE FROM goals WHERE id = ?1", [goal_id])?;
-    tx.commit()?;
+    conn.execute("UPDATE tasks SET goal_id = NULL WHERE goal_id = ?1", [goal_id])?;
+    conn.execute("DELETE FROM goals WHERE id = ?1", [goal_id])?;
     Ok(true)
 }
 

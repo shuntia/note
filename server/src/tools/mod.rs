@@ -3,6 +3,7 @@ pub mod call_ops;
 pub mod context_ops;
 pub mod goal_ops;
 pub mod inbox_ops;
+pub mod loose;
 pub mod memory_ops;
 pub mod note_ops;
 pub mod order_ops;
