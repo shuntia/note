@@ -15,6 +15,8 @@ pub struct OpenAILLM {
     reasoning_off: bool,
     /// Models that refused the off switch; they are asked for the least reasoning instead.
     reasoning_mandatory: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// What each model's reasoning accepts, as `OpenRouter`'s catalogue lists it.
+    caps: std::sync::RwLock<std::collections::HashMap<String, ReasoningCaps>>,
     /// Models that refused a forced tool; they are asked without one from then on.
     choice_refused: std::sync::Mutex<std::collections::HashSet<String>>,
     extra: serde_json::Map<String, serde_json::Value>,
@@ -38,6 +40,7 @@ impl OpenAILLM {
             reasoning: reasoning.map(String::from),
             reasoning_off: false,
             reasoning_mandatory: std::sync::Mutex::default(),
+            caps: std::sync::RwLock::default(),
             choice_refused: std::sync::Mutex::default(),
             extra: serde_json::Map::new(),
             openrouter: base_url.contains("openrouter.ai"),
@@ -97,9 +100,36 @@ impl OpenAILLM {
         req.effort.map(super::Effort::as_str).or(self.reasoning.as_deref())
     }
 
+    /// Reads which efforts each model takes, and which cannot reason less than
+    /// some, from the endpoint's `/models` (`OpenRouter`'s carries a `reasoning` per model).
+    pub fn learn_caps(&self) {
+        let url = format!("{}/models", self.base_url);
+        let catalogue = self.agents.get_json(&url).unwrap_or_else(|e| {
+            eprintln!("openai: the model catalogue is unreadable, efforts go out as asked: {e:#}");
+            serde_json::Value::Null
+        });
+        self.learn_caps_from(&catalogue);
+    }
+
+    fn learn_caps_from(&self, catalogue: &serde_json::Value) {
+        let Some(models) = catalogue["data"].as_array() else { return };
+        let caps = models.iter().filter_map(|m| {
+            let r = &m["reasoning"];
+            let efforts: Vec<String> = r["supported_efforts"].as_array()?.iter().filter_map(|e| e.as_str().map(String::from)).collect();
+            Some((m["id"].as_str()?.to_string(), ReasoningCaps { mandatory: r["mandatory"].as_bool() == Some(true), efforts }))
+        });
+        self.caps.write().unwrap_or_else(std::sync::PoisonError::into_inner).extend(caps);
+    }
+
+    fn caps_of(&self, model: &str) -> Option<ReasoningCaps> {
+        self.caps.read().unwrap_or_else(std::sync::PoisonError::into_inner).get(model).cloned()
+    }
+
     fn request_body(&self, req: &ChatRequest) -> serde_json::Value {
         let model = self.model_for(req);
-        let mut v = body(&model, req, self.effort_for(req));
+        let caps = self.caps_of(&model);
+        let effort = self.effort_for(req).map(|e| caps.as_ref().map_or_else(|| e.to_string(), |c| c.nearest(e)));
+        let mut v = body(&model, req, effort.as_deref());
         if self.openrouter {
             v["usage"] = serde_json::json!({"include": true});
         }
@@ -111,8 +141,9 @@ impl OpenAILLM {
             };
         }
         if self.off(req) {
-            v["reasoning"] = if self.mandatory(&model) {
-                serde_json::json!({"effort": "low", "exclude": true})
+            v["reasoning"] = if self.mandatory(&model) || caps.as_ref().is_some_and(|c| c.mandatory) {
+                let least = caps.as_ref().map_or_else(|| "low".to_string(), ReasoningCaps::least);
+                serde_json::json!({"effort": least, "exclude": true})
             } else {
                 serde_json::json!({"enabled": false})
             };
@@ -180,6 +211,35 @@ impl OpenAILLM {
         let v = self.agents.post_json(req.background, "openai", &body, |agent| self.authorized(agent.post(&url)))?;
         crate::usage::record(crate::usage::Usage::openai_call(&v["usage"]));
         Ok(v)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ReasoningCaps {
+    mandatory: bool,
+    efforts: Vec<String>,
+}
+
+const EFFORT_LADDER: [&str; 7] = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+impl ReasoningCaps {
+    fn rungs(&self) -> Vec<usize> {
+        self.efforts.iter().filter(|e| *e != "none").filter_map(|e| EFFORT_LADDER.iter().position(|r| r == e)).collect()
+    }
+
+    /// The accepted effort closest to `asked`, the higher one on a tie; `asked` itself when unknown.
+    fn nearest(&self, asked: &str) -> String {
+        let (Some(want), rungs) = (EFFORT_LADDER.iter().position(|r| *r == asked), self.rungs()) else {
+            return asked.to_string();
+        };
+        rungs
+            .into_iter()
+            .min_by_key(|&r| (r.abs_diff(want), std::cmp::Reverse(r)))
+            .map_or_else(|| asked.to_string(), |r| EFFORT_LADDER[r].to_string())
+    }
+
+    fn least(&self) -> String {
+        self.rungs().into_iter().min().map_or_else(|| "low".to_string(), |r| EFFORT_LADDER[r].to_string())
     }
 }
 
@@ -861,6 +921,45 @@ mod tests {
         let none = OpenAILLM::new(&base, "m", "", ChatAgents::new(30, 30), None);
         none.chat(&ChatRequest { effort: Some(crate::providers::Effort::Medium), ..plain }).unwrap();
         assert_eq!(crate::testhttp::body_json(&rx.recv().unwrap())["reasoning"], serde_json::json!({"effort": "medium"}));
+    }
+
+    #[test]
+    fn an_effort_is_rounded_to_the_nearest_one_the_model_takes() {
+        let caps = |e: &[&str]| ReasoningCaps { mandatory: false, efforts: e.iter().map(|s| s.to_string()).collect() };
+        let deepseek = caps(&["max", "high", "low", "none"]);
+        assert_eq!(deepseek.nearest("medium"), "high", "a tie goes up");
+        assert_eq!(deepseek.nearest("low"), "low");
+        assert_eq!(caps(&["high", "none"]).nearest("low"), "high");
+        assert_eq!(caps(&["max", "xhigh", "high", "medium", "low"]).least(), "low");
+        assert_eq!(deepseek.nearest("whatever"), "whatever");
+        assert_eq!(caps(&["none"]).nearest("high"), "high", "a model listing no effort is asked as asked");
+    }
+
+    #[test]
+    fn the_catalogue_shapes_each_models_reasoning() {
+        const REPLY: &str = r#"{"choices":[{"message":{"content":"ok"}}]}"#;
+        let (base, rx) = crate::testhttp::serve(vec![("200 OK", REPLY); 4]);
+        let llm = OpenAILLM::new(&base, "deepseek/flash", "", ChatAgents::new(30, 30), Some("low"));
+        llm.learn_caps_from(&serde_json::json!({"data": [
+            {"id": "deepseek/flash", "reasoning": {"mandatory": false, "supported_efforts": ["max", "high", "low", "none"]}},
+            {"id": "z-ai/glm", "reasoning": {"mandatory": true, "supported_efforts": ["max", "high", "low"]}},
+            {"id": "plain/model"},
+        ]}));
+        let msgs = vec![Message::User("hi".into())];
+        let base_req = ChatRequest { system: "s", messages: &msgs, tools: &[], background: false, plain: false, must_call: None, model: None, effort: None };
+        let sent = |req: &ChatRequest| {
+            llm.chat(req).unwrap();
+            crate::testhttp::body_json(&rx.recv().unwrap())["reasoning"].clone()
+        };
+        use crate::providers::Effort;
+        assert_eq!(sent(&ChatRequest { effort: Some(Effort::Medium), ..base_req.clone() }), serde_json::json!({"effort": "high"}));
+        assert_eq!(sent(&ChatRequest { effort: Some(Effort::Off), ..base_req.clone() }), serde_json::json!({"enabled": false}));
+        assert_eq!(
+            sent(&ChatRequest { model: Some("z-ai/glm"), effort: Some(Effort::Off), ..base_req.clone() }),
+            serde_json::json!({"effort": "low", "exclude": true}),
+            "a model that must reason is asked for its least, never switched off"
+        );
+        assert_eq!(sent(&ChatRequest { model: Some("plain/model"), effort: Some(Effort::Medium), ..base_req }), serde_json::json!({"effort": "medium"}));
     }
 
     #[test]

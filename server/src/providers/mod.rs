@@ -295,6 +295,12 @@ impl ChatAgents {
             .into()
     }
 
+    pub(crate) fn get_json(&self, url: &str) -> Result<serde_json::Value> {
+        let mut resp = self.background.get(url).call().with_context(|| format!("GET {url}"))?;
+        anyhow::ensure!(resp.status().is_success(), "GET {url}: status {}", resp.status());
+        Ok(resp.body_mut().with_config().limit(16 * 1024 * 1024).read_json()?)
+    }
+
     /// Posts `body` and reads the JSON reply. A transport failure, a reply that
     /// stalls mid-read, 429 and 5xx are tried again; any other status fails at
     /// once. The error carries the status and the head of the body, since the
@@ -378,7 +384,7 @@ pub fn build(cfg: &crate::config::ProvidersConfig) -> Result<Providers> {
             "openai" => {
                 anyhow::ensure!(!p.base_url.is_empty(), "openai llm provider requires base_url");
                 let key = read_key(p, false)?;
-                Arc::new(
+                let llm = Arc::new(
                     openai::OpenAILLM::new(
                         &p.base_url,
                         &p.model,
@@ -387,7 +393,12 @@ pub fn build(cfg: &crate::config::ProvidersConfig) -> Result<Providers> {
                         reasoning_effort(p)?,
                     )
                     .with_models(&p.models),
-                )
+                );
+                if p.base_url.contains("openrouter.ai") {
+                    let learning = llm.clone();
+                    std::thread::spawn(move || learning.learn_caps());
+                }
+                llm
             }
             other => anyhow::bail!("unknown llm provider kind: {other}"),
         },
