@@ -31,6 +31,36 @@ pub struct ChatRequest<'a> {
     /// the call condenses text and thinking first buys nothing.
     pub plain: bool,
     pub must_call: Option<MustCall<'a>>,
+    /// Asks for this model over the provider's own.
+    pub model: Option<&'a str>,
+    /// Asks for this reasoning effort over the provider's own; `plain` still wins.
+    pub effort: Option<Effort>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Effort {
+    Off,
+    Low,
+    Medium,
+    High,
+}
+
+impl Effort {
+    pub const ALL: [Effort; 4] = [Effort::Off, Effort::Low, Effort::Medium, Effort::High];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Effort::Off => "off",
+            Effort::Low => "low",
+            Effort::Medium => "medium",
+            Effort::High => "high",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|e| e.as_str() == s)
+    }
 }
 
 /// What the reply has to call instead of answering in text, or `Nothing` for
@@ -136,14 +166,25 @@ pub trait LLMProvider: Send + Sync {
     fn set_model(&self, _model: &str) -> bool {
         false
     }
+
+    /// The models a request may ask for: `model()` first, then the configured extras.
+    fn offered(&self) -> Vec<String> {
+        self.model().into_iter().collect()
+    }
+
+    /// The effort a request that names none goes out with; `None` leaves it to the model.
+    fn effort(&self) -> Option<Effort> {
+        None
+    }
 }
 
-/// A model name the admin can swap while calls are in flight.
-pub(crate) struct LiveModel(std::sync::RwLock<String>);
+/// A model name the admin can swap while calls are in flight, and the others
+/// a request may ask for instead.
+pub(crate) struct LiveModel(std::sync::RwLock<String>, Vec<String>);
 
 impl LiveModel {
     pub(crate) fn new(model: &str) -> Self {
-        Self(std::sync::RwLock::new(model.to_string()))
+        Self(std::sync::RwLock::new(model.to_string()), Vec::new())
     }
 
     pub(crate) fn get(&self) -> String {
@@ -152,6 +193,21 @@ impl LiveModel {
 
     pub(crate) fn set(&self, model: &str) {
         *self.0.write().unwrap_or_else(std::sync::PoisonError::into_inner) = model.to_string();
+    }
+
+    pub(crate) fn offer(&mut self, models: &[String]) {
+        self.1 = models.iter().map(|m| m.trim().to_string()).filter(|m| !m.is_empty()).collect();
+    }
+
+    pub(crate) fn offered(&self) -> Vec<String> {
+        let mut all = vec![self.get()];
+        for m in &self.1 {
+            if !all.contains(m) {
+                all.push(m.clone());
+            }
+        }
+        all.retain(|m| !m.is_empty());
+        all
     }
 }
 
@@ -293,23 +349,29 @@ pub fn build(cfg: &crate::config::ProvidersConfig) -> Result<Providers> {
             "mock" => Arc::new(mock::NullLLM),
             "anthropic" => {
                 let key = read_key(p, true)?;
-                Arc::new(anthropic::AnthropicLLM::new(
-                    &p.base_url,
-                    &p.model,
-                    &key,
-                    ChatAgents::new(p.timeout_secs, p.background_timeout_secs),
-                ))
+                Arc::new(
+                    anthropic::AnthropicLLM::new(
+                        &p.base_url,
+                        &p.model,
+                        &key,
+                        ChatAgents::new(p.timeout_secs, p.background_timeout_secs),
+                    )
+                    .with_models(&p.models),
+                )
             }
             "openai" => {
                 anyhow::ensure!(!p.base_url.is_empty(), "openai llm provider requires base_url");
                 let key = read_key(p, false)?;
-                Arc::new(openai::OpenAILLM::new(
-                    &p.base_url,
-                    &p.model,
-                    &key,
-                    ChatAgents::new(p.timeout_secs, p.background_timeout_secs),
-                    reasoning_effort(p)?,
-                ))
+                Arc::new(
+                    openai::OpenAILLM::new(
+                        &p.base_url,
+                        &p.model,
+                        &key,
+                        ChatAgents::new(p.timeout_secs, p.background_timeout_secs),
+                        reasoning_effort(p)?,
+                    )
+                    .with_models(&p.models),
+                )
             }
             other => anyhow::bail!("unknown llm provider kind: {other}"),
         },
@@ -444,7 +506,7 @@ mod tests {
     fn build_defaults_to_null_llm_and_no_embeddings() {
         let cfg = crate::config::ProvidersConfig::default();
         let (llm, emb) = build(&cfg).unwrap();
-        let req = ChatRequest { system: "", messages: &[], tools: &[], background: false, plain: false, must_call: None };
+        let req = ChatRequest { system: "", messages: &[], tools: &[], background: false, plain: false, must_call: None, model: None, effort: None };
         let resp = llm.chat(&req).unwrap();
         assert!(resp.text.is_empty());
         assert_eq!(llm.chat_with_reasoning(&req).unwrap().1, "");
@@ -459,7 +521,7 @@ mod tests {
                 kind: "carrier-pigeon".into(),
                 base_url: String::new(), model: String::new(), api_key_env: String::new(),
                 api_key_file: std::path::PathBuf::new(), timeout_secs: 45, background_timeout_secs: 180,
-                reasoning: String::new(), cache_ttl_min: None,
+                reasoning: String::new(), cache_ttl_min: None, models: vec![],
             }),
             embeddings: None,
         };
@@ -477,7 +539,7 @@ mod tests {
                 kind: "anthropic".into(), base_url: String::new(),
                 model: "m".into(), api_key_env: "NOTE_TEST_MISSING_KEY".into(),
                 api_key_file: std::path::PathBuf::new(), timeout_secs: 45, background_timeout_secs: 180,
-                reasoning: String::new(), cache_ttl_min: None,
+                reasoning: String::new(), cache_ttl_min: None, models: vec![],
             }),
             embeddings: None,
         };
@@ -492,7 +554,7 @@ mod tests {
         crate::config::ProviderConfig {
             kind: "openai".into(), base_url: "http://localhost:1/v1".into(),
             model: "m".into(), api_key_env: String::new(), api_key_file: path,
-            timeout_secs: 45, background_timeout_secs: 180, reasoning: String::new(), cache_ttl_min: None,
+            timeout_secs: 45, background_timeout_secs: 180, reasoning: String::new(), cache_ttl_min: None, models: vec![],
         }
     }
 
@@ -515,7 +577,7 @@ mod tests {
     fn a_call_reasons_low_unless_told_otherwise() {
         let reply = r#"{"choices":[{"message":{"content":"hi"}}]}"#;
         let main: Arc<dyn LLMProvider> = Arc::new(mock::NullLLM);
-        let req = ChatRequest { system: "s", messages: &[], tools: &[], background: false, plain: false, must_call: None };
+        let req = ChatRequest { system: "s", messages: &[], tools: &[], background: false, plain: false, must_call: None, model: None, effort: None };
         let sent = |toml: &str| {
             let (base, rx) = crate::testhttp::serve(vec![("200 OK", reply)]);
             let mut p = file_key_config(std::path::PathBuf::new());

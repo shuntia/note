@@ -1062,6 +1062,7 @@ pub async fn run_turn(state: &crate::AppState, principal: &crate::auth::SharePri
             thread_note: None,
             share: Some(crate::agent::ShareSession { id: share.id, thread_id, brief: share.brief.clone(), scope: share.scope.clone(), visitor_lang }),
             caller: None,
+            conversation_id: None,
         };
         let answered = (|| {
             let out = crate::agent::run_session(&deps, owner_id, &owner, crate::tools::SessionKind::Share, now, &past, &message)?;

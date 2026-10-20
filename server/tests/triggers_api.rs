@@ -1122,7 +1122,7 @@ async fn a_reply_sent_while_the_waiting_session_finishes_still_answers_the_wait(
 
     let wakes = note_server::runner::sweep(&state);
     llm.first_round().await;
-    let busy = note_server::talk::run_turn(&state, 1, "aki", None, "ok starting", note_server::talk::Via::Matrix, None).await;
+    let busy = note_server::talk::run_turn(&state, 1, "aki", None, "ok starting", note_server::talk::Via::Matrix, None, Default::default()).await;
     assert!(matches!(busy, Err(note_server::talk::TurnError::Busy(_))), "the wake-up holds the gate");
     let reply = tokio::spawn({
         let state = state.clone();

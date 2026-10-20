@@ -104,6 +104,8 @@ category default.
 | `voice_voice` | a call voice id; blank for the language default |
 | `voice_cue` | bool (default true) |
 | `matrix_send`, `matrix_ping` | bool |
+| `model` | one of `GET /api/models`' `models`, or null for the server's ([agent.md](agent.md#models)) |
+| `effort` | `off`, `low`, `medium`, `high`, or null for the server's |
 | `alerts` | `[{index, alert}]`: which of the template's routines ping |
 
 `category` is read-only here; it belongs to the account.

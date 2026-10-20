@@ -23,6 +23,7 @@ require_second_factor = true
 # model = "deepseek/deepseek-v4-flash"
 # api_key_file = "config/openrouter.key"
 # reasoning = "low"             # model reasoning shown in the Talk activity panel; costs tokens
+# models = ["deepseek/deepseek-v4.1-flash"]  # more models a user may pick for a chat or as their default
 
 # How long the endpoint keeps a prompt cached; it caps how long a
 # conversation may idle before the summary pass replays it.

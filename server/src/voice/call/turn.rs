@@ -54,6 +54,8 @@ pub fn spawn(
             background: false,
             plain: false,
             must_call: None,
+            model: None,
+            effort: None,
         };
         let mut sink = TurnSink::new(spec.reply, &stop, &tx);
         let mut result = llm.chat_stream(&req, &opts, &mut sink);

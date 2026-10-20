@@ -164,7 +164,7 @@ pub async fn receive(state: &AppState, rooms: &mut Rooms, message: &Message) {
     let queue = rooms.queues.entry(user_id).or_insert_with(|| Queue::start(state, user_id));
     if queue.waiting.load(Ordering::SeqCst) == 0 {
         let conversation = if fresh { None } else { recent_thread(state, user_id) };
-        match crate::talk::run_turn(state, user_id, &username, conversation, text, Via::Matrix, None).await {
+        match crate::talk::run_turn(state, user_id, &username, conversation, text, Via::Matrix, None, crate::models::Pick::default()).await {
             Err(TurnError::Busy(_)) => {}
             done => return answer(state, &message.room_id, user_id, lang, done).await,
         }

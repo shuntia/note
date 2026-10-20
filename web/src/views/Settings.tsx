@@ -4,6 +4,7 @@ import type { ViewProps } from '../app'
 import { desktop } from '../desktop'
 import { useLoad, useSave } from '../hooks'
 import { adoptLanguage, t, type Key } from '../i18n'
+import { EFFORTS, effortKey, shortModel, type Effort, type ModelOffer } from '../models'
 import { prefsFrom, writePrefs } from '../prefs'
 import type { CounterMode } from '../session'
 import '../styles/settings.css'
@@ -114,6 +115,11 @@ export function Settings({
   const [theme, setTheme] = useState<ThemeChoice>(storedTheme)
   const [place, setPlace] = useState(storedPlace)
   const [mxid, setMxid] = useState('')
+  const [offer, setOffer] = useState<ModelOffer | null>(null)
+
+  useEffect(() => {
+    api.models().then(setOffer, () => setOffer(null))
+  }, [])
 
   const loaded = state !== undefined && state !== 'error' ? state : null
   const settings = loaded?.settings
@@ -425,6 +431,54 @@ export function Settings({
               )}
             </FoldRow>
             <ToggleSetting field="show_arc_between_sessions" label={t('settings.arc')} />
+            {offer && (
+              <FoldRow
+                label={t('settings.model')}
+                value={[
+                  settings.model ? shortModel(settings.model, offer.models) : t('settings.model.serverDefault'),
+                  settings.effort && t(effortKey(settings.effort)),
+                ]
+                  .filter(Boolean)
+                  .join(' · ')}
+                open={open === 'model'}
+                onToggle={fold('model')}
+              >
+                {open === 'model' && (
+                  <div className="set-fold-body">
+                    <span className="set-sub">{t('settings.model.sub')}</span>
+                    {offer.models.length > 1 && (
+                      <select
+                        aria-label={t('settings.model')}
+                        value={settings.model ?? ''}
+                        disabled={busy}
+                        onChange={(e) => void saveSettings('model', { model: e.target.value || null })}
+                      >
+                        <option value="">{t('settings.model.serverDefault')}</option>
+                        {offer.models.map((m) => (
+                          <option key={m} value={m} title={m}>
+                            {shortModel(m, offer.models)}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                    <div className="seg" role="group" aria-label={t('settings.model.effort')}>
+                      {[null, ...EFFORTS].map((e: Effort | null) => (
+                        <button
+                          key={e ?? 'default'}
+                          type="button"
+                          aria-pressed={settings.effort === e}
+                          disabled={busy}
+                          onClick={() => void saveSettings('model', { effort: e })}
+                        >
+                          {e ? t(effortKey(e)) : t('talk.pick.default')}
+                        </button>
+                      ))}
+                    </div>
+                    <Status save={save} row="model" />
+                  </div>
+                )}
+              </FoldRow>
+            )}
           </Group>
         )}
 

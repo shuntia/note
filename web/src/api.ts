@@ -1,4 +1,5 @@
 import { t } from './i18n'
+import type { ModelOffer, ModelPick } from './models'
 import type {
   AdminGate,
   AdminLog,
@@ -98,6 +99,8 @@ export const WRITABLE_SETTINGS = [
   'matrix_send',
   'matrix_ping',
   'language',
+  'model',
+  'effort',
 ] as const
 
 export type WritableSetting = (typeof WRITABLE_SETTINGS)[number]
@@ -291,13 +294,19 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ conversation_id: conversationId }),
     }),
-  talk: (message: string, conversationId?: number) =>
+  // A new thread opens with `opensWith`; an existing one keeps its own pick.
+  talk: (message: string, conversationId?: number, opensWith?: ModelPick) =>
     request<TalkReply | TalkPending>('/api/talk', {
       method: 'POST',
       body: JSON.stringify(
-        conversationId === undefined ? { message } : { message, conversation_id: conversationId },
+        conversationId === undefined
+          ? { message, ...opensWith }
+          : { message, conversation_id: conversationId },
       ),
     }),
+  models: () => request<ModelOffer>('/api/models'),
+  setConversationModel: (id: number, pick: ModelPick) =>
+    request<ModelPick>(`/api/conversations/${id}/model`, { method: 'PUT', body: JSON.stringify(pick) }),
   settings: () => request<Settings>('/api/settings'),
   presence: () => request<void>('/api/presence', { method: 'POST' }),
   // The server rejects unknown fields, so only the writable keys actually set go on the

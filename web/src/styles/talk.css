@@ -257,6 +257,19 @@
 .chat .tellnote textarea::placeholder { transition: opacity 300ms ease; }
 .chat .tellnote textarea.flying::placeholder { opacity: 0; }
 
+/* the model pick rides the pill's left edge from outside the form, so the pill's
+   button rules leave it and its menu alone; a dot marks a chat with its own pick */
+.chat .chat-compose { position: relative; }
+.chat .tellnote.has-pick { padding-left: 2.75rem; }
+.chat .chat-pick-wrap { position: absolute; left: 0.375rem; bottom: 0.375rem; z-index: 1; }
+.chat .chat-pick { position: relative; display: grid; place-items: center; width: 2.25rem; height: 2.25rem; border: 0; border-radius: 50%; background: none; color: var(--quiet); cursor: pointer; transition: background-color 180ms ease, color 180ms ease; }
+.chat .chat-pick:hover, .chat .chat-pick[aria-expanded='true'] { background: var(--sunk); color: var(--text); }
+.chat .chat-pick:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+.chat .chat-pick svg { width: 1.125rem; height: 1.125rem; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; transition: transform 180ms ease; }
+.chat .chat-pick[aria-expanded='true'] svg { transform: rotate(45deg); }
+.chat .chat-pick.picked::after { content: ''; position: absolute; top: 0.4375rem; right: 0.4375rem; width: 0.3125rem; height: 0.3125rem; border-radius: 50%; background: var(--sun-ink); }
+.chat .chat-pick-wrap .ev-menu { top: auto; bottom: calc(100% + 0.375rem); left: 0; right: auto; }
+
 /* the drawer: a row's actions show themselves only when the row is in hand */
 @media (pointer: fine) and (min-width: 768px) {
   .chat .chat-row .chat-more-wrap { opacity: 0; transition: opacity 150ms ease; }
@@ -268,7 +281,8 @@
 @media (prefers-reduced-motion: reduce) {
   .pulse-arc, .pulse-fill, .send-ghost, .chat .activity.live,
   .chat .tellnote button, .chat .tellnote textarea::placeholder,
-  .chat .chat-row .chat-more-wrap, .compose-button svg { transition: none; }
+  .chat .chat-row .chat-more-wrap, .compose-button svg,
+  .chat .chat-pick, .chat .chat-pick svg { transition: none; }
   .chat .activity.live.held { opacity: 1; }
   .chat .reply.fresh { animation: none; }
 }

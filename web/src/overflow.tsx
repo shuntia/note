@@ -62,6 +62,9 @@ export function Overflow({
   subtitle,
   row,
   trigger: showTrigger = true,
+  icon = '⋯',
+  triggerClass = 'ev-more',
+  triggerTitle,
   ref: handle,
 }: {
   label: string
@@ -74,6 +77,10 @@ export function Overflow({
   // that press has lifted the row to drag it.
   row?: string
   trigger?: boolean
+  // What the trigger shows in place of the ⋯, and the class and tooltip it wears.
+  icon?: ReactNode
+  triggerClass?: string
+  triggerTitle?: string
   ref?: Ref<OverflowHandle>
 }) {
   const sheet = useMenuSheet()
@@ -342,14 +349,16 @@ export function Overflow({
     <div className={className} ref={wrap} data-open={open && !closing}>
       {showTrigger && (
         <button
-          className="ev-more"
+          type="button"
+          className={triggerClass}
           ref={trigger}
           aria-label={label}
+          title={triggerTitle}
           aria-haspopup="menu"
           aria-expanded={open && !closing}
           onClick={toggle}
         >
-          ⋯
+          {icon}
         </button>
       )}
       {popover && (point ? createPortal(popover, document.body) : popover)}

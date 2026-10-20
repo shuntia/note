@@ -22,6 +22,12 @@ files.
   `message.reasoning` or `message.reasoning_content`. Reasoning is shown live
   and stored on the assistant row (capped at 32 KiB), never fed back into the
   next round.
+- `models`: more models a user may pick, beside `model`, from the composer's
+  "+" menu (one chat) or Settings (their default). A session asks for the
+  chat's pick, else the user's default, else `model`; the chat's or the user's
+  effort (`off`, `low`, `medium`, `high`) likewise overrides `reasoning`.
+  Voice calls and share-link visitors always run on the server's own. A pick
+  later dropped from the list falls back to `model`.
 - `cache_ttl_min`: how long the endpoint keeps a prompt cached; it caps how
   long a conversation may idle before the summary pass (`[agent]
   idle_summary_min`) replays it.
@@ -49,6 +55,20 @@ the WebSocket ([delivery.md](delivery.md#websocket)).
 Conversations: `GET /api/conversations`, `PATCH/DELETE /api/conversations/{id}`,
 and `GET /api/conversations/{id}/messages` (user, assistant and tool rows in
 order; each carries `reasoning`, and the assistant row `thought_ms`).
+
+### Models
+
+`GET /api/models` answers `{default, models, efforts, effort_default}`: the
+provider's live model (null on the mock), the models on offer (that one first,
+then `[providers.llm] models`), `["off","low","medium","high"]`, and the
+configured effort (null when none is set). `PUT /api/conversations/{id}/model
+{model, effort}` sets a thread's own pick (null follows the user's default);
+a value not on offer is a `422`, another user's thread a `404`. Each listed
+conversation carries its `model` and `effort`. `POST /api/talk` may carry
+`model` and `effort` for the thread it opens. A session asks for the thread's
+pick, then the user's (`model`, `effort` in Settings), then the provider's;
+only talk turns read a thread's pick, and calls and share visitors always run
+on the provider's own.
 
 `GET /api/triggers` is the signed-in user's trigger log, oldest first: up to
 100 settled in the last 7 days, then up to 50 still waiting, each

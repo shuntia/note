@@ -1,3 +1,4 @@
+import type { Effort } from './models'
 import type { WritableSetting } from './api'
 import type { AgentFrame } from './ws'
 
@@ -158,6 +159,9 @@ export type Conversation = {
   updated_at: string
   summary: string | null
   via: ConversationVia
+  // Null follows the user's default from Settings.
+  model: string | null
+  effort: Effort | null
 }
 
 export type TalkStep = {
@@ -262,6 +266,9 @@ export type Settings = {
   matrix_ping: boolean
   // '' follows the browser.
   language: Language
+  // Null follows the server's own.
+  model: string | null
+  effort: Effort | null
 }
 
 export type Language = '' | 'en' | 'ja'

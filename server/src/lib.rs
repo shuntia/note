@@ -23,6 +23,7 @@ pub mod log;
 pub mod matrix;
 pub mod memory;
 pub mod model_text;
+pub mod models;
 pub mod net;
 pub mod nightly;
 pub mod notes;

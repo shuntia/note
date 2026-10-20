@@ -116,6 +116,7 @@ fn delivery_reaches_the_user_through_the_ladder() {
         thread_note: None,
         share: None,
         caller: None,
+        conversation_id: None,
     };
     let nightly_now: jiff::Timestamp = "2026-08-30T18:30:00Z".parse().unwrap();
     note_server::nightly::run_for_user(&deps, uid, "aki", nightly_now).unwrap();

@@ -4,7 +4,7 @@ use crate::AppState;
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
-use axum::routing::{get, patch, post};
+use axum::routing::{get, patch, post, put};
 use axum::{Json, Router};
 use base64::Engine;
 use rusqlite::OptionalExtension;
@@ -50,6 +50,8 @@ pub fn router(state: AppState) -> Router {
             patch(conversation_rename).delete(conversation_delete),
         )
         .route("/api/conversations/{id}/messages", get(conversation_messages))
+        .route("/api/conversations/{id}/model", put(conversation_model_put))
+        .route("/api/models", get(models_get))
         .route("/api/settings", get(settings_get).put(settings_put))
         .route("/api/presence", post(presence))
         .route("/api/voice/link", post(voice_link).delete(voice_unlink))
@@ -1014,6 +1016,7 @@ async fn task_agent(
             thread_note: None,
             share: None,
             caller: None,
+            conversation_id: None,
         };
         let session = crate::agent::run_session(
             &deps,
@@ -1232,6 +1235,7 @@ async fn agent_inbox(
             thread_note: None,
             share: None,
             caller: None,
+            conversation_id: None,
         };
         crate::agent::run_session(
             &deps,
@@ -1377,6 +1381,11 @@ async fn tokens_revoke(
 struct TalkReq {
     message: String,
     conversation_id: Option<i64>,
+    /// The pick a new thread opens with; ignored for an existing one.
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    effort: Option<String>,
 }
 
 /// A session makes synchronous provider calls and blocking DB writes, so it
@@ -1394,7 +1403,11 @@ async fn talk(
         let (state, username) = (state.clone(), user.username.clone());
         async move {
             let message = req.message;
-            crate::talk::run_turn(&state, user.id, &username, req.conversation_id, &message, crate::talk::Via::Web, Some(started))
+            let opens_with = crate::models::Pick {
+                model: req.model,
+                effort: req.effort.as_deref().and_then(crate::providers::Effort::parse),
+            };
+            crate::talk::run_turn(&state, user.id, &username, req.conversation_id, &message, crate::talk::Via::Web, Some(started), opens_with)
                 .await
         }
     });
@@ -1513,7 +1526,7 @@ async fn triggers_log(user: CurrentUser, State(state): State<AppState>) -> impl 
 async fn conversations_list(user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
     let conn = state.db();
     let Ok(mut stmt) = conn.prepare(
-        "SELECT id, title, updated_at, summary, via, title_kind FROM conversations
+        "SELECT id, title, updated_at, summary, via, title_kind, model, effort FROM conversations
          WHERE user_id = ?1
            AND EXISTS (SELECT 1 FROM talk_messages m WHERE m.conversation_id = conversations.id)
          ORDER BY updated_at DESC, id DESC",
@@ -1529,11 +1542,48 @@ async fn conversations_list(user: CurrentUser, State(state): State<AppState>) ->
                 "summary": r.get::<_, Option<String>>(3)?,
                 "via": r.get::<_, String>(4)?,
                 "title_kind": r.get::<_, String>(5)?,
+                "model": crate::models::still_offered(state.llm.as_ref(), r.get(6)?),
+                "effort": r.get::<_, Option<String>>(7)?.as_deref().and_then(crate::providers::Effort::parse),
             }))
         })
         .and_then(|m| m.collect());
     match rows {
         Ok(v) => Json(v).into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn models_get(_user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
+    Json(serde_json::json!({
+        "default": state.llm.model(),
+        "models": state.llm.offered(),
+        "efforts": crate::providers::Effort::ALL,
+        "effort_default": state.llm.effort(),
+    }))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelPickReq {
+    model: Option<String>,
+    effort: Option<String>,
+}
+
+/// Null clears either half back to the user's default.
+async fn conversation_model_put(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(req): Json<ModelPickReq>,
+) -> impl IntoResponse {
+    let pick = match crate::models::parse(state.llm.as_ref(), req.model, req.effort) {
+        Ok(pick) => pick,
+        Err(field) => return unprocessable_field(field, "is not on offer"),
+    };
+    let conn = state.db();
+    match crate::models::set_conversation_pick(&conn, user.id, id, &pick) {
+        Ok(false) => conversation_not_found(),
+        Ok(true) => Json(serde_json::json!({ "model": pick.model, "effort": pick.effort })).into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
@@ -1643,6 +1693,10 @@ struct SettingsPatch {
     matrix_send: Option<bool>,
     matrix_ping: Option<bool>,
     language: Option<String>,
+    #[serde(default, deserialize_with = "crate::tasks::present")]
+    model: Option<Option<String>>,
+    #[serde(default, deserialize_with = "crate::tasks::present")]
+    effort: Option<Option<String>>,
     alerts: Option<Vec<AlertPatch>>,
 }
 
@@ -1695,6 +1749,8 @@ fn settings_body(
         "matrix_send": cfg.matrix_send(),
         "matrix_ping": cfg.matrix_ping(),
         "language": cfg.language(),
+        "model": crate::models::still_offered(state.llm.as_ref(), cfg.model.clone()),
+        "effort": cfg.effort(),
         "schedule": schedule,
     })
 }
@@ -1930,6 +1986,18 @@ async fn settings_put(
             return invalid_field("language", "must be blank, en or ja");
         }
         cfg.language = (!language.is_empty()).then_some(language);
+    }
+    if let Some(model) = req.model {
+        if crate::models::parse(state.llm.as_ref(), model.clone(), None).is_err() {
+            return invalid_field("model", "is not on offer");
+        }
+        cfg.model = model;
+    }
+    if let Some(effort) = req.effort {
+        if effort.as_deref().is_some_and(|e| crate::providers::Effort::parse(e).is_none()) {
+            return invalid_field("effort", "must be off, low, medium or high");
+        }
+        cfg.effort = effort;
     }
     if let Some(alerts) = req.alerts {
         let changes: Vec<(usize, bool)> = alerts.iter().map(|a| (a.index, a.alert)).collect();
@@ -2273,6 +2341,7 @@ async fn debug_prompt(
             thread_note: None,
             share: None,
             caller: None,
+            conversation_id: None,
         };
         let prompt = crate::agent::system_prompt(&deps, user.id, &user.username, kind, jiff::Timestamp::now())?;
         let mut tools: Vec<&str> = crate::tools::registry(kind).to_vec();

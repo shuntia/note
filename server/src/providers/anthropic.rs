@@ -18,6 +18,12 @@ impl AnthropicLLM {
             api_key: api_key.to_string(),
         }
     }
+
+    #[must_use]
+    pub fn with_models(mut self, models: &[String]) -> Self {
+        self.model.offer(models);
+        self
+    }
 }
 
 pub fn body(model: &str, req: &ChatRequest) -> serde_json::Value {
@@ -91,7 +97,7 @@ pub fn parse(v: &serde_json::Value) -> Result<ChatResponse> {
 impl LLMProvider for AnthropicLLM {
     fn chat(&self, req: &ChatRequest) -> Result<ChatResponse> {
         let url = format!("{}/v1/messages", self.base_url);
-        let body = body(&self.model.get(), req);
+        let body = body(&req.model.map_or_else(|| self.model.get(), String::from), req);
         let resp = self.agents.post_json(req.background, "anthropic", &body, |agent| {
             agent
                 .post(&url)
@@ -110,6 +116,10 @@ impl LLMProvider for AnthropicLLM {
     fn set_model(&self, model: &str) -> bool {
         self.model.set(model);
         true
+    }
+
+    fn offered(&self) -> Vec<String> {
+        self.model.offered()
     }
 }
 
@@ -134,7 +144,7 @@ mod tests {
     fn body_maps_roles_tools_and_merges_tool_results() {
         let tools = vec![serde_json::json!({"name":"memory_query","description":"d","input_schema":{"type":"object"}})];
         let msgs = req_fixture();
-        let b = body("claude-sonnet-5", &ChatRequest { system: "be kind", messages: &msgs, tools: &tools, background: false, plain: false, must_call: None });
+        let b = body("claude-sonnet-5", &ChatRequest { system: "be kind", messages: &msgs, tools: &tools, background: false, plain: false, must_call: None, model: None, effort: None });
         assert_eq!(b["system"], "be kind");
         assert_eq!(b["max_tokens"], 4096);
         assert_eq!(b["tools"][0]["name"], "memory_query");
@@ -149,7 +159,7 @@ mod tests {
     #[test]
     fn body_omits_tools_key_when_empty() {
         let msgs = vec![Message::User("hi".into())];
-        let b = body("claude-sonnet-5", &ChatRequest { system: "", messages: &msgs, tools: &[], background: false, plain: false, must_call: None });
+        let b = body("claude-sonnet-5", &ChatRequest { system: "", messages: &msgs, tools: &[], background: false, plain: false, must_call: None, model: None, effort: None });
         assert!(b.get("tools").is_none());
     }
 

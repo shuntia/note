@@ -195,6 +195,9 @@ pub struct ProviderConfig {
     /// How long the endpoint keeps a prompt cached, when it caches at all.
     #[serde(default)]
     pub cache_ttl_min: Option<u32>,
+    /// Models a user may pick for their chats besides `model`.
+    #[serde(default)]
+    pub models: Vec<String>,
 }
 
 pub const DEFAULT_PROVIDER_TIMEOUT_SECS: u64 = 45;
@@ -380,6 +383,12 @@ pub struct UserConfig {
     /// One of `text::LANGUAGES`; blank follows the browser.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
+    /// The chat model the user's sessions ask for; absent follows the server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// The reasoning effort the user's sessions ask for; absent follows the server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
 }
 
 pub const DEFAULT_TRIGGERS_PER_DAY: u32 = 12;
@@ -445,6 +454,10 @@ impl UserConfig {
             Some(n) => u32::try_from(n).ok(),
             None => Some(DEFAULT_TRIGGERS_PER_DAY),
         }
+    }
+
+    pub fn effort(&self) -> Option<crate::providers::Effort> {
+        self.effort.as_deref().and_then(crate::providers::Effort::parse)
     }
 
     pub fn timezone_auto(&self) -> bool {

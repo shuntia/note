@@ -392,6 +392,7 @@ pub fn run_for_user(
         thread_note: None,
         share: None,
         caller: deps.caller,
+        conversation_id: None,
     };
     let sunday = week_start.checked_add(jiff::Span::new().days(6))?;
     let opening = mt::review_opening(l, &week, sunday, &digest);
@@ -474,6 +475,7 @@ mod tests {
             thread_note: None,
             share: None,
             caller: None,
+            conversation_id: None,
         }
     }
 

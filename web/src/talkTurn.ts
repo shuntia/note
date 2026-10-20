@@ -1,5 +1,6 @@
 import { api, ApiError } from './api'
 import { t } from './i18n'
+import type { ModelPick } from './models'
 import type { TalkMessage, TalkReply } from './types'
 import { onAgentFrame, type TalkDoneFrame } from './ws'
 
@@ -8,7 +9,7 @@ const POLL_MS = 10_000
 
 // One Talk turn. A turn the server stopped waiting on is followed to its end on the
 // socket, so a long job reads the same as a short one: a reply, or an ApiError.
-export async function talkTurn(message: string, conversationId?: number): Promise<TalkReply> {
+export async function talkTurn(message: string, conversationId?: number, opensWith?: ModelPick): Promise<TalkReply> {
   const ended = new Map<number, TalkDoneFrame>()
   let heard: (() => void) | null = null
   const off = onAgentFrame((frame) => {
@@ -17,7 +18,7 @@ export async function talkTurn(message: string, conversationId?: number): Promis
     heard?.()
   })
   try {
-    const answer = await api.talk(message, conversationId)
+    const answer = await api.talk(message, conversationId, opensWith)
     if (!('pending' in answer)) return answer
     const { conversation_id: id, turn } = answer
     for (;;) {

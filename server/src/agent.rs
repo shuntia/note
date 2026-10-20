@@ -177,6 +177,8 @@ pub struct SessionDeps<'a> {
     pub share: Option<ShareSession>,
     /// How the session reaches the user by phone; without one, `call_user` refuses.
     pub caller: Option<&'a dyn crate::channels::calling::Caller>,
+    /// The thread a talk session replies in, whose model pick it follows.
+    pub conversation_id: Option<i64>,
 }
 
 /// The link a share session answers for.
@@ -550,6 +552,16 @@ fn session_schemas(
     }
 }
 
+fn session_pick(deps: &SessionDeps, kind: SessionKind, ucfg: Option<&crate::config::UserConfig>) -> crate::models::Pick {
+    use crate::models::{self, Pick};
+    let conversation = match (kind, deps.conversation_id) {
+        (SessionKind::Talk, Some(id)) => models::conversation_pick(&crate::db_guard(deps.db), id).unwrap_or_default(),
+        _ => Pick::default(),
+    };
+    let user = ucfg.map(Pick::of_user).unwrap_or_default();
+    models::resolve(deps.llm, kind, &conversation, &user)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_traced(
     deps: &SessionDeps,
@@ -564,6 +576,7 @@ fn run_traced(
 ) -> Result<SessionOutcome> {
     let (ucfg, lang) = reader(deps, username, kind);
     let uncapped = ucfg.as_ref().is_ok_and(|c| c.triggers_per_day().is_none());
+    let pick = session_pick(deps, kind, ucfg.as_ref().ok());
     let prompt = build_prompt(deps, user_id, username, kind, now, lang, ucfg)?;
     let system = &prompt.system;
     let profile = profile(kind);
@@ -641,7 +654,16 @@ fn run_traced(
                 if turns + 1 == max_turns || schemas.len() == 1 { MustCall::Tool(name) } else { MustCall::Any }
             })
         };
-        let req = ChatRequest { system, messages: &messages, tools: offered, background, plain: profile.plain, must_call };
+        let req = ChatRequest {
+            system,
+            messages: &messages,
+            tools: offered,
+            background,
+            plain: profile.plain,
+            must_call,
+            model: pick.model.as_deref(),
+            effort: pick.effort,
+        };
         trace.spent(crate::usage::take());
         let round = std::time::Instant::now();
         let (resp, thinking, streamed) = match chat_round(deps.llm, &req, profile.streams, on_event, stop) {
@@ -1241,7 +1263,7 @@ mod tests {
     ) -> SessionDeps<'a> {
         SessionDeps { db, config_dir: tmp.path(), data_dir: tmp.path(), llm, embeddings: None,
             search: None, task_scope: None, inbox_source: None, memory_source: None, token_id: None, thread_note: None,
-            share: None, caller: None }
+            share: None, caller: None, conversation_id: None }
     }
 
     fn now() -> jiff::Timestamp {
@@ -1557,6 +1579,7 @@ mod tests {
             thread_note: None,
             share: None,
             caller: None,
+            conversation_id: None,
         };
         let err = run_session_watched(
             &deps,
@@ -2736,6 +2759,7 @@ mod tests {
             thread_note: None,
             share: None,
             caller: None,
+            conversation_id: None,
         };
         assert!(run_session(&d, 1, "aki", SessionKind::Talk, now(), &[], "hi").is_err());
     }
@@ -2753,7 +2777,7 @@ mod tests {
         }
         let llm = MockLLM::scripted(vec![ChatResponse { text: "Aki has a lab report.".into(), tool_calls: vec![] }]);
         let share = ShareSession { id: 1, thread_id: 1, brief: "be warm".into(), scope: crate::shares::ShareScope::default(), visitor_lang: crate::text::Lang::En };
-        let deps = SessionDeps { db: &db, config_dir: tmp.path(), data_dir: tmp.path(), llm: &llm, embeddings: None, search: None, task_scope: None, inbox_source: None, memory_source: None, token_id: None, thread_note: Some("SECRET NOTE".into()), share: Some(share), caller: None };
+        let deps = SessionDeps { db: &db, config_dir: tmp.path(), data_dir: tmp.path(), llm: &llm, embeddings: None, search: None, task_scope: None, inbox_source: None, memory_source: None, token_id: None, thread_note: Some("SECRET NOTE".into()), share: Some(share), caller: None, conversation_id: None };
         let out = run_session(&deps, 1, "aki", SessionKind::Share, jiff::Timestamp::now(), &[], "what does aki have?").unwrap();
         assert_eq!(out.reply, "Aki has a lab report.");
         let seen = llm.seen();

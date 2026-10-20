@@ -54,6 +54,12 @@ impl OpenAILLM {
     }
 
     #[must_use]
+    pub fn with_models(mut self, models: &[String]) -> Self {
+        self.model.offer(models);
+        self
+    }
+
+    #[must_use]
     pub fn with_effort(mut self, effort: &str) -> Self {
         self.reasoning = Some(effort.into());
         self
@@ -70,15 +76,30 @@ impl OpenAILLM {
         format!("{}/chat/completions", self.base_url)
     }
 
+    fn model_for(&self, req: &ChatRequest) -> String {
+        req.model.map_or_else(|| self.model.get(), String::from)
+    }
+
     /// Whether `req` goes out with reasoning switched off.
     fn off(&self, req: &ChatRequest) -> bool {
-        self.reasoning_off || (req.plain && self.reasoning.is_some())
+        match req.effort {
+            Some(super::Effort::Off) => true,
+            Some(_) => req.plain,
+            None => self.reasoning_off || (req.plain && self.reasoning.is_some()),
+        }
+    }
+
+    /// The effort `req` asks for, `None` when reasoning is off or left to the model.
+    fn effort_for<'r>(&'r self, req: &ChatRequest) -> Option<&'r str> {
+        if req.plain || self.off(req) {
+            return None;
+        }
+        req.effort.map(super::Effort::as_str).or(self.reasoning.as_deref())
     }
 
     fn request_body(&self, req: &ChatRequest) -> serde_json::Value {
-        let model = self.model.get();
-        let effort = if req.plain { None } else { self.reasoning.as_deref() };
-        let mut v = body(&model, req, effort);
+        let model = self.model_for(req);
+        let mut v = body(&model, req, self.effort_for(req));
         if self.openrouter {
             v["usage"] = serde_json::json!({"include": true});
         }
@@ -110,7 +131,7 @@ impl OpenAILLM {
     /// do without: the off switch or a forced tool. The refusal is remembered
     /// for the model, so the call is worth sending again.
     fn refused(&self, req: &ChatRequest, error: &str) -> bool {
-        let model = self.model.get();
+        let model = self.model_for(req);
         if self.off(req) && !self.mandatory(&model) && error.contains("Reasoning is mandatory") {
             return lock(&self.reasoning_mandatory).insert(model);
         }
@@ -138,7 +159,7 @@ impl OpenAILLM {
             let head: String = resp.body_mut().read_to_string().unwrap_or_default().chars().take(300).collect();
             return Err(ProviderError::status(code, &head, format!("openai stream request failed: status {code}: {head}")).into());
         }
-        let reasoning = self.reasoning.is_some() && !self.off(req);
+        let reasoning = self.effort_for(req).is_some();
         read_stream(&spawn_line_reader(resp.into_body()), started, opts, reasoning, sink)
     }
 
@@ -438,7 +459,7 @@ impl LLMProvider for OpenAILLM {
 
     fn chat_with_reasoning(&self, req: &ChatRequest) -> Result<(ChatResponse, String)> {
         let resp = self.post(req)?;
-        let reasoning = if self.reasoning.is_some() { reasoning_text(&resp) } else { String::new() };
+        let reasoning = if self.effort_for(req).is_some() { reasoning_text(&resp) } else { String::new() };
         Ok((parse(&resp)?, reasoning))
     }
 
@@ -456,6 +477,17 @@ impl LLMProvider for OpenAILLM {
     fn set_model(&self, model: &str) -> bool {
         self.model.set(model);
         true
+    }
+
+    fn offered(&self) -> Vec<String> {
+        self.model.offered()
+    }
+
+    fn effort(&self) -> Option<super::Effort> {
+        if self.reasoning_off {
+            return Some(super::Effort::Off);
+        }
+        self.reasoning.as_deref().and_then(super::Effort::parse)
     }
 }
 
@@ -488,7 +520,7 @@ mod tests {
             Message::ToolResult { call_id: "c1".into(), content: "{\"task_id\":1}".into(), is_error: false },
             Message::ToolResult { call_id: "c2".into(), content: "{\"kind\":\"rejected\"}".into(), is_error: true },
         ];
-        let b = body("gpt-x", &ChatRequest { system: "sys", messages: &msgs, tools: &tools, background: false, plain: false, must_call: None }, None);
+        let b = body("gpt-x", &ChatRequest { system: "sys", messages: &msgs, tools: &tools, background: false, plain: false, must_call: None, model: None, effort: None }, None);
         let m = b["messages"].as_array().unwrap();
         assert_eq!(m[0]["role"], "system");
         assert_eq!(m[2]["tool_calls"][0]["function"]["name"], "task_create");
@@ -500,7 +532,7 @@ mod tests {
     #[test]
     fn body_omits_tools_key_when_empty() {
         let msgs = vec![Message::User("hi".into())];
-        let b = body("gpt-x", &ChatRequest { system: "sys", messages: &msgs, tools: &[], background: false, plain: false, must_call: None }, None);
+        let b = body("gpt-x", &ChatRequest { system: "sys", messages: &msgs, tools: &[], background: false, plain: false, must_call: None, model: None, effort: None }, None);
         assert!(b.get("tools").is_none());
         assert!(b.get("reasoning").is_none());
     }
@@ -508,7 +540,7 @@ mod tests {
     #[test]
     fn body_carries_the_reasoning_effort_only_when_configured() {
         let msgs = vec![Message::User("hi".into())];
-        let req = ChatRequest { system: "sys", messages: &msgs, tools: &[], background: false, plain: false, must_call: None };
+        let req = ChatRequest { system: "sys", messages: &msgs, tools: &[], background: false, plain: false, must_call: None, model: None, effort: None };
         assert!(body("gpt-x", &req, None).get("reasoning").is_none());
         assert_eq!(body("gpt-x", &req, Some("high"))["reasoning"]["effort"], "high");
     }
@@ -622,7 +654,7 @@ mod tests {
 
     fn req() -> ChatRequest<'static> {
         static MSGS: std::sync::LazyLock<Vec<Message>> = std::sync::LazyLock::new(|| vec![Message::User("hi".into())]);
-        ChatRequest { system: "sys", messages: &MSGS, tools: &[], background: false, plain: false, must_call: None }
+        ChatRequest { system: "sys", messages: &MSGS, tools: &[], background: false, plain: false, must_call: None, model: None, effort: None }
     }
 
     fn opts(first_token: Duration) -> StreamOpts {
@@ -679,7 +711,7 @@ mod tests {
         let (base, rx) = crate::testhttp::serve(vec![("200 OK", REPLY), ("400 Bad Request", REFUSED), ("200 OK", REPLY), ("200 OK", REPLY)]);
         let llm = OpenAILLM::new(&base, "m", "", ChatAgents::new(30, 30), Some("low"));
         let msgs = vec![Message::User("hi".into())];
-        let plain = ChatRequest { system: "s", messages: &msgs, tools: &[], background: true, plain: true, must_call: None };
+        let plain = ChatRequest { system: "s", messages: &msgs, tools: &[], background: true, plain: true, must_call: None, model: None, effort: None };
         llm.chat(&plain).unwrap();
         let sent = crate::testhttp::body_json(&rx.recv().unwrap());
         assert_eq!(sent["reasoning"], serde_json::json!({"enabled": false}));
@@ -803,6 +835,58 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_request_asks_for_its_own_model_and_effort() {
+        const REPLY: &str = r#"{"choices":[{"message":{"content":"ok"}}]}"#;
+        let (base, rx) = crate::testhttp::serve(vec![("200 OK", REPLY); 5]);
+        let llm = OpenAILLM::new(&base, "m", "", ChatAgents::new(30, 30), Some("low"));
+        let msgs = vec![Message::User("hi".into())];
+        let plain = ChatRequest { system: "s", messages: &msgs, tools: &[], background: false, plain: false, must_call: None, model: None, effort: None };
+        let sent = |req: &ChatRequest| {
+            llm.chat(req).unwrap();
+            crate::testhttp::body_json(&rx.recv().unwrap())
+        };
+        let b = sent(&plain);
+        assert_eq!((b["model"].as_str(), &b["reasoning"]), (Some("m"), &serde_json::json!({"effort": "low"})));
+        let b = sent(&ChatRequest { model: Some("other/x"), effort: Some(crate::providers::Effort::High), ..plain.clone() });
+        assert_eq!((b["model"].as_str(), &b["reasoning"]), (Some("other/x"), &serde_json::json!({"effort": "high"})));
+        let b = sent(&ChatRequest { effort: Some(crate::providers::Effort::Off), ..plain.clone() });
+        assert_eq!(b["reasoning"], serde_json::json!({"enabled": false}));
+        let b = sent(&ChatRequest { effort: Some(crate::providers::Effort::High), plain: true, ..plain.clone() });
+        assert_eq!(b["reasoning"], serde_json::json!({"enabled": false}), "plain still wins");
+        let none = OpenAILLM::new(&base, "m", "", ChatAgents::new(30, 30), None);
+        none.chat(&ChatRequest { effort: Some(crate::providers::Effort::Medium), ..plain }).unwrap();
+        assert_eq!(crate::testhttp::body_json(&rx.recv().unwrap())["reasoning"], serde_json::json!({"effort": "medium"}));
+    }
+
+    #[test]
+    fn effort_off_falls_back_to_the_least_for_a_model_that_must_reason() {
+        const MANDATORY: &str = r#"{"error":{"message":"Reasoning is mandatory for this endpoint and cannot be disabled.","code":400}}"#;
+        let (base, rx) = crate::testhttp::serve(vec![("400 Bad Request", MANDATORY), ("200 OK", SSE), ("200 OK", SSE)]);
+        let llm = OpenAILLM::new(&base, "m", "", ChatAgents::new(30, 30), Some("high"));
+        let off = ChatRequest { model: Some("must/reason"), effort: Some(crate::providers::Effort::Off), ..req() };
+        let o = opts(Duration::from_secs(5));
+        llm.chat_stream(&off, &o, &mut Collect::default()).unwrap();
+        llm.chat_stream(&off, &o, &mut Collect::default()).unwrap();
+        let sent: Vec<_> = rx.try_iter().map(|raw| crate::testhttp::body_json(&raw)).collect();
+        assert!(sent.iter().all(|b| b["model"] == "must/reason"), "the retry keeps the model");
+        let least = serde_json::json!({"effort": "low", "exclude": true});
+        let reasoning: Vec<_> = sent.iter().map(|b| b["reasoning"].clone()).collect();
+        assert_eq!(reasoning, vec![serde_json::json!({"enabled": false}), least.clone(), least]);
+        assert!(!llm.mandatory("m"), "only the model that refused is remembered");
+    }
+
+    #[test]
+    fn the_offered_models_lead_with_the_live_one_once_each() {
+        let llm = OpenAILLM::new("http://127.0.0.1:1", "a/one", "", ChatAgents::new(30, 30), Some("medium"))
+            .with_models(&["b/two".into(), "a/one".into(), " ".into()]);
+        assert_eq!(llm.offered(), vec!["a/one", "b/two"]);
+        llm.set_model("b/two");
+        assert_eq!(llm.offered(), vec!["b/two", "a/one"]);
+        assert_eq!(llm.effort(), Some(crate::providers::Effort::Medium));
+        assert_eq!(llm.without_reasoning().effort(), Some(crate::providers::Effort::Off));
+    }
+
     #[derive(Default)]
     struct Thoughts(String, String);
 
@@ -838,7 +922,7 @@ mod tests {
 
         let llm = OpenAILLM::new(&stub_sse(THOUGHTS), "m", "", ChatAgents::new(30, 30), Some("low"));
         let msgs = vec![Message::User("hi".into())];
-        let plain = ChatRequest { system: "s", messages: &msgs, tools: &[], background: false, plain: true, must_call: None };
+        let plain = ChatRequest { system: "s", messages: &msgs, tools: &[], background: false, plain: true, must_call: None, model: None, effort: None };
         let mut sink = Thoughts::default();
         llm.chat_stream(&plain, &opts(Duration::from_secs(5)), &mut sink).unwrap();
         assert_eq!((sink.0.as_str(), sink.1.as_str()), ("", "hi"));

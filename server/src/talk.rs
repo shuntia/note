@@ -403,7 +403,7 @@ fn opening_exchange(conn: &Connection, conversation_id: i64, l: Lang) -> Result<
 /// One tool-less call that names the thread.
 fn ask_for_title(llm: &dyn LLMProvider, system: &str, exchange: &str) -> Result<String> {
     let messages = [Message::User(exchange.to_string())];
-    let req = ChatRequest { system, messages: &messages, tools: &[], background: true, plain: true, must_call: None };
+    let req = ChatRequest { system, messages: &messages, tools: &[], background: true, plain: true, must_call: None, model: None, effort: None };
     let reply = llm.chat(&req)?.text;
     normalize_title(&reply)
         .ok_or_else(|| anyhow::anyhow!("not a title: {:?}", clip_chars(&reply, 80)))
@@ -632,7 +632,9 @@ pub enum TurnError {
 /// the same thread notes, the same rows in the same order. `conversation` is
 /// `None` to open a thread, titled from the message. The thread and the user's
 /// message are written before the session runs, so the turn shows wherever the
-/// thread is opened; a session that fails takes both back.
+/// thread is opened; a session that fails takes both back. A new thread keeps
+/// `opens_with` as its model pick.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_turn(
     state: &AppState,
     user_id: i64,
@@ -641,8 +643,9 @@ pub async fn run_turn(
     message: &str,
     via: Via,
     started: Option<tokio::sync::oneshot::Sender<Started>>,
+    opens_with: crate::models::Pick,
 ) -> Result<Turn, TurnError> {
-    turn(state, user_id, username, conversation, message, via, started, false).await
+    turn(state, user_id, username, conversation, message, via, started, false, opens_with).await
 }
 
 /// `run_turn` that waits for the user's other session, or a free slot, rather
@@ -655,7 +658,7 @@ pub async fn run_turn_when_free(
     message: &str,
     via: Via,
 ) -> Result<Turn, TurnError> {
-    turn(state, user_id, username, conversation, message, via, None, true).await
+    turn(state, user_id, username, conversation, message, via, None, true, crate::models::Pick::default()).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -668,6 +671,7 @@ async fn turn(
     via: Via,
     started: Option<tokio::sync::oneshot::Sender<Started>>,
     wait: bool,
+    opens_with: crate::models::Pick,
 ) -> Result<Turn, TurnError> {
     let message = message.trim().to_string();
     if message.is_empty() || message.len() > MAX_MESSAGE {
@@ -714,7 +718,7 @@ async fn turn(
         // held here, not in the caller's future, so a cancelled request still
         // holds the slot until the session it orphaned actually finishes
         let _permit = permit;
-        let deps = SessionDeps {
+        let mut deps = SessionDeps {
             db: &st.db,
             config_dir: &st.config_dir,
             data_dir: &st.data_dir,
@@ -728,6 +732,7 @@ async fn turn(
             thread_note,
             share: None,
             caller: Some(&st),
+            conversation_id: None,
         };
         let now = jiff::Timestamp::now();
         let (past, conv_id, user_row) = {
@@ -739,15 +744,25 @@ async fn turn(
                 Some(id) => talk_history(&conn, id)?,
                 None => Vec::new(),
             };
-            let conv_id = match conversation {
-                Some(id) => id,
-                None => create(&conn, user_id, &title_from(&said), now)?,
+            let conv_id = if let Some(id) = conversation {
+                id
+            } else {
+                let id = create(&conn, user_id, &title_from(&said), now)?;
+                let pick = crate::models::Pick {
+                    model: crate::models::still_offered(st.llm.as_ref(), opens_with.model),
+                    effort: opens_with.effort,
+                };
+                if pick != crate::models::Pick::default() {
+                    crate::models::set_conversation_pick(&conn, user_id, id, &pick)?;
+                }
+                id
             };
             append_text(&conn, conv_id, "user", &said, now)?;
             let user_row = conn.last_insert_rowid();
             touch(&conn, conv_id, now)?;
             (past, conv_id, user_row)
         };
+        deps.conversation_id = Some(conv_id);
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         st.live_turns.begin(user_id, conv_id, stop.clone());
         let lang = Lang::for_user(&st.config_dir, &session_user);

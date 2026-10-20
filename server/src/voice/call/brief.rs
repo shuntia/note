@@ -105,6 +105,7 @@ mod tests {
             thread_note: None,
             share: None,
             caller: None,
+            conversation_id: None,
         };
         let essay = {
             let conn = db.lock().unwrap();
@@ -180,6 +181,7 @@ mod tests {
             thread_note: None,
             share: None,
             caller: None,
+            conversation_id: None,
         };
         let brief = build(&deps, 1, "aki", &Reason::UserCalled, Some(thread), now, Lang::En).unwrap();
         assert!(brief.starts_with(&format!("{}\n\ncall Aki", crate::model_text::call_briefly(crate::text::Lang::En))));
@@ -219,6 +221,7 @@ mod tests {
             thread_note: None,
             share: None,
             caller: None,
+            conversation_id: None,
         };
         let brief = build(&deps, 1, "aki", &Reason::UserCalled, None, now, Lang::Ja).unwrap();
         assert!(brief.starts_with(crate::model_text::call_briefly(Lang::Ja)), "{brief}");

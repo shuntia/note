@@ -1342,6 +1342,7 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
         thread_note,
         share: None,
         caller: Some(state),
+        conversation_id: None,
     };
     let call_args = std::cell::RefCell::new(String::new());
     let changed = std::cell::Cell::new(false);

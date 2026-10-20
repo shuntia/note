@@ -25,6 +25,7 @@ import { Overflow } from '../overflow'
 import { Pulse } from '../pulse'
 import { batchReceipts, doing, receipt } from '../receipts'
 import { makeHold } from '../held'
+import { NO_PICK, pickMenu, picks, type ModelOffer, type ModelPick } from '../models'
 import type { FocusSession } from '../session'
 import { claims, onAgentFrame, type AgentFrame } from '../ws'
 import type { Conversation, FailureReason, TalkMessage, TalkStep, TriggerLogEntry } from '../types'
@@ -497,6 +498,9 @@ export function Talk({
   // the read-only Triggers thread is open in place of a conversation
   const [onTriggers, setOnTriggers] = useState(false)
   const [triggerLog, setTriggerLog] = useState<TriggerLogEntry[]>([])
+  const [offer, setOffer] = useState<ModelOffer | null>(null)
+  // the pick a chat not yet sent opens with
+  const [fresh, setFresh] = useState<ModelPick>(NO_PICK)
   const [, tick] = useState(0)
 
   const pane = useRef<HTMLDivElement>(null)
@@ -759,8 +763,13 @@ export function Talk({
     setCurrent(null)
     setItems([])
     setMsgState('ready')
+    setFresh(NO_PICK)
     input.current?.focus()
   }
+
+  useEffect(() => {
+    api.models().then(setOffer, () => setOffer(null))
+  }, [])
 
   // Chat opens on an empty conversation — the drawer's own control — unless a thread
   // was named on the way in. Nothing is written until the first message is sent, so
@@ -832,7 +841,7 @@ export function Talk({
     }
 
     try {
-      const reply = await talkTurn(text, current ?? undefined)
+      const reply = await talkTurn(text, current ?? undefined, current === null ? fresh : undefined)
       void loadList(true)
       if (era.current !== sentIn) return
       setItems((prev) => [
@@ -982,6 +991,19 @@ export function Talk({
 
   const visible = conversations.filter((c) => c.id !== deleteHold.held())
   const here = current === null ? null : (conversations.find((c) => c.id === current) ?? null)
+  const pick: ModelPick = here ? { model: here.model ?? null, effort: here.effort ?? null } : fresh
+  const choosePick = (next: ModelPick) => {
+    if (!here) setFresh(next)
+    if (current === null) return
+    const id = current
+    const before = conversations
+    setConversations((cs) => cs.map((c) => (c.id === id ? { ...c, ...next } : c)))
+    api.setConversationModel(id, next).catch(() => {
+      setConversations(before)
+      notify(t('talk.pickFailed'))
+    })
+  }
+  const pickable = !!offer && !onTriggers
   const shown = column ? listOpen : sideOpen
   const renameInput = (at: 'list' | 'head', id: number) => (
     <input
@@ -1184,7 +1206,25 @@ export function Talk({
 
         <div className="chat-foot">
           <div className="chat-compose">
-            <form className={`tellnote${draft.trim() ? ' armed' : ''}`} onSubmit={onSubmit}>
+            {pickable && (
+              <Overflow
+                className="chat-pick-wrap"
+                triggerClass={`chat-pick${picks(pick) ? ' picked' : ''}`}
+                triggerTitle={pick.model ?? undefined}
+                label={t('talk.pick')}
+                icon={
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M12 6v12" />
+                    <path d="M6 12h12" />
+                  </svg>
+                }
+                items={pickMenu(offer, pick, choosePick)}
+              />
+            )}
+            <form
+              className={`tellnote${draft.trim() ? ' armed' : ''}${pickable ? ' has-pick' : ''}`}
+              onSubmit={onSubmit}
+            >
               <textarea
                 ref={input}
                 rows={1}

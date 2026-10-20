@@ -23,6 +23,8 @@ pub struct RecordedChat {
     pub tool_names: Vec<String>,
     pub plain: bool,
     pub must_call: Option<String>,
+    pub model: Option<String>,
+    pub effort: Option<super::Effort>,
 }
 
 #[derive(Default)]
@@ -33,6 +35,7 @@ pub struct MockLLM {
     seen: Mutex<Vec<RecordedChat>>,
     streams: bool,
     usage: Option<crate::usage::Usage>,
+    offers: Vec<String>,
 }
 
 impl MockLLM {
@@ -63,6 +66,13 @@ impl MockLLM {
         self
     }
 
+    /// Offers `models` as `offered()`, the first as `model()`.
+    #[must_use]
+    pub fn offering(mut self, models: &[&str]) -> Self {
+        self.offers = models.iter().map(|m| (*m).to_string()).collect();
+        self
+    }
+
     pub fn seen(&self) -> Vec<RecordedChat> {
         self.seen.lock().unwrap().clone()
     }
@@ -86,6 +96,8 @@ impl MockLLM {
                 super::MustCall::Tool(name) => name.to_string(),
                 super::MustCall::Nothing => "-".to_string(),
             }),
+            model: req.model.map(String::from),
+            effort: req.effort,
         });
     }
 }
@@ -93,6 +105,14 @@ impl MockLLM {
 impl LLMProvider for MockLLM {
     fn streams(&self) -> bool {
         self.streams
+    }
+
+    fn model(&self) -> Option<String> {
+        self.offers.first().cloned()
+    }
+
+    fn offered(&self) -> Vec<String> {
+        self.offers.clone()
     }
 
     /// A scripted call's `$token` is filled from the latest tool result's
@@ -207,7 +227,7 @@ mod tests {
                 tool_calls: vec![ToolCall { id: "c1".into(), name: "task_create".into(), args: "{}".into() }],
             },
         ]);
-        let req = ChatRequest { system: "sys", messages: &[Message::User("hi".into())], tools: &[], background: false, plain: false, must_call: None };
+        let req = ChatRequest { system: "sys", messages: &[Message::User("hi".into())], tools: &[], background: false, plain: false, must_call: None, model: None, effort: None };
         assert_eq!(llm.chat(&req).unwrap().text, "one");
         assert_eq!(llm.chat(&req).unwrap().tool_calls[0].name, "task_create");
         assert!(llm.chat(&req).unwrap().text.contains("no scripted response"));
@@ -239,7 +259,7 @@ mod tests {
             vec![StreamPiece::Call(call), StreamPiece::Wait(Duration::from_millis(1)), StreamPiece::Text("a"), StreamPiece::Text("b")],
             vec![StreamPiece::Text("partial"), StreamPiece::Fail("dropped")],
         ]);
-        let req = ChatRequest { system: "sys", messages: &[Message::User("hi".into())], tools: &[], background: false, plain: false, must_call: None };
+        let req = ChatRequest { system: "sys", messages: &[Message::User("hi".into())], tools: &[], background: false, plain: false, must_call: None, model: None, effort: None };
         let opts = crate::providers::StreamOpts::spoken(Duration::from_secs(1));
         let mut sink = Collect::default();
         let resp = llm.chat_stream(&req, &opts, &mut sink).unwrap();
@@ -253,7 +273,7 @@ mod tests {
     #[test]
     fn null_llm_replies_blank_and_stays_stateless() {
         let llm = NullLLM;
-        let req = ChatRequest { system: "sys", messages: &[Message::User("hi".into())], tools: &[], background: false, plain: false, must_call: None };
+        let req = ChatRequest { system: "sys", messages: &[Message::User("hi".into())], tools: &[], background: false, plain: false, must_call: None, model: None, effort: None };
         for _ in 0..3 {
             let r = llm.chat(&req).unwrap();
             assert!(r.text.is_empty());
