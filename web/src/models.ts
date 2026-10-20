@@ -5,10 +5,13 @@ export type Effort = 'off' | 'low' | 'medium' | 'high'
 
 export const EFFORTS: Effort[] = ['off', 'low', 'medium', 'high']
 
+// `name` and `desc` are blank for a model the server lists without them.
+export type ModelInfo = { id: string; name: string; desc: string }
+
 // `default` is null on a provider without a model name, such as the built-in mock.
 export type ModelOffer = {
   default: string | null
-  models: string[]
+  models: ModelInfo[]
   efforts: Effort[]
   effort_default: Effort | null
 }
@@ -26,6 +29,11 @@ export function shortModel(id: string, among: string[] = []) {
   return among.some((m) => m !== id && short(m) === short(id)) ? id : short(id)
 }
 
+export function modelName(id: string, among: ModelInfo[] = []): string {
+  const named = among.find((m) => m.id === id)?.name
+  return named || shortModel(id, among.map((m) => m.id))
+}
+
 export const picks = (p: ModelPick) => p.model !== null || p.effort !== null
 
 // A single model on offer is no choice, so its group is left out.
@@ -38,9 +46,10 @@ export function pickMenu(offer: ModelOffer, pick: ModelPick, choose: (next: Mode
       children: [
         { label: fallback, checked: pick.model === null, run: () => choose({ ...pick, model: null }) },
         ...offer.models.map((m) => ({
-          label: shortModel(m, offer.models),
-          checked: pick.model === m,
-          run: () => choose({ ...pick, model: m }),
+          label: modelName(m.id, offer.models),
+          hint: m.desc || undefined,
+          checked: pick.model === m.id,
+          run: () => choose({ ...pick, model: m.id }),
         })),
       ],
     })

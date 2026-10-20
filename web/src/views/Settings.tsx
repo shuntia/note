@@ -4,7 +4,7 @@ import type { ViewProps } from '../app'
 import { desktop } from '../desktop'
 import { useLoad, useSave } from '../hooks'
 import { adoptLanguage, t, type Key } from '../i18n'
-import { EFFORTS, effortKey, shortModel, type Effort, type ModelOffer } from '../models'
+import { EFFORTS, effortKey, modelName, type Effort, type ModelOffer } from '../models'
 import { prefsFrom, writePrefs } from '../prefs'
 import type { CounterMode } from '../session'
 import '../styles/settings.css'
@@ -435,7 +435,7 @@ export function Settings({
               <FoldRow
                 label={t('settings.model')}
                 value={[
-                  settings.model ? shortModel(settings.model, offer.models) : t('settings.model.serverDefault'),
+                  settings.model ? modelName(settings.model, offer.models) : t('settings.model.serverDefault'),
                   settings.effort && t(effortKey(settings.effort)),
                 ]
                   .filter(Boolean)
@@ -455,8 +455,9 @@ export function Settings({
                       >
                         <option value="">{t('settings.model.serverDefault')}</option>
                         {offer.models.map((m) => (
-                          <option key={m} value={m} title={m}>
-                            {shortModel(m, offer.models)}
+                          <option key={m.id} value={m.id} title={m.id}>
+                            {modelName(m.id, offer.models)}
+                            {m.desc && ` · ${m.desc}`}
                           </option>
                         ))}
                       </select>

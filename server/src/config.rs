@@ -197,7 +197,19 @@ pub struct ProviderConfig {
     pub cache_ttl_min: Option<u32>,
     /// Models a user may pick for their chats besides `model`.
     #[serde(default)]
-    pub models: Vec<String>,
+    pub models: Vec<ModelInfo>,
+}
+
+/// A model a user may pick: the provider's id for it, the name shown, and a few
+/// words on what it is good for.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelInfo {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub desc: String,
 }
 
 pub const DEFAULT_PROVIDER_TIMEOUT_SECS: u64 = 45;

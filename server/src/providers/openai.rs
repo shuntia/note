@@ -54,7 +54,7 @@ impl OpenAILLM {
     }
 
     #[must_use]
-    pub fn with_models(mut self, models: &[String]) -> Self {
+    pub fn with_models(mut self, models: &[crate::config::ModelInfo]) -> Self {
         self.model.offer(models);
         self
     }
@@ -483,6 +483,10 @@ impl LLMProvider for OpenAILLM {
         self.model.offered()
     }
 
+    fn catalogue(&self) -> Vec<crate::config::ModelInfo> {
+        self.model.catalogue()
+    }
+
     fn effort(&self) -> Option<super::Effort> {
         if self.reasoning_off {
             return Some(super::Effort::Off);
@@ -878,11 +882,20 @@ mod tests {
 
     #[test]
     fn the_offered_models_lead_with_the_live_one_once_each() {
+        use crate::config::ModelInfo;
         let llm = OpenAILLM::new("http://127.0.0.1:1", "a/one", "", ChatAgents::new(30, 30), Some("medium"))
-            .with_models(&["b/two".into(), "a/one".into(), " ".into()]);
+            .with_models(&[
+                ModelInfo { id: "b/two".into(), name: "Two".into(), desc: "deep".into() },
+                ModelInfo { id: "a/one".into(), name: "One".into(), desc: "fast".into() },
+                ModelInfo { id: " ".into(), ..Default::default() },
+            ]);
         assert_eq!(llm.offered(), vec!["a/one", "b/two"]);
+        let names: Vec<_> = llm.catalogue().into_iter().map(|m| (m.name, m.desc)).collect();
+        assert_eq!(names, [("One".into(), "fast".into()), ("Two".into(), "deep".into())], "the live one keeps its own entry");
         llm.set_model("b/two");
         assert_eq!(llm.offered(), vec!["b/two", "a/one"]);
+        llm.set_model("c/three");
+        assert_eq!(llm.catalogue()[0], ModelInfo { id: "c/three".into(), ..Default::default() }, "a live model off the list is offered bare");
         assert_eq!(llm.effort(), Some(crate::providers::Effort::Medium));
         assert_eq!(llm.without_reasoning().effort(), Some(crate::providers::Effort::Off));
     }

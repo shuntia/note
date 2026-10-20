@@ -23,7 +23,9 @@ files.
   and stored on the assistant row (capped at 32 KiB), never fed back into the
   next round.
 - `models`: more models a user may pick, beside `model`, from the composer's
-  "+" menu (one chat) or Settings (their default). A session asks for the
+  "+" menu (one chat) or Settings (their default), each
+  `{ id = "<provider id>", name = "<shown name>", desc = "<a few words>" }`;
+  listing `model` itself gives it a name too. A session asks for the
   chat's pick, else the user's default, else `model`; the chat's or the user's
   effort (`off`, `low`, `medium`, `high`) likewise overrides `reasoning`.
   Voice calls and share-link visitors always run on the server's own. A pick
@@ -59,8 +61,8 @@ order; each carries `reasoning`, and the assistant row `thought_ms`).
 ### Models
 
 `GET /api/models` answers `{default, models, efforts, effort_default}`: the
-provider's live model (null on the mock), the models on offer (that one first,
-then `[providers.llm] models`), `["off","low","medium","high"]`, and the
+provider's live model (null on the mock), the models on offer as
+`{id, name, desc}` (that one first, then `[providers.llm] models`), `["off","low","medium","high"]`, and the
 configured effort (null when none is set). `PUT /api/conversations/{id}/model
 {model, effort}` sets a thread's own pick (null follows the user's default);
 a value not on offer is a `422`, another user's thread a `404`. Each listed

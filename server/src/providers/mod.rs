@@ -172,6 +172,11 @@ pub trait LLMProvider: Send + Sync {
         self.model().into_iter().collect()
     }
 
+    /// `offered()` with what each model is called and is for; the default comes first.
+    fn catalogue(&self) -> Vec<crate::config::ModelInfo> {
+        self.offered().into_iter().map(|id| crate::config::ModelInfo { id, ..Default::default() }).collect()
+    }
+
     /// The effort a request that names none goes out with; `None` leaves it to the model.
     fn effort(&self) -> Option<Effort> {
         None
@@ -180,7 +185,7 @@ pub trait LLMProvider: Send + Sync {
 
 /// A model name the admin can swap while calls are in flight, and the others
 /// a request may ask for instead.
-pub(crate) struct LiveModel(std::sync::RwLock<String>, Vec<String>);
+pub(crate) struct LiveModel(std::sync::RwLock<String>, Vec<crate::config::ModelInfo>);
 
 impl LiveModel {
     pub(crate) fn new(model: &str) -> Self {
@@ -195,18 +200,29 @@ impl LiveModel {
         *self.0.write().unwrap_or_else(std::sync::PoisonError::into_inner) = model.to_string();
     }
 
-    pub(crate) fn offer(&mut self, models: &[String]) {
-        self.1 = models.iter().map(|m| m.trim().to_string()).filter(|m| !m.is_empty()).collect();
+    pub(crate) fn offer(&mut self, models: &[crate::config::ModelInfo]) {
+        self.1 = models
+            .iter()
+            .map(|m| crate::config::ModelInfo { id: m.id.trim().to_string(), ..m.clone() })
+            .filter(|m| !m.id.is_empty())
+            .collect();
     }
 
     pub(crate) fn offered(&self) -> Vec<String> {
-        let mut all = vec![self.get()];
+        self.catalogue().into_iter().map(|m| m.id).collect()
+    }
+
+    pub(crate) fn catalogue(&self) -> Vec<crate::config::ModelInfo> {
+        let live = self.get();
+        let mut all: Vec<crate::config::ModelInfo> = Vec::new();
+        if !live.is_empty() {
+            all.push(self.1.iter().find(|m| m.id == live).cloned().unwrap_or(crate::config::ModelInfo { id: live, ..Default::default() }));
+        }
         for m in &self.1 {
-            if !all.contains(m) {
+            if !all.iter().any(|a| a.id == m.id) {
                 all.push(m.clone());
             }
         }
-        all.retain(|m| !m.is_empty());
         all
     }
 }

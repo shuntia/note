@@ -1556,7 +1556,7 @@ async fn conversations_list(user: CurrentUser, State(state): State<AppState>) ->
 async fn models_get(_user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
     Json(serde_json::json!({
         "default": state.llm.model(),
-        "models": state.llm.offered(),
+        "models": state.llm.catalogue(),
         "efforts": crate::providers::Effort::ALL,
         "effort_default": state.llm.effort(),
     }))

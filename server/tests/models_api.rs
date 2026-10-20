@@ -47,7 +47,13 @@ async fn models_lists_the_default_and_the_extras() {
     let (status, v) = send(&app, get("/api/models", &cookie)).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(v["default"], "base/model");
-    assert_eq!(v["models"], serde_json::json!(["base/model", "deepseek/deepseek-v4.1-flash"]));
+    assert_eq!(
+        v["models"],
+        serde_json::json!([
+            {"id": "base/model", "name": "", "desc": ""},
+            {"id": "deepseek/deepseek-v4.1-flash", "name": "", "desc": ""},
+        ])
+    );
     assert_eq!(v["efforts"], serde_json::json!(["off", "low", "medium", "high"]));
     assert!(v["effort_default"].is_null());
     assert_eq!(send(&app, Request::get("/api/models").body(Body::empty()).unwrap()).await.0, StatusCode::UNAUTHORIZED);

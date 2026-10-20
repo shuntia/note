@@ -18,6 +18,8 @@ import { reducedMotion } from './motion'
 // `children` makes it a group: one row until it is asked for, then radio rows under it.
 export type OverflowItem = {
   label: string
+  // A few quiet words after the label.
+  hint?: string
   run?: () => void
   disabled?: boolean
   checked?: boolean
@@ -304,6 +306,7 @@ export function Overflow({
           onClick={() => pick(item)}
         >
           <span className="ev-menu-label">{item.label}</span>
+          {item.hint && <span className="ev-menu-hint">{item.hint}</span>}
           {item.children && (
             <>
               {held && <span className="ev-menu-held">{held.label}</span>}

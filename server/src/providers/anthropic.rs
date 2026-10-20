@@ -20,7 +20,7 @@ impl AnthropicLLM {
     }
 
     #[must_use]
-    pub fn with_models(mut self, models: &[String]) -> Self {
+    pub fn with_models(mut self, models: &[crate::config::ModelInfo]) -> Self {
         self.model.offer(models);
         self
     }
@@ -120,6 +120,10 @@ impl LLMProvider for AnthropicLLM {
 
     fn offered(&self) -> Vec<String> {
         self.model.offered()
+    }
+
+    fn catalogue(&self) -> Vec<crate::config::ModelInfo> {
+        self.model.catalogue()
     }
 }
 
