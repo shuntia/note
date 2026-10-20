@@ -54,7 +54,6 @@
   /* a list that hangs from a line begins under it rather than at it, and where it
      has only so much room, it leaves the same way at the bottom */
   --under-line: linear-gradient(to bottom, transparent 0.125rem, #000 2.625rem);
-  --under-line-both: linear-gradient(to bottom, transparent 0.125rem, #000 2.625rem, #000 calc(100% - 2.25rem), transparent 100%);
 
   /* the whole composition grows from here. 1px at 1440x900 and under; above it,
      half of what the viewport itself gained, so the design opens rather than zooms. */
@@ -1266,17 +1265,10 @@ textarea.mono { font-family: var(--mono); }
 .today-when { display: flex; align-items: baseline; gap: 0.875rem; margin-top: 0.25rem; }
 .today-in { font-family: var(--display); font-weight: 500; font-size: 1.875rem; letter-spacing: -0.02em; color: var(--ink); font-variant-numeric: tabular-nums; }
 .today-span { font-size: 0.9375rem; color: var(--quiet); font-variant-numeric: tabular-nums; }
-.today-line { position: absolute; left: var(--rail); right: var(--rail); top: calc(var(--hero-top) + 25.625rem); }
-/* the desktop list has the ground beneath it for a floor, so the day scrolls
-   through the room between the line and it */
-.today-line .home-list {
-  margin-top: 3.25rem;
-  max-height: max(9rem, calc(100dvh - var(--hero-top) - var(--bar) - 29.875rem));
-  overflow-y: auto;
-  scrollbar-width: none;
-  mask-image: var(--under-line-both);
-  -webkit-mask-image: var(--under-line-both);
-}
+/* the hero holds the line's place, so a long day runs on down the page under it */
+.today-hero { min-height: calc(var(--hero-top) + 25.625rem); }
+.today-line { position: relative; display: flow-root; margin: 0 var(--rail); }
+.today-line .home-list { margin-top: 3.25rem; mask-image: none; -webkit-mask-image: none; }
 .today-line .home-list li { min-height: 2.375rem; }
 .today-ground { position: absolute; left: 0; right: 0; top: calc(var(--hero-top) + 29.625rem); bottom: 0; background: var(--earth); padding: 6.25rem 0 0 var(--rail); }
 

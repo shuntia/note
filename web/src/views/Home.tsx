@@ -18,6 +18,7 @@ import { hintShown, hintUsed, railX, sessionFor, slotAfter, withoutCategory, wor
 import { latest } from '../coalesce'
 import type { ToastAction } from '../app'
 import { DayLine as DayLineView, minutesOf } from '../dayline'
+import { desktop } from '../desktop'
 import { eventFacts, nextUp } from '../events'
 import * as fx from '../fx'
 import { arcPath, Circle, Gauge, STROKE, VB, type ArcLine } from '../gauge'
@@ -348,7 +349,12 @@ export function Home({
   const facts = next ? eventFacts(next, now) : null
   const face = next ? rowParts(next) : null
   const label = face?.name ?? ''
-
+  // What the resting face names: the plan's next block, else the queue's first task.
+  const rest = next && facts
+    ? { name: label, of: face?.of ?? null }
+    : upNext
+      ? { name: upNext.step?.title ?? upNext.task.title, of: upNext.step ? upNext.task.title : null }
+      : null
 
   // A routine is timed to its span; without an end the routine default stands in.
   // A block laid for a task runs as that task, so finishing it settles both.
@@ -882,6 +888,15 @@ export function Home({
       </button>
     )
 
+  const popButton = desktop()?.widget && (
+    <button className="btn-round face-pop" aria-label={t('session.widget')} onClick={() => desktop()?.widget?.()}>
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path fillRule="evenodd" d="M5.5 5h13A2.5 2.5 0 0 1 21 7.5v9a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 16.5v-9A2.5 2.5 0 0 1 5.5 5zm.25 1.75a1 1 0 0 0-1 1v8.5a1 1 0 0 0 1 1h12.5a1 1 0 0 0 1-1v-8.5a1 1 0 0 0-1-1z" />
+        <rect x="10.75" y="10.5" width="7" height="5.25" rx="1" />
+      </svg>
+    </button>
+  )
+
   const surface = {
     tabIndex: 0,
     role: 'button',
@@ -1226,34 +1241,43 @@ export function Home({
           </div>
         )}
       </div>
-      {session && stopButton(session)}
+      {session && (popButton || isPaused(session)) && (
+        <div className="face-controls">
+          {stopButton(session)}
+          {popButton}
+        </div>
+      )}
       {breakSheet}
     </div>
   ) : (
     <div key="rest" className="home-face">
-      <div ref={faceBox} className="circle-face idle" style={{ width: u(faceSize), height: u(faceSize) }} {...surface}>
-        {next && facts && prefs.showArc ? (
-          <Gauge size={faceSize} fracAt={waitFracAt(next)} faded>
-            {facts.wait && (
-              <div className="gauge-num" style={{ fontSize: u(mobile ? 50 : 58) }}><Atoms text={facts.wait} /></div>
+      {rest && !prefs.showArc ? (
+        <div ref={faceBox} className="circle-face idle bare" {...surface}>
+          <div className="home-text">
+            <div className="home-title"><Atoms text={rest.name} /></div>
+            {rest.of && <div className="gauge-of"><Atoms text={rest.of} /></div>}
+            {facts?.wait && (
+              <div className="gauge-num" style={{ fontSize: u(30) }}><Atoms text={`in ${facts.wait}`} /></div>
             )}
-            <div className="gauge-name" style={{ fontSize: u(mobile ? 18 : 22) }}><Atoms text={label} /></div>
-            {face?.of && <div className="gauge-of"><Atoms text={face.of} /></div>}
-            <div className="gauge-sub" style={{ fontSize: mobile ? undefined : u(14) }}><Atoms text={facts.span} /></div>
+            {facts && <div className="gauge-sub"><Atoms text={facts.span} /></div>}
             {startHint && <p className="face-hint inline">{t('hint.start')}</p>}
-          </Gauge>
-        ) : (
-          startHint && <p className="face-hint">{t('hint.start')}</p>
-        )}
-      </div>
-      {next && facts && !prefs.showArc && (
-        <div className="home-text">
-          <div className="home-title"><Atoms text={label} /></div>
-          {face?.of && <div className="gauge-of"><Atoms text={face.of} /></div>}
-          {facts.wait && (
-            <div className="gauge-num" style={{ fontSize: u(30) }}><Atoms text={`in ${facts.wait}`} /></div>
+          </div>
+        </div>
+      ) : (
+        <div ref={faceBox} className="circle-face idle" style={{ width: u(faceSize), height: u(faceSize) }} {...surface}>
+          {rest ? (
+            <Gauge size={faceSize} fracAt={next && facts ? waitFracAt(next) : undefined} frac={1} faded>
+              {facts?.wait && (
+                <div className="gauge-num" style={{ fontSize: u(mobile ? 50 : 58) }}><Atoms text={facts.wait} /></div>
+              )}
+              <div className="gauge-name" style={{ fontSize: u(mobile ? 18 : 22) }}><Atoms text={rest.name} /></div>
+              {rest.of && <div className="gauge-of"><Atoms text={rest.of} /></div>}
+              {facts && <div className="gauge-sub" style={{ fontSize: mobile ? undefined : u(14) }}><Atoms text={facts.span} /></div>}
+              {startHint && <p className="face-hint inline">{t('hint.start')}</p>}
+            </Gauge>
+          ) : (
+            startHint && <p className="face-hint">{t('hint.start')}</p>
           )}
-          <div className="gauge-sub"><Atoms text={facts.span} /></div>
         </div>
       )}
     </div>
@@ -1272,6 +1296,7 @@ export function Home({
           </Gauge>
           {pauseButton(session)}
           {stopButton(session)}
+          {popButton}
         </div>
       </div>
     ) : (
@@ -1286,6 +1311,7 @@ export function Home({
         {doneButton}
         {pauseButton(session)}
         {stopButton(session)}
+        {popButton}
       </div>
     )
   ) : next && facts ? (
@@ -1530,6 +1556,8 @@ export function Home({
     prefs.showArc,
     next?.id,
     label,
+    rest?.name,
+    rest?.of,
     facts?.eyebrow,
     facts?.wait,
     facts?.span,
@@ -1544,6 +1572,7 @@ export function Home({
     session?.phase,
     session?.round,
     over,
+    sessionHint,
     visible.map((ev) => ev.id).join(','),
   ].join('|')
   const [layout, relayout] = useState(0)
@@ -1585,7 +1614,7 @@ export function Home({
           from(qa('.home-face.compact .btn-round, .home-face.compact .btn-fill'), { autoAlpha: 0, scale: 0.85, duration: 0.3, ease: 'power2.out' }, 0.65)
           from(qa('.home-sheet'), { autoAlpha: 0, y: 24, duration: 0.3, ease: 'power2.out' }, 0.62)
         }
-        if (!q('.home-face.compact')) to(qa('.face-big .home-text'), { autoAlpha: 0, y: -20, duration: 0.4, ease: 'power2.in' }, 0.2)
+        if (!q('.home-face.compact')) to(qa('.face-big .home-text, .face-big .gauge-ring, .face-big .gauge-centre'), { autoAlpha: 0, y: -20, duration: 0.4, ease: 'power2.in' }, 0.2)
         from(qa('.home-today .dayline'), { autoAlpha: 0, y: 28, duration: 0.4, ease: 'power2.out' }, 0.35)
         from(qa('.home-list li'), { autoAlpha: 0, y: 24, duration: 0.35, ease: 'power2.out', stagger: capped(0.04, qa('.home-list li').length) }, 0.42)
         from(qa('.home-today .close-day, .home-today .sofar'), { autoAlpha: 0, y: 24, duration: 0.35, ease: 'power2.out' }, 0.42)
@@ -1613,8 +1642,11 @@ export function Home({
             .to(fl, { t: 1, duration: 1, ease: 'power2.inOut', onUpdate: () => flat(fl.t, line, STROKE + (thin - STROKE) * fl.t) }, 0)
             .to(ring, { autoAlpha: 0, duration: 0.015, ease: 'none' }, 0.985)
             .from(bar, { autoAlpha: 0, duration: 0.015, ease: 'none' }, 0.985)
-          from(qa('.in-word'), { autoAlpha: 0, duration: 0.4, ease: 'none' }, 0.6)
+        } else {
+          if (ring) to([ring as unknown as HTMLElement], { autoAlpha: 0, duration: 0.4, ease: 'none' }, 0.2)
+          from(qa('.today-bar'), { autoAlpha: 0, duration: 0.4, ease: 'none' }, 0.6)
         }
+        from(qa('.in-word'), { autoAlpha: 0, duration: 0.4, ease: 'none' }, 0.6)
         travel(timeline, q('.face-big .gauge-num'), q('.in-num'))
         travel(timeline, q('.face-big .gauge-name, .face-big .home-title'), q('.today-title'))
         travel(timeline, q('.face-big .gauge-sub'), q('.today-span'))
@@ -1622,7 +1654,9 @@ export function Home({
         from(qa('.today-eyebrow'), { autoAlpha: 0, duration: 0.4, ease: 'none' }, 0.6)
         from(qa('.today-line'), { autoAlpha: 0, y: 28, duration: 0.45, ease: 'power2.out' }, 0.35)
       }
-      to(qa('.face-big .chev, .face-big .face-hint, .face-big .slot:not(.now)'), { autoAlpha: 0, duration: 0.35 }, 0)
+      to(qa('.face-big .chev, .face-big .face-hint, .face-big .slot:not(.now), .face-big .face-controls'), { autoAlpha: 0, duration: 0.35 }, 0)
+      const surfaceEl = q('.face-big .circle-face')
+      if (surfaceEl) timeline.set(surfaceEl, { pointerEvents: 'none' }, 0.02)
       tl.current = timeline
       timeline.progress(st.current?.progress ?? 0)
       setReady(true)

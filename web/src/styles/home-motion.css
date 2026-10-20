@@ -91,22 +91,26 @@
   html.in-session .topbar:not(:hover):not(:focus-within) > * { opacity: 0.35; transition-duration: 0.6s; }
 }
 
-.circle-face + .face-stop { margin-top: calc(64 * var(--u)); }
+.face-controls { display: flex; justify-content: center; gap: calc(16 * var(--u)); margin-top: calc(64 * var(--u)); }
 .session-arc .btn-round.face-stop { left: calc(50% + 2.75rem); }
-.widget-pop { position: fixed; right: 1rem; bottom: 1rem; z-index: 5; }
+.session-arc .btn-round.face-pop { left: calc(50% - 2.75rem); }
+/* without the arc the words themselves are what a tap starts */
+.circle-face.bare { align-self: flex-start; max-width: 100%; border-radius: calc(24 * var(--u)); }
+.circle-face.bare .home-text { width: auto; }
+.circle-face.bare .face-hint { text-align: left; }
 
 /* ── a resting session: only the timer and its words ── */
-html.in-session.idle :is(.circle-face .bead, .strip .slot:not(.now), .slot.now :is(.mark, .parent), .strip-dots, .face-hint, .face-stop, .widget-pop, .face-big .chev, .topbar, .shell > .tabs, .handle) {
+html.in-session.idle :is(.circle-face .bead, .strip .slot:not(.now), .slot.now :is(.mark, .parent), .strip-dots, .face-hint, .face-stop, .face-pop, .face-big .chev, .topbar, .shell > .tabs, .handle) {
   opacity: 0 !important;
   visibility: hidden !important;
   pointer-events: none !important;
   transition: opacity 300ms ease, visibility 0s linear 300ms !important;
 }
-html.in-session.waking :is(.circle-face .bead, .strip .slot:not(.now), .slot.now :is(.mark, .parent), .strip-dots, .face-hint, .face-stop, .widget-pop, .face-big .chev, .topbar, .shell > .tabs, .handle) {
+html.in-session.waking :is(.circle-face .bead, .strip .slot:not(.now), .slot.now :is(.mark, .parent), .strip-dots, .face-hint, .face-stop, .face-pop, .face-big .chev, .topbar, .shell > .tabs, .handle) {
   transition: opacity 200ms ease, visibility 0s !important;
 }
 @media (prefers-reduced-motion: reduce) {
-  html.in-session:is(.idle, .waking) :is(.circle-face .bead, .strip .slot:not(.now), .slot.now :is(.mark, .parent), .strip-dots, .face-hint, .face-stop, .widget-pop, .face-big .chev, .topbar, .shell > .tabs, .handle) {
+  html.in-session:is(.idle, .waking) :is(.circle-face .bead, .strip .slot:not(.now), .slot.now :is(.mark, .parent), .strip-dots, .face-hint, .face-stop, .face-pop, .face-big .chev, .topbar, .shell > .tabs, .handle) {
     transition: none !important;
   }
 }

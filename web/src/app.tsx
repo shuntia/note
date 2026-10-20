@@ -484,14 +484,6 @@ export function App() {
       ))}
       {mobile && <PhoneBar current={current} go={go} tab={tab} inSession={session !== null} />}
       <Toaster aboveTabs={mobile} />
-      {session && tab === 'today' && desktop()?.widget && (
-        <button className="btn-round widget-pop" aria-label={t('session.widget')} onClick={() => desktop()?.widget?.()}>
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <rect x="4" y="5" width="16" height="14" rx="2.5" opacity="0.35" />
-            <rect x="11" y="12" width="7" height="5" rx="1.4" />
-          </svg>
-        </button>
-      )}
       {call && (
         <Suspense fallback={null}>
           <CallView.View key={call.at} call={call} onClose={endCall} onMicBlocked={blockMic} />
