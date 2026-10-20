@@ -82,9 +82,10 @@ pub fn stamp_matrix(conn: &Connection, id: i64, now: jiff::Timestamp) -> Result<
     Ok(())
 }
 
-/// The thread a check-in's question lands in: one per user per plan date, so
-/// every check-in of a day appends to the same conversation and the next day
-/// starts a fresh one. The question is stored as an assistant row.
+/// The thread a check-in's question lands in: the plan date's check-in thread
+/// until the user writes in it, when it becomes their conversation and the next
+/// check-in opens another; the next day starts afresh. The question is stored
+/// as an assistant row.
 pub fn checkin_thread(
     conn: &Connection,
     user_id: i64,
@@ -96,7 +97,8 @@ pub fn checkin_thread(
 ) -> Result<i64> {
     let existing: Option<i64> = conn
         .query_row(
-            "SELECT id FROM conversations WHERE user_id = ?1 AND checkin_date = ?2
+            "SELECT id FROM conversations c WHERE user_id = ?1 AND checkin_date = ?2
+               AND NOT EXISTS (SELECT 1 FROM talk_messages m WHERE m.conversation_id = c.id AND m.role = 'user')
              ORDER BY id DESC LIMIT 1",
             (user_id, date),
             |r| r.get(0),
@@ -938,6 +940,19 @@ mod tests {
 
         let next = checkin_thread(&conn, 1, "2026-09-18", "08:00", "Morning again", crate::text::Lang::En, noon).unwrap();
         assert_ne!(next, first);
+    }
+
+    #[test]
+    fn a_checkin_the_user_answered_is_left_to_them_and_the_next_opens_another() {
+        let conn = conn_with_conversation();
+        let at: jiff::Timestamp = "2026-09-17T00:00:00Z".parse().unwrap();
+        let first = checkin_thread(&conn, 1, "2026-09-17", "08:00", "How did you sleep?", crate::text::Lang::En, at).unwrap();
+        append_text(&conn, first, "user", "badly, let's talk", at).unwrap();
+        let next = checkin_thread(&conn, 1, "2026-09-17", "11:00", "Midday. How is it going?", crate::text::Lang::En, at).unwrap();
+        assert_ne!(next, first, "a check-in never lands in the middle of a conversation");
+        let again = checkin_thread(&conn, 1, "2026-09-17", "14:00", "Afternoon.", crate::text::Lang::En, at).unwrap();
+        assert_eq!(again, next, "an unanswered one is still the day's to share");
+        assert_eq!(messages_json(&conn, first).unwrap().len(), 2);
     }
 
     #[test]
