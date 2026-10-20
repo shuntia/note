@@ -226,7 +226,7 @@ pub fn prepare(
         return PreparedVectors::default();
     }
     let mut out = PreparedVectors::default();
-    match find(name).map(|(_, t)| t.embed) {
+    match known(name).and_then(|(n, _)| find(n)).map(|(_, t)| t.embed) {
         Some(Embed::Query) => {
             #[derive(serde::Deserialize, Default)]
             #[serde(default)]

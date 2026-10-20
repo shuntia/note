@@ -753,7 +753,8 @@ fn run_traced(
             let args = coerced(kind, &call.name, &call.args);
             let (content, is_error) =
                 env.step(&call.name, &args, &mut steps, &mut thinking, trace, on_event);
-            if !is_error && tools::ends(kind, &call.name, &content) {
+            let called = tools::known(&call.name).map_or(call.name.as_str(), |(name, _)| name);
+            if !is_error && tools::ends(kind, called, &content) {
                 on_event(AgentEvent::Reply { text: &content });
                 trace.ok(&content);
                 finish(deps, user_id, kind, turns, tool_calls, profile.log_session)?;
@@ -1617,6 +1618,18 @@ mod tests {
         assert_eq!(out.steps.len(), 1);
         assert_eq!(out.steps[0].thinking.as_deref(), Some("nothing worth saying"));
         assert_eq!(out.reasoning, "");
+    }
+
+    #[test]
+    fn a_terminal_tool_under_a_made_up_name_still_ends_the_session() {
+        let (db, tmp) = env();
+        let llm = MockLLM::scripted(vec![ChatResponse {
+            text: String::new(),
+            tool_calls: vec![ToolCall { id: "c1".into(), name: "stay_quiet2".into(), args: r#"{"reason":"nothing to add"}"#.into() }],
+        }]);
+        let out = run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Trigger, now(), &[], "check").unwrap();
+        assert_eq!(out.turns, 1);
+        assert_eq!(llm.seen().len(), 1, "no second round after the ending");
     }
 
     #[test]
