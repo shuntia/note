@@ -40,7 +40,7 @@
             pnpmDeps = webPkgs.fetchPnpmDeps {
               inherit (finalAttrs) pname version src;
               fetcherVersion = 4;
-              hash = "sha256-4Io/KbppI7PhW42tBqVed1fo+/VyO5DN0KrHcfc5fK0=";
+              hash = "sha256-draBFb56CDfIWXqaa6uo1e8Lw7qyuF2yCxlOewH1L4s=";
             };
             buildPhase = ''
               runHook preBuild
