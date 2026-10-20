@@ -184,9 +184,8 @@ pub(crate) const RETRY_DELAYS_MS: [u64; 2] = [1_500, 4_000];
 pub struct ChatAgents {
     interactive: ureq::Agent,
     background: ureq::Agent,
-    timeout_secs: u64,
     background_timeout_secs: u64,
-    stream_agents: std::sync::Mutex<std::collections::HashMap<(bool, std::time::Duration), ureq::Agent>>,
+    stream_agents: std::sync::Mutex<std::collections::HashMap<std::time::Duration, ureq::Agent>>,
     retry_delays_ms: &'static [u64],
 }
 
@@ -196,7 +195,6 @@ impl ChatAgents {
         Self {
             interactive: http_agent(timeout_secs),
             background: http_agent(background_timeout_secs),
-            timeout_secs,
             background_timeout_secs,
             stream_agents: std::sync::Mutex::default(),
             retry_delays_ms: &RETRY_DELAYS_MS,
@@ -204,15 +202,16 @@ impl ChatAgents {
     }
 
     /// The agent for streamed calls with this deadline: the response head must
-    /// arrive within `first_token`, and the whole body within the usual chat cap.
-    pub(crate) fn stream_agent(&self, background: bool, first_token: std::time::Duration) -> ureq::Agent {
+    /// arrive within `first_token`, and the whole body within the background
+    /// cap, since a long think streams for minutes and the caller's stall
+    /// deadline already catches a dead stream.
+    pub(crate) fn stream_agent(&self, first_token: std::time::Duration) -> ureq::Agent {
         let mut agents = self.stream_agents.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        agents.entry((background, first_token)).or_insert_with(|| self.new_stream_agent(background, first_token)).clone()
+        agents.entry(first_token).or_insert_with(|| self.new_stream_agent(first_token)).clone()
     }
 
-    fn new_stream_agent(&self, background: bool, first_token: std::time::Duration) -> ureq::Agent {
-        let secs = if background { self.background_timeout_secs } else { self.timeout_secs };
-        let cap = Some(std::time::Duration::from_secs(secs));
+    fn new_stream_agent(&self, first_token: std::time::Duration) -> ureq::Agent {
+        let cap = Some(std::time::Duration::from_secs(self.background_timeout_secs));
         ureq::Agent::config_builder()
             .http_status_as_error(false)
             .timeout_connect(Some(std::time::Duration::from_secs(5)))

@@ -124,7 +124,7 @@ impl OpenAILLM {
         let mut body = self.request_body(req);
         body["stream"] = serde_json::Value::Bool(true);
         body["stream_options"] = serde_json::json!({"include_usage": true});
-        let agent = self.agents.stream_agent(req.background, opts.first_token);
+        let agent = self.agents.stream_agent(opts.first_token);
         let started = Instant::now();
         let mut resp = match self.authorized(agent.post(&self.url())).send_json(&body) {
             Ok(resp) => resp,
@@ -744,9 +744,18 @@ mod tests {
     #[test]
     fn stream_agents_are_reused_per_first_token_deadline() {
         let agents = ChatAgents::new(30, 30);
-        let a = agents.stream_agent(false, Duration::from_secs(1));
-        assert!(std::ptr::eq(a.config(), agents.stream_agent(false, Duration::from_secs(1)).config()));
-        assert!(!std::ptr::eq(a.config(), agents.stream_agent(false, Duration::from_secs(2)).config()));
+        let a = agents.stream_agent(Duration::from_secs(1));
+        assert!(std::ptr::eq(a.config(), agents.stream_agent(Duration::from_secs(1)).config()));
+        assert!(!std::ptr::eq(a.config(), agents.stream_agent(Duration::from_secs(2)).config()));
+    }
+
+    #[test]
+    fn an_interactive_stream_may_outlast_the_interactive_timeout() {
+        let think = (Duration::from_millis(300), "data: {\"choices\":[{\"delta\":{\"content\":\".\"}}]}\n\n");
+        let (base, _rx) = crate::testhttp::serve_stream(Duration::ZERO, vec![think; 6]);
+        let llm = OpenAILLM::new(&base, "m", "", ChatAgents::new(1, 5), None);
+        let resp = llm.chat_stream(&req(), &opts(Duration::from_secs(5)), &mut Collect::default()).unwrap();
+        assert_eq!(resp.text, "......");
     }
 
     #[test]
