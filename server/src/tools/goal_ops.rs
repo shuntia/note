@@ -150,14 +150,6 @@ fn confined(
     Ok(out)
 }
 
-fn cut_bytes(title: &str) -> Option<String> {
-    let cut = loose::truncate(title, MAX_TITLE_BYTES)?;
-    Some(match cut.rfind(char::is_whitespace) {
-        Some(at) if at > MAX_TITLE_BYTES / 2 => cut[..at].trim_end().to_string(),
-        _ => cut,
-    })
-}
-
 fn open_goals(conn: &Connection, user_id: i64) -> Result<Vec<(i64, String)>, ToolError> {
     Ok(crate::goals::list(conn, user_id, None)
         .map_err(|e| internal(e.to_string()))?
@@ -175,11 +167,16 @@ pub fn save(conn: &Connection, ctx: &ToolCtx, kind: SessionKind, raw: &str) -> R
     if let Some(w) = warning {
         saver.env.warn(w);
     }
-    for field in obj.rest() {
-        saver.env.ignored(None, &field, "not a goal_save field");
+    let rest = obj.rest();
+    for field in &rest {
+        saver.env.ignored(None, field, "not a goal_save field");
     }
     if goals.is_empty() {
-        saver.env.warn("nothing to save: goals was empty");
+        if rest.is_empty() {
+            saver.env.warn("nothing to save: goals was empty");
+        } else {
+            saver.env.refuse_call("nothing was saved: the goals go in goals, a list");
+        }
         return Ok(saver.env.into_value());
     }
     let tz = user_tz(ctx);
@@ -196,7 +193,7 @@ pub fn save(conn: &Connection, ctx: &ToolCtx, kind: SessionKind, raw: &str) -> R
         let mut title = goal_obj.take(&["title", "name"]).and_then(|v| loose::text(&v)).map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
         let mut description = goal_obj.take(&["description", "desc", "details"]).and_then(|v| loose::text(&v));
         if let Some(full) = title.clone() {
-            if let Some(cut) = cut_bytes(&full) {
+            if let Some(cut) = loose::cut_bytes(&full, MAX_TITLE_BYTES) {
                 env.adjusted(Some(&r), "title", cut.clone().into(), "a goal's title stops at 200 bytes; the whole text leads the description");
                 description = Some(match description {
                     Some(d) => format!("{full}\n\n{d}"),
@@ -214,7 +211,12 @@ pub fn save(conn: &Connection, ctx: &ToolCtx, kind: SessionKind, raw: &str) -> R
             match loose::text(&v) {
                 Some(s) if s.trim().is_empty() => due = Some(None),
                 Some(s) => match loose::when(&s, &tz, now) {
-                    Some(w) => due = Some(Some(w)),
+                    Some(w) => {
+                        if let Some(d) = loose::rolled(&s, now.to_zoned(tz.clone()).date()) {
+                            env.adjusted(Some(&r), "due", d.to_string().into(), loose::rolled_why(&s, d));
+                        }
+                        due = Some(Some(w));
+                    }
                     None => env.ignored(Some(&r), "due", format!("a due is {} or {}", loose::DAY_FORMS, loose::MOMENT_FORMS)),
                 },
                 None => env.ignored(Some(&r), "due", "a due is text such as 2026-12-18"),
@@ -347,12 +349,12 @@ pub fn remove(conn: &Connection, ctx: &ToolCtx, raw: &str) -> Result<Value, Tool
     super::task_query::unscoped(ctx)?;
     let mut o = Obj::new(loose::args(raw)?);
     let mut env = Envelope::default();
-    let ids = o.take(&["ids", "id", "goal_ids", "goal_id", "goals"]).map(loose::list).unwrap_or_default();
+    let ids = loose::ids(&mut o, &["ids", "id", "goal_ids", "goal_id", "goals"], &mut env);
     for field in o.rest() {
         env.ignored(None, &field, "not a goal_remove field");
     }
     if ids.is_empty() {
-        env.warn("nothing to remove: ids was empty");
+        loose::nothing_removed(&mut env);
         return Ok(env.into_value());
     }
     for (i, v) in ids.into_iter().enumerate() {

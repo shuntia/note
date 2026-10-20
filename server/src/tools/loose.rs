@@ -64,6 +64,10 @@ impl Envelope {
     pub fn refused(&mut self, r: &Ref, why: impl Into<String>) {
         self.refused.push(serde_json::json!({ "ref": r.0, "why": why.into() }));
     }
+    /// A refusal of the call as a whole, not of one item.
+    pub fn refuse_call(&mut self, why: impl Into<String>) {
+        self.refused.push(serde_json::json!({ "why": why.into() }));
+    }
     pub fn warn(&mut self, w: impl Into<String>) {
         self.warnings.push(w.into());
     }
@@ -172,8 +176,8 @@ impl Obj {
 }
 
 /// The list a call carries under `key`, under one of `aliases`, or under any
-/// key at all when there is exactly one list; a bare object is a list of
-/// itself when it carries one of `item_fields`.
+/// key at all when it is the one list or object left; a bare object is a list
+/// of itself when it carries one of `item_fields`.
 pub fn items(o: &mut Obj, key: &str, aliases: &[&str], item_fields: &[&str]) -> (Vec<Value>, Option<String>) {
     if let Some(v) = o.take(&[key]) {
         return (list(v), None);
@@ -187,7 +191,49 @@ pub fn items(o: &mut Obj, key: &str, aliases: &[&str], item_fields: &[&str]) -> 
             return (list(v), Some(format!("read {alias} as {key}")));
         }
     }
-    (Vec::new(), None)
+    match only_list(o) {
+        Some((field, v)) => (list(v), Some(format!("read {field} as {key}"))),
+        None => (Vec::new(), None),
+    }
+}
+
+/// The one field left holding a list or an object, taken out.
+pub fn only_list(o: &mut Obj) -> Option<(String, Value)> {
+    let mut lists = o.map.iter().filter(|(_, v)| v.is_array() || v.is_object()).map(|(k, _)| k.clone());
+    let field = lists.next()?;
+    if lists.next().is_some() {
+        return None;
+    }
+    let v = o.map.remove(&field)?;
+    Some((field, v))
+}
+
+/// The ids a remove names under one of `names`, or in the one list left.
+pub fn ids(o: &mut Obj, names: &[&str], env: &mut Envelope) -> Vec<Value> {
+    if let Some(v) = o.take(names) {
+        return list(v);
+    }
+    match only_list(o) {
+        Some((field, v)) => {
+            env.warn(format!("read {field} as {}", names[0]));
+            list(v)
+        }
+        None => Vec::new(),
+    }
+}
+
+/// A remove that named nothing: no error unless fields came that were not read.
+pub fn nothing_removed(env: &mut Envelope) {
+    if env.ignored.is_empty() {
+        env.warn("nothing to remove: ids was empty");
+    } else {
+        env.refuse_call("nothing was removed: the ids go in ids, a list");
+    }
+}
+
+/// Why a yearless day was read as next year's.
+pub fn rolled_why(raw: &str, d: Date) -> String {
+    format!("{} has gone by this year, so it reads as {}; give the year to mean another", raw.trim(), d.year())
 }
 
 pub fn list(v: Value) -> Vec<Value> {
@@ -271,30 +317,58 @@ pub fn fold(s: &str) -> String {
 
 /// The one of `candidates` whose title folds to `title`, or why there is none.
 pub fn by_title(title: &str, candidates: &[(i64, String)], what: &str) -> Result<i64, String> {
+    by_title_listed(title, candidates, what, |ids| ids.iter().map(i64::to_string).collect::<Vec<_>>().join(", "))
+}
+
+/// `by_title`, with the candidates of an ambiguous title written by `list`.
+pub fn by_title_listed(title: &str, candidates: &[(i64, String)], what: &str, list: impl Fn(&[i64]) -> String) -> Result<i64, String> {
     let want = fold(title);
-    let hits: Vec<&(i64, String)> = candidates.iter().filter(|(_, t)| fold(t) == want).collect();
+    let hits: Vec<i64> = candidates.iter().filter(|(_, t)| fold(t) == want).map(|(id, _)| *id).collect();
     match hits.as_slice() {
-        [(id, _)] => Ok(*id),
+        [id] => Ok(*id),
         [] => Err(format!("no open {what} is titled {title:?}; give its id")),
-        many => Err(format!(
-            "{} open {what}s are titled {title:?}: {}; give the id",
-            many.len(),
-            many.iter().map(|(id, _)| id.to_string()).collect::<Vec<_>>().join(", ")
-        )),
+        many => Err(format!("{} open {what}s are titled {title:?}: {}; give the id", many.len(), list(many))),
     }
 }
 
-/// A title past `MAX_TITLE_CHARS`, cut at a word boundary; `None` when it fits.
+/// Up to `n` of `candidates` nearest `title`: those sharing a word first, then
+/// by edit distance.
+pub fn nearest(title: &str, candidates: &[(i64, String)], n: usize) -> Vec<(i64, String)> {
+    let want = fold(title);
+    let words: Vec<&str> = want.split(' ').filter(|w| w.len() > 2).collect();
+    let mut ranked: Vec<(usize, usize, &(i64, String))> = candidates
+        .iter()
+        .map(|c| {
+            let have = fold(&c.1);
+            let shared = words.iter().filter(|w| have.contains(**w)).count();
+            (usize::MAX - shared, super::distance(&want, &have), c)
+        })
+        .collect();
+    ranked.sort_by_key(|(shared, dist, c)| (*shared, *dist, c.0));
+    ranked.into_iter().take(n).map(|(.., c)| c.clone()).collect()
+}
+
+/// A title past `MAX_TITLE_CHARS` or the task's byte cap, cut at a word
+/// boundary; `None` when it fits.
 pub fn cut_title(title: &str) -> Option<String> {
-    if title.chars().count() <= MAX_TITLE_CHARS {
-        return None;
-    }
-    let hard: String = title.chars().take(MAX_TITLE_CHARS).collect();
-    let cut = match hard.rfind(char::is_whitespace) {
-        Some(at) if at > MAX_TITLE_CHARS / 2 => hard[..at].trim_end().to_string(),
-        _ => hard,
-    };
-    Some(cut)
+    let by_chars = (title.chars().count() > MAX_TITLE_CHARS).then(|| {
+        let hard: String = title.chars().take(MAX_TITLE_CHARS).collect();
+        match hard.rfind(char::is_whitespace) {
+            Some(at) if at > MAX_TITLE_CHARS / 2 => hard[..at].trim_end().to_string(),
+            _ => hard,
+        }
+    });
+    cut_bytes(by_chars.as_deref().unwrap_or(title), crate::tasks::MAX_TITLE_BYTES).or(by_chars)
+}
+
+/// `title` cut to `max` bytes, at a word boundary in its second half; `None`
+/// when it fits.
+pub fn cut_bytes(title: &str, max: usize) -> Option<String> {
+    let cut = truncate(title, max)?;
+    Some(match cut.rfind(char::is_whitespace) {
+        Some(at) if at > max / 2 => cut[..at].trim_end().to_string(),
+        _ => cut,
+    })
 }
 
 /// `s` cut to `max` bytes on a character boundary; `None` when it fits.
@@ -415,35 +489,55 @@ pub fn weekday_name(word: &str) -> Option<&'static str> {
     weekday(word).map(|d| crate::calendar::DAY_NAMES[d.to_monday_zero_offset() as usize])
 }
 
-fn on_or_after(today: Date, month: i8, day: i8) -> Option<Date> {
+/// Days back a yearless date may lie and still be this year's.
+const PAST_DAYS: i32 = 60;
+
+/// A yearless month and day as this year's, unless that lies more than
+/// `PAST_DAYS` back; `true` when it was read as next year's.
+fn on_or_after(today: Date, month: i8, day: i8) -> Option<(Date, bool)> {
     let this = Date::new(today.year(), month, day).ok()?;
-    if this >= today {
-        return Some(this);
+    if this >= today || (today - this).get_days() <= PAST_DAYS {
+        return Some((this, false));
     }
-    Date::new(today.year() + 1, month, day).ok()
+    Date::new(today.year() + 1, month, day).ok().map(|d| (d, true))
 }
 
-/// A day from `YYYY-MM-DD`, `M/D` (the next one on or after today), `11月6日`,
-/// `Dec 12`, `today`/`tomorrow`/`今日`/`明日`, or a weekday (the next one).
+/// A day from `YYYY-MM-DD`, `M/D` (this year's, or next year's once more than
+/// two months gone), `11月6日`, `Dec 12`, `today`/`tomorrow`/`今日`/`明日`, or a
+/// weekday (the next one).
 pub fn day(raw: &str, today: Date) -> Option<Date> {
+    day_read(raw, today).map(|(d, _)| d)
+}
+
+/// The day `raw` names when it carried no year and was read as next year's.
+pub fn rolled(raw: &str, today: Date) -> Option<Date> {
+    let s = raw.trim();
+    let halves = s.rfind([' ', 'T']).filter(|at| *at > 0).map(|at| [&s[..at], &s[at + 1..]]);
+    std::iter::once(s)
+        .chain(halves.into_iter().flatten())
+        .find_map(|part| day_read(part, today).filter(|(_, next)| *next).map(|(d, _)| d))
+}
+
+fn day_read(raw: &str, today: Date) -> Option<(Date, bool)> {
     let s = raw.trim().trim_end_matches(['.', ',']).to_lowercase();
     if s.is_empty() {
         return None;
     }
+    let plain = |d: Option<Date>| d.map(|d| (d, false));
     match s.as_str() {
-        "today" | "今日" | "きょう" | "本日" => return Some(today),
-        "tomorrow" | "明日" | "あした" | "あす" => return today.tomorrow().ok(),
-        "明後日" | "あさって" => return today.checked_add(jiff::Span::new().days(2)).ok(),
+        "today" | "今日" | "きょう" | "本日" => return Some((today, false)),
+        "tomorrow" | "明日" | "あした" | "あす" => return plain(today.tomorrow().ok()),
+        "明後日" | "あさって" => return plain(today.checked_add(jiff::Span::new().days(2)).ok()),
         _ => {}
     }
     if s.len() == 10 {
         if let Ok(d) = s.replace('/', "-").parse::<Date>() {
-            return Some(d);
+            return Some((d, false));
         }
     }
     if let Some(d) = weekday(&s) {
         let ahead = (d.to_monday_zero_offset() - today.weekday().to_monday_zero_offset()).rem_euclid(7);
-        return today.checked_add(jiff::Span::new().days(i64::from(ahead))).ok();
+        return plain(today.checked_add(jiff::Span::new().days(i64::from(ahead))).ok());
     }
     if let Some(rest) = s.strip_suffix('日') {
         let (year, rest) = match rest.split_once('年') {
@@ -453,7 +547,7 @@ pub fn day(raw: &str, today: Date) -> Option<Date> {
         let (m, d) = rest.split_once('月')?;
         let (m, d) = (m.trim().parse::<i8>().ok()?, d.trim().parse::<i8>().ok()?);
         return match year {
-            Some(y) => Date::new(y, m, d).ok(),
+            Some(y) => plain(Date::new(y, m, d).ok()),
             None => on_or_after(today, m, d),
         };
     }
@@ -463,10 +557,10 @@ pub fn day(raw: &str, today: Date) -> Option<Date> {
         if let Some(n) = nums {
             return match n.as_slice() {
                 [m, d] => on_or_after(today, i8::try_from(*m).ok()?, i8::try_from(*d).ok()?),
-                [y, m, d] if *y > 31 => Date::new(i16::try_from(*y).ok()?, i8::try_from(*m).ok()?, i8::try_from(*d).ok()?).ok(),
+                [y, m, d] if *y > 31 => plain(Date::new(i16::try_from(*y).ok()?, i8::try_from(*m).ok()?, i8::try_from(*d).ok()?).ok()),
                 [m, d, y] => {
                     let y = if *y < 100 { 2000 + y } else { *y };
-                    Date::new(i16::try_from(y).ok()?, i8::try_from(*m).ok()?, i8::try_from(*d).ok()?).ok()
+                    plain(Date::new(i16::try_from(y).ok()?, i8::try_from(*m).ok()?, i8::try_from(*d).ok()?).ok())
                 }
                 _ => None,
             };
@@ -476,7 +570,7 @@ pub fn day(raw: &str, today: Date) -> Option<Date> {
 }
 
 /// `dec 12`, `december 12, 2026`, `12 dec`.
-fn month_name_day(text: &str, today: Date) -> Option<Date> {
+fn month_name_day(text: &str, today: Date) -> Option<(Date, bool)> {
     let words: Vec<&str> = text.split([' ', ',']).filter(|w| !w.is_empty()).collect();
     let month_of = |w: &str| MONTHS.iter().position(|m| w.starts_with(m)).map(|i| i as i8 + 1);
     let (month, day, year) = match words.as_slice() {
@@ -493,7 +587,7 @@ fn month_name_day(text: &str, today: Date) -> Option<Date> {
         _ => return None,
     };
     match year {
-        Some(y) => Date::new(y, month, day).ok(),
+        Some(y) => Date::new(y, month, day).ok().map(|d| (d, false)),
         None => on_or_after(today, month, day),
     }
 }
@@ -714,7 +808,12 @@ mod tests {
         let today = d("2026-10-20");
         assert_eq!(day("2026-11-06", today), Some(d("2026-11-06")));
         assert_eq!(day("11/6", today), Some(d("2026-11-06")));
-        assert_eq!(day("10/1", today), Some(d("2027-10-01")), "a day gone by this year is next year's");
+        assert_eq!(day("10/1", today), Some(d("2026-10-01")), "a day weeks gone stays this year's");
+        assert_eq!(day("8/1", today), Some(d("2027-08-01")), "a day months gone is next year's");
+        assert_eq!(rolled("8/1", today), Some(d("2027-08-01")));
+        assert_eq!(rolled("8/1 17:00", today), Some(d("2027-08-01")));
+        assert_eq!(rolled("10/1", today), None);
+        assert_eq!(rolled("2027-08-01", today), None);
         assert_eq!(day("10/20", today), Some(d("2026-10-20")));
         assert_eq!(day("11月6日", today), Some(d("2026-11-06")));
         assert_eq!(day("2027年1月3日", today), Some(d("2027-01-03")));
@@ -791,6 +890,8 @@ mod tests {
         assert_eq!(by_title("lab report", &open, "task"), Ok(7));
         let e = by_title("ESSAY", &open, "task").unwrap_err();
         assert!(e.contains("88, 91"), "{e}");
+        let goals = vec![(1, "AP Chemistry final".to_string()), (2, "Visual Arts".to_string()), (3, "Chem lab".to_string())];
+        assert_eq!(nearest("chemistry", &goals, 2).iter().map(|g| g.0).collect::<Vec<_>>(), [1, 3]);
         assert!(by_title("Poem", &open, "task").unwrap_err().starts_with("no open task"));
     }
 
@@ -822,8 +923,8 @@ mod tests {
         assert!(cut.chars().count() <= MAX_TITLE_CHARS);
         assert!(cut.ends_with("word"));
         assert_eq!(cut_title("short"), None);
-        let ja = "あ".repeat(250);
-        assert_eq!(cut_title(&ja).unwrap().chars().count(), MAX_TITLE_CHARS);
+        let ja = "あ".repeat(180);
+        assert_eq!(cut_title(&ja).unwrap().len(), crate::tasks::MAX_TITLE_BYTES - 2, "under 200 characters, over 500 bytes");
         assert_eq!(truncate("ああ", 4).as_deref(), Some("あ"));
     }
 
@@ -842,6 +943,11 @@ mod tests {
         assert_eq!(items(&mut o, "tasks", &[], &[]).0, vec![json!({"title": "one"})]);
         let mut o = obj(json!({}));
         assert!(items(&mut o, "tasks", &[], &["title"]).0.is_empty());
+        let mut o = obj(json!({"updates": [{"id": 4}], "why": "x"}));
+        let (got, warning) = items(&mut o, "tasks", &[], &["title"]);
+        assert_eq!((got.len(), warning.as_deref()), (1, Some("read updates as tasks")));
+        let mut o = obj(json!({"a": [1], "b": {"id": 2}}));
+        assert!(items(&mut o, "tasks", &[], &["title"]).0.is_empty(), "two lists name none");
     }
 
     #[test]

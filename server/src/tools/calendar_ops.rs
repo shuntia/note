@@ -213,11 +213,13 @@ fn read_entry(obj: &mut Obj, r: &Ref, env: &mut Envelope, today: jiff::civil::Da
         if raw.trim().is_empty() {
             return Some(String::new());
         }
-        let day = loose::day(&raw, today).map(|d| d.to_string());
-        if day.is_none() {
-            env.ignored(Some(r), field, format!("a day is {}", loose::DAY_FORMS));
+        let day = loose::day(&raw, today);
+        match day {
+            None => env.ignored(Some(r), field, format!("a day is {}", loose::DAY_FORMS)),
+            Some(d) if loose::rolled(&raw, today).is_some() => env.adjusted(Some(r), field, d.to_string().into(), loose::rolled_why(&raw, d)),
+            Some(_) => {}
         }
-        day
+        day.map(|d| d.to_string())
     };
     entry.on = day_field(obj, env, "on", &["on", "on_date", "date", "day"]);
     entry.from = day_field(obj, env, "from", &["from", "from_date", "start_date", "starts_on"]);
@@ -348,11 +350,16 @@ pub fn save(conn: &Connection, ctx: &ToolCtx, raw: &str) -> Result<Value, ToolEr
     if let Some(w) = warning {
         env.warn(w);
     }
-    for field in o.rest() {
-        env.ignored(None, &field, "not a calendar_save field");
+    let rest = o.rest();
+    for field in &rest {
+        env.ignored(None, field, "not a calendar_save field");
     }
     if entries.is_empty() {
-        env.warn("nothing to save: entries was empty");
+        if rest.is_empty() {
+            env.warn("nothing to save: entries was empty");
+        } else {
+            env.refuse_call("nothing was saved: the entries go in entries, a list");
+        }
         return Ok(env.into_value());
     }
     let today = today(ctx);
@@ -625,12 +632,12 @@ pub fn remove(conn: &Connection, ctx: &ToolCtx, raw: &str) -> Result<Value, Tool
     unscoped(ctx)?;
     let mut o = Obj::new(loose::args(raw)?);
     let mut env = Envelope::default();
-    let ids = o.take(&["ids", "id", "entry_id", "entry_ids", "event_id", "entries"]).map(loose::list).unwrap_or_default();
+    let ids = loose::ids(&mut o, &["ids", "id", "entry_id", "entry_ids", "event_id", "entries"], &mut env);
     for field in o.rest() {
         env.ignored(None, &field, "not a calendar_remove field");
     }
     if ids.is_empty() {
-        env.warn("nothing to remove: ids was empty");
+        loose::nothing_removed(&mut env);
         return Ok(env.into_value());
     }
     let all: Vec<(i64, String)> = calendar::list(conn, ctx.user_id).map_err(internal)?.into_iter().map(|x| (x.id, x.title)).collect();

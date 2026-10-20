@@ -988,7 +988,7 @@ pub fn known(name: &str) -> Option<(&'static str, Option<String>)> {
     find(trimmed).map(|(_, t)| (t.name, Some(format!("there is no tool {name:?}; this ran {}", t.name))))
 }
 
-fn distance(a: &str, b: &str) -> usize {
+pub(crate) fn distance(a: &str, b: &str) -> usize {
     let b: Vec<char> = b.chars().collect();
     let mut row: Vec<usize> = (0..=b.len()).collect();
     for (i, ca) in a.chars().enumerate() {

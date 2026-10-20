@@ -165,7 +165,7 @@ impl<'a> Saver<'a> {
             match loose::text(&v).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
                 Some(t) => match loose::cut_title(&t) {
                     Some(cut) => {
-                        self.env.adjusted(Some(r), "title", cut.clone().into(), "a title stops at 200 characters; the whole text leads the description");
+                        self.env.adjusted(Some(r), "title", cut.clone().into(), "a title stops at 200 characters or 500 bytes; the whole text leads the description");
                         node.full_title = Some(t);
                         node.title = Some(cut);
                     }
@@ -201,7 +201,12 @@ impl<'a> Saver<'a> {
             match loose::text(&v) {
                 Some(s) if s.trim().is_empty() => node.due = Some(None),
                 Some(s) => match loose::when(&s, &self.tz, self.now) {
-                    Some(w) => node.due = Some(Some(w)),
+                    Some(w) => {
+                        if let Some(d) = loose::rolled(&s, self.now.to_zoned(self.tz.clone()).date()) {
+                            self.env.adjusted(Some(r), "due", d.to_string().into(), loose::rolled_why(&s, d));
+                        }
+                        node.due = Some(Some(w));
+                    }
                     None => self.ignore(r, "due", format!("a due is {} or {}", loose::DAY_FORMS, loose::MOMENT_FORMS)),
                 },
                 None => self.ignore(r, "due", "a due is text such as 2026-11-06, 11/6 or 2026-11-06T17:00"),
@@ -382,7 +387,7 @@ impl<'a> Saver<'a> {
             }
             Target::Title(title) => {
                 let open = self.open_under(under, anywhere)?;
-                match loose::by_title(title, &open, "task") {
+                match loose::by_title_listed(title, &open, "task", |ids| listed(self.conn, self.ctx.user_id, ids)) {
                     Ok(id) => {
                         self.env.adjusted(Some(r), "id", id.into(), format!("{title:?} is task {id}"));
                         Ok(Some(id))
@@ -813,6 +818,20 @@ impl<'a> Saver<'a> {
                 Ok(())
             }
             Err(tasks::UpdateError::Db(e)) => Err(internal(e)),
+            Err(_) if list.len() == 1 && !list[0].new.children.is_empty() => {
+                let (root, kids) = split(list.into_iter().next().expect("one tree"));
+                let r = root.refs[0].0.clone();
+                let before = self.env.saved.len();
+                self.create_group(parent, vec![root])?;
+                let made = self.env.saved[before..].iter().find(|x| x["ref"] == r.0).and_then(|x| x["id"].as_i64());
+                for kid in kids {
+                    match made {
+                        Some(id) => self.create_group(Some(id), vec![kid])?,
+                        None => self.env.refused(&kid.refs[0].0, "its parent was refused"),
+                    }
+                }
+                Ok(())
+            }
             Err(e) if list.len() == 1 => {
                 let r = list[0].refs.first().map(|(r, _)| r.clone()).unwrap_or_default();
                 self.env.refused(&r, e.to_string());
@@ -834,6 +853,43 @@ impl<'a> Saver<'a> {
         let Some(id) = self.resolve(&r, &t, None, true)? else { return Ok(()) };
         self.update(child, id, Some(Some(under)))
     }
+}
+
+fn nodes_in(n: &NewTask) -> usize {
+    1 + n.children.iter().map(nodes_in).sum::<usize>()
+}
+
+/// A tree cut into its root alone and one tree per child, each keeping the
+/// refs, placings and adoptions that fall inside it.
+fn split(b: Built) -> (Built, Vec<Built>) {
+    let Built { mut new, refs, places, deferred } = b;
+    let children = std::mem::take(&mut new.children);
+    let mut spans = Vec::with_capacity(children.len());
+    let mut at = 1;
+    for c in &children {
+        spans.push(at..at + nodes_in(c));
+        at += nodes_in(c);
+    }
+    let bucket = |i: usize| spans.iter().position(|s| s.contains(&i));
+    let mut kids: Vec<Built> = children
+        .into_iter()
+        .zip(&spans)
+        .map(|(c, s)| Built { new: c, refs: refs[s.clone()].to_vec(), places: Vec::new(), deferred: Vec::new() })
+        .collect();
+    let mut root = Built { new, refs: refs[..1].to_vec(), places: Vec::new(), deferred: Vec::new() };
+    for (i, t) in places {
+        match bucket(i) {
+            Some(k) => kids[k].places.push((i - spans[k].start, t)),
+            None => root.places.push((i, t)),
+        }
+    }
+    for (i, n) in deferred {
+        match bucket(i) {
+            Some(k) => kids[k].deferred.push((i - spans[k].start, n)),
+            None => root.deferred.push((i, n)),
+        }
+    }
+    (root, kids)
 }
 
 fn clone_new(n: &NewTask) -> NewTask {
@@ -858,6 +914,10 @@ fn clone_new(n: &NewTask) -> NewTask {
         children: n.children.iter().map(clone_new).collect(),
         zone: n.zone.clone(),
     }
+}
+
+fn listed(conn: &Connection, user_id: i64, ids: &[i64]) -> String {
+    labeled(conn, user_id, ids).unwrap_or_else(|_| ids.iter().map(i64::to_string).collect::<Vec<_>>().join(", "))
 }
 
 /// `16 (Unit 1 › Lesson 2)` for each id that sits under a root, the bare id otherwise.
@@ -903,11 +963,16 @@ pub fn save(conn: &Connection, ctx: &ToolCtx, kind: SessionKind, raw: &str) -> R
     if let Some(w) = warning {
         saver.env.warn(w);
     }
-    for field in o.rest() {
-        saver.env.ignored(None, &field, loose::unknown(&field, ELSEWHERE));
+    let rest = o.rest();
+    for field in &rest {
+        saver.env.ignored(None, field, loose::unknown(field, ELSEWHERE));
     }
     if items.is_empty() {
-        saver.env.warn("nothing to save: tasks was empty");
+        if rest.is_empty() {
+            saver.env.warn("nothing to save: tasks was empty");
+        } else {
+            saver.env.refuse_call("nothing was saved: the tasks go in tasks, a list");
+        }
         return Ok(saver.env.into_value());
     }
     saver.save(items)?;
@@ -918,13 +983,13 @@ pub fn save(conn: &Connection, ctx: &ToolCtx, kind: SessionKind, raw: &str) -> R
 pub fn remove(conn: &Connection, ctx: &ToolCtx, kind: SessionKind, raw: &str) -> Result<Value, ToolError> {
     let mut o = Obj::new(loose::args(raw)?);
     let mut env = Envelope::default();
-    let ids = o.take(&["ids", "id", "task_ids", "task_id", "tasks", "items"]).map(loose::list).unwrap_or_default();
     let all = o.take(&["all", "force", "confirm"]).and_then(|v| loose::boolean(&v)).unwrap_or(false);
+    let ids = loose::ids(&mut o, &["ids", "id", "task_ids", "task_id", "tasks", "items"], &mut env);
     for field in o.rest() {
         env.ignored(None, &field, "not a task_remove field");
     }
     if ids.is_empty() {
-        env.warn("nothing to remove: ids was empty");
+        loose::nothing_removed(&mut env);
         return Ok(env.into_value());
     }
     let held = if kind == SessionKind::Trigger { running_line(conn, ctx.user_id).map_err(internal)? } else { Vec::new() };
@@ -935,7 +1000,7 @@ pub fn remove(conn: &Connection, ctx: &ToolCtx, kind: SessionKind, raw: &str) ->
             Some(Target::Id(id)) => id,
             Some(Target::Title(t)) => {
                 let open = open_tasks(conn, ctx.user_id)?;
-                match loose::by_title(&t, &open, "task") {
+                match loose::by_title_listed(&t, &open, "task", |ids| listed(conn, ctx.user_id, ids)) {
                     Ok(id) => {
                         env.adjusted(Some(&r), "id", id.into(), format!("{t:?} is task {id}"));
                         id
@@ -1378,6 +1443,72 @@ mod tests {
         assert!(field(&out, "adjusted", "0", "title").is_some());
         assert_eq!(t.notes.len(), 16 * 1024);
         assert!(out["warnings"][0].as_str().unwrap().contains("notes"));
+    }
+
+    #[test]
+    fn a_long_title_is_cut_to_fit_and_a_bad_part_spares_its_siblings() {
+        let (conn, tmp) = env("UTC");
+        let out = talk(&conn, &tmp, "task_save", json!({"tasks": [{"title": "美術", "children": [{"title": "あ".repeat(180)}, {"title": "短い"}]}]}));
+        assert_eq!(out["ok"], true, "{out}");
+        let long = task(&conn, saved(&out, "0.0"));
+        assert!(long.title.len() <= crate::tasks::MAX_TITLE_BYTES);
+        assert_eq!(long.description, "あ".repeat(180));
+        let out = talk(&conn, &tmp, "task_save", json!({"tasks": [{"title": "Course", "children": [
+            {"title": "Unit 1", "children": ["Lesson 1", {"title": "Lesson 2 ".repeat(2500)}]}, {"title": "Unit 2", "children": ["Lesson 3"]}]}]}));
+        assert_eq!(task(&conn, saved(&out, "0.1.0")).title, "Lesson 3", "{out}");
+        assert_eq!(task(&conn, saved(&out, "0.0.0")).title, "Lesson 1");
+        assert_eq!(out["refused"][0]["ref"], "0.0.1", "{out}");
+        assert_eq!(out["refused"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_wrong_key_is_read_as_the_list_and_a_call_that_saves_nothing_fails() {
+        let (conn, tmp) = env("UTC");
+        let out = talk(&conn, &tmp, "task_save", json!({"task": {"title": "Buy brushes"}}));
+        assert_eq!(out["saved"][0]["title"], "Buy brushes", "{out}");
+        assert_eq!(out["warnings"][0], "read task as tasks");
+        let out = talk(&conn, &tmp, "task_save", json!({"why": "nothing", "note": "x"}));
+        assert_eq!(out["ok"], false, "{out}");
+        for (tool, args) in [
+            ("goal_save", json!({"goal": "x", "why": "y"})),
+            ("calendar_save", json!({"when": "tuesday"})),
+            ("task_remove", json!({"task": "12"})),
+            ("goal_remove", json!({"which": 3})),
+            ("calendar_remove", json!({"which": 3})),
+        ] {
+            assert_eq!(talk(&conn, &tmp, tool, args)["ok"], false, "{tool}");
+        }
+        let brushes = saved(&talk(&conn, &tmp, "task_save", json!({"tasks": [{"title": "Buy brushes"}]})), "0");
+        let out = talk(&conn, &tmp, "task_remove", json!({"delete": [brushes]}));
+        assert_eq!(out["removed"][0]["id"], brushes, "{out}");
+    }
+
+    #[test]
+    fn a_day_weeks_gone_stays_this_year_and_one_rolled_to_next_year_says_so() {
+        let (conn, tmp) = env("UTC");
+        let today = jiff::Timestamp::now().to_zoned(jiff::tz::TimeZone::UTC).date();
+        let md = |days: i64| {
+            let d = today.checked_sub(jiff::Span::new().days(days)).unwrap();
+            (format!("{}/{}", d.month(), d.day()), d)
+        };
+        let (recent, recent_day) = md(5);
+        let (old, old_day) = md(120);
+        let out = talk(&conn, &tmp, "task_save", json!({"tasks": [{"title": "Late lab report", "due": recent}, {"title": "Next year", "due": old}]}));
+        assert_eq!(task(&conn, saved(&out, "0")).due_on, Some(recent_day.to_string()));
+        assert!(field(&out, "adjusted", "0", "due").is_none(), "{out}");
+        let next = old_day.checked_add(jiff::Span::new().years(1)).unwrap();
+        assert_eq!(task(&conn, saved(&out, "1")).due_on, Some(next.to_string()));
+        assert_eq!(field(&out, "adjusted", "1", "due").unwrap()["to"], next.to_string());
+    }
+
+    #[test]
+    fn an_ambiguous_title_lists_each_candidate_with_its_path() {
+        let (conn, tmp) = env("UTC");
+        let out = talk(&conn, &tmp, "task_save", json!({"tasks": [{"title": "Course", "children": [{"title": "Unit 1", "children": ["Lesson 2"]}, {"title": "Unit 2", "children": ["Lesson 2"]}]}]}));
+        let (a, b) = (saved(&out, "0.0.0"), saved(&out, "0.1.0"));
+        let out = talk(&conn, &tmp, "task_save", json!({"tasks": [{"id": "Lesson 2", "state": "done"}]}));
+        let why = out["refused"][0]["why"].as_str().unwrap();
+        assert!(why.contains(&format!("{a} (Course › Unit 1 › Lesson 2), {b} (Course › Unit 2 › Lesson 2)")), "{why}");
     }
 
     #[test]
