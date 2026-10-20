@@ -38,3 +38,28 @@ describe('schedule receipts', () => {
     expect(receipt('wait_for', '{"until":"+30min"}', false)).toBe('Set a check-in in 30 min')
   })
 })
+
+describe('find, save and remove receipts', () => {
+  test('task_save reads as the create or update it carries', () => {
+    expect(receipt('task_save', '{"tasks":[{"title":"Essay"}]}', false)).toBe('Added “Essay” to your tasks')
+    expect(receipt('task_save', '{"tasks":[{"id":4,"state":"done"}]}', false)).toBe('Marked a task done')
+    expect(receipt('task_save', '{"tasks":[{"id":4,"now":true}]}', false)).toBe(receipt('task_update', '{"is_now":true}', false))
+    expect(receipt('task_save', '{"tasks":[{"title":"a"},{"title":"b"}]}', false)).toBe('Saved 2 tasks')
+    expect(doing('task_save', '{}')).toBe('Saving tasks')
+    expect(receipt('task_save', '{}', true)).toBe("Couldn't save those tasks")
+  })
+  test('task_find reads as a search, a read or a survey', () => {
+    expect(receipt('task_find', '{"query":"essay"}', false)).toBe('Looked for “essay” in your tasks')
+    expect(receipt('task_find', '{"id":3}', false)).toBe('Read a task')
+    expect(receipt('task_find', '{"overdue":true}', false)).toBe('Looked over what is overdue')
+  })
+  test('removals, goals and the calendar read plainly', () => {
+    expect(receipt('task_remove', '{"ids":[1]}', false)).toBe('Deleted a task')
+    expect(receipt('task_remove', '{"ids":[1,2,3]}', false)).toBe('Deleted 3 tasks')
+    expect(receipt('goal_save', '{"goals":[{"title":"Visual Arts"}]}', false)).toBe('Saved the goal “Visual Arts”')
+    expect(receipt('goal_find', '{}', false)).toBe('Read your goals')
+    expect(receipt('calendar_save', '{"entries":[{"title":"Swim"}]}', false)).toBe('Added “Swim” to your calendar')
+    expect(receipt('calendar_save', '{"entries":[{"id":2,"skip":["2026-11-03"]}]}', false)).toMatch(/^Skipped a calendar entry/)
+    expect(receipt('calendar_find', '{}', false)).toBe('Read your calendar')
+  })
+})

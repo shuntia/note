@@ -215,6 +215,59 @@ const TABLE: Record<string, Receipt> = {
     failed: 'receipt.taskBulk.failed',
   },
 
+  task_find: {
+    doing: (a) => {
+      const q = str(a, 'query')
+      if (q) return t('receipt.taskSearch.doingFor', { query: clip(q) })
+      return t(a.id === undefined ? 'receipt.taskList.doing' : 'receipt.taskRead.doing')
+    },
+    done: (a) => {
+      const q = str(a, 'query')
+      if (q) return t('receipt.taskSearch.doneFor', { query: clip(q) })
+      if (a.id !== undefined) return t('receipt.taskRead.done')
+      return say(TABLE.task_list.done, { ...a, is_now: a.now ?? a.is_now })
+    },
+    failed: 'receipt.taskList.failed',
+  },
+  task_save: {
+    doing: 'receipt.taskSave.doing',
+    done: (a) => {
+      const tasks = nodes(a, 'tasks')
+      if (tasks.length !== 1) return t('receipt.taskSave.done', { count: tasks.length })
+      const one = tasks[0]
+      if (one.id !== undefined) return say(TABLE.task_update.done, { ...one, is_now: one.now ?? one.is_now })
+      return say(TABLE.task_create.done, one)
+    },
+    failed: 'receipt.taskSave.failed',
+  },
+  task_remove: {
+    doing: 'receipt.taskDelete.doing',
+    done: (a) => {
+      const count = Array.isArray(a.ids) ? a.ids.length : 1
+      return count === 1 ? t('receipt.taskDelete.done') : t('receipt.taskRemove.done', { count })
+    },
+    failed: 'receipt.taskDelete.failed',
+  },
+  goal_find: {
+    doing: 'receipt.goalFind.doing',
+    done: 'receipt.goalFind.done',
+    failed: 'receipt.goalFind.failed',
+  },
+  goal_save: {
+    doing: 'receipt.goalSave.doing',
+    done: (a) => {
+      const goals = nodes(a, 'goals')
+      const title = goals.length === 1 ? str(goals[0], 'title') : ''
+      return title ? t('receipt.goalSave.doneNamed', { title: clip(title) }) : t('receipt.goalSave.done')
+    },
+    failed: 'receipt.goalSave.failed',
+  },
+  goal_remove: {
+    doing: 'receipt.goalRemove.doing',
+    done: 'receipt.goalRemove.done',
+    failed: 'receipt.goalRemove.failed',
+  },
+
   note_write: {
     doing: 'receipt.noteWrite.doing',
     done: (a) => {
@@ -343,6 +396,24 @@ const TABLE: Record<string, Receipt> = {
       return title
         ? t('receipt.calendarUpdate.renamed', { title: clip(title) })
         : t('receipt.calendarUpdate.done')
+    },
+    failed: 'receipt.calendarUpdate.failed',
+  },
+  calendar_find: {
+    doing: 'receipt.calendarList.doing',
+    done: 'receipt.calendarList.done',
+    failed: 'receipt.calendarList.failed',
+  },
+  calendar_save: {
+    doing: 'receipt.calendarUpdate.doing',
+    done: (a) => {
+      const entries = nodes(a, 'entries')
+      if (entries.length !== 1) return t('receipt.calendarSave.done', { count: entries.length })
+      const one = entries[0]
+      const skipped = Array.isArray(one.skip) && typeof one.skip[0] === 'string' ? (one.skip[0] as string) : ''
+      if (skipped) return t('receipt.calendarSkip.done', { day: dayPhrase(skipped) })
+      if (one.id === undefined) return say(TABLE.calendar_add.done, one)
+      return say(TABLE.calendar_update.done, one)
     },
     failed: 'receipt.calendarUpdate.failed',
   },
@@ -485,6 +556,14 @@ const TABLE: Record<string, Receipt> = {
     done: (a) => t('receipt.batch.done', { count: size(a, 'calls') }),
     failed: 'receipt.batch.failed',
   },
+}
+
+// The items a write carries under `key`, or the call itself when it sent one bare.
+function nodes(a: Args, key: string): Args[] {
+  const list = a[key]
+  if (Array.isArray(list)) return list.filter((x): x is Args => typeof x === 'object' && x !== null)
+  if (typeof list === 'object' && list !== null) return [list as Args]
+  return 'title' in a || 'id' in a ? [a] : []
 }
 
 function parse(raw: string): Args {
