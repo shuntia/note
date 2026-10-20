@@ -17,7 +17,9 @@ import type { ViewProps } from '../app'
 import { t, type Key } from '../i18n'
 import { isoDay } from '../i18n/format'
 import { Markdown } from '../markdown'
+import { follows, newFollow, scrollsByKey } from '../follow'
 import { reducedMotion } from '../motion'
+import { StreamText } from '../streamfade'
 import { talkTurn } from '../talkTurn'
 import { Overflow } from '../overflow'
 import { Pulse } from '../pulse'
@@ -294,7 +296,12 @@ function Trace({
                 <Receipt item={step} />
               </Fragment>
             ))}
-            {reasoning && <p className="activity-think">{reasoning}</p>}
+            {reasoning &&
+              (live ? (
+                <StreamText className="activity-think" text={reasoning} />
+              ) : (
+                <p className="activity-think">{reasoning}</p>
+              ))}
           </div>
         </div>
       )}
@@ -495,6 +502,7 @@ export function Talk({
   const pane = useRef<HTMLDivElement>(null)
   const input = useRef<HTMLTextAreaElement>(null)
   const stick = useRef(true)
+  const follow = useRef(newFollow())
   // a freshly loaded transcript opens at its end at once; everything after eases there
   const jump = useRef(false)
   const wanted = useRef<number | null>(null)
@@ -945,8 +953,32 @@ export function Talk({
 
   const onScroll = () => {
     const el = pane.current
-    if (el && !flight.current) stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 64
+    if (!el) return
+    if (flight.current) {
+      follow.current.top = el.scrollTop
+      return
+    }
+    const g = { top: el.scrollTop, height: el.scrollHeight, client: el.clientHeight }
+    stick.current = follows(follow.current, stick.current, g, performance.now())
   }
+
+  // The user's own hand on the pane: an ease toward the end stops fighting it.
+  const intend = () => {
+    follow.current.intentAt = performance.now()
+    if (!flight.current && pane.current) gsap.killTweensOf(pane.current)
+  }
+
+  useEffect(() => {
+    const release = () => {
+      follow.current.held = false
+    }
+    window.addEventListener('pointerup', release)
+    window.addEventListener('pointercancel', release)
+    return () => {
+      window.removeEventListener('pointerup', release)
+      window.removeEventListener('pointercancel', release)
+    }
+  }, [])
 
   const visible = conversations.filter((c) => c.id !== deleteHold.held())
   const here = current === null ? null : (conversations.find((c) => c.id === current) ?? null)
@@ -1089,7 +1121,18 @@ export function Talk({
           </button>
           {goHome && <Pulse session={session} refresh={refresh} onOpen={goHome} />}
         </div>
-        <div className="chat-pane" ref={pane} onScroll={onScroll}>
+        <div
+          className="chat-pane"
+          ref={pane}
+          onScroll={onScroll}
+          onWheel={intend}
+          onTouchMove={intend}
+          onKeyDown={(e) => scrollsByKey(e.key) && intend()}
+          onPointerDown={() => {
+            follow.current.held = true
+            intend()
+          }}
+        >
           <div className="chat-stream">
             {msgState === 'loading' && <p className="muted">{t('talk.loadingChat')}</p>}
             {msgState === 'ready' && current === null && !onTriggers && items.length === 0 && (
@@ -1131,7 +1174,7 @@ export function Talk({
                 />
                 {live.text && (
                   <div className="turn assistant">
-                    <Markdown text={live.text} />
+                    <Markdown text={live.text} stream />
                   </div>
                 )}
               </div>

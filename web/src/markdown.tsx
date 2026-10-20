@@ -1,7 +1,8 @@
 import DOMPurify from 'dompurify'
 import { marked } from 'marked'
-import { useEffect, useMemo, useRef, type MouseEvent } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, type MouseEvent } from 'react'
 import { t } from './i18n'
+import { Fader } from './streamfade'
 
 // Model output carries text from the web and from strangers, so nothing in it may load on its own.
 const PURIFY = {
@@ -43,9 +44,25 @@ function render(text: string): string {
   return holder.innerHTML
 }
 
-export function Markdown({ text }: { text: string }) {
+/** `stream` fades text in as it grows. */
+export function Markdown({ text, stream = false }: { text: string; stream?: boolean }) {
   const html = useMemo(() => render(text), [text])
   const timers = useRef(new Map<HTMLButtonElement, number>())
+  const root = useRef<HTMLDivElement>(null)
+  const fader = useRef<Fader | null>(null)
+
+  useLayoutEffect(() => {
+    if (!stream) return
+    const f = new Fader(root.current!, 'rendered')
+    fader.current = f
+    return () => {
+      f.dispose()
+      fader.current = null
+    }
+  }, [stream])
+
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useLayoutEffect(() => fader.current?.update(text), [html, stream])
 
   useEffect(() => {
     const live = timers.current
@@ -78,5 +95,5 @@ export function Markdown({ text }: { text: string }) {
     )
   }
 
-  return <div className="prose" onClick={copy} dangerouslySetInnerHTML={{ __html: html }} />
+  return <div className="prose" ref={root} onClick={copy} dangerouslySetInnerHTML={{ __html: html }} />
 }

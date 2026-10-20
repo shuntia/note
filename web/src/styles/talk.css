@@ -215,6 +215,14 @@
   .chat .reply.fresh { animation: bubble-in 240ms cubic-bezier(0.2, 0.7, 0.3, 1) both; }
 }
 
+/* streamed words surface rather than appear; timing is set per word by the fader */
+@media (prefers-reduced-motion: no-preference) {
+  .chat .stream-in { animation-name: stream-in; animation-timing-function: cubic-bezier(0.25, 0.6, 0.3, 1); animation-fill-mode: both; }
+}
+@keyframes stream-in {
+  from { opacity: 0; filter: blur(1.5px); }
+}
+
 /* the text on its way from the composer to the thread */
 .send-ghost {
   position: fixed;
