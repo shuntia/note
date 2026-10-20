@@ -157,8 +157,12 @@ struct Entry {
 
 impl Entry {
     fn changes_fields(&self) -> bool {
-        self.title.is_some()
-            || self.kind.is_some()
+        self.title.is_some() || self.changes_rule()
+    }
+
+    /// Changes anything besides the title and the skipped days.
+    fn changes_rule(&self) -> bool {
+        self.kind.is_some()
             || self.start.is_some()
             || self.end.is_some()
             || self.days.is_some()
@@ -279,8 +283,30 @@ fn read_entry(obj: &mut Obj, r: &Ref, env: &mut Envelope, today: jiff::civil::Da
         }
         out
     };
-    entry.skip = dates(obj, env, "skip", &["skip", "skip_dates", "skipped", "except", "cancel"]);
-    entry.unskip = dates(obj, env, "unskip", &["unskip", "restore", "unskip_dates"]);
+    const SKIP: &[&str] = &["skip", "skip_dates", "skipped", "except", "cancel"];
+    const UNSKIP: &[&str] = &["unskip", "restore", "unskip_dates"];
+    for (field, names) in [("skip", SKIP), ("unskip", UNSKIP)] {
+        let flag = obj.peek(names).filter(|v| v.is_boolean() || v.is_string()).and_then(loose::boolean);
+        let days = match flag {
+            Some(on) => {
+                obj.take(names);
+                match (on, entry.on.take().filter(|d| !d.is_empty()).and_then(|d| d.parse().ok())) {
+                    (true, Some(d)) => vec![d],
+                    (true, None) => {
+                        env.ignored(Some(r), field, format!("{field}: true takes its day from date; or list the days in {field}"));
+                        Vec::new()
+                    }
+                    (false, _) => Vec::new(),
+                }
+            }
+            None => dates(obj, env, field, names),
+        };
+        if field == "skip" {
+            entry.skip = days;
+        } else {
+            entry.unskip = days;
+        }
+    }
     entry.new = obj.take(&["new", "also"]).and_then(|v| loose::boolean(&v)).unwrap_or(false);
     entry
 }
@@ -341,6 +367,9 @@ pub fn save(conn: &Connection, ctx: &ToolCtx, raw: &str) -> Result<Value, ToolEr
         for field in eo.rest() {
             env.ignored(Some(&r), &field, "not a calendar entry field");
         }
+        if e.target.is_none() && !e.changes_rule() && (!e.skip.is_empty() || !e.unskip.is_empty()) {
+            e.target = e.title.take().map(Target::Title);
+        }
         let target = match e.target.take() {
             Some(Target::Id(id)) => {
                 let found = calendar::get(conn, ctx.user_id, id).map_err(internal)?;
@@ -375,21 +404,46 @@ pub fn save(conn: &Connection, ctx: &ToolCtx, raw: &str) -> Result<Value, ToolEr
                 None => continue,
             },
         };
+        let mut skipped = false;
         for d in &e.skip {
-            if let Err(err) = calendar::skip(conn, ctx.user_id, entry.0.id, &d.to_string()) {
-                env.ignored(Some(&r), "skip", refusal(err)?);
+            if !occurs(&entry.0, *d) {
+                env.ignored(Some(&r), "skip", format!("{} doesn't happen on {d} ({})", entry.0.title, rule(&entry.0)));
+                continue;
+            }
+            match calendar::skip(conn, ctx.user_id, entry.0.id, &d.to_string()) {
+                Ok(()) => skipped = true,
+                Err(err) => env.ignored(Some(&r), "skip", refusal(err)?),
             }
         }
         for d in &e.unskip {
-            if let Err(err) = calendar::unskip(conn, ctx.user_id, entry.0.id, &d.to_string()) {
-                env.ignored(Some(&r), "unskip", refusal(err)?);
+            match calendar::unskip(conn, ctx.user_id, entry.0.id, &d.to_string()) {
+                Ok(()) => skipped = true,
+                Err(err) => env.ignored(Some(&r), "unskip", refusal(err)?),
             }
         }
         let fresh = calendar::get(conn, ctx.user_id, entry.0.id).map_err(internal)?.unwrap_or(entry.0);
-        let op = if entry.1 == "unchanged" && (!e.skip.is_empty() || !e.unskip.is_empty()) { "updated" } else { entry.1 };
+        let op = if entry.1 == "unchanged" && skipped { "updated" } else { entry.1 };
         env.saved(&r, fresh.id, &fresh.title, op)["when"] = when(&fresh).into();
     }
     Ok(env.into_value())
+}
+
+fn occurs(e: &calendar::Entry, d: jiff::civil::Date) -> bool {
+    let day = d.to_string();
+    if e.days == 0 {
+        return e.on_date.as_deref() == Some(day.as_str());
+    }
+    e.days & (1 << d.weekday().to_monday_zero_offset()) != 0
+        && e.from_date.as_deref().is_none_or(|f| f <= day.as_str())
+        && e.until_date.as_deref().is_none_or(|u| u >= day.as_str())
+}
+
+/// `tue, thu`, or a one-off's day.
+fn rule(e: &calendar::Entry) -> String {
+    match &e.on_date {
+        Some(on) if e.days == 0 => on.clone(),
+        _ => e.day_names.join(", "),
+    }
 }
 
 /// A one-off's date and times given in `tz`, restated on the user's own clock.
@@ -446,6 +500,10 @@ fn create(conn: &Connection, ctx: &ToolCtx, r: &Ref, env: &mut Envelope, entry: 
     }
     if !entry.new {
         if let Some(found) = same_entry(conn, ctx.user_id, &title, &start, &end, days, on.as_deref())? {
+            if found.days > 0 && days == 0 {
+                env.adjusted(Some(r), "id", found.id.into(), format!("{:?} already happens then ({}), so nothing was added; new: true adds another", found.title, rule(&found)));
+                return Ok(Some((found, "unchanged")));
+            }
             env.adjusted(Some(r), "id", found.id.into(), format!("entry {} {:?} already covers that time, so it was updated; new: true adds another", found.id, found.title));
             let as_update = Entry { title: None, on, start: Some(start), end: Some(end), tz: None, ..clone_entry(entry) };
             return update(conn, ctx, r, env, found, &as_update);
@@ -513,6 +571,10 @@ fn update(conn: &Connection, ctx: &ToolCtx, r: &Ref, env: &mut Envelope, found: 
     }
     if found.external_id.is_some() {
         env.refused(r, format!("entry {} is imported from another calendar, which rewrites it; skip its dates instead", found.id));
+        return Ok(None);
+    }
+    if found.days > 0 && entry.days.is_none() && entry.on.as_deref().is_some_and(|o| !o.is_empty()) {
+        env.refused(r, format!("{} repeats ({}); on makes a one-off; to skip a date use skip", found.title, rule(&found)));
         return Ok(None);
     }
     let (mut start, mut end, mut on) = (entry.start.clone(), entry.end.clone(), entry.on.clone());
@@ -700,6 +762,28 @@ mod tests {
         let out = talk(&conn, &tmp, "calendar_skip", json!({"entry_id": id, "date": "2099-09-22"}));
         assert!(out["warnings"][0].as_str().unwrap().contains("calendar_save"));
         assert_eq!(entry(&conn, id).exceptions, ["2099-09-21", "2099-09-22"]);
+    }
+
+    #[test]
+    fn a_repeating_entry_stays_repeating_and_skips_only_its_own_days() {
+        let (conn, tmp) = env("UTC");
+        let gym = saved(&talk(&conn, &tmp, "calendar_save", json!({"entries": [{"title": "Gym", "start": "18:00", "end": "19:00", "days": ["tue", "thu"]}]})), "0");
+        let out = talk(&conn, &tmp, "calendar_save", json!({"entries": [{"id": gym, "on": "2099-01-08"}]}));
+        assert_eq!(out["ok"], false);
+        assert!(out["refused"][0]["why"].as_str().unwrap().contains("to skip a date use skip"), "{out}");
+        assert_eq!(entry(&conn, gym).days, 2 | 8);
+        let out = talk(&conn, &tmp, "calendar_save", json!({"entries": [{"id": gym, "date": "2099-01-08", "skip": true}]}));
+        assert_eq!(out["ok"], true, "{out}");
+        assert_eq!((entry(&conn, gym).days, entry(&conn, gym).exceptions.clone()), (2 | 8, vec!["2099-01-08".to_string()]));
+        let out = talk(&conn, &tmp, "calendar_save", json!({"entries": [{"title": "gym", "skip": ["2099-01-13"]}]}));
+        assert_eq!(saved(&out, "0"), gym, "{out}");
+        assert_eq!(entry(&conn, gym).exceptions.len(), 2);
+        let out = talk(&conn, &tmp, "calendar_save", json!({"entries": [{"id": gym, "skip": ["2099-01-07"]}]}));
+        assert_eq!(out["ignored"][0]["why"], "Gym doesn't happen on 2099-01-07 (tue, thu)");
+        assert_eq!(out["saved"][0]["op"], "unchanged");
+        let out = talk(&conn, &tmp, "calendar_save", json!({"entries": [{"title": "Gym", "on": "2099-01-15", "start": "18:00", "end": "19:00"}]}));
+        assert_eq!(saved(&out, "0"), gym, "a one-off inside a repeating entry is already there");
+        assert_eq!(entry(&conn, gym).days, 2 | 8);
     }
 
     #[test]

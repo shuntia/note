@@ -152,6 +152,11 @@ impl Obj {
         found
     }
 
+    /// The first of `names` given with a value other than null, left in place.
+    pub fn peek(&self, names: &[&str]) -> Option<&Value> {
+        names.iter().find_map(|n| self.map.get(*n).filter(|v| !v.is_null()))
+    }
+
     pub fn has(&self, names: &[&str]) -> bool {
         names.iter().any(|n| self.map.get(*n).is_some_and(|v| !v.is_null()))
     }
