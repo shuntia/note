@@ -17,12 +17,13 @@ pub const MAX_ROUNDS: i64 = 16;
 const COLS: &str = "id, task_id, event_id, title, planned_min, started_at, paused_at, \
                     paused_ms, mode, work_min, break_min, phase, phase_started_at, \
                     phase_paused_ms, round, step_index, step_count, step_name, notes, \
-                    conversation_id";
+                    conversation_id, leaf_id, leaf_from_ms";
 
 const COLS_W: &str = "w.id, w.task_id, w.event_id, w.title, w.planned_min, w.started_at, \
                       w.paused_at, w.paused_ms, w.mode, w.work_min, w.break_min, w.phase, \
                       w.phase_started_at, w.phase_paused_ms, w.round, w.step_index, \
-                      w.step_count, w.step_name, w.notes, w.conversation_id";
+                      w.step_count, w.step_name, w.notes, w.conversation_id, w.leaf_id, \
+                      w.leaf_from_ms";
 
 #[derive(Debug, Serialize)]
 pub struct Session {
@@ -46,6 +47,19 @@ pub struct Session {
     pub step_name: Option<String>,
     pub notes: String,
     pub conversation_id: Option<i64>,
+    /// The leaf under `task_id` the session is on now.
+    pub leaf_id: Option<i64>,
+    pub leaf_title: Option<String>,
+    /// Titles from `task_id` down to the leaf.
+    pub leaf_path: Vec<String>,
+    /// The leaf's place among the live leaves under `task_id`, 1-based, and
+    /// their count; absent when the leaf is `task_id` itself.
+    pub leaf_index: Option<i64>,
+    pub leaf_count: Option<i64>,
+    /// How far into the session the current leaf began; what came before is
+    /// already booked to the leaves before it.
+    #[serde(skip)]
+    pub leaf_from_ms: i64,
 }
 
 fn row_to_session(r: &rusqlite::Row) -> rusqlite::Result<Session> {
@@ -72,7 +86,86 @@ fn row_to_session(r: &rusqlite::Row) -> rusqlite::Result<Session> {
         step_name: r.get(17)?,
         notes: r.get(18)?,
         conversation_id: r.get(19)?,
+        leaf_id: r.get(20)?,
+        leaf_from_ms: r.get(21)?,
+        leaf_title: None,
+        leaf_path: Vec::new(),
+        leaf_index: None,
+        leaf_count: None,
     })
+}
+
+/// The tree the session runs, read without the caller's id: the session row
+/// already proved whose it is.
+fn session_tree(conn: &Connection, task_id: i64) -> rusqlite::Result<Option<crate::tasks::TaskNode>> {
+    let owner: Option<i64> =
+        conn.query_row("SELECT user_id FROM tasks WHERE id = ?1", [task_id], |r| r.get(0)).optional()?;
+    match owner {
+        Some(user_id) => crate::tasks::node(conn, user_id, task_id),
+        None => Ok(None),
+    }
+}
+
+/// Fills the leaf fields, and the step fields older clients read from them.
+fn with_leaf(conn: &Connection, mut s: Session) -> rusqlite::Result<Session> {
+    let Some(leaf) = s.leaf_id else { return Ok(s) };
+    s.leaf_title = conn
+        .query_row("SELECT title FROM tasks WHERE id = ?1", [leaf], |r| r.get(0))
+        .optional()?;
+    let tree = match s.task_id {
+        Some(t) => session_tree(conn, t)?,
+        None => None,
+    };
+    let Some(tree) = tree else {
+        s.leaf_path = s.leaf_title.iter().cloned().collect();
+        return Ok(s);
+    };
+    s.leaf_path = tree.path_to(leaf).unwrap_or_else(|| s.leaf_title.iter().cloned().collect());
+    if leaf != tree.task.id {
+        let leaves = tree.leaves();
+        s.leaf_count = Some(leaves.len() as i64);
+        s.leaf_index = leaves.iter().position(|l| l.id == leaf).map(|i| i as i64 + 1);
+        s.step_index = s.leaf_index;
+        s.step_count = s.leaf_count;
+        s.step_name.clone_from(&s.leaf_title);
+    }
+    Ok(s)
+}
+
+/// The leaf a session on `task_id` runs: `leaf_id` when it lies under it (its
+/// first open leaf when it has parts), else the `step_index`-th leaf an older
+/// client named, else the first open one. A leaf alone runs under its root.
+fn resolve_leaf(
+    conn: &Connection,
+    user_id: i64,
+    task_id: Option<i64>,
+    leaf_id: Option<i64>,
+    step_index: Option<i64>,
+) -> Result<(Option<i64>, Option<i64>), StartError> {
+    let task_id = match (task_id, leaf_id) {
+        (None, None) => return Ok((None, None)),
+        (Some(t), _) => t,
+        (None, Some(l)) => match crate::tasks::get(conn, user_id, l)? {
+            Some(leaf) => leaf.root_id,
+            None => return Err(StartError::Invalid(format!("no task {l}"))),
+        },
+    };
+    let Some(tree) = crate::tasks::node(conn, user_id, task_id)? else {
+        return Err(StartError::Invalid(format!("no task {task_id}")));
+    };
+    let leaf = match leaf_id {
+        Some(l) => {
+            let Some(at) = tree.find(l) else {
+                return Err(StartError::Invalid(format!("task {l} is not under task {task_id}")));
+            };
+            at.first_open_leaf().map_or(l, |t| t.id)
+        }
+        None => match step_index.filter(|i| *i >= 1).and_then(|i| tree.leaves().get(i as usize - 1).map(|t| t.id)) {
+            Some(l) => l,
+            None => tree.first_open_leaf().map_or(task_id, |t| t.id),
+        },
+    };
+    Ok((Some(task_id), Some(leaf)))
 }
 
 fn since(at: &str, now: jiff::Timestamp) -> i64 {
@@ -110,6 +203,7 @@ impl Session {
 #[derive(Debug, Default)]
 pub struct NewSession {
     pub task_id: Option<i64>,
+    pub leaf_id: Option<i64>,
     pub event_id: Option<i64>,
     pub title: String,
     pub planned_min: Option<i64>,
@@ -139,7 +233,9 @@ pub fn open(conn: &Connection, user_id: i64) -> rusqlite::Result<Option<Session>
         [user_id],
         row_to_session,
     )
-    .optional()
+    .optional()?
+    .map(|s| with_leaf(conn, s))
+    .transpose()
 }
 
 /// The user's open session, only when it is the one the client named.
@@ -183,11 +279,7 @@ pub fn start(
     if new.step_index.is_some_and(|i| i < 0) {
         return Err(StartError::Invalid("step_index must not be negative".into()));
     }
-    if let Some(id) = new.task_id {
-        if crate::tasks::get(conn, user_id, id)?.is_none() {
-            return Err(StartError::Invalid(format!("no task {id}")));
-        }
-    }
+    let (task_id, leaf_id) = resolve_leaf(conn, user_id, new.task_id, new.leaf_id, new.step_index)?;
     if let Some(id) = new.event_id {
         if crate::plan::event_gate(conn, user_id, id).map_err(StartError::Other)?.is_none() {
             return Err(StartError::Invalid(format!("no event {id}")));
@@ -210,11 +302,11 @@ pub fn start(
         "INSERT INTO work_sessions
             (user_id, task_id, event_id, title, planned_min, started_at, mode, work_min,
              break_min, phase, phase_started_at, round, step_index, step_count, step_name,
-             notes, conversation_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'work', ?6, 1, ?10, ?11, ?12, ?13, ?14)",
+             notes, conversation_id, leaf_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'work', ?6, 1, ?10, ?11, ?12, ?13, ?14, ?15)",
         rusqlite::params![
             user_id,
-            new.task_id,
+            task_id,
             new.event_id,
             title,
             new.planned_min,
@@ -227,6 +319,7 @@ pub fn start(
             new.step_name,
             notes,
             conversation_id,
+            leaf_id,
         ],
     )?;
     let id = conn.last_insert_rowid();
@@ -237,7 +330,8 @@ pub fn start(
     crate::log::record(conn, Some(user_id), "work_session_started", &format!("session {id} {title:?}"))
         .map_err(StartError::Other)?;
     tx.commit()?;
-    Ok(conn.query_row(&format!("SELECT {COLS} FROM work_sessions WHERE id = ?1"), [id], row_to_session)?)
+    let session = conn.query_row(&format!("SELECT {COLS} FROM work_sessions WHERE id = ?1"), [id], row_to_session)?;
+    Ok(with_leaf(conn, session)?)
 }
 
 /// Halfway through, or 25 minutes in, whichever comes first.
@@ -387,8 +481,8 @@ fn close(
         "UPDATE work_sessions SET ended_at = ?1, outcome = ?2 WHERE id = ?3",
         (now.to_string(), outcome, session.id),
     )?;
-    if let Some(task_id) = session.task_id {
-        book_minutes(conn, task_id, session.elapsed_ms(now) / 60_000)?;
+    if let Some(node) = session.leaf_id.or(session.task_id) {
+        book_minutes(conn, node, (session.elapsed_ms(now) - session.leaf_from_ms) / 60_000)?;
     }
     let dropped = conn.execute(
         "UPDATE events SET status = 'dropped', decided_at = ?1
@@ -470,15 +564,16 @@ pub fn discard(
     Ok(true)
 }
 
-/// Books the minutes worked against the task, and against its parent as well
-/// when the session ran a step.
+/// Books the minutes worked against the node and every node above it.
 fn book_minutes(conn: &Connection, task_id: i64, minutes: i64) -> rusqlite::Result<()> {
     if minutes <= 0 {
         return Ok(());
     }
     conn.execute(
-        "UPDATE tasks SET actual_min = COALESCE(actual_min, 0) + ?2
-         WHERE id = ?1 OR id = (SELECT parent_id FROM tasks WHERE id = ?1)",
+        "WITH RECURSIVE up(id) AS (
+             SELECT ?1 UNION ALL SELECT t.parent_id FROM tasks t JOIN up ON t.id = up.id
+             WHERE t.parent_id IS NOT NULL)
+         UPDATE tasks SET actual_min = COALESCE(actual_min, 0) + ?2 WHERE id IN up",
         (task_id, minutes),
     )?;
     Ok(())
@@ -600,22 +695,87 @@ pub fn resume(
     Ok(open_named(conn, user_id, id)?)
 }
 
-/// Where in the task's steps the session has reached.
+/// Where in the task's steps the session has reached, as an older client
+/// counts them: the `step_index`-th leaf under the session's task.
 pub fn set_step(
     conn: &Connection,
     user_id: i64,
     id: i64,
     step_index: i64,
     step_name: &str,
-) -> rusqlite::Result<Option<Session>> {
-    if open_named(conn, user_id, id)?.is_none() {
-        return Ok(None);
+    now: jiff::Timestamp,
+) -> Result<Option<Session>, StartError> {
+    let Some(session) = open_named(conn, user_id, id)? else { return Ok(None) };
+    let leaf = match session.task_id {
+        Some(t) => crate::tasks::node(conn, user_id, t)?.and_then(|tree| {
+            let leaves = tree.leaves();
+            usize::try_from(step_index).ok().filter(|i| *i >= 1).and_then(|i| leaves.get(i - 1).map(|l| l.id))
+        }),
+        None => None,
+    };
+    if leaf.is_some() {
+        return advance_leaf(conn, user_id, id, leaf, now);
     }
     conn.execute(
         "UPDATE work_sessions SET step_index = ?1, step_name = ?2 WHERE id = ?3",
         (step_index, step_name, id),
     )?;
-    open_named(conn, user_id, id)
+    Ok(open_named(conn, user_id, id)?)
+}
+
+/// Moves the session to `leaf_id`, or to the next open leaf after the current
+/// one under the session's task, never past it. The minutes on the leaf it
+/// leaves are booked to that leaf. With nothing open after it, the session
+/// stays where it is.
+pub fn advance_leaf(
+    conn: &Connection,
+    user_id: i64,
+    id: i64,
+    leaf_id: Option<i64>,
+    now: jiff::Timestamp,
+) -> Result<Option<Session>, StartError> {
+    let Some(session) = open_named(conn, user_id, id)? else { return Ok(None) };
+    let Some(task_id) = session.task_id else {
+        return match leaf_id {
+            Some(_) => Err(StartError::Invalid("this session runs no task".into())),
+            None => Ok(Some(session)),
+        };
+    };
+    let Some(tree) = crate::tasks::node(conn, user_id, task_id)? else { return Ok(Some(session)) };
+    let target = if let Some(l) = leaf_id {
+        let Some(at) = tree.find(l) else {
+            return Err(StartError::Invalid(format!("task {l} is not under task {task_id}")));
+        };
+        at.first_open_leaf().map_or(l, |t| t.id)
+    } else {
+        let leaves = tree.leaves();
+        let after = session
+            .leaf_id
+            .and_then(|cur| leaves.iter().position(|l| l.id == cur))
+            .map_or(0, |at| at + 1);
+        let open = |t: &&&crate::tasks::Task| matches!(t.state.as_str(), "open" | "in_progress");
+        let Some(next) = leaves[after.min(leaves.len())..].iter().find(open) else {
+            return Ok(Some(session));
+        };
+        next.id
+    };
+
+    if Some(target) == session.leaf_id {
+        return Ok(Some(session));
+    }
+    let tx = conn.is_autocommit().then(|| conn.unchecked_transaction()).transpose()?;
+    let minutes = (session.elapsed_ms(now) - session.leaf_from_ms).max(0) / 60_000;
+    if let Some(node) = session.leaf_id.or(session.task_id) {
+        book_minutes(conn, node, minutes)?;
+    }
+    conn.execute(
+        "UPDATE work_sessions SET leaf_id = ?1, leaf_from_ms = leaf_from_ms + ?2 WHERE id = ?3",
+        (target, minutes * 60_000, id),
+    )?;
+    if let Some(tx) = tx {
+        tx.commit()?;
+    }
+    Ok(open_named(conn, user_id, id)?)
 }
 
 /// Cuts a break short and starts the next round now; outside a break there is
@@ -671,7 +831,7 @@ pub fn tick(conn: &Connection, config_dir: &Path, now: jiff::Timestamp) -> Resul
          WHERE w.ended_at IS NULL AND w.mode = 'pomodoro' AND w.paused_at IS NULL"
     ))?;
     let running: Vec<(Session, i64, String)> = stmt
-        .query_map([], |r| Ok((row_to_session(r)?, r.get(20)?, r.get(21)?)))?
+        .query_map([], |r| Ok((row_to_session(r)?, r.get(22)?, r.get(23)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     drop(stmt);
 
@@ -811,7 +971,7 @@ pub fn planned_end(conn: &Connection, config_dir: &Path, now: jiff::Timestamp) -
            AND w.mode = 'single' AND w.end_notified_at IS NULL"
     ))?;
     let due: Vec<(Session, i64, String)> = stmt
-        .query_map([], |r| Ok((row_to_session(r)?, r.get(20)?, r.get(21)?)))?
+        .query_map([], |r| Ok((row_to_session(r)?, r.get(22)?, r.get(23)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?
         .into_iter()
         .filter(|(s, _, _)| s.elapsed_ms(now) >= s.planned_min.unwrap_or_default() * 60_000)
@@ -858,7 +1018,7 @@ pub fn overrun(conn: &Connection, config_dir: &Path, now: jiff::Timestamp) -> Re
          WHERE w.ended_at IS NULL AND w.paused_at IS NULL AND w.planned_min IS NOT NULL"
     ))?;
     let open: Vec<(Session, i64, String, Option<String>)> = stmt
-        .query_map([], |r| Ok((row_to_session(r)?, r.get(20)?, r.get(21)?, r.get(22)?)))?
+        .query_map([], |r| Ok((row_to_session(r)?, r.get(22)?, r.get(23)?, r.get(24)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     drop(stmt);
 
@@ -967,7 +1127,7 @@ pub fn close_abandoned(
          JOIN users u ON u.id = w.user_id WHERE w.ended_at IS NULL"
     ))?;
     let open: Vec<(Session, i64, String)> = stmt
-        .query_map([], |r| Ok((row_to_session(r)?, r.get(20)?, r.get(21)?)))?
+        .query_map([], |r| Ok((row_to_session(r)?, r.get(22)?, r.get(23)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     drop(stmt);
 
@@ -1133,6 +1293,92 @@ mod tests {
         let outline = new_task(&conn, uid, "outline", Some(essay));
         work_on(&conn, &tmp, uid, outline, "2026-09-17T09:20:00Z");
         assert_eq!((actual(&conn, outline), actual(&conn, essay)), (Some(20), Some(20)));
+    }
+
+    fn start_on(conn: &Connection, tmp: &tempfile::TempDir, uid: i64, task_id: i64, leaf_id: Option<i64>) -> Session {
+        start(
+            conn,
+            tmp.path(),
+            uid,
+            "aki",
+            NewSession { title: "course".into(), task_id: Some(task_id), leaf_id, ..Default::default() },
+            at("2026-09-17T09:00:00Z"),
+        )
+        .unwrap()
+    }
+
+    /// course > [unit 1 > [a, b], unit 2 > [c > [d]]], with `a` done.
+    fn course(conn: &Connection, uid: i64) -> [i64; 7] {
+        let course = new_task(conn, uid, "course", None);
+        let u1 = new_task(conn, uid, "unit 1", Some(course));
+        let a = new_task(conn, uid, "a", Some(u1));
+        let b = new_task(conn, uid, "b", Some(u1));
+        let u2 = new_task(conn, uid, "unit 2", Some(course));
+        let c = new_task(conn, uid, "c", Some(u2));
+        let d = new_task(conn, uid, "d", Some(c));
+        crate::tasks::update(
+            conn,
+            uid,
+            a,
+            &crate::tasks::TaskPatch { state: Some("done".into()), ..Default::default() },
+        )
+        .unwrap();
+        [course, u1, a, b, u2, c, d]
+    }
+
+    #[test]
+    fn a_session_starts_on_the_first_open_leaf_and_reports_where_it_is() {
+        let (conn, tmp, uid) = env();
+        let [course, u1, a, b, _, _, d] = course(&conn, uid);
+        let s = start_on(&conn, &tmp, uid, course, None);
+        assert_eq!(s.leaf_id, Some(b));
+        assert_eq!(s.leaf_title.as_deref(), Some("b"));
+        assert_eq!(s.leaf_path, ["course", "unit 1", "b"]);
+        assert_eq!((s.leaf_index, s.leaf_count), (Some(2), Some(3)), "a, b, d are the leaves");
+        assert_eq!((s.step_index, s.step_name.as_deref()), (Some(2), Some("b")));
+
+        let s = start_on(&conn, &tmp, uid, course, Some(d));
+        assert_eq!((s.leaf_id, s.leaf_index), (Some(d), Some(3)));
+        let s = start_on(&conn, &tmp, uid, u1, Some(a));
+        assert_eq!(s.leaf_path, ["unit 1", "a"]);
+        let other = new_task(&conn, uid, "other", None);
+        let refused = start(
+            &conn,
+            tmp.path(),
+            uid,
+            "aki",
+            NewSession { title: "x".into(), task_id: Some(other), leaf_id: Some(b), ..Default::default() },
+            at("2026-09-17T09:00:00Z"),
+        );
+        assert!(matches!(refused, Err(StartError::Invalid(_))), "a leaf outside the task is refused");
+        let s = start_on(&conn, &tmp, uid, other, None);
+        assert_eq!((s.leaf_id, s.leaf_index, s.leaf_path.clone()), (Some(other), None, vec!["other".to_string()]));
+    }
+
+    #[test]
+    fn advance_walks_to_the_next_open_leaf_and_never_past_the_started_node() {
+        let (conn, tmp, uid) = env();
+        let [course, u1, _, b, _, _, d] = course(&conn, uid);
+        let s = start_on(&conn, &tmp, uid, course, None);
+        let s = advance_leaf(&conn, uid, s.id, None, at("2026-09-17T09:10:00Z")).unwrap().unwrap();
+        assert_eq!(s.leaf_id, Some(d), "past unit 1, into unit 2 and down to its leaf");
+        assert_eq!(s.leaf_path, ["course", "unit 2", "c", "d"]);
+        let same = advance_leaf(&conn, uid, s.id, None, at("2026-09-17T09:12:00Z")).unwrap().unwrap();
+        assert_eq!(same.leaf_id, Some(d), "nothing open follows the last leaf");
+        let back = advance_leaf(&conn, uid, s.id, Some(b), at("2026-09-17T09:15:00Z")).unwrap().unwrap();
+        assert_eq!(back.leaf_id, Some(b));
+        end(&conn, tmp.path(), uid, "aki", None, "stopped", at("2026-09-17T09:20:00Z")).unwrap();
+        assert_eq!(actual(&conn, b), Some(15), "b held 09:00-09:10 and 09:15-09:20");
+        assert_eq!(actual(&conn, d), Some(5));
+        assert_eq!(actual(&conn, u1), Some(15));
+        assert_eq!(actual(&conn, course), Some(20), "every minute reaches the root once");
+
+        let s = start_on(&conn, &tmp, uid, u1, None);
+        assert_eq!(s.leaf_id, Some(b));
+        let stay = advance_leaf(&conn, uid, s.id, None, at("2026-09-17T09:30:00Z")).unwrap().unwrap();
+        assert_eq!(stay.leaf_id, Some(b), "a session on unit 1 never walks into unit 2");
+        assert!(matches!(advance_leaf(&conn, uid, s.id, Some(d), at("2026-09-17T09:31:00Z")), Err(StartError::Invalid(_))));
+        assert!(advance_leaf(&conn, uid, s.id + 9, None, at("2026-09-17T09:31:00Z")).unwrap().is_none());
     }
 
     #[test]
@@ -1636,9 +1882,9 @@ mod tests {
         assert_eq!((session.step_index, session.step_count), (Some(0), Some(3)));
         assert_eq!(session.notes, "quietly");
 
-        let moved = set_step(&conn, uid, session.id, 1, "the second page").unwrap().unwrap();
+        let moved = set_step(&conn, uid, session.id, 1, "the second page", jiff::Timestamp::now()).unwrap().unwrap();
         assert_eq!((moved.step_index, moved.step_name.as_deref()), (Some(1), Some("the second page")));
-        assert!(set_step(&conn, uid, session.id + 9, 2, "nowhere").unwrap().is_none());
+        assert!(set_step(&conn, uid, session.id + 9, 2, "nowhere", jiff::Timestamp::now()).unwrap().is_none());
     }
 
     #[test]

@@ -196,6 +196,7 @@ fn start_block(
         event_id: Some(event_id),
         title,
         planned_min: planned,
+        leaf_id: None,
         step_index: None,
         step_count: None,
         step_name: None,

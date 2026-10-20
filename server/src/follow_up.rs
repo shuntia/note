@@ -210,8 +210,8 @@ fn tasks_of(conn: &Connection, outreach_id: i64) -> rusqlite::Result<Vec<i64>> {
     rows
 }
 
-/// Whether the user moved between `from` and `until`: on one of `tasks` (done,
-/// changed, or a work session started on it or a step of it), or with none
+/// Whether the user moved between `from` and `until`: anywhere in the tree of one
+/// of `tasks` (done, changed, or a work session started in it), or with none
 /// named, by finishing any task or starting any work session.
 fn acted(conn: &Connection, user_id: i64, tasks: &[i64], from: &str, until: &str) -> rusqlite::Result<bool> {
     if tasks.is_empty() {
@@ -226,11 +226,12 @@ fn acted(conn: &Connection, user_id: i64, tasks: &[i64], from: &str, until: &str
     }
     for &task in tasks {
         let moved: bool = conn.query_row(
-            "SELECT EXISTS (SELECT 1 FROM tasks WHERE user_id = ?1 AND (id = ?2 OR parent_id = ?2)
+            "SELECT EXISTS (SELECT 1 FROM tasks WHERE user_id = ?1
+                            AND root_id = (SELECT root_id FROM tasks WHERE id = ?2)
                             AND ((completed_at > ?3 AND completed_at <= ?4) OR (updated_at > ?3 AND updated_at <= ?4)))
-                 OR EXISTS (SELECT 1 FROM work_sessions w WHERE w.user_id = ?1
-                            AND w.started_at > ?3 AND w.started_at <= ?4
-                            AND (w.task_id = ?2 OR w.task_id IN (SELECT id FROM tasks WHERE parent_id = ?2)))",
+                 OR EXISTS (SELECT 1 FROM work_sessions w JOIN tasks t ON t.id = w.task_id
+                            WHERE w.user_id = ?1 AND w.started_at > ?3 AND w.started_at <= ?4
+                            AND t.root_id = (SELECT root_id FROM tasks WHERE id = ?2))",
             (user_id, task, from, until),
             |r| r.get(0),
         )?;
