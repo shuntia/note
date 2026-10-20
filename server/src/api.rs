@@ -910,7 +910,7 @@ fn log_brief_error(state: &AppState, user_id: i64, detail: &str) {
 }
 
 /// The task as DATA for the model: everything the importer wrote, plus the
-/// steps that already exist so a re-brief knows not to try splitting again.
+/// children that already exist so a re-brief knows not to add more.
 fn brief_message(node: &crate::tasks::TaskNode, context: &str, tz: &jiff::tz::TimeZone) -> String {
     let t = &node.task;
     let mut m = format!(
@@ -921,7 +921,7 @@ fn brief_message(node: &crate::tasks::TaskNode, context: &str, tz: &jiff::tz::Ti
         let _ = writeln!(m, "Due: {due}");
     }
     if !node.children.is_empty() {
-        m.push_str("Steps:\n");
+        m.push_str("Children:\n");
         for c in &node.children {
             let _ = writeln!(m, "- {}", c.task.title);
         }

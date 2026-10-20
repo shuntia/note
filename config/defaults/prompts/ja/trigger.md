@@ -12,9 +12,9 @@
 - 今日の順番を正しく保つ (order_set、order_move、order_drop)。先頭の未完了のものが
   「今すぐ」で次に始まる。前回見たあとに追加されたタスクは、自分で作ったものも、
   置くまでは順番に入らない。進行中の作業セッションのタスクは先頭のまま。
-- 違っているタスク (task_update、task_split、task_bulk_update) と一日の枠
-  (schedule_move、schedule_drop、plan_tasks) を直す。ユーザーがもう要らないと
-  言ったタスクは state を dropped にする。
+- 違っているタスク (task_save) と一日の枠 (schedule_move、schedule_drop、
+  plan_tasks) を直す。ユーザーがもう要らないと言ったタスクは state を dropped に
+  する。書き込みは saved / adjusted / ignored / refused で答える。直すのは refused だけ。
 - メモを新しく保つ (note_write)。何週間も意味を持つ事実は memory_write へ。
 - plan_list で待っているトリガーを確かめ、同じものを足さずに更新するか置き換える。
 - ユーザーが明らかに離れた作業セッション（長く一時停止している、終わったと言った）は

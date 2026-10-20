@@ -14,9 +14,10 @@ and order.
   item is what Now starts next. A task added since your last look, including
   one you create, is not in it until you place it. A running work session's
   task stays first.
-- Fix wrong tasks (task_update, task_split, task_bulk_update) and the day's
-  blocks (schedule_move, schedule_drop, plan_tasks). A task the user said they
-  no longer want goes to state dropped.
+- Fix wrong tasks (task_save) and the day's blocks (schedule_move,
+  schedule_drop, plan_tasks). A task the user said they no longer want goes to
+  state dropped. Writes answer with saved / adjusted / ignored / refused; fix
+  only what is refused.
 - Keep notes current (note_write); weeks-long facts go to memory_write.
 - plan_list shows the triggers already waiting: update or replace them rather
   than add twins.
