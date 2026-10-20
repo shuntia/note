@@ -127,32 +127,32 @@ async fn duration_is_five_minute_granular_and_user_sourced() {
 }
 
 #[tokio::test]
-async fn grandchild_task_is_rejected() {
+async fn a_tree_nests_four_levels_below_its_root_and_refuses_cycles() {
     let (app, cookie, _tmp) = app_with_user().await;
-    post(&app, &cookie, "/api/tasks", r#"{"title":"parent"}"#).await;
-    let (status, child) = post(
-        &app,
-        &cookie,
-        "/api/tasks",
-        r#"{"title":"step","parent_id":1,"duration_min":5}"#,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(child["parent_id"], 1);
+    post(&app, &cookie, "/api/tasks", r#"{"title":"course"}"#).await;
+    for (id, title) in [(1, "unit"), (2, "lesson"), (3, "part"), (4, "bit")] {
+        let (status, made) =
+            post(&app, &cookie, "/api/tasks", &format!(r#"{{"title":"{title}","parent_id":{id}}}"#)).await;
+        assert_eq!(status, StatusCode::OK, "{made}");
+        assert_eq!(made["depth"], id);
+        assert_eq!(made["root_id"], 1);
+    }
+    let (status, _) = post(&app, &cookie, "/api/tasks", r#"{"title":"crumb","parent_id":5}"#).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "nothing sits five levels down");
 
-    let (status, _) =
-        post(&app, &cookie, "/api/tasks", r#"{"title":"deeper","parent_id":2}"#).await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-
-    post(&app, &cookie, "/api/tasks", r#"{"title":"loose"}"#).await;
-    let (status, _) = patch_task(&app, &cookie, 3, r#"{"parent_id":2}"#).await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     let (status, _) = patch_task(&app, &cookie, 1, r#"{"parent_id":3}"#).await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "a task cannot sit under its own part");
     let (status, _) = patch_task(&app, &cookie, 3, r#"{"parent_id":3}"#).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     let (status, _) = patch_task(&app, &cookie, 3, r#"{"parent_id":999}"#).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let (status, _) = patch_task(&app, &cookie, 2, r#"{"parent_id":5}"#).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+    let v = list(&app, &cookie).await;
+    let deepest = &v[0]["children"][0]["children"][0]["children"][0]["children"][0];
+    assert_eq!(deepest["title"], "bit");
+    assert_eq!(deepest["depth"], 4);
 }
 
 #[tokio::test]
@@ -260,7 +260,7 @@ async fn split_creates_steps_and_totals_the_parent_duration() {
     let (status, node) = post(&app, &cookie, "/api/tasks/1/split", LANDLORD_STEPS).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(node["duration_min"], 20);
-    assert_eq!(node["duration_source"], "user");
+    assert_eq!(node["duration_source"], "derived");
     assert_eq!(node["children"].as_array().unwrap().len(), 3);
     assert_eq!(node["children"][2]["duration_min"], 10);
 
@@ -270,8 +270,11 @@ async fn split_creates_steps_and_totals_the_parent_duration() {
     assert_eq!(node["children"].as_array().unwrap().len(), 5);
     assert_eq!(node["children"][4]["title"], "b");
     assert_eq!(node["duration_min"], 30);
-    let (status, _) = post(&app, &cookie, "/api/tasks/2/split", two).await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "a step cannot be split");
+    let (status, step) = post(&app, &cookie, "/api/tasks/2/split", two).await;
+    assert_eq!(status, StatusCode::OK, "a step splits into parts of its own");
+    assert_eq!(step["depth"], 1);
+    assert_eq!(step["children"][0]["depth"], 2);
+    assert_eq!(list(&app, &cookie).await[0]["duration_min"], 30 - 5 + 10);
 
     post(&app, &cookie, "/api/tasks", r#"{"title":"other"}"#).await;
     let (status, _) = post(&app, &cookie, "/api/tasks/7/split", r#"{"steps":[]}"#).await;
@@ -417,34 +420,39 @@ async fn reopening_a_done_now_task_demotes_the_newest_instead_of_failing() {
 }
 
 #[tokio::test]
-async fn a_step_can_never_be_in_now() {
+async fn a_step_in_now_takes_the_place_of_its_task() {
     let (app, cookie, _tmp) = app_with_user().await;
-    post(&app, &cookie, "/api/tasks", r#"{"title":"email landlord"}"#).await;
+    post(&app, &cookie, "/api/tasks", r#"{"title":"email landlord","is_now":true}"#).await;
     let (status, step) =
         post(&app, &cookie, "/api/tasks", r#"{"title":"find the thread","parent_id":1}"#).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(step["is_now"], false);
 
-    let (status, _) = patch_task(&app, &cookie, 2, r#"{"is_now":true}"#).await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    let (status, _) = post(
-        &app,
-        &cookie,
-        "/api/tasks",
-        r#"{"title":"another step","parent_id":1,"is_now":true}"#,
-    )
-    .await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let (status, t) = patch_task(&app, &cookie, 2, r#"{"is_now":true}"#).await;
+    assert_eq!(status, StatusCode::OK, "{t}");
+    assert_eq!(t["is_now"], true);
+    assert_eq!(t["adjusted"][0]["id"], 1);
+    assert_eq!(t["adjusted"][0]["field"], "is_now");
+    assert_eq!(t["adjusted"][0]["by"], 2);
+    let v = list(&app, &cookie).await;
+    assert_eq!(v[0]["is_now"], false);
+
+    let (status, t) = patch_task(&app, &cookie, 1, r#"{"is_now":true}"#).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(t["adjusted"][0]["id"], 2, "the newer one always wins the place");
 
     // a task in Now that becomes a step leaves Now with the move
     post(&app, &cookie, "/api/tasks", r#"{"title":"loose","is_now":true}"#).await;
-    let (status, t) = patch_task(&app, &cookie, 3, r#"{"parent_id":1}"#).await;
+    let (status, t) = patch_task(&app, &cookie, 3, r#"{"parent_id":2}"#).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(t["is_now"], false);
-    assert_eq!(t["parent_id"], 1);
+    assert_eq!(t["parent_id"], 2);
+    assert_eq!(t["depth"], 2);
 
-    let v = list(&app, &cookie).await;
-    assert_eq!(v[0]["children"][0]["is_now"], false);
+    for bad in ["\"friday\"", "\"2026-09-19T15:00:00Z\"", "\"2026-02-30\""] {
+        let (status, _) = patch_task(&app, &cookie, 1, &format!(r#"{{"due_on":{bad}}}"#)).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "accepted {bad}");
+    }
 }
 
 #[tokio::test]
@@ -664,25 +672,64 @@ async fn a_due_is_a_whole_day_or_a_moment_never_both() {
 }
 
 #[tokio::test]
-async fn a_step_never_carries_a_due_date_of_its_own() {
+async fn a_step_due_after_its_task_is_clamped_and_says_so() {
     let (app, cookie, _tmp) = app_with_user().await;
-    post(&app, &cookie, "/api/tasks", r#"{"title":"essay"}"#).await;
-    let (status, _) = post(
+    post(&app, &cookie, "/api/tasks", r#"{"title":"Unit 1","due_on":"2026-11-06"}"#).await;
+    let (status, made) = post(
         &app,
         &cookie,
         "/api/tasks",
-        r#"{"title":"draft","parent_id":1,"due_at":"2026-09-19T23:59:00Z"}"#,
+        r#"{"title":"Lesson 3","parent_id":1,"due_on":"2026-11-20"}"#,
     )
     .await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(status, StatusCode::OK, "{made}");
+    assert_eq!(made["due_on"], "2026-11-06");
+    assert_eq!(made["adjusted"][0]["field"], "due");
+    assert_eq!(made["adjusted"][0]["to"], "2026-11-06");
+    assert_eq!(made["adjusted"][0]["by_title"], "Unit 1");
 
-    post(&app, &cookie, "/api/tasks", r#"{"title":"draft","parent_id":1}"#).await;
-    let (status, _) = patch_task(&app, &cookie, 2, r#"{"due_at":"2026-09-19T23:59:00Z"}"#).await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    post(&app, &cookie, "/api/tasks", r#"{"title":"Lesson 4","parent_id":1,"due_on":"2026-11-02"}"#).await;
+    let (status, t) = patch_task(&app, &cookie, 1, r#"{"due_on":"2026-11-01"}"#).await;
+    assert_eq!(status, StatusCode::OK);
+    let clamped: Vec<i64> = t["adjusted"].as_array().unwrap().iter().map(|a| a["id"].as_i64().unwrap()).collect();
+    assert_eq!(clamped, [2, 3], "each descendant past the new due is reported");
 
-    post(&app, &cookie, "/api/tasks", r#"{"title":"loose","due_at":"2026-09-19T23:59:00Z"}"#).await;
-    let (status, _) = patch_task(&app, &cookie, 3, r#"{"parent_id":1}"#).await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "a task with a due date cannot become a step");
+    let v = list(&app, &cookie).await;
+    let lesson = &v[0]["children"][0];
+    assert_eq!(lesson["due_on"], "2026-11-01");
+    assert_eq!(lesson["due_from"], 2);
+    let (status, _) = patch_task(&app, &cookie, 2, r#"{"due_at":null}"#).await;
+    assert_eq!(status, StatusCode::OK);
+    let lesson = &list(&app, &cookie).await[0]["children"][0];
+    assert!(lesson["due_on"].is_null());
+    assert_eq!(lesson["effective_due_on"], "2026-11-01");
+    assert_eq!(lesson["due_from"], 1);
+}
+
+#[tokio::test]
+async fn a_task_is_created_with_its_children_nested() {
+    let (app, cookie, _tmp) = app_with_user().await;
+    let (status, made) = post(
+        &app,
+        &cookie,
+        "/api/tasks",
+        r#"{"title":"course","children":[
+            {"title":"unit 1","children":[{"title":"a","duration_min":20},{"title":"b","duration_min":25}]},
+            {"title":"unit 2","duration_min":30}]}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{made}");
+    assert_eq!(made["duration_min"], 75);
+    assert_eq!(made["duration_source"], "derived");
+    assert_eq!(made["children"][0]["duration_min"], 45);
+    assert_eq!(made["children"][0]["children"][1]["title"], "b");
+    assert_eq!(made["children"][0]["children"][1]["position"], 1);
+
+    let (status, t) = patch_task(&app, &cookie, 5, r#"{"position":0}"#).await;
+    assert_eq!(status, StatusCode::OK);
+    let v = list(&app, &cookie).await;
+    let titles: Vec<&str> = v[0]["children"].as_array().unwrap().iter().map(|c| c["title"].as_str().unwrap()).collect();
+    assert_eq!(titles, ["unit 2", "unit 1"], "{t}");
 }
 
 #[tokio::test]

@@ -138,7 +138,7 @@ async fn a_bearer_token_briefs_a_task() {
 
     let task = &v["task"];
     assert!(task["description"].as_str().unwrap().starts_with("Read chapter 4"));
-    assert_eq!(task["duration_source"], "agent");
+    assert_eq!(task["duration_source"], "derived");
     assert_eq!(task["duration_min"], 45);
     assert_eq!(task["state"], "open");
     assert_eq!(task["children"].as_array().unwrap().len(), 2);

@@ -83,6 +83,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/sessions/{id}/pause", post(work_session_pause))
         .route("/api/sessions/{id}/resume", post(work_session_resume))
         .route("/api/sessions/{id}/step", post(work_session_step))
+        .route("/api/sessions/{id}/advance", post(work_session_advance))
         .route("/api/sessions/{id}/skip_break", post(work_session_skip_break))
         .route("/api/ws", get(ws_connect))
         .route("/api/call/ws", get(call_ws))
@@ -703,10 +704,10 @@ async fn tasks_create(
     req.zone = Some(tz.clone());
     let conn = state.db();
     let source = default_source(&user.via);
-    match crate::tasks::create(&conn, user.id, req, source, crate::tasks::Actor::User) {
-        Ok(mut t) => {
-            let _ = crate::tasks::stamp_schedule(&conn, user.id, &tz, std::iter::once(&mut t));
-            Json(t).into_response()
+    match crate::tasks::create_reported(&conn, user.id, req, source, crate::tasks::Actor::User) {
+        Ok(mut made) => {
+            let _ = crate::tasks::stamp_schedule(&conn, user.id, &tz, std::iter::once(&mut made.node.task));
+            Json(made).into_response()
         }
         Err(e) => task_error(e),
     }
@@ -922,7 +923,7 @@ fn brief_message(node: &crate::tasks::TaskNode, context: &str, tz: &jiff::tz::Ti
     if !node.children.is_empty() {
         m.push_str("Steps:\n");
         for c in &node.children {
-            let _ = writeln!(m, "- {}", c.title);
+            let _ = writeln!(m, "- {}", c.task.title);
         }
     }
     if !context.trim().is_empty() {
@@ -2963,6 +2964,8 @@ struct NewWorkSession {
     #[serde(default)]
     task_id: Option<i64>,
     #[serde(default)]
+    leaf_id: Option<i64>,
+    #[serde(default)]
     event_id: Option<i64>,
     title: String,
     #[serde(default)]
@@ -3008,6 +3011,7 @@ async fn work_session_start(
         &user.username,
         crate::work::NewSession {
             task_id: req.task_id,
+            leaf_id: req.leaf_id,
             event_id: req.event_id,
             title: req.title,
             planned_min: req.planned_min,
@@ -3114,7 +3118,43 @@ async fn work_session_step(
         );
     }
     let conn = state.db();
-    session_reply(crate::work::set_step(&conn, user.id, id, req.step_index, &req.step_name))
+    leaf_reply(crate::work::set_step(&conn, user.id, id, req.step_index, &req.step_name, jiff::Timestamp::now()))
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct SessionAdvance {
+    #[serde(default)]
+    leaf_id: Option<i64>,
+}
+
+fn leaf_reply(moved: Result<Option<crate::work::Session>, crate::work::StartError>) -> axum::response::Response {
+    match moved {
+        Err(crate::work::StartError::Invalid(m)) => {
+            (StatusCode::UNPROCESSABLE_ENTITY, Json(serde_json::json!({ "error": m }))).into_response()
+        }
+        other => session_reply(other),
+    }
+}
+
+/// Moves the session to the leaf named, or to the next open one; the same
+/// session back when nothing open follows.
+async fn work_session_advance(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    let req: SessionAdvance = if body.iter().all(u8::is_ascii_whitespace) {
+        SessionAdvance::default()
+    } else {
+        match serde_json::from_slice(&body) {
+            Ok(req) => req,
+            Err(e) => return unprocessable_field("leaf_id", &e.to_string()),
+        }
+    };
+    let conn = state.db();
+    leaf_reply(crate::work::advance_leaf(&conn, user.id, id, req.leaf_id, jiff::Timestamp::now()))
 }
 
 async fn work_session_skip_break(

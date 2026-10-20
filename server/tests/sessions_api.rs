@@ -272,6 +272,50 @@ async fn the_step_the_session_is_on_comes_back_with_the_session() {
 }
 
 #[tokio::test]
+async fn a_session_walks_the_leaves_of_its_tree() {
+    let w = world(Vec::new()).await;
+    let (status, made) = post(
+        &w,
+        "/api/tasks",
+        r#"{"title":"essay","children":[
+            {"title":"research","children":[{"title":"sources"},{"title":"notes"}]},
+            {"title":"draft"}]}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{made}");
+    let root = made["id"].as_i64().unwrap();
+    let sources = made["children"][0]["children"][0]["id"].as_i64().unwrap();
+    let notes = made["children"][0]["children"][1]["id"].as_i64().unwrap();
+    let draft = made["children"][1]["id"].as_i64().unwrap();
+
+    let session = start(&w, &format!(r#"{{"title":"essay","task_id":{root}}}"#)).await;
+    assert_eq!(session["leaf_id"], sources);
+    assert_eq!(session["leaf_path"], serde_json::json!(["essay", "research", "sources"]));
+    assert_eq!((session["leaf_index"].as_i64(), session["leaf_count"].as_i64()), (Some(1), Some(3)));
+    let id = session["id"].as_i64().unwrap();
+
+    let (status, moved) = post(&w, &format!("/api/sessions/{id}/advance"), "").await;
+    assert_eq!(status, StatusCode::OK, "{moved}");
+    assert_eq!(moved["leaf_id"], notes);
+    let (_, moved) = post(&w, &format!("/api/sessions/{id}/advance"), "{}").await;
+    assert_eq!(moved["leaf_id"], draft);
+    assert_eq!(moved["leaf_path"], serde_json::json!(["essay", "draft"]));
+    let (_, stayed) = post(&w, &format!("/api/sessions/{id}/advance"), "{}").await;
+    assert_eq!(stayed["leaf_id"], draft, "nothing open follows the last leaf");
+    let (_, back) = post(&w, &format!("/api/sessions/{id}/advance"), &format!(r#"{{"leaf_id":{sources}}}"#)).await;
+    assert_eq!(back["leaf_id"], sources);
+    let (status, _) = post(&w, &format!("/api/sessions/{id}/advance"), r#"{"leaf_id":99999}"#).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let (status, _) = post(&w, &format!("/api/sessions/{}/advance", id + 9), "{}").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (status, stepped) =
+        post(&w, &format!("/api/sessions/{id}/step"), r#"{"step_index":3,"step_name":"draft"}"#).await;
+    assert_eq!(status, StatusCode::OK, "{stepped}");
+    assert_eq!(stepped["leaf_id"], draft, "the old step route lands on the same leaf");
+}
+
+#[tokio::test]
 async fn a_pomodoro_session_turns_its_rounds_and_says_so() {
     let w = world(Vec::new()).await;
     turn_on_pomodoro(&w).await;
