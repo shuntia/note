@@ -6,17 +6,22 @@ use serde_json::{json, Value};
 const DAY: &str = "A day: YYYY-MM-DD, M/D, today, tomorrow or a weekday.";
 const DUE: &str = "A day (YYYY-MM-DD, M/D, today, friday) or a moment (YYYY-MM-DDTHH:MM, HH:MM). Empty clears it.";
 
+/// An id, or the exact title the forgiving reader resolves.
+fn id_or_title() -> Value {
+    json!(["integer", "string"])
+}
+
 fn ids(what: &str) -> Value {
-    json!({ "type": "array", "items": { "type": "integer" }, "description": what })
+    json!({ "type": "array", "items": { "type": id_or_title() }, "description": what })
 }
 
 fn node() -> Value {
     json!({
         "type": "object",
         "properties": {
-            "id": { "type": "integer", "description": "Updates this task; an exact title also works." },
-            "parent": { "type": "integer", "description": "Attach or move under this task (id or exact title); 0 makes it top-level." },
-            "before": { "type": "integer", "description": "Place it before this sibling." },
+            "id": { "type": id_or_title(), "description": "Updates this task; an exact title also works." },
+            "parent": { "type": id_or_title(), "description": "Attach or move under this task (id or exact title); 0 makes it top-level." },
+            "before": { "type": id_or_title(), "description": "Place it before this sibling." },
             "title": { "type": "string" },
             "description": { "type": "string" },
             "notes": { "type": "string" },
@@ -31,7 +36,7 @@ fn node() -> Value {
             "goal_id": { "type": "integer", "description": "Top-level tasks only." },
             "url": { "type": "string" },
             "new": { "type": "boolean", "description": "Create it even though an open task under the same parent has this title." },
-            "children": { "type": "array", "items": { "type": "object" }, "description": "Child tasks of this same shape, or plain titles." }
+            "children": { "type": "array", "items": { "type": ["object", "string"] }, "description": "Child tasks of this same shape, or plain titles." }
         }
     })
 }
@@ -40,7 +45,7 @@ pub fn task_find() -> Value {
     json!({
         "type": "object",
         "properties": {
-            "id": { "type": "integer", "description": "Read this task in full with its whole subtree; a list of ids works too." },
+            "id": { "type": ["integer", "string", "array"], "items": { "type": id_or_title() }, "description": "Read it in full with its whole subtree; a list works too." },
             "query": { "type": "string", "description": "Words that must all match, at any depth." },
             "state": { "type": "string", "enum": ["open", "in_progress", "done", "dropped", "any"], "description": "Default: open and in_progress." },
             "now": { "type": "boolean" },
@@ -96,12 +101,12 @@ pub fn goal_save() -> Value {
                 "items": {
                     "type": "object",
                     "properties": {
-                        "id": { "type": "integer", "description": "Updates this goal; an exact title also works." },
+                        "id": { "type": id_or_title(), "description": "Updates this goal; an exact title also works." },
                         "title": { "type": "string" },
                         "description": { "type": "string" },
                         "due": { "type": "string", "description": DUE },
                         "state": { "type": "string", "enum": ["open", "done", "dropped"] },
-                        "tasks": { "type": "array", "items": { "type": "object" }, "description": "Task nodes, as task_save takes them, that hang from this goal." }
+                        "tasks": { "type": "array", "items": { "type": ["object", "string"] }, "description": "Task nodes, as task_save takes them, that hang from this goal." }
                     }
                 }
             }
@@ -133,7 +138,7 @@ pub fn calendar_save() -> Value {
                 "items": {
                     "type": "object",
                     "properties": {
-                        "id": { "type": "integer", "description": "Changes this entry." },
+                        "id": { "type": id_or_title(), "description": "Changes this entry." },
                         "title": { "type": "string" },
                         "kind": { "type": "string", "enum": ["fixed", "busy", "note", "free"] },
                         "start": { "type": "string", "description": "HH:MM on the user's clock." },

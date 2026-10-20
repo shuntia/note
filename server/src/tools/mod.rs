@@ -1246,6 +1246,18 @@ mod tests {
     }
 
     #[test]
+    fn the_schemas_admit_the_titles_and_lists_the_tools_read() {
+        let input = |name: &str| schemas(SessionKind::Talk).iter().find(|s| s["name"] == name).unwrap()["input_schema"].clone();
+        let node = &input("task_save")["properties"]["tasks"]["items"]["properties"];
+        for field in ["id", "parent", "before"] {
+            assert_eq!(node[field]["type"], serde_json::json!(["integer", "string"]), "{field}");
+        }
+        assert_eq!(node["children"]["items"]["type"], serde_json::json!(["object", "string"]));
+        assert_eq!(input("task_find")["properties"]["id"]["type"], serde_json::json!(["integer", "string", "array"]));
+        assert_eq!(input("task_remove")["properties"]["ids"]["items"]["type"], serde_json::json!(["integer", "string"]));
+    }
+
+    #[test]
     fn a_batch_call_takes_name_and_arguments_for_tool_and_args() {
         let args: BatchArgs = serde_json::from_str(r#"{"calls":[{"name":"task_find","arguments":{"query":"x"}},{"tool":"goal_find"}]}"#).unwrap();
         assert_eq!((args.calls[0].tool.as_str(), args.calls[0].args["query"].as_str()), ("task_find", Some("x")));
@@ -1858,8 +1870,8 @@ mod tests {
         }
     }
 
-    /// Talk's schemas this phase, in bytes (22,318 at phase 2); phase 5 brings the 15,000 cap.
-    const TALK_SCHEMA_BUDGET: usize = 22_400;
+    /// Talk's schemas this phase, in bytes (22,526 at phase 2); phase 5 brings the 15,000 cap.
+    const TALK_SCHEMA_BUDGET: usize = 22_600;
 
     #[test]
     fn talks_schemas_stay_within_this_phases_budget() {
