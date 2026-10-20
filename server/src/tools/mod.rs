@@ -770,8 +770,8 @@ const TOOLS: &[ToolSpec] = tools![
          when this really is a second task. steps gives it its steps in the same call.",
     "task_update": task_ops::UpdateArgs => run!(task_ops::update), writes = true;
         "Update a task or step; only the fields given change. Now holds at most 3; a fourth \
-         pushes the newest one back to Later. Steps are never in Now and carry no due date, \
-         category or goal of their own.",
+         pushes the newest one back to Later, and a task and its step never sit there together. \
+         A step's due never falls after its task's; it carries no category or goal of its own.",
     "task_split": task_ops::SplitArgs => run!(task_ops::split), writes = true;
         "Add steps to an existing task, after any it already has, each in whole 5-minute \
          blocks; a task holds up to 200. Not a way to create new tasks.",
@@ -1271,19 +1271,20 @@ mod tests {
     }
 
     #[test]
-    fn the_agent_cannot_put_a_step_in_now() {
+    fn the_agent_puts_a_step_in_now_in_place_of_its_task() {
         let (conn, tmp) = env();
         let out = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_create",
-            r#"{"title":"email landlord"}"#).unwrap();
+            r#"{"title":"email landlord","is_now":true}"#).unwrap();
         let id = out["task_id"].as_i64().unwrap();
         let out = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_split",
             &format!(r#"{{"task_id":{id},"steps":[
                 {{"title":"find the thread","duration_min":5}},
                 {{"title":"write and send","duration_min":10}}]}}"#)).unwrap();
         let step = out["step_ids"][0].as_i64().unwrap();
-        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_update",
-            &format!(r#"{{"task_id":{step},"is_now":true}}"#)).unwrap_err();
-        assert_eq!(e.kind, "rejected");
+        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_update",
+            &format!(r#"{{"task_id":{step},"is_now":true}}"#)).unwrap();
+        assert_eq!(out["is_now"], true);
+        assert!(!crate::tasks::get(&conn, 1, id).unwrap().unwrap().is_now);
     }
 
     #[test]
@@ -1364,7 +1365,7 @@ mod tests {
     }
 
     #[test]
-    fn task_split_makes_one_level_of_steps() {
+    fn task_split_nests_steps_under_any_task() {
         let (conn, tmp) = env();
         let out = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_create",
             r#"{"title":"email landlord"}"#).unwrap();
@@ -1377,10 +1378,11 @@ mod tests {
         assert_eq!(out["step_ids"].as_array().unwrap().len(), 2);
         let child = out["step_ids"][0].as_i64().unwrap();
 
-        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_split",
+        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_split",
             &format!(r#"{{"task_id":{child},"steps":[
-                {{"title":"a","duration_min":5}},{{"title":"b","duration_min":5}}]}}"#)).unwrap_err();
-        assert_eq!(e.kind, "rejected");
+                {{"title":"a","duration_min":5}},{{"title":"b","duration_min":10}}]}}"#)).unwrap();
+        assert_eq!(out["duration_min"], 15);
+        assert_eq!(crate::tasks::get(&conn, 1, id).unwrap().unwrap().duration_min, Some(25));
 
         let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_split",
             &format!(r#"{{"task_id":{id},"steps":[]}}"#)).unwrap_err();

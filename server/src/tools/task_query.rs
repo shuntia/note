@@ -421,37 +421,40 @@ pub fn read(conn: &Connection, ctx: &ToolCtx, args: &ReadArgs) -> Result<serde_j
         if !shared {
             return Err(ToolError::not_found(format!("no task {}", args.task_id)));
         }
-        if !scope.goals {
-            for task in std::iter::once(&mut node.task).chain(node.children.iter_mut()) {
-                task.goal_id = None;
-                task.goal_title = None;
-            }
-        }
     }
     let tz = crate::triggers::timezone(ctx.config_dir, ctx.username);
     crate::tasks::stamp_schedule(conn, ctx.user_id, &tz, std::iter::once(&mut node.task))
         .map_err(internal)?;
     let mut out = serde_json::to_value(&node).map_err(internal)?;
     let mut stmt = conn
-        .prepare("SELECT id, created_at FROM tasks WHERE id = ?1 OR parent_id = ?1")
+        .prepare("SELECT id, created_at FROM tasks WHERE root_id = ?1")
         .map_err(internal)?;
     let added: std::collections::HashMap<i64, String> = stmt
-        .query_map([args.task_id], |r| Ok((r.get(0)?, r.get(1)?)))
+        .query_map([node.task.root_id], |r| Ok((r.get(0)?, r.get(1)?)))
         .and_then(|rows| rows.collect::<rusqlite::Result<_>>())
         .map_err(internal)?;
-    stamp(&mut out, &added);
-    if let Some(children) = out["children"].as_array_mut() {
-        for child in children {
-            stamp(child, &added);
+    let hide_goals = ctx.share.as_ref().is_some_and(|scope| !scope.goals);
+    let titles = ctx.share.as_ref().is_some_and(|scope| !scope.details);
+    each_node(&mut out, &mut |t| {
+        stamp(t, &added);
+        if hide_goals {
+            t["goal_id"] = serde_json::Value::Null;
+            t["goal_title"] = serde_json::Value::Null;
         }
-    }
-    if ctx.share.as_ref().is_some_and(|scope| !scope.details) {
-        titles_only(&mut out);
-        if let Some(children) = out["children"].as_array_mut() {
-            children.iter_mut().for_each(titles_only);
+        if titles {
+            titles_only(t);
         }
-    }
+    });
     Ok(out)
+}
+
+fn each_node(node: &mut serde_json::Value, f: &mut impl FnMut(&mut serde_json::Value)) {
+    f(node);
+    if let Some(children) = node["children"].as_array_mut() {
+        for child in children {
+            each_node(child, f);
+        }
+    }
 }
 
 fn completed_at(conn: &Connection, id: i64) -> rusqlite::Result<Option<String>> {
@@ -1077,22 +1080,25 @@ mod tests {
     }
 
     #[test]
-    fn task_bulk_update_never_puts_a_step_in_now() {
+    fn task_bulk_update_never_leaves_a_task_and_its_step_in_now() {
         let (conn, tmp) = env();
         let landlord = task(&conn, &tmp, r#"{"title":"email landlord"}"#);
         let steps = split_two(&conn, &tmp, landlord);
-        let e = call(
+        call(
             &conn,
             &tmp,
             "task_bulk_update",
             &format!(r#"{{"task_ids":[{landlord},{}],"is_now":true}}"#, steps[0]),
         )
-        .unwrap_err();
-        assert_eq!(e.kind, "rejected");
-        let flag: i64 = conn
-            .query_row("SELECT is_now FROM tasks WHERE id = ?1", [landlord], |r| r.get(0))
+        .unwrap();
+        let flagged: Vec<i64> = conn
+            .prepare("SELECT id FROM tasks WHERE is_now = 1")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
             .unwrap();
-        assert_eq!(flag, 0, "a rejected batch changes nothing");
+        assert_eq!(flagged, [steps[0]], "the later of the pair holds the place");
     }
 
     #[test]

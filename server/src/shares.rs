@@ -726,6 +726,7 @@ pub fn render(
                 continue;
             }
             let pressing = crate::tasks::pressing_at(&t.state, t.due_at.as_deref(), now);
+            let parts = if node.children.is_empty() { Vec::new() } else { node.leaves() };
             tasks.push(TaskRow {
                 id: t.id,
                 title: t.title.clone(),
@@ -740,8 +741,8 @@ pub fn render(
                     .as_deref()
                     .and_then(|d| d.parse::<jiff::Timestamp>().ok())
                     .is_some_and(|d| d < now),
-                steps: node.children.iter().filter(|c| c.state != "dropped").count() as i64,
-                done_steps: node.children.iter().filter(|c| c.state == "done").count() as i64,
+                steps: parts.len() as i64,
+                done_steps: parts.iter().filter(|c| c.state == "done").count() as i64,
                 category: t.category.clone(),
                 goal_title: t.goal_title.clone().filter(|_| scope.goals),
                 description: scope.details.then(|| t.description.clone()),

@@ -250,7 +250,7 @@ pub fn assemble_from(
     let (now_tasks, mut later): (Vec<_>, Vec<_>) = tasks
         .iter()
         .filter(|t| t.task.state == "open" || t.task.state == "in_progress")
-        .partition(|t| t.task.is_now);
+        .partition(|t| t.walk().iter().any(|n| n.is_now && matches!(n.state.as_str(), "open" | "in_progress")));
     // the nearest deadline first, then the newest of what carries none
     later.sort_by(|a, b| match (&a.task.due_at, &b.task.due_at) {
         (Some(x), Some(y)) => x.cmp(y),
@@ -597,17 +597,7 @@ fn tasks_section(
                 due(l, &n.task, tz, today, now),
                 n.task.id,
             );
-            for c in n.children.iter().filter(|c| c.state != "done") {
-                let mark = if c.state == "in_progress" { '~' } else { ' ' };
-                let _ = writeln!(
-                    s,
-                    "  - [{mark}] {}{}{} (task_id {})",
-                    c.title,
-                    duration(l, c.duration_min),
-                    progress(l, c),
-                    c.id,
-                );
-            }
+            open_parts(&mut s, l, n, 1);
         }
     }
     if later.is_empty() {
@@ -638,6 +628,23 @@ fn tasks_section(
     }
     s.push_str(&mt::finished_not_listed(l, done_today));
     s
+}
+
+/// The unfinished nodes under `n`, indented one level per depth.
+fn open_parts(s: &mut String, l: Lang, n: &crate::tasks::TaskNode, level: usize) {
+    for c in n.children.iter().filter(|c| c.task.state != "done") {
+        let mark = if c.task.state == "in_progress" { '~' } else { ' ' };
+        let _ = writeln!(
+            s,
+            "{}- [{mark}] {}{}{} (task_id {})",
+            "  ".repeat(level),
+            c.task.title,
+            duration(l, c.task.duration_min),
+            progress(l, &c.task),
+            c.task.id,
+        );
+        open_parts(s, l, c, level + 1);
+    }
 }
 
 fn order_section(l: Lang, items: &[crate::order::Item]) -> String {

@@ -133,49 +133,63 @@ fn assert_invariants(conn: &rusqlite::Connection, data_dir: &std::path::Path) {
         }
     }
 
-    // 3. Task steps stay exactly one level deep and every duration is a whole
-    //    number of 5-minute blocks.
+    // 3. Every node sits where its parent says, at most 4 levels below its
+    //    root; every duration is a whole number of 5-minute blocks, and a
+    //    derived one is its live children's sum.
     let mut stmt = conn
         .prepare(
-            "SELECT c.id FROM tasks c JOIN tasks p ON c.parent_id = p.id
-             WHERE p.parent_id IS NOT NULL",
+            "SELECT c.id FROM tasks c LEFT JOIN tasks p ON c.parent_id = p.id
+             WHERE (p.id IS NULL AND (c.root_id != c.id OR c.depth != 0))
+                OR (p.id IS NOT NULL AND (c.root_id != p.root_id OR c.depth != p.depth + 1))",
         )
         .unwrap();
-    let deep: Vec<i64> =
+    let misplaced: Vec<i64> =
         stmt.query_map([], |r| r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
-    assert!(deep.is_empty(), "tasks nested more than one level deep: {deep:?}");
+    assert!(misplaced.is_empty(), "tasks out of place in their tree: {misplaced:?}");
     let mut stmt = conn
-        .prepare("SELECT id, duration_min, duration_source FROM tasks WHERE duration_min IS NOT NULL")
+        .prepare(
+            "SELECT id, duration_min, duration_source,
+                    (SELECT SUM(c.duration_min) FROM tasks c WHERE c.parent_id = t.id AND c.state != 'dropped')
+             FROM tasks t WHERE duration_min IS NOT NULL",
+        )
         .unwrap();
-    let durs: Vec<(i64, i64, String)> = stmt
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+    let durs: Vec<(i64, i64, String, Option<i64>)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
         .unwrap()
         .collect::<rusqlite::Result<_>>()
         .unwrap();
-    for (id, d, source) in durs {
+    for (id, d, source, sum) in durs {
         assert!(d > 0 && d % 5 == 0, "task {id} has an unusable duration {d}");
-        assert_eq!(source, "agent", "task {id} duration came from nowhere");
+        match source.as_str() {
+            "agent" => {}
+            "derived" => assert_eq!(Some(d), sum, "task {id} is not the sum of its parts"),
+            other => panic!("task {id} duration came from nowhere: {other}"),
+        }
     }
 
-    // 4. Now holds at most three live top-level tasks, and no step is ever in it.
+    // 4. Now holds at most three live tasks, never a task with its own part.
     let live: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM tasks
-             WHERE user_id = 1 AND is_now = 1 AND parent_id IS NULL
-               AND state IN ('open','in_progress')",
+             WHERE user_id = 1 AND is_now = 1 AND state IN ('open','in_progress')",
             [],
             |r| r.get(0),
         )
         .unwrap();
     assert!(live <= 3, "Now overflowed with {live} tasks");
-    let flagged_steps: i64 = conn
+    let kin: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM tasks WHERE is_now = 1 AND parent_id IS NOT NULL",
+            "WITH RECURSIVE up(id, anc) AS (
+                 SELECT id, parent_id FROM tasks WHERE parent_id IS NOT NULL
+                 UNION ALL SELECT up.id, t.parent_id FROM up JOIN tasks t ON t.id = up.anc
+                 WHERE t.parent_id IS NOT NULL)
+             SELECT COUNT(*) FROM up JOIN tasks a ON a.id = up.anc JOIN tasks d ON d.id = up.id
+             WHERE a.is_now = 1 AND d.is_now = 1",
             [],
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(flagged_steps, 0, "a step was flagged into Now");
+    assert_eq!(kin, 0, "a task and its part sit in Now together");
 
     // 5. Memory: index rows and files agree; ids unique; supersede chains resolve.
     let mut stmt = conn

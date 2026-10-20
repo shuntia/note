@@ -142,6 +142,10 @@ async fn main() -> anyhow::Result<()> {
         eprintln!("passkeys are registered but browsers will refuse them: {} is not https", cfg.public_base_url);
     }
 
+    if db::server_setting(&conn, note_server::tasks::TREE_DERIVED_SETTING)?.is_none() {
+        note_server::tasks::rederive_all(&conn)?;
+        db::set_server_setting(&conn, note_server::tasks::TREE_DERIVED_SETTING, "1")?;
+    }
     let (llm, embeddings) = providers::build(&cfg.providers)?;
     if let Some(model) = db::server_setting(&conn, admin::LLM_MODEL_SETTING)? {
         llm.set_model(&model);

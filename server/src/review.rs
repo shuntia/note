@@ -261,7 +261,7 @@ fn long_view(conn: &Connection, user_id: i64, long: &Window, tz: &jiff::tz::Time
 
     let mut stmt = conn.prepare(&format!(
         "SELECT t.state, COALESCE(t.completed_at, t.updated_at), {AREA_OF}
-         FROM tasks t LEFT JOIN tasks pt ON pt.id = t.parent_id
+         FROM tasks t LEFT JOIN tasks pt ON pt.id = t.root_id AND t.parent_id IS NOT NULL
               LEFT JOIN goals g ON g.id = t.goal_id
          WHERE t.user_id = ?1 AND t.parent_id IS NULL
            AND ((t.state = 'done' AND t.completed_at >= ?2 AND t.completed_at < ?3)
@@ -285,7 +285,7 @@ fn long_view(conn: &Connection, user_id: i64, long: &Window, tz: &jiff::tz::Time
     let mut stmt = conn.prepare(&format!(
         "SELECT ws.started_at, ws.ended_at, ws.paused_ms, {AREA_OF}
          FROM work_sessions ws LEFT JOIN tasks t ON t.id = ws.task_id
-              LEFT JOIN tasks pt ON pt.id = t.parent_id
+              LEFT JOIN tasks pt ON pt.id = t.root_id AND t.parent_id IS NOT NULL
               LEFT JOIN goals g ON g.id = COALESCE(pt.goal_id, t.goal_id)
          WHERE ws.user_id = ?1 AND ws.started_at >= ?2 AND ws.started_at < ?3"
     ))?;

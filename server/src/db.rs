@@ -511,7 +511,65 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE paused_sessions ADD COLUMN call TEXT;",
     "ALTER TABLE conversations ADD COLUMN model TEXT;
      ALTER TABLE conversations ADD COLUMN effort TEXT;",
+    TREE,
 ];
+
+/// v65: tasks form one tree. Each due/size/Now column loses its parent-only
+/// CHECK by swapping in a fresh column, since the table cannot be rebuilt
+/// under the foreign keys pointing at it.
+const TREE: &str = "
+    ALTER TABLE tasks ADD COLUMN root_id INTEGER REFERENCES tasks(id);
+    ALTER TABLE tasks ADD COLUMN depth INTEGER NOT NULL DEFAULT 0 CHECK (depth BETWEEN 0 AND 4);
+    ALTER TABLE tasks ADD COLUMN position INTEGER NOT NULL DEFAULT 0;
+    UPDATE tasks SET root_id = COALESCE(parent_id, id), depth = (parent_id IS NOT NULL);
+    UPDATE tasks SET position = (SELECT COUNT(*) FROM tasks s
+        WHERE s.parent_id = tasks.parent_id AND s.id < tasks.id) WHERE parent_id IS NOT NULL;
+
+    ALTER TABLE tasks ADD COLUMN due_at_n TEXT;
+    ALTER TABLE tasks ADD COLUMN due_on_n TEXT CHECK (due_on_n IS NULL OR due_at_n IS NOT NULL);
+    UPDATE tasks SET due_at_n = due_at, due_on_n = due_on;
+    ALTER TABLE tasks DROP COLUMN due_on;
+    ALTER TABLE tasks DROP COLUMN due_at;
+    ALTER TABLE tasks RENAME COLUMN due_at_n TO due_at;
+    ALTER TABLE tasks RENAME COLUMN due_on_n TO due_on;
+
+    ALTER TABLE tasks ADD COLUMN duration_source_n TEXT NOT NULL DEFAULT 'none'
+        CHECK (duration_source_n IN ('user','agent','none','derived'));
+    UPDATE tasks SET duration_source_n = CASE
+        WHEN EXISTS (SELECT 1 FROM tasks c WHERE c.parent_id = tasks.id AND c.state != 'dropped'
+                     AND c.duration_min IS NOT NULL) THEN 'derived' ELSE duration_source END;
+    ALTER TABLE tasks DROP COLUMN duration_source;
+    ALTER TABLE tasks RENAME COLUMN duration_source_n TO duration_source;
+
+    DROP INDEX idx_tasks_now;
+    ALTER TABLE tasks ADD COLUMN is_now_n INTEGER NOT NULL DEFAULT 0 CHECK (is_now_n IN (0, 1));
+    UPDATE tasks SET is_now_n = is_now;
+    ALTER TABLE tasks DROP COLUMN is_now;
+    ALTER TABLE tasks RENAME COLUMN is_now_n TO is_now;
+    CREATE INDEX idx_tasks_now ON tasks(user_id, is_now);
+    CREATE INDEX idx_tasks_root ON tasks(root_id, depth, position);
+
+    CREATE TRIGGER tasks_planted AFTER INSERT ON tasks WHEN NEW.root_id IS NULL BEGIN
+        UPDATE tasks SET
+            root_id = COALESCE((SELECT p.root_id FROM tasks p WHERE p.id = NEW.parent_id), NEW.id),
+            depth = COALESCE((SELECT p.depth + 1 FROM tasks p WHERE p.id = NEW.parent_id), 0)
+        WHERE id = NEW.id;
+    END;
+
+    ALTER TABLE work_sessions ADD COLUMN leaf_id INTEGER REFERENCES tasks(id);
+    ALTER TABLE work_sessions ADD COLUMN leaf_from_ms INTEGER NOT NULL DEFAULT 0;
+    UPDATE work_sessions SET leaf_id = COALESCE(
+        CASE
+            WHEN step_index >= 1 THEN (SELECT c.id FROM tasks c
+                WHERE c.parent_id = work_sessions.task_id AND c.state != 'dropped'
+                  AND (SELECT COUNT(*) FROM tasks b WHERE b.parent_id = c.parent_id
+                       AND b.state != 'dropped' AND b.id < c.id) = work_sessions.step_index - 1)
+            WHEN ended_at IS NULL THEN (SELECT c.id FROM tasks c
+                WHERE c.parent_id = work_sessions.task_id AND c.state IN ('open','in_progress')
+                ORDER BY c.id LIMIT 1)
+        END, task_id)
+      WHERE task_id IS NOT NULL;
+";
 
 pub fn server_setting(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
     use rusqlite::OptionalExtension;
@@ -642,19 +700,93 @@ mod tests {
     fn v64_gives_a_conversation_its_own_model_and_effort() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
-        apply_migrations(&conn, BASELINE, &MIGRATIONS[..MIGRATIONS.len() - 1]).unwrap();
+        apply_migrations(&conn, BASELINE, &MIGRATIONS[..8]).unwrap();
         conn.execute_batch(
             "INSERT INTO users (username, pass_hash, role) VALUES ('aitest','h','member');
              INSERT INTO conversations (user_id, title, created_at, updated_at) VALUES (1, 't', 'x', 'x');",
         )
         .unwrap();
-        apply_migrations(&conn, BASELINE, MIGRATIONS).unwrap();
+        apply_migrations(&conn, BASELINE, &MIGRATIONS[..9]).unwrap();
         let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
         assert_eq!(v, 64);
         let kept: (Option<String>, Option<String>) =
             conn.query_row("SELECT model, effort FROM conversations", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
         assert_eq!(kept, (None, None));
         conn.execute("UPDATE conversations SET model = 'a/b', effort = 'high'", []).unwrap();
+    }
+
+    #[test]
+    fn v65_plants_every_task_in_a_tree_and_points_sessions_at_their_leaf() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        apply_migrations(&conn, BASELINE, &MIGRATIONS[..9]).unwrap();
+        conn.execute_batch(
+            "INSERT INTO users (username, pass_hash, role) VALUES ('aitest','h','member');
+             INSERT INTO tasks (id, user_id, title, created_at, updated_at, duration_min, duration_source, is_now, due_at, due_on, urgency)
+                 VALUES (1, 1, 'essay', 'x', 'x', 30, 'user', 1, '2026-11-06T08:00:00Z', '2026-11-06', 'high');
+             INSERT INTO tasks (id, user_id, title, created_at, updated_at, parent_id, duration_min, duration_source)
+                 VALUES (2, 1, 'outline', 'x', 'x', 1, 10, 'user'), (3, 1, 'draft', 'x', 'x', 1, 20, 'agent');
+             INSERT INTO tasks (id, user_id, title, created_at, updated_at, parent_id, state)
+                 VALUES (4, 1, 'gone', 'x', 'x', 1, 'dropped'), (5, 1, 'proof', 'x', 'x', 1, 'open');
+             INSERT INTO tasks (id, user_id, title, created_at, updated_at, duration_min, duration_source)
+                 VALUES (6, 1, 'laundry', 'x', 'x', 15, 'user');
+             UPDATE tasks SET state = 'done' WHERE id = 2;
+             INSERT INTO work_sessions (user_id, task_id, title, started_at, step_index, step_count, step_name)
+                 VALUES (1, 1, 'essay', 'x', 2, 4, 'draft');
+             INSERT INTO work_sessions (user_id, task_id, title, started_at, step_index, step_count, step_name)
+                 VALUES (1, 1, 'essay', 'x', 3, 4, 'proof');
+             INSERT INTO work_sessions (user_id, task_id, title, started_at) VALUES (1, 1, 'essay', 'x');
+             INSERT INTO work_sessions (user_id, task_id, title, started_at, ended_at) VALUES (1, 1, 'essay', 'x', 'y');
+             INSERT INTO work_sessions (user_id, task_id, title, started_at) VALUES (1, 6, 'laundry', 'x');
+             INSERT INTO work_sessions (user_id, title, started_at) VALUES (1, 'free', 'x');",
+        )
+        .unwrap();
+        apply_migrations(&conn, BASELINE, MIGRATIONS).unwrap();
+        let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, 65);
+        type Row = (i64, i64, i64, i64, String, bool, Option<String>, Option<String>);
+        let rows: Vec<Row> = conn
+            .prepare("SELECT id, root_id, depth, position, duration_source, is_now, due_at, due_on FROM tasks ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        let shape: Vec<_> = rows.iter().map(|r| (r.0, r.1, r.2, r.3, r.4.as_str(), r.5)).collect();
+        assert_eq!(
+            shape,
+            [
+                (1, 1, 0, 0, "derived", true),
+                (2, 1, 1, 0, "user", false),
+                (3, 1, 1, 1, "agent", false),
+                (4, 1, 1, 2, "none", false),
+                (5, 1, 1, 3, "none", false),
+                (6, 6, 0, 0, "user", false),
+            ]
+        );
+        assert_eq!(rows[0].6.as_deref(), Some("2026-11-06T08:00:00Z"));
+        assert_eq!(rows[0].7.as_deref(), Some("2026-11-06"));
+        let leaves: Vec<Option<i64>> = conn
+            .prepare("SELECT leaf_id FROM work_sessions ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(leaves, [Some(3), Some(5), Some(3), Some(1), Some(6), None]);
+
+        conn.execute_batch(
+            "UPDATE tasks SET due_at = '2026-11-01T08:00:00Z', due_on = '2026-11-01', is_now = 1,
+                 duration_source = 'derived' WHERE id = 3;
+             INSERT INTO tasks (user_id, title, created_at, updated_at, parent_id) VALUES (1, 'cite', 'x', 'x', 3);",
+        )
+        .unwrap();
+        let planted: (i64, i64) =
+            conn.query_row("SELECT root_id, depth FROM tasks WHERE title = 'cite'", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!(planted, (1, 2), "a row inserted without its place is planted under its parent");
+        assert!(conn.execute("UPDATE tasks SET due_on = '2026-11-02', due_at = NULL WHERE id = 3", []).is_err());
+        assert!(conn.execute("UPDATE tasks SET depth = 5 WHERE id = 3", []).is_err());
+        assert!(conn.execute("UPDATE tasks SET category = 'x' WHERE id = 3", []).is_err(), "a child still carries no category");
     }
 
     #[test]
@@ -865,6 +997,11 @@ mod tests {
                  WHERE p.user_id = ?1 AND p.parent_id IS NULL AND p.state != 'dropped'
                    AND t.state != 'dropped'",
                 "idx_tasks_user_parent",
+                "SCAN",
+            ),
+            (
+                "SELECT t.id FROM tasks t WHERE t.root_id = ?1 AND t.depth > ?2 ORDER BY t.position, t.id",
+                "idx_tasks_root",
                 "SCAN",
             ),
             (

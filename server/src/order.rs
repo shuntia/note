@@ -35,9 +35,11 @@ pub fn list(
         "SELECT t.id, t.title, p.title FROM run_order o
          JOIN tasks t ON t.id = o.task_id
          LEFT JOIN tasks p ON p.id = t.parent_id
+         JOIN tasks r ON r.id = t.root_id
          WHERE o.user_id = ?1 AND o.date = ?2 AND t.user_id = ?1
            AND t.state IN ('open','in_progress')
            AND (p.id IS NULL OR p.state IN ('open','in_progress'))
+           AND r.state IN ('open','in_progress')
          ORDER BY o.position",
     )?;
     let rows = stmt.query_map((user_id, date.to_string()), |r| {
@@ -139,20 +141,13 @@ pub fn candidates(
         let Some(held) = tasks::get(conn, user_id, item.task_id)? else {
             continue;
         };
-        let top_id = held.parent_id.unwrap_or(held.id);
-        if out.iter().any(|e| e.task.task.id == top_id) {
+        if out.iter().any(|e| e.task.task.id == held.root_id) {
             continue;
         }
-        let Some((task, step)) = tasks::start_point(conn, user_id, held, now)? else {
+        let Some((task, leaf)) = tasks::start_point(conn, user_id, &held, now)? else {
             continue;
         };
-        out.push(QueueEntry {
-            planned_min: tasks::planned_minutes(&task.task, step.as_ref()),
-            task,
-            step,
-            reason: "order",
-            event_id: None,
-        });
+        out.push(QueueEntry::new(task, leaf, "order"));
     }
     for entry in tasks::queue(conn, user_id, tz, now, limit)? {
         if out.len() == limit {

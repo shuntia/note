@@ -208,7 +208,7 @@ pub fn create(
         .ok_or_else(|| ToolError::internal(format!("task {} vanished", task.id)))?;
     Ok(serde_json::json!({
         "task_id": task.id,
-        "step_ids": node.children.iter().map(|c| c.id).collect::<Vec<_>>(),
+        "step_ids": node.children.iter().map(|c| c.task.id).collect::<Vec<_>>(),
     }))
 }
 
@@ -242,8 +242,8 @@ pub struct UpdateArgs {
     /// belongs to no goal of its own.
     #[serde(default, deserialize_with = "crate::tasks::present")]
     pub goal_id: Option<Option<i64>>,
-    /// low, normal or high. High goes first when the day is laid. A step reads
-    /// its parent's.
+    /// low, normal or high. High goes first when the day is laid. A step counts
+    /// as at least as urgent as its task.
     pub urgency: Option<String>,
     /// Steps to add after any it already has, each with a duration in whole
     /// 5-minute blocks.
@@ -328,7 +328,7 @@ pub fn update(
         let node = crate::tasks::split(conn, ctx.user_id, args.task_id, args.steps, Actor::Agent)
             .map_err(task_error)?
             .ok_or_else(|| ToolError::not_found(format!("no task {}", args.task_id)))?;
-        let ids: Vec<i64> = node.children.iter().map(|c| c.id).collect();
+        let ids: Vec<i64> = node.children.iter().map(|c| c.task.id).collect();
         out["step_ids"] = ids[ids.len().saturating_sub(added)..].to_vec().into();
     }
     Ok(out)
@@ -375,7 +375,7 @@ pub fn split(
         Ok(Some(n)) => Ok(serde_json::json!({
             "task_id": n.task.id,
             "duration_min": n.task.duration_min,
-            "step_ids": n.children.iter().map(|c| c.id).collect::<Vec<_>>(),
+            "step_ids": n.children.iter().map(|c| c.task.id).collect::<Vec<_>>(),
         })),
         Ok(None) => Err(ToolError::not_found(format!("no task {}", args.task_id))),
         Err(e) => Err(task_error(e)),
@@ -418,7 +418,7 @@ pub fn brief(
     args: BriefArgs,
 ) -> Result<serde_json::Value, ToolError> {
     in_scope(conn, ctx, args.task_id, false)?;
-    let Some(node) = crate::tasks::node(conn, ctx.user_id, args.task_id).map_err(task_error)?
+    let Some(node) = crate::tasks::node(conn, ctx.user_id, args.task_id).map_err(|e| task_error(e.into()))?
     else {
         return Err(ToolError::not_found(format!("no task {}", args.task_id)));
     };
@@ -715,7 +715,7 @@ mod tests {
         let e = call("task_update", &format!(r#"{{"task_id":{step},"goal_id":{goal}}}"#))
             .unwrap_err();
         assert_eq!(e.kind, "rejected");
-        assert_eq!(goal_of(step), None);
+        assert_eq!(goal_of(step), Some(goal), "a step reads its root's goal");
     }
 
     #[test]
@@ -802,7 +802,7 @@ mod tests {
         let node = crate::tasks::node(&conn, 1, 1).unwrap().unwrap();
         assert!(node.task.description.starts_with("Read chapter 4."));
         assert_eq!(node.task.duration_min, Some(45));
-        assert_eq!(node.task.duration_source, "agent");
+        assert_eq!(node.task.duration_source, "derived");
         assert_eq!(node.task.state, "open");
         assert_eq!(node.task.title, "scoped");
         assert!(!node.task.is_now);
@@ -880,7 +880,7 @@ mod tests {
         let node = crate::tasks::node(&conn, 1, 1).unwrap().unwrap();
         assert_eq!(node.task.description, "a fresher brief");
         assert_eq!(node.children.len(), 2);
-        assert_eq!(node.children[0].title, "draft");
+        assert_eq!(node.children[0].task.title, "draft");
     }
 
     #[test]
@@ -903,7 +903,7 @@ mod tests {
         let long = format!(r#"{{"title":"{}","duration_min":5}}"#, "x".repeat(101));
         for steps in [
             String::new(),
-            [one; crate::tasks::MAX_STEPS + 1].join(","),
+            [one; crate::tasks::MAX_CHILDREN + 1].join(","),
             format!("{one},{long}"),
             format!(r#"{one},{{"title":"odd","duration_min":7}}"#),
         ] {
@@ -926,7 +926,7 @@ mod tests {
         assert_eq!(out["step_ids"].as_array().unwrap().len(), 11);
         let node = crate::tasks::node(&conn, 1, id).unwrap().unwrap();
         assert_eq!(node.children.len(), 11);
-        assert_eq!(node.children[10].title, "lesson 10");
+        assert_eq!(node.children[10].task.title, "lesson 10");
         assert_eq!(node.task.duration_min, Some(110));
     }
 
@@ -965,7 +965,7 @@ mod tests {
         let out = split(7).unwrap();
         assert_eq!(out["step_ids"].as_array().unwrap().len(), 11);
         assert_eq!(out["duration_min"], 110);
-        let e = split(crate::tasks::MAX_STEPS - 10).unwrap_err();
+        let e = split(crate::tasks::MAX_CHILDREN - 10).unwrap_err();
         assert_eq!(e.kind, "rejected");
         assert_eq!(crate::tasks::node(&conn, 1, 1).unwrap().unwrap().children.len(), 11);
     }
@@ -988,7 +988,7 @@ mod tests {
     fn a_brief_reaches_only_the_scoped_task_itself() {
         let (conn, tmp) = env();
         split_it(&conn, 1);
-        let step = crate::tasks::node(&conn, 1, 1).unwrap().unwrap().children[0].id;
+        let step = crate::tasks::node(&conn, 1, 1).unwrap().unwrap().children[0].task.id;
         for target in [2, step, 9999] {
             let args = format!(r#"{{"task_id":{target},"homework":true,"description":"nope"}}"#);
             assert_eq!(brief(&conn, &tmp, &args).unwrap_err().kind, "rejected", "reached {target}");

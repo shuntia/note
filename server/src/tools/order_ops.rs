@@ -39,19 +39,20 @@ fn refused(e: OrderError) -> ToolError {
     }
 }
 
-/// The running work session's task with its parent and its steps; empty when
+/// The running work session's task with everything above and below it; empty when
 /// no session runs or it holds no task.
 pub(crate) fn held(conn: &Connection, user_id: i64) -> rusqlite::Result<Vec<i64>> {
     let Some(id) = crate::work::open(conn, user_id)?.and_then(|s| s.task_id) else {
         return Ok(Vec::new());
     };
-    let mut out = vec![id];
-    if let Some(parent) = crate::tasks::get(conn, user_id, id)?.and_then(|t| t.parent_id) {
-        out.push(parent);
-    }
-    let mut stmt = conn.prepare("SELECT id FROM tasks WHERE user_id = ?1 AND parent_id = ?2")?;
-    let steps = stmt.query_map([user_id, id], |r| r.get(0))?.collect::<rusqlite::Result<Vec<i64>>>()?;
-    out.extend(steps);
+    let mut stmt = conn.prepare(
+        "WITH RECURSIVE
+             up(id) AS (SELECT ?2 UNION ALL SELECT t.parent_id FROM tasks t JOIN up ON t.id = up.id
+                        WHERE t.parent_id IS NOT NULL),
+             down(id) AS (SELECT ?2 UNION ALL SELECT t.id FROM tasks t JOIN down ON t.parent_id = down.id)
+         SELECT id FROM tasks WHERE user_id = ?1 AND (id IN up OR id IN down) ORDER BY id = ?2 DESC, depth, id",
+    )?;
+    let out = stmt.query_map([user_id, id], |r| r.get(0))?.collect::<rusqlite::Result<Vec<i64>>>()?;
     Ok(out)
 }
 

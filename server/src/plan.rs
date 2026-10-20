@@ -255,13 +255,13 @@ pub fn events_for(conn: &Connection, user_id: i64, date: jiff::civil::Date) -> R
                 m.id, mp.date, m.wall_time, m.kind, e.span_min,
                 e.origin, e.decided_at, t.id, t.title, t.state, e.prompt, pt.title,
                 COALESCE(pt.category, t.category), COALESCE(pt.urgency, t.urgency),
-                COALESCE(pt.due_at, t.due_at), COALESCE(pt.state, t.state)
+                COALESCE(t.due_at, pt.due_at), COALESCE(pt.state, t.state)
          FROM events e JOIN plans p ON p.id = e.plan_id
          LEFT JOIN events m ON m.id = e.moved_to_event_id
          LEFT JOIN plans mp ON mp.id = m.plan_id
          LEFT JOIN event_tasks et ON et.event_id = e.id
          LEFT JOIN tasks t ON t.id = et.task_id
-         LEFT JOIN tasks pt ON pt.id = t.parent_id
+         LEFT JOIN tasks pt ON pt.id = t.root_id AND t.parent_id IS NOT NULL
          WHERE p.user_id = ?1 AND p.date = ?2 ORDER BY e.wall_time",
     )?;
     let rows = stmt.query_map((user_id, date.to_string()), |r| {
