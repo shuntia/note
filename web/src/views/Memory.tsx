@@ -83,7 +83,8 @@ function factDate(iso: string): string {
 }
 
 // The list endpoint has no dates, so the order settles as the rows read theirs back;
-// a row still waiting keeps the server's place until then.
+// a row still waiting keeps the server's place until then. Every row is read when the
+// list arrives, so the order settles once instead of shifting under a reader scrolling down.
 function newestFirst(items: MemoryHit[], saved: (id: string) => MemoryFact | undefined): MemoryHit[] {
   return items
     .map((m, i) => ({ m, i, created: saved(m.id)?.created }))
@@ -121,7 +122,9 @@ function useFacts() {
   return { get: (id: string) => factCache.get(id), want }
 }
 
-// Results arrive as a staggered rise; a row that only changed places slides there.
+// Results arrive as a staggered rise; a row that only changed places in the list slides
+// there. Places are layout offsets within the list, so neither a scroll between renders
+// nor a slide still under way reads as a move.
 function useListMotion(list: RefObject<HTMLUListElement | null>, sig: string) {
   const tops = useRef(new Map<string, number>())
   const settled = useRef(false)
@@ -133,9 +136,10 @@ function useListMotion(list: RefObject<HTMLUListElement | null>, sig: string) {
 
   useLayoutEffect(() => {
     const moves: { el: Element; dy: number }[] = []
+    const origin = list.current?.offsetTop ?? 0
     list.current?.querySelectorAll<HTMLElement>('[data-mem]').forEach((el) => {
       const id = el.dataset.mem as string
-      const top = el.getBoundingClientRect().top
+      const top = el.offsetTop - origin
       const was = tops.current.get(id)
       if (was !== undefined) moves.push({ el, dy: was - top })
       tops.current.set(id, top)
@@ -262,6 +266,11 @@ export function Memory({ notify, refresh, onChanged, openTalk }: ViewProps) {
 
   const live = items?.filter((m) => m.id !== forgetHold.held()) ?? null
 
+  const want = facts.want
+  useEffect(() => {
+    items?.forEach((m) => want(m.id))
+  }, [items, want])
+
   // Side by side, the reading pane is never left empty: it opens the newest fact
   // once the rows on screen have read back their dates.
   const head = live?.slice(0, AUTO_OPEN_AFTER) ?? []
@@ -281,11 +290,13 @@ export function Memory({ notify, refresh, onChanged, openTalk }: ViewProps) {
 
   const shown = onInbox ? inboxSelected : selected
 
-  // On the single-pane layout the detail replaces the list, so bring it into view.
-  useEffect(() => {
-    if (shown === null) return
+  // On the single-pane layout the detail replaces the list, so bring it into view;
+  // going back returns the list to where it was left.
+  const listY = useRef(0)
+  useLayoutEffect(() => {
     if (!window.matchMedia(SINGLE_PANE).matches) return
-    detail.current?.scrollIntoView()
+    if (shown === null) window.scrollTo(0, listY.current)
+    else detail.current?.scrollIntoView()
   }, [shown])
 
   // Where the detail replaces the list it rises like a sheet; beside it, it settles.
@@ -310,7 +321,7 @@ export function Memory({ notify, refresh, onChanged, openTalk }: ViewProps) {
 
   return (
     <div className="memory" data-pane={shown === null ? 'list' : 'detail'}>
-      <div className="memory-side">
+      <div className="memory-side" onClickCapture={() => (listY.current = window.scrollY)}>
         {!onInbox && (
           <div className="tellnote memory-search">
             <input
@@ -385,7 +396,6 @@ export function Memory({ notify, refresh, onChanged, openTalk }: ViewProps) {
                   setEditing('summary')
                 }}
                 onForget={forget}
-                onSeen={facts.want}
                 openTalk={openTalk}
               />
             ))}
@@ -429,7 +439,6 @@ function MemoryRow({
   onOpen,
   onEdit,
   onForget,
-  onSeen,
   openTalk,
 }: {
   hit: MemoryHit
@@ -438,33 +447,10 @@ function MemoryRow({
   onOpen: (id: string) => void
   onEdit: (id: string) => void
   onForget: (hit: MemoryHit) => void
-  onSeen: (id: string) => void
   openTalk: (draft: string) => void
 }) {
-  const row = useRef<HTMLLIElement>(null)
-
-  // Dates cost one read each, so a row only asks for its own once it is on screen.
-  useEffect(() => {
-    if (saved !== undefined) return
-    const el = row.current
-    if (!el || typeof IntersectionObserver !== 'function') {
-      onSeen(hit.id)
-      return
-    }
-    const io = new IntersectionObserver(
-      (entries) => {
-        if (!entries.some((e) => e.isIntersecting)) return
-        io.disconnect()
-        onSeen(hit.id)
-      },
-      { rootMargin: '200px' },
-    )
-    io.observe(el)
-    return () => io.disconnect()
-  }, [hit.id, saved, onSeen])
-
   return (
-    <li ref={row} data-mem={hit.id}>
+    <li data-mem={hit.id}>
       <button className="memory-row" aria-current={selected} onClick={() => onOpen(hit.id)}>
         <Glyph category={hit.category} />
         <span className="memory-summary">{displaySummary(hit)}</span>
