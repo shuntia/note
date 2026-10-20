@@ -3,7 +3,7 @@ use anyhow::Result;
 use rusqlite::Connection;
 use std::path::Path;
 
-pub const MAX_TITLE_CHARS: usize = 80;
+pub const MAX_TITLE_CHARS: usize = 160;
 const UPCOMING_HOURS: i64 = 12;
 const STALE_DAYS: i64 = 3;
 
@@ -381,10 +381,10 @@ mod tests {
     }
 
     #[test]
-    fn a_title_is_one_line_of_at_most_80_characters() {
+    fn a_title_is_one_line_of_at_most_160_characters() {
         assert_eq!(checked_title("  call\n the   bank\t").unwrap(), "call the bank");
-        assert_eq!(checked_title(&"あ".repeat(80)).unwrap().chars().count(), 80);
-        assert!(checked_title(&"あ".repeat(81)).is_err());
+        assert_eq!(checked_title(&"あ".repeat(160)).unwrap().chars().count(), 160);
+        assert!(checked_title(&"あ".repeat(161)).is_err());
         assert!(checked_title(" \n\t ").is_err());
     }
 

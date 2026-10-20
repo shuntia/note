@@ -121,7 +121,8 @@ pub struct CreateArgs {
     /// Create it even though an open task with the same title exists.
     #[serde(default)]
     pub also: bool,
-    /// Its steps, in order, each with a duration in whole 5-minute blocks.
+    /// Its steps, in order, each with a duration in whole 5-minute blocks; with
+    /// steps the task's own size is theirs summed and `duration_min` is ignored.
     #[serde(default)]
     pub steps: Vec<Step>,
 }
@@ -171,7 +172,7 @@ pub fn create(
         ctx.user_id,
         NewTask {
             title: title.to_owned(),
-            duration_min: args.duration_min,
+            duration_min: if args.steps.is_empty() { args.duration_min } else { None },
             is_now: args.is_now,
             due_at: due.due_at,
             due_on: due.due_on,
@@ -244,6 +245,10 @@ pub struct UpdateArgs {
     /// low, normal or high. High goes first when the day is laid. A step reads
     /// its parent's.
     pub urgency: Option<String>,
+    /// Steps to add after any it already has, each with a duration in whole
+    /// 5-minute blocks.
+    #[serde(default)]
+    pub steps: Vec<Step>,
 }
 
 pub fn update(
@@ -289,7 +294,7 @@ pub fn update(
         description: args.description,
         state: args.state,
         notes: args.notes,
-        duration_min: args.duration_min.map(Some),
+        duration_min: args.duration_min.filter(|_| args.steps.is_empty()).map(Some),
         is_now: args.is_now,
         due_at: due.due_at,
         due_on: due.due_on,
@@ -302,18 +307,31 @@ pub fn update(
         actor: Actor::Agent,
         ..Default::default()
     };
-    match crate::tasks::update(conn, ctx.user_id, args.task_id, &patch) {
-        Ok(Some(t)) => Ok(serde_json::json!({
-            "task_id": t.task.id,
-            "state": t.task.state,
-            "is_now": t.task.is_now,
-            "progress": t.task.progress,
-            "remaining_min": t.task.remaining_min,
-            "demoted_from_now": t.demoted_from_now,
-        })),
-        Ok(None) => Err(ToolError::not_found(format!("no task {}", args.task_id))),
-        Err(e) => Err(task_error(e)),
+    for s in &args.steps {
+        checked_title(&s.title)?;
     }
+    let updated = match crate::tasks::update(conn, ctx.user_id, args.task_id, &patch) {
+        Ok(Some(t)) => t,
+        Ok(None) => return Err(ToolError::not_found(format!("no task {}", args.task_id))),
+        Err(e) => return Err(task_error(e)),
+    };
+    let mut out = serde_json::json!({
+        "task_id": updated.task.id,
+        "state": updated.task.state,
+        "is_now": updated.task.is_now,
+        "progress": updated.task.progress,
+        "remaining_min": updated.task.remaining_min,
+        "demoted_from_now": updated.demoted_from_now,
+    });
+    if !args.steps.is_empty() {
+        let added = args.steps.len();
+        let node = crate::tasks::split(conn, ctx.user_id, args.task_id, args.steps, Actor::Agent)
+            .map_err(task_error)?
+            .ok_or_else(|| ToolError::not_found(format!("no task {}", args.task_id)))?;
+        let ids: Vec<i64> = node.children.iter().map(|c| c.id).collect();
+        out["step_ids"] = ids[ids.len().saturating_sub(added)..].to_vec().into();
+    }
+    Ok(out)
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -910,6 +928,21 @@ mod tests {
         assert_eq!(node.children.len(), 11);
         assert_eq!(node.children[10].title, "lesson 10");
         assert_eq!(node.task.duration_min, Some(110));
+    }
+
+    #[test]
+    fn steps_decide_a_tasks_size_whatever_size_it_is_given() {
+        let (conn, tmp) = env();
+        let args = format!(r#"{{"title":"Unit 5","duration_min":0,"steps":[{}]}}"#, steps_json(3));
+        let out = dispatch(&conn, &ctx(&tmp, None), SessionKind::Talk, "task_create", &args).unwrap();
+        let id = out["task_id"].as_i64().unwrap();
+        assert_eq!(crate::tasks::node(&conn, 1, id).unwrap().unwrap().task.duration_min, Some(30));
+
+        let args = format!(r#"{{"task_id":{id},"duration_min":0,"due_at":"2026-12-18","steps":[{}]}}"#, steps_json(2));
+        let out = dispatch(&conn, &ctx(&tmp, None), SessionKind::Talk, "task_update", &args).unwrap();
+        assert_eq!(out["step_ids"].as_array().unwrap().len(), 2, "an update adds steps after the ones there");
+        let node = crate::tasks::node(&conn, 1, id).unwrap().unwrap();
+        assert_eq!((node.children.len(), node.task.duration_min), (5, Some(50)));
     }
 
     #[test]

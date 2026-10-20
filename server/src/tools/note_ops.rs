@@ -19,7 +19,7 @@ pub struct WriteArgs {
     pub op: WriteOp,
     /// The note's id; every op but add needs it.
     pub id: Option<String>,
-    /// One self-explanatory line, at most 80 characters.
+    /// One self-explanatory line, at most 160 characters.
     pub title: Option<String>,
     /// When the note starts to matter: RFC 3339, or YYYY-MM-DDTHH:MM or YYYY-MM-DD in the user's own zone. An empty string clears it.
     pub from: Option<String>,
@@ -229,7 +229,7 @@ mod tests {
         let (conn, tmp) = env();
         let bad = |args: &str| dispatch(&conn, &ctx(&tmp, 1), SessionKind::Talk, "note_write", args).unwrap_err().kind;
         assert_eq!(bad(r#"{"op":"add","title":"   "}"#), "rejected");
-        assert_eq!(bad(&format!(r#"{{"op":"add","title":"{}"}}"#, "x".repeat(81))), "rejected");
+        assert_eq!(bad(&format!(r#"{{"op":"add","title":"{}"}}"#, "x".repeat(161))), "rejected");
         assert_eq!(bad(r#"{"op":"add"}"#), "rejected");
         assert_eq!(bad(r#"{"op":"add","title":"x","id":"00000000-0000-4000-8000-000000000001"}"#), "rejected");
         assert_eq!(bad(r#"{"op":"add","title":"x","from":"friday"}"#), "rejected");
