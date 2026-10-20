@@ -160,7 +160,7 @@ async fn a_visitor_reads_the_link_the_view_and_talks_with_a_cookie_thread() {
     assert_eq!(turn["note"], false);
     let seen = llm.seen();
     assert!(seen[0].system.contains("lab report"));
-    assert!(seen[0].tool_names.contains(&"task_list".to_string()));
+    assert!(seen[0].tool_names.contains(&"task_find".to_string()));
     assert!(!seen[0].tool_names.iter().any(|n| n.starts_with("memory_")));
 
     let thread = turn["thread"].as_i64().expect("the turn names its thread");

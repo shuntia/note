@@ -736,7 +736,7 @@ fn run_traced(
             if stopped() {
                 break 'rounds;
             }
-            if call.name == "batch" {
+            if tools::known(&call.name).is_some_and(|(name, _)| name == "batch") {
                 let (content, is_error) = run_batch(
                     &env,
                     &call.args,
@@ -942,6 +942,32 @@ pub(crate) fn run_tool(
     args: &str,
     once: Option<(&str, &str)>,
 ) -> (String, bool) {
+    let (name, fuzz): (&str, _) = match tools::known(name) {
+        Some((known, fuzz)) => (known, fuzz),
+        None => (name, None),
+    };
+    let (content, is_error) = run_known_tool(deps, user_id, username, kind, name, args, once);
+    match fuzz {
+        Some(w) => (warned(&content, w), is_error),
+        None => (content, is_error),
+    }
+}
+
+/// A tool result with `warning` added to it.
+fn warned(content: &str, warning: String) -> String {
+    let value = serde_json::from_str(content).unwrap_or_else(|_| serde_json::Value::String(content.to_string()));
+    tools::loose::with_warning(value, warning).to_string()
+}
+
+fn run_known_tool(
+    deps: &SessionDeps,
+    user_id: i64,
+    username: &str,
+    kind: SessionKind,
+    name: &str,
+    args: &str,
+    once: Option<(&str, &str)>,
+) -> (String, bool) {
     let result = match tools::network(name) {
         Some(_) if !tools::registry(kind).contains(&name) => Err(ToolError::forbidden(format!(
             "tool {name} is not available in this session type"
@@ -996,7 +1022,19 @@ struct CallEnv<'a> {
 impl CallEnv<'_> {
     /// Runs one call; a read already made since the last other call is answered
     /// from its earlier result instead of running again.
-    fn run(&self, name: &str, args: &str) -> (String, bool) {
+    fn run(&self, called: &str, args: &str) -> (String, bool) {
+        let (name, fuzz): (&str, _) = match tools::known(called) {
+            Some((name, fuzz)) => (name, fuzz),
+            None => (called, None),
+        };
+        let (content, is_error) = self.run_known(name, args);
+        match fuzz {
+            Some(w) => (warned(&content, w), is_error),
+            None => (content, is_error),
+        }
+    }
+
+    fn run_known(&self, name: &str, args: &str) -> (String, bool) {
         let read = tools::reads(name).then(|| read_key(name, args));
         if let Some(content) = read.as_ref().and_then(|k| self.reads.borrow().get(k).cloned()) {
             return (mt::repeated_call(self.lang, &content), false);
@@ -1048,6 +1086,11 @@ impl CallEnv<'_> {
             };
             let lang = Lang::for_user(self.deps.config_dir, self.username);
             return call_ops::check(&mut self.calls.borrow_mut(), &args, &situation, &self.heard, lang, now);
+        }
+        let mut args = args;
+        if !args.task_ids.is_empty() {
+            let conn = crate::db_guard(self.deps.db);
+            args.task_ids = call_ops::resolve_task_ids(&conn, self.user_id, &args.task_ids)?;
         }
         let confirmed = call_ops::confirm(&mut self.calls.borrow_mut(), &args, now)?;
         if self.kind == SessionKind::Trigger {
@@ -1159,11 +1202,12 @@ fn run_batch(
     }
     let mut results = Vec::new();
     for sub in args.calls {
-        let refused = if sub.tool == "batch" {
+        let canonical = tools::known(&sub.tool).map_or(sub.tool.as_str(), |(name, _)| name);
+        let refused = if canonical == "batch" {
             Some(ToolError::rejected("a batch cannot hold another batch"))
-        } else if sub.tool == "call_user" {
+        } else if canonical == "call_user" {
             Some(ToolError::rejected("call_user must be called on its own"))
-        } else if tools::is_terminal(env.kind, &sub.tool) {
+        } else if tools::is_terminal(env.kind, canonical) {
             Some(ToolError::rejected(format!(
                 "{} ends the session and must be called on its own",
                 sub.tool
@@ -1189,7 +1233,8 @@ fn run_batch(
         results.push(if is_error {
             serde_json::json!({ "tool": sub.tool, "ok": false, "error": value })
         } else {
-            serde_json::json!({ "tool": sub.tool, "ok": true, "result": value })
+            let ok = value.get("ok") != Some(&serde_json::Value::Bool(false));
+            serde_json::json!({ "tool": sub.tool, "ok": ok, "result": value })
         });
     }
     (serde_json::json!({ "results": results }).to_string(), false)
@@ -1616,6 +1661,33 @@ mod tests {
     }
 
     #[test]
+    fn a_made_up_name_runs_the_tool_it_means_and_a_batch_holds_the_envelope() {
+        let (db, tmp) = env();
+        let call = |id: &str, name: &str, args: &str| ToolCall { id: id.into(), name: name.into(), args: args.into() };
+        let llm = MockLLM::scripted(vec![
+            ChatResponse { text: String::new(), tool_calls: vec![call("c1", "task_save9", r#"{"tasks":[{"title":"buy milk"}]}"#)] },
+            batch_call(
+                "b1",
+                &serde_json::json!([
+                    { "tool": "task_find2", "args": {} },
+                    { "tool": "task_save", "args": { "tasks": [{ "id": 999, "state": "done" }, { "title": "call the dentist" }] } },
+                ]),
+            ),
+            ChatResponse { text: "done".into(), tool_calls: vec![] },
+        ]);
+        let out = run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, now(), &[], "two things").unwrap();
+        assert!(!out.steps[0].is_error);
+        assert!(out.steps[0].result.contains("this ran task_save"), "{}", out.steps[0].result);
+        let (result, _) = batch_result(&llm, 2);
+        let results = result["results"].as_array().unwrap();
+        assert_eq!(results[0]["ok"], true);
+        assert_eq!(results[0]["result"]["total"], 1);
+        assert_eq!(results[1]["ok"], false, "a refused item marks the call not ok");
+        assert_eq!(results[1]["result"]["saved"][0]["title"], "call the dentist");
+        assert!(out.steps.iter().all(|s| !s.is_error));
+    }
+
+    #[test]
     fn tool_call_round_trip_creates_task_and_returns_reply() {
         let (db, tmp) = env();
         let llm = MockLLM::scripted(vec![
@@ -1646,7 +1718,7 @@ mod tests {
         let step = &out.steps[0];
         assert_eq!(step.name, "task_create");
         assert_eq!(step.args, r#"{"title":"buy milk"}"#);
-        assert!(step.result.contains("task_id"), "{}", step.result);
+        assert!(step.result.contains("saved"), "{}", step.result);
         assert!(!step.is_error);
         let title: String = db
             .lock()
@@ -1667,7 +1739,7 @@ mod tests {
             Message::ToolResult { call_id, content, is_error } => {
                 assert_eq!(call_id, "c1");
                 assert!(!is_error);
-                assert!(content.contains("task_id"), "{content}");
+                assert!(content.contains("saved"), "{content}");
             }
             other => panic!("expected a tool result, got {other:?}"),
         }
@@ -2183,7 +2255,7 @@ mod tests {
                 "call:0:task_create",
                 "result:0:task_create:false",
                 "call:1:task_update",
-                "result:1:task_update:true",
+                "result:1:task_update:false",
                 "call:2:task_create",
                 "result:2:task_create:false",
                 "reply:both added",
@@ -2196,9 +2268,9 @@ mod tests {
         assert_eq!(results.len(), 3);
         assert_eq!(results[0]["tool"], "task_create");
         assert_eq!(results[0]["ok"], true);
-        assert!(results[0]["result"]["task_id"].is_i64());
-        assert_eq!(results[1]["ok"], false);
-        assert_eq!(results[1]["error"]["kind"], "not_found");
+        assert!(results[0]["result"]["saved"][0]["id"].is_i64());
+        assert_eq!(results[1]["ok"], false, "a refused item reads as not ok");
+        assert_eq!(results[1]["result"]["refused"][0]["why"], "no task 999");
         assert_eq!(results[2]["ok"], true);
 
         let titles: Vec<String> = {
@@ -2764,7 +2836,7 @@ mod tests {
                 "b1",
                 &serde_json::json!([
                     { "tool": "task_create", "args": { "title": "buy milk" } },
-                    { "tool": "task_update", "args": { "task_id": 999, "state": "done" } },
+                    { "tool": "task_frobnicate", "args": { "task_id": 999 } },
                 ]),
             ),
             ChatResponse { text: "one added".into(), tool_calls: vec![] },
@@ -2777,9 +2849,9 @@ mod tests {
         let calls = rounds(&detail)[0]["calls"].as_array().unwrap();
         assert_eq!(calls.len(), 2, "the batch envelope itself is not a call");
         assert_eq!(calls[0]["name"], "task_create");
-        assert_eq!(calls[1]["name"], "task_update");
+        assert_eq!(calls[1]["name"], "task_frobnicate");
         assert_eq!(calls[1]["is_error"], true);
-        assert_eq!(calls[1]["error_kind"], "not_found");
+        assert_eq!(calls[1]["error_kind"], "unknown_tool");
     }
 
     #[test]

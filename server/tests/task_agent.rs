@@ -134,7 +134,7 @@ async fn a_bearer_token_briefs_a_task() {
     assert_eq!(steps[0]["name"], "task_brief");
     assert_eq!(steps[0]["is_error"], false);
     assert!(steps[0]["args"].as_str().unwrap().contains("Hand in"));
-    assert!(steps[0]["result"].as_str().unwrap().contains(r#""steps_applied":2"#));
+    assert!(steps[0]["result"].as_str().unwrap().contains(r#""children_applied":2"#));
 
     let task = &v["task"];
     assert!(task["description"].as_str().unwrap().starts_with("Read chapter 4"));
@@ -308,7 +308,7 @@ async fn a_provider_failure_is_502_and_restores_the_task_and_its_steps() {
     let llm = Arc::new(ScriptThenFail::new(vec![call(
         "c1",
         "task_brief",
-        r#"{"task_id":1,"homework":true,"description":"half-written brief","duration_min":31}"#,
+        r#"{"task_id":1,"homework":false,"description":"half-written brief","duration_min":30}"#,
     )]));
     let (app, cookie, _state, _cfg) = common::app_with_logged_in_user_llm_and_state(llm).await;
     make_task(&app, &cookie, "Essay").await;
@@ -390,7 +390,7 @@ async fn a_re_brief_keeps_the_existing_steps() {
         send(&app, cookie_auth(&cookie), Method::POST, "/api/tasks/1/agent", Some("{}")).await;
     assert_eq!(status, StatusCode::OK, "{v}");
     assert_eq!(v["outcome"], "briefed");
-    assert!(v["steps"][0]["result"].as_str().unwrap().contains(r#""steps_applied":"kept""#));
+    assert!(v["steps"][0]["result"].as_str().unwrap().contains(r#""children_applied":"kept""#));
     let children = v["task"]["children"].as_array().unwrap();
     assert_eq!(children.len(), 2);
     assert_eq!(children[0]["title"], "draft");

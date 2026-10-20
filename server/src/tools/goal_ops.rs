@@ -1,136 +1,127 @@
-use super::task_ops::{checked_due, task_error, user_tz};
-use super::{check_text, ToolCtx, ToolError};
+use super::loose::{self, Envelope, Obj, Ref, Target, When};
+use super::task_ops::{user_tz, Saver};
+use super::{SessionKind, ToolCtx, ToolError};
 use crate::goals::{GoalPatch, NewGoal};
 use rusqlite::Connection;
-use schemars::JsonSchema;
-use serde::Deserialize;
+use serde_json::{json, Value};
 
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct CreateArgs {
-    /// What reaching the goal looks like, in a few words.
-    pub title: String,
-    /// What it involves and why it matters, for your own later reference.
-    #[serde(default)]
-    pub description: Option<String>,
-    /// When the goal has to be reached: YYYY-MM-DD when only the day is known,
-    /// YYYY-MM-DDTHH:MM for a set time where the user lives, or an RFC 3339
-    /// instant.
-    #[serde(default)]
-    pub due_at: Option<String>,
+const MAX_TITLE_BYTES: usize = 200;
+const MAX_DESCRIPTION_BYTES: usize = 8 * 1024;
+
+fn internal(e: impl std::fmt::Display) -> ToolError {
+    ToolError::internal(e.to_string())
 }
 
-pub fn create(
-    conn: &Connection,
-    ctx: &ToolCtx,
-    args: CreateArgs,
-) -> Result<serde_json::Value, ToolError> {
-    super::task_query::unscoped(ctx)?;
-    if let Some(d) = &args.description {
-        check_text("description", d)?;
+fn row(g: &crate::goals::Goal, tz: &jiff::tz::TimeZone, details: bool) -> Value {
+    let mut row = json!({
+        "id": g.id,
+        "title": g.title,
+        "state": g.state,
+        "tasks": g.tasks,
+        "done_tasks": g.done_tasks,
+    });
+    if let Some(due) = g.due_at.as_deref().and_then(|at| crate::due::local_label(at, g.due_on.as_deref(), tz)) {
+        row["due"] = due.into();
     }
-    let due = args.due_at.as_deref().map(|raw| checked_due(ctx, raw)).transpose()?.unwrap_or_default();
-    let goal = crate::goals::create(
-        conn,
-        ctx.user_id,
-        NewGoal {
-            title: args.title,
-            description: args.description,
-            due_at: due.due_at,
-            due_on: due.due_on,
-            zone: Some(user_tz(ctx)),
-        },
-    )
-    .map_err(task_error)?;
-    Ok(serde_json::json!({
-        "goal_id": goal.id, "title": goal.title, "due_at": goal.due_at, "due_on": goal.due_on,
-    }))
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct UpdateArgs {
-    pub goal_id: i64,
-    pub title: Option<String>,
-    pub description: Option<String>,
-    /// One of open, done, dropped.
-    pub state: Option<String>,
-    /// YYYY-MM-DD when only the day is known, YYYY-MM-DDTHH:MM for a set time
-    /// where the user lives, or an RFC 3339 instant. An empty string clears it.
-    pub due_at: Option<String>,
-}
-
-pub fn update(
-    conn: &Connection,
-    ctx: &ToolCtx,
-    args: UpdateArgs,
-) -> Result<serde_json::Value, ToolError> {
-    super::task_query::unscoped(ctx)?;
-    if let Some(d) = &args.description {
-        check_text("description", d)?;
+    if let (Some(id), Some(title)) = (g.next_task_id, &g.next_task_title) {
+        row["next_task"] = json!({
+            "id": id,
+            "title": title,
+            "due": g.next_due_at.as_deref().and_then(|at| crate::due::local_label(at, g.next_due_on.as_deref(), tz)),
+        });
     }
-    let due = args.due_at.as_deref().map(|raw| checked_due(ctx, raw)).transpose()?.unwrap_or_default();
-    let patch = GoalPatch {
-        title: args.title,
-        description: args.description,
-        state: args.state,
-        due_at: due.due_at,
-        due_on: due.due_on,
-        zone: Some(user_tz(ctx)),
+    if details && !g.description.is_empty() {
+        row["description"] = g.description.clone().into();
+    }
+    row
+}
+
+/// `goal_find`: the goals, soonest due first, or one with its tasks.
+pub fn find(conn: &Connection, ctx: &ToolCtx, raw: &str) -> Result<Value, ToolError> {
+    super::task_query::unscoped(ctx)?;
+    let mut o = Obj::new(loose::args(raw)?);
+    let mut warnings = Vec::new();
+    let id = o.take(&["id", "goal_id", "ids"]).map(loose::list).unwrap_or_default();
+    let state = o.take(&["state", "status"]).and_then(|v| loose::text(&v)).map(|s| {
+        let s = s.trim().to_lowercase();
+        if s == "any" || s == "all" {
+            s.replace("all", "any")
+        } else {
+            loose::choice(&s, crate::goals::STATES, loose::STATE_SYNONYMS).map_or(s, str::to_string)
+        }
+    });
+    for field in o.rest() {
+        warnings.push(format!("{field} was ignored: not a goal_find field"));
+    }
+    let state = match state.as_deref() {
+        Some(s) if s != "any" && !crate::goals::STATES.contains(&s) => {
+            warnings.push(format!("state {s:?} was ignored: it is open, done, dropped or any"));
+            None
+        }
+        _ => state,
     };
-    match crate::goals::update(conn, ctx.user_id, args.goal_id, &patch) {
-        Ok(Some(g)) => Ok(serde_json::json!({
-            "goal_id": g.id,
-            "title": g.title,
-            "state": g.state,
-            "due_at": g.due_at,
-            "due_on": g.due_on,
-        })),
-        Ok(None) => Err(ToolError::not_found(format!("no goal {}", args.goal_id))),
-        Err(e) => Err(task_error(e)),
+    let wanted: Vec<i64> = id.iter().filter_map(loose::id).collect();
+    let mut goals = crate::goals::list(conn, ctx.user_id, if wanted.is_empty() { state.as_deref() } else { Some("any") })
+        .map_err(|e| internal(e.to_string()))?;
+    if !wanted.is_empty() {
+        goals.retain(|g| wanted.contains(&g.id));
     }
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ListArgs {
-    /// open (default), done, dropped, or any.
-    #[serde(default)]
-    pub state: Option<String>,
-}
-
-pub fn list(
-    conn: &Connection,
-    ctx: &ToolCtx,
-    args: &ListArgs,
-) -> Result<serde_json::Value, ToolError> {
-    super::task_query::unscoped(ctx)?;
-    let mut goals = crate::goals::list(conn, ctx.user_id, args.state.as_deref()).map_err(task_error)?;
     if let Some(scope) = ctx.share.as_ref().filter(|s| !s.categories.is_empty()) {
         goals = confined(conn, goals, scope)?;
     }
+    let tz = user_tz(ctx);
     let details = ctx.share.as_ref().is_none_or(|s| s.details);
-    let goals: Vec<serde_json::Value> = goals
-        .into_iter()
-        .map(|g| {
-            let mut row = serde_json::json!({
-                "goal_id": g.id,
-                "title": g.title,
-                "state": g.state,
-                "due_at": g.due_at,
-                "tasks": g.tasks,
-                "done_tasks": g.done_tasks,
-                "next_task_id": g.next_task_id,
-                "next_task_title": g.next_task_title,
-                "next_due_at": g.next_due_at,
-            });
-            if details {
-                row["description"] = serde_json::json!(g.description);
-            }
-            row
-        })
-        .collect();
-    Ok(serde_json::json!({ "goals": goals }))
+    let mut items: Vec<Value> = goals.iter().map(|g| row(g, &tz, details)).collect();
+    for id in &wanted {
+        if !goals.iter().any(|g| g.id == *id) {
+            warnings.push(format!("no goal {id}"));
+        }
+    }
+    let mut out = if wanted.len() == 1 && items.len() == 1 {
+        let mut item = items.remove(0);
+        item["task_list"] = goal_tasks(conn, ctx, wanted[0], &tz)?;
+        json!({ "item": item })
+    } else {
+        json!({ "total": items.len(), "items": items })
+    };
+    if !warnings.is_empty() {
+        out["warnings"] = warnings.into();
+    }
+    Ok(out)
+}
+
+/// The goal's top-level tasks, each with its leaf count, as one line apiece.
+fn goal_tasks(conn: &Connection, ctx: &ToolCtx, goal: i64, tz: &jiff::tz::TimeZone) -> Result<Value, ToolError> {
+    let mut sql = "SELECT id FROM tasks WHERE user_id = ?1 AND goal_id = ?2 AND parent_id IS NULL AND state != 'dropped'".to_string();
+    let mut params: Vec<rusqlite::types::Value> = vec![ctx.user_id.into(), goal.into()];
+    if let Some((clause, shared)) = ctx.share.as_ref().and_then(|s| s.category_clause("category")) {
+        sql.push_str(&clause);
+        params.extend(shared);
+    }
+    sql.push_str(" ORDER BY due_at IS NULL, due_at, id");
+    let mut stmt = conn.prepare(&sql).map_err(internal)?;
+    let ids: Vec<i64> = stmt
+        .query_map(rusqlite::params_from_iter(params.iter()), |r| r.get(0))
+        .and_then(|rows| rows.collect::<rusqlite::Result<_>>())
+        .map_err(internal)?;
+    let mut out = Vec::new();
+    for id in ids {
+        let Some(node) = crate::tasks::node(conn, ctx.user_id, id).map_err(internal)? else { continue };
+        let t = &node.task;
+        let mut row = json!({ "id": t.id, "title": t.title, "state": t.state });
+        if let Some(due) = t.due_at.as_deref().and_then(|at| crate::due::local_label(at, t.due_on.as_deref(), tz)) {
+            row["due"] = due.into();
+        }
+        if let Some(m) = t.duration_min {
+            row["minutes"] = m.into();
+        }
+        if !node.children.is_empty() {
+            let leaves = node.leaves();
+            row["leaves"] = format!("{}/{}", leaves.iter().filter(|l| l.state == "done").count(), leaves.len()).into();
+        }
+        out.push(row);
+    }
+    Ok(out.into())
 }
 
 /// Recounts each goal, and picks its next task, from the shared categories
@@ -140,11 +131,9 @@ fn confined(
     goals: Vec<crate::goals::Goal>,
     scope: &crate::shares::ShareScope,
 ) -> Result<Vec<crate::goals::Goal>, ToolError> {
-    let internal = |e: rusqlite::Error| ToolError::internal(e.to_string());
     let mut out = Vec::with_capacity(goals.len());
     for mut g in goals {
-        let (tasks, done_tasks) =
-            crate::shares::goal_counts(conn, g.id, scope).map_err(internal)?;
+        let (tasks, done_tasks) = crate::shares::goal_counts(conn, g.id, scope).map_err(internal)?;
         if tasks == 0 {
             continue;
         }
@@ -155,159 +144,402 @@ fn confined(
             Some((id, title, due)) => (Some(id), Some(title), due),
             None => (None, None, None),
         };
+        g.next_due_on = None;
         out.push(g);
     }
     Ok(out)
 }
 
+fn cut_bytes(title: &str) -> Option<String> {
+    let cut = loose::truncate(title, MAX_TITLE_BYTES)?;
+    Some(match cut.rfind(char::is_whitespace) {
+        Some(at) if at > MAX_TITLE_BYTES / 2 => cut[..at].trim_end().to_string(),
+        _ => cut,
+    })
+}
+
+fn open_goals(conn: &Connection, user_id: i64) -> Result<Vec<(i64, String)>, ToolError> {
+    Ok(crate::goals::list(conn, user_id, None)
+        .map_err(|e| internal(e.to_string()))?
+        .into_iter()
+        .map(|g| (g.id, g.title))
+        .collect())
+}
+
+/// `goal_save`: goals made or changed, each with its task nodes hung from it.
+pub fn save(conn: &Connection, ctx: &ToolCtx, kind: SessionKind, raw: &str) -> Result<Value, ToolError> {
+    super::task_query::unscoped(ctx)?;
+    let mut obj = Obj::new(loose::args(raw)?);
+    let (goals, warning) = loose::items(&mut obj, "goals", &["items", "list", "data", "goal"], &["title", "id", "goal_id", "due", "tasks"]);
+    let mut saver = Saver::new(conn, ctx, kind)?;
+    if let Some(w) = warning {
+        saver.env.warn(w);
+    }
+    for field in obj.rest() {
+        saver.env.ignored(None, &field, "not a goal_save field");
+    }
+    if goals.is_empty() {
+        saver.env.warn("nothing to save: goals was empty");
+        return Ok(saver.env.into_value());
+    }
+    let tz = user_tz(ctx);
+    let now = jiff::Timestamp::now();
+    for (i, v) in goals.into_iter().enumerate() {
+        let r = Ref::top(i);
+        let Value::Object(map) = v else {
+            saver.env.refused(&r, "a goal is an object with a title");
+            continue;
+        };
+        let mut goal_obj = Obj::new(map);
+        let env = &mut saver.env;
+        let target = goal_obj.take(&["id", "goal_id"]).and_then(|v| loose::target(&v));
+        let mut title = goal_obj.take(&["title", "name"]).and_then(|v| loose::text(&v)).map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
+        let mut description = goal_obj.take(&["description", "desc", "details"]).and_then(|v| loose::text(&v));
+        if let Some(full) = title.clone() {
+            if let Some(cut) = cut_bytes(&full) {
+                env.adjusted(Some(&r), "title", cut.clone().into(), "a goal's title stops at 200 bytes; the whole text leads the description");
+                description = Some(match description {
+                    Some(d) => format!("{full}\n\n{d}"),
+                    None => full,
+                });
+                title = Some(cut);
+            }
+        }
+        if let Some(d) = description.as_deref().and_then(|d| loose::truncate(d, MAX_DESCRIPTION_BYTES)) {
+            env.warn(format!("{} description was cut to {MAX_DESCRIPTION_BYTES} bytes", r.0));
+            description = Some(d);
+        }
+        let mut due: Option<Option<When>> = None;
+        if let Some(v) = goal_obj.take(&["due", "due_at", "due_on", "deadline", "due_date"]) {
+            match loose::text(&v) {
+                Some(s) if s.trim().is_empty() => due = Some(None),
+                Some(s) => match loose::when(&s, &tz, now) {
+                    Some(w) => due = Some(Some(w)),
+                    None => env.ignored(Some(&r), "due", format!("a due is {} or {}", loose::DAY_FORMS, loose::MOMENT_FORMS)),
+                },
+                None => env.ignored(Some(&r), "due", "a due is text such as 2026-12-18"),
+            }
+        }
+        let state = goal_obj.take(&["state", "status"]).and_then(|v| loose::text(&v)).and_then(|s| {
+            let state = loose::choice(&s, crate::goals::STATES, loose::STATE_SYNONYMS);
+            if state.is_none() {
+                env.ignored(Some(&r), "state", "a goal's state is open, done or dropped");
+            }
+            state
+        });
+        let new = goal_obj.take(&["new", "also"]).and_then(|v| loose::boolean(&v)).unwrap_or(false);
+        let tasks = goal_obj.take(&["tasks", "children", "milestones", "items", "steps"]).map(loose::list).unwrap_or_default();
+        for field in goal_obj.rest() {
+            env.ignored(Some(&r), &field, "not a goal field");
+        }
+        let (due_at, due_on) = match due {
+            None => (None, None),
+            Some(None) => (Some(None), None),
+            Some(Some(When::Day(d))) => (None, Some(Some(d.to_string()))),
+            Some(Some(When::At(t))) => (Some(Some(t.to_string())), None),
+        };
+        let id = match target {
+            Some(Target::Id(id)) => {
+                if crate::goals::get(conn, ctx.user_id, id).map_err(internal)?.is_none() {
+                    env.refused(&r, format!("no goal {id}"));
+                    continue;
+                }
+                Some(id)
+            }
+            Some(Target::Title(t)) => match loose::by_title(&t, &open_goals(conn, ctx.user_id)?, "goal") {
+                Ok(id) => {
+                    env.adjusted(Some(&r), "id", id.into(), format!("{t:?} is goal {id}"));
+                    Some(id)
+                }
+                Err(why) => {
+                    env.refused(&r, why);
+                    continue;
+                }
+            },
+            None => match (&title, new) {
+                (Some(t), false) => {
+                    let want = loose::fold(t);
+                    let hits: Vec<i64> = open_goals(conn, ctx.user_id)?.into_iter().filter(|(_, x)| loose::fold(x) == want).map(|(id, _)| id).collect();
+                    match hits.as_slice() {
+                        [] => None,
+                        [one] => {
+                            env.adjusted(Some(&r), "id", (*one).into(), format!("open goal {one} has this title, so it was updated; new: true makes another"));
+                            Some(*one)
+                        }
+                        many => {
+                            env.refused(&r, format!("{} open goals are titled {t:?}: {}; give the id", many.len(), many.iter().map(i64::to_string).collect::<Vec<_>>().join(", ")));
+                            continue;
+                        }
+                    }
+                }
+                _ => None,
+            },
+        };
+        let saved = if let Some(id) = id {
+            {
+                let before = crate::goals::get(conn, ctx.user_id, id).map_err(internal)?;
+                let patch = GoalPatch { title, description, state: state.map(str::to_string), due_at, due_on, zone: Some(tz.clone()) };
+                let changed = before.is_none_or(|b| {
+                    patch.title.as_ref().is_some_and(|t| *t != b.title)
+                        || patch.description.as_ref().is_some_and(|d| *d != b.description)
+                        || patch.state.as_ref().is_some_and(|s| *s != b.state)
+                        || patch.due_at.is_some()
+                        || patch.due_on.is_some()
+                });
+                match crate::goals::update(conn, ctx.user_id, id, &patch) {
+                    Ok(Some(goal)) => Some((goal, if changed { "updated" } else { "unchanged" })),
+                    Ok(None) => {
+                        env.refused(&r, format!("no goal {id}"));
+                        None
+                    }
+                    Err(crate::tasks::UpdateError::Db(e)) => return Err(internal(e)),
+                    Err(e) => {
+                        env.refused(&r, e.to_string());
+                        None
+                    }
+                }
+            }
+        } else {
+            {
+                let Some(title) = title else {
+                    env.refused(&r, "a new goal needs a title; to change one, give its id");
+                    continue;
+                };
+                let made = crate::goals::create(conn, ctx.user_id, NewGoal { title, description, due_at, due_on, zone: Some(tz.clone()) });
+                match made {
+                    Ok(goal) => {
+                        let goal = if let Some(s) = state.filter(|s| *s != "open") {
+                            crate::goals::update(conn, ctx.user_id, goal.id, &GoalPatch { state: Some(s.into()), ..GoalPatch::default() })
+                                .map_err(|e| internal(e.to_string()))?
+                                .unwrap_or(goal)
+                        } else {
+                            goal
+                        };
+                        Some((goal, "created"))
+                    }
+                    Err(crate::tasks::UpdateError::Db(e)) => return Err(internal(e)),
+                    Err(e) => {
+                        env.refused(&r, e.to_string());
+                        None
+                    }
+                }
+            }
+        };
+        let Some((goal, op)) = saved else { continue };
+        saver.env.saved(&r, goal.id, &goal.title, op)["kind"] = "goal".into();
+        if !tasks.is_empty() {
+            let items = tasks.into_iter().enumerate().map(|(j, v)| (r.child(j), v)).collect();
+            saver.set_goal(Some(goal.id));
+            saver.save(items)?;
+            saver.set_goal(None);
+        }
+    }
+    Ok(saver.env.into_value())
+}
+
+/// `goal_remove`: the goals go, their tasks stay.
+pub fn remove(conn: &Connection, ctx: &ToolCtx, raw: &str) -> Result<Value, ToolError> {
+    super::task_query::unscoped(ctx)?;
+    let mut o = Obj::new(loose::args(raw)?);
+    let mut env = Envelope::default();
+    let ids = o.take(&["ids", "id", "goal_ids", "goal_id", "goals"]).map(loose::list).unwrap_or_default();
+    for field in o.rest() {
+        env.ignored(None, &field, "not a goal_remove field");
+    }
+    if ids.is_empty() {
+        env.warn("nothing to remove: ids was empty");
+        return Ok(env.into_value());
+    }
+    for (i, v) in ids.into_iter().enumerate() {
+        let r = Ref::top(i);
+        let id = match loose::target(&v) {
+            Some(Target::Id(id)) => id,
+            Some(Target::Title(t)) => match loose::by_title(&t, &open_goals(conn, ctx.user_id)?, "goal") {
+                Ok(id) => id,
+                Err(why) => {
+                    env.refused(&r, why);
+                    continue;
+                }
+            },
+            None => {
+                env.refused(&r, "a goal is named by its id");
+                continue;
+            }
+        };
+        let Some(goal) = crate::goals::get(conn, ctx.user_id, id).map_err(internal)? else {
+            env.refused(&r, format!("no goal {id}"));
+            continue;
+        };
+        if crate::goals::delete_within(conn, ctx.user_id, id).map_err(internal)? {
+            env.removed(id, &goal.title);
+        }
+    }
+    Ok(env.into_value())
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::tools::{dispatch, registry, PreparedVectors, SessionKind, ToolCtx};
-    use rusqlite::Connection;
-    use serde_json::Value;
+    use crate::tools::testkit::{call, ctx, env, saved, talk, task};
+    use crate::tools::{dispatch, registry, SessionKind, ToolCtx};
+    use serde_json::{json, Value};
 
-    fn env() -> (Connection, tempfile::TempDir) {
-        let conn = crate::db::open_memory().unwrap();
-        conn.execute(
-            "INSERT INTO users (username, pass_hash, role) VALUES ('aki', 'x', 'member')",
-            [],
-        )
-        .unwrap();
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join("defaults")).unwrap();
-        std::fs::write(
-            tmp.path().join("defaults/user.toml"),
-            "display_name = \"X\"\ntimezone = \"Asia/Tokyo\"\ntemplate = \"default\"\n",
-        )
-        .unwrap();
-        (conn, tmp)
+    fn md(days: i64) -> String {
+        let d = jiff::Timestamp::now().to_zoned(jiff::tz::TimeZone::get("America/Los_Angeles").unwrap()).date()
+            .checked_add(jiff::Span::new().days(days)).unwrap();
+        format!("{}/{}", d.month(), d.day())
     }
 
-    fn ctx(tmp: &tempfile::TempDir, scope: Option<i64>) -> ToolCtx<'_> {
-        ToolCtx {
-            config_dir: tmp.path(),
-            data_dir: tmp.path(),
-            user_id: 1,
-            username: "aki",
-            vectors: PreparedVectors::default(),
-            task_scope: scope,
-            inbox_source: None,
-            memory_source: None,
-            share: None,
-            share_thread: None,
+    fn iso(days: i64) -> String {
+        jiff::Timestamp::now().to_zoned(jiff::tz::TimeZone::get("America/Los_Angeles").unwrap()).date()
+            .checked_add(jiff::Span::new().days(days)).unwrap().to_string()
+    }
+
+    /// The course the eval's visual-arts case hands a model, in one call.
+    #[test]
+    fn a_whole_course_lands_in_one_goal_save() {
+        let (conn, tmp) = env("America/Los_Angeles");
+        let sizes = [json!("1h"), json!("45m"), json!(30), json!("1:15"), json!("50 min"), json!("40"), json!(25), json!("1.5h"), json!(20)];
+        let units: Vec<(i64, usize)> = vec![(17, 8), (29, 7), (44, 9), (58, 8)];
+        let mut tasks: Vec<Value> = units
+            .iter()
+            .enumerate()
+            .map(|(u, (due, n))| {
+                let lessons: Vec<Value> = (0..*n)
+                    .map(|l| json!({"title": format!("Lesson {}.{}", u + 1, l + 1), "minutes": sizes[(u + l) % sizes.len()]}))
+                    .collect();
+                json!({"title": format!("Unit {}", u + 1), "due": md(*due), "children": lessons})
+            })
+            .collect();
+        tasks.insert(2, json!({"title": "Unit 2b", "due": md(36), "minutes": "2h", "steps": ["Sketch", "Shade", {"title": "Critique", "duration": "1h", "due": md(90)}]}));
+        tasks.push(json!({"title": "Cumulative exam", "due": md(59), "children": [{"title": "Review all units", "minutes": "2h"}]}));
+        let out = talk(&conn, &tmp, "goal_save", json!({"goals": [{"title": "Visual Arts", "due": md(59), "tasks": tasks}]}));
+        assert_eq!(out["ok"], true, "{out}");
+        let goal = saved(&out, "0");
+        let g = crate::goals::get(&conn, 1, goal).unwrap().unwrap();
+        assert_eq!(g.due_on.as_deref(), Some(iso(59).as_str()));
+        let roots: Vec<i64> = conn
+            .prepare("SELECT id FROM tasks WHERE goal_id = ?1 AND parent_id IS NULL ORDER BY id").unwrap()
+            .query_map([goal], |r| r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+        assert_eq!(roots.len(), 6);
+        let mut lessons = 0;
+        for (i, root) in roots.iter().enumerate() {
+            let node = crate::tasks::node(&conn, 1, *root).unwrap().unwrap();
+            let sum: u32 = node.children.iter().map(|c| c.task.duration_min.unwrap()).sum();
+            assert_eq!(node.task.duration_min, Some(sum), "{} sums its lessons", node.task.title);
+            for child in &node.children {
+                assert_eq!(child.task.duration_min.unwrap() % 5, 0);
+                if let (Some(own), Some(limit)) = (&child.task.due_at, &node.task.due_at) {
+                    assert!(own <= limit, "{} is due after {}", child.task.title, node.task.title);
+                }
+                lessons += 1;
+            }
+            let due = [17, 29, 36, 44, 58, 59][i];
+            assert_eq!(node.task.due_on.as_deref(), Some(iso(due).as_str()), "{}", node.task.title);
+        }
+        assert!(lessons >= 35, "{lessons} lessons");
+        assert!(out["adjusted"].as_array().unwrap().iter().any(|a| a["field"] == "due" && a["ref"] == "0.2.2"), "the critique was clamped");
+        assert_eq!(task(&conn, saved(&out, "0.0.3")).duration_min, Some(75));
+        assert_eq!(task(&conn, saved(&out, "0.2.0")).duration_min, Some(30), "the unsized parts share what is left of 2h");
+
+        let again = talk(&conn, &tmp, "goal_save", json!({"goals": [{"title": "Visual Arts", "tasks": [{"title": "Unit 1", "children": [{"title": "Lesson 1.1", "state": "done"}]}]}]}));
+        assert_eq!(again["saved"][0]["op"], "unchanged");
+        assert_eq!(saved(&again, "0.0"), roots[0], "the same course sent twice updates, not doubles");
+        assert_eq!(task(&conn, saved(&again, "0.0.0")).state, "done");
+    }
+
+    #[test]
+    fn a_goal_is_made_read_changed_and_removed_with_its_tasks_left_behind() {
+        let (conn, tmp) = env("Asia/Tokyo");
+        let out = talk(&conn, &tmp, "goal_save", json!({"goals": [{"title": "get into the programme", "description": "the whole application", "due": "2099-11-01",
+            "tasks": [{"title": "essay", "due": "2099-10-25"}, {"title": "form", "due": "2099-10-02"}]}]}));
+        let goal = saved(&out, "0");
+        assert_eq!(out["saved"][0]["kind"], "goal");
+        assert_eq!(crate::goals::get(&conn, 1, goal).unwrap().unwrap().due_at.as_deref(), Some("2099-11-01T14:59:00Z"));
+        let found = talk(&conn, &tmp, "goal_find", json!({}));
+        assert_eq!(found["total"], 1);
+        assert_eq!(found["items"][0]["tasks"], 2);
+        assert_eq!(found["items"][0]["next_task"]["title"], "form");
+        let one = talk(&conn, &tmp, "goal_find", json!({"id": goal}));
+        assert_eq!(one["item"]["task_list"].as_array().unwrap().len(), 2);
+        let out = talk(&conn, &tmp, "goal_save", json!({"goals": [{"id": "Get into the  programme", "state": "reached"}]}));
+        assert_eq!(out["saved"][0]["op"], "updated");
+        assert_eq!(talk(&conn, &tmp, "goal_find", json!({}))["total"], 0);
+        assert_eq!(talk(&conn, &tmp, "goal_find", json!({"state": "any"}))["total"], 1);
+        let essay = saved(&talk(&conn, &tmp, "task_find", json!({"query": "essay"})).pipe_items(), "x");
+        let out = talk(&conn, &tmp, "goal_remove", json!({"ids": [goal, 999]}));
+        assert_eq!(out["removed"][0]["id"], goal);
+        assert_eq!(out["refused"][0]["why"], "no goal 999");
+        assert_eq!(task(&conn, essay).goal_id, None, "its tasks stay, detached");
+    }
+
+    trait Items {
+        fn pipe_items(self) -> Value;
+    }
+
+    impl Items for Value {
+        fn pipe_items(self) -> Value {
+            json!({ "saved": self["items"].as_array().unwrap().iter().map(|i| json!({"ref": "x", "id": i["id"]})).collect::<Vec<_>>() })
         }
     }
 
-    fn call(conn: &Connection, tmp: &tempfile::TempDir, name: &str, args: &str) -> Value {
-        dispatch(conn, &ctx(tmp, None), SessionKind::Talk, name, args).unwrap()
+    #[test]
+    fn a_goal_save_forgives_what_it_can_and_refuses_what_it_cannot() {
+        let (conn, tmp) = env("UTC");
+        let out = talk(&conn, &tmp, "goal_save", json!({"title": "bare goal", "due": "someday", "colour": "red"}));
+        assert_eq!(out["saved"][0]["title"], "bare goal");
+        assert!(out["ignored"].as_array().unwrap().iter().any(|i| i["field"] == "due"));
+        assert!(out["ignored"].as_array().unwrap().iter().any(|i| i["field"] == "colour"));
+        let out = talk(&conn, &tmp, "goal_save", json!({"goals": [{"id": 99, "title": "x"}, {"description": "no title"}, {"title": "bare goal"}]}));
+        assert_eq!(out["refused"][0]["why"], "no goal 99");
+        assert_eq!(out["refused"][1]["ref"], "1");
+        assert_eq!(out["saved"][0]["op"], "unchanged", "the same title is the same goal");
+        let out = talk(&conn, &tmp, "goal_save", json!({"goals": []}));
+        assert_eq!(out["ok"], true);
+        let long = "goal ".repeat(60);
+        let out = talk(&conn, &tmp, "goal_save", json!({"goals": [{"title": long}]}));
+        let g = crate::goals::get(&conn, 1, saved(&out, "0")).unwrap().unwrap();
+        assert!(g.title.len() <= 200 && g.description.starts_with("goal goal"));
+        let out = talk(&conn, &tmp, "goal_create", json!({"title": "old shape", "due_at": "2099-01-01"}));
+        assert!(out["warnings"][0].as_str().unwrap().contains("goal_save"));
+        let id = saved(&out, "0");
+        talk(&conn, &tmp, "goal_update", json!({"goal_id": id, "state": "done"}));
+        assert_eq!(crate::goals::get(&conn, 1, id).unwrap().unwrap().state, "done");
+        assert_eq!(talk(&conn, &tmp, "goal_list", json!({"state": "done"}))["total"], 1);
     }
 
     #[test]
-    fn a_goal_is_made_read_back_and_closed() {
-        let (conn, tmp) = env();
-        let out = call(
-            &conn,
-            &tmp,
-            "goal_create",
-            r#"{"title":"get into the programme","description":"the whole application","due_at":"2026-11-01"}"#,
-        );
-        let id = out["goal_id"].as_i64().unwrap();
-        assert_eq!(out["due_at"], "2026-11-01T14:59:00Z", "a bare day is the end of it in Tokyo");
-
-        let out = call(&conn, &tmp, "goal_list", "{}");
-        assert_eq!(out["goals"].as_array().unwrap().len(), 1);
-        assert_eq!(out["goals"][0]["goal_id"], id);
-        assert_eq!(out["goals"][0]["description"], "the whole application");
-        assert_eq!(out["goals"][0]["tasks"], 0);
-
-        let out = call(&conn, &tmp, "goal_update", &format!(r#"{{"goal_id":{id},"state":"done"}}"#));
-        assert_eq!(out["state"], "done");
-        assert!(call(&conn, &tmp, "goal_list", "{}")["goals"].as_array().unwrap().is_empty());
-        assert_eq!(
-            call(&conn, &tmp, "goal_list", r#"{"state":"any"}"#)["goals"].as_array().unwrap().len(),
-            1
-        );
-    }
-
-    #[test]
-    fn a_goal_counts_the_tasks_hung_from_it_and_names_the_next_one_due() {
-        let (conn, tmp) = env();
-        let goal = call(&conn, &tmp, "goal_create", r#"{"title":"apply"}"#)["goal_id"]
-            .as_i64()
-            .unwrap();
-        let task = |args: &str| call(&conn, &tmp, "task_create", args)["task_id"].as_i64().unwrap();
-        let essay = task(&format!(r#"{{"title":"essay","goal_id":{goal},"due_at":"2026-10-25"}}"#));
-        let form = task(&format!(r#"{{"title":"form","goal_id":{goal},"due_at":"2026-10-02"}}"#));
-        task(r#"{"title":"unrelated"}"#);
-        call(&conn, &tmp, "task_update", &format!(r#"{{"task_id":{essay},"state":"done"}}"#));
-
-        let out = call(&conn, &tmp, "goal_list", "{}");
-        assert_eq!(out["goals"][0]["tasks"], 2);
-        assert_eq!(out["goals"][0]["done_tasks"], 1);
-        assert_eq!(out["goals"][0]["next_task_id"], form);
-        assert_eq!(out["goals"][0]["next_task_title"], "form");
-    }
-
-    #[test]
-    fn a_goal_tool_refuses_what_is_not_a_goal() {
-        let (conn, tmp) = env();
-        let bad = |name: &str, args: &str| {
-            dispatch(&conn, &ctx(&tmp, None), SessionKind::Talk, name, args).unwrap_err()
-        };
-        assert_eq!(bad("goal_create", r#"{"title":"   "}"#).kind, "rejected");
-        assert_eq!(bad("goal_create", r#"{"title":"x","due_at":"friday"}"#).kind, "rejected");
-        assert_eq!(bad("goal_update", r#"{"goal_id":99,"title":"x"}"#).kind, "not_found");
-        let id = call(&conn, &tmp, "goal_create", r#"{"title":"apply"}"#)["goal_id"]
-            .as_i64()
-            .unwrap();
-        assert_eq!(
-            bad("goal_update", &format!(r#"{{"goal_id":{id},"state":"someday"}}"#)).kind,
-            "rejected"
-        );
-        assert_eq!(bad("goal_list", r#"{"state":"maybe"}"#).kind, "rejected");
-    }
-
-    #[test]
-    fn the_goal_tools_sit_where_the_user_can_be_asked_and_nowhere_else() {
-        for name in ["goal_create", "goal_update", "goal_list"] {
-            for kind in [SessionKind::Talk, SessionKind::Nightly] {
+    fn the_goal_tools_sit_where_the_user_can_be_asked() {
+        for name in ["goal_find", "goal_save", "goal_remove"] {
+            for kind in [SessionKind::Talk, SessionKind::Nightly, SessionKind::Call] {
                 assert!(registry(kind).contains(&name), "{name} missing from {kind:?}");
             }
             for kind in [SessionKind::Import, SessionKind::Inbox] {
                 assert!(!registry(kind).contains(&name), "{name} reached {kind:?}");
             }
         }
-        assert!(registry(SessionKind::Trigger).contains(&"goal_list"));
-        assert!(!registry(SessionKind::Trigger).contains(&"goal_create"), "a wake-up reads goals only");
-        let (conn, tmp) = env();
-        let e = dispatch(&conn, &ctx(&tmp, Some(1)), SessionKind::Talk, "goal_list", "{}")
-            .unwrap_err();
+        assert!(registry(SessionKind::Trigger).contains(&"goal_find"));
+        assert!(!registry(SessionKind::Trigger).contains(&"goal_save"), "a wake-up reads goals only");
+        let (conn, tmp) = env("UTC");
+        let scoped = ToolCtx { task_scope: Some(1), ..ctx(&tmp) };
+        let e = dispatch(&conn, &scoped, SessionKind::Talk, "goal_find", "{}").unwrap_err();
         assert_eq!(e.kind, "rejected", "a scoped session surveys nothing");
-    }
-
-    fn share_ctx(tmp: &tempfile::TempDir, scope: crate::shares::ShareScope) -> ToolCtx<'_> {
-        ToolCtx { share: Some(scope), ..ctx(tmp, None) }
+        let e = call(&conn, &tmp, SessionKind::Trigger, "goal_save", r#"{"goals":[{"title":"x"}]}"#).unwrap_err();
+        assert_eq!(e.kind, "forbidden");
     }
 
     #[test]
-    fn goal_list_under_a_share_counts_only_allowed_tasks_and_hides_empty_goals() {
-        let (conn, tmp) = env();
-        let g = call(&conn, &tmp, "goal_create", r#"{"title":"pass chemistry"}"#);
-        let h = call(&conn, &tmp, "goal_create", r#"{"title":"get healthy","description":"private"}"#);
-        let gid = g["goal_id"].as_i64().unwrap();
-        let hid = h["goal_id"].as_i64().unwrap();
-        call(&conn, &tmp, "task_create", &format!(r#"{{"title":"lab","category":"school","goal_id":{gid}}}"#));
-        let quiz = call(&conn, &tmp, "task_create", &format!(r#"{{"title":"quiz","category":"school","goal_id":{gid}}}"#));
-        call(&conn, &tmp, "task_update", &format!(r#"{{"task_id":{},"state":"done"}}"#, quiz["task_id"]));
-        call(&conn, &tmp, "task_create", &format!(r#"{{"title":"gym","category":"health","goal_id":{gid}}}"#));
-        call(&conn, &tmp, "task_create", &format!(r#"{{"title":"forms","category":"health","goal_id":{hid}}}"#));
-        let sctx = share_ctx(&tmp, crate::shares::ShareScope { categories: vec!["school".into()], ..Default::default() });
-        let out = dispatch(&conn, &sctx, SessionKind::Share, "goal_list", "{}").unwrap();
-        let goals = out["goals"].as_array().unwrap();
-        assert_eq!(goals.len(), 1, "{out}");
-        assert_eq!(goals[0]["tasks"], 2);
-        assert_eq!(goals[0]["done_tasks"], 1);
-        assert!(goals[0].get("description").is_none(), "details are off");
-        assert_eq!(goals[0]["next_task_title"], "lab", "the next task due is an allowed one");
+    fn a_share_counts_only_allowed_tasks_and_hides_empty_goals() {
+        let (conn, tmp) = env("UTC");
+        talk(&conn, &tmp, "goal_save", json!({"goals": [
+            {"title": "pass chemistry", "tasks": [{"title": "lab", "category": "school"}, {"title": "quiz", "category": "school", "state": "done"}, {"title": "gym", "category": "health"}]},
+            {"title": "get healthy", "description": "private", "tasks": [{"title": "forms", "category": "health"}]}
+        ]}));
+        let sctx = ToolCtx { share: Some(crate::shares::ShareScope { categories: vec!["school".into()], ..Default::default() }), ..ctx(&tmp) };
+        let out = dispatch(&conn, &sctx, SessionKind::Share, "goal_find", "{}").unwrap();
+        assert_eq!(out["total"], 1, "{out}");
+        assert_eq!(out["items"][0]["tasks"], 2);
+        assert_eq!(out["items"][0]["done_tasks"], 1);
+        assert!(out["items"][0].get("description").is_none());
+        assert_eq!(out["items"][0]["next_task"]["title"], "lab");
     }
 }

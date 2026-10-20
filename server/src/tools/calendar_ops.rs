@@ -1,70 +1,30 @@
+use super::loose::{self, Envelope, Obj, Ref, Target};
 use super::{ToolCtx, ToolError};
 use crate::calendar::{self, CalendarError};
 use rusqlite::Connection;
-use schemars::JsonSchema;
-use serde::Deserialize;
+use serde_json::{json, Value};
+use std::fmt::Write as _;
 
-pub const MAX_DAYS_AHEAD: u32 = 14;
+pub const MAX_DAYS_AHEAD: i64 = 14;
 
-#[derive(Deserialize, JsonSchema, Clone, Copy)]
-#[serde(rename_all = "snake_case")]
-pub enum Day {
-    Mon,
-    Tue,
-    Wed,
-    Thu,
-    Fri,
-    Sat,
-    Sun,
-}
+const KIND_SYNONYMS: &[(&str, &str)] = &[
+    ("hard", "fixed"),
+    ("class", "fixed"),
+    ("school", "fixed"),
+    ("work", "fixed"),
+    ("commitment", "fixed"),
+    ("soft", "busy"),
+    ("event", "busy"),
+    ("appointment", "busy"),
+    ("info", "note"),
+    ("informational", "note"),
+    ("reminder", "note"),
+    ("open", "free"),
+    ("task_time", "free"),
+];
 
-impl Day {
-    fn as_str(self) -> &'static str {
-        match self {
-            Day::Mon => "mon",
-            Day::Tue => "tue",
-            Day::Wed => "wed",
-            Day::Thu => "thu",
-            Day::Fri => "fri",
-            Day::Sat => "sat",
-            Day::Sun => "sun",
-        }
-    }
-}
-
-#[derive(Deserialize, JsonSchema, Clone, Copy)]
-#[serde(rename_all = "snake_case")]
-pub enum Kind {
-    Fixed,
-    Busy,
-    Note,
-    Free,
-}
-
-impl Kind {
-    fn as_str(self) -> &'static str {
-        match self {
-            Kind::Fixed => "fixed",
-            Kind::Busy => "busy",
-            Kind::Note => "note",
-            Kind::Free => "free",
-        }
-    }
-}
-
-fn mask(days: &[Day]) -> i64 {
-    days.iter().fold(0, |m, d| {
-        m | calendar::day_mask(&[d.as_str()]).expect("a Day is always a known day name")
-    })
-}
-
-fn failed(e: CalendarError) -> ToolError {
-    match e {
-        CalendarError::Invalid(m) => ToolError::rejected(m),
-        e @ (CalendarError::TooMany | CalendarError::Duplicate { .. }) => ToolError::rejected(e.to_string()),
-        e @ CalendarError::NotFound(_) => ToolError::not_found(e.to_string()),
-        CalendarError::Db(e) => ToolError::internal(e.to_string()),
-    }
+fn internal(e: impl std::fmt::Display) -> ToolError {
+    ToolError::internal(e.to_string())
 }
 
 /// The calendar belongs to the user, not to one imported task or inbox item, so
@@ -76,173 +36,260 @@ fn unscoped(ctx: &ToolCtx) -> Result<(), ToolError> {
     Ok(())
 }
 
-/// Days reach the model as names and the database as a bitmask.
-fn row(e: &calendar::Entry) -> serde_json::Value {
-    serde_json::json!({
-        "entry_id": e.id,
+fn today(ctx: &ToolCtx) -> jiff::civil::Date {
+    jiff::Timestamp::now().to_zoned(crate::triggers::timezone(ctx.config_dir, ctx.username)).date()
+}
+
+/// How an entry recurs, in a few words.
+fn when(e: &calendar::Entry) -> String {
+    let mut out = match &e.on_date {
+        Some(on) => format!("{on} {}-{}", e.start_time, e.end_time),
+        None => format!("{} {}-{}", e.day_names.join(","), e.start_time, e.end_time),
+    };
+    if let Some(from) = &e.from_date {
+        let _ = write!(out, " from {from}");
+    }
+    if let Some(until) = &e.until_date {
+        let _ = write!(out, " until {until}");
+    }
+    out
+}
+
+fn row(e: &calendar::Entry) -> Value {
+    let mut v = json!({
+        "id": e.id,
         "title": e.title,
         "kind": e.kind,
+        "start": e.start_time,
+        "end": e.end_time,
         "quiet": e.quiet,
-        "start_time": e.start_time,
-        "end_time": e.end_time,
-        "days": e.day_names,
-        "on_date": e.on_date,
-        "from_date": e.from_date,
-        "until_date": e.until_date,
-        "skipped_dates": e.exceptions,
-    })
+    });
+    match &e.on_date {
+        Some(on) => v["on"] = on.clone().into(),
+        None => v["days"] = json!(e.day_names),
+    }
+    if let Some(from) = &e.from_date {
+        v["from"] = from.clone().into();
+    }
+    if let Some(until) = &e.until_date {
+        v["until"] = until.clone().into();
+    }
+    if !e.exceptions.is_empty() {
+        v["skipped"] = json!(e.exceptions);
+    }
+    if e.external_id.is_some() {
+        v["imported"] = true.into();
+    }
+    v
 }
 
-fn today(ctx: &ToolCtx) -> jiff::civil::Date {
-    let tz = crate::triggers::timezone(ctx.config_dir, ctx.username);
-    jiff::Timestamp::now().to_zoned(tz).date()
-}
-
-fn parse_date(field: &str, raw: &str) -> Result<jiff::civil::Date, ToolError> {
-    raw.parse()
-        .map_err(|_| ToolError::rejected(format!("{field} must be YYYY-MM-DD, got {raw:?}")))
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ListArgs {
-    /// First day to read, YYYY-MM-DD. Defaults to today.
-    #[serde(default)]
-    pub date: Option<String>,
-    /// How many days from `date`, 1 to 14. Defaults to 1.
-    #[serde(default)]
-    pub days: Option<u32>,
-}
-
-pub fn list(
-    conn: &Connection,
-    ctx: &ToolCtx,
-    args: &ListArgs,
-) -> Result<serde_json::Value, ToolError> {
+/// `calendar_find`: every entry with its rule, and what lands on each day asked for.
+pub fn find(conn: &Connection, ctx: &ToolCtx, raw: &str) -> Result<Value, ToolError> {
     unscoped(ctx)?;
-    let start = match args.date.as_deref() {
-        Some(d) => parse_date("date", d)?,
-        None => today(ctx),
+    let mut o = Obj::new(loose::args(raw)?);
+    let mut warnings = Vec::new();
+    let today = today(ctx);
+    let mut start = match o.take(&["date", "day", "from", "on"]).and_then(|v| loose::text(&v)) {
+        Some(raw) => loose::day(&raw, today).unwrap_or_else(|| {
+            warnings.push(format!("date {raw:?} was ignored: a day is {}", loose::DAY_FORMS));
+            today
+        }),
+        None => today,
     };
-    let span = args.days.unwrap_or(1);
+    let mut span = o.take(&["days", "span", "count"]).and_then(|v| loose::integer(&v)).unwrap_or(1);
     if !(1..=MAX_DAYS_AHEAD).contains(&span) {
-        return Err(ToolError::rejected(format!("days must be in 1..={MAX_DAYS_AHEAD}")));
+        warnings.push(format!("days is 1 to {MAX_DAYS_AHEAD}; read {}", span.clamp(1, MAX_DAYS_AHEAD)));
+        span = span.clamp(1, MAX_DAYS_AHEAD);
+    }
+    for field in o.rest() {
+        warnings.push(format!("{field} was ignored: not a calendar_find field"));
     }
     if let Some(scope) = &ctx.share {
-        let (first, shared_end) = scope.horizon(today(ctx));
-        let internal = |e: jiff::Error| ToolError::internal(e.to_string());
-        let asked_end = start.checked_add(jiff::Span::new().days(i64::from(span))).map_err(internal)?;
-        if start < first || asked_end > shared_end {
-            return Err(ToolError::rejected(format!(
-                "this link shares {} to {}",
-                first,
-                shared_end.yesterday().map_err(internal)?
-            )));
+        let (first, end) = scope.horizon(today);
+        let last = end.yesterday().map_err(internal)?;
+        if start < first || start > last {
+            warnings.push(format!("this link shares {first} to {last}"));
+            start = first;
+        }
+        let room = i64::from((end - start).get_days().max(1));
+        if span > room {
+            warnings.push(format!("this link shares {first} to {last}"));
+            span = room;
         }
     }
-    let mut days = Vec::with_capacity(span as usize);
+    let mut days = Vec::new();
     let mut date = start;
     for _ in 0..span {
-        let occurrences = calendar::occurrences(conn, ctx.user_id, date)
-            .map_err(|e| ToolError::internal(e.to_string()))?;
-        days.push(serde_json::json!({ "date": date.to_string(), "occurrences": occurrences }));
-        date = date.tomorrow().map_err(|e| ToolError::internal(e.to_string()))?;
+        let occurrences = calendar::occurrences(conn, ctx.user_id, date).map_err(internal)?;
+        days.push(json!({ "date": date.to_string(), "occurrences": occurrences }));
+        date = date.tomorrow().map_err(internal)?;
     }
-    Ok(serde_json::json!({ "days": days }))
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct AddArgs {
-    /// What it is, as the user would say it: "school", "swim practice".
-    pub title: String,
-    pub kind: Kind,
-    /// Whether deliveries wait for the window to end. Defaults to true, and is
-    /// always false for a note or free time.
-    #[serde(default)]
-    pub quiet: Option<bool>,
-    /// Zero-padded HH:MM in the user's timezone.
-    pub start_time: String,
-    pub end_time: String,
-    /// The weekdays it repeats on. Leave it out for a one-off entry and give
-    /// `on_date` instead.
-    #[serde(default)]
-    pub days: Option<Vec<Day>>,
-    /// The single date a one-off entry happens, YYYY-MM-DD.
-    #[serde(default)]
-    pub on_date: Option<String>,
-    /// Optional first and last date a repeating entry is valid, YYYY-MM-DD.
-    #[serde(default)]
-    pub from_date: Option<String>,
-    #[serde(default)]
-    pub until_date: Option<String>,
-    /// For a one-off entry: the IANA zone `on_date` and the times are given in,
-    /// when not the user's own.
-    #[serde(default)]
-    pub tz: Option<String>,
-    /// Add it even though an entry with the same title already overlaps it.
-    #[serde(default)]
-    pub also: bool,
-}
-
-/// A one-off entry whose end is behind the user's clock is a lay in the past.
-/// A recurring one is not, and neither is `until_date`, which bounds an entry
-/// rather than placing it.
-fn check_past(ctx: &ToolCtx, args: &AddArgs, days: i64) -> Result<(), ToolError> {
-    let Some(raw) = args.on_date.as_deref().filter(|_| days == 0) else { return Ok(()) };
-    let (Ok(date), true) = (raw.parse(), crate::templates::valid_time(&args.end_time)) else {
-        return Ok(());
+    let mut out = if ctx.share.is_some() {
+        json!({ "days": days })
+    } else {
+        let entries = calendar::list(conn, ctx.user_id).map_err(internal)?;
+        json!({ "total": entries.len(), "items": entries.iter().map(row).collect::<Vec<_>>(), "days": days })
     };
-    if super::has_gone_by(ctx, date, &args.end_time) {
-        return Err(ToolError::past(format!(
-            "{raw} {} has gone by; put a one-off entry on a day still ahead",
-            args.end_time
-        )));
+    if !warnings.is_empty() {
+        out["warnings"] = warnings.into();
     }
-    Ok(())
+    Ok(out)
 }
 
-/// A one-off entry's date and times given in `tz`, restated in the user's own
-/// zone. A repeating entry keeps the user's clock, so it takes no `tz`.
-fn one_off_in_user_zone(
-    ctx: &ToolCtx,
-    tz: Option<&str>,
-    on_date: Option<&str>,
-    start: Option<&str>,
-    end: Option<&str>,
-    repeating: bool,
-) -> Result<Option<(String, String, String)>, ToolError> {
-    if tz.is_none_or(|t| t.trim().is_empty()) {
-        return Ok(None);
+/// One entry of a call, read.
+#[derive(Default)]
+struct Entry {
+    target: Option<Target>,
+    title: Option<String>,
+    kind: Option<&'static str>,
+    start: Option<String>,
+    end: Option<String>,
+    days: Option<i64>,
+    on: Option<String>,
+    from: Option<String>,
+    until: Option<String>,
+    quiet: Option<bool>,
+    tz: Option<String>,
+    skip: Vec<jiff::civil::Date>,
+    unskip: Vec<jiff::civil::Date>,
+    new: bool,
+}
+
+impl Entry {
+    fn changes_fields(&self) -> bool {
+        self.title.is_some()
+            || self.kind.is_some()
+            || self.start.is_some()
+            || self.end.is_some()
+            || self.days.is_some()
+            || self.on.is_some()
+            || self.from.is_some()
+            || self.until.is_some()
+            || self.quiet.is_some()
     }
-    let (Some(on_date), Some(start), Some(end), false) = (on_date, start, end, repeating) else {
-        return Err(ToolError::rejected(
-            "tz goes with a one-off entry: give on_date, start_time and end_time together, and no days",
-        ));
+}
+
+/// Weekday names, a list or one string: `["tue","thu"]`, `"tue,thu"`,
+/// `"Tuesdays and Thursdays"`, `"weekdays"`, `"daily"`.
+fn day_mask(v: &Value) -> Result<i64, String> {
+    let words: Vec<String> = match v {
+        Value::Array(items) => items.iter().filter_map(loose::text).collect(),
+        Value::String(s) => vec![s.clone()],
+        _ => return Err("days are weekday names such as [\"tue\", \"thu\"]".into()),
     };
-    let date: jiff::civil::Date = on_date
-        .parse()
-        .map_err(|_| ToolError::rejected(format!("on_date must be YYYY-MM-DD, got {on_date:?}")))?;
-    let (date, walls) = super::in_user_zone(ctx, tz, date, &[start, end])?;
-    Ok(Some((date.to_string(), walls[0].clone(), walls[1].clone())))
+    let mut names = Vec::new();
+    for word in words {
+        let w = word.to_lowercase();
+        match w.trim() {
+            "weekdays" | "weekday" | "平日" => names.extend(["mon", "tue", "wed", "thu", "fri"]),
+            "weekends" | "weekend" | "週末" | "土日" => names.extend(["sat", "sun"]),
+            "daily" | "every day" | "everyday" | "all" | "毎日" => names.extend(calendar::DAY_NAMES),
+            _ => {
+                for part in w.split([',', ' ', '+', '/', '&', '、', '・']).filter(|p| !p.is_empty() && *p != "and" && *p != "every") {
+                    let part = part.trim_end_matches('s');
+                    match loose::weekday_name(part).or_else(|| loose::weekday_name(&format!("{part}s"))) {
+                        Some(n) => names.push(n),
+                        None => return Err(format!("{part:?} is not a weekday")),
+                    }
+                }
+            }
+        }
+    }
+    if names.is_empty() {
+        return Err("days are weekday names such as [\"tue\", \"thu\"]".into());
+    }
+    calendar::day_mask(&names).map_err(|e| e.to_string())
+}
+
+fn read_entry(obj: &mut Obj, r: &Ref, env: &mut Envelope, today: jiff::civil::Date) -> Entry {
+    let mut entry = Entry::default();
+    let day_field = |obj: &mut Obj, env: &mut Envelope, field: &str, names: &[&str]| -> Option<String> {
+        let v = obj.take(names)?;
+        let raw = loose::text(&v).unwrap_or_default();
+        if raw.trim().is_empty() {
+            return Some(String::new());
+        }
+        let day = loose::day(&raw, today).map(|d| d.to_string());
+        if day.is_none() {
+            env.ignored(Some(r), field, format!("a day is {}", loose::DAY_FORMS));
+        }
+        day
+    };
+    entry.on = day_field(obj, env, "on", &["on", "on_date", "date", "day"]);
+    entry.from = day_field(obj, env, "from", &["from", "from_date", "start_date", "starts_on"]);
+    entry.until = day_field(obj, env, "until", &["until", "until_date", "end_date", "ends_on", "through"]);
+    if let Some(v) = obj.take(&["id", "entry_id", "event_id", "calendar_id"]) {
+        entry.target = loose::target(&v);
+    }
+    entry.title = obj.take(&["title", "name", "summary"]).and_then(|v| loose::text(&v)).map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
+    if let Some(t) = &entry.title {
+        if t.chars().count() > calendar::MAX_TITLE_CHARS {
+            let cut: String = t.chars().take(calendar::MAX_TITLE_CHARS).collect();
+            env.adjusted(Some(r), "title", cut.clone().into(), "a calendar title stops at 80 characters");
+            entry.title = Some(cut.trim_end().to_string());
+        }
+    }
+    if let Some(v) = obj.take(&["kind", "type"]) {
+        match loose::text(&v).and_then(|s| loose::choice(&s, &calendar::KINDS, KIND_SYNONYMS)) {
+            Some(k) => entry.kind = Some(k),
+            None => env.ignored(Some(r), "kind", "kind is fixed, busy, note or free"),
+        }
+    }
+    let time = |obj: &mut Obj, env: &mut Envelope, field: &str, names: &[&str]| -> Option<String> {
+        let v = obj.take(names)?;
+        let raw = loose::text(&v).unwrap_or_default();
+        if let Some(t) = loose::wall_time(&raw) {
+            return Some(t);
+        }
+        if let Some((a, b)) = raw.split_once(['-', '–', '~', '〜']).or_else(|| raw.split_once(" to ")) {
+            if let (Some(a), Some(b)) = (loose::wall_time(a), loose::wall_time(b)) {
+                return Some(format!("{a}-{b}"));
+            }
+        }
+        env.ignored(Some(r), field, "a time is HH:MM, 5pm or 17時");
+        None
+    };
+    let start = time(obj, env, "start", &["start", "start_time", "starts", "begin", "from_time", "time"]);
+    let end = time(obj, env, "end", &["end", "end_time", "ends", "until_time", "to"]);
+    if let Some((a, b)) = start.as_deref().and_then(|s| s.split_once('-')) {
+        entry.start = Some(a.to_string());
+        entry.end = end.or_else(|| Some(b.to_string()));
+    } else {
+        entry.start = start;
+        entry.end = end;
+    }
+    if let Some(v) = obj.take(&["days", "weekdays", "repeat", "every", "on_days"]) {
+        match day_mask(&v) {
+            Ok(m) => entry.days = Some(m),
+            Err(why) => env.ignored(Some(r), "days", why),
+        }
+    }
+    if let Some(v) = obj.take(&["quiet", "do_not_disturb", "dnd", "hold"]) {
+        entry.quiet = loose::boolean(&v);
+    }
+    entry.tz = obj.take(&["tz", "timezone", "zone"]).and_then(|v| loose::text(&v)).filter(|t| !t.trim().is_empty());
+    let dates = |obj: &mut Obj, env: &mut Envelope, field: &str, names: &[&str]| -> Vec<jiff::civil::Date> {
+        let Some(v) = obj.take(names) else { return Vec::new() };
+        let mut out = Vec::new();
+        for raw in loose::list(v).iter().filter_map(loose::text) {
+            match loose::day(&raw, today) {
+                Some(d) => out.push(d),
+                None => env.ignored(Some(r), field, format!("{raw:?} is not a day: {}", loose::DAY_FORMS)),
+            }
+        }
+        out
+    };
+    entry.skip = dates(obj, env, "skip", &["skip", "skip_dates", "skipped", "except", "cancel"]);
+    entry.unskip = dates(obj, env, "unskip", &["unskip", "restore", "unskip_dates"]);
+    entry.new = obj.take(&["new", "also"]).and_then(|v| loose::boolean(&v)).unwrap_or(false);
+    entry
 }
 
 /// An entry already on the calendar under the same title whose time overlaps
 /// on a day both reach.
-fn same_entry(
-    conn: &Connection,
-    ctx: &ToolCtx,
-    title: &str,
-    start: &str,
-    end: &str,
-    days: i64,
-    on_date: Option<&str>,
-) -> Result<Option<calendar::Entry>, ToolError> {
-    let weekday_bit = |d: &str| -> i64 {
-        d.parse::<jiff::civil::Date>()
-            .map_or(0, |d| 1 << (d.weekday().to_monday_zero_offset()))
-    };
-    let entries = calendar::list(conn, ctx.user_id).map_err(|e| ToolError::internal(e.to_string()))?;
+fn same_entry(conn: &Connection, user_id: i64, title: &str, start: &str, end: &str, days: i64, on_date: Option<&str>) -> Result<Option<calendar::Entry>, ToolError> {
+    let weekday_bit = |d: &str| -> i64 { d.parse::<jiff::civil::Date>().map_or(0, |d| 1 << (d.weekday().to_monday_zero_offset())) };
+    let entries = calendar::list(conn, user_id).map_err(internal)?;
     Ok(entries.into_iter().find(|e| {
         let shared_day = match (days, e.days) {
             (0, 0) => on_date.is_some() && e.on_date.as_deref() == on_date,
@@ -250,197 +297,332 @@ fn same_entry(
             (ours, 0) => e.on_date.as_deref().is_some_and(|d| ours & weekday_bit(d) != 0),
             (ours, theirs) => ours & theirs != 0,
         };
-        shared_day
-            && super::same_title(&e.title, title)
-            && e.start_time.as_str() < end
-            && start < e.end_time.as_str()
+        shared_day && super::same_title(&e.title, title) && e.start_time.as_str() < end && start < e.end_time.as_str()
     }))
 }
 
-pub fn add(conn: &Connection, ctx: &ToolCtx, mut args: AddArgs) -> Result<serde_json::Value, ToolError> {
-    unscoped(ctx)?;
-    super::check_text("title", &args.title)?;
-    if let Some((on_date, start, end)) = one_off_in_user_zone(
-        ctx,
-        args.tz.as_deref(),
-        args.on_date.as_deref(),
-        Some(&args.start_time),
-        Some(&args.end_time),
-        args.days.is_some(),
-    )? {
-        (args.on_date, args.start_time, args.end_time) = (Some(on_date), start, end);
+fn refusal(e: CalendarError) -> Result<String, ToolError> {
+    match e {
+        CalendarError::Db(e) => Err(internal(e)),
+        other => Ok(other.to_string()),
     }
-    let days = args.days.as_deref().map_or(0, mask);
-    if !args.also {
-        let found = same_entry(
-            conn,
-            ctx,
-            &args.title,
-            &args.start_time,
-            &args.end_time,
-            days,
-            args.on_date.as_deref(),
-        )?;
-        if let Some(e) = found {
-            return Err(ToolError::duplicate(format!(
-                "calendar entry {} {:?} already covers {}-{}; change it with calendar_update, or pass \
-                 also: true when this is a second one",
-                e.id, e.title, e.start_time, e.end_time
-            )));
+}
+
+/// `calendar_save`: entries added or changed, and dates skipped or restored.
+pub fn save(conn: &Connection, ctx: &ToolCtx, raw: &str) -> Result<Value, ToolError> {
+    unscoped(ctx)?;
+    let mut o = Obj::new(loose::args(raw)?);
+    let mut env = Envelope::default();
+    let (entries, warning) = loose::items(
+        &mut o,
+        "entries",
+        &["items", "events", "calendar", "list", "data", "entry"],
+        &["title", "id", "entry_id", "start", "start_time", "days", "on", "on_date", "skip"],
+    );
+    if let Some(w) = warning {
+        env.warn(w);
+    }
+    for field in o.rest() {
+        env.ignored(None, &field, "not a calendar_save field");
+    }
+    if entries.is_empty() {
+        env.warn("nothing to save: entries was empty");
+        return Ok(env.into_value());
+    }
+    let today = today(ctx);
+    for (i, v) in entries.into_iter().enumerate() {
+        let r = Ref::top(i);
+        let Value::Object(map) = v else {
+            env.refused(&r, "an entry is an object with a title and times");
+            continue;
+        };
+        let mut eo = Obj::new(map);
+        let mut e = read_entry(&mut eo, &r, &mut env, today);
+        for field in eo.rest() {
+            env.ignored(Some(&r), &field, "not a calendar entry field");
+        }
+        let target = match e.target.take() {
+            Some(Target::Id(id)) => {
+                let found = calendar::get(conn, ctx.user_id, id).map_err(internal)?;
+                if found.is_none() {
+                    env.refused(&r, format!("no calendar entry {id}"));
+                    continue;
+                }
+                found
+            }
+            Some(Target::Title(t)) => {
+                let all: Vec<(i64, String)> = calendar::list(conn, ctx.user_id).map_err(internal)?.into_iter().map(|x| (x.id, x.title)).collect();
+                match loose::by_title(&t, &all, "calendar entry") {
+                    Ok(id) => {
+                        env.adjusted(Some(&r), "id", id.into(), format!("{t:?} is entry {id}"));
+                        calendar::get(conn, ctx.user_id, id).map_err(internal)?
+                    }
+                    Err(why) => {
+                        env.refused(&r, why.replace("no open ", "no "));
+                        continue;
+                    }
+                }
+            }
+            None => None,
+        };
+        let entry = match target {
+            Some(found) => match update(conn, ctx, &r, &mut env, found, &e)? {
+                Some(x) => x,
+                None => continue,
+            },
+            None => match create(conn, ctx, &r, &mut env, &e)? {
+                Some(x) => x,
+                None => continue,
+            },
+        };
+        for d in &e.skip {
+            if let Err(err) = calendar::skip(conn, ctx.user_id, entry.0.id, &d.to_string()) {
+                env.ignored(Some(&r), "skip", refusal(err)?);
+            }
+        }
+        for d in &e.unskip {
+            if let Err(err) = calendar::unskip(conn, ctx.user_id, entry.0.id, &d.to_string()) {
+                env.ignored(Some(&r), "unskip", refusal(err)?);
+            }
+        }
+        let fresh = calendar::get(conn, ctx.user_id, entry.0.id).map_err(internal)?.unwrap_or(entry.0);
+        let op = if entry.1 == "unchanged" && (!e.skip.is_empty() || !e.unskip.is_empty()) { "updated" } else { entry.1 };
+        env.saved(&r, fresh.id, &fresh.title, op)["when"] = when(&fresh).into();
+    }
+    Ok(env.into_value())
+}
+
+/// A one-off's date and times given in `tz`, restated on the user's own clock.
+fn in_zone(ctx: &ToolCtx, tz: &str, on: &str, start: &str, end: &str) -> Result<Result<(String, String, String), String>, ToolError> {
+    let Ok(date) = on.parse::<jiff::civil::Date>() else { return Ok(Err(format!("{on:?} is not a day"))) };
+    match super::in_user_zone(ctx, Some(tz), date, &[start, end]) {
+        Ok((d, walls)) => Ok(Ok((d.to_string(), walls[0].clone(), walls[1].clone()))),
+        Err(e) if e.kind == "internal" => Err(e),
+        Err(e) => Ok(Err(e.message)),
+    }
+}
+
+fn create(conn: &Connection, ctx: &ToolCtx, r: &Ref, env: &mut Envelope, entry: &Entry) -> Result<Option<(calendar::Entry, &'static str)>, ToolError> {
+    let mut missing = Vec::new();
+    if entry.title.is_none() {
+        missing.push("title");
+    }
+    if entry.start.is_none() {
+        missing.push("start");
+    }
+    if entry.end.is_none() {
+        missing.push("end");
+    }
+    if entry.days.is_none() && entry.on.as_deref().is_none_or(str::is_empty) {
+        missing.push("days or on");
+    }
+    if !missing.is_empty() {
+        env.refused(r, format!("a new entry needs {}; to change one, give its id", missing.join(", ")));
+        return Ok(None);
+    }
+    let title = entry.title.clone().unwrap_or_default();
+    let (mut start, mut end) = (entry.start.clone().unwrap_or_default(), entry.end.clone().unwrap_or_default());
+    let mut on = entry.on.clone().filter(|o| !o.is_empty());
+    let days = entry.days.unwrap_or(0);
+    if days > 0 && on.is_some() {
+        env.ignored(Some(r), "on", "days makes it repeat; on is for a one-off");
+        on = None;
+    }
+    if let Some(tz) = &entry.tz {
+        match &on {
+            Some(day) => match in_zone(ctx, tz, day, &start, &end)? {
+                Ok((d, s, x)) => {
+                    on = Some(d);
+                    start = s;
+                    end = x;
+                }
+                Err(why) => {
+                    env.refused(r, why);
+                    return Ok(None);
+                }
+            },
+            None => env.ignored(Some(r), "tz", "a repeating entry keeps the user's own clock"),
         }
     }
-    check_past(ctx, &args, days)?;
+    if !entry.new {
+        if let Some(found) = same_entry(conn, ctx.user_id, &title, &start, &end, days, on.as_deref())? {
+            env.adjusted(Some(r), "id", found.id.into(), format!("entry {} {:?} already covers that time, so it was updated; new: true adds another", found.id, found.title));
+            let as_update = Entry { title: None, on, start: Some(start), end: Some(end), tz: None, ..clone_entry(entry) };
+            return update(conn, ctx, r, env, found, &as_update);
+        }
+    }
+    if let (Some(day), true) = (on.as_deref(), days == 0) {
+        if let Ok(date) = day.parse() {
+            if super::has_gone_by(ctx, date, &end) {
+                env.refused(r, format!("{day} {end} has gone by; put a one-off on a day still ahead"));
+                return Ok(None);
+            }
+        }
+    }
+    let (from, until) = if days > 0 {
+        (entry.from.clone().filter(|x| !x.is_empty()), entry.until.clone().filter(|x| !x.is_empty()))
+    } else {
+        if entry.from.is_some() || entry.until.is_some() {
+            env.ignored(Some(r), "until", "from and until bound a repeating entry");
+        }
+        (None, None)
+    };
     let fields = calendar::Fields {
-        title: args.title,
-        kind: args.kind.as_str().into(),
-        quiet: args.quiet,
-        start_time: args.start_time,
-        end_time: args.end_time,
+        title,
+        kind: entry.kind.unwrap_or("busy").into(),
+        quiet: entry.quiet,
+        start_time: start,
+        end_time: end,
         days: Some(days),
-        on_date: args.on_date,
-        from_date: args.from_date,
-        until_date: args.until_date,
+        on_date: on,
+        from_date: from,
+        until_date: until,
         external_id: None,
     };
-    calendar::create(conn, ctx.user_id, fields).map(|e| row(&e)).map_err(failed)
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct UpdateArgs {
-    pub entry_id: i64,
-    #[serde(default)]
-    pub title: Option<String>,
-    #[serde(default)]
-    pub kind: Option<Kind>,
-    #[serde(default)]
-    pub quiet: Option<bool>,
-    #[serde(default)]
-    pub start_time: Option<String>,
-    #[serde(default)]
-    pub end_time: Option<String>,
-    /// The weekdays it repeats on; giving them clears a one-off date.
-    #[serde(default)]
-    pub days: Option<Vec<Day>>,
-    /// The single date a one-off entry happens; giving it clears the weekdays.
-    #[serde(default)]
-    pub on_date: Option<String>,
-    /// An empty string clears a validity bound.
-    #[serde(default)]
-    pub from_date: Option<String>,
-    #[serde(default)]
-    pub until_date: Option<String>,
-    /// The IANA zone `on_date` and the times are given in, when not the user's
-    /// own; it needs `on_date`, `start_time` and `end_time` together.
-    #[serde(default)]
-    pub tz: Option<String>,
-}
-
-pub fn update(
-    conn: &Connection,
-    ctx: &ToolCtx,
-    mut args: UpdateArgs,
-) -> Result<serde_json::Value, ToolError> {
-    unscoped(ctx)?;
-    if let Some(title) = &args.title {
-        super::check_text("title", title)?;
+    match calendar::create(conn, ctx.user_id, fields) {
+        Ok(made) => Ok(Some((made, "created"))),
+        Err(err) => {
+            env.refused(r, refusal(err)?);
+            Ok(None)
+        }
     }
-    if let Some((on_date, start, end)) = one_off_in_user_zone(
-        ctx,
-        args.tz.as_deref(),
-        args.on_date.as_deref(),
-        args.start_time.as_deref(),
-        args.end_time.as_deref(),
-        args.days.is_some(),
-    )? {
-        (args.on_date, args.start_time, args.end_time) = (Some(on_date), Some(start), Some(end));
+}
+
+fn clone_entry(e: &Entry) -> Entry {
+    Entry {
+        target: e.target.clone(),
+        title: e.title.clone(),
+        kind: e.kind,
+        start: e.start.clone(),
+        end: e.end.clone(),
+        days: e.days,
+        on: e.on.clone(),
+        from: e.from.clone(),
+        until: e.until.clone(),
+        quiet: e.quiet,
+        tz: e.tz.clone(),
+        skip: e.skip.clone(),
+        unskip: e.unskip.clone(),
+        new: e.new,
+    }
+}
+
+fn update(conn: &Connection, ctx: &ToolCtx, r: &Ref, env: &mut Envelope, found: calendar::Entry, entry: &Entry) -> Result<Option<(calendar::Entry, &'static str)>, ToolError> {
+    if !entry.changes_fields() {
+        return Ok(Some((found, "unchanged")));
+    }
+    if found.external_id.is_some() {
+        env.refused(r, format!("entry {} is imported from another calendar, which rewrites it; skip its dates instead", found.id));
+        return Ok(None);
+    }
+    let (mut start, mut end, mut on) = (entry.start.clone(), entry.end.clone(), entry.on.clone());
+    if let Some(tz) = &entry.tz {
+        let repeating = entry.days.is_some_and(|d| d > 0) || (entry.on.is_none() && found.days > 0);
+        if repeating {
+            env.ignored(Some(r), "tz", "a repeating entry keeps the user's own clock");
+        } else {
+            let day = on.clone().or(found.on_date.clone()).unwrap_or_default();
+            let s = start.clone().unwrap_or(found.start_time.clone());
+            let x = end.clone().unwrap_or(found.end_time.clone());
+            match in_zone(ctx, tz, &day, &s, &x)? {
+                Ok((d, s, x)) => {
+                    on = Some(d);
+                    start = Some(s);
+                    end = Some(x);
+                }
+                Err(why) => {
+                    env.refused(r, why);
+                    return Ok(None);
+                }
+            }
+        }
     }
     let patch = calendar::Patch {
-        title: args.title,
-        kind: args.kind.map(|k| k.as_str().to_string()),
-        quiet: args.quiet,
-        start_time: args.start_time,
-        end_time: args.end_time,
-        days: args.days.as_deref().map(mask),
-        on_date: args.on_date,
-        from_date: args.from_date,
-        until_date: args.until_date,
+        title: entry.title.clone(),
+        kind: entry.kind.map(str::to_string),
+        quiet: entry.quiet,
+        start_time: start,
+        end_time: end,
+        days: entry.days,
+        on_date: on,
+        from_date: entry.from.clone(),
+        until_date: entry.until.clone(),
         external_id: None,
     };
-    calendar::update(conn, ctx.user_id, args.entry_id, patch).map(|e| row(&e)).map_err(failed)
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct RemoveArgs {
-    pub entry_id: i64,
-}
-
-pub fn remove(
-    conn: &Connection,
-    ctx: &ToolCtx,
-    args: &RemoveArgs,
-) -> Result<serde_json::Value, ToolError> {
-    unscoped(ctx)?;
-    match calendar::delete(conn, ctx.user_id, args.entry_id) {
-        Ok(true) => Ok(serde_json::json!({ "removed": true })),
-        Ok(false) => Err(ToolError::not_found(format!("no calendar entry {}", args.entry_id))),
-        Err(e) => Err(ToolError::internal(e.to_string())),
+    match calendar::update(conn, ctx.user_id, found.id, patch) {
+        Ok(entry) => Ok(Some((entry, "updated"))),
+        Err(err) => {
+            env.refused(r, refusal(err)?);
+            Ok(None)
+        }
     }
 }
 
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct SkipArgs {
-    pub entry_id: i64,
-    /// The date this entry does not happen, YYYY-MM-DD.
-    pub date: String,
+/// `calendar_remove`: entries gone for good.
+pub fn remove(conn: &Connection, ctx: &ToolCtx, raw: &str) -> Result<Value, ToolError> {
+    unscoped(ctx)?;
+    let mut o = Obj::new(loose::args(raw)?);
+    let mut env = Envelope::default();
+    let ids = o.take(&["ids", "id", "entry_id", "entry_ids", "event_id", "entries"]).map(loose::list).unwrap_or_default();
+    for field in o.rest() {
+        env.ignored(None, &field, "not a calendar_remove field");
+    }
+    if ids.is_empty() {
+        env.warn("nothing to remove: ids was empty");
+        return Ok(env.into_value());
+    }
+    let all: Vec<(i64, String)> = calendar::list(conn, ctx.user_id).map_err(internal)?.into_iter().map(|x| (x.id, x.title)).collect();
+    for (i, v) in ids.into_iter().enumerate() {
+        let r = Ref::top(i);
+        let id = match loose::target(&v) {
+            Some(Target::Id(id)) => id,
+            Some(Target::Title(t)) => match loose::by_title(&t, &all, "calendar entry") {
+                Ok(id) => id,
+                Err(why) => {
+                    env.refused(&r, why.replace("no open ", "no "));
+                    continue;
+                }
+            },
+            None => {
+                env.refused(&r, "an entry is named by its id");
+                continue;
+            }
+        };
+        let Some(found) = calendar::get(conn, ctx.user_id, id).map_err(internal)? else {
+            env.refused(&r, format!("no calendar entry {id}"));
+            continue;
+        };
+        if found.external_id.is_some() {
+            env.refused(&r, format!("entry {id} is imported from another calendar, which would bring it back; skip its dates instead"));
+            continue;
+        }
+        if calendar::delete(conn, ctx.user_id, id).map_err(internal)? {
+            env.removed(id, &found.title);
+        }
+    }
+    Ok(env.into_value())
 }
 
-pub fn skip(
-    conn: &Connection,
-    ctx: &ToolCtx,
-    args: &SkipArgs,
-) -> Result<serde_json::Value, ToolError> {
-    unscoped(ctx)?;
-    calendar::skip(conn, ctx.user_id, args.entry_id, &args.date).map_err(failed)?;
-    Ok(serde_json::json!({ "entry_id": args.entry_id, "skipped": args.date }))
+/// `calendar_skip`, run as `calendar_save` with its date under `skip`.
+pub fn skip_adapter(conn: &Connection, ctx: &ToolCtx, raw: &str) -> Result<Value, ToolError> {
+    let mut args = loose::args(raw)?;
+    if let Some(date) = args.remove("date") {
+        args.insert("skip".into(), json!([date]));
+    }
+    save(conn, ctx, &Value::Object(args).to_string())
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::tools::{dispatch, registry, schemas, PreparedVectors, SessionKind, ToolCtx};
-    use rusqlite::Connection;
+    use crate::tools::testkit::{call, ctx, env, saved, talk};
+    use crate::tools::{dispatch, registry, schemas, SessionKind, ToolCtx};
+    use serde_json::json;
 
-    fn env() -> (Connection, tempfile::TempDir) {
-        let conn = crate::db::open_memory().unwrap();
-        conn.execute(
-            "INSERT INTO users (username, pass_hash, role) VALUES ('aki', 'x', 'member')",
-            [],
-        )
-        .unwrap();
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join("defaults")).unwrap();
-        std::fs::write(
-            tmp.path().join("defaults/user.toml"),
-            "display_name = \"X\"\ntimezone = \"UTC\"\ntemplate = \"default\"\n",
-        )
-        .unwrap();
-        (conn, tmp)
+    const SCHOOL: &str = r#"{"entries":[{"title":"school","kind":"fixed","start":"08:15","end":"15:30","days":["mon","tue","wed","thu","fri"]}]}"#;
+
+    fn entry(conn: &rusqlite::Connection, id: i64) -> crate::calendar::Entry {
+        crate::calendar::get(conn, 1, id).unwrap().unwrap()
     }
-
-    fn ctx(tmp: &tempfile::TempDir) -> ToolCtx<'_> {
-        ToolCtx {
-            config_dir: tmp.path(), data_dir: tmp.path(), user_id: 1, username: "aki",
-            vectors: PreparedVectors::default(), task_scope: None, inbox_source: None,
-            memory_source: None,
-            share: None,
-            share_thread: None,
-        }
-    }
-
-    const SCHOOL: &str = r#"{"title":"school","kind":"fixed","start_time":"08:15",
-        "end_time":"15:30","days":["mon","tue","wed","thu","fri"]}"#;
 
     /// Pins the user to a zone whose clock reads midday, so an hour either side
     /// of now stays on today's date.
@@ -448,250 +630,157 @@ mod tests {
         let zone = crate::triggers::midday_zone();
         std::fs::write(
             tmp.path().join("defaults/user.toml"),
-            format!(
-                "display_name = \"X\"\ntimezone = \"{}\"\ntemplate = \"default\"\n",
-                zone.iana_name().unwrap()
-            ),
+            format!("display_name = \"X\"\ntimezone = \"{}\"\ntemplate = \"default\"\n", zone.iana_name().unwrap()),
         )
         .unwrap();
         jiff::Timestamp::now().to_zoned(zone).date()
     }
 
     #[test]
-    fn a_commitment_goes_in_by_day_name_and_comes_back_by_day_name() {
-        let (conn, tmp) = env();
-        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "calendar_add", SCHOOL).unwrap();
-        assert_eq!(out["days"], serde_json::json!(["mon", "tue", "wed", "thu", "fri"]));
-        assert_eq!(out["quiet"], true, "a fixed commitment is quiet unless it is told otherwise");
-
-        let mask: i64 =
-            conn.query_row("SELECT days FROM calendar_entries", [], |r| r.get(0)).unwrap();
-        assert_eq!(mask, 31);
-
-        let id = out["entry_id"].as_i64().unwrap();
-        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "calendar_update",
-            &format!(r#"{{"entry_id":{id},"days":["sat","sun"],"quiet":false}}"#)).unwrap();
-        assert_eq!(out["days"], serde_json::json!(["sat", "sun"]));
-        assert_eq!(out["quiet"], false);
+    fn a_commitment_goes_in_by_day_name_and_reads_back_with_its_rule() {
+        let (conn, tmp) = env("UTC");
+        let out = call(&conn, &tmp, SessionKind::Talk, "calendar_save", SCHOOL).unwrap();
+        let id = saved(&out, "0");
+        assert_eq!(out["saved"][0]["when"], "mon,tue,wed,thu,fri 08:15-15:30");
+        assert!(entry(&conn, id).quiet, "a fixed commitment is quiet unless told otherwise");
+        assert_eq!(entry(&conn, id).days, 31);
+        talk(&conn, &tmp, "calendar_save", json!({"entries": [{"id": id, "days": "weekends", "quiet": false}]}));
+        assert_eq!((entry(&conn, id).day_names, entry(&conn, id).quiet), (vec!["sat", "sun"], false));
+        let out = talk(&conn, &tmp, "calendar_find", json!({"date": "2026-09-18", "days": 3}));
+        assert_eq!(out["items"][0]["days"], json!(["sat", "sun"]));
+        assert!(out["days"][0]["occurrences"].as_array().unwrap().is_empty(), "2026-09-18 is a Friday");
+        assert_eq!(out["days"][1]["occurrences"][0]["title"], "school");
+        let out = talk(&conn, &tmp, "calendar_find", json!({"days": 30}));
+        assert_eq!(out["days"].as_array().unwrap().len(), 14);
+        assert!(out["warnings"][0].as_str().unwrap().contains("1 to 14"));
     }
 
     #[test]
-    fn a_note_is_added_but_never_quiet() {
-        let (conn, tmp) = env();
-        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "calendar_add",
-            r#"{"title":"bin day","kind":"note","quiet":true,"start_time":"07:00",
-                "end_time":"08:00","days":["wed"]}"#).unwrap();
-        assert_eq!(out["quiet"], false);
+    fn swim_practice_twice_a_week_until_a_date_is_one_quiet_entry() {
+        let (conn, tmp) = env("America/Los_Angeles");
+        let out = talk(&conn, &tmp, "calendar_save", json!({"entries": [{"title": "Swim practice", "kind": "busy",
+            "start": "5pm", "end": "6:30pm", "days": "Tuesdays and Thursdays", "until": "December 12", "quiet": true}]}));
+        assert_eq!(out["ok"], true, "{out}");
+        let e = entry(&conn, saved(&out, "0"));
+        assert_eq!((e.start_time.as_str(), e.end_time.as_str()), ("17:00", "18:30"));
+        assert_eq!(e.day_names, vec!["tue", "thu"]);
+        assert!(e.until_date.as_deref().unwrap().ends_with("-12-12"));
+        assert!(e.quiet);
+        let out = talk(&conn, &tmp, "calendar_save", json!({"entries": [{"title": "swim  practice", "start": "17:30", "end": "19:00", "days": ["tue"]}]}));
+        assert_eq!(out["saved"][0]["id"], e.id, "the same commitment again is updated, not doubled");
+        assert!(out["adjusted"][0]["why"].as_str().unwrap().contains("already covers"));
+        let out = talk(&conn, &tmp, "calendar_save", json!({"entries": [{"title": "swim practice", "start": "17:30", "end": "19:00", "days": ["tue"], "new": true}]}));
+        assert_ne!(saved(&out, "0"), e.id);
     }
 
     #[test]
-    fn listing_walks_the_days_asked_for() {
-        let (conn, tmp) = env();
-        dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "calendar_add", SCHOOL).unwrap();
-        // 2026-09-18 is a Friday, so the third day of the span is a Sunday
-        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "calendar_list",
-            r#"{"date":"2026-09-18","days":3}"#).unwrap();
-        let days = out["days"].as_array().unwrap();
-        assert_eq!(days.len(), 3);
-        assert_eq!(days[0]["date"], "2026-09-18");
-        assert_eq!(days[0]["occurrences"][0]["title"], "school");
-        assert_eq!(days[0]["occurrences"][0]["start"], "08:15");
-        assert!(days[2]["occurrences"].as_array().unwrap().is_empty());
-
-        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "calendar_list", r#"{"days":15}"#)
-            .unwrap_err();
-        assert_eq!(e.kind, "rejected");
-        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "calendar_list",
-            r#"{"date":"18/09/2026"}"#).unwrap_err();
-        assert_eq!(e.kind, "rejected");
+    fn a_time_range_in_one_field_is_split_and_bad_fields_are_ignored() {
+        let (conn, tmp) = env("UTC");
+        let out = talk(&conn, &tmp, "calendar_save", json!({"title": "piano", "start": "16:00-17:00", "days": "wed", "kind": "lesson", "colour": "red"}));
+        let e = entry(&conn, saved(&out, "0"));
+        assert_eq!((e.start_time.as_str(), e.end_time.as_str(), e.kind.as_str()), ("16:00", "17:00", "busy"));
+        let ignored: Vec<&str> = out["ignored"].as_array().unwrap().iter().map(|i| i["field"].as_str().unwrap()).collect();
+        assert_eq!(ignored, ["kind", "colour"]);
+        let out = talk(&conn, &tmp, "calendar_save", json!({"entries": [{"title": "x", "start": "09:00"}, {"title": "y", "start": "10:00", "end": "09:00", "days": ["mon"]}]}));
+        assert_eq!(out["ok"], false);
+        assert!(out["refused"][0]["why"].as_str().unwrap().contains("needs end, days or on"));
+        assert!(out["refused"][1]["why"].as_str().unwrap().contains("end after it starts"));
+        assert_eq!(talk(&conn, &tmp, "calendar_save", json!({"entries": []}))["ok"], true);
     }
 
     #[test]
-    fn a_share_lists_only_inside_its_horizon() {
-        let (conn, tmp) = env();
-        let sctx = ToolCtx { share: Some(crate::shares::ShareScope::default()), ..ctx(&tmp) };
-        let today = jiff::Timestamp::now().to_zoned(jiff::tz::TimeZone::UTC).date();
-        let list = |args: String| dispatch(&conn, &sctx, SessionKind::Share, "calendar_list", &args);
-        assert_eq!(list(format!(r#"{{"date":"{today}","days":3}}"#)).unwrap()["days"].as_array().unwrap().len(), 3);
-        let yesterday = today.yesterday().unwrap();
-        assert_eq!(list(format!(r#"{{"date":"{yesterday}"}}"#)).unwrap_err().kind, "rejected");
-        assert_eq!(list(format!(r#"{{"date":"{today}","days":4}}"#)).unwrap_err().kind, "rejected");
+    fn skip_and_unskip_take_dates_off_and_back() {
+        let (conn, tmp) = env("UTC");
+        let id = saved(&call(&conn, &tmp, SessionKind::Talk, "calendar_save", SCHOOL).unwrap(), "0");
+        let out = talk(&conn, &tmp, "calendar_save", json!({"entries": [{"id": id, "skip": ["2099-09-18", "2099-09-21"]}]}));
+        assert_eq!(out["saved"][0]["op"], "updated");
+        assert_eq!(entry(&conn, id).exceptions, ["2099-09-18", "2099-09-21"]);
+        talk(&conn, &tmp, "calendar_save", json!({"entries": [{"id": "School", "unskip": ["2099-09-18"]}]}));
+        assert_eq!(entry(&conn, id).exceptions, ["2099-09-21"]);
+        let out = talk(&conn, &tmp, "calendar_skip", json!({"entry_id": id, "date": "2099-09-22"}));
+        assert!(out["warnings"][0].as_str().unwrap().contains("calendar_save"));
+        assert_eq!(entry(&conn, id).exceptions, ["2099-09-21", "2099-09-22"]);
     }
 
     #[test]
-    fn listing_without_a_date_reads_today_in_the_users_timezone() {
-        let (conn, tmp) = env();
-        let out =
-            dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "calendar_list", "{}").unwrap();
-        let today = jiff::Timestamp::now().to_zoned(jiff::tz::TimeZone::UTC).date().to_string();
-        assert_eq!(out["days"][0]["date"], today);
+    fn an_imported_entry_is_skipped_never_rewritten_or_removed() {
+        let (conn, tmp) = env("UTC");
+        let fields = crate::calendar::Fields {
+            title: "Chemistry".into(), kind: "fixed".into(), start_time: "09:00".into(), end_time: "10:00".into(),
+            days: Some(1), ..Default::default()
+        };
+        let (e, _) = crate::calendar::upsert_by_external(&conn, 1, "ics:1", fields).unwrap();
+        let out = talk(&conn, &tmp, "calendar_save", json!({"entries": [{"id": e.id, "title": "Chem"}]}));
+        assert!(out["refused"][0]["why"].as_str().unwrap().contains("imported"));
+        let out = talk(&conn, &tmp, "calendar_save", json!({"entries": [{"id": e.id, "skip": ["2099-01-05"]}]}));
+        assert_eq!(out["ok"], true);
+        let out = talk(&conn, &tmp, "calendar_remove", json!({"ids": [e.id]}));
+        assert_eq!(out["ok"], false);
+        assert_eq!(entry(&conn, e.id).title, "Chemistry");
     }
 
     #[test]
-    fn skipping_a_date_leaves_the_entry_and_removes_the_day() {
-        let (conn, tmp) = env();
-        let id = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "calendar_add", SCHOOL).unwrap()
-            ["entry_id"].as_i64().unwrap();
-        dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "calendar_skip",
-            &format!(r#"{{"entry_id":{id},"date":"2026-09-18"}}"#)).unwrap();
-        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "calendar_list",
-            r#"{"date":"2026-09-18"}"#).unwrap();
-        assert!(out["days"][0]["occurrences"].as_array().unwrap().is_empty());
-
-        dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "calendar_remove",
-            &format!(r#"{{"entry_id":{id}}}"#)).unwrap();
-        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "calendar_remove",
-            &format!(r#"{{"entry_id":{id}}}"#)).unwrap_err();
-        assert_eq!(e.kind, "not_found");
-    }
-
-    #[test]
-    fn a_malformed_entry_is_rejected_and_writes_nothing() {
-        let (conn, tmp) = env();
-        for args in [
-            r#"{"title":"x","kind":"fixed","start_time":"08:15","end_time":"07:00","days":["mon"]}"#,
-            r#"{"title":"x","kind":"party","start_time":"08:15","end_time":"09:00","days":["mon"]}"#,
-            r#"{"title":"x","kind":"fixed","start_time":"08:15","end_time":"09:00"}"#,
-        ] {
-            let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "calendar_add", args)
-                .unwrap_err();
-            assert!(matches!(e.kind, "rejected" | "invalid_args"), "{args} gave {e:?}");
-        }
-        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "calendar_add",
-            r#"{"title":"x","kind":"fixed","start_time":"08:15","end_time":"09:00",
-                "days":["moonday"]}"#).unwrap_err();
-        assert_eq!(e.kind, "invalid_args");
-        let n: i64 =
-            conn.query_row("SELECT COUNT(*) FROM calendar_entries", [], |r| r.get(0)).unwrap();
-        assert_eq!(n, 0);
-    }
-
-    #[test]
-    fn a_one_off_entry_that_has_already_ended_is_refused() {
-        let (conn, tmp) = env();
+    fn a_one_off_that_has_ended_is_refused_and_another_zone_lands_on_the_users_clock() {
+        let (conn, tmp) = env("UTC");
         let today = pin_to_midday(&tmp);
-        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "calendar_add",
-            &format!(r#"{{"title":"dentist","kind":"busy","start_time":"10:00",
-                "end_time":"11:00","on_date":"{today}"}}"#)).unwrap_err();
-        assert_eq!(e.kind, "past");
-        assert!(e.message.contains("has gone by"), "{}", e.message);
-
-        dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "calendar_add",
-            &format!(r#"{{"title":"dentist","kind":"busy","start_time":"13:00",
-                "end_time":"14:00","on_date":"{today}"}}"#)).unwrap();
+        let out = talk(&conn, &tmp, "calendar_save", json!({"entries": [
+            {"title": "dentist", "start": "10:00", "end": "11:00", "on": today.to_string()},
+            {"title": "dentist", "start": "13:00", "end": "14:00", "on": "today"}
+        ]}));
+        assert!(out["refused"][0]["why"].as_str().unwrap().contains("gone by"));
+        assert_eq!(out["saved"][0]["ref"], "1");
+        std::fs::write(tmp.path().join("defaults/user.toml"), "display_name = \"X\"\ntimezone = \"Europe/London\"\ntemplate = \"default\"\n").unwrap();
+        let out = talk(&conn, &tmp, "calendar_save", json!({"entries": [{"title": "call", "start": "14:00", "end": "15:00", "on": "2099-07-02", "tz": "Asia/Tokyo"},
+            {"title": "gym", "start": "14:00", "end": "15:00", "days": ["mon"], "tz": "Asia/Tokyo"}]}));
+        let e = entry(&conn, saved(&out, "0"));
+        assert_eq!((e.on_date.as_deref(), e.start_time.as_str()), (Some("2099-07-02"), "06:00"));
+        assert_eq!(entry(&conn, saved(&out, "1")).start_time, "14:00", "a repeating entry keeps the user's clock");
+        assert!(out["ignored"].as_array().unwrap().iter().any(|i| i["ref"] == "1" && i["field"] == "tz"));
     }
 
     #[test]
-    fn a_recurring_entry_is_added_however_its_bounds_read() {
-        let (conn, tmp) = env();
-        let today = pin_to_midday(&tmp);
-        dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "calendar_add",
-            &format!(r#"{{"title":"swim","kind":"busy","start_time":"09:00","end_time":"10:00",
-                "days":["mon","wed"],"until_date":"{}"}}"#, today.yesterday().unwrap())).unwrap();
-        let n: i64 =
-            conn.query_row("SELECT COUNT(*) FROM calendar_entries", [], |r| r.get(0)).unwrap();
-        assert_eq!(n, 1, "an until_date bounds an entry, it does not lay one");
+    fn a_remove_takes_ids_or_titles() {
+        let (conn, tmp) = env("UTC");
+        let id = saved(&call(&conn, &tmp, SessionKind::Talk, "calendar_save", SCHOOL).unwrap(), "0");
+        let out = talk(&conn, &tmp, "calendar_remove", json!({"entry_id": id}));
+        assert_eq!(out["removed"][0]["id"], id);
+        let out = talk(&conn, &tmp, "calendar_remove", json!({"ids": [id, "nothing"]}));
+        assert_eq!(out["refused"].as_array().unwrap().len(), 2);
     }
 
     #[test]
     fn a_wake_up_reads_the_calendar_and_changes_nothing() {
-        assert_eq!(
-            registry(SessionKind::Trigger).iter().filter(|t| t.starts_with("calendar_")).count(),
-            1
-        );
-        let (conn, tmp) = env();
-        dispatch(&conn, &ctx(&tmp), SessionKind::Trigger, "calendar_list", "{}").unwrap();
-        for name in ["calendar_add", "calendar_update", "calendar_remove", "calendar_skip"] {
-            let e = dispatch(&conn, &ctx(&tmp), SessionKind::Trigger, name, SCHOOL).unwrap_err();
-            assert_eq!(e.kind, "forbidden", "{name} is reachable from a wake-up");
+        assert_eq!(registry(SessionKind::Trigger).iter().filter(|t| t.starts_with("calendar_")).count(), 1);
+        let (conn, tmp) = env("UTC");
+        call(&conn, &tmp, SessionKind::Trigger, "calendar_find", "{}").unwrap();
+        for name in ["calendar_save", "calendar_remove", "calendar_add", "calendar_update", "calendar_skip"] {
+            assert_eq!(call(&conn, &tmp, SessionKind::Trigger, name, SCHOOL).unwrap_err().kind, "forbidden", "{name}");
         }
-    }
-
-    #[test]
-    fn no_calendar_tool_reaches_an_import_or_inbox_session() {
         for kind in [SessionKind::Import, SessionKind::Inbox] {
             assert!(!registry(kind).iter().any(|t| t.starts_with("calendar_")), "{kind:?}");
         }
-    }
-
-    #[test]
-    fn a_scoped_session_is_refused_even_on_a_surface_that_carries_the_tool() {
-        let (conn, tmp) = env();
         let scoped = ToolCtx { task_scope: Some(1), ..ctx(&tmp) };
-        let e = dispatch(&conn, &scoped, SessionKind::Talk, "calendar_add", SCHOOL).unwrap_err();
-        assert_eq!(e.kind, "forbidden");
-        let e = dispatch(&conn, &scoped, SessionKind::Talk, "calendar_list", "{}").unwrap_err();
-        assert_eq!(e.kind, "forbidden");
-
-        let inbox = ToolCtx { inbox_source: Some("lms:post:1".into()), ..ctx(&tmp) };
-        let e = dispatch(&conn, &inbox, SessionKind::Talk, "calendar_add", SCHOOL).unwrap_err();
-        assert_eq!(e.kind, "forbidden");
+        assert_eq!(dispatch(&conn, &scoped, SessionKind::Talk, "calendar_save", SCHOOL).unwrap_err().kind, "forbidden");
     }
 
     #[test]
-    fn the_add_schema_offers_day_names_and_kinds() {
-        let schema = schemas(SessionKind::Talk)
-            .iter()
-            .find(|s| s["name"] == "calendar_add")
-            .unwrap();
+    fn a_share_reads_only_its_horizon_and_no_rules() {
+        let (conn, tmp) = env("UTC");
+        call(&conn, &tmp, SessionKind::Talk, "calendar_save", SCHOOL).unwrap();
+        let sctx = ToolCtx { share: Some(crate::shares::ShareScope::default()), ..ctx(&tmp) };
+        let out = dispatch(&conn, &sctx, SessionKind::Share, "calendar_find", r#"{"days":14}"#).unwrap();
+        assert_eq!(out["days"].as_array().unwrap().len(), crate::shares::ShareScope::default().horizon_days as usize);
+        assert!(out.get("items").is_none());
+        assert!(out["warnings"].is_array());
+    }
+
+    #[test]
+    fn the_save_schema_offers_day_names_kinds_and_skip() {
+        let schema = schemas(SessionKind::Talk).iter().find(|s| s["name"] == "calendar_save").unwrap();
         let text = schema["input_schema"].to_string();
-        for word in ["mon", "sun", "fixed", "busy", "note", "free"] {
+        for word in ["mon", "sun", "fixed", "busy", "note", "free", "skip", "unskip"] {
             assert!(text.contains(word), "the schema never mentions {word}");
         }
-        let description = schema["description"].as_str().unwrap();
-        assert!(description.contains("held"), "{description}");
-    }
-
-    #[test]
-    fn the_same_commitment_twice_is_shown_the_first() {
-        let (conn, tmp) = env();
-        let add = |args: &str| dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "calendar_add", args);
-        let first = add(SCHOOL).unwrap()["entry_id"].as_i64().unwrap();
-        let e = add(r#"{"title":"School","kind":"fixed","start_time":"09:00","end_time":"12:00",
-            "days":["fri","sat"]}"#).unwrap_err();
-        assert_eq!(e.kind, "duplicate");
-        assert!(e.message.contains(&format!("calendar entry {first}")), "{}", e.message);
-        // a Friday one-off of the same name, inside school hours
-        let e = add(r#"{"title":"school","kind":"busy","start_time":"10:00","end_time":"11:00",
-            "on_date":"2099-01-02"}"#).unwrap_err();
-        assert_eq!(e.kind, "duplicate");
-        add(r#"{"title":"school","kind":"fixed","start_time":"16:00","end_time":"17:00",
-            "days":["mon"]}"#).unwrap();
-        add(r#"{"title":"school","kind":"fixed","start_time":"09:00","end_time":"12:00",
-            "days":["sat"]}"#).unwrap();
-        add(r#"{"title":"school","kind":"fixed","start_time":"09:00","end_time":"12:00",
-            "days":["mon"],"also":true}"#).unwrap();
-    }
-
-    /// Two in the afternoon in Tokyo is one in the morning in London (UTC+1
-    /// on 2099-07-01).
-    #[test]
-    fn a_one_off_given_in_another_zone_lands_on_the_users_clock() {
-        let (conn, tmp) = env();
-        std::fs::write(
-            tmp.path().join("defaults/user.toml"),
-            "display_name = \"X\"\ntimezone = \"Europe/London\"\ntemplate = \"default\"\n",
-        )
-        .unwrap();
-        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "calendar_add",
-            r#"{"title":"call","kind":"busy","start_time":"14:00","end_time":"15:00",
-                "on_date":"2099-07-02","tz":"Asia/Tokyo"}"#).unwrap();
-        assert_eq!(
-            (out["on_date"].as_str(), out["start_time"].as_str(), out["end_time"].as_str()),
-            (Some("2099-07-02"), Some("06:00"), Some("07:00"))
-        );
-        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "calendar_add",
-            r#"{"title":"late","kind":"busy","start_time":"07:30","end_time":"09:00",
-                "on_date":"2099-07-02","tz":"Asia/Tokyo"}"#).unwrap_err();
-        assert_eq!(e.kind, "rejected", "it crosses midnight in London");
-        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "calendar_add",
-            r#"{"title":"gym","kind":"busy","start_time":"14:00","end_time":"15:00",
-                "days":["mon"],"tz":"Asia/Tokyo"}"#).unwrap_err();
-        assert_eq!(e.kind, "rejected", "a repeating entry keeps the user's clock");
-        let id = out["entry_id"].as_i64().unwrap();
-        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "calendar_update",
-            &format!(r#"{{"entry_id":{id},"start_time":"20:00","end_time":"21:00",
-                "on_date":"2099-07-02","tz":"Asia/Tokyo"}}"#)).unwrap();
-        assert_eq!(out["start_time"], "12:00");
+        assert!(schema["description"].as_str().unwrap().contains("holds deliveries"));
     }
 }

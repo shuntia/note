@@ -468,7 +468,7 @@ mod tests {
     }
 
     fn task(conn: &Connection, tmp: &tempfile::TempDir, args: &str) -> i64 {
-        call(conn, tmp, "task_create", args).unwrap()["task_id"].as_i64().unwrap()
+        call(conn, tmp, "task_create", args).unwrap()["saved"][0]["id"].as_i64().unwrap()
     }
 
     /// The tools resolve "today" in the user's zone, and a config-less test

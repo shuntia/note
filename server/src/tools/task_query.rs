@@ -1,19 +1,16 @@
-use super::{SessionKind, ToolCtx, ToolError};
+use super::loose::{self, Obj, Target};
+use super::{ToolCtx, ToolError};
 use rusqlite::types::Value as SqlValue;
 use rusqlite::Connection;
-use schemars::JsonSchema;
-use serde::Deserialize;
+use serde_json::{json, Value};
 
-const DEFAULT_LIMIT: u32 = 50;
-const MAX_LIMIT: u32 = 200;
-const MAX_KEYWORD_CHARS: usize = 200;
+const DEFAULT_LIMIT: i64 = 50;
+const MAX_LIMIT: i64 = 200;
 const MAX_QUERY_CHARS: usize = 200;
-const SEARCH_HITS: usize = 20;
-const MAX_BATCH: usize = 200;
-const MAX_AGE_DAYS: u32 = 3650;
+const SEARCH_HITS: i64 = 20;
+const MAX_AGE_DAYS: i64 = 3650;
 
-/// These tools survey or move the whole list, so a session pinned to one task
-/// has no business in any of them.
+/// A session pinned to one task has no business surveying the whole list.
 pub(super) fn unscoped(ctx: &ToolCtx) -> Result<(), ToolError> {
     match ctx.task_scope {
         None => Ok(()),
@@ -27,64 +24,20 @@ fn internal(e: impl std::fmt::Display) -> ToolError {
     ToolError::internal(e.to_string())
 }
 
-fn checked_date(field: &str, value: &str) -> Result<String, ToolError> {
-    value
-        .parse::<jiff::civil::Date>()
-        .map(|d| d.to_string())
-        .map_err(|_| ToolError::rejected(format!("{field} must be YYYY-MM-DD, got {value:?}")))
+/// The soonest deadline still open anywhere in a root's tree, else the root's own.
+const NEXT_DUE: &str = "COALESCE((SELECT MIN(d.due_at) FROM tasks d WHERE d.root_id = tasks.id
+    AND d.state IN ('open','in_progress') AND d.due_at IS NOT NULL), tasks.due_at)";
+
+fn hides_goals(ctx: &ToolCtx) -> bool {
+    ctx.share.as_ref().is_some_and(|scope| !scope.goals)
 }
 
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ListArgs {
-    /// open, `in_progress`, done, dropped, or any. Omitted: the live ones, open and `in_progress`.
-    #[serde(default)]
-    pub state: Option<String>,
-    /// Case-insensitive substring of the title, the description or the notes.
-    #[serde(default)]
-    pub keyword: Option<String>,
-    /// Only tasks in this category, matched exactly.
-    #[serde(default)]
-    pub category: Option<String>,
-    /// Only tasks added on or after this day, YYYY-MM-DD.
-    #[serde(default)]
-    pub added_after: Option<String>,
-    /// Only tasks added before this day, YYYY-MM-DD.
-    #[serde(default)]
-    pub added_before: Option<String>,
-    /// Only tasks added more than this many days ago.
-    #[serde(default)]
-    pub older_than_days: Option<u32>,
-    /// True for the Now list only, false for everything outside it.
-    #[serde(default)]
-    pub is_now: Option<bool>,
-    /// Only tasks due before this day starts, YYYY-MM-DD in the user's timezone.
-    #[serde(default)]
-    pub due_before: Option<String>,
-    /// Only tasks due on or after this day starts, YYYY-MM-DD in the user's timezone.
-    #[serde(default)]
-    pub due_after: Option<String>,
-    /// True for tasks whose due date has passed, false for everything else.
-    #[serde(default)]
-    pub overdue: Option<bool>,
-    /// Only tasks at this urgency: low, normal or high.
-    #[serde(default)]
-    pub urgency: Option<String>,
-    /// added (default), newest first; due, soonest first with undated last; or
-    /// urgency (high, then pressing, then normal, then low; soonest due inside each).
-    #[serde(default)]
-    pub sort: Option<String>,
-    /// How many tasks to return, 1 to 200. Default 50.
-    #[serde(default)]
-    pub limit: Option<u32>,
+fn matches_details(ctx: &ToolCtx) -> bool {
+    ctx.share.as_ref().is_none_or(|scope| scope.details)
 }
 
-/// The category clause a share scope imposes on a task read; a category the
-/// caller names itself must be one the link shares, and then needs no clause.
-fn share_categories(
-    ctx: &ToolCtx,
-    requested: Option<&str>,
-) -> Result<Option<(String, Vec<SqlValue>)>, ToolError> {
+/// The category clause a share imposes, read off each node's root.
+fn share_categories(ctx: &ToolCtx, requested: Option<&str>, column: &str) -> Result<Option<(String, Vec<SqlValue>)>, ToolError> {
     let Some(scope) = &ctx.share else { return Ok(None) };
     match requested {
         Some(c) if !scope.allows_category(c.trim()) => Err(ToolError::rejected(format!(
@@ -92,26 +45,360 @@ fn share_categories(
             scope.categories.join(", ")
         ))),
         Some(_) => Ok(None),
-        None => Ok(scope.category_clause("category")),
+        None => Ok(scope.category_clause(column)),
     }
 }
 
-/// Whether a text match may reach descriptions and notes, which a link
-/// without details keeps back.
-fn matches_details(ctx: &ToolCtx) -> bool {
-    ctx.share.as_ref().is_none_or(|scope| scope.details)
+fn tz(ctx: &ToolCtx) -> jiff::tz::TimeZone {
+    crate::triggers::timezone(ctx.config_dir, ctx.username)
 }
 
-fn hides_goals(ctx: &ToolCtx) -> bool {
-    ctx.share.as_ref().is_some_and(|scope| !scope.goals)
+fn today(ctx: &ToolCtx) -> jiff::civil::Date {
+    jiff::Timestamp::now().to_zoned(tz(ctx)).date()
 }
 
-/// The filters, as SQL and its parameters, shared by the page and its count.
-fn list_filters(ctx: &ToolCtx, args: &ListArgs) -> Result<(String, Vec<SqlValue>), ToolError> {
+fn day_start(ctx: &ToolCtx, day: jiff::civil::Date) -> Result<String, ToolError> {
+    Ok(day.to_zoned(tz(ctx)).map_err(internal)?.timestamp().to_string())
+}
+
+/// What the filters read: the canonical fields plus the old list's own.
+struct Filters {
+    state: Option<String>,
+    query: Option<String>,
+    category: Option<String>,
+    goal_id: Option<i64>,
+    now: Option<bool>,
+    due_before: Option<jiff::civil::Date>,
+    due_after: Option<jiff::civil::Date>,
+    overdue: Option<bool>,
+    urgency: Option<&'static str>,
+    sort: &'static str,
+    depth: usize,
+    limit: i64,
+    added_after: Option<jiff::civil::Date>,
+    added_before: Option<jiff::civil::Date>,
+    older_than_days: Option<i64>,
+}
+
+fn read_filters(ctx: &ToolCtx, o: &mut Obj, warnings: &mut Vec<String>) -> Filters {
+    let today = today(ctx);
+    let mut day_of = |o: &mut Obj, names: &[&str]| {
+        let v = o.take(names)?;
+        let raw = loose::text(&v).unwrap_or_default();
+        let d = loose::day(&raw, today);
+        if d.is_none() {
+            warnings.push(format!("{} {raw:?} was ignored: a day is {}", names[0], loose::DAY_FORMS));
+        }
+        d
+    };
+    let due_before = day_of(o, &["due_before", "before"]);
+    let due_after = day_of(o, &["due_after", "after"]);
+    let added_after = day_of(o, &["added_after"]);
+    let added_before = day_of(o, &["added_before"]);
+    let state = o.take(&["state", "status"]).and_then(|v| loose::text(&v)).and_then(|s| {
+        if s.trim().eq_ignore_ascii_case("any") || s.trim().eq_ignore_ascii_case("all") {
+            return Some("any".to_string());
+        }
+        let state = loose::choice(&s, crate::tasks::STATES, loose::STATE_SYNONYMS);
+        if state.is_none() {
+            warnings.push(format!("state {s:?} was ignored: it is open, in_progress, done, dropped or any"));
+        }
+        state.map(str::to_string)
+    });
+    let urgency = o.take(&["urgency", "priority"]).and_then(|v| {
+        let raw = loose::text(&v).unwrap_or_default();
+        let u = loose::choice(&raw, crate::tasks::URGENCY, loose::URGENCY_SYNONYMS);
+        if u.is_none() {
+            warnings.push(format!("urgency {raw:?} was ignored: it is low, normal or high"));
+        }
+        u
+    });
+    let sort = match o.take(&["sort", "order", "sort_by"]).and_then(|v| loose::text(&v)).as_deref().map(str::trim) {
+        Some("due" | "due_at" | "deadline" | "soonest") => "due",
+        Some("urgency" | "priority" | "urgent") => "urgency",
+        Some("added" | "created" | "newest" | "") | None => "added",
+        Some(other) => {
+            warnings.push(format!("sort {other:?} was ignored: it is added, due or urgency"));
+            "added"
+        }
+    };
+    let limit = o.take(&["limit", "max", "count"]).and_then(|v| loose::integer(&v)).unwrap_or(DEFAULT_LIMIT);
+    let depth = o.take(&["depth", "levels"]).and_then(|v| loose::integer(&v)).unwrap_or(1);
+    Filters {
+        state,
+        query: o.take(&["query", "keyword", "q", "search", "text", "words"]).and_then(|v| loose::text(&v)),
+        category: o.take(&["category"]).and_then(|v| loose::text(&v)),
+        goal_id: o.take(&["goal_id", "goal"]).and_then(|v| loose::id(&v)),
+        now: o.take(&["now", "is_now"]).and_then(|v| loose::boolean(&v)),
+        due_before,
+        due_after,
+        overdue: o.take(&["overdue"]).and_then(|v| loose::boolean(&v)),
+        urgency,
+        sort,
+        depth: depth.clamp(0, crate::tasks::MAX_DEPTH) as usize,
+        limit: limit.clamp(1, MAX_LIMIT),
+        added_after,
+        added_before,
+        older_than_days: o.take(&["older_than_days"]).and_then(|v| loose::integer(&v)).map(|d| d.clamp(0, MAX_AGE_DAYS)),
+    }
+}
+
+/// `task_find`: one node in full by id, a word search at any depth, or a
+/// survey of the top-level tasks.
+pub fn find(conn: &Connection, ctx: &ToolCtx, raw: &str) -> Result<Value, ToolError> {
+    unscoped(ctx)?;
+    let mut o = Obj::new(loose::args(raw)?);
+    let mut warnings = Vec::new();
+    let ids = o.take(&["id", "ids", "task_id", "task_ids"]).map(loose::list).unwrap_or_default();
+    let mut f = read_filters(ctx, &mut o, &mut warnings);
+    for field in o.rest() {
+        warnings.push(format!("{field} was ignored: not a task_find field"));
+    }
+    let targets: Vec<Target> = ids.iter().filter_map(loose::target).collect();
+    let mut out = if targets.is_empty() {
+        match f.query.take() {
+            Some(q) => search(conn, ctx, &q, f.limit.min(SEARCH_HITS), &mut warnings)?,
+            None => survey(conn, ctx, &f, &mut warnings)?,
+        }
+    } else {
+        by_ids(conn, ctx, &targets, &mut warnings)?
+    };
+    if !warnings.is_empty() {
+        out["warnings"] = warnings.into();
+    }
+    Ok(out)
+}
+
+fn by_ids(conn: &Connection, ctx: &ToolCtx, targets: &[Target], warnings: &mut Vec<String>) -> Result<Value, ToolError> {
+    let mut items = Vec::new();
+    for t in targets {
+        match t {
+            Target::Id(id) => match read_one(conn, ctx, *id)? {
+                Some(v) => items.push(v),
+                None => warnings.push(format!("no task {id}")),
+            },
+            Target::Title(title) => {
+                let hits = search(conn, ctx, title, SEARCH_HITS, warnings)?;
+                let found: Vec<i64> = hits["items"].as_array().into_iter().flatten().filter_map(|h| h["id"].as_i64()).collect();
+                let exact: Vec<i64> = hits["items"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|h| h["title"].as_str().is_some_and(|x| loose::fold(x) == loose::fold(title)))
+                    .filter_map(|h| h["id"].as_i64())
+                    .collect();
+                match (exact.as_slice(), found.as_slice()) {
+                    ([one], _) | ([], [one]) => items.extend(read_one(conn, ctx, *one)?),
+                    _ => items.extend(hits["items"].as_array().cloned().unwrap_or_default()),
+                }
+            }
+        }
+    }
+    if items.len() == 1 && targets.len() == 1 {
+        return Ok(json!({ "item": items.pop() }));
+    }
+    Ok(json!({ "total": items.len(), "items": items }))
+}
+
+fn compact(v: &mut Value) {
+    if let Value::Object(o) = v {
+        o.retain(|k, x| k == "children" || !(x.is_null() || x.as_str() == Some("")));
+        if let Some(Value::Array(children)) = o.get_mut("children") {
+            children.iter_mut().for_each(compact);
+        }
+    }
+}
+
+/// One node in full, exactly as `GET /api/tasks` renders it, plus when it was
+/// added, its local due, and its path from its root.
+fn read_one(conn: &Connection, ctx: &ToolCtx, id: i64) -> Result<Option<Value>, ToolError> {
+    let Some(mut node) = crate::tasks::node(conn, ctx.user_id, id).map_err(internal)? else { return Ok(None) };
+    if let Some(scope) = &ctx.share {
+        let finished_in_view = || {
+            scope.progress
+                && completed_at(conn, id)
+                    .is_ok_and(|at| at.is_some_and(|at| at >= crate::shares::done_since(jiff::Timestamp::now()).to_string()))
+        };
+        let shared = scope.allows_category(&node.task.category)
+            && match node.task.state.as_str() {
+                "dropped" => false,
+                "done" => finished_in_view(),
+                _ => true,
+            };
+        if !shared {
+            return Ok(None);
+        }
+    }
+    let tz = tz(ctx);
+    crate::tasks::stamp_schedule(conn, ctx.user_id, &tz, std::iter::once(&mut node.task)).map_err(internal)?;
+    let path = path_of(conn, ctx.user_id, node.task.id)?;
+    let mut out = serde_json::to_value(&node).map_err(internal)?;
+    let mut stmt = conn.prepare("SELECT id, created_at FROM tasks WHERE root_id = ?1").map_err(internal)?;
+    let added: std::collections::HashMap<i64, String> = stmt
+        .query_map([node.task.root_id], |r| Ok((r.get(0)?, r.get(1)?)))
+        .and_then(|rows| rows.collect::<rusqlite::Result<_>>())
+        .map_err(internal)?;
+    let hide_goals = hides_goals(ctx);
+    let titles = !matches_details(ctx);
+    each_node(&mut out, &mut |t| {
+        if let Some(created) = t["id"].as_i64().and_then(|id| added.get(&id)) {
+            t["created_at"] = json!(created);
+        }
+        if let Some(label) = t["effective_due_at"]
+            .as_str()
+            .and_then(|at| crate::due::local_label(at, t["effective_due_on"].as_str(), &tz))
+        {
+            t["due"] = label.into();
+        }
+        if hide_goals {
+            t["goal_id"] = Value::Null;
+            t["goal_title"] = Value::Null;
+        }
+        if titles {
+            for field in ["description", "notes", "url", "external_id"] {
+                t[field] = Value::Null;
+            }
+        }
+    });
+    if path.len() > 1 {
+        out["path"] = path.join(" › ").into();
+    }
+    compact(&mut out);
+    Ok(Some(out))
+}
+
+fn each_node(node: &mut Value, f: &mut impl FnMut(&mut Value)) {
+    f(node);
+    if let Some(children) = node["children"].as_array_mut() {
+        for child in children {
+            each_node(child, f);
+        }
+    }
+}
+
+fn completed_at(conn: &Connection, id: i64) -> rusqlite::Result<Option<String>> {
+    conn.query_row("SELECT completed_at FROM tasks WHERE id = ?1", [id], |r| r.get(0))
+}
+
+/// Titles from the root down to `id`.
+pub(super) fn path_of(conn: &Connection, user_id: i64, id: i64) -> Result<Vec<String>, ToolError> {
+    let mut out = Vec::new();
+    let mut at = Some(id);
+    while let Some(here) = at {
+        let row: Option<(String, Option<i64>)> = conn
+            .query_row("SELECT title, parent_id FROM tasks WHERE id = ?1 AND user_id = ?2", (here, user_id), |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .map(Some)
+            .or_else(|e| if e == rusqlite::Error::QueryReturnedNoRows { Ok(None) } else { Err(e) })
+            .map_err(internal)?;
+        let Some((title, parent)) = row else { break };
+        out.push(title);
+        at = parent;
+    }
+    out.reverse();
+    Ok(out)
+}
+
+/// Every word of the query against titles first, then against each node's
+/// whole text, at any depth; live nodes before finished ones.
+fn search(conn: &Connection, ctx: &ToolCtx, query: &str, limit: i64, warnings: &mut Vec<String>) -> Result<Value, ToolError> {
+    let query = query.trim();
+    if query.is_empty() || query.chars().count() > MAX_QUERY_CHARS {
+        warnings.push(format!("query must be 1 to {MAX_QUERY_CHARS} characters"));
+        return Ok(json!({ "total": 0, "items": [] }));
+    }
+    let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+    let mut params: Vec<SqlValue> = vec![ctx.user_id.into()];
+    let finished = match &ctx.share {
+        None => "",
+        Some(scope) if scope.progress => {
+            params.push(crate::shares::done_since(jiff::Timestamp::now()).to_string().into());
+            " AND (state != 'done' OR completed_at >= ?)"
+        }
+        Some(_) => " AND state != 'done'",
+    };
+    let clause = |column: &str, params: &mut Vec<SqlValue>| {
+        params.extend(words.iter().map(|w| SqlValue::from(w.clone())));
+        words.iter().map(|_| format!("instr({column}, ?) > 0")).collect::<Vec<_>>().join(" AND ")
+    };
+    let text = if matches_details(ctx) {
+        "lower(title) || ' ' || lower(description) || ' ' || lower(notes)"
+    } else {
+        "lower(title)"
+    };
+    let text_match = clause(text, &mut params);
+    let root_category = "(SELECT r.category FROM tasks r WHERE r.id = tasks.root_id)";
+    let (shared, shared_params) = share_categories(ctx, None, root_category)?.unwrap_or_default();
+    params.extend(shared_params);
+    let title_match = clause("lower(title)", &mut params);
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT id FROM tasks
+             WHERE user_id = ? AND state != 'dropped'{finished} AND ({text_match}){shared}
+             ORDER BY CASE WHEN {title_match} THEN 0 ELSE 1 END,
+                      CASE WHEN state = 'done' THEN 1 ELSE 0 END,
+                      depth, created_at DESC, id DESC
+             LIMIT {limit}"
+        ))
+        .map_err(internal)?;
+    let ids: Vec<i64> = stmt
+        .query_map(rusqlite::params_from_iter(params.iter()), |r| r.get(0))
+        .and_then(|rows| rows.collect::<rusqlite::Result<_>>())
+        .map_err(internal)?;
+    let tz = tz(ctx);
+    let mut items = Vec::new();
+    for id in ids {
+        let Some(t) = crate::tasks::get(conn, ctx.user_id, id).map_err(internal)? else { continue };
+        let mut row = row_of(&t, &tz, hides_goals(ctx));
+        let path = path_of(conn, ctx.user_id, id)?;
+        if path.len() > 1 {
+            row["path"] = path.join(" › ").into();
+        }
+        items.push(row);
+    }
+    if items.is_empty() {
+        warnings.push(format!("nothing matched {query:?}; try fewer words, or no query to survey"));
+    }
+    Ok(json!({ "total": items.len(), "items": items }))
+}
+
+/// A node as one short line of fields, what lists carry.
+fn row_of(t: &crate::tasks::Task, tz: &jiff::tz::TimeZone, goals_hidden: bool) -> Value {
+    let mut row = json!({ "id": t.id, "title": t.title, "state": t.state });
+    if t.is_now {
+        row["now"] = true.into();
+    }
+    if let Some(m) = t.duration_min {
+        row["minutes"] = m.into();
+    }
+    if let Some(label) = t.due_at.as_deref().and_then(|at| crate::due::local_label(at, t.due_on.as_deref(), tz)) {
+        row["due"] = label.into();
+    }
+    if t.urgency != "normal" {
+        row["urgency"] = t.urgency.clone().into();
+    }
+    if t.pressing {
+        row["pressing"] = true.into();
+    }
+    if t.progress > 0 && t.state != "done" {
+        row["progress"] = t.progress.into();
+    }
+    if t.parent_id.is_none() {
+        if !t.category.is_empty() {
+            row["category"] = t.category.clone().into();
+        }
+        if let (Some(g), false) = (t.goal_id, goals_hidden) {
+            row["goal_id"] = g.into();
+        }
+    }
+    row
+}
+
+fn survey_filters(ctx: &ToolCtx, f: &Filters) -> Result<(String, Vec<SqlValue>), ToolError> {
     let mut wheres = vec!["user_id = ?".to_string(), "parent_id IS NULL".to_string()];
     let mut params: Vec<SqlValue> = vec![ctx.user_id.into()];
-
-    match (&ctx.share, args.state.as_deref()) {
+    match (&ctx.share, f.state.as_deref()) {
         (_, None) => wheres.push("state IN ('open','in_progress')".into()),
         (Some(_), Some(s @ ("open" | "in_progress"))) => {
             wheres.push("state = ?".into());
@@ -129,1140 +416,294 @@ fn list_filters(ctx: &ToolCtx, args: &ListArgs) -> Result<(String, Vec<SqlValue>
                     crate::shares::RECENT_DAYS
                 )
             } else {
-                format!(
-                    "this link shares live tasks alone; state must be omitted, open or in_progress, got {s:?}"
-                )
+                format!("this link shares live tasks alone; state must be omitted, open or in_progress, got {s:?}")
             }))
         }
         (None, Some("any")) => {}
-        (None, Some(s)) if crate::tasks::STATES.contains(&s) => {
+        (None, Some(s)) => {
             wheres.push("state = ?".into());
             params.push(s.to_string().into());
         }
-        (None, Some(s)) => {
-            return Err(ToolError::rejected(format!(
-                "state must be one of {}, any, got {s:?}",
-                crate::tasks::STATES.join(", ")
-            )))
-        }
     }
-    if let Some(keyword) = &args.keyword {
-        let needle = keyword.trim().to_lowercase();
-        if needle.is_empty() || needle.chars().count() > MAX_KEYWORD_CHARS {
-            return Err(ToolError::rejected(format!(
-                "keyword must be 1 to {MAX_KEYWORD_CHARS} characters"
-            )));
-        }
-        if matches_details(ctx) {
-            wheres.push(
-                "(instr(lower(title), ?) > 0 OR instr(lower(description), ?) > 0 \
-                  OR instr(lower(notes), ?) > 0)"
-                    .into(),
-            );
-            params.extend([needle.clone().into(), needle.clone().into(), needle.into()]);
-        } else {
-            wheres.push("instr(lower(title), ?) > 0".into());
-            params.push(needle.into());
-        }
-    }
-    if let Some(category) = &args.category {
+    if let Some(category) = &f.category {
         wheres.push("category = ?".into());
         params.push(category.trim().to_string().into());
     }
-    if let Some(day) = &args.added_after {
+    if let Some(g) = f.goal_id {
+        wheres.push("goal_id = ?".into());
+        params.push(g.into());
+    }
+    if let Some(day) = f.added_after {
         wheres.push("created_at >= ?".into());
-        params.push(checked_date("added_after", day)?.into());
+        params.push(day.to_string().into());
     }
-    if let Some(day) = &args.added_before {
+    if let Some(day) = f.added_before {
         wheres.push("created_at < ?".into());
-        params.push(checked_date("added_before", day)?.into());
+        params.push(day.to_string().into());
     }
-    if let Some(days) = args.older_than_days {
-        if days > MAX_AGE_DAYS {
-            return Err(ToolError::rejected(format!(
-                "older_than_days must be at most {MAX_AGE_DAYS}"
-            )));
-        }
-        let cutoff = jiff::Timestamp::now()
-            .checked_sub(jiff::Span::new().hours(24 * i64::from(days)))
-            .map_err(internal)?;
+    if let Some(days) = f.older_than_days {
+        let cutoff = jiff::Timestamp::now().checked_sub(jiff::Span::new().hours(24 * days)).map_err(internal)?;
         wheres.push("created_at < ?".into());
         params.push(cutoff.to_string().into());
     }
-    if let Some(flag) = args.is_now {
-        wheres.push("is_now = ?".into());
-        params.push(i64::from(flag).into());
+    if let Some(flag) = f.now {
+        wheres.push(format!(
+            "{}EXISTS (SELECT 1 FROM tasks n WHERE n.root_id = tasks.id AND n.is_now = 1 AND n.state IN ('open','in_progress'))",
+            if flag { "" } else { "NOT " }
+        ));
     }
-    if let Some(day) = &args.due_before {
-        wheres.push("due_at IS NOT NULL AND due_at < ?".into());
-        params.push(day_start(ctx, "due_before", day)?.into());
+    if let Some(day) = f.due_before {
+        wheres.push(format!("{NEXT_DUE} < ?"));
+        params.push(day_start(ctx, day)?.into());
     }
-    if let Some(day) = &args.due_after {
-        wheres.push("due_at IS NOT NULL AND due_at >= ?".into());
-        params.push(day_start(ctx, "due_after", day)?.into());
+    if let Some(day) = f.due_after {
+        wheres.push(format!("{NEXT_DUE} >= ?"));
+        params.push(day_start(ctx, day)?.into());
     }
-    if let Some(flag) = args.overdue {
-        wheres.push(
-            if flag { "(due_at IS NOT NULL AND due_at < ?)" } else { "(due_at IS NULL OR due_at >= ?)" }
-                .into(),
-        );
+    if let Some(flag) = f.overdue {
+        wheres.push(if flag { format!("({NEXT_DUE} < ?)") } else { format!("({NEXT_DUE} IS NULL OR {NEXT_DUE} >= ?)") });
         params.push(jiff::Timestamp::now().to_string().into());
     }
-    if let Some(u) = &args.urgency {
-        if !crate::tasks::URGENCY.contains(&u.as_str()) {
-            return Err(ToolError::rejected(format!(
-                "urgency must be one of {}",
-                crate::tasks::URGENCY.join(", ")
-            )));
-        }
-        wheres.push("urgency = ?".into());
-        params.push(u.clone().into());
+    if let Some(u) = f.urgency {
+        wheres.push("EXISTS (SELECT 1 FROM tasks n WHERE n.root_id = tasks.id AND n.urgency = ? AND n.state != 'dropped')".into());
+        params.push(u.to_string().into());
     }
     let mut sql = wheres.join(" AND ");
-    if let Some((clause, shared)) = share_categories(ctx, args.category.as_deref())? {
+    if let Some((clause, shared)) = share_categories(ctx, f.category.as_deref(), "category")? {
         sql.push_str(&clause);
         params.extend(shared);
     }
     Ok((sql, params))
 }
 
-/// The instant a local day begins, which is what a due-date filter compares
-/// against.
-fn day_start(ctx: &ToolCtx, field: &str, day: &str) -> Result<String, ToolError> {
-    let day: jiff::civil::Date = day
-        .parse()
-        .map_err(|_| ToolError::rejected(format!("{field} must be YYYY-MM-DD, got {day:?}")))?;
-    let tz = crate::triggers::timezone(ctx.config_dir, ctx.username);
-    Ok(day.to_zoned(tz).map_err(internal)?.timestamp().to_string())
-}
-
-/// The user's top-level tasks, newest first, with how far their steps have got.
-pub fn list(conn: &Connection, ctx: &ToolCtx, args: &ListArgs) -> Result<serde_json::Value, ToolError> {
-    unscoped(ctx)?;
-    let limit = args.limit.unwrap_or(DEFAULT_LIMIT);
-    if !(1..=MAX_LIMIT).contains(&limit) {
-        return Err(ToolError::rejected(format!("limit must be in 1..={MAX_LIMIT}")));
-    }
+/// The top-level tasks, each with its leaf counts, its next part due and
+/// `depth` levels of children.
+fn survey(conn: &Connection, ctx: &ToolCtx, f: &Filters, warnings: &mut Vec<String>) -> Result<Value, ToolError> {
     let now = jiff::Timestamp::now();
-    let mut pressing_cutoff = None;
-    let order = match args.sort.as_deref() {
-        None | Some("added") => "created_at DESC, id DESC",
-        Some("due") => "due_at IS NULL, due_at ASC, created_at DESC, id DESC",
-        Some("urgency") => {
-            pressing_cutoff =
-                Some((now + jiff::Span::new().hours(crate::tasks::PRESSING_HOURS)).to_string());
-            "CASE WHEN urgency = 'high' THEN 0
-                  WHEN state IN ('open','in_progress') AND due_at IS NOT NULL AND due_at < ? THEN 1
-                  WHEN urgency = 'normal' THEN 2 ELSE 3 END,
-             due_at IS NULL, due_at ASC, created_at DESC, id DESC"
+    let mut extra = Vec::new();
+    let order = match f.sort {
+        "due" => format!("{NEXT_DUE} IS NULL, {NEXT_DUE} ASC, created_at DESC, id DESC"),
+        "urgency" => {
+            extra.push(SqlValue::from((now + jiff::Span::new().hours(crate::tasks::PRESSING_HOURS)).to_string()));
+            format!(
+                "CASE WHEN EXISTS (SELECT 1 FROM tasks n WHERE n.root_id = tasks.id AND n.urgency = 'high'
+                                   AND n.state IN ('open','in_progress')) THEN 0
+                      WHEN state IN ('open','in_progress') AND {NEXT_DUE} < ? THEN 1
+                      WHEN urgency = 'normal' THEN 2 ELSE 3 END,
+                 {NEXT_DUE} IS NULL, {NEXT_DUE} ASC, created_at DESC, id DESC"
+            )
         }
-        Some(other) => {
-            return Err(ToolError::rejected(format!(
-                "sort must be added, due or urgency, got {other:?}"
-            )))
-        }
+        _ => "created_at DESC, id DESC".to_string(),
     };
-    let (wheres, params) = list_filters(ctx, args)?;
-    let goals_hidden = hides_goals(ctx);
-
+    let (wheres, params) = survey_filters(ctx, f)?;
     let total: i64 = conn
-        .query_row(
-            &format!("SELECT COUNT(*) FROM tasks WHERE {wheres}"),
-            rusqlite::params_from_iter(params.iter()),
-            |r| r.get(0),
-        )
+        .query_row(&format!("SELECT COUNT(*) FROM tasks WHERE {wheres}"), rusqlite::params_from_iter(params.iter()), |r| r.get(0))
         .map_err(internal)?;
     let mut page_params = params;
-    page_params.extend(pressing_cutoff.map(SqlValue::from));
+    page_params.extend(extra);
     let mut stmt = conn
-        .prepare(&format!(
-            "SELECT id, title, state, is_now, duration_min, created_at, updated_at, due_at,
-                    (SELECT COUNT(*) FROM tasks s WHERE s.parent_id = tasks.id AND s.state != 'dropped'),
-                    (SELECT COUNT(*) FROM tasks s WHERE s.parent_id = tasks.id AND s.state = 'done'),
-                    progress, actual_min, category, goal_id, urgency, due_on
-             FROM tasks WHERE {wheres}
-             ORDER BY {order} LIMIT {limit}"
-        ))
+        .prepare(&format!("SELECT id FROM tasks WHERE {wheres} ORDER BY {order} LIMIT {}", f.limit))
         .map_err(internal)?;
-    let tasks = stmt
-        .query_map(rusqlite::params_from_iter(page_params.iter()), |r| {
-            let progress: u32 = r.get(10)?;
-            let (expected_min, remaining_min) =
-                crate::tasks::projection(progress, r.get(11)?);
-            let state: String = r.get(2)?;
-            let due_at: Option<String> = r.get(7)?;
-            let pressing = crate::tasks::pressing_at(&state, due_at.as_deref(), now);
-            Ok(serde_json::json!({
-                "id": r.get::<_, i64>(0)?,
-                "title": r.get::<_, String>(1)?,
-                "state": state,
-                "is_now": r.get::<_, bool>(3)?,
-                "duration_min": r.get::<_, Option<i64>>(4)?,
-                "created_at": r.get::<_, String>(5)?,
-                "updated_at": r.get::<_, String>(6)?,
-                "due_at": due_at,
-                "due_on": r.get::<_, Option<String>>(15)?,
-                "steps": r.get::<_, i64>(8)?,
-                "done_steps": r.get::<_, i64>(9)?,
-                "progress": progress,
-                "expected_min": expected_min,
-                "remaining_min": remaining_min,
-                "category": r.get::<_, String>(12)?,
-                "goal_id": if goals_hidden { None } else { r.get::<_, Option<i64>>(13)? },
-                "urgency": r.get::<_, String>(14)?,
-                "pressing": pressing,
-            }))
-        })
-        .and_then(|rows| rows.collect::<rusqlite::Result<Vec<_>>>())
-        .map_err(internal)?;
-    Ok(serde_json::json!({ "tasks": tasks, "total": total }))
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct SearchArgs {
-    /// The words to look for, 1 to 200 characters. Every word must match.
-    pub query: String,
-}
-
-/// Every word of the query against the title first, then against the task's
-/// whole text; live tasks before finished ones.
-pub fn search(conn: &Connection, ctx: &ToolCtx, args: &SearchArgs) -> Result<serde_json::Value, ToolError> {
-    unscoped(ctx)?;
-    let query = args.query.trim();
-    if query.is_empty() || query.chars().count() > MAX_QUERY_CHARS {
-        return Err(ToolError::rejected(format!(
-            "query must be 1 to {MAX_QUERY_CHARS} characters"
-        )));
-    }
-    let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
-    let mut params: Vec<SqlValue> = vec![ctx.user_id.into()];
-    let finished = match &ctx.share {
-        None => "",
-        Some(scope) if scope.progress => {
-            params.push(crate::shares::done_since(jiff::Timestamp::now()).to_string().into());
-            " AND (state != 'done' OR completed_at >= ?)"
-        }
-        Some(_) => " AND state != 'done'",
-    };
-    let clause = |column: &str, params: &mut Vec<SqlValue>| {
-        params.extend(words.iter().map(|w| SqlValue::from(w.clone())));
-        words
-            .iter()
-            .map(|_| format!("instr({column}, ?) > 0"))
-            .collect::<Vec<_>>()
-            .join(" AND ")
-    };
-    let text = if matches_details(ctx) {
-        "lower(title) || ' ' || lower(description) || ' ' || lower(notes)"
-    } else {
-        "lower(title)"
-    };
-    // the parameters are pushed in the order the statement below binds them
-    let text_match = clause(text, &mut params);
-    let (shared, shared_params) = share_categories(ctx, None)?.unwrap_or_default();
-    params.extend(shared_params);
-    let title_match = clause("lower(title)", &mut params);
-
-    let mut stmt = conn
-        .prepare(&format!(
-            "SELECT id, title, state, is_now, duration_min, due_at, due_on
-             FROM tasks
-             WHERE user_id = ? AND parent_id IS NULL AND state != 'dropped'{finished} AND ({text_match}){shared}
-             ORDER BY CASE WHEN {title_match} THEN 0 ELSE 1 END,
-                      CASE WHEN state = 'done' THEN 1 ELSE 0 END,
-                      created_at DESC, id DESC
-             LIMIT {SEARCH_HITS}"
-        ))
-        .map_err(internal)?;
-    let tasks = stmt
-        .query_map(rusqlite::params_from_iter(params.iter()), |r| {
-            Ok(serde_json::json!({
-                "id": r.get::<_, i64>(0)?,
-                "title": r.get::<_, String>(1)?,
-                "state": r.get::<_, String>(2)?,
-                "is_now": r.get::<_, bool>(3)?,
-                "duration_min": r.get::<_, Option<i64>>(4)?,
-                "due_at": r.get::<_, Option<String>>(5)?,
-                "due_on": r.get::<_, Option<String>>(6)?,
-            }))
-        })
-        .and_then(|rows| rows.collect::<rusqlite::Result<Vec<_>>>())
-        .map_err(internal)?;
-    Ok(serde_json::json!({ "tasks": tasks }))
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ReadArgs {
-    pub task_id: i64,
-}
-
-/// One task in full, exactly as `GET /api/tasks` renders it, plus when it was
-/// added.
-pub fn read(conn: &Connection, ctx: &ToolCtx, args: &ReadArgs) -> Result<serde_json::Value, ToolError> {
-    unscoped(ctx)?;
-    let Some(mut node) = crate::tasks::node(conn, ctx.user_id, args.task_id).map_err(internal)?
-    else {
-        return Err(ToolError::not_found(format!("no task {}", args.task_id)));
-    };
-    if let Some(scope) = &ctx.share {
-        let finished_in_view = || {
-            scope.progress
-                && completed_at(conn, args.task_id)
-                    .is_ok_and(|at| at.is_some_and(|at| at >= crate::shares::done_since(jiff::Timestamp::now()).to_string()))
-        };
-        let shared = scope.allows_category(&node.task.category)
-            && match node.task.state.as_str() {
-                "dropped" => false,
-                "done" => finished_in_view(),
-                _ => true,
-            };
-        if !shared {
-            return Err(ToolError::not_found(format!("no task {}", args.task_id)));
-        }
-    }
-    let tz = crate::triggers::timezone(ctx.config_dir, ctx.username);
-    crate::tasks::stamp_schedule(conn, ctx.user_id, &tz, std::iter::once(&mut node.task))
-        .map_err(internal)?;
-    let mut out = serde_json::to_value(&node).map_err(internal)?;
-    let mut stmt = conn
-        .prepare("SELECT id, created_at FROM tasks WHERE root_id = ?1")
-        .map_err(internal)?;
-    let added: std::collections::HashMap<i64, String> = stmt
-        .query_map([node.task.root_id], |r| Ok((r.get(0)?, r.get(1)?)))
+    let ids: Vec<i64> = stmt
+        .query_map(rusqlite::params_from_iter(page_params.iter()), |r| r.get(0))
         .and_then(|rows| rows.collect::<rusqlite::Result<_>>())
         .map_err(internal)?;
-    let hide_goals = ctx.share.as_ref().is_some_and(|scope| !scope.goals);
-    let titles = ctx.share.as_ref().is_some_and(|scope| !scope.details);
-    each_node(&mut out, &mut |t| {
-        stamp(t, &added);
-        if hide_goals {
-            t["goal_id"] = serde_json::Value::Null;
-            t["goal_title"] = serde_json::Value::Null;
-        }
-        if titles {
-            titles_only(t);
-        }
-    });
-    Ok(out)
-}
-
-fn each_node(node: &mut serde_json::Value, f: &mut impl FnMut(&mut serde_json::Value)) {
-    f(node);
-    if let Some(children) = node["children"].as_array_mut() {
-        for child in children {
-            each_node(child, f);
-        }
-    }
-}
-
-fn completed_at(conn: &Connection, id: i64) -> rusqlite::Result<Option<String>> {
-    conn.query_row("SELECT completed_at FROM tasks WHERE id = ?1", [id], |r| r.get(0))
-}
-
-fn titles_only(task: &mut serde_json::Value) {
-    for field in ["description", "notes", "url"] {
-        task[field] = serde_json::json!("");
-    }
-    task["external_id"] = serde_json::Value::Null;
-}
-
-fn stamp(task: &mut serde_json::Value, added: &std::collections::HashMap<i64, String>) {
-    let Some(created) = task["id"].as_i64().and_then(|id| added.get(&id)) else { return };
-    task["created_at"] = serde_json::json!(created);
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct BulkUpdateArgs {
-    /// Up to 200 task ids; a repeated one counts once.
-    pub task_ids: Vec<i64>,
-    /// One of open, `in_progress`, done, dropped, for all of them.
-    #[serde(default)]
-    pub state: Option<String>,
-    /// True moves them all into Now, false moves them all back to Later.
-    #[serde(default)]
-    pub is_now: Option<bool>,
-    /// Puts them all in this category; an empty string clears it.
-    #[serde(default)]
-    pub category: Option<String>,
-    /// Hangs them all from this goal; null detaches them.
-    #[serde(default, deserialize_with = "crate::tasks::present")]
-    pub goal_id: Option<Option<i64>>,
-    /// Sets them all to this urgency: low, normal or high.
-    #[serde(default)]
-    pub urgency: Option<String>,
-    /// True deletes them all, with their steps and their place on the day's plan.
-    #[serde(default)]
-    pub delete: Option<bool>,
-}
-
-/// The same change across a batch of tasks. Ids that are not the user's (or are
-/// already gone) are skipped and reported; a repeated id counts once; delete
-/// takes the place of any other change in the call.
-pub fn bulk_update(
-    conn: &Connection,
-    ctx: &ToolCtx,
-    kind: SessionKind,
-    args: &BulkUpdateArgs,
-) -> Result<serde_json::Value, ToolError> {
-    unscoped(ctx)?;
-    let delete = args.delete == Some(true);
-    if kind == SessionKind::Trigger && delete {
-        return Err(ToolError::forbidden(
-            "a wake-up never deletes tasks; set state dropped instead",
-        ));
-    }
-    let mut seen = std::collections::HashSet::new();
-    let ids: Vec<i64> = args.task_ids.iter().copied().filter(|id| seen.insert(*id)).collect();
-    if ids.len() > MAX_BATCH {
-        return Err(ToolError::rejected(format!(
-            "task_ids holds {} ids; at most {MAX_BATCH} per call, so split it",
-            ids.len()
-        )));
-    }
-    let changes = args.state.is_some()
-        || args.is_now.is_some()
-        || args.category.is_some()
-        || args.goal_id.is_some()
-        || args.urgency.is_some();
-    if !delete && !changes {
-        return Err(ToolError::rejected(
-            "nothing to change: give state, is_now, category, goal_id, urgency or delete: true",
-        ));
-    }
-    let mut ignored = Vec::new();
-    if delete && changes {
-        ignored.push("every change but delete: the tasks are deleted");
-    }
-    let mut skipped = Vec::new();
-    let mut present = Vec::new();
+    let tz = tz(ctx);
+    let goals_hidden = hides_goals(ctx);
+    let mut items = Vec::new();
     for id in ids {
-        if crate::tasks::get(conn, ctx.user_id, id).map_err(internal)?.is_some() {
-            present.push(id);
-        } else {
-            skipped.push(id);
+        let Some(node) = crate::tasks::node(conn, ctx.user_id, id).map_err(internal)? else { continue };
+        let mut row = row_of(&node.task, &tz, goals_hidden);
+        if !node.children.is_empty() {
+            let leaves = node.leaves();
+            let done = leaves.iter().filter(|l| l.state == "done").count();
+            row["leaves"] = format!("{done}/{}", leaves.len()).into();
+            let next = node
+                .walk()
+                .into_iter()
+                .skip(1)
+                .filter(|t| matches!(t.state.as_str(), "open" | "in_progress") && t.due_at.is_some())
+                .min_by(|a, b| a.due_at.cmp(&b.due_at));
+            if let Some(n) = next {
+                row["next_due"] = json!({
+                    "id": n.id,
+                    "title": n.title,
+                    "due": n.due_at.as_deref().and_then(|at| crate::due::local_label(at, n.due_on.as_deref(), &tz)),
+                });
+            }
+            if f.depth > 0 {
+                row["children"] = children_rows(&node, &tz, f.depth);
+            }
         }
+        items.push(row);
     }
-    let mut out = serde_json::json!({});
-    if !skipped.is_empty() {
-        out["skipped"] = serde_json::json!({ "ids": skipped, "why": "no such task of this user, or already deleted" });
+    if total == 0 {
+        warnings.push("no task matched; state any reaches finished ones".into());
     }
-    if !ignored.is_empty() {
-        out["ignored"] = ignored.into();
-    }
-
-    if delete {
-        for id in &present {
-            // a step deleted with its parent earlier in the batch is already gone
-            crate::tasks::delete_within(conn, ctx.user_id, *id).map_err(internal)?;
-        }
-        out["deleted"] = present.into();
-        return Ok(out);
-    }
-
-    let mut demoted = Vec::new();
-    for id in &present {
-        let patch = crate::tasks::TaskPatch {
-            state: args.state.clone(),
-            is_now: args.is_now,
-            category: args.category.clone(),
-            goal_id: args.goal_id,
-            urgency: args.urgency.clone(),
-            actor: crate::tasks::Actor::Agent,
-            ..Default::default()
-        };
-        match crate::tasks::update(conn, ctx.user_id, *id, &patch) {
-            Ok(Some(t)) => demoted.extend(t.demoted_from_now),
-            Ok(None) => {}
-            Err(e) => return Err(task_error(e)),
-        }
-    }
-    demoted.sort_unstable();
-    demoted.dedup();
-    let mut left_now = Vec::new();
-    for id in demoted {
-        let still_now: bool = conn
-            .query_row("SELECT is_now FROM tasks WHERE id = ?1", [id], |r| r.get(0))
-            .map_err(internal)?;
-        if !still_now {
-            left_now.push(id);
-        }
-    }
-    out["updated"] = present.into();
-    out["demoted_from_now"] = left_now.into();
-    Ok(out)
+    Ok(json!({ "total": total, "items": items }))
 }
 
-fn task_error(e: crate::tasks::UpdateError) -> ToolError {
-    match e {
-        crate::tasks::UpdateError::Db(e) => ToolError::internal(e.to_string()),
-        other => ToolError::rejected(other.to_string()),
-    }
+fn children_rows(node: &crate::tasks::TaskNode, tz: &jiff::tz::TimeZone, depth: usize) -> Value {
+    node.children
+        .iter()
+        .map(|c| {
+            let mut row = row_of(&c.task, tz, false);
+            if !c.children.is_empty() {
+                if depth > 1 {
+                    row["children"] = children_rows(c, tz, depth - 1);
+                } else {
+                    let leaves = c.leaves();
+                    let done = leaves.iter().filter(|l| l.state == "done").count();
+                    row["leaves"] = format!("{done}/{}", leaves.len()).into();
+                }
+            }
+            row
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::tools::{dispatch, registry, PreparedVectors, SessionKind, ToolCtx, ToolError};
-    use rusqlite::Connection;
-    use serde_json::Value;
+    use crate::tools::testkit::{ctx, env, saved, talk};
+    use crate::tools::{dispatch, SessionKind, ToolCtx};
+    use serde_json::{json, Value};
 
-    fn env() -> (Connection, tempfile::TempDir) {
-        let conn = crate::db::open_memory().unwrap();
-        conn.execute(
-            "INSERT INTO users (username, pass_hash, role) VALUES ('aki', 'x', 'member')",
-            [],
-        )
-        .unwrap();
-        (conn, tempfile::tempdir().unwrap())
+    fn titles(out: &Value) -> Vec<String> {
+        out["items"].as_array().unwrap().iter().map(|t| t["title"].as_str().unwrap().to_string()).collect()
     }
 
-    fn ctx(tmp: &tempfile::TempDir, scope: Option<i64>) -> ToolCtx<'_> {
-        ToolCtx {
-            config_dir: tmp.path(),
-            data_dir: tmp.path(),
-            user_id: 1,
-            username: "aki",
-            vectors: PreparedVectors::default(),
-            task_scope: scope,
-            inbox_source: None,
-            memory_source: None,
-            share: None,
-            share_thread: None,
-        }
-    }
-
-    fn call(
-        conn: &Connection,
-        tmp: &tempfile::TempDir,
-        name: &str,
-        args: &str,
-    ) -> Result<Value, ToolError> {
-        dispatch(conn, &ctx(tmp, None), SessionKind::Talk, name, args)
-    }
-
-    fn task(conn: &Connection, tmp: &tempfile::TempDir, args: &str) -> i64 {
-        call(conn, tmp, "task_create", args).unwrap()["task_id"].as_i64().unwrap()
-    }
-
-    fn patch(conn: &Connection, tmp: &tempfile::TempDir, id: i64, fields: &str) {
-        call(conn, tmp, "task_update", &format!(r#"{{"task_id":{id},{fields}}}"#)).unwrap();
-    }
-
-    fn ids(out: &Value, key: &str) -> Vec<i64> {
-        out[key]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|t| t["id"].as_i64().or_else(|| t.as_i64()).unwrap())
-            .collect()
-    }
-
-    fn split_two(conn: &Connection, tmp: &tempfile::TempDir, id: i64) -> Vec<i64> {
-        let out = call(
-            conn,
-            tmp,
-            "task_split",
-            &format!(
-                r#"{{"task_id":{id},"steps":[{{"title":"find the thread","duration_min":5}},
-                     {{"title":"write and send","duration_min":10}}]}}"#
-            ),
-        )
-        .unwrap();
-        out["step_ids"].as_array().unwrap().iter().map(|v| v.as_i64().unwrap()).collect()
+    fn make(conn: &rusqlite::Connection, tmp: &tempfile::TempDir, node: &Value) -> i64 {
+        saved(&talk(conn, tmp, "task_save", json!({"tasks": [node]})), "0")
     }
 
     #[test]
-    fn task_list_filters_and_sorts_by_urgency() {
-        let (conn, tmp) = env();
-        let mk = |title: &str, urgency: &str, due: Option<&str>| {
-            let due = due.map(|d| format!(r#","due_at":"{d}""#)).unwrap_or_default();
-            task(&conn, &tmp, &format!(r#"{{"title":"{title}","urgency":"{urgency}"{due}}}"#));
-        };
-        mk("low one", "low", None);
-        mk("plain", "normal", None);
-        mk("soon", "normal", Some("2026-01-02T00:00:00Z"));
-        mk("top", "high", None);
-        let out = call(&conn, &tmp, "task_list", r#"{"sort":"urgency"}"#).unwrap();
-        let titles: Vec<&str> =
-            out["tasks"].as_array().unwrap().iter().map(|t| t["title"].as_str().unwrap()).collect();
-        assert_eq!(titles, vec!["top", "soon", "plain", "low one"]);
-        assert_eq!(out["tasks"][0]["urgency"], "high");
-        assert_eq!(out["tasks"][1]["pressing"], true);
-        assert_eq!(out["tasks"][2]["pressing"], false);
-        let out = call(&conn, &tmp, "task_list", r#"{"urgency":"low"}"#).unwrap();
-        assert_eq!(out["total"], 1);
-        let err = call(&conn, &tmp, "task_list", r#"{"urgency":"asap"}"#).unwrap_err();
-        assert_eq!(err.kind, "rejected");
-    }
-
-    #[test]
-    fn a_finished_task_with_a_past_due_date_is_not_ranked_pressing() {
-        let (conn, tmp) = env();
-        let done = task(&conn, &tmp, r#"{"title":"filed","due_at":"2026-01-02T00:00:00Z"}"#);
-        patch(&conn, &tmp, done, r#""state":"done""#);
-        let in_an_hour = jiff::Timestamp::now() + jiff::Span::new().hours(1);
-        task(&conn, &tmp, &format!(r#"{{"title":"soon","due_at":"{in_an_hour}"}}"#));
-        let out = call(&conn, &tmp, "task_list", r#"{"state":"any","sort":"urgency"}"#).unwrap();
-        let titles: Vec<&str> =
-            out["tasks"].as_array().unwrap().iter().map(|t| t["title"].as_str().unwrap()).collect();
-        assert_eq!(titles, vec!["soon", "filed"]);
-        assert_eq!(out["tasks"][0]["pressing"], true);
-        assert_eq!(out["tasks"][1]["pressing"], false);
-    }
-
-    #[test]
-    fn task_bulk_update_sets_urgency_on_every_task() {
-        let (conn, tmp) = env();
-        let a = task(&conn, &tmp, r#"{"title":"a"}"#);
-        let b = task(&conn, &tmp, r#"{"title":"b"}"#);
-        call(&conn, &tmp, "task_bulk_update", &format!(r#"{{"task_ids":[{a},{b}],"urgency":"high"}}"#))
-            .unwrap();
-        let out = call(&conn, &tmp, "task_list", r#"{"urgency":"high"}"#).unwrap();
+    fn a_survey_shows_the_top_level_with_leaf_counts_next_parts_due_and_children() {
+        let (conn, tmp) = env("UTC");
+        let course = make(&conn, &tmp, &json!({"title": "Visual Arts", "due": "2099-12-18", "children": [
+            {"title": "Unit 1", "due": "2099-11-06", "children": [{"title": "L1", "state": "done"}, "L2"]},
+            {"title": "Unit 2", "children": ["L3"]}
+        ]}));
+        make(&conn, &tmp, &json!({"title": "Dentist"}));
+        let out = talk(&conn, &tmp, "task_find", json!({}));
         assert_eq!(out["total"], 2);
+        let row = out["items"].as_array().unwrap().iter().find(|r| r["id"] == course).unwrap();
+        assert_eq!(row["leaves"], "1/3");
+        assert_eq!(row["next_due"]["title"], "Unit 1");
+        assert_eq!(row["next_due"]["due"], "2099-11-06");
+        assert_eq!(row["children"].as_array().unwrap().len(), 2);
+        assert_eq!(row["children"][0]["leaves"], "1/2", "depth 1 stops at the units");
+        let deep = talk(&conn, &tmp, "task_find", json!({"depth": 2}));
+        let row = deep["items"].as_array().unwrap().iter().find(|r| r["id"] == course).unwrap();
+        assert_eq!(row["children"][0]["children"][1]["title"], "L2");
+        let flat = talk(&conn, &tmp, "task_find", json!({"depth": 0}));
+        assert!(flat["items"][0].get("children").is_none());
     }
 
     #[test]
-    fn task_list_shows_the_live_tasks_newest_first_with_their_steps() {
-        let (conn, tmp) = env();
-        let dentist = task(&conn, &tmp, r#"{"title":"call dentist"}"#);
-        let landlord = task(&conn, &tmp, r#"{"title":"email landlord"}"#);
-        let steps = split_two(&conn, &tmp, landlord);
-        patch(&conn, &tmp, steps[0], r#""state":"done""#);
-        let gone = task(&conn, &tmp, r#"{"title":"an abandoned idea"}"#);
-        patch(&conn, &tmp, gone, r#""state":"dropped""#);
-
-        let out = call(&conn, &tmp, "task_list", "{}").unwrap();
-        assert_eq!(ids(&out, "tasks"), vec![landlord, dentist]);
-        assert_eq!(out["total"], 2);
-        assert_eq!(out["tasks"][0]["steps"], 2);
-        assert_eq!(out["tasks"][0]["done_steps"], 1);
-        assert_eq!(out["tasks"][0]["duration_min"], 15);
-        assert_eq!(out["tasks"][0]["state"], "open");
-        assert_eq!(out["tasks"][0]["is_now"], false);
-        assert_eq!(out["tasks"][1]["steps"], 0);
-        assert!(out["tasks"][0]["created_at"].is_string());
-        assert!(out["tasks"][0]["updated_at"].is_string());
+    fn a_query_matches_at_any_depth_with_the_path() {
+        let (conn, tmp) = env("UTC");
+        make(&conn, &tmp, &json!({"title": "Visual Arts", "children": [{"title": "Unit 2", "children": ["Lesson 3 shading"]}]}));
+        make(&conn, &tmp, &json!({"title": "Shading pencils"}));
+        let out = talk(&conn, &tmp, "task_find", json!({"query": "SHADING"}));
+        assert_eq!(titles(&out), ["Shading pencils", "Lesson 3 shading"]);
+        assert_eq!(out["items"][1]["path"], "Visual Arts › Unit 2 › Lesson 3 shading");
+        let miss = talk(&conn, &tmp, "task_find", json!({"query": "pottery"}));
+        assert_eq!(miss["total"], 0);
+        assert!(miss["warnings"][0].as_str().unwrap().contains("nothing matched"));
+        let out = talk(&conn, &tmp, "task_search", json!({"query": "pencils"}));
+        assert_eq!(titles(&out), ["Shading pencils"]);
+        assert!(out["warnings"][0].as_str().unwrap().contains("task_find"));
     }
 
     #[test]
-    fn task_list_filters_by_state_keyword_age_and_now() {
-        let (conn, tmp) = env();
-        let dentist =
-            task(&conn, &tmp, r#"{"title":"call dentist","description":"about the MOLAR","is_now":true}"#);
-        let landlord = task(&conn, &tmp, r#"{"title":"email landlord"}"#);
-        patch(&conn, &tmp, landlord, r#""notes":"the broken window again""#);
-        let taxes = task(&conn, &tmp, r#"{"title":"tax return"}"#);
-        conn.execute("UPDATE tasks SET created_at = '2026-01-01T00:00:00Z' WHERE id = ?1", [taxes])
-            .unwrap();
-        patch(&conn, &tmp, taxes, r#""state":"done""#);
-
-        let list = |args: &str| ids(&call(&conn, &tmp, "task_list", args).unwrap(), "tasks");
-        assert_eq!(list(r#"{"state":"done"}"#), vec![taxes]);
-        assert_eq!(list(r#"{"state":"any"}"#), vec![landlord, dentist, taxes]);
-        assert_eq!(list(r#"{"keyword":"molar"}"#), vec![dentist]);
-        assert_eq!(list(r#"{"keyword":"BROKEN window"}"#), vec![landlord]);
-        assert_eq!(list(r#"{"older_than_days":30,"state":"any"}"#), vec![taxes]);
-        assert_eq!(list(r#"{"added_before":"2026-06-01","state":"any"}"#), vec![taxes]);
-        assert_eq!(list(r#"{"added_after":"2026-06-01","state":"any"}"#), vec![landlord, dentist]);
-        assert_eq!(list(r#"{"is_now":true}"#), vec![dentist]);
-        assert_eq!(list(r#"{"is_now":false}"#), vec![landlord]);
+    fn an_id_reads_the_whole_subtree_in_full_and_a_miss_is_no_error() {
+        let (conn, tmp) = env("UTC");
+        let id = make(&conn, &tmp, &json!({"title": "email landlord", "description": "about the window", "notes": "fridge",
+            "now": true, "due": "2099-01-02", "children": [{"title": "find the thread", "minutes": 5, "state": "done"}, {"title": "send", "minutes": 10}]}));
+        let out = talk(&conn, &tmp, "task_find", json!({"id": id}));
+        let item = &out["item"];
+        assert_eq!(item["title"], "email landlord");
+        assert_eq!(item["notes"], "fridge");
+        assert_eq!(item["due"], "2099-01-02");
+        assert_eq!(item["duration_min"], 15);
+        assert!(item["created_at"].is_string());
+        assert_eq!(item["children"][0]["state"], "done");
+        assert_eq!(item["children"][1]["due"], "2099-01-02", "a child shows its effective due");
+        let child = item["children"][1]["id"].as_i64().unwrap();
+        assert_eq!(talk(&conn, &tmp, "task_find", json!({"id": child}))["item"]["path"], "email landlord › send");
+        let both = talk(&conn, &tmp, "task_find", json!({"id": [id, 9999]}));
+        assert_eq!(both["total"], 1);
+        assert_eq!(both["warnings"][0], "no task 9999");
+        let miss = talk(&conn, &tmp, "task_find", json!({"id": 9999}));
+        assert_eq!(miss["total"], 0);
+        let by_title = talk(&conn, &tmp, "task_find", json!({"id": "Email Landlord"}));
+        assert_eq!(by_title["item"]["id"], id);
+        let old = talk(&conn, &tmp, "task_read", json!({"task_id": id}));
+        assert_eq!(old["item"]["id"], id);
     }
 
     #[test]
-    fn task_list_filters_and_sorts_by_due_date() {
-        let (conn, tmp) = env();
-        let tomorrow = jiff::Timestamp::now()
-            .to_zoned(jiff::tz::TimeZone::UTC)
-            .date()
-            .tomorrow()
-            .unwrap();
-        let midnight = tomorrow.to_zoned(jiff::tz::TimeZone::UTC).unwrap().timestamp();
-        let yesterday = (jiff::Timestamp::now() - jiff::Span::new().hours(30)).to_string();
-        let soon = (midnight - jiff::Span::new().seconds(1)).to_string();
-        let later = (midnight + jiff::Span::new().hours(24 * 10)).to_string();
-        let late = task(&conn, &tmp, &format!(r#"{{"title":"late","due_at":"{yesterday}"}}"#));
-        let today = task(&conn, &tmp, &format!(r#"{{"title":"today","due_at":"{soon}"}}"#));
-        let far = task(&conn, &tmp, &format!(r#"{{"title":"far","due_at":"{later}"}}"#));
-        let undated = task(&conn, &tmp, r#"{"title":"undated"}"#);
-
-        let list = |args: &str| ids(&call(&conn, &tmp, "task_list", args).unwrap(), "tasks");
-        assert_eq!(list("{}"), vec![undated, far, today, late], "added order is untouched");
-        assert_eq!(list(r#"{"sort":"due"}"#), vec![late, today, far, undated], "nulls last");
-        assert_eq!(list(r#"{"overdue":true}"#), vec![late]);
-        assert_eq!(list(r#"{"overdue":false}"#), vec![undated, far, today]);
-
-        assert_eq!(list(&format!(r#"{{"due_before":"{tomorrow}"}}"#)), vec![today, late]);
-        assert_eq!(list(&format!(r#"{{"due_after":"{tomorrow}"}}"#)), vec![far]);
-
-        let out = call(&conn, &tmp, "task_list", r#"{"sort":"due"}"#).unwrap();
-        assert_eq!(out["tasks"][0]["due_at"], yesterday);
-        assert!(out["tasks"][3]["due_at"].is_null());
-    }
-
-    #[test]
-    fn a_bad_sort_or_filter_is_rejected_rather_than_ignored() {
-        let (conn, tmp) = env();
-        task(&conn, &tmp, r#"{"title":"x"}"#);
-        for args in [r#"{"sort":"soonest"}"#, r#"{"due_before":"friday"}"#, r#"{"due_after":"2026-13-01"}"#] {
-            assert_eq!(call(&conn, &tmp, "task_list", args).unwrap_err().kind, "rejected", "{args}");
-        }
-    }
-
-    #[test]
-    fn a_task_read_and_a_search_carry_where_the_task_came_from() {
-        let (conn, tmp) = env();
-        let id = task(&conn, &tmp, r#"{"title":"Biology ch.4","due_at":"2026-09-19T14:59:00Z"}"#);
-        conn.execute(
-            "UPDATE tasks SET external_id = 'canvas:12', url = 'https://canvas.example/a/12',
-                              source = 'import' WHERE id = ?1",
-            [id],
-        )
-        .unwrap();
-
-        let out = call(&conn, &tmp, "task_read", &format!(r#"{{"task_id":{id}}}"#)).unwrap();
-        assert_eq!(out["due_at"], "2026-09-19T14:59:00Z");
-        assert_eq!(out["external_id"], "canvas:12");
-        assert_eq!(out["url"], "https://canvas.example/a/12");
-        assert_eq!(out["source"], "import");
-
-        let hits = call(&conn, &tmp, "task_search", r#"{"query":"biology"}"#).unwrap();
-        assert_eq!(hits["tasks"][0]["due_at"], "2026-09-19T14:59:00Z");
-    }
-
-    #[test]
-    fn task_list_bounds_its_page_and_reports_the_whole_count() {
-        let (conn, tmp) = env();
-        for title in ["a", "b", "c", "d"] {
-            task(&conn, &tmp, &format!(r#"{{"title":"{title}"}}"#));
-        }
-        let out = call(&conn, &tmp, "task_list", r#"{"limit":2}"#).unwrap();
-        assert_eq!(out["tasks"].as_array().unwrap().len(), 2);
-        assert_eq!(out["total"], 4);
-
-        for (args, why) in [
-            (r#"{"limit":0}"#, "no page at all"),
-            (r#"{"limit":201}"#, "past the ceiling"),
-            (r#"{"state":"maybe"}"#, "not a state"),
-            (r#"{"keyword":"   "}"#, "blank keyword"),
-            (r#"{"added_after":"last tuesday"}"#, "not a date"),
-            (r#"{"added_before":"2026-13-01"}"#, "not a date"),
-        ] {
-            assert_eq!(
-                call(&conn, &tmp, "task_list", args).unwrap_err().kind,
-                "rejected",
-                "{why}"
-            );
-        }
-        let e = call(&conn, &tmp, "task_list", r#"{"surprise":1}"#).unwrap_err();
-        assert_eq!(e.kind, "invalid_args");
-    }
-
-    #[test]
-    fn task_list_leaves_steps_out() {
-        let (conn, tmp) = env();
-        let landlord = task(&conn, &tmp, r#"{"title":"email landlord"}"#);
-        split_two(&conn, &tmp, landlord);
-        let out = call(&conn, &tmp, "task_list", r#"{"state":"any"}"#).unwrap();
-        assert_eq!(ids(&out, "tasks"), vec![landlord]);
-    }
-
-    #[test]
-    fn task_search_puts_title_matches_first_and_finished_ones_last() {
-        let (conn, tmp) = env();
-        let by_title = task(&conn, &tmp, r#"{"title":"email the landlord"}"#);
-        let by_body = task(
-            &conn,
-            &tmp,
-            r#"{"title":"tuesday admin","description":"email the landlord about the window"}"#,
-        );
-        let finished = task(&conn, &tmp, r#"{"title":"email the landlord again"}"#);
-        patch(&conn, &tmp, finished, r#""state":"done""#);
-        let abandoned = task(&conn, &tmp, r#"{"title":"email the landlord once"}"#);
-        patch(&conn, &tmp, abandoned, r#""state":"dropped""#);
-        task(&conn, &tmp, r#"{"title":"call dentist"}"#);
-
-        let out = call(&conn, &tmp, "task_search", r#"{"query":"LANDLORD  email"}"#).unwrap();
-        assert_eq!(ids(&out, "tasks"), vec![by_title, finished, by_body]);
-        assert_eq!(out["tasks"][0]["title"], "email the landlord");
-        assert_eq!(out["tasks"][0]["state"], "open");
-        assert_eq!(out["tasks"][0]["is_now"], false);
-        assert!(out["tasks"][0].get("duration_min").is_some());
-
-        let out = call(&conn, &tmp, "task_search", r#"{"query":"landlord dentist"}"#).unwrap();
-        assert!(out["tasks"].as_array().unwrap().is_empty(), "every word must match");
-    }
-
-    #[test]
-    fn task_search_needs_a_query_of_its_own() {
-        let (conn, tmp) = env();
-        let long = format!(r#"{{"query":"{}"}}"#, "x".repeat(201));
-        for args in [r#"{"query":"   "}"#, &long] {
-            assert_eq!(call(&conn, &tmp, "task_search", args).unwrap_err().kind, "rejected");
-        }
-    }
-
-    #[test]
-    fn task_read_returns_the_whole_task_with_its_steps() {
-        let (conn, tmp) = env();
-        let landlord =
-            task(&conn, &tmp, r#"{"title":"email landlord","description":"about the window"}"#);
-        patch(&conn, &tmp, landlord, r#""notes":"his number is on the fridge","is_now":true"#);
-        let steps = split_two(&conn, &tmp, landlord);
-        patch(&conn, &tmp, steps[0], r#""state":"done""#);
-
-        let out = call(&conn, &tmp, "task_read", &format!(r#"{{"task_id":{landlord}}}"#)).unwrap();
-        assert_eq!(out["id"], landlord);
-        assert_eq!(out["title"], "email landlord");
-        assert_eq!(out["description"], "about the window");
-        assert_eq!(out["notes"], "his number is on the fridge");
-        assert_eq!(out["state"], "open");
-        assert_eq!(out["source"], "agent");
-        assert_eq!(out["duration_min"], 15);
-        assert_eq!(out["is_now"], true);
-        assert!(out["parent_id"].is_null());
-        assert!(out["created_at"].is_string());
-        assert!(out["updated_at"].is_string());
-        assert_eq!(out["children"].as_array().unwrap().len(), 2);
-        assert_eq!(out["children"][0]["state"], "done");
-        assert_eq!(out["children"][0]["duration_min"], 5);
-        assert_eq!(out["children"][0]["parent_id"], landlord);
-    }
-
-    #[test]
-    fn task_read_does_not_reach_another_users_task() {
-        let (conn, tmp) = env();
-        conn.execute(
-            "INSERT INTO users (username, pass_hash, role) VALUES ('rin', 'x', 'member')",
-            [],
-        )
-        .unwrap();
-        let mut theirs = ctx(&tmp, None);
-        theirs.user_id = 2;
-        theirs.username = "rin";
-        let id = dispatch(&conn, &theirs, SessionKind::Talk, "task_create", r#"{"title":"theirs"}"#)
-            .unwrap()["task_id"]
-            .as_i64()
-            .unwrap();
-
-        for target in [id, 9999] {
-            let e = call(&conn, &tmp, "task_read", &format!(r#"{{"task_id":{target}}}"#))
-                .unwrap_err();
-            assert_eq!(e.kind, "not_found", "reached {target}");
-        }
-    }
-
-    #[test]
-    fn task_bulk_update_sets_one_state_on_many_tasks() {
-        let (conn, tmp) = env();
-        let a = task(&conn, &tmp, r#"{"title":"a"}"#);
-        let b = task(&conn, &tmp, r#"{"title":"b"}"#);
-        let out = call(
-            &conn,
-            &tmp,
-            "task_bulk_update",
-            &format!(r#"{{"task_ids":[{a},{b}],"state":"done"}}"#),
-        )
-        .unwrap();
-        assert_eq!(ids(&out, "updated"), vec![a, b]);
-        assert!(out["demoted_from_now"].as_array().unwrap().is_empty());
-        for id in [a, b] {
-            assert_eq!(crate::tasks::get(&conn, 1, id).unwrap().unwrap().state, "done");
-        }
-    }
-
-    #[test]
-    fn task_bulk_update_fills_now_and_reports_who_stepped_aside() {
-        let (conn, tmp) = env();
-        let all: Vec<i64> = ["a", "b", "c", "d"]
-            .iter()
-            .map(|t| task(&conn, &tmp, &format!(r#"{{"title":"{t}"}}"#)))
-            .collect();
-        let list = all.iter().map(std::string::ToString::to_string).collect::<Vec<_>>().join(",");
-        let out = call(
-            &conn,
-            &tmp,
-            "task_bulk_update",
-            &format!(r#"{{"task_ids":[{list}],"is_now":true}}"#),
-        )
-        .unwrap();
-        assert_eq!(ids(&out, "updated"), all);
-        assert_eq!(ids(&out, "demoted_from_now"), vec![all[2]]);
-        let now: Vec<i64> = {
-            let mut stmt = conn
-                .prepare("SELECT id FROM tasks WHERE is_now = 1 ORDER BY id")
-                .unwrap();
-            stmt.query_map([], |r| r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap()
-        };
-        assert_eq!(now, vec![all[0], all[1], all[3]]);
-    }
-
-    #[test]
-    fn task_bulk_update_deletes_the_whole_batch() {
-        let (conn, tmp) = env();
-        let a = task(&conn, &tmp, r#"{"title":"a"}"#);
-        let b = task(&conn, &tmp, r#"{"title":"b"}"#);
-        split_two(&conn, &tmp, b);
-        let keep = task(&conn, &tmp, r#"{"title":"keep me"}"#);
-
-        let out = call(
-            &conn,
-            &tmp,
-            "task_bulk_update",
-            &format!(r#"{{"task_ids":[{a},{b}],"delete":true}}"#),
-        )
-        .unwrap();
-        assert_eq!(ids(&out, "deleted"), vec![a, b]);
-        let left: i64 = conn.query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0)).unwrap();
-        assert_eq!(left, 1);
-        assert!(crate::tasks::get(&conn, 1, keep).unwrap().is_some());
-    }
-
-    #[test]
-    fn a_wake_up_drops_tasks_but_never_deletes_them() {
-        let (conn, tmp) = env();
-        let a = task(&conn, &tmp, r#"{"title":"a"}"#);
-        let e = dispatch(&conn, &ctx(&tmp, None), SessionKind::Trigger, "task_bulk_update",
-            &format!(r#"{{"task_ids":[{a}],"delete":true}}"#)).unwrap_err();
-        assert_eq!(e.kind, "forbidden");
-        assert!(crate::tasks::get(&conn, 1, a).unwrap().is_some());
-        let e = dispatch(&conn, &ctx(&tmp, None), SessionKind::Trigger, "task_delete",
-            &format!(r#"{{"task_id":{a}}}"#)).unwrap_err();
-        assert_eq!(e.kind, "forbidden");
-        dispatch(&conn, &ctx(&tmp, None), SessionKind::Trigger, "task_bulk_update",
-            &format!(r#"{{"task_ids":[{a}],"state":"dropped"}}"#)).unwrap();
-        assert_eq!(crate::tasks::get(&conn, 1, a).unwrap().unwrap().state, "dropped");
-    }
-
-    #[test]
-    fn task_bulk_update_refuses_only_what_says_nothing_or_overflows() {
-        let (conn, tmp) = env();
-        let a = task(&conn, &tmp, r#"{"title":"a"}"#);
-        let over = (0..201).map(|n| (n + 1000).to_string()).collect::<Vec<_>>().join(",");
-        for (args, why) in [
-            (format!(r#"{{"task_ids":[{a}]}}"#), "nothing to change"),
-            (format!(r#"{{"task_ids":[{a}],"delete":false}}"#), "delete false changes nothing"),
-            (format!(r#"{{"task_ids":[{over}],"state":"done"}}"#), "past the batch cap"),
-            (format!(r#"{{"task_ids":[{a}],"state":"exploded"}}"#), "not a state"),
-        ] {
-            assert_eq!(call(&conn, &tmp, "task_bulk_update", &args).unwrap_err().kind, "rejected", "{why}");
-        }
-        assert_eq!(crate::tasks::get(&conn, 1, a).unwrap().unwrap().state, "open");
-
-        let out = call(&conn, &tmp, "task_bulk_update", &format!(r#"{{"task_ids":[{a},{a}],"state":"done","urgency":"high"}}"#)).unwrap();
-        assert_eq!(out["updated"], serde_json::json!([a]), "a repeated id counts once and both changes land");
-        let t = crate::tasks::get(&conn, 1, a).unwrap().unwrap();
-        assert_eq!((t.state.as_str(), t.urgency.as_str()), ("done", "high"));
-        assert_eq!(call(&conn, &tmp, "task_bulk_update", r#"{"task_ids":[],"state":"done"}"#).unwrap()["updated"], serde_json::json!([]));
-    }
-
-    #[test]
-    fn ids_that_are_gone_or_someone_elses_are_skipped_and_the_rest_land() {
-        let (conn, tmp) = env();
-        conn.execute("INSERT INTO users (username, pass_hash, role) VALUES ('rin', 'x', 'member')", []).unwrap();
-        let mut theirs = ctx(&tmp, None);
-        theirs.user_id = 2;
-        theirs.username = "rin";
-        let foreign = dispatch(&conn, &theirs, SessionKind::Talk, "task_create", r#"{"title":"theirs"}"#).unwrap()["task_id"].as_i64().unwrap();
-        let done = task(&conn, &tmp, r#"{"title":"mine"}"#);
-        let out = call(&conn, &tmp, "task_bulk_update", &format!(r#"{{"task_ids":[{done},{foreign},9999],"state":"done"}}"#)).unwrap();
-        assert_eq!(out["updated"], serde_json::json!([done]));
-        assert_eq!(out["skipped"]["ids"], serde_json::json!([foreign, 9999]));
-        assert_eq!(crate::tasks::get(&conn, 1, done).unwrap().unwrap().state, "done");
-
-        let gone = task(&conn, &tmp, r#"{"title":"old flat"}"#);
-        let out = call(&conn, &tmp, "task_bulk_update", &format!(r#"{{"task_ids":[{gone},{foreign}],"delete":true,"state":"dropped"}}"#)).unwrap();
-        assert_eq!(out["deleted"], serde_json::json!([gone]));
-        assert!(out["ignored"].is_array(), "delete takes the place of the other change");
-        assert!(crate::tasks::get(&conn, 1, gone).unwrap().is_none());
-        assert!(crate::tasks::get(&conn, 2, foreign).unwrap().is_some(), "someone else's task is never touched");
-    }
-
-    #[test]
-    fn task_bulk_update_never_leaves_a_task_and_its_step_in_now() {
-        let (conn, tmp) = env();
-        let landlord = task(&conn, &tmp, r#"{"title":"email landlord"}"#);
-        let steps = split_two(&conn, &tmp, landlord);
-        call(
-            &conn,
-            &tmp,
-            "task_bulk_update",
-            &format!(r#"{{"task_ids":[{landlord},{}],"is_now":true}}"#, steps[0]),
-        )
-        .unwrap();
-        let flagged: Vec<i64> = conn
-            .prepare("SELECT id FROM tasks WHERE is_now = 1")
-            .unwrap()
-            .query_map([], |r| r.get(0))
-            .unwrap()
-            .collect::<rusqlite::Result<_>>()
-            .unwrap();
-        assert_eq!(flagged, [steps[0]], "the later of the pair holds the place");
-    }
-
-    #[test]
-    fn the_survey_tools_are_closed_to_a_scoped_session() {
-        let (conn, tmp) = env();
-        let id = task(&conn, &tmp, r#"{"title":"biology ch.4"}"#);
-        for (name, args) in [
-            ("task_list", "{}".to_string()),
-            ("task_search", r#"{"query":"biology"}"#.to_string()),
-            ("task_read", format!(r#"{{"task_id":{id}}}"#)),
-            ("task_bulk_update", format!(r#"{{"task_ids":[{id}],"state":"done"}}"#)),
-        ] {
-            let e = dispatch(&conn, &ctx(&tmp, Some(id)), SessionKind::Talk, name, &args)
-                .unwrap_err();
-            assert_eq!(e.kind, "rejected", "{name} answered a scoped session");
-        }
-    }
-
-    #[test]
-    fn the_survey_tools_sit_in_the_right_registries() {
-        for name in ["task_list", "task_search", "task_read"] {
-            for kind in [SessionKind::Talk, SessionKind::Nightly] {
-                assert!(registry(kind).contains(&name), "{name} missing from {kind:?}");
-            }
-        }
-        for kind in [SessionKind::Talk, SessionKind::Nightly, SessionKind::Trigger, SessionKind::Call] {
-            assert!(registry(kind).contains(&"task_bulk_update"), "{kind:?}");
-        }
-        for name in ["task_list", "task_search", "task_read", "task_bulk_update"] {
-            assert!(!registry(SessionKind::Import).contains(&name), "{name} reached import");
-        }
-
-        let (conn, tmp) = env();
-        let e = dispatch(
-            &conn,
-            &ctx(&tmp, None),
-            SessionKind::Share,
-            "task_bulk_update",
-            r#"{"task_ids":[1],"state":"done"}"#,
-        )
-        .unwrap_err();
-        assert_eq!(e.kind, "forbidden");
+    fn the_filters_and_sorts_read_loosely() {
+        let (conn, tmp) = env("UTC");
+        let low = make(&conn, &tmp, &json!({"title": "low one", "urgency": "low"}));
+        let plain = make(&conn, &tmp, &json!({"title": "plain"}));
+        let soon = make(&conn, &tmp, &json!({"title": "soon", "due": "+30min"}));
+        let top = make(&conn, &tmp, &json!({"title": "top", "urgency": "urgent", "category": "School"}));
+        let late = make(&conn, &tmp, &json!({"title": "has a late part", "children": [{"title": "part", "due": "2020-01-02"}]}));
+        let out = talk(&conn, &tmp, "task_find", json!({"sort": "urgency"}));
+        let order: Vec<i64> = out["items"].as_array().unwrap().iter().map(|t| t["id"].as_i64().unwrap()).collect();
+        assert_eq!(order, [top, late, soon, plain, low]);
+        assert_eq!(talk(&conn, &tmp, "task_find", json!({"overdue": true}))["items"][0]["id"], late, "a root is as due as its parts");
+        assert_eq!(talk(&conn, &tmp, "task_find", json!({"urgency": "HIGH"}))["total"], 1);
+        assert_eq!(talk(&conn, &tmp, "task_find", json!({"category": "School"}))["total"], 1);
+        assert_eq!(talk(&conn, &tmp, "task_find", json!({"due_before": "tomorrow"}))["total"], 2);
+        assert_eq!(talk(&conn, &tmp, "task_find", json!({"limit": 2}))["items"].as_array().unwrap().len(), 2);
+        let bad = talk(&conn, &tmp, "task_find", json!({"sort": "random", "due_before": "friday-ish", "colour": 1}));
+        assert_eq!(bad["total"], 5);
+        assert_eq!(bad["warnings"].as_array().unwrap().len(), 3);
+        talk(&conn, &tmp, "task_save", json!({"tasks": [{"id": plain, "state": "done"}]}));
+        assert_eq!(talk(&conn, &tmp, "task_find", json!({"state": "complete"}))["items"][0]["id"], plain);
+        assert_eq!(talk(&conn, &tmp, "task_find", json!({"state": "any"}))["total"], 5);
+        assert_eq!(talk(&conn, &tmp, "task_list", json!({"is_now": false}))["total"], 4);
     }
 
     fn share_ctx(tmp: &tempfile::TempDir, scope: crate::shares::ShareScope) -> ToolCtx<'_> {
-        ToolCtx { share: Some(scope), ..ctx(tmp, None) }
-    }
-
-    fn out_id(v: &Value) -> i64 {
-        v["tasks"][0]["id"].as_i64().unwrap()
-    }
-
-    fn school_only() -> crate::shares::ShareScope {
-        crate::shares::ShareScope { categories: vec!["school".into()], ..Default::default() }
+        ToolCtx { share: Some(scope), ..ctx(tmp) }
     }
 
     #[test]
-    fn a_share_scope_confines_the_task_tools_to_its_categories() {
-        let (conn, tmp) = env();
-        call(&conn, &tmp, "task_create", r#"{"title":"lab report","category":"school","description":"secret grade talk"}"#).unwrap();
-        call(&conn, &tmp, "task_create", r#"{"title":"therapy forms","category":"health"}"#).unwrap();
-        let sctx = share_ctx(&tmp, school_only());
-        let out = dispatch(&conn, &sctx, SessionKind::Share, "task_list", "{}").unwrap();
-        assert_eq!(out["total"], 1);
-        assert_eq!(out["tasks"][0]["title"], "lab report");
-        let err = dispatch(&conn, &sctx, SessionKind::Share, "task_list", r#"{"category":"health"}"#).unwrap_err();
-        assert_eq!(err.kind, "rejected");
-        let out = dispatch(&conn, &sctx, SessionKind::Share, "task_search", r#"{"query":"forms"}"#).unwrap();
-        assert_eq!(out["tasks"].as_array().unwrap().len(), 0);
-        let out = dispatch(&conn, &sctx, SessionKind::Share, "task_search", r#"{"query":"lab"}"#).unwrap();
-        assert_eq!(out["tasks"].as_array().unwrap().len(), 1);
-        assert_eq!(out["tasks"][0]["title"], "lab report");
-        let id = out_id(&call(&conn, &tmp, "task_list", r#"{"category":"health"}"#).unwrap());
-        let err = dispatch(&conn, &sctx, SessionKind::Share, "task_read", &format!(r#"{{"task_id":{id}}}"#)).unwrap_err();
-        assert_eq!(err.kind, "not_found");
-        let school = out_id(&call(&conn, &tmp, "task_list", r#"{"category":"school"}"#).unwrap());
-        conn.execute(
-            "UPDATE tasks SET url = 'https://lms.example/lab', external_id = 'lms-7' WHERE id = ?1",
-            [school],
-        )
-        .unwrap();
-        let read = dispatch(&conn, &sctx, SessionKind::Share, "task_read", &format!(r#"{{"task_id":{school}}}"#)).unwrap();
-        assert_eq!(read["description"], "", "details are off");
-        assert_eq!(read["url"], "");
-        assert!(read["external_id"].is_null());
-        let detailed = share_ctx(&tmp, crate::shares::ShareScope { details: true, ..school_only() });
-        let read = dispatch(&conn, &detailed, SessionKind::Share, "task_read", &format!(r#"{{"task_id":{school}}}"#)).unwrap();
-        assert_eq!(read["description"], "secret grade talk");
-        assert_eq!(read["url"], "https://lms.example/lab");
-        assert_eq!(read["external_id"], "lms-7");
-    }
-
-    #[test]
-    fn without_details_a_share_matches_titles_alone() {
-        let (conn, tmp) = env();
-        call(&conn, &tmp, "task_create", r#"{"title":"lab report","description":"secret grade talk"}"#).unwrap();
-        let plain = share_ctx(&tmp, crate::shares::ShareScope::default());
+    fn a_share_confines_task_find_to_its_categories_details_and_recent_finishes() {
+        let (conn, tmp) = env("UTC");
+        let lab = make(&conn, &tmp, &json!({"title": "lab report", "category": "school", "description": "secret grade talk", "children": ["graph"]}));
+        let forms = make(&conn, &tmp, &json!({"title": "therapy forms", "category": "health"}));
+        let school = share_ctx(&tmp, crate::shares::ShareScope { categories: vec!["school".into()], ..Default::default() });
+        let find = |c: &ToolCtx, args: Value| dispatch(&conn, c, SessionKind::Share, "task_find", &args.to_string());
+        assert_eq!(titles(&find(&school, json!({})).unwrap()), ["lab report"]);
+        assert_eq!(find(&school, json!({"category": "health"})).unwrap_err().kind, "rejected");
+        assert_eq!(find(&school, json!({"query": "forms"})).unwrap()["total"], 0);
+        assert_eq!(titles(&find(&school, json!({"query": "graph"})).unwrap()), ["graph"], "a child reads its root's category");
+        assert_eq!(find(&school, json!({"id": forms})).unwrap()["total"], 0);
+        let read = find(&school, json!({"id": lab})).unwrap();
+        assert!(read["item"].get("description").is_none(), "details are off");
+        assert_eq!(find(&school, json!({"query": "grade"})).unwrap()["total"], 0);
         let detailed = share_ctx(&tmp, crate::shares::ShareScope { details: true, ..Default::default() });
-        for (sctx, hits) in [(&plain, 0), (&detailed, 1)] {
-            let out = dispatch(&conn, sctx, SessionKind::Share, "task_list", r#"{"keyword":"grade"}"#).unwrap();
-            assert_eq!(out["total"], hits);
-            let out = dispatch(&conn, sctx, SessionKind::Share, "task_search", r#"{"query":"grade"}"#).unwrap();
-            assert_eq!(out["tasks"].as_array().unwrap().len(), hits);
-        }
-        let out = dispatch(&conn, &plain, SessionKind::Share, "task_list", r#"{"keyword":"lab"}"#).unwrap();
-        assert_eq!(out["total"], 1);
-    }
-
-    #[test]
-    fn a_share_reaches_finished_tasks_only_with_progress_and_only_recent_ones() {
-        let (conn, tmp) = env();
-        let recent = task(&conn, &tmp, r#"{"title":"essay draft"}"#);
-        let old = task(&conn, &tmp, r#"{"title":"essay outline"}"#);
-        let dropped = task(&conn, &tmp, r#"{"title":"essay idea"}"#);
-        patch(&conn, &tmp, recent, r#""state":"done""#);
-        patch(&conn, &tmp, old, r#""state":"done""#);
-        patch(&conn, &tmp, dropped, r#""state":"dropped""#);
-        let at = |days: i64| (jiff::Timestamp::now() - jiff::Span::new().hours(24 * days)).to_string();
-        conn.execute("UPDATE tasks SET completed_at = ?1 WHERE id = ?2", (at(1), recent)).unwrap();
-        conn.execute("UPDATE tasks SET completed_at = ?1 WHERE id = ?2", (at(10), old)).unwrap();
-        let read = |sctx: &ToolCtx, id: i64| {
-            dispatch(&conn, sctx, SessionKind::Share, "task_read", &format!(r#"{{"task_id":{id}}}"#))
-        };
-
+        assert_eq!(find(&detailed, json!({"id": lab})).unwrap()["item"]["description"], "secret grade talk");
         let closed = share_ctx(&tmp, crate::shares::ShareScope { progress: false, ..Default::default() });
-        for state in ["done", "any", "dropped"] {
-            let err = dispatch(&conn, &closed, SessionKind::Share, "task_list", &format!(r#"{{"state":"{state}"}}"#))
-                .unwrap_err();
-            assert_eq!(err.kind, "rejected", "{state}");
-        }
-        assert_eq!(read(&closed, recent).unwrap_err().kind, "not_found");
-        let out = dispatch(&conn, &closed, SessionKind::Share, "task_search", r#"{"query":"essay"}"#).unwrap();
-        assert!(out["tasks"].as_array().unwrap().is_empty(), "{out}");
-
-        let open = share_ctx(&tmp, crate::shares::ShareScope::default());
-        let out = dispatch(&conn, &open, SessionKind::Share, "task_list", r#"{"state":"done"}"#).unwrap();
-        assert_eq!(ids(&out, "tasks"), vec![recent]);
-        for state in ["any", "dropped"] {
-            let err = dispatch(&conn, &open, SessionKind::Share, "task_list", &format!(r#"{{"state":"{state}"}}"#))
-                .unwrap_err();
-            assert_eq!(err.kind, "rejected", "{state}");
-        }
-        assert_eq!(read(&open, recent).unwrap()["id"], recent);
-        assert_eq!(read(&open, old).unwrap_err().kind, "not_found");
-        assert_eq!(read(&open, dropped).unwrap_err().kind, "not_found");
-        let out = dispatch(&conn, &open, SessionKind::Share, "task_search", r#"{"query":"essay"}"#).unwrap();
-        assert_eq!(ids(&out, "tasks"), vec![recent]);
+        assert_eq!(find(&closed, json!({"state": "done"})).unwrap_err().kind, "rejected");
+        let hidden = share_ctx(&tmp, crate::shares::ShareScope { goals: false, ..Default::default() });
+        let goal = saved(&talk(&conn, &tmp, "goal_save", json!({"goals": [{"title": "GOAL-TITLE-SECRET", "tasks": [{"id": lab}]}]})), "0");
+        assert_eq!(crate::tasks::get(&conn, 1, lab).unwrap().unwrap().goal_id, Some(goal));
+        let read = find(&hidden, json!({"id": lab})).unwrap();
+        assert!(!read.to_string().contains("GOAL-TITLE-SECRET"), "{read}");
+        assert!(find(&hidden, json!({})).unwrap()["items"][0].get("goal_id").is_none());
     }
 
     #[test]
-    fn a_share_without_goals_leaves_the_goal_off_its_tasks() {
-        let (conn, tmp) = env();
-        let goal = call(&conn, &tmp, "goal_create", r#"{"title":"GOAL-TITLE-SECRET"}"#).unwrap()["goal_id"]
-            .as_i64()
-            .unwrap();
-        let id = task(&conn, &tmp, &format!(r#"{{"title":"essay","goal_id":{goal}}}"#));
-        let hidden = share_ctx(&tmp, crate::shares::ShareScope { goals: false, ..Default::default() });
-        let shown = share_ctx(&tmp, crate::shares::ShareScope::default());
-        for (sctx, visible) in [(&hidden, false), (&shown, true)] {
-            let list = dispatch(&conn, sctx, SessionKind::Share, "task_list", "{}").unwrap();
-            assert_eq!(!list["tasks"][0]["goal_id"].is_null(), visible);
-            let read = dispatch(&conn, sctx, SessionKind::Share, "task_read", &format!(r#"{{"task_id":{id}}}"#)).unwrap();
-            assert_eq!(!read["goal_id"].is_null(), visible);
-            assert_eq!(read.to_string().contains("GOAL-TITLE-SECRET"), visible, "{read}");
-        }
+    fn a_scoped_session_surveys_nothing() {
+        let (conn, tmp) = env("UTC");
+        let id = make(&conn, &tmp, &json!({"title": "biology"}));
+        let scoped = ToolCtx { task_scope: Some(id), ..ctx(&tmp) };
+        let e = dispatch(&conn, &scoped, SessionKind::Talk, "task_find", "{}").unwrap_err();
+        assert_eq!(e.kind, "rejected");
     }
 }

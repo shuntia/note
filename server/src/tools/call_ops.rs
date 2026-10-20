@@ -33,9 +33,10 @@ pub struct CallArgs {
     /// ids, times, what to settle — so it can talk without looking things up.
     #[serde(default)]
     pub brief: Option<String>,
-    /// Second call: the tasks the call pushes on, by id; omit to take the wake-up's own.
+    /// Second call: the tasks the call pushes on, by id or exact title; omit to take the wake-up's own.
     #[serde(default)]
-    pub task_ids: Vec<i64>,
+    #[schemars(with = "Vec<i64>")]
+    pub task_ids: Vec<serde_json::Value>,
 }
 
 pub const MAX_BRIEF_BYTES: usize = 1536;
@@ -122,7 +123,7 @@ pub fn gate(s: &Situation) -> Gate {
 
 const PREPARE: &str = "Prepare the call before it rings: anticipate what it will cover — the reason, \
     the likely follow-ups, the tasks, events, goals and people involved — and fetch that now, in one \
-    round (memory_query or memory_read, task_read or task_search, calendar_list, plan_list). Judge \
+    round (memory_query or memory_read, task_find, calendar_find, plan_list). Judge \
     from what comes back whether you could hold the conversation without looking anything up; if \
     not, gather more, or write to the user instead.";
 
@@ -270,6 +271,30 @@ impl Confirmed {
     }
 }
 
+/// The tasks a confirming call names, each title read as the one open task
+/// carrying it.
+pub fn resolve_task_ids(conn: &Connection, user_id: i64, given: &[serde_json::Value]) -> Result<Vec<serde_json::Value>, ToolError> {
+    let mut out = Vec::new();
+    for v in given {
+        match super::loose::target(v) {
+            Some(super::loose::Target::Id(id)) => out.push(id.into()),
+            Some(super::loose::Target::Title(title)) => {
+                let mut stmt = conn
+                    .prepare("SELECT id, title FROM tasks WHERE user_id = ?1 AND state IN ('open','in_progress') ORDER BY id")
+                    .map_err(|e| ToolError::internal(e.to_string()))?;
+                let open: Vec<(i64, String)> = stmt
+                    .query_map([user_id], |r| Ok((r.get(0)?, r.get(1)?)))
+                    .and_then(|rows| rows.collect::<rusqlite::Result<_>>())
+                    .map_err(|e| ToolError::internal(e.to_string()))?;
+                let id = super::loose::by_title(&title, &open, "task").map_err(|why| ToolError::rejected(format!("task_ids: {why}")))?;
+                out.push(id.into());
+            }
+            None => return Err(ToolError::rejected(format!("task_ids holds {v}, which is neither an id nor a title"))),
+        }
+    }
+    Ok(out)
+}
+
 /// Whether a successful `call_user` result is the confirmed second call.
 pub fn is_confirmed(result: &str) -> bool {
     serde_json::from_str::<serde_json::Value>(result).is_ok_and(|v| v.get("said").is_some())
@@ -311,7 +336,7 @@ pub fn confirm(calls: &mut Calls, args: &CallArgs, now: Instant) -> Result<Confi
         reason: pending.reason,
         brief: brief.to_string(),
         asked: pending.asked,
-        task_ids: args.task_ids.clone(),
+        task_ids: args.task_ids.iter().filter_map(super::loose::id).collect(),
     })
 }
 
@@ -319,6 +344,21 @@ pub fn confirm(calls: &mut Calls, args: &CallArgs, now: Instant) -> Result<Confi
 mod tests {
     use super::*;
     use crate::wake::Busy;
+
+    #[test]
+    fn a_confirming_call_names_its_tasks_by_id_or_title() {
+        let conn = crate::db::open_memory().unwrap();
+        conn.execute("INSERT INTO users (username, pass_hash, role) VALUES ('aki', 'x', 'member')", []).unwrap();
+        for title in ["Lab report", "Essay", "essay"] {
+            crate::tasks::create(&conn, 1, crate::tasks::NewTask { title: title.into(), ..Default::default() }, "manual", crate::tasks::Actor::User).unwrap();
+        }
+        let ids = resolve_task_ids(&conn, 1, &[serde_json::json!("lab report"), serde_json::json!("#2")]).unwrap();
+        assert_eq!(ids, [serde_json::json!(1), serde_json::json!(2)]);
+        let e = resolve_task_ids(&conn, 1, &[serde_json::json!("Essay")]).unwrap_err();
+        assert!(e.message.contains("2, 3"), "{}", e.message);
+        let confirmed = args(r#"{"task_ids":[3,"x"]}"#).task_ids.iter().filter_map(super::super::loose::id).collect::<Vec<_>>();
+        assert_eq!(confirmed, [3]);
+    }
 
     fn free() -> Situation {
         Situation { busy: None, reach: Reach { web: true, phone: false }, ring_for: "allowed".into(), live_call: false }
@@ -354,7 +394,7 @@ mod tests {
         assert_eq!(out["allowed"], true);
         assert_eq!(out["would_ring"], serde_json::json!(["the web app"]));
         let prepare = out["prepare"].as_str().unwrap();
-        assert!(prepare.contains("anticipate") && prepare.contains("task_read"), "{prepare}");
+        assert!(prepare.contains("anticipate") && prepare.contains("task_find"), "{prepare}");
         assert!(out["next"].as_str().unwrap().contains("brief"), "{out}");
         assert_eq!(out["opening_style"], crate::model_text::call_opening_style(Lang::En));
         assert!(out.get("said").is_none() && !is_confirmed(&out.to_string()));

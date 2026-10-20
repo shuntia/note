@@ -337,7 +337,7 @@ async fn talk_persists_the_exchange_and_surfaces_tool_steps() {
     assert_eq!(steps.len(), 1);
     assert_eq!(steps[0]["name"], "task_create");
     assert_eq!(steps[0]["args"], r#"{"title":"call mom"}"#);
-    assert!(steps[0]["result"].as_str().unwrap().contains("task_id"));
+    assert!(steps[0]["result"].as_str().unwrap().contains("saved"));
     assert_eq!(steps[0]["is_error"], false);
 
     let conn = state.db.lock().unwrap();
@@ -363,7 +363,7 @@ async fn talk_persists_the_exchange_and_surfaces_tool_steps() {
     assert_eq!(rows[0].1, "remind me to call mom");
     assert!(rows[0].2.is_none());
     assert_eq!(rows[1].0, "tool");
-    assert!(rows[1].1.contains("task_id"));
+    assert!(rows[1].1.contains("saved"));
     assert_eq!(rows[1].2.as_deref(), Some("task_create"));
     assert_eq!(rows[1].3.as_deref(), Some(r#"{"title":"call mom"}"#));
     assert!(!rows[1].4);

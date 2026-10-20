@@ -56,25 +56,6 @@ pub(crate) fn held(conn: &Connection, user_id: i64) -> rusqlite::Result<Vec<i64>
     Ok(out)
 }
 
-/// Refuses a wake-up's edit of the task the user is working on right now.
-pub(crate) fn guard_running(conn: &Connection, ctx: &ToolCtx, name: &str, raw: &str) -> Result<(), ToolError> {
-    if !matches!(name, "task_update" | "task_split" | "task_bulk_update" | "task_delete") {
-        return Ok(());
-    }
-    let args: serde_json::Value = serde_json::from_str(raw).unwrap_or_default();
-    let mut named: Vec<i64> = args["task_id"].as_i64().into_iter().collect();
-    if let Some(ids) = args["task_ids"].as_array() {
-        named.extend(ids.iter().filter_map(serde_json::Value::as_i64));
-    }
-    let held = held(conn, ctx.user_id).map_err(internal)?;
-    match named.into_iter().find(|id| held.contains(id)) {
-        Some(id) => Err(ToolError::rejected(format!(
-            "task {id} is in the work session running now; leave it until the session ends"
-        ))),
-        None => Ok(()),
-    }
-}
-
 fn write(
     conn: &Connection,
     ctx: &ToolCtx,
@@ -167,8 +148,8 @@ mod tests {
     }
 
     fn task(conn: &rusqlite::Connection, tmp: &tempfile::TempDir, title: &str) -> i64 {
-        dispatch(conn, &ctx(tmp), SessionKind::Talk, "task_create", &format!(r#"{{"title":"{title}"}}"#))
-            .unwrap()["task_id"]
+        dispatch(conn, &ctx(tmp), SessionKind::Talk, "task_save", &format!(r#"{{"tasks":[{{"title":"{title}","new":true}}]}}"#))
+            .unwrap()["saved"][0]["id"]
             .as_i64()
             .unwrap()
     }
@@ -277,16 +258,15 @@ mod tests {
             [essay],
         )
         .unwrap();
-        for (name, args) in [
-            ("task_update", format!(r#"{{"task_id":{essay},"title":"x"}}"#)),
-            ("task_bulk_update", format!(r#"{{"task_ids":[{other},{essay}],"state":"dropped"}}"#)),
-        ] {
-            let e = dispatch(&conn, &ctx(&tmp), SessionKind::Trigger, name, &args).unwrap_err();
-            assert_eq!(e.kind, "rejected", "{name}");
-        }
-        dispatch(&conn, &ctx(&tmp), SessionKind::Trigger, "task_update",
-            &format!(r#"{{"task_id":{other},"title":"wash"}}"#)).unwrap();
-        dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_update",
-            &format!(r#"{{"task_id":{essay},"title":"the essay"}}"#)).unwrap();
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Trigger, "task_save",
+            &format!(r#"{{"tasks":[{{"id":{other},"state":"dropped"}},{{"id":{essay},"state":"done"}}]}}"#)).unwrap();
+        assert_eq!(e["ok"], false);
+        assert_eq!(e["refused"][0]["ref"], "1", "{e}");
+        assert_eq!(e["saved"][0]["id"], other, "the rest of the call lands");
+        dispatch(&conn, &ctx(&tmp), SessionKind::Trigger, "task_save",
+            &format!(r#"{{"tasks":[{{"id":{essay},"title":"the essay"}}]}}"#)).unwrap();
+        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_save",
+            &format!(r#"{{"tasks":[{{"id":{essay},"state":"done"}}]}}"#)).unwrap();
+        assert_eq!(out["ok"], true, "the user may close it themselves");
     }
 }

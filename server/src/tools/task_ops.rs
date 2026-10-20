@@ -1,496 +1,1144 @@
-use super::{check_text, ToolCtx, ToolError};
-use crate::tasks::{Actor, NewTask, Step, TaskPatch, UpdateError};
+use super::loose::{self, Envelope, Obj, Ref, Target, When};
+use super::{SessionKind, ToolCtx, ToolError};
+use crate::tasks::{self, Actor, NewTask, TaskPatch};
 use rusqlite::Connection;
-use schemars::JsonSchema;
-use serde::Deserialize;
+use serde_json::{json, Map, Value};
+use std::collections::HashMap;
 
-const MAX_TITLE_BYTES: usize = 500;
+pub const MAX_NODES: usize = 100;
+/// Nodes one `task_remove` deletes before it needs `all`.
+pub const MAX_REMOVE: usize = 20;
 
-/// Trims and length-checks a title; shared so `create` and `update` cannot drift.
-fn checked_title(title: &str) -> Result<&str, ToolError> {
-    let title = title.trim();
-    if title.is_empty() || title.len() > MAX_TITLE_BYTES {
-        return Err(ToolError::rejected(format!(
-            "title must be 1..={MAX_TITLE_BYTES} bytes"
-        )));
-    }
-    Ok(title)
-}
+/// Fields a model hands `task_save` that another tool takes.
+const ELSEWHERE: &[(&str, &str)] = &[
+    ("event_id", "schedule_move or schedule_drop"),
+    ("date", "plan_tasks"),
+    ("start", "plan_tasks"),
+    ("at", "plan_tasks"),
+    ("scheduled_at", "plan_tasks"),
+    ("prompt", "trigger_set"),
+];
 
-/// In a scoped session the model may only reach the scoped task itself, and —
-/// when `steps_too` — its steps. Unscoped sessions reach everything.
-fn in_scope(
-    conn: &Connection,
-    ctx: &ToolCtx,
-    task_id: i64,
-    steps_too: bool,
-) -> Result<(), ToolError> {
-    let Some(scope) = ctx.task_scope else { return Ok(()) };
-    if task_id == scope {
-        return Ok(());
-    }
-    let parent = steps_too
-        .then(|| crate::tasks::get(conn, ctx.user_id, task_id))
-        .transpose()
-        .map_err(|e| ToolError::internal(e.to_string()))?
-        .flatten()
-        .and_then(|t| t.parent_id);
-    if parent == Some(scope) {
-        return Ok(());
-    }
-    Err(ToolError::rejected(format!(
-        "this session may only change task {scope}{}",
-        if steps_too { " and its steps" } else { "" }
-    )))
-}
+pub(super) const NODE_FIELDS: &[&str] =
+    &["id", "task_id", "title", "name", "parent", "parent_id", "minutes", "duration_min", "due", "due_at", "state"];
 
-/// The timezone the user's days are measured in; a bare day means the end of
-/// one of those.
 pub(super) fn user_tz(ctx: &ToolCtx) -> jiff::tz::TimeZone {
     crate::triggers::timezone(ctx.config_dir, ctx.username)
 }
 
-/// A typed due as the wire pair `due_at` / `due_on`.
+fn internal(e: impl std::fmt::Display) -> ToolError {
+    ToolError::internal(e.to_string())
+}
+
+/// One node of a call, its fields read and normalised.
 #[derive(Default)]
-pub(super) struct WireDue {
-    pub due_at: Option<Option<String>>,
-    pub due_on: Option<Option<String>>,
+struct Node {
+    r: Ref,
+    target: Option<Target>,
+    /// Given at all; `Some(None)` makes it a root.
+    parent: Option<Option<Target>>,
+    before: Option<Target>,
+    title: Option<String>,
+    /// The whole title, when it was cut.
+    full_title: Option<String>,
+    description: Option<String>,
+    notes: Option<String>,
+    minutes: Option<i64>,
+    due: Option<Option<When>>,
+    progress: Option<u32>,
+    state: Option<&'static str>,
+    urgency: Option<&'static str>,
+    notify: Option<&'static str>,
+    now: Option<bool>,
+    category: Option<String>,
+    goal_id: Option<Option<i64>>,
+    url: Option<String>,
+    new: bool,
+    children: Vec<Value>,
 }
 
-/// A bare `YYYY-MM-DD` is a whole day, a date with a time is that moment where
-/// the user lives, an RFC 3339 instant is itself, and an empty string clears.
-pub(super) fn checked_due(ctx: &ToolCtx, raw: &str) -> Result<WireDue, ToolError> {
-    if raw.trim().is_empty() {
-        return Ok(WireDue { due_at: Some(None), due_on: Some(None) });
-    }
-    match crate::due::parse_loose(raw, &user_tz(ctx)) {
-        Some(crate::due::Due::Day(d)) => Ok(WireDue { due_on: Some(Some(d.to_string())), ..Default::default() }),
-        Some(crate::due::Due::At(t)) => Ok(WireDue { due_at: Some(Some(t.to_string())), ..Default::default() }),
-        None => Err(ToolError::rejected(format!(
-            "due_at must be YYYY-MM-DD, YYYY-MM-DDTHH:MM or an RFC 3339 instant, got {raw:?}"
-        ))),
-    }
+#[derive(Clone, Copy)]
+enum Nest {
+    Top,
+    Under(i64),
 }
 
-pub(super) fn task_error(e: UpdateError) -> ToolError {
-    match e {
-        UpdateError::InvalidState(s) => ToolError::rejected(format!("invalid state: {s}")),
-        UpdateError::InvalidDuration(m)
-        | UpdateError::InvalidHierarchy(m)
-        | UpdateError::NowFull(m)
-        | UpdateError::Invalid(m)
-        | UpdateError::ExternalIdTaken(m) => ToolError::rejected(m),
-        UpdateError::Db(e) => ToolError::internal(e.to_string()),
-    }
+/// The state of one `task_save` (or `goal_save`'s tasks) as it lands item by item.
+pub(super) struct Saver<'a> {
+    conn: &'a Connection,
+    ctx: &'a ToolCtx<'a>,
+    tz: jiff::tz::TimeZone,
+    now: jiff::Timestamp,
+    pub env: Envelope,
+    refs: HashMap<i64, Ref>,
+    count: usize,
+    /// The running work session's leaf and everything above it, for a wake-up.
+    held: Vec<i64>,
+    /// The goal `goal_save` hangs its roots from.
+    goal: Option<i64>,
 }
 
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct CreateArgs {
-    pub title: String,
-    #[serde(default)]
-    pub description: String,
-    /// Rough estimate in whole 5-minute blocks.
-    #[serde(default)]
-    pub duration_min: Option<u32>,
-    /// Put the task straight in Now, the user's short list of at most 3.
-    #[serde(default)]
-    pub is_now: bool,
-    /// When it is due: YYYY-MM-DD when only the day is known,
-    /// YYYY-MM-DDTHH:MM for a set time where the user lives, or an RFC 3339
-    /// instant.
-    #[serde(default)]
-    pub due_at: Option<String>,
-    /// How the block holding this task announces itself when it starts: none,
-    /// chat, or notify.
-    #[serde(default)]
-    pub notify: Option<String>,
-    /// How far along it already is, 0 to 100. Leave it out for work not started.
-    #[serde(default)]
-    pub progress: Option<u32>,
-    /// What the task belongs to — a course, a project, a part of life. Free
-    /// text; reuse one the user already has rather than coining a near-copy.
-    #[serde(default)]
-    pub category: Option<String>,
-    /// The goal this task is part of, from `goal_list`.
-    #[serde(default)]
-    pub goal_id: Option<i64>,
-    /// low, normal (default) or high. High goes first when the day is laid.
-    #[serde(default)]
-    pub urgency: Option<String>,
-    /// Create it even though an open task with the same title exists.
-    #[serde(default)]
-    pub also: bool,
-    /// Its steps, in order, each with a duration in whole 5-minute blocks; with
-    /// steps the task's own size is theirs summed and `duration_min` is ignored.
-    #[serde(default)]
-    pub steps: Vec<Step>,
+/// A node built for creation, with the refs of everything under it in the
+/// order it is inserted.
+struct Built {
+    new: NewTask,
+    refs: Vec<(Ref, String)>,
+    places: Vec<(usize, Target)>,
+    deferred: Vec<(usize, Node)>,
 }
 
-/// An open top-level task already carrying this title.
-fn open_namesake(conn: &Connection, user_id: i64, title: &str) -> Result<Option<(i64, String)>, ToolError> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, title FROM tasks
-             WHERE user_id = ?1 AND parent_id IS NULL AND state IN ('open', 'in_progress')
-             ORDER BY id",
-        )
-        .map_err(|e| ToolError::internal(e.to_string()))?;
-    let rows = stmt
-        .query_map([user_id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
-        .map_err(|e| ToolError::internal(e.to_string()))?;
-    for row in rows {
-        let (id, existing) = row.map_err(|e| ToolError::internal(e.to_string()))?;
-        if super::same_title(&existing, title) {
-            return Ok(Some((id, existing)));
-        }
-    }
-    Ok(None)
-}
-
-pub fn create(
-    conn: &Connection,
-    ctx: &ToolCtx,
-    args: CreateArgs,
-) -> Result<serde_json::Value, ToolError> {
-    let title = checked_title(&args.title)?;
-    check_text("description", &args.description)?;
-    if !args.also {
-        if let Some((id, existing)) = open_namesake(conn, ctx.user_id, title)? {
-            return Err(ToolError::duplicate(format!(
-                "task {id} {existing:?} is already open; update it with task_update, or pass \
-                 also: true when this is a separate task"
-            )));
-        }
-    }
-    for s in &args.steps {
-        checked_title(&s.title)?;
-    }
-    let due = args.due_at.as_deref().map(|raw| checked_due(ctx, raw)).transpose()?.unwrap_or_default();
-    let task = crate::tasks::create(
-        conn,
-        ctx.user_id,
-        NewTask {
-            title: title.to_owned(),
-            duration_min: if args.steps.is_empty() { args.duration_min } else { None },
-            is_now: args.is_now,
-            due_at: due.due_at,
-            due_on: due.due_on,
-            zone: Some(user_tz(ctx)),
-            notify: args.notify,
-            progress: args.progress,
-            category: args.category,
-            goal_id: args.goal_id,
-            urgency: args.urgency,
-            ..NewTask::default()
-        },
-        "agent",
-        Actor::Agent,
-    )
-    .map_err(task_error)?;
-    if !args.description.is_empty() {
-        crate::tasks::update(
+impl<'a> Saver<'a> {
+    pub fn new(conn: &'a Connection, ctx: &'a ToolCtx<'a>, kind: SessionKind) -> Result<Self, ToolError> {
+        let held = if kind == SessionKind::Trigger { running_line(conn, ctx.user_id).map_err(internal)? } else { Vec::new() };
+        Ok(Self {
             conn,
-            ctx.user_id,
-            task.id,
-            &TaskPatch {
-                description: Some(args.description),
-                ..Default::default()
-            },
-        )
-        .map_err(task_error)?;
+            ctx,
+            tz: user_tz(ctx),
+            now: jiff::Timestamp::now(),
+            env: Envelope::default(),
+            refs: HashMap::new(),
+            count: 0,
+            held,
+            goal: None,
+        })
     }
-    if args.steps.is_empty() {
-        return Ok(serde_json::json!({ "task_id": task.id }));
+
+    pub fn set_goal(&mut self, goal: Option<i64>) {
+        self.goal = goal;
     }
-    let node = crate::tasks::split(conn, ctx.user_id, task.id, args.steps, Actor::Agent)
-        .map_err(task_error)?
-        .ok_or_else(|| ToolError::internal(format!("task {} vanished", task.id)))?;
-    Ok(serde_json::json!({
-        "task_id": task.id,
-        "step_ids": node.children.iter().map(|c| c.task.id).collect::<Vec<_>>(),
-    }))
-}
 
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct UpdateArgs {
-    pub task_id: i64,
-    pub title: Option<String>,
-    pub description: Option<String>,
-    /// One of open, `in_progress`, done, dropped.
-    pub state: Option<String>,
-    pub notes: Option<String>,
-    /// Rough estimate in whole 5-minute blocks.
-    pub duration_min: Option<u32>,
-    /// True moves the task into Now, false moves it back to Later.
-    pub is_now: Option<bool>,
-    /// When it is due: YYYY-MM-DD when only the day is known,
-    /// YYYY-MM-DDTHH:MM for a set time where the user lives, or an RFC 3339
-    /// instant. An empty string clears it.
-    pub due_at: Option<String>,
-    /// How the block holding this task announces itself when it starts: none,
-    /// chat, or notify.
-    pub notify: Option<String>,
-    /// How far along it is, 0 to 100. Finishing a task fills it on its own, and a
-    /// task with steps holds theirs, so this is ignored on one.
-    pub progress: Option<u32>,
-    /// What the task belongs to — a course, a project, a part of life. An empty
-    /// string clears it. A step carries none: it reads its parent's.
-    pub category: Option<String>,
-    /// The goal this task is part of, from `goal_list`; null detaches it. A step
-    /// belongs to no goal of its own.
-    #[serde(default, deserialize_with = "crate::tasks::present")]
-    pub goal_id: Option<Option<i64>>,
-    /// low, normal or high. High goes first when the day is laid. A step counts
-    /// as at least as urgent as its task.
-    pub urgency: Option<String>,
-    /// Steps to add after any it already has, each with a duration in whole
-    /// 5-minute blocks.
-    #[serde(default)]
-    pub steps: Vec<Step>,
-}
+    pub fn save(&mut self, items: Vec<(Ref, Value)>) -> Result<(), ToolError> {
+        self.level(items, Nest::Top)
+    }
 
-pub fn update(
-    conn: &Connection,
-    ctx: &ToolCtx,
-    args: UpdateArgs,
-) -> Result<serde_json::Value, ToolError> {
-    in_scope(conn, ctx, args.task_id, true)?;
-    if let Some(scope) = ctx.task_scope {
-        if args.is_now.is_some() {
-            return Err(ToolError::rejected("this session cannot move a task in or out of Now"));
-        }
-        if let Some(wanted) = args.state.as_deref() {
-            if wanted != "dropped" {
-                return Err(ToolError::rejected(format!(
-                    "this session may only drop a task, not set its state to {wanted}"
-                )));
+    fn ignore(&mut self, r: &Ref, field: &str, why: impl Into<String>) {
+        self.env.ignored(Some(r), field, why);
+    }
+
+    fn parse(&mut self, r: &Ref, v: Value) -> Option<Node> {
+        let map = match v {
+            Value::Object(m) => m,
+            Value::String(s) if !s.trim().is_empty() => Map::from_iter([("title".to_string(), Value::String(s))]),
+            _ => {
+                self.env.refused(r, "a task is an object with a title, or a plain title");
+                return None;
             }
-            let state = crate::tasks::get(conn, ctx.user_id, scope)
-                .map_err(|e| ToolError::internal(e.to_string()))?
-                .map(|t| t.state)
-                .unwrap_or_default();
-            if state == "in_progress" || state == "done" {
-                return Err(ToolError::rejected(format!(
-                    "task {scope} is already {state}; only an open task can be dropped"
-                )));
+        };
+        self.count += 1;
+        if self.count > MAX_NODES {
+            self.env.refused(r, format!("at most {MAX_NODES} tasks per call, nested ones counted; send the rest in another call"));
+            return None;
+        }
+        let mut obj = Obj::new(map);
+        let mut node = Node { r: r.clone(), ..Node::default() };
+        if let Some(v) = obj.take(&["id", "task_id"]) {
+            match loose::target(&v) {
+                Some(t) => node.target = Some(t),
+                None => self.ignore(r, "id", "an id is a number like 41, or the exact title of one open task"),
             }
         }
+        if let Some(v) = obj.take(&["parent", "parent_id", "parent_task_id"]) {
+            node.parent = match &v {
+                Value::Number(_) if loose::integer(&v) == Some(0) => Some(None),
+                Value::String(s) if matches!(loose::fold(s).as_str(), "" | "0" | "root" | "none" | "top") => Some(None),
+                _ => {
+                    let parent = loose::target(&v);
+                    if parent.is_none() {
+                        self.ignore(r, "parent", "a parent is a task id or the exact title of one open task");
+                    }
+                    parent.map(Some)
+                }
+            };
+        }
+        if let Some(v) = obj.take(&["before", "before_id", "before_task_id"]) {
+            match loose::text(&v).map(|s| loose::fold(&s)).as_deref() {
+                Some("last" | "end" | "") => {}
+                _ => node.before = loose::target(&v),
+            }
+        }
+        if let Some(v) = obj.take(&["title", "name"]) {
+            match loose::text(&v).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+                Some(t) => match loose::cut_title(&t) {
+                    Some(cut) => {
+                        self.env.adjusted(Some(r), "title", cut.clone().into(), "a title stops at 200 characters; the whole text leads the description");
+                        node.full_title = Some(t);
+                        node.title = Some(cut);
+                    }
+                    None => node.title = Some(t),
+                },
+                None => self.ignore(r, "title", "a title is non-empty text"),
+            }
+        }
+        for (field, names) in [("description", &["description", "desc", "details"][..]), ("notes", &["notes", "note"][..])] {
+            if let Some(v) = obj.take(names) {
+                let Some(mut text) = loose::text(&v) else {
+                    self.ignore(r, field, "it is text");
+                    continue;
+                };
+                if let Some(cut) = loose::truncate(&text, loose::MAX_TEXT_BYTES) {
+                    self.env.warn(format!("{} {field} was cut to {} bytes", r.0, loose::MAX_TEXT_BYTES));
+                    text = cut;
+                }
+                if field == "description" {
+                    node.description = Some(text);
+                } else {
+                    node.notes = Some(text);
+                }
+            }
+        }
+        if let Some(v) = obj.take(&["minutes", "duration_min", "duration", "size", "estimate", "mins", "duration_minutes", "estimate_min"]) {
+            match loose::minutes(&v) {
+                Some(m) => node.minutes = Some(m),
+                None => self.ignore(r, "minutes", "a size is minutes: 45, \"1h30\", \"90m\" or \"1:30\""),
+            }
+        }
+        if let Some(v) = obj.take(&["due", "due_at", "due_on", "deadline", "due_date"]) {
+            match loose::text(&v) {
+                Some(s) if s.trim().is_empty() => node.due = Some(None),
+                Some(s) => match loose::when(&s, &self.tz, self.now) {
+                    Some(w) => node.due = Some(Some(w)),
+                    None => self.ignore(r, "due", format!("a due is {} or {}", loose::DAY_FORMS, loose::MOMENT_FORMS)),
+                },
+                None => self.ignore(r, "due", "a due is text such as 2026-11-06, 11/6 or 2026-11-06T17:00"),
+            }
+        }
+        if let Some(v) = obj.take(&["progress", "percent"]) {
+            match loose::integer(&v) {
+                Some(p) => {
+                    let clamped = p.clamp(0, 100);
+                    if clamped != p {
+                        self.env.adjusted(Some(r), "progress", clamped.into(), "progress is 0 to 100");
+                    }
+                    node.progress = Some(clamped as u32);
+                }
+                None => self.ignore(r, "progress", "progress is a number 0 to 100"),
+            }
+        }
+        if let Some(v) = obj.take(&["state", "status"]) {
+            match loose::text(&v).and_then(|s| loose::choice(&s, tasks::STATES, loose::STATE_SYNONYMS)) {
+                Some(s) => node.state = Some(s),
+                None => self.ignore(r, "state", "a state is open, in_progress, done or dropped"),
+            }
+        }
+        if let Some(v) = obj.take(&["done", "completed", "finished"]) {
+            if node.state.is_none() {
+                node.state = loose::boolean(&v).map(|d| if d { "done" } else { "open" });
+            }
+        }
+        if let Some(v) = obj.take(&["urgency", "priority"]) {
+            match loose::text(&v).and_then(|s| loose::choice(&s, tasks::URGENCY, loose::URGENCY_SYNONYMS)) {
+                Some(u) => node.urgency = Some(u),
+                None => self.ignore(r, "urgency", "urgency is low, normal or high"),
+            }
+        }
+        if let Some(v) = obj.take(&["notify"]) {
+            match loose::text(&v).and_then(|s| loose::choice(&s, tasks::NOTIFY, loose::NOTIFY_SYNONYMS)) {
+                Some(x) => node.notify = Some(x),
+                None => self.ignore(r, "notify", "notify is none, chat or notify"),
+            }
+        }
+        if let Some(v) = obj.take(&["now", "is_now", "in_now"]) {
+            match loose::boolean(&v) {
+                Some(b) => node.now = Some(b),
+                None => self.ignore(r, "now", "now is true or false"),
+            }
+        }
+        if let Some(v) = obj.take(&["category"]) {
+            match loose::text(&v) {
+                Some(c) => {
+                    let c = c.trim().to_string();
+                    match loose::truncate(&c, tasks::MAX_CATEGORY_BYTES) {
+                        Some(cut) => {
+                            self.env.adjusted(Some(r), "category", cut.clone().into(), "a category is at most 100 bytes");
+                            node.category = Some(cut);
+                        }
+                        None => node.category = Some(c),
+                    }
+                }
+                None => self.ignore(r, "category", "a category is text"),
+            }
+        }
+        if let Some(v) = obj.take(&["goal_id", "goal"]) {
+            node.goal_id = self.goal_of(r, &v);
+        }
+        if let Some(v) = obj.take(&["url", "link"]) {
+            match loose::text(&v).filter(|u| u.len() <= 2048) {
+                Some(u) => node.url = Some(u),
+                None => self.ignore(r, "url", "a url is text of at most 2048 bytes"),
+            }
+        }
+        if let Some(v) = obj.take(&["new", "also"]) {
+            node.new = loose::boolean(&v).unwrap_or(false);
+        }
+        if let Some(v) = obj.take(&["children", "steps", "subtasks", "items", "tasks", "parts"]) {
+            node.children = loose::list(v);
+        }
+        for field in obj.rest() {
+            let why = loose::unknown(&field, ELSEWHERE);
+            self.ignore(r, &field, why);
+        }
+        Some(node)
     }
-    let title = match &args.title {
-        Some(t) => Some(checked_title(t)?.to_owned()),
-        None => None,
-    };
-    if let Some(d) = &args.description {
-        check_text("description", d)?;
+
+    fn goal_of(&mut self, r: &Ref, v: &Value) -> Option<Option<i64>> {
+        if loose::integer(v) == Some(0) || v.as_str().is_some_and(|s| s.trim().is_empty()) {
+            return Some(None);
+        }
+        let mine = |id: i64| crate::goals::get(self.conn, self.ctx.user_id, id).ok().flatten().is_some();
+        match loose::target(v) {
+            Some(Target::Id(id)) if mine(id) => Some(Some(id)),
+            Some(Target::Id(id)) => {
+                self.ignore(r, "goal_id", format!("no goal {id}"));
+                None
+            }
+            Some(Target::Title(t)) => {
+                let open: Vec<(i64, String)> = crate::goals::list(self.conn, self.ctx.user_id, None)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|g| (g.id, g.title))
+                    .collect();
+                match loose::by_title(&t, &open, "goal") {
+                    Ok(id) => Some(Some(id)),
+                    Err(why) => {
+                        self.ignore(r, "goal_id", why);
+                        None
+                    }
+                }
+            }
+            None => {
+                self.ignore(r, "goal_id", "a goal is its id");
+                None
+            }
+        }
     }
-    if let Some(n) = &args.notes {
-        check_text("notes", n)?;
+
+    /// Open tasks under `under` (`None`: the roots), or anywhere when `anywhere`.
+    fn open_under(&self, under: Option<i64>, anywhere: bool) -> Result<Vec<(i64, String)>, ToolError> {
+        if anywhere {
+            return open_tasks(self.conn, self.ctx.user_id);
+        }
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT id, title FROM tasks WHERE user_id = ?1 AND state IN ('open','in_progress') AND parent_id IS ?2 ORDER BY id")
+            .map_err(internal)?;
+        let rows = stmt
+            .query_map((self.ctx.user_id, under), |r| Ok((r.get(0)?, r.get(1)?)))
+            .and_then(|rows| rows.collect::<rusqlite::Result<Vec<_>>>())
+            .map_err(internal)?;
+        Ok(rows)
     }
-    let due = args.due_at.as_deref().map(|raw| checked_due(ctx, raw)).transpose()?.unwrap_or_default();
-    let patch = TaskPatch {
-        title,
-        description: args.description,
-        state: args.state,
-        notes: args.notes,
-        duration_min: args.duration_min.filter(|_| args.steps.is_empty()).map(Some),
-        is_now: args.is_now,
-        due_at: due.due_at,
-        due_on: due.due_on,
-        zone: Some(user_tz(ctx)),
-        notify: args.notify,
-        progress: args.progress,
-        category: args.category,
-        goal_id: args.goal_id,
-        urgency: args.urgency,
-        actor: Actor::Agent,
-        ..Default::default()
-    };
-    for s in &args.steps {
-        checked_title(&s.title)?;
+
+    fn resolve(&mut self, r: &Ref, t: &Target, under: Option<i64>, anywhere: bool) -> Result<Option<i64>, ToolError> {
+        match t {
+            Target::Id(id) => {
+                if tasks::get(self.conn, self.ctx.user_id, *id).map_err(internal)?.is_some() {
+                    return Ok(Some(*id));
+                }
+                self.env.refused(r, format!("no task {id}"));
+                Ok(None)
+            }
+            Target::Title(title) => {
+                let open = self.open_under(under, anywhere)?;
+                match loose::by_title(title, &open, "task") {
+                    Ok(id) => {
+                        self.env.adjusted(Some(r), "id", id.into(), format!("{title:?} is task {id}"));
+                        Ok(Some(id))
+                    }
+                    Err(why) => {
+                        self.env.refused(r, why);
+                        Ok(None)
+                    }
+                }
+            }
+        }
     }
-    let updated = match crate::tasks::update(conn, ctx.user_id, args.task_id, &patch) {
-        Ok(Some(t)) => t,
-        Ok(None) => return Err(ToolError::not_found(format!("no task {}", args.task_id))),
-        Err(e) => return Err(task_error(e)),
-    };
-    let mut out = serde_json::json!({
-        "task_id": updated.task.id,
-        "state": updated.task.state,
-        "is_now": updated.task.is_now,
-        "progress": updated.task.progress,
-        "remaining_min": updated.task.remaining_min,
-        "demoted_from_now": updated.demoted_from_now,
-    });
-    if !args.steps.is_empty() {
-        let added = args.steps.len();
-        let node = crate::tasks::split(conn, ctx.user_id, args.task_id, args.steps, Actor::Agent)
-            .map_err(task_error)?
-            .ok_or_else(|| ToolError::not_found(format!("no task {}", args.task_id)))?;
-        let ids: Vec<i64> = node.children.iter().map(|c| c.task.id).collect();
-        out["step_ids"] = ids[ids.len().saturating_sub(added)..].to_vec().into();
+
+    fn in_scope(&self, id: i64) -> Result<bool, ToolError> {
+        let Some(scope) = self.ctx.task_scope else { return Ok(true) };
+        if id == scope {
+            return Ok(true);
+        }
+        Ok(ancestors(self.conn, id).map_err(internal)?.contains(&scope))
     }
+
+    fn level(&mut self, items: Vec<(Ref, Value)>, nest: Nest) -> Result<(), ToolError> {
+        let mut creates: Vec<(Option<i64>, Node)> = Vec::new();
+        for (r, v) in items {
+            let Some(mut node) = self.parse(&r, v) else { continue };
+            let explicit = match (nest, node.parent.take()) {
+                (Nest::Under(_), Some(_)) => {
+                    self.ignore(&r, "parent", "it is nested under its parent in this call");
+                    None
+                }
+                (_, given) => given,
+            };
+            let parent_given: Option<Option<i64>> = match explicit {
+                None => None,
+                Some(None) => Some(None),
+                Some(Some(t)) => match self.resolve(&r, &t, None, true)? {
+                    Some(id) => Some(Some(id)),
+                    None => continue,
+                },
+            };
+            let under: Option<Option<i64>> = match nest {
+                Nest::Under(p) => Some(Some(p)),
+                Nest::Top => parent_given,
+            };
+            let target = match node.target.take() {
+                Some(t) => {
+                    let (scope, anywhere) = match under {
+                        Some(u) => (u, false),
+                        None => (None, true),
+                    };
+                    match self.resolve(&r, &t, scope, anywhere)? {
+                        Some(id) => Some(id),
+                        None => continue,
+                    }
+                }
+                None => match (&node.title, node.new) {
+                    (Some(title), false) => {
+                        let open = self.open_under(under.flatten(), false)?;
+                        let want = loose::fold(title);
+                        let hits: Vec<i64> = open.iter().filter(|(_, t)| loose::fold(t) == want).map(|(id, _)| *id).collect();
+                        match hits.as_slice() {
+                            [] => None,
+                            [one] => {
+                                self.env.adjusted(
+                                    Some(&r),
+                                    "id",
+                                    (*one).into(),
+                                    format!("open task {one} under the same parent has this title, so it was updated; new: true makes another"),
+                                );
+                                Some(*one)
+                            }
+                            many => {
+                                self.env.refused(
+                                    &r,
+                                    format!(
+                                        "{} open tasks are titled {title:?}: {}; give the id, or new: true",
+                                        many.len(),
+                                        many.iter().map(i64::to_string).collect::<Vec<_>>().join(", ")
+                                    ),
+                                );
+                                continue;
+                            }
+                        }
+                    }
+                    _ => None,
+                },
+            };
+            match target {
+                Some(id) => {
+                    if !self.in_scope(id)? {
+                        self.env.refused(&r, format!("this session may only change task {} and its parts", self.ctx.task_scope.unwrap_or_default()));
+                        continue;
+                    }
+                    self.update(node, id, under)?;
+                }
+                None if node.title.is_none() => self.env.refused(&r, "a new task needs a title; to change one, give its id"),
+                None => {
+                    let parent = under.flatten();
+                    let allowed = match parent {
+                        Some(p) => self.in_scope(p)?,
+                        None => self.ctx.task_scope.is_none(),
+                    };
+                    if !allowed {
+                        self.env.refused(&r, "this session may only add parts to its own task");
+                        continue;
+                    }
+                    creates.push((parent, node));
+                }
+            }
+        }
+        self.create(creates)
+    }
+
+    fn report(&mut self, adjusted: Vec<tasks::Adjusted>) {
+        for a in adjusted {
+            let field = match a.field {
+                "duration_min" => "minutes",
+                "is_now" => "now",
+                f => f,
+            };
+            let mut v = json!({ "id": a.id, "title": a.title, "field": field, "to": a.to, "why": a.why });
+            if let Some(r) = self.refs.get(&a.id) {
+                v["ref"] = r.0.clone().into();
+            }
+            if let Some(by) = a.by_title {
+                v["by"] = by.into();
+            }
+            self.env.adjusted.push(v);
+        }
+    }
+
+    fn demoted(&mut self, ids: Vec<i64>) -> Result<(), ToolError> {
+        for id in ids {
+            let title = tasks::get(self.conn, self.ctx.user_id, id).map_err(internal)?.map(|t| t.title).unwrap_or_default();
+            let mut v = json!({ "id": id, "title": title, "field": "now", "to": false, "why": "Now holds at most 3; the newest one left" });
+            if let Some(r) = self.refs.get(&id) {
+                v["ref"] = r.0.clone().into();
+            }
+            self.env.adjusted.push(v);
+        }
+        Ok(())
+    }
+
+    fn update(&mut self, n: Node, id: i64, under: Option<Option<i64>>) -> Result<(), ToolError> {
+        let r = n.r.clone();
+        let Some(before) = tasks::get(self.conn, self.ctx.user_id, id).map_err(internal)? else {
+            self.env.refused(&r, format!("no task {id}"));
+            return Ok(());
+        };
+        let moving = under.filter(|p| *p != before.parent_id);
+        if self.held.contains(&id) && (matches!(n.state, Some("done" | "dropped")) || moving.is_some()) {
+            self.env.refused(&r, format!("task {id} is in the work session running now; leave it until the session ends"));
+            return Ok(());
+        }
+        let parent_after = moving.unwrap_or(before.parent_id);
+        let kids: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM tasks WHERE parent_id = ?1 AND state != 'dropped'", [id], |x| x.get(0))
+            .map_err(internal)?;
+        let is_parent = kids > 0 || !n.children.is_empty();
+        let mut p = TaskPatch { actor: Actor::Agent, zone: Some(self.tz.clone()), ..TaskPatch::default() };
+        let mut changed = false;
+        if let Some(t) = n.title {
+            changed |= t != before.title;
+            p.title = Some(t);
+        }
+        if let Some(full) = n.full_title {
+            let rest = n.description.clone().unwrap_or_else(|| before.description.clone());
+            p.description = Some(if rest.is_empty() { full } else { format!("{full}\n\n{rest}") });
+            changed = true;
+        } else if let Some(d) = n.description {
+            changed |= d != before.description;
+            p.description = Some(d);
+        }
+        if let Some(x) = n.notes {
+            changed |= x != before.notes;
+            p.notes = Some(x);
+        }
+        if let Some(m) = n.minutes {
+            if m <= 0 {
+                if is_parent {
+                    self.ignore(&r, "minutes", "a parent's size is the sum of its children's");
+                } else {
+                    p.duration_min = Some(None);
+                    changed = true;
+                }
+            } else {
+                let rounded = loose::round_minutes(m);
+                if rounded != m {
+                    self.env.adjusted(Some(&r), "minutes", rounded.into(), "a size is whole 5 minutes, 5 to 1440");
+                }
+                p.duration_min = Some(Some(rounded as u32));
+                changed = true;
+            }
+        }
+        if let Some(due) = n.due {
+            match due {
+                None => p.due_at = Some(None),
+                Some(When::Day(d)) => p.due_on = Some(Some(d.to_string())),
+                Some(When::At(t)) => p.due_at = Some(Some(t.to_string())),
+            }
+            changed = true;
+        }
+        if let Some(x) = n.progress {
+            p.progress = Some(x);
+            changed = true;
+        }
+        if let Some(s) = n.state {
+            match self.ctx.task_scope {
+                Some(_) if s != "dropped" => self.ignore(&r, "state", "this session may only drop a task"),
+                Some(_) if before.state != "open" => self.ignore(&r, "state", format!("task {id} is already {}; only an open task can be dropped", before.state)),
+                _ => {
+                    changed |= s != before.state;
+                    p.state = Some(s.to_string());
+                }
+            }
+        }
+        if let Some(u) = n.urgency {
+            changed |= u != before.urgency;
+            p.urgency = Some(u.to_string());
+        }
+        if let Some(x) = n.notify {
+            p.notify = Some(x.to_string());
+            changed = true;
+        }
+        if let Some(now) = n.now {
+            if self.ctx.task_scope.is_some() {
+                self.ignore(&r, "now", "this session cannot move a task in or out of Now");
+            } else {
+                changed |= now != before.is_now;
+                p.is_now = Some(now);
+            }
+        }
+        if let Some(c) = n.category {
+            if parent_after.is_some() {
+                self.ignore(&r, "category", "a child reads its root's category");
+            } else {
+                changed |= c != before.category;
+                p.category = Some(c);
+            }
+        }
+        let goal = match (self.goal, parent_after) {
+            (Some(g), None) => Some(Some(g)),
+            _ => n.goal_id,
+        };
+        if let Some(g) = goal {
+            if parent_after.is_some() {
+                self.ignore(&r, "goal_id", "a child reads its root's goal");
+            } else {
+                changed |= g != before.goal_id;
+                p.goal_id = Some(g);
+            }
+        }
+        if let Some(u) = n.url {
+            p.url = Some(u);
+            changed = true;
+        }
+        if let Some(m) = moving {
+            p.parent_id = Some(m);
+            changed = true;
+        }
+        let op = if changed { "updated" } else { "unchanged" };
+        match tasks::update(self.conn, self.ctx.user_id, id, &p) {
+            Ok(Some(u)) => {
+                self.refs.insert(id, r.clone());
+                self.env.saved(&r, id, &u.task.title, op);
+                self.report(u.adjusted);
+                self.demoted(u.demoted_from_now)?;
+            }
+            Ok(None) => {
+                self.env.refused(&r, format!("no task {id}"));
+                return Ok(());
+            }
+            Err(tasks::UpdateError::Db(e)) => return Err(internal(e)),
+            Err(e) => {
+                self.env.refused(&r, e.to_string());
+                return Ok(());
+            }
+        }
+        if let Some(b) = n.before {
+            self.place(&r, id, &b)?;
+        }
+        let children = n.children.into_iter().enumerate().map(|(i, v)| (r.child(i), v)).collect();
+        self.level(children, Nest::Under(id))
+    }
+
+    /// Puts `id` in front of its sibling `before`.
+    fn place(&mut self, r: &Ref, id: i64, before: &Target) -> Result<(), ToolError> {
+        let parent: Option<i64> = self
+            .conn
+            .query_row("SELECT parent_id FROM tasks WHERE id = ?1", [id], |x| x.get(0))
+            .map_err(internal)?;
+        let Some(parent) = parent else {
+            self.ignore(r, "before", "top-level tasks keep no order of their own; the day's order is order_move's");
+            return Ok(());
+        };
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT id, title FROM tasks WHERE parent_id = ?1 AND id != ?2 AND state != 'dropped' ORDER BY position, id")
+            .map_err(internal)?;
+        let sibs: Vec<(i64, String)> = stmt
+            .query_map((parent, id), |x| Ok((x.get(0)?, x.get(1)?)))
+            .and_then(|rows| rows.collect::<rusqlite::Result<_>>())
+            .map_err(internal)?;
+        drop(stmt);
+        let found = match before {
+            Target::Id(b) => sibs.iter().position(|(s, _)| s == b),
+            Target::Title(t) => loose::by_title(t, &sibs, "sibling").ok().and_then(|b| sibs.iter().position(|(s, _)| *s == b)),
+        };
+        let Some(index) = found else {
+            self.ignore(r, "before", "it is not a sibling of this task");
+            return Ok(());
+        };
+        let patch = TaskPatch { position: Some(index), actor: Actor::Agent, ..TaskPatch::default() };
+        tasks::update(self.conn, self.ctx.user_id, id, &patch).map_err(|e| internal(e.to_string()))?;
+        Ok(())
+    }
+
+    fn build(&mut self, n: Node, root: bool, b: &mut Built) -> NewTask {
+        let r = n.r.clone();
+        let title = n.title.clone().unwrap_or_default();
+        b.refs.push((r.clone(), title.clone()));
+        let me = b.refs.len() - 1;
+        if let Some(t) = n.before.clone() {
+            b.places.push((me, t));
+        }
+        let mut new = NewTask { title, zone: Some(self.tz.clone()), ..NewTask::default() };
+        new.description = match (n.full_title, n.description) {
+            (Some(full), Some(d)) => Some(format!("{full}\n\n{d}")),
+            (Some(full), None) => Some(full),
+            (None, d) => d,
+        };
+        new.notes = n.notes;
+        if let Some(m) = n.minutes.filter(|m| *m > 0) {
+            let rounded = loose::round_minutes(m);
+            if rounded != m {
+                self.env.adjusted(Some(&r), "minutes", rounded.into(), "a size is whole 5 minutes, 5 to 1440");
+            }
+            new.duration_min = Some(rounded as u32);
+        }
+        match n.due {
+            Some(Some(When::Day(d))) => new.due_on = Some(Some(d.to_string())),
+            Some(Some(When::At(t))) => new.due_at = Some(Some(t.to_string())),
+            _ => {}
+        }
+        new.progress = n.progress;
+        new.state = n.state.map(str::to_string);
+        new.urgency = n.urgency.map(str::to_string);
+        new.notify = n.notify.map(str::to_string);
+        new.url = n.url;
+        if let Some(now) = n.now {
+            if self.ctx.task_scope.is_some() {
+                self.ignore(&r, "now", "this session cannot move a task in or out of Now");
+            } else {
+                new.is_now = now;
+            }
+        }
+        if let Some(c) = n.category {
+            if root {
+                new.category = Some(c);
+            } else {
+                self.ignore(&r, "category", "a child reads its root's category");
+            }
+        }
+        let goal = if root { self.goal.map(Some).or(n.goal_id) } else { n.goal_id };
+        if let Some(g) = goal {
+            if root {
+                new.goal_id = g;
+            } else {
+                self.ignore(&r, "goal_id", "a child reads its root's goal");
+            }
+        }
+        for (i, v) in n.children.into_iter().enumerate() {
+            let cr = r.child(i);
+            let Some(mut child) = self.parse(&cr, v) else { continue };
+            if child.parent.take().is_some() {
+                self.ignore(&cr, "parent", "it is nested under its parent in this call");
+            }
+            if child.target.is_some() {
+                b.deferred.push((me, child));
+            } else if child.title.is_none() {
+                self.env.refused(&cr, "a new task needs a title; to change one, give its id");
+            } else {
+                let built = self.build(child, false, b);
+                new.children.push(built);
+            }
+        }
+        new
+    }
+
+    fn create(&mut self, creates: Vec<(Option<i64>, Node)>) -> Result<(), ToolError> {
+        let mut groups: Vec<(Option<i64>, Vec<Built>)> = Vec::new();
+        for (parent, n) in creates {
+            let mut parent = parent;
+            if let Some(p) = parent {
+                let at = tasks::get(self.conn, self.ctx.user_id, p).map_err(internal)?;
+                if let Some(at) = at.filter(|t| t.depth >= tasks::MAX_DEPTH) {
+                    self.env.adjusted(Some(&n.r), "depth", tasks::MAX_DEPTH.into(), format!("nothing sits more than 4 levels below its root, so it went beside {:?}", at.title));
+                    parent = at.parent_id;
+                }
+            }
+            let mut b = Built { new: NewTask::default(), refs: Vec::new(), places: Vec::new(), deferred: Vec::new() };
+            b.new = self.build(n, parent.is_none(), &mut b);
+            match groups.iter_mut().find(|(g, _)| *g == parent) {
+                Some((_, list)) => list.push(b),
+                None => groups.push((parent, vec![b])),
+            }
+        }
+        for (parent, list) in groups {
+            self.create_group(parent, list)?;
+        }
+        Ok(())
+    }
+
+    fn create_group(&mut self, parent: Option<i64>, list: Vec<Built>) -> Result<(), ToolError> {
+        let news: Vec<NewTask> = list.iter().map(|b| clone_new(&b.new)).collect();
+        match tasks::create_group(self.conn, self.ctx.user_id, parent, news, "agent", Actor::Agent) {
+            Ok((ids, adjusted)) => {
+                let mut ids = ids.into_iter();
+                let mut landed = Vec::new();
+                for b in list {
+                    let made: Vec<i64> = ids.by_ref().take(b.refs.len()).collect();
+                    for ((r, title), id) in b.refs.iter().zip(&made) {
+                        self.refs.insert(*id, r.clone());
+                        self.env.saved(r, *id, title, "created");
+                    }
+                    landed.push((b, made));
+                }
+                self.report(adjusted);
+                for (b, made) in landed {
+                    for (at, t) in &b.places {
+                        if let (Some(id), Some((r, _))) = (made.get(*at), b.refs.get(*at)) {
+                            self.place(&r.clone(), *id, t)?;
+                        }
+                    }
+                    for (at, child) in b.deferred {
+                        let Some(&under) = made.get(at) else { continue };
+                        self.adopt(child, under)?;
+                    }
+                }
+                Ok(())
+            }
+            Err(tasks::UpdateError::Db(e)) => Err(internal(e)),
+            Err(e) if list.len() == 1 => {
+                let r = list[0].refs.first().map(|(r, _)| r.clone()).unwrap_or_default();
+                self.env.refused(&r, e.to_string());
+                Ok(())
+            }
+            Err(_) => {
+                for b in list {
+                    self.create_group(parent, vec![b])?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// An existing node nested under one this call made: moved there.
+    fn adopt(&mut self, mut child: Node, under: i64) -> Result<(), ToolError> {
+        let r = child.r.clone();
+        let Some(t) = child.target.take() else { return Ok(()) };
+        let Some(id) = self.resolve(&r, &t, None, true)? else { return Ok(()) };
+        self.update(child, id, Some(Some(under)))
+    }
+}
+
+fn clone_new(n: &NewTask) -> NewTask {
+    NewTask {
+        title: n.title.clone(),
+        description: n.description.clone(),
+        notes: n.notes.clone(),
+        duration_min: n.duration_min,
+        parent_id: n.parent_id,
+        is_now: n.is_now,
+        state: n.state.clone(),
+        due_at: n.due_at.clone(),
+        due_on: n.due_on.clone(),
+        url: n.url.clone(),
+        external_id: n.external_id.clone(),
+        source: n.source.clone(),
+        notify: n.notify.clone(),
+        progress: n.progress,
+        category: n.category.clone(),
+        goal_id: n.goal_id,
+        urgency: n.urgency.clone(),
+        children: n.children.iter().map(clone_new).collect(),
+        zone: n.zone.clone(),
+    }
+}
+
+fn ancestors(conn: &Connection, id: i64) -> rusqlite::Result<Vec<i64>> {
+    let mut stmt = conn.prepare_cached(
+        "WITH RECURSIVE up(id) AS (SELECT parent_id FROM tasks WHERE id = ?1
+             UNION ALL SELECT t.parent_id FROM tasks t JOIN up ON t.id = up.id WHERE t.parent_id IS NOT NULL)
+         SELECT id FROM up WHERE id IS NOT NULL",
+    )?;
+    let rows = stmt.query_map([id], |r| r.get(0))?;
+    rows.collect()
+}
+
+/// The running work session's leaf and every node above it.
+pub(super) fn running_line(conn: &Connection, user_id: i64) -> rusqlite::Result<Vec<i64>> {
+    let Some(s) = crate::work::open(conn, user_id)? else { return Ok(Vec::new()) };
+    let Some(leaf) = s.leaf_id.or(s.task_id) else { return Ok(Vec::new()) };
+    let mut out = vec![leaf];
+    out.extend(ancestors(conn, leaf)?);
     Ok(out)
 }
 
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct DeleteArgs {
-    pub task_id: i64,
+/// The nodes a call carries, each with its ref.
+pub(super) fn nodes(o: &mut Obj, key: &str, aliases: &[&str]) -> (Vec<(Ref, Value)>, Option<String>) {
+    let (list, warning) = loose::items(o, key, aliases, NODE_FIELDS);
+    (list.into_iter().enumerate().map(|(i, v)| (Ref::top(i), v)).collect(), warning)
 }
 
-pub fn delete(
-    conn: &Connection,
-    ctx: &ToolCtx,
-    args: &DeleteArgs,
-) -> Result<serde_json::Value, ToolError> {
-    in_scope(conn, ctx, args.task_id, true)?;
-    match crate::tasks::delete_within(conn, ctx.user_id, args.task_id) {
-        Ok(true) => Ok(serde_json::json!({ "task_id": args.task_id, "deleted": true })),
-        Ok(false) => Err(ToolError::not_found(format!("no task {}", args.task_id))),
-        Err(e) => Err(ToolError::internal(e.to_string())),
+/// `task_save`.
+pub fn save(conn: &Connection, ctx: &ToolCtx, kind: SessionKind, raw: &str) -> Result<Value, ToolError> {
+    let mut o = Obj::new(loose::args(raw)?);
+    let (items, warning) = nodes(&mut o, "tasks", &["items", "nodes", "children", "steps", "list", "data"]);
+    let mut saver = Saver::new(conn, ctx, kind)?;
+    if let Some(w) = warning {
+        saver.env.warn(w);
     }
+    for field in o.rest() {
+        saver.env.ignored(None, &field, loose::unknown(&field, ELSEWHERE));
+    }
+    if items.is_empty() {
+        saver.env.warn("nothing to save: tasks was empty");
+        return Ok(saver.env.into_value());
+    }
+    saver.save(items)?;
+    Ok(saver.env.into_value())
 }
 
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct SplitArgs {
-    pub task_id: i64,
-    /// Steps to add after any it already has, each with a duration in whole
-    /// 5-minute blocks.
-    pub steps: Vec<Step>,
+/// `task_remove`.
+pub fn remove(conn: &Connection, ctx: &ToolCtx, kind: SessionKind, raw: &str) -> Result<Value, ToolError> {
+    let mut o = Obj::new(loose::args(raw)?);
+    let mut env = Envelope::default();
+    let ids = o.take(&["ids", "id", "task_ids", "task_id", "tasks", "items"]).map(loose::list).unwrap_or_default();
+    let all = o.take(&["all", "force", "confirm"]).and_then(|v| loose::boolean(&v)).unwrap_or(false);
+    for field in o.rest() {
+        env.ignored(None, &field, "not a task_remove field");
+    }
+    if ids.is_empty() {
+        env.warn("nothing to remove: ids was empty");
+        return Ok(env.into_value());
+    }
+    let held = if kind == SessionKind::Trigger { running_line(conn, ctx.user_id).map_err(internal)? } else { Vec::new() };
+    let mut picked: Vec<(Ref, i64, String)> = Vec::new();
+    for (i, v) in ids.into_iter().enumerate() {
+        let r = Ref::top(i);
+        let id = match loose::target(&v) {
+            Some(Target::Id(id)) => id,
+            Some(Target::Title(t)) => {
+                let open = open_tasks(conn, ctx.user_id)?;
+                match loose::by_title(&t, &open, "task") {
+                    Ok(id) => {
+                        env.adjusted(Some(&r), "id", id.into(), format!("{t:?} is task {id}"));
+                        id
+                    }
+                    Err(why) => {
+                        env.refused(&r, why);
+                        continue;
+                    }
+                }
+            }
+            None => {
+                env.refused(&r, "an id is a number like 41, or the exact title of one open task");
+                continue;
+            }
+        };
+        let Some(task) = tasks::get(conn, ctx.user_id, id).map_err(internal)? else {
+            env.refused(&r, format!("no task {id}"));
+            continue;
+        };
+        if let Some(scope) = ctx.task_scope {
+            if id != scope && !ancestors(conn, id).map_err(internal)?.contains(&scope) {
+                env.refused(&r, format!("this session may only change task {scope} and its parts"));
+                continue;
+            }
+        }
+        if held.contains(&id) {
+            env.refused(&r, format!("task {id} is in the work session running now; leave it until the session ends"));
+            continue;
+        }
+        if !picked.iter().any(|(_, p, _)| *p == id) {
+            picked.push((r, id, task.title));
+        }
+    }
+    let subtree = |id: i64| -> Result<Vec<i64>, ToolError> {
+        let mut stmt = conn
+            .prepare_cached("WITH RECURSIVE sub(id) AS (SELECT ?1 UNION ALL SELECT c.id FROM tasks c JOIN sub ON c.parent_id = sub.id) SELECT id FROM sub")
+            .map_err(internal)?;
+        let rows = stmt.query_map([id], |r| r.get(0)).and_then(|rows| rows.collect::<rusqlite::Result<Vec<i64>>>()).map_err(internal)?;
+        Ok(rows)
+    };
+    let mut every = std::collections::HashSet::new();
+    let mut sizes = Vec::new();
+    for (_, id, _) in &picked {
+        let nodes = subtree(*id)?;
+        sizes.push(nodes.len());
+        every.extend(nodes);
+    }
+    if every.len() > MAX_REMOVE && !all {
+        for (r, id, _) in &picked {
+            env.refused(r, format!(
+                "this call would delete {} tasks, parts included; pass all: true when that is meant, or set state dropped with task_save to keep them (task {id})",
+                every.len()
+            ));
+        }
+        return Ok(env.into_value());
+    }
+    let mut gone = std::collections::HashSet::new();
+    for ((_, id, title), size) in picked.into_iter().zip(sizes) {
+        if gone.contains(&id) {
+            continue;
+        }
+        gone.extend(subtree(id)?);
+        if tasks::delete_within(conn, ctx.user_id, id).map_err(internal)? {
+            env.removed(id, &title);
+            if size > 1 {
+                if let Some(last) = env.removed.last_mut() {
+                    last["parts"] = (size - 1).into();
+                }
+            }
+        }
+    }
+    Ok(env.into_value())
 }
 
-pub fn split(
-    conn: &Connection,
-    ctx: &ToolCtx,
-    args: SplitArgs,
-) -> Result<serde_json::Value, ToolError> {
-    in_scope(conn, ctx, args.task_id, false)?;
-    for s in &args.steps {
-        checked_title(&s.title)?;
+fn open_tasks(conn: &Connection, user_id: i64) -> Result<Vec<(i64, String)>, ToolError> {
+    let mut stmt = conn
+        .prepare_cached("SELECT id, title FROM tasks WHERE user_id = ?1 AND state IN ('open','in_progress') ORDER BY id")
+        .map_err(internal)?;
+    let rows = stmt
+        .query_map([user_id], |r| Ok((r.get(0)?, r.get(1)?)))
+        .and_then(|rows| rows.collect::<rusqlite::Result<Vec<_>>>())
+        .map_err(internal)?;
+    Ok(rows)
+}
+
+/// `task_bulk_update`, run as `task_save` over each id, or `task_remove` when
+/// it deletes.
+pub fn bulk_update(conn: &Connection, ctx: &ToolCtx, kind: SessionKind, raw: &str) -> Result<Value, ToolError> {
+    let mut args = loose::args(raw)?;
+    let ids = args.remove("task_ids").or_else(|| args.remove("ids")).map(loose::list).unwrap_or_default();
+    if args.remove("delete").as_ref().and_then(loose::boolean) == Some(true) {
+        if !super::registry(kind).contains(&"task_remove") {
+            return Err(ToolError::forbidden("a wake-up never deletes tasks; set state dropped instead"));
+        }
+        return remove(conn, ctx, kind, &json!({ "ids": ids }).to_string());
     }
-    match crate::tasks::split(conn, ctx.user_id, args.task_id, args.steps, Actor::Agent) {
-        Ok(Some(n)) => Ok(serde_json::json!({
-            "task_id": n.task.id,
-            "duration_min": n.task.duration_min,
-            "step_ids": n.children.iter().map(|c| c.task.id).collect::<Vec<_>>(),
-        })),
-        Ok(None) => Err(ToolError::not_found(format!("no task {}", args.task_id))),
-        Err(e) => Err(task_error(e)),
-    }
+    let nodes: Vec<Value> = ids
+        .into_iter()
+        .map(|id| {
+            let mut node = args.clone();
+            node.insert("id".into(), id);
+            Value::Object(node)
+        })
+        .collect();
+    save(conn, ctx, kind, &json!({ "tasks": nodes }).to_string())
 }
 
 const MAX_BRIEF_DESCRIPTION: usize = 2 * 1024;
 const MAX_REASON_CHARS: usize = 100;
-const MAX_STEP_TITLE_CHARS: usize = 100;
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct BriefArgs {
-    pub task_id: i64,
-    /// False drops the task as not homework; true writes the brief.
-    pub homework: bool,
-    /// Why it is not homework, under 100 characters. Required when homework is false.
-    #[serde(default)]
-    pub reason: Option<String>,
-    /// The brief: at most 6 short plain-text lines, no blank lines, no markdown.
-    #[serde(default)]
-    pub description: Option<String>,
-    /// Focused minutes, in whole 5-minute blocks.
-    #[serde(default)]
-    pub duration_min: Option<u32>,
-    /// The course or source this assignment came from, as the item names it.
-    #[serde(default)]
-    pub category: Option<String>,
-    /// 2 to 5 steps, each under 100 characters. Ignored when the task already has steps.
-    #[serde(default)]
-    pub steps: Option<Vec<Step>>,
-}
+const MAX_CHILD_TITLE_CHARS: usize = 100;
 
 /// The whole import session in one call: either the task is dropped as not
-/// homework, or it gets its description, duration and — for a task with no
-/// steps yet — its steps.
-pub fn brief(
-    conn: &Connection,
-    ctx: &ToolCtx,
-    args: BriefArgs,
-) -> Result<serde_json::Value, ToolError> {
-    in_scope(conn, ctx, args.task_id, false)?;
-    let Some(node) = crate::tasks::node(conn, ctx.user_id, args.task_id).map_err(|e| task_error(e.into()))?
-    else {
-        return Err(ToolError::not_found(format!("no task {}", args.task_id)));
-    };
-    if !args.homework {
-        return drop_as_not_homework(conn, ctx, &node.task, args.reason.as_deref().unwrap_or(""));
-    }
-
-    let description = match args.description {
-        Some(d) => {
-            if d.len() > MAX_BRIEF_DESCRIPTION {
-                return Err(ToolError::rejected(format!(
-                    "description must be at most {MAX_BRIEF_DESCRIPTION} bytes"
-                )));
-            }
-            if d.trim().is_empty() {
-                return Err(ToolError::rejected("description must say something"));
-            }
-            Some(d)
+/// homework, or it gets its description, size and, while it has none yet, its
+/// children.
+pub fn brief(conn: &Connection, ctx: &ToolCtx, raw: &str) -> Result<Value, ToolError> {
+    let mut o = Obj::new(loose::args(raw)?);
+    let task_id = o
+        .take(&["task_id", "id"])
+        .and_then(|v| loose::id(&v))
+        .ok_or_else(|| ToolError::invalid_args("task_id is required"))?;
+    let homework = o
+        .take(&["homework", "is_homework", "work"])
+        .and_then(|v| loose::boolean(&v))
+        .ok_or_else(|| ToolError::invalid_args("homework is required: true or false"))?;
+    if let Some(scope) = ctx.task_scope {
+        if task_id != scope {
+            return Err(ToolError::rejected(format!("this session may only change task {scope}")));
         }
-        None => None,
-    };
-    if description.is_some() || args.duration_min.is_some() || args.category.is_some() {
-        patch(
-            conn,
-            ctx,
-            args.task_id,
-            &TaskPatch {
-                description,
-                duration_min: args.duration_min.map(Some),
-                category: args.category,
-                actor: Actor::Agent,
-                ..Default::default()
-            },
-        )?;
     }
-
-    let steps_applied = if !node.children.is_empty() {
-        serde_json::json!("kept")
-    } else if let Some(steps) = args.steps {
-        let steps = steps
-            .into_iter()
-            .map(|s| {
-                Ok(Step { title: checked_step_title(&s.title)?.to_owned(), ..s })
-            })
-            .collect::<Result<Vec<_>, ToolError>>()?;
-        let n = steps.len();
-        match crate::tasks::split(conn, ctx.user_id, args.task_id, steps, Actor::Agent) {
-            Ok(Some(_)) => serde_json::json!(n),
-            Ok(None) => return Err(ToolError::not_found(format!("no task {}", args.task_id))),
-            Err(e) => return Err(task_error(e)),
-        }
-    } else {
-        serde_json::json!(0)
+    let Some(node) = tasks::node(conn, ctx.user_id, task_id).map_err(internal)? else {
+        return Err(ToolError::not_found(format!("no task {task_id}")));
     };
-    Ok(serde_json::json!({
-        "task_id": args.task_id,
-        "outcome": "briefed",
-        "steps_applied": steps_applied,
-    }))
+    let reason = o.take(&["reason", "why"]).and_then(|v| loose::text(&v)).unwrap_or_default();
+    if !homework {
+        return drop_as_not_homework(conn, ctx, &node.task, &reason);
+    }
+    let mut env = Envelope::default();
+    let mut patch = TaskPatch { actor: Actor::Agent, ..TaskPatch::default() };
+    if let Some(d) = o.take(&["description", "brief"]).and_then(|v| loose::text(&v)) {
+        let d = match loose::truncate(&d, MAX_BRIEF_DESCRIPTION) {
+            Some(cut) => {
+                env.warn(format!("description was cut to {MAX_BRIEF_DESCRIPTION} bytes"));
+                cut
+            }
+            None => d,
+        };
+        if d.trim().is_empty() {
+            env.ignored(None, "description", "a description says something");
+        } else {
+            patch.description = Some(d);
+        }
+    }
+    if let Some(v) = o.take(&["minutes", "duration_min", "duration", "estimate"]) {
+        match loose::minutes(&v).filter(|m| *m > 0) {
+            Some(m) => {
+                let rounded = loose::round_minutes(m);
+                if rounded != m {
+                    env.adjusted(None, "minutes", rounded.into(), "a size is whole 5 minutes, 5 to 1440");
+                }
+                patch.duration_min = Some(Some(rounded as u32));
+            }
+            None => env.ignored(None, "minutes", "a size is minutes, such as 45 or \"1h30\""),
+        }
+    }
+    if let Some(c) = o.take(&["category", "course"]).and_then(|v| loose::text(&v)) {
+        patch.category = Some(loose::truncate(c.trim(), tasks::MAX_CATEGORY_BYTES).unwrap_or_else(|| c.trim().to_string()));
+    }
+    let children = o.take(&["children", "steps", "subtasks", "items"]).map(loose::list);
+    for field in o.rest() {
+        env.ignored(None, &field, "not a task_brief field");
+    }
+    if patch.description.is_some() || patch.duration_min.is_some() || patch.category.is_some() {
+        match tasks::update(conn, ctx.user_id, task_id, &patch) {
+            Ok(Some(_)) => {}
+            Ok(None) => return Err(ToolError::not_found(format!("no task {task_id}"))),
+            Err(tasks::UpdateError::Db(e)) => return Err(internal(e)),
+            Err(e) => return Err(ToolError::rejected(e.to_string())),
+        }
+    }
+    let applied = match children {
+        _ if !node.children.is_empty() => json!("kept"),
+        None => json!(0),
+        Some(list) => {
+            if list.len() > tasks::MAX_CHILDREN {
+                return Err(ToolError::rejected(format!("a task holds at most {} children", tasks::MAX_CHILDREN)));
+            }
+            let mut news = Vec::new();
+            for (i, v) in list.into_iter().enumerate() {
+                let r = Ref::top(i);
+                let mut child = match v {
+                    Value::Object(m) => Obj::new(m),
+                    Value::String(s) => Obj::new(Map::from_iter([("title".to_string(), Value::String(s))])),
+                    _ => {
+                        env.refused(&r, "a child is an object with a title, or a plain title");
+                        continue;
+                    }
+                };
+                let Some(title) = child.take(&["title", "name"]).and_then(|v| loose::text(&v)).map(|t| t.trim().to_string()).filter(|t| !t.is_empty()) else {
+                    env.refused(&r, "a child needs a title");
+                    continue;
+                };
+                let title = if title.chars().count() > MAX_CHILD_TITLE_CHARS {
+                    let cut: String = title.chars().take(MAX_CHILD_TITLE_CHARS).collect();
+                    env.adjusted(Some(&r), "title", cut.clone().into(), "a child's title stops at 100 characters");
+                    cut
+                } else {
+                    title
+                };
+                let minutes = child.take(&["minutes", "duration_min", "duration", "size", "estimate"]).and_then(|v| loose::minutes(&v)).filter(|m| *m > 0);
+                let duration_min = minutes.map(|m| {
+                    let rounded = loose::round_minutes(m);
+                    if rounded != m {
+                        env.adjusted(Some(&r), "minutes", rounded.into(), "a size is whole 5 minutes, 5 to 1440");
+                    }
+                    rounded as u32
+                });
+                for field in child.rest() {
+                    env.ignored(Some(&r), &field, "a brief's child takes a title and minutes");
+                }
+                news.push(NewTask { title, duration_min, source: Some(node.task.source.clone()), ..NewTask::default() });
+            }
+            let n = news.len();
+            if n > 0 {
+                match tasks::create_group(conn, ctx.user_id, Some(task_id), news, &node.task.source, Actor::Agent) {
+                    Ok(_) => {}
+                    Err(tasks::UpdateError::Db(e)) => return Err(internal(e)),
+                    Err(e) => return Err(ToolError::rejected(e.to_string())),
+                }
+            }
+            json!(n)
+        }
+    };
+    let mut out = env.into_value();
+    out["task_id"] = task_id.into();
+    out["outcome"] = "briefed".into();
+    out["children_applied"] = applied;
+    Ok(out)
 }
 
-fn drop_as_not_homework(
-    conn: &Connection,
-    ctx: &ToolCtx,
-    task: &crate::tasks::Task,
-    reason: &str,
-) -> Result<serde_json::Value, ToolError> {
+fn drop_as_not_homework(conn: &Connection, ctx: &ToolCtx, task: &tasks::Task, reason: &str) -> Result<Value, ToolError> {
     let reason = reason.trim();
     if reason.is_empty() || reason.chars().count() > MAX_REASON_CHARS {
-        return Err(ToolError::rejected(format!(
-            "homework=false needs a reason of 1 to {MAX_REASON_CHARS} characters"
-        )));
+        return Err(ToolError::rejected(format!("homework=false needs a reason of 1 to {MAX_REASON_CHARS} characters")));
     }
     if task.state != "open" {
         return Err(ToolError::rejected(format!(
@@ -498,501 +1146,389 @@ fn drop_as_not_homework(
             task.id, task.state
         )));
     }
-    patch(
-        conn,
-        ctx,
-        task.id,
-        &TaskPatch {
-            description: Some(format!("Not homework: {reason}")),
-            state: Some("dropped".into()),
-            actor: Actor::Agent,
-            ..Default::default()
-        },
-    )?;
-    Ok(serde_json::json!({ "task_id": task.id, "outcome": "dropped", "steps_applied": 0 }))
-}
-
-fn checked_step_title(title: &str) -> Result<&str, ToolError> {
-    let title = title.trim();
-    if title.is_empty() || title.chars().count() > MAX_STEP_TITLE_CHARS {
-        return Err(ToolError::rejected(format!(
-            "each step title must be 1 to {MAX_STEP_TITLE_CHARS} characters"
-        )));
-    }
-    Ok(title)
-}
-
-fn patch(conn: &Connection, ctx: &ToolCtx, task_id: i64, p: &TaskPatch) -> Result<(), ToolError> {
-    match crate::tasks::update(conn, ctx.user_id, task_id, p) {
-        Ok(Some(_)) => Ok(()),
-        Ok(None) => Err(ToolError::not_found(format!("no task {task_id}"))),
-        Err(e) => Err(task_error(e)),
+    let patch = TaskPatch {
+        description: Some(format!("Not homework: {reason}")),
+        state: Some("dropped".into()),
+        actor: Actor::Agent,
+        ..TaskPatch::default()
+    };
+    match tasks::update(conn, ctx.user_id, task.id, &patch) {
+        Ok(Some(_)) => Ok(json!({ "ok": true, "task_id": task.id, "outcome": "dropped", "children_applied": 0 })),
+        Ok(None) => Err(ToolError::not_found(format!("no task {}", task.id))),
+        Err(tasks::UpdateError::Db(e)) => Err(internal(e)),
+        Err(e) => Err(ToolError::rejected(e.to_string())),
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::tools::testkit::{call, ctx, env, saved, talk, task};
     use crate::tools::{dispatch, SessionKind, ToolCtx};
+    use serde_json::{json, Value};
 
-    fn env() -> (rusqlite::Connection, tempfile::TempDir) {
-        let conn = crate::db::open_memory().unwrap();
-        conn.execute(
-            "INSERT INTO users (username, pass_hash, role) VALUES ('aki', 'x', 'member')",
-            [],
-        )
-        .unwrap();
-        for title in ["scoped", "someone elses"] {
-            crate::tasks::create(
-                &conn,
-                1,
-                crate::tasks::NewTask {
-                    title: title.into(),
-                    ..crate::tasks::NewTask::default()
-                },
-                "manual",
-                crate::tasks::Actor::User,
-            )
-            .unwrap();
+    fn ids_under(conn: &rusqlite::Connection, parent: i64) -> Vec<i64> {
+        crate::tasks::node(conn, 1, parent).unwrap().unwrap().children.iter().map(|c| c.task.id).collect()
+    }
+
+    fn field<'a>(out: &'a Value, list: &str, r: &str, field: &str) -> Option<&'a Value> {
+        out[list].as_array()?.iter().find(|x| x["ref"] == r && x["field"] == field)
+    }
+
+    #[test]
+    fn nodes_nest_any_depth_with_sizes_in_every_form() {
+        let (conn, tmp) = env("UTC");
+        let out = talk(&conn, &tmp, "task_save", json!({"tasks": [{
+            "title": "Essay",
+            "children": [
+                {"title": "Research", "steps": [{"title": "Sources", "minutes": "1h"}, {"title": "Notes", "duration": "45m"}]},
+                {"title": "Draft", "duration_min": 23},
+                "Proofread"
+            ]
+        }]}));
+        assert_eq!(out["ok"], true, "{out}");
+        let root = saved(&out, "0");
+        assert_eq!(saved(&out, "0.0.1"), saved(&out, "0.0") + 2);
+        assert_eq!(task(&conn, saved(&out, "0.0.0")).duration_min, Some(60));
+        assert_eq!(task(&conn, saved(&out, "0.0.1")).duration_min, Some(45));
+        assert_eq!(task(&conn, saved(&out, "0.1")).duration_min, Some(25));
+        assert_eq!(field(&out, "adjusted", "0.1", "minutes").unwrap()["to"], 25);
+        assert_eq!(task(&conn, saved(&out, "0.2")).title, "Proofread", "a plain string is a title");
+        assert_eq!(task(&conn, root).duration_min, Some(130), "a parent's size is the sum of its children's");
+        assert_eq!(task(&conn, saved(&out, "0.0.0")).depth, 2);
+    }
+
+    #[test]
+    fn a_sized_parent_shares_what_is_left_among_its_unsized_parts() {
+        let (conn, tmp) = env("UTC");
+        let out = talk(&conn, &tmp, "task_save", json!({"tasks": [{"title": "History essay", "minutes": 90,
+            "children": [{"title": "Outline", "minutes": 30}, "Draft", "Cite"]}]}));
+        assert_eq!(task(&conn, saved(&out, "0.1")).duration_min, Some(30));
+        assert_eq!(task(&conn, saved(&out, "0")).duration_min, Some(90));
+        let id = saved(&out, "0");
+        let out = talk(&conn, &tmp, "task_save", json!({"tasks": [{"id": id, "children": [{"title": "Proofread", "minutes": 15}]}]}));
+        assert_eq!(out["saved"][0]["op"], "unchanged");
+        assert_eq!(out["saved"][1]["op"], "created");
+        assert_eq!(task(&conn, id).duration_min, Some(105));
+    }
+
+    #[test]
+    fn ids_come_in_every_form_and_titles_resolve_only_when_unique() {
+        let (conn, tmp) = env("UTC");
+        let out = talk(&conn, &tmp, "task_save", json!({"tasks": [{"title": "Essay"}, {"title": "Lab report"}, {"title": "Essay", "new": true}]}));
+        let (a, lab, b) = (saved(&out, "0"), saved(&out, "1"), saved(&out, "2"));
+        for form in [json!(lab), json!(lab.to_string()), json!(format!("#{lab}")), json!(format!("t{lab}"))] {
+            let out = talk(&conn, &tmp, "task_save", json!({"tasks": [{"id": form, "notes": "x"}]}));
+            assert_eq!(saved(&out, "0"), lab, "{form}");
         }
-        (conn, tempfile::tempdir().unwrap())
-    }
-
-    fn ctx(tmp: &tempfile::TempDir, scope: Option<i64>) -> ToolCtx<'_> {
-        ToolCtx {
-            config_dir: tmp.path(),
-            data_dir: tmp.path(),
-            user_id: 1,
-            username: "aki",
-            vectors: crate::tools::PreparedVectors::default(),
-            task_scope: scope,
-            inbox_source: None,
-            memory_source: None,
-            share: None,
-            share_thread: None,
-        }
-    }
-
-    /// A config dir whose user lives in `tz`, which is what a bare day means.
-    fn tz_dir(tz: &str) -> tempfile::TempDir {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join("defaults")).unwrap();
-        std::fs::write(
-            tmp.path().join("defaults/user.toml"),
-            format!("display_name = \"X\"\ntimezone = \"{tz}\"\ntemplate = \"default\"\n"),
-        )
-        .unwrap();
-        tmp
-    }
-
-    fn due_of(conn: &rusqlite::Connection, id: i64) -> Option<String> {
-        crate::tasks::get(conn, 1, id).unwrap().unwrap().due_at
-    }
-
-    fn day_of(conn: &rusqlite::Connection, id: i64) -> Option<String> {
-        crate::tasks::get(conn, 1, id).unwrap().unwrap().due_on
+        let out = talk(&conn, &tmp, "task_save", json!({"tasks": [{"id": "lab  REPORT", "state": "done"}]}));
+        assert_eq!(saved(&out, "0"), lab);
+        assert_eq!(field(&out, "adjusted", "0", "id").unwrap()["to"], lab);
+        let out = talk(&conn, &tmp, "task_save", json!({"tasks": [{"id": "Essay", "state": "done"}, {"id": 9999, "notes": "y"}, {"title": "Poem"}]}));
+        assert_eq!(out["ok"], false);
+        let why = out["refused"][0]["why"].as_str().unwrap();
+        assert!(why.contains(&format!("{a}, {b}")), "{why}");
+        assert_eq!(out["refused"][1]["why"], "no task 9999");
+        assert_eq!(out["refused"][1]["ref"], "1");
+        assert_eq!(out["saved"][0]["ref"], "2", "the rest of the call lands");
+        assert_eq!(task(&conn, a).state, "open");
     }
 
     #[test]
-    fn a_due_is_a_whole_day_or_a_moment_where_the_user_lives() {
-        let (conn, _tmp) = env();
-        let tmp = tz_dir("Asia/Tokyo");
-        let call = |args: &str| {
-            dispatch(&conn, &ctx(&tmp, None), SessionKind::Talk, "task_create", args)
-        };
-        let id = call(r#"{"title":"essay","due_at":"2026-09-19T23:59:00+09:00"}"#).unwrap()
-            ["task_id"]
-            .as_i64()
-            .unwrap();
-        assert_eq!(due_of(&conn, id).as_deref(), Some("2026-09-19T14:59:00Z"));
-        assert_eq!(day_of(&conn, id), None);
-
-        let bare = call(r#"{"title":"worksheet","due_at":"2026-09-19"}"#).unwrap()["task_id"]
-            .as_i64()
-            .unwrap();
-        assert_eq!(
-            due_of(&conn, bare).as_deref(),
-            Some("2026-09-19T14:59:00Z"),
-            "a bare day is the end of that day in Tokyo"
-        );
-        assert_eq!(day_of(&conn, bare).as_deref(), Some("2026-09-19"));
-
-        dispatch(
-            &conn,
-            &ctx(&tmp, None),
-            SessionKind::Talk,
-            "task_update",
-            &format!(r#"{{"task_id":{bare},"due_at":"2026-09-19T17:30"}}"#),
-        )
-        .unwrap();
-        assert_eq!(due_of(&conn, bare).as_deref(), Some("2026-09-19T08:30:00Z"), "a wall time is Tokyo's");
-        assert_eq!(day_of(&conn, bare), None, "a time replaces the whole day");
-
-        dispatch(
-            &conn,
-            &ctx(&tmp, None),
-            SessionKind::Talk,
-            "task_update",
-            &format!(r#"{{"task_id":{bare},"due_at":"2026-09-20"}}"#),
-        )
-        .unwrap();
-        assert_eq!(due_of(&conn, bare).as_deref(), Some("2026-09-20T14:59:00Z"));
-        assert_eq!(day_of(&conn, bare).as_deref(), Some("2026-09-20"));
-
-        dispatch(
-            &conn,
-            &ctx(&tmp, None),
-            SessionKind::Talk,
-            "task_update",
-            &format!(r#"{{"task_id":{bare},"due_at":""}}"#),
-        )
-        .unwrap();
-        assert_eq!(due_of(&conn, bare), None, "an empty string clears it");
-        assert_eq!(day_of(&conn, bare), None);
-
-        assert_eq!(call(r#"{"title":"x","due_at":"friday"}"#).unwrap_err().kind, "rejected");
+    fn a_create_with_an_open_tasks_title_updates_it_unless_new() {
+        let (conn, tmp) = env("UTC");
+        let first = saved(&talk(&conn, &tmp, "task_save", json!({"tasks": [{"title": "Call the dentist"}]})), "0");
+        let out = talk(&conn, &tmp, "task_save", json!({"tasks": [{"title": "call the  dentist", "minutes": 10}]}));
+        assert_eq!(saved(&out, "0"), first);
+        assert_eq!(out["saved"][0]["op"], "updated");
+        assert!(field(&out, "adjusted", "0", "id").is_some());
+        let out = talk(&conn, &tmp, "task_save", json!({"tasks": [{"title": "Call the dentist", "new": true}]}));
+        assert_ne!(saved(&out, "0"), first);
+        let out = talk(&conn, &tmp, "task_save", json!({"tasks": [{"title": "Call the dentist"}]}));
+        assert_eq!(out["ok"], false, "two open tasks carry it now");
+        conn.execute("UPDATE tasks SET state = 'done'", []).unwrap();
+        let out = talk(&conn, &tmp, "task_save", json!({"tasks": [{"title": "Call the dentist"}]}));
+        assert_eq!(out["saved"][0]["op"], "created", "a finished one is not matched");
     }
 
     #[test]
-    fn a_category_is_written_cleared_and_never_put_on_a_step() {
-        let (conn, tmp) = env();
-        let call = |name: &str, args: &str| {
-            dispatch(&conn, &ctx(&tmp, None), SessionKind::Talk, name, args)
-        };
-        let id = call("task_create", r#"{"title":"chapter 4","category":"  Biology  "}"#).unwrap()
-            ["task_id"]
-            .as_i64()
-            .unwrap();
-        let category = |id: i64| crate::tasks::get(&conn, 1, id).unwrap().unwrap().category;
-        assert_eq!(category(id), "Biology");
-
-        call("task_update", &format!(r#"{{"task_id":{id},"category":"Chemistry"}}"#)).unwrap();
-        assert_eq!(category(id), "Chemistry");
-        call("task_update", &format!(r#"{{"task_id":{id},"category":""}}"#)).unwrap();
-        assert_eq!(category(id), "");
-
-        call("task_update", &format!(r#"{{"task_id":{id},"category":"Biology"}}"#)).unwrap();
-        let steps = r#""steps":[{"title":"read","duration_min":5},{"title":"answer","duration_min":5}]"#;
-        let split = call("task_split", &format!(r#"{{"task_id":{id},{steps}}}"#)).unwrap();
-        let step = split["step_ids"][0].as_i64().unwrap();
-        assert_eq!(category(step), "Biology", "a step reads the task's own");
-        let e = call("task_update", &format!(r#"{{"task_id":{step},"category":"History"}}"#))
-            .unwrap_err();
-        assert_eq!(e.kind, "rejected");
-
-        let long = format!(r#"{{"title":"x","category":"{}"}}"#, "c".repeat(101));
-        assert_eq!(call("task_create", &long).unwrap_err().kind, "rejected");
-    }
-
-    #[test]
-    fn a_goal_is_hung_on_a_task_detached_and_refused_on_a_step() {
-        let (conn, tmp) = env();
-        let call = |name: &str, args: &str| {
-            dispatch(&conn, &ctx(&tmp, None), SessionKind::Talk, name, args)
-        };
-        let goal = call("goal_create", r#"{"title":"get into the programme"}"#).unwrap()["goal_id"]
-            .as_i64()
-            .unwrap();
-        let id = call("task_create", &format!(r#"{{"title":"essay","goal_id":{goal}}}"#)).unwrap()
-            ["task_id"]
-            .as_i64()
-            .unwrap();
-        let goal_of = |id: i64| crate::tasks::get(&conn, 1, id).unwrap().unwrap().goal_id;
-        assert_eq!(goal_of(id), Some(goal));
-
-        call("task_update", &format!(r#"{{"task_id":{id},"goal_id":null}}"#)).unwrap();
-        assert_eq!(goal_of(id), None);
-        call("task_update", &format!(r#"{{"task_id":{id},"goal_id":{goal}}}"#)).unwrap();
-        assert_eq!(goal_of(id), Some(goal));
-
-        assert_eq!(
-            call("task_create", r#"{"title":"x","goal_id":9999}"#).unwrap_err().kind,
-            "rejected"
-        );
-
-        let steps = r#""steps":[{"title":"draft","duration_min":5},{"title":"edit","duration_min":5}]"#;
-        let split = call("task_split", &format!(r#"{{"task_id":{id},{steps}}}"#)).unwrap();
-        let step = split["step_ids"][0].as_i64().unwrap();
-        let e = call("task_update", &format!(r#"{{"task_id":{step},"goal_id":{goal}}}"#))
-            .unwrap_err();
-        assert_eq!(e.kind, "rejected");
-        assert_eq!(goal_of(step), Some(goal), "a step reads its root's goal");
-    }
-
-    #[test]
-    fn a_brief_files_the_task_under_the_course_it_came_from() {
-        let (conn, tmp) = env();
-        brief(
-            &conn,
-            &tmp,
-            r#"{"task_id":1,"homework":true,"description":"Read chapter 4.","category":"Biology"}"#,
-        )
-        .unwrap();
-        assert_eq!(crate::tasks::get(&conn, 1, 1).unwrap().unwrap().category, "Biology");
-    }
-
-    #[test]
-    fn a_scoped_session_cannot_delete_a_task_outside_its_scope() {
-        let (conn, tmp) = env();
-        let e = dispatch(
-            &conn,
-            &ctx(&tmp, Some(1)),
-            SessionKind::Talk,
-            "task_delete",
-            r#"{"task_id":2}"#,
-        )
-        .unwrap_err();
-        assert_eq!(e.kind, "rejected");
-        assert!(crate::tasks::get(&conn, 1, 2).unwrap().is_some());
-
-        dispatch(&conn, &ctx(&tmp, Some(1)), SessionKind::Talk, "task_delete", r#"{"task_id":1}"#)
-            .unwrap();
-        assert!(crate::tasks::get(&conn, 1, 1).unwrap().is_none());
-    }
-
-    #[test]
-    fn an_unscoped_session_deletes_any_of_the_users_tasks() {
-        let (conn, tmp) = env();
-        dispatch(&conn, &ctx(&tmp, None), SessionKind::Talk, "task_delete", r#"{"task_id":2}"#)
-            .unwrap();
-        assert!(crate::tasks::get(&conn, 1, 2).unwrap().is_none());
-    }
-
-    fn brief(
-        conn: &rusqlite::Connection,
-        tmp: &tempfile::TempDir,
-        args: &str,
-    ) -> Result<serde_json::Value, crate::tools::ToolError> {
-        dispatch(conn, &ctx(tmp, Some(1)), SessionKind::Import, "task_brief", args)
-    }
-
-    fn description(conn: &rusqlite::Connection, id: i64) -> String {
-        crate::tasks::get(conn, 1, id).unwrap().unwrap().description
-    }
-
-    fn split_it(conn: &rusqlite::Connection, id: i64) {
-        crate::tasks::split(
-            conn,
-            1,
-            id,
-            vec![
-                crate::tasks::Step { title: "draft".into(), duration_min: 20 },
-                crate::tasks::Step { title: "edit".into(), duration_min: 10 },
-            ],
-            crate::tasks::Actor::User,
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn one_brief_writes_the_description_the_duration_and_the_steps() {
-        let (conn, tmp) = env();
-        let out = brief(
-            &conn,
-            &tmp,
-            r#"{"task_id":1,"homework":true,"description":"Read chapter 4.\nHand in: worksheet.",
-                "duration_min":45,
-                "steps":[{"title":"read chapter 4","duration_min":25},
-                         {"title":"answer the questions","duration_min":20}]}"#,
-        )
-        .unwrap();
-        assert_eq!(out["task_id"], 1);
-        assert_eq!(out["outcome"], "briefed");
-        assert_eq!(out["steps_applied"], 2);
-
-        let node = crate::tasks::node(&conn, 1, 1).unwrap().unwrap();
-        assert!(node.task.description.starts_with("Read chapter 4."));
-        assert_eq!(node.task.duration_min, Some(45));
-        assert_eq!(node.task.duration_source, "derived");
-        assert_eq!(node.task.state, "open");
-        assert_eq!(node.task.title, "scoped");
-        assert!(!node.task.is_now);
-        assert_eq!(node.children.len(), 2);
-    }
-
-    #[test]
-    fn not_homework_drops_the_task_with_its_reason() {
-        let (conn, tmp) = env();
-        let out = brief(
-            &conn,
-            &tmp,
-            r#"{"task_id":1,"homework":false,"reason":"class calendar, nothing to hand in",
-                "description":"ignored","duration_min":30}"#,
-        )
-        .unwrap();
-        assert_eq!(out["outcome"], "dropped");
-        assert_eq!(out["steps_applied"], 0);
-
-        let task = crate::tasks::get(&conn, 1, 1).unwrap().unwrap();
-        assert_eq!(task.state, "dropped");
-        assert_eq!(task.description, "Not homework: class calendar, nothing to hand in");
-        assert_eq!(task.duration_min, None);
-    }
-
-    #[test]
-    fn not_homework_needs_a_short_reason() {
-        let (conn, tmp) = env();
-        for args in [
-            r#"{"task_id":1,"homework":false}"#,
-            r#"{"task_id":1,"homework":false,"reason":"   "}"#,
-        ] {
-            assert_eq!(brief(&conn, &tmp, args).unwrap_err().kind, "rejected", "{args}");
-        }
-        let long = format!(
-            r#"{{"task_id":1,"homework":false,"reason":"{}"}}"#,
-            "why".repeat(40)
-        );
-        assert_eq!(brief(&conn, &tmp, &long).unwrap_err().kind, "rejected");
-        assert_eq!(crate::tasks::get(&conn, 1, 1).unwrap().unwrap().state, "open");
-    }
-
-    #[test]
-    fn a_started_task_is_briefed_never_dropped() {
-        let (conn, tmp) = env();
-        for state in ["in_progress", "done"] {
-            crate::tasks::update(
-                &conn,
-                1,
-                1,
-                &crate::tasks::TaskPatch { state: Some(state.into()), ..Default::default() },
-            )
-            .unwrap();
-            let e = brief(&conn, &tmp, r#"{"task_id":1,"homework":false,"reason":"a rubric"}"#)
-                .unwrap_err();
-            assert_eq!(e.kind, "rejected", "dropped a task that was {state}");
-            assert_eq!(crate::tasks::get(&conn, 1, 1).unwrap().unwrap().state, state);
-        }
-        brief(&conn, &tmp, r#"{"task_id":1,"homework":true,"description":"still work"}"#).unwrap();
-        assert_eq!(crate::tasks::get(&conn, 1, 1).unwrap().unwrap().state, "done");
-    }
-
-    #[test]
-    fn existing_steps_are_kept_and_the_new_ones_ignored() {
-        let (conn, tmp) = env();
-        split_it(&conn, 1);
-        let out = brief(
-            &conn,
-            &tmp,
-            r#"{"task_id":1,"homework":true,"description":"a fresher brief",
-                "steps":[{"title":"a","duration_min":5},{"title":"b","duration_min":5}]}"#,
-        )
-        .unwrap();
-        assert_eq!(out["steps_applied"], "kept");
-        let node = crate::tasks::node(&conn, 1, 1).unwrap().unwrap();
-        assert_eq!(node.task.description, "a fresher brief");
-        assert_eq!(node.children.len(), 2);
-        assert_eq!(node.children[0].task.title, "draft");
-    }
-
-    #[test]
-    fn a_blank_description_or_an_odd_duration_is_rejected() {
-        let (conn, tmp) = env();
-        for args in [
-            r#"{"task_id":1,"homework":true,"description":"\n  \n"}"#,
-            r#"{"task_id":1,"homework":true,"description":"fine","duration_min":23}"#,
-            r#"{"task_id":1,"homework":true,"description":"fine","surprise":1}"#,
-        ] {
-            assert!(brief(&conn, &tmp, args).is_err(), "{args}");
-        }
-        assert_eq!(description(&conn, 1), "");
-    }
-
-    #[test]
-    fn steps_are_short_titles_in_five_minute_blocks() {
-        let (conn, tmp) = env();
-        let one = r#"{"title":"only","duration_min":5}"#;
-        let long = format!(r#"{{"title":"{}","duration_min":5}}"#, "x".repeat(101));
-        for steps in [
-            String::new(),
-            [one; crate::tasks::MAX_CHILDREN + 1].join(","),
-            format!("{one},{long}"),
-            format!(r#"{one},{{"title":"odd","duration_min":7}}"#),
-        ] {
-            let args = format!(r#"{{"task_id":1,"homework":true,"steps":[{steps}]}}"#);
-            assert_eq!(brief(&conn, &tmp, &args).unwrap_err().kind, "rejected", "{args}");
-        }
-        assert!(crate::tasks::node(&conn, 1, 1).unwrap().unwrap().children.is_empty());
-    }
-
-    fn steps_json(n: usize) -> String {
-        (0..n).map(|i| format!(r#"{{"title":"lesson {i}","duration_min":10}}"#)).collect::<Vec<_>>().join(",")
-    }
-
-    #[test]
-    fn a_task_is_created_with_its_steps_in_one_call() {
-        let (conn, tmp) = env();
-        let args = format!(r#"{{"title":"Unit 1","due_at":"2026-11-02","steps":[{}]}}"#, steps_json(11));
-        let out = dispatch(&conn, &ctx(&tmp, None), SessionKind::Talk, "task_create", &args).unwrap();
-        let id = out["task_id"].as_i64().unwrap();
-        assert_eq!(out["step_ids"].as_array().unwrap().len(), 11);
-        let node = crate::tasks::node(&conn, 1, id).unwrap().unwrap();
-        assert_eq!(node.children.len(), 11);
-        assert_eq!(node.children[10].task.title, "lesson 10");
-        assert_eq!(node.task.duration_min, Some(110));
-    }
-
-    #[test]
-    fn steps_decide_a_tasks_size_whatever_size_it_is_given() {
-        let (conn, tmp) = env();
-        let args = format!(r#"{{"title":"Unit 5","duration_min":0,"steps":[{}]}}"#, steps_json(3));
-        let out = dispatch(&conn, &ctx(&tmp, None), SessionKind::Talk, "task_create", &args).unwrap();
-        let id = out["task_id"].as_i64().unwrap();
-        assert_eq!(crate::tasks::node(&conn, 1, id).unwrap().unwrap().task.duration_min, Some(30));
-
-        let args = format!(r#"{{"task_id":{id},"duration_min":0,"due_at":"2026-12-18","steps":[{}]}}"#, steps_json(2));
-        let out = dispatch(&conn, &ctx(&tmp, None), SessionKind::Talk, "task_update", &args).unwrap();
-        assert_eq!(out["step_ids"].as_array().unwrap().len(), 2, "an update adds steps after the ones there");
-        let node = crate::tasks::node(&conn, 1, id).unwrap().unwrap();
-        assert_eq!((node.children.len(), node.task.duration_min), (5, Some(50)));
-    }
-
-    #[test]
-    fn a_task_with_a_bad_step_is_not_created() {
-        let (conn, tmp) = env();
-        let args = r#"{"title":"Unit 2","steps":[{"title":"odd","duration_min":7}]}"#;
-        assert!(dispatch(&conn, &ctx(&tmp, None), SessionKind::Talk, "task_create", args).is_err());
-        let n: i64 = conn.query_row("SELECT COUNT(*) FROM tasks WHERE title = 'Unit 2'", [], |r| r.get(0)).unwrap();
+    fn a_refused_node_refuses_its_children_and_spares_its_siblings() {
+        let (conn, tmp) = env("UTC");
+        let out = talk(&conn, &tmp, "task_save", json!({"tasks": [
+            {"id": 404, "children": [{"title": "orphan"}]},
+            {"title": "Kept", "children": [{"title": "kept child"}, {"notes": "no title"}]}
+        ]}));
+        assert_eq!(out["ok"], false);
+        let refused: Vec<&str> = out["refused"].as_array().unwrap().iter().map(|r| r["ref"].as_str().unwrap()).collect();
+        assert_eq!(refused, ["0", "1.1"]);
+        assert_eq!(out["saved"].as_array().unwrap().len(), 2);
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM tasks WHERE title = 'orphan'", [], |r| r.get(0)).unwrap();
         assert_eq!(n, 0);
     }
 
     #[test]
-    fn a_split_appends_after_the_steps_a_task_has() {
-        let (conn, tmp) = env();
-        let split = |n: usize| {
-            let args = format!(r#"{{"task_id":1,"steps":[{}]}}"#, steps_json(n));
-            dispatch(&conn, &ctx(&tmp, None), SessionKind::Talk, "task_split", &args)
-        };
-        split(4).unwrap();
-        let out = split(7).unwrap();
-        assert_eq!(out["step_ids"].as_array().unwrap().len(), 11);
-        assert_eq!(out["duration_min"], 110);
-        let e = split(crate::tasks::MAX_CHILDREN - 10).unwrap_err();
-        assert_eq!(e.kind, "rejected");
-        assert_eq!(crate::tasks::node(&conn, 1, 1).unwrap().unwrap().children.len(), 11);
+    fn a_zero_size_is_ignored_on_a_parent_and_clears_a_leaf() {
+        let (conn, tmp) = env("UTC");
+        let out = talk(&conn, &tmp, "task_save", json!({"tasks": [{"title": "Unit 5", "minutes": 0, "steps": [{"title": "a", "minutes": 10}, {"title": "b", "minutes": 20}]}, {"title": "leaf", "minutes": 15}]}));
+        assert_eq!(task(&conn, saved(&out, "0")).duration_min, Some(30));
+        let (parent, leaf) = (saved(&out, "0"), saved(&out, "1"));
+        let out = talk(&conn, &tmp, "task_save", json!({"tasks": [{"id": parent, "minutes": 0}, {"id": leaf, "minutes": 0}]}));
+        assert!(field(&out, "ignored", "0", "minutes").is_some(), "{out}");
+        assert_eq!(task(&conn, parent).duration_min, Some(30));
+        assert_eq!(task(&conn, leaf).duration_min, None);
     }
 
     #[test]
-    fn a_failing_split_leaves_the_description_alone() {
-        let (conn, tmp) = env();
-        let e = brief(
-            &conn,
-            &tmp,
-            r#"{"task_id":1,"homework":true,"description":"half a brief",
-                "steps":[{"title":"odd","duration_min":7}]}"#,
-        )
-        .unwrap_err();
-        assert_eq!(e.kind, "rejected");
-        assert_eq!(description(&conn, 1), "");
+    fn dues_read_as_days_or_moments_and_a_child_is_clamped_to_its_parent() {
+        let (conn, tmp) = env("Asia/Tokyo");
+        let out = talk(&conn, &tmp, "task_save", json!({"tasks": [{"title": "Unit 1", "due": "2099-11-06", "children": [
+            {"title": "Lesson 1", "due": "2099-11-20"},
+            {"title": "Lesson 2", "deadline": "2099-11-01T17:30"},
+            {"title": "Lesson 3", "due": "sometime soon"}
+        ]}]}));
+        let unit = task(&conn, saved(&out, "0"));
+        assert_eq!(unit.due_on.as_deref(), Some("2099-11-06"));
+        let l1 = task(&conn, saved(&out, "0.0"));
+        assert_eq!(l1.due_on.as_deref(), Some("2099-11-06"), "clamped to the unit");
+        assert!(field(&out, "adjusted", "0.0", "due").is_some(), "{out}");
+        assert_eq!(task(&conn, saved(&out, "0.1")).due_at.as_deref(), Some("2099-11-01T08:30:00Z"));
+        let why = field(&out, "ignored", "0.2", "due").unwrap()["why"].as_str().unwrap();
+        assert!(why.contains("M/D"), "{why}");
+        let out = talk(&conn, &tmp, "task_save", json!({"tasks": [{"id": unit.id, "due": ""}]}));
+        assert_eq!(out["ok"], true);
+        assert_eq!(task(&conn, unit.id).due_at, None);
     }
 
     #[test]
-    fn a_brief_reaches_only_the_scoped_task_itself() {
-        let (conn, tmp) = env();
-        split_it(&conn, 1);
-        let step = crate::tasks::node(&conn, 1, 1).unwrap().unwrap().children[0].task.id;
-        for target in [2, step, 9999] {
-            let args = format!(r#"{{"task_id":{target},"homework":true,"description":"nope"}}"#);
-            assert_eq!(brief(&conn, &tmp, &args).unwrap_err().kind, "rejected", "reached {target}");
+    fn root_fields_on_a_child_are_ignored_with_the_reason() {
+        let (conn, tmp) = env("UTC");
+        let goal = saved(&talk(&conn, &tmp, "goal_save", json!({"goals": [{"title": "Pass"}]})), "0");
+        let out = talk(&conn, &tmp, "task_save", json!({"tasks": [{"title": "Course", "category": "Art", "goal_id": goal,
+            "children": [{"title": "Unit", "category": "Other", "goal_id": goal}]}]}));
+        assert_eq!(out["ok"], true);
+        assert_eq!(field(&out, "ignored", "0.0", "category").unwrap()["why"], "a child reads its root's category");
+        assert!(field(&out, "ignored", "0.0", "goal_id").is_some());
+        let child = task(&conn, saved(&out, "0.0"));
+        assert_eq!((child.category.as_str(), child.goal_id), ("Art", Some(goal)));
+        let out = talk(&conn, &tmp, "task_save", json!({"tasks": [{"id": child.id, "category": "Other"}]}));
+        assert!(field(&out, "ignored", "0", "category").is_some());
+    }
+
+    #[test]
+    fn over_long_text_is_cut_and_kept() {
+        let (conn, tmp) = env("UTC");
+        let long = "a long title word ".repeat(20);
+        let notes = "n".repeat(16 * 1024 + 10);
+        let out = talk(&conn, &tmp, "task_save", json!({"tasks": [{"title": long, "description": "the rest", "notes": notes}]}));
+        let t = task(&conn, saved(&out, "0"));
+        assert!(t.title.chars().count() <= 200);
+        assert!(t.description.starts_with(long.trim()), "{}", t.description);
+        assert!(t.description.ends_with("the rest"));
+        assert!(field(&out, "adjusted", "0", "title").is_some());
+        assert_eq!(t.notes.len(), 16 * 1024);
+        assert!(out["warnings"][0].as_str().unwrap().contains("notes"));
+    }
+
+    #[test]
+    fn the_list_is_found_however_it_is_sent_and_an_empty_one_is_no_error() {
+        let (conn, tmp) = env("UTC");
+        let out = talk(&conn, &tmp, "task_save", json!({"title": "bare"}));
+        assert_eq!(out["saved"][0]["op"], "created");
+        let out = talk(&conn, &tmp, "task_save", json!({"items": [{"title": "one"}, {"title": "two"}]}));
+        assert_eq!(out["saved"].as_array().unwrap().len(), 2);
+        assert!(out["warnings"][0].as_str().unwrap().contains("items"));
+        let out = talk(&conn, &tmp, "task_save", json!({"tasks": {"title": "lone object"}}));
+        assert_eq!(out["saved"][0]["title"], "lone object");
+        for empty in [json!({"tasks": []}), json!({})] {
+            let out = talk(&conn, &tmp, "task_save", empty);
+            assert_eq!(out["ok"], true);
+            assert!(out["warnings"][0].as_str().unwrap().starts_with("nothing to save"));
         }
-        assert_eq!(description(&conn, 2), "");
+        let out = call(&conn, &tmp, SessionKind::Talk, "task_save", r#""{\"tasks\":[{\"title\":\"quoted\"}]}""#).unwrap();
+        assert_eq!(out["saved"][0]["title"], "quoted");
+    }
+
+    #[test]
+    fn nesting_past_the_cap_is_flattened_onto_the_deepest_level() {
+        let (conn, tmp) = env("UTC");
+        let deep = json!({"title": "L0", "children": [{"title": "L1", "children": [{"title": "L2", "children": [{"title": "L3",
+            "children": [{"title": "L4", "children": [{"title": "L5", "children": ["L6"]}]}]}]}]}]});
+        let out = talk(&conn, &tmp, "task_save", json!({"tasks": [deep]}));
+        assert_eq!(out["ok"], true, "{out}");
+        assert_eq!(task(&conn, saved(&out, "0.0.0.0.0.0")).depth, 4);
+        assert_eq!(task(&conn, saved(&out, "0.0.0.0.0.0.0")).depth, 4);
+        assert!(out["adjusted"].as_array().unwrap().iter().any(|a| a["field"] == "depth" && a["ref"] == "0.0.0.0.0.0"), "{out}");
+        let l4 = saved(&out, "0.0.0.0.0");
+        let out = talk(&conn, &tmp, "task_save", json!({"tasks": [{"parent": l4, "title": "under the cap"}]}));
+        let made = task(&conn, saved(&out, "0"));
+        assert_eq!(made.depth, 4);
+        assert!(field(&out, "adjusted", "0", "depth").is_some());
+    }
+
+    #[test]
+    fn fields_that_belong_elsewhere_or_nowhere_are_ignored_and_named() {
+        let (conn, tmp) = env("UTC");
+        let out = talk(&conn, &tmp, "task_save", json!({"tasks": [{"title": "x", "event_id": 4, "colour": "red", "state": "Completed", "urgency": "urgent", "notify": "silent"}]}));
+        assert_eq!(field(&out, "ignored", "0", "event_id").unwrap()["why"], "event_id belongs to schedule_move or schedule_drop");
+        assert_eq!(field(&out, "ignored", "0", "colour").unwrap()["why"], "not a field here");
+        let t = task(&conn, saved(&out, "0"));
+        assert_eq!((t.state.as_str(), t.urgency.as_str(), t.notify.as_str()), ("done", "high", "none"));
+        let out = talk(&conn, &tmp, "task_save", json!({"tasks": [{"title": "y", "state": "exploded"}]}));
+        assert!(field(&out, "ignored", "0", "state").is_some());
+        assert_eq!(task(&conn, saved(&out, "0")).state, "open");
+    }
+
+    #[test]
+    fn a_call_holds_at_most_a_hundred_nodes() {
+        let (conn, tmp) = env("UTC");
+        let children: Vec<Value> = (0..120).map(|i| json!(format!("lesson {i}"))).collect();
+        let out = talk(&conn, &tmp, "task_save", json!({"tasks": [{"title": "big", "children": children}]}));
+        assert_eq!(out["ok"], false);
+        assert_eq!(out["saved"].as_array().unwrap().len(), 100);
+        assert_eq!(out["refused"].as_array().unwrap().len(), 21);
+    }
+
+    #[test]
+    fn now_takes_its_place_and_reports_who_left() {
+        let (conn, tmp) = env("UTC");
+        let four: Vec<Value> = ["a", "b", "c", "d"].iter().map(|t| json!({"title": t, "now": true})).collect();
+        let out = talk(&conn, &tmp, "task_save", json!({ "tasks": four }));
+        assert!(out["adjusted"].as_array().unwrap().iter().any(|a| a["field"] == "now" && a["to"] == false), "{out}");
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM tasks WHERE is_now = 1", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 3);
+        let out = talk(&conn, &tmp, "task_save", json!({"tasks": [{"title": "landlord", "now": true, "children": [{"title": "find the thread", "now": true}]}]}));
+        assert!(!task(&conn, saved(&out, "0")).is_now, "a node and its part never sit in Now together");
+        assert!(task(&conn, saved(&out, "0.0")).is_now);
+    }
+
+    #[test]
+    fn a_node_moves_by_parent_and_takes_its_place_by_before() {
+        let (conn, tmp) = env("UTC");
+        let out = talk(&conn, &tmp, "task_save", json!({"tasks": [{"title": "Course", "children": ["A", "B", "C"]}, {"title": "Loose"}]}));
+        let (course, a, c, loose) = (saved(&out, "0"), saved(&out, "0.0"), saved(&out, "0.2"), saved(&out, "1"));
+        let out = talk(&conn, &tmp, "task_save", json!({"tasks": [{"id": loose, "parent": "Course", "before": a}, {"id": c, "before": "A"}]}));
+        assert_eq!(out["ok"], true, "{out}");
+        let under = ids_under(&conn, course);
+        assert_eq!(&under[..2], &[loose, c], "{under:?}");
+        let out = talk(&conn, &tmp, "task_save", json!({"tasks": [{"id": loose, "parent": 0}]}));
+        assert_eq!(out["ok"], true);
+        assert_eq!(task(&conn, loose).parent_id, None);
+        let out = talk(&conn, &tmp, "task_save", json!({"tasks": [{"id": course, "parent": a}]}));
+        assert_eq!(out["ok"], false, "a cycle is refused");
+    }
+
+    #[test]
+    fn a_remove_takes_subtrees_and_asks_for_all_past_twenty() {
+        let (conn, tmp) = env("UTC");
+        let lessons: Vec<Value> = (0..25).map(|i| json!(format!("lesson {i}"))).collect();
+        let out = talk(&conn, &tmp, "task_save", json!({"tasks": [{"title": "Course", "children": lessons}, {"title": "Draft"}, {"title": "Old idea"}]}));
+        let (course, draft) = (saved(&out, "0"), saved(&out, "1"));
+        let out = talk(&conn, &tmp, "task_remove", json!({"ids": [course, draft]}));
+        assert_eq!(out["ok"], false);
+        assert_eq!(out["refused"].as_array().unwrap().len(), 2);
+        assert!(crate::tasks::get(&conn, 1, course).unwrap().is_some());
+        let out = talk(&conn, &tmp, "task_remove", json!({"ids": [course], "all": true}));
+        assert_eq!(out["removed"][0]["parts"], 25);
+        let out = talk(&conn, &tmp, "task_remove", json!({"ids": ["old IDEA", 9999]}));
+        assert_eq!(out["removed"][0]["title"], "Old idea");
+        assert_eq!(out["refused"][0]["why"], "no task 9999");
+        let out = talk(&conn, &tmp, "task_remove", json!({"ids": []}));
+        assert_eq!(out["ok"], true);
+        assert!(out["warnings"][0].as_str().unwrap().starts_with("nothing to remove"));
+        let out = talk(&conn, &tmp, "task_remove", json!({"task_id": draft}));
+        assert_eq!(out["removed"][0]["id"], draft, "a bare id is a list of one");
+    }
+
+    #[test]
+    fn another_users_task_is_never_reached() {
+        let (conn, tmp) = env("UTC");
+        conn.execute("INSERT INTO users (username, pass_hash, role) VALUES ('rin', 'x', 'member')", []).unwrap();
+        let theirs = crate::tasks::create(&conn, 2, crate::tasks::NewTask { title: "theirs".into(), ..Default::default() }, "manual", crate::tasks::Actor::User).unwrap().id;
+        for (name, args) in [("task_save", json!({"tasks": [{"id": theirs, "state": "done"}]})), ("task_remove", json!({"ids": [theirs]}))] {
+            let out = talk(&conn, &tmp, name, args);
+            assert_eq!(out["refused"][0]["why"], format!("no task {theirs}"), "{name}");
+        }
+        let out = talk(&conn, &tmp, "task_save", json!({"tasks": [{"id": "theirs", "state": "done"}]}));
+        assert_eq!(out["ok"], false);
+        assert_eq!(crate::tasks::get(&conn, 2, theirs).unwrap().unwrap().state, "open");
+    }
+
+    #[test]
+    fn a_scoped_session_reaches_its_own_tree_and_only_drops() {
+        let (conn, tmp) = env("UTC");
+        let out = talk(&conn, &tmp, "task_save", json!({"tasks": [{"title": "biology ch.4", "children": ["read", "answer"]}, {"title": "other"}]}));
+        let (mine, step, other) = (saved(&out, "0"), saved(&out, "0.0"), saved(&out, "1"));
+        let scoped = ToolCtx { task_scope: Some(mine), ..ctx(&tmp) };
+        let run = |args: Value| dispatch(&conn, &scoped, SessionKind::Talk, "task_save", &args.to_string()).unwrap();
+        let out = run(json!({"tasks": [{"id": step, "title": "read carefully", "now": true, "state": "done"}, {"id": other, "notes": "x"}]}));
+        assert_eq!(task(&conn, step).title, "read carefully");
+        assert!(!task(&conn, step).is_now);
+        assert_eq!(task(&conn, step).state, "open");
+        assert!(field(&out, "ignored", "0", "now").is_some() && field(&out, "ignored", "0", "state").is_some());
+        assert_eq!(out["refused"][0]["ref"], "1");
+        run(json!({"tasks": [{"id": mine, "state": "dropped"}]}));
+        assert_eq!(task(&conn, mine).state, "dropped");
+    }
+
+    #[test]
+    fn a_wake_up_may_drop_tasks_but_never_delete_them() {
+        let (conn, tmp) = env("UTC");
+        let a = saved(&talk(&conn, &tmp, "task_save", json!({"tasks": [{"title": "a"}]})), "0");
+        let e = call(&conn, &tmp, SessionKind::Trigger, "task_remove", &json!({"ids": [a]}).to_string()).unwrap_err();
+        assert_eq!(e.kind, "forbidden");
+        call(&conn, &tmp, SessionKind::Trigger, "task_bulk_update", &json!({"task_ids": [a], "state": "dropped"}).to_string()).unwrap();
+        assert_eq!(task(&conn, a).state, "dropped");
+    }
+
+    fn brief(conn: &rusqlite::Connection, tmp: &tempfile::TempDir, args: &Value) -> Result<Value, crate::tools::ToolError> {
+        let scoped = ToolCtx { task_scope: Some(1), ..ctx(tmp) };
+        dispatch(conn, &scoped, SessionKind::Import, "task_brief", &args.to_string())
+    }
+
+    fn import_env() -> (rusqlite::Connection, tempfile::TempDir) {
+        let (conn, tmp) = env("UTC");
+        for title in ["scoped", "someone elses"] {
+            crate::tasks::create(&conn, 1, crate::tasks::NewTask { title: title.into(), ..Default::default() }, "manual", crate::tasks::Actor::User).unwrap();
+        }
+        (conn, tmp)
+    }
+
+    #[test]
+    fn one_brief_writes_the_description_the_size_and_the_children() {
+        let (conn, tmp) = import_env();
+        let out = brief(&conn, &tmp, &json!({"task_id": 1, "homework": true, "description": "Read chapter 4.", "duration_min": 43,
+            "category": "Biology", "steps": [{"title": "read chapter 4", "duration_min": 25}, {"title": "answer", "minutes": "20m"}]})).unwrap();
+        assert_eq!((out["outcome"].as_str(), out["children_applied"].as_i64()), (Some("briefed"), Some(2)));
+        let node = crate::tasks::node(&conn, 1, 1).unwrap().unwrap();
+        assert_eq!(node.task.description, "Read chapter 4.");
+        assert_eq!(node.task.category, "Biology");
+        assert_eq!(node.task.duration_min, Some(45));
+        assert_eq!(node.children.len(), 2);
+        let again = brief(&conn, &tmp, &json!({"task_id": 1, "homework": true, "children": ["more"]})).unwrap();
+        assert_eq!(again["children_applied"], "kept");
+        assert_eq!(crate::tasks::node(&conn, 1, 1).unwrap().unwrap().children.len(), 2);
+    }
+
+    #[test]
+    fn not_homework_drops_an_open_task_with_its_reason() {
+        let (conn, tmp) = import_env();
+        assert_eq!(brief(&conn, &tmp, &json!({"task_id": 1, "homework": false})).unwrap_err().kind, "rejected");
+        let out = brief(&conn, &tmp, &json!({"task_id": 1, "homework": false, "reason": "class calendar"})).unwrap();
+        assert_eq!(out["outcome"], "dropped");
+        let t = task(&conn, 1);
+        assert_eq!((t.state.as_str(), t.description.as_str()), ("dropped", "Not homework: class calendar"));
+        assert_eq!(brief(&conn, &tmp, &json!({"task_id": 1, "homework": false, "reason": "again"})).unwrap_err().kind, "rejected");
+    }
+
+    #[test]
+    fn a_brief_reaches_only_the_scoped_task_and_reads_loosely() {
+        let (conn, tmp) = import_env();
+        for target in [2, 9999] {
+            assert_eq!(brief(&conn, &tmp, &json!({"task_id": target, "homework": true, "description": "nope"})).unwrap_err().kind, "rejected");
+        }
+        let out = brief(&conn, &tmp, &json!({"task_id": "1", "homework": "true", "description": "  ", "surprise": 1, "children": [{"title": "x".repeat(120)}]})).unwrap();
+        assert!(out["ignored"].as_array().unwrap().iter().any(|i| i["field"] == "surprise"));
+        assert!(out["ignored"].as_array().unwrap().iter().any(|i| i["field"] == "description"));
+        assert_eq!(crate::tasks::node(&conn, 1, 1).unwrap().unwrap().children[0].task.title.chars().count(), 100);
+        assert_eq!(task(&conn, 2).description, "");
     }
 }

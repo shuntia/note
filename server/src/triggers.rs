@@ -906,12 +906,19 @@ const MAX_CHANGE_CHARS: usize = 300;
 
 /// The activity row for one step a wake-up took, so the user can see what Note
 /// did on its own; `false` when the step changed nothing.
-pub fn log_change(conn: &Connection, user_id: i64, event_id: i64, name: &str, args: &str, is_error: bool) -> Result<bool> {
+pub fn log_change(conn: &Connection, user_id: i64, event_id: i64, name: &str, args: &str, result: &str, is_error: bool) -> Result<bool> {
     if is_error || !crate::tools::writes(name) {
         return Ok(false);
     }
-    let args: String = args.chars().take(MAX_CHANGE_CHARS).collect();
-    crate::log::record(conn, Some(user_id), "wake_change", &format!("event {event_id}: {name} {args}"))?;
+    let mut line: String = args.chars().take(MAX_CHANGE_CHARS).collect();
+    let result: serde_json::Value = serde_json::from_str(result).unwrap_or_default();
+    for key in ["adjusted", "ignored", "refused"] {
+        if let Some(items) = result[key].as_array().filter(|items| !items.is_empty()) {
+            let items = serde_json::Value::Array(items.clone()).to_string();
+            let _ = write!(line, " {key} {}", items.chars().take(MAX_CHANGE_CHARS).collect::<String>());
+        }
+    }
+    crate::log::record(conn, Some(user_id), "wake_change", &format!("event {event_id}: {name} {line}"))?;
     Ok(true)
 }
 
@@ -1348,9 +1355,9 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
     let changed = std::cell::Cell::new(false);
     let log_writes = |event: crate::agent::AgentEvent| match event {
         crate::agent::AgentEvent::ToolCall { args, .. } => *call_args.borrow_mut() = args.to_string(),
-        crate::agent::AgentEvent::ToolResult { name, is_error, .. } => {
+        crate::agent::AgentEvent::ToolResult { name, result, is_error, .. } => {
             let conn = state.db();
-            if log_change(&conn, fired.user_id, ev.event_id, name, &call_args.borrow(), is_error).unwrap_or(false) {
+            if log_change(&conn, fired.user_id, ev.event_id, name, &call_args.borrow(), result, is_error).unwrap_or(false) {
                 changed.set(true);
             }
         }
@@ -2221,7 +2228,7 @@ mod tests {
         let steps = [step("task_read", false), step("order_move", false), step("task_update", true), step("stay_quiet", false)];
         let logged = steps
             .iter()
-            .filter(|s| log_change(&conn, uid, 9, &s.name, &s.args, s.is_error).unwrap())
+            .filter(|s| log_change(&conn, uid, 9, &s.name, &s.args, &s.result, s.is_error).unwrap())
             .count();
         assert_eq!(logged, 1);
         let detail: String = conn
