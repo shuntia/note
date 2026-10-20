@@ -74,25 +74,36 @@ export type Task = {
   source: string
   notes: string
   duration_min: number | null
-  duration_source: 'user' | 'agent' | 'none'
+  // 'derived': a parent with sized children reads the sum of its live children.
+  duration_source: 'user' | 'agent' | 'none' | 'derived'
   parent_id: number | null
+  root_id: number
+  // 0 for a root, at most 4 below it.
+  depth: number
+  // 0-based order among its siblings.
+  position: number
   is_now: boolean
   updated_at: string
-  // The deadline, RFC 3339 UTC like updated_at; steps never carry one.
+  // The node's own deadline, RFC 3339 UTC like updated_at.
   due_at: string | null
   // YYYY-MM-DD when it is due some time that day rather than at a set moment;
   // due_at is then the end of it.
   due_on: string | null
+  // The own due, else the nearest ancestor's; `due_from` is the node it comes from.
+  effective_due_at: string | null
+  effective_due_on: string | null
+  due_from: number | null
   external_id: string | null
   url: string
   notify: TaskNotify
-  // Free text, one per task; a step reports the one its parent carries.
+  // Free text, one per tree; every node reports its root's.
   category: string
-  // low, normal or high; a step reports its parent's.
   urgency: TaskUrgency
-  // Due inside the next two days or already past due. Derived by the server.
+  // The highest of its own urgency and its ancestors'.
+  effective_urgency: TaskUrgency
+  // The effective due falls inside the next two days or is already past.
   pressing: boolean
-  // The goal this task belongs to; steps never carry one.
+  // The root's goal, reported on every node of the tree.
   goal_id: number | null
   goal_title: string | null
   // When the task's next block still to come starts, as a date-time in the
@@ -106,8 +117,8 @@ export type Task = {
   remaining_min: number | null
 }
 
-// A top-level task with its steps; the list never nests deeper than this.
-export type TaskNode = Task & { children: Task[] }
+// Live children in `position` order, recursively.
+export type TaskNode = Task & { children: TaskNode[] }
 
 export type GoalState = 'open' | 'done' | 'dropped'
 
@@ -140,11 +151,33 @@ export type Token = {
 // The secret is present only in the create response.
 export type TokenCreated = Token & { token: string }
 
+// A change the server made beyond what was asked: a due clamped to fit ancestor
+// `by`, or a relative that left Now because `by` took its place.
+export type Adjusted = {
+  id: number
+  title: string
+  field: 'due' | 'duration_min' | 'is_now' | 'category' | 'goal_id' | 'depth' | 'state'
+  to?: unknown
+  why: string
+  by?: number
+  by_title?: string
+}
+
 // `parent` arrives when finishing or reopening cascaded to it; `demoted_from_now`
 // when the write pushed other tasks out of Now, newest first.
-export type TaskUpdate = Task & { parent?: Task; demoted_from_now?: number[] }
+export type TaskUpdate = Task & { parent?: Task; demoted_from_now?: number[]; adjusted?: Adjusted[] }
+
+export type TaskCreated = Task & { children: TaskNode[]; adjusted?: Adjusted[] }
 
 export type NewStep = { title: string; duration_min: number }
+
+export type NewTask = {
+  title: string
+  duration_min?: number
+  due_at?: string
+  due_on?: string
+  children?: NewTask[]
+}
 
 export type FlattenResult = { task: TaskNode; removed: Task[] }
 
@@ -543,6 +576,15 @@ export type WorkSession = {
   phase_started_at: string | null
   phase_paused_ms: number
   round: number
+  // The leaf being worked under `task_id`; `leaf_path` runs from task_id's
+  // title down to it. Index and count place it among the live leaves under
+  // task_id, depth first, and are null when the leaf is task_id itself.
+  leaf_id: number | null
+  leaf_title: string | null
+  leaf_path: string[]
+  leaf_index: number | null
+  leaf_count: number | null
+  // Mirrors of leaf_index, leaf_count and leaf_title.
   step_index: number | null
   step_count: number | null
   step_name: string | null
@@ -558,21 +600,24 @@ export type SessionStart = {
   task_id?: number
   event_id?: number
   planned_min?: number
-  step_index?: number
-  step_count?: number
-  step_name?: string
+  // Absent: the server picks the first open leaf under task_id.
+  leaf_id?: number
   notes?: string
 }
 
-// Today's order: the tasks and steps Now works through, first to last.
+// Today's order: the tasks Now works through, first to last.
 export type RunOrder = { date: string; task_ids: number[] }
 
 export type QueueReason = 'now' | 'overdue' | 'urgent' | 'due_soon' | 'oldest' | 'scheduled' | 'order'
 
-// `task` is the whole task with its steps; `step` is the one to work on, if any;
-// `event_id` is the block a scheduled entry was laid in.
+// `task` is the whole tree; `leaf` is the first open leaf it would begin with,
+// null when the root is itself the leaf; `path` runs from the root's title to
+// the leaf's. `event_id` is the block a scheduled entry was laid in.
 export type QueueEntry = {
   task: TaskNode
+  leaf: Task | null
+  path: string[]
+  // Equal to `leaf`.
   step: Task | null
   planned_min: number | null
   reason: QueueReason

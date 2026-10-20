@@ -45,6 +45,7 @@ import {
 } from '../session'
 import { useSameArray, useStableCallback } from '../stable'
 import { Tick } from '../tick'
+import { findNode, leaves } from '../tree'
 import type { DayView, PlanEvent, QueueEntry, QueueReason, SessionPhase, SessionStart, Task, TaskNode, TaskNotify } from '../types'
 import { Urgent } from '../urgent'
 import { capped } from '../wave'
@@ -88,6 +89,18 @@ function leftToday(): boolean {
 }
 
 const isLive = (t: Task) => t.state === 'open' || t.state === 'in_progress'
+
+// A leaf below the session's task, named with the node it hangs from; null when
+// the task is its own leaf. A session kept from an older build may lack the path.
+function leafOf(s: FocusSession): { name: string; of: string } | null {
+  const path = s.leaf_path ?? []
+  return path.length > 1 ? { name: s.leaf_title ?? path[path.length - 1], of: path[path.length - 2] } : null
+}
+
+// The same for a queue entry: its leaf, under the node the leaf hangs from.
+function entryLeaf(e: QueueEntry): { name: string; of: string } | null {
+  return e.leaf && e.path.length > 1 ? { name: e.leaf.title, of: e.path[e.path.length - 2] } : null
+}
 
 // A discarded session's id can be handed out again, so its start tells the two apart.
 const keyOf = (s: FocusSession) => `${s.id}@${s.started_at}`
@@ -353,7 +366,7 @@ export function Home({
   const rest = next && facts
     ? { name: label, of: face?.of ?? null }
     : upNext
-      ? { name: upNext.step?.title ?? upNext.task.title, of: upNext.step ? upNext.task.title : null }
+      ? { name: entryLeaf(upNext)?.name ?? upNext.task.title, of: entryLeaf(upNext)?.of ?? null }
       : null
 
   // A routine is timed to its span; without an end the routine default stands in.
@@ -426,8 +439,8 @@ export function Home({
     })
   }
 
-  // The step's own write waits out the undo window, and undoing it hands the
-  // session back to the step it was on.
+  // The leaf's own write waits out the undo window, and undoing it hands the
+  // session back to the leaf it was on.
   const advance = (s: FocusSession, step: Task) => {
     const notes = withElapsedNote(step.notes, elapsedSec(s))
     doneHold.start(s, () => {
@@ -441,12 +454,7 @@ export function Home({
       label: t('toast.undo'),
       run: () => {
         if (!doneHold.cancel(s)) return
-        void route(() =>
-          api.stepWorkSession(s.id, {
-            step_index: s.step_index ?? 1,
-            step_name: s.step_name ?? s.title,
-          }),
-        )
+        void route(() => api.advanceWorkSession(s.id, step.id))
       },
     })
   }
@@ -463,9 +471,7 @@ export function Home({
     api
       .tasks()
       .then((nodes) => {
-        const node =
-          nodes.find((n) => n.id === id) ??
-          nodes.flatMap((n) => n.children).map((c) => ({ ...c, children: [] })).find((c) => c.id === id)
+        const node = findNode(nodes, id)
         if (live && node) setOwn({ key, node })
       })
       .catch(() => {})
@@ -480,35 +486,30 @@ export function Home({
       ? own.node.category
       : (strip?.items.find((e) => e.task.id === s.task_id)?.task.category ?? '')
 
-  // The step reached by an advance on this screen fills by its own clock; a step
+  // The leaf reached by an advance on this screen fills by its own clock; a leaf
   // found on load fills by the session's.
-  const stepClock = useRef<{ key: string; stepIndex: number; startedAt: number; pausedMs: number; plannedSec: number } | null>(null)
+  const stepClock = useRef<{ key: string; leafId: number; startedAt: number; pausedMs: number; plannedSec: number } | null>(null)
 
-  // The step the session is on, and whatever is still open after it.
+  // The leaf the session is on, and whether the server finds an open one after it.
   const finish = async (): Promise<'advanced' | 'completed' | null> => {
     const s = session
     if (!s || pending) return null
     setPending(true)
     try {
       const nodes = s.task_id === null ? [] : await api.tasks()
-      const parent = nodes.find((n) => n.id === s.task_id) ?? null
-      const own = nodes.flatMap((n) => [n as Task, ...n.children]).find((t) => t.id === s.task_id) ?? null
-      const steps = parent?.children ?? []
-      const at = s.step_index
-      const current = at !== null && steps.length ? (steps[at - 1] ?? own) : own
-      const next = at !== null ? (steps.slice(at).find(isLive) ?? null) : null
-      if (next && current) {
-        const stepped = await api.stepWorkSession(s.id, {
-          step_index: steps.indexOf(next) + 1,
-          step_name: next.title,
-        })
-        const left = steps.slice(steps.indexOf(next)).filter(isLive).length
-        const share = s.planned_min === null ? null : (s.planned_min * 60) / left
-        const stepSec = next.duration_min !== null ? next.duration_min * 60 : share
-        stepClock.current =
-          stepSec && stepped.step_index !== null
-            ? { key: keyOf(stepped), stepIndex: stepped.step_index, startedAt: Date.now(), pausedMs: stepped.paused_ms, plannedSec: stepSec }
-            : null
+      const base = s.task_id === null ? null : findNode(nodes, s.task_id)
+      const current = findNode(nodes, s.leaf_id ?? s.task_id ?? NaN)
+      const below = s.leaf_id !== null && s.leaf_id !== s.task_id
+      const stepped = below && current ? await api.advanceWorkSession(s.id) : null
+      if (stepped && current && stepped.leaf_id !== null && stepped.leaf_id !== s.leaf_id) {
+        const next = findNode(nodes, stepped.leaf_id)
+        const ahead = base ? leaves(base) : []
+        const left = ahead.slice(ahead.findIndex((l) => l.id === stepped.leaf_id)).filter(isLive).length
+        const share = s.planned_min === null || left === 0 ? null : (s.planned_min * 60) / left
+        const stepSec = next?.duration_min != null ? next.duration_min * 60 : share
+        stepClock.current = stepSec
+          ? { key: keyOf(stepped), leafId: stepped.leaf_id, startedAt: Date.now(), pausedMs: stepped.paused_ms, plannedSec: stepSec }
+          : null
         setSession(stepped)
         advance(s, current)
         return 'advanced'
@@ -559,7 +560,7 @@ export function Home({
 
   const stepFracAt = (s: FocusSession) => {
     const c = stepClock.current
-    if (onBreak || !c || c.key !== keyOf(s) || c.stepIndex !== s.step_index) return sessionFracAt(s)
+    if (onBreak || !c || c.key !== keyOf(s) || c.leafId !== s.leaf_id) return sessionFracAt(s)
     return () => ((pausedAt(s) ?? Date.now()) - c.startedAt - (s.paused_ms - c.pausedMs)) / (c.plannedSec * 1000)
   }
 
@@ -570,11 +571,11 @@ export function Home({
     </div>
   )
 
-  // A step reads as a task of its own, with the task it belongs to under it; any other
+  // A leaf reads as a task of its own, with the node it hangs from under it; any other
   // session keeps the first line of its notes there.
-  const titleOf = (s: FocusSession) => withoutCategory(s.step_name ?? s.title, categoryOf(s))
-  const subOf = (s: FocusSession) => withoutCategory(s.step_name ? s.title : firstLine(s.notes), categoryOf(s))
-  const subClass = (s: FocusSession) => (s.step_name ? 'gauge-sub parent' : 'gauge-sub')
+  const titleOf = (s: FocusSession) => withoutCategory(leafOf(s)?.name ?? s.title, categoryOf(s))
+  const subOf = (s: FocusSession) => withoutCategory(leafOf(s)?.of ?? firstLine(s.notes), categoryOf(s))
+  const subClass = (s: FocusSession) => (leafOf(s) ? 'gauge-sub parent' : 'gauge-sub')
 
   const pauseButton = (s: FocusSession) => (
     <button
@@ -725,8 +726,9 @@ export function Home({
       const node = ownNow.current?.key === key ? ownNow.current.node : null
       if (found !== -1) index = found + 1
       else if (node) {
-        const step = s.step_index !== null ? (node.children[s.step_index - 1] ?? null) : null
-        items = [{ task: node, step, planned_min: s.planned_min, reason: 'oldest' }, ...items]
+        const leaf = s.leaf_id !== null && s.leaf_id !== node.id ? findNode([node], s.leaf_id) : null
+        const path = [node.title, ...(leafOf(s) ? (s.leaf_path ?? []).slice(1) : [])]
+        items = [{ task: node, leaf, path, step: leaf, planned_min: s.planned_min, reason: 'oldest' }, ...items]
         index = 1
       } else {
         stripFor.current = ''
@@ -1198,14 +1200,15 @@ export function Home({
       )
     }
     const category = entry?.task.category ?? ''
-    const name = entry ? withoutCategory((entry.step ?? entry.task).title, category) : workTime().title
-    const sub = entry ? withoutCategory(entry.step ? entry.task.title : firstLine(entry.task.notes), category) : ''
+    const leaf = entry && entryLeaf(entry)
+    const name = entry ? withoutCategory(leaf?.name ?? entry.task.title, category) : workTime().title
+    const sub = entry ? withoutCategory(leaf?.of ?? firstLine(entry.task.notes), category) : ''
     return (
       <div key={i} className={`slot${i === strip.index ? ' now' : ''}`} aria-hidden="true">
         {mark && <i className={`mark ${mark}`} />}
         <div className="slot-gap" style={{ height: u(mobile ? 64 : 76) }} />
         <div className="slot-name" style={{ fontSize: u(mobile ? 20 : 22) }}>{name}</div>
-        {sub && <div className={entry?.step ? 'slot-sub parent' : 'slot-sub'}>{sub}</div>}
+        {sub && <div className={leaf ? 'slot-sub parent' : 'slot-sub'}>{sub}</div>}
       </div>
     )
   }
@@ -1215,7 +1218,7 @@ export function Home({
       <div ref={faceBox} className={`circle-face${onBreak ? ' resting' : ''}`} style={{ width: u(faceSize), height: u(faceSize) }} {...surface}>
         <Circle
           size={faceSize}
-          fracAt={landing ? undefined : shown.step_count && shown.step_index ? stepFracAt(shown) : sessionFracAt(shown)}
+          fracAt={landing ? undefined : shown.leaf_count && shown.leaf_index ? stepFracAt(shown) : sessionFracAt(shown)}
           drain={onBreak}
           breathe
           paused={isPaused(shown)}
@@ -1351,8 +1354,8 @@ export function Home({
       ) : upNext ? (
         <>
           <div className="today-eyebrow">{t('face.next')}</div>
-          <h1 className="today-title">{upNext.step?.title ?? upNext.task.title}</h1>
-          {upNext.step && <p className="today-of">{upNext.task.title}</p>}
+          <h1 className="today-title">{entryLeaf(upNext)?.name ?? upNext.task.title}</h1>
+          {entryLeaf(upNext) && <p className="today-of">{entryLeaf(upNext)?.of}</p>}
         </>
       ) : (
         events && upNext === null && <h1 className="today-title">{t('today.empty')}</h1>
@@ -1567,8 +1570,8 @@ export function Home({
     !!landing,
     strip?.index,
     strip?.items.length,
-    session?.step_index,
-    session?.step_name,
+    session?.leaf_id,
+    session?.leaf_title,
     session?.phase,
     session?.round,
     over,

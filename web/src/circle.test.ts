@@ -5,7 +5,7 @@ import type { QueueEntry, Task } from './types'
 const task = (o: Partial<Task>): Task =>
   ({ id: 1, title: 'Read', due_at: null, state: 'open', notes: '', duration_min: null, is_now: false, ...o }) as unknown as Task
 const entry = (o: Partial<QueueEntry>): QueueEntry =>
-  ({ task: { ...task({}), children: [] }, step: null, planned_min: null, reason: 'oldest', ...o })
+  ({ task: { ...task({}), children: [] }, leaf: null, path: [], step: null, planned_min: null, reason: 'oldest', ...o })
 
 beforeEach(() => {
   const store = new Map<string, string>()
@@ -38,17 +38,16 @@ test('the rail rubber-bands past the ends', () => {
 })
 
 test('a session is built like the Tasks view builds one', () => {
-  const step = task({ id: 9, title: 'Step two', notes: 'n', duration_min: 20 })
-  const parent = { ...task({ id: 3, title: 'Essay' }), children: [task({ id: 8, state: 'done' }), step, task({ id: 10 })] }
-  expect(sessionFor(entry({ task: parent, step, planned_min: 20 }))).toEqual({
-    title: 'Essay', task_id: 3, notes: 'n', step_index: 2, step_count: 3, step_name: 'Step two', planned_min: 20,
+  const leaf = task({ id: 9, title: 'Step two', notes: 'n', duration_min: 20 })
+  const parent = { ...task({ id: 3, title: 'Essay' }), children: [] }
+  expect(sessionFor(entry({ task: parent, leaf, step: leaf, planned_min: 20 }))).toEqual({
+    title: 'Essay', task_id: 3, notes: 'n', leaf_id: 9, planned_min: 20,
   })
 })
 
-test('the category leaves the title and the step name', () => {
-  const step = task({ id: 9, title: 'MIT — Draft essays 1-2', category: 'MIT' })
-  const parent = { ...task({ id: 3, title: 'MIT — Draft 4 essays', category: 'MIT' }), children: [step] }
-  expect(sessionFor(entry({ task: parent, step }))).toMatchObject({ title: 'Draft 4 essays', step_name: 'Draft essays 1-2' })
+test('the category leaves the title', () => {
+  const parent = { ...task({ id: 3, title: 'MIT — Draft 4 essays', category: 'MIT' }), children: [] }
+  expect(sessionFor(entry({ task: parent }))).toMatchObject({ title: 'Draft 4 essays' })
 })
 
 test('only a leading "category — " goes, and never the whole title', () => {
@@ -58,7 +57,7 @@ test('only a leading "category — " goes, and never the whole title', () => {
   expect(withoutCategory('MIT — Draft', '')).toBe('MIT — Draft')
 })
 
-test('a task without steps carries its own notes and no step fields', () => {
+test('a task that is its own leaf carries its own notes and no leaf', () => {
   const parent = { ...task({ id: 4, title: 'Call', notes: 'ring' }), children: [] }
   expect(sessionFor(entry({ task: parent }))).toEqual({ title: 'Call', task_id: 4, notes: 'ring' })
 })

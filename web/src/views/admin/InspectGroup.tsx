@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { admin } from '../../api'
 import { useLoad, useSave } from '../../hooks'
+import { subtree } from '../../tree'
 import { t } from '../../i18n'
 import * as format from '../../i18n/format'
 import type { AdminUser, Conversation, SqlResult } from '../../types'
@@ -77,7 +78,7 @@ export function InspectGroup({ expire }: { expire: Expire }) {
                       </tr>
                     </thead>
                     <tbody>
-                      {loaded.tasks.flatMap((task) => [task, ...task.children]).map((task) => (
+                      {loaded.tasks.flatMap(subtree).map((task) => (
                         <tr key={task.id}>
                           <td className="mono">{task.id}</td>
                           <td>{task.title}</td>

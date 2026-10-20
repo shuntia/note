@@ -386,8 +386,11 @@
   font-size: 0.92rem;
 }
 .task-step > .tick { grid-area: tick; }
-.task-step-title { grid-area: title; }
-.task-step-min { grid-area: min; }
+.task-step-head { grid-area: title; display: flex; align-items: center; gap: 0.375rem; min-width: 0; justify-self: start; }
+.task-step-min { grid-area: min; display: flex; align-items: center; gap: 0.625rem; }
+/* each level sits one tick and gap further in, under its parent's title */
+.task-step > .task-steps { grid-column: 1 / -1; margin: 0; padding: 0 0 0 2rem; }
+.task-item .task-step.done .task-step.done { opacity: 1; }
 .task-step > .task-prog { grid-area: prog; }
 @media (min-width: 1088px) {
   .task-steps { padding-right: calc(var(--acts) + 0.75rem); }
@@ -483,9 +486,10 @@
 
 /* the order's rows lift on a long press and the others part around a gap; the
    hairline is where the order ends */
-.task-group.soon [data-drag] { -webkit-touch-callout: none; user-select: none; }
-.task-item[data-lifted] { z-index: 2; }
-.task-item[data-lifted]::before {
+.task-group.soon [data-drag], .task-step[data-drag] { -webkit-touch-callout: none; user-select: none; }
+.task-step { position: relative; }
+.task-item[data-lifted], .task-step[data-lifted] { z-index: 2; }
+.task-item[data-lifted]::before, .task-step[data-lifted]::before {
   content: '';
   position: absolute;
   inset: -0.25rem -0.5rem;
@@ -496,7 +500,7 @@
   backdrop-filter: blur(8px);
   box-shadow: 0 0.75rem 1.75rem -0.5rem rgb(0 0 0 / 0.12);
 }
-.task-item[data-lifted][data-settling] { transition: transform 180ms ease; }
+.task-item[data-lifted][data-settling], .task-step[data-lifted][data-settling] { transition: transform 180ms ease; }
 .order-edge { border: 0; height: 1px; margin: 6px 0; background: var(--line); }
 .order-edge.bare { opacity: 0; transition: opacity 180ms ease; }
 [data-dragging] .order-edge.bare { opacity: 1; }
@@ -504,5 +508,5 @@
 [data-dragging] .order-edge { transition: transform 180ms ease, opacity 180ms ease; }
 @media (prefers-reduced-motion: reduce) {
   [data-dragging] [data-drag]:not([data-lifted]), [data-dragging] .order-edge,
-  .task-item[data-lifted][data-settling], .order-edge.bare { transition: none; }
+  .task-item[data-lifted][data-settling], .task-step[data-lifted][data-settling], .order-edge.bare { transition: none; }
 }

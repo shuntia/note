@@ -3,7 +3,7 @@ import { dropped, gapAt, landing, withOrder } from './order'
 import type { TaskNode } from './types'
 
 const node = (id: number, steps: number[] = []) =>
-  ({ id, children: steps.map((s) => ({ id: s })) }) as unknown as TaskNode
+  ({ id, children: steps.map((s) => ({ id: s, children: [] })) }) as unknown as TaskNode
 
 describe('withOrder', () => {
   test('ordered tasks lead, once each, and the rest keep their order', () => {
@@ -11,6 +11,10 @@ describe('withOrder', () => {
     const { rows, ordered } = withOrder([a, c], [a, b, c, d], [22, 3, 21])
     expect(rows.map((n) => n.id)).toEqual([2, 3, 1])
     expect(ordered).toBe(2)
+  })
+  test('an ordered id deep in a tree lifts its root', () => {
+    const deep = { id: 5, children: [{ id: 51, children: [{ id: 511, children: [] }] }] } as unknown as TaskNode
+    expect(withOrder([], [node(1), deep], [511]).rows.map((n) => n.id)).toEqual([5])
   })
   test('an id no live task holds is passed over', () => {
     expect(withOrder([node(1)], [node(1)], [99]).ordered).toBe(0)

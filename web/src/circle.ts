@@ -56,18 +56,12 @@ export function withoutCategory(title: string, category: string): string {
 
 /** The session fields for a queue entry, as the Tasks view's startFocus builds them; a scheduled entry also names its block. */
 export function sessionFor(entry: QueueEntry): SessionStart {
-  const { task, step, planned_min, event_id } = entry
-  const index = step ? task.children.findIndex((c) => c.id === step.id) : -1
+  const { task, leaf, planned_min, event_id } = entry
   return {
     title: withoutCategory(task.title, task.category),
     task_id: task.id,
-    notes: (step ?? task).notes,
-    ...(index !== -1 &&
-      step && {
-        step_index: index + 1,
-        step_count: task.children.length,
-        step_name: withoutCategory(step.title, task.category),
-      }),
+    notes: (leaf ?? task).notes,
+    ...(leaf && { leaf_id: leaf.id }),
     ...(planned_min !== null && { planned_min }),
     ...(event_id !== undefined && { event_id }),
   }

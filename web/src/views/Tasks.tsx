@@ -22,8 +22,21 @@ import { useStableCallback, useStableMethods } from '../stable'
 import { Tick } from '../tick'
 import { urgencyRank } from '../urgent'
 import { dueBody, dueDraft, dueParts, goalDated, type DueBody } from '../due'
+import {
+  findNode,
+  finish,
+  firstOpenLeaf,
+  leaves,
+  liveChildren,
+  mapNode,
+  mapSubtree,
+  postOrder,
+  progressOf,
+  subtree,
+  withUrgency,
+} from '../tree'
 import '../styles/tasks.css'
-import type { Goal, NewStep, Task, TaskNode, TaskNotify, TaskState, TaskUpdate, TaskUrgency } from '../types'
+import type { Adjusted, Goal, NewTask, Task, TaskNode, TaskNotify, TaskState, TaskUpdate, TaskUrgency } from '../types'
 import { t, type Key } from '../i18n'
 import * as format from '../i18n/format'
 
@@ -84,24 +97,36 @@ const earlier = (a: string | null, b: string | null) => {
 
 const newest = (a: TaskNode, b: TaskNode) => b.id - a.id
 
+// A tree reads as urgent and as due as its most pressing live node.
+const liveNodes = (n: TaskNode) => subtree(n).filter(isLive)
+
+function soonestDue(n: TaskNode): string | null {
+  let best: string | null = null
+  for (const x of liveNodes(n)) if (earlier(x.effective_due_at, best) < 0) best = x.effective_due_at
+  return best
+}
+
+const rankOf = (n: TaskNode) =>
+  Math.min(...[n, ...liveNodes(n)].map((x) => urgencyRank({ urgency: x.effective_urgency, pressing: x.pressing })))
+
 const bySchedule = (a: TaskNode, b: TaskNode) =>
-  earlier(a.scheduled_at, b.scheduled_at) || earlier(a.due_at, b.due_at) || newest(a, b)
+  earlier(a.scheduled_at, b.scheduled_at) || earlier(soonestDue(a), soonestDue(b)) || newest(a, b)
 
 const byUrgency = (a: TaskNode, b: TaskNode) =>
-  urgencyRank(a) - urgencyRank(b) || earlier(a.due_at, b.due_at) || newest(a, b)
+  rankOf(a) - rankOf(b) || earlier(soonestDue(a), soonestDue(b)) || newest(a, b)
 
 const COMPARE: Record<SortKey, (a: TaskNode, b: TaskNode) => number> = {
-  schedule: (a, b) => urgencyRank(a) - urgencyRank(b) || bySchedule(a, b),
-  due: (a, b) => earlier(a.due_at, b.due_at) || newest(a, b),
+  schedule: (a, b) => rankOf(a) - rankOf(b) || bySchedule(a, b),
+  due: (a, b) => earlier(soonestDue(a), soonestDue(b)) || newest(a, b),
   urgency: byUrgency,
   newest,
   category: bySchedule,
 }
 
-// Every word has to land somewhere on the task for it to stay in the list.
+// Every word has to land somewhere on the task or a title under it for it to stay in the list.
 function matches(node: TaskNode, words: string[]): boolean {
   if (words.length === 0) return true
-  const hay = [node.title, node.description, node.notes, node.category, node.goal_title ?? '']
+  const hay = [node.description, node.notes, node.category, node.goal_title ?? '', ...subtree(node).map((n) => n.title)]
     .join(' ')
     .toLowerCase()
   return words.every((w) => hay.includes(w))
@@ -137,8 +162,7 @@ function byCategory(list: Placed[], categories: string[]): [string, Placed[]][] 
   return out
 }
 
-// The prior states a completion has to put back, steps first: reopening a step
-// cascades the parent, so the parent's own state must land last to win.
+// The prior states an undo puts back, in the order it sends them.
 type Snapshot = { id: number; state: TaskState; progress: number }[]
 
 const isLive = (t: Task) => t.state === 'open' || t.state === 'in_progress'
@@ -147,35 +171,34 @@ const isLive = (t: Task) => t.state === 'open' || t.state === 'in_progress'
 // can ever show a duration the user could not have been offered.
 const round5 = (min: number) => Math.max(5, Math.round(min / 5) * 5)
 
-// A parent hands its focus session off to its next unfinished step.
-const focusTarget = (node: TaskNode): Task =>
-  node.children.find((c) => c.state !== 'done') ?? node
-
 const shown = (t: Task) => (t.state === 'done' ? 100 : t.progress)
 
-// The weighting the server holds a parent to: each live step by its length, one
-// without a length by its siblings' mean, a finished one counted full.
-function stepsProgress(steps: Task[]): number | null {
-  const live = steps.filter((s) => s.state !== 'dropped')
-  if (live.length === 0) return null
-  const sized = live.flatMap((s) => (s.duration_min === null ? [] : [s.duration_min]))
-  const mean = sized.length > 0 ? sized.reduce((a, b) => a + b, 0) / sized.length : 1
-  let sum = 0
-  let weight = 0
-  for (const s of live) {
-    const w = s.duration_min ?? mean
-    sum += w * shown(s)
-    weight += w
-  }
-  return Math.round(sum / weight)
+function parentSub(node: TaskNode): string {
+  const all = leaves(node)
+  return t('tasks.stepsDone', { done: all.filter((l) => l.state === 'done').length, count: all.length })
 }
 
-const nodeProgress = (node: TaskNode) =>
-  node.state === 'done' ? 100 : (stepsProgress(node.children) ?? node.progress)
+// What creating a node again takes: its own size when it is a leaf, its own due, and its tree.
+function regrow(n: TaskNode): NewTask {
+  const kids = liveChildren(n)
+  return {
+    title: n.title,
+    ...(kids.length === 0 && n.duration_min !== null && { duration_min: n.duration_min }),
+    ...(n.due_on !== null ? { due_on: n.due_on } : n.due_at !== null && { due_at: n.due_at }),
+    ...(kids.length > 0 && { children: kids.map(regrow) }),
+  }
+}
 
-function parentSub(node: TaskNode): string {
-  const done = node.children.filter((c) => c.state === 'done').length
-  return t('tasks.stepsDone', { done, count: node.children.length })
+const snapOf = (ns: TaskNode[]): Snapshot => ns.map((n) => ({ id: n.id, state: n.state, progress: n.progress }))
+
+const nowCount = (nodes: TaskNode[], except?: TaskNode) =>
+  nodes.filter((n) => n !== except).flatMap(liveNodes).filter((n) => n.is_now).length
+
+// 'YYYY-MM-DD' for a whole day, else an instant.
+function clampDay(to: unknown): string {
+  if (typeof to !== 'string') return ''
+  const day = /^(\d{4})-(\d{2})-(\d{2})$/.exec(to)
+  return day ? format.day(new Date(+day[1], +day[2] - 1, +day[3])) : format.isoDay(to)
 }
 
 function sameDay(iso: string, today: Date): boolean {
@@ -199,14 +222,12 @@ const near = (iso: string | null, today: Date) =>
 function groups(nodes: TaskNode[]) {
   const today = new Date()
   const live = nodes.filter(isLive)
-  const now = live.filter((n) => n.is_now).slice(0, NOW_CAP)
+  const now = live.filter((n) => liveNodes(n).some((x) => x.is_now)).slice(0, NOW_CAP)
   const inNow = new Set(now.map((n) => n.id))
   const soon = (n: TaskNode) =>
     inNow.has(n.id) ||
-    n.urgency === 'high' ||
-    n.pressing ||
-    near(n.due_at, today) ||
-    near(n.scheduled_at, today)
+    near(n.scheduled_at, today) ||
+    liveNodes(n).some((x) => x.effective_urgency === 'high' || x.pressing || near(x.effective_due_at, today))
   return {
     now,
     soon: live.filter(soon),
@@ -248,56 +269,45 @@ function shownGroups(
 }
 
 function withTask(nodes: TaskNode[], t: Task): TaskNode[] {
-  return nodes.map((n) => {
-    if (n.id === t.id) return { ...n, ...t, children: n.children }
-    if (!n.children.some((c) => c.id === t.id)) return n
-    return { ...n, children: n.children.map((c) => (c.id === t.id ? { ...c, ...t } : c)) }
-  })
+  return mapNode(nodes, t.id, (n) => ({ ...n, ...t, children: n.children }))
 }
 
-function withState(
-  nodes: TaskNode[],
-  id: number,
-  state: TaskState,
-  progress?: number,
-): TaskNode[] {
+const stamped = (state: TaskState, progress?: number) => {
   const stamp = new Date().toISOString()
-  const put = <T extends Task>(t: T): T => ({
+  return (t: TaskNode): TaskNode => ({
     ...t,
     state,
     updated_at: stamp,
     progress: state === 'done' ? 100 : (progress ?? t.progress),
   })
-  return nodes.map((n) => {
-    if (n.id === id) return put(n)
-    if (!n.children.some((c) => c.id === id)) return n
-    return { ...n, children: n.children.map((c) => (c.id === id ? put(c) : c)) }
-  })
+}
+
+function withState(nodes: TaskNode[], id: number, state: TaskState, progress?: number): TaskNode[] {
+  const put = stamped(state, progress)
+  return mapNode(nodes, id, (n) => ({ ...put(n), children: n.children }))
 }
 
 // `demoted_from_now` rides on any write, not only one that set `is_now`.
 function mergeUpdate(nodes: TaskNode[], u: TaskUpdate): TaskNode[] {
-  const { parent, demoted_from_now, ...task } = u
+  const { parent, demoted_from_now, adjusted: _adjusted, ...task } = u
   let next = withTask(nodes, task)
   if (parent) next = withTask(next, parent)
-  if (demoted_from_now?.length) {
-    const out = new Set(demoted_from_now)
-    next = next.map((n) => (out.has(n.id) ? { ...n, is_now: false } : n))
-  }
+  for (const id of demoted_from_now ?? []) next = mapNode(next, id, (n) => ({ ...n, is_now: false }))
   return next
 }
 
 // A finished or dropped task keeps its place in the list until it has folded away.
-type Leaving = { id: number; group: Exclude<Group, 'done'>; index: number; state: TaskState }
+type Leaving = { id: number; group: Exclude<Group, 'done'>; index: number; state: TaskState; node: TaskNode }
 
 type Placed = { node: TaskNode; leaving: TaskState | null }
 
+// A leaving row is drawn from the node it left as, since a reload no longer lists a dropped one.
 function placed(list: TaskNode[], nodes: TaskNode[], leaving: Leaving[], group: Group): Placed[] {
   const out: Placed[] = list.map((node) => ({ node, leaving: null }))
   for (const l of leaving) {
     if (l.group !== group) continue
-    const node = nodes.find((n) => n.id === l.id)
-    if (node) out.splice(Math.min(l.index, out.length), 0, { node, leaving: l.state })
+    const node = nodes.find((n) => n.id === l.id) ?? l.node
+    out.splice(Math.min(l.index, out.length), 0, { node, leaving: l.state })
   }
   return out
 }
@@ -355,9 +365,9 @@ type RowActions = {
   setDue: (node: TaskNode, due: DueBody) => void
   setGoal: (node: TaskNode, goal_id: number | null) => void
   setProgress: (task: Task, progress: number) => void
-  complete: (node: TaskNode, step?: Task) => void
+  complete: (node: TaskNode) => void
   reopen: (node: TaskNode) => void
-  reopenStep: (step: Task) => void
+  reorder: (node: TaskNode, position: number) => void
   moveToNow: (node: TaskNode) => void
   moveToLater: (node: TaskNode) => void
   drop: (node: TaskNode) => void
@@ -415,7 +425,9 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
         setFailed(false)
         if (seeded.current) return
         seeded.current = true
-        setOpenSteps(new Set(ts.filter((t) => t.is_now && t.children.length > 0).map((t) => t.id)))
+        setOpenSteps(
+          new Set(ts.filter((t) => t.children.length > 0 && liveNodes(t).some((x) => x.is_now)).map((t) => t.id)),
+        )
       })
       .catch(() => setFailed(true))
   }, [loadGoals, newest])
@@ -434,11 +446,16 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
         goal_id?: number | null
         due_at?: string | null
         due_on?: string | null
+        position?: number
       },
     ) => {
       try {
         const updated = await api.patchTask(id, body)
         setNodes((ns) => (ns ? mergeUpdate(ns, updated) : ns))
+        const clamp = updated.adjusted?.find((a: Adjusted) => a.field === 'due')
+        if (clamp)
+          notify(t('tasks.dueClamped', { date: clampDay(clamp.to), title: clamp.by_title ?? updated.title }))
+        load()
       } catch (err) {
         notify(
           err instanceof ApiError && err.status === 409
@@ -460,9 +477,8 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
         ns ? snap.reduce((acc, s) => withState(acc, s.id, s.state, s.progress), ns) : ns,
       )
       for (const s of snap) await patch(s.id, { state: s.state, progress: s.progress })
-      loadGoals()
     },
-    [loadGoals, mark, patch],
+    [mark, patch],
   )
 
   const markLeaving = (node: TaskNode, state: TaskState) => {
@@ -470,7 +486,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
     const soon = shown.soon.findIndex((n) => n.id === node.id)
     const index = soon === -1 ? shown.later.findIndex((n) => n.id === node.id) : soon
     if (index === -1) return
-    setLeaving((ls) => [...ls, { id: node.id, group: soon === -1 ? 'later' : 'soon', index, state }])
+    setLeaving((ls) => [...ls, { id: node.id, group: soon === -1 ? 'later' : 'soon', index, state, node }])
   }
   const gone = useCallback(
     (id: number) => {
@@ -480,58 +496,64 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
     [mark],
   )
 
-  // Finishing a task takes its live steps with it, and finishing the last step
-  // finishes the task, so undo has to put the whole cascade back.
-  const complete = (node: TaskNode, step?: Task) => {
-    const lastStep =
-      step !== undefined && node.children.every((c) => c.id === step.id || c.state === 'done')
-    const cascade = step
-      ? lastStep
-        ? [node]
-        : []
-      : node.children.filter((c) => c.state !== 'done')
-    const ordered = step ? [step, ...cascade] : [...cascade, node]
-    const snap: Snapshot = ordered.map((t) => ({ id: t.id, state: t.state, progress: t.progress }))
+  // Finishing a node takes its unfinished descendants with it and may finish its
+  // ancestors, so undo has to put the whole cascade back.
+  const complete = (node: TaskNode) => {
+    if (!nodes) return
+    const { roots, changed } = finish(nodes, node.id, stamped('done'))
+    const snap = snapOf(changed)
     for (const s of snap) unfinished.current.set(s.id, s.progress)
-    if (!step || lastStep) markLeaving(node, 'done')
-    setNodes((ns) => (ns ? snap.reduce((acc, s) => withState(acc, s.id, 'done'), ns) : ns))
-    void patch(step ? step.id : node.id, { state: 'done' }).then(loadGoals)
-    notify(t('tasks.doneToast', { title: step && !lastStep ? step.title : node.title }), {
+    const root = roots.find((r) => r.id === node.root_id || r.id === node.id)
+    if (root?.state === 'done') markLeaving(root, 'done')
+    setNodes(roots)
+    void patch(node.id, { state: 'done' })
+    notify(t('tasks.doneToast', { title: node.title }), {
       label: t('toast.undo'),
       run: () => void restore(snap),
       windowMs: UNDO_MS,
     })
   }
 
-  // Reopening a finished task brings its steps back too, so the sub-line's count
-  // cannot claim work is done under a task that is open again. Each goes back to
-  // the progress it had before it was finished here, when that is known.
+  // Reopening a finished node brings its descendants back too, so no count can
+  // claim work is done under a node that is open again. Each goes back to the
+  // progress it had before it was finished here, when that is known.
   const reopened = (t: Task) => ({
     id: t.id,
     state: 'open' as TaskState,
     progress: unfinished.current.get(t.id) ?? t.progress,
   })
-  const reopen = (node: TaskNode) => void restore([...node.children.map(reopened), reopened(node)])
+  const reopen = (node: TaskNode) =>
+    void restore(postOrder(node).filter((n) => n.state !== 'dropped').map(reopened))
 
-  const reopenStep = (step: Task) => void restore([reopened(step)])
-
-  // Dropping a task drops every step it still has, finished ones included, and a
-  // dropped step never comes back on its own, so undo has to name each of them.
+  // Dropping a node drops everything under it, finished parts included, and a
+  // dropped node never comes back on its own, so undo names each of them, the
+  // node first so its descendants come back under a live parent.
   const drop = (node: TaskNode) => {
-    const steps = node.children.filter((c) => c.state !== 'dropped')
-    const snap: Snapshot = [...steps, node].map((t) => ({
-      id: t.id,
-      state: t.state,
-      progress: t.progress,
-    }))
-    markLeaving(node, 'dropped')
-    setNodes((ns) => (ns ? snap.reduce((acc, s) => withState(acc, s.id, 'dropped'), ns) : ns))
-    void patch(node.id, { state: 'dropped' }).then(loadGoals)
+    const snap = snapOf(subtree(node).filter((n) => n.state !== 'dropped'))
+    if (node.parent_id === null) markLeaving(node, 'dropped')
+    const put = stamped('dropped')
+    setNodes((ns) => (ns ? mapNode(ns, node.id, (n) => mapSubtree(n, put)) : ns))
+    void patch(node.id, { state: 'dropped' })
     notify(t('tasks.droppedToast', { title: node.title }), {
       label: t('toast.undo'),
       run: () => void restore(snap),
       windowMs: UNDO_MS,
     })
+  }
+
+  const reorder = (node: TaskNode, position: number) => {
+    if (node.parent_id === null) return
+    mark()
+    setNodes((ns) =>
+      ns
+        ? mapNode(ns, node.parent_id as number, (p) => {
+            const kids = liveChildren(p).filter((c) => c.id !== node.id)
+            kids.splice(position, 0, node)
+            return { ...p, children: kids.map((c, i) => ({ ...c, position: i })) }
+          })
+        : ns,
+    )
+    void patch(node.id, { position })
   }
 
   const setProgress = (task: Task, progress: number) => {
@@ -540,21 +562,13 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
   }
 
   const announce = (node: TaskNode, notify: TaskNotify) => {
-    setNodes((ns) => (ns ? ns.map((n) => (n.id === node.id ? { ...n, notify } : n)) : ns))
+    setNodes((ns) => (ns ? mapNode(ns, node.id, (n) => ({ ...n, notify })) : ns))
     void patch(node.id, { notify })
   }
 
-  // A category rides on the task and is read back by its steps.
+  // A category rides on the root and is read back by everything under it.
   const setCategory = (node: TaskNode, category: string) => {
-    setNodes((ns) =>
-      ns
-        ? ns.map((n) =>
-            n.id === node.id
-              ? { ...n, category, children: n.children.map((c) => ({ ...c, category })) }
-              : n,
-          )
-        : ns,
-    )
+    setNodes((ns) => (ns ? mapNode(ns, node.id, (n) => mapSubtree(n, (c) => ({ ...c, category }))) : ns))
     if (filter !== null && filter !== category) setFilter(null)
     void patch(node.id, { category })
   }
@@ -562,33 +576,21 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
   const setDue = (node: TaskNode, due: DueBody) => void patch(node.id, due)
 
   const setUrgency = (node: TaskNode, urgency: TaskUrgency) => {
-    setNodes((ns) =>
-      ns
-        ? ns.map((n) =>
-            n.id === node.id
-              ? { ...n, urgency, children: n.children.map((c) => ({ ...c, urgency })) }
-              : n,
-          )
-        : ns,
-    )
+    setNodes((ns) => (ns ? mapNode(ns, node.id, (n) => withUrgency(n, urgency)) : ns))
     void patch(node.id, { urgency })
   }
 
   const setGoal = (node: TaskNode, goal_id: number | null) => {
-    const goal = goals.find((g) => g.id === goal_id) ?? null
+    const goal_title = goals.find((g) => g.id === goal_id)?.title ?? null
     setNodes((ns) =>
-      ns
-        ? ns.map((n) =>
-            n.id === node.id ? { ...n, goal_id, goal_title: goal ? goal.title : null } : n,
-          )
-        : ns,
+      ns ? mapNode(ns, node.id, (n) => mapSubtree(n, (c) => ({ ...c, goal_id, goal_title }))) : ns,
     )
-    void patch(node.id, { goal_id }).then(loadGoals)
+    void patch(node.id, { goal_id })
   }
 
   // A task carries the fold its group asks for: open in Now, closed in Later.
   const setNow = (node: TaskNode, is_now: boolean) => {
-    setNodes((ns) => (ns ? ns.map((n) => (n.id === node.id ? { ...n, is_now } : n)) : ns))
+    setNodes((ns) => (ns ? mapNode(ns, node.id, (n) => ({ ...n, is_now })) : ns))
     setOpenSteps((open) => {
       const next = new Set(open)
       if (is_now) next.add(node.id)
@@ -659,18 +661,14 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
       return next
     })
 
-  // The only reversal a flatten has is replaying the split, so the steps travel
-  // into the undo closure rather than being read back off a stale row.
+  // The only reversal a flatten has is creating the tree under it again, so the
+  // tree travels into the undo closure rather than being read back off a stale row.
   const mergeSteps = (node: TaskNode) => {
-    const steps: NewStep[] = node.children
-      .filter((c) => c.duration_min !== null)
-      .map((c) => ({ title: c.title, duration_min: c.duration_min as number }))
-    const put = (n: TaskNode) =>
-      setNodes((ns) => (ns ? ns.map((x) => (x.id === n.id ? { ...x, ...n } : x)) : ns))
-    setNodes((ns) => (ns ? ns.map((n) => (n.id === node.id ? { ...n, children: [] } : n)) : ns))
+    const regrown = liveChildren(node).map(regrow)
+    setNodes((ns) => (ns ? mapNode(ns, node.id, (n) => ({ ...n, children: [] })) : ns))
     api
       .flattenTask(node.id)
-      .then((r) => put(r.task))
+      .then(load)
       .catch(() => {
         notify(t('tasks.updateFailed'))
         load()
@@ -678,30 +676,25 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
     notify(t('tasks.mergedToast', { title: node.title }), {
       label: t('toast.undo'),
       run: () =>
-        void api
-          .splitTask(node.id, steps)
-          .then(put)
-          .catch(() => {
-            notify(t('tasks.splitFailed'))
-            load()
-          }),
+        void (async () => {
+          for (const { title, ...c } of regrown) await api.addTask(title, { parent_id: node.id, ...c })
+        })()
+          .catch(() => notify(t('tasks.splitFailed')))
+          .finally(load),
       windowMs: UNDO_MS,
     })
   }
 
+  // A root holding a Now node starts on that node's first open leaf.
   const startFocus = (node: TaskNode) => {
-    const target = focusTarget(node)
-    const index = node.children.findIndex((c) => c.id === target.id)
+    const from = subtree(node).find((n) => n !== node && n.is_now && isLive(n)) ?? node
+    const leaf = firstOpenLeaf(from) ?? from
     openNow({
       title: node.title,
       task_id: node.id,
-      notes: target.notes,
-      ...(index !== -1 && {
-        step_index: index + 1,
-        step_count: node.children.length,
-        step_name: target.title,
-      }),
-      ...(target.duration_min !== null && { planned_min: round5(target.duration_min) }),
+      notes: leaf.notes,
+      ...(leaf.id !== node.id && { leaf_id: leaf.id }),
+      ...(leaf.duration_min !== null && { planned_min: round5(leaf.duration_min) }),
     })
   }
 
@@ -715,8 +708,9 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
     // A task added while a category is picked lands in it, so the list the user
     // is looking at is the list it joins.
     const category = filter ?? ''
+    const temp = -Date.now()
     const optimistic: TaskNode = {
-      id: -Date.now(),
+      id: temp,
       title: text,
       description: '',
       state: 'open',
@@ -725,15 +719,22 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
       duration_min: null,
       duration_source: 'none',
       parent_id: null,
+      root_id: temp,
+      depth: 0,
+      position: 0,
       is_now,
       updated_at: new Date().toISOString(),
       due_at: null,
       due_on: null,
+      effective_due_at: null,
+      effective_due_on: null,
+      due_from: null,
       external_id: null,
       url: '',
       notify: 'notify',
       category,
       urgency: 'normal',
+      effective_urgency: 'normal',
       pressing: false,
       goal_id: null,
       goal_title: null,
@@ -784,9 +785,9 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
     setProgress,
     complete,
     reopen,
-    reopenStep,
+    reorder,
     moveToNow: (node) =>
-      nodes && groups(nodes).now.length >= NOW_CAP ? notify(t('tasks.nowFull')) : setNow(node, true),
+      nodes && nowCount(nodes, node) >= NOW_CAP ? notify(t('tasks.nowFull')) : setNow(node, true),
     moveToLater: (node) => setNow(node, false),
     drop,
     mergeSteps,
@@ -863,7 +864,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
     ...head,
     ...(sort === 'category' ? byCategory(rest, categories).flatMap(([, rows]) => rows) : rest),
   ].map((p) => p.node)
-  dropRef.current = canDrag
+  const soonDrop: DropTo | null = canDrag
     ? ({ from, to, into }, commit) => {
         const next = dropped(runOrder, dragRows, head.length, from, to, into)
         const same = next.length === runOrder.length && next.every((id, i) => id === runOrder[i])
@@ -881,6 +882,14 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
         return true
       }
     : null
+  dropRef.current = (d, commit) => {
+    if (d.list === 'soon') return soonDrop ? soonDrop(d, commit) : false
+    const parent = d.list === undefined ? null : findNode(nodes, Number(d.list))
+    const moved = parent ? liveChildren(parent)[d.from] : undefined
+    if (!moved || d.to === d.from) return false
+    if (commit) actions.reorder(moved, d.to)
+    return true
+  }
 
   const row = (p: Placed, group: Exclude<Group, 'done'>, scope = '', drag = false) => (
     <Row
@@ -1018,7 +1027,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
         </section>
       )}
       {soon.length > 0 && (
-        <section className="task-group soon" data-drag-list>
+        <section className="task-group soon" data-drag-list="soon">
           {head.length > 0 && (
             <div className="task-list">{head.map((p) => row(p, 'soon', '', canDrag))}</div>
           )}
@@ -1101,13 +1110,15 @@ function dueLabel(day: Date, at: Date | null, now: Date): string {
 }
 
 // Urgency is the date's colour; an urgent task with no date keeps a dot of it.
-function Due({ task }: { task: Task }) {
-  const urgent = task.urgency === 'high' || task.pressing
-  const due = dueParts(task)
-  if (due === null || task.due_at === null)
-    return urgent ? <span className="task-dot" role="img" aria-label={t('tasks.urgent')} /> : null
+// `own` shows only a due the node carries itself, and no dot.
+function Due({ task, own = false }: { task: Task; own?: boolean }) {
+  const urgent = task.effective_urgency === 'high' || task.pressing
+  const dated = own ? task : { due_at: task.effective_due_at, due_on: task.effective_due_on }
+  const due = dueParts(dated)
+  if (due === null || dated.due_at === null)
+    return urgent && !own ? <span className="task-dot" role="img" aria-label={t('tasks.urgent')} /> : null
   const now = new Date()
-  if (new Date(task.due_at).getTime() < now.getTime())
+  if (new Date(dated.due_at).getTime() < now.getTime())
     return <span className="meta warn">{t('due.overdue')}</span>
   return <span className={urgent ? 'meta sun' : 'meta'}>{dueLabel(due.day, due.at, now)}</span>
 }
@@ -1431,7 +1442,7 @@ const Row = memo(function Row({
   const sheet = useMenuSheet()
   const done = group === 'done'
   const finished = (done && !reviving) || leaving === 'done'
-  const steps = done ? [] : node.children
+  const steps = done ? [] : liveChildren(node)
 
   useLayoutEffect(() => {
     if (leaving === null) return
@@ -1516,7 +1527,7 @@ const Row = memo(function Row({
     })
   items.push({ label: t('menu.drop'), kind: 'danger', run: () => actions.drop(node) })
 
-  const progress = finished ? 100 : nodeProgress(node)
+  const progress = finished ? 100 : progressOf(node)
   const speaks = progress > 0
 
   return (
@@ -1573,11 +1584,11 @@ const Row = memo(function Row({
               items={items}
             />
           )}
-          {node.is_now && !sheet && (
+          {liveNodes(node).some((x) => x.is_now) && !sheet && (
             <button
               className="task-start"
               data-tip={t('block.start')}
-              aria-label={t('block.startFor', { name: focusTarget(node).title })}
+              aria-label={t('block.startFor', { name: (firstOpenLeaf(node) ?? node).title })}
               onClick={() => actions.startFocus(node)}
             >
               <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -1633,33 +1644,82 @@ const Row = memo(function Row({
           </button>
         </form>
       )}
-      {steps.length > 0 && stepsOpen && (
-        <ul className="task-steps">
-          {steps.map((c) => (
-            <li key={c.id} className={`task-step${c.state === 'done' ? ' done' : ''}`}>
-              <Tick
-                checked={c.state === 'done'}
-                label={t(c.state === 'done' ? 'tasks.markUndone' : 'tasks.tick', { text: c.title })}
-                onClick={() =>
-                  c.state === 'done' ? actions.reopenStep(c) : actions.complete(node, c)
-                }
-              />
-              <span className="task-step-title">{c.title}</span>
-              {c.duration_min !== null && (
-                <span className="task-step-min meta">{round5(c.duration_min)} min</span>
-              )}
-              {(shown(c) > 0 || !sheet) && (
-                <Progress
-                  task={c}
-                  value={shown(c)}
-                  quiet={shown(c) === 0}
-                  onSet={live && c.state !== 'done' ? (p) => actions.setProgress(c, p) : undefined}
-                />
-              )}
-            </li>
-          ))}
-        </ul>
-      )}
+      {steps.length > 0 && stepsOpen && <Steps parent={node} live={live} sheet={sheet} actions={actions} />}
     </div>
+  )
+})
+
+// The rows under a parent, at any depth; a live row drags among its siblings.
+function Steps({
+  parent,
+  live,
+  sheet,
+  actions,
+}: {
+  parent: TaskNode
+  live: boolean
+  sheet: boolean
+  actions: RowActions
+}) {
+  return (
+    <ul className="task-steps" data-drag-list={String(parent.id)}>
+      {liveChildren(parent).map((c) => (
+        <Step key={c.id} node={c} live={live} sheet={sheet} actions={actions} />
+      ))}
+    </ul>
+  )
+}
+
+const Step = memo(function Step({
+  node,
+  live,
+  sheet,
+  actions,
+}: {
+  node: TaskNode
+  live: boolean
+  sheet: boolean
+  actions: RowActions
+}) {
+  const [open, setOpen] = useState(false)
+  const kids = liveChildren(node)
+  const finished = node.state === 'done'
+  const value = kids.length > 0 ? progressOf(node) : shown(node)
+  return (
+    <li className={`task-step${finished ? ' done' : ''}`} data-drag={live || undefined}>
+      <Tick
+        checked={finished}
+        label={t(finished ? 'tasks.markUndone' : 'tasks.tick', { text: node.title })}
+        onClick={() => (finished ? actions.reopen(node) : actions.complete(node))}
+      />
+      <span className="task-step-head">
+        <span className="task-step-title">{node.title}</span>
+        {kids.length > 0 && (
+          <button
+            className="task-fold"
+            aria-expanded={open}
+            aria-label={parentSub(node)}
+            onClick={() => setOpen((o) => !o)}
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M9 6l6 6-6 6" />
+            </svg>
+          </button>
+        )}
+      </span>
+      <span className="task-step-min">
+        {!finished && <Due task={node} own />}
+        {node.duration_min !== null && <span className="meta">{round5(node.duration_min)} min</span>}
+      </span>
+      {(value > 0 || !sheet) && (
+        <Progress
+          task={node}
+          value={value}
+          quiet={value === 0}
+          onSet={live && !finished && kids.length === 0 ? (p) => actions.setProgress(node, p) : undefined}
+        />
+      )}
+      {kids.length > 0 && open && <Steps parent={node} live={live} sheet={sheet} actions={actions} />}
+    </li>
   )
 })

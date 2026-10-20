@@ -156,4 +156,23 @@ describe('liftDrag', () => {
     expect(rows[2].dataset.lifted).toBeUndefined()
     expect(rows.map((r) => r.style.transform)).toEqual(['', '', ''])
   })
+
+  test('a row of a nested list moves among its own siblings and names its list', () => {
+    const outer = page()
+    const ul = { dataset: { dragList: '7' } as Record<string, string>, rows: [] as Fake[], querySelectorAll: () => ul.rows }
+    const kids = [fake(200, 30), fake(230, 30)]
+    ul.rows = kids
+    for (const r of kids)
+      Object.assign(r, {
+        closest: (sel: string) =>
+          sel === '[data-drag]' ? r : sel === '[data-drag-list]' ? ul : sel === '.task-steps' ? ul : null,
+        matches: () => false,
+        getBoundingClientRect: () => ({ top: r.top, height: r.height }),
+      })
+    hold(kids[0], 215)
+    fire(doc, 'pointermove', { clientY: 260 })
+    fire(doc, 'pointerup', { clientY: 260 })
+    expect(drop).toHaveBeenCalledWith({ from: 0, to: 1, into: false, list: '7' }, false)
+    expect(outer.rows.map((r) => r.style.transform)).toEqual(['', '', ''])
+  })
 })

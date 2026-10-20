@@ -1,9 +1,8 @@
 import { useEffect, type RefObject } from 'react'
 import { flushSync } from 'react-dom'
 import { reducedMotion } from './motion'
+import { holds } from './tree'
 import type { TaskNode } from './types'
-
-const holds = (node: TaskNode, id: number) => node.id === id || node.children.some((c) => c.id === id)
 
 // Soon's rows with today's order on top: each ordered item lifts the task that
 // holds it, once, and the other rows keep their order beneath.
@@ -46,7 +45,8 @@ const HOLD_MS = 450
 const SLOP_PX = 8
 const SETTLE_MS = 180
 
-export type Drop = { from: number; to: number; into: boolean }
+// `list` is the `data-drag-list` value of the list the row was lifted in.
+export type Drop = { from: number; to: number; into: boolean; list?: string }
 
 // A row or the order's edge other than the lifted row, where it was at the lift.
 export type Slot = { top: number; height: number; edge?: boolean }
@@ -86,19 +86,22 @@ type Lifted = {
   height: number
   top: number
   parts: { el: HTMLElement; slot: Slot; shift: number }[]
+  key: string | undefined
 }
 
 // A long press lifts a `[data-drag]` row inside a `[data-drag-list]` of `doc`; the
-// other rows and the list's `.order-edge` part to open a gap under the pointer, and
-// the row settles into that gap when let go. Off while `drop` holds null. Returns
-// the teardown.
+// other rows of that same list, not of lists nested in it, and the list's
+// `.order-edge` part to open a gap under the pointer, and the row settles into that
+// gap when let go. A press inside a `.task-steps` list lifts only one of its own
+// rows. Off while `drop` holds null. Returns the teardown.
 export function liftDrag(doc: Document, drop: RefObject<DropTo | null>): () => void {
   let timer: Timer | undefined
   let settleTimer: Timer | undefined
   let press: Press | null = null
   let lifted: Lifted | null = null
   let settling: Lifted | null = null
-  const rowsOf = (list: HTMLElement) => [...list.querySelectorAll<HTMLElement>('[data-drag]')]
+  const own = (list: HTMLElement) => (el: HTMLElement) => el.closest('[data-drag-list]') === list
+  const rowsOf = (list: HTMLElement) => [...list.querySelectorAll<HTMLElement>('[data-drag]')].filter(own(list))
   const slotsOf = (l: Lifted) => l.parts.map((p) => p.slot)
   const midOf = (l: Lifted) => l.top + l.height / 2
   const settleMs = () => (reducedMotion() ? 0 : SETTLE_MS)
@@ -147,6 +150,7 @@ export function liftDrag(doc: Document, drop: RefObject<DropTo | null>): () => v
     let after = false
     const parts: Lifted['parts'] = []
     for (const other of list.querySelectorAll<HTMLElement>('[data-drag], .order-edge')) {
+      if (!other.matches('.order-edge') && !own(list)(other)) continue
       if (other === el) {
         after = true
         continue
@@ -155,7 +159,7 @@ export function liftDrag(doc: Document, drop: RefObject<DropTo | null>): () => v
       const slot = { top: r.top, height: r.height, edge: other.matches('.order-edge') }
       parts.push({ el: other, slot, shift: after ? -box.height : 0 })
     }
-    lifted = { id, el, list, rows, from, y, height: box.height, top: box.top, parts }
+    lifted = { id, el, list, rows, from, y, height: box.height, top: box.top, parts, key: list.dataset.dragList }
     el.dataset.lifted = ''
     list.dataset.dragging = ''
     el.style.transform = 'scale(1.02)'
@@ -169,10 +173,10 @@ export function liftDrag(doc: Document, drop: RefObject<DropTo | null>): () => v
     }
     if (e.button !== 0 || !drop.current || settling || lifted) return
     const target = e.target as HTMLElement
-    if (target.closest('button, input, a, [role="slider"], .task-steps')) return
+    if (target.closest('button, input, a, [role="slider"]')) return
     const el = target.closest<HTMLElement>('[data-drag]')
     const list = el?.closest<HTMLElement>('[data-drag-list]')
-    if (!el || !list) return
+    if (!el || !list || target.closest('.task-steps') !== el.closest('.task-steps')) return
     press = { id: e.pointerId, el, list, x: e.clientX, y: e.clientY }
     timer = setTimeout(lift, HOLD_MS)
   }
@@ -195,7 +199,7 @@ export function liftDrag(doc: Document, drop: RefObject<DropTo | null>): () => v
     const l = lifted
     if (l?.id !== e.pointerId) return
     const land = landing(e.clientY - l.y, midOf(l), slotsOf(l))
-    const d = land && { from: l.from, ...land }
+    const d = land && { from: l.from, ...land, ...(l.key !== undefined && { list: l.key }) }
     if (!d || !unchanged(l) || !drop.current?.(d, false)) return putBack(l)
     const at = part(l, e.clientY)
     const closedTop = (p: Lifted['parts'][number]) => p.slot.top + p.shift

@@ -27,6 +27,7 @@ import type {
   MemoryFact,
   MemoryHit,
   NewStep,
+  NewTask,
   Outage,
   PlanEvent,
   QueueEntry,
@@ -51,7 +52,7 @@ import type {
   TalkMessage,
   TalkPending,
   TalkReply,
-  Task,
+  TaskCreated,
   TaskNode,
   TaskNotify,
   TaskState,
@@ -118,6 +119,7 @@ type NewTaskOpts = {
   progress?: number
   category?: string
   goal_id?: number
+  children?: NewTask[]
 }
 
 type NewGoal = { title: string; description?: string; due_at?: string | null; due_on?: string | null }
@@ -154,6 +156,10 @@ type TaskPatch = {
   urgency?: TaskUrgency
   // null detaches the task from whatever goal it was on.
   goal_id?: number | null
+  // null makes it a root.
+  parent_id?: number | null
+  // 0-based among its siblings after any parent change; past the end is last.
+  position?: number
 }
 
 // `reason` says why the assistant could not answer; `detail` is the provider's
@@ -249,7 +255,7 @@ export const api = {
     }),
   tasks: () => request<TaskNode[]>('/api/tasks'),
   addTask: (title: string, opts?: NewTaskOpts) =>
-    request<Task>('/api/tasks', { method: 'POST', body: JSON.stringify({ title, ...opts }) }),
+    request<TaskCreated>('/api/tasks', { method: 'POST', body: JSON.stringify({ title, ...opts }) }),
   // The server rejects unknown fields, and undefined keys drop out of the body,
   // so a patch carries exactly the fields the caller set.
   patchTask: (id: number, patch: TaskPatch) =>
@@ -378,6 +384,13 @@ export const api = {
     request<WorkSession>(`/api/sessions/${id}/step`, {
       method: 'POST',
       body: JSON.stringify(step),
+    }),
+  // No leaf: the next open leaf after the current one under the session's task;
+  // the leaf stays put when none follows.
+  advanceWorkSession: (id: number, leaf_id?: number) =>
+    request<WorkSession>(`/api/sessions/${id}/advance`, {
+      method: 'POST',
+      body: JSON.stringify(leaf_id === undefined ? {} : { leaf_id }),
     }),
   skipBreak: (id: number) =>
     request<WorkSession>(`/api/sessions/${id}/skip_break`, { method: 'POST' }),

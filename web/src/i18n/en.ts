@@ -854,6 +854,7 @@ export const en = {
   "tasks.doneToast": "{title} — done",
   "tasks.doneToday": "Done today",
   "tasks.droppedToast": "{title} — dropped",
+  "tasks.dueClamped": "Due moved to {date} to fit {title}",
   "tasks.later": "Later",
   "tasks.loadFailed": "Couldn't load tasks.",
   "tasks.markUndone": "Mark {text} not done",

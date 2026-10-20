@@ -855,6 +855,7 @@ export const ja: Dict = {
   "tasks.doneToast": "{title} — 完了",
   "tasks.doneToday": "今日の完了",
   "tasks.droppedToast": "{title} — 中止しました",
+  "tasks.dueClamped": "{title} に合わせて期限を {date} にしました。",
   "tasks.later": "後で",
   "tasks.loadFailed": "タスクの読み込みに失敗しました。",
   "tasks.markUndone": "{text}を未完了に戻す",
