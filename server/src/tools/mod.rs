@@ -125,8 +125,9 @@ pub const MAX_BATCH_CALLS: usize = 25;
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BatchCall {
+    #[serde(alias = "name")]
     pub tool: String,
-    #[serde(default)]
+    #[serde(default, alias = "arguments")]
     #[schemars(extend("type" = "object"))]
     pub args: serde_json::Value,
 }
@@ -1003,14 +1004,40 @@ pub(crate) fn distance(a: &str, b: &str) -> usize {
     row[b.len()]
 }
 
-/// An unknown name's error, naming the three offered tools nearest it.
+/// Verbs a model puts in a tool name, and the suffix of the tool that does it.
+const VERBS: &[(&[&str], &str)] = &[
+    (&["complete", "completed", "done", "finish", "finished", "close", "check", "tick", "mark"], "done"),
+    (&["add", "create", "new", "make", "update", "edit", "set", "change", "modify", "rename", "move", "write", "put"], "_save"),
+    (&["delete", "drop", "remove", "rm", "del", "erase", "destroy"], "_remove"),
+    (&["list", "get", "read", "search", "show", "query", "view", "fetch", "find"], "_find"),
+];
+
+/// An unknown name's error: what its verb means among the offered tools, then
+/// the three offered tools nearest it.
 fn unknown(kind: SessionKind, name: &str) -> ToolError {
-    let mut offered: Vec<&str> = registry(kind).to_vec();
-    offered.sort_by_key(|t| (distance(name, t), *t));
-    ToolError::unknown_tool(format!(
-        "no such tool: {name}; the nearest are {}",
-        offered.iter().take(3).copied().collect::<Vec<_>>().join(", ")
-    ))
+    let offered = registry(kind);
+    let words: Vec<String> = name.to_lowercase().split(['_', '-', '.', ' ']).map(str::to_string).collect();
+    let verb = words.iter().find_map(|w| VERBS.iter().find(|(vs, _)| vs.contains(&w.as_str())).map(|(_, v)| *v));
+    let tool = |suffix: &str| {
+        words.iter().find_map(|w| offered.iter().find(|t| **t == format!("{w}{suffix}")).copied())
+    };
+    let (hint, first) = match verb {
+        Some("done") => match tool("_save") {
+            Some(t) if t != "calendar_save" => (Some(format!("to finish one, set state done with {t}")), Some(t)),
+            other => (None, other),
+        },
+        Some(suffix) => match tool(suffix) {
+            Some(t) => (Some(format!("that is {t}")), Some(t)),
+            None => (None, None),
+        },
+        None => (None, None),
+    };
+    let deleting = verb == Some("_remove");
+    let mut ranked: Vec<&str> = offered.iter().copied().filter(|t| Some(*t) != first).collect();
+    ranked.sort_by_key(|t| (!deleting && t.ends_with("_remove"), distance(name, t), *t));
+    let nearest: Vec<&str> = first.into_iter().chain(ranked).take(3).collect();
+    let hint = hint.map(|h| format!("; {h}")).unwrap_or_default();
+    ToolError::unknown_tool(format!("no such tool: {name}{hint}; the nearest are {}", nearest.join(", ")))
 }
 
 /// The tool's `{name, description, input_schema}`, built once.
@@ -1219,6 +1246,13 @@ mod tests {
     }
 
     #[test]
+    fn a_batch_call_takes_name_and_arguments_for_tool_and_args() {
+        let args: BatchArgs = serde_json::from_str(r#"{"calls":[{"name":"task_find","arguments":{"query":"x"}},{"tool":"goal_find"}]}"#).unwrap();
+        assert_eq!((args.calls[0].tool.as_str(), args.calls[0].args["query"].as_str()), ("task_find", Some("x")));
+        assert_eq!(args.calls[1].tool, "goal_find");
+    }
+
+    #[test]
     fn an_unknown_tool_names_the_nearest_offered_ones_and_bad_json_is_typed() {
         let (conn, tmp) = env();
         let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "rm_rf", "{}").unwrap_err();
@@ -1229,6 +1263,14 @@ mod tests {
         assert_eq!(e.message.matches(", ").count(), 2, "three names: {}", e.message);
         let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_save", "not json").unwrap_err();
         assert_eq!(e.kind, "invalid_args");
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_complete", "{}").unwrap_err();
+        assert!(e.message.contains("set state done with task_save; the nearest are task_save,"), "{}", e.message);
+        for name in ["task_complete", "task_update_status", "goal_finish", "complete_task"] {
+            let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, name, "{}").unwrap_err();
+            assert!(!e.message.split("nearest are ").nth(1).unwrap().starts_with("task_remove"), "{name}: {}", e.message);
+        }
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "calendar_delete_entry", "{}").unwrap_err();
+        assert!(e.message.contains("that is calendar_remove; the nearest are calendar_remove"), "{}", e.message);
         let out = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_save", r#"{"tasks":[{"title":"x","surprise":1}]}"#).unwrap();
         assert_eq!(out["ok"], true);
         assert_eq!(out["ignored"][0]["field"], "surprise");
