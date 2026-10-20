@@ -634,6 +634,12 @@ impl<'a> Saver<'a> {
             changed = true;
         }
         let op = if changed { "updated" } else { "unchanged" };
+        let closing = p.state.as_deref().filter(|s| matches!(*s, "done" | "dropped") && *s != before.state).map(str::to_string);
+        let open_parts = match &closing {
+            Some(_) => open_below(self.conn, id).map_err(internal)?,
+            None => 0,
+        };
+        let above = states(self.conn, &ancestors(self.conn, id).map_err(internal)?).map_err(internal)?;
         match tasks::update(self.conn, self.ctx.user_id, id, &p) {
             Ok(Some(u)) => {
                 self.refs.insert(id, r.clone());
@@ -643,6 +649,11 @@ impl<'a> Saver<'a> {
                 }
                 self.report(u.adjusted);
                 self.demoted(u.demoted_from_now)?;
+                if let (Some(s), true) = (&closing, open_parts > 0) {
+                    let why = format!("{open_parts} open part{} went {s} with it", if open_parts == 1 { "" } else { "s" });
+                    self.env.adjusted.push(json!({ "ref": r.0, "id": id, "title": u.task.title, "field": "children", "to": s, "why": why }));
+                }
+                self.settled(&above)?;
             }
             Ok(None) => {
                 self.env.refused(&r, format!("no task {id}"));
@@ -659,6 +670,23 @@ impl<'a> Saver<'a> {
         }
         let children = n.children.into_iter().enumerate().map(|(i, v)| (r.child(i), v)).collect();
         self.level(children, Nest::Under(id))
+    }
+
+    /// Each ancestor whose state its parts moved, against what it was.
+    fn settled(&mut self, above: &[(i64, String, String)]) -> Result<(), ToolError> {
+        let ids: Vec<i64> = above.iter().map(|(id, ..)| *id).collect();
+        for ((id, title, was), (_, _, now)) in above.iter().zip(states(self.conn, &ids).map_err(internal)?) {
+            if *was == now {
+                continue;
+            }
+            let why = match now.as_str() {
+                "done" => "its last open part finished",
+                "in_progress" if was == "open" => "a part of it is under way",
+                _ => "a part of it is open again",
+            };
+            self.env.adjusted.push(json!({ "id": id, "title": title, "field": "state", "to": now, "why": why }));
+        }
+        Ok(())
     }
 
     /// Puts `id` in front of its sibling `before`.
@@ -928,6 +956,22 @@ pub(super) fn labeled(conn: &Connection, user_id: i64, ids: &[i64]) -> Result<St
         out.push(if path.len() > 1 { format!("{id} ({})", path.join(" › ")) } else { id.to_string() });
     }
     Ok(out.join(", "))
+}
+
+fn open_below(conn: &Connection, id: i64) -> rusqlite::Result<i64> {
+    conn.query_row(
+        "WITH RECURSIVE sub(id) AS (SELECT id FROM tasks WHERE parent_id = ?1
+             UNION ALL SELECT c.id FROM tasks c JOIN sub ON c.parent_id = sub.id)
+         SELECT COUNT(*) FROM tasks WHERE id IN sub AND state IN ('open','in_progress')",
+        [id],
+        |r| r.get(0),
+    )
+}
+
+fn states(conn: &Connection, ids: &[i64]) -> rusqlite::Result<Vec<(i64, String, String)>> {
+    ids.iter()
+        .map(|id| conn.query_row("SELECT id, title, state FROM tasks WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))))
+        .collect()
 }
 
 fn ancestors(conn: &Connection, id: i64) -> rusqlite::Result<Vec<i64>> {
@@ -1380,6 +1424,20 @@ mod tests {
         assert_eq!(out["saved"].as_array().unwrap().len(), 2);
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM tasks WHERE title = 'orphan'", [], |r| r.get(0)).unwrap();
         assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn a_state_that_moves_a_parent_or_its_parts_says_so() {
+        let (conn, tmp) = env("UTC");
+        let out = talk(&conn, &tmp, "task_save", json!({"tasks": [{"title": "Essay", "children": [{"title": "Outline", "state": "done"}, "Draft", "Edit"]},
+            {"title": "Unit 4", "children": ["Read", "Problems"]}]}));
+        let (essay, draft, edit, unit) = (saved(&out, "0"), saved(&out, "0.1"), saved(&out, "0.2"), saved(&out, "1"));
+        let out = talk(&conn, &tmp, "task_save", json!({"tasks": [{"id": draft, "state": "done"}, {"id": edit, "state": "done"}]}));
+        let up: Vec<&Value> = out["adjusted"].as_array().unwrap().iter().filter(|a| a["id"] == essay).collect();
+        assert_eq!(up.len(), 1, "{out}");
+        assert_eq!((up[0]["to"].as_str(), up[0]["why"].as_str()), (Some("done"), Some("its last open part finished")));
+        let out = talk(&conn, &tmp, "task_save", json!({"tasks": [{"id": unit, "state": "done"}]}));
+        assert_eq!(out["adjusted"][0]["why"], "2 open parts went done with it", "{out}");
     }
 
     #[test]
