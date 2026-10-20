@@ -9,6 +9,7 @@ export type NoteDesktop = {
   settings?(): Promise<ShellSettings | null>
   set?(key: keyof ShellSettings, on: boolean): Promise<ShellSettings | null>
   changeServer?(): void
+  inCall?(on: boolean): void
   widget?(): void
   widgetClock?(clock: WidgetClock | null): void
   shown?(): Promise<boolean | null>

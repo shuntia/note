@@ -8,6 +8,7 @@ import { primeAudio, releaseAudioContext } from './prime'
 import { chime, CUE_TAIL_MS, ringtone } from './tones'
 import { callUrl, CallSession, type AudioIo, type LiveState } from './session'
 import { Swipe } from './swipe'
+import { systemCall, systemMuted } from './system'
 import '../styles/call.css'
 
 export type { CallOpen }
@@ -111,6 +112,17 @@ export function CallView({
   }
 
   useEffect(() => control.mount(), [control])
+  const open = phase !== 'gone'
+  useEffect(() => {
+    if (!open) return
+    return systemCall({
+      end: () => control.end(),
+      toggleMic: () => {
+        if (control.shown.phase !== 'ringing') control.tap()
+      },
+    })
+  }, [open, control])
+  useEffect(() => systemMuted(muted), [muted])
   useEffect(() => {
     const escape = (e: globalThis.KeyboardEvent) => {
       if (e.key !== 'Escape') return

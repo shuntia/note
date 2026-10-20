@@ -1,9 +1,10 @@
 'use strict'
 
-const { app, BrowserWindow, Menu, Tray, ipcMain, nativeImage, net, screen, shell, systemPreferences } = require('electron')
+const { app, BrowserWindow, Menu, Tray, ipcMain, nativeImage, net, powerSaveBlocker, screen, shell, systemPreferences } = require('electron')
 const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
+const { pauseOthers } = require('./media')
 const { normalizeServerUrl, resolveServerUrl } = require('./server-url')
 const { CHECK_EVERY_MS, RELEASES_URL, updateMode } = require('./updates')
 
@@ -18,6 +19,7 @@ let win = null
 let setupWin = null
 let widgetWin = null
 let widgetClock = null
+let callHold = null
 let tray = null
 let quitting = false
 let failures = 0
@@ -285,6 +287,8 @@ function createWindow(startHidden) {
     refreshTray()
   })
   win.on('focus', () => win.flashFrame(false))
+  win.webContents.on('did-start-loading', () => holdCall(false))
+  win.webContents.on('render-process-gone', () => holdCall(false))
   const tellShown = () => {
     refreshTray()
     if (!win.isDestroyed()) win.webContents.send('desktop:shown', win.isVisible())
@@ -492,6 +496,23 @@ ipcMain.handle('desktop:set', (event, key, on) => {
   return shellSettings()
 })
 
+// While a call is open the screen stays awake and other players are paused,
+// then resumed once it ends.
+function holdCall(on) {
+  if (on && !callHold) {
+    callHold = { blocker: powerSaveBlocker.start('prevent-display-sleep'), resume: pauseOthers() }
+  } else if (!on && callHold) {
+    const { blocker, resume } = callHold
+    callHold = null
+    powerSaveBlocker.stop(blocker)
+    resume.then((play) => play()).catch(() => {})
+  }
+}
+
+ipcMain.on('desktop:inCall', (event, on) => {
+  if (fromApp(event)) holdCall(on === true)
+})
+
 ipcMain.on('desktop:widget', (event) => {
   if (!fromApp(event)) return
   if (widgetWin) closeWidget()
@@ -657,6 +678,7 @@ if (!app.requestSingleInstanceLock()) {
   })
   app.on('before-quit', () => {
     quitting = true
+    holdCall(false)
   })
   app.on('activate', showWindow)
   app.on('window-all-closed', () => {})
