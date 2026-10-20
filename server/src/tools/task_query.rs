@@ -62,6 +62,7 @@ fn day_start(ctx: &ToolCtx, day: jiff::civil::Date) -> Result<String, ToolError>
 }
 
 /// What the filters read: the canonical fields plus the old list's own.
+#[derive(Default)]
 struct Filters {
     state: Option<String>,
     query: Option<String>,
@@ -73,7 +74,9 @@ struct Filters {
     overdue: Option<bool>,
     urgency: Option<&'static str>,
     sort: &'static str,
+    sort_given: bool,
     depth: usize,
+    depth_given: bool,
     limit: i64,
     added_after: Option<jiff::civil::Date>,
     added_before: Option<jiff::civil::Date>,
@@ -91,8 +94,12 @@ fn read_filters(ctx: &ToolCtx, o: &mut Obj, warnings: &mut Vec<String>) -> Filte
         }
         d
     };
-    let due_before = day_of(o, &["due_before", "before"]);
-    let due_after = day_of(o, &["due_after", "after"]);
+    let mut due_before = day_of(o, &["due_before", "before"]);
+    let mut due_after = day_of(o, &["due_after", "after"]);
+    if let Some(d) = day_of(o, &["due", "due_on", "due_date"]) {
+        due_after = due_after.max(Some(d));
+        due_before = d.tomorrow().ok().map(|next| due_before.map_or(next, |b| b.min(next)));
+    }
     let added_after = day_of(o, &["added_after"]);
     let added_before = day_of(o, &["added_before"]);
     let state = o.take(&["state", "status"]).and_then(|v| loose::text(&v)).and_then(|s| {
@@ -113,7 +120,9 @@ fn read_filters(ctx: &ToolCtx, o: &mut Obj, warnings: &mut Vec<String>) -> Filte
         }
         u
     });
-    let sort = match o.take(&["sort", "order", "sort_by"]).and_then(|v| loose::text(&v)).as_deref().map(str::trim) {
+    let sort_raw = o.take(&["sort", "order", "sort_by"]).and_then(|v| loose::text(&v));
+    let sort_given = sort_raw.as_deref().is_some_and(|s| !s.trim().is_empty());
+    let sort = match sort_raw.as_deref().map(str::trim) {
         Some("due" | "due_at" | "deadline" | "soonest") => "due",
         Some("urgency" | "priority" | "urgent") => "urgency",
         Some("added" | "created" | "newest" | "") | None => "added",
@@ -123,7 +132,9 @@ fn read_filters(ctx: &ToolCtx, o: &mut Obj, warnings: &mut Vec<String>) -> Filte
         }
     };
     let limit = o.take(&["limit", "max", "count"]).and_then(|v| loose::integer(&v)).unwrap_or(DEFAULT_LIMIT);
-    let depth = o.take(&["depth", "levels"]).and_then(|v| loose::integer(&v)).unwrap_or(1);
+    let depth = o.take(&["depth", "levels"]).and_then(|v| loose::integer(&v));
+    let depth_given = depth.is_some();
+    let depth = depth.unwrap_or(1);
     Filters {
         state,
         query: o.take(&["query", "keyword", "q", "search", "text", "words"]).and_then(|v| loose::text(&v)),
@@ -135,7 +146,9 @@ fn read_filters(ctx: &ToolCtx, o: &mut Obj, warnings: &mut Vec<String>) -> Filte
         overdue: o.take(&["overdue"]).and_then(|v| loose::boolean(&v)),
         urgency,
         sort,
+        sort_given,
         depth: depth.clamp(0, crate::tasks::MAX_DEPTH) as usize,
+        depth_given,
         limit: limit.clamp(1, MAX_LIMIT),
         added_after,
         added_before,
@@ -143,8 +156,15 @@ fn read_filters(ctx: &ToolCtx, o: &mut Obj, warnings: &mut Vec<String>) -> Filte
     }
 }
 
-/// `task_find`: one node in full by id, a word search at any depth, or a
-/// survey of the top-level tasks.
+impl Filters {
+    /// Asks for nodes by their own deadline, at any depth.
+    fn by_due(&self) -> bool {
+        self.due_before.is_some() || self.due_after.is_some() || self.overdue == Some(true)
+    }
+}
+
+/// `task_find`: one node in full by id, a word search at any depth, the nodes
+/// due in a window at any depth, or a survey of the top-level tasks.
 pub fn find(conn: &Connection, ctx: &ToolCtx, raw: &str) -> Result<Value, ToolError> {
     unscoped(ctx)?;
     let mut o = Obj::new(loose::args(raw)?);
@@ -157,7 +177,15 @@ pub fn find(conn: &Connection, ctx: &ToolCtx, raw: &str) -> Result<Value, ToolEr
     let targets: Vec<Target> = ids.iter().filter_map(loose::target).collect();
     let mut out = if targets.is_empty() {
         match f.query.take() {
-            Some(q) => search(conn, ctx, &q, f.limit.min(SEARCH_HITS), &mut warnings)?,
+            Some(q) => {
+                for (given, field) in [(f.sort_given, "sort"), (f.depth_given, "depth")] {
+                    if given {
+                        warnings.push(format!("{field} was ignored: a query lists matching nodes, best title match first"));
+                    }
+                }
+                search(conn, ctx, &q, &f, f.limit.min(SEARCH_HITS), &mut warnings)?
+            }
+            None if f.by_due() => due_nodes(conn, ctx, &f, &mut warnings)?,
             None => survey(conn, ctx, &f, &mut warnings)?,
         }
     } else {
@@ -178,7 +206,7 @@ fn by_ids(conn: &Connection, ctx: &ToolCtx, targets: &[Target], warnings: &mut V
                 None => warnings.push(format!("no task {id}")),
             },
             Target::Title(title) => {
-                let hits = search(conn, ctx, title, SEARCH_HITS, warnings)?;
+                let hits = search(conn, ctx, title, &Filters::default(), SEARCH_HITS, warnings)?;
                 let found: Vec<i64> = hits["items"].as_array().into_iter().flatten().filter_map(|h| h["id"].as_i64()).collect();
                 let exact: Vec<i64> = hits["items"]
                     .as_array()
@@ -202,15 +230,15 @@ fn by_ids(conn: &Connection, ctx: &ToolCtx, targets: &[Target], warnings: &mut V
 
 fn compact(v: &mut Value) {
     if let Value::Object(o) = v {
-        o.retain(|k, x| k == "children" || !(x.is_null() || x.as_str() == Some("")));
+        o.retain(|_, x| !(x.is_null() || x.as_str() == Some("") || x.as_array().is_some_and(Vec::is_empty)));
         if let Some(Value::Array(children)) = o.get_mut("children") {
             children.iter_mut().for_each(compact);
         }
     }
 }
 
-/// One node in full, exactly as `GET /api/tasks` renders it, plus when it was
-/// added, its local due, and its path from its root.
+/// One node in full with its subtree, as `GET /api/tasks` renders it less its
+/// bookkeeping, with its local due and its path from its root.
 fn read_one(conn: &Connection, ctx: &ToolCtx, id: i64) -> Result<Option<Value>, ToolError> {
     let Some(mut node) = crate::tasks::node(conn, ctx.user_id, id).map_err(internal)? else { return Ok(None) };
     if let Some(scope) = &ctx.share {
@@ -233,17 +261,9 @@ fn read_one(conn: &Connection, ctx: &ToolCtx, id: i64) -> Result<Option<Value>, 
     crate::tasks::stamp_schedule(conn, ctx.user_id, &tz, std::iter::once(&mut node.task)).map_err(internal)?;
     let path = path_of(conn, ctx.user_id, node.task.id)?;
     let mut out = serde_json::to_value(&node).map_err(internal)?;
-    let mut stmt = conn.prepare("SELECT id, created_at FROM tasks WHERE root_id = ?1").map_err(internal)?;
-    let added: std::collections::HashMap<i64, String> = stmt
-        .query_map([node.task.root_id], |r| Ok((r.get(0)?, r.get(1)?)))
-        .and_then(|rows| rows.collect::<rusqlite::Result<_>>())
-        .map_err(internal)?;
     let hide_goals = hides_goals(ctx);
     let titles = !matches_details(ctx);
     each_node(&mut out, &mut |t| {
-        if let Some(created) = t["id"].as_i64().and_then(|id| added.get(&id)) {
-            t["created_at"] = json!(created);
-        }
         if let Some(label) = t["effective_due_at"]
             .as_str()
             .and_then(|at| crate::due::local_label(at, t["effective_due_on"].as_str(), &tz))
@@ -257,6 +277,16 @@ fn read_one(conn: &Connection, ctx: &ToolCtx, id: i64) -> Result<Option<Value>, 
         if titles {
             for field in ["description", "notes", "url", "external_id"] {
                 t[field] = Value::Null;
+            }
+        }
+        let Value::Object(o) = t else { return };
+        for field in ["created_at", "updated_at", "duration_source", "source", "root_id", "position"] {
+            o.remove(field);
+        }
+        for field in ["due_at", "due_on", "urgency"] {
+            let effective = format!("effective_{field}");
+            if o.get(&effective) == o.get(field) {
+                o.remove(&effective);
             }
         }
     });
@@ -302,22 +332,28 @@ pub(super) fn path_of(conn: &Connection, user_id: i64, id: i64) -> Result<Vec<St
 
 /// Every word of the query against titles first, then against each node's
 /// whole text, at any depth; live nodes before finished ones.
-fn search(conn: &Connection, ctx: &ToolCtx, query: &str, limit: i64, warnings: &mut Vec<String>) -> Result<Value, ToolError> {
+fn search(conn: &Connection, ctx: &ToolCtx, query: &str, f: &Filters, limit: i64, warnings: &mut Vec<String>) -> Result<Value, ToolError> {
     let query = query.trim();
     if query.is_empty() || query.chars().count() > MAX_QUERY_CHARS {
         warnings.push(format!("query must be 1 to {MAX_QUERY_CHARS} characters"));
         return Ok(json!({ "total": 0, "items": [] }));
     }
     let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+    let mut wheres = vec!["user_id = ?".to_string()];
     let mut params: Vec<SqlValue> = vec![ctx.user_id.into()];
-    let finished = match &ctx.share {
-        None => "",
-        Some(scope) if scope.progress => {
-            params.push(crate::shares::done_since(jiff::Timestamp::now()).to_string().into());
-            " AND (state != 'done' OR completed_at >= ?)"
+    if f.state.is_none() {
+        wheres.push("state != 'dropped'".into());
+        match &ctx.share {
+            None => {}
+            Some(scope) if scope.progress => {
+                wheres.push("(state != 'done' OR completed_at >= ?)".into());
+                params.push(crate::shares::done_since(jiff::Timestamp::now()).to_string().into());
+            }
+            Some(_) => wheres.push("state != 'done'".into()),
         }
-        Some(_) => " AND state != 'done'",
-    };
+    } else {
+        state_filter(ctx, f.state.as_deref(), &mut wheres, &mut params)?;
+    }
     let clause = |column: &str, params: &mut Vec<SqlValue>| {
         params.extend(words.iter().map(|w| SqlValue::from(w.clone())));
         words.iter().map(|_| format!("instr({column}, ?) > 0")).collect::<Vec<_>>().join(" AND ")
@@ -327,40 +363,67 @@ fn search(conn: &Connection, ctx: &ToolCtx, query: &str, limit: i64, warnings: &
     } else {
         "lower(title)"
     };
-    let text_match = clause(text, &mut params);
-    let root_category = "(SELECT r.category FROM tasks r WHERE r.id = tasks.root_id)";
-    let (shared, shared_params) = share_categories(ctx, None, root_category)?.unwrap_or_default();
-    params.extend(shared_params);
+    wheres.push(format!("({})", clause(text, &mut params)));
+    filters(ctx, f, Level::Any, &mut wheres, &mut params)?;
     let title_match = clause("lower(title)", &mut params);
     let mut stmt = conn
         .prepare(&format!(
             "SELECT id FROM tasks
-             WHERE user_id = ? AND state != 'dropped'{finished} AND ({text_match}){shared}
+             WHERE {}
              ORDER BY CASE WHEN {title_match} THEN 0 ELSE 1 END,
                       CASE WHEN state = 'done' THEN 1 ELSE 0 END,
                       depth, created_at DESC, id DESC
-             LIMIT {limit}"
+             LIMIT {limit}",
+            wheres.join(" AND ")
         ))
         .map_err(internal)?;
     let ids: Vec<i64> = stmt
         .query_map(rusqlite::params_from_iter(params.iter()), |r| r.get(0))
         .and_then(|rows| rows.collect::<rusqlite::Result<_>>())
         .map_err(internal)?;
+    let items = rows_with_paths(conn, ctx, &ids)?;
+    if items.is_empty() {
+        warnings.push(format!("nothing matched {query:?}; try fewer words, or no query to survey"));
+    }
+    Ok(json!({ "total": items.len(), "items": items }))
+}
+
+fn rows_with_paths(conn: &Connection, ctx: &ToolCtx, ids: &[i64]) -> Result<Vec<Value>, ToolError> {
     let tz = tz(ctx);
     let mut items = Vec::new();
     for id in ids {
-        let Some(t) = crate::tasks::get(conn, ctx.user_id, id).map_err(internal)? else { continue };
+        let Some(t) = crate::tasks::get(conn, ctx.user_id, *id).map_err(internal)? else { continue };
         let mut row = row_of(&t, &tz, hides_goals(ctx));
-        let path = path_of(conn, ctx.user_id, id)?;
+        let path = path_of(conn, ctx.user_id, *id)?;
         if path.len() > 1 {
             row["path"] = path.join(" › ").into();
         }
         items.push(row);
     }
-    if items.is_empty() {
-        warnings.push(format!("nothing matched {query:?}; try fewer words, or no query to survey"));
+    Ok(items)
+}
+
+/// The nodes whose own deadline falls in the window, at any depth, soonest first.
+fn due_nodes(conn: &Connection, ctx: &ToolCtx, f: &Filters, warnings: &mut Vec<String>) -> Result<Value, ToolError> {
+    let mut wheres = vec!["user_id = ?".to_string(), "due_at IS NOT NULL".to_string()];
+    let mut params: Vec<SqlValue> = vec![ctx.user_id.into()];
+    state_filter(ctx, f.state.as_deref(), &mut wheres, &mut params)?;
+    filters(ctx, f, Level::Any, &mut wheres, &mut params)?;
+    let wheres = wheres.join(" AND ");
+    let total: i64 = conn
+        .query_row(&format!("SELECT COUNT(*) FROM tasks WHERE {wheres}"), rusqlite::params_from_iter(params.iter()), |r| r.get(0))
+        .map_err(internal)?;
+    let mut stmt = conn
+        .prepare(&format!("SELECT id FROM tasks WHERE {wheres} ORDER BY due_at, depth, id LIMIT {}", f.limit))
+        .map_err(internal)?;
+    let ids: Vec<i64> = stmt
+        .query_map(rusqlite::params_from_iter(params.iter()), |r| r.get(0))
+        .and_then(|rows| rows.collect::<rusqlite::Result<_>>())
+        .map_err(internal)?;
+    if total == 0 {
+        warnings.push("nothing is due then; state any reaches finished ones".into());
     }
-    Ok(json!({ "total": items.len(), "items": items }))
+    Ok(json!({ "total": total, "items": rows_with_paths(conn, ctx, &ids)? }))
 }
 
 /// A node as one short line of fields, what lists carry.
@@ -395,10 +458,15 @@ fn row_of(t: &crate::tasks::Task, tz: &jiff::tz::TimeZone, goals_hidden: bool) -
     row
 }
 
-fn survey_filters(ctx: &ToolCtx, f: &Filters) -> Result<(String, Vec<SqlValue>), ToolError> {
-    let mut wheres = vec!["user_id = ?".to_string(), "parent_id IS NULL".to_string()];
-    let mut params: Vec<SqlValue> = vec![ctx.user_id.into()];
-    match (&ctx.share, f.state.as_deref()) {
+/// Whether a filter reads a root's whole tree or each node on its own.
+#[derive(Clone, Copy, PartialEq)]
+enum Level {
+    Roots,
+    Any,
+}
+
+fn state_filter(ctx: &ToolCtx, state: Option<&str>, wheres: &mut Vec<String>, params: &mut Vec<SqlValue>) -> Result<(), ToolError> {
+    match (&ctx.share, state) {
         (_, None) => wheres.push("state IN ('open','in_progress')".into()),
         (Some(_), Some(s @ ("open" | "in_progress"))) => {
             wheres.push("state = ?".into());
@@ -425,12 +493,24 @@ fn survey_filters(ctx: &ToolCtx, f: &Filters) -> Result<(String, Vec<SqlValue>),
             params.push(s.to_string().into());
         }
     }
-    if let Some(category) = &f.category {
-        wheres.push("category = ?".into());
-        params.push(category.trim().to_string().into());
+    Ok(())
+}
+
+/// Every filter but the state: at `Roots` a root matches through its tree,
+/// at `Any` a node through its own fields and its root's category and goal.
+fn filters(ctx: &ToolCtx, f: &Filters, level: Level, wheres: &mut Vec<String>, params: &mut Vec<SqlValue>) -> Result<(), ToolError> {
+    let roots = level == Level::Roots;
+    let (category, goal, due) = if roots {
+        ("category", "goal_id", NEXT_DUE)
+    } else {
+        ("(SELECT r.category FROM tasks r WHERE r.id = tasks.root_id)", "(SELECT r.goal_id FROM tasks r WHERE r.id = tasks.root_id)", "due_at")
+    };
+    if let Some(c) = &f.category {
+        wheres.push(format!("{category} = ?"));
+        params.push(c.trim().to_string().into());
     }
     if let Some(g) = f.goal_id {
-        wheres.push("goal_id = ?".into());
+        wheres.push(format!("{goal} = ?"));
         params.push(g.into());
     }
     if let Some(day) = f.added_after {
@@ -447,33 +527,48 @@ fn survey_filters(ctx: &ToolCtx, f: &Filters) -> Result<(String, Vec<SqlValue>),
         params.push(cutoff.to_string().into());
     }
     if let Some(flag) = f.now {
-        wheres.push(format!(
-            "{}EXISTS (SELECT 1 FROM tasks n WHERE n.root_id = tasks.id AND n.is_now = 1 AND n.state IN ('open','in_progress'))",
-            if flag { "" } else { "NOT " }
-        ));
+        wheres.push(match (roots, flag) {
+            (true, _) => format!(
+                "{}EXISTS (SELECT 1 FROM tasks n WHERE n.root_id = tasks.id AND n.is_now = 1 AND n.state IN ('open','in_progress'))",
+                if flag { "" } else { "NOT " }
+            ),
+            (false, true) => "is_now = 1".into(),
+            (false, false) => "is_now = 0".into(),
+        });
     }
     if let Some(day) = f.due_before {
-        wheres.push(format!("{NEXT_DUE} < ?"));
+        wheres.push(format!("{due} < ?"));
         params.push(day_start(ctx, day)?.into());
     }
     if let Some(day) = f.due_after {
-        wheres.push(format!("{NEXT_DUE} >= ?"));
+        wheres.push(format!("{due} >= ?"));
         params.push(day_start(ctx, day)?.into());
     }
     if let Some(flag) = f.overdue {
-        wheres.push(if flag { format!("({NEXT_DUE} < ?)") } else { format!("({NEXT_DUE} IS NULL OR {NEXT_DUE} >= ?)") });
+        wheres.push(if flag { format!("({due} < ?)") } else { format!("({due} IS NULL OR {due} >= ?)") });
         params.push(jiff::Timestamp::now().to_string().into());
     }
     if let Some(u) = f.urgency {
-        wheres.push("EXISTS (SELECT 1 FROM tasks n WHERE n.root_id = tasks.id AND n.urgency = ? AND n.state != 'dropped')".into());
+        wheres.push(if roots {
+            "EXISTS (SELECT 1 FROM tasks n WHERE n.root_id = tasks.id AND n.urgency = ? AND n.state != 'dropped')".into()
+        } else {
+            "urgency = ?".into()
+        });
         params.push(u.to_string().into());
     }
-    let mut sql = wheres.join(" AND ");
-    if let Some((clause, shared)) = share_categories(ctx, f.category.as_deref(), "category")? {
-        sql.push_str(&clause);
+    if let Some((clause, shared)) = share_categories(ctx, f.category.as_deref(), category)? {
+        wheres.push(clause.trim_start().trim_start_matches("AND ").to_string());
         params.extend(shared);
     }
-    Ok((sql, params))
+    Ok(())
+}
+
+fn survey_filters(ctx: &ToolCtx, f: &Filters) -> Result<(String, Vec<SqlValue>), ToolError> {
+    let mut wheres = vec!["user_id = ?".to_string(), "parent_id IS NULL".to_string()];
+    let mut params: Vec<SqlValue> = vec![ctx.user_id.into()];
+    state_filter(ctx, f.state.as_deref(), &mut wheres, &mut params)?;
+    filters(ctx, f, Level::Roots, &mut wheres, &mut params)?;
+    Ok((wheres.join(" AND "), params))
 }
 
 /// The top-level tasks, each with its leaf counts, its next part due and
@@ -626,7 +721,10 @@ mod tests {
         assert_eq!(item["notes"], "fridge");
         assert_eq!(item["due"], "2099-01-02");
         assert_eq!(item["duration_min"], 15);
-        assert!(item["created_at"].is_string());
+        for gone in ["created_at", "updated_at", "duration_source", "source", "root_id", "position", "effective_due_at", "effective_urgency"] {
+            assert!(item.get(gone).is_none(), "{gone}: {item}");
+        }
+        assert!(item["children"][0].get("children").is_none());
         assert_eq!(item["children"][0]["state"], "done");
         assert_eq!(item["children"][1]["due"], "2099-01-02", "a child shows its effective due");
         let child = item["children"][1]["id"].as_i64().unwrap();
@@ -653,7 +751,10 @@ mod tests {
         let out = talk(&conn, &tmp, "task_find", json!({"sort": "urgency"}));
         let order: Vec<i64> = out["items"].as_array().unwrap().iter().map(|t| t["id"].as_i64().unwrap()).collect();
         assert_eq!(order, [top, late, soon, plain, low]);
-        assert_eq!(talk(&conn, &tmp, "task_find", json!({"overdue": true}))["items"][0]["id"], late, "a root is as due as its parts");
+        let overdue = talk(&conn, &tmp, "task_find", json!({"overdue": true}));
+        assert_eq!(overdue["items"][0]["path"], "has a late part › part", "{overdue}");
+        assert_eq!(talk(&conn, &tmp, "task_find", json!({"overdue": false}))["items"].as_array().unwrap().len(), 4);
+        assert_eq!(talk(&conn, &tmp, "task_find", json!({"sort": "due"}))["items"][0]["id"], late, "a root is as due as its parts");
         assert_eq!(talk(&conn, &tmp, "task_find", json!({"urgency": "HIGH"}))["total"], 1);
         assert_eq!(talk(&conn, &tmp, "task_find", json!({"category": "School"}))["total"], 1);
         assert_eq!(talk(&conn, &tmp, "task_find", json!({"due_before": "tomorrow"}))["total"], 2);
@@ -665,6 +766,38 @@ mod tests {
         assert_eq!(talk(&conn, &tmp, "task_find", json!({"state": "complete"}))["items"][0]["id"], plain);
         assert_eq!(talk(&conn, &tmp, "task_find", json!({"state": "any"}))["total"], 5);
         assert_eq!(talk(&conn, &tmp, "task_list", json!({"is_now": false}))["total"], 4);
+    }
+
+    #[test]
+    fn a_due_filter_lists_the_nodes_due_then_at_any_depth() {
+        let (conn, tmp) = env("UTC");
+        let unit = make(&conn, &tmp, &json!({"title": "Unit 4", "due": "2099-11-13", "children": ["Read", {"title": "Problem set 4", "due": "2099-10-23"}]}));
+        let essay = make(&conn, &tmp, &json!({"title": "Essay", "due": "2099-10-23", "category": "History"}));
+        make(&conn, &tmp, &json!({"title": "Gym bag", "due": "2099-10-22"}));
+        let friday = talk(&conn, &tmp, "task_find", json!({"due": "2099-10-23"}));
+        assert_eq!(titles(&friday), ["Essay", "Problem set 4"], "{friday}");
+        assert_eq!(friday["items"][1]["path"], "Unit 4 › Problem set 4");
+        assert!(!friday["items"].as_array().unwrap().iter().any(|i| i["id"] == unit));
+        let window = talk(&conn, &tmp, "task_find", json!({"due_after": "2099-10-23", "due_before": "2099-10-24"}));
+        assert_eq!(titles(&window), titles(&friday));
+        let before = talk(&conn, &tmp, "task_find", json!({"due_before": "2099-10-23"}));
+        assert_eq!(titles(&before), ["Gym bag"], "due_before leaves its own day out");
+        let history = talk(&conn, &tmp, "task_find", json!({"due": "2099-10-23", "category": "History"}));
+        assert_eq!(history["items"][0]["id"], essay);
+        assert_eq!(history["total"], 1);
+    }
+
+    #[test]
+    fn a_query_keeps_the_state_due_and_category_filters() {
+        let (conn, tmp) = env("UTC");
+        make(&conn, &tmp, &json!({"title": "Essay draft", "category": "History", "due": "2099-10-23"}));
+        make(&conn, &tmp, &json!({"title": "Essay outline", "category": "English", "state": "done"}));
+        assert_eq!(talk(&conn, &tmp, "task_find", json!({"query": "essay"}))["total"], 2);
+        assert_eq!(titles(&talk(&conn, &tmp, "task_find", json!({"query": "essay", "state": "done"}))), ["Essay outline"]);
+        assert_eq!(titles(&talk(&conn, &tmp, "task_find", json!({"query": "essay", "category": "History"}))), ["Essay draft"]);
+        assert_eq!(talk(&conn, &tmp, "task_find", json!({"query": "essay", "due": "2099-10-24"}))["total"], 0);
+        let sorted = talk(&conn, &tmp, "task_find", json!({"query": "essay", "sort": "due"}));
+        assert!(sorted["warnings"][0].as_str().unwrap().starts_with("sort was ignored"), "{sorted}");
     }
 
     fn share_ctx(tmp: &tempfile::TempDir, scope: crate::shares::ShareScope) -> ToolCtx<'_> {

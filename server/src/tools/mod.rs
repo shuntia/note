@@ -768,9 +768,9 @@ fn lean(v: &mut serde_json::Value, defs: &serde_json::Value) {
 
 const TOOLS: &[ToolSpec] = tools![
     "task_find": shapes::task_find => run!(raw task_query::find), share = Some(|s| s.tasks), reads = true;
-        "Find tasks. id reads tasks in full with their whole subtree; query matches words at any depth, each \
-         hit with its path; neither surveys the top-level tasks, each with its leaf count, its next part due \
-         and depth levels of children. A miss is total 0, not an error.",
+        "Find tasks. id reads tasks in full with their whole subtree; query, or a due filter, lists the \
+         matching nodes at any depth, each with its path; neither surveys the top-level tasks, each with its \
+         leaf count, its next part due and depth levels of children. A miss is total 0, not an error.",
     "task_save": shapes::task_save => run!(kind raw task_ops::save), writes = true;
         "Create or update tasks, children nested inline down to 4 levels below the top. A node with id, or \
          whose title is that of one open task under the same parent, is updated; any other is created. \
