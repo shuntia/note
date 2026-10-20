@@ -100,9 +100,10 @@ fn check_one(
         return Ok(None);
     }
     let date = local.date();
-    let allowance = triggers::allowance(conn, config_dir, &user.username, user.user_id, date)?;
-    if triggers::spent(conn, user.user_id, date)? >= allowance {
-        return Ok(None);
+    if let Some(cap) = triggers::allowance(conn, config_dir, &user.username, user.user_id, date)? {
+        if triggers::spent(conn, user.user_id, date)? >= cap {
+            return Ok(None);
+        }
     }
     let plan_id = crate::plan::ensure(conn, config_dir, &user.username, user.user_id, date)?;
     let id = triggers::insert(
@@ -437,6 +438,20 @@ mod tests {
         crate::triggers::insert(&conn, plan_id, "15:00", "ask", "agent", None, None, None,
             at("2026-09-30T08:00:00Z")).unwrap();
         assert!(check(&conn, tmp.path(), noon()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn no_daily_cap_never_runs_out() {
+        let (conn, tmp, uid) = env("triggers_per_day = -1\n");
+        seen(&conn, uid, "2026-09-30T11:00:00Z");
+        note(&conn, &tmp, "call the bank", MORNING, None);
+        let date: jiff::civil::Date = "2026-09-30".parse().unwrap();
+        let plan_id = crate::plan::ensure(&conn, tmp.path(), "aki", uid, date).unwrap();
+        for wall in ["15:00", "16:00", "17:00"] {
+            crate::triggers::insert(&conn, plan_id, wall, "ask", "agent", None, None, None,
+                at("2026-09-30T08:00:00Z")).unwrap();
+        }
+        assert_eq!(check(&conn, tmp.path(), noon()).unwrap().len(), 1);
     }
 
     #[test]

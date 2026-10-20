@@ -286,9 +286,9 @@ pub fn assemble_from(
         l,
         &ucfg.display_name,
         crate::learn::plan_factor(conn, user_id).unwrap_or(None).map(|f| (f.value, f.sample)),
-        crate::triggers::spent(conn, user_id, today).unwrap_or(0),
         crate::triggers::allowance_over(conn, ucfg.triggers_per_day(), user_id, today)
-            .unwrap_or_else(|_| ucfg.triggers_per_day()),
+            .unwrap_or_else(|_| ucfg.triggers_per_day())
+            .map(|allowance| (crate::triggers::spent(conn, user_id, today).unwrap_or(0), allowance)),
     );
     let activity = without_restated(activity, !order.is_empty());
     let render = |caps: &Caps| {
@@ -1566,10 +1566,21 @@ mod tests {
         let (conn, uid) = user();
         let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
         assert!(
-            out.contains("# Settings\n\nUser: X\nTrigger points you may lay today: 0 of 12 used\n"),
+            out.contains("# Settings\n\nUser: X\nTrigger points you may lay today: 0 of 12 used; to exceed it"),
             "{out}"
         );
         assert!(!out.contains("template default"), "{out}");
+    }
+
+    #[test]
+    fn no_daily_cap_leaves_the_budget_out() {
+        let tmp = cfg_dir();
+        let (conn, uid) = user();
+        std::fs::create_dir_all(tmp.path().join("users/aki")).unwrap();
+        std::fs::write(tmp.path().join("users/aki/user.toml"), "triggers_per_day = -1\n").unwrap();
+        let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
+        assert!(out.contains("# Settings\n\nUser: X\n"), "{out}");
+        assert!(!out.contains("Trigger points") && !out.contains("trigger_budget"), "{out}");
     }
 
     #[test]

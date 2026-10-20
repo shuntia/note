@@ -234,7 +234,7 @@ export type Settings = {
   category: 'member' | 'test'
   nightly_enabled: boolean
   checkins_enabled: boolean
-  // How many check-ins Note may start on its own in a day.
+  // How many check-ins Note may start on its own in a day; -1 is no limit.
   triggers_per_day: number
   pomodoro_enabled: boolean
   pomodoro_work_min: number

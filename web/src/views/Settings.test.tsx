@@ -3,6 +3,7 @@ import { expect, test, vi } from 'vitest'
 import { previewPlayer, type Sample } from '../voicePreview'
 import { VoiceGrid } from '../voiceSheet'
 import { RingChoices } from './Settings'
+import { triggersFromInput, triggersLabel, UNLIMITED } from './settings/triggers'
 
 test('a_second_preview_replaces_the_first', () => {
   const audio: Sample = {
@@ -73,4 +74,14 @@ test('the_voice_grid_credits_only_the_chosen_voice', () => {
     ].map((c) => c[1])
   expect(credits('ja:himari')).toEqual(['VOICEVOX:冥鳴ひまり'])
   expect(credits('af_heart')).toEqual([])
+})
+
+test('a_cleared_check_in_field_is_no_limit', () => {
+  expect(triggersFromInput('')).toBe(UNLIMITED)
+  expect(triggersFromInput('-1')).toBe(UNLIMITED)
+  expect(triggersFromInput('-5')).toBe(UNLIMITED)
+  expect(triggersFromInput('0')).toBe(0)
+  expect(triggersFromInput('99')).toBe(20)
+  expect(triggersLabel(UNLIMITED)).toBe('No limit')
+  expect(triggersLabel(4)).toBe('Up to 4 a day')
 })

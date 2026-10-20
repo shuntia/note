@@ -324,8 +324,12 @@ pub fn budget(
         Some(raw) => checked_day(raw, &triggers::timezone(ctx.config_dir, ctx.username), now)?,
         None => target_date(ctx, SessionKind::Talk, now),
     };
-    let base = triggers::allowance_of(ctx.config_dir, ctx.username);
-    let raised = triggers::allowance_over(conn, base, ctx.user_id, date).map_err(internal)? - base;
+    let Some(base) = triggers::allowance_of(ctx.config_dir, ctx.username) else {
+        return Err(ToolError::rejected("the user set no daily check-in limit; nothing to raise"));
+    };
+    let raised = triggers::allowance_over(conn, Some(base), ctx.user_id, date)
+        .map_err(internal)?
+        .map_or(0, |a| a - base);
     if raised + args.extra > base {
         return Err(ToolError::cap_reached(format!(
             "{date} is already raised by {raised}; a day reaches at most twice its {base} check-ins"
@@ -801,6 +805,20 @@ mod tests {
     }
 
     #[test]
+    fn no_daily_cap_lays_past_the_old_one_and_has_nothing_to_raise() {
+        let (conn, tmp) = env();
+        std::fs::create_dir_all(tmp.path().join("users/aki")).unwrap();
+        std::fs::write(tmp.path().join("users/aki/user.toml"), "triggers_per_day = -1\n").unwrap();
+        for n in 1..=6 {
+            dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "trigger_set",
+                &format!(r#"{{"at":"+{}min","prompt":"check in"}}"#, 60 + n * 30)).unwrap();
+        }
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "trigger_budget",
+            r#"{"extra":2,"reason":"they asked"}"#).unwrap_err();
+        assert_eq!(e.kind, "rejected");
+    }
+
+    #[test]
     fn a_day_is_raised_to_at_most_twice_its_allowance() {
         let (conn, tmp) = env();
         let raise = |n: u32| dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "trigger_budget",
@@ -820,6 +838,6 @@ mod tests {
         assert_eq!(out["allowance"], 6);
         let today = crate::triggers::allowance(&conn, tmp.path(), "aki", 1, day_in("America/Los_Angeles", 0))
             .unwrap();
-        assert_eq!(today, 4);
+        assert_eq!(today, Some(4));
     }
 }

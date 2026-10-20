@@ -336,9 +336,9 @@ pub struct UserConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkins_enabled: Option<bool>,
     /// How many trigger points Note may lay for itself in a day before it has
-    /// to ask.
+    /// to ask; `UNLIMITED_TRIGGERS` sets no cap.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub triggers_per_day: Option<u32>,
+    pub triggers_per_day: Option<i32>,
     /// Whether a session runs in rounds of work and break rather than straight
     /// through.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -383,6 +383,7 @@ pub struct UserConfig {
 }
 
 pub const DEFAULT_TRIGGERS_PER_DAY: u32 = 12;
+pub const UNLIMITED_TRIGGERS: i32 = -1;
 pub const DEFAULT_DAY_START: &str = "08:00";
 pub const DEFAULT_CLOSE_DAY_TIME: &str = "21:30";
 pub const DEFAULT_CALLS_UNTIL: &str = "23:00";
@@ -438,10 +439,11 @@ impl UserConfig {
         self.morning_until.as_deref().unwrap_or(DEFAULT_MORNING_UNTIL)
     }
 
-    pub fn triggers_per_day(&self) -> u32 {
+    /// `None` when the user set no daily cap.
+    pub fn triggers_per_day(&self) -> Option<u32> {
         match self.triggers_per_day {
-            Some(n) => n,
-            None => DEFAULT_TRIGGERS_PER_DAY,
+            Some(n) => u32::try_from(n).ok(),
+            None => Some(DEFAULT_TRIGGERS_PER_DAY),
         }
     }
 
@@ -887,7 +889,7 @@ mod tests {
             "display_name = \"X\"\ntimezone = \"UTC\"\ntemplate = \"default\"\n");
         let cfg = UserConfig::load(tmp.path(), "aki").unwrap();
         assert_eq!(cfg.day_start(), DEFAULT_DAY_START);
-        assert_eq!(cfg.triggers_per_day(), 12);
+        assert_eq!(cfg.triggers_per_day(), Some(12));
         write(tmp.path(), "users/aki/user.toml", "day_start = \"\"\n");
         assert_eq!(UserConfig::load(tmp.path(), "aki").unwrap().day_start(), "");
         write(tmp.path(), "users/aki/user.toml", "day_start = \"8:00\"\n");
@@ -912,13 +914,15 @@ mod tests {
         write(tmp.path(), "defaults/user.toml",
             "display_name = \"X\"\ntimezone = \"UTC\"\ntemplate = \"default\"\n");
         let cfg = UserConfig::load(tmp.path(), "aki").unwrap();
-        assert_eq!(cfg.triggers_per_day(), DEFAULT_TRIGGERS_PER_DAY);
+        assert_eq!(cfg.triggers_per_day(), Some(DEFAULT_TRIGGERS_PER_DAY));
         cfg.save(tmp.path(), "aki").unwrap();
         let raw = std::fs::read_to_string(tmp.path().join("users/aki/user.toml")).unwrap();
         assert!(!raw.contains("triggers_per_day"), "unexpected file: {raw}");
 
         write(tmp.path(), "users/aki/user.toml", "triggers_per_day = 7\n");
-        assert_eq!(UserConfig::load(tmp.path(), "aki").unwrap().triggers_per_day(), 7);
+        assert_eq!(UserConfig::load(tmp.path(), "aki").unwrap().triggers_per_day(), Some(7));
+        write(tmp.path(), "users/aki/user.toml", "triggers_per_day = -1\n");
+        assert_eq!(UserConfig::load(tmp.path(), "aki").unwrap().triggers_per_day(), None);
     }
 
     #[test]

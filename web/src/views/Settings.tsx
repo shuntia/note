@@ -24,6 +24,7 @@ import { SharesSection } from './settings/SharesSection'
 import { SkyStrip } from './settings/SkyStrip'
 import { SettingsContext, ToggleSetting, type SaveSettings } from './settings/ToggleSetting'
 import { TokensSection } from './settings/TokensSection'
+import { MAX_TRIGGERS_PER_DAY, triggersFromInput, triggersLabel, UNLIMITED } from './settings/triggers'
 
 export { RingChoices, SecuritySection }
 
@@ -41,7 +42,6 @@ const EDITABLE = [
   'idle_nudge_min',
 ] as const
 
-const MAX_TRIGGERS_PER_DAY = 20
 const MXID_EXAMPLE = '@you:server'
 const WORK_MIN = { min: 5, max: 120 }
 const BREAK_MIN = { min: 1, max: 60 }
@@ -578,7 +578,7 @@ export function Settings({
           {loaded && (
             <FoldRow
               label={t('settings.triggers')}
-              value={t('settings.triggers.value', { n: loaded.draft.triggers_per_day })}
+              value={triggersLabel(loaded.draft.triggers_per_day)}
               open={open === 'triggers'}
               onToggle={fold('triggers')}
             >
@@ -588,19 +588,29 @@ export function Settings({
                   <input
                     aria-label={t('settings.triggers.input')}
                     type="number"
-                    min={0}
+                    min={UNLIMITED}
                     max={MAX_TRIGGERS_PER_DAY}
-                    value={loaded.draft.triggers_per_day}
-                    onChange={(e) =>
-                      edit(
-                        'triggers_per_day',
-                        Math.min(MAX_TRIGGERS_PER_DAY, Math.max(0, Math.round(Number(e.target.value) || 0))),
-                      )
-                    }
+                    placeholder="∞"
+                    value={loaded.draft.triggers_per_day === UNLIMITED ? '' : loaded.draft.triggers_per_day}
+                    onChange={(e) => edit('triggers_per_day', triggersFromInput(e.target.value))}
                     {...commitOn('triggers')}
                   />
                   <Status save={save} row="triggers" />
                   <div className="set-acts">
+                    {loaded.draft.triggers_per_day !== UNLIMITED && (
+                      <button
+                        type="button"
+                        className="set-link"
+                        aria-label={t('settings.triggers.unlimited')}
+                        disabled={busy}
+                        onClick={() => {
+                          edit('triggers_per_day', UNLIMITED)
+                          void commit('triggers', { triggers_per_day: UNLIMITED })
+                        }}
+                      >
+                        ∞
+                      </button>
+                    )}
                     <button
                       type="button"
                       className="set-link"

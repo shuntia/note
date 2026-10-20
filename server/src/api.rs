@@ -1629,7 +1629,7 @@ struct SettingsPatch {
     counter: Option<String>,
     nightly_enabled: Option<bool>,
     checkins_enabled: Option<bool>,
-    triggers_per_day: Option<u32>,
+    triggers_per_day: Option<i32>,
     pomodoro_enabled: Option<bool>,
     pomodoro_work_min: Option<u32>,
     pomodoro_break_min: Option<u32>,
@@ -1648,7 +1648,7 @@ struct SettingsPatch {
 
 /// A day's worth of check-ins Note may start on its own; more than this and it
 /// is not a companion any more.
-const MAX_TRIGGERS_PER_DAY: u32 = 20;
+const MAX_TRIGGERS_PER_DAY: i32 = 20;
 const POMODORO_WORK_MIN: std::ops::RangeInclusive<u32> = 5..=120;
 const POMODORO_BREAK_MIN: std::ops::RangeInclusive<u32> = 1..=60;
 const IDLE_NUDGE_MIN: std::ops::RangeInclusive<u32> = 0..=240;
@@ -1678,7 +1678,7 @@ fn settings_body(
         "category": category,
         "nightly_enabled": features.nightly,
         "checkins_enabled": features.checkins,
-        "triggers_per_day": cfg.triggers_per_day(),
+        "triggers_per_day": cfg.triggers_per_day().map_or(i64::from(crate::config::UNLIMITED_TRIGGERS), i64::from),
         "pomodoro_enabled": cfg.pomodoro_enabled(),
         "pomodoro_work_min": cfg.pomodoro_work_min(),
         "pomodoro_break_min": cfg.pomodoro_break_min(),
@@ -1852,7 +1852,7 @@ async fn settings_put(
         cfg.checkins_enabled = Some(on);
     }
     if let Some(n) = req.triggers_per_day {
-        if n > MAX_TRIGGERS_PER_DAY {
+        if n != crate::config::UNLIMITED_TRIGGERS && !(0..=MAX_TRIGGERS_PER_DAY).contains(&n) {
             return invalid_field(
                 "triggers_per_day",
                 &format!("must be 0 to {MAX_TRIGGERS_PER_DAY}"),

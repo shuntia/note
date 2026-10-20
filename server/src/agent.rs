@@ -532,6 +532,24 @@ fn build_prompt(
     Ok(Prompt { system, context })
 }
 
+/// A user with no daily check-in cap has no budget to raise.
+fn session_schemas(
+    kind: SessionKind,
+    share: Option<&ShareSession>,
+    search: bool,
+    uncapped: bool,
+) -> std::borrow::Cow<'static, [serde_json::Value]> {
+    if let (SessionKind::Share, Some(s)) = (kind, share) {
+        return tools::share_schemas(&s.scope).into();
+    }
+    let offered = tools::offered_schemas(kind, search);
+    if uncapped {
+        offered.iter().filter(|s| s["name"] != "trigger_budget").cloned().collect::<Vec<_>>().into()
+    } else {
+        offered.into()
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_traced(
     deps: &SessionDeps,
@@ -545,13 +563,11 @@ fn run_traced(
     trace: &mut crate::trace::Builder,
 ) -> Result<SessionOutcome> {
     let (ucfg, lang) = reader(deps, username, kind);
+    let uncapped = ucfg.as_ref().is_ok_and(|c| c.triggers_per_day().is_none());
     let prompt = build_prompt(deps, user_id, username, kind, now, lang, ucfg)?;
     let system = &prompt.system;
     let profile = profile(kind);
-    let schemas: std::borrow::Cow<[serde_json::Value]> = match (kind, &deps.share) {
-        (SessionKind::Share, Some(s)) => tools::share_schemas(&s.scope).into(),
-        _ => tools::offered_schemas(kind, deps.search.is_some()).into(),
-    };
+    let schemas = session_schemas(kind, deps.share.as_ref(), deps.search.is_some(), uncapped);
     let mut messages = match start {
         Start::Fresh { history, opening } => {
             let mut m = history.to_vec();
@@ -1175,6 +1191,18 @@ mod tests {
         }
         assert_eq!(inert("1 < 2 and <b>bold</b>", "context"), "1 < 2 and <b>bold</b>");
         assert_eq!(inert("ends with <", "context"), "ends with <");
+    }
+
+    #[test]
+    fn no_daily_cap_offers_no_budget_to_raise() {
+        let named = |uncapped| {
+            session_schemas(SessionKind::Talk, None, true, uncapped)
+                .iter()
+                .any(|s| s["name"] == "trigger_budget")
+        };
+        assert!(named(false));
+        assert!(!named(true));
+        assert!(session_schemas(SessionKind::Talk, None, true, true).iter().any(|s| s["name"] == "trigger_set"));
     }
     use crate::providers::{mock::MockLLM, ChatResponse, ToolCall};
     use crate::tools::SessionKind;

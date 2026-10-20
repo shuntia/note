@@ -909,7 +909,7 @@ const TOOLS: &[ToolSpec] = tools![
         "Lay a trigger point: a moment to look again, then message the user, call them, or \
          stay quiet. prompt is your note on what you are following up; when the user asked to \
          be called, say so in it, lay it in the thread they asked in, and use call_user when \
-         it fires. date lays it on any later day, spending that day's allowance; tz \
+         it fires. date lays it on any later day; tz \
          reads at and date in the IANA zone the user named the time in. Check plan_list \
          first: a trigger within 20 minutes of a pending one is refused with that one named — \
          reword it with replace set to its id, or pass also when both are wanted. cancel_on \

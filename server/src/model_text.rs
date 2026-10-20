@@ -417,15 +417,23 @@ pub fn plan_factor(l: Lang, value: f64, sample: i64) -> String {
 }
 
 /// The plan factor appears once there is one.
-pub fn settings(l: Lang, name: &str, factor: Option<(f64, i64)>, spent: u32, allowance: u32) -> String {
+/// `budget` is today's (spent, allowance), absent when the user set no cap.
+pub fn settings(l: Lang, name: &str, factor: Option<(f64, i64)>, budget: Option<(u32, u32)>) -> String {
     let factor = factor.map(|(value, sample)| plan_factor(l, value, sample)).unwrap_or_default();
-    match l {
+    let budget = budget.map(|(spent, allowance)| match l {
         Lang::En => format!(
-            "# Settings\n\nUser: {name}\n{factor}Trigger points you may lay today: {spent} of {allowance} used\n\n"
+            "Trigger points you may lay today: {spent} of {allowance} used; to exceed it, ask the user and \
+             call trigger_budget only after they agree\n"
         ),
         Lang::Ja => format!(
-            "# 設定\n\nユーザー: {name}\n{factor}今日置けるトリガーポイント: {allowance}件中{spent}件使用済み\n\n"
+            "今日置けるトリガーポイント: {allowance}件中{spent}件使用済み。超えるなら先にユーザーに聞き、\
+             同意を得てから trigger_budget を呼ぶ\n"
         ),
+    });
+    let budget = budget.unwrap_or_default();
+    match l {
+        Lang::En => format!("# Settings\n\nUser: {name}\n{factor}{budget}\n"),
+        Lang::Ja => format!("# 設定\n\nユーザー: {name}\n{factor}{budget}\n"),
     }
 }
 

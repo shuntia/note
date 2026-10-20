@@ -157,24 +157,31 @@ pub(crate) fn midday_zone() -> jiff::tz::TimeZone {
     jiff::tz::TimeZone::get(&format!("Etc/GMT{:+}", hour - 12)).unwrap()
 }
 
-pub fn allowance_of(config_dir: &Path, username: &str) -> u32 {
+/// `None` when the user set no daily cap.
+pub fn allowance_of(config_dir: &Path, username: &str) -> Option<u32> {
     crate::config::UserConfig::load(config_dir, username)
-        .map_or(crate::config::DEFAULT_TRIGGERS_PER_DAY, |c| c.triggers_per_day())
+        .map_or(Some(crate::config::DEFAULT_TRIGGERS_PER_DAY), |c| c.triggers_per_day())
 }
 
-/// What the user's own extra raised today's allowance to.
+/// What the user's own extra raised today's allowance to; `None` is no cap.
 pub fn allowance(
     conn: &Connection,
     config_dir: &Path,
     username: &str,
     user_id: i64,
     date: jiff::civil::Date,
-) -> rusqlite::Result<u32> {
+) -> rusqlite::Result<Option<u32>> {
     allowance_over(conn, allowance_of(config_dir, username), user_id, date)
 }
 
 /// `allowance` over a daily allowance already read from the user's config.
-pub fn allowance_over(conn: &Connection, per_day: u32, user_id: i64, date: jiff::civil::Date) -> rusqlite::Result<u32> {
+pub fn allowance_over(
+    conn: &Connection,
+    per_day: Option<u32>,
+    user_id: i64,
+    date: jiff::civil::Date,
+) -> rusqlite::Result<Option<u32>> {
+    let Some(per_day) = per_day else { return Ok(None) };
     let extra: i64 = conn
         .query_row(
             "SELECT extra FROM trigger_budgets WHERE user_id = ?1 AND date = ?2",
@@ -183,7 +190,7 @@ pub fn allowance_over(conn: &Connection, per_day: u32, user_id: i64, date: jiff:
         )
         .optional()?
         .unwrap_or(0);
-    Ok(per_day.saturating_add(extra.max(0) as u32))
+    Ok(Some(per_day.saturating_add(extra.max(0) as u32)))
 }
 
 /// Triggers the agent laid, or idleness laid, for that day out of its own
@@ -396,11 +403,13 @@ pub fn lay(conn: &Connection, lay: &Lay) -> Result<Laid, Refusal> {
                  with replace before adding more"
             )));
         }
-        let allowance = allowance(conn, lay.config_dir, lay.username, lay.user_id, date)
-            .map_err(internal)?;
-        let spent = spent(conn, lay.user_id, date).map_err(internal)?;
-        if spent >= allowance {
-            return Err(Refusal::CapReached { date, allowance, spent });
+        if let Some(allowance) = allowance(conn, lay.config_dir, lay.username, lay.user_id, date)
+            .map_err(internal)?
+        {
+            let spent = spent(conn, lay.user_id, date).map_err(internal)?;
+            if spent >= allowance {
+                return Err(Refusal::CapReached { date, allowance, spent });
+            }
         }
     }
     if let Some(id) = lay.conversation_id {
@@ -1706,7 +1715,7 @@ mod tests {
     #[test]
     fn a_trigger_lands_on_the_day_and_counts_against_the_allowance() {
         let (conn, tmp, uid) = env();
-        assert_eq!(allowance(&conn, tmp.path(), "aki", uid, date()).unwrap(), 4);
+        assert_eq!(allowance(&conn, tmp.path(), "aki", uid, date()).unwrap(), Some(4));
         assert_eq!(spent(&conn, uid, date()).unwrap(), 0);
 
         let laid = lay(&conn, &lay_at(&tmp, uid, "11:00")).unwrap();
@@ -1800,7 +1809,7 @@ mod tests {
         assert!(matches!(e, Refusal::CapReached { allowance: 4, spent: 4, .. }), "got {e:?}");
 
         assert_eq!(add_extra(&conn, uid, date(), 2).unwrap(), 2);
-        assert_eq!(allowance(&conn, tmp.path(), "aki", uid, date()).unwrap(), 6);
+        assert_eq!(allowance(&conn, tmp.path(), "aki", uid, date()).unwrap(), Some(6));
         lay(&conn, &lay_at(&tmp, uid, "16:00")).unwrap();
         assert_eq!(add_extra(&conn, uid, date(), 1).unwrap(), 3);
     }

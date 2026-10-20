@@ -301,6 +301,12 @@ async fn the_allowance_is_a_setting_the_user_owns() {
     let (status, _) = send(&w, Request::put("/api/settings"), r#"{"triggers_per_day":99}"#).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(get(&w, "/api/settings").await.1["triggers_per_day"], 8);
+
+    let (status, saved) = send(&w, Request::put("/api/settings"), r#"{"triggers_per_day":-1}"#).await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(get(&w, "/api/settings").await.1["triggers_per_day"], -1, "no daily limit");
+    let (status, _) = send(&w, Request::put("/api/settings"), r#"{"triggers_per_day":-2}"#).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

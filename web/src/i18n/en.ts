@@ -764,6 +764,7 @@ export const en = {
   "settings.triggers": "Check-ins from Note",
   "settings.triggers.input": "Check-ins from Note a day",
   "settings.triggers.sub": "Moments Note sets aside to look at the day and reach out on its own. It asks before it goes past this.",
+  "settings.triggers.unlimited": "No limit",
   "settings.triggers.value": "Up to {n} a day",
   "settings.voice": "Voice",
   "settings.you": "You",

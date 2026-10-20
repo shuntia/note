@@ -137,6 +137,11 @@ mod tests {
             ] {
                 assert!(trigger.contains(name), "the trigger prompt ({lang:?}) never mentions {name}");
             }
+            for name in ["persona", "share", "voice", "summarize"] {
+                let text = load(name);
+                assert!(text.contains("ids") || text.contains("ID"), "the {name} prompt ({lang:?}) never keeps ids from the user");
+            }
+            assert!(!load("persona").contains("trigger_budget"), "the daily budget belongs to the context, which drops it when uncapped");
             let planning = load("planning");
             assert!(planning.contains("order_set"), "the planning prompt ({lang:?}) never sets the order");
             for name in NAMES {

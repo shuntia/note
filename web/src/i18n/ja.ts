@@ -765,6 +765,7 @@ export const ja: Dict = {
   "settings.triggers": "Note からのチェックイン",
   "settings.triggers.input": "1日あたりの Note からのチェックイン",
   "settings.triggers.sub": "Note が自発的に一日を見直し、声をかける回数です。超過時は事前に確認します。",
+  "settings.triggers.unlimited": "上限なし",
   "settings.triggers.value": "1日{n}回まで",
   "settings.voice": "声",
   "settings.you": "あなた",
