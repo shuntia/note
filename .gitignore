@@ -16,3 +16,7 @@ config/*.pem
 .claude/worktrees/
 __pycache__/
 .release/
+
+# eval run output; only the README is tracked
+eval/results/*
+!eval/results/README.md

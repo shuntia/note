@@ -2673,6 +2673,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "note-eval"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "jiff",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "toml",
+ "ureq 3.4.2",
+]
+
+[[package]]
 name = "note-server"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,4 @@
+kind = "trigger"
+local_hour = 10
+description = "A due wake-up follows up on a started tree and waits for an answer"
+prompt = "see whether the draft started"
