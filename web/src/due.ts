@@ -7,7 +7,7 @@ export type DueBody = { due_on: string } | { due_at: string } | { due_on: null }
 
 const pad = (n: number) => String(n).padStart(2, '0')
 
-const localDay = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+export const localDay = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
 
 // `date` and `time` as a date and a time input hold them; an empty time is the
 // whole day. `null` when the date does not read.

@@ -288,7 +288,7 @@ export function Home({
     newest(api.day(date))
       .then((d) => d && setDay(d))
       .catch(() =>
-        setDay({ date, events: [], calendar: [], free: [], quiet_now: null, history: [] }),
+        setDay({ date, items: [], events: [], calendar: [], free: [], quiet_now: null, history: [] }),
       )
     api.candidates(1).then(
       (items) => setUpNext(items[0] ?? null),
@@ -728,7 +728,7 @@ export function Home({
       else if (node) {
         const leaf = s.leaf_id !== null && s.leaf_id !== node.id ? findNode([node], s.leaf_id) : null
         const path = [node.title, ...(leafOf(s) ? (s.leaf_path ?? []).slice(1) : [])]
-        items = [{ task: node, leaf, path, step: leaf, planned_min: s.planned_min, reason: 'oldest' }, ...items]
+        items = [{ task: node, leaf, path, planned_min: s.planned_min, reason: 'oldest' }, ...items]
         index = 1
       } else {
         stripFor.current = ''

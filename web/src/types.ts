@@ -545,8 +545,19 @@ export type FreeWindow = { start: string; end: string }
 
 // One local day, whole. `history` is empty for a day that has not started, and
 // `quiet_now` is only ever set for today.
+// One entry of a day's list in display order: a task item (`t` id) names its task.
+export type DayItem = {
+  id: string
+  kind: 'task' | 'wake' | 'routine' | 'event' | 'busy'
+  task?: number
+  state?: TaskState
+  at?: string
+  end?: string
+}
+
 export type DayView = {
   date: string
+  items: DayItem[]
   events: PlanEvent[]
   calendar: CalendarOccurrence[]
   free: FreeWindow[]
@@ -584,10 +595,6 @@ export type WorkSession = {
   leaf_path: string[]
   leaf_index: number | null
   leaf_count: number | null
-  // Mirrors of leaf_index, leaf_count and leaf_title.
-  step_index: number | null
-  step_count: number | null
-  step_name: string | null
   notes: string
   // The session thread; break reports and Note's own check-ins are in it.
   conversation_id: number | null
@@ -605,7 +612,7 @@ export type SessionStart = {
   notes?: string
 }
 
-// Today's order: the tasks Now works through, first to last.
+// A day's open task items, first to last.
 export type RunOrder = { date: string; task_ids: number[] }
 
 export type QueueReason = 'now' | 'overdue' | 'urgent' | 'due_soon' | 'oldest' | 'scheduled' | 'order'
@@ -617,8 +624,6 @@ export type QueueEntry = {
   task: TaskNode
   leaf: Task | null
   path: string[]
-  // Equal to `leaf`.
-  step: Task | null
   planned_min: number | null
   reason: QueueReason
   event_id?: number

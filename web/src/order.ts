@@ -2,7 +2,13 @@ import { useEffect, type RefObject } from 'react'
 import { flushSync } from 'react-dom'
 import { reducedMotion } from './motion'
 import { holds } from './tree'
-import type { TaskNode } from './types'
+import type { DayItem, TaskNode } from './types'
+
+// The day's open task items in list order: the order Soon lifts and drags.
+export const openTaskItems = (items: DayItem[]): number[] =>
+  items.flatMap((i) =>
+    i.kind === 'task' && i.task !== undefined && (i.state === 'open' || i.state === 'in_progress') ? [i.task] : [],
+  )
 
 // Soon's rows with today's order on top: each ordered item lifts the task that
 // holds it, once, and the other rows keep their order beneath.

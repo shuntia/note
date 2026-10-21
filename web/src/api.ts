@@ -380,11 +380,6 @@ export const api = {
     request<WorkSession>(`/api/sessions/${id}/pause`, { method: 'POST' }),
   resumeWorkSession: (id: number) =>
     request<WorkSession>(`/api/sessions/${id}/resume`, { method: 'POST' }),
-  stepWorkSession: (id: number, step: { step_index: number; step_name: string }) =>
-    request<WorkSession>(`/api/sessions/${id}/step`, {
-      method: 'POST',
-      body: JSON.stringify(step),
-    }),
   // No leaf: the next open leaf after the current one under the session's task;
   // the leaf stays put when none follows.
   advanceWorkSession: (id: number, leaf_id?: number) =>
@@ -403,9 +398,8 @@ export const api = {
   rounds: () => request<{ rounds: number }>('/api/sessions/today'),
   // Today's order, then the priority queue behind it.
   candidates: (limit = 5) => request<QueueEntry[]>(`/api/tasks/candidates?limit=${limit}`),
-  order: () => request<RunOrder>('/api/order'),
-  setOrder: (task_ids: number[]) =>
-    request<RunOrder>('/api/order', { method: 'PUT', body: JSON.stringify({ task_ids }) }),
+  setDayOrder: (date: string, task_ids: number[]) =>
+    request<RunOrder>(`/api/day/${date}/order`, { method: 'PUT', body: JSON.stringify({ task_ids }) }),
   calendar: () => request<{ entries: CalendarEntry[] }>('/api/calendar'),
   addCalendarEntry: (fields: CalendarFields) =>
     request<CalendarEntry>('/api/calendar', { method: 'POST', body: JSON.stringify(fields) }),

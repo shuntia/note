@@ -13,7 +13,7 @@ import {
 } from 'react'
 import { api, ApiError } from '../api'
 import { latest } from '../coalesce'
-import { dropped, useLiftDrag, withOrder, type DropTo } from '../order'
+import { dropped, openTaskItems, useLiftDrag, withOrder, type DropTo } from '../order'
 import type { ViewProps } from '../app'
 import { collapse, flip, settle } from '../motion-gsap'
 import { reducedMotion } from '../motion'
@@ -21,7 +21,7 @@ import { Overflow, useMenuSheet, type OverflowItem } from '../overflow'
 import { useStableCallback, useStableMethods } from '../stable'
 import { Tick } from '../tick'
 import { urgencyRank } from '../urgent'
-import { dueBody, dueDraft, dueParts, goalDated, type DueBody } from '../due'
+import { dueBody, dueDraft, dueParts, goalDated, localDay, type DueBody } from '../due'
 import {
   findNode,
   finish,
@@ -415,8 +415,8 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
   const load = useCallback(() => {
     loadGoals()
     api
-      .order()
-      .then((o) => setRunOrder(o.task_ids))
+      .day(localDay(new Date()))
+      .then((d) => setRunOrder(openTaskItems(d.items)))
       .catch(() => setRunOrder([]))
     newest(api.tasks())
       .then((ts) => {
@@ -873,7 +873,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
         mark()
         setRunOrder(next)
         api
-          .setOrder(next)
+          .setDayOrder(localDay(new Date()), next)
           .then((o) => setRunOrder(o.task_ids))
           .catch(() => {
             notify(t('tasks.updateFailed'))

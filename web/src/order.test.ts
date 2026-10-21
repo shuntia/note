@@ -1,9 +1,22 @@
 import { describe, expect, test } from 'vitest'
-import { dropped, gapAt, landing, withOrder } from './order'
-import type { TaskNode } from './types'
+import { dropped, gapAt, landing, openTaskItems, withOrder } from './order'
+import type { DayItem, TaskNode } from './types'
 
 const node = (id: number, steps: number[] = []) =>
   ({ id, children: steps.map((s) => ({ id: s, children: [] })) }) as unknown as TaskNode
+
+describe('openTaskItems', () => {
+  test('only open task items, in list order', () => {
+    const items: DayItem[] = [
+      { id: 'e1', kind: 'wake', at: '09:00' },
+      { id: 't7', kind: 'task', task: 7, state: 'in_progress' },
+      { id: 't8', kind: 'task', task: 8, state: 'done' },
+      { id: 'c2', kind: 'event', at: '10:00' },
+      { id: 't3', kind: 'task', task: 3, state: 'open' },
+    ]
+    expect(openTaskItems(items)).toEqual([7, 3])
+  })
+})
 
 describe('withOrder', () => {
   test('ordered tasks lead, once each, and the rest keep their order', () => {

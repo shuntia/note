@@ -5,7 +5,7 @@ import type { QueueEntry, Task } from './types'
 const task = (o: Partial<Task>): Task =>
   ({ id: 1, title: 'Read', due_at: null, state: 'open', notes: '', duration_min: null, is_now: false, ...o }) as unknown as Task
 const entry = (o: Partial<QueueEntry>): QueueEntry =>
-  ({ task: { ...task({}), children: [] }, leaf: null, path: [], step: null, planned_min: null, reason: 'oldest', ...o })
+  ({ task: { ...task({}), children: [] }, leaf: null, path: [], planned_min: null, reason: 'oldest', ...o })
 
 beforeEach(() => {
   const store = new Map<string, string>()
@@ -40,7 +40,7 @@ test('the rail rubber-bands past the ends', () => {
 test('a session is built like the Tasks view builds one', () => {
   const leaf = task({ id: 9, title: 'Step two', notes: 'n', duration_min: 20 })
   const parent = { ...task({ id: 3, title: 'Essay' }), children: [] }
-  expect(sessionFor(entry({ task: parent, leaf, step: leaf, planned_min: 20 }))).toEqual({
+  expect(sessionFor(entry({ task: parent, leaf, planned_min: 20 }))).toEqual({
     title: 'Essay', task_id: 3, notes: 'n', leaf_id: 9, planned_min: 20,
   })
 })
