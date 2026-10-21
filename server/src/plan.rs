@@ -12,6 +12,8 @@ pub enum ShiftError {
     OutOfWindow { offset: i64, window: i64 },
     #[error("event already {status}")]
     Decided { status: String },
+    #[error("a block from {start} must end after it, by 23:59")]
+    Empty { start: String },
     #[error(transparent)]
     Db(#[from] rusqlite::Error),
     #[error(transparent)]
@@ -451,6 +453,9 @@ pub fn reshape(
     };
     if status == "done" || status == "dropped" {
         return Err(ShiftError::Decided { status });
+    }
+    if crate::templates::wall_minutes(end) <= crate::templates::wall_minutes(start) {
+        return Err(ShiftError::Empty { start: start.to_string() });
     }
     conn.execute(
         "UPDATE events SET wall_time = ?1, end_wall_time = ?2 WHERE id = ?3",

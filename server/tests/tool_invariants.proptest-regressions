@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc a9e1fa9e6501007f3f7ee2e9e76db3f9bc0a34b98a9cf3257f7858a288f7610e # shrinks to ops = [Reshape(4, "23:00", "00:00"), Slide(4, 59)]
