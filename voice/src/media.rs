@@ -72,7 +72,9 @@ impl MediaJoin for LiveKitJoin {
         mxid: &str,
         wait: Duration,
     ) -> Result<Box<dyn MediaIo>> {
-        let (url, jwt) = matrix.livekit_jwt(livekit_service_url, room_id).await?;
+        let (url, jwt) = matrix.livekit_jwt(livekit_service_url, room_id).await.inspect_err(|e| {
+            eprintln!("voice: fetching the LiveKit token for {room_id} failed: {e:#}");
+        })?;
         let who = Who { user_prefix: format!("{mxid}:"), bot_prefix: format!("{}:", matrix.user_id) };
         Ok(Box::new(LiveKitMedia::join(&url, &jwt, &who, wait).await?))
     }
@@ -115,14 +117,22 @@ impl LiveKitMedia {
     /// who has not joined within `wait` ends the media with `Gone::Failed`.
     /// Needs the process's rustls provider installed, since the build links two.
     pub async fn join(url: &str, jwt: &str, who: &Who, wait: Duration) -> Result<LiveKitMedia> {
-        let (room, events) = tokio::time::timeout(CONNECT_WAIT, Room::connect(url, jwt, RoomOptions::default()))
-            .await
-            .map_err(|_| anyhow!("joining LiveKit timed out after {CONNECT_WAIT:?}"))?
-            .context("joining LiveKit")?;
+        let (room, events) = match tokio::time::timeout(CONNECT_WAIT, Room::connect(url, jwt, RoomOptions::default())).await {
+            Ok(Ok(joined)) => joined,
+            Ok(Err(e)) => {
+                eprintln!("voice: connecting to LiveKit at {url} failed: {e}");
+                return Err(anyhow::Error::from(e).context("joining LiveKit"));
+            }
+            Err(_) => {
+                eprintln!("voice: connecting to LiveKit at {url} timed out after {CONNECT_WAIT:?}");
+                return Err(anyhow!("joining LiveKit timed out after {CONNECT_WAIT:?}"));
+            }
+        };
         let options = AudioSourceOptions { echo_cancellation: false, noise_suppression: false, auto_gain_control: false };
         let source = NativeAudioSource::new(options, OUT_RATE, 1, 100);
         let track = LocalAudioTrack::create_audio_track("note", RtcAudioSource::Native(source.clone()));
         if let Err(e) = room.local_participant().publish_track(LocalTrack::Audio(track), TrackPublishOptions::default()).await {
+            eprintln!("voice: publishing the bot's track failed: {e}");
             close(&room).await;
             return Err(anyhow::Error::from(e).context("publishing the bot's track"));
         }
@@ -422,6 +432,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "needs NOTE_VOICE_LIVE=<bot json>, NOTE_VOICE_HOMESERVER and NOTE_VOICE_RTC_FOCUS"]
     async fn the_bot_joins_and_publishes() {
+        let _ = env_logger::builder().is_test(true).try_init();
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let creds: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(std::env::var("NOTE_VOICE_LIVE").unwrap()).unwrap()).unwrap();
