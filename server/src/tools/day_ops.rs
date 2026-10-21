@@ -93,6 +93,7 @@ struct EventRow {
     orig: String,
     window: i64,
     prompt: String,
+    origin: String,
     /// The task a block delivers.
     task: Option<i64>,
 }
@@ -109,7 +110,7 @@ impl EventRow {
 fn event(conn: &Connection, user_id: i64, id: i64) -> Result<Option<EventRow>, ToolError> {
     conn.query_row(
         "SELECT e.id, p.date, e.kind, e.wall_time, e.end_wall_time, e.status, e.flexibility, e.orig_wall_time,
-                e.slide_window_min, e.prompt,
+                e.slide_window_min, e.prompt, e.origin,
                 CASE WHEN e.end_wall_time IS NOT NULL
                      THEN (SELECT task_id FROM event_tasks WHERE event_id = e.id LIMIT 1) END
          FROM events e JOIN plans p ON p.id = e.plan_id WHERE e.id = ?1 AND p.user_id = ?2",
@@ -127,7 +128,8 @@ fn event(conn: &Connection, user_id: i64, id: i64) -> Result<Option<EventRow>, T
                 orig: r.get(7)?,
                 window: r.get(8)?,
                 prompt: r.get(9)?,
-                task: r.get(10)?,
+                origin: r.get(10)?,
+                task: r.get(11)?,
             })
         },
     )
@@ -1101,6 +1103,9 @@ impl<'a> Day<'a> {
             self.env.refused(r, format!("a routine's name is 1 to {MAX_ROUTINE_CHARS} characters"));
             return Ok(());
         }
+        if let Some(same) = self.routine_named(date, &name)? {
+            return self.rework_routine(r, &same, at, None, None, flexibility.as_deref(), zone);
+        }
         let (date, w) = match at.map(|v| self.at(&v, date, zone)) {
             Some(Ok(At::Wall(d, w))) => (d, w),
             Some(Ok(At::In(m))) => {
@@ -1157,13 +1162,61 @@ impl<'a> Day<'a> {
         Ok(())
     }
 
-    fn rework_routine(&mut self, r: &Ref, ev: &EventRow, at: Option<Value>, snooze: Option<Value>, minutes: Option<i64>, zone: Option<&jiff::tz::TimeZone>) -> Result<(), ToolError> {
+    /// The routine of that name still waiting on `date`, which a routine item
+    /// naming it again changes rather than doubles.
+    fn routine_named(&self, date: Date, name: &str) -> Result<Option<EventRow>, ToolError> {
+        let mut stmt = self
+            .conn
+            .prepare_cached(
+                "SELECT e.id, e.kind FROM events e JOIN plans p ON p.id = e.plan_id
+                 WHERE p.user_id = ?1 AND p.date = ?2 AND e.kind != ?3 AND e.end_wall_time IS NULL
+                   AND e.status IN ('pending','snoozed') ORDER BY e.id",
+            )
+            .map_err(internal)?;
+        let rows: Vec<(i64, String)> = stmt
+            .query_map((self.ctx.user_id, date.to_string(), triggers::KIND), |x| Ok((x.get(0)?, x.get(1)?)))
+            .and_then(|rows| rows.collect::<rusqlite::Result<Vec<_>>>())
+            .map_err(internal)?;
+        match rows.into_iter().find(|(_, kind)| loose::fold(kind) == loose::fold(name)) {
+            Some((id, _)) => event(self.conn, self.ctx.user_id, id),
+            None => Ok(None),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn rework_routine(
+        &mut self,
+        r: &Ref,
+        ev: &EventRow,
+        at: Option<Value>,
+        snooze: Option<Value>,
+        minutes: Option<i64>,
+        flexibility: Option<&str>,
+        zone: Option<&jiff::tz::TimeZone>,
+    ) -> Result<(), ToolError> {
         let e = ev;
         if e.settled() {
             self.env.refused(r, format!("{} at {} is already {}; the user decided it", e.kind, e.wall, e.status));
             return Ok(());
         }
         let mut changed = false;
+        if let Some(f) = flexibility {
+            match loose::choice(f, &["fixed", "slide", "drop"], &[("flexible", "slide"), ("optional", "drop"), ("droppable", "drop")]) {
+                Some(f) if e.origin == "template" => {
+                    if f != e.flexibility {
+                        self.ignore(r, "flexibility", "a routine from the user's template keeps its flexibility");
+                    }
+                }
+                Some(f) => {
+                    changed |= self
+                        .conn
+                        .execute("UPDATE events SET flexibility = ?1 WHERE id = ?2 AND flexibility != ?1", (f, e.id))
+                        .map_err(internal)?
+                        > 0;
+                }
+                None => self.ignore(r, "flexibility", "flexibility is fixed, slide or drop"),
+            }
+        }
         if let Some(v) = snooze {
             match loose::minutes(&v).filter(|m| (1..=1440).contains(m)) {
                 Some(m) => match crate::plan::snooze(self.conn, self.ctx.user_id, e.id, m) {
@@ -1176,6 +1229,7 @@ impl<'a> Day<'a> {
         }
         if let Some(v) = at {
             match self.at(&v, e.date, zone) {
+                Ok(At::Wall(day, clock)) if day == e.date && minutes_of(&clock) == minutes_of(&e.wall) => {}
                 Ok(At::Wall(day, clock)) if day == e.date => {
                     let target = minutes_of(&clock);
                     if let Some(end) = &e.end {
@@ -1300,11 +1354,12 @@ impl<'a> Day<'a> {
             let at = o.take(&["at", "time", "start", "when"]);
             let snooze = o.take(&["snooze_min", "snooze"]);
             let minutes = o.take(&["minutes", "duration_min", "duration", "length"]).and_then(|v| loose::minutes(&v)).filter(|m| *m > 0);
+            let flexibility = o.take(&["flexibility", "flex"]).and_then(|v| loose::text(&v));
             for field in o.rest() {
                 let why = loose::unknown(&field, ELSEWHERE);
                 self.ignore(r, &field, why);
             }
-            return self.rework_routine(r, &e, at, snooze, minutes, zone.as_ref());
+            return self.rework_routine(r, &e, at, snooze, minutes, flexibility.as_deref(), zone.as_ref());
         }
         if wake.is_some() || hint.as_deref().is_some_and(|h| matches!(h, "wake" | "trigger" | "reminder")) {
             if let Some(t) = task {
@@ -1677,7 +1732,7 @@ fn remove_event(day: &mut Day, r: &Ref, e: &EventRow) -> Result<(), ToolError> {
         day.env.removed.push(json!({ "id": format!("e{}", e.id), "title": excerpt(&e.prompt) }));
         return Ok(());
     }
-    if e.flexibility != "drop" {
+    if e.flexibility != "drop" && e.origin == "template" {
         day.env.refused(r, format!("{} at {} is a {} routine; only droppable ones come off the day", e.kind, e.wall, e.flexibility));
         return Ok(());
     }
@@ -2078,10 +2133,21 @@ mod tests {
         assert_eq!(woken["ignored"][0]["field"], "routine", "{woken}");
         let snoozed = talk(&conn, &tmp, "schedule_move", json!({ "event_id": id[1..].parse::<i64>().unwrap(), "minutes": 10, "snooze": true }));
         assert_eq!(snoozed["ok"], true, "{snoozed}");
+        let again = talk(&conn, &tmp, "day_save", json!({ "items": [{ "routine": "Stretch", "at": "15:30", "flexibility": "drop" }] }));
+        assert_eq!((again["saved"][0]["id"].as_str(), again["saved"][0]["op"].as_str()), (Some(id.as_str()), Some("updated")), "named again, it is changed, not doubled: {again}");
         let fixed = talk(&conn, &tmp, "schedule_insert", json!({ "date": today().to_string(), "kind": "meds", "time": "17:00", "flexibility": "fixed", "channel": "push" }));
         let meds = fixed["saved"][0]["id"].clone();
-        let refused = talk(&conn, &tmp, "day_remove", json!({ "ids": [meds] }));
-        assert_eq!(refused["ok"], false, "a fixed routine stays: {refused}");
+        let removed = talk(&conn, &tmp, "day_remove", json!({ "ids": [meds] }));
+        assert_eq!(removed["ok"], true, "a routine Note added comes off whatever its flexibility: {removed}");
+        crate::plan::ensure(&conn, tmp.path(), "aitest", 1, today()).unwrap();
+        conn.execute(
+            "INSERT INTO events (plan_id, kind, wall_time, orig_wall_time, flexibility) SELECT id, 'meds', '18:00', '18:00', 'fixed' FROM plans LIMIT 1",
+            [],
+        )
+        .unwrap();
+        let template = conn.last_insert_rowid();
+        let refused = talk(&conn, &tmp, "day_remove", json!({ "ids": [format!("e{template}")] }));
+        assert_eq!(refused["ok"], false, "the template's fixed routine stays: {refused}");
     }
 
     #[test]
