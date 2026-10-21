@@ -1471,9 +1471,10 @@ pub fn save(conn: &Connection, ctx: &ToolCtx, kind: SessionKind, raw: &str) -> R
         }
     }
     if items.is_empty() && !replace && !carry && day.env.saved.is_empty() {
+        let gated = |i: &Value| i.get("ref").is_none() && matches!(i["field"].as_str(), Some("extra_wakes" | "carry"));
         if day.env.ignored.is_empty() {
             day.env.warn("nothing to save: items was empty");
-        } else if day.env.refused.is_empty() {
+        } else if day.env.refused.is_empty() && !day.env.ignored.iter().all(gated) {
             day.env.refuse_call("nothing was saved: the day's items go in items, a list");
         }
         return Ok(day.env.into_value());
@@ -2045,7 +2046,7 @@ mod tests {
         assert_eq!(over["ok"], false);
         assert!(over["refused"][0]["why"].as_str().unwrap().contains("extra_wakes"), "{over}");
         let ignored = call(&conn, &tmp, SessionKind::Trigger, "day_save", json!({ "extra_wakes": { "n": 2, "reason": "x" }, "items": [] }));
-        assert_eq!(ignored["ignored"][0]["field"], "extra_wakes", "{ignored}");
+        assert_eq!((ignored["ok"].clone(), ignored["ignored"][0]["field"].clone()), (json!(true), json!("extra_wakes")), "{ignored}");
         let out = talk(&conn, &tmp, "day_save", json!({ "extra_wakes": { "n": 9, "reason": "they asked to be pushed" }, "items": [{ "wake": "one more", "at": "+240min" }] }));
         assert_eq!(out["ok"], true, "{out}");
         assert_eq!(out["adjusted"][0]["to"], 4, "a day reaches at most twice its allowance");
