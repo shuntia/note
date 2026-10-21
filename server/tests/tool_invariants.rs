@@ -80,7 +80,7 @@ fn apply(conn: &rusqlite::Connection, ctx: &ToolCtx, op: &Op, mem_ids: &mut Vec<
     };
     if let Ok(out) = dispatch(conn, ctx, SessionKind::Nightly, name, &raw) {
         if name == "memory_write" {
-            if let Some(id) = out["id"].as_str() {
+            if let Some(id) = out["saved"][0]["id"].as_str() {
                 mem_ids.push(id.to_string());
             }
         }
