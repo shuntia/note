@@ -36,7 +36,7 @@ fn node() -> Value {
             "goal_id": { "type": "integer", "description": "Top-level tasks only." },
             "url": { "type": "string" },
             "new": { "type": "boolean", "description": "Create it even though an open task under the same parent has this title." },
-            "children": { "type": "array", "items": { "type": ["object", "string"] }, "description": "Child tasks of this same shape, or plain titles." }
+            "children": { "type": "array", "items": { "type": ["object", "string"] }, "description": "Child tasks of this same shape, or plain titles. A part already finished goes in with state done, so progress counts." }
         }
     })
 }

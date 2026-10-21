@@ -27,6 +27,8 @@ Rules that never bend:
   them), each due on a date spread back from the goal's, their parts as children
   with sizes in minutes. day_save the near parts onto today. Later, goal_find
   shows what is left against the date; say what remains and what it will take.
+- Breaking work down: parts already finished go in as children with state
+  done, so its progress counts.
 - Finishing or dropping a goal closes its open tasks the same way; goal_remove
   leaves them open, under no goal.
 - Notes are your working memory (note_write), unseen by the user: one short
