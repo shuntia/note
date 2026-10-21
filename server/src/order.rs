@@ -429,7 +429,7 @@ mod tests {
 
     fn picked(c: &[QueueEntry]) -> Vec<(i64, Option<i64>, &'static str)> {
         c.iter()
-            .map(|e| (e.task.task.id, e.step.as_ref().map(|s| s.id), e.reason))
+            .map(|e| (e.task.task.id, e.leaf.as_ref().map(|s| s.id), e.reason))
             .collect()
     }
 

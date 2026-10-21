@@ -109,8 +109,7 @@ async fn the_open_session_is_the_whole_face_the_client_paints() {
     let w = world(Vec::new()).await;
     let session = start(
         &w,
-        r#"{"title":"Common App essay draft","planned_min":60,"step_index":1,"step_count":3,
-            "step_name":"the opening paragraph","notes":"kitchen table"}"#,
+        r#"{"title":"Common App essay draft","planned_min":60,"notes":"kitchen table"}"#,
     )
     .await;
 
@@ -127,9 +126,9 @@ async fn the_open_session_is_the_whole_face_the_client_paints() {
     assert_eq!(session["phase_started_at"], session["started_at"]);
     assert_eq!(session["phase_paused_ms"], 0);
     assert_eq!(session["round"], 1);
-    assert_eq!(session["step_index"], 1);
-    assert_eq!(session["step_count"], 3);
-    assert_eq!(session["step_name"], "the opening paragraph");
+    for gone in ["step_index", "step_count", "step_name"] {
+        assert!(session.get(gone).is_none(), "{gone}");
+    }
     assert_eq!(session["notes"], "kitchen table");
     assert!(session["conversation_id"].is_i64(), "the session holds its own thread");
     assert!(session["started_at"].as_str().unwrap().parse::<jiff::Timestamp>().is_ok());
@@ -239,36 +238,6 @@ async fn pausing_holds_the_clock_and_a_stale_id_reaches_nothing() {
         let (status, _) = post(&w, &format!("/api/sessions/{}/{path}", id + 99), "").await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{path} on a session that is not open");
     }
-    let (status, _) = post(
-        &w,
-        &format!("/api/sessions/{}/step", id + 99),
-        r#"{"step_index":1,"step_name":"nowhere"}"#,
-    )
-    .await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-}
-
-#[tokio::test]
-async fn the_step_the_session_is_on_comes_back_with_the_session() {
-    let w = world(Vec::new()).await;
-    let session = start(&w, r#"{"title":"read the chapter","step_count":3}"#).await;
-    let id = session["id"].as_i64().unwrap();
-
-    let (status, moved) = post(
-        &w,
-        &format!("/api/sessions/{id}/step"),
-        r#"{"step_index":2,"step_name":"photos of the ceiling"}"#,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{moved}");
-    assert_eq!(moved["step_index"], 2);
-    assert_eq!(moved["step_name"], "photos of the ceiling");
-    assert_eq!(moved["step_count"], 3);
-    assert_eq!(get(&w, "/api/sessions/open").await.1["step_name"], "photos of the ceiling");
-
-    let (status, _) =
-        post(&w, &format!("/api/sessions/{id}/step"), r#"{"step_index":-1,"step_name":"x"}"#).await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
 }
 
 #[tokio::test]
@@ -308,11 +277,8 @@ async fn a_session_walks_the_leaves_of_its_tree() {
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     let (status, _) = post(&w, &format!("/api/sessions/{}/advance", id + 9), "{}").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-
-    let (status, stepped) =
-        post(&w, &format!("/api/sessions/{id}/step"), r#"{"step_index":3,"step_name":"draft"}"#).await;
-    assert_eq!(status, StatusCode::OK, "{stepped}");
-    assert_eq!(stepped["leaf_id"], draft, "the old step route lands on the same leaf");
+    let (status, _) = post(&w, &format!("/api/sessions/{id}/step"), r#"{"step_index":3,"step_name":"draft"}"#).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "the step route is gone");
 }
 
 #[tokio::test]

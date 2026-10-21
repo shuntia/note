@@ -34,34 +34,43 @@ async fn task(app: &axum::Router, cookie: &str, title: &str) -> i64 {
     t["id"].as_i64().unwrap()
 }
 
+fn today() -> String {
+    jiff::Timestamp::now().to_zoned(jiff::tz::TimeZone::UTC).date().to_string()
+}
+
+/// The open task items of today's list, first to last.
+async fn order(app: &axum::Router, cookie: &str) -> serde_json::Value {
+    let (status, day) = call(app, cookie, Method::GET, &format!("/api/day/{}", today()), None).await;
+    assert_eq!(status, StatusCode::OK, "{day}");
+    day["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| i["kind"] == "task" && (i["state"] == "open" || i["state"] == "in_progress"))
+        .map(|i| i["task"].clone())
+        .collect()
+}
+
 #[tokio::test]
-async fn the_order_is_read_and_replaced_whole() {
+async fn the_day_list_is_read_and_replaced_whole() {
     let (app, cookie, state, _cfg) = common::app_with_logged_in_user_and_state().await;
     let essay = task(&app, &cookie, "essay").await;
     let laundry = task(&app, &cookie, "laundry").await;
-
-    let (status, empty) = call(&app, &cookie, Method::GET, "/api/order", None).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(empty["task_ids"], json!([]));
-    let today = jiff::Timestamp::now().to_zoned(jiff::tz::TimeZone::UTC).date().to_string();
-    assert_eq!(empty["date"], today);
+    assert_eq!(order(&app, &cookie).await, json!([]));
 
     let (_conn_id, mut rx) = state.hub.register(1).unwrap();
     let body = format!(r#"{{"task_ids":[{laundry},{essay}]}}"#);
-    let (status, set) = call(&app, &cookie, Method::PUT, "/api/order", Some(&body)).await;
+    let (status, set) = call(&app, &cookie, Method::PUT, &format!("/api/day/{}/order", today()), Some(&body)).await;
     assert_eq!(status, StatusCode::OK, "{set}");
-    assert_eq!(set["task_ids"], json!([laundry, essay]));
+    assert_eq!((set["date"].as_str(), &set["task_ids"]), (Some(today().as_str()), &json!([laundry, essay])));
     let frame: serde_json::Value = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
     assert_eq!(frame["type"], "changed");
-
-    let (_, read) = call(&app, &cookie, Method::GET, "/api/order", None).await;
-    assert_eq!(read["task_ids"], json!([laundry, essay]));
+    assert_eq!(order(&app, &cookie).await, json!([laundry, essay]));
 
     let (status, _) =
         call(&app, &cookie, Method::PATCH, &format!("/api/tasks/{laundry}"), Some(r#"{"state":"done"}"#)).await;
     assert_eq!(status, StatusCode::OK);
-    let (_, read) = call(&app, &cookie, Method::GET, "/api/order", None).await;
-    assert_eq!(read["task_ids"], json!([essay]), "a finished task leaves the order");
+    assert_eq!(order(&app, &cookie).await, json!([essay]), "a finished task leaves the open list");
 }
 
 #[tokio::test]
@@ -73,11 +82,17 @@ async fn a_bad_order_is_refused_and_changes_nothing() {
         format!(r#"{{"task_ids":[{essay},{essay}]}}"#),
         format!(r#"{{"task_ids":[{essay}],"date":"2026-01-01"}}"#),
     ] {
-        let (status, _) = call(&app, &cookie, Method::PUT, "/api/order", Some(&body)).await;
+        let (status, _) = call(&app, &cookie, Method::PUT, &format!("/api/day/{}/order", today()), Some(&body)).await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
     }
-    let (_, read) = call(&app, &cookie, Method::GET, "/api/order", None).await;
-    assert_eq!(read["task_ids"], json!([]));
+    assert_eq!(order(&app, &cookie).await, json!([]));
+}
+
+#[tokio::test]
+async fn the_old_order_route_is_gone() {
+    let (app, cookie, _cfg) = common::app_with_logged_in_user().await;
+    let (status, _) = call(&app, &cookie, Method::GET, "/api/order", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -90,7 +105,7 @@ async fn now_starts_the_head_of_the_order() {
     assert_eq!(q[0]["task"]["title"], "essay");
     assert_eq!(q[0]["reason"], "oldest");
 
-    call(&app, &cookie, Method::PUT, "/api/order", Some(&format!(r#"{{"task_ids":[{laundry}]}}"#))).await;
+    call(&app, &cookie, Method::PUT, &format!("/api/day/{}/order", today()), Some(&format!(r#"{{"task_ids":[{laundry}]}}"#))).await;
     let (status, q) = call(&app, &cookie, Method::GET, "/api/tasks/candidates?limit=5", None).await;
     assert_eq!(status, StatusCode::OK, "{q}");
     let q = q.as_array().unwrap();

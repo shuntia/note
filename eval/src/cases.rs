@@ -198,7 +198,7 @@ pub fn seed(case: &Case, c: &Client, db: &rusqlite::Connection, zone: &str) -> R
                 fx.ids.insert(key.into(), id);
                 placed.push(id);
             }
-            c.must("PUT", "/api/order", &json!({ "task_ids": placed }))?;
+            c.must("PUT", &format!("/api/day/{today}/order"), &json!({ "task_ids": placed }))?;
             let plan = plan_id(c, db, today)?;
             block(db, plan, fx.ids["physics"], "Physics problem set", "14:00", "15:00", 60)?;
             block(db, plan, fx.ids["grocery"], "Grocery run", "16:30", "17:15", 45)?;

@@ -24,7 +24,6 @@ pub fn router(state: AppState) -> Router {
         .route("/api/tasks", get(tasks_list).post(tasks_create))
         .route("/api/tasks/queue", get(task_queue::<false>))
         .route("/api/tasks/candidates", get(task_queue::<true>))
-        .route("/api/order", get(order_get).put(order_put))
         .route("/api/tasks/{id}", patch(tasks_update).delete(tasks_delete))
         .route(
             "/api/tasks/by-external/{external_id}",
@@ -83,7 +82,6 @@ pub fn router(state: AppState) -> Router {
         .route("/api/sessions/{id}/end", post(work_session_end))
         .route("/api/sessions/{id}/pause", post(work_session_pause))
         .route("/api/sessions/{id}/resume", post(work_session_resume))
-        .route("/api/sessions/{id}/step", post(work_session_step))
         .route("/api/sessions/{id}/advance", post(work_session_advance))
         .route("/api/sessions/{id}/skip_break", post(work_session_skip_break))
         .route("/api/ws", get(ws_connect))
@@ -643,25 +641,6 @@ fn order_json(date: jiff::civil::Date, items: &[crate::order::Item]) -> serde_js
         "date": date.to_string(),
         "task_ids": items.iter().map(|i| i.task_id).collect::<Vec<_>>(),
     })
-}
-
-async fn order_get(user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
-    let today = jiff::Timestamp::now().to_zoned(user_zone(&state, &user.username)).date();
-    let conn = state.db();
-    match crate::order::list(&conn, user.id, today) {
-        Ok(items) => Json(order_json(today, &items)).into_response(),
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    }
-}
-
-/// Replaces today's order with the one the user dragged into place.
-async fn order_put(
-    user: CurrentUser,
-    State(state): State<AppState>,
-    Json(body): Json<OrderBody>,
-) -> axum::response::Response {
-    let today = jiff::Timestamp::now().to_zoned(user_zone(&state, &user.username)).date();
-    put_order(&state, &user, today, &body.task_ids)
 }
 
 /// Replaces one day's list of open task items, in the order given.
@@ -2991,12 +2970,6 @@ struct NewWorkSession {
     #[serde(default)]
     planned_min: Option<i64>,
     #[serde(default)]
-    step_index: Option<i64>,
-    #[serde(default)]
-    step_count: Option<i64>,
-    #[serde(default)]
-    step_name: Option<String>,
-    #[serde(default)]
     notes: Option<String>,
 }
 
@@ -3006,13 +2979,6 @@ struct EndWorkSession {
     outcome: String,
     #[serde(default)]
     discard: bool,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SessionStep {
-    step_index: i64,
-    step_name: String,
 }
 
 /// Opens a work session, stopping whatever was still running. The server lays
@@ -3035,9 +3001,6 @@ async fn work_session_start(
             event_id: req.event_id,
             title: req.title,
             planned_min: req.planned_min,
-            step_index: req.step_index,
-            step_count: req.step_count,
-            step_name: req.step_name,
             notes: req.notes,
         },
         jiff::Timestamp::now(),
@@ -3120,25 +3083,6 @@ async fn work_session_resume(
 ) -> impl IntoResponse {
     let conn = state.db();
     session_reply(crate::work::resume(&conn, &state.config_dir, user.id, id, jiff::Timestamp::now()))
-}
-
-async fn work_session_step(
-    user: CurrentUser,
-    State(state): State<AppState>,
-    Path(id): Path<i64>,
-    Json(req): Json<SessionStep>,
-) -> impl IntoResponse {
-    if req.step_index < 0 {
-        return unprocessable_field("step_index", "must not be negative");
-    }
-    if req.step_name.len() > crate::work::MAX_TITLE_BYTES {
-        return unprocessable_field(
-            "step_name",
-            &format!("must be at most {} bytes", crate::work::MAX_TITLE_BYTES),
-        );
-    }
-    let conn = state.db();
-    leaf_reply(crate::work::set_step(&conn, user.id, id, req.step_index, &req.step_name, jiff::Timestamp::now()))
 }
 
 #[derive(Deserialize, Default)]

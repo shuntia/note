@@ -1330,7 +1330,6 @@ pub struct QueueEntry {
     pub leaf: Option<Task>,
     /// Titles from the root down to the leaf.
     pub path: Vec<String>,
-    pub step: Option<Task>,
     pub planned_min: Option<u32>,
     pub reason: &'static str,
     /// The block a scheduled entry was laid in.
@@ -1346,7 +1345,6 @@ impl QueueEntry {
             .unwrap_or_else(|| vec![task.task.title.clone()]);
         Self {
             planned_min: planned_minutes(&task.task, leaf.as_ref()),
-            step: leaf.clone(),
             leaf,
             path,
             task,
@@ -2719,9 +2717,9 @@ mod tests {
 
         let q = queue(&conn, uid, &jiff::tz::TimeZone::UTC, now, 10).unwrap();
         let entry = |id: i64| q.iter().find(|e| e.task.task.id == id).unwrap();
-        assert_eq!(entry(stepped).step.as_ref().map(|s| s.id), Some(second));
+        assert_eq!(entry(stepped).leaf.as_ref().map(|s| s.id), Some(second));
         assert_eq!(entry(stepped).planned_min, Some(20));
-        assert!(entry(whole).step.is_none());
+        assert!(entry(whole).leaf.is_none());
         assert_eq!(entry(whole).planned_min, Some(45));
         assert_eq!(entry(bare).planned_min, None);
     }
@@ -3051,7 +3049,7 @@ mod tests {
         assert_eq!(q.iter().map(|e| e.task.task.id).collect::<Vec<_>>(), [course, other]);
         assert_eq!(q[0].reason, "due_soon");
         assert_eq!(q[0].leaf.as_ref().map(|l| l.id), Some(second));
-        assert_eq!(q[0].step.as_ref().map(|l| l.id), Some(second));
+        assert_eq!(q[0].leaf.as_ref().map(|l| l.id), Some(second));
         assert_eq!(q[0].path, ["course", "unit", "second"]);
         assert_eq!(q[0].planned_min, Some(35));
         assert!(q[1].leaf.is_none());

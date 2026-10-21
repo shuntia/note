@@ -197,9 +197,6 @@ fn start_block(
         title,
         planned_min: planned,
         leaf_id: None,
-        step_index: None,
-        step_count: None,
-        step_name: None,
         notes: None,
     };
     match crate::work::start(conn, config_dir, user_id, username, new, now) {

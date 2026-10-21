@@ -513,6 +513,7 @@ const MIGRATIONS: &[&str] = &[
      ALTER TABLE conversations ADD COLUMN effort TEXT;",
     TREE,
     DAY,
+    CLEANUP,
 ];
 
 /// v65: tasks form one tree. Each due/size/Now column loses its parent-only
@@ -607,6 +608,15 @@ const DAY: &str = "
         WHERE NOT EXISTS (SELECT 1 FROM run_order o
                           WHERE o.user_id = b.user_id AND o.date = b.date AND o.task_id = b.task_id);
     DROP TABLE day_blocks;
+";
+
+/// v67: the day list and the session's leaf are all that remain of the order
+/// and the step columns.
+const CLEANUP: &str = "
+    DROP TABLE run_order;
+    ALTER TABLE work_sessions DROP COLUMN step_index;
+    ALTER TABLE work_sessions DROP COLUMN step_count;
+    ALTER TABLE work_sessions DROP COLUMN step_name;
 ";
 
 pub fn server_setting(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
@@ -894,7 +904,7 @@ mod tests {
              INSERT INTO event_tasks (event_id, task_id) VALUES (1, 3), (2, 5), (3, 4), (4, 4);",
         )
         .unwrap();
-        apply_migrations(&conn, BASELINE, MIGRATIONS).unwrap();
+        apply_migrations(&conn, BASELINE, &MIGRATIONS[..11]).unwrap();
         let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
         assert_eq!(v, 66);
         let rows: Vec<(String, i64, Option<i64>)> = conn
@@ -921,6 +931,51 @@ mod tests {
         let leaf: Option<i64> = conn.query_row("SELECT leaf_id FROM work_sessions", [], |r| r.get(0)).unwrap();
         assert_eq!(leaf, Some(3));
         assert!(conn.execute("INSERT INTO day_items (user_id, date, position, task_id) VALUES (1, '2026-10-21', 9, 4)", []).is_err());
+    }
+
+    #[test]
+    fn v67_drops_the_order_table_and_the_step_columns_and_keeps_the_day_and_the_leaf() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        apply_migrations(&conn, BASELINE, &MIGRATIONS[..11]).unwrap();
+        conn.execute_batch(
+            "INSERT INTO users (username, pass_hash, role) VALUES ('aitest','h','member');
+             INSERT INTO tasks (id, user_id, title, created_at, updated_at) VALUES (1, 1, 'essay', 'x', 'x');
+             INSERT INTO tasks (id, user_id, title, created_at, updated_at, parent_id)
+                 VALUES (2, 1, 'outline', 'x', 'x', 1), (3, 1, 'draft', 'x', 'x', 1);
+             UPDATE tasks SET state = 'done' WHERE id = 2;
+             INSERT INTO work_sessions (user_id, task_id, leaf_id, title, started_at, step_index, step_count, step_name)
+                 VALUES (1, 1, 3, 'essay', 'x', 2, 2, 'draft');
+             INSERT INTO run_order (user_id, date, position, task_id) VALUES (1, '2026-10-21', 0, 3);
+             INSERT INTO plans (id, user_id, date, created_at) VALUES (1, 1, '2026-10-21', 'x');
+             INSERT INTO events (id, plan_id, kind, wall_time, end_wall_time, alert, status)
+                 VALUES (1, 1, 'draft', '13:00', '14:00', 0, 'pending');
+             INSERT INTO event_tasks (event_id, task_id) VALUES (1, 3);
+             INSERT INTO day_items (user_id, date, position, task_id, event_id) VALUES (1, '2026-10-21', 0, 3, 1);",
+        )
+        .unwrap();
+        apply_migrations(&conn, BASELINE, MIGRATIONS).unwrap();
+        let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, 67);
+        let tables: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sqlite_master WHERE name IN ('run_order', 'idx_run_order_day')", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(tables, 0);
+        let columns: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('work_sessions')")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(!columns.iter().any(|c| c.starts_with("step_")), "{columns:?}");
+        let session: (i64, i64) = conn.query_row("SELECT task_id, leaf_id FROM work_sessions", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!(session, (1, 3), "the open session stays on its leaf");
+        let item: (i64, Option<i64>) =
+            conn.query_row("SELECT task_id, event_id FROM day_items", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!(item, (3, Some(1)), "the day keeps its block");
+        let tree: i64 = conn.query_row("SELECT COUNT(*) FROM tasks WHERE root_id = 1", [], |r| r.get(0)).unwrap();
+        assert_eq!(tree, 3);
     }
 
     #[test]
