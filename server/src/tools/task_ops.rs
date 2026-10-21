@@ -208,7 +208,7 @@ impl<'a> Saver<'a> {
                         }
                         node.due = Some(Some(w));
                     }
-                    None => self.ignore(r, "due", format!("a due is {} or {}", loose::DAY_FORMS, loose::MOMENT_FORMS)),
+                    None => self.ignore(r, "due", format!("a due is a day ({}) or a moment ({})", loose::DAY_FORMS, loose::MOMENT_FORMS)),
                 },
                 None => self.ignore(r, "due", "a due is text such as 2026-11-06, 11/6 or 2026-11-06T17:00"),
             }

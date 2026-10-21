@@ -467,7 +467,7 @@ pub fn round_minutes(m: i64) -> i64 {
 }
 
 pub const DAY_FORMS: &str = "YYYY-MM-DD, M/D, 11月6日, today, tomorrow or a weekday";
-pub const MOMENT_FORMS: &str = "a day, YYYY-MM-DDTHH:MM, HH:MM, 9am, 21時 or +20min";
+pub const MOMENT_FORMS: &str = "YYYY-MM-DDTHH:MM, HH:MM, 9am, 21時 or +20min";
 
 const MONTHS: [&str; 12] = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
 
@@ -650,10 +650,13 @@ fn hour_minute(s: &str) -> Option<(i64, i64)> {
     }
 }
 
-/// `+20min`, `+1h`, `in 20 minutes`.
+/// `+20min`, `+1h`, `in 20 minutes`; a bare `+17` names no unit and is not one.
 fn relative(raw: &str) -> Option<i64> {
     let s = raw.trim().to_lowercase();
     let rest = s.strip_prefix('+').or_else(|| s.strip_prefix("in "))?;
+    if rest.trim().chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
     minutes_text(rest).filter(|m| *m > 0)
 }
 
@@ -868,6 +871,7 @@ mod tests {
         assert_eq!(at("11/6 17:00"), "2026-11-06T08:00:00Z");
         assert_eq!(when("11/6", &tz, now), Some(When::Day(d("2026-11-06"))));
         assert_eq!(when("whenever", &tz, now), None);
+        assert_eq!(when("+17", &tz, now), None, "a bare count names no unit");
     }
 
     #[test]

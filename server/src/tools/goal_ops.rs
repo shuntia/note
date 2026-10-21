@@ -60,7 +60,25 @@ pub fn find(conn: &Connection, ctx: &ToolCtx, raw: &str) -> Result<Value, ToolEr
         }
         _ => state,
     };
-    let wanted: Vec<i64> = id.iter().filter_map(loose::id).collect();
+    let mut wanted: Vec<i64> = Vec::new();
+    for v in &id {
+        match (loose::id(v), loose::text(v)) {
+            (Some(n), _) => wanted.push(n),
+            (None, Some(title)) if ctx.share.is_none() => {
+                let all = crate::goals::list(conn, ctx.user_id, Some("any")).map_err(|e| internal(e.to_string()))?;
+                match all.iter().find(|g| super::same_title(&g.title, &title)) {
+                    Some(g) => wanted.push(g.id),
+                    None => warnings.push(format!("no goal titled {title:?}")),
+                }
+            }
+            _ => warnings.push(format!("id {v} was ignored: a goal id or title")),
+        }
+    }
+    if !id.is_empty() && wanted.is_empty() {
+        let mut out = serde_json::json!({ "total": 0, "items": [] });
+        out["warnings"] = warnings.into();
+        return Ok(out);
+    }
     let mut goals = crate::goals::list(conn, ctx.user_id, if wanted.is_empty() { state.as_deref() } else { Some("any") })
         .map_err(|e| internal(e.to_string()))?;
     if !wanted.is_empty() {
@@ -245,7 +263,7 @@ pub fn save(conn: &Connection, ctx: &ToolCtx, kind: SessionKind, raw: &str) -> R
                         }
                         due = Some(Some(w));
                     }
-                    None => env.ignored(Some(&r), "due", format!("a due is {} or {}", loose::DAY_FORMS, loose::MOMENT_FORMS)),
+                    None => env.ignored(Some(&r), "due", format!("a due is a day ({}) or a moment ({})", loose::DAY_FORMS, loose::MOMENT_FORMS)),
                 },
                 None => env.ignored(Some(&r), "due", "a due is text such as 2026-12-18"),
             }
@@ -608,6 +626,9 @@ mod tests {
         talk(&conn, &tmp, "goal_save", json!({"goals": [{"goal_id": id, "state": "complete"}]}));
         assert_eq!(crate::goals::get(&conn, 1, id).unwrap().unwrap().state, "done");
         assert_eq!(talk(&conn, &tmp, "goal_find", json!({"state": "done"}))["total"], 1);
+        assert_eq!(talk(&conn, &tmp, "goal_find", json!({"id": "Bare Object"}))["item"]["id"], id);
+        let miss = talk(&conn, &tmp, "goal_find", json!({"id": "nope"}));
+        assert_eq!((miss["total"].as_i64(), miss["warnings"][0].as_str()), (Some(0), Some("no goal titled \"nope\"")));
     }
 
     #[test]
