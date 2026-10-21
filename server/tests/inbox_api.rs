@@ -185,7 +185,7 @@ async fn a_remembered_item_writes_its_facts_and_returns_their_ids() {
     assert!(seen[0].system.contains("read one item"), "{}", seen[0].system);
     assert!(!seen[0].system.contains("you are note"), "{}", seen[0].system);
     assert!(!seen[0].system.contains("Today's plan"), "{}", seen[0].system);
-    assert_eq!(seen[0].tool_names, vec!["memory_query", "memory_read", "inbox_decide"]);
+    assert_eq!(seen[0].tool_names, vec!["memory_find", "inbox_decide"]);
     let opening = match &seen[0].messages[0] {
         note_server::providers::Message::User(t) => t.clone(),
         other => panic!("expected the item as the opening message, got {other:?}"),
@@ -405,7 +405,7 @@ async fn a_provider_failure_is_502_and_writes_nothing() {
                 text: String::new(),
                 tool_calls: vec![ToolCall {
                     id: "c1".into(),
-                    name: "memory_query".into(),
+                    name: "memory_find".into(),
                     args: r#"{"query":"biology"}"#.into(),
                 }],
             }]

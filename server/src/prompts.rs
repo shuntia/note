@@ -133,7 +133,7 @@ mod tests {
             let trigger = load("trigger");
             for name in [
                 "say", "stay_quiet", "call_user", "cancel_on",
-                "day_find", "day_save", "day_remove", "note_write",
+                "day_find", "day_save", "day_remove", "memory_save",
             ] {
                 assert!(trigger.contains(name), "the trigger prompt ({lang:?}) never mentions {name}");
             }
@@ -151,7 +151,7 @@ mod tests {
                     "task_bulk_update", "goal_create", "goal_update", "goal_list", "calendar_list", "calendar_add",
                     "calendar_update", "calendar_skip", "plan_list", "plan_tasks", "plan_carry", "order_set",
                     "order_move", "order_drop", "schedule_move", "schedule_drop", "schedule_insert", "trigger_set",
-                    "trigger_budget",
+                    "trigger_budget", "memory_query", "memory_read", "memory_write", "note_write", "note_settle",
                 ] {
                     assert!(!load(name).contains(old), "the {name} prompt ({lang:?}) still calls {old}");
                 }

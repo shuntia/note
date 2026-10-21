@@ -6,7 +6,6 @@ pub mod goal_ops;
 pub mod inbox_ops;
 pub mod loose;
 pub mod memory_ops;
-pub mod note_ops;
 pub mod review_ops;
 pub mod shapes;
 pub mod share_ops;
@@ -105,7 +104,7 @@ pub struct ToolCtx<'a> {
     pub task_scope: Option<i64>,
     /// When set, `inbox_decide` accepts only this source id.
     pub inbox_source: Option<String>,
-    /// When set, every fact `memory_write` lands is recorded against this
+    /// When set, every fact `memory_save` lands is recorded against this
     /// source id.
     pub memory_source: Option<String>,
     /// When set, the read tools see only what this link shares: its categories,
@@ -205,9 +204,9 @@ pub struct HangUpArgs {}
 
 #[derive(Default, Debug)]
 pub struct PreparedVectors {
-    pub content: Option<Vec<f32>>,
     pub query: Option<Vec<f32>>,
-    /// One vector per fact of an `inbox_decide` call, in argument order.
+    /// One vector per fact of an `inbox_decide` call, or per item of a
+    /// `memory_save`, in argument order.
     pub facts: Vec<Option<Vec<f32>>>,
     pub error: Option<String>,
 }
@@ -242,21 +241,16 @@ pub fn prepare(
                 }
             }
         }
-        Some(Embed::Content) => {
-            #[derive(serde::Deserialize, Default)]
-            #[serde(default)]
-            struct W {
-                summary: String,
-                body: String,
-            }
-            if let Ok(w) = serde_json::from_str::<W>(raw_args) {
-                if !w.summary.is_empty() || !w.body.is_empty() {
-                    let text = crate::memory::embed_text(&w.summary, &w.body);
-                    match emb.embed(&[&text]) {
-                        Ok(vs) if !vs.is_empty() => out.content = Some(vs[0].clone()),
-                        Ok(_) => {}
-                        Err(e) => out.error = Some(e.to_string()),
+        Some(Embed::Items) => {
+            let texts = memory_ops::embed_texts(raw_args);
+            let wanted: Vec<&str> = texts.iter().flatten().map(String::as_str).collect();
+            if !wanted.is_empty() {
+                match emb.embed(&wanted) {
+                    Ok(vs) => {
+                        let mut vs = vs.into_iter();
+                        out.facts = texts.iter().map(|t| t.as_ref().and_then(|_| vs.next())).collect();
                     }
+                    Err(e) => out.error = Some(e.to_string()),
                 }
             }
         }
@@ -369,11 +363,9 @@ const GOALS_READ: &[&str] = &["goal_find"];
 const GOALS_WRITE: &[&str] = &["goal_save", "goal_remove"];
 const CALENDAR_READ: &[&str] = &["calendar_find"];
 const CALENDAR_WRITE: &[&str] = &["calendar_save", "calendar_remove"];
-const MEMORY_READ: &[&str] = &["memory_query", "memory_read"];
-const MEMORY_WRITE: &[&str] = &["memory_write"];
-const NOTES: &[&str] = &["note_write"];
-/// Settling working memory into long-term memory is the nightly run's job.
-const NOTE_SETTLE: &[&str] = &["note_settle"];
+const MEMORY_READ: &[&str] = &["memory_find"];
+const MEMORY_WRITE: &[&str] = &["memory_save"];
+const MEMORY_REMOVE: &[&str] = &["memory_remove"];
 const DAY_READ: &[&str] = &["day_find"];
 const DAY_WRITE: &[&str] = &["day_save", "day_remove"];
 const CONTEXT: &[&str] = &["context_edit"];
@@ -412,8 +404,7 @@ const DOMAINS: &[&[&str]] = &[
     DAY_WRITE,
     MEMORY_READ,
     MEMORY_WRITE,
-    NOTES,
-    NOTE_SETTLE,
+    MEMORY_REMOVE,
     CONTEXT,
     TIMEZONE,
     CALL_USER,
@@ -467,7 +458,7 @@ const TALK: &[&str] = registry_of![
     DAY_WRITE,
     MEMORY_READ,
     MEMORY_WRITE,
-    NOTES,
+    MEMORY_REMOVE,
     CONTEXT,
     TIMEZONE,
     CALL_USER,
@@ -486,8 +477,7 @@ const NIGHTLY: &[&str] = registry_of![
     DAY_WRITE,
     MEMORY_READ,
     MEMORY_WRITE,
-    NOTES,
-    NOTE_SETTLE,
+    MEMORY_REMOVE,
     CONTEXT,
     CALL_USER,
     NIGHTLY_NOTES,
@@ -503,7 +493,7 @@ const TRIGGER: &[&str] = registry_of![
     DAY_WRITE,
     MEMORY_READ,
     MEMORY_WRITE,
-    NOTES,
+    MEMORY_REMOVE,
     CALL_USER,
     SEARCH,
     BATCH,
@@ -537,7 +527,7 @@ const CALL: &[&str] = registry_of![
     DAY_WRITE,
     MEMORY_READ,
     MEMORY_WRITE,
-    NOTES,
+    MEMORY_REMOVE,
     TIMEZONE,
     SEARCH,
     CALL_ONLY,
@@ -604,7 +594,8 @@ enum Exec {
 enum Embed {
     Nothing,
     Query,
-    Content,
+    /// One vector per item of a `memory_save`, notes left out.
+    Items,
     /// One vector per fact of the call.
     Facts,
 }
@@ -790,13 +781,15 @@ const TOOLS: &[ToolSpec] = tools![
          \"remembered\" writes 1 to 10 durable facts, \"task\" leaves it to the importer to \
          make a task, \"nothing\" records that it held nothing durable. Facts already written \
          for this source are archived and replaced.",
-    "memory_query": schema::<memory_ops::QueryArgs> => run!(&memory_ops::query), embed = Embed::Query, reads = true;
-        "Search the user's long-term memory; returns ids and summaries.",
-    "memory_read": schema::<memory_ops::ReadArgs> => run!(&memory_ops::read), reads = true;
-        "Read one memory in full by id.",
-    "memory_write": schema::<memory_ops::WriteArgs> => run!(&memory_ops::write), writes = true, embed = Embed::Content;
-        "Add, update, or supersede a memory; superseding archives the old fact. On an add, \
-         set until on anything tied to a stretch of time and leave it off what stays true.",
+    "memory_find": shapes::memory_find => run!(raw memory_ops::find), embed = Embed::Query, reads = true;
+        "Find long-term memories and your working notes. query ranks matches; id reads them in full; \
+         neither lists the newest. A miss is total 0, not an error.",
+    "memory_save": shapes::memory_save => run!(raw memory_ops::save), writes = true, embed = Embed::Items;
+        "Write long-term memories and your working notes (one short line each that every session reads \
+         and the user never sees). A new note titled like an open one is that note; with id only the \
+         fields given change.",
+    "memory_remove": shapes::memory_remove => run!(raw memory_ops::remove), writes = true;
+        "Archive memories no longer true; delete notes no longer needed.",
     "summary_write": schema::<summary_ops::WriteArgs> => run!(&summary_ops::write), terminal_in = &[SessionKind::Summarize];
         "Write this conversation's summary, in a single call that ends the session: 1 to 1200 \
          bytes of plain text, no markdown headers.",
@@ -809,18 +802,6 @@ const TOOLS: &[ToolSpec] = tools![
         "Replace last night's brief for tomorrow's sessions: 5-12 plain lines, no markdown \
          headers, nothing that will read as stale. Every session tomorrow reads it; write it \
          for yourself, not the user.",
-    "note_settle": schema::<note_ops::SettleArgs> => run!(&note_ops::settle);
-        "Settle one working note the opening lists as due. outcome memory turns it into a \
-         long-term memory (summary and body may rewrite it to read on its own) and removes \
-         the note; outcome drop removes it. A due note you leave is kept as a memory word for \
-         word.",
-    "note_write": schema::<note_ops::WriteArgs> => run!(&note_ops::write), writes = true;
-        "Your working notes, read by every session and call and never seen by the user. op \
-         add writes one, with from and until when it belongs to a stretch of time; update \
-         rewords it or moves its window (an empty from or until clears it); keep says it \
-         still matters; remove deletes it once it no longer does. An add whose title an \
-         existing note already reads is refused with that note's id. Anything longer is a \
-         memory_write the note may name by id; anything the user has to do is a task.",
     "timezone_set": schema::<zone_ops::SetArgs> => run!(&zone_ops::set);
         "Set the user's time zone when they say where they are (travelling, moved) or the \
          clock you show is off. Pending triggers and blocks keep the moment they were laid \
@@ -903,6 +884,11 @@ const TOOLS: &[ToolSpec] = tools![
     "schedule_insert": shapes::any => run!(kind raw day_ops::schedule_insert), adapter_for = Some("day_save"); "",
     "trigger_set": shapes::any => run!(kind raw day_ops::trigger_set), adapter_for = Some("day_save"); "",
     "trigger_budget": shapes::any => run!(kind raw day_ops::trigger_budget), adapter_for = Some("day_save"); "",
+    "memory_query": shapes::any => run!(raw memory_ops::find), adapter_for = Some("memory_find"), embed = Embed::Query; "",
+    "memory_read": shapes::any => run!(raw memory_ops::find), adapter_for = Some("memory_find"); "",
+    "memory_write": shapes::any => run!(raw memory_ops::write_adapter), adapter_for = Some("memory_save"), embed = Embed::Items; "",
+    "note_write": shapes::any => run!(raw memory_ops::note_adapter), adapter_for = Some("memory_save"); "",
+    "note_settle": shapes::any => run!(raw memory_ops::settle_adapter), adapter_for = Some("memory_save"); "",
 ];
 
 fn find(name: &str) -> Option<(usize, &'static ToolSpec)> {
@@ -1139,7 +1125,7 @@ fn run(
 
 /// `(tool prefix, unknown field, the tool that takes it)` for the fields a
 /// model most often hands the wrong tool.
-const ELSEWHERE: &[(&str, &str, &str)] = &[("note_write", "category", "memory_write")];
+const ELSEWHERE: &[(&str, &str, &str)] = &[];
 
 /// An unknown-field error, with the tool that takes that field where one
 /// obviously does.
@@ -1247,25 +1233,27 @@ mod tests {
         use crate::providers::mock::MockEmbeddings;
         let emb = MockEmbeddings;
 
-        let v = prepare(Some(&emb), "memory_query", r#"{"query":"abba"}"#);
+        let v = prepare(Some(&emb), "memory_find", r#"{"query":"abba"}"#);
         assert!(v.query.is_some());
-        assert!(v.content.is_none() && v.error.is_none());
+        assert!(v.facts.is_empty() && v.error.is_none());
 
-        let v = prepare(Some(&emb), "memory_write", r#"{"op":"add","category":"semantic","summary":"s","body":"b"}"#);
-        assert!(v.content.is_some());
+        let v = prepare(Some(&emb), "memory_save", r#"{"items":[{"title":"s","body":"b"},{"kind":"note","title":"n"}]}"#);
+        assert_eq!(v.facts.iter().map(Option::is_some).collect::<Vec<_>>(), [true, false]);
         assert!(v.query.is_none());
+        let v = prepare(Some(&emb), "memory_write", r#"{"op":"add","category":"semantic","summary":"s","body":"b"}"#);
+        assert_eq!(v.facts.len(), 1, "an old name embeds as its replacement does");
 
         // non-memory tools and malformed args cost nothing
-        let v = prepare(Some(&emb), "task_create", r#"{"title":"x"}"#);
-        assert!(v.content.is_none() && v.query.is_none() && v.error.is_none());
-        let v = prepare(Some(&emb), "memory_query", "not json");
+        let v = prepare(Some(&emb), "task_save", r#"{"tasks":[{"title":"x"}]}"#);
+        assert!(v.facts.is_empty() && v.query.is_none() && v.error.is_none());
+        let v = prepare(Some(&emb), "memory_find", "not json");
         assert!(v.query.is_none() && v.error.is_none());
 
         // no provider → all None
-        let v = prepare(None, "memory_query", r#"{"query":"abba"}"#);
+        let v = prepare(None, "memory_find", r#"{"query":"abba"}"#);
         assert!(v.query.is_none());
 
-        let v = prepare(Some(&FailingEmb), "memory_query", r#"{"query":"abba"}"#);
+        let v = prepare(Some(&FailingEmb), "memory_find", r#"{"query":"abba"}"#);
         assert!(v.query.is_none());
         assert!(v.error.as_deref().unwrap_or("").contains("endpoint down"));
     }
@@ -1274,12 +1262,12 @@ mod tests {
     fn prepared_vector_text_matches_index_text() {
         use crate::providers::{mock::MockEmbeddings, EmbeddingsProvider};
         let emb = MockEmbeddings;
-        let v = prepare(Some(&emb), "memory_write",
-            r#"{"op":"add","category":"semantic","summary":"line one\nline two","body":"  padded  "}"#);
+        let v = prepare(Some(&emb), "memory_save",
+            r#"{"items":[{"title":"line one\nline two","body":"  padded  "}]}"#);
         let direct = emb
             .embed(&[&crate::memory::embed_text("line one\nline two", "  padded  ")])
             .unwrap();
-        assert_eq!(v.content.unwrap(), direct[0]);
+        assert_eq!(v.facts[0].clone().unwrap(), direct[0]);
     }
 
     /// Talk ⊆ Nightly but for `timezone_set`, which lives where the user is
@@ -1725,22 +1713,34 @@ mod tests {
     }
 
     #[test]
-    fn note_settle_belongs_to_the_nightly_run_alone() {
-        assert!(registry(SessionKind::Nightly).contains(&"note_settle"));
-        for kind in KINDS.into_iter().filter(|k| *k != SessionKind::Nightly) {
-            assert!(!registry(kind).contains(&"note_settle"), "{kind:?} reaches note_settle");
+    fn memory_is_read_where_the_user_a_wake_up_or_a_call_can_reach_it_and_written_by_a_review() {
+        for kind in [SessionKind::Talk, SessionKind::Nightly, SessionKind::Trigger, SessionKind::Call] {
+            for name in ["memory_find", "memory_save", "memory_remove"] {
+                assert!(registry(kind).contains(&name), "{name} missing from {kind:?}");
+            }
+        }
+        assert_eq!(registry(SessionKind::Inbox), ["memory_find", "inbox_decide"]);
+        assert_eq!(registry(SessionKind::Review), ["memory_save", "review_write"]);
+        for kind in [SessionKind::Import, SessionKind::Summarize, SessionKind::Share] {
+            assert!(!registry(kind).iter().any(|t| t.starts_with("memory_")), "{kind:?}");
+        }
+        for kind in KINDS {
+            for old in ["memory_query", "memory_read", "memory_write", "note_write", "note_settle"] {
+                assert!(!schemas(kind).iter().any(|s| s["name"] == old), "{kind:?} offers {old}");
+            }
         }
         let (conn, tmp) = env();
-        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "note_settle",
-            r#"{"id":"00000000-0000-4000-8000-000000000001","outcome":"drop"}"#).unwrap_err();
-        assert_eq!(e.kind, "forbidden");
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Inbox, "note_write", r#"{"op":"add","title":"x"}"#).unwrap_err();
+        assert_eq!(e.kind, "forbidden", "an old name goes only where its replacement does");
+        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Inbox, "memory_query", r#"{"query":"x"}"#).unwrap();
+        assert!(out["warnings"].to_string().contains("memory_query is now memory_find"), "{out}");
     }
 
     #[test]
     fn a_wake_up_tends_the_day_and_reads_but_never_writes_the_calendar() {
         let t = registry(SessionKind::Trigger);
         for name in [
-            "memory_write", "task_find", "task_save", "note_write", "day_find", "day_save", "day_remove",
+            "memory_find", "memory_save", "memory_remove", "task_find", "task_save", "day_find", "day_save", "day_remove",
             "calendar_find", "goal_find", "web_search",
         ] {
             assert!(t.contains(&name), "{name}");
@@ -1808,13 +1808,13 @@ mod tests {
         }
     }
 
-    /// Talk's schemas this phase, in bytes (18,444 at phase 3); phase 5 brings the 15,000 cap.
-    const TALK_SCHEMA_BUDGET: usize = 18_500;
+    /// Talk's schemas this phase, in bytes (17,749 at phase 4); phase 5 brings the 15,000 cap.
+    const TALK_SCHEMA_BUDGET: usize = 17_800;
 
     #[test]
     fn talks_schemas_stay_within_this_phases_budget() {
         let bytes: usize = schemas(SessionKind::Talk).iter().map(|s| s.to_string().len()).sum();
         assert!(bytes <= TALK_SCHEMA_BUDGET, "Talk's schemas are {bytes} bytes");
-        assert_eq!(registry(SessionKind::Talk).len(), 21);
+        assert_eq!(registry(SessionKind::Talk).len(), 20);
     }
 }

@@ -252,3 +252,47 @@ pub fn task_brief() -> Value {
 pub fn any() -> Value {
     json!({ "type": "object" })
 }
+
+pub fn memory_find() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "query": { "type": "string" },
+            "id": { "type": ["string", "array"], "items": { "type": "string" }, "description": "Read in full; a list works too." },
+            "kind": { "type": "string", "enum": ["semantic", "episodic", "procedural", "note"], "description": "Notes show only with kind note." },
+            "limit": { "type": "integer", "description": "1-50; default 8." }
+        }
+    })
+}
+
+pub fn memory_save() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "items": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string", "description": "Changes this memory or note; a note's id alone keeps it." },
+                        "kind": { "type": "string", "enum": ["semantic", "episodic", "procedural", "note"], "description": "Default semantic. A note given another kind becomes that memory." },
+                        "title": { "type": "string", "description": "One line." },
+                        "body": { "type": "string" },
+                        "from": { "type": "string", "description": "A note's start, YYYY-MM-DDTHH:MM." },
+                        "until": { "type": "string", "description": "When it stops mattering, for what is tied to a stretch of time: a day, or a note's moment. Empty clears it." },
+                        "supersedes": { "type": "string", "description": "A memory this replaces, archived." }
+                    }
+                }
+            }
+        },
+        "required": ["items"]
+    })
+}
+
+pub fn memory_remove() -> Value {
+    json!({
+        "type": "object",
+        "properties": { "ids": { "type": "array", "items": { "type": "string" }, "description": "An exact title works too." } },
+        "required": ["ids"]
+    })
+}

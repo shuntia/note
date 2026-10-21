@@ -1466,7 +1466,7 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
                 }
             }
         }
-        let named: Vec<String> = serde_json::from_value(result["notes"].clone()).unwrap_or_default();
+        let named: Vec<String> = serde_json::from_value(result["memory"].clone()).unwrap_or_default();
         let _ = crate::notes::nudged(&conn, &state.data_dir, &fired.username, &named, now);
         let _ = crate::log::record(
             &conn,

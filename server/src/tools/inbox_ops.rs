@@ -364,17 +364,14 @@ mod tests {
     }
 
     #[test]
-    fn the_inbox_surface_is_three_tools_and_the_decision_ends_the_session() {
-        assert_eq!(
-            crate::tools::registry(SessionKind::Inbox),
-            ["memory_query", "memory_read", "inbox_decide"]
-        );
+    fn the_inbox_surface_is_two_tools_and_the_decision_ends_the_session() {
+        assert_eq!(crate::tools::registry(SessionKind::Inbox), ["memory_find", "inbox_decide"]);
         assert!(crate::tools::is_terminal(SessionKind::Inbox, "inbox_decide"));
-        assert!(!crate::tools::is_terminal(SessionKind::Inbox, "memory_query"));
+        assert!(!crate::tools::is_terminal(SessionKind::Inbox, "memory_find"));
         assert!(!crate::tools::is_terminal(SessionKind::Talk, "inbox_decide"));
 
         let (conn, tmp) = env();
-        for name in ["memory_write", "task_create", "context_edit"] {
+        for name in ["memory_save", "memory_write", "task_create", "context_edit"] {
             let e = dispatch(&conn, &ctx(&tmp, "s1"), SessionKind::Inbox, name, "{}").unwrap_err();
             assert!(matches!(e.kind, "forbidden" | "unknown_tool"), "{name} gave {e:?}");
         }

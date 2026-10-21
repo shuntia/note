@@ -4,7 +4,7 @@ The digest holds the user's goals and how far each has got, the last eight weeks
 
 Answer in one round with both calls side by side:
 
-1. `memory_write`, op "add", category "episodic": summary "Week of <the Monday's date>: <one line>", body five to ten lines of what the week held.
+1. `memory_save` with one item, kind "episodic": title "Week of <the Monday's date>: <one line>", body five to ten lines of what the week held.
 2. `review_write`: the whole new strategy, at most 1500 bytes of plain lines, written for yourself and every session, not the user. It replaces the old one, so carry over what still holds:
    - Each long-term goal and where it stands against its date, a line each.
    - Where the time actually went over recent weeks, against what the goals need.

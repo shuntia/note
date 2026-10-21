@@ -10,8 +10,8 @@ pub struct SayArgs {
     /// One or two warm sentences, as the user will read them.
     pub text: String,
     /// The ids of the working notes these words are about, when a nudge names any.
-    #[serde(default)]
-    pub notes: Vec<String>,
+    #[serde(default, alias = "notes")]
+    pub memory: Vec<String>,
     /// Wait up to this many minutes, 5 to 120, for an answer; this session
     /// then goes on, told whether the user answered or acted.
     #[serde(default)]
@@ -62,7 +62,7 @@ pub fn say(args: &SayArgs) -> Result<serde_json::Value, ToolError> {
     if text.is_empty() || text.len() > triggers::MAX_SAY_BYTES {
         return Err(ToolError::rejected(format!("text must be 1 to {} bytes", triggers::MAX_SAY_BYTES)));
     }
-    let mut out = serde_json::json!({ "said": text, "notes": args.notes });
+    let mut out = serde_json::json!({ "said": text, "memory": args.memory });
     if !args.task_ids.is_empty() {
         out["task_ids"] = serde_json::json!(args.task_ids);
     }
@@ -168,12 +168,14 @@ mod tests {
     fn say_carries_the_notes_it_names() {
         let (conn, tmp) = env();
         let id = "00000000-0000-4000-8000-000000000003";
-        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Trigger, "say",
-            &format!(r#"{{"text":"the bank closes at five","notes":["{id}"]}}"#)).unwrap();
-        assert_eq!(out["notes"], serde_json::json!([id]));
+        for field in ["memory", "notes"] {
+            let out = dispatch(&conn, &ctx(&tmp), SessionKind::Trigger, "say",
+                &format!(r#"{{"text":"the bank closes at five","{field}":["{id}"]}}"#)).unwrap();
+            assert_eq!(out["memory"], serde_json::json!([id]), "{field}");
+        }
         let out = dispatch(&conn, &ctx(&tmp), SessionKind::Trigger, "say", r#"{"text":"hi"}"#)
             .unwrap();
-        assert_eq!(out["notes"], serde_json::json!([]));
+        assert_eq!(out["memory"], serde_json::json!([]));
     }
 
     #[test]

@@ -489,8 +489,8 @@ pub fn title_assistant(l: Lang) -> &'static str {
 
 pub fn notes_to_settle(l: Lang) -> &'static str {
     l.of(
-        "\n\nWorking notes due to settle tonight, each with note_settle (id: title):\n",
-        "\n\n今夜 note_settle で一つずつ片付ける作業メモ（id: 内容）:\n",
+        "\n\nWorking notes due to settle tonight, each with memory_save or memory_remove (id: title):\n",
+        "\n\n今夜 memory_save か memory_remove で一つずつ片付ける作業メモ（id: 内容）:\n",
     )
 }
 

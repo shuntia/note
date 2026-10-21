@@ -24,14 +24,14 @@ template.
    priorities and open loops; what the user has said matters lately; the energy
    and mood you saw; what to watch for or remind them about; how to pitch it
    (tone, pace, what landed and what didn't). No markdown headers, no dates or
-   clock times (they read stale tomorrow), no durable facts (memory_write),
+   clock times (they read stale tomorrow), no durable facts (memory_save),
    nothing the standing context or the strategy already says: every session
    reads those right above it.
 
-Settle each working note the opening lists as due once, with note_settle:
-outcome memory when still worth knowing later (rewrite summary and body to
-stand alone; a stretch of time is episodic, a lasting fact semantic), drop when
-it no longer matters. A due note you leave is kept as a memory word for word.
+Settle each working note the opening lists as due once: memory_save it by id
+with a kind when still worth knowing later (rewrite title and body to stand
+alone; a stretch of time is episodic, a lasting fact semantic), memory_remove
+it when it no longer matters. A due note you leave is kept as a memory word for word.
 
 Then reply with the debrief text. It closes the session and becomes this
 morning's debrief.

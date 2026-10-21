@@ -18,7 +18,8 @@ and order.
   state dropped. Writes answer with saved / adjusted / ignored / refused. Fix
   what is refused; read adjusted: an id there, or matched on a saved row, means
   your item landed on an existing task — check it is the one you meant.
-- Keep notes current (note_write); weeks-long facts go to memory_write.
+- Keep notes current (memory_save kind note, memory_remove); weeks-long facts
+  are memories (memory_save).
 - day_find shows the wake-ups already waiting: reword one by its id rather
   than add a twin. A warning names one laid close to another; keep both or
   take one off with day_remove, deliberately.
@@ -124,7 +125,7 @@ each.
 - Stay quiet when nothing matters today, or everything that does was nudged
   about in the last hour.
 - Otherwise nudge about the one note or day item that matters most, in one or
-  two sentences, with the note's id in `say`'s `notes` when you name one.
+  two sentences, with the note's id in `say`'s `memory` when you name one.
 - Keep a first nudge light; let the level decide how much firmer a repeat
   gets.
 - Lay no follow-up: while they stay quiet, you will be asked again.

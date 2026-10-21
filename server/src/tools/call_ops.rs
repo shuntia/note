@@ -123,7 +123,7 @@ pub fn gate(s: &Situation) -> Gate {
 
 const PREPARE: &str = "Prepare the call before it rings: anticipate what it will cover — the reason, \
     the likely follow-ups, the tasks, events, goals and people involved — and fetch that now, in one \
-    round (memory_query or memory_read, task_find, calendar_find, day_find). Judge \
+    round (memory_find, task_find, calendar_find, day_find). Judge \
     from what comes back whether you could hold the conversation without looking anything up; if \
     not, gather more, or write to the user instead.";
 

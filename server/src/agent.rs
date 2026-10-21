@@ -1412,7 +1412,7 @@ mod tests {
                         name: "task_create".into(),
                         args: r#"{"title":"buy milk"}"#.into(),
                     },
-                    ToolCall { id: "c2".into(), name: "memory_query".into(), args: "{}".into() },
+                    ToolCall { id: "c2".into(), name: "memory_find".into(), args: "[1".into() },
                 ],
             },
             ChatResponse { text: "done".into(), tool_calls: vec![] },
@@ -1436,8 +1436,8 @@ mod tests {
                 "thinking:a task, then a lookup",
                 "call:0:task_create",
                 "result:0:task_create:false",
-                "call:1:memory_query",
-                "result:1:memory_query:true",
+                "call:1:memory_find",
+                "result:1:memory_find:true",
                 "reply:done",
             ]
         );
@@ -1882,8 +1882,8 @@ mod tests {
             call("d", "task_list", "{}"),
             call("e", "goal_create", r#"{"title":"move"}"#),
             call("f", "task_list", "{}"),
-            call("g", "memory_read", r#"{"id":"missing"}"#),
-            call("h", "memory_read", r#"{"id":"missing"}"#),
+            call("g", "memory_find", "[1"),
+            call("h", "memory_find", "[1"),
             ChatResponse { text: "done".into(), tool_calls: vec![] },
         ]);
         run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, now(), &[], "hi").unwrap();
