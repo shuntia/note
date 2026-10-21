@@ -348,18 +348,34 @@ pub fn max_id(conn: &rusqlite::Connection, table: &str) -> Result<i64> {
     Ok(conn.query_row(&format!("SELECT COALESCE(MAX(id), 0) FROM {table}"), [], |r| r.get(0))?)
 }
 
-/// The ordered list of each date, from `run_order`.
+/// Whether the scratch DB holds `table`.
+pub fn has_table(conn: &rusqlite::Connection, table: &str) -> Result<bool> {
+    let n: i64 = conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1", [table], |r| r.get(0))?;
+    Ok(n > 0)
+}
+
+/// The ordered list of each date: `day_items` from v66, leaving out a row whose
+/// block was dropped, else `run_order`.
 pub fn order_from_db(conn: &rusqlite::Connection, dates: &[Date]) -> Result<BTreeMap<Date, Vec<DayItem>>> {
     let mut out = BTreeMap::new();
-    let has_table: i64 =
-        conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'run_order'", [], |r| r.get(0))?;
+    let sql = if has_table(conn, "day_items")? {
+        Some(
+            "SELECT d.position, d.task_id, t.state FROM day_items d JOIN tasks t ON t.id = d.task_id
+             LEFT JOIN events e ON e.id = d.event_id
+             WHERE d.date = ?1 AND (e.id IS NULL OR e.status != 'dropped') ORDER BY d.position",
+        )
+    } else if has_table(conn, "run_order")? {
+        Some(
+            "SELECT o.position, o.task_id, t.state FROM run_order o JOIN tasks t ON t.id = o.task_id
+             WHERE o.date = ?1 ORDER BY o.position",
+        )
+    } else {
+        None
+    };
     for d in dates {
         let mut items = Vec::new();
-        if has_table > 0 {
-            let mut stmt = conn.prepare(
-                "SELECT o.position, o.task_id, t.state FROM run_order o JOIN tasks t ON t.id = o.task_id
-                 WHERE o.date = ?1 ORDER BY o.position",
-            )?;
+        if let Some(sql) = sql {
+            let mut stmt = conn.prepare(sql)?;
             let rows = stmt.query_map([d.to_string()], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?)))?;
             for row in rows {
                 let (position, task, state) = row?;
@@ -401,6 +417,24 @@ mod tests {
         let snap = Snapshot { nodes, ..Default::default() };
         assert_eq!(snap.root_of(3), 1);
         assert!(snap.is_leaf(2), "a node whose children are all done is a leaf");
+    }
+
+    #[test]
+    fn a_days_list_reads_from_day_items_without_a_dropped_block() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE tasks (id INTEGER PRIMARY KEY, state TEXT);
+             CREATE TABLE events (id INTEGER PRIMARY KEY, status TEXT);
+             CREATE TABLE day_items (user_id INTEGER, date TEXT, position INTEGER, task_id INTEGER, event_id INTEGER);
+             INSERT INTO tasks VALUES (1, 'open'), (2, 'open'), (3, 'done');
+             INSERT INTO events VALUES (7, 'pending'), (8, 'dropped');
+             INSERT INTO day_items VALUES (1, '2026-10-21', 0, 3, NULL), (1, '2026-10-21', 1, 1, 7), (1, '2026-10-21', 2, 2, 8);",
+        )
+        .unwrap();
+        let day = jiff::civil::date(2026, 10, 21);
+        let days = order_from_db(&conn, &[day]).unwrap();
+        let got: Vec<(Option<i64>, Option<i64>, &str)> = days[&day].iter().map(|i| (i.task_id, i.position, i.status.as_str())).collect();
+        assert_eq!(got, [(Some(3), Some(0), "done"), (Some(1), Some(1), "open")]);
     }
 
     #[test]

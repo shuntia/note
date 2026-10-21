@@ -153,7 +153,19 @@ fn block(db: &rusqlite::Connection, plan: i64, task: i64, title: &str, start: &s
          VALUES (?1, ?2, ?3, ?3, ?4, 'drop', 0, 'push', 0, ?5, 'agent')",
         (plan, title, start, end, minutes),
     )?;
-    db.execute("INSERT INTO event_tasks (event_id, task_id) VALUES (?1, ?2)", (db.last_insert_rowid(), task))?;
+    let event = db.last_insert_rowid();
+    db.execute("INSERT INTO event_tasks (event_id, task_id) VALUES (?1, ?2)", (event, task))?;
+    if crate::snapshot::has_table(db, "day_items")? {
+        db.execute(
+            "INSERT INTO day_items (user_id, date, position, task_id, event_id)
+             SELECT p.user_id, p.date,
+                    (SELECT COALESCE(MAX(d.position) + 1, 0) FROM day_items d WHERE d.user_id = p.user_id AND d.date = p.date),
+                    ?2, ?3
+             FROM plans p WHERE p.id = ?1
+             ON CONFLICT (user_id, date, task_id) DO UPDATE SET event_id = excluded.event_id",
+            (plan, task, event),
+        )?;
+    }
     Ok(())
 }
 
