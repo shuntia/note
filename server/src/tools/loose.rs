@@ -169,6 +169,10 @@ impl Obj {
         self.map.values().all(Value::is_null)
     }
 
+    pub fn into_map(self) -> Map<String, Value> {
+        self.map
+    }
+
     /// The fields left unread, nulls aside.
     pub fn rest(self) -> Vec<String> {
         self.map.into_iter().filter(|(_, v)| !v.is_null()).map(|(k, _)| k).collect()
@@ -236,7 +240,11 @@ pub fn rolled_why(raw: &str, d: Date) -> String {
     format!("{} has gone by this year, so it reads as {}; give the year to mean another", raw.trim(), d.year())
 }
 
+/// Keys a model wraps a list in, as in `{"item": [...]}`.
+const WRAPPERS: &[&str] = &["item", "items", "element", "elements", "list", "array", "value", "values"];
+
 pub fn list(v: Value) -> Vec<Value> {
+    let v = unwrapped(v);
     match v {
         Value::Array(items) => items.into_iter().filter(|v| !v.is_null()).collect(),
         Value::Null => Vec::new(),
@@ -245,6 +253,16 @@ pub fn list(v: Value) -> Vec<Value> {
             _ => vec![Value::String(s)],
         },
         other => vec![other],
+    }
+}
+
+/// A lone `{"item": X}` read as `X`.
+fn unwrapped(v: Value) -> Value {
+    match v {
+        Value::Object(o) if o.len() == 1 && WRAPPERS.contains(&o.keys().next().map_or("", String::as_str)) => {
+            unwrapped(o.into_iter().next().expect("one entry").1)
+        }
+        other => other,
     }
 }
 
@@ -948,6 +966,16 @@ mod tests {
         assert_eq!((got.len(), warning.as_deref()), (1, Some("read updates as tasks")));
         let mut o = obj(json!({"a": [1], "b": {"id": 2}}));
         assert!(items(&mut o, "tasks", &[], &["title"]).0.is_empty(), "two lists name none");
+    }
+
+    #[test]
+    fn a_list_wrapped_in_item_is_the_list() {
+        assert_eq!(list(json!({"item": ["1", "2"]})), vec![json!("1"), json!("2")]);
+        assert_eq!(list(json!({"item": {"id": "5", "due": "10/28"}})), vec![json!({"id": "5", "due": "10/28"})]);
+        assert_eq!(list(json!({"items": {"item": [3]}})), vec![json!(3)]);
+        assert_eq!(list(json!({"id": 4})), vec![json!({"id": 4})], "a node is not a wrapper");
+        let mut o = Obj::new(json!({"tasks": {"item": {"id": "5"}}}).as_object().unwrap().clone());
+        assert_eq!(items(&mut o, "tasks", &[], &["id"]).0, vec![json!({"id": "5"})]);
     }
 
     #[test]
