@@ -177,7 +177,7 @@ impl Entry {
 /// `"Tuesdays and Thursdays"`, `"weekdays"`, `"daily"`.
 fn day_mask(v: &Value) -> Result<i64, String> {
     let words: Vec<String> = match v {
-        Value::Array(items) => items.iter().filter_map(loose::text).collect(),
+        Value::Array(_) | Value::Object(_) => loose::list(v.clone()).iter().filter_map(loose::text).collect(),
         Value::String(s) => vec![s.clone()],
         _ => return Err("days are weekday names such as [\"tue\", \"thu\"]".into()),
     };
@@ -791,6 +791,13 @@ mod tests {
         let out = talk(&conn, &tmp, "calendar_save", json!({"entries": [{"title": "Gym", "on": "2099-01-15", "start": "18:00", "end": "19:00"}]}));
         assert_eq!(saved(&out, "0"), gym, "a one-off inside a repeating entry is already there");
         assert_eq!(entry(&conn, gym).days, 2 | 8);
+    }
+
+    #[test]
+    fn days_wrapped_in_item_still_name_the_weekdays() {
+        let (conn, tmp) = env("UTC");
+        let out = talk(&conn, &tmp, "calendar_save", json!({"entries": {"item": [{"title": "Pills", "kind": "note", "start": "08:00", "end": "08:05", "days": {"item": ["mon", "wed"]}}]}}));
+        assert_eq!(entry(&conn, saved(&out, "0")).days, 1 | 4, "{out}");
     }
 
     #[test]
