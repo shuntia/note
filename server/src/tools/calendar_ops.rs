@@ -870,6 +870,7 @@ mod tests {
         for word in ["mon", "sun", "fixed", "busy", "note", "free", "skip", "unskip"] {
             assert!(text.contains(word), "the schema never mentions {word}");
         }
-        assert!(schema["description"].as_str().unwrap().contains("holds deliveries"));
+        let quiet = &schema["input_schema"]["properties"]["entries"]["items"]["properties"]["quiet"]["description"];
+        assert!(quiet.as_str().unwrap().contains("Hold deliveries"));
     }
 }

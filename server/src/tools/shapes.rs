@@ -3,16 +3,20 @@
 
 use serde_json::{json, Value};
 
-const DAY: &str = "A day: YYYY-MM-DD, M/D, today, tomorrow or a weekday.";
-const DUE: &str = "A day (YYYY-MM-DD, M/D, today, friday) or a moment (YYYY-MM-DDTHH:MM, HH:MM). Empty clears it.";
+const DAY: &str = "YYYY-MM-DD, M/D, today, tomorrow or a weekday.";
+const DUE: &str = "A day (YYYY-MM-DD, M/D, friday) or a moment (YYYY-MM-DDTHH:MM, HH:MM); \"\" clears it.";
 
 /// An id, or the exact title the forgiving reader resolves.
 fn id_or_title() -> Value {
     json!(["integer", "string"])
 }
 
-fn ids(what: &str) -> Value {
-    json!({ "type": "array", "items": { "type": id_or_title() }, "description": what })
+fn ids(what: Option<&str>) -> Value {
+    let mut v = json!({ "type": "array", "items": { "type": id_or_title() } });
+    if let Some(what) = what {
+        v["description"] = what.into();
+    }
+    v
 }
 
 fn node() -> Value {
@@ -20,8 +24,8 @@ fn node() -> Value {
         "type": "object",
         "properties": {
             "id": { "type": id_or_title(), "description": "Updates this task; an exact title also works." },
-            "parent": { "type": id_or_title(), "description": "Attach or move under this task (id or exact title); 0 makes it top-level." },
-            "before": { "type": id_or_title(), "description": "Place it before this sibling." },
+            "parent": { "type": id_or_title(), "description": "Attach or move under this task; 0 makes it top-level." },
+            "before": { "type": id_or_title(), "description": "The sibling it goes before." },
             "title": { "type": "string" },
             "description": { "type": "string" },
             "notes": { "type": "string" },
@@ -31,13 +35,13 @@ fn node() -> Value {
             "state": { "type": "string", "enum": ["open", "in_progress", "done", "dropped"] },
             "urgency": { "type": "string", "enum": ["low", "normal", "high"] },
             "notify": { "type": "string", "enum": ["none", "chat", "notify"], "description": "How its block announces itself." },
-            "now": { "type": "boolean", "description": "In Now, the short list of at most 3." },
-            "category": { "type": "string", "description": "Top-level tasks only: a course, project or part of life." },
-            "goal_id": { "type": "integer", "description": "Top-level tasks only." },
+            "now": { "type": "boolean", "description": "In Now, at most 3." },
+            "category": { "type": "string", "description": "Top-level only: a course, project or area of life." },
+            "goal_id": { "type": "integer", "description": "Top-level only." },
             "url": { "type": "string" },
-            "new": { "type": "boolean", "description": "Create it even though an open task under the same parent has this title." },
-            "children": { "type": "array", "items": { "type": ["object", "string"] }, "description": "Child tasks of this same shape, or plain titles." },
-            "done": { "type": "array", "items": { "type": "string" }, "description": "Titles of parts already finished, kept as done children so progress counts." }
+            "new": { "type": "boolean", "description": "Create it even if an open sibling has this title." },
+            "children": { "type": "array", "items": { "type": ["object", "string"] }, "description": "Tasks of this same shape, or titles." },
+            "done": { "type": "array", "items": { "type": "string" }, "description": "Titles of parts already finished." }
         }
     })
 }
@@ -46,19 +50,19 @@ pub fn task_find() -> Value {
     json!({
         "type": "object",
         "properties": {
-            "id": { "type": ["integer", "string", "array"], "items": { "type": id_or_title() }, "description": "Read it in full with its whole subtree; a list works too." },
-            "query": { "type": "string", "description": "Words that must all match, at any depth." },
+            "id": { "type": ["integer", "string", "array"], "items": { "type": id_or_title() }, "description": "A list works too." },
+            "query": { "type": "string", "description": "All words must match." },
             "state": { "type": "string", "enum": ["open", "in_progress", "done", "dropped", "any"], "description": "Default: open and in_progress." },
             "now": { "type": "boolean" },
             "category": { "type": "string" },
             "goal_id": { "type": "integer" },
             "due": { "type": "string", "description": DAY },
-            "due_before": { "type": "string", "description": "A day, left out itself." },
-            "due_after": { "type": "string", "description": "A day, kept itself." },
+            "due_before": { "type": "string", "description": "Due before this day." },
+            "due_after": { "type": "string", "description": "Due on or after this day." },
             "overdue": { "type": "boolean" },
             "urgency": { "type": "string", "enum": ["low", "normal", "high"] },
             "sort": { "type": "string", "enum": ["added", "due", "urgency"] },
-            "depth": { "type": "integer", "description": "Levels of children a survey shows, 0-4; default 1." },
+            "depth": { "type": "integer", "description": "Levels of children shown, 0-4; default 1." },
             "limit": { "type": "integer", "description": "1-200; default 50." }
         }
     })
@@ -76,7 +80,7 @@ pub fn task_remove() -> Value {
     json!({
         "type": "object",
         "properties": {
-            "ids": ids("Tasks to delete, each with its whole subtree."),
+            "ids": ids(Some("Each goes with its subtree.")),
             "all": { "type": "boolean", "description": "Needed when more than 20 tasks would go." }
         },
         "required": ["ids"]
@@ -87,7 +91,7 @@ pub fn goal_find() -> Value {
     json!({
         "type": "object",
         "properties": {
-            "id": { "type": "integer", "description": "Read this goal with its tasks." },
+            "id": { "type": "integer" },
             "state": { "type": "string", "enum": ["open", "done", "dropped", "any"], "description": "Default: open." }
         }
     })
@@ -107,7 +111,7 @@ pub fn goal_save() -> Value {
                         "description": { "type": "string" },
                         "due": { "type": "string", "description": DUE },
                         "state": { "type": "string", "enum": ["open", "done", "dropped"] },
-                        "tasks": { "type": "array", "items": { "type": ["object", "string"] }, "description": "Task nodes, as task_save takes them, that hang from this goal." }
+                        "tasks": { "type": "array", "items": { "type": ["object", "string"] }, "description": "task_save nodes under this goal." }
                     }
                 }
             }
@@ -117,7 +121,7 @@ pub fn goal_save() -> Value {
 }
 
 pub fn goal_remove() -> Value {
-    json!({ "type": "object", "properties": { "ids": ids("Goals to delete; their tasks stay.") }, "required": ["ids"] })
+    json!({ "type": "object", "properties": { "ids": ids(None) }, "required": ["ids"] })
 }
 
 pub fn calendar_find() -> Value {
@@ -142,17 +146,17 @@ pub fn calendar_save() -> Value {
                         "id": { "type": id_or_title(), "description": "Changes this entry." },
                         "title": { "type": "string" },
                         "kind": { "type": "string", "enum": ["fixed", "busy", "note", "free"] },
-                        "start": { "type": "string", "description": "HH:MM on the user's clock." },
+                        "start": { "type": "string", "description": "HH:MM." },
                         "end": { "type": "string", "description": "HH:MM." },
-                        "days": { "type": "array", "items": { "type": "string", "enum": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"] }, "description": "Makes it repeat." },
+                        "days": { "type": "array", "items": { "type": "string", "enum": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"] } },
                         "on": { "type": "string", "description": "The one day of a one-off." },
-                        "from": { "type": "string", "description": "First day a repeating entry holds." },
-                        "until": { "type": "string", "description": "Last day a repeating entry holds." },
+                        "from": { "type": "string", "description": "First day it holds." },
+                        "until": { "type": "string", "description": "Last day it holds." },
                         "quiet": { "type": "boolean", "description": "Hold deliveries until it ends; default true, never for note or free." },
-                        "tz": { "type": "string", "description": "IANA zone a one-off's day and times are given in." },
-                        "skip": { "type": "array", "items": { "type": "string" }, "description": "Days a repeating entry does not happen." },
+                        "tz": { "type": "string", "description": "IANA zone of a one-off's day and times." },
+                        "skip": { "type": "array", "items": { "type": "string" }, "description": "Days it does not happen." },
                         "unskip": { "type": "array", "items": { "type": "string" }, "description": "Skipped days to restore." },
-                        "new": { "type": "boolean", "description": "Add it even though one of the same title overlaps." }
+                        "new": { "type": "boolean", "description": "Add it even if one of this title overlaps." }
                     }
                 }
             }
@@ -162,7 +166,7 @@ pub fn calendar_save() -> Value {
 }
 
 pub fn calendar_remove() -> Value {
-    json!({ "type": "object", "properties": { "ids": ids("Entries to delete for good.") }, "required": ["ids"] })
+    json!({ "type": "object", "properties": { "ids": ids(None) }, "required": ["ids"] })
 }
 
 pub fn day_find() -> Value {
@@ -179,22 +183,22 @@ pub fn day_save() -> Value {
     json!({
         "type": "object",
         "properties": {
-            "date": { "type": "string", "description": "The day; default today, and for the nightly run the day it plans." },
+            "date": { "type": "string", "description": "Default today; in the nightly run, the day it plans." },
             "items": {
                 "type": "array",
                 "items": {
                     "type": "object",
                     "properties": {
-                        "id": { "type": "string", "description": "An item of the day as day_find lists it (t412, e88), to change it." },
-                        "task": { "type": id_or_title(), "description": "A task to place (id or exact title)." },
-                        "at": { "type": "string", "description": "HH:MM, 9am or +20min. On a task it makes a block; empty makes it untimed." },
+                        "id": { "type": "string", "description": "An item to change, as day_find lists it (t412, e88)." },
+                        "task": { "type": id_or_title() },
+                        "at": { "type": "string", "description": "HH:MM, 9am or +20min; \"\" untimes a task." },
                         "minutes": { "type": "integer", "description": "A block's length; default the task's size." },
-                        "before": { "type": id_or_title(), "description": "Place the task in front of this item of the list; \"end\" puts it last." },
-                        "wake": { "type": "string", "description": "A wake-up: your note on what to look at when at comes." },
+                        "before": { "type": id_or_title(), "description": "The item it goes before; \"end\" puts it last." },
+                        "wake": { "type": "string", "description": "A wake-up: your note on what to check at at." },
                         "ring": { "type": "boolean", "description": "The wake-up calls the user." },
-                        "cancel_on": { "type": "string", "enum": ["reply", "task"], "description": "What calls the wake-up off first: the user writing back in thread, or task finished." },
-                        "session_check": { "type": "boolean", "description": "A check on the open work session, dropped when it ends." },
-                        "thread": { "type": "integer", "description": "The conversation the wake-up speaks in; default the day's check-in thread." },
+                        "cancel_on": { "type": "string", "enum": ["reply", "task"], "description": "Calls the wake-up off: a reply, or the task finished." },
+                        "session_check": { "type": "boolean", "description": "A check on the open work session; ends with it." },
+                        "thread": { "type": "integer", "description": "Conversation it speaks in; default the check-in thread." },
                         "routine": { "type": "string", "description": "Add a routine of this name at at." },
                         "flexibility": { "type": "string", "enum": ["fixed", "slide", "drop"], "description": "A new routine's; default slide." },
                         "snooze_min": { "type": "integer", "description": "Hold back a routine's delivery this long." }
@@ -202,15 +206,14 @@ pub fn day_save() -> Value {
                 }
             },
             "replace": { "type": "boolean", "description": "The task items given become the day's whole task list, in order." },
-            "carry": { "type": "boolean", "description": "Move what is left of the day to the next: untimed items to its front, blocks at their time." },
+            "carry": { "type": "boolean", "description": "Move what is left of the day to the next." },
             "extra_wakes": {
                 "type": "object",
                 "properties": { "n": { "type": "integer" }, "reason": { "type": "string" } },
-                "description": "Raise the day's wake-up budget by n, only once the user agreed; reason is what they agreed to."
+                "description": "Raise the day's wake-up budget by n once the user agreed; reason: what they agreed to."
             },
-            "tz": { "type": "string", "description": "The IANA zone the times are given in, when not the user's." }
-        },
-        "required": ["items"]
+            "tz": { "type": "string", "description": "IANA zone of the times, when not the user's." }
+        }
     })
 }
 
@@ -219,7 +222,7 @@ pub fn day_remove() -> Value {
         "type": "object",
         "properties": {
             "date": { "type": "string", "description": DAY },
-            "ids": ids("Items to take off the day: t412, e88, or a task's exact title.")
+            "ids": ids(Some("t412, e88, or a task's exact title."))
         },
         "required": ["ids"]
     })
@@ -254,7 +257,7 @@ pub fn memory_find() -> Value {
         "type": "object",
         "properties": {
             "query": { "type": "string" },
-            "id": { "type": ["string", "array"], "items": { "type": "string" }, "description": "Read in full; a list works too." },
+            "id": { "type": ["string", "array"], "items": { "type": "string" }, "description": "A list works too." },
             "kind": { "type": "string", "enum": ["semantic", "episodic", "procedural", "note"], "description": "Notes show only with kind note." },
             "limit": { "type": "integer", "description": "1-50; default 8." }
         }
@@ -275,7 +278,7 @@ pub fn memory_save() -> Value {
                         "title": { "type": "string", "description": "One line." },
                         "body": { "type": "string" },
                         "from": { "type": "string", "description": "A note's start, YYYY-MM-DDTHH:MM." },
-                        "until": { "type": "string", "description": "When it stops mattering, for what is tied to a stretch of time: a day, or a note's moment. Empty clears it." },
+                        "until": { "type": "string", "description": "When it stops mattering: a day, or a note's moment; \"\" clears it." },
                         "supersedes": { "type": "string", "description": "A memory this replaces, archived." }
                     }
                 }

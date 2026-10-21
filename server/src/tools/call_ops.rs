@@ -13,27 +13,25 @@ pub const TOKEN_TTL: Duration = Duration::from_mins(5);
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CallArgs {
-    /// First call: why you want to call, in one line. The call is told it.
+    /// Why, in one line; the call is told it.
     #[serde(default)]
     pub reason: Option<String>,
-    /// First call: the user asked to be called. Only then does a call go
-    /// through while they seem busy.
+    /// The user asked to be called, which lets it through while they seem busy.
     #[serde(default)]
     pub asked: bool,
-    /// First call, with asked: the user's own words asking to be called.
+    /// Their own words asking.
     #[serde(default)]
     pub quote: Option<String>,
-    /// Second call: the token the first call returned.
+    /// What the first call returned.
     #[serde(default)]
     pub token: Option<String>,
-    /// Second call: the first thing you say when they pick up.
+    /// Your first words when they pick up.
     #[serde(default)]
     pub opening: Option<String>,
-    /// Second call: what the call needs to know, in short plain lines — facts,
-    /// ids, times, what to settle — so it can talk without looking things up.
+    /// What the call needs to know in short plain lines: facts, ids, times, what to settle.
     #[serde(default)]
     pub brief: Option<String>,
-    /// Second call: the tasks the call pushes on, by id or exact title; omit to take the wake-up's own.
+    /// The tasks it pushes on; default the wake-up's own.
     #[serde(default)]
     #[schemars(with = "Vec<i64>")]
     pub task_ids: Vec<serde_json::Value>,
