@@ -33,6 +33,8 @@ pub const CALL_WAIT_MIN: u32 = 45;
 /// How long a wake-up whose call the gate held waits for an answer to the
 /// message that went instead, when its `say` named no wait of its own.
 pub const HELD_WAIT_MIN: u32 = 20;
+/// How long a wake-up's `say` that asks a question waits when it named no wait.
+pub const QUESTION_WAIT_MIN: u32 = 15;
 /// A parked call not yet answered, missed, declined or failed.
 const RINGING: &str = "ringing";
 const MAX_CALL_LINES: usize = 12;
@@ -1252,6 +1254,14 @@ fn not_about(context: &str, event_id: i64) -> String {
 
 /// The tool a trigger session ended on and its result: its last terminal step.
 /// Text it closed on is never the decision; it may be narration.
+/// Whether the session laid a wake-up of its own, which a question's default
+/// wait would only double.
+fn laid_a_wake(out: &crate::agent::SessionOutcome) -> bool {
+    out.steps.iter().any(|s| {
+        !s.is_error && (s.name == "trigger_set" || (s.name == "day_save" && s.result.contains("\"id\":\"e")))
+    })
+}
+
 fn decision(out: &crate::agent::SessionOutcome) -> Option<(String, serde_json::Value)> {
     out.steps
         .iter()
@@ -1428,7 +1438,12 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
     let laid_to_ring = call.is_none() && fired.channel == crate::channels::RING_CHANNEL;
     let held = laid_to_ring.then(|| crate::channels::calling::held(state, fired.user_id, &fired.username)).flatten();
     let rings = call.is_some() || (laid_to_ring && held.is_none());
-    let asked = result["await_min"].as_u64().map(|min| u32::try_from(min).unwrap_or(*AWAIT_MIN.end()));
+    let own = ev.origin == crate::idle::ORIGIN || ev.origin == crate::wake::ORIGIN;
+    let defaulted = result["await_default"] == true;
+    let asked = result["await_min"]
+        .as_u64()
+        .filter(|_| !(defaulted && (own || laid_a_wake(&out))))
+        .map(|min| u32::try_from(min).unwrap_or(*AWAIT_MIN.end()));
     let wait_min = if rings {
         Some(CALL_WAIT_MIN)
     } else if held.is_some() {
@@ -1481,7 +1496,6 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
         let _ = state.db().execute("UPDATE paused_sessions SET context = ?1 WHERE event_id = ?2", (snapshot, id));
     }
     state.hub.broadcast_changed(fired.user_id);
-    let own = ev.origin == crate::idle::ORIGIN || ev.origin == crate::wake::ORIGIN;
     let close_day = is_close_day(&ev.prompt) || also.iter().any(|p| is_close_day(p));
     let mut msg = said_message(fired, &ev, close_day, text, conversation_id, lang);
     msg.checkin = !own;

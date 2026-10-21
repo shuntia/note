@@ -116,7 +116,7 @@ async fn start_session(w: &World) -> i64 {
 
 #[tokio::test]
 async fn a_trigger_that_speaks_lands_in_the_thread_and_on_a_channel() {
-    let w = world(vec![call("c1", "say", r#"{"text":"how is the chapter going?"}"#)]).await;
+    let w = world(vec![call("c1", "say", r#"{"text":"how is the chapter going?","await_min":0}"#)]).await;
     start_session(&w).await;
     make_due(&w);
 
@@ -154,6 +154,19 @@ async fn a_trigger_that_speaks_lands_in_the_thread_and_on_a_channel() {
     let opening = format!("{:?}", seen[0].messages.last().unwrap());
     assert!(opening.contains("Progress check on read the chapter."), "{opening}");
     assert!(opening.contains("read the chapter"), "{opening}");
+}
+
+#[tokio::test]
+async fn a_question_left_without_await_min_waits_for_its_answer() {
+    let w = world(vec![call("c1", "say", r#"{"text":"how is the chapter going?"}"#)]).await;
+    start_session(&w).await;
+    make_due(&w);
+
+    note_server::runner::sweep_once(&w.state);
+
+    assert_eq!(statuses(&w), vec!["done", "pending"]);
+    let waiting: Vec<String> = rows(&w, "SELECT origin FROM events WHERE status = 'pending'");
+    assert_eq!(waiting, vec![note_server::triggers::AWAIT_ORIGIN]);
 }
 
 #[tokio::test]
@@ -736,7 +749,7 @@ async fn a_chat_rings_now_and_opens_in_the_check_in_thread() {
 
 #[tokio::test]
 async fn the_trigger_log_shows_the_owners_triggers_and_how_they_ended() {
-    let w = world(vec![call("c1", "say", r#"{"text":"how is the chapter going?"}"#)]).await;
+    let w = world(vec![call("c1", "say", r#"{"text":"how is the chapter going?","await_min":0}"#)]).await;
     start_session(&w).await;
     make_due(&w);
     note_server::runner::sweep_once(&w.state);
@@ -767,7 +780,7 @@ async fn the_trigger_log_shows_the_owners_triggers_and_how_they_ended() {
 async fn a_wake_up_that_answers_in_text_is_made_to_decide_and_its_narration_never_goes_out() {
     let w = world(vec![
         ChatResponse { text: "Let me look at the plan first.".into(), tool_calls: vec![] },
-        call("c1", "say", r#"{"text":"Back to the chapter?"}"#),
+        call("c1", "say", r#"{"text":"Back to the chapter?","await_min":0}"#),
     ])
     .await;
     start_session(&w).await;

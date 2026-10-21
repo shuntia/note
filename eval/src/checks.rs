@@ -221,7 +221,7 @@ fn checkin_follow_up(snap: &Snapshot, fx: &Fixture) -> Verdict {
                 || format!("{} names tasks {ids:?}, none in the Lab report tree", c.name),
             );
             j.expect(
-                c.name == "call_user" || c.args["await_min"].as_u64().is_some(),
+                c.name == "call_user" || c.args["await_min"].as_u64().is_some() || c.result["await_min"].as_u64().is_some(),
                 || "say set no await_min".into(),
             );
         }
@@ -507,6 +507,10 @@ mod tests {
         assert!(checkin_follow_up(&s, &fx).pass);
         let (s, fx) = wake(vec![call("say", serde_json::json!({"text": "hi", "task_ids": [3]}), false)]);
         assert!(!checkin_follow_up(&s, &fx).pass, "no await_min");
+        let mut asked = call("say", serde_json::json!({"text": "start now?", "task_ids": [3]}), false);
+        asked.result = serde_json::json!({"said": "start now?", "await_min": 15, "await_default": true});
+        let (s, fx) = wake(vec![asked]);
+        assert!(checkin_follow_up(&s, &fx).pass, "a question waits by default");
         let (s, fx) = wake(vec![call("say", serde_json::json!({"text": "hi", "task_ids": [9], "await_min": 30}), false)]);
         assert!(!checkin_follow_up(&s, &fx).pass, "names another task");
         let (s, fx) = wake(vec![

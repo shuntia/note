@@ -13,7 +13,8 @@ pub struct SayArgs {
     #[serde(default, alias = "notes")]
     pub memory: Vec<String>,
     /// Wait up to this many minutes, 5 to 120, for an answer; this session
-    /// then goes on, told whether the user answered or acted.
+    /// then goes on, told whether the user answered or acted. Words that ask
+    /// a question wait 15 without it; 0 waits for nothing.
     #[serde(default)]
     pub await_min: Option<u32>,
     /// The tasks these words push on, by id; omit to take the wake-up's own.
@@ -66,7 +67,15 @@ pub fn say(args: &SayArgs) -> Result<serde_json::Value, ToolError> {
     if !args.task_ids.is_empty() {
         out["task_ids"] = serde_json::json!(args.task_ids);
     }
-    if let Some(min) = args.await_min {
+    if args.await_min.is_none() && asks(text) {
+        out["await_min"] = triggers::QUESTION_WAIT_MIN.into();
+        out["await_default"] = true.into();
+        out["warnings"] = serde_json::json!([format!(
+            "a question waits {} minutes for its answer when await_min is left out; 0 waits for nothing",
+            triggers::QUESTION_WAIT_MIN
+        )]);
+    }
+    if let Some(min) = args.await_min.filter(|m| *m != 0) {
         if !triggers::AWAIT_MIN.contains(&min) {
             return Err(ToolError::rejected(format!(
                 "await_min must be {} to {}",
@@ -77,6 +86,12 @@ pub fn say(args: &SayArgs) -> Result<serde_json::Value, ToolError> {
         out["await_min"] = min.into();
     }
     Ok(out)
+}
+
+/// Whether the words end on a question, which waits for its answer.
+fn asks(text: &str) -> bool {
+    text.trim_end_matches(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | ')' | '」' | '』' | '）' | '”' | '’'))
+        .ends_with(['?', '？'])
 }
 
 pub fn stay_quiet(
@@ -176,6 +191,18 @@ mod tests {
         let out = dispatch(&conn, &ctx(&tmp), SessionKind::Trigger, "say", r#"{"text":"hi"}"#)
             .unwrap();
         assert_eq!(out["memory"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn a_question_waits_for_its_answer_unless_told_not_to() {
+        let (conn, tmp) = env();
+        let say = |args: &str| dispatch(&conn, &ctx(&tmp), SessionKind::Trigger, "say", args).unwrap();
+        let out = say(r#"{"text":"Want to open the doc now?"}"#);
+        assert_eq!((out["await_min"].as_u64(), out["await_default"].as_bool()), (Some(15), Some(true)));
+        assert!(say(r#"{"text":"「下書き、始めますか？」"}"#)["await_min"].is_u64());
+        assert!(say(r#"{"text":"Want to open the doc now?","await_min":0}"#)["await_min"].is_null());
+        assert!(say(r#"{"text":"Nice, the draft is moving."}"#)["await_min"].is_null());
+        assert_eq!(say(r#"{"text":"Ready?","await_min":30}"#)["await_min"].as_u64(), Some(30));
     }
 
     #[test]

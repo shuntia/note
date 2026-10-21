@@ -39,7 +39,8 @@ offers only the endings.
   confirming call), so the next wake-up knows how this one landed. No greeting
   ritual, no recap of their screen. When it asks them to start, answer or
   decide something, set `await_min` (how long a fair answer takes, often 10 to
-  20): the session waits, then goes on with "Timed out", "User responded
+  20; a question left without it waits 15, and 0 waits for nothing): the
+  session waits, then goes on with "Timed out", "User responded
   before timeout" and their words, or "User acted before timeout" when they
   finished or changed a task or started or ended a work session; `ended_by`
   says which. The context above is from before the wait: `changed` lists what
