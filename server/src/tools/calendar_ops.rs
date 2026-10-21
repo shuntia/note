@@ -411,26 +411,29 @@ pub fn save(conn: &Connection, ctx: &ToolCtx, raw: &str) -> Result<Value, ToolEr
                 None => continue,
             },
         };
-        let mut skipped = false;
+        let before = entry.0.exceptions.clone();
         for d in &e.skip {
             if !occurs(&entry.0, *d) {
                 env.ignored(Some(&r), "skip", format!("{} doesn't happen on {d} ({})", entry.0.title, rule(&entry.0)));
                 continue;
             }
-            match calendar::skip(conn, ctx.user_id, entry.0.id, &d.to_string()) {
-                Ok(()) => skipped = true,
-                Err(err) => env.ignored(Some(&r), "skip", refusal(err)?),
+            if let Err(err) = calendar::skip(conn, ctx.user_id, entry.0.id, &d.to_string()) {
+                env.ignored(Some(&r), "skip", refusal(err)?);
             }
         }
         for d in &e.unskip {
-            match calendar::unskip(conn, ctx.user_id, entry.0.id, &d.to_string()) {
-                Ok(()) => skipped = true,
-                Err(err) => env.ignored(Some(&r), "unskip", refusal(err)?),
+            if let Err(err) = calendar::unskip(conn, ctx.user_id, entry.0.id, &d.to_string()) {
+                env.ignored(Some(&r), "unskip", refusal(err)?);
             }
         }
         let fresh = calendar::get(conn, ctx.user_id, entry.0.id).map_err(internal)?.unwrap_or(entry.0);
-        let op = if entry.1 == "unchanged" && skipped { "updated" } else { entry.1 };
-        env.saved(&r, fresh.id, &fresh.title, op)["when"] = when(&fresh).into();
+        let skips_changed = fresh.exceptions != before;
+        let op = if entry.1 == "unchanged" && skips_changed { "updated" } else { entry.1 };
+        let row = env.saved(&r, fresh.id, &fresh.title, op);
+        row["when"] = when(&fresh).into();
+        if !e.skip.is_empty() || !e.unskip.is_empty() {
+            row["skipped"] = json!(fresh.exceptions);
+        }
     }
     Ok(env.into_value())
 }
@@ -755,6 +758,9 @@ mod tests {
         let out = talk(&conn, &tmp, "calendar_save", json!({"entries": [{"id": id, "skip": ["2099-09-18", "2099-09-21"]}]}));
         assert_eq!(out["saved"][0]["op"], "updated");
         assert_eq!(entry(&conn, id).exceptions, ["2099-09-18", "2099-09-21"]);
+        assert_eq!(out["saved"][0]["skipped"], json!(["2099-09-18", "2099-09-21"]));
+        let again = talk(&conn, &tmp, "calendar_save", json!({"entries": [{"id": id, "skip": "2099-09-21"}]}));
+        assert_eq!(again["saved"][0]["op"], "unchanged", "{again}");
         talk(&conn, &tmp, "calendar_save", json!({"entries": [{"id": "School", "unskip": ["2099-09-18"]}]}));
         assert_eq!(entry(&conn, id).exceptions, ["2099-09-21"]);
         let out = talk(&conn, &tmp, "calendar_save", json!({"entries": [{"entry_id": id, "skip": "2099-09-22"}]}));

@@ -995,8 +995,8 @@ impl<'a> Day<'a> {
         }
         if let Some(n) = near {
             self.env.warn(format!(
-                "wake-up e{} is already laid for {} {} ({:?}), within {} minutes of {}; keep both, reword one, or take one off with day_remove",
-                n.event_id, n.date, n.at, n.prompt, triggers::NEAR_MIN, r.0
+                "wake-up e{} is already laid for {} {} ({:?}), within {} minutes of the new e{} at {}; keep both, reword one, or take one off with day_remove",
+                n.event_id, n.date, n.at, n.prompt, triggers::NEAR_MIN, laid.event_id, laid.at
             ));
         }
         let landed: String = self

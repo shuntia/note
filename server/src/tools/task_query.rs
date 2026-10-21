@@ -283,11 +283,13 @@ fn read_one(conn: &Connection, ctx: &ToolCtx, id: i64) -> Result<Option<Value>, 
         for field in ["created_at", "updated_at", "duration_source", "source", "root_id", "position"] {
             o.remove(field);
         }
-        for field in ["due_at", "due_on", "urgency"] {
-            let effective = format!("effective_{field}");
-            if o.get(&effective) == o.get(field) {
-                o.remove(&effective);
+        if o.contains_key("due") {
+            for field in ["due_at", "due_on", "effective_due_at", "effective_due_on"] {
+                o.remove(field);
             }
+        }
+        if o.get("effective_urgency") == o.get("urgency") {
+            o.remove("effective_urgency");
         }
     });
     if path.len() > 1 {
