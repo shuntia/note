@@ -802,10 +802,10 @@ pub fn paused_since(l: Lang, at: &str) -> String {
     }
 }
 
-pub fn steps_done_since(l: Lang, done: i64) -> String {
+pub fn parts_done_since(l: Lang, done: i64) -> String {
     match l {
-        Lang::En => format!(", {done} step{} done since the last check.", plural(done)),
-        Lang::Ja => format!("、前回の確認から{done}ステップ完了。"),
+        Lang::En => format!(", {done} part{} done since the last check.", plural(done)),
+        Lang::Ja => format!("、前回の確認から{done}個完了。"),
     }
 }
 

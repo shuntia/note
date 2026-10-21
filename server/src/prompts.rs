@@ -146,13 +146,7 @@ mod tests {
             assert!(planning.contains("day_save") && planning.contains("replace"), "the planning prompt ({lang:?}) never sets the day's list");
             for name in NAMES {
                 assert!(!load(name).contains("plan_auto"), "the {name} prompt ({lang:?}) still calls plan_auto");
-                for old in [
-                    "task_create", "task_update", "task_split", "task_delete", "task_list", "task_search", "task_read",
-                    "task_bulk_update", "goal_create", "goal_update", "goal_list", "calendar_list", "calendar_add",
-                    "calendar_update", "calendar_skip", "plan_list", "plan_tasks", "plan_carry", "order_set",
-                    "order_move", "order_drop", "schedule_move", "schedule_drop", "schedule_insert", "trigger_set",
-                    "trigger_budget", "memory_query", "memory_read", "memory_write", "note_write", "note_settle",
-                ] {
+                for (old, _) in crate::tools::RETIRED {
                     assert!(!load(name).contains(old), "the {name} prompt ({lang:?}) still calls {old}");
                 }
             }

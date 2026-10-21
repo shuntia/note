@@ -281,6 +281,17 @@ mod tests {
     }
 
     #[test]
+    fn the_shipped_docs_name_no_retired_tool_and_call_a_task_s_pieces_parts() {
+        for doc in load(&shipped(), Lang::En).unwrap().into_iter().chain(load(&shipped(), Lang::Ja).unwrap()) {
+            let text = format!("{}\n{}", doc.summary, doc.body);
+            for (old, _) in crate::tools::RETIRED {
+                assert!(!text.contains(old), "{} names {old}", doc.slug);
+            }
+            assert!(!text.contains(" step") && !text.contains("ステップ"), "{} still says steps", doc.slug);
+        }
+    }
+
+    #[test]
     fn backfill_seeds_existing_users_once() {
         let conn = crate::db::open_memory().unwrap();
         let data = tempfile::tempdir().unwrap();

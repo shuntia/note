@@ -889,7 +889,7 @@ pub(crate) fn distance(a: &str, b: &str) -> usize {
 }
 
 /// Names retired with the tools they belonged to, and what does their work now.
-const RETIRED: &[(&str, &str)] = &[
+pub(crate) const RETIRED: &[(&str, &str)] = &[
     ("task_list", "task_find"),
     ("task_search", "task_find"),
     ("task_read", "task_find"),

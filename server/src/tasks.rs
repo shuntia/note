@@ -543,13 +543,13 @@ fn checked_root_fields(
     }
     if category.is_some_and(|c| !c.is_empty()) {
         return Err(UpdateError::Invalid(
-            "a step carries no category of its own; it reads the one on the task it belongs to"
+            "a child carries no category of its own; it reads its root's"
                 .into(),
         ));
     }
     if goal_id.is_some() {
         return Err(UpdateError::Invalid(
-            "a step belongs to no goal of its own; the task it belongs to holds one".into(),
+            "a child belongs to no goal of its own; its root holds one".into(),
         ));
     }
     Ok(())
@@ -1005,7 +1005,7 @@ fn checked_parent(
     child: Option<&Task>,
 ) -> Result<Task, UpdateError> {
     if child.is_some_and(|c| c.id == parent_id) {
-        return Err(UpdateError::InvalidHierarchy("a task cannot be its own step".into()));
+        return Err(UpdateError::InvalidHierarchy("a task cannot be its own child".into()));
     }
     let Some(parent) = get(conn, user_id, parent_id)? else {
         return Err(UpdateError::InvalidHierarchy(format!("no task {parent_id}")));

@@ -59,7 +59,7 @@ words open it when the same check lets a call through, and the session waits
 on it as above. Else they go as a message and the session waits for an answer,
 its result carrying `call: "Held: <why>"`. Write them to be spoken.
 
-Stay quiet when the user wrote or finished a step in the last ten minutes, or
+Stay quiet when the user wrote or finished a task or part in the last ten minutes, or
 the prompt no longer applies.
 
 ## Following through

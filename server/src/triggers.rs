@@ -816,8 +816,8 @@ pub fn situation(
             if let Some(at) = paused {
                 s.push_str(&mt::paused_since(l, &clock(&at)));
             }
-            let done = steps_done_since(conn, user_id, id, &started).unwrap_or(0);
-            let _ = writeln!(s, "{}", mt::steps_done_since(l, done));
+            let done = parts_done_since(conn, user_id, id, &started).unwrap_or(0);
+            let _ = writeln!(s, "{}", mt::parts_done_since(l, done));
         }
     }
     match last_user_message(conn, user_id).ok().flatten() {
@@ -829,7 +829,7 @@ pub fn situation(
 
 /// Tasks the user finished since this work session's previous check, falling
 /// back to the whole session when it has had none.
-fn steps_done_since(
+fn parts_done_since(
     conn: &Connection,
     user_id: i64,
     work_session_id: i64,
@@ -2095,7 +2095,7 @@ mod tests {
         assert!(text.starts_with("how did the essay go?"), "{text}");
         assert!(text.contains("Laid at 09:00, meant for 09:30."), "{text}");
         assert!(text.contains("\"read the chapter\", started 08:55, planned 60 min"), "{text}");
-        assert!(text.contains("0 steps done since the last check"), "{text}");
+        assert!(text.contains("0 parts done since the last check"), "{text}");
         assert!(text.contains("Last message from the user: 08:40."), "{text}");
     }
 

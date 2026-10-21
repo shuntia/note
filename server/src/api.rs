@@ -984,7 +984,7 @@ async fn task_agent(
         if node.task.parent_id.is_some() {
             return brief_error(
                 StatusCode::CONFLICT,
-                "only a top-level task can be briefed, not one of its steps",
+                "only a top-level task can be briefed, not one of its children",
             );
         }
         let tz = user_zone(&state, &user.username);
